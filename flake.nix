@@ -12,9 +12,15 @@
       url = "git+https://github.com/microvm-nix/microvm.nix?shallow=1";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+    # Projects' toolchains and gates (lib/project.nix).
+    rust-overlay = {
+      url = "git+https://github.com/oxalica/rust-overlay?shallow=1";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+    crane.url = "git+https://github.com/ipetkov/crane?shallow=1";
   };
 
-  outputs = { self, nixpkgs, ... }@inputs:
+  outputs = { self, nixpkgs, rust-overlay, crane, ... }@inputs:
     let
       system = "x86_64-linux";
       pkgs = nixpkgs.legacyPackages.${system};
@@ -29,6 +35,14 @@
       names = [ "claude" "undo" "switch" "notify" "updates" "proj" "remote-control" "agents" "robot" "ops" "toolbox" "autoland" ];
     in
     {
+      # A project's dev shell and gate in a few lines; see lib/project.nix.
+      lib.project = import ./lib/project.nix { inherit nixpkgs rust-overlay crane; };
+
+      templates.default = {
+        path = ./templates/project;
+        description = "A project whose gate is its flake (burrow.lib.project)";
+      };
+
       nixosModules = nixpkgs.lib.genAttrs names module // {
         default = {
           key = "burrow/default";
@@ -62,7 +76,11 @@
         # Sandboxes for real: boot two, work in them, break out of nothing.
         # Nested KVM: run it on a machine that has /dev/kvm.
         agents = import ./tests/agents.nix { inherit self pkgs; };
-      };
+      } // nixpkgs.lib.mapAttrs' (name: nixpkgs.lib.nameValuePair "house-${name}") (
+        # lib/project.nix's own gates, on the smallest projects that have them.
+        (self.lib.project { self = ./tests/house/rust; systems = [ system ]; rust = { }; }).checks.${system}
+        // (self.lib.project { self = ./tests/house/python; systems = [ system ]; python = { format = true; }; }).checks.${system}
+      );
 
       formatter.${system} = pkgs.nixfmt-rfc-style;
     };

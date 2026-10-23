@@ -8,6 +8,7 @@ change is made once and reaches every repo.
 |---|---|---|
 | The machine | `burrow.claude` | Permissions, the guard, the one-way doors, and which model does what. Every Claude on the box gets it; nothing in a repo repeats it. |
 | Every repo | [`house/rules.md`](../house/rules.md), copied into AGENTS.md | The house rules and the commit style. It lives in the repo because Codex, cloud sessions and outside contributors never see the machine. |
+| Every code repo | [`lib/project.nix`](../lib/project.nix), through its `flake.nix` | The toolchains, and the gate: format, lint and tests in `nix flake check`. CI only calls it. |
 | Each project | the repo itself | Its domain rules, its own review risks, how to build and test it, its verification tools, ADRs, status docs and deploys. |
 
 ## The house block
@@ -32,6 +33,31 @@ rewrites it when this file changes, so:
   rules point at that section.
 - To change a house rule, change `house/rules.md` here. Edits inside the
   markers in a repo are overwritten.
+
+## The gate is the flake
+
+Every repo with code gets a `flake.nix` from the template
+(`nix flake init -t github:FieldmouseWorks/burrow`), a few lines calling
+[`burrow.lib.project`](../lib/project.nix) with the languages it has:
+
+- `nix develop` gives the toolchains: Rust as `rust-toolchain.toml` pins it
+  (with rust-analyzer), Python with ruff and uv, Node's LTS.
+- `nix flake check` is the gate, the same on a laptop, in an agent's sandbox
+  and in CI: rustfmt, clippy on all targets with warnings as errors, and the
+  tests of the Cargo workspace; ruff's error rules on Python (and `ruff
+  format`, once a repo has been formatted).
+- CI is `.github/workflows/flake.yml` from the template, which calls burrow's
+  shared [`flake-check`](../.github/workflows/flake-check.yml) workflow. A
+  repo's heavier gates (VM replays, browser tiers, databases) stay its own
+  jobs, alongside it, and run their tools from `nix develop`.
+- Renovate keeps `flake.lock` current, so a repo's toolchains and gate move
+  when burrow's do. Change a Rust version in `rust-toolchain.toml` only.
+- The template also brings `.editorconfig`. Rust crates forbid `unsafe` in
+  `[workspace.lints]` (or `[lints]`) unless the repo says why it needs it.
+
+Bringing a repo onto it: keep the checks it already runs, move the ones that
+are hermetic into the flake (its `checks` argument takes more), and delete
+the CI steps the flake now covers, in the same PR.
 
 ## CLAUDE.md
 

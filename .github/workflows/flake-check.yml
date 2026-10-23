@@ -1,0 +1,13 @@
+# The shared CI for every repo whose gate is its flake (burrow's
+# lib/project.nix): check out, install Nix, `nix flake check`. Called from a
+# repo's own workflow with `uses:`; Renovate pins the actions to commits.
+name: flake-check
+on:
+  workflow_call:
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: cachix/install-nix-action@v31
+      - run: nix flake check -L --keep-going
