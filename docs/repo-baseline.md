@@ -51,6 +51,9 @@ review. That includes their bumps of the actions pinned in
   Codex applies only the `## Code Review Rules` section of the AGENTS.md
   nearest each changed file (`###` subheadings group its checks), so review
   rules under any other heading move under that one.
+- **The house block** in AGENTS.md: [`house/rules.md`](../house/rules.md),
+  copied in verbatim with its marker lines, as [the house style](house-style.md)
+  says, so the house sync can find and update it later.
 - **CLAUDE.md** containing `@AGENTS.md`, then anything only Claude needs, so
   there's one source of truth.
 - **README.md**: what it is, how to build and run it, and its license.
