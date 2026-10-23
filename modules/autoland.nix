@@ -48,6 +48,7 @@ let
       ruleset = true;
       requireCi = true;
       actionBumps = true;
+      ownerChecks = [ ];
     };
     repos = cfg.repos;
     baselineTask = ''
@@ -236,7 +237,10 @@ in
         default a settled PR in a repo with no CI waits for you),
         actionBumps (false: a dependency bot's bump of the actions pinned in
         .github/workflows waits for you like any other .github/ change; by
-        default it merges on green CI, as other dependency updates do).
+        default it merges on green CI, as other dependency updates do),
+        ownerChecks (names of checks that only a person clears, such as a
+        verdict from a test machine: a settled PR waiting on nothing else is
+        listed for you instead of waiting quietly for CI).
       '';
     };
   };

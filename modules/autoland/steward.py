@@ -660,6 +660,11 @@ def handle(repo, pr, repo_info, digest):
             hand_off("CI is red (" + ", ".join(ci_names) + ")")
     elif no_ci:
         settle("pending", f"Settled, but this repo has no CI: {CFG['owner']} merges it", "Settled, yours to merge")
+    elif ci == "pending" and all(n in rc["ownerChecks"] for n in ci_names):
+        # Only checks a person clears are left (a verdict from a test
+        # machine): waiting quietly would never end, so it's the owner's.
+        then = f"then merges it (touches {gate})" if gate else "then it lands"
+        settle("pending", f"Settled; {CFG['owner']} clears {', '.join(ci_names)}, {then}"[:140], "Settled, yours to merge")
     elif ci == "pending":
         settle("pending", "Settled; waiting for CI: " + ", ".join(ci_names)[:90])
     elif gate:

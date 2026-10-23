@@ -36,8 +36,9 @@ change nothing else in the same PR.
 Waiting for the owner instead: PRs touching the one-way paths
 (`burrow.autoland.oneWay`: `.github/`, secrets, migrations), PRs past the
 round limit, major dependency updates, outside contributions, and PRs in a
-repo with no CI yet (unless it's set `requireCi = false`: nothing to test). They're
-listed in one issue. Dependency bots' minor updates skip Codex: CI is their
+repo with no CI yet (unless it's set `requireCi = false`: nothing to test), and
+settled PRs waiting only on a check that a person clears, such as a test
+machine's verdict (the repo names it in `ownerChecks`). They're listed in one issue. Dependency bots' minor updates skip Codex: CI is their
 review. That includes their bumps of the actions pinned in
 `.github/workflows/`, unless the repo sets `actionBumps = false`.
 
