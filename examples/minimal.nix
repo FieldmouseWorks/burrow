@@ -33,5 +33,10 @@
       enable = true;
       serverIp = "203.0.113.7";
     };
+    autoland = {
+      enable = true;
+      owners = [ "sam" ];
+      authors = [ "sam" ];
+    };
   };
 }

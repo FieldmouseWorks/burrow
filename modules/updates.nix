@@ -54,6 +54,8 @@ let
     BOOT = if config.burrow.switch.trialBoot.enable then "${prefix}-boot" else "";
     NOTIFY = "${prefix}-notify";
     REVIEW_HINTS = cfg.firmware.reviewHints;
+    # The autoland steward's commit status, which renovate-sweep doesn't count as CI.
+    SETTLED = config.burrow.autoland.context or "review-settled";
   };
 
   # Each script gets the names it uses (shellcheck rejects the rest), set above
