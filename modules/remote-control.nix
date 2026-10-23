@@ -10,13 +10,14 @@
 # Each server runs `claude remote-control` in its own tmux server, so it has
 # the terminal it wants and you can look at it: `tmux -L rc-NAME attach`.
 #
-# The first start of each one stops at two questions (trust the folder, enable
-# Remote Control), so answer them once per project, by hand:
+# Nothing about a server needs a hand at its terminal: claude-rc-serve
+# (remote-control/serve.sh) trusts the folder before Claude would ask. What's
+# left is a one-time `claude remote-control` run by hand on a new machine, to
+# log in and say yes to Remote Control itself.
 #
-#   systemctl --user stop claude-rc@NAME
-#   cd PROJECTS/NAME && claude remote-control --name NAME --spawn=same-dir
-#   # y (trust), y (enable); once it's connected, Ctrl-C, then:
-#   systemctl --user start claude-rc@NAME
+# This is also how a claude.ai project reaches a project: a thread there starts
+# a session on that project's server and talks to it (docs/front-door.md).
+# Those sessions each get their own git worktree (burrow.remoteControl.spawn).
 inputs:
 { config, lib, pkgs, ... }:
 let
@@ -24,15 +25,38 @@ let
   inherit (config.burrow) user projectsDir;
   tmux = "${pkgs.tmux}/bin/tmux";
 
+  serve = pkgs.writeShellApplication {
+    name = "claude-rc-serve";
+    runtimeInputs = [ pkgs.coreutils pkgs.findutils pkgs.jq ];
+    text = ''
+      PROJECTS=${lib.escapeShellArg projectsDir}
+      FLAKE=${lib.escapeShellArg config.burrow.flake}
+      SPAWN=${lib.escapeShellArg cfg.spawn}
+      SAME_DIR=(${lib.escapeShellArgs cfg.sameDir})
+    '' + builtins.readFile ./remote-control/serve.sh;
+  };
+
   scan = pkgs.writeShellApplication {
     name = "claude-rc-scan";
     runtimeInputs = [ pkgs.systemd pkgs.coreutils ];
     text = ''
       # Start a server for every project folder, stop the ones whose folder is gone.
+      # A linked git worktree (its .git is a file) is a checkout of a project
+      # that already has its own server, so it gets none; neither does a folder
+      # matching burrow.remoteControl.skip.
+      skips=(${lib.escapeShellArgs cfg.skip})
       want=()
       for d in ${lib.escapeShellArg projectsDir}/*/; do
         [ -d "$d" ] || continue
-        want+=("$(systemd-escape --template claude-rc@.service "$(basename "$d")")")
+        name=$(basename "$d")
+        [ -f "$d/.git" ] && continue
+        skip=
+        for glob in "''${skips[@]}"; do
+          # shellcheck disable=SC2053 # the glob is meant to match
+          [[ $name == $glob ]] && skip=1
+        done
+        [ -z "$skip" ] || continue
+        want+=("$(systemd-escape --template claude-rc@.service "$name")")
       done
       for unit in "''${want[@]}"; do
         systemctl --user start --no-block "$unit"
@@ -48,8 +72,36 @@ in
 {
   imports = [ (import ./common.nix inputs) ];
 
-  options.burrow.remoteControl.enable =
-    lib.mkEnableOption "an always-on Claude Remote Control server for every project folder";
+  options.burrow.remoteControl = {
+    enable = lib.mkEnableOption "an always-on Claude Remote Control server for every project folder";
+    skip = lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      default = [ "*-worktrees" ];
+      example = [ "*-worktrees" "scratch-*" ];
+      description = ''
+        Shell globs for folders in burrow.projectsDir that get no server: folders
+        that hold a project's extra checkouts rather than a project. Linked git
+        worktrees are always skipped.
+      '';
+    };
+    spawn = lib.mkOption {
+      type = lib.types.enum [ "worktree" "same-dir" ];
+      default = "worktree";
+      description = ''
+        Where a session started from claude.ai works. worktree: its own git
+        worktree of the project, so sessions working at once never share a
+        checkout (the one session that's always there stays in the folder
+        itself). same-dir: all of them in the folder. The machine's own flake
+        and folders that aren't git repositories are always same-dir.
+      '';
+    };
+    sameDir = lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      default = [ ];
+      example = [ "website" ];
+      description = "Project folders whose sessions all work in the folder itself, whatever spawn says.";
+    };
+  };
 
   config = lib.mkIf cfg.enable {
     systemd.user.services."claude-rc@" = {
@@ -64,12 +116,9 @@ in
       serviceConfig = {
         Type = "forking";
         # A login shell, so sessions get the same PATH and env as an SSH login.
-        # --spawn is set so the first start doesn't stop on a question. The other
-        # two (trust the folder, enable Remote Control) still need one manual run
-        # per project (see the top of this file). The name goes in as an argument,
-        # not spliced into the command string, so a folder with a space in it
-        # ("agent pipeline") still works.
-        ExecStart = "${tmux} -L rc-%I new-session -d -s rc -c ${projectsDir}/%I ${pkgs.bashInteractive}/bin/bash -lc 'exec claude remote-control --name \"$$1\" --spawn=same-dir' rc %I";
+        # The name goes in as an argument, not spliced into the command string,
+        # so a folder with a space in it ("agent pipeline") still works.
+        ExecStart = "${tmux} -L rc-%I new-session -d -s rc -c ${projectsDir}/%I ${pkgs.bashInteractive}/bin/bash -lc 'exec ${serve}/bin/claude-rc-serve \"$$1\"' rc %I";
         ExecStop = "${tmux} -L rc-%I kill-server";
         Restart = "always";
         RestartSec = 15;
@@ -104,5 +153,23 @@ in
 
     # Claude Code too, for when burrow.claude (which also installs it) is off.
     environment.systemPackages = [ pkgs.tmux config.burrow.claude.package ];
+
+    burrow.claude.machineMd = lib.mkOrder 690 ''
+      ## Sessions started from a claude.ai project
+
+      ${config.burrow.owner} runs every project from one claude.ai project chat. When a thread
+      there needs work done in a project, it starts a Remote Control session on that
+      project's server, and that's you: the project's own Claude, with its checkout,
+      CLAUDE.md, tools and logins. The thread is where ${config.burrow.owner} talks to you,
+      usually from a phone, and what they type there reaches you.
+
+      - You're in your own git worktree of the project, so other sessions can work
+        at the same time. Branch, commit, push and open the PR from there, and
+        leave the main checkout in ${projectsDir}/NAME alone.
+      - Send results, PR links and questions back to the thread as you go, short
+        and in plain words. A question waits for ${config.burrow.owner}'s answer in the
+        thread; carry on with whatever doesn't depend on it.
+      - Long work is fine. Keep going until it's done, then say so.
+    '';
   };
 }
