@@ -129,6 +129,10 @@ save_work() {
   # A worktree's .git is a file pointing into the real repo on the host.
   [ -d "$clone/.git" ] && [ -d "$repo/.git" ] || return 2
   t=$(mktemp -d -p "$d" save.XXXX)
+  # And without the host user's own or the system's git config either: the
+  # sandbox controls .gitattributes, which could name a filter defined there.
+  local GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
+  export GIT_CONFIG_GLOBAL GIT_CONFIG_NOSYSTEM
   git init -q --bare "$t"
   echo "$clone/.git/objects" >"$t/objects/info/alternates"
   cp "$clone/.git/info/exclude" "$t/info/exclude" 2>/dev/null || true

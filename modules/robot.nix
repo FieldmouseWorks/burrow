@@ -9,7 +9,7 @@ let
 
   robot = pkgs.writeShellApplication {
     name = "robot";
-    runtimeInputs = [ pkgs.curl pkgs.jq pkgs.coreutils ];
+    runtimeInputs = [ pkgs.curl pkgs.jq pkgs.coreutils pkgs.gnused ];
     text = ''
       ROBOT_DEFAULT_IP=${lib.escapeShellArg cfg.serverIp}
       ROBOT_DEFAULT_CREDS=${lib.escapeShellArg cfg.credentialsFile}
