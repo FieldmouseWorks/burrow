@@ -38,5 +38,6 @@
       owners = [ "sam" ];
       authors = [ "sam" ];
     };
+    house.enable = true;
   };
 }

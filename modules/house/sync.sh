@@ -1,0 +1,148 @@
+# house-sync: keep every repo's copy of the house block (burrow's
+# house/rules.md) the same as burrow's. A repo whose block differs gets one
+# draft PR that rewrites only what's between the markers, from an ordinary
+# branch, so the steward reviews and lands it like any other PR. (RULES,
+# OWNERS, EXCLUDE, DRY_RUN and NOTIFY come from ../house.nix.)
+#
+#   house-sync          one pass
+#   house-sync status   what a pass would do, changing nothing
+
+set -euo pipefail
+[ "${1:-}" = status ] && DRY_RUN=1
+
+begin_re='^<!-- house:rules v[0-9]+ begin'
+end_re='^<!-- house:rules end -->$'
+rev=$(sha256sum "$RULES" | cut -c1-8)
+branch="house/rules-$rev"
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+
+say() { echo "house-sync: $*"; }
+read -ra globs <<<"$EXCLUDE"
+excluded() {
+  local r=$1 g
+  for g in "${globs[@]}"; do
+    # shellcheck disable=SC2053 # a glob, on purpose
+    [[ $r == $g ]] && return 0
+  done
+  return 1
+}
+
+read -ra owners <<<"$OWNERS"
+: >"$tmp/repos"
+for owner in "${owners[@]}"; do
+  # An owner whose list can't be read is a failure too; the others go on.
+  if ! gh repo list "$owner" --no-archived --source --limit 1000 \
+    --json nameWithOwner,defaultBranchRef \
+    --jq '.[] | select(.defaultBranchRef != null) | "\(.nameWithOwner) \(.defaultBranchRef.name)"' >>"$tmp/repos"; then
+    say "$owner: couldn't list its repos, trying again next pass"
+    echo "$owner (its repo list)" >>"$tmp/failed"
+  fi
+done
+
+# Every gh call below is checked by hand: set -e doesn't reach into a
+# function called with ||, and one repo's failure shouldn't end the pass.
+
+# Close the open PRs for older rules, so none of them can land after the
+# current one. Any close that fails fails the repo, and the next pass retries.
+close_older() {
+  local repo=$1 why=$2 old n failed=0
+  old=$(gh pr list -R "$repo" --state open --limit 1000 --json number,headRefName |
+    jq -r --arg b "$branch" '.[] | select((.headRefName | startswith("house/rules-")) and .headRefName != $b) | .number') ||
+    return 1
+  for n in $old; do
+    if [ -n "${DRY_RUN:-}" ]; then
+      say "$repo: would close #$n ($why)"
+    else
+      gh pr close "$n" -R "$repo" --delete-branch --comment "$why" >/dev/null || failed=1
+    fi
+  done
+  return $failed
+}
+
+sync_repo() {
+  local repo=$1 base=$2 f="$tmp/AGENTS.md" sha fsha begins ends b e url
+  # One snapshot of the default branch: the file is read at this commit and
+  # the branch starts from it, so the PR can't undo a change made meanwhile.
+  sha=$(gh api "repos/$repo/git/ref/heads/$base" --jq .object.sha) || return 1
+  if ! gh api "repos/$repo/contents/AGENTS.md?ref=$sha" >"$tmp/file.json" 2>"$tmp/err"; then
+    # No AGENTS.md yet: the baseline job writes it, block included. Any other
+    # error is a failure, not a missing file.
+    grep -q 'HTTP 404' "$tmp/err" && return 0
+    cat "$tmp/err" >&2
+    return 1
+  fi
+  fsha=$(jq -r .sha "$tmp/file.json") || return 1
+  jq -r .content "$tmp/file.json" | base64 -d >"$f" || return 1
+
+  begins=$(grep -cE "$begin_re" "$f" || true)
+  ends=$(grep -cE "$end_re" "$f" || true)
+  if [ "$begins" = 0 ] && [ "$ends" = 0 ]; then
+    say "$repo: no house block yet (its baseline job or the rollout adds it)"
+    return 0
+  fi
+  b=$(grep -nE "$begin_re" "$f" | head -1 | cut -d: -f1 || true)
+  e=$(grep -nE "$end_re" "$f" | head -1 | cut -d: -f1 || true)
+  if [ "$begins" != 1 ] || [ "$ends" != 1 ] || [ "$e" -le "$b" ]; then
+    say "$repo: the house block's markers are mangled"
+    echo "$repo" >>"$tmp/mangled"
+    return 0
+  fi
+  if sed -n "${b},${e}p" "$f" | cmp -s - "$RULES"; then
+    close_older "$repo" "AGENTS.md on $base already has the current house rules ($rev)."
+    return
+  fi
+
+  # The new AGENTS.md: everything outside the markers as it was.
+  { head -n $((b - 1)) "$f"; cat "$RULES"; tail -n +$((e + 1)) "$f"; } >"$tmp/new"
+
+  # Already open for these rules: only the cleanup may be left to do.
+  url=$(gh pr list -R "$repo" --state open --head "$branch" --json url --jq '.[0].url // ""') || return 1
+  if [ -n "$url" ]; then
+    close_older "$repo" "Replaced by $url."
+    return
+  fi
+  if [ -n "${DRY_RUN:-}" ]; then
+    say "$repo: would open a PR updating its house block to $rev"
+    close_older "$repo" "Replaced by the PR for $rev."
+    return
+  fi
+
+  # The branch is ours: if a run before this one left it, start it over.
+  gh api "repos/$repo/git/refs" -f ref="refs/heads/$branch" -f sha="$sha" >/dev/null 2>&1 ||
+    gh api -X PATCH "repos/$repo/git/refs/heads/$branch" -f sha="$sha" -F force=true >/dev/null ||
+    return 1
+  gh api -X PUT "repos/$repo/contents/AGENTS.md" -f branch="$branch" -f sha="$fsha" \
+    -f message="house: the house rules block, as burrow has it now" \
+    -f content="$(base64 -w0 "$tmp/new")" >/dev/null || return 1
+  url=$(gh pr create -R "$repo" --draft --base "$base" --head "$branch" \
+    --title "house: the house rules block, as burrow has it now" \
+    --body "burrow's house/rules.md changed (now $rev). This rewrites only what's between the house markers in AGENTS.md, so it matches. Change the rules in FieldmouseWorks/burrow, not here.") ||
+    return 1
+  say "$repo: opened $url"
+  close_older "$repo" "Replaced by $url."
+}
+
+# fd 3, so nothing in the loop can eat the list from stdin.
+while read -r repo base <&3; do
+  excluded "$repo" && continue
+  if ! sync_repo "$repo" "$base"; then
+    say "$repo: failed, trying again next pass"
+    echo "$repo" >>"$tmp/failed"
+  fi
+done 3<"$tmp/repos"
+
+[ -n "${DRY_RUN:-}" ] && exit 0
+if [ -s "$tmp/mangled" ]; then
+  "$NOTIFY" open house-markers "The house block's markers are broken" \
+    "house-sync can't find exactly one house block in these repos' AGENTS.md, so it can't keep them current: $(paste -sd, "$tmp/mangled" | sed 's/,/, /g'). Put back one begin and one end marker line, as burrow's house/rules.md has them."
+elif ! [ -s "$tmp/failed" ]; then
+  # Only once every repo was read: one that failed may still be broken.
+  "$NOTIFY" close house-markers "Every house block is readable again."
+fi
+if [ -s "$tmp/failed" ]; then
+  "$NOTIFY" open house-sync "house-sync failed on some repos" \
+    "These couldn't be checked or updated on the last pass (see journalctl -u house-sync): $(paste -sd, "$tmp/failed" | sed 's/,/, /g'). It tries again every day."
+else
+  "$NOTIFY" close house-sync "house-sync got through every repo again."
+fi
