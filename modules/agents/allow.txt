@@ -1,0 +1,59 @@
+# Where an agent sandbox may go without --open (tinyproxy, fnmatch, one host
+# pattern per line; "*.x" doesn't match "x" itself). Add to it rather than
+# reaching for --open when a project needs something new.
+
+# Claude
+api.anthropic.com
+*.anthropic.com
+claude.ai
+*.claude.ai
+*.claude.com
+
+# GitHub (reads only: the VM holds no token)
+github.com
+*.github.com
+*.githubusercontent.com
+ghcr.io
+*.ghcr.io
+
+# Nix
+cache.nixos.org
+channels.nixos.org
+tarballs.nixos.org
+
+# JavaScript
+registry.npmjs.org
+registry.yarnpkg.com
+*.npmjs.org
+*.npmjs.com
+nodejs.org
+
+# Python
+pypi.org
+*.pypi.org
+files.pythonhosted.org
+
+# Rust
+crates.io
+*.crates.io
+static.rust-lang.org
+*.rust-lang.org
+
+# Go
+proxy.golang.org
+sum.golang.org
+storage.googleapis.com
+
+# Browsers for tests (Playwright)
+playwright.azureedge.net
+*.playwright.dev
+playwright-akamai.azureedge.net
+playwright-verizon.azureedge.net
+
+# Distro mirrors, for projects that build or update Linux guests
+*.centos.org
+*.almalinux.org
+*.rockylinux.org
+*.fedoraproject.org
+*.debian.org
+*.ubuntu.com
