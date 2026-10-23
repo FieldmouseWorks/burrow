@@ -7,8 +7,14 @@
 pkgs.testers.runNixOSTest {
   name = "agents";
 
-  nodes.host = { lib, pkgs, ... }: {
-    imports = [ self.nixosModules.default ];
+  nodes.host = { lib, pkgs, ... }: let
+    # The test commits, on the host and in the sandboxes.
+    identity.programs.git.config.user = {
+      name = "Test";
+      email = "test@example.com";
+    };
+  in {
+    imports = [ self.nixosModules.default identity ];
     burrow = {
       claude.enable = true;
       proj.enable = true;
@@ -18,7 +24,7 @@ pkgs.testers.runNixOSTest {
       agents.memory = 1536;
       agents.vcpus = 2;
       # Everything the sandboxes log lands in this test's output.
-      agents.guestModules = [ { burrow.agentGuest.consoleLevel = "info"; } ];
+      agents.guestModules = [ { burrow.agentGuest.consoleLevel = "info"; } identity ];
     };
 
     users.users.dev = {
