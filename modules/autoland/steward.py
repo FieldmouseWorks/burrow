@@ -284,9 +284,11 @@ def codex_verdict(pr, head, since):
                      "running": "running"}.get(cr.get("status"), "none")
                 events.append((ts(c["updatedAt"]), v))
             continue
+        # A receipt names only a prefix of the commit: enough to count its
+        # findings, never to call a head clean (the summary above does that).
         m = RECEIPT_RE.search(body)
-        if m and head.startswith(m.group(1)):
-            events.append((ts(c["createdAt"]), "clean" if "find any major issues" in body else "findings"))
+        if m and head.startswith(m.group(1)) and "find any major issues" not in body:
+            events.append((ts(c["createdAt"]), "findings"))
         elif "Something went wrong" in body and ts(c["createdAt"]) >= since:
             events.append((ts(c["createdAt"]), "failed"))
     for r in pr["reviews"]["nodes"]:
@@ -357,25 +359,28 @@ def post_status(repo, pr, state, desc):
 
 ACTION_PINS_RE = re.compile(r"^\.github/workflows/[^/]+\.ya?ml$")
 # A changed line that only repins an action: "uses: owner/action@sha # v4.1.0".
-PIN_LINE_RE = re.compile(r"^[+-]\s*(-\s+)?uses:\s*[^\s#]+(\s+#.*)?$")
+PIN_LINE_RE = re.compile(r"^[+-]\s*(-\s+)?uses:\s*([^\s#@]+)@[^\s#]+(\s+#.*)?$")
 
 
 def pins_only(repo, pr):
     """True if every changed line in the PR's workflow files only repins an
-    action (no permissions, triggers or commands)."""
+    action: each removed `uses:` comes back with the same action at a new ref,
+    nothing added or dropped (no permissions, triggers or commands)."""
     diff = gh("pr", "diff", str(pr["number"]), "-R", repo, check=False)
     if not isinstance(diff, str) or not diff:
         return False
-    path = None
+    path, changed = None, {}
     for x in diff.splitlines():
         if x.startswith("diff --git "):
             path = x.split(" b/", 1)[-1]
         elif x.startswith(("+++", "---")):
             continue
         elif path and ACTION_PINS_RE.match(path) and x[:1] in "+-" and x.strip("+- \t"):
-            if not PIN_LINE_RE.match(x):
+            m = PIN_LINE_RE.match(x)
+            if not m:
                 return False
-    return True
+            changed.setdefault(path, {"+": [], "-": []})[x[0]].append(m.group(2))
+    return all(sorted(c["+"]) == sorted(c["-"]) for c in changed.values())
 
 
 def one_way(repo, pr, rc, dep=None):
