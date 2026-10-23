@@ -35,7 +35,8 @@ change nothing else in the same PR.
 
 Waiting for the owner instead: PRs touching the one-way paths
 (`burrow.autoland.oneWay`: `.github/`, secrets, migrations), PRs past the
-round limit, major dependency updates, and outside contributions. They're
+round limit, major dependency updates, outside contributions, and PRs in a
+repo with no CI yet (unless it's set `requireCi = false`: nothing to test). They're
 listed in one issue. Dependency bots' minor updates skip Codex: CI is their
 review. That includes their bumps of the actions pinned in
 `.github/workflows/`, unless the repo sets `actionBumps = false`.
@@ -47,6 +48,9 @@ review. That includes their bumps of the actions pinned in
   "green" means nothing and dependency updates can't merge themselves.
 - **AGENTS.md** with the two sections below, plus whatever the repo's own
   agents need (how to build, test and run it). Keep the repo's existing text.
+  Codex applies only the `## Code Review Rules` section of the AGENTS.md
+  nearest each changed file (`###` subheadings group its checks), so review
+  rules under any other heading move under that one.
 - **CLAUDE.md** containing `@AGENTS.md`, then anything only Claude needs, so
   there's one source of truth.
 - **README.md**: what it is, how to build and run it, and its license.
@@ -70,7 +74,7 @@ CI is green, it marks the PR ready and merges it. Fix or answer every finding:
 push the fix and reply with the commit, or reply with why it's wrong, then
 resolve the thread. Don't merge or mark ready yourself.
 
-## Review guidelines
+## Code Review Rules
 
 For reviewers, Codex included. Flag as P1:
 
