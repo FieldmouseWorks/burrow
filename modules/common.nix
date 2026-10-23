@@ -118,6 +118,31 @@ inputs:
             description = "The Claude Code build, here and in the agent sandboxes.";
           };
 
+          claude.memory = {
+            high = mkOption {
+              type = types.str;
+              default = "40%";
+              example = "24G";
+              description = ''
+                Where every Claude this machine runs on its own (proj jobs, Remote
+                Control servers and their sessions) starts being slowed and pushed
+                to give memory back: claude.slice's MemoryHigh, a size or a share
+                of the machine's memory.
+              '';
+            };
+            max = mkOption {
+              type = types.str;
+              default = "50%";
+              example = "30G";
+              description = ''
+                The most they may hold between them (claude.slice's MemoryMax). Past
+                it the kernel kills a Claude, proj jobs first, rather than anything
+                else on the machine: CI, services, the ZFS ARC. Leave room for
+                those.
+              '';
+            };
+          };
+
           claude.machineMd = mkOption {
             type = types.lines;
             default = "";
@@ -126,6 +151,19 @@ inputs:
               burrow's modules fill in their sections at lib.mkOrder 600 to 1400;
               put an intro in lib.mkBefore (500) and an ending in lib.mkAfter (1500).
             '';
+          };
+        };
+
+        # In the user's systemd manager, where proj jobs (claude-jobs.slice)
+        # and Remote Control servers (claude-rc.slice) run. Many headless
+        # Claudes at a few GB each once ran a machine out of memory and the
+        # kernel killed a CI run instead of one of them; capped here, they
+        # can only run out of their own.
+        config.systemd.user.slices.claude = {
+          description = "Every Claude that runs on its own";
+          sliceConfig = {
+            MemoryHigh = config.burrow.claude.memory.high;
+            MemoryMax = config.burrow.claude.memory.max;
           };
         };
       })
