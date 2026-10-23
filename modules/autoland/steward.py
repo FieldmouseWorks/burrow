@@ -235,11 +235,11 @@ query($owner: String!, $name: String!, $cursor: String) {
         createdAt updatedAt
         author { login }
         autoMergeRequest { enabledAt }
-        labels(first: 30) { nodes { name } }
+        labels(first: 100) { pageInfo { hasNextPage } nodes { name } }
         files(first: 100) { nodes { path } }
         changedFiles
-        reviewThreads(first: 100) { nodes { isResolved comments(first: 1) { nodes { author { login } } } } }
-        reviews(last: 100) { nodes { author { login } state body submittedAt commit { oid } } }
+        reviewThreads(first: 100) { pageInfo { hasNextPage } nodes { isResolved comments(first: 1) { nodes { author { login } } } } }
+        reviews(last: 100) { pageInfo { hasPreviousPage } nodes { author { login } state body submittedAt commit { oid } } }
         comments(last: 100) {
           nodes {
             databaseId body createdAt updatedAt author { login }
@@ -499,6 +499,15 @@ def handle(repo, pr, repo_info, digest):
         if st["landFails"] >= 3:
             digest.append(("Couldn't merge", line, "gh pr merge keeps failing (journalctl -u autoland)"))
 
+    # A list longer than one page could hide a hold, an open thread or a
+    # changes-requested review: fail closed.
+    cut = [k for k, more in (("labels", pr["labels"]["pageInfo"]["hasNextPage"]),
+                             ("review threads", pr["reviewThreads"]["pageInfo"]["hasNextPage"]),
+                             ("reviews", pr["reviews"]["pageInfo"]["hasPreviousPage"])) if more]
+    if cut:
+        settle("pending", f"Over 100 {' and '.join(cut)}, too many to read: {CFG['owner']} merges it", "Settled, yours to merge")
+        save(key, st)
+        return
     if CFG["labels"]["hold"] in labels:
         # Held after it was settled: take back the status and the queued merge.
         log(f"{tag}: on hold")
