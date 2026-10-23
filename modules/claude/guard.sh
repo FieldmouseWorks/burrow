@@ -89,7 +89,7 @@ fi
 # instead of a question. Every git checkout/switch/restore/reset counts, since
 # path and forced forms overwrite uncommitted work. Redirects, cp and tee count
 # too (they overwrite), except redirects into /dev (2>/dev/null and friends).
-if [ "${#GUARD_SNAPSHOT_DATASETS[@]}" -gt 0 ] && grep -Eq '(^|[;&|[:space:](])(rm|rmdir|shred|truncate|unlink|git([[:space:]]+-C[[:space:]]+[^[:space:]]+)?[[:space:]]+(clean|reset|checkout|switch|restore|stash|branch[[:space:]]+-D|worktree[[:space:]]+remove|filter-branch|filter-repo))([[:space:]]|$)|(^|[^0-9&>])>[[:space:]]*([^&>/[:space:]]|/[^d]|/d[^e])|rsync[[:space:]].*--delete|find[[:space:]].*-delete|(^|[;&|[:space:]])(mv|cp|tee|sed[[:space:]]+-i|perl[[:space:]]+-p?i)[[:space:]]' <<<"$cmd"; then
+if [ "${#GUARD_SNAPSHOT_DATASETS[@]}" -gt 0 ] && grep -Eq '(^|[;&|[:space:](])(rm|rmdir|shred|truncate|unlink|git([[:space:]]+-C[[:space:]]+[^[:space:]]+)?[[:space:]]+(clean|reset|checkout|switch|restore|stash|branch[[:space:]]+-D|worktree[[:space:]]+remove|filter-branch|filter-repo))([[:space:]]|$)|(^|[^0-9&>])>>?[[:space:]]*([^&>/[:space:]]|/[^d]|/d[^e])|rsync[[:space:]].*--delete|find[[:space:]].*-delete|(^|[;&|[:space:]])(mv|cp|tee|sed[[:space:]]+-i|perl[[:space:]]+-p?i)[[:space:]]' <<<"$cmd"; then
   # Collapse bursts: one round of snapshots per 5 seconds is plenty.
   mark="${XDG_RUNTIME_DIR:-/tmp}/claude-guard-last-snapshot"
   if [ ! -e "$mark" ] || [ $(($(date +%s) - $(stat -c %Y "$mark"))) -ge 5 ]; then
