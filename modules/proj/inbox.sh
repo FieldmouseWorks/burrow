@@ -197,8 +197,8 @@ if [ ${#unreached[@]} -gt 0 ]; then
       "For over an hour, proj-inbox on $HOST hasn't been able to read or comment on issues in: $(printf '%s\n' "${unreached[@]}" | sort -u | paste -sd' '). Issues labelled \`$LABEL\` there wait until it can. \`journalctl -u proj-inbox\` has the errors (a rate limit, often)."
   fi
 else
-  if [ -e "$STATE/.unreached-since" ]; then
-    rm -f "$STATE/.unreached-since"
-    [ -z "$NOTIFY" ] || "$NOTIFY" close proj-inbox "proj-inbox reaches GitHub again."
-  fi
+  rm -f "$STATE/.unreached-since"
+  # Every clean pass: a close that didn't get through is tried again, and
+  # with nothing open it's a no-op that doesn't ask GitHub.
+  [ -z "$NOTIFY" ] || "$NOTIFY" close proj-inbox "proj-inbox reaches GitHub again."
 fi
