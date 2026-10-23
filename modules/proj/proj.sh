@@ -8,6 +8,7 @@
 #   proj reply ID "message"     continue that job's conversation
 #   proj status                 recent jobs and their state
 #   proj log ID                 the job's latest answer (--raw for the full stream)
+#   proj state ID               running, done, error or failed
 #   proj stop ID                stop a running job
 #   proj list                   projects you can run jobs in
 #
@@ -92,6 +93,7 @@ case "${1:-status}" in
       tail -n 3 "$jobs/$id/$n.jsonl" 2>/dev/null || true
     fi
     ;;
+  state) state "${2:?usage: proj state ID}" ;;
   stop) systemctl --user stop "$(unit "${2:?usage: proj stop ID}")" ;;
   list) find "$src" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort ;;
   _exec)
@@ -118,5 +120,5 @@ case "${1:-status}" in
     fi
     exit "$rc"
     ;;
-  *) echo "usage: proj run|reply|status|log|stop|list" >&2; exit 2 ;;
+  *) echo "usage: proj run|reply|status|log|state|stop|list" >&2; exit 2 ;;
 esac
