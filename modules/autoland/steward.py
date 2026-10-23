@@ -70,8 +70,21 @@ def write(*args, **kw):
 def graphql(query, **variables):
     args = ["api", "graphql", "-f", f"query={query}"]
     for k, v in variables.items():
-        args += ["-F" if isinstance(v, int) else "-f", f"{k}={v}"]
+        if v is not None:
+            args += ["-F" if isinstance(v, int) else "-f", f"{k}={v}"]
     return gh(*args)["data"]
+
+
+def open_prs(owner, name):
+    """The repo's merge settings and every open PR, all pages."""
+    prs, cursor = [], None
+    while True:
+        info = graphql(PRS, owner=owner, name=name, cursor=cursor)["repository"]
+        page = info.pop("pullRequests")
+        prs += page["nodes"]
+        if not page["pageInfo"]["hasNextPage"]:
+            return info, prs
+        cursor = page["pageInfo"]["endCursor"]
 
 
 def ts(s):
@@ -212,10 +225,11 @@ def job(repo, task, clone=False):
 # ---------------------------------------------------------------- PRs
 
 PRS = """
-query($owner: String!, $name: String!) {
+query($owner: String!, $name: String!, $cursor: String) {
   repository(owner: $owner, name: $name) {
     squashMergeAllowed mergeCommitAllowed rebaseMergeAllowed
-    pullRequests(states: OPEN, first: 50, orderBy: {field: UPDATED_AT, direction: DESC}) {
+    pullRequests(states: OPEN, first: 30, after: $cursor, orderBy: {field: CREATED_AT, direction: ASC}) {
+      pageInfo { hasNextPage endCursor }
       nodes {
         id number title url isDraft isCrossRepository headRefName headRefOid
         createdAt updatedAt
@@ -293,13 +307,14 @@ def codex_verdict(pr, head, since):
 
 
 def ci_state(pr):
-    """green / pending / red over every check on the head except ours, and
-    the names of the ones that aren't green."""
+    """green / pending / red / none (no checks at all) over every check on
+    the head except ours, and the names of the ones that aren't green."""
     nodes = pr["commits"]["nodes"]
     rollup = (nodes[0]["commit"].get("statusCheckRollup") or {}) if nodes else {}
-    red, pending = [], []
+    red, pending, seen = [], [], 0
     for c in (rollup.get("contexts") or {}).get("nodes", []):
         if c["__typename"] == "CheckRun":
+            seen += 1
             name = c["name"]
             if c["status"] != "COMPLETED":
                 pending.append(name)
@@ -309,10 +324,13 @@ def ci_state(pr):
             name = c["context"]
             if name == CONTEXT:
                 continue
+            seen += 1
             if c["state"] in ("PENDING", "EXPECTED"):
                 pending.append(name)
             elif c["state"] != "SUCCESS":
                 red.append(name)
+    if not seen:
+        return "none", []
     return ("red" if red else "pending" if pending else "green"), red or pending
 
 
@@ -442,6 +460,10 @@ def handle(repo, pr, repo_info, digest):
         return
 
     ci, ci_names = ci_state(pr)
+    if ci == "none":
+        # No checks ran at all. Unless the repo is set not to need any (docs
+        # only), that's not green: nothing has tested it.
+        ci, ci_names = ("green", []) if not rc["requireCi"] else ("pending", ["no CI on this repo yet"])
     open_threads = sum(1 for t in pr["reviewThreads"]["nodes"] if not t["isResolved"])
     latest = {}
     for r in pr["reviews"]["nodes"]:
@@ -456,7 +478,9 @@ def handle(repo, pr, repo_info, digest):
     # renovate-sweep handles the red ones and the majors.
     if dep:
         if dep == "major":
-            settle("pending", f"Major update: {CFG['owner']} merges it", None)
+            # Renovate's majors are listed by renovate-sweep; Dependabot's here.
+            why = None if pr["headRefName"].startswith("renovate/") else "Major dependency updates"
+            settle("pending", f"Major update: {CFG['owner']} merges it", why)
         elif ci == "green" and not open_threads:
             settle("success", "Dependency update, CI green")
             # Renovate merges its own; Dependabot's need merging.
@@ -627,22 +651,26 @@ def publish(digest):
 def main():
     os.makedirs(STATE, exist_ok=True)
     repos = discover()
-    known = load("known.json", None)
-    first = known is None
-    known = set(known or [])
+    # Repos whose baseline job has started. A repo not in it gets one, a few
+    # per pass so the first pass on a machine doesn't start them all at once.
+    known = set(load("known.json", []))
+    started = 0
     digest = []
     for r in repos:
         repo = r["repo"]
         try:
             new = settle_repo(r, known)
-            if new and not first and CFG["baselineJobs"]:
+            if new and CFG["baselineJobs"] and started < CFG["baselinePerPass"]:
                 jid = job(repo, CFG["baselineTask"].replace("REPO", repo), clone=True)
-                log(f"{repo}: new repo, baseline job {jid}")
-            known.add(repo)
+                log(f"{repo}: baseline job {jid}")
+                started += 1
+                known.add(repo)
+            elif new and not CFG["baselineJobs"]:
+                known.add(repo)
             owner, name = repo.split("/")
-            info = graphql(PRS, owner=owner, name=name)["repository"]
+            info, prs = open_prs(owner, name)
             heads = set()
-            for pr in info["pullRequests"]["nodes"]:
+            for pr in prs:
                 heads.add(pr["headRefName"])
                 try:
                     handle(repo, pr, info, digest)

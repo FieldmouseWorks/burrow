@@ -17,7 +17,7 @@ let
   inherit (lib) mkOption types;
 
   settings = {
-    inherit (cfg) owners exclude context rulesets keepBranches baselineJobs;
+    inherit (cfg) owners exclude context rulesets keepBranches baselineJobs baselinePerPass;
     authors = cfg.authors ++ [ "dependabot" ];
     codexLogin = "chatgpt-codex-connector";
     stateDir = "${stateDir}/autoland";
@@ -37,6 +37,7 @@ let
       codexTimeout = cfg.codexTimeoutMinutes;
       directPush = false;
       ruleset = true;
+      requireCi = true;
     };
     repos = cfg.repos;
     baselineTask = ''
@@ -174,7 +175,17 @@ in
     baselineJobs = mkOption {
       type = types.bool;
       default = true;
-      description = "When a new repo shows up, a Claude job opens a draft PR bringing its files to the baseline.";
+      description = ''
+        Every repo gets one Claude job (a few per pass, the first time it's seen,
+        existing repos included) that opens a draft PR bringing its files up to
+        the baseline, if they aren't already.
+      '';
+    };
+
+    baselinePerPass = mkOption {
+      type = types.ints.positive;
+      default = 2;
+      description = "At most this many baseline jobs start in one pass (the first pass would otherwise start one per repo).";
     };
 
     labels = {
@@ -203,7 +214,8 @@ in
       description = ''
         Per-repo overrides (OWNER/NAME): any of rounds, oneWay,
         handoffAfter, settleDelay, codexTimeout (minutes), directPush,
-        ruleset (false: no baseline ruleset).
+        ruleset (false: no baseline ruleset), requireCi (false: a PR with no
+        checks at all counts as green, for a repo with nothing to test).
       '';
     };
   };
