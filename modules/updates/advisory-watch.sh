@@ -55,16 +55,16 @@ names=$(nix-store -qR /run/current-system | sed -E 's|^/nix/store/[a-z0-9]{32}-|
 # copy is the same list.
 if kev=$(curl -fsS --max-time 60 https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json 2>/dev/null ||
   curl -fsS --max-time 60 https://raw.githubusercontent.com/cisagov/kev-data/develop/known_exploited_vulnerabilities.json); then
-  jq -r '.vulnerabilities[] | [.cveID, .vendorProject, .product, .vulnerabilityName] | @tsv' <<<"$kev" |
-    while IFS=$'\t' read -r cve vendor product title; do
+  # Only a match is recorded as seen: a product installed later still gets
+  # its known-exploited CVEs.
+  jq -r '.vulnerabilities[] | def n: ascii_downcase | gsub("[^a-z0-9-]"; "");
+    [.cveID, (.vendorProject | n), (.product | n), .vulnerabilityName] | @tsv' <<<"$kev" |
+    while IFS=$'\t' read -r cve v p title; do
+      grep -qxF "$p" <<<"$names" || grep -qxF "$v-$p" <<<"$names" ||
+        { [ "$p" = kernel ] && [ "$v" = linux ]; } || continue
       fresh "kev:$cve" || continue
       ! quiet kev || continue
-      p=$(tr '[:upper:]' '[:lower:]' <<<"$product" | tr -cd 'a-z0-9-')
-      v=$(tr '[:upper:]' '[:lower:]' <<<"$vendor" | tr -cd 'a-z0-9-')
-      if grep -qxF "$p" <<<"$names" || grep -qxF "$v-$p" <<<"$names" ||
-        { [ "$p" = kernel ] && [ "$v" = linux ]; }; then
-        echo "$PROJECT	$cve (KNOWN EXPLOITED): $title" >>"$found"
-      fi
+      echo "$PROJECT	$cve (KNOWN EXPLOITED): $title" >>"$found"
     done || true
   baselined kev
 fi

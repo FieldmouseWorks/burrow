@@ -27,9 +27,10 @@ if [ -z "$repo" ]; then
   exit 0
 fi
 
+# Fails when GitHub can't be asked, so a close isn't mistaken for "no issue".
 find_issue() {
   gh issue list -R "$repo" --label "$LABEL" --state open --search "\"$tag\" in:title" \
-    --json number,title --jq ".[] | select(.title | startswith(\"$tag\")) | .number" 2>/dev/null | head -n1
+    --json number,title --jq "[.[] | select(.title | startswith(\"$tag\")) | .number] | first // empty" 2>/dev/null
 }
 
 {
@@ -49,9 +50,11 @@ find_issue() {
     close)
       # Only what this opened (saves an API call every run).
       [ -e "$state/$key" ] || exit 0
-      n=$(find_issue)
-      rm -f "$state/$key"
-      [ -z "$n" ] || gh issue close "$n" -R "$repo" --comment "${3:-Cleared.}"
+      # Forget it only once it's closed (or gone), so a failed close is
+      # retried by the next one.
+      n=$(find_issue) &&
+        { [ -z "$n" ] || gh issue close "$n" -R "$repo" --comment "${3:-Cleared.}"; } &&
+        rm -f "$state/$key"
       ;;
     *)
       echo "usage: $NOTIFY open|close KEY ..." >&2

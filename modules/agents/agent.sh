@@ -138,7 +138,8 @@ save_work() {
   # commit.
   head=$(git --git-dir="$clone/.git" rev-parse -q --verify 'HEAD^{commit}' || true)
   GIT_INDEX_FILE=$t/index git --git-dir="$t" --work-tree="$clone" add -A
-  obj=$(git --git-dir="$t" commit-tree --no-gpg-sign "$(GIT_INDEX_FILE=$t/index git --git-dir="$t" write-tree)" ${head:+-p "$head"} \
+  # By the agent, so it needs no identity from the host's git config.
+  obj=$(git --git-dir="$t" -c user.name="agent $id" -c user.email="agent@$(uname -n)" commit-tree --no-gpg-sign "$(GIT_INDEX_FILE=$t/index git --git-dir="$t" write-tree)" ${head:+-p "$head"} \
     -m "agent $id: working tree as of $(date -Is)")
   git --git-dir="$t" update-ref refs/worktree "$obj"
   git -C "$repo" fetch -q --no-write-fetch-head "$t" "+refs/heads/*:refs/agents/$id/heads/*" \
@@ -282,7 +283,10 @@ case "${1:-ls}" in
     id=${2:?usage: agent fetch ID}
     rc=0
     save_work "$id" || rc=$?
-    [ "$rc" != 2 ] || die "$(cat "$(dir "$id")/project") is not a git repository of its own; nothing to fetch into"
+    if [ "$rc" = 2 ]; then
+      echo "agent: $(cat "$(dir "$id")/project") is not a git repository of its own; nothing to fetch into" >&2
+      exit 2
+    fi
     [ "$rc" = 0 ] || exit "$rc"
     git -C "$src/$(cat "$root/$id/project")" for-each-ref --format='%(refname) %(objectname:short) %(subject)' "refs/agents/$id/"
     ;;
@@ -307,9 +311,15 @@ case "${1:-ls}" in
     id=${2:?usage: agent rm ID}
     d=$(dir "$id")
     stop_vm "$id"
-    runuser -u "$user" -- "$0" fetch "$id" >/dev/null 2>&1 || true
+    rc=0
+    runuser -u "$user" -- "$0" fetch "$id" >/dev/null 2>&1 || rc=$?
     touch "$d/removed"
-    echo "$id stopped; deleted in a day unless you run: agent keep $id"
+    if [ "$rc" = 0 ] || [ "$rc" = 2 ]; then
+      echo "$id stopped; deleted in a day unless you run: agent keep $id"
+    else
+      echo "$id stopped, but its work COULDN'T BE SAVED (agent fetch $id says why)." >&2
+      echo "It's deleted in a day with that work unless you run: agent keep $id" >&2
+    fi
     ;;
   keep)
     id=${2:?usage: agent keep ID [DAYS]}
