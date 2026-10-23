@@ -26,7 +26,7 @@
         key = "burrow/${name}";
         imports = [ (import ./modules/${name}.nix inputs) ];
       };
-      names = [ "claude" "undo" "switch" "notify" "updates" "proj" "remote-control" "agents" "robot" "ops" "toolbox" ];
+      names = [ "claude" "undo" "switch" "notify" "updates" "proj" "remote-control" "agents" "robot" "ops" "toolbox" "autoland" ];
     in
     {
       nixosModules = nixpkgs.lib.genAttrs names module // {
@@ -54,6 +54,7 @@
                 (nixpkgs.lib.optionalAttrs (name == "robot") { burrow.robot.serverIp = "203.0.113.7"; })
                 (nixpkgs.lib.optionalAttrs (name == "undo") { burrow.undo.datasets = [ "rpool/safe/data" ]; })
                 (nixpkgs.lib.optionalAttrs (name == "updates") { burrow.updates.origin = "https://github.com/sam/homelab"; })
+                (nixpkgs.lib.optionalAttrs (name == "autoland") { burrow.autoland = { owners = [ "sam" ]; authors = [ "sam" ]; }; })
                 { burrow.${if name == "remote-control" then "remoteControl" else name}.enable = true; }
               ];
             };
