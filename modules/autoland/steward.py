@@ -366,7 +366,8 @@ def one_way(repo, pr, rc):
 
 
 DEP_RE = re.compile(r"^(renovate|dependabot)/")
-MAJOR_RE = re.compile(r"from v?(\d+)\.\S* to v?(\d+)\.")
+# "from 1.2.3 to 2.0.0", "from v3 to v4" (an action's major tag), "from 3 to 4".
+MAJOR_RE = re.compile(r"from v?(\d+)\S* to v?(\d+)")
 
 
 def dep_kind(pr):
@@ -389,7 +390,8 @@ def merge_method(repo_info):
 
 
 def land(repo, pr, repo_info):
-    """Ready, then auto-merge (or merge now if nothing is left to wait for)."""
+    """Ready, then auto-merge (or merge now if nothing is left to wait for).
+    False if GitHub took neither."""
     n = str(pr["number"])
     if pr["isDraft"]:
         write("pr", "ready", n, "-R", repo, check=False)
@@ -397,7 +399,8 @@ def land(repo, pr, repo_info):
         method = merge_method(repo_info)
         if write("pr", "merge", n, "-R", repo, "--auto", method, check=False) is None and not DRY:
             # No branch rules to wait on: GitHub won't queue it, so merge it now.
-            write("pr", "merge", n, "-R", repo, method, check=False)
+            return write("pr", "merge", n, "-R", repo, method, check=False) is not None
+    return True
 
 
 def unland(repo, pr, back_to_draft):
@@ -432,7 +435,7 @@ def handle(repo, pr, repo_info, digest):
     key = f"pr-{repo.replace('/', '_')}-{n}.json"
     st = load(key, {})
     if st.get("head") != head:
-        st.update(head=head, seen=NOW, asked=[], handed=None)
+        st.update(head=head, seen=NOW, asked=[], handed=None, landFails=0)
     st.setdefault("base", 0)
     labels = {x["name"] for x in pr["labels"]["nodes"]}
     author = (pr["author"] or {}).get("login", "")
@@ -449,6 +452,17 @@ def handle(repo, pr, repo_info, digest):
         if state != "success" and (pr["autoMergeRequest"] or (st.get("landed") and not pr["isDraft"])):
             unland(repo, pr, back_to_draft=bool(st.get("landed")))
             st["landed"] = None
+
+    def merge():
+        # Marked landed only once GitHub has queued or done the merge, so a
+        # failed one is tried again next pass, and the owner hears after three.
+        if land(repo, pr, repo_info):
+            st["landed"] = head
+            return
+        st["landFails"] = st.get("landFails", 0) + 1
+        log(f"{tag}: merge failed ({st['landFails']})")
+        if st["landFails"] >= 3:
+            digest.append(("Couldn't merge", line, "gh pr merge keeps failing (journalctl -u autoland)"))
 
     if CFG["labels"]["hold"] in labels:
         log(f"{tag}: on hold")
@@ -477,16 +491,17 @@ def handle(repo, pr, repo_info, digest):
     # Dependency bumps: CI is the review. Renovate merges its own;
     # renovate-sweep handles the red ones and the majors.
     if dep:
-        if dep == "major":
+        if gate:
+            settle("pending", f"Dependency update; {CFG['owner']} merges it (touches {gate})", "Settled, yours to merge")
+        elif dep == "major":
             # Renovate's majors are listed by renovate-sweep; Dependabot's here.
             why = None if pr["headRefName"].startswith("renovate/") else "Major dependency updates"
             settle("pending", f"Major update: {CFG['owner']} merges it", why)
         elif ci == "green" and not open_threads:
             settle("success", "Dependency update, CI green")
             # Renovate merges its own; Dependabot's need merging.
-            if not pr["headRefName"].startswith("renovate/"):
-                land(repo, pr, repo_info)
-                st["landed"] = head
+            if not pr["headRefName"].startswith("renovate/") and st.get("landed") != head:
+                merge()
         else:
             settle("pending", f"Dependency update, CI {ci}")
         save(key, st)
@@ -565,8 +580,7 @@ def handle(repo, pr, repo_info, digest):
         settle("success", "Codex found nothing on this commit, every thread is resolved, CI is green")
         if st.get("landed") != head:
             log(f"{tag}: settled, landing")
-            land(repo, pr, repo_info)
-            st["landed"] = head
+            merge()
 
     if NOW - ts(pr["createdAt"]) > 86400 and verdict != "clean" and not gate:
         digest.append(("Open over a day", line, our_status(pr)[1] or "unsettled"))
@@ -654,17 +668,26 @@ def main():
     # Repos whose baseline job has started. A repo not in it gets one, a few
     # per pass so the first pass on a machine doesn't start them all at once.
     known = set(load("known.json", []))
+    # Ones whose job didn't start: tried again a day later, so they don't
+    # take every pass's slots.
+    failed = load("baseline-failed.json", {})
     started = 0
     digest = []
     for r in repos:
         repo = r["repo"]
         try:
             new = settle_repo(r, known)
-            if new and CFG["baselineJobs"] and started < CFG["baselinePerPass"]:
+            if (new and CFG["baselineJobs"] and started < CFG["baselinePerPass"]
+                    and NOW - failed.get(repo, 0) > 86400):
                 jid = job(repo, CFG["baselineTask"].replace("REPO", repo), clone=True)
-                log(f"{repo}: baseline job {jid}")
                 started += 1
-                known.add(repo)
+                if jid:
+                    log(f"{repo}: baseline job {jid}")
+                    known.add(repo)
+                    failed.pop(repo, None)
+                else:
+                    log(f"{repo}: baseline job didn't start (no checkout, or proj refused); trying again tomorrow")
+                    failed[repo] = NOW
             elif new and not CFG["baselineJobs"]:
                 known.add(repo)
             owner, name = repo.split("/")
@@ -681,6 +704,7 @@ def main():
         except Exception as e:
             log(f"{repo}: {e}")
     save("known.json", sorted(known))
+    save("baseline-failed.json", failed)
     publish(digest)
 
 
