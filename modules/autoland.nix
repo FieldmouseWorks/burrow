@@ -16,6 +16,13 @@ let
   account = config.users.users.${user};
   inherit (lib) mkOption types;
 
+  # The baseline and the house style it links to, together, so the links
+  # between them resolve for the job that reads them.
+  baselineDocs = lib.fileset.toSource {
+    root = ../.;
+    fileset = lib.fileset.unions [ ../docs ../house ];
+  };
+
   settings = {
     inherit (cfg) owners exclude context rulesets keepBranches baselineJobs baselinePerPass;
     # The bots' logins as GitHub's GraphQL API gives them (no "[bot]").
@@ -44,8 +51,8 @@ let
     repos = cfg.repos;
     baselineTask = ''
       REPO is new, and doesn't meet the baseline every repo of ${config.burrow.owner}'s keeps yet. Read
-      ${../docs/repo-baseline.md} and bring this repo up to its "Files" section: open one draft PR that adds
-      what's missing (CI that builds and runs the tests, AGENTS.md with the shared "Pull requests" and
+      ${baselineDocs}/docs/repo-baseline.md and bring this repo up to its "Files" section: open one draft PR that adds
+      what's missing (CI that builds and runs the tests, AGENTS.md with the house block and the shared "Pull requests" and
       "Code Review Rules" sections, CLAUDE.md, README, .gitignore, LICENSE if it's public) and changes
       nothing else. Don't ask for a review or merge it: the steward does that.
     '';

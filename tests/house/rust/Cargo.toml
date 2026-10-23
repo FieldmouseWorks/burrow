@@ -1,0 +1,12 @@
+[package]
+name = "house-fixture"
+version = "0.1.0"
+edition = "2024"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+# A root package with a member, so the checks are shown to cover every
+# member, not only the root.
+[workspace]
+members = ["member"]
