@@ -157,7 +157,7 @@ case "${1:-status}" in
     ;;
   status)
     mkdir -p "$jobs"
-    find "$jobs" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %f\n' | sort -rn | head -n "${2:-15}" |
+    find "$jobs" -mindepth 1 -maxdepth 1 -type d -not -name '.*' -printf '%T@ %f\n' | sort -rn | head -n "${2:-15}" |
       while read -r _ id; do
         printf '%-40s %-8s %s%s\n' "$id" "$(state "$id")" \
           "$(sed 's/.*/[vm &] /' "$jobs/$id/agent" 2>/dev/null)" \

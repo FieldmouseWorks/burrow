@@ -27,6 +27,8 @@ pkgs.testers.runNixOSTest {
       proj = {
         enable = true;
         maxJobs = 2;
+        # The VM is small: only the slot count holds jobs back here.
+        minFreeMemory = 0;
         jobMemoryMax = "128M";
       };
     };
@@ -63,26 +65,28 @@ pkgs.testers.runNixOSTest {
         assert "MemoryMax=" in out and "infinity" not in out, out
 
     with subtest("past maxJobs, jobs wait in line, and --first goes ahead"):
-        a = proj('run web "sleep 30"')
-        b = proj('run web "sleep 30"')
-        time.sleep(3)
+        a = proj('run web "sleep 600"')
+        b = proj('run web "sleep 600"')
+        for j in (a, b):
+            machine.wait_until_succeeds(f"su - dev -c 'proj state {j}' | grep -x running", timeout=120)
         c = proj('run web "sleep 1"')
-        time.sleep(1)
         d = proj('run --first web "sleep 1"')
-        time.sleep(3)
+        time.sleep(5)
         states = [state(j) for j in (a, b, c, d)]
         assert states == ["running", "running", "queued", "queued"], states
+        listed = proj("status")
+        assert ".queue" not in listed and ".slots" not in listed, listed
         out = machine.succeed(f"systemctl --user -M dev@ show {unit(a)} -p Slice -p MemoryMax")
         assert "Slice=claude-jobs.slice" in out and "MemoryMax=134217728" in out, out
         proj(f"stop {a}")
         proj(f"stop {b}")
-        machine.wait_until_succeeds(f"su - dev -c 'proj state {c}' | grep -x done", timeout=30)
-        machine.wait_until_succeeds(f"su - dev -c 'proj state {d}' | grep -x done", timeout=30)
+        machine.wait_until_succeeds(f"su - dev -c 'proj state {c}' | grep -x done", timeout=120)
+        machine.wait_until_succeeds(f"su - dev -c 'proj state {d}' | grep -x done", timeout=120)
         assert started(d) < started(c), (started(d), started(c))
 
     with subtest("a job past its memory cap is killed by its own limit"):
         e = proj("run web eat")
-        machine.wait_until_succeeds(f"su - dev -c 'proj state {e}' | grep -x failed", timeout=60)
+        machine.wait_until_succeeds(f"su - dev -c 'proj state {e}' | grep -x failed", timeout=120)
         machine.succeed("journalctl -k | grep -q 'Memory cgroup out of memory'")
   '';
 }
