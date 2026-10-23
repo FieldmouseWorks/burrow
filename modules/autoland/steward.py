@@ -372,10 +372,11 @@ PIN_LINE_RE = re.compile(r"^[+-]\s*(-\s+)?uses:\s*([^\s#@]+)@[^\s#]+(\s+#.*)?$")
 def pins_only(repo, pr):
     """True if every changed line in the PR's workflow files only repins an
     action: each removed `uses:` comes back with the same action at a new ref,
-    nothing added or dropped (no permissions, triggers or commands)."""
+    nothing added or dropped (no permissions, triggers or commands). None if
+    the diff couldn't be read."""
     diff = gh("pr", "diff", str(pr["number"]), "-R", repo, check=False)
     if not isinstance(diff, str) or not diff:
-        return False
+        return None
     path, changed = None, {}
     for x in diff.splitlines():
         if x.startswith("diff --git "):
@@ -401,13 +402,18 @@ def one_way(repo, pr, rc, dep=None):
     for f in pr["files"]["nodes"]:
         if dep and rc["actionBumps"] and ACTION_PINS_RE.match(f["path"]):
             if pins is None:
-                # One diff per head, not one per pass.
+                # One diff per head, not one per pass; a failed read isn't
+                # kept, so the next pass reads it again.
                 cache = load("pins.json", {})
                 key = f"{repo}#{pr['number']}"
-                if (cache.get(key) or [None])[0] != pr["headRefOid"]:
-                    cache[key] = [pr["headRefOid"], pins_only(repo, pr)]
-                    save("pins.json", cache)
-                pins = cache[key][1]
+                if (cache.get(key) or [None])[0] == pr["headRefOid"]:
+                    pins = cache[key][1]
+                else:
+                    pins = pins_only(repo, pr)
+                    if pins is not None:
+                        cache[key] = [pr["headRefOid"], pins]
+                        save("pins.json", cache)
+                    pins = bool(pins)
             if pins:
                 continue
         for pat in rc["oneWay"]:
