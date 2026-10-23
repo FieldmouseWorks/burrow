@@ -76,7 +76,7 @@ pkgs.testers.runNixOSTest {
         assert states == ["running", "running", "queued", "queued"], states
         listed = proj("status")
         assert ".queue" not in listed and ".slots" not in listed, listed
-        out = machine.succeed(f"systemctl --user -M dev@ show {unit(a)} -p Slice -p MemoryMax")
+        out = machine.succeed(f"systemctl --user -M dev@ show '{unit(a)}' -p Slice -p MemoryMax")
         assert "Slice=claude-jobs.slice" in out and "MemoryMax=134217728" in out, out
         proj(f"stop {a}")
         proj(f"stop {b}")

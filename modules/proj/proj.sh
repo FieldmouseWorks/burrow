@@ -83,10 +83,16 @@ take_slot() {
   local id=$1 first=$2 me head f fid pid i fd num busy LC_ALL=C
   mkdir -p "$jobs/.queue" "$jobs/.slots"
   me="$jobs/.queue/$([ "$first" = first ] && echo 0 || echo 1)-$(date +%s%N)-$id"
-  echo "$$" >"$me"
-  trap 'rm -f "$me"' EXIT
+  trap 'rm -f "$me" "${me%/*}/.${me##*/}.new"' EXIT
   trap 'exit 143' TERM INT
   while :; do
+    # Published whole (a dot file, which the line skips, then renamed), so a
+    # waiter clearing out dead places never sees it without its pid. Put
+    # back if it went anyway.
+    if [ ! -e "$me" ]; then
+      echo "$$" >"${me%/*}/.${me##*/}.new"
+      mv -f "${me%/*}/.${me##*/}.new" "$me"
+    fi
     # The head of the line, once the places of shells that are gone are cleared.
     head=
     for f in "$jobs/.queue"/*; do
