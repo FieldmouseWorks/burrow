@@ -250,7 +250,15 @@ done
 # 6. Live, with the dead man's switch; healthy, or straight back.
 "$HEALTH" snapshot "$state/health-before"
 claude_before=$(as_user claude --version 2>/dev/null || true)
-if ! BURROW_CONFIRM_WITHIN=$WITHIN "$SWITCH" --toplevel "$new" >"$state/logs/switch.log" 2>&1; then
+rc=0
+BURROW_CONFIRM_WITHIN=$WITHIN "$SWITCH" --toplevel "$new" >"$state/logs/switch.log" 2>&1 || rc=$?
+if [ "$rc" = 3 ]; then
+  # Refused before anything went live: an older nixpkgs than the running one.
+  note failed "the switch refused it as a downgrade; nothing changed"
+  dispatch switch "$UPDATE: $SWITCH refused $new ($(describe)) as built from an older nixpkgs than the running system, so nothing went live. The output is $state/logs/switch.log. Find out why the new system looks older (each reads nixpkgs' date from its /etc/burrow/inputs.json) and fix it. $worktree_rules"
+  exit 1
+fi
+if [ "$rc" != 0 ]; then
   "$SWITCH" --abort >>"$state/logs/switch.log" 2>&1 || true
   note failed "activation failed; reverted"
   dispatch activation "$UPDATE: switching to $new ($(describe)) failed during activation and was reverted. The output is $state/logs/switch.log; journalctl has the rest. Fix it. $worktree_rules"
@@ -277,6 +285,7 @@ fi
   note failed "health was fine but $CONFIRM failed; it reverts by itself"
   exit 1
 }
+settled switch "An update went through."
 settled activation "An update went through."
 settled health "An update went through."
 
