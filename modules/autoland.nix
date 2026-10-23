@@ -193,7 +193,7 @@ in
       hold = mkOption {
         type = types.str;
         default = "hold";
-        description = "A PR with this label is left alone.";
+        description = "A PR with this label is paused: its status goes back to pending and nothing merges it.";
       };
       owner = mkOption {
         type = types.str;

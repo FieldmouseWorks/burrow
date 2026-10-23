@@ -248,7 +248,7 @@ query($owner: String!, $name: String!, $cursor: String) {
         }
         reactions(last: 20) { nodes { content createdAt user { login } } }
         commits(last: 1) {
-          nodes { commit { oid statusCheckRollup { contexts(first: 100) { nodes {
+          nodes { commit { oid statusCheckRollup { contexts(first: 100) { pageInfo { hasNextPage } nodes {
             __typename
             ... on CheckRun { name status conclusion }
             ... on StatusContext { context state description }
@@ -311,8 +311,12 @@ def ci_state(pr):
     the head except ours, and the names of the ones that aren't green."""
     nodes = pr["commits"]["nodes"]
     rollup = (nodes[0]["commit"].get("statusCheckRollup") or {}) if nodes else {}
+    contexts = rollup.get("contexts") or {}
+    if (contexts.get("pageInfo") or {}).get("hasNextPage"):
+        # Only the first 100 come back; one past them could be red.
+        return "pending", ["over 100 checks, too many to read"]
     red, pending, seen = [], [], 0
-    for c in (rollup.get("contexts") or {}).get("nodes", []):
+    for c in contexts.get("nodes", []):
         if c["__typename"] == "CheckRun":
             seen += 1
             name = c["name"]
@@ -472,7 +476,9 @@ def handle(repo, pr, repo_info, digest):
             digest.append(("Couldn't merge", line, "gh pr merge keeps failing (journalctl -u autoland)"))
 
     if CFG["labels"]["hold"] in labels:
+        # Held after it was settled: take back the status and the queued merge.
         log(f"{tag}: on hold")
+        settle("pending", f"On hold (the {CFG['labels']['hold']} label)")
         save(key, st)
         return
     if pr["isCrossRepository"] or author not in CFG["authors"]:
