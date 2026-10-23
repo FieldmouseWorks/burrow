@@ -35,15 +35,38 @@ for owner in "${owners[@]}"; do
     --jq '.[] | select(.defaultBranchRef != null) | "\(.nameWithOwner) \(.defaultBranchRef.name)"'
 done >"$tmp/repos"
 
-# One repo. Every gh call is checked by hand: set -e doesn't reach into a
+# Every gh call below is checked by hand: set -e doesn't reach into a
 # function called with ||, and one repo's failure shouldn't end the pass.
+
+# Close the open PRs for older rules, so none of them can land after the
+# current one. Any close that fails fails the repo, and the next pass retries.
+close_older() {
+  local repo=$1 why=$2 old n failed=0
+  old=$(gh pr list -R "$repo" --state open --limit 1000 --json number,headRefName |
+    jq -r --arg b "$branch" '.[] | select((.headRefName | startswith("house/rules-")) and .headRefName != $b) | .number') ||
+    return 1
+  for n in $old; do
+    if [ -n "${DRY_RUN:-}" ]; then
+      say "$repo: would close #$n ($why)"
+    else
+      gh pr close "$n" -R "$repo" --delete-branch --comment "$why" >/dev/null || failed=1
+    fi
+  done
+  return $failed
+}
+
 sync_repo() {
-  local repo=$1 base=$2 f="$tmp/AGENTS.md" sha fsha begins ends b e open old url
+  local repo=$1 base=$2 f="$tmp/AGENTS.md" sha fsha begins ends b e url
   # One snapshot of the default branch: the file is read at this commit and
   # the branch starts from it, so the PR can't undo a change made meanwhile.
   sha=$(gh api "repos/$repo/git/ref/heads/$base" --jq .object.sha) || return 1
-  # No AGENTS.md yet: the baseline job writes it, block included.
-  gh api "repos/$repo/contents/AGENTS.md?ref=$sha" >"$tmp/file.json" 2>/dev/null || return 0
+  if ! gh api "repos/$repo/contents/AGENTS.md?ref=$sha" >"$tmp/file.json" 2>"$tmp/err"; then
+    # No AGENTS.md yet: the baseline job writes it, block included. Any other
+    # error is a failure, not a missing file.
+    grep -q 'HTTP 404' "$tmp/err" && return 0
+    cat "$tmp/err" >&2
+    return 1
+  fi
   fsha=$(jq -r .sha "$tmp/file.json") || return 1
   jq -r .content "$tmp/file.json" | base64 -d >"$f" || return 1
 
@@ -60,17 +83,24 @@ sync_repo() {
     echo "$repo" >>"$tmp/mangled"
     return 0
   fi
-  sed -n "${b},${e}p" "$f" | cmp -s - "$RULES" && return 0
+  if sed -n "${b},${e}p" "$f" | cmp -s - "$RULES"; then
+    close_older "$repo" "AGENTS.md on $base already has the current house rules ($rev)."
+    return
+  fi
 
   # The new AGENTS.md: everything outside the markers as it was.
   { head -n $((b - 1)) "$f"; cat "$RULES"; tail -n +$((e + 1)) "$f"; } >"$tmp/new"
 
-  # Already open for these rules.
-  open=$(gh pr list -R "$repo" --state open --head "$branch" --json number --jq length) || return 1
-  [ "$open" = 0 ] || return 0
+  # Already open for these rules: only the cleanup may be left to do.
+  url=$(gh pr list -R "$repo" --state open --head "$branch" --json url --jq '.[0].url // ""') || return 1
+  if [ -n "$url" ]; then
+    close_older "$repo" "Replaced by $url."
+    return
+  fi
   if [ -n "${DRY_RUN:-}" ]; then
     say "$repo: would open a PR updating its house block to $rev"
-    return 0
+    close_older "$repo" "Replaced by the PR for $rev."
+    return
   fi
 
   # The branch is ours: if a run before this one left it, start it over.
@@ -85,13 +115,7 @@ sync_repo() {
     --body "burrow's house/rules.md changed (now $rev). This rewrites only what's between the house markers in AGENTS.md, so it matches. Change the rules in FieldmouseWorks/burrow, not here.") ||
     return 1
   say "$repo: opened $url"
-  # The older rules PRs this one replaces.
-  old=$(gh pr list -R "$repo" --state open --limit 1000 --json number,headRefName |
-    jq -r --arg b "$branch" '.[] | select((.headRefName | startswith("house/rules-")) and .headRefName != $b) | .number') ||
-    return 1
-  for n in $old; do
-    gh pr close "$n" -R "$repo" --delete-branch --comment "Replaced by $url." >/dev/null || true
-  done
+  close_older "$repo" "Replaced by $url."
 }
 
 # fd 3, so nothing in the loop can eat the list from stdin.
@@ -107,7 +131,8 @@ done 3<"$tmp/repos"
 if [ -s "$tmp/mangled" ]; then
   "$NOTIFY" open house-markers "The house block's markers are broken" \
     "house-sync can't find exactly one house block in these repos' AGENTS.md, so it can't keep them current: $(paste -sd, "$tmp/mangled" | sed 's/,/, /g'). Put back one begin and one end marker line, as burrow's house/rules.md has them."
-else
+elif ! [ -s "$tmp/failed" ]; then
+  # Only once every repo was read: one that failed may still be broken.
   "$NOTIFY" close house-markers "Every house block is readable again."
 fi
 if [ -s "$tmp/failed" ]; then
