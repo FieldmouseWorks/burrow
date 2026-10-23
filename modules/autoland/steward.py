@@ -242,7 +242,7 @@ query($owner: String!, $name: String!, $cursor: String) {
     pullRequests(states: OPEN, first: 30, after: $cursor, orderBy: {field: CREATED_AT, direction: ASC}) {
       pageInfo { hasNextPage endCursor }
       nodes {
-        id number title url isDraft isCrossRepository headRefName headRefOid
+        id number title url isDraft isCrossRepository headRefName headRefOid baseRefName
         createdAt updatedAt
         author { login }
         autoMergeRequest { enabledAt }
@@ -402,16 +402,18 @@ def one_way(repo, pr, rc, dep=None):
     for f in pr["files"]["nodes"]:
         if dep and rc["actionBumps"] and ACTION_PINS_RE.match(f["path"]):
             if pins is None:
-                # One diff per head, not one per pass; a failed read isn't
-                # kept, so the next pass reads it again.
+                # One diff per head and base, not one per pass (retargeting
+                # changes the diff); a failed read isn't kept, so the next
+                # pass reads it again.
                 cache = load("pins.json", {})
                 key = f"{repo}#{pr['number']}"
-                if (cache.get(key) or [None])[0] == pr["headRefOid"]:
-                    pins = cache[key][1]
+                seen = [pr["headRefOid"], pr["baseRefName"]]
+                if (cache.get(key) or [None])[:2] == seen:
+                    pins = cache[key][2]
                 else:
                     pins = pins_only(repo, pr)
                     if pins is not None:
-                        cache[key] = [pr["headRefOid"], pins]
+                        cache[key] = seen + [pins]
                         save("pins.json", cache)
                     pins = bool(pins)
             if pins:
@@ -744,13 +746,19 @@ def publish(digest):
     if prev.get("body") == body and NOW - prev.get("checked", 0) < 3600:
         return
     found = gh("issue", "list", "-R", nrepo, "--label", label, "--state", "open", "--search",
-               f'"{title}" in:title', "--json", "number,body", check=False) or []
+               f'"{title}" in:title', "--json", "number,body", check=False)
+    if not isinstance(found, list):
+        return  # couldn't look (no quota?): try next pass, and don't open a second issue
     found = [i for i in found if i]
     lines = sorted({line for _, line, _ in digest})
+    # Recorded as published only once every call went through, so a failed
+    # one is tried again next pass rather than an hour later.
+    ok = True
     if not digest:
         if found:
-            gh("issue", "close", str(found[0]["number"]), "-R", nrepo, "--comment", "Nothing waiting.", check=False)
-        save("digest.json", {"lines": [], "body": body, "checked": NOW})
+            ok = gh("issue", "close", str(found[0]["number"]), "-R", nrepo, "--comment", "Nothing waiting.", check=False) is not None
+        if ok:
+            save("digest.json", {"lines": [], "body": body, "checked": NOW})
         return
     full = body + "\n\n_Kept up to date by autoland-steward on " + os.uname().nodename + "._"
     if not found:
@@ -758,15 +766,16 @@ def publish(digest):
         args = ["issue", "create", "-R", nrepo, "--label", label, "--title", title, "--body", full]
         if CFG["notify"]["assignee"]:
             args += ["--assignee", CFG["notify"]["assignee"]]
-        gh(*args, check=False)
+        ok = gh(*args, check=False) is not None
     else:
         num = str(found[0]["number"])
         if found[0]["body"] != full:
-            gh("issue", "edit", num, "-R", nrepo, "--body", full, check=False)
+            ok = gh("issue", "edit", num, "-R", nrepo, "--body", full, check=False) is not None
         added = [x for x in lines if x not in prev["lines"]]
-        if added:
-            gh("issue", "comment", num, "-R", nrepo, "--body", "New:\n" + "\n".join(f"- {x}" for x in added), check=False)
-    save("digest.json", {"lines": lines, "body": body, "checked": NOW})
+        if added and ok:
+            ok = gh("issue", "comment", num, "-R", nrepo, "--body", "New:\n" + "\n".join(f"- {x}" for x in added), check=False) is not None
+    if ok:
+        save("digest.json", {"lines": lines, "body": body, "checked": NOW})
 
 
 # ---------------------------------------------------------------- main
