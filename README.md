@@ -19,7 +19,7 @@ MIT licensed. Status: in daily use on one machine; options may still move.
 | `switch` | `burrow.switch` | `HOST-switch` / `HOST-confirm`: a dead man's switch for system changes. The new system goes live but isn't the boot default; unless confirmed within 10 minutes the old one comes back by itself. So a change that cuts off SSH, the network or Claude undoes itself. `--abort` reverts at once; with `flakeInputs` it refuses a system built from an older nixpkgs. With `trialBoot` (GRUB), `HOST-boot` boots a new kernel, initrd or command line once at a quiet hour and makes it the default only after it came up; one that panics or hangs resets into the last good one and is never tried again. |
 | `updates` | `burrow.updates` | Everything current, unattended. `HOST-update` (every 15 minutes) bumps the flake's inputs and Claude Code, builds, runs your VM tests, switches with the dead man's switch, compares health checks before and after (`HOST-health`), confirms and pushes to main; anything that breaks reverts and goes to a Claude job. It deploys main too, so a merged PR goes live the same way. Plus Renovate for every repo you own (`renovate`, merged on green CI, stuck PRs handed to Claude), `advisory-watch` (CISA KEV, vulnix, osv-scanner; new CVEs become Claude jobs the same hour), `firmware-check` (offers go to you: flashing is yours) and daily `rustup update`. |
 | `notify` | `burrow.notify` | `HOST-notify`: what the owner must know, as one GitHub issue per problem in `burrow.notify.repo`, commented at most daily and closed when it clears. |
-| `remote-control` | `burrow.remoteControl` | An always-on `claude remote-control` server for every folder in `burrow.projectsDir`, found by itself (a path unit rescans when folders come and go). The machine's own flake checkout is one of them: that session is the operator. |
+| `remote-control` | `burrow.remoteControl` | An always-on `claude remote-control` server for every folder in `burrow.projectsDir`, found by itself (a path unit rescans when folders come and go) and trusted by itself, so none waits on a prompt. Sessions started from claude.ai each get their own git worktree. The machine's own flake checkout is one of them: that session is the operator. |
 | `proj` | `burrow.proj` | `proj run PROJECT "task"`: the operator hands work to a headless Claude inside that project, as a systemd unit, and checks on it later (`status`, `log`, `reply`, `stop`). |
 | `agents` | `burrow.agents` | `agent new PROJECT`: a microVM per task (microvm.nix, QEMU) on a ZFS clone of the data dataset, Claude with permissions bypassed inside, egress only through an allowlist proxy, no GitHub token; the work comes back with `agent fetch` as `refs/agents/ID/*`. Idle ones stop after a day and are saved and deleted after a week. Opt-in per task. |
 | `robot` | `burrow.robot` | `robot status / rescue / reset / wol` for a Hetzner dedicated server, through the Robot webservice. The way back in when the box is down. |
@@ -91,8 +91,12 @@ in `burrow.updates.claudeManifest`). Persist `burrow.stateDir` if `/` is
 ephemeral. `HOST-update` pushes to `origin` with the user's git login, and
 everything that reaches GitHub (Renovate, notices) uses their gh login.
 
-After the first boot, each project's Remote Control server needs its folder
-trusted once by hand (see the top of `modules/remote-control.nix`).
+After the first boot, run `claude remote-control` by hand once, anywhere, to
+log in and enable Remote Control. Every project folder after that is trusted
+and served on its own.
+
+To run every project from one claude.ai project chat, see
+[docs/front-door.md](docs/front-door.md).
 
 ## Checks
 
