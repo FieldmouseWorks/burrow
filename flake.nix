@@ -32,7 +32,7 @@
         key = "burrow/${name}";
         imports = [ (import ./modules/${name}.nix inputs) ];
       };
-      names = [ "claude" "undo" "switch" "notify" "updates" "proj" "remote-control" "agents" "robot" "ops" "toolbox" "autoland" ];
+      names = [ "claude" "undo" "switch" "notify" "updates" "proj" "remote-control" "agents" "robot" "ops" "toolbox" "autoland" "house" ];
     in
     {
       # A project's dev shell and gate in a few lines; see lib/project.nix.
@@ -69,6 +69,7 @@
                 (nixpkgs.lib.optionalAttrs (name == "undo") { burrow.undo.datasets = [ "rpool/safe/data" ]; })
                 (nixpkgs.lib.optionalAttrs (name == "updates") { burrow.updates.origin = "https://github.com/sam/homelab"; })
                 (nixpkgs.lib.optionalAttrs (name == "autoland") { burrow.autoland = { owners = [ "sam" ]; authors = [ "sam" ]; }; })
+                (nixpkgs.lib.optionalAttrs (name == "house") { burrow.house.owners = [ "sam" ]; })
                 { burrow.${if name == "remote-control" then "remoteControl" else name}.enable = true; }
               ];
             };
