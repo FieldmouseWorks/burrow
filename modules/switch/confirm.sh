@@ -1,7 +1,12 @@
 # HOST-confirm: keep the system HOST-switch put live, and boot into it from now
-# on. (STATE and REVERT come from ../switch.nix.)
+# on. (STATE, REVERT and BOOT come from ../switch.nix. With trial boots on, BOOT
+# is HOST-boot: a new kernel or initrd boots once on trial first.)
 [ "$(id -u)" = 0 ] || exec sudo "$0" "$@"
 state=$STATE
+
+boot_default() {
+  if [ -n "$BOOT" ]; then "$BOOT" default "$1"; else "$1/bin/switch-to-configuration" boot; fi
+}
 
 # Hold off any switch until this is done (see switch.sh).
 mkdir -p $state
@@ -23,7 +28,7 @@ fi
 # Through the daemon, as the user's builds do; root opening the store directly can
 # trip over how /nix/store is mounted.
 if ! env NIX_REMOTE=daemon nix-env -p /nix/var/nix/profiles/system --set "$new" ||
-  ! "$new/bin/switch-to-configuration" boot; then
+  ! boot_default "$new"; then
   echo "couldn't make it the boot default; still pending, and it reverts on schedule" >&2
   exit 1
 fi
@@ -35,10 +40,12 @@ if [ "$(readlink -f /run/current-system)" != "$new" ]; then
   # The revert fired while we were confirming. Boot what's actually running.
   cur=$(readlink -f /run/current-system)
   env NIX_REMOTE=daemon nix-env -p /nix/var/nix/profiles/system --set "$cur"
-  "$cur/bin/switch-to-configuration" boot
+  boot_default "$cur"
   rm -f $state/pending $state/prev
-  echo "too late: it reverted while confirming; $cur stays the boot default" >&2
+  echo "too late: it reverted while confirming; $cur is running" >&2
   exit 1
 fi
 rm -f $state/pending $state/prev
-echo "confirmed: $new is the boot default"
+# With trial boots, HOST-boot said above what boots next (it may be queued for
+# a trial boot).
+echo "confirmed: $new"

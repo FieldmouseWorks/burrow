@@ -17,8 +17,9 @@ in
       default = true;
       description = ''
         Have systemd pet the hardware watchdog: if PID 1 stops answering for
-        30s the board resets itself. Load your board's watchdog driver
-        (boot.kernelModules) for it to do anything.
+        30s the board resets itself, in the initrd too. Load your board's
+        watchdog driver (boot.kernelModules, and boot.initrd.kernelModules) for
+        it to do anything.
       '';
     };
   };
@@ -54,6 +55,10 @@ in
       RuntimeWatchdogSec = "30s";
       RebootWatchdogSec = "10min";
     };
+    # And in a systemd initrd, so a hang before the system is up resets too
+    # (the driver has to be in boot.initrd.kernelModules for that).
+    boot.initrd.systemd.settings.Manager.RuntimeWatchdogSec =
+      lib.mkIf (cfg.watchdog && config.boot.initrd.systemd.enable) "30s";
 
     services.fwupd.enable = true;
     services.smartd.enable = true;

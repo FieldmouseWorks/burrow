@@ -42,6 +42,43 @@ inputs:
             '';
           };
 
+          prefix = mkOption {
+            type = types.str;
+            default = config.networking.hostName;
+            defaultText = lib.literalExpression "config.networking.hostName";
+            description = ''
+              Names the machine's own commands and their units: PREFIX-switch,
+              PREFIX-confirm, PREFIX-boot, PREFIX-update, PREFIX-health, PREFIX-notify.
+            '';
+          };
+
+          stateDir = mkOption {
+            type = types.str;
+            default = "/var/lib/burrow";
+            description = ''
+              Where the switch, trial boots, notices and the update pipeline keep
+              what must survive a reboot. Persist it if / is ephemeral.
+            '';
+          };
+
+          scratchDir = mkOption {
+            type = types.str;
+            default = "${dirOf config.burrow.projectsDir}/scratch";
+            defaultText = lib.literalExpression ''"''${dirOf config.burrow.projectsDir}/scratch"'';
+            description = ''
+              Throwaway clones and worktrees (the update pipeline's own clone, the
+              fix jobs' worktrees). Outside projectsDir, so they get no Remote
+              Control server.
+            '';
+          };
+
+          tools = mkOption {
+            type = types.attrsOf types.package;
+            default = { };
+            internal = true;
+            description = "The commands each module builds, for the others to call.";
+          };
+
           owner = mkOption {
             type = types.str;
             default = "the owner";
@@ -59,10 +96,22 @@ inputs:
             '';
           };
 
+          claude.manifest = mkOption {
+            type = types.nullOr types.path;
+            default = null;
+            example = lib.literalExpression "./claude-code.json";
+            description = ''
+              A Claude Code release manifest (from downloads.claude.ai's release
+              channel) to build instead of the version nixpkgs-unstable carries.
+              burrow.updates keeps it at the newest release.
+            '';
+          };
+
           claude.package = mkOption {
             type = types.package;
             default = import ./claude/package.nix {
               inherit inputs;
+              inherit (config.burrow.claude) manifest;
               system = pkgs.stdenv.hostPlatform.system;
             };
             defaultText = lib.literalMD "Claude Code from burrow's nixpkgs-unstable";

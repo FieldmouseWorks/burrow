@@ -5,6 +5,12 @@
 #   HOST-switch [FLAKE_DIR]        build FLAKE_DIR#CONFIG (default: the machine's flake)
 #   HOST-switch --toplevel PATH    use an already-built system instead
 #   HOST-switch --status           show what's pending
+#   HOST-switch --abort            revert a pending switch now instead of waiting
+#
+# It won't put a system live whose nixpkgs is older than the running one's (that
+# would quietly undo security fixes); --allow-downgrade, anywhere on the line,
+# says you mean it. (It knows nixpkgs' date from /etc/burrow/inputs.json, which
+# burrow.switch.flakeInputs writes.)
 #
 # The new system goes live at once but is NOT made the boot default. Unless
 # HOST-confirm runs within BURROW_CONFIRM_WITHIN (default 10min), the previous
@@ -17,6 +23,13 @@
 
 state=$STATE
 within=${BURROW_CONFIRM_WITHIN:-$WITHIN}
+
+downgrade=
+args=()
+for a in "$@"; do
+  if [ "$a" = --allow-downgrade ]; then downgrade=1; else args+=("$a"); fi
+done
+set -- "${args[@]}"
 
 # The revert is a oneshot: "activating" for as long as it runs.
 reverting() {
@@ -62,6 +75,20 @@ if [ "${1:-}" = --status ]; then
   exit 0
 fi
 
+if [ "${1:-}" = --abort ]; then
+  mkdir -p $state
+  exec 9>$state/lock
+  flock 9
+  [ -e $state/pending ] || { echo "nothing pending"; exit 0; }
+  systemctl stop "$REVERT.timer" 2>/dev/null || true
+  # A revert that already fired finishes on its own.
+  while reverting; do sleep 1; done
+  [ -e $state/pending ] || { echo "already reverted"; exit 0; }
+  systemd-run --unit="$REVERT-now" --collect --wait --pipe --quiet --setenv=PATH="$PATH" \
+    "$(readlink -f "$0")" --revert-to "$(cat $state/prev)"
+  exit
+fi
+
 if [ "${1:-}" = --toplevel ]; then
   new=$(readlink -f "$2")
 else
@@ -78,6 +105,14 @@ fi
 if [ "$new" = "$(readlink -f /run/current-system)" ]; then
   echo "already running $new"
   exit 0
+fi
+
+# nixpkgs' commit time, as built into each system (burrow.switch.flakeInputs).
+stamp() { jq -r '.nixpkgs.lastModified // 0' "$1/etc/burrow/inputs.json" 2>/dev/null || echo 0; }
+if [ -z "$downgrade" ] && [ "$(stamp "$new")" -lt "$(stamp /run/current-system)" ]; then
+  echo "refusing: $new is built from an older nixpkgs than the running system" >&2
+  echo "(that would undo security fixes; pull origin/main first, or pass --allow-downgrade)" >&2
+  exit 1
 fi
 
 # One switch or confirm at a time: each owns pending and the revert timer

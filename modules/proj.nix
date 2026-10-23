@@ -30,6 +30,7 @@ in
 
   config = lib.mkIf cfg.enable {
     environment.systemPackages = [ proj ];
+    burrow.tools.proj = proj;
     # Jobs are units in the user's systemd manager, so they outlive the session
     # that started them.
     users.users.${user}.linger = lib.mkDefault true;
