@@ -432,10 +432,11 @@ def land(repo, pr, repo_info):
     if pr["isDraft"]:
         write("pr", "ready", n, "-R", repo, check=False)
     if not pr["autoMergeRequest"]:
-        method = merge_method(repo_info)
-        if write("pr", "merge", n, "-R", repo, "--auto", method, check=False) is None and not DRY:
+        # Only the head that was checked: a push since then waits for the next pass.
+        method = [merge_method(repo_info), "--match-head-commit", pr["headRefOid"]]
+        if write("pr", "merge", n, "-R", repo, "--auto", *method, check=False) is None and not DRY:
             # No branch rules to wait on: GitHub won't queue it, so merge it now.
-            return write("pr", "merge", n, "-R", repo, method, check=False) is not None
+            return write("pr", "merge", n, "-R", repo, *method, check=False) is not None
     return True
 
 
