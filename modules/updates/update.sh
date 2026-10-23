@@ -176,8 +176,8 @@ commit() {
   git_ commit -qam "Update ${what%, }" -m "Pushed by $UPDATE after the build, the VM tests and the health check passed."
 }
 
-# A tree that failed to build or test in the last day isn't tried again (a
-# failing VM test would otherwise rerun every 15 minutes); --force retries.
+# A tree that failed to build in the last day isn't tried again (nor, below, a
+# VM test it already passed or failed); --force retries.
 tree() { git_ rev-parse 'HEAD^{tree}'; }
 failed_before() {
   [ -z "$force" ] || return 1
@@ -233,19 +233,102 @@ if [ "$new" = "$current" ]; then
 fi
 
 # 5. The VM tests, under KVM, on exactly this tree.
+#
+# A test that fails is run once more on the same tree. If it passes then, it's
+# flaky: the update goes ahead, and a Claude job is told to make the test
+# reliable (the owner hears about it until it has passed first time three runs
+# in a row). If it fails again, it's run on main as it was before the updates.
+# Passing there means the updates broke it, and they wait for a fix. Failing
+# there too means main's test is broken, which isn't the updates' fault: they
+# still wait, unless they take away a serious known vulnerability from what runs
+# now (CVSS 7+, per vulnix). Those go live without the test, under the same dead
+# man's switch and health check as everything else.
+
+# VM test $1 on commit $2, logged to $3.
+run_check() {
+  as_user nix build --no-link -L "git+file://$work?rev=$2#checks.$SYSTEM.$1" >"$3" 2>&1
+}
+# What VM test $1 did on commit $2's tree in the last day: pass, fail or nothing.
+result_of() {
+  [ -z "$force" ] || return 0
+  awk -v k="$1:$(git_ rev-parse "$2^{tree}")" -v since=$(($(date +%s) - 86400)) \
+    '$1 == k && $3 > since { r = $2 } END { print r }' "$state/check-results" 2>/dev/null
+}
+record() { echo "$1:$(git_ rev-parse "$2^{tree}") $3 $(date +%s)" >>"$state/check-results"; }
+# Serious known vulnerabilities in a system's closure, one "CVE package" per line.
+vulns() {
+  local out
+  out=$(vulnix --closure --json "$1" 2>/dev/null) || [ -n "$out" ] || return 0
+  jq -r '.[] | . as $p | .affected_by[] as $c | select((($p.cvssv3_basescore[$c]) // 0) >= 7)
+    | "\($c) \($p.pname)"' <<<"$out" 2>/dev/null | sort -u || true
+}
+
+head=$(git_ rev-parse HEAD)
+untested=()
 for c in "${checks[@]}"; do
-  if failed_before "$c" || ! as_user nix build --no-link -L "$work#checks.$SYSTEM.$c" >"$state/logs/check-$c.log" 2>&1; then
-    failed_before "$c" || remember_failed "$c"
-    note failed "VM test $c fails on $(git_ rev-parse --short HEAD) ($(describe))"
-    dispatch "check-$c" "$UPDATE: the VM test $c fails with these updates on top of main: $(describe). The log is $state/logs/check-$c.log; the tree is $work at $(git_ rev-parse HEAD) (don't edit there, it's reset every run). Find out whether the updates or main broke it, and fix it. $worktree_rules"
-    if [ "$(age "check-$c")" -gt 86400 ]; then
-      "$NOTIFY" open "check-$c" "Updates stuck: VM test $c fails" \
-        "For a day now $UPDATE can't get the VM test $c to pass with the latest updates ($(describe)), so they aren't deployed. Claude jobs have tried; see \`proj status\` on $HOST."
+  log=$state/logs/check-$c.log
+  r=$(result_of "$c" "$head")
+  if [ -z "$r" ]; then
+    if run_check "$c" "$head" "$log"; then
+      r=pass
+      n=$(($(cat "$state/clean-$c" 2>/dev/null || echo 0) + 1))
+      echo "$n" >"$state/clean-$c"
+      [ "$n" -lt 3 ] || settled "flaky-$c" "The VM test $c has passed first time three runs in a row."
+    elif run_check "$c" "$head" "$log.again"; then
+      r=pass
+      mv "$log" "$state/logs/flaky-$c.log"
+      mv "$log.again" "$log"
+      echo 0 >"$state/clean-$c"
+      dispatch "flaky-$c" "$UPDATE: the VM test $c is flaky: on $head it failed once (log: $state/logs/flaky-$c.log) and passed when run again ($log). A flaky test holds back security updates, so find the cause and fix it, in the test or in what it tests; a retry or a longer timeout isn't a fix unless the cause really is time. $worktree_rules"
+      "$NOTIFY" open "flaky-$c" "VM test $c is flaky" \
+        "The VM test $c failed and then passed on the same tree, so updates went ahead. A Claude job is finding the cause; this closes once the test passes first time three runs in a row."
+    else
+      r=fail
+      mv "$log.again" "$log"
     fi
+    record "$c" "$head" "$r"
+  fi
+  if [ "$r" = pass ]; then
+    settled "check-$c" "The VM test $c passes again."
+    continue
+  fi
+
+  # It fails every time. The updates' fault, or main's?
+  if [ "$head" = "$main" ]; then
+    base=fail
+  else
+    base=$(result_of "$c" "$main")
+    if [ -z "$base" ]; then
+      base=fail
+      run_check "$c" "$main" "$state/logs/check-$c-main.log" && base=pass
+      record "$c" "$main" "$base"
+    fi
+  fi
+  if [ "$base" = fail ]; then
+    untested+=("$c")
+    dispatch "check-$c" "$UPDATE: the VM test $c fails on $origin main ($main) itself, not only with the updates. The log is $log; the tree is $work (don't edit there, it's reset every run). Fix main. $worktree_rules"
+  else
+    note failed "VM test $c fails with $(describe) and passes on main"
+    dispatch "check-$c" "$UPDATE: the VM test $c fails with these updates on top of main: $(describe). It passes on main, so the updates break it. The log is $log; the tree is $work at $head (don't edit there, it's reset every run). Make the updates pass it. $worktree_rules"
+  fi
+  if [ "$(age "check-$c")" -gt 86400 ]; then
+    "$NOTIFY" open "check-$c" "Updates stuck: VM test $c fails" \
+      "For a day now $UPDATE can't get the VM test $c to pass ($(describe)), so updates that don't fix a serious vulnerability aren't deployed. Claude jobs have tried; see \`proj status\` on $HOST."
+  fi
+  [ "$base" = fail ] || exit 1
+done
+if [ ${#untested[@]} -gt 0 ]; then
+  fixes=$(comm -23 <(vulns "$current") <(vulns "$new"))
+  if [ -z "$fixes" ]; then
+    note failed "VM test ${untested[*]} fails on main as well; holding $(describe) until main passes"
     exit 1
   fi
-  settled "check-$c" "The VM test $c passes again."
-done
+  echo "main fails ${untested[*]}, but this fixes: $(tr '\n' ',' <<<"$fixes")"
+  "$NOTIFY" open untested "Security updates went live without a passing VM test" \
+    "The VM test ${untested[*]} fails on main itself, and these updates fix serious vulnerabilities in what $HOST runs:
+$fixes
+So they went live without it, under the dead man's switch and the health check. A Claude job is fixing main's test; this closes when an update passes every test again."
+fi
 
 # 6. Live, with the dead man's switch; healthy, or straight back.
 "$HEALTH" snapshot "$state/health-before"
@@ -288,8 +371,17 @@ fi
 settled switch "An update went through."
 settled activation "An update went through."
 settled health "An update went through."
+[ ${#untested[@]} -gt 0 ] || settled untested "An update passed every VM test again."
 
 # 7. Push, and bring the operator's checkout along when it isn't mid-work.
+# (The commit says what was skipped. The running system keeps the old commit
+# as its revision; "deployed" below is how the next run knows it's this one.)
+if [ ${#untested[@]} -gt 0 ] && [ -n "$changed" ]; then
+  git_ commit -q --amend -m "Update $(describe | sed 's/, $//')" \
+    -m "Pushed by $UPDATE without the VM test ${untested[*]}, which fails on main itself, because it fixes:
+$fixes
+It built and stayed healthy live."
+fi
 echo "$new" >"$state/deployed"
 if git_ push -q origin HEAD:main; then
   git_ rev-parse HEAD >"$state/deployed-main"
