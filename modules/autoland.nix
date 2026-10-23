@@ -85,6 +85,15 @@ in
       description = "Repos to leave alone (OWNER/NAME globs).";
     };
 
+    dryRun = mkOption {
+      type = types.bool;
+      default = false;
+      description = ''
+        Only log what each pass would do (`autoland-steward status`), changing
+        nothing on GitHub: for a first look at a new machine's repos.
+      '';
+    };
+
     every = mkOption {
       type = types.str;
       default = "2min";
@@ -214,7 +223,7 @@ in
       serviceConfig = {
         Type = "oneshot";
         User = user;
-        ExecStart = "${steward}/bin/autoland-steward";
+        ExecStart = "${steward}/bin/autoland-steward${lib.optionalString cfg.dryRun " status"}";
         TimeoutStartSec = "20min";
         Nice = 10;
       };
