@@ -9,8 +9,8 @@
 #
 # It won't put a system live whose nixpkgs is older than the running one's (that
 # would quietly undo security fixes); --allow-downgrade, anywhere on the line,
-# says you mean it. (It knows nixpkgs' date from /etc/burrow/inputs.json, which
-# burrow.switch.flakeInputs writes.)
+# says you mean it, and without it the refusal exits 3. (It knows nixpkgs' date
+# from /etc/burrow/inputs.json, which burrow.switch.flakeInputs writes.)
 #
 # The new system goes live at once but is NOT made the boot default. Unless
 # HOST-confirm runs within BURROW_CONFIRM_WITHIN (default 10min), the previous
@@ -112,7 +112,7 @@ stamp() { jq -r '.nixpkgs.lastModified // 0' "$1/etc/burrow/inputs.json" 2>/dev/
 if [ -z "$downgrade" ] && [ "$(stamp "$new")" -lt "$(stamp /run/current-system)" ]; then
   echo "refusing: $new is built from an older nixpkgs than the running system" >&2
   echo "(that would undo security fixes; pull origin/main first, or pass --allow-downgrade)" >&2
-  exit 1
+  exit 3
 fi
 
 # One switch or confirm at a time: each owns pending and the revert timer
