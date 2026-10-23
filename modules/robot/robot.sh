@@ -34,7 +34,9 @@ creds() {
 
 api() {
   local method=$1 path=$2; shift 2
-  curl -fsS --max-time 30 -u "$(creds)" -X "$method" "$url$path" "$@"
+  # The credentials go in through a config on a pipe, not argv, where any
+  # user on the box could read them.
+  curl -fsS --max-time 30 -K <(creds | sed 's/[\\"]/\\&/g; s/^/user = "/; s/$/"/') -X "$method" "$url$path" "$@"
 }
 
 case "${1:-status}" in

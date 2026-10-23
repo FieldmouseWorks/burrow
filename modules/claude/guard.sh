@@ -94,7 +94,10 @@ if [ "${#GUARD_SNAPSHOT_DATASETS[@]}" -gt 0 ] && grep -Eq '(^|[;&|[:space:](])(r
   mark="${XDG_RUNTIME_DIR:-/tmp}/claude-guard-last-snapshot"
   if [ ! -e "$mark" ] || [ $(($(date +%s) - $(stat -c %Y "$mark"))) -ge 5 ]; then
     stamp=$(date +%Y%m%d-%H%M%S)
-    zfs snapshot "${GUARD_SNAPSHOT_DATASETS[@]/%/@pre-$stamp}" 2>/dev/null || true
+    # No snapshot, no undo: then it asks instead.
+    if ! err=$(zfs snapshot "${GUARD_SNAPSHOT_DATASETS[@]/%/@pre-$stamp}" 2>&1); then
+      ask "Couldn't take the undo snapshot first (${err:-zfs snapshot failed}), so this would have no undo."
+    fi
     touch "$mark"
   fi
 fi
