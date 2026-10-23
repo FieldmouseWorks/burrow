@@ -37,7 +37,8 @@ Waiting for the owner instead: PRs touching the one-way paths
 (`burrow.autoland.oneWay`: `.github/`, secrets, migrations), PRs past the
 round limit, major dependency updates, and outside contributions. They're
 listed in one issue. Dependency bots' minor updates skip Codex: CI is their
-review.
+review. That includes their bumps of the actions pinned in
+`.github/workflows/`, unless the repo sets `actionBumps = false`.
 
 ## Files (a Claude job, once)
 

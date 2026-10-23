@@ -38,6 +38,7 @@ let
       directPush = false;
       ruleset = true;
       requireCi = true;
+      actionBumps = true;
     };
     repos = cfg.repos;
     baselineTask = ''
@@ -215,7 +216,10 @@ in
         Per-repo overrides (OWNER/NAME): any of rounds, oneWay,
         handoffAfter, settleDelay, codexTimeout (minutes), directPush,
         ruleset (false: no baseline ruleset), requireCi (false: a PR with no
-        checks at all counts as green, for a repo with nothing to test).
+        checks at all counts as green, for a repo with nothing to test),
+        actionBumps (false: a dependency bot's bump of the actions pinned in
+        .github/workflows waits for you like any other .github/ change; by
+        default it merges on green CI, as other dependency updates do).
       '';
     };
   };

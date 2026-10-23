@@ -351,12 +351,19 @@ def post_status(repo, pr, state, desc):
           "-f", f"context={CONTEXT}", "-f", f"description={desc}", "-f", f"target_url={pr['url']}", check=False)
 
 
-def one_way(repo, pr, rc):
+ACTION_PINS_RE = re.compile(r"^\.github/workflows/[^/]+\.ya?ml$")
+
+
+def one_way(repo, pr, rc, dep=None):
     """The first path (or label) that makes this PR the owner's to merge."""
     for lab in pr["labels"]["nodes"]:
         if lab["name"] == CFG["labels"]["owner"]:
             return f"the {lab['name']} label"
     for f in pr["files"]["nodes"]:
+        # A dependency bot editing a workflow is bumping the actions it pins:
+        # CI is its review, like any other dependency (unless actionBumps is off).
+        if dep and rc["actionBumps"] and ACTION_PINS_RE.match(f["path"]):
+            continue
         for pat in rc["oneWay"]:
             if re.search(pat, f["path"]):
                 return f["path"]
@@ -486,7 +493,7 @@ def handle(repo, pr, repo_info, digest):
             latest[who] = r["state"]
     changes = [w for w, s in latest.items() if s == "CHANGES_REQUESTED"]
     dep = dep_kind(pr)
-    gate = one_way(repo, pr, rc)
+    gate = one_way(repo, pr, rc, dep)
 
     # Dependency bumps: CI is the review. Renovate merges its own;
     # renovate-sweep handles the red ones and the majors.
