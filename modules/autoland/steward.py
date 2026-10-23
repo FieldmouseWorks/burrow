@@ -538,9 +538,10 @@ def handle(repo, pr, repo_info, digest):
         return
 
     ci, ci_names = ci_state(pr)
+    # No checks ran at all. Unless the repo is set not to need any (docs
+    # only), that's not green: nothing has tested it, so the owner merges it.
+    no_ci = ci == "none" and rc["requireCi"]
     if ci == "none":
-        # No checks ran at all. Unless the repo is set not to need any (docs
-        # only), that's not green: nothing has tested it.
         ci, ci_names = ("green", []) if not rc["requireCi"] else ("pending", ["no CI on this repo yet"])
     open_threads = sum(1 for t in pr["reviewThreads"]["nodes"] if not t["isResolved"])
     latest = {}
@@ -637,6 +638,8 @@ def handle(repo, pr, repo_info, digest):
         idle = NOW - max(ts(pr["updatedAt"]), st["seen"])
         if idle > rc["handoffAfter"] * MIN and st.get("handed") != head:
             hand_off("CI is red (" + ", ".join(ci_names) + ")")
+    elif no_ci:
+        settle("pending", f"Settled, but this repo has no CI: {CFG['owner']} merges it", "Settled, yours to merge")
     elif ci == "pending":
         settle("pending", "Settled; waiting for CI: " + ", ".join(ci_names)[:90])
     elif gate:
@@ -648,8 +651,9 @@ def handle(repo, pr, repo_info, digest):
             merge()
 
     # Anything not merged after a day, Codex clean or not (a check that never
-    # reports keeps it pending). One-way PRs are listed above already.
-    if NOW - ts(pr["createdAt"]) > 86400 and not gate:
+    # reports keeps it pending). One-way PRs, and those already listed for
+    # the owner (no CI), are left out.
+    if NOW - ts(pr["createdAt"]) > 86400 and not gate and not any(x[1] == line for x in digest):
         digest.append(("Open over a day", line, our_status(pr)[1] or "unsettled"))
     save(key, st)
 

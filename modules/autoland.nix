@@ -224,7 +224,8 @@ in
         Per-repo overrides (OWNER/NAME): any of rounds, oneWay,
         handoffAfter, settleDelay, codexTimeout (minutes), directPush,
         ruleset (false: no baseline ruleset), requireCi (false: a PR with no
-        checks at all counts as green, for a repo with nothing to test),
+        checks at all counts as green, for a repo with nothing to test; by
+        default a settled PR in a repo with no CI waits for you),
         actionBumps (false: a dependency bot's bump of the actions pinned in
         .github/workflows waits for you like any other .github/ change; by
         default it merges on green CI, as other dependency updates do).
@@ -279,7 +280,7 @@ in
         branch goes too. Don't merge, mark ready or post that status yourself.
       - What it won't merge (paths matching its one-way list, such as `.github/`,
         secrets and migrations; more than ${toString cfg.rounds} Codex rounds; outside
-        contributions) waits for ${config.burrow.owner}, listed in one issue. Label a PR
+        contributions; repos with no CI yet) waits for ${config.burrow.owner}, listed in one issue. Label a PR
         `${cfg.labels.owner}` to send it there yourself, or `${cfg.labels.hold}` to keep the
         steward off it.
       - `autoland-steward status` shows where every open PR stands, changing nothing.
