@@ -51,9 +51,16 @@ let
     '';
   };
 
-  steward = pkgs.writers.writePython3Bin "autoland-steward"
+  configFile = pkgs.writeText "autoland.json" (builtins.toJSON settings);
+  stewardPy = pkgs.writers.writePython3Bin "autoland-steward"
     { flakeIgnore = [ "E501" "W503" ]; }
     (builtins.readFile ./autoland/steward.py);
+  # The command, with this machine's config, so `autoland-steward status`
+  # works from any shell, not only in the service.
+  steward = pkgs.writeShellScriptBin "autoland-steward" ''
+    export AUTOLAND_CONFIG=''${AUTOLAND_CONFIG:-${configFile}}
+    exec ${stewardPy}/bin/autoland-steward "$@"
+  '';
 in
 {
   imports = [
@@ -235,7 +242,6 @@ in
       description = "autoland: settle and merge every PR, keep every repo at the baseline";
       after = [ "network-online.target" ];
       wants = [ "network-online.target" ];
-      environment.AUTOLAND_CONFIG = pkgs.writeText "autoland.json" (builtins.toJSON settings);
       path = [ pkgs.gh pkgs.git pkgs.coreutils config.burrow.tools.proj ];
       serviceConfig = {
         Type = "oneshot";
