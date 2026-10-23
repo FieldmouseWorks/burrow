@@ -1,0 +1,10 @@
+# burrow's own gate, through the same shared workflow every project calls
+# (flake-check.yml), taken from this checkout so a PR runs its own version.
+name: flake
+on:
+  pull_request:
+  push:
+    branches: [main]
+jobs:
+  check:
+    uses: ./.github/workflows/flake-check.yml

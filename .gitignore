@@ -1,1 +1,19 @@
+# Nix build links
+result
+result-*
+.direnv/
+
+# The test projects' build output
+target/
 __pycache__/
+*.pyc
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+
+# Claude's machine-local notes (docs/house-style.md)
+CLAUDE.local.md
