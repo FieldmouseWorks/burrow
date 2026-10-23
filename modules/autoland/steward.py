@@ -119,7 +119,7 @@ def repo_cfg(repo):
 def discover():
     seen = []
     for owner in CFG["owners"]:
-        for r in gh("repo", "list", owner, "--no-archived", "--source", "--limit", "1000",
+        for r in gh("repo", "list", owner, "--no-archived", "--source", "--limit", "100000",
                     "--json", "nameWithOwner,isPrivate,viewerPermission,defaultBranchRef") or []:
             name = r["nameWithOwner"]
             if any(fnmatch.fnmatch(name, pat) for pat in CFG["exclude"]):
@@ -488,6 +488,17 @@ def handle(repo, pr, repo_info, digest):
             unland(repo, pr, back_to_draft=bool(st.get("landed")))
             st["landed"] = None
 
+    def hand_off(why):
+        # Recorded only once a job has started; until then it's tried every
+        # pass and listed for the owner.
+        jid = job(repo, fix_task(repo, pr, why))
+        if jid:
+            st["handed"] = head
+            log(f"{tag}: handed to a Claude job {jid} ({why})")
+        else:
+            log(f"{tag}: couldn't hand to a Claude job (no checkout, or proj refused)")
+            digest.append(("Couldn't start a Claude job to fix it", line, why))
+
     def merge():
         # Marked landed only once GitHub has queued or done the merge, so a
         # failed one is tried again next pass, and the owner hears after three.
@@ -607,19 +618,13 @@ def handle(repo, pr, repo_info, digest):
             settle("pending", f"Round {rounds}: " + ", ".join(what))
             idle = NOW - max(ts(pr["updatedAt"]), st["seen"])
             if idle > rc["handoffAfter"] * MIN and st.get("handed") != head:
-                jid = job(repo, fix_task(repo, pr, ", ".join(what)))
-                st["handed"] = head
-                log(f"{tag}: handed to a Claude job ({jid or 'no checkout'})")
-                if jid is None:
-                    digest.append(("No checkout on this machine to fix it in", line, ", ".join(what)))
+                hand_off(", ".join(what))
     # 2. Codex is clean on this head and nothing is open: CI, then land.
     elif ci == "red":
         settle("pending", "CI is red: " + ", ".join(ci_names)[:100])
         idle = NOW - max(ts(pr["updatedAt"]), st["seen"])
         if idle > rc["handoffAfter"] * MIN and st.get("handed") != head:
-            jid = job(repo, fix_task(repo, pr, "CI is red (" + ", ".join(ci_names) + ")"))
-            st["handed"] = head
-            log(f"{tag}: red CI handed to a Claude job ({jid or 'no checkout'})")
+            hand_off("CI is red (" + ", ".join(ci_names) + ")")
     elif ci == "pending":
         settle("pending", "Settled; waiting for CI: " + ", ".join(ci_names)[:90])
     elif gate:
