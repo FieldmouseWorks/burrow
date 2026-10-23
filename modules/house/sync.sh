@@ -29,11 +29,16 @@ excluded() {
 }
 
 read -ra owners <<<"$OWNERS"
+: >"$tmp/repos"
 for owner in "${owners[@]}"; do
-  gh repo list "$owner" --no-archived --source --limit 1000 \
+  # An owner whose list can't be read is a failure too; the others go on.
+  if ! gh repo list "$owner" --no-archived --source --limit 1000 \
     --json nameWithOwner,defaultBranchRef \
-    --jq '.[] | select(.defaultBranchRef != null) | "\(.nameWithOwner) \(.defaultBranchRef.name)"'
-done >"$tmp/repos"
+    --jq '.[] | select(.defaultBranchRef != null) | "\(.nameWithOwner) \(.defaultBranchRef.name)"' >>"$tmp/repos"; then
+    say "$owner: couldn't list its repos, trying again next pass"
+    echo "$owner (its repo list)" >>"$tmp/failed"
+  fi
+done
 
 # Every gh call below is checked by hand: set -e doesn't reach into a
 # function called with ||, and one repo's failure shouldn't end the pass.
@@ -137,7 +142,7 @@ elif ! [ -s "$tmp/failed" ]; then
 fi
 if [ -s "$tmp/failed" ]; then
   "$NOTIFY" open house-sync "house-sync failed on some repos" \
-    "These repos' house blocks couldn't be checked or updated on the last pass (see journalctl -u house-sync): $(paste -sd, "$tmp/failed" | sed 's/,/, /g'). It tries again every day."
+    "These couldn't be checked or updated on the last pass (see journalctl -u house-sync): $(paste -sd, "$tmp/failed" | sed 's/,/, /g'). It tries again every day."
 else
   "$NOTIFY" close house-sync "house-sync got through every repo again."
 fi
