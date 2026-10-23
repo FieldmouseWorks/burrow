@@ -8,7 +8,7 @@ let
   cfg = config.burrow.ops;
 in
 {
-  imports = [ ./common.nix ];
+  imports = [ (import ./common.nix inputs) ];
 
   options.burrow.ops = {
     enable = lib.mkEnableOption "kernel, hardware and firmware tools, fwupd, smartd";

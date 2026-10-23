@@ -9,11 +9,6 @@ let
   cfg = config.burrow.claude;
   inherit (config.networking) hostName;
 
-  claude-code = import ./claude/package.nix {
-    inherit inputs;
-    system = pkgs.stdenv.hostPlatform.system;
-  };
-
   guard = pkgs.writeShellApplication {
     name = "claude-guard";
     runtimeInputs = [ pkgs.jq pkgs.gnugrep pkgs.coreutils pkgs.git config.boot.zfs.package ];
@@ -97,17 +92,10 @@ let
   robot = config.burrow.robot.enable or false;
 in
 {
-  imports = [ ./common.nix ];
+  imports = [ (import ./common.nix inputs) ];
 
   options.burrow.claude = {
     enable = lib.mkEnableOption "system-wide Claude Code with reversibility-classed permissions";
-
-    package = lib.mkOption {
-      type = lib.types.package;
-      default = claude-code;
-      defaultText = lib.literalMD "Claude Code from burrow's nixpkgs-unstable";
-      description = "The Claude Code build, here and in the agent sandboxes.";
-    };
 
     extraAsk = lib.mkOption {
       type = lib.types.listOf lib.types.str;
@@ -131,15 +119,6 @@ in
       '';
     };
 
-    machineMd = lib.mkOption {
-      type = lib.types.lines;
-      default = "";
-      description = ''
-        /etc/claude-code/CLAUDE.md. burrow's modules fill in their sections at
-        lib.mkOrder 600 to 1400; put an intro in lib.mkBefore (500) and an
-        ending in lib.mkAfter (1500).
-      '';
-    };
   };
 
   config = lib.mkIf cfg.enable {

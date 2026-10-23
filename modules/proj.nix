@@ -17,7 +17,7 @@ let
   };
 in
 {
-  imports = [ ./common.nix ];
+  imports = [ (import ./common.nix inputs) ];
 
   options.burrow.proj = {
     enable = lib.mkEnableOption "proj, background Claude jobs in each project";
@@ -30,6 +30,9 @@ in
 
   config = lib.mkIf cfg.enable {
     environment.systemPackages = [ proj ];
+    # Jobs are units in the user's systemd manager, so they outlive the session
+    # that started them.
+    users.users.${user}.linger = lib.mkDefault true;
     systemd.tmpfiles.rules = [ "d ${cfg.jobsDir} 0755 ${user} ${config.users.users.${user}.group} -" ];
 
     burrow.claude.machineMd = lib.mkOrder 700 ''

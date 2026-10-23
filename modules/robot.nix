@@ -17,7 +17,7 @@ let
   };
 in
 {
-  imports = [ ./common.nix ];
+  imports = [ (import ./common.nix inputs) ];
 
   options.burrow.robot = {
     enable = lib.mkEnableOption "robot, the Hetzner Robot CLI";

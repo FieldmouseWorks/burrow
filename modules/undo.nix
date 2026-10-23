@@ -11,7 +11,7 @@ let
   zfs = config.boot.zfs.package;
 in
 {
-  imports = [ ./common.nix ];
+  imports = [ (import ./common.nix inputs) ];
 
   options.burrow.undo = {
     enable = lib.mkEnableOption "guard snapshots of burrow.undo.datasets, delegated and pruned";

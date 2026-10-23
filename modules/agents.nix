@@ -133,7 +133,7 @@ let
   };
 in
 {
-  imports = [ ./common.nix inputs.microvm.nixosModules.host ];
+  imports = [ (import ./common.nix inputs) inputs.microvm.nixosModules.host ];
 
   options.burrow.agents = {
     enable = lib.mkEnableOption "agent sandboxes, a microVM per task (`agent`)";
@@ -210,6 +210,8 @@ in
     ];
 
     microvm.stateDir = cfg.stateDir;
+    # The sandboxes' directories are microvm:kvm, and the user works in them.
+    users.users.${user}.extraGroups = [ "kvm" ];
 
     environment.systemPackages = [ agent ];
     boot.kernelModules = [ "vhost_vsock" ];

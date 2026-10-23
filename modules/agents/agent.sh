@@ -155,6 +155,7 @@ destroy() {
 case "${1:-ls}" in
   new)
     as_user "$@"
+    install -d -m 0700 "$(dirname "$key")"
     [ -f "$key" ] || ssh-keygen -q -t ed25519 -N '' -C "agent@$(uname -n)" -f "$key"
     id=$(/run/wrappers/bin/sudo -n "$0" _new "${@:2}") || exit 1
     wait_ready "$id"
@@ -164,6 +165,9 @@ case "${1:-ls}" in
     as_root "$@"
     p=${2:?usage: agent new PROJECT [--with $data/PATH]... [--open]}
     shift 2
+    # A folder directly in the projects folder, nothing else: the name goes
+    # into the share paths.
+    case $p in */* | . | .. | "") die "not a project name: $p" ;; esac
     [ -d "$src/$p" ] || die "no such project: $src/$p"
     net=filtered
     withs=()

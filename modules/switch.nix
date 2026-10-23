@@ -28,7 +28,7 @@ let
   };
 in
 {
-  imports = [ ./common.nix ];
+  imports = [ (import ./common.nix inputs) ];
 
   options.burrow.switch = {
     enable = lib.mkEnableOption "HOST-switch and HOST-confirm, system changes with a dead man's switch";

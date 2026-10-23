@@ -43,6 +43,19 @@
 
       checks.${system} = {
         example = self.nixosConfigurations.example.config.system.build.toplevel;
+        # Each module on its own, with only what it imports: evaluating is the
+        # check, so these build nothing.
+        standalone = pkgs.writeText "burrow-standalone" (nixpkgs.lib.concatMapStrings (name:
+          let
+            machine = nixpkgs.lib.nixosSystem {
+              modules = [
+                self.nixosModules.${name}
+                ./examples/machine.nix
+                (nixpkgs.lib.optionalAttrs (name == "robot") { burrow.robot.serverIp = "203.0.113.7"; })
+                { burrow.${if name == "remote-control" then "remoteControl" else name}.enable = true; }
+              ];
+            };
+          in "${name} ${builtins.unsafeDiscardStringContext machine.config.system.build.toplevel.drvPath}\n") names);
         # Sandboxes for real: boot two, work in them, break out of nothing.
         # Nested KVM: run it on a machine that has /dev/kvm.
         agents = import ./tests/agents.nix { inherit self pkgs; };

@@ -4,7 +4,7 @@
 inputs:
 { config, lib, options, pkgs, ... }:
 {
-  imports = [ ./common.nix ];
+  imports = [ (import ./common.nix inputs) ];
 
   options.burrow.toolbox.enable = lib.mkEnableOption "the shared toolbox (on the host; sandboxes always get it)";
 

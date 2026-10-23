@@ -46,7 +46,7 @@ let
   };
 in
 {
-  imports = [ ./common.nix ];
+  imports = [ (import ./common.nix inputs) ];
 
   options.burrow.remoteControl.enable =
     lib.mkEnableOption "an always-on Claude Remote Control server for every project folder";
@@ -95,6 +95,10 @@ in
         Unit = "claude-rc-scan.service";
       };
     };
+
+    # The servers live in the user's systemd manager, which has to run from
+    # boot on, logged in or not.
+    users.users.${user}.linger = lib.mkDefault true;
 
     systemd.tmpfiles.rules = [ "d ${projectsDir} 0755 ${user} ${config.users.users.${user}.group} -" ];
 
