@@ -29,6 +29,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import time
 from datetime import datetime
 
@@ -655,6 +656,21 @@ def handle(repo, pr, repo_info, digest):
 
 # ---------------------------------------------------------------- branches
 
+def delete_branch(repo, name, sha):
+    """Delete the branch only if its tip is still `sha`: a push since then
+    keeps it (git's lease; the REST API has no conditional delete)."""
+    if DRY:
+        log(f"  would: delete {repo} {name} if still at {sha[:7]}")
+        return
+    with tempfile.TemporaryDirectory() as d:
+        subprocess.run(["git", "init", "-q", "--bare", d], check=False)
+        p = subprocess.run(["git", "-C", d, "push", "-q", f"--force-with-lease=refs/heads/{name}:{sha}",
+                            f"https://github.com/{repo}.git", f":refs/heads/{name}"],
+                           capture_output=True, text=True)
+        if p.returncode != 0:
+            log(f"{repo}: kept {name}: {p.stderr.strip()[:200]}")
+
+
 def sweep_branches(r, open_heads, digest):
     repo = r["repo"]
     st = load(f"repo-{repo.replace('/', '_')}.json", {})
@@ -664,19 +680,21 @@ def sweep_branches(r, open_heads, digest):
         return
     stale = []
     names = (gh("api", "--paginate", f"repos/{repo}/branches?per_page=100", "--jq",
-                ".[] | select(.protected | not) | .name", check=False) or "")
-    for name in str(names).split("\n"):
-        if not name or name == r["default"] or name in open_heads or DEP_RE.match(name):
+                '.[] | select(.protected | not) | "\\(.name) \\(.commit.sha)"', check=False) or "")
+    for x in str(names).split("\n"):
+        name, _, sha = x.partition(" ")
+        if not name or not sha or name == r["default"] or name in open_heads or DEP_RE.match(name):
             continue
         if any(fnmatch.fnmatch(name, pat) for pat in CFG["keepBranches"]):
             continue
-        cmp = gh("api", f"repos/{repo}/compare/{r['default']}...{name}", "--jq",
+        # Compared at the tip just listed, and deleted only if it's still there.
+        cmp = gh("api", f"repos/{repo}/compare/{r['default']}...{sha}", "--jq",
                  "{ahead: .ahead_by, date: .commits[-1].commit.committer.date}", check=False)
         if not isinstance(cmp, dict):
             continue
         if cmp["ahead"] == 0:
-            log(f"{repo}: deleting {name} (already in {r['default']})")
-            write("api", "-X", "DELETE", f"repos/{repo}/git/refs/heads/{name}", check=False)
+            log(f"{repo}: deleting {name} at {sha[:7]} (already in {r['default']})")
+            delete_branch(repo, name, sha)
         elif cmp.get("date") and NOW - ts(cmp["date"]) > 30 * 86400:
             stale.append(name)
     st.update(branches=NOW, stale=stale)
