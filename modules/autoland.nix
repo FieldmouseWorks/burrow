@@ -114,7 +114,7 @@ in
 
     every = mkOption {
       type = types.str;
-      default = "2min";
+      default = "5min";
       description = "Time between passes (after one ends).";
     };
 
