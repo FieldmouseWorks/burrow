@@ -43,7 +43,10 @@ let
   pyCfg = { dirs = [ "." ]; format = false; } // (if python == null then { } else python);
   rustDir = if rustCfg.dir == "." then self else self + "/${rustCfg.dir}";
 
-  toolchainFor = pkgs:
+  # What the repo's rust-toolchain(.toml) asks for, as rust-overlay's
+  # fromRustupToolchain takes it; latest stable with rustfmt and clippy
+  # without one.
+  toolchainSpec =
     let
       file = lib.findFirst builtins.pathExists null [
         (rustDir + "/rust-toolchain.toml")
@@ -51,13 +54,23 @@ let
         (self + "/rust-toolchain.toml")
         (self + "/rust-toolchain")
       ];
+      text = builtins.readFile file;
+      # The legacy rust-toolchain file is either TOML or just the channel.
+      spec =
+        if lib.hasInfix "[toolchain]" text then (builtins.fromTOML text).toolchain
+        else { channel = lib.trim text; };
     in
-    if file != null then pkgs.rust-bin.fromRustupToolchainFile file
-    else pkgs.rust-bin.stable.latest.default.override { extensions = [ "rustfmt" "clippy" ]; };
+    { components = [ ]; } // (if file != null then spec else { channel = "stable"; components = [ "rustfmt" "clippy" ]; });
+
+  # extra: components on top of the repo's own (the shell's rust-analyzer).
+  toolchainFor = pkgs: extra:
+    pkgs.rust-bin.fromRustupToolchain (toolchainSpec // {
+      components = toolchainSpec.components ++ extra;
+    });
 
   rustChecks = pkgs:
     let
-      craneLib = (crane.mkLib pkgs).overrideToolchain (toolchainFor pkgs);
+      craneLib = (crane.mkLib pkgs).overrideToolchain (toolchainFor pkgs [ ]);
       # The whole directory, not only the Cargo sources: tests read fixtures.
       src = lib.cleanSource rustDir;
       # Every member of the workspace, not only a root package or its
@@ -91,7 +104,7 @@ in
     default = pkgs.mkShell {
       packages =
         lib.optional (rust != null)
-          ((toolchainFor pkgs).override { extensions = [ "rust-src" "rust-analyzer" ]; })
+          (toolchainFor pkgs [ "rust-src" "rust-analyzer" ])
         ++ lib.optionals (python != null) [ pkgs.python3 pkgs.ruff pkgs.uv ]
         ++ lib.optional (node != null) pkgs.nodejs
         ++ packages pkgs;
