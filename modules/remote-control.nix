@@ -17,7 +17,9 @@
 #
 # This is also how a claude.ai project reaches a project: a thread there starts
 # a session on that project's server and talks to it (docs/front-door.md).
-# Those sessions each get their own git worktree (burrow.remoteControl.spawn).
+# Those sessions each get their own git worktree (burrow.remoteControl.spawn),
+# and run in burrow.remoteControl.permissionMode: bypassPermissions alongside
+# burrow.claude, like every other session here, so only its one-way doors ask.
 inputs:
 { config, lib, pkgs, ... }:
 let
@@ -33,6 +35,7 @@ let
       FLAKE=${lib.escapeShellArg config.burrow.flake}
       SPAWN=${lib.escapeShellArg cfg.spawn}
       SAME_DIR=(${lib.escapeShellArgs cfg.sameDir})
+      MODE=${lib.escapeShellArg (if cfg.permissionMode == null then "" else cfg.permissionMode)}
     '' + builtins.readFile ./remote-control/serve.sh;
   };
 
@@ -93,6 +96,17 @@ in
         checkout (the one session that's always there stays in the folder
         itself). same-dir: all of them in the folder. The machine's own flake
         and folders that aren't git repositories are always same-dir.
+      '';
+    };
+    permissionMode = lib.mkOption {
+      type = lib.types.nullOr (lib.types.enum [ "acceptEdits" "auto" "bypassPermissions" "default" "dontAsk" "plan" ]);
+      default = if config.burrow.claude.enable or false then "bypassPermissions" else null;
+      defaultText = lib.literalExpression ''if config.burrow.claude.enable then "bypassPermissions" else null'';
+      description = ''
+        The permission mode for sessions started from claude.ai. Without it,
+        the mode claude.ai asks for wins over the machine's managed defaultMode.
+        bypassPermissions keeps burrow.claude's ask rules: its one-way doors
+        still ask. null: whatever claude.ai and the settings say.
       '';
     };
     sameDir = lib.mkOption {
