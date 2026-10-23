@@ -180,13 +180,12 @@ def settle_repo(r, known):
                 patch.setdefault("security_and_analysis", {})[key] = {"status": "enabled"}
     if patch:
         log(f"{repo}: settings {sorted(patch)}")
-        write("api", "-X", "PATCH", f"repos/{repo}", "--input", "-", input=json.dumps(patch), check=False)
-        # A private repo on a free account ignores allow_auto_merge without an
-        # error (the steward merges its PRs itself): ask once, not every day.
-        if "allow_auto_merge" in patch and not DRY:
-            after = gh("api", f"repos/{repo}", check=False)
-            if isinstance(after, dict) and not after.get("allow_auto_merge"):
-                st["autoMergeRefused"] = True
+        after = write("api", "-X", "PATCH", f"repos/{repo}", "--input", "-", input=json.dumps(patch), check=False)
+        # A private repo on a free account takes allow_auto_merge without an
+        # error and leaves it off (the steward merges its PRs itself): once the
+        # PATCH went through and it's still off, stop asking every day.
+        if "allow_auto_merge" in patch and isinstance(after, dict) and not after.get("allow_auto_merge"):
+            st["autoMergeRefused"] = True
     write("api", "-X", "PUT", f"repos/{repo}/vulnerability-alerts", check=False)
 
     if CFG["rulesets"] and rc["ruleset"]:
