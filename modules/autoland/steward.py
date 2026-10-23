@@ -356,6 +356,26 @@ def post_status(repo, pr, state, desc):
 
 
 ACTION_PINS_RE = re.compile(r"^\.github/workflows/[^/]+\.ya?ml$")
+# A changed line that only repins an action: "uses: owner/action@sha # v4.1.0".
+PIN_LINE_RE = re.compile(r"^[+-]\s*(-\s+)?uses:\s*[^\s#]+(\s+#.*)?$")
+
+
+def pins_only(repo, pr):
+    """True if every changed line in the PR's workflow files only repins an
+    action (no permissions, triggers or commands)."""
+    diff = gh("pr", "diff", str(pr["number"]), "-R", repo, check=False)
+    if not isinstance(diff, str) or not diff:
+        return False
+    path = None
+    for x in diff.splitlines():
+        if x.startswith("diff --git "):
+            path = x.split(" b/", 1)[-1]
+        elif x.startswith(("+++", "---")):
+            continue
+        elif path and ACTION_PINS_RE.match(path) and x[:1] in "+-" and x.strip("+- \t"):
+            if not PIN_LINE_RE.match(x):
+                return False
+    return True
 
 
 def one_way(repo, pr, rc, dep=None):
@@ -363,11 +383,15 @@ def one_way(repo, pr, rc, dep=None):
     for lab in pr["labels"]["nodes"]:
         if lab["name"] == CFG["labels"]["owner"]:
             return f"the {lab['name']} label"
+    # A dependency bot that only repins actions in workflows is a dependency
+    # update: CI is its review (unless actionBumps is off).
+    pins = None
     for f in pr["files"]["nodes"]:
-        # A dependency bot editing a workflow is bumping the actions it pins:
-        # CI is its review, like any other dependency (unless actionBumps is off).
         if dep and rc["actionBumps"] and ACTION_PINS_RE.match(f["path"]):
-            continue
+            if pins is None:
+                pins = pins_only(repo, pr)
+            if pins:
+                continue
         for pat in rc["oneWay"]:
             if re.search(pat, f["path"]):
                 return f["path"]
