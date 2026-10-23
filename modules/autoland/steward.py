@@ -543,11 +543,13 @@ def handle(repo, pr, repo_info, digest):
             # Renovate's majors are listed by renovate-sweep; Dependabot's here.
             why = None if pr["headRefName"].startswith("renovate/") else "Major dependency updates"
             settle("pending", f"Major update: {CFG['owner']} merges it", why)
-        elif ci == "green" and not open_threads:
+        elif ci == "green" and not open_threads and not changes:
             settle("success", "Dependency update, CI green")
             # Renovate merges its own; Dependabot's need merging.
             if not pr["headRefName"].startswith("renovate/") and st.get("landed") != head:
                 merge()
+        elif changes:
+            settle("pending", "Dependency update; changes requested by " + ", ".join(changes))
         else:
             settle("pending", f"Dependency update, CI {ci}")
         save(key, st)
