@@ -102,6 +102,7 @@ in
 
     systemd.tmpfiles.rules = [ "d ${projectsDir} 0755 ${user} ${config.users.users.${user}.group} -" ];
 
-    environment.systemPackages = [ pkgs.tmux ];
+    # Claude Code too, for when burrow.claude (which also installs it) is off.
+    environment.systemPackages = [ pkgs.tmux config.burrow.claude.package ];
   };
 }

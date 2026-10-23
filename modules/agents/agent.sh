@@ -168,8 +168,10 @@ case "${1:-ls}" in
     p=${2:?usage: agent new PROJECT [--with $data/PATH]... [--open]}
     shift 2
     # A folder directly in the projects folder, nothing else: the name goes
-    # into the share paths.
+    # into the share paths, and a symlink there would share whatever it
+    # points at.
     case $p in */* | . | .. | "") die "not a project name: $p" ;; esac
+    [ ! -L "$src/$p" ] || die "a symlink, not a project folder: $src/$p"
     [ -d "$src/$p" ] || die "no such project: $src/$p"
     net=filtered
     withs=()

@@ -29,7 +29,8 @@ in
   };
 
   config = lib.mkIf cfg.enable {
-    environment.systemPackages = [ proj ];
+    # Claude Code too, for when burrow.claude (which also installs it) is off.
+    environment.systemPackages = [ proj config.burrow.claude.package ];
     burrow.tools.proj = proj;
     # Jobs are units in the user's systemd manager, so they outlive the session
     # that started them.
