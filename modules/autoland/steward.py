@@ -243,7 +243,7 @@ query($owner: String!, $name: String!, $cursor: String) {
       pageInfo { hasNextPage endCursor }
       nodes {
         id number title url isDraft isCrossRepository headRefName headRefOid baseRefName
-        createdAt updatedAt
+        createdAt updatedAt mergeStateStatus
         author { login }
         autoMergeRequest { enabledAt }
         labels(first: 100) { pageInfo { hasNextPage } nodes { name } }
@@ -674,6 +674,13 @@ def handle(repo, pr, repo_info, digest):
         if st.get("landed") != head:
             log(f"{tag}: settled, landing")
             merge()
+        elif pr.get("mergeStateStatus") == "BEHIND" and st.get("updated") != head:
+            # The base's rules want the branch up to date first, and auto-merge
+            # won't bring it there. The merged-in head is reviewed like any other.
+            if write("api", "-X", "PUT", f"repos/{repo}/pulls/{n}/update-branch",
+                     "-f", f"expected_head_sha={head}", check=False) is not None:
+                log(f"{tag}: behind its base, brought up to date")
+                st["updated"] = head
 
     # Anything not merged after a day, Codex clean or not (a check that never
     # reports keeps it pending). One-way PRs, and those already listed for
