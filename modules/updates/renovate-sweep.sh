@@ -47,6 +47,7 @@ for d in "$src"/*/; do
       major=$(jq -r '[.labels[]?.name] | index("major") != null' <<<"$pr")
       verdict=$(jq -r --arg ok "$OK" --arg held "$HELD" '[.labels[]?.name] |
         if index($held) != null then "held" elif index($ok) != null then "ok" else "" end' <<<"$pr")
+      labelled_verdict=$verdict
       pending=$(jq -r '[.statusCheckRollup[]? | select((.context // .name) != $settled) | (.conclusion // .state // "" | ascii_upcase)
         | select(. == "" or . == "PENDING" or . == "EXPECTED")] | length' --arg settled "$SETTLED" <<<"$pr")
       # No checks at all isn't "passed CI": nothing has tested it yet.
@@ -74,7 +75,11 @@ for d in "$src"/*/; do
         [ -n "${labelled:-}" ] || gh label create "$HELD" -R "$repo" --force --color d93f0b \
           --description "Major update a Claude job read: needs a decision first (see its comment)" >/dev/null 2>&1 || true
         labelled=1
-        gh pr edit "$n" -R "$repo" --remove-label "$OK" --remove-label "$HELD" >/dev/null 2>&1 || true
+        # Until the old verdict is gone, the new head isn't recorded: the
+        # next pass would take that verdict for the new job's.
+        if [ -n "$labelled_verdict" ]; then
+          gh pr edit "$n" -R "$repo" --remove-label "$OK" --remove-label "$HELD" >/dev/null 2>&1 || continue
+        fi
       fi
       echo "$want" >"$key"
       if [ "$major" = true ]; then
