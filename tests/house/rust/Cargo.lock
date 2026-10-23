@@ -5,3 +5,7 @@ version = 4
 [[package]]
 name = "house-fixture"
 version = "0.1.0"
+
+[[package]]
+name = "house-fixture-member"
+version = "0.1.0"

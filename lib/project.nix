@@ -60,11 +60,13 @@ let
       craneLib = (crane.mkLib pkgs).overrideToolchain (toolchainFor pkgs);
       # The whole directory, not only the Cargo sources: tests read fixtures.
       src = lib.cleanSource rustDir;
-      common = { inherit src; strictDeps = true; };
+      # Every member of the workspace, not only a root package or its
+      # default-members.
+      common = { inherit src; strictDeps = true; cargoExtraArgs = "--locked --workspace"; };
       cargoArtifacts = craneLib.buildDepsOnly common;
     in
     {
-      rust-fmt = craneLib.cargoFmt { inherit src; };
+      rust-fmt = craneLib.cargoFmt { inherit src; cargoExtraArgs = "--all"; };
       rust-clippy = craneLib.cargoClippy (common // {
         inherit cargoArtifacts;
         cargoClippyExtraArgs = "--all-targets -- -D warnings";
