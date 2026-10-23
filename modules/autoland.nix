@@ -46,7 +46,7 @@ let
       REPO is new, and doesn't meet the baseline every repo of ${config.burrow.owner}'s keeps yet. Read
       ${../docs/repo-baseline.md} and bring this repo up to its "Files" section: open one draft PR that adds
       what's missing (CI that builds and runs the tests, AGENTS.md with the shared "Pull requests" and
-      "Review guidelines" sections, CLAUDE.md, README, .gitignore, LICENSE if it's public) and changes
+      "Code Review Rules" sections, CLAUDE.md, README, .gitignore, LICENSE if it's public) and changes
       nothing else. Don't ask for a review or merge it: the steward does that.
     '';
   };
