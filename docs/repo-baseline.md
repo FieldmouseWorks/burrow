@@ -46,6 +46,9 @@ review. That includes their bumps of the actions pinned in
 - **CI** on every PR that builds the code and runs its tests, in any repo with
   code. Pin actions to a commit (Renovate keeps them current). Without CI,
   "green" means nothing and dependency updates can't merge themselves.
+  The CI is the flake gate the [house style](house-style.md#the-gate-is-the-flake)
+  describes: a `flake.nix` from burrow's template, and the workflow that calls
+  `nix flake check`. Jobs the flake can't hold stay alongside it.
 - **AGENTS.md** with the two sections below, plus whatever the repo's own
   agents need (how to build, test and run it). Keep the repo's existing text.
   Codex applies only the `## Code Review Rules` section of the AGENTS.md
