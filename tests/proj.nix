@@ -41,6 +41,9 @@ pkgs.testers.runNixOSTest {
     users.groups.dev.gid = 1001;
     systemd.tmpfiles.rules = [ "d /data/dev/src/web 0755 dev dev -" ];
     virtualisation.memorySize = 2048;
+    # The test framework panics on any OOM, a cgroup's own included; a real
+    # machine kills inside the cgroup, which is what's checked here.
+    boot.kernel.sysctl."vm.panic_on_oom" = 0;
   };
 
   testScript = ''
