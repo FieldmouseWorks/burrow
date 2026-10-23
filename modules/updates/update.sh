@@ -250,17 +250,22 @@ run_check() {
 }
 # What VM test $1 did on commit $2's tree in the last day: pass, fail or nothing.
 result_of() {
-  [ -z "$force" ] || return 0
+  [ -z "$force" ] && [ -e "$state/check-results" ] || return 0
   awk -v k="$1:$(git_ rev-parse "$2^{tree}")" -v since=$(($(date +%s) - 86400)) \
     '$1 == k && $3 > since { r = $2 } END { print r }' "$state/check-results" 2>/dev/null
 }
 record() { echo "$1:$(git_ rev-parse "$2^{tree}") $3 $(date +%s)" >>"$state/check-results"; }
-# Serious known vulnerabilities in a system's closure, one "CVE package" per line.
+# Serious known vulnerabilities in a system's closure, one "CVE package" per
+# line, sorted. Fails if vulnix fails or says something that isn't its report:
+# a scan that didn't happen must never read as "fixed everything".
 vulns() {
-  local out
-  out=$(vulnix --closure --json "$1" 2>/dev/null) || [ -n "$out" ] || return 0
-  jq -r '.[] | . as $p | .affected_by[] as $c | select((($p.cvssv3_basescore[$c]) // 0) >= 7)
-    | "\($c) \($p.pname)"' <<<"$out" 2>/dev/null | sort -u || true
+  local out list
+  out=$(vulnix --closure --json "$1" 2>/dev/null) || true
+  [ -n "$out" ] || return 1
+  list=$(jq -r 'if type != "array" then error("not a vulnix report") else .[] end
+    | . as $p | .affected_by[] as $c | select((($p.cvssv3_basescore[$c]) // 0) >= 7)
+    | "\($c) \($p.pname)"' <<<"$out" 2>/dev/null) || return 1
+  sort -u <<<"$list"
 }
 
 head=$(git_ rev-parse HEAD)
@@ -318,7 +323,12 @@ for c in "${checks[@]}"; do
   [ "$base" = fail ] || exit 1
 done
 if [ ${#untested[@]} -gt 0 ]; then
-  fixes=$(comm -23 <(vulns "$current") <(vulns "$new"))
+  fixes=
+  if before=$(vulns "$current") && after=$(vulns "$new"); then
+    fixes=$(comm -23 <(printf '%s\n' "$before") <(printf '%s\n' "$after"))
+  else
+    echo "vulnix couldn't scan both systems; treating it as fixing nothing"
+  fi
   if [ -z "$fixes" ]; then
     note failed "VM test ${untested[*]} fails on main as well; holding $(describe) until main passes"
     exit 1
