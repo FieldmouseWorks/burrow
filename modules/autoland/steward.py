@@ -293,14 +293,13 @@ def codex_verdict(pr, head, since):
         if (r["author"] or {}).get("login") == CODEX and (r["commit"] or {}).get("oid") == head:
             clean = "find any major issues" in (r["body"] or "")
             events.append((ts(r["submittedAt"]), "clean" if clean else "findings"))
-    # A thumbs-up (clean) or eyes (working on it) on the PR or on a request.
+    # Eyes (working on it) on the PR or on a request. A thumbs-up names no
+    # commit (it can be the end of a review of the previous head), so only
+    # the SHA-bound summary and receipts above can say clean.
     for holder in [pr] + pr["comments"]["nodes"]:
         for x in (holder.get("reactions") or {}).get("nodes", []):
-            if (x["user"] or {}).get("login") == CODEX and ts(x["createdAt"]) >= since:
-                if x["content"] == "THUMBS_UP":
-                    events.append((ts(x["createdAt"]), "clean"))
-                elif x["content"] == "EYES":
-                    events.append((ts(x["createdAt"]), "running"))
+            if (x["user"] or {}).get("login") == CODEX and ts(x["createdAt"]) >= since and x["content"] == "EYES":
+                events.append((ts(x["createdAt"]), "running"))
     if not events:
         return "none", 0
     t, v = max(events)
