@@ -125,15 +125,21 @@ yourself. If you change code, open a draft PR whose description says
       continue
     fi
 
-    # Replies since the last turn continue the job.
+    # Replies since the last turn continue the job. Only once they're a minute
+    # old: closing with a comment posts the comment first, and the issue list
+    # can show an issue open for a few seconds after it closed. So the issue
+    # is asked for again too, before the reply is handed on.
     seen=$(cat "$d/seen")
-    comments=$(gh api "repos/$repo/issues/$n/comments" --paginate --slurp | jq 'add // []') || continue
+    comments=$(gh api "repos/$repo/issues/$n/comments" --paginate --slurp |
+      jq --arg before "$(date -u -d '1 minute ago' +%Y-%m-%dT%H:%M:%SZ)" 'add // [] | map(select(.created_at < $before))') || continue
     msg=$(jq -r --argjson seen "$seen" --arg mark "$MARK" --arg authors "$AUTHORS" '
       ($authors | split(" ")) as $ok
       | [.[] | select(.id > $seen and (.body | contains($mark) | not) and (.user.login as $u | $ok | index($u)))]
       | map("\(.user.login) replied on the issue:\n\n\(.body)") | join("\n\n")' <<<"$comments")
     newest=$(jq -r --argjson seen "$seen" 'map(.id) | max // $seen' <<<"$comments")
     if [ -n "$msg" ]; then
+      gh api "repos/$repo/issues/$n" | jq -e --arg label "$LABEL" '.state == "open" and any(.labels[]; .name == $label)' >/dev/null ||
+        continue
       if ! proj reply "$id" "$msg" >/dev/null 2>&1; then
         # No session to continue (the first turn never got going): start over.
         id=$(proj run "${vm[@]}" "$p" "$msg
