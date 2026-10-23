@@ -72,7 +72,7 @@ let
   calls = [ tools.proj tools.notify ];
   healthTool = script health ./updates/health.sh (with pkgs; [ coreutils gnugrep gnused gawk systemd ]);
   updateTool = script update ./updates/update.sh (
-    (with pkgs; [ coreutils git jq curl util-linux systemd gnugrep gnused gawk config.nix.package ])
+    (with pkgs; [ coreutils git jq curl util-linux systemd gnugrep gnused gawk vulnix config.nix.package ])
     ++ [ healthTool tools.switch tools.confirm ] ++ calls ++ lib.optional (tools ? boot) tools.boot
   );
   advisoryWatch = script "advisory-watch" ./updates/advisory-watch.sh (
@@ -215,7 +215,13 @@ in
       type = lib.types.listOf lib.types.str;
       default = [ ];
       example = [ "rehearsal" ];
-      description = "The flake's checks (VM tests) an update must pass before it goes live.";
+      description = ''
+        The flake's checks (VM tests) an update must pass before it goes live.
+        A test that fails and then passes on the same tree counts as flaky: the
+        update goes ahead and a Claude job fixes the test. One that fails on
+        main as well holds updates back unless they fix a CVSS 7+ vulnerability
+        in what runs now; those go live under the switch and health check.
+      '';
     };
 
     confirmWithin = lib.mkOption {
