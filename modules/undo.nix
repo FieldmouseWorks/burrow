@@ -29,6 +29,15 @@ in
   };
 
   config = lib.mkIf cfg.enable {
+    # With no datasets, `zfs list -r` would list every snapshot on the box and
+    # the prune would reach far beyond the guard's.
+    assertions = [
+      {
+        assertion = cfg.datasets != [ ];
+        message = "burrow.undo: set burrow.undo.datasets to the datasets the guard should snapshot.";
+      }
+    ];
+
     systemd.services.prune-pre-snapshots = {
       description = "Drop guard-hook snapshots older than ${toString cfg.keepDays} days";
       serviceConfig.Type = "oneshot";

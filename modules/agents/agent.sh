@@ -87,6 +87,8 @@ write_args() {
   local d=$root/$1 cid fwd i=0 tag
   cid=$(cat "$d/cid")
   if [ "$(cat "$d/net")" = open ]; then fwd=$AGENT_FWD_OPEN; else fwd=$AGENT_FWD_FILTERED; fi
+  # Fresh each start, so a token the host has since dropped doesn't linger.
+  rm -f "$d/claude-token"
   if [ -n "$AGENT_TOKEN_FILE" ] && [ -s "$AGENT_TOKEN_FILE" ]; then
     install -m 0400 -o microvm -g kvm "$AGENT_TOKEN_FILE" "$d/claude-token"
   fi
