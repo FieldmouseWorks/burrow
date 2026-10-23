@@ -38,9 +38,12 @@ in
 
     exclude = mkOption {
       type = types.listOf types.str;
-      default = config.burrow.autoland.exclude or [ ];
-      defaultText = lib.literalExpression "config.burrow.autoland.exclude";
-      description = "Repos to leave alone (OWNER/NAME globs).";
+      default = [ ];
+      description = ''
+        Repos to leave alone (OWNER/NAME globs). Not autoland's exclude: a repo
+        that lands its own PRs still keeps the house rules, and gets its
+        house PR as a draft to land its own way.
+      '';
     };
 
     dryRun = mkOption {
