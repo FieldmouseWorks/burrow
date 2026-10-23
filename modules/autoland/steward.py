@@ -164,7 +164,8 @@ def settle_repo(r, known):
     repo, rc = r["repo"], repo_cfg(r["repo"])
     st = load(f"repo-{repo.replace('/', '_')}.json", {})
     new = repo not in known
-    if NOW - st.get("settings", 0) < 86400 and not new:
+    # A repo seen for the first time has no state yet, so it's settled now.
+    if NOW - st.get("settings", 0) < 86400:
         return new
     info = gh("api", f"repos/{repo}")
     patch = {}
