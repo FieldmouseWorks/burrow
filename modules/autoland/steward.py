@@ -34,10 +34,12 @@ import time
 from datetime import datetime
 
 CFG = json.load(open(os.environ["AUTOLAND_CONFIG"]))
-STATE = CFG["stateDir"]
 CONTEXT = CFG["context"]
 CODEX = CFG["codexLogin"]
 DRY = len(sys.argv) > 1 and sys.argv[1] == "status"
+# A dry run keeps its own state, so its once-a-day reads (settings, branches)
+# stay once a day instead of running every pass on the owner's API quota.
+STATE = CFG["stateDir"] + ("/dry" if DRY else "")
 NOW = time.time()
 MIN = 60
 
@@ -100,12 +102,14 @@ def load(name, default):
 
 
 def save(name, value):
-    if DRY:
-        return
     path = os.path.join(STATE, name)
-    with open(path + ".tmp", "w") as f:
-        json.dump(value, f, indent=1)
-    os.replace(path + ".tmp", path)
+    try:
+        with open(path + ".tmp", "w") as f:
+            json.dump(value, f, indent=1)
+        os.replace(path + ".tmp", path)
+    except OSError:
+        if not DRY:  # `status` from a shell that can't write the state dir: fine
+            raise
 
 
 def repo_cfg(repo):
@@ -171,7 +175,7 @@ def settle_repo(r, known):
     info = gh("api", f"repos/{repo}")
     patch = {}
     for key in ("allow_auto_merge", "delete_branch_on_merge", "allow_squash_merge"):
-        if not info.get(key):
+        if not info.get(key) and not (key == "allow_auto_merge" and st.get("autoMergeRefused")):
             patch[key] = True
     if not r["private"]:
         sa = info.get("security_and_analysis") or {}
@@ -180,7 +184,12 @@ def settle_repo(r, known):
                 patch.setdefault("security_and_analysis", {})[key] = {"status": "enabled"}
     if patch:
         log(f"{repo}: settings {sorted(patch)}")
-        write("api", "-X", "PATCH", f"repos/{repo}", "--input", "-", input=json.dumps(patch), check=False)
+        after = write("api", "-X", "PATCH", f"repos/{repo}", "--input", "-", input=json.dumps(patch), check=False)
+        # A private repo on a free account takes allow_auto_merge without an
+        # error and leaves it off (the steward merges its PRs itself): once the
+        # PATCH went through and it's still off, stop asking every day.
+        if "allow_auto_merge" in patch and isinstance(after, dict) and not after.get("allow_auto_merge"):
+            st["autoMergeRefused"] = True
     write("api", "-X", "PUT", f"repos/{repo}/vulnerability-alerts", check=False)
 
     if CFG["rulesets"] and rc["ruleset"]:
@@ -233,21 +242,16 @@ query($owner: String!, $name: String!, $cursor: String) {
     pullRequests(states: OPEN, first: 30, after: $cursor, orderBy: {field: CREATED_AT, direction: ASC}) {
       pageInfo { hasNextPage endCursor }
       nodes {
-        id number title url isDraft isCrossRepository headRefName headRefOid
+        id number title url isDraft isCrossRepository headRefName headRefOid baseRefName
         createdAt updatedAt
         author { login }
         autoMergeRequest { enabledAt }
         labels(first: 100) { pageInfo { hasNextPage } nodes { name } }
         files(first: 100) { nodes { path } }
         changedFiles
-        reviewThreads(first: 100) { pageInfo { hasNextPage } nodes { isResolved comments(first: 1) { nodes { author { login } } } } }
+        reviewThreads(first: 100) { pageInfo { hasNextPage } nodes { isResolved } }
         reviews(last: 100) { pageInfo { hasPreviousPage } nodes { author { login } state body submittedAt commit { oid } } }
-        comments(last: 100) {
-          nodes {
-            databaseId body createdAt updatedAt author { login }
-            reactions(last: 20) { nodes { content createdAt user { login } } }
-          }
-        }
+        comments(last: 100) { nodes { databaseId body createdAt updatedAt author { login } } }
         reactions(last: 20) { nodes { content createdAt user { login } } }
         commits(last: 1) {
           nodes { commit { oid statusCheckRollup { contexts(first: 100) { pageInfo { hasNextPage } nodes {
@@ -296,10 +300,12 @@ def codex_verdict(pr, head, since):
         if (r["author"] or {}).get("login") == CODEX and (r["commit"] or {}).get("oid") == head:
             clean = "find any major issues" in (r["body"] or "")
             events.append((ts(r["submittedAt"]), "clean" if clean else "findings"))
-    # Eyes (working on it) on the PR or on a request. A thumbs-up names no
-    # commit (it can be the end of a review of the previous head), so only
-    # the SHA-bound summary and receipts above can say clean.
-    for holder in [pr] + pr["comments"]["nodes"]:
+    # Eyes (working on it) on the PR. A thumbs-up names no commit (it can be
+    # the end of a review of the previous head), so only the SHA-bound
+    # summary and receipts above can say clean. (Eyes on a request comment
+    # aren't read: the summary says "running" too, and reading every
+    # comment's reactions made each pass's query cost ~60 points a repo.)
+    for holder in [pr]:
         for x in (holder.get("reactions") or {}).get("nodes", []):
             if (x["user"] or {}).get("login") == CODEX and ts(x["createdAt"]) >= since and x["content"] == "EYES":
                 events.append((ts(x["createdAt"]), "running"))
@@ -366,10 +372,11 @@ PIN_LINE_RE = re.compile(r"^[+-]\s*(-\s+)?uses:\s*([^\s#@]+)@[^\s#]+(\s+#.*)?$")
 def pins_only(repo, pr):
     """True if every changed line in the PR's workflow files only repins an
     action: each removed `uses:` comes back with the same action at a new ref,
-    nothing added or dropped (no permissions, triggers or commands)."""
+    nothing added or dropped (no permissions, triggers or commands). None if
+    the diff couldn't be read."""
     diff = gh("pr", "diff", str(pr["number"]), "-R", repo, check=False)
     if not isinstance(diff, str) or not diff:
-        return False
+        return None
     path, changed = None, {}
     for x in diff.splitlines():
         if x.startswith("diff --git "):
@@ -395,7 +402,20 @@ def one_way(repo, pr, rc, dep=None):
     for f in pr["files"]["nodes"]:
         if dep and rc["actionBumps"] and ACTION_PINS_RE.match(f["path"]):
             if pins is None:
-                pins = pins_only(repo, pr)
+                # One diff per head and base, not one per pass (retargeting
+                # changes the diff); a failed read isn't kept, so the next
+                # pass reads it again.
+                cache = load("pins.json", {})
+                key = f"{repo}#{pr['number']}"
+                seen = [pr["headRefOid"], pr["baseRefName"]]
+                if (cache.get(key) or [None])[:2] == seen:
+                    pins = cache[key][2]
+                else:
+                    pins = pins_only(repo, pr)
+                    if pins is not None:
+                        cache[key] = seen + [pins]
+                        save("pins.json", cache)
+                    pins = bool(pins)
             if pins:
                 continue
         for pat in rc["oneWay"]:
@@ -721,15 +741,24 @@ def publish(digest):
         return
     title = "[autoland] PRs waiting for you"
     label = CFG["notify"]["label"]
-    found = gh("issue", "list", "-R", nrepo, "--label", label, "--state", "open", "--search",
-               f'"{title}" in:title', "--json", "number,body", check=False) or []
-    found = [i for i in found if i]
     prev = load("digest.json", {"lines": []})
+    # Unchanged since the last look, under an hour ago: nothing to read or write.
+    if prev.get("body") == body and NOW - prev.get("checked", 0) < 3600:
+        return
+    found = gh("issue", "list", "-R", nrepo, "--label", label, "--state", "open", "--search",
+               f'"{title}" in:title', "--json", "number,body", check=False)
+    if not isinstance(found, list):
+        return  # couldn't look (no quota?): try next pass, and don't open a second issue
+    found = [i for i in found if i]
     lines = sorted({line for _, line, _ in digest})
+    # Recorded as published only once every call went through, so a failed
+    # one is tried again next pass rather than an hour later.
+    ok = True
     if not digest:
         if found:
-            gh("issue", "close", str(found[0]["number"]), "-R", nrepo, "--comment", "Nothing waiting.", check=False)
-        save("digest.json", {"lines": []})
+            ok = gh("issue", "close", str(found[0]["number"]), "-R", nrepo, "--comment", "Nothing waiting.", check=False) is not None
+        if ok:
+            save("digest.json", {"lines": [], "body": body, "checked": NOW})
         return
     full = body + "\n\n_Kept up to date by autoland-steward on " + os.uname().nodename + "._"
     if not found:
@@ -737,21 +766,26 @@ def publish(digest):
         args = ["issue", "create", "-R", nrepo, "--label", label, "--title", title, "--body", full]
         if CFG["notify"]["assignee"]:
             args += ["--assignee", CFG["notify"]["assignee"]]
-        gh(*args, check=False)
+        ok = gh(*args, check=False) is not None
     else:
         num = str(found[0]["number"])
         if found[0]["body"] != full:
-            gh("issue", "edit", num, "-R", nrepo, "--body", full, check=False)
+            ok = gh("issue", "edit", num, "-R", nrepo, "--body", full, check=False) is not None
         added = [x for x in lines if x not in prev["lines"]]
-        if added:
-            gh("issue", "comment", num, "-R", nrepo, "--body", "New:\n" + "\n".join(f"- {x}" for x in added), check=False)
-    save("digest.json", {"lines": lines})
+        if added and ok:
+            ok = gh("issue", "comment", num, "-R", nrepo, "--body", "New:\n" + "\n".join(f"- {x}" for x in added), check=False) is not None
+    if ok:
+        save("digest.json", {"lines": lines, "body": body, "checked": NOW})
 
 
 # ---------------------------------------------------------------- main
 
 def main():
-    os.makedirs(STATE, exist_ok=True)
+    try:
+        os.makedirs(STATE, exist_ok=True)
+    except OSError:
+        if not DRY:
+            raise
     repos = discover()
     # Repos whose baseline job has started. A repo not in it gets one, a few
     # per pass so the first pass on a machine doesn't start them all at once.
