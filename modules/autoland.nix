@@ -18,7 +18,8 @@ let
 
   settings = {
     inherit (cfg) owners exclude context rulesets keepBranches baselineJobs baselinePerPass;
-    authors = cfg.authors ++ [ "dependabot" ];
+    # The bots' logins as GitHub's GraphQL API gives them (no "[bot]").
+    authors = cfg.authors ++ [ "dependabot" "renovate" ];
     codexLogin = "chatgpt-codex-connector";
     stateDir = "${stateDir}/autoland";
     projectsDir = config.burrow.projectsDir;
@@ -75,7 +76,7 @@ in
       example = [ "sam" ];
       description = ''
         Whose PRs merge themselves once settled: you, and so your Claude
-        sessions, which push as you. Dependabot is added. Anyone else's PR
+        sessions, which push as you. Dependabot and Renovate's app are added. Anyone else's PR
         gets reviewed the same way and then waits for you.
       '';
     };

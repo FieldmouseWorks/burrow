@@ -564,6 +564,11 @@ def handle(repo, pr, repo_info, digest):
             settle("pending", "Dependency update; changes requested by " + ", ".join(changes))
         else:
             settle("pending", f"Dependency update, CI {ci}")
+        # Renovate's stuck ones are renovate-sweep's; a Dependabot one that
+        # still hasn't merged after a day is the owner's to look at.
+        if (not gate and dep != "major" and not pr["headRefName"].startswith("renovate/")
+                and NOW - ts(pr["createdAt"]) > 86400):
+            digest.append(("Open over a day", line, f"Dependency update, CI {ci}"))
         save(key, st)
         return
 

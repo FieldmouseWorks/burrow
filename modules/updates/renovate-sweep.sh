@@ -38,7 +38,9 @@ for d in "$src"/*/; do
       major=$(jq -r '[.labels[]?.name] | index("major") != null' <<<"$pr")
       pending=$(jq -r '[.statusCheckRollup[]? | select((.context // .name) != $settled) | (.conclusion // .state // "" | ascii_upcase)
         | select(. == "" or . == "PENDING" or . == "EXPECTED")] | length' --arg settled "$SETTLED" <<<"$pr")
-      if [ "$major" = true ] && [ "$red" -eq 0 ] && [ "$pending" -eq 0 ]; then
+      # No checks at all isn't "passed CI": nothing has tested it yet.
+      checks=$(jq -r '[.statusCheckRollup[]? | select((.context // .name) != $settled)] | length' --arg settled "$SETTLED" <<<"$pr")
+      if [ "$major" = true ] && [ "$checks" -gt 0 ] && [ "$red" -eq 0 ] && [ "$pending" -eq 0 ]; then
         echo "- $title: https://github.com/$repo/pull/$n" >>"$ready"
       fi
       [ "$red" -gt 0 ] || [ "$major" = true ] || continue
