@@ -240,7 +240,9 @@ in
         default it merges on green CI, as other dependency updates do),
         ownerChecks (names of checks that only a person clears, such as a
         verdict from a test machine: a settled PR waiting on nothing else is
-        listed for you instead of waiting quietly for CI).
+        listed for you instead of waiting quietly for CI), keepBranches
+        (more branch globs the cleanup never touches in this repo, on top of
+        the machine's, for branches a repo keeps as evidence).
       '';
     };
   };

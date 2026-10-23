@@ -708,13 +708,15 @@ def sweep_branches(r, open_heads, digest):
             digest.append(("Stale branches (unmerged, no PR, 30+ days)", f"{repo}: `{b}`", ""))
         return
     stale = []
+    # The machine's globs, plus the repo's own (evidence branches it cites).
+    keep = CFG["keepBranches"] + repo_cfg(repo).get("keepBranches", [])
     names = (gh("api", "--paginate", f"repos/{repo}/branches?per_page=100", "--jq",
                 '.[] | select(.protected | not) | "\\(.name) \\(.commit.sha)"', check=False) or "")
     for x in str(names).split("\n"):
         name, _, sha = x.partition(" ")
         if not name or not sha or name == r["default"] or name in open_heads or DEP_RE.match(name):
             continue
-        if any(fnmatch.fnmatch(name, pat) for pat in CFG["keepBranches"]):
+        if any(fnmatch.fnmatch(name, pat) for pat in keep):
             continue
         # Compared at the tip just listed, and deleted only if it's still there.
         cmp = gh("api", f"repos/{repo}/compare/{r['default']}...{sha}", "--jq",
