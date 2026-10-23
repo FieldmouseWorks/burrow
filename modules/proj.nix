@@ -25,10 +25,12 @@ let
       SRC=${lib.escapeShellArg projectsDir}
       JOBS=${lib.escapeShellArg cfg.jobsDir}
       STATE=${lib.escapeShellArg "${config.burrow.stateDir}/proj-inbox"}
+      SCRATCH=${lib.escapeShellArg config.burrow.scratchDir}
       LABEL=${lib.escapeShellArg cfg.inbox.label}
       AUTHORS=${lib.escapeShellArg (lib.concatStringsSep " " cfg.inbox.authors)}
       VM=${if cfg.inbox.vm then "1" else "0"}
       HOST=${lib.escapeShellArg config.networking.hostName}
+      NOTIFY=${lib.escapeShellArg (lib.optionalString (config.burrow.tools ? notify) (lib.getExe config.burrow.tools.notify))}
     '' + builtins.readFile ./proj/inbox.sh;
   };
 in
