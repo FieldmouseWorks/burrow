@@ -636,7 +636,9 @@ def handle(repo, pr, repo_info, digest):
             log(f"{tag}: settled, landing")
             merge()
 
-    if NOW - ts(pr["createdAt"]) > 86400 and verdict != "clean" and not gate:
+    # Anything not merged after a day, Codex clean or not (a check that never
+    # reports keeps it pending). One-way PRs are listed above already.
+    if NOW - ts(pr["createdAt"]) > 86400 and not gate:
         digest.append(("Open over a day", line, our_status(pr)[1] or "unsettled"))
     save(key, st)
 
