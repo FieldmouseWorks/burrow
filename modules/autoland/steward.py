@@ -481,14 +481,15 @@ def handle(repo, pr, repo_info, digest):
         return True
 
     def ask_ds():
-        """DeepSeek on this head, now (at most 4 reviews a head, a few a pass)."""
+        """DeepSeek on this head, now (a few a pass). Its looks at one head
+        are bounded by `rounds`: each one with findings counts as a round."""
         dst = st["ds"]
         if DRY:
             log(f"  would: ask DeepSeek to review {tag} at {head[:7]}")
             return None
         if dst.get("fails", 0) >= 3 and C.NOW - dst.get("failedAt", 0) > 3600:
             dst["fails"] = 0  # an outage passes: three more tries an hour on
-        if (dst.get("runs", 0) >= 4 or dst.get("fails", 0) >= 3 or dst.get("tooBig")
+        if (dst.get("fails", 0) >= 3 or dst.get("tooBig")
                 or len(D.DS_CALLS) >= D.DS["perPass"]):
             return None
         try:
@@ -497,7 +498,6 @@ def handle(repo, pr, repo_info, digest):
             dst["fails"], dst["failedAt"] = dst.get("fails", 0) + 1, C.NOW
             log(f"{tag}: DeepSeek review failed ({dst['fails']}): {str(e)[:200]}")
             return None
-        dst["runs"] = dst.get("runs", 0) + (v is not None)
         return v
 
     # 1. The reviewers.

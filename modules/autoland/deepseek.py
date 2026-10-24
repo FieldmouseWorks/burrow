@@ -43,6 +43,29 @@ def deepseek_verdict(pr, head):
     return verdict, at, rounds
 
 
+QUOTED = r'"(?:[^"\\]|\\.)*"'
+
+
+def diff_paths(header):
+    """Both names in a `diff --git` line, as git quotes them when they hold
+    unusual characters ("a/caf\\303\\251.pem"), or None if it can't tell."""
+    m = re.fullmatch(rf"diff --git ({QUOTED}|a/.*?) ({QUOTED}|b/.*)", header)
+    if not m:
+        return None
+    names = []
+    for t, side in zip(m.groups(), "ab"):
+        if t.startswith('"'):
+            # C-style escapes, the octal ones bytes of UTF-8.
+            try:
+                t = t[1:-1].encode("latin-1", "backslashreplace").decode("unicode_escape").encode("latin-1").decode("utf-8", "replace")
+            except (UnicodeError, ValueError):
+                return None
+        if not t.startswith(side + "/"):
+            return None
+        names.append(t[2:])
+    return names
+
+
 def numbered(diff):
     """The diff, file by file, with each new-side line's number in front (the
     numbers findings point at), and the lines a review comment can go on."""
@@ -51,9 +74,11 @@ def numbered(diff):
     hidden = in_hunk = False
     for x in diff.splitlines():
         if x.startswith("diff --git "):
-            old, _, path = x.removeprefix("diff --git a/").partition(" b/")
-            # A rename out of a secrets path still carries its contents.
-            hidden, in_hunk = any(p.search(q) for p in skip for q in (old, path)), False
+            names = diff_paths(x)
+            # A rename out of a secrets path still carries its contents, and
+            # a header it can't read hides the file rather than risk it.
+            old, path = names or (x, x)
+            hidden, in_hunk = not names or any(p.search(q) for p in skip for q in (old, path)), False
             files[path] = set()
             out.append(f"\n=== {path}" + ("\n(contents not sent: a secrets path)" if hidden else ""))
         elif hidden or path is None:

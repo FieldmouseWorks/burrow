@@ -71,6 +71,13 @@ pre-approved.
   in one project at once. A server holds no session until one is asked for
   (`burrow.remoteControl.idleSession`), and all of them, with the proj jobs,
   share the memory cap `burrow.claude.memory` sets.
+- A switch never restarts a server, since that would cut off the session
+  confirming it. `claude-rc-scan` (every 5 minutes, and on a switch) restarts
+  any server still running an older `claude-rc-serve` (older Claude Code or
+  permission mode) once it holds no session (`tests/remote-control.nix`).
+- What the owner has approved in advance goes in `burrow.claude.standingAuthority`:
+  a section of the machine CLAUDE.md, so no session asks them to approve it
+  again just because the instruction came through a thread or an issue.
 - A thread holds one Remote Control session at a time. To give it more to do
   after it started, start Remote Control again from the same thread with new
   instructions; they reach the running session.
