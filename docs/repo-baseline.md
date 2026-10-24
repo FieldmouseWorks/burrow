@@ -3,7 +3,8 @@
 Every repo the autoland steward covers (`burrow.autoland.owners`) is held to
 this, new ones included. The steward keeps the **Settings** itself, every
 day. When it first sees a repo, a Claude job brings the **Files** up to it in
-one draft PR, which then goes through the same review loop as any other.
+one PR, opened ready for review, which then goes through the same review loop
+as any other.
 
 A Claude bringing a repo up to the baseline: add only what's missing, keep
 what the repo already does better (a stricter gate, its own license), and
@@ -21,10 +22,13 @@ change nothing else in the same PR.
   required. Repo admins can still merge past it from the PR page. A repo whose
   automation pushes to its default branch (`directPush`) gets only the first
   two. Existing rules stay; the ruleset only adds.
+- The `hold` and `needs-owner` labels (`burrow.autoland.labels`), which the
+  steward and its jobs put on PRs.
 
 ## The PR flow (the steward)
 
-1. PRs are opened as drafts.
+1. PRs are opened ready for review. A draft is work in progress: the steward
+   leaves it alone (a pending `review-settled`, nothing else) until it's ready.
 2. Codex reviews the head (the steward asks with `@codex review`). Where
    the machine turns on `burrow.autoland.deepseek`, DeepSeek reviews it too,
    in the background: the steward sends it the diff and the Code Review Rules
@@ -34,18 +38,33 @@ change nothing else in the same PR.
    after `handoffAfterMinutes`.
 4. The reviewers look again, until none of them finds anything on the exact head.
 5. With no thread open, no changes requested and CI green, the steward posts
-   `review-settled` and marks the PR ready. Codex takes marking ready as a
-   cue to review again, so the steward merges a pass later, once that look
-   has had its chance; the branch is deleted.
+   `review-settled` and merges it, `.github/` changes included; the branch is
+   deleted.
+6. A settled PR it won't land on its own word gets one Claude job a head
+   that judges it: one touching a one-way path (`burrow.autoland.oneWay`:
+   CODEOWNERS, secrets, migrations), one in a repo with no CI yet (the job
+   builds and tests it itself, unless the repo is set `requireCi = false`:
+   nothing to test), a dependency update touching a one-way path, and a
+   Dependabot major. The job lands anything a revert or a follow-up can undo,
+   and sends the owner only what can't be undone (data dropped or rewritten
+   for good, a secret exposed) or is theirs to decide. Its verdict is a
+   comment ending `<!-- autoland-judgment: land|owner SHA -->`, trusted only
+   for that exact head and only from the steward's own login.
+7. Checks that run on a machine rather than in CI (the repo names them in
+   `proofJobs`, with how to run each): once a settled PR waits on nothing
+   else, one Claude job a head runs them on that commit and records each
+   verdict. A red one goes to a fix job like any red CI.
 
-Waiting for the owner instead: PRs touching the one-way paths
-(`burrow.autoland.oneWay`: `.github/`, secrets, migrations), PRs past the
-round limit, major dependency updates, outside contributions, and PRs in a
-repo with no CI yet (unless it's set `requireCi = false`: nothing to test), and
-settled PRs waiting only on a check that a person clears, such as a test
-machine's verdict (the repo names it in `ownerChecks`). The steward marks a PR the owner merges ready, a pass before listing it, so the owner's merge doesn't set off a review of its own. They're listed in one issue. Dependency bots' minor updates skip review: CI is their
-review. That includes their bumps of the actions pinned in
-`.github/workflows/`, unless the repo sets `actionBumps = false`.
+Waiting for the owner instead, listed in one issue: what a judge job sent
+them (or anyone labelled `needs-owner`), PRs past the round limit, held
+Renovate majors, and outside contributions. Everything else is
+pre-approved: merges, GitHub settings changes and cleanup don't wait for
+the owner. Dependency bots' minor updates skip review: CI is their review,
+their bumps of the actions in `.github/workflows/` included. A Renovate
+major merges once its CI is green and renovate-sweep's job has given it an
+ok verdict for that head; a security fix merges on green CI alone, a major
+one too. An ok major in a repo the steward doesn't cover is listed for the
+owner, since nothing else merges it.
 
 ## Files (a Claude job, once)
 
@@ -83,11 +102,13 @@ over their guidance (and the house rule against naming models).
 ```markdown
 ## Pull requests
 
-Open PRs as drafts and leave them to the steward: it asks the review bot for a
-review, and once the bot finds nothing on your head, every review thread is
-resolved and CI is green, it marks the PR ready and merges it. Fix or answer every finding:
-push the fix and reply with the commit, or reply with why it's wrong, then
-resolve the thread. Don't merge or mark ready yourself.
+Open PRs ready for review, never as drafts, and leave them to the steward: it
+asks the review bot for a review, and once the bot finds nothing on your head,
+every review thread is resolved and CI is green, it merges the PR. Fix or
+answer every finding: push the fix and reply with the commit, or reply with
+why it's wrong, then resolve the thread. A PR touching a one-way path
+(secrets, migrations, CODEOWNERS) gets a judgment first: it lands unless it
+can't be undone or is the owner's to decide.
 
 ## Code Review Rules
 

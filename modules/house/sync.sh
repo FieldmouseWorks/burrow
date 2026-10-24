@@ -1,6 +1,6 @@
 # house-sync: keep every repo's copy of the house block (burrow's
 # house/rules.md) the same as burrow's. A repo whose block differs gets one
-# draft PR that rewrites only what's between the markers, from an ordinary
+# PR that rewrites only what's between the markers, from an ordinary
 # branch, so the steward reviews and lands it like any other PR. (RULES,
 # OWNERS, EXCLUDE, DRY_RUN and NOTIFY come from ../house.nix.)
 #
@@ -115,7 +115,7 @@ sync_repo() {
   gh api -X PUT "repos/$repo/contents/AGENTS.md" -f branch="$branch" -f sha="$fsha" \
     -f message="house: the house rules block, as burrow has it now" \
     -f content="$(base64 -w0 "$tmp/new")" >/dev/null || return 1
-  url=$(gh pr create -R "$repo" --draft --base "$base" --head "$branch" \
+  url=$(gh pr create -R "$repo" --base "$base" --head "$branch" \
     --title "house: the house rules block, as burrow has it now" \
     --body "burrow's house/rules.md changed (now $rev). This rewrites only what's between the house markers in AGENTS.md, so it matches. Change the rules in FieldmouseWorks/burrow, not here.") ||
     return 1

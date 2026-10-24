@@ -12,7 +12,8 @@ import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
-from common import CFG, DS, STATE, gh, load, log, repo_cfg, save, ts
+import common as C
+from common import CFG, DS, STATE, load, log, repo_cfg, save, ts
 
 # The steward posts DeepSeek's reviews under the user's own login, so they're
 # told apart by these markers: the review's names the commit and how many
@@ -21,14 +22,6 @@ DS_RE = re.compile(r"<!-- deepseek-review:v1 (\{.*?\}) -->")
 DS_FINDING = "<!-- deepseek-finding -->"
 QUEUE, DONE = "ds-queue", "ds-done"  # under STATE: asked for, and what went wrong
 STALE = 4 * 3600  # a queued review not back by then is taken as failed
-_me = []
-
-
-def me():
-    """The login the steward runs as (and posts DeepSeek's reviews as)."""
-    if not _me:
-        _me.append(gh("api", "user", "--jq", ".login"))
-    return _me[0]
 
 
 def deepseek_verdict(pr, head):
@@ -37,7 +30,7 @@ def deepseek_verdict(pr, head):
     verdict, at, rounds = "none", 0, 0
     for r in pr["reviews"]["nodes"]:
         m = DS_RE.search(r["body"] or "")
-        if not m or (r["author"] or {}).get("login") != me():
+        if not m or (r["author"] or {}).get("login") != C.me():
             continue
         try:
             found = int(json.loads(m.group(1)).get("findings", 0)) > 0
@@ -153,8 +146,8 @@ def numbered(diff):
 def review_rules(repo, base, paths):
     """The `## Code Review Rules` of the AGENTS.md nearest each changed file,
     as the base branch has them (a PR can't rewrite its own rules)."""
-    tree = gh("api", f"repos/{repo}/git/trees/{base}?recursive=1", "--jq",
-              '[.tree[] | select(.type == "blob") | .path | select(test("(^|/)AGENTS\\\\.md$"))]', check=False)
+    tree = C.gh("api", f"repos/{repo}/git/trees/{base}?recursive=1", "--jq",
+                '[.tree[] | select(.type == "blob") | .path | select(test("(^|/)AGENTS\\\\.md$"))]', check=False)
     have = set(tree) if isinstance(tree, list) else set()
     wanted = set()
     for p in paths:
@@ -167,7 +160,7 @@ def review_rules(repo, base, paths):
                 break
     rules = []
     for f in sorted(wanted):
-        text = gh("api", "-H", "Accept: application/vnd.github.raw", f"repos/{repo}/contents/{f}?ref={base}", check=False)
+        text = C.gh("api", "-H", "Accept: application/vnd.github.raw", f"repos/{repo}/contents/{f}?ref={base}", check=False)
         m = re.search(r"^## Code Review Rules\s*$(.*?)(?=^## |\Z)", text if isinstance(text, str) else "", re.M | re.S)
         if m:
             rules.append(f"From {f}:\n{m.group(1).strip()}")
@@ -176,21 +169,21 @@ def review_rules(repo, base, paths):
 
 def prior_findings(repo, n):
     """DeepSeek's earlier findings on this PR and the replies each got."""
-    out = gh("api", "--paginate", f"repos/{repo}/pulls/{n}/comments?per_page=100", "--jq",
-             ".[] | {id, in_reply_to_id, path, line, original_line, body, user: .user.login}", check=False)
+    out = C.gh("api", "--paginate", f"repos/{repo}/pulls/{n}/comments?per_page=100", "--jq",
+               ".[] | {id, in_reply_to_id, path, line, original_line, body, user: .user.login}", check=False)
     cs = []
     for x in (out if isinstance(out, str) else json.dumps(out) if out else "").splitlines():
         try:
             cs.append(json.loads(x))
         except ValueError:
             pass
-    roots = [c for c in cs if c["user"] == me() and DS_FINDING in (c["body"] or "")]
+    roots = [c for c in cs if c["user"] == C.me() and DS_FINDING in (c["body"] or "")]
     text = []
     for c in roots:
         # Only replies from those whose PRs it reviews: anyone else's text
         # never steers it.
         replies = [r for r in cs if r.get("in_reply_to_id") == c["id"]
-                   and (r["user"] in CFG["authors"] or r["user"] == me())]
+                   and (r["user"] in CFG["authors"] or r["user"] == C.me())]
         body = c["body"].replace(DS_FINDING, "").strip()
         at = c.get("line") or c.get("original_line")
         text.append(f"- {c['path']}{f':{at}' if at else ''}: {body}\n"
@@ -323,8 +316,8 @@ def run_deepseek(repo, pr):
     Returns "clean", "findings", or "tooBig" (nothing sent). Raises if it
     didn't happen."""
     n, head = pr["number"], pr["headRefOid"]
-    diff = gh("api", "-H", "Accept: application/vnd.github.diff",
-              f"repos/{repo}/compare/{pr['baseRefName']}...{head}", check=False)
+    diff = C.gh("api", "-H", "Accept: application/vnd.github.diff",
+                f"repos/{repo}/compare/{pr['baseRefName']}...{head}", check=False)
     if not isinstance(diff, str) or not diff.startswith("diff"):
         raise RuntimeError("couldn't read the diff")
     text, files = numbered(diff)
@@ -367,15 +360,15 @@ def run_deepseek(repo, pr):
     if loose:
         body += "\n\nNotes not on a changed line:\n" + "\n".join(loose)
     body += "\n\n<!-- deepseek-review:v1 " + json.dumps({"commit_sha": head, "findings": k}) + " -->"
-    posted = gh("api", "-X", "POST", f"repos/{repo}/pulls/{n}/reviews", "--input", "-",
-                input=json.dumps({"commit_id": head, "event": "COMMENT", "body": body, "comments": comments}), check=False)
+    posted = C.gh("api", "-X", "POST", f"repos/{repo}/pulls/{n}/reviews", "--input", "-",
+                  input=json.dumps({"commit_id": head, "event": "COMMENT", "body": body, "comments": comments}), check=False)
     if not isinstance(posted, dict):
         raise RuntimeError("GitHub didn't take the review")
     # A review can't hold file-level comments: they go on their own. The
     # review already counts them, so a lost one still keeps the PR unsettled.
     for c in whole_file:
-        if not isinstance(gh("api", "-X", "POST", f"repos/{repo}/pulls/{n}/comments", "--input", "-",
-                             input=json.dumps({**c, "commit_id": head, "subject_type": "file"}), check=False), dict):
+        if not isinstance(C.gh("api", "-X", "POST", f"repos/{repo}/pulls/{n}/comments", "--input", "-",
+                               input=json.dumps({**c, "commit_id": head, "subject_type": "file"}), check=False), dict):
             log(f"{repo}#{n}: couldn't post DeepSeek's finding on {c['path']}")
     log(f"{repo}#{n}: DeepSeek review posted, {k} finding(s)")
     return "findings" if k else "clean"
@@ -395,7 +388,7 @@ def review_queued(name):
         if not repo_cfg(repo)["deepseek"]:
             log(f"{repo}#{n}: the repo is off DeepSeek now, not reviewing it")
             return
-        cur = gh("api", f"repos/{repo}/pulls/{n}", "--jq", "{state, sha: .head.sha}")
+        cur = C.gh("api", f"repos/{repo}/pulls/{n}", "--jq", "{state, sha: .head.sha}")
         if cur.get("state") != "open" or cur.get("sha") != item["headRefOid"]:
             log(f"{repo}#{n}: moved on from {item['headRefOid'][:7]}, not reviewing it")
             return

@@ -80,8 +80,13 @@
         # proj's queue and memory caps, with a stand-in for Claude.
         proj = import ./tests/proj.nix { inherit self pkgs; };
         # The steward's DeepSeek reviewer, with stand-ins for gh and the API.
-        autoland = pkgs.runCommand "autoland-check" { nativeBuildInputs = [ pkgs.python3 ]; } ''
+        autoland = pkgs.runCommand "autoland-check" { nativeBuildInputs = [ pkgs.python3 pkgs.git ]; } ''
           python3 -I ${./tests/autoland.py} ${./modules/autoland}/steward.py
+          touch $out
+        '';
+        # Which Renovate PRs renovate-sweep hands over and lists, with stand-ins for gh and proj.
+        renovate-sweep = pkgs.runCommand "renovate-sweep-check" { nativeBuildInputs = [ pkgs.python3 pkgs.git pkgs.jq pkgs.gnused ]; } ''
+          python3 -I ${./tests/renovate-sweep.py} ${./modules/updates/renovate-sweep.sh}
           touch $out
         '';
         # Stale Remote Control servers catch up once idle, with a stand-in for Claude.
