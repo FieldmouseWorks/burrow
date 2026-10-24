@@ -169,16 +169,18 @@ fingerprint() { # repo n
   fi
   pr=$("$GH" api "repos/$1/pulls/$2") || return
   sha=$(jq -r .head.sha <<<"$pr")
-  reviews=$("$GH" api "repos/$1/pulls/$2/reviews?per_page=100") || return
-  runs=$("$GH" api "repos/$1/commits/$sha/check-runs?per_page=100") || return
+  # Every page: a review or check past the first hundred is news too.
+  reviews=$("$GH" api --paginate --slurp "repos/$1/pulls/$2/reviews?per_page=100") || return
+  runs=$("$GH" api --paginate --slurp "repos/$1/commits/$sha/check-runs?per_page=100") || return
   status=$("$GH" api "repos/$1/commits/$sha/status") || return
-  jq -nc --argjson pr "$pr" --argjson reviews "$reviews" --argjson runs "$runs" --argjson status "$status" '
+  jq -nc --argjson pr "$pr" --argjson reviews "$reviews" --argjson pages "$runs" --argjson status "$status" '
+    [$pages[].check_runs[]] as $runs |
     {state: $pr.state, merged: $pr.merged, head: $pr.head.sha,
-     comments: $pr.comments, review_comments: $pr.review_comments, reviews: ($reviews | length),
-     checks: (if any($runs.check_runs[]; .status != "completed")
+     comments: $pr.comments, review_comments: $pr.review_comments, reviews: ($reviews | add | length),
+     checks: (if any($runs[]; .status != "completed")
                  or ($status.total_count > 0 and $status.state == "pending")
               then "running"
-              else ([$runs.check_runs[] | "\(.name)=\(.conclusion)"]
+              else ([$runs[] | "\(.name)=\(.conclusion)"]
                     + (if $status.total_count > 0 then ["status=\($status.state)"] else [] end)
                     | sort | join(" "))
               end)}'

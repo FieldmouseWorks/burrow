@@ -30,11 +30,22 @@ let
     ${pkgs.jq}/bin/jq -nc --arg r "did $prompt" '{type: "result", session_id: "s", result: $r, is_error: false}'
   '';
   # GitHub, as far as proj-watch can tell: each endpoint's answer is a file in
-  # /tmp/gh that the test writes.
+  # /tmp/gh that the test writes. A file holding one JSON value per line is
+  # one page per line, which --slurp gathers into an array as gh does.
   gh = pkgs.writeShellScriptBin "gh" ''
     [ "$1" = api ] || exit 2
-    ep=''${2%%\?*}
-    cat "/tmp/gh/''${ep//\//_}"
+    shift
+    slurp=""
+    for a; do
+      case $a in
+        --slurp) slurp=1 ;;
+        --*) ;;
+        *) ep=''${a%%\?*} ;;
+      esac
+    done
+    f="/tmp/gh/''${ep//\//_}"
+    [ -e "$f" ] || exit 1
+    if [ -n "$slurp" ]; then ${pkgs.jq}/bin/jq -cs . "$f"; else cat "$f"; fi
   '';
 in
 pkgs.testers.runNixOSTest {
@@ -69,6 +80,7 @@ pkgs.testers.runNixOSTest {
   };
 
   testScript = ''
+    import json
     import time
 
     def proj(args):
@@ -153,6 +165,19 @@ pkgs.testers.runNixOSTest {
         prompt = machine.succeed(f"cat /data/dev/jobs/{e}/prompt.2")
         assert "o/r#5: checks" in prompt and "ci=success" in prompt, prompt
         assert "awaits" not in proj("status"), proj("status")
+
+    with subtest("a review past the first page is news"):
+        hundred = json.dumps([{"id": i} for i in range(100)])
+        github("repos/o/r/pulls/5/reviews", hundred)
+        github("repos/o/r/commits/abc/check-runs", '{"check_runs": [{"name": "ci", "status": "completed", "conclusion": "success"}]}')
+        e = proj('run web "await https://github.com/o/r/pull/5"')
+        machine.wait_until_succeeds(f"su - dev -c 'proj state {e}' | grep -x done", timeout=120)
+        machine.succeed(f"echo '[{{\"id\": 100}}]' >>/tmp/gh/repos_o_r_pulls_5_reviews")
+        proj("_watch")
+        machine.wait_until_succeeds(f"grep -x 2 /data/dev/jobs/{e}/turns", timeout=30)
+        prompt = machine.succeed(f"cat /data/dev/jobs/{e}/prompt.2")
+        assert "reviews 100 → 101" in prompt, prompt
+        github("repos/o/r/pulls/5/reviews", '[]')
 
     with subtest("a change after proj await but before the turn ends is news"):
         github("repos/o/r/commits/abc/check-runs", '{"check_runs": [{"name": "ci", "status": "in_progress", "conclusion": null}]}')
