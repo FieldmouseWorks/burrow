@@ -8,19 +8,27 @@ One pass (the timer runs it every couple of minutes):
      `baseline` ruleset); a repo seen for the first time also gets a Claude
      job that brings its files to docs/repo-baseline.md.
   2. For each open PR, work out where it stands and do the next thing:
-     ask Codex for a review, hand open findings or red CI to a Claude job,
+     ask Codex for a review (and queue one from DeepSeek, if it's on:
+     config.deepseek),
+     hand open findings or red CI to a Claude job,
      post the `review-settled` commit status, mark it ready and turn on
      auto-merge, or stop and list it for the owner.
   3. Once a day per repo, delete branches whose tip is already in the
      default branch, and list the stale unmerged ones.
   4. Keep one issue up to date with everything waiting for the owner.
 
-Everything talks to GitHub through `gh`, with the user's own login. Settings
+Everything talks to GitHub through `gh`, with the user's own login, so
+DeepSeek's reviews are posted under it too, each marked as DeepSeek's. Settings
 are in the JSON file $AUTOLAND_CONFIG (../autoland.nix). State is in
 config.stateDir: one JSON file per PR, one per repo.
 
 `autoland-steward status` prints what it thinks of every open PR without
 changing anything.
+
+`autoland-steward deepseek` works through the DeepSeek reviews the passes
+queued (config.stateDir/ds-queue), a few at once, and posts each one. A
+careful look takes DeepSeek many minutes, so it runs as its own service and
+no pass waits for it.
 """
 
 import fnmatch
@@ -30,44 +38,12 @@ import re
 import subprocess
 import sys
 import tempfile
-import time
-from datetime import datetime
 
-CFG = json.load(open(os.environ["AUTOLAND_CONFIG"]))
+from common import CFG, DRY, DS, MIN, NOW, STATE, gh, load, log, repo_cfg, save, ts, write
+from deepseek import DONE, QUEUE, STALE, deepseek_queue, deepseek_verdict
+
 CONTEXT = CFG["context"]
 CODEX = CFG["codexLogin"]
-DRY = len(sys.argv) > 1 and sys.argv[1] == "status"
-# A dry run keeps its own state, so its once-a-day reads (settings, branches)
-# stay once a day instead of running every pass on the owner's API quota.
-STATE = CFG["stateDir"] + ("/dry" if DRY else "")
-NOW = time.time()
-MIN = 60
-
-
-def log(*a):
-    print(*a, flush=True)
-
-
-def gh(*args, input=None, check=True):
-    """Run gh; return its stdout (parsed as JSON when it is JSON)."""
-    p = subprocess.run(["gh", *args], input=input, capture_output=True, text=True)
-    if p.returncode != 0:
-        if check:
-            raise RuntimeError(f"gh {' '.join(args[:3])}: {p.stderr.strip()[:300]}")
-        return None
-    out = p.stdout.strip()
-    try:
-        return json.loads(out) if out else ""
-    except ValueError:
-        return out
-
-
-def write(*args, **kw):
-    """A gh call that changes something: skipped (and logged) in status mode."""
-    if DRY:
-        log("  would:", "gh", " ".join(a if len(a) < 80 else a[:77] + "..." for a in args))
-        return None
-    return gh(*args, **kw)
 
 
 def graphql(query, **variables):
@@ -88,35 +64,6 @@ def open_prs(owner, name):
         if not page["pageInfo"]["hasNextPage"]:
             return info, prs
         cursor = page["pageInfo"]["endCursor"]
-
-
-def ts(s):
-    return datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp() if s else 0
-
-
-def load(name, default):
-    try:
-        return json.load(open(os.path.join(STATE, name)))
-    except (OSError, ValueError):
-        return default
-
-
-def save(name, value):
-    path = os.path.join(STATE, name)
-    try:
-        with open(path + ".tmp", "w") as f:
-            json.dump(value, f, indent=1)
-        os.replace(path + ".tmp", path)
-    except OSError:
-        if not DRY:  # `status` from a shell that can't write the state dir: fine
-            raise
-
-
-def repo_cfg(repo):
-    """The defaults, with this repo's overrides from config.repos on top."""
-    c = dict(CFG["defaults"])
-    c.update(CFG["repos"].get(repo, {}))
-    return c
 
 
 # ---------------------------------------------------------------- repos
@@ -498,10 +445,11 @@ def fix_task(repo, pr, why):
     return (
         f"PR #{pr['number']} in {repo} (\"{pr['title']}\", branch {pr['headRefName']}) isn't settled: {why}. "
         "Settle it. Check out the branch in your own worktree (git worktree add) under the scratch dir, never in this checkout's main tree. "
-        "For every unresolved review thread (Codex's or anyone's): either fix it, push, and reply on the thread with the commit, "
+        "For every unresolved review thread (Codex's, DeepSeek's, which the steward posts under the owner's login marked DeepSeek, or anyone's): "
+        "either fix it, push, and reply on the thread with the commit, "
         "or reply with why it's wrong or out of scope; then resolve the thread (gh api graphql, resolveReviewThread). "
         "If CI is red, read the failing job's log, fix the cause and push. Run the repo's tests before you push. "
-        "Don't ask Codex for a review, don't mark the PR ready and don't merge: the steward does those once you're done. "
+        "Don't ask for a review, don't mark the PR ready and don't merge: the steward does those once you're done. "
         "If something needs the owner (a decision, a secret, a one-way change), comment on the PR saying exactly what, "
         f"add the {CFG['labels']['owner']} label, and stop."
     )
@@ -513,8 +461,10 @@ def handle(repo, pr, repo_info, digest):
     key = f"pr-{repo.replace('/', '_')}-{n}.json"
     st = load(key, {})
     if st.get("head") != head:
-        st.update(head=head, seen=NOW, asked=[], handed=None, landFails=0)
+        st.update(head=head, seen=NOW, asked=[], handed=None, landFails=0, ds={})
     st.setdefault("base", 0)
+    st.setdefault("dsBase", 0)
+    st.setdefault("ds", {})
     labels = {x["name"] for x in pr["labels"]["nodes"]}
     author = (pr["author"] or {}).get("login", "")
     age = NOW - st["seen"]
@@ -656,12 +606,19 @@ def handle(repo, pr, repo_info, digest):
         return
 
     verdict, vtime = codex_verdict(pr, head, st["seen"])
-    rounds = sum(1 for r in pr["reviews"]["nodes"] if (r["author"] or {}).get("login") == CODEX) - st["base"]
+    # DeepSeek, where it's on, is a second reviewer: both have to find nothing.
+    use_ds = DS["enable"] and rc["deepseek"]
+    dsv, dstime, ds_rounds = deepseek_verdict(pr, head) if use_ds else ("clean", 0, 0)
+    codex_rounds = sum(1 for r in pr["reviews"]["nodes"] if (r["author"] or {}).get("login") == CODEX) - st["base"]
+    ds_rounds -= st["dsBase"]
     if st.get("escalated") and CFG["labels"]["owner"] not in labels:
         # The owner took the label off: another full set of rounds.
-        st["base"] += rounds
-        rounds = 0
+        st["base"] += codex_rounds
+        st["dsBase"] += ds_rounds
+        codex_rounds = ds_rounds = 0
         st["escalated"] = False
+    rounds = max(codex_rounds, ds_rounds)
+    reviewers = "Codex and DeepSeek" if use_ds else "Codex"
     last_ask = max(st["asked"]) if st["asked"] else 0
 
     def ask(why):
@@ -672,43 +629,108 @@ def handle(repo, pr, repo_info, digest):
         st["asked"].append(NOW)
         return True
 
-    # 1. Codex.
-    if rounds >= rc["rounds"] and verdict != "clean":
+    # DeepSeek's reviews are queued for its own service (`deepseek` below),
+    # which posts each one; this pass only reads what came back. One is on
+    # its way while it's queued and no review of this head is newer.
+    dst = st["ds"]
+    item = f"{key[:-5]}-{head[:12]}.json"
+    if use_ds:
+        back = load(f"{DONE}/{item}", None)
+        if back and not DRY:
+            os.remove(os.path.join(STATE, DONE, item))
+            dst.pop("queued", None)
+            if back.get("result") == "tooBig":
+                dst["tooBig"] = True
+            else:  # the API, the network, its JSON: tried again next pass
+                dst["fails"], dst["failedAt"] = dst.get("fails", 0) + 1, NOW
+                log(f"{tag}: DeepSeek review failed ({dst['fails']}): {back.get('error', '')[:200]}")
+        if dst.get("queued") and dstime >= dst["queued"]:
+            dst.pop("queued")  # it's back
+        elif dst.get("queued") and NOW - dst["queued"] > STALE:
+            dst.pop("queued")
+            dst["fails"], dst["failedAt"] = dst.get("fails", 0) + 1, NOW
+            log(f"{tag}: the DeepSeek review queued over {STALE // 3600}h ago never came back")
+    ds_busy = bool(dst.get("queued"))
+
+    def ask_ds():
+        """Queue DeepSeek on this head, unless it's already on its way. Its
+        looks at one head are bounded by `rounds`: each one with findings
+        counts as a round."""
+        if ds_busy:
+            return
+        if DRY:
+            log(f"  would: ask DeepSeek to review {tag} at {head[:7]}")
+            return
+        if dst.get("fails", 0) >= 3 and NOW - dst.get("failedAt", 0) > 3600:
+            dst["fails"] = 0  # an outage passes: three more tries an hour on
+        if dst.get("fails", 0) >= 3 or dst.get("tooBig"):
+            return
+        log(f"{tag}: queueing a DeepSeek review of {head[:7]}")
+        save(f"{QUEUE}/{item}", {"repo": repo, "number": n, "headRefOid": head,
+                                 "baseRefName": pr["baseRefName"], "title": pr["title"], "at": NOW})
+        dst["queued"] = NOW
+
+    # 1. The reviewers.
+    if rounds >= rc["rounds"] and not (verdict == "clean" and dsv == "clean"):
         if not st.get("escalated"):
             write("pr", "edit", str(n), "-R", repo, "--add-label", CFG["labels"]["owner"], check=False)
-            comment(repo, n, f"{rounds} Codex rounds and it still has findings, so this stops here and waits for "
+            comment(repo, n, f"{rounds} review rounds and there are still findings, so this stops here and waits for "
                              f"{CFG['owner']}. Taking the `{CFG['labels']['owner']}` label off gives it another {rc['rounds']}.")
             st["escalated"] = True
-        settle("pending", f"Still unsettled after {rounds} Codex rounds: {CFG['owner']} decides", "Unsettled after the round limit")
+        settle("pending", f"Still unsettled after {rounds} review rounds: {CFG['owner']} decides", "Unsettled after the round limit")
         save(key, st)
         return
 
     quiet = age >= rc["settleDelay"] * MIN
+    waiting = []
     if verdict in ("none", "failed") or (verdict == "running" and NOW - vtime > rc["codexTimeout"] * MIN):
         if quiet and (not last_ask or NOW - last_ask > rc["codexTimeout"] * MIN):
             ask("Review this head." if not last_ask else "Retrying: the last request got no result.")
         if len(st["asked"]) >= 2 and NOW - last_ask > rc["codexTimeout"] * MIN:
             digest.append(("Codex isn't answering", line, f"asked {len(st['asked'])} times on {head[:7]}"))
-        settle("pending", "Waiting for Codex's review of this commit")
+        waiting.append("Waiting for Codex's review of this commit")
     elif verdict == "running":
-        settle("pending", "Codex is reviewing this commit")
-    elif verdict == "findings" or open_threads or changes:
-        what = []
-        if open_threads:
-            what.append(f"{open_threads} open review thread{'s' * (open_threads > 1)}")
-        if changes:
-            what.append("changes requested by " + ", ".join(changes))
-        if verdict == "findings" and not open_threads and not changes:
-            # Every finding answered without a new commit: Codex looks again.
-            if vtime > last_ask and NOW - vtime > rc["settleDelay"] * MIN:
+        waiting.append("Codex is reviewing this commit")
+    # DeepSeek is queued in the same pass as Codex is asked.
+    if dsv == "none":
+        if quiet:
+            ask_ds()
+        waiting.append("DeepSeek is reviewing this commit" if dst.get("queued") else "Waiting for DeepSeek's review of this commit")
+    # A first look or a second one that can't happen: the owner hears either way.
+    ds_stuck = None
+    if use_ds and dst.get("tooBig"):
+        ds_stuck = f"too big for DeepSeek (over {DS['maxDiffChars']} characters of diff)"
+        digest.append(("Too big for DeepSeek to review", line, f"over {DS['maxDiffChars']} characters of diff"))
+    elif use_ds and dst.get("fails", 0) >= 3:
+        ds_stuck = f"DeepSeek failed {dst['fails']} times on {head[:7]}"
+        digest.append(("DeepSeek couldn't review it", line, f"failed {dst['fails']} times on {head[:7]} (journalctl -u autoland-deepseek)"))
+
+    what = []
+    if open_threads:
+        what.append(f"{open_threads} open review thread{'s' * (open_threads > 1)}")
+    if changes:
+        what.append("changes requested by " + ", ".join(changes))
+    idle = NOW - max(ts(pr["updatedAt"]), st["seen"])
+    if waiting:
+        settle("pending", "; ".join(waiting + what))
+        # One reviewer's threads needn't wait for the other to finish.
+        if what and idle > rc["handoffAfter"] * MIN and st.get("handed") != head and not swept:
+            hand_off(", ".join(what))
+    elif "findings" in (verdict, dsv) or open_threads or changes:
+        if not open_threads and not changes:
+            # Every finding answered without a new commit: the reviewers that
+            # had findings look again.
+            if verdict == "findings" and vtime > last_ask and NOW - vtime > rc["settleDelay"] * MIN:
                 ask("Every finding is answered and resolved; review again.")
-            settle("pending", f"Findings answered; Codex round {rounds + 1} next")
+            if dsv == "findings" and NOW - dstime > rc["settleDelay"] * MIN:
+                ask_ds()
+            settle("pending", f"Findings answered; {ds_stuck}" if dsv == "findings" and ds_stuck
+                   else f"Findings answered; review round {rounds + 1} next")
         else:
             settle("pending", f"Round {rounds}: " + ", ".join(what))
-            idle = NOW - max(ts(pr["updatedAt"]), st["seen"])
             if idle > rc["handoffAfter"] * MIN and st.get("handed") != head and not swept:
                 hand_off(", ".join(what))
-    # 2. Codex is clean on this head and nothing is open: CI, then land.
+    # 2. The reviewers are clean on this head and nothing is open: CI, then land.
     elif ci == "red":
         settle("pending", "CI is red: " + ", ".join(ci_names)[:100])
         idle = NOW - max(ts(pr["updatedAt"]), st["seen"])
@@ -730,7 +752,7 @@ def handle(repo, pr, repo_info, digest):
     elif gate:
         owner_merges(f"Settled; {CFG['owner']} merges it (touches {gate})")
     else:
-        settle("success", "Codex found nothing on this commit, every thread is resolved, CI is green")
+        settle("success", f"{reviewers} found nothing on this commit, every thread is resolved, CI is green")
         if st.get("landed") != head:
             if readied():
                 log(f"{tag}: settled, landing")
@@ -738,7 +760,7 @@ def handle(repo, pr, repo_info, digest):
         else:
             update_branch()
 
-    # Anything not merged after a day, Codex clean or not (a check that never
+    # Anything not merged after a day, reviewed clean or not (a check that never
     # reports keeps it pending). One-way PRs, and those already listed for
     # the owner (no CI), are left out.
     if NOW - ts(pr["createdAt"]) > 86400 and not gate and not any(x[1] == line for x in digest):
@@ -851,8 +873,14 @@ def publish(digest):
 # ---------------------------------------------------------------- main
 
 def main():
+    if sys.argv[1:] == ["deepseek"]:
+        for d in (QUEUE, DONE):
+            os.makedirs(os.path.join(STATE, d), exist_ok=True)
+        deepseek_queue()
+        return
     try:
-        os.makedirs(STATE, exist_ok=True)
+        for d in ("", QUEUE, DONE):
+            os.makedirs(os.path.join(STATE, d), exist_ok=True)
     except OSError:
         if not DRY:
             raise
