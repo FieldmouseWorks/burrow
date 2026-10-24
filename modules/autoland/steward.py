@@ -630,7 +630,7 @@ def numbered(diff):
                 out.append(x)
             elif not in_hunk:
                 # The file's header: only the lines that say what happened to it.
-                if x.startswith(("new file", "deleted file", "rename ", "Binary files")):
+                if x.startswith(("new file", "deleted file", "old mode", "new mode", "rename ", "copy ", "Binary files")):
                     out.append(x)
             elif x.startswith("-"):
                 out.append(f"{'':>6} {x}")

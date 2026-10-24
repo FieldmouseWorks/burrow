@@ -131,6 +131,9 @@ diff --git a/my notes.txt b/my notes.txt
 @@ -1 +1 @@
 -old
 +new
+diff --git a/start.sh b/start.sh
+old mode 100755
+new mode 100644
 diff --git a/gone.txt b/gone.txt
 deleted file mode 100644
 --- a/gone.txt
@@ -186,6 +189,8 @@ assert "UNPARSEDSECRET" not in text
 assert S.header_pairs("diff --git a/foo b/.env b/config.txt") == [("foo", ".env b/config.txt"), ("foo b/.env", "config.txt")]
 assert files["config.txt"] == set() and "SPACEDSECRET" not in text
 assert files["my notes.txt"] == {1} and "+new" in text
+# A mode change is all a diff may say about a file: it's sent.
+assert files["start.sh"] == set() and "old mode 100755\nnew mode 100644" in text
 assert "---- a removed line that looks like a header" in text
 assert files["gone.txt"] == set()
 
