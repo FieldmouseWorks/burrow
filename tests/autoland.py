@@ -5,7 +5,9 @@ DeepSeek reviewer, and handle() end to end on PRs shaped like its query's.
   nix build .#checks.x86_64-linux.autoland
 """
 
+import contextlib
 import http.server
+import io
 import json
 import os
 import shutil
@@ -179,6 +181,7 @@ def gh(*args, input=None, check=True):
     return ""
 
 
+real_gh = C.gh
 C.gh = gh
 head = "a" * 40
 
@@ -287,6 +290,19 @@ except RuntimeError as e:
     assert "thought past 1000 tokens at high" in str(e) and len(REQS) == n + 2
 ANSWER["long"] = ()
 
+# A gh call allowed to fail still says why in the journal.
+fake = os.path.join(tmp, "bin")
+os.makedirs(fake)
+with open(f"{fake}/gh", "w") as f:
+    f.write("#!/bin/sh\necho \"'needs-owner' not found\" >&2\nexit 1\n")
+os.chmod(f"{fake}/gh", 0o755)
+path, os.environ["PATH"] = os.environ["PATH"], fake + os.pathsep + os.environ["PATH"]
+out = io.StringIO()
+with contextlib.redirect_stdout(out):
+    assert real_gh("pr", "edit", "5", "--add-label", "needs-owner", check=False) is None
+os.environ["PATH"] = path
+assert "gh pr edit 5: 'needs-owner' not found" in out.getvalue(), out.getvalue()
+
 # ---------------------------------------------------------------- handle()
 
 WROTE, RUNS, JOBS, RESULT = [], [], [], {"v": "clean"}
@@ -309,9 +325,12 @@ def gh_stub(*a, **k):
 C.gh = gh_stub
 
 
+FAIL = []  # writes that fail (gh's None), by a piece of their arguments
+
+
 def write(*a, **k):
     WROTE.append(" ".join(a))
-    return {}
+    return None if any(f in " ".join(a) for f in FAIL) else {}
 
 
 def run_deepseek(repo, pr):
@@ -492,6 +511,24 @@ status, digest = run(clean(labels=["needs-owner"], **mig), 700)
 assert JOBS == [] and not merged() and [x[0] for x in digest] == ["Labelled needs-owner"], digest
 status, digest = run(clean(labels=["needs-owner"]), 800)
 assert JOBS == [] and not merged() and digest, digest
+
+# Past the round limit: the owner's label, then one comment. A label that
+# won't go on (none in the repo) isn't taken as on: no comment, and the next
+# pass tries again rather than starting the rounds over.
+fresh_pr_state()
+codex_said = {"author": {"login": "chatgpt-codex-connector"}, "state": "COMMENTED", "submittedAt": T0,
+              "commit": {"oid": head}, "body": "Here are some suggestions."}
+stuck = {"reviews": [codex_said] * 5, "threads": [False]}
+FAIL.append("--add-label")
+for t in (700, 800):
+    status, _ = run(mkpr(**stuck), t)
+    assert "--add-label needs-owner" in " ".join(WROTE) and not any("/comments" in x for x in WROTE), WROTE
+    assert "Unsettled after the round limit" not in status and "Still unsettled" in status, status
+FAIL.clear()
+status, _ = run(mkpr(**stuck), 900)
+assert any("/comments" in x for x in WROTE) and JOBS == [], WROTE
+status, _ = run(mkpr(**stuck), 1000)
+assert not any("--add-label" in x for x in WROTE), "labelled once"
 
 # No CI at all: the judge builds and tests it itself.
 fresh_pr_state()
