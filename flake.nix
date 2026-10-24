@@ -81,7 +81,9 @@
         proj = import ./tests/proj.nix { inherit self pkgs; };
         # The steward and its reviewers, with stand-ins for gh, git's remote and the agents.
         autoland = pkgs.runCommand "autoland-check" { nativeBuildInputs = [ pkgs.python3 pkgs.git pkgs.gnutar ]; } ''
-          python3 -I ${./tests/autoland.py} ${./modules/autoland}/steward.py
+          for t in review post handle; do
+            python3 -I ${./tests/autoland}/$t.py ${./modules/autoland}/steward.py
+          done
           touch $out
         '';
         # Which Renovate PRs renovate-sweep hands over and lists, with stand-ins for gh and proj.

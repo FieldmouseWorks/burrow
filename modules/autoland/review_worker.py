@@ -73,7 +73,7 @@ def answer_of(text):
     try:
         return json.loads(text[text.index("{"):text.rindex("}") + 1])
     except ValueError:
-        raise RuntimeError(f"no JSON in its answer: {text[-200:]!r}")
+        raise RuntimeError(f"no JSON in its answer: {tail(text, 200)!r}")
 
 
 def wait_for(text):
@@ -130,7 +130,7 @@ def codex(snap, prompt):
         if p.returncode != 0 and re.search(r"not logged in|log ?in again|401|unauthorized|refresh token", said, re.I):
             raise Out("it isn't logged in (autoland-codex-login on the machine)", time.time() + 3600)
         if p.returncode != 0:
-            raise RuntimeError(f"codex exited {p.returncode}: {said.strip()[-300:]}")
+            raise RuntimeError(f"codex exited {p.returncode}: {tail(said.strip(), 300)}")
         with open(f"{t}/answer.json") as f:
             return answer_of(f.read())
 
@@ -164,7 +164,7 @@ def deepseek(snap, prompt):
                 raise Out("its API key was turned down or its balance is spent", time.time() + 3600)
             try:
                 if p.returncode != 0:
-                    raise RuntimeError(f"dsh exited {p.returncode}: {said[-300:]}")
+                    raise RuntimeError(f"dsh exited {p.returncode}: {tail(said, 300)}")
                 return answer_of(p.stdout)
             except RuntimeError:
                 # At max effort it can think past its budget without
@@ -208,11 +208,19 @@ def secrets():
     return found
 
 
-def scrub(answer):
-    text = json.dumps(answer)
+def scrub(x):
+    """x (an answer, or anything said about one) with those keys taken out:
+    whatever an agent says goes through here before it's logged or kept."""
+    text = json.dumps(x)
     for s in secrets():
         text = text.replace(json.dumps(s)[1:-1], "[redacted]")
     return json.loads(text)
+
+
+def tail(text, n):
+    """The last n characters of what an agent said, its keys taken out
+    first so none is cut in half."""
+    return scrub(text)[-n:]
 
 
 def review(name):
@@ -235,11 +243,11 @@ def review(name):
         log(f"{item['repo']}#{item['number']}: {V.NAMES[r]} is reviewing {item['headRefOid'][:7]}")
         out = {"result": "review", "answer": scrub(AGENTS[r](snap, prompt))}
     except Out as e:
-        log(f"{item['repo']}#{item['number']}: {V.NAMES[item['reviewer']]} is out: {e}")
-        out = {"result": "out", "why": str(e), "until": e.until}
+        out = {"result": "out", "why": scrub(str(e)), "until": e.until}
+        log(f"{item['repo']}#{item['number']}: {V.NAMES[item['reviewer']]} is out: {out['why']}")
     except Exception as e:
-        log(f"{(item or {}).get('repo')}#{(item or {}).get('number')}: review failed: {str(e)[:300]}")
-        out = {"result": "error", "error": str(e)[:300]}
+        out = {"result": "error", "error": scrub(str(e))[:300]}
+        log(f"{(item or {}).get('repo')}#{(item or {}).get('number')}: review failed: {out['error']}")
     save(f"{V.DONE}/{name}", {**out, "at": time.time()})
     try:
         os.remove(os.path.join(STATE, V.QUEUE, name))
