@@ -139,19 +139,23 @@ for repo in "${!project[@]}"; do
       if post "$repo" "$n" "On it: \`proj\` job \`$id\` in $p."; then rm -f "$d/unannounced"; else miss "$repo"; fi
     fi
     st=$(proj state "$id")
-    case $st in queued | running) continue ;; esac
     turns=$(cat "$JOBS/$id/turns" 2>/dev/null || echo 0)
 
-    # A turn that finished: its answer goes to the issue.
-    if [ "$turns" -gt "$(cat "$d/answered")" ]; then
-      case $st in
-        done) body=$(proj log "$id") ;;
-        *) body="The job ended without an answer ($st). \`proj log $id --raw\` on $HOST has what it did." ;;
-      esac
+    # Every turn that has finished gets its answer on the issue, in order:
+    # all but the one queued or running now. A job that proj _watch resumed
+    # before this pass still has the answer it gave before posted.
+    case $st in queued | running) last=$((turns - 1)) ;; *) last=$turns ;; esac
+    k=$(cat "$d/answered")
+    while [ "$k" -lt "$last" ]; do
+      k=$((k + 1))
+      if [ "$k" = "$turns" ]; then why=" ($st)"; else why=''; fi
+      body=$(proj log "$id" --turn "$k") ||
+        body="The job's turn $k ended without an answer$why. \`proj log $id --turn $k --raw\` on $HOST has what it did."
       # GitHub takes 65536 characters a comment.
-      post "$repo" "$n" "${body:0:60000}" || { miss "$repo"; continue; }
-      echo "$turns" >"$d/answered"
-    fi
+      post "$repo" "$n" "${body:0:60000}" || { miss "$repo"; continue 2; }
+      echo "$k" >"$d/answered"
+    done
+    case $st in queued | running) continue ;; esac
 
     # Closed, or the label taken off: done with it.
     if ! jq -e --argjson n "$n" 'any(.[]; .number == $n)' <<<"$open" >/dev/null; then

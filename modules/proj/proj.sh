@@ -8,7 +8,8 @@
 #   proj run --first PROJECT "task"  ahead of the line (someone is waiting on it)
 #   proj reply [--first] ID "message"  continue that job's conversation
 #   proj status                 recent jobs and their state
-#   proj log ID                 the job's latest answer (--raw for the full stream)
+#   proj log ID [--turn N]      the job's latest answer, or turn N's (--raw for
+#                               the full stream); fails when there's none
 #   proj state ID               queued, running, done, error or failed
 #   proj stop ID                stop a running job
 #   proj list                   projects you can run jobs in
@@ -161,29 +162,31 @@ target() {
 # so a run of them wakes the job once. REST, not GraphQL, whose budget is
 # shared with everything else under the login.
 fingerprint() { # repo n
-  local issue pr sha reviews runs status
+  local issue pr sha reviews status checks
   issue=$("$GH" api "repos/$1/issues/$2") || return
   if ! jq -e 'has("pull_request")' <<<"$issue" >/dev/null; then
     jq -c '{state, comments}' <<<"$issue"
     return
   fi
-  pr=$("$GH" api "repos/$1/pulls/$2") || return
-  sha=$(jq -r .head.sha <<<"$pr")
+  # Each answer is cut down to what's compared before it's passed on: a whole
+  # one (a long PR body, hundreds of reviews) can be past what one argument
+  # may hold.
+  pr=$("$GH" api "repos/$1/pulls/$2" | jq -c '{state, merged, head: .head.sha, comments, review_comments}') || return
+  sha=$(jq -r .head <<<"$pr")
   # Every page: a review or check past the first hundred is news too.
-  reviews=$("$GH" api --paginate --slurp "repos/$1/pulls/$2/reviews?per_page=100") || return
-  runs=$("$GH" api --paginate --slurp "repos/$1/commits/$sha/check-runs?per_page=100") || return
-  status=$("$GH" api "repos/$1/commits/$sha/status") || return
-  jq -nc --argjson pr "$pr" --argjson reviews "$reviews" --argjson pages "$runs" --argjson status "$status" '
-    [$pages[].check_runs[]] as $runs |
-    {state: $pr.state, merged: $pr.merged, head: $pr.head.sha,
-     comments: $pr.comments, review_comments: $pr.review_comments, reviews: ($reviews | add | length),
-     checks: (if any($runs[]; .status != "completed")
-                 or ($status.total_count > 0 and $status.state == "pending")
-              then "running"
-              else ([$runs[] | "\(.name)=\(.conclusion)"]
-                    + (if $status.total_count > 0 then ["status=\($status.state)"] else [] end)
-                    | sort | join(" "))
-              end)}'
+  reviews=$("$GH" api --paginate --slurp "repos/$1/pulls/$2/reviews?per_page=100" | jq 'add | length') || return
+  status=$("$GH" api "repos/$1/commits/$sha/status" | jq -c '{total_count, state}') || return
+  checks=$("$GH" api --paginate --slurp "repos/$1/commits/$sha/check-runs?per_page=100" |
+    jq -r --argjson status "$status" '
+      [.[].check_runs[]] as $runs |
+      if any($runs[]; .status != "completed")
+         or ($status.total_count > 0 and $status.state == "pending")
+      then "running"
+      else ([$runs[] | "\(.name)=\(.conclusion)"]
+            + (if $status.total_count > 0 then ["status=\($status.state)"] else [] end)
+            | sort | join(" "))
+      end') || return
+  jq -c --argjson reviews "$reviews" --arg checks "$checks" '. + {reviews: $reviews, checks: $checks}' <<<"$pr"
 }
 
 case "${1:-status}" in
@@ -231,15 +234,32 @@ case "${1:-status}" in
       done
     ;;
   log)
-    id=${2:?usage: proj log ID [--raw]}
-    n=$(cat "$jobs/$id/turns")
-    if [ "${3:-}" = --raw ]; then
+    id=${2:?usage: proj log ID [--turn N] [--raw]}
+    shift 2
+    n=$(cat "$jobs/$id/turns") raw=''
+    while [ $# -gt 0 ]; do
+      case $1 in
+        --raw) raw=1 ;;
+        --turn) n=${2:?usage: proj log ID [--turn N] [--raw]}; shift ;;
+        *) echo "usage: proj log ID [--turn N] [--raw]" >&2; exit 2 ;;
+      esac
+      shift
+    done
+    # A turn's answer is the result line in its own stream, so an earlier
+    # turn's is still there once later ones have started.
+    last=$(grep '"type":"result"' "$jobs/$id/$n.jsonl" 2>/dev/null | tail -n 1 || true)
+    if [ -n "$raw" ]; then
       cat "$jobs/$id/$n.jsonl"
-    elif [ -s "$jobs/$id/result" ]; then
-      cat "$jobs/$id/result"
+    elif [ -n "$last" ]; then
+      jq -r '.result // ""' <<<"$last"
     else
-      echo "($(state "$id"); no answer yet)"
+      if [ "$n" = "$(cat "$jobs/$id/turns")" ]; then
+        echo "($(state "$id"); no answer yet)"
+      else
+        echo "(turn $n ended without an answer)"
+      fi
       tail -n 3 "$jobs/$id/$n.jsonl" 2>/dev/null || true
+      exit 1
     fi
     ;;
   state) state "${2:?usage: proj state ID}" ;;

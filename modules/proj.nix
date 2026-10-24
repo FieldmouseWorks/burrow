@@ -29,7 +29,7 @@ let
 
   inbox = pkgs.writeShellApplication {
     name = "proj-inbox";
-    runtimeInputs = [ proj pkgs.coreutils pkgs.git pkgs.gh pkgs.jq pkgs.gnused pkgs.gnugrep ];
+    runtimeInputs = [ proj pkgs.coreutils pkgs.git cfg.gh pkgs.jq pkgs.gnused pkgs.gnugrep ];
     text = ''
       SRC=${lib.escapeShellArg projectsDir}
       JOBS=${lib.escapeShellArg cfg.jobsDir}
@@ -110,7 +110,7 @@ in
       default = pkgs.gh;
       defaultText = lib.literalExpression "pkgs.gh";
       internal = true;
-      description = "The gh proj-watch asks GitHub with (the test's is a stand-in).";
+      description = "The gh proj-watch and proj-inbox ask GitHub with (the test's is a stand-in).";
     };
 
     inbox = {
@@ -184,7 +184,7 @@ in
           proj run web "the task"           start a job; prints its id
           proj run --first web "the task"   the same, ahead of the line
           proj status                       what's running, what finished
-          proj log ID                       its answer (--raw for everything)
+          proj log ID                       its answer (--turn N for an earlier one, --raw for everything)
           proj reply ID "follow-up"         continue the same conversation
           proj stop ID
 

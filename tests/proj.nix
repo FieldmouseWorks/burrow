@@ -4,8 +4,9 @@
 # whose turn has ended frees its slot, that one waiting on a PR (proj await)
 # is resumed when the PR changes (even if it changed before the turn ended)
 # or once its deadline passes with GitHub unreadable, that a reply meanwhile
-# owns the job's waits, and that a job past its memory cap is killed by its
-# own cgroup's limit rather than the machine running out.
+# owns the job's waits, that proj-inbox posts every finished turn's answer
+# (one resumed before it looked too), and that a job past its memory cap is
+# killed by its own cgroup's limit rather than the machine running out.
 #
 #   nix build .#checks.x86_64-linux.proj -L
 { self, pkgs }:
@@ -26,23 +27,29 @@ let
       # Awaits, then takes a while to answer: what changes meanwhile is news.
       slowawait*) proj await "''${prompt#slowawait }" >/dev/null; sleep 10 ;;
       eat) head -c 512M /dev/zero | tail >/dev/null; exit 1 ;;
+      # An issue's task (proj-inbox) that takes a while to answer.
+      *inbox-slow*) sleep 8 ;;
     esac
     ${pkgs.jq}/bin/jq -nc --arg r "did $prompt" '{type: "result", session_id: "s", result: $r, is_error: false}'
   '';
-  # GitHub, as far as proj-watch can tell: each endpoint's answer is a file in
-  # /tmp/gh that the test writes. A file holding one JSON value per line is
-  # one page per line, which --slurp gathers into an array as gh does.
+  # GitHub, as far as proj-watch and proj-inbox can tell: each endpoint's
+  # answer is a file in /tmp/gh that the test writes. A file holding one JSON
+  # value per line is one page per line, which --slurp gathers into an array
+  # as gh does. What's posted (-F body=@-) is added to /tmp/gh/posted.
   gh = pkgs.writeShellScriptBin "gh" ''
     [ "$1" = api ] || exit 2
     shift
-    slurp=""
-    for a; do
-      case $a in
+    slurp="" post=""
+    while [ $# -gt 0 ]; do
+      case $1 in
         --slurp) slurp=1 ;;
-        --*) ;;
-        *) ep=''${a%%\?*} ;;
+        -F | -f) post=1; shift ;;
+        -*) ;;
+        *) ep=''${1%%\?*} ;;
       esac
+      shift
     done
+    if [ -n "$post" ]; then cat >>/tmp/gh/posted; echo '{}'; exit 0; fi
     # /tmp/gh/slow: GitHub takes its time, as it does.
     [ -e /tmp/gh/slow ] && sleep 2
     f="/tmp/gh/''${ep//\//_}"
@@ -65,8 +72,15 @@ pkgs.testers.runNixOSTest {
         jobMemoryMax = "128M";
         maxWait = 20;
         inherit gh;
+        # Run by hand here, never by its timer.
+        inbox = {
+          enable = true;
+          authors = [ "sam" ];
+          every = "yearly";
+        };
       };
     };
+    environment.systemPackages = [ pkgs.git ];
 
     users.users.dev = {
       isNormalUser = true;
@@ -74,7 +88,10 @@ pkgs.testers.runNixOSTest {
       group = "dev";
     };
     users.groups.dev.gid = 1001;
-    systemd.tmpfiles.rules = [ "d /data/dev/src/web 0755 dev dev -" ];
+    systemd.tmpfiles.rules = [
+      "d /data/dev/src/web 0755 dev dev -"
+      "d /data/dev/src/ib 0755 dev dev -"
+    ];
     virtualisation.memorySize = 2048;
     # The test framework panics on any OOM, a cgroup's own included; a real
     # machine kills inside the cgroup, which is what's checked here.
@@ -169,8 +186,9 @@ pkgs.testers.runNixOSTest {
         assert "awaits" not in proj("status"), proj("status")
 
     with subtest("a review past the first page is news"):
-        hundred = json.dumps([{"id": i} for i in range(100)])
-        github("repos/o/r/pulls/5/reviews", hundred)
+        # A hundred reviews with bodies, past what one argument may hold all
+        # together (and what one command to the VM may, so it's made there).
+        machine.succeed("${pkgs.jq}/bin/jq -nc '[range(100) | {id: ., body: (\"x\" * 2000)}]' >/tmp/gh/repos_o_r_pulls_5_reviews")
         github("repos/o/r/commits/abc/check-runs", '{"check_runs": [{"name": "ci", "status": "completed", "conclusion": "success"}]}')
         e = proj('run web "await https://github.com/o/r/pull/5"')
         machine.wait_until_succeeds(f"su - dev -c 'proj state {e}' | grep -x done", timeout=120)
@@ -217,6 +235,25 @@ pkgs.testers.runNixOSTest {
         machine.wait_until_succeeds(f"grep -x 2 /data/dev/jobs/{e}/turns", timeout=30)
         prompt = machine.succeed(f"cat /data/dev/jobs/{e}/prompt.2")
         assert "couldn't be read from GitHub" in prompt, prompt
+
+    with subtest("every finished turn's answer reaches its issue, one resumed before the inbox looked too"):
+        # The stand-in gh runs as dev and appends what it posts here.
+        machine.succeed("mkdir -p /tmp/gh && install -m 666 /dev/null /tmp/gh/posted")
+        machine.succeed("su - dev -c 'git -C /data/dev/src/ib init -q && git -C /data/dev/src/ib remote add origin https://github.com/o/r'")
+        issue = {"number": 7, "user": {"login": "sam"}, "html_url": "https://github.com/o/r/issues/7",
+                 "title": "t", "body": "inbox-slow", "state": "open", "labels": [{"name": "claude"}]}
+        github("repos/o/r/issues", json.dumps([issue]))
+        github("repos/o/r/issues/7/comments", "[]")
+        machine.succeed("su - dev -c proj-inbox")
+        job = machine.succeed("su - dev -c 'proj-inbox status'").split()[-1]
+        machine.wait_until_succeeds(f"su - dev -c 'proj state {job}' | grep -x done", timeout=120)
+        # Its next turn starts before the inbox looks again, as proj _watch's can.
+        proj(f'reply {job} "sleep 1"')
+        machine.wait_until_succeeds(f"su - dev -c 'proj state {job}' | grep -x done", timeout=120)
+        machine.succeed("su - dev -c proj-inbox")
+        posted = machine.succeed("cat /tmp/gh/posted")
+        first = posted.find("did This task comes from GitHub issue o/r#7")
+        assert "On it" in posted and -1 < first < posted.find("did sleep 1"), posted
 
     with subtest("a job past its memory cap is killed by its own limit"):
         e = proj("run web eat")
