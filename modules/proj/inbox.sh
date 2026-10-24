@@ -137,6 +137,9 @@ for repo in "${!project[@]}"; do
     if [ -e "$d/unannounced" ]; then
       if post "$repo" "$n" "On it: \`proj\` job \`$id\` in $p."; then rm -f "$d/unannounced"; else miss "$repo"; fi
     fi
+    # A job dir removed by hand: that job is over. The issue's record goes
+    # with it, and one still open is taken up afresh next pass.
+    if [ ! -d "$JOBS/$id" ]; then rm -rf "$d"; continue; fi
     # The state and the turn count, read together: a turn starts (proj reply,
     # proj _watch) holding the job's lock, and halfway through it the count
     # names the new turn while the state is still the last one's.

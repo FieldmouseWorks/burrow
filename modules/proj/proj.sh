@@ -338,7 +338,13 @@ case "${1:-status}" in
       waits=$(cat "$f" 2>/dev/null) || continue
       news='' lines=''
       while IFS=$'\t' read -r t since was; do
-        read -r repo n < <(target "$t")
+        [ -n "$t" ] || continue
+        if ! read -r repo n < <(target "$t") || ! [[ $since =~ ^[0-9]+$ ]]; then
+          # Not a line proj await writes (one edited by hand): the job hears
+          # so rather than waiting on it for good.
+          news+="- $t: not something proj can watch; no longer watched"$'\n'
+          continue
+        fi
         now=$(fingerprint "$repo" "$n" </dev/null) || now=''
         expired=$(($(date +%s) - since >= AWAIT_HOURS * 3600))
         if [ -n "$now" ] && [ -n "$was" ] && [ "$now" != "$was" ]; then

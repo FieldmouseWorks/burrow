@@ -8,8 +8,10 @@
 # job's waits, that proj-inbox posts every finished turn's answer (one
 # resumed before it looked too, none misread while a turn starts) and ends
 # the waits of one whose issue closed (proj stop's, which a watch already
-# asking GitHub keeps to), a stop that fails there not holding up the rest, and that a job past its memory cap is killed by
-# its own cgroup's limit rather than the machine running out.
+# asking GitHub keeps to), a stop that fails there not holding up the rest,
+# that a job dir removed or a wait it can't read stops neither proj-inbox nor
+# _watch, and that a job past its memory cap is killed by its own cgroup's
+# limit rather than the machine running out.
 #
 #   nix build .#checks.x86_64-linux.proj -L
 { self, pkgs }:
@@ -394,6 +396,27 @@ pkgs.testers.runNixOSTest {
         assert "o/r#8" in machine.succeed("su - dev -c 'proj-inbox status'")
         machine.succeed("su - dev -c proj-inbox")
         assert "o/r#8" not in machine.succeed("su - dev -c 'proj-inbox status'")
+
+    with subtest("an issue whose job dir was removed is taken up afresh"):
+        listed = machine.succeed("su - dev -c 'proj-inbox status'")
+        gone = next(x.split()[-1] for x in listed.splitlines() if x.startswith("o/r#9 "))
+        machine.succeed(f"rm -rf /data/dev/jobs/{gone}")
+        machine.succeed("su - dev -c proj-inbox")
+        machine.succeed("su - dev -c proj-inbox")
+        listed = machine.succeed("su - dev -c 'proj-inbox status'")
+        again = next(x.split()[-1] for x in listed.splitlines() if x.startswith("o/r#9 "))
+        assert again != gone, listed
+        machine.wait_until_succeeds(f"su - dev -c 'proj state {again}' | grep -x done", timeout=120)
+
+    with subtest("a wait proj can't read is news, and doesn't stop _watch"):
+        e = proj('run web "sleep 1"')
+        machine.wait_until_succeeds(f"su - dev -c 'proj state {e}' | grep -x done", timeout=120)
+        machine.succeed(f"su - dev -c 'echo https://example.com/nope >/data/dev/jobs/{e}/await'")
+        proj("_watch")
+        machine.wait_until_succeeds(f"grep -x 2 /data/dev/jobs/{e}/turns", timeout=30)
+        prompt = machine.succeed(f"cat /data/dev/jobs/{e}/prompt.2")
+        assert "https://example.com/nope: not something proj can watch" in prompt, prompt
+        machine.wait_until_succeeds(f"su - dev -c 'proj state {e}' | grep -x done", timeout=120)
 
     with subtest("an earlier turn's answer is read without the turn count"):
         e = proj('run web "sleep 1"')
