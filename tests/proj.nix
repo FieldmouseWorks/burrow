@@ -3,9 +3,9 @@
 # --first goes ahead but can't starve a turn that has waited long, that a job
 # whose turn has ended frees its slot, that one waiting on a PR (proj await)
 # is resumed when the PR changes (even if it changed before the turn ended)
-# or once its deadline passes with GitHub unreadable, and that a job past its
-# memory cap is
-# killed by its own cgroup's limit rather than the machine running out.
+# or once its deadline passes with GitHub unreadable, that a reply meanwhile
+# owns the job's waits, and that a job past its memory cap is killed by its
+# own cgroup's limit rather than the machine running out.
 #
 #   nix build .#checks.x86_64-linux.proj -L
 { self, pkgs }:
@@ -43,6 +43,8 @@ let
         *) ep=''${a%%\?*} ;;
       esac
     done
+    # /tmp/gh/slow: GitHub takes its time, as it does.
+    [ -e /tmp/gh/slow ] && sleep 2
     f="/tmp/gh/''${ep//\//_}"
     [ -e "$f" ] || exit 1
     if [ -n "$slurp" ]; then ${pkgs.jq}/bin/jq -cs . "$f"; else cat "$f"; fi
@@ -172,7 +174,7 @@ pkgs.testers.runNixOSTest {
         github("repos/o/r/commits/abc/check-runs", '{"check_runs": [{"name": "ci", "status": "completed", "conclusion": "success"}]}')
         e = proj('run web "await https://github.com/o/r/pull/5"')
         machine.wait_until_succeeds(f"su - dev -c 'proj state {e}' | grep -x done", timeout=120)
-        machine.succeed(f"echo '[{{\"id\": 100}}]' >>/tmp/gh/repos_o_r_pulls_5_reviews")
+        machine.succeed("echo '[{\"id\": 100}]' >>/tmp/gh/repos_o_r_pulls_5_reviews")
         proj("_watch")
         machine.wait_until_succeeds(f"grep -x 2 /data/dev/jobs/{e}/turns", timeout=30)
         prompt = machine.succeed(f"cat /data/dev/jobs/{e}/prompt.2")
@@ -189,6 +191,20 @@ pkgs.testers.runNixOSTest {
         machine.wait_until_succeeds(f"grep -x 2 /data/dev/jobs/{e}/turns", timeout=30)
         prompt = machine.succeed(f"cat /data/dev/jobs/{e}/prompt.2")
         assert "ci=failure" in prompt, prompt
+
+    with subtest("a reply while GitHub is being asked owns the job's waits"):
+        github("repos/o/r/commits/abc/check-runs", '{"check_runs": [{"name": "ci", "status": "in_progress", "conclusion": null}]}')
+        e = proj('run web "await https://github.com/o/r/pull/5"')
+        machine.wait_until_succeeds(f"su - dev -c 'proj state {e}' | grep -x done", timeout=120)
+        machine.succeed("touch /tmp/gh/slow")
+        machine.succeed("su - dev -c 'proj _watch' >/tmp/watch.log 2>&1 &")
+        time.sleep(2)
+        proj(f'reply {e} "sleep 1"')
+        machine.wait_until_succeeds("! pgrep -u dev -f 'proj _watch'", timeout=60)
+        machine.succeed("rm /tmp/gh/slow")
+        machine.wait_until_succeeds(f"su - dev -c 'proj state {e}' | grep -x done", timeout=120)
+        assert machine.succeed(f"cat /data/dev/jobs/{e}/turns").strip() == "2"
+        machine.fail(f"test -e /data/dev/jobs/{e}/await")
 
     with subtest("the await deadline holds while GitHub can't be read"):
         github("repos/o/r/commits/abc/check-runs", '{"check_runs": [{"name": "ci", "status": "in_progress", "conclusion": null}]}')

@@ -211,6 +211,10 @@ case "${1:-status}" in
       id=${1:?usage: proj reply [--first] ID \"message\"}
       task=${2:?usage: proj reply [--first] ID \"message\"}
       [ -s "$jobs/$id/session" ] || { echo "$id has no session to continue (yet)" >&2; exit 1; }
+      # A job's turns start one at a time, and _watch writes back a wait
+      # only under the same lock (held until proj exits).
+      exec {lk}>>"$jobs/$id/lock"
+      flock "$lk"
       case $(state "$id") in queued | running) echo "$id is still $(state "$id")" >&2; exit 1 ;; esac
     fi
     start_turn "$id" "$task" "$first"
@@ -265,6 +269,10 @@ case "${1:-status}" in
       [ -s "$f" ] || continue
       id=$(basename "$(dirname "$f")")
       case $(state "$id") in queued | running) continue ;; esac
+      turn=$(cat "$jobs/$id/turns")
+      # Gone already: another _watch (the timer's, or a hand-run one) has
+      # started its next turn.
+      waits=$(cat "$f" 2>/dev/null) || continue
       news='' lines=''
       while IFS=$'\t' read -r t since was; do
         read -r repo n < <(target "$t")
@@ -282,16 +290,23 @@ case "${1:-status}" in
         else
           lines+="$t"$'\t'"$since"$'\t'"${was:-$now}"$'\n'
         fi
-      done <"$f"
-      if [ -n "$news" ]; then
+      done <<<"$waits"
+      # GitHub was asked without the lock, so a reply may have started a
+      # turn meanwhile: that turn owns the job's waits, and these are dropped.
+      exec {lk}>>"$jobs/$id/lock"
+      flock "$lk"
+      if [ "$(cat "$jobs/$id/turns")" != "$turn" ]; then
+        :
+      elif [ -n "$news" ]; then
         # The new turn clears what's left: if it still waits, it says so again.
-        "$self" reply "$id" "News on what you were waiting on:
+        start_turn "$id" "News on what you were waiting on:
 
 $news
-Carry on from there. Anything you left in the background last turn was stopped when it ended." >/dev/null || true
+Carry on from there. Anything you left in the background last turn was stopped when it ended." ""
       else
         printf '%s' "$lines" >"$f.new" && mv -f "$f.new" "$f"
       fi
+      exec {lk}>&-
     done
     ;;
   _exec)
