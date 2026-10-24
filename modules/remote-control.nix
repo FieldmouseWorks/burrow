@@ -41,6 +41,25 @@ let
     '' + builtins.readFile ./remote-control/serve.sh;
   };
 
+  # Stop a server the way Ctrl-C would, so it takes its registration with it:
+  # killed outright, the folder stays "already served" at claude.ai for a few
+  # minutes and the restart fails until then.
+  stop = pkgs.writeShellApplication {
+    name = "claude-rc-stop";
+    runtimeInputs = [ pkgs.tmux pkgs.coreutils ];
+    text = ''
+      sock=rc-''${1:?usage: claude-rc-stop NAME}
+      if pid=$(tmux -L "$sock" display-message -p -t rc '#{pane_pid}' 2>/dev/null); then
+        kill -INT "$pid" 2>/dev/null || true
+        for _ in $(seq 100); do
+          kill -0 "$pid" 2>/dev/null || break
+          sleep 0.1
+        done
+      fi
+      tmux -L "$sock" kill-server 2>/dev/null || true
+    '';
+  };
+
   scan = pkgs.writeShellApplication {
     name = "claude-rc-scan";
     runtimeInputs = [ pkgs.systemd pkgs.coreutils pkgs.gnugrep pkgs.procps ];
@@ -164,7 +183,7 @@ in
         # The name goes in as an argument, not spliced into the command string,
         # so a folder with a space in it ("agent pipeline") still works.
         ExecStart = "${tmux} -L rc-%I new-session -d -s rc -c ${projectsDir}/%I ${pkgs.bashInteractive}/bin/bash -lc 'exec ${serve}/bin/claude-rc-serve \"$$1\"' rc %I";
-        ExecStop = "${tmux} -L rc-%I kill-server";
+        ExecStop = "${stop}/bin/claude-rc-stop %I";
         Restart = "always";
         RestartSec = 15;
         # Under burrow.claude.memory's cap with the proj jobs (common.nix).
