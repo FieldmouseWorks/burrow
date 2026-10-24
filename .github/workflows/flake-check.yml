@@ -14,6 +14,13 @@ on:
         description: Install Nix first. False on a runner that has it already (NixOS).
         type: boolean
         default: true
+      build-skip:
+        description: >-
+          Space-separated checks to evaluate but not build, for a check this
+          runner can't run (one that needs nested KVM, say). The caller says
+          where that check does run.
+        type: string
+        default: ''
 jobs:
   check:
     runs-on: ${{ inputs.runner }}
@@ -21,4 +28,17 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - if: inputs.install-nix
         uses: cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b # v31.11.3
-      - run: nix flake check -L --keep-going
+      - if: inputs.build-skip == ''
+        run: nix flake check -L --keep-going
+      - if: inputs.build-skip != ''
+        env:
+          SKIP: ${{ inputs.build-skip }}
+        run: |
+          nix flake check --no-build -L
+          system=$(nix eval --impure --raw --expr builtins.currentSystem)
+          targets=()
+          for c in $(nix eval --raw ".#checks.$system" --apply 'cs: toString (builtins.attrNames cs)'); do
+            case " $SKIP " in *" $c "*) echo "not building $c"; continue ;; esac
+            targets+=(".#checks.$system.$c")
+          done
+          nix build -L --no-link --keep-going "${targets[@]}"
