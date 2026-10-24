@@ -610,6 +610,14 @@ status, _ = run(mkpr(**minor), 7200)
 assert len(JOBS) == 1 and "1 open review thread" in JOBS[0] and not merged(), (status, JOBS)
 status, _ = run(mkpr(**minor), 9000)
 assert JOBS == [], "one job a head"
+# A Renovate major's threads are renovate-sweep's until it gives the head a
+# verdict; after that, nobody else's.
+fresh_pr_state()
+run(mkpr(threads=[False], **major), 0)
+status, _ = run(mkpr(threads=[False], **major), 7200)
+assert JOBS == [] and "renovate-sweep has it" in status, status
+status, _ = run(mkpr(threads=[False], comments=[said(f"<!-- major-verdict: ok {head} -->")], **major), 9000)
+assert len(JOBS) == 1 and "1 open review thread" in JOBS[0] and not merged(), (status, JOBS)
 # A red Renovate one is renovate-sweep's, threads and all: no second job on its branch.
 fresh_pr_state()
 red_ci = [{"__typename": "CheckRun", "name": "ci", "status": "COMPLETED", "conclusion": "FAILURE"}]

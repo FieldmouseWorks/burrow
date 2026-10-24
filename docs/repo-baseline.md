@@ -62,7 +62,9 @@ pre-approved: merges, GitHub settings changes and cleanup don't wait for
 the owner. Dependency bots' minor updates skip review: CI is their review,
 their bumps of the actions in `.github/workflows/` included. A Renovate
 major merges once its CI is green and renovate-sweep's job has given it an
-ok verdict for that head.
+ok verdict for that head; a security fix merges on green CI alone, a major
+one too. An ok major in a repo the steward doesn't cover is listed for the
+owner, since nothing else merges it.
 
 ## Files (a Claude job, once)
 

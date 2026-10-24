@@ -6,7 +6,7 @@
 # project, which fixes them on their branches so they can merge. Once per PR
 # head, so a fix that's pushed gets a fresh look only if it's still stuck.
 # The autoland steward's own status (SETTLED) doesn't count as a check. (DIR,
-# SRC, OWNER, NOTIFY and SETTLED come from ../updates.nix.)
+# SRC, OWNER, NOTIFY, SETTLED and COVERED come from ../updates.nix.)
 #
 # The job's verdict on a major: ok when it can merge as it is, held when it
 # shouldn't (its comment says why). The job ends that comment with a marker
@@ -14,11 +14,13 @@
 # labels the PR $OK or $HELD for people to see. A verdict counts only for the
 # head it names and only from our own login, so a job still finishing on an
 # older head, a push since, or someone else's comment can't clear a PR. The
-# autoland steward merges an ok one once its CI is green (the same rule);
-# held ones are listed for the owner here, as waiting on a decision.
+# autoland steward merges an ok one once its CI is green (the same rule) in
+# the repos it covers (COVERED, the list it writes each pass). The owner gets
+# one notice listing the held ones, as waiting on a decision, and the ok ones
+# no steward will merge.
 #
 # Security fixes (Renovate's `security` label) merge themselves even when
-# they're majors, so the steward never waits for a verdict on one. A red one
+# they're majors: none is asked for a verdict or waits for one. A red one
 # is handed over again every day, not once per head: the patch window is
 # short, and a cause outside the repo (a broken runner) can clear without a
 # push. One still open a day after Renovate opened it goes in a notice,
@@ -31,14 +33,16 @@ state=$DIR/renovate-sweep
 src=$SRC
 mkdir -p "$state"
 held=$(mktemp)
+ready=$(mktemp)
 stuck=$(mktemp)
-trap 'rm -f "$held" "$stuck"' EXIT
+trap 'rm -f "$held" "$ready" "$stuck"' EXIT
 
 for d in "$src"/*/; do
   p=$(basename "$d")
   url=$(git -C "$d" remote get-url origin 2>/dev/null) || continue
   repo=$(sed -E 's#^(https://github.com/|git@github.com:)##; s#\.git$##' <<<"$url")
   [[ $repo == */* ]] || continue
+  covered=$(jq -r --arg r "$repo" 'index($r) != null' "$COVERED" 2>/dev/null || echo false)
 
   # Every stuck PR of the repo goes to one job: they usually share a cause
   # (a toolchain bump, a lint the new versions trip), and one job per PR
@@ -55,7 +59,7 @@ for d in "$src"/*/; do
       # Check runs carry a conclusion (empty while running), commit statuses a state.
       red=$(jq -r '[.statusCheckRollup[]? | select((.context // .name) != $settled) | (.conclusion // .state // "" | ascii_upcase)
         | select(. == "FAILURE" or . == "ERROR" or . == "TIMED_OUT" or . == "STARTUP_FAILURE")] | length' --arg settled "$SETTLED" <<<"$pr")
-      major=$(jq -r '[.labels[]?.name] | index("major") != null' <<<"$pr")
+      major=$(jq -r '[.labels[]?.name] | index("major") != null and index("security") == null' <<<"$pr")
       security=$(jq -r '[.labels[]?.name] | index("security") != null' <<<"$pr")
       pending=$(jq -r '[.statusCheckRollup[]? | select((.context // .name) != $settled) | (.conclusion // .state // "" | ascii_upcase)
         | select(. == "" or . == "PENDING" or . == "EXPECTED")] | length' --arg settled "$SETTLED" <<<"$pr")
@@ -77,6 +81,9 @@ for d in "$src"/*/; do
       fi
       if [ "$major" = true ] && [ "$verdict" = held ]; then
         echo "- $title: https://github.com/$repo/pull/$n" >>"$held"
+      elif [ "$major" = true ] && [ "$verdict" = ok ] && [ "$covered" != true ] &&
+        [ "$red" -eq 0 ] && [ "$pending" -eq 0 ] && [ "$checks" -gt 0 ]; then
+        echo "- $title: https://github.com/$repo/pull/$n" >>"$ready"
       fi
       if [ "$security" = true ] &&
         [ $(($(date +%s) - $(date -d "$(jq -r .createdAt <<<"$pr")" +%s))) -gt 86400 ]; then
@@ -125,11 +132,22 @@ Make them mergeable. Look for a cause they share first (often the same failure o
   rm -f "$todo"
 done
 
-# The held majors wait on the owner's decision: one notice listing them all.
-# The ok ones aren't theirs: the steward merges those.
-if [ -s "$held" ]; then
-  "$NOTIFY" open majors "Major updates waiting on you" "A Claude job read these and held them; its comment on each PR says why. They need a decision before they merge:
+# The majors waiting on the owner: one notice listing them all, the held
+# ones apart from the ok ones in repos no steward merges in.
+if [ -s "$held" ] || [ -s "$ready" ]; then
+  body=""
+  if [ -s "$held" ]; then
+    body="A Claude job read these and held them; its comment on each PR says why. They need a decision before they merge:
 $(cat "$held")"
+  fi
+  if [ -s "$ready" ]; then
+    [ -z "$body" ] || body="$body
+
+"
+    body="${body}A Claude job read these and cleared them, and their CI is green, but the autoland steward doesn't cover their repos, so nothing merges them:
+$(cat "$ready")"
+  fi
+  "$NOTIFY" open majors "Major updates waiting on you" "$body"
 else
   "$NOTIFY" close majors "No major updates waiting."
 fi

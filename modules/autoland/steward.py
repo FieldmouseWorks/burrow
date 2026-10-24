@@ -483,6 +483,10 @@ def handle(repo, pr, repo_info, digest):
             settle("pending", "Dependency update; changes requested by " + ", ".join(changes))
         elif renovate and ci == "red":
             settle("pending", "Dependency update, CI red; renovate-sweep has it" + (f" ({threads})" if threads else ""))
+        elif renovate and dep == "major" and open_threads and not major_verdict:
+            # Until it gives this head a verdict, renovate-sweep's job has it,
+            # threads and all: one job on its branch.
+            settle("pending", f"Major update, {threads}; renovate-sweep has it")
         elif open_threads or ci == "red":
             what = threads or "CI is red (" + ", ".join(ci_names) + ")"
             settle("pending", f"Dependency update; {what}"[:140])
@@ -683,6 +687,8 @@ def main():
         if not DRY:
             raise
     repos = R.discover()
+    # Which repos it covers, for renovate-sweep: it lists the ok majors of the rest.
+    save("repos.json", sorted(r["repo"] for r in repos))
     # Repos whose baseline job has started. A repo not in it gets one, a few
     # per pass so the first pass on a machine doesn't start them all at once.
     known = set(load("known.json", []))
