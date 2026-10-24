@@ -37,6 +37,7 @@
       enable = true;
       owners = [ "sam" ];
       authors = [ "sam" ];
+      reviewers.codex.enable = true;
     };
     house.enable = true;
   };

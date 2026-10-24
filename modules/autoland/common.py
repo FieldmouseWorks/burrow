@@ -12,8 +12,6 @@ from datetime import datetime
 
 CFG = json.load(open(os.environ["AUTOLAND_CONFIG"]))
 CONTEXT = CFG["context"]
-CODEX = CFG["codexLogin"]
-DS = CFG.get("deepseek") or {"enable": False}
 DRY = len(sys.argv) > 1 and sys.argv[1] == "status"
 # A dry run keeps its own state, so its once-a-day reads (settings, branches)
 # stay once a day instead of running every pass on the owner's API quota.
@@ -68,7 +66,7 @@ _me = []
 
 def me():
     """The login the steward runs as, read once a pass. Its Claude jobs and
-    DeepSeek's reviews post as it too, and nobody else can."""
+    the reviewers' reviews post as it too, and nobody else can."""
     if not _me:
         _me.append(gh("api", "user", "--jq", ".login"))
     return _me[0]
