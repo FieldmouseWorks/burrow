@@ -356,6 +356,16 @@ pkgs.testers.runNixOSTest {
         machine.succeed("grep -q 'Running as unit' /tmp/turn.log")
         machine.fail(f"systemctl --user -M dev@ -q is-active '{unit(job)}'")
 
+    with subtest("a stop that fails still ends the job's waits, and says it failed"):
+        machine.succeed(f"su - dev -c \"printf 'o/r#6\\t%s\\t{{}}\\n' $(date +%s) >{d}/await\"")
+        machine.succeed(f"su - dev -c 'XDG_RUNTIME_DIR=/run/user/$(id -u dev) systemd-run --user -p RefuseManualStop=yes --unit=\"proj-$(systemd-escape {job}).service\" sleep 600'")
+        machine.succeed(f"systemctl --user -M dev@ -q is-active '{unit(job)}'")
+        rc, out = machine.execute(f"su - dev -c 'proj stop {job}' 2>&1")
+        assert rc != 0 and "couldn't stop" in out, (rc, out)
+        machine.fail(f"test -e {d}/await")
+        machine.succeed(f"systemctl --user -M dev@ kill '{unit(job)}'")
+        machine.wait_until_fails(f"systemctl --user -M dev@ -q is-active '{unit(job)}'", timeout=30)
+
     with subtest("a job past its memory cap is killed by its own limit"):
         e = proj("run web eat")
         machine.wait_until_succeeds(f"su - dev -c 'proj state {e}' | grep -x failed", timeout=120)

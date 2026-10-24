@@ -292,8 +292,16 @@ case "${1:-status}" in
     # stopping. A stopped job is over: nothing it waited on resumes it.
     exec {lk}>>"$jobs/$id/lock"
     flock "$lk"
-    if systemctl --user -q is-active "$(unit "$id")"; then systemctl --user stop "$(unit "$id")"; fi
+    u=$(unit "$id") rc=0
+    if systemctl --user -q is-active "$u"; then systemctl --user stop "$u" || rc=$?; fi
+    # Its waits go whatever the stop said. A failed stop is an error only
+    # while the turn may still be running: one that ended on its own between
+    # the look and the stop is stopped all the same.
     rm -f "$jobs/$id/await" "$jobs/$id/await.next"
+    if [ "$rc" != 0 ] && [ "$(systemctl --user show -P ActiveState "$u" 2>/dev/null)" != inactive ]; then
+      echo "proj: couldn't stop $id" >&2
+      exit "$rc"
+    fi
     ;;
   list) find "$src" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort ;;
   await)
