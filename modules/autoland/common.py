@@ -148,3 +148,12 @@ def job(repo, task, clone=False):
         return "dry"
     p = subprocess.run([CFG["proj"], "run", d, task], capture_output=True, text=True)
     return p.stdout.strip() or None
+
+
+def job_state(jid):
+    """queued, running, or how it ended (done, error, failed, timed out ...);
+    None when proj can't say."""
+    if DRY:
+        return "running"
+    p = subprocess.run([CFG["proj"], "state", jid], capture_output=True, text=True)
+    return p.stdout.strip() or None

@@ -111,5 +111,9 @@ calls, _ = sweep([pr(6, labels=(), conclusion="FAILURE")], covered=[REPO],
 assert len(calls) == 1 and "remi-proof isn't CI" in calls[0][-1] and "ssh remi proof" in calls[0][-1], calls
 calls, _ = sweep([pr(6, labels=(), conclusion="FAILURE")], covered=[REPO])
 assert len(calls) == 1 and "isn't CI" not in calls[0][-1], calls
+# Told even when the steward's list is stale: how a proof runs hasn't changed.
+calls, _ = sweep([pr(6, labels=(), conclusion="FAILURE")], covered=[REPO], age=7 * 3600,
+                 proofs={"remi-proof": "ssh remi proof"})
+assert len(calls) == 1 and "ssh remi proof" in calls[0][-1], calls
 
 print("renovate-sweep: ok")

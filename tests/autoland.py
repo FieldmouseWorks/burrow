@@ -349,6 +349,8 @@ def job(repo, task, clone=False):
 
 C.write = write
 C.job = job
+STATES = {}  # a job's state, by id, as `proj state` says it: running unless set
+C.job_state = lambda jid: STATES.get(jid, "running")
 D.run_deepseek = run_deepseek
 T0 = "2026-10-24T00:00:00Z"
 info = {"squashMergeAllowed": True, "mergeCommitAllowed": False, "rebaseMergeAllowed": False}
@@ -521,6 +523,34 @@ other = "c" * 40
 status, _ = run(clean(comments=[said(f"<!-- autoland-judgment: land {head} -->")], sha=other, **mig), 700)
 assert len(JOBS) == 1 and other in JOBS[0] and not merged()
 
+# A judge that ends without a verdict (crashed, timed out, said nothing) is
+# started once more, after a second pass sees it ended; a second one that
+# does the same is listed for the owner.
+fresh_pr_state()
+run(clean(**mig), 700)
+STATES["job-1"] = "error"
+status, _ = run(clean(**mig), 800)
+assert JOBS == [] and "judging it" in status, (status, JOBS)
+status, digest = run(clean(**mig), 900)
+assert len(JOBS) == 1 and "judging it again" in status and digest == [], (status, digest)
+STATES["job-1"] = "running"  # the second one (ids restart each pass here)
+status, _ = run(clean(**mig), 1000)
+assert JOBS == [] and "judging it" in status and not merged(), status
+STATES["job-1"] = "failed"
+status, digest = run(clean(**mig), 1100)
+assert JOBS == [] and not merged() and digest == [], (status, JOBS, digest)
+status, digest = run(clean(**mig), 1200)
+assert JOBS == [] and [x[0] for x in digest] == ["Two Claude jobs ended without a verdict"], (status, digest)
+# One still running, or one proj can't say about, isn't lost.
+for state in ("running", None):
+    fresh_pr_state()
+    run(clean(**mig), 700)
+    STATES["job-1"] = state
+    for t in (800, 900):
+        status, digest = run(clean(**mig), t)
+    assert JOBS == [] and "judging it" in status and digest == [], (state, status)
+STATES.clear()
+
 # The judge's build or tests fail: one fix job a head, not a judge waited on
 # for good.
 fresh_pr_state()
@@ -604,6 +634,14 @@ for checks in (CI_GREEN, []):
 # renovate-sweep is told how a covered repo's proofs run.
 C.NOW = C.ts(T0)
 assert S.coverage([{"repo": "sam/r"}]) == {"at": C.NOW, "repos": {"sam/r": {"proofJobs": S.CFG["repos"]["sam/r"]["proofJobs"]}}}
+# A proof job that ends without posting its verdict is started once more.
+fresh_pr_state()
+run(clean(checks=CI_GREEN), 700)
+STATES["job-1"] = "done"
+run(clean(checks=CI_GREEN), 800)
+status, _ = run(clean(checks=CI_GREEN), 900)
+assert len(JOBS) == 1 and "just proof" in JOBS[0] and "running remi-proof again" in status, (status, JOBS)
+STATES.clear()
 # Still waiting on ordinary CI too: no job yet.
 fresh_pr_state()
 busy = proof + [{"__typename": "CheckRun", "name": "build", "status": "IN_PROGRESS", "conclusion": None}]

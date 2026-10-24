@@ -369,10 +369,36 @@ def handle(repo, pr, repo_info, digest):
         jid = C.job(repo, task)
         if jid:
             st[kind] = head
+            st[kind + "Job"] = jid
             log(f"{tag}: a Claude job {jid} ({kind})")
         else:
             log(f"{tag}: couldn't start a Claude job (no checkout, or proj refused)")
         return bool(jid)
+
+    def lost(kind):
+        """This head's job of the kind ended without the answer it was for
+        (it crashed, timed out, or never posted it). Seen on two passes: the
+        first may have read the PR just before its answer went up."""
+        jid = st.get(kind + "Job")
+        if st.get(kind) != head or not jid or C.job_state(jid) in (None, "queued", "running"):
+            return False
+        seen = st.get(kind + "Lost") == head
+        st[kind + "Lost"] = head
+        return seen
+
+    def again(kind, task, doing, answer):
+        """A job that ended without its answer is started once more; one that
+        does that twice is listed for the owner."""
+        if st.get(kind + "Again") == head:
+            settle("pending", f"Settled, but two Claude jobs ended without {answer}"[:140],
+                   f"Two Claude jobs ended without {answer}")
+        elif started(kind, task):
+            st[kind + "Again"] = head
+            st.pop(kind + "Lost", None)
+            settle("pending", f"Settled; a Claude job is {doing} again (the last one ended without {answer})"[:140])
+        else:
+            settle("pending", f"Settled, but no Claude job could start {doing} again"[:140],
+                   "Couldn't start a Claude job")
 
     def hand_off(why, kind="handed"):
         proofs = {c: rc["proofJobs"][c] for c in ci_names if c in rc["proofJobs"]} if ci == "red" else {}
@@ -433,6 +459,8 @@ def handle(repo, pr, repo_info, digest):
                          "failFixed")
         elif update_branch():
             settle("pending", "Settled, but behind its base: brought up to date, reviewed again")
+        elif lost("judged"):
+            again("judged", judge_task(repo, pr, why, ci == "none"), "judging it", "a verdict")
         elif st.get("judged") == head or started("judged", judge_task(repo, pr, why, ci == "none")):
             settle("pending", f"Settled; a Claude job is judging it ({why})")
         else:
@@ -441,7 +469,9 @@ def handle(repo, pr, repo_info, digest):
     def prove():
         """Only checks that run on a machine, not in CI, are left: a Claude
         job runs them on this head and records their verdicts."""
-        if st.get("proved") == head or started("proved", proof_task(repo, pr, ci_names, rc["proofJobs"])):
+        if lost("proved"):
+            again("proved", proof_task(repo, pr, ci_names, rc["proofJobs"]), "running " + ", ".join(ci_names), "its verdict")
+        elif st.get("proved") == head or started("proved", proof_task(repo, pr, ci_names, rc["proofJobs"])):
             settle("pending", f"Settled; a Claude job is running {', '.join(ci_names)}"[:140])
         else:
             settle("pending", f"Settled, but no Claude job could run {', '.join(ci_names)}"[:140],
