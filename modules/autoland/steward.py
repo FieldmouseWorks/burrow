@@ -311,60 +311,12 @@ def post_status(repo, pr, state, desc):
           "-f", f"context={CONTEXT}", "-f", f"description={desc}", "-f", f"target_url={pr['url']}", check=False)
 
 
-ACTION_PINS_RE = re.compile(r"^\.github/workflows/[^/]+\.ya?ml$")
-# A changed line that only repins an action: "uses: owner/action@sha # v4.1.0".
-PIN_LINE_RE = re.compile(r"^[+-]\s*(-\s+)?uses:\s*([^\s#@]+)@[^\s#]+(\s+#.*)?$")
-
-
-def pins_only(repo, pr):
-    """True if every changed line in the PR's workflow files only repins an
-    action: each removed `uses:` comes back with the same action at a new ref,
-    nothing added or dropped (no permissions, triggers or commands). None if
-    the diff couldn't be read."""
-    diff = gh("pr", "diff", str(pr["number"]), "-R", repo, check=False)
-    if not isinstance(diff, str) or not diff:
-        return None
-    path, changed = None, {}
-    for x in diff.splitlines():
-        if x.startswith("diff --git "):
-            path = x.split(" b/", 1)[-1]
-        elif x.startswith(("+++", "---")):
-            continue
-        elif path and ACTION_PINS_RE.match(path) and x[:1] in "+-" and x.strip("+- \t"):
-            m = PIN_LINE_RE.match(x)
-            if not m:
-                return False
-            changed.setdefault(path, {"+": [], "-": []})[x[0]].append(m.group(2))
-    return all(sorted(c["+"]) == sorted(c["-"]) for c in changed.values())
-
-
-def one_way(repo, pr, rc, dep=None):
+def one_way(pr, rc):
     """The first path (or label) that makes this PR the owner's to merge."""
     for lab in pr["labels"]["nodes"]:
         if lab["name"] == CFG["labels"]["owner"]:
             return f"the {lab['name']} label"
-    # A dependency bot that only repins actions in workflows is a dependency
-    # update: CI is its review (unless actionBumps is off).
-    pins = None
     for f in pr["files"]["nodes"]:
-        if dep and rc["actionBumps"] and ACTION_PINS_RE.match(f["path"]):
-            if pins is None:
-                # One diff per head and base, not one per pass (retargeting
-                # changes the diff); a failed read isn't kept, so the next
-                # pass reads it again.
-                cache = load("pins.json", {})
-                key = f"{repo}#{pr['number']}"
-                seen = [pr["headRefOid"], pr["baseRefName"]]
-                if (cache.get(key) or [None])[:2] == seen:
-                    pins = cache[key][2]
-                else:
-                    pins = pins_only(repo, pr)
-                    if pins is not None:
-                        cache[key] = seen + [pins]
-                        save("pins.json", cache)
-                    pins = bool(pins)
-            if pins:
-                continue
         for pat in rc["oneWay"]:
             if re.search(pat, f["path"]):
                 return f["path"]
@@ -570,7 +522,7 @@ def handle(repo, pr, repo_info, digest):
             latest[who] = r["state"]
     changes = [w for w, s in latest.items() if s == "CHANGES_REQUESTED"]
     dep = dep_kind(pr)
-    gate = one_way(repo, pr, rc, dep)
+    gate = one_way(pr, rc)
     # A minor Renovate PR a Claude job fixed carries Claude's code, and Renovate
     # won't merge it: it goes through the review loop below like a Claude PR.
     # While its CI is red it's renovate-sweep's to hand over, findings and all:

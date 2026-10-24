@@ -1,6 +1,7 @@
 """The steward's DeepSeek reviewer, with gh and DeepSeek's API stood in for.
 
-  python3 tests/autoland.py modules/autoland/steward.py
+  nix eval --json .#nixosConfigurations.example.config.burrow.autoland.oneWay >/tmp/one-way.json
+  python3 tests/autoland.py modules/autoland/steward.py /tmp/one-way.json
   nix build .#checks.x86_64-linux.autoland
 """
 
@@ -62,7 +63,7 @@ with open(f"{tmp}/config.json", "w") as f:
         "stateDir": f"{tmp}/state", "projectsDir": f"{tmp}/none", "proj": "proj", "owner": "Sam", "cleanBranches": False,
         "labels": {"hold": "hold", "owner": "needs-owner"}, "notify": {"repo": "", "assignee": "", "label": "autoland"},
         "defaults": {"rounds": 5, "oneWay": [], "handoffAfter": 30, "settleDelay": 3, "codexTimeout": 45,
-                     "directPush": False, "ruleset": True, "requireCi": True, "actionBumps": True,
+                     "directPush": False, "ruleset": True, "requireCi": True,
                      "ownerChecks": [], "deepseek": True},
         "repos": {},
         "deepseek": {"enable": True, "baseUrl": f"http://127.0.0.1:{srv.server_port}", "effort": "max",
@@ -73,6 +74,10 @@ os.environ["AUTOLAND_CONFIG"] = f"{tmp}/config.json"
 os.environ["CREDENTIALS_DIRECTORY"] = f"{tmp}/cred"
 
 # The steward and the modules beside it, as the service runs them.
+# The module's default one-way paths.
+with open(sys.argv[2]) as f:
+    ONE_WAY = json.load(f)
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(sys.argv[1])))
 spec = importlib.util.spec_from_file_location("steward", sys.argv[1])
 S = importlib.util.module_from_spec(spec)
@@ -493,3 +498,16 @@ assert any(x[0] == "Too big for DeepSeek to review" for x in digest) and queued(
 RESULT["v"] = "clean"
 
 print("autoland: ok")
+
+
+# The module's one-way paths: secrets and migrations wait for the owner;
+# .github/ (workflows, CODEOWNERS) is settled and merged like anything else.
+def touching(*paths):
+    return {"labels": {"nodes": []}, "files": {"nodes": [{"path": p} for p in paths]}, "changedFiles": len(paths)}
+
+
+for p in (".github/workflows/flake.yml", ".github/CODEOWNERS", ".github/dependabot.yml"):
+    assert S.one_way(touching("src/app.py", p), {"oneWay": ONE_WAY}) is None, (p, ONE_WAY)
+for p in ("secrets/remi.yaml", ".sops.yaml", "server/migrations/0002_users.sql"):
+    assert S.one_way(touching(".github/workflows/flake.yml", p), {"oneWay": ONE_WAY}) == p, (p, ONE_WAY)
+print("one-way: ok")
