@@ -81,7 +81,7 @@
         proj = import ./tests/proj.nix { inherit self pkgs; };
         # The steward's DeepSeek reviewer, with stand-ins for gh and the API.
         autoland = pkgs.runCommand "autoland-check" { nativeBuildInputs = [ pkgs.python3 ]; } ''
-          python3 -I ${./tests/autoland.py} ${./modules/autoland/steward.py}
+          python3 -I ${./tests/autoland.py} ${./modules/autoland}/steward.py
           touch $out
         '';
         # Stale Remote Control servers catch up once idle, with a stand-in for Claude.

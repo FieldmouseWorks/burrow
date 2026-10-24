@@ -83,14 +83,21 @@ let
     ", and posts DeepSeek's (under ${config.burrow.owner}'s login, marked as DeepSeek's)";
 
   configFile = pkgs.writeText "autoland.json" (builtins.toJSON settings);
-  stewardPy = pkgs.writers.writePython3Bin "autoland-steward"
-    { flakeIgnore = [ "E501" "W503" ]; }
-    (builtins.readFile ./autoland/steward.py);
+  # steward.py and the modules it imports from beside it, linted as they're
+  # built.
+  stewardSrc = pkgs.runCommand "autoland-steward-src"
+    { nativeBuildInputs = [ pkgs.python3Packages.flake8 ]; } ''
+    mkdir $out
+    cp ${./autoland/steward.py} $out/steward.py
+    cp ${./autoland/common.py} $out/common.py
+    cp ${./autoland/deepseek.py} $out/deepseek.py
+    flake8 --ignore E501,W503 $out
+  '';
   # The command, with this machine's config, so `autoland-steward status`
   # works from any shell, not only in the service.
   steward = pkgs.writeShellScriptBin "autoland-steward" ''
     export AUTOLAND_CONFIG=''${AUTOLAND_CONFIG:-${configFile}}
-    exec ${stewardPy}/bin/autoland-steward "$@"
+    exec ${pkgs.python3}/bin/python3 -E -s ${stewardSrc}/steward.py "$@"
   '';
 in
 {
