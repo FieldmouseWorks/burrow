@@ -20,12 +20,21 @@ REQS, ANSWER = [], {}
 
 class API(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
-        REQS.append((self.headers["Authorization"], json.loads(self.rfile.read(int(self.headers["Content-Length"])))))
+        req = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        REQS.append((self.headers["Authorization"], req, self.path))
+        if "tools" in req and ANSWER.get("noBeta"):
+            self.send_response(400)
+            self.end_headers()
+            return
         # ANSWER["junk"]: that many answers that aren't JSON come first.
         junk = ANSWER.get("junk", 0) > 0
         ANSWER["junk"] = ANSWER.get("junk", 0) - 1
-        content = "" if junk else json.dumps(ANSWER["v"])
-        out = json.dumps({"choices": [{"message": {"content": content}}]}).encode()
+        text = "" if junk else json.dumps(ANSWER["v"])
+        if "tools" in req:
+            msg = {"content": "", "tool_calls": [{"type": "function", "function": {"name": "submit_review", "arguments": text}}]}
+        else:
+            msg = {"content": text}
+        out = json.dumps({"choices": [{"message": msg}]}).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
@@ -136,8 +145,11 @@ ANSWER["v"] = {"findings": [
     {"path": "gone.txt", "line": 1, "severity": "P2", "title": "t", "body": "b"},
     {"path": "nope.py", "line": 1, "severity": "PX", "title": "t2", "body": "b2"}], "summary": "s"}
 assert S.run_deepseek("sam/r", pr, {}) == "findings"
-auth, req = REQS[-1]
+auth, req, path = REQS[-1]
 assert auth == "Bearer sk-test" and req["model"] == "m-test" and req["reasoning_effort"] == "max"
+# A strict tool call on the beta endpoint, held to the review's schema.
+assert path == "/beta/chat/completions" and req["tools"][0]["function"]["strict"] is True
+assert req["tool_choice"]["function"]["name"] == "submit_review"
 sent = req["messages"][1]["content"]
 assert "never call eval" in sent and "root rule" in sent and "not rules" not in sent
 assert "Not a bug: b is meant." in sent and "someone else" not in sent
@@ -169,6 +181,13 @@ try:
 except RuntimeError as e:
     assert "no JSON" in str(e)
 ANSWER["junk"] = 0
+
+# Strict mode turned down (a beta): JSON mode on the plain endpoint instead.
+ANSWER["noBeta"], n = True, len(REQS)
+assert S.run_deepseek("sam/r", pr, {}) == "clean"
+assert [r[2] for r in REQS[n:]] == ["/beta/chat/completions", "/chat/completions"]
+assert REQS[-1][1]["response_format"] == {"type": "json_object"} and "tools" not in REQS[-1][1]
+ANSWER["noBeta"] = False
 
 # ---------------------------------------------------------------- handle()
 

@@ -612,45 +612,91 @@ def prior_findings(repo, n):
     return "\n".join(text)[:60000]
 
 
+# The answer's shape. In strict mode (DeepSeek's beta endpoint) the API
+# holds the model to it: every property required, nothing else allowed.
+DS_REVIEW_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "findings": {"type": "array", "items": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "line": {"type": "integer"},
+                "severity": {"type": "string", "enum": ["P0", "P1", "P2"]},
+                "title": {"type": "string"},
+                "body": {"type": "string"},
+            },
+            "required": ["path", "line", "severity", "title", "body"],
+            "additionalProperties": False,
+        }},
+        "summary": {"type": "string"},
+    },
+    "required": ["findings", "summary"],
+    "additionalProperties": False,
+}
+
+
 def ask_deepseek(system, user):
-    """One chat completion, JSON out. Raises on any failure."""
+    """One review from DeepSeek, as a dict. Raises on any failure.
+
+    First as a strict tool call, which the API holds to DS_REVIEW_SCHEMA; if
+    that's turned down (it's a beta), JSON mode, which now and then answers
+    with something that isn't JSON (its docs say so, and remi saw one in
+    six); if that's turned down too, plain text. Each answer that can't be
+    read is asked again, three tries in all."""
     env = {}
     for x in open(os.path.join(os.environ.get("CREDENTIALS_DIRECTORY", ""), "deepseek")):
         k, sep, v = x.strip().partition("=")
         if sep:
             env[k] = v.strip().strip('"')
-    body = {
+    base = {
         "model": env["DEEPSEEK_MODEL"],
         "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
-        "response_format": {"type": "json_object"},
         "reasoning_effort": env.get("DEEPSEEK_EFFORT") or DS["effort"],
         "max_tokens": DS["maxTokens"],
     }
+    url = DS["baseUrl"].rstrip("/")
+    ways = [
+        (url + "/beta", {
+            "tools": [{"type": "function", "function": {
+                "name": "submit_review", "strict": True,
+                "description": "Submit the review: every finding, and a one-sentence summary.",
+                "parameters": DS_REVIEW_SCHEMA}}],
+            "tool_choice": {"type": "function", "function": {"name": "submit_review"}},
+        }),
+        (url, {"response_format": {"type": "json_object"}}),
+        (url, {}),
+    ]
     ctx = ssl.create_default_context(cafile=DS["caFile"])
 
-    def call(b):
-        req = urllib.request.Request(DS["baseUrl"].rstrip("/") + "/chat/completions", data=json.dumps(b).encode(),
+    def call(at, extra):
+        req = urllib.request.Request(at + "/chat/completions", data=json.dumps({**base, **extra}).encode(),
                                      headers={"Authorization": f"Bearer {env['DEEPSEEK_API_KEY']}",
                                               "Content-Type": "application/json"})
         with urllib.request.urlopen(req, timeout=DS["timeout"], context=ctx) as r:
-            return json.load(r)["choices"][0]["message"]["content"] or ""
+            msg = json.load(r)["choices"][0]["message"]
+        for t in msg.get("tool_calls") or []:
+            if t["function"]["name"] == "submit_review":
+                return t["function"]["arguments"] or ""
+        return msg.get("content") or ""
 
-    # JSON mode now and then answers with something that isn't JSON (its
-    # docs say so, and remi saw one in six): ask again before giving up.
-    for attempt in range(3):
+    tries = 0
+    while True:
+        at, extra = ways[0]
         try:
-            content = call(body)
+            text = call(at, extra)
         except urllib.error.HTTPError as e:
-            if e.code != 400 or "response_format" not in body:
+            if e.code != 400 or len(ways) == 1:
                 raise
-            # Turned down as asked: without JSON mode, read it from the text.
-            body.pop("response_format")
-            content = call(body)
+            log(f"  DeepSeek turned down {', '.join(extra) or 'plain text'} ({e.code}): trying the next way")
+            ways.pop(0)
+            continue
+        tries += 1
         try:
-            return json.loads(content[content.index("{"):content.rindex("}") + 1])
+            return json.loads(text[text.index("{"):text.rindex("}") + 1])
         except ValueError:
-            if attempt == 2:
-                raise RuntimeError(f"no JSON in its answer: {content[:100]!r}")
+            if tries == 3:
+                raise RuntimeError(f"no JSON in its answer: {text[:100]!r}")
 
 
 DS_SYSTEM = """You review pull requests for {owner}'s repos. You are one of two reviewers; a PR merges itself once both find nothing on its latest commit, so what you let through ships.
@@ -661,7 +707,7 @@ Earlier findings on this PR are listed with the replies they got. Don't raise on
 
 Each finding: "path" (as the diff names it), "line" (a number from the diff's left column, on the new side, where the problem is), "severity" ("P0": unsafe or breaks things, "P1": a real bug or a rule broken, "P2": a smaller real defect), "title" (one line), "body" (what is wrong, why, and the fix, in a few sentences). At most 10, most severe first.
 
-Answer with JSON only: {{"findings": [...], "summary": "one sentence on the PR as a whole"}}"""
+Answer by calling submit_review if you have it, otherwise with JSON only: {{"findings": [...], "summary": "one sentence on the PR as a whole"}}"""
 
 
 def quiet_mentions(text):
