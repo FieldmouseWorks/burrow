@@ -7,12 +7,25 @@
 # head, so a fix that's pushed gets a fresh look only if it's still stuck.
 # The autoland steward's own status (SETTLED) doesn't count as a check. (DIR,
 # SRC, OWNER, NOTIFY and SETTLED come from ../updates.nix.)
+#
+# The job's verdict on a major: ok when it can merge as it is, held when it
+# shouldn't (its comment says why). The job ends that comment with a marker
+# naming the head it cleared, `<!-- major-verdict: ok|held SHA -->`, and
+# labels the PR $OK or $HELD for people to see. The majors notice goes by the
+# marker: a verdict counts only for the head it names and only from our own
+# login, so a job still finishing on an older head, a push since, or
+# someone else's comment can't make a PR one tap. Green ok ones are listed as
+# ready, held ones as waiting on a decision; the rest haven't been read.
+OK="major-ok"
+HELD="major-held"
+me=$(gh api user --jq .login 2>/dev/null || true)
 
 state=$DIR/renovate-sweep
 src=$SRC
 mkdir -p "$state"
 ready=$(mktemp)
-trap 'rm -f "$ready"' EXIT
+held=$(mktemp)
+trap 'rm -f "$ready" "$held"' EXIT
 
 for d in "$src"/*/; do
   p=$(basename "$d")
@@ -40,13 +53,45 @@ for d in "$src"/*/; do
         | select(. == "" or . == "PENDING" or . == "EXPECTED")] | length' --arg settled "$SETTLED" <<<"$pr")
       # No checks at all isn't "passed CI": nothing has tested it yet.
       checks=$(jq -r '[.statusCheckRollup[]? | select((.context // .name) != $settled)] | length' --arg settled "$SETTLED" <<<"$pr")
-      if [ "$major" = true ] && [ "$checks" -gt 0 ] && [ "$red" -eq 0 ] && [ "$pending" -eq 0 ]; then
+      key="$state/${repo//\//_}-$n"
+      seen=$(cat "$key" 2>/dev/null || true)
+      # A major's key also says the job was asked for a verdict, so a major
+      # handed over before verdicts existed is handed over once more.
+      want=$sha
+      [ "$major" != true ] || want="$sha verdict"
+      verdict=""
+      if [ "$major" = true ] && [ -n "$me" ]; then
+        verdict=$(gh pr view "$n" -R "$repo" --json comments 2>/dev/null | jq -r --arg me "$me" --arg sha "$sha" '
+          [.comments[] | select(.author.login == $me) | .body
+            | capture("<!-- major-verdict: (?<v>ok|held) (?<sha>[0-9a-f]{40}) -->") | select(.sha == $sha)] | last
+          | if . != null then .v else "" end' || true)
+      fi
+      if [ "$major" = true ] && [ "$verdict" = held ]; then
+        echo "- $title: https://github.com/$repo/pull/$n" >>"$held"
+      elif [ "$major" = true ] && [ "$verdict" = ok ] && [ "$checks" -gt 0 ] && [ "$red" -eq 0 ] && [ "$pending" -eq 0 ]; then
         echo "- $title: https://github.com/$repo/pull/$n" >>"$ready"
       fi
       [ "$red" -gt 0 ] || [ "$major" = true ] || continue
-      key="$state/${repo//\//_}-$n"
-      [ "$(cat "$key" 2>/dev/null)" != "$sha" ] || continue
-      echo "$sha" >"$key"
+      [ "$seen" != "$want" ] || continue
+      # A job that pushed its fix and then cleared the new head is done:
+      # nothing for another job to do there.
+      if [ -n "$verdict" ] && [ "$red" -eq 0 ]; then
+        echo "$want" >"$key"
+        continue
+      fi
+      if [ "$major" = true ]; then
+        # The job labels what it read; the labels have to exist first.
+        [ -n "${labelled:-}" ] || gh label create "$OK" -R "$repo" --force --color 0e8a16 \
+          --description "Major update a Claude job read: fine to merge as it is" >/dev/null 2>&1 || true
+        [ -n "${labelled:-}" ] || gh label create "$HELD" -R "$repo" --force --color d93f0b \
+          --description "Major update a Claude job read: needs a decision first (see its comment)" >/dev/null 2>&1 || true
+        labelled=1
+        # The old head's labels would mislead a reader; the marker is what counts.
+        if jq -e --arg ok "$OK" --arg held "$HELD" '[.labels[]?.name] | index($ok) != null or index($held) != null' <<<"$pr" >/dev/null; then
+          gh pr edit "$n" -R "$repo" --remove-label "$OK" --remove-label "$HELD" >/dev/null 2>&1 || true
+        fi
+      fi
+      echo "$want" >"$key"
       if [ "$major" = true ]; then
         why="a major version bump"
         [ "$red" -eq 0 ] || why="$why, and its CI fails"
@@ -58,16 +103,28 @@ for d in "$src"/*/; do
   if [ -s "$todo" ]; then
     proj run "$p" "Renovate's PRs in $repo can't merge themselves:
 $(cat "$todo")
-Make them mergeable. Look for a cause they share first (often the same failure on several branches), and check whether the default branch itself is red: if it is, fix that in its own PR and say so on each Renovate PR rather than patching every branch. Then, per PR: check out the branch in your own worktree (git worktree add), fix whatever the update breaks (code, config, lockfile), run the tests, and push to the same branch. Renovate merges minor and patch PRs itself once CI is green. A major one waits for $OWNER: leave a short comment on the PR with the breaking changes that touch this project and what you changed for them, and don't merge it. If one can't or shouldn't be done (an upstream regression, a migration that needs a decision), comment on the PR saying why, in one or two lines, and close it only if it's a dead end." >/dev/null &&
+Make them mergeable. Look for a cause they share first (often the same failure on several branches), and check whether the default branch itself is red: if it is, fix that in its own PR and say so on each Renovate PR rather than patching every branch. Then, per PR: check out the branch in your own worktree (git worktree add), fix whatever the update breaks (code, config, lockfile), run the tests, and push to the same branch. Renovate merges minor and patch PRs itself once CI is green. A major one waits for $OWNER: leave a short comment on the PR with the breaking changes that touch this project and what you changed for them, and don't merge it. Then give every major PR a verdict, once its CI is green or you've given up on it: ok if $OWNER can merge it as it is, or held if it needs a decision or more work first (a support floor to drop, a migration, a regression), with the reason in your comment. End that comment with the marker <!-- major-verdict: ok SHA --> or <!-- major-verdict: held SHA -->, where SHA is the full head commit of the PR after your last push (gh pr view N --json headRefOid), and label the PR $OK or $HELD to match. $OWNER is told about ok PRs as one-tap merges, so never mark one ok that you'd argue against merging. If one can't or shouldn't be done (an upstream regression, a migration that needs a decision), comment on the PR saying why, in one or two lines, and close it only if it's a dead end." >/dev/null &&
       echo "$repo: $(wc -l <"$todo") PRs handed to one Claude job"
   fi
   rm -f "$todo"
 done
 
-# Green major updates are the owner's to merge: one notice listing them all.
-if [ -s "$ready" ]; then
-  "$NOTIFY" open majors "Major updates ready to merge" "These passed CI, and a Claude job has read their breaking changes (see its comment on each PR). Merging is one tap each:
+# Major updates are the owner's to merge: one notice listing them all, the
+# ones a job cleared apart from the ones it held.
+if [ -s "$ready" ] || [ -s "$held" ]; then
+  body=""
+  if [ -s "$ready" ]; then
+    body="These passed CI, and a Claude job read their breaking changes and found nothing in the way (its comment on each PR says what changed). Merging is one tap each:
 $(cat "$ready")"
+  fi
+  if [ -s "$held" ]; then
+    [ -z "$body" ] || body="$body
+
+"
+    body="${body}These need a decision before they merge. A Claude job read them and held them; its comment on each PR says why:
+$(cat "$held")"
+  fi
+  "$NOTIFY" open majors "Major updates waiting on you" "$body"
 else
   "$NOTIFY" close majors "No major updates waiting."
 fi
