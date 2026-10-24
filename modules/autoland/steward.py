@@ -433,8 +433,14 @@ def handle(repo, pr, repo_info, digest):
             # is off, that's the owner's go-ahead. A label taken off before
             # the judge said anything isn't an answer to it.
             st["ownerSaw"] = head
-        settle("pending", f"Settled; {CFG['owner']} decides (the {CFG['labels']['owner']} label)",
-               "Judged yours to decide" if judged_owner else f"Labelled {CFG['labels']['owner']}")
+        if st.get("escalated"):
+            # Labelled here at the round limit: still theirs, clean reviews
+            # since or not, until the label comes off.
+            settle("pending", f"Past the review-round limit: {CFG['owner']} decides (the {CFG['labels']['owner']} label)",
+                   "Unsettled after the round limit")
+        else:
+            settle("pending", f"Settled; {CFG['owner']} decides (the {CFG['labels']['owner']} label)",
+                   "Judged yours to decide" if judged_owner else f"Labelled {CFG['labels']['owner']}")
 
     def judged(why):
         """Settled, but not something the steward lands on its own word: one
@@ -536,7 +542,7 @@ def handle(repo, pr, repo_info, digest):
     # Sent to the owner (by hand, a fix job or a judge): theirs, whatever else
     # is open on it, and nothing more is asked or handed off until the label
     # comes off. One past the round limit is listed as that, below.
-    if CFG["labels"]["owner"] in labels and not st.get("escalated"):
+    if CFG["labels"]["owner"] in labels:
         owner_decides()
         save(key, st)
         return

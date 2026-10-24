@@ -603,8 +603,13 @@ for t in (700, 800):
 FAIL.clear()
 status, _ = run(mkpr(**stuck), 900)
 assert any("/comments" in x for x in WROTE) and JOBS == [], WROTE
-status, _ = run(mkpr(**stuck), 1000)
+status, _ = run(mkpr(labels=["needs-owner"], **stuck), 1000)
 assert not any("--add-label" in x for x in WROTE), "labelled once"
+# Clean reviews since don't land it while the label is on; taking it off does.
+status, digest = run(clean(labels=["needs-owner"]), 1100)
+assert not merged() and JOBS == [] and [x[0] for x in digest] == ["Unsettled after the round limit"], (status, digest)
+status, _ = run(clean(), 1200)
+assert merged(), status
 
 # No CI at all: the judge builds and tests it itself.
 fresh_pr_state()
