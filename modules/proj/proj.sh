@@ -339,7 +339,8 @@ case "${1:-status}" in
       news='' lines=''
       while IFS=$'\t' read -r t since was; do
         [ -n "$t" ] || continue
-        if ! read -r repo n < <(target "$t") || ! [[ $since =~ ^[0-9]+$ ]]; then
+        if ! read -r repo n < <(target "$t") || ! [[ $since =~ ^[0-9]+$ ]] ||
+          { [ -n "$was" ] && ! jq -e 'type == "object"' <<<"$was" >/dev/null 2>&1; }; then
           # Not a line proj await writes (one edited by hand): the job hears
           # so rather than waiting on it for good.
           news+="- $t: not something proj can watch; no longer watched"$'\n'
@@ -419,7 +420,8 @@ Carry on from there. Anything you left in the background last turn was stopped w
       # What it awaits, from the baseline `proj await` took; one line per
       # target, the first await of it in the turn.
       if [ "$(cat "$dir/outcome")" = "done" ] && [ -s "$dir/await.next" ]; then
-        awk -F '\t' '!seen[$1]++' "$dir/await.next" >"$dir/await"
+        # Swapped in whole, so _watch never reads half of it.
+        awk -F '\t' '!seen[$1]++' "$dir/await.next" >"$dir/await.new" && mv -f "$dir/await.new" "$dir/await"
       fi
       rm -f "$dir/await.next"
     elif [ "$rc" -eq 124 ]; then

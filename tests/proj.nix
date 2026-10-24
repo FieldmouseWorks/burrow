@@ -417,6 +417,13 @@ pkgs.testers.runNixOSTest {
         prompt = machine.succeed(f"cat /data/dev/jobs/{e}/prompt.2")
         assert "https://example.com/nope: not something proj can watch" in prompt, prompt
         machine.wait_until_succeeds(f"su - dev -c 'proj state {e}' | grep -x done", timeout=120)
+        # A fingerprint that isn't one proj wrote is the same.
+        machine.succeed(f"su - dev -c \"printf 'o/r#5\\t%s\\tnotjson\\n' $(date +%s) >/data/dev/jobs/{e}/await\"")
+        proj("_watch")
+        machine.wait_until_succeeds(f"grep -x 3 /data/dev/jobs/{e}/turns", timeout=30)
+        prompt = machine.succeed(f"cat /data/dev/jobs/{e}/prompt.3")
+        assert "o/r#5: not something proj can watch" in prompt, prompt
+        machine.wait_until_succeeds(f"su - dev -c 'proj state {e}' | grep -x done", timeout=120)
 
     with subtest("an earlier turn's answer is read without the turn count"):
         e = proj('run web "sleep 1"')
