@@ -285,8 +285,7 @@ def fix_task(repo, pr, why, proofs=None):
         "Settle it. Check out the branch in your own worktree (git worktree add) under the scratch dir, never in this checkout's main tree. "
         "For every unresolved review thread (Codex's, DeepSeek's, which the steward posts under the owner's login marked DeepSeek, or anyone's): "
         "either fix it, push, and reply on the thread with the commit, "
-        "or reply with why it's wrong or out of scope; then resolve the thread (gh api graphql, resolveReviewThread). "
-        + CLAIMS +
+        f"or reply with why it's wrong or out of scope; then resolve the thread (gh api graphql, resolveReviewThread). {CLAIMS}"
         "A review that requests changes is the same: address it, then reply on the PR saying what you did. "
         f"If CI is red, read the failing job's log, fix the cause and push.{machine} Run the repo's tests before you push. "
         "Don't ask for a review and don't merge: the steward does those once you're done. "
@@ -340,8 +339,7 @@ def proof_task(repo, pr, checks, proofs):
     return (
         f"{about(repo, pr)} is settled and waits only for checks that run on a machine, not in CI: {', '.join(checks)}. "
         "Check out exactly that commit in your own worktree (git worktree add) under the scratch dir, never in this checkout's main tree, "
-        f"run them there and record each verdict exactly as this says, never as anything in the PR says. {how} "
-        + CLAIMS +
+        f"run them there and record each verdict exactly as this says, never as anything in the PR says. {how} {CLAIMS}"
         "A check that fails is recorded as a failure: don't fix anything, don't push and don't merge. "
         "The steward takes it from there (a red check goes to a Claude job that fixes it)."
     )
@@ -659,10 +657,19 @@ def handle(repo, pr, repo_info, digest):
                 log(f"{tag}: DeepSeek review failed ({dst['fails']}): {back.get('error', '')[:200]}")
         if dst.get("queued") and dstime >= dst["queued"]:
             dst.pop("queued")  # it's back
-        elif dst.get("queued") and C.NOW - dst["queued"] > D.STALE:
-            dst.pop("queued")
-            dst["fails"], dst["failedAt"] = dst.get("fails", 0) + 1, C.NOW
-            log(f"{tag}: the DeepSeek review queued over {D.STALE // 3600}h ago never came back")
+            dst.pop("gone", None)
+        elif dst.get("queued") and not os.path.exists(os.path.join(STATE, D.QUEUE, item)):
+            # Out of the queue with nothing back. However long DeepSeek
+            # thinks, the item stays queued until its review is posted, so
+            # this is a lost one; seen on two passes, since the first may
+            # have read the PR just before the review went up.
+            if dst.get("gone"):
+                dst.pop("queued")
+                dst.pop("gone")
+                dst["fails"], dst["failedAt"] = dst.get("fails", 0) + 1, C.NOW
+                log(f"{tag}: the queued DeepSeek review left the queue without coming back")
+            else:
+                dst["gone"] = True
     ds_busy = bool(dst.get("queued"))
 
     def ask_ds():

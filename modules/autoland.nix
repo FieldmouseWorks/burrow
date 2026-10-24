@@ -368,8 +368,9 @@ in
         Type = "oneshot";
         User = user;
         ExecStart = "${steward}/bin/autoland-steward deepseek";
-        # A pass queued past STALE (4h) counts it as failed anyway.
-        TimeoutStartSec = "4h";
+        # However long DeepSeek thinks: each read has its own timeout, and the
+        # API keeps a long call alive.
+        TimeoutStartSec = "infinity";
         Nice = 10;
         LoadCredential = "deepseek:${cfg.deepseek.envFile}";
       };
