@@ -271,10 +271,11 @@ case "${1:-status}" in
   stop)
     id=${2:?usage: proj stop ID}
     [ -d "$jobs/$id" ] || { echo "no job $id" >&2; exit 1; }
-    if systemctl --user -q is-active "$(unit "$id")"; then systemctl --user stop "$(unit "$id")"; fi
-    # A stopped job is over: nothing it waited on resumes it.
+    # Under the lock turns start under, so none starts between looking and
+    # stopping. A stopped job is over: nothing it waited on resumes it.
     exec {lk}>>"$jobs/$id/lock"
     flock "$lk"
+    if systemctl --user -q is-active "$(unit "$id")"; then systemctl --user stop "$(unit "$id")"; fi
     rm -f "$jobs/$id/await" "$jobs/$id/await.next"
     ;;
   list) find "$src" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort ;;

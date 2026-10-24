@@ -312,6 +312,19 @@ pkgs.testers.runNixOSTest {
         machine.fail(f"test -e {d}/await")
         assert machine.succeed(f"cat {d}/turns").strip() == "2"
 
+    with subtest("a turn started while proj stop waits for the lock is stopped too"):
+        # What _watch does when there's news: start the job's next turn under its lock.
+        machine.succeed(f"""cat >/tmp/turn.sh <<'EOF'
+    export XDG_RUNTIME_DIR=/run/user/$(id -u)
+    sleep 3
+    systemd-run --user --unit="proj-$(systemd-escape {job}).service" sleep 600
+    EOF""")
+        machine.succeed(f"su - dev -c 'flock {d}/lock sh /tmp/turn.sh' >/tmp/turn.log 2>&1 &")
+        time.sleep(1)
+        proj(f"stop {job}")
+        machine.succeed("grep -q 'Running as unit' /tmp/turn.log")
+        machine.fail(f"systemctl --user -M dev@ -q is-active '{unit(job)}'")
+
     with subtest("a job past its memory cap is killed by its own limit"):
         e = proj("run web eat")
         machine.wait_until_succeeds(f"su - dev -c 'proj state {e}' | grep -x failed", timeout=120)
