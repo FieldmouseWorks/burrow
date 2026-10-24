@@ -63,8 +63,8 @@ for d in "$src"/*/; do
       if [ "$major" = true ] && [ -n "$me" ]; then
         verdict=$(gh pr view "$n" -R "$repo" --json comments 2>/dev/null | jq -r --arg me "$me" --arg sha "$sha" '
           [.comments[] | select(.author.login == $me) | .body
-            | capture("<!-- major-verdict: (?<v>ok|held) (?<sha>[0-9a-f]{40}) -->")] | last
-          | if . != null and .sha == $sha then .v else "" end' || true)
+            | capture("<!-- major-verdict: (?<v>ok|held) (?<sha>[0-9a-f]{40}) -->") | select(.sha == $sha)] | last
+          | if . != null then .v else "" end' || true)
       fi
       if [ "$major" = true ] && [ "$verdict" = held ]; then
         echo "- $title: https://github.com/$repo/pull/$n" >>"$held"
