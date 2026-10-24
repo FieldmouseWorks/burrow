@@ -59,6 +59,19 @@ def settle_repo(r, known):
     repo, rc = r["repo"], repo_cfg(r["repo"])
     st = load(f"repo-{repo.replace('/', '_')}.json", {})
     new = repo not in known
+    # The labels the steward and its jobs put on PRs: without them a hold
+    # can't be set and the round limit can't hand a PR to the owner.
+    want = [CFG["labels"]["hold"], CFG["labels"]["owner"]]
+    if st.get("labels") != want:
+        made = [C.write("label", "create", name, "-R", repo, "--force", "--color", color, "--description", about,
+                     check=False) is not None
+                for name, color, about in zip(want, ("fbca04", "b60205"), (
+                    "The steward leaves this PR alone",
+                    f"Waits for {CFG['owner']}; take the label off to let the steward carry on"))]
+        if all(made):
+            log(f"{repo}: labels {', '.join(want)}")
+            st["labels"] = want
+            save(f"repo-{repo.replace('/', '_')}.json", st)
     # A repo seen for the first time has no state yet, so it's settled now.
     if C.NOW - st.get("settings", 0) < 86400:
         return new

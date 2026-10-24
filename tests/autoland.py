@@ -75,6 +75,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(sys.argv[1])))
 sys.argv = ["steward"]
 import common as C  # noqa: E402
 import deepseek as D  # noqa: E402
+import repos as R  # noqa: E402
 import steward as S  # noqa: E402
 D.ssl.create_default_context = lambda cafile=None: None  # plain http here
 
@@ -420,6 +421,10 @@ red = CI_GREEN + [{"__typename": "StatusContext", "context": "remi-proof", "stat
 run(clean(checks=red), 0)
 status, _ = run(clean(checks=red), 7200)
 assert "CI is red: remi-proof" in status and len(JOBS) == 1 and "isn't settled" in JOBS[0]
+# A dependency update waiting only on a proof check gets its job too.
+fresh_pr_state()
+status, _ = run(mkpr(branch="dependabot/npm/foo-1", title="Bump foo from 1.4 to 1.5", number=11, checks=proof), 900)
+assert len(JOBS) == 1 and "just proof" in JOBS[0] and "a Claude job is running remi-proof" in status
 del S.CFG["repos"]["sam/r"]
 
 # A Renovate major lands on renovate-sweep's ok for its head, from our login.
@@ -437,6 +442,18 @@ assert "state=success" in status and merged()
 fresh_pr_state()
 status, _ = run(mkpr(comments=[said(f"<!-- major-verdict: ok {head} -->")], checks=busy, **major), 900)
 assert not merged()
+# One touching a one-way path still needs the ok: a judge's land doesn't
+# replace a held or missing verdict.
+fresh_pr_state()
+gated = {**major, "files": ("migrations/0002.sql",)}
+for said_ in ([], [said(f"<!-- major-verdict: held {head} -->")]):
+    status, _ = run(mkpr(comments=[*said_, said(f"<!-- autoland-judgment: land {head} -->")], **gated), 900)
+    assert not merged() and JOBS == [] and "renovate-sweep" in status, said_
+status, _ = run(mkpr(comments=[said(f"<!-- major-verdict: ok {head} -->")], **gated), 900)
+assert not merged() and len(JOBS) == 1 and "migrations/" in JOBS[0]
+status, _ = run(mkpr(comments=[said(f"<!-- major-verdict: ok {head} -->"),
+                               said(f"<!-- autoland-judgment: land {head} -->")], **gated), 1000)
+assert merged()
 # A Renovate minor: Renovate merges it itself. A Dependabot major is judged.
 fresh_pr_state()
 status, _ = run(mkpr(branch="renovate/foo-1.x", title="Update foo from 1.4 to 1.5", number=9), 900)
@@ -478,5 +495,16 @@ assert RUNS == []
 RESULT["v"] = "clean"
 run(mkpr(comments=[codex_clean()]), 4400)
 assert RUNS == [head]
+
+# Every repo gets the hold and needs-owner labels, once.
+fresh_pr_state()
+C.NOW = C.ts(T0)
+C.save("repo-sam_r.json", {"settings": C.NOW})
+WROTE.clear()
+R.settle_repo({"repo": "sam/r", "private": False, "default": "main"}, {"sam/r"})
+assert sorted(x.split()[2] for x in WROTE if x.startswith("label create")) == ["hold", "needs-owner"], WROTE
+WROTE.clear()
+R.settle_repo({"repo": "sam/r", "private": False, "default": "main"}, {"sam/r"})
+assert WROTE == [], WROTE
 
 print("autoland: ok")

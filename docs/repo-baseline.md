@@ -22,6 +22,8 @@ change nothing else in the same PR.
   required. Repo admins can still merge past it from the PR page. A repo whose
   automation pushes to its default branch (`directPush`) gets only the first
   two. Existing rules stay; the ruleset only adds.
+- The `hold` and `needs-owner` labels (`burrow.autoland.labels`), which the
+  steward and its jobs put on PRs.
 
 ## The PR flow (the steward)
 

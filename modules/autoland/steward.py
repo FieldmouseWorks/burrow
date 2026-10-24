@@ -379,6 +379,15 @@ def handle(repo, pr, repo_info, digest):
         else:
             settle("pending", f"Settled, but no Claude job could judge it ({why})", "Couldn't start a Claude job to judge it")
 
+    def prove():
+        """Only checks that run on a machine, not in CI, are left: a Claude
+        job runs them on this head and records their verdicts."""
+        if st.get("proved") == head or started("proved", proof_task(repo, pr, ci_names, rc["proofJobs"])):
+            settle("pending", f"Settled; a Claude job is running {', '.join(ci_names)}"[:140])
+        else:
+            settle("pending", f"Settled, but no Claude job could run {', '.join(ci_names)}"[:140],
+                   "Couldn't start a Claude job to run its checks")
+
     # A list longer than one page could hide a hold, an open thread or a
     # changes-requested review: fail closed.
     cut = [k for k, more in (("labels", pr["labels"]["pageInfo"]["hasNextPage"]),
@@ -420,29 +429,32 @@ def handle(repo, pr, repo_info, digest):
     dep = dep_kind(pr)
     gate = one_way(pr, rc)
     renovate = pr["headRefName"].startswith("renovate/")
+    proof_only = ci == "pending" and bool(ci_names) and all(c in rc["proofJobs"] for c in ci_names)
 
     # Dependency bumps: CI is the review. Renovate merges its own minor
     # ones; renovate-sweep fixes the red ones and gives each major a verdict.
     if dep:
+        major_verdict = C.marker(pr, MAJOR_VERDICT, head) if dep == "major" and renovate else None
         if changes:
             settle("pending", "Dependency update; changes requested by " + ", ".join(changes))
+        elif proof_only and not open_threads:
+            prove()
         elif ci in ("red", "pending"):
             settle("pending", f"Dependency update, CI {ci}")
         elif open_threads:
             settle("pending", f"Dependency update; {open_threads} open review thread{'s' * (open_threads > 1)}")
         elif CFG["labels"]["owner"] in labels:
             owner_decides()
+        elif dep == "major" and renovate and major_verdict != "ok":
+            # renovate-sweep's verdict comes first; a judge doesn't replace it.
+            settle("pending", "Major update; renovate-sweep held it: see its comment" if major_verdict == "held"
+                   else "Major update; waiting for renovate-sweep's verdict on this head")
         elif gate or ci == "none":
             judged(f"a dependency update touching {gate}" if gate else "the repo has no CI")
         elif dep == "major" and not renovate:
             judged("a major dependency update")
         elif dep == "major":
-            v = C.marker(pr, MAJOR_VERDICT, head)
-            if v == "ok":
-                land_now("Major update renovate-sweep cleared, CI green")
-            else:
-                settle("pending", "Major update; renovate-sweep held it: see its comment" if v == "held"
-                       else "Major update; waiting for renovate-sweep's verdict on this head")
+            land_now("Major update renovate-sweep cleared, CI green")
         else:
             settle("success", "Dependency update, CI green")
             # Renovate merges its own; Dependabot's need merging.
@@ -567,14 +579,8 @@ def handle(repo, pr, repo_info, digest):
         settle("pending", "CI is red: " + ", ".join(ci_names)[:100])
         if idle > rc["handoffAfter"] * MIN and st.get("handed") != head:
             hand_off("CI is red (" + ", ".join(ci_names) + ")")
-    elif ci == "pending" and all(c in rc["proofJobs"] for c in ci_names):
-        # Only checks that run on a machine, not in CI, are left: a Claude
-        # job runs them on this head and records their verdicts.
-        if st.get("proved") == head or started("proved", proof_task(repo, pr, ci_names, rc["proofJobs"])):
-            settle("pending", f"Settled; a Claude job is running {', '.join(ci_names)}"[:140])
-        else:
-            settle("pending", f"Settled, but no Claude job could run {', '.join(ci_names)}"[:140],
-                   "Couldn't start a Claude job to run its checks")
+    elif proof_only:
+        prove()
     elif ci == "pending":
         settle("pending", "Settled; waiting for CI: " + ", ".join(ci_names)[:90])
     elif CFG["labels"]["owner"] in labels:
