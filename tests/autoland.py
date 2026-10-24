@@ -514,6 +514,16 @@ assert len(JOBS) == 1 and "build or tests failing" in JOBS[0] and "isn't settled
 assert "a Claude job is fixing it" in status and not merged() and digest == [], (status, digest)
 status, _ = run(clean(comments=[failed], **mig), 900)
 assert JOBS == [] and "a Claude job is fixing it" in status
+# A fix job that answered a finding on this head without pushing didn't fix
+# what the judge found failing: that gets its own job.
+fresh_pr_state()
+run(clean(threads=[False], **mig), 0)
+run(clean(threads=[False], **mig), 7200)
+assert len(JOBS) == 1 and "isn't settled" in JOBS[0], JOBS
+run(clean(**mig), 7300)
+assert len(JOBS) == 1 and f"autoland-judgment: failed {head}" in JOBS[0], JOBS
+status, _ = run(clean(comments=[failed], **mig), 7400)
+assert len(JOBS) == 1 and "build or tests failing" in JOBS[0], (status, JOBS)
 
 # The needs-owner label goes straight to the owner: no judge job.
 fresh_pr_state()

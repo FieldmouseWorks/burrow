@@ -367,9 +367,9 @@ def handle(repo, pr, repo_info, digest):
             log(f"{tag}: couldn't start a Claude job (no checkout, or proj refused)")
         return bool(jid)
 
-    def hand_off(why):
+    def hand_off(why, kind="handed"):
         proofs = {c: rc["proofJobs"][c] for c in ci_names if c in rc["proofJobs"]} if ci == "red" else {}
-        if not started("handed", fix_task(repo, pr, why, proofs)):
+        if not started(kind, fix_task(repo, pr, why, proofs)):
             digest.append(("Couldn't start a Claude job to fix it", line, why))
 
     def merge():
@@ -408,10 +408,12 @@ def handle(repo, pr, repo_info, digest):
             settle("pending", f"Settled; a Claude job judged it {CFG['owner']}'s to decide ({why})", "Judged yours to decide")
         elif verdict == "failed":
             # The judge's own build or tests failed on this head: a fix job
-            # has it, and its push is judged again.
+            # has it, and its push is judged again. Its own once a head: a
+            # job that answered a finding here without pushing didn't fix this.
             settle("pending", "Settled, but its build or tests fail; a Claude job is fixing it")
-            if st.get("handed") != head:
-                hand_off("the Claude job that judged it found its build or tests failing on this head (its comment on the PR says what)")
+            if st.get("failFixed") != head:
+                hand_off("the Claude job that judged it found its build or tests failing on this head (its comment on the PR says what)",
+                         "failFixed")
         elif update_branch():
             settle("pending", "Settled, but behind its base: brought up to date, reviewed again")
         elif st.get("judged") == head or started("judged", judge_task(repo, pr, why, ci == "none")):
