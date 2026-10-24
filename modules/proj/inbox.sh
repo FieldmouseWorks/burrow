@@ -5,7 +5,7 @@
 # the label off ends it; a turn still running gets its answer posted first.
 # Runs every few minutes from a timer (../proj.nix); `proj-inbox status` shows
 # which issue is which job. SRC, JOBS, STATE, SCRATCH, LABEL, AUTHORS, VM,
-# HOST and NOTIFY come from ../proj.nix.
+# HOST, NOTIFY and MARK come from ../proj.nix.
 #
 # The inbox posts as the gh login, which is usually the owner's own account,
 # so its own comments carry MARK and are never read back as replies. Jobs are
@@ -16,7 +16,6 @@
 # Everything goes through GitHub's REST API: its GraphQL budget is shared with
 # whatever else runs under the same login, and runs out first.
 
-MARK='<!-- proj-inbox -->'
 vm=()
 [ "$VM" != 1 ] || vm=(--vm)
 mkdir -p "$STATE"

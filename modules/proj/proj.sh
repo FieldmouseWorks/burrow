@@ -162,10 +162,14 @@ target() {
 # so a run of them wakes the job once. REST, not GraphQL, whose budget is
 # shared with everything else under the login.
 fingerprint() { # repo n
-  local issue pr sha reviews status checks
+  local issue comments pr sha reviews status checks
   issue=$("$GH" api "repos/$1/issues/$2") || return
   if ! jq -e 'has("pull_request")' <<<"$issue" >/dev/null; then
-    jq -c '{state, comments}' <<<"$issue"
+    # proj-inbox's own comments (MARK) aren't news: a job awaiting its own
+    # issue would wake on every answer the inbox posts for it.
+    comments=$("$GH" api --paginate --slurp "repos/$1/issues/$2/comments?per_page=100" |
+      jq --arg mark "$MARK" '[add // [] | .[] | select(.body | contains($mark) | not)] | length') || return
+    jq -c --argjson comments "$comments" '{state, comments: $comments}' <<<"$issue"
     return
   fi
   # Each answer is cut down to what's compared before it's passed on: a whole

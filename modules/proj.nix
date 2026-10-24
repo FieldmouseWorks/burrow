@@ -8,6 +8,8 @@ inputs:
 { config, lib, pkgs, ... }:
 let
   cfg = config.burrow.proj;
+  # What marks proj-inbox's own comments on an issue: never a reply, never news.
+  inboxMark = "<!-- proj-inbox -->";
   inherit (config.burrow) user projectsDir;
 
   proj = pkgs.writeShellApplication {
@@ -24,6 +26,7 @@ let
       MAX_WAIT=${toString cfg.maxWait}
       AWAIT_HOURS=${toString cfg.awaitHours}
       GH=${lib.getExe cfg.gh}
+      MARK=${lib.escapeShellArg inboxMark}
     '' + builtins.readFile ./proj/proj.sh;
   };
 
@@ -38,6 +41,7 @@ let
       LABEL=${lib.escapeShellArg cfg.inbox.label}
       AUTHORS=${lib.escapeShellArg (lib.concatStringsSep " " cfg.inbox.authors)}
       VM=${if cfg.inbox.vm then "1" else "0"}
+      MARK=${lib.escapeShellArg inboxMark}
       HOST=${lib.escapeShellArg config.networking.hostName}
       NOTIFY=${lib.escapeShellArg (lib.optionalString (config.burrow.tools ? notify) (lib.getExe config.burrow.tools.notify))}
     '' + builtins.readFile ./proj/inbox.sh;

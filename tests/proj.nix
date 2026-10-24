@@ -2,8 +2,9 @@
 # (burrow.claude.package) checks that jobs past maxJobs wait in line, that
 # --first goes ahead but can't starve a turn that has waited long, that a job
 # whose turn has ended frees its slot, that one waiting on a PR (proj await)
-# is resumed when the PR changes (even if it changed before the turn ended)
-# or once its deadline passes with GitHub unreadable, that a reply meanwhile
+# is resumed when the PR changes (even if it changed before the turn ended;
+# never for proj-inbox's own comment on an awaited issue) or once its
+# deadline passes with GitHub unreadable, that a reply meanwhile
 # owns the job's waits, that proj-inbox posts every finished turn's answer
 # (one resumed before it looked too, none misread while a turn starts), and
 # that a job past its memory cap is killed by its own cgroup's limit rather
@@ -224,6 +225,21 @@ pkgs.testers.runNixOSTest {
         machine.wait_until_succeeds(f"su - dev -c 'proj state {e}' | grep -x done", timeout=120)
         assert machine.succeed(f"cat /data/dev/jobs/{e}/turns").strip() == "2"
         machine.fail(f"test -e /data/dev/jobs/{e}/await")
+
+    with subtest("the inbox's own answer on an awaited issue isn't news"):
+        github("repos/o/r/issues/6", '{"state": "open", "comments": 0}')
+        github("repos/o/r/issues/6/comments", '[]')
+        e = proj('run web "await https://github.com/o/r/issues/6"')
+        machine.wait_until_succeeds(f"su - dev -c 'proj state {e}' | grep -x done", timeout=120)
+        github("repos/o/r/issues/6", '{"state": "open", "comments": 1}')
+        github("repos/o/r/issues/6/comments", '[{"id": 1, "body": "did it\\n<!-- proj-inbox -->"}]')
+        proj("_watch")
+        time.sleep(3)
+        assert machine.succeed(f"cat /data/dev/jobs/{e}/turns").strip() == "1"
+        github("repos/o/r/issues/6", '{"state": "open", "comments": 2}')
+        github("repos/o/r/issues/6/comments", '[{"id": 1, "body": "did it\\n<!-- proj-inbox -->"}, {"id": 2, "body": "yes"}]')
+        proj("_watch")
+        machine.wait_until_succeeds(f"grep -x 2 /data/dev/jobs/{e}/turns", timeout=30)
 
     with subtest("the await deadline holds while GitHub can't be read"):
         github("repos/o/r/commits/abc/check-runs", '{"check_runs": [{"name": "ci", "status": "in_progress", "conclusion": null}]}')
