@@ -340,7 +340,7 @@ def mkpr(reviews=(), comments=(), threads=(), draft=True):
         "id": "x", "number": 5, "title": "t", "url": "u", "isDraft": draft, "isCrossRepository": False,
         "headRefName": "feat", "headRefOid": head, "baseRefName": "main", "createdAt": T0, "updatedAt": T0,
         "mergeStateStatus": "CLEAN", "author": {"login": "sam"}, "autoMergeRequest": None,
-        "labels": {"pageInfo": {"hasNextPage": False}, "nodes": []}, "files": {"nodes": [{"path": "a.py"}]},
+        "labels": {"pageInfo": {"hasNextPage": False}, "nodes": []}, "files": {"nodes": [{"path": "a.py", "changeType": "MODIFIED"}]},
         "changedFiles": 1, "reactions": {"nodes": []}, "comments": {"nodes": list(comments)},
         "reviewThreads": {"pageInfo": {"hasNextPage": False}, "nodes": [{"isResolved": r} for r in threads]},
         "reviews": {"pageInfo": {"hasPreviousPage": False}, "nodes": list(reviews)},
@@ -521,13 +521,13 @@ print("one-way: ok")
 # A dependency bot's change to the gate: a workflow edit past repinning its
 # actions is reviewed like a Claude PR, since nothing else reads it; a pin
 # bump alone merges on green CI like any dependency update.
-def bump(diff, path=".github/workflows/ci.yml"):
+def bump(diff, path=".github/workflows/ci.yml", change="MODIFIED"):
     PR_DIFF["v"] = diff
     WROTE.clear()
     pr = mkpr()
     pr.update(number=12, headRefName="dependabot/github_actions/actions/checkout-4.2.0",
               title="Bump actions/checkout from 4.1.0 to 4.2.0", author={"login": "dependabot"},
-              files={"nodes": [{"path": path}]})
+              files={"nodes": [{"path": path, "changeType": change}]})
     S.save("pr-sam_r-12.json", {})
     return run(pr, 4000)[0]
 
@@ -549,4 +549,20 @@ status = bump("")  # the diff couldn't be read
 assert "Dependency update" not in status and not any("pr merge" in x for x in WROTE), (status, WROTE)
 status = bump(PIN, ".github/CODEOWNERS")
 assert "Dependency update" not in status and not any("pr merge" in x for x in WROTE), (status, WROTE)
+# The file list names only a rename's new path: a rename out of .github/ or
+# a dormant workflow renamed in is read from the diff, and so is a workflow
+# whose mode alone changed; none of them is a repin.
+for diff, path, change in (
+        ("diff --git a/.github/CODEOWNERS b/CODEOWNERS.bak\nsimilarity index 100%\n"
+         "rename from .github/CODEOWNERS\nrename to CODEOWNERS.bak\n", "CODEOWNERS.bak", "RENAMED"),
+        ("diff --git a/ci.yml.disabled b/.github/workflows/ci.yml\nsimilarity index 100%\n"
+         "rename from ci.yml.disabled\nrename to .github/workflows/ci.yml\n", ".github/workflows/ci.yml", "RENAMED"),
+        ("diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml\nold mode 100644\nnew mode 100755\n",
+         ".github/workflows/ci.yml", "MODIFIED")):
+    status = bump(diff, path, change)
+    assert "Dependency update" not in status and not any("pr merge" in x for x in WROTE), (diff, status, WROTE)
+# A rename elsewhere is read too, and merges.
+status = bump("diff --git a/src/a.rs b/src/b.rs\nsimilarity index 100%\nrename from src/a.rs\nrename to src/b.rs\n",
+              "src/b.rs", "RENAMED")
+assert "Dependency update, CI green" in status and any("pr merge" in x for x in WROTE), (status, WROTE)
 print("gate edits: ok")
