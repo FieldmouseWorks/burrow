@@ -64,3 +64,10 @@ def save(name, value):
     except OSError:
         if not DRY:  # `status` from a shell that can't write the state dir: fine
             raise
+
+
+def repo_cfg(repo):
+    """The defaults, with this repo's overrides from config.repos on top."""
+    c = dict(CFG["defaults"])
+    c.update(CFG["repos"].get(repo, {}))
+    return c

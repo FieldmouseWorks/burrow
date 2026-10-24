@@ -39,7 +39,7 @@ import subprocess
 import sys
 import tempfile
 
-from common import CFG, DRY, DS, MIN, NOW, STATE, gh, load, log, save, ts, write
+from common import CFG, DRY, DS, MIN, NOW, STATE, gh, load, log, repo_cfg, save, ts, write
 from deepseek import DONE, QUEUE, STALE, deepseek_queue, deepseek_verdict
 
 CONTEXT = CFG["context"]
@@ -64,13 +64,6 @@ def open_prs(owner, name):
         if not page["pageInfo"]["hasNextPage"]:
             return info, prs
         cursor = page["pageInfo"]["endCursor"]
-
-
-def repo_cfg(repo):
-    """The defaults, with this repo's overrides from config.repos on top."""
-    c = dict(CFG["defaults"])
-    c.update(CFG["repos"].get(repo, {}))
-    return c
 
 
 # ---------------------------------------------------------------- repos

@@ -432,6 +432,15 @@ worker()
 assert RUNS == [] and os.listdir(DDIR) == []
 CUR["sha"] = head
 
+# Queued, then the repo is taken off DeepSeek: nothing of it is sent.
+fresh_pr_state()
+run(mkpr(comments=[codex_clean]), 0)
+run(mkpr(comments=[codex_clean]), 600)
+S.CFG["repos"]["sam/r"] = {"deepseek": False}
+worker()
+assert RUNS == [] and os.listdir(DDIR) == []
+del S.CFG["repos"]["sam/r"]
+
 # A repo set to Codex alone lands on Codex's word.
 fresh_pr_state()
 S.CFG["repos"]["sam/r"] = {"deepseek": False}
