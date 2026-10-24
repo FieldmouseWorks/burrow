@@ -358,22 +358,38 @@ def renovate_edited(repo, pr, st):
 
 
 WORKFLOW_RE = re.compile(r"^\.github/workflows/[^/]+\.ya?ml$")
-# A changed line that only repins an action: "uses: owner/action@sha # v4.1.0".
-PIN_LINE_RE = re.compile(r"^[+-]\s*(-\s+)?uses:\s*([^\s#@]+)@[^\s#]+(\s+#.*)?$")
+# A line that only names an action at a ref: "uses: owner/action@sha # v4.1.0".
+# The ref is a sha, tag or branch and nothing else, so no shell can ride on it.
+PIN_LINE_RE = re.compile(r"^(\s*(-\s+)?uses:\s*[^\s#@]+@)[0-9A-Za-z._/-]+(\s+#.*)?$")
 
 
 def pins_only(repo, pr):
     """True if every file the PR's diff touches under .github/ is a workflow
-    whose changed lines only repin actions: each removed `uses:` comes back
-    with the same action at a new ref, nothing added or dropped (no
-    permissions, triggers or commands). A rename or copy into or out of
-    .github/, or a file with no repinned line (a mode change, a binary), is
-    not a repin. None if the diff couldn't be read."""
+    whose changes only repin actions: each removed `uses:` line is replaced in
+    place by one that's the same up to its `@` (indentation, key and action),
+    so it's the same step at a new ref, and nothing is added, dropped or moved
+    (no permissions, triggers or commands, and no `uses:`-shaped text inside
+    a `run:`). A rename or copy into or out of .github/, or a file with no
+    repinned line (a mode change, a binary), is not a repin. None if the diff
+    couldn't be read."""
     diff = gh("pr", "diff", str(pr["number"]), "-R", repo, check=False)
     if not isinstance(diff, str) or not diff:
         return None
-    path, hunk, gated, changed = None, False, set(), {}
+    path, hunk, gated, pinned, out, back = None, False, set(), set(), [], []
+
+    def paired():
+        # A run of removed lines, then the run that replaced them, line by line.
+        ok = len(out) == len(back) and all(a.group(1) == b.group(1) for a, b in zip(out, back))
+        if out and ok:
+            pinned.add(path)
+        out.clear()
+        back.clear()
+        return ok
+
     for x in diff.splitlines():
+        if not (hunk and x[:1] in "+-\\") or (x[:1] == "-" and back):
+            if not paired():
+                return False
         if x.startswith("diff --git "):
             a, sep, b = x[len("diff --git "):].partition(" b/")
             if not (sep and a.startswith("a/")):
@@ -391,11 +407,11 @@ def pins_only(repo, pr):
         elif x.startswith("@@"):
             hunk = True
         elif path and hunk and x[:1] in "+-" and x[1:].strip():
-            m = PIN_LINE_RE.match(x)
+            m = PIN_LINE_RE.match(x[1:])
             if not m:
                 return False
-            changed.setdefault(path, {"+": [], "-": []})[x[0]].append(m.group(2))
-    return all(p in changed and sorted(changed[p]["+"]) == sorted(changed[p]["-"]) for p in gated)
+            (out if x[0] == "-" else back).append(m)
+    return paired() and gated <= pinned
 
 
 def gate_edit(repo, pr, st):

