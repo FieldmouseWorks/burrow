@@ -59,6 +59,9 @@ adopt() {
   n=$(cat "$d/turns" 2>/dev/null) || return 0
   for f in slot outcome result; do
     [ -e "$d/$f" ] || continue
+    # A turn still running the old _exec reads its outcome back once it has
+    # written it (to publish its waits), so that one stays until it has ended.
+    if [ "$f" = outcome ] && ! [ "$d/prompt.$n" -nt "$d/$f" ] && ! gone "$(unit "$1")"; then continue; fi
     if [ ! -e "$d/$n.$f" ] && ! [ "$d/prompt.$n" -nt "$d/$f" ]; then
       mv -f "$d/$f" "$d/$n.$f" 2>/dev/null || true
     else

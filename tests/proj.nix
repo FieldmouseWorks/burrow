@@ -346,6 +346,15 @@ pkgs.testers.runNixOSTest {
         machine.succeed(f"su - dev -c 'echo done >{d}/2.outcome'")
         assert state(job) == "done", state(job)
 
+    with subtest("a turn running across the update keeps its outcome until it ends"):
+        # The old _exec reads its outcome back to publish its waits.
+        e = proj('run web "sleep 30"')
+        machine.wait_until_succeeds(f"su - dev -c 'proj state {e}' | grep -x running", timeout=60)
+        machine.succeed(f"su - dev -c 'echo done >/data/dev/jobs/{e}/outcome'")
+        assert state(e) == "running", state(e)
+        machine.succeed(f"test -s /data/dev/jobs/{e}/outcome")
+        proj(f"stop {e}")
+
     with subtest("an issue closed under a waiting job ends its waits"):
         d = f"/data/dev/jobs/{job}"
         machine.succeed(f"su - dev -c \"printf 'o/r#6\\t%s\\t{{}}\\n' $(date +%s) >{d}/await\"")
