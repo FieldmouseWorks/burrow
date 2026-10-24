@@ -898,8 +898,19 @@ RESULT["v"] = "clean"
 run(mkpr(comments=[codex_clean()]), 4400)
 assert queued() == [head]
 
-# A queued review that never comes back counts as a failure, and is asked again.
-status, _ = run(mkpr(comments=[codex_clean()]), 4400 + D.STALE + 1)
+# Still queued, however long it takes: no pass gives up on it.
+status, _ = run(mkpr(comments=[codex_clean()]), 4400 + 86400)
+assert json.load(open(f"{tmp}/state/pr-sam_r-5.json"))["ds"].get("fails", 0) == 0 and queued() == [head]
+assert "DeepSeek is reviewing" in status
+
+# Out of the queue with nothing back (lost): one pass may have read the PR
+# just before its review went up, so it counts as a failure on the second,
+# and is asked again.
+for x in os.listdir(QDIR):
+    os.remove(f"{QDIR}/{x}")
+run(mkpr(comments=[codex_clean()]), 4400 + 86500)
+assert json.load(open(f"{tmp}/state/pr-sam_r-5.json"))["ds"].get("fails", 0) == 0 and queued() == []
+run(mkpr(comments=[codex_clean()]), 4400 + 86600)
 assert json.load(open(f"{tmp}/state/pr-sam_r-5.json"))["ds"]["fails"] == 1 and queued() == [head]
 
 # Too big to send: the owner hears, and it isn't queued again.

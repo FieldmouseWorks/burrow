@@ -21,7 +21,6 @@ from common import CFG, DS, STATE, load, log, repo_cfg, save, ts
 DS_RE = re.compile(r"<!-- deepseek-review:v1 (\{.*?\}) -->")
 DS_FINDING = "<!-- deepseek-finding -->"
 QUEUE, DONE = "ds-queue", "ds-done"  # under STATE: asked for, and what went wrong
-STALE = 4 * 3600  # a queued review not back by then is taken as failed
 
 
 def deepseek_verdict(pr, head):
@@ -188,7 +187,7 @@ def prior_findings(repo, n):
         at = c.get("line") or c.get("original_line")
         text.append(f"- {c['path']}{f':{at}' if at else ''}: {body}\n"
                     + "".join(f"  Reply from {r['user']}: {r['body'].strip()}\n" for r in replies))
-    return "\n".join(text)[:60000]
+    return "\n".join(text)
 
 
 # The answer's shape. In strict mode (DeepSeek's beta endpoint) the API
@@ -301,7 +300,7 @@ Report only real defects a careful senior reviewer would block the merge for: bu
 
 Earlier findings on this PR are listed with the replies they got. Don't raise one again unless the code still has the problem and the reply is wrong; then say why the reply doesn't hold.
 
-Each finding: "path" (as the diff names it), "line" (a number from the diff's left column, on the new side, where the problem is), "severity" ("P0": unsafe or breaks things, "P1": a real bug or a rule broken, "P2": a smaller real defect), "title" (one line), "body" (what is wrong, why, and the fix, in a few sentences). At most 10, most severe first.
+Each finding: "path" (as the diff names it), "line" (a number from the diff's left column, on the new side, where the problem is), "severity" ("P0": unsafe or breaks things, "P1": a real bug or a rule broken, "P2": a smaller real defect), "title" (one line), "body" (what is wrong, why, and the fix, in a few sentences). Most severe first.
 
 Answer by calling submit_review if you have it, otherwise with JSON only: {{"findings": [...], "summary": "one sentence on the PR as a whole"}}"""
 
@@ -334,7 +333,7 @@ def run_deepseek(repo, pr):
     if not isinstance(found, list) or not all(isinstance(f, dict) for f in found):
         raise RuntimeError(f"not a review: {json.dumps(answer)[:100]}")
     comments, whole_file, loose = [], [], []
-    for f in found[:10]:
+    for f in found:
         sev = f.get("severity") if f.get("severity") in ("P0", "P1", "P2") else "P1"
         msg = f"**DeepSeek · {sev}** {quiet_mentions(f.get('title', ''))}\n\n{quiet_mentions(f.get('body', ''))}"
         lines = files.get(f.get("path"))
