@@ -46,7 +46,7 @@ def pr(n, labels=("major",), conclusion="SUCCESS"):
     return {"number": n, "title": f"Update foo{n} to v2", "headRefName": f"renovate/foo{n}-2.x",
             "headRefOid": f"{n:040x}", "labels": [{"name": x} for x in labels],
             "createdAt": "2099-01-01T00:00:00Z",
-            "statusCheckRollup": [{"name": "ci", "conclusion": conclusion}]}
+            "statusCheckRollup": [{"__typename": "CheckRun", "name": "ci", "status": "COMPLETED", "conclusion": conclusion}]}
 
 
 def verdict(n, v):
@@ -111,13 +111,25 @@ assert calls == [] and verb == "open" and url + "3" in body, body
 calls, (verb, _) = sweep([pr(4, conclusion="FAILURE")], {4: [verdict(4, "ok")]})
 assert len(calls) == 1 and verb == "close", (calls, verb)
 
+# Red and green as the steward has them: a cancelled run is red, so a job
+# fixes it; a skipped or neutral one is green, so it merges; one still
+# running holds it.
+calls, (verb, _) = sweep([pr(9, conclusion="CANCELLED")], {9: [verdict(9, "ok")]}, covered=[REPO])
+assert len(calls) == 1 and "#9 " in calls[0][-1] and "CI fails" in calls[0][-1], calls
+for green in ("SKIPPED", "NEUTRAL"):
+    calls, (verb, body) = sweep([pr(9, conclusion=green)], {9: [verdict(9, "ok")]})
+    assert calls == [] and verb == "open" and url + "9" in body, (green, calls, body)
+running = {**pr(9), "statusCheckRollup": [{"__typename": "CheckRun", "name": "ci", "status": "IN_PROGRESS", "conclusion": ""}]}
+calls, (verb, _) = sweep([running], {9: [verdict(9, "ok")]})
+assert calls == [] and verb == "close", (calls, verb)
+
 # Handed over for its verdict, then red on the same head (a proof run since):
 # handed over again, ok or not; once a head red.
 kept = tempfile.mkdtemp(dir=tmp)
 calls, _ = sweep([pr(7)], state=kept)
 assert len(calls) == 1, calls
 red_proof = {**pr(7), "statusCheckRollup": [
-    {"name": "ci", "conclusion": "SUCCESS"}, {"context": "remi-proof", "state": "FAILURE"}]}
+    *pr(7)["statusCheckRollup"], {"__typename": "StatusContext", "context": "remi-proof", "state": "FAILURE"}]}
 calls, _ = sweep([red_proof], {7: [verdict(7, "ok")]}, state=kept)
 assert len(calls) == 1 and "#7 " in calls[0][-1] and "CI fails" in calls[0][-1], calls
 calls, _ = sweep([red_proof], {7: [verdict(7, "ok")]}, state=kept)

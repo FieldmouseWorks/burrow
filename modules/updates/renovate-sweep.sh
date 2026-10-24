@@ -64,19 +64,25 @@ for d in "$src"/*/; do
       sha=$(jq -r .headRefOid <<<"$pr")
       title=$(jq -r .title <<<"$pr")
       branch=$(jq -r .headRefName <<<"$pr")
-      # Check runs carry a conclusion (empty while running), commit statuses a state.
-      red=$(jq -r '[.statusCheckRollup[]? | select((.context // .name) != $settled) | (.conclusion // .state // "" | ascii_upcase)
-        | select(. == "FAILURE" or . == "ERROR" or . == "TIMED_OUT" or . == "STARTUP_FAILURE")] | length' --arg settled "$SETTLED" <<<"$pr")
+      # Each check but the steward's own, green, pending or red as the
+      # steward reads it (ci_state in ../autoland/steward.py), so a head
+      # neither calls the other's is never left between them.
+      ci=$(jq -c '[.statusCheckRollup[]? | select((.context // .name) != $settled)
+        | if .__typename == "StatusContext" then
+            (if .state == "SUCCESS" then "green" elif .state == "PENDING" or .state == "EXPECTED" then "pending" else "red" end)
+          elif .status != "COMPLETED" then "pending"
+          elif .conclusion == "SUCCESS" or .conclusion == "NEUTRAL" or .conclusion == "SKIPPED" then "green"
+          else "red" end]' --arg settled "$SETTLED" <<<"$pr")
+      red=$(jq '[.[] | select(. == "red")] | length' <<<"$ci")
+      pending=$(jq '[.[] | select(. == "pending")] | length' <<<"$ci")
+      # No checks at all isn't "passed CI": nothing has tested it yet.
+      checks=$(jq length <<<"$ci")
       # A major is what the steward takes for one (dep_kind in
       # ../autoland/steward.py): the label, or a title from one major to
       # another. A security fix never is.
       major=$(jq -r '[.labels[]?.name] as $l | [.title | capture("from v?(?<a>[0-9]+)\\S* to v?(?<b>[0-9]+)")][0] as $m
         | ($l | index("security")) == null and (($l | index("major")) != null or ($m != null and $m.a != $m.b))' <<<"$pr")
       security=$(jq -r '[.labels[]?.name] | index("security") != null' <<<"$pr")
-      pending=$(jq -r '[.statusCheckRollup[]? | select((.context // .name) != $settled) | (.conclusion // .state // "" | ascii_upcase)
-        | select(. == "" or . == "PENDING" or . == "EXPECTED")] | length' --arg settled "$SETTLED" <<<"$pr")
-      # No checks at all isn't "passed CI": nothing has tested it yet.
-      checks=$(jq -r '[.statusCheckRollup[]? | select((.context // .name) != $settled)] | length' --arg settled "$SETTLED" <<<"$pr")
       key="$state/${repo//\//_}-$n"
       seen=$(cat "$key" 2>/dev/null || true)
       # A major's key also says the job was asked for a verdict, so a major
