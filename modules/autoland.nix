@@ -25,7 +25,14 @@ let
     fileset = lib.fileset.unions [ ../docs ../house ../templates ../lib ];
   };
 
+  # The email Renovate commits as, when it has one of its own: any other
+  # author on a Renovate branch is a Claude fix (steward.py). Without one,
+  # Renovate commits as the user, like the fixes, and nothing tells them apart.
+  renovateAuthor = config.burrow.updates.renovate.gitAuthor or null;
+  renovateMatch = if renovateAuthor == null then null else builtins.match ".*<([^>]*)>.*" renovateAuthor;
+
   settings = {
+    renovateEmail = if renovateMatch == null then null else lib.head renovateMatch;
     inherit (cfg) owners exclude context rulesets keepBranches baselineJobs baselinePerPass;
     # The bots' logins as GitHub's GraphQL API gives them (no "[bot]").
     authors = cfg.authors ++ [ "dependabot" "renovate" ];

@@ -455,6 +455,22 @@ def dep_kind(pr):
     return "minor"
 
 
+def renovate_edited(repo, pr, st):
+    """Whether a Renovate branch has a commit Renovate didn't write (a Claude
+    job's fix). Renovate won't merge a branch edited like that. Asked once
+    per head; a failed ask counts as not edited and is asked again."""
+    if not CFG["renovateEmail"] or not pr["headRefName"].startswith("renovate/"):
+        return False
+    if st.get("editedHead") != pr["headRefOid"]:
+        got = gh("pr", "view", str(pr["number"]), "-R", repo, "--json", "commits", check=False)
+        if not got:
+            return False
+        st["edited"] = any(a.get("email") != CFG["renovateEmail"]
+                           for c in got["commits"] for a in c["authors"])
+        st["editedHead"] = pr["headRefOid"]
+    return st["edited"]
+
+
 def merge_method(repo_info):
     for flag, method in (("squashMergeAllowed", "--squash"), ("mergeCommitAllowed", "--merge"),
                          ("rebaseMergeAllowed", "--rebase")):
@@ -987,10 +1003,17 @@ def handle(repo, pr, repo_info, digest):
     changes = [w for w, s in latest.items() if s == "CHANGES_REQUESTED"]
     dep = dep_kind(pr)
     gate = one_way(repo, pr, rc, dep)
+    # A minor Renovate PR a Claude job fixed carries Claude's code, and Renovate
+    # won't merge it: it goes through the review loop below like a Claude PR.
+    # While its CI is red it's renovate-sweep's to hand over, findings and all:
+    # a job from each on one branch would push over each other. The sweep's
+    # push makes a new head, and Codex reads it again.
+    fixed = dep == "minor" and not gate and renovate_edited(repo, pr, st)
+    swept = fixed and ci == "red"
 
     # Dependency bumps: CI is the review. Renovate merges its own;
     # renovate-sweep handles the red ones and the majors.
-    if dep:
+    if dep and not fixed:
         if gate:
             owner_merges(f"Dependency update; {CFG['owner']} merges it (touches {gate})")
         elif dep == "major":
@@ -1119,7 +1142,7 @@ def handle(repo, pr, repo_info, digest):
     if waiting:
         settle("pending", "; ".join(waiting + what))
         # One reviewer's threads needn't wait for the other to finish.
-        if what and idle > rc["handoffAfter"] * MIN and st.get("handed") != head:
+        if what and idle > rc["handoffAfter"] * MIN and st.get("handed") != head and not swept:
             hand_off(", ".join(what))
     elif "findings" in (verdict, dsv) or open_threads or changes:
         if not open_threads and not changes:
@@ -1132,13 +1155,13 @@ def handle(repo, pr, repo_info, digest):
             settle("pending", f"Findings answered; review round {rounds + 1} next")
         else:
             settle("pending", f"Round {rounds}: " + ", ".join(what))
-            if idle > rc["handoffAfter"] * MIN and st.get("handed") != head:
+            if idle > rc["handoffAfter"] * MIN and st.get("handed") != head and not swept:
                 hand_off(", ".join(what))
     # 2. The reviewers are clean on this head and nothing is open: CI, then land.
     elif ci == "red":
         settle("pending", "CI is red: " + ", ".join(ci_names)[:100])
         idle = NOW - max(ts(pr["updatedAt"]), st["seen"])
-        if idle > rc["handoffAfter"] * MIN and st.get("handed") != head:
+        if idle > rc["handoffAfter"] * MIN and st.get("handed") != head and not swept:
             hand_off("CI is red (" + ", ".join(ci_names) + ")")
     elif no_ci:
         owner_merges(f"Settled, but this repo has no CI: {CFG['owner']} merges it")
