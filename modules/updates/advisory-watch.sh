@@ -119,7 +119,7 @@ $list
 
 Renovate opens security PRs for these on its own, without the usual wait. Make sure each fix lands today: if Renovate's PR exists, get its CI green and let it merge; if Renovate can't fix it (a transitive dependency, no fixed version yet, a breaking bump), make the fix yourself on a branch and open a PR. If a vulnerability can't affect this project (dev-only tooling, code path not used), say why in one line instead. If something needs $OWNER, run \`$NOTIFY open advisory-$p \"title\" \"what they need to do\"\`."
   fi
-  if id=$(as_user proj run "$p" "$task"); then
+  if id=$(as_user proj run --first "$p" "$task"); then
     echo "$(date -Is) $p: handed to Claude, proj log $id" >>"$state/log"
   fi
 done

@@ -118,7 +118,7 @@ for repo in "${!project[@]}"; do
     allowed "$(jq -r .user.login <<<"$issue")" || continue
     # Comments already there are part of the task; replies after this are turns.
     comments=$(gh api "repos/$repo/issues/$n/comments" --paginate --slurp | jq 'add // []') || { miss "$repo"; continue; }
-    id=$(proj run "${vm[@]}" "$p" "$(task "$repo" "$issue" "$comments")") || continue
+    id=$(proj run --first "${vm[@]}" "$p" "$(task "$repo" "$issue" "$comments")") || continue
     mkdir -p "$d"
     echo "$repo#$n" >"$d/issue"
     echo "$id" >"$d/job"
@@ -139,7 +139,7 @@ for repo in "${!project[@]}"; do
       if post "$repo" "$n" "On it: \`proj\` job \`$id\` in $p."; then rm -f "$d/unannounced"; else miss "$repo"; fi
     fi
     st=$(proj state "$id")
-    [ "$st" != running ] || continue
+    case $st in queued | running) continue ;; esac
     turns=$(cat "$JOBS/$id/turns" 2>/dev/null || echo 0)
 
     # A turn that finished: its answer goes to the issue.
@@ -175,10 +175,10 @@ for repo in "${!project[@]}"; do
       now=$(gh api "repos/$repo/issues/$n") || { miss "$repo"; continue; }
       jq -e --arg label "$LABEL" '.state == "open" and any(.labels[]; .name == $label)' <<<"$now" >/dev/null ||
         continue
-      if ! proj reply "$id" "$msg" >/dev/null 2>&1; then
+      if ! proj reply --first "$id" "$msg" >/dev/null 2>&1; then
         # No session to continue (the first turn never got going): start over,
         # from the issue as it stands, replies and all.
-        id=$(proj run "${vm[@]}" "$p" "$(task "$repo" "$now" "$comments")") || continue
+        id=$(proj run --first "${vm[@]}" "$p" "$(task "$repo" "$now" "$comments")") || continue
         echo "$id" >"$d/job"
         echo 0 >"$d/answered"
       fi

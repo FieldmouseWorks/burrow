@@ -243,7 +243,7 @@ query($owner: String!, $name: String!, $cursor: String) {
       pageInfo { hasNextPage endCursor }
       nodes {
         id number title url isDraft isCrossRepository headRefName headRefOid baseRefName
-        createdAt updatedAt
+        createdAt updatedAt mergeStateStatus
         author { login }
         autoMergeRequest { enabledAt }
         labels(first: 100) { pageInfo { hasNextPage } nodes { name } }
@@ -660,6 +660,11 @@ def handle(repo, pr, repo_info, digest):
             hand_off("CI is red (" + ", ".join(ci_names) + ")")
     elif no_ci:
         settle("pending", f"Settled, but this repo has no CI: {CFG['owner']} merges it", "Settled, yours to merge")
+    elif ci == "pending" and all(n in rc["ownerChecks"] for n in ci_names):
+        # Only checks a person clears are left (a verdict from a test
+        # machine): waiting quietly would never end, so it's the owner's.
+        then = f"then merges it (touches {gate})" if gate else "then it lands"
+        settle("pending", f"Settled; {CFG['owner']} clears {', '.join(ci_names)}, {then}"[:140], "Settled, yours to merge")
     elif ci == "pending":
         settle("pending", "Settled; waiting for CI: " + ", ".join(ci_names)[:90])
     elif gate:
@@ -669,6 +674,13 @@ def handle(repo, pr, repo_info, digest):
         if st.get("landed") != head:
             log(f"{tag}: settled, landing")
             merge()
+        elif pr.get("mergeStateStatus") == "BEHIND" and st.get("updated") != head:
+            # The base's rules want the branch up to date first, and auto-merge
+            # won't bring it there. The merged-in head is reviewed like any other.
+            if write("api", "-X", "PUT", f"repos/{repo}/pulls/{n}/update-branch",
+                     "-f", f"expected_head_sha={head}", check=False) is not None:
+                log(f"{tag}: behind its base, brought up to date")
+                st["updated"] = head
 
     # Anything not merged after a day, Codex clean or not (a check that never
     # reports keeps it pending). One-way PRs, and those already listed for
@@ -703,13 +715,15 @@ def sweep_branches(r, open_heads, digest):
             digest.append(("Stale branches (unmerged, no PR, 30+ days)", f"{repo}: `{b}`", ""))
         return
     stale = []
+    # The machine's globs, plus the repo's own (evidence branches it cites).
+    keep = CFG["keepBranches"] + repo_cfg(repo).get("keepBranches", [])
     names = (gh("api", "--paginate", f"repos/{repo}/branches?per_page=100", "--jq",
                 '.[] | select(.protected | not) | "\\(.name) \\(.commit.sha)"', check=False) or "")
     for x in str(names).split("\n"):
         name, _, sha = x.partition(" ")
         if not name or not sha or name == r["default"] or name in open_heads or DEP_RE.match(name):
             continue
-        if any(fnmatch.fnmatch(name, pat) for pat in CFG["keepBranches"]):
+        if any(fnmatch.fnmatch(name, pat) for pat in keep):
             continue
         # Compared at the tip just listed, and deleted only if it's still there.
         cmp = gh("api", f"repos/{repo}/compare/{r['default']}...{sha}", "--jq",

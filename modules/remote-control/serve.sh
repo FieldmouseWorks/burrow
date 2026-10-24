@@ -3,8 +3,10 @@
 # Claude can ask it (nobody is at that terminal to answer it), then picks the
 # spawn mode: sessions started from claude.ai each get their own git worktree,
 # so two of them in one project never share a checkout, in the permission mode
-# MODE (none: Claude's own default). PROJECTS, FLAKE, SPAWN, SAME_DIR and MODE
-# come from ../remote-control.nix.
+# MODE (none: Claude's own default). With IDLE_SESSION=0 it starts no session
+# of its own: each one is a full Claude holding a few GB, so a server only
+# holds them while someone is using them. PROJECTS, FLAKE, SPAWN, SAME_DIR,
+# MODE and IDLE_SESSION come from ../remote-control.nix.
 
 name=${1:?usage: claude-rc-serve NAME}
 dir=$PROJECTS/$name
@@ -52,4 +54,6 @@ for n in "${SAME_DIR[@]}"; do
   if [ "$n" = "$name" ]; then spawn=same-dir; fi
 done
 
-exec claude remote-control --name "$name" --spawn="$spawn" ${MODE:+--permission-mode "$MODE"}
+idle=--no-create-session-in-dir
+[ "$IDLE_SESSION" = 0 ] || idle=--create-session-in-dir
+exec claude remote-control --name "$name" --spawn="$spawn" "$idle" ${MODE:+--permission-mode "$MODE"}

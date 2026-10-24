@@ -11,10 +11,15 @@ let
 
   proj = pkgs.writeShellApplication {
     name = "proj";
-    runtimeInputs = [ pkgs.coreutils pkgs.findutils pkgs.gnugrep pkgs.jq pkgs.systemd pkgs.bashInteractive ];
+    runtimeInputs = [ pkgs.coreutils pkgs.findutils pkgs.gnugrep pkgs.gawk pkgs.jq pkgs.systemd pkgs.util-linux pkgs.bashInteractive ];
     text = ''
       SRC=${lib.escapeShellArg projectsDir}
       JOBS=${lib.escapeShellArg cfg.jobsDir}
+      SLICE=claude-jobs.slice
+      MAX_JOBS=${toString cfg.maxJobs}
+      MIN_FREE=${toString cfg.minFreeMemory}
+      JOB_MEMORY_MAX=${lib.escapeShellArg cfg.jobMemoryMax}
+      TIMEOUT=${lib.escapeShellArg cfg.timeout}
     '' + builtins.readFile ./proj/proj.sh;
   };
 
@@ -43,6 +48,37 @@ in
       type = lib.types.str;
       default = "/data/dev/jobs";
       description = "Where each job's prompts, transcript and answer are kept.";
+    };
+    maxJobs = lib.mkOption {
+      type = lib.types.ints.positive;
+      default = 4;
+      description = ''
+        How many jobs run Claude at once. The rest wait in line (`proj state`
+        says queued), so a launcher can hand over as much work as it likes.
+        Each headless Claude holds a few GB.
+      '';
+    };
+    minFreeMemory = lib.mkOption {
+      type = lib.types.ints.unsigned;
+      default = 4096;
+      description = ''
+        MiB the machine must have to spare (available memory plus what the ZFS
+        ARC would give back) before another job starts while one is running.
+      '';
+    };
+    jobMemoryMax = lib.mkOption {
+      type = lib.types.str;
+      default = "8G";
+      description = "The most memory one job may hold (systemd's MemoryMax) before it's killed.";
+    };
+    timeout = lib.mkOption {
+      type = lib.types.str;
+      default = "4h";
+      example = "90m";
+      description = ''
+        How long one turn may run (coreutils timeout's units) before it's
+        stopped, so a stuck job can't hold its place for good.
+      '';
     };
 
     inbox = {
@@ -97,12 +133,15 @@ in
 
           proj list                         projects in ${projectsDir}
           proj run web "the task"           start a job; prints its id
+          proj run --first web "the task"   the same, ahead of the line
           proj status                       what's running, what finished
           proj log ID                       its answer (--raw for everything)
           proj reply ID "follow-up"         continue the same conversation
           proj stop ID
 
-      Jobs run in the background and survive this session ending. Check on them,
+      Jobs run in the background and survive this session ending. At most
+      ${toString cfg.maxJobs} run at once; the rest are queued. Use --first when ${config.burrow.owner} is
+      waiting on the answer. Check on them,
       relay results to ${config.burrow.owner}, and follow up yourself where the answer is obvious.
       A job can't ask ${config.burrow.owner} anything: R2 commands get refused, so bring those to
       them. ${config.burrow.owner} can also open any project's own session directly from their phone.

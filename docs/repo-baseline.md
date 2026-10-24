@@ -36,8 +36,9 @@ change nothing else in the same PR.
 Waiting for the owner instead: PRs touching the one-way paths
 (`burrow.autoland.oneWay`: `.github/`, secrets, migrations), PRs past the
 round limit, major dependency updates, outside contributions, and PRs in a
-repo with no CI yet (unless it's set `requireCi = false`: nothing to test). They're
-listed in one issue. Dependency bots' minor updates skip Codex: CI is their
+repo with no CI yet (unless it's set `requireCi = false`: nothing to test), and
+settled PRs waiting only on a check that a person clears, such as a test
+machine's verdict (the repo names it in `ownerChecks`). They're listed in one issue. Dependency bots' minor updates skip Codex: CI is their
 review. That includes their bumps of the actions pinned in
 `.github/workflows/`, unless the repo sets `actionBumps = false`.
 
@@ -71,18 +72,21 @@ review. That includes their bumps of the actions pinned in
 
 ### AGENTS.md: the shared sections
 
+They call Codex "the review bot", so they pass the name guards some repos run
+over their guidance (and the house rule against naming models).
+
 ```markdown
 ## Pull requests
 
-Open PRs as drafts and leave them to the steward: it asks Codex for a review,
-and once Codex finds nothing on your head, every review thread is resolved and
-CI is green, it marks the PR ready and merges it. Fix or answer every finding:
+Open PRs as drafts and leave them to the steward: it asks the review bot for a
+review, and once the bot finds nothing on your head, every review thread is
+resolved and CI is green, it marks the PR ready and merges it. Fix or answer every finding:
 push the fix and reply with the commit, or reply with why it's wrong, then
 resolve the thread. Don't merge or mark ready yourself.
 
 ## Code Review Rules
 
-For reviewers, Codex included. Flag as P1:
+For reviewers, the review bot included. Flag as P1:
 
 - a change that makes a check pass without fixing the thing it checks
 - tests or checks weakened, skipped or deleted to get green

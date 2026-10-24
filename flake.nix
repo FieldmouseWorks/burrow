@@ -77,6 +77,8 @@
         # Sandboxes for real: boot two, work in them, break out of nothing.
         # Nested KVM: run it on a machine that has /dev/kvm.
         agents = import ./tests/agents.nix { inherit self pkgs; };
+        # proj's queue and memory caps, with a stand-in for Claude.
+        proj = import ./tests/proj.nix { inherit self pkgs; };
       } // nixpkgs.lib.mapAttrs' (name: nixpkgs.lib.nameValuePair "house-${name}") (
         # lib/project.nix's own gates, on the smallest projects that have them.
         (self.lib.project { self = ./tests/house/rust; systems = [ system ]; rust = { }; }).checks.${system}
