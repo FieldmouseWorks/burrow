@@ -543,8 +543,9 @@ def numbered(diff):
     hidden = in_hunk = False
     for x in diff.splitlines():
         if x.startswith("diff --git "):
-            path = x.split(" b/", 1)[-1]
-            hidden, in_hunk = any(p.search(path) for p in skip), False
+            old, _, path = x.removeprefix("diff --git a/").partition(" b/")
+            # A rename out of a secrets path still carries its contents.
+            hidden, in_hunk = any(p.search(q) for p in skip for q in (old, path)), False
             files[path] = set()
             out.append(f"\n=== {path}" + ("\n(contents not sent: a secrets path)" if hidden else ""))
         elif hidden or path is None:
@@ -607,7 +608,8 @@ def prior_findings(repo, n):
     for c in roots:
         replies = [r for r in cs if r.get("in_reply_to_id") == c["id"]]
         body = c["body"].replace(DS_FINDING, "").strip()
-        text.append(f"- {c['path']}:{c.get('line') or c.get('original_line')}: {body}\n"
+        at = c.get("line") or c.get("original_line")
+        text.append(f"- {c['path']}{f':{at}' if at else ''}: {body}\n"
                     + "".join(f"  Reply from {r['user']}: {r['body'].strip()}\n" for r in replies))
     return "\n".join(text)[:60000]
 
@@ -736,17 +738,23 @@ def run_deepseek(repo, pr, dst):
             f"The diff against {pr['baseRefName']}:\n{text}")
     log(f"{repo}#{n}: asking DeepSeek ({len(text)} chars of diff)")
     answer = ask_deepseek(DS_SYSTEM.format(owner=CFG["owner"]), user)
-    comments, loose = [], []
-    for f in (answer.get("findings") or [])[:10]:
-        if not isinstance(f, dict):
-            continue
+    # Anything but a list of findings is no review at all, never a clean one.
+    found = answer.get("findings") if isinstance(answer, dict) else None
+    if not isinstance(found, list) or not all(isinstance(f, dict) for f in found):
+        raise RuntimeError(f"not a review: {json.dumps(answer)[:100]}")
+    comments, whole_file, loose = [], [], []
+    for f in found[:10]:
         sev = f.get("severity") if f.get("severity") in ("P0", "P1", "P2") else "P1"
         msg = f"**DeepSeek · {sev}** {quiet_mentions(f.get('title', ''))}\n\n{quiet_mentions(f.get('body', ''))}"
         lines = files.get(f.get("path"))
-        if not lines:
-            # A file that isn't in the diff, or has no new side (deleted): no
-            # thread to hang it on, so it's a note in the review, not a finding.
+        if lines is None:
+            # Not a file this PR changes: a note in the review, not a finding.
             loose.append(f"- `{quiet_mentions(f.get('path'))}`: " + msg.replace("\n\n", " "))
+            continue
+        if not lines:
+            # Changed, but with no new side to comment on (deleted, binary,
+            # a secrets path): a thread on the whole file, still a finding.
+            whole_file.append({"path": f["path"], "body": msg + "\n\n" + DS_FINDING})
             continue
         try:
             want = int(f.get("line"))
@@ -754,7 +762,7 @@ def run_deepseek(repo, pr, dst):
             want = min(lines)
         line = want if want in lines else min(lines, key=lambda x: abs(x - want))
         comments.append({"path": f["path"], "line": line, "side": "RIGHT", "body": msg + "\n\n" + DS_FINDING})
-    k = len(comments)
+    k = len(comments) + len(whole_file)
     head_line = (f"**DeepSeek review** of {head[:7]}: "
                  + (f"{k} finding{'s' * (k > 1)}. Fix or answer each, then resolve its thread." if k else "nothing found."))
     body = head_line + (f"\n\n{quiet_mentions(answer.get('summary', ''))}" if answer.get("summary") else "")
@@ -765,6 +773,12 @@ def run_deepseek(repo, pr, dst):
                 input=json.dumps({"commit_id": head, "event": "COMMENT", "body": body, "comments": comments}), check=False)
     if not isinstance(posted, dict):
         raise RuntimeError("GitHub didn't take the review")
+    # A review can't hold file-level comments: they go on their own. The
+    # review already counts them, so a lost one still keeps the PR unsettled.
+    for c in whole_file:
+        if not isinstance(gh("api", "-X", "POST", f"repos/{repo}/pulls/{n}/comments", "--input", "-",
+                             input=json.dumps({**c, "commit_id": head, "subject_type": "file"}), check=False), dict):
+            log(f"{repo}#{n}: couldn't post DeepSeek's finding on {c['path']}")
     log(f"{repo}#{n}: DeepSeek review posted, {k} finding(s)")
     return "findings" if k else "clean"
 

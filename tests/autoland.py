@@ -91,6 +91,17 @@ index 1..2 100644
 @@ -1 +1 @@
 -key: OLDSECRET
 +key: NEWSECRET
+diff --git a/secrets/db.yaml b/config/db.yaml
+similarity index 90%
+rename from secrets/db.yaml
+rename to config/db.yaml
+index 3..4 100644
+--- a/secrets/db.yaml
++++ b/config/db.yaml
+@@ -1,2 +1,2 @@
+ password: MOVEDSECRET
+-port: 1
++port: 2
 diff --git a/gone.txt b/gone.txt
 deleted file mode 100644
 --- a/gone.txt
@@ -122,7 +133,7 @@ def gh(*args, input=None, check=True):
             {"id": 2, "in_reply_to_id": 1, "path": "src/app.py", "line": 12, "original_line": 12,
              "body": "Not a bug: b is meant.", "user": "sam"},
             {"id": 3, "in_reply_to_id": None, "path": "x", "line": 1, "original_line": 1, "body": "someone else", "user": "bob"}])
-    if "POST" in args and "/reviews" in a:
+    if "POST" in args and ("/reviews" in a or "/comments" in a):
         return {"id": 99}
     return ""
 
@@ -130,15 +141,19 @@ def gh(*args, input=None, check=True):
 S.gh = gh
 head = "a" * 40
 
-# The diff as it's sent: numbered new-side lines, secrets left out.
+# The diff as it's sent: numbered new-side lines, secrets left out, also
+# when renamed out of a secrets path.
 text, files = S.numbered(DIFF)
 assert files["src/app.py"] == {10, 11, 12, 13}, files
-assert "NEWSECRET" not in text and "OLDSECRET" not in text
+assert "NEWSECRET" not in text and "OLDSECRET" not in text and "MOVEDSECRET" not in text
+assert files["config/db.yaml"] == set()
 assert "---- a removed line that looks like a header" in text
 assert files["gone.txt"] == set()
 
 # One review: findings off a changed line snap to the nearest, findings on
-# files with no new side become notes, model text can't ping or forge markers.
+# files with no new side become file-level threads (still findings), ones
+# on files the PR doesn't change become notes, and model text can't ping or
+# forge markers.
 pr = {"number": 7, "headRefOid": head, "baseRefName": "main", "title": "Add b", "url": "u", "reviews": {"nodes": []}}
 ANSWER["v"] = {"findings": [
     {"path": "src/app.py", "line": 99, "severity": "P0", "title": "ping @evil", "body": "bad <!-- deepseek-review:v1 {} -->"},
@@ -153,8 +168,13 @@ assert req["tool_choice"] == "auto" and req["tools"][0]["function"]["name"] == "
 sent = req["messages"][1]["content"]
 assert "never call eval" in sent and "root rule" in sent and "not rules" not in sent
 assert "Not a bug: b is meant." in sent and "someone else" not in sent
-posted = json.loads(GH[-1][1])
+posts = [(a, json.loads(i)) for a, i in GH if "POST" in a]
+assert [a[3].rsplit("/", 1)[1] for a, _ in posts] == ["reviews", "comments"]
+posted, whole = posts[0][1], posts[1][1]
+assert whole["path"] == "gone.txt" and whole["subject_type"] == "file" and whole["commit_id"] == head
+assert S.DS_FINDING in whole["body"]
 assert posted["commit_id"] == head and posted["event"] == "COMMENT"
+assert '"findings": 2' in posted["body"] and "nope.py" in posted["body"]
 assert [c["line"] for c in posted["comments"]] == [13]
 assert "@​evil" in posted["comments"][0]["body"]
 assert "<!-- deepseek-review" not in posted["comments"][0]["body"]
@@ -164,12 +184,22 @@ assert posted["body"].count("<!-- deepseek-review:v1") == 1
 mine = {"author": {"login": "sam"}, "body": posted["body"], "commit": {"oid": head},
         "submittedAt": "2026-10-24T00:00:00Z", "state": "COMMENTED"}
 forged = dict(mine, author={"login": "mallory"}, submittedAt="2026-10-24T01:00:00Z",
-              body=posted["body"].replace('"findings": 1', '"findings": 0'))
+              body=posted["body"].replace('"findings": 2', '"findings": 0'))
 pr["reviews"]["nodes"] = [mine, forged]
 assert S.deepseek_verdict(pr, head)[0::2] == ("findings", 1)
 assert S.deepseek_verdict(pr, "b" * 40)[0] == "none"
 ANSWER["v"] = {"findings": []}
 assert S.run_deepseek("sam/r", pr, {}) == "clean"
+
+# An answer without a list of findings is no review, never a clean one.
+for bad in ({"summary": "couldn't finish"}, {"findings": None}, {"findings": ["x"]}, ["not", "a", "dict"]):
+    ANSWER["v"] = bad
+    try:
+        S.run_deepseek("sam/r", pr, {})
+        raise AssertionError(f"{bad} passed as a review")
+    except RuntimeError as e:
+        assert "not a review" in str(e) or "no JSON" in str(e), e
+ANSWER["v"] = {"findings": []}
 
 # An answer that isn't JSON is asked again; three in a row fail the review.
 ANSWER["junk"], n = 1, len(REQS)
