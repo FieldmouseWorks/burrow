@@ -79,6 +79,8 @@
         agents = import ./tests/agents.nix { inherit self pkgs; };
         # proj's queue and memory caps, with a stand-in for Claude.
         proj = import ./tests/proj.nix { inherit self pkgs; };
+        # The steward's labels, against a stand-in for GitHub.
+        autoland = import ./tests/autoland.nix { inherit pkgs; };
         # Stale Remote Control servers catch up once idle, with a stand-in for Claude.
         remote-control = import ./tests/remote-control.nix { inherit self pkgs; };
       } // nixpkgs.lib.mapAttrs' (name: nixpkgs.lib.nameValuePair "house-${name}") (

@@ -5,7 +5,7 @@ One pass (the timer runs it every couple of minutes):
   1. Find the repos: every non-archived, non-fork repo of each owner in
      `owners`, new ones included. Bring each one's settings to the baseline
      (auto-merge, delete-branch-on-merge, squash, secret scanning, the
-     `baseline` ruleset); a repo seen for the first time also gets a Claude
+     `baseline` ruleset, the hold and owner labels); a repo seen for the first time also gets a Claude
      job that brings its files to docs/repo-baseline.md.
   2. For each open PR, work out where it stands and do the next thing:
      ask Codex for a review, hand open findings or red CI to a Claude job,
@@ -164,13 +164,42 @@ def baseline_ruleset(rc, default):
     }
 
 
+LABELS = {"hold": ("FBCA04", "autoland: paused, nothing merges it"),
+          "owner": ("B60205", "autoland: waits for the owner")}
+
+
+def ensure_labels(repo):
+    """Create the labels the steward reads (config.labels) where the repo
+    lacks them. True once all of them are there."""
+    have = gh("label", "list", "-R", repo, "--limit", "1000", "--json", "name", check=False)
+    if not isinstance(have, list):
+        return False
+    names = {x["name"].lower() for x in have}  # GitHub matches labels case-blind
+    ok = True
+    for key, (color, desc) in LABELS.items():
+        name = CFG["labels"][key]
+        if name.lower() not in names:
+            log(f"{repo}: creating the {name} label")
+            ok = write("label", "create", name, "-R", repo, "--color", color,
+                       "--description", desc, check=False) is not None and ok
+    return ok
+
+
 def settle_repo(r, known):
     """The repo's settings, at most once a day. Returns True if it's new."""
     repo, rc = r["repo"], repo_cfg(r["repo"])
-    st = load(f"repo-{repo.replace('/', '_')}.json", {})
+    key = f"repo-{repo.replace('/', '_')}.json"
+    st = load(key, {})
     new = repo not in known
     # A repo seen for the first time has no state yet, so it's settled now.
-    if NOW - st.get("settings", 0) < 86400:
+    due = NOW - st.get("settings", 0) >= 86400
+    # The labels are looked at with the settings, and straight away when
+    # config.labels names ones not yet made here.
+    wanted = sorted(CFG["labels"].values())
+    if (due or st.get("labels") != wanted) and ensure_labels(repo):
+        st["labels"] = wanted
+        save(key, st)
+    if not due:
         return new
     info = gh("api", f"repos/{repo}")
     patch = {}
@@ -201,7 +230,7 @@ def settle_repo(r, known):
                   input=json.dumps(baseline_ruleset(rc, r["default"])), check=False)
 
     st["settings"] = NOW
-    save(f"repo-{repo.replace('/', '_')}.json", st)
+    save(key, st)
     return new
 
 
@@ -675,10 +704,15 @@ def handle(repo, pr, repo_info, digest):
     # 1. Codex.
     if rounds >= rc["rounds"] and verdict != "clean":
         if not st.get("escalated"):
-            write("pr", "edit", str(n), "-R", repo, "--add-label", CFG["labels"]["owner"], check=False)
-            comment(repo, n, f"{rounds} Codex rounds and it still has findings, so this stops here and waits for "
-                             f"{CFG['owner']}. Taking the `{CFG['labels']['owner']}` label off gives it another {rc['rounds']}.")
-            st["escalated"] = True
+            # Escalated only once the label is on: one that isn't reads next
+            # pass as the owner taking it off, and the rounds start over.
+            add = ("pr", "edit", str(n), "-R", repo, "--add-label", CFG["labels"]["owner"])
+            if write(*add, check=False) is not None or (ensure_labels(repo) and write(*add, check=False) is not None):
+                comment(repo, n, f"{rounds} Codex rounds and it still has findings, so this stops here and waits for "
+                                 f"{CFG['owner']}. Taking the `{CFG['labels']['owner']}` label off gives it another {rc['rounds']}.")
+                st["escalated"] = True
+            else:
+                log(f"{tag}: couldn't add the {CFG['labels']['owner']} label; trying again next pass")
         settle("pending", f"Still unsettled after {rounds} Codex rounds: {CFG['owner']} decides", "Unsettled after the round limit")
         save(key, st)
         return

@@ -21,6 +21,8 @@ change nothing else in the same PR.
   required. Repo admins can still merge past it from the PR page. A repo whose
   automation pushes to its default branch (`directPush`) gets only the first
   two. Existing rules stay; the ruleset only adds.
+- The steward's two labels (`autoland.labels`: hold, and the one that sends a
+  PR to the owner), made where the repo doesn't have them.
 
 ## The PR flow (the steward)
 
