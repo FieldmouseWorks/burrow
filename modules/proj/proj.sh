@@ -240,15 +240,19 @@ case "${1:-status}" in
   stop) systemctl --user stop "$(unit "${2:?usage: proj stop ID}")" ;;
   list) find "$src" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort ;;
   await)
-    # Noted now, watched from the end of the turn: what the turn itself does
-    # to a PR (a push) isn't news to it.
+    # The baseline is taken now, so whatever changes from here on, even
+    # before the turn has ended, is news. It's watched once the turn ends.
     id=${PROJ_JOB:?proj await is for a proj job, about what it waits on}
     shift
     [ $# -gt 0 ] || { echo "usage: proj await PR-OR-ISSUE-URL..." >&2; exit 2; }
     for t in "$@"; do
       target "$t" >/dev/null || { echo "not a GitHub PR or issue: $t" >&2; exit 2; }
     done
-    for t in "$@"; do target "$t"; done >>"$jobs/$id/await.next"
+    for t in "$@"; do
+      read -r repo num < <(target "$t")
+      # No fingerprint (GitHub can't be asked just now): _watch takes it later.
+      printf '%s\t%s\t%s\n' "$repo#$num" "$(date +%s)" "$(fingerprint "$repo" "$num" </dev/null || true)"
+    done >>"$jobs/$id/await.next"
     echo "Noted. End your turn now: this job is resumed once $* changes."
     ;;
   _watch)
@@ -262,16 +266,19 @@ case "${1:-status}" in
       news='' lines=''
       while IFS=$'\t' read -r t since was; do
         read -r repo n < <(target "$t")
-        if ! now=$(fingerprint "$repo" "$n" </dev/null); then lines+="$t"$'\t'"$since"$'\t'"$was"$'\n'; continue; fi
-        if [ -z "$was" ]; then
-          lines+="$t"$'\t'"$since"$'\t'"$now"$'\n'
-        elif [ "$now" != "$was" ]; then
+        now=$(fingerprint "$repo" "$n" </dev/null) || now=''
+        expired=$(($(date +%s) - since >= AWAIT_HOURS * 3600))
+        if [ -n "$now" ] && [ -n "$was" ] && [ "$now" != "$was" ]; then
           news+="- $t: $(jq -rn --argjson was "$was" --argjson now "$now" '
             [$now | keys[] as $k | select($was[$k] != $now[$k]) | "\($k) \($was[$k] | tojson) → \($now[$k] | tojson)"] | join(", ")')"$'\n'
-        elif [ $(($(date +%s) - since)) -ge $((AWAIT_HOURS * 3600)) ]; then
+        elif [ "$expired" = 1 ] && [ -n "$now" ]; then
           news+="- $t: nothing changed in ${AWAIT_HOURS}h; no longer watched"$'\n'
+        elif [ "$expired" = 1 ]; then
+          # The deadline holds even when GitHub can't be read (down, or the
+          # repo gone): the job hears that rather than waiting for good.
+          news+="- $t: couldn't be read from GitHub, and ${AWAIT_HOURS}h have passed; no longer watched"$'\n'
         else
-          lines+="$t"$'\t'"$since"$'\t'"$was"$'\n'
+          lines+="$t"$'\t'"$since"$'\t'"${was:-$now}"$'\n'
         fi
       done <"$f"
       if [ -n "$news" ]; then
@@ -318,12 +325,10 @@ Carry on from there. Anything you left in the background last turn was stopped w
       jq -r '.session_id' <<<"$last" >"$dir/session"
       jq -r '.result // ""' <<<"$last" >"$dir/result"
       jq -r 'if .is_error then "error" else "done" end' <<<"$last" >"$dir/outcome"
-      # What it awaits, watched from now (_watch takes the baseline if GitHub
-      # can't be asked just now).
+      # What it awaits, from the baseline `proj await` took; one line per
+      # target, the first await of it in the turn.
       if [ "$(cat "$dir/outcome")" = "done" ] && [ -s "$dir/await.next" ]; then
-        sort -u "$dir/await.next" | while read -r repo num; do
-          printf '%s\t%s\t%s\n' "$repo#$num" "$(date +%s)" "$(fingerprint "$repo" "$num" </dev/null || true)"
-        done >"$dir/await"
+        awk -F '\t' '!seen[$1]++' "$dir/await.next" >"$dir/await"
       fi
       rm -f "$dir/await.next"
     elif [ "$rc" -eq 124 ]; then
