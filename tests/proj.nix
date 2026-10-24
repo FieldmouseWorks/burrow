@@ -1,14 +1,15 @@
 # proj's limits, for real: a machine with proj on and a stand-in for Claude
 # (burrow.claude.package) checks that jobs past maxJobs wait in line, that
 # --first goes ahead but can't starve a turn that has waited long, that a job
-# whose turn has ended frees its slot, that one waiting on a PR (proj await)
-# is resumed when the PR changes (even if it changed before the turn ended;
-# never for proj-inbox's own comment on an awaited issue) or once its
-# deadline passes with GitHub unreadable, that a reply meanwhile
-# owns the job's waits, that proj-inbox posts every finished turn's answer
-# (one resumed before it looked too, none misread while a turn starts), and
-# that a job past its memory cap is killed by its own cgroup's limit rather
-# than the machine running out.
+# whose turn has ended frees its slot, that one waiting on a PR or issue
+# (proj await) is resumed when it changes, even before the turn ended and
+# from proj-watch's own unit, but never for proj-inbox's own comment, or once
+# its deadline passes with GitHub unreadable, that a reply meanwhile owns the
+# job's waits, that proj-inbox posts every finished turn's answer (one
+# resumed before it looked too, none misread while a turn starts) and ends
+# the waits of one whose issue closed (proj stop's, which a watch already
+# asking GitHub keeps to), and that a job past its memory cap is killed by
+# its own cgroup's limit rather than the machine running out.
 #
 #   nix build .#checks.x86_64-linux.proj -L
 { self, pkgs }:
@@ -74,7 +75,8 @@ pkgs.testers.runNixOSTest {
         jobMemoryMax = "128M";
         maxWait = 20;
         inherit gh;
-        # Run by hand here, never by its timer.
+        # Both run by hand here, never by their timers.
+        watchEvery = "yearly";
         inbox = {
           enable = true;
           authors = [ "sam" ];
@@ -173,14 +175,19 @@ pkgs.testers.runNixOSTest {
         github("repos/o/r/pulls/5/reviews", '[]')
         github("repos/o/r/commits/abc/check-runs", '{"check_runs": [{"name": "ci", "status": "in_progress", "conclusion": null}]}')
         github("repos/o/r/commits/abc/status", '{"state": "pending", "total_count": 0}')
+        github("repos/o/r/issues/5/comments", '[]')
         e = proj('run web "await https://github.com/o/r/pull/5"')
         machine.wait_until_succeeds(f"su - dev -c 'proj state {e}' | grep -x done", timeout=120)
         assert "[awaits o/r#5]" in proj("status"), proj("status")
+        # proj-inbox's own answer on the PR isn't news.
+        github("repos/o/r/pulls/5", '{"state": "open", "merged": false, "head": {"sha": "abc"}, "comments": 1, "review_comments": 0}')
+        github("repos/o/r/issues/5/comments", '[{"id": 1, "body": "did it\\n<!-- proj-inbox -->"}]')
         proj("_watch")
         time.sleep(3)
         assert machine.succeed(f"cat /data/dev/jobs/{e}/turns").strip() == "1"
         github("repos/o/r/commits/abc/check-runs", '{"check_runs": [{"name": "ci", "status": "completed", "conclusion": "success"}]}')
-        proj("_watch")
+        # The timer's way, as a system unit running as the user.
+        machine.succeed("systemctl start proj-watch.service")
         machine.wait_until_succeeds(f"grep -x 2 /data/dev/jobs/{e}/turns", timeout=30)
         machine.wait_until_succeeds(f"su - dev -c 'proj state {e}' | grep -x done", timeout=120)
         prompt = machine.succeed(f"cat /data/dev/jobs/{e}/prompt.2")
@@ -283,6 +290,27 @@ pkgs.testers.runNixOSTest {
         posted = machine.succeed("cat /tmp/gh/posted")
         assert "turn 3" not in posted, posted
         machine.succeed(f"grep -x 2 {d}/turns")
+
+    with subtest("an issue closed under a waiting job ends its waits"):
+        d = f"/data/dev/jobs/{job}"
+        machine.succeed(f"su - dev -c \"printf 'o/r#6\\t%s\\t{{}}\\n' $(date +%s) >{d}/await\"")
+        github("repos/o/r/issues", "[]")
+        machine.succeed("su - dev -c proj-inbox")
+        machine.fail(f"test -e {d}/await")
+        proj("_watch")
+        time.sleep(3)
+        assert machine.succeed(f"cat {d}/turns").strip() == "2"
+
+    with subtest("a job stopped while GitHub is being asked stays stopped"):
+        machine.succeed(f"su - dev -c \"printf 'o/r#6\\t%s\\t{{}}\\n' $(date +%s) >{d}/await\"")
+        machine.succeed("touch /tmp/gh/slow")
+        machine.succeed("su - dev -c 'proj _watch' >/tmp/watch.log 2>&1 &")
+        time.sleep(1)
+        proj(f"stop {job}")
+        machine.wait_until_succeeds("! pgrep -u dev -f 'proj _watch'", timeout=60)
+        machine.succeed("rm /tmp/gh/slow")
+        machine.fail(f"test -e {d}/await")
+        assert machine.succeed(f"cat {d}/turns").strip() == "2"
 
     with subtest("a job past its memory cap is killed by its own limit"):
         e = proj("run web eat")

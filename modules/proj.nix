@@ -190,7 +190,7 @@ in
           proj status                       what's running, what finished
           proj log ID                       its answer (--turn N for an earlier one, --raw for everything)
           proj reply ID "follow-up"         continue the same conversation
-          proj stop ID
+          proj stop ID                      end it: its running turn, and anything it awaits
 
       Jobs run in the background and survive this session ending. At most
       ${toString cfg.maxJobs} run at once; the rest are queued. Use --first when ${config.burrow.owner} is

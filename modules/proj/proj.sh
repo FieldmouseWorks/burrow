@@ -11,7 +11,7 @@
 #   proj log ID [--turn N]      the job's latest answer, or turn N's (--raw for
 #                               the full stream); fails when there's none
 #   proj state ID               queued, running, done, error or failed
-#   proj stop ID                stop a running job
+#   proj stop ID                end a job: its running turn and its waits
 #   proj list                   projects you can run jobs in
 #   proj await TARGET...        from inside a job: resume it once a PR or
 #                               issue (URL or OWNER/REPO#N) changes
@@ -164,11 +164,11 @@ target() {
 fingerprint() { # repo n
   local issue comments pr sha reviews status checks
   issue=$("$GH" api "repos/$1/issues/$2") || return
+  # Comments on the issue or PR, but not proj-inbox's own (MARK): a job
+  # awaiting its own issue would wake on every answer the inbox posts there.
+  comments=$("$GH" api --paginate --slurp "repos/$1/issues/$2/comments?per_page=100" |
+    jq --arg mark "$MARK" '[add // [] | .[] | select(.body | contains($mark) | not)] | length') || return
   if ! jq -e 'has("pull_request")' <<<"$issue" >/dev/null; then
-    # proj-inbox's own comments (MARK) aren't news: a job awaiting its own
-    # issue would wake on every answer the inbox posts for it.
-    comments=$("$GH" api --paginate --slurp "repos/$1/issues/$2/comments?per_page=100" |
-      jq --arg mark "$MARK" '[add // [] | .[] | select(.body | contains($mark) | not)] | length') || return
     jq -c --argjson comments "$comments" '{state, comments: $comments}' <<<"$issue"
     return
   fi
@@ -190,7 +190,8 @@ fingerprint() { # repo n
             + (if $status.total_count > 0 then ["status=\($status.state)"] else [] end)
             | sort | join(" "))
       end') || return
-  jq -c --argjson reviews "$reviews" --arg checks "$checks" '. + {reviews: $reviews, checks: $checks}' <<<"$pr"
+  jq -c --argjson comments "$comments" --argjson reviews "$reviews" --arg checks "$checks" \
+    '. + {comments: $comments, reviews: $reviews, checks: $checks}' <<<"$pr"
 }
 
 case "${1:-status}" in
@@ -267,7 +268,15 @@ case "${1:-status}" in
     fi
     ;;
   state) state "${2:?usage: proj state ID}" ;;
-  stop) systemctl --user stop "$(unit "${2:?usage: proj stop ID}")" ;;
+  stop)
+    id=${2:?usage: proj stop ID}
+    [ -d "$jobs/$id" ] || { echo "no job $id" >&2; exit 1; }
+    if systemctl --user -q is-active "$(unit "$id")"; then systemctl --user stop "$(unit "$id")"; fi
+    # A stopped job is over: nothing it waited on resumes it.
+    exec {lk}>>"$jobs/$id/lock"
+    flock "$lk"
+    rm -f "$jobs/$id/await" "$jobs/$id/await.next"
+    ;;
   list) find "$src" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort ;;
   await)
     # The baseline is taken now, so whatever changes from here on, even
@@ -316,10 +325,11 @@ case "${1:-status}" in
         fi
       done <<<"$waits"
       # GitHub was asked without the lock, so a reply may have started a
-      # turn meanwhile: that turn owns the job's waits, and these are dropped.
+      # turn meanwhile (that turn owns the job's waits), or proj stop ended
+      # the job: either way these are dropped.
       exec {lk}>>"$jobs/$id/lock"
       flock "$lk"
-      if [ "$(cat "$jobs/$id/turns")" != "$turn" ]; then
+      if [ "$(cat "$jobs/$id/turns")" != "$turn" ] || [ "$(cat "$f" 2>/dev/null)" != "$waits" ]; then
         :
       elif [ -n "$news" ]; then
         # The new turn clears what's left: if it still waits, it says so again.
