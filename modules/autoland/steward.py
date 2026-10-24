@@ -357,6 +357,52 @@ def renovate_edited(repo, pr, st):
     return st["edited"]
 
 
+WORKFLOW_RE = re.compile(r"^\.github/workflows/[^/]+\.ya?ml$")
+# A changed line that only repins an action: "uses: owner/action@sha # v4.1.0".
+PIN_LINE_RE = re.compile(r"^[+-]\s*(-\s+)?uses:\s*([^\s#@]+)@[^\s#]+(\s+#.*)?$")
+
+
+def pins_only(repo, pr):
+    """True if every changed line in the PR's workflow files only repins an
+    action: each removed `uses:` comes back with the same action at a new ref,
+    nothing added or dropped (no permissions, triggers or commands). None if
+    the diff couldn't be read."""
+    diff = gh("pr", "diff", str(pr["number"]), "-R", repo, check=False)
+    if not isinstance(diff, str) or not diff:
+        return None
+    path, changed = None, {}
+    for x in diff.splitlines():
+        if x.startswith("diff --git "):
+            path = x.split(" b/", 1)[-1]
+        elif x.startswith(("+++", "---")):
+            continue
+        elif path and WORKFLOW_RE.match(path) and x[:1] in "+-" and x.strip("+- \t"):
+            m = PIN_LINE_RE.match(x)
+            if not m:
+                return False
+            changed.setdefault(path, {"+": [], "-": []})[x[0]].append(m.group(2))
+    return all(sorted(c["+"]) == sorted(c["-"]) for c in changed.values())
+
+
+def gate_edit(repo, pr, st):
+    """Whether a dependency bot's PR changes .github/ beyond repinning the
+    actions its workflows use: that's the gate itself, and a dependency
+    update is never reviewed. Read once per head and base; a diff that can't
+    be read counts as an edit (reviewed, not merged on CI alone)."""
+    paths = [f["path"] for f in pr["files"]["nodes"] if f["path"].startswith(".github/")]
+    if not paths:
+        return False
+    if not all(WORKFLOW_RE.match(p) for p in paths):
+        return True
+    seen = [pr["headRefOid"], pr["baseRefName"]]
+    if st.get("pins", [None])[:2] != seen:
+        pins = pins_only(repo, pr)
+        if pins is None:
+            return True
+        st["pins"] = seen + [pins]
+    return not st["pins"][2]
+
+
 def merge_method(repo_info):
     for flag, method in (("squashMergeAllowed", "--squash"), ("mergeCommitAllowed", "--merge"),
                          ("rebaseMergeAllowed", "--rebase")):
@@ -524,12 +570,14 @@ def handle(repo, pr, repo_info, digest):
     dep = dep_kind(pr)
     gate = one_way(pr, rc)
     # A minor Renovate PR a Claude job fixed carries Claude's code, and Renovate
-    # won't merge it: it goes through the review loop below like a Claude PR.
-    # While its CI is red it's renovate-sweep's to hand over, findings and all:
-    # a job from each on one branch would push over each other. The sweep's
-    # push makes a new head, and Codex reads it again.
-    fixed = dep == "minor" and not gate and renovate_edited(repo, pr, st)
-    swept = fixed and ci == "red"
+    # won't merge it; a bot's PR that changes a workflow beyond repinning its
+    # actions changes the gate. Either goes through the review loop below like
+    # a Claude PR. While a Renovate one's CI is red it's renovate-sweep's to
+    # hand over, findings and all: a job from each on one branch would push
+    # over each other. The sweep's push makes a new head, and Codex reads it
+    # again.
+    fixed = dep == "minor" and not gate and (renovate_edited(repo, pr, st) or gate_edit(repo, pr, st))
+    swept = fixed and ci == "red" and pr["headRefName"].startswith("renovate/")
 
     # Dependency bumps: CI is the review. Renovate merges its own;
     # renovate-sweep handles the red ones and the majors.
