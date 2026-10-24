@@ -58,7 +58,7 @@ query($owner: String!, $name: String!, $cursor: String) {
         changedFiles
         reviewThreads(first: 100) { pageInfo { hasNextPage } nodes { isResolved } }
         reviews(last: 100) { pageInfo { hasPreviousPage } nodes { author { login } state body submittedAt commit { oid } } }
-        comments(last: 100) { nodes { databaseId body createdAt updatedAt author { login } } }
+        comments(last: 100) { pageInfo { hasPreviousPage } nodes { databaseId body createdAt updatedAt author { login } } }
         reactions(last: 20) { nodes { content createdAt user { login } } }
         commits(last: 1) {
           nodes { commit { oid statusCheckRollup { contexts(first: 100) { pageInfo { hasNextPage } nodes {
@@ -135,9 +135,11 @@ def codex_verdict(pr, head, since):
     return v, t
 
 
-def ci_state(pr):
+def ci_state(pr, proofs=()):
     """green / pending / red / none (no checks at all) over every check on
-    the head except ours, and the names of the ones that aren't green."""
+    the head except ours, and the names of the ones that aren't green. A
+    proof (a check a Claude job runs on a machine) that hasn't reported yet
+    is pending: nothing posts it until its job runs."""
     nodes = pr["commits"]["nodes"]
     rollup = (nodes[0]["commit"].get("statusCheckRollup") or {}) if nodes else {}
     contexts = rollup.get("contexts") or {}
@@ -162,6 +164,11 @@ def ci_state(pr):
                 pending.append(name)
             elif c["state"] != "SUCCESS":
                 red.append(name)
+    named = {c.get("name") or c.get("context") for c in contexts.get("nodes", [])}
+    for name in proofs:
+        if name not in named:
+            seen += 1
+            pending.append(name)
     if not seen:
         return "none", []
     return ("red" if red else "pending" if pending else "green"), red or pending
@@ -395,6 +402,11 @@ def handle(repo, pr, repo_info, digest):
         """Sent to the owner by hand, by a fix job or by a judge (the label):
         listed for them, and no judge job."""
         judged_owner = C.marker(pr, JUDGMENT, head) == "owner"
+        if judged_owner:
+            # The judge's word, seen labelled on this head: once the label
+            # is off, that's the owner's go-ahead. A label taken off before
+            # the judge said anything isn't an answer to it.
+            st["ownerSaw"] = head
         settle("pending", f"Settled; {CFG['owner']} decides (the {CFG['labels']['owner']} label)",
                "Judged yours to decide" if judged_owner else f"Labelled {CFG['labels']['owner']}")
 
@@ -404,8 +416,13 @@ def handle(repo, pr, repo_info, digest):
         verdict = C.marker(pr, JUDGMENT, head)
         if verdict == "land":
             land_now(f"Settled; a Claude job judged it fine to land ({why})")
+        elif verdict == "owner" and st.get("ownerSaw") == head:
+            land_now(f"Settled; a Claude job sent it to {CFG['owner']}, who took the {CFG['labels']['owner']} label off ({why})")
         elif verdict == "owner":
+            # The judge didn't label it: labelled here, so the owner has a
+            # label to take off.
             settle("pending", f"Settled; a Claude job judged it {CFG['owner']}'s to decide ({why})", "Judged yours to decide")
+            C.write("pr", "edit", str(n), "-R", repo, "--add-label", CFG["labels"]["owner"], check=False)
         elif verdict == "failed":
             # The judge's own build or tests failed on this head: a fix job
             # has it, and its push is judged again. Its own once a head: a
@@ -436,11 +453,12 @@ def handle(repo, pr, repo_info, digest):
         settle("pending", "Draft: work in progress, reviewed once it's marked ready")
         save(key, st)
         return
-    # A list longer than one page could hide a hold, an open thread or a
-    # changes-requested review: fail closed.
+    # A list longer than one page could hide a hold, an open thread, a
+    # changes-requested review or a verdict: fail closed.
     cut = [k for k, more in (("labels", pr["labels"]["pageInfo"]["hasNextPage"]),
                              ("review threads", pr["reviewThreads"]["pageInfo"]["hasNextPage"]),
-                             ("reviews", pr["reviews"]["pageInfo"]["hasPreviousPage"])) if more]
+                             ("reviews", pr["reviews"]["pageInfo"]["hasPreviousPage"]),
+                             ("comments", pr["comments"]["pageInfo"]["hasPreviousPage"])) if more]
     if cut:
         settle("pending", f"Over 100 {' and '.join(cut)}, too many to read: {CFG['owner']} merges it", "Too much to read")
         save(key, st)
@@ -456,7 +474,7 @@ def handle(repo, pr, repo_info, digest):
         save(key, st)
         return
 
-    ci, ci_names = ci_state(pr)
+    ci, ci_names = ci_state(pr, rc["proofJobs"])
     # No checks ran at all ("none"). Unless the repo is set not to need any
     # (docs only), that's not green: nothing has tested it, so a judge job
     # runs the build and tests itself.
@@ -485,15 +503,20 @@ def handle(repo, pr, repo_info, digest):
     # ones; renovate-sweep fixes the red ones (and settles their threads) and
     # gives each major a verdict. Anything else that's open on one, a review
     # finding or a red Dependabot update, goes to a Claude job like any PR's.
+    # Sent to the owner (by hand, a fix job or a judge): theirs, whatever else
+    # is open on it, and nothing more is asked or handed off until the label
+    # comes off. One past the round limit is listed as that, below.
+    if CFG["labels"]["owner"] in labels and not st.get("escalated"):
+        owner_decides()
+        save(key, st)
+        return
+
     if dep and not fixed:
         major_verdict = C.marker(pr, MAJOR_VERDICT, head) if dep == "major" and renovate else None
         threads = f"{open_threads} open review thread{'s' * (open_threads > 1)}" if open_threads else ""
         if changes:
             threads = ", ".join([threads] * bool(threads) + ["changes requested by " + ", ".join(changes)])
-        if CFG["labels"]["owner"] in labels:
-            # Sent to the owner: theirs, whatever else is open on it.
-            owner_decides()
-        elif renovate and ci == "red":
+        if renovate and ci == "red":
             settle("pending", "Dependency update, CI red; renovate-sweep has it" + (f" ({threads})" if threads else ""))
         elif renovate and dep == "major" and threads and not major_verdict:
             # Until it gives this head a verdict, renovate-sweep's job has it,
@@ -668,8 +691,6 @@ def handle(repo, pr, repo_info, digest):
         prove()
     elif ci == "pending":
         settle("pending", "Settled; waiting for CI: " + ", ".join(ci_names)[:90])
-    elif CFG["labels"]["owner"] in labels:
-        owner_decides()
     elif gate or ci == "none":
         judged(f"it touches {gate}" if gate else "the repo has no CI")
     else:
@@ -684,6 +705,12 @@ def handle(repo, pr, repo_info, digest):
 
 # ---------------------------------------------------------------- main
 
+def coverage(repos):
+    """repos.json, for renovate-sweep: the repos this pass covers, each with
+    how its proofs run, and when."""
+    return {"at": C.NOW, "repos": {r["repo"]: {"proofJobs": repo_cfg(r["repo"])["proofJobs"]} for r in repos}}
+
+
 def main():
     if sys.argv[1:] == ["deepseek"]:
         for d in (D.QUEUE, D.DONE):
@@ -697,8 +724,9 @@ def main():
         if not DRY:
             raise
     repos = R.discover()
-    # Which repos it covers, for renovate-sweep: it lists the ok majors of the rest.
-    save("repos.json", sorted(r["repo"] for r in repos))
+    # Which repos it covers, and when it last looked, for renovate-sweep: it
+    # lists the ok majors of the rest, and tells its jobs how a repo's proofs run.
+    save("repos.json", coverage(repos))
     # Repos whose baseline job has started. A repo not in it gets one, a few
     # per pass so the first pass on a machine doesn't start them all at once.
     known = set(load("known.json", []))

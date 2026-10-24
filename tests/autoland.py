@@ -381,7 +381,7 @@ def mkpr(reviews=(), comments=(), threads=(), draft=False, number=5, sha=head, f
         "mergeStateStatus": "CLEAN", "author": {"login": "sam"}, "autoMergeRequest": None,
         "labels": {"pageInfo": {"hasNextPage": False}, "nodes": [{"name": x} for x in labels]},
         "files": {"nodes": [{"path": f} for f in files]},
-        "changedFiles": len(files), "reactions": {"nodes": []}, "comments": {"nodes": list(comments)},
+        "changedFiles": len(files), "reactions": {"nodes": []}, "comments": {"pageInfo": {"hasPreviousPage": False}, "nodes": list(comments)},
         "reviewThreads": {"pageInfo": {"hasNextPage": False}, "nodes": [{"isResolved": r} for r in threads]},
         "reviews": {"pageInfo": {"hasPreviousPage": False}, "nodes": list(reviews)},
         "commits": {"nodes": [{"commit": {"oid": sha, "statusCheckRollup": {"contexts": {
@@ -447,6 +447,11 @@ big = mkpr(draft=True)
 big["labels"]["pageInfo"]["hasNextPage"] = True
 status, digest = run(big, 600)
 assert "Draft: work in progress" in status and digest == [], (status, digest)
+# Ready, more comments than one page could hide a verdict: the owner's.
+long = mkpr()
+long["comments"]["pageInfo"]["hasPreviousPage"] = True
+status, digest = run(long, 600)
+assert "Over 100 comments" in status and digest and JOBS == [] and not merged(), (status, digest)
 
 # A head is reviewed by both once it has sat still: Codex asked, DeepSeek
 # queued (once) for its own service, and no pass waits on it.
@@ -493,6 +498,19 @@ assert "state=success" in status and merged() and JOBS == []
 fresh_pr_state()
 status, digest = run(clean(comments=[said(f"<!-- autoland-judgment: owner {head} -->")], **mig), 700)
 assert not merged() and JOBS == [] and [x[0] for x in digest] == ["Judged yours to decide"], digest
+assert any(x.startswith("pr edit 6") and "--add-label needs-owner" in x for x in WROTE), "labelled for the owner"
+# Labelled, it waits; the owner taking the label off is the go-ahead.
+owner_said = said(f"<!-- autoland-judgment: owner {head} -->")
+status, digest = run(clean(comments=[owner_said], labels=["needs-owner"], **mig), 750)
+assert not merged() and [x[0] for x in digest] == ["Judged yours to decide"], digest
+status, digest = run(clean(comments=[owner_said], **mig), 760)
+assert merged() and "took the needs-owner label off" in status and digest == [], (status, digest)
+# A label taken off before the judge said anything isn't an answer to it.
+fresh_pr_state()
+run(clean(labels=["needs-owner"], **mig), 700)
+run(clean(**mig), 710)
+status, digest = run(clean(comments=[owner_said], **mig), 720)
+assert not merged() and [x[0] for x in digest] == ["Judged yours to decide"], (status, digest)
 # The newest verdict on the head counts.
 status, digest = run(clean(comments=[said(f"<!-- autoland-judgment: owner {head} -->"),
                                      said(f"<!-- autoland-judgment: land {head} -->")], **mig), 800)
@@ -531,6 +549,14 @@ status, digest = run(clean(labels=["needs-owner"], **mig), 700)
 assert JOBS == [] and not merged() and [x[0] for x in digest] == ["Labelled needs-owner"], digest
 status, digest = run(clean(labels=["needs-owner"]), 800)
 assert JOBS == [] and not merged() and digest, digest
+# Whatever else is open on it: red CI, CI still running or a thread.
+for kw in ({"checks": [{"__typename": "CheckRun", "name": "ci", "status": "COMPLETED", "conclusion": "FAILURE"}]},
+           {"checks": [{"__typename": "CheckRun", "name": "ci", "status": "IN_PROGRESS", "conclusion": None}]},
+           {"threads": [False]}):
+    fresh_pr_state()
+    run(clean(labels=["needs-owner"], **kw), 0)
+    status, digest = run(clean(labels=["needs-owner"], **kw), 7200)
+    assert JOBS == [] and not merged() and [x[0] for x in digest] == ["Labelled needs-owner"], (kw, status, digest)
 
 # Past the round limit: the owner's label, then one comment. A label that
 # won't go on (none in the repo) isn't taken as on: no comment, and the next
@@ -568,6 +594,16 @@ status, _ = run(clean(checks=proof), 800)
 assert JOBS == [] and "a Claude job is running remi-proof" in status
 status, _ = run(clean(checks=proof, sha=other), 900)
 assert len(JOBS) == 1 and other in JOBS[0]
+# Not reported at all (nothing posts it before its job runs): the same, not
+# a merge on the rest of CI, nor a judge when there's no other CI.
+for checks in (CI_GREEN, []):
+    fresh_pr_state()
+    status, _ = run(clean(checks=checks), 700)
+    assert len(JOBS) == 1 and "just proof" in JOBS[0] and not merged(), (checks, status, JOBS)
+    assert "a Claude job is running remi-proof" in status, status
+# renovate-sweep is told how a covered repo's proofs run.
+C.NOW = C.ts(T0)
+assert S.coverage([{"repo": "sam/r"}]) == {"at": C.NOW, "repos": {"sam/r": {"proofJobs": S.CFG["repos"]["sam/r"]["proofJobs"]}}}
 # Still waiting on ordinary CI too: no job yet.
 fresh_pr_state()
 busy = proof + [{"__typename": "CheckRun", "name": "build", "status": "IN_PROGRESS", "conclusion": None}]
