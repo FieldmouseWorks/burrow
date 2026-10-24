@@ -569,6 +569,7 @@ red = CI_GREEN + [{"__typename": "StatusContext", "context": "remi-proof", "stat
 run(clean(checks=red), 0)
 status, _ = run(clean(checks=red), 7200)
 assert "CI is red: remi-proof" in status and len(JOBS) == 1 and "isn't settled" in JOBS[0]
+assert "just proof" in JOBS[0] and "Rerun it that way" in JOBS[0], "the job is told how the proof runs"
 # A dependency update waiting only on a proof check gets its job too.
 fresh_pr_state()
 status, _ = run(mkpr(branch="dependabot/npm/foo-1", title="Bump foo from 1.4 to 1.5", number=11, checks=proof), 900)
@@ -639,6 +640,22 @@ bump = {"branch": "dependabot/npm/foo-1", "title": "Bump foo from 1.4 to 1.5", "
 run(mkpr(checks=red_ci, **bump), 0)
 status, _ = run(mkpr(checks=red_ci, **bump), 7200)
 assert len(JOBS) == 1 and "CI is red (ci)" in JOBS[0], (status, JOBS)
+# One sent to the owner is theirs, whatever else is open on it: no job.
+fresh_pr_state()
+run(mkpr(checks=red_ci, labels=("needs-owner",), **bump), 0)
+status, digest = run(mkpr(checks=red_ci, labels=("needs-owner",), **bump), 7200)
+assert JOBS == [] and [x[0] for x in digest] == ["Labelled needs-owner"], (status, JOBS, digest)
+# Changes requested on one go to a job like a thread; on a Renovate major
+# without a verdict, to renovate-sweep.
+pat = {"author": {"login": "pat"}, "state": "CHANGES_REQUESTED", "submittedAt": T0, "commit": {"oid": head}}
+fresh_pr_state()
+run(mkpr(reviews=[pat], **bump), 0)
+status, _ = run(mkpr(reviews=[pat], **bump), 7200)
+assert len(JOBS) == 1 and "changes requested by pat" in JOBS[0], (status, JOBS)
+fresh_pr_state()
+run(mkpr(reviews=[pat], **major), 0)
+status, _ = run(mkpr(reviews=[pat], **major), 7200)
+assert JOBS == [] and "changes requested by pat; renovate-sweep has it" in status, status
 
 # A Renovate security fix merges itself, a major one too: no verdict waited on.
 fresh_pr_state()
