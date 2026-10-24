@@ -53,10 +53,11 @@ def verdict(n, v):
     return {"author": {"login": "me"}, "body": f"Read it.\n<!-- major-verdict: {v} {n:040x} -->"}
 
 
-def sweep(prs, comments=None, covered=None, age=0, proofs=None, state=None):
+def sweep(prs, comments=None, covered=None, age=0, proofs=None, state=None, failed=()):
     """Run one sweep; return (proj calls, the majors notice as (verb, body)).
     covered: the repos the steward's repos.json lists, written age seconds ago,
-    each with proofs as its proofJobs. state: a state dir to keep between sweeps."""
+    each with proofs as its proofJobs; failed: ones it lists whose pass failed.
+    state: a state dir to keep between sweeps."""
     for f in ("proj.log", "notify.log"):
         open(os.path.join(tmp, f), "w").close()
     json.dump(prs, open(os.path.join(tmp, "prs.json"), "w"))
@@ -65,7 +66,8 @@ def sweep(prs, comments=None, covered=None, age=0, proofs=None, state=None):
     cov = ""
     if covered is not None:
         cov = os.path.join(state, "repos.json")
-        json.dump({"at": time.time() - age, "repos": {r: {"proofJobs": proofs or {}} for r in covered}}, open(cov, "w"))
+        repos = {r: {"proofJobs": proofs or {}, "covered": r not in failed} for r in [*covered, *failed]}
+        json.dump({"at": time.time() - age, "repos": repos}, open(cov, "w"))
     env = {"DIR": state, "SRC": src, "OWNER": "Sam", "NOTIFY": notify, "SETTLED": "review-settled", "COVERED": cov}
     script = "set -euo pipefail\n" + "".join(f"{k}={shlex.quote(v)}\n" for k, v in env.items()) + SWEEP
     subprocess.run(["bash", "-c", script], check=True, env={**os.environ, "PATH": bin_ + ":" + os.environ["PATH"]})
@@ -100,6 +102,9 @@ assert calls == [] and verb == "close", verb
 for covered in (["sam/other"], None):
     calls, (verb, body) = sweep([pr(3)], {3: [verdict(3, "ok")]}, covered=covered)
     assert calls == [] and verb == "open" and url + "3" in body and "doesn't cover" in body, (covered, body)
+# ... or in one whose last steward pass failed: nothing merged it.
+calls, (verb, body) = sweep([pr(3)], {3: [verdict(3, "ok")]}, covered=[], failed=[REPO])
+assert calls == [] and verb == "open" and url + "3" in body, body
 # ... with no CI at all too, saying so.
 nochecks = {**pr(3), "statusCheckRollup": []}
 calls, (verb, body) = sweep([nochecks], {3: [verdict(3, "ok")]})
@@ -146,6 +151,10 @@ calls, _ = sweep([pr(6, labels=(), conclusion="FAILURE")], covered=[REPO],
 assert len(calls) == 1 and "remi-proof isn't CI" in calls[0][-1] and "ssh remi proof" in calls[0][-1], calls
 calls, _ = sweep([pr(6, labels=(), conclusion="FAILURE")], covered=[REPO])
 assert len(calls) == 1 and "isn't CI" not in calls[0][-1], calls
+# Told for a repo whose last pass failed too.
+calls, _ = sweep([pr(6, labels=(), conclusion="FAILURE")], covered=[], failed=[REPO],
+                 proofs={"remi-proof": "ssh remi proof"})
+assert len(calls) == 1 and "ssh remi proof" in calls[0][-1], calls
 # Told even when the steward's list is stale: how a proof runs hasn't changed.
 calls, _ = sweep([pr(6, labels=(), conclusion="FAILURE")], covered=[REPO], age=7 * 3600,
                  proofs={"remi-proof": "ssh remi proof"})

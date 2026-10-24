@@ -49,7 +49,7 @@ for d in "$src"/*/; do
   covered=false
   proofs=$(jq -r --arg r "$repo" '[.repos[$r].proofJobs // {} | to_entries[] | " \(.key) isn'"'"'t CI: it runs on a machine, like this: \(.value) Rerun it that way on what you push."] | join("")' "$COVERED" 2>/dev/null || true)
   if [ -n "$COVERED" ] && jq -e --argjson now "$(date +%s)" '$now - .at < 6 * 3600' "$COVERED" >/dev/null 2>&1; then
-    covered=$(jq -r --arg r "$repo" '.repos | has($r)' "$COVERED")
+    covered=$(jq -r --arg r "$repo" '.repos[$r].covered == true' "$COVERED")
   fi
 
   # Every stuck PR of the repo goes to one job: they usually share a cause

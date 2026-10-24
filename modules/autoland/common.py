@@ -2,6 +2,8 @@
 and Claude jobs. Calls that touch the outside (gh, write, job, me) are used
 as `C.gh(...)` and so on, so a test can stand in for them in one place."""
 
+import hashlib
+import hmac
 import json
 import os
 import re
@@ -74,17 +76,42 @@ def me():
     return _me[0]
 
 
-def marker(pr, name, head):
+_key = []
+
+
+def seal(repo, n, name, verdict, head):
+    """What a verdict's marker carries after the head: a MAC under a key kept
+    in the state dir, which only the job a task hands it to is told. Every
+    Claude job posts as the steward's login, so without it a job quoting PR
+    text that holds a well-formed marker would pass for the verdict."""
+    if not _key:
+        path = os.path.join(STATE, "verdict.key")
+        try:
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "w") as f:
+                f.write(os.urandom(32).hex())
+        except FileExistsError:
+            pass
+        _key.append(open(path).read().strip())
+    msg = f"{repo}#{n} {name} {verdict} {head}".encode()
+    return hmac.new(_key[0].encode(), msg, hashlib.sha256).hexdigest()[:32]
+
+
+def marker(pr, name, head, repo=None):
     """The verdict in the newest `<!-- NAME: VERDICT SHA -->` on the PR for
-    exactly this head, from the steward's own login only; else None."""
-    pat = re.compile(rf"<!-- {re.escape(name)}: ([a-z]+) ([0-9a-f]{{40}}) -->")
+    exactly this head, from the steward's own login only; else None. With
+    repo, only a marker that also carries its seal counts."""
+    pat = re.compile(rf"<!-- {re.escape(name)}: ([a-z]+) ([0-9a-f]{{40}})(?: ([0-9a-f]{{32}}))? -->")
     verdict = None
     for c in pr["comments"]["nodes"]:  # oldest first
         if (c["author"] or {}).get("login") != me():
             continue
         for m in pat.finditer(c["body"] or ""):
-            if m.group(2) == head:
-                verdict = m.group(1)
+            if m.group(2) != head:
+                continue
+            if repo and not hmac.compare_digest(m.group(3) or "", seal(repo, pr["number"], name, m.group(1), head)):
+                continue
+            verdict = m.group(1)
     return verdict
 
 

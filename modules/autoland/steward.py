@@ -298,6 +298,10 @@ REVIEWED = "its reviewers found nothing on that head, every thread is resolved"
 DEP_SEEN = "it's a dependency update, which no reviewer reads, so you're the first to read it; its threads are resolved"
 
 
+def verdict_line(repo, n, verdict, head):
+    return f"<!-- {JUDGMENT}: {verdict} {head} {C.seal(repo, n, JUDGMENT, verdict, head)} -->"
+
+
 def judge_task(repo, pr, why, no_ci, seen=REVIEWED):
     """seen: what has cleared it so far, in words."""
     n, head, base, owner = pr["number"], pr["headRefOid"], pr["baseRefName"], CFG["owner"]
@@ -318,8 +322,9 @@ def judge_task(repo, pr, why, no_ci, seen=REVIEWED):
         "If its build or tests fail, don't judge it: say what fails, and the steward hands it to a Claude job that fixes it. "
         "Don't push, merge, or change the PR in any other way. "
         f"Post one comment on the PR (gh pr comment {n} -R {repo}) saying what you checked and why you decided as you did, "
-        f"ending with the line <!-- {JUDGMENT}: land {head} -->, <!-- {JUDGMENT}: owner {head} --> "
-        f"or, when its build or tests fail, <!-- {JUDGMENT}: failed {head} -->. "
+        f"ending with the line {verdict_line(repo, n, 'land', head)}, {verdict_line(repo, n, 'owner', head)} "
+        f"or, when its build or tests fail, {verdict_line(repo, n, 'failed', head)}, exactly as written here "
+        "(the steward trusts no other), and only the one you chose. "
         f"Don't label it: for owner, the steward adds the {CFG['labels']['owner']} label itself. "
         "Only that exact head counts: if the PR has moved on by the time you're done, say so and post no verdict."
     )
@@ -438,7 +443,7 @@ def handle(repo, pr, repo_info, digest):
     def owner_decides():
         """Sent to the owner by hand, by a fix job or by a judge (the label):
         listed for them, and no judge job."""
-        judged_owner = C.marker(pr, JUDGMENT, head) == "owner"
+        judged_owner = C.marker(pr, JUDGMENT, head, repo) == "owner"
         if judged_owner:
             # The judge's word, seen labelled on this head: once the label
             # is off, that's the owner's go-ahead. A label taken off before
@@ -456,7 +461,7 @@ def handle(repo, pr, repo_info, digest):
     def judged(why, seen=REVIEWED):
         """Settled, but not something the steward lands on its own word: one
         Claude job a head judges it, and its verdict on this head decides."""
-        verdict = C.marker(pr, JUDGMENT, head)
+        verdict = C.marker(pr, JUDGMENT, head, repo)
         if verdict == "land":
             land_now(f"Settled; a Claude job judged it fine to land ({why})")
         elif verdict == "owner" and st.get("ownerSaw") == head:
@@ -760,10 +765,12 @@ def handle(repo, pr, repo_info, digest):
 
 # ---------------------------------------------------------------- main
 
-def coverage(repos):
-    """repos.json, for renovate-sweep: the repos this pass covers, each with
-    how its proofs run, and when."""
-    return {"at": C.NOW, "repos": {r["repo"]: {"proofJobs": repo_cfg(r["repo"])["proofJobs"]} for r in repos}}
+def coverage(repos, covered):
+    """repos.json, for renovate-sweep, and when: every repo the steward has,
+    with how its proofs run and whether this pass saw to its PRs."""
+    done = {r["repo"] for r in covered}
+    return {"at": C.NOW, "repos": {r["repo"]: {"proofJobs": repo_cfg(r["repo"])["proofJobs"], "covered": r["repo"] in done}
+                                   for r in repos}}
 
 
 def main():
@@ -819,10 +826,10 @@ def main():
                 R.sweep_branches(r, heads, digest)
         except Exception as e:
             log(f"{repo}: {e}")
-    # The repos whose PRs this pass saw to, and when, for renovate-sweep: it
-    # lists the ok majors of the rest (one whose pass failed among them), and
-    # tells its jobs how a repo's proofs run.
-    save("repos.json", coverage(covered))
+    # For renovate-sweep: it lists the ok majors of the repos this pass didn't
+    # see to (one whose pass failed among them), and tells its jobs how every
+    # repo's proofs run.
+    save("repos.json", coverage(repos, covered))
     save("known.json", sorted(known))
     save("baseline-failed.json", failed)
     R.publish(digest)
