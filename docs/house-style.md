@@ -44,10 +44,12 @@ Every repo with code gets a `flake.nix` from the template
   (with rust-analyzer), Python with ruff and uv, Node's LTS.
 - `nix flake check` is the gate, the same on a laptop, in an agent's sandbox
   and in CI: rustfmt, clippy on all targets with warnings as errors, and the
-  tests of the Cargo workspace; ruff's error rules on Python (and `ruff
+  tests of the Cargo workspace, built as `cargo test` builds them (debug
+  assertions on); ruff's error rules on Python (and `ruff
   format`, once a repo has been formatted).
 - CI is `.github/workflows/flake.yml` from the template, which calls burrow's
-  shared [`flake-check`](../.github/workflows/flake-check.yml) workflow. A
+  shared [`flake-check`](../.github/workflows/flake-check.yml) workflow
+  (`runner` and `install-nix: false` put it on a self-hosted NixOS runner). A
   repo's heavier gates (VM replays, browser tiers, databases) stay its own
   jobs, alongside it, and run their tools from `nix develop`.
 - Renovate keeps `flake.lock` current, so a repo's toolchains and gate move
