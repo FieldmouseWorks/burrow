@@ -30,6 +30,8 @@ let
       # Awaits, then takes a while to answer: what changes meanwhile is news.
       slowawait*) proj await "''${prompt#slowawait }" >/dev/null; sleep 10 ;;
       eat) head -c 512M /dev/zero | tail >/dev/null; exit 1 ;;
+      # Fails as Claude does when the API refuses it: a result with no text.
+      fail) echo '{"type":"result","session_id":"s","is_error":true,"errors":["refused"]}'; exit 1 ;;
       # An issue's task (proj-inbox) that takes a while to answer.
       *inbox-slow*) sleep 8 ;;
     esac
@@ -123,6 +125,12 @@ pkgs.testers.runNixOSTest {
     with subtest("the cap is on claude.slice"):
         out = machine.succeed("systemctl --user -M dev@ show claude.slice -p MemoryHigh -p MemoryMax")
         assert "MemoryMax=" in out and "infinity" not in out, out
+
+    with subtest("a turn that failed without saying anything has no answer"):
+        e = proj("run web fail")
+        machine.wait_until_succeeds(f"su - dev -c 'proj state {e}' | grep -x error", timeout=120)
+        out = machine.fail(f"su - dev -c 'proj log {e}'")
+        assert "ended without an answer" in out and "refused" in out, out
 
     with subtest("past maxJobs, jobs wait in line, and --first goes ahead"):
         a = proj('run web "sleep 600"')

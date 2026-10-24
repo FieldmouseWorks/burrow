@@ -255,10 +255,12 @@ case "${1:-status}" in
     last=$(grep '"type":"result"' "$jobs/$id/$n.jsonl" 2>/dev/null | tail -n 1 || true)
     if [ -n "$raw" ]; then
       cat "$jobs/$id/$n.jsonl"
-    elif [ -n "$last" ]; then
-      jq -r '.result // ""' <<<"$last"
+    elif [ -n "$last" ] && jq -e '(.result // "") != ""' <<<"$last" >/dev/null; then
+      jq -r .result <<<"$last"
     else
-      if [ "$n" = "$(cat "$jobs/$id/turns")" ]; then
+      # No result yet, or one with nothing to say: an error's can hold only
+      # its errors.
+      if [ -z "$last" ] && [ "$n" = "$(cat "$jobs/$id/turns")" ]; then
         echo "($(state "$id"); no answer yet)"
       else
         echo "(turn $n ended without an answer)"
