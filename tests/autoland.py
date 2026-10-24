@@ -537,6 +537,13 @@ other = "c" * 40
 status, _ = run(clean(comments=[said(f"<!-- autoland-judgment: land {head} -->")], sha=other, **mig), 700)
 assert len(JOBS) == 1 and other in JOBS[0] and not merged()
 
+# More files than the query reads: a one-way path could be past them, so
+# it's judged too.
+fresh_pr_state()
+big = {**clean(files=["a.py"]), "changedFiles": 150}
+status, _ = run(big, 700)
+assert len(JOBS) == 1 and "150 files (too many to check)" in JOBS[0] and not merged(), (status, JOBS)
+
 # A judge that ends without a verdict (crashed, timed out, said nothing) is
 # started once more, after a second pass sees it ended; a second one that
 # does the same is listed for the owner.
