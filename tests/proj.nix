@@ -333,6 +333,19 @@ pkgs.testers.runNixOSTest {
         machine.succeed(f"su - dev -c 'echo 2 >{d}/turns'")
         assert state(job) == "done", state(job)
 
+    with subtest("a job from before each turn kept its own files reads as it was"):
+        # Its last turn's outcome and answer unnumbered, written after its
+        # prompt (the update came between turns, or ran across one).
+        machine.succeed(f"su - dev -c 'cd {d} && mv 2.outcome outcome && mv 2.result result && touch outcome result'")
+        assert state(job) == "done", state(job)
+        machine.succeed(f"test -s {d}/2.outcome && test -e {d}/2.result && ! test -e {d}/outcome && ! test -e {d}/result")
+        # One older than the latest turn's prompt is an earlier turn's, not its.
+        machine.succeed(f"su - dev -c 'cd {d} && mv 2.outcome outcome && touch -d \"1 hour ago\" outcome'")
+        assert state(job) == "failed", state(job)
+        machine.fail(f"test -e {d}/outcome")
+        machine.succeed(f"su - dev -c 'echo done >{d}/2.outcome'")
+        assert state(job) == "done", state(job)
+
     with subtest("an issue closed under a waiting job ends its waits"):
         d = f"/data/dev/jobs/{job}"
         machine.succeed(f"su - dev -c \"printf 'o/r#6\\t%s\\t{{}}\\n' $(date +%s) >{d}/await\"")

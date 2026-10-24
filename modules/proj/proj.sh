@@ -50,10 +50,29 @@ jobs=$JOBS
 self=$(readlink -f "$0")
 
 unit() { echo "proj-$(systemd-escape "$1").service"; }
+# Jobs from before each turn kept its own files have the last turn's slot,
+# outcome and answer unnumbered (a turn that ran across the update writes
+# them there too, once it ends). They're turn N's if they're no older than its
+# prompt; anything older is an earlier turn's, and goes.
+adopt() {
+  local d=$jobs/$1 n f
+  n=$(cat "$d/turns" 2>/dev/null) || return 0
+  for f in slot outcome result; do
+    [ -e "$d/$f" ] || continue
+    if [ ! -e "$d/$n.$f" ] && ! [ "$d/prompt.$n" -nt "$d/$f" ]; then
+      mv -f "$d/$f" "$d/$n.$f" 2>/dev/null || true
+    else
+      rm -f "$d/$f"
+    fi
+  done
+}
+
 # The latest turn's: its slot and outcome are its own, named by its number,
 # so one that never got as far as writing them is never read as the last.
+# (status reads the answer after this, in the same line.)
 state() {
   local n
+  adopt "$1"
   n=$(cat "$jobs/$1/turns" 2>/dev/null || true)
   if systemctl --user -q is-active "$(unit "$1")"; then
     if [ -e "$jobs/$1/$n.slot" ]; then echo running; else echo queued; fi
