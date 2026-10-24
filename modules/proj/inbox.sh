@@ -138,8 +138,14 @@ for repo in "${!project[@]}"; do
     if [ -e "$d/unannounced" ]; then
       if post "$repo" "$n" "On it: \`proj\` job \`$id\` in $p."; then rm -f "$d/unannounced"; else miss "$repo"; fi
     fi
-    st=$(proj state "$id")
-    turns=$(cat "$JOBS/$id/turns" 2>/dev/null || echo 0)
+    # The state and the turn count, read together: a turn starts (proj reply,
+    # proj _watch) holding the job's lock, and halfway through it the count
+    # names the new turn while the state is still the last one's.
+    {
+      flock -s 9
+      st=$(proj state "$id")
+      turns=$(cat "$JOBS/$id/turns" 2>/dev/null || echo 0)
+    } 9>>"$JOBS/$id/lock"
 
     # Every turn that has finished gets its answer on the issue, in order:
     # all but the one queued or running now. A job that proj _watch resumed

@@ -5,8 +5,9 @@
 # is resumed when the PR changes (even if it changed before the turn ended)
 # or once its deadline passes with GitHub unreadable, that a reply meanwhile
 # owns the job's waits, that proj-inbox posts every finished turn's answer
-# (one resumed before it looked too), and that a job past its memory cap is
-# killed by its own cgroup's limit rather than the machine running out.
+# (one resumed before it looked too, none misread while a turn starts), and
+# that a job past its memory cap is killed by its own cgroup's limit rather
+# than the machine running out.
 #
 #   nix build .#checks.x86_64-linux.proj -L
 { self, pkgs }:
@@ -254,6 +255,18 @@ pkgs.testers.runNixOSTest {
         posted = machine.succeed("cat /tmp/gh/posted")
         first = posted.find("did This task comes from GitHub issue o/r#7")
         assert "On it" in posted and -1 < first < posted.find("did sleep 1"), posted
+
+    with subtest("the inbox waits out a turn being started"):
+        # A turn held halfway through starting (its number written, its last
+        # outcome gone), then put back: the inbox reads neither half alone.
+        d = f"/data/dev/jobs/{job}"
+        machine.execute(f"su - dev -c 'cd {d} && cp outcome outcome.keep && flock lock sh -c \"echo 3 >turns; rm outcome;"
+                        f" sleep 20; echo 2 >turns; mv outcome.keep outcome\"' >/dev/null 2>&1 &")
+        machine.wait_until_succeeds(f"grep -x 3 {d}/turns", timeout=30)
+        machine.succeed("su - dev -c proj-inbox")
+        posted = machine.succeed("cat /tmp/gh/posted")
+        assert "turn 3" not in posted, posted
+        machine.succeed(f"grep -x 2 {d}/turns")
 
     with subtest("a job past its memory cap is killed by its own limit"):
         e = proj("run web eat")

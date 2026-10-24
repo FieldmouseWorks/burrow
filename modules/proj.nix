@@ -29,7 +29,7 @@ let
 
   inbox = pkgs.writeShellApplication {
     name = "proj-inbox";
-    runtimeInputs = [ proj pkgs.coreutils pkgs.git cfg.gh pkgs.jq pkgs.gnused pkgs.gnugrep ];
+    runtimeInputs = [ proj pkgs.coreutils pkgs.git cfg.gh pkgs.jq pkgs.gnused pkgs.gnugrep pkgs.util-linux ];
     text = ''
       SRC=${lib.escapeShellArg projectsDir}
       JOBS=${lib.escapeShellArg cfg.jobsDir}
