@@ -90,8 +90,12 @@ for d in "$src"/*/; do
       if [ "$major" = true ] && [ "$verdict" = held ]; then
         echo "- $title: https://github.com/$repo/pull/$n" >>"$held"
       elif [ "$major" = true ] && [ "$verdict" = ok ] && [ "$covered" != true ] &&
-        [ "$red" -eq 0 ] && [ "$pending" -eq 0 ] && [ "$checks" -gt 0 ]; then
-        echo "- $title: https://github.com/$repo/pull/$n" >>"$ready"
+        [ "$red" -eq 0 ] && [ "$pending" -eq 0 ]; then
+        # One with no CI at all is listed too, saying so: nothing else would
+        # bring it to anyone.
+        note=""
+        [ "$checks" -gt 0 ] || note=" (no checks ran on it)"
+        echo "- $title: https://github.com/$repo/pull/$n$note" >>"$ready"
       fi
       if [ "$security" = true ] &&
         [ $(($(date +%s) - $(date -d "$(jq -r .createdAt <<<"$pr")" +%s))) -gt 86400 ]; then

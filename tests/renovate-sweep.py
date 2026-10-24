@@ -93,6 +93,10 @@ assert calls == [] and verb == "close", verb
 for covered in (["sam/other"], None):
     calls, (verb, body) = sweep([pr(3)], {3: [verdict(3, "ok")]}, covered=covered)
     assert calls == [] and verb == "open" and url + "3" in body and "doesn't cover" in body, (covered, body)
+# ... with no CI at all too, saying so.
+nochecks = {**pr(3), "statusCheckRollup": []}
+calls, (verb, body) = sweep([nochecks], {3: [verdict(3, "ok")]})
+assert calls == [] and verb == "open" and url + "3 (no checks ran on it)" in body, (calls, body)
 # ... or when the steward's list is six hours old: it may have stopped.
 calls, (verb, body) = sweep([pr(3)], {3: [verdict(3, "ok")]}, covered=[REPO], age=7 * 3600)
 assert calls == [] and verb == "open" and url + "3" in body, body
