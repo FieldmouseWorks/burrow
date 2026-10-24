@@ -80,6 +80,9 @@ for d in "$src"/*/; do
       want=$sha
       [ "$major" != true ] || want="$sha verdict"
       [ "$security" != true ] || want="$sha $(date +%F)"
+      # Red since it was handed over (a proof run later, say): another job
+      # fixes that, verdict or not.
+      [ "$red" -eq 0 ] || want="$want red"
       verdict=""
       if [ "$major" = true ] && [ -n "$me" ]; then
         verdict=$(gh pr view "$n" -R "$repo" --json comments 2>/dev/null | jq -r --arg me "$me" --arg sha "$sha" '

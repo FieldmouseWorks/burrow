@@ -53,15 +53,15 @@ def verdict(n, v):
     return {"author": {"login": "me"}, "body": f"Read it.\n<!-- major-verdict: {v} {n:040x} -->"}
 
 
-def sweep(prs, comments=None, covered=None, age=0, proofs=None):
+def sweep(prs, comments=None, covered=None, age=0, proofs=None, state=None):
     """Run one sweep; return (proj calls, the majors notice as (verb, body)).
     covered: the repos the steward's repos.json lists, written age seconds ago,
-    each with proofs as its proofJobs."""
+    each with proofs as its proofJobs. state: a state dir to keep between sweeps."""
     for f in ("proj.log", "notify.log"):
         open(os.path.join(tmp, f), "w").close()
     json.dump(prs, open(os.path.join(tmp, "prs.json"), "w"))
     json.dump({str(k): v for k, v in (comments or {}).items()}, open(os.path.join(tmp, "comments.json"), "w"))
-    state = tempfile.mkdtemp(dir=tmp)
+    state = state or tempfile.mkdtemp(dir=tmp)
     cov = ""
     if covered is not None:
         cov = os.path.join(state, "repos.json")
@@ -103,6 +103,18 @@ assert calls == [] and verb == "open" and url + "3" in body, body
 # Not while its CI is red: that's a job's to fix first.
 calls, (verb, _) = sweep([pr(4, conclusion="FAILURE")], {4: [verdict(4, "ok")]})
 assert len(calls) == 1 and verb == "close", (calls, verb)
+
+# Handed over for its verdict, then red on the same head (a proof run since):
+# handed over again, ok or not; once a head red.
+kept = tempfile.mkdtemp(dir=tmp)
+calls, _ = sweep([pr(7)], state=kept)
+assert len(calls) == 1, calls
+red_proof = {**pr(7), "statusCheckRollup": [
+    {"name": "ci", "conclusion": "SUCCESS"}, {"context": "remi-proof", "state": "FAILURE"}]}
+calls, _ = sweep([red_proof], {7: [verdict(7, "ok")]}, state=kept)
+assert len(calls) == 1 and "#7 " in calls[0][-1] and "CI fails" in calls[0][-1], calls
+calls, _ = sweep([red_proof], {7: [verdict(7, "ok")]}, state=kept)
+assert calls == [], calls
 
 # A security fix merges itself, a major one too: no job is asked for a
 # verdict on it, and it's never listed as held.
