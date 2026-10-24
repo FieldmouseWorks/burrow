@@ -14,6 +14,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 
 import common as C
 from common import CFG, STATE, load, log, save, ts
@@ -70,8 +71,8 @@ def verdict(pr, head, r):
 
 # ---------------------------------------------------------------- the snapshot
 
-def git(*args, cwd=None, input=None):
-    p = subprocess.run(["git", *args], cwd=cwd, input=input, capture_output=True, check=False)
+def git(*args, cwd=None, input=None, env=None):
+    p = subprocess.run(["git", *args], cwd=cwd, input=input, env=env, capture_output=True, check=False)
     if p.returncode != 0:
         raise RuntimeError(f"git {' '.join(args[:2])}: {p.stderr.decode(errors='replace').strip()[:300]}")
     return p.stdout
@@ -79,6 +80,13 @@ def git(*args, cwd=None, input=None):
 
 def skipped(path):
     return any(re.search(p, path) for p in CFG["skipPaths"])
+
+
+def hidden(path):
+    """A secrets path: matched itself, or in a directory that is (a
+    directory matches with a trailing slash)."""
+    parts = path.split("/")
+    return skipped(path) or any(skipped("/".join(parts[:i]) + "/") for i in range(1, len(parts)))
 
 
 def rules(mirror, rev, paths):
@@ -116,9 +124,11 @@ def remove(p):
 
 def snapshot(repo, pr, key):
     """A fresh repo of two commits, the PR's merge base and its head, each
-    without the secrets paths: all a reviewer gets to read. Taken once a
-    head, for every reviewer. Returns its name, the review rules and the
-    secrets paths the PR changes."""
+    without the secrets paths: all a reviewer gets to read. The commits are
+    git's own trees with those paths taken out, so nothing the repo's
+    attributes or ignore files say can change or hide what the PR changed.
+    Taken once a head, for every reviewer. Returns its name, the review
+    rules and the secrets paths the PR changes."""
     n, head, base = pr["number"], pr["headRefOid"], pr["baseRefName"]
     name = snap_name(key, head)
     meta = load(f"{SNAP}/{name}.json", None)
@@ -132,28 +142,45 @@ def snapshot(repo, pr, key):
         f"+refs/pull/{n}/head:refs/pr/{n}", f"+refs/heads/{base}:refs/base/{base}")
     mb = git("-C", mirror, "merge-base", f"refs/base/{base}", head).decode().strip()
     changed = [p for p in git("-C", mirror, "diff", "-z", "--name-only", "--no-renames", mb, head).decode().split("\0") if p]
+    # Each commit's tree less the secrets paths, built in the mirror (which
+    # only the steward reads), so their contents never reach the snapshot.
+    who = ["-c", "user.name=autoland", "-c", "user.email=autoland@localhost", "-c", "commit.gpgsign=false"]
+    index = os.path.join(mirror, f"snap-{name}.index")
+    parent = []
+    empty = tempfile.mkdtemp()
+    try:
+        for label, rev in (("base", mb), (f"head {head}", head)):
+            if os.path.exists(index):
+                os.remove(index)
+            # The index only: git wants a work tree for it, and an empty one
+            # is never read or written.
+            e = {**os.environ, "GIT_INDEX_FILE": index, "GIT_WORK_TREE": empty}
+            subprocess.run(["git", "-C", mirror, "read-tree", rev], env=e, check=True, capture_output=True)
+            paths = subprocess.run(["git", "-C", mirror, "ls-files", "-z"], env=e, check=True,
+                                   capture_output=True).stdout.decode().split("\0")
+            gone = [p for p in paths if p and hidden(p)]
+            if gone:
+                subprocess.run(["git", "-C", mirror, "update-index", "-z", "--force-remove", "--stdin"], env=e,
+                               input="\0".join(gone).encode() + b"\0", check=True, capture_output=True)
+            tree = subprocess.run(["git", "-C", mirror, "write-tree"], env=e, check=True,
+                                  capture_output=True).stdout.decode().strip()
+            commit = git("-C", mirror, *who, "commit-tree", tree, *parent, "-m", label).decode().strip()
+            parent = ["-p", commit]
+    finally:
+        os.rmdir(empty)
+        if os.path.exists(index):
+            os.remove(index)
+    git("-C", mirror, "update-ref", f"refs/snap/{name}", commit)
     dst = os.path.join(STATE, SNAP, name)
     shutil.rmtree(dst, ignore_errors=True)
-    git("init", "-q", dst)
-    who = ["-c", "user.name=autoland", "-c", "user.email=autoland@localhost", "-c", "commit.gpgsign=false"]
-    for label, rev in (("base", mb), (f"head {head}", head)):
-        for x in os.listdir(dst):
-            if x != ".git":
-                remove(os.path.join(dst, x))
-        subprocess.run(["tar", "-x", "-C", dst], input=git("-C", mirror, "archive", rev), check=True)
-        for root, dirs, files in os.walk(dst):
-            if root == dst:
-                dirs.remove(".git")
-            for d in list(dirs):
-                if skipped(os.path.relpath(os.path.join(root, d), dst) + "/"):
-                    remove(os.path.join(root, d))
-                    dirs.remove(d)
-            for f in files:
-                if skipped(os.path.relpath(os.path.join(root, f), dst)):
-                    remove(os.path.join(root, f))
-        git("-C", dst, "add", "-A")
-        git("-C", dst, *who, "commit", "-q", "--allow-empty", "-m", label)
-    meta = {"rules": rules(mirror, f"refs/base/{base}", changed), "secret": [p for p in changed if skipped(p)]}
+    # Nothing from the steward's own git config (an LFS filter, say) runs
+    # on what the PR put there.
+    bare = {**os.environ, "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1"}
+    git("init", "-q", dst, env=bare)
+    git("-C", dst, "fetch", "-q", "--no-tags", mirror, f"refs/snap/{name}:refs/heads/review", env=bare)
+    git("-C", mirror, "update-ref", "-d", f"refs/snap/{name}")
+    git("-C", dst, "checkout", "-q", "review", env=bare)
+    meta = {"rules": rules(mirror, f"refs/base/{base}", changed), "secret": [p for p in changed if hidden(p)]}
     save(f"{SNAP}/{name}.json", meta)
     return name, meta
 

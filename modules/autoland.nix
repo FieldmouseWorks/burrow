@@ -81,6 +81,7 @@ let
     };
     inherit (rv) skipPaths;
     agents = "${agents}/bin";
+    sandbox = "${pkgs.bubblewrap}/bin/bwrap";
     baselineTask = ''
       REPO is new, and doesn't meet the baseline every repo of ${config.burrow.owner}'s keeps yet. Read
       ${baselineDocs}/docs/repo-baseline.md and bring this repo up to its "Files" section: open one PR, ready for review (not a draft), that adds
@@ -392,9 +393,9 @@ in
       description = "autoland: the reviewers' reviews of the queued PR heads";
       after = [ "network-online.target" ];
       wants = [ "network-online.target" ];
-      # git for the agents to read the snapshot with, bubblewrap for their
-      # sandboxes.
-      path = [ pkgs.git pkgs.bubblewrap pkgs.coreutils pkgs.ripgrep ];
+      # What the agents read the snapshot with, and bubblewrap for codex's
+      # own sandbox inside theirs.
+      path = with pkgs; [ bash git bubblewrap coreutils findutils gnugrep gnused diffutils ripgrep ];
       environment.HOME = reviewerHome;
       serviceConfig = {
         Type = "oneshot";

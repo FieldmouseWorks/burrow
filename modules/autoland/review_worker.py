@@ -3,10 +3,11 @@ reviews the passes queued, a few at once per reviewer, and leaves each answer
 for the next pass to post.
 
 It runs as a user of its own with no GitHub login, and each agent runs
-read-only in the head's snapshot (reviewers.py), so a PR that talks an agent
-into reading or saying something it shouldn't finds nothing worth having:
-no GitHub token, no secrets paths, and the agents' own keys are taken out of
-anything they say."""
+read-only in a sandbox that shows it its head's snapshot (reviewers.py) and
+little else, so a PR that talks an agent into reading or saying something it
+shouldn't finds nothing worth having: no GitHub token, no secrets paths, no
+other repo's code, and the agents' own keys are taken out of anything they
+say."""
 
 import json
 import os
@@ -90,17 +91,38 @@ def env(**extra):
     return {"HOME": home, "PATH": os.environ.get("PATH", ""), "LANG": "C.UTF-8", **extra}
 
 
+def sandboxed(snap, home, t, argv):
+    """argv in a sandbox of its own (bubblewrap): it sees the store, /etc,
+    its snapshot (read-only), its own agent's home and its temp dir `t`, and
+    nothing else of the machine. The service's user can read every queued
+    head's snapshot and every answer, and an agent talked into reading
+    another repo's would post it in this one's review.
+
+    The snapshot is the steward's, so git needs telling it's safe to read:
+    a git config of its own, for that one path."""
+    os.makedirs(home, exist_ok=True)
+    with open(f"{t}/gitconfig", "w") as f:
+        f.write(f"[safe]\n\tdirectory = {snap}\n")
+    ro = ["/nix/store", "/etc", "/bin", "/usr/bin", "/run/current-system", "/run/systemd/resolve", "/run/nscd"]
+    return [CFG["sandbox"], "--unshare-all", "--share-net", "--die-with-parent", "--new-session",
+            "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
+            *[x for p in ro for x in ("--ro-bind-try", p, p)],
+            "--ro-bind", snap, snap, "--bind", home, home, "--bind", t, t,
+            "--ro-bind", f"{t}/gitconfig", os.path.join(os.environ["HOME"], ".gitconfig"),
+            "--chdir", snap, "--", *argv]
+
+
 def codex(snap, prompt):
     home = os.path.join(os.environ["HOME"], ".codex")
     with tempfile.TemporaryDirectory() as t:
         with open(f"{t}/schema.json", "w") as f:
             json.dump(SCHEMA, f)
-        p = subprocess.run(
-            [f"{CFG['agents']}/codex", "exec", "--cd", snap, "--sandbox", "read-only", "--ephemeral",
-             "--color", "never", "--output-schema", f"{t}/schema.json", "-o", f"{t}/answer.json",
-             # The checkout's AGENTS.md is the PR's own: the base's rules are in the prompt.
-             "-c", "project_doc_max_bytes=0",
-             "-c", f"model_reasoning_effort={CFG['reviewers']['codex']['effort']}", "-"],
+        p = subprocess.run(sandboxed(snap, home, t, [
+            f"{CFG['agents']}/codex", "exec", "--cd", snap, "--sandbox", "read-only", "--ephemeral",
+            "--color", "never", "--output-schema", f"{t}/schema.json", "-o", f"{t}/answer.json",
+            # The checkout's AGENTS.md is the PR's own: the base's rules are in the prompt.
+            "-c", "project_doc_max_bytes=0",
+            "-c", f"model_reasoning_effort={CFG['reviewers']['codex']['effort']}", "-"]),
             input=prompt, capture_output=True, text=True, env=env(CODEX_HOME=home))
         said = p.stderr + p.stdout
         if re.search(r"usage limit|usage_limit_reached", said, re.I):
@@ -125,6 +147,7 @@ def overlay(effort):
 
 def deepseek(snap, prompt):
     key = deepseek_key()
+    home = os.path.join(os.environ["HOME"], ".dsh")
     efforts = [CFG["reviewers"]["deepseek"]["effort"]]
     if efforts[0] == "max":
         efforts.append("high")
@@ -133,10 +156,9 @@ def deepseek(snap, prompt):
             with open(f"{t}/overlay.yml", "w") as f:
                 f.write(overlay(efforts[0]))
             p = subprocess.run(
-                [f"{CFG['agents']}/dsh", "--profile", "headless", "--patch", f"{t}/overlay.yml", "-"],
-                cwd=snap, input=prompt, capture_output=True, text=True,
-                env=env(DSH_HOME=os.path.join(os.environ["HOME"], ".dsh"), DSH_TELEMETRY_MODE="DISABLED",
-                        DSH_PERMISSION_MODE="read-only", DEEPSEEK_API_KEY=key))
+                sandboxed(snap, home, t, [f"{CFG['agents']}/dsh", "--profile", "headless", "--patch", f"{t}/overlay.yml", "-"]),
+                input=prompt, capture_output=True, text=True,
+                env=env(DSH_HOME=home, DSH_TELEMETRY_MODE="DISABLED", DSH_PERMISSION_MODE="read-only", DEEPSEEK_API_KEY=key))
             said = p.stderr.strip()
             if p.returncode != 0 and re.search(r"\bAUTH\b|CREDENTIAL|\b40[12]\b|insufficient balance", said, re.I):
                 raise Out("its API key was turned down or its balance is spent", time.time() + 3600)
