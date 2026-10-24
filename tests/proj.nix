@@ -120,7 +120,8 @@ pkgs.testers.runNixOSTest {
         return "proj-" + machine.succeed(f"systemd-escape {job}").strip() + ".service"
 
     def started(job):
-        return float(machine.succeed(f"stat -c %.9Y /data/dev/jobs/{job}/slot"))
+        d = f"/data/dev/jobs/{job}"
+        return float(machine.succeed(f"stat -c %.9Y {d}/$(cat {d}/turns).slot"))
 
     machine.wait_for_unit("user@1001.service")
 
@@ -313,16 +314,24 @@ pkgs.testers.runNixOSTest {
         assert "On it" in posted and -1 < first < posted.find("did sleep 1"), posted
 
     with subtest("the inbox waits out a turn being started"):
-        # A turn held halfway through starting (its number written, its last
-        # outcome gone), then put back: the inbox reads neither half alone.
+        # A turn held halfway through starting (its number written, its unit
+        # not yet), then put back: the inbox reads neither half alone.
         d = f"/data/dev/jobs/{job}"
-        machine.execute(f"su - dev -c 'cd {d} && cp outcome outcome.keep && flock lock sh -c \"echo 3 >turns; rm outcome;"
-                        f" sleep 20; echo 2 >turns; mv outcome.keep outcome\"' >/dev/null 2>&1 &")
+        machine.execute(f"su - dev -c 'cd {d} && flock lock sh -c \"echo 3 >turns; sleep 20; echo 2 >turns\"' >/dev/null 2>&1 &")
         machine.wait_until_succeeds(f"grep -x 3 {d}/turns", timeout=30)
         machine.succeed("su - dev -c proj-inbox")
         posted = machine.succeed("cat /tmp/gh/posted")
         assert "turn 3" not in posted, posted
         machine.succeed(f"grep -x 2 {d}/turns")
+
+    with subtest("a turn that never got going isn't read as the last one's outcome"):
+        # Numbered, but its _exec gone before it wrote anything (killed as it
+        # started): the turn failed, whatever the turn before it did.
+        d = f"/data/dev/jobs/{job}"
+        machine.succeed(f"su - dev -c 'echo 3 >{d}/turns'")
+        assert state(job) == "failed", state(job)
+        machine.succeed(f"su - dev -c 'echo 2 >{d}/turns'")
+        assert state(job) == "done", state(job)
 
     with subtest("an issue closed under a waiting job ends its waits"):
         d = f"/data/dev/jobs/{job}"

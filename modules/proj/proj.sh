@@ -50,10 +50,14 @@ jobs=$JOBS
 self=$(readlink -f "$0")
 
 unit() { echo "proj-$(systemd-escape "$1").service"; }
+# The latest turn's: its slot and outcome are its own, named by its number,
+# so one that never got as far as writing them is never read as the last.
 state() {
+  local n
+  n=$(cat "$jobs/$1/turns" 2>/dev/null || true)
   if systemctl --user -q is-active "$(unit "$1")"; then
-    if [ -e "$jobs/$1/slot" ]; then echo running; else echo queued; fi
-  elif [ -s "$jobs/$1/outcome" ]; then cat "$jobs/$1/outcome"
+    if [ -e "$jobs/$1/$n.slot" ]; then echo running; else echo queued; fi
+  elif [ -s "$jobs/$1/$n.outcome" ]; then cat "$jobs/$1/$n.outcome"
   else echo failed
   fi
 }
@@ -68,9 +72,8 @@ start_turn() {
   local id=$1 msg=$2 first=$3 n
   local d=$jobs/$id
   n=$(($(cat "$d/turns" 2>/dev/null || echo 0) + 1))
-  # The last turn's state (its answer, outcome, slot and waits) is the new
-  # turn's to clear (_exec), so a turn that can't start, or a start_turn
-  # killed partway, leaves the job as it was, waits and all.
+  # The last turn's waits are the new turn's to clear (_exec), so a turn that
+  # can't start, or a start_turn killed partway, leaves the job as it was.
   printf '%s\n' "$msg" >"$d/prompt.$n"
   set_turns "$id" "$n"
   systemctl --user reset-failed "$(unit "$id")" 2>/dev/null || true
@@ -106,7 +109,7 @@ spare() {
 # A slot is a lock on JOBS/.slots/N, so a turn that's killed frees its slot
 # (and its place in line) by itself.
 take_slot() {
-  local id=$1 first=$2 me since head f fid pid i fd num busy LC_ALL=C
+  local id=$1 n=$2 first=$3 me since head f fid pid i fd num busy LC_ALL=C
   mkdir -p "$jobs/.queue" "$jobs/.slots"
   since=$(date +%s)
   me="$jobs/.queue/$([ "$first" = first ] && echo 0 || echo 1)-$(date +%s%N)-$id"
@@ -152,7 +155,7 @@ take_slot() {
         if [ -z "$busy" ] || [ "$(spare)" -ge "$MIN_FREE" ]; then
           rm -f "$me"
           trap - EXIT TERM INT
-          echo "$num" >"$jobs/$id/slot"
+          echo "$num" >"$jobs/$id/$n.slot"
           return
         fi
         exec {slot}>&-
@@ -251,7 +254,7 @@ case "${1:-status}" in
         printf '%-40s %-8s %s%s%s\n' "$id" "$(state "$id")" \
           "$(sed 's/.*/[vm &] /' "$jobs/$id/agent" 2>/dev/null)" \
           "$(cut -f1 "$jobs/$id/await" 2>/dev/null | paste -sd' ' | sed 's/.\+/[awaits &] /')" \
-          "$(head -c 100 "$jobs/$id/result" 2>/dev/null | tr '\n' ' ')"
+          "$(head -c 100 "$jobs/$id/$(cat "$jobs/$id/turns" 2>/dev/null).result" 2>/dev/null | tr '\n' ' ')"
       done
     ;;
   log)
@@ -386,10 +389,10 @@ Carry on from there. Anything you left in the background last turn was stopped w
     id=$2
     dir="$jobs/$id"
     n=$(cat "$dir/turns")
-    # The last turn's state, now that this one has started. Its waits can go:
-    # this turn writes its own to await.next, and await only once it ends.
-    rm -f "$dir/result" "$dir/outcome" "$dir/slot" "$dir/await" "$dir/await.next"
-    take_slot "$id" "$3"
+    # The last turn's waits, now that this one has started: this turn writes
+    # its own to await.next, and await only once it ends.
+    rm -f "$dir/await" "$dir/await.next"
+    take_slot "$id" "$n" "$3"
     args=(-p --output-format stream-json --verbose)
     if [ -s "$dir/session" ]; then args+=(--resume "$(cat "$dir/session")"); fi
     : >"$dir/$n.jsonl"
@@ -415,19 +418,19 @@ Carry on from there. Anything you left in the background last turn was stopped w
     if [ -n "$last" ]; then
       rc=0
       jq -r '.session_id' <<<"$last" >"$dir/session"
-      jq -r '.result // ""' <<<"$last" >"$dir/result"
-      jq -r 'if .is_error then "error" else "done" end' <<<"$last" >"$dir/outcome"
+      jq -r '.result // ""' <<<"$last" >"$dir/$n.result"
+      jq -r 'if .is_error then "error" else "done" end' <<<"$last" >"$dir/$n.outcome"
       # What it awaits, from the baseline `proj await` took; one line per
       # target, the first await of it in the turn.
-      if [ "$(cat "$dir/outcome")" = "done" ] && [ -s "$dir/await.next" ]; then
+      if [ "$(cat "$dir/$n.outcome")" = "done" ] && [ -s "$dir/await.next" ]; then
         # Swapped in whole, so _watch never reads half of it.
         awk -F '\t' '!seen[$1]++' "$dir/await.next" >"$dir/await.new" && mv -f "$dir/await.new" "$dir/await"
       fi
       rm -f "$dir/await.next"
     elif [ "$rc" -eq 124 ]; then
-      echo "timed out after $TIMEOUT" >"$dir/outcome"
+      echo "timed out after $TIMEOUT" >"$dir/$n.outcome"
     else
-      echo failed >"$dir/outcome"
+      echo failed >"$dir/$n.outcome"
     fi
     exit "$rc"
     ;;
