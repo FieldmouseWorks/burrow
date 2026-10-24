@@ -67,7 +67,11 @@ for d in "$src"/*/; do
       # Check runs carry a conclusion (empty while running), commit statuses a state.
       red=$(jq -r '[.statusCheckRollup[]? | select((.context // .name) != $settled) | (.conclusion // .state // "" | ascii_upcase)
         | select(. == "FAILURE" or . == "ERROR" or . == "TIMED_OUT" or . == "STARTUP_FAILURE")] | length' --arg settled "$SETTLED" <<<"$pr")
-      major=$(jq -r '[.labels[]?.name] | index("major") != null and index("security") == null' <<<"$pr")
+      # A major is what the steward takes for one (dep_kind in
+      # ../autoland/steward.py): the label, or a title from one major to
+      # another. A security fix never is.
+      major=$(jq -r '[.labels[]?.name] as $l | [.title | capture("from v?(?<a>[0-9]+)\\S* to v?(?<b>[0-9]+)")][0] as $m
+        | ($l | index("security")) == null and (($l | index("major")) != null or ($m != null and $m.a != $m.b))' <<<"$pr")
       security=$(jq -r '[.labels[]?.name] | index("security") != null' <<<"$pr")
       pending=$(jq -r '[.statusCheckRollup[]? | select((.context // .name) != $settled) | (.conclusion // .state // "" | ascii_upcase)
         | select(. == "" or . == "PENDING" or . == "EXPECTED")] | length' --arg settled "$SETTLED" <<<"$pr")

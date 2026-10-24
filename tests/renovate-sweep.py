@@ -82,6 +82,13 @@ url = f"https://github.com/{REPO}/pull/"
 calls, (verb, _) = sweep([pr(1)])
 assert len(calls) == 1 and "#1 " in calls[0][-1] and verb == "close", (calls, verb)
 
+# One that says so only in its title, as the steward reads it, is a major
+# too; one from 1.4 to 1.5 isn't.
+calls, _ = sweep([{**pr(8, labels=()), "title": "Update foo from 1.4 to 2.0"}])
+assert len(calls) == 1 and "#8 " in calls[0][-1] and "a major version bump" in calls[0][-1], calls
+calls, _ = sweep([{**pr(8, labels=()), "title": "Update foo from 1.4 to 1.5"}])
+assert calls == [], calls
+
 # A held one is the owner's, covered by the steward or not.
 calls, (verb, body) = sweep([pr(2)], {2: [verdict(2, "held")]}, covered=[REPO])
 assert calls == [] and verb == "open" and url + "2" in body and "held" in body, (calls, body)
