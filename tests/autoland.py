@@ -439,6 +439,14 @@ status, digest = run(clean(draft=True), 600)
 assert "state=pending" in status and "Draft: work in progress" in status, status
 assert WROTE == [x for x in WROTE if "/statuses/" in x] and RUNS == [] and JOBS == [] and digest == [], WROTE
 assert not any(x.startswith("pr ready") for x in WROTE)
+# Whoever's it is: an outside author's draft, or one with too much to read, isn't listed yet.
+outside = {**mkpr(draft=True), "author": {"login": "mallory"}}
+status, digest = run(outside, 600)
+assert "Draft: work in progress" in status and digest == [], (status, digest)
+big = mkpr(draft=True)
+big["labels"]["pageInfo"]["hasNextPage"] = True
+status, digest = run(big, 600)
+assert "Draft: work in progress" in status and digest == [], (status, digest)
 
 # A head is reviewed by both once it has sat still: Codex asked, DeepSeek
 # queued (once) for its own service, and no pass waits on it.
@@ -544,6 +552,7 @@ S.CFG["repos"]["sam/r"] = {"proofJobs": {"remi-proof": "Run `just proof` and pos
 proof = CI_GREEN + [{"__typename": "StatusContext", "context": "remi-proof", "state": "PENDING", "description": ""}]
 status, _ = run(clean(checks=proof), 700)
 assert len(JOBS) == 1 and "just proof" in JOBS[0] and head in JOBS[0] and not merged()
+assert "git worktree add" in JOBS[0] and "never in this checkout's main tree" in JOBS[0], JOBS[0]
 assert "a Claude job is running remi-proof" in status
 status, _ = run(clean(checks=proof), 800)
 assert JOBS == [] and "a Claude job is running remi-proof" in status

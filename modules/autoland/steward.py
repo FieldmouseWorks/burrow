@@ -308,7 +308,8 @@ def proof_task(repo, pr, checks, proofs):
     how = " ".join(f"{c}: {proofs[c]}" for c in checks)
     return (
         f"{about(repo, pr)} is settled and waits only for checks that run on a machine, not in CI: {', '.join(checks)}. "
-        f"Run them on exactly that commit and record each verdict the way the repo says. {how} "
+        "Check out exactly that commit in your own worktree (git worktree add) under the scratch dir, never in this checkout's main tree, "
+        f"run them there and record each verdict the way the repo says. {how} "
         "A check that fails is recorded as a failure: don't fix anything, don't push and don't merge. "
         "The steward takes it from there (a red check goes to a Claude job that fixes it)."
     )
@@ -422,6 +423,12 @@ def handle(repo, pr, repo_info, digest):
             settle("pending", f"Settled, but no Claude job could run {', '.join(ci_names)}"[:140],
                    "Couldn't start a Claude job to run its checks")
 
+    if pr["isDraft"]:
+        # Work in progress, whoever's it is: nobody reviews it yet, and nobody
+        # is told.
+        settle("pending", "Draft: work in progress, reviewed once it's marked ready")
+        save(key, st)
+        return
     # A list longer than one page could hide a hold, an open thread or a
     # changes-requested review: fail closed.
     cut = [k for k, more in (("labels", pr["labels"]["pageInfo"]["hasNextPage"]),
@@ -439,11 +446,6 @@ def handle(repo, pr, repo_info, digest):
         return
     if pr["isCrossRepository"] or author not in CFG["authors"]:
         settle("pending", f"Outside contribution: {CFG['owner']} reviews and merges it", "Outside contributions")
-        save(key, st)
-        return
-    if pr["isDraft"]:
-        # Work in progress: nobody reviews it yet, and nobody is told.
-        settle("pending", "Draft: work in progress, reviewed once it's marked ready")
         save(key, st)
         return
 
