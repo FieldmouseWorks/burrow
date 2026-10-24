@@ -554,10 +554,11 @@ def handle(repo, pr, repo_info, digest):
             settle("pending", f"Major update, {threads}; renovate-sweep has it"[:140])
         elif threads or ci == "red":
             what = threads or "CI is red (" + ", ".join(ci_names) + ")"
+            kind = "handed" if threads else "redFixed"
             settle("pending", f"Dependency update; {what}"[:140])
             idle = C.NOW - max(ts(pr["updatedAt"]), st["seen"])
-            if idle > rc["handoffAfter"] * MIN and st.get("handed") != head:
-                hand_off(what)
+            if idle > rc["handoffAfter"] * MIN and st.get(kind) != head:
+                hand_off(what, kind)
         elif proof_only:
             prove()
         elif ci == "pending":
@@ -715,8 +716,10 @@ def handle(repo, pr, repo_info, digest):
     # 2. The reviewers are clean on this head and nothing is open: CI, then land.
     elif ci == "red":
         settle("pending", "CI is red: " + ", ".join(ci_names)[:100])
-        if idle > rc["handoffAfter"] * MIN and st.get("handed") != head and not swept:
-            hand_off("CI is red (" + ", ".join(ci_names) + ")")
+        # Its own once a head, apart from a findings job's: one that answered
+        # a finding here without pushing didn't fix a check that failed since.
+        if idle > rc["handoffAfter"] * MIN and st.get("redFixed") != head and not swept:
+            hand_off("CI is red (" + ", ".join(ci_names) + ")", "redFixed")
     elif proof_only:
         prove()
     elif ci == "pending":

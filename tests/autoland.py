@@ -654,6 +654,26 @@ run(clean(checks=red), 0)
 status, _ = run(clean(checks=red), 7200)
 assert "CI is red: remi-proof" in status and len(JOBS) == 1 and "isn't settled" in JOBS[0]
 assert "just proof" in JOBS[0] and "Rerun it that way" in JOBS[0], "the job is told how the proof runs"
+# A proof that fails after a findings job answered on this head without
+# pushing gets its own fix job.
+fresh_pr_state()
+run(clean(threads=[False], checks=proof), 0)
+run(clean(threads=[False], checks=proof), 7200)
+assert len(JOBS) == 1 and "open review thread" in JOBS[0], JOBS
+run(clean(checks=proof), 7300)
+assert len(JOBS) == 1 and "just proof" in JOBS[0], JOBS
+status, _ = run(clean(checks=red), 7400)
+assert len(JOBS) == 1 and "CI is red: remi-proof" in status and "isn't settled" in JOBS[0], (status, JOBS)
+status, _ = run(clean(checks=red), 7500)
+assert JOBS == [], "one a head"
+# The same on a Dependabot update.
+fresh_pr_state()
+dbump = {"branch": "dependabot/npm/foo-1", "title": "Bump foo from 1.4 to 1.5", "number": 11}
+run(mkpr(threads=[False], **dbump), 0)
+run(mkpr(threads=[False], **dbump), 7200)
+assert len(JOBS) == 1 and "open review thread" in JOBS[0], JOBS
+status, _ = run(mkpr(checks=red, **dbump), 7300)
+assert len(JOBS) == 1 and "CI is red (remi-proof)" in JOBS[0], (status, JOBS)
 # A dependency update waiting only on a proof check gets its job too.
 fresh_pr_state()
 status, _ = run(mkpr(branch="dependabot/npm/foo-1", title="Bump foo from 1.4 to 1.5", number=11, checks=proof), 900)
