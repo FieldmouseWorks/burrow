@@ -36,15 +36,36 @@ let
       SPAWN=${lib.escapeShellArg cfg.spawn}
       SAME_DIR=(${lib.escapeShellArgs cfg.sameDir})
       MODE=${lib.escapeShellArg (if cfg.permissionMode == null then "" else cfg.permissionMode)}
+      CLAUDE=${config.burrow.claude.package}/bin/claude
       IDLE_SESSION=${if cfg.idleSession then "1" else "0"}
     '' + builtins.readFile ./remote-control/serve.sh;
   };
 
+  # Stop a server the way Ctrl-C would, so it takes its registration with it:
+  # killed outright, the folder stays "already served" at claude.ai for a few
+  # minutes and the restart fails until then.
+  stop = pkgs.writeShellApplication {
+    name = "claude-rc-stop";
+    runtimeInputs = [ pkgs.tmux pkgs.coreutils ];
+    text = ''
+      sock=rc-''${1:?usage: claude-rc-stop NAME}
+      if pid=$(tmux -L "$sock" display-message -p -t rc '#{pane_pid}' 2>/dev/null); then
+        kill -INT "$pid" 2>/dev/null || true
+        for _ in $(seq 100); do
+          kill -0 "$pid" 2>/dev/null || break
+          sleep 0.1
+        done
+      fi
+      tmux -L "$sock" kill-server 2>/dev/null || true
+    '';
+  };
+
   scan = pkgs.writeShellApplication {
     name = "claude-rc-scan";
-    runtimeInputs = [ pkgs.systemd pkgs.coreutils ];
+    runtimeInputs = [ pkgs.systemd pkgs.coreutils pkgs.gnugrep pkgs.procps ];
     text = ''
-      # Start a server for every project folder, stop the ones whose folder is gone.
+      # Start a server for every project folder, stop the ones whose folder is gone,
+      # and restart the stale ones once they hold no session.
       # A linked git worktree (its .git is a file) is a checkout of a project
       # that already has its own server, so it gets none; neither does a folder
       # matching burrow.remoteControl.skip.
@@ -70,6 +91,22 @@ let
         for w in "''${want[@]}"; do [ "$w" = "$unit" ] && keep=1; done
         [ -n "$keep" ] || systemctl --user stop --no-block "$unit"
       done < <(systemctl --user list-units --plain --no-legend --all 'claude-rc@*.service')
+      # A switch leaves running servers alone (restartIfChanged), so a server
+      # keeps the claude-rc-serve it started with: its Claude Code, its
+      # permission mode. One whose tmux runs any other is stale, and restarts
+      # here as soon as its Claude has no session (no live child): nobody
+      # is cut off, and no server stays behind for long.
+      for unit in "''${want[@]}"; do
+        pid=$(systemctl --user show -p MainPID --value "$unit")
+        [ "$pid" != 0 ] && [ -r "/proc/$pid/cmdline" ] || continue
+        tr '\0' ' ' <"/proc/$pid/cmdline" | grep -qF ${serve}/bin/claude-rc-serve && continue
+        busy=
+        for rc in $(pgrep -P "$pid"); do
+          # Any state but Z: a zombie is a session that already ended.
+          if pgrep -P "$rc" -r D,I,R,S,T,t >/dev/null; then busy=1; fi
+        done
+        [ -n "$busy" ] || systemctl --user restart --no-block "$unit"
+      done
     '';
   };
 in
@@ -133,7 +170,8 @@ in
     systemd.user.services."claude-rc@" = {
       description = "Claude Remote Control for ${projectsDir}/%I";
       after = [ "network-online.target" ];
-      # A switch must not kill the operator that has to confirm it.
+      # A switch must not kill the operator that has to confirm it; claude-rc-scan
+      # restarts a server onto the new config once it's idle.
       restartIfChanged = false;
       unitConfig = {
         ConditionUser = user;
@@ -145,7 +183,7 @@ in
         # The name goes in as an argument, not spliced into the command string,
         # so a folder with a space in it ("agent pipeline") still works.
         ExecStart = "${tmux} -L rc-%I new-session -d -s rc -c ${projectsDir}/%I ${pkgs.bashInteractive}/bin/bash -lc 'exec ${serve}/bin/claude-rc-serve \"$$1\"' rc %I";
-        ExecStop = "${tmux} -L rc-%I kill-server";
+        ExecStop = "${stop}/bin/claude-rc-stop %I";
         Restart = "always";
         RestartSec = 15;
         # Under burrow.claude.memory's cap with the proj jobs (common.nix).
@@ -160,6 +198,16 @@ in
       serviceConfig = {
         Type = "oneshot";
         ExecStart = "${scan}/bin/claude-rc-scan";
+      };
+    };
+
+    # And every few minutes, for the stale servers that were busy last time.
+    systemd.user.timers.claude-rc-scan = {
+      wantedBy = [ "timers.target" ];
+      unitConfig.ConditionUser = user;
+      timerConfig = {
+        OnActiveSec = "5min";
+        OnUnitActiveSec = "5min";
       };
     };
 
