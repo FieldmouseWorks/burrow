@@ -62,7 +62,7 @@ with open(f"{tmp}/config.json", "w") as f:
                      "ownerChecks": [], "deepseek": True},
         "repos": {},
         "deepseek": {"enable": True, "baseUrl": f"http://127.0.0.1:{srv.server_port}", "effort": "max",
-                     "skipPaths": ["(^|/)secrets?/"], "maxDiffChars": 800000, "perPass": 6, "maxTokens": 1000,
+                     "skipPaths": ["(^|/)secrets?/", r"\.(pem|key|p12|pfx)$"], "maxDiffChars": 800000, "perPass": 6, "maxTokens": 1000,
                      "timeout": 30, "caFile": None},
     }, f)
 os.environ["AUTOLAND_CONFIG"] = f"{tmp}/config.json"
@@ -102,6 +102,15 @@ index 3..4 100644
  password: MOVEDSECRET
 -port: 1
 +port: 2
+diff --git "a/cert-\\303\\251.pem" "b/cert-\\303\\251.pem"
+new file mode 100644
+--- /dev/null
++++ "b/cert-\\303\\251.pem"
+@@ -0,0 +1 @@
++QUOTEDSECRET
+diff --git a/weird header
+@@ -0,0 +1 @@
++UNPARSEDSECRET
 diff --git a/gone.txt b/gone.txt
 deleted file mode 100644
 --- a/gone.txt
@@ -147,6 +156,11 @@ text, files = S.numbered(DIFF)
 assert files["src/app.py"] == {10, 11, 12, 13}, files
 assert "NEWSECRET" not in text and "OLDSECRET" not in text and "MOVEDSECRET" not in text
 assert files["config/db.yaml"] == set()
+# Git quotes unusual names; they're read, and a header that can't be read
+# hides its file.
+assert files["cert-é.pem"] == set() and "QUOTEDSECRET" not in text
+assert "UNPARSEDSECRET" not in text
+assert S.diff_paths('diff --git a/x y b/x y') == ["x y", "x y"]
 assert "---- a removed line that looks like a header" in text
 assert files["gone.txt"] == set()
 
