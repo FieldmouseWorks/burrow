@@ -31,14 +31,16 @@ change nothing else in the same PR.
    after `handoffAfterMinutes`.
 4. Codex reviews again, until it finds nothing on the exact head.
 5. With no thread open, no changes requested and CI green, the steward posts
-   `review-settled`, marks the PR ready and merges it; the branch is deleted.
+   `review-settled` and marks the PR ready. Codex takes marking ready as a
+   cue to review again, so the steward merges a pass later, once that look
+   has had its chance; the branch is deleted.
 
 Waiting for the owner instead: PRs touching the one-way paths
 (`burrow.autoland.oneWay`: `.github/`, secrets, migrations), PRs past the
 round limit, major dependency updates, outside contributions, and PRs in a
 repo with no CI yet (unless it's set `requireCi = false`: nothing to test), and
 settled PRs waiting only on a check that a person clears, such as a test
-machine's verdict (the repo names it in `ownerChecks`). They're listed in one issue. Dependency bots' minor updates skip Codex: CI is their
+machine's verdict (the repo names it in `ownerChecks`). The steward marks a PR the owner merges ready, a pass before listing it, so the owner's merge doesn't set off a review of its own. They're listed in one issue. Dependency bots' minor updates skip Codex: CI is their
 review. That includes their bumps of the actions pinned in
 `.github/workflows/`, unless the repo sets `actionBumps = false`.
 
