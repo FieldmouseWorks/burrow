@@ -590,8 +590,11 @@ def handle(repo, pr, repo_info, digest):
     gate = one_way(repo, pr, rc, dep)
     # A minor Renovate PR a Claude job fixed carries Claude's code, and Renovate
     # won't merge it: it goes through the review loop below like a Claude PR.
-    # Red CI on it stays renovate-sweep's to hand over.
+    # While its CI is red it's renovate-sweep's to hand over, findings and all:
+    # a job from each on one branch would push over each other. The sweep's
+    # push makes a new head, and Codex reads it again.
     fixed = dep == "minor" and not gate and renovate_edited(repo, pr, st)
+    swept = fixed and ci == "red"
 
     # Dependency bumps: CI is the review. Renovate merges its own;
     # renovate-sweep handles the red ones and the majors.
@@ -670,13 +673,13 @@ def handle(repo, pr, repo_info, digest):
         else:
             settle("pending", f"Round {rounds}: " + ", ".join(what))
             idle = NOW - max(ts(pr["updatedAt"]), st["seen"])
-            if idle > rc["handoffAfter"] * MIN and st.get("handed") != head:
+            if idle > rc["handoffAfter"] * MIN and st.get("handed") != head and not swept:
                 hand_off(", ".join(what))
     # 2. Codex is clean on this head and nothing is open: CI, then land.
     elif ci == "red":
         settle("pending", "CI is red: " + ", ".join(ci_names)[:100])
         idle = NOW - max(ts(pr["updatedAt"]), st["seen"])
-        if idle > rc["handoffAfter"] * MIN and st.get("handed") != head and not fixed:
+        if idle > rc["handoffAfter"] * MIN and st.get("handed") != head and not swept:
             hand_off("CI is red (" + ", ".join(ci_names) + ")")
     elif no_ci:
         settle("pending", f"Settled, but this repo has no CI: {CFG['owner']} merges it", "Settled, yours to merge")
