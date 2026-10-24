@@ -25,11 +25,14 @@ change nothing else in the same PR.
 ## The PR flow (the steward)
 
 1. PRs are opened as drafts.
-2. Codex reviews the head (the steward asks with `@codex review`).
+2. Codex reviews the head (the steward asks with `@codex review`). Where
+   the machine turns on `burrow.autoland.deepseek`, DeepSeek reviews it in
+   the same pass: the steward sends it the diff and the Code Review Rules below
+   and posts its findings as review threads marked as DeepSeek's.
 3. Whoever opened the PR fixes each finding, or replies with why not, and
    resolves its thread. A Claude job on the machine takes over if nobody has
    after `handoffAfterMinutes`.
-4. Codex reviews again, until it finds nothing on the exact head.
+4. The reviewers look again, until none of them finds anything on the exact head.
 5. With no thread open, no changes requested and CI green, the steward posts
    `review-settled`, marks the PR ready and merges it; the branch is deleted.
 
@@ -38,7 +41,7 @@ Waiting for the owner instead: PRs touching the one-way paths
 round limit, major dependency updates, outside contributions, and PRs in a
 repo with no CI yet (unless it's set `requireCi = false`: nothing to test), and
 settled PRs waiting only on a check that a person clears, such as a test
-machine's verdict (the repo names it in `ownerChecks`). They're listed in one issue. Dependency bots' minor updates skip Codex: CI is their
+machine's verdict (the repo names it in `ownerChecks`). They're listed in one issue. Dependency bots' minor updates skip review: CI is their
 review. That includes their bumps of the actions pinned in
 `.github/workflows/`, unless the repo sets `actionBumps = false`.
 
@@ -52,7 +55,7 @@ review. That includes their bumps of the actions pinned in
   `nix flake check`. Jobs the flake can't hold stay alongside it.
 - **AGENTS.md** with the two sections below, plus whatever the repo's own
   agents need (how to build, test and run it). Keep the repo's existing text.
-  Codex applies only the `## Code Review Rules` section of the AGENTS.md
+  Codex (and DeepSeek) apply only the `## Code Review Rules` section of the AGENTS.md
   nearest each changed file (`###` subheadings group its checks), so review
   rules under any other heading move under that one.
 - **The house block** in AGENTS.md: [`house/rules.md`](../house/rules.md),

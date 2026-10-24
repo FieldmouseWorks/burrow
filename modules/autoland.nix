@@ -1,8 +1,9 @@
 # autoland: every PR in every repo you own goes from draft to merged on its
 # own, once a reviewer has nothing left to say (autoland/steward.py).
 #
-#   draft -> Codex reviews -> Claude fixes or answers every finding
-#         -> Codex finds nothing on the exact head, CI green
+#   draft -> Codex (and DeepSeek, if it's on) reviews
+#         -> Claude fixes or answers every finding
+#         -> both find nothing on the exact head, CI green
 #         -> `review-settled` status -> ready -> auto-merge -> branch deleted
 #
 # The owner only sees what needs them, in one issue: one-way doors, PRs past
@@ -49,8 +50,15 @@ let
       requireCi = true;
       actionBumps = true;
       ownerChecks = [ ];
+      deepseek = true;
     };
     repos = cfg.repos;
+    deepseek = {
+      inherit (cfg.deepseek) enable baseUrl effort skipPaths maxDiffChars perPass;
+      maxTokens = 65536;
+      timeout = 600;
+      caFile = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
+    };
     baselineTask = ''
       REPO is new, and doesn't meet the baseline every repo of ${config.burrow.owner}'s keeps yet. Read
       ${baselineDocs}/docs/repo-baseline.md and bring this repo up to its "Files" section: open one draft PR that adds
@@ -59,6 +67,9 @@ let
       nothing else. Don't ask for a review or merge it: the steward does that.
     '';
   };
+
+  dsAlso = lib.optionalString cfg.deepseek.enable
+    ", and posts DeepSeek's (under ${config.burrow.owner}'s login, marked as DeepSeek's)";
 
   configFile = pkgs.writeText "autoland.json" (builtins.toJSON settings);
   stewardPy = pkgs.writers.writePython3Bin "autoland-steward"
@@ -122,7 +133,7 @@ in
     rounds = mkOption {
       type = types.ints.positive;
       default = 5;
-      description = "Codex rounds with findings before it stops and asks you.";
+      description = "Review rounds with findings (Codex's or DeepSeek's, whichever has had more) before it stops and asks you.";
     };
 
     oneWay = mkOption {
@@ -219,6 +230,60 @@ in
       };
     };
 
+    deepseek = {
+      enable = lib.mkEnableOption ''
+        DeepSeek as a second reviewer, next to Codex. The steward sends each
+        PR head's diff, with the Code Review Rules of the nearest AGENTS.md,
+        to DeepSeek's API and posts its findings as one review (under your
+        login, each thread marked as DeepSeek's), and a PR settles only once
+        Codex and DeepSeek both find nothing on its head. Its rounds count
+        towards `rounds` like Codex's. The diffs of every repo it covers go
+        to DeepSeek, private ones included; `skipPaths` are left out
+      '';
+
+      envFile = mkOption {
+        type = types.str;
+        example = "/run/secrets/deepseek-review";
+        description = ''
+          A root-only file of KEY=value lines: DEEPSEEK_API_KEY, DEEPSEEK_MODEL
+          (the API's model name: which model does what is the machine's
+          business, so it lives here and not in a tracked file) and optionally
+          DEEPSEEK_EFFORT, which overrides `effort`. Only the service reads it
+          (systemd's LoadCredential).
+        '';
+      };
+
+      baseUrl = mkOption {
+        type = types.str;
+        default = "https://api.deepseek.com";
+        description = "The API's base URL (OpenAI-style chat completions).";
+      };
+
+      effort = mkOption {
+        type = types.enum [ "low" "high" "max" ];
+        default = "max";
+        description = "How hard it thinks (`reasoning_effort`).";
+      };
+
+      skipPaths = mkOption {
+        type = types.listOf types.str;
+        default = [ "(^|/)secrets?/" "(^|/)\\.sops\\.yaml$" "\\.sops\\.(ya?ml|json|env)$" "(^|/)\\.env(\\..*)?$" "\\.(pem|key|p12|pfx)$" ];
+        description = "Path regexes whose contents are never sent (it's told they changed, not how).";
+      };
+
+      maxDiffChars = mkOption {
+        type = types.ints.positive;
+        default = 800000;
+        description = "A bigger diff isn't sent: the PR waits for you instead.";
+      };
+
+      perPass = mkOption {
+        type = types.ints.positive;
+        default = 6;
+        description = "At most this many DeepSeek reviews in one pass; the rest wait for the next.";
+      };
+    };
+
     repos = mkOption {
       type = types.attrsOf types.attrs;
       default = { };
@@ -242,7 +307,9 @@ in
         verdict from a test machine: a settled PR waiting on nothing else is
         listed for you instead of waiting quietly for CI), keepBranches
         (more branch globs the cleanup never touches in this repo, on top of
-        the machine's, for branches a repo keeps as evidence).
+        the machine's, for branches a repo keeps as evidence), deepseek
+        (false: Codex alone reviews this repo, and none of it goes to
+        DeepSeek).
       '';
     };
   };
@@ -262,8 +329,11 @@ in
         Type = "oneshot";
         User = user;
         ExecStart = "${steward}/bin/autoland-steward${lib.optionalString cfg.dryRun " status"}";
-        TimeoutStartSec = "20min";
+        # DeepSeek's reviews, at their most thorough, can take minutes each.
+        TimeoutStartSec = if cfg.deepseek.enable then "45min" else "20min";
         Nice = 10;
+      } // lib.optionalAttrs cfg.deepseek.enable {
+        LoadCredential = "deepseek:${cfg.deepseek.envFile}";
       };
     };
     systemd.timers.autoland = {
@@ -286,14 +356,14 @@ in
       Every repo of ${lib.concatStringsSep ", " cfg.owners} merges its PRs on its own, through the
       steward (`autoland`, every ${cfg.every}). Open PRs as drafts, then leave them be:
 
-      - The steward asks Codex for a review. Fix or answer every finding (reply on
-        the thread, push the fix) and resolve the thread; it asks Codex again once
-        they're all resolved.
-      - Once Codex finds nothing on the head, every thread is resolved and CI is
+      - The steward asks Codex for a review${dsAlso}. Fix or answer every finding (reply on
+        the thread, push the fix) and resolve the thread; the reviewer that raised it
+        looks again once they're all resolved.
+      - Once ${if cfg.deepseek.enable then "Codex and DeepSeek both find" else "Codex finds"} nothing on the head, every thread is resolved and CI is
         green, it posts `${cfg.context}`, marks the PR ready and merges it; the
         branch goes too. Don't merge, mark ready or post that status yourself.
       - What it won't merge (paths matching its one-way list, such as `.github/`,
-        secrets and migrations; more than ${toString cfg.rounds} Codex rounds; outside
+        secrets and migrations; more than ${toString cfg.rounds} review rounds; outside
         contributions; repos with no CI yet) waits for ${config.burrow.owner}, listed in one issue. Label a PR
         `${cfg.labels.owner}` to send it there yourself, or `${cfg.labels.hold}` to keep the
         steward off it.

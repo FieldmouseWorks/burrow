@@ -8,14 +8,16 @@ One pass (the timer runs it every couple of minutes):
      `baseline` ruleset); a repo seen for the first time also gets a Claude
      job that brings its files to docs/repo-baseline.md.
   2. For each open PR, work out where it stands and do the next thing:
-     ask Codex for a review, hand open findings or red CI to a Claude job,
+     ask Codex for a review (and DeepSeek, if it's on: config.deepseek),
+     hand open findings or red CI to a Claude job,
      post the `review-settled` commit status, mark it ready and turn on
      auto-merge, or stop and list it for the owner.
   3. Once a day per repo, delete branches whose tip is already in the
      default branch, and list the stale unmerged ones.
   4. Keep one issue up to date with everything waiting for the owner.
 
-Everything talks to GitHub through `gh`, with the user's own login. Settings
+Everything talks to GitHub through `gh`, with the user's own login, so
+DeepSeek's reviews are posted under it too, each marked as DeepSeek's. Settings
 are in the JSON file $AUTOLAND_CONFIG (../autoland.nix). State is in
 config.stateDir: one JSON file per PR, one per repo.
 
@@ -27,15 +29,19 @@ import fnmatch
 import json
 import os
 import re
+import ssl
 import subprocess
 import sys
 import tempfile
 import time
+import urllib.error
+import urllib.request
 from datetime import datetime
 
 CFG = json.load(open(os.environ["AUTOLAND_CONFIG"]))
 CONTEXT = CFG["context"]
 CODEX = CFG["codexLogin"]
+DS = CFG.get("deepseek") or {"enable": False}
 DRY = len(sys.argv) > 1 and sys.argv[1] == "status"
 # A dry run keeps its own state, so its once-a-day reads (settings, branches)
 # stay once a day instead of running every pass on the owner's API quota.
@@ -482,13 +488,233 @@ def fix_task(repo, pr, why):
     return (
         f"PR #{pr['number']} in {repo} (\"{pr['title']}\", branch {pr['headRefName']}) isn't settled: {why}. "
         "Settle it. Check out the branch in your own worktree (git worktree add) under the scratch dir, never in this checkout's main tree. "
-        "For every unresolved review thread (Codex's or anyone's): either fix it, push, and reply on the thread with the commit, "
+        "For every unresolved review thread (Codex's, DeepSeek's, which the steward posts under the owner's login marked DeepSeek, or anyone's): "
+        "either fix it, push, and reply on the thread with the commit, "
         "or reply with why it's wrong or out of scope; then resolve the thread (gh api graphql, resolveReviewThread). "
         "If CI is red, read the failing job's log, fix the cause and push. Run the repo's tests before you push. "
-        "Don't ask Codex for a review, don't mark the PR ready and don't merge: the steward does those once you're done. "
+        "Don't ask for a review, don't mark the PR ready and don't merge: the steward does those once you're done. "
         "If something needs the owner (a decision, a secret, a one-way change), comment on the PR saying exactly what, "
         f"add the {CFG['labels']['owner']} label, and stop."
     )
+
+
+# ---------------------------------------------------------------- DeepSeek
+
+# The steward posts DeepSeek's reviews under the user's own login, so they're
+# told apart by these markers: the review's names the commit and how many
+# findings it had, and each finding's thread carries the other.
+DS_RE = re.compile(r"<!-- deepseek-review:v1 (\{.*?\}) -->")
+DS_FINDING = "<!-- deepseek-finding -->"
+DS_CALLS = []  # when each DeepSeek call this pass started
+_me = []
+
+
+def me():
+    """The login the steward runs as (and posts DeepSeek's reviews as)."""
+    if not _me:
+        _me.append(gh("api", "user", "--jq", ".login"))
+    return _me[0]
+
+
+def deepseek_verdict(pr, head):
+    """What DeepSeek last said about this exact head (clean, findings or
+    none), when, and how many of its reviews on the PR had findings."""
+    verdict, at, rounds = "none", 0, 0
+    for r in pr["reviews"]["nodes"]:
+        m = DS_RE.search(r["body"] or "")
+        if not m or (r["author"] or {}).get("login") != me():
+            continue
+        try:
+            found = int(json.loads(m.group(1)).get("findings", 0)) > 0
+            sha = json.loads(m.group(1)).get("commit_sha")
+        except (ValueError, TypeError, AttributeError):
+            continue
+        rounds += found
+        if sha == head and (r["commit"] or {}).get("oid") == head and ts(r["submittedAt"]) >= at:
+            verdict, at = ("findings" if found else "clean"), ts(r["submittedAt"])
+    return verdict, at, rounds
+
+
+def numbered(diff):
+    """The diff, file by file, with each new-side line's number in front (the
+    numbers findings point at), and the lines a review comment can go on."""
+    files, out, path, new = {}, [], None, 0
+    skip = [re.compile(p) for p in DS["skipPaths"]]
+    hidden = in_hunk = False
+    for x in diff.splitlines():
+        if x.startswith("diff --git "):
+            path = x.split(" b/", 1)[-1]
+            hidden, in_hunk = any(p.search(path) for p in skip), False
+            files[path] = set()
+            out.append(f"\n=== {path}" + ("\n(contents not sent: a secrets path)" if hidden else ""))
+        elif hidden or path is None:
+            continue
+        elif x.startswith("@@"):
+            m = re.match(r"@@ -\d+(?:,\d+)? \+(\d+)", x)
+            new, in_hunk = (int(m.group(1)) if m else 0), True
+            out.append(x)
+        elif not in_hunk:
+            # The file's header: only the lines that say what happened to it.
+            if x.startswith(("new file", "deleted file", "rename ", "Binary files")):
+                out.append(x)
+        elif x.startswith("-"):
+            out.append(f"{'':>6} {x}")
+        elif x.startswith(("+", " ")):
+            files[path].add(new)
+            out.append(f"{new:>6} {x}")
+            new += 1
+        else:
+            out.append(f"{'':>6} {x}")  # "\ No newline at end of file"
+    return "\n".join(out), files
+
+
+def review_rules(repo, base, paths):
+    """The `## Code Review Rules` of the AGENTS.md nearest each changed file,
+    as the base branch has them (a PR can't rewrite its own rules)."""
+    tree = gh("api", f"repos/{repo}/git/trees/{base}?recursive=1", "--jq",
+              '[.tree[] | select(.type == "blob") | .path | select(test("(^|/)AGENTS\\\\.md$"))]', check=False)
+    have = set(tree) if isinstance(tree, list) else set()
+    wanted = set()
+    for p in paths:
+        d = p
+        while d:
+            d = d.rpartition("/")[0]
+            f = f"{d}/AGENTS.md" if d else "AGENTS.md"
+            if f in have:
+                wanted.add(f)
+                break
+    rules = []
+    for f in sorted(wanted):
+        text = gh("api", "-H", "Accept: application/vnd.github.raw", f"repos/{repo}/contents/{f}?ref={base}", check=False)
+        m = re.search(r"^## Code Review Rules\s*$(.*?)(?=^## |\Z)", text if isinstance(text, str) else "", re.M | re.S)
+        if m:
+            rules.append(f"From {f}:\n{m.group(1).strip()}")
+    return "\n\n".join(rules)
+
+
+def prior_findings(repo, n):
+    """DeepSeek's earlier findings on this PR and the replies each got."""
+    out = gh("api", "--paginate", f"repos/{repo}/pulls/{n}/comments?per_page=100", "--jq",
+             ".[] | {id, in_reply_to_id, path, line, original_line, body, user: .user.login}", check=False)
+    cs = []
+    for x in (out if isinstance(out, str) else json.dumps(out) if out else "").splitlines():
+        try:
+            cs.append(json.loads(x))
+        except ValueError:
+            pass
+    roots = [c for c in cs if c["user"] == me() and DS_FINDING in (c["body"] or "")]
+    text = []
+    for c in roots:
+        replies = [r for r in cs if r.get("in_reply_to_id") == c["id"]]
+        body = c["body"].replace(DS_FINDING, "").strip()
+        text.append(f"- {c['path']}:{c.get('line') or c.get('original_line')}: {body}\n"
+                    + "".join(f"  Reply from {r['user']}: {r['body'].strip()}\n" for r in replies))
+    return "\n".join(text)[:60000]
+
+
+def ask_deepseek(system, user):
+    """One chat completion, JSON out. Raises on any failure."""
+    env = {}
+    for x in open(os.path.join(os.environ.get("CREDENTIALS_DIRECTORY", ""), "deepseek")):
+        k, sep, v = x.strip().partition("=")
+        if sep:
+            env[k] = v.strip().strip('"')
+    body = {
+        "model": env["DEEPSEEK_MODEL"],
+        "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
+        "response_format": {"type": "json_object"},
+        "reasoning_effort": env.get("DEEPSEEK_EFFORT") or DS["effort"],
+        "max_tokens": DS["maxTokens"],
+    }
+    ctx = ssl.create_default_context(cafile=DS["caFile"])
+
+    def call(b):
+        req = urllib.request.Request(DS["baseUrl"].rstrip("/") + "/chat/completions", data=json.dumps(b).encode(),
+                                     headers={"Authorization": f"Bearer {env['DEEPSEEK_API_KEY']}",
+                                              "Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=DS["timeout"], context=ctx) as r:
+            return json.load(r)["choices"][0]["message"]["content"] or ""
+
+    try:
+        content = call(body)
+    except urllib.error.HTTPError as e:
+        if e.code != 400:
+            raise
+        # Turned down as asked: once more without JSON mode, read from the text.
+        body.pop("response_format")
+        content = call(body)
+    try:
+        return json.loads(content)
+    except ValueError:
+        return json.loads(content[content.index("{"):content.rindex("}") + 1])
+
+
+DS_SYSTEM = """You review pull requests for {owner}'s repos. You are one of two reviewers; a PR merges itself once both find nothing on its latest commit, so what you let through ships.
+
+Report only real defects a careful senior reviewer would block the merge for: bugs, security holes, data loss, races, broken error handling, tests or checks weakened to get green, behaviour changed beyond what the PR says it does, and anything the repo's Code Review Rules flag. No style or naming nits, no praise, no "consider" suggestions, no restating the diff, nothing you can't point at in the code. If nothing qualifies, return no findings: that is the usual outcome for a good commit.
+
+Earlier findings on this PR are listed with the replies they got. Don't raise one again unless the code still has the problem and the reply is wrong; then say why the reply doesn't hold.
+
+Each finding: "path" (as the diff names it), "line" (a number from the diff's left column, on the new side, where the problem is), "severity" ("P0": unsafe or breaks things, "P1": a real bug or a rule broken, "P2": a smaller real defect), "title" (one line), "body" (what is wrong, why, and the fix, in a few sentences). At most 10, most severe first.
+
+Answer with JSON only: {{"findings": [...], "summary": "one sentence on the PR as a whole"}}"""
+
+
+def quiet_mentions(text):
+    """Model text goes out under the user's login: no @-pings from it."""
+    return re.sub(r"@(?=[\w-])", "@​", str(text)).replace("<!--", "&lt;!--")
+
+
+def run_deepseek(repo, pr, dst):
+    """Ask DeepSeek about the head and post what it says as one review.
+    Returns "clean", "findings", or None if it didn't happen."""
+    n, head = pr["number"], pr["headRefOid"]
+    DS_CALLS.append(time.time())
+    diff = gh("api", "-H", "Accept: application/vnd.github.diff",
+              f"repos/{repo}/compare/{pr['baseRefName']}...{head}", check=False)
+    if not isinstance(diff, str) or not diff.startswith("diff"):
+        raise RuntimeError("couldn't read the diff")
+    text, files = numbered(diff)
+    if len(text) > DS["maxDiffChars"]:
+        dst["tooBig"] = True
+        return None
+    user = (f"Repo {repo}, PR #{n}: {pr['title']}\n\n"
+            f"Code Review Rules:\n{review_rules(repo, pr['baseRefName'], files) or '(none)'}\n\n"
+            f"Earlier findings:\n{prior_findings(repo, n) or '(none)'}\n\n"
+            f"The diff against {pr['baseRefName']}:\n{text}")
+    log(f"{repo}#{n}: asking DeepSeek ({len(text)} chars of diff)")
+    answer = ask_deepseek(DS_SYSTEM.format(owner=CFG["owner"]), user)
+    comments, loose = [], []
+    for f in (answer.get("findings") or [])[:10]:
+        if not isinstance(f, dict):
+            continue
+        sev = f.get("severity") if f.get("severity") in ("P0", "P1", "P2") else "P1"
+        msg = f"**DeepSeek · {sev}** {quiet_mentions(f.get('title', ''))}\n\n{quiet_mentions(f.get('body', ''))}"
+        lines = files.get(f.get("path"))
+        if not lines:
+            # A file that isn't in the diff, or has no new side (deleted): no
+            # thread to hang it on, so it's a note in the review, not a finding.
+            loose.append(f"- `{quiet_mentions(f.get('path'))}`: " + msg.replace("\n\n", " "))
+            continue
+        try:
+            want = int(f.get("line"))
+        except (TypeError, ValueError):
+            want = min(lines)
+        line = want if want in lines else min(lines, key=lambda x: abs(x - want))
+        comments.append({"path": f["path"], "line": line, "side": "RIGHT", "body": msg + "\n\n" + DS_FINDING})
+    k = len(comments)
+    head_line = (f"**DeepSeek review** of {head[:7]}: "
+                 + (f"{k} finding{'s' * (k > 1)}. Fix or answer each, then resolve its thread." if k else "nothing found."))
+    body = head_line + (f"\n\n{quiet_mentions(answer.get('summary', ''))}" if answer.get("summary") else "")
+    if loose:
+        body += "\n\nNotes not on a changed line:\n" + "\n".join(loose)
+    body += "\n\n<!-- deepseek-review:v1 " + json.dumps({"commit_sha": head, "findings": k}) + " -->"
+    posted = gh("api", "-X", "POST", f"repos/{repo}/pulls/{n}/reviews", "--input", "-",
+                input=json.dumps({"commit_id": head, "event": "COMMENT", "body": body, "comments": comments}), check=False)
+    if not isinstance(posted, dict):
+        raise RuntimeError("GitHub didn't take the review")
+    log(f"{repo}#{n}: DeepSeek review posted, {k} finding(s)")
+    return "findings" if k else "clean"
 
 
 def handle(repo, pr, repo_info, digest):
@@ -497,8 +723,10 @@ def handle(repo, pr, repo_info, digest):
     key = f"pr-{repo.replace('/', '_')}-{n}.json"
     st = load(key, {})
     if st.get("head") != head:
-        st.update(head=head, seen=NOW, asked=[], handed=None, landFails=0)
+        st.update(head=head, seen=NOW, asked=[], handed=None, landFails=0, ds={})
     st.setdefault("base", 0)
+    st.setdefault("dsBase", 0)
+    st.setdefault("ds", {})
     labels = {x["name"] for x in pr["labels"]["nodes"]}
     author = (pr["author"] or {}).get("login", "")
     age = NOW - st["seen"]
@@ -600,12 +828,19 @@ def handle(repo, pr, repo_info, digest):
         return
 
     verdict, vtime = codex_verdict(pr, head, st["seen"])
-    rounds = sum(1 for r in pr["reviews"]["nodes"] if (r["author"] or {}).get("login") == CODEX) - st["base"]
+    # DeepSeek, where it's on, is a second reviewer: both have to find nothing.
+    use_ds = DS["enable"] and rc["deepseek"]
+    dsv, dstime, ds_rounds = deepseek_verdict(pr, head) if use_ds else ("clean", 0, 0)
+    codex_rounds = sum(1 for r in pr["reviews"]["nodes"] if (r["author"] or {}).get("login") == CODEX) - st["base"]
+    ds_rounds -= st["dsBase"]
     if st.get("escalated") and CFG["labels"]["owner"] not in labels:
         # The owner took the label off: another full set of rounds.
-        st["base"] += rounds
-        rounds = 0
+        st["base"] += codex_rounds
+        st["dsBase"] += ds_rounds
+        codex_rounds = ds_rounds = 0
         st["escalated"] = False
+    rounds = max(codex_rounds, ds_rounds)
+    reviewers = "Codex and DeepSeek" if use_ds else "Codex"
     last_ask = max(st["asked"]) if st["asked"] else 0
 
     def ask(why):
@@ -616,43 +851,89 @@ def handle(repo, pr, repo_info, digest):
         st["asked"].append(NOW)
         return True
 
-    # 1. Codex.
-    if rounds >= rc["rounds"] and verdict != "clean":
+    def ask_ds():
+        """DeepSeek on this head, now (at most 4 reviews a head, a few a pass)."""
+        dst = st["ds"]
+        if DRY:
+            log(f"  would: ask DeepSeek to review {tag} at {head[:7]}")
+            return None
+        if dst.get("fails", 0) >= 3 and NOW - dst.get("failedAt", 0) > 3600:
+            dst["fails"] = 0  # an outage passes: three more tries an hour on
+        if (dst.get("runs", 0) >= 4 or dst.get("fails", 0) >= 3 or dst.get("tooBig")
+                or len(DS_CALLS) >= DS["perPass"]):
+            return None
+        try:
+            v = run_deepseek(repo, pr, dst)
+        except Exception as e:  # the API, the network, its JSON: tried again next pass
+            dst["fails"], dst["failedAt"] = dst.get("fails", 0) + 1, NOW
+            log(f"{tag}: DeepSeek review failed ({dst['fails']}): {str(e)[:200]}")
+            return None
+        dst["runs"] = dst.get("runs", 0) + (v is not None)
+        return v
+
+    # 1. The reviewers.
+    if rounds >= rc["rounds"] and not (verdict == "clean" and dsv == "clean"):
         if not st.get("escalated"):
             write("pr", "edit", str(n), "-R", repo, "--add-label", CFG["labels"]["owner"], check=False)
-            comment(repo, n, f"{rounds} Codex rounds and it still has findings, so this stops here and waits for "
+            comment(repo, n, f"{rounds} review rounds and there are still findings, so this stops here and waits for "
                              f"{CFG['owner']}. Taking the `{CFG['labels']['owner']}` label off gives it another {rc['rounds']}.")
             st["escalated"] = True
-        settle("pending", f"Still unsettled after {rounds} Codex rounds: {CFG['owner']} decides", "Unsettled after the round limit")
+        settle("pending", f"Still unsettled after {rounds} review rounds: {CFG['owner']} decides", "Unsettled after the round limit")
         save(key, st)
         return
 
     quiet = age >= rc["settleDelay"] * MIN
+    waiting = []
     if verdict in ("none", "failed") or (verdict == "running" and NOW - vtime > rc["codexTimeout"] * MIN):
         if quiet and (not last_ask or NOW - last_ask > rc["codexTimeout"] * MIN):
             ask("Review this head." if not last_ask else "Retrying: the last request got no result.")
         if len(st["asked"]) >= 2 and NOW - last_ask > rc["codexTimeout"] * MIN:
             digest.append(("Codex isn't answering", line, f"asked {len(st['asked'])} times on {head[:7]}"))
-        settle("pending", "Waiting for Codex's review of this commit")
+        waiting.append("Waiting for Codex's review of this commit")
     elif verdict == "running":
-        settle("pending", "Codex is reviewing this commit")
-    elif verdict == "findings" or open_threads or changes:
-        what = []
-        if open_threads:
-            what.append(f"{open_threads} open review thread{'s' * (open_threads > 1)}")
-        if changes:
-            what.append("changes requested by " + ", ".join(changes))
-        if verdict == "findings" and not open_threads and not changes:
-            # Every finding answered without a new commit: Codex looks again.
-            if vtime > last_ask and NOW - vtime > rc["settleDelay"] * MIN:
+        waiting.append("Codex is reviewing this commit")
+    # DeepSeek is asked in the same pass as Codex, and answers within it.
+    # Threads it opens just now aren't in this pass's numbers yet.
+    fresh = False
+    if dsv == "none":
+        if quiet:
+            dsv = ask_ds() or "none"
+            fresh = dsv == "findings"
+        if st["ds"].get("tooBig"):
+            digest.append(("Too big for DeepSeek to review", line, f"over {DS['maxDiffChars']} characters of diff"))
+        elif st["ds"].get("fails", 0) >= 3:
+            digest.append(("DeepSeek couldn't review it", line, f"failed {st['ds']['fails']} times on {head[:7]} (journalctl -u autoland)"))
+        if dsv == "none":
+            waiting.append("Waiting for DeepSeek's review of this commit")
+
+    what = []
+    if open_threads:
+        what.append(f"{open_threads} open review thread{'s' * (open_threads > 1)}")
+    if changes:
+        what.append("changes requested by " + ", ".join(changes))
+    idle = NOW - max(ts(pr["updatedAt"]), st["seen"])
+    if waiting:
+        settle("pending", "; ".join(waiting + what))
+        # One reviewer's threads needn't wait for the other to finish.
+        if what and idle > rc["handoffAfter"] * MIN and st.get("handed") != head:
+            hand_off(", ".join(what))
+    elif "findings" in (verdict, dsv) or open_threads or changes:
+        if not open_threads and not changes and not fresh:
+            # Every finding answered without a new commit: the reviewers that
+            # had findings look again.
+            if verdict == "findings" and vtime > last_ask and NOW - vtime > rc["settleDelay"] * MIN:
                 ask("Every finding is answered and resolved; review again.")
-            settle("pending", f"Findings answered; Codex round {rounds + 1} next")
+            if dsv == "findings" and NOW - dstime > rc["settleDelay"] * MIN:
+                fresh = ask_ds() == "findings"
+        if fresh:
+            settle("pending", f"Round {rounds + 1}: DeepSeek has new findings")
+        elif not open_threads and not changes:
+            settle("pending", f"Findings answered; review round {rounds + 1} next")
         else:
             settle("pending", f"Round {rounds}: " + ", ".join(what))
-            idle = NOW - max(ts(pr["updatedAt"]), st["seen"])
             if idle > rc["handoffAfter"] * MIN and st.get("handed") != head:
                 hand_off(", ".join(what))
-    # 2. Codex is clean on this head and nothing is open: CI, then land.
+    # 2. The reviewers are clean on this head and nothing is open: CI, then land.
     elif ci == "red":
         settle("pending", "CI is red: " + ", ".join(ci_names)[:100])
         idle = NOW - max(ts(pr["updatedAt"]), st["seen"])
@@ -670,7 +951,7 @@ def handle(repo, pr, repo_info, digest):
     elif gate:
         settle("pending", f"Settled; {CFG['owner']} merges it (touches {gate})", "Settled, yours to merge")
     else:
-        settle("success", "Codex found nothing on this commit, every thread is resolved, CI is green")
+        settle("success", f"{reviewers} found nothing on this commit, every thread is resolved, CI is green")
         if st.get("landed") != head:
             log(f"{tag}: settled, landing")
             merge()
@@ -682,7 +963,7 @@ def handle(repo, pr, repo_info, digest):
                 log(f"{tag}: behind its base, brought up to date")
                 st["updated"] = head
 
-    # Anything not merged after a day, Codex clean or not (a check that never
+    # Anything not merged after a day, reviewed clean or not (a check that never
     # reports keeps it pending). One-way PRs, and those already listed for
     # the owner (no CI), are left out.
     if NOW - ts(pr["createdAt"]) > 86400 and not gate and not any(x[1] == line for x in digest):
