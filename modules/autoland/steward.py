@@ -292,13 +292,19 @@ JUDGMENT = "autoland-judgment"
 MAJOR_VERDICT = "major-verdict"  # renovate-sweep's, on a Renovate major
 
 
-def judge_task(repo, pr, why, no_ci):
+REVIEWED = "its reviewers found nothing on that head, every thread is resolved"
+# A dependency update isn't reviewed: the judge is the first to read it.
+DEP_SEEN = "it's a dependency update, which no reviewer reads, so you're the first to read it; its threads are resolved"
+
+
+def judge_task(repo, pr, why, no_ci, seen=REVIEWED):
+    """seen: what has cleared it so far, in words."""
     n, head, owner = pr["number"], pr["headRefOid"], CFG["owner"]
     test = (" The repo has no CI, so nothing has built or tested this: check out exactly that commit in your own worktree "
             "(git worktree add) under the scratch dir, never in this checkout's main tree, and run its build and tests yourself."
             if no_ci else "")
     return (
-        f"{about(repo, pr)} is settled: its reviewers found nothing on that head, every thread is resolved"
+        f"{about(repo, pr)} is settled: {seen}"
         + ("" if no_ci else " and CI is green")
         + f". The steward doesn't land it on its own word because {why}, so you judge it. "
         f"Read the diff (gh pr diff {n} -R {repo}) and the repo's AGENTS.md.{test} "
@@ -442,7 +448,7 @@ def handle(repo, pr, repo_info, digest):
             settle("pending", f"Settled; {CFG['owner']} decides (the {CFG['labels']['owner']} label)",
                    "Judged yours to decide" if judged_owner else f"Labelled {CFG['labels']['owner']}")
 
-    def judged(why):
+    def judged(why, seen=REVIEWED):
         """Settled, but not something the steward lands on its own word: one
         Claude job a head judges it, and its verdict on this head decides."""
         verdict = C.marker(pr, JUDGMENT, head)
@@ -452,9 +458,11 @@ def handle(repo, pr, repo_info, digest):
             land_now(f"Settled; a Claude job sent it to {CFG['owner']}, who took the {CFG['labels']['owner']} label off ({why})")
         elif verdict == "owner":
             # The judge didn't label it: labelled here, so the owner has a
-            # label to take off.
+            # label to take off, and taking it off is their answer even
+            # before a pass has seen it on.
             settle("pending", f"Settled; a Claude job judged it {CFG['owner']}'s to decide ({why})", "Judged yours to decide")
-            C.write("pr", "edit", str(n), "-R", repo, "--add-label", CFG["labels"]["owner"], check=False)
+            if C.write("pr", "edit", str(n), "-R", repo, "--add-label", CFG["labels"]["owner"], check=False) is not None:
+                st["ownerSaw"] = head
         elif verdict == "failed":
             # The judge's own build or tests failed on this head: a fix job
             # has it, and its push is judged again. Its own once a head: a
@@ -466,8 +474,8 @@ def handle(repo, pr, repo_info, digest):
         elif update_branch():
             settle("pending", "Settled, but behind its base: brought up to date, reviewed again")
         elif lost("judged"):
-            again("judged", judge_task(repo, pr, why, ci == "none"), "judging it", "a verdict")
-        elif st.get("judged") == head or started("judged", judge_task(repo, pr, why, ci == "none")):
+            again("judged", judge_task(repo, pr, why, ci == "none", seen), "judging it", "a verdict")
+        elif st.get("judged") == head or started("judged", judge_task(repo, pr, why, ci == "none", seen)):
             settle("pending", f"Settled; a Claude job is judging it ({why})")
         else:
             settle("pending", f"Settled, but no Claude job could judge it ({why})", "Couldn't start a Claude job to judge it")
@@ -574,9 +582,10 @@ def handle(repo, pr, repo_info, digest):
             settle("pending", "Major update; renovate-sweep held it: see its comment" if major_verdict == "held"
                    else "Major update; waiting for renovate-sweep's verdict on this head")
         elif gate or ci == "none":
-            judged(f"a dependency update touching {gate}" if gate else "the repo has no CI")
+            judged(f"a dependency update touching {gate}" if gate else "the repo has no CI",
+                   DEP_SEEN + ("; renovate-sweep cleared the major version for this head" if major_verdict == "ok" else ""))
         elif dep == "major" and not renovate:
-            judged("a major dependency update")
+            judged("a major dependency update", DEP_SEEN)
         elif dep == "major":
             land_now("Major update renovate-sweep cleared, CI green")
         else:

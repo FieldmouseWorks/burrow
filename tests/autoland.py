@@ -507,6 +507,16 @@ status, digest = run(clean(comments=[owner_said], labels=["needs-owner"], **mig)
 assert not merged() and [x[0] for x in digest] == ["Judged yours to decide"], digest
 status, digest = run(clean(comments=[owner_said], **mig), 760)
 assert merged() and "took the needs-owner label off" in status and digest == [], (status, digest)
+# Taken off before a pass saw it on, it's the same answer; a label that
+# wouldn't go on isn't one.
+fresh_pr_state()
+FAIL.append("--add-label")
+run(clean(comments=[owner_said], **mig), 700)
+FAIL.clear()
+status, _ = run(clean(comments=[owner_said], **mig), 710)
+assert not merged() and any("--add-label needs-owner" in x for x in WROTE), (status, WROTE)
+status, _ = run(clean(comments=[owner_said], **mig), 720)
+assert merged() and "took the needs-owner label off" in status, status
 # A label taken off before the judge said anything isn't an answer to it.
 fresh_pr_state()
 run(clean(labels=["needs-owner"], **mig), 700)
@@ -709,6 +719,8 @@ for said_ in ([], [said(f"<!-- major-verdict: held {head} -->")]):
     assert not merged() and JOBS == [] and "renovate-sweep" in status, said_
 status, _ = run(mkpr(comments=[said(f"<!-- major-verdict: ok {head} -->")], **gated), 900)
 assert not merged() and len(JOBS) == 1 and "migrations/" in JOBS[0]
+assert "no reviewer reads" in JOBS[0] and "renovate-sweep cleared the major version" in JOBS[0], JOBS[0]
+assert "its reviewers found nothing" not in JOBS[0], JOBS[0]
 status, _ = run(mkpr(comments=[said(f"<!-- major-verdict: ok {head} -->"),
                                said(f"<!-- autoland-judgment: land {head} -->")], **gated), 1000)
 assert merged()
@@ -718,6 +730,7 @@ status, _ = run(mkpr(branch="renovate/foo-1.x", title="Update foo from 1.4 to 1.
 assert "state=success" in status and not merged() and JOBS == []
 status, _ = run(mkpr(branch="dependabot/npm/foo-2", title="Bump foo from 1.4 to 2.0", number=10), 900)
 assert len(JOBS) == 1 and "a major dependency update" in JOBS[0] and not merged()
+assert "no reviewer reads" in JOBS[0] and "its reviewers found nothing" not in JOBS[0], JOBS[0]
 
 # A finding on a dependency update goes to a Claude job once it has sat, like
 # any PR's: nobody else settles a green Renovate PR's threads.
