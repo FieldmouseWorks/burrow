@@ -84,6 +84,8 @@
           python3 -I ${./tests/autoland.py} ${./modules/autoland/steward.py}
           touch $out
         '';
+        # Stale Remote Control servers catch up once idle, with a stand-in for Claude.
+        remote-control = import ./tests/remote-control.nix { inherit self pkgs; };
       } // nixpkgs.lib.mapAttrs' (name: nixpkgs.lib.nameValuePair "house-${name}") (
         # lib/project.nix's own gates, on the smallest projects that have them.
         (self.lib.project { self = ./tests/house/rust; systems = [ system ]; rust = { }; }).checks.${system}

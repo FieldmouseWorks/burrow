@@ -119,6 +119,16 @@ in
       '';
     };
 
+    standingAuthority = lib.mkOption {
+      type = lib.types.lines;
+      default = "";
+      description = ''
+        What the owner has approved in advance, as markdown for its own section
+        of the machine CLAUDE.md ("Standing authority", just before "What still
+        asks"), so no session asks them to approve it again. Empty: no section.
+      '';
+    };
+
   };
 
   config = lib.mkIf cfg.enable {
@@ -154,13 +164,18 @@ in
         configured (burrow's modules/claude.nix), not patched.
       '')
 
+      (lib.mkIf (cfg.standingAuthority != "") (lib.mkOrder 1150 ''
+        ## Standing authority
+
+        ${cfg.standingAuthority}''))
+
       (lib.mkOrder 1200 ''
         ## What still asks ${config.burrow.owner}
 
         Only one-way doors: destroying or rolling back ZFS datasets, wiping or
         partitioning disks, deleting remote data (rclone delete/purge/sync, gh repo
         delete), force-pushing a default branch, flashing firmware${lib.optionalString robot ", and Hetzner Robot\ncalls that cancel or reinstall the server"}. Everything else: just do it, then
-        say what you did.
+        say what you did.${lib.optionalString (cfg.standingAuthority != "") "\nThe standing authority above is already given: never ask ${config.burrow.owner} to restate it."}
       '')
     ];
   };
