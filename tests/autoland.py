@@ -21,7 +21,11 @@ REQS, ANSWER = [], {}
 class API(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         REQS.append((self.headers["Authorization"], json.loads(self.rfile.read(int(self.headers["Content-Length"])))))
-        out = json.dumps({"choices": [{"message": {"content": json.dumps(ANSWER["v"])}}]}).encode()
+        # ANSWER["junk"]: that many answers that aren't JSON come first.
+        junk = ANSWER.get("junk", 0) > 0
+        ANSWER["junk"] = ANSWER.get("junk", 0) - 1
+        content = "" if junk else json.dumps(ANSWER["v"])
+        out = json.dumps({"choices": [{"message": {"content": content}}]}).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
@@ -154,6 +158,17 @@ assert S.deepseek_verdict(pr, head)[0::2] == ("findings", 1)
 assert S.deepseek_verdict(pr, "b" * 40)[0] == "none"
 ANSWER["v"] = {"findings": []}
 assert S.run_deepseek("sam/r", pr, {}) == "clean"
+
+# An answer that isn't JSON is asked again; three in a row fail the review.
+ANSWER["junk"], n = 1, len(REQS)
+assert S.run_deepseek("sam/r", pr, {}) == "clean" and len(REQS) == n + 2
+ANSWER["junk"] = 3
+try:
+    S.run_deepseek("sam/r", pr, {})
+    raise AssertionError("three non-JSON answers should fail the review")
+except RuntimeError as e:
+    assert "no JSON" in str(e)
+ANSWER["junk"] = 0
 
 # ---------------------------------------------------------------- handle()
 

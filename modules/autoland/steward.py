@@ -635,18 +635,22 @@ def ask_deepseek(system, user):
         with urllib.request.urlopen(req, timeout=DS["timeout"], context=ctx) as r:
             return json.load(r)["choices"][0]["message"]["content"] or ""
 
-    try:
-        content = call(body)
-    except urllib.error.HTTPError as e:
-        if e.code != 400:
-            raise
-        # Turned down as asked: once more without JSON mode, read from the text.
-        body.pop("response_format")
-        content = call(body)
-    try:
-        return json.loads(content)
-    except ValueError:
-        return json.loads(content[content.index("{"):content.rindex("}") + 1])
+    # JSON mode now and then answers with something that isn't JSON (its
+    # docs say so, and remi saw one in six): ask again before giving up.
+    for attempt in range(3):
+        try:
+            content = call(body)
+        except urllib.error.HTTPError as e:
+            if e.code != 400 or "response_format" not in body:
+                raise
+            # Turned down as asked: without JSON mode, read it from the text.
+            body.pop("response_format")
+            content = call(body)
+        try:
+            return json.loads(content[content.index("{"):content.rindex("}") + 1])
+        except ValueError:
+            if attempt == 2:
+                raise RuntimeError(f"no JSON in its answer: {content[:100]!r}")
 
 
 DS_SYSTEM = """You review pull requests for {owner}'s repos. You are one of two reviewers; a PR merges itself once both find nothing on its latest commit, so what you let through ships.
