@@ -1,13 +1,24 @@
 # The shared CI for every repo whose gate is its flake (burrow's
 # lib/project.nix): check out, install Nix, `nix flake check`. Called from a
-# repo's own workflow with `uses:`; Renovate pins the actions to commits.
+# repo's own workflow with `uses:`. Its actions are pinned to commits (repos that
+# allow only pinned actions need that), and Renovate keeps the pins current.
 name: flake-check
 on:
   workflow_call:
+    inputs:
+      runner:
+        description: The runner label to run on, such as a self-hosted runner's.
+        type: string
+        default: ubuntu-latest
+      install-nix:
+        description: Install Nix first. False on a runner that has it already (NixOS).
+        type: boolean
+        default: true
 jobs:
   check:
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner }}
     steps:
-      - uses: actions/checkout@v5
-      - uses: cachix/install-nix-action@v31
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - if: inputs.install-nix
+        uses: cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b # v31.11.3
       - run: nix flake check -L --keep-going

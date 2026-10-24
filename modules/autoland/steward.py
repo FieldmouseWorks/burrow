@@ -809,6 +809,39 @@ def handle(repo, pr, repo_info, digest):
             unland(repo, pr, back_to_draft=bool(st.get("landed")))
             st["landed"] = None
 
+    def update_branch():
+        """Bring a settled head up to date with a base whose rules want it
+        (auto-merge won't). The merged-in head is reviewed like any other."""
+        if pr.get("mergeStateStatus") != "BEHIND" or st.get("updated") == head:
+            return False
+        if write("api", "-X", "PUT", f"repos/{repo}/pulls/{n}/update-branch",
+                 "-f", f"expected_head_sha={head}", check=False) is None:
+            return False
+        log(f"{tag}: behind its base, brought up to date")
+        st["updated"] = head
+        return True
+
+    def readied():
+        """Codex reviews a draft again when it's marked ready, so a PR made
+        ready and merged in one go gets a review after the merge. Ready it
+        first, then merge or list it a pass later, once that review has
+        had its chance: a finding it posts unsettles the PR like any other.
+        It stays ready (Codex reviews a ready PR's new commits by itself),
+        so it's readied once, not every time it settles again."""
+        if not pr["isDraft"]:
+            return True
+        if write("pr", "ready", str(n), "-R", repo, check=False) is not None:
+            log(f"{tag}: settled, marked ready for Codex's last look")
+        return False
+
+    def owner_merges(desc):
+        if update_branch():
+            settle("pending", "Settled, but behind its base: brought up to date, reviewed again")
+        elif not readied():
+            settle("pending", f"{desc}; marked ready, Codex takes a last look first"[:140])
+        else:
+            settle("pending", desc, "Settled, yours to merge")
+
     def hand_off(why):
         # Recorded only once a job has started; until then it's tried every
         # pass and listed for the owner.
@@ -871,7 +904,7 @@ def handle(repo, pr, repo_info, digest):
     # renovate-sweep handles the red ones and the majors.
     if dep:
         if gate:
-            settle("pending", f"Dependency update; {CFG['owner']} merges it (touches {gate})", "Settled, yours to merge")
+            owner_merges(f"Dependency update; {CFG['owner']} merges it (touches {gate})")
         elif dep == "major":
             # Renovate's majors are listed by renovate-sweep; Dependabot's here.
             why = None if pr["headRefName"].startswith("renovate/") else "Major dependency updates"
@@ -1006,28 +1039,28 @@ def handle(repo, pr, repo_info, digest):
         if idle > rc["handoffAfter"] * MIN and st.get("handed") != head:
             hand_off("CI is red (" + ", ".join(ci_names) + ")")
     elif no_ci:
-        settle("pending", f"Settled, but this repo has no CI: {CFG['owner']} merges it", "Settled, yours to merge")
+        owner_merges(f"Settled, but this repo has no CI: {CFG['owner']} merges it")
     elif ci == "pending" and all(n in rc["ownerChecks"] for n in ci_names):
         # Only checks a person clears are left (a verdict from a test
         # machine): waiting quietly would never end, so it's the owner's.
         then = f"then merges it (touches {gate})" if gate else "then it lands"
-        settle("pending", f"Settled; {CFG['owner']} clears {', '.join(ci_names)}, {then}"[:140], "Settled, yours to merge")
+        desc = f"Settled; {CFG['owner']} clears {', '.join(ci_names)}, {then}"[:140]
+        if gate:
+            owner_merges(desc)
+        else:
+            settle("pending", desc, "Settled, yours to merge")
     elif ci == "pending":
         settle("pending", "Settled; waiting for CI: " + ", ".join(ci_names)[:90])
     elif gate:
-        settle("pending", f"Settled; {CFG['owner']} merges it (touches {gate})", "Settled, yours to merge")
+        owner_merges(f"Settled; {CFG['owner']} merges it (touches {gate})")
     else:
         settle("success", f"{reviewers} found nothing on this commit, every thread is resolved, CI is green")
         if st.get("landed") != head:
-            log(f"{tag}: settled, landing")
-            merge()
-        elif pr.get("mergeStateStatus") == "BEHIND" and st.get("updated") != head:
-            # The base's rules want the branch up to date first, and auto-merge
-            # won't bring it there. The merged-in head is reviewed like any other.
-            if write("api", "-X", "PUT", f"repos/{repo}/pulls/{n}/update-branch",
-                     "-f", f"expected_head_sha={head}", check=False) is not None:
-                log(f"{tag}: behind its base, brought up to date")
-                st["updated"] = head
+            if readied():
+                log(f"{tag}: settled, landing")
+                merge()
+        else:
+            update_branch()
 
     # Anything not merged after a day, reviewed clean or not (a check that never
     # reports keeps it pending). One-way PRs, and those already listed for

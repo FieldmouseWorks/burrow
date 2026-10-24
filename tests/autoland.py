@@ -251,9 +251,9 @@ def ds_review(k):
             "body": "<!-- deepseek-review:v1 " + json.dumps({"commit_sha": head, "findings": k}) + " -->"}
 
 
-def mkpr(reviews=(), comments=(), threads=()):
+def mkpr(reviews=(), comments=(), threads=(), draft=True):
     return {
-        "id": "x", "number": 5, "title": "t", "url": "u", "isDraft": True, "isCrossRepository": False,
+        "id": "x", "number": 5, "title": "t", "url": "u", "isDraft": draft, "isCrossRepository": False,
         "headRefName": "feat", "headRefOid": head, "baseRefName": "main", "createdAt": T0, "updatedAt": T0,
         "mergeStateStatus": "CLEAN", "author": {"login": "sam"}, "autoMergeRequest": None,
         "labels": {"pageInfo": {"hasNextPage": False}, "nodes": []}, "files": {"nodes": [{"path": "a.py"}]},
@@ -289,9 +289,11 @@ assert RUNS == [] and not any("@codex" in x for x in WROTE)
 status, _ = run(mkpr(), 600)
 assert RUNS == [head] and any("@codex review" in x for x in WROTE) and "Waiting for Codex" in status
 
-# Both clean, CI green: settled and merged.
+# Both clean, CI green: settled, marked ready, and merged a pass later.
 status, _ = run(mkpr(reviews=[ds_review(0)], comments=[codex_clean]), 700)
 assert "state=success" in status and "Codex and DeepSeek found nothing" in status and RUNS == []
+assert any(x.startswith("pr ready") for x in WROTE) and not any(x.startswith("pr merge") for x in WROTE)
+status, _ = run(mkpr(reviews=[ds_review(0)], comments=[codex_clean], draft=False), 800)
 assert any(x.startswith("pr merge") for x in WROTE)
 
 # Codex clean but DeepSeek's fresh findings: nothing merges.
@@ -315,6 +317,7 @@ S.CFG["repos"]["sam/r"] = {"deepseek": False}
 run(mkpr(comments=[codex_clean]), 0)
 status, _ = run(mkpr(comments=[codex_clean]), 600)
 assert "state=success" in status and "Codex found nothing" in status and RUNS == []
+assert any(x.startswith("pr ready") for x in WROTE)
 del S.CFG["repos"]["sam/r"]
 
 # DeepSeek down: after three failures the owner hears, and an hour on it's tried again.

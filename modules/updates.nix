@@ -92,6 +92,14 @@ let
   # Renovate's settings for every repo (a repo's own renovate.json can add to
   # them). Checked by renovate-config-validator at build time.
   rcfg = cfg.renovate;
+  # Renovate takes a branch with a commit by anyone but its gitAuthor as edited
+  # by hand, and leaves it alone. With the user's own email, the fixes Claude
+  # pushes to its branches (as the user) look like Renovate's, and its next
+  # rebase drops them.
+  gitConfigs = let c = config.programs.git.config; in if builtins.isList c then c else [ c ];
+  userEmails = lib.concatMap (c: lib.optional (c ? user && c.user ? email) c.user.email) gitConfigs;
+  renovateEmail = let m = if rcfg.gitAuthor == null then null else builtins.match ".*<([^>]*)>.*" rcfg.gitAuthor;
+    in if m == null then null else lib.head m;
   renovateSettings = lib.recursiveUpdate ({
     platform = "github";
     autodiscover = true;
@@ -295,8 +303,13 @@ in
       gitAuthor = lib.mkOption {
         type = lib.types.nullOr lib.types.str;
         default = null;
-        example = "renovate <123+sam@users.noreply.github.com>";
-        description = "Who Renovate's commits are by.";
+        example = "renovate <renovate@example.com>";
+        description = ''
+          Who Renovate's commits are by. Not the user's own email: Renovate
+          keeps a branch that has a commit by someone other than this, and
+          rebases over everything else, so fixes pushed as the user would be
+          lost.
+        '';
       };
       timezone = lib.mkOption {
         type = lib.types.nullOr lib.types.str;
@@ -479,6 +492,14 @@ in
     })
 
     (lib.mkIf rcfg.enable {
+      assertions = [{
+        assertion = renovateEmail == null || !(lib.elem renovateEmail userEmails);
+        message = ''
+          burrow.updates.renovate.gitAuthor uses ${renovateEmail}, the email the
+          user's own commits are made with. Renovate then can't tell a fix pushed
+          to its branch from its own commits, and rebases it away. Give Renovate
+          an email of its own.'';
+      }];
       environment.systemPackages = [ renovateSweep pkgs.renovate ];
 
       # Renovate as the user, with gh's login, like the other jobs that talk to GitHub.
