@@ -8,7 +8,7 @@
 # job's waits, that proj-inbox posts every finished turn's answer (one
 # resumed before it looked too, none misread while a turn starts) and ends
 # the waits of one whose issue closed (proj stop's, which a watch already
-# asking GitHub keeps to), and that a job past its memory cap is killed by
+# asking GitHub keeps to), a stop that fails there not holding up the rest, and that a job past its memory cap is killed by
 # its own cgroup's limit rather than the machine running out.
 #
 #   nix build .#checks.x86_64-linux.proj -L
@@ -375,6 +375,25 @@ pkgs.testers.runNixOSTest {
         machine.fail(f"test -e {d}/await")
         proj(f"stop {job}")
         machine.fail(f"systemctl --user -M dev@ -q is-active '{unit(job)}'")
+
+    with subtest("a closed issue whose job can't be stopped doesn't hold up the others"):
+        for i in (8, 9):
+            github(f"repos/o/r/issues/{i}/comments", "[]")
+        issues = [dict(issue, number=i, html_url=f"https://github.com/o/r/issues/{i}", body="t") for i in (8, 9)]
+        github("repos/o/r/issues", json.dumps(issues))
+        machine.succeed("su - dev -c proj-inbox")
+        jobs = machine.succeed("su - dev -c 'proj-inbox status'")
+        for j in jobs.split():
+            if j.startswith("ib-"):
+                machine.wait_until_succeeds(f"su - dev -c 'proj state {j}' | grep -x done", timeout=120)
+        # 8 closed, 9's answer still to post; systemd can't be asked, so 8's
+        # job can't be stopped.
+        github("repos/o/r/issues", json.dumps(issues[1:]))
+        machine.succeed("su - dev -c 'env -u DBUS_SESSION_BUS_ADDRESS XDG_RUNTIME_DIR=/nonexistent proj-inbox'")
+        assert "did This task comes from GitHub issue o/r#9" in machine.succeed("cat /tmp/gh/posted")
+        assert "o/r#8" in machine.succeed("su - dev -c 'proj-inbox status'")
+        machine.succeed("su - dev -c proj-inbox")
+        assert "o/r#8" not in machine.succeed("su - dev -c 'proj-inbox status'")
 
     with subtest("an earlier turn's answer is read without the turn count"):
         e = proj('run web "sleep 1"')

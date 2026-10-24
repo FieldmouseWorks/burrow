@@ -163,9 +163,10 @@ for repo in "${!project[@]}"; do
     case $st in queued | running) continue ;; esac
 
     # Closed, or the label taken off: done with it, and so is its job, which
-    # nothing it awaits brings back.
+    # nothing it awaits brings back. A job that couldn't be stopped (proj stop
+    # says why) is tried again next pass; the rest are still seen to.
     if ! jq -e --argjson n "$n" 'any(.[]; .number == $n)' <<<"$open" >/dev/null; then
-      proj stop "$id"
+      proj stop "$id" || continue
       rm -rf "$d"
       continue
     fi
