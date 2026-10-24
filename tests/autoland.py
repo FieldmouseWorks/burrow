@@ -317,6 +317,8 @@ def gh_stub(*a, **k):
         return "sam"
     if a[:2] == ("pr", "view") and "commits" in a:
         return {"commits": [{"authors": [{"email": e}]} for e in COMMITS.get(int(a[2]), ["bot@renovateapp.com"])]}
+    if a[:2] == ("api", "repos/sam/r"):
+        return {"allow_auto_merge": True, "delete_branch_on_merge": True, "allow_squash_merge": True}
     if a[:2] == ("api", "repos/sam/r/pulls/5"):
         return {"state": "open", "sha": CUR["sha"]}
     return ""
@@ -743,7 +745,7 @@ status, digest = run(mkpr(comments=[codex_clean()]), 700)
 assert any(x[0] == "Too big for DeepSeek to review" for x in digest) and queued() == []
 RESULT["v"] = "clean"
 
-# Every repo gets the hold and needs-owner labels, once.
+# Every repo gets the hold and needs-owner labels, once a day.
 fresh_pr_state()
 C.NOW = C.ts(T0)
 C.save("repo-sam_r.json", {"settings": C.NOW})
@@ -753,5 +755,9 @@ assert sorted(x.split()[2] for x in WROTE if x.startswith("label create")) == ["
 WROTE.clear()
 R.settle_repo({"repo": "sam/r", "private": False, "default": "main"}, {"sam/r"})
 assert WROTE == [], WROTE
+# A day on, they're made again with the settings, in case one was deleted.
+C.NOW += 86400
+R.settle_repo({"repo": "sam/r", "private": False, "default": "main"}, {"sam/r"})
+assert sorted(x.split()[2] for x in WROTE if x.startswith("label create")) == ["hold", "needs-owner"], WROTE
 
 print("autoland: ok")

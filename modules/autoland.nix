@@ -412,8 +412,9 @@ in
       - A settled PR that touches a one-way path (secrets, migrations, CODEOWNERS), or
         a repo with no CI, gets a Claude job that judges it: it lands what a revert or a
         follow-up can undo, and sends ${config.burrow.owner} only what can't be undone or is theirs to decide.
-        A Claude session may merge such a PR itself (squash, delete the branch) once
-        it has made that call.
+        The judge doesn't merge: the steward lands the PR on its verdict. Outside a
+        steward job, a Claude session may merge such a PR itself (squash, delete the
+        branch) once it has made that call.
       - ${config.burrow.owner}'s standing authority: merges, GitHub settings changes and cleanup
         are pre-approved. Take the judgment call first; only a genuine one-way door
         you can't decide waits for them, labelled `${cfg.labels.owner}` and listed in one issue
