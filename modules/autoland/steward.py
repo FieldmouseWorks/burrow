@@ -8,9 +8,9 @@ One pass (the timer runs it every couple of minutes):
      `baseline` ruleset); a repo seen for the first time also gets a Claude
      job that brings its files to docs/repo-baseline.md (repos.py).
   2. For each open PR that isn't a draft, work out where it stands and do
-     the next thing: ask Codex for a review (and DeepSeek, if it's on:
-     deepseek.py), hand open findings or red CI to a Claude job, have a
-     Claude job run the checks only a machine of the owner's runs
+     the next thing: ask Codex for a review (and queue one from DeepSeek, if
+     it's on: deepseek.py), hand open findings or red CI to a Claude job,
+     have a Claude job run the checks only a machine of the owner's runs
      (proofJobs) or judge a PR it won't land on its own word, post the
      `review-settled` commit status and merge it, or list it for the owner.
   3. Once a day per repo, delete branches whose tip is already in the
@@ -24,11 +24,17 @@ in config.stateDir: one JSON file per PR, one per repo.
 
 `autoland-steward status` prints what it thinks of every open PR without
 changing anything.
+
+`autoland-steward deepseek` works through the DeepSeek reviews the passes
+queued (config.stateDir/ds-queue), a few at once, and posts each one. A
+careful look takes DeepSeek many minutes, so it runs as its own service and
+no pass waits for it.
 """
 
 import json
 import os
 import re
+import sys
 
 import common as C
 import deepseek as D
@@ -199,10 +205,30 @@ def dep_kind(pr):
     if not DEP_RE.match(pr["headRefName"]):
         return None
     labels = {x["name"] for x in pr["labels"]["nodes"]}
+    if "security" in labels and pr["headRefName"].startswith("renovate/"):
+        # Renovate's security fixes merge themselves, majors too: none waits
+        # for renovate-sweep's verdict (renovate-sweep.sh).
+        return "minor"
     m = MAJOR_RE.search(pr["title"])
     if "major" in labels or (m and m.group(1) != m.group(2)):
         return "major"
     return "minor"
+
+
+def renovate_edited(repo, pr, st):
+    """Whether a Renovate branch has a commit Renovate didn't write (a Claude
+    job's fix). Renovate won't merge a branch edited like that. Asked once
+    per head; a failed ask counts as not edited and is asked again."""
+    if not CFG["renovateEmail"] or not pr["headRefName"].startswith("renovate/"):
+        return False
+    if st.get("editedHead") != pr["headRefOid"]:
+        got = C.gh("pr", "view", str(pr["number"]), "-R", repo, "--json", "commits", check=False)
+        if not got:
+            return False
+        st["edited"] = any(a.get("email") != CFG["renovateEmail"]
+                           for c in got["commits"] for a in c["authors"])
+        st["editedHead"] = pr["headRefOid"]
+    return st["edited"]
 
 
 def merge_method(repo_info):
@@ -437,12 +463,19 @@ def handle(repo, pr, repo_info, digest):
     gate = one_way(pr, rc)
     renovate = pr["headRefName"].startswith("renovate/")
     proof_only = ci == "pending" and bool(ci_names) and all(c in rc["proofJobs"] for c in ci_names)
+    # A minor Renovate PR a Claude job fixed carries Claude's code, and Renovate
+    # won't merge it: it goes through the review loop below like a Claude PR.
+    # While its CI is red it's renovate-sweep's to hand over, findings and all:
+    # a job from each on one branch would push over each other. The sweep's
+    # push makes a new head, and Codex reads it again.
+    fixed = dep == "minor" and not gate and renovate_edited(repo, pr, st)
+    swept = fixed and ci == "red"
 
     # Dependency bumps: CI is the review. Renovate merges its own minor
     # ones; renovate-sweep fixes the red ones (and settles their threads) and
     # gives each major a verdict. Anything else that's open on one, a review
     # finding or a red Dependabot update, goes to a Claude job like any PR's.
-    if dep:
+    if dep and not fixed:
         major_verdict = C.marker(pr, MAJOR_VERDICT, head) if dep == "major" and renovate else None
         threads = f"{open_threads} open review thread{'s' * (open_threads > 1)}" if open_threads else ""
         if changes:
@@ -486,7 +519,7 @@ def handle(repo, pr, repo_info, digest):
 
     verdict, vtime = codex_verdict(pr, head, st["seen"])
     # DeepSeek, where it's on, is a second reviewer: both have to find nothing.
-    use_ds = D.DS["enable"] and rc["deepseek"]
+    use_ds = C.DS["enable"] and rc["deepseek"]
     dsv, dstime, ds_rounds = D.deepseek_verdict(pr, head) if use_ds else ("clean", 0, 0)
     codex_rounds = sum(1 for r in pr["reviews"]["nodes"] if (r["author"] or {}).get("login") == CODEX) - st["base"]
     ds_rounds -= st["dsBase"]
@@ -508,25 +541,46 @@ def handle(repo, pr, repo_info, digest):
         st["asked"].append(C.NOW)
         return True
 
+    # DeepSeek's reviews are queued for its own service (`deepseek` below),
+    # which posts each one; this pass only reads what came back. One is on
+    # its way while it's queued and no review of this head is newer.
+    dst = st["ds"]
+    item = f"{key[:-5]}-{head[:12]}.json"
+    if use_ds:
+        back = load(f"{D.DONE}/{item}", None)
+        if back and not DRY:
+            os.remove(os.path.join(STATE, D.DONE, item))
+            dst.pop("queued", None)
+            if back.get("result") == "tooBig":
+                dst["tooBig"] = True
+            else:  # the API, the network, its JSON: tried again next pass
+                dst["fails"], dst["failedAt"] = dst.get("fails", 0) + 1, C.NOW
+                log(f"{tag}: DeepSeek review failed ({dst['fails']}): {back.get('error', '')[:200]}")
+        if dst.get("queued") and dstime >= dst["queued"]:
+            dst.pop("queued")  # it's back
+        elif dst.get("queued") and C.NOW - dst["queued"] > D.STALE:
+            dst.pop("queued")
+            dst["fails"], dst["failedAt"] = dst.get("fails", 0) + 1, C.NOW
+            log(f"{tag}: the DeepSeek review queued over {D.STALE // 3600}h ago never came back")
+    ds_busy = bool(dst.get("queued"))
+
     def ask_ds():
-        """DeepSeek on this head, now (a few a pass). Its looks at one head
-        are bounded by `rounds`: each one with findings counts as a round."""
-        dst = st["ds"]
+        """Queue DeepSeek on this head, unless it's already on its way. Its
+        looks at one head are bounded by `rounds`: each one with findings
+        counts as a round."""
+        if ds_busy:
+            return
         if DRY:
             log(f"  would: ask DeepSeek to review {tag} at {head[:7]}")
-            return None
+            return
         if dst.get("fails", 0) >= 3 and C.NOW - dst.get("failedAt", 0) > 3600:
             dst["fails"] = 0  # an outage passes: three more tries an hour on
-        if (dst.get("fails", 0) >= 3 or dst.get("tooBig")
-                or len(D.DS_CALLS) >= D.DS["perPass"]):
-            return None
-        try:
-            v = D.run_deepseek(repo, pr, dst)
-        except Exception as e:  # the API, the network, its JSON: tried again next pass
-            dst["fails"], dst["failedAt"] = dst.get("fails", 0) + 1, C.NOW
-            log(f"{tag}: DeepSeek review failed ({dst['fails']}): {str(e)[:200]}")
-            return None
-        return v
+        if dst.get("fails", 0) >= 3 or dst.get("tooBig"):
+            return
+        log(f"{tag}: queueing a DeepSeek review of {head[:7]}")
+        save(f"{D.QUEUE}/{item}", {"repo": repo, "number": n, "headRefOid": head,
+                                   "baseRefName": pr["baseRefName"], "title": pr["title"], "at": C.NOW})
+        dst["queued"] = C.NOW
 
     # 1. The reviewers.
     if rounds >= rc["rounds"] and not (verdict == "clean" and dsv == "clean"):
@@ -549,19 +603,19 @@ def handle(repo, pr, repo_info, digest):
         waiting.append("Waiting for Codex's review of this commit")
     elif verdict == "running":
         waiting.append("Codex is reviewing this commit")
-    # DeepSeek is asked in the same pass as Codex, and answers within it.
-    # Threads it opens just now aren't in this pass's numbers yet.
-    fresh = False
+    # DeepSeek is queued in the same pass as Codex is asked.
     if dsv == "none":
         if quiet:
-            dsv = ask_ds() or "none"
-            fresh = dsv == "findings"
-        if st["ds"].get("tooBig"):
-            digest.append(("Too big for DeepSeek to review", line, f"over {D.DS['maxDiffChars']} characters of diff"))
-        elif st["ds"].get("fails", 0) >= 3:
-            digest.append(("DeepSeek couldn't review it", line, f"failed {st['ds']['fails']} times on {head[:7]} (journalctl -u autoland)"))
-        if dsv == "none":
-            waiting.append("Waiting for DeepSeek's review of this commit")
+            ask_ds()
+        waiting.append("DeepSeek is reviewing this commit" if dst.get("queued") else "Waiting for DeepSeek's review of this commit")
+    # A first look or a second one that can't happen: the owner hears either way.
+    ds_stuck = None
+    if use_ds and dst.get("tooBig"):
+        ds_stuck = f"too big for DeepSeek (over {C.DS['maxDiffChars']} characters of diff)"
+        digest.append(("Too big for DeepSeek to review", line, f"over {C.DS['maxDiffChars']} characters of diff"))
+    elif use_ds and dst.get("fails", 0) >= 3:
+        ds_stuck = f"DeepSeek failed {dst['fails']} times on {head[:7]}"
+        digest.append(("DeepSeek couldn't review it", line, f"failed {dst['fails']} times on {head[:7]} (journalctl -u autoland-deepseek)"))
 
     what = []
     if open_threads:
@@ -572,28 +626,26 @@ def handle(repo, pr, repo_info, digest):
     if waiting:
         settle("pending", "; ".join(waiting + what))
         # One reviewer's threads needn't wait for the other to finish.
-        if what and idle > rc["handoffAfter"] * MIN and st.get("handed") != head:
+        if what and idle > rc["handoffAfter"] * MIN and st.get("handed") != head and not swept:
             hand_off(", ".join(what))
     elif "findings" in (verdict, dsv) or open_threads or changes:
-        if not open_threads and not changes and not fresh:
+        if not open_threads and not changes:
             # Every finding answered without a new commit: the reviewers that
             # had findings look again.
             if verdict == "findings" and vtime > last_ask and C.NOW - vtime > rc["settleDelay"] * MIN:
                 ask("Every finding is answered and resolved; review again.")
             if dsv == "findings" and C.NOW - dstime > rc["settleDelay"] * MIN:
-                fresh = ask_ds() == "findings"
-        if fresh:
-            settle("pending", f"Round {rounds + 1}: DeepSeek has new findings")
-        elif not open_threads and not changes:
-            settle("pending", f"Findings answered; review round {rounds + 1} next")
+                ask_ds()
+            settle("pending", f"Findings answered; {ds_stuck}" if dsv == "findings" and ds_stuck
+                   else f"Findings answered; review round {rounds + 1} next")
         else:
             settle("pending", f"Round {rounds}: " + ", ".join(what))
-            if idle > rc["handoffAfter"] * MIN and st.get("handed") != head:
+            if idle > rc["handoffAfter"] * MIN and st.get("handed") != head and not swept:
                 hand_off(", ".join(what))
     # 2. The reviewers are clean on this head and nothing is open: CI, then land.
     elif ci == "red":
         settle("pending", "CI is red: " + ", ".join(ci_names)[:100])
-        if idle > rc["handoffAfter"] * MIN and st.get("handed") != head:
+        if idle > rc["handoffAfter"] * MIN and st.get("handed") != head and not swept:
             hand_off("CI is red (" + ", ".join(ci_names) + ")")
     elif proof_only:
         prove()
@@ -616,8 +668,14 @@ def handle(repo, pr, repo_info, digest):
 # ---------------------------------------------------------------- main
 
 def main():
+    if sys.argv[1:] == ["deepseek"]:
+        for d in (D.QUEUE, D.DONE):
+            os.makedirs(os.path.join(STATE, d), exist_ok=True)
+        D.deepseek_queue()
+        return
     try:
-        os.makedirs(STATE, exist_ok=True)
+        for d in ("", D.QUEUE, D.DONE):
+            os.makedirs(os.path.join(STATE, d), exist_ok=True)
     except OSError:
         if not DRY:
             raise

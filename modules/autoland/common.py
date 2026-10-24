@@ -13,6 +13,7 @@ from datetime import datetime
 CFG = json.load(open(os.environ["AUTOLAND_CONFIG"]))
 CONTEXT = CFG["context"]
 CODEX = CFG["codexLogin"]
+DS = CFG.get("deepseek") or {"enable": False}
 DRY = len(sys.argv) > 1 and sys.argv[1] == "status"
 # A dry run keeps its own state, so its once-a-day reads (settings, branches)
 # stay once a day instead of running every pass on the owner's API quota.
