@@ -63,11 +63,11 @@ def settle_repo(r, known):
     # can't be set and the round limit can't hand a PR to the owner.
     want = [CFG["labels"]["hold"], CFG["labels"]["owner"]]
     if st.get("labels") != want:
-        made = [C.write("label", "create", name, "-R", repo, "--force", "--color", color, "--description", about,
-                     check=False) is not None
-                for name, color, about in zip(want, ("fbca04", "b60205"), (
-                    "The steward leaves this PR alone",
-                    f"Waits for {CFG['owner']}; take the label off to let the steward carry on"))]
+        about = ("The steward leaves this PR alone",
+                 f"Waits for {CFG['owner']}; take the label off to let the steward carry on")
+        made = [C.write("label", "create", name, "-R", repo, "--force", "--color", color,
+                        "--description", text, check=False) is not None
+                for name, color, text in zip(want, ("fbca04", "b60205"), about)]
         if all(made):
             log(f"{repo}: labels {', '.join(want)}")
             st["labels"] = want
