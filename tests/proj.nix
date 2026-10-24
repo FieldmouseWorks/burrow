@@ -227,6 +227,18 @@ pkgs.testers.runNixOSTest {
         assert "DISMISSED" in prompt, prompt
         github("repos/o/r/pulls/5/reviews", '[]')
 
+    with subtest("a resume that can't start keeps the job's waits"):
+        github("repos/o/r/commits/abc/check-runs", '{"check_runs": [{"name": "ci", "status": "in_progress", "conclusion": null}]}')
+        e = proj('run web "await https://github.com/o/r/pull/5"')
+        machine.wait_until_succeeds(f"su - dev -c 'proj state {e}' | grep -x done", timeout=120)
+        github("repos/o/r/commits/abc/check-runs", '{"check_runs": [{"name": "ci", "status": "completed", "conclusion": "success"}]}')
+        # No user manager to reach (a bus error, a restart): the turn can't start.
+        machine.execute("su - dev -c 'XDG_RUNTIME_DIR=/nonexistent proj _watch'")
+        assert machine.succeed(f"cat /data/dev/jobs/{e}/turns").strip() == "1"
+        machine.succeed(f"test -s /data/dev/jobs/{e}/await")
+        proj("_watch")
+        machine.wait_until_succeeds(f"grep -x 2 /data/dev/jobs/{e}/turns", timeout=30)
+
     with subtest("a change after proj await but before the turn ends is news"):
         github("repos/o/r/commits/abc/check-runs", '{"check_runs": [{"name": "ci", "status": "in_progress", "conclusion": null}]}')
         e = proj('run web "slowawait https://github.com/o/r/pull/5"')

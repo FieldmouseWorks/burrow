@@ -59,19 +59,32 @@ state() {
 }
 
 start_turn() {
-  local id=$1 msg=$2 first=$3 n
-  n=$(($(cat "$jobs/$id/turns" 2>/dev/null || echo 0) + 1))
-  printf '%s\n' "$msg" >"$jobs/$id/prompt.$n"
-  echo "$n" >"$jobs/$id/turns"
-  rm -f "$jobs/$id/result" "$jobs/$id/outcome" "$jobs/$id/slot" "$jobs/$id/await" "$jobs/$id/await.next"
+  local id=$1 msg=$2 first=$3 n f was
+  local d=$jobs/$id
+  n=$(($(cat "$d/turns" 2>/dev/null || echo 0) + 1))
+  # The last turn's state is set aside, not deleted, until the new turn has
+  # started: a turn that can't start leaves the job as it was, waits and all.
+  was=$(mktemp -d "$d/.was.XXXXXX")
+  for f in turns result outcome slot await await.next; do
+    if [ -e "$d/$f" ]; then mv "$d/$f" "$was/"; fi
+  done
+  printf '%s\n' "$msg" >"$d/prompt.$n"
+  echo "$n" >"$d/turns"
   systemctl --user reset-failed "$(unit "$id")" 2>/dev/null || true
   # Claude is what goes first when memory runs out, not whatever it's next to.
-  systemd-run --user --quiet --collect --unit="$(unit "$id")" \
+  if ! systemd-run --user --quiet --collect --unit="$(unit "$id")" \
     --slice="$SLICE" \
     --property=MemoryMax="$JOB_MEMORY_MAX" \
     --property=OOMScoreAdjust=500 \
-    --property=WorkingDirectory="$(cat "$jobs/$id/project")" \
-    "$self" _exec "$id" "${first:-normal}"
+    --property=WorkingDirectory="$(cat "$d/project")" \
+    "$self" _exec "$id" "${first:-normal}"; then
+    rm -f "$d/turns" "$d/prompt.$n"
+    find "$was" -mindepth 1 -maxdepth 1 -exec mv -t "$d" {} +
+    rmdir "$was"
+    echo "proj: turn $n of $id couldn't start" >&2
+    return 1
+  fi
+  rm -rf "$was"
 }
 
 # Memory to spare, in MiB: what the kernel says is available, plus what the
@@ -338,10 +351,11 @@ case "${1:-status}" in
         :
       elif [ -n "$news" ]; then
         # The new turn clears what's left: if it still waits, it says so again.
+        # One that can't start keeps its waits, so the next look tries again.
         start_turn "$id" "News on what you were waiting on:
 
 $news
-Carry on from there. Anything you left in the background last turn was stopped when it ended." ""
+Carry on from there. Anything you left in the background last turn was stopped when it ended." "" || true
       else
         printf '%s' "$lines" >"$f.new" && mv -f "$f.new" "$f"
       fi
