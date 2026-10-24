@@ -12,6 +12,8 @@
 #   proj state ID               queued, running, done, error or failed
 #   proj stop ID                stop a running job
 #   proj list                   projects you can run jobs in
+#   proj await TARGET...        from inside a job: resume it once a PR or
+#                               issue (URL or OWNER/REPO#N) changes
 #
 # Jobs run headless (claude -p) in SRC/PROJECT under the same managed
 # settings as every session: no prompts, and an R2 command is refused rather
@@ -20,10 +22,19 @@
 #
 # At most MAX_JOBS turns run Claude at once, and a turn starts only with
 # MIN_FREE MiB of memory to spare; the rest wait in line (queued), --first
-# ones ahead, then oldest first. A waiting turn is just this shell. Every turn
-# runs in SLICE, which the machine caps, so jobs can't take memory from
-# anything else, and gets TIMEOUT before it's stopped, so a stuck one can't
-# hold its slot for good.
+# ones ahead, then oldest first, and a turn that has waited MAX_WAIT seconds
+# counts as --first itself, so a stream of them can't starve it. A waiting
+# turn is just this shell. Every turn runs in SLICE, which the machine caps,
+# so jobs can't take memory from anything else, and gets TIMEOUT before it's
+# stopped, so a stuck one can't hold its slot for good.
+#
+# A turn ends at its answer. Claude -p stays up after it while anything it
+# left in the background runs (a CI watch, say), holding a slot to do
+# nothing; so the answer stops it, and what it left running. A job waiting on
+# GitHub says so with `proj await`, and `proj _watch` (a timer, ../proj.nix)
+# gives it its next turn once what it waits on changes: checks finish, a
+# review, comment or push comes in, or it's merged or closed. Nothing
+# changed in AWAIT_HOURS, and it's told that instead.
 #
 # With --vm the job runs in its own microVM on a clone of the project, where
 # nothing is refused at all; the work comes back with `agent fetch` (the
@@ -51,7 +62,7 @@ start_turn() {
   n=$(($(cat "$jobs/$id/turns" 2>/dev/null || echo 0) + 1))
   printf '%s\n' "$msg" >"$jobs/$id/prompt.$n"
   echo "$n" >"$jobs/$id/turns"
-  rm -f "$jobs/$id/result" "$jobs/$id/outcome" "$jobs/$id/slot"
+  rm -f "$jobs/$id/result" "$jobs/$id/outcome" "$jobs/$id/slot" "$jobs/$id/await" "$jobs/$id/await.next"
   systemctl --user reset-failed "$(unit "$id")" 2>/dev/null || true
   # Claude is what goes first when memory runs out, not whatever it's next to.
   systemd-run --user --quiet --collect --unit="$(unit "$id")" \
@@ -80,8 +91,9 @@ spare() {
 # A slot is a lock on JOBS/.slots/N, so a turn that's killed frees its slot
 # (and its place in line) by itself.
 take_slot() {
-  local id=$1 first=$2 me head f fid pid i fd num busy LC_ALL=C
+  local id=$1 first=$2 me since head f fid pid i fd num busy LC_ALL=C
   mkdir -p "$jobs/.queue" "$jobs/.slots"
+  since=$(date +%s)
   me="$jobs/.queue/$([ "$first" = first ] && echo 0 || echo 1)-$(date +%s%N)-$id"
   trap 'rm -f "$me" "${me%/*}/.${me##*/}.new"' EXIT
   trap 'exit 143' TERM INT
@@ -92,6 +104,10 @@ take_slot() {
     if [ ! -e "$me" ]; then
       echo "$$" >"${me%/*}/.${me##*/}.new"
       mv -f "${me%/*}/.${me##*/}.new" "$me"
+    fi
+    # Waited long enough: among the --first ones now, by when it came.
+    if [[ ${me##*/} == 1-* ]] && [ $(($(date +%s) - since)) -ge "$MAX_WAIT" ]; then
+      mv -f "$me" "${me%/*}/0-${me##*/1-}" && me="${me%/*}/0-${me##*/1-}"
     fi
     # The head of the line, once the places of shells that are gone are cleared.
     head=
@@ -131,6 +147,43 @@ take_slot() {
   done
 }
 
+# OWNER/REPO N from a PR or issue URL, or OWNER/REPO#N.
+target() {
+  local t=${1#https://github.com/}
+  if [[ $t =~ ^([^/#]+/[^/#]+)/(pull|issues)/([0-9]+) ]]; then echo "${BASH_REMATCH[1]} ${BASH_REMATCH[3]}"
+  elif [[ $t =~ ^([^/#]+/[^/#]+)#([0-9]+)$ ]]; then echo "${BASH_REMATCH[1]} ${BASH_REMATCH[2]}"
+  else return 1
+  fi
+}
+
+# What a job waiting on a PR or issue would want to hear about, as one line of
+# JSON: a change in it is news. Checks count only once they've all finished,
+# so a run of them wakes the job once. REST, not GraphQL, whose budget is
+# shared with everything else under the login.
+fingerprint() { # repo n
+  local issue pr sha reviews runs status
+  issue=$("$GH" api "repos/$1/issues/$2") || return
+  if ! jq -e 'has("pull_request")' <<<"$issue" >/dev/null; then
+    jq -c '{state, comments}' <<<"$issue"
+    return
+  fi
+  pr=$("$GH" api "repos/$1/pulls/$2") || return
+  sha=$(jq -r .head.sha <<<"$pr")
+  reviews=$("$GH" api "repos/$1/pulls/$2/reviews?per_page=100") || return
+  runs=$("$GH" api "repos/$1/commits/$sha/check-runs?per_page=100") || return
+  status=$("$GH" api "repos/$1/commits/$sha/status") || return
+  jq -nc --argjson pr "$pr" --argjson reviews "$reviews" --argjson runs "$runs" --argjson status "$status" '
+    {state: $pr.state, merged: $pr.merged, head: $pr.head.sha,
+     comments: $pr.comments, review_comments: $pr.review_comments, reviews: ($reviews | length),
+     checks: (if any($runs.check_runs[]; .status != "completed")
+                 or ($status.total_count > 0 and $status.state == "pending")
+              then "running"
+              else ([$runs.check_runs[] | "\(.name)=\(.conclusion)"]
+                    + (if $status.total_count > 0 then ["status=\($status.state)"] else [] end)
+                    | sort | join(" "))
+              end)}'
+}
+
 case "${1:-status}" in
   run | reply)
     cmd=$1 vm='' first=''
@@ -165,8 +218,9 @@ case "${1:-status}" in
     mkdir -p "$jobs"
     find "$jobs" -mindepth 1 -maxdepth 1 -type d -not -name '.*' -printf '%T@ %f\n' | sort -rn | head -n "${2:-15}" |
       while read -r _ id; do
-        printf '%-40s %-8s %s%s\n' "$id" "$(state "$id")" \
+        printf '%-40s %-8s %s%s%s\n' "$id" "$(state "$id")" \
           "$(sed 's/.*/[vm &] /' "$jobs/$id/agent" 2>/dev/null)" \
+          "$(cut -f1 "$jobs/$id/await" 2>/dev/null | paste -sd' ' | sed 's/.\+/[awaits &] /')" \
           "$(head -c 100 "$jobs/$id/result" 2>/dev/null | tr '\n' ' ')"
       done
     ;;
@@ -185,6 +239,52 @@ case "${1:-status}" in
   state) state "${2:?usage: proj state ID}" ;;
   stop) systemctl --user stop "$(unit "${2:?usage: proj stop ID}")" ;;
   list) find "$src" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort ;;
+  await)
+    # Noted now, watched from the end of the turn: what the turn itself does
+    # to a PR (a push) isn't news to it.
+    id=${PROJ_JOB:?proj await is for a proj job, about what it waits on}
+    shift
+    [ $# -gt 0 ] || { echo "usage: proj await PR-OR-ISSUE-URL..." >&2; exit 2; }
+    for t in "$@"; do
+      target "$t" >/dev/null || { echo "not a GitHub PR or issue: $t" >&2; exit 2; }
+    done
+    for t in "$@"; do target "$t"; done >>"$jobs/$id/await.next"
+    echo "Noted. End your turn now: this job is resumed once $* changes."
+    ;;
+  _watch)
+    # Every few minutes (../proj.nix): jobs waiting on GitHub whose PRs or
+    # issues changed get their next turn. A line of JOBS/ID/await is
+    # "OWNER/REPO#N <tab> since <tab> fingerprint".
+    for f in "$jobs"/*/await; do
+      [ -s "$f" ] || continue
+      id=$(basename "$(dirname "$f")")
+      case $(state "$id") in queued | running) continue ;; esac
+      news='' lines=''
+      while IFS=$'\t' read -r t since was; do
+        read -r repo n < <(target "$t")
+        if ! now=$(fingerprint "$repo" "$n" </dev/null); then lines+="$t"$'\t'"$since"$'\t'"$was"$'\n'; continue; fi
+        if [ -z "$was" ]; then
+          lines+="$t"$'\t'"$since"$'\t'"$now"$'\n'
+        elif [ "$now" != "$was" ]; then
+          news+="- $t: $(jq -rn --argjson was "$was" --argjson now "$now" '
+            [$now | keys[] as $k | select($was[$k] != $now[$k]) | "\($k) \($was[$k] | tojson) → \($now[$k] | tojson)"] | join(", ")')"$'\n'
+        elif [ $(($(date +%s) - since)) -ge $((AWAIT_HOURS * 3600)) ]; then
+          news+="- $t: nothing changed in ${AWAIT_HOURS}h; no longer watched"$'\n'
+        else
+          lines+="$t"$'\t'"$since"$'\t'"$was"$'\n'
+        fi
+      done <"$f"
+      if [ -n "$news" ]; then
+        # The new turn clears what's left: if it still waits, it says so again.
+        "$self" reply "$id" "News on what you were waiting on:
+
+$news
+Carry on from there. Anything you left in the background last turn was stopped when it ended." >/dev/null || true
+      else
+        printf '%s' "$lines" >"$f.new" && mv -f "$f.new" "$f"
+      fi
+    done
+    ;;
   _exec)
     # One turn of a job, inside its own systemd unit.
     id=$2
@@ -193,19 +293,39 @@ case "${1:-status}" in
     take_slot "$id" "$3"
     args=(-p --output-format stream-json --verbose)
     if [ -s "$dir/session" ]; then args+=(--resume "$(cat "$dir/session")"); fi
-    rc=0
+    : >"$dir/$n.jsonl"
     if [ -s "$dir/agent" ]; then
-      timeout -k 1m "$TIMEOUT" agent sh "$(cat "$dir/agent")" claude "${args[@]}" <"$dir/prompt.$n" >"$dir/$n.jsonl" || rc=$?
+      timeout -k 1m "$TIMEOUT" agent sh "$(cat "$dir/agent")" claude "${args[@]}" <"$dir/prompt.$n" >"$dir/$n.jsonl" &
     else
+      args+=(--append-system-prompt "This is proj job $id, running headless. Your turn ends with your answer, and anything you left running in the background is stopped then, so don't wait on GitHub (CI, reviews, merges) in the background or with sleep. Run \`proj await URL\` for each PR or issue you're still waiting on, then end your turn saying what you wait for: the job is resumed, with this conversation, once one of them changes (checks finish, a review, comment or push, merged or closed).")
       # A login shell, so the job sees the same PATH and env as an SSH login.
       # shellcheck disable=SC2016 # expanded by that shell
-      timeout -k 1m "$TIMEOUT" bash -lc 'exec claude "$@" <"$0"' "$dir/prompt.$n" "${args[@]}" >"$dir/$n.jsonl" || rc=$?
+      PROJ_JOB=$id timeout -k 1m "$TIMEOUT" bash -lc 'exec claude "$@" <"$0"' "$dir/prompt.$n" "${args[@]}" >"$dir/$n.jsonl" &
     fi
+    pid=$!
+    # The answer ends the turn: a few seconds to exit by itself, then Claude
+    # and whatever it left in the background are stopped (the unit takes the
+    # rest when this shell ends), and the slot goes with them.
+    if grep -qm1 '"type":"result"' < <(tail -n +1 -f --pid="$pid" "$dir/$n.jsonl"); then
+      for _ in $(seq 10); do kill -0 "$pid" 2>/dev/null || break; sleep 1; done
+      kill "$pid" 2>/dev/null || true
+    fi
+    rc=0
+    wait "$pid" || rc=$?
     last=$(grep '"type":"result"' "$dir/$n.jsonl" | tail -n 1 || true)
     if [ -n "$last" ]; then
+      rc=0
       jq -r '.session_id' <<<"$last" >"$dir/session"
       jq -r '.result // ""' <<<"$last" >"$dir/result"
       jq -r 'if .is_error then "error" else "done" end' <<<"$last" >"$dir/outcome"
+      # What it awaits, watched from now (_watch takes the baseline if GitHub
+      # can't be asked just now).
+      if [ "$(cat "$dir/outcome")" = "done" ] && [ -s "$dir/await.next" ]; then
+        sort -u "$dir/await.next" | while read -r repo num; do
+          printf '%s\t%s\t%s\n' "$repo#$num" "$(date +%s)" "$(fingerprint "$repo" "$num" </dev/null || true)"
+        done >"$dir/await"
+      fi
+      rm -f "$dir/await.next"
     elif [ "$rc" -eq 124 ]; then
       echo "timed out after $TIMEOUT" >"$dir/outcome"
     else

@@ -176,6 +176,9 @@ for repo in "${!project[@]}"; do
       jq -e --arg label "$LABEL" '.state == "open" and any(.labels[]; .name == $label)' <<<"$now" >/dev/null ||
         continue
       if ! proj reply --first "$id" "$msg" >/dev/null 2>&1; then
+        # Woken by what it awaits (proj _watch) since it was looked at: the
+        # reply waits for the next pass.
+        [ ! -s "$JOBS/$id/session" ] || continue
         # No session to continue (the first turn never got going): start over,
         # from the issue as it stands, replies and all.
         id=$(proj run --first "${vm[@]}" "$p" "$(task "$repo" "$now" "$comments")") || continue
