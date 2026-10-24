@@ -74,8 +74,9 @@ let
       # The whole directory, not only the Cargo sources: tests read fixtures.
       src = lib.cleanSource rustDir;
       # Every member of the workspace, not only a root package or its
-      # default-members.
-      common = { inherit src; strictDeps = true; cargoExtraArgs = "--locked --workspace"; };
+      # default-members, built as `cargo test` builds them (crane's default is
+      # release, which drops debug assertions and overflow checks).
+      common = { inherit src; strictDeps = true; cargoExtraArgs = "--locked --workspace"; CARGO_PROFILE = "dev"; };
       cargoArtifacts = craneLib.buildDepsOnly common;
     in
     {
