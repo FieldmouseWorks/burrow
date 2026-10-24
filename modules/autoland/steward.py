@@ -8,7 +8,8 @@ One pass (the timer runs it every couple of minutes):
      `baseline` ruleset); a repo seen for the first time also gets a Claude
      job that brings its files to docs/repo-baseline.md.
   2. For each open PR, work out where it stands and do the next thing:
-     ask Codex for a review (and DeepSeek, if it's on: config.deepseek),
+     ask Codex for a review (and queue one from DeepSeek, if it's on:
+     config.deepseek),
      hand open findings or red CI to a Claude job,
      post the `review-settled` commit status, mark it ready and turn on
      auto-merge, or stop and list it for the owner.
@@ -23,6 +24,11 @@ config.stateDir: one JSON file per PR, one per repo.
 
 `autoland-steward status` prints what it thinks of every open PR without
 changing anything.
+
+`autoland-steward deepseek` works through the DeepSeek reviews the passes
+queued (config.stateDir/ds-queue), a few at once, and posts each one. A
+careful look takes DeepSeek many minutes, so it runs as its own service and
+no pass waits for it.
 """
 
 import fnmatch
@@ -36,6 +42,7 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
 CFG = json.load(open(os.environ["AUTOLAND_CONFIG"]))
@@ -505,7 +512,8 @@ def fix_task(repo, pr, why):
 # findings it had, and each finding's thread carries the other.
 DS_RE = re.compile(r"<!-- deepseek-review:v1 (\{.*?\}) -->")
 DS_FINDING = "<!-- deepseek-finding -->"
-DS_CALLS = []  # when each DeepSeek call this pass started
+QUEUE, DONE = "ds-queue", "ds-done"  # under STATE: asked for, and what went wrong
+STALE = 4 * 3600  # a queued review not back by then is taken as failed
 _me = []
 
 
@@ -538,59 +546,100 @@ def deepseek_verdict(pr, head):
 QUOTED = r'"(?:[^"\\]|\\.)*"'
 
 
-def diff_paths(header):
-    """Both names in a `diff --git` line, as git quotes them when they hold
-    unusual characters ("a/caf\\303\\251.pem"), or None if it can't tell."""
-    m = re.fullmatch(rf"diff --git ({QUOTED}|a/.*?) ({QUOTED}|b/.*)", header)
-    if not m:
+def unquote(t):
+    """A name as git writes it: bare, or quoted with C-style escapes (the
+    octal ones bytes of UTF-8) when it holds unusual characters. None if
+    it's neither."""
+    if not t.startswith('"'):
+        return t
+    if not re.fullmatch(QUOTED, t):
         return None
-    names = []
-    for t, side in zip(m.groups(), "ab"):
-        if t.startswith('"'):
-            # C-style escapes, the octal ones bytes of UTF-8.
-            try:
-                t = t[1:-1].encode("latin-1", "backslashreplace").decode("unicode_escape").encode("latin-1").decode("utf-8", "replace")
-            except (UnicodeError, ValueError):
-                return None
-        if not t.startswith(side + "/"):
-            return None
-        names.append(t[2:])
-    return names
+    try:
+        return t[1:-1].encode("latin-1", "backslashreplace").decode("unicode_escape").encode("latin-1").decode("utf-8", "replace")
+    except (UnicodeError, ValueError):
+        return None
+
+
+def header_pairs(header):
+    """Every (old, new) a `diff --git` line can be read as. Git leaves
+    spaces bare, so "a/x b/y b/z" is two renames at once; the caller
+    checks them all."""
+    rest = header[len("diff --git "):]
+    pairs = []
+    for i, c in enumerate(rest):
+        if c == " ":
+            a, b = unquote(rest[:i]), unquote(rest[i + 1:])
+            if a and b and a.startswith("a/") and b.startswith("b/"):
+                pairs.append((a[2:], b[2:]))
+    return pairs
+
+
+def file_names(lines):
+    """For one file's part of a diff: every name it might have (old or
+    new, however its header splits), and the one it has on the new side
+    (the old one if it's deleted), or None if that's not certain."""
+    pairs = header_pairs(lines[0])
+    names = {x for p in pairs for x in p}
+    told = {}
+    for x in lines[1:]:
+        if x.startswith("@@"):
+            break
+        m = re.match(r"(rename|copy) (from|to) (.*)", x) or re.match(r"(---|\+\+\+) (?:(/dev/null)|(.*?))\t?$", x)
+        if not m:
+            continue
+        if m.group(2) == "/dev/null":
+            told[m.group(1)] = None
+            continue
+        name = unquote(m.group(3))
+        if m.group(1) in ("---", "+++"):
+            name = name[2:] if name and name[:2] in ("a/", "b/") else None
+        if name is None:
+            return names, None  # a name it can't read
+        names.add(name)
+        told[m.group(1) + (m.group(2) if m.group(1) in ("rename", "copy") else "")] = name
+    same = {b for a, b in pairs if a == b}
+    path = (told.get("+++") or told.get("renameto") or told.get("copyto")
+            or (told.get("---") if "+++" in told else None)
+            or (same.pop() if len(same) == 1 else pairs[0][1] if len(pairs) == 1 else None))
+    return names, path
 
 
 def numbered(diff):
     """The diff, file by file, with each new-side line's number in front (the
     numbers findings point at), and the lines a review comment can go on."""
-    files, out, path, new = {}, [], None, 0
+    files, out = {}, []
     skip = [re.compile(p) for p in DS["skipPaths"]]
-    hidden = in_hunk = False
-    for x in diff.splitlines():
-        if x.startswith("diff --git "):
-            names = diff_paths(x)
-            # A rename out of a secrets path still carries its contents, and
-            # a header it can't read hides the file rather than risk it.
-            old, path = names or (x, x)
-            hidden, in_hunk = not names or any(p.search(q) for p in skip for q in (old, path)), False
-            files[path] = set()
-            out.append(f"\n=== {path}" + ("\n(contents not sent: a secrets path)" if hidden else ""))
-        elif hidden or path is None:
+    for part in re.split(r"(?m)^(?=diff --git )", diff):
+        lines = part.splitlines()
+        if not lines or not lines[0].startswith("diff --git "):
             continue
-        elif x.startswith("@@"):
-            m = re.match(r"@@ -\d+(?:,\d+)? \+(\d+)", x)
-            new, in_hunk = (int(m.group(1)) if m else 0), True
-            out.append(x)
-        elif not in_hunk:
-            # The file's header: only the lines that say what happened to it.
-            if x.startswith(("new file", "deleted file", "rename ", "Binary files")):
+        names, path = file_names(lines)
+        # A rename out of a secrets path still carries its contents, and a
+        # file whose name isn't certain is hidden rather than risked.
+        hidden = path is None or any(p.search(q) for p in skip for q in names)
+        path = path or lines[0]
+        files[path] = set()
+        out.append(f"\n=== {path}" + ("\n(contents not sent: a secrets path)" if hidden else ""))
+        if hidden:
+            continue
+        new, in_hunk = 0, False
+        for x in lines[1:]:
+            if x.startswith("@@"):
+                m = re.match(r"@@ -\d+(?:,\d+)? \+(\d+)", x)
+                new, in_hunk = (int(m.group(1)) if m else 0), True
                 out.append(x)
-        elif x.startswith("-"):
-            out.append(f"{'':>6} {x}")
-        elif x.startswith(("+", " ")):
-            files[path].add(new)
-            out.append(f"{new:>6} {x}")
-            new += 1
-        else:
-            out.append(f"{'':>6} {x}")  # "\ No newline at end of file"
+            elif not in_hunk:
+                # The file's header: only the lines that say what happened to it.
+                if x.startswith(("new file", "deleted file", "rename ", "Binary files")):
+                    out.append(x)
+            elif x.startswith("-"):
+                out.append(f"{'':>6} {x}")
+            elif x.startswith(("+", " ")):
+                files[path].add(new)
+                out.append(f"{new:>6} {x}")
+                new += 1
+            else:
+                out.append(f"{'':>6} {x}")  # "\ No newline at end of file"
     return "\n".join(out), files
 
 
@@ -670,16 +719,23 @@ def ask_deepseek(system, user):
     that's turned down (it's a beta), JSON mode, which now and then answers
     with something that isn't JSON (its docs say so, and remi saw one in
     six); if that's turned down too, plain text. Each answer that can't be
-    read is asked again, three tries in all."""
+    read is asked again, three tries in all.
+
+    Its thinking counts against max_tokens. At max effort a big diff can
+    think past even that (remi#39: most calls did, after 11 minutes each),
+    and asking the same again would only do it again: it's asked once more
+    at high effort, and if that runs out too the review fails."""
     env = {}
     for x in open(os.path.join(os.environ.get("CREDENTIALS_DIRECTORY", ""), "deepseek")):
         k, sep, v = x.strip().partition("=")
         if sep:
             env[k] = v.strip().strip('"')
+    efforts = [env.get("DEEPSEEK_EFFORT") or DS["effort"]]
+    if efforts[0] == "max":
+        efforts.append("high")
     base = {
         "model": env["DEEPSEEK_MODEL"],
         "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
-        "reasoning_effort": env.get("DEEPSEEK_EFFORT") or DS["effort"],
         "max_tokens": DS["maxTokens"],
     }
     url = DS["baseUrl"].rstrip("/")
@@ -699,26 +755,34 @@ def ask_deepseek(system, user):
     ctx = ssl.create_default_context(cafile=DS["caFile"])
 
     def call(at, extra):
-        req = urllib.request.Request(at + "/chat/completions", data=json.dumps({**base, **extra}).encode(),
+        body = {**base, **extra, "reasoning_effort": efforts[0]}
+        req = urllib.request.Request(at + "/chat/completions", data=json.dumps(body).encode(),
                                      headers={"Authorization": f"Bearer {env['DEEPSEEK_API_KEY']}",
                                               "Content-Type": "application/json"})
         with urllib.request.urlopen(req, timeout=DS["timeout"], context=ctx) as r:
-            msg = json.load(r)["choices"][0]["message"]
+            choice = json.load(r)["choices"][0]
+        msg = choice["message"]
         for t in msg.get("tool_calls") or []:
             if t["function"]["name"] == "submit_review":
-                return t["function"]["arguments"] or ""
-        return msg.get("content") or ""
+                return choice.get("finish_reason"), t["function"]["arguments"] or ""
+        return choice.get("finish_reason"), msg.get("content") or ""
 
     tries = 0
     while True:
         at, extra = ways[0]
         try:
-            text = call(at, extra)
+            why, text = call(at, extra)
         except urllib.error.HTTPError as e:
             if e.code != 400 or len(ways) == 1:
                 raise
             log(f"  DeepSeek turned down {', '.join(extra) or 'plain text'} ({e.code}): trying the next way")
             ways.pop(0)
+            continue
+        if why == "length":
+            if len(efforts) == 1:
+                raise RuntimeError(f"thought past {DS['maxTokens']} tokens at {efforts[0]} effort without answering")
+            log(f"  DeepSeek thought past {DS['maxTokens']} tokens at {efforts[0]} effort: asking at {efforts[1]}")
+            efforts.pop(0)
             continue
         tries += 1
         try:
@@ -744,19 +808,18 @@ def quiet_mentions(text):
     return re.sub(r"@(?=[\w-])", "@​", str(text)).replace("<!--", "&lt;!--")
 
 
-def run_deepseek(repo, pr, dst):
+def run_deepseek(repo, pr):
     """Ask DeepSeek about the head and post what it says as one review.
-    Returns "clean", "findings", or None if it didn't happen."""
+    Returns "clean", "findings", or "tooBig" (nothing sent). Raises if it
+    didn't happen."""
     n, head = pr["number"], pr["headRefOid"]
-    DS_CALLS.append(time.time())
     diff = gh("api", "-H", "Accept: application/vnd.github.diff",
               f"repos/{repo}/compare/{pr['baseRefName']}...{head}", check=False)
     if not isinstance(diff, str) or not diff.startswith("diff"):
         raise RuntimeError("couldn't read the diff")
     text, files = numbered(diff)
     if len(text) > DS["maxDiffChars"]:
-        dst["tooBig"] = True
-        return None
+        return "tooBig"
     user = (f"Repo {repo}, PR #{n}: {pr['title']}\n\n"
             f"Code Review Rules:\n{review_rules(repo, pr['baseRefName'], files) or '(none)'}\n\n"
             f"Earlier findings:\n{prior_findings(repo, n) or '(none)'}\n\n"
@@ -975,25 +1038,46 @@ def handle(repo, pr, repo_info, digest):
         st["asked"].append(NOW)
         return True
 
+    # DeepSeek's reviews are queued for its own service (`deepseek` below),
+    # which posts each one; this pass only reads what came back. One is on
+    # its way while it's queued and no review of this head is newer.
+    dst = st["ds"]
+    item = f"{key[:-5]}-{head[:12]}.json"
+    if use_ds:
+        back = load(f"{DONE}/{item}", None)
+        if back and not DRY:
+            os.remove(os.path.join(STATE, DONE, item))
+            dst.pop("queued", None)
+            if back.get("result") == "tooBig":
+                dst["tooBig"] = True
+            else:  # the API, the network, its JSON: tried again next pass
+                dst["fails"], dst["failedAt"] = dst.get("fails", 0) + 1, NOW
+                log(f"{tag}: DeepSeek review failed ({dst['fails']}): {back.get('error', '')[:200]}")
+        if dst.get("queued") and dstime >= dst["queued"]:
+            dst.pop("queued")  # it's back
+        elif dst.get("queued") and NOW - dst["queued"] > STALE:
+            dst.pop("queued")
+            dst["fails"], dst["failedAt"] = dst.get("fails", 0) + 1, NOW
+            log(f"{tag}: the DeepSeek review queued over {STALE // 3600}h ago never came back")
+    ds_busy = bool(dst.get("queued"))
+
     def ask_ds():
-        """DeepSeek on this head, now (a few a pass). Its looks at one head
-        are bounded by `rounds`: each one with findings counts as a round."""
-        dst = st["ds"]
+        """Queue DeepSeek on this head, unless it's already on its way. Its
+        looks at one head are bounded by `rounds`: each one with findings
+        counts as a round."""
+        if ds_busy:
+            return
         if DRY:
             log(f"  would: ask DeepSeek to review {tag} at {head[:7]}")
-            return None
+            return
         if dst.get("fails", 0) >= 3 and NOW - dst.get("failedAt", 0) > 3600:
             dst["fails"] = 0  # an outage passes: three more tries an hour on
-        if (dst.get("fails", 0) >= 3 or dst.get("tooBig")
-                or len(DS_CALLS) >= DS["perPass"]):
-            return None
-        try:
-            v = run_deepseek(repo, pr, dst)
-        except Exception as e:  # the API, the network, its JSON: tried again next pass
-            dst["fails"], dst["failedAt"] = dst.get("fails", 0) + 1, NOW
-            log(f"{tag}: DeepSeek review failed ({dst['fails']}): {str(e)[:200]}")
-            return None
-        return v
+        if dst.get("fails", 0) >= 3 or dst.get("tooBig"):
+            return
+        log(f"{tag}: queueing a DeepSeek review of {head[:7]}")
+        save(f"{QUEUE}/{item}", {"repo": repo, "number": n, "headRefOid": head,
+                                 "baseRefName": pr["baseRefName"], "title": pr["title"], "at": NOW})
+        dst["queued"] = NOW
 
     # 1. The reviewers.
     if rounds >= rc["rounds"] and not (verdict == "clean" and dsv == "clean"):
@@ -1016,19 +1100,15 @@ def handle(repo, pr, repo_info, digest):
         waiting.append("Waiting for Codex's review of this commit")
     elif verdict == "running":
         waiting.append("Codex is reviewing this commit")
-    # DeepSeek is asked in the same pass as Codex, and answers within it.
-    # Threads it opens just now aren't in this pass's numbers yet.
-    fresh = False
+    # DeepSeek is queued in the same pass as Codex is asked.
     if dsv == "none":
         if quiet:
-            dsv = ask_ds() or "none"
-            fresh = dsv == "findings"
-        if st["ds"].get("tooBig"):
+            ask_ds()
+        if dst.get("tooBig"):
             digest.append(("Too big for DeepSeek to review", line, f"over {DS['maxDiffChars']} characters of diff"))
-        elif st["ds"].get("fails", 0) >= 3:
-            digest.append(("DeepSeek couldn't review it", line, f"failed {st['ds']['fails']} times on {head[:7]} (journalctl -u autoland)"))
-        if dsv == "none":
-            waiting.append("Waiting for DeepSeek's review of this commit")
+        elif dst.get("fails", 0) >= 3:
+            digest.append(("DeepSeek couldn't review it", line, f"failed {dst['fails']} times on {head[:7]} (journalctl -u autoland-deepseek)"))
+        waiting.append("DeepSeek is reviewing this commit" if dst.get("queued") else "Waiting for DeepSeek's review of this commit")
 
     what = []
     if open_threads:
@@ -1042,16 +1122,13 @@ def handle(repo, pr, repo_info, digest):
         if what and idle > rc["handoffAfter"] * MIN and st.get("handed") != head:
             hand_off(", ".join(what))
     elif "findings" in (verdict, dsv) or open_threads or changes:
-        if not open_threads and not changes and not fresh:
+        if not open_threads and not changes:
             # Every finding answered without a new commit: the reviewers that
             # had findings look again.
             if verdict == "findings" and vtime > last_ask and NOW - vtime > rc["settleDelay"] * MIN:
                 ask("Every finding is answered and resolved; review again.")
             if dsv == "findings" and NOW - dstime > rc["settleDelay"] * MIN:
-                fresh = ask_ds() == "findings"
-        if fresh:
-            settle("pending", f"Round {rounds + 1}: DeepSeek has new findings")
-        elif not open_threads and not changes:
+                ask_ds()
             settle("pending", f"Findings answered; review round {rounds + 1} next")
         else:
             settle("pending", f"Round {rounds}: " + ", ".join(what))
@@ -1197,11 +1274,65 @@ def publish(digest):
         save("digest.json", {"lines": lines, "body": body, "checked": NOW})
 
 
+# ---------------------------------------------------------------- DeepSeek's queue
+
+def review_queued(name):
+    """One queued review: posted, or what went wrong left in DONE for the
+    next pass. Gone from the queue either way."""
+    item = load(f"{QUEUE}/{name}", None)
+    repo, n = (item or {}).get("repo"), (item or {}).get("number")
+    try:
+        if not item:
+            return
+        cur = gh("api", f"repos/{repo}/pulls/{n}", "--jq", "{state, sha: .head.sha}")
+        if cur.get("state") != "open" or cur.get("sha") != item["headRefOid"]:
+            log(f"{repo}#{n}: moved on from {item['headRefOid'][:7]}, not reviewing it")
+            return
+        if run_deepseek(repo, item) == "tooBig":
+            save(f"{DONE}/{name}", {"result": "tooBig", "at": time.time()})
+    except Exception as e:
+        log(f"{repo}#{n}: DeepSeek review failed: {str(e)[:300]}")
+        save(f"{DONE}/{name}", {"result": "error", "error": str(e)[:300], "at": time.time()})
+    finally:
+        try:
+            os.remove(os.path.join(STATE, QUEUE, name))
+        except OSError:
+            pass
+
+
+def deepseek_queue():
+    """Every queued review, `parallel` at a time, until the queue is empty
+    (passes may add to it meanwhile)."""
+    q = os.path.join(STATE, QUEUE)
+    # What went wrong on a head no pass came back for (it moved on).
+    for name in os.listdir(os.path.join(STATE, DONE)):
+        path = os.path.join(STATE, DONE, name)
+        if time.time() - os.path.getmtime(path) > 86400:
+            os.remove(path)
+    with ThreadPoolExecutor(DS["parallel"]) as pool:
+        busy, seen = [], set()
+        while True:
+            for name in sorted(os.listdir(q)):
+                if name.endswith(".json") and name not in seen:
+                    seen.add(name)
+                    busy.append(pool.submit(review_queued, name))
+            busy = [f for f in busy if not f.done()]
+            if not busy:
+                return
+            time.sleep(5)
+
+
 # ---------------------------------------------------------------- main
 
 def main():
+    if sys.argv[1:] == ["deepseek"]:
+        for d in (QUEUE, DONE):
+            os.makedirs(os.path.join(STATE, d), exist_ok=True)
+        deepseek_queue()
+        return
     try:
-        os.makedirs(STATE, exist_ok=True)
+        for d in ("", QUEUE, DONE):
+            os.makedirs(os.path.join(STATE, d), exist_ok=True)
     except OSError:
         if not DRY:
             raise

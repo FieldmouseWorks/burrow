@@ -54,10 +54,12 @@ let
     };
     repos = cfg.repos;
     deepseek = {
-      inherit (cfg.deepseek) enable baseUrl effort skipPaths maxDiffChars perPass;
-      # Its thinking counts against this too, and at max effort a big PR can
-      # think for a long time. Only what it uses is paid for.
-      maxTokens = 131072;
+      inherit (cfg.deepseek) enable baseUrl effort skipPaths maxDiffChars parallel;
+      # Its thinking counts against this too, and at max effort a real PR
+      # thought past 131072 in most calls (remi#39), so it's the API's
+      # ceiling. Only what it uses is paid for.
+      maxTokens = 384000;
+      # Per read: the API keeps a long call alive with blank lines.
       timeout = 600;
       caFile = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
     };
@@ -279,10 +281,14 @@ in
         description = "A bigger diff isn't sent: the PR waits for you instead.";
       };
 
-      perPass = mkOption {
+      parallel = mkOption {
         type = types.ints.positive;
-        default = 6;
-        description = "At most this many DeepSeek reviews in one pass; the rest wait for the next.";
+        default = 4;
+        description = ''
+          At most this many DeepSeek reviews at once. A careful one can take
+          DeepSeek half an hour, so they run in their own service
+          (autoland-deepseek), apart from the steward's passes.
+        '';
       };
     };
 
@@ -331,12 +337,29 @@ in
         Type = "oneshot";
         User = user;
         ExecStart = "${steward}/bin/autoland-steward${lib.optionalString cfg.dryRun " status"}";
-        # DeepSeek's reviews, at their most thorough, can take minutes each.
-        TimeoutStartSec = if cfg.deepseek.enable then "45min" else "20min";
+        TimeoutStartSec = "20min";
         Nice = 10;
-      } // lib.optionalAttrs cfg.deepseek.enable {
+      };
+    };
+    # The DeepSeek reviews the passes queue, as soon as there are any.
+    systemd.services.autoland-deepseek = lib.mkIf (cfg.deepseek.enable && !cfg.dryRun) {
+      description = "autoland: DeepSeek's reviews of the queued PR heads";
+      after = [ "network-online.target" ];
+      wants = [ "network-online.target" ];
+      path = [ pkgs.gh pkgs.coreutils ];
+      serviceConfig = {
+        Type = "oneshot";
+        User = user;
+        ExecStart = "${steward}/bin/autoland-steward deepseek";
+        # A pass queued past STALE (4h) counts it as failed anyway.
+        TimeoutStartSec = "4h";
+        Nice = 10;
         LoadCredential = "deepseek:${cfg.deepseek.envFile}";
       };
+    };
+    systemd.paths.autoland-deepseek = lib.mkIf (cfg.deepseek.enable && !cfg.dryRun) {
+      wantedBy = [ "paths.target" ];
+      pathConfig.DirectoryNotEmpty = "${stateDir}/autoland/ds-queue";
     };
     systemd.timers.autoland = {
       wantedBy = [ "timers.target" ];
@@ -346,11 +369,15 @@ in
       };
     };
 
-    systemd.tmpfiles.settings.burrow."${stateDir}/autoland".d = {
-      mode = "0755";
-      inherit user;
-      group = account.group;
-    };
+    systemd.tmpfiles.settings.burrow = lib.genAttrs
+      [ "${stateDir}/autoland" "${stateDir}/autoland/ds-queue" "${stateDir}/autoland/ds-done" ]
+      (_: {
+        d = {
+          mode = "0755";
+          inherit user;
+          group = account.group;
+        };
+      });
 
     burrow.claude.machineMd = lib.mkOrder 1050 ''
       ## Pull requests

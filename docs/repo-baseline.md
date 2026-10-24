@@ -26,9 +26,9 @@ change nothing else in the same PR.
 
 1. PRs are opened as drafts.
 2. Codex reviews the head (the steward asks with `@codex review`). Where
-   the machine turns on `burrow.autoland.deepseek`, DeepSeek reviews it in
-   the same pass: the steward sends it the diff and the Code Review Rules below
-   and posts its findings as review threads marked as DeepSeek's.
+   the machine turns on `burrow.autoland.deepseek`, DeepSeek reviews it too,
+   in the background: the steward sends it the diff and the Code Review Rules
+   below and posts its findings as review threads marked as DeepSeek's.
 3. Whoever opened the PR fixes each finding, or replies with why not, and
    resolves its thread. A Claude job on the machine takes over if nobody has
    after `handoffAfterMinutes`.
