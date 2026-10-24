@@ -149,7 +149,7 @@ auth, req, path = REQS[-1]
 assert auth == "Bearer sk-test" and req["model"] == "m-test" and req["reasoning_effort"] == "max"
 # A strict tool call on the beta endpoint, held to the review's schema.
 assert path == "/beta/chat/completions" and req["tools"][0]["function"]["strict"] is True
-assert req["tool_choice"]["function"]["name"] == "submit_review"
+assert req["tool_choice"] == "auto" and req["tools"][0]["function"]["name"] == "submit_review"
 sent = req["messages"][1]["content"]
 assert "never call eval" in sent and "root rule" in sent and "not rules" not in sent
 assert "Not a bug: b is meant." in sent and "someone else" not in sent

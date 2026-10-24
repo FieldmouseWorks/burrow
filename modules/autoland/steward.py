@@ -662,7 +662,9 @@ def ask_deepseek(system, user):
                 "name": "submit_review", "strict": True,
                 "description": "Submit the review: every finding, and a one-sentence summary.",
                 "parameters": DS_REVIEW_SCHEMA}}],
-            "tool_choice": {"type": "function", "function": {"name": "submit_review"}},
+            # Thinking mode turns down a forced or "required" tool_choice
+            # (remi#34); with "auto" it called submit_review every time.
+            "tool_choice": "auto",
         }),
         (url, {"response_format": {"type": "json_object"}}),
         (url, {}),
