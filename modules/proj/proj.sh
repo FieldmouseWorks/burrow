@@ -58,18 +58,21 @@ state() {
   fi
 }
 
+# Swapped in whole, so a reader never finds it missing or half written.
+set_turns() { echo "$2" >"$jobs/$1/turns.new" && mv -f "$jobs/$1/turns.new" "$jobs/$1/turns"; }
+
+# Known not to be running: not "can't say".
+gone() { case $(systemctl --user show -P ActiveState "$1" 2>/dev/null) in inactive | failed) return 0 ;; esac; return 1; }
+
 start_turn() {
-  local id=$1 msg=$2 first=$3 n f was
+  local id=$1 msg=$2 first=$3 n
   local d=$jobs/$id
   n=$(($(cat "$d/turns" 2>/dev/null || echo 0) + 1))
-  # The last turn's state is set aside, not deleted, until the new turn has
-  # started: a turn that can't start leaves the job as it was, waits and all.
-  was=$(mktemp -d "$d/.was.XXXXXX")
-  for f in turns result outcome slot await await.next; do
-    if [ -e "$d/$f" ]; then mv "$d/$f" "$was/"; fi
-  done
+  # The last turn's state (its answer, outcome, slot and waits) is the new
+  # turn's to clear (_exec), so a turn that can't start, or a start_turn
+  # killed partway, leaves the job as it was, waits and all.
   printf '%s\n' "$msg" >"$d/prompt.$n"
-  echo "$n" >"$d/turns"
+  set_turns "$id" "$n"
   systemctl --user reset-failed "$(unit "$id")" 2>/dev/null || true
   # Claude is what goes first when memory runs out, not whatever it's next to.
   if ! systemd-run --user --quiet --collect --unit="$(unit "$id")" \
@@ -78,13 +81,11 @@ start_turn() {
     --property=OOMScoreAdjust=500 \
     --property=WorkingDirectory="$(cat "$d/project")" \
     "$self" _exec "$id" "${first:-normal}"; then
-    rm -f "$d/turns" "$d/prompt.$n"
-    find "$was" -mindepth 1 -maxdepth 1 -exec mv -t "$d" {} +
-    rmdir "$was"
+    if [ "$n" = 1 ]; then rm -f "$d/turns"; else set_turns "$id" $((n - 1)); fi
+    rm -f "$d/prompt.$n"
     echo "proj: turn $n of $id couldn't start" >&2
     return 1
   fi
-  rm -rf "$was"
 }
 
 # Memory to spare, in MiB: what the kernel says is available, plus what the
@@ -256,7 +257,7 @@ case "${1:-status}" in
   log)
     id=${2:?usage: proj log ID [--turn N] [--raw]}
     shift 2
-    n=$(cat "$jobs/$id/turns") raw=''
+    n='' raw=''
     while [ $# -gt 0 ]; do
       case $1 in
         --raw) raw=1 ;;
@@ -265,6 +266,8 @@ case "${1:-status}" in
       esac
       shift
     done
+    # The latest turn's only when no turn was asked for.
+    [ -n "$n" ] || n=$(cat "$jobs/$id/turns")
     # A turn's answer is the result line in its own stream, so an earlier
     # turn's is still there once later ones have started.
     last=$(grep '"type":"result"' "$jobs/$id/$n.jsonl" 2>/dev/null | tail -n 1 || true)
@@ -275,7 +278,7 @@ case "${1:-status}" in
     else
       # No result yet, or one with nothing to say: an error's can hold only
       # its errors.
-      if [ -z "$last" ] && [ "$n" = "$(cat "$jobs/$id/turns")" ]; then
+      if [ -z "$last" ] && [ "$n" = "$(cat "$jobs/$id/turns" 2>/dev/null)" ]; then
         echo "($(state "$id"); no answer yet)"
       else
         echo "(turn $n ended without an answer)"
@@ -293,12 +296,13 @@ case "${1:-status}" in
     exec {lk}>>"$jobs/$id/lock"
     flock "$lk"
     u=$(unit "$id") rc=0
-    if systemctl --user -q is-active "$u"; then systemctl --user stop "$u" || rc=$?; fi
-    # Its waits go whatever the stop said. A failed stop is an error only
-    # while the turn may still be running: one that ended on its own between
-    # the look and the stop is stopped all the same.
+    gone "$u" || systemctl --user stop "$u" || rc=$?
+    # Its waits go whatever the stop said. A failed stop is an error unless
+    # the turn is known to be over: one that ended on its own between the
+    # look and the stop is stopped all the same, and one systemd can't be
+    # asked about may still be running.
     rm -f "$jobs/$id/await" "$jobs/$id/await.next"
-    if [ "$rc" != 0 ] && [ "$(systemctl --user show -P ActiveState "$u" 2>/dev/null)" != inactive ]; then
+    if [ "$rc" != 0 ] && ! gone "$u"; then
       echo "proj: couldn't stop $id" >&2
       exit "$rc"
     fi
@@ -328,7 +332,7 @@ case "${1:-status}" in
       [ -s "$f" ] || continue
       id=$(basename "$(dirname "$f")")
       case $(state "$id") in queued | running) continue ;; esac
-      turn=$(cat "$jobs/$id/turns")
+      turn=$(cat "$jobs/$id/turns" 2>/dev/null) || continue
       # Gone already: another _watch (the timer's, or a hand-run one) has
       # started its next turn.
       waits=$(cat "$f" 2>/dev/null) || continue
@@ -375,6 +379,9 @@ Carry on from there. Anything you left in the background last turn was stopped w
     id=$2
     dir="$jobs/$id"
     n=$(cat "$dir/turns")
+    # The last turn's state, now that this one has started. Its waits can go:
+    # this turn writes its own to await.next, and await only once it ends.
+    rm -f "$dir/result" "$dir/outcome" "$dir/slot" "$dir/await" "$dir/await.next"
     take_slot "$id" "$3"
     args=(-p --output-format stream-json --verbose)
     if [ -s "$dir/session" ]; then args+=(--resume "$(cat "$dir/session")"); fi

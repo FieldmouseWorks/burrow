@@ -366,6 +366,28 @@ pkgs.testers.runNixOSTest {
         machine.succeed(f"systemctl --user -M dev@ kill '{unit(job)}'")
         machine.wait_until_fails(f"systemctl --user -M dev@ -q is-active '{unit(job)}'", timeout=30)
 
+    with subtest("a stop systemd can't be asked about fails, and still ends the waits"):
+        machine.succeed(f"su - dev -c \"printf 'o/r#6\\t%s\\t{{}}\\n' $(date +%s) >{d}/await\"")
+        machine.succeed(f"su - dev -c 'XDG_RUNTIME_DIR=/run/user/$(id -u dev) systemd-run --user --unit=\"proj-$(systemd-escape {job}).service\" sleep 600'")
+        machine.succeed(f"systemctl --user -M dev@ -q is-active '{unit(job)}'")
+        rc, out = machine.execute(f"su - dev -c 'env -u DBUS_SESSION_BUS_ADDRESS XDG_RUNTIME_DIR=/nonexistent proj stop {job}' 2>&1")
+        assert rc != 0 and "couldn't stop" in out, (rc, out)
+        machine.fail(f"test -e {d}/await")
+        proj(f"stop {job}")
+        machine.fail(f"systemctl --user -M dev@ -q is-active '{unit(job)}'")
+
+    with subtest("an earlier turn's answer is read without the turn count"):
+        e = proj('run web "sleep 1"')
+        machine.wait_until_succeeds(f"su - dev -c 'proj state {e}' | grep -x done", timeout=120)
+        machine.succeed(f"mv /data/dev/jobs/{e}/turns /tmp/turns-aside")
+        assert proj(f"log {e} --turn 1") == "did sleep 1"
+        machine.succeed(f"mv /tmp/turns-aside /data/dev/jobs/{e}/turns")
+
+    with subtest("a job with no turn count doesn't stop _watch looking at the rest"):
+        machine.succeed("su - dev -c 'mkdir -p /data/dev/jobs/broken && printf \"o/r#6\\t0\\t{}\\n\" >/data/dev/jobs/broken/await'")
+        proj("_watch")
+        machine.succeed("rm -rf /data/dev/jobs/broken")
+
     with subtest("a job past its memory cap is killed by its own limit"):
         e = proj("run web eat")
         machine.wait_until_succeeds(f"su - dev -c 'proj state {e}' | grep -x failed", timeout=120)
