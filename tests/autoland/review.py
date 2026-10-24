@@ -125,6 +125,12 @@ C.gh = gh
 C.NOW = time.time()
 
 
+os.makedirs(f"{tmp}/run/resolvconf")
+open(f"{tmp}/run/resolvconf/resolv.conf", "w").close()
+os.symlink(f"{tmp}/run/resolvconf/resolv.conf", f"{tmp}/resolv.conf")
+W.RESOLV = f"{tmp}/resolv.conf"
+
+
 def queue_and_work(r):
     V.queue("sam/r", snap_pr, "pr-sam_r-5.json", r)
     W.work()
@@ -156,6 +162,8 @@ mounted = {(k, d) for k, src, d in box["binds"] if src == d}
 assert ("--ro-bind", snap) in mounted and ("--bind", f"{tmp}/home/.dsh") in mounted, mounted
 assert not any(d.startswith(f"{tmp}/state") and d != snap or d == f"{tmp}/home" or d.startswith(f"{tmp}/home/.codex")
                for k, src, d in box["binds"]), box["binds"]
+# The resolver config's target is there too, wherever it's kept.
+assert ("--ro-bind-try", f"{tmp}/run/resolvconf/resolv.conf") in mounted, mounted
 # git trusts that one snapshot, which isn't the reviewers' own.
 assert box["gitconfig"] == [f"[safe]\n\tdirectory = {snap}\n"], box["gitconfig"]
 assert "- id: agent-instructions\n  disabled: true" in run["overlay"] and "- id: tool-web\n  disabled: true" in run["overlay"]

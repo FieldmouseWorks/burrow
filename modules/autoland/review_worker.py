@@ -91,6 +91,9 @@ def env(**extra):
     return {"HOME": home, "PATH": os.environ.get("PATH", ""), "LANG": "C.UTF-8", **extra}
 
 
+RESOLV = "/etc/resolv.conf"
+
+
 def sandboxed(snap, home, t, argv):
     """argv in a sandbox of its own (bubblewrap): it sees the store, /etc,
     its snapshot (read-only), its own agent's home and its temp dir `t`, and
@@ -104,6 +107,11 @@ def sandboxed(snap, home, t, argv):
     with open(f"{t}/gitconfig", "w") as f:
         f.write(f"[safe]\n\tdirectory = {snap}\n")
     ro = ["/nix/store", "/etc", "/bin", "/usr/bin", "/run/current-system", "/run/systemd/resolve", "/run/nscd"]
+    # The resolver config is a link out of /etc wherever the machine's DNS
+    # manager keeps it: its target too, or the agents can't find their APIs.
+    dns = os.path.realpath(RESOLV)
+    if not any(dns == p or dns.startswith(p + "/") for p in ro):
+        ro.append(dns)
     return [CFG["sandbox"], "--unshare-all", "--share-net", "--die-with-parent", "--new-session",
             "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
             *[x for p in ro for x in ("--ro-bind-try", p, p)],
