@@ -4,10 +4,20 @@
 name: flake-check
 on:
   workflow_call:
+    inputs:
+      runner:
+        description: The runner label to run on, such as a self-hosted runner's.
+        type: string
+        default: ubuntu-latest
+      install-nix:
+        description: Install Nix first. False on a runner that has it already (NixOS).
+        type: boolean
+        default: true
 jobs:
   check:
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner }}
     steps:
       - uses: actions/checkout@v5
-      - uses: cachix/install-nix-action@v31
+      - if: inputs.install-nix
+        uses: cachix/install-nix-action@v31
       - run: nix flake check -L --keep-going

@@ -8,3 +8,5 @@ on:
 jobs:
   check:
     uses: FieldmouseWorks/burrow/.github/workflows/flake-check.yml@main
+    # On a self-hosted NixOS runner (a private repo out of hosted minutes):
+    # with: { runner: remi, install-nix: false }
