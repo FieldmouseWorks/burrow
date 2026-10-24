@@ -7,12 +7,15 @@
 { self, pkgs }:
 let
   # Claude, as far as proj can tell: reads the prompt, answers in stream-json.
-  # "sleep N" sleeps; "eat" holds far more memory than the test's job cap.
+  # "sleep N" sleeps; "eat" holds far more memory than the test's job cap;
+  # "twice" answers twice in one turn.
   claude = pkgs.writeShellScriptBin "claude" ''
     prompt=$(cat)
     case $prompt in
       sleep*) sleep "''${prompt#sleep }" ;;
       eat) head -c 512M /dev/zero | tail >/dev/null; exit 1 ;;
+      # Answers, then answers again once a background task reports back.
+      twice) echo '{"type":"result","session_id":"s","result":"the answer","is_error":false}' ;;
     esac
     echo '{"type":"result","session_id":"s","result":"did '"$prompt"'","is_error":false}'
   '';
@@ -86,6 +89,12 @@ pkgs.testers.runNixOSTest {
         machine.wait_until_succeeds(f"su - dev -c 'proj state {c}' | grep -x done", timeout=120)
         machine.wait_until_succeeds(f"su - dev -c 'proj state {d}' | grep -x done", timeout=120)
         assert started(d) < started(c), (started(d), started(c))
+
+    with subtest("every answer in a turn is kept, not only the last"):
+        f = proj("run web twice")
+        machine.wait_until_succeeds(f"su - dev -c 'proj state {f}' | grep -x done", timeout=120)
+        log = proj(f"log {f}")
+        assert log == "the answer\n\ndid twice", log
 
     with subtest("a job past its memory cap is killed by its own limit"):
         e = proj("run web eat")

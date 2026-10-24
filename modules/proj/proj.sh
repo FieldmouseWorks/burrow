@@ -204,7 +204,11 @@ case "${1:-status}" in
     last=$(grep '"type":"result"' "$dir/$n.jsonl" | tail -n 1 || true)
     if [ -n "$last" ]; then
       jq -r '.session_id' <<<"$last" >"$dir/session"
-      jq -r '.result // ""' <<<"$last" >"$dir/result"
+      # Claude answers again each time a background task it left running
+      # reports back, so the last result can be a line about that task with
+      # the real answer one before it. The turn's answer is all of them.
+      grep '"type":"result"' "$dir/$n.jsonl" |
+        jq -rs 'map(.result // "" | select(. != "")) | join("\n\n")' >"$dir/result"
       jq -r 'if .is_error then "error" else "done" end' <<<"$last" >"$dir/outcome"
     elif [ "$rc" -eq 124 ]; then
       echo "timed out after $TIMEOUT" >"$dir/outcome"
