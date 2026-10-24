@@ -125,7 +125,7 @@ def codex(snap, prompt):
             "-c", f"model_reasoning_effort={CFG['reviewers']['codex']['effort']}", "-"]),
             input=prompt, capture_output=True, text=True, env=env(CODEX_HOME=home))
         said = p.stderr + p.stdout
-        if re.search(r"usage limit|usage_limit_reached", said, re.I):
+        if p.returncode != 0 and re.search(r"usage limit|usage_limit_reached", said, re.I):
             raise Out("its ChatGPT plan's usage is spent", time.time() + wait_for(said))
         if p.returncode != 0 and re.search(r"not logged in|log ?in again|401|unauthorized|refresh token", said, re.I):
             raise Out("it isn't logged in (autoland-codex-login on the machine)", time.time() + 3600)

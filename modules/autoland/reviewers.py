@@ -142,6 +142,20 @@ def snapshot(repo, pr, key):
         f"+refs/pull/{n}/head:refs/pr/{n}", f"+refs/heads/{base}:refs/base/{base}")
     mb = git("-C", mirror, "merge-base", f"refs/base/{base}", head).decode().strip()
     changed = [p for p in git("-C", mirror, "diff", "-z", "--name-only", "--no-renames", mb, head).decode().split("\0") if p]
+    # A secret renamed or copied to a plain path is still a secret: either
+    # name hides both.
+    moved = set()
+    out = git("-C", mirror, "diff", "-z", "--name-status", "-M", "-C", "--find-copies-harder", mb, head).decode().split("\0")
+    i = 0
+    while i < len(out) - 1:
+        status = out[i]
+        if status[:1] in ("R", "C"):
+            src, dst_ = out[i + 1], out[i + 2]
+            if hidden(src) or hidden(dst_):
+                moved |= {src, dst_}
+            i += 3
+        else:
+            i += 2
     # Each commit's tree less the secrets paths, built in the mirror (which
     # only the steward reads), so their contents never reach the snapshot.
     who = ["-c", "user.name=autoland", "-c", "user.email=autoland@localhost", "-c", "commit.gpgsign=false"]
@@ -158,7 +172,7 @@ def snapshot(repo, pr, key):
             subprocess.run(["git", "-C", mirror, "read-tree", rev], env=e, check=True, capture_output=True)
             paths = subprocess.run(["git", "-C", mirror, "ls-files", "-z"], env=e, check=True,
                                    capture_output=True).stdout.decode().split("\0")
-            gone = [p for p in paths if p and hidden(p)]
+            gone = [p for p in paths if p and (hidden(p) or p in moved)]
             if gone:
                 subprocess.run(["git", "-C", mirror, "update-index", "-z", "--force-remove", "--stdin"], env=e,
                                input="\0".join(gone).encode() + b"\0", check=True, capture_output=True)
@@ -180,7 +194,7 @@ def snapshot(repo, pr, key):
     git("-C", dst, "fetch", "-q", "--no-tags", mirror, f"refs/snap/{name}:refs/heads/review", env=bare)
     git("-C", mirror, "update-ref", "-d", f"refs/snap/{name}")
     git("-C", dst, "checkout", "-q", "review", env=bare)
-    meta = {"rules": rules(mirror, f"refs/base/{base}", changed), "secret": [p for p in changed if hidden(p)]}
+    meta = {"rules": rules(mirror, f"refs/base/{base}", changed), "secret": [p for p in changed if hidden(p) or p in moved]}
     save(f"{SNAP}/{name}.json", meta)
     return name, meta
 

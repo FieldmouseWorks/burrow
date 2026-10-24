@@ -43,10 +43,9 @@ if "effort" in do and do["effort"] not in json.dumps(args) + (open(args[args.ind
 if do.get("rc"):
     print(do["err"], file=sys.stderr); sys.exit(do["rc"])
 out = do.get("say", "Looked.\\n" + json.dumps(do.get("answer", {{"findings": [], "summary": "fine"}})))
-if "-o" in args:
+if "-o" in args:  # codex writes its last message there, and prints it too
     open(args[args.index("-o") + 1], "w").write(out)
-else:
-    print(out)
+print(out)
 """)
     os.chmod(f"{tmp}/agents/{name}", 0o755)
 
@@ -146,6 +145,8 @@ put("AGENTS.md", "# r\n\n## Code Review Rules\n\n- root rule\n")
 put("src/AGENTS.md", "# x\n\n## Code Review Rules\n\n- never call eval\n\n## Other\nnot rules\n")
 put("secrets/remi.yaml", "key: OLDSECRET\n")
 put(".env", "TOKEN=ENVSECRET\n")
+put("secrets/db.yaml", "password: MOVEDSECRET\nport: 1\n")
+put("secrets/api.yaml", "token: COPIEDSECRET\n")
 sh(*GIT, "add", "-A", cwd=work)
 sh(*GIT, "commit", "-qm", "base", cwd=work)
 sh("git", "push", "-q", origin, "main", cwd=work)
@@ -162,6 +163,10 @@ put("hidden.py", "steal()\n")
 put(".gitignore", "built.py\n")
 put("built.py", "also()\n")
 put("notes.txt", "one\r\ntwo\n")
+# A secret moved, or copied, out of a secrets path is still one.
+os.remove(f"{work}/secrets/db.yaml")
+put("config/db.yaml", "password: MOVEDSECRET\nport: 2\n")
+put("cfg/api.yaml", "token: COPIEDSECRET\n")
 sh(*GIT, "add", "-A", "-f", cwd=work)
 sh(*GIT, "commit", "-qm", "use eval", cwd=work)
 pr_head = sh("git", "rev-parse", "HEAD", cwd=work).strip()
@@ -186,7 +191,8 @@ assert sh("git", "rev-parse", "HEAD:notes.txt", cwd=snap) == sh("git", "rev-pars
 # Secrets paths aren't in either commit, or in what git keeps of them.
 for rev in ("HEAD", "HEAD~1"):
     files = sh("git", "ls-tree", "-r", "--name-only", rev, cwd=snap).split()
-    assert "src/app.py" in files and not any(x.startswith("secrets/") or x in (".env", "cert.pem") for x in files), files
+    assert "src/app.py" in files and not any(x.startswith("secrets/") or x in (".env", "cert.pem", "config/db.yaml", "cfg/api.yaml")
+                                             for x in files), files
 out = subprocess.run(["grep", "-rlE", "SECRET", snap], capture_output=True, text=True).stdout
 assert out == "", out
 for f in ("secrets/remi.yaml", "cert.pem", ".env"):
@@ -194,7 +200,7 @@ for f in ("secrets/remi.yaml", "cert.pem", ".env"):
         oid = sh("git", "rev-parse", f"{rev}:{f}", cwd=work).strip() if f != "cert.pem" or rev == "feat" else None
         if oid:
             assert subprocess.run(["git", "cat-file", "-e", oid], cwd=snap).returncode != 0, (f, rev)
-assert sorted(meta["secret"]) == ["cert.pem", "secrets/remi.yaml"], meta
+assert sorted(meta["secret"]) == ["cert.pem", "cfg/api.yaml", "config/db.yaml", "secrets/db.yaml", "secrets/remi.yaml"], meta
 # The rules are the base's, nearest each changed file: the PR's own edit to them doesn't count.
 assert "never call eval" in meta["rules"] and "root rule" in meta["rules"], meta["rules"]
 assert "eval is fine" not in meta["rules"] and "not rules" not in meta["rules"], meta["rules"]
@@ -301,6 +307,10 @@ agent(codex={"rc": 1, "err": "ERROR: You've hit your usage limit. Upgrade to Pro
 t = time.time()
 back = queue_and_work("codex")
 assert back["result"] == "out" and "usage" in back["why"] and abs(back["until"] - t - (2 * 86400 + 3 * 3600)) < 60, back
+# An answer that only mentions a usage limit is a review.
+agent(codex={"answer": {"findings": [{"path": "a", "line": 1, "severity": "P2", "title": "t",
+                                      "body": "no usage limit on retries"}], "summary": "s"}})
+assert queue_and_work("codex")["result"] == "review"
 agent(codex={"rc": 1, "err": "Error: Not logged in. Run codex login."})
 back = queue_and_work("codex")
 assert back["result"] == "out" and "autoland-codex-login" in back["why"] and back["until"] > t, back
