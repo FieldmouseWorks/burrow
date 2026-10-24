@@ -140,6 +140,15 @@ let
     automergeType = "pr";
     platformAutomerge = false;
 
+    # Rebase only on a conflict. By default Renovate rebases every automerge
+    # PR whenever its base moves, and each rebase restarts CI. On a repo with
+    # one slow gate slot (LoK-web) every merge to main sent all open PRs,
+    # security fixes included, back to the end of the queue, so none finished.
+    # Main's own CI still runs after each merge. A repo whose branch rules
+    # require PRs to be up to date would leave them green but unmerged, and
+    # renovate-sweep reports security PRs stuck that way.
+    rebaseWhen = "conflicted";
+
     nix.enabled = true;
 
     packageRules = [
