@@ -5,7 +5,7 @@
 # the label off ends it; a turn still running gets its answer posted first.
 # Runs every few minutes from a timer (../proj.nix); `proj-inbox status` shows
 # which issue is which job. SRC, JOBS, STATE, SCRATCH, LABEL, AUTHORS, VM,
-# HOST and NOTIFY come from ../proj.nix.
+# HOST, NOTIFY and MARK come from ../proj.nix.
 #
 # The inbox posts as the gh login, which is usually the owner's own account,
 # so its own comments carry MARK and are never read back as replies. Jobs are
@@ -16,7 +16,6 @@
 # Everything goes through GitHub's REST API: its GraphQL budget is shared with
 # whatever else runs under the same login, and runs out first.
 
-MARK='<!-- proj-inbox -->'
 vm=()
 [ "$VM" != 1 ] || vm=(--vm)
 mkdir -p "$STATE"
@@ -138,23 +137,39 @@ for repo in "${!project[@]}"; do
     if [ -e "$d/unannounced" ]; then
       if post "$repo" "$n" "On it: \`proj\` job \`$id\` in $p."; then rm -f "$d/unannounced"; else miss "$repo"; fi
     fi
-    st=$(proj state "$id")
-    case $st in queued | running) continue ;; esac
-    turns=$(cat "$JOBS/$id/turns" 2>/dev/null || echo 0)
+    # A job dir removed by hand: that job is over. The issue's record goes
+    # with it, and one still open is taken up afresh next pass.
+    if [ ! -d "$JOBS/$id" ]; then rm -rf "$d"; continue; fi
+    # The state and the turn count, read together: a turn starts (proj reply,
+    # proj _watch) holding the job's lock, and halfway through it the count
+    # names the new turn while the state is still the last one's.
+    {
+      flock -s 9
+      st=$(proj state "$id")
+      turns=$(cat "$JOBS/$id/turns" 2>/dev/null || echo 0)
+    } 9>>"$JOBS/$id/lock"
 
-    # A turn that finished: its answer goes to the issue.
-    if [ "$turns" -gt "$(cat "$d/answered")" ]; then
-      case $st in
-        done) body=$(proj log "$id") ;;
-        *) body="The job ended without an answer ($st). \`proj log $id --raw\` on $HOST has what it did." ;;
-      esac
+    # Every turn that has finished gets its answer on the issue, in order:
+    # all but the one queued or running now. A job that proj _watch resumed
+    # before this pass still has the answer it gave before posted.
+    case $st in queued | running) last=$((turns - 1)) ;; *) last=$turns ;; esac
+    k=$(cat "$d/answered")
+    while [ "$k" -lt "$last" ]; do
+      k=$((k + 1))
+      if [ "$k" = "$turns" ]; then why=" ($st)"; else why=''; fi
+      body=$(proj log "$id" --turn "$k") ||
+        body="The job's turn $k ended without an answer$why. \`proj log $id --turn $k --raw\` on $HOST has what it did."
       # GitHub takes 65536 characters a comment.
-      post "$repo" "$n" "${body:0:60000}" || { miss "$repo"; continue; }
-      echo "$turns" >"$d/answered"
-    fi
+      post "$repo" "$n" "${body:0:60000}" || { miss "$repo"; continue 2; }
+      echo "$k" >"$d/answered"
+    done
+    case $st in queued | running) continue ;; esac
 
-    # Closed, or the label taken off: done with it.
+    # Closed, or the label taken off: done with it, and so is its job, which
+    # nothing it awaits brings back. A job that couldn't be stopped (proj stop
+    # says why) is tried again next pass; the rest are still seen to.
     if ! jq -e --argjson n "$n" 'any(.[]; .number == $n)' <<<"$open" >/dev/null; then
+      proj stop "$id" || continue
       rm -rf "$d"
       continue
     fi
@@ -176,6 +191,9 @@ for repo in "${!project[@]}"; do
       jq -e --arg label "$LABEL" '.state == "open" and any(.labels[]; .name == $label)' <<<"$now" >/dev/null ||
         continue
       if ! proj reply --first "$id" "$msg" >/dev/null 2>&1; then
+        # Woken by what it awaits (proj _watch) since it was looked at: the
+        # reply waits for the next pass.
+        [ ! -s "$JOBS/$id/session" ] || continue
         # No session to continue (the first turn never got going): start over,
         # from the issue as it stands, replies and all.
         id=$(proj run --first "${vm[@]}" "$p" "$(task "$repo" "$now" "$comments")") || continue

@@ -2,11 +2,14 @@
 # background job (proj/proj.sh). Jobs run as burrow.user, in
 # burrow.projectsDir/PROJECT, and keep everything they said in jobsDir.
 # With proj.inbox, issues labelled for Claude in the projects' GitHub repos
-# become jobs too (proj/inbox.sh).
+# become jobs too (proj/inbox.sh). A job waiting on a PR doesn't hold a slot:
+# proj-watch resumes it when the PR changes.
 inputs:
 { config, lib, pkgs, ... }:
 let
   cfg = config.burrow.proj;
+  # What marks proj-inbox's own comments on an issue: never a reply, never news.
+  inboxMark = "<!-- proj-inbox -->";
   inherit (config.burrow) user projectsDir;
 
   proj = pkgs.writeShellApplication {
@@ -20,12 +23,16 @@ let
       MIN_FREE=${toString cfg.minFreeMemory}
       JOB_MEMORY_MAX=${lib.escapeShellArg cfg.jobMemoryMax}
       TIMEOUT=${lib.escapeShellArg cfg.timeout}
+      MAX_WAIT=${toString cfg.maxWait}
+      AWAIT_HOURS=${toString cfg.awaitHours}
+      GH=${lib.getExe cfg.gh}
+      MARK=${lib.escapeShellArg inboxMark}
     '' + builtins.readFile ./proj/proj.sh;
   };
 
   inbox = pkgs.writeShellApplication {
     name = "proj-inbox";
-    runtimeInputs = [ proj pkgs.coreutils pkgs.git pkgs.gh pkgs.jq pkgs.gnused pkgs.gnugrep ];
+    runtimeInputs = [ proj pkgs.coreutils pkgs.git cfg.gh pkgs.jq pkgs.gnused pkgs.gnugrep pkgs.util-linux ];
     text = ''
       SRC=${lib.escapeShellArg projectsDir}
       JOBS=${lib.escapeShellArg cfg.jobsDir}
@@ -34,6 +41,7 @@ let
       LABEL=${lib.escapeShellArg cfg.inbox.label}
       AUTHORS=${lib.escapeShellArg (lib.concatStringsSep " " cfg.inbox.authors)}
       VM=${if cfg.inbox.vm then "1" else "0"}
+      MARK=${lib.escapeShellArg inboxMark}
       HOST=${lib.escapeShellArg config.networking.hostName}
       NOTIFY=${lib.escapeShellArg (lib.optionalString (config.burrow.tools ? notify) (lib.getExe config.burrow.tools.notify))}
     '' + builtins.readFile ./proj/inbox.sh;
@@ -80,6 +88,34 @@ in
         stopped, so a stuck job can't hold its place for good.
       '';
     };
+    maxWait = lib.mkOption {
+      type = lib.types.ints.positive;
+      default = 1800;
+      description = ''
+        Seconds a queued turn waits before it counts as --first, so --first
+        ones can't keep jumping ahead of it.
+      '';
+    };
+    awaitHours = lib.mkOption {
+      type = lib.types.ints.positive;
+      default = 24;
+      description = ''
+        How long a job waits on a PR or issue (`proj await`) that doesn't
+        change before it's resumed anyway, told so.
+      '';
+    };
+    watchEvery = lib.mkOption {
+      type = lib.types.str;
+      default = "*:0/3";
+      description = "How often proj-watch looks at what waiting jobs await (a systemd OnCalendar).";
+    };
+    gh = lib.mkOption {
+      type = lib.types.package;
+      default = pkgs.gh;
+      defaultText = lib.literalExpression "pkgs.gh";
+      internal = true;
+      description = "The gh proj-watch and proj-inbox ask GitHub with (the test's is a stand-in).";
+    };
 
     inbox = {
       enable = lib.mkEnableOption ''
@@ -124,6 +160,23 @@ in
     users.users.${user}.linger = lib.mkDefault true;
     systemd.tmpfiles.rules = [ "d ${cfg.jobsDir} 0755 ${user} ${config.users.users.${user}.group} -" ];
 
+    # Jobs that ended their turn waiting on GitHub (proj await) get the next
+    # one when what they wait on changes, so waiting holds no slot.
+    systemd.services.proj-watch = {
+      description = "Resume proj jobs whose awaited PRs and issues changed";
+      after = [ "network-online.target" ];
+      wants = [ "network-online.target" ];
+      serviceConfig = {
+        Type = "oneshot";
+        User = user;
+        ExecStart = "${proj}/bin/proj _watch";
+      };
+    };
+    systemd.timers.proj-watch = {
+      wantedBy = [ "timers.target" ];
+      timerConfig.OnCalendar = cfg.watchEvery;
+    };
+
     burrow.claude.machineMd = lib.mkOrder 700 ''
       ## Projects, from the operator
 
@@ -135,14 +188,16 @@ in
           proj run web "the task"           start a job; prints its id
           proj run --first web "the task"   the same, ahead of the line
           proj status                       what's running, what finished
-          proj log ID                       its answer (--raw for everything)
+          proj log ID                       its answer (--turn N for an earlier one, --raw for everything)
           proj reply ID "follow-up"         continue the same conversation
-          proj stop ID
+          proj stop ID                      end it: its running turn, and anything it awaits
 
       Jobs run in the background and survive this session ending. At most
       ${toString cfg.maxJobs} run at once; the rest are queued. Use --first when ${config.burrow.owner} is
       waiting on the answer. Check on them,
       relay results to ${config.burrow.owner}, and follow up yourself where the answer is obvious.
+      A job waiting on GitHub (CI, a review) ends its turn with `proj await
+      PR-URL` and is resumed when the PR changes, holding no slot meanwhile.
       A job can't ask ${config.burrow.owner} anything: R2 commands get refused, so bring those to
       them. ${config.burrow.owner} can also open any project's own session directly from their phone.
     '';
