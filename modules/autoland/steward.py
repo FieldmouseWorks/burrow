@@ -267,10 +267,11 @@ def judge_task(repo, pr, why, no_ci):
         "Land anything a revert or a follow-up PR can undo. "
         f"Send it to {owner} only if it can't be undone (it drops or rewrites data for good, or exposes a secret) "
         f"or it decides something the repo reserves for {owner}, and only if you genuinely can't make the call yourself. "
-        "If its build or tests fail, say what fails and post no verdict: that's for whoever fixes the PR. "
+        "If its build or tests fail, don't judge it: say what fails, and the steward hands it to a Claude job that fixes it. "
         "Don't push, merge, or change the PR in any other way. "
         f"Post one comment on the PR (gh pr comment {n} -R {repo}) saying what you checked and why you decided as you did, "
-        f"ending with the line <!-- {JUDGMENT}: land {head} --> or <!-- {JUDGMENT}: owner {head} -->. "
+        f"ending with the line <!-- {JUDGMENT}: land {head} -->, <!-- {JUDGMENT}: owner {head} --> "
+        f"or, when its build or tests fail, <!-- {JUDGMENT}: failed {head} -->. "
         f"For owner, also add the {CFG['labels']['owner']} label (gh pr edit {n} -R {repo} --add-label {CFG['labels']['owner']}). "
         "Only that exact head counts: if the PR has moved on by the time you're done, say so and post no verdict."
     )
@@ -372,6 +373,12 @@ def handle(repo, pr, repo_info, digest):
             land_now(f"Settled; a Claude job judged it fine to land ({why})")
         elif verdict == "owner":
             settle("pending", f"Settled; a Claude job judged it {CFG['owner']}'s to decide ({why})", "Judged yours to decide")
+        elif verdict == "failed":
+            # The judge's own build or tests failed on this head: a fix job
+            # has it, and its push is judged again.
+            settle("pending", "Settled, but its build or tests fail; a Claude job is fixing it")
+            if st.get("handed") != head:
+                hand_off("the Claude job that judged it found its build or tests failing on this head (its comment on the PR says what)")
         elif update_branch():
             settle("pending", "Settled, but behind its base: brought up to date, reviewed again")
         elif st.get("judged") == head or started("judged", judge_task(repo, pr, why, ci == "none")):

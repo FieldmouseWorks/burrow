@@ -387,6 +387,18 @@ other = "c" * 40
 status, _ = run(clean(comments=[said(f"<!-- autoland-judgment: land {head} -->")], sha=other, **mig), 700)
 assert len(JOBS) == 1 and other in JOBS[0] and not merged()
 
+# The judge's build or tests fail: one fix job a head, not a judge waited on
+# for good.
+fresh_pr_state()
+failed = said(f"`cargo test` fails.\n\n<!-- autoland-judgment: failed {head} -->")
+status, _ = run(clean(**mig), 700)
+assert len(JOBS) == 1 and f"autoland-judgment: failed {head}" in JOBS[0]
+status, digest = run(clean(comments=[failed], **mig), 800)
+assert len(JOBS) == 1 and "build or tests failing" in JOBS[0] and "isn't settled" in JOBS[0], JOBS
+assert "a Claude job is fixing it" in status and not merged() and digest == [], (status, digest)
+status, _ = run(clean(comments=[failed], **mig), 900)
+assert JOBS == [] and "a Claude job is fixing it" in status
+
 # The needs-owner label goes straight to the owner: no judge job.
 fresh_pr_state()
 status, digest = run(clean(labels=["needs-owner"], **mig), 700)
