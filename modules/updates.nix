@@ -340,8 +340,10 @@ in
       };
       path = lib.mkOption {
         type = lib.types.listOf lib.types.package;
-        default = with pkgs; [ cargo rustc nodejs_22 pnpm python3 uv go ];
-        defaultText = lib.literalExpression "with pkgs; [ cargo rustc nodejs_22 pnpm python3 uv go ]";
+        # Node 24 for npm 11: npm 10's arborist crashes resolving deep
+        # optional-peer chains (vite 7 -> @vitejs/devtools -> vitest).
+        default = with pkgs; [ cargo rustc nodejs_24 pnpm python3 uv go ];
+        defaultText = lib.literalExpression "with pkgs; [ cargo rustc nodejs_24 pnpm python3 uv go ]";
         description = "Toolchains Renovate runs to refresh lockfiles.";
       };
     };
