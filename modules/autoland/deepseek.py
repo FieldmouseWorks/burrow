@@ -13,7 +13,7 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
 import common as C
-from common import CFG, DS, STATE, load, log, save, ts
+from common import CFG, DS, STATE, load, log, repo_cfg, save, ts
 
 # The steward posts DeepSeek's reviews under the user's own login, so they're
 # told apart by these markers: the review's names the commit and how many
@@ -383,6 +383,10 @@ def review_queued(name):
     repo, n = (item or {}).get("repo"), (item or {}).get("number")
     try:
         if not item:
+            return
+        # Queued before the repo was taken off DeepSeek: none of it goes.
+        if not repo_cfg(repo)["deepseek"]:
+            log(f"{repo}#{n}: the repo is off DeepSeek now, not reviewing it")
             return
         cur = C.gh("api", f"repos/{repo}/pulls/{n}", "--jq", "{state, sha: .head.sha}")
         if cur.get("state") != "open" or cur.get("sha") != item["headRefOid"]:
