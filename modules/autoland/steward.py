@@ -40,7 +40,7 @@ import sys
 import tempfile
 
 from common import CFG, DRY, DS, MIN, NOW, STATE, gh, load, log, repo_cfg, save, ts, write
-from deepseek import DONE, QUEUE, STALE, deepseek_queue, deepseek_verdict
+from deepseek import DONE, QUEUE, deepseek_queue, deepseek_verdict
 
 CONTEXT = CFG["context"]
 CODEX = CFG["codexLogin"]
@@ -646,10 +646,19 @@ def handle(repo, pr, repo_info, digest):
                 log(f"{tag}: DeepSeek review failed ({dst['fails']}): {back.get('error', '')[:200]}")
         if dst.get("queued") and dstime >= dst["queued"]:
             dst.pop("queued")  # it's back
-        elif dst.get("queued") and NOW - dst["queued"] > STALE:
-            dst.pop("queued")
-            dst["fails"], dst["failedAt"] = dst.get("fails", 0) + 1, NOW
-            log(f"{tag}: the DeepSeek review queued over {STALE // 3600}h ago never came back")
+            dst.pop("gone", None)
+        elif dst.get("queued") and not os.path.exists(os.path.join(STATE, QUEUE, item)):
+            # Out of the queue with nothing back. However long DeepSeek
+            # thinks, the item stays queued until its review is posted, so
+            # this is a lost one; seen on two passes, since the first may
+            # have read the PR just before the review went up.
+            if dst.get("gone"):
+                dst.pop("queued")
+                dst.pop("gone")
+                dst["fails"], dst["failedAt"] = dst.get("fails", 0) + 1, NOW
+                log(f"{tag}: the queued DeepSeek review left the queue without coming back")
+            else:
+                dst["gone"] = True
     ds_busy = bool(dst.get("queued"))
 
     def ask_ds():
