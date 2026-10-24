@@ -36,6 +36,7 @@ let
       SPAWN=${lib.escapeShellArg cfg.spawn}
       SAME_DIR=(${lib.escapeShellArgs cfg.sameDir})
       MODE=${lib.escapeShellArg (if cfg.permissionMode == null then "" else cfg.permissionMode)}
+      IDLE_SESSION=${if cfg.idleSession then "1" else "0"}
     '' + builtins.readFile ./remote-control/serve.sh;
   };
 
@@ -93,8 +94,8 @@ in
       description = ''
         Where a session started from claude.ai works. worktree: its own git
         worktree of the project, so sessions working at once never share a
-        checkout (the one session that's always there stays in the folder
-        itself). same-dir: all of them in the folder. The machine's own flake
+        checkout (an idleSession stays in the folder itself). same-dir: all
+        of them in the folder. The machine's own flake
         and folders that aren't git repositories are always same-dir.
       '';
     };
@@ -107,6 +108,17 @@ in
         the mode claude.ai asks for wins over the machine's managed defaultMode.
         bypassPermissions keeps burrow.claude's ask rules: its one-way doors
         still ask. null: whatever claude.ai and the settings say.
+      '';
+    };
+    idleSession = lib.mkOption {
+      type = lib.types.bool;
+      default = false;
+      description = ''
+        Keep one session open in each project's folder, ready before anyone
+        asks for it (Claude's own default). Each is a whole Claude holding a
+        few GB whether anyone uses it or not; one per project ran a machine
+        out of memory. Off: sessions start when claude.ai asks for one, in
+        the project's spawn mode.
       '';
     };
     sameDir = lib.mkOption {
@@ -136,6 +148,8 @@ in
         ExecStop = "${tmux} -L rc-%I kill-server";
         Restart = "always";
         RestartSec = 15;
+        # Under burrow.claude.memory's cap with the proj jobs (common.nix).
+        Slice = "claude-rc.slice";
       };
     };
 

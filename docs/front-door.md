@@ -68,8 +68,9 @@ pre-approved.
   `burrow.remoteControl.skip` get none.
 - With `burrow.remoteControl.spawn = "worktree"` (the default) each session
   started from claude.ai gets its own git worktree, so several threads can work
-  in one project at once. The session that's always there in the folder stays
-  in the main checkout.
+  in one project at once. A server holds no session until one is asked for
+  (`burrow.remoteControl.idleSession`), and all of them, with the proj jobs,
+  share the memory cap `burrow.claude.memory` sets.
 - A thread holds one Remote Control session at a time. To give it more to do
   after it started, start Remote Control again from the same thread with new
   instructions; they reach the running session.
