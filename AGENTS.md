@@ -55,15 +55,17 @@ module. `examples/` is the machine the checks build.
 
 ## Pull requests
 
-Open PRs as drafts and leave them to the steward: it asks Codex for a review,
-and once Codex finds nothing on your head, every review thread is resolved and
-CI is green, it marks the PR ready and merges it. Fix or answer every finding:
-push the fix and reply with the commit, or reply with why it's wrong, then
-resolve the thread. Don't merge or mark ready yourself.
+Open PRs ready for review, never as drafts, and leave them to the steward: it
+asks its reviewers for a review, and once they find nothing on your head,
+every review thread is resolved and CI is green, it merges the PR. Fix or answer
+every finding: push the fix and reply with the commit, or reply with why it's
+wrong, then resolve the thread. A PR touching a one-way path (secrets,
+migrations, CODEOWNERS) gets a judgment first: it lands unless it can't be
+undone or is the owner's to decide.
 
 ## Code Review Rules
 
-For reviewers, Codex included. Flag as P1:
+For every reviewer, the steward's included. Flag as P1:
 
 - a change that makes a check pass without fixing the thing it checks
 - tests or checks weakened, skipped or deleted to get green
@@ -78,8 +80,11 @@ For reviewers, Codex included. Flag as P1:
   skippable
 - a sandbox that reaches more than it's given: egress past the allowlist
   proxy, a GitHub token, or host paths beyond its clones
-- the steward merging what it shouldn't: a head other than the one Codex and CI
-  checked, a one-way path, or a PR with open threads
+- the steward merging what it shouldn't: a head other than the one its
+  reviewers and CI checked, a one-way path, or a PR with open threads
+- a review agent that reaches more than its snapshot: a GitHub token, a
+  secrets path (`reviewers.skipPaths`), the PR's own copy of its review
+  rules, or its own key in what gets posted
 - `HOST-update` confirming or pushing without the VM tests and health checks
   passing first
 - a job acting on text from anyone outside its configured authors

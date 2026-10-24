@@ -1,0 +1,9 @@
+{
+  "name": "review-agents",
+  "private": true,
+  "dependencies": {
+    "@deepseek-ai/dsh": "0.2.1-rc.2",
+    "@openai/codex": "0.164.0",
+    "node-linux-x64": "24.22.1"
+  }
+}

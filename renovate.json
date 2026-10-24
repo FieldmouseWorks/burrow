@@ -1,0 +1,22 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "packageRules": [
+    {
+      "description": "The steward's review agents stay on their newest release, majors included: one PR, merged once the flake check has built them and run each one.",
+      "matchFileNames": ["modules/autoland/agents/package.json"],
+      "groupName": "review agents",
+      "automerge": true,
+      "labels": []
+    },
+    {
+      "description": "DeepSeek Harness only ships pre-releases: follow what npm calls its latest.",
+      "matchPackageNames": ["@deepseek-ai/dsh"],
+      "followTag": "latest"
+    },
+    {
+      "description": "The Node build dsh runs on: LTS lines (even majors) only.",
+      "matchPackageNames": ["node-linux-x64"],
+      "allowedVersions": "/^[0-9]*[02468]\\./"
+    }
+  ]
+}
