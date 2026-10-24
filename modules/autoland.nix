@@ -55,7 +55,9 @@ let
     repos = cfg.repos;
     deepseek = {
       inherit (cfg.deepseek) enable baseUrl effort skipPaths maxDiffChars perPass;
-      maxTokens = 65536;
+      # Its thinking counts against this too, and at max effort a big PR can
+      # think for a long time. Only what it uses is paid for.
+      maxTokens = 131072;
       timeout = 600;
       caFile = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
     };
