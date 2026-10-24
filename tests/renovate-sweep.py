@@ -102,6 +102,9 @@ assert calls == [] and verb == "open" and url + "2" in body and "held" in body, 
 # An ok one, green, merges on the steward's own in a repo it covers ...
 calls, (verb, _) = sweep([pr(3)], {3: [verdict(3, "ok")]}, covered=[REPO])
 assert calls == [] and verb == "close", verb
+# ... spelled as GitHub spells it, which the clone's remote needn't match ...
+calls, (verb, _) = sweep([pr(3)], {3: [verdict(3, "ok")]}, covered=["Sam/R"])
+assert calls == [] and verb == "close", verb
 # ... and is listed for the owner in one it doesn't, or with no steward at all.
 for covered in (["sam/other"], None):
     calls, (verb, body) = sweep([pr(3)], {3: [verdict(3, "ok")]}, covered=covered)
@@ -155,6 +158,9 @@ calls, _ = sweep([pr(6, labels=(), conclusion="FAILURE")], covered=[REPO],
 assert len(calls) == 1 and "remi-proof isn't CI" in calls[0][-1] and "ssh remi proof" in calls[0][-1], calls
 calls, _ = sweep([pr(6, labels=(), conclusion="FAILURE")], covered=[REPO])
 assert len(calls) == 1 and "isn't CI" not in calls[0][-1], calls
+calls, _ = sweep([pr(6, labels=(), conclusion="FAILURE")], covered=["Sam/R"],
+                 proofs={"remi-proof": "ssh remi proof"})
+assert len(calls) == 1 and "ssh remi proof" in calls[0][-1], calls
 # Told for a repo whose last pass failed too.
 calls, _ = sweep([pr(6, labels=(), conclusion="FAILURE")], covered=[], failed=[REPO],
                  proofs={"remi-proof": "ssh remi proof"})

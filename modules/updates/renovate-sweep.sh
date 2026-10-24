@@ -43,13 +43,17 @@ for d in "$src"/*/; do
   url=$(git -C "$d" remote get-url origin 2>/dev/null) || continue
   repo=$(sed -E 's#^(https://github.com/|git@github.com:)##; s#\.git$##' <<<"$url")
   [[ $repo == */* ]] || continue
+  # repos.json names each repo as GitHub spells it; the clone's remote may
+  # not (GitHub doesn't mind case), so the two are matched without it.
+  # shellcheck disable=SC2016 # jq's $r
+  mine='.repos | with_entries(.key |= ascii_downcase) | .[$r | ascii_downcase]'
   # A proof the steward runs on a machine rather than in CI: the job is told
   # how, so it can rerun one it broke, whether or not the steward is still
   # running.
   covered=false
-  proofs=$(jq -r --arg r "$repo" '[.repos[$r].proofJobs // {} | to_entries[] | " \(.key) isn'"'"'t CI: it runs on a machine, like this: \(.value) Rerun it that way on what you push."] | join("")' "$COVERED" 2>/dev/null || true)
+  proofs=$(jq -r --arg r "$repo" '['"$mine"'.proofJobs // {} | to_entries[] | " \(.key) isn'"'"'t CI: it runs on a machine, like this: \(.value) Rerun it that way on what you push."] | join("")' "$COVERED" 2>/dev/null || true)
   if [ -n "$COVERED" ] && jq -e --argjson now "$(date +%s)" '$now - .at < 6 * 3600' "$COVERED" >/dev/null 2>&1; then
-    covered=$(jq -r --arg r "$repo" '.repos[$r].covered == true' "$COVERED")
+    covered=$(jq -r --arg r "$repo" "$mine"' | .covered == true' "$COVERED")
   fi
 
   # Every stuck PR of the repo goes to one job: they usually share a cause
