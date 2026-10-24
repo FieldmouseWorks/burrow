@@ -683,7 +683,7 @@ assert S.coverage([{"repo": "sam/r"}], [{"repo": "sam/r"}]) == {
 # isn't, so renovate-sweep lists its ok majors itself, and still knows how
 # its proofs run.
 kept_fns = (S.R.discover, S.R.settle_repo, S.R.publish, S.open_prs)
-S.R.discover = lambda: [{"repo": "sam/r"}, {"repo": "sam/bad"}]
+S.R.discover = lambda: [{"repo": "sam/r"}, {"repo": "sam/bad"}, {"repo": "sam/flaky"}]
 S.R.settle_repo = lambda r, known: False
 S.R.publish = lambda digest: None
 
@@ -691,14 +691,15 @@ S.R.publish = lambda digest: None
 def some_prs(owner, name):
     if name == "bad":
         raise RuntimeError("GitHub said no")
-    return info, []
+    # One PR the steward can't handle: its repo isn't seen to either.
+    return info, [{"number": 1, "headRefName": "x"}] if name == "flaky" else []
 
 
 S.open_prs = some_prs
 S.main()
 S.R.discover, S.R.settle_repo, S.R.publish, S.open_prs = kept_fns
 written = json.load(open(f"{tmp}/state/repos.json"))["repos"]
-assert {r: v["covered"] for r, v in written.items()} == {"sam/r": True, "sam/bad": False}, written
+assert {r: v["covered"] for r, v in written.items()} == {"sam/r": True, "sam/bad": False, "sam/flaky": False}, written
 assert written["sam/bad"]["proofJobs"] == S.repo_cfg("sam/bad")["proofJobs"], written
 # A proof job that ends without posting its verdict is started once more.
 fresh_pr_state()
@@ -976,5 +977,16 @@ assert WROTE == [], WROTE
 C.NOW += 86400
 R.settle_repo({"repo": "sam/r", "private": False, "default": "main"}, {"sam/r"})
 assert sorted(x.split()[2] for x in WROTE if x.startswith("label create")) == ["hold", "needs-owner"], WROTE
+
+# `status` (a dry run) reads the seal the real passes' judges use, and makes
+# none of its own while there's one.
+C._key.clear()
+real = C.seal("sam/r", 6, "autoland-judgment", "land", head)
+C._key.clear()
+C.DRY, C.STATE = True, f"{tmp}/state/dry"
+os.makedirs(C.STATE)
+assert C.seal("sam/r", 6, "autoland-judgment", "land", head) == real
+assert not os.path.exists(f"{tmp}/state/dry/verdict.key")
+C.DRY, C.STATE = False, f"{tmp}/state"
 
 print("autoland: ok")

@@ -815,13 +815,16 @@ def main():
             owner, name = repo.split("/")
             info, prs = open_prs(owner, name)
             heads = set()
+            seen_to = True
             for pr in prs:
                 heads.add(pr["headRefName"])
                 try:
                     handle(repo, pr, info, digest)
                 except Exception as e:  # one bad PR mustn't stop the rest
                     log(f"{repo}#{pr['number']}: {e}")
-            covered.append(r)
+                    seen_to = False
+            if seen_to:
+                covered.append(r)
             if CFG["cleanBranches"]:
                 R.sweep_branches(r, heads, digest)
         except Exception as e:

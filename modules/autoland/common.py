@@ -85,8 +85,14 @@ def seal(repo, n, name, verdict, head):
     Claude job posts as the steward's login, so without it a job quoting PR
     text that holds a well-formed marker would pass for the verdict."""
     if not _key:
-        path = os.path.join(STATE, "verdict.key")
+        # The real state dir's, dry run or not, so `status` reads the
+        # verdicts the real passes' judges wrote; a dry run with none yet
+        # writes nothing and makes do with one of its own.
+        path = os.path.join(CFG["stateDir"], "verdict.key")
         try:
+            if DRY and not os.path.exists(path):
+                _key.append(os.urandom(32).hex())
+                return seal(repo, n, name, verdict, head)
             fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
             with os.fdopen(fd, "w") as f:
                 f.write(os.urandom(32).hex())
