@@ -26,6 +26,8 @@ let
   cfg = config.burrow.remoteControl;
   inherit (config.burrow) user projectsDir;
   tmux = "${pkgs.tmux}/bin/tmux";
+  # How long a stale server waits on a session that has stopped doing anything.
+  idleMinutes = 30;
 
   serve = pkgs.writeShellApplication {
     name = "claude-rc-serve";
@@ -62,7 +64,7 @@ let
 
   scan = pkgs.writeShellApplication {
     name = "claude-rc-scan";
-    runtimeInputs = [ pkgs.systemd pkgs.coreutils pkgs.gnugrep pkgs.procps ];
+    runtimeInputs = [ pkgs.systemd pkgs.coreutils pkgs.gnugrep pkgs.procps pkgs.jq ];
     text = ''
       # Start a server for every project folder, stop the ones whose folder is gone,
       # and restart the stale ones once they hold no session.
@@ -94,8 +96,22 @@ let
       # A switch leaves running servers alone (restartIfChanged), so a server
       # keeps the claude-rc-serve it started with: its Claude Code, its
       # permission mode. One whose tmux runs any other is stale, and restarts
-      # here as soon as its Claude has no session (no live child): nobody
-      # is cut off, and no server stays behind for long.
+      # here once none of its sessions is in use. A session (a child of its
+      # Claude) stays open as long as claude.ai keeps it, so being open is
+      # not being in use: Claude Code's ~/.claude/sessions/PID.json says
+      # what it's doing, and only one that is working, or did something in
+      # the last ${toString idleMinutes} minutes, holds the server. Nobody is cut off mid-turn,
+      # and an open but idle session doesn't keep a stale server forever.
+      # Its transcript stays on disk, and claude.ai resumes it on the new one.
+      held() {
+        local f=$HOME/.claude/sessions/$1.json status at
+        # No status to go by: leave it be.
+        [ -r "$f" ] || return 0
+        status=$(jq -r '.status // ""' "$f") || return 0
+        at=$(jq -r '.statusUpdatedAt // 0' "$f") || return 0
+        [ "$status" = busy ] && return 0
+        (( $(date +%s%3N) - at < ${toString idleMinutes} * 60000 ))
+      }
       for unit in "''${want[@]}"; do
         pid=$(systemctl --user show -p MainPID --value "$unit")
         [ "$pid" != 0 ] && [ -r "/proc/$pid/cmdline" ] || continue
@@ -103,7 +119,9 @@ let
         busy=
         for rc in $(pgrep -P "$pid"); do
           # Any state but Z: a zombie is a session that already ended.
-          if pgrep -P "$rc" -r D,I,R,S,T,t >/dev/null; then busy=1; fi
+          for s in $(pgrep -P "$rc" -r D,I,R,S,T,t); do
+            if held "$s"; then busy=1; fi
+          done
         done
         [ -n "$busy" ] || systemctl --user restart --no-block "$unit"
       done

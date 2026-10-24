@@ -74,7 +74,9 @@ pre-approved.
 - A switch never restarts a server, since that would cut off the session
   confirming it. `claude-rc-scan` (every 5 minutes, and on a switch) restarts
   any server still running an older `claude-rc-serve` (older Claude Code or
-  permission mode) once it holds no session (`tests/remote-control.nix`).
+  permission mode) once none of its sessions is working or has done anything
+  in the last 30 minutes; a session that's open but idle doesn't count
+  (`tests/remote-control.nix`).
 - What the owner has approved in advance goes in `burrow.claude.standingAuthority`:
   a section of the machine CLAUDE.md, so no session asks them to approve it
   again just because the instruction came through a thread or an issue.
