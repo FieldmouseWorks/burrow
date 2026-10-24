@@ -177,8 +177,10 @@ fingerprint() { # repo n
   # may hold.
   pr=$("$GH" api "repos/$1/pulls/$2" | jq -c '{state, merged, head: .head.sha, comments, review_comments}') || return
   sha=$(jq -r .head <<<"$pr")
-  # Every page: a review or check past the first hundred is news too.
-  reviews=$("$GH" api --paginate --slurp "repos/$1/pulls/$2/reviews?per_page=100" | jq 'add | length') || return
+  # Every page: a review or check past the first hundred is news too. Reviews
+  # are counted by state, so a dismissed one is news as well as a new one.
+  reviews=$("$GH" api --paginate --slurp "repos/$1/pulls/$2/reviews?per_page=100" |
+    jq -c 'add // [] | group_by(.state) | map({(.[0].state): length}) | add // {}') || return
   status=$("$GH" api "repos/$1/commits/$sha/status" | jq -c '{total_count, state}') || return
   checks=$("$GH" api --paginate --slurp "repos/$1/commits/$sha/check-runs?per_page=100" |
     jq -r --argjson status "$status" '

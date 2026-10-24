@@ -205,15 +205,26 @@ pkgs.testers.runNixOSTest {
     with subtest("a review past the first page is news"):
         # A hundred reviews with bodies, past what one argument may hold all
         # together (and what one command to the VM may, so it's made there).
-        machine.succeed("${pkgs.jq}/bin/jq -nc '[range(100) | {id: ., body: (\"x\" * 2000)}]' >/tmp/gh/repos_o_r_pulls_5_reviews")
+        machine.succeed("${pkgs.jq}/bin/jq -nc '[range(100) | {id: ., state: \"COMMENTED\", body: (\"x\" * 2000)}]' >/tmp/gh/repos_o_r_pulls_5_reviews")
         github("repos/o/r/commits/abc/check-runs", '{"check_runs": [{"name": "ci", "status": "completed", "conclusion": "success"}]}')
         e = proj('run web "await https://github.com/o/r/pull/5"')
         machine.wait_until_succeeds(f"su - dev -c 'proj state {e}' | grep -x done", timeout=120)
-        machine.succeed("echo '[{\"id\": 100}]' >>/tmp/gh/repos_o_r_pulls_5_reviews")
+        machine.succeed("echo '[{\"id\": 100, \"state\": \"COMMENTED\"}]' >>/tmp/gh/repos_o_r_pulls_5_reviews")
         proj("_watch")
         machine.wait_until_succeeds(f"grep -x 2 /data/dev/jobs/{e}/turns", timeout=30)
         prompt = machine.succeed(f"cat /data/dev/jobs/{e}/prompt.2")
-        assert "reviews 100 → 101" in prompt, prompt
+        assert 'reviews {"COMMENTED":100} → {"COMMENTED":101}' in prompt, prompt
+        github("repos/o/r/pulls/5/reviews", '[]')
+
+    with subtest("a review dismissed is news"):
+        github("repos/o/r/pulls/5/reviews", '[{"id": 1, "state": "CHANGES_REQUESTED"}]')
+        e = proj('run web "await https://github.com/o/r/pull/5"')
+        machine.wait_until_succeeds(f"su - dev -c 'proj state {e}' | grep -x done", timeout=120)
+        github("repos/o/r/pulls/5/reviews", '[{"id": 1, "state": "DISMISSED"}]')
+        proj("_watch")
+        machine.wait_until_succeeds(f"grep -x 2 /data/dev/jobs/{e}/turns", timeout=30)
+        prompt = machine.succeed(f"cat /data/dev/jobs/{e}/prompt.2")
+        assert "DISMISSED" in prompt, prompt
         github("repos/o/r/pulls/5/reviews", '[]')
 
     with subtest("a change after proj await but before the turn ends is news"):
