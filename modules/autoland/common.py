@@ -31,8 +31,10 @@ def gh(*args, input=None, check=True):
     """Run gh; return its stdout (parsed as JSON when it is JSON)."""
     p = subprocess.run(["gh", *args], input=input, capture_output=True, text=True)
     if p.returncode != 0:
+        why = f"gh {' '.join(args[:3])}: {p.stderr.strip()[:300]}"
         if check:
-            raise RuntimeError(f"gh {' '.join(args[:3])}: {p.stderr.strip()[:300]}")
+            raise RuntimeError(why)
+        log("  failed:", why)
         return None
     out = p.stdout.strip()
     try:

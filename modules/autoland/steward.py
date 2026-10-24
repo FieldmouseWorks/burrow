@@ -584,8 +584,10 @@ def handle(repo, pr, repo_info, digest):
 
     # 1. The reviewers.
     if rounds >= rc["rounds"] and not (verdict == "clean" and dsv == "clean"):
-        if not st.get("escalated"):
-            C.write("pr", "edit", str(n), "-R", repo, "--add-label", CFG["labels"]["owner"], check=False)
+        # Escalated only once the label is on: a pass that sees no label takes
+        # it as the owner's go-ahead and starts the rounds over.
+        if not st.get("escalated") and (C.write("pr", "edit", str(n), "-R", repo, "--add-label",
+                                                CFG["labels"]["owner"], check=False) is not None or DRY):
             C.comment(repo, n, f"{rounds} review rounds and there are still findings, so this stops here and waits for "
                       f"{CFG['owner']}. Taking the `{CFG['labels']['owner']}` label off gives it another {rc['rounds']}.")
             st["escalated"] = True
