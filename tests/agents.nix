@@ -179,7 +179,7 @@ pkgs.testers.runNixOSTest {
         # No Claude login in a test, so the job ends without an answer; what
         # matters is that it ran claude inside the sandbox and kept its output.
         host.wait_until_succeeds(f"[ \"$(su - dev -c 'proj status' | grep {job} | awk '{{print $2}}')\" != running ]", timeout=180)
-        host.succeed(f"test -s /data/dev/jobs/{job}/1.jsonl -o -s /data/dev/jobs/{job}/outcome")
+        host.succeed(f"test -s /data/dev/jobs/{job}/1.jsonl -o -s /data/dev/jobs/{job}/1.outcome")
 
     with subtest("rm stops and saves, keep undoes it, gc deletes once expired"):
         dev(f"agent rm {o}")
