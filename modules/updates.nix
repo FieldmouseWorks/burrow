@@ -492,11 +492,14 @@ in
     })
 
     (lib.mkIf rcfg.enable {
-      warnings = lib.optional (renovateEmail != null && lib.elem renovateEmail userEmails) ''
-        burrow.updates.renovate.gitAuthor uses ${renovateEmail}, the email the
-        user's own commits are made with. Renovate then can't tell a fix pushed
-        to its branch from its own commits, and rebases it away. Give Renovate
-        an email of its own.'';
+      assertions = [{
+        assertion = renovateEmail == null || !(lib.elem renovateEmail userEmails);
+        message = ''
+          burrow.updates.renovate.gitAuthor uses ${renovateEmail}, the email the
+          user's own commits are made with. Renovate then can't tell a fix pushed
+          to its branch from its own commits, and rebases it away. Give Renovate
+          an email of its own.'';
+      }];
       environment.systemPackages = [ renovateSweep pkgs.renovate ];
 
       # Renovate as the user, with gh's login, like the other jobs that talk to GitHub.
