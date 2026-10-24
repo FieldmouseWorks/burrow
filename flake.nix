@@ -80,7 +80,7 @@
         # proj's queue and memory caps, with a stand-in for Claude.
         proj = import ./tests/proj.nix { inherit self pkgs; };
         # The steward's DeepSeek reviewer, with stand-ins for gh and the API.
-        autoland = pkgs.runCommand "autoland-check" { nativeBuildInputs = [ pkgs.python3 ]; } ''
+        autoland = pkgs.runCommand "autoland-check" { nativeBuildInputs = [ pkgs.python3 pkgs.git ]; } ''
           python3 -I ${./tests/autoland.py} ${./modules/autoland}/steward.py
           touch $out
         '';

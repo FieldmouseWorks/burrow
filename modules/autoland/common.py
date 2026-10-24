@@ -115,9 +115,14 @@ def repo_cfg(repo):
 
 
 def project_dir(repo):
-    """The repo's checkout in projectsDir (by origin URL), or None."""
+    """The repo's checkout in projectsDir (by origin URL), or None. Only a
+    clone of its own counts: a hidden folder, or a worktree of the repo
+    (`.git` is a file there) checked out on some other branch, sorts first
+    and shares the origin, but a job sent there works on the wrong tree."""
     src = CFG["projectsDir"]
     for d in sorted(os.listdir(src)) if os.path.isdir(src) else []:
+        if d.startswith(".") or not os.path.isdir(os.path.join(src, d, ".git")):
+            continue
         p = subprocess.run(["git", "-C", os.path.join(src, d), "remote", "get-url", "origin"],
                            capture_output=True, text=True)
         url = re.sub(r"^(https://github\.com/|git@github\.com:)", "", p.stdout.strip()).removesuffix(".git")

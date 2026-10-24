@@ -432,17 +432,26 @@ def handle(repo, pr, repo_info, digest):
     proof_only = ci == "pending" and bool(ci_names) and all(c in rc["proofJobs"] for c in ci_names)
 
     # Dependency bumps: CI is the review. Renovate merges its own minor
-    # ones; renovate-sweep fixes the red ones and gives each major a verdict.
+    # ones; renovate-sweep fixes the red ones (and settles their threads) and
+    # gives each major a verdict. Anything else that's open on one, a review
+    # finding or a red Dependabot update, goes to a Claude job like any PR's.
     if dep:
         major_verdict = C.marker(pr, MAJOR_VERDICT, head) if dep == "major" and renovate else None
+        threads = f"{open_threads} open review thread{'s' * (open_threads > 1)}" if open_threads else ""
         if changes:
             settle("pending", "Dependency update; changes requested by " + ", ".join(changes))
-        elif proof_only and not open_threads:
+        elif renovate and ci == "red":
+            settle("pending", "Dependency update, CI red; renovate-sweep has it" + (f" ({threads})" if threads else ""))
+        elif open_threads or ci == "red":
+            what = threads or "CI is red (" + ", ".join(ci_names) + ")"
+            settle("pending", f"Dependency update; {what}"[:140])
+            idle = C.NOW - max(ts(pr["updatedAt"]), st["seen"])
+            if idle > rc["handoffAfter"] * MIN and st.get("handed") != head:
+                hand_off(what)
+        elif proof_only:
             prove()
-        elif ci in ("red", "pending"):
-            settle("pending", f"Dependency update, CI {ci}")
-        elif open_threads:
-            settle("pending", f"Dependency update; {open_threads} open review thread{'s' * (open_threads > 1)}")
+        elif ci == "pending":
+            settle("pending", "Dependency update, CI pending")
         elif CFG["labels"]["owner"] in labels:
             owner_decides()
         elif dep == "major" and renovate and major_verdict != "ok":

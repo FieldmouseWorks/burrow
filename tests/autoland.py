@@ -8,6 +8,7 @@ DeepSeek reviewer, and handle() end to end on PRs shaped like its query's.
 import http.server
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import threading
@@ -460,6 +461,45 @@ status, _ = run(mkpr(branch="renovate/foo-1.x", title="Update foo from 1.4 to 1.
 assert "state=success" in status and not merged() and JOBS == []
 status, _ = run(mkpr(branch="dependabot/npm/foo-2", title="Bump foo from 1.4 to 2.0", number=10), 900)
 assert len(JOBS) == 1 and "a major dependency update" in JOBS[0] and not merged()
+
+# A finding on a dependency update goes to a Claude job once it has sat, like
+# any PR's: nobody else settles a green Renovate PR's threads.
+fresh_pr_state()
+minor = {"branch": "renovate/foo-1.x", "title": "Update foo from 1.4 to 1.5", "number": 12, "threads": [False]}
+status, _ = run(mkpr(**minor), 0)
+assert JOBS == [] and "1 open review thread" in status, status
+status, _ = run(mkpr(**minor), 7200)
+assert len(JOBS) == 1 and "1 open review thread" in JOBS[0] and not merged(), (status, JOBS)
+status, _ = run(mkpr(**minor), 9000)
+assert JOBS == [], "one job a head"
+# A red Renovate one is renovate-sweep's, threads and all: no second job on its branch.
+fresh_pr_state()
+red_ci = [{"__typename": "CheckRun", "name": "ci", "status": "COMPLETED", "conclusion": "FAILURE"}]
+run(mkpr(checks=red_ci, **minor), 0)
+status, _ = run(mkpr(checks=red_ci, **minor), 7200)
+assert JOBS == [] and "renovate-sweep has it" in status, status
+# A red Dependabot one has no sweep: it goes to a job.
+fresh_pr_state()
+bump = {"branch": "dependabot/npm/foo-1", "title": "Bump foo from 1.4 to 1.5", "number": 13}
+run(mkpr(checks=red_ci, **bump), 0)
+status, _ = run(mkpr(checks=red_ci, **bump), 7200)
+assert len(JOBS) == 1 and "CI is red (ci)" in JOBS[0], (status, JOBS)
+
+# Jobs go to the repo's own clone, never a hidden folder or a worktree of it
+# that sorts first and shares its origin.
+src = f"{tmp}/src"
+os.makedirs(src)
+for d in (".worktrees-r", "r", "q"):
+    subprocess.run(["git", "init", "-q", f"{src}/{d}"], check=True)
+    subprocess.run(["git", "-C", f"{src}/{d}", "remote", "add", "origin",
+                    "https://github.com/sam/r.git" if d != "q" else "https://github.com/sam/q.git"], check=True)
+subprocess.run(["git", "-C", f"{src}/r", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q",
+                "--allow-empty", "-m", "x"], check=True)
+subprocess.run(["git", "-C", f"{src}/r", "worktree", "add", "-q", f"{src}/a-tree"], check=True)
+S.CFG["projectsDir"] = src
+assert C.project_dir("sam/r") == "r", C.project_dir("sam/r")
+assert C.project_dir("sam/q") == "q" and C.project_dir("sam/none") is None
+S.CFG["projectsDir"] = f"{tmp}/none"
 
 # Codex clean but DeepSeek's fresh findings: nothing merges.
 fresh_pr_state()
