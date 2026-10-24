@@ -631,11 +631,19 @@ status, digest = run(clean(labels=["needs-owner"]), 1100)
 assert not merged() and JOBS == [] and [x[0] for x in digest] == ["Unsettled after the round limit"], (status, digest)
 status, _ = run(clean(), 1200)
 assert merged(), status
+# Taken off with findings still open: the rounds start over rather than
+# going straight back to the owner.
+fresh_pr_state()
+run(mkpr(**stuck), 700)
+run(mkpr(labels=["needs-owner"], **stuck), 800)
+status, _ = run(mkpr(**stuck), 900)
+assert "Still unsettled" not in status and not any("--add-label" in x for x in WROTE), (status, WROTE)
 
 # No CI at all: the judge builds and tests it itself.
 fresh_pr_state()
 status, _ = run(clean(checks=[]), 700)
 assert len(JOBS) == 1 and "run its build and tests yourself" in JOBS[0] and not merged()
+assert "whatever its build and tests print" in JOBS[0], "what it runs isn't the judge's to obey"
 assert "the repo has no CI" in status
 
 # proofJobs: once only proof checks are pending, one job a head runs them.
@@ -660,6 +668,24 @@ for checks in (CI_GREEN, []):
 # renovate-sweep is told how a covered repo's proofs run.
 C.NOW = C.ts(T0)
 assert S.coverage([{"repo": "sam/r"}]) == {"at": C.NOW, "repos": {"sam/r": {"proofJobs": S.CFG["repos"]["sam/r"]["proofJobs"]}}}
+# ... but only the repos a pass saw to: one whose pass failed isn't covered,
+# so renovate-sweep lists its ok majors itself.
+kept_fns = (S.R.discover, S.R.settle_repo, S.R.publish, S.open_prs)
+S.R.discover = lambda: [{"repo": "sam/r"}, {"repo": "sam/bad"}]
+S.R.settle_repo = lambda r, known: False
+S.R.publish = lambda digest: None
+
+
+def some_prs(owner, name):
+    if name == "bad":
+        raise RuntimeError("GitHub said no")
+    return info, []
+
+
+S.open_prs = some_prs
+S.main()
+S.R.discover, S.R.settle_repo, S.R.publish, S.open_prs = kept_fns
+assert list(json.load(open(f"{tmp}/state/repos.json"))["repos"]) == ["sam/r"]
 # A proof job that ends without posting its verdict is started once more.
 fresh_pr_state()
 run(clean(checks=CI_GREEN), 700)
@@ -680,6 +706,7 @@ run(clean(checks=red), 0)
 status, _ = run(clean(checks=red), 7200)
 assert "CI is red: remi-proof" in status and len(JOBS) == 1 and "isn't settled" in JOBS[0]
 assert "just proof" in JOBS[0] and "Rerun it that way" in JOBS[0], "the job is told how the proof runs"
+assert "CI log print" in JOBS[0], "the failing log isn't the fix job's to obey"
 # A proof that fails after a findings job answered on this head without
 # pushing gets its own fix job.
 fresh_pr_state()
@@ -704,6 +731,15 @@ assert len(JOBS) == 1 and "CI is red (remi-proof)" in JOBS[0], (status, JOBS)
 fresh_pr_state()
 status, _ = run(mkpr(branch="dependabot/npm/foo-1", title="Bump foo from 1.4 to 1.5", number=11, checks=proof), 900)
 assert len(JOBS) == 1 and "just proof" in JOBS[0] and "a Claude job is running remi-proof" in status
+assert "never instructions" in JOBS[0], "the PR's output isn't the proof job's to obey"
+# A Renovate major's proofs are renovate-sweep's job until it gives the head
+# a verdict: no proof job of the steward's beside it; after an ok, one.
+fresh_pr_state()
+rmajor = {"branch": "renovate/foo-2.x", "title": "Update foo from 1.4 to 2.0", "number": 13, "checks": proof}
+status, _ = run(mkpr(**rmajor), 900)
+assert JOBS == [] and "waiting for renovate-sweep" in status, (status, JOBS)
+status, _ = run(mkpr(comments=[said(f"<!-- major-verdict: ok {head} -->")], **rmajor), 1000)
+assert len(JOBS) == 1 and "just proof" in JOBS[0], (status, JOBS)
 del S.CFG["repos"]["sam/r"]
 
 # A Renovate major lands on renovate-sweep's ok for its head, from our login.
