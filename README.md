@@ -25,7 +25,7 @@ MIT licensed. Status: in daily use on one machine; options may still move.
 | `robot` | `burrow.robot` | `robot status / rescue / reset / wol` for a Hetzner dedicated server, through the Robot webservice. The way back in when the box is down. |
 | `ops` | `burrow.ops` | perf, bpftrace, bcc, strace, gdb, tcpdump, nvme-cli, smartctl, fwupd and friends, and a systemd hardware watchdog. |
 | `toolbox` | `burrow.toolbox` | The dev tools projects and agents expect (gh, jj, rust, go, node, python, uv, qemu, nix-ld, direnv). The sandboxes always get it. |
-| `house` | `burrow.house` | `house-sync` (daily): every repo's copy of the house rules block ([house/rules.md](house/rules.md), between its markers in AGENTS.md) kept the same as burrow's, as one draft PR per repo when the rules change. Broken markers, and repos it couldn't get through, go to the owner through `notify`. See [docs/house-style.md](docs/house-style.md). |
+| `house` | `burrow.house` | `house-sync` (daily): every repo's copy of the house rules block ([house/rules.md](house/rules.md), between its markers in AGENTS.md) kept the same as burrow's, as one PR per repo when the rules change. Broken markers, and repos it couldn't get through, go to the owner through `notify`. See [docs/house-style.md](docs/house-style.md). |
 
 ## Assumptions
 

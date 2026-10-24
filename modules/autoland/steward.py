@@ -1,4 +1,4 @@
-"""autoland-steward: every PR in every repo the owner has, from draft to merged.
+"""autoland-steward: every PR in every repo the owner has, from ready to merged.
 
 One pass (the timer runs it every couple of minutes):
 
@@ -6,240 +6,35 @@ One pass (the timer runs it every couple of minutes):
      `owners`, new ones included. Bring each one's settings to the baseline
      (auto-merge, delete-branch-on-merge, squash, secret scanning, the
      `baseline` ruleset); a repo seen for the first time also gets a Claude
-     job that brings its files to docs/repo-baseline.md.
-  2. For each open PR, work out where it stands and do the next thing:
-     ask Codex for a review (and DeepSeek, if it's on: config.deepseek),
-     hand open findings or red CI to a Claude job,
-     post the `review-settled` commit status, mark it ready and turn on
-     auto-merge, or stop and list it for the owner.
+     job that brings its files to docs/repo-baseline.md (repos.py).
+  2. For each open PR that isn't a draft, work out where it stands and do
+     the next thing: ask Codex for a review (and DeepSeek, if it's on:
+     deepseek.py), hand open findings or red CI to a Claude job, have a
+     Claude job run the checks only a machine of the owner's runs
+     (proofJobs) or judge a PR it won't land on its own word, post the
+     `review-settled` commit status and merge it, or list it for the owner.
   3. Once a day per repo, delete branches whose tip is already in the
      default branch, and list the stale unmerged ones.
   4. Keep one issue up to date with everything waiting for the owner.
 
 Everything talks to GitHub through `gh`, with the user's own login, so
-DeepSeek's reviews are posted under it too, each marked as DeepSeek's. Settings
-are in the JSON file $AUTOLAND_CONFIG (../autoland.nix). State is in
-config.stateDir: one JSON file per PR, one per repo.
+DeepSeek's reviews and the Claude jobs' verdicts are posted under it too.
+Settings are in the JSON file $AUTOLAND_CONFIG (../autoland.nix). State is
+in config.stateDir: one JSON file per PR, one per repo.
 
 `autoland-steward status` prints what it thinks of every open PR without
 changing anything.
 """
 
-import fnmatch
 import json
 import os
 import re
-import ssl
-import subprocess
-import sys
-import tempfile
-import time
-import urllib.error
-import urllib.request
-from datetime import datetime
 
-CFG = json.load(open(os.environ["AUTOLAND_CONFIG"]))
-CONTEXT = CFG["context"]
-CODEX = CFG["codexLogin"]
-DS = CFG.get("deepseek") or {"enable": False}
-DRY = len(sys.argv) > 1 and sys.argv[1] == "status"
-# A dry run keeps its own state, so its once-a-day reads (settings, branches)
-# stay once a day instead of running every pass on the owner's API quota.
-STATE = CFG["stateDir"] + ("/dry" if DRY else "")
-NOW = time.time()
-MIN = 60
+import common as C
+import deepseek as D
+import repos as R
+from common import CFG, CODEX, CONTEXT, DEP_RE, DRY, MIN, STATE, load, log, repo_cfg, save, ts
 
-
-def log(*a):
-    print(*a, flush=True)
-
-
-def gh(*args, input=None, check=True):
-    """Run gh; return its stdout (parsed as JSON when it is JSON)."""
-    p = subprocess.run(["gh", *args], input=input, capture_output=True, text=True)
-    if p.returncode != 0:
-        if check:
-            raise RuntimeError(f"gh {' '.join(args[:3])}: {p.stderr.strip()[:300]}")
-        return None
-    out = p.stdout.strip()
-    try:
-        return json.loads(out) if out else ""
-    except ValueError:
-        return out
-
-
-def write(*args, **kw):
-    """A gh call that changes something: skipped (and logged) in status mode."""
-    if DRY:
-        log("  would:", "gh", " ".join(a if len(a) < 80 else a[:77] + "..." for a in args))
-        return None
-    return gh(*args, **kw)
-
-
-def graphql(query, **variables):
-    args = ["api", "graphql", "-f", f"query={query}"]
-    for k, v in variables.items():
-        if v is not None:
-            args += ["-F" if isinstance(v, int) else "-f", f"{k}={v}"]
-    return gh(*args)["data"]
-
-
-def open_prs(owner, name):
-    """The repo's merge settings and every open PR, all pages."""
-    prs, cursor = [], None
-    while True:
-        info = graphql(PRS, owner=owner, name=name, cursor=cursor)["repository"]
-        page = info.pop("pullRequests")
-        prs += page["nodes"]
-        if not page["pageInfo"]["hasNextPage"]:
-            return info, prs
-        cursor = page["pageInfo"]["endCursor"]
-
-
-def ts(s):
-    return datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp() if s else 0
-
-
-def load(name, default):
-    try:
-        return json.load(open(os.path.join(STATE, name)))
-    except (OSError, ValueError):
-        return default
-
-
-def save(name, value):
-    path = os.path.join(STATE, name)
-    try:
-        with open(path + ".tmp", "w") as f:
-            json.dump(value, f, indent=1)
-        os.replace(path + ".tmp", path)
-    except OSError:
-        if not DRY:  # `status` from a shell that can't write the state dir: fine
-            raise
-
-
-def repo_cfg(repo):
-    """The defaults, with this repo's overrides from config.repos on top."""
-    c = dict(CFG["defaults"])
-    c.update(CFG["repos"].get(repo, {}))
-    return c
-
-
-# ---------------------------------------------------------------- repos
-
-def discover():
-    seen = []
-    for owner in CFG["owners"]:
-        for r in gh("repo", "list", owner, "--no-archived", "--source", "--limit", "100000",
-                    "--json", "nameWithOwner,isPrivate,viewerPermission,defaultBranchRef") or []:
-            name = r["nameWithOwner"]
-            if any(fnmatch.fnmatch(name, pat) for pat in CFG["exclude"]):
-                continue
-            if r["viewerPermission"] != "ADMIN" or not r.get("defaultBranchRef"):
-                continue
-            seen.append({"repo": name, "private": r["isPrivate"], "default": r["defaultBranchRef"]["name"]})
-    return seen
-
-
-def baseline_ruleset(rc, default):
-    rules = [{"type": "deletion"}, {"type": "non_fast_forward"}]
-    if not rc["directPush"]:
-        rules += [
-            {"type": "pull_request", "parameters": {
-                "required_approving_review_count": 0,
-                "dismiss_stale_reviews_on_push": False,
-                # CODEOWNERS (if any) names the paths the owner signs off on.
-                "require_code_owner_review": True,
-                "require_last_push_approval": False,
-                "required_review_thread_resolution": True,
-            }},
-            {"type": "required_status_checks", "parameters": {
-                "strict_required_status_checks_policy": False,
-                "required_status_checks": [{"context": CONTEXT}],
-            }},
-        ]
-    return {
-        "name": "baseline",
-        "target": "branch",
-        "enforcement": "active",
-        "conditions": {"ref_name": {"include": ["~DEFAULT_BRANCH"], "exclude": []}},
-        # The owner (an admin) can still merge past it, from the PR page.
-        "bypass_actors": [{"actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "pull_request"}]
-        if not rc["directPush"] else [{"actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "always"}],
-        "rules": rules,
-    }
-
-
-def settle_repo(r, known):
-    """The repo's settings, at most once a day. Returns True if it's new."""
-    repo, rc = r["repo"], repo_cfg(r["repo"])
-    st = load(f"repo-{repo.replace('/', '_')}.json", {})
-    new = repo not in known
-    # A repo seen for the first time has no state yet, so it's settled now.
-    if NOW - st.get("settings", 0) < 86400:
-        return new
-    info = gh("api", f"repos/{repo}")
-    patch = {}
-    for key in ("allow_auto_merge", "delete_branch_on_merge", "allow_squash_merge"):
-        if not info.get(key) and not (key == "allow_auto_merge" and st.get("autoMergeRefused")):
-            patch[key] = True
-    if not r["private"]:
-        sa = info.get("security_and_analysis") or {}
-        for key in ("secret_scanning", "secret_scanning_push_protection"):
-            if (sa.get(key) or {}).get("status") != "enabled":
-                patch.setdefault("security_and_analysis", {})[key] = {"status": "enabled"}
-    if patch:
-        log(f"{repo}: settings {sorted(patch)}")
-        after = write("api", "-X", "PATCH", f"repos/{repo}", "--input", "-", input=json.dumps(patch), check=False)
-        # A private repo on a free account takes allow_auto_merge without an
-        # error and leaves it off (the steward merges its PRs itself): once the
-        # PATCH went through and it's still off, stop asking every day.
-        if "allow_auto_merge" in patch and isinstance(after, dict) and not after.get("allow_auto_merge"):
-            st["autoMergeRefused"] = True
-    write("api", "-X", "PUT", f"repos/{repo}/vulnerability-alerts", check=False)
-
-    if CFG["rulesets"] and rc["ruleset"]:
-        existing = gh("api", f"repos/{repo}/rulesets", check=False)
-        # None: the plan doesn't offer rules on this repo (private, free account).
-        if isinstance(existing, list) and not any(x["name"] == "baseline" for x in existing):
-            log(f"{repo}: adding the baseline ruleset")
-            write("api", "-X", "POST", f"repos/{repo}/rulesets", "--input", "-",
-                  input=json.dumps(baseline_ruleset(rc, r["default"])), check=False)
-
-    st["settings"] = NOW
-    save(f"repo-{repo.replace('/', '_')}.json", st)
-    return new
-
-
-def project_dir(repo):
-    """The repo's checkout in projectsDir (by origin URL), or None."""
-    src = CFG["projectsDir"]
-    for d in sorted(os.listdir(src)) if os.path.isdir(src) else []:
-        p = subprocess.run(["git", "-C", os.path.join(src, d), "remote", "get-url", "origin"],
-                           capture_output=True, text=True)
-        url = re.sub(r"^(https://github\.com/|git@github\.com:)", "", p.stdout.strip()).removesuffix(".git")
-        if url.lower() == repo.lower():
-            return d
-    return None
-
-
-def job(repo, task, clone=False):
-    """Hand a task to a Claude job in the repo's project. Returns the job id."""
-    d = project_dir(repo)
-    if d is None and clone and not DRY:
-        d = repo.split("/")[1]
-        subprocess.run(["gh", "repo", "clone", repo, os.path.join(CFG["projectsDir"], d)], check=False)
-        d = project_dir(repo)
-    if d is None:
-        return None
-    if DRY:
-        log(f"  would: proj run {d} ...")
-        return "dry"
-    p = subprocess.run([CFG["proj"], "run", d, task], capture_output=True, text=True)
-    return p.stdout.strip() or None
-
-
-# ---------------------------------------------------------------- PRs
 
 PRS = """
 query($owner: String!, $name: String!, $cursor: String) {
@@ -271,6 +66,19 @@ query($owner: String!, $name: String!, $cursor: String) {
   }
 }
 """
+
+
+def open_prs(owner, name):
+    """The repo's merge settings and every open PR, all pages."""
+    prs, cursor = [], None
+    while True:
+        info = C.graphql(PRS, owner=owner, name=name, cursor=cursor)["repository"]
+        page = info.pop("pullRequests")
+        prs += page["nodes"]
+        if not page["pageInfo"]["hasNextPage"]:
+            return info, prs
+        cursor = page["pageInfo"]["endCursor"]
+
 
 STATE_RE = re.compile(r"codex-review-state:v1 (\{.*?\}) -->", re.S)
 RECEIPT_RE = re.compile(r"Reviewed commit:\*\*\s*`([0-9a-f]{7,40})`")
@@ -366,64 +174,14 @@ def post_status(repo, pr, state, desc):
     desc = desc[:140]
     if our_status(pr) == (state, desc):
         return
-    write("api", f"repos/{repo}/statuses/{pr['headRefOid']}", "-f", f"state={state}",
-          "-f", f"context={CONTEXT}", "-f", f"description={desc}", "-f", f"target_url={pr['url']}", check=False)
+    C.write("api", f"repos/{repo}/statuses/{pr['headRefOid']}", "-f", f"state={state}",
+            "-f", f"context={CONTEXT}", "-f", f"description={desc}", "-f", f"target_url={pr['url']}", check=False)
 
 
-ACTION_PINS_RE = re.compile(r"^\.github/workflows/[^/]+\.ya?ml$")
-# A changed line that only repins an action: "uses: owner/action@sha # v4.1.0".
-PIN_LINE_RE = re.compile(r"^[+-]\s*(-\s+)?uses:\s*([^\s#@]+)@[^\s#]+(\s+#.*)?$")
-
-
-def pins_only(repo, pr):
-    """True if every changed line in the PR's workflow files only repins an
-    action: each removed `uses:` comes back with the same action at a new ref,
-    nothing added or dropped (no permissions, triggers or commands). None if
-    the diff couldn't be read."""
-    diff = gh("pr", "diff", str(pr["number"]), "-R", repo, check=False)
-    if not isinstance(diff, str) or not diff:
-        return None
-    path, changed = None, {}
-    for x in diff.splitlines():
-        if x.startswith("diff --git "):
-            path = x.split(" b/", 1)[-1]
-        elif x.startswith(("+++", "---")):
-            continue
-        elif path and ACTION_PINS_RE.match(path) and x[:1] in "+-" and x.strip("+- \t"):
-            m = PIN_LINE_RE.match(x)
-            if not m:
-                return False
-            changed.setdefault(path, {"+": [], "-": []})[x[0]].append(m.group(2))
-    return all(sorted(c["+"]) == sorted(c["-"]) for c in changed.values())
-
-
-def one_way(repo, pr, rc, dep=None):
-    """The first path (or label) that makes this PR the owner's to merge."""
-    for lab in pr["labels"]["nodes"]:
-        if lab["name"] == CFG["labels"]["owner"]:
-            return f"the {lab['name']} label"
-    # A dependency bot that only repins actions in workflows is a dependency
-    # update: CI is its review (unless actionBumps is off).
-    pins = None
+def one_way(pr, rc):
+    """The first path that makes this PR one a Claude job judges before it
+    lands (config oneWay), or None."""
     for f in pr["files"]["nodes"]:
-        if dep and rc["actionBumps"] and ACTION_PINS_RE.match(f["path"]):
-            if pins is None:
-                # One diff per head and base, not one per pass (retargeting
-                # changes the diff); a failed read isn't kept, so the next
-                # pass reads it again.
-                cache = load("pins.json", {})
-                key = f"{repo}#{pr['number']}"
-                seen = [pr["headRefOid"], pr["baseRefName"]]
-                if (cache.get(key) or [None])[:2] == seen:
-                    pins = cache[key][2]
-                else:
-                    pins = pins_only(repo, pr)
-                    if pins is not None:
-                        cache[key] = seen + [pins]
-                        save("pins.json", cache)
-                    pins = bool(pins)
-            if pins:
-                continue
         for pat in rc["oneWay"]:
             if re.search(pat, f["path"]):
                 return f["path"]
@@ -432,7 +190,6 @@ def one_way(repo, pr, rc, dep=None):
     return None
 
 
-DEP_RE = re.compile(r"^(renovate|dependabot)/")
 # "from 1.2.3 to 2.0.0", "from v3 to v4" (an action's major tag), "from 3 to 4".
 MAJOR_RE = re.compile(r"from v?(\d+)\S* to v?(\d+)")
 
@@ -457,330 +214,76 @@ def merge_method(repo_info):
 
 
 def land(repo, pr, repo_info):
-    """Ready, then auto-merge (or merge now if nothing is left to wait for).
-    False if GitHub took neither."""
+    """Auto-merge (or merge now if nothing is left to wait for). False if
+    GitHub took neither."""
     n = str(pr["number"])
-    if pr["isDraft"]:
-        write("pr", "ready", n, "-R", repo, check=False)
     if not pr["autoMergeRequest"]:
         # Only the head that was checked: a push since then waits for the next pass.
         method = [merge_method(repo_info), "--match-head-commit", pr["headRefOid"]]
-        if write("pr", "merge", n, "-R", repo, "--auto", *method, check=False) is None and not DRY:
+        if C.write("pr", "merge", n, "-R", repo, "--auto", *method, check=False) is None and not DRY:
             # No branch rules to wait on: GitHub won't queue it, so merge it now.
-            return write("pr", "merge", n, "-R", repo, *method, check=False) is not None
+            return C.write("pr", "merge", n, "-R", repo, *method, check=False) is not None
     return True
 
 
-def unland(repo, pr, back_to_draft):
+def unland(repo, pr):
     """Something new came up after it was settled: stop the merge."""
-    n = str(pr["number"])
     if pr["autoMergeRequest"]:
-        write("pr", "merge", n, "-R", repo, "--disable-auto", check=False)
-    if back_to_draft and not pr["isDraft"]:
-        write("pr", "ready", n, "-R", repo, "--undo", check=False)
+        C.write("pr", "merge", str(pr["number"]), "-R", repo, "--disable-auto", check=False)
 
 
-def comment(repo, n, body):
-    return write("api", f"repos/{repo}/issues/{n}/comments", "-f", f"body={body}", check=False)
+def about(repo, pr):
+    return f"PR #{pr['number']} in {repo} (\"{pr['title']}\", branch {pr['headRefName']}, head {pr['headRefOid']})"
 
 
 def fix_task(repo, pr, why):
     return (
-        f"PR #{pr['number']} in {repo} (\"{pr['title']}\", branch {pr['headRefName']}) isn't settled: {why}. "
+        f"{about(repo, pr)} isn't settled: {why}. "
         "Settle it. Check out the branch in your own worktree (git worktree add) under the scratch dir, never in this checkout's main tree. "
         "For every unresolved review thread (Codex's, DeepSeek's, which the steward posts under the owner's login marked DeepSeek, or anyone's): "
         "either fix it, push, and reply on the thread with the commit, "
         "or reply with why it's wrong or out of scope; then resolve the thread (gh api graphql, resolveReviewThread). "
         "If CI is red, read the failing job's log, fix the cause and push. Run the repo's tests before you push. "
-        "Don't ask for a review, don't mark the PR ready and don't merge: the steward does those once you're done. "
-        "If something needs the owner (a decision, a secret, a one-way change), comment on the PR saying exactly what, "
+        "Don't ask for a review and don't merge: the steward does those once you're done. "
+        "If something needs the owner (a decision only they can make, a secret), comment on the PR saying exactly what, "
         f"add the {CFG['labels']['owner']} label, and stop."
     )
 
 
-# ---------------------------------------------------------------- DeepSeek
-
-# The steward posts DeepSeek's reviews under the user's own login, so they're
-# told apart by these markers: the review's names the commit and how many
-# findings it had, and each finding's thread carries the other.
-DS_RE = re.compile(r"<!-- deepseek-review:v1 (\{.*?\}) -->")
-DS_FINDING = "<!-- deepseek-finding -->"
-DS_CALLS = []  # when each DeepSeek call this pass started
-_me = []
+JUDGMENT = "autoland-judgment"
+MAJOR_VERDICT = "major-verdict"  # renovate-sweep's, on a Renovate major
 
 
-def me():
-    """The login the steward runs as (and posts DeepSeek's reviews as)."""
-    if not _me:
-        _me.append(gh("api", "user", "--jq", ".login"))
-    return _me[0]
+def judge_task(repo, pr, why, no_ci):
+    n, head, owner = pr["number"], pr["headRefOid"], CFG["owner"]
+    test = (" The repo has no CI, so nothing has built or tested this: check out exactly that commit in your own worktree "
+            "(git worktree add) under the scratch dir, never in this checkout's main tree, and run its build and tests yourself."
+            if no_ci else "")
+    return (
+        f"{about(repo, pr)} is settled: its reviewers found nothing on that head, every thread is resolved"
+        + ("" if no_ci else " and CI is green")
+        + f". The steward doesn't land it on its own word because {why}, so you judge it. "
+        f"Read the diff (gh pr diff {n} -R {repo}) and the repo's AGENTS.md.{test} "
+        "Land anything a revert or a follow-up PR can undo. "
+        f"Send it to {owner} only if it can't be undone (it drops or rewrites data for good, or exposes a secret) "
+        f"or it decides something the repo reserves for {owner}, and only if you genuinely can't make the call yourself. "
+        "If its build or tests fail, say what fails and post no verdict: that's for whoever fixes the PR. "
+        "Don't push, merge, or change the PR in any other way. "
+        f"Post one comment on the PR (gh pr comment {n} -R {repo}) saying what you checked and why you decided as you did, "
+        f"ending with the line <!-- {JUDGMENT}: land {head} --> or <!-- {JUDGMENT}: owner {head} -->. "
+        f"For owner, also add the {CFG['labels']['owner']} label (gh pr edit {n} -R {repo} --add-label {CFG['labels']['owner']}). "
+        "Only that exact head counts: if the PR has moved on by the time you're done, say so and post no verdict."
+    )
 
 
-def deepseek_verdict(pr, head):
-    """What DeepSeek last said about this exact head (clean, findings or
-    none), when, and how many of its reviews on the PR had findings."""
-    verdict, at, rounds = "none", 0, 0
-    for r in pr["reviews"]["nodes"]:
-        m = DS_RE.search(r["body"] or "")
-        if not m or (r["author"] or {}).get("login") != me():
-            continue
-        try:
-            found = int(json.loads(m.group(1)).get("findings", 0)) > 0
-            sha = json.loads(m.group(1)).get("commit_sha")
-        except (ValueError, TypeError, AttributeError):
-            continue
-        rounds += found
-        if sha == head and (r["commit"] or {}).get("oid") == head and ts(r["submittedAt"]) >= at:
-            verdict, at = ("findings" if found else "clean"), ts(r["submittedAt"])
-    return verdict, at, rounds
-
-
-def numbered(diff):
-    """The diff, file by file, with each new-side line's number in front (the
-    numbers findings point at), and the lines a review comment can go on."""
-    files, out, path, new = {}, [], None, 0
-    skip = [re.compile(p) for p in DS["skipPaths"]]
-    hidden = in_hunk = False
-    for x in diff.splitlines():
-        if x.startswith("diff --git "):
-            old, _, path = x.removeprefix("diff --git a/").partition(" b/")
-            # A rename out of a secrets path still carries its contents.
-            hidden, in_hunk = any(p.search(q) for p in skip for q in (old, path)), False
-            files[path] = set()
-            out.append(f"\n=== {path}" + ("\n(contents not sent: a secrets path)" if hidden else ""))
-        elif hidden or path is None:
-            continue
-        elif x.startswith("@@"):
-            m = re.match(r"@@ -\d+(?:,\d+)? \+(\d+)", x)
-            new, in_hunk = (int(m.group(1)) if m else 0), True
-            out.append(x)
-        elif not in_hunk:
-            # The file's header: only the lines that say what happened to it.
-            if x.startswith(("new file", "deleted file", "rename ", "Binary files")):
-                out.append(x)
-        elif x.startswith("-"):
-            out.append(f"{'':>6} {x}")
-        elif x.startswith(("+", " ")):
-            files[path].add(new)
-            out.append(f"{new:>6} {x}")
-            new += 1
-        else:
-            out.append(f"{'':>6} {x}")  # "\ No newline at end of file"
-    return "\n".join(out), files
-
-
-def review_rules(repo, base, paths):
-    """The `## Code Review Rules` of the AGENTS.md nearest each changed file,
-    as the base branch has them (a PR can't rewrite its own rules)."""
-    tree = gh("api", f"repos/{repo}/git/trees/{base}?recursive=1", "--jq",
-              '[.tree[] | select(.type == "blob") | .path | select(test("(^|/)AGENTS\\\\.md$"))]', check=False)
-    have = set(tree) if isinstance(tree, list) else set()
-    wanted = set()
-    for p in paths:
-        d = p
-        while d:
-            d = d.rpartition("/")[0]
-            f = f"{d}/AGENTS.md" if d else "AGENTS.md"
-            if f in have:
-                wanted.add(f)
-                break
-    rules = []
-    for f in sorted(wanted):
-        text = gh("api", "-H", "Accept: application/vnd.github.raw", f"repos/{repo}/contents/{f}?ref={base}", check=False)
-        m = re.search(r"^## Code Review Rules\s*$(.*?)(?=^## |\Z)", text if isinstance(text, str) else "", re.M | re.S)
-        if m:
-            rules.append(f"From {f}:\n{m.group(1).strip()}")
-    return "\n\n".join(rules)
-
-
-def prior_findings(repo, n):
-    """DeepSeek's earlier findings on this PR and the replies each got."""
-    out = gh("api", "--paginate", f"repos/{repo}/pulls/{n}/comments?per_page=100", "--jq",
-             ".[] | {id, in_reply_to_id, path, line, original_line, body, user: .user.login}", check=False)
-    cs = []
-    for x in (out if isinstance(out, str) else json.dumps(out) if out else "").splitlines():
-        try:
-            cs.append(json.loads(x))
-        except ValueError:
-            pass
-    roots = [c for c in cs if c["user"] == me() and DS_FINDING in (c["body"] or "")]
-    text = []
-    for c in roots:
-        replies = [r for r in cs if r.get("in_reply_to_id") == c["id"]]
-        body = c["body"].replace(DS_FINDING, "").strip()
-        at = c.get("line") or c.get("original_line")
-        text.append(f"- {c['path']}{f':{at}' if at else ''}: {body}\n"
-                    + "".join(f"  Reply from {r['user']}: {r['body'].strip()}\n" for r in replies))
-    return "\n".join(text)[:60000]
-
-
-# The answer's shape. In strict mode (DeepSeek's beta endpoint) the API
-# holds the model to it: every property required, nothing else allowed.
-DS_REVIEW_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "findings": {"type": "array", "items": {
-            "type": "object",
-            "properties": {
-                "path": {"type": "string"},
-                "line": {"type": "integer"},
-                "severity": {"type": "string", "enum": ["P0", "P1", "P2"]},
-                "title": {"type": "string"},
-                "body": {"type": "string"},
-            },
-            "required": ["path", "line", "severity", "title", "body"],
-            "additionalProperties": False,
-        }},
-        "summary": {"type": "string"},
-    },
-    "required": ["findings", "summary"],
-    "additionalProperties": False,
-}
-
-
-def ask_deepseek(system, user):
-    """One review from DeepSeek, as a dict. Raises on any failure.
-
-    First as a strict tool call, which the API holds to DS_REVIEW_SCHEMA; if
-    that's turned down (it's a beta), JSON mode, which now and then answers
-    with something that isn't JSON (its docs say so, and remi saw one in
-    six); if that's turned down too, plain text. Each answer that can't be
-    read is asked again, three tries in all."""
-    env = {}
-    for x in open(os.path.join(os.environ.get("CREDENTIALS_DIRECTORY", ""), "deepseek")):
-        k, sep, v = x.strip().partition("=")
-        if sep:
-            env[k] = v.strip().strip('"')
-    base = {
-        "model": env["DEEPSEEK_MODEL"],
-        "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
-        "reasoning_effort": env.get("DEEPSEEK_EFFORT") or DS["effort"],
-        "max_tokens": DS["maxTokens"],
-    }
-    url = DS["baseUrl"].rstrip("/")
-    ways = [
-        (url + "/beta", {
-            "tools": [{"type": "function", "function": {
-                "name": "submit_review", "strict": True,
-                "description": "Submit the review: every finding, and a one-sentence summary.",
-                "parameters": DS_REVIEW_SCHEMA}}],
-            # Thinking mode turns down a forced or "required" tool_choice
-            # (remi#34); with "auto" it called submit_review every time.
-            "tool_choice": "auto",
-        }),
-        (url, {"response_format": {"type": "json_object"}}),
-        (url, {}),
-    ]
-    ctx = ssl.create_default_context(cafile=DS["caFile"])
-
-    def call(at, extra):
-        req = urllib.request.Request(at + "/chat/completions", data=json.dumps({**base, **extra}).encode(),
-                                     headers={"Authorization": f"Bearer {env['DEEPSEEK_API_KEY']}",
-                                              "Content-Type": "application/json"})
-        with urllib.request.urlopen(req, timeout=DS["timeout"], context=ctx) as r:
-            msg = json.load(r)["choices"][0]["message"]
-        for t in msg.get("tool_calls") or []:
-            if t["function"]["name"] == "submit_review":
-                return t["function"]["arguments"] or ""
-        return msg.get("content") or ""
-
-    tries = 0
-    while True:
-        at, extra = ways[0]
-        try:
-            text = call(at, extra)
-        except urllib.error.HTTPError as e:
-            if e.code != 400 or len(ways) == 1:
-                raise
-            log(f"  DeepSeek turned down {', '.join(extra) or 'plain text'} ({e.code}): trying the next way")
-            ways.pop(0)
-            continue
-        tries += 1
-        try:
-            return json.loads(text[text.index("{"):text.rindex("}") + 1])
-        except ValueError:
-            if tries == 3:
-                raise RuntimeError(f"no JSON in its answer: {text[:100]!r}")
-
-
-DS_SYSTEM = """You review pull requests for {owner}'s repos. You are one of two reviewers; a PR merges itself once both find nothing on its latest commit, so what you let through ships.
-
-Report only real defects a careful senior reviewer would block the merge for: bugs, security holes, data loss, races, broken error handling, tests or checks weakened to get green, behaviour changed beyond what the PR says it does, and anything the repo's Code Review Rules flag. No style or naming nits, no praise, no "consider" suggestions, no restating the diff, nothing you can't point at in the code. If nothing qualifies, return no findings: that is the usual outcome for a good commit.
-
-Earlier findings on this PR are listed with the replies they got. Don't raise one again unless the code still has the problem and the reply is wrong; then say why the reply doesn't hold.
-
-Each finding: "path" (as the diff names it), "line" (a number from the diff's left column, on the new side, where the problem is), "severity" ("P0": unsafe or breaks things, "P1": a real bug or a rule broken, "P2": a smaller real defect), "title" (one line), "body" (what is wrong, why, and the fix, in a few sentences). At most 10, most severe first.
-
-Answer by calling submit_review if you have it, otherwise with JSON only: {{"findings": [...], "summary": "one sentence on the PR as a whole"}}"""
-
-
-def quiet_mentions(text):
-    """Model text goes out under the user's login: no @-pings from it."""
-    return re.sub(r"@(?=[\w-])", "@​", str(text)).replace("<!--", "&lt;!--")
-
-
-def run_deepseek(repo, pr, dst):
-    """Ask DeepSeek about the head and post what it says as one review.
-    Returns "clean", "findings", or None if it didn't happen."""
-    n, head = pr["number"], pr["headRefOid"]
-    DS_CALLS.append(time.time())
-    diff = gh("api", "-H", "Accept: application/vnd.github.diff",
-              f"repos/{repo}/compare/{pr['baseRefName']}...{head}", check=False)
-    if not isinstance(diff, str) or not diff.startswith("diff"):
-        raise RuntimeError("couldn't read the diff")
-    text, files = numbered(diff)
-    if len(text) > DS["maxDiffChars"]:
-        dst["tooBig"] = True
-        return None
-    user = (f"Repo {repo}, PR #{n}: {pr['title']}\n\n"
-            f"Code Review Rules:\n{review_rules(repo, pr['baseRefName'], files) or '(none)'}\n\n"
-            f"Earlier findings:\n{prior_findings(repo, n) or '(none)'}\n\n"
-            f"The diff against {pr['baseRefName']}:\n{text}")
-    log(f"{repo}#{n}: asking DeepSeek ({len(text)} chars of diff)")
-    answer = ask_deepseek(DS_SYSTEM.format(owner=CFG["owner"]), user)
-    # Anything but a list of findings is no review at all, never a clean one.
-    found = answer.get("findings") if isinstance(answer, dict) else None
-    if not isinstance(found, list) or not all(isinstance(f, dict) for f in found):
-        raise RuntimeError(f"not a review: {json.dumps(answer)[:100]}")
-    comments, whole_file, loose = [], [], []
-    for f in found[:10]:
-        sev = f.get("severity") if f.get("severity") in ("P0", "P1", "P2") else "P1"
-        msg = f"**DeepSeek · {sev}** {quiet_mentions(f.get('title', ''))}\n\n{quiet_mentions(f.get('body', ''))}"
-        lines = files.get(f.get("path"))
-        if lines is None:
-            # Not a file this PR changes: a note in the review, not a finding.
-            loose.append(f"- `{quiet_mentions(f.get('path'))}`: " + msg.replace("\n\n", " "))
-            continue
-        if not lines:
-            # Changed, but with no new side to comment on (deleted, binary,
-            # a secrets path): a thread on the whole file, still a finding.
-            whole_file.append({"path": f["path"], "body": msg + "\n\n" + DS_FINDING})
-            continue
-        try:
-            want = int(f.get("line"))
-        except (TypeError, ValueError):
-            want = min(lines)
-        line = want if want in lines else min(lines, key=lambda x: abs(x - want))
-        comments.append({"path": f["path"], "line": line, "side": "RIGHT", "body": msg + "\n\n" + DS_FINDING})
-    k = len(comments) + len(whole_file)
-    head_line = (f"**DeepSeek review** of {head[:7]}: "
-                 + (f"{k} finding{'s' * (k > 1)}. Fix or answer each, then resolve its thread." if k else "nothing found."))
-    body = head_line + (f"\n\n{quiet_mentions(answer.get('summary', ''))}" if answer.get("summary") else "")
-    if loose:
-        body += "\n\nNotes not on a changed line:\n" + "\n".join(loose)
-    body += "\n\n<!-- deepseek-review:v1 " + json.dumps({"commit_sha": head, "findings": k}) + " -->"
-    posted = gh("api", "-X", "POST", f"repos/{repo}/pulls/{n}/reviews", "--input", "-",
-                input=json.dumps({"commit_id": head, "event": "COMMENT", "body": body, "comments": comments}), check=False)
-    if not isinstance(posted, dict):
-        raise RuntimeError("GitHub didn't take the review")
-    # A review can't hold file-level comments: they go on their own. The
-    # review already counts them, so a lost one still keeps the PR unsettled.
-    for c in whole_file:
-        if not isinstance(gh("api", "-X", "POST", f"repos/{repo}/pulls/{n}/comments", "--input", "-",
-                             input=json.dumps({**c, "commit_id": head, "subject_type": "file"}), check=False), dict):
-            log(f"{repo}#{n}: couldn't post DeepSeek's finding on {c['path']}")
-    log(f"{repo}#{n}: DeepSeek review posted, {k} finding(s)")
-    return "findings" if k else "clean"
+def proof_task(repo, pr, checks, proofs):
+    how = " ".join(f"{c}: {proofs[c]}" for c in checks)
+    return (
+        f"{about(repo, pr)} is settled and waits only for checks that run on a machine, not in CI: {', '.join(checks)}. "
+        f"Run them on exactly that commit and record each verdict the way the repo says. {how} "
+        "A check that fails is recorded as a failure: don't fix anything, don't push and don't merge. "
+        "The steward takes it from there (a red check goes to a Claude job that fixes it)."
+    )
 
 
 def handle(repo, pr, repo_info, digest):
@@ -789,13 +292,13 @@ def handle(repo, pr, repo_info, digest):
     key = f"pr-{repo.replace('/', '_')}-{n}.json"
     st = load(key, {})
     if st.get("head") != head:
-        st.update(head=head, seen=NOW, asked=[], handed=None, landFails=0, ds={})
+        st.update(head=head, seen=C.NOW, asked=[], handed=None, landFails=0, ds={})
     st.setdefault("base", 0)
     st.setdefault("dsBase", 0)
     st.setdefault("ds", {})
     labels = {x["name"] for x in pr["labels"]["nodes"]}
     author = (pr["author"] or {}).get("login", "")
-    age = NOW - st["seen"]
+    age = C.NOW - st["seen"]
     tag = f"{repo}#{n}"
     line = f"[{repo}#{n}]({pr['url']}) {pr['title']}"
 
@@ -803,10 +306,9 @@ def handle(repo, pr, repo_info, digest):
         post_status(repo, pr, state, desc)
         if why:
             digest.append((why, line, desc))
-        # Not settled (any more): nothing may merge it, and if the steward
-        # marked it ready, it goes back to draft.
-        if state != "success" and (pr["autoMergeRequest"] or (st.get("landed") and not pr["isDraft"])):
-            unland(repo, pr, back_to_draft=bool(st.get("landed")))
+        # Not settled (any more): nothing may merge it.
+        if state != "success" and (pr["autoMergeRequest"] or st.get("landed")):
+            unland(repo, pr)
             st["landed"] = None
 
     def update_branch():
@@ -814,43 +316,26 @@ def handle(repo, pr, repo_info, digest):
         (auto-merge won't). The merged-in head is reviewed like any other."""
         if pr.get("mergeStateStatus") != "BEHIND" or st.get("updated") == head:
             return False
-        if write("api", "-X", "PUT", f"repos/{repo}/pulls/{n}/update-branch",
-                 "-f", f"expected_head_sha={head}", check=False) is None:
+        if C.write("api", "-X", "PUT", f"repos/{repo}/pulls/{n}/update-branch",
+                   "-f", f"expected_head_sha={head}", check=False) is None:
             return False
         log(f"{tag}: behind its base, brought up to date")
         st["updated"] = head
         return True
 
-    def readied():
-        """Codex reviews a draft again when it's marked ready, so a PR made
-        ready and merged in one go gets a review after the merge. Ready it
-        first, then merge or list it a pass later, once that review has
-        had its chance: a finding it posts unsettles the PR like any other.
-        It stays ready (Codex reviews a ready PR's new commits by itself),
-        so it's readied once, not every time it settles again."""
-        if not pr["isDraft"]:
-            return True
-        if write("pr", "ready", str(n), "-R", repo, check=False) is not None:
-            log(f"{tag}: settled, marked ready for Codex's last look")
-        return False
-
-    def owner_merges(desc):
-        if update_branch():
-            settle("pending", "Settled, but behind its base: brought up to date, reviewed again")
-        elif not readied():
-            settle("pending", f"{desc}; marked ready, Codex takes a last look first"[:140])
+    def started(kind, task):
+        """A Claude job, once per head (recorded once it has started; until
+        then it's tried every pass and listed for the owner)."""
+        jid = C.job(repo, task)
+        if jid:
+            st[kind] = head
+            log(f"{tag}: a Claude job {jid} ({kind})")
         else:
-            settle("pending", desc, "Settled, yours to merge")
+            log(f"{tag}: couldn't start a Claude job (no checkout, or proj refused)")
+        return bool(jid)
 
     def hand_off(why):
-        # Recorded only once a job has started; until then it's tried every
-        # pass and listed for the owner.
-        jid = job(repo, fix_task(repo, pr, why))
-        if jid:
-            st["handed"] = head
-            log(f"{tag}: handed to a Claude job {jid} ({why})")
-        else:
-            log(f"{tag}: couldn't hand to a Claude job (no checkout, or proj refused)")
+        if not started("handed", fix_task(repo, pr, why)):
             digest.append(("Couldn't start a Claude job to fix it", line, why))
 
     def merge():
@@ -864,13 +349,43 @@ def handle(repo, pr, repo_info, digest):
         if st["landFails"] >= 3:
             digest.append(("Couldn't merge", line, "gh pr merge keeps failing (journalctl -u autoland)"))
 
+    def land_now(desc):
+        settle("success", desc)
+        if st.get("landed") != head:
+            log(f"{tag}: settled, landing")
+            merge()
+        else:
+            update_branch()
+
+    def owner_decides():
+        """Sent to the owner by hand, by a fix job or by a judge (the label):
+        listed for them, and no judge job."""
+        judged_owner = C.marker(pr, JUDGMENT, head) == "owner"
+        settle("pending", f"Settled; {CFG['owner']} decides (the {CFG['labels']['owner']} label)",
+               "Judged yours to decide" if judged_owner else f"Labelled {CFG['labels']['owner']}")
+
+    def judged(why):
+        """Settled, but not something the steward lands on its own word: one
+        Claude job a head judges it, and its verdict on this head decides."""
+        verdict = C.marker(pr, JUDGMENT, head)
+        if verdict == "land":
+            land_now(f"Settled; a Claude job judged it fine to land ({why})")
+        elif verdict == "owner":
+            settle("pending", f"Settled; a Claude job judged it {CFG['owner']}'s to decide ({why})", "Judged yours to decide")
+        elif update_branch():
+            settle("pending", "Settled, but behind its base: brought up to date, reviewed again")
+        elif st.get("judged") == head or started("judged", judge_task(repo, pr, why, ci == "none")):
+            settle("pending", f"Settled; a Claude job is judging it ({why})")
+        else:
+            settle("pending", f"Settled, but no Claude job could judge it ({why})", "Couldn't start a Claude job to judge it")
+
     # A list longer than one page could hide a hold, an open thread or a
     # changes-requested review: fail closed.
     cut = [k for k, more in (("labels", pr["labels"]["pageInfo"]["hasNextPage"]),
                              ("review threads", pr["reviewThreads"]["pageInfo"]["hasNextPage"]),
                              ("reviews", pr["reviews"]["pageInfo"]["hasPreviousPage"])) if more]
     if cut:
-        settle("pending", f"Over 100 {' and '.join(cut)}, too many to read: {CFG['owner']} merges it", "Settled, yours to merge")
+        settle("pending", f"Over 100 {' and '.join(cut)}, too many to read: {CFG['owner']} merges it", "Too much to read")
         save(key, st)
         return
     if CFG["labels"]["hold"] in labels:
@@ -883,13 +398,18 @@ def handle(repo, pr, repo_info, digest):
         settle("pending", f"Outside contribution: {CFG['owner']} reviews and merges it", "Outside contributions")
         save(key, st)
         return
+    if pr["isDraft"]:
+        # Work in progress: nobody reviews it yet, and nobody is told.
+        settle("pending", "Draft: work in progress, reviewed once it's marked ready")
+        save(key, st)
+        return
 
     ci, ci_names = ci_state(pr)
-    # No checks ran at all. Unless the repo is set not to need any (docs
-    # only), that's not green: nothing has tested it, so the owner merges it.
-    no_ci = ci == "none" and rc["requireCi"]
-    if ci == "none":
-        ci, ci_names = ("green", []) if not rc["requireCi"] else ("pending", ["no CI on this repo yet"])
+    # No checks ran at all ("none"). Unless the repo is set not to need any
+    # (docs only), that's not green: nothing has tested it, so a judge job
+    # runs the build and tests itself.
+    if ci == "none" and not rc["requireCi"]:
+        ci = "green"
     open_threads = sum(1 for t in pr["reviewThreads"]["nodes"] if not t["isResolved"])
     latest = {}
     for r in pr["reviews"]["nodes"]:
@@ -898,38 +418,48 @@ def handle(repo, pr, repo_info, digest):
             latest[who] = r["state"]
     changes = [w for w, s in latest.items() if s == "CHANGES_REQUESTED"]
     dep = dep_kind(pr)
-    gate = one_way(repo, pr, rc, dep)
+    gate = one_way(pr, rc)
+    renovate = pr["headRefName"].startswith("renovate/")
 
-    # Dependency bumps: CI is the review. Renovate merges its own;
-    # renovate-sweep handles the red ones and the majors.
+    # Dependency bumps: CI is the review. Renovate merges its own minor
+    # ones; renovate-sweep fixes the red ones and gives each major a verdict.
     if dep:
-        if gate:
-            owner_merges(f"Dependency update; {CFG['owner']} merges it (touches {gate})")
+        if changes:
+            settle("pending", "Dependency update; changes requested by " + ", ".join(changes))
+        elif ci in ("red", "pending"):
+            settle("pending", f"Dependency update, CI {ci}")
+        elif open_threads:
+            settle("pending", f"Dependency update; {open_threads} open review thread{'s' * (open_threads > 1)}")
+        elif CFG["labels"]["owner"] in labels:
+            owner_decides()
+        elif gate or ci == "none":
+            judged(f"a dependency update touching {gate}" if gate else "the repo has no CI")
+        elif dep == "major" and not renovate:
+            judged("a major dependency update")
         elif dep == "major":
-            # Renovate's majors are listed by renovate-sweep; Dependabot's here.
-            why = None if pr["headRefName"].startswith("renovate/") else "Major dependency updates"
-            settle("pending", f"Major update: {CFG['owner']} merges it", why)
-        elif ci == "green" and not open_threads and not changes:
+            v = C.marker(pr, MAJOR_VERDICT, head)
+            if v == "ok":
+                land_now("Major update renovate-sweep cleared, CI green")
+            else:
+                settle("pending", "Major update; renovate-sweep held it: see its comment" if v == "held"
+                       else "Major update; waiting for renovate-sweep's verdict on this head")
+        else:
             settle("success", "Dependency update, CI green")
             # Renovate merges its own; Dependabot's need merging.
-            if not pr["headRefName"].startswith("renovate/") and st.get("landed") != head:
+            if not renovate and st.get("landed") != head:
                 merge()
-        elif changes:
-            settle("pending", "Dependency update; changes requested by " + ", ".join(changes))
-        else:
-            settle("pending", f"Dependency update, CI {ci}")
         # Renovate's stuck ones are renovate-sweep's; a Dependabot one that
         # still hasn't merged after a day is the owner's to look at.
-        if (not gate and dep != "major" and not pr["headRefName"].startswith("renovate/")
-                and NOW - ts(pr["createdAt"]) > 86400):
+        if (not renovate and C.NOW - ts(pr["createdAt"]) > 86400
+                and not any(x[1] == line for x in digest)):
             digest.append(("Open over a day", line, f"Dependency update, CI {ci}"))
         save(key, st)
         return
 
     verdict, vtime = codex_verdict(pr, head, st["seen"])
     # DeepSeek, where it's on, is a second reviewer: both have to find nothing.
-    use_ds = DS["enable"] and rc["deepseek"]
-    dsv, dstime, ds_rounds = deepseek_verdict(pr, head) if use_ds else ("clean", 0, 0)
+    use_ds = D.DS["enable"] and rc["deepseek"]
+    dsv, dstime, ds_rounds = D.deepseek_verdict(pr, head) if use_ds else ("clean", 0, 0)
     codex_rounds = sum(1 for r in pr["reviews"]["nodes"] if (r["author"] or {}).get("login") == CODEX) - st["base"]
     ds_rounds -= st["dsBase"]
     if st.get("escalated") and CFG["labels"]["owner"] not in labels:
@@ -946,8 +476,8 @@ def handle(repo, pr, repo_info, digest):
         if len(st["asked"]) >= 4:
             return False
         log(f"{tag}: asking Codex ({why})")
-        comment(repo, n, f"@codex review\n\n{why}")
-        st["asked"].append(NOW)
+        C.comment(repo, n, f"@codex review\n\n{why}")
+        st["asked"].append(C.NOW)
         return True
 
     def ask_ds():
@@ -956,15 +486,15 @@ def handle(repo, pr, repo_info, digest):
         if DRY:
             log(f"  would: ask DeepSeek to review {tag} at {head[:7]}")
             return None
-        if dst.get("fails", 0) >= 3 and NOW - dst.get("failedAt", 0) > 3600:
+        if dst.get("fails", 0) >= 3 and C.NOW - dst.get("failedAt", 0) > 3600:
             dst["fails"] = 0  # an outage passes: three more tries an hour on
         if (dst.get("runs", 0) >= 4 or dst.get("fails", 0) >= 3 or dst.get("tooBig")
-                or len(DS_CALLS) >= DS["perPass"]):
+                or len(D.DS_CALLS) >= D.DS["perPass"]):
             return None
         try:
-            v = run_deepseek(repo, pr, dst)
+            v = D.run_deepseek(repo, pr, dst)
         except Exception as e:  # the API, the network, its JSON: tried again next pass
-            dst["fails"], dst["failedAt"] = dst.get("fails", 0) + 1, NOW
+            dst["fails"], dst["failedAt"] = dst.get("fails", 0) + 1, C.NOW
             log(f"{tag}: DeepSeek review failed ({dst['fails']}): {str(e)[:200]}")
             return None
         dst["runs"] = dst.get("runs", 0) + (v is not None)
@@ -973,9 +503,9 @@ def handle(repo, pr, repo_info, digest):
     # 1. The reviewers.
     if rounds >= rc["rounds"] and not (verdict == "clean" and dsv == "clean"):
         if not st.get("escalated"):
-            write("pr", "edit", str(n), "-R", repo, "--add-label", CFG["labels"]["owner"], check=False)
-            comment(repo, n, f"{rounds} review rounds and there are still findings, so this stops here and waits for "
-                             f"{CFG['owner']}. Taking the `{CFG['labels']['owner']}` label off gives it another {rc['rounds']}.")
+            C.write("pr", "edit", str(n), "-R", repo, "--add-label", CFG["labels"]["owner"], check=False)
+            C.comment(repo, n, f"{rounds} review rounds and there are still findings, so this stops here and waits for "
+                      f"{CFG['owner']}. Taking the `{CFG['labels']['owner']}` label off gives it another {rc['rounds']}.")
             st["escalated"] = True
         settle("pending", f"Still unsettled after {rounds} review rounds: {CFG['owner']} decides", "Unsettled after the round limit")
         save(key, st)
@@ -983,10 +513,10 @@ def handle(repo, pr, repo_info, digest):
 
     quiet = age >= rc["settleDelay"] * MIN
     waiting = []
-    if verdict in ("none", "failed") or (verdict == "running" and NOW - vtime > rc["codexTimeout"] * MIN):
-        if quiet and (not last_ask or NOW - last_ask > rc["codexTimeout"] * MIN):
+    if verdict in ("none", "failed") or (verdict == "running" and C.NOW - vtime > rc["codexTimeout"] * MIN):
+        if quiet and (not last_ask or C.NOW - last_ask > rc["codexTimeout"] * MIN):
             ask("Review this head." if not last_ask else "Retrying: the last request got no result.")
-        if len(st["asked"]) >= 2 and NOW - last_ask > rc["codexTimeout"] * MIN:
+        if len(st["asked"]) >= 2 and C.NOW - last_ask > rc["codexTimeout"] * MIN:
             digest.append(("Codex isn't answering", line, f"asked {len(st['asked'])} times on {head[:7]}"))
         waiting.append("Waiting for Codex's review of this commit")
     elif verdict == "running":
@@ -999,7 +529,7 @@ def handle(repo, pr, repo_info, digest):
             dsv = ask_ds() or "none"
             fresh = dsv == "findings"
         if st["ds"].get("tooBig"):
-            digest.append(("Too big for DeepSeek to review", line, f"over {DS['maxDiffChars']} characters of diff"))
+            digest.append(("Too big for DeepSeek to review", line, f"over {D.DS['maxDiffChars']} characters of diff"))
         elif st["ds"].get("fails", 0) >= 3:
             digest.append(("DeepSeek couldn't review it", line, f"failed {st['ds']['fails']} times on {head[:7]} (journalctl -u autoland)"))
         if dsv == "none":
@@ -1010,7 +540,7 @@ def handle(repo, pr, repo_info, digest):
         what.append(f"{open_threads} open review thread{'s' * (open_threads > 1)}")
     if changes:
         what.append("changes requested by " + ", ".join(changes))
-    idle = NOW - max(ts(pr["updatedAt"]), st["seen"])
+    idle = C.NOW - max(ts(pr["updatedAt"]), st["seen"])
     if waiting:
         settle("pending", "; ".join(waiting + what))
         # One reviewer's threads needn't wait for the other to finish.
@@ -1020,9 +550,9 @@ def handle(repo, pr, repo_info, digest):
         if not open_threads and not changes and not fresh:
             # Every finding answered without a new commit: the reviewers that
             # had findings look again.
-            if verdict == "findings" and vtime > last_ask and NOW - vtime > rc["settleDelay"] * MIN:
+            if verdict == "findings" and vtime > last_ask and C.NOW - vtime > rc["settleDelay"] * MIN:
                 ask("Every finding is answered and resolved; review again.")
-            if dsv == "findings" and NOW - dstime > rc["settleDelay"] * MIN:
+            if dsv == "findings" and C.NOW - dstime > rc["settleDelay"] * MIN:
                 fresh = ask_ds() == "findings"
         if fresh:
             settle("pending", f"Round {rounds + 1}: DeepSeek has new findings")
@@ -1035,141 +565,30 @@ def handle(repo, pr, repo_info, digest):
     # 2. The reviewers are clean on this head and nothing is open: CI, then land.
     elif ci == "red":
         settle("pending", "CI is red: " + ", ".join(ci_names)[:100])
-        idle = NOW - max(ts(pr["updatedAt"]), st["seen"])
         if idle > rc["handoffAfter"] * MIN and st.get("handed") != head:
             hand_off("CI is red (" + ", ".join(ci_names) + ")")
-    elif no_ci:
-        owner_merges(f"Settled, but this repo has no CI: {CFG['owner']} merges it")
-    elif ci == "pending" and all(n in rc["ownerChecks"] for n in ci_names):
-        # Only checks a person clears are left (a verdict from a test
-        # machine): waiting quietly would never end, so it's the owner's.
-        then = f"then merges it (touches {gate})" if gate else "then it lands"
-        desc = f"Settled; {CFG['owner']} clears {', '.join(ci_names)}, {then}"[:140]
-        if gate:
-            owner_merges(desc)
+    elif ci == "pending" and all(c in rc["proofJobs"] for c in ci_names):
+        # Only checks that run on a machine, not in CI, are left: a Claude
+        # job runs them on this head and records their verdicts.
+        if st.get("proved") == head or started("proved", proof_task(repo, pr, ci_names, rc["proofJobs"])):
+            settle("pending", f"Settled; a Claude job is running {', '.join(ci_names)}"[:140])
         else:
-            settle("pending", desc, "Settled, yours to merge")
+            settle("pending", f"Settled, but no Claude job could run {', '.join(ci_names)}"[:140],
+                   "Couldn't start a Claude job to run its checks")
     elif ci == "pending":
         settle("pending", "Settled; waiting for CI: " + ", ".join(ci_names)[:90])
-    elif gate:
-        owner_merges(f"Settled; {CFG['owner']} merges it (touches {gate})")
+    elif CFG["labels"]["owner"] in labels:
+        owner_decides()
+    elif gate or ci == "none":
+        judged(f"it touches {gate}" if gate else "the repo has no CI")
     else:
-        settle("success", f"{reviewers} found nothing on this commit, every thread is resolved, CI is green")
-        if st.get("landed") != head:
-            if readied():
-                log(f"{tag}: settled, landing")
-                merge()
-        else:
-            update_branch()
+        land_now(f"{reviewers} found nothing on this commit, every thread is resolved, CI is green")
 
     # Anything not merged after a day, reviewed clean or not (a check that never
-    # reports keeps it pending). One-way PRs, and those already listed for
-    # the owner (no CI), are left out.
-    if NOW - ts(pr["createdAt"]) > 86400 and not gate and not any(x[1] == line for x in digest):
+    # reports keeps it pending), unless it's already listed for the owner.
+    if C.NOW - ts(pr["createdAt"]) > 86400 and not any(x[1] == line for x in digest):
         digest.append(("Open over a day", line, our_status(pr)[1] or "unsettled"))
     save(key, st)
-
-
-# ---------------------------------------------------------------- branches
-
-def delete_branch(repo, name, sha):
-    """Delete the branch only if its tip is still `sha`: a push since then
-    keeps it (git's lease; the REST API has no conditional delete)."""
-    if DRY:
-        log(f"  would: delete {repo} {name} if still at {sha[:7]}")
-        return
-    with tempfile.TemporaryDirectory() as d:
-        subprocess.run(["git", "init", "-q", "--bare", d], check=False)
-        p = subprocess.run(["git", "-C", d, "push", "-q", f"--force-with-lease=refs/heads/{name}:{sha}",
-                            f"https://github.com/{repo}.git", f":refs/heads/{name}"],
-                           capture_output=True, text=True)
-        if p.returncode != 0:
-            log(f"{repo}: kept {name}: {p.stderr.strip()[:200]}")
-
-
-def sweep_branches(r, open_heads, digest):
-    repo = r["repo"]
-    st = load(f"repo-{repo.replace('/', '_')}.json", {})
-    if NOW - st.get("branches", 0) < 86400:
-        for b in st.get("stale", []):
-            digest.append(("Stale branches (unmerged, no PR, 30+ days)", f"{repo}: `{b}`", ""))
-        return
-    stale = []
-    # The machine's globs, plus the repo's own (evidence branches it cites).
-    keep = CFG["keepBranches"] + repo_cfg(repo).get("keepBranches", [])
-    names = (gh("api", "--paginate", f"repos/{repo}/branches?per_page=100", "--jq",
-                '.[] | select(.protected | not) | "\\(.name) \\(.commit.sha)"', check=False) or "")
-    for x in str(names).split("\n"):
-        name, _, sha = x.partition(" ")
-        if not name or not sha or name == r["default"] or name in open_heads or DEP_RE.match(name):
-            continue
-        if any(fnmatch.fnmatch(name, pat) for pat in keep):
-            continue
-        # Compared at the tip just listed, and deleted only if it's still there.
-        cmp = gh("api", f"repos/{repo}/compare/{r['default']}...{sha}", "--jq",
-                 "{ahead: .ahead_by, date: .commits[-1].commit.committer.date}", check=False)
-        if not isinstance(cmp, dict):
-            continue
-        if cmp["ahead"] == 0:
-            log(f"{repo}: deleting {name} at {sha[:7]} (already in {r['default']})")
-            delete_branch(repo, name, sha)
-        elif cmp.get("date") and NOW - ts(cmp["date"]) > 30 * 86400:
-            stale.append(name)
-    st.update(branches=NOW, stale=stale)
-    save(f"repo-{repo.replace('/', '_')}.json", st)
-    for b in stale:
-        digest.append(("Stale branches (unmerged, no PR, 30+ days)", f"{repo}: `{b}`", ""))
-
-
-# ---------------------------------------------------------------- digest
-
-def publish(digest):
-    """One issue in config.notify.repo listing what waits for the owner."""
-    nrepo = CFG["notify"]["repo"]
-    groups = {}
-    for why, line, desc in digest:
-        groups.setdefault(why, []).append(f"- {line}" + (f": {desc}" if desc else ""))
-    body = "\n\n".join(f"**{why}**\n" + "\n".join(lines) for why, lines in groups.items())
-    if DRY or not nrepo:
-        log("--- waiting for the owner ---\n" + (body or "(nothing)"))
-        return
-    title = "[autoland] PRs waiting for you"
-    label = CFG["notify"]["label"]
-    prev = load("digest.json", {"lines": []})
-    # Unchanged since the last look, under an hour ago: nothing to read or write.
-    if prev.get("body") == body and NOW - prev.get("checked", 0) < 3600:
-        return
-    found = gh("issue", "list", "-R", nrepo, "--label", label, "--state", "open", "--search",
-               f'"{title}" in:title', "--json", "number,body", check=False)
-    if not isinstance(found, list):
-        return  # couldn't look (no quota?): try next pass, and don't open a second issue
-    found = [i for i in found if i]
-    lines = sorted({line for _, line, _ in digest})
-    # Recorded as published only once every call went through, so a failed
-    # one is tried again next pass rather than an hour later.
-    ok = True
-    if not digest:
-        if found:
-            ok = gh("issue", "close", str(found[0]["number"]), "-R", nrepo, "--comment", "Nothing waiting.", check=False) is not None
-        if ok:
-            save("digest.json", {"lines": [], "body": body, "checked": NOW})
-        return
-    full = body + "\n\n_Kept up to date by autoland-steward on " + os.uname().nodename + "._"
-    if not found:
-        gh("label", "create", label, "-R", nrepo, "--color", "B60205", check=False)
-        args = ["issue", "create", "-R", nrepo, "--label", label, "--title", title, "--body", full]
-        if CFG["notify"]["assignee"]:
-            args += ["--assignee", CFG["notify"]["assignee"]]
-        ok = gh(*args, check=False) is not None
-    else:
-        num = str(found[0]["number"])
-        if found[0]["body"] != full:
-            ok = gh("issue", "edit", num, "-R", nrepo, "--body", full, check=False) is not None
-        added = [x for x in lines if x not in prev["lines"]]
-        if added and ok:
-            ok = gh("issue", "comment", num, "-R", nrepo, "--body", "New:\n" + "\n".join(f"- {x}" for x in added), check=False) is not None
-    if ok:
-        save("digest.json", {"lines": lines, "body": body, "checked": NOW})
 
 
 # ---------------------------------------------------------------- main
@@ -1180,7 +599,7 @@ def main():
     except OSError:
         if not DRY:
             raise
-    repos = discover()
+    repos = R.discover()
     # Repos whose baseline job has started. A repo not in it gets one, a few
     # per pass so the first pass on a machine doesn't start them all at once.
     known = set(load("known.json", []))
@@ -1192,10 +611,10 @@ def main():
     for r in repos:
         repo = r["repo"]
         try:
-            new = settle_repo(r, known)
+            new = R.settle_repo(r, known)
             if (new and CFG["baselineJobs"] and started < CFG["baselinePerPass"]
-                    and NOW - failed.get(repo, 0) > 86400):
-                jid = job(repo, CFG["baselineTask"].replace("REPO", repo), clone=True)
+                    and C.NOW - failed.get(repo, 0) > 86400):
+                jid = C.job(repo, CFG["baselineTask"].replace("REPO", repo), clone=True)
                 started += 1
                 if jid:
                     log(f"{repo}: baseline job {jid}")
@@ -1203,7 +622,7 @@ def main():
                     failed.pop(repo, None)
                 else:
                     log(f"{repo}: baseline job didn't start (no checkout, or proj refused); trying again tomorrow")
-                    failed[repo] = NOW
+                    failed[repo] = C.NOW
             elif new and not CFG["baselineJobs"]:
                 known.add(repo)
             owner, name = repo.split("/")
@@ -1216,12 +635,12 @@ def main():
                 except Exception as e:  # one bad PR mustn't stop the rest
                     log(f"{repo}#{pr['number']}: {e}")
             if CFG["cleanBranches"]:
-                sweep_branches(r, heads, digest)
+                R.sweep_branches(r, heads, digest)
         except Exception as e:
             log(f"{repo}: {e}")
     save("known.json", sorted(known))
     save("baseline-failed.json", failed)
-    publish(digest)
+    R.publish(digest)
 
 
 if __name__ == "__main__":

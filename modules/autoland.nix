@@ -1,13 +1,15 @@
-# autoland: every PR in every repo you own goes from draft to merged on its
+# autoland: every PR in every repo you own goes from ready to merged on its
 # own, once a reviewer has nothing left to say (autoland/steward.py).
 #
-#   draft -> Codex (and DeepSeek, if it's on) reviews
+#   ready -> Codex (and DeepSeek, if it's on) reviews
 #         -> Claude fixes or answers every finding
 #         -> both find nothing on the exact head, CI green
-#         -> `review-settled` status -> ready -> auto-merge -> branch deleted
+#         -> (one-way paths, no CI: a Claude job judges it)
+#         -> `review-settled` status -> auto-merge -> branch deleted
 #
-# The owner only sees what needs them, in one issue: one-way doors, PRs past
-# the round limit, outside contributions, anything stuck. It also keeps every
+# A draft is work in progress: nothing happens to it until it's ready. The
+# owner only sees what needs them, in one issue: what a judge job couldn't
+# decide, PRs past the round limit, outside contributions, anything stuck. It also keeps every
 # repo's settings at the baseline (docs/repo-baseline.md), new repos included.
 inputs:
 { config, lib, pkgs, ... }:
@@ -48,8 +50,7 @@ let
       directPush = false;
       ruleset = true;
       requireCi = true;
-      actionBumps = true;
-      ownerChecks = [ ];
+      proofJobs = { };
       deepseek = true;
     };
     repos = cfg.repos;
@@ -63,7 +64,7 @@ let
     };
     baselineTask = ''
       REPO is new, and doesn't meet the baseline every repo of ${config.burrow.owner}'s keeps yet. Read
-      ${baselineDocs}/docs/repo-baseline.md and bring this repo up to its "Files" section: open one draft PR that adds
+      ${baselineDocs}/docs/repo-baseline.md and bring this repo up to its "Files" section: open one PR, ready for review (not a draft), that adds
       what's missing (CI that builds and runs the tests through the repo's flake, AGENTS.md with the house block and the shared "Pull requests" and
       "Code Review Rules" sections, CLAUDE.md, README, .gitignore, LICENSE if it's public) and changes
       nothing else. Don't ask for a review or merge it: the steward does that.
@@ -74,9 +75,18 @@ let
     ", and posts DeepSeek's (under ${config.burrow.owner}'s login, marked as DeepSeek's)";
 
   configFile = pkgs.writeText "autoland.json" (builtins.toJSON settings);
-  stewardPy = pkgs.writers.writePython3Bin "autoland-steward"
-    { flakeIgnore = [ "E501" "W503" ]; }
-    (builtins.readFile ./autoland/steward.py);
+  # The steward's modules (steward.py and what it imports), linted as
+  # writePython3Bin lints a single file.
+  stewardSrc = pkgs.runCommand "autoland-steward-src" { nativeBuildInputs = [ pkgs.python3Packages.flake8 ]; } ''
+    cp -r ${./autoland} $out
+    flake8 --ignore E501,W503 $out
+  '';
+  stewardPy = pkgs.writers.writePython3Bin "autoland-steward" { flakeIgnore = [ "E402" "E501" ]; } ''
+    import sys
+    sys.path.insert(0, "${stewardSrc}")
+    import steward
+    steward.main()
+  '';
   # The command, with this machine's config, so `autoland-steward status`
   # works from any shell, not only in the service.
   steward = pkgs.writeShellScriptBin "autoland-steward" ''
@@ -140,11 +150,12 @@ in
 
     oneWay = mkOption {
       type = types.listOf types.str;
-      default = [ "^\\.github/" "(^|/)secrets?/" "(^|/)\\.sops\\.yaml$" "\\.sops\\.(ya?ml|json|env)$" "(^|/)migrations?/" ];
+      default = [ "(^|/)CODEOWNERS$" "(^|/)secrets?/" "(^|/)\\.sops\\.yaml$" "\\.sops\\.(ya?ml|json|env)$" "(^|/)migrations?/" ];
       description = ''
-        Path regexes that make a PR yours to merge: it's settled the same way,
-        then waits for you. The default is the gate itself (workflows,
-        CODEOWNERS), secrets and database migrations.
+        Path regexes that make a settled PR one a Claude job judges before it
+        lands: it lands anything a revert or a follow-up can undo, and sends
+        you only what can't be undone or is yours to decide. The default is
+        CODEOWNERS (who signs off on what), secrets and database migrations.
       '';
     };
 
@@ -208,7 +219,7 @@ in
       default = true;
       description = ''
         Every repo gets one Claude job (a few per pass, the first time it's seen,
-        existing repos included) that opens a draft PR bringing its files up to
+        existing repos included) that opens a PR bringing its files up to
         the baseline, if they aren't already.
       '';
     };
@@ -294,6 +305,7 @@ in
           # Its update pipeline pushes to main: rules stop force pushes and deletion only.
           "sam/homelab".directPush = true;
           "sam/website" = { oneWay = [ "^deploy/" ]; rounds = 3; };
+          "sam/firmware".proofJobs.hil = "Run `just hil` on the bench box and post its result as the `hil` commit status.";
         }
       '';
       description = ''
@@ -301,13 +313,12 @@ in
         handoffAfter, settleDelay, codexTimeout (minutes), directPush,
         ruleset (false: no baseline ruleset), requireCi (false: a PR with no
         checks at all counts as green, for a repo with nothing to test; by
-        default a settled PR in a repo with no CI waits for you),
-        actionBumps (false: a dependency bot's bump of the actions pinned in
-        .github/workflows waits for you like any other .github/ change; by
-        default it merges on green CI, as other dependency updates do),
-        ownerChecks (names of checks that only a person clears, such as a
-        verdict from a test machine: a settled PR waiting on nothing else is
-        listed for you instead of waiting quietly for CI), keepBranches
+        default a Claude job judges a settled PR in a repo with no CI,
+        building and testing it itself), proofJobs (checks that run on a
+        machine rather than in CI, `{ "<check>" = "<how to run it and record
+        its verdict>"; }`: once a settled PR waits on nothing else, one
+        Claude job a head runs them on that commit and records each verdict,
+        a failure as a failure), keepBranches
         (more branch globs the cleanup never touches in this repo, on top of
         the machine's, for branches a repo keeps as evidence), deepseek
         (false: Codex alone reviews this repo, and none of it goes to
@@ -356,19 +367,25 @@ in
       ## Pull requests
 
       Every repo of ${lib.concatStringsSep ", " cfg.owners} merges its PRs on its own, through the
-      steward (`autoland`, every ${cfg.every}). Open PRs as drafts, then leave them be:
+      steward (`autoland`, every ${cfg.every}). Open PRs ready for review, never as drafts (a
+      draft is left alone until it's ready), then leave them be:
 
       - The steward asks Codex for a review${dsAlso}. Fix or answer every finding (reply on
         the thread, push the fix) and resolve the thread; the reviewer that raised it
         looks again once they're all resolved.
-      - Once ${if cfg.deepseek.enable then "Codex and DeepSeek both find" else "Codex finds"} nothing on the head, every thread is resolved and CI is
-        green, it posts `${cfg.context}`, marks the PR ready and merges it; the
-        branch goes too. Don't merge, mark ready or post that status yourself.
-      - What it won't merge (paths matching its one-way list, such as `.github/`,
-        secrets and migrations; more than ${toString cfg.rounds} review rounds; outside
-        contributions; repos with no CI yet) waits for ${config.burrow.owner}, listed in one issue. Label a PR
-        `${cfg.labels.owner}` to send it there yourself, or `${cfg.labels.hold}` to keep the
-        steward off it.
+      - Once ${if cfg.deepseek.enable then "Codex and DeepSeek both find" else "Codex finds"} nothing on the exact head, every thread is resolved and CI is
+        green, it posts `${cfg.context}` and merges it, `.github/` changes included; the
+        branch goes too.
+      - A settled PR that touches a one-way path (secrets, migrations, CODEOWNERS), or
+        a repo with no CI, gets a Claude job that judges it: it lands what a revert or a
+        follow-up can undo, and sends ${config.burrow.owner} only what can't be undone or is theirs to decide.
+        A Claude session may merge such a PR itself (squash, delete the branch) once
+        it has made that call.
+      - ${config.burrow.owner}'s standing authority: merges, GitHub settings changes and cleanup
+        are pre-approved. Take the judgment call first; only a genuine one-way door
+        you can't decide waits for them, labelled `${cfg.labels.owner}` and listed in one issue
+        (so are outside contributions and PRs past ${toString cfg.rounds} review rounds).
+        `${cfg.labels.hold}` keeps the steward off a PR.
       - `autoland-steward status` shows where every open PR stands, changing nothing.
       - Every repo, new ones too, is kept at the baseline in burrow's
         docs/repo-baseline.md.

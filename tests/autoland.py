@@ -1,11 +1,11 @@
-"""The steward's DeepSeek reviewer, with gh and DeepSeek's API stood in for.
+"""The steward, with gh, Claude jobs and DeepSeek's API stood in for: its
+DeepSeek reviewer, and handle() end to end on PRs shaped like its query's.
 
   python3 tests/autoland.py modules/autoland/steward.py
   nix build .#checks.x86_64-linux.autoland
 """
 
 import http.server
-import importlib.util
 import json
 import os
 import sys
@@ -57,9 +57,12 @@ with open(f"{tmp}/config.json", "w") as f:
         "baselineJobs": False, "baselinePerPass": 1, "authors": ["sam"], "codexLogin": "chatgpt-codex-connector",
         "stateDir": f"{tmp}/state", "projectsDir": f"{tmp}/none", "proj": "proj", "owner": "Sam", "cleanBranches": False,
         "labels": {"hold": "hold", "owner": "needs-owner"}, "notify": {"repo": "", "assignee": "", "label": "autoland"},
-        "defaults": {"rounds": 5, "oneWay": [], "handoffAfter": 30, "settleDelay": 3, "codexTimeout": 45,
-                     "directPush": False, "ruleset": True, "requireCi": True, "actionBumps": True,
-                     "ownerChecks": [], "deepseek": True},
+        "defaults": {"rounds": 5,
+                     # autoland.nix's default.
+                     "oneWay": ["(^|/)CODEOWNERS$", "(^|/)secrets?/", "(^|/)\\.sops\\.yaml$",
+                                "\\.sops\\.(ya?ml|json|env)$", "(^|/)migrations?/"], "handoffAfter": 30, "settleDelay": 3, "codexTimeout": 45,
+                     "directPush": False, "ruleset": True, "requireCi": True,
+                     "proofJobs": {}, "deepseek": True},
         "repos": {},
         "deepseek": {"enable": True, "baseUrl": f"http://127.0.0.1:{srv.server_port}", "effort": "max",
                      "skipPaths": ["(^|/)secrets?/"], "maxDiffChars": 800000, "perPass": 6, "maxTokens": 1000,
@@ -68,11 +71,12 @@ with open(f"{tmp}/config.json", "w") as f:
 os.environ["AUTOLAND_CONFIG"] = f"{tmp}/config.json"
 os.environ["CREDENTIALS_DIRECTORY"] = f"{tmp}/cred"
 
-spec = importlib.util.spec_from_file_location("steward", sys.argv[1])
-S = importlib.util.module_from_spec(spec)
+sys.path.insert(0, os.path.dirname(os.path.abspath(sys.argv[1])))
 sys.argv = ["steward"]
-spec.loader.exec_module(S)
-S.ssl.create_default_context = lambda cafile=None: None  # plain http here
+import common as C  # noqa: E402
+import deepseek as D  # noqa: E402
+import steward as S  # noqa: E402
+D.ssl.create_default_context = lambda cafile=None: None  # plain http here
 
 DIFF = """diff --git a/src/app.py b/src/app.py
 index 111..222 100644
@@ -129,7 +133,7 @@ def gh(*args, input=None, check=True):
     if "/comments?per_page" in a:
         return "\n".join(json.dumps(x) for x in [
             {"id": 1, "in_reply_to_id": None, "path": "src/app.py", "line": 12, "original_line": 12,
-             "body": "**DeepSeek · P1** old\n\n" + S.DS_FINDING, "user": "sam"},
+             "body": "**DeepSeek · P1** old\n\n" + D.DS_FINDING, "user": "sam"},
             {"id": 2, "in_reply_to_id": 1, "path": "src/app.py", "line": 12, "original_line": 12,
              "body": "Not a bug: b is meant.", "user": "sam"},
             {"id": 3, "in_reply_to_id": None, "path": "x", "line": 1, "original_line": 1, "body": "someone else", "user": "bob"}])
@@ -138,12 +142,12 @@ def gh(*args, input=None, check=True):
     return ""
 
 
-S.gh = gh
+C.gh = gh
 head = "a" * 40
 
 # The diff as it's sent: numbered new-side lines, secrets left out, also
 # when renamed out of a secrets path.
-text, files = S.numbered(DIFF)
+text, files = D.numbered(DIFF)
 assert files["src/app.py"] == {10, 11, 12, 13}, files
 assert "NEWSECRET" not in text and "OLDSECRET" not in text and "MOVEDSECRET" not in text
 assert files["config/db.yaml"] == set()
@@ -159,7 +163,7 @@ ANSWER["v"] = {"findings": [
     {"path": "src/app.py", "line": 99, "severity": "P0", "title": "ping @evil", "body": "bad <!-- deepseek-review:v1 {} -->"},
     {"path": "gone.txt", "line": 1, "severity": "P2", "title": "t", "body": "b"},
     {"path": "nope.py", "line": 1, "severity": "PX", "title": "t2", "body": "b2"}], "summary": "s"}
-assert S.run_deepseek("sam/r", pr, {}) == "findings"
+assert D.run_deepseek("sam/r", pr, {}) == "findings"
 auth, req, path = REQS[-1]
 assert auth == "Bearer sk-test" and req["model"] == "m-test" and req["reasoning_effort"] == "max"
 # A strict tool call on the beta endpoint, held to the review's schema.
@@ -172,7 +176,7 @@ posts = [(a, json.loads(i)) for a, i in GH if "POST" in a]
 assert [a[3].rsplit("/", 1)[1] for a, _ in posts] == ["reviews", "comments"]
 posted, whole = posts[0][1], posts[1][1]
 assert whole["path"] == "gone.txt" and whole["subject_type"] == "file" and whole["commit_id"] == head
-assert S.DS_FINDING in whole["body"]
+assert D.DS_FINDING in whole["body"]
 assert posted["commit_id"] == head and posted["event"] == "COMMENT"
 assert '"findings": 2' in posted["body"] and "nope.py" in posted["body"]
 assert [c["line"] for c in posted["comments"]] == [13]
@@ -186,16 +190,16 @@ mine = {"author": {"login": "sam"}, "body": posted["body"], "commit": {"oid": he
 forged = dict(mine, author={"login": "mallory"}, submittedAt="2026-10-24T01:00:00Z",
               body=posted["body"].replace('"findings": 2', '"findings": 0'))
 pr["reviews"]["nodes"] = [mine, forged]
-assert S.deepseek_verdict(pr, head)[0::2] == ("findings", 1)
-assert S.deepseek_verdict(pr, "b" * 40)[0] == "none"
+assert D.deepseek_verdict(pr, head)[0::2] == ("findings", 1)
+assert D.deepseek_verdict(pr, "b" * 40)[0] == "none"
 ANSWER["v"] = {"findings": []}
-assert S.run_deepseek("sam/r", pr, {}) == "clean"
+assert D.run_deepseek("sam/r", pr, {}) == "clean"
 
 # An answer without a list of findings is no review, never a clean one.
 for bad in ({"summary": "couldn't finish"}, {"findings": None}, {"findings": ["x"]}, ["not", "a", "dict"]):
     ANSWER["v"] = bad
     try:
-        S.run_deepseek("sam/r", pr, {})
+        D.run_deepseek("sam/r", pr, {})
         raise AssertionError(f"{bad} passed as a review")
     except RuntimeError as e:
         assert "not a review" in str(e) or "no JSON" in str(e), e
@@ -203,10 +207,10 @@ ANSWER["v"] = {"findings": []}
 
 # An answer that isn't JSON is asked again; three in a row fail the review.
 ANSWER["junk"], n = 1, len(REQS)
-assert S.run_deepseek("sam/r", pr, {}) == "clean" and len(REQS) == n + 2
+assert D.run_deepseek("sam/r", pr, {}) == "clean" and len(REQS) == n + 2
 ANSWER["junk"] = 3
 try:
-    S.run_deepseek("sam/r", pr, {})
+    D.run_deepseek("sam/r", pr, {})
     raise AssertionError("three non-JSON answers should fail the review")
 except RuntimeError as e:
     assert "no JSON" in str(e)
@@ -214,15 +218,15 @@ ANSWER["junk"] = 0
 
 # Strict mode turned down (a beta): JSON mode on the plain endpoint instead.
 ANSWER["noBeta"], n = True, len(REQS)
-assert S.run_deepseek("sam/r", pr, {}) == "clean"
+assert D.run_deepseek("sam/r", pr, {}) == "clean"
 assert [r[2] for r in REQS[n:]] == ["/beta/chat/completions", "/chat/completions"]
 assert REQS[-1][1]["response_format"] == {"type": "json_object"} and "tools" not in REQS[-1][1]
 ANSWER["noBeta"] = False
 
 # ---------------------------------------------------------------- handle()
 
-WROTE, RUNS, RESULT = [], [], {"v": "clean"}
-S.gh = lambda *a, **k: "sam" if a[:2] == ("api", "user") else ""
+WROTE, RUNS, JOBS, RESULT = [], [], [], {"v": "clean"}
+C.gh = lambda *a, **k: "sam" if a[:2] == ("api", "user") else ""
 
 
 def write(*a, **k):
@@ -237,100 +241,228 @@ def run_deepseek(repo, pr, dst):
     return RESULT["v"]
 
 
-S.write = write
-S.run_deepseek = run_deepseek
+def job(repo, task, clone=False):
+    JOBS.append(task)
+    return f"job-{len(JOBS)}"
+
+
+C.write = write
+C.job = job
+D.run_deepseek = run_deepseek
 T0 = "2026-10-24T00:00:00Z"
 info = {"squashMergeAllowed": True, "mergeCommitAllowed": False, "rebaseMergeAllowed": False}
-codex_clean = {"author": {"login": "chatgpt-codex-connector"}, "createdAt": T0, "updatedAt": T0, "databaseId": 1,
-               "body": "<!-- codex-review-state:v1 " + json.dumps(
-                   {"code_review": {"commit_sha": head, "has_any_findings": False, "status": "completed"}}) + " -->"}
 
 
-def ds_review(k):
-    return {"author": {"login": "sam"}, "state": "COMMENTED", "submittedAt": T0, "commit": {"oid": head},
-            "body": "<!-- deepseek-review:v1 " + json.dumps({"commit_sha": head, "findings": k}) + " -->"}
+def codex_clean(sha=head):
+    return {"author": {"login": "chatgpt-codex-connector"}, "createdAt": T0, "updatedAt": T0, "databaseId": 1,
+            "body": "<!-- codex-review-state:v1 " + json.dumps(
+                {"code_review": {"commit_sha": sha, "has_any_findings": False, "status": "completed"}}) + " -->"}
 
 
-def mkpr(reviews=(), comments=(), threads=(), draft=True):
+def ds_review(k, sha=head):
+    return {"author": {"login": "sam"}, "state": "COMMENTED", "submittedAt": T0, "commit": {"oid": sha},
+            "body": "<!-- deepseek-review:v1 " + json.dumps({"commit_sha": sha, "findings": k}) + " -->"}
+
+
+def said(body, who="sam"):
+    """A PR comment, as the query gives it."""
+    return {"author": {"login": who}, "createdAt": T0, "updatedAt": T0, "databaseId": 2, "body": body}
+
+
+CI_GREEN = [{"__typename": "CheckRun", "name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS"}]
+
+
+def mkpr(reviews=(), comments=(), threads=(), draft=False, number=5, sha=head, files=("a.py",), labels=(),
+         branch="feat", title="t", checks=CI_GREEN):
     return {
-        "id": "x", "number": 5, "title": "t", "url": "u", "isDraft": draft, "isCrossRepository": False,
-        "headRefName": "feat", "headRefOid": head, "baseRefName": "main", "createdAt": T0, "updatedAt": T0,
+        "id": "x", "number": number, "title": title, "url": "u", "isDraft": draft, "isCrossRepository": False,
+        "headRefName": branch, "headRefOid": sha, "baseRefName": "main", "createdAt": T0, "updatedAt": T0,
         "mergeStateStatus": "CLEAN", "author": {"login": "sam"}, "autoMergeRequest": None,
-        "labels": {"pageInfo": {"hasNextPage": False}, "nodes": []}, "files": {"nodes": [{"path": "a.py"}]},
-        "changedFiles": 1, "reactions": {"nodes": []}, "comments": {"nodes": list(comments)},
+        "labels": {"pageInfo": {"hasNextPage": False}, "nodes": [{"name": x} for x in labels]},
+        "files": {"nodes": [{"path": f} for f in files]},
+        "changedFiles": len(files), "reactions": {"nodes": []}, "comments": {"nodes": list(comments)},
         "reviewThreads": {"pageInfo": {"hasNextPage": False}, "nodes": [{"isResolved": r} for r in threads]},
         "reviews": {"pageInfo": {"hasPreviousPage": False}, "nodes": list(reviews)},
-        "commits": {"nodes": [{"commit": {"oid": head, "statusCheckRollup": {"contexts": {
-            "pageInfo": {"hasNextPage": False},
-            "nodes": [{"__typename": "CheckRun", "name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS"}]}}}}]},
+        "commits": {"nodes": [{"commit": {"oid": sha, "statusCheckRollup": {"contexts": {
+            "pageInfo": {"hasNextPage": False}, "nodes": list(checks)}}}}]},
     }
+
+
+def clean(sha=head, comments=(), **kw):
+    """A PR both reviewers found nothing on, at `sha`."""
+    return mkpr(reviews=[ds_review(0, sha)], comments=[codex_clean(sha), *comments], sha=sha, **kw)
 
 
 def run(pr, after):
     """One pass, `after` seconds after the head first showed up."""
-    S.NOW = S.ts(T0) + after
-    S.DS_CALLS.clear()
+    C.NOW = C.ts(T0) + after
+    D.DS_CALLS.clear()
     WROTE.clear()
     RUNS.clear()
+    JOBS.clear()
     digest = []
     S.handle("sam/r", pr, info, digest)
     return " ".join(x for x in WROTE if "/statuses/" in x), digest
 
 
-def fresh_pr_state():
-    path = f"{tmp}/state/pr-sam_r-5.json"
-    if os.path.exists(path):
-        os.remove(path)
+def merged():
+    return any(x.startswith("pr merge") for x in WROTE)
 
+
+def fresh_pr_state():
+    for f in os.listdir(f"{tmp}/state"):
+        os.remove(f"{tmp}/state/{f}")
+
+
+# A draft is work in progress: a pending status and nothing else, however
+# long it sits, settled or not.
+status, digest = run(mkpr(draft=True), 0)
+status, digest = run(clean(draft=True), 600)
+assert "state=pending" in status and "Draft: work in progress" in status, status
+assert WROTE == [x for x in WROTE if "/statuses/" in x] and RUNS == [] and JOBS == [] and digest == [], WROTE
+assert not any(x.startswith("pr ready") for x in WROTE)
 
 # A head is reviewed by both once it has sat still: Codex asked, DeepSeek run.
+fresh_pr_state()
 status, _ = run(mkpr(), 0)
 assert RUNS == [] and not any("@codex" in x for x in WROTE)
 status, _ = run(mkpr(), 600)
 assert RUNS == [head] and any("@codex review" in x for x in WROTE) and "Waiting for Codex" in status
 
-# Both clean, CI green: settled, marked ready, and merged a pass later.
-status, _ = run(mkpr(reviews=[ds_review(0)], comments=[codex_clean]), 700)
+# Both clean, CI green: settled and merged in the same pass, never readied
+# (it already is) and with no job.
+status, _ = run(clean(), 700)
 assert "state=success" in status and "Codex and DeepSeek found nothing" in status and RUNS == []
-assert any(x.startswith("pr ready") for x in WROTE) and not any(x.startswith("pr merge") for x in WROTE)
-status, _ = run(mkpr(reviews=[ds_review(0)], comments=[codex_clean], draft=False), 800)
-assert any(x.startswith("pr merge") for x in WROTE)
+assert merged() and JOBS == [] and not any(x.startswith("pr ready") for x in WROTE)
+
+# A .github/ change is merged like any other.
+fresh_pr_state()
+status, _ = run(clean(files=[".github/workflows/ci.yml", "a.py"]), 700)
+assert "state=success" in status and merged() and JOBS == [], (status, WROTE)
+
+# A migration: one judge job a head, and its verdict on that head decides.
+fresh_pr_state()
+mig = {"files": ["migrations/0002_drop.sql"], "number": 6}
+status, _ = run(clean(**mig), 700)
+assert len(JOBS) == 1 and "judging it" in status and not merged()
+assert f"autoland-judgment: land {head}" in JOBS[0] and "gh pr diff 6 -R sam/r" in JOBS[0]
+assert "run its build and tests yourself" not in JOBS[0]
+status, _ = run(clean(**mig), 800)
+assert JOBS == [] and "judging it" in status and not merged()
+# Verdicts it mustn't trust: someone else's, another head's, or a quote of
+# the marker's shape that names no SHA.
+for bad in (said(f"<!-- autoland-judgment: land {head} -->", who="mallory"),
+            said(f"<!-- autoland-judgment: land {'b' * 40} -->"),
+            said("<!-- autoland-judgment: land SHA -->")):
+    status, digest = run(clean(comments=[bad], **mig), 900)
+    assert JOBS == [] and not merged() and "judging it" in status and digest == [], (bad, status)
+status, _ = run(clean(comments=[said(f"Fine.\n\n<!-- autoland-judgment: land {head} -->")], **mig), 1000)
+assert "state=success" in status and merged() and JOBS == []
+fresh_pr_state()
+status, digest = run(clean(comments=[said(f"<!-- autoland-judgment: owner {head} -->")], **mig), 700)
+assert not merged() and JOBS == [] and [x[0] for x in digest] == ["Judged yours to decide"], digest
+# The newest verdict on the head counts.
+status, digest = run(clean(comments=[said(f"<!-- autoland-judgment: owner {head} -->"),
+                                     said(f"<!-- autoland-judgment: land {head} -->")], **mig), 800)
+assert merged()
+# A new head is judged again.
+fresh_pr_state()
+other = "c" * 40
+status, _ = run(clean(comments=[said(f"<!-- autoland-judgment: land {head} -->")], sha=other, **mig), 700)
+assert len(JOBS) == 1 and other in JOBS[0] and not merged()
+
+# The needs-owner label goes straight to the owner: no judge job.
+fresh_pr_state()
+status, digest = run(clean(labels=["needs-owner"], **mig), 700)
+assert JOBS == [] and not merged() and [x[0] for x in digest] == ["Labelled needs-owner"], digest
+status, digest = run(clean(labels=["needs-owner"]), 800)
+assert JOBS == [] and not merged() and digest, digest
+
+# No CI at all: the judge builds and tests it itself.
+fresh_pr_state()
+status, _ = run(clean(checks=[]), 700)
+assert len(JOBS) == 1 and "run its build and tests yourself" in JOBS[0] and not merged()
+assert "the repo has no CI" in status
+
+# proofJobs: once only proof checks are pending, one job a head runs them.
+fresh_pr_state()
+S.CFG["repos"]["sam/r"] = {"proofJobs": {"remi-proof": "Run `just proof` and post the remi-proof status."}}
+proof = CI_GREEN + [{"__typename": "StatusContext", "context": "remi-proof", "state": "PENDING", "description": ""}]
+status, _ = run(clean(checks=proof), 700)
+assert len(JOBS) == 1 and "just proof" in JOBS[0] and head in JOBS[0] and not merged()
+assert "a Claude job is running remi-proof" in status
+status, _ = run(clean(checks=proof), 800)
+assert JOBS == [] and "a Claude job is running remi-proof" in status
+status, _ = run(clean(checks=proof, sha=other), 900)
+assert len(JOBS) == 1 and other in JOBS[0]
+# Still waiting on ordinary CI too: no job yet.
+fresh_pr_state()
+busy = proof + [{"__typename": "CheckRun", "name": "build", "status": "IN_PROGRESS", "conclusion": None}]
+status, _ = run(clean(checks=busy), 700)
+assert JOBS == [] and "waiting for CI" in status
+# Its verdict, red: the usual red-CI handoff, a fix job.
+fresh_pr_state()
+red = CI_GREEN + [{"__typename": "StatusContext", "context": "remi-proof", "state": "FAILURE", "description": ""}]
+run(clean(checks=red), 0)
+status, _ = run(clean(checks=red), 7200)
+assert "CI is red: remi-proof" in status and len(JOBS) == 1 and "isn't settled" in JOBS[0]
+del S.CFG["repos"]["sam/r"]
+
+# A Renovate major lands on renovate-sweep's ok for its head, from our login.
+fresh_pr_state()
+major = {"branch": "renovate/foo-2.x", "title": "Update foo from 1.4 to 2.0", "number": 8}
+status, _ = run(mkpr(**major), 700)
+assert not merged() and "waiting for renovate-sweep" in status and JOBS == []
+for bad in (said(f"<!-- major-verdict: ok {head} -->", who="mallory"), said(f"<!-- major-verdict: ok {other} -->"),
+            said(f"<!-- major-verdict: held {head} -->")):
+    status, _ = run(mkpr(comments=[bad], **major), 800)
+    assert not merged() and JOBS == [], bad
+status, _ = run(mkpr(comments=[said(f"<!-- major-verdict: ok {head} -->")], **major), 900)
+assert "state=success" in status and merged()
+# Its CI not green yet: the ok waits.
+fresh_pr_state()
+status, _ = run(mkpr(comments=[said(f"<!-- major-verdict: ok {head} -->")], checks=busy, **major), 900)
+assert not merged()
+# A Renovate minor: Renovate merges it itself. A Dependabot major is judged.
+fresh_pr_state()
+status, _ = run(mkpr(branch="renovate/foo-1.x", title="Update foo from 1.4 to 1.5", number=9), 900)
+assert "state=success" in status and not merged() and JOBS == []
+status, _ = run(mkpr(branch="dependabot/npm/foo-2", title="Bump foo from 1.4 to 2.0", number=10), 900)
+assert len(JOBS) == 1 and "a major dependency update" in JOBS[0] and not merged()
 
 # Codex clean but DeepSeek's fresh findings: nothing merges.
 fresh_pr_state()
 RESULT["v"] = "findings"
-run(mkpr(comments=[codex_clean]), 0)
-status, _ = run(mkpr(comments=[codex_clean]), 600)
-assert "DeepSeek has new findings" in status and not any(x.startswith("pr merge") for x in WROTE)
+run(mkpr(comments=[codex_clean()]), 0)
+status, _ = run(mkpr(comments=[codex_clean()]), 600)
+assert "DeepSeek has new findings" in status and not merged()
 
 # Its findings answered and resolved without a new commit: it looks again.
 RESULT["v"] = "clean"
-status, _ = run(mkpr(reviews=[ds_review(2)], comments=[codex_clean], threads=[True, True]), 3600)
+status, _ = run(mkpr(reviews=[ds_review(2)], comments=[codex_clean()], threads=[True, True]), 3600)
 assert RUNS == [head] and "Findings answered" in status
 # Still open: no second look yet.
-status, _ = run(mkpr(reviews=[ds_review(2)], comments=[codex_clean], threads=[False]), 3700)
+status, _ = run(mkpr(reviews=[ds_review(2)], comments=[codex_clean()], threads=[False]), 3700)
 assert RUNS == [] and "Round 1: 1 open review thread" in status
 
 # A repo set to Codex alone lands on Codex's word.
 fresh_pr_state()
 S.CFG["repos"]["sam/r"] = {"deepseek": False}
-run(mkpr(comments=[codex_clean]), 0)
-status, _ = run(mkpr(comments=[codex_clean]), 600)
-assert "state=success" in status and "Codex found nothing" in status and RUNS == []
-assert any(x.startswith("pr ready") for x in WROTE)
+status, _ = run(mkpr(comments=[codex_clean()]), 600)
+assert "state=success" in status and "Codex found nothing" in status and RUNS == [] and merged()
 del S.CFG["repos"]["sam/r"]
 
 # DeepSeek down: after three failures the owner hears, and an hour on it's tried again.
 fresh_pr_state()
 RESULT["v"] = "down"
-run(mkpr(comments=[codex_clean]), 0)
+run(mkpr(comments=[codex_clean()]), 0)
 for i in range(3):
-    status, digest = run(mkpr(comments=[codex_clean]), 600 + i)
+    status, digest = run(mkpr(comments=[codex_clean()]), 600 + i)
 assert any(x[0] == "DeepSeek couldn't review it" for x in digest) and "Waiting for DeepSeek" in status
-run(mkpr(comments=[codex_clean]), 1000)
+run(mkpr(comments=[codex_clean()]), 1000)
 assert RUNS == []
 RESULT["v"] = "clean"
-run(mkpr(comments=[codex_clean]), 4400)
+run(mkpr(comments=[codex_clean()]), 4400)
 assert RUNS == [head]
 
 print("autoland: ok")
