@@ -265,15 +265,15 @@ fi
 # Not a failed unit: one would read as a broken update in the health check
 # after a switch. The journal says it every pass, the owner after an hour.
 [ ${#unreached[@]} = 0 ] || echo "couldn't reach GitHub for ${unreached[*]}; trying again in five minutes" >&2
-long=()
-for f in "$STATE"/.unreached/*; do
+long=() left=("$STATE"/.unreached/*)
+for f in "${left[@]}"; do
   [ -e "$f" ] || continue
   [ $(($(date +%s) - $(cat "$f"))) -le 3600 ] || long+=("${f##*/}")
 done
 if [ ${#long[@]} -gt 0 ]; then
   [ -z "$NOTIFY" ] || "$NOTIFY" open proj-inbox "proj-inbox can't reach GitHub" \
     "For over an hour, proj-inbox on $HOST hasn't been able to read or comment on issues in: $(printf '%s\n' "${long[@]}" | sed 's#_#/#' | sort | paste -sd' '). Issues labelled \`$LABEL\` there wait until it can. \`journalctl -u 'proj-inbox*'\` has the errors (a rate limit, often)."
-elif ! compgen -G "$STATE/.unreached/*" >/dev/null; then
+elif [ ! -e "${left[0]}" ]; then
   # Every pass that reaches everything: a close that didn't get through is
   # tried again, and with nothing open it's a no-op that doesn't ask GitHub.
   [ -z "$NOTIFY" ] || "$NOTIFY" close proj-inbox "proj-inbox reaches GitHub again."

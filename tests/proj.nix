@@ -518,7 +518,10 @@ pkgs.testers.runNixOSTest {
         machine.succeed("su - dev -c 'proj-inbox o/r'")
         machine.succeed(f"test -s {gone}/o_r")
         machine.succeed("mv /tmp/gh/kept /tmp/gh/repos_o_r_issues")
-        machine.succeed("su - dev -c 'proj-inbox o/r'")
+        # The pass that reaches everything again, whole (its shell has no
+        # compgen, for one).
+        out = machine.succeed("su - dev -c 'proj-inbox o/r' 2>&1")
+        assert "command not found" not in out, out
         assert machine.succeed(f"ls -A {gone}").strip() == "", machine.succeed(f"ls -A {gone}")
         # One whose clone is gone is out of reach no more, after a full pass.
         machine.succeed(f"su - dev -c 'echo 0 >{gone}/sam_gone'")
