@@ -451,6 +451,8 @@ in
       environment.systemPackages = [ advisoryWatch pkgs.vulnix pkgs.osv-scanner ];
       systemd.services.advisory-watch = online // {
         description = "Look for new vulnerabilities in what the system and its projects run";
+        # A switch leaves a running one be (see burrow.switch's check).
+        restartIfChanged = false;
         serviceConfig = {
           Type = "oneshot";
           ExecStart = "${advisoryWatch}/bin/advisory-watch";
@@ -516,6 +518,8 @@ in
       # Renovate as the user, with gh's login, like the other jobs that talk to GitHub.
       systemd.services.renovate = online // {
         description = "Renovate: dependency PRs for every repo";
+        # A switch leaves a running one be (see burrow.switch's check).
+        restartIfChanged = false;
         environment = {
           RENOVATE_CONFIG_FILE = renovateConfig;
           LOG_LEVEL = "info";

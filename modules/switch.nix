@@ -47,6 +47,36 @@ let
     (base ++ [ config.nix.package ] ++ lib.optional cfg.trialBoot.enable bootTool);
 
   watchdog = config.systemd.settings.Manager.RuntimeWatchdogSec or null != null;
+
+  # A time span in seconds: one number and unit. Zero, infinity and anything
+  # else count as unbounded (null), so the check below errs towards flagging.
+  seconds = span:
+    let
+      m = builtins.match "([0-9]+) *([a-z]*)" (toString span);
+      unit = {
+        "" = 1; s = 1; sec = 1; second = 1; seconds = 1;
+        m = 60; min = 60; minute = 60; minutes = 60;
+        h = 3600; hr = 3600; hour = 3600; hours = 3600;
+        d = 86400; day = 86400; days = 86400;
+      }.${lib.elemAt m 1} or null;
+    in if m == null || unit == null || lib.toInt (lib.head m) == 0 then null
+      else lib.toInt (lib.head m) * unit;
+
+  # A switch restarts a changed unit that is running (or, with
+  # RemainAfterExit, has run) and waits for it. A oneshot that may run longer
+  # than the confirm window then holds the switch past its own revert, which
+  # can't take the lock and fails the activation.
+  # Only a declared timeout counts: most of NixOS's own oneshots set none and
+  # are meant to rerun on a switch, so a job that can run long says so.
+  longOneshots = lib.attrNames (lib.filterAttrs (_: s:
+    let
+      sc = s.serviceConfig;
+      t = if sc.TimeoutStartSec or null != null then sc.TimeoutStartSec else sc.TimeoutSec or null;
+    in s.enable && s.restartIfChanged
+      && (sc.Type or null) == "oneshot"
+      && t != null
+      && (let n = seconds t; w = seconds cfg.confirmWithin; in n == null || w == null || n >= w)
+  ) config.systemd.services);
 in
 {
   imports = [
@@ -99,6 +129,15 @@ in
 
   config = lib.mkIf cfg.enable (lib.mkMerge [
     {
+      assertions = [{
+        assertion = longOneshots == [ ];
+        message = ''
+          These oneshot services may run longer than burrow.switch.confirmWithin
+          (${cfg.confirmWithin}), and a switch that finds one running restarts it and waits:
+          ${lib.concatStringsSep ", " longOneshots}. Give each restartIfChanged = false,
+          so a switch leaves a running one be and the next run is the new one.'';
+      }];
+
       environment.systemPackages = [ switchTool confirmTool ];
       burrow.tools = { switch = switchTool; confirm = confirmTool; };
 
