@@ -77,6 +77,7 @@ def me():
 
 
 _key = []
+KEY_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 def seal(repo, n, name, verdict, head, base):
@@ -91,16 +92,41 @@ def seal(repo, n, name, verdict, head, base):
         # verdicts the real passes' judges wrote; a dry run with none yet
         # writes nothing and makes do with one of its own.
         path = os.path.join(CFG["stateDir"], "verdict.key")
+        if DRY and not os.path.exists(path):
+            _key.append(os.urandom(32).hex())
+            return seal(repo, n, name, verdict, head, base)
         try:
-            if DRY and not os.path.exists(path):
-                _key.append(os.urandom(32).hex())
-                return seal(repo, n, name, verdict, head, base)
-            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            key = open(path).read().strip()
+        except FileNotFoundError:
+            key = None
+        if not KEY_RE.match(key or ""):
+            if DRY:
+                raise RuntimeError(f"{path} isn't a key: the steward's next pass makes a new one")
+            # Missing, or cut short (a crash or a full disk as it was made):
+            # an empty or short key is one anyone could seal with, so a new
+            # one, whole or not at all. Verdicts sealed with a damaged one
+            # stop counting, and their judges are asked again.
+            if key is not None:
+                log(f"{path} isn't a key; making a new one")
+            tmp = f"{path}.{os.getpid()}.new"
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
             with os.fdopen(fd, "w") as f:
                 f.write(os.urandom(32).hex())
-        except FileExistsError:
-            pass
-        _key.append(open(path).read().strip())
+                f.flush()
+                os.fsync(f.fileno())
+            if key is None:
+                # Linked in whole, and only if no one made one meanwhile.
+                try:
+                    os.link(tmp, path)
+                except FileExistsError:
+                    pass
+                os.remove(tmp)
+            else:
+                os.replace(tmp, path)
+            key = open(path).read().strip()
+            if not KEY_RE.match(key):
+                raise RuntimeError(f"{path} couldn't be written")
+        _key.append(key)
     msg = f"{repo}#{n} {name} {verdict} {head} {base}".encode()
     return hmac.new(_key[0].encode(), msg, hashlib.sha256).hexdigest()[:32]
 
