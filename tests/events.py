@@ -145,6 +145,7 @@ line = E.Line()
 line.event(E.FULL, 0)
 started = []
 RUNNING = set()  # units already running when asked for
+FAILING = set()  # units whose pass fails
 
 
 def systemctl(cmd, **kw):
@@ -153,6 +154,7 @@ def systemctl(cmd, **kw):
     started.append(cmd)
     with open(wake, "w") as f:
         json.dump({"sam/next": 1}, f)  # what the pass booked
+    return types.SimpleNamespace(returncode=1 if cmd[-1] in FAILING else 0)
 
 
 E.serve("autoland", h, line, run=systemctl, once=True)
@@ -169,6 +171,19 @@ line.event(E.FULL, 0)
 E.serve("autoland", h, line, run=systemctl, once=True)
 assert started == [["systemctl", "start", "autoland.service"]] * 2, started
 RUNNING.clear()
+# A pass that failed (killed at its timeout, say) runs again a minute later,
+# then two, up to an hour, and from scratch once one goes through: nothing
+# else may come for it.
+FAILING.add("autoland.service")
+line = E.Line()
+line.event(E.FULL, 0)
+before = E.time.time()
+E.serve("autoland", h, line, run=systemctl, once=True)
+assert before + 60 <= line.due[E.FULL] <= E.time.time() + 60, line.due
+assert [line.done(E.FULL, False, 0) for _ in range(7)] == [120, 240, 480, 960, 1920, 3600, 3600]
+FAILING.clear()
+line.done(E.FULL, True, 0)
+assert line.done(E.FULL, False, 0) == 60 and line.done("sam/r", False, 0) == 60
 print("passes: ok")
 
 # With no handlers the service still runs: exiting would be a restart every

@@ -45,6 +45,8 @@ MAX_BODY = 25 * 1024 * 1024  # GitHub's cap on a delivery
 # OWNER/REPO as GitHub has them, and never one that reads as an option.
 REPO_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_.][A-Za-z0-9_.-]*$")
 FULL = ""  # a full pass's place in a line
+RETRY = 60  # a pass that failed runs again this long after, doubling each time it fails again
+RETRY_MAX = 3600
 
 
 def log(msg):
@@ -81,6 +83,7 @@ class Line:
 
     def __init__(self):
         self.due, self.last = {}, {}
+        self.fails = {}  # passes in a row that failed, by repo
         # Something came in since the last take: the wait after it returns
         # at once instead of sleeping through what it missed.
         self.news = False
@@ -125,6 +128,19 @@ class Line:
             later = [max(at, self.last.get(r, 0) + GAP) for r, at in self.due.items()]
             return ready, (min(later) - now if later else None)
 
+    def done(self, repo, ok, now):
+        """A pass ended. One that failed (or never started) runs again a
+        minute later, then two, up to an hour: no other event may come for
+        it, and once one goes through its unit isn't failed any more."""
+        if ok:
+            self.fails.pop(repo, None)
+            return None
+        n = self.fails[repo] = self.fails.get(repo, 0) + 1
+        at = now + min(RETRY * 2 ** (n - 1), RETRY_MAX)
+        with self.cond:
+            self.due[repo] = min(self.due.get(repo, at), at)
+        return at
+
     def wait(self, timeout):
         with self.cond:
             if not self.news:
@@ -153,9 +169,12 @@ def serve(name, h, line, run=subprocess.run, once=False):
             # began before this pass was due, and asking for it again only
             # waits for that one: so it runs again once that one is done.
             busy = run(["systemctl", "show", "-P", "ActiveState", u], capture_output=True, text=True).stdout.strip() == "activating"
-            run(["systemctl", "start", u])
+            ok = run(["systemctl", "start", u]).returncode == 0
             if busy:
-                run(["systemctl", "start", u])
+                ok = run(["systemctl", "start", u]).returncode == 0
+            again = line.done(repo, ok, time.time())
+            if again:
+                log(f"{name}: {repo or 'full pass'} failed; again in {round(again - time.time())}s")
         if ready and h.get("wake"):
             line.wakes(booked(h["wake"]))
         if once:
