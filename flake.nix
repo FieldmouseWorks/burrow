@@ -82,7 +82,7 @@
         # The steward's DeepSeek reviewer, with stand-ins for gh and the API,
         # and its one-way paths as the module sets them.
         autoland = pkgs.runCommand "autoland-check" { nativeBuildInputs = [ pkgs.python3 pkgs.git ]; } ''
-          python3 -I ${./tests/autoland.py} ${./modules/autoland}/steward.py \
+          python3 -I ${./tests/autoland}/check.py ${./modules/autoland}/steward.py \
             ${pkgs.writeText "one-way.json" (builtins.toJSON self.nixosConfigurations.example.config.burrow.autoland.oneWay)}
           touch $out
         '';
