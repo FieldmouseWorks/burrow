@@ -91,8 +91,10 @@ def hidden(path):
 
 def rules(mirror, rev, paths):
     """The `## Code Review Rules` of the AGENTS.md nearest each changed file,
-    as `rev` (the base branch) has them: a PR can't rewrite its own rules."""
-    have = set(git("-C", mirror, "ls-tree", "-r", "-z", "--name-only", rev).decode().split("\0"))
+    as `rev` (the base branch) has them: a PR can't rewrite its own rules.
+    An AGENTS.md in a secrets path is never read: its rules would reach the
+    reviewers in the prompt."""
+    have = {f for f in git("-C", mirror, "ls-tree", "-r", "-z", "--name-only", rev).decode().split("\0") if not hidden(f)}
     wanted = set()
     for p in paths:
         d = p
@@ -195,7 +197,7 @@ def snapshot(repo, pr, key):
     git("-C", dst, "fetch", "-q", "--no-tags", mirror, f"refs/snap/{name}:refs/heads/review", env=bare)
     git("-C", mirror, "update-ref", "-d", f"refs/snap/{name}")
     git("-C", dst, "checkout", "-q", "review", env=bare)
-    meta = {"rules": rules(mirror, f"refs/base/{base}", changed), "secret": [p for p in changed if hidden(p) or p in moved],
+    meta = {"rules": rules(mirror, f"refs/base/{base}", [p for p in changed if not (hidden(p) or p in moved)]), "secret": [p for p in changed if hidden(p) or p in moved],
             "moved": sorted(p for p in moved if not hidden(p))}
     save(f"{SNAP}/{name}.json", meta)
     return name, meta

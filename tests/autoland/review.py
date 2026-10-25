@@ -28,6 +28,7 @@ put("src/app.py", "def f():\n    a = 1\n    return a\n")
 put("AGENTS.md", "# r\n\n## Code Review Rules\n\n- root rule\n")
 put("src/AGENTS.md", "# x\n\n## Code Review Rules\n\n- never call eval\n\n## Other\nnot rules\n")
 put("secrets/remi.yaml", "key: OLDSECRET\n")
+put("secrets/AGENTS.md", "## Code Review Rules\n\n- the vault's rule\n")
 put(".env", "TOKEN=ENVSECRET\n")
 put("secrets/db.yaml", "password: MOVEDSECRET\nport: 1\n")
 put("secrets/api.yaml", "token: COPIEDSECRET\n")
@@ -98,6 +99,8 @@ assert meta["moved"] == ["cfg/api.yaml", "config/db.yaml"] and V.moved("pr-sam_r
 # The rules are the base's, nearest each changed file: the PR's own edit to them doesn't count.
 assert "never call eval" in meta["rules"] and "root rule" in meta["rules"], meta["rules"]
 assert "eval is fine" not in meta["rules"] and "not rules" not in meta["rules"], meta["rules"]
+# A secrets path's own AGENTS.md is a secret too: its rules stay out of the prompt.
+assert "vault" not in meta["rules"], meta["rules"]
 # Taken once a head: asked again, it's the same one.
 assert V.snapshot("sam/r", snap_pr, "pr-sam_r-5.json") == (name, meta)
 
