@@ -382,6 +382,17 @@ pkgs.testers.runNixOSTest {
         machine.succeed("su - dev -c 'proj-inbox o/r'")
         assert json.loads(machine.succeed("cat /var/lib/burrow/proj-inbox/wake.json")) == {}
 
+    with subtest("a reply whose turn can't start is tried again in five minutes"):
+        old = machine.succeed("date -u -d '2 minutes ago' +%Y-%m-%dT%H:%M:%SZ").strip()
+        github("repos/o/r/issues/7/comments", json.dumps([{"id": 60, "user": {"login": "sam"}, "body": "and the docs", "created_at": old}]))
+        before = int(machine.succeed("date +%s"))
+        machine.succeed("su - dev -c 'env -u DBUS_SESSION_BUS_ADDRESS XDG_RUNTIME_DIR=/nonexistent proj-inbox o/r'")
+        assert machine.succeed(f"cat /data/dev/jobs/{job}/turns").strip() == "2"
+        wake = json.loads(machine.succeed("cat /var/lib/burrow/proj-inbox/wake.json"))
+        assert before + 300 <= wake.get("o/r", 0) <= int(machine.succeed("date +%s")) + 300, wake
+        github("repos/o/r/issues/7/comments", "[]")
+        machine.succeed("su - dev -c 'proj-inbox o/r'")
+
     with subtest("the inbox waits out a turn being started"):
         # A turn held halfway through starting (its number written, its unit
         # not yet), then put back: the inbox reads neither half alone.
