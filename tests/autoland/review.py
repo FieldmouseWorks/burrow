@@ -1,8 +1,5 @@
 """The reviewers' snapshot of a head (what they read, and what they never
-see), and the service that runs them on it.
-
-  python3 tests/autoland/review.py modules/autoland/steward.py
-"""
+see), and the service that runs them on it."""
 
 import contextlib
 import io
@@ -10,11 +7,9 @@ import json
 import os
 import shutil
 import subprocess
-import sys
 import time
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from stand_ins import C, V, W, agent, agent_runs, boxes, sh, tmp  # noqa: E402
+from harness import C, V, W, agent, agent_runs, boxes, sh, tmp
 
 # GitHub, as a bare repo: main, and PR 5's head on refs/pull/5/head.
 origin, work = f"{tmp}/origin/sam/r.git", f"{tmp}/work"
@@ -120,7 +115,6 @@ def gh(*args, input=None, check=True):
     return ""
 
 
-real_gh = C.gh
 C.gh = gh
 C.NOW = time.time()
 
@@ -246,4 +240,4 @@ back = queue_and_work("deepseek")
 assert back["result"] == "error" and "snapshot is gone" in back["error"], back
 os.remove(f"{tmp}/state/{V.SNAP}/{name}.json")
 
-print("autoland review: ok")
+print("review: ok")

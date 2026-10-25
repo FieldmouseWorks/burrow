@@ -79,11 +79,11 @@
         agents = import ./tests/agents.nix { inherit self pkgs; };
         # proj's queue and memory caps, with a stand-in for Claude.
         proj = import ./tests/proj.nix { inherit self pkgs; };
-        # The steward and its reviewers, with stand-ins for gh, git's remote and the agents.
-        autoland = pkgs.runCommand "autoland-check" { nativeBuildInputs = [ pkgs.python3 pkgs.git pkgs.gnutar ]; } ''
-          for t in review post handle; do
-            python3 -I ${./tests/autoland}/$t.py ${./modules/autoland}/steward.py
-          done
+        # The steward and its reviewers, with stand-ins for gh, git's remote and
+        # the agents, and its one-way paths as the module sets them.
+        autoland = pkgs.runCommand "autoland-check" { nativeBuildInputs = [ pkgs.python3 pkgs.git ]; } ''
+          python3 -I ${./tests/autoland}/check.py ${./modules/autoland}/steward.py \
+            ${pkgs.writeText "one-way.json" (builtins.toJSON self.nixosConfigurations.example.config.burrow.autoland.oneWay)}
           touch $out
         '';
         # Which Renovate PRs renovate-sweep hands over and lists, with stand-ins for gh and proj.

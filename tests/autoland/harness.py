@@ -1,0 +1,271 @@
+"""What the steward's checks share (check.py runs them): its config and
+state in a temp dir; stand-ins for gh, Claude jobs, GitHub's git remote and
+the review agents (each records how it was run, then does what it's told);
+and PRs shaped like its query's."""
+
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+
+tmp = tempfile.mkdtemp()
+os.makedirs(f"{tmp}/state")
+os.makedirs(f"{tmp}/cred")
+os.makedirs(f"{tmp}/home")
+with open(f"{tmp}/cred/deepseek", "w") as f:
+    f.write('DEEPSEEK_API_KEY="sk-test-0123456789"\n')
+
+# The review agents: each records how it was run, then does what AGENT says
+# (an answer, or an error on stderr and an exit code).
+AGENT_LOG, AGENT = f"{tmp}/agent-log", f"{tmp}/agent.json"
+os.makedirs(f"{tmp}/agents")
+for name in ("codex", "dsh"):
+    with open(f"{tmp}/agents/{name}", "w") as f:
+        f.write(f"""#!{sys.executable}
+import json, os, sys
+args = sys.argv[1:]
+prompt = sys.stdin.read()
+with open({AGENT_LOG!r}, "a") as f:
+    f.write(json.dumps({{"agent": {name!r}, "args": args, "cwd": os.getcwd(), "env": dict(os.environ), "prompt": prompt,
+                        "overlay": open(args[args.index("--patch") + 1]).read() if "--patch" in args else None}}) + "\\n")
+do = json.load(open({AGENT!r})).get({name!r}, {{}})
+if "effort" in do and do["effort"] not in json.dumps(args) + (open(args[args.index("--patch") + 1]).read() if "--patch" in args else ""):
+    print("dsh: error: thought too long", file=sys.stderr); sys.exit(1)
+if do.get("rc"):
+    print(do["err"], file=sys.stderr); sys.exit(do["rc"])
+out = do.get("say", "Looked.\\n" + json.dumps(do.get("answer", {{"findings": [], "summary": "fine"}})))
+if "-o" in args:  # codex writes its last message there, and prints it too
+    open(args[args.index("-o") + 1], "w").write(out)
+print(out)
+""")
+    os.chmod(f"{tmp}/agents/{name}", 0o755)
+
+
+# The sandbox: records how it was set up (and the git config it was given),
+# then runs the agent where it says.
+BOX_LOG = f"{tmp}/box-log"
+with open(f"{tmp}/bwrap", "w") as f:
+    f.write(f"""#!{sys.executable}
+import json, os, sys
+a = sys.argv[1:]
+cut = a.index("--")
+binds = [(a[i], a[i + 1], a[i + 2]) for i in range(cut) if a[i] in ("--bind", "--ro-bind", "--ro-bind-try")]
+git = [open(s).read() for k, s, d in binds if d.endswith("/.gitconfig")]
+with open({BOX_LOG!r}, "a") as f:
+    f.write(json.dumps({{"args": a[:cut], "binds": binds, "gitconfig": git}}) + "\\n")
+os.chdir(a[a.index("--chdir") + 1])
+os.execv(a[cut + 1], a[cut + 1:])
+""")
+os.chmod(f"{tmp}/bwrap", 0o755)
+
+
+def boxes():
+    runs = [json.loads(x) for x in open(BOX_LOG)]
+    open(BOX_LOG, "w").close()
+    return runs
+
+
+def agent(**do):
+    with open(AGENT, "w") as f:
+        json.dump(do, f)
+    open(AGENT_LOG, "w").close()
+
+
+def agent_runs():
+    return [json.loads(x) for x in open(AGENT_LOG)]
+
+
+agent()
+# The module's default one-way paths.
+with open(sys.argv[2]) as f:
+    ONE_WAY = json.load(f)
+with open(f"{tmp}/config.json", "w") as f:
+    json.dump({
+        "owners": ["sam"], "exclude": [], "context": "review-settled", "rulesets": True, "keepBranches": [],
+        "baselineJobs": False, "baselinePerPass": 1, "authors": ["sam", "dependabot", "renovate"],
+        "stateDir": f"{tmp}/state", "projectsDir": f"{tmp}/none", "renovateEmail": "bot@renovateapp.com", "proj": "proj", "owner": "Sam", "cleanBranches": False,
+        "labels": {"hold": "hold", "owner": "needs-owner"}, "notify": {"repo": "", "assignee": "", "label": "autoland"},
+        "defaults": {"rounds": 5,
+                     "oneWay": ONE_WAY, "handoffAfter": 30, "settleDelay": 3,
+                     "directPush": False, "ruleset": True, "requireCi": True,
+                     "proofJobs": {}, "codex": True, "deepseek": True},
+        "repos": {},
+        "reviewers": {"codex": {"enable": True, "effort": "high", "parallel": 2},
+                      "deepseek": {"enable": True, "effort": "max", "parallel": 2}},
+        "skipPaths": ["(^|/)secrets?/", r"\.(pem|key|p12|pfx)$", r"(^|/)\.env(\..*)?$"],
+        "agents": f"{tmp}/agents",
+        "sandbox": f"{tmp}/bwrap",
+    }, f)
+os.environ["AUTOLAND_CONFIG"] = f"{tmp}/config.json"
+os.environ["CREDENTIALS_DIRECTORY"] = f"{tmp}/cred"
+os.environ["HOME"] = f"{tmp}/home"
+os.environ["GH_TOKEN"] = "ghp_steward_token"  # never passed on to an agent
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(sys.argv[1])))
+sys.argv = ["steward"]
+import common as C  # noqa: E402,F401
+import repos as R  # noqa: E402,F401
+import review_worker as W  # noqa: E402,F401
+import reviewers as V  # noqa: E402,F401
+import steward as S  # noqa: E402,F401
+REAL_GH = C.gh  # the real one, before any check stands in for it
+
+for d in (V.QUEUE, V.SNAP, V.DONE, V.GIT):
+    os.makedirs(f"{tmp}/state/{d}")
+
+
+def sh(*a, cwd=None):
+    return subprocess.run(a, cwd=cwd, check=True, capture_output=True, text=True).stdout
+
+
+head = "a" * 40
+WROTE, JOBS, POSTED = [], [], []
+COMMITS = {}  # a PR's commits' author emails, by number, as `pr view --json commits` gives them
+PR_DIFF = {"v": ""}  # what `gh pr diff` gives
+
+
+def gh_stub(*a, **k):
+    if a[:2] == ("api", "user"):
+        return "sam"
+    if a[:2] == ("pr", "view") and "commits" in a:
+        return {"commits": [{"authors": [{"email": e}]} for e in COMMITS.get(int(a[2]), ["bot@renovateapp.com"])]}
+    if a[:2] == ("api", "repos/sam/r"):
+        return {"allow_auto_merge": True, "delete_branch_on_merge": True, "allow_squash_merge": True}
+    if a[:2] == ("pr", "diff"):
+        return PR_DIFF["v"]
+    return ""
+
+
+FAIL = []  # writes that fail (gh's None), by a piece of their arguments
+
+
+def write(*a, **k):
+    WROTE.append(" ".join(a))
+    return None if any(f in " ".join(a) for f in FAIL) else {}
+
+
+def job(repo, task, clone=False):
+    JOBS.append(task)
+    return f"job-{len(JOBS)}"
+
+
+# The snapshot and the posting have their own checks (review.py, post.py):
+# for handle() a queued review is a file, and a posted one is a line in POSTED.
+STUB = {"queue": None, "post": None}  # an error each raises, when set
+
+
+def queue(repo, pr, key, r):
+    if STUB["queue"]:
+        raise STUB["queue"]
+    C.save(f"{V.QUEUE}/{V.item_name(key, r, pr['headRefOid'])}.json",
+           {"reviewer": r, "repo": repo, "number": pr["number"], "headRefOid": pr["headRefOid"]})
+
+
+def post(repo, pr, r, answer):
+    if STUB["post"]:
+        raise STUB["post"]
+    if not isinstance(answer, dict) or not isinstance(answer.get("findings"), list):
+        raise ValueError("not a review")
+    POSTED.append((r, pr["headRefOid"], len(answer["findings"])))
+    return "findings" if answer["findings"] else "clean"
+
+
+STATES = {}  # a job's state, by id, as `proj state` says it: running unless set
+T0 = "2026-10-24T00:00:00Z"
+T = C.ts(T0)
+info = {"squashMergeAllowed": True, "mergeCommitAllowed": False, "rebaseMergeAllowed": False}
+
+
+def rv_review(r, k, sha=head, at="2026-10-24T00:11:00Z", who="sam"):
+    """A review the steward posted for reviewer r, with k findings."""
+    return {"author": {"login": who}, "state": "COMMENTED", "submittedAt": at, "commit": {"oid": sha},
+            "body": f"<!-- {r}-review:v1 " + json.dumps({"commit_sha": sha, "findings": k}) + " -->"}
+
+
+def judgment(v, n=6, sha=head, base="main"):
+    """A judge's verdict line, sealed as its task gives it."""
+    return f"<!-- autoland-judgment: {v} {sha} {C.seal('sam/r', n, 'autoland-judgment', v, sha, base)} -->"
+
+
+def said(body, who="sam"):
+    """A PR comment, as the query gives it."""
+    return {"author": {"login": who}, "createdAt": T0, "updatedAt": T0, "databaseId": 2, "body": body}
+
+
+CI_GREEN = [{"__typename": "CheckRun", "name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS"}]
+
+
+def mkpr(reviews=(), comments=(), threads=(), draft=False, number=5, sha=head, files=("a.py",), labels=(),
+         branch="feat", title="t", checks=CI_GREEN, base="main"):
+    return {
+        "id": "x", "number": number, "title": title, "url": "u", "isDraft": draft, "isCrossRepository": False,
+        "headRefName": branch, "headRefOid": sha, "baseRefName": base, "createdAt": T0, "updatedAt": T0,
+        "mergeStateStatus": "CLEAN", "author": {"login": "sam"}, "autoMergeRequest": None,
+        "labels": {"pageInfo": {"hasNextPage": False}, "nodes": [{"name": x} for x in labels]},
+        "files": {"nodes": [{"path": f, "changeType": "MODIFIED"} for f in files]},
+        "changedFiles": len(files), "reactions": {"nodes": []}, "comments": {"pageInfo": {"hasPreviousPage": False}, "nodes": list(comments)},
+        "reviewThreads": {"pageInfo": {"hasNextPage": False}, "nodes": [{"isResolved": r} for r in threads]},
+        "reviews": {"pageInfo": {"hasPreviousPage": False}, "nodes": list(reviews)},
+        "commits": {"nodes": [{"commit": {"oid": sha, "statusCheckRollup": {"contexts": {
+            "pageInfo": {"hasNextPage": False}, "nodes": list(checks)}}}}]},
+    }
+
+
+def clean(sha=head, comments=(), reviews=(), **kw):
+    """A PR both reviewers found nothing on, at `sha`."""
+    return mkpr(reviews=[*reviews, rv_review("codex", 0, sha), rv_review("deepseek", 0, sha)],
+                comments=comments, sha=sha, **kw)
+
+
+QDIR, DDIR = f"{tmp}/state/{V.QUEUE}", f"{tmp}/state/{V.DONE}"
+
+
+def run(pr, after):
+    """One pass, `after` seconds after the head first showed up."""
+    C.NOW = C.ts(T0) + after
+    WROTE.clear()
+    JOBS.clear()
+    POSTED.clear()
+    digest = []
+    S.handle("sam/r", pr, info, digest)
+    return " ".join(x for x in WROTE if "/statuses/" in x), digest
+
+
+def merged():
+    return any(x.startswith("pr merge") for x in WROTE)
+
+
+def queued():
+    """The reviewers queued, one entry a review."""
+    return sorted(x.partition("--")[0] for x in os.listdir(QDIR))
+
+
+def worker(**back):
+    """autoland-review, through the queue: each reviewer answers what
+    `back` says it does, a clean review unless told otherwise."""
+    for x in os.listdir(QDIR):
+        r = x.partition("--")[0]
+        C.save(f"{V.DONE}/{x}", {**back.get(r, {"result": "review", "answer": {"findings": []}}), "at": C.NOW})
+        os.remove(f"{QDIR}/{x}")
+
+
+def pr_state(n=5):
+    return json.load(open(f"{tmp}/state/pr-sam_r-{n}.json"))
+
+
+def fresh_pr_state():
+    shutil.rmtree(f"{tmp}/state")
+    for d in (V.QUEUE, V.SNAP, V.DONE, V.GIT):
+        os.makedirs(f"{tmp}/state/{d}")
+
+
+def stand_in():
+    """gh, Claude jobs, the queue and the posting, for handle()."""
+    C.gh = gh_stub
+    C.write = write
+    C.job = job
+    C.job_state = lambda jid: STATES.get(jid, "running")
+    V.queue = queue
+    V.post = post

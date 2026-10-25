@@ -59,6 +59,8 @@ in
 
     systemd.services.house-sync = {
       description = "house-sync: every repo's house block, as burrow has it";
+      # A switch leaves a running one be (see burrow.switch's check).
+      restartIfChanged = false;
       after = [ "network-online.target" ];
       wants = [ "network-online.target" ];
       serviceConfig = {

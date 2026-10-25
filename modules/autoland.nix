@@ -105,6 +105,7 @@ let
     cp ${./autoland/reviewers.py} $out/reviewers.py
     cp ${./autoland/review_worker.py} $out/review_worker.py
     cp ${./autoland/repos.py} $out/repos.py
+    cp ${./autoland/tasks.py} $out/tasks.py
     flake8 --ignore E501,W503 $out
   '';
   # The command, with this machine's config, so `autoland-steward status`
@@ -176,6 +177,8 @@ in
         lands: it lands anything a revert or a follow-up can undo, and sends
         you only what can't be undone or is yours to decide. The default is
         CODEOWNERS (who signs off on what), secrets and database migrations.
+        The rest of `.github/` isn't on it: the reviewers read workflow
+        changes like any other, and the steward merges them once settled.
       '';
     };
 
@@ -375,6 +378,8 @@ in
 
     systemd.services.autoland = {
       description = "autoland: settle and merge every PR, keep every repo at the baseline";
+      # A switch leaves a running one be (see burrow.switch's check).
+      restartIfChanged = false;
       after = [ "network-online.target" ];
       wants = [ "network-online.target" ];
       path = [ pkgs.gh pkgs.git pkgs.gnutar pkgs.coreutils config.burrow.tools.proj ];
@@ -391,6 +396,8 @@ in
     # can read of the repos.
     systemd.services.autoland-review = lib.mkIf (!cfg.dryRun) {
       description = "autoland: the reviewers' reviews of the queued PR heads";
+      # A switch leaves a running one be (see burrow.switch's check).
+      restartIfChanged = false;
       after = [ "network-online.target" ];
       wants = [ "network-online.target" ];
       # What the agents read the snapshot with, and bubblewrap for codex's

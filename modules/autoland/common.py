@@ -2,6 +2,8 @@
 and Claude jobs. Calls that touch the outside (gh, write, job, me) are used
 as `C.gh(...)` and so on, so a test can stand in for them in one place."""
 
+import hashlib
+import hmac
 import json
 import os
 import re
@@ -72,17 +74,78 @@ def me():
     return _me[0]
 
 
-def marker(pr, name, head):
+_key = []
+KEY_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+def seal(repo, n, name, verdict, head, base):
+    """What a verdict's marker carries after the head: a MAC under a key kept
+    in the state dir, which only the job a task hands it to is told. Every
+    Claude job posts as the steward's login, so without it a job quoting PR
+    text that holds a well-formed marker would pass for the verdict. It binds
+    the base too: a PR retargeted onto another branch has another diff, which
+    its verdict wasn't about."""
+    if not _key:
+        # The real state dir's, dry run or not, so `status` reads the
+        # verdicts the real passes' judges wrote; a dry run with none yet
+        # writes nothing and makes do with one of its own.
+        path = os.path.join(CFG["stateDir"], "verdict.key")
+        if DRY and not os.path.exists(path):
+            _key.append(os.urandom(32).hex())
+            return seal(repo, n, name, verdict, head, base)
+        try:
+            key = open(path).read().strip()
+        except FileNotFoundError:
+            key = None
+        if not KEY_RE.match(key or ""):
+            if DRY:
+                raise RuntimeError(f"{path} isn't a key: the steward's next pass makes a new one")
+            # Missing, or cut short (a crash or a full disk as it was made):
+            # an empty or short key is one anyone could seal with, so a new
+            # one, whole or not at all. Verdicts sealed with a damaged one
+            # stop counting, and their judges are asked again.
+            if key is not None:
+                log(f"{path} isn't a key; making a new one")
+            tmp = f"{path}.{os.getpid()}.new"
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w") as f:
+                f.write(os.urandom(32).hex())
+                f.flush()
+                os.fsync(f.fileno())
+            if key is None:
+                # Linked in whole, and only if no one made one meanwhile.
+                try:
+                    os.link(tmp, path)
+                except FileExistsError:
+                    pass
+                os.remove(tmp)
+            else:
+                os.replace(tmp, path)
+            key = open(path).read().strip()
+            if not KEY_RE.match(key):
+                raise RuntimeError(f"{path} couldn't be written")
+        _key.append(key)
+    msg = f"{repo}#{n} {name} {verdict} {head} {base}".encode()
+    return hmac.new(_key[0].encode(), msg, hashlib.sha256).hexdigest()[:32]
+
+
+def marker(pr, name, head, repo=None, base=None):
     """The verdict in the newest `<!-- NAME: VERDICT SHA -->` on the PR for
-    exactly this head, from the steward's own login only; else None."""
-    pat = re.compile(rf"<!-- {re.escape(name)}: ([a-z]+) ([0-9a-f]{{40}}) -->")
+    exactly this head, from the steward's own login only; else None. With
+    repo, only a marker that also carries its seal, for this head on the PR's
+    base as it is now, counts; with base, only one that names that base
+    (`<!-- NAME: VERDICT SHA on BASE -->`)."""
+    pat = re.compile(rf"<!-- {re.escape(name)}: ([a-z]+) ([0-9a-f]{{40}})(?: on (\S+))?(?: ([0-9a-f]{{32}}))? -->")
     verdict = None
     for c in pr["comments"]["nodes"]:  # oldest first
         if (c["author"] or {}).get("login") != me():
             continue
         for m in pat.finditer(c["body"] or ""):
-            if m.group(2) == head:
-                verdict = m.group(1)
+            if m.group(2) != head or (base is not None and m.group(3) != base):
+                continue
+            if repo and not hmac.compare_digest(m.group(4) or "", seal(repo, pr["number"], name, m.group(1), head, pr["baseRefName"])):
+                continue
+            verdict = m.group(1)
     return verdict
 
 

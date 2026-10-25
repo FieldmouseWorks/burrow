@@ -51,8 +51,10 @@ change nothing else in the same PR.
    Dependabot major. The job lands anything a revert or a follow-up can undo,
    and sends the owner only what can't be undone (data dropped or rewritten
    for good, a secret exposed) or is theirs to decide. Its verdict is a
-   comment ending `<!-- autoland-judgment: land|owner SHA -->`, trusted only
-   for that exact head and only from the steward's own login.
+   comment ending `<!-- autoland-judgment: land|owner|failed SHA SEAL -->`,
+   trusted only for that exact head, only from the steward's own login, and
+   only with the seal the steward gave that job for that verdict: every
+   Claude job posts as that login, so a job quoting PR text isn't a verdict.
 7. Checks that run on a machine rather than in CI (the repo names them in
    `proofJobs`, with how to run each): once a settled PR waits on nothing
    else, one Claude job a head runs them on that commit and records each
@@ -63,7 +65,9 @@ them (or anyone labelled `needs-owner`), PRs past the round limit, held
 Renovate majors, and outside contributions. Everything else is
 pre-approved: merges, GitHub settings changes and cleanup don't wait for
 the owner. Dependency bots' minor updates skip review: CI is their review,
-their bumps of the actions in `.github/workflows/` included. A Renovate
+except a change to `.github/` beyond repinning the actions its workflows
+use: that's the gate, so it goes through the review loop like any other PR.
+Apart from CODEOWNERS, `.github/` isn't one-way. A Renovate
 major merges once its CI is green and renovate-sweep's job has given it an
 ok verdict for that head; a security fix merges on green CI alone, a major
 one too. An ok major in a repo the steward doesn't cover is listed for the

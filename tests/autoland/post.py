@@ -1,19 +1,12 @@
 """What gets posted from a reviewer's answer, and how its verdict is read
-back.
-
-  python3 tests/autoland/post.py modules/autoland/steward.py
-"""
+back."""
 
 import contextlib
 import io
 import json
 import os
-import sys
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from stand_ins import C, V, tmp  # noqa: E402
-
-real_gh = C.gh
+from harness import REAL_GH, C, V, tmp
 
 
 def gh(*a, **k):
@@ -145,8 +138,8 @@ os.chmod(f"{fake}/gh", 0o755)
 path, os.environ["PATH"] = os.environ["PATH"], fake + os.pathsep + os.environ["PATH"]
 out = io.StringIO()
 with contextlib.redirect_stdout(out):
-    assert real_gh("pr", "edit", "5", "--add-label", "needs-owner", check=False) is None
+    assert REAL_GH("pr", "edit", "5", "--add-label", "needs-owner", check=False) is None
 os.environ["PATH"] = path
 assert "gh pr edit 5: 'needs-owner' not found" in out.getvalue(), out.getvalue()
 
-print("autoland post: ok")
+print("post: ok")
