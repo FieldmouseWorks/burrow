@@ -79,11 +79,15 @@ class Line:
 
     def __init__(self):
         self.due, self.last = {}, {}
+        # Something came in since the last take: the wait after it returns
+        # at once instead of sleeping through what it missed.
+        self.news = False
         self.cond = threading.Condition()
 
     def event(self, repo, now):
         with self.cond:
             self.due[repo] = min(self.due.get(repo, now + DEBOUNCE), now + DEBOUNCE)
+            self.news = True
             self.cond.notify()
 
     def wakes(self, booked):
@@ -93,12 +97,14 @@ class Line:
             for repo, at in booked.items():
                 if isinstance(repo, str) and REPO_RE.match(repo) and isinstance(at, (int, float)) and at > self.last.get(repo, 0):
                     self.due[repo] = min(self.due.get(repo, at), at)
+            self.news = True
             self.cond.notify()
 
     def take(self, now):
         """The repos whose pass starts now, the full pass first, and how long
         until the next one is due (None: nothing is)."""
         with self.cond:
+            self.news = False
             ready = sorted(r for r, at in self.due.items() if max(at, self.last.get(r, 0) + GAP) <= now)
             if FULL in ready:
                 # It sees to every repo whose event has come in as well, GAP
@@ -115,7 +121,8 @@ class Line:
 
     def wait(self, timeout):
         with self.cond:
-            self.cond.wait(timeout)
+            if not self.news:
+                self.cond.wait(timeout)
 
 
 def booked(path):

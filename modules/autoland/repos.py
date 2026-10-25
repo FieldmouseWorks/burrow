@@ -117,7 +117,10 @@ def hook(repo, st, due):
     the repo starts its handlers' passes within seconds. Set again when its
     URL, events or secret change, and with the daily settings, in case it was
     deleted or edited. GitHub never gives the secret back, so it's known by a
-    hash."""
+    hash. A status run has neither the secret (only the services get it)
+    nor anything to change, so it leaves the hook alone."""
+    if DRY:
+        return
     wh = CFG["webhook"]
     secret = C.webhook_secret()
     want = hashlib.sha256(json.dumps([wh["url"], wh["events"], secret]).encode()).hexdigest()[:16]

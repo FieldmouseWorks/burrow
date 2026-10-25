@@ -55,6 +55,15 @@ line.event(E.FULL, 106 - E.DEBOUNCE)
 line.wakes({"sam/s": 500})
 assert line.take(111) == ([E.FULL], 389), line.due
 assert line.due == {"sam/s": 500} and line.take(120) == ([], 380), line.due
+# An event between a take that found nothing and the wait after it isn't
+# slept through.
+line = E.Line()
+assert line.take(0) == ([], None)
+line.event("sam/r", 0)
+waited = threading.Thread(target=line.wait, args=(None,), daemon=True)
+waited.start()
+waited.join(5)
+assert not waited.is_alive(), "the wait slept through an event that came in before it"
 print("line: ok")
 
 # Deliveries go to the handlers that take their event; kicks name a handler,

@@ -178,5 +178,15 @@ with open(f"{tmp}/cred/webhook", "w") as f:
 R.hook("sam/r", st, False)
 assert [x for x in WROTE if "PATCH repos/sam/r/hooks/9" in x] and not [x for x in WROTE if "POST" in x], WROTE
 assert SENT[-1]["config"]["secret"] == "new-secret", SENT
+# A status run, from a shell without the services' credentials, leaves the
+# hook alone instead of failing on the secret.
+cred = os.environ["CREDENTIALS_DIRECTORY"]
+os.environ["CREDENTIALS_DIRECTORY"] = f"{tmp}/none"
+R.DRY = True
+WROTE.clear()
+R.hook("sam/r", {}, True)
+assert WROTE == [], WROTE
+R.DRY = False
+os.environ["CREDENTIALS_DIRECTORY"] = cred
 C.gh, C.write = gh_kept, write_kept
 print("hooks: ok")
