@@ -273,10 +273,16 @@ pkgs.testers.runNixOSTest {
         e = proj('run web "await https://github.com/o/r/pull/5"')
         machine.wait_until_succeeds(f"su - dev -c 'proj state {e}' | grep -x done", timeout=120)
         github("repos/o/r/commits/abc/check-runs", '{"check_runs": [{"name": "ci", "status": "completed", "conclusion": "success"}]}')
+        # Its deadline has passed too, so the retry is all that books o/r.
+        machine.succeed(f"sed -i 's/\\t[0-9]*\\t/\\t0\\t/' /data/dev/jobs/{e}/await")
         # No user manager to reach (a bus error, a restart): the turn can't start.
+        before = int(machine.succeed("date +%s"))
         machine.execute("su - dev -c 'XDG_RUNTIME_DIR=/nonexistent proj _watch'")
         assert machine.succeed(f"cat /data/dev/jobs/{e}/turns").strip() == "1"
         machine.succeed(f"test -s /data/dev/jobs/{e}/await")
+        # Retried in five minutes: the past deadline doesn't take its place.
+        wake = json.loads(machine.succeed("cat /var/lib/burrow/proj-watch/wake.json"))
+        assert before + 300 <= wake["o/r"] <= int(machine.succeed("date +%s")) + 300, wake
         proj("_watch")
         machine.wait_until_succeeds(f"grep -x 2 /data/dev/jobs/{e}/turns", timeout=30)
 

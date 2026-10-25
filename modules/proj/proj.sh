@@ -426,10 +426,12 @@ Carry on from there. Anything you left in the background last turn was stopped w
       exec {lk}>&-
     done
     # When each repo needs a look next, for burrow-events: the deadline of
-    # every job's waits (they're all still to come), and the retries.
+    # every job's waits that's still to come, and the retries. One already
+    # past is a turn that couldn't start (its retry stands for it) or one
+    # this pass skipped as running, whose end kicks proj-watch itself.
     if [ -n "$WAKE" ]; then
-      { cat "$jobs"/*/await 2>/dev/null | awk -F '\t' -v h="$AWAIT_HOURS" '
-          $2 ~ /^[0-9]+$/ && split($1, t, "#") == 2 { print t[1] "\t" ($2 + h * 3600 + 1) }'
+      { cat "$jobs"/*/await 2>/dev/null | awk -F '\t' -v h="$AWAIT_HOURS" -v now="$(date +%s)" '
+          $2 ~ /^[0-9]+$/ && split($1, t, "#") == 2 && $2 + h * 3600 + 1 > now { print t[1] "\t" ($2 + h * 3600 + 1) }'
         printf '%s' "$retry"
       } | jq -Rn 'reduce (inputs | split("\t")) as [$r, $at] ({}; .[$r] = ([.[$r] // empty, ($at | tonumber)] | min))' \
         >"$WAKE.new" && mv -f "$WAKE.new" "$WAKE"
