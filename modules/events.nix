@@ -15,8 +15,8 @@ let
   inherit (lib) mkOption types;
 
   configFile = pkgs.writeText "burrow-events.json" (builtins.toJSON {
-    inherit (cfg) port kickPort ownStatuses;
-    handlers = lib.mapAttrs (_: h: { inherit (h) events unit wake; }) cfg.handlers;
+    inherit (cfg) port kickPort;
+    handlers = lib.mapAttrs (_: h: { inherit (h) events unit wake ownStatuses; }) cfg.handlers;
   });
   src = pkgs.runCommand "burrow-events" { nativeBuildInputs = [ pkgs.python3.pkgs.flake8 ]; } ''
     mkdir $out
@@ -86,6 +86,16 @@ in
             type = types.str;
             description = "The units' name, without @ or .service.";
           };
+          ownStatuses = mkOption {
+            type = types.listOf types.str;
+            default = [ ];
+            description = ''
+              The commit status contexts the handler's passes post themselves
+              (the steward's `review-settled`): a `status` delivery for one
+              is no news to it, so it starts none of its passes. Other
+              handlers still get it.
+            '';
+          };
           wake = mkOption {
             type = types.nullOr types.str;
             default = null;
@@ -97,16 +107,6 @@ in
           };
         };
       });
-    };
-
-    ownStatuses = mkOption {
-      type = types.listOf types.str;
-      default = [ ];
-      description = ''
-        The commit status contexts this machine posts itself (the steward's
-        `review-settled`): a `status` delivery for one says nothing new, so it
-        starts no pass.
-      '';
     };
 
     url = mkOption {

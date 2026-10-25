@@ -367,9 +367,9 @@ in
         "pull_request_review_thread" "issue_comment" "check_suite" "status" ];
       unit = "autoland";
       wake = "${stateDir}/autoland/wake.json";
+      # Its own status tells it nothing (a job awaiting the PR does want it).
+      ownStatuses = [ cfg.context ];
     };
-    # The steward's own status changes nothing it doesn't already know.
-    burrow.events.ownStatuses = [ cfg.context ];
     systemd.services = lib.genAttrs [ "autoland" "autoland@" ] (name: {
       description = if name == "autoland"
         then "autoland: settle and merge every PR, keep every repo at the baseline"

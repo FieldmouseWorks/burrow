@@ -72,13 +72,14 @@ waited.join(5)
 assert not waited.is_alive(), "the wait slept through an event that came in before it"
 print("line: ok")
 
-# Deliveries go to the handlers that take their event; kicks name a handler,
-# and a repo or none (a full pass). A commit status this machine posted
-# itself starts nothing.
-handlers = {"autoland": {"events": ["push", "pull_request", "status"], "unit": "autoland", "wake": None},
-            "inbox": {"events": ["issues", "pull_request"], "unit": "proj-inbox", "wake": None}}
+# Deliveries go to the handlers that take their event, but a commit status
+# not to the handler whose passes posted it; kicks name a handler, and a
+# repo or none (a full pass).
+handlers = {"autoland": {"events": ["push", "pull_request", "status"], "unit": "autoland", "wake": None,
+                         "ownStatuses": ["review-settled"]},
+            "inbox": {"events": ["issues", "pull_request", "status"], "unit": "proj-inbox", "wake": None}}
 lines = {name: E.Line() for name in handlers}
-hooks = http.server.HTTPServer(("127.0.0.1", 0), E.deliveries(handlers, lines, "hook-secret", ["review-settled"]))
+hooks = http.server.HTTPServer(("127.0.0.1", 0), E.deliveries(handlers, lines, "hook-secret"))
 kicks = http.server.HTTPServer(("127.0.0.1", 0), E.kicks(lines))
 for srv in (hooks, kicks):
     threading.Thread(target=srv.serve_forever, daemon=True).start()
@@ -117,9 +118,13 @@ def status(context):
     return deliver(data, "sha256=" + hmac.new(b"hook-secret", data, hashlib.sha256).hexdigest(), "status")
 
 
-assert status("review-settled") == 204 and due() == {"autoland": [], "inbox": []}, due()
-assert status("proof") == 202 and due() == {"autoland": ["sam/r"], "inbox": []}, due()
+# The steward's own status is no news to it; to another handler (a job
+# awaiting the PR) it is.
+assert status("review-settled") == 202 and due() == {"autoland": [], "inbox": ["sam/r"]}, due()
+lines["inbox"].due.clear()
+assert status("proof") == 202 and due() == {"autoland": ["sam/r"], "inbox": ["sam/r"]}, due()
 lines["autoland"].due.clear()
+lines["inbox"].due.clear()
 assert post(kicks, "/kick/inbox/sam/q") == 202 and due() == {"autoland": [], "inbox": ["sam/q"]}, due()
 assert post(kicks, "/kick/autoland") == 202 and due() == {"autoland": [E.FULL], "inbox": ["sam/q"]}, due()
 for bad in ("/kick/nope/sam/r", "/kick/inbox/--help/x", "/kick/inbox/sam", "/kick", "/burrow/hook"):
@@ -156,7 +161,7 @@ print("passes: ok")
 # With no handlers the service still runs: exiting would be a restart every
 # few seconds.
 with open(f"{tmp}/events.json", "w") as f:
-    json.dump({"port": 0, "kickPort": 0, "handlers": {}, "ownStatuses": []}, f)
+    json.dump({"port": 0, "kickPort": 0, "handlers": {}}, f)
 os.makedirs(f"{tmp}/cred", exist_ok=True)
 with open(f"{tmp}/cred/webhook", "w") as f:
     f.write("hook-secret\n")

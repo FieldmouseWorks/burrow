@@ -183,10 +183,10 @@ class Quiet(http.server.BaseHTTPRequestHandler):
         pass  # a line per delivery says nothing the passes' lines don't
 
 
-def deliveries(handlers, lines, secret, own=()):
+def deliveries(handlers, lines, secret):
     """The webhook's deliveries, nginx passes them on: each goes to the
-    handlers that take its event, but for a commit status this machine
-    posted itself (`own`), which is news to nobody."""
+    handlers that take its event, but a commit status goes to none whose
+    own passes posted it (`ownStatuses`), which is no news to them."""
 
     class Delivery(Quiet):
         def do_POST(self):
@@ -206,11 +206,12 @@ def deliveries(handlers, lines, secret, own=()):
             if not isinstance(repo, str) or not REPO_RE.match(repo):
                 return answer(self, 204)
             event = self.headers.get("X-GitHub-Event")
-            if event == "status" and payload.get("context") in own:
-                return answer(self, 204)
             for name, h in handlers.items():
-                if event in h["events"]:
-                    lines[name].event(repo, time.time())
+                if event not in h["events"]:
+                    continue
+                if event == "status" and payload.get("context") in h.get("ownStatuses", ()):
+                    continue
+                lines[name].event(repo, time.time())
             answer(self, 202)
 
     return Delivery
@@ -249,7 +250,7 @@ def main():
     lines = {name: Line() for name in handlers}
     for line in lines.values():
         line.event(FULL, time.time() - DEBOUNCE)  # catching up
-    listen(cfg["port"], deliveries(handlers, lines, secret, cfg["ownStatuses"]))
+    listen(cfg["port"], deliveries(handlers, lines, secret))
     listen(cfg["kickPort"], kicks(lines))
     log(f"deliveries on 127.0.0.1:{cfg['port']}, kicks on 127.0.0.1:{cfg['kickPort']}: {', '.join(handlers)}")
     for name, h in handlers.items():
