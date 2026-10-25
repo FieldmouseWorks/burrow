@@ -1,6 +1,7 @@
 # HOST-update: keep the machine on the newest of everything it runs, unattended.
 #
-#   HOST-update            one run; the timer does this every 15 minutes
+#   HOST-update            one run; burrow-events starts one for each push to
+#                          main (or a watched input), and hourly
 #   HOST-update --force    run the whole loop even if nothing upstream moved
 #   HOST-update status     what the last run did, and what's queued
 #
@@ -45,7 +46,7 @@ case "${1:-}" in
       [ -e "$f" ] && echo "fix job for $(basename "$f"): $(cat "$f")"
     done
     [ -z "$BOOT" ] || "$BOOT" status
-    systemctl list-timers "$UPDATE.timer" ${BOOT:+"$BOOT-trial.timer"} --no-pager | sed -n '2,3p'
+    systemctl list-timers burrow-events-catch-up.timer ${BOOT:+"$BOOT-trial.timer"} --no-pager | sed -n '2,3p'
     exit 0
     ;;
   --force) force=1 ;;
