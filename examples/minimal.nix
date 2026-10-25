@@ -40,5 +40,9 @@
       reviewers.codex.enable = true;
     };
     house.enable = true;
+    events = {
+      host = "example.org";
+      secretFile = "/run/secrets/burrow-webhook";
+    };
   };
 }

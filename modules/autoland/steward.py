@@ -1,6 +1,7 @@
 """autoland-steward: every PR in every repo the owner has, from ready to merged.
 
-One pass (the timer runs it every couple of minutes):
+A full pass (burrow-events runs one when it starts, and hourly, for what no
+event reports):
 
   1. Find the repos: every non-archived, non-fork repo of each owner in
      `owners`, new ones included. Bring each one's settings to the baseline
@@ -12,11 +13,17 @@ One pass (the timer runs it every couple of minutes):
      and DeepSeek (reviewers.py), post what they found, hand open findings
      or red CI to a Claude job,
      have a Claude job run the checks only a machine of the owner's runs
-     (proofJobs) or judge a PR it won't land on its own word, post the
-     `review-settled` commit status and merge it, or list it for the owner.
+     (proofJobs) or judge a PR it won't land on its own word (tasks.py says
+     what each job is told), post the `review-settled` commit status and
+     merge it, or list it for the owner.
   3. Once a day per repo, delete branches whose tip is already in the
      default branch, and list the stale unmerged ones.
   4. Keep one issue up to date with everything waiting for the owner.
+
+`autoland-steward kick OWNER/REPO` is a pass over that repo's PRs alone
+(2, and 4), the one burrow-events starts within seconds of what changes it:
+a webhook delivery, a Claude job's turn ending, a reviewer's answer coming
+back, or a wait the last pass booked ending (common.wake).
 
 Everything talks to GitHub through `gh`, with the user's own login, so the
 reviewers' reviews and the Claude jobs' verdicts are posted under it too.
@@ -31,15 +38,15 @@ changing anything.
 agent many minutes, so it runs as its own service and no pass waits for it.
 """
 
-import codecs
+import fcntl
 import os
-import re
 import sys
 
 import common as C
 import repos as R
 import reviewers as V
-from common import CFG, CONTEXT, DEP_RE, DRY, MIN, STATE, load, log, repo_cfg, save, ts
+from common import CFG, CONTEXT, DRY, MIN, STATE, load, log, repo_cfg, save, ts
+from touches import dep_kind, gate_edit, moved_from, one_way, renovate_edited
 from tasks import DEP_SEEN, JUDGMENT, MAJOR_VERDICT, REVIEWED, fix_task, judge_task, proof_task
 
 
@@ -58,8 +65,8 @@ query($owner: String!, $name: String!, $cursor: String) {
         files(first: 100) { nodes { path changeType } }
         changedFiles
         reviewThreads(first: 100) { pageInfo { hasNextPage } nodes { isResolved } }
-        reviews(last: 100) { pageInfo { hasPreviousPage } nodes { author { login } state body submittedAt commit { oid } } }
-        comments(last: 100) { pageInfo { hasPreviousPage } nodes { databaseId body createdAt updatedAt author { login } } }
+        reviews(last: 100) { pageInfo { hasPreviousPage startCursor } nodes { %s } }
+        comments(last: 100) { pageInfo { hasPreviousPage startCursor } nodes { %s } }
         reactions(last: 20) { nodes { content createdAt user { login } } }
         commits(last: 1) {
           nodes { commit { oid statusCheckRollup { contexts(first: 100) { pageInfo { hasNextPage } nodes {
@@ -75,16 +82,52 @@ query($owner: String!, $name: String!, $cursor: String) {
 """
 
 
+# What each review and comment is read for, in PRS and the older pages.
+OLDER = {"reviews": "author { login } state body submittedAt commit { oid }",
+         "comments": "databaseId body createdAt updatedAt author { login }"}
+PRS = PRS % (OLDER["reviews"], OLDER["comments"])
+OLDER_PAGE = """
+query($id: ID!, $cursor: String) {
+  node(id: $id) { ... on PullRequest { %s(last: 100, before: $cursor) { pageInfo { hasPreviousPage startCursor } nodes { %s } } } }
+}
+"""
+
+
+def acted_on(pr):
+    """Whether the steward does anything with the PR beyond saying it's not
+    its to do: not a draft, and from one of its authors."""
+    return not pr["isDraft"] and not pr["isCrossRepository"] and (pr["author"] or {}).get("login") in CFG["authors"]
+
+
+# Pages of older reviews, and of older comments, read for a PR: up to 1,000
+# of each. Anyone can comment on a public repo's PRs, and every event reads
+# them again, so a PR longer than that is the owner's (the cut in handle).
+OLDER_PAGES = 9
+
+
 def open_prs(owner, name):
-    """The repo's merge settings and every open PR, all pages."""
+    """The repo's merge settings and every open PR, all pages, with the
+    reviews and comments of each it acts on, up to OLDER_PAGES older pages:
+    a long PR's verdicts, markers and rounds can be older than the last 100.
+    An outside contribution's older pages aren't read: it's the owner's
+    anyway."""
     prs, cursor = [], None
     while True:
         info = C.graphql(PRS, owner=owner, name=name, cursor=cursor)["repository"]
         page = info.pop("pullRequests")
         prs += page["nodes"]
         if not page["pageInfo"]["hasNextPage"]:
-            return info, prs
+            break
         cursor = page["pageInfo"]["endCursor"]
+    for pr in filter(acted_on, prs):
+        for field, nodes in OLDER.items():
+            for _ in range(OLDER_PAGES):
+                if not pr[field]["pageInfo"]["hasPreviousPage"]:
+                    break
+                got = C.graphql(OLDER_PAGE % (field, nodes), id=pr["id"], cursor=pr[field]["pageInfo"]["startCursor"])
+                older = got["node"][field]
+                pr[field] = {"pageInfo": older["pageInfo"], "nodes": older["nodes"] + pr[field]["nodes"]}
+    return info, prs
 
 
 def ci_state(pr, proofs=()):
@@ -136,170 +179,13 @@ def our_status(pr):
 
 
 def post_status(repo, pr, state, desc):
+    """False if GitHub didn't take it."""
     desc = desc[:140]
     if our_status(pr) == (state, desc):
-        return
-    C.write("api", f"repos/{repo}/statuses/{pr['headRefOid']}", "-f", f"state={state}",
-            "-f", f"context={CONTEXT}", "-f", f"description={desc}", "-f", f"target_url={pr['url']}", check=False)
-
-
-def one_way(pr, rc, moved=()):
-    """The first path that makes this PR one a Claude job judges before it
-    lands (config oneWay), or None. moved: where its renames and copies
-    started (moved_from), None if that couldn't be read."""
-    for path in [f["path"] for f in pr["files"]["nodes"]] + list(moved or ()):
-        for pat in rc["oneWay"]:
-            if re.search(pat, path):
-                return path
-    if pr["changedFiles"] > len(pr["files"]["nodes"]):
-        return f"{pr['changedFiles']} files (too many to check)"
-    if moved is None:
-        return "a rename or copy whose diff couldn't be read"
-    return None
-
-
-MOVED_RE = re.compile(r"^(?:rename|copy) from (.+)$")
-
-
-def unquote(path):
-    """A path as git's diff header has it: quoted, with C escapes, when it
-    has odd characters. Bytes that aren't UTF-8 come back as U+FFFD, so the
-    rest of the path (`secrets/`) still reads as it is."""
-    if not (len(path) > 1 and path[0] == path[-1] == '"'):
-        return path
-    try:
-        return codecs.escape_decode(path[1:-1].encode())[0].decode("utf-8", "replace")
-    except ValueError:  # a broken escape: the path between the quotes, as written
-        return path[1:-1]
-
-
-def moved_from(repo, pr, st):
-    """Where the PR's renames and copies started: the file list names only
-    where each one went, so a rename out of a one-way path (CODEOWNERS to
-    CODEOWNERS.bak) is read from the diff. Read once per head and base; None
-    if the diff couldn't be read."""
-    if not any(f.get("changeType") in ("RENAMED", "COPIED") for f in pr["files"]["nodes"]):
-        return []
-    seen = [pr["headRefOid"], pr["baseRefName"]]
-    if st.get("moved", [None])[:2] != seen:
-        diff = C.gh("pr", "diff", str(pr["number"]), "-R", repo, check=False)
-        if not isinstance(diff, str) or not diff:
-            return None
-        st["moved"] = seen + [[unquote(m.group(1)) for m in map(MOVED_RE.match, diff.splitlines()) if m]]
-    return st["moved"][2]
-
-
-# "from 1.2.3 to 2.0.0", "from v3 to v4" (an action's major tag), "from 3 to 4".
-MAJOR_RE = re.compile(r"from v?(\d+)\S* to v?(\d+)")
-
-
-def dep_kind(pr):
-    """None, 'minor' or 'major' for a dependency bot's PR."""
-    if not DEP_RE.match(pr["headRefName"]):
-        return None
-    labels = {x["name"] for x in pr["labels"]["nodes"]}
-    if "security" in labels and pr["headRefName"].startswith("renovate/"):
-        # Renovate's security fixes merge themselves, majors too: none waits
-        # for renovate-sweep's verdict (renovate-sweep.sh).
-        return "minor"
-    m = MAJOR_RE.search(pr["title"])
-    if "major" in labels or (m and m.group(1) != m.group(2)):
-        return "major"
-    return "minor"
-
-
-def renovate_edited(repo, pr, st):
-    """Whether a Renovate branch has a commit Renovate didn't write (a Claude
-    job's fix). Renovate won't merge a branch edited like that. Asked once
-    per head; a failed ask counts as not edited and is asked again."""
-    if not CFG["renovateEmail"] or not pr["headRefName"].startswith("renovate/"):
-        return False
-    if st.get("editedHead") != pr["headRefOid"]:
-        got = C.gh("pr", "view", str(pr["number"]), "-R", repo, "--json", "commits", check=False)
-        if not got:
-            return False
-        st["edited"] = any(a.get("email") != CFG["renovateEmail"]
-                           for c in got["commits"] for a in c["authors"])
-        st["editedHead"] = pr["headRefOid"]
-    return st["edited"]
-
-
-WORKFLOW_RE = re.compile(r"^\.github/workflows/[^/]+\.ya?ml$")
-# A line that only names an action at a ref: "uses: owner/action@sha # v4.1.0".
-# The ref is a sha, tag or branch and nothing else, so no shell can ride on it.
-PIN_LINE_RE = re.compile(r"^(\s*(-\s+)?uses:\s*[^\s#@]+@)[0-9A-Za-z._/-]+(\s+#.*)?$")
-
-
-def pins_only(repo, pr):
-    """True if every file the PR's diff touches under .github/ is a workflow
-    whose changes only repin actions: each removed `uses:` line is replaced in
-    place by one that's the same up to its `@` (indentation, key and action),
-    so it's the same step at a new ref, and nothing is added, dropped or moved
-    (no permissions, triggers or commands, and no `uses:`-shaped text inside
-    a `run:`). A rename or copy into or out of .github/, or a file with no
-    repinned line (a mode change, a binary), is not a repin. None if the diff
-    couldn't be read."""
-    diff = C.gh("pr", "diff", str(pr["number"]), "-R", repo, check=False)
-    if not isinstance(diff, str) or not diff:
-        return None
-    path, hunk, gated, pinned, out, back = None, False, set(), set(), [], []
-
-    def paired():
-        # A run of removed lines, then the run that replaced them, line by line.
-        ok = len(out) == len(back) and all(a.group(1) == b.group(1) for a, b in zip(out, back))
-        if out and ok:
-            pinned.add(path)
-        out.clear()
-        back.clear()
-        return ok
-
-    for x in diff.splitlines():
-        if not (hunk and x[:1] in "+-\\") or (x[:1] == "-" and back):
-            if not paired():
-                return False
-        if x.startswith("diff --git "):
-            a, sep, b = x[len("diff --git "):].partition(" b/")
-            if not (sep and a.startswith("a/")):
-                if ".github/" in x:
-                    return False
-                path = None
-                continue
-            a, path, hunk = a[2:], b, False
-            if a.startswith(".github/") or b.startswith(".github/"):
-                if a != b or not WORKFLOW_RE.match(b):
-                    return False
-                gated.add(b)
-            else:
-                path = None
-        elif x.startswith("@@"):
-            hunk = True
-        elif path and hunk and x[:1] in "+-" and x[1:].strip():
-            m = PIN_LINE_RE.match(x[1:])
-            if not m:
-                return False
-            (out if x[0] == "-" else back).append(m)
-    return paired() and gated <= pinned
-
-
-def gate_edit(repo, pr, st):
-    """Whether a dependency bot's PR changes .github/ beyond repinning the
-    actions its workflows use: that's the gate itself, and a dependency
-    update is never reviewed. The file list names only a rename's new path,
-    so a rename or copy is read from the diff too. (A list too long to see
-    whole is already the owner's: one_way.) Read once per head and base; a diff that can't be read counts
-    as an edit (reviewed, not merged on CI alone)."""
-    nodes = pr["files"]["nodes"]
-    if not any(f["path"].startswith(".github/") or f["changeType"] in ("RENAMED", "COPIED") for f in nodes):
-        return False
-    if any(f["path"].startswith(".github/") and not WORKFLOW_RE.match(f["path"]) for f in nodes):
         return True
-    seen = [pr["headRefOid"], pr["baseRefName"]]
-    if st.get("pins", [None])[:2] != seen:
-        pins = pins_only(repo, pr)
-        if pins is None:
-            return True
-        st["pins"] = seen + [pins]
-    return not st["pins"][2]
+    return C.write("api", f"repos/{repo}/statuses/{pr['headRefOid']}", "-f", f"state={state}",
+                   "-f", f"context={CONTEXT}", "-f", f"description={desc}", "-f", f"target_url={pr['url']}",
+                   check=False) is not None
 
 
 def merge_method(repo_info):
@@ -324,9 +210,10 @@ def land(repo, pr, repo_info):
 
 
 def unland(repo, pr):
-    """Something new came up after it was settled: stop the merge."""
-    if pr["autoMergeRequest"]:
-        C.write("pr", "merge", str(pr["number"]), "-R", repo, "--disable-auto", check=False)
+    """Something new came up after it was settled: stop the merge. False if
+    GitHub didn't take it."""
+    return not pr["autoMergeRequest"] or C.write(
+        "pr", "merge", str(pr["number"]), "-R", repo, "--disable-auto", check=False) is not None
 
 
 def handle(repo, pr, repo_info, digest):
@@ -342,19 +229,38 @@ def handle(repo, pr, repo_info, digest):
     st.setdefault("rv", {})
     st.setdefault("rvBase", {})
     labels = {x["name"] for x in pr["labels"]["nodes"]}
-    author = (pr["author"] or {}).get("login", "")
     age = C.NOW - st["seen"]
     tag = f"{repo}#{n}"
     line = f"[{repo}#{n}]({pr['url']}) {pr['title']}"
 
+    def after(t, minutes):
+        """A wait that ends `minutes` after t: this repo gets a pass then."""
+        C.wake(repo, t + minutes * MIN + 1)
+
+    # Open a day, it's listed for the owner (below): a pass then says so.
+    after(ts(pr["createdAt"]), 24 * 60)
+
+    def handoff_due(kind):
+        """Whether findings or red CI have sat long enough for a Claude job
+        to take them (it's booked a pass for when they will, if not)."""
+        since = max(ts(pr["updatedAt"]), st["seen"])
+        after(since, rc["handoffAfter"])
+        return C.NOW - since > rc["handoffAfter"] * MIN
+
     def settle(state, desc, why=None):
-        post_status(repo, pr, state, desc)
+        ok = post_status(repo, pr, state, desc)
         if why:
             digest.append((why, line, desc))
         # Not settled (any more): nothing may merge it.
         if state != "success" and (pr["autoMergeRequest"] or st.get("landed")):
-            unland(repo, pr)
-            st["landed"] = None
+            if unland(repo, pr):
+                st["landed"] = None
+            else:
+                ok = False
+        if not ok and not DRY:
+            # GitHub didn't take the status or the stop: until it does, the
+            # old ones stand and auto-merge can still merge it. Again in a minute.
+            after(C.NOW, 1)
 
     def update_branch():
         """Bring a settled head up to date with a base whose rules want it
@@ -371,7 +277,7 @@ def handle(repo, pr, repo_info, digest):
     def started(kind, task, at=head):
         """A Claude job, once per head (at: once per head on its base, for
         the judge's; recorded once it has started; until then it's tried
-        every pass and listed for the owner)."""
+        again every five minutes and listed for the owner)."""
         jid = C.job(repo, task)
         if jid:
             st[kind] = at
@@ -379,6 +285,7 @@ def handle(repo, pr, repo_info, digest):
             log(f"{tag}: a Claude job {jid} ({kind})")
         else:
             log(f"{tag}: couldn't start a Claude job (no checkout, or proj refused)")
+            after(C.NOW, 5)
         return bool(jid)
 
     def lost(kind, at=head):
@@ -390,6 +297,8 @@ def handle(repo, pr, repo_info, digest):
             return False
         seen = st.get(kind + "Lost") == at
         st[kind + "Lost"] = at
+        if not seen:
+            after(C.NOW, 1)  # the second look
         return seen
 
     def again(kind, task, doing, answer, at=head):
@@ -447,6 +356,7 @@ def handle(repo, pr, repo_info, digest):
             return
         st["landFails"] = st.get("landFails", 0) + 1
         log(f"{tag}: merge failed ({st['landFails']})")
+        after(C.NOW, 1)
         if st["landFails"] >= 3:
             digest.append(("Couldn't merge", line, "gh pr merge keeps failing (journalctl -u autoland)"))
 
@@ -524,24 +434,25 @@ def handle(repo, pr, repo_info, digest):
         settle("pending", "Draft: work in progress, reviewed once it's marked ready")
         save(key, st)
         return
+    if not acted_on(pr):
+        settle("pending", f"Outside contribution: {CFG['owner']} reviews and merges it", "Outside contributions")
+        save(key, st)
+        return
     # A list longer than one page could hide a hold, an open thread, a
-    # changes-requested review or a verdict: fail closed.
+    # changes-requested review or a verdict: fail closed. (open_prs reads
+    # older reviews and comments, so those two are cut only past its cap.)
     cut = [k for k, more in (("labels", pr["labels"]["pageInfo"]["hasNextPage"]),
                              ("review threads", pr["reviewThreads"]["pageInfo"]["hasNextPage"]),
                              ("reviews", pr["reviews"]["pageInfo"]["hasPreviousPage"]),
                              ("comments", pr["comments"]["pageInfo"]["hasPreviousPage"])) if more]
     if cut:
-        settle("pending", f"Over 100 {' and '.join(cut)}, too many to read: {CFG['owner']} merges it", "Too much to read")
+        settle("pending", f"Too many {' and '.join(cut)} to read: {CFG['owner']} merges it", "Too much to read")
         save(key, st)
         return
     if CFG["labels"]["hold"] in labels:
         # Held after it was settled: take back the status and the queued merge.
         log(f"{tag}: on hold")
         settle("pending", f"On hold (the {CFG['labels']['hold']} label)")
-        save(key, st)
-        return
-    if pr["isCrossRepository"] or author not in CFG["authors"]:
-        settle("pending", f"Outside contribution: {CFG['owner']} reviews and merges it", "Outside contributions")
         save(key, st)
         return
 
@@ -611,8 +522,7 @@ def handle(repo, pr, repo_info, digest):
             what = threads or "CI is red (" + ", ".join(ci_names) + ")"
             kind = "handed" if threads else "redFixed"
             settle("pending", f"Dependency update; {what}"[:140])
-            idle = C.NOW - max(ts(pr["updatedAt"]), st["seen"])
-            if idle > rc["handoffAfter"] * MIN:
+            if handoff_due(kind):
                 hand_off(what, kind)
         elif dep == "major" and renovate and major_verdict != "ok":
             # renovate-sweep's verdict comes first, and its job runs the proofs
@@ -684,6 +594,7 @@ def handle(repo, pr, repo_info, digest):
                     rs["fails"], rs["failedAt"] = rs.get("fails", 0) + 1, C.NOW
                     log(f"{tag}: couldn't post {V.NAMES[r]}'s review ({rs['fails']}): {e}")
                     if rs["fails"] < 3:
+                        after(C.NOW, 1)
                         return
             elif back["result"] == "out":
                 o = load(V.OUT, {})
@@ -708,10 +619,15 @@ def handle(repo, pr, repo_info, digest):
                 log(f"{tag}: the queued {V.NAMES[r]} review left the queue without an answer")
             else:
                 rs["gone"] = True
+                after(C.NOW, 1)  # the second look
 
     for r in live:
         consume(r)
     live = [r for r in live if not V.out(r)]
+    for r in names:
+        if V.out(r):
+            # Back in service then: its look at this head is asked for.
+            C.wake(repo, load(V.OUT, {})[r]["until"] + 1)
     rounds_of = {r: said[r][2] - st["rvBase"].get(r, 0) for r in live}
     if st.get("escalated") and CFG["labels"]["owner"] not in labels:
         # The owner took the label off: another full set of rounds.
@@ -735,12 +651,14 @@ def handle(repo, pr, repo_info, digest):
         if rs.get("fails", 0) >= 3 and C.NOW - rs.get("failedAt", 0) > 3600:
             rs["fails"] = 0  # an outage passes: three more tries an hour on
         if rs.get("fails", 0) >= 3:
+            after(rs.get("failedAt", 0), 60)
             return
         try:
             V.queue(repo, pr, key, r)
         except Exception as e:  # the snapshot: GitHub, git, the disk
             rs["fails"], rs["failedAt"] = rs.get("fails", 0) + 1, C.NOW
             log(f"{tag}: couldn't queue {V.NAMES[r]} on {head[:7]} ({rs['fails']}): {str(e)[:200]}")
+            after(C.NOW, 5)
             return
         log(f"{tag}: queued a {V.NAMES[r]} review of {head[:7]}")
         rs["queued"] = C.NOW
@@ -759,6 +677,8 @@ def handle(repo, pr, repo_info, digest):
         return
 
     quiet = age >= rc["settleDelay"] * MIN
+    if not quiet and any(said[r][0] == "none" for r in live):
+        after(st["seen"], rc["settleDelay"])  # the reviewers are asked then
     waiting = []
     if not live:
         why = "; ".join(f"{V.NAMES[r]}: {away[r] or V.out(r)}" for r in names) or "none is on"
@@ -783,30 +703,31 @@ def handle(repo, pr, repo_info, digest):
         what.append(f"{open_threads} open review thread{'s' * (open_threads > 1)}")
     if changes:
         what.append("changes requested by " + ", ".join(changes))
-    idle = C.NOW - max(ts(pr["updatedAt"]), st["seen"])
     if waiting:
         settle("pending", "; ".join(waiting + stuck + what))
         # One reviewer's threads needn't wait for the other to finish.
-        if what and idle > rc["handoffAfter"] * MIN and not swept:
+        if what and not swept and handoff_due("handed"):
             hand_off(", ".join(what))
     elif not clean or open_threads or changes:
         if not open_threads and not changes:
             # Every finding answered without a new commit: the reviewers that
             # had findings look again.
             for r in live:
-                if said[r][0] == "findings" and C.NOW - said[r][1] > rc["settleDelay"] * MIN:
-                    ask(r)
+                if said[r][0] == "findings":
+                    after(said[r][1], rc["settleDelay"])
+                    if C.NOW - said[r][1] > rc["settleDelay"] * MIN:
+                        ask(r)
             settle("pending", "Findings answered; " + ("; ".join(stuck) if stuck else f"review round {rounds + 1} next"))
         else:
             settle("pending", f"Round {rounds}: " + ", ".join(what))
-            if idle > rc["handoffAfter"] * MIN and not swept:
+            if not swept and handoff_due("handed"):
                 hand_off(", ".join(what))
     # 2. The reviewers are clean on this head and nothing is open: CI, then land.
     elif ci == "red":
         settle("pending", "CI is red: " + ", ".join(ci_names)[:100])
         # Its own once a head, apart from a findings job's: one that answered
         # a finding here without pushing didn't fix a check that failed since.
-        if idle > rc["handoffAfter"] * MIN and not swept:
+        if not swept and handoff_due("redFixed"):
             hand_off("CI is red (" + ", ".join(ci_names) + ")", "redFixed")
     elif held:
         judged("a Claude job was asked to judge this head")
@@ -849,7 +770,18 @@ def main():
     except OSError:
         if not DRY:
             raise
+    # `kick REPO...`: just those repos' PRs, now (burrow-events, on what
+    # changed on GitHub or here, or a wait that has ended). The full pass,
+    # when burrow-events starts and hourly, does the rest: the settings, new
+    # repos' baseline jobs and branches.
+    kick = [k.lower() for k in sys.argv[2:]] if sys.argv[1:2] == ["kick"] else None
+    if not DRY:
+        # One pass at a time, full or kicked: two would act on the same PRs.
+        lock = open(os.path.join(STATE, "pass.lock"), "w")
+        fcntl.flock(lock, fcntl.LOCK_EX)
     repos = R.discover()
+    if kick is not None:
+        repos = [r for r in repos if r["repo"].lower() in kick]  # GitHub's names are case-blind
     # Repos whose baseline job has started. A repo not in it gets one, a few
     # per pass so the first pass on a machine doesn't start them all at once.
     known = set(load("known.json", []))
@@ -857,13 +789,15 @@ def main():
     # take every pass's slots.
     failed = load("baseline-failed.json", {})
     started = 0
-    digest = []
+    # What waits for the owner, by repo: a kicked pass replaces its repos'.
+    digest = {}
     read, live = set(), set()  # the repos whose PRs it read, and their heads' snapshots
     covered = []
     for r in repos:
         repo = r["repo"]
+        digest[repo] = mine = []
         try:
-            new = R.settle_repo(r, known)
+            new = kick is None and R.settle_repo(r, known)
             if (new and CFG["baselineJobs"] and started < CFG["baselinePerPass"]
                     and C.NOW - failed.get(repo, 0) > 86400):
                 jid = C.job(repo, CFG["baselineTask"].replace("REPO", repo), clone=True)
@@ -886,25 +820,42 @@ def main():
                 heads.add(pr["headRefName"])
                 live.add(V.snap_name(f"pr-{repo.replace('/', '_')}-{pr['number']}.json", pr["headRefOid"], pr["baseRefName"]))
                 try:
-                    handle(repo, pr, info, digest)
+                    handle(repo, pr, info, mine)
                 except Exception as e:  # one bad PR mustn't stop the rest
                     log(f"{repo}#{pr['number']}: {e}")
                     seen_to = False
             if seen_to:
                 covered.append(r)
+            else:
+                C.wake(repo, C.NOW + 5 * MIN)
             if CFG["cleanBranches"]:
-                R.sweep_branches(r, heads, digest)
+                # Stale ones the last sweep found are listed every pass.
+                R.sweep_branches(r, heads, mine, sweep=kick is None)
         except Exception as e:
             log(f"{repo}: {e}")
-    # For renovate-sweep: it lists the ok majors of the repos this pass didn't
-    # see to (one whose pass failed among them), and tells its jobs how every
-    # repo's proofs run.
-    save("repos.json", coverage(repos, covered))
-    save("known.json", sorted(known))
-    save("baseline-failed.json", failed)
+            C.wake(repo, C.NOW + 5 * MIN)  # GitHub, often: another look soon
+    # This pass's wake-ups and owner's lines replace the ones it had for the
+    # repos it saw; a full pass's, all of them.
+    seen = {r["repo"] for r in repos}
+    wakes = {k: v for k, v in load("wake.json", {}).items() if v > C.NOW and k not in seen}
+    save("wake.json", {**wakes, **C.WAKE})
+    if kick is not None:
+        digest = {**{k: v for k, v in load("digest-repos.json", {}).items() if k not in seen}, **digest}
+    save("digest-repos.json", digest)
+    if kick is None:
+        # For renovate-sweep: it lists the ok majors of the repos this pass
+        # didn't see to (one whose pass failed among them), and tells its
+        # jobs how every repo's proofs run.
+        save("repos.json", coverage(repos, covered))
+        save("known.json", sorted(known))
+        save("baseline-failed.json", failed)
     if not DRY:
         V.sweep(read, live)
-    R.publish(digest)
+    if kick is None:
+        R.unhook_gone(repos + R.hook_projects(repos))
+    # Last: GitHub failing it leaves the pass's state saved. A line more than
+    # one repo has (a reviewer out of service) is listed once.
+    R.publish(list(dict.fromkeys(tuple(x) for repo in sorted(digest) for x in digest[repo])))
 
 
 if __name__ == "__main__":

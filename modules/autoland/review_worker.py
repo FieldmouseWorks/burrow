@@ -21,6 +21,7 @@ import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor
 
+import common as C
 import egress as G
 import reviewers as V
 from common import CFG, STATE, load, log, save
@@ -270,7 +271,7 @@ def tail(text, n):
 
 def review(name):
     """One queued review: its answer, or why there's none, left in DONE for
-    the next pass. Gone from the queue either way."""
+    the repo's pass, which it kicks. Gone from the queue either way."""
     item = load(f"{V.QUEUE}/{name}", None)
     try:
         if not item:
@@ -302,6 +303,8 @@ def review(name):
             os.remove(os.path.join(STATE, V.QUEUE, name))
         except OSError:
             pass
+        if isinstance((item or {}).get("repo"), str):
+            C.kick(item["repo"])
 
 
 def work():

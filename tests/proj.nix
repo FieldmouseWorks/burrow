@@ -5,7 +5,10 @@
 # (proj await) is resumed when it changes, even before the turn ended and
 # from proj-watch's own unit, but never for proj-inbox's own comment, or once
 # its deadline passes with GitHub unreadable, that a reply meanwhile owns the
-# job's waits, that proj-inbox posts every finished turn's answer (one
+# job's waits, that a turn's end kicks what it was started to and proj-watch
+# for the repos it awaits, that _watch and proj-inbox given a repo look at
+# that repo alone and book when it next needs a look, that proj-inbox posts
+# every finished turn's answer (one
 # resumed before it looked too, none misread while a turn starts) and ends
 # the waits of one whose issue closed (proj stop's, which a watch already
 # asking GitHub keeps to), a stop that fails there not holding up the rest,
@@ -87,16 +90,17 @@ pkgs.testers.runNixOSTest {
         jobMemoryMax = "128M";
         maxWait = 20;
         inherit gh;
-        # Both run by hand here, never by their timers.
-        watchEvery = "yearly";
         inbox = {
           enable = true;
           authors = [ "sam" ];
-          every = "yearly";
         };
       };
     };
-    environment.systemPackages = [ pkgs.git ];
+    # proj-watch and proj-inbox run by hand here, never from burrow-events,
+    # whose kick port the test listens on itself.
+    systemd.services.burrow-events.enable = false;
+    systemd.timers.burrow-events-catch-up.enable = false;
+    environment.systemPackages = [ pkgs.git pkgs.python3 ];
 
     users.users.dev = {
       isNormalUser = true;
@@ -132,10 +136,40 @@ pkgs.testers.runNixOSTest {
         return float(machine.succeed(f"stat -c %.9Y {d}/$(cat {d}/turns).slot"))
 
     machine.wait_for_unit("user@1001.service")
+    # burrow-events' kick port: each kick's path, a line each.
+    machine.succeed("""cat >/tmp/kicks.py <<'EOF'
+    import http.server
+    class K(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("Content-Length") or 0))
+            open("/tmp/kicks", "a").write(self.path + "\\n")
+            self.send_response(202)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+    http.server.HTTPServer(("127.0.0.1", 8788), K).serve_forever()
+    EOF""")
+    machine.succeed("touch /tmp/kicks && (python3 /tmp/kicks.py >/tmp/kicks.log 2>&1 &)")
+    machine.wait_for_open_port(8788)
+
+    def kicks():
+        return machine.succeed("cat /tmp/kicks").split()
 
     with subtest("the cap is on claude.slice"):
         out = machine.succeed("systemctl --user -M dev@ show claude.slice -p MemoryHigh -p MemoryMax")
         assert "MemoryMax=" in out and "infinity" not in out, out
+
+    with subtest("a look with nothing awaited succeeds, and books nothing"):
+        proj("_watch")
+        assert json.loads(machine.succeed("cat /var/lib/burrow/proj-watch/wake.json")) == {}
+
+    with subtest("a look waits for one already running"):
+        # burrow-events runs one at a time, but one from before its restart
+        # (or a hand-run one) can still be going: two would each write the
+        # wake file from what they saw.
+        machine.execute("su - dev -c 'flock /var/lib/burrow/proj-watch/wake.json.lock sleep 10' >/dev/null 2>&1 &")
+        machine.wait_until_fails("flock -n /var/lib/burrow/proj-watch/wake.json.lock true", timeout=30)
+        machine.fail("su - dev -c 'timeout 3 proj _watch'")
+        machine.wait_until_succeeds("flock -n /var/lib/burrow/proj-watch/wake.json.lock true", timeout=30)
 
     with subtest("a turn that failed without saying anything has no answer"):
         e = proj("run web fail")
@@ -195,9 +229,24 @@ pkgs.testers.runNixOSTest {
         github("repos/o/r/commits/abc/check-runs", '{"check_runs": [{"name": "ci", "status": "in_progress", "conclusion": null}]}')
         github("repos/o/r/commits/abc/status", '{"state": "pending", "total_count": 0}')
         github("repos/o/r/issues/5/comments", '[]')
-        e = proj('run web "await https://github.com/o/r/pull/5"')
+        machine.succeed("truncate -s 0 /tmp/kicks")
+        e = proj('run --kick autoland/o/r web "await https://github.com/o/r/pull/5"')
         machine.wait_until_succeeds(f"su - dev -c 'proj state {e}' | grep -x done", timeout=120)
         assert "[awaits o/r#5]" in proj("status"), proj("status")
+        # Its turn's end kicked what it was started to, and proj-watch for o/r.
+        machine.wait_until_succeeds("grep -x /kick/proj-watch/o/r /tmp/kicks", timeout=30)
+        assert sorted(kicks()) == ["/kick/autoland/o/r", "/kick/proj-watch/o/r"], kicks()
+        # A project folder's name is the job's, whatever it holds.
+        machine.succeed("install -d -o dev -g dev '/data/dev/src/my web%n'")
+        machine.succeed("truncate -s 0 /tmp/kicks")
+        e2 = proj('run --kick autoland/o/q \"my web%n\" hello')
+        machine.wait_until_succeeds(f"su - dev -c 'proj state \"{e2}\"' | grep -x done", timeout=120)
+        machine.wait_until_succeeds("grep -x /kick/autoland/o/q /tmp/kicks", timeout=30)
+        # proj-watch's next look at o/r is booked for the wait's deadline.
+        since = int(machine.succeed(f"cut -f2 /data/dev/jobs/{e}/await").strip())
+        proj("_watch")
+        wake = json.loads(machine.succeed("cat /var/lib/burrow/proj-watch/wake.json"))
+        assert wake == {"o/r": since + 24 * 3600 + 1}, wake
         # proj-inbox's own answer on the PR isn't news.
         github("repos/o/r/pulls/5", '{"state": "open", "merged": false, "head": {"sha": "abc"}, "comments": 1, "review_comments": 0}')
         github("repos/o/r/issues/5/comments", '[{"id": 1, "body": "did it\\n<!-- proj-inbox -->"}]')
@@ -205,8 +254,13 @@ pkgs.testers.runNixOSTest {
         time.sleep(3)
         assert machine.succeed(f"cat /data/dev/jobs/{e}/turns").strip() == "1"
         github("repos/o/r/commits/abc/check-runs", '{"check_runs": [{"name": "ci", "status": "completed", "conclusion": "success"}]}')
-        # The timer's way, as a system unit running as the user.
-        machine.succeed("systemctl start proj-watch.service")
+        # Another repo's look leaves it be.
+        proj("_watch o/q")
+        time.sleep(3)
+        assert machine.succeed(f"cat /data/dev/jobs/{e}/turns").strip() == "1"
+        # burrow-events' way: the repo's own unit, running as the user, and
+        # spelt as GitHub may spell it.
+        machine.succeed("systemctl start proj-watch@O-R.service")
         machine.wait_until_succeeds(f"grep -x 2 /data/dev/jobs/{e}/turns", timeout=30)
         machine.wait_until_succeeds(f"su - dev -c 'proj state {e}' | grep -x done", timeout=120)
         prompt = machine.succeed(f"cat /data/dev/jobs/{e}/prompt.2")
@@ -243,10 +297,20 @@ pkgs.testers.runNixOSTest {
         e = proj('run web "await https://github.com/o/r/pull/5"')
         machine.wait_until_succeeds(f"su - dev -c 'proj state {e}' | grep -x done", timeout=120)
         github("repos/o/r/commits/abc/check-runs", '{"check_runs": [{"name": "ci", "status": "completed", "conclusion": "success"}]}')
+        # Its deadline has passed too, so the retry is all that books o/r.
+        machine.succeed(f"sed -i 's/\\t[0-9]*\\t/\\t0\\t/' /data/dev/jobs/{e}/await")
         # No user manager to reach (a bus error, a restart): the turn can't start.
+        before = int(machine.succeed("date +%s"))
         machine.execute("su - dev -c 'XDG_RUNTIME_DIR=/nonexistent proj _watch'")
         assert machine.succeed(f"cat /data/dev/jobs/{e}/turns").strip() == "1"
         machine.succeed(f"test -s /data/dev/jobs/{e}/await")
+        # Retried in five minutes: the past deadline doesn't take its place.
+        wake = json.loads(machine.succeed("cat /var/lib/burrow/proj-watch/wake.json"))
+        assert before + 300 <= wake["o/r"] <= int(machine.succeed("date +%s")) + 300, wake
+        # A look at another repo keeps o/r's retry.
+        machine.execute("su - dev -c 'XDG_RUNTIME_DIR=/nonexistent proj _watch o/q'")
+        kept = json.loads(machine.succeed("cat /var/lib/burrow/proj-watch/wake.json"))
+        assert kept.get("o/r") == wake["o/r"], kept
         proj("_watch")
         machine.wait_until_succeeds(f"grep -x 2 /data/dev/jobs/{e}/turns", timeout=30)
 
@@ -310,9 +374,16 @@ pkgs.testers.runNixOSTest {
                  "title": "t", "body": "inbox-slow", "state": "open", "labels": [{"name": "claude"}]}
         github("repos/o/r/issues", json.dumps([issue]))
         github("repos/o/r/issues/7/comments", "[]")
-        machine.succeed("su - dev -c proj-inbox")
+        # Another repo's look leaves it be.
+        machine.succeed("su - dev -c 'proj-inbox o/q'")
+        assert machine.succeed("su - dev -c 'proj-inbox status'").strip() == ""
+        machine.succeed("truncate -s 0 /tmp/kicks")
+        # Spelt otherwise than the clone's origin: GitHub's names are case-blind.
+        machine.succeed("su - dev -c 'proj-inbox O/R'")
         job = machine.succeed("su - dev -c 'proj-inbox status'").split()[-1]
         machine.wait_until_succeeds(f"su - dev -c 'proj state {job}' | grep -x done", timeout=120)
+        # Its turn's end kicks the inbox's look at o/r, which posts the answer.
+        machine.wait_until_succeeds("grep -x /kick/proj-inbox/o/r /tmp/kicks", timeout=30)
         # Its next turn starts before the inbox looks again, as proj _watch's can.
         proj(f'reply {job} "sleep 1"')
         machine.wait_until_succeeds(f"su - dev -c 'proj state {job}' | grep -x done", timeout=120)
@@ -320,6 +391,46 @@ pkgs.testers.runNixOSTest {
         posted = machine.succeed("cat /tmp/gh/posted")
         first = posted.find("did This task comes from GitHub issue o/r#7")
         assert "On it" in posted and -1 < first < posted.find("did sleep 1"), posted
+
+    with subtest("a reply under a minute old waits, and the inbox books when it's old enough"):
+        now = machine.succeed("date -u +%Y-%m-%dT%H:%M:%SZ").strip()
+        github("repos/o/r/issues/7", json.dumps(issue))
+        github("repos/o/r/issues/7/comments", json.dumps([{"id": 50, "user": {"login": "sam"}, "body": "and the tests", "created_at": now}]))
+        machine.succeed("su - dev -c 'proj-inbox o/r'")
+        assert machine.succeed(f"cat /data/dev/jobs/{job}/turns").strip() == "2"
+        wake = json.loads(machine.succeed("cat /var/lib/burrow/proj-inbox/wake.json"))
+        at = int(machine.succeed(f"date -d {now} +%s").strip()) + 61
+        assert wake == {"o/r": at}, (wake, at)
+        github("repos/o/r/issues/7/comments", "[]")
+        machine.succeed("su - dev -c 'proj-inbox o/r'")
+        assert json.loads(machine.succeed("cat /var/lib/burrow/proj-inbox/wake.json")) == {}
+        # Its own answer, or someone else's comment, is nothing to hand on.
+        now = machine.succeed("date -u +%Y-%m-%dT%H:%M:%SZ").strip()
+        github("repos/o/r/issues/7/comments", json.dumps([
+            {"id": 51, "user": {"login": "sam"}, "body": "did it <!-- proj-inbox -->", "created_at": now},
+            {"id": 52, "user": {"login": "eve"}, "body": "me too", "created_at": now}]))
+        machine.succeed("su - dev -c 'proj-inbox o/r'")
+        assert json.loads(machine.succeed("cat /var/lib/burrow/proj-inbox/wake.json")) == {}
+        github("repos/o/r/issues/7/comments", "[]")
+        machine.succeed("su - dev -c 'proj-inbox o/r'")
+
+    with subtest("a reply whose turn can't start is tried again in five minutes"):
+        old = machine.succeed("date -u -d '2 minutes ago' +%Y-%m-%dT%H:%M:%SZ").strip()
+        github("repos/o/r/issues/7/comments", json.dumps([{"id": 60, "user": {"login": "sam"}, "body": "and the docs", "created_at": old}]))
+        before = int(machine.succeed("date +%s"))
+        machine.succeed("su - dev -c 'env -u DBUS_SESSION_BUS_ADDRESS XDG_RUNTIME_DIR=/nonexistent proj-inbox o/r'")
+        assert machine.succeed(f"cat /data/dev/jobs/{job}/turns").strip() == "2"
+        wake = json.loads(machine.succeed("cat /var/lib/burrow/proj-inbox/wake.json"))
+        assert before + 300 <= wake.get("o/r", 0) <= int(machine.succeed("date +%s")) + 300, wake
+        github("repos/o/r/issues/7/comments", "[]")
+        machine.succeed("su - dev -c 'proj-inbox o/r'")
+
+    with subtest("the inbox waits for a pass already running"):
+        # Two at once could each find an issue without its job and start one.
+        machine.execute("su - dev -c 'flock /var/lib/burrow/proj-inbox/wake.json.lock sleep 10' >/dev/null 2>&1 &")
+        machine.wait_until_fails("flock -n /var/lib/burrow/proj-inbox/wake.json.lock true", timeout=30)
+        machine.fail("su - dev -c 'timeout 3 proj-inbox o/r'")
+        machine.wait_until_succeeds("flock -n /var/lib/burrow/proj-inbox/wake.json.lock true", timeout=30)
 
     with subtest("the inbox waits out a turn being started"):
         # A turn held halfway through starting (its number written, its unit
@@ -430,9 +541,13 @@ pkgs.testers.runNixOSTest {
         # 8 closed, 9's answer still to post; systemd can't be asked, so 8's
         # job can't be stopped.
         github("repos/o/r/issues", json.dumps(issues[1:]))
+        before = int(machine.succeed("date +%s"))
         machine.succeed("su - dev -c 'env -u DBUS_SESSION_BUS_ADDRESS XDG_RUNTIME_DIR=/nonexistent proj-inbox'")
         assert "did This task comes from GitHub issue o/r#9" in machine.succeed("cat /tmp/gh/posted")
         assert "o/r#8" in machine.succeed("su - dev -c 'proj-inbox status'")
+        # Nothing else may come for o/r, so the stop is tried again in five minutes.
+        wake = json.loads(machine.succeed("cat /var/lib/burrow/proj-inbox/wake.json"))
+        assert before + 300 <= wake.get("o/r", 0) <= int(machine.succeed("date +%s")) + 300, wake
         machine.succeed("su - dev -c proj-inbox")
         assert "o/r#8" not in machine.succeed("su - dev -c 'proj-inbox status'")
 
@@ -446,6 +561,22 @@ pkgs.testers.runNixOSTest {
         again = next(x.split()[-1] for x in listed.splitlines() if x.startswith("o/r#9 "))
         assert again != gone, listed
         machine.wait_until_succeeds(f"su - dev -c 'proj state {again}' | grep -x done", timeout=120)
+
+    with subtest("a repo out of reach is remembered until a pass reaches it again"):
+        gone = "/var/lib/burrow/proj-inbox/.unreached"
+        machine.succeed("mv /tmp/gh/repos_o_r_issues /tmp/gh/kept")
+        machine.succeed("su - dev -c 'proj-inbox o/r'")
+        machine.succeed(f"test -s {gone}/o_r")
+        machine.succeed("mv /tmp/gh/kept /tmp/gh/repos_o_r_issues")
+        # The pass that reaches everything again, whole (its shell has no
+        # compgen, for one).
+        out = machine.succeed("su - dev -c 'proj-inbox o/r' 2>&1")
+        assert "command not found" not in out, out
+        assert machine.succeed(f"ls -A {gone}").strip() == "", machine.succeed(f"ls -A {gone}")
+        # One whose clone is gone is out of reach no more, after a full pass.
+        machine.succeed(f"su - dev -c 'echo 0 >{gone}/sam_gone'")
+        machine.succeed("su - dev -c proj-inbox")
+        assert machine.succeed(f"ls -A {gone}").strip() == "", machine.succeed(f"ls -A {gone}")
 
     with subtest("a wait proj can't read is news, and doesn't stop _watch"):
         e = proj('run web "sleep 1"')

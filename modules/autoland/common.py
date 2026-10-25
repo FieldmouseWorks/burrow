@@ -1,5 +1,5 @@
 """What every part of the steward shares: its settings, gh, its state files,
-and Claude jobs. Calls that touch the outside (gh, write, job, me) are used
+and Claude jobs. Calls that touch the outside (gh, write, job, kick, me) are used
 as `C.gh(...)` and so on, so a test can stand in for them in one place."""
 
 import hashlib
@@ -10,6 +10,7 @@ import re
 import subprocess
 import sys
 import time
+import urllib.request
 from datetime import datetime
 
 CFG = json.load(open(os.environ["AUTOLAND_CONFIG"]))
@@ -153,6 +154,39 @@ def ts(s):
     return datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp() if s else 0
 
 
+# When each repo's PRs next need a pass, as this pass worked out: a wait that
+# ends then (a new head's settle delay, a reviewer's timeout, the time left
+# before a Claude job takes its findings). Saved to wake.json, where
+# burrow-events (../events/events.py) reads it and starts that repo's pass
+# then.
+WAKE = {}
+
+
+def wake(repo, at):
+    """Ask for a pass of repo at `at`, if that's still to come."""
+    if at > NOW:
+        WAKE[repo] = min(WAKE.get(repo, at), at)
+
+
+def webhook_secret():
+    """The secret GitHub signs the webhook's deliveries with (burrow-events
+    checks them; repos.py gives it to each repo's hook)."""
+    with open(os.path.join(os.environ.get("CREDENTIALS_DIRECTORY", ""), "webhook")) as f:
+        return f.read().strip()
+
+
+def kick(repo):
+    """Start the repo's pass now (burrow-events), for something it would find
+    that GitHub sends no event for. Best effort: the hourly catch-up is there
+    for one that doesn't get through."""
+    if DRY:
+        return
+    try:
+        urllib.request.urlopen(urllib.request.Request(f"{CFG['kick']}/{repo}", data=b"", method="POST"), timeout=5).close()
+    except OSError as e:
+        log(f"{repo}: couldn't kick its pass: {e}")
+
+
 def load(name, default):
     try:
         return json.load(open(os.path.join(STATE, name)))
@@ -178,11 +212,12 @@ def repo_cfg(repo):
     return c
 
 
-def project_dir(repo):
-    """The repo's checkout in projectsDir (by origin URL), or None. Only a
-    clone of its own counts: a hidden folder, or a worktree of the repo
-    (`.git` is a file there) checked out on some other branch, sorts first
-    and shares the origin, but a job sent there works on the wrong tree."""
+def projects():
+    """(folder, repo) for each project in projectsDir, by its origin URL.
+    Only a clone of its own counts: a hidden folder, or a worktree of the
+    repo (`.git` is a file there) checked out on some other branch, sorts
+    first and shares the origin, but a job sent there works on the wrong
+    tree."""
     src = CFG["projectsDir"]
     for d in sorted(os.listdir(src)) if os.path.isdir(src) else []:
         if d.startswith(".") or not os.path.isdir(os.path.join(src, d, ".git")):
@@ -190,9 +225,13 @@ def project_dir(repo):
         p = subprocess.run(["git", "-C", os.path.join(src, d), "remote", "get-url", "origin"],
                            capture_output=True, text=True)
         url = re.sub(r"^(https://github\.com/|git@github\.com:)", "", p.stdout.strip()).removesuffix(".git")
-        if url.lower() == repo.lower():
-            return d
-    return None
+        if url.count("/") == 1:
+            yield d, url
+
+
+def project_dir(repo):
+    """The repo's checkout in projectsDir, or None."""
+    return next((d for d, url in projects() if url.lower() == repo.lower()), None)
 
 
 def job(repo, task, clone=False):
@@ -207,7 +246,8 @@ def job(repo, task, clone=False):
     if DRY:
         log(f"  would: proj run {d} ...")
         return "dry"
-    p = subprocess.run([CFG["proj"], "run", d, task], capture_output=True, text=True)
+    # Each of its turns that ends starts the repo's pass, which reads what it did.
+    p = subprocess.run([CFG["proj"], "run", "--kick", f"autoland/{repo}", d, task], capture_output=True, text=True)
     return p.stdout.strip() or None
 
 

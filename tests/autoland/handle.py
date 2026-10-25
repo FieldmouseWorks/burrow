@@ -34,7 +34,7 @@ assert "Draft: work in progress" in status and digest == [], (status, digest)
 long = mkpr()
 long["comments"]["pageInfo"]["hasPreviousPage"] = True
 status, digest = run(long, 600)
-assert "Over 100 comments" in status and digest and JOBS == [] and not merged(), (status, digest)
+assert "Too many comments to read" in status and digest and JOBS == [] and not merged(), (status, digest)
 
 
 # A head is reviewed by both once it has sat still: each queued (once) for
@@ -372,10 +372,23 @@ assert S.coverage([{"repo": "sam/r"}], [{"repo": "sam/r"}]) == {
 # ... but only the repos a pass saw to are covered: one whose pass failed
 # isn't, so renovate-sweep lists its ok majors itself, and still knows how
 # its proofs run.
-kept_fns = (S.R.discover, S.R.settle_repo, S.R.publish, S.open_prs)
+kept_fns = (S.R.discover, S.R.settle_repo, S.R.publish, S.open_prs, S.R.unhook_gone, S.R.hook_projects)
 S.R.discover = lambda: [{"repo": "sam/r"}, {"repo": "sam/bad"}, {"repo": "sam/flaky"}]
+# A full pass takes the hooks off the repos it no longer sees to, but not
+# off the projects it hooks for proj.
+UNHOOKED = []
+S.R.unhook_gone = UNHOOKED.append
+S.R.hook_projects = lambda repos: [{"repo": "eve/p"}]
 S.R.settle_repo = lambda r, known: False
-S.R.publish = lambda digest: None
+# The owner's issue can't be updated (GitHub down): the pass's state is
+# saved all the same.
+
+
+def publish(digest):
+    raise RuntimeError("GitHub is down")
+
+
+S.R.publish = publish
 
 
 def some_prs(owner, name):
@@ -386,8 +399,17 @@ def some_prs(owner, name):
 
 
 S.open_prs = some_prs
-S.main()
-S.R.discover, S.R.settle_repo, S.R.publish, S.open_prs = kept_fns
+for f in ("repos.json", "known.json"):
+    if os.path.exists(f"{tmp}/state/{f}"):
+        os.remove(f"{tmp}/state/{f}")
+try:
+    S.main()
+    raise AssertionError("publish's failure was swallowed")
+except RuntimeError:
+    pass
+assert os.path.exists(f"{tmp}/state/known.json")
+assert UNHOOKED == [S.R.discover() + [{"repo": "eve/p"}]], UNHOOKED
+S.R.discover, S.R.settle_repo, S.R.publish, S.open_prs, S.R.unhook_gone, S.R.hook_projects = kept_fns
 written = json.load(open(f"{tmp}/state/repos.json"))["repos"]
 assert {r: v["covered"] for r, v in written.items()} == {"sam/r": True, "sam/bad": False, "sam/flaky": False}, written
 assert written["sam/bad"]["proofJobs"] == S.repo_cfg("sam/bad")["proofJobs"], written

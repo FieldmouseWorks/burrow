@@ -32,7 +32,7 @@
         key = "burrow/${name}";
         imports = [ (import ./modules/${name}.nix inputs) ];
       };
-      names = [ "claude" "undo" "switch" "notify" "updates" "proj" "remote-control" "agents" "robot" "ops" "toolbox" "autoland" "house" ];
+      names = [ "claude" "undo" "switch" "notify" "updates" "proj" "remote-control" "agents" "robot" "ops" "toolbox" "autoland" "house" "events" ];
     in
     {
       # A project's dev shell and gate in a few lines; see lib/project.nix.
@@ -58,8 +58,17 @@
       checks.${system} = {
         example = self.nixosConfigurations.example.config.system.build.toplevel;
         # Each module on its own, with only what it imports: evaluating is the
-        # check, so these build nothing.
-        standalone = pkgs.writeText "burrow-standalone" (nixpkgs.lib.concatMapStrings (name:
+        # check, so these build nothing. A service that says how it runs (a
+        # Type) has something to run too: systemd refuses one without
+        # ExecStart or ExecStop, and only when it starts.
+        standalone = let
+          runnable = name: machine: let
+            s = machine.config.systemd.services;
+            empty = builtins.filter (n: s.${n}.enable && s.${n}.serviceConfig ? Type
+              && !(s.${n}.serviceConfig ? ExecStart || s.${n}.serviceConfig ? ExecStop)) (builtins.attrNames s);
+          in if empty == [ ] then machine
+             else throw "${name}: services with nothing to run: ${builtins.concatStringsSep ", " empty}";
+        in pkgs.writeText "burrow-standalone" (nixpkgs.lib.concatMapStrings (name:
           let
             machine = nixpkgs.lib.nixosSystem {
               modules = [
@@ -70,10 +79,12 @@
                 (nixpkgs.lib.optionalAttrs (name == "updates") { burrow.updates.origin = "https://github.com/sam/homelab"; })
                 (nixpkgs.lib.optionalAttrs (name == "autoland") { burrow.autoland = { owners = [ "sam" ]; authors = [ "sam" ]; reviewers = { codex.enable = true; deepseek = { enable = true; envFile = "/run/secrets/deepseek-review"; }; }; }; })
                 (nixpkgs.lib.optionalAttrs (name == "house") { burrow.house.owners = [ "sam" ]; })
+                (nixpkgs.lib.optionalAttrs (builtins.elem name [ "events" "autoland" ]) { burrow.events = { host = "example.org"; secretFile = "/run/secrets/burrow-webhook"; }; })
                 { burrow.${if name == "remote-control" then "remoteControl" else name}.enable = true; }
               ];
             };
-          in "${name} ${builtins.unsafeDiscardStringContext machine.config.system.build.toplevel.drvPath}\n") names);
+          in "${name} ${builtins.unsafeDiscardStringContext (runnable name machine).config.system.build.toplevel.drvPath}\n")
+            names + "example ${builtins.unsafeDiscardStringContext (runnable "example" self.nixosConfigurations.example).config.system.build.toplevel.drvPath}\n");
         # Sandboxes for real: boot two, work in them, break out of nothing.
         # Nested KVM: run it on a machine that has /dev/kvm.
         agents = import ./tests/agents.nix { inherit self pkgs; };
@@ -84,6 +95,14 @@
         autoland = pkgs.runCommand "autoland-check" { nativeBuildInputs = [ pkgs.python3 pkgs.git ]; } ''
           python3 -I ${./tests/autoland}/check.py ${./modules/autoland}/steward.py \
             ${pkgs.writeText "one-way.json" (builtins.toJSON self.nixosConfigurations.example.config.burrow.autoland.oneWay)}
+          touch $out
+        '';
+        # burrow-events for real: deliveries, kicks and wake-ups starting a
+        # handler's units through polkit.
+        events-service = import ./tests/events.nix { inherit self pkgs; };
+        # Which deliveries and kicks start whose pass, with a stand-in for systemctl.
+        events = pkgs.runCommand "events-check" { nativeBuildInputs = [ pkgs.python3 ]; } ''
+          python3 -I ${./tests/events.py} ${./modules/events}/events.py
           touch $out
         '';
         # Which Renovate PRs renovate-sweep hands over and lists, with stand-ins for gh and proj.

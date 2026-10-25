@@ -2,6 +2,7 @@
 daily branch sweep, and the one issue that lists what waits for the owner."""
 
 import fnmatch
+import hashlib
 import json
 import os
 import subprocess
@@ -74,6 +75,7 @@ def settle_repo(r, known):
             log(f"{repo}: labels {', '.join(want)}")
             st["labels"] = want
             save(f"repo-{repo.replace('/', '_')}.json", st)
+    hook(repo, st, due)
     # A repo seen for the first time has no state yet, so it's settled now.
     if not due:
         return new
@@ -110,6 +112,98 @@ def settle_repo(r, known):
     return new
 
 
+def hook(repo, st, due):
+    """The repo's webhook to burrow-events (../events.nix): what happens on
+    the repo starts its handlers' passes within seconds. Set again when its
+    URL, events or secret change, and with the daily settings, in case it was
+    deleted or edited. GitHub never gives the secret back, so it's known by a
+    hash. The hook is the one with the id it was given, so a new URL moves
+    it rather than leaving the old one sending. A status run has neither the secret (only the services get it)
+    nor anything to change, so it leaves the hook alone."""
+    if DRY:
+        return
+    wh = CFG["webhook"]
+    secret = C.webhook_secret()
+    want = hashlib.sha256(json.dumps([wh["url"], wh["events"], secret]).encode()).hexdigest()[:16]
+    if st.get("hook") == want and not due:
+        return
+    hooks = C.gh("api", f"repos/{repo}/hooks", check=False)
+    if not isinstance(hooks, list):
+        return  # tried again on the next full pass
+    body = json.dumps({"active": True, "events": wh["events"],
+                       "config": {"url": wh["url"], "content_type": "json", "secret": secret, "insecure_ssl": "0"}})
+    mine = ([x for x in hooks if x.get("id") == st.get("hookId")]
+            or [x for x in hooks if (x.get("config") or {}).get("url") == wh["url"]])
+    if mine:
+        done = C.write("api", "-X", "PATCH", f"repos/{repo}/hooks/{mine[0]['id']}", "--input", "-", input=body, check=False)
+        made = mine[0]["id"]
+    else:
+        log(f"{repo}: adding the webhook")
+        done = C.write("api", "-X", "POST", f"repos/{repo}/hooks", "--input", "-",
+                       input=json.dumps({"name": "web", **json.loads(body)}), check=False)
+        made = done.get("id") if isinstance(done, dict) else None
+    if done is not None:
+        st["hook"], st["hookId"] = want, made
+        save(f"repo-{repo.replace('/', '_')}.json", st)
+
+
+def hook_projects(repos):
+    """The hook on the projects' repos (projectsDir) that it doesn't see to
+    (excluded, or another owner's): proj-watch and proj-inbox start from its
+    deliveries too. Returns them, for unhook_gone to keep."""
+    if DRY:
+        return []
+    seen = {r["repo"].lower() for r in repos}
+    more = sorted({repo for _, repo in C.projects() if repo.lower() not in seen})
+    for repo in more:
+        name = f"repo-{repo.replace('/', '_')}.json"
+        st = load(name, {})
+        due = C.NOW - st.get("hookAt", 0) >= 86400
+        if due:
+            st["hookAt"] = C.NOW
+            save(name, st)
+        hook(repo, st, due)
+    return [{"repo": repo} for repo in more]
+
+
+def unhook_gone(repos):
+    """The hooks this machine gave repos it no longer sees to (excluded,
+    archived, out of the owners), off them: their deliveries would start
+    passes over nothing, and the URL has no business there. One that can't
+    be taken off (no admin any more, say), or whose name GitHub won't look
+up, is tried again a day later. A
+    renamed repo leaves its old state file behind, and GitHub answers the old
+    name with the new one: that hook is the one hook() adopted under the new
+    name, so the old file lets go of it instead."""
+    if DRY:
+        return
+    live = {r["repo"].lower() for r in repos}
+    keep = {f"repo-{r['repo'].replace('/', '_')}.json" for r in repos}
+    for name in sorted(os.listdir(C.STATE)):
+        if not (name.startswith("repo-") and name.endswith(".json")) or name in keep:
+            continue
+        st = load(name, {})
+        if not st.get("hookId") or C.NOW - st.get("unhookTried", 0) < 86400:
+            continue
+        repo = name[len("repo-"):-len(".json")].replace("_", "/", 1)  # an owner has no _
+        now = C.gh("api", f"repos/{repo}", check=False)
+        if not isinstance(now, dict):  # not known to be gone: the old path may lead to a live repo
+            st["unhookTried"] = C.NOW
+            save(name, st)
+            continue
+        if str(now.get("full_name", "")).lower() in live:
+            log(f"{repo}: renamed to {now['full_name']}, which keeps the webhook")
+        else:
+            log(f"{repo}: no longer seen to, taking its webhook off")
+            if C.write("api", "-X", "DELETE", f"repos/{repo}/hooks/{st['hookId']}", check=False) is None:
+                st["unhookTried"] = C.NOW
+                save(name, st)
+                continue
+        for k in ("hook", "hookId", "unhookTried"):
+            st.pop(k, None)
+        save(name, st)
+
+
 def delete_branch(repo, name, sha):
     """Delete the branch only if its tip is still `sha`: a push since then
     keeps it (git's lease; the REST API has no conditional delete)."""
@@ -125,10 +219,13 @@ def delete_branch(repo, name, sha):
             log(f"{repo}: kept {name}: {p.stderr.strip()[:200]}")
 
 
-def sweep_branches(r, open_heads, digest):
+def sweep_branches(r, open_heads, digest, sweep=True):
+    """Delete the merged branches and list the stale ones, once a day and
+    only when `sweep`; the stale ones the last sweep found are listed every
+    time."""
     repo = r["repo"]
     st = load(f"repo-{repo.replace('/', '_')}.json", {})
-    if C.NOW - st.get("branches", 0) < 86400:
+    if not sweep or C.NOW - st.get("branches", 0) < 86400:
         for b in st.get("stale", []):
             digest.append(("Stale branches (unmerged, no PR, 30+ days)", f"{repo}: `{b}`", ""))
         return

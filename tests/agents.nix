@@ -71,6 +71,9 @@ pkgs.testers.runNixOSTest {
 
     host.wait_for_unit("multi-user.target")
     host.wait_for_unit("agents-dataset.service")
+    # proj alone runs burrow-events with no host or secret: kicks and
+    # wake-ups only.
+    host.wait_for_unit("burrow-events.service")
     host.succeed("mountpoint /agents")
     for unit in ["agent-proxy.service", "agent-proxy-open.service"]:
         host.wait_for_unit(unit)

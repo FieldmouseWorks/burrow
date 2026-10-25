@@ -1,21 +1,45 @@
 """What the steward's checks share (check.py runs them): its config and
-state in a temp dir; stand-ins for gh, Claude jobs, GitHub's git remote and
-the review agents (each records how it was run, then does what it's told);
-and PRs shaped like its query's."""
+state in a temp dir; stand-ins for gh, Claude jobs, GitHub's git remote,
+the review agents (each records how it was run, then does what it's told)
+and burrow-events' kick port; and PRs shaped like its query's."""
 
+import http.server
 import json
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 
 tmp = tempfile.mkdtemp()
+
+# burrow-events' kick port: which repos' passes were kicked.
+KICKS = []
+
+
+class Kicks(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        self.rfile.read(int(self.headers.get("Content-Length") or 0))
+        KICKS.append(self.path)
+        self.send_response(202)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def log_message(self, *a):
+        pass
+
+
+kicks = http.server.HTTPServer(("127.0.0.1", 0), Kicks)
+threading.Thread(target=kicks.serve_forever, daemon=True).start()
+
 os.makedirs(f"{tmp}/state")
 os.makedirs(f"{tmp}/cred")
 os.makedirs(f"{tmp}/home")
 with open(f"{tmp}/cred/deepseek", "w") as f:
     f.write('DEEPSEEK_API_KEY="sk-test-0123456789"\n')
+with open(f"{tmp}/cred/webhook", "w") as f:
+    f.write("hook-secret\n")
 
 # The review agents: each records how it was run, then does what AGENT says
 # (requests to send out, then an answer, or an error on stderr and an exit
@@ -112,6 +136,8 @@ with open(f"{tmp}/config.json", "w") as f:
                      "directPush": False, "ruleset": True, "requireCi": True,
                      "proofJobs": {}, "codex": True, "deepseek": True},
         "repos": {},
+        "webhook": {"url": "https://example.org/burrow/hook", "events": ["check_suite", "push"]},
+        "kick": f"http://127.0.0.1:{kicks.server_port}/kick/autoland",
         "reviewers": {"codex": {"enable": True, "effort": "high", "parallel": 2},
                       "deepseek": {"enable": True, "effort": "max", "parallel": 2}},
         "skipPaths": ["(^|/)secrets?/", r"\.(pem|key|p12|pfx)$", r"(^|/)\.env(\..*)?$"],
@@ -130,6 +156,7 @@ import repos as R  # noqa: E402,F401
 import review_worker as W  # noqa: E402,F401
 import reviewers as V  # noqa: E402,F401
 import steward as S  # noqa: E402,F401
+import touches as G  # noqa: E402,F401
 REAL_GH = C.gh  # the real one, before any check stands in for it
 
 for d in (V.QUEUE, V.SNAP, V.DONE, V.GIT):
@@ -248,6 +275,7 @@ def run(pr, after):
     C.NOW = C.ts(T0) + after
     WROTE.clear()
     JOBS.clear()
+    C.WAKE.clear()
     POSTED.clear()
     digest = []
     S.handle("sam/r", pr, info, digest)
@@ -282,8 +310,11 @@ def fresh_pr_state():
         os.makedirs(f"{tmp}/state/{d}")
 
 
+REAL = {"job": C.job}  # the steward's own, for the checks of what it runs
+
+
 def stand_in():
-    """gh, Claude jobs, the queue and the posting, for handle()."""
+    """gh, Claude jobs, the queue and the posting, for handle() and the passes."""
     C.gh = gh_stub
     C.write = write
     C.job = job

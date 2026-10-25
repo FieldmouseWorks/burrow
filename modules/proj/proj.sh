@@ -6,6 +6,8 @@
 #   proj run PROJECT "task"     start a job; prints its id
 #   proj run --vm PROJECT "task"  the same, in a fresh agent sandbox (agent.sh)
 #   proj run --first PROJECT "task"  ahead of the line (someone is waiting on it)
+#   proj run --kick NAME PROJECT "task"  kick NAME (HANDLER or HANDLER/OWNER/REPO,
+#                               one of burrow-events') each time a turn ends
 #   proj reply [--first] ID "message"  continue that job's conversation
 #   proj status                 recent jobs and their state
 #   proj log ID [--turn N]      the job's latest answer, or turn N's (--raw for
@@ -32,10 +34,12 @@
 # A turn ends at its answer. Claude -p stays up after it while anything it
 # left in the background runs (a CI watch, say), holding a slot to do
 # nothing; so the answer stops it, and what it left running. A job waiting on
-# GitHub says so with `proj await`, and `proj _watch` (a timer, ../proj.nix)
-# gives it its next turn once what it waits on changes: checks finish, a
-# review, comment or push comes in, or it's merged or closed. Nothing
-# changed in AWAIT_HOURS, and it's told that instead.
+# GitHub says so with `proj await`, and `proj _watch` gives it its next turn
+# once what it waits on changes: checks finish, a review, comment or push
+# comes in, or it's merged or closed. Nothing changed in AWAIT_HOURS, and
+# it's told that instead. burrow-events (../events.nix) starts _watch on the
+# repo's webhook deliveries, when a turn that awaits it ends, and at the
+# deadline _watch books in WAKE.
 #
 # With --vm the job runs in its own microVM on a clone of the project, where
 # nothing is refused at all; the work comes back with `agent fetch` (the
@@ -111,6 +115,8 @@ start_turn() {
     --property=MemoryMax="$JOB_MEMORY_MAX" \
     --property=OOMScoreAdjust=500 \
     --property=WorkingDirectory="$(cat "$d/project")" \
+    --setenv=PROJ_ENDED="$id" \
+    --property=ExecStopPost="$self _ended" \
     "$self" _exec "$id" "${first:-normal}"; then
     if [ "$n" = 1 ]; then rm -f "$d/turns"; else set_turns "$id" $((n - 1)); fi
     rm -f "$d/prompt.$n"
@@ -243,24 +249,31 @@ fingerprint() { # repo n
 
 case "${1:-status}" in
   run | reply)
-    cmd=$1 vm='' first=''
+    cmd=$1 vm='' first='' kick=()
     shift
     while :; do
       case ${1:-} in
         --vm) [ "$cmd" = run ] || { echo "proj reply has no --vm" >&2; exit 2; }; vm=1 ;;
+        --kick)
+          [ "$cmd" = run ] || { echo "proj reply has no --kick: the job's own are kept" >&2; exit 2; }
+          [[ ${2:-} =~ ^[a-z0-9-]+(/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)?$ ]] || { echo "proj run --kick HANDLER[/OWNER/REPO]" >&2; exit 2; }
+          kick+=("$2")
+          shift
+          ;;
         --first) first=first ;;
         *) break ;;
       esac
       shift
     done
     if [ "$cmd" = run ]; then
-      p=${1:?usage: proj run [--vm] [--first] PROJECT \"task\"}
-      task=${2:?usage: proj run [--vm] [--first] PROJECT \"task\"}
+      p=${1:?usage: proj run [--vm] [--first] [--kick NAME]... PROJECT \"task\"}
+      task=${2:?usage: proj run [--vm] [--first] [--kick NAME]... PROJECT \"task\"}
       [ -d "$src/$p" ] || { echo "no such project: $src/$p" >&2; exit 1; }
       mkdir -p "$jobs"
       # Unique even when two jobs start in the same second.
       id=$(basename "$(mktemp -d "$jobs/$p-$(date +%Y%m%d-%H%M%S)-XXXX")")
       echo "$src/$p" >"$jobs/$id/project"
+      [ ${#kick[@]} = 0 ] || printf '%s\n' "${kick[@]}" >"$jobs/$id/kick"
       if [ -n "$vm" ]; then agent new "$p" >"$jobs/$id/agent"; fi
     else
       id=${1:?usage: proj reply [--first] ID \"message\"}
@@ -361,15 +374,20 @@ case "${1:-status}" in
     echo "Noted. End your turn now: this job is resumed once $* changes."
     ;;
   _watch)
-    # Every few minutes (../proj.nix): jobs waiting on GitHub whose PRs or
-    # issues changed get their next turn. A line of JOBS/ID/await is
-    # "OWNER/REPO#N <tab> since <tab> fingerprint".
+    # `_watch [OWNER/REPO]`: jobs waiting on GitHub whose PRs or issues (in
+    # that repo, or any) changed get their next turn. A line of JOBS/ID/await
+    # is "OWNER/REPO#N <tab> since <tab> fingerprint". One pass at a time,
+    # whoever started it (burrow-events, from before a restart too, or a
+    # hand): two would each write WAKE from what they saw.
+    exec {pass}>>"$WAKE.lock"
+    flock "$pass"
+    only=${2:-} retry=''
     for f in "$jobs"/*/await; do
       [ -s "$f" ] || continue
       id=$(basename "$(dirname "$f")")
       case $(state "$id") in queued | running) continue ;; esac
       turn=$(cat "$jobs/$id/turns" 2>/dev/null) || continue
-      # Gone already: another _watch (the timer's, or a hand-run one) has
+      # Gone already: another _watch (burrow-events', or a hand-run one) has
       # started its next turn.
       waits=$(cat "$f" 2>/dev/null) || continue
       news='' lines=''
@@ -382,7 +400,13 @@ case "${1:-status}" in
           news+="- $t: not something proj can watch; no longer watched"$'\n'
           continue
         fi
-        now=$(fingerprint "$repo" "$n" </dev/null) || now=''
+        # GitHub's names are case-blind: the await's spelling needn't be the event's.
+        if [ -n "$only" ] && [ "${repo,,}" != "${only,,}" ]; then
+          lines+="$t"$'\t'"$since"$'\t'"$was"$'\n'
+          continue
+        fi
+        # GitHub can't be asked just now: looked at again in five minutes.
+        now=$(fingerprint "$repo" "$n" </dev/null) || { now=''; retry+="$repo"$'\t'$(($(date +%s) + 300))$'\n'; }
         expired=$(($(date +%s) - since >= AWAIT_HOURS * 3600))
         if [ -n "$now" ] && [ -n "$was" ] && [ "$now" != "$was" ]; then
           news+="- $t: $(jq -rn --argjson was "$was" --argjson now "$now" '
@@ -406,15 +430,48 @@ case "${1:-status}" in
         :
       elif [ -n "$news" ]; then
         # The new turn clears what's left: if it still waits, it says so again.
-        # One that can't start keeps its waits, so the next look tries again.
+        # One that can't start keeps its waits, and is tried again in five
+        # minutes.
         start_turn "$id" "News on what you were waiting on:
 
 $news
-Carry on from there. Anything you left in the background last turn was stopped when it ended." "" || true
+Carry on from there. Anything you left in the background last turn was stopped when it ended." "" ||
+          retry+=$(cut -f1 <<<"$waits" | sed 's/#.*//' | awk -v at=$(($(date +%s) + 300)) '{ print $0 "\t" at }')$'\n'
       else
         printf '%s' "$lines" >"$f.new" && mv -f "$f.new" "$f"
       fi
       exec {lk}>&-
+    done
+    # When each repo needs a look next, for burrow-events: the deadline of
+    # every job's waits that's still to come, and the retries. One already
+    # past is a turn that couldn't start (its retry stands for it) or one
+    # this pass skipped as running, whose end kicks proj-watch itself. A pass
+    # over one repo keeps the other repos' wake-ups (their retries too).
+    if [ -n "$WAKE" ]; then
+      { [ -z "$only" ] || jq -r --arg only "${only,,}" --argjson now "$(date +%s)" '
+          to_entries[] | select((.key | ascii_downcase) != $only and (.value | type) == "number" and .value > $now)
+          | "\(.key)\t\(.value)"' "$WAKE" 2>/dev/null || true
+        { cat "$jobs"/*/await 2>/dev/null || true; } | awk -F '\t' -v h="$AWAIT_HOURS" -v now="$(date +%s)" '
+          $2 ~ /^[0-9]+$/ && split($1, t, "#") == 2 && $2 + h * 3600 + 1 > now { print t[1] "\t" ($2 + h * 3600 + 1) }'
+        printf '%s' "$retry"
+      } | jq -Rn 'reduce (inputs | split("\t")) as [$r, $at] ({}; .[$r] = ([.[$r] // empty, ($at | tonumber)] | min))' \
+        >"$WAKE.new"
+      mv -f "$WAKE.new" "$WAKE"
+    fi
+    ;;
+  _ended)
+    # After each turn, however it ended (its unit's ExecStopPost): what the
+    # job was started to kick (proj run --kick) gets a pass now, and so does
+    # proj-watch for each repo the turn awaits, which then sees at once
+    # anything that changed since the turn took its baseline. The job comes
+    # in the unit's environment: systemd splits and expands a command line,
+    # and a job's id is its project's folder name, spaces, `%` and all.
+    id=${PROJ_ENDED:?proj _ended is for the end of a job turn, run by its unit}
+    [ -n "$KICK" ] || exit 0
+    { cat "$jobs/$id/kick" 2>/dev/null || true
+      cut -f1 "$jobs/$id/await" 2>/dev/null | sed 's/#.*//; s#^#proj-watch/#' || true
+    } | sort -u | while read -r k; do
+      [ -z "$k" ] || curl -fsS -m 5 -d '' "$KICK/$k" >/dev/null || echo "proj: couldn't kick $k" >&2
     done
     ;;
   _exec)
