@@ -1,6 +1,6 @@
 # house: every repo's copy of the house block (house/rules.md, between its
 # markers in AGENTS.md) kept the same as burrow's (house/sync.sh). A change to
-# the rules here reaches each repo as one draft PR, which the steward lands.
+# the rules here reaches each repo as one PR, which the steward lands.
 inputs:
 { config, lib, pkgs, ... }:
 let
@@ -42,7 +42,7 @@ in
       description = ''
         Repos to leave alone (OWNER/NAME globs). Not autoland's exclude: a repo
         that lands its own PRs still keeps the house rules, and gets its
-        house PR as a draft to land its own way.
+        house PR to land its own way.
       '';
     };
 

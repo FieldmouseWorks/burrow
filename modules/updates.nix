@@ -56,6 +56,8 @@ let
     REVIEW_HINTS = cfg.firmware.reviewHints;
     # The autoland steward's commit status, which renovate-sweep doesn't count as CI.
     SETTLED = config.burrow.autoland.context or "review-settled";
+    # The repos the steward covers, as it last found them; none without it.
+    COVERED = if config.burrow.autoland.enable or false then "${stateDir}/autoland/repos.json" else "";
   };
 
   # Each script gets the names it uses (shellcheck rejects the rest), set above
