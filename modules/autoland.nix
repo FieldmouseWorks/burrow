@@ -372,6 +372,8 @@ in
       description = if name == "autoland"
         then "autoland: settle and merge every PR, keep every repo at the baseline"
         else "autoland: settle and merge the PRs of %I";
+      # A switch leaves a running one be (see burrow.switch's check).
+      restartIfChanged = false;
       after = [ "network-online.target" ];
       wants = [ "network-online.target" ];
       path = [ pkgs.gh pkgs.git pkgs.coreutils config.burrow.tools.proj ];
@@ -389,6 +391,8 @@ in
       # The DeepSeek reviews the passes queue, as soon as there are any.
       autoland-deepseek = lib.mkIf (cfg.deepseek.enable && !cfg.dryRun) {
         description = "autoland: DeepSeek's reviews of the queued PR heads";
+        # A switch leaves a running one be (see burrow.switch's check).
+        restartIfChanged = false;
         after = [ "network-online.target" ];
         wants = [ "network-online.target" ];
         path = [ pkgs.gh pkgs.coreutils ];
