@@ -306,6 +306,11 @@ case "${1:-status}" in
       cat "$jobs/$id/$n.jsonl"
     elif [ -n "$last" ] && text=$(answer "$jobs/$id/$n.jsonl") && [ -n "$text" ]; then
       printf '%s\n' "$text"
+      # An answer, then an error: say what the turn ended on.
+      if jq -e .is_error <<<"$last" >/dev/null; then
+        printf '\n(turn %s ended in an error)\n' "$n"
+        jq -c '.errors // empty' <<<"$last"
+      fi
     else
       # No result yet, or none with anything to say: an error's can hold
       # only its errors.
