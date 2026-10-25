@@ -671,6 +671,10 @@ def handle(repo, pr, repo_info, digest):
     # hand over, findings and all: a job from each on one branch would push
     # over each other. The sweep's push makes a new head, and Codex reads it
     # again.
+    # A judge asked for on this head and base (the repo had no CI then, say)
+    # still decides once CI shows up: its owner or failed verdict isn't
+    # dropped for a green check.
+    asked = st.get("judged") == judged_at or C.marker(pr, JUDGMENT, head, repo) is not None
     fixed = dep == "minor" and not gate and (renovate_edited(repo, pr, st) or gate_edit(repo, pr, st))
     swept = fixed and ci == "red" and renovate
 
@@ -714,8 +718,9 @@ def handle(repo, pr, repo_info, digest):
             prove()
         elif ci == "pending":
             settle("pending", "Dependency update, CI pending")
-        elif gate or ci == "none":
-            judged(f"a dependency update touching {gate}" if gate else "the repo has no CI",
+        elif gate or ci == "none" or asked:
+            judged(f"a dependency update touching {gate}" if gate else "the repo has no CI" if ci == "none"
+                   else "a Claude job was asked to judge this head",
                    DEP_SEEN + ("; renovate-sweep cleared the major version for this head" if major_verdict == "ok" else ""))
         elif dep == "major" and not renovate:
             judged("a major dependency update", DEP_SEEN)
@@ -881,8 +886,9 @@ def handle(repo, pr, repo_info, digest):
         prove()
     elif ci == "pending":
         settle("pending", "Settled; waiting for CI: " + ", ".join(ci_names)[:90])
-    elif gate or ci == "none":
-        judged(f"it touches {gate}" if gate else "the repo has no CI")
+    elif gate or ci == "none" or asked:
+        judged(f"it touches {gate}" if gate else "the repo has no CI" if ci == "none"
+               else "a Claude job was asked to judge this head")
     else:
         land_now(f"{reviewers} found nothing on this commit, every thread is resolved, CI is green")
 

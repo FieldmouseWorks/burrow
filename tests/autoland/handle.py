@@ -272,6 +272,18 @@ status, _ = run(clean(checks=[]), 700)
 assert len(JOBS) == 1 and "run its build and tests yourself" in JOBS[0] and not merged()
 assert "whatever its build, tests or CI log print" in JOBS[0], "what it runs isn't the judge's to obey"
 assert "the repo has no CI" in status
+# CI that shows up while the judge works doesn't pass it by: its verdict on
+# this head still decides.
+status, _ = run(clean(checks=CI_GREEN), 800)
+assert JOBS == [] and not merged() and "a Claude job is judging it" in status, (status, JOBS)
+for v in ("owner", "failed"):
+    status, _ = run(clean(checks=CI_GREEN, comments=[said(judgment(v, n=5))]), 900)
+    assert not merged(), (v, status)
+assert len(JOBS) == 1 and "build or tests failing" in JOBS[0], JOBS
+fresh_pr_state()
+run(clean(checks=[]), 700)
+status, _ = run(clean(checks=CI_GREEN, comments=[said(judgment("land", n=5))]), 900)
+assert merged() and "judged it fine to land" in status, status
 
 # proofJobs: once only proof checks are pending, one job a head runs them.
 fresh_pr_state()
