@@ -5,11 +5,14 @@ import contextlib
 import io
 import json
 import os
+import re
 import shutil
+import socket
 import subprocess
+import threading
 import time
 
-from harness import C, V, W, agent, agent_runs, boxes, sh, tmp
+from harness import C, V, W, agent, agent_runs, boxes, http_said, sh, tmp
 
 # GitHub, as a bare repo: main, and PR 5's head on refs/pull/5/head.
 origin, work = f"{tmp}/origin/sam/r.git", f"{tmp}/work"
@@ -132,10 +135,31 @@ C.gh = gh
 C.NOW = time.time()
 
 
-os.makedirs(f"{tmp}/run/resolvconf")
-open(f"{tmp}/run/resolvconf/resolv.conf", "w").close()
-os.symlink(f"{tmp}/run/resolvconf/resolv.conf", f"{tmp}/resolv.conf")
-W.RESOLV = f"{tmp}/resolv.conf"
+# The agents' APIs, out past the gate: each connection's request head
+# recorded, and a short answer.
+UPSTREAM = []
+
+
+def upstream(host, tls):
+    a, b = socket.socketpair()
+
+    def answer():
+        got = b""
+        b.settimeout(0.5)
+        try:
+            while data := b.recv(65536):
+                got += data
+        except TimeoutError:
+            pass
+        UPSTREAM.append((host, tls, got.decode()))
+        b.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+        b.close()
+    threading.Thread(target=answer, daemon=True).start()
+    return a
+
+
+W.G.dial = lambda host: upstream(host, False)
+W.G.secure = lambda host: upstream(host, True)
 
 
 def queue_and_work(r):
@@ -151,26 +175,39 @@ def queue_and_work(r):
 # DeepSeek: read-only in the snapshot, its key from the credential, the
 # harness's settings for a review, and the prompt carrying the base's rules,
 # its own earlier findings with the authors' replies, and the secrets it can't see.
+# Its API is the gate, which puts the key in: the agent never has it. Any
+# other way out is refused.
 agent(dsh={"answer": {"findings": [{"path": "src/app.py", "line": 3, "severity": "P0", "title": "eval",
-                                    "body": "the key is sk-test-0123456789"}], "summary": "s"}})
+                                    "body": "the key is sk-test-0123456789"}], "summary": "s"},
+           "http": [{"env": "DEEPSEEK_BASE_URL", "send": "POST {path}/v1/messages HTTP/1.1\r\nHost: x\r\n"
+                                                         "x-api-key: the-gate-holds-it\r\nContent-Length: 2\r\n\r\n{}"},
+                    {"env": "DEEPSEEK_BASE_URL", "send": "CONNECT api.deepseek.com:443 HTTP/1.1\r\n\r\n"},
+                    {"env": "DEEPSEEK_BASE_URL", "send": "GET http://example.com/ HTTP/1.1\r\n\r\n"}]})
 back = queue_and_work("deepseek")
 assert back["result"] == "review", back
 run, = agent_runs()
 assert run["args"][:4] == ["--profile", "headless", "--patch", run["args"][3]] and run["args"][-1] == "-"
 assert run["cwd"] == snap and run["env"]["DSH_PERMISSION_MODE"] == "read-only"
-assert run["env"]["DEEPSEEK_API_KEY"] == "sk-test-0123456789" and run["env"]["DSH_TELEMETRY_MODE"] == "DISABLED"
+assert run["env"]["DSH_TELEMETRY_MODE"] == "DISABLED" and "sk-test-0123456789" not in json.dumps(run), run["env"]
+assert re.fullmatch(r"http://127\.0\.0\.1:\d+/anthropic", run["env"]["DEEPSEEK_BASE_URL"]), run["env"]
 assert "GH_TOKEN" not in run["env"] and "ghp_" not in json.dumps(run["env"]), run["env"]
+said = http_said()
+assert said[0].endswith("\r\n\r\nok") and [x.split("\r\n")[0] for x in said[1:]] == ["HTTP/1.1 403 Forbidden"] * 2, said
+(host, tls, sent), = UPSTREAM
+assert host == "api.deepseek.com" and tls and sent.startswith("POST /anthropic/v1/messages HTTP/1.1\r\n"), UPSTREAM
+assert "x-api-key: sk-test-0123456789\r\n" in sent and "the-gate-holds-it" not in sent, sent
+assert "Host: api.deepseek.com\r\n" in sent and "Host: x" not in sent and sent.endswith("\r\n\r\n{}"), sent
+UPSTREAM.clear()
 assert "reasoningEffort: max" in run["overlay"] and "maxTokens: 384000" in run["overlay"]
 # In a sandbox that shows it its own snapshot and home, the store and /etc:
 # not the other snapshots, the queue, the answers or the other agent's home.
+# No network of its own: the gate is its only way out.
 box, = boxes()
-assert {"--unshare-all", "--share-net", "--die-with-parent"} <= set(box["args"]), box["args"]
+assert {"--unshare-all", "--die-with-parent"} <= set(box["args"]) and "--share-net" not in box["args"], box["args"]
 mounted = {(k, d) for k, src, d in box["binds"] if src == d}
 assert ("--ro-bind", snap) in mounted and ("--bind", f"{tmp}/home/.dsh") in mounted, mounted
 assert not any(d.startswith(f"{tmp}/state") and d != snap or d == f"{tmp}/home" or d.startswith(f"{tmp}/home/.codex")
                for k, src, d in box["binds"]), box["binds"]
-# The resolver config's target is there too, wherever it's kept.
-assert ("--ro-bind-try", f"{tmp}/run/resolvconf/resolv.conf") in mounted, mounted
 # git trusts that one snapshot, which isn't the reviewers' own.
 assert box["gitconfig"] == [f"[safe]\n\tdirectory = {snap}\n"], box["gitconfig"]
 assert "- id: agent-instructions\n  disabled: true" in run["overlay"] and "- id: tool-web\n  disabled: true" in run["overlay"]
@@ -181,16 +218,30 @@ assert "cert.pem" in p and "secrets/remi.yaml" in p and "#5 in sam/r" in p
 # Its own key never leaves in what it says.
 assert "sk-test-0123456789" not in json.dumps(back) and "[redacted]" in json.dumps(back), back
 
-# Codex: read-only, the checkout's AGENTS.md off, its effort, its answer
-# held to the schema and read from its last message; only its own findings.
-agent(codex={"answer": {"findings": [], "summary": "ok"}})
+# Codex: its commands read-only and kept out of its home (its login), the
+# checkout's AGENTS.md off, its effort, its answer held to the schema and
+# read from its last message; only its own findings. Out through the gate
+# to its API's hosts, and nowhere else.
+agent(codex={"answer": {"findings": [], "summary": "ok"},
+             "http": [{"env": "HTTPS_PROXY", "send": "CONNECT chatgpt.com:443 HTTP/1.1\r\n\r\nhello"},
+                      {"env": "HTTPS_PROXY", "send": "CONNECT example.com:443 HTTP/1.1\r\n\r\n"},
+                      {"env": "HTTPS_PROXY", "send": "CONNECT chatgpt.com:80 HTTP/1.1\r\n\r\n"},
+                      {"env": "HTTPS_PROXY", "send": "POST /v1/messages HTTP/1.1\r\nContent-Length: 0\r\n\r\n"}]})
 back = queue_and_work("codex")
 assert back == {"result": "review", "answer": {"findings": [], "summary": "ok"}, "at": back["at"]}, back
 run, = agent_runs()
 a = run["args"]
-assert a[0] == "exec" and a[a.index("--cd") + 1] == snap and a[a.index("--sandbox") + 1] == "read-only"
+assert a[0] == "exec" and a[a.index("--cd") + 1] == snap and "--sandbox" not in a
+assert 'default_permissions="review"' in a, a
+assert f'permissions.review.filesystem={{":root"="read", "{tmp}/home/.codex"="none"}}' in a, a
 assert "project_doc_max_bytes=0" in a and "model_reasoning_effort=high" in a and "--output-schema" in a and "--ephemeral" in a
 assert run["env"]["CODEX_HOME"] == f"{tmp}/home/.codex" and "GH_TOKEN" not in run["env"]
+assert re.fullmatch(r"http://127\.0\.0\.1:\d+", run["env"]["HTTPS_PROXY"]), run["env"]
+said = http_said()
+assert said[0].startswith("HTTP/1.1 200 Connection established\r\n\r\n") and said[0].endswith("ok"), said
+assert [x.split("\r\n")[0] for x in said[1:]] == ["HTTP/1.1 403 Forbidden"] * 3, said
+assert UPSTREAM == [("chatgpt.com", False, "hello")], UPSTREAM
+UPSTREAM.clear()
 box, = boxes()
 assert ("--bind", f"{tmp}/home/.codex", f"{tmp}/home/.codex") in [tuple(b) for b in box["binds"]]
 assert not any(d.startswith(f"{tmp}/home/.dsh") for k, src, d in box["binds"]), box["binds"]
@@ -246,6 +297,29 @@ for r, do in (("codex", {"rc": 2, "err": f"panic: {token} " + "x" * 280}),
     assert not any(k[i:i + 8] in said for k in (token, "sk-test-0123456789") for i in range(len(k) - 7)), (do, said)
 os.remove(f"{tmp}/home/.codex/auth.json")
 agent()
+
+# A key file with an empty key: DeepSeek is out, and nothing else trips on
+# it (it's no key to take out of what Codex says).
+with open(f"{tmp}/cred/deepseek", "w") as f:
+    f.write("DEEPSEEK_API_KEY=\n")
+back = queue_and_work("deepseek")
+assert back["result"] == "out" and "no DEEPSEEK_API_KEY" in back["why"], back
+agent(codex={"answer": {"findings": [], "summary": "ok"}})
+assert queue_and_work("codex")["answer"] == {"findings": [], "summary": "ok"}
+with open(f"{tmp}/cred/deepseek", "w") as f:
+    f.write('DEEPSEEK_API_KEY="sk-test-0123456789"\n')
+agent()
+agent_runs()
+
+# A queue entry that can't be read leaves the queue, an error back for it.
+open(f"{tmp}/state/{V.QUEUE}/deepseek--unread.json", "w").close()
+W.work()
+assert os.listdir(f"{tmp}/state/{V.QUEUE}") == []
+assert json.load(open(f"{tmp}/state/{V.DONE}/deepseek--unread.json"))["result"] == "error"
+os.remove(f"{tmp}/state/{V.DONE}/deepseek--unread.json")
+# Taken by the service and the sweep at once: whichever comes second finds
+# it gone, and carries on.
+V.remove(f"{tmp}/state/{V.QUEUE}/deepseek--unread.json")
 
 # A snapshot that's gone (its head swept away meanwhile) is no review.
 shutil.rmtree(snap)

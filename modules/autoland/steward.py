@@ -675,6 +675,8 @@ def handle(repo, pr, repo_info, digest):
                     v = V.post(repo, pr, r, back["answer"])
                     _, _, rr = said[r]
                     said[r] = (v, C.NOW, rr + (v == "findings"))
+                    rs.pop("fails", None)
+                    rs.pop("failedAt", None)
                 except ValueError as e:  # an answer that's no review
                     rs["fails"], rs["failedAt"] = rs.get("fails", 0) + 1, C.NOW
                     log(f"{tag}: {V.NAMES[r]}'s answer wasn't a review ({rs['fails']}): {e}")

@@ -130,6 +130,17 @@ try:
     raise AssertionError("a review GitHub didn't take passed")
 except RuntimeError as e:
     assert "didn't take" in str(e)
+# A diff that can't be read (none at all, or not a diff) posts nothing: read
+# as one, every finding would be a note and the review clean.
+C.write = write
+for got in ("", "Not Found"):
+    WROTE.clear()
+    C.gh = lambda *a, **k: got if "compare/" in " ".join(a) else gh(*a, **k)
+    try:
+        V.post("sam/r", pr, "deepseek", answer)
+        raise AssertionError(f"posted on a diff of {got!r}")
+    except RuntimeError as e:
+        assert "couldn't read the diff" in str(e) and WROTE == [], (e, WROTE)
 
 # A gh call allowed to fail still says why in the journal.
 fake = os.path.join(tmp, "bin")

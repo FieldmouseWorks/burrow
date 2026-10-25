@@ -626,6 +626,8 @@ assert len(os.listdir(DDIR)) == 1 and pr_state()["rv"]["deepseek"]["fails"] == 2
 STUB["post"] = None
 status, _ = run(mkpr(reviews=[cx]), 630)
 assert POSTED == [("deepseek", head, 0)] and os.listdir(DDIR) == [] and merged(), status
+# Posted, its earlier failures are behind it: none left to report.
+assert "fails" not in pr_state()["rv"]["deepseek"], pr_state()["rv"]
 # Turned down three times, it's dropped and the owner hears, not posted forever.
 fresh_pr_state()
 run(mkpr(reviews=[cx]), 0)

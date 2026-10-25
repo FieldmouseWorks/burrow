@@ -18,19 +18,29 @@ with open(f"{tmp}/cred/deepseek", "w") as f:
     f.write('DEEPSEEK_API_KEY="sk-test-0123456789"\n')
 
 # The review agents: each records how it was run, then does what AGENT says
-# (an answer, or an error on stderr and an exit code).
-AGENT_LOG, AGENT = f"{tmp}/agent-log", f"{tmp}/agent.json"
+# (requests to send out, then an answer, or an error on stderr and an exit
+# code). What came back to the requests goes in HTTP_LOG.
+AGENT_LOG, AGENT, HTTP_LOG = f"{tmp}/agent-log", f"{tmp}/agent.json", f"{tmp}/http-log"
 os.makedirs(f"{tmp}/agents")
 for name in ("codex", "dsh"):
     with open(f"{tmp}/agents/{name}", "w") as f:
         f.write(f"""#!{sys.executable}
-import json, os, sys
+import json, os, socket, sys, urllib.parse
 args = sys.argv[1:]
 prompt = sys.stdin.read()
 with open({AGENT_LOG!r}, "a") as f:
     f.write(json.dumps({{"agent": {name!r}, "args": args, "cwd": os.getcwd(), "env": dict(os.environ), "prompt": prompt,
                         "overlay": open(args[args.index("--patch") + 1]).read() if "--patch" in args else None}}) + "\\n")
 do = json.load(open({AGENT!r})).get({name!r}, {{}})
+for req in do.get("http", []):
+    u = urllib.parse.urlsplit(os.environ[req["env"]])
+    c = socket.create_connection((u.hostname, u.port))
+    c.sendall(req["send"].replace("{{path}}", u.path).encode())
+    got = b""
+    while data := c.recv(65536):
+        got += data
+    with open({HTTP_LOG!r}, "a") as f:
+        f.write(json.dumps(got.decode()) + "\\n")
 if "effort" in do and do["effort"] not in json.dumps(args) + (open(args[args.index("--patch") + 1]).read() if "--patch" in args else ""):
     print("dsh: error: thought too long", file=sys.stderr); sys.exit(1)
 if do.get("rc"):
@@ -75,6 +85,13 @@ def agent(**do):
 
 def agent_runs():
     return [json.loads(x) for x in open(AGENT_LOG)]
+
+
+def http_said():
+    """What came back to the agents' requests, since last asked."""
+    said = [json.loads(x) for x in open(HTTP_LOG)] if os.path.exists(HTTP_LOG) else []
+    open(HTTP_LOG, "w").close()
+    return said
 
 
 agent()

@@ -4,19 +4,23 @@ for the next pass to post.
 
 It runs as a user of its own with no GitHub login, and each agent runs
 read-only in a sandbox that shows it its head's snapshot (reviewers.py) and
-little else, so a PR that talks an agent into reading or saying something it
-shouldn't finds nothing worth having: no GitHub token, no secrets paths, no
-other repo's code, and the agents' own keys are taken out of anything they
-say."""
+little else, with no network but its own API (egress.py). So a PR that talks
+an agent into reading, sending or saying something it shouldn't finds nothing
+worth having: no GitHub token, no secrets paths, no other repo's code, no
+way out but its API, and no key of its own (DeepSeek's stays with the gate;
+the commands Codex runs can't read its login). The keys are taken out of
+anything the agents say as well."""
 
 import json
 import os
 import re
 import subprocess
+import sys
 import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor
 
+import egress as G
 import reviewers as V
 from common import CFG, STATE, load, log, save
 
@@ -91,33 +95,36 @@ def env(**extra):
     return {"HOME": home, "PATH": os.environ.get("PATH", ""), "LANG": "C.UTF-8", **extra}
 
 
-RESOLV = "/etc/resolv.conf"
-
-
-def sandboxed(snap, home, t, argv):
+def sandboxed(snap, home, t, names, argv):
     """argv in a sandbox of its own (bubblewrap): it sees the store, /etc,
     its snapshot (read-only), its own agent's home and its temp dir `t`, and
     nothing else of the machine. The service's user can read every queued
     head's snapshot and every answer, and an agent talked into reading
     another repo's would post it in this one's review.
 
+    It has no network: argv runs behind egress.py's bridge to the gate on
+    `t`/egress.sock, which the caller opens, with `names` in its environment
+    pointing at the bridge.
+
     The snapshot is the steward's, so git needs telling it's safe to read:
     a git config of its own, for that one path."""
     os.makedirs(home, exist_ok=True)
     with open(f"{t}/gitconfig", "w") as f:
         f.write(f"[safe]\n\tdirectory = {snap}\n")
-    ro = ["/nix/store", "/etc", "/bin", "/usr/bin", "/run/current-system", "/run/systemd/resolve", "/run/nscd"]
-    # The resolver config is a link out of /etc wherever the machine's DNS
-    # manager keeps it: its target too, or the agents can't find their APIs.
-    dns = os.path.realpath(RESOLV)
-    if not any(dns == p or dns.startswith(p + "/") for p in ro):
-        ro.append(dns)
-    return [CFG["sandbox"], "--unshare-all", "--share-net", "--die-with-parent", "--new-session",
+    ro = ["/nix/store", "/etc", "/bin", "/usr/bin", "/run/current-system"]
+    return [CFG["sandbox"], "--unshare-all", "--die-with-parent", "--new-session",
             "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
             *[x for p in ro for x in ("--ro-bind-try", p, p)],
             "--ro-bind", snap, snap, "--bind", home, home, "--bind", t, t,
             "--ro-bind", f"{t}/gitconfig", os.path.join(os.environ["HOME"], ".gitconfig"),
-            "--chdir", snap, "--", *argv]
+            "--chdir", snap, "--", sys.executable, "-I", G.__file__, f"{t}/egress.sock", ",".join(names), "--", *argv]
+
+
+# Where each agent's API is. Codex goes through the gate as its HTTPS proxy,
+# to these hosts only; DeepSeek sends its requests to the gate, which puts
+# the key in and sends them on.
+CODEX_HOSTS = ["chatgpt.com", "auth.openai.com", "api.openai.com"]
+DEEPSEEK_API = "api.deepseek.com"
 
 
 def codex(snap, prompt):
@@ -125,13 +132,21 @@ def codex(snap, prompt):
     with tempfile.TemporaryDirectory() as t:
         with open(f"{t}/schema.json", "w") as f:
             json.dump(SCHEMA, f)
-        p = subprocess.run(sandboxed(snap, home, t, [
-            f"{CFG['agents']}/codex", "exec", "--cd", snap, "--sandbox", "read-only", "--ephemeral",
-            "--color", "never", "--output-schema", f"{t}/schema.json", "-o", f"{t}/answer.json",
-            # The checkout's AGENTS.md is the PR's own: the base's rules are in the prompt.
-            "-c", "project_doc_max_bytes=0",
-            "-c", f"model_reasoning_effort={CFG['reviewers']['codex']['effort']}", "-"]),
-            input=prompt, capture_output=True, text=True, env=env(CODEX_HOME=home))
+        gate = G.Gate(f"{t}/egress.sock", CODEX_HOSTS)
+        try:
+            p = subprocess.run(sandboxed(snap, home, t, ["HTTPS_PROXY"], [
+                f"{CFG['agents']}/codex", "exec", "--cd", snap, "--ephemeral",
+                "--color", "never", "--output-schema", f"{t}/schema.json", "-o", f"{t}/answer.json",
+                # The commands it runs read everything but its own home (its
+                # login) and write nothing.
+                "-c", 'default_permissions="review"',
+                "-c", f'permissions.review.filesystem={{":root"="read", {json.dumps(home)}="none"}}',
+                # The checkout's AGENTS.md is the PR's own: the base's rules are in the prompt.
+                "-c", "project_doc_max_bytes=0",
+                "-c", f"model_reasoning_effort={CFG['reviewers']['codex']['effort']}", "-"]),
+                input=prompt, capture_output=True, text=True, env=env(CODEX_HOME=home))
+        finally:
+            gate.close()
         said = p.stderr + p.stdout
         if p.returncode != 0 and re.search(r"usage limit|usage_limit_reached", said, re.I):
             raise Out("its ChatGPT plan's usage is spent", time.time() + wait_for(said))
@@ -160,34 +175,47 @@ def deepseek(snap, prompt):
     if efforts[0] == "max":
         efforts.append("high")
     with tempfile.TemporaryDirectory() as t:
-        while True:
-            with open(f"{t}/overlay.yml", "w") as f:
-                f.write(overlay(efforts[0]))
-            p = subprocess.run(
-                sandboxed(snap, home, t, [f"{CFG['agents']}/dsh", "--profile", "headless", "--patch", f"{t}/overlay.yml", "-"]),
-                input=prompt, capture_output=True, text=True,
-                env=env(DSH_HOME=home, DSH_TELEMETRY_MODE="DISABLED", DSH_PERMISSION_MODE="read-only", DEEPSEEK_API_KEY=key))
-            said = p.stderr.strip()
-            if p.returncode != 0 and re.search(r"\bAUTH\b|CREDENTIAL|\b40[12]\b|insufficient balance", said, re.I):
-                raise Out("its API key was turned down or its balance is spent", time.time() + 3600)
-            try:
-                if p.returncode != 0:
-                    raise RuntimeError(f"dsh exited {p.returncode}: {tail(said, 300)}")
-                return answer_of(p.stdout)
-            except RuntimeError:
-                # At max effort it can think past its budget without
-                # answering, and asking the same again only does it again:
-                # once more at high.
-                if len(efforts) == 1:
-                    raise
-                log(f"  DeepSeek didn't answer at {efforts[0]} effort: asking at {efforts[1]}")
-                efforts.pop(0)
+        gate = G.Gate(f"{t}/egress.sock", [], (DEEPSEEK_API, {"x-api-key": key}))
+        try:
+            return deepseek_in(snap, prompt, home, t, efforts)
+        finally:
+            gate.close()
+
+
+def deepseek_in(snap, prompt, home, t, efforts):
+    """deepseek(), its gate open: at each effort in turn until one answers."""
+    while True:
+        with open(f"{t}/overlay.yml", "w") as f:
+            f.write(overlay(efforts[0]))
+        # Its API is the gate, and the key it holds is a stand-in: the gate
+        # puts the real one in.
+        p = subprocess.run(
+            sandboxed(snap, home, t, ["DEEPSEEK_BASE_URL/anthropic"],
+                      [f"{CFG['agents']}/dsh", "--profile", "headless", "--patch", f"{t}/overlay.yml", "-"]),
+            input=prompt, capture_output=True, text=True,
+            env=env(DSH_HOME=home, DSH_TELEMETRY_MODE="DISABLED", DSH_PERMISSION_MODE="read-only",
+                    DEEPSEEK_API_KEY="the-gate-holds-it"))
+        said = p.stderr.strip()
+        if p.returncode != 0 and re.search(r"\bAUTH\b|CREDENTIAL|\b40[12]\b|insufficient balance", said, re.I):
+            raise Out("its API key was turned down or its balance is spent", time.time() + 3600)
+        try:
+            if p.returncode != 0:
+                raise RuntimeError(f"dsh exited {p.returncode}: {tail(said, 300)}")
+            return answer_of(p.stdout)
+        except RuntimeError:
+            # At max effort it can think past its budget without
+            # answering, and asking the same again only does it again:
+            # once more at high.
+            if len(efforts) == 1:
+                raise
+            log(f"  DeepSeek didn't answer at {efforts[0]} effort: asking at {efforts[1]}")
+            efforts.pop(0)
 
 
 def deepseek_key():
     for x in open(os.path.join(os.environ.get("CREDENTIALS_DIRECTORY", ""), "deepseek")):
         k, sep, v = x.strip().partition("=")
-        if sep and k == "DEEPSEEK_API_KEY":
+        if sep and k == "DEEPSEEK_API_KEY" and v.strip().strip('"'):
             return v.strip().strip('"')
     raise Out("no DEEPSEEK_API_KEY in its key file", time.time() + 3600)
 
@@ -196,8 +224,9 @@ AGENTS = {"codex": codex, "deepseek": deepseek}
 
 
 def secrets():
-    """The agents' own keys, as they could be read out of their homes or
-    their environment: never let into an answer."""
+    """The agents' own keys, should one turn up in what they say (an error
+    quoting its request, say): never let into an answer. Nothing under 16
+    characters is one, an empty value least of all."""
     found = []
     try:
         found.append(deepseek_key())
@@ -208,12 +237,12 @@ def secrets():
             if isinstance(x, dict):
                 for v in x.values():
                     walk(v)
-            elif isinstance(x, str) and len(x) >= 16:
+            elif isinstance(x, str):
                 found.append(x)
         walk(json.load(open(os.path.join(os.environ["HOME"], ".codex", "auth.json"))))
     except (OSError, ValueError, KeyError):
         pass
-    return found
+    return [x for x in found if len(x) >= 16]
 
 
 def scrub(x):
@@ -237,7 +266,7 @@ def review(name):
     item = load(f"{V.QUEUE}/{name}", None)
     try:
         if not item:
-            return
+            raise RuntimeError("its queue entry is unreadable")
         r = item["reviewer"]
         if r not in V.on(item["repo"]):  # the repo was taken off it since
             raise RuntimeError(f"{item['repo']} isn't one {V.NAMES[r]} reviews")
@@ -256,11 +285,15 @@ def review(name):
     except Exception as e:
         out = {"result": "error", "error": scrub(str(e))[:300]}
         log(f"{(item or {}).get('repo')}#{(item or {}).get('number')}: review failed: {out['error']}")
-    save(f"{V.DONE}/{name}", {**out, "at": time.time()})
+    # Out of the queue even if the answer can't be kept: with nothing back
+    # the steward counts it lost and queues it again.
     try:
-        os.remove(os.path.join(STATE, V.QUEUE, name))
-    except OSError:
-        pass
+        save(f"{V.DONE}/{name}", {**out, "at": time.time()})
+    finally:
+        try:
+            os.remove(os.path.join(STATE, V.QUEUE, name))
+        except OSError:
+            pass
 
 
 def work():

@@ -104,6 +104,7 @@ let
     cp ${./autoland/common.py} $out/common.py
     cp ${./autoland/reviewers.py} $out/reviewers.py
     cp ${./autoland/review_worker.py} $out/review_worker.py
+    cp ${./autoland/egress.py} $out/egress.py
     cp ${./autoland/repos.py} $out/repos.py
     cp ${./autoland/tasks.py} $out/tasks.py
     flake8 --ignore E501,W503 $out
@@ -404,6 +405,8 @@ in
       # own sandbox inside theirs.
       path = with pkgs; [ bash git bubblewrap coreutils findutils gnugrep gnused diffutils ripgrep ];
       environment.HOME = reviewerHome;
+      # The gate's TLS to the agents' APIs (autoland/egress.py).
+      environment.SSL_CERT_FILE = config.security.pki.caBundle;
       serviceConfig = {
         Type = "oneshot";
         User = reviewer;

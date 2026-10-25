@@ -118,10 +118,15 @@ def snap_name(key, head):
 
 
 def remove(p):
-    if os.path.isdir(p) and not os.path.islink(p):
-        shutil.rmtree(p)
-    else:
-        os.remove(p)
+    """p gone, whether this takes it or something else (the reviewers'
+    service, done with a queued review) got there first."""
+    try:
+        if os.path.isdir(p) and not os.path.islink(p):
+            shutil.rmtree(p)
+        else:
+            os.remove(p)
+    except FileNotFoundError:
+        pass
 
 
 def snapshot(repo, pr, key):
@@ -372,7 +377,9 @@ def post(repo, pr, r, answer):
         raise ValueError(f"not a review: {json.dumps(answer)[:100]}")
     diff = C.gh("api", "-H", "Accept: application/vnd.github.diff",
                 f"repos/{repo}/compare/{pr['baseRefName']}...{head}", check=False)
-    if not isinstance(diff, str):
+    # Read wrong, every finding would land as a note and the review count as
+    # clean.
+    if not isinstance(diff, str) or not diff.startswith("diff --git "):
         raise RuntimeError("couldn't read the diff")
     files = commentable(diff)
     mark, who = finding(r), NAMES[r]
