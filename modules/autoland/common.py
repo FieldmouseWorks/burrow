@@ -131,20 +131,21 @@ def seal(repo, n, name, verdict, head, base):
     return hmac.new(_key[0].encode(), msg, hashlib.sha256).hexdigest()[:32]
 
 
-def marker(pr, name, head, repo=None):
+def marker(pr, name, head, repo=None, base=None):
     """The verdict in the newest `<!-- NAME: VERDICT SHA -->` on the PR for
     exactly this head, from the steward's own login only; else None. With
     repo, only a marker that also carries its seal, for this head on the PR's
-    base as it is now, counts."""
-    pat = re.compile(rf"<!-- {re.escape(name)}: ([a-z]+) ([0-9a-f]{{40}})(?: ([0-9a-f]{{32}}))? -->")
+    base as it is now, counts; with base, only one that names that base
+    (`<!-- NAME: VERDICT SHA on BASE -->`)."""
+    pat = re.compile(rf"<!-- {re.escape(name)}: ([a-z]+) ([0-9a-f]{{40}})(?: on (\S+))?(?: ([0-9a-f]{{32}}))? -->")
     verdict = None
     for c in pr["comments"]["nodes"]:  # oldest first
         if (c["author"] or {}).get("login") != me():
             continue
         for m in pat.finditer(c["body"] or ""):
-            if m.group(2) != head:
+            if m.group(2) != head or (base is not None and m.group(3) != base):
                 continue
-            if repo and not hmac.compare_digest(m.group(3) or "", seal(repo, pr["number"], name, m.group(1), head, pr["baseRefName"])):
+            if repo and not hmac.compare_digest(m.group(4) or "", seal(repo, pr["number"], name, m.group(1), head, pr["baseRefName"])):
                 continue
             verdict = m.group(1)
     return verdict

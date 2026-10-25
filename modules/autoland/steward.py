@@ -191,16 +191,49 @@ def post_status(repo, pr, state, desc):
             "-f", f"context={CONTEXT}", "-f", f"description={desc}", "-f", f"target_url={pr['url']}", check=False)
 
 
-def one_way(pr, rc):
+def one_way(pr, rc, moved=()):
     """The first path that makes this PR one a Claude job judges before it
-    lands (config oneWay), or None."""
-    for f in pr["files"]["nodes"]:
+    lands (config oneWay), or None. moved: where its renames and copies
+    started (moved_from), None if that couldn't be read."""
+    for path in [f["path"] for f in pr["files"]["nodes"]] + list(moved or ()):
         for pat in rc["oneWay"]:
-            if re.search(pat, f["path"]):
-                return f["path"]
+            if re.search(pat, path):
+                return path
     if pr["changedFiles"] > len(pr["files"]["nodes"]):
         return f"{pr['changedFiles']} files (too many to check)"
+    if moved is None:
+        return "a rename or copy whose diff couldn't be read"
     return None
+
+
+MOVED_RE = re.compile(r"^(?:rename|copy) from (.+)$")
+
+
+def unquote(path):
+    """A path as git's diff header has it: quoted, with C escapes, when it
+    has odd characters."""
+    if not (len(path) > 1 and path[0] == path[-1] == '"'):
+        return path
+    try:
+        return path[1:-1].encode("ascii").decode("unicode_escape").encode("latin-1").decode("utf-8")
+    except UnicodeError:
+        return path
+
+
+def moved_from(repo, pr, st):
+    """Where the PR's renames and copies started: the file list names only
+    where each one went, so a rename out of a one-way path (CODEOWNERS to
+    CODEOWNERS.bak) is read from the diff. Read once per head and base; None
+    if the diff couldn't be read."""
+    if not any(f.get("changeType") in ("RENAMED", "COPIED") for f in pr["files"]["nodes"]):
+        return []
+    seen = [pr["headRefOid"], pr["baseRefName"]]
+    if st.get("moved", [None])[:2] != seen:
+        diff = C.gh("pr", "diff", str(pr["number"]), "-R", repo, check=False)
+        if not isinstance(diff, str) or not diff:
+            return None
+        st["moved"] = seen + [[unquote(m.group(1)) for m in map(MOVED_RE.match, diff.splitlines()) if m]]
+    return st["moved"][2]
 
 
 # "from 1.2.3 to 2.0.0", "from v3 to v4" (an action's major tag), "from 3 to 4".
@@ -628,7 +661,7 @@ def handle(repo, pr, repo_info, digest):
             latest[who] = r["state"]
     changes = [w for w, s in latest.items() if s == "CHANGES_REQUESTED"]
     dep = dep_kind(pr)
-    gate = one_way(pr, rc)
+    gate = one_way(pr, rc, moved_from(repo, pr, st))
     renovate = pr["headRefName"].startswith("renovate/")
     proof_only = ci == "pending" and bool(ci_names) and all(c in rc["proofJobs"] for c in ci_names)
     # A minor Renovate PR a Claude job fixed carries Claude's code, and Renovate
@@ -654,7 +687,7 @@ def handle(repo, pr, repo_info, digest):
         return
 
     if dep and not fixed:
-        major_verdict = C.marker(pr, MAJOR_VERDICT, head) if dep == "major" and renovate else None
+        major_verdict = C.marker(pr, MAJOR_VERDICT, head, base=pr["baseRefName"]) if dep == "major" and renovate else None
         threads = f"{open_threads} open review thread{'s' * (open_threads > 1)}" if open_threads else ""
         if changes:
             threads = ", ".join([threads] * bool(threads) + ["changes requested by " + ", ".join(changes)])
