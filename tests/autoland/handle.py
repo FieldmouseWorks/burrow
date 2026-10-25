@@ -6,7 +6,7 @@ import json
 import os
 import subprocess
 
-from harness import (CI_GREEN, COMMITS, CUR, DDIR, FAIL, JOBS, QDIR, RESULT, RUNS, STATES, T0, WROTE, C, R, S,
+from harness import (CI_GREEN, COMMITS, CUR, DDIR, FAIL, JOBS, PR_DIFF, QDIR, RESULT, RUNS, STATES, T0, WROTE, C, R, S,
                      clean, codex_clean, ds_review, fresh_pr_state, head, info, judgment, merged, mkpr, queued, run,
                      said, stand_in, tmp, worker)
 
@@ -146,6 +146,30 @@ fresh_pr_state()
 big = {**clean(files=["a.py"]), "changedFiles": 150}
 status, _ = run(big, 700)
 assert len(JOBS) == 1 and "150 files (too many to check)" in JOBS[0] and not merged(), (status, JOBS)
+
+# The file list names only where a rename went: one out of a one-way path
+# (CODEOWNERS to CODEOWNERS.bak) is read from the diff and judged, and so is
+# one whose diff can't be read. A rename elsewhere merges.
+def renamed(to, diff):
+    PR_DIFF["v"] = diff
+    pr = clean(files=[to])
+    pr["files"]["nodes"][0]["changeType"] = "RENAMED"
+    return pr
+
+
+fresh_pr_state()
+gone = renamed("CODEOWNERS.bak", "diff --git a/.github/CODEOWNERS b/CODEOWNERS.bak\nsimilarity index 100%\n"
+                                 "rename from .github/CODEOWNERS\nrename to CODEOWNERS.bak\n")
+status, _ = run(gone, 700)
+assert len(JOBS) == 1 and ".github/CODEOWNERS" in JOBS[0] and not merged(), (status, JOBS)
+fresh_pr_state()
+status, _ = run(renamed("CODEOWNERS.bak", ""), 700)
+assert len(JOBS) == 1 and "diff couldn't be read" in JOBS[0] and not merged(), (status, JOBS)
+fresh_pr_state()
+status, _ = run(renamed("src/b.rs", "diff --git a/src/a.rs b/src/b.rs\nsimilarity index 100%\n"
+                                    "rename from src/a.rs\nrename to src/b.rs\n"), 700)
+assert "state=success" in status and merged() and JOBS == [], (status, JOBS)
+PR_DIFF["v"] = ""
 
 # A judge that ends without a verdict (crashed, timed out, said nothing) is
 # started once more, after a second pass sees it ended; a second one that
@@ -346,7 +370,7 @@ fresh_pr_state()
 rmajor = {"branch": "renovate/foo-2.x", "title": "Update foo from 1.4 to 2.0", "number": 13, "checks": proof}
 status, _ = run(mkpr(**rmajor), 900)
 assert JOBS == [] and "waiting for renovate-sweep" in status, (status, JOBS)
-status, _ = run(mkpr(comments=[said(f"<!-- major-verdict: ok {head} -->")], **rmajor), 1000)
+status, _ = run(mkpr(comments=[said(f"<!-- major-verdict: ok {head} on main -->")], **rmajor), 1000)
 assert len(JOBS) == 1 and "just proof" in JOBS[0], (status, JOBS)
 del S.CFG["repos"]["sam/r"]
 
@@ -355,28 +379,33 @@ fresh_pr_state()
 major = {"branch": "renovate/foo-2.x", "title": "Update foo from 1.4 to 2.0", "number": 8}
 status, _ = run(mkpr(**major), 700)
 assert not merged() and "waiting for renovate-sweep" in status and JOBS == []
-for bad in (said(f"<!-- major-verdict: ok {head} -->", who="mallory"), said(f"<!-- major-verdict: ok {other} -->"),
-            said(f"<!-- major-verdict: held {head} -->")):
+for bad in (said(f"<!-- major-verdict: ok {head} on main -->", who="mallory"), said(f"<!-- major-verdict: ok {other} on main -->"),
+            said(f"<!-- major-verdict: held {head} on main -->"), said(f"<!-- major-verdict: ok {head} -->"),
+            said(f"<!-- major-verdict: ok {head} on release -->")):
     status, _ = run(mkpr(comments=[bad], **major), 800)
     assert not merged() and JOBS == [], bad
-status, _ = run(mkpr(comments=[said(f"<!-- major-verdict: ok {head} -->")], **major), 900)
+status, _ = run(mkpr(comments=[said(f"<!-- major-verdict: ok {head} on main -->")], **major), 900)
 assert "state=success" in status and merged()
+# Retargeted since: the ok was for another base's diff, and counts no more.
+fresh_pr_state()
+status, _ = run(mkpr(comments=[said(f"<!-- major-verdict: ok {head} on main -->")], base="release", **major), 900)
+assert not merged() and "waiting for renovate-sweep" in status, status
 # Its CI not green yet: the ok waits.
 fresh_pr_state()
-status, _ = run(mkpr(comments=[said(f"<!-- major-verdict: ok {head} -->")], checks=busy, **major), 900)
+status, _ = run(mkpr(comments=[said(f"<!-- major-verdict: ok {head} on main -->")], checks=busy, **major), 900)
 assert not merged()
 # One touching a one-way path still needs the ok: a judge's land doesn't
 # replace a held or missing verdict.
 fresh_pr_state()
 gated = {**major, "files": ("migrations/0002.sql",)}
-for said_ in ([], [said(f"<!-- major-verdict: held {head} -->")]):
+for said_ in ([], [said(f"<!-- major-verdict: held {head} on main -->")]):
     status, _ = run(mkpr(comments=[*said_, said(judgment("land", n=8))], **gated), 900)
     assert not merged() and JOBS == [] and "renovate-sweep" in status, said_
-status, _ = run(mkpr(comments=[said(f"<!-- major-verdict: ok {head} -->")], **gated), 900)
+status, _ = run(mkpr(comments=[said(f"<!-- major-verdict: ok {head} on main -->")], **gated), 900)
 assert not merged() and len(JOBS) == 1 and "migrations/" in JOBS[0]
 assert "no reviewer reads" in JOBS[0] and "renovate-sweep cleared the major version" in JOBS[0], JOBS[0]
 assert "its reviewers found nothing" not in JOBS[0], JOBS[0]
-status, _ = run(mkpr(comments=[said(f"<!-- major-verdict: ok {head} -->"),
+status, _ = run(mkpr(comments=[said(f"<!-- major-verdict: ok {head} on main -->"),
                                said(judgment("land", n=8))], **gated), 1000)
 assert merged()
 # A Renovate minor: Renovate merges it itself. A Dependabot major is judged.
@@ -403,7 +432,7 @@ fresh_pr_state()
 run(mkpr(threads=[False], **major), 0)
 status, _ = run(mkpr(threads=[False], **major), 7200)
 assert JOBS == [] and "renovate-sweep has it" in status, status
-status, _ = run(mkpr(threads=[False], comments=[said(f"<!-- major-verdict: ok {head} -->")], **major), 9000)
+status, _ = run(mkpr(threads=[False], comments=[said(f"<!-- major-verdict: ok {head} on main -->")], **major), 9000)
 assert len(JOBS) == 1 and "1 open review thread" in JOBS[0] and not merged(), (status, JOBS)
 # A red Renovate one is renovate-sweep's, threads and all: no second job on its branch.
 fresh_pr_state()

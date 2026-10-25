@@ -44,13 +44,13 @@ notify = stub("notify", """open(os.path.join(STUB, "notify.log"), "a").write(jso
 
 def pr(n, labels=("major",), conclusion="SUCCESS"):
     return {"number": n, "title": f"Update foo{n} to v2", "headRefName": f"renovate/foo{n}-2.x",
-            "headRefOid": f"{n:040x}", "labels": [{"name": x} for x in labels],
+            "headRefOid": f"{n:040x}", "baseRefName": "main", "labels": [{"name": x} for x in labels],
             "createdAt": "2099-01-01T00:00:00Z",
             "statusCheckRollup": [{"__typename": "CheckRun", "name": "ci", "status": "COMPLETED", "conclusion": conclusion}]}
 
 
-def verdict(n, v):
-    return {"author": {"login": "me"}, "body": f"Read it.\n<!-- major-verdict: {v} {n:040x} -->"}
+def verdict(n, v, base="main"):
+    return {"author": {"login": "me"}, "body": f"Read it.\n<!-- major-verdict: {v} {n:040x} on {base} -->"}
 
 
 def sweep(prs, comments=None, covered=None, age=0, proofs=None, state=None, failed=()):
@@ -119,6 +119,12 @@ assert calls == [] and verb == "open" and url + "3 (no checks ran on it)" in bod
 # ... or when the steward's list is six hours old: it may have stopped.
 calls, (verb, body) = sweep([pr(3)], {3: [verdict(3, "ok")]}, covered=[REPO], age=7 * 3600)
 assert calls == [] and verb == "open" and url + "3" in body, body
+# A verdict for another base (it was retargeted since), or one that names
+# none, isn't one: the job is asked again, and it isn't listed.
+for said in (verdict(3, "ok", base="release"), {"author": {"login": "me"}, "body": f"<!-- major-verdict: ok {3:040x} -->"}):
+    calls, (verb, body) = sweep([pr(3)], {3: [said]}, covered=["sam/other"])
+    assert len(calls) == 1 and "#3 " in calls[0][-1] and verb == "close", (said, calls, verb)
+assert "on BASE -->" in calls[0][-1] and "baseRefName" in calls[0][-1], calls
 # Not while its CI is red: that's a job's to fix first.
 calls, (verb, _) = sweep([pr(4, conclusion="FAILURE")], {4: [verdict(4, "ok")]})
 assert len(calls) == 1 and verb == "close", (calls, verb)

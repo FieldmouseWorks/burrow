@@ -14,6 +14,8 @@ for p in (".github/workflows/flake.yml", ".github/dependabot.yml"):
     assert S.one_way(touching("src/app.py", p), {"oneWay": ONE_WAY}) is None, (p, ONE_WAY)
 for p in (".github/CODEOWNERS", "secrets/remi.yaml", ".sops.yaml", "server/migrations/0002_users.sql"):
     assert S.one_way(touching(".github/workflows/flake.yml", p), {"oneWay": ONE_WAY}) == p, (p, ONE_WAY)
+assert S.one_way(touching("CODEOWNERS.bak"), {"oneWay": ONE_WAY}, [".github/CODEOWNERS"]) == ".github/CODEOWNERS"
+assert S.unquote('"secrets/caf\\303\\251.yaml"') == "secrets/caf\u00e9.yaml" and S.unquote("a b") == "a b"
 print("one-way: ok")
 
 
