@@ -25,7 +25,13 @@ pkgs.testers.runNixOSTest {
       agents.vcpus = 2;
       # Everything the sandboxes log lands in this test's output.
       agents.guestModules = [ { burrow.agentGuest.consoleLevel = "info"; } identity ];
+      # proj's passes start on burrow-events, as on a real machine.
+      events = {
+        host = "example.org";
+        secretFile = "/etc/burrow-webhook";
+      };
     };
+    environment.etc."burrow-webhook".text = "hook-secret\n";
 
     users.users.dev = {
       isNormalUser = true;
