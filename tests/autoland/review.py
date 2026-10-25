@@ -97,8 +97,8 @@ for f in ("secrets/remi.yaml", "cert.pem", ".env"):
             assert subprocess.run(["git", "cat-file", "-e", oid], cwd=snap).returncode != 0, (f, rev)
 assert sorted(meta["secret"]) == ["cert.pem", "cfg/api.yaml", "config/db.yaml", "keys/util.key", "secrets/db.yaml",
                                   "secrets/remi.yaml"], meta
-# And the steward knows which plain paths a secret went to, since no reviewer saw them.
-assert meta["moved"] == ["cfg/api.yaml", "config/db.yaml"] and V.moved("pr-sam_r-5.json", pr_head) == meta["moved"], meta
+# And the steward knows what no reviewer saw.
+assert V.unseen("pr-sam_r-5.json", pr_head) == meta["secret"], meta
 # The rules are the base's, nearest each changed file: the PR's own edit to them doesn't count.
 assert "never call eval" in meta["rules"] and "root rule" in meta["rules"], meta["rules"]
 assert "eval is fine" not in meta["rules"] and "not rules" not in meta["rules"], meta["rules"]

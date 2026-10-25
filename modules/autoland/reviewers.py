@@ -202,8 +202,8 @@ def snapshot(repo, pr, key):
     git("-C", dst, "fetch", "-q", "--no-tags", mirror, f"refs/snap/{name}:refs/heads/review", env=bare)
     git("-C", mirror, "update-ref", "-d", f"refs/snap/{name}")
     git("-C", dst, "checkout", "-q", "review", env=bare)
-    meta = {"rules": rules(mirror, f"refs/base/{base}", [p for p in changed if not (hidden(p) or p in moved)]), "secret": [p for p in changed if hidden(p) or p in moved],
-            "moved": sorted(p for p in moved if not hidden(p))}
+    meta = {"rules": rules(mirror, f"refs/base/{base}", [p for p in changed if not (hidden(p) or p in moved)]),
+            "secret": [p for p in changed if hidden(p) or p in moved]}
     save(f"{SNAP}/{name}.json", meta)
     return name, meta
 
@@ -248,10 +248,11 @@ def queue(repo, pr, key, r):
         "prior": prior(repo, pr["number"], r), "at": C.NOW})
 
 
-def moved(key, head):
-    """Plain paths a secret was renamed or copied to on this head, by its
-    snapshot: no reviewer saw them. [] until the snapshot's taken."""
-    return (load(f"{SNAP}/{snap_name(key, head)}.json", None) or {}).get("moved", [])
+def unseen(key, head):
+    """What the head changes that its snapshot hid from the reviewers
+    (secrets paths, and plain ones a secret was moved to). [] until the
+    snapshot's taken."""
+    return (load(f"{SNAP}/{snap_name(key, head)}.json", None) or {}).get("secret", [])
 
 
 def drop(name):

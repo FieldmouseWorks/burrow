@@ -72,12 +72,13 @@ fresh_pr_state()
 status, _ = run(clean(files=[".github/workflows/ci.yml", "a.py"]), 700)
 assert "state=success" in status and merged() and JOBS == [], (status, WROTE)
 
-# A secret renamed or copied to a plain path, which the reviewers' snapshot
-# hid from them: their clean reviews don't cover it, so it's judged.
+# A change the reviewers' snapshot hid from them (a .env, say, or a plain
+# path a secret was moved to): their clean reviews don't cover it, so it's
+# judged.
 fresh_pr_state()
-C.save(f"{V.SNAP}/{V.snap_name('pr-sam_r-5.json', head)}.json", {"rules": "", "secret": ["cfg/api.yaml"], "moved": ["cfg/api.yaml"]})
-status, _ = run(clean(), 700)
-assert len(JOBS) == 1 and not merged() and "secret's contents in cfg/api.yaml" in JOBS[0], (status, JOBS)
+C.save(f"{V.SNAP}/{V.snap_name('pr-sam_r-5.json', head)}.json", {"rules": "", "secret": [".env", "cfg/api.yaml"]})
+status, _ = run(clean(files=[".env", "cfg/api.yaml"]), 700)
+assert len(JOBS) == 1 and not merged() and "it changes .env, cfg/api.yaml, which the reviewers" in JOBS[0], (status, JOBS)
 
 # A migration: one judge job a head, and its verdict on that head decides.
 fresh_pr_state()

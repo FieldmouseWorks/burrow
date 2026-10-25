@@ -650,9 +650,9 @@ def handle(repo, pr, repo_info, digest):
     # service (its usage spent, say) isn't waited for meanwhile. Each review
     # is queued for the reviewers' own service; a pass posts what comes back.
     names = V.on(repo)
-    # A secret renamed or copied to a plain path: hidden from the reviewers,
-    # so their clean reviews don't cover it, and it would publish the secret.
-    secret_moved = V.moved(key, head)
+    # What the reviewers weren't shown: their clean reviews don't cover it,
+    # so a judge, who sees it all, looks before it lands.
+    unseen = V.unseen(key, head)
     away = {r: V.out(r) for r in names}
     live = [r for r in names if not away[r]]
     for r in names:
@@ -814,9 +814,9 @@ def handle(repo, pr, repo_info, digest):
         prove()
     elif ci == "pending":
         settle("pending", "Settled; waiting for CI: " + ", ".join(ci_names)[:90])
-    elif gate or secret_moved or ci == "none" or asked:
+    elif gate or unseen or ci == "none" or asked:
         judged(f"it touches {gate}" if gate else
-               f"it puts a secret's contents in {', '.join(secret_moved)}, which no reviewer could be shown" if secret_moved
+               f"it changes {', '.join(unseen[:5])}{' and more' * (len(unseen) > 5)}, which the reviewers aren't shown" if unseen
                else "the repo has no CI" if ci == "none" else "a Claude job was asked to judge this head")
     else:
         land_now(f"{' and '.join(V.NAMES[r] for r in live)} found nothing on this commit, every thread is resolved, CI is green")

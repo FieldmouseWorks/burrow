@@ -322,8 +322,9 @@ in
         default = [ "(^|/)secrets?/" "(^|/)\\.sops\\.yaml$" "\\.sops\\.(ya?ml|json|env)$" "(^|/)\\.env(\\..*)?$" "\\.(pem|key|p12|pfx)$" ];
         description = ''
           Path regexes left out of the snapshot the reviewers read, on both
-          sides of the diff: they're told such a file changed, not how. A
-          directory matches with a trailing slash.
+          sides of the diff: they're told such a file changed, not how, so a
+          PR that changes one is judged before it lands. A directory matches
+          with a trailing slash.
         '';
       };
     };
