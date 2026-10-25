@@ -76,7 +76,7 @@ V.ORIGIN = f"{tmp}/origin/{{}}.git"
 snap_pr = {"number": 5, "headRefOid": pr_head, "baseRefName": "main", "title": "Use eval"}
 name, meta = V.snapshot("sam/r", snap_pr, "pr-sam_r-5.json")
 snap = f"{tmp}/state/{V.SNAP}/{name}"
-assert name == f"pr-sam_r-5-{pr_head[:12]}"
+assert name == V.snap_name("pr-sam_r-5.json", pr_head, "main") and name.startswith(f"pr-sam_r-5-{pr_head[:12]}-")
 assert sh("git", "log", "--format=%s", cwd=snap).split("\n")[:2] == [f"head {pr_head}", "base"]
 diff = sh("git", "diff", "HEAD~1", "HEAD", cwd=snap)
 assert "+    b = eval('2')" in diff and "later.txt" not in diff, diff
@@ -98,7 +98,7 @@ for f in ("secrets/remi.yaml", "cert.pem", ".env"):
 assert sorted(meta["secret"]) == ["cert.pem", "cfg/api.yaml", "config/db.yaml", "keys/util.key", "secrets/db.yaml",
                                   "secrets/remi.yaml"], meta
 # And the steward knows what no reviewer saw.
-assert V.unseen("pr-sam_r-5.json", pr_head) == meta["secret"], meta
+assert V.unseen("pr-sam_r-5.json", pr_head, "main") == meta["secret"], meta
 # The rules are the base's, nearest each changed file: the PR's own edit to them doesn't count.
 assert "never call eval" in meta["rules"] and "root rule" in meta["rules"], meta["rules"]
 assert "eval is fine" not in meta["rules"] and "not rules" not in meta["rules"], meta["rules"]
@@ -166,7 +166,7 @@ def queue_and_work(r):
     V.queue("sam/r", snap_pr, "pr-sam_r-5.json", r)
     W.work()
     assert os.listdir(f"{tmp}/state/{V.QUEUE}") == []
-    item = V.item_name("pr-sam_r-5.json", r, pr_head)
+    item = V.item_name("pr-sam_r-5.json", r, pr_head, "main")
     back = json.load(open(f"{tmp}/state/{V.DONE}/{item}.json"))
     os.remove(f"{tmp}/state/{V.DONE}/{item}.json")
     return back
@@ -325,7 +325,7 @@ V.remove(f"{tmp}/state/{V.QUEUE}/deepseek--unread.json")
 agent(dsh={"sleep": 8})
 V.queue("sam/r", snap_pr, "pr-sam_r-5.json", "deepseek")
 V.queue("sam/r", snap_pr, "pr-sam_r-5.json", "codex")
-again = V.item_name("pr-sam_r-5.json", "codex", pr_head)
+again = V.item_name("pr-sam_r-5.json", "codex", pr_head, "main")
 entry = open(f"{tmp}/state/{V.QUEUE}/{again}.json").read()
 worker = threading.Thread(target=W.work)
 worker.start()

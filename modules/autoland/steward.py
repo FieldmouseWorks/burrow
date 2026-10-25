@@ -652,7 +652,7 @@ def handle(repo, pr, repo_info, digest):
     names = V.on(repo)
     # What the reviewers weren't shown: their clean reviews don't cover it,
     # so a judge, who sees it all, looks before it lands.
-    unseen = V.unseen(key, head)
+    unseen = V.unseen(key, head, pr["baseRefName"])
     away = {r: V.out(r) for r in names}
     live = [r for r in names if not away[r]]
     for r in names:
@@ -667,7 +667,7 @@ def handle(repo, pr, repo_info, digest):
         """What came back from the reviewer's service for this head, if
         anything: posted as its review, or counted as a failure."""
         rs = st["rv"].setdefault(r, {})
-        name = V.item_name(key, r, head)
+        name = V.item_name(key, r, head, pr["baseRefName"])
         back = load(f"{V.DONE}/{name}.json", None)
         if back and not DRY:
             if back["result"] == "review":
@@ -884,7 +884,7 @@ def main():
             seen_to = True
             for pr in prs:
                 heads.add(pr["headRefName"])
-                live.add(V.snap_name(f"pr-{repo.replace('/', '_')}-{pr['number']}.json", pr["headRefOid"]))
+                live.add(V.snap_name(f"pr-{repo.replace('/', '_')}-{pr['number']}.json", pr["headRefOid"], pr["baseRefName"]))
                 try:
                     handle(repo, pr, info, digest)
                 except Exception as e:  # one bad PR mustn't stop the rest

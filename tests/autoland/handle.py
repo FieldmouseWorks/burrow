@@ -76,9 +76,17 @@ assert "state=success" in status and merged() and JOBS == [], (status, WROTE)
 # path a secret was moved to): their clean reviews don't cover it, so it's
 # judged.
 fresh_pr_state()
-C.save(f"{V.SNAP}/{V.snap_name('pr-sam_r-5.json', head)}.json", {"rules": "", "secret": [".env", "cfg/api.yaml"]})
+C.save(f"{V.SNAP}/{V.snap_name('pr-sam_r-5.json', head, 'main')}.json", {"rules": "", "secret": [".env", "cfg/api.yaml"]})
 status, _ = run(clean(files=[".env", "cfg/api.yaml"]), 700)
 assert len(JOBS) == 1 and not merged() and "it changes .env, cfg/api.yaml, which the reviewers" in JOBS[0], (status, JOBS)
+
+# Retargeted after its reviews, the same head is another change: what they
+# said doesn't count, and they're asked again.
+fresh_pr_state()
+on_main = [rv_review("codex", 0), rv_review("deepseek", 0)]
+status, _ = run(mkpr(reviews=on_main, base="release"), 0)
+status, _ = run(mkpr(reviews=on_main, base="release"), 700)
+assert not merged() and queued() == ["codex", "deepseek"], status
 
 # A migration: one judge job a head, and its verdict on that head decides.
 fresh_pr_state()
@@ -725,9 +733,12 @@ del S.CFG["repos"]["sam/r"]
 # The sweep: snapshots, queued reviews and answers of heads no open PR has
 # any more go, for the repos the pass read (a dash in a name included).
 fresh_pr_state()
-gone, live_snap = V.snap_name("pr-sam_r-5.json", "d" * 40), V.snap_name("pr-sam_r-5.json", head)
-other_repo, dashed = V.snap_name("pr-sam_q-1.json", "e" * 40), V.snap_name("pr-sam_lo-k-3.json", "f" * 40)
-for s in (gone, live_snap, other_repo, dashed):
+gone, live_snap = V.snap_name("pr-sam_r-5.json", "d" * 40, "main"), V.snap_name("pr-sam_r-5.json", head, "main")
+other_repo, dashed = V.snap_name("pr-sam_q-1.json", "e" * 40, "main"), V.snap_name("pr-sam_lo-k-3.json", "f" * 40, "main")
+# Retargeted: the same head on another base is another snapshot.
+retargeted = V.snap_name("pr-sam_r-5.json", head, "release/1.x")
+assert retargeted != live_snap
+for s in (gone, live_snap, other_repo, dashed, retargeted):
     os.makedirs(f"{tmp}/state/{V.SNAP}/{s}")
     C.save(f"{V.SNAP}/{s}.json", {})
     C.save(f"{V.QUEUE}/deepseek--{s}.json", {})

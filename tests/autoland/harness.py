@@ -177,7 +177,7 @@ STUB = {"queue": None, "post": None}  # an error each raises, when set
 def queue(repo, pr, key, r):
     if STUB["queue"]:
         raise STUB["queue"]
-    C.save(f"{V.QUEUE}/{V.item_name(key, r, pr['headRefOid'])}.json",
+    C.save(f"{V.QUEUE}/{V.item_name(key, r, pr['headRefOid'], pr['baseRefName'])}.json",
            {"reviewer": r, "repo": repo, "number": pr["number"], "headRefOid": pr["headRefOid"]})
 
 
@@ -196,10 +196,10 @@ T = C.ts(T0)
 info = {"squashMergeAllowed": True, "mergeCommitAllowed": False, "rebaseMergeAllowed": False}
 
 
-def rv_review(r, k, sha=head, at="2026-10-24T00:11:00Z", who="sam"):
+def rv_review(r, k, sha=head, at="2026-10-24T00:11:00Z", who="sam", base="main"):
     """A review the steward posted for reviewer r, with k findings."""
     return {"author": {"login": who}, "state": "COMMENTED", "submittedAt": at, "commit": {"oid": sha},
-            "body": f"<!-- {r}-review:v1 " + json.dumps({"commit_sha": sha, "findings": k}) + " -->"}
+            "body": f"<!-- {r}-review:v1 " + json.dumps({"commit_sha": sha, "base": base, "findings": k}) + " -->"}
 
 
 def judgment(v, n=6, sha=head, base="main"):
@@ -232,8 +232,9 @@ def mkpr(reviews=(), comments=(), threads=(), draft=False, number=5, sha=head, f
 
 
 def clean(sha=head, comments=(), reviews=(), **kw):
-    """A PR both reviewers found nothing on, at `sha`."""
-    return mkpr(reviews=[*reviews, rv_review("codex", 0, sha), rv_review("deepseek", 0, sha)],
+    """A PR both reviewers found nothing on, at `sha` on its base."""
+    base = kw.get("base", "main")
+    return mkpr(reviews=[*reviews, rv_review("codex", 0, sha, base=base), rv_review("deepseek", 0, sha, base=base)],
                 comments=comments, sha=sha, **kw)
 
 

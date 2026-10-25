@@ -110,6 +110,8 @@ forged = dict(mine, author={"login": "mallory"}, submittedAt="2026-10-24T01:00:0
 pr["reviews"]["nodes"] = [mine, forged]
 assert V.verdict(pr, head, "deepseek")[0::2] == ("findings", 1)
 assert V.verdict(pr, "b" * 40, "deepseek")[0] == "none" and V.verdict(pr, head, "codex")[0] == "none"
+# Retargeted, the same head is another change: what was said on main doesn't count.
+assert V.verdict(dict(pr, baseRefName="release"), head, "deepseek")[0] == "none"
 WROTE.clear()
 assert V.post("sam/r", pr, "codex", {"findings": []}) == "clean"
 assert "**Codex review** of aaaaaaa: nothing found." in json.loads(WROTE[0][1])["body"]

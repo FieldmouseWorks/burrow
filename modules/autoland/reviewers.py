@@ -9,6 +9,7 @@ what came back (`post`), under the steward's login and marked as that
 reviewer's, and reads each reviewer's verdict back from those posts
 (`verdict`)."""
 
+import hashlib
 import json
 import os
 import re
@@ -49,8 +50,8 @@ def finding(r):
 
 
 def verdict(pr, head, r):
-    """What the reviewer last said about this exact head (clean, findings or
-    none), when, and how many of its reviews on the PR had findings. Only
+    """What the reviewer last said about this exact head on the PR's base
+    (clean, findings or none), when, and how many of its reviews on the PR had findings. Only
     reviews the steward posted count: anyone can write the marker."""
     pat = review_re(r)
     v, at, rounds = "none", 0, 0
@@ -64,7 +65,10 @@ def verdict(pr, head, r):
         except (ValueError, TypeError, AttributeError):
             continue
         rounds += found
-        if said.get("commit_sha") == head and (x["commit"] or {}).get("oid") == head and ts(x["submittedAt"]) >= at:
+        # Retargeted, the PR is another change on the same head: what was
+        # said about it on its old base doesn't count.
+        if (said.get("commit_sha") == head and said.get("base") == pr["baseRefName"]
+                and (x["commit"] or {}).get("oid") == head and ts(x["submittedAt"]) >= at):
             v, at = ("findings" if found else "clean"), ts(x["submittedAt"])
     return v, at, rounds
 
@@ -113,8 +117,9 @@ def rules(mirror, rev, paths):
     return "\n\n".join(out)
 
 
-def snap_name(key, head):
-    return f"{key[:-5]}-{head[:12]}"
+def snap_name(key, head, base):
+    """One snapshot a head on a base: retargeted, a PR is another change."""
+    return f"{key[:-5]}-{head[:12]}-{hashlib.sha1(base.encode()).hexdigest()[:8]}"
 
 
 def remove(p):
@@ -134,10 +139,10 @@ def snapshot(repo, pr, key):
     without the secrets paths: all a reviewer gets to read. The commits are
     git's own trees with those paths taken out, so nothing the repo's
     attributes or ignore files say can change or hide what the PR changed.
-    Taken once a head, for every reviewer. Returns its name, the review
-    rules and the secrets paths the PR changes."""
+    Taken once a head on a base, for every reviewer. Returns its name, the
+    review rules and the secrets paths the PR changes."""
     n, head, base = pr["number"], pr["headRefOid"], pr["baseRefName"]
-    name = snap_name(key, head)
+    name = snap_name(key, head, base)
     meta = load(f"{SNAP}/{name}.json", None)
     if meta:
         return name, meta
@@ -234,8 +239,8 @@ def prior(repo, n, r):
     return "\n".join(text)
 
 
-def item_name(key, r, head):
-    return f"{r}--{snap_name(key, head)}"
+def item_name(key, r, head, base):
+    return f"{r}--{snap_name(key, head, base)}"
 
 
 def queue(repo, pr, key, r):
@@ -248,11 +253,11 @@ def queue(repo, pr, key, r):
         "prior": prior(repo, pr["number"], r), "at": C.NOW})
 
 
-def unseen(key, head):
+def unseen(key, head, base):
     """What the head changes that its snapshot hid from the reviewers
     (secrets paths, and plain ones a secret was moved to). [] until the
     snapshot's taken."""
-    return (load(f"{SNAP}/{snap_name(key, head)}.json", None) or {}).get("secret", [])
+    return (load(f"{SNAP}/{snap_name(key, head, base)}.json", None) or {}).get("secret", [])
 
 
 def drop(name):
@@ -273,7 +278,7 @@ def sweep(repos, live):
             snap = x.removesuffix(".json")
             if d != SNAP:
                 snap = snap.partition("--")[2]
-            if snap.rsplit("-", 2)[0].removeprefix("pr-") in repos and snap not in live:
+            if snap.rsplit("-", 3)[0].removeprefix("pr-") in repos and snap not in live:
                 remove(os.path.join(STATE, d, x))
 
 
@@ -411,7 +416,7 @@ def post(repo, pr, r, answer):
         body += f"\n\n{quiet(answer['summary'])}"
     if loose:
         body += "\n\nNotes not on a changed line:\n" + "\n".join(loose)
-    body += f"\n\n<!-- {r}-review:v1 " + json.dumps({"commit_sha": head, "findings": k}) + " -->"
+    body += f"\n\n<!-- {r}-review:v1 " + json.dumps({"commit_sha": head, "base": pr["baseRefName"], "findings": k}) + " -->"
     if not isinstance(C.write("api", "-X", "POST", f"repos/{repo}/pulls/{n}/reviews", "--input", "-",
                               input=json.dumps({"commit_id": head, "event": "COMMENT", "body": body, "comments": comments}),
                               check=False), dict):
