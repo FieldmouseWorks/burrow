@@ -67,11 +67,12 @@ assert not waited.is_alive(), "the wait slept through an event that came in befo
 print("line: ok")
 
 # Deliveries go to the handlers that take their event; kicks name a handler,
-# and a repo or none (a full pass).
-handlers = {"autoland": {"events": ["push", "pull_request"], "unit": "autoland", "wake": None},
+# and a repo or none (a full pass). A commit status this machine posted
+# itself starts nothing.
+handlers = {"autoland": {"events": ["push", "pull_request", "status"], "unit": "autoland", "wake": None},
             "inbox": {"events": ["issues", "pull_request"], "unit": "proj-inbox", "wake": None}}
 lines = {name: E.Line() for name in handlers}
-hooks = http.server.HTTPServer(("127.0.0.1", 0), E.deliveries(handlers, lines, "hook-secret"))
+hooks = http.server.HTTPServer(("127.0.0.1", 0), E.deliveries(handlers, lines, "hook-secret", ["review-settled"]))
 kicks = http.server.HTTPServer(("127.0.0.1", 0), E.kicks(lines))
 for srv in (hooks, kicks):
     threading.Thread(target=srv.serve_forever, daemon=True).start()
@@ -103,6 +104,16 @@ assert deliver(body, sig, "push") == 202 and due() == {"autoland": ["sam/r"], "i
 assert deliver(body, sig, "pull_request") == 202 and due() == {"autoland": ["sam/r"], "inbox": ["sam/r"]}, due()
 lines["autoland"].due.clear()
 lines["inbox"].due.clear()
+
+
+def status(context):
+    data = json.dumps({"repository": {"full_name": "sam/r"}, "context": context}).encode()
+    return deliver(data, "sha256=" + hmac.new(b"hook-secret", data, hashlib.sha256).hexdigest(), "status")
+
+
+assert status("review-settled") == 204 and due() == {"autoland": [], "inbox": []}, due()
+assert status("proof") == 202 and due() == {"autoland": ["sam/r"], "inbox": []}, due()
+lines["autoland"].due.clear()
 assert post(kicks, "/kick/inbox/sam/q") == 202 and due() == {"autoland": [], "inbox": ["sam/q"]}, due()
 assert post(kicks, "/kick/autoland") == 202 and due() == {"autoland": [E.FULL], "inbox": ["sam/q"]}, due()
 for bad in ("/kick/nope/sam/r", "/kick/inbox/--help/x", "/kick/inbox/sam", "/kick", "/burrow/hook"):

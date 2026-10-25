@@ -177,9 +177,10 @@ class Quiet(http.server.BaseHTTPRequestHandler):
         pass  # a line per delivery says nothing the passes' lines don't
 
 
-def deliveries(handlers, lines, secret):
+def deliveries(handlers, lines, secret, own=()):
     """The webhook's deliveries, nginx passes them on: each goes to the
-    handlers that take its event."""
+    handlers that take its event, but for a commit status this machine
+    posted itself (`own`), which is news to nobody."""
 
     class Delivery(Quiet):
         def do_POST(self):
@@ -189,12 +190,15 @@ def deliveries(handlers, lines, secret):
             if not got or not signed(secret, got, self.headers.get("X-Hub-Signature-256")):
                 return answer(self, 401)
             try:
-                repo = json.loads(got)["repository"]["full_name"]
+                payload = json.loads(got)
+                repo = payload["repository"]["full_name"]
             except (ValueError, KeyError, TypeError):
                 return answer(self, 204)  # nothing about a repo
             if not isinstance(repo, str) or not REPO_RE.match(repo):
                 return answer(self, 204)
             event = self.headers.get("X-GitHub-Event")
+            if event == "status" and payload.get("context") in own:
+                return answer(self, 204)
             for name, h in handlers.items():
                 if event in h["events"]:
                     lines[name].event(repo, time.time())
@@ -236,7 +240,7 @@ def main():
     lines = {name: Line() for name in handlers}
     for line in lines.values():
         line.event(FULL, time.time() - DEBOUNCE)  # catching up
-    listen(cfg["port"], deliveries(handlers, lines, secret))
+    listen(cfg["port"], deliveries(handlers, lines, secret, cfg["ownStatuses"]))
     listen(cfg["kickPort"], kicks(lines))
     log(f"deliveries on 127.0.0.1:{cfg['port']}, kicks on 127.0.0.1:{cfg['kickPort']}: {', '.join(handlers)}")
     workers = [threading.Thread(target=serve, args=(name, h, lines[name]), daemon=True) for name, h in handlers.items()]

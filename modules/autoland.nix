@@ -368,6 +368,8 @@ in
       unit = "autoland";
       wake = "${stateDir}/autoland/wake.json";
     };
+    # The steward's own status changes nothing it doesn't already know.
+    burrow.events.ownStatuses = [ cfg.context ];
     systemd.services = lib.genAttrs [ "autoland" "autoland@" ] (name: {
       description = if name == "autoland"
         then "autoland: settle and merge every PR, keep every repo at the baseline"

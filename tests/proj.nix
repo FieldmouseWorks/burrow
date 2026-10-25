@@ -496,6 +496,15 @@ pkgs.testers.runNixOSTest {
         assert again != gone, listed
         machine.wait_until_succeeds(f"su - dev -c 'proj state {again}' | grep -x done", timeout=120)
 
+    with subtest("a repo out of reach is remembered until a pass reaches it again"):
+        gone = "/var/lib/burrow/proj-inbox/.unreached"
+        machine.succeed("mv /tmp/gh/repos_o_r_issues /tmp/gh/kept")
+        machine.succeed("su - dev -c 'proj-inbox o/r'")
+        machine.succeed(f"test -s {gone}/o_r")
+        machine.succeed("mv /tmp/gh/kept /tmp/gh/repos_o_r_issues")
+        machine.succeed("su - dev -c 'proj-inbox o/r'")
+        assert machine.succeed(f"ls -A {gone}").strip() == "", machine.succeed(f"ls -A {gone}")
+
     with subtest("a wait proj can't read is news, and doesn't stop _watch"):
         e = proj('run web "sleep 1"')
         machine.wait_until_succeeds(f"su - dev -c 'proj state {e}' | grep -x done", timeout=120)

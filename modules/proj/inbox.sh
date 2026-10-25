@@ -237,9 +237,12 @@ if [ -n "$WAKE" ]; then
   } | jq -s 'add // {}' >"$WAKE.new" && mv -f "$WAKE.new" "$WAKE"
 fi
 
-# Since when each repo has been out of reach, until a pass reaches it again.
+# Since when each repo has been out of reach, until a pass reaches it again:
+# a file per repo, OWNER_NAME (a GitHub owner has no _ in it, so the first
+# one is the slash).
+mkdir -p "$STATE/.unreached"
 for repo in "${looked[@]}"; do
-  f=$STATE/.unreached-${repo//\//_}
+  f=$STATE/.unreached/${repo//\//_}
   if printf '%s\n' "${unreached[@]}" | grep -qxF "$repo"; then
     [ -e "$f" ] || date +%s >"$f"
   else
@@ -251,14 +254,14 @@ done
 # after a switch. The journal says it every pass, the owner after an hour.
 [ ${#unreached[@]} = 0 ] || echo "couldn't reach GitHub for ${unreached[*]}; trying again in five minutes" >&2
 long=()
-for f in "$STATE"/.unreached-*; do
+for f in "$STATE"/.unreached/*; do
   [ -e "$f" ] || continue
-  [ $(($(date +%s) - $(cat "$f"))) -le 3600 ] || long+=("${f##*/.unreached-}")
+  [ $(($(date +%s) - $(cat "$f"))) -le 3600 ] || long+=("${f##*/}")
 done
 if [ ${#long[@]} -gt 0 ]; then
   [ -z "$NOTIFY" ] || "$NOTIFY" open proj-inbox "proj-inbox can't reach GitHub" \
     "For over an hour, proj-inbox on $HOST hasn't been able to read or comment on issues in: $(printf '%s\n' "${long[@]}" | sed 's#_#/#' | sort | paste -sd' '). Issues labelled \`$LABEL\` there wait until it can. \`journalctl -u 'proj-inbox*'\` has the errors (a rate limit, often)."
-elif ! compgen -G "$STATE/.unreached-*" >/dev/null; then
+elif ! compgen -G "$STATE/.unreached/*" >/dev/null; then
   # Every pass that reaches everything: a close that didn't get through is
   # tried again, and with nothing open it's a no-op that doesn't ask GitHub.
   [ -z "$NOTIFY" ] || "$NOTIFY" close proj-inbox "proj-inbox reaches GitHub again."
