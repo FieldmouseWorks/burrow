@@ -162,6 +162,15 @@ pkgs.testers.runNixOSTest {
         proj("_watch")
         assert json.loads(machine.succeed("cat /var/lib/burrow/proj-watch/wake.json")) == {}
 
+    with subtest("a look waits for one already running"):
+        # burrow-events runs one at a time, but one from before its restart
+        # (or a hand-run one) can still be going: two would each write the
+        # wake file from what they saw.
+        machine.execute("su - dev -c 'flock /var/lib/burrow/proj-watch/wake.json.lock sleep 10' >/dev/null 2>&1 &")
+        machine.wait_until_fails("flock -n /var/lib/burrow/proj-watch/wake.json.lock true", timeout=30)
+        machine.fail("su - dev -c 'timeout 3 proj _watch'")
+        machine.wait_until_succeeds("flock -n /var/lib/burrow/proj-watch/wake.json.lock true", timeout=30)
+
     with subtest("a turn that failed without saying anything has no answer"):
         e = proj("run web fail")
         machine.wait_until_succeeds(f"su - dev -c 'proj state {e}' | grep -x error", timeout=120)
@@ -415,6 +424,13 @@ pkgs.testers.runNixOSTest {
         assert before + 300 <= wake.get("o/r", 0) <= int(machine.succeed("date +%s")) + 300, wake
         github("repos/o/r/issues/7/comments", "[]")
         machine.succeed("su - dev -c 'proj-inbox o/r'")
+
+    with subtest("the inbox waits for a pass already running"):
+        # Two at once could each find an issue without its job and start one.
+        machine.execute("su - dev -c 'flock /var/lib/burrow/proj-inbox/wake.json.lock sleep 10' >/dev/null 2>&1 &")
+        machine.wait_until_fails("flock -n /var/lib/burrow/proj-inbox/wake.json.lock true", timeout=30)
+        machine.fail("su - dev -c 'timeout 3 proj-inbox o/r'")
+        machine.wait_until_succeeds("flock -n /var/lib/burrow/proj-inbox/wake.json.lock true", timeout=30)
 
     with subtest("the inbox waits out a turn being started"):
         # A turn held halfway through starting (its number written, its unit

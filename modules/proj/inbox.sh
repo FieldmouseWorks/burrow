@@ -32,6 +32,12 @@ if [ "${1:-}" = status ]; then
   exit 0
 fi
 
+# One pass at a time, whoever started it (burrow-events, from before a
+# restart too, or a hand): two could each find an issue without its job and
+# start one, and each writes WAKE from what it saw.
+exec {pass}>>"$WAKE.lock"
+flock "$pass"
+
 allowed() {
   local a
   for a in $AUTHORS; do [ "$a" = "$1" ] && return 0; done

@@ -376,7 +376,11 @@ case "${1:-status}" in
   _watch)
     # `_watch [OWNER/REPO]`: jobs waiting on GitHub whose PRs or issues (in
     # that repo, or any) changed get their next turn. A line of JOBS/ID/await
-    # is "OWNER/REPO#N <tab> since <tab> fingerprint".
+    # is "OWNER/REPO#N <tab> since <tab> fingerprint". One pass at a time,
+    # whoever started it (burrow-events, from before a restart too, or a
+    # hand): two would each write WAKE from what they saw.
+    exec {pass}>>"$WAKE.lock"
+    flock "$pass"
     only=${2:-} retry=''
     for f in "$jobs"/*/await; do
       [ -s "$f" ] || continue
