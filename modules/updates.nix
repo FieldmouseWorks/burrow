@@ -137,8 +137,10 @@ let
       automerge = true;
     };
 
-    # Merged by Renovate itself once every check is green, so it doesn't
-    # depend on each repo's auto-merge setting.
+    # Merged by Renovate on its next run once every check is green, so it
+    # doesn't depend on each repo's auto-merge setting. With autoland on, the
+    # steward merges them the moment they're green, if the PR says Renovate
+    # would.
     automergeType = "pr";
     platformAutomerge = false;
 

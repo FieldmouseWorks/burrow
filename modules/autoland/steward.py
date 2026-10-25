@@ -57,7 +57,7 @@ query($owner: String!, $name: String!, $cursor: String) {
     pullRequests(states: OPEN, first: 30, after: $cursor, orderBy: {field: CREATED_AT, direction: ASC}) {
       pageInfo { hasNextPage endCursor }
       nodes {
-        id number title url isDraft isCrossRepository headRefName headRefOid baseRefName
+        id number title body url isDraft isCrossRepository headRefName headRefOid baseRefName
         createdAt updatedAt mergeStateStatus
         author { login }
         autoMergeRequest { enabledAt }
@@ -214,6 +214,11 @@ def unland(repo, pr):
     GitHub didn't take it."""
     return not pr["autoMergeRequest"] or C.write(
         "pr", "merge", str(pr["number"]), "-R", repo, "--disable-auto", check=False) is not None
+
+
+# What Renovate writes in a PR its config would merge once CI is green (the
+# rest say "Disabled by config").
+RENOVATE_AUTOMERGE = "🚦 **Automerge**: Enabled."
 
 
 def handle(repo, pr, repo_info, digest):
@@ -491,8 +496,9 @@ def handle(repo, pr, repo_info, digest):
     fixed = dep == "minor" and not gate and (renovate_edited(repo, pr, st) or gate_edit(repo, pr, st))
     swept = fixed and ci == "red" and renovate
 
-    # Dependency bumps: CI is the review. Renovate merges its own minor
-    # ones; renovate-sweep fixes the red ones (and settles their threads) and
+    # Dependency bumps: CI is the review. A minor one merges once CI is green
+    # (a Renovate one if its config would merge it: RENOVATE_AUTOMERGE);
+    # renovate-sweep fixes the red ones (and settles their threads) and
     # gives each major a verdict. Anything else that's open on one, a review
     # finding or a red Dependabot update, goes to a Claude job like any PR's.
     # Sent to the owner (by hand, a fix job or a judge): theirs, whatever else
@@ -545,8 +551,10 @@ def handle(repo, pr, repo_info, digest):
             land_now("Major update renovate-sweep cleared, CI green")
         else:
             settle("success", "Dependency update, CI green")
-            # Renovate merges its own; Dependabot's need merging.
-            if not renovate and st.get("landed") != head:
+            # Merged now, not on Renovate's next run (a median of 37 minutes
+            # after green), but a Renovate one only if its config would merge
+            # it too: it says so in the PR.
+            if (not renovate or RENOVATE_AUTOMERGE in (pr["body"] or "")) and st.get("landed") != head:
                 merge()
         # Renovate's stuck ones are renovate-sweep's; a Dependabot one that
         # still hasn't merged after a day is the owner's to look at.

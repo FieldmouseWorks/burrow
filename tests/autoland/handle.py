@@ -509,10 +509,16 @@ assert "its reviewers found nothing" not in JOBS[0], JOBS[0]
 status, _ = run(mkpr(comments=[said(f"<!-- major-verdict: ok {head} on main -->"),
                                said(judgment("land", n=8))], **gated), 1000)
 assert merged()
-# A Renovate minor: Renovate merges it itself. A Dependabot major is judged.
+# A green Renovate minor merges at once if Renovate's config would merge it
+# (it says so in the PR), and waits for a person if not. A Dependabot major
+# is judged.
 fresh_pr_state()
-status, _ = run(mkpr(branch="renovate/foo-1.x", title="Update foo from 1.4 to 1.5", number=9), 900)
+renovate_minor = {"branch": "renovate/foo-1.x", "title": "Update foo from 1.4 to 1.5", "number": 9}
+status, _ = run(mkpr(body="\U0001f6a6 **Automerge**: Disabled by config.", **renovate_minor), 900)
 assert "state=success" in status and not merged() and JOBS == []
+status, _ = run(mkpr(body="\U0001f6a6 **Automerge**: Enabled.", **renovate_minor), 900)
+assert "state=success" in status and JOBS == []
+assert any(x.startswith("pr merge 9") and "--match-head-commit " + head in x for x in WROTE), WROTE
 status, _ = run(mkpr(branch="dependabot/npm/foo-2", title="Bump foo from 1.4 to 2.0", number=10), 900)
 assert len(JOBS) == 1 and "a major dependency update" in JOBS[0] and not merged()
 assert "no reviewer reads" in JOBS[0] and "its reviewers found nothing" not in JOBS[0], JOBS[0]
