@@ -121,5 +121,13 @@ pkgs.testers.runNixOSTest {
         assert deliver(body, "hook-secret") == "401"
         assert deliver(body, "new-secret") == "202"
         machine.wait_until_succeeds("grep -x sam/n /var/lib/probe/passes", timeout=60)
+
+    with subtest("the catch-up doesn't fail while burrow-events is down"):
+        # Its own start runs every full pass anyway; a failed unit would read
+        # as a broken switch.
+        machine.succeed("systemctl stop burrow-events.service")
+        machine.succeed("systemctl start burrow-events-catch-up.service")
+        machine.succeed("journalctl -u burrow-events-catch-up.service | grep \"couldn't kick probe\"")
+        machine.succeed("systemctl start burrow-events.service")
   '';
 }

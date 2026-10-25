@@ -95,10 +95,6 @@ pkgs.testers.runNixOSTest {
           authors = [ "sam" ];
         };
       };
-      events = {
-        host = "example.org";
-        secretFile = "/etc/burrow-webhook";
-      };
     };
     # proj-watch and proj-inbox run by hand here, never from burrow-events,
     # whose kick port the test listens on itself.

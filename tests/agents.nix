@@ -25,13 +25,7 @@ pkgs.testers.runNixOSTest {
       agents.vcpus = 2;
       # Everything the sandboxes log lands in this test's output.
       agents.guestModules = [ { burrow.agentGuest.consoleLevel = "info"; } identity ];
-      # proj's passes start on burrow-events, as on a real machine.
-      events = {
-        host = "example.org";
-        secretFile = "/etc/burrow-webhook";
-      };
     };
-    environment.etc."burrow-webhook".text = "hook-secret\n";
 
     users.users.dev = {
       isNormalUser = true;
@@ -77,6 +71,9 @@ pkgs.testers.runNixOSTest {
 
     host.wait_for_unit("multi-user.target")
     host.wait_for_unit("agents-dataset.service")
+    # proj alone runs burrow-events with no host or secret: kicks and
+    # wake-ups only.
+    host.wait_for_unit("burrow-events.service")
     host.succeed("mountpoint /agents")
     for unit in ["agent-proxy.service", "agent-proxy-open.service"]:
         host.wait_for_unit(unit)

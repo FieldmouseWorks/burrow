@@ -14,8 +14,11 @@ let
   cfg = config.burrow.events;
   inherit (lib) mkOption types;
 
+  # Deliveries come in only where GitHub can reach the machine.
+  hooked = cfg.host != null;
   configFile = pkgs.writeText "burrow-events.json" (builtins.toJSON {
-    inherit (cfg) port kickPort;
+    inherit (cfg) kickPort;
+    port = if hooked then cfg.port else null;
     handlers = lib.mapAttrs (_: h: { inherit (h) events unit wake ownStatuses; }) cfg.handlers;
   });
   src = pkgs.runCommand "burrow-events" { nativeBuildInputs = [ pkgs.python3.pkgs.flake8 ]; } ''
@@ -24,8 +27,10 @@ let
     flake8 --ignore E501,W503 $out
   '';
   units = lib.mapAttrsToList (_: h: h.unit) cfg.handlers;
+  # Each one best-effort: burrow-events down (restarting, say) runs every
+  # full pass when it starts anyway.
   kickAll = lib.concatMapStrings (name: ''
-    curl -fsS -m 10 -d "" ${cfg.kick}/${name} >/dev/null
+    curl -fsS -m 10 -d "" ${cfg.kick}/${name} >/dev/null || echo "couldn't kick ${name}" >&2
   '') (lib.attrNames cfg.handlers);
 in
 {
@@ -36,9 +41,15 @@ in
       serve `host` over HTTPS'';
 
     host = mkOption {
-      type = types.str;
+      type = types.nullOr types.str;
+      default = null;
       example = "example.org";
-      description = "The nginx virtual host GitHub reaches this machine at: the hooks' URL is https://HOST/PATH.";
+      description = ''
+        The nginx virtual host GitHub reaches this machine at: the hooks' URL
+        is https://HOST/PATH. Without one (and `secretFile`), no deliveries
+        come in, and passes start only on kicks, wake-ups and the catch-up.
+        The steward (burrow.autoland) needs both.
+      '';
     };
 
     path = mkOption {
@@ -60,7 +71,8 @@ in
     };
 
     secretFile = mkOption {
-      type = types.str;
+      type = types.nullOr types.str;
+      default = null;
       example = "/run/secrets/burrow-webhook";
       description = ''
         A root-only file holding the secret GitHub signs each delivery with: a
@@ -110,11 +122,11 @@ in
     };
 
     url = mkOption {
-      type = types.str;
+      type = types.nullOr types.str;
       readOnly = true;
-      default = "https://${cfg.host}${cfg.path}";
+      default = if hooked then "https://${cfg.host}${cfg.path}" else null;
       defaultText = lib.literalExpression ''"https://''${host}''${path}"'';
-      description = "The hooks' URL.";
+      description = "The hooks' URL, if the machine takes deliveries.";
     };
 
     kick = mkOption {
@@ -134,6 +146,11 @@ in
   };
 
   config = lib.mkIf cfg.enable {
+    assertions = [{
+      assertion = (cfg.host == null) == (cfg.secretFile == null);
+      message = "burrow.events: deliveries need both host and secretFile (or neither, for none).";
+    }];
+
     # The repos' hooks are the steward's to keep (autoland/repos.py).
     warnings = lib.optional (!(lib.attrByPath [ "burrow" "autoland" "enable" ] false config)) ''
       burrow.events is on without burrow.autoland, which keeps each repo's
@@ -158,12 +175,13 @@ in
         ExecStart = "${pkgs.python3}/bin/python3 -E -s ${src}/events.py";
         Restart = "always";
         RestartSec = 5;
-        LoadCredential = "webhook:${cfg.secretFile}";
         ProtectSystem = "strict";
         ProtectHome = true;
         PrivateTmp = true;
         NoNewPrivileges = true;
         RestrictAddressFamilies = [ "AF_INET" "AF_INET6" "AF_UNIX" ];
+      } // lib.optionalAttrs hooked {
+        LoadCredential = "webhook:${cfg.secretFile}";
       };
     };
 
@@ -172,11 +190,11 @@ in
     # then give every repo's hook the new one: so the restart waits for any
     # full pass already running, which read the old one and would start
     # nothing new if asked again while it runs.
-    systemd.paths.burrow-events-secret = {
+    systemd.paths.burrow-events-secret = lib.mkIf hooked {
       wantedBy = [ "multi-user.target" ];
       pathConfig.PathChanged = cfg.secretFile;
     };
-    systemd.services.burrow-events-secret = {
+    systemd.services.burrow-events-secret = lib.mkIf hooked {
       description = "burrow-events: restart for a new webhook secret";
       after = map (u: "${u}.service") units;
       path = [ config.systemd.package ];
@@ -218,9 +236,11 @@ in
       });
     '';
 
-    services.nginx.virtualHosts.${cfg.host}.locations.${cfg.path} = {
-      proxyPass = "http://127.0.0.1:${toString cfg.port}";
-      extraConfig = "client_max_body_size 25m;";
+    services.nginx.virtualHosts = lib.mkIf hooked {
+      ${cfg.host}.locations.${cfg.path} = {
+        proxyPass = "http://127.0.0.1:${toString cfg.port}";
+        extraConfig = "client_max_body_size 25m;";
+      };
     };
   };
 }

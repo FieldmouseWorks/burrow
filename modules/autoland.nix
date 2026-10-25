@@ -367,6 +367,10 @@ in
     assertions = [{
       assertion = rv.codex.enable || rv.deepseek.enable;
       message = "burrow.autoland needs a reviewer: turn on burrow.autoland.reviewers.codex or .deepseek.";
+    } {
+      # It keeps every repo's hook, which GitHub's deliveries come in on.
+      assertion = config.burrow.events.host != null;
+      message = "burrow.autoland needs burrow.events.host and .secretFile: GitHub's events reach its passes through them.";
     }];
 
     burrow.proj.enable = true;

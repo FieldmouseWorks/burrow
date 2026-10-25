@@ -147,8 +147,15 @@ def serve(name, h, line, run=subprocess.run, once=False):
     while True:
         ready, wait = line.take(time.time())
         for repo in ready:
+            u = unit(h, repo)
             log(f"{name}: {repo or 'full pass'}")
-            run(["systemctl", "start", unit(h, repo)])
+            # One already running (from before this service started, say)
+            # began before this pass was due, and asking for it again only
+            # waits for that one: so it runs again once that one is done.
+            busy = run(["systemctl", "show", "-P", "ActiveState", u], capture_output=True, text=True).stdout.strip() == "activating"
+            run(["systemctl", "start", u])
+            if busy:
+                run(["systemctl", "start", u])
         if ready and h.get("wake"):
             line.wakes(booked(h["wake"]))
         if once:
@@ -244,15 +251,18 @@ def listen(port, h):
 
 def main():
     cfg = json.load(open(os.environ["EVENTS_CONFIG"]))
-    with open(os.path.join(os.environ.get("CREDENTIALS_DIRECTORY", ""), "webhook")) as f:
-        secret = f.read().strip()
     handlers = cfg["handlers"]
     lines = {name: Line() for name in handlers}
     for line in lines.values():
         line.event(FULL, time.time() - DEBOUNCE)  # catching up
-    listen(cfg["port"], deliveries(handlers, lines, secret))
+    # GitHub's deliveries, where the machine takes them (a host and a secret).
+    if cfg["port"] is not None:
+        with open(os.path.join(os.environ.get("CREDENTIALS_DIRECTORY", ""), "webhook")) as f:
+            secret = f.read().strip()
+        listen(cfg["port"], deliveries(handlers, lines, secret))
+        log(f"deliveries on 127.0.0.1:{cfg['port']}")
     listen(cfg["kickPort"], kicks(lines))
-    log(f"deliveries on 127.0.0.1:{cfg['port']}, kicks on 127.0.0.1:{cfg['kickPort']}: {', '.join(handlers)}")
+    log(f"kicks on 127.0.0.1:{cfg['kickPort']}: {', '.join(handlers)}")
     for name, h in handlers.items():
         threading.Thread(target=serve, args=(name, h, lines[name]), daemon=True).start()
     # The servers and the handlers' lines run until the service stops, with

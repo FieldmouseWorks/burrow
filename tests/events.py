@@ -13,6 +13,7 @@ import os
 import sys
 import tempfile
 import threading
+import types
 import urllib.error
 import urllib.request
 
@@ -143,9 +144,12 @@ h = {"events": [], "unit": "autoland", "wake": wake}
 line = E.Line()
 line.event(E.FULL, 0)
 started = []
+RUNNING = set()  # units already running when asked for
 
 
-def systemctl(cmd):
+def systemctl(cmd, **kw):
+    if cmd[1] == "show":
+        return types.SimpleNamespace(stdout="activating\n" if cmd[-1] in RUNNING else "inactive\n")
     started.append(cmd)
     with open(wake, "w") as f:
         json.dump({"sam/next": 1}, f)  # what the pass booked
@@ -156,6 +160,15 @@ assert started == [["systemctl", "start", "autoland.service"]], started
 assert line.due == {"sam/next": 1}, line.due
 E.serve("autoland", h, line, run=systemctl, once=True)
 assert started[1:] == [["systemctl", "start", "autoland@sam-next.service"]], started
+# A pass already running when its turn comes (from before a restart) began
+# before it was due: asking again only waits for it, so it runs once more.
+started.clear()
+RUNNING.add("autoland.service")
+line = E.Line()
+line.event(E.FULL, 0)
+E.serve("autoland", h, line, run=systemctl, once=True)
+assert started == [["systemctl", "start", "autoland.service"]] * 2, started
+RUNNING.clear()
 print("passes: ok")
 
 # With no handlers the service still runs: exiting would be a restart every
@@ -171,3 +184,16 @@ running.start()
 running.join(2)
 assert running.is_alive(), "burrow-events exited with no handlers"
 print("no handlers: ok")
+
+# With no host, no deliveries: kicks only, and no secret to read.
+with open(f"{tmp}/kicks-only.json", "w") as f:
+    json.dump({"port": None, "kickPort": 0, "handlers": {}}, f)
+os.environ.update(EVENTS_CONFIG=f"{tmp}/kicks-only.json", CREDENTIALS_DIRECTORY=f"{tmp}/none")
+ports = []
+E.listen, listen = (lambda port, h: ports.append(port)), E.listen
+running = threading.Thread(target=E.main, daemon=True)
+running.start()
+running.join(2)
+E.listen = listen
+assert running.is_alive() and ports == [0], ports
+print("kicks only: ok")

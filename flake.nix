@@ -70,7 +70,7 @@
                 (nixpkgs.lib.optionalAttrs (name == "updates") { burrow.updates.origin = "https://github.com/sam/homelab"; })
                 (nixpkgs.lib.optionalAttrs (name == "autoland") { burrow.autoland = { owners = [ "sam" ]; authors = [ "sam" ]; reviewers = { codex.enable = true; deepseek = { enable = true; envFile = "/run/secrets/deepseek-review"; }; }; }; })
                 (nixpkgs.lib.optionalAttrs (name == "house") { burrow.house.owners = [ "sam" ]; })
-                (nixpkgs.lib.optionalAttrs (builtins.elem name [ "events" "proj" "autoland" "updates" ]) { burrow.events = { host = "example.org"; secretFile = "/run/secrets/burrow-webhook"; }; })
+                (nixpkgs.lib.optionalAttrs (builtins.elem name [ "events" "autoland" ]) { burrow.events = { host = "example.org"; secretFile = "/run/secrets/burrow-webhook"; }; })
                 { burrow.${if name == "remote-control" then "remoteControl" else name}.enable = true; }
               ];
             };
