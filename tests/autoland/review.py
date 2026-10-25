@@ -309,7 +309,6 @@ assert queue_and_work("codex")["answer"] == {"findings": [], "summary": "ok"}
 with open(f"{tmp}/cred/deepseek", "w") as f:
     f.write('DEEPSEEK_API_KEY="sk-test-0123456789"\n')
 agent()
-agent_runs()
 
 # A queue entry that can't be read leaves the queue, an error back for it.
 open(f"{tmp}/state/{V.QUEUE}/deepseek--unread.json", "w").close()
@@ -320,6 +319,27 @@ os.remove(f"{tmp}/state/{V.DONE}/deepseek--unread.json")
 # Taken by the service and the sweep at once: whichever comes second finds
 # it gone, and carries on.
 V.remove(f"{tmp}/state/{V.QUEUE}/deepseek--unread.json")
+
+# A review done with and queued again (a retry) while another is still
+# running is taken again, not left until the service next starts.
+agent(dsh={"sleep": 8})
+V.queue("sam/r", snap_pr, "pr-sam_r-5.json", "deepseek")
+V.queue("sam/r", snap_pr, "pr-sam_r-5.json", "codex")
+again = V.item_name("pr-sam_r-5.json", "codex", pr_head)
+entry = open(f"{tmp}/state/{V.QUEUE}/{again}.json").read()
+worker = threading.Thread(target=W.work)
+worker.start()
+while not os.path.exists(f"{tmp}/state/{V.DONE}/{again}.json"):
+    time.sleep(0.1)
+os.remove(f"{tmp}/state/{V.DONE}/{again}.json")
+with open(f"{tmp}/state/{V.QUEUE}/{again}.json", "w") as f:
+    f.write(entry)
+worker.join()
+assert os.listdir(f"{tmp}/state/{V.QUEUE}") == [] and os.path.exists(f"{tmp}/state/{V.DONE}/{again}.json")
+assert sorted(x["agent"] for x in agent_runs()) == ["codex", "codex", "dsh"]
+for x in os.listdir(f"{tmp}/state/{V.DONE}"):
+    os.remove(f"{tmp}/state/{V.DONE}/{x}")
+agent()
 
 # A snapshot that's gone (its head swept away meanwhile) is no review.
 shutil.rmtree(snap)

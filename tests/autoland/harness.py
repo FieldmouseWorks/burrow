@@ -25,13 +25,14 @@ os.makedirs(f"{tmp}/agents")
 for name in ("codex", "dsh"):
     with open(f"{tmp}/agents/{name}", "w") as f:
         f.write(f"""#!{sys.executable}
-import json, os, socket, sys, urllib.parse
+import json, os, socket, sys, time, urllib.parse
 args = sys.argv[1:]
 prompt = sys.stdin.read()
 with open({AGENT_LOG!r}, "a") as f:
     f.write(json.dumps({{"agent": {name!r}, "args": args, "cwd": os.getcwd(), "env": dict(os.environ), "prompt": prompt,
                         "overlay": open(args[args.index("--patch") + 1]).read() if "--patch" in args else None}}) + "\\n")
 do = json.load(open({AGENT!r})).get({name!r}, {{}})
+time.sleep(do.get("sleep", 0))
 for req in do.get("http", []):
     u = urllib.parse.urlsplit(os.environ[req["env"]])
     c = socket.create_connection((u.hostname, u.port))

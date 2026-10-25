@@ -301,14 +301,15 @@ def work():
     the queue is empty (passes may add to it meanwhile)."""
     q = os.path.join(STATE, V.QUEUE)
     pools = {r: ThreadPoolExecutor(CFG["reviewers"][r]["parallel"]) for r in V.NAMES}
-    busy, seen = [], set()
+    # Only what's in hand: a name done with and queued again (a retry, a
+    # second look) is taken again.
+    busy = {}
     while True:
         for name in sorted(os.listdir(q)):
             r = name.partition("--")[0]
-            if name.endswith(".json") and name not in seen and r in pools:
-                seen.add(name)
-                busy.append(pools[r].submit(review, name))
-        busy = [f for f in busy if not f.done()]
+            if name.endswith(".json") and name not in busy and r in pools:
+                busy[name] = pools[r].submit(review, name)
+        busy = {n: f for n, f in busy.items() if not f.done()}
         if not busy:
             break
         time.sleep(5)
