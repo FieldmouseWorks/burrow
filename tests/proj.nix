@@ -487,9 +487,13 @@ pkgs.testers.runNixOSTest {
         # 8 closed, 9's answer still to post; systemd can't be asked, so 8's
         # job can't be stopped.
         github("repos/o/r/issues", json.dumps(issues[1:]))
+        before = int(machine.succeed("date +%s"))
         machine.succeed("su - dev -c 'env -u DBUS_SESSION_BUS_ADDRESS XDG_RUNTIME_DIR=/nonexistent proj-inbox'")
         assert "did This task comes from GitHub issue o/r#9" in machine.succeed("cat /tmp/gh/posted")
         assert "o/r#8" in machine.succeed("su - dev -c 'proj-inbox status'")
+        # Nothing else may come for o/r, so the stop is tried again in five minutes.
+        wake = json.loads(machine.succeed("cat /var/lib/burrow/proj-inbox/wake.json"))
+        assert before + 300 <= wake.get("o/r", 0) <= int(machine.succeed("date +%s")) + 300, wake
         machine.succeed("su - dev -c proj-inbox")
         assert "o/r#8" not in machine.succeed("su - dev -c 'proj-inbox status'")
 

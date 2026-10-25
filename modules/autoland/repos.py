@@ -117,7 +117,8 @@ def hook(repo, st, due):
     the repo starts its handlers' passes within seconds. Set again when its
     URL, events or secret change, and with the daily settings, in case it was
     deleted or edited. GitHub never gives the secret back, so it's known by a
-    hash. A status run has neither the secret (only the services get it)
+    hash. The hook is the one with the id it was given, so a new URL moves
+    it rather than leaving the old one sending. A status run has neither the secret (only the services get it)
     nor anything to change, so it leaves the hook alone."""
     if DRY:
         return
@@ -131,15 +132,18 @@ def hook(repo, st, due):
         return  # tried again on the next full pass
     body = json.dumps({"active": True, "events": wh["events"],
                        "config": {"url": wh["url"], "content_type": "json", "secret": secret, "insecure_ssl": "0"}})
-    mine = [x for x in hooks if (x.get("config") or {}).get("url") == wh["url"]]
+    mine = ([x for x in hooks if x.get("id") == st.get("hookId")]
+            or [x for x in hooks if (x.get("config") or {}).get("url") == wh["url"]])
     if mine:
         done = C.write("api", "-X", "PATCH", f"repos/{repo}/hooks/{mine[0]['id']}", "--input", "-", input=body, check=False)
+        made = mine[0]["id"]
     else:
         log(f"{repo}: adding the webhook")
         done = C.write("api", "-X", "POST", f"repos/{repo}/hooks", "--input", "-",
                        input=json.dumps({"name": "web", **json.loads(body)}), check=False)
+        made = done.get("id") if isinstance(done, dict) else None
     if done is not None:
-        st["hook"] = want
+        st["hook"], st["hookId"] = want, made
         save(f"repo-{repo.replace('/', '_')}.json", st)
 
 

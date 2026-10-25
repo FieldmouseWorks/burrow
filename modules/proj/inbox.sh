@@ -92,9 +92,12 @@ book() { # repo at
 # minutes. The journal says so each time; one missed for an hour tells the
 # owner.
 unreached=()
+# Something about the repo didn't get done (a job that didn't start or
+# stop): it's looked at again in five minutes, since nothing else may come.
+retry() { book "$1" $(($(date +%s) + 300)); }
 miss() {
   unreached+=("$1")
-  book "$1" $(($(date +%s) + 300))
+  retry "$1"
 }
 
 # One project per GitHub repo: the folder itself, never a linked worktree of it
@@ -137,7 +140,7 @@ for repo in "${!project[@]}"; do
     allowed "$(jq -r .user.login <<<"$issue")" || continue
     # Comments already there are part of the task; replies after this are turns.
     comments=$(gh api "repos/$repo/issues/$n/comments" --paginate --slurp | jq 'add // []') || { miss "$repo"; continue; }
-    id=$(proj run --first "${vm[@]}" --kick "proj-inbox/$repo" "$p" "$(task "$repo" "$issue" "$comments")") || continue
+    id=$(proj run --first "${vm[@]}" --kick "proj-inbox/$repo" "$p" "$(task "$repo" "$issue" "$comments")") || { retry "$repo"; continue; }
     mkdir -p "$d"
     echo "$repo#$n" >"$d/issue"
     echo "$id" >"$d/job"
@@ -187,9 +190,9 @@ for repo in "${!project[@]}"; do
 
     # Closed, or the label taken off: done with it, and so is its job, which
     # nothing it awaits brings back. A job that couldn't be stopped (proj stop
-    # says why) is tried again next pass; the rest are still seen to.
+    # says why) is tried again in five minutes; the rest are still seen to.
     if ! jq -e --argjson n "$n" 'any(.[]; .number == $n)' <<<"$open" >/dev/null; then
-      proj stop "$id" || continue
+      proj stop "$id" || { retry "$repo"; continue; }
       rm -rf "$d"
       continue
     fi
@@ -221,7 +224,7 @@ for repo in "${!project[@]}"; do
         [ ! -s "$JOBS/$id/session" ] || continue
         # No session to continue (the first turn never got going): start over,
         # from the issue as it stands, replies and all.
-        id=$(proj run --first "${vm[@]}" --kick "proj-inbox/$repo" "$p" "$(task "$repo" "$now" "$comments")") || continue
+        id=$(proj run --first "${vm[@]}" --kick "proj-inbox/$repo" "$p" "$(task "$repo" "$now" "$comments")") || { retry "$repo"; continue; }
         echo "$id" >"$d/job"
         echo 0 >"$d/answered"
       fi

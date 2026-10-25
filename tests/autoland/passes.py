@@ -178,6 +178,14 @@ with open(f"{tmp}/cred/webhook", "w") as f:
 R.hook("sam/r", st, False)
 assert [x for x in WROTE if "PATCH repos/sam/r/hooks/9" in x] and not [x for x in WROTE if "POST" in x], WROTE
 assert SENT[-1]["config"]["secret"] == "new-secret", SENT
+# A new URL moves the hook it made, by its id, rather than adding another.
+assert st["hookId"] == 9, st
+WROTE.clear()
+S.CFG["webhook"] = {**S.CFG["webhook"], "url": "https://new.example.org/burrow/hook"}
+R.hook("sam/r", st, False)
+assert [x for x in WROTE if "PATCH repos/sam/r/hooks/9" in x] and not [x for x in WROTE if "POST" in x], WROTE
+assert SENT[-1]["config"]["url"] == "https://new.example.org/burrow/hook", SENT
+S.CFG["webhook"] = {**S.CFG["webhook"], "url": "https://example.org/burrow/hook"}
 # A status run, from a shell without the services' credentials, leaves the
 # hook alone instead of failing on the secret.
 cred = os.environ["CREDENTIALS_DIRECTORY"]
