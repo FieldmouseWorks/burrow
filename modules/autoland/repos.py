@@ -2,6 +2,7 @@
 daily branch sweep, and the one issue that lists what waits for the owner."""
 
 import fnmatch
+import hashlib
 import json
 import os
 import subprocess
@@ -74,6 +75,7 @@ def settle_repo(r, known):
             log(f"{repo}: labels {', '.join(want)}")
             st["labels"] = want
             save(f"repo-{repo.replace('/', '_')}.json", st)
+    hook(repo, st, due)
     # A repo seen for the first time has no state yet, so it's settled now.
     if not due:
         return new
@@ -110,6 +112,34 @@ def settle_repo(r, known):
     return new
 
 
+def hook(repo, st, due):
+    """The repo's webhook to burrow-events (../events.nix): what happens on
+    the repo starts its handlers' passes within seconds. Set again when its
+    URL, events or secret change, and with the daily settings, in case it was
+    deleted or edited. GitHub never gives the secret back, so it's known by a
+    hash."""
+    wh = CFG["webhook"]
+    secret = C.webhook_secret()
+    want = hashlib.sha256(json.dumps([wh["url"], wh["events"], secret]).encode()).hexdigest()[:16]
+    if st.get("hook") == want and not due:
+        return
+    hooks = C.gh("api", f"repos/{repo}/hooks", check=False)
+    if not isinstance(hooks, list):
+        return  # tried again on the next full pass
+    body = json.dumps({"active": True, "events": wh["events"],
+                       "config": {"url": wh["url"], "content_type": "json", "secret": secret, "insecure_ssl": "0"}})
+    mine = [x for x in hooks if (x.get("config") or {}).get("url") == wh["url"]]
+    if mine:
+        done = C.write("api", "-X", "PATCH", f"repos/{repo}/hooks/{mine[0]['id']}", "--input", "-", input=body, check=False)
+    else:
+        log(f"{repo}: adding the webhook")
+        done = C.write("api", "-X", "POST", f"repos/{repo}/hooks", "--input", "-",
+                       input=json.dumps({"name": "web", **json.loads(body)}), check=False)
+    if done is not None:
+        st["hook"] = want
+        save(f"repo-{repo.replace('/', '_')}.json", st)
+
+
 def delete_branch(repo, name, sha):
     """Delete the branch only if its tip is still `sha`: a push since then
     keeps it (git's lease; the REST API has no conditional delete)."""
@@ -125,10 +155,13 @@ def delete_branch(repo, name, sha):
             log(f"{repo}: kept {name}: {p.stderr.strip()[:200]}")
 
 
-def sweep_branches(r, open_heads, digest):
+def sweep_branches(r, open_heads, digest, sweep=True):
+    """Delete the merged branches and list the stale ones, once a day and
+    only when `sweep`; the stale ones the last sweep found are listed every
+    time."""
     repo = r["repo"]
     st = load(f"repo-{repo.replace('/', '_')}.json", {})
-    if C.NOW - st.get("branches", 0) < 86400:
+    if not sweep or C.NOW - st.get("branches", 0) < 86400:
         for b in st.get("stale", []):
             digest.append(("Stale branches (unmerged, no PR, 30+ days)", f"{repo}: `{b}`", ""))
         return

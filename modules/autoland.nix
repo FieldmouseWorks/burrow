@@ -61,6 +61,14 @@ let
       deepseek = true;
     };
     repos = cfg.repos;
+    # Every repo's hook to burrow-events (repos.py), with what each of its
+    # handlers takes.
+    webhook = {
+      inherit (config.burrow.events) url;
+      events = config.burrow.events.hookEvents;
+    };
+    # For DeepSeek's reviews coming back (deepseek.py).
+    kick = "${config.burrow.events.kick}/autoland";
     deepseek = {
       inherit (cfg.deepseek) enable baseUrl effort skipPaths maxDiffChars parallel;
       # Its thinking counts against this too, and at max effort a real PR
@@ -93,6 +101,7 @@ let
     cp ${./autoland/common.py} $out/common.py
     cp ${./autoland/deepseek.py} $out/deepseek.py
     cp ${./autoland/repos.py} $out/repos.py
+    cp ${./autoland/tasks.py} $out/tasks.py
     flake8 --ignore E501,W503 $out
   '';
   # The command, with this machine's config, so `autoland-steward status`
@@ -107,6 +116,7 @@ in
     (import ./common.nix inputs)
     { key = "burrow/notify"; imports = [ (import ./notify.nix inputs) ]; }
     { key = "burrow/proj"; imports = [ (import ./proj.nix inputs) ]; }
+    { key = "burrow/events"; imports = [ (import ./events.nix inputs) ]; }
   ];
 
   options.burrow.autoland = {
@@ -144,12 +154,6 @@ in
       '';
     };
 
-    every = mkOption {
-      type = types.str;
-      default = "5min";
-      description = "Time between passes (after one ends).";
-    };
-
     rounds = mkOption {
       type = types.ints.positive;
       default = 5;
@@ -171,7 +175,7 @@ in
 
     handoffAfterMinutes = mkOption {
       type = types.ints.positive;
-      default = 30;
+      default = 10;
       description = ''
         How long open findings or red CI sit with nobody pushing or replying
         before a Claude job on this machine takes them. Usually the session
@@ -181,7 +185,7 @@ in
 
     settleDelayMinutes = mkOption {
       type = types.ints.positive;
-      default = 3;
+      default = 1;
       description = "How long a new head sits still before Codex is asked, so a burst of pushes gets one review.";
     };
 
@@ -347,46 +351,61 @@ in
 
     environment.systemPackages = [ steward ];
 
-    systemd.services.autoland = {
-      description = "autoland: settle and merge every PR, keep every repo at the baseline";
+    # Every PR's pass comes from what happens to it (burrow.events): a push, a
+    # review, a comment or CI finishing on it starts its repo's pass
+    # (autoland@OWNER-REPO), and so do a Claude job's turn ending and DeepSeek's
+    # review coming back. A pass that waits on time (a new head's settle
+    # delay, a reviewer's timeout) books its repo's next one in wake.json.
+    # The full pass (settings, new repos, branches) is burrow-events'
+    # catch-up, when it starts and hourly.
+    burrow.events.handlers.autoland = {
+      # The PR itself (opened, ready, labels, retargeted), pushes, reviews and
+      # their threads, comments (Codex's summary), CI finishing, and commit
+      # statuses (a proof's verdict).
+      events = [ "push" "pull_request" "pull_request_review" "pull_request_review_comment"
+        "pull_request_review_thread" "issue_comment" "check_suite" "status" ];
+      unit = "autoland";
+      wake = "${stateDir}/autoland/wake.json";
+    };
+    systemd.services = lib.genAttrs [ "autoland" "autoland@" ] (name: {
+      description = if name == "autoland"
+        then "autoland: settle and merge every PR, keep every repo at the baseline"
+        else "autoland: settle and merge the PRs of %I";
       after = [ "network-online.target" ];
       wants = [ "network-online.target" ];
       path = [ pkgs.gh pkgs.git pkgs.coreutils config.burrow.tools.proj ];
       serviceConfig = {
         Type = "oneshot";
         User = user;
-        ExecStart = "${steward}/bin/autoland-steward${lib.optionalString cfg.dryRun " status"}";
+        ExecStart = "${steward}/bin/autoland-steward"
+          + (if cfg.dryRun then " status" else lib.optionalString (name == "autoland@") " kick %I");
         TimeoutStartSec = "20min";
         Nice = 10;
+        # For the repos' hooks (repos.py).
+        LoadCredential = "webhook:${config.burrow.events.secretFile}";
       };
-    };
-    # The DeepSeek reviews the passes queue, as soon as there are any.
-    systemd.services.autoland-deepseek = lib.mkIf (cfg.deepseek.enable && !cfg.dryRun) {
-      description = "autoland: DeepSeek's reviews of the queued PR heads";
-      after = [ "network-online.target" ];
-      wants = [ "network-online.target" ];
-      path = [ pkgs.gh pkgs.coreutils ];
-      serviceConfig = {
-        Type = "oneshot";
-        User = user;
-        ExecStart = "${steward}/bin/autoland-steward deepseek";
-        # However long DeepSeek thinks: each read has its own timeout, and the
-        # API keeps a long call alive.
-        TimeoutStartSec = "infinity";
-        Nice = 10;
-        LoadCredential = "deepseek:${cfg.deepseek.envFile}";
+    }) // {
+      # The DeepSeek reviews the passes queue, as soon as there are any.
+      autoland-deepseek = lib.mkIf (cfg.deepseek.enable && !cfg.dryRun) {
+        description = "autoland: DeepSeek's reviews of the queued PR heads";
+        after = [ "network-online.target" ];
+        wants = [ "network-online.target" ];
+        path = [ pkgs.gh pkgs.coreutils ];
+        serviceConfig = {
+          Type = "oneshot";
+          User = user;
+          ExecStart = "${steward}/bin/autoland-steward deepseek";
+          # However long DeepSeek thinks: each read has its own timeout, and the
+          # API keeps a long call alive.
+          TimeoutStartSec = "infinity";
+          Nice = 10;
+          LoadCredential = "deepseek:${cfg.deepseek.envFile}";
+        };
       };
     };
     systemd.paths.autoland-deepseek = lib.mkIf (cfg.deepseek.enable && !cfg.dryRun) {
       wantedBy = [ "paths.target" ];
       pathConfig.DirectoryNotEmpty = "${stateDir}/autoland/ds-queue";
-    };
-    systemd.timers.autoland = {
-      wantedBy = [ "timers.target" ];
-      timerConfig = {
-        OnBootSec = "5min";
-        OnUnitInactiveSec = cfg.every;
-      };
     };
 
     systemd.tmpfiles.settings.burrow = lib.genAttrs
@@ -403,7 +422,7 @@ in
       ## Pull requests
 
       Every repo of ${lib.concatStringsSep ", " cfg.owners} merges its PRs on its own, through the
-      steward (`autoland`, every ${cfg.every}). Open PRs ready for review, never as drafts (a
+      steward (`autoland`, on every change to a PR). Open PRs ready for review, never as drafts (a
       draft is left alone until it's ready), then leave them be:
 
       - The steward asks Codex for a review${dsAlso}. Fix or answer every finding (reply on

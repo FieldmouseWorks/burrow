@@ -32,7 +32,7 @@
         key = "burrow/${name}";
         imports = [ (import ./modules/${name}.nix inputs) ];
       };
-      names = [ "claude" "undo" "switch" "notify" "updates" "proj" "remote-control" "agents" "robot" "ops" "toolbox" "autoland" "house" ];
+      names = [ "claude" "undo" "switch" "notify" "updates" "proj" "remote-control" "agents" "robot" "ops" "toolbox" "autoland" "house" "events" ];
     in
     {
       # A project's dev shell and gate in a few lines; see lib/project.nix.
@@ -70,6 +70,7 @@
                 (nixpkgs.lib.optionalAttrs (name == "updates") { burrow.updates.origin = "https://github.com/sam/homelab"; })
                 (nixpkgs.lib.optionalAttrs (name == "autoland") { burrow.autoland = { owners = [ "sam" ]; authors = [ "sam" ]; deepseek = { enable = true; envFile = "/run/secrets/deepseek-review"; }; }; })
                 (nixpkgs.lib.optionalAttrs (name == "house") { burrow.house.owners = [ "sam" ]; })
+                (nixpkgs.lib.optionalAttrs (builtins.elem name [ "events" "proj" "autoland" "updates" ]) { burrow.events = { host = "example.org"; secretFile = "/run/secrets/burrow-webhook"; }; })
                 { burrow.${if name == "remote-control" then "remoteControl" else name}.enable = true; }
               ];
             };
@@ -79,11 +80,19 @@
         agents = import ./tests/agents.nix { inherit self pkgs; };
         # proj's queue and memory caps, with a stand-in for Claude.
         proj = import ./tests/proj.nix { inherit self pkgs; };
-        # The steward's DeepSeek reviewer, with stand-ins for gh and the API,
+        # The steward, with stand-ins for gh, Claude jobs and DeepSeek's API,
         # and its one-way paths as the module sets them.
         autoland = pkgs.runCommand "autoland-check" { nativeBuildInputs = [ pkgs.python3 pkgs.git ]; } ''
-          python3 -I ${./tests/autoland.py} ${./modules/autoland}/steward.py \
+          python3 -I ${./tests/autoland}/check.py ${./modules/autoland}/steward.py \
             ${pkgs.writeText "one-way.json" (builtins.toJSON self.nixosConfigurations.example.config.burrow.autoland.oneWay)}
+          touch $out
+        '';
+        # burrow-events for real: deliveries, kicks and wake-ups starting a
+        # handler's units through polkit.
+        events-service = import ./tests/events.nix { inherit self pkgs; };
+        # Which deliveries and kicks start whose pass, with a stand-in for systemctl.
+        events = pkgs.runCommand "events-check" { nativeBuildInputs = [ pkgs.python3 ]; } ''
+          python3 -I ${./tests/events.py} ${./modules/events}/events.py
           touch $out
         '';
         # Which Renovate PRs renovate-sweep hands over and lists, with stand-ins for gh and proj.

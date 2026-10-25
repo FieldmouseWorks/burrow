@@ -3,9 +3,12 @@
 # job's answer goes back to the issue as a comment, and a reply there from one
 # of AUTHORS continues the same job (proj reply). Closing the issue or taking
 # the label off ends it; a turn still running gets its answer posted first.
-# Runs every few minutes from a timer (../proj.nix); `proj-inbox status` shows
-# which issue is which job. SRC, JOBS, STATE, SCRATCH, LABEL, AUTHORS, VM,
-# HOST, NOTIFY and MARK come from ../proj.nix.
+# `proj-inbox [OWNER/REPO]` looks at that repo's issues, or every project's;
+# burrow-events (../events.nix) runs it on the repo's issue events, each time
+# one of its jobs' turns ends (proj run --kick), and when a wait it booked in
+# WAKE ends. `proj-inbox status` shows which issue is which job. SRC, JOBS,
+# STATE, SCRATCH, LABEL, AUTHORS, VM, HOST, NOTIFY, MARK and WAKE come from
+# ../proj.nix.
 #
 # The inbox posts as the gh login, which is usually the owner's own account,
 # so its own comments carry MARK and are never read back as replies. Jobs are
@@ -76,10 +79,23 @@ don't go and read it. $(rules "$1" "$n") If you change code, open a PR (ready fo
 description says \"Fixes #$n\" (or \"Refs #$n\" if it doesn't settle the issue)."
 }
 
-# Repos GitHub couldn't be asked about this pass. A pass that misses some says
-# so in the journal; one that keeps missing for an hour tells the owner.
+only=${1:-}
+
+# When a repo needs another look, as this pass works out: a reply not yet old
+# enough to hand on, a repo GitHub couldn't be asked about.
+declare -A wake
+book() { # repo at
+  if [ -z "${wake[$1]:-}" ] || [ "$2" -lt "${wake[$1]}" ]; then wake[$1]=$2; fi
+}
+
+# Repos GitHub couldn't be asked about this pass: looked at again in five
+# minutes. The journal says so each time; one missed for an hour tells the
+# owner.
 unreached=()
-miss() { unreached+=("$1"); }
+miss() {
+  unreached+=("$1")
+  book "$1" $(($(date +%s) + 300))
+}
 
 # One project per GitHub repo: the folder itself, never a linked worktree of it
 # (.git is a file there) or a second clone.
@@ -92,7 +108,10 @@ for d in "$SRC"/*/; do
   [ -n "${project[$repo]:-}" ] || project[$repo]=$(basename "$d")
 done
 
+looked=()
 for repo in "${!project[@]}"; do
+  [ -z "$only" ] || [ "$repo" = "$only" ] || continue
+  looked+=("$repo")
   p=${project[$repo]}
   key=${repo//\//_}
   # The label, so it's there to pick on the phone. Once per repo.
@@ -117,7 +136,7 @@ for repo in "${!project[@]}"; do
     allowed "$(jq -r .user.login <<<"$issue")" || continue
     # Comments already there are part of the task; replies after this are turns.
     comments=$(gh api "repos/$repo/issues/$n/comments" --paginate --slurp | jq 'add // []') || { miss "$repo"; continue; }
-    id=$(proj run --first "${vm[@]}" "$p" "$(task "$repo" "$issue" "$comments")") || continue
+    id=$(proj run --first "${vm[@]}" --kick "proj-inbox/$repo" "$p" "$(task "$repo" "$issue" "$comments")") || continue
     mkdir -p "$d"
     echo "$repo#$n" >"$d/issue"
     echo "$id" >"$d/job"
@@ -179,8 +198,13 @@ for repo in "${!project[@]}"; do
     # can show an issue open for a few seconds after it closed. So the issue
     # is asked for again too, before the reply is handed on.
     seen=$(cat "$d/seen")
-    comments=$(gh api "repos/$repo/issues/$n/comments" --paginate --slurp |
-      jq --arg before "$(date -u -d '1 minute ago' +%Y-%m-%dT%H:%M:%SZ)" 'add // [] | map(select(.created_at < $before))') || { miss "$repo"; continue; }
+    all=$(gh api "repos/$repo/issues/$n/comments" --paginate --slurp | jq 'add // []') || { miss "$repo"; continue; }
+    before=$(date -u -d '1 minute ago' +%Y-%m-%dT%H:%M:%SZ)
+    comments=$(jq --arg before "$before" 'map(select(.created_at < $before))' <<<"$all")
+    # A newer one is handed on once it's a minute old.
+    young=$(jq -r --argjson seen "$seen" --arg before "$before" '
+      [.[] | select(.id > $seen and .created_at >= $before) | .created_at | fromdateiso8601] | min // empty' <<<"$all")
+    [ -z "$young" ] || book "$repo" $((young + 61))
     msg=$(jq -r --argjson seen "$seen" --arg mark "$MARK" --arg authors "$AUTHORS" '
       ($authors | split(" ")) as $ok
       | [.[] | select(.id > $seen and (.body | contains($mark) | not) and (.user.login as $u | $ok | index($u)))]
@@ -196,7 +220,7 @@ for repo in "${!project[@]}"; do
         [ ! -s "$JOBS/$id/session" ] || continue
         # No session to continue (the first turn never got going): start over,
         # from the issue as it stands, replies and all.
-        id=$(proj run --first "${vm[@]}" "$p" "$(task "$repo" "$now" "$comments")") || continue
+        id=$(proj run --first "${vm[@]}" --kick "proj-inbox/$repo" "$p" "$(task "$repo" "$now" "$comments")") || continue
         echo "$id" >"$d/job"
         echo 0 >"$d/answered"
       fi
@@ -205,18 +229,37 @@ for repo in "${!project[@]}"; do
   done
 done
 
+# The wake-ups, in place of the ones the repos looked at had.
+if [ -n "$WAKE" ]; then
+  { jq -c --argjson now "$(date +%s)" --args 'with_entries(select(.value > $now and (.key | IN($ARGS.positional[]) | not)))' \
+    "${looked[@]}" <"$WAKE" 2>/dev/null || echo '{}'
+    for r in "${!wake[@]}"; do jq -cn --arg r "$r" --argjson at "${wake[$r]}" '{($r): $at}'; done
+  } | jq -s 'add // {}' >"$WAKE.new" && mv -f "$WAKE.new" "$WAKE"
+fi
+
+# Since when each repo has been out of reach, until a pass reaches it again.
+for repo in "${looked[@]}"; do
+  f=$STATE/.unreached-${repo//\//_}
+  if printf '%s\n' "${unreached[@]}" | grep -qxF "$repo"; then
+    [ -e "$f" ] || date +%s >"$f"
+  else
+    rm -f "$f"
+  fi
+done
+
 # Not a failed unit: one would read as a broken update in the health check
 # after a switch. The journal says it every pass, the owner after an hour.
-if [ ${#unreached[@]} -gt 0 ]; then
-  echo "couldn't reach GitHub for ${unreached[*]}; trying again next pass" >&2
-  [ -e "$STATE/.unreached-since" ] || date +%s >"$STATE/.unreached-since"
-  if [ -n "$NOTIFY" ] && [ $(($(date +%s) - $(cat "$STATE/.unreached-since"))) -gt 3600 ]; then
-    "$NOTIFY" open proj-inbox "proj-inbox can't reach GitHub" \
-      "For over an hour, proj-inbox on $HOST hasn't been able to read or comment on issues in: $(printf '%s\n' "${unreached[@]}" | sort -u | paste -sd' '). Issues labelled \`$LABEL\` there wait until it can. \`journalctl -u proj-inbox\` has the errors (a rate limit, often)."
-  fi
-else
-  rm -f "$STATE/.unreached-since"
-  # Every clean pass: a close that didn't get through is tried again, and
-  # with nothing open it's a no-op that doesn't ask GitHub.
+[ ${#unreached[@]} = 0 ] || echo "couldn't reach GitHub for ${unreached[*]}; trying again in five minutes" >&2
+long=()
+for f in "$STATE"/.unreached-*; do
+  [ -e "$f" ] || continue
+  [ $(($(date +%s) - $(cat "$f"))) -le 3600 ] || long+=("${f##*/.unreached-}")
+done
+if [ ${#long[@]} -gt 0 ]; then
+  [ -z "$NOTIFY" ] || "$NOTIFY" open proj-inbox "proj-inbox can't reach GitHub" \
+    "For over an hour, proj-inbox on $HOST hasn't been able to read or comment on issues in: $(printf '%s\n' "${long[@]}" | sed 's#_#/#' | sort | paste -sd' '). Issues labelled \`$LABEL\` there wait until it can. \`journalctl -u 'proj-inbox*'\` has the errors (a rate limit, often)."
+elif ! compgen -G "$STATE/.unreached-*" >/dev/null; then
+  # Every pass that reaches everything: a close that didn't get through is
+  # tried again, and with nothing open it's a no-op that doesn't ask GitHub.
   [ -z "$NOTIFY" ] || "$NOTIFY" close proj-inbox "proj-inbox reaches GitHub again."
 fi

@@ -1,5 +1,5 @@
 """What every part of the steward shares: its settings, gh, its state files,
-and Claude jobs. Calls that touch the outside (gh, write, job, me) are used
+and Claude jobs. Calls that touch the outside (gh, write, job, kick, me) are used
 as `C.gh(...)` and so on, so a test can stand in for them in one place."""
 
 import hashlib
@@ -10,6 +10,7 @@ import re
 import subprocess
 import sys
 import time
+import urllib.request
 from datetime import datetime
 
 CFG = json.load(open(os.environ["AUTOLAND_CONFIG"]))
@@ -128,6 +129,39 @@ def ts(s):
     return datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp() if s else 0
 
 
+# When each repo's PRs next need a pass, as this pass worked out: a wait that
+# ends then (a new head's settle delay, a reviewer's timeout, the time left
+# before a Claude job takes its findings). Saved to wake.json, where
+# burrow-events (../events/events.py) reads it and starts that repo's pass
+# then.
+WAKE = {}
+
+
+def wake(repo, at):
+    """Ask for a pass of repo at `at`, if that's still to come."""
+    if at > NOW:
+        WAKE[repo] = min(WAKE.get(repo, at), at)
+
+
+def webhook_secret():
+    """The secret GitHub signs the webhook's deliveries with (burrow-events
+    checks them; repos.py gives it to each repo's hook)."""
+    with open(os.path.join(os.environ.get("CREDENTIALS_DIRECTORY", ""), "webhook")) as f:
+        return f.read().strip()
+
+
+def kick(repo):
+    """Start the repo's pass now (burrow-events), for something it would find
+    that GitHub sends no event for. Best effort: the hourly catch-up is there
+    for one that doesn't get through."""
+    if DRY:
+        return
+    try:
+        urllib.request.urlopen(urllib.request.Request(f"{CFG['kick']}/{repo}", data=b"", method="POST"), timeout=5).close()
+    except OSError as e:
+        log(f"{repo}: couldn't kick its pass: {e}")
+
+
 def load(name, default):
     try:
         return json.load(open(os.path.join(STATE, name)))
@@ -182,7 +216,8 @@ def job(repo, task, clone=False):
     if DRY:
         log(f"  would: proj run {d} ...")
         return "dry"
-    p = subprocess.run([CFG["proj"], "run", d, task], capture_output=True, text=True)
+    # Each of its turns that ends starts the repo's pass, which reads what it did.
+    p = subprocess.run([CFG["proj"], "run", "--kick", f"autoland/{repo}", d, task], capture_output=True, text=True)
     return p.stdout.strip() or None
 
 

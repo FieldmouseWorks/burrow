@@ -10,7 +10,7 @@ unless you need the second.
 ```
 claude.ai project chat                   GitHub                  the box
 ──────────────────────                   ──────                  ──────────────────────
-thread ── issue labelled `claude` ──▶ the project's repo ◀── proj-inbox (every 3 min)
+thread ── issue labelled `claude` ──▶ the project's repo ──▶ proj-inbox (on its webhook)
        ◀── answer as a comment ─────                     ──▶ proj run / proj reply
 
 thread ── Remote Control (one tap) ───────────────────────────▶ claude-rc@PROJECT
@@ -25,7 +25,7 @@ jobs.
 - **Start:** open an issue in the project's own GitHub repo (one checked out in
   `burrow.projectsDir`) with the label `claude` (`inbox.label`), as one of
   `inbox.authors`. Put the whole brief in the body: the job knows only the
-  issue. Within a few minutes it's a `proj run` job in that project, and the
+  issue. Within seconds it's a `proj run` job in that project, and the
   issue gets an "On it" comment naming the job.
 - **Answer:** when the job finishes a turn, its answer is posted to the issue.
 - **Follow-ups:** reply on the issue. Replies from `inbox.authors` go to the

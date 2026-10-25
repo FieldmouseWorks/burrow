@@ -377,7 +377,7 @@ def run_deepseek(repo, pr):
 
 def review_queued(name):
     """One queued review: posted, or what went wrong left in DONE for the
-    next pass. Gone from the queue either way."""
+    repo's pass, which it kicks. Gone from the queue either way."""
     item = load(f"{QUEUE}/{name}", None)
     repo, n = (item or {}).get("repo"), (item or {}).get("number")
     try:
@@ -401,6 +401,8 @@ def review_queued(name):
             os.remove(os.path.join(STATE, QUEUE, name))
         except OSError:
             pass
+        if isinstance(repo, str):
+            C.kick(repo)
 
 
 def deepseek_queue():

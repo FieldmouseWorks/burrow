@@ -3,18 +3,22 @@
 # burrow.projectsDir/PROJECT, and keep everything they said in jobsDir.
 # With proj.inbox, issues labelled for Claude in the projects' GitHub repos
 # become jobs too (proj/inbox.sh). A job waiting on a PR doesn't hold a slot:
-# proj-watch resumes it when the PR changes.
+# proj-watch resumes it when the PR changes. Both are burrow.events handlers:
+# a repo's webhook deliveries, the end of a turn and their own wake-ups start
+# them, never a timer.
 inputs:
 { config, lib, pkgs, ... }:
 let
   cfg = config.burrow.proj;
   # What marks proj-inbox's own comments on an issue: never a reply, never news.
   inboxMark = "<!-- proj-inbox -->";
-  inherit (config.burrow) user projectsDir;
+  inherit (config.burrow) user projectsDir stateDir;
+  watchWake = "${stateDir}/proj-watch/wake.json";
+  inboxWake = "${stateDir}/proj-inbox/wake.json";
 
   proj = pkgs.writeShellApplication {
     name = "proj";
-    runtimeInputs = [ pkgs.coreutils pkgs.findutils pkgs.gnugrep pkgs.gawk pkgs.jq pkgs.systemd pkgs.util-linux pkgs.bashInteractive ];
+    runtimeInputs = [ pkgs.coreutils pkgs.findutils pkgs.gnugrep pkgs.gnused pkgs.gawk pkgs.jq pkgs.curl pkgs.systemd pkgs.util-linux pkgs.bashInteractive ];
     text = ''
       SRC=${lib.escapeShellArg projectsDir}
       JOBS=${lib.escapeShellArg cfg.jobsDir}
@@ -27,6 +31,8 @@ let
       AWAIT_HOURS=${toString cfg.awaitHours}
       GH=${lib.getExe cfg.gh}
       MARK=${lib.escapeShellArg inboxMark}
+      KICK=${lib.escapeShellArg config.burrow.events.kick}
+      WAKE=${lib.escapeShellArg watchWake}
     '' + builtins.readFile ./proj/proj.sh;
   };
 
@@ -36,7 +42,7 @@ let
     text = ''
       SRC=${lib.escapeShellArg projectsDir}
       JOBS=${lib.escapeShellArg cfg.jobsDir}
-      STATE=${lib.escapeShellArg "${config.burrow.stateDir}/proj-inbox"}
+      STATE=${lib.escapeShellArg "${stateDir}/proj-inbox"}
       SCRATCH=${lib.escapeShellArg config.burrow.scratchDir}
       LABEL=${lib.escapeShellArg cfg.inbox.label}
       AUTHORS=${lib.escapeShellArg (lib.concatStringsSep " " cfg.inbox.authors)}
@@ -44,11 +50,15 @@ let
       MARK=${lib.escapeShellArg inboxMark}
       HOST=${lib.escapeShellArg config.networking.hostName}
       NOTIFY=${lib.escapeShellArg (lib.optionalString (config.burrow.tools ? notify) (lib.getExe config.burrow.tools.notify))}
+      WAKE=${lib.escapeShellArg inboxWake}
     '' + builtins.readFile ./proj/inbox.sh;
   };
 in
 {
-  imports = [ (import ./common.nix inputs) ];
+  imports = [
+    (import ./common.nix inputs)
+    { key = "burrow/events"; imports = [ (import ./events.nix inputs) ]; }
+  ];
 
   options.burrow.proj = {
     enable = lib.mkEnableOption "proj, background Claude jobs in each project";
@@ -104,11 +114,6 @@ in
         change before it's resumed anyway, told so.
       '';
     };
-    watchEvery = lib.mkOption {
-      type = lib.types.str;
-      default = "*:0/3";
-      description = "How often proj-watch looks at what waiting jobs await (a systemd OnCalendar).";
-    };
     gh = lib.mkOption {
       type = lib.types.package;
       default = pkgs.gh;
@@ -143,11 +148,6 @@ in
         default = false;
         description = "Run issue jobs in agent sandboxes (proj run --vm) instead of on the machine.";
       };
-      every = lib.mkOption {
-        type = lib.types.str;
-        default = "*:0/3";
-        description = "How often the inbox looks at the repos (a systemd OnCalendar).";
-      };
     };
   };
 
@@ -158,24 +158,32 @@ in
     # Jobs are units in the user's systemd manager, so they outlive the session
     # that started them.
     users.users.${user}.linger = lib.mkDefault true;
-    systemd.tmpfiles.rules = [ "d ${cfg.jobsDir} 0755 ${user} ${config.users.users.${user}.group} -" ];
 
     # Jobs that ended their turn waiting on GitHub (proj await) get the next
-    # one when what they wait on changes, so waiting holds no slot.
-    systemd.services.proj-watch = {
-      description = "Resume proj jobs whose awaited PRs and issues changed";
+    # one when what they wait on changes, so waiting holds no slot. A PR's or
+    # issue's events start the look at its repo (proj-watch@OWNER-REPO), and so
+    # does the end of a turn that awaits it; the deadline is booked in its
+    # wake file.
+    burrow.events.enable = true;
+    burrow.events.handlers.proj-watch = {
+      events = [ "pull_request" "pull_request_review" "pull_request_review_comment" "issue_comment" "issues" "check_suite" "status" ];
+      unit = "proj-watch";
+      wake = watchWake;
+    };
+    systemd.services = lib.genAttrs [ "proj-watch" "proj-watch@" ] (name: {
+      description = "Resume proj jobs whose awaited PRs and issues changed${lib.optionalString (name == "proj-watch@") " in %I"}";
       after = [ "network-online.target" ];
       wants = [ "network-online.target" ];
       serviceConfig = {
         Type = "oneshot";
         User = user;
-        ExecStart = "${proj}/bin/proj _watch";
+        ExecStart = "${proj}/bin/proj _watch${lib.optionalString (name == "proj-watch@") " %I"}";
       };
-    };
-    systemd.timers.proj-watch = {
-      wantedBy = [ "timers.target" ];
-      timerConfig.OnCalendar = cfg.watchEvery;
-    };
+    });
+    systemd.tmpfiles.rules = [
+      "d ${cfg.jobsDir} 0755 ${user} ${config.users.users.${user}.group} -"
+      "d ${stateDir}/proj-watch 0755 ${user} ${config.users.users.${user}.group} -"
+    ];
 
     burrow.claude.machineMd = lib.mkOrder 700 ''
       ## Projects, from the operator
@@ -209,25 +217,29 @@ in
       message = "burrow.proj.inbox.authors: name who may hand Claude issues.";
     }];
     environment.systemPackages = [ inbox ];
-    systemd.services.proj-inbox = {
-      description = "Hand GitHub issues labelled ${cfg.inbox.label} to proj jobs";
+    # A repo's issue events start its look (proj-inbox@OWNER-REPO), and so
+    # does the end of each of its jobs' turns (proj run --kick), whose answer
+    # it posts.
+    burrow.events.handlers.proj-inbox = {
+      events = [ "issues" "issue_comment" ];
+      unit = "proj-inbox";
+      wake = inboxWake;
+    };
+    systemd.services = lib.genAttrs [ "proj-inbox" "proj-inbox@" ] (name: {
+      description = "Hand GitHub issues labelled ${cfg.inbox.label} to proj jobs${lib.optionalString (name == "proj-inbox@") " in %I"}";
       after = [ "network-online.target" ];
       wants = [ "network-online.target" ];
       serviceConfig = {
         Type = "oneshot";
         User = user;
-        ExecStart = "${inbox}/bin/proj-inbox";
+        ExecStart = "${inbox}/bin/proj-inbox${lib.optionalString (name == "proj-inbox@") " %I"}";
       };
-    };
-    systemd.timers.proj-inbox = {
-      wantedBy = [ "timers.target" ];
-      timerConfig.OnCalendar = cfg.inbox.every;
-    };
-    systemd.tmpfiles.rules = [ "d ${config.burrow.stateDir}/proj-inbox 0755 ${user} ${config.users.users.${user}.group} -" ];
+    });
+    systemd.tmpfiles.rules = [ "d ${stateDir}/proj-inbox 0755 ${user} ${config.users.users.${user}.group} -" ];
 
     burrow.claude.machineMd = lib.mkOrder 701 ''
       Issues work too: label one `${cfg.inbox.label}` in a project's GitHub repo
-      (opened by ${lib.concatStringsSep " or " cfg.inbox.authors}) and within minutes it's a job there.
+      (opened by ${lib.concatStringsSep " or " cfg.inbox.authors}) and within seconds it's a job there.
       The answer comes back as a comment, a reply on the issue continues the job,
       and closing it or taking the label off ends it. `proj-inbox status` shows
       which issue is which job.

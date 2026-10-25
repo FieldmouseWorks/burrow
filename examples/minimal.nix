@@ -39,5 +39,9 @@
       authors = [ "sam" ];
     };
     house.enable = true;
+    events = {
+      host = "example.org";
+      secretFile = "/run/secrets/burrow-webhook";
+    };
   };
 }
