@@ -147,6 +147,30 @@ def hook(repo, st, due):
         save(f"repo-{repo.replace('/', '_')}.json", st)
 
 
+def unhook_gone(repos):
+    """The hooks this machine gave repos it no longer sees to (excluded,
+    archived, out of the owners), off them: their deliveries would start
+    passes over nothing, and the URL has no business there. One that can't
+    be taken off (no admin any more, say) is tried again a day later."""
+    if DRY:
+        return
+    keep = {f"repo-{r['repo'].replace('/', '_')}.json" for r in repos}
+    for name in sorted(os.listdir(C.STATE)):
+        if not (name.startswith("repo-") and name.endswith(".json")) or name in keep:
+            continue
+        st = load(name, {})
+        if not st.get("hookId") or C.NOW - st.get("unhookTried", 0) < 86400:
+            continue
+        repo = name[len("repo-"):-len(".json")].replace("_", "/", 1)  # an owner has no _
+        log(f"{repo}: no longer seen to, taking its webhook off")
+        if C.write("api", "-X", "DELETE", f"repos/{repo}/hooks/{st['hookId']}", check=False) is not None:
+            for k in ("hook", "hookId", "unhookTried"):
+                st.pop(k, None)
+        else:
+            st["unhookTried"] = C.NOW
+        save(name, st)
+
+
 def delete_branch(repo, name, sha):
     """Delete the branch only if its tip is still `sha`: a push since then
     keeps it (git's lease; the REST API has no conditional delete)."""

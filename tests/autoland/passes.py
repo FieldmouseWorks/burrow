@@ -6,8 +6,8 @@ import json
 import os
 import sys
 
-from harness import (KICKS, QDIR, REAL, STATES, STUB, T, WROTE, C, R, S, V, W, clean, fresh_pr_state, head, info,
-                     mkpr, pr_state, queued, run, rv_review, tmp, worker)
+from harness import (FAIL, KICKS, QDIR, REAL, STATES, STUB, T, WROTE, C, R, S, V, W, clean, fresh_pr_state, head,
+                     info, mkpr, pr_state, queued, run, rv_review, tmp, worker)
 
 # A pass that waits on time books its repo's next pass for when the wait
 # ends: a new head's settle delay, and how long findings sit before a job.
@@ -122,7 +122,8 @@ C.save("wake.json", {"sam/r": T + 50, "sam/other": T + 60, "sam/gone": T - 1})
 C.save("digest-repos.json", {"sam/r": [["Old", "r line", ""]], "sam/other": [["Open over a day", "other line", "x"]]})
 C.save("repos.json", {"untouched": True})
 seen_repos, swept, published = [], [], []
-kept_fns = (S.R.discover, S.R.settle_repo, S.R.publish, S.R.sweep_branches, S.open_prs)
+kept_fns = (S.R.discover, S.R.settle_repo, S.R.publish, S.R.sweep_branches, S.open_prs, S.R.unhook_gone)
+S.R.unhook_gone = lambda repos: (_ for _ in ()).throw(AssertionError("hooks taken off in a kicked pass"))
 S.R.discover = lambda: [{"repo": "sam/r"}, {"repo": "sam/other"}]
 S.R.settle_repo = lambda r, known: (_ for _ in ()).throw(AssertionError("settings in a kicked pass"))
 S.R.publish = published.append
@@ -141,7 +142,7 @@ C.WAKE.clear()
 S.main()
 sys.argv = argv
 S.CFG["cleanBranches"] = False
-S.R.discover, S.R.settle_repo, S.R.publish, S.R.sweep_branches, S.open_prs = kept_fns
+S.R.discover, S.R.settle_repo, S.R.publish, S.R.sweep_branches, S.open_prs, S.R.unhook_gone = kept_fns
 assert seen_repos == ["sam/r"] and swept == [False], (seen_repos, swept)
 assert C.load("repos.json", None) == {"untouched": True}
 assert C.load("wake.json", None) == {"sam/r": T + 3 * 60 + 1, "sam/other": T + 60}, C.load("wake.json", None)
@@ -162,8 +163,11 @@ def graphql(query, **v):
     ASKED.append(("older reviews" if "node(id" in query and "reviews(" in query else "prs", v.get("cursor")))
     if "node(id" in query:
         return {"node": {"reviews": page(["r1"])}}
-    pr = {"id": "PR_1", "reviews": page(["r2"], True, "c-r2"), "comments": page(["c1"])}
-    return {"repository": {"squashMergeAllowed": True, "pullRequests": {"pageInfo": {"hasNextPage": False}, "nodes": [pr]}}}
+    who = {"isDraft": False, "isCrossRepository": False, "author": {"login": "sam"}}
+    pr = {"id": "PR_1", **who, "reviews": page(["r2"], True, "c-r2"), "comments": page(["c1"])}
+    # An outside contribution's older pages aren't read: anyone can add to them.
+    outside = {"id": "PR_2", **who, "author": {"login": "eve"}, "reviews": page(["x"], True, "c-x"), "comments": page([])}
+    return {"repository": {"squashMergeAllowed": True, "pullRequests": {"pageInfo": {"hasNextPage": False}, "nodes": [pr, outside]}}}
 
 
 graphql_kept, C.graphql = C.graphql, graphql
@@ -171,6 +175,13 @@ _, prs = S.open_prs("sam", "r")
 C.graphql = graphql_kept
 assert prs[0]["reviews"] == page(["r1", "r2"]) and prs[0]["comments"] == page(["c1"]), prs
 assert ASKED == [("prs", None), ("older reviews", "c-r2")], ASKED
+# Cut short, it's still just an outside contribution.
+fresh_pr_state()
+long_outside = mkpr()
+long_outside["author"] = {"login": "eve"}
+long_outside["comments"]["pageInfo"]["hasPreviousPage"] = True
+statuses, digest = run(long_outside, 600)
+assert "Outside contribution" in statuses and [x[0] for x in digest] == ["Outside contributions"], (statuses, digest)
 print("long PRs: ok")
 
 # Each repo keeps a hook to burrow-events: added when it's missing, set
@@ -223,4 +234,25 @@ assert WROTE == [], WROTE
 R.DRY = False
 os.environ["CREDENTIALS_DIRECTORY"] = cred
 C.gh, C.write = gh_kept, write_kept
+# A repo no longer seen to (excluded, archived) has its hook taken off, on
+# a full pass; one that won't come off is tried again a day later.
+C.save("repo-sam_old.json", {"hook": "h", "hookId": 7, "other": 1})
+C.save("repo-sam_stuck.json", {"hook": "h", "hookId": 8})
+C.save("repo-sam_r.json", {"hook": "h", "hookId": 9})
+FAIL.append("sam/stuck/hooks")
+C.NOW = T
+WROTE.clear()
+R.unhook_gone([{"repo": "sam/r"}])
+assert sorted(x for x in WROTE if "DELETE" in x) == ["api -X DELETE repos/sam/old/hooks/7",
+                                                     "api -X DELETE repos/sam/stuck/hooks/8"], WROTE
+assert C.load("repo-sam_old.json", None) == {"other": 1}
+assert C.load("repo-sam_stuck.json", None) == {"hook": "h", "hookId": 8, "unhookTried": T}
+assert C.load("repo-sam_r.json", None)["hookId"] == 9
+WROTE.clear()
+R.unhook_gone([{"repo": "sam/r"}])
+assert WROTE == [], WROTE
+C.NOW = T + 86400 + 1
+R.unhook_gone([{"repo": "sam/r"}])
+assert WROTE == ["api -X DELETE repos/sam/stuck/hooks/8"], WROTE
+FAIL.clear()
 print("hooks: ok")

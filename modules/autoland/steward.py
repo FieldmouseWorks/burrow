@@ -93,10 +93,18 @@ query($id: ID!, $cursor: String) {
 """
 
 
+def acted_on(pr):
+    """Whether the steward does anything with the PR beyond saying it's not
+    its to do: not a draft, and from one of its authors."""
+    return not pr["isDraft"] and not pr["isCrossRepository"] and (pr["author"] or {}).get("login") in CFG["authors"]
+
+
 def open_prs(owner, name):
     """The repo's merge settings and every open PR, all pages, with every
-    review and comment on each: a long PR's verdicts, markers and rounds
-    can be older than the last 100."""
+    review and comment on each it acts on: a long PR's verdicts, markers and
+    rounds can be older than the last 100. Anyone can comment on an outside
+    contribution, so its older pages aren't read (that's the owner's
+    anyway), lest every event read thousands of them."""
     prs, cursor = [], None
     while True:
         info = C.graphql(PRS, owner=owner, name=name, cursor=cursor)["repository"]
@@ -105,7 +113,7 @@ def open_prs(owner, name):
         if not page["pageInfo"]["hasNextPage"]:
             break
         cursor = page["pageInfo"]["endCursor"]
-    for pr in prs:
+    for pr in filter(acted_on, prs):
         for field, nodes in OLDER.items():
             while pr[field]["pageInfo"]["hasPreviousPage"]:
                 got = C.graphql(OLDER_PAGE % (field, nodes), id=pr["id"], cursor=pr[field]["pageInfo"]["startCursor"])
@@ -210,7 +218,6 @@ def handle(repo, pr, repo_info, digest):
     st.setdefault("rv", {})
     st.setdefault("rvBase", {})
     labels = {x["name"] for x in pr["labels"]["nodes"]}
-    author = (pr["author"] or {}).get("login", "")
     age = C.NOW - st["seen"]
     tag = f"{repo}#{n}"
     line = f"[{repo}#{n}]({pr['url']}) {pr['title']}"
@@ -410,6 +417,10 @@ def handle(repo, pr, repo_info, digest):
         settle("pending", "Draft: work in progress, reviewed once it's marked ready")
         save(key, st)
         return
+    if not acted_on(pr):
+        settle("pending", f"Outside contribution: {CFG['owner']} reviews and merges it", "Outside contributions")
+        save(key, st)
+        return
     # A list longer than one page could hide a hold, an open thread, a
     # changes-requested review or a verdict: fail closed. (open_prs reads
     # every review and comment, so those two are whole unless it couldn't.)
@@ -425,10 +436,6 @@ def handle(repo, pr, repo_info, digest):
         # Held after it was settled: take back the status and the queued merge.
         log(f"{tag}: on hold")
         settle("pending", f"On hold (the {CFG['labels']['hold']} label)")
-        save(key, st)
-        return
-    if pr["isCrossRepository"] or author not in CFG["authors"]:
-        settle("pending", f"Outside contribution: {CFG['owner']} reviews and merges it", "Outside contributions")
         save(key, st)
         return
 
@@ -827,6 +834,8 @@ def main():
         save("baseline-failed.json", failed)
     if not DRY:
         V.sweep(read, live)
+    if kick is None:
+        R.unhook_gone(repos)
     # Last: GitHub failing it leaves the pass's state saved. A line more than
     # one repo has (a reviewer out of service) is listed once.
     R.publish(list(dict.fromkeys(tuple(x) for repo in sorted(digest) for x in digest[repo])))
