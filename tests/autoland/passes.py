@@ -239,6 +239,8 @@ C.gh, C.write = gh_kept, write_kept
 C.save("repo-sam_old.json", {"hook": "h", "hookId": 7, "other": 1})
 C.save("repo-sam_stuck.json", {"hook": "h", "hookId": 8})
 C.save("repo-sam_r.json", {"hook": "h", "hookId": 9})
+# sam/R renamed to sam/r: the same repo, whose hook hook() just adopted.
+C.save("repo-sam_R.json", {"hook": "h", "hookId": 9})
 FAIL.append("sam/stuck/hooks")
 C.NOW = T
 WROTE.clear()

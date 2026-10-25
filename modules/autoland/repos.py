@@ -154,9 +154,11 @@ def unhook_gone(repos):
     be taken off (no admin any more, say) is tried again a day later."""
     if DRY:
         return
-    keep = {f"repo-{r['repo'].replace('/', '_')}.json" for r in repos}
+    # GitHub names are case-blind: after a rename that only changes case the
+    # old state file is the same repo, and its hook is the one hook() adopted.
+    keep = {f"repo-{r['repo'].replace('/', '_')}.json".lower() for r in repos}
     for name in sorted(os.listdir(C.STATE)):
-        if not (name.startswith("repo-") and name.endswith(".json")) or name in keep:
+        if not (name.startswith("repo-") and name.endswith(".json")) or name.lower() in keep:
             continue
         st = load(name, {})
         if not st.get("hookId") or C.NOW - st.get("unhookTried", 0) < 86400:
