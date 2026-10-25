@@ -25,6 +25,27 @@ run(clean(), 400)
 assert C.WAKE == {"sam/r": T + 86400 + 1}, C.WAKE
 run(clean(), 86400 + 10)
 assert C.WAKE == {}, C.WAKE
+# A status or a stop of auto-merge GitHub didn't take is tried again a
+# minute later: until then the old success and the auto-merge stand.
+fresh_pr_state()
+run(clean(), 400)
+key = "pr-sam_r-5.json"
+C.save(key, {**C.load(key, {}), "landed": head})
+held = clean(labels=["hold"])
+held["autoMergeRequest"] = {"enabledAt": "x"}
+FAIL.extend(["/statuses/", "--disable-auto"])
+run(held, 500)
+assert C.WAKE["sam/r"] == T + 500 + 60 + 1 and C.load(key, {})["landed"] == head, (C.WAKE, C.load(key, {}))
+FAIL.remove("/statuses/")
+run(held, 600)
+assert C.WAKE["sam/r"] == T + 600 + 60 + 1, C.WAKE
+FAIL.remove("--disable-auto")
+run(held, 700)
+assert C.WAKE == {"sam/r": T + 86400 + 1} and C.load(key, {})["landed"] is None, (C.WAKE, C.load(key, {}))
+FAIL.append("/statuses/")
+run(clean(labels=["hold"]), 800)
+assert C.WAKE["sam/r"] == T + 800 + 60 + 1, C.WAKE
+FAIL.clear()
 # Every finding answered: the reviewer looks again once the settle delay
 # after its review is up.
 fresh_pr_state()

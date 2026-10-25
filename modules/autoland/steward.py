@@ -179,11 +179,13 @@ def our_status(pr):
 
 
 def post_status(repo, pr, state, desc):
+    """False if GitHub didn't take it."""
     desc = desc[:140]
     if our_status(pr) == (state, desc):
-        return
-    C.write("api", f"repos/{repo}/statuses/{pr['headRefOid']}", "-f", f"state={state}",
-            "-f", f"context={CONTEXT}", "-f", f"description={desc}", "-f", f"target_url={pr['url']}", check=False)
+        return True
+    return C.write("api", f"repos/{repo}/statuses/{pr['headRefOid']}", "-f", f"state={state}",
+                   "-f", f"context={CONTEXT}", "-f", f"description={desc}", "-f", f"target_url={pr['url']}",
+                   check=False) is not None
 
 
 def merge_method(repo_info):
@@ -208,9 +210,10 @@ def land(repo, pr, repo_info):
 
 
 def unland(repo, pr):
-    """Something new came up after it was settled: stop the merge."""
-    if pr["autoMergeRequest"]:
-        C.write("pr", "merge", str(pr["number"]), "-R", repo, "--disable-auto", check=False)
+    """Something new came up after it was settled: stop the merge. False if
+    GitHub didn't take it."""
+    return not pr["autoMergeRequest"] or C.write(
+        "pr", "merge", str(pr["number"]), "-R", repo, "--disable-auto", check=False) is not None
 
 
 def handle(repo, pr, repo_info, digest):
@@ -245,13 +248,19 @@ def handle(repo, pr, repo_info, digest):
         return C.NOW - since > rc["handoffAfter"] * MIN
 
     def settle(state, desc, why=None):
-        post_status(repo, pr, state, desc)
+        ok = post_status(repo, pr, state, desc)
         if why:
             digest.append((why, line, desc))
         # Not settled (any more): nothing may merge it.
         if state != "success" and (pr["autoMergeRequest"] or st.get("landed")):
-            unland(repo, pr)
-            st["landed"] = None
+            if unland(repo, pr):
+                st["landed"] = None
+            else:
+                ok = False
+        if not ok and not DRY:
+            # GitHub didn't take the status or the stop: until it does, the
+            # old ones stand and auto-merge can still merge it. Again in a minute.
+            after(C.NOW, 1)
 
     def update_branch():
         """Bring a settled head up to date with a base whose rules want it
