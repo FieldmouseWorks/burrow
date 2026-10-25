@@ -115,7 +115,8 @@ start_turn() {
     --property=MemoryMax="$JOB_MEMORY_MAX" \
     --property=OOMScoreAdjust=500 \
     --property=WorkingDirectory="$(cat "$d/project")" \
-    --property=ExecStopPost="$self _ended $id" \
+    --setenv=PROJ_ENDED="$id" \
+    --property=ExecStopPost="$self _ended" \
     "$self" _exec "$id" "${first:-normal}"; then
     if [ "$n" = 1 ]; then rm -f "$d/turns"; else set_turns "$id" $((n - 1)); fi
     rm -f "$d/prompt.$n"
@@ -458,8 +459,10 @@ Carry on from there. Anything you left in the background last turn was stopped w
     # After each turn, however it ended (its unit's ExecStopPost): what the
     # job was started to kick (proj run --kick) gets a pass now, and so does
     # proj-watch for each repo the turn awaits, which then sees at once
-    # anything that changed since the turn took its baseline.
-    id=$2
+    # anything that changed since the turn took its baseline. The job comes
+    # in the unit's environment: systemd splits and expands a command line,
+    # and a job's id is its project's folder name, spaces, `%` and all.
+    id=${PROJ_ENDED:?proj _ended is its turn's unit's ExecStopPost}
     [ -n "$KICK" ] || exit 0
     { cat "$jobs/$id/kick" 2>/dev/null || true
       cut -f1 "$jobs/$id/await" 2>/dev/null | sed 's/#.*//; s#^#proj-watch/#' || true
