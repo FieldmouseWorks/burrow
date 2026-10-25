@@ -93,6 +93,7 @@ let
     cp ${./autoland/common.py} $out/common.py
     cp ${./autoland/deepseek.py} $out/deepseek.py
     cp ${./autoland/repos.py} $out/repos.py
+    cp ${./autoland/tasks.py} $out/tasks.py
     flake8 --ignore E501,W503 $out
   '';
   # The command, with this machine's config, so `autoland-steward status`
