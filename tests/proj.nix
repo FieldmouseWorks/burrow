@@ -385,6 +385,15 @@ pkgs.testers.runNixOSTest {
         github("repos/o/r/issues/7/comments", "[]")
         machine.succeed("su - dev -c 'proj-inbox o/r'")
         assert json.loads(machine.succeed("cat /var/lib/burrow/proj-inbox/wake.json")) == {}
+        # Its own answer, or someone else's comment, is nothing to hand on.
+        now = machine.succeed("date -u +%Y-%m-%dT%H:%M:%SZ").strip()
+        github("repos/o/r/issues/7/comments", json.dumps([
+            {"id": 51, "user": {"login": "sam"}, "body": "did it <!-- proj-inbox -->", "created_at": now},
+            {"id": 52, "user": {"login": "eve"}, "body": "me too", "created_at": now}]))
+        machine.succeed("su - dev -c 'proj-inbox o/r'")
+        assert json.loads(machine.succeed("cat /var/lib/burrow/proj-inbox/wake.json")) == {}
+        github("repos/o/r/issues/7/comments", "[]")
+        machine.succeed("su - dev -c 'proj-inbox o/r'")
 
     with subtest("a reply whose turn can't start is tried again in five minutes"):
         old = machine.succeed("date -u -d '2 minutes ago' +%Y-%m-%dT%H:%M:%SZ").strip()

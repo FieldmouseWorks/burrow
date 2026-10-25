@@ -205,9 +205,12 @@ for repo in "${!project[@]}"; do
     all=$(gh api "repos/$repo/issues/$n/comments" --paginate --slurp | jq 'add // []') || { miss "$repo"; continue; }
     before=$(date -u -d '1 minute ago' +%Y-%m-%dT%H:%M:%SZ)
     comments=$(jq --arg before "$before" 'map(select(.created_at < $before))' <<<"$all")
-    # A newer one is handed on once it's a minute old.
-    young=$(jq -r --argjson seen "$seen" --arg before "$before" '
-      [.[] | select(.id > $seen and .created_at >= $before) | .created_at | fromdateiso8601] | min // empty' <<<"$all")
+    # A newer reply is handed on once it's a minute old: one of the authors',
+    # never the inbox's own answer.
+    young=$(jq -r --argjson seen "$seen" --arg before "$before" --arg mark "$MARK" --arg authors "$AUTHORS" '
+      ($authors | split(" ")) as $ok
+      | [.[] | select(.id > $seen and .created_at >= $before and (.body | contains($mark) | not) and (.user.login as $u | $ok | index($u)))
+        | .created_at | fromdateiso8601] | min // empty' <<<"$all")
     [ -z "$young" ] || book "$repo" $((young + 61))
     msg=$(jq -r --argjson seen "$seen" --arg mark "$MARK" --arg authors "$AUTHORS" '
       ($authors | split(" ")) as $ok

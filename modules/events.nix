@@ -134,6 +134,13 @@ in
   };
 
   config = lib.mkIf cfg.enable {
+    # The repos' hooks are the steward's to keep (autoland/repos.py).
+    warnings = lib.optional (!(lib.attrByPath [ "burrow" "autoland" "enable" ] false config)) ''
+      burrow.events is on without burrow.autoland, which keeps each repo's
+      webhook: GitHub's events won't reach this machine, so its passes come
+      from local kicks, their own wake-ups and the hourly catch-up.
+    '';
+
     users.users.burrow-events = {
       isSystemUser = true;
       group = "burrow-events";
@@ -162,13 +169,16 @@ in
 
     # A new secret (secretFile written, or replaced as sops does) restarts the
     # service, which reads it only when it starts. Its catch-up full passes
-    # then give every repo's hook the new one.
+    # then give every repo's hook the new one: so the restart waits for any
+    # full pass already running, which read the old one and would start
+    # nothing new if asked again while it runs.
     systemd.paths.burrow-events-secret = {
       wantedBy = [ "multi-user.target" ];
       pathConfig.PathChanged = cfg.secretFile;
     };
     systemd.services.burrow-events-secret = {
       description = "burrow-events: restart for a new webhook secret";
+      after = map (u: "${u}.service") units;
       path = [ config.systemd.package ];
       script = "systemctl try-restart burrow-events.service";
       serviceConfig.Type = "oneshot";

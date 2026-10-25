@@ -13,6 +13,8 @@ let
   # seconds on.
   probe = pkgs.writeShellScript "probe" ''
     echo "''${1:-full}" >>/var/lib/probe/passes
+    # A full pass that takes its time, for as long as the test says.
+    while [ -z "''${1:-}" ] && [ -e /var/lib/probe/slow ]; do sleep 1; done
     if [ "''${1:-}" = sam/r ] && ! [ -e /var/lib/probe/booked ]; then
       touch /var/lib/probe/booked
       echo "{\"sam/later\": $(( $(date +%s) + 8 ))}" >/var/lib/probe/wake.json
@@ -58,6 +60,7 @@ pkgs.testers.runNixOSTest {
     import hashlib
     import hmac
     import json
+    import time
 
     def passes():
         return machine.succeed("cat /var/lib/probe/passes 2>/dev/null || true").split()
@@ -99,10 +102,20 @@ pkgs.testers.runNixOSTest {
         machine.succeed("su -s /bin/sh burrow-events -c 'systemctl start probe@sam-x.service'")
         machine.succeed("grep -x sam/x /var/lib/probe/passes")
 
-    with subtest("a new secret restarts it, and is the one checked"):
+    with subtest("a new secret restarts it once a running full pass is done, and is the one checked"):
+        # A full pass that read the old secret is still going.
+        machine.succeed("touch /var/lib/probe/slow")
+        machine.succeed("curl -fsS -d ''' http://127.0.0.1:8788/kick/probe")
+        machine.wait_until_succeeds("systemctl show -p ActiveState --value probe.service | grep -x activating", timeout=60)
+        fulls = passes().count("full")
         pid = machine.succeed("systemctl show -p MainPID --value burrow-events.service").strip()
         machine.succeed("echo new-secret >/etc/burrow-webhook")
+        time.sleep(5)
+        assert machine.succeed("systemctl show -p MainPID --value burrow-events.service").strip() == pid
+        machine.succeed("rm /var/lib/probe/slow")
         machine.wait_until_succeeds(f"[ $(systemctl show -p MainPID --value burrow-events.service) != {pid} ]", timeout=60)
+        # Its catch-up is a full pass of its own, after the old one.
+        machine.wait_until_succeeds(f"[ $(grep -cx full /var/lib/probe/passes) -gt {fulls} ]", timeout=60)
         machine.wait_for_open_port(8787)
         body = json.dumps({"repository": {"full_name": "sam/n"}})
         assert deliver(body, "hook-secret") == "401"
