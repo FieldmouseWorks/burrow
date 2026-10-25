@@ -194,6 +194,9 @@ def deliveries(handlers, lines, secret, own=()):
             if got is None:
                 return
             if not got or not signed(secret, got, self.headers.get("X-Hub-Signature-256")):
+                # GitHub's secret and this one differ (a forgery, or a
+                # secret changed and not yet restarted for): say so.
+                log(f"a {self.headers.get('X-GitHub-Event')} delivery whose signature isn't the hook secret's; turned away")
                 return answer(self, 401)
             try:
                 payload = json.loads(got)
@@ -249,11 +252,11 @@ def main():
     listen(cfg["port"], deliveries(handlers, lines, secret, cfg["ownStatuses"]))
     listen(cfg["kickPort"], kicks(lines))
     log(f"deliveries on 127.0.0.1:{cfg['port']}, kicks on 127.0.0.1:{cfg['kickPort']}: {', '.join(handlers)}")
-    workers = [threading.Thread(target=serve, args=(name, h, lines[name]), daemon=True) for name, h in handlers.items()]
-    for w in workers:
-        w.start()
-    for w in workers:
-        w.join()
+    for name, h in handlers.items():
+        threading.Thread(target=serve, args=(name, h, lines[name]), daemon=True).start()
+    # The servers and the handlers' lines run until the service stops, with
+    # no handlers too: exiting would be a restart every few seconds.
+    threading.Event().wait()
 
 
 if __name__ == "__main__":

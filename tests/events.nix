@@ -3,7 +3,8 @@
 # starts its full pass when it starts, that a delivery signed with the hook's
 # secret starts the repo's pass as its own unit (polkit lets the service
 # start those and nothing else), that one signed otherwise doesn't, that a
-# kick on the local port does, and that a wake-up a pass booked comes on time.
+# kick on the local port does, that a wake-up a pass booked comes on time,
+# and that a new secret is the one checked once it's written.
 #
 #   nix build .#checks.x86_64-linux.events-service -L
 { self, pkgs }:
@@ -33,7 +34,9 @@ pkgs.testers.runNixOSTest {
         wake = "/var/lib/probe/wake.json";
       };
     };
-    environment.etc."burrow-webhook".text = "hook-secret\n";
+    # A file of its own rather than a link into the store, so the test can
+    # write a new secret into it.
+    environment.etc."burrow-webhook" = { text = "hook-secret\n"; mode = "0600"; };
     systemd.services = pkgs.lib.genAttrs [ "probe" "probe@" ] (name: {
       serviceConfig = {
         Type = "oneshot";
@@ -95,5 +98,15 @@ pkgs.testers.runNixOSTest {
         machine.fail("su -s /bin/sh burrow-events -c 'systemctl start other.service'")
         machine.succeed("su -s /bin/sh burrow-events -c 'systemctl start probe@sam-x.service'")
         machine.succeed("grep -x sam/x /var/lib/probe/passes")
+
+    with subtest("a new secret restarts it, and is the one checked"):
+        pid = machine.succeed("systemctl show -p MainPID --value burrow-events.service").strip()
+        machine.succeed("echo new-secret >/etc/burrow-webhook")
+        machine.wait_until_succeeds(f"[ $(systemctl show -p MainPID --value burrow-events.service) != {pid} ]", timeout=60)
+        machine.wait_for_open_port(8787)
+        body = json.dumps({"repository": {"full_name": "sam/n"}})
+        assert deliver(body, "hook-secret") == "401"
+        assert deliver(body, "new-secret") == "202"
+        machine.wait_until_succeeds("grep -x sam/n /var/lib/probe/passes", timeout=60)
   '';
 }

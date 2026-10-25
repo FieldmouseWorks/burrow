@@ -152,3 +152,17 @@ assert line.due == {"sam/next": 1}, line.due
 E.serve("autoland", h, line, run=systemctl, once=True)
 assert started[1:] == [["systemctl", "start", "autoland@sam-next.service"]], started
 print("passes: ok")
+
+# With no handlers the service still runs: exiting would be a restart every
+# few seconds.
+with open(f"{tmp}/events.json", "w") as f:
+    json.dump({"port": 0, "kickPort": 0, "handlers": {}, "ownStatuses": []}, f)
+os.makedirs(f"{tmp}/cred", exist_ok=True)
+with open(f"{tmp}/cred/webhook", "w") as f:
+    f.write("hook-secret\n")
+os.environ.update(EVENTS_CONFIG=f"{tmp}/events.json", CREDENTIALS_DIRECTORY=f"{tmp}/cred")
+running = threading.Thread(target=E.main, daemon=True)
+running.start()
+running.join(2)
+assert running.is_alive(), "burrow-events exited with no handlers"
+print("no handlers: ok")

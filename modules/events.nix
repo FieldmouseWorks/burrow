@@ -160,6 +160,20 @@ in
       };
     };
 
+    # A new secret (secretFile written, or replaced as sops does) restarts the
+    # service, which reads it only when it starts. Its catch-up full passes
+    # then give every repo's hook the new one.
+    systemd.paths.burrow-events-secret = {
+      wantedBy = [ "multi-user.target" ];
+      pathConfig.PathChanged = cfg.secretFile;
+    };
+    systemd.services.burrow-events-secret = {
+      description = "burrow-events: restart for a new webhook secret";
+      path = [ config.systemd.package ];
+      script = "systemctl try-restart burrow-events.service";
+      serviceConfig.Type = "oneshot";
+    };
+
     # The only timer: a full pass of every handler each hour, for what no
     # event reports. A delivery GitHub couldn't make (this machine down, or
     # nginx) is never sent again, and a repo made on a user account sends
