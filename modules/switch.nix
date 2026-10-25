@@ -64,10 +64,12 @@ let
   # A switch restarts a changed unit that is running and waits for it. A
   # oneshot that may run longer than the confirm window then holds the switch
   # past its own revert, which can't take the lock and fails the activation.
+  # Only a declared timeout counts: most of NixOS's own oneshots set none and
+  # are meant to rerun on a switch, so a job that can run long says so.
   longOneshots = lib.attrNames (lib.filterAttrs (_: s:
     let
       sc = s.serviceConfig;
-      t = sc.TimeoutStartSec or null;
+      t = sc.TimeoutStartSec or sc.TimeoutSec or null;
     in s.enable && s.restartIfChanged
       && (sc.Type or null) == "oneshot" && !(sc.RemainAfterExit or false)
       && t != null
