@@ -206,8 +206,9 @@ in
     # event reports. A delivery GitHub couldn't make (this machine down, or
     # nginx) is never sent again, and a repo made on a user account sends
     # nothing before its first pass gives it a hook. A pass that has nothing
-    # to do asks GitHub for little: one listing, a few points.
-    systemd.services.burrow-events-catch-up = {
+    # to do asks GitHub for little: one listing, a few points. With no
+    # handlers there's nothing to pass over.
+    systemd.services.burrow-events-catch-up = lib.mkIf (cfg.handlers != { }) {
       description = "burrow-events: a full pass of every handler, for what no event reported";
       path = [ pkgs.curl ];
       script = kickAll;
@@ -216,7 +217,7 @@ in
         User = "burrow-events";
       };
     };
-    systemd.timers.burrow-events-catch-up = {
+    systemd.timers.burrow-events-catch-up = lib.mkIf (cfg.handlers != { }) {
       wantedBy = [ "timers.target" ];
       timerConfig.OnCalendar = "hourly";
     };
