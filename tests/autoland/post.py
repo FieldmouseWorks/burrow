@@ -70,9 +70,9 @@ assert files["config.txt"] == {1, 2} and files["my notes.txt"] == {1}
 assert files["start.sh"] == set() and files["gone.txt"] == set()
 
 # One review: findings off a changed line snap to the nearest, findings on
-# files with no new side become file-level threads (still findings), ones
-# on files the PR doesn't change become notes, and model text can't ping or
-# forge markers.
+# files with no new side become file-level threads, ones on files the PR
+# doesn't change become threads on its first changed file that say where
+# (all still findings), and model text can't ping or forge markers.
 WROTE = []
 
 
@@ -91,12 +91,14 @@ answer = {"findings": [
     {"path": "nope.py", "line": 1, "severity": "PX", "title": "t2", "body": "b2"}], "summary": "s"}
 assert V.post("sam/r", pr, "deepseek", answer) == "findings"
 posts = [(a, json.loads(i)) for a, i in WROTE]
-assert [a[3].rsplit("/", 1)[1] for a, _ in posts] == ["reviews", "comments"]
-posted, whole = posts[0][1], posts[1][1]
+assert [a[3].rsplit("/", 1)[1] for a, _ in posts] == ["reviews", "comments", "comments"]
+posted, whole, elsewhere = posts[0][1], posts[1][1], posts[2][1]
 assert whole["path"] == "gone.txt" and whole["subject_type"] == "file" and whole["commit_id"] == head
 assert V.finding("deepseek") in whole["body"]
+assert elsewhere["path"] == "src/app.py" and elsewhere["subject_type"] == "file" and V.finding("deepseek") in elsewhere["body"]
+assert "(In `nope.py`, which this PR doesn't change.)" in elsewhere["body"] and "t2" in elsewhere["body"], elsewhere
 assert posted["commit_id"] == head and posted["event"] == "COMMENT"
-assert '"findings": 2' in posted["body"] and "nope.py" in posted["body"] and "**DeepSeek review**" in posted["body"]
+assert '"findings": 3' in posted["body"] and "**DeepSeek review**" in posted["body"]
 assert [c["line"] for c in posted["comments"]] == [13]
 assert "@​evil" in posted["comments"][0]["body"] and posted["comments"][0]["body"].startswith("**DeepSeek · P0**")
 assert "<!-- deepseek-review" not in posted["comments"][0]["body"]
@@ -120,7 +122,7 @@ assert "**Codex review** of aaaaaaa: nothing found." in json.loads(WROTE[0][1])[
 # GitHub won't take is a different failure (the same answer goes next pass).
 for bad in ({"summary": "couldn't finish"}, {"findings": None}, {"findings": ["x"]}, ["not", "a", "dict"],
             {"findings": [{"path": ["src/app.py"], "line": 1}]}, {"findings": [{"path": "src/app.py", "title": {}}]},
-            {"findings": [], "summary": 3}):
+            {"findings": [], "summary": 3}, {"findings": [{"line": 1, "severity": "P1", "title": "t", "body": "b"}]}):
     try:
         V.post("sam/r", pr, "deepseek", bad)
         raise AssertionError(f"{bad} passed as a review")
@@ -132,6 +134,14 @@ try:
     raise AssertionError("a review GitHub didn't take passed")
 except RuntimeError as e:
     assert "didn't take" in str(e)
+# With no changed file to put one on, a finding is listed in the review,
+# and still counts.
+C.write = write
+WROTE.clear()
+C.gh = lambda *a, **k: "diff --git a/weird header\n@@ -0,0 +1 @@\n+x\n" if "compare/" in " ".join(a) else gh(*a, **k)
+assert V.post("sam/r", pr, "deepseek", {"findings": [answer["findings"][2]]}) == "findings"
+body = json.loads(WROTE[0][1])["body"]
+assert '"findings": 1' in body and "- `nope.py`: **DeepSeek · P1** t2 b2" in body and len(WROTE) == 1, body
 # A diff that can't be read (none at all, or not a diff) posts nothing: read
 # as one, every finding would be a note and the review clean.
 C.write = write

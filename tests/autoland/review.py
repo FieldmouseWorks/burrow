@@ -61,6 +61,9 @@ put("cfg/api.yaml", "token: COPIEDSECRET\n")
 # the copy is hidden.
 put("src/util.py", UTIL % 2)
 put("keys/util.key", UTIL % 2)
+# Paths are bytes, not always UTF-8.
+put(os.fsdecode(b"src/caf\xe9.py"), "print('bytes')\n")
+put(os.fsdecode(b"secrets/k\xff.yaml"), "token: BYTESECRET\n")
 sh(*GIT, "add", "-A", "-f", cwd=work)
 sh(*GIT, "commit", "-qm", "use eval", cwd=work)
 pr_head = sh("git", "rev-parse", "HEAD", cwd=work).strip()
@@ -82,6 +85,7 @@ diff = sh("git", "diff", "HEAD~1", "HEAD", cwd=snap)
 assert "+    b = eval('2')" in diff and "later.txt" not in diff, diff
 assert "+steal()" in diff and "+also()" in diff, diff
 assert "+++ b/src/util.py" in diff and "+    return 2" in diff and "util.key" not in diff, diff
+assert '+++ "b/src/caf\\351.py"' in diff and "+print('bytes')" in diff, diff
 assert sh("git", "rev-parse", "HEAD:notes.txt", cwd=snap) == sh("git", "rev-parse", "feat:notes.txt", cwd=work)
 # Secrets paths aren't in either commit, or in what git keeps of them.
 for rev in ("HEAD", "HEAD~1"):
@@ -96,7 +100,7 @@ for f in ("secrets/remi.yaml", "cert.pem", ".env"):
         if oid:
             assert subprocess.run(["git", "cat-file", "-e", oid], cwd=snap).returncode != 0, (f, rev)
 assert sorted(meta["secret"]) == ["cert.pem", "cfg/api.yaml", "config/db.yaml", "keys/util.key", "secrets/db.yaml",
-                                  "secrets/remi.yaml"], meta
+                                  "secrets/k\ufffd.yaml", "secrets/remi.yaml"], meta
 # And the steward knows what no reviewer saw.
 assert V.unseen("pr-sam_r-5.json", pr_head, "main") == meta["secret"], meta
 # The rules are the base's, nearest each changed file: the PR's own edit to them doesn't count.

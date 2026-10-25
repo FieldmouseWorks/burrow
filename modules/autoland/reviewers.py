@@ -75,6 +75,19 @@ def verdict(pr, head, r):
 
 # ---------------------------------------------------------------- the snapshot
 
+def names(out):
+    """Paths from git's -z output. A path is bytes, not always UTF-8: the
+    ones that aren't keep their bytes (surrogateescape), so git gets the
+    same path back."""
+    return [p for p in out.decode(errors="surrogateescape").split("\0") if p]
+
+
+def shown(path):
+    """A path as text to show (a prompt, a judge's task): any bytes that
+    aren't UTF-8 as replacement characters."""
+    return path.encode(errors="surrogateescape").decode(errors="replace")
+
+
 def git(*args, cwd=None, input=None, env=None):
     p = subprocess.run(["git", *args], cwd=cwd, input=input, env=env, capture_output=True, check=False)
     if p.returncode != 0:
@@ -98,7 +111,7 @@ def rules(mirror, rev, paths):
     as `rev` (the base branch) has them: a PR can't rewrite its own rules.
     An AGENTS.md in a secrets path is never read: its rules would reach the
     reviewers in the prompt."""
-    have = {f for f in git("-C", mirror, "ls-tree", "-r", "-z", "--name-only", rev).decode().split("\0") if not hidden(f)}
+    have = {f for f in names(git("-C", mirror, "ls-tree", "-r", "-z", "--name-only", rev)) if not hidden(f)}
     wanted = set()
     for p in paths:
         d = p
@@ -153,14 +166,14 @@ def snapshot(repo, pr, key):
         "fetch", "-q", "--no-tags", ORIGIN.format(repo),
         f"+refs/pull/{n}/head:refs/pr/{n}", f"+refs/heads/{base}:refs/base/{base}")
     mb = git("-C", mirror, "merge-base", f"refs/base/{base}", head).decode().strip()
-    changed = [p for p in git("-C", mirror, "diff", "-z", "--name-only", "--no-renames", mb, head).decode().split("\0") if p]
+    changed = names(git("-C", mirror, "diff", "-z", "--name-only", "--no-renames", mb, head))
     # A secret renamed or copied to a plain path is still a secret, so its
     # new name is hidden too. A plain file copied into a secrets path stays
     # in view: only the copy is hidden, by its own path.
     moved = set()
-    out = git("-C", mirror, "diff", "-z", "--name-status", "-M", "-C", "--find-copies-harder", mb, head).decode().split("\0")
+    out = names(git("-C", mirror, "diff", "-z", "--name-status", "-M", "-C", "--find-copies-harder", mb, head))
     i = 0
-    while i < len(out) - 1:
+    while i < len(out):
         status = out[i]
         if status[:1] in ("R", "C"):
             src, dst_ = out[i + 1], out[i + 2]
@@ -183,12 +196,12 @@ def snapshot(repo, pr, key):
             # is never read or written.
             e = {**os.environ, "GIT_INDEX_FILE": index, "GIT_WORK_TREE": empty}
             subprocess.run(["git", "-C", mirror, "read-tree", rev], env=e, check=True, capture_output=True)
-            paths = subprocess.run(["git", "-C", mirror, "ls-files", "-z"], env=e, check=True,
-                                   capture_output=True).stdout.decode().split("\0")
-            gone = [p for p in paths if p and (hidden(p) or p in moved)]
+            paths = names(subprocess.run(["git", "-C", mirror, "ls-files", "-z"], env=e, check=True,
+                                         capture_output=True).stdout)
+            gone = [p for p in paths if hidden(p) or p in moved]
             if gone:
                 subprocess.run(["git", "-C", mirror, "update-index", "-z", "--force-remove", "--stdin"], env=e,
-                               input="\0".join(gone).encode() + b"\0", check=True, capture_output=True)
+                               input="\0".join(gone).encode(errors="surrogateescape") + b"\0", check=True, capture_output=True)
             tree = subprocess.run(["git", "-C", mirror, "write-tree"], env=e, check=True,
                                   capture_output=True).stdout.decode().strip()
             commit = git("-C", mirror, *who, "commit-tree", tree, *parent, "-m", label).decode().strip()
@@ -208,7 +221,7 @@ def snapshot(repo, pr, key):
     git("-C", mirror, "update-ref", "-d", f"refs/snap/{name}")
     git("-C", dst, "checkout", "-q", "review", env=bare)
     meta = {"rules": rules(mirror, f"refs/base/{base}", [p for p in changed if not (hidden(p) or p in moved)]),
-            "secret": [p for p in changed if hidden(p) or p in moved]}
+            "secret": [shown(p) for p in changed if hidden(p) or p in moved]}
     save(f"{SNAP}/{name}.json", meta)
     return name, meta
 
@@ -379,7 +392,7 @@ def post(repo, pr, r, answer):
     found = answer.get("findings") if isinstance(answer, dict) else None
     text = ("path", "title", "body")
     if (not isinstance(found, list) or not isinstance(answer.get("summary", ""), str)
-            or not all(isinstance(f, dict) and all(isinstance(f.get(k, ""), str) for k in text) for f in found)):
+            or not all(isinstance(f, dict) and all(isinstance(f.get(k), str) for k in text) for f in found)):
         raise ValueError(f"not a review: {json.dumps(answer)[:100]}")
     diff = C.gh("api", "-H", "Accept: application/vnd.github.diff",
                 f"repos/{repo}/compare/{pr['baseRefName']}...{head}", check=False)
@@ -392,11 +405,17 @@ def post(repo, pr, r, answer):
     comments, whole_file, loose = [], [], []
     for f in found:
         sev = f.get("severity") if f.get("severity") in ("P0", "P1", "P2") else "P1"
-        msg = f"**{who} · {sev}** {quiet(f.get('title', ''))}\n\n{quiet(f.get('body', ''))}"
-        lines = files.get(f.get("path"))
+        msg = f"**{who} · {sev}** {quiet(f['title'])}\n\n{quiet(f['body'])}"
+        lines = files.get(f["path"])
         if lines is None:
-            # Not a file this PR changes: a note in the review, not a finding.
-            loose.append(f"- `{quiet(f.get('path'))}`: " + msg.replace("\n\n", " "))
+            # Not a file this PR changes (a caller it breaks, say): still a
+            # finding, a thread on the PR's first changed file that says
+            # where. With none to go on, it's listed in the review.
+            on = next(iter(files), None)
+            if on is None:
+                loose.append(f"- `{quiet(f['path'])}`: " + msg.replace("\n\n", " "))
+            else:
+                whole_file.append({"path": on, "body": f"{msg}\n\n(In `{quiet(f['path'])}`, which this PR doesn't change.)\n\n{mark}"})
             continue
         if not lines:
             # Changed, but with no new side to comment on (deleted, binary,
@@ -409,13 +428,13 @@ def post(repo, pr, r, answer):
             want = min(lines)
         line = want if want in lines else min(lines, key=lambda x: abs(x - want))
         comments.append({"path": f["path"], "line": line, "side": "RIGHT", "body": msg + "\n\n" + mark})
-    k = len(comments) + len(whole_file)
+    k = len(comments) + len(whole_file) + len(loose)
     body = (f"**{who} review** of {head[:7]}: "
             + (f"{k} finding{'s' * (k > 1)}. Fix or answer each, then resolve its thread." if k else "nothing found."))
     if answer.get("summary"):
         body += f"\n\n{quiet(answer['summary'])}"
     if loose:
-        body += "\n\nNotes not on a changed line:\n" + "\n".join(loose)
+        body += "\n\nFindings with no changed file to go on:\n" + "\n".join(loose)
     body += f"\n\n<!-- {r}-review:v1 " + json.dumps({"commit_sha": head, "base": pr["baseRefName"], "findings": k}) + " -->"
     if not isinstance(C.write("api", "-X", "POST", f"repos/{repo}/pulls/{n}/reviews", "--input", "-",
                               input=json.dumps({"commit_id": head, "event": "COMMENT", "body": body, "comments": comments}),
