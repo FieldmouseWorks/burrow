@@ -151,25 +151,32 @@ def unhook_gone(repos):
     """The hooks this machine gave repos it no longer sees to (excluded,
     archived, out of the owners), off them: their deliveries would start
     passes over nothing, and the URL has no business there. One that can't
-    be taken off (no admin any more, say) is tried again a day later."""
+    be taken off (no admin any more, say) is tried again a day later. A
+    renamed repo leaves its old state file behind, and GitHub answers the old
+    name with the new one: that hook is the one hook() adopted under the new
+    name, so the old file lets go of it instead."""
     if DRY:
         return
-    # GitHub names are case-blind: after a rename that only changes case the
-    # old state file is the same repo, and its hook is the one hook() adopted.
-    keep = {f"repo-{r['repo'].replace('/', '_')}.json".lower() for r in repos}
+    live = {r["repo"].lower() for r in repos}
+    keep = {f"repo-{r['repo'].replace('/', '_')}.json" for r in repos}
     for name in sorted(os.listdir(C.STATE)):
-        if not (name.startswith("repo-") and name.endswith(".json")) or name.lower() in keep:
+        if not (name.startswith("repo-") and name.endswith(".json")) or name in keep:
             continue
         st = load(name, {})
         if not st.get("hookId") or C.NOW - st.get("unhookTried", 0) < 86400:
             continue
         repo = name[len("repo-"):-len(".json")].replace("_", "/", 1)  # an owner has no _
-        log(f"{repo}: no longer seen to, taking its webhook off")
-        if C.write("api", "-X", "DELETE", f"repos/{repo}/hooks/{st['hookId']}", check=False) is not None:
-            for k in ("hook", "hookId", "unhookTried"):
-                st.pop(k, None)
+        now = C.gh("api", f"repos/{repo}", check=False)
+        if isinstance(now, dict) and str(now.get("full_name", "")).lower() in live:
+            log(f"{repo}: renamed to {now['full_name']}, which keeps the webhook")
         else:
-            st["unhookTried"] = C.NOW
+            log(f"{repo}: no longer seen to, taking its webhook off")
+            if C.write("api", "-X", "DELETE", f"repos/{repo}/hooks/{st['hookId']}", check=False) is None:
+                st["unhookTried"] = C.NOW
+                save(name, st)
+                continue
+        for k in ("hook", "hookId", "unhookTried"):
+            st.pop(k, None)
         save(name, st)
 
 

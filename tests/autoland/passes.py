@@ -239,8 +239,12 @@ C.gh, C.write = gh_kept, write_kept
 C.save("repo-sam_old.json", {"hook": "h", "hookId": 7, "other": 1})
 C.save("repo-sam_stuck.json", {"hook": "h", "hookId": 8})
 C.save("repo-sam_r.json", {"hook": "h", "hookId": 9})
-# sam/R renamed to sam/r: the same repo, whose hook hook() just adopted.
+# sam/R and sam/was renamed to sam/r: the same repo, whose hook hook() just
+# adopted under the new name, and GitHub answers either old name with it.
 C.save("repo-sam_R.json", {"hook": "h", "hookId": 9})
+C.save("repo-sam_was.json", {"hook": "h", "hookId": 9, "other": 2})
+NAMES = {"repos/sam/R": "sam/r", "repos/sam/was": "sam/r", "repos/sam/old": "sam/old"}
+C.gh = lambda *a, **k: {"full_name": NAMES[a[1]]} if a[:1] == ("api",) and a[1:2] and a[1] in NAMES else gh_kept(*a, **k)
 FAIL.append("sam/stuck/hooks")
 C.NOW = T
 WROTE.clear()
@@ -250,6 +254,8 @@ assert sorted(x for x in WROTE if "DELETE" in x) == ["api -X DELETE repos/sam/ol
 assert C.load("repo-sam_old.json", None) == {"other": 1}
 assert C.load("repo-sam_stuck.json", None) == {"hook": "h", "hookId": 8, "unhookTried": T}
 assert C.load("repo-sam_r.json", None)["hookId"] == 9
+assert C.load("repo-sam_R.json", None) == {}
+assert C.load("repo-sam_was.json", None) == {"other": 2}
 WROTE.clear()
 R.unhook_gone([{"repo": "sam/r"}])
 assert WROTE == [], WROTE
@@ -257,4 +263,5 @@ C.NOW = T + 86400 + 1
 R.unhook_gone([{"repo": "sam/r"}])
 assert WROTE == ["api -X DELETE repos/sam/stuck/hooks/8"], WROTE
 FAIL.clear()
+C.gh = gh_kept
 print("hooks: ok")
