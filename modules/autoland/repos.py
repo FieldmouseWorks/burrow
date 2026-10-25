@@ -151,7 +151,8 @@ def unhook_gone(repos):
     """The hooks this machine gave repos it no longer sees to (excluded,
     archived, out of the owners), off them: their deliveries would start
     passes over nothing, and the URL has no business there. One that can't
-    be taken off (no admin any more, say) is tried again a day later. A
+    be taken off (no admin any more, say), or whose name GitHub won't look
+up, is tried again a day later. A
     renamed repo leaves its old state file behind, and GitHub answers the old
     name with the new one: that hook is the one hook() adopted under the new
     name, so the old file lets go of it instead."""
@@ -167,7 +168,11 @@ def unhook_gone(repos):
             continue
         repo = name[len("repo-"):-len(".json")].replace("_", "/", 1)  # an owner has no _
         now = C.gh("api", f"repos/{repo}", check=False)
-        if isinstance(now, dict) and str(now.get("full_name", "")).lower() in live:
+        if not isinstance(now, dict):  # not known to be gone: the old path may lead to a live repo
+            st["unhookTried"] = C.NOW
+            save(name, st)
+            continue
+        if str(now.get("full_name", "")).lower() in live:
             log(f"{repo}: renamed to {now['full_name']}, which keeps the webhook")
         else:
             log(f"{repo}: no longer seen to, taking its webhook off")
