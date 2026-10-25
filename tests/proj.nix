@@ -154,6 +154,10 @@ pkgs.testers.runNixOSTest {
         out = machine.succeed("systemctl --user -M dev@ show claude.slice -p MemoryHigh -p MemoryMax")
         assert "MemoryMax=" in out and "infinity" not in out, out
 
+    with subtest("a look with nothing awaited succeeds, and books nothing"):
+        proj("_watch")
+        assert json.loads(machine.succeed("cat /var/lib/burrow/proj-watch/wake.json")) == {}
+
     with subtest("a turn that failed without saying anything has no answer"):
         e = proj("run web fail")
         machine.wait_until_succeeds(f"su - dev -c 'proj state {e}' | grep -x error", timeout=120)

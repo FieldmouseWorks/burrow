@@ -435,7 +435,7 @@ Carry on from there. Anything you left in the background last turn was stopped w
       { [ -z "$only" ] || jq -r --arg only "${only,,}" --argjson now "$(date +%s)" '
           to_entries[] | select((.key | ascii_downcase) != $only and (.value | type) == "number" and .value > $now)
           | "\(.key)\t\(.value)"' "$WAKE" 2>/dev/null || true
-        cat "$jobs"/*/await 2>/dev/null | awk -F '\t' -v h="$AWAIT_HOURS" -v now="$(date +%s)" '
+        { cat "$jobs"/*/await 2>/dev/null || true; } | awk -F '\t' -v h="$AWAIT_HOURS" -v now="$(date +%s)" '
           $2 ~ /^[0-9]+$/ && split($1, t, "#") == 2 && $2 + h * 3600 + 1 > now { print t[1] "\t" ($2 + h * 3600 + 1) }'
         printf '%s' "$retry"
       } | jq -Rn 'reduce (inputs | split("\t")) as [$r, $at] ({}; .[$r] = ([.[$r] // empty, ($at | tonumber)] | min))' \
