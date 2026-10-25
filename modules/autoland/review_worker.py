@@ -14,6 +14,7 @@ anything the agents say as well."""
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -170,11 +171,18 @@ def overlay(effort):
 
 def deepseek(snap, prompt):
     key = deepseek_key()
-    home = os.path.join(os.environ["HOME"], ".dsh")
     efforts = [CFG["reviewers"]["deepseek"]["effort"]]
     if efforts[0] == "max":
         efforts.append("high")
     with tempfile.TemporaryDirectory() as t:
+        # A home of its own for each review, with only the machine's settings
+        # for it (the model) in: dsh keeps every session it runs there, and
+        # an agent talked into reading another review's would post that
+        # repo's code in this one.
+        home = f"{t}/dsh"
+        mine = os.path.join(os.environ["HOME"], ".dsh", "profiles")
+        if os.path.isdir(mine):
+            shutil.copytree(mine, f"{home}/profiles")
         gate = G.Gate(f"{t}/egress.sock", [], (DEEPSEEK_API, {"x-api-key": key}))
         try:
             return deepseek_in(snap, prompt, home, t, efforts)

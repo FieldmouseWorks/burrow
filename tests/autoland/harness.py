@@ -30,7 +30,9 @@ args = sys.argv[1:]
 prompt = sys.stdin.read()
 with open({AGENT_LOG!r}, "a") as f:
     f.write(json.dumps({{"agent": {name!r}, "args": args, "cwd": os.getcwd(), "env": dict(os.environ), "prompt": prompt,
-                        "overlay": open(args[args.index("--patch") + 1]).read() if "--patch" in args else None}}) + "\\n")
+                        "overlay": open(args[args.index("--patch") + 1]).read() if "--patch" in args else None,
+                        "home": sorted(os.path.relpath(os.path.join(d, x), os.environ["DSH_HOME"])
+                                       for d, _, xs in os.walk(os.environ.get("DSH_HOME", "/nonexistent")) for x in xs)}}) + "\\n")
 do = json.load(open({AGENT!r})).get({name!r}, {{}})
 time.sleep(do.get("sleep", 0))
 for req in do.get("http", []):

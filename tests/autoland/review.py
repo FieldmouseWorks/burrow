@@ -180,7 +180,14 @@ def queue_and_work(r):
 # harness's settings for a review, and the prompt carrying the base's rules,
 # its own earlier findings with the authors' replies, and the secrets it can't see.
 # Its API is the gate, which puts the key in: the agent never has it. Any
-# other way out is refused.
+# other way out is refused. Its home is new for each review, with only the
+# machine's settings for it: not the sessions of the reviews before.
+os.makedirs(f"{tmp}/home/.dsh/profiles/headless")
+os.makedirs(f"{tmp}/home/.dsh/sessions")
+with open(f"{tmp}/home/.dsh/profiles/headless/cordis.patch.yml", "w") as f:
+    f.write("- id: agent-default-model\n")
+with open(f"{tmp}/home/.dsh/sessions/other.json", "w") as f:
+    f.write("another repo's code")
 agent(dsh={"answer": {"findings": [{"path": "src/app.py", "line": 3, "severity": "P0", "title": "eval",
                                     "body": "the key is sk-test-0123456789"}], "summary": "s"},
            "http": [{"env": "DEEPSEEK_BASE_URL", "send": "POST {path}/v1/messages HTTP/1.1\r\nHost: x\r\n"
@@ -192,6 +199,7 @@ assert back["result"] == "review", back
 run, = agent_runs()
 assert run["args"][:4] == ["--profile", "headless", "--patch", run["args"][3]] and run["args"][-1] == "-"
 assert run["cwd"] == snap and run["env"]["DSH_PERMISSION_MODE"] == "read-only"
+assert run["home"] == ["profiles/headless/cordis.patch.yml"] and not os.path.exists(run["env"]["DSH_HOME"]), run["home"]
 assert run["env"]["DSH_TELEMETRY_MODE"] == "DISABLED" and "sk-test-0123456789" not in json.dumps(run), run["env"]
 assert re.fullmatch(r"http://127\.0\.0\.1:\d+/anthropic", run["env"]["DEEPSEEK_BASE_URL"]), run["env"]
 assert "GH_TOKEN" not in run["env"] and "ghp_" not in json.dumps(run["env"]), run["env"]
@@ -209,8 +217,8 @@ assert "reasoningEffort: max" in run["overlay"] and "maxTokens: 384000" in run["
 box, = boxes()
 assert {"--unshare-all", "--die-with-parent"} <= set(box["args"]) and "--share-net" not in box["args"], box["args"]
 mounted = {(k, d) for k, src, d in box["binds"] if src == d}
-assert ("--ro-bind", snap) in mounted and ("--bind", f"{tmp}/home/.dsh") in mounted, mounted
-assert not any(d.startswith(f"{tmp}/state") and d != snap or d == f"{tmp}/home" or d.startswith(f"{tmp}/home/.codex")
+assert ("--ro-bind", snap) in mounted and ("--bind", run["env"]["DSH_HOME"]) in mounted, mounted
+assert not any(d.startswith(f"{tmp}/state") and d != snap or d.startswith(f"{tmp}/home/") and not d.endswith("/.gitconfig") or d == f"{tmp}/home"
                for k, src, d in box["binds"]), box["binds"]
 # git trusts that one snapshot, which isn't the reviewers' own.
 assert box["gitconfig"] == [f"[safe]\n\tdirectory = {snap}\n"], box["gitconfig"]
