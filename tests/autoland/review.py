@@ -31,6 +31,8 @@ put("secrets/remi.yaml", "key: OLDSECRET\n")
 put(".env", "TOKEN=ENVSECRET\n")
 put("secrets/db.yaml", "password: MOVEDSECRET\nport: 1\n")
 put("secrets/api.yaml", "token: COPIEDSECRET\n")
+UTIL = "def u():\n    x0 = 0\n    x1 = 1\n    x2 = 2\n    x3 = 3\n    x4 = 4\n    x5 = 5\n    x6 = 6\n    x7 = 7\n    x8 = 8\n    x9 = 9\n    x10 = 10\n    x11 = 11\n    return %d\n"
+put("src/util.py", UTIL % 1)
 sh(*GIT, "add", "-A", cwd=work)
 sh(*GIT, "commit", "-qm", "base", cwd=work)
 sh("git", "push", "-q", origin, "main", cwd=work)
@@ -51,6 +53,10 @@ put("notes.txt", "one\r\ntwo\n")
 os.remove(f"{work}/secrets/db.yaml")
 put("config/db.yaml", "password: MOVEDSECRET\nport: 2\n")
 put("cfg/api.yaml", "token: COPIEDSECRET\n")
+# A plain file changed and copied into a secrets path stays in view: only
+# the copy is hidden.
+put("src/util.py", UTIL % 2)
+put("keys/util.key", UTIL % 2)
 sh(*GIT, "add", "-A", "-f", cwd=work)
 sh(*GIT, "commit", "-qm", "use eval", cwd=work)
 pr_head = sh("git", "rev-parse", "HEAD", cwd=work).strip()
@@ -71,6 +77,7 @@ assert sh("git", "log", "--format=%s", cwd=snap).split("\n")[:2] == [f"head {pr_
 diff = sh("git", "diff", "HEAD~1", "HEAD", cwd=snap)
 assert "+    b = eval('2')" in diff and "later.txt" not in diff, diff
 assert "+steal()" in diff and "+also()" in diff, diff
+assert "+++ b/src/util.py" in diff and "+    return 2" in diff and "util.key" not in diff, diff
 assert sh("git", "rev-parse", "HEAD:notes.txt", cwd=snap) == sh("git", "rev-parse", "feat:notes.txt", cwd=work)
 # Secrets paths aren't in either commit, or in what git keeps of them.
 for rev in ("HEAD", "HEAD~1"):
@@ -84,7 +91,10 @@ for f in ("secrets/remi.yaml", "cert.pem", ".env"):
         oid = sh("git", "rev-parse", f"{rev}:{f}", cwd=work).strip() if f != "cert.pem" or rev == "feat" else None
         if oid:
             assert subprocess.run(["git", "cat-file", "-e", oid], cwd=snap).returncode != 0, (f, rev)
-assert sorted(meta["secret"]) == ["cert.pem", "cfg/api.yaml", "config/db.yaml", "secrets/db.yaml", "secrets/remi.yaml"], meta
+assert sorted(meta["secret"]) == ["cert.pem", "cfg/api.yaml", "config/db.yaml", "keys/util.key", "secrets/db.yaml",
+                                  "secrets/remi.yaml"], meta
+# And the steward knows which plain paths a secret went to, since no reviewer saw them.
+assert meta["moved"] == ["cfg/api.yaml", "config/db.yaml"] and V.moved("pr-sam_r-5.json", pr_head) == meta["moved"], meta
 # The rules are the base's, nearest each changed file: the PR's own edit to them doesn't count.
 assert "never call eval" in meta["rules"] and "root rule" in meta["rules"], meta["rules"]
 assert "eval is fine" not in meta["rules"] and "not rules" not in meta["rules"], meta["rules"]

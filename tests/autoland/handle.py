@@ -72,6 +72,13 @@ fresh_pr_state()
 status, _ = run(clean(files=[".github/workflows/ci.yml", "a.py"]), 700)
 assert "state=success" in status and merged() and JOBS == [], (status, WROTE)
 
+# A secret renamed or copied to a plain path, which the reviewers' snapshot
+# hid from them: their clean reviews don't cover it, so it's judged.
+fresh_pr_state()
+C.save(f"{V.SNAP}/{V.snap_name('pr-sam_r-5.json', head)}.json", {"rules": "", "secret": ["cfg/api.yaml"], "moved": ["cfg/api.yaml"]})
+status, _ = run(clean(), 700)
+assert len(JOBS) == 1 and not merged() and "secret's contents in cfg/api.yaml" in JOBS[0], (status, JOBS)
+
 # A migration: one judge job a head, and its verdict on that head decides.
 fresh_pr_state()
 mig = {"files": ["migrations/0002_drop.sql"], "number": 6}
@@ -615,10 +622,21 @@ assert queued() == ["deepseek"] and os.listdir(DDIR) == []
 worker()
 STUB["post"] = RuntimeError("GitHub didn't take the review")
 status, _ = run(mkpr(reviews=[cx]), 620)
-assert len(os.listdir(DDIR)) == 1 and pr_state()["rv"]["deepseek"]["fails"] == 1 and not merged(), status
+assert len(os.listdir(DDIR)) == 1 and pr_state()["rv"]["deepseek"]["fails"] == 2 and not merged(), status
 STUB["post"] = None
 status, _ = run(mkpr(reviews=[cx]), 630)
 assert POSTED == [("deepseek", head, 0)] and os.listdir(DDIR) == [] and merged(), status
+# Turned down three times, it's dropped and the owner hears, not posted forever.
+fresh_pr_state()
+run(mkpr(reviews=[cx]), 0)
+run(mkpr(reviews=[cx]), 600)
+worker()
+STUB["post"] = RuntimeError("GitHub didn't take the review")
+for i in range(3):
+    status, digest = run(mkpr(reviews=[cx]), 610 + i)
+STUB["post"] = None
+assert os.listdir(DDIR) == [] and queued() == [] and pr_state()["rv"]["deepseek"]["fails"] == 3, status
+assert any(x[0] == "DeepSeek couldn't review it" for x in digest) and not merged(), digest
 # A snapshot that can't be taken is a failed try too.
 fresh_pr_state()
 run(mkpr(reviews=[cx]), 0)
@@ -671,6 +689,14 @@ run(mkpr(number=6), 1400)
 assert queued() == ["deepseek"]
 run(mkpr(number=6), 4300)
 assert queued() == ["codex", "deepseek"]
+# The owner hears one is out, once however many PRs find it so.
+fresh_pr_state()
+C.save(V.OUT, {"codex": {"why": "it isn't logged in", "until": C.ts(T0) + 86400}})
+digest = []
+for num in (5, 6):
+    S.handle("sam/r", mkpr(number=num), info, digest)
+assert [x for x in digest if x[0] == "A reviewer is out of service"] == [
+    ("A reviewer is out of service", "Codex", "it isn't logged in")], digest
 # Every reviewer out: the owner hears, and nothing is queued or landed.
 fresh_pr_state()
 C.save(V.OUT, {r: {"why": "spent", "until": C.ts(T0) + 86400} for r in V.NAMES})

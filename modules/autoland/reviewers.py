@@ -142,8 +142,9 @@ def snapshot(repo, pr, key):
         f"+refs/pull/{n}/head:refs/pr/{n}", f"+refs/heads/{base}:refs/base/{base}")
     mb = git("-C", mirror, "merge-base", f"refs/base/{base}", head).decode().strip()
     changed = [p for p in git("-C", mirror, "diff", "-z", "--name-only", "--no-renames", mb, head).decode().split("\0") if p]
-    # A secret renamed or copied to a plain path is still a secret: either
-    # name hides both.
+    # A secret renamed or copied to a plain path is still a secret, so its
+    # new name is hidden too. A plain file copied into a secrets path stays
+    # in view: only the copy is hidden, by its own path.
     moved = set()
     out = git("-C", mirror, "diff", "-z", "--name-status", "-M", "-C", "--find-copies-harder", mb, head).decode().split("\0")
     i = 0
@@ -151,8 +152,8 @@ def snapshot(repo, pr, key):
         status = out[i]
         if status[:1] in ("R", "C"):
             src, dst_ = out[i + 1], out[i + 2]
-            if hidden(src) or hidden(dst_):
-                moved |= {src, dst_}
+            if hidden(src):
+                moved.add(dst_)
             i += 3
         else:
             i += 2
@@ -194,7 +195,8 @@ def snapshot(repo, pr, key):
     git("-C", dst, "fetch", "-q", "--no-tags", mirror, f"refs/snap/{name}:refs/heads/review", env=bare)
     git("-C", mirror, "update-ref", "-d", f"refs/snap/{name}")
     git("-C", dst, "checkout", "-q", "review", env=bare)
-    meta = {"rules": rules(mirror, f"refs/base/{base}", changed), "secret": [p for p in changed if hidden(p) or p in moved]}
+    meta = {"rules": rules(mirror, f"refs/base/{base}", changed), "secret": [p for p in changed if hidden(p) or p in moved],
+            "moved": sorted(p for p in moved if not hidden(p))}
     save(f"{SNAP}/{name}.json", meta)
     return name, meta
 
@@ -237,6 +239,12 @@ def queue(repo, pr, key, r):
         "reviewer": r, "snap": snap, "repo": repo, "number": pr["number"], "headRefOid": pr["headRefOid"],
         "baseRefName": pr["baseRefName"], "title": pr["title"], "rules": meta["rules"], "secret": meta["secret"],
         "prior": prior(repo, pr["number"], r), "at": C.NOW})
+
+
+def moved(key, head):
+    """Plain paths a secret was renamed or copied to on this head, by its
+    snapshot: no reviewer saw them. [] until the snapshot's taken."""
+    return (load(f"{SNAP}/{snap_name(key, head)}.json", None) or {}).get("moved", [])
 
 
 def drop(name):
@@ -356,7 +364,9 @@ def post(repo, pr, r, answer):
     n, head = pr["number"], pr["headRefOid"]
     # Anything but a list of findings is no review at all, never a clean one.
     found = answer.get("findings") if isinstance(answer, dict) else None
-    if not isinstance(found, list) or not all(isinstance(f, dict) for f in found):
+    text = ("path", "title", "body")
+    if (not isinstance(found, list) or not isinstance(answer.get("summary", ""), str)
+            or not all(isinstance(f, dict) and all(isinstance(f.get(k, ""), str) for k in text) for f in found)):
         raise ValueError(f"not a review: {json.dumps(answer)[:100]}")
     diff = C.gh("api", "-H", "Accept: application/vnd.github.diff",
                 f"repos/{repo}/compare/{pr['baseRefName']}...{head}", check=False)

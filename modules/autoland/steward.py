@@ -650,8 +650,17 @@ def handle(repo, pr, repo_info, digest):
     # service (its usage spent, say) isn't waited for meanwhile. Each review
     # is queued for the reviewers' own service; a pass posts what comes back.
     names = V.on(repo)
+    # A secret renamed or copied to a plain path: hidden from the reviewers,
+    # so their clean reviews don't cover it, and it would publish the secret.
+    secret_moved = V.moved(key, head)
     away = {r: V.out(r) for r in names}
     live = [r for r in names if not away[r]]
+    for r in names:
+        # Once a pass, whichever PR finds it out, while the others carry on
+        # without it (with none left, the PR says so below): logging it back
+        # in, say, is the owner's to do.
+        if live and away[r] and not any(x[:2] == ("A reviewer is out of service", V.NAMES[r]) for x in digest):
+            digest.append(("A reviewer is out of service", V.NAMES[r], away[r]))
     said = {r: V.verdict(pr, head, r) for r in live}  # verdict, when, rounds with findings
 
     def consume(r):
@@ -669,9 +678,11 @@ def handle(repo, pr, repo_info, digest):
                 except ValueError as e:  # an answer that's no review
                     rs["fails"], rs["failedAt"] = rs.get("fails", 0) + 1, C.NOW
                     log(f"{tag}: {V.NAMES[r]}'s answer wasn't a review ({rs['fails']}): {e}")
-                except RuntimeError as e:  # GitHub: the same answer is posted next pass
-                    log(f"{tag}: couldn't post {V.NAMES[r]}'s review: {e}")
-                    return
+                except RuntimeError as e:  # GitHub: the same answer goes again next pass, twice more
+                    rs["fails"], rs["failedAt"] = rs.get("fails", 0) + 1, C.NOW
+                    log(f"{tag}: couldn't post {V.NAMES[r]}'s review ({rs['fails']}): {e}")
+                    if rs["fails"] < 3:
+                        return
             elif back["result"] == "out":
                 o = load(V.OUT, {})
                 o[r] = {"why": back["why"], "until": back["until"]}
@@ -801,9 +812,10 @@ def handle(repo, pr, repo_info, digest):
         prove()
     elif ci == "pending":
         settle("pending", "Settled; waiting for CI: " + ", ".join(ci_names)[:90])
-    elif gate or ci == "none" or asked:
-        judged(f"it touches {gate}" if gate else "the repo has no CI" if ci == "none"
-               else "a Claude job was asked to judge this head")
+    elif gate or secret_moved or ci == "none" or asked:
+        judged(f"it touches {gate}" if gate else
+               f"it puts a secret's contents in {', '.join(secret_moved)}, which no reviewer could be shown" if secret_moved
+               else "the repo has no CI" if ci == "none" else "a Claude job was asked to judge this head")
     else:
         land_now(f"{' and '.join(V.NAMES[r] for r in live)} found nothing on this commit, every thread is resolved, CI is green")
 

@@ -116,7 +116,9 @@ assert "**Codex review** of aaaaaaa: nothing found." in json.loads(WROTE[0][1])[
 
 # An answer without a list of findings is no review, never a clean one; one
 # GitHub won't take is a different failure (the same answer goes next pass).
-for bad in ({"summary": "couldn't finish"}, {"findings": None}, {"findings": ["x"]}, ["not", "a", "dict"]):
+for bad in ({"summary": "couldn't finish"}, {"findings": None}, {"findings": ["x"]}, ["not", "a", "dict"],
+            {"findings": [{"path": ["src/app.py"], "line": 1}]}, {"findings": [{"path": "src/app.py", "title": {}}]},
+            {"findings": [], "summary": 3}):
     try:
         V.post("sam/r", pr, "deepseek", bad)
         raise AssertionError(f"{bad} passed as a review")
