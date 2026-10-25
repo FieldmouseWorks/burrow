@@ -253,6 +253,14 @@ for repo in "${looked[@]}"; do
     rm -f "$f"
   fi
 done
+# A full pass: a repo no longer here (its clone gone) is out of reach no more.
+if [ -z "$only" ]; then
+  for f in "$STATE"/.unreached/*; do
+    [ -e "$f" ] || continue
+    n=${f##*/}
+    [ -n "${project[${n/_//}]:-}" ] || rm -f "$f"
+  done
+fi
 
 # Not a failed unit: one would read as a broken update in the health check
 # after a switch. The journal says it every pass, the owner after an hour.

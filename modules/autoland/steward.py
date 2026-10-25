@@ -850,15 +850,15 @@ def main():
     if kick is not None:
         digest = {**{k: v for k, v in load("digest-repos.json", {}).items() if k not in seen}, **digest}
     save("digest-repos.json", digest)
+    if kick is None:
+        # For renovate-sweep: it lists the ok majors of the repos this pass
+        # didn't see to (one whose pass failed among them), and tells its
+        # jobs how every repo's proofs run.
+        save("repos.json", coverage(repos, covered))
+        save("known.json", sorted(known))
+        save("baseline-failed.json", failed)
+    # Last: GitHub failing it leaves the pass's state saved.
     R.publish([tuple(x) for repo in sorted(digest) for x in digest[repo]])
-    if kick is not None:
-        return
-    # For renovate-sweep: it lists the ok majors of the repos this pass didn't
-    # see to (one whose pass failed among them), and tells its jobs how every
-    # repo's proofs run.
-    save("repos.json", coverage(repos, covered))
-    save("known.json", sorted(known))
-    save("baseline-failed.json", failed)
 
 
 if __name__ == "__main__":

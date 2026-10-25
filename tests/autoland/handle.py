@@ -346,7 +346,15 @@ assert S.coverage([{"repo": "sam/r"}], [{"repo": "sam/r"}]) == {
 kept_fns = (S.R.discover, S.R.settle_repo, S.R.publish, S.open_prs)
 S.R.discover = lambda: [{"repo": "sam/r"}, {"repo": "sam/bad"}, {"repo": "sam/flaky"}]
 S.R.settle_repo = lambda r, known: False
-S.R.publish = lambda digest: None
+# The owner's issue can't be updated (GitHub down): the pass's state is
+# saved all the same.
+
+
+def publish(digest):
+    raise RuntimeError("GitHub is down")
+
+
+S.R.publish = publish
 
 
 def some_prs(owner, name):
@@ -357,7 +365,15 @@ def some_prs(owner, name):
 
 
 S.open_prs = some_prs
-S.main()
+for f in ("repos.json", "known.json"):
+    if os.path.exists(f"{tmp}/state/{f}"):
+        os.remove(f"{tmp}/state/{f}")
+try:
+    S.main()
+    raise AssertionError("publish's failure was swallowed")
+except RuntimeError:
+    pass
+assert os.path.exists(f"{tmp}/state/known.json")
 S.R.discover, S.R.settle_repo, S.R.publish, S.open_prs = kept_fns
 written = json.load(open(f"{tmp}/state/repos.json"))["repos"]
 assert {r: v["covered"] for r, v in written.items()} == {"sam/r": True, "sam/bad": False, "sam/flaky": False}, written

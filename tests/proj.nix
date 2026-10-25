@@ -284,6 +284,10 @@ pkgs.testers.runNixOSTest {
         # Retried in five minutes: the past deadline doesn't take its place.
         wake = json.loads(machine.succeed("cat /var/lib/burrow/proj-watch/wake.json"))
         assert before + 300 <= wake["o/r"] <= int(machine.succeed("date +%s")) + 300, wake
+        # A look at another repo keeps o/r's retry.
+        machine.execute("su - dev -c 'XDG_RUNTIME_DIR=/nonexistent proj _watch o/q'")
+        kept = json.loads(machine.succeed("cat /var/lib/burrow/proj-watch/wake.json"))
+        assert kept.get("o/r") == wake["o/r"], kept
         proj("_watch")
         machine.wait_until_succeeds(f"grep -x 2 /data/dev/jobs/{e}/turns", timeout=30)
 
@@ -515,6 +519,10 @@ pkgs.testers.runNixOSTest {
         machine.succeed(f"test -s {gone}/o_r")
         machine.succeed("mv /tmp/gh/kept /tmp/gh/repos_o_r_issues")
         machine.succeed("su - dev -c 'proj-inbox o/r'")
+        assert machine.succeed(f"ls -A {gone}").strip() == "", machine.succeed(f"ls -A {gone}")
+        # One whose clone is gone is out of reach no more, after a full pass.
+        machine.succeed(f"su - dev -c 'echo 0 >{gone}/sam_gone'")
+        machine.succeed("su - dev -c proj-inbox")
         assert machine.succeed(f"ls -A {gone}").strip() == "", machine.succeed(f"ls -A {gone}")
 
     with subtest("a wait proj can't read is news, and doesn't stop _watch"):
