@@ -1,95 +1,146 @@
 """What the steward's checks share (check.py runs them): its config and
-state in a temp dir, stand-ins for gh, Claude jobs and DeepSeek's API, and
-PRs shaped like its query's."""
+state in a temp dir; stand-ins for gh, Claude jobs, GitHub's git remote and
+the review agents (each records how it was run, then does what it's told);
+and PRs shaped like its query's."""
 
-import http.server
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
-import threading
 
 tmp = tempfile.mkdtemp()
-
-# DeepSeek: answers every request with ANSWER, as JSON in the message.
-REQS, ANSWER = [], {}
-
-
-class API(http.server.BaseHTTPRequestHandler):
-    def do_POST(self):
-        req = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
-        REQS.append((self.headers["Authorization"], req, self.path))
-        if "tools" in req and ANSWER.get("noBeta"):
-            self.send_response(400)
-            self.end_headers()
-            return
-        # ANSWER["junk"]: that many answers that aren't JSON come first;
-        # ANSWER["long"]: efforts that think past max_tokens.
-        junk = ANSWER.get("junk", 0) > 0
-        ANSWER["junk"] = ANSWER.get("junk", 0) - 1
-        long = req["reasoning_effort"] in ANSWER.get("long", ())
-        text = "" if junk or long else json.dumps(ANSWER["v"])
-        if "tools" in req and not long:
-            msg = {"content": "", "tool_calls": [{"type": "function", "function": {"name": "submit_review", "arguments": text}}]}
-        else:
-            msg = {"content": text}
-        why = "length" if long else "tool_calls" if "tools" in req else "stop"
-        # A long call keeps the line alive with blank lines first.
-        out = b"\n\n" + json.dumps({"choices": [{"message": msg, "finish_reason": why}]}).encode()
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.end_headers()
-        self.wfile.write(out)
-
-    def log_message(self, *a):
-        pass
-
-
-srv = http.server.HTTPServer(("127.0.0.1", 0), API)
-threading.Thread(target=srv.serve_forever, daemon=True).start()
-
 os.makedirs(f"{tmp}/state")
 os.makedirs(f"{tmp}/cred")
+os.makedirs(f"{tmp}/home")
 with open(f"{tmp}/cred/deepseek", "w") as f:
-    f.write('DEEPSEEK_API_KEY=sk-test\nDEEPSEEK_MODEL="m-test"\n')
+    f.write('DEEPSEEK_API_KEY="sk-test-0123456789"\n')
+
+# The review agents: each records how it was run, then does what AGENT says
+# (requests to send out, then an answer, or an error on stderr and an exit
+# code). What came back to the requests goes in HTTP_LOG.
+AGENT_LOG, AGENT, HTTP_LOG = f"{tmp}/agent-log", f"{tmp}/agent.json", f"{tmp}/http-log"
+os.makedirs(f"{tmp}/agents")
+for name in ("codex", "dsh"):
+    with open(f"{tmp}/agents/{name}", "w") as f:
+        f.write(f"""#!{sys.executable}
+import json, os, socket, sys, time, urllib.parse
+args = sys.argv[1:]
+prompt = sys.stdin.read()
+with open({AGENT_LOG!r}, "a") as f:
+    f.write(json.dumps({{"agent": {name!r}, "args": args, "cwd": os.getcwd(), "env": dict(os.environ), "prompt": prompt,
+                        "overlay": open(args[args.index("--patch") + 1]).read() if "--patch" in args else None}}) + "\\n")
+do = json.load(open({AGENT!r})).get({name!r}, {{}})
+time.sleep(do.get("sleep", 0))
+for req in do.get("http", []):
+    u = urllib.parse.urlsplit(os.environ[req["env"]])
+    c = socket.create_connection((u.hostname, u.port))
+    c.sendall(req["send"].replace("{{path}}", u.path).encode())
+    got = b""
+    while data := c.recv(65536):
+        got += data
+    with open({HTTP_LOG!r}, "a") as f:
+        f.write(json.dumps(got.decode()) + "\\n")
+if "effort" in do and do["effort"] not in json.dumps(args) + (open(args[args.index("--patch") + 1]).read() if "--patch" in args else ""):
+    print("dsh: error: thought too long", file=sys.stderr); sys.exit(1)
+if do.get("rc"):
+    print(do["err"], file=sys.stderr); sys.exit(do["rc"])
+out = do.get("say", "Looked.\\n" + json.dumps(do.get("answer", {{"findings": [], "summary": "fine"}})))
+if "-o" in args:  # codex writes its last message there, and prints it too
+    open(args[args.index("-o") + 1], "w").write(out)
+print(out)
+""")
+    os.chmod(f"{tmp}/agents/{name}", 0o755)
+
+
+# The sandbox: records how it was set up (and the git config it was given),
+# then runs the agent where it says.
+BOX_LOG = f"{tmp}/box-log"
+with open(f"{tmp}/bwrap", "w") as f:
+    f.write(f"""#!{sys.executable}
+import json, os, sys
+a = sys.argv[1:]
+cut = a.index("--")
+binds = [(a[i], a[i + 1], a[i + 2]) for i in range(cut) if a[i] in ("--bind", "--ro-bind", "--ro-bind-try")]
+git = [open(s).read() for k, s, d in binds if d.endswith("/.gitconfig")]
+with open({BOX_LOG!r}, "a") as f:
+    f.write(json.dumps({{"args": a[:cut], "binds": binds, "gitconfig": git}}) + "\\n")
+os.chdir(a[a.index("--chdir") + 1])
+os.execv(a[cut + 1], a[cut + 1:])
+""")
+os.chmod(f"{tmp}/bwrap", 0o755)
+
+
+def boxes():
+    runs = [json.loads(x) for x in open(BOX_LOG)]
+    open(BOX_LOG, "w").close()
+    return runs
+
+
+def agent(**do):
+    with open(AGENT, "w") as f:
+        json.dump(do, f)
+    open(AGENT_LOG, "w").close()
+
+
+def agent_runs():
+    return [json.loads(x) for x in open(AGENT_LOG)]
+
+
+def http_said():
+    """What came back to the agents' requests, since last asked."""
+    said = [json.loads(x) for x in open(HTTP_LOG)] if os.path.exists(HTTP_LOG) else []
+    open(HTTP_LOG, "w").close()
+    return said
+
+
+agent()
 # The module's default one-way paths.
 with open(sys.argv[2]) as f:
     ONE_WAY = json.load(f)
 with open(f"{tmp}/config.json", "w") as f:
     json.dump({
         "owners": ["sam"], "exclude": [], "context": "review-settled", "rulesets": True, "keepBranches": [],
-        "baselineJobs": False, "baselinePerPass": 1, "authors": ["sam", "dependabot", "renovate"], "codexLogin": "chatgpt-codex-connector",
+        "baselineJobs": False, "baselinePerPass": 1, "authors": ["sam", "dependabot", "renovate"],
         "stateDir": f"{tmp}/state", "projectsDir": f"{tmp}/none", "renovateEmail": "bot@renovateapp.com", "proj": "proj", "owner": "Sam", "cleanBranches": False,
         "labels": {"hold": "hold", "owner": "needs-owner"}, "notify": {"repo": "", "assignee": "", "label": "autoland"},
         "defaults": {"rounds": 5,
-                     "oneWay": ONE_WAY, "handoffAfter": 30, "settleDelay": 3, "codexTimeout": 45,
+                     "oneWay": ONE_WAY, "handoffAfter": 30, "settleDelay": 3,
                      "directPush": False, "ruleset": True, "requireCi": True,
-                     "proofJobs": {}, "deepseek": True},
+                     "proofJobs": {}, "codex": True, "deepseek": True},
         "repos": {},
-        "deepseek": {"enable": True, "baseUrl": f"http://127.0.0.1:{srv.server_port}", "effort": "max",
-                     "skipPaths": ["(^|/)secrets?/", r"\.(pem|key|p12|pfx)$", r"(^|/)\.env(\..*)?$"], "maxDiffChars": 800000, "parallel": 2, "maxTokens": 1000,
-                     "timeout": 30, "caFile": None},
+        "reviewers": {"codex": {"enable": True, "effort": "high", "parallel": 2},
+                      "deepseek": {"enable": True, "effort": "max", "parallel": 2}},
+        "skipPaths": ["(^|/)secrets?/", r"\.(pem|key|p12|pfx)$", r"(^|/)\.env(\..*)?$"],
+        "agents": f"{tmp}/agents",
+        "sandbox": f"{tmp}/bwrap",
     }, f)
 os.environ["AUTOLAND_CONFIG"] = f"{tmp}/config.json"
 os.environ["CREDENTIALS_DIRECTORY"] = f"{tmp}/cred"
+os.environ["HOME"] = f"{tmp}/home"
+os.environ["GH_TOKEN"] = "ghp_steward_token"  # never passed on to an agent
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(sys.argv[1])))
 sys.argv = ["steward"]
-import common as C  # noqa: E402
-import deepseek as D  # noqa: E402
-import repos as R  # noqa: E402,F401 (for the checks)
-import steward as S  # noqa: E402
-D.ssl.create_default_context = lambda cafile=None: None  # plain http here
+import common as C  # noqa: E402,F401
+import repos as R  # noqa: E402,F401
+import review_worker as W  # noqa: E402,F401
+import reviewers as V  # noqa: E402,F401
+import steward as S  # noqa: E402,F401
+REAL_GH = C.gh  # the real one, before any check stands in for it
+
+for d in (V.QUEUE, V.SNAP, V.DONE, V.GIT):
+    os.makedirs(f"{tmp}/state/{d}")
+
+
+def sh(*a, cwd=None):
+    return subprocess.run(a, cwd=cwd, check=True, capture_output=True, text=True).stdout
+
+
 head = "a" * 40
-
-WROTE, RUNS, JOBS, RESULT = [], [], [], {"v": "clean"}
-CUR = {"sha": head}  # the PR's head as the DeepSeek worker finds it
-
-
+WROTE, JOBS, POSTED = [], [], []
 COMMITS = {}  # a PR's commits' author emails, by number, as `pr view --json commits` gives them
-
-
 PR_DIFF = {"v": ""}  # what `gh pr diff` gives
 
 
@@ -102,8 +153,6 @@ def gh_stub(*a, **k):
         return {"allow_auto_merge": True, "delete_branch_on_merge": True, "allow_squash_merge": True}
     if a[:2] == ("pr", "diff"):
         return PR_DIFF["v"]
-    if a[:2] == ("api", "repos/sam/r/pulls/5"):
-        return {"state": "open", "sha": CUR["sha"]}
     return ""
 
 
@@ -115,16 +164,30 @@ def write(*a, **k):
     return None if any(f in " ".join(a) for f in FAIL) else {}
 
 
-def run_deepseek(repo, pr):
-    RUNS.append(pr["headRefOid"])
-    if RESULT["v"] == "down":
-        raise RuntimeError("down")
-    return RESULT["v"]
-
-
 def job(repo, task, clone=False):
     JOBS.append(task)
     return f"job-{len(JOBS)}"
+
+
+# The snapshot and the posting have their own checks (review.py, post.py):
+# for handle() a queued review is a file, and a posted one is a line in POSTED.
+STUB = {"queue": None, "post": None}  # an error each raises, when set
+
+
+def queue(repo, pr, key, r):
+    if STUB["queue"]:
+        raise STUB["queue"]
+    C.save(f"{V.QUEUE}/{V.item_name(key, r, pr['headRefOid'], pr['baseRefName'])}.json",
+           {"reviewer": r, "repo": repo, "number": pr["number"], "headRefOid": pr["headRefOid"]})
+
+
+def post(repo, pr, r, answer):
+    if STUB["post"]:
+        raise STUB["post"]
+    if not isinstance(answer, dict) or not isinstance(answer.get("findings"), list):
+        raise ValueError("not a review")
+    POSTED.append((r, pr["headRefOid"], len(answer["findings"])))
+    return "findings" if answer["findings"] else "clean"
 
 
 STATES = {}  # a job's state, by id, as `proj state` says it: running unless set
@@ -133,15 +196,10 @@ T = C.ts(T0)
 info = {"squashMergeAllowed": True, "mergeCommitAllowed": False, "rebaseMergeAllowed": False}
 
 
-def codex_clean(sha=head):
-    return {"author": {"login": "chatgpt-codex-connector"}, "createdAt": T0, "updatedAt": T0, "databaseId": 1,
-            "body": "<!-- codex-review-state:v1 " + json.dumps(
-                {"code_review": {"commit_sha": sha, "has_any_findings": False, "status": "completed"}}) + " -->"}
-
-
-def ds_review(k, sha=head, at="2026-10-24T00:11:00Z"):
-    return {"author": {"login": "sam"}, "state": "COMMENTED", "submittedAt": at, "commit": {"oid": sha},
-            "body": "<!-- deepseek-review:v1 " + json.dumps({"commit_sha": sha, "findings": k}) + " -->"}
+def rv_review(r, k, sha=head, at="2026-10-24T00:11:00Z", who="sam", base="main"):
+    """A review the steward posted for reviewer r, with k findings."""
+    return {"author": {"login": who}, "state": "COMMENTED", "submittedAt": at, "commit": {"oid": sha},
+            "body": f"<!-- {r}-review:v1 " + json.dumps({"commit_sha": sha, "base": base, "findings": k}) + " -->"}
 
 
 def judgment(v, n=6, sha=head, base="main"):
@@ -173,20 +231,22 @@ def mkpr(reviews=(), comments=(), threads=(), draft=False, number=5, sha=head, f
     }
 
 
-def clean(sha=head, comments=(), **kw):
-    """A PR both reviewers found nothing on, at `sha`."""
-    return mkpr(reviews=[ds_review(0, sha)], comments=[codex_clean(sha), *comments], sha=sha, **kw)
+def clean(sha=head, comments=(), reviews=(), **kw):
+    """A PR both reviewers found nothing on, at `sha` on its base."""
+    base = kw.get("base", "main")
+    return mkpr(reviews=[*reviews, rv_review("codex", 0, sha, base=base), rv_review("deepseek", 0, sha, base=base)],
+                comments=comments, sha=sha, **kw)
 
 
-QDIR, DDIR = f"{tmp}/state/{D.QUEUE}", f"{tmp}/state/{D.DONE}"
+QDIR, DDIR = f"{tmp}/state/{V.QUEUE}", f"{tmp}/state/{V.DONE}"
 
 
 def run(pr, after):
     """One pass, `after` seconds after the head first showed up."""
     C.NOW = C.ts(T0) + after
     WROTE.clear()
-    RUNS.clear()
     JOBS.clear()
+    POSTED.clear()
     digest = []
     S.handle("sam/r", pr, info, digest)
     return " ".join(x for x in WROTE if "/statuses/" in x), digest
@@ -197,26 +257,34 @@ def merged():
 
 
 def queued():
-    return [json.load(open(f"{QDIR}/{x}"))["headRefOid"] for x in os.listdir(QDIR) if x.endswith(".json")]
+    """The reviewers queued, one entry a review."""
+    return sorted(x.partition("--")[0] for x in os.listdir(QDIR))
 
 
-def worker():
-    """autoland-deepseek, through the queue."""
-    RUNS.clear()
-    D.deepseek_queue()
-    assert queued() == []
+def worker(**back):
+    """autoland-review, through the queue: each reviewer answers what
+    `back` says it does, a clean review unless told otherwise."""
+    for x in os.listdir(QDIR):
+        r = x.partition("--")[0]
+        C.save(f"{V.DONE}/{x}", {**back.get(r, {"result": "review", "answer": {"findings": []}}), "at": C.NOW})
+        os.remove(f"{QDIR}/{x}")
+
+
+def pr_state(n=5):
+    return json.load(open(f"{tmp}/state/pr-sam_r-{n}.json"))
 
 
 def fresh_pr_state():
     shutil.rmtree(f"{tmp}/state")
-    for d in (QDIR, DDIR):
-        os.makedirs(d)
+    for d in (V.QUEUE, V.SNAP, V.DONE, V.GIT):
+        os.makedirs(f"{tmp}/state/{d}")
 
 
 def stand_in():
-    """gh, Claude jobs and DeepSeek's reviews, for handle()."""
+    """gh, Claude jobs, the queue and the posting, for handle()."""
     C.gh = gh_stub
     C.write = write
     C.job = job
     C.job_state = lambda jid: STATES.get(jid, "running")
-    D.run_deepseek = run_deepseek
+    V.queue = queue
+    V.post = post

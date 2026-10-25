@@ -25,7 +25,7 @@ def fix_task(repo, pr, why, proofs=None):
     return (
         f"{about(repo, pr)} isn't settled: {why}. "
         "Settle it. Check out the branch in your own worktree (git worktree add) under the scratch dir, never in this checkout's main tree. "
-        "For every unresolved review thread (Codex's, DeepSeek's, which the steward posts under the owner's login marked DeepSeek, or anyone's): "
+        "For every unresolved review thread (the reviewers', which the steward posts under the owner's login marked Codex or DeepSeek, or anyone's): "
         "either fix it, push, and reply on the thread with the commit, "
         f"or reply with why it's wrong or out of scope; then resolve the thread (gh api graphql, resolveReviewThread). {CLAIMS}"
         "A review that requests changes is the same: address it, then reply on the PR saying what you did. "

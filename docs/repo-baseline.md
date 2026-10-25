@@ -29,10 +29,13 @@ change nothing else in the same PR.
 
 1. PRs are opened ready for review. A draft is work in progress: the steward
    leaves it alone (a pending `review-settled`, nothing else) until it's ready.
-2. Codex reviews the head (the steward asks with `@codex review`). Where
-   the machine turns on `burrow.autoland.deepseek`, DeepSeek reviews it too,
-   in the background: the steward sends it the diff and the Code Review Rules
-   below and posts its findings as review threads marked as DeepSeek's.
+2. The machine's reviewers (`burrow.autoland.reviewers`) review the head:
+   Codex through the codex CLI on the owner's ChatGPT plan, and DeepSeek
+   through DeepSeek Harness. The steward takes a snapshot of the change with
+   secrets paths left out; each agent reads it read-only, with no GitHub
+   login, and the steward posts its findings as review threads marked as
+   that reviewer's. One whose usage runs out is left out until it's back,
+   and PRs settle on the others meanwhile.
 3. Whoever opened the PR fixes each finding, or replies with why not, and
    resolves its thread. A Claude job on the machine takes over if nobody has
    after `handoffAfterMinutes`.
@@ -80,9 +83,10 @@ owner, since nothing else merges it.
   `nix flake check`. Jobs the flake can't hold stay alongside it.
 - **AGENTS.md** with the two sections below, plus whatever the repo's own
   agents need (how to build, test and run it). Keep the repo's existing text.
-  Codex (and DeepSeek) apply only the `## Code Review Rules` section of the AGENTS.md
-  nearest each changed file (`###` subheadings group its checks), so review
-  rules under any other heading move under that one.
+  The reviewers apply only the `## Code Review Rules` section of the
+  AGENTS.md nearest each changed file, as the base branch has it (`###`
+  subheadings group its checks), so review rules under any other heading
+  move under that one.
 - **The house block** in AGENTS.md: [`house/rules.md`](../house/rules.md),
   copied in verbatim with its marker lines, as [the house style](house-style.md)
   says, so the house sync can find and update it later.

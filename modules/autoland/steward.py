@@ -8,8 +8,9 @@ One pass (the timer runs it every couple of minutes):
      `baseline` ruleset); a repo seen for the first time also gets a Claude
      job that brings its files to docs/repo-baseline.md (repos.py).
   2. For each open PR that isn't a draft, work out where it stands and do
-     the next thing: ask Codex for a review (and queue one from DeepSeek, if
-     it's on: deepseek.py), hand open findings or red CI to a Claude job,
+     the next thing: queue a review of its head from each reviewer, Codex
+     and DeepSeek (reviewers.py), post what they found, hand open findings
+     or red CI to a Claude job,
      have a Claude job run the checks only a machine of the owner's runs
      (proofJobs) or judge a PR it won't land on its own word, post the
      `review-settled` commit status and merge it, or list it for the owner.
@@ -17,30 +18,28 @@ One pass (the timer runs it every couple of minutes):
      default branch, and list the stale unmerged ones.
   4. Keep one issue up to date with everything waiting for the owner.
 
-Everything talks to GitHub through `gh`, with the user's own login, so
-DeepSeek's reviews and the Claude jobs' verdicts are posted under it too.
+Everything talks to GitHub through `gh`, with the user's own login, so the
+reviewers' reviews and the Claude jobs' verdicts are posted under it too.
 Settings are in the JSON file $AUTOLAND_CONFIG (../autoland.nix). State is
 in config.stateDir: one JSON file per PR, one per repo.
 
 `autoland-steward status` prints what it thinks of every open PR without
 changing anything.
 
-`autoland-steward deepseek` works through the DeepSeek reviews the passes
-queued (config.stateDir/ds-queue), a few at once, and posts each one. A
-careful look takes DeepSeek many minutes, so it runs as its own service and
-no pass waits for it.
+`autoland-steward review` works through the reviews the passes queued
+(review_worker.py), as the reviewers' own user. A careful look takes an
+agent many minutes, so it runs as its own service and no pass waits for it.
 """
 
 import codecs
-import json
 import os
 import re
 import sys
 
 import common as C
-import deepseek as D
 import repos as R
-from common import CFG, CODEX, CONTEXT, DEP_RE, DRY, MIN, STATE, load, log, repo_cfg, save, ts
+import reviewers as V
+from common import CFG, CONTEXT, DEP_RE, DRY, MIN, STATE, load, log, repo_cfg, save, ts
 from tasks import DEP_SEEN, JUDGMENT, MAJOR_VERDICT, REVIEWED, fix_task, judge_task, proof_task
 
 
@@ -86,55 +85,6 @@ def open_prs(owner, name):
         if not page["pageInfo"]["hasNextPage"]:
             return info, prs
         cursor = page["pageInfo"]["endCursor"]
-
-
-STATE_RE = re.compile(r"codex-review-state:v1 (\{.*?\}) -->", re.S)
-RECEIPT_RE = re.compile(r"Reviewed commit:\*\*\s*`([0-9a-f]{7,40})`")
-
-
-def codex_verdict(pr, head, since):
-    """What Codex last said about this exact head: clean, findings, running,
-    failed, or none. `since` is when the head first showed up."""
-    events = []  # (time, verdict)
-    for c in pr["comments"]["nodes"]:
-        if (c["author"] or {}).get("login") != CODEX:
-            continue
-        body = c["body"]
-        m = STATE_RE.search(body)
-        if m:
-            try:
-                cr = json.loads(m.group(1))["code_review"]
-            except (ValueError, KeyError):
-                cr = {}
-            if cr.get("commit_sha") == head:
-                v = {"completed": "findings" if cr.get("has_any_findings") else "clean",
-                     "running": "running"}.get(cr.get("status"), "none")
-                events.append((ts(c["updatedAt"]), v))
-            continue
-        # A receipt names only a prefix of the commit: enough to count its
-        # findings, never to call a head clean (the summary above does that).
-        m = RECEIPT_RE.search(body)
-        if m and head.startswith(m.group(1)) and "find any major issues" not in body:
-            events.append((ts(c["createdAt"]), "findings"))
-        elif "Something went wrong" in body and ts(c["createdAt"]) >= since:
-            events.append((ts(c["createdAt"]), "failed"))
-    for r in pr["reviews"]["nodes"]:
-        if (r["author"] or {}).get("login") == CODEX and (r["commit"] or {}).get("oid") == head:
-            clean = "find any major issues" in (r["body"] or "")
-            events.append((ts(r["submittedAt"]), "clean" if clean else "findings"))
-    # Eyes (working on it) on the PR. A thumbs-up names no commit (it can be
-    # the end of a review of the previous head), so only the SHA-bound
-    # summary and receipts above can say clean. (Eyes on a request comment
-    # aren't read: the summary says "running" too, and reading every
-    # comment's reactions made each pass's query cost ~60 points a repo.)
-    for holder in [pr]:
-        for x in (holder.get("reactions") or {}).get("nodes", []):
-            if (x["user"] or {}).get("login") == CODEX and ts(x["createdAt"]) >= since and x["content"] == "EYES":
-                events.append((ts(x["createdAt"]), "running"))
-    if not events:
-        return "none", 0
-    t, v = max(events)
-    return v, t
 
 
 def ci_state(pr, proofs=()):
@@ -388,10 +338,9 @@ def handle(repo, pr, repo_info, digest):
     key = f"pr-{repo.replace('/', '_')}-{n}.json"
     st = load(key, {})
     if st.get("head") != head:
-        st.update(head=head, seen=C.NOW, asked=[], handed=None, landFails=0, ds={})
-    st.setdefault("base", 0)
-    st.setdefault("dsBase", 0)
-    st.setdefault("ds", {})
+        st.update(head=head, seen=C.NOW, handed=None, landFails=0, rv={})
+    st.setdefault("rv", {})
+    st.setdefault("rvBase", {})
     labels = {x["name"] for x in pr["labels"]["nodes"]}
     author = (pr["author"] or {}).get("login", "")
     age = C.NOW - st["seen"]
@@ -606,7 +555,7 @@ def handle(repo, pr, repo_info, digest):
     latest = {}
     for r in pr["reviews"]["nodes"]:
         who = (r["author"] or {}).get("login")
-        if who and who != CODEX and r["state"] in ("APPROVED", "CHANGES_REQUESTED", "DISMISSED"):
+        if who and r["state"] in ("APPROVED", "CHANGES_REQUESTED", "DISMISSED"):
             latest[who] = r["state"]
     changes = [w for w, s in latest.items() if s == "CHANGES_REQUESTED"]
     dep = dep_kind(pr)
@@ -618,7 +567,7 @@ def handle(repo, pr, repo_info, digest):
     # actions changes the gate. Either goes through the review loop below like
     # a Claude PR. While a Renovate one's CI is red it's renovate-sweep's to
     # hand over, findings and all: a job from each on one branch would push
-    # over each other. The sweep's push makes a new head, and Codex reads it
+    # over each other. The sweep's push makes a new head, and the reviewers read it
     # again.
     # A judge asked for on this head and base (the repo had no CI then, say)
     # still decides once CI shows up: its owner or failed verdict isn't
@@ -697,82 +646,107 @@ def handle(repo, pr, repo_info, digest):
         save(key, st)
         return
 
-    verdict, vtime = codex_verdict(pr, head, st["seen"])
-    # DeepSeek, where it's on, is a second reviewer: both have to find nothing.
-    use_ds = C.DS["enable"] and rc["deepseek"]
-    dsv, dstime, ds_rounds = D.deepseek_verdict(pr, head) if use_ds else ("clean", 0, 0)
-    codex_rounds = sum(1 for r in pr["reviews"]["nodes"] if (r["author"] or {}).get("login") == CODEX) - st["base"]
-    ds_rounds -= st["dsBase"]
+    # The reviewers (reviewers.py): every one this repo has, but one out of
+    # service (its usage spent, say) isn't waited for meanwhile. Each review
+    # is queued for the reviewers' own service; a pass posts what comes back.
+    names = V.on(repo)
+    # What the reviewers weren't shown: their clean reviews don't cover it,
+    # so a judge, who sees it all, looks before it lands.
+    unseen = V.unseen(key, head, pr["baseRefName"])
+    away = {r: V.out(r) for r in names}
+    live = [r for r in names if not away[r]]
+    for r in names:
+        # Once a pass, whichever PR finds it out, while the others carry on
+        # without it (with none left, the PR says so below): logging it back
+        # in, say, is the owner's to do.
+        if live and away[r] and not any(x[:2] == ("A reviewer is out of service", V.NAMES[r]) for x in digest):
+            digest.append(("A reviewer is out of service", V.NAMES[r], away[r]))
+    said = {r: V.verdict(pr, head, r) for r in live}  # verdict, when, rounds with findings
+
+    def consume(r):
+        """What came back from the reviewer's service for this head, if
+        anything: posted as its review, or counted as a failure."""
+        rs = st["rv"].setdefault(r, {})
+        name = V.item_name(key, r, head, pr["baseRefName"])
+        back = load(f"{V.DONE}/{name}.json", None)
+        if back and not DRY:
+            if back["result"] == "review":
+                try:
+                    v = V.post(repo, pr, r, back["answer"])
+                    _, _, rr = said[r]
+                    said[r] = (v, C.NOW, rr + (v == "findings"))
+                    rs.pop("fails", None)
+                    rs.pop("failedAt", None)
+                except ValueError as e:  # an answer that's no review
+                    rs["fails"], rs["failedAt"] = rs.get("fails", 0) + 1, C.NOW
+                    log(f"{tag}: {V.NAMES[r]}'s answer wasn't a review ({rs['fails']}): {e}")
+                except RuntimeError as e:  # GitHub: the same answer goes again next pass, twice more
+                    rs["fails"], rs["failedAt"] = rs.get("fails", 0) + 1, C.NOW
+                    log(f"{tag}: couldn't post {V.NAMES[r]}'s review ({rs['fails']}): {e}")
+                    if rs["fails"] < 3:
+                        return
+            elif back["result"] == "out":
+                o = load(V.OUT, {})
+                o[r] = {"why": back["why"], "until": back["until"]}
+                save(V.OUT, o)
+                log(f"{tag}: {V.NAMES[r]} is out of service until {back['until']:.0f}: {back['why']}")
+            else:  # the agent, the network, its JSON: tried again next pass
+                rs["fails"], rs["failedAt"] = rs.get("fails", 0) + 1, C.NOW
+                log(f"{tag}: {V.NAMES[r]}'s review failed ({rs['fails']}): {back.get('error', '')[:200]}")
+            V.drop(name)
+            rs.pop("queued", None)
+            rs.pop("gone", None)
+        elif rs.get("queued") and not DRY and not os.path.exists(os.path.join(STATE, V.QUEUE, name + ".json")):
+            # Out of the queue with nothing back. However long an agent
+            # thinks, its review stays queued until it's answered, so this
+            # is a lost one; seen on two passes, since the service may have
+            # answered between this pass's two looks.
+            if rs.get("gone"):
+                rs.pop("queued")
+                rs.pop("gone")
+                rs["fails"], rs["failedAt"] = rs.get("fails", 0) + 1, C.NOW
+                log(f"{tag}: the queued {V.NAMES[r]} review left the queue without an answer")
+            else:
+                rs["gone"] = True
+
+    for r in live:
+        consume(r)
+    live = [r for r in live if not V.out(r)]
+    rounds_of = {r: said[r][2] - st["rvBase"].get(r, 0) for r in live}
     if st.get("escalated") and CFG["labels"]["owner"] not in labels:
         # The owner took the label off: another full set of rounds.
-        st["base"] += codex_rounds
-        st["dsBase"] += ds_rounds
-        codex_rounds = ds_rounds = 0
+        for r in live:
+            st["rvBase"][r] = st["rvBase"].get(r, 0) + rounds_of[r]
+            rounds_of[r] = 0
         st["escalated"] = False
-    rounds = max(codex_rounds, ds_rounds)
-    reviewers = "Codex and DeepSeek" if use_ds else "Codex"
-    last_ask = max(st["asked"]) if st["asked"] else 0
+    rounds = max(rounds_of.values(), default=0)
+    clean = bool(live) and all(said[r][0] == "clean" for r in live)
 
-    def ask(why):
-        if len(st["asked"]) >= 4:
-            return False
-        log(f"{tag}: asking Codex ({why})")
-        C.comment(repo, n, f"@codex review\n\n{why}")
-        st["asked"].append(C.NOW)
-        return True
-
-    # DeepSeek's reviews are queued for its own service (`deepseek` below),
-    # which posts each one; this pass only reads what came back. One is on
-    # its way while it's queued and no review of this head is newer.
-    dst = st["ds"]
-    item = f"{key[:-5]}-{head[:12]}.json"
-    if use_ds:
-        back = load(f"{D.DONE}/{item}", None)
-        if back and not DRY:
-            os.remove(os.path.join(STATE, D.DONE, item))
-            dst.pop("queued", None)
-            if back.get("result") == "tooBig":
-                dst["tooBig"] = True
-            else:  # the API, the network, its JSON: tried again next pass
-                dst["fails"], dst["failedAt"] = dst.get("fails", 0) + 1, C.NOW
-                log(f"{tag}: DeepSeek review failed ({dst['fails']}): {back.get('error', '')[:200]}")
-        if dst.get("queued") and dstime >= dst["queued"]:
-            dst.pop("queued")  # it's back
-            dst.pop("gone", None)
-        elif dst.get("queued") and not os.path.exists(os.path.join(STATE, D.QUEUE, item)):
-            # Out of the queue with nothing back. However long DeepSeek
-            # thinks, the item stays queued until its review is posted, so
-            # this is a lost one; seen on two passes, since the first may
-            # have read the PR just before the review went up.
-            if dst.get("gone"):
-                dst.pop("queued")
-                dst.pop("gone")
-                dst["fails"], dst["failedAt"] = dst.get("fails", 0) + 1, C.NOW
-                log(f"{tag}: the queued DeepSeek review left the queue without coming back")
-            else:
-                dst["gone"] = True
-    ds_busy = bool(dst.get("queued"))
-
-    def ask_ds():
-        """Queue DeepSeek on this head, unless it's already on its way. Its
-        looks at one head are bounded by `rounds`: each one with findings
+    def ask(r):
+        """Queue the reviewer on this head, unless it's already on its way.
+        Its looks at one head are bounded by `rounds`: each one with findings
         counts as a round."""
-        if ds_busy:
+        rs = st["rv"].setdefault(r, {})
+        if rs.get("queued"):
             return
         if DRY:
-            log(f"  would: ask DeepSeek to review {tag} at {head[:7]}")
+            log(f"  would: ask {V.NAMES[r]} to review {tag} at {head[:7]}")
             return
-        if dst.get("fails", 0) >= 3 and C.NOW - dst.get("failedAt", 0) > 3600:
-            dst["fails"] = 0  # an outage passes: three more tries an hour on
-        if dst.get("fails", 0) >= 3 or dst.get("tooBig"):
+        if rs.get("fails", 0) >= 3 and C.NOW - rs.get("failedAt", 0) > 3600:
+            rs["fails"] = 0  # an outage passes: three more tries an hour on
+        if rs.get("fails", 0) >= 3:
             return
-        log(f"{tag}: queueing a DeepSeek review of {head[:7]}")
-        save(f"{D.QUEUE}/{item}", {"repo": repo, "number": n, "headRefOid": head,
-                                   "baseRefName": pr["baseRefName"], "title": pr["title"], "at": C.NOW})
-        dst["queued"] = C.NOW
+        try:
+            V.queue(repo, pr, key, r)
+        except Exception as e:  # the snapshot: GitHub, git, the disk
+            rs["fails"], rs["failedAt"] = rs.get("fails", 0) + 1, C.NOW
+            log(f"{tag}: couldn't queue {V.NAMES[r]} on {head[:7]} ({rs['fails']}): {str(e)[:200]}")
+            return
+        log(f"{tag}: queued a {V.NAMES[r]} review of {head[:7]}")
+        rs["queued"] = C.NOW
 
     # 1. The reviewers.
-    if rounds >= rc["rounds"] and not (verdict == "clean" and dsv == "clean"):
+    if rounds >= rc["rounds"] and not clean:
         # Escalated only once the label is on: a pass that sees no label takes
         # it as the owner's go-ahead and starts the rounds over.
         if not st.get("escalated") and (C.write("pr", "edit", str(n), "-R", repo, "--add-label",
@@ -786,27 +760,23 @@ def handle(repo, pr, repo_info, digest):
 
     quiet = age >= rc["settleDelay"] * MIN
     waiting = []
-    if verdict in ("none", "failed") or (verdict == "running" and C.NOW - vtime > rc["codexTimeout"] * MIN):
-        if quiet and (not last_ask or C.NOW - last_ask > rc["codexTimeout"] * MIN):
-            ask("Review this head." if not last_ask else "Retrying: the last request got no result.")
-        if len(st["asked"]) >= 2 and C.NOW - last_ask > rc["codexTimeout"] * MIN:
-            digest.append(("Codex isn't answering", line, f"asked {len(st['asked'])} times on {head[:7]}"))
-        waiting.append("Waiting for Codex's review of this commit")
-    elif verdict == "running":
-        waiting.append("Codex is reviewing this commit")
-    # DeepSeek is queued in the same pass as Codex is asked.
-    if dsv == "none":
-        if quiet:
-            ask_ds()
-        waiting.append("DeepSeek is reviewing this commit" if dst.get("queued") else "Waiting for DeepSeek's review of this commit")
-    # A first look or a second one that can't happen: the owner hears either way.
-    ds_stuck = None
-    if use_ds and dst.get("tooBig"):
-        ds_stuck = f"too big for DeepSeek (over {C.DS['maxDiffChars']} characters of diff)"
-        digest.append(("Too big for DeepSeek to review", line, f"over {C.DS['maxDiffChars']} characters of diff"))
-    elif use_ds and dst.get("fails", 0) >= 3:
-        ds_stuck = f"DeepSeek failed {dst['fails']} times on {head[:7]}"
-        digest.append(("DeepSeek couldn't review it", line, f"failed {dst['fails']} times on {head[:7]} (journalctl -u autoland-deepseek)"))
+    if not live:
+        why = "; ".join(f"{V.NAMES[r]}: {away[r] or V.out(r)}" for r in names) or "none is on"
+        waiting.append(f"No reviewer can review it now ({why})")
+        digest.append(("No reviewer can review it", line, why))
+    for r in live:
+        if said[r][0] == "none":
+            if quiet:
+                ask(r)
+            waiting.append(f"{V.NAMES[r]} is reviewing this commit" if st["rv"].get(r, {}).get("queued")
+                           else f"Waiting for {V.NAMES[r]}'s review of this commit")
+    # A look that can't happen, a first one or a second: the owner hears either way.
+    stuck = []
+    for r in live:
+        if st["rv"].get(r, {}).get("fails", 0) >= 3:
+            x = f"failed {st['rv'][r]['fails']} times on {head[:7]}"
+            stuck.append(f"{V.NAMES[r]} {x}")
+            digest.append((f"{V.NAMES[r]} couldn't review it", line, x + " (journalctl -u autoland-review)"))
 
     what = []
     if open_threads:
@@ -815,20 +785,18 @@ def handle(repo, pr, repo_info, digest):
         what.append("changes requested by " + ", ".join(changes))
     idle = C.NOW - max(ts(pr["updatedAt"]), st["seen"])
     if waiting:
-        settle("pending", "; ".join(waiting + what))
+        settle("pending", "; ".join(waiting + stuck + what))
         # One reviewer's threads needn't wait for the other to finish.
         if what and idle > rc["handoffAfter"] * MIN and not swept:
             hand_off(", ".join(what))
-    elif "findings" in (verdict, dsv) or open_threads or changes:
+    elif not clean or open_threads or changes:
         if not open_threads and not changes:
             # Every finding answered without a new commit: the reviewers that
             # had findings look again.
-            if verdict == "findings" and vtime > last_ask and C.NOW - vtime > rc["settleDelay"] * MIN:
-                ask("Every finding is answered and resolved; review again.")
-            if dsv == "findings" and C.NOW - dstime > rc["settleDelay"] * MIN:
-                ask_ds()
-            settle("pending", f"Findings answered; {ds_stuck}" if dsv == "findings" and ds_stuck
-                   else f"Findings answered; review round {rounds + 1} next")
+            for r in live:
+                if said[r][0] == "findings" and C.NOW - said[r][1] > rc["settleDelay"] * MIN:
+                    ask(r)
+            settle("pending", "Findings answered; " + ("; ".join(stuck) if stuck else f"review round {rounds + 1} next"))
         else:
             settle("pending", f"Round {rounds}: " + ", ".join(what))
             if idle > rc["handoffAfter"] * MIN and not swept:
@@ -846,11 +814,12 @@ def handle(repo, pr, repo_info, digest):
         prove()
     elif ci == "pending":
         settle("pending", "Settled; waiting for CI: " + ", ".join(ci_names)[:90])
-    elif gate or ci == "none" or asked:
-        judged(f"it touches {gate}" if gate else "the repo has no CI" if ci == "none"
-               else "a Claude job was asked to judge this head")
+    elif gate or unseen or ci == "none" or asked:
+        judged(f"it touches {gate}" if gate else
+               f"it changes {', '.join(unseen[:5])}{' and more' * (len(unseen) > 5)}, which the reviewers aren't shown" if unseen
+               else "the repo has no CI" if ci == "none" else "a Claude job was asked to judge this head")
     else:
-        land_now(f"{reviewers} found nothing on this commit, every thread is resolved, CI is green")
+        land_now(f"{' and '.join(V.NAMES[r] for r in live)} found nothing on this commit, every thread is resolved, CI is green")
 
     # Anything not merged after a day, reviewed clean or not (a check that never
     # reports keeps it pending), unless it's already listed for the owner.
@@ -870,13 +839,12 @@ def coverage(repos, covered):
 
 
 def main():
-    if sys.argv[1:] == ["deepseek"]:
-        for d in (D.QUEUE, D.DONE):
-            os.makedirs(os.path.join(STATE, d), exist_ok=True)
-        D.deepseek_queue()
+    if sys.argv[1:] == ["review"]:
+        import review_worker
+        review_worker.work()
         return
     try:
-        for d in ("", D.QUEUE, D.DONE):
+        for d in ("", V.QUEUE, V.SNAP, V.DONE, V.GIT):
             os.makedirs(os.path.join(STATE, d), exist_ok=True)
     except OSError:
         if not DRY:
@@ -890,6 +858,7 @@ def main():
     failed = load("baseline-failed.json", {})
     started = 0
     digest = []
+    read, live = set(), set()  # the repos whose PRs it read, and their heads' snapshots
     covered = []
     for r in repos:
         repo = r["repo"]
@@ -910,10 +879,12 @@ def main():
                 known.add(repo)
             owner, name = repo.split("/")
             info, prs = open_prs(owner, name)
+            read.add(repo.replace("/", "_"))
             heads = set()
             seen_to = True
             for pr in prs:
                 heads.add(pr["headRefName"])
+                live.add(V.snap_name(f"pr-{repo.replace('/', '_')}-{pr['number']}.json", pr["headRefOid"], pr["baseRefName"]))
                 try:
                     handle(repo, pr, info, digest)
                 except Exception as e:  # one bad PR mustn't stop the rest
@@ -931,6 +902,8 @@ def main():
     save("repos.json", coverage(repos, covered))
     save("known.json", sorted(known))
     save("baseline-failed.json", failed)
+    if not DRY:
+        V.sweep(read, live)
     R.publish(digest)
 
 
