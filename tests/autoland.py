@@ -367,9 +367,9 @@ def ds_review(k, sha=head, at="2026-10-24T00:11:00Z"):
             "body": "<!-- deepseek-review:v1 " + json.dumps({"commit_sha": sha, "findings": k}) + " -->"}
 
 
-def judgment(v, n=6, sha=head):
+def judgment(v, n=6, sha=head, base="main"):
     """A judge's verdict line, sealed as its task gives it."""
-    return f"<!-- autoland-judgment: {v} {sha} {C.seal('sam/r', n, 'autoland-judgment', v, sha)} -->"
+    return f"<!-- autoland-judgment: {v} {sha} {C.seal('sam/r', n, 'autoland-judgment', v, sha, base)} -->"
 
 
 def said(body, who="sam"):
@@ -381,10 +381,10 @@ CI_GREEN = [{"__typename": "CheckRun", "name": "ci", "status": "COMPLETED", "con
 
 
 def mkpr(reviews=(), comments=(), threads=(), draft=False, number=5, sha=head, files=("a.py",), labels=(),
-         branch="feat", title="t", checks=CI_GREEN):
+         branch="feat", title="t", checks=CI_GREEN, base="main"):
     return {
         "id": "x", "number": number, "title": title, "url": "u", "isDraft": draft, "isCrossRepository": False,
-        "headRefName": branch, "headRefOid": sha, "baseRefName": "main", "createdAt": T0, "updatedAt": T0,
+        "headRefName": branch, "headRefOid": sha, "baseRefName": base, "createdAt": T0, "updatedAt": T0,
         "mergeStateStatus": "CLEAN", "author": {"login": "sam"}, "autoMergeRequest": None,
         "labels": {"pageInfo": {"hasNextPage": False}, "nodes": [{"name": x} for x in labels]},
         "files": {"nodes": [{"path": f} for f in files]},
@@ -554,6 +554,17 @@ fresh_pr_state()
 other = "c" * 40
 status, _ = run(clean(comments=[said(judgment("land"))], sha=other, **mig), 700)
 assert len(JOBS) == 1 and other in JOBS[0] and not merged()
+# So is one retargeted onto another base: its diff is another one, and so
+# are the rules it's judged by. A verdict for the head on that base counts.
+fresh_pr_state()
+run(clean(comments=[said(judgment("land"))], **mig), 700)
+assert merged()
+for verdicts, start in (([said(judgment("land"))], True), ([said(judgment("land")), said(judgment("owner"))], False)):
+    status, _ = run(clean(comments=verdicts, base="release", **mig), 800)
+    assert not merged() and "judging it" in status, status
+    assert (len(JOBS) == 1 and "origin/release:AGENTS.md" in JOBS[0]) if start else JOBS == [], JOBS
+status, _ = run(clean(comments=[said(judgment("land")), said(judgment("land", base="release"))], base="release", **mig), 900)
+assert merged() and "state=success" in status, status
 
 # More files than the query reads: a one-way path could be past them, so
 # it's judged too.
@@ -1000,11 +1011,11 @@ assert sorted(x.split()[2] for x in WROTE if x.startswith("label create")) == ["
 # `status` (a dry run) reads the seal the real passes' judges use, and makes
 # none of its own while there's one.
 C._key.clear()
-real = C.seal("sam/r", 6, "autoland-judgment", "land", head)
+real = C.seal("sam/r", 6, "autoland-judgment", "land", head, "main")
 C._key.clear()
 C.DRY, C.STATE = True, f"{tmp}/state/dry"
 os.makedirs(C.STATE)
-assert C.seal("sam/r", 6, "autoland-judgment", "land", head) == real
+assert C.seal("sam/r", 6, "autoland-judgment", "land", head, "main") == real
 assert not os.path.exists(f"{tmp}/state/dry/verdict.key")
 C.DRY, C.STATE = False, f"{tmp}/state"
 

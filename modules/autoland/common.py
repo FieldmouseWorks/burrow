@@ -79,11 +79,13 @@ def me():
 _key = []
 
 
-def seal(repo, n, name, verdict, head):
+def seal(repo, n, name, verdict, head, base):
     """What a verdict's marker carries after the head: a MAC under a key kept
     in the state dir, which only the job a task hands it to is told. Every
     Claude job posts as the steward's login, so without it a job quoting PR
-    text that holds a well-formed marker would pass for the verdict."""
+    text that holds a well-formed marker would pass for the verdict. It binds
+    the base too: a PR retargeted onto another branch has another diff, which
+    its verdict wasn't about."""
     if not _key:
         # The real state dir's, dry run or not, so `status` reads the
         # verdicts the real passes' judges wrote; a dry run with none yet
@@ -92,21 +94,22 @@ def seal(repo, n, name, verdict, head):
         try:
             if DRY and not os.path.exists(path):
                 _key.append(os.urandom(32).hex())
-                return seal(repo, n, name, verdict, head)
+                return seal(repo, n, name, verdict, head, base)
             fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
             with os.fdopen(fd, "w") as f:
                 f.write(os.urandom(32).hex())
         except FileExistsError:
             pass
         _key.append(open(path).read().strip())
-    msg = f"{repo}#{n} {name} {verdict} {head}".encode()
+    msg = f"{repo}#{n} {name} {verdict} {head} {base}".encode()
     return hmac.new(_key[0].encode(), msg, hashlib.sha256).hexdigest()[:32]
 
 
 def marker(pr, name, head, repo=None):
     """The verdict in the newest `<!-- NAME: VERDICT SHA -->` on the PR for
     exactly this head, from the steward's own login only; else None. With
-    repo, only a marker that also carries its seal counts."""
+    repo, only a marker that also carries its seal, for this head on the PR's
+    base as it is now, counts."""
     pat = re.compile(rf"<!-- {re.escape(name)}: ([a-z]+) ([0-9a-f]{{40}})(?: ([0-9a-f]{{32}}))? -->")
     verdict = None
     for c in pr["comments"]["nodes"]:  # oldest first
@@ -115,7 +118,7 @@ def marker(pr, name, head, repo=None):
         for m in pat.finditer(c["body"] or ""):
             if m.group(2) != head:
                 continue
-            if repo and not hmac.compare_digest(m.group(3) or "", seal(repo, pr["number"], name, m.group(1), head)):
+            if repo and not hmac.compare_digest(m.group(3) or "", seal(repo, pr["number"], name, m.group(1), head, pr["baseRefName"])):
                 continue
             verdict = m.group(1)
     return verdict

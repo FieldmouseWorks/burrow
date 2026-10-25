@@ -303,8 +303,8 @@ REVIEWED = "its reviewers found nothing on that head, every thread is resolved"
 DEP_SEEN = "it's a dependency update, which no reviewer reads, so you're the first to read it; its threads are resolved"
 
 
-def verdict_line(repo, n, verdict, head):
-    return f"<!-- {JUDGMENT}: {verdict} {head} {C.seal(repo, n, JUDGMENT, verdict, head)} -->"
+def verdict_line(repo, n, verdict, head, base):
+    return f"<!-- {JUDGMENT}: {verdict} {head} {C.seal(repo, n, JUDGMENT, verdict, head, base)} -->"
 
 
 def judge_task(repo, pr, why, no_ci, seen=REVIEWED):
@@ -326,11 +326,12 @@ def judge_task(repo, pr, why, no_ci, seen=REVIEWED):
         "If its build or tests fail, don't judge it: say what fails, and the steward hands it to a Claude job that fixes it. "
         "Don't push, merge, or change the PR in any other way. "
         f"Post one comment on the PR (gh pr comment {n} -R {repo}) saying what you checked and why you decided as you did, "
-        f"ending with the line {verdict_line(repo, n, 'land', head)}, {verdict_line(repo, n, 'owner', head)} "
-        f"or, when its build or tests fail, {verdict_line(repo, n, 'failed', head)}, exactly as written here "
+        f"ending with the line {verdict_line(repo, n, 'land', head, base)}, {verdict_line(repo, n, 'owner', head, base)} "
+        f"or, when its build or tests fail, {verdict_line(repo, n, 'failed', head, base)}, exactly as written here "
         "(the steward trusts no other), and only the one you chose. "
         f"Don't label it: for owner, the steward adds the {CFG['labels']['owner']} label itself. "
-        "Only that exact head counts: if the PR has moved on by the time you're done, say so and post no verdict."
+        f"Only that exact head on {base} counts: if the PR has moved on (a new head, or another base) by the time you're done, "
+        "say so and post no verdict."
     )
 
 
@@ -348,6 +349,9 @@ def proof_task(repo, pr, checks, proofs):
 def handle(repo, pr, repo_info, digest):
     rc = repo_cfg(repo)
     n, head = pr["number"], pr["headRefOid"]
+    # The judge reads the diff against the base, so its verdict (and its
+    # job) is for this head on this base: one retargeted is judged again.
+    judged_at = f"{head} {pr['baseRefName']}"
     key = f"pr-{repo.replace('/', '_')}-{n}.json"
     st = load(key, {})
     if st.get("head") != head:
@@ -382,46 +386,47 @@ def handle(repo, pr, repo_info, digest):
         st["updated"] = head
         return True
 
-    def started(kind, task):
-        """A Claude job, once per head (recorded once it has started; until
-        then it's tried every pass and listed for the owner)."""
+    def started(kind, task, at=head):
+        """A Claude job, once per head (at: once per head on its base, for
+        the judge's; recorded once it has started; until then it's tried
+        every pass and listed for the owner)."""
         jid = C.job(repo, task)
         if jid:
-            st[kind] = head
+            st[kind] = at
             st[kind + "Job"] = jid
             log(f"{tag}: a Claude job {jid} ({kind})")
         else:
             log(f"{tag}: couldn't start a Claude job (no checkout, or proj refused)")
         return bool(jid)
 
-    def lost(kind):
+    def lost(kind, at=head):
         """This head's job of the kind ended without the answer it was for
         (it crashed, timed out, or never posted it). Seen on two passes: the
         first may have read the PR just before its answer went up."""
         jid = st.get(kind + "Job")
-        if st.get(kind) != head or not jid or C.job_state(jid) in (None, "queued", "running"):
+        if st.get(kind) != at or not jid or C.job_state(jid) in (None, "queued", "running"):
             return False
-        seen = st.get(kind + "Lost") == head
-        st[kind + "Lost"] = head
+        seen = st.get(kind + "Lost") == at
+        st[kind + "Lost"] = at
         return seen
 
-    def again(kind, task, doing, answer):
+    def again(kind, task, doing, answer, at=head):
         """A job that ended without its answer is started once more; one that
         does that twice is listed for the owner."""
-        if st.get(kind + "Again") == head:
+        if st.get(kind + "Again") == at:
             settle("pending", f"Settled, but two Claude jobs ended without {answer}"[:140],
                    f"Two Claude jobs ended without {answer}")
-        elif started(kind, task):
-            st[kind + "Again"] = head
+        elif started(kind, task, at):
+            st[kind + "Again"] = at
             st.pop(kind + "Lost", None)
             settle("pending", f"Settled; a Claude job is {doing} again (the last one ended without {answer})"[:140])
         else:
             settle("pending", f"Settled, but no Claude job could start {doing} again"[:140],
                    "Couldn't start a Claude job")
 
-    def hand_off(why, kind="handed"):
+    def hand_off(why, kind="handed", at=head):
         proofs = {c: rc["proofJobs"][c] for c in ci_names if c in rc["proofJobs"]} if ci == "red" else {}
-        if not started(kind, fix_task(repo, pr, why, proofs)):
+        if not started(kind, fix_task(repo, pr, why, proofs), at):
             digest.append(("Couldn't start a Claude job to fix it", line, why))
 
     def merge():
@@ -451,7 +456,7 @@ def handle(repo, pr, repo_info, digest):
             # The judge's word, seen labelled on this head: once the label
             # is off, that's the owner's go-ahead. A label taken off before
             # the judge said anything isn't an answer to it.
-            st["ownerSaw"] = head
+            st["ownerSaw"] = judged_at
         if st.get("escalated"):
             # Labelled here at the round limit: still theirs, clean reviews
             # since or not, until the label comes off.
@@ -467,7 +472,7 @@ def handle(repo, pr, repo_info, digest):
         verdict = C.marker(pr, JUDGMENT, head, repo)
         if verdict == "land":
             land_now(f"Settled; a Claude job judged it fine to land ({why})")
-        elif verdict == "owner" and st.get("ownerSaw") == head:
+        elif verdict == "owner" and st.get("ownerSaw") == judged_at:
             land_now(f"Settled; a Claude job sent it to {CFG['owner']}, who took the {CFG['labels']['owner']} label off ({why})")
         elif verdict == "owner":
             # Labelled here, never by the judge, so the steward knows it went
@@ -475,20 +480,20 @@ def handle(repo, pr, repo_info, digest):
             # their answer even before a pass has seen it on.
             settle("pending", f"Settled; a Claude job judged it {CFG['owner']}'s to decide ({why})", "Judged yours to decide")
             if C.write("pr", "edit", str(n), "-R", repo, "--add-label", CFG["labels"]["owner"], check=False) is not None:
-                st["ownerSaw"] = head
+                st["ownerSaw"] = judged_at
         elif verdict == "failed":
             # The judge's own build or tests failed on this head: a fix job
             # has it, and its push is judged again. Its own once a head: a
             # job that answered a finding here without pushing didn't fix this.
             settle("pending", "Settled, but its build or tests fail; a Claude job is fixing it")
-            if st.get("failFixed") != head:
+            if st.get("failFixed") != judged_at:
                 hand_off("the Claude job that judged it found its build or tests failing on this head (its comment on the PR says what)",
-                         "failFixed")
+                         "failFixed", judged_at)
         elif update_branch():
             settle("pending", "Settled, but behind its base: brought up to date, reviewed again")
-        elif lost("judged"):
-            again("judged", judge_task(repo, pr, why, ci == "none", seen), "judging it", "a verdict")
-        elif st.get("judged") == head or started("judged", judge_task(repo, pr, why, ci == "none", seen)):
+        elif lost("judged", judged_at):
+            again("judged", judge_task(repo, pr, why, ci == "none", seen), "judging it", "a verdict", judged_at)
+        elif st.get("judged") == judged_at or started("judged", judge_task(repo, pr, why, ci == "none", seen), judged_at):
             settle("pending", f"Settled; a Claude job is judging it ({why})")
         else:
             settle("pending", f"Settled, but no Claude job could judge it ({why})", "Couldn't start a Claude job to judge it")
