@@ -232,7 +232,7 @@ pkgs.testers.runNixOSTest {
         machine.wait_until_succeeds("grep -x /kick/proj-watch/o/r /tmp/kicks", timeout=30)
         assert sorted(kicks()) == ["/kick/autoland/o/r", "/kick/proj-watch/o/r"], kicks()
         # A project folder's name is the job's, whatever it holds.
-        machine.succeed("su - dev -c 'mkdir -p \"/data/dev/src/my web%n\"'")
+        machine.succeed("install -d -o dev -g dev '/data/dev/src/my web%n'")
         machine.succeed("truncate -s 0 /tmp/kicks")
         e2 = proj('run --kick autoland/o/q \"my web%n\" hello')
         machine.wait_until_succeeds(f"su - dev -c 'proj state \"{e2}\"' | grep -x done", timeout=120)
