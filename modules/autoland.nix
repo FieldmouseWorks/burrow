@@ -30,7 +30,7 @@ let
   codexLogin = pkgs.writeShellScriptBin "autoland-codex-login" ''
     # Codex reviews on the ChatGPT plan's login: a device code to approve in
     # a browser. Run again whenever the review digest says it's logged out.
-    exec /run/wrappers/bin/sudo -u ${reviewer} env HOME=${reviewerHome} CODEX_HOME=${reviewerHome}/.codex \
+    exec /run/wrappers/bin/sudo -u ${reviewer} ${pkgs.coreutils}/bin/env HOME=${reviewerHome} CODEX_HOME=${reviewerHome}/.codex \
       ${agents}/bin/codex login --device-auth "$@"
   '';
 
