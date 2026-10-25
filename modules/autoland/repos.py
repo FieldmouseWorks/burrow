@@ -147,6 +147,25 @@ def hook(repo, st, due):
         save(f"repo-{repo.replace('/', '_')}.json", st)
 
 
+def hook_projects(repos):
+    """The hook on the projects' repos (projectsDir) that it doesn't see to
+    (excluded, or another owner's): proj-watch and proj-inbox start from its
+    deliveries too. Returns them, for unhook_gone to keep."""
+    if DRY:
+        return []
+    seen = {r["repo"].lower() for r in repos}
+    more = sorted({repo for _, repo in C.projects() if repo.lower() not in seen})
+    for repo in more:
+        name = f"repo-{repo.replace('/', '_')}.json"
+        st = load(name, {})
+        due = C.NOW - st.get("hookAt", 0) >= 86400
+        if due:
+            st["hookAt"] = C.NOW
+            save(name, st)
+        hook(repo, st, due)
+    return [{"repo": repo} for repo in more]
+
+
 def unhook_gone(repos):
     """The hooks this machine gave repos it no longer sees to (excluded,
     archived, out of the owners), off them: their deliveries would start

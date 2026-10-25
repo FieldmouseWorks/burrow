@@ -160,21 +160,28 @@ ASKED = []
 
 
 def graphql(query, **v):
-    ASKED.append(("older reviews" if "node(id" in query and "reviews(" in query else "prs", v.get("cursor")))
+    if "node(id" in query and "comments(" in query:
+        ASKED.append(("older comments", v["id"]))
+        return {"node": {"comments": page(["c"], len(ASKED) < 30, "c-1")}}
+    ASKED.append(("older reviews" if "node(id" in query else "prs", v.get("cursor")))
     if "node(id" in query:
         return {"node": {"reviews": page(["r1"])}}
     who = {"isDraft": False, "isCrossRepository": False, "author": {"login": "sam"}}
     pr = {"id": "PR_1", **who, "reviews": page(["r2"], True, "c-r2"), "comments": page(["c1"])}
+    # One whose comments go on and on (anyone can add them) is read only so
+    # far: past that the cut hands it to the owner.
+    endless = {"id": "PR_3", **who, "reviews": page([]), "comments": page(["c"], True, "c-0")}
     # An outside contribution's older pages aren't read: anyone can add to them.
     outside = {"id": "PR_2", **who, "author": {"login": "eve"}, "reviews": page(["x"], True, "c-x"), "comments": page([])}
-    return {"repository": {"squashMergeAllowed": True, "pullRequests": {"pageInfo": {"hasNextPage": False}, "nodes": [pr, outside]}}}
+    return {"repository": {"squashMergeAllowed": True, "pullRequests": {"pageInfo": {"hasNextPage": False}, "nodes": [pr, outside, endless]}}}
 
 
 graphql_kept, C.graphql = C.graphql, graphql
 _, prs = S.open_prs("sam", "r")
 C.graphql = graphql_kept
 assert prs[0]["reviews"] == page(["r1", "r2"]) and prs[0]["comments"] == page(["c1"]), prs
-assert ASKED == [("prs", None), ("older reviews", "c-r2")], ASKED
+assert ASKED == [("prs", None), ("older reviews", "c-r2")] + [("older comments", "PR_3")] * S.OLDER_PAGES, ASKED
+assert len(prs[2]["comments"]["nodes"]) == 1 + S.OLDER_PAGES and prs[2]["comments"]["pageInfo"]["hasPreviousPage"], prs[2]
 # Cut short, it's still just an outside contribution.
 fresh_pr_state()
 long_outside = mkpr()
@@ -234,6 +241,23 @@ assert WROTE == [], WROTE
 R.DRY = False
 os.environ["CREDENTIALS_DIRECTORY"] = cred
 C.gh, C.write = gh_kept, write_kept
+# A project of proj's that it doesn't see to (excluded, another owner's)
+# gets the hook too, for proj-watch and proj-inbox, and keeps it.
+projects_kept = C.projects
+C.projects = lambda: iter([("r", "sam/r"), ("R", "Sam/R"), ("p", "eve/p")])
+C.gh = lambda *a, **k: [] if a[:2] == ("api", "repos/eve/p/hooks") else gh_kept(*a, **k)
+C.NOW = T
+WROTE.clear()
+more = R.hook_projects([{"repo": "sam/r"}])
+assert more == [{"repo": "eve/p"}], more
+assert [x for x in WROTE if "hooks" in x] == ["api -X POST repos/eve/p/hooks --input -"], WROTE
+assert C.load("repo-eve_p.json", None)["hookAt"] == T
+C.save("repo-eve_p.json", {"hook": "h", "hookId": 5, "hookAt": T})
+WROTE.clear()
+R.unhook_gone([{"repo": "sam/r"}] + more)
+assert not [x for x in WROTE if "eve/p" in x], WROTE
+os.remove(f"{tmp}/state/repo-eve_p.json")
+C.gh, C.projects = gh_kept, projects_kept
 # A repo no longer seen to (excluded, archived) has its hook taken off, on
 # a full pass; one that won't come off is tried again a day later.
 C.save("repo-sam_old.json", {"hook": "h", "hookId": 7, "other": 1})

@@ -212,11 +212,12 @@ def repo_cfg(repo):
     return c
 
 
-def project_dir(repo):
-    """The repo's checkout in projectsDir (by origin URL), or None. Only a
-    clone of its own counts: a hidden folder, or a worktree of the repo
-    (`.git` is a file there) checked out on some other branch, sorts first
-    and shares the origin, but a job sent there works on the wrong tree."""
+def projects():
+    """(folder, repo) for each project in projectsDir, by its origin URL.
+    Only a clone of its own counts: a hidden folder, or a worktree of the
+    repo (`.git` is a file there) checked out on some other branch, sorts
+    first and shares the origin, but a job sent there works on the wrong
+    tree."""
     src = CFG["projectsDir"]
     for d in sorted(os.listdir(src)) if os.path.isdir(src) else []:
         if d.startswith(".") or not os.path.isdir(os.path.join(src, d, ".git")):
@@ -224,9 +225,13 @@ def project_dir(repo):
         p = subprocess.run(["git", "-C", os.path.join(src, d), "remote", "get-url", "origin"],
                            capture_output=True, text=True)
         url = re.sub(r"^(https://github\.com/|git@github\.com:)", "", p.stdout.strip()).removesuffix(".git")
-        if url.lower() == repo.lower():
-            return d
-    return None
+        if url.count("/") == 1:
+            yield d, url
+
+
+def project_dir(repo):
+    """The repo's checkout in projectsDir, or None."""
+    return next((d for d, url in projects() if url.lower() == repo.lower()), None)
 
 
 def job(repo, task, clone=False):

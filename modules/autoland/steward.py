@@ -99,12 +99,18 @@ def acted_on(pr):
     return not pr["isDraft"] and not pr["isCrossRepository"] and (pr["author"] or {}).get("login") in CFG["authors"]
 
 
+# Pages of older reviews, and of older comments, read for a PR: up to 1,000
+# of each. Anyone can comment on a public repo's PRs, and every event reads
+# them again, so a PR longer than that is the owner's (the cut in handle).
+OLDER_PAGES = 9
+
+
 def open_prs(owner, name):
-    """The repo's merge settings and every open PR, all pages, with every
-    review and comment on each it acts on: a long PR's verdicts, markers and
-    rounds can be older than the last 100. Anyone can comment on an outside
-    contribution, so its older pages aren't read (that's the owner's
-    anyway), lest every event read thousands of them."""
+    """The repo's merge settings and every open PR, all pages, with the
+    reviews and comments of each it acts on, up to OLDER_PAGES older pages:
+    a long PR's verdicts, markers and rounds can be older than the last 100.
+    An outside contribution's older pages aren't read: it's the owner's
+    anyway."""
     prs, cursor = [], None
     while True:
         info = C.graphql(PRS, owner=owner, name=name, cursor=cursor)["repository"]
@@ -115,7 +121,9 @@ def open_prs(owner, name):
         cursor = page["pageInfo"]["endCursor"]
     for pr in filter(acted_on, prs):
         for field, nodes in OLDER.items():
-            while pr[field]["pageInfo"]["hasPreviousPage"]:
+            for _ in range(OLDER_PAGES):
+                if not pr[field]["pageInfo"]["hasPreviousPage"]:
+                    break
                 got = C.graphql(OLDER_PAGE % (field, nodes), id=pr["id"], cursor=pr[field]["pageInfo"]["startCursor"])
                 older = got["node"][field]
                 pr[field] = {"pageInfo": older["pageInfo"], "nodes": older["nodes"] + pr[field]["nodes"]}
@@ -423,13 +431,13 @@ def handle(repo, pr, repo_info, digest):
         return
     # A list longer than one page could hide a hold, an open thread, a
     # changes-requested review or a verdict: fail closed. (open_prs reads
-    # every review and comment, so those two are whole unless it couldn't.)
+    # older reviews and comments, so those two are cut only past its cap.)
     cut = [k for k, more in (("labels", pr["labels"]["pageInfo"]["hasNextPage"]),
                              ("review threads", pr["reviewThreads"]["pageInfo"]["hasNextPage"]),
                              ("reviews", pr["reviews"]["pageInfo"]["hasPreviousPage"]),
                              ("comments", pr["comments"]["pageInfo"]["hasPreviousPage"])) if more]
     if cut:
-        settle("pending", f"Over 100 {' and '.join(cut)}, too many to read: {CFG['owner']} merges it", "Too much to read")
+        settle("pending", f"Too many {' and '.join(cut)} to read: {CFG['owner']} merges it", "Too much to read")
         save(key, st)
         return
     if CFG["labels"]["hold"] in labels:
@@ -835,7 +843,7 @@ def main():
     if not DRY:
         V.sweep(read, live)
     if kick is None:
-        R.unhook_gone(repos)
+        R.unhook_gone(repos + R.hook_projects(repos))
     # Last: GitHub failing it leaves the pass's state saved. A line more than
     # one repo has (a reviewer out of service) is listed once.
     R.publish(list(dict.fromkeys(tuple(x) for repo in sorted(digest) for x in digest[repo])))
