@@ -31,6 +31,7 @@ careful look takes DeepSeek many minutes, so it runs as its own service and
 no pass waits for it.
 """
 
+import codecs
 import json
 import os
 import re
@@ -212,13 +213,14 @@ MOVED_RE = re.compile(r"^(?:rename|copy) from (.+)$")
 
 def unquote(path):
     """A path as git's diff header has it: quoted, with C escapes, when it
-    has odd characters."""
+    has odd characters. Bytes that aren't UTF-8 come back as U+FFFD, so the
+    rest of the path (`secrets/`) still reads as it is."""
     if not (len(path) > 1 and path[0] == path[-1] == '"'):
         return path
     try:
-        return path[1:-1].encode("ascii").decode("unicode_escape").encode("latin-1").decode("utf-8")
-    except UnicodeError:
-        return path
+        return codecs.escape_decode(path[1:-1].encode())[0].decode("utf-8", "replace")
+    except ValueError:  # a broken escape: the path between the quotes, as written
+        return path[1:-1]
 
 
 def moved_from(repo, pr, st):
@@ -652,6 +654,10 @@ def handle(repo, pr, repo_info, digest):
             # Until it gives this head a verdict, renovate-sweep's job has it,
             # threads, reviews and all: one job on its branch.
             settle("pending", f"Major update, {threads}; renovate-sweep has it"[:140])
+        elif renovate and dep == "major" and major_verdict == "held":
+            # Held for the owner (renovate-sweep tells them): no job pushes
+            # to it, threads or not, and changes what they're deciding on.
+            settle("pending", "Major update; renovate-sweep held it: see its comment")
         elif threads or ci == "red":
             what = threads or "CI is red (" + ", ".join(ci_names) + ")"
             kind = "handed" if threads else "redFixed"
@@ -663,8 +669,7 @@ def handle(repo, pr, repo_info, digest):
             # renovate-sweep's verdict comes first, and its job runs the proofs
             # until then: neither a judge nor a proof job of the steward's
             # works the branch beside it.
-            settle("pending", "Major update; renovate-sweep held it: see its comment" if major_verdict == "held"
-                   else "Major update; waiting for renovate-sweep's verdict on this head")
+            settle("pending", "Major update; waiting for renovate-sweep's verdict on this head")
         elif held:
             judged("a Claude job was asked to judge this head", DEP_SEEN)
         elif proof_only:

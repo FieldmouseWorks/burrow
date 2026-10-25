@@ -16,6 +16,7 @@ for p in (".github/CODEOWNERS", "secrets/remi.yaml", ".sops.yaml", "server/migra
     assert S.one_way(touching(".github/workflows/flake.yml", p), {"oneWay": ONE_WAY}) == p, (p, ONE_WAY)
 assert S.one_way(touching("CODEOWNERS.bak"), {"oneWay": ONE_WAY}, [".github/CODEOWNERS"]) == ".github/CODEOWNERS"
 assert S.unquote('"secrets/caf\\303\\251.yaml"') == "secrets/caf\u00e9.yaml" and S.unquote("a b") == "a b"
+assert S.unquote('"secrets/\\377"') == "secrets/\ufffd" and S.unquote('"secrets/bad\\x"') == "secrets/bad\\x"
 print("one-way: ok")
 
 

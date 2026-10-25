@@ -169,6 +169,12 @@ fresh_pr_state()
 status, _ = run(renamed("src/b.rs", "diff --git a/src/a.rs b/src/b.rs\nsimilarity index 100%\n"
                                     "rename from src/a.rs\nrename to src/b.rs\n"), 700)
 assert "state=success" in status and merged() and JOBS == [], (status, JOBS)
+# A quoted old name, bytes that aren't UTF-8 and all, still reads as where
+# it came from.
+fresh_pr_state()
+status, _ = run(renamed("keys/x", 'diff --git "a/secrets/\\377" b/keys/x\nsimilarity index 100%\n'
+                                  'rename from "secrets/\\377"\nrename to keys/x\n'), 700)
+assert len(JOBS) == 1 and "secrets/" in JOBS[0] and not merged(), (status, JOBS)
 PR_DIFF["v"] = ""
 
 # A judge that ends without a verdict (crashed, timed out, said nothing) is
@@ -478,6 +484,11 @@ status, _ = run(mkpr(threads=[False], **major), 7200)
 assert JOBS == [] and "renovate-sweep has it" in status, status
 status, _ = run(mkpr(threads=[False], comments=[said(f"<!-- major-verdict: ok {head} on main -->")], **major), 9000)
 assert len(JOBS) == 1 and "1 open review thread" in JOBS[0] and not merged(), (status, JOBS)
+# One it held is the owner's, threads and all: no job pushes to it.
+fresh_pr_state()
+run(mkpr(threads=[False], comments=[said(f"<!-- major-verdict: held {head} on main -->")], **major), 0)
+status, _ = run(mkpr(threads=[False], comments=[said(f"<!-- major-verdict: held {head} on main -->")], **major), 9000)
+assert JOBS == [] and not merged() and "renovate-sweep held it" in status, (status, JOBS)
 # A red Renovate one is renovate-sweep's, threads and all: no second job on its branch.
 fresh_pr_state()
 red_ci = [{"__typename": "CheckRun", "name": "ci", "status": "COMPLETED", "conclusion": "FAILURE"}]
