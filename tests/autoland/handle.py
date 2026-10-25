@@ -211,7 +211,8 @@ assert "a Claude job is fixing it" in status and not merged() and digest == [], 
 status, _ = run(clean(comments=[failed], **mig), 900)
 assert JOBS == [] and "a Claude job is fixing it" in status
 # A fix job that answered a finding on this head without pushing didn't fix
-# what the judge found failing: that gets its own job.
+# what the judge found failing: that gets its own job, once the first one
+# has ended (two on one branch push over each other).
 fresh_pr_state()
 run(clean(threads=[False], **mig), 0)
 run(clean(threads=[False], **mig), 7200)
@@ -219,7 +220,21 @@ assert len(JOBS) == 1 and "isn't settled" in JOBS[0], JOBS
 run(clean(**mig), 7300)
 assert len(JOBS) == 1 and f"autoland-judgment: failed {head}" in JOBS[0], JOBS
 status, _ = run(clean(comments=[failed], **mig), 7400)
+assert JOBS == [] and "a Claude job is fixing it" in status, (status, JOBS)
+STATES["job-1"] = "done"
+status, _ = run(clean(comments=[failed], **mig), 7500)
 assert len(JOBS) == 1 and "build or tests failing" in JOBS[0], (status, JOBS)
+# That one ends with it still failing (it pushed nothing): handed once more
+# once two passes have seen it ended, then listed for the owner.
+STATES["job-1"] = "error"
+status, digest = run(clean(comments=[failed], **mig), 7600)
+assert JOBS == [] and digest == [], (JOBS, digest)
+status, digest = run(clean(comments=[failed], **mig), 7700)
+assert len(JOBS) == 1 and "build or tests failing" in JOBS[0], (status, JOBS)
+run(clean(comments=[failed], **mig), 7800)
+status, digest = run(clean(comments=[failed], **mig), 7900)
+assert JOBS == [] and [x[0] for x in digest] == ["Two Claude jobs ended without fixing it"], (JOBS, digest)
+STATES.clear()
 
 # The needs-owner label goes straight to the owner: no judge job.
 fresh_pr_state()
@@ -284,6 +299,17 @@ fresh_pr_state()
 run(clean(checks=[]), 700)
 status, _ = run(clean(checks=CI_GREEN, comments=[said(judgment("land", n=5))]), 900)
 assert merged() and "judged it fine to land" in status, status
+# Nor while that CI is still running: an owner or failed verdict holds it
+# at once, and only a land waits for CI.
+busy_ci = [{"__typename": "CheckRun", "name": "ci", "status": "IN_PROGRESS", "conclusion": None}]
+fresh_pr_state()
+run(clean(checks=[]), 700)
+status, digest = run(clean(checks=busy_ci, comments=[said(judgment("owner", n=5))]), 800)
+assert "Judged yours to decide" in [x[0] for x in digest] and any("--add-label needs-owner" in x for x in WROTE), (status, digest)
+status, _ = run(clean(checks=busy_ci, comments=[said(judgment("failed", n=5))]), 900)
+assert len(JOBS) == 1 and "build or tests failing" in JOBS[0], (status, JOBS)
+status, _ = run(clean(checks=busy_ci, comments=[said(judgment("land", n=5))]), 1000)
+assert not merged() and "waiting for CI" in status, status
 
 # proofJobs: once only proof checks are pending, one job a head runs them.
 fresh_pr_state()
@@ -352,25 +378,31 @@ assert "CI is red: remi-proof" in status and len(JOBS) == 1 and "isn't settled" 
 assert "just proof" in JOBS[0] and "Rerun it that way" in JOBS[0], "the job is told how the proof runs"
 assert "CI log print" in JOBS[0], "the failing log isn't the fix job's to obey"
 # A proof that fails after a findings job answered on this head without
-# pushing gets its own fix job.
+# pushing gets its own fix job, once that one has ended, not beside it.
 fresh_pr_state()
 run(clean(threads=[False], checks=proof), 0)
 run(clean(threads=[False], checks=proof), 7200)
 assert len(JOBS) == 1 and "open review thread" in JOBS[0], JOBS
 run(clean(checks=proof), 7300)
 assert len(JOBS) == 1 and "just proof" in JOBS[0], JOBS
+status, _ = run(clean(checks=red), 7350)
+assert JOBS == [] and "CI is red: remi-proof" in status, (status, JOBS)
+STATES["job-1"] = "done"
 status, _ = run(clean(checks=red), 7400)
 assert len(JOBS) == 1 and "CI is red: remi-proof" in status and "isn't settled" in JOBS[0], (status, JOBS)
 status, _ = run(clean(checks=red), 7500)
 assert JOBS == [], "one a head"
+STATES.clear()
 # The same on a Dependabot update.
 fresh_pr_state()
 dbump = {"branch": "dependabot/npm/foo-1", "title": "Bump foo from 1.4 to 1.5", "number": 11}
 run(mkpr(threads=[False], **dbump), 0)
 run(mkpr(threads=[False], **dbump), 7200)
 assert len(JOBS) == 1 and "open review thread" in JOBS[0], JOBS
+STATES["job-1"] = "done"
 status, _ = run(mkpr(checks=red, **dbump), 7300)
 assert len(JOBS) == 1 and "CI is red (remi-proof)" in JOBS[0], (status, JOBS)
+STATES.clear()
 # A dependency update waiting only on a proof check gets its job too.
 fresh_pr_state()
 status, _ = run(mkpr(branch="dependabot/npm/foo-1", title="Bump foo from 1.4 to 1.5", number=11, checks=proof), 900)

@@ -415,8 +415,6 @@ def handle(repo, pr, repo_info, digest):
         """Whether findings or red CI have sat long enough for a Claude job
         to take them (it's booked a pass for when they will, if not)."""
         since = max(ts(pr["updatedAt"]), st["seen"])
-        if st.get(kind) == head:
-            return False
         after(since, rc["handoffAfter"])
         return C.NOW - since > rc["handoffAfter"] * MIN
 
@@ -482,10 +480,38 @@ def handle(repo, pr, repo_info, digest):
             settle("pending", f"Settled, but no Claude job could start {doing} again"[:140],
                    "Couldn't start a Claude job")
 
+    def fixing():
+        """The kind of fix job handed on this head that's still queued or
+        running (or that proj can't say about), else None."""
+        for k in ("handed", "redFixed", "failFixed"):
+            jid = st.get(k + "Job")
+            if st.get(k) == (judged_at if k == "failFixed" else head) and jid \
+                    and C.job_state(jid) in (None, "queued", "running"):
+                return k
+        return None
+
     def hand_off(why, kind="handed", at=head):
+        """A Claude job fixes it, one of each kind a head (at). One that ended
+        with this still to fix (it crashed, or pushed nothing) is handed once
+        more, and after a second it's listed for the owner. Never while
+        another fix job is still working on this head: two on one branch
+        push over each other."""
+        retry = st.get(kind) == at
+        if retry and not lost(kind, at):
+            return
+        if retry and st.get(kind + "Again") == at:
+            digest.append(("Two Claude jobs ended without fixing it", line, why))
+            return
+        busy = fixing()
+        if busy:
+            log(f"{tag}: a Claude job ({busy}) is still working on this head; {kind} waits for it")
+            return
         proofs = {c: rc["proofJobs"][c] for c in ci_names if c in rc["proofJobs"]} if ci == "red" else {}
         if not started(kind, fix_task(repo, pr, why, proofs), at):
             digest.append(("Couldn't start a Claude job to fix it", line, why))
+        elif retry:
+            st[kind + "Again"] = at
+            st.pop(kind + "Lost", None)
 
     def merge():
         # Marked landed only once GitHub has queued or done the merge, so a
@@ -545,9 +571,8 @@ def handle(repo, pr, repo_info, digest):
             # has it, and its push is judged again. Its own once a head: a
             # job that answered a finding here without pushing didn't fix this.
             settle("pending", "Settled, but its build or tests fail; a Claude job is fixing it")
-            if st.get("failFixed") != judged_at:
-                hand_off("the Claude job that judged it found its build or tests failing on this head (its comment on the PR says what)",
-                         "failFixed", judged_at)
+            hand_off("the Claude job that judged it found its build or tests failing on this head (its comment on the PR says what)",
+                     "failFixed", judged_at)
         elif update_branch():
             settle("pending", "Settled, but behind its base: brought up to date, reviewed again")
         elif lost("judged", judged_at):
@@ -622,7 +647,11 @@ def handle(repo, pr, repo_info, digest):
     # A judge asked for on this head and base (the repo had no CI then, say)
     # still decides once CI shows up: its owner or failed verdict isn't
     # dropped for a green check.
-    asked = st.get("judged") == judged_at or C.marker(pr, JUDGMENT, head, repo) is not None
+    judge_said = C.marker(pr, JUDGMENT, head, repo)
+    asked = st.get("judged") == judged_at or judge_said is not None
+    # Its owner or failed verdict holds it whatever CI is still doing; only
+    # a land waits for CI.
+    held = asked and judge_said in ("owner", "failed")
     fixed = dep == "minor" and not gate and (renovate_edited(repo, pr, st) or gate_edit(repo, pr, st))
     swept = fixed and ci == "red" and renovate
 
@@ -661,6 +690,8 @@ def handle(repo, pr, repo_info, digest):
             # works the branch beside it.
             settle("pending", "Major update; renovate-sweep held it: see its comment" if major_verdict == "held"
                    else "Major update; waiting for renovate-sweep's verdict on this head")
+        elif held:
+            judged("a Claude job was asked to judge this head", DEP_SEEN)
         elif proof_only:
             prove()
         elif ci == "pending":
@@ -842,6 +873,8 @@ def handle(repo, pr, repo_info, digest):
         # a finding here without pushing didn't fix a check that failed since.
         if not swept and handoff_due("redFixed"):
             hand_off("CI is red (" + ", ".join(ci_names) + ")", "redFixed")
+    elif held:
+        judged("a Claude job was asked to judge this head")
     elif proof_only:
         prove()
     elif ci == "pending":
