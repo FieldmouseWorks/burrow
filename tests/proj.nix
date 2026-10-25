@@ -18,6 +18,7 @@
 let
   # Claude, as far as proj can tell: reads the prompt, answers in stream-json.
   # "sleep N" sleeps; "eat" holds far more memory than the test's job cap;
+  # "twice" answers twice in one turn, "answerfail" answers and then fails;
   # "linger N" answers, then stays up N seconds, as Claude does while
   # something it left in the background (a CI watch) is still going.
   claude = pkgs.writeShellScriptBin "claude" ''
@@ -32,6 +33,13 @@ let
       # Awaits, then takes a while to answer: what changes meanwhile is news.
       slowawait*) proj await "''${prompt#slowawait }" >/dev/null; sleep 10 ;;
       eat) head -c 512M /dev/zero | tail >/dev/null; exit 1 ;;
+      # Answers, then answers again once a background task reports back.
+      twice) echo '{"type":"result","session_id":"s","result":"the answer","is_error":false}' ;;
+      # Answers, then fails as "fail" does.
+      answerfail)
+        echo '{"type":"result","session_id":"s","result":"the answer","is_error":false}'
+        echo '{"type":"result","session_id":"s","is_error":true,"errors":["refused"]}'
+        exit 1 ;;
       # Fails as Claude does when the API refuses it: a result with no text.
       fail) echo '{"type":"result","session_id":"s","is_error":true,"errors":["refused"]}'; exit 1 ;;
       # An issue's task (proj-inbox) that takes a while to answer.
@@ -467,6 +475,18 @@ pkgs.testers.runNixOSTest {
         machine.succeed("su - dev -c 'mkdir -p /data/dev/jobs/broken && printf \"o/r#6\\t0\\t{}\\n\" >/data/dev/jobs/broken/await'")
         proj("_watch")
         machine.succeed("rm -rf /data/dev/jobs/broken")
+
+    with subtest("every answer in a turn is kept, not only the last"):
+        f = proj("run web twice")
+        machine.wait_until_succeeds(f"su - dev -c 'proj state {f}' | grep -x done", timeout=120)
+        assert proj(f"log {f}") == "the answer\n\ndid twice", proj(f"log {f}")
+        assert machine.succeed(f"cat /data/dev/jobs/{f}/1.result") == "the answer\n\ndid twice\n"
+
+    with subtest("an answer, then an error: the log has both"):
+        f = proj("run web answerfail")
+        machine.wait_until_succeeds(f"su - dev -c 'proj state {f}' | grep -x error", timeout=120)
+        log = proj(f"log {f}")
+        assert log == 'the answer\n\n(turn 1 ended in an error)\n["refused"]', log
 
     with subtest("a job past its memory cap is killed by its own limit"):
         e = proj("run web eat")

@@ -84,6 +84,12 @@ state() {
   fi
 }
 
+# A turn's answer, from its stream: every result with something to say, in
+# order. Claude answers again each time a background task it left running
+# reports back, so the last result can be a line about that task with the
+# real answer one before it.
+answer() { grep '"type":"result"' "$1" 2>/dev/null | jq -rs 'map(.result // "" | select(. != "")) | join("\n\n")'; }
+
 # Swapped in whole, so a reader never finds it missing or half written.
 set_turns() { echo "$2" >"$jobs/$1/turns.new" && mv -f "$jobs/$1/turns.new" "$jobs/$1/turns"; }
 
@@ -293,16 +299,21 @@ case "${1:-status}" in
     done
     # The latest turn's only when no turn was asked for.
     [ -n "$n" ] || n=$(cat "$jobs/$id/turns")
-    # A turn's answer is the result line in its own stream, so an earlier
-    # turn's is still there once later ones have started.
+    # A turn's answer is read from its own stream, so an earlier turn's is
+    # still there once later ones have started.
     last=$(grep '"type":"result"' "$jobs/$id/$n.jsonl" 2>/dev/null | tail -n 1 || true)
     if [ -n "$raw" ]; then
       cat "$jobs/$id/$n.jsonl"
-    elif [ -n "$last" ] && jq -e '(.result // "") != ""' <<<"$last" >/dev/null; then
-      jq -r .result <<<"$last"
+    elif [ -n "$last" ] && text=$(answer "$jobs/$id/$n.jsonl") && [ -n "$text" ]; then
+      printf '%s\n' "$text"
+      # An answer, then an error: say what the turn ended on.
+      if jq -e .is_error <<<"$last" >/dev/null; then
+        printf '\n(turn %s ended in an error)\n' "$n"
+        jq -c '.errors // empty' <<<"$last"
+      fi
     else
-      # No result yet, or one with nothing to say: an error's can hold only
-      # its errors.
+      # No result yet, or none with anything to say: an error's can hold
+      # only its errors.
       if [ -z "$last" ] && [ "$n" = "$(cat "$jobs/$id/turns" 2>/dev/null)" ]; then
         echo "($(state "$id"); no answer yet)"
       else
@@ -440,7 +451,7 @@ Carry on from there. Anything you left in the background last turn was stopped w
     if [ -n "$last" ]; then
       rc=0
       jq -r '.session_id' <<<"$last" >"$dir/session"
-      jq -r '.result // ""' <<<"$last" >"$dir/$n.result"
+      answer "$dir/$n.jsonl" >"$dir/$n.result"
       jq -r 'if .is_error then "error" else "done" end' <<<"$last" >"$dir/$n.outcome"
       # What it awaits, from the baseline `proj await` took; one line per
       # target, the first await of it in the turn.
