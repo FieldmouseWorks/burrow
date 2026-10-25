@@ -462,7 +462,7 @@ Carry on from there. Anything you left in the background last turn was stopped w
     # anything that changed since the turn took its baseline. The job comes
     # in the unit's environment: systemd splits and expands a command line,
     # and a job's id is its project's folder name, spaces, `%` and all.
-    id=${PROJ_ENDED:?proj _ended is its turn's unit's ExecStopPost}
+    id=${PROJ_ENDED:?proj _ended is for the end of a job turn, run by its unit}
     [ -n "$KICK" ] || exit 0
     { cat "$jobs/$id/kick" 2>/dev/null || true
       cut -f1 "$jobs/$id/await" 2>/dev/null | sed 's/#.*//; s#^#proj-watch/#' || true
