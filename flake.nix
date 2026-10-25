@@ -68,7 +68,7 @@
                 (nixpkgs.lib.optionalAttrs (name == "robot") { burrow.robot.serverIp = "203.0.113.7"; })
                 (nixpkgs.lib.optionalAttrs (name == "undo") { burrow.undo.datasets = [ "rpool/safe/data" ]; })
                 (nixpkgs.lib.optionalAttrs (name == "updates") { burrow.updates.origin = "https://github.com/sam/homelab"; })
-                (nixpkgs.lib.optionalAttrs (name == "autoland") { burrow.autoland = { owners = [ "sam" ]; authors = [ "sam" ]; deepseek = { enable = true; envFile = "/run/secrets/deepseek-review"; }; }; })
+                (nixpkgs.lib.optionalAttrs (name == "autoland") { burrow.autoland = { owners = [ "sam" ]; authors = [ "sam" ]; reviewers = { codex.enable = true; deepseek = { enable = true; envFile = "/run/secrets/deepseek-review"; }; }; }; })
                 (nixpkgs.lib.optionalAttrs (name == "house") { burrow.house.owners = [ "sam" ]; })
                 (nixpkgs.lib.optionalAttrs (builtins.elem name [ "events" "proj" "autoland" "updates" ]) { burrow.events = { host = "example.org"; secretFile = "/run/secrets/burrow-webhook"; }; })
                 { burrow.${if name == "remote-control" then "remoteControl" else name}.enable = true; }
@@ -80,8 +80,8 @@
         agents = import ./tests/agents.nix { inherit self pkgs; };
         # proj's queue and memory caps, with a stand-in for Claude.
         proj = import ./tests/proj.nix { inherit self pkgs; };
-        # The steward, with stand-ins for gh, Claude jobs and DeepSeek's API,
-        # and its one-way paths as the module sets them.
+        # The steward and its reviewers, with stand-ins for gh, git's remote and
+        # the agents, and its one-way paths as the module sets them.
         autoland = pkgs.runCommand "autoland-check" { nativeBuildInputs = [ pkgs.python3 pkgs.git ]; } ''
           python3 -I ${./tests/autoland}/check.py ${./modules/autoland}/steward.py \
             ${pkgs.writeText "one-way.json" (builtins.toJSON self.nixosConfigurations.example.config.burrow.autoland.oneWay)}

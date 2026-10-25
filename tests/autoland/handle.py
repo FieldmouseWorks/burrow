@@ -1,4 +1,6 @@
-"""handle(), end to end on PRs shaped like the steward's query's."""
+"""handle(), end to end on PRs shaped like the steward's query's, with the
+snapshot, the reviewers and the posting stood in for (review.py and post.py
+check those)."""
 
 import hashlib
 import hmac
@@ -6,9 +8,9 @@ import json
 import os
 import subprocess
 
-from harness import (CI_GREEN, COMMITS, CUR, DDIR, FAIL, JOBS, PR_DIFF, QDIR, RESULT, RUNS, STATES, T0, WROTE, C, R, S,
-                     clean, codex_clean, ds_review, fresh_pr_state, head, info, judgment, merged, mkpr, queued, run,
-                     said, stand_in, tmp, worker)
+from harness import (C, CI_GREEN, COMMITS, DDIR, FAIL, JOBS, POSTED, PR_DIFF, QDIR, R, S, STATES, STUB, T0, V,
+                     W, WROTE, agent, agent_runs, clean, fresh_pr_state, head, info, judgment, merged,
+                     mkpr, pr_state, queued, run, rv_review, said, stand_in, tmp, worker)
 
 stand_in()
 fresh_pr_state()
@@ -18,7 +20,7 @@ fresh_pr_state()
 status, digest = run(mkpr(draft=True), 0)
 status, digest = run(clean(draft=True), 600)
 assert "state=pending" in status and "Draft: work in progress" in status, status
-assert WROTE == [x for x in WROTE if "/statuses/" in x] and RUNS == [] and JOBS == [] and digest == [], WROTE
+assert WROTE == [x for x in WROTE if "/statuses/" in x] and queued() == [] and POSTED == [] and JOBS == [] and digest == [], WROTE
 assert not any(x.startswith("pr ready") for x in WROTE)
 # Whoever's it is: an outside author's draft, or one with too much to read, isn't listed yet.
 outside = {**mkpr(draft=True), "author": {"login": "mallory"}}
@@ -34,21 +36,33 @@ long["comments"]["pageInfo"]["hasPreviousPage"] = True
 status, digest = run(long, 600)
 assert "Over 100 comments" in status and digest and JOBS == [] and not merged(), (status, digest)
 
-# A head is reviewed by both once it has sat still: Codex asked, DeepSeek
-# queued (once) for its own service, and no pass waits on it.
+
+# A head is reviewed by both once it has sat still: each queued (once) for
+# the reviewers' service, and no pass waits on them.
 fresh_pr_state()
 status, _ = run(mkpr(), 0)
-assert queued() == [] and not any("@codex" in x for x in WROTE)
+assert queued() == [] and "Waiting for Codex's review" in status, status
 status, _ = run(mkpr(), 600)
-assert queued() == [head] and any("@codex review" in x for x in WROTE)
-assert "Waiting for Codex" in status and "DeepSeek is reviewing this commit" in status
+assert queued() == ["codex", "deepseek"], queued()
+assert "Codex is reviewing this commit" in status and "DeepSeek is reviewing this commit" in status, status
 status, _ = run(mkpr(), 640)
-assert queued() == [head] and "DeepSeek is reviewing" in status
+assert queued() == ["codex", "deepseek"] and "DeepSeek is reviewing" in status
+# Their answers are posted by the next pass, which lands it on them.
 worker()
-assert RUNS == [head]
+status, _ = run(mkpr(), 650)
+assert sorted(POSTED) == [("codex", head, 0), ("deepseek", head, 0)] and os.listdir(DDIR) == [], POSTED
+assert "Codex and DeepSeek found nothing" in status and merged(), status
+
+# Only reviews the steward posted count.
+fresh_pr_state()
+forged = mkpr(reviews=[rv_review("codex", 0, who="mallory"), rv_review("deepseek", 0, who="mallory")])
+run(forged, 0)
+status, _ = run(forged, 700)
+assert not merged() and queued() == ["codex", "deepseek"], status
 
 # Both clean, CI green: settled and merged in the same pass, never readied
 # (it already is) and with no job.
+fresh_pr_state()
 status, _ = run(clean(), 700)
 assert "state=success" in status and "Codex and DeepSeek found nothing" in status and queued() == []
 assert merged() and JOBS == [] and not any(x.startswith("pr ready") for x in WROTE)
@@ -57,6 +71,22 @@ assert merged() and JOBS == [] and not any(x.startswith("pr ready") for x in WRO
 fresh_pr_state()
 status, _ = run(clean(files=[".github/workflows/ci.yml", "a.py"]), 700)
 assert "state=success" in status and merged() and JOBS == [], (status, WROTE)
+
+# A change the reviewers' snapshot hid from them (a .env, say, or a plain
+# path a secret was moved to): their clean reviews don't cover it, so it's
+# judged.
+fresh_pr_state()
+C.save(f"{V.SNAP}/{V.snap_name('pr-sam_r-5.json', head, 'main')}.json", {"rules": "", "secret": [".env", "cfg/api.yaml"]})
+status, _ = run(clean(files=[".env", "cfg/api.yaml"]), 700)
+assert len(JOBS) == 1 and not merged() and "it changes .env, cfg/api.yaml, which the reviewers" in JOBS[0], (status, JOBS)
+
+# Retargeted after its reviews, the same head is another change: what they
+# said doesn't count, and they're asked again.
+fresh_pr_state()
+on_main = [rv_review("codex", 0), rv_review("deepseek", 0)]
+status, _ = run(mkpr(reviews=on_main, base="release"), 0)
+status, _ = run(mkpr(reviews=on_main, base="release"), 700)
+assert not merged() and queued() == ["codex", "deepseek"], status
 
 # A migration: one judge job a head, and its verdict on that head decides.
 fresh_pr_state()
@@ -146,6 +176,7 @@ fresh_pr_state()
 big = {**clean(files=["a.py"]), "changedFiles": 150}
 status, _ = run(big, 700)
 assert len(JOBS) == 1 and "150 files (too many to check)" in JOBS[0] and not merged(), (status, JOBS)
+
 
 # The file list names only where a rename went: one out of a one-way path
 # (CODEOWNERS to CODEOWNERS.bak) is read from the diff and judged, and so is
@@ -261,9 +292,7 @@ for kw in ({"checks": [{"__typename": "CheckRun", "name": "ci", "status": "COMPL
 # won't go on (none in the repo) isn't taken as on: no comment, and the next
 # pass tries again rather than starting the rounds over.
 fresh_pr_state()
-codex_said = {"author": {"login": "chatgpt-codex-connector"}, "state": "COMMENTED", "submittedAt": T0,
-              "commit": {"oid": head}, "body": "Here are some suggestions."}
-stuck = {"reviews": [codex_said] * 5, "threads": [False]}
+stuck = {"reviews": [rv_review("codex", 1)] * 5, "threads": [False]}
 FAIL.append("--add-label")
 for t in (700, 800):
     status, _ = run(mkpr(**stuck), t)
@@ -570,102 +599,171 @@ assert C.project_dir("sam/r") == "r", C.project_dir("sam/r")
 assert C.project_dir("sam/q") == "q" and C.project_dir("sam/none") is None
 S.CFG["projectsDir"] = f"{tmp}/none"
 
+
 # Codex clean but DeepSeek has findings: nothing merges until they're settled.
+cx = rv_review("codex", 0)
+ds2 = rv_review("deepseek", 2)
 fresh_pr_state()
-run(mkpr(comments=[codex_clean()]), 0)
-run(mkpr(comments=[codex_clean()]), 600)
-worker()
-status, _ = run(mkpr(reviews=[ds_review(2)], comments=[codex_clean()], threads=[False, False]), 700)
+run(mkpr(reviews=[cx]), 0)
+run(mkpr(reviews=[cx]), 600)
+assert queued() == ["deepseek"]
+worker(deepseek={"result": "review", "answer": {"findings": [{"path": "a.py"}, {"path": "a.py"}]}})
+status, _ = run(mkpr(reviews=[cx]), 650)
+assert POSTED == [("deepseek", head, 2)] and not merged(), (POSTED, status)
+status, _ = run(mkpr(reviews=[ds2, cx], threads=[False, False]), 700)
 assert "Round 1: 2 open review threads" in status and not merged()
 
 # Its findings answered and resolved without a new commit: it looks again.
-status, _ = run(mkpr(reviews=[ds_review(2)], comments=[codex_clean()], threads=[True, True]), 3600)
-assert queued() == [head] and "Findings answered" in status
-status, _ = run(mkpr(reviews=[ds_review(2)], comments=[codex_clean()], threads=[True, True]), 3700)
-assert queued() == [head]
+status, _ = run(mkpr(reviews=[ds2, cx], threads=[True, True]), 3600)
+assert queued() == ["deepseek"] and "Findings answered" in status
+status, _ = run(mkpr(reviews=[ds2, cx], threads=[True, True]), 3700)
+assert queued() == ["deepseek"]
 worker()
 # Its new review, later than the ask, is what counts.
-status, _ = run(mkpr(reviews=[ds_review(2), ds_review(0, at="2026-10-24T01:10:00Z")], comments=[codex_clean()],
-                     threads=[True, True]), 4300)
-assert "state=success" in status and merged()
+status, _ = run(mkpr(reviews=[ds2, cx], threads=[True, True]), 4300)
+assert "state=success" in status and merged(), status
 
 # Its second look failing three times: the owner hears, though a review
 # with findings is on record.
-RESULT["v"] = "down"
+fresh_pr_state()
+answered = mkpr(reviews=[ds2, cx], threads=[True, True])
 for i in range(3):
-    run(mkpr(reviews=[ds_review(2)], comments=[codex_clean()], threads=[True, True]), 5000 + i)
-    worker()
-status, digest = run(mkpr(reviews=[ds_review(2)], comments=[codex_clean()], threads=[True, True]), 5100)
+    run(answered, 5000 + i)
+    assert queued() == ["deepseek"], i
+    worker(deepseek={"result": "error", "error": "dsh exited 1"})
+status, digest = run(answered, 5100)
 assert any(x[0] == "DeepSeek couldn't review it" for x in digest), digest
-assert "Findings answered; DeepSeek failed 3 times" in status, status
-RESULT["v"] = "clean"
+assert "Findings answered; DeepSeek failed 3 times" in status and queued() == [], status
 
-# A head that moved on before its turn isn't reviewed.
+# An answer that's no review is a failed one, never a clean one.
 fresh_pr_state()
-run(mkpr(comments=[codex_clean()]), 0)
-run(mkpr(comments=[codex_clean()]), 600)
-CUR["sha"] = "c" * 40
+run(mkpr(reviews=[cx]), 0)
+run(mkpr(reviews=[cx]), 600)
+worker(deepseek={"result": "review", "answer": {"summary": "couldn't finish"}})
+status, _ = run(mkpr(reviews=[cx]), 610)
+assert POSTED == [] and not merged() and pr_state()["rv"]["deepseek"]["fails"] == 1, status
+assert queued() == ["deepseek"] and os.listdir(DDIR) == []
+# One GitHub won't take stays where it is and is posted by the next pass.
 worker()
-assert RUNS == [] and os.listdir(DDIR) == []
-CUR["sha"] = head
-
-# Queued, then the repo is taken off DeepSeek: nothing of it is sent.
+STUB["post"] = RuntimeError("GitHub didn't take the review")
+status, _ = run(mkpr(reviews=[cx]), 620)
+assert len(os.listdir(DDIR)) == 1 and pr_state()["rv"]["deepseek"]["fails"] == 2 and not merged(), status
+STUB["post"] = None
+status, _ = run(mkpr(reviews=[cx]), 630)
+assert POSTED == [("deepseek", head, 0)] and os.listdir(DDIR) == [] and merged(), status
+# Posted, its earlier failures are behind it: none left to report.
+assert "fails" not in pr_state()["rv"]["deepseek"], pr_state()["rv"]
+# Turned down three times, it's dropped and the owner hears, not posted forever.
 fresh_pr_state()
-run(mkpr(comments=[codex_clean()]), 0)
-run(mkpr(comments=[codex_clean()]), 600)
-S.CFG["repos"]["sam/r"] = {"deepseek": False}
+run(mkpr(reviews=[cx]), 0)
+run(mkpr(reviews=[cx]), 600)
 worker()
-assert RUNS == [] and os.listdir(DDIR) == []
-del S.CFG["repos"]["sam/r"]
-
-# A repo set to Codex alone lands on Codex's word.
+STUB["post"] = RuntimeError("GitHub didn't take the review")
+for i in range(3):
+    status, digest = run(mkpr(reviews=[cx]), 610 + i)
+STUB["post"] = None
+assert os.listdir(DDIR) == [] and queued() == [] and pr_state()["rv"]["deepseek"]["fails"] == 3, status
+assert any(x[0] == "DeepSeek couldn't review it" for x in digest) and not merged(), digest
+# A snapshot that can't be taken is a failed try too.
 fresh_pr_state()
-S.CFG["repos"]["sam/r"] = {"deepseek": False}
-status, _ = run(mkpr(comments=[codex_clean()]), 600)
-assert "state=success" in status and "Codex found nothing" in status and queued() == [] and merged()
-del S.CFG["repos"]["sam/r"]
+run(mkpr(reviews=[cx]), 0)
+STUB["queue"] = RuntimeError("the head moved on")
+status, _ = run(mkpr(reviews=[cx]), 600)
+assert queued() == [] and pr_state()["rv"]["deepseek"]["fails"] == 1 and "Waiting for DeepSeek" in status, status
+STUB["queue"] = None
+
+# A queued review that leaves the queue with nothing back is lost: seen so on
+# two passes, it counts as a failure and is asked again.
+fresh_pr_state()
+run(mkpr(reviews=[cx]), 0)
+run(mkpr(reviews=[cx]), 600)
+os.remove(f"{QDIR}/{os.listdir(QDIR)[0]}")
+run(mkpr(reviews=[cx]), 610)
+assert "fails" not in pr_state()["rv"]["deepseek"] and queued() == []
+status, _ = run(mkpr(reviews=[cx]), 620)
+assert pr_state()["rv"]["deepseek"]["fails"] == 1 and queued() == ["deepseek"], status
+# Still queued, however long it takes: no failure, nothing asked twice.
+status, _ = run(mkpr(reviews=[cx]), 620 + 2 * 86400)
+assert "DeepSeek is reviewing this commit" in status and queued() == ["deepseek"], status
+assert pr_state()["rv"]["deepseek"]["fails"] == 1
 
 # DeepSeek down: each failure comes back to the next pass, which queues it
 # again; after three the owner hears, and an hour on it's tried again.
 fresh_pr_state()
-RESULT["v"] = "down"
-run(mkpr(comments=[codex_clean()]), 0)
-run(mkpr(comments=[codex_clean()]), 600)
+run(mkpr(reviews=[cx]), 0)
+run(mkpr(reviews=[cx]), 600)
 for i in range(3):
-    worker()
-    status, digest = run(mkpr(comments=[codex_clean()]), 610 + i)
+    worker(deepseek={"result": "error", "error": "down"})
+    status, digest = run(mkpr(reviews=[cx]), 610 + i)
 assert any(x[0] == "DeepSeek couldn't review it" for x in digest) and "Waiting for DeepSeek" in status
 assert queued() == []
-run(mkpr(comments=[codex_clean()]), 1000)
+run(mkpr(reviews=[cx]), 1000)
 assert queued() == []
-RESULT["v"] = "clean"
-run(mkpr(comments=[codex_clean()]), 4400)
-assert queued() == [head]
+run(mkpr(reviews=[cx]), 4400)
+assert queued() == ["deepseek"]
 
-# Still queued, however long it takes: no pass gives up on it.
-status, _ = run(mkpr(comments=[codex_clean()]), 4400 + 86400)
-assert json.load(open(f"{tmp}/state/pr-sam_r-5.json"))["ds"].get("fails", 0) == 0 and queued() == [head]
-assert "DeepSeek is reviewing" in status
-
-# Out of the queue with nothing back (lost): one pass may have read the PR
-# just before its review went up, so it counts as a failure on the second,
-# and is asked again.
-for x in os.listdir(QDIR):
-    os.remove(f"{QDIR}/{x}")
-run(mkpr(comments=[codex_clean()]), 4400 + 86500)
-assert json.load(open(f"{tmp}/state/pr-sam_r-5.json"))["ds"].get("fails", 0) == 0 and queued() == []
-run(mkpr(comments=[codex_clean()]), 4400 + 86600)
-assert json.load(open(f"{tmp}/state/pr-sam_r-5.json"))["ds"]["fails"] == 1 and queued() == [head]
-
-# Too big to send: the owner hears, and it isn't queued again.
+# Out of service (Codex's plan spent): recorded for every PR, which settle on
+# the other reviewer meanwhile, and asked again once it's back.
 fresh_pr_state()
-RESULT["v"] = "tooBig"
-run(mkpr(comments=[codex_clean()]), 0)
-run(mkpr(comments=[codex_clean()]), 600)
-worker()
-status, digest = run(mkpr(comments=[codex_clean()]), 700)
-assert any(x[0] == "Too big for DeepSeek to review" for x in digest) and queued() == []
-RESULT["v"] = "clean"
+run(mkpr(), 0)
+run(mkpr(), 600)
+worker(codex={"result": "out", "why": "its ChatGPT plan's usage is spent", "until": C.ts(T0) + 4200})
+status, _ = run(mkpr(), 650)
+assert "DeepSeek found nothing" in status and "Codex and" not in status and merged(), status
+assert json.load(open(f"{tmp}/state/{V.OUT}"))["codex"]["until"] == C.ts(T0) + 4200
+run(mkpr(number=6), 700)
+run(mkpr(number=6), 1400)
+assert queued() == ["deepseek"]
+run(mkpr(number=6), 4300)
+assert queued() == ["codex", "deepseek"]
+# The owner hears one is out, once however many PRs find it so.
+fresh_pr_state()
+C.save(V.OUT, {"codex": {"why": "it isn't logged in", "until": C.ts(T0) + 86400}})
+digest = []
+for num in (5, 6):
+    S.handle("sam/r", mkpr(number=num), info, digest)
+assert [x for x in digest if x[0] == "A reviewer is out of service"] == [
+    ("A reviewer is out of service", "Codex", "it isn't logged in")], digest
+# Every reviewer out: the owner hears, and nothing is queued or landed.
+fresh_pr_state()
+C.save(V.OUT, {r: {"why": "spent", "until": C.ts(T0) + 86400} for r in V.NAMES})
+status, digest = run(clean(), 600)
+assert "No reviewer can review it now (Codex: spent; DeepSeek: spent)" in status, status
+assert [x[0] for x in digest] == ["No reviewer can review it"] and queued() == [] and not merged(), digest
+
+# A repo set to Codex alone lands on Codex's word, and a review queued
+# before it was taken off DeepSeek isn't sent.
+fresh_pr_state()
+run(mkpr(reviews=[cx]), 0)
+run(mkpr(reviews=[cx]), 600)
+name, = os.listdir(QDIR)
+S.CFG["repos"]["sam/r"] = {"deepseek": False}
+agent()
+W.review(name)
+back = json.load(open(f"{DDIR}/{name}"))
+assert back["result"] == "error" and "isn't one DeepSeek reviews" in back["error"] and agent_runs() == [], back
+status, _ = run(mkpr(reviews=[cx]), 700)
+assert "state=success" in status and "Codex found nothing" in status and merged()
+del S.CFG["repos"]["sam/r"]
+
+# The sweep: snapshots, queued reviews and answers of heads no open PR has
+# any more go, for the repos the pass read (a dash in a name included).
+fresh_pr_state()
+gone, live_snap = V.snap_name("pr-sam_r-5.json", "d" * 40, "main"), V.snap_name("pr-sam_r-5.json", head, "main")
+other_repo, dashed = V.snap_name("pr-sam_q-1.json", "e" * 40, "main"), V.snap_name("pr-sam_lo-k-3.json", "f" * 40, "main")
+# Retargeted: the same head on another base is another snapshot.
+retargeted = V.snap_name("pr-sam_r-5.json", head, "release/1.x")
+assert retargeted != live_snap
+for s in (gone, live_snap, other_repo, dashed, retargeted):
+    os.makedirs(f"{tmp}/state/{V.SNAP}/{s}")
+    C.save(f"{V.SNAP}/{s}.json", {})
+    C.save(f"{V.QUEUE}/deepseek--{s}.json", {})
+    C.save(f"{V.DONE}/codex--{s}.json", {})
+V.sweep({"sam_r", "sam_lo-k"}, {live_snap})
+left = sorted(x for d in (V.SNAP, V.QUEUE, V.DONE) for x in os.listdir(f"{tmp}/state/{d}"))
+assert left == sorted([live_snap, live_snap + ".json", other_repo, other_repo + ".json",
+                       f"deepseek--{live_snap}.json", f"deepseek--{other_repo}.json",
+                       f"codex--{live_snap}.json", f"codex--{other_repo}.json"]), left
 
 # Every repo gets the hold and needs-owner labels, once a day.
 fresh_pr_state()
@@ -704,7 +802,7 @@ for bad in ("", "abc", real):
     forged = hmac.new(bad.encode(), f"sam/r#6 autoland-judgment land {head} main".encode(), hashlib.sha256).hexdigest()[:32]
     assert sealed != forged, bad
 
-print("autoland: ok")
+print("handle: ok")
 
 # Over 100 checks: only the first page comes back, and one past it could be
 # red, so a green first page doesn't land it.

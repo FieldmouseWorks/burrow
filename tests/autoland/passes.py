@@ -6,17 +6,17 @@ import json
 import os
 import sys
 
-from harness import (KICKS, REAL, STATES, T, WROTE, C, R, S, clean, codex_clean, fresh_pr_state, head, info, mkpr,
-                     queued, run, tmp, worker)
+from harness import (KICKS, QDIR, REAL, STATES, STUB, T, WROTE, C, R, S, V, W, clean, fresh_pr_state, head, info,
+                     mkpr, pr_state, queued, run, rv_review, tmp, worker)
 
 # A pass that waits on time books its repo's next pass for when the wait
-# ends: a new head's settle delay, the reviewer's timeout, and how long
-# findings sit before a job.
+# ends: a new head's settle delay, and how long findings sit before a job.
 fresh_pr_state()
 run(mkpr(), 10)
 assert C.WAKE == {"sam/r": T + 10 + 3 * 60 + 1}, C.WAKE
-run(mkpr(), 200)  # Codex asked: heard about once its timeout's up
-assert C.WAKE == {"sam/r": T + 200 + 45 * 60 + 1}, C.WAKE
+# The reviewers queued: their answers kick it (below), so there's only the day.
+run(mkpr(), 200)
+assert queued() == ["codex", "deepseek"] and C.WAKE == {"sam/r": T + 86400 + 1}, C.WAKE
 fresh_pr_state()
 run(clean(threads=[False]), 300)
 assert C.WAKE == {"sam/r": T + 300 + 30 * 60 + 1}, C.WAKE
@@ -25,10 +25,22 @@ run(clean(), 400)
 assert C.WAKE == {"sam/r": T + 86400 + 1}, C.WAKE
 run(clean(), 86400 + 10)
 assert C.WAKE == {}, C.WAKE
+# Every finding answered: the reviewer looks again once the settle delay
+# after its review is up.
+fresh_pr_state()
+run(mkpr(reviews=[rv_review("codex", 1), rv_review("deepseek", 0)]), 700)
+assert C.WAKE == {"sam/r": T + 660 + 3 * 60 + 1}, C.WAKE
+# A reviewer out of service: its look is asked for once it's back.
+fresh_pr_state()
+run(mkpr(), 0)
+C.save(V.OUT, {"codex": {"why": "its usage is spent", "until": T + 5000}})
+run(mkpr(), 600)
+assert queued() == ["deepseek"] and C.WAKE == {"sam/r": T + 5000 + 1}, C.WAKE
+C.save(V.OUT, {})
 
 # Whatever didn't go through is looked at again soon: a merge that failed, a
 # job that couldn't start, a job seen ended with no answer (the second look),
-# and a DeepSeek review lost from the queue.
+# a review that couldn't be queued or posted, and one lost from the queue.
 fresh_pr_state()
 S.land, land = (lambda repo, pr, info: False), S.land
 run(clean(), 700)
@@ -46,30 +58,44 @@ run(clean(files=["migrations/1.sql"]), 800)
 assert C.WAKE["sam/r"] == T + 800 + 60 + 1, C.WAKE
 STATES.clear()
 fresh_pr_state()
-run(mkpr(comments=[codex_clean()]), 0)
-run(mkpr(comments=[codex_clean()]), 600)
-assert queued() == [head]
-for x in os.listdir(f"{tmp}/state/ds-queue"):
-    os.remove(f"{tmp}/state/ds-queue/{x}")
-run(mkpr(comments=[codex_clean()]), 700)
+run(mkpr(), 0)
+STUB["queue"] = RuntimeError("git: the head moved on")
+run(mkpr(), 600)
+STUB["queue"] = None
+assert queued() == [] and C.WAKE["sam/r"] == T + 600 + 5 * 60 + 1, C.WAKE
+fresh_pr_state()
+run(mkpr(), 0)
+run(mkpr(), 600)
+worker()
+STUB["post"] = RuntimeError("gh: 502")
+run(mkpr(), 700)
+STUB["post"] = None
+assert C.WAKE["sam/r"] == T + 700 + 60 + 1, C.WAKE
+fresh_pr_state()
+run(mkpr(), 0)
+run(mkpr(), 600)
+assert queued() == ["codex", "deepseek"]
+for x in os.listdir(QDIR):
+    os.remove(f"{QDIR}/{x}")
+run(mkpr(), 700)
 assert C.WAKE["sam/r"] == T + 700 + 60 + 1, C.WAKE
 # Three failed reviews: tried again an hour after the last.
-st = C.load("pr-sam_r-5.json", None)
-st["ds"].update(fails=3, failedAt=T + 650)
-st["ds"].pop("gone", None)
-st["ds"].pop("queued", None)
+st = pr_state()
+for r in ("codex", "deepseek"):
+    st["rv"][r] = {"fails": 3, "failedAt": T + 650}
 C.save("pr-sam_r-5.json", st)
-run(mkpr(comments=[codex_clean()]), 800)
+run(mkpr(), 800)
 assert C.WAKE["sam/r"] == T + 650 + 3600 + 1, C.WAKE
 print("wake-ups: ok")
 
-# DeepSeek's review back, posted or failed: the repo's pass is kicked, since a
-# failure sends GitHub nothing.
+# A reviewer's answer back, a review or why there's none: the repo's pass is
+# kicked, since nothing goes to GitHub until that pass posts it.
 fresh_pr_state()
-run(mkpr(comments=[codex_clean()]), 0)
-run(mkpr(comments=[codex_clean()]), 600)
+C.save(f"{V.QUEUE}/codex--lost.json", {"reviewer": "codex", "repo": "sam/r", "number": 5, "snap": "gone",
+                                       "headRefOid": head})
 KICKS.clear()
-worker()
+W.review("codex--lost.json")
+assert C.load(f"{V.DONE}/codex--lost.json", None)["result"] == "error" and queued() == []
 assert KICKS == ["/kick/autoland/sam/r"], KICKS
 # A Claude job kicks it at the end of each turn (proj run --kick).
 proj = os.path.join(tmp, "proj")
