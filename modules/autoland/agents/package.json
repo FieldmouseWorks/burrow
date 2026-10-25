@@ -4,6 +4,6 @@
   "dependencies": {
     "@deepseek-ai/dsh": "0.2.1-rc.2",
     "@openai/codex": "0.164.0",
-    "node-linux-x64": "24.22.1"
+    "node-linux-x64": "26.12.1"
   }
 }
