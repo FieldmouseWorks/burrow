@@ -67,8 +67,8 @@ query($owner: String!, $name: String!, $cursor: String) {
         files(first: 100) { nodes { path changeType } }
         changedFiles
         reviewThreads(first: 100) { pageInfo { hasNextPage } nodes { isResolved } }
-        reviews(last: 100) { pageInfo { hasPreviousPage } nodes { author { login } state body submittedAt commit { oid } } }
-        comments(last: 100) { pageInfo { hasPreviousPage } nodes { databaseId body createdAt updatedAt author { login } } }
+        reviews(last: 100) { pageInfo { hasPreviousPage startCursor } nodes { %s } }
+        comments(last: 100) { pageInfo { hasPreviousPage startCursor } nodes { %s } }
         reactions(last: 20) { nodes { content createdAt user { login } } }
         commits(last: 1) {
           nodes { commit { oid statusCheckRollup { contexts(first: 100) { pageInfo { hasNextPage } nodes {
@@ -84,16 +84,36 @@ query($owner: String!, $name: String!, $cursor: String) {
 """
 
 
+# What each review and comment is read for, in PRS and the older pages.
+OLDER = {"reviews": "author { login } state body submittedAt commit { oid }",
+         "comments": "databaseId body createdAt updatedAt author { login }"}
+PRS = PRS % (OLDER["reviews"], OLDER["comments"])
+OLDER_PAGE = """
+query($id: ID!, $cursor: String) {
+  node(id: $id) { ... on PullRequest { %s(last: 100, before: $cursor) { pageInfo { hasPreviousPage startCursor } nodes { %s } } } }
+}
+"""
+
+
 def open_prs(owner, name):
-    """The repo's merge settings and every open PR, all pages."""
+    """The repo's merge settings and every open PR, all pages, with every
+    review and comment on each: a long PR's verdicts, markers and rounds
+    can be older than the last 100."""
     prs, cursor = [], None
     while True:
         info = C.graphql(PRS, owner=owner, name=name, cursor=cursor)["repository"]
         page = info.pop("pullRequests")
         prs += page["nodes"]
         if not page["pageInfo"]["hasNextPage"]:
-            return info, prs
+            break
         cursor = page["pageInfo"]["endCursor"]
+    for pr in prs:
+        for field, nodes in OLDER.items():
+            while pr[field]["pageInfo"]["hasPreviousPage"]:
+                got = C.graphql(OLDER_PAGE % (field, nodes), id=pr["id"], cursor=pr[field]["pageInfo"]["startCursor"])
+                older = got["node"][field]
+                pr[field] = {"pageInfo": older["pageInfo"], "nodes": older["nodes"] + pr[field]["nodes"]}
+    return info, prs
 
 
 STATE_RE = re.compile(r"codex-review-state:v1 (\{.*?\}) -->", re.S)
@@ -443,7 +463,8 @@ def handle(repo, pr, repo_info, digest):
         save(key, st)
         return
     # A list longer than one page could hide a hold, an open thread, a
-    # changes-requested review or a verdict: fail closed.
+    # changes-requested review or a verdict: fail closed. (open_prs reads
+    # every review and comment, so those two are whole unless it couldn't.)
     cut = [k for k, more in (("labels", pr["labels"]["pageInfo"]["hasNextPage"]),
                              ("review threads", pr["reviewThreads"]["pageInfo"]["hasNextPage"]),
                              ("reviews", pr["reviews"]["pageInfo"]["hasPreviousPage"]),

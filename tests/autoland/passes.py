@@ -123,6 +123,30 @@ assert C.load("digest-repos.json", None) == {"sam/r": [], "sam/other": [["Open o
 assert published == [[("Open over a day", "other line", "x")]], published
 print("kick: ok")
 
+# A long PR's older reviews and comments are read too, a page at a time,
+# oldest first: its verdicts, markers and rounds can be past the last 100.
+def page(nodes, more=False, at=None):
+    return {"pageInfo": {"hasPreviousPage": more, "startCursor": at}, "nodes": nodes}
+
+
+ASKED = []
+
+
+def graphql(query, **v):
+    ASKED.append(("older reviews" if "node(id" in query and "reviews(" in query else "prs", v.get("cursor")))
+    if "node(id" in query:
+        return {"node": {"reviews": page(["r1"])}}
+    pr = {"id": "PR_1", "reviews": page(["r2"], True, "c-r2"), "comments": page(["c1"])}
+    return {"repository": {"squashMergeAllowed": True, "pullRequests": {"pageInfo": {"hasNextPage": False}, "nodes": [pr]}}}
+
+
+graphql_kept, C.graphql = C.graphql, graphql
+_, prs = S.open_prs("sam", "r")
+C.graphql = graphql_kept
+assert prs[0]["reviews"] == page(["r1", "r2"]) and prs[0]["comments"] == page(["c1"]), prs
+assert ASKED == [("prs", None), ("older reviews", "c-r2")], ASKED
+print("long PRs: ok")
+
 # Each repo keeps a hook to burrow-events: added when it's missing, set
 # again when its URL, events or secret change, left alone otherwise.
 HOOKS, SENT = {"v": []}, []
