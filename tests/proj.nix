@@ -235,8 +235,9 @@ pkgs.testers.runNixOSTest {
         proj("_watch o/q")
         time.sleep(3)
         assert machine.succeed(f"cat /data/dev/jobs/{e}/turns").strip() == "1"
-        # burrow-events' way: the repo's own unit, running as the user.
-        machine.succeed("systemctl start proj-watch@o-r.service")
+        # burrow-events' way: the repo's own unit, running as the user, and
+        # spelt as GitHub may spell it.
+        machine.succeed("systemctl start proj-watch@O-R.service")
         machine.wait_until_succeeds(f"grep -x 2 /data/dev/jobs/{e}/turns", timeout=30)
         machine.wait_until_succeeds(f"su - dev -c 'proj state {e}' | grep -x done", timeout=120)
         prompt = machine.succeed(f"cat /data/dev/jobs/{e}/prompt.2")
@@ -350,7 +351,8 @@ pkgs.testers.runNixOSTest {
         machine.succeed("su - dev -c 'proj-inbox o/q'")
         assert machine.succeed("su - dev -c 'proj-inbox status'").strip() == ""
         machine.succeed("truncate -s 0 /tmp/kicks")
-        machine.succeed("su - dev -c 'proj-inbox o/r'")
+        # Spelt otherwise than the clone's origin: GitHub's names are case-blind.
+        machine.succeed("su - dev -c 'proj-inbox O/R'")
         job = machine.succeed("su - dev -c 'proj-inbox status'").split()[-1]
         machine.wait_until_succeeds(f"su - dev -c 'proj state {job}' | grep -x done", timeout=120)
         # Its turn's end kicks the inbox's look at o/r, which posts the answer.

@@ -110,7 +110,8 @@ done
 
 looked=()
 for repo in "${!project[@]}"; do
-  [ -z "$only" ] || [ "$repo" = "$only" ] || continue
+  # GitHub's names are case-blind: the clone's spelling needn't be the event's.
+  [ -z "$only" ] || [ "${repo,,}" = "${only,,}" ] || continue
   looked+=("$repo")
   p=${project[$repo]}
   key=${repo//\//_}

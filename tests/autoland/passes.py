@@ -110,7 +110,7 @@ def kicked_prs(owner, name):
 
 S.open_prs, argv = kicked_prs, sys.argv
 S.CFG["cleanBranches"] = True
-sys.argv = ["steward", "kick", "sam/r"]
+sys.argv = ["steward", "kick", "Sam/R"]  # as burrow-events spells it, or not
 C.WAKE.clear()
 S.main()
 sys.argv = argv

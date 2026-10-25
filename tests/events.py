@@ -55,6 +55,12 @@ line.event(E.FULL, 106 - E.DEBOUNCE)
 line.wakes({"sam/s": 500})
 assert line.take(111) == ([E.FULL], 389), line.due
 assert line.due == {"sam/s": 500} and line.take(120) == ([], 380), line.due
+# GitHub's names are case-blind: two spellings are one repo's pass.
+line = E.Line()
+line.event("Sam/R", 100)
+line.event("sam/r", 101)
+line.wakes({"SAM/r": 103})
+assert line.take(106) == (["sam/r"], None), line.due
 # An event between a take that found nothing and the wait after it isn't
 # slept through.
 line = E.Line()

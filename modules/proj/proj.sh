@@ -384,7 +384,8 @@ case "${1:-status}" in
           news+="- $t: not something proj can watch; no longer watched"$'\n'
           continue
         fi
-        if [ -n "$only" ] && [ "$repo" != "$only" ]; then
+        # GitHub's names are case-blind: the await's spelling needn't be the event's.
+        if [ -n "$only" ] && [ "${repo,,}" != "${only,,}" ]; then
           lines+="$t"$'\t'"$since"$'\t'"$was"$'\n'
           continue
         fi

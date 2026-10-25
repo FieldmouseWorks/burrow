@@ -75,7 +75,9 @@ def unit(h, repo):
 
 
 class Line:
-    """One handler's repos due a pass, and when each one's last pass started."""
+    """One handler's repos due a pass, and when each one's last pass started.
+    GitHub's names are case-blind, so a repo is kept in lower case: two
+    spellings are one repo, and the handlers match it case-blind too."""
 
     def __init__(self):
         self.due, self.last = {}, {}
@@ -85,6 +87,7 @@ class Line:
         self.cond = threading.Condition()
 
     def event(self, repo, now):
+        repo = repo.lower()
         with self.cond:
             self.due[repo] = min(self.due.get(repo, now + DEBOUNCE), now + DEBOUNCE)
             self.news = True
@@ -95,7 +98,10 @@ class Line:
         started is new (that pass rewrote its repo's)."""
         with self.cond:
             for repo, at in booked.items():
-                if isinstance(repo, str) and REPO_RE.match(repo) and isinstance(at, (int, float)) and at > self.last.get(repo, 0):
+                if not isinstance(repo, str) or not REPO_RE.match(repo):
+                    continue
+                repo = repo.lower()
+                if isinstance(at, (int, float)) and at > self.last.get(repo, 0):
                     self.due[repo] = min(self.due.get(repo, at), at)
             self.news = True
             self.cond.notify()

@@ -785,14 +785,14 @@ def main():
     # changed on GitHub or here, or a wait that has ended). The full pass,
     # when burrow-events starts and hourly, does the rest: the settings, new
     # repos' baseline jobs and branches.
-    kick = sys.argv[2:] if sys.argv[1:2] == ["kick"] else None
+    kick = [k.lower() for k in sys.argv[2:]] if sys.argv[1:2] == ["kick"] else None
     if not DRY:
         # One pass at a time, full or kicked: two would act on the same PRs.
         lock = open(os.path.join(STATE, "pass.lock"), "w")
         fcntl.flock(lock, fcntl.LOCK_EX)
     repos = R.discover()
     if kick is not None:
-        repos = [r for r in repos if r["repo"] in kick]
+        repos = [r for r in repos if r["repo"].lower() in kick]  # GitHub's names are case-blind
     # Repos whose baseline job has started. A repo not in it gets one, a few
     # per pass so the first pass on a machine doesn't start them all at once.
     known = set(load("known.json", []))
