@@ -1,5 +1,7 @@
 """handle(), end to end on PRs shaped like the steward's query's."""
 
+import hashlib
+import hmac
 import json
 import os
 import subprocess
@@ -590,6 +592,17 @@ os.makedirs(C.STATE)
 assert C.seal("sam/r", 6, "autoland-judgment", "land", head, "main") == real
 assert not os.path.exists(f"{tmp}/state/dry/verdict.key")
 C.DRY, C.STATE = False, f"{tmp}/state"
+# A key that's empty or cut short (a crash, a full disk) is one anyone could
+# seal with: it's replaced, whole, and what it sealed stops counting.
+for bad in ("", "abc", real):
+    with open(f"{tmp}/state/verdict.key", "w") as f:
+        f.write(bad)
+    C._key.clear()
+    sealed = C.seal("sam/r", 6, "autoland-judgment", "land", head, "main")
+    key = open(f"{tmp}/state/verdict.key").read()
+    assert len(key) == 64 and int(key, 16) >= 0 and C._key == [key], key
+    forged = hmac.new(bad.encode(), f"sam/r#6 autoland-judgment land {head} main".encode(), hashlib.sha256).hexdigest()[:32]
+    assert sealed != forged, bad
 
 print("autoland: ok")
 
