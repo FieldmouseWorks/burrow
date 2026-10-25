@@ -79,9 +79,11 @@
         agents = import ./tests/agents.nix { inherit self pkgs; };
         # proj's queue and memory caps, with a stand-in for Claude.
         proj = import ./tests/proj.nix { inherit self pkgs; };
-        # The steward's DeepSeek reviewer, with stand-ins for gh and the API.
+        # The steward's DeepSeek reviewer, with stand-ins for gh and the API,
+        # and its one-way paths as the module sets them.
         autoland = pkgs.runCommand "autoland-check" { nativeBuildInputs = [ pkgs.python3 ]; } ''
-          python3 -I ${./tests/autoland.py} ${./modules/autoland}/steward.py
+          python3 -I ${./tests/autoland.py} ${./modules/autoland}/steward.py \
+            ${pkgs.writeText "one-way.json" (builtins.toJSON self.nixosConfigurations.example.config.burrow.autoland.oneWay)}
           touch $out
         '';
         # Stale Remote Control servers catch up once idle, with a stand-in for Claude.

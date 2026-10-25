@@ -55,7 +55,6 @@ let
       directPush = false;
       ruleset = true;
       requireCi = true;
-      actionBumps = true;
       ownerChecks = [ ];
       deepseek = true;
     };
@@ -156,11 +155,12 @@ in
 
     oneWay = mkOption {
       type = types.listOf types.str;
-      default = [ "^\\.github/" "(^|/)secrets?/" "(^|/)\\.sops\\.yaml$" "\\.sops\\.(ya?ml|json|env)$" "(^|/)migrations?/" ];
+      default = [ "(^|/)secrets?/" "(^|/)\\.sops\\.yaml$" "\\.sops\\.(ya?ml|json|env)$" "(^|/)migrations?/" ];
       description = ''
         Path regexes that make a PR yours to merge: it's settled the same way,
-        then waits for you. The default is the gate itself (workflows,
-        CODEOWNERS), secrets and database migrations.
+        then waits for you. The default is secrets and database migrations.
+        `.github/` isn't on it: the reviewers read workflow changes like any
+        other, and the steward merges them once they're settled.
       '';
     };
 
@@ -322,9 +322,6 @@ in
         ruleset (false: no baseline ruleset), requireCi (false: a PR with no
         checks at all counts as green, for a repo with nothing to test; by
         default a settled PR in a repo with no CI waits for you),
-        actionBumps (false: a dependency bot's bump of the actions pinned in
-        .github/workflows waits for you like any other .github/ change; by
-        default it merges on green CI, as other dependency updates do),
         ownerChecks (names of checks that only a person clears, such as a
         verdict from a test machine: a settled PR waiting on nothing else is
         listed for you instead of waiting quietly for CI), keepBranches
@@ -406,7 +403,7 @@ in
       - Once ${if cfg.deepseek.enable then "Codex and DeepSeek both find" else "Codex finds"} nothing on the head, every thread is resolved and CI is
         green, it posts `${cfg.context}`, marks the PR ready and merges it; the
         branch goes too. Don't merge, mark ready or post that status yourself.
-      - What it won't merge (paths matching its one-way list, such as `.github/`,
+      - What it won't merge (paths matching its one-way list, such as
         secrets and migrations; more than ${toString cfg.rounds} review rounds; outside
         contributions; repos with no CI yet) waits for ${config.burrow.owner}, listed in one issue. Label a PR
         `${cfg.labels.owner}` to send it there yourself, or `${cfg.labels.hold}` to keep the

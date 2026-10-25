@@ -39,13 +39,15 @@ change nothing else in the same PR.
    has had its chance; the branch is deleted.
 
 Waiting for the owner instead: PRs touching the one-way paths
-(`burrow.autoland.oneWay`: `.github/`, secrets, migrations), PRs past the
+(`burrow.autoland.oneWay`: secrets, migrations), PRs past the
 round limit, major dependency updates, outside contributions, and PRs in a
 repo with no CI yet (unless it's set `requireCi = false`: nothing to test), and
 settled PRs waiting only on a check that a person clears, such as a test
 machine's verdict (the repo names it in `ownerChecks`). The steward marks a PR the owner merges ready, a pass before listing it, so the owner's merge doesn't set off a review of its own. They're listed in one issue. Dependency bots' minor updates skip review: CI is their
-review. That includes their bumps of the actions pinned in
-`.github/workflows/`, unless the repo sets `actionBumps = false`.
+review, except a change to `.github/` beyond repinning the actions its
+workflows use: that's the gate, so it goes through the review loop like any
+other PR. Changes to `.github/` aren't one-way: the reviewers read them like any
+other change, and the steward merges them once they're settled.
 
 ## Files (a Claude job, once)
 
