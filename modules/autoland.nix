@@ -164,6 +164,8 @@ in
         lands: it lands anything a revert or a follow-up can undo, and sends
         you only what can't be undone or is yours to decide. The default is
         CODEOWNERS (who signs off on what), secrets and database migrations.
+        The rest of `.github/` isn't on it: the reviewers read workflow
+        changes like any other, and the steward merges them once settled.
       '';
     };
 

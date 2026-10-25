@@ -54,7 +54,7 @@ query($owner: String!, $name: String!, $cursor: String) {
         author { login }
         autoMergeRequest { enabledAt }
         labels(first: 100) { pageInfo { hasNextPage } nodes { name } }
-        files(first: 100) { nodes { path } }
+        files(first: 100) { nodes { path changeType } }
         changedFiles
         reviewThreads(first: 100) { pageInfo { hasNextPage } nodes { isResolved } }
         reviews(last: 100) { pageInfo { hasPreviousPage } nodes { author { login } state body submittedAt commit { oid } } }
@@ -236,6 +236,84 @@ def renovate_edited(repo, pr, st):
                            for c in got["commits"] for a in c["authors"])
         st["editedHead"] = pr["headRefOid"]
     return st["edited"]
+
+
+WORKFLOW_RE = re.compile(r"^\.github/workflows/[^/]+\.ya?ml$")
+# A line that only names an action at a ref: "uses: owner/action@sha # v4.1.0".
+# The ref is a sha, tag or branch and nothing else, so no shell can ride on it.
+PIN_LINE_RE = re.compile(r"^(\s*(-\s+)?uses:\s*[^\s#@]+@)[0-9A-Za-z._/-]+(\s+#.*)?$")
+
+
+def pins_only(repo, pr):
+    """True if every file the PR's diff touches under .github/ is a workflow
+    whose changes only repin actions: each removed `uses:` line is replaced in
+    place by one that's the same up to its `@` (indentation, key and action),
+    so it's the same step at a new ref, and nothing is added, dropped or moved
+    (no permissions, triggers or commands, and no `uses:`-shaped text inside
+    a `run:`). A rename or copy into or out of .github/, or a file with no
+    repinned line (a mode change, a binary), is not a repin. None if the diff
+    couldn't be read."""
+    diff = C.gh("pr", "diff", str(pr["number"]), "-R", repo, check=False)
+    if not isinstance(diff, str) or not diff:
+        return None
+    path, hunk, gated, pinned, out, back = None, False, set(), set(), [], []
+
+    def paired():
+        # A run of removed lines, then the run that replaced them, line by line.
+        ok = len(out) == len(back) and all(a.group(1) == b.group(1) for a, b in zip(out, back))
+        if out and ok:
+            pinned.add(path)
+        out.clear()
+        back.clear()
+        return ok
+
+    for x in diff.splitlines():
+        if not (hunk and x[:1] in "+-\\") or (x[:1] == "-" and back):
+            if not paired():
+                return False
+        if x.startswith("diff --git "):
+            a, sep, b = x[len("diff --git "):].partition(" b/")
+            if not (sep and a.startswith("a/")):
+                if ".github/" in x:
+                    return False
+                path = None
+                continue
+            a, path, hunk = a[2:], b, False
+            if a.startswith(".github/") or b.startswith(".github/"):
+                if a != b or not WORKFLOW_RE.match(b):
+                    return False
+                gated.add(b)
+            else:
+                path = None
+        elif x.startswith("@@"):
+            hunk = True
+        elif path and hunk and x[:1] in "+-" and x[1:].strip():
+            m = PIN_LINE_RE.match(x[1:])
+            if not m:
+                return False
+            (out if x[0] == "-" else back).append(m)
+    return paired() and gated <= pinned
+
+
+def gate_edit(repo, pr, st):
+    """Whether a dependency bot's PR changes .github/ beyond repinning the
+    actions its workflows use: that's the gate itself, and a dependency
+    update is never reviewed. The file list names only a rename's new path,
+    so a rename or copy is read from the diff too. (A list too long to see
+    whole is already the owner's: one_way.) Read once per head and base; a diff that can't be read counts
+    as an edit (reviewed, not merged on CI alone)."""
+    nodes = pr["files"]["nodes"]
+    if not any(f["path"].startswith(".github/") or f["changeType"] in ("RENAMED", "COPIED") for f in nodes):
+        return False
+    if any(f["path"].startswith(".github/") and not WORKFLOW_RE.match(f["path"]) for f in nodes):
+        return True
+    seen = [pr["headRefOid"], pr["baseRefName"]]
+    if st.get("pins", [None])[:2] != seen:
+        pins = pins_only(repo, pr)
+        if pins is None:
+            return True
+        st["pins"] = seen + [pins]
+    return not st["pins"][2]
 
 
 def merge_method(repo_info):
@@ -554,12 +632,14 @@ def handle(repo, pr, repo_info, digest):
     renovate = pr["headRefName"].startswith("renovate/")
     proof_only = ci == "pending" and bool(ci_names) and all(c in rc["proofJobs"] for c in ci_names)
     # A minor Renovate PR a Claude job fixed carries Claude's code, and Renovate
-    # won't merge it: it goes through the review loop below like a Claude PR.
-    # While its CI is red it's renovate-sweep's to hand over, findings and all:
-    # a job from each on one branch would push over each other. The sweep's
-    # push makes a new head, and Codex reads it again.
-    fixed = dep == "minor" and not gate and renovate_edited(repo, pr, st)
-    swept = fixed and ci == "red"
+    # won't merge it; a bot's PR that changes a workflow beyond repinning its
+    # actions changes the gate. Either goes through the review loop below like
+    # a Claude PR. While a Renovate one's CI is red it's renovate-sweep's to
+    # hand over, findings and all: a job from each on one branch would push
+    # over each other. The sweep's push makes a new head, and Codex reads it
+    # again.
+    fixed = dep == "minor" and not gate and (renovate_edited(repo, pr, st) or gate_edit(repo, pr, st))
+    swept = fixed and ci == "red" and renovate
 
     # Dependency bumps: CI is the review. Renovate merges its own minor
     # ones; renovate-sweep fixes the red ones (and settles their threads) and

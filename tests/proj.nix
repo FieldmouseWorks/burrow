@@ -120,7 +120,8 @@ pkgs.testers.runNixOSTest {
         return "proj-" + machine.succeed(f"systemd-escape {job}").strip() + ".service"
 
     def started(job):
-        return float(machine.succeed(f"stat -c %.9Y /data/dev/jobs/{job}/slot"))
+        d = f"/data/dev/jobs/{job}"
+        return float(machine.succeed(f"stat -c %.9Y {d}/$(cat {d}/turns).slot"))
 
     machine.wait_for_unit("user@1001.service")
 
@@ -313,16 +314,46 @@ pkgs.testers.runNixOSTest {
         assert "On it" in posted and -1 < first < posted.find("did sleep 1"), posted
 
     with subtest("the inbox waits out a turn being started"):
-        # A turn held halfway through starting (its number written, its last
-        # outcome gone), then put back: the inbox reads neither half alone.
+        # A turn held halfway through starting (its number written, its unit
+        # not yet), then put back: the inbox reads neither half alone.
         d = f"/data/dev/jobs/{job}"
-        machine.execute(f"su - dev -c 'cd {d} && cp outcome outcome.keep && flock lock sh -c \"echo 3 >turns; rm outcome;"
-                        f" sleep 20; echo 2 >turns; mv outcome.keep outcome\"' >/dev/null 2>&1 &")
+        machine.execute(f"su - dev -c 'cd {d} && flock lock sh -c \"echo 3 >turns; sleep 20; echo 2 >turns\"' >/dev/null 2>&1 &")
         machine.wait_until_succeeds(f"grep -x 3 {d}/turns", timeout=30)
         machine.succeed("su - dev -c proj-inbox")
         posted = machine.succeed("cat /tmp/gh/posted")
         assert "turn 3" not in posted, posted
         machine.succeed(f"grep -x 2 {d}/turns")
+
+    with subtest("a turn that never got going isn't read as the last one's outcome"):
+        # Numbered, but its _exec gone before it wrote anything (killed as it
+        # started): the turn failed, whatever the turn before it did.
+        d = f"/data/dev/jobs/{job}"
+        machine.succeed(f"su - dev -c 'echo 3 >{d}/turns'")
+        assert state(job) == "failed", state(job)
+        machine.succeed(f"su - dev -c 'echo 2 >{d}/turns'")
+        assert state(job) == "done", state(job)
+
+    with subtest("a job from before each turn kept its own files reads as it was"):
+        # Its last turn's outcome and answer unnumbered, written after its
+        # prompt (the update came between turns, or ran across one).
+        machine.succeed(f"su - dev -c 'cd {d} && mv 2.outcome outcome && mv 2.result result && touch outcome result'")
+        assert state(job) == "done", state(job)
+        machine.succeed(f"test -s {d}/2.outcome && test -e {d}/2.result && ! test -e {d}/outcome && ! test -e {d}/result")
+        # One older than the latest turn's prompt is an earlier turn's, not its.
+        machine.succeed(f"su - dev -c 'cd {d} && mv 2.outcome outcome && touch -d \"1 hour ago\" outcome'")
+        assert state(job) == "failed", state(job)
+        machine.fail(f"test -e {d}/outcome")
+        machine.succeed(f"su - dev -c 'echo done >{d}/2.outcome'")
+        assert state(job) == "done", state(job)
+
+    with subtest("a turn running across the update keeps its outcome until it ends"):
+        # The old _exec reads its outcome back to publish its waits.
+        e = proj('run web "sleep 30"')
+        machine.wait_until_succeeds(f"su - dev -c 'proj state {e}' | grep -x running", timeout=60)
+        machine.succeed(f"su - dev -c 'echo done >/data/dev/jobs/{e}/outcome'")
+        assert state(e) == "running", state(e)
+        machine.succeed(f"test -s /data/dev/jobs/{e}/outcome")
+        proj(f"stop {e}")
 
     with subtest("an issue closed under a waiting job ends its waits"):
         d = f"/data/dev/jobs/{job}"
