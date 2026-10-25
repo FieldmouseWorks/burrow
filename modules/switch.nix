@@ -71,11 +71,11 @@ let
   longOneshots = lib.attrNames (lib.filterAttrs (_: s:
     let
       sc = s.serviceConfig;
-      t = sc.TimeoutStartSec or sc.TimeoutSec or null;
+      t = if sc.TimeoutStartSec or null != null then sc.TimeoutStartSec else sc.TimeoutSec or null;
     in s.enable && s.restartIfChanged
       && (sc.Type or null) == "oneshot"
       && t != null
-      && (let n = seconds t; w = seconds cfg.confirmWithin; in n == null || w == null || n > w)
+      && (let n = seconds t; w = seconds cfg.confirmWithin; in n == null || w == null || n >= w)
   ) config.systemd.services);
 in
 {
