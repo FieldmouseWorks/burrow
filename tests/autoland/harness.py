@@ -103,6 +103,7 @@ import common as C  # noqa: E402
 import deepseek as D  # noqa: E402
 import repos as R  # noqa: E402,F401 (for the checks)
 import steward as S  # noqa: E402
+import touches as G  # noqa: E402,F401 (for the checks)
 D.ssl.create_default_context = lambda cafile=None: None  # plain http here
 head = "a" * 40
 

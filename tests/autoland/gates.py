@@ -1,7 +1,7 @@
 """What a PR touches: the one-way paths, and a dependency bot's edits to
 the gate."""
 
-from harness import ONE_WAY, PR_DIFF, WROTE, S, mkpr, run
+from harness import ONE_WAY, PR_DIFF, WROTE, G, S, mkpr, run
 
 
 # The module's one-way paths: CODEOWNERS, secrets and migrations are judged
@@ -11,11 +11,12 @@ def touching(*paths):
 
 
 for p in (".github/workflows/flake.yml", ".github/dependabot.yml"):
-    assert S.one_way(touching("src/app.py", p), {"oneWay": ONE_WAY}) is None, (p, ONE_WAY)
+    assert G.one_way(touching("src/app.py", p), {"oneWay": ONE_WAY}) is None, (p, ONE_WAY)
 for p in (".github/CODEOWNERS", "secrets/remi.yaml", ".sops.yaml", "server/migrations/0002_users.sql"):
-    assert S.one_way(touching(".github/workflows/flake.yml", p), {"oneWay": ONE_WAY}) == p, (p, ONE_WAY)
-assert S.one_way(touching("CODEOWNERS.bak"), {"oneWay": ONE_WAY}, [".github/CODEOWNERS"]) == ".github/CODEOWNERS"
-assert S.unquote('"secrets/caf\\303\\251.yaml"') == "secrets/caf\u00e9.yaml" and S.unquote("a b") == "a b"
+    assert G.one_way(touching(".github/workflows/flake.yml", p), {"oneWay": ONE_WAY}) == p, (p, ONE_WAY)
+assert G.one_way(touching("CODEOWNERS.bak"), {"oneWay": ONE_WAY}, [".github/CODEOWNERS"]) == ".github/CODEOWNERS"
+assert G.unquote('"secrets/caf\\303\\251.yaml"') == "secrets/caf\u00e9.yaml" and G.unquote("a b") == "a b"
+assert G.unquote('"secrets/\\377"') == "secrets/\ufffd" and G.unquote('"secrets/bad\\x"') == "secrets/bad\\x"
 print("one-way: ok")
 
 
