@@ -48,8 +48,8 @@ let
 
   watchdog = config.systemd.settings.Manager.RuntimeWatchdogSec or null != null;
 
-  # A time span in seconds: one number and unit, or infinity. Anything else
-  # counts as unbounded, so the check below errs towards flagging.
+  # A time span in seconds: one number and unit. Zero, infinity and anything
+  # else count as unbounded (null), so the check below errs towards flagging.
   seconds = span:
     let
       m = builtins.match "([0-9]+) *([a-z]*)" (toString span);
@@ -59,11 +59,13 @@ let
         h = 3600; hr = 3600; hour = 3600; hours = 3600;
         d = 86400; day = 86400; days = 86400;
       }.${lib.elemAt m 1} or null;
-    in if m == null || unit == null then null else lib.toInt (lib.head m) * unit;
+    in if m == null || unit == null || lib.toInt (lib.head m) == 0 then null
+      else lib.toInt (lib.head m) * unit;
 
-  # A switch restarts a changed unit that is running and waits for it. A
-  # oneshot that may run longer than the confirm window then holds the switch
-  # past its own revert, which can't take the lock and fails the activation.
+  # A switch restarts a changed unit that is running (or, with
+  # RemainAfterExit, has run) and waits for it. A oneshot that may run longer
+  # than the confirm window then holds the switch past its own revert, which
+  # can't take the lock and fails the activation.
   # Only a declared timeout counts: most of NixOS's own oneshots set none and
   # are meant to rerun on a switch, so a job that can run long says so.
   longOneshots = lib.attrNames (lib.filterAttrs (_: s:
@@ -71,7 +73,7 @@ let
       sc = s.serviceConfig;
       t = sc.TimeoutStartSec or sc.TimeoutSec or null;
     in s.enable && s.restartIfChanged
-      && (sc.Type or null) == "oneshot" && !(sc.RemainAfterExit or false)
+      && (sc.Type or null) == "oneshot"
       && t != null
       && (let n = seconds t; w = seconds cfg.confirmWithin; in n == null || w == null || n > w)
   ) config.systemd.services);
