@@ -792,7 +792,7 @@ assert sorted(x.split()[2] for x in WROTE if x.startswith("label create")) == ["
 checks = {"type": "required_status_checks", "parameters": {
     "strict_required_status_checks_policy": True, "required_status_checks": [{"context": "gate"}]}}
 SETTINGS = {
-    "repos/sam/r/rulesets": [{"id": 1, "name": "baseline"}, {"id": 2, "name": "gates"}, {"id": 3, "name": "tags"},
+    "repos/sam/r/rulesets?per_page=100&includes_parents=false": [{"id": 1, "name": "baseline"}, {"id": 2, "name": "gates"}, {"id": 3, "name": "tags"},
                              {"id": 4, "name": "org"}],
     "repos/sam/r/rulesets/1": {"name": "baseline", "target": "branch", "source_type": "Repository",
                                "rules": [{"type": "deletion"}]},
@@ -844,6 +844,7 @@ R.watch_default(repo_r, {}, [], mine)
 assert JOBS == [] and mine == []
 R.watch_default(repo_r, default("FAILURE"), [], mine)
 assert len(JOBS) == 1 and "is red: CI failed on " + "c" * 40 in JOBS[0] and "autoland/red-cccccccccccc" in JOBS[0], JOBS
+assert "gh run list --commit " + "c" * 40 in JOBS[0] and "issue and comment" in JOBS[0], JOBS[0]
 R.watch_default(repo_r, default("FAILURE"), [], mine)
 assert len(JOBS) == 1, JOBS  # still running
 STATES["job-1"] = "done"

@@ -100,7 +100,9 @@ def settle_repo(r, known):
             st["autoMergeRefused"] = True
     C.write("api", "-X", "PUT", f"repos/{repo}/vulnerability-alerts", check=False)
 
-    existing = C.gh("api", f"repos/{repo}/rulesets", check=False)
+    # The repo's own, which is all not_strict changes; a repo with more than
+    # 100 of them is past anything the steward's baseline sets up.
+    existing = C.gh("api", f"repos/{repo}/rulesets?per_page=100&includes_parents=false", check=False)
     # None: the plan doesn't offer rules on this repo (private, free account).
     if isinstance(existing, list):
         if CFG["rulesets"] and rc["ruleset"] and not any(x["name"] == "baseline" for x in existing):
