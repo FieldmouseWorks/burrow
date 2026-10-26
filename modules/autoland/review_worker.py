@@ -94,15 +94,19 @@ def wait_for(text):
 
 def env(**extra):
     home = os.environ["HOME"]
-    return {"HOME": home, "PATH": os.environ.get("PATH", ""), "LANG": "C.UTF-8", **extra}
+    return {"HOME": home, "PATH": os.environ.get("PATH", ""), "LANG": "C.UTF-8",
+            "SSL_CERT_FILE": "/etc/ssl/certs/ca-certificates.crt", **extra}
 
 
 def sandboxed(snap, home, t, names, argv):
-    """argv in a sandbox of its own (bubblewrap): it sees the store, /etc,
-    its snapshot (read-only), its own agent's home and its temp dir `t`, and
-    nothing else of the machine. The service's user can read every queued
-    head's snapshot and every answer, and an agent talked into reading
-    another repo's would post it in this one's review.
+    """argv in a sandbox of its own (bubblewrap): it sees the store paths it
+    runs on (the agents, the tools and their closure, `box.store`), the CA
+    bundle, /etc's passwd and group, its snapshot (read-only), its own
+    agent's home and its temp dir `t`, and nothing else of the machine. The
+    service's user can read every queued head's snapshot and every answer,
+    and an agent talked into reading another repo's would post it in this
+    one's review. Nor does it see the rest of the store: every flake this
+    machine has evaluated has its sources there, private repos' included.
 
     It has no network: argv runs behind egress.py's bridge to the gate on
     `t`/egress.sock, which the caller opens, with `names` in its environment
@@ -113,10 +117,15 @@ def sandboxed(snap, home, t, names, argv):
     os.makedirs(home, exist_ok=True)
     with open(f"{t}/gitconfig", "w") as f:
         f.write(f"[safe]\n\tdirectory = {snap}\n")
-    ro = ["/nix/store", "/etc", "/bin", "/usr/bin", "/run/current-system"]
+    box = CFG["box"]
+    with open(box["store"]) as f:
+        store = f.read().split()
     return [CFG["sandbox"], "--unshare-all", "--die-with-parent", "--new-session",
             "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
-            *[x for p in ro for x in ("--ro-bind-try", p, p)],
+            *[x for p in store for x in ("--ro-bind", p, p)],
+            *[x for p in ("/etc/passwd", "/etc/group") for x in ("--ro-bind-try", p, p)],
+            "--ro-bind", box["caBundle"], "/etc/ssl/certs/ca-certificates.crt",
+            "--symlink", box["sh"], "/bin/sh", "--symlink", box["env"], "/usr/bin/env",
             "--ro-bind", snap, snap, "--bind", home, home, "--bind", t, t,
             "--ro-bind", f"{t}/gitconfig", os.path.join(os.environ["HOME"], ".gitconfig"),
             "--chdir", snap, "--", sys.executable, "-I", G.__file__, f"{t}/egress.sock", ",".join(names), "--", *argv]

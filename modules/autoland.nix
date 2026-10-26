@@ -27,6 +27,16 @@ let
   reviewer = "autoland-review";
   reviewerHome = "${stateDir}/autoland-review";
   reviewDir = "${stateDir}/autoland/review";
+  # What the reviewers' service runs commands with, and so what an agent
+  # reads the snapshot with.
+  reviewTools = with pkgs; [ bash git bubblewrap coreutils findutils gnugrep gnused diffutils ripgrep ];
+  # All of the store an agent's sandbox shows: the agents, the bridge to
+  # the gate, those tools and the CA bundle, with what they need. Never the
+  # whole store, which holds every flake's sources this machine has read,
+  # private ones included.
+  reviewStore = pkgs.closureInfo {
+    rootPaths = [ agents pkgs.python3 stewardSrc pkgs.cacert ] ++ reviewTools;
+  };
   codexLogin = pkgs.writeShellScriptBin "autoland-codex-login" ''
     # Codex reviews on the ChatGPT plan's login: a device code to approve in
     # a browser. Run again whenever the review digest says it's logged out.
@@ -91,6 +101,12 @@ let
     inherit (rv) skipPaths;
     agents = "${agents}/bin";
     sandbox = "${pkgs.bubblewrap}/bin/bwrap";
+    box = {
+      store = "${reviewStore}/store-paths";
+      caBundle = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
+      sh = "${pkgs.bash}/bin/sh";
+      env = "${pkgs.coreutils}/bin/env";
+    };
     baselineTask = ''
       REPO is new, and doesn't meet the baseline every repo of ${config.burrow.owner}'s keeps yet. Read
       ${baselineDocs}/docs/repo-baseline.md and bring this repo up to its "Files" section: open one PR, ready for review (not a draft), that adds
@@ -440,7 +456,7 @@ in
         wants = [ "network-online.target" ];
         # What the agents read the snapshot with, and bubblewrap for codex's
         # own sandbox inside theirs.
-        path = with pkgs; [ bash git bubblewrap coreutils findutils gnugrep gnused diffutils ripgrep ];
+        path = reviewTools;
         environment.HOME = reviewerHome;
         # The gate's TLS to the agents' APIs (autoland/egress.py).
         environment.SSL_CERT_FILE = config.security.pki.caBundle;

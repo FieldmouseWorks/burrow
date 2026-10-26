@@ -143,7 +143,12 @@ with open(f"{tmp}/config.json", "w") as f:
         "skipPaths": ["(^|/)secrets?/", r"\.(pem|key|p12|pfx)$", r"(^|/)\.env(\..*)?$"],
         "agents": f"{tmp}/agents",
         "sandbox": f"{tmp}/bwrap",
+        "box": {"store": f"{tmp}/store-paths", "caBundle": f"{tmp}/ca.crt", "sh": "/bin/sh", "env": "/usr/bin/env"},
     }, f)
+# The store paths an agent's sandbox shows: its closure, never the whole store.
+STORE = ["/nix/store/aaaa-review-agents", "/nix/store/bbbb-python3", "/nix/store/cccc-ripgrep"]
+with open(f"{tmp}/store-paths", "w") as f:
+    f.write("\n".join(STORE) + "\n")
 os.environ["AUTOLAND_CONFIG"] = f"{tmp}/config.json"
 os.environ["CREDENTIALS_DIRECTORY"] = f"{tmp}/cred"
 os.environ["HOME"] = f"{tmp}/home"
