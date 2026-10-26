@@ -47,6 +47,8 @@ change nothing else in the same PR.
    back, and PRs settle on the others meanwhile; DeepSeek's balance running
    low is listed for the owner first, and DeepSeek sits out the rest of a
    day once it has spent its daily budget (`reviewers.deepseek.dailyBudget`).
+   DeepSeek looks last (`reviewers.deepseek.last`): at a head only once the
+   other reviewers in service have found it clean.
 3. Whoever opened the PR fixes each finding, or replies with why not, and
    resolves its thread. A Claude job on the machine takes over if nobody has
    after `handoffAfterMinutes`, or after `sessionHandoffAfterMinutes` on a

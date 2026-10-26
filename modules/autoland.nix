@@ -111,7 +111,7 @@ let
     kick = "${config.burrow.events.kick}/autoland";
     reviewers = {
       codex = { inherit (rv.codex) enable effort parallel; };
-      deepseek = { inherit (rv.deepseek) enable effort parallel lowBalance dailyBudget; };
+      deepseek = { inherit (rv.deepseek) enable effort parallel lowBalance dailyBudget last; };
     };
     inherit (rv) skipPaths;
     agents = "${agents}/bin";
@@ -393,6 +393,16 @@ in
             is out of service until the next day and PRs settle on the other
             reviewers. Reviews already under way finish, so a day can go over
             by what they cost.
+          '';
+        };
+        last = mkOption {
+          type = types.bool;
+          default = true;
+          description = ''
+            Look at a head only once the other reviewers in service have found
+            it clean, rather than alongside them: their findings come back in
+            minutes, so DeepSeek reads the head they'd send back for fixes only
+            when they've none. With none of them in service, it looks at once.
           '';
         };
       };

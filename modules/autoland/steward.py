@@ -789,8 +789,14 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
         why = "; ".join(f"{V.NAMES[r]}: {away[r] or V.out(r)}" for r in names) or "none is on"
         waiting.append(f"No reviewer can review it now ({why})")
         digest.append(("No reviewer can review it", line, why))
+    # One set to look last isn't asked until the others in service find this
+    # head clean: their findings come in minutes, and a look of its own at
+    # every head they send back costs it money.
+    first = [x for x in live if not CFG["reviewers"][x].get("last")]
     for r in live:
         if said[r][0] == "none":
+            if CFG["reviewers"][r].get("last") and any(said[x][0] != "clean" for x in first):
+                continue
             if quiet:
                 ask(r)
             waiting.append(f"{V.NAMES[r]} is reviewing this commit" if st["rv"].get(r, {}).get("queued")
