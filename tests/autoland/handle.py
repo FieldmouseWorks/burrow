@@ -88,6 +88,15 @@ worker(deepseek={"result": "review", "answer": {"findings": [{"path": "a.py"}]}}
 status, _ = run(clean(sha=newer), 700)
 assert ("deepseek", head, 1) in POSTED and not merged(), (POSTED, WROTE)
 assert "state=pending" in status and f"review findings on {head[:7]}" in status, status
+# So are an out-of-service reviewer's: its look came back before it went out.
+fresh_pr_state()
+run(mkpr(), 0)
+run(mkpr(), 600)
+worker(deepseek={"result": "review", "answer": {"findings": [{"path": "a.py"}]}})
+C.save(V.OUT, {"deepseek": {"why": "balance", "until": C.ts(T0) + 86400}})
+status, _ = run(mkpr(sha=newer, reviews=[rv_review("codex", 0, newer)]), 700)
+assert ("deepseek", head, 1) in POSTED and not merged() and os.listdir(DDIR) == [], (POSTED, WROTE)
+assert f"review findings on {head[:7]}" in status, status
 # One GitHub wouldn't take is kept and tried again, and the PR waits for it.
 fresh_pr_state()
 run(mkpr(), 0)

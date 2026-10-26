@@ -642,8 +642,9 @@ def handle(repo, pr, repo_info, digest):
             if back.get("result") == "review" and back.get("base") == pr["baseRefName"] and isinstance(back.get("head"), str):
                 try:
                     if V.post(repo, {**pr, "headRefOid": back["head"]}, r, back["answer"]) == "findings":
-                        v, at, rr = said[r]
-                        said[r] = (v, at, rr + 1)
+                        if r in said:
+                            v, at, rr = said[r]
+                            said[r] = (v, at, rr + 1)
                         late.append(back["head"][:7])
                 except ValueError as e:  # an answer that's no review
                     log(f"{tag}: {V.NAMES[r]}'s review of {back['head'][:7]} wasn't a review: {e}")
@@ -666,8 +667,11 @@ def handle(repo, pr, repo_info, digest):
         else:
             rs.pop("late", None)
 
-    for r in live:
+    for r in names:
+        # One out of service too: its earlier looks came back before it went
+        # out, and posting them asks nothing of it.
         overtaken(r)
+    for r in live:
         consume(r)
     live = [r for r in live if not V.out(r)]
     for r in names:
