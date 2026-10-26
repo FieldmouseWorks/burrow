@@ -571,7 +571,8 @@ def handle(repo, pr, repo_info, digest):
         # in, say, is the owner's to do.
         if live and away[r] and not any(x[:2] == ("A reviewer is out of service", V.NAMES[r]) for x in digest):
             digest.append(("A reviewer is out of service", V.NAMES[r], away[r]))
-    said = {r: V.verdict(pr, head, r) for r in live}  # verdict, when, rounds with findings
+    said = {r: V.verdict(pr, head, r) for r in names}  # verdict, when, rounds with findings
+    found = []  # the reviewers whose findings on this head this pass posted
 
     def consume(r):
         """What came back from the reviewer's service for this head, if
@@ -585,6 +586,8 @@ def handle(repo, pr, repo_info, digest):
                     v = V.post(repo, pr, r, back["answer"])
                     _, _, rr = said[r]
                     said[r] = (v, C.NOW, rr + (v == "findings"))
+                    if v == "findings":
+                        found.append(r)
                     rs.pop("fails", None)
                     rs.pop("failedAt", None)
                 except ValueError as e:  # an answer that's no review
@@ -642,9 +645,8 @@ def handle(repo, pr, repo_info, digest):
             if back.get("result") == "review" and back.get("base") == pr["baseRefName"] and isinstance(back.get("head"), str):
                 try:
                     if V.post(repo, {**pr, "headRefOid": back["head"]}, r, back["answer"]) == "findings":
-                        if r in said:
-                            v, at, rr = said[r]
-                            said[r] = (v, at, rr + 1)
+                        v, at, rr = said[r]
+                        said[r] = (v, at, rr + 1)
                         late.append(back["head"][:7])
                 except ValueError as e:  # an answer that's no review
                     log(f"{tag}: {V.NAMES[r]}'s review of {back['head'][:7]} wasn't a review: {e}")
@@ -668,12 +670,15 @@ def handle(repo, pr, repo_info, digest):
             rs.pop("late", None)
 
     for r in names:
-        # One out of service too: its earlier looks came back before it went
-        # out, and posting them asks nothing of it.
+        # One out of service too, or put out by one of these answers: its
+        # looks came back before it went out, and posting them asks nothing
+        # of it.
         overtaken(r)
-    for r in live:
         consume(r)
     live = [r for r in live if not V.out(r)]
+    # The findings of one out now on this head are threads this pass never
+    # read, and its verdict isn't waited for: they hold the pass back.
+    late += [head[:7] for r in found if r not in live]
     for r in names:
         if V.out(r):
             # Back in service then: its look at this head is asked for.
