@@ -134,7 +134,7 @@ with open(f"{tmp}/config.json", "w") as f:
         "defaults": {"rounds": 5,
                      "oneWay": ONE_WAY, "handoffAfter": 30, "settleDelay": 3,
                      "directPush": False, "ruleset": True, "requireCi": True,
-                     "proofJobs": {}, "codex": True, "deepseek": True},
+                     "proofJobs": {}, "codex": True, "deepseek": True, "skipPaths": []},
         "repos": {}, "pipelineRepos": ["Sam/Pipe"],
         "webhook": {"url": "https://example.org/burrow/hook", "events": ["check_suite", "push"]},
         "kick": f"http://127.0.0.1:{kicks.server_port}/kick/autoland",
