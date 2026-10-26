@@ -24,8 +24,11 @@ NAMES = {"codex": "Codex", "deepseek": "DeepSeek"}
 # Under STATE: what's asked for, the snapshot each one reads, what came back,
 # and a clone per repo the snapshots are taken from.
 QUEUE, SNAP, DONE, GIT = "review/queue", "review/snap", "review/done", "review/git"
+# What the reviewers' accounts have left, as their service last read it.
+ACCOUNT = "review/account"
 ORIGIN = "https://github.com/{}.git"
 OUT = "reviewers.json"  # a reviewer out of service, and until when
+BALANCE = f"{ACCOUNT}/deepseek.json"
 
 
 def on(repo):
@@ -39,6 +42,18 @@ def out(r):
     None. Out, it isn't asked and isn't waited for."""
     o = load(OUT, {}).get(r)
     return o["why"] if o and C.NOW < o["until"] else None
+
+
+def low_balance():
+    """The owner's line when DeepSeek's account, as its last review left it,
+    is down to under `lowBalance` (it stops reviewing at nothing), or none."""
+    rv = CFG["reviewers"]["deepseek"]
+    left = load(BALANCE, {}).get("left") or {}
+    if not rv["enable"] or not left or any(v >= rv["lowBalance"] for v in left.values()):
+        return []
+    said = " and ".join(f"{v:.2f} {c}" for c, v in sorted(left.items()))
+    return [("DeepSeek's balance is running low", "DeepSeek",
+             f"{said} left. Top it up: once it's spent, DeepSeek is out of service and PRs merge on the other reviewers' word")]
 
 
 def review_re(r):

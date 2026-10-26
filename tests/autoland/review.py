@@ -144,6 +144,16 @@ C.NOW = time.time()
 UPSTREAM = []
 
 
+def balance(*left, status="200 OK"):
+    """What DeepSeek's API says the account has left: (currency, amount)s."""
+    body = json.dumps({"is_available": True, "balance_infos": [
+        {"currency": c, "total_balance": v, "granted_balance": "0.00", "topped_up_balance": v} for c, v in left]})
+    return f"HTTP/1.1 {status}\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n{len(body):x}\r\n{body}\r\n0\r\n\r\n".encode()
+
+
+BALANCE = [balance(("USD", "20.00"))]
+
+
 def upstream(host, tls):
     a, b = socket.socketpair()
 
@@ -156,7 +166,10 @@ def upstream(host, tls):
         except TimeoutError:
             pass
         UPSTREAM.append((host, tls, got.decode()))
-        b.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+        if got.startswith(b"GET /user/balance "):
+            b.sendall(BALANCE[0])
+        else:
+            b.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
         b.close()
     threading.Thread(target=answer, daemon=True).start()
     return a
@@ -205,8 +218,14 @@ assert re.fullmatch(r"http://127\.0\.0\.1:\d+/anthropic", run["env"]["DEEPSEEK_B
 assert "GH_TOKEN" not in run["env"] and "ghp_" not in json.dumps(run["env"]), run["env"]
 said = http_said()
 assert said[0].endswith("\r\n\r\nok") and [x.split("\r\n")[0] for x in said[1:]] == ["HTTP/1.1 403 Forbidden"] * 2, said
-(host, tls, sent), = UPSTREAM
+(host, tls, sent), (bhost, btls, asked) = UPSTREAM
 assert host == "api.deepseek.com" and tls and sent.startswith("POST /anthropic/v1/messages HTTP/1.1\r\n"), UPSTREAM
+# Then what the account has left, asked with the key outside the sandbox,
+# kept for the steward: plenty, so the owner hears nothing.
+assert bhost == "api.deepseek.com" and btls and asked.startswith("GET /user/balance HTTP/1.1\r\n"), asked
+assert "Authorization: Bearer sk-test-0123456789\r\n" in asked, asked
+assert json.load(open(f"{tmp}/state/{V.BALANCE}"))["left"] == {"USD": 20.0}
+assert V.low_balance() == []
 assert "x-api-key: sk-test-0123456789\r\n" in sent and "the-gate-holds-it" not in sent, sent
 assert "Host: api.deepseek.com\r\n" in sent and "Host: x" not in sent and sent.endswith("\r\n\r\n{}"), sent
 UPSTREAM.clear()
@@ -286,6 +305,26 @@ for err in ("dsh: AUTH: Authentication Fails, Your api key: ****0123 is invalid 
             "dsh: LLM: 402 Insufficient Balance"):
     agent(dsh={"rc": 1, "err": err})
     assert queue_and_work("deepseek")["result"] == "out", err
+# Under lowBalance after a review, the owner's issue says so; in every
+# currency the account has, since one is what it spends. A look that
+# fails keeps the last one.
+BALANCE[0] = balance(("USD", "3.10"))
+agent(dsh={"say": json.dumps({"findings": [], "summary": "ok"})})
+assert queue_and_work("deepseek")["result"] == "review"
+low, = V.low_balance()
+assert low[:2] == ("DeepSeek's balance is running low", "DeepSeek") and "3.10 USD left" in low[2], low
+BALANCE[0] = balance(("USD", "3.10"), ("CNY", "80.00"))
+assert queue_and_work("deepseek")["result"] == "review" and V.low_balance() == []
+BALANCE[0] = balance(("USD", "0.00"))
+agent(dsh={"rc": 1, "err": "dsh: LLM: 402 Insufficient Balance"})
+assert queue_and_work("deepseek")["result"] == "out" and "0.00 USD left" in V.low_balance()[0][2]
+for answer in (balance(("USD", "50.00"), status="500 Internal Server Error"), b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"):
+    BALANCE[0] = answer
+    agent(dsh={"say": json.dumps({"findings": [], "summary": "ok"})})
+    assert queue_and_work("deepseek")["result"] == "review" and "0.00 USD left" in V.low_balance()[0][2]
+BALANCE[0] = balance(("USD", "20.00"))
+assert queue_and_work("deepseek")["result"] == "review" and V.low_balance() == []
+UPSTREAM.clear()
 # A finding that only mentions auth is no outage.
 agent(dsh={"say": json.dumps({"findings": [{"path": "a", "line": 1, "severity": "P1", "title": "auth", "body": "AUTH bypass"}]})})
 assert queue_and_work("deepseek")["result"] == "review"

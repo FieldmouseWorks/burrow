@@ -139,7 +139,7 @@ with open(f"{tmp}/config.json", "w") as f:
         "webhook": {"url": "https://example.org/burrow/hook", "events": ["check_suite", "push"]},
         "kick": f"http://127.0.0.1:{kicks.server_port}/kick/autoland",
         "reviewers": {"codex": {"enable": True, "effort": "high", "parallel": 2},
-                      "deepseek": {"enable": True, "effort": "max", "parallel": 2}},
+                      "deepseek": {"enable": True, "effort": "max", "parallel": 2, "lowBalance": 5}},
         "skipPaths": ["(^|/)secrets?/", r"\.(pem|key|p12|pfx)$", r"(^|/)\.env(\..*)?$"],
         "agents": f"{tmp}/agents",
         "sandbox": f"{tmp}/bwrap",
@@ -159,7 +159,7 @@ import steward as S  # noqa: E402,F401
 import touches as G  # noqa: E402,F401
 REAL_GH = C.gh  # the real one, before any check stands in for it
 
-for d in (V.QUEUE, V.SNAP, V.DONE, V.GIT):
+for d in (V.QUEUE, V.SNAP, V.DONE, V.ACCOUNT, V.GIT):
     os.makedirs(f"{tmp}/state/{d}")
 
 
@@ -306,7 +306,7 @@ def pr_state(n=5):
 
 def fresh_pr_state():
     shutil.rmtree(f"{tmp}/state")
-    for d in (V.QUEUE, V.SNAP, V.DONE, V.GIT):
+    for d in (V.QUEUE, V.SNAP, V.DONE, V.ACCOUNT, V.GIT):
         os.makedirs(f"{tmp}/state/{d}")
 
 

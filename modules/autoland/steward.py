@@ -765,7 +765,7 @@ def main():
         review_worker.work()
         return
     try:
-        for d in ("", V.QUEUE, V.SNAP, V.DONE, V.GIT):
+        for d in ("", V.QUEUE, V.SNAP, V.DONE, V.ACCOUNT, V.GIT):
             os.makedirs(os.path.join(STATE, d), exist_ok=True)
     except OSError:
         if not DRY:
@@ -854,8 +854,9 @@ def main():
     if kick is None:
         R.unhook_gone(repos + R.hook_projects(repos))
     # Last: GitHub failing it leaves the pass's state saved. A line more than
-    # one repo has (a reviewer out of service) is listed once.
-    R.publish(list(dict.fromkeys(tuple(x) for repo in sorted(digest) for x in digest[repo])))
+    # one repo has (a reviewer out of service) is listed once, and one that's
+    # no repo's (DeepSeek's balance) goes with them.
+    R.publish(list(dict.fromkeys(tuple(x) for repo in sorted(digest) for x in digest[repo])) + V.low_balance())
 
 
 if __name__ == "__main__":

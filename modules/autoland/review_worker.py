@@ -11,6 +11,7 @@ way out but its API, and no key of its own (DeepSeek's stays with the gate;
 the commands Codex runs can't read its login). The keys are taken out of
 anything the agents say as well."""
 
+import http.client
 import json
 import os
 import re
@@ -18,6 +19,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 
@@ -189,6 +191,37 @@ def deepseek(snap, prompt):
             return deepseek_in(snap, prompt, home, t, efforts)
         finally:
             gate.close()
+            deepseek_balance(key)
+
+
+BALANCE_LOCK = threading.Lock()  # reviews run side by side
+
+
+def deepseek_balance(key):
+    """What DeepSeek's account has left after a review, by currency, kept
+    for the steward to warn the owner before it's spent (reviewers.py
+    `low_balance`). A look that fails keeps the last one."""
+    try:
+        s = G.secure(DEEPSEEK_API)
+        try:
+            s.sendall(f"GET /user/balance HTTP/1.1\r\nHost: {DEEPSEEK_API}\r\nAuthorization: Bearer {key}\r\n"
+                      "Accept: application/json\r\nConnection: close\r\n\r\n".encode())
+            r = http.client.HTTPResponse(s)
+            r.begin()
+            body = r.read()
+        finally:
+            s.close()
+        if r.status != 200:
+            raise ValueError(f"HTTP {r.status}")
+        left = {b["currency"]: float(b["total_balance"]) for b in json.loads(body)["balance_infos"]}
+    except (OSError, ValueError, KeyError, TypeError, http.client.HTTPException) as e:
+        log(f"  couldn't read DeepSeek's balance: {tail(str(e), 200)}")
+        return
+    try:
+        with BALANCE_LOCK:
+            save(V.BALANCE, {"left": left, "at": time.time()})
+    except OSError as e:  # never the review's undoing
+        log(f"  couldn't keep DeepSeek's balance: {e}")
 
 
 def deepseek_in(snap, prompt, home, t, efforts):
