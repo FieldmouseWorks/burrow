@@ -67,6 +67,8 @@ pkgs.testers.runNixOSTest {
       "f /data/dev/src/left/session 0644 dev dev - idle 3600"
       "d /data/dev/src/late 0755 dev dev -"
       "f /data/dev/src/late/session 0644 dev dev - idle 600"
+      "d /data/dev/src/due 0755 dev dev -"
+      "f /data/dev/src/due/session 0644 dev dev - waiting 600"
     ];
   };
 
@@ -77,11 +79,16 @@ pkgs.testers.runNixOSTest {
     def started(project):
         return machine.succeed(f"cat /data/dev/src/{project}/started").split()
 
+    def now():
+        # The machine's clock, which Claude Code writes by and the scan reads
+        # by: boot sets it apart from the host's, by up to a second.
+        return time.time() + skew
+
     def session(project, status, ago):
         # What Claude Code writes when a session's status changes; returns
         # its statusUpdatedAt, in seconds.
         pid = machine.succeed(f"cat /data/dev/src/{project}/session.pid").strip()
-        at = int(time.time() * 1000) - ago * 1000
+        at = int(now() * 1000) - ago * 1000
         machine.succeed(f"echo '{{\"pid\":{pid},\"status\":\"{status}\",\"statusUpdatedAt\":{at}}}' >/home/dev/.claude/sessions/{pid}.json")
         return at / 1000
 
@@ -94,7 +101,9 @@ pkgs.testers.runNixOSTest {
         return at - float(machine.succeed("cut -d' ' -f1 /proc/uptime"))
 
     machine.wait_for_unit("user@1001.service")
-    for p in ("idle", "busy", "recent", "waiting", "left", "late"):
+    sent = time.time()
+    skew = float(machine.succeed("date +%s.%N")) - (sent + time.time()) / 2
+    for p in ("idle", "busy", "recent", "waiting", "left", "late", "due"):
         machine.wait_until_succeeds(f"grep -qx old /data/dev/src/{p}/started", timeout=120)
     # Nothing is stale yet: no scan booked.
     machine.wait_until_succeeds("systemctl --user -M dev@ show -p ActiveState --value claude-rc-scan.service | grep -qx inactive", timeout=60)
@@ -111,11 +120,12 @@ pkgs.testers.runNixOSTest {
 
     with subtest("a stale server whose session is working, or was lately, waits"):
         time.sleep(5)
-        for p in ("busy", "recent", "waiting", "late"):
+        for p in ("busy", "recent", "waiting", "late", "due"):
             assert started(p) == ["old"], (p, started(p))
 
     with subtest("and a scan is booked for the soonest end of a quiet spell"):
-        # recent and waiting went quiet 10 minutes before the servers started.
+        # recent, waiting and due went quiet 10 minutes before the servers
+        # started.
         left = wake_in()
         soonest = 1200 - (time.time() - booted)
         assert left is not None and soonest - 300 < left < soonest + 5, (left, soonest)
@@ -147,18 +157,54 @@ pkgs.testers.runNixOSTest {
         session("late", "idle", 3600)
         # Waiting's status is an ordinary file again, and the read that's
         # held gets the same through the pipe it has open, then its end.
-        at = int(time.time() * 1000)
+        at = int(now() * 1000)
         machine.succeed(f"echo '{{\"pid\":{pid},\"status\":\"waiting\",\"statusUpdatedAt\":{at}}}' >/home/dev/.claude/status && cp /home/dev/.claude/status /home/dev/.claude/answer && mv /home/dev/.claude/status {f}")
         machine.succeed(f"cat /home/dev/.claude/answer >{fd} && kill {holder}")
         machine.wait_until_succeeds("grep -qx new /data/dev/src/late/started", timeout=60)
+
+    with subtest("a quiet spell that ends while a scan runs isn't missed"):
+        # due's status is a link to a pipe, so a scan that reads it waits for
+        # the test to write each read's answer. Nothing in the sessions
+        # folder changes meanwhile: the link stays as it is. The scan held
+        # began over 5 seconds before its answer, a spell that ended 2
+        # seconds before it: for that scan due's server is held, and the end
+        # of its spell already past. No timer is booked for a spell that's
+        # over, and nothing changed on disk to start a scan: only the look
+        # after the scan, at the time, sees it.
+        pid = machine.succeed("cat /data/dev/src/due/session.pid").strip()
+        f = f"/home/dev/.claude/sessions/{pid}.json"
+        machine.wait_until_succeeds("systemctl --user -M dev@ show -p ActiveState --value claude-rc-scan.service | grep -qx inactive", timeout=60)
+        machine.succeed(f"mkfifo -m 644 /home/dev/.claude/due && ln -s /home/dev/.claude/due /home/dev/.claude/link && mv -T /home/dev/.claude/link {f}")
+
+        def answer(status, at, before=None):
+            # A scan's read of due's status, held on the pipe, gets this:
+            # one read at a time (status and statusUpdatedAt are a read
+            # each), so it waits for the read before it to end and the next
+            # one to come. Returns that read's pid.
+            read = machine.wait_until_succeeds(f"pgrep -u dev -f 'jq .*sessions/{pid}.json' | grep -vx '{before}'", timeout=60).split()[0]
+            machine.succeed(f"echo '{{\"pid\":{pid},\"status\":\"{status}\",\"statusUpdatedAt\":{at}}}' | timeout 10 tee /home/dev/.claude/due >/dev/null")
+            machine.wait_until_fails(f"kill -0 {read}", timeout=10)
+            return read
+
+        # The scan held: began over 5 seconds before it's answered.
+        machine.wait_until_succeeds(f"pgrep -u dev -f 'jq .*sessions/{pid}.json'", timeout=60)
+        time.sleep(6)
+        at = int((now() - 2 - 30 * 60) * 1000)
+        read = answer("idle", at)
+        read = answer("idle", at, read)
+        # The scan after it reads the same, now past its spell's end.
+        read = answer("idle", at, read)
+        answer("idle", at, read)
+        machine.wait_until_succeeds("grep -qx new /data/dev/src/due/started", timeout=60)
+        machine.succeed(f"rm {f} /home/dev/.claude/due")
 
     with subtest("the booked scan comes when the quiet spell ends"):
         # The spell ends 30 seconds on: the scan this status starts books its
         # wake for then, however long that scan takes to run.
         ends = session("waiting", "waiting", 30 * 60 - 30) + 30 * 60
         deadline = time.time() + 25
-        while (left := wake_in()) is None or left > ends - time.time() + 2:
-            assert time.time() < deadline, (left, ends - time.time())
+        while (left := wake_in()) is None or left > ends - now() + 2:
+            assert time.time() < deadline, (left, ends - now())
             time.sleep(0.5)
         assert started("waiting") == ["old"], started("waiting")
         machine.wait_until_succeeds("grep -qx new /data/dev/src/waiting/started", timeout=90)
