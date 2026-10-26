@@ -78,10 +78,12 @@ pkgs.testers.runNixOSTest {
         return machine.succeed(f"cat /data/dev/src/{project}/started").split()
 
     def session(project, status, ago):
-        # What Claude Code writes when a session's status changes.
+        # What Claude Code writes when a session's status changes; returns
+        # its statusUpdatedAt, in seconds.
         pid = machine.succeed(f"cat /data/dev/src/{project}/session.pid").strip()
         at = int(time.time() * 1000) - ago * 1000
         machine.succeed(f"echo '{{\"pid\":{pid},\"status\":\"{status}\",\"statusUpdatedAt\":{at}}}' >/home/dev/.claude/sessions/{pid}.json")
+        return at / 1000
 
     def wake_in():
         # Seconds until the booked scan, or None.
@@ -153,8 +155,7 @@ pkgs.testers.runNixOSTest {
     with subtest("the booked scan comes when the quiet spell ends"):
         # The spell ends 30 seconds on: the scan this status starts books its
         # wake for then, however long that scan takes to run.
-        ends = time.time() + 30
-        session("waiting", "waiting", 30 * 60 - 30)
+        ends = session("waiting", "waiting", 30 * 60 - 30) + 30 * 60
         deadline = time.time() + 25
         while (left := wake_in()) is None or left > ends - time.time() + 2:
             assert time.time() < deadline, (left, ends - time.time())
