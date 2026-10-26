@@ -241,11 +241,12 @@ assert re.fullmatch(r"http://127\.0\.0\.1:\d+/anthropic", run["env"]["DEEPSEEK_B
 assert "GH_TOKEN" not in run["env"] and "ghp_" not in json.dumps(run["env"]), run["env"]
 said = http_said()
 assert said[0].endswith("\r\n\r\nok") and [x.split("\r\n")[0] for x in said[1:]] == ["HTTP/1.1 403 Forbidden"] * 2, said
-(host, tls, sent), (bhost, btls, asked) = UPSTREAM
+(ahost, atls, before), (host, tls, sent), (bhost, btls, asked) = UPSTREAM
 assert host == "api.deepseek.com" and tls and sent.startswith("POST /anthropic/v1/messages HTTP/1.1\r\n"), UPSTREAM
-# Then what the account has left, asked with the key outside the sandbox,
-# kept for the steward: plenty, so the owner hears nothing.
-assert bhost == "api.deepseek.com" and btls and asked.startswith("GET /user/balance HTTP/1.1\r\n"), asked
+# What the account has left, asked before and after with the key outside
+# the sandbox, kept for the steward: plenty, so the owner hears nothing.
+assert before == asked and (ahost, atls) == (bhost, btls) == ("api.deepseek.com", True), UPSTREAM
+assert asked.startswith("GET /user/balance HTTP/1.1\r\n"), asked
 assert "Authorization: Bearer sk-test-0123456789\r\n" in asked, asked
 assert json.load(open(f"{tmp}/state/{V.BALANCE}"))["left"] == {"USD": 20.0}
 assert V.low_balance() == []
@@ -391,6 +392,34 @@ agent(codex={"answer": {"findings": [], "summary": "ok"}})
 assert queue_and_work("codex")["answer"] == {"findings": [], "summary": "ok"}
 with open(f"{tmp}/cred/deepseek", "w") as f:
     f.write('DEEPSEEK_API_KEY="sk-test-0123456789"\n')
+agent()
+
+# DeepSeek's daily budget, from its balance: spent, it's out until the
+# machine's next day, without being run. A top-up isn't money back, and a
+# new day starts over.
+C.CFG["reviewers"]["deepseek"]["dailyBudget"] = 5
+BALANCE[0] = balance(("USD", "10.00"))
+os.remove(f"{tmp}/state/{W.DAY}")
+assert queue_and_work("deepseek")["result"] == "review"
+BALANCE[0] = balance(("USD", "5.50"))
+agent()
+journal = io.StringIO()
+with contextlib.redirect_stdout(journal):
+    assert queue_and_work("deepseek")["result"] == "review" and len(agent_runs()) == 1
+assert "DeepSeek: 0 requests to its API, 0.0 MB sent; 0.00 USD spent meanwhile" in journal.getvalue(), journal.getvalue()
+BALANCE[0] = balance(("USD", "25.50"))
+assert queue_and_work("deepseek")["result"] == "review"
+BALANCE[0] = balance(("USD", "25.00"))
+agent()
+back = queue_and_work("deepseek")
+t = time.localtime()
+assert back["result"] == "out" and back["why"] == "it has spent its daily budget (5)" and agent_runs() == [], back
+assert time.localtime(back["until"])[:6] == time.localtime(time.mktime((*t[:2], t[2] + 1, 0, 0, 0, 0, 0, -1)))[:6], back
+day = json.load(open(f"{tmp}/state/{W.DAY}"))
+json.dump({**day, "day": "2000-01-01"}, open(f"{tmp}/state/{W.DAY}", "w"))
+assert queue_and_work("deepseek")["result"] == "review"
+C.CFG["reviewers"]["deepseek"]["dailyBudget"] = None
+BALANCE[0] = balance(("USD", "20.00"))
 agent()
 
 # A queue entry that can't be read leaves the queue, an error back for it.

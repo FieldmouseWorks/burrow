@@ -45,7 +45,8 @@ change nothing else in the same PR.
    finishes, and its findings are posted on the commit it read, so they go
    into the next push. One whose usage runs out is left out until it's
    back, and PRs settle on the others meanwhile; DeepSeek's balance running
-   low is listed for the owner first.
+   low is listed for the owner first, and DeepSeek sits out the rest of a
+   day once it has spent its daily budget (`reviewers.deepseek.dailyBudget`).
 3. Whoever opened the PR fixes each finding, or replies with why not, and
    resolves its thread. A Claude job on the machine takes over if nobody has
    after `handoffAfterMinutes`, or after `sessionHandoffAfterMinutes` on a

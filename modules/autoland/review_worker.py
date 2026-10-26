@@ -188,6 +188,10 @@ def overlay(effort):
 
 def deepseek(snap, prompt):
     key = deepseek_key()
+    budget, spent = CFG["reviewers"]["deepseek"]["dailyBudget"], deepseek_balance(key)
+    if budget is not None and spent and max(spent.values()) >= budget:
+        t = time.localtime()
+        raise Out(f"it has spent its daily budget ({budget:g})", time.mktime((*t[:2], t[2] + 1, 0, 0, 0, 0, 0, -1)))
     efforts = [CFG["reviewers"]["deepseek"]["effort"]]
     if efforts[0] == "max":
         efforts.append("high")
@@ -205,16 +209,23 @@ def deepseek(snap, prompt):
             return deepseek_in(snap, prompt, home, t, efforts)
         finally:
             gate.close()
-            deepseek_balance(key)
+            after = deepseek_balance(key)
+            cost = (f"; {', '.join(f'{after[c] - (spent or {}).get(c, 0):.2f} {c}' for c in after)} spent meanwhile "
+                    "(any other review under way included)") if after is not None and spent is not None else ""
+            log(f"  DeepSeek: {gate.requests} requests to its API, {gate.sent / 1e6:.1f} MB sent{cost}")
 
 
 BALANCE_LOCK = threading.Lock()  # reviews run side by side
+DAY = "deepseek-day.json"
 
 
 def deepseek_balance(key):
-    """What DeepSeek's account has left after a review, by currency, kept
-    for the steward to warn the owner before it's spent (reviewers.py
-    `low_balance`). A look that fails keeps the last one."""
+    """What DeepSeek's account has left, read before and after each review,
+    by currency: kept for the steward to warn the owner before it's spent
+    (reviewers.py `low_balance`), and counted against the day's budget
+    (the machine's day). What it has spent today, by currency, comes back:
+    each drop in the balance since the last read (a top-up is none). A read
+    that fails keeps the last one and gives None."""
     try:
         s = G.secure(DEEPSEEK_API)
         try:
@@ -231,11 +242,20 @@ def deepseek_balance(key):
     except (OSError, ValueError, KeyError, TypeError, http.client.HTTPException) as e:
         log(f"  couldn't read DeepSeek's balance: {tail(str(e), 200)}")
         return
-    try:
-        with BALANCE_LOCK:
+    with BALANCE_LOCK:
+        day = time.strftime("%Y-%m-%d")
+        d = load(DAY, {})
+        if d.get("day") != day:
+            d = {"day": day, "spent": {}, "last": left}
+        for c, now in left.items():
+            d["spent"][c] = round(d["spent"].get(c, 0) + max(0, d["last"].get(c, now) - now), 4)
+        d["last"] = left
+        try:
             save(V.BALANCE, {"left": left, "at": time.time()})
-    except OSError as e:  # never the review's undoing
-        log(f"  couldn't keep DeepSeek's balance: {e}")
+            save(DAY, d)
+        except OSError as e:  # never the review's undoing
+            log(f"  couldn't keep DeepSeek's balance: {e}")
+        return d["spent"]
 
 
 def deepseek_in(snap, prompt, home, t, efforts):

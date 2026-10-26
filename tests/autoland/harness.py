@@ -139,7 +139,7 @@ with open(f"{tmp}/config.json", "w") as f:
         "webhook": {"url": "https://example.org/burrow/hook", "events": ["check_suite", "push"]},
         "kick": f"http://127.0.0.1:{kicks.server_port}/kick/autoland",
         "reviewers": {"codex": {"enable": True, "effort": "high", "parallel": 2},
-                      "deepseek": {"enable": True, "effort": "max", "parallel": 2, "lowBalance": 5}},
+                      "deepseek": {"enable": True, "effort": "max", "parallel": 2, "lowBalance": 5, "dailyBudget": None}},
         "skipPaths": ["(^|/)secrets?/", r"\.(pem|key|p12|pfx)$", r"(^|/)\.env(\..*)?$"],
         "agents": f"{tmp}/agents",
         "sandbox": f"{tmp}/bwrap",

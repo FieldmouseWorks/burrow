@@ -111,7 +111,7 @@ let
     kick = "${config.burrow.events.kick}/autoland";
     reviewers = {
       codex = { inherit (rv.codex) enable effort parallel; };
-      deepseek = { inherit (rv.deepseek) enable effort parallel lowBalance; };
+      deepseek = { inherit (rv.deepseek) enable effort parallel lowBalance dailyBudget; };
     };
     inherit (rv) skipPaths;
     agents = "${agents}/bin";
@@ -381,6 +381,18 @@ in
             Under this much left on DeepSeek's account (in its own currency),
             after any review, the steward's issue for the owner says so. Spent,
             DeepSeek is out of service and PRs merge on the other reviewers.
+          '';
+        };
+        dailyBudget = mkOption {
+          type = types.nullOr types.number;
+          default = 5;
+          description = ''
+            The most DeepSeek may spend in a day (the machine's day), in its
+            account's own currency, counted from the balance it reads before
+            and after each review; null for no limit. Once it's spent, DeepSeek
+            is out of service until the next day and PRs settle on the other
+            reviewers. Reviews already under way finish, so a day can go over
+            by what they cost.
           '';
         };
       };
