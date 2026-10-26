@@ -276,7 +276,7 @@ def clean(sha=head, comments=(), reviews=(), **kw):
 QDIR, DDIR = f"{tmp}/state/{V.QUEUE}", f"{tmp}/state/{V.DONE}"
 
 
-def run(pr, after):
+def run(pr, after, obsolete=False):
     """One pass, `after` seconds after the head first showed up."""
     C.NOW = C.ts(T0) + after
     WROTE.clear()
@@ -284,7 +284,7 @@ def run(pr, after):
     C.WAKE.clear()
     POSTED.clear()
     digest = []
-    S.handle("sam/r", pr, info, digest)
+    S.handle("sam/r", pr, info, digest, obsolete)
     return " ".join(x for x in WROTE if "/statuses/" in x), digest
 
 

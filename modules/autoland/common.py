@@ -205,6 +205,19 @@ def save(name, value):
             raise
 
 
+def acted_on(pr):
+    """Whether the steward does anything with the PR beyond saying it's not
+    its to do: not a draft, and from one of its authors."""
+    return not pr["isDraft"] and not pr["isCrossRepository"] and (pr["author"] or {}).get("login") in CFG["authors"]
+
+
+def unland(repo, pr):
+    """Something new came up after it was settled: stop the merge. False if
+    GitHub didn't take it."""
+    return not pr["autoMergeRequest"] or write(
+        "pr", "merge", str(pr["number"]), "-R", repo, "--disable-auto", check=False) is not None
+
+
 def repo_cfg(repo):
     """The defaults, with this repo's overrides from config.repos on top."""
     c = dict(CFG["defaults"])

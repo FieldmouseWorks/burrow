@@ -54,6 +54,7 @@ PRS = """
 query($owner: String!, $name: String!, $cursor: String) {
   repository(owner: $owner, name: $name) {
     squashMergeAllowed mergeCommitAllowed rebaseMergeAllowed
+    defaultBranchRef { name target { ... on Commit { oid statusCheckRollup { state } } } }
     pullRequests(states: OPEN, first: 30, after: $cursor, orderBy: {field: CREATED_AT, direction: ASC}) {
       pageInfo { hasNextPage endCursor }
       nodes {
@@ -93,12 +94,6 @@ query($id: ID!, $cursor: String) {
 """
 
 
-def acted_on(pr):
-    """Whether the steward does anything with the PR beyond saying it's not
-    its to do: not a draft, and from one of its authors."""
-    return not pr["isDraft"] and not pr["isCrossRepository"] and (pr["author"] or {}).get("login") in CFG["authors"]
-
-
 # Pages of older reviews, and of older comments, read for a PR: up to 1,000
 # of each. Anyone can comment on a public repo's PRs, and every event reads
 # them again, so a PR longer than that is the owner's (the cut in handle).
@@ -119,7 +114,7 @@ def open_prs(owner, name):
         if not page["pageInfo"]["hasNextPage"]:
             break
         cursor = page["pageInfo"]["endCursor"]
-    for pr in filter(acted_on, prs):
+    for pr in filter(C.acted_on, prs):
         for field, nodes in OLDER.items():
             for _ in range(OLDER_PAGES):
                 if not pr[field]["pageInfo"]["hasPreviousPage"]:
@@ -209,14 +204,7 @@ def land(repo, pr, repo_info):
     return True
 
 
-def unland(repo, pr):
-    """Something new came up after it was settled: stop the merge. False if
-    GitHub didn't take it."""
-    return not pr["autoMergeRequest"] or C.write(
-        "pr", "merge", str(pr["number"]), "-R", repo, "--disable-auto", check=False) is not None
-
-
-def handle(repo, pr, repo_info, digest):
+def handle(repo, pr, repo_info, digest, obsolete=False):
     rc = repo_cfg(repo)
     n, head = pr["number"], pr["headRefOid"]
     # The judge reads the diff against the base, so its verdict (and its
@@ -253,7 +241,7 @@ def handle(repo, pr, repo_info, digest):
             digest.append((why, line, desc))
         # Not settled (any more): nothing may merge it.
         if state != "success" and (pr["autoMergeRequest"] or st.get("landed")):
-            if unland(repo, pr):
+            if C.unland(repo, pr):
                 st["landed"] = None
             else:
                 ok = False
@@ -434,7 +422,7 @@ def handle(repo, pr, repo_info, digest):
         settle("pending", "Draft: work in progress, reviewed once it's marked ready")
         save(key, st)
         return
-    if not acted_on(pr):
+    if not C.acted_on(pr):
         settle("pending", f"Outside contribution: {CFG['owner']} reviews and merges it", "Outside contributions")
         save(key, st)
         return
@@ -447,6 +435,12 @@ def handle(repo, pr, repo_info, digest):
                              ("comments", pr["comments"]["pageInfo"]["hasPreviousPage"])) if more]
     if cut:
         settle("pending", f"Too many {' and '.join(cut)} to read: {CFG['owner']} merges it", "Too much to read")
+        save(key, st)
+        return
+    if obsolete:
+        # A red-branch fix its branch went green without (R.watch_default),
+        # waiting to be closed: like a hold, nothing may merge it.
+        settle("pending", f"Not needed: {pr['baseRefName']} is green again without it")
         save(key, st)
         return
     if CFG["labels"]["hold"] in labels:
@@ -814,13 +808,17 @@ def main():
             owner, name = repo.split("/")
             info, prs = open_prs(owner, name)
             read.add(repo.replace("/", "_"))
+            # First, so a fix PR it made obsolete isn't merged by this same pass.
+            obsolete = R.watch_default(r, info, prs, mine) or set()
             heads = set()
             seen_to = True
-            for pr in prs:
+            # Obsolete fixes first: their holds take back a queued merge
+            # before anything else this pass waits on.
+            for pr in sorted(prs, key=lambda pr: pr["number"] not in obsolete):
                 heads.add(pr["headRefName"])
                 live.add(V.snap_name(f"pr-{repo.replace('/', '_')}-{pr['number']}.json", pr["headRefOid"], pr["baseRefName"]))
                 try:
-                    handle(repo, pr, info, mine)
+                    handle(repo, pr, info, mine, pr["number"] in obsolete)
                 except Exception as e:  # one bad PR mustn't stop the rest
                     log(f"{repo}#{pr['number']}: {e}")
                     seen_to = False

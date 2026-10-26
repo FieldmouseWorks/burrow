@@ -22,6 +22,13 @@ change nothing else in the same PR.
   required. Repo admins can still merge past it from the PR page. A repo whose
   automation pushes to its default branch (`directPush`) gets only the first
   two. Existing rules stay; the ruleset only adds.
+- No rule makes a branch be up to date with its base before it merges, the
+  repo's own rulesets and branch protection included: the steward turns that
+  off where it finds it. With it on, every merge puts every other open PR
+  behind, and each needs a new merge, CI run and review before it can land,
+  so the PRs take turns. It guards only against two PRs that pass alone and
+  break the branch together, and the default branch's own CI catches that
+  (step 8 of the PR flow undoes it). There's no merge queue either.
 - The `hold` and `needs-owner` labels (`burrow.autoland.labels`), which the
   steward and its jobs put on PRs.
 
@@ -59,6 +66,12 @@ change nothing else in the same PR.
    `proofJobs`, with how to run each): once a settled PR waits on nothing
    else, one Claude job a head runs them on that commit and records each
    verdict. A red one goes to a fix job like any red CI.
+8. A red default branch (CI failed on what was merged): one Claude job
+   finds the cause and opens a PR from `autoland/red-SHA` that reverts the
+   merge that broke it, or fixes it, and that PR lands like any other. Nothing
+   more while the job works or its PR is open; one more job if the branch is
+   still red after, then the owner. Green again without it (fixed some other
+   way, or a flake), its PR is closed once the job has ended.
 
 Waiting for the owner instead, listed in one issue: what a judge job sent
 them (or anyone labelled `needs-owner`), PRs past the round limit, held

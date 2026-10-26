@@ -46,6 +46,20 @@ FAIL.append("/statuses/")
 run(clean(labels=["hold"]), 800)
 assert C.WAKE["sam/r"] == T + 800 + 60 + 1, C.WAKE
 FAIL.clear()
+# A red-branch fix the branch went green without is held the same way while
+# it waits to be closed: its status goes pending and its queued merge comes
+# off, again a minute later if GitHub doesn't take that.
+fresh_pr_state()
+run(clean(), 400)
+C.save(key, {**C.load(key, {}), "landed": head})
+stale = {**clean(branch="autoland/red-cccccccccccc"), "autoMergeRequest": {"enabledAt": "x"}}
+FAIL.append("--disable-auto")
+status, _ = run(stale, 500, obsolete=True)
+assert "state=pending" in status and "green again without it" in status, status
+assert C.WAKE["sam/r"] == T + 500 + 60 + 1 and C.load(key, {})["landed"] == head, (C.WAKE, C.load(key, {}))
+FAIL.clear()
+run(stale, 600, obsolete=True)
+assert "pr merge 5 -R sam/r --disable-auto" in WROTE and C.load(key, {})["landed"] is None, (WROTE, C.load(key, {}))
 # Every finding answered: the reviewer looks again once the settle delay
 # after its review is up.
 fresh_pr_state()

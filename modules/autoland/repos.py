@@ -7,9 +7,11 @@ import json
 import os
 import subprocess
 import tempfile
+import urllib.parse
 
 import common as C
 from common import CFG, CONTEXT, DEP_RE, DRY, load, log, repo_cfg, save, ts
+from tasks import RED_BRANCH, red_default_task
 
 
 def discover():
@@ -99,17 +101,139 @@ def settle_repo(r, known):
             st["autoMergeRefused"] = True
     C.write("api", "-X", "PUT", f"repos/{repo}/vulnerability-alerts", check=False)
 
-    if CFG["rulesets"] and rc["ruleset"]:
-        existing = C.gh("api", f"repos/{repo}/rulesets", check=False)
-        # None: the plan doesn't offer rules on this repo (private, free account).
-        if isinstance(existing, list) and not any(x["name"] == "baseline" for x in existing):
+    # Every page, an org's rulesets included: one named baseline counts as
+    # the repo's.
+    pages = C.gh("api", f"repos/{repo}/rulesets?per_page=100", "--paginate", "--slurp", check=False)
+    # None: the plan doesn't offer rules on this repo (private, free account).
+    if isinstance(pages, list):
+        existing = [x for page in pages for x in page]
+        if CFG["rulesets"] and rc["ruleset"] and not any(x["name"] == "baseline" for x in existing):
             log(f"{repo}: adding the baseline ruleset")
             C.write("api", "-X", "POST", f"repos/{repo}/rulesets", "--input", "-",
                     input=json.dumps(baseline_ruleset(rc, r["default"])), check=False)
+        # Whether or not the repo gets the baseline ruleset, its own rules
+        # don't make branches be up to date.
+        not_strict(repo, [x for x in existing if x.get("target") == "branch" and x.get("source_type") == "Repository"])
+    not_strict_protection(repo, r["default"])
 
     st["settings"] = C.NOW
     save(f"repo-{repo.replace('/', '_')}.json", st)
     return new
+
+
+def not_strict(repo, rulesets):
+    """Up-to-date branches off in each of the repo's own branch rulesets
+    (docs/repo-baseline.md says why). The listing names a ruleset without
+    its rules, so each one is read."""
+    for x in rulesets:
+        rs = C.gh("api", f"repos/{repo}/rulesets/{x['id']}", check=False)
+        if not isinstance(rs, dict):
+            continue
+        rules = rs.get("rules") or []
+        strict = [y for y in rules if y.get("type") == "required_status_checks"
+                  and (y.get("parameters") or {}).get("strict_required_status_checks_policy")]
+        if strict:
+            for y in strict:
+                y["parameters"]["strict_required_status_checks_policy"] = False
+            log(f"{repo}: up-to-date branches off in the {rs.get('name')!r} ruleset")
+            # The whole ruleset goes back, so only that one setting changes.
+            keep = {k: rs[k] for k in ("name", "target", "enforcement", "bypass_actors", "conditions") if k in rs}
+            C.write("api", "-X", "PUT", f"repos/{repo}/rulesets/{x['id']}", "--input", "-",
+                    input=json.dumps({**keep, "rules": rules}), check=False)
+
+
+def not_strict_protection(repo, default):
+    """The same in the default branch's classic protection. Its checks are
+    read only when the branch says it requires some: the endpoint is a 404
+    otherwise."""
+    # A slash in the name (release/1.0) is part of it, not of the path.
+    branch = urllib.parse.quote(default, safe="")
+    b = C.gh("api", f"repos/{repo}/branches/{branch}", check=False)
+    checks = ((b.get("protection") or {}).get("required_status_checks") or {}) if isinstance(b, dict) else {}
+    if checks.get("enforcement_level", "off") == "off":
+        return
+    path = f"repos/{repo}/branches/{branch}/protection/required_status_checks"
+    got = C.gh("api", path, check=False)
+    if isinstance(got, dict) and got.get("strict"):
+        log(f"{repo}: up-to-date branches off in {default}'s protection")
+        C.write("api", "-X", "PATCH", path, "-F", "strict=false", check=False)
+
+
+def watch_default(r, info, prs, digest):
+    """A red default branch: CI failed on what's merged, and every PR is
+    built on it. With no merge queue (docs/repo-baseline.md), this is how
+    two PRs that broke it together get undone: a Claude job finds the
+    cause and opens a PR from RED_BRANCH that reverts or fixes it, which
+    lands like any other. Nothing more while that job works or its PR is
+    open; a second job if it's still red after (seen on two passes), then
+    the owner. Returns the PRs this pass mustn't merge: a fix PR made
+    obsolete by the branch going green some other way."""
+    repo = r["repo"]
+    target = (info.get("defaultBranchRef") or {}).get("target") or {}
+    sha, state = target.get("oid"), (target.get("statusCheckRollup") or {}).get("state")
+    key = f"repo-{repo.replace('/', '_')}.json"
+    st = load(key, {})
+    red = st.get("red") or {}
+    working = red.get("job") and C.job_state(red["job"]) in (None, "queued", "running")
+    # Its PR: the one its task names, from the steward's own authors to this
+    # branch. Anyone can open a PR from a branch of that name on a fork, and
+    # that one is nothing of the steward's.
+    fix = RED_BRANCH + (red.get("at") or "")[:12]
+    open_fix = [pr for pr in prs if red.get("at") and pr["headRefName"] == fix
+                and pr["baseRefName"] == r["default"] and C.acted_on(pr)]
+    if state not in ("FAILURE", "ERROR"):
+        if not red or state != "SUCCESS":
+            return
+        # Green while its job still works: wait for the job to end, so a PR
+        # it opens can't outlive the red it was for, and leave alone one it
+        # has opened. Once it has ended, its PR, if one is open, isn't needed.
+        if working:
+            return {pr["number"] for pr in open_fix}
+        # Ended with no PR to show: as when red, seen on two passes before
+        # the red is forgotten, since this one may have read the PRs just
+        # before the job opened its own.
+        if not open_fix and red.get("job") and not red.get("ended"):
+            red["ended"] = True
+            save(key, st)
+            C.wake(repo, C.NOW + 60)
+            return set()
+        unclosed = []
+        for pr in open_fix:
+            log(f"{repo}: closing #{pr['number']}, {r['default']} is green again without it")
+            if C.write("pr", "close", str(pr["number"]), "-R", repo, "--comment",
+                       f"{r['default']} is green again at {sha[:7]}, so this fix for {red['at'][:7]} isn't needed.",
+                       check=False) is None:
+                unclosed.append(pr)
+        # One GitHub wouldn't close is still known by the red it was for, and
+        # tried again soon.
+        if unclosed:
+            C.wake(repo, C.NOW + 5 * 60)
+        else:
+            log(f"{repo}: {r['default']} is green again")
+            st.pop("red")
+            save(key, st)
+        return {pr["number"] for pr in open_fix}
+    line = f"{repo} {r['default']} at {sha[:7]}"
+    if working or open_fix:
+        return
+    # Its job ended with no PR to show. Seen on two passes: this one may
+    # have read the PRs just before the job opened its own.
+    if red.get("job") and not red.get("ended"):
+        red["ended"] = True
+        save(key, st)
+        C.wake(repo, C.NOW + 60)
+        return
+    if red.get("jobs", 0) >= 2:
+        digest.append(("The default branch is red", line, "two Claude jobs ended with it still red"))
+        return
+    jid = C.job(repo, red_default_task(repo, r["default"], sha))
+    if not jid:
+        digest.append(("Couldn't start a Claude job to fix it", line, "the default branch is red"))
+        C.wake(repo, C.NOW + 5 * 60)
+        return
+    log(f"{repo}: {r['default']} is red at {sha[:7]}; a Claude job {jid} fixes it")
+    st["red"] = {"job": jid, "jobs": red.get("jobs", 0) + 1, "at": sha}
+    save(key, st)
 
 
 def hook(repo, st, due):
