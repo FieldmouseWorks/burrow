@@ -160,7 +160,10 @@ let
       # The wake-up: a timer of its own for this unit, gone once it fires.
       systemctl --user stop claude-rc-scan.timer 2>/dev/null || true
       if [ -n "$wake" ]; then
-        systemd-run --user --quiet --unit=claude-rc-scan --on-active="$(( (wake - now) / 1000 + 1 ))s" \
+        # From the clock now, not the scan's start: a slow scan books no later.
+        left=$(( wake - $(date +%s%3N) ))
+        (( left > 0 )) || left=0
+        systemd-run --user --quiet --unit=claude-rc-scan --on-active="$(( left / 1000 + 1 ))s" \
           --timer-property=AccuracySec=1s --timer-property=RemainAfterElapse=no
       fi
       [ "$(seen)" != "$before" ] || break
