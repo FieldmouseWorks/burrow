@@ -178,6 +178,22 @@ STUB["post"] = None
 status, _ = run(mkpr(reviews=[rv_review("codex", 0)]), 890)
 assert ("deepseek", head, 1) in POSTED and not merged() and os.listdir(DDIR) == [], (POSTED, status)
 os.remove(f"{tmp}/state/{V.OUT}")
+# Put out in the pass that would have dropped it, by an earlier head's
+# answer, it's kept too.
+fresh_pr_state()
+run(mkpr(), 0)
+run(mkpr(), 600)
+worker(deepseek={"result": "review", "answer": {"findings": [{"path": "a.py"}]}})
+STUB["post"] = RuntimeError("HTTP 502")
+run(mkpr(reviews=[rv_review("codex", 0)]), 650)
+run(mkpr(reviews=[rv_review("codex", 0)]), 710)
+C.save(f"{V.DONE}/{V.item_name('pr-sam_r-5.json', 'deepseek', newer, 'main')}.json",
+       {"result": "out", "why": "balance", "until": C.ts(T0) + 86400, "head": newer, "base": "main"})
+status, _ = run(mkpr(reviews=[rv_review("codex", 0)]), 770)
+STUB["post"] = None
+assert V.out("deepseek") and not merged() and f"Posting DeepSeek's review of {head[:7]}" in status, (status, WROTE)
+assert os.listdir(DDIR) == [V.item_name("pr-sam_r-5.json", "deepseek", head, "main") + ".json"], os.listdir(DDIR)
+os.remove(f"{tmp}/state/{V.OUT}")
 # Nor is a look at an earlier head still under way passed over by one out
 # of service: the PR waits for what it finds.
 fresh_pr_state()

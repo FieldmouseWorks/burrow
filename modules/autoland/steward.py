@@ -575,6 +575,21 @@ def handle(repo, pr, repo_info, digest):
     found = []  # the reviewers whose findings on this head this pass posted
     late, unposted = [], []  # earlier heads whose findings this pass posted; reviews it couldn't post yet
 
+    def went_out(r, back):
+        o = load(V.OUT, {})
+        o[r] = {"why": back["why"], "until": back["until"]}
+        save(V.OUT, o)
+        log(f"{tag}: {V.NAMES[r]} is out of service until {back['until']:.0f}: {back['why']}")
+
+    def outs(r):
+        """An earlier head's look that found the reviewer out of service:
+        recorded before anything this pass decides on whether it's out."""
+        for name in V.answered(key, r):
+            back = load(f"{V.DONE}/{name}.json", None) or {}
+            if name != V.item_name(key, r, head, pr["baseRefName"]) and back.get("result") == "out" and not DRY:
+                went_out(r, back)
+                V.drop(name)
+
     def consume(r):
         """What came back from the reviewer's service for this head, if
         anything: posted as its review, or counted as a failure."""
@@ -607,10 +622,7 @@ def handle(repo, pr, repo_info, digest):
                         after(C.NOW, 1)
                         return
             elif back["result"] == "out":
-                o = load(V.OUT, {})
-                o[r] = {"why": back["why"], "until": back["until"]}
-                save(V.OUT, o)
-                log(f"{tag}: {V.NAMES[r]} is out of service until {back['until']:.0f}: {back['why']}")
+                went_out(r, back)
             else:  # the agent, the network, its JSON: tried again next pass
                 rs["fails"], rs["failedAt"] = rs.get("fails", 0) + 1, C.NOW
                 log(f"{tag}: {V.NAMES[r]}'s review failed ({rs['fails']}): {back.get('error', '')[:200]}")
@@ -668,11 +680,6 @@ def handle(repo, pr, repo_info, digest):
                             digest.append(("A review couldn't be posted", line, f"{x}, {tries[name]} tries"))
                         after(C.NOW, 1)
                         continue
-            elif back.get("result") == "out":
-                o = load(V.OUT, {})
-                o[r] = {"why": back["why"], "until": back["until"]}
-                save(V.OUT, o)
-                log(f"{tag}: {V.NAMES[r]} is out of service until {back['until']:.0f}: {back['why']}")
             tries.pop(name, None)
             V.drop(name)
         if tries:
@@ -680,6 +687,8 @@ def handle(repo, pr, repo_info, digest):
         else:
             rs.pop("late", None)
 
+    for r in names:
+        outs(r)
     for r in names:
         # One out of service too, or put out by one of these answers: its
         # looks came back before it went out, and posting them asks nothing
