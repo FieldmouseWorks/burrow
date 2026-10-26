@@ -78,13 +78,17 @@ def dep_kind(pr):
 def renovate_edited(repo, pr, st):
     """Whether a Renovate branch has a commit Renovate didn't write (a Claude
     job's fix). Renovate won't merge a branch edited like that. Asked once
-    per head; a failed ask counts as not edited and is asked again."""
-    if not CFG["renovateEmail"] or not pr["headRefName"].startswith("renovate/"):
+    per head; None when it can't be told (no Renovate address, or the ask
+    failed: asked again next pass), which is never a branch to merge
+    unreviewed."""
+    if not pr["headRefName"].startswith("renovate/"):
         return False
+    if not CFG["renovateEmail"]:
+        return None
     if st.get("editedHead") != pr["headRefOid"]:
         got = C.gh("pr", "view", str(pr["number"]), "-R", repo, "--json", "commits", check=False)
         if not got:
-            return False
+            return None
         st["edited"] = any(a.get("email") != CFG["renovateEmail"]
                            for c in got["commits"] for a in c["authors"])
         st["editedHead"] = pr["headRefOid"]

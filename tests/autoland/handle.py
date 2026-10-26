@@ -10,7 +10,7 @@ import subprocess
 
 from harness import (C, CI_GREEN, COMMITS, DDIR, FAIL, JOBS, POSTED, PR_DIFF, QDIR, R, S, STATES, STUB, T0, V,
                      W, WROTE, agent, agent_runs, clean, fresh_pr_state, head, info, judgment, merged,
-                     mkpr, pr_state, queued, run, rv_review, said, stand_in, tmp, worker)
+                     gh_stub, mkpr, pr_state, queued, run, rv_review, said, stand_in, tmp, worker)
 
 stand_in()
 fresh_pr_state()
@@ -509,14 +509,25 @@ assert "its reviewers found nothing" not in JOBS[0], JOBS[0]
 status, _ = run(mkpr(comments=[said(f"<!-- major-verdict: ok {head} on main -->"),
                                said(judgment("land", n=8))], **gated), 1000)
 assert merged()
-# A green Renovate minor merges at once if Renovate's config would merge it
-# (it says so in the PR), and waits for a person if not. A Dependabot major
-# is judged.
+# A green Renovate minor merges at once if Renovate would merge it now (its
+# config says so in the PR, with no automerge window, and only Renovate's
+# commits are on it), and is left to Renovate if not. A Dependabot major is
+# judged.
 fresh_pr_state()
 renovate_minor = {"branch": "renovate/foo-1.x", "title": "Update foo from 1.4 to 1.5", "number": 9}
-status, _ = run(mkpr(body="\U0001f6a6 **Automerge**: Disabled by config.", **renovate_minor), 900)
+ANY_TIME = "- Automerge\n  - At any time (no schedule defined)\n\n"
+status, _ = run(mkpr(body=ANY_TIME + "\U0001f6a6 **Automerge**: Disabled by config.", **renovate_minor), 900)
 assert "state=success" in status and not merged() and JOBS == []
-status, _ = run(mkpr(body="\U0001f6a6 **Automerge**: Enabled.", **renovate_minor), 900)
+fresh_pr_state()
+status, _ = run(mkpr(body="- Automerge\n  - Before 5am\n\n\U0001f6a6 **Automerge**: Enabled.", **renovate_minor), 900)
+assert "state=success" in status and not merged() and JOBS == []
+# Whose commits are on it couldn't be read: it could carry a Claude job's fix.
+fresh_pr_state()
+C.gh = lambda *a, **k: None if a[:2] == ("pr", "view") else gh_stub(*a, **k)
+status, _ = run(mkpr(body=ANY_TIME + "\U0001f6a6 **Automerge**: Enabled.", **renovate_minor), 900)
+C.gh = gh_stub
+assert "state=success" in status and not merged() and JOBS == []
+status, _ = run(mkpr(body=(ANY_TIME + "\U0001f6a6 **Automerge**: Enabled.").replace("\n", "\r\n"), **renovate_minor), 900)
 assert "state=success" in status and JOBS == []
 assert any(x.startswith("pr merge 9") and "--match-head-commit " + head in x for x in WROTE), WROTE
 status, _ = run(mkpr(branch="dependabot/npm/foo-2", title="Bump foo from 1.4 to 2.0", number=10), 900)

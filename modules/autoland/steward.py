@@ -217,8 +217,10 @@ def unland(repo, pr):
 
 
 # What Renovate writes in a PR its config would merge once CI is green (the
-# rest say "Disabled by config").
-RENOVATE_AUTOMERGE = "🚦 **Automerge**: Enabled."
+# rest say "Disabled by config"), and that it may merge it at any time: a
+# repo with an automergeSchedule names its window there instead, and
+# Renovate merges it in that window.
+RENOVATE_AUTOMERGE = ("🚦 **Automerge**: Enabled.", "- Automerge\n  - At any time (no schedule defined)")
 
 
 def handle(repo, pr, repo_info, digest):
@@ -493,7 +495,8 @@ def handle(repo, pr, repo_info, digest):
     # Its owner or failed verdict holds it whatever CI is still doing; only
     # a land waits for CI.
     held = asked and judge_said in ("owner", "failed")
-    fixed = dep == "minor" and not gate and (renovate_edited(repo, pr, st) or gate_edit(repo, pr, st))
+    edited = renovate_edited(repo, pr, st) if dep == "minor" and not gate else None
+    fixed = dep == "minor" and not gate and (edited or gate_edit(repo, pr, st))
     swept = fixed and ci == "red" and renovate
 
     # Dependency bumps: CI is the review. A minor one merges once CI is green
@@ -552,9 +555,12 @@ def handle(repo, pr, repo_info, digest):
         else:
             settle("success", "Dependency update, CI green")
             # Merged now, not on Renovate's next run (a median of 37 minutes
-            # after green), but a Renovate one only if its config would merge
-            # it too: it says so in the PR.
-            if (not renovate or RENOVATE_AUTOMERGE in (pr["body"] or "")) and st.get("landed") != head:
+            # after green), but a Renovate one only if Renovate would merge it
+            # now too: its config says so in the PR, and only Renovate's
+            # commits are on it (an unknown is left to Renovate).
+            body = (pr["body"] or "").replace("\r\n", "\n")
+            if ((not renovate or (edited is False and all(x in body for x in RENOVATE_AUTOMERGE)))
+                    and st.get("landed") != head):
                 merge()
         # Renovate's stuck ones are renovate-sweep's; a Dependabot one that
         # still hasn't merged after a day is the owner's to look at.
