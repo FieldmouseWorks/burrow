@@ -64,6 +64,10 @@ put("keys/util.key", UTIL % 2)
 # Paths are bytes, not always UTF-8.
 put(os.fsdecode(b"src/caf\xe9.py"), "print('bytes')\n")
 put(os.fsdecode(b"secrets/k\xff.yaml"), "token: BYTESECRET\n")
+# What this repo keeps private on top of the machine's list: a game image
+# and its folder, hidden here and nowhere else.
+put("roms/game.gen", "ROMSECRET\n")
+put("game.gen", "IMAGESECRET\n")
 sh(*GIT, "add", "-A", "-f", cwd=work)
 sh(*GIT, "commit", "-qm", "use eval", cwd=work)
 pr_head = sh("git", "rev-parse", "HEAD", cwd=work).strip()
@@ -76,6 +80,10 @@ sh(*GIT, "commit", "-qm", "later", cwd=work)
 sh("git", "push", "-q", origin, "main", cwd=work)
 V.ORIGIN = f"{tmp}/origin/{{}}.git"
 
+C.CFG["repos"]["sam/r"] = {"skipPaths": [r"(^|/)roms/", r"\.gen$"]}
+assert V.hidden("sam/r", "game.gen") and not V.hidden("sam/other", "game.gen")
+# A repo's list adds to the machine's: its secrets stay hidden.
+assert V.hidden("sam/r", ".env") and V.hidden("sam/r", "secrets/x.yaml")
 snap_pr = {"number": 5, "headRefOid": pr_head, "baseRefName": "main", "title": "Use eval"}
 name, meta = V.snapshot("sam/r", snap_pr, "pr-sam_r-5.json")
 snap = f"{tmp}/state/{V.SNAP}/{name}"
@@ -91,7 +99,7 @@ assert sh("git", "rev-parse", "HEAD:notes.txt", cwd=snap) == sh("git", "rev-pars
 for rev in ("HEAD", "HEAD~1"):
     files = sh("git", "ls-tree", "-r", "--name-only", rev, cwd=snap).split()
     assert "src/app.py" in files and not any(x.startswith("secrets/") or x in (".env", "cert.pem", "config/db.yaml", "cfg/api.yaml")
-                                             for x in files), files
+                                             or x in ("game.gen", "roms/game.gen") for x in files), files
 out = subprocess.run(["grep", "-rlE", "SECRET", snap], capture_output=True, text=True).stdout
 assert out == "", out
 for f in ("secrets/remi.yaml", "cert.pem", ".env"):
@@ -99,8 +107,8 @@ for f in ("secrets/remi.yaml", "cert.pem", ".env"):
         oid = sh("git", "rev-parse", f"{rev}:{f}", cwd=work).strip() if f != "cert.pem" or rev == "feat" else None
         if oid:
             assert subprocess.run(["git", "cat-file", "-e", oid], cwd=snap).returncode != 0, (f, rev)
-assert sorted(meta["secret"]) == ["cert.pem", "cfg/api.yaml", "config/db.yaml", "keys/util.key", "secrets/db.yaml",
-                                  "secrets/k\ufffd.yaml", "secrets/remi.yaml"], meta
+assert sorted(meta["secret"]) == ["cert.pem", "cfg/api.yaml", "config/db.yaml", "game.gen", "keys/util.key", "roms/game.gen",
+                                  "secrets/db.yaml", "secrets/k\ufffd.yaml", "secrets/remi.yaml"], meta
 # And the steward knows what no reviewer saw.
 assert V.unseen("pr-sam_r-5.json", pr_head, "main") == meta["secret"], meta
 # The rules are the base's, nearest each changed file: the PR's own edit to them doesn't count.

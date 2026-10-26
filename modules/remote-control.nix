@@ -251,13 +251,16 @@ in
 
     systemd.user.services.claude-rc-scan = {
       description = "Start a Remote Control server for each project folder";
+      # On boot, and on every switch, which makes servers stale (a new
+      # claude-rc-serve) and leaves them running: it starts default.target
+      # again once it has re-executed the user manager.
       wantedBy = [ "default.target" ];
       unitConfig = {
         ConditionUser = user;
-        # Its path units start it on every change, and a burst of them (many
-        # sessions at once) would hit the default start limit, which fails
-        # the path units too and leaves nothing watching. A start while one
-        # runs only joins it, so there's nothing to limit.
+        # Its path units start it on every change, and changes coming one
+        # after another (many sessions at once) would hit the default start
+        # limit, which fails the path units too and leaves nothing watching.
+        # A start while one runs only joins it, so there's nothing to limit.
         StartLimitIntervalSec = 0;
       };
       serviceConfig = {
@@ -265,14 +268,6 @@ in
         ExecStart = "${scan}/bin/claude-rc-scan";
       };
     };
-
-    # A switch makes servers stale (a new claude-rc-serve), and leaves them
-    # running: its user activation scans for them.
-    system.userActivationScripts.claude-rc-scan = ''
-      if [ "$(id -un)" = ${lib.escapeShellArg user} ]; then
-        ${pkgs.systemd}/bin/systemctl --user start --no-block claude-rc-scan.service || true
-      fi
-    '';
 
     # A session's status changing (working, done, gone) may free its stale
     # server, or move the end of its quiet spell.
