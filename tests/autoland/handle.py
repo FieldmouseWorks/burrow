@@ -791,24 +791,35 @@ assert sorted(x.split()[2] for x in WROTE if x.startswith("label create")) == ["
 # don't ask for it, are left as they are.
 checks = {"type": "required_status_checks", "parameters": {
     "strict_required_status_checks_policy": True, "required_status_checks": [{"context": "gate"}]}}
+LISTED = [{"id": 1, "name": "baseline", "target": "branch", "source_type": "Repository"},
+          {"id": 2, "name": "gates", "target": "branch", "source_type": "Repository"},
+          {"id": 3, "name": "tags", "target": "tag", "source_type": "Repository"},
+          {"id": 4, "name": "org", "target": "branch", "source_type": "Organization"}]
+gates = {"name": "gates", "target": "branch", "source_type": "Repository", "enforcement": "active",
+         "bypass_actors": [{"actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "always"}],
+         "conditions": {"ref_name": {"include": ["~DEFAULT_BRANCH"], "exclude": []}},
+         "rules": [{"type": "deletion"}, checks]}
 SETTINGS = {
-    "repos/sam/r/rulesets?per_page=100&includes_parents=false": [{"id": 1, "name": "baseline"}, {"id": 2, "name": "gates"}, {"id": 3, "name": "tags"},
-                             {"id": 4, "name": "org"}],
+    "repos/sam/r/rulesets?per_page=100": LISTED,
     "repos/sam/r/rulesets/1": {"name": "baseline", "target": "branch", "source_type": "Repository",
                                "rules": [{"type": "deletion"}]},
-    "repos/sam/r/rulesets/2": {"name": "gates", "target": "branch", "source_type": "Repository",
-                               "rules": [{"type": "deletion"}, checks]},
-    "repos/sam/r/rulesets/3": {"name": "tags", "target": "tag", "source_type": "Repository", "rules": [checks]},
-    "repos/sam/r/rulesets/4": {"name": "org", "target": "branch", "source_type": "Organization", "rules": [checks]},
+    "repos/sam/r/rulesets/2": gates,
     "repos/sam/r/branches/main": {"protection": {"required_status_checks": {"enforcement_level": "everyone"}}},
     "repos/sam/r/branches/main/protection/required_status_checks": {"strict": True},
 }
 C.gh = lambda *a, **k: SETTINGS[a[1]] if a[:1] == ("api",) and a[1:2] and a[1] in SETTINGS else gh_stub(*a, **k)
+BODIES, write = [], C.write
+C.write = lambda *a, **k: (BODIES.append(json.loads(k["input"])) if "rulesets" in " ".join(a) else None) or write(*a, **k)
 C.NOW += 86400
 WROTE.clear()
 R.settle_repo({"repo": "sam/r", "private": False, "default": "main"}, {"sam/r"})
-puts = [x for x in WROTE if "rulesets/" in x]
+puts = [x for x in WROTE if "rulesets" in x]
 assert len(puts) == 1 and puts[0].startswith("api -X PUT repos/sam/r/rulesets/2 "), WROTE
+# The whole ruleset goes back with only the one setting changed: its name,
+# branches and bypass are what they were.
+want = json.loads(json.dumps({k: v for k, v in gates.items() if k != "source_type"}))
+want["rules"][1]["parameters"]["strict_required_status_checks_policy"] = False
+assert BODIES == [want], BODIES
 assert "api -X PATCH repos/sam/r/branches/main/protection/required_status_checks -F strict=false" in WROTE, WROTE
 # A repo set to have no baseline ruleset still gets its own rules' turned off.
 SETTINGS["repos/sam/r/rulesets/2"]["rules"][1]["parameters"]["strict_required_status_checks_policy"] = True
@@ -826,7 +837,19 @@ C.NOW += 86400
 WROTE.clear()
 R.settle_repo({"repo": "sam/r", "private": False, "default": "main"}, {"sam/r"})
 assert not [x for x in WROTE if "rulesets/" in x or "protection" in x], WROTE
-C.gh = gh_stub
+# A baseline from the org counts as the repo's own: none is added.
+SETTINGS["repos/sam/r/rulesets?per_page=100"] = [{**LISTED[0], "id": 9, "source_type": "Organization"}]
+C.NOW += 86400
+WROTE.clear()
+R.settle_repo({"repo": "sam/r", "private": False, "default": "main"}, {"sam/r"})
+assert not [x for x in WROTE if "rulesets" in x], WROTE
+# And with none at all, it's added.
+SETTINGS["repos/sam/r/rulesets?per_page=100"] = []
+C.NOW += 86400
+WROTE.clear()
+R.settle_repo({"repo": "sam/r", "private": False, "default": "main"}, {"sam/r"})
+assert [x for x in WROTE if "rulesets" in x] == ["api -X POST repos/sam/r/rulesets --input -"], WROTE
+C.gh, C.write = gh_stub, write
 
 # A red default branch gets one Claude job, and nothing more while it works
 # or its PR is open; a second if it ends with the branch still red, then the
@@ -845,6 +868,7 @@ assert JOBS == [] and mine == []
 R.watch_default(repo_r, default("FAILURE"), [], mine)
 assert len(JOBS) == 1 and "is red: CI failed on " + "c" * 40 in JOBS[0] and "autoland/red-cccccccccccc" in JOBS[0], JOBS
 assert "gh run list --commit " + "c" * 40 in JOBS[0] and "issue and comment" in JOBS[0], JOBS[0]
+assert "gh run list --branch main" in JOBS[0] and "with no PR" in JOBS[0], JOBS[0]
 R.watch_default(repo_r, default("FAILURE"), [], mine)
 assert len(JOBS) == 1, JOBS  # still running
 STATES["job-1"] = "done"

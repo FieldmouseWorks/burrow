@@ -100,9 +100,9 @@ def settle_repo(r, known):
             st["autoMergeRefused"] = True
     C.write("api", "-X", "PUT", f"repos/{repo}/vulnerability-alerts", check=False)
 
-    # The repo's own, which is all not_strict changes; a repo with more than
-    # 100 of them is past anything the steward's baseline sets up.
-    existing = C.gh("api", f"repos/{repo}/rulesets?per_page=100&includes_parents=false", check=False)
+    # An org's rulesets included: one named baseline counts as the repo's. A
+    # repo with more than 100 is past anything the steward's baseline sets up.
+    existing = C.gh("api", f"repos/{repo}/rulesets?per_page=100", check=False)
     # None: the plan doesn't offer rules on this repo (private, free account).
     if isinstance(existing, list):
         if CFG["rulesets"] and rc["ruleset"] and not any(x["name"] == "baseline" for x in existing):
@@ -111,7 +111,7 @@ def settle_repo(r, known):
                     input=json.dumps(baseline_ruleset(rc, r["default"])), check=False)
         # Whether or not the repo gets the baseline ruleset, its own rules
         # don't make branches be up to date.
-        not_strict(repo, existing)
+        not_strict(repo, [x for x in existing if x.get("target") == "branch" and x.get("source_type") == "Repository"])
     not_strict_protection(repo, r["default"])
 
     st["settings"] = C.NOW
@@ -125,7 +125,7 @@ def not_strict(repo, rulesets):
     its rules, so each one is read."""
     for x in rulesets:
         rs = C.gh("api", f"repos/{repo}/rulesets/{x['id']}", check=False)
-        if not isinstance(rs, dict) or rs.get("target") != "branch" or rs.get("source_type") != "Repository":
+        if not isinstance(rs, dict):
             continue
         rules = rs.get("rules") or []
         strict = [y for y in rules if y.get("type") == "required_status_checks"
@@ -134,8 +134,10 @@ def not_strict(repo, rulesets):
             for y in strict:
                 y["parameters"]["strict_required_status_checks_policy"] = False
             log(f"{repo}: up-to-date branches off in the {rs.get('name')!r} ruleset")
+            # The whole ruleset goes back, so only that one setting changes.
+            keep = {k: rs[k] for k in ("name", "target", "enforcement", "bypass_actors", "conditions") if k in rs}
             C.write("api", "-X", "PUT", f"repos/{repo}/rulesets/{x['id']}", "--input", "-",
-                    input=json.dumps({"rules": rules}), check=False)
+                    input=json.dumps({**keep, "rules": rules}), check=False)
 
 
 def not_strict_protection(repo, default):
