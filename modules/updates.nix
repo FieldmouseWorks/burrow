@@ -186,20 +186,13 @@ let
       {
         # A lock file refresh has no release timestamp, and Renovate (42 on)
         # holds an update without one at a pending stability check for
-        # good. Taken as stable without one where the three days still hold
-        # some other way: npm resolves package-lock.json with --before
-        # minimumReleaseAge, and Nix inputs are commits, not registry
-        # releases, which HOST-update already deploys the hour they land.
-        # Cargo enforces nothing of the kind (`cargo update` takes the
-        # newest), and neither do pnpm and yarn here, so theirs still wait.
+        # good. Nix's is taken as stable without one: its inputs are
+        # commits, not registry releases, and HOST-update already deploys
+        # them the hour they land. A registry's (Cargo, npm) still waits:
+        # nothing checks the age of what it resolves to (burrow#82; npm's
+        # --before is dropped whenever it fails to resolve).
         matchUpdateTypes = [ "lockFileMaintenance" ];
         matchManagers = [ "nix" ];
-        minimumReleaseAgeBehaviour = "timestamp-optional";
-      }
-      {
-        matchUpdateTypes = [ "lockFileMaintenance" ];
-        matchManagers = [ "npm" ];
-        matchJsonata = [ "$exists(managerData.npmLock)" ];
         minimumReleaseAgeBehaviour = "timestamp-optional";
       }
     ] ++ lib.optional (githubRepo != null) {
