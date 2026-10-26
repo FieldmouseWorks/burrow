@@ -135,11 +135,16 @@ let
       schedule = [ "at any time" ];
     };
 
-    # Transitive fixes arrive through a fresh lockfile, daily.
+    # Transitive fixes arrive through a fresh lockfile, daily. A lockfile
+    # refresh has no release timestamp, and Renovate (42 on) holds an update
+    # without one at a pending stability check for good, so these never
+    # merged. Taken as stable without one, they keep minimumReleaseAge itself:
+    # npm and Poetry still resolve only what's older than it.
     lockFileMaintenance = {
       enabled = true;
       schedule = [ "before 5am" ];
       automerge = true;
+      minimumReleaseAgeBehaviour = "timestamp-optional";
     };
 
     # Merged by Renovate itself once every check is green, so it doesn't
