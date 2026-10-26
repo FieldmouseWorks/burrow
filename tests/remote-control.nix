@@ -43,6 +43,10 @@ pkgs.testers.runNixOSTest {
     # The same machine with a newer Claude Code: a new claude-rc-serve.
     specialisation.next.configuration.burrow.claude.package = lib.mkForce (claude "new");
 
+    # The user manager's start limit, over an hour: a dozen scans in a row
+    # pass it however slowly they come, unless the scan lifts its own.
+    systemd.user.extraConfig = "DefaultStartLimitIntervalSec=1h";
+
     users.users.dev = {
       isNormalUser = true;
       uid = 1001;
@@ -132,7 +136,9 @@ pkgs.testers.runNixOSTest {
         # Opening a pipe to read waits for a writer, so one holds it open:
         # the scan's read gets past opening it and waits for what's written.
         machine.succeed("mkfifo -m 644 /home/dev/.claude/hold")
-        holder = machine.succeed("sleep infinity >/home/dev/.claude/hold 2>/dev/null </dev/null & echo $!").strip()
+        # Its output goes nowhere before it opens the pipe, which waits: the
+        # test's own output stays its to close.
+        holder = machine.succeed("{ exec sleep infinity >/home/dev/.claude/hold; } >/dev/null 2>&1 </dev/null & echo $!").strip()
         machine.succeed(f"mv /home/dev/.claude/hold {f}")
         jq = machine.wait_until_succeeds(f"pgrep -u dev -f 'jq .*sessions/{pid}.json'", timeout=60).split()[0]
         fd = machine.wait_until_succeeds(f"for d in /proc/{jq}/fd/*; do case $(readlink $d) in *sessions/{pid}.json*) echo $d;; esac; done | grep .", timeout=10).split()[0]
@@ -153,8 +159,8 @@ pkgs.testers.runNixOSTest {
         machine.wait_until_succeeds("grep -qx new /data/dev/src/waiting/started", timeout=60)
 
     with subtest("status changes one after another leave the scan's watchers watching"):
-        # Each one its own scan, a dozen in a row: past systemd's default
-        # start limit (5 in 10s).
+        # Each one its own scan, a dozen in a row: past the start limit (5 in
+        # the hour this machine's manager gives).
         def invocation():
             return machine.succeed("systemctl --user -M dev@ show -p InvocationID --value claude-rc-scan.service").strip()
         for _ in range(12):
