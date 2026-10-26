@@ -88,6 +88,7 @@ let
     defaults = {
       inherit (cfg) rounds oneWay;
       handoffAfter = cfg.handoffAfterMinutes;
+      sessionHandoffAfter = cfg.sessionHandoffAfterMinutes;
       settleDelay = cfg.settleDelayMinutes;
       directPush = false;
       ruleset = true;
@@ -220,8 +221,19 @@ in
       default = 10;
       description = ''
         How long open findings or red CI sit with nobody pushing or replying
-        before a Claude job on this machine takes them. Usually the session
-        that opened the PR fixes them first.
+        before a Claude job on this machine takes them.
+      '';
+    };
+
+    sessionHandoffAfterMinutes = mkOption {
+      type = types.ints.positive;
+      default = 30;
+      description = ''
+        The same wait for a PR whose body links the Claude session that
+        opened it (`https://claude.ai/code/session_…`). That session hears of
+        every finding and red check and fixes them itself, so a job on this
+        machine only takes over once it has been quiet this long, in case
+        it's gone; sooner, the two push over each other.
       '';
     };
 
@@ -375,7 +387,7 @@ in
       '';
       description = ''
         Per-repo overrides (OWNER/NAME): any of rounds, oneWay,
-        handoffAfter, settleDelay (minutes), directPush,
+        handoffAfter, sessionHandoffAfter, settleDelay (minutes), directPush,
         ruleset (false: no baseline ruleset), requireCi (false: a PR with no
         checks at all counts as green, for a repo with nothing to test; by
         default a Claude job judges a settled PR in a repo with no CI,
