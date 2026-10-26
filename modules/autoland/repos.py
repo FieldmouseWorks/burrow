@@ -100,11 +100,12 @@ def settle_repo(r, known):
             st["autoMergeRefused"] = True
     C.write("api", "-X", "PUT", f"repos/{repo}/vulnerability-alerts", check=False)
 
-    # An org's rulesets included: one named baseline counts as the repo's. A
-    # repo with more than 100 is past anything the steward's baseline sets up.
-    existing = C.gh("api", f"repos/{repo}/rulesets?per_page=100", check=False)
+    # Every page, an org's rulesets included: one named baseline counts as
+    # the repo's.
+    pages = C.gh("api", f"repos/{repo}/rulesets?per_page=100", "--paginate", "--slurp", check=False)
     # None: the plan doesn't offer rules on this repo (private, free account).
-    if isinstance(existing, list):
+    if isinstance(pages, list):
+        existing = [x for page in pages for x in page]
         if CFG["rulesets"] and rc["ruleset"] and not any(x["name"] == "baseline" for x in existing):
             log(f"{repo}: adding the baseline ruleset")
             C.write("api", "-X", "POST", f"repos/{repo}/rulesets", "--input", "-",

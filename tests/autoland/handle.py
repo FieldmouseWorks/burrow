@@ -800,14 +800,25 @@ gates = {"name": "gates", "target": "branch", "source_type": "Repository", "enfo
          "conditions": {"ref_name": {"include": ["~DEFAULT_BRANCH"], "exclude": []}},
          "rules": [{"type": "deletion"}, checks]}
 SETTINGS = {
-    "repos/sam/r/rulesets?per_page=100": LISTED,
+    # gh's pages: the strict one is on the second.
+    "repos/sam/r/rulesets?per_page=100": [LISTED[:1], LISTED[1:]],
     "repos/sam/r/rulesets/1": {"name": "baseline", "target": "branch", "source_type": "Repository",
                                "rules": [{"type": "deletion"}]},
     "repos/sam/r/rulesets/2": gates,
     "repos/sam/r/branches/main": {"protection": {"required_status_checks": {"enforcement_level": "everyone"}}},
     "repos/sam/r/branches/main/protection/required_status_checks": {"strict": True},
 }
-C.gh = lambda *a, **k: SETTINGS[a[1]] if a[:1] == ("api",) and a[1:2] and a[1] in SETTINGS else gh_stub(*a, **k)
+
+
+def settings(*a, **k):
+    if a[:1] != ("api",) or a[1:2] == () or a[1] not in SETTINGS:
+        return gh_stub(*a, **k)
+    got = SETTINGS[a[1]]
+    # A listing comes in pages: all of them with --paginate --slurp, else the first.
+    return got if "rulesets?" not in a[1] or "--slurp" in a else got[0]
+
+
+C.gh = settings
 BODIES, write = [], C.write
 C.write = lambda *a, **k: (BODIES.append(json.loads(k["input"])) if "rulesets" in " ".join(a) else None) or write(*a, **k)
 C.NOW += 86400
@@ -838,13 +849,13 @@ WROTE.clear()
 R.settle_repo({"repo": "sam/r", "private": False, "default": "main"}, {"sam/r"})
 assert not [x for x in WROTE if "rulesets/" in x or "protection" in x], WROTE
 # A baseline from the org counts as the repo's own: none is added.
-SETTINGS["repos/sam/r/rulesets?per_page=100"] = [{**LISTED[0], "id": 9, "source_type": "Organization"}]
+SETTINGS["repos/sam/r/rulesets?per_page=100"] = [[{**LISTED[0], "id": 9, "source_type": "Organization"}]]
 C.NOW += 86400
 WROTE.clear()
 R.settle_repo({"repo": "sam/r", "private": False, "default": "main"}, {"sam/r"})
 assert not [x for x in WROTE if "rulesets" in x], WROTE
 # And with none at all, it's added.
-SETTINGS["repos/sam/r/rulesets?per_page=100"] = []
+SETTINGS["repos/sam/r/rulesets?per_page=100"] = [[]]
 C.NOW += 86400
 WROTE.clear()
 R.settle_repo({"repo": "sam/r", "private": False, "default": "main"}, {"sam/r"})
