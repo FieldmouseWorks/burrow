@@ -161,10 +161,14 @@ pkgs.testers.runNixOSTest {
     with subtest("status changes one after another leave the scan's watchers watching"):
         # Each one its own scan, a dozen in a row: past the start limit (5 in
         # the hour this machine's manager gives).
-        def invocation():
-            return machine.succeed("systemctl --user -M dev@ show -p InvocationID --value claude-rc-scan.service").strip()
+        # A change while a scan runs only joins it, so each starts from none
+        # running: the last scan's InvocationID, read with it inactive.
+        def idle_invocation():
+            return machine.wait_until_succeeds(
+                "s=$(systemctl --user -M dev@ show -p ActiveState -p InvocationID claude-rc-scan.service) && "
+                "echo \"$s\" | grep -qx ActiveState=inactive && echo \"$s\" | sed -n 's/^InvocationID=//p'", timeout=30).strip()
         for _ in range(12):
-            last = invocation()
+            last = idle_invocation()
             session("waiting", "idle", 0)
             machine.wait_until_succeeds(
                 f"[ \"$(systemctl --user -M dev@ show -p InvocationID --value claude-rc-scan.service)\" != {last} ] && "
