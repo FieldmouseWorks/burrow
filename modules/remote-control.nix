@@ -164,7 +164,11 @@ let
         # In milliseconds: a timer never fires early, so the scan it starts
         # finds the spell over, and whole seconds would add up to one late.
         left=$(( wake - $(date +%s%3N) ))
-        (( left > 0 )) || left=1
+        # A spell already over is this scan's to see, now. One that ends
+        # within the second gets the second: a timer that fires while this
+        # scan still runs only joins it, and is spent.
+        (( left > 0 )) || continue
+        (( left >= 1000 )) || left=1000
         systemd-run --user --quiet --unit=claude-rc-scan --on-active="''${left}ms" \
           --timer-property=AccuracySec=1s --timer-property=RemainAfterElapse=no
       fi
