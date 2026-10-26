@@ -113,8 +113,6 @@ let
     autodiscoverFilter = rcfg.autodiscoverFilter;
     onboarding = false;
     requireConfig = "optional";
-    # What autodiscovery does anyway, for the runs on one repo (renovate@) too.
-    forkProcessing = "disabled";
     dependencyDashboard = false;
     binarySource = "global";
     baseDir = "${rcfg.dir}/work";
@@ -588,19 +586,20 @@ in
           if [ -z "''${1:-}" ]; then
             exec flock ${rcfg.dir}/run.lock renovate
           fi
-          # As GitHub spells it (burrow-events has it in lower case): the
-          # package rules match repos by that name.
-          repo=$(gh api "repos/$1" --jq .full_name)
-          # Only a repo a full run covers, as Renovate's own code applies its
-          # autodiscoverFilter: any repo's events reach this unit.
+          # Only a repo a full run covers: any repo's events reach this unit.
+          # Renovate's own code applies its autodiscoverFilter here, and then
+          # its own autodiscovery, narrowed to this repo, applies the rest
+          # (topics, forks, archived, mirrors) and names the repo as GitHub
+          # spells it, which the package rules match (burrow-events has it in
+          # lower case).
           covers=0
-          ${coversTool} "$repo" || covers=$?
+          ${coversTool} "$1" || covers=$?
           case $covers in
             0) ;;
-            10) echo "$repo: not one of Renovate's (autodiscoverFilter)"; exit 0 ;;
-            *) echo "$repo: couldn't apply autodiscoverFilter" >&2; exit 1 ;;
+            10) echo "$1: not one of Renovate's (autodiscoverFilter)"; exit 0 ;;
+            *) echo "$1: couldn't apply autodiscoverFilter" >&2; exit 1 ;;
           esac
-          exec flock ${rcfg.dir}/run.lock renovate --autodiscover=false "$repo"
+          exec flock ${rcfg.dir}/run.lock renovate --autodiscover-filter="[\"$1\"]"
         '';
       }) // lib.genAttrs [ "renovate-sweep" "renovate-sweep@" ] (name: {
         description = "Hand stuck Renovate PRs to a Claude job${lib.optionalString (name == "renovate-sweep@") " (%I)"}";
