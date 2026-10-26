@@ -93,8 +93,11 @@ def wait_for(text):
 
 
 def env(**extra):
+    """The service's CA bundle goes in by its store path: /etc's own link to
+    it runs through /etc/static, which the sandbox doesn't show."""
     home = os.environ["HOME"]
-    return {"HOME": home, "PATH": os.environ.get("PATH", ""), "LANG": "C.UTF-8", **extra}
+    return {"HOME": home, "PATH": os.environ.get("PATH", ""), "LANG": "C.UTF-8",
+            "SSL_CERT_FILE": os.environ["SSL_CERT_FILE"], **extra}
 
 
 def sandboxed(snap, home, t, names, argv):

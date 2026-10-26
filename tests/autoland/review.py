@@ -258,6 +258,9 @@ assert 'default_permissions="review"' in a, a
 assert f'permissions.review.filesystem={{":root"="read", "{tmp}/home/.codex"="none"}}' in a, a
 assert "project_doc_max_bytes=0" in a and "model_reasoning_effort=high" in a and "--output-schema" in a and "--ephemeral" in a
 assert run["env"]["CODEX_HOME"] == f"{tmp}/home/.codex" and "GH_TOKEN" not in run["env"]
+# Its CA bundle by the store path the sandbox shows: /etc's link to it goes
+# through /etc/static, which it doesn't.
+assert run["env"]["SSL_CERT_FILE"] in STORE, run["env"]
 assert re.fullmatch(r"http://127\.0\.0\.1:\d+", run["env"]["HTTPS_PROXY"]), run["env"]
 said = http_said()
 assert said[0].startswith("HTTP/1.1 200 Connection established\r\n\r\n") and said[0].endswith("ok"), said

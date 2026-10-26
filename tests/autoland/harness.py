@@ -99,7 +99,7 @@ os.chmod(f"{tmp}/bwrap", 0o755)
 
 
 # The store paths the sandbox shows, out of a store that holds more.
-STORE = ["/nix/store/aaa-agents", "/nix/store/bbb-python3"]
+STORE = ["/nix/store/aaa-agents", "/nix/store/bbb-python3", "/nix/store/ccc-ca-bundle.crt"]
 with open(f"{tmp}/store-paths", "w") as f:
     f.write("".join(p + "\n" for p in STORE))
 
@@ -154,6 +154,7 @@ with open(f"{tmp}/config.json", "w") as f:
 os.environ["AUTOLAND_CONFIG"] = f"{tmp}/config.json"
 os.environ["CREDENTIALS_DIRECTORY"] = f"{tmp}/cred"
 os.environ["HOME"] = f"{tmp}/home"
+os.environ["SSL_CERT_FILE"] = STORE[2]
 os.environ["GH_TOKEN"] = "ghp_steward_token"  # never passed on to an agent
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(sys.argv[1])))
