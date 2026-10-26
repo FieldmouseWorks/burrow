@@ -167,7 +167,21 @@ def upstream(host, tls):
         b.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
         b.close()
     threading.Thread(target=answer, daemon=True).start()
-    return a
+    return Upstream(a) if tls else a
+
+
+class Upstream:
+    """The stand-in API's end, as the gate's TLS socket to it: nothing kept
+    back unread (gate.py has the gate on real TLS)."""
+
+    def __init__(self, sock):
+        self.sock = sock
+
+    def pending(self):
+        return 0
+
+    def __getattr__(self, name):
+        return getattr(self.sock, name)
 
 
 W.G.dial = lambda host: upstream(host, False)
