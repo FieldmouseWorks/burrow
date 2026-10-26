@@ -77,11 +77,16 @@ pkgs.testers.runNixOSTest {
     def started(project):
         return machine.succeed(f"cat /data/dev/src/{project}/started").split()
 
+    def now():
+        # The machine's clock, which Claude Code writes by and the scan reads
+        # by: it's set apart from the host's at boot, by up to a second.
+        return time.time() + skew
+
     def session(project, status, ago):
         # What Claude Code writes when a session's status changes; returns
         # its statusUpdatedAt, in seconds.
         pid = machine.succeed(f"cat /data/dev/src/{project}/session.pid").strip()
-        at = int(time.time() * 1000) - ago * 1000
+        at = int(now() * 1000) - ago * 1000
         machine.succeed(f"echo '{{\"pid\":{pid},\"status\":\"{status}\",\"statusUpdatedAt\":{at}}}' >/home/dev/.claude/sessions/{pid}.json")
         return at / 1000
 
@@ -94,6 +99,8 @@ pkgs.testers.runNixOSTest {
         return at - float(machine.succeed("cut -d' ' -f1 /proc/uptime"))
 
     machine.wait_for_unit("user@1001.service")
+    sent = time.time()
+    skew = float(machine.succeed("date +%s.%N")) - (sent + time.time()) / 2
     for p in ("idle", "busy", "recent", "waiting", "left", "late"):
         machine.wait_until_succeeds(f"grep -qx old /data/dev/src/{p}/started", timeout=120)
     # Nothing is stale yet: no scan booked.
@@ -147,7 +154,7 @@ pkgs.testers.runNixOSTest {
         session("late", "idle", 3600)
         # Waiting's status is an ordinary file again, and the read that's
         # held gets the same through the pipe it has open, then its end.
-        at = int(time.time() * 1000)
+        at = int(now() * 1000)
         machine.succeed(f"echo '{{\"pid\":{pid},\"status\":\"waiting\",\"statusUpdatedAt\":{at}}}' >/home/dev/.claude/status && cp /home/dev/.claude/status /home/dev/.claude/answer && mv /home/dev/.claude/status {f}")
         machine.succeed(f"cat /home/dev/.claude/answer >{fd} && kill {holder}")
         machine.wait_until_succeeds("grep -qx new /data/dev/src/late/started", timeout=60)
@@ -157,8 +164,8 @@ pkgs.testers.runNixOSTest {
         # wake for then, however long that scan takes to run.
         ends = session("waiting", "waiting", 30 * 60 - 30) + 30 * 60
         deadline = time.time() + 25
-        while (left := wake_in()) is None or left > ends - time.time() + 2:
-            assert time.time() < deadline, (left, ends - time.time())
+        while (left := wake_in()) is None or left > ends - now() + 2:
+            assert time.time() < deadline, (left, ends - now())
             time.sleep(0.5)
         assert started("waiting") == ["old"], started("waiting")
         machine.wait_until_succeeds("grep -qx new /data/dev/src/waiting/started", timeout=90)
