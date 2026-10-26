@@ -318,21 +318,12 @@ def answered(key, r):
     return mine(DONE, key, r)
 
 
-def running(key, r):
-    """The names of the reviewer's looks at the PR, for any head, that the
-    reviewers' service is on now (it holds the entry's lock while it is)."""
-    on = []
-    for name in mine(QUEUE, key, r):
-        try:
-            f = open(os.path.join(STATE, QUEUE, name + ".json"))
-        except OSError:
-            continue
-        with f:
-            try:
-                fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
-                on.append(name)
-    return on
+def under_way(key, r, keep):
+    """The names of the reviewer's looks at the PR's other heads than `keep`
+    (an item name) that the reviewers' service is on now. Those it hasn't
+    begun are taken off the queue (`taken`), so none begins after this."""
+    return [name for name in mine(QUEUE, key, r)
+            if name != keep and not taken(os.path.join(STATE, QUEUE, name + ".json"))]
 
 
 def taken(path):
@@ -496,12 +487,13 @@ def post(repo, pr, r, answer):
             if on is None:
                 loose.append(f"- `{quiet(f['path'])}`: " + msg.replace("\n\n", " "))
             else:
-                whole_file.append({"path": on, "body": f"{msg}\n\n(In `{quiet(f['path'])}`, which this PR doesn't change.)\n\n{mark}"})
+                whole_file.append(({"path": on, "body": f"{msg}\n\n(In `{quiet(f['path'])}`, which this PR doesn't change.)\n\n{mark}"},
+                                   f"- `{quiet(f['path'])}`: " + msg.replace("\n\n", " ")))
             continue
         if not lines:
             # Changed, but with no new side to comment on (deleted, binary,
             # a mode change): a thread on the whole file, still a finding.
-            whole_file.append({"path": f["path"], "body": msg + "\n\n" + mark})
+            whole_file.append(({"path": f["path"], "body": msg + "\n\n" + mark}, f"- `{quiet(f['path'])}`: " + msg.replace("\n\n", " ")))
             continue
         try:
             want = int(f.get("line"))
@@ -510,6 +502,13 @@ def post(repo, pr, r, answer):
         line = want if want in lines else min(lines, key=lambda x: abs(x - want))
         comments.append({"path": f["path"], "line": line, "side": "RIGHT", "body": msg + "\n\n" + mark})
     k = len(comments) + len(whole_file) + len(loose)
+    # A review can't hold file-level comments: they go on their own, first,
+    # and one GitHub won't take is written into the review instead.
+    for c, text in whole_file:
+        if not isinstance(C.write("api", "-X", "POST", f"repos/{repo}/pulls/{n}/comments", "--input", "-",
+                                  input=json.dumps({**c, "commit_id": head, "subject_type": "file"}), check=False), dict):
+            log(f"{repo}#{n}: couldn't post {who}'s finding on {c['path']}")
+            loose.append(text)
     body = (f"**{who} review** of {head[:7]}: "
             + (f"{k} finding{'s' * (k > 1)}. Fix or answer each, then resolve its thread." if k else "nothing found."))
     if answer.get("summary"):
@@ -521,11 +520,5 @@ def post(repo, pr, r, answer):
                               input=json.dumps({"commit_id": head, "event": "COMMENT", "body": body, "comments": comments}),
                               check=False), dict):
         raise RuntimeError("GitHub didn't take the review")
-    # A review can't hold file-level comments: they go on their own. The
-    # review already counts them, so a lost one still keeps the PR unsettled.
-    for c in whole_file:
-        if not isinstance(C.write("api", "-X", "POST", f"repos/{repo}/pulls/{n}/comments", "--input", "-",
-                                  input=json.dumps({**c, "commit_id": head, "subject_type": "file"}), check=False), dict):
-            log(f"{repo}#{n}: couldn't post {who}'s finding on {c['path']}")
     log(f"{repo}#{n}: {who}'s review posted, {k} finding(s)")
     return "findings" if k else "clean"

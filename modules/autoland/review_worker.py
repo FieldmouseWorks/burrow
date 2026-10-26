@@ -312,7 +312,14 @@ def review(name):
     nothing to do."""
     try:
         held = open(os.path.join(STATE, V.QUEUE, name))
-    except OSError:
+    except FileNotFoundError:
+        return
+    except OSError as e:  # one it can't open is answered, or it'd be handed out forever
+        log(f"{name}: review failed: its queue entry can't be opened: {e}")
+        try:
+            save(f"{V.DONE}/{name}", {"result": "error", "error": f"its queue entry can't be opened: {e}"[:300], "at": time.time()})
+        finally:
+            V.remove(os.path.join(STATE, V.QUEUE, name))
         return
     with held:
         # Held while it runs: a sweep leaves a look that's under way, and its

@@ -378,6 +378,12 @@ W.work()
 assert os.listdir(f"{tmp}/state/{V.QUEUE}") == []
 assert json.load(open(f"{tmp}/state/{V.DONE}/deepseek--unread.json"))["result"] == "error"
 os.remove(f"{tmp}/state/{V.DONE}/deepseek--unread.json")
+# So does one that's there but can't be opened, or it'd be handed out forever.
+os.mkdir(f"{tmp}/state/{V.QUEUE}/deepseek--dir.json")
+W.review("deepseek--dir.json")
+assert os.listdir(f"{tmp}/state/{V.QUEUE}") == []
+assert json.load(open(f"{tmp}/state/{V.DONE}/deepseek--dir.json"))["result"] == "error"
+os.remove(f"{tmp}/state/{V.DONE}/deepseek--dir.json")
 # Taken by the service and the sweep at once: whichever comes second finds
 # it gone, and carries on.
 V.remove(f"{tmp}/state/{V.QUEUE}/deepseek--unread.json")

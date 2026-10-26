@@ -209,9 +209,10 @@ fcntl.flock(held, fcntl.LOCK_SH)
 status, _ = run(mkpr(), 650)
 assert not merged() and "DeepSeek is still reviewing an earlier commit" in status, status
 held.close()
-os.remove(f"{QDIR}/{under_way}.json")
+# One the service hasn't begun is taken off the queue, so none begins once
+# the PR has landed on the other's word.
 status, _ = run(mkpr(reviews=[rv_review("codex", 0)]), 700)
-assert merged(), status
+assert merged() and os.listdir(QDIR) == [], (status, os.listdir(QDIR))
 # The answers it posts are this PR's alone: sam/r-5's PR 3 isn't sam/r's PR 5.
 fresh_pr_state()
 for k in ("pr-sam_r-5.json", "pr-sam_r-5-3.json", "pr-sam_r-50.json"):

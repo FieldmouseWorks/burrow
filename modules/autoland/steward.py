@@ -694,6 +694,12 @@ def handle(repo, pr, repo_info, digest):
         # looks came back before it went out, and posting them asks nothing
         # of it.
         consume(r)
+    # A look at an earlier head still under way by one out of service, whose
+    # verdict on this head doesn't cover it: what it finds is posted once
+    # it's back, so the pass waits for it. One not begun never will be.
+    reading = [r for r in names if not DRY and V.out(r) and said[r][0] != "clean"
+               and V.under_way(key, r, V.item_name(key, r, head, pr["baseRefName"]))]
+    for r in names:
         overtaken(r)
     live = [r for r in live if not V.out(r)]
     # The findings of one out now on this head are threads this pass never
@@ -755,13 +761,7 @@ def handle(repo, pr, repo_info, digest):
     if not quiet and any(said[r][0] == "none" for r in live):
         after(st["seen"], rc["settleDelay"])  # the reviewers are asked then
     waiting = [f"Posting {x}" for x in unposted]
-    for r in names:
-        # A look at an earlier head still under way by one whose verdict on
-        # this head doesn't cover it (out of service, say): what it finds
-        # is posted once it's back, so the pass waits for it.
-        if r not in live and said[r][0] != "clean" and any(
-                x != V.item_name(key, r, head, pr["baseRefName"]) for x in V.running(key, r)):
-            waiting.append(f"{V.NAMES[r]} is still reviewing an earlier commit")
+    waiting += [f"{V.NAMES[r]} is still reviewing an earlier commit" for r in reading]
     if not live:
         why = "; ".join(f"{V.NAMES[r]}: {away[r] or V.out(r)}" for r in names) or "none is on"
         waiting.append(f"No reviewer can review it now ({why})")
