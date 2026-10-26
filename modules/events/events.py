@@ -11,7 +11,7 @@ Three things put a repo in a handler's line:
   - A webhook delivery from GitHub (the steward keeps each repo's hook) whose
     X-GitHub-Event is one of the handler's. Only a delivery signed with the
     hook's secret counts, and all it says is which repo changed: the pass
-    reads the rest from GitHub. A handler can take only some repos (`repos`),
+    reads the rest from GitHub. A handler can take only the repos it names (`repos`),
     only pushes to a repo's default branch (`pushes`), and only the other
     events about some branches (`branches`).
   - A kick on the local port: POST /kick/HANDLER/OWNER/REPO for one repo, or
@@ -81,20 +81,10 @@ def unit(h, repo):
 
 
 def covers(h, repo):
-    """Whether the handler takes this repo, by Renovate's rules for its
-    autodiscoverFilter: case-blind globs, any one of which takes it, and none
-    of the ones starting with ! (which leave out what they match). No list
-    takes every repo; an empty one, none."""
-    pats = h.get("repos")
-    if pats is None:
-        return True
-    repo = repo.lower()
-    take = [p.lower() for p in pats if not p.startswith("!")]
-    leave = [p[1:].lower() for p in pats if p.startswith("!")]
-    if not take and not leave:
-        return False
-    return ((not take or any(fnmatch.fnmatchcase(repo, p) for p in take))
-            and not any(fnmatch.fnmatchcase(repo, p) for p in leave))
+    """Whether the handler takes this repo: one of its `repos`, case-blind,
+    or any repo when it names none."""
+    names = h.get("repos")
+    return names is None or repo.lower() in (n.lower() for n in names)
 
 
 def branches(event, payload):

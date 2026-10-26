@@ -111,13 +111,11 @@ in
           repos = mkOption {
             type = types.nullOr (types.listOf types.str);
             default = null;
-            example = [ "sam/*" "!sam/old" ];
+            example = [ "sam/homelab" ];
             description = ''
-              The repos whose deliveries and kicks start the handler's passes,
-              as Renovate's autodiscoverFilter has them: case-blind globs, any
-              of which takes a repo, and ones starting with `!`, which leave
-              out what they match. Globs only, no /regex/. null: every repo;
-              [ ]: none, so only full passes (a kick, the catch-up).
+              The repos (OWNER/NAME, case-blind) whose deliveries and kicks
+              start the handler's passes. null: every repo; [ ]: none, so only
+              full passes (a kick, the catch-up).
             '';
           };
           pushes = mkOption {
@@ -190,10 +188,7 @@ in
     assertions = [{
       assertion = (cfg.host == null) == (cfg.secretFile == null);
       message = "burrow.events: deliveries need both host and secretFile (or neither, for none).";
-    }] ++ lib.mapAttrsToList (name: h: {
-      assertion = lib.all (p: !(lib.hasPrefix "/" (lib.removePrefix "!" p))) (if h.repos == null then [ ] else h.repos);
-      message = "burrow.events.handlers.${name}.repos: globs only; a /regex/ isn't one.";
-    }) cfg.handlers;
+    }];
 
     # The repos' hooks are the steward's to keep (autoland/repos.py).
     warnings = lib.optional (!(lib.attrByPath [ "burrow" "autoland" "enable" ] false config)) ''

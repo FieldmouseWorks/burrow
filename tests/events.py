@@ -34,13 +34,12 @@ h = {"events": ["push"], "unit": "autoland", "wake": None}
 assert E.unit(h, "sam/r") == "autoland@sam-r.service" and E.unit(h, E.FULL) == "autoland.service"
 print("units: ok")
 
-# A handler takes the repos its globs say, case-blind, as Renovate's
-# autodiscoverFilter does: any one that isn't a ! takes it, no ! one may
-# match it. None takes every repo, [] none.
+# A handler takes the repos it names, case-blind: none named, every repo;
+# [], none. A name is a name, never a pattern.
 assert E.covers({}, "sam/r") and E.covers({"repos": None}, "sam/r") and not E.covers({"repos": []}, "sam/r")
-both = {"repos": ["Sam/*", "kim/r", "!sam/old"]}
-assert [E.covers(both, r) for r in ("sam/r", "SAM/x", "kim/r", "sam/OLD", "kim/q")] == [True, True, True, False, False]
-assert E.covers({"repos": ["!sam/old"]}, "kim/q") and not E.covers({"repos": ["!sam/old"]}, "Sam/Old")
+named = {"repos": ["Sam/R", "kim/r"]}
+assert [E.covers(named, r) for r in ("sam/r", "KIM/R", "sam/q")] == [True, True, False]
+assert not E.covers({"repos": ["sam/*"]}, "sam/r")
 
 
 def payload(repo="sam/r", **kw):
@@ -51,7 +50,7 @@ def payload(repo="sam/r", **kw):
 # to the default branch only if it says so, and the rest only about its
 # branches if it names some (an event about no branch still counts).
 picky = {"events": ["push", "pull_request", "check_suite", "check_run", "status", "issues"], "unit": "renovate",
-         "repos": ["sam/*"], "pushes": "default", "branches": ["renovate/*"]}
+         "repos": ["sam/r"], "pushes": "default", "branches": ["renovate/*"]}
 cases = [
     ("push", payload(ref="refs/heads/main"), True),
     ("push", payload(ref="refs/heads/renovate/x"), False),

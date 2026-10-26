@@ -199,6 +199,12 @@ let
     // lib.optionalAttrs (rcfg.gitAuthor != null) { inherit (rcfg) gitAuthor; })
     rcfg.settings;
 
+  # Whether Renovate's autodiscoverFilter takes a repo, by Renovate's own code
+  # (updates/renovate-covers.mjs), on the node it runs on.
+  coversTool = lib.escapeShellArgs [
+    (lib.getExe pkgs.nodejs_24) "${./updates/renovate-covers.mjs}" "${pkgs.renovate}" (builtins.toJSON renovateSettings.autodiscoverFilter)
+  ];
+
   renovateConfig = pkgs.runCommand "renovate-config.json"
     {
       nativeBuildInputs = [ pkgs.jq pkgs.renovate ];
@@ -547,8 +553,6 @@ in
         renovate = {
           events = [ "push" "pull_request" "check_suite" "status" ];
           unit = "renovate";
-          # Only the repos Renovate covers (a kick for another is none).
-          repos = rcfg.autodiscoverFilter;
           pushes = "default";
           branches = [ "renovate/*" ];
         };
@@ -587,6 +591,15 @@ in
           # As GitHub spells it (burrow-events has it in lower case): the
           # package rules match repos by that name.
           repo=$(gh api "repos/$1" --jq .full_name)
+          # Only a repo a full run covers, as Renovate's own code applies its
+          # autodiscoverFilter: any repo's events reach this unit.
+          covers=0
+          ${coversTool} "$repo" || covers=$?
+          case $covers in
+            0) ;;
+            10) echo "$repo: not one of Renovate's (autodiscoverFilter)"; exit 0 ;;
+            *) echo "$repo: couldn't apply autodiscoverFilter" >&2; exit 1 ;;
+          esac
           exec flock ${rcfg.dir}/run.lock renovate --autodiscover=false "$repo"
         '';
       }) // lib.genAttrs [ "renovate-sweep" "renovate-sweep@" ] (name: {
