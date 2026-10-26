@@ -83,6 +83,8 @@ for req in do.get("http", []):
         f.write(json.dumps(got.decode()) + "\\n")
 if "effort" in do and do["effort"] not in json.dumps(args) + (open(args[args.index("--patch") + 1]).read() if "--patch" in args else ""):
     print("dsh: error: thought too long", file=sys.stderr); sys.exit(1)
+for e in do.get("events", []):  # --json, ahead of an error
+    print(json.dumps(e))
 if do.get("rc"):
     print(do["err"], file=sys.stderr); sys.exit(do["rc"])
 out = do.get("say", "Looked.\\n" + json.dumps(do.get("answer", {{"findings": [], "summary": "fine"}})))
