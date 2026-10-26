@@ -92,9 +92,12 @@ pkgs.testers.runNixOSTest {
 
     def wake_in():
         # Seconds until the booked scan, or None.
-        if machine.execute("systemctl --user -M dev@ is-active -q claude-rc-wake.timer")[0] != 0:
+        timers = machine.succeed("systemctl --user -M dev@ list-units --plain --no-legend 'claude-rc-wake@*.timer'").split("\n")
+        timers = [t.split()[0] for t in timers if t.strip()]
+        if not timers:
             return None
-        out = machine.succeed("systemctl --user -M dev@ show -p NextElapseUSecMonotonic --value claude-rc-wake.timer").strip()
+        assert len(timers) == 1, timers
+        out = machine.succeed(f"systemctl --user -M dev@ show -p NextElapseUSecMonotonic --value {timers[0]}").strip()
         at = sum(float(n) * {"h": 3600, "min": 60, "s": 1, "ms": 0.001}[u] for n, u in re.findall(r"([\d.]+)(h|min|ms|s)", out))
         return at - float(machine.succeed("cut -d' ' -f1 /proc/uptime"))
 
@@ -162,7 +165,9 @@ pkgs.testers.runNixOSTest {
     with subtest("a wake while a scan runs waits for it to end, then scans"):
         # The timer can fire while the scan that booked it still runs, and a
         # start then only joins that run. Here a scan held reading waiting's
-        # status, as above, runs when the wake comes.
+        # status, as above, runs when the wake comes. It starts from no scan
+        # running: a change as one ends goes unseen (#79).
+        machine.wait_until_succeeds("systemctl --user -M dev@ show -p ActiveState --value claude-rc-scan.service | grep -qx inactive", timeout=60)
         pid = machine.succeed("cat /data/dev/src/waiting/session.pid").strip()
         f = f"/home/dev/.claude/sessions/{pid}.json"
         machine.succeed("mkfifo -m 644 /home/dev/.claude/hold")
@@ -171,16 +176,18 @@ pkgs.testers.runNixOSTest {
         jq = machine.wait_until_succeeds(f"pgrep -u dev -f 'jq .*sessions/{pid}.json'", timeout=60).split()[0]
         fd = machine.wait_until_succeeds(f"for d in /proc/{jq}/fd/*; do case $(readlink $d) in *sessions/{pid}.json*) echo $d;; esac; done | grep .", timeout=10).split()[0]
         held = machine.succeed("systemctl --user -M dev@ show -p InvocationID --value claude-rc-scan.service").strip()
-        machine.succeed("systemctl --user -M dev@ start --no-block claude-rc-wake.service")
+        machine.succeed("systemctl --user -M dev@ start --no-block claude-rc-wake@test.service")
         time.sleep(2)
-        machine.succeed("systemctl --user -M dev@ show -p ActiveState --value claude-rc-wake.service | grep -qx activating")
+        machine.succeed("systemctl --user -M dev@ show -p ActiveState --value claude-rc-wake@test.service | grep -qx activating")
         at = int(now() * 1000)
         machine.succeed(f"echo '{{\"pid\":{pid},\"status\":\"waiting\",\"statusUpdatedAt\":{at}}}' >/home/dev/.claude/status && cp /home/dev/.claude/status /home/dev/.claude/answer && mv /home/dev/.claude/status {f}")
         machine.succeed(f"cat /home/dev/.claude/answer >{fd} && kill {holder}")
-        # Once the held scan is done, the wake's own begins.
+        # Once the held scan is done, the wake's own begins; and ends, before
+        # the next status is written.
         machine.wait_until_succeeds(
             f"[ \"$(systemctl --user -M dev@ show -p InvocationID --value claude-rc-scan.service)\" != {held} ] && "
-            "systemctl --user -M dev@ show -p ActiveState --value claude-rc-wake.service | grep -qx inactive", timeout=30)
+            "systemctl --user -M dev@ show -p ActiveState --value claude-rc-wake@test.service | grep -qx inactive && "
+            "systemctl --user -M dev@ show -p ActiveState --value claude-rc-scan.service | grep -qx inactive", timeout=30)
 
     with subtest("the booked scan comes when the quiet spell ends"):
         # The spell ends 30 seconds on: the scan this status starts books its
