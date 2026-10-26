@@ -12,6 +12,7 @@ Anything else gets a 403, so a command a PR talks an agent into running
 reaches nothing: not the machine's own services, not the LAN, not the web."""
 
 import os
+import select
 import socket
 import ssl
 import subprocess
@@ -55,6 +56,36 @@ def splice(a, b, first=b""):
     back.start()
     pipe(a, b)
     back.join()
+
+
+def relay(c, up, first):
+    """splice() for a TLS `up`, on this one thread: a TLS socket read and
+    written from two threads at once crashes the process. Over once `up`
+    ends, or neither side says anything for a minute."""
+    up.sendall(first)
+    reading = True
+    while True:
+        ready = [up] if up.pending() else select.select([up, c] if reading else [up], [], [], 60)[0]
+        if not ready:
+            return
+        if c in ready:
+            if data := c.recv(65536):
+                up.sendall(data)
+            else:
+                reading = False
+        if up in ready:
+            # What came in may be TLS's own (a session ticket), with nothing
+            # to read yet: not waited on, so c isn't kept waiting meanwhile.
+            up.settimeout(0)
+            try:
+                data = up.recv(65536)
+            except ssl.SSLWantReadError:
+                continue
+            finally:
+                up.settimeout(60)
+            if not data:
+                return
+            c.sendall(data)
 
 
 class Gate:
@@ -112,7 +143,7 @@ class Gate:
                 keep = [x for x in lines[1:] if x.partition(":")[0].strip().lower() not in drop]
                 out = [lines[0], f"Host: {host}", *(f"{k}: {v}" for k, v in set_.items()), "Connection: close", *keep]
                 up = secure(host)
-                splice(c, up, ("\r\n".join(out) + "\r\n\r\n").encode("latin-1") + rest)
+                relay(c, up, ("\r\n".join(out) + "\r\n\r\n").encode("latin-1") + rest)
             else:
                 c.sendall(FORBIDDEN)
         except OSError:
