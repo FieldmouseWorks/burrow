@@ -507,25 +507,21 @@ def post(repo, pr, r, answer):
         body += f"\n\n{quiet(answer['summary'])}"
     if loose:
         body += "\n\nFindings with no changed file to go on:\n" + "\n".join(loose)
+    if whole_file:
+        # In full here too: the threads below are separate calls, and a
+        # finding mustn't hang on one of them.
+        body += "\n\nFindings on whole files (each a thread too):\n" + "\n".join(text for _, text in whole_file)
     body += f"\n\n<!-- {r}-review:v1 " + json.dumps({"commit_sha": head, "base": pr["baseRefName"], "findings": k}) + " -->"
-    done = C.write("api", "-X", "POST", f"repos/{repo}/pulls/{n}/reviews", "--input", "-",
-                   input=json.dumps({"commit_id": head, "event": "COMMENT", "body": body, "comments": comments}), check=False)
-    if not isinstance(done, dict) or "id" not in done:
+    if not isinstance(C.write("api", "-X", "POST", f"repos/{repo}/pulls/{n}/reviews", "--input", "-",
+                              input=json.dumps({"commit_id": head, "event": "COMMENT", "body": body, "comments": comments}),
+                              check=False), dict):
         raise RuntimeError("GitHub didn't take the review")
     # A review can't hold file-level comments: they go on their own, after
     # it, so a review GitHub turns away (posted again next pass) leaves none
-    # behind. One it won't take is written into the review instead.
-    lost = []
-    for c, text in whole_file:
+    # behind. Its body has them already, so one GitHub won't take loses nothing.
+    for c, _ in whole_file:
         if not isinstance(C.write("api", "-X", "POST", f"repos/{repo}/pulls/{n}/comments", "--input", "-",
                                   input=json.dumps({**c, "commit_id": head, "subject_type": "file"}), check=False), dict):
             log(f"{repo}#{n}: couldn't post {who}'s finding on {c['path']}")
-            lost.append(text)
-    if lost:
-        mark_at = body.rindex(f"\n\n<!-- {r}-review:v1 ")
-        body = body[:mark_at] + "\n\nFindings GitHub wouldn't take as threads:\n" + "\n".join(lost) + body[mark_at:]
-        if not isinstance(C.write("api", "-X", "PUT", f"repos/{repo}/pulls/{n}/reviews/{done['id']}", "--input", "-",
-                                  input=json.dumps({"body": body}), check=False), dict):
-            log(f"{repo}#{n}: couldn't add {who}'s {len(lost)} lost finding(s) to its review either")
     log(f"{repo}#{n}: {who}'s review posted, {k} finding(s)")
     return "findings" if k else "clean"

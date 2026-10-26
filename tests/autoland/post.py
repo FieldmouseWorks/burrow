@@ -103,15 +103,14 @@ assert [c["line"] for c in posted["comments"]] == [13]
 assert "@​evil" in posted["comments"][0]["body"] and posted["comments"][0]["body"].startswith("**DeepSeek · P0**")
 assert "<!-- deepseek-review" not in posted["comments"][0]["body"]
 assert posted["body"].count("<!-- deepseek-review:v1") == 1 and "no changed file to go on" not in posted["body"]
-# A file-level one GitHub won't take is written into the review instead,
-# still counted.
+# File-level ones are in the review's own body in full too, so one GitHub
+# won't take as a thread loses nothing, with no second call to fail.
+assert "- `gone.txt`: **DeepSeek · P2** t b" in posted["body"], posted["body"]
+assert "- `nope.py`: **DeepSeek · P1** t2 b2" in posted["body"] and V.finding("deepseek") not in posted["body"], posted["body"]
 WROTE.clear()
 C.write = lambda *a, **k: write(*a, **k) if "/reviews" in a[3] else None
 assert V.post("sam/r", pr, "deepseek", answer) == "findings"
-(put, edited), = [(a, json.loads(i)) for a, i in WROTE if a[2] == "PUT"]
-assert put[3] == "repos/sam/r/pulls/7/reviews/99" and edited["body"].count("<!-- deepseek-review:v1") == 1, put
-assert '"findings": 3' in edited["body"] and "- `gone.txt`: **DeepSeek · P2** t b" in edited["body"], edited["body"]
-assert "- `nope.py`: **DeepSeek · P1** t2 b2" in edited["body"] and V.finding("deepseek") not in edited["body"], edited["body"]
+assert [a[2] for a, _ in WROTE] == ["POST"] and "- `gone.txt`: " in json.loads(WROTE[0][1])["body"], WROTE
 # One GitHub won't take leaves no file-level threads to be posted again.
 WROTE.clear()
 C.write = lambda *a, **k: write(*a, **k) if "/comments" in a[3] else None
