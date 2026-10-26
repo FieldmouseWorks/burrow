@@ -22,6 +22,12 @@ change nothing else in the same PR.
   required. Repo admins can still merge past it from the PR page. A repo whose
   automation pushes to its default branch (`directPush`) gets only the first
   two. Existing rules stay; the ruleset only adds.
+- No rule makes a branch be up to date with its base before it merges, the
+  repo's own rulesets and branch protection included: the steward turns that
+  off where it finds it. With it on, every merge puts every other open PR
+  behind, and each needs a new merge, CI run and review before it can land,
+  so the PRs take turns. It guards only against two PRs that pass alone and
+  break the branch together; the default branch's own CI catches that.
 - The `hold` and `needs-owner` labels (`burrow.autoland.labels`), which the
   steward and its jobs put on PRs.
 

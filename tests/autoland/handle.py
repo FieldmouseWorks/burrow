@@ -10,7 +10,7 @@ import subprocess
 
 from harness import (C, CI_GREEN, COMMITS, DDIR, FAIL, JOBS, POSTED, PR_DIFF, QDIR, R, S, STATES, STUB, T0, V,
                      W, WROTE, agent, agent_runs, clean, fresh_pr_state, head, info, judgment, merged,
-                     mkpr, pr_state, queued, run, rv_review, said, stand_in, tmp, worker)
+                     gh_stub, mkpr, pr_state, queued, run, rv_review, said, stand_in, tmp, worker)
 
 stand_in()
 fresh_pr_state()
@@ -785,6 +785,39 @@ assert WROTE == [], WROTE
 C.NOW += 86400
 R.settle_repo({"repo": "sam/r", "private": False, "default": "main"}, {"sam/r"})
 assert sorted(x.split()[2] for x in WROTE if x.startswith("label create")) == ["hold", "needs-owner"], WROTE
+
+# Up-to-date branches go off wherever the repo has them: its own rulesets
+# and the default branch's classic protection. Tag rulesets, and ones that
+# don't ask for it, are left as they are.
+checks = {"type": "required_status_checks", "parameters": {
+    "strict_required_status_checks_policy": True, "required_status_checks": [{"context": "gate"}]}}
+SETTINGS = {
+    "repos/sam/r/rulesets": [{"id": 1, "name": "baseline"}, {"id": 2, "name": "gates"}, {"id": 3, "name": "tags"},
+                             {"id": 4, "name": "org"}],
+    "repos/sam/r/rulesets/1": {"name": "baseline", "target": "branch", "source_type": "Repository",
+                               "rules": [{"type": "deletion"}]},
+    "repos/sam/r/rulesets/2": {"name": "gates", "target": "branch", "source_type": "Repository",
+                               "rules": [{"type": "deletion"}, checks]},
+    "repos/sam/r/rulesets/3": {"name": "tags", "target": "tag", "source_type": "Repository", "rules": [checks]},
+    "repos/sam/r/rulesets/4": {"name": "org", "target": "branch", "source_type": "Organization", "rules": [checks]},
+    "repos/sam/r/branches/main": {"protection": {"required_status_checks": {"enforcement_level": "everyone"}}},
+    "repos/sam/r/branches/main/protection/required_status_checks": {"strict": True},
+}
+C.gh = lambda *a, **k: SETTINGS[a[1]] if a[:1] == ("api",) and a[1:2] and a[1] in SETTINGS else gh_stub(*a, **k)
+C.NOW += 86400
+WROTE.clear()
+R.settle_repo({"repo": "sam/r", "private": False, "default": "main"}, {"sam/r"})
+puts = [x for x in WROTE if "rulesets/" in x]
+assert len(puts) == 1 and puts[0].startswith("api -X PUT repos/sam/r/rulesets/2 "), WROTE
+assert "api -X PATCH repos/sam/r/branches/main/protection/required_status_checks -F strict=false" in WROTE, WROTE
+# Already off, or no classic checks at all: nothing to change.
+SETTINGS["repos/sam/r/rulesets/2"]["rules"][1]["parameters"]["strict_required_status_checks_policy"] = False
+SETTINGS["repos/sam/r/branches/main"] = {"protection": {"required_status_checks": {"enforcement_level": "off"}}}
+C.NOW += 86400
+WROTE.clear()
+R.settle_repo({"repo": "sam/r", "private": False, "default": "main"}, {"sam/r"})
+assert not [x for x in WROTE if "rulesets/" in x or "protection" in x], WROTE
+C.gh = gh_stub
 
 # `status` (a dry run) reads the seal the real passes' judges use, and makes
 # none of its own while there's one.

@@ -106,10 +106,47 @@ def settle_repo(r, known):
             log(f"{repo}: adding the baseline ruleset")
             C.write("api", "-X", "POST", f"repos/{repo}/rulesets", "--input", "-",
                     input=json.dumps(baseline_ruleset(rc, r["default"])), check=False)
+        if isinstance(existing, list):
+            not_strict(repo, existing)
+    not_strict_protection(repo, r["default"])
 
     st["settings"] = C.NOW
     save(f"repo-{repo.replace('/', '_')}.json", st)
     return new
+
+
+def not_strict(repo, rulesets):
+    """Up-to-date branches off in each of the repo's own branch rulesets
+    (docs/repo-baseline.md says why). The listing names a ruleset without
+    its rules, so each one is read."""
+    for x in rulesets:
+        rs = C.gh("api", f"repos/{repo}/rulesets/{x['id']}", check=False)
+        if not isinstance(rs, dict) or rs.get("target") != "branch" or rs.get("source_type") != "Repository":
+            continue
+        rules = rs.get("rules") or []
+        strict = [y for y in rules if y.get("type") == "required_status_checks"
+                  and (y.get("parameters") or {}).get("strict_required_status_checks_policy")]
+        if strict:
+            for y in strict:
+                y["parameters"]["strict_required_status_checks_policy"] = False
+            log(f"{repo}: up-to-date branches off in the {rs.get('name')!r} ruleset")
+            C.write("api", "-X", "PUT", f"repos/{repo}/rulesets/{x['id']}", "--input", "-",
+                    input=json.dumps({"rules": rules}), check=False)
+
+
+def not_strict_protection(repo, default):
+    """The same in the default branch's classic protection. Its checks are
+    read only when the branch says it requires some: the endpoint is a 404
+    otherwise."""
+    b = C.gh("api", f"repos/{repo}/branches/{default}", check=False)
+    checks = ((b.get("protection") or {}).get("required_status_checks") or {}) if isinstance(b, dict) else {}
+    if checks.get("enforcement_level", "off") == "off":
+        return
+    path = f"repos/{repo}/branches/{default}/protection/required_status_checks"
+    got = C.gh("api", path, check=False)
+    if isinstance(got, dict) and got.get("strict"):
+        log(f"{repo}: up-to-date branches off in {default}'s protection")
+        C.write("api", "-X", "PATCH", path, "-F", "strict=false", check=False)
 
 
 def hook(repo, st, due):
