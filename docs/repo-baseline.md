@@ -45,7 +45,9 @@ change nothing else in the same PR.
    and PRs settle on the others meanwhile.
 3. Whoever opened the PR fixes each finding, or replies with why not, and
    resolves its thread. A Claude job on the machine takes over if nobody has
-   after `handoffAfterMinutes`.
+   after `handoffAfterMinutes`, or after `sessionHandoffAfterMinutes` on a
+   PR whose body links the Claude session that opened it, since that session
+   is fixing them itself.
 4. The reviewers look again, until none of them finds anything on the exact head.
 5. With no thread open, no changes requested and CI green, the steward posts
    `review-settled` and merges it, `.github/` changes included; the branch is

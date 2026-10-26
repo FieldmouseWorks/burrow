@@ -40,6 +40,7 @@ agent many minutes, so it runs as its own service and no pass waits for it.
 
 import fcntl
 import os
+import re
 import sys
 
 import common as C
@@ -59,7 +60,7 @@ query($owner: String!, $name: String!, $cursor: String) {
       pageInfo { hasNextPage endCursor }
       nodes {
         id number title url isDraft isCrossRepository headRefName headRefOid baseRefName
-        createdAt updatedAt mergeStateStatus
+        createdAt updatedAt mergeStateStatus body
         author { login }
         autoMergeRequest { enabledAt }
         labels(first: 100) { pageInfo { hasNextPage } nodes { name } }
@@ -87,6 +88,8 @@ query($owner: String!, $name: String!, $cursor: String) {
 OLDER = {"reviews": "author { login } state body submittedAt commit { oid }",
          "comments": "databaseId body createdAt updatedAt author { login }"}
 PRS = PRS % (OLDER["reviews"], OLDER["comments"])
+# The link Claude Code puts in a PR its session opens.
+SESSION = re.compile(r"https://claude\.ai/code/session_\w+")
 OLDER_PAGE = """
 query($id: ID!, $cursor: String) {
   node(id: $id) { ... on PullRequest { %s(last: 100, before: $cursor) { pageInfo { hasPreviousPage startCursor } nodes { %s } } } }
@@ -230,10 +233,15 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
 
     def handoff_due(kind):
         """Whether findings or red CI have sat long enough for a Claude job
-        to take them (it's booked a pass for when they will, if not)."""
+        to take them (it's booked a pass for when they will, if not). A PR
+        that links the Claude session that opened it is that session's to
+        settle: it hears of every finding and failure and is likely at work
+        on them, so a job takes over only after a longer quiet, in case the
+        session is gone. Every push or reply starts either wait over."""
+        wait = rc["sessionHandoffAfter"] if SESSION.search(pr.get("body") or "") else rc["handoffAfter"]
         since = max(ts(pr["updatedAt"]), st["seen"])
-        after(since, rc["handoffAfter"])
-        return C.NOW - since > rc["handoffAfter"] * MIN
+        after(since, wait)
+        return C.NOW - since > wait * MIN
 
     def settle(state, desc, why=None):
         ok = post_status(repo, pr, state, desc)

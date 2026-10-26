@@ -273,6 +273,25 @@ status, digest = run(clean(comments=[failed], **mig), 7900)
 assert JOBS == [] and [x[0] for x in digest] == ["Two Claude jobs ended without fixing it"], (JOBS, digest)
 STATES.clear()
 
+# Findings sat handoffAfter with nobody on them: a fix job takes them. On a
+# PR its own Claude session opened (its body links it) that session is on
+# them, so a job waits out the longer quiet, in case it's gone; anything it
+# pushes or says starts that wait over.
+fresh_pr_state()
+run(clean(threads=[False]), 0)
+run(clean(threads=[False]), 31 * 60)
+assert len(JOBS) == 1 and "isn't settled" in JOBS[0], JOBS
+fresh_pr_state()
+linked = {"threads": [False], "body": "Does it.\n\nhttps://claude.ai/code/session_01AbCdEf"}
+run(clean(**linked), 0)
+status, _ = run(clean(**linked), 31 * 60)
+assert JOBS == [] and "1 open review thread" in status, (JOBS, status)
+replied = {**clean(**linked), "updatedAt": "2026-10-24T01:20:00Z"}
+run(replied, 91 * 60)
+assert JOBS == [], JOBS
+run(replied, 171 * 60)
+assert len(JOBS) == 1 and "isn't settled" in JOBS[0], JOBS
+
 # The needs-owner label goes straight to the owner: no judge job.
 fresh_pr_state()
 status, digest = run(clean(labels=["needs-owner"], **mig), 700)
