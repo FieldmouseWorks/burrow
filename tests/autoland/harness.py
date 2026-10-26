@@ -143,7 +143,8 @@ with open(f"{tmp}/config.json", "w") as f:
         "skipPaths": ["(^|/)secrets?/", r"\.(pem|key|p12|pfx)$", r"(^|/)\.env(\..*)?$"],
         "agents": f"{tmp}/agents",
         "sandbox": f"{tmp}/bwrap",
-        "box": {"store": f"{tmp}/store-paths", "caBundle": f"{tmp}/ca.crt", "sh": "/bin/sh", "env": "/usr/bin/env"},
+        "box": {"store": f"{tmp}/store-paths", "caBundle": f"{tmp}/ca.crt",
+                "links": {"/bin/sh": "/nix/store/dddd-bash/bin/sh", "/usr/bin/env": "/nix/store/eeee-coreutils/bin/env"}},
     }, f)
 # The store paths an agent's sandbox shows: its closure, never the whole store.
 STORE = ["/nix/store/aaaa-review-agents", "/nix/store/bbbb-python3", "/nix/store/cccc-ripgrep"]

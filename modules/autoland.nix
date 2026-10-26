@@ -30,12 +30,22 @@ let
   # What the reviewers' service runs commands with, and so what an agent
   # reads the snapshot with.
   reviewTools = with pkgs; [ bash git bubblewrap coreutils findutils gnugrep gnused diffutils ripgrep ];
+  # The machine's own /bin/sh, /bin/bash and /usr/bin/env, as an agent's
+  # sandbox shows them.
+  reviewLinks = {
+    "/bin/sh" = config.environment.binsh;
+    "/bin/bash" = "${pkgs.bashInteractive}/bin/bash";
+  } // lib.optionalAttrs (config.environment.usrbinenv != null) {
+    "/usr/bin/env" = config.environment.usrbinenv;
+  };
   # All of the store an agent's sandbox shows: the agents, the bridge to
-  # the gate, those tools and the CA bundle, with what they need. Never the
-  # whole store, which holds every flake's sources this machine has read,
-  # private ones included.
+  # the gate, those tools, the links and the machine's CA bundle, with what
+  # they need. Never the whole store, which holds every flake's sources this
+  # machine has read, private ones included; nor /etc, whose files link into
+  # the machine's own configuration.
   reviewStore = pkgs.closureInfo {
-    rootPaths = [ agents pkgs.python3 stewardSrc pkgs.cacert ] ++ reviewTools;
+    rootPaths = [ agents pkgs.python3 stewardSrc config.security.pki.caBundle ]
+      ++ reviewTools ++ lib.attrValues reviewLinks;
   };
   codexLogin = pkgs.writeShellScriptBin "autoland-codex-login" ''
     # Codex reviews on the ChatGPT plan's login: a device code to approve in
@@ -103,9 +113,8 @@ let
     sandbox = "${pkgs.bubblewrap}/bin/bwrap";
     box = {
       store = "${reviewStore}/store-paths";
-      caBundle = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
-      sh = "${pkgs.bash}/bin/sh";
-      env = "${pkgs.coreutils}/bin/env";
+      caBundle = config.security.pki.caBundle;
+      links = reviewLinks;
     };
     baselineTask = ''
       REPO is new, and doesn't meet the baseline every repo of ${config.burrow.owner}'s keeps yet. Read

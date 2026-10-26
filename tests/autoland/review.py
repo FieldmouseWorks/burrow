@@ -230,6 +230,9 @@ assert ("--ro-bind", snap) in mounted and ("--bind", run["env"]["DSH_HOME"]) in 
 # sources this machine has read, private repos' included.
 assert all(("--ro-bind", p) in mounted for p in STORE), mounted
 assert not {"/nix/store", "/nix", "/etc", "/run", "/run/current-system"} & {d for k, src, d in box["binds"]}, box["binds"]
+# The machine's own /bin/sh and /usr/bin/env, as links into that closure.
+links = {(box["args"][i + 2], box["args"][i + 1]) for i, x in enumerate(box["args"]) if x == "--symlink"}
+assert links == {("/bin/sh", "/nix/store/dddd-bash/bin/sh"), ("/usr/bin/env", "/nix/store/eeee-coreutils/bin/env")}, links
 assert not any(d.startswith(f"{tmp}/state") and d != snap or d.startswith(f"{tmp}/home/") and not d.endswith("/.gitconfig") or d == f"{tmp}/home"
                for k, src, d in box["binds"]), box["binds"]
 # git trusts that one snapshot, which isn't the reviewers' own.
