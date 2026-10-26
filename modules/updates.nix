@@ -135,7 +135,8 @@ let
       schedule = [ "at any time" ];
     };
 
-    # Transitive fixes arrive through a fresh lockfile, daily.
+    # Transitive fixes arrive through a fresh lockfile, daily (but see the
+    # lock file rules below).
     lockFileMaintenance = {
       enabled = true;
       schedule = [ "before 5am" ];
@@ -175,6 +176,25 @@ let
       { matchCategories = [ "python" ]; matchUpdateTypes = [ "minor" "patch" ]; groupName = "Python packages"; }
       { matchCategories = [ "ci" ]; matchUpdateTypes = [ "minor" "patch" "digest" "pin" ]; groupName = "CI actions"; }
       { matchCategories = [ "nix" ]; groupName = "Nix inputs"; }
+      {
+        # One lock file refresh per manager, so one that can't merge (below)
+        # holds up no other.
+        matchUpdateTypes = [ "lockFileMaintenance" ];
+        additionalBranchPrefix = "{{manager}}-";
+        commitMessageExtra = "({{manager}})";
+      }
+      {
+        # A lock file refresh has no release timestamp, and Renovate (42 on)
+        # holds an update without one at a pending stability check for
+        # good. Nix's is taken as stable without one: its inputs are
+        # commits, not registry releases, and HOST-update already deploys
+        # them the hour they land. A registry's (Cargo, npm) still waits:
+        # nothing checks the age of what it resolves to (burrow#82; npm's
+        # --before is dropped whenever it fails to resolve).
+        matchUpdateTypes = [ "lockFileMaintenance" ];
+        matchManagers = [ "nix" ];
+        minimumReleaseAgeBehaviour = "timestamp-optional";
+      }
     ] ++ lib.optional (githubRepo != null) {
       # The machine's own flake.lock is HOST-update's: it deploys what it bumps.
       matchRepositories = [ githubRepo ];
