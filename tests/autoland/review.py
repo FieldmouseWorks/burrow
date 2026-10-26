@@ -378,6 +378,18 @@ assert queue_and_work("deepseek")["result"] == "review"
 agent(codex={"rc": 2, "err": "panic: something else"})
 back = queue_and_work("codex")
 assert back["result"] == "error" and "something else" in back["error"], back
+# Nor what it read on the way (the PR's own files, in its events), nor a
+# 401 inside a longer number.
+agent(codex={"rc": 1, "err": "no session session-1793040155", "events": [
+    {"type": "item.completed", "item": {"type": "command_execution", "aggregated_output": "usage limit; not logged in; 401"}}]})
+back = queue_and_work("codex")
+assert back["result"] == "error" and "no session" in back["error"], back
+# What it says went wrong in an error event counts.
+agent(codex={"rc": 1, "err": "", "events": [{"type": "turn.failed", "error": {"message": "You've hit your usage limit."}}]})
+assert queue_and_work("codex")["result"] == "out"
+agent(codex={"rc": 1, "err": "", "events": [{"type": "error", "message": "unexpected status 401 Unauthorized"}]})
+back = queue_and_work("codex")
+assert back["result"] == "out" and "autoland-codex-login" in back["why"], back
 # Nor in a failure, whole or cut in half: not in the journal, not in what's
 # kept for the next pass.
 token = "codexREFRESHtokenQWERTYzxcvb"
