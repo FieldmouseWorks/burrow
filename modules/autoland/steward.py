@@ -47,8 +47,9 @@ import common as C
 import repos as R
 import reviewers as V
 from common import CFG, CONTEXT, DRY, MIN, STATE, load, log, repo_cfg, save, ts
+from seal import MAJOR as MAJOR_VERDICT  # renovate-sweep's, on a Renovate major
 from touches import dep_kind, gate_edit, moved_from, one_way, renovate_edited
-from tasks import DEP_SEEN, JUDGMENT, MAJOR_VERDICT, REVIEWED, fix_task, judge_task, proof_task
+from tasks import DEP_SEEN, JUDGMENT, REVIEWED, fix_task, judge_task, proof_task
 
 
 PRS = """
@@ -506,7 +507,7 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
         return
 
     if dep and not fixed:
-        major_verdict = C.marker(pr, MAJOR_VERDICT, head, base=pr["baseRefName"]) if dep == "major" and renovate else None
+        major_verdict = C.marker(pr, MAJOR_VERDICT, head, repo, pr["baseRefName"]) if dep == "major" and renovate else None
         threads = f"{open_threads} open review thread{'s' * (open_threads > 1)}" if open_threads else ""
         if changes:
             threads = ", ".join([threads] * bool(threads) + ["changes requested by " + ", ".join(changes)])

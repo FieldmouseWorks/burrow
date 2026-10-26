@@ -160,7 +160,7 @@ with open(f"{tmp}/config.json", "w") as f:
     json.dump({
         "owners": ["sam"], "exclude": [], "context": "review-settled", "rulesets": True, "keepBranches": [],
         "baselineJobs": False, "baselinePerPass": 1, "authors": ["sam", "dependabot", "renovate"],
-        "stateDir": f"{tmp}/state", "projectsDir": f"{tmp}/none", "renovateEmail": "bot@renovateapp.com", "proj": "proj", "owner": "Sam", "cleanBranches": False,
+        "stateDir": f"{tmp}/state", "majorKey": f"{tmp}/sweep.key", "projectsDir": f"{tmp}/none", "renovateEmail": "bot@renovateapp.com", "proj": "proj", "owner": "Sam", "cleanBranches": False,
         "labels": {"hold": "hold", "owner": "needs-owner"}, "notify": {"repo": "", "assignee": "", "label": "autoland"},
         "defaults": {"rounds": 5,
                      "oneWay": ONE_WAY, "handoffAfter": 30, "sessionHandoffAfter": 90, "settleDelay": 3,
@@ -271,6 +271,11 @@ def rv_review(r, k, sha=head, at="2026-10-24T00:11:00Z", who="sam", base="main")
 def judgment(v, n=6, sha=head, base="main"):
     """A judge's verdict line, sealed as its task gives it."""
     return f"<!-- autoland-judgment: {v} {sha} {C.seal('sam/r', n, 'autoland-judgment', v, sha, base)} -->"
+
+
+def swept(v, n=8, sha=head, base="main"):
+    """renovate-sweep's verdict line, sealed as major-seal seals it."""
+    return f"<!-- major-verdict: {v} {sha} on {base} {C.seal('sam/r', n, 'major-verdict', v, sha, base)} -->"
 
 
 def said(body, who="sam"):

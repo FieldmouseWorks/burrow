@@ -138,7 +138,7 @@
         '';
         # Which Renovate PRs renovate-sweep hands over and lists, with stand-ins for gh and proj.
         renovate-sweep = pkgs.runCommand "renovate-sweep-check" { nativeBuildInputs = [ pkgs.python3 pkgs.git pkgs.jq pkgs.gnused ]; } ''
-          python3 -I ${./tests/renovate-sweep.py} ${./modules/updates/renovate-sweep.sh}
+          python3 -I ${./tests/renovate-sweep.py} ${./modules/updates/renovate-sweep.sh} ${./modules/updates/major-seal.py} ${./modules/autoland/seal.py}
           touch $out
         '';
         # Which repos house-sync passes over, and when it tells the owner, with
