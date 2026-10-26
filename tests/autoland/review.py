@@ -319,12 +319,17 @@ agent(dsh={"say": "I ran out of room."})
 back = queue_and_work("deepseek")
 assert back["result"] == "error" and "no JSON" in back["error"] and len(agent_runs()) == 2, back
 
-# Out of service: the plan's usage spent (back when it says), logged out, a
-# key turned down. Any other failure is just a failure.
+# Out of service: the plan's usage spent (asked again within the hour,
+# since credits carry it before the plan's reset; that soon, if sooner),
+# logged out, a key turned down. Any other failure is just a failure.
 agent(codex={"rc": 1, "err": "ERROR: You've hit your usage limit. Upgrade to Pro or try again in 2 days 3 hours."})
 t = time.time()
 back = queue_and_work("codex")
-assert back["result"] == "out" and "usage" in back["why"] and abs(back["until"] - t - (2 * 86400 + 3 * 3600)) < 60, back
+assert back["result"] == "out" and "usage" in back["why"] and abs(back["until"] - t - 3600) < 60, back
+assert any(time.strftime("%a %H:%MZ", time.gmtime(t + 2 * 86400 + 3 * 3600 + d)) in back["why"] for d in (0, 60)), back
+agent(codex={"rc": 1, "err": "ERROR: You've hit your usage limit. Upgrade to Pro or try again in 20 minutes."})
+back = queue_and_work("codex")
+assert back["result"] == "out" and abs(back["until"] - t - 1200) < 60, back
 # An answer that only mentions a usage limit is a review.
 agent(codex={"answer": {"findings": [{"path": "a", "line": 1, "severity": "P2", "title": "t",
                                       "body": "no usage limit on retries"}], "summary": "s"}})

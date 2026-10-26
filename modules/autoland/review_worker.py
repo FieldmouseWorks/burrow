@@ -167,7 +167,11 @@ def codex(snap, prompt):
             gate.close()
         said = p.stderr + p.stdout
         if p.returncode != 0 and re.search(r"usage limit|usage_limit_reached", said, re.I):
-            raise Out("its ChatGPT plan's usage is spent", time.time() + wait_for(said))
+            # Asked again within the hour, whatever the plan's reset: credits
+            # (or a bigger plan) carry it on before then.
+            back = time.time() + wait_for(said)
+            raise Out(f"its ChatGPT plan's usage is spent, back {time.strftime('%a %H:%MZ', time.gmtime(back))} "
+                      "unless credits carry it", min(back, time.time() + 3600))
         if p.returncode != 0 and re.search(r"not logged in|log ?in again|401|unauthorized|refresh token", said, re.I):
             raise Out("it isn't logged in (autoland-codex-login on the machine)", time.time() + 3600)
         if p.returncode != 0:
