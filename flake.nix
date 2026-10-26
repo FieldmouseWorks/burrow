@@ -108,9 +108,11 @@
         # Which repos a run of Renovate on one repo covers: the ones its
         # autodiscoverFilter takes, as Renovate's own code has it.
         renovate-covers = pkgs.runCommand "renovate-covers-check" { } ''
-          covers() { ${pkgs.lib.getExe pkgs.nodejs_24} ${./modules/updates/renovate-covers.mjs} ${pkgs.renovate} '["sam/*", "Kim/r", "!sam/{old,archive}", "!/^sam\/tmp-/"]' "$1"; }
-          for r in sam/r SAM/X kim/r; do covers "$r" || { echo "$r: not covered"; exit 1; }; done
-          for r in sam/old sam/archive sam/tmp-1 kim/q other/r; do
+          # A /regex/ minds case: Sam/Secret is out, sam/secret isn't (so
+          # renovate@ asks with GitHub's spelling).
+          covers() { ${pkgs.lib.getExe pkgs.nodejs_24} ${./modules/updates/renovate-covers.mjs} ${pkgs.renovate} '["sam/*", "Kim/r", "!sam/{old,archive}", "!/^sam\/tmp-/", "!/^Sam\/Secret$/"]' "$1"; }
+          for r in sam/r SAM/X kim/r sam/secret; do covers "$r" || { echo "$r: not covered"; exit 1; }; done
+          for r in sam/old sam/archive sam/tmp-1 Sam/Secret kim/q other/r; do
             rc=0; covers "$r" || rc=$?
             [ "$rc" = 10 ] || { echo "$r: $rc, not 10"; exit 1; }
           done
