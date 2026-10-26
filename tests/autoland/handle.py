@@ -117,6 +117,22 @@ C.save(f"{V.DONE}/{V.item_name('pr-sam_r-5.json', 'deepseek', newer, 'main')}.js
 status, _ = run(mkpr(), 650)
 assert V.out("deepseek") and ("deepseek", head, 1) in POSTED and not merged(), (POSTED, WROTE)
 assert f"review findings on {head[:7]}" in status, status
+# An earlier head's out answer that comes in after the pass began puts it
+# out too, rather than being dropped with the reviewer still taken for in.
+fresh_pr_state()
+run(mkpr(), 0)
+real_answered, late_out = V.answered, []
+def answered(key, r):
+    names = real_answered(key, r)
+    if r == "deepseek" and not late_out:
+        late_out.append(C.save(f"{V.DONE}/{V.item_name('pr-sam_r-5.json', 'deepseek', newer, 'main')}.json",
+                               {"result": "out", "why": "balance", "until": C.ts(T0) + 86400, "head": newer, "base": "main"}))
+    return names
+V.answered = answered
+run(mkpr(reviews=[rv_review("codex", 0)]), 600)
+V.answered = real_answered
+assert late_out and V.out("deepseek") and os.listdir(DDIR) == [], (os.listdir(DDIR), WROTE)
+os.remove(f"{tmp}/state/{V.OUT}")
 # One GitHub wouldn't take is kept and tried again, and the PR waits for it.
 fresh_pr_state()
 run(mkpr(), 0)

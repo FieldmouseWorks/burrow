@@ -664,7 +664,9 @@ def handle(repo, pr, repo_info, digest):
             back = load(f"{V.DONE}/{name}.json", None) or {}
             if DRY:
                 continue
-            if back.get("result") == "review" and back.get("base") == pr["baseRefName"] and isinstance(back.get("head"), str):
+            if back.get("result") == "out":  # in since outs() looked
+                went_out(r, back)
+            elif back.get("result") == "review" and back.get("base") == pr["baseRefName"] and isinstance(back.get("head"), str):
                 try:
                     if V.post(repo, {**pr, "headRefOid": back["head"]}, r, back["answer"]) == "findings":
                         v, at, rr = said[r]
@@ -710,10 +712,10 @@ def handle(repo, pr, repo_info, digest):
         # looks came back before it went out, and posting them asks nothing
         # of it.
         consume(r)
-    # Put out by its answer about this head, which is in: its others.
-    under_way += reading([r for r in names if V.out(r) and r not in was_out])
     for r in names:
         overtaken(r)
+    # Put out by an answer this pass read: its others.
+    under_way += reading([r for r in names if V.out(r) and r not in was_out])
     live = [r for r in live if not V.out(r)]
     # The findings of one out now on this head are threads this pass never
     # read, and its verdict isn't waited for: they hold the pass back.
