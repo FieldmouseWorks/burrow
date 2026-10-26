@@ -129,6 +129,9 @@ S.CFG.update(proj=proj, projectsDir=f"{tmp}/src")
 C.project_dir, project_dir = (lambda repo: "r"), C.project_dir
 assert REAL["job"]("sam/r", "the task") == "job-9"
 assert open(f"{tmp}/proj-args").read().split() == ["run", "--kick", "autoland/sam/r", "r", "the", "task"]
+# One of the pipeline's own repos goes ahead of the line.
+assert REAL["job"]("sam/pipe", "the task") == "job-9"
+assert open(f"{tmp}/proj-args").read().split() == ["run", "--first", "--kick", "autoland/sam/pipe", "r", "the", "task"]
 C.project_dir = project_dir
 S.CFG.clear()
 S.CFG.update(kept)

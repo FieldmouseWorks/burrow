@@ -420,6 +420,25 @@ for x in os.listdir(f"{tmp}/state/{V.DONE}"):
     os.remove(f"{tmp}/state/{V.DONE}/{x}")
 agent()
 
+# A reviewer's next free place goes to the pipeline's own repos first
+# (pipelineRepos, any case), then to the review queued longest.
+V.queue("sam/r", snap_pr, "pr-sam_r-5.json", "deepseek")
+entry, = os.listdir(f"{tmp}/state/{V.QUEUE}")
+item = json.load(open(f"{tmp}/state/{V.QUEUE}/{entry}"))
+os.remove(f"{tmp}/state/{V.QUEUE}/{entry}")
+for n, repo, at in (("deepseek--a-old.json", "sam/r", 1), ("deepseek--b-pipe.json", "sam/pipe", 3), ("deepseek--c-new.json", "sam/r", 2)):
+    C.save(f"{V.QUEUE}/{n}", {**item, "repo": repo, "at": at})
+W.CFG["reviewers"]["deepseek"]["parallel"] = 1
+W.work()
+W.CFG["reviewers"]["deepseek"]["parallel"] = 2
+order = [re.search(r"in (sam/\w+)", x["prompt"]).group(1) for x in agent_runs()]
+assert order == ["sam/pipe", "sam/r", "sam/r"], order
+done = [json.load(open(f"{tmp}/state/{V.DONE}/deepseek--{n}.json"))["at"] for n in ("b-pipe", "a-old", "c-new")]
+assert done == sorted(done), done
+for x in os.listdir(f"{tmp}/state/{V.DONE}"):
+    os.remove(f"{tmp}/state/{V.DONE}/{x}")
+agent()
+
 # A snapshot that's gone (its head swept away meanwhile) is no review.
 shutil.rmtree(snap)
 back = queue_and_work("deepseek")

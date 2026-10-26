@@ -75,6 +75,7 @@ let
       deepseek = true;
     };
     repos = cfg.repos;
+    inherit (cfg) pipelineRepos;
     # Every repo's hook to burrow-events (repos.py), with what each of its
     # handlers takes.
     webhook = {
@@ -157,6 +158,19 @@ in
       default = [ ];
       example = [ "sam/scratch-*" ];
       description = "Repos to leave alone (OWNER/NAME globs).";
+    };
+
+    pipelineRepos = mkOption {
+      type = types.listOf types.str;
+      default = [ ];
+      example = [ "sam/burrow" "sam/box" ];
+      description = ''
+        The repos whose PRs work on this pipeline itself (OWNER/NAMEs, any
+        case): the steward, its reviewers, the machine they run on. Their
+        reviews take a reviewer's next free place before anyone else's, and
+        their Claude jobs go ahead of the line (`proj run --first`), so the
+        work queued behind them gets the speedup sooner.
+      '';
     };
 
     dryRun = mkOption {

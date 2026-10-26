@@ -361,18 +361,27 @@ def review(name):
 
 def work():
     """Every queued review, `parallel` at a time for each reviewer, until
-    the queue is empty (passes may add to it meanwhile)."""
+    the queue is empty (passes may add to it meanwhile). A free place goes
+    to the pipeline's own repos' reviews first (`pipelineRepos`), then to
+    the one queued longest."""
     q = os.path.join(STATE, V.QUEUE)
     pools = {r: ThreadPoolExecutor(CFG["reviewers"][r]["parallel"]) for r in V.NAMES}
     # Only what's in hand: a name done with and queued again (a retry, a
     # second look) is taken again.
     busy = {}
     while True:
-        for name in sorted(os.listdir(q)):
+        busy = {n: f for n, f in busy.items() if not f.done()}
+        waiting = {}
+        for name in os.listdir(q):
             r = name.partition("--")[0]
             if name.endswith(".json") and name not in busy and r in pools:
+                item = load(f"{V.QUEUE}/{name}", None)
+                item = item if isinstance(item, dict) else {}
+                waiting.setdefault(r, []).append((not C.pipeline(item.get("repo")), item.get("at", 0), name))
+        for r, names in waiting.items():
+            free = CFG["reviewers"][r]["parallel"] - sum(n.partition("--")[0] == r for n in busy)
+            for *_, name in sorted(names)[:max(free, 0)]:
                 busy[name] = pools[r].submit(review, name)
-        busy = {n: f for n, f in busy.items() if not f.done()}
         if not busy:
             break
         time.sleep(5)

@@ -234,8 +234,16 @@ def project_dir(repo):
     return next((d for d, url in projects() if url.lower() == repo.lower()), None)
 
 
+def pipeline(repo):
+    """Whether repo is one whose PRs work on this pipeline itself
+    (`pipelineRepos`): its reviews and Claude jobs go ahead of the others',
+    so everything after them is quicker."""
+    return isinstance(repo, str) and repo.lower() in {x.lower() for x in CFG["pipelineRepos"]}
+
+
 def job(repo, task, clone=False):
-    """Hand a task to a Claude job in the repo's project. Returns the job id."""
+    """Hand a task to a Claude job in the repo's project, ahead of the line
+    for the pipeline's own repos. Returns the job id."""
     d = project_dir(repo)
     if d is None and clone and not DRY:
         d = repo.split("/")[1]
@@ -247,7 +255,8 @@ def job(repo, task, clone=False):
         log(f"  would: proj run {d} ...")
         return "dry"
     # Each of its turns that ends starts the repo's pass, which reads what it did.
-    p = subprocess.run([CFG["proj"], "run", "--kick", f"autoland/{repo}", d, task], capture_output=True, text=True)
+    p = subprocess.run([CFG["proj"], "run", *(["--first"] if pipeline(repo) else []), "--kick", f"autoland/{repo}", d, task],
+                       capture_output=True, text=True)
     return p.stdout.strip() or None
 
 
