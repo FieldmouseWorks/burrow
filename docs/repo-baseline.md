@@ -34,8 +34,11 @@ change nothing else in the same PR.
    through DeepSeek Harness. The steward takes a snapshot of the change with
    secrets paths left out; each agent reads it read-only, with no GitHub
    login, and the steward posts its findings as review threads marked as
-   that reviewer's. One whose usage runs out is left out until it's back,
-   and PRs settle on the others meanwhile.
+   that reviewer's. A look at a head the PR has since moved past still
+   finishes, and its findings are posted on the commit it read, so they go
+   into the next push. One whose usage runs out is left out until it's
+   back, and PRs settle on the others meanwhile; DeepSeek's balance running
+   low is listed for the owner first.
 3. Whoever opened the PR fixes each finding, or replies with why not, and
    resolves its thread. A Claude job on the machine takes over if nobody has
    after `handoffAfterMinutes`.

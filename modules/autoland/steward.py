@@ -621,7 +621,34 @@ def handle(repo, pr, repo_info, digest):
                 rs["gone"] = True
                 after(C.NOW, 1)  # the second look
 
+    def overtaken(r):
+        """What came back from the reviewer's looks at the PR's earlier heads
+        after it moved on (V.sweep keeps them): posted on the commit each
+        one read, so what it found goes into the next push instead of
+        waiting for its look at this head. Findings there count as a round;
+        "nothing found" there says nothing about this head."""
+        for name in V.answered(key, r):
+            if name == V.item_name(key, r, head, pr["baseRefName"]):
+                continue
+            back = load(f"{V.DONE}/{name}.json", None) or {}
+            if DRY:
+                continue
+            if back.get("result") == "review" and back.get("base") == pr["baseRefName"] and isinstance(back.get("head"), str):
+                try:
+                    if V.post(repo, {**pr, "headRefOid": back["head"]}, r, back["answer"]) == "findings":
+                        v, at, rr = said[r]
+                        said[r] = (v, at, rr + 1)
+                except (ValueError, RuntimeError) as e:  # nothing waits on it: once
+                    log(f"{tag}: couldn't post {V.NAMES[r]}'s review of {back['head'][:7]}: {e}")
+            elif back.get("result") == "out":
+                o = load(V.OUT, {})
+                o[r] = {"why": back["why"], "until": back["until"]}
+                save(V.OUT, o)
+                log(f"{tag}: {V.NAMES[r]} is out of service until {back['until']:.0f}: {back['why']}")
+            V.drop(name)
+
     for r in live:
+        overtaken(r)
         consume(r)
     live = [r for r in live if not V.out(r)]
     for r in names:

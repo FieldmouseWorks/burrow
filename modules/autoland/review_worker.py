@@ -11,6 +11,7 @@ way out but its API, and no key of its own (DeepSeek's stays with the gate;
 the commands Codex runs can't read its login). The keys are taken out of
 anything the agents say as well."""
 
+import fcntl
 import http.client
 import json
 import os
@@ -306,40 +307,56 @@ def tail(text, n):
 
 def review(name):
     """One queued review: its answer, or why there's none, left in DONE for
-    the repo's pass, which it kicks. Gone from the queue either way."""
-    item = load(f"{V.QUEUE}/{name}", None)
+    the repo's pass, which it kicks. Gone from the queue either way. A sweep
+    that took it off the queue first (its PR moved on before it began) leaves
+    nothing to do."""
     try:
-        if not item:
-            raise RuntimeError("its queue entry is unreadable")
-        r = item["reviewer"]
-        if r not in V.on(item["repo"]):  # the repo was taken off it since
-            raise RuntimeError(f"{item['repo']} isn't one {V.NAMES[r]} reviews")
-        snap = os.path.join(STATE, V.SNAP, item["snap"])
-        if not os.path.isdir(snap):
-            raise RuntimeError("its snapshot is gone")
-        secret = ("\n\nThese files are secrets and are left out of both commits; the PR changes them, "
-                  "but you can't see how: " + ", ".join(item["secret"])) if item["secret"] else ""
-        prompt = PROMPT.format(**{**item, "owner": CFG["owner"], "secret": secret,
-                                  "rules": item["rules"] or "(none)", "prior": item["prior"] or "(none)"})
-        log(f"{item['repo']}#{item['number']}: {V.NAMES[r]} is reviewing {item['headRefOid'][:7]}")
-        out = {"result": "review", "answer": scrub(AGENTS[r](snap, prompt))}
-    except Out as e:
-        out = {"result": "out", "why": scrub(str(e)), "until": e.until}
-        log(f"{item['repo']}#{item['number']}: {V.NAMES[item['reviewer']]} is out: {out['why']}")
-    except Exception as e:
-        out = {"result": "error", "error": scrub(str(e))[:300]}
-        log(f"{(item or {}).get('repo')}#{(item or {}).get('number')}: review failed: {out['error']}")
-    # Out of the queue even if the answer can't be kept: with nothing back
-    # the steward counts it lost and queues it again.
-    try:
-        save(f"{V.DONE}/{name}", {**out, "at": time.time()})
-    finally:
+        held = open(os.path.join(STATE, V.QUEUE, name))
+    except OSError:
+        return
+    with held:
+        # Held while it runs: a sweep leaves a look that's under way, and its
+        # snapshot, be (reviewers.py `taken`), and takes one that isn't under
+        # its own lock, which this waits out.
+        fcntl.flock(held, fcntl.LOCK_SH)
+        if os.fstat(held.fileno()).st_nlink == 0:
+            return
+        item = load(f"{V.QUEUE}/{name}", None)
         try:
-            os.remove(os.path.join(STATE, V.QUEUE, name))
-        except OSError:
-            pass
-        if isinstance((item or {}).get("repo"), str):
-            C.kick(item["repo"])
+            if not item:
+                raise RuntimeError("its queue entry is unreadable")
+            r = item["reviewer"]
+            if r not in V.on(item["repo"]):  # the repo was taken off it since
+                raise RuntimeError(f"{item['repo']} isn't one {V.NAMES[r]} reviews")
+            snap = os.path.join(STATE, V.SNAP, item["snap"])
+            if not os.path.isdir(snap):
+                raise RuntimeError("its snapshot is gone")
+            secret = ("\n\nThese files are secrets and are left out of both commits; the PR changes them, "
+                      "but you can't see how: " + ", ".join(item["secret"])) if item["secret"] else ""
+            prompt = PROMPT.format(**{**item, "owner": CFG["owner"], "secret": secret,
+                                      "rules": item["rules"] or "(none)", "prior": item["prior"] or "(none)"})
+            log(f"{item['repo']}#{item['number']}: {V.NAMES[r]} is reviewing {item['headRefOid'][:7]}")
+            out = {"result": "review", "answer": scrub(AGENTS[r](snap, prompt))}
+        except Out as e:
+            out = {"result": "out", "why": scrub(str(e)), "until": e.until}
+            log(f"{item['repo']}#{item['number']}: {V.NAMES[item['reviewer']]} is out: {out['why']}")
+        except Exception as e:
+            out = {"result": "error", "error": scrub(str(e))[:300]}
+            log(f"{(item or {}).get('repo')}#{(item or {}).get('number')}: review failed: {out['error']}")
+        # Out of the queue even if the answer can't be kept: with nothing back
+        # the steward counts it lost and queues it again.
+        try:
+            # The head it read, for a PR that has moved on since (the
+            # steward's `overtaken`).
+            save(f"{V.DONE}/{name}", {**out, "at": time.time(),
+                                      **({"head": item.get("headRefOid"), "base": item.get("baseRefName")} if isinstance(item, dict) else {})})
+        finally:
+            try:
+                os.remove(os.path.join(STATE, V.QUEUE, name))
+            except OSError:
+                pass
+            if isinstance((item or {}).get("repo"), str):
+                C.kick(item["repo"])
 
 
 def work():

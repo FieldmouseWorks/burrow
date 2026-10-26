@@ -207,7 +207,7 @@ def queue(repo, pr, key, r):
     if STUB["queue"]:
         raise STUB["queue"]
     C.save(f"{V.QUEUE}/{V.item_name(key, r, pr['headRefOid'], pr['baseRefName'])}.json",
-           {"reviewer": r, "repo": repo, "number": pr["number"], "headRefOid": pr["headRefOid"]})
+           {"reviewer": r, "repo": repo, "number": pr["number"], "headRefOid": pr["headRefOid"], "baseRefName": pr["baseRefName"]})
 
 
 def post(repo, pr, r, answer):
@@ -296,7 +296,9 @@ def worker(**back):
     `back` says it does, a clean review unless told otherwise."""
     for x in os.listdir(QDIR):
         r = x.partition("--")[0]
-        C.save(f"{V.DONE}/{x}", {**back.get(r, {"result": "review", "answer": {"findings": []}}), "at": C.NOW})
+        item = json.load(open(f"{QDIR}/{x}"))
+        C.save(f"{V.DONE}/{x}", {**back.get(r, {"result": "review", "answer": {"findings": []}}), "at": C.NOW,
+                                 "head": item.get("headRefOid"), "base": item.get("baseRefName")})
         os.remove(f"{QDIR}/{x}")
 
 

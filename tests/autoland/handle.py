@@ -4,6 +4,7 @@ check those)."""
 
 import hashlib
 import hmac
+import fcntl
 import json
 import os
 import subprocess
@@ -52,6 +53,30 @@ worker()
 status, _ = run(mkpr(), 650)
 assert sorted(POSTED) == [("codex", head, 0), ("deepseek", head, 0)] and os.listdir(DDIR) == [], POSTED
 assert "Codex and DeepSeek found nothing" in status and merged(), status
+
+# A look at an earlier head that comes back after the PR moved on is posted
+# on the commit it read, so its findings go into the next push. Its
+# "nothing found" says nothing about the new head, which both look at.
+fresh_pr_state()
+run(mkpr(), 0)
+run(mkpr(), 600)
+newer = "9" * 40
+status, _ = run(mkpr(sha=newer), 700)
+assert queued() == ["codex", "deepseek"] and "Waiting for Codex's review" in status, status
+worker(deepseek={"result": "review", "answer": {"findings": [{"path": "a.py"}, {"path": "a.py"}]}})
+status, _ = run(mkpr(sha=newer), 710)
+assert sorted(POSTED) == [("codex", head, 0), ("deepseek", head, 2)] and os.listdir(DDIR) == [], POSTED
+assert not merged() and queued() == [] and "Waiting for Codex's review" in status, status
+# Its findings were a round, and the new head's own looks come once it's sat still.
+status, _ = run(mkpr(sha=newer, reviews=[rv_review("codex", 0), rv_review("deepseek", 2)], threads=[False, False]), 1300)
+assert "2 open review threads" in status and queued() == ["codex", "deepseek"], status
+# Retargeted since, what an earlier head got on the old base isn't posted.
+fresh_pr_state()
+run(mkpr(), 0)
+run(mkpr(), 600)
+worker(deepseek={"result": "review", "answer": {"findings": [{"path": "a.py"}]}})
+run(mkpr(sha=newer, base="release/1.x"), 700)
+assert POSTED == [] and os.listdir(DDIR) == [], POSTED
 
 # Only reviews the steward posted count.
 fresh_pr_state()
@@ -765,11 +790,31 @@ for s in (gone, live_snap, other_repo, dashed, retargeted):
     C.save(f"{V.SNAP}/{s}.json", {})
     C.save(f"{V.QUEUE}/deepseek--{s}.json", {})
     C.save(f"{V.DONE}/codex--{s}.json", {})
+# PR 5 is still open: an earlier head's look that's under way (its queue
+# entry locked, as the reviewers' service holds it) keeps its snapshot, and
+# what came back from its earlier heads stays for its next pass to post.
+running = V.snap_name("pr-sam_r-5.json", "c" * 40, "main")
+os.makedirs(f"{tmp}/state/{V.SNAP}/{running}")
+C.save(f"{V.SNAP}/{running}.json", {})
+C.save(f"{V.QUEUE}/codex--{running}.json", {})
+held = open(f"{tmp}/state/{V.QUEUE}/codex--{running}.json")
+fcntl.flock(held, fcntl.LOCK_SH)
 V.sweep({"sam_r", "sam_lo-k"}, {live_snap})
+held.close()
 left = sorted(x for d in (V.SNAP, V.QUEUE, V.DONE) for x in os.listdir(f"{tmp}/state/{d}"))
 assert left == sorted([live_snap, live_snap + ".json", other_repo, other_repo + ".json",
                        f"deepseek--{live_snap}.json", f"deepseek--{other_repo}.json",
-                       f"codex--{live_snap}.json", f"codex--{other_repo}.json"]), left
+                       f"codex--{live_snap}.json", f"codex--{other_repo}.json",
+                       running, running + ".json", f"codex--{running}.json",
+                       f"codex--{gone}.json", f"codex--{retargeted}.json"]), left
+# Once it's done, the next sweep takes its snapshot.
+V.remove(f"{tmp}/state/{V.QUEUE}/codex--{running}.json")
+V.sweep({"sam_r", "sam_lo-k"}, {live_snap})
+assert not os.path.exists(f"{tmp}/state/{V.SNAP}/{running}") and os.path.exists(f"{tmp}/state/{V.DONE}/codex--{gone}.json")
+# And a PR that's gone takes everything with it.
+V.sweep({"sam_r", "sam_lo-k"}, set())
+left = sorted(x for d in (V.SNAP, V.QUEUE, V.DONE) for x in os.listdir(f"{tmp}/state/{d}"))
+assert left == sorted([other_repo, other_repo + ".json", f"deepseek--{other_repo}.json", f"codex--{other_repo}.json"]), left
 
 # Every repo gets the hold and needs-owner labels, once a day.
 fresh_pr_state()

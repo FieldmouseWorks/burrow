@@ -9,6 +9,7 @@ what came back (`post`), under the steward's login and marked as that
 reviewer's, and reads each reviewer's verdict back from those posts
 (`verdict`)."""
 
+import fcntl
 import hashlib
 import json
 import os
@@ -297,16 +298,51 @@ def drop(name):
             pass
 
 
+def answered(key, r):
+    """The names of the reviewer's answers, for any head, to the PR whose
+    state file is `key`."""
+    pre = f"{r}--{key[:-5]}-"
+    return sorted(x.removesuffix(".json") for x in os.listdir(os.path.join(STATE, DONE)) if x.startswith(pre))
+
+
+def taken(path):
+    """Takes the queued review at path off the queue unless the reviewers'
+    service is on it (it holds the entry's lock while it is: review_worker
+    `review`). False if it is."""
+    try:
+        f = open(path)
+    except OSError:
+        return True
+    with f:
+        try:
+            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return False
+        remove(path)  # under the lock: the service, waiting on it, sees it gone
+        return True
+
+
 def sweep(repos, live):
     """For the repos this pass read (`repos`, as state file names spell
     them): the snapshots, queue entries and answers of heads none of their
-    open PRs has any more (`live`: the snapshot names of the heads they have)."""
-    for d in (QUEUE, DONE, SNAP):
+    open PRs has any more (`live`: the snapshot names of the heads they have).
+    An open PR's earlier head keeps a look the reviewers' service is on, the
+    snapshot it reads, and what came back, which the PR's next pass posts
+    on the commit it read (steward.py's `overtaken`)."""
+    prs = {s.rsplit("-", 2)[0] for s in live}
+    keep = set()
+    for d in (QUEUE, DONE, SNAP):  # the queue first: a look still running keeps its snapshot
         for x in os.listdir(os.path.join(STATE, d)):
             snap = x.removesuffix(".json")
             if d != SNAP:
                 snap = snap.partition("--")[2]
-            if snap.rsplit("-", 3)[0].removeprefix("pr-") in repos and snap not in live:
+            if snap.rsplit("-", 3)[0].removeprefix("pr-") not in repos or snap in live:
+                continue
+            ours = snap.rsplit("-", 2)[0] in prs
+            if d == QUEUE and ours:
+                if not taken(os.path.join(STATE, d, x)):
+                    keep.add(snap)
+            elif not (ours and (d == DONE or snap in keep)):
                 remove(os.path.join(STATE, d, x))
 
 

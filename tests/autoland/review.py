@@ -2,6 +2,7 @@
 see), and the service that runs them on it."""
 
 import contextlib
+import fcntl
 import io
 import json
 import os
@@ -261,7 +262,7 @@ agent(codex={"answer": {"findings": [], "summary": "ok"},
                       {"env": "HTTPS_PROXY", "send": "CONNECT chatgpt.com:80 HTTP/1.1\r\n\r\n"},
                       {"env": "HTTPS_PROXY", "send": "POST /v1/messages HTTP/1.1\r\nContent-Length: 0\r\n\r\n"}]})
 back = queue_and_work("codex")
-assert back == {"result": "review", "answer": {"findings": [], "summary": "ok"}, "at": back["at"]}, back
+assert back == {"result": "review", "answer": {"findings": [], "summary": "ok"}, "at": back["at"], "head": pr_head, "base": "main"}, back
 run, = agent_runs()
 a = run["args"]
 assert a[0] == "exec" and a[a.index("--cd") + 1] == snap and "--sandbox" not in a
@@ -372,6 +373,31 @@ os.remove(f"{tmp}/state/{V.DONE}/deepseek--unread.json")
 # Taken by the service and the sweep at once: whichever comes second finds
 # it gone, and carries on.
 V.remove(f"{tmp}/state/{V.QUEUE}/deepseek--unread.json")
+# One a sweep takes off the queue (its PR moved on) while the service waits
+# for the entry's lock is never begun: no agent, no answer.
+V.queue("sam/r", snap_pr, "pr-sam_r-5.json", "deepseek")
+entry, = os.listdir(f"{tmp}/state/{V.QUEUE}")
+held = open(f"{tmp}/state/{V.QUEUE}/{entry}")
+fcntl.flock(held, fcntl.LOCK_EX)
+t = threading.Thread(target=W.review, args=(entry,))
+t.start()
+time.sleep(0.5)
+os.remove(f"{tmp}/state/{V.QUEUE}/{entry}")
+held.close()
+t.join()
+assert agent_runs() == [] and os.listdir(f"{tmp}/state/{V.DONE}") == [], os.listdir(f"{tmp}/state/{V.DONE}")
+# And one it's under way on holds its entry's lock: the sweep leaves it.
+agent(dsh={"sleep": 2})
+V.queue("sam/r", snap_pr, "pr-sam_r-5.json", "deepseek")
+entry, = os.listdir(f"{tmp}/state/{V.QUEUE}")
+t = threading.Thread(target=W.review, args=(entry,))
+t.start()
+time.sleep(1)
+assert not V.taken(f"{tmp}/state/{V.QUEUE}/{entry}")
+t.join()
+back = json.load(open(f"{tmp}/state/{V.DONE}/{entry}"))
+assert back["result"] == "review" and back["head"] == pr_head and back["base"] == "main", back
+os.remove(f"{tmp}/state/{V.DONE}/{entry}")
 
 # A review done with and queued again (a retry) while another is still
 # running is taken again, not left until the service next starts.
