@@ -1,6 +1,8 @@
 # house: every repo's copy of the house block (house/rules.md, between its
 # markers in AGENTS.md) kept the same as burrow's (house/sync.sh). A change to
-# the rules here reaches each repo as one PR, which the steward lands.
+# the rules here reaches each repo as one PR, which the steward lands. Nothing
+# waits for a timer: a switch that brings new rules starts a pass over every
+# repo, and a push to a repo's default branch one over that repo.
 inputs:
 { config, lib, pkgs, ... }:
 let
@@ -24,6 +26,7 @@ in
   imports = [
     (import ./common.nix inputs)
     { key = "burrow/notify"; imports = [ (import ./notify.nix inputs) ]; }
+    { key = "burrow/events"; imports = [ (import ./events.nix inputs) ]; }
   ];
 
   options.burrow.house = {
@@ -57,8 +60,17 @@ in
     burrow.notify.enable = true;
     environment.systemPackages = [ sync ];
 
-    systemd.services.house-sync = {
-      description = "house-sync: every repo's house block, as burrow has it";
+    # A push to a repo's default branch (a house PR merged, AGENTS.md edited
+    # by hand, a new repo's first commits) starts house-sync@OWNER-REPO, its
+    # pass over that repo. burrow-events' catch-up, when it starts and hourly,
+    # is the full pass, for what no push reports: a house PR closed unmerged.
+    burrow.events.handlers.house = {
+      events = [ "push" ];
+      unit = "house-sync";
+      pushes = "default";
+    };
+    systemd.services = lib.genAttrs [ "house-sync" "house-sync@" ] (name: {
+      description = "house-sync: ${if name == "house-sync" then "every repo's" else "%I's"} house block, as burrow has it";
       # A switch leaves a running one be (see burrow.switch's check).
       restartIfChanged = false;
       after = [ "network-online.target" ];
@@ -66,17 +78,25 @@ in
       serviceConfig = {
         Type = "oneshot";
         User = user;
-        ExecStart = "${sync}/bin/house-sync";
+        ExecStart = "${sync}/bin/house-sync${lib.optionalString (name == "house-sync@") " %I"}";
         TimeoutStartSec = "20min";
         Nice = 10;
       };
-    };
-    systemd.timers.house-sync = {
-      wantedBy = [ "timers.target" ];
-      timerConfig = {
-        OnCalendar = "daily";
-        RandomizedDelaySec = "1h";
-        Persistent = true;
+    }) // {
+      # New rules arrive with a switch, which changes this unit and so starts
+      # it again: it asks burrow-events for a full pass, in line with the
+      # handler's others.
+      house-sync-rules = {
+        description = "house-sync: a full pass for the house rules this system has";
+        wantedBy = [ "multi-user.target" ];
+        after = [ "burrow-events.service" ];
+        restartTriggers = [ ../house/rules.md ];
+        path = [ pkgs.curl ];
+        script = "curl -fsS --retry 10 --retry-connrefused --retry-delay 1 -d '' ${config.burrow.events.kick}/house";
+        serviceConfig = {
+          Type = "oneshot";
+          RemainAfterExit = true;
+        };
       };
     };
 
@@ -84,7 +104,8 @@ in
       ## The house rules
 
       The house rules block in every repo's AGENTS.md is a copy of burrow's
-      house/rules.md, and `house-sync` (daily) opens a PR wherever a copy differs.
+      house/rules.md, and `house-sync` (on new rules, and each repo's pushes to
+      its default branch) opens a PR wherever a copy differs.
       To change a house rule, change it in burrow, never between a repo's markers.
     '';
   };
