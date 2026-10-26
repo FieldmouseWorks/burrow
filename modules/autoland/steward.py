@@ -809,11 +809,15 @@ def main():
             owner, name = repo.split("/")
             info, prs = open_prs(owner, name)
             read.add(repo.replace("/", "_"))
+            # First, so a fix PR it closes isn't merged by this same pass.
+            obsolete = R.watch_default(r, info, prs, mine) or set()
             heads = set()
             seen_to = True
             for pr in prs:
                 heads.add(pr["headRefName"])
                 live.add(V.snap_name(f"pr-{repo.replace('/', '_')}-{pr['number']}.json", pr["headRefOid"], pr["baseRefName"]))
+                if pr["number"] in obsolete:
+                    continue
                 try:
                     handle(repo, pr, info, mine)
                 except Exception as e:  # one bad PR mustn't stop the rest
@@ -823,7 +827,6 @@ def main():
                 covered.append(r)
             else:
                 C.wake(repo, C.NOW + 5 * MIN)
-            R.watch_default(r, info, prs, mine)
             if CFG["cleanBranches"]:
                 # Stale ones the last sweep found are listed every pass.
                 R.sweep_branches(r, heads, mine, sweep=kick is None)

@@ -163,7 +163,8 @@ def watch_default(r, info, prs, digest):
     cause and opens a PR from RED_BRANCH that reverts or fixes it, which
     lands like any other. Nothing more while that job works or its PR is
     open; a second job if it's still red after (seen on two passes), then
-    the owner."""
+    the owner. Returns the PRs this pass mustn't handle: a fix PR made
+    obsolete by the branch going green some other way."""
     repo = r["repo"]
     target = (info.get("defaultBranchRef") or {}).get("target") or {}
     sha, state = target.get("oid"), (target.get("statusCheckRollup") or {}).get("state")
@@ -185,15 +186,21 @@ def watch_default(r, info, prs, digest):
         # one is open, isn't needed.
         if working:
             return
+        unclosed = False
         for pr in open_fix:
             log(f"{repo}: closing #{pr['number']}, {r['default']} is green again without it")
-            C.write("pr", "close", str(pr["number"]), "-R", repo, "--comment",
-                    f"{r['default']} is green again at {sha[:7]}, so this fix for {red['at'][:7]} isn't needed.",
-                    check=False)
-        log(f"{repo}: {r['default']} is green again")
-        st.pop("red")
-        save(key, st)
-        return
+            unclosed |= C.write("pr", "close", str(pr["number"]), "-R", repo, "--comment",
+                                f"{r['default']} is green again at {sha[:7]}, so this fix for {red['at'][:7]} isn't needed.",
+                                check=False) is None
+        # One GitHub wouldn't close is still known by the red it was for, and
+        # tried again soon.
+        if unclosed:
+            C.wake(repo, C.NOW + 5 * 60)
+        else:
+            log(f"{repo}: {r['default']} is green again")
+            st.pop("red")
+            save(key, st)
+        return {pr["number"] for pr in open_fix}
     line = f"{repo} {r['default']} at {sha[:7]}"
     if working or open_fix:
         return

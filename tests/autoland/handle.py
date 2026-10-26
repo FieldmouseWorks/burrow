@@ -918,12 +918,38 @@ WROTE.clear()
 R.watch_default(repo_r, default("SUCCESS", sha="e" * 40), [], mine)
 assert C.load("repo-sam_r.json", {}).get("red") and WROTE == [], WROTE
 STATES[f"job-{len(JOBS)}"] = "done"
-R.watch_default(repo_r, default("SUCCESS", sha="e" * 40),
-                [mkpr(branch="autoland/red-cccccccccccc", number=9), mkpr(branch="autoland/red-dddddddddddd", number=8)], mine)
+fixes = [mkpr(branch="autoland/red-cccccccccccc", number=9), mkpr(branch="autoland/red-dddddddddddd", number=8)]
+# GitHub won't close it: the red is kept, the close tried again soon, and
+# the pass still leaves the PR alone.
+FAIL.append("pr close 9")
+C.WAKE.clear()
+assert R.watch_default(repo_r, default("SUCCESS", sha="e" * 40), fixes, mine) == {9}
+FAIL.remove("pr close 9")
+assert C.load("repo-sam_r.json", {}).get("red") and C.WAKE.get("sam/r"), C.WAKE
+WROTE.clear()
+assert R.watch_default(repo_r, default("SUCCESS", sha="e" * 40), fixes, mine) == {9}
 assert [x.split()[:3] for x in WROTE] == [["pr", "close", "9"]], WROTE
 assert not C.load("repo-sam_r.json", {}).get("red"), C.load("repo-sam_r.json", {})
 R.watch_default(repo_r, default("FAILURE"), [], mine)
 assert len(JOBS) == 4 and mine == [], (JOBS, mine)
+
+# In a pass the watcher goes first, and the steward doesn't handle a fix PR
+# it made obsolete, so one with settled reviews and green CI can't merge
+# before it's closed.
+kept_fns = (S.R.discover, S.R.settle_repo, S.R.publish, S.open_prs, S.R.unhook_gone, S.R.hook_projects,
+            S.R.watch_default, S.handle)
+order = []
+S.R.discover = lambda: [{"repo": "sam/r", "default": "main"}]
+S.R.settle_repo = lambda r, known: False
+S.R.publish = S.R.unhook_gone = lambda *a: None
+S.R.hook_projects = lambda repos: []
+S.open_prs = lambda owner, name: (info, [mkpr(branch="autoland/red-cccccccccccc", number=9), mkpr(number=10)])
+S.R.watch_default = lambda r, info, prs, digest: order.append("watch") or {9}
+S.handle = lambda repo, pr, info, digest: order.append(pr["number"])
+S.main()
+(S.R.discover, S.R.settle_repo, S.R.publish, S.open_prs, S.R.unhook_gone, S.R.hook_projects,
+ S.R.watch_default, S.handle) = kept_fns
+assert order == ["watch", 10], order
 
 # `status` (a dry run) reads the seal the real passes' judges use, and makes
 # none of its own while there's one.
