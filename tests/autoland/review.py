@@ -12,7 +12,7 @@ import subprocess
 import threading
 import time
 
-from harness import C, V, W, agent, agent_runs, boxes, http_said, sh, tmp
+from harness import STORE, C, V, W, agent, agent_runs, boxes, http_said, sh, tmp
 
 # GitHub, as a bare repo: main, and PR 5's head on refs/pull/5/head.
 origin, work = f"{tmp}/origin/sam/r.git", f"{tmp}/work"
@@ -219,13 +219,20 @@ assert "x-api-key: sk-test-0123456789\r\n" in sent and "the-gate-holds-it" not i
 assert "Host: api.deepseek.com\r\n" in sent and "Host: x" not in sent and sent.endswith("\r\n\r\n{}"), sent
 UPSTREAM.clear()
 assert "reasoningEffort: max" in run["overlay"] and "maxTokens: 384000" in run["overlay"]
-# In a sandbox that shows it its own snapshot and home, the store and /etc:
+# In a sandbox that shows it its own snapshot and home, and its closure of the store:
 # not the other snapshots, the queue, the answers or the other agent's home.
 # No network of its own: the gate is its only way out.
 box, = boxes()
 assert {"--unshare-all", "--die-with-parent"} <= set(box["args"]) and "--share-net" not in box["args"], box["args"]
 mounted = {(k, d) for k, src, d in box["binds"] if src == d}
 assert ("--ro-bind", snap) in mounted and ("--bind", run["env"]["DSH_HOME"]) in mounted, mounted
+# Of the store, only what it runs on: the whole store holds every flake's
+# sources this machine has read, private repos' included.
+assert all(("--ro-bind", p) in mounted for p in STORE), mounted
+assert not {"/nix/store", "/nix", "/etc", "/run", "/run/current-system"} & {d for k, src, d in box["binds"]}, box["binds"]
+# The machine's own /bin/sh and /usr/bin/env, as links into that closure.
+links = {(box["args"][i + 2], box["args"][i + 1]) for i, x in enumerate(box["args"]) if x == "--symlink"}
+assert links == {("/bin/sh", "/nix/store/dddd-bash/bin/sh"), ("/usr/bin/env", "/nix/store/eeee-coreutils/bin/env")}, links
 assert not any(d.startswith(f"{tmp}/state") and d != snap or d.startswith(f"{tmp}/home/") and not d.endswith("/.gitconfig") or d == f"{tmp}/home"
                for k, src, d in box["binds"]), box["binds"]
 # git trusts that one snapshot, which isn't the reviewers' own.

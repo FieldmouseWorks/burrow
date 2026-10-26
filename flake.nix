@@ -100,6 +100,21 @@
             ${pkgs.writeText "one-way.json" (builtins.toJSON self.nixosConfigurations.example.config.burrow.autoland.oneWay)}
           touch $out
         '';
+        # The steward on a machine without /bin/sh: its sandbox's store still
+        # builds.
+        autoland-shellless = let
+          machine = nixpkgs.lib.nixosSystem {
+            modules = [
+              self.nixosModules.autoland
+              ./examples/machine.nix
+              ({ lib, ... }: {
+                burrow.autoland = { enable = true; owners = [ "sam" ]; authors = [ "sam" ]; reviewers.codex.enable = true; };
+                burrow.events = { host = "example.org"; secretFile = "/run/secrets/burrow-webhook"; };
+                environment.binsh = lib.mkForce null;
+              })
+            ];
+          };
+        in builtins.head (builtins.filter (p: (p.name or "") == "autoland-steward") machine.config.environment.systemPackages);
         # burrow-events for real: deliveries, kicks and wake-ups starting a
         # handler's units through polkit.
         events-service = import ./tests/events.nix { inherit self pkgs; };
