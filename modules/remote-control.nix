@@ -64,10 +64,21 @@ let
 
   scan = pkgs.writeShellApplication {
     name = "claude-rc-scan";
-    runtimeInputs = [ pkgs.systemd pkgs.coreutils pkgs.gnugrep pkgs.procps pkgs.jq ];
+    runtimeInputs = [ pkgs.systemd pkgs.coreutils pkgs.findutils pkgs.gnugrep pkgs.procps pkgs.jq ];
     text = ''
       # Start a server for every project folder, stop the ones whose folder is gone,
       # and restart the stale ones once they hold no session.
+      #
+      # A path unit starts no scan while one runs: what changed meanwhile
+      # (a session's status, a folder added or gone) would go unseen. So a
+      # scan that saw either change goes round again.
+      sessions=$HOME/.claude/sessions
+      seen() {
+        { find "$sessions" -mindepth 1 -maxdepth 1 -printf '%p %T@\n' 2>/dev/null || true; } | sort
+        { find ${lib.escapeShellArg projectsDir} -mindepth 1 -maxdepth 1 -printf '%p\n' 2>/dev/null || true; } | sort
+      }
+      while :; do
+      before=$(seen)
       # A linked git worktree (its .git is a file) is a checkout of a project
       # that already has its own server, so it gets none; neither does a folder
       # matching burrow.remoteControl.skip.
@@ -103,27 +114,56 @@ let
       # the last ${toString idleMinutes} minutes, holds the server. Nobody is cut off mid-turn,
       # and an open but idle session doesn't keep a stale server forever.
       # Its transcript stays on disk, and claude.ai resumes it on the new one.
+      #
+      # A held server's scan comes again when what holds it changes: a
+      # session's status (the path unit on ~/.claude/sessions), or the end of
+      # its quiet spell, which this scan books (claude-rc-scan.timer), at the
+      # latest of its sessions' and the soonest of the servers'. One that is
+      # working, or says nothing, is looked at again a quiet spell from now:
+      # it may end without a word.
+      now=$(date +%s%3N)
+      quiet=$(( ${toString idleMinutes} * 60000 ))
+      # held SESSION: whether it holds its server; `until` says until when,
+      # at the soonest.
       held() {
-        local f=$HOME/.claude/sessions/$1.json status at
-        # No status to go by: leave it be.
+        local f=$sessions/$1.json status at
+        until=$(( now + quiet ))
         [ -r "$f" ] || return 0
         status=$(jq -r '.status // ""' "$f") || return 0
         at=$(jq -r '.statusUpdatedAt // 0' "$f") || return 0
         [ "$status" = busy ] && return 0
-        (( $(date +%s%3N) - at < ${toString idleMinutes} * 60000 ))
+        until=$(( at + quiet ))
+        (( now < until ))
       }
+      wake=
       for unit in "''${want[@]}"; do
         pid=$(systemctl --user show -p MainPID --value "$unit")
         [ "$pid" != 0 ] && [ -r "/proc/$pid/cmdline" ] || continue
         tr '\0' ' ' <"/proc/$pid/cmdline" | grep -qF ${serve}/bin/claude-rc-serve && continue
         busy=
+        last=0
         for rc in $(pgrep -P "$pid"); do
           # Any state but Z: a zombie is a session that already ended.
           for s in $(pgrep -P "$rc" -r D,I,R,S,T,t); do
-            if held "$s"; then busy=1; fi
+            if held "$s"; then
+              busy=1
+              (( until <= last )) || last=$until
+            fi
           done
         done
-        [ -n "$busy" ] || systemctl --user restart --no-block "$unit"
+        if [ -z "$busy" ]; then
+          systemctl --user restart --no-block "$unit"
+        elif [ -z "$wake" ] || (( last < wake )); then
+          wake=$last
+        fi
+      done
+      # The wake-up: a timer of its own for this unit, gone once it fires.
+      systemctl --user stop claude-rc-scan.timer 2>/dev/null || true
+      if [ -n "$wake" ]; then
+        systemd-run --user --quiet --unit=claude-rc-scan --on-active="$(( (wake - now) / 1000 + 1 ))s" \
+          --timer-property=AccuracySec=1s --timer-property=RemainAfterElapse=no
+      fi
+      [ "$(seen)" != "$before" ] || break
       done
     '';
   };
@@ -212,20 +252,36 @@ in
     systemd.user.services.claude-rc-scan = {
       description = "Start a Remote Control server for each project folder";
       wantedBy = [ "default.target" ];
-      unitConfig.ConditionUser = user;
+      unitConfig = {
+        ConditionUser = user;
+        # Its path units start it on every change, and a burst of them (many
+        # sessions at once) would hit the default start limit, which fails
+        # the path units too and leaves nothing watching. A start while one
+        # runs only joins it, so there's nothing to limit.
+        StartLimitIntervalSec = 0;
+      };
       serviceConfig = {
         Type = "oneshot";
         ExecStart = "${scan}/bin/claude-rc-scan";
       };
     };
 
-    # And every few minutes, for the stale servers that were busy last time.
-    systemd.user.timers.claude-rc-scan = {
-      wantedBy = [ "timers.target" ];
+    # A switch makes servers stale (a new claude-rc-serve), and leaves them
+    # running: its user activation scans for them.
+    system.userActivationScripts.claude-rc-scan = ''
+      if [ "$(id -un)" = ${lib.escapeShellArg user} ]; then
+        ${pkgs.systemd}/bin/systemctl --user start --no-block claude-rc-scan.service || true
+      fi
+    '';
+
+    # A session's status changing (working, done, gone) may free its stale
+    # server, or move the end of its quiet spell.
+    systemd.user.paths.claude-rc-scan-sessions = {
+      wantedBy = [ "default.target" ];
       unitConfig.ConditionUser = user;
-      timerConfig = {
-        OnActiveSec = "5min";
-        OnUnitActiveSec = "5min";
+      pathConfig = {
+        PathChanged = "%h/.claude/sessions";
+        Unit = "claude-rc-scan.service";
       };
     };
 

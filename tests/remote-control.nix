@@ -2,7 +2,10 @@
 # through the switch it confirms), so claude-rc-scan catches servers up: one
 # still on an old claude-rc-serve (its Claude Code, its permission mode)
 # restarts as soon as none of its sessions is in use, and not before. An open
-# session that has sat idle for half an hour isn't in use.
+# session that has sat idle for half an hour isn't in use. Nothing waits for a
+# timer: the switch's user activation scans, a session's status changing does,
+# and a scan that leaves a server waiting books the next one for when its
+# quiet spell ends.
 #
 #   nix build .#checks.x86_64-linux.remote-control -L
 { self, pkgs }:
@@ -60,23 +63,37 @@ pkgs.testers.runNixOSTest {
   };
 
   testScript = ''
+    import re
     import time
 
     def started(project):
         return machine.succeed(f"cat /data/dev/src/{project}/started").split()
 
-    def scan():
-        machine.succeed("systemctl --user -M dev@ start claude-rc-scan.service")
+    def session(project, status, ago):
+        # What Claude Code writes when a session's status changes.
+        pid = machine.succeed(f"cat /data/dev/src/{project}/session.pid").strip()
+        at = int(time.time() * 1000) - ago * 1000
+        machine.succeed(f"echo '{{\"pid\":{pid},\"status\":\"{status}\",\"statusUpdatedAt\":{at}}}' >/home/dev/.claude/sessions/{pid}.json")
+
+    def wake_in():
+        # Seconds until the booked scan, or None.
+        if machine.execute("systemctl --user -M dev@ is-active -q claude-rc-scan.timer")[0] != 0:
+            return None
+        out = machine.succeed("systemctl --user -M dev@ show -p NextElapseUSecMonotonic --value claude-rc-scan.timer").strip()
+        at = sum(float(n) * {"h": 3600, "min": 60, "s": 1, "ms": 0.001}[u] for n, u in re.findall(r"([\d.]+)(h|min|ms|s)", out))
+        return at - float(machine.succeed("cut -d' ' -f1 /proc/uptime"))
 
     machine.wait_for_unit("user@1001.service")
     for p in ("idle", "busy", "recent", "waiting", "left"):
         machine.wait_until_succeeds(f"grep -qx old /data/dev/src/{p}/started", timeout=120)
+    # Nothing is stale yet: no scan booked.
+    machine.wait_until_succeeds("systemctl --user -M dev@ show -p ActiveState --value claude-rc-scan.service | grep -qx inactive", timeout=60)
+    assert wake_in() is None, wake_in()
+    booted = time.time()
 
     machine.succeed("/run/current-system/specialisation/next/bin/switch-to-configuration test")
 
-    with subtest("a stale server with no session restarts on the new one"):
-        # The switch's own user activation may have run the scan already.
-        scan()
+    with subtest("the switch scans: a stale server with no session restarts on the new one"):
         machine.wait_until_succeeds("grep -qx new /data/dev/src/idle/started", timeout=60)
 
     with subtest("a stale server whose session sat idle for an hour restarts"):
@@ -87,14 +104,42 @@ pkgs.testers.runNixOSTest {
         for p in ("busy", "recent", "waiting"):
             assert started(p) == ["old"], (p, started(p))
 
-    with subtest("and restarts once the session is gone"):
-        machine.succeed("kill $(cat /data/dev/src/busy/session.pid)")
-        scan()
+    with subtest("and a scan is booked for the soonest end of a quiet spell"):
+        # recent and waiting went quiet 10 minutes before the servers started.
+        left = wake_in()
+        soonest = 1200 - (time.time() - booted)
+        assert left is not None and soonest - 300 < left < soonest + 5, (left, soonest)
+
+    with subtest("a session's status changing scans: one quiet for an hour frees its server"):
+        session("recent", "idle", 3600)
+        machine.wait_until_succeeds("grep -qx new /data/dev/src/recent/started", timeout=60)
+
+    with subtest("and so does a session ending"):
+        pid = machine.succeed("cat /data/dev/src/busy/session.pid").strip()
+        machine.succeed(f"kill {pid}; rm /home/dev/.claude/sessions/{pid}.json")
         machine.wait_until_succeeds("grep -qx new /data/dev/src/busy/started", timeout=60)
 
-    with subtest("a server already on the new one stays up"):
-        scan()
+    with subtest("the booked scan comes when the quiet spell ends"):
+        session("waiting", "waiting", 30 * 60 - 8)
+        time.sleep(3)
+        assert started("waiting") == ["old"], started("waiting")
+        left = wake_in()
+        assert left is not None and left < 10, left
+        machine.wait_until_succeeds("grep -qx new /data/dev/src/waiting/started", timeout=60)
+
+    with subtest("a burst of status changes leaves the scan's watchers watching"):
+        # Thirty in six seconds: past systemd's default start limit (5 in 10s).
+        pid = machine.succeed("cat /data/dev/src/waiting/session.pid").strip()
+        machine.succeed(f"for i in $(seq 30); do echo '{{\"pid\":{pid},\"status\":\"idle\",\"statusUpdatedAt\":0}}' >/home/dev/.claude/sessions/{pid}.json; sleep 0.2; done")
+        machine.succeed("systemctl --user -M dev@ is-active -q claude-rc-scan-sessions.path claude-rc-scan.path")
+        machine.succeed("mkdir /data/dev/src/later && chown dev:dev /data/dev/src/later")
+        machine.wait_until_succeeds("grep -qx new /data/dev/src/later/started", timeout=60)
+
+    with subtest("a server already on the new one stays up, and nothing is booked"):
+        session("waiting", "busy", 0)
         time.sleep(5)
         assert started("idle") == ["old", "new"], started("idle")
+        machine.wait_until_succeeds("systemctl --user -M dev@ show -p ActiveState --value claude-rc-scan.service | grep -qx inactive", timeout=60)
+        assert wake_in() is None, wake_in()
   '';
 }
