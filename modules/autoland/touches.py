@@ -95,6 +95,25 @@ def renovate_edited(repo, pr, st):
     return st["edited"]
 
 
+# Renovate's configuration block, the last section it writes before its
+# controls and footer. Anything above it can be a dependency's release
+# notes, so only the last one, matched whole, is Renovate's word.
+RENOVATE_CONFIG = "\n### Configuration\n"
+# Its config would merge the PR once CI is green (the rest say "Disabled by
+# config"), at any time: a repo with an automergeSchedule names its window
+# there instead, and Renovate merges it in that window.
+RENOVATE_MERGES_NOW = re.compile(
+    r"\n📅 \*\*Schedule\*\*:[^\n]*\n\n- Branch creation\n(?:  - [^\n]*\n)+"
+    r"- Automerge\n  - At any time \(no schedule defined\)\n\n🚦 \*\*Automerge\*\*: Enabled\.\n")
+
+
+def renovate_merges_now(pr):
+    """Whether Renovate's own block in the PR says it would merge it the
+    moment CI is green."""
+    _, sep, config = (pr["body"] or "").replace("\r\n", "\n").rpartition(RENOVATE_CONFIG)
+    return bool(sep) and RENOVATE_MERGES_NOW.match(config) is not None
+
+
 WORKFLOW_RE = re.compile(r"^\.github/workflows/[^/]+\.ya?ml$")
 # A line that only names an action at a ref: "uses: owner/action@sha # v4.1.0".
 # The ref is a sha, tag or branch and nothing else, so no shell can ride on it.

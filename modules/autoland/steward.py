@@ -46,7 +46,7 @@ import common as C
 import repos as R
 import reviewers as V
 from common import CFG, CONTEXT, DRY, MIN, STATE, load, log, repo_cfg, save, ts
-from touches import dep_kind, gate_edit, moved_from, one_way, renovate_edited
+from touches import dep_kind, gate_edit, moved_from, one_way, renovate_edited, renovate_merges_now
 from tasks import DEP_SEEN, JUDGMENT, MAJOR_VERDICT, REVIEWED, fix_task, judge_task, proof_task
 
 
@@ -214,13 +214,6 @@ def unland(repo, pr):
     GitHub didn't take it."""
     return not pr["autoMergeRequest"] or C.write(
         "pr", "merge", str(pr["number"]), "-R", repo, "--disable-auto", check=False) is not None
-
-
-# What Renovate writes in a PR its config would merge once CI is green (the
-# rest say "Disabled by config"), and that it may merge it at any time: a
-# repo with an automergeSchedule names its window there instead, and
-# Renovate merges it in that window.
-RENOVATE_AUTOMERGE = ("🚦 **Automerge**: Enabled.", "- Automerge\n  - At any time (no schedule defined)")
 
 
 def handle(repo, pr, repo_info, digest):
@@ -500,7 +493,7 @@ def handle(repo, pr, repo_info, digest):
     swept = fixed and ci == "red" and renovate
 
     # Dependency bumps: CI is the review. A minor one merges once CI is green
-    # (a Renovate one if its config would merge it: RENOVATE_AUTOMERGE);
+    # (a Renovate one if Renovate would merge it now: renovate_merges_now);
     # renovate-sweep fixes the red ones (and settles their threads) and
     # gives each major a verdict. Anything else that's open on one, a review
     # finding or a red Dependabot update, goes to a Claude job like any PR's.
@@ -558,9 +551,7 @@ def handle(repo, pr, repo_info, digest):
             # after green), but a Renovate one only if Renovate would merge it
             # now too: its config says so in the PR, and only Renovate's
             # commits are on it (an unknown is left to Renovate).
-            body = (pr["body"] or "").replace("\r\n", "\n")
-            if ((not renovate or (edited is False and all(x in body for x in RENOVATE_AUTOMERGE)))
-                    and st.get("landed") != head):
+            if (not renovate or (edited is False and renovate_merges_now(pr))) and st.get("landed") != head:
                 merge()
         # Renovate's stuck ones are renovate-sweep's; a Dependabot one that
         # still hasn't merged after a day is the owner's to look at.
