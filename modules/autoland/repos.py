@@ -7,6 +7,7 @@ import json
 import os
 import subprocess
 import tempfile
+import urllib.parse
 
 import common as C
 from common import CFG, CONTEXT, DEP_RE, DRY, load, log, repo_cfg, save, ts
@@ -145,11 +146,13 @@ def not_strict_protection(repo, default):
     """The same in the default branch's classic protection. Its checks are
     read only when the branch says it requires some: the endpoint is a 404
     otherwise."""
-    b = C.gh("api", f"repos/{repo}/branches/{default}", check=False)
+    # A slash in the name (release/1.0) is part of it, not of the path.
+    branch = urllib.parse.quote(default, safe="")
+    b = C.gh("api", f"repos/{repo}/branches/{branch}", check=False)
     checks = ((b.get("protection") or {}).get("required_status_checks") or {}) if isinstance(b, dict) else {}
     if checks.get("enforcement_level", "off") == "off":
         return
-    path = f"repos/{repo}/branches/{default}/protection/required_status_checks"
+    path = f"repos/{repo}/branches/{branch}/protection/required_status_checks"
     got = C.gh("api", path, check=False)
     if isinstance(got, dict) and got.get("strict"):
         log(f"{repo}: up-to-date branches off in {default}'s protection")

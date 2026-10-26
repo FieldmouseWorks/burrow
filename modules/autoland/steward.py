@@ -812,7 +812,9 @@ def main():
             obsolete = R.watch_default(r, info, prs, mine) or set()
             heads = set()
             seen_to = True
-            for pr in prs:
+            # Obsolete fixes first: their holds take back a queued merge
+            # before anything else this pass waits on.
+            for pr in sorted(prs, key=lambda pr: pr["number"] not in obsolete):
                 heads.add(pr["headRefName"])
                 live.add(V.snap_name(f"pr-{repo.replace('/', '_')}-{pr['number']}.json", pr["headRefOid"], pr["baseRefName"]))
                 try:

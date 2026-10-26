@@ -841,6 +841,13 @@ R.settle_repo({"repo": "sam/r", "private": False, "default": "main"}, {"sam/r"})
 del S.C.CFG["repos"]["sam/r"]["ruleset"]
 puts = [x for x in WROTE if "rulesets/" in x]
 assert len(puts) == 1 and puts[0].startswith("api -X PUT repos/sam/r/rulesets/2 "), WROTE
+# A default branch with a slash in its name is read and changed by its
+# encoded name.
+SETTINGS["repos/sam/r/branches/release%2F1.0"] = SETTINGS["repos/sam/r/branches/main"]
+SETTINGS["repos/sam/r/branches/release%2F1.0/protection/required_status_checks"] = {"strict": True}
+WROTE.clear()
+R.not_strict_protection("sam/r", "release/1.0")
+assert WROTE == ["api -X PATCH repos/sam/r/branches/release%2F1.0/protection/required_status_checks -F strict=false"], WROTE
 # Already off, or no classic checks at all: nothing to change.
 SETTINGS["repos/sam/r/rulesets/2"]["rules"][1]["parameters"]["strict_required_status_checks_policy"] = False
 SETTINGS["repos/sam/r/branches/main"] = {"protection": {"required_status_checks": {"enforcement_level": "off"}}}
@@ -946,8 +953,8 @@ assert [x.split()[:3] for x in WROTE] == [["pr", "close", "9"]], WROTE
 assert not C.load("repo-sam_r.json", {}).get("red"), C.load("repo-sam_r.json", {})
 
 # In a pass the watcher goes first, and the steward holds a fix PR it made
-# obsolete (passes.py has what holding does), so one with settled reviews
-# and green CI can't merge before it's closed.
+# obsolete (passes.py has what holding does) before any other PR, so one
+# with settled reviews and green CI can't merge before it's closed.
 kept_fns = (S.R.discover, S.R.settle_repo, S.R.publish, S.open_prs, S.R.unhook_gone, S.R.hook_projects,
             S.R.watch_default, S.handle)
 order = []
@@ -955,7 +962,7 @@ S.R.discover = lambda: [{"repo": "sam/r", "default": "main"}]
 S.R.settle_repo = lambda r, known: False
 S.R.publish = S.R.unhook_gone = lambda *a: None
 S.R.hook_projects = lambda repos: []
-S.open_prs = lambda owner, name: (info, [mkpr(branch="autoland/red-cccccccccccc", number=9), mkpr(number=10)])
+S.open_prs = lambda owner, name: (info, [mkpr(number=10), mkpr(branch="autoland/red-cccccccccccc", number=9)])
 S.R.watch_default = lambda r, info, prs, digest: order.append("watch") or {9}
 S.handle = lambda repo, pr, info, digest, obsolete: order.append((pr["number"], obsolete))
 S.main()
