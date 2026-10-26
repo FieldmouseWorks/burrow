@@ -73,6 +73,7 @@ let
       proofJobs = { };
       codex = true;
       deepseek = true;
+      skipPaths = [ ];
     };
     repos = cfg.repos;
     # Every repo's hook to burrow-events (repos.py), with what each of its
@@ -328,7 +329,8 @@ in
           Path regexes left out of the snapshot the reviewers read, on both
           sides of the diff: they're told such a file changed, not how, so a
           PR that changes one is judged before it lands. A directory matches
-          with a trailing slash.
+          with a trailing slash. A repo's own `skipPaths` (in `repos`) adds
+          to these.
         '';
       };
     };
@@ -358,7 +360,9 @@ in
         (more branch globs the cleanup never touches in this repo, on top of
         the machine's, for branches a repo keeps as evidence), codex and
         deepseek (false: that reviewer leaves this repo alone, and none of it
-        goes to it).
+        goes to it), skipPaths (more path regexes the reviewers never read in
+        this repo, on top of `reviewers.skipPaths`, never instead of them: what
+        the repo keeps private that isn't a secret anywhere else).
       '';
     };
   };

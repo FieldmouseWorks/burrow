@@ -95,23 +95,26 @@ def git(*args, cwd=None, input=None, env=None):
     return p.stdout
 
 
-def skipped(path):
-    return any(re.search(p, path) for p in CFG["skipPaths"])
+def skipped(repo, path):
+    """The machine's skipPaths, and the repo's own on top: a repo's list
+    only adds to the machine's, so nothing can take a secrets path back
+    into view."""
+    return any(re.search(p, path) for p in CFG["skipPaths"] + C.repo_cfg(repo)["skipPaths"])
 
 
-def hidden(path):
+def hidden(repo, path):
     """A secrets path: matched itself, or in a directory that is (a
     directory matches with a trailing slash)."""
     parts = path.split("/")
-    return skipped(path) or any(skipped("/".join(parts[:i]) + "/") for i in range(1, len(parts)))
+    return skipped(repo, path) or any(skipped(repo, "/".join(parts[:i]) + "/") for i in range(1, len(parts)))
 
 
-def rules(mirror, rev, paths):
+def rules(repo, mirror, rev, paths):
     """The `## Code Review Rules` of the AGENTS.md nearest each changed file,
     as `rev` (the base branch) has them: a PR can't rewrite its own rules.
     An AGENTS.md in a secrets path is never read: its rules would reach the
     reviewers in the prompt."""
-    have = {f for f in names(git("-C", mirror, "ls-tree", "-r", "-z", "--name-only", rev)) if not hidden(f)}
+    have = {f for f in names(git("-C", mirror, "ls-tree", "-r", "-z", "--name-only", rev)) if not hidden(repo, f)}
     wanted = set()
     for p in paths:
         d = p
@@ -177,7 +180,7 @@ def snapshot(repo, pr, key):
         status = out[i]
         if status[:1] in ("R", "C"):
             src, dst_ = out[i + 1], out[i + 2]
-            if hidden(src):
+            if hidden(repo, src):
                 moved.add(dst_)
             i += 3
         else:
@@ -198,7 +201,7 @@ def snapshot(repo, pr, key):
             subprocess.run(["git", "-C", mirror, "read-tree", rev], env=e, check=True, capture_output=True)
             paths = names(subprocess.run(["git", "-C", mirror, "ls-files", "-z"], env=e, check=True,
                                          capture_output=True).stdout)
-            gone = [p for p in paths if hidden(p) or p in moved]
+            gone = [p for p in paths if hidden(repo, p) or p in moved]
             if gone:
                 subprocess.run(["git", "-C", mirror, "update-index", "-z", "--force-remove", "--stdin"], env=e,
                                input="\0".join(gone).encode(errors="surrogateescape") + b"\0", check=True, capture_output=True)
@@ -220,8 +223,8 @@ def snapshot(repo, pr, key):
     git("-C", dst, "fetch", "-q", "--no-tags", mirror, f"refs/snap/{name}:refs/heads/review", env=bare)
     git("-C", mirror, "update-ref", "-d", f"refs/snap/{name}")
     git("-C", dst, "checkout", "-q", "review", env=bare)
-    meta = {"rules": rules(mirror, f"refs/base/{base}", [p for p in changed if not (hidden(p) or p in moved)]),
-            "secret": [shown(p) for p in changed if hidden(p) or p in moved]}
+    meta = {"rules": rules(repo, mirror, f"refs/base/{base}", [p for p in changed if not (hidden(repo, p) or p in moved)]),
+            "secret": [shown(p) for p in changed if hidden(repo, p) or p in moved]}
     save(f"{SNAP}/{name}.json", meta)
     return name, meta
 
