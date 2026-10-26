@@ -856,12 +856,20 @@ for pr in (dict(mkpr(branch="autoland/red-cccccccccccc"), isCrossRepository=True
            mkpr(branch="autoland/red-cccccccccccc", base="dev")):
     st_kept = C.load("repo-sam_r.json", {})
     R.watch_default(repo_r, default("FAILURE"), [pr], mine)
+    R.watch_default(repo_r, default("FAILURE"), [pr], mine)
     assert len(JOBS) == 2, (pr, JOBS)
     JOBS.pop()
     C.save("repo-sam_r.json", st_kept)
+# Ended with no PR: the first pass to see it looks again in a minute (the
+# PR may have gone up just after it read them), the second starts another.
+C.WAKE.clear()
+R.watch_default(repo_r, default("ERROR", sha="d" * 40), [], mine)
+assert len(JOBS) == 1 and C.WAKE.get("sam/r") == C.NOW + 60, (JOBS, C.WAKE)
 R.watch_default(repo_r, default("ERROR", sha="d" * 40), [], mine)
 assert len(JOBS) == 2 and "d" * 40 in JOBS[1], JOBS
 STATES["job-2"] = "done"
+R.watch_default(repo_r, default("FAILURE", sha="d" * 40), [], mine)
+assert len(JOBS) == 2 and mine == [], mine
 R.watch_default(repo_r, default("FAILURE", sha="d" * 40), [], mine)
 assert len(JOBS) == 2 and mine and mine[0][0] == "The default branch is red", mine
 mine.clear()

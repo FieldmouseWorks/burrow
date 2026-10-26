@@ -157,7 +157,8 @@ def watch_default(r, info, prs, digest):
     two PRs that broke it together get undone: a Claude job finds the
     cause and opens a PR from RED_BRANCH that reverts or fixes it, which
     lands like any other. Nothing more while that job works or its PR is
-    open; a second job if it's still red after, then the owner."""
+    open; a second job if it's still red after (seen on two passes), then
+    the owner."""
     repo = r["repo"]
     target = (info.get("defaultBranchRef") or {}).get("target") or {}
     sha, state = target.get("oid"), (target.get("statusCheckRollup") or {}).get("state")
@@ -179,6 +180,13 @@ def watch_default(r, info, prs, digest):
     fix = RED_BRANCH + (red.get("at") or "")[:12]
     if red.get("at") and any(pr["headRefName"] == fix and pr["baseRefName"] == r["default"] and C.acted_on(pr)
                              for pr in prs):
+        return
+    # Its job ended with no PR to show. Seen on two passes: this one may
+    # have read the PRs just before the job opened its own.
+    if red.get("job") and not red.get("ended"):
+        red["ended"] = True
+        save(key, st)
+        C.wake(repo, C.NOW + 60)
         return
     if red.get("jobs", 0) >= 2:
         digest.append(("The default branch is red", line, "two Claude jobs ended with it still red"))
