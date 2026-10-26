@@ -6,6 +6,7 @@ and burrow-events' kick port; and PRs shaped like its query's."""
 import http.server
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -169,15 +170,17 @@ def sh(*a, cwd=None):
 
 head = "a" * 40
 WROTE, JOBS, POSTED = [], [], []
-COMMITS = {}  # a PR's commits' author emails, by number, as `pr view --json commits` gives them
+COMMITS = {}  # a PR's commits' (author, committer) emails, by number; one email is both
 PR_DIFF = {"v": ""}  # what `gh pr diff` gives
 
 
 def gh_stub(*a, **k):
     if a[:2] == ("api", "user"):
         return "sam"
-    if a[:2] == ("pr", "view") and "commits" in a:
-        return {"commits": [{"authors": [{"email": e}]} for e in COMMITS.get(int(a[2]), ["bot@renovateapp.com"])]}
+    m = re.fullmatch(r"repos/sam/r/pulls/(\d+)/commits\?per_page=100", a[1]) if a[:1] == ("api",) and len(a) > 1 else None
+    if m:
+        return [{"commit": {"author": {"email": e[0]}, "committer": {"email": e[1]}}}
+                for e in ((x, x) if isinstance(x, str) else x for x in COMMITS.get(int(m.group(1)), ["bot@renovateapp.com"]))]
     if a[:2] == ("api", "repos/sam/r"):
         return {"allow_auto_merge": True, "delete_branch_on_merge": True, "allow_squash_merge": True}
     if a[:2] == ("pr", "diff"):

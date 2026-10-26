@@ -538,10 +538,17 @@ status, _ = run(mkpr(body=renovate_body(window="Before 5am", notes="```\n" + ren
 assert "state=success" in status and not merged() and JOBS == []
 # Whose commits are on it couldn't be read: it could carry a Claude job's fix.
 fresh_pr_state()
-C.gh = lambda *a, **k: None if a[:2] == ("pr", "view") else gh_stub(*a, **k)
+C.gh = lambda *a, **k: None if a[1:2] == ("repos/sam/r/pulls/9/commits?per_page=100",) else gh_stub(*a, **k)
 status, _ = run(mkpr(body=renovate_body(), **renovate_minor), 900)
 C.gh = gh_stub
 assert "state=success" in status and not merged() and JOBS == []
+# A Claude job's amend keeps Renovate as the author, not the committer.
+fresh_pr_state()
+COMMITS[9] = [("bot@renovateapp.com", "claude@remi")]
+status, _ = run(mkpr(body=renovate_body(), **renovate_minor), 900)
+del COMMITS[9]
+assert not merged(), WROTE
+fresh_pr_state()
 status, _ = run(mkpr(body=renovate_body().replace("\n", "\r\n"), **renovate_minor), 900)
 assert "state=success" in status and JOBS == []
 assert any(x.startswith("pr merge 9") and "--match-head-commit " + head in x for x in WROTE), WROTE

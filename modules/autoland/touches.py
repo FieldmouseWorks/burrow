@@ -76,21 +76,23 @@ def dep_kind(pr):
 
 
 def renovate_edited(repo, pr, st):
-    """Whether a Renovate branch has a commit Renovate didn't write (a Claude
-    job's fix). Renovate won't merge a branch edited like that. Asked once
-    per head; None when it can't be told (no Renovate address, or the ask
-    failed: asked again next pass), which is never a branch to merge
-    unreviewed."""
+    """Whether a Renovate branch has a commit Renovate didn't write or commit
+    (a Claude job's fix, an amend of Renovate's commit included). Renovate
+    won't merge a branch edited like that. Asked once per head; None when it
+    can't be told (no Renovate address, the ask failed and is asked again
+    next pass, or too many commits to read), which is never a branch to
+    merge unreviewed."""
     if not pr["headRefName"].startswith("renovate/"):
         return False
     if not CFG["renovateEmail"]:
         return None
     if st.get("editedHead") != pr["headRefOid"]:
-        got = C.gh("pr", "view", str(pr["number"]), "-R", repo, "--json", "commits", check=False)
-        if not got:
+        got = C.gh("api", f"repos/{repo}/pulls/{pr['number']}/commits?per_page=100", check=False)
+        # Only the first 100 come back.
+        if not isinstance(got, list) or not got or len(got) >= 100:
             return None
-        st["edited"] = any(a.get("email") != CFG["renovateEmail"]
-                           for c in got["commits"] for a in c["authors"])
+        st["edited"] = any((c["commit"].get(who) or {}).get("email") != CFG["renovateEmail"]
+                           for c in got for who in ("author", "committer"))
         st["editedHead"] = pr["headRefOid"]
     return st["edited"]
 
