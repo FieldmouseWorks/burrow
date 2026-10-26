@@ -933,6 +933,17 @@ assert [x.split()[:3] for x in WROTE] == [["pr", "close", "9"]], WROTE
 assert not C.load("repo-sam_r.json", {}).get("red"), C.load("repo-sam_r.json", {})
 R.watch_default(repo_r, default("FAILURE"), [], mine)
 assert len(JOBS) == 4 and mine == [], (JOBS, mine)
+# Its job ends green with no PR seen: the red is kept for one more look,
+# since its PR may have gone up just after the PRs were read. On that look
+# it's there, and closed.
+STATES[f"job-{len(JOBS)}"] = "done"
+C.WAKE.clear()
+assert R.watch_default(repo_r, default("SUCCESS", sha="e" * 40), [], mine) == set()
+assert C.load("repo-sam_r.json", {}).get("red") and C.WAKE.get("sam/r") == C.NOW + 60, C.WAKE
+WROTE.clear()
+assert R.watch_default(repo_r, default("SUCCESS", sha="e" * 40), opened, mine) == {9}
+assert [x.split()[:3] for x in WROTE] == [["pr", "close", "9"]], WROTE
+assert not C.load("repo-sam_r.json", {}).get("red"), C.load("repo-sam_r.json", {})
 
 # In a pass the watcher goes first, and the steward doesn't handle a fix PR
 # it made obsolete, so one with settled reviews and green CI can't merge

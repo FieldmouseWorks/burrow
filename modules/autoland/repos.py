@@ -186,6 +186,14 @@ def watch_default(r, info, prs, digest):
         # has opened. Once it has ended, its PR, if one is open, isn't needed.
         if working:
             return {pr["number"] for pr in open_fix}
+        # Ended with no PR to show: as when red, seen on two passes before
+        # the red is forgotten, since this one may have read the PRs just
+        # before the job opened its own.
+        if not open_fix and red.get("job") and not red.get("ended"):
+            red["ended"] = True
+            save(key, st)
+            C.wake(repo, C.NOW + 60)
+            return set()
         unclosed = False
         for pr in open_fix:
             log(f"{repo}: closing #{pr['number']}, {r['default']} is green again without it")
