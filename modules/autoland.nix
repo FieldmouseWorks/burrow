@@ -517,7 +517,7 @@ in
           ProtectSystem = "strict";
           ProtectHome = true;
           PrivateTmp = true;
-          ReadWritePaths = [ reviewerHome "${reviewDir}/queue" "${reviewDir}/done" "${reviewDir}/account" ];
+          ReadWritePaths = [ reviewerHome "${reviewDir}/queue" "${reviewDir}/done" "${reviewDir}/account" "${reviewDir}/sessions" ];
         } // lib.optionalAttrs rv.deepseek.enable {
           LoadCredential = "deepseek:${rv.deepseek.envFile}";
         };
@@ -525,13 +525,19 @@ in
     };
     systemd.paths.autoland-review = lib.mkIf (!cfg.dryRun) {
       wantedBy = [ "paths.target" ];
-      pathConfig.DirectoryNotEmpty = "${reviewDir}/queue";
+      # A review to do, or a closed PR's sessions to delete.
+      pathConfig = {
+        DirectoryNotEmpty = "${reviewDir}/queue";
+        PathExistsGlob = "${reviewDir}/sessions/.gone-*";
+      };
     };
 
     # The steward's state, and the reviews: it queues them and takes the
     # snapshots; the reviewers' user reads those, answers in done/, takes
-    # what it answered off the queue and notes its accounts' balances in
-    # account/. The clones the snapshots come from are the steward's alone.
+    # what it answered off the queue, notes its accounts' balances in
+    # account/ and keeps each open PR's sessions in sessions/, which the
+    # steward marks gone when the PR closes. The clones the snapshots come
+    # from are the steward's alone.
     systemd.tmpfiles.settings.burrow = let
       dir = mode: group: { d = { inherit mode user group; }; };
     in {
@@ -540,6 +546,7 @@ in
       "${reviewDir}/queue" = dir "2770" reviewer;
       "${reviewDir}/done" = dir "2770" reviewer;
       "${reviewDir}/account" = dir "2770" reviewer;
+      "${reviewDir}/sessions" = dir "2770" reviewer;
       "${reviewDir}/snap" = dir "2750" reviewer;
       "${reviewDir}/git" = dir "0700" account.group;
     };

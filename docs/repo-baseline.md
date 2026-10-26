@@ -43,7 +43,10 @@ change nothing else in the same PR.
    login, and the steward posts its findings as review threads marked as
    that reviewer's. A look at a head the PR has since moved past still
    finishes, and its findings are posted on the commit it read, so they go
-   into the next push. One whose usage runs out is left out until it's
+   into the next push. Each reviewer keeps one session per PR: every look
+   resumes the one before, told which head it last read, and still judges
+   the whole change at the new head. A PR's sessions are deleted for good
+   once it merges or closes. One whose usage runs out is left out until it's
    back, and PRs settle on the others meanwhile; DeepSeek's balance running
    low is listed for the owner first.
 3. Whoever opened the PR fixes each finding, or replies with why not, and

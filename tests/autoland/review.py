@@ -216,8 +216,9 @@ def queue_and_work(r):
 # harness's settings for a review, and the prompt carrying the base's rules,
 # its own earlier findings with the authors' replies, and the secrets it can't see.
 # Its API is the gate, which puts the key in: the agent never has it. Any
-# other way out is refused. Its home is new for each review, with only the
-# machine's settings for it: not the sessions of the reviews before.
+# other way out is refused. Its home is its PR's session, with only the
+# machine's settings for it: not the reviewers' own sessions, nor any other
+# PR's.
 os.makedirs(f"{tmp}/home/.dsh/profiles/headless")
 os.makedirs(f"{tmp}/home/.dsh/sessions")
 with open(f"{tmp}/home/.dsh/profiles/headless/cordis.patch.yml", "w") as f:
@@ -233,9 +234,13 @@ agent(dsh={"answer": {"findings": [{"path": "src/app.py", "line": 3, "severity":
 back = queue_and_work("deepseek")
 assert back["result"] == "review", back
 run, = agent_runs()
-assert run["args"][:4] == ["--profile", "headless", "--patch", run["args"][3]] and run["args"][-1] == "-"
+assert run["args"] == ["--profile", "headless", "--patch", run["args"][3], "--json", "-"], run["args"]
 assert run["cwd"] == snap and run["env"]["DSH_PERMISSION_MODE"] == "read-only"
-assert run["home"] == ["profiles/headless/cordis.patch.yml"] and not os.path.exists(run["env"]["DSH_HOME"]), run["home"]
+session = f"{tmp}/state/{V.SESSIONS}/{V.session_name('deepseek', name)}"
+assert run["env"]["DSH_HOME"] == f"{session}/home" and not run["resumed"], run["env"]
+assert run["home"] == ["profiles/headless/cordis.patch.yml", f"sessions/{run['session']}"], run["home"]
+# The session stays for the PR's next look, which resumes it.
+assert json.load(open(f"{session}/look.json")) == {"id": run["session"], "head": pr_head}
 assert run["env"]["DSH_TELEMETRY_MODE"] == "DISABLED" and "sk-test-0123456789" not in json.dumps(run), run["env"]
 assert re.fullmatch(r"http://127\.0\.0\.1:\d+/anthropic", run["env"]["DEEPSEEK_BASE_URL"]), run["env"]
 assert "GH_TOKEN" not in run["env"] and "ghp_" not in json.dumps(run["env"]), run["env"]
@@ -258,19 +263,21 @@ assert "reasoningEffort: max" in run["overlay"] and "maxTokens: 384000" in run["
 # No network of its own: the gate is its only way out.
 box, = boxes()
 assert {"--unshare-all", "--die-with-parent"} <= set(box["args"]) and "--share-net" not in box["args"], box["args"]
-mounted = {(k, d) for k, src, d in box["binds"] if src == d}
-assert ("--ro-bind", snap) in mounted and ("--bind", run["env"]["DSH_HOME"]) in mounted, mounted
+binds = [tuple(b) for b in box["binds"]]
+mounted = {(k, d) for k, src, d in binds if src == d}
+assert ("--ro-bind", snap, W.CHECKOUT) in binds and ("--bind", run["env"]["DSH_HOME"]) in mounted, binds
 # Of the store, only what it runs on: the whole store holds every flake's
 # sources this machine has read, private repos' included.
 assert all(("--ro-bind", p) in mounted for p in STORE), mounted
-assert not {"/nix/store", "/nix", "/etc", "/run", "/run/current-system"} & {d for k, src, d in box["binds"]}, box["binds"]
+assert not {"/nix/store", "/nix", "/etc", "/run", "/run/current-system"} & {d for k, src, d in binds}, binds
 # The machine's own /bin/sh and /usr/bin/env, as links into that closure.
 links = {(box["args"][i + 2], box["args"][i + 1]) for i, x in enumerate(box["args"]) if x == "--symlink"}
 assert links == {("/bin/sh", "/nix/store/dddd-bash/bin/sh"), ("/usr/bin/env", "/nix/store/eeee-coreutils/bin/env")}, links
-assert not any(d.startswith(f"{tmp}/state") and d != snap or d.startswith(f"{tmp}/home/") and not d.endswith("/.gitconfig") or d == f"{tmp}/home"
-               for k, src, d in box["binds"]), box["binds"]
+assert not any(src.startswith(f"{tmp}/state") and src not in (snap, run["env"]["DSH_HOME"])
+               or d.startswith(f"{tmp}/home/") and not d.endswith("/.gitconfig") or d == f"{tmp}/home"
+               for k, src, d in binds), binds
 # git trusts that one snapshot, which isn't the reviewers' own.
-assert box["gitconfig"] == [f"[safe]\n\tdirectory = {snap}\n"], box["gitconfig"]
+assert box["gitconfig"] == [f"[safe]\n\tdirectory = {W.CHECKOUT}\n"], box["gitconfig"]
 assert "- id: agent-instructions\n  disabled: true" in run["overlay"] and "- id: tool-web\n  disabled: true" in run["overlay"]
 p = run["prompt"]
 assert "never call eval" in p and "root rule" in p and "eval is fine" not in p
@@ -294,11 +301,13 @@ back = queue_and_work("codex")
 assert back == {"result": "review", "answer": {"findings": [], "summary": "ok"}, "at": back["at"], "head": pr_head, "base": "main"}, back
 run, = agent_runs()
 a = run["args"]
-assert a[0] == "exec" and a[a.index("--cd") + 1] == snap and "--sandbox" not in a
+assert a[0] == "exec" and a[a.index("--cd") + 1] == W.CHECKOUT and "--sandbox" not in a and "--json" in a
+assert run["cwd"] == snap and not run["resumed"], run
 assert 'default_permissions="review"' in a, a
-assert f'permissions.review.filesystem={{":root"="read", "{tmp}/home/.codex"="none"}}' in a, a
-assert "project_doc_max_bytes=0" in a and "model_reasoning_effort=high" in a and "--output-schema" in a and "--ephemeral" in a
-assert run["env"]["CODEX_HOME"] == f"{tmp}/home/.codex" and "GH_TOKEN" not in run["env"]
+home = f"{tmp}/state/{V.SESSIONS}/{V.session_name('codex', name)}/home"
+assert f'permissions.review.filesystem={{":root"="read", "{home}"="none", "{tmp}/home/.codex"="none"}}' in a, a
+assert "project_doc_max_bytes=0" in a and "model_reasoning_effort=high" in a and "--output-schema" in a and "--ephemeral" not in a
+assert run["env"]["CODEX_HOME"] == home and "GH_TOKEN" not in run["env"]
 assert re.fullmatch(r"http://127\.0\.0\.1:\d+", run["env"]["HTTPS_PROXY"]), run["env"]
 said = http_said()
 assert said[0].startswith("HTTP/1.1 200 Connection established\r\n\r\n") and said[0].endswith("ok"), said
@@ -306,7 +315,8 @@ assert [x.split("\r\n")[0] for x in said[1:]] == ["HTTP/1.1 403 Forbidden"] * 3,
 assert UPSTREAM == [("chatgpt.com", False, "hello")], UPSTREAM
 UPSTREAM.clear()
 box, = boxes()
-assert ("--bind", f"{tmp}/home/.codex", f"{tmp}/home/.codex") in [tuple(b) for b in box["binds"]]
+assert ("--bind", home, home) in [tuple(b) for b in box["binds"]]
+assert not any(d == f"{tmp}/home/.codex" for k, src, d in box["binds"]), box["binds"]
 assert not any(d.startswith(f"{tmp}/home/.dsh") for k, src, d in box["binds"]), box["binds"]
 assert "codex's" in run["prompt"] and "Not a bug" not in run["prompt"]
 
@@ -371,6 +381,7 @@ assert back["result"] == "error" and "something else" in back["error"], back
 # Nor in a failure, whole or cut in half: not in the journal, not in what's
 # kept for the next pass.
 token = "codexREFRESHtokenQWERTYzxcvb"
+os.makedirs(f"{tmp}/home/.codex", exist_ok=True)
 with open(f"{tmp}/home/.codex/auth.json", "w") as f:
     json.dump({"tokens": {"refresh_token": token}}, f)
 for r, do in (("codex", {"rc": 2, "err": f"panic: {token} " + "x" * 280}),
@@ -478,6 +489,134 @@ assert done == sorted(done), done
 for x in os.listdir(f"{tmp}/state/{V.DONE}"):
     os.remove(f"{tmp}/state/{V.DONE}/{x}")
 agent()
+
+# Every look at a PR resumes its session, on whichever head: told where it
+# last looked, and still the verdict on the whole change.
+def requeue(r, head=pr_head, snap_name=name, number=5):
+    V.queue("sam/r", snap_pr, "pr-sam_r-5.json", r)
+    entry = V.item_name("pr-sam_r-5.json", r, pr_head, "main")
+    item = json.load(open(f"{tmp}/state/{V.QUEUE}/{entry}.json"))
+    os.remove(f"{tmp}/state/{V.QUEUE}/{entry}.json")
+    later = f"{r}--{V.snap_name(f'pr-sam_r-{number}.json', head, 'main')}.json"
+    C.save(f"{V.QUEUE}/{later}", {**item, "headRefOid": head, "snap": snap_name, "number": number})
+    return later
+
+
+def look(r, snap_name=name):
+    return json.load(open(f"{tmp}/state/{V.SESSIONS}/{V.session_name(r, snap_name)}/look.json"))
+
+
+newer = "f" * 40
+for r in ("deepseek", "codex"):
+    first = look(r)["id"]
+    requeue(r, newer)
+    W.work()
+    run, = agent_runs()
+    assert run["resumed"] and run["session"] == first, run
+    p = run["prompt"]
+    assert p.startswith("This continues your review of this PR.") and "Review the whole change as it stands at HEAD" in p, p
+    assert f"Your last look was at {pr_head[:12]}, and the PR's head is now {newer[:12]}." in p, p
+    assert "Find them all in this one look." in p and "#5 in sam/r" in p, p
+    if r == "codex":
+        assert run["args"][:2] == ["exec", "resume"] and run["args"][-2:] == [first, "-"] and "--cd" not in run["args"], run["args"]
+    else:
+        assert run["args"][run["args"].index("--session-id") + 1] == first, run["args"]
+    assert look(r) == {"id": first, "head": newer}, look(r)
+    # Again on the same head (its findings answered, say): the same session.
+    requeue(r, newer)
+    agent()
+    W.work()
+    run, = agent_runs()
+    assert run["session"] == first and "The PR's head is the one you last looked at." in run["prompt"], run
+    # A session that won't resume (lost) fails that look, and the next
+    # starts the PR's next session.
+    for x in os.listdir(f"{tmp}/state/{V.SESSIONS}/{V.session_name(r, name)}/home/sessions"):
+        os.remove(f"{tmp}/state/{V.SESSIONS}/{V.session_name(r, name)}/home/sessions/{x}")
+    requeue(r, newer)
+    agent()
+    W.work()
+    assert not os.path.exists(f"{tmp}/state/{V.SESSIONS}/{V.session_name(r, name)}/look.json")
+    requeue(r, newer)
+    agent()
+    W.work()
+    run, = agent_runs()
+    assert not run["resumed"] and look(r)["id"] == run["session"] != first, run
+    agent()
+for x in os.listdir(f"{tmp}/state/{V.DONE}"):
+    os.remove(f"{tmp}/state/{V.DONE}/{x}")
+# Another PR's look has a session of its own, and never sees this one's.
+other = V.snap_name("pr-sam_r-6.json", pr_head, "main")
+shutil.copytree(snap, f"{tmp}/state/{V.SNAP}/{other}", symlinks=True)
+requeue("deepseek", pr_head, other, 6)
+boxes()
+W.work()
+run, = agent_runs()
+mine = f"{tmp}/state/{V.SESSIONS}/{V.session_name('deepseek', name)}"
+assert not run["resumed"] and run["env"]["DSH_HOME"] == f"{tmp}/state/{V.SESSIONS}/{V.session_name('deepseek', other)}/home", run
+box, = boxes()
+assert not any(src.startswith(mine) for k, src, d in box["binds"]), box["binds"]
+# One look at a time in a session: a PR's second head waits for the look
+# at its first, then resumes its session.
+agent(dsh={"sleep": 2})
+requeue("deepseek", "a" * 40), requeue("deepseek", "b" * 40)
+W.work()
+one, two = agent_runs()
+assert two["began"] - one["began"] >= 2, (one["began"], two["began"])
+assert two["resumed"] and two["session"] == one["session"], (one, two)
+for x in os.listdir(f"{tmp}/state/{V.DONE}"):
+    os.remove(f"{tmp}/state/{V.DONE}/{x}")
+agent()
+# A refresh Codex saves as a new file in the PR's session goes back to the
+# reviewers' login, which every session links to.
+with open(f"{tmp}/home/.codex/auth.json", "w") as f:
+    f.write('{"tokens": {"refresh_token": "old"}}')
+requeue("codex", newer)
+agent(codex={"relogin": '{"tokens": {"refresh_token": "new"}}'})
+W.work()
+link = f"{tmp}/state/{V.SESSIONS}/{V.session_name('codex', name)}/home/auth.json"
+assert os.readlink(link) == f"{tmp}/home/.codex/auth.json", link
+assert json.load(open(f"{tmp}/home/.codex/auth.json")) == {"tokens": {"refresh_token": "new"}}
+# The machine's settings for Codex: linked into the session, and what the
+# link points at is in the sandbox too (read-only), or it'd dangle there.
+with open(f"{tmp}/home/.codex/config.toml", "w") as f:
+    f.write('model = "set-by-the-machine"\n')
+boxes()
+requeue("codex", newer)
+agent()
+W.work()
+assert os.readlink(f"{os.path.dirname(link)}/config.toml") == f"{tmp}/home/.codex/config.toml"
+box, = boxes()
+assert ("--ro-bind", f"{tmp}/home/.codex/config.toml", f"{tmp}/home/.codex/config.toml") in [tuple(b) for b in box["binds"]], box["binds"]
+os.remove(f"{tmp}/home/.codex/config.toml")
+# And one saved while its PR closed, its session marked gone under it.
+requeue("codex", newer)
+agent(codex={"relogin": '{"tokens": {"refresh_token": "newer"}}', "gone": True})
+W.work()
+assert json.load(open(f"{tmp}/home/.codex/auth.json")) == {"tokens": {"refresh_token": "newer"}}
+assert not os.path.exists(os.path.dirname(os.path.dirname(link))), "the gone session is deleted"
+requeue("codex", newer)  # the PR's open again: a session of its own anew
+agent()
+W.work()
+os.remove(f"{tmp}/home/.codex/auth.json")
+for x in os.listdir(f"{tmp}/state/{V.DONE}"):
+    os.remove(f"{tmp}/state/{V.DONE}/{x}")
+agent()
+# A PR that closes (or is retargeted) takes its sessions with it, for good:
+# the sweep marks them gone, the reviewers' service deletes them. Another
+# repo's, not read by this pass, stay.
+retargeted = V.snap_name("pr-sam_r-5.json", pr_head, "release")
+elsewhere = V.snap_name("pr-sam_q-1.json", pr_head, "main")
+for s_ in (retargeted, elsewhere):
+    os.makedirs(f"{tmp}/state/{V.SESSIONS}/{V.session_name('codex', s_)}/home")
+os.chmod(f"{tmp}/state/{V.SESSIONS}/{V.session_name('deepseek', other)}/home", 0o500)  # agents keep their own modes
+V.sweep({"sam_r"}, {name})
+left = sorted(os.listdir(f"{tmp}/state/{V.SESSIONS}"))
+assert [x for x in left if not x.startswith(V.GONE)] == sorted(
+    [V.session_name("codex", name), V.session_name("deepseek", name), V.session_name("codex", elsewhere)]), left
+assert sorted(x.split("-", 2)[2] for x in left if x.startswith(V.GONE)) == sorted(
+    [V.session_name("deepseek", other), V.session_name("codex", retargeted)]), left
+W.work()
+assert sorted(os.listdir(f"{tmp}/state/{V.SESSIONS}")) == [x for x in left if not x.startswith(V.GONE)]
 
 # A snapshot that's gone (its head swept away meanwhile) is no review.
 shutil.rmtree(snap)
