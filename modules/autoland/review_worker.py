@@ -98,9 +98,11 @@ def env(**extra):
 
 
 def sandboxed(snap, home, t, names, argv):
-    """argv in a sandbox of its own (bubblewrap): it sees the store, /etc,
-    its snapshot (read-only), its own agent's home and its temp dir `t`, and
-    nothing else of the machine. The service's user can read every queued
+    """argv in a sandbox of its own (bubblewrap): it sees /etc, the store
+    paths it runs on (and no other: the store holds every repo this machine
+    has built, the paths a repo hides from the reviewers too), its snapshot
+    (read-only), its own agent's home and its temp dir `t`, and nothing else
+    of the machine. The service's user can read every queued
     head's snapshot and every answer, and an agent talked into reading
     another repo's would post it in this one's review.
 
@@ -113,7 +115,8 @@ def sandboxed(snap, home, t, names, argv):
     os.makedirs(home, exist_ok=True)
     with open(f"{t}/gitconfig", "w") as f:
         f.write(f"[safe]\n\tdirectory = {snap}\n")
-    ro = ["/nix/store", "/etc", "/bin", "/usr/bin", "/run/current-system"]
+    with open(CFG["reviewStore"]) as f:
+        ro = ["/etc", "/bin", "/usr/bin", *f.read().split()]
     return [CFG["sandbox"], "--unshare-all", "--die-with-parent", "--new-session",
             "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
             *[x for p in ro for x in ("--ro-bind-try", p, p)],

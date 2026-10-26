@@ -12,7 +12,7 @@ import subprocess
 import threading
 import time
 
-from harness import C, V, W, agent, agent_runs, boxes, http_said, sh, tmp
+from harness import C, STORE, V, W, agent, agent_runs, boxes, http_said, sh, tmp
 
 # GitHub, as a bare repo: main, and PR 5's head on refs/pull/5/head.
 origin, work = f"{tmp}/origin/sam/r.git", f"{tmp}/work"
@@ -219,10 +219,12 @@ assert "x-api-key: sk-test-0123456789\r\n" in sent and "the-gate-holds-it" not i
 assert "Host: api.deepseek.com\r\n" in sent and "Host: x" not in sent and sent.endswith("\r\n\r\n{}"), sent
 UPSTREAM.clear()
 assert "reasoningEffort: max" in run["overlay"] and "maxTokens: 384000" in run["overlay"]
-# In a sandbox that shows it its own snapshot and home, the store and /etc:
-# not the other snapshots, the queue, the answers or the other agent's home.
-# No network of its own: the gate is its only way out.
+# In a sandbox that shows it its own snapshot and home, the store paths it
+# runs on and /etc: not the other snapshots, the queue, the answers, the
+# other agent's home or the rest of the store (other repos' sources, their
+# hidden paths included). No network of its own: the gate is its only way out.
 box, = boxes()
+assert {d for k, src, d in box["binds"] if d.startswith("/nix/store")} == set(STORE), box["binds"]
 assert {"--unshare-all", "--die-with-parent"} <= set(box["args"]) and "--share-net" not in box["args"], box["args"]
 mounted = {(k, d) for k, src, d in box["binds"] if src == d}
 assert ("--ro-bind", snap) in mounted and ("--bind", run["env"]["DSH_HOME"]) in mounted, mounted

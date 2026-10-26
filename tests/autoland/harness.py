@@ -98,6 +98,12 @@ os.execv(a[cut + 1], a[cut + 1:])
 os.chmod(f"{tmp}/bwrap", 0o755)
 
 
+# The store paths the sandbox shows, out of a store that holds more.
+STORE = ["/nix/store/aaa-agents", "/nix/store/bbb-python3"]
+with open(f"{tmp}/store-paths", "w") as f:
+    f.write("".join(p + "\n" for p in STORE))
+
+
 def boxes():
     runs = [json.loads(x) for x in open(BOX_LOG)]
     open(BOX_LOG, "w").close()
@@ -143,6 +149,7 @@ with open(f"{tmp}/config.json", "w") as f:
         "skipPaths": ["(^|/)secrets?/", r"\.(pem|key|p12|pfx)$", r"(^|/)\.env(\..*)?$"],
         "agents": f"{tmp}/agents",
         "sandbox": f"{tmp}/bwrap",
+        "reviewStore": f"{tmp}/store-paths",
     }, f)
 os.environ["AUTOLAND_CONFIG"] = f"{tmp}/config.json"
 os.environ["CREDENTIALS_DIRECTORY"] = f"{tmp}/cred"

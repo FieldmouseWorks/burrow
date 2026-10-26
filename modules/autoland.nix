@@ -27,6 +27,17 @@ let
   reviewer = "autoland-review";
   reviewerHome = "${stateDir}/autoland-review";
   reviewDir = "${stateDir}/autoland/review";
+  # What the agents read the snapshot with, and bubblewrap for codex's own
+  # sandbox inside theirs.
+  reviewTools = with pkgs; [ bash git bubblewrap coreutils findutils gnugrep gnused diffutils ripgrep ];
+  # All the reviewers' sandbox sees of the store (review_worker.py): what
+  # runs in it and what that needs. The rest of the store holds every repo
+  # this machine has built, the parts a repo hides from the reviewers too.
+  reviewStore = pkgs.closureInfo {
+    rootPaths = [ agents stewardSrc pkgs.python3 config.security.pki.caBundle config.environment.binsh ]
+      ++ lib.optional (config.environment.usrbinenv != null) config.environment.usrbinenv
+      ++ reviewTools;
+  };
   codexLogin = pkgs.writeShellScriptBin "autoland-codex-login" ''
     # Codex reviews on the ChatGPT plan's login: a device code to approve in
     # a browser. Run again whenever the review digest says it's logged out.
@@ -91,6 +102,7 @@ let
     inherit (rv) skipPaths;
     agents = "${agents}/bin";
     sandbox = "${pkgs.bubblewrap}/bin/bwrap";
+    reviewStore = "${reviewStore}/store-paths";
     baselineTask = ''
       REPO is new, and doesn't meet the baseline every repo of ${config.burrow.owner}'s keeps yet. Read
       ${baselineDocs}/docs/repo-baseline.md and bring this repo up to its "Files" section: open one PR, ready for review (not a draft), that adds
@@ -438,9 +450,7 @@ in
         restartIfChanged = false;
         after = [ "network-online.target" ];
         wants = [ "network-online.target" ];
-        # What the agents read the snapshot with, and bubblewrap for codex's
-        # own sandbox inside theirs.
-        path = with pkgs; [ bash git bubblewrap coreutils findutils gnugrep gnused diffutils ripgrep ];
+        path = reviewTools;
         environment.HOME = reviewerHome;
         # The gate's TLS to the agents' APIs (autoland/egress.py).
         environment.SSL_CERT_FILE = config.security.pki.caBundle;
