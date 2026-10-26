@@ -23,6 +23,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -120,12 +121,13 @@ def env(**extra):
 CHECKOUT = "/review"
 
 
-def sandboxed(snap, home, t, names, argv, binds=()):
+def sandboxed(snap, home, t, names, argv, binds=(), ro=()):
     """argv in a sandbox of its own (bubblewrap): it sees the store paths it
     runs on (the agents, the tools and their closure, `box.store`), the
     machine's CA bundle, /bin/sh, /bin/bash and /usr/bin/env, /etc's passwd
     and group, its snapshot (read-only, at CHECKOUT), its PR's session
-    (`home`), its temp dir `t` and `binds`, and nothing else of the machine.
+    (`home`), its temp dir `t`, `binds` and `ro` (read-only), and nothing
+    else of the machine.
     The service's user can read every queued head's snapshot, every answer
     and every PR's session, and an agent talked into reading another repo's
     would post it in this one's review. Nor does it see the rest of the
@@ -153,6 +155,7 @@ def sandboxed(snap, home, t, names, argv, binds=()):
             *[x for at, to in box["links"].items() for x in ("--symlink", to, at)],
             "--ro-bind", snap, CHECKOUT, "--bind", home, home, "--bind", t, t,
             *[x for p in binds for x in ("--bind", p, p)],
+            *[x for p in ro for x in ("--ro-bind", p, p)],
             "--ro-bind", f"{t}/gitconfig", os.path.join(os.environ["HOME"], ".gitconfig"),
             "--chdir", CHECKOUT, "--", sys.executable, "-I", G.__file__, f"{t}/egress.sock", ",".join(names), "--", *argv]
 
@@ -177,6 +180,10 @@ def codex(snap, prompt, home, sid):
     for f in ("auth.json", "config.toml"):
         if os.path.exists(f"{login}/{f}") and not os.path.lexists(f"{home}/{f}"):
             os.symlink(f"{login}/{f}", f"{home}/{f}")
+    # The session as it is now, wherever it goes: a PR that closes while
+    # Codex looks has its session marked gone (reviewers.py `sweep`), and a
+    # refresh saved in it still goes back to the login.
+    held = os.open(home, os.O_RDONLY | os.O_DIRECTORY)
     with tempfile.TemporaryDirectory() as t:
         with open(f"{t}/schema.json", "w") as f:
             json.dump(SCHEMA, f)
@@ -192,13 +199,17 @@ def codex(snap, prompt, home, sid):
                 [f"{CFG['agents']}/codex", "exec", "--cd", CHECKOUT, "--color", "never", *flags, "-"])
         gate = G.Gate(f"{t}/egress.sock", CODEX_HOSTS)
         try:
-            # The login, where a refresh writes it.
+            # The login, where a refresh writes it, and the machine's settings.
             p = subprocess.run(sandboxed(snap, home, t, ["HTTPS_PROXY"], argv,
-                                         [f"{login}/auth.json"] if os.path.exists(f"{login}/auth.json") else []),
+                                         [f"{login}/auth.json"] if os.path.exists(f"{login}/auth.json") else [],
+                                         [f"{login}/config.toml"] if os.path.exists(f"{login}/config.toml") else []),
                                input=prompt, capture_output=True, text=True, env=env(CODEX_HOME=home))
         finally:
             gate.close()
-            keep_login(home, login)
+            try:
+                keep_login(held, login)
+            finally:
+                os.close(held)
         said = p.stderr + p.stdout
         if p.returncode != 0 and re.search(r"usage limit|usage_limit_reached", said, re.I):
             raise Out("its ChatGPT plan's usage is spent", time.time() + wait_for(said))
@@ -216,16 +227,22 @@ def codex(snap, prompt, home, sid):
 def keep_login(home, login):
     """The reviewers' login as Codex last saved it: one that saved it in
     place of the PR's link to it (a refresh written as a new file) puts it
-    back where every PR's session reads it."""
-    mine = f"{home}/auth.json"
-    if os.path.islink(mine) or not os.path.isfile(mine):
+    back where every PR's session reads it. `home` is the session's CODEX_HOME,
+    open (a directory fd), so a session renamed meanwhile is still the one read."""
+    try:
+        st = os.stat("auth.json", dir_fd=home, follow_symlinks=False)
+    except FileNotFoundError:
+        return
+    if not stat.S_ISREG(st.st_mode):
         return
     with LOGIN_LOCK:
-        shutil.copyfile(mine, f"{login}/auth.json.tmp")
+        with open("auth.json", "rb", opener=lambda p, fl: os.open(p, fl, dir_fd=home)) as src, \
+                open(f"{login}/auth.json.tmp", "wb") as dst:
+            shutil.copyfileobj(src, dst)
         os.chmod(f"{login}/auth.json.tmp", 0o600)
         os.replace(f"{login}/auth.json.tmp", f"{login}/auth.json")
-        os.remove(mine)
-        os.symlink(f"{login}/auth.json", mine)
+        os.remove("auth.json", dir_fd=home)
+        os.symlink(f"{login}/auth.json", "auth.json", dir_fd=home)
 
 
 def events(out):

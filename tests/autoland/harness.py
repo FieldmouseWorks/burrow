@@ -86,6 +86,11 @@ if "effort" in do and do["effort"] not in json.dumps(args) + (open(args[args.ind
 if do.get("rc"):
     print(do["err"], file=sys.stderr); sys.exit(do["rc"])
 out = do.get("say", "Looked.\\n" + json.dumps(do.get("answer", {{"findings": [], "summary": "fine"}})))
+if do.get("gone"):  # its PR closed meanwhile: the sweep marked its session gone
+    session = os.path.dirname(home)
+    gone = os.path.join(os.path.dirname(session), ".gone-0-" + os.path.basename(session))
+    os.rename(session, gone)
+    home = os.path.join(gone, "home")  # where the sandbox's bind still writes
 if do.get("relogin"):  # a refresh, saved as a new file where the login was
     os.remove(os.path.join(home, "auth.json"))
     open(os.path.join(home, "auth.json"), "w").write(do["relogin"])

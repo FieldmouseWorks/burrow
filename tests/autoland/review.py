@@ -571,6 +571,27 @@ W.work()
 link = f"{tmp}/state/{V.SESSIONS}/{V.session_name('codex', name)}/home/auth.json"
 assert os.readlink(link) == f"{tmp}/home/.codex/auth.json", link
 assert json.load(open(f"{tmp}/home/.codex/auth.json")) == {"tokens": {"refresh_token": "new"}}
+# The machine's settings for Codex: linked into the session, and what the
+# link points at is in the sandbox too (read-only), or it'd dangle there.
+with open(f"{tmp}/home/.codex/config.toml", "w") as f:
+    f.write('model = "set-by-the-machine"\n')
+boxes()
+requeue("codex", newer)
+agent()
+W.work()
+assert os.readlink(f"{os.path.dirname(link)}/config.toml") == f"{tmp}/home/.codex/config.toml"
+box, = boxes()
+assert ("--ro-bind", f"{tmp}/home/.codex/config.toml", f"{tmp}/home/.codex/config.toml") in [tuple(b) for b in box["binds"]], box["binds"]
+os.remove(f"{tmp}/home/.codex/config.toml")
+# And one saved while its PR closed, its session marked gone under it.
+requeue("codex", newer)
+agent(codex={"relogin": '{"tokens": {"refresh_token": "newer"}}', "gone": True})
+W.work()
+assert json.load(open(f"{tmp}/home/.codex/auth.json")) == {"tokens": {"refresh_token": "newer"}}
+assert not os.path.exists(os.path.dirname(os.path.dirname(link))), "the gone session is deleted"
+requeue("codex", newer)  # the PR's open again: a session of its own anew
+agent()
+W.work()
 os.remove(f"{tmp}/home/.codex/auth.json")
 for x in os.listdir(f"{tmp}/state/{V.DONE}"):
     os.remove(f"{tmp}/state/{V.DONE}/{x}")
