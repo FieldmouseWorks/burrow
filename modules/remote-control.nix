@@ -117,7 +117,7 @@ let
       #
       # A held server's scan comes again when what holds it changes: a
       # session's status (the path unit on ~/.claude/sessions), or the end of
-      # its quiet spell, which this scan books (claude-rc-scan.timer), at the
+      # its quiet spell, which this scan books (claude-rc-wake.timer), at the
       # latest of its sessions' and the soonest of the servers'. One that is
       # working, or says nothing, is looked at again a quiet spell from now:
       # it may end without a word.
@@ -157,22 +157,43 @@ let
           wake=$last
         fi
       done
-      # The wake-up: a timer of its own for this unit, gone once it fires.
-      systemctl --user stop claude-rc-scan.timer 2>/dev/null || true
+      # The wake-up: a timer of its own, gone once it fires, for claude-rc-wake.
+      systemctl --user stop claude-rc-wake.timer 2>/dev/null || true
       if [ -n "$wake" ]; then
         # From the clock now, not the scan's start: a slow scan books no later.
         # In milliseconds: a timer never fires early, so the scan it starts
         # finds the spell over, and whole seconds would add up to one late.
         left=$(( wake - $(date +%s%3N) ))
-        # A spell already over is this scan's to see, now. One that ends
-        # within the second gets the second: a timer that fires while this
-        # scan still runs only joins it, and is spent.
+        # A spell already over is this scan's to see, now.
         (( left > 0 )) || continue
-        (( left >= 1000 )) || left=1000
-        systemd-run --user --quiet --unit=claude-rc-scan --on-active="''${left}ms" \
+        systemd-run --user --quiet --unit=claude-rc-wake --on-active="''${left}ms" \
           --timer-property=AccuracySec=1s --timer-property=RemainAfterElapse=no
       fi
       [ "$(seen)" != "$before" ] || break
+      done
+    '';
+  };
+
+  # The booked scan. Its timer can fire while the scan that booked it still
+  # runs, and starting the scan then would only join that run, which looked
+  # before the spell ended: so it waits for any scan begun before it to end,
+  # then starts one. A scan begun since sees the spell over.
+  wake = pkgs.writeShellApplication {
+    name = "claude-rc-wake";
+    runtimeInputs = [ pkgs.systemd ];
+    text = ''
+      read -r up _ </proc/uptime
+      woke=$(( 10#''${up/./} * 10000 ))
+      while :; do
+        state=$(systemctl --user show -p ActiveState --value claude-rc-scan.service)
+        case $state in
+          inactive | failed)
+            exec systemctl --user start --no-block claude-rc-scan.service
+            ;;
+        esac
+        began=$(systemctl --user show -p InactiveExitTimestampMonotonic --value claude-rc-scan.service)
+        (( began < woke )) || exit 0
+        sleep 1
       done
     '';
   };
@@ -275,6 +296,15 @@ in
       serviceConfig = {
         Type = "oneshot";
         ExecStart = "${scan}/bin/claude-rc-scan";
+      };
+    };
+
+    systemd.user.services.claude-rc-wake = {
+      description = "Scan for stale Remote Control servers when a quiet spell ends";
+      unitConfig.ConditionUser = user;
+      serviceConfig = {
+        Type = "oneshot";
+        ExecStart = "${wake}/bin/claude-rc-wake";
       };
     };
 
