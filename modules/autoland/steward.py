@@ -94,12 +94,6 @@ query($id: ID!, $cursor: String) {
 """
 
 
-def acted_on(pr):
-    """Whether the steward does anything with the PR beyond saying it's not
-    its to do: not a draft, and from one of its authors."""
-    return not pr["isDraft"] and not pr["isCrossRepository"] and (pr["author"] or {}).get("login") in CFG["authors"]
-
-
 # Pages of older reviews, and of older comments, read for a PR: up to 1,000
 # of each. Anyone can comment on a public repo's PRs, and every event reads
 # them again, so a PR longer than that is the owner's (the cut in handle).
@@ -120,7 +114,7 @@ def open_prs(owner, name):
         if not page["pageInfo"]["hasNextPage"]:
             break
         cursor = page["pageInfo"]["endCursor"]
-    for pr in filter(acted_on, prs):
+    for pr in filter(C.acted_on, prs):
         for field, nodes in OLDER.items():
             for _ in range(OLDER_PAGES):
                 if not pr[field]["pageInfo"]["hasPreviousPage"]:
@@ -435,7 +429,7 @@ def handle(repo, pr, repo_info, digest):
         settle("pending", "Draft: work in progress, reviewed once it's marked ready")
         save(key, st)
         return
-    if not acted_on(pr):
+    if not C.acted_on(pr):
         settle("pending", f"Outside contribution: {CFG['owner']} reviews and merges it", "Outside contributions")
         save(key, st)
         return

@@ -849,6 +849,16 @@ assert len(JOBS) == 1, JOBS  # still running
 STATES["job-1"] = "done"
 R.watch_default(repo_r, default("FAILURE"), [mkpr(branch="autoland/red-cccccccccccc")], mine)
 assert len(JOBS) == 1, JOBS  # its PR is open
+# One from a fork, a draft or someone else, or to another branch, isn't it.
+for pr in (dict(mkpr(branch="autoland/red-cccccccccccc"), isCrossRepository=True),
+           mkpr(branch="autoland/red-cccccccccccc", draft=True),
+           dict(mkpr(branch="autoland/red-cccccccccccc"), author={"login": "mallory"}),
+           mkpr(branch="autoland/red-cccccccccccc", base="dev")):
+    st_kept = C.load("repo-sam_r.json", {})
+    R.watch_default(repo_r, default("FAILURE"), [pr], mine)
+    assert len(JOBS) == 2, (pr, JOBS)
+    JOBS.pop()
+    C.save("repo-sam_r.json", st_kept)
 R.watch_default(repo_r, default("ERROR", sha="d" * 40), [], mine)
 assert len(JOBS) == 2 and "d" * 40 in JOBS[1], JOBS
 STATES["job-2"] = "done"

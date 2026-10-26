@@ -205,6 +205,12 @@ def save(name, value):
             raise
 
 
+def acted_on(pr):
+    """Whether the steward does anything with the PR beyond saying it's not
+    its to do: not a draft, and from one of its authors."""
+    return not pr["isDraft"] and not pr["isCrossRepository"] and (pr["author"] or {}).get("login") in CFG["authors"]
+
+
 def repo_cfg(repo):
     """The defaults, with this repo's overrides from config.repos on top."""
     c = dict(CFG["defaults"])

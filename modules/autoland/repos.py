@@ -173,8 +173,13 @@ def watch_default(r, info, prs, digest):
     line = f"{repo} {r['default']} at {sha[:7]}"
     if red.get("job") and C.job_state(red["job"]) in (None, "queued", "running"):
         return
-    if any(pr["headRefName"].startswith(RED_BRANCH) for pr in prs):
-        return  # its PR is in the loop
+    # Its PR is in the loop: the one its task names, from the steward's own
+    # authors to this branch. Anyone can open a PR from a branch of that name
+    # on a fork, and that one holds nothing up.
+    fix = RED_BRANCH + (red.get("at") or "")[:12]
+    if red.get("at") and any(pr["headRefName"] == fix and pr["baseRefName"] == r["default"] and C.acted_on(pr)
+                             for pr in prs):
+        return
     if red.get("jobs", 0) >= 2:
         digest.append(("The default branch is red", line, "two Claude jobs ended with it still red"))
         return
