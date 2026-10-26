@@ -161,6 +161,23 @@ os.remove(f"{tmp}/state/{V.OUT}")
 status, _ = run(clean(sha=newer), 940)
 STUB["post"] = None
 assert os.listdir(DDIR) == [] and merged(), (os.listdir(DDIR), status)
+# Its look at this head is the same: kept while it's out, however often
+# GitHub turns it away, and the PR waits.
+fresh_pr_state()
+run(mkpr(), 0)
+run(mkpr(), 600)
+worker(deepseek={"result": "review", "answer": {"findings": [{"path": "a.py"}]}})
+C.save(V.OUT, {"deepseek": {"why": "balance", "until": C.ts(T0) + 86400}})
+STUB["post"] = RuntimeError("HTTP 502")
+for t in (650, 710, 770, 830):
+    status, digest = run(mkpr(reviews=[rv_review("codex", 0)]), t)
+    assert not merged() and f"Posting DeepSeek's review of {head[:7]}" in status, (t, WROTE)
+    assert V.item_name("pr-sam_r-5.json", "deepseek", head, "main") + ".json" in os.listdir(DDIR), t
+assert ("A review couldn't be posted", "[sam/r#5](u) t", f"DeepSeek's review of {head[:7]}, 4 tries") in digest, digest
+STUB["post"] = None
+status, _ = run(mkpr(reviews=[rv_review("codex", 0)]), 890)
+assert ("deepseek", head, 1) in POSTED and not merged() and os.listdir(DDIR) == [], (POSTED, status)
+os.remove(f"{tmp}/state/{V.OUT}")
 # Nor is a look at an earlier head still under way passed over by one out
 # of service: the PR waits for what it finds.
 fresh_pr_state()

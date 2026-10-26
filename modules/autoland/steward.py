@@ -573,6 +573,7 @@ def handle(repo, pr, repo_info, digest):
             digest.append(("A reviewer is out of service", V.NAMES[r], away[r]))
     said = {r: V.verdict(pr, head, r) for r in names}  # verdict, when, rounds with findings
     found = []  # the reviewers whose findings on this head this pass posted
+    late, unposted = [], []  # earlier heads whose findings this pass posted; reviews it couldn't post yet
 
     def consume(r):
         """What came back from the reviewer's service for this head, if
@@ -593,10 +594,16 @@ def handle(repo, pr, repo_info, digest):
                 except ValueError as e:  # an answer that's no review
                     rs["fails"], rs["failedAt"] = rs.get("fails", 0) + 1, C.NOW
                     log(f"{tag}: {V.NAMES[r]}'s answer wasn't a review ({rs['fails']}): {e}")
-                except RuntimeError as e:  # GitHub: the same answer goes again next pass, twice more
+                except RuntimeError as e:  # GitHub: the same answer goes again next pass
                     rs["fails"], rs["failedAt"] = rs.get("fails", 0) + 1, C.NOW
                     log(f"{tag}: couldn't post {V.NAMES[r]}'s review ({rs['fails']}): {e}")
-                    if rs["fails"] < 3:
+                    # Three tries; one out of service then isn't asked again,
+                    # so its answer stays, the pass waits and the owner hears.
+                    if rs["fails"] < 3 or V.out(r):
+                        x = f"{V.NAMES[r]}'s review of {head[:7]}"
+                        unposted.append(x)
+                        if rs["fails"] >= 3:
+                            digest.append(("A review couldn't be posted", line, f"{x}, {rs['fails']} tries"))
                         after(C.NOW, 1)
                         return
             elif back["result"] == "out":
@@ -623,8 +630,6 @@ def handle(repo, pr, repo_info, digest):
             else:
                 rs["gone"] = True
                 after(C.NOW, 1)  # the second look
-
-    late, unposted = [], []  # earlier heads whose findings this pass posted, or couldn't post yet
 
     def overtaken(r):
         """What came back from the reviewer's looks at the PR's earlier heads
