@@ -318,21 +318,26 @@ def answered(key, r):
     return mine(DONE, key, r)
 
 
-def under_way(key, r):
-    """The names of the reviewer's looks at the PR, for any head, that the
-    reviewers' service is on now. Those it hasn't begun are taken off the
-    queue (`taken`), so none begins after this."""
-    return [name for name in mine(QUEUE, key, r) if not taken(os.path.join(STATE, QUEUE, name + ".json"))]
+def under_way(key, r, base):
+    """The names of the reviewer's looks at the PR on `base`, for any head,
+    that the reviewers' service is on now (on another base, the PR was
+    another change). Those it hasn't begun are taken off the queue
+    (`taken`), so none begins after this."""
+    on = snap_name(key, "", base).rsplit("-", 1)[1]
+    return [name for name in mine(QUEUE, key, r)
+            if name.rsplit("-", 1)[1] == on and not taken(os.path.join(STATE, QUEUE, name + ".json"))]
 
 
 def taken(path):
     """Takes the queued review at path off the queue unless the reviewers'
     service is on it (it holds the entry's lock while it is: review_worker
-    `review`). False if it is."""
+    `review`). False if it is, or if it can't be opened to tell."""
     try:
         f = open(path)
-    except OSError:
+    except FileNotFoundError:
         return True
+    except OSError:
+        return False
     with f:
         try:
             fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)

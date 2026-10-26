@@ -207,6 +207,10 @@ STUB["post"] = None
 C.save(V.OUT, {"deepseek": {"why": "balance", "until": C.ts(T0) + 86400}})
 status, _ = run(mkpr(reviews=[rv_review("codex", 0)]), 830)
 assert not merged() and f"DeepSeek's findings on {head[:7]} couldn't be posted" in status, status
+# Nor past the same head retargeted, which is another change.
+rel = mkpr(base="release/1.x", reviews=[rv_review("codex", 0, base="release/1.x")])
+status, _ = run(rel, 900)
+assert merged() and "couldn't be posted" not in status, status
 # Not past a new head, which it never read.
 status, _ = run(mkpr(sha=newer, reviews=[rv_review("codex", 0, newer)]), 1500)
 assert merged() and "lost" not in pr_state()["rv"]["deepseek"], (status, pr_state())
@@ -246,6 +250,22 @@ assert not merged() and "DeepSeek is still reviewing it, though out of service" 
 held.close()
 status, _ = run(mkpr(reviews=[rv_review("codex", 0)]), 700)
 assert merged() and os.listdir(QDIR) == [], (status, os.listdir(QDIR))
+# One on the PR's old base, which it answers about another change, doesn't.
+fresh_pr_state()
+C.save(V.OUT, {"deepseek": {"why": "balance", "until": C.ts(T0) + 86400}})
+old_base = V.item_name("pr-sam_r-5.json", "deepseek", head, "release/1.x")
+C.save(f"{V.QUEUE}/{old_base}.json", {})
+held = open(f"{QDIR}/{old_base}.json")
+fcntl.flock(held, fcntl.LOCK_SH)
+status, _ = run(mkpr(reviews=[rv_review("codex", 0)]), 700)
+held.close()
+assert merged() and "still reviewing" not in status, status
+os.remove(f"{QDIR}/{old_base}.json")
+# An entry it can't open to tell is taken as under way: left be.
+os.mkdir(f"{QDIR}/{old_base}.json")
+assert not V.taken(f"{QDIR}/{old_base}.json") and os.path.isdir(f"{QDIR}/{old_base}.json")
+os.rmdir(f"{QDIR}/{old_base}.json")
+os.remove(f"{tmp}/state/{V.OUT}")
 # The answers it posts are this PR's alone: sam/r-5's PR 3 isn't sam/r's PR 5.
 fresh_pr_state()
 for k in ("pr-sam_r-5.json", "pr-sam_r-5-3.json", "pr-sam_r-50.json"):

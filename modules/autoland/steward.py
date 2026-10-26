@@ -625,7 +625,7 @@ def handle(repo, pr, repo_info, digest):
                     if back["answer"].get("findings"):
                         # Dropped, it's asked again; one out of service by
                         # then isn't, so the head's held for it meanwhile.
-                        rs["lost"] = head
+                        rs["lost"] = [head, pr["baseRefName"]]
             elif back["result"] == "out":
                 went_out(r, back)
             else:  # the agent, the network, its JSON: tried again next pass
@@ -701,7 +701,7 @@ def handle(repo, pr, repo_info, digest):
         pass waits for what it finds. One not begun never will be. Asked
         before this pass reads what came back, so one that ends meanwhile
         is read."""
-        return [r for r in rs if not DRY and said[r][0] != "clean" and V.under_way(key, r)]
+        return [r for r in rs if not DRY and said[r][0] != "clean" and V.under_way(key, r, pr["baseRefName"])]
 
     was_out = [r for r in names if V.out(r)]
     under_way = reading(was_out)
@@ -776,7 +776,7 @@ def handle(repo, pr, repo_info, digest):
     waiting = [f"Posting {x}" for x in unposted]
     for r in names:
         rs = st["rv"].setdefault(r, {})
-        if rs.get("lost") != head:
+        if rs.get("lost") != [head, pr["baseRefName"]]:
             rs.pop("lost", None)
         elif r not in live:
             waiting.append(f"{V.NAMES[r]}'s findings on {head[:7]} couldn't be posted, and it's out of service")
