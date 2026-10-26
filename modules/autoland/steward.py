@@ -606,6 +606,7 @@ def handle(repo, pr, repo_info, digest):
                         found.append(r)
                     rs.pop("fails", None)
                     rs.pop("failedAt", None)
+                    rs.pop("lost", None)
                 except ValueError as e:  # an answer that's no review
                     rs["fails"], rs["failedAt"] = rs.get("fails", 0) + 1, C.NOW
                     log(f"{tag}: {V.NAMES[r]}'s answer wasn't a review ({rs['fails']}): {e}")
@@ -621,6 +622,10 @@ def handle(repo, pr, repo_info, digest):
                             digest.append(("A review couldn't be posted", line, f"{x}, {rs['fails']} tries"))
                         after(C.NOW, 1)
                         return
+                    if back["answer"].get("findings"):
+                        # Dropped, it's asked again; one out of service by
+                        # then isn't, so the head's held for it meanwhile.
+                        rs["lost"] = head
             elif back["result"] == "out":
                 went_out(r, back)
             else:  # the agent, the network, its JSON: tried again next pass
@@ -769,6 +774,12 @@ def handle(repo, pr, repo_info, digest):
     if not quiet and any(said[r][0] == "none" for r in live):
         after(st["seen"], rc["settleDelay"])  # the reviewers are asked then
     waiting = [f"Posting {x}" for x in unposted]
+    for r in names:
+        rs = st["rv"].setdefault(r, {})
+        if rs.get("lost") != head:
+            rs.pop("lost", None)
+        elif r not in live:
+            waiting.append(f"{V.NAMES[r]}'s findings on {head[:7]} couldn't be posted, and it's out of service")
     waiting += [f"{V.NAMES[r]} is still reviewing it, though out of service" for r in under_way]
     if not live:
         why = "; ".join(f"{V.NAMES[r]}: {away[r] or V.out(r)}" for r in names) or "none is on"

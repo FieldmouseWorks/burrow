@@ -192,7 +192,24 @@ C.save(f"{V.DONE}/{V.item_name('pr-sam_r-5.json', 'deepseek', newer, 'main')}.js
 status, _ = run(mkpr(reviews=[rv_review("codex", 0)]), 770)
 STUB["post"] = None
 assert V.out("deepseek") and not merged() and f"Posting DeepSeek's review of {head[:7]}" in status, (status, WROTE)
-assert os.listdir(DDIR) == [V.item_name("pr-sam_r-5.json", "deepseek", head, "main") + ".json"], os.listdir(DDIR)
+assert V.item_name("pr-sam_r-5.json", "deepseek", head, "main") + ".json" in os.listdir(DDIR), os.listdir(DDIR)
+os.remove(f"{tmp}/state/{V.OUT}")
+# And in service through three failed posts, so dropped to be asked again,
+# then put out (by another PR's pass, say): the head is held for it.
+fresh_pr_state()
+run(mkpr(), 0)
+run(mkpr(), 600)
+worker(deepseek={"result": "review", "answer": {"findings": [{"path": "a.py"}]}})
+STUB["post"] = RuntimeError("HTTP 502")
+for t in (650, 710, 770):
+    run(mkpr(reviews=[rv_review("codex", 0)]), t)
+STUB["post"] = None
+C.save(V.OUT, {"deepseek": {"why": "balance", "until": C.ts(T0) + 86400}})
+status, _ = run(mkpr(reviews=[rv_review("codex", 0)]), 830)
+assert not merged() and f"DeepSeek's findings on {head[:7]} couldn't be posted" in status, status
+# Not past a new head, which it never read.
+status, _ = run(mkpr(sha=newer, reviews=[rv_review("codex", 0, newer)]), 1500)
+assert merged() and "lost" not in pr_state()["rv"]["deepseek"], (status, pr_state())
 os.remove(f"{tmp}/state/{V.OUT}")
 # Nor is a look at an earlier head still under way passed over by one out
 # of service: the PR waits for what it finds.
