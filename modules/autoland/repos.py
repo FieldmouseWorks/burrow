@@ -185,6 +185,7 @@ def watch_default(r, info, prs, digest):
         # it opens can't outlive the red it was for, and leave alone one it
         # has opened. Once it has ended, its PR, if one is open, isn't needed.
         if working:
+            hold_merges(repo, open_fix)
             return {pr["number"] for pr in open_fix}
         # Ended with no PR to show: as when red, seen on two passes before
         # the red is forgotten, since this one may have read the PRs just
@@ -194,15 +195,17 @@ def watch_default(r, info, prs, digest):
             save(key, st)
             C.wake(repo, C.NOW + 60)
             return set()
-        unclosed = False
+        unclosed = []
         for pr in open_fix:
             log(f"{repo}: closing #{pr['number']}, {r['default']} is green again without it")
-            unclosed |= C.write("pr", "close", str(pr["number"]), "-R", repo, "--comment",
-                                f"{r['default']} is green again at {sha[:7]}, so this fix for {red['at'][:7]} isn't needed.",
-                                check=False) is None
-        # One GitHub wouldn't close is still known by the red it was for, and
-        # tried again soon.
+            if C.write("pr", "close", str(pr["number"]), "-R", repo, "--comment",
+                       f"{r['default']} is green again at {sha[:7]}, so this fix for {red['at'][:7]} isn't needed.",
+                       check=False) is None:
+                unclosed.append(pr)
+        # One GitHub wouldn't close is still known by the red it was for,
+        # kept from merging, and tried again soon.
         if unclosed:
+            hold_merges(repo, unclosed)
             C.wake(repo, C.NOW + 5 * 60)
         else:
             log(f"{repo}: {r['default']} is green again")
@@ -230,6 +233,14 @@ def watch_default(r, info, prs, digest):
     log(f"{repo}: {r['default']} is red at {sha[:7]}; a Claude job {jid} fixes it")
     st["red"] = {"job": jid, "jobs": red.get("jobs", 0) + 1, "at": sha}
     save(key, st)
+
+
+def hold_merges(repo, prs):
+    """A fix PR the pass leaves alone mustn't merge on its own either: one
+    already queued to auto-merge has that taken off. One GitHub won't take
+    it off for gets another pass soon."""
+    if not all([C.unland(repo, pr) for pr in prs]):
+        C.wake(repo, C.NOW + 5 * 60)
 
 
 def hook(repo, st, due):

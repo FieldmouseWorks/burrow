@@ -918,6 +918,12 @@ WROTE.clear()
 opened = [mkpr(branch="autoland/red-cccccccccccc", number=9)]
 assert R.watch_default(repo_r, default("SUCCESS", sha="e" * 40), opened, mine) == {9}
 assert C.load("repo-sam_r.json", {}).get("red") and WROTE == [], WROTE
+# One already queued to auto-merge has that taken off, so GitHub can't land
+# it meanwhile either.
+queued_fix = [{**opened[0], "autoMergeRequest": {"enabledAt": T0}}]
+assert R.watch_default(repo_r, default("SUCCESS", sha="e" * 40), queued_fix, mine) == {9}
+assert WROTE == ["pr merge 9 -R sam/r --disable-auto"], WROTE
+WROTE.clear()
 STATES[f"job-{len(JOBS)}"] = "done"
 fixes = [mkpr(branch="autoland/red-cccccccccccc", number=9), mkpr(branch="autoland/red-dddddddddddd", number=8)]
 # GitHub won't close it: the red is kept, the close tried again soon, and
@@ -925,8 +931,12 @@ fixes = [mkpr(branch="autoland/red-cccccccccccc", number=9), mkpr(branch="autola
 FAIL.append("pr close 9")
 C.WAKE.clear()
 assert R.watch_default(repo_r, default("SUCCESS", sha="e" * 40), fixes, mine) == {9}
-FAIL.remove("pr close 9")
 assert C.load("repo-sam_r.json", {}).get("red") and C.WAKE.get("sam/r"), C.WAKE
+# ... and its queued auto-merge is taken off meanwhile.
+WROTE.clear()
+assert R.watch_default(repo_r, default("SUCCESS", sha="e" * 40), queued_fix + fixes[1:], mine) == {9}
+assert WROTE[1:] == ["pr merge 9 -R sam/r --disable-auto"], WROTE
+FAIL.remove("pr close 9")
 WROTE.clear()
 assert R.watch_default(repo_r, default("SUCCESS", sha="e" * 40), fixes, mine) == {9}
 assert [x.split()[:3] for x in WROTE] == [["pr", "close", "9"]], WROTE

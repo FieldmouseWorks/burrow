@@ -204,13 +204,6 @@ def land(repo, pr, repo_info):
     return True
 
 
-def unland(repo, pr):
-    """Something new came up after it was settled: stop the merge. False if
-    GitHub didn't take it."""
-    return not pr["autoMergeRequest"] or C.write(
-        "pr", "merge", str(pr["number"]), "-R", repo, "--disable-auto", check=False) is not None
-
-
 def handle(repo, pr, repo_info, digest):
     rc = repo_cfg(repo)
     n, head = pr["number"], pr["headRefOid"]
@@ -248,7 +241,7 @@ def handle(repo, pr, repo_info, digest):
             digest.append((why, line, desc))
         # Not settled (any more): nothing may merge it.
         if state != "success" and (pr["autoMergeRequest"] or st.get("landed")):
-            if unland(repo, pr):
+            if C.unland(repo, pr):
                 st["landed"] = None
             else:
                 ok = False
