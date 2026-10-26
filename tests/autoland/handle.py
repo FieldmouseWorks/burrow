@@ -915,7 +915,8 @@ assert len(JOBS) == 3 and mine == [], (JOBS, mine)
 # Green while its job still works: the red is kept until the job ends, and
 # then its PR, no longer needed, is closed; another one is left alone.
 WROTE.clear()
-R.watch_default(repo_r, default("SUCCESS", sha="e" * 40), [], mine)
+opened = [mkpr(branch="autoland/red-cccccccccccc", number=9)]
+assert R.watch_default(repo_r, default("SUCCESS", sha="e" * 40), opened, mine) == {9}
 assert C.load("repo-sam_r.json", {}).get("red") and WROTE == [], WROTE
 STATES[f"job-{len(JOBS)}"] = "done"
 fixes = [mkpr(branch="autoland/red-cccccccccccc", number=9), mkpr(branch="autoland/red-dddddddddddd", number=8)]

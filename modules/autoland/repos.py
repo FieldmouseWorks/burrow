@@ -182,10 +182,10 @@ def watch_default(r, info, prs, digest):
         if not red or state != "SUCCESS":
             return
         # Green while its job still works: wait for the job to end, so a PR
-        # it opens can't outlive the red it was for. Once it has, its PR, if
-        # one is open, isn't needed.
+        # it opens can't outlive the red it was for, and leave alone one it
+        # has opened. Once it has ended, its PR, if one is open, isn't needed.
         if working:
-            return
+            return {pr["number"] for pr in open_fix}
         unclosed = False
         for pr in open_fix:
             log(f"{repo}: closing #{pr['number']}, {r['default']} is green again without it")
