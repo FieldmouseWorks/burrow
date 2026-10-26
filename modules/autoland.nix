@@ -77,6 +77,9 @@ let
     # The bots' logins as GitHub's GraphQL API gives them (no "[bot]").
     authors = cfg.authors ++ [ "dependabot" "renovate" ];
     stateDir = "${stateDir}/autoland";
+    # The key renovate-sweep seals its verdicts on majors with (seal.py),
+    # when it runs here; without it, none counts.
+    majorKey = if (config.burrow.updates.enable or false) && (config.burrow.updates.renovate.enable or false) then "${stateDir}/renovate-sweep/verdict.key" else null;
     projectsDir = config.burrow.projectsDir;
     proj = "${config.burrow.tools.proj}/bin/proj";
     owner = config.burrow.owner;
@@ -147,6 +150,7 @@ let
     cp ${./autoland/repos.py} $out/repos.py
     cp ${./autoland/tasks.py} $out/tasks.py
     cp ${./autoland/touches.py} $out/touches.py
+    cp ${./autoland/seal.py} $out/seal.py
     flake8 --ignore E501,W503 $out
   '';
   # The command, with this machine's config, so `autoland-steward status`

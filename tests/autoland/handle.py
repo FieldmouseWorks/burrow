@@ -12,7 +12,7 @@ import subprocess
 
 from harness import (C, CI_GREEN, COMMITS, DDIR, FAIL, JOBS, POSTED, PR_DIFF, QDIR, R, S, STATES, STUB, T0, V,
                      W, WROTE, agent, agent_runs, clean, fresh_pr_state, head, info, judgment, merged,
-                     gh_stub, mkpr, pr_state, queued, run, rv_review, said, stand_in, tmp, worker)
+                     gh_stub, mkpr, pr_state, queued, run, rv_review, said, stand_in, swept, tmp, worker)
 
 stand_in()
 fresh_pr_state()
@@ -730,7 +730,7 @@ fresh_pr_state()
 rmajor = {"branch": "renovate/foo-2.x", "title": "Update foo from 1.4 to 2.0", "number": 13, "checks": proof}
 status, _ = run(mkpr(**rmajor), 900)
 assert JOBS == [] and "waiting for renovate-sweep" in status, (status, JOBS)
-status, _ = run(mkpr(comments=[said(f"<!-- major-verdict: ok {head} on main -->")], **rmajor), 1000)
+status, _ = run(mkpr(comments=[said(swept("ok", n=13))], **rmajor), 1000)
 assert len(JOBS) == 1 and "just proof" in JOBS[0], (status, JOBS)
 del S.CFG["repos"]["sam/r"]
 
@@ -739,33 +739,43 @@ fresh_pr_state()
 major = {"branch": "renovate/foo-2.x", "title": "Update foo from 1.4 to 2.0", "number": 8}
 status, _ = run(mkpr(**major), 700)
 assert not merged() and "waiting for renovate-sweep" in status and JOBS == []
-for bad in (said(f"<!-- major-verdict: ok {head} on main -->", who="mallory"), said(f"<!-- major-verdict: ok {other} on main -->"),
-            said(f"<!-- major-verdict: held {head} on main -->"), said(f"<!-- major-verdict: ok {head} -->"),
-            said(f"<!-- major-verdict: ok {head} on release -->")):
+# Every Claude job posts as our login, so one without major-seal's seal (a
+# job quoting PR text), with another verdict's, PR's or base's, or under
+# another key doesn't count either.
+okmac = swept("ok").split()[-2]
+for bad in (said(swept("ok"), who="mallory"), said(swept("ok", sha=other)), said(swept("held")),
+            said(f"<!-- major-verdict: ok {head} -->"), said(swept("ok", base="release")),
+            said(f"<!-- major-verdict: ok {head} on main -->"), said(swept("held").replace(swept("held").split()[-2], okmac)),
+            said(swept("ok", n=9)), said(swept("ok").replace(okmac, "0" * 32))):
     status, _ = run(mkpr(comments=[bad], **major), 800)
     assert not merged() and JOBS == [], bad
-status, _ = run(mkpr(comments=[said(f"<!-- major-verdict: ok {head} on main -->")], **major), 900)
+# With no renovate-sweep on the machine (no key), none counts.
+key, S.CFG["majorKey"] = S.CFG["majorKey"], None
+status, _ = run(mkpr(comments=[said(swept("ok"))], **major), 850)
+S.CFG["majorKey"] = key
+assert not merged() and "waiting for renovate-sweep" in status, status
+status, _ = run(mkpr(comments=[said(swept("ok"))], **major), 900)
 assert "state=success" in status and merged()
 # Retargeted since: the ok was for another base's diff, and counts no more.
 fresh_pr_state()
-status, _ = run(mkpr(comments=[said(f"<!-- major-verdict: ok {head} on main -->")], base="release", **major), 900)
+status, _ = run(mkpr(comments=[said(swept("ok"))], base="release", **major), 900)
 assert not merged() and "waiting for renovate-sweep" in status, status
 # Its CI not green yet: the ok waits.
 fresh_pr_state()
-status, _ = run(mkpr(comments=[said(f"<!-- major-verdict: ok {head} on main -->")], checks=busy, **major), 900)
+status, _ = run(mkpr(comments=[said(swept("ok"))], checks=busy, **major), 900)
 assert not merged()
 # One touching a one-way path still needs the ok: a judge's land doesn't
 # replace a held or missing verdict.
 fresh_pr_state()
 gated = {**major, "files": ("migrations/0002.sql",)}
-for said_ in ([], [said(f"<!-- major-verdict: held {head} on main -->")]):
+for said_ in ([], [said(swept("held"))]):
     status, _ = run(mkpr(comments=[*said_, said(judgment("land", n=8))], **gated), 900)
     assert not merged() and JOBS == [] and "renovate-sweep" in status, said_
-status, _ = run(mkpr(comments=[said(f"<!-- major-verdict: ok {head} on main -->")], **gated), 900)
+status, _ = run(mkpr(comments=[said(swept("ok"))], **gated), 900)
 assert not merged() and len(JOBS) == 1 and "migrations/" in JOBS[0]
 assert "no reviewer reads" in JOBS[0] and "renovate-sweep cleared the major version" in JOBS[0], JOBS[0]
 assert "its reviewers found nothing" not in JOBS[0], JOBS[0]
-status, _ = run(mkpr(comments=[said(f"<!-- major-verdict: ok {head} on main -->"),
+status, _ = run(mkpr(comments=[said(swept("ok")),
                                said(judgment("land", n=8))], **gated), 1000)
 assert merged()
 # A Renovate minor: Renovate merges it itself. A Dependabot major is judged.
@@ -792,12 +802,12 @@ fresh_pr_state()
 run(mkpr(threads=[False], **major), 0)
 status, _ = run(mkpr(threads=[False], **major), 7200)
 assert JOBS == [] and "renovate-sweep has it" in status, status
-status, _ = run(mkpr(threads=[False], comments=[said(f"<!-- major-verdict: ok {head} on main -->")], **major), 9000)
+status, _ = run(mkpr(threads=[False], comments=[said(swept("ok"))], **major), 9000)
 assert len(JOBS) == 1 and "1 open review thread" in JOBS[0] and not merged(), (status, JOBS)
 # One it held is the owner's, threads and all: no job pushes to it.
 fresh_pr_state()
-run(mkpr(threads=[False], comments=[said(f"<!-- major-verdict: held {head} on main -->")], **major), 0)
-status, _ = run(mkpr(threads=[False], comments=[said(f"<!-- major-verdict: held {head} on main -->")], **major), 9000)
+run(mkpr(threads=[False], comments=[said(swept("held"))], **major), 0)
+status, _ = run(mkpr(threads=[False], comments=[said(swept("held"))], **major), 9000)
 assert JOBS == [] and not merged() and "renovate-sweep held it" in status, (status, JOBS)
 # A red Renovate one is renovate-sweep's, threads and all: no second job on its branch.
 fresh_pr_state()
@@ -863,391 +873,6 @@ S.CFG["projectsDir"] = src
 assert C.project_dir("sam/r") == "r", C.project_dir("sam/r")
 assert C.project_dir("sam/q") == "q" and C.project_dir("sam/none") is None
 S.CFG["projectsDir"] = f"{tmp}/none"
-
-
-# Codex clean but DeepSeek has findings: nothing merges until they're settled.
-cx = rv_review("codex", 0)
-ds2 = rv_review("deepseek", 2)
-fresh_pr_state()
-run(mkpr(reviews=[cx]), 0)
-run(mkpr(reviews=[cx]), 600)
-assert queued() == ["deepseek"]
-worker(deepseek={"result": "review", "answer": {"findings": [{"path": "a.py"}, {"path": "a.py"}]}})
-status, _ = run(mkpr(reviews=[cx]), 650)
-assert POSTED == [("deepseek", head, 2)] and not merged(), (POSTED, status)
-status, _ = run(mkpr(reviews=[ds2, cx], threads=[False, False]), 700)
-assert "Round 1: 2 open review threads" in status and not merged()
-
-# Its findings answered and resolved without a new commit: it looks again.
-status, _ = run(mkpr(reviews=[ds2, cx], threads=[True, True]), 3600)
-assert queued() == ["deepseek"] and "Findings answered" in status
-status, _ = run(mkpr(reviews=[ds2, cx], threads=[True, True]), 3700)
-assert queued() == ["deepseek"]
-worker()
-# Its new review, later than the ask, is what counts.
-status, _ = run(mkpr(reviews=[ds2, cx], threads=[True, True]), 4300)
-assert "state=success" in status and merged(), status
-
-# Its second look failing three times: the owner hears, though a review
-# with findings is on record.
-fresh_pr_state()
-answered = mkpr(reviews=[ds2, cx], threads=[True, True])
-for i in range(3):
-    run(answered, 5000 + i)
-    assert queued() == ["deepseek"], i
-    worker(deepseek={"result": "error", "error": "dsh exited 1"})
-status, digest = run(answered, 5100)
-assert any(x[0] == "DeepSeek couldn't review it" for x in digest), digest
-assert "Findings answered; DeepSeek failed 3 times" in status and queued() == [], status
-
-# An answer that's no review is a failed one, never a clean one.
-fresh_pr_state()
-run(mkpr(reviews=[cx]), 0)
-run(mkpr(reviews=[cx]), 600)
-worker(deepseek={"result": "review", "answer": {"summary": "couldn't finish"}})
-status, _ = run(mkpr(reviews=[cx]), 610)
-assert POSTED == [] and not merged() and pr_state()["rv"]["deepseek"]["fails"] == 1, status
-assert queued() == ["deepseek"] and os.listdir(DDIR) == []
-# One GitHub won't take stays where it is and is posted by the next pass.
-worker()
-STUB["post"] = RuntimeError("GitHub didn't take the review")
-status, _ = run(mkpr(reviews=[cx]), 620)
-assert len(os.listdir(DDIR)) == 1 and pr_state()["rv"]["deepseek"]["fails"] == 2 and not merged(), status
-STUB["post"] = None
-status, _ = run(mkpr(reviews=[cx]), 630)
-assert POSTED == [("deepseek", head, 0)] and os.listdir(DDIR) == [] and merged(), status
-# Posted, its earlier failures are behind it: none left to report.
-assert "fails" not in pr_state()["rv"]["deepseek"], pr_state()["rv"]
-# Turned down three times, it's dropped and the owner hears, not posted forever.
-fresh_pr_state()
-run(mkpr(reviews=[cx]), 0)
-run(mkpr(reviews=[cx]), 600)
-worker()
-STUB["post"] = RuntimeError("GitHub didn't take the review")
-for i in range(3):
-    status, digest = run(mkpr(reviews=[cx]), 610 + i)
-STUB["post"] = None
-assert os.listdir(DDIR) == [] and queued() == [] and pr_state()["rv"]["deepseek"]["fails"] == 3, status
-assert any(x[0] == "DeepSeek couldn't review it" for x in digest) and not merged(), digest
-# A snapshot that can't be taken is a failed try too.
-fresh_pr_state()
-run(mkpr(reviews=[cx]), 0)
-STUB["queue"] = RuntimeError("the head moved on")
-status, _ = run(mkpr(reviews=[cx]), 600)
-assert queued() == [] and pr_state()["rv"]["deepseek"]["fails"] == 1 and "Waiting for DeepSeek" in status, status
-STUB["queue"] = None
-
-# A queued review that leaves the queue with nothing back is lost: seen so on
-# two passes, it counts as a failure and is asked again.
-fresh_pr_state()
-run(mkpr(reviews=[cx]), 0)
-run(mkpr(reviews=[cx]), 600)
-os.remove(f"{QDIR}/{os.listdir(QDIR)[0]}")
-run(mkpr(reviews=[cx]), 610)
-assert "fails" not in pr_state()["rv"]["deepseek"] and queued() == []
-status, _ = run(mkpr(reviews=[cx]), 620)
-assert pr_state()["rv"]["deepseek"]["fails"] == 1 and queued() == ["deepseek"], status
-# Still queued, however long it takes: no failure, nothing asked twice.
-status, _ = run(mkpr(reviews=[cx]), 620 + 2 * 86400)
-assert "DeepSeek is reviewing this commit" in status and queued() == ["deepseek"], status
-assert pr_state()["rv"]["deepseek"]["fails"] == 1
-
-# DeepSeek down: each failure comes back to the next pass, which queues it
-# again; after three the owner hears, and an hour on it's tried again.
-fresh_pr_state()
-run(mkpr(reviews=[cx]), 0)
-run(mkpr(reviews=[cx]), 600)
-for i in range(3):
-    worker(deepseek={"result": "error", "error": "down"})
-    status, digest = run(mkpr(reviews=[cx]), 610 + i)
-assert any(x[0] == "DeepSeek couldn't review it" for x in digest) and "Waiting for DeepSeek" in status
-assert queued() == []
-run(mkpr(reviews=[cx]), 1000)
-assert queued() == []
-run(mkpr(reviews=[cx]), 4400)
-assert queued() == ["deepseek"]
-
-# Out of service (Codex's plan spent): recorded for every PR, which settle on
-# the other reviewer meanwhile, and asked again once it's back.
-fresh_pr_state()
-run(mkpr(), 0)
-run(mkpr(), 600)
-worker(codex={"result": "out", "why": "its ChatGPT plan's usage is spent", "until": C.ts(T0) + 4200})
-status, _ = run(mkpr(), 650)
-assert "DeepSeek found nothing" in status and "Codex and" not in status and merged(), status
-assert json.load(open(f"{tmp}/state/{V.OUT}"))["codex"]["until"] == C.ts(T0) + 4200
-run(mkpr(number=6), 700)
-run(mkpr(number=6), 1400)
-assert queued() == ["deepseek"]
-run(mkpr(number=6), 4300)
-assert queued() == ["codex", "deepseek"]
-# The owner hears one is out, once however many PRs find it so.
-fresh_pr_state()
-C.save(V.OUT, {"codex": {"why": "it isn't logged in", "until": C.ts(T0) + 86400}})
-digest = []
-for num in (5, 6):
-    S.handle("sam/r", mkpr(number=num), info, digest)
-assert [x for x in digest if x[0] == "A reviewer is out of service"] == [
-    ("A reviewer is out of service", "Codex", "it isn't logged in")], digest
-# Every reviewer out: the owner hears, and nothing is queued or landed.
-fresh_pr_state()
-C.save(V.OUT, {r: {"why": "spent", "until": C.ts(T0) + 86400} for r in V.NAMES})
-status, digest = run(clean(), 600)
-assert "No reviewer can review it now (Codex: spent; DeepSeek: spent)" in status, status
-assert [x[0] for x in digest] == ["No reviewer can review it"] and queued() == [] and not merged(), digest
-
-# A repo set to Codex alone lands on Codex's word, and a review queued
-# before it was taken off DeepSeek isn't sent.
-fresh_pr_state()
-run(mkpr(reviews=[cx]), 0)
-run(mkpr(reviews=[cx]), 600)
-name, = os.listdir(QDIR)
-S.CFG["repos"]["sam/r"] = {"deepseek": False}
-agent()
-W.review(name)
-back = json.load(open(f"{DDIR}/{name}"))
-assert back["result"] == "error" and "isn't one DeepSeek reviews" in back["error"] and agent_runs() == [], back
-status, _ = run(mkpr(reviews=[cx]), 700)
-assert "state=success" in status and "Codex found nothing" in status and merged()
-del S.CFG["repos"]["sam/r"]
-
-# The sweep: snapshots, queued reviews and answers of heads no open PR has
-# any more go, for the repos the pass read (a dash in a name included).
-fresh_pr_state()
-gone, live_snap = V.snap_name("pr-sam_r-5.json", "d" * 40, "main"), V.snap_name("pr-sam_r-5.json", head, "main")
-other_repo, dashed = V.snap_name("pr-sam_q-1.json", "e" * 40, "main"), V.snap_name("pr-sam_lo-k-3.json", "f" * 40, "main")
-# Retargeted: the same head on another base is another snapshot.
-retargeted = V.snap_name("pr-sam_r-5.json", head, "release/1.x")
-assert retargeted != live_snap
-for s in (gone, live_snap, other_repo, dashed, retargeted):
-    os.makedirs(f"{tmp}/state/{V.SNAP}/{s}")
-    C.save(f"{V.SNAP}/{s}.json", {})
-    C.save(f"{V.QUEUE}/deepseek--{s}.json", {})
-    C.save(f"{V.DONE}/codex--{s}.json", {})
-# PR 5 is still open: an earlier head's look that's under way (its queue
-# entry locked, as the reviewers' service holds it) keeps its snapshot, and
-# what came back from its earlier heads stays for its next pass to post.
-running = V.snap_name("pr-sam_r-5.json", "c" * 40, "main")
-os.makedirs(f"{tmp}/state/{V.SNAP}/{running}")
-C.save(f"{V.SNAP}/{running}.json", {})
-C.save(f"{V.QUEUE}/codex--{running}.json", {})
-held = open(f"{tmp}/state/{V.QUEUE}/codex--{running}.json")
-fcntl.flock(held, fcntl.LOCK_SH)
-V.sweep({"sam_r", "sam_lo-k"}, {live_snap})
-held.close()
-left = sorted(x for d in (V.SNAP, V.QUEUE, V.DONE) for x in os.listdir(f"{tmp}/state/{d}"))
-assert left == sorted([live_snap, live_snap + ".json", other_repo, other_repo + ".json",
-                       f"deepseek--{live_snap}.json", f"deepseek--{other_repo}.json",
-                       f"codex--{live_snap}.json", f"codex--{other_repo}.json",
-                       running, running + ".json", f"codex--{running}.json",
-                       f"codex--{gone}.json", f"codex--{retargeted}.json"]), left
-# Once it's done, the next sweep takes its snapshot.
-V.remove(f"{tmp}/state/{V.QUEUE}/codex--{running}.json")
-V.sweep({"sam_r", "sam_lo-k"}, {live_snap})
-assert not os.path.exists(f"{tmp}/state/{V.SNAP}/{running}") and os.path.exists(f"{tmp}/state/{V.DONE}/codex--{gone}.json")
-# And a PR that's gone takes everything with it.
-V.sweep({"sam_r", "sam_lo-k"}, set())
-left = sorted(x for d in (V.SNAP, V.QUEUE, V.DONE) for x in os.listdir(f"{tmp}/state/{d}"))
-assert left == sorted([other_repo, other_repo + ".json", f"deepseek--{other_repo}.json", f"codex--{other_repo}.json"]), left
-
-# Every repo gets the hold and needs-owner labels, once a day.
-fresh_pr_state()
-C.NOW = C.ts(T0)
-C.save("repo-sam_r.json", {"settings": C.NOW})
-WROTE.clear()
-R.settle_repo({"repo": "sam/r", "private": False, "default": "main"}, {"sam/r"})
-assert sorted(x.split()[2] for x in WROTE if x.startswith("label create")) == ["hold", "needs-owner"], WROTE
-WROTE.clear()
-R.settle_repo({"repo": "sam/r", "private": False, "default": "main"}, {"sam/r"})
-assert WROTE == [], WROTE
-# A day on, they're made again with the settings, in case one was deleted.
-C.NOW += 86400
-R.settle_repo({"repo": "sam/r", "private": False, "default": "main"}, {"sam/r"})
-assert sorted(x.split()[2] for x in WROTE if x.startswith("label create")) == ["hold", "needs-owner"], WROTE
-
-# Up-to-date branches go off wherever the repo has them: its own rulesets
-# and the default branch's classic protection. Tag rulesets, and ones that
-# don't ask for it, are left as they are.
-checks = {"type": "required_status_checks", "parameters": {
-    "strict_required_status_checks_policy": True, "required_status_checks": [{"context": "gate"}]}}
-LISTED = [{"id": 1, "name": "baseline", "target": "branch", "source_type": "Repository"},
-          {"id": 2, "name": "gates", "target": "branch", "source_type": "Repository"},
-          {"id": 3, "name": "tags", "target": "tag", "source_type": "Repository"},
-          {"id": 4, "name": "org", "target": "branch", "source_type": "Organization"}]
-gates = {"name": "gates", "target": "branch", "source_type": "Repository", "enforcement": "active",
-         "bypass_actors": [{"actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "always"}],
-         "conditions": {"ref_name": {"include": ["~DEFAULT_BRANCH"], "exclude": []}},
-         "rules": [{"type": "deletion"}, checks]}
-SETTINGS = {
-    # gh's pages: the strict one is on the second.
-    "repos/sam/r/rulesets?per_page=100": [LISTED[:1], LISTED[1:]],
-    "repos/sam/r/rulesets/1": {"name": "baseline", "target": "branch", "source_type": "Repository",
-                               "rules": [{"type": "deletion"}]},
-    "repos/sam/r/rulesets/2": gates,
-    "repos/sam/r/branches/main": {"protection": {"required_status_checks": {"enforcement_level": "everyone"}}},
-    "repos/sam/r/branches/main/protection/required_status_checks": {"strict": True},
-}
-
-
-def settings(*a, **k):
-    if a[:1] != ("api",) or a[1:2] == () or a[1] not in SETTINGS:
-        return gh_stub(*a, **k)
-    got = SETTINGS[a[1]]
-    # A listing comes in pages: all of them with --paginate --slurp, else the first.
-    return got if "rulesets?" not in a[1] or "--slurp" in a else got[0]
-
-
-C.gh = settings
-BODIES, write = [], C.write
-C.write = lambda *a, **k: (BODIES.append(json.loads(k["input"])) if "rulesets" in " ".join(a) else None) or write(*a, **k)
-C.NOW += 86400
-WROTE.clear()
-R.settle_repo({"repo": "sam/r", "private": False, "default": "main"}, {"sam/r"})
-puts = [x for x in WROTE if "rulesets" in x]
-assert len(puts) == 1 and puts[0].startswith("api -X PUT repos/sam/r/rulesets/2 "), WROTE
-# The whole ruleset goes back with only the one setting changed: its name,
-# branches and bypass are what they were.
-want = json.loads(json.dumps({k: v for k, v in gates.items() if k != "source_type"}))
-want["rules"][1]["parameters"]["strict_required_status_checks_policy"] = False
-assert BODIES == [want], BODIES
-assert "api -X PATCH repos/sam/r/branches/main/protection/required_status_checks -F strict=false" in WROTE, WROTE
-# A repo set to have no baseline ruleset still gets its own rules' turned off.
-SETTINGS["repos/sam/r/rulesets/2"]["rules"][1]["parameters"]["strict_required_status_checks_policy"] = True
-S.C.CFG["repos"]["sam/r"] = {**S.C.CFG["repos"].get("sam/r", {}), "ruleset": False}
-C.NOW += 86400
-WROTE.clear()
-R.settle_repo({"repo": "sam/r", "private": False, "default": "main"}, {"sam/r"})
-del S.C.CFG["repos"]["sam/r"]["ruleset"]
-puts = [x for x in WROTE if "rulesets/" in x]
-assert len(puts) == 1 and puts[0].startswith("api -X PUT repos/sam/r/rulesets/2 "), WROTE
-# A default branch with a slash in its name is read and changed by its
-# encoded name.
-SETTINGS["repos/sam/r/branches/release%2F1.0"] = SETTINGS["repos/sam/r/branches/main"]
-SETTINGS["repos/sam/r/branches/release%2F1.0/protection/required_status_checks"] = {"strict": True}
-WROTE.clear()
-R.not_strict_protection("sam/r", "release/1.0")
-assert WROTE == ["api -X PATCH repos/sam/r/branches/release%2F1.0/protection/required_status_checks -F strict=false"], WROTE
-# Already off, or no classic checks at all: nothing to change.
-SETTINGS["repos/sam/r/rulesets/2"]["rules"][1]["parameters"]["strict_required_status_checks_policy"] = False
-SETTINGS["repos/sam/r/branches/main"] = {"protection": {"required_status_checks": {"enforcement_level": "off"}}}
-C.NOW += 86400
-WROTE.clear()
-R.settle_repo({"repo": "sam/r", "private": False, "default": "main"}, {"sam/r"})
-assert not [x for x in WROTE if "rulesets/" in x or "protection" in x], WROTE
-# A baseline from the org counts as the repo's own: none is added.
-SETTINGS["repos/sam/r/rulesets?per_page=100"] = [[{**LISTED[0], "id": 9, "source_type": "Organization"}]]
-C.NOW += 86400
-WROTE.clear()
-R.settle_repo({"repo": "sam/r", "private": False, "default": "main"}, {"sam/r"})
-assert not [x for x in WROTE if "rulesets" in x], WROTE
-# And with none at all, it's added.
-SETTINGS["repos/sam/r/rulesets?per_page=100"] = [[]]
-C.NOW += 86400
-WROTE.clear()
-R.settle_repo({"repo": "sam/r", "private": False, "default": "main"}, {"sam/r"})
-assert [x for x in WROTE if "rulesets" in x] == ["api -X POST repos/sam/r/rulesets --input -"], WROTE
-C.gh, C.write = gh_stub, write
-
-# A red default branch gets one Claude job, and nothing more while it works
-# or its PR is open; a second if it ends with the branch still red, then the
-# owner. Green again, it starts over.
-def default(state, sha="c" * 40):
-    return {"defaultBranchRef": {"name": "main", "target": {"oid": sha, "statusCheckRollup": {"state": state}}}}
-
-
-repo_r = {"repo": "sam/r", "private": False, "default": "main"}
-JOBS.clear()
-mine = []
-R.watch_default(repo_r, default("SUCCESS"), [], mine)
-R.watch_default(repo_r, default("PENDING"), [], mine)
-R.watch_default(repo_r, {}, [], mine)
-assert JOBS == [] and mine == []
-R.watch_default(repo_r, default("FAILURE"), [], mine)
-assert len(JOBS) == 1 and "is red: CI failed on " + "c" * 40 in JOBS[0] and "autoland/red-cccccccccccc" in JOBS[0], JOBS
-assert "gh run list --commit " + "c" * 40 in JOBS[0] and "issue and comment" in JOBS[0], JOBS[0]
-assert "gh run list --branch main" in JOBS[0] and "with no PR" in JOBS[0], JOBS[0]
-R.watch_default(repo_r, default("FAILURE"), [], mine)
-assert len(JOBS) == 1, JOBS  # still running
-STATES["job-1"] = "done"
-R.watch_default(repo_r, default("FAILURE"), [mkpr(branch="autoland/red-cccccccccccc")], mine)
-assert len(JOBS) == 1, JOBS  # its PR is open
-# One from a fork, a draft or someone else, or to another branch, isn't it.
-for pr in (dict(mkpr(branch="autoland/red-cccccccccccc"), isCrossRepository=True),
-           mkpr(branch="autoland/red-cccccccccccc", draft=True),
-           dict(mkpr(branch="autoland/red-cccccccccccc"), author={"login": "mallory"}),
-           mkpr(branch="autoland/red-cccccccccccc", base="dev")):
-    st_kept = C.load("repo-sam_r.json", {})
-    R.watch_default(repo_r, default("FAILURE"), [pr], mine)
-    R.watch_default(repo_r, default("FAILURE"), [pr], mine)
-    assert len(JOBS) == 2, (pr, JOBS)
-    JOBS.pop()
-    C.save("repo-sam_r.json", st_kept)
-# Ended with no PR: the first pass to see it looks again in a minute (the
-# PR may have gone up just after it read them), the second starts another.
-C.WAKE.clear()
-R.watch_default(repo_r, default("ERROR", sha="d" * 40), [], mine)
-assert len(JOBS) == 1 and C.WAKE.get("sam/r") == C.NOW + 60, (JOBS, C.WAKE)
-R.watch_default(repo_r, default("ERROR", sha="d" * 40), [], mine)
-assert len(JOBS) == 2 and "d" * 40 in JOBS[1], JOBS
-STATES["job-2"] = "done"
-R.watch_default(repo_r, default("FAILURE", sha="d" * 40), [], mine)
-assert len(JOBS) == 2 and mine == [], mine
-R.watch_default(repo_r, default("FAILURE", sha="d" * 40), [], mine)
-assert len(JOBS) == 2 and mine and mine[0][0] == "The default branch is red", mine
-mine.clear()
-R.watch_default(repo_r, default("SUCCESS"), [], mine)
-R.watch_default(repo_r, default("FAILURE"), [], mine)
-assert len(JOBS) == 3 and mine == [], (JOBS, mine)
-# Green while its job still works: the red is kept until the job ends, and
-# then its PR, no longer needed, is closed; another one is left alone.
-WROTE.clear()
-opened = [mkpr(branch="autoland/red-cccccccccccc", number=9)]
-assert R.watch_default(repo_r, default("SUCCESS", sha="e" * 40), opened, mine) == {9}
-assert C.load("repo-sam_r.json", {}).get("red") and WROTE == [], WROTE
-STATES[f"job-{len(JOBS)}"] = "done"
-fixes = [mkpr(branch="autoland/red-cccccccccccc", number=9), mkpr(branch="autoland/red-dddddddddddd", number=8)]
-# GitHub won't close it: the red is kept, the close tried again soon, and
-# the pass still leaves the PR alone.
-FAIL.append("pr close 9")
-C.WAKE.clear()
-assert R.watch_default(repo_r, default("SUCCESS", sha="e" * 40), fixes, mine) == {9}
-FAIL.remove("pr close 9")
-assert C.load("repo-sam_r.json", {}).get("red") and C.WAKE.get("sam/r"), C.WAKE
-WROTE.clear()
-assert R.watch_default(repo_r, default("SUCCESS", sha="e" * 40), fixes, mine) == {9}
-assert [x.split()[:3] for x in WROTE] == [["pr", "close", "9"]], WROTE
-assert not C.load("repo-sam_r.json", {}).get("red"), C.load("repo-sam_r.json", {})
-R.watch_default(repo_r, default("FAILURE"), [], mine)
-assert len(JOBS) == 4 and mine == [], (JOBS, mine)
-# Its job ends green with no PR seen: the red is kept for one more look,
-# since its PR may have gone up just after the PRs were read. On that look
-# it's there, and closed.
-STATES[f"job-{len(JOBS)}"] = "done"
-C.WAKE.clear()
-assert R.watch_default(repo_r, default("SUCCESS", sha="e" * 40), [], mine) == set()
-assert C.load("repo-sam_r.json", {}).get("red") and C.WAKE.get("sam/r") == C.NOW + 60, C.WAKE
-WROTE.clear()
-assert R.watch_default(repo_r, default("SUCCESS", sha="e" * 40), opened, mine) == {9}
-assert [x.split()[:3] for x in WROTE] == [["pr", "close", "9"]], WROTE
-assert not C.load("repo-sam_r.json", {}).get("red"), C.load("repo-sam_r.json", {})
-
-# In a pass the watcher goes first, and the steward holds a fix PR it made
-# obsolete (passes.py has what holding does) before any other PR, so one
-# with settled reviews and green CI can't merge before it's closed.
-kept_fns = (S.R.discover, S.R.settle_repo, S.R.publish, S.open_prs, S.R.unhook_gone, S.R.hook_projects,
-            S.R.watch_default, S.handle)
-order = []
-S.R.discover = lambda: [{"repo": "sam/r", "default": "main"}]
-S.R.settle_repo = lambda r, known: False
-S.R.publish = S.R.unhook_gone = lambda *a: None
-S.R.hook_projects = lambda repos: []
-S.open_prs = lambda owner, name: (info, [mkpr(number=10), mkpr(branch="autoland/red-cccccccccccc", number=9)])
-S.R.watch_default = lambda r, info, prs, digest: order.append("watch") or {9}
-S.handle = lambda repo, pr, info, digest, obsolete: order.append((pr["number"], obsolete))
-S.main()
-(S.R.discover, S.R.settle_repo, S.R.publish, S.open_prs, S.R.unhook_gone, S.R.hook_projects,
- S.R.watch_default, S.handle) = kept_fns
-assert order == ["watch", (9, True), (10, False)], order
 
 # `status` (a dry run) reads the seal the real passes' judges use, and makes
 # none of its own while there's one.

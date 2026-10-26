@@ -2,7 +2,6 @@
 and Claude jobs. Calls that touch the outside (gh, write, job, kick, me) are used
 as `C.gh(...)` and so on, so a test can stand in for them in one place."""
 
-import hashlib
 import hmac
 import json
 import os
@@ -12,6 +11,8 @@ import sys
 import time
 import urllib.request
 from datetime import datetime
+
+import seal as S
 
 CFG = json.load(open(os.environ["AUTOLAND_CONFIG"]))
 CONTEXT = CFG["context"]
@@ -76,16 +77,16 @@ def me():
 
 
 _key = []
-KEY_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 def seal(repo, n, name, verdict, head, base):
-    """What a verdict's marker carries after the head: a MAC under a key kept
-    in the state dir, which only the job a task hands it to is told. Every
-    Claude job posts as the steward's login, so without it a job quoting PR
-    text that holds a well-formed marker would pass for the verdict. It binds
-    the base too: a PR retargeted onto another branch has another diff, which
-    its verdict wasn't about."""
+    """What a verdict's marker carries after the head (seal.py), or None
+    when there's no key to check it with. A judge's key is kept in the state
+    dir, and only the job a task hands its seal to is told it. A major's is
+    renovate-sweep's (majorKey), which its job seals with."""
+    if name == S.MAJOR:
+        k = CFG.get("majorKey") and S.key(CFG["majorKey"], create=not DRY)
+        return S.major(k, repo, n, verdict, head, base) if k else None
     if not _key:
         # The real state dir's, dry run or not, so `status` reads the
         # verdicts the real passes' judges wrote; a dry run with none yet
@@ -94,40 +95,11 @@ def seal(repo, n, name, verdict, head, base):
         if DRY and not os.path.exists(path):
             _key.append(os.urandom(32).hex())
             return seal(repo, n, name, verdict, head, base)
-        try:
-            key = open(path).read().strip()
-        except FileNotFoundError:
-            key = None
-        if not KEY_RE.match(key or ""):
-            if DRY:
-                raise RuntimeError(f"{path} isn't a key: the steward's next pass makes a new one")
-            # Missing, or cut short (a crash or a full disk as it was made):
-            # an empty or short key is one anyone could seal with, so a new
-            # one, whole or not at all. Verdicts sealed with a damaged one
-            # stop counting, and their judges are asked again.
-            if key is not None:
-                log(f"{path} isn't a key; making a new one")
-            tmp = f"{path}.{os.getpid()}.new"
-            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-            with os.fdopen(fd, "w") as f:
-                f.write(os.urandom(32).hex())
-                f.flush()
-                os.fsync(f.fileno())
-            if key is None:
-                # Linked in whole, and only if no one made one meanwhile.
-                try:
-                    os.link(tmp, path)
-                except FileExistsError:
-                    pass
-                os.remove(tmp)
-            else:
-                os.replace(tmp, path)
-            key = open(path).read().strip()
-            if not KEY_RE.match(key):
-                raise RuntimeError(f"{path} couldn't be written")
+        key = S.key(path, create=not DRY)
+        if key is None:
+            raise RuntimeError(f"{path} isn't a key: the steward's next pass makes a new one")
         _key.append(key)
-    msg = f"{repo}#{n} {name} {verdict} {head} {base}".encode()
-    return hmac.new(_key[0].encode(), msg, hashlib.sha256).hexdigest()[:32]
+    return S.mac(_key[0], repo, n, name, verdict, head, base)
 
 
 def marker(pr, name, head, repo=None, base=None):
@@ -144,7 +116,8 @@ def marker(pr, name, head, repo=None, base=None):
         for m in pat.finditer(c["body"] or ""):
             if m.group(2) != head or (base is not None and m.group(3) != base):
                 continue
-            if repo and not hmac.compare_digest(m.group(4) or "", seal(repo, pr["number"], name, m.group(1), head, pr["baseRefName"])):
+            want = repo and seal(repo, pr["number"], name, m.group(1), head, pr["baseRefName"])
+            if repo and not (want and hmac.compare_digest(m.group(4) or "", want)):
                 continue
             verdict = m.group(1)
     return verdict

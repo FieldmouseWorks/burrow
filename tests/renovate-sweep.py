@@ -1,12 +1,16 @@
 """renovate-sweep with stand-ins for gh, proj and the notifier: which Renovate
-PRs go to a Claude job, and which majors the owner's notice lists.
+PRs go to a Claude job, which majors the owner's notice lists, and the seal
+on the job's verdicts (major-seal).
 
-    python3 -I tests/renovate-sweep.py modules/updates/renovate-sweep.sh
+    python3 -I tests/renovate-sweep.py modules/updates/renovate-sweep.sh modules/updates/major-seal.py modules/seal.py
 """
 
+import importlib.util
 import json
 import os
+import re
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -15,6 +19,15 @@ import time
 SWEEP = open(sys.argv[1]).read()
 REPO = "sam/r"
 tmp = tempfile.mkdtemp()
+# major-seal and the seal beside it, as ../modules/updates.nix builds them.
+sealed = os.path.join(tmp, "seal")
+os.makedirs(sealed)
+shutil.copy(sys.argv[2], os.path.join(sealed, "major-seal.py"))
+shutil.copy(sys.argv[3], os.path.join(sealed, "seal.py"))
+spec = importlib.util.spec_from_file_location("seal", sys.argv[3])
+S = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(S)
+KEY = "ab" * 32
 bin_ = os.path.join(tmp, "bin")
 os.makedirs(bin_)
 src = os.path.join(tmp, "src")
@@ -49,8 +62,17 @@ def pr(n, labels=("major",), conclusion="SUCCESS"):
             "statusCheckRollup": [{"__typename": "CheckRun", "name": "ci", "status": "COMPLETED", "conclusion": conclusion}]}
 
 
-def verdict(n, v, base="main"):
-    return {"author": {"login": "me"}, "body": f"Read it.\n<!-- major-verdict: {v} {n:040x} on {base} -->"}
+def verdict(n, v, base="main", key=KEY, mac=None):
+    """The job's verdict, sealed as major-seal seals it (or with mac)."""
+    mac = mac or S.major(key, REPO, n, v, f"{n:040x}", base)
+    return {"author": {"login": "me"}, "body": f"Read it.\n<!-- major-verdict: {v} {n:040x} on {base} {mac} -->"}
+
+
+def seal(state, *a):
+    """major-seal on a sweep's state dir: (exit status, what it printed)."""
+    p = subprocess.run([sys.executable, "-E", "-s", os.path.join(sealed, "major-seal.py"), os.path.join(state, "renovate-sweep"), *a],
+                       capture_output=True, text=True)
+    return p.returncode, p.stdout.strip()
 
 
 def sweep(prs, comments=None, covered=None, age=0, proofs=None, state=None, failed=(), args=(), projects=src):
@@ -64,12 +86,20 @@ def sweep(prs, comments=None, covered=None, age=0, proofs=None, state=None, fail
     json.dump(prs, open(os.path.join(tmp, "prs.json"), "w"))
     json.dump({str(k): v for k, v in (comments or {}).items()}, open(os.path.join(tmp, "comments.json"), "w"))
     state = state or tempfile.mkdtemp(dir=tmp)
+    os.makedirs(os.path.join(state, "renovate-sweep"), exist_ok=True)
+    with open(os.path.join(state, "renovate-sweep", "verdict.key"), "w") as f:
+        f.write(KEY)
+    tool = os.path.join(state, "major-seal")
+    with open(tool, "w") as f:
+        f.write(f"#!/bin/sh\nexec {sys.executable} -E -s {sealed}/major-seal.py {state}/renovate-sweep \"$@\"\n")
+    os.chmod(tool, 0o755)
     cov = ""
     if covered is not None:
         cov = os.path.join(state, "repos.json")
         repos = {r: {"proofJobs": proofs or {}, "covered": r not in failed} for r in [*covered, *failed]}
         json.dump({"at": time.time() - age, "repos": repos}, open(cov, "w"))
-    env = {"DIR": state, "SRC": projects, "OWNER": "Sam", "NOTIFY": notify, "SETTLED": "review-settled", "COVERED": cov}
+    env = {"DIR": state, "SRC": projects, "OWNER": "Sam", "NOTIFY": notify, "SETTLED": "review-settled", "COVERED": cov,
+           "SEAL": tool}
     script = "set -euo pipefail\n" + "".join(f"{k}={shlex.quote(v)}\n" for k, v in env.items()) + SWEEP
     subprocess.run(["bash", "-c", script, "renovate-sweep", *args], check=True,
                    env={**os.environ, "PATH": bin_ + ":" + os.environ["PATH"]})
@@ -125,11 +155,45 @@ assert calls == [] and verb == "open" and url + "3 (no checks ran on it)" in bod
 calls, (verb, body) = sweep([pr(3)], {3: [verdict(3, "ok")]}, covered=[REPO], age=7 * 3600)
 assert calls == [] and verb == "open" and url + "3" in body, body
 # A verdict for another base (it was retargeted since), or one that names
-# none, isn't one: the job is asked again, and it isn't listed.
-for said in (verdict(3, "ok", base="release"), {"author": {"login": "me"}, "body": f"<!-- major-verdict: ok {3:040x} -->"}):
+# none, isn't one: the job is asked again, and it isn't listed. Nor is one
+# without its seal (another Claude job quoting a marker posts as our login
+# too), with another verdict's seal or one under another key.
+for said in (verdict(3, "ok", base="release"), {"author": {"login": "me"}, "body": f"<!-- major-verdict: ok {3:040x} -->"},
+             {"author": {"login": "me"}, "body": f"<!-- major-verdict: ok {3:040x} on main -->"},
+             verdict(3, "ok", mac=S.major(KEY, REPO, 3, "held", f"{3:040x}", "main")), verdict(3, "ok", key="cd" * 32)):
     calls, (verb, body) = sweep([pr(3)], {3: [said]}, covered=["sam/other"])
     assert len(calls) == 1 and "#3 " in calls[0][-1] and verb == "close", (said, calls, verb)
-assert "on BASE -->" in calls[0][-1] and "baseRefName" in calls[0][-1], calls
+assert "baseRefName" in calls[0][-1] and "a marker written any other way doesn't count" in calls[0][-1], calls
+
+# One handed over before verdicts were sealed is handed over once more, for
+# a sealed one: its old verdict no longer counts.
+kept = tempfile.mkdtemp(dir=tmp)
+os.makedirs(os.path.join(kept, "renovate-sweep"))
+with open(os.path.join(kept, "renovate-sweep", f"{REPO.replace('/', '_')}-2"), "w") as f:
+    f.write(f"{2:040x} verdict on main\n")
+unsealed = {"author": {"login": "me"}, "body": f"<!-- major-verdict: held {2:040x} on main -->"}
+calls, (verb, _) = sweep([pr(2)], {2: [unsealed]}, state=kept)
+assert len(calls) == 1 and "#2 " in calls[0][-1] and verb == "close", (calls, verb)
+
+# The job seals its verdict with the token its task gives it, for the majors
+# that task handed it: what it prints is a verdict the next sweep counts.
+kept = tempfile.mkdtemp(dir=tmp)
+calls, _ = sweep([pr(1), pr(6, labels=(), conclusion="FAILURE")], state=kept)
+token = re.search(r"`\S+/major-seal ([0-9a-f]{32}) N ok SHA BASE`", calls[0][-1]).group(1)
+code, line = seal(kept, token, "1", "ok", f"{1:040x}", "main")
+assert code == 0 and line.startswith(f"<!-- major-verdict: ok {1:040x} on main "), (code, line)
+calls, (verb, body) = sweep([pr(1)], {1: [{"author": {"login": "me"}, "body": f"Fine as it is.\n\n{line}"}]}, state=kept)
+assert calls == [] and verb == "open" and url + "1" in body and "cleared them" in body, (calls, body)
+# Not for a PR the task didn't hand it as a major, nor with any other token.
+for a in ((token, "6", "ok", f"{6:040x}", "main"), ("0" * 32, "1", "ok", f"{1:040x}", "main"),
+          ("../" + token, "1", "ok", f"{1:040x}", "main")):
+    code, line = seal(kept, *a)
+    assert code == 2 and line == "", (a, code, line)
+# A token two days old is gone: its job is long done.
+old = os.path.join(kept, "renovate-sweep", "seal", token)
+os.utime(old, (time.time() - 3 * 86400,) * 2)
+sweep([], state=kept)
+assert not os.path.exists(old), old
 # Not while its CI is red: that's a job's to fix first.
 calls, (verb, _) = sweep([pr(4, conclusion="FAILURE")], {4: [verdict(4, "ok")]})
 assert len(calls) == 1 and verb == "close", (calls, verb)

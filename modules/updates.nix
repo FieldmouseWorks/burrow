@@ -63,6 +63,7 @@ let
     SETTLED = config.burrow.autoland.context or "review-settled";
     # The repos the steward covers, as it last found them; none without it.
     COVERED = if config.burrow.autoland.enable or false then "${stateDir}/autoland/repos.json" else "";
+    SEAL = "${majorSeal}/bin/major-seal";
   };
 
   # Each script gets the names it uses (shellcheck rejects the rest), set above
@@ -88,8 +89,20 @@ let
   firmwareCheck = script "firmware-check" ./updates/firmware-check.sh (
     (with pkgs; [ coreutils jq gnugrep gnused fwupd dmidecode nvme-cli util-linux ]) ++ calls
   );
+  # What seals renovate-sweep's verdicts on majors (updates/major-seal.py),
+  # with the seal the autoland steward checks them with beside it, linted as
+  # it's built.
+  majorSealSrc = pkgs.runCommand "major-seal-src" { nativeBuildInputs = [ pkgs.python3Packages.flake8 ]; } ''
+    mkdir $out
+    cp ${./updates/major-seal.py} $out/major-seal.py
+    cp ${./autoland/seal.py} $out/seal.py
+    flake8 --ignore E501,W503 $out
+  '';
+  majorSeal = pkgs.writeShellScriptBin "major-seal" ''
+    exec ${pkgs.python3}/bin/python3 -E -s ${majorSealSrc}/major-seal.py ${stateDir}/renovate-sweep "$@"
+  '';
   renovateSweep = script "renovate-sweep" ./updates/renovate-sweep.sh (
-    (with pkgs; [ coreutils git gh jq gnused ]) ++ calls
+    (with pkgs; [ coreutils findutils git gh jq gnused ]) ++ calls
   );
 
   # What the health checks may call, beyond the system's own PATH.

@@ -37,7 +37,6 @@ def fix_task(repo, pr, why, proofs=None):
 
 
 JUDGMENT = "autoland-judgment"
-MAJOR_VERDICT = "major-verdict"  # renovate-sweep's, on a Renovate major
 
 
 REVIEWED = "its reviewers found nothing on that head, every thread is resolved"
