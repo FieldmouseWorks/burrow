@@ -144,6 +144,41 @@ status, _ = run(clean(sha=newer), 820)
 STUB["post"] = None
 assert os.listdir(DDIR) == [] and "late" not in pr_state()["rv"]["deepseek"], (os.listdir(DDIR), pr_state())
 assert POSTED == [] and merged(), (POSTED, status)
+# Only a clean look at this head by the same reviewer covers what it found
+# there: out of service, it never comes, so the answer stays, the PR waits
+# and the owner hears. Back and clean on this head, it's let go.
+fresh_pr_state()
+run(mkpr(), 0)
+run(mkpr(), 600)
+worker(deepseek={"result": "review", "answer": {"findings": [{"path": "a.py"}]}})
+C.save(V.OUT, {"deepseek": {"why": "balance", "until": C.ts(T0) + 86400}})
+STUB["post"] = RuntimeError("HTTP 422")
+for t in (700, 760, 820, 880):
+    status, digest = run(mkpr(sha=newer, reviews=[rv_review("codex", 0, newer)]), t)
+    assert not merged() and V.item_name("pr-sam_r-5.json", "deepseek", head, "main") + ".json" in os.listdir(DDIR), (t, WROTE)
+assert ("A review couldn't be posted", f"[sam/r#5](u) t", f"DeepSeek's review of {head[:7]}, 4 tries") in digest, digest
+os.remove(f"{tmp}/state/{V.OUT}")
+status, _ = run(clean(sha=newer), 940)
+STUB["post"] = None
+assert os.listdir(DDIR) == [] and merged(), (os.listdir(DDIR), status)
+# Nor is a look at an earlier head still under way passed over by one out
+# of service: the PR waits for what it finds.
+fresh_pr_state()
+run(mkpr(), 0)
+run(mkpr(), 600)
+os.remove(f"{QDIR}/{V.item_name('pr-sam_r-5.json', 'deepseek', head, 'main')}.json")
+worker()
+C.save(V.OUT, {"deepseek": {"why": "balance", "until": C.ts(T0) + 86400}})
+under_way = V.item_name("pr-sam_r-5.json", "deepseek", "c" * 40, "main")
+C.save(f"{V.QUEUE}/{under_way}.json", {})
+held = open(f"{QDIR}/{under_way}.json")
+fcntl.flock(held, fcntl.LOCK_SH)
+status, _ = run(mkpr(), 650)
+assert not merged() and "DeepSeek is still reviewing an earlier commit" in status, status
+held.close()
+os.remove(f"{QDIR}/{under_way}.json")
+status, _ = run(mkpr(reviews=[rv_review("codex", 0)]), 700)
+assert merged(), status
 # The answers it posts are this PR's alone: sam/r-5's PR 3 isn't sam/r's PR 5.
 fresh_pr_state()
 for k in ("pr-sam_r-5.json", "pr-sam_r-5-3.json", "pr-sam_r-50.json"):

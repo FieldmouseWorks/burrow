@@ -650,11 +650,17 @@ def handle(repo, pr, repo_info, digest):
                         late.append(back["head"][:7])
                 except ValueError as e:  # an answer that's no review
                     log(f"{tag}: {V.NAMES[r]}'s review of {back['head'][:7]} wasn't a review: {e}")
-                except RuntimeError as e:  # GitHub: the same answer goes again next pass, twice more
+                except RuntimeError as e:  # GitHub: the same answer goes again next pass
                     tries[name] = tries.get(name, 0) + 1
                     log(f"{tag}: couldn't post {V.NAMES[r]}'s review of {back['head'][:7]} ({tries[name]}): {e}")
-                    if tries[name] < 3:
-                        unposted.append(f"{V.NAMES[r]}'s review of {back['head'][:7]}")
+                    # Three tries, and then only until the reviewer finds this
+                    # head clean, which covers what it found there; one out of
+                    # service may never, so the owner hears.
+                    if tries[name] < 3 or said[r][0] != "clean":
+                        x = f"{V.NAMES[r]}'s review of {back['head'][:7]}"
+                        unposted.append(x)
+                        if tries[name] >= 3:
+                            digest.append(("A review couldn't be posted", line, f"{x}, {tries[name]} tries"))
                         after(C.NOW, 1)
                         continue
             elif back.get("result") == "out":
@@ -673,8 +679,8 @@ def handle(repo, pr, repo_info, digest):
         # One out of service too, or put out by one of these answers: its
         # looks came back before it went out, and posting them asks nothing
         # of it.
-        overtaken(r)
         consume(r)
+        overtaken(r)
     live = [r for r in live if not V.out(r)]
     # The findings of one out now on this head are threads this pass never
     # read, and its verdict isn't waited for: they hold the pass back.
@@ -735,6 +741,13 @@ def handle(repo, pr, repo_info, digest):
     if not quiet and any(said[r][0] == "none" for r in live):
         after(st["seen"], rc["settleDelay"])  # the reviewers are asked then
     waiting = [f"Posting {x}" for x in unposted]
+    for r in names:
+        # A look at an earlier head still under way by one whose verdict on
+        # this head doesn't cover it (out of service, say): what it finds
+        # is posted once it's back, so the pass waits for it.
+        if r not in live and said[r][0] != "clean" and any(
+                x != V.item_name(key, r, head, pr["baseRefName"]) for x in V.running(key, r)):
+            waiting.append(f"{V.NAMES[r]} is still reviewing an earlier commit")
     if not live:
         why = "; ".join(f"{V.NAMES[r]}: {away[r] or V.out(r)}" for r in names) or "none is on"
         waiting.append(f"No reviewer can review it now ({why})")

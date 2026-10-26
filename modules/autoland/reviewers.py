@@ -301,16 +301,38 @@ def drop(name):
             pass
 
 
-def answered(key, r):
-    """The names of the reviewer's answers, for any head, to the PR whose
-    state file is `key`: parsed, not matched by prefix, since sam/r-5's
-    names start with sam/r PR 5's. [] if there's no answers directory (a
-    status run that couldn't make it)."""
+def mine(d, key, r):
+    """The names of the reviewer's entries in `d` (the queue, the answers),
+    for any head, for the PR whose state file is `key`: parsed, not matched
+    by prefix, since sam/r-5's names start with sam/r PR 5's. [] if there's
+    no such directory (a status run that couldn't make it)."""
     try:
-        names = [x.removesuffix(".json") for x in os.listdir(os.path.join(STATE, DONE))]
+        names = [x.removesuffix(".json") for x in os.listdir(os.path.join(STATE, d))]
     except OSError:
         return []
     return sorted(n for n in names if n.partition("--")[0] == r and n.partition("--")[2].rsplit("-", 2)[0] == key[:-5])
+
+
+def answered(key, r):
+    """The names of the reviewer's answers, for any head, to the PR."""
+    return mine(DONE, key, r)
+
+
+def running(key, r):
+    """The names of the reviewer's looks at the PR, for any head, that the
+    reviewers' service is on now (it holds the entry's lock while it is)."""
+    on = []
+    for name in mine(QUEUE, key, r):
+        try:
+            f = open(os.path.join(STATE, QUEUE, name + ".json"))
+        except OSError:
+            continue
+        with f:
+            try:
+                fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                on.append(name)
+    return on
 
 
 def taken(path):
