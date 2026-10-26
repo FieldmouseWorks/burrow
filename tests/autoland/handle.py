@@ -912,6 +912,18 @@ mine.clear()
 R.watch_default(repo_r, default("SUCCESS"), [], mine)
 R.watch_default(repo_r, default("FAILURE"), [], mine)
 assert len(JOBS) == 3 and mine == [], (JOBS, mine)
+# Green while its job still works: the red is kept until the job ends, and
+# then its PR, no longer needed, is closed; another one is left alone.
+WROTE.clear()
+R.watch_default(repo_r, default("SUCCESS", sha="e" * 40), [], mine)
+assert C.load("repo-sam_r.json", {}).get("red") and WROTE == [], WROTE
+STATES[f"job-{len(JOBS)}"] = "done"
+R.watch_default(repo_r, default("SUCCESS", sha="e" * 40),
+                [mkpr(branch="autoland/red-cccccccccccc", number=9), mkpr(branch="autoland/red-dddddddddddd", number=8)], mine)
+assert [x.split()[:3] for x in WROTE] == [["pr", "close", "9"]], WROTE
+assert not C.load("repo-sam_r.json", {}).get("red"), C.load("repo-sam_r.json", {})
+R.watch_default(repo_r, default("FAILURE"), [], mine)
+assert len(JOBS) == 4 and mine == [], (JOBS, mine)
 
 # `status` (a dry run) reads the seal the real passes' judges use, and makes
 # none of its own while there's one.

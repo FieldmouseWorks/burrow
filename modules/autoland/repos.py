@@ -170,21 +170,32 @@ def watch_default(r, info, prs, digest):
     key = f"repo-{repo.replace('/', '_')}.json"
     st = load(key, {})
     red = st.get("red") or {}
+    working = red.get("job") and C.job_state(red["job"]) in (None, "queued", "running")
+    # Its PR: the one its task names, from the steward's own authors to this
+    # branch. Anyone can open a PR from a branch of that name on a fork, and
+    # that one is nothing of the steward's.
+    fix = RED_BRANCH + (red.get("at") or "")[:12]
+    open_fix = [pr for pr in prs if red.get("at") and pr["headRefName"] == fix
+                and pr["baseRefName"] == r["default"] and C.acted_on(pr)]
     if state not in ("FAILURE", "ERROR"):
-        if red and state == "SUCCESS":
-            log(f"{repo}: {r['default']} is green again")
-            st.pop("red")
-            save(key, st)
+        if not red or state != "SUCCESS":
+            return
+        # Green while its job still works: wait for the job to end, so a PR
+        # it opens can't outlive the red it was for. Once it has, its PR, if
+        # one is open, isn't needed.
+        if working:
+            return
+        for pr in open_fix:
+            log(f"{repo}: closing #{pr['number']}, {r['default']} is green again without it")
+            C.write("pr", "close", str(pr["number"]), "-R", repo, "--comment",
+                    f"{r['default']} is green again at {sha[:7]}, so this fix for {red['at'][:7]} isn't needed.",
+                    check=False)
+        log(f"{repo}: {r['default']} is green again")
+        st.pop("red")
+        save(key, st)
         return
     line = f"{repo} {r['default']} at {sha[:7]}"
-    if red.get("job") and C.job_state(red["job"]) in (None, "queued", "running"):
-        return
-    # Its PR is in the loop: the one its task names, from the steward's own
-    # authors to this branch. Anyone can open a PR from a branch of that name
-    # on a fork, and that one holds nothing up.
-    fix = RED_BRANCH + (red.get("at") or "")[:12]
-    if red.get("at") and any(pr["headRefName"] == fix and pr["baseRefName"] == r["default"] and C.acted_on(pr)
-                             for pr in prs):
+    if working or open_fix:
         return
     # Its job ended with no PR to show. Seen on two passes: this one may
     # have read the PRs just before the job opened its own.
