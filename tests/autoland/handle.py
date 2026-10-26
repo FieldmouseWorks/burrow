@@ -7,6 +7,7 @@ import hmac
 import fcntl
 import json
 import os
+import shutil
 import subprocess
 
 from harness import (C, CI_GREEN, COMMITS, DDIR, FAIL, JOBS, POSTED, PR_DIFF, QDIR, R, S, STATES, STUB, T0, V,
@@ -77,6 +78,53 @@ run(mkpr(), 600)
 worker(deepseek={"result": "review", "answer": {"findings": [{"path": "a.py"}]}})
 run(mkpr(sha=newer, base="release/1.x"), 700)
 assert POSTED == [] and os.listdir(DDIR) == [], POSTED
+# Findings on an earlier head, posted while the new one is already clean
+# and green, hold the pass back from landing: the threads it read are from
+# before them.
+fresh_pr_state()
+run(mkpr(), 0)
+run(mkpr(), 600)
+worker(deepseek={"result": "review", "answer": {"findings": [{"path": "a.py"}]}})
+status, _ = run(clean(sha=newer), 700)
+assert ("deepseek", head, 1) in POSTED and not merged(), (POSTED, WROTE)
+assert "state=pending" in status and f"review findings on {head[:7]}" in status, status
+# One GitHub wouldn't take is kept and tried again, and the PR waits for it.
+fresh_pr_state()
+run(mkpr(), 0)
+run(mkpr(), 600)
+worker(deepseek={"result": "review", "answer": {"findings": [{"path": "a.py"}]}})
+STUB["post"] = RuntimeError("HTTP 502")
+for t in (700, 760):
+    status, _ = run(clean(sha=newer), t)
+    assert not merged() and len(os.listdir(DDIR)) == 2 and C.WAKE, (t, WROTE, os.listdir(DDIR))
+    assert f"Posting DeepSeek's review of {head[:7]}" in status, status
+STUB["post"] = None
+status, _ = run(clean(sha=newer), 820)
+assert ("deepseek", head, 1) in POSTED and os.listdir(DDIR) == [] and not merged(), (POSTED, status)
+assert "late" not in pr_state()["rv"]["deepseek"], pr_state()
+# The third failure gives up on it: the new head's own reviews still decide.
+fresh_pr_state()
+run(mkpr(), 0)
+run(mkpr(), 600)
+worker(deepseek={"result": "review", "answer": {"findings": [{"path": "a.py"}]}})
+STUB["post"] = RuntimeError("HTTP 502")
+for t in (700, 760):
+    run(clean(sha=newer), t)
+    assert not merged(), WROTE
+status, _ = run(clean(sha=newer), 820)
+STUB["post"] = None
+assert os.listdir(DDIR) == [] and "late" not in pr_state()["rv"]["deepseek"], (os.listdir(DDIR), pr_state())
+assert POSTED == [] and merged(), (POSTED, status)
+# The answers it posts are this PR's alone: sam/r-5's PR 3 isn't sam/r's PR 5.
+fresh_pr_state()
+for k in ("pr-sam_r-5.json", "pr-sam_r-5-3.json", "pr-sam_r-50.json"):
+    C.save(f"{V.DONE}/codex--{V.snap_name(k, head, 'main')}.json", {})
+assert V.answered("pr-sam_r-5.json", "codex") == [V.item_name("pr-sam_r-5.json", "codex", head, "main")]
+assert V.answered("pr-sam_r-5.json", "deepseek") == []
+# And a status run with no answers directory reads none.
+shutil.rmtree(DDIR)
+assert V.answered("pr-sam_r-5.json", "codex") == []
+fresh_pr_state()
 
 # Only reviews the steward posted count.
 fresh_pr_state()

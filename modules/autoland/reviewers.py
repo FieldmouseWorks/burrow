@@ -303,9 +303,14 @@ def drop(name):
 
 def answered(key, r):
     """The names of the reviewer's answers, for any head, to the PR whose
-    state file is `key`."""
-    pre = f"{r}--{key[:-5]}-"
-    return sorted(x.removesuffix(".json") for x in os.listdir(os.path.join(STATE, DONE)) if x.startswith(pre))
+    state file is `key`: parsed, not matched by prefix, since sam/r-5's
+    names start with sam/r PR 5's. [] if there's no answers directory (a
+    status run that couldn't make it)."""
+    try:
+        names = [x.removesuffix(".json") for x in os.listdir(os.path.join(STATE, DONE))]
+    except OSError:
+        return []
+    return sorted(n for n in names if n.partition("--")[0] == r and n.partition("--")[2].rsplit("-", 2)[0] == key[:-5])
 
 
 def taken(path):

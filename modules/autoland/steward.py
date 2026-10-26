@@ -621,13 +621,19 @@ def handle(repo, pr, repo_info, digest):
                 rs["gone"] = True
                 after(C.NOW, 1)  # the second look
 
+    late, unposted = [], []  # earlier heads whose findings this pass posted, or couldn't post yet
+
     def overtaken(r):
         """What came back from the reviewer's looks at the PR's earlier heads
         after it moved on (V.sweep keeps them): posted on the commit each
         one read, so what it found goes into the next push instead of
-        waiting for its look at this head. Findings there count as a round;
-        "nothing found" there says nothing about this head."""
-        for name in V.answered(key, r):
+        waiting for its look at this head. Findings there count as a round,
+        and hold this pass back from landing: the threads it read are from
+        before them. "Nothing found" there says nothing about this head."""
+        rs = st["rv"].setdefault(r, {})
+        mine = V.answered(key, r)
+        tries = {n: k for n, k in rs.get("late", {}).items() if n in mine}
+        for name in mine:
             if name == V.item_name(key, r, head, pr["baseRefName"]):
                 continue
             back = load(f"{V.DONE}/{name}.json", None) or {}
@@ -638,14 +644,27 @@ def handle(repo, pr, repo_info, digest):
                     if V.post(repo, {**pr, "headRefOid": back["head"]}, r, back["answer"]) == "findings":
                         v, at, rr = said[r]
                         said[r] = (v, at, rr + 1)
-                except (ValueError, RuntimeError) as e:  # nothing waits on it: once
-                    log(f"{tag}: couldn't post {V.NAMES[r]}'s review of {back['head'][:7]}: {e}")
+                        late.append(back["head"][:7])
+                except ValueError as e:  # an answer that's no review
+                    log(f"{tag}: {V.NAMES[r]}'s review of {back['head'][:7]} wasn't a review: {e}")
+                except RuntimeError as e:  # GitHub: the same answer goes again next pass, twice more
+                    tries[name] = tries.get(name, 0) + 1
+                    log(f"{tag}: couldn't post {V.NAMES[r]}'s review of {back['head'][:7]} ({tries[name]}): {e}")
+                    if tries[name] < 3:
+                        unposted.append(f"{V.NAMES[r]}'s review of {back['head'][:7]}")
+                        after(C.NOW, 1)
+                        continue
             elif back.get("result") == "out":
                 o = load(V.OUT, {})
                 o[r] = {"why": back["why"], "until": back["until"]}
                 save(V.OUT, o)
                 log(f"{tag}: {V.NAMES[r]} is out of service until {back['until']:.0f}: {back['why']}")
+            tries.pop(name, None)
             V.drop(name)
+        if tries:
+            rs["late"] = tries
+        else:
+            rs.pop("late", None)
 
     for r in live:
         overtaken(r)
@@ -706,7 +725,7 @@ def handle(repo, pr, repo_info, digest):
     quiet = age >= rc["settleDelay"] * MIN
     if not quiet and any(said[r][0] == "none" for r in live):
         after(st["seen"], rc["settleDelay"])  # the reviewers are asked then
-    waiting = []
+    waiting = [f"Posting {x}" for x in unposted]
     if not live:
         why = "; ".join(f"{V.NAMES[r]}: {away[r] or V.out(r)}" for r in names) or "none is on"
         waiting.append(f"No reviewer can review it now ({why})")
@@ -730,13 +749,15 @@ def handle(repo, pr, repo_info, digest):
         what.append(f"{open_threads} open review thread{'s' * (open_threads > 1)}")
     if changes:
         what.append("changes requested by " + ", ".join(changes))
+    if late:
+        what.append("review findings on " + ", ".join(sorted(set(late))))
     if waiting:
         settle("pending", "; ".join(waiting + stuck + what))
         # One reviewer's threads needn't wait for the other to finish.
         if what and not swept and handoff_due("handed"):
             hand_off(", ".join(what))
-    elif not clean or open_threads or changes:
-        if not open_threads and not changes:
+    elif not clean or what:
+        if not what:
             # Every finding answered without a new commit: the reviewers that
             # had findings look again.
             for r in live:
