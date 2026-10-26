@@ -872,7 +872,7 @@ def main():
         review_worker.work()
         return
     try:
-        for d in ("", V.QUEUE, V.SNAP, V.DONE, V.ACCOUNT, V.GIT):
+        for d in ("", V.QUEUE, V.SNAP, V.DONE, V.ACCOUNT, V.SESSIONS, V.GIT):
             os.makedirs(os.path.join(STATE, d), exist_ok=True)
     except OSError:
         if not DRY:

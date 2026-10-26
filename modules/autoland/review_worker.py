@@ -9,7 +9,13 @@ an agent into reading, sending or saying something it shouldn't finds nothing
 worth having: no GitHub token, no secrets paths, no other repo's code, no
 way out but its API, and no key of its own (DeepSeek's stays with the gate;
 the commands Codex runs can't read its login). The keys are taken out of
-anything the agents say as well."""
+anything the agents say as well.
+
+Each reviewer keeps one session per PR (review/sessions/REVIEWER--PR): the
+agent's home, and the look it last took there, which its next look resumes.
+Nothing in it is another PR's (only Codex's login is linked in), and once
+the PR merges or closes the steward's sweep marks it gone and this service
+deletes it."""
 
 import fcntl
 import http.client
@@ -46,6 +52,12 @@ Your earlier findings on this PR, with the replies they got. Don't raise one aga
 Each finding: "path" (from the repository root), "line" (the line number in the file at HEAD where the problem is), "severity" ("P0": unsafe or breaks things, "P1": a real bug or a rule broken, "P2": a smaller real defect), "title" (one line), "body" (what is wrong, why, and the fix, in a few sentences). Most severe first.
 
 End with your answer as JSON and nothing else: {{"findings": [...], "summary": "one sentence on the PR as a whole"}}"""
+
+# A look that resumes the PR's session: what it already read may be stale,
+# and its answer is still the verdict on the whole change.
+AGAIN = """This continues your review of this PR. {since} The checkout is in the same place; anything you read there before may have changed, so read it again before you rely on it. Review the whole change as it stands at HEAD, not only what changed since your last look: your answer is the verdict on all of it, and the PR merges on it. Here is the brief again, with the replies your findings have had since.
+
+"""
 
 SCHEMA = {
     "type": "object",
@@ -103,17 +115,23 @@ def env(**extra):
             "SSL_CERT_FILE": "/etc/ssl/certs/ca-certificates.crt", **extra}
 
 
-def sandboxed(snap, home, t, names, argv):
+# Where a look sees its snapshot: the same path for every head, so a
+# session resumed on a PR's new head finds the checkout where it left it.
+CHECKOUT = "/review"
+
+
+def sandboxed(snap, home, t, names, argv, binds=()):
     """argv in a sandbox of its own (bubblewrap): it sees the store paths it
     runs on (the agents, the tools and their closure, `box.store`), the
     machine's CA bundle, /bin/sh, /bin/bash and /usr/bin/env, /etc's passwd
-    and group, its snapshot (read-only), its own
-    agent's home and its temp dir `t`, and nothing else of the machine. The
-    service's user can read every queued head's snapshot and every answer,
-    and an agent talked into reading another repo's would post it in this
-    one's review. Nor does it see the rest of the store: every flake this
-    machine has evaluated has its sources there, private repos' included,
-    and /etc's files link into the machine's configuration.
+    and group, its snapshot (read-only, at CHECKOUT), its PR's session
+    (`home`), its temp dir `t` and `binds`, and nothing else of the machine.
+    The service's user can read every queued head's snapshot, every answer
+    and every PR's session, and an agent talked into reading another repo's
+    would post it in this one's review. Nor does it see the rest of the
+    store: every flake this machine has evaluated has its sources there,
+    private repos' included, and /etc's files link into the machine's
+    configuration.
 
     It has no network: argv runs behind egress.py's bridge to the gate on
     `t`/egress.sock, which the caller opens, with `names` in its environment
@@ -123,7 +141,7 @@ def sandboxed(snap, home, t, names, argv):
     a git config of its own, for that one path."""
     os.makedirs(home, exist_ok=True)
     with open(f"{t}/gitconfig", "w") as f:
-        f.write(f"[safe]\n\tdirectory = {snap}\n")
+        f.write(f"[safe]\n\tdirectory = {CHECKOUT}\n")
     box = CFG["box"]
     with open(box["store"]) as f:
         store = f.read().split()
@@ -133,9 +151,10 @@ def sandboxed(snap, home, t, names, argv):
             *[x for p in ("/etc/passwd", "/etc/group") for x in ("--ro-bind-try", p, p)],
             "--ro-bind", box["caBundle"], "/etc/ssl/certs/ca-certificates.crt",
             *[x for at, to in box["links"].items() for x in ("--symlink", to, at)],
-            "--ro-bind", snap, snap, "--bind", home, home, "--bind", t, t,
+            "--ro-bind", snap, CHECKOUT, "--bind", home, home, "--bind", t, t,
+            *[x for p in binds for x in ("--bind", p, p)],
             "--ro-bind", f"{t}/gitconfig", os.path.join(os.environ["HOME"], ".gitconfig"),
-            "--chdir", snap, "--", sys.executable, "-I", G.__file__, f"{t}/egress.sock", ",".join(names), "--", *argv]
+            "--chdir", CHECKOUT, "--", sys.executable, "-I", G.__file__, f"{t}/egress.sock", ",".join(names), "--", *argv]
 
 
 # Where each agent's API is. Codex goes through the gate as its HTTPS proxy,
@@ -145,26 +164,41 @@ CODEX_HOSTS = ["chatgpt.com", "auth.openai.com", "api.openai.com"]
 DEEPSEEK_API = "api.deepseek.com"
 
 
-def codex(snap, prompt):
-    home = os.path.join(os.environ["HOME"], ".codex")
+LOGIN_LOCK = threading.Lock()  # looks run side by side
+
+
+def codex(snap, prompt, home, sid):
+    """Codex's look, in the PR's session `sid` (a new one if None): its
+    answer, and the session's id. `home` is the PR's own CODEX_HOME, which
+    holds that session and nothing of any other PR's; the login in it is
+    the reviewers' one (~/.codex/auth.json, linked in)."""
+    login = os.path.join(os.environ["HOME"], ".codex")
+    os.makedirs(home, exist_ok=True)
+    for f in ("auth.json", "config.toml"):
+        if os.path.exists(f"{login}/{f}") and not os.path.lexists(f"{home}/{f}"):
+            os.symlink(f"{login}/{f}", f"{home}/{f}")
     with tempfile.TemporaryDirectory() as t:
         with open(f"{t}/schema.json", "w") as f:
             json.dump(SCHEMA, f)
+        flags = ["--json", "--output-schema", f"{t}/schema.json", "-o", f"{t}/answer.json",
+                 # The commands it runs read everything but its homes (its
+                 # login) and write nothing.
+                 "-c", 'default_permissions="review"',
+                 "-c", f'permissions.review.filesystem={{":root"="read", {json.dumps(home)}="none", {json.dumps(login)}="none"}}',
+                 # The checkout's AGENTS.md is the PR's own: the base's rules are in the prompt.
+                 "-c", "project_doc_max_bytes=0",
+                 "-c", f"model_reasoning_effort={CFG['reviewers']['codex']['effort']}"]
+        argv = ([f"{CFG['agents']}/codex", "exec", "resume", *flags, sid, "-"] if sid else
+                [f"{CFG['agents']}/codex", "exec", "--cd", CHECKOUT, "--color", "never", *flags, "-"])
         gate = G.Gate(f"{t}/egress.sock", CODEX_HOSTS)
         try:
-            p = subprocess.run(sandboxed(snap, home, t, ["HTTPS_PROXY"], [
-                f"{CFG['agents']}/codex", "exec", "--cd", snap, "--ephemeral",
-                "--color", "never", "--output-schema", f"{t}/schema.json", "-o", f"{t}/answer.json",
-                # The commands it runs read everything but its own home (its
-                # login) and write nothing.
-                "-c", 'default_permissions="review"',
-                "-c", f'permissions.review.filesystem={{":root"="read", {json.dumps(home)}="none"}}',
-                # The checkout's AGENTS.md is the PR's own: the base's rules are in the prompt.
-                "-c", "project_doc_max_bytes=0",
-                "-c", f"model_reasoning_effort={CFG['reviewers']['codex']['effort']}", "-"]),
-                input=prompt, capture_output=True, text=True, env=env(CODEX_HOME=home))
+            # The login, where a refresh writes it.
+            p = subprocess.run(sandboxed(snap, home, t, ["HTTPS_PROXY"], argv,
+                                         [f"{login}/auth.json"] if os.path.exists(f"{login}/auth.json") else []),
+                               input=prompt, capture_output=True, text=True, env=env(CODEX_HOME=home))
         finally:
             gate.close()
+            keep_login(home, login)
         said = p.stderr + p.stdout
         if p.returncode != 0 and re.search(r"usage limit|usage_limit_reached", said, re.I):
             raise Out("its ChatGPT plan's usage is spent", time.time() + wait_for(said))
@@ -172,8 +206,39 @@ def codex(snap, prompt):
             raise Out("it isn't logged in (autoland-codex-login on the machine)", time.time() + 3600)
         if p.returncode != 0:
             raise RuntimeError(f"codex exited {p.returncode}: {tail(said.strip(), 300)}")
+        sid = next((e["thread_id"] for e in events(p.stdout) if e.get("type") == "thread.started"), sid)
+        if not sid:
+            raise RuntimeError("codex named no session")
         with open(f"{t}/answer.json") as f:
-            return answer_of(f.read())
+            return answer_of(f.read()), sid
+
+
+def keep_login(home, login):
+    """The reviewers' login as Codex last saved it: one that saved it in
+    place of the PR's link to it (a refresh written as a new file) puts it
+    back where every PR's session reads it."""
+    mine = f"{home}/auth.json"
+    if os.path.islink(mine) or not os.path.isfile(mine):
+        return
+    with LOGIN_LOCK:
+        shutil.copyfile(mine, f"{login}/auth.json.tmp")
+        os.chmod(f"{login}/auth.json.tmp", 0o600)
+        os.replace(f"{login}/auth.json.tmp", f"{login}/auth.json")
+        os.remove(mine)
+        os.symlink(f"{login}/auth.json", mine)
+
+
+def events(out):
+    """The JSON events an agent printed, one a line (--json)."""
+    found = []
+    for line in out.splitlines():
+        try:
+            e = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(e, dict):
+            found.append(e)
+    return found
 
 
 def overlay(effort):
@@ -186,23 +251,23 @@ def overlay(effort):
             "- id: tool-web\n  disabled: true\n")
 
 
-def deepseek(snap, prompt):
+def deepseek(snap, prompt, home, sid):
+    """DeepSeek's look, in the PR's session `sid` (a new one if None): its
+    answer, and the session's id. `home` is the PR's own DSH_HOME: dsh keeps
+    every session it runs there, and one PR's look reading another's would
+    post that repo's code in this one."""
     key = deepseek_key()
     efforts = [CFG["reviewers"]["deepseek"]["effort"]]
     if efforts[0] == "max":
         efforts.append("high")
+    # The machine's settings for it (the model), once, when the session starts.
+    mine = os.path.join(os.environ["HOME"], ".dsh", "profiles")
+    if os.path.isdir(mine) and not os.path.exists(f"{home}/profiles"):
+        shutil.copytree(mine, f"{home}/profiles")
     with tempfile.TemporaryDirectory() as t:
-        # A home of its own for each review, with only the machine's settings
-        # for it (the model) in: dsh keeps every session it runs there, and
-        # an agent talked into reading another review's would post that
-        # repo's code in this one.
-        home = f"{t}/dsh"
-        mine = os.path.join(os.environ["HOME"], ".dsh", "profiles")
-        if os.path.isdir(mine):
-            shutil.copytree(mine, f"{home}/profiles")
         gate = G.Gate(f"{t}/egress.sock", [], (DEEPSEEK_API, {"x-api-key": key}))
         try:
-            return deepseek_in(snap, prompt, home, t, efforts)
+            return deepseek_in(snap, prompt, home, t, efforts, sid)
         finally:
             gate.close()
             deepseek_balance(key)
@@ -238,8 +303,9 @@ def deepseek_balance(key):
         log(f"  couldn't keep DeepSeek's balance: {e}")
 
 
-def deepseek_in(snap, prompt, home, t, efforts):
-    """deepseek(), its gate open: at each effort in turn until one answers."""
+def deepseek_in(snap, prompt, home, t, efforts, sid):
+    """deepseek(), its gate open: at each effort in turn until one answers,
+    in the one session."""
     while True:
         with open(f"{t}/overlay.yml", "w") as f:
             f.write(overlay(efforts[0]))
@@ -247,17 +313,22 @@ def deepseek_in(snap, prompt, home, t, efforts):
         # puts the real one in.
         p = subprocess.run(
             sandboxed(snap, home, t, ["DEEPSEEK_BASE_URL/anthropic"],
-                      [f"{CFG['agents']}/dsh", "--profile", "headless", "--patch", f"{t}/overlay.yml", "-"]),
+                      [f"{CFG['agents']}/dsh", "--profile", "headless", "--patch", f"{t}/overlay.yml", "--json",
+                       *(["--session-id", sid] if sid else []), "-"]),
             input=prompt, capture_output=True, text=True,
             env=env(DSH_HOME=home, DSH_TELEMETRY_MODE="DISABLED", DSH_PERMISSION_MODE="read-only",
                     DEEPSEEK_API_KEY="the-gate-holds-it"))
         said = p.stderr.strip()
         if p.returncode != 0 and re.search(r"\bAUTH\b|CREDENTIAL|\b40[12]\b|insufficient balance", said, re.I):
             raise Out("its API key was turned down or its balance is spent", time.time() + 3600)
+        seen = events(p.stdout)
+        sid = next((e["sessionId"] for e in seen if e.get("type") == "session"), sid)
         try:
             if p.returncode != 0:
                 raise RuntimeError(f"dsh exited {p.returncode}: {tail(said, 300)}")
-            return answer_of(p.stdout)
+            if not sid:
+                raise RuntimeError("dsh named no session")
+            return answer_of("".join(e.get("text", "") for e in seen if e.get("type") == "final")), sid
         except RuntimeError:
             # At max effort it can think past its budget without
             # answering, and asking the same again only does it again:
@@ -353,8 +424,30 @@ def review(name):
                       "but you can't see how: " + ", ".join(item["secret"])) if item["secret"] else ""
             prompt = PROMPT.format(**{**item, "owner": CFG["owner"], "secret": secret,
                                       "rules": item["rules"] or "(none)", "prior": item["prior"] or "(none)"})
-            log(f"{item['repo']}#{item['number']}: {V.NAMES[r]} is reviewing {item['headRefOid'][:7]}")
-            out = {"result": "review", "answer": scrub(AGENTS[r](snap, prompt))}
+            # The PR's session: every look at it resumes the one before's.
+            session = f"{V.SESSIONS}/{V.session_name(r, item['snap'])}"
+            last = load(f"{session}/look.json", None) or {}
+            head = item["headRefOid"]
+            if last.get("id"):
+                prompt = AGAIN.format(since=f"Your last look was at {last['head'][:12]}, and the PR's head is now {head[:12]}."
+                                      if last.get("head") != head else "The PR's head is the one you last looked at.") + prompt
+            log(f"{item['repo']}#{item['number']}: {V.NAMES[r]} is reviewing {head[:7]}"
+                + (" in its session" if last.get("id") else ""))
+            began = time.time()
+            try:
+                answer, sid = AGENTS[r](snap, prompt, os.path.join(STATE, session, "home"), last.get("id"))
+            except Out:
+                raise
+            except Exception:
+                # A session that won't resume (lost, or broken) isn't asked
+                # again: the look's next try starts the PR's next one.
+                if last.get("id"):
+                    remove_look(session)
+                raise
+            save(f"{session}/look.json", {"id": sid, "head": head})
+            log(f"{item['repo']}#{item['number']}: {V.NAMES[r]} took {time.time() - began:.0f}s"
+                + (" in its session" if last.get("id") else ", starting its session"))
+            out = {"result": "review", "answer": scrub(answer)}
         except Out as e:
             out = {"result": "out", "why": scrub(str(e)), "until": e.until}
             log(f"{item['repo']}#{item['number']}: {V.NAMES[item['reviewer']]} is out: {out['why']}")
@@ -377,6 +470,43 @@ def review(name):
                 C.kick(item["repo"])
 
 
+def remove_look(session):
+    try:
+        os.remove(os.path.join(STATE, session, "look.json"))
+    except OSError:
+        pass
+
+
+def session_of(name):
+    """The session a queued review's look is in (one whose name isn't a
+    snapshot's is its own, and fails as no review)."""
+    r, _, snap = name.removesuffix(".json").partition("--")
+    try:
+        return V.session_name(r, snap)
+    except ValueError:
+        return name
+
+
+def forget():
+    """The sessions of PRs that closed, which the steward's sweep marked
+    gone: deleted for good, nothing of them kept."""
+    def writable(f, path, e):
+        # The agents set their own modes on what they write; a directory
+        # they left read-only is opened up to delete what's in it.
+        if not isinstance(e, PermissionError):
+            raise e
+        os.chmod(os.path.dirname(path), 0o700)
+        f(path)
+
+    d = os.path.join(STATE, V.SESSIONS)
+    for x in os.listdir(d):
+        if x.startswith(V.GONE):
+            try:
+                shutil.rmtree(os.path.join(d, x), onexc=writable)
+            except OSError as e:
+                log(f"couldn't delete the closed PR's session {x}: {e}")
+
+
 def work():
     """Every queued review, `parallel` at a time for each reviewer, until
     the queue is empty (passes may add to it meanwhile). A free place goes
@@ -387,6 +517,7 @@ def work():
     # Only what's in hand: a name done with and queued again (a retry, a
     # second look) is taken again.
     busy = {}
+    forget()
     while True:
         busy = {n: f for n, f in busy.items() if not f.done()}
         waiting = {}
@@ -396,12 +527,21 @@ def work():
                 item = load(f"{V.QUEUE}/{name}", None)
                 item = item if isinstance(item, dict) else {}
                 waiting.setdefault(r, []).append((not C.pipeline(item.get("repo")), item.get("at", 0), name))
+        # One look at a time in a session: a PR's next head waits for the
+        # look at its last one, and resumes it.
+        sessions = {session_of(n) for n in busy}
         for r, names in waiting.items():
             free = CFG["reviewers"][r]["parallel"] - sum(n.partition("--")[0] == r for n in busy)
-            for *_, name in sorted(names)[:max(free, 0)]:
-                busy[name] = pools[r].submit(review, name)
+            for *_, name in sorted(names):
+                if free <= 0:
+                    break
+                if session_of(name) not in sessions:
+                    sessions.add(session_of(name))
+                    busy[name] = pools[r].submit(review, name)
+                    free -= 1
         if not busy:
             break
         time.sleep(5)
     for p in pools.values():
         p.shutdown()
+    forget()

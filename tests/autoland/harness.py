@@ -52,8 +52,21 @@ for name in ("codex", "dsh"):
 import json, os, socket, sys, time, urllib.parse
 args = sys.argv[1:]
 prompt = sys.stdin.read()
+# Its session: the one it's told to resume (an unknown one is an error, as
+# both agents have it), or a new one, kept in its home.
+home = os.environ.get("DSH_HOME") or os.environ.get("CODEX_HOME")
+if {name!r} == "dsh":
+    sid = args[args.index("--session-id") + 1] if "--session-id" in args else None
+else:
+    sid = args[-2] if args[:2] == ["exec", "resume"] else None
+if sid and not os.path.exists(os.path.join(home, "sessions", sid)):
+    print(f"no session {{sid}}", file=sys.stderr); sys.exit(1)
+resumed, sid = bool(sid), sid or "session-%d" % time.time_ns()
+os.makedirs(os.path.join(home, "sessions"), exist_ok=True)
+open(os.path.join(home, "sessions", sid), "a").write(prompt)
 with open({AGENT_LOG!r}, "a") as f:
     f.write(json.dumps({{"agent": {name!r}, "args": args, "cwd": os.getcwd(), "env": dict(os.environ), "prompt": prompt,
+                        "session": sid, "resumed": resumed, "began": time.time(),
                         "overlay": open(args[args.index("--patch") + 1]).read() if "--patch" in args else None,
                         "home": sorted(os.path.relpath(os.path.join(d, x), os.environ["DSH_HOME"])
                                        for d, _, xs in os.walk(os.environ.get("DSH_HOME", "/nonexistent")) for x in xs)}}) + "\\n")
@@ -73,9 +86,18 @@ if "effort" in do and do["effort"] not in json.dumps(args) + (open(args[args.ind
 if do.get("rc"):
     print(do["err"], file=sys.stderr); sys.exit(do["rc"])
 out = do.get("say", "Looked.\\n" + json.dumps(do.get("answer", {{"findings": [], "summary": "fine"}})))
-if "-o" in args:  # codex writes its last message there, and prints it too
+if do.get("relogin"):  # a refresh, saved as a new file where the login was
+    os.remove(os.path.join(home, "auth.json"))
+    open(os.path.join(home, "auth.json"), "w").write(do["relogin"])
+if "-o" in args:  # codex writes its last message there
     open(args[args.index("-o") + 1], "w").write(out)
-print(out)
+# --json: events, one a line, the session's id among them.
+if {name!r} == "dsh":
+    print(json.dumps({{"type": "session", "sessionId": sid, "cwd": os.getcwd()}}))
+    print(json.dumps({{"type": "final", "text": out}}))
+else:
+    print(json.dumps({{"type": "thread.started", "thread_id": sid}}))
+    print(json.dumps({{"type": "turn.completed"}}))
 """)
     os.chmod(f"{tmp}/agents/{name}", 0o755)
 
@@ -92,7 +114,9 @@ binds = [(a[i], a[i + 1], a[i + 2]) for i in range(cut) if a[i] in ("--bind", "-
 git = [open(s).read() for k, s, d in binds if d.endswith("/.gitconfig")]
 with open({BOX_LOG!r}, "a") as f:
     f.write(json.dumps({{"args": a[:cut], "binds": binds, "gitconfig": git}}) + "\\n")
-os.chdir(a[a.index("--chdir") + 1])
+# Where it starts, as the agent sees it: the path a bind put there.
+where = a[a.index("--chdir") + 1]
+os.chdir(next((src for k, src, d in binds if d == where), where))
 os.execv(a[cut + 1], a[cut + 1:])
 """)
 os.chmod(f"{tmp}/bwrap", 0o755)
@@ -165,7 +189,7 @@ import steward as S  # noqa: E402,F401
 import touches as G  # noqa: E402,F401
 REAL_GH = C.gh  # the real one, before any check stands in for it
 
-for d in (V.QUEUE, V.SNAP, V.DONE, V.ACCOUNT, V.GIT):
+for d in (V.QUEUE, V.SNAP, V.DONE, V.ACCOUNT, V.SESSIONS, V.GIT):
     os.makedirs(f"{tmp}/state/{d}")
 
 
@@ -314,7 +338,7 @@ def pr_state(n=5):
 
 def fresh_pr_state():
     shutil.rmtree(f"{tmp}/state")
-    for d in (V.QUEUE, V.SNAP, V.DONE, V.ACCOUNT, V.GIT):
+    for d in (V.QUEUE, V.SNAP, V.DONE, V.ACCOUNT, V.SESSIONS, V.GIT):
         os.makedirs(f"{tmp}/state/{d}")
 
 

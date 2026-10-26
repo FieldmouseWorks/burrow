@@ -17,6 +17,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 
 import common as C
 from common import CFG, STATE, load, log, save, ts
@@ -27,6 +28,10 @@ NAMES = {"codex": "Codex", "deepseek": "DeepSeek"}
 QUEUE, SNAP, DONE, GIT = "review/queue", "review/snap", "review/done", "review/git"
 # What the reviewers' accounts have left, as their service last read it.
 ACCOUNT = "review/account"
+# Each reviewer's session for each open PR, which every look at it resumes.
+# The reviewers' service owns what's in them; the sweep marks a closed PR's
+# GONE, and the service deletes it.
+SESSIONS, GONE = "review/sessions", ".gone-"
 ORIGIN = "https://github.com/{}.git"
 OUT = "reviewers.json"  # a reviewer out of service, and until when
 BALANCE = f"{ACCOUNT}/deepseek.json"
@@ -271,6 +276,14 @@ def prior(repo, n, r):
     return "\n".join(text)
 
 
+def session_name(r, snap):
+    """The reviewer's session for the PR, on its base, whose head the
+    snapshot `snap` is: the same for every head, so each look resumes the
+    last one's, and another for a retargeted PR, which is another change."""
+    pr, _, base = snap.rsplit("-", 2)
+    return f"{r}--{pr}-{base}"
+
+
 def item_name(key, r, head, base):
     return f"{r}--{snap_name(key, head, base)}"
 
@@ -369,6 +382,17 @@ def sweep(repos, live):
                     keep.add(snap)
             elif not (ours and (d == DONE or snap in keep)):
                 remove(os.path.join(STATE, d, x))
+    # And the reviewers' sessions, for good, once their PR is closed (or
+    # retargeted): nothing of one PR's carries over to another's.
+    on = {f"{pr}-{base}" for pr, _, base in (s.rsplit("-", 2) for s in live)}
+    for x in os.listdir(os.path.join(STATE, SESSIONS)):
+        pr = x.partition("--")[2]
+        if x.startswith(GONE) or pr.rsplit("-", 2)[0].removeprefix("pr-") not in repos or pr in on:
+            continue
+        try:
+            os.rename(os.path.join(STATE, SESSIONS, x), os.path.join(STATE, SESSIONS, f"{GONE}{time.time_ns()}-{x}"))
+        except OSError as e:
+            log(f"couldn't mark the session {x} gone: {e}")
 
 
 # ---------------------------------------------------------------- posting
