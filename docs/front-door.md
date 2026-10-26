@@ -72,7 +72,8 @@ pre-approved.
   (`burrow.remoteControl.idleSession`), and all of them, with the proj jobs,
   share the memory cap `burrow.claude.memory` sets.
 - A switch never restarts a server, since that would cut off the session
-  confirming it. `claude-rc-scan` (every 5 minutes, and on a switch) restarts
+  confirming it. `claude-rc-scan` (on a switch, when a session's status changes, and when the
+  quiet spell it's waiting on ends) restarts
   any server still running an older `claude-rc-serve` (older Claude Code or
   permission mode) once none of its sessions is working or has done anything
   in the last 30 minutes; a session that's open but idle doesn't count
