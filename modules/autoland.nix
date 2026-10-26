@@ -31,10 +31,12 @@ let
   # reads the snapshot with.
   reviewTools = with pkgs; [ bash git bubblewrap coreutils findutils gnugrep gnused diffutils ripgrep ];
   # The machine's own /bin/sh, /bin/bash and /usr/bin/env, as an agent's
-  # sandbox shows them.
+  # sandbox shows them; a machine without /bin/sh or /usr/bin/env gives the
+  # sandbox none either.
   reviewLinks = {
-    "/bin/sh" = config.environment.binsh;
     "/bin/bash" = "${pkgs.bashInteractive}/bin/bash";
+  } // lib.optionalAttrs (config.environment.binsh != null) {
+    "/bin/sh" = config.environment.binsh;
   } // lib.optionalAttrs (config.environment.usrbinenv != null) {
     "/usr/bin/env" = config.environment.usrbinenv;
   };
