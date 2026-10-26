@@ -548,6 +548,15 @@ COMMITS[9] = [("bot@renovateapp.com", "claude@remi")]
 status, _ = run(mkpr(body=renovate_body(), **renovate_minor), 900)
 del COMMITS[9]
 assert not merged(), WROTE
+# Nor is an older steward's author-only answer for the head trusted.
+fresh_pr_state()
+run(mkpr(body=renovate_body(automerge="Disabled by config."), **renovate_minor), 900)
+old_state = {k: v for k, v in pr_state(9).items() if k != "renovateEdited"}
+C.save("pr-sam_r-9.json", {**old_state, "edited": False, "editedHead": head})
+COMMITS[9] = [("bot@renovateapp.com", "claude@remi")]
+status, _ = run(mkpr(body=renovate_body(), **renovate_minor), 900)
+del COMMITS[9]
+assert not merged(), WROTE
 fresh_pr_state()
 status, _ = run(mkpr(body=renovate_body().replace("\n", "\r\n"), **renovate_minor), 900)
 assert "state=success" in status and JOBS == []

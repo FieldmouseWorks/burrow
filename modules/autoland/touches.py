@@ -86,15 +86,18 @@ def renovate_edited(repo, pr, st):
         return False
     if not CFG["renovateEmail"]:
         return None
-    if st.get("editedHead") != pr["headRefOid"]:
+    # [head, edited]. Its own key: the edited/editedHead an older steward
+    # left read authors alone, so they're dropped, not trusted.
+    st.pop("edited", None), st.pop("editedHead", None)
+    if (st.get("renovateEdited") or [None])[0] != pr["headRefOid"]:
         got = C.gh("api", f"repos/{repo}/pulls/{pr['number']}/commits?per_page=100", check=False)
         # Only the first 100 come back.
         if not isinstance(got, list) or not got or len(got) >= 100:
             return None
-        st["edited"] = any((c["commit"].get(who) or {}).get("email") != CFG["renovateEmail"]
-                           for c in got for who in ("author", "committer"))
-        st["editedHead"] = pr["headRefOid"]
-    return st["edited"]
+        st["renovateEdited"] = [pr["headRefOid"], any(
+            (c["commit"].get(who) or {}).get("email") != CFG["renovateEmail"]
+            for c in got for who in ("author", "committer"))]
+    return st["renovateEdited"][1]
 
 
 # Renovate's configuration block, the last section it writes before its
