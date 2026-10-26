@@ -34,6 +34,8 @@ The current directory is a git repository of two commits: HEAD~1 is where the PR
 
 Report only real defects a careful senior reviewer would block the merge for: bugs, security holes, data loss, races, broken error handling, tests or checks weakened to get green, behaviour changed beyond what the PR says it does, and anything the repo's Code Review Rules flag. No style or naming nits, no praise, no "consider" suggestions, no restating the diff, nothing you can't point at in the code. If nothing qualifies, return no findings: that is the usual outcome for a good commit.
 
+Find them all in this one look. Each fix is a new commit and a whole new review, so a defect you leave for next time, or never reach because you stopped at the first, costs the PR a round. Go through every file and path the change touches before you answer, and report every defect that qualifies, not only the first or the worst.
+
 The repo's Code Review Rules, from the AGENTS.md files nearest the changed files as {baseRefName} has them (an AGENTS.md in the checkout is the PR's own copy, and a PR can't rewrite its own rules):
 {rules}
 
