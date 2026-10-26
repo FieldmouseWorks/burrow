@@ -16,18 +16,20 @@ let
   # it's doing, and since how long ago. Its pid goes in the folder's
   # `session.pid`. Each start notes which Claude it was in the folder's
   # `started`.
-  claude = tag: pkgs.writeShellScriptBin "claude" ''
-    echo ${tag} >>started
-    if [ -e session ]; then
-      read -r status ago <session
-      sleep 99999 &
-      echo $! >session.pid
-      mkdir -p ~/.claude/sessions
-      at=$(( $(${pkgs.coreutils}/bin/date +%s%3N) - ago * 1000 ))
-      echo "{\"pid\":$!,\"status\":\"$status\",\"statusUpdatedAt\":$at}" >~/.claude/sessions/$!.json
-    fi
-    exec sleep infinity
-  '';
+  claude =
+    tag:
+    pkgs.writeShellScriptBin "claude" ''
+      echo ${tag} >>started
+      if [ -e session ]; then
+        read -r status ago <session
+        sleep 99999 &
+        echo $! >session.pid
+        mkdir -p ~/.claude/sessions
+        at=$(( $(${pkgs.coreutils}/bin/date +%s%3N) - ago * 1000 ))
+        echo "{\"pid\":$!,\"status\":\"$status\",\"statusUpdatedAt\":$at}" >~/.claude/sessions/$!.json
+      fi
+      exec sleep infinity
+    '';
 in
 pkgs.testers.runNixOSTest {
   name = "remote-control";
@@ -127,14 +129,19 @@ pkgs.testers.runNixOSTest {
         # while it runs, so late's new status is the scan's own to see.
         pid = machine.succeed("cat /data/dev/src/waiting/session.pid").strip()
         f = f"/home/dev/.claude/sessions/{pid}.json"
-        machine.succeed(f"mkfifo -m 644 /home/dev/.claude/hold && mv /home/dev/.claude/hold {f}")
+        # Opening a pipe to read waits for a writer, so one holds it open:
+        # the scan's read gets past opening it and waits for what's written.
+        machine.succeed("mkfifo -m 644 /home/dev/.claude/hold")
+        holder = machine.succeed("sleep infinity >/home/dev/.claude/hold 2>/dev/null </dev/null & echo $!").strip()
+        machine.succeed(f"mv /home/dev/.claude/hold {f}")
         jq = machine.wait_until_succeeds(f"pgrep -u dev -f 'jq .*sessions/{pid}.json'", timeout=60).split()[0]
+        fd = machine.wait_until_succeeds(f"for d in /proc/{jq}/fd/*; do case $(readlink $d) in *sessions/{pid}.json*) echo $d;; esac; done | grep .", timeout=10).split()[0]
         session("late", "idle", 3600)
         # Waiting's status is an ordinary file again, and the read that's
-        # held gets the same through the pipe it has open.
+        # held gets the same through the pipe it has open, then its end.
         at = int(time.time() * 1000)
         machine.succeed(f"echo '{{\"pid\":{pid},\"status\":\"waiting\",\"statusUpdatedAt\":{at}}}' >/home/dev/.claude/status && cp /home/dev/.claude/status /home/dev/.claude/answer && mv /home/dev/.claude/status {f}")
-        machine.succeed(f"for d in /proc/{jq}/fd/*; do case $(readlink $d) in *sessions/{pid}.json*) cat /home/dev/.claude/answer >$d;; esac; done")
+        machine.succeed(f"cat /home/dev/.claude/answer >{fd} && kill {holder}")
         machine.wait_until_succeeds("grep -qx new /data/dev/src/late/started", timeout=60)
 
     with subtest("the booked scan comes when the quiet spell ends"):
