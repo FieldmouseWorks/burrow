@@ -54,6 +54,7 @@ PRS = """
 query($owner: String!, $name: String!, $cursor: String) {
   repository(owner: $owner, name: $name) {
     squashMergeAllowed mergeCommitAllowed rebaseMergeAllowed
+    defaultBranchRef { name target { ... on Commit { oid statusCheckRollup { state } } } }
     pullRequests(states: OPEN, first: 30, after: $cursor, orderBy: {field: CREATED_AT, direction: ASC}) {
       pageInfo { hasNextPage endCursor }
       nodes {
@@ -828,6 +829,7 @@ def main():
                 covered.append(r)
             else:
                 C.wake(repo, C.NOW + 5 * MIN)
+            R.watch_default(r, info, prs, mine)
             if CFG["cleanBranches"]:
                 # Stale ones the last sweep found are listed every pass.
                 R.sweep_branches(r, heads, mine, sweep=kick is None)

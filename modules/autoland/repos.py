@@ -10,6 +10,7 @@ import tempfile
 
 import common as C
 from common import CFG, CONTEXT, DEP_RE, DRY, load, log, repo_cfg, save, ts
+from tasks import RED_BRANCH, red_default_task
 
 
 def discover():
@@ -147,6 +148,43 @@ def not_strict_protection(repo, default):
     if isinstance(got, dict) and got.get("strict"):
         log(f"{repo}: up-to-date branches off in {default}'s protection")
         C.write("api", "-X", "PATCH", path, "-F", "strict=false", check=False)
+
+
+def watch_default(r, info, prs, digest):
+    """A red default branch: CI failed on what's merged, and every PR is
+    built on it. With no merge queue (docs/repo-baseline.md), this is how
+    two PRs that broke it together get undone: a Claude job finds the
+    cause and opens a PR from RED_BRANCH that reverts or fixes it, which
+    lands like any other. Nothing more while that job works or its PR is
+    open; a second job if it's still red after, then the owner."""
+    repo = r["repo"]
+    target = (info.get("defaultBranchRef") or {}).get("target") or {}
+    sha, state = target.get("oid"), (target.get("statusCheckRollup") or {}).get("state")
+    key = f"repo-{repo.replace('/', '_')}.json"
+    st = load(key, {})
+    red = st.get("red") or {}
+    if state not in ("FAILURE", "ERROR"):
+        if red and state == "SUCCESS":
+            log(f"{repo}: {r['default']} is green again")
+            st.pop("red")
+            save(key, st)
+        return
+    line = f"{repo} {r['default']} at {sha[:7]}"
+    if red.get("job") and C.job_state(red["job"]) in (None, "queued", "running"):
+        return
+    if any(pr["headRefName"].startswith(RED_BRANCH) for pr in prs):
+        return  # its PR is in the loop
+    if red.get("jobs", 0) >= 2:
+        digest.append(("The default branch is red", line, "two Claude jobs ended with it still red"))
+        return
+    jid = C.job(repo, red_default_task(repo, r["default"], sha))
+    if not jid:
+        digest.append(("Couldn't start a Claude job to fix it", line, "the default branch is red"))
+        C.wake(repo, C.NOW + 5 * 60)
+        return
+    log(f"{repo}: {r['default']} is red at {sha[:7]}; a Claude job {jid} fixes it")
+    st["red"] = {"job": jid, "jobs": red.get("jobs", 0) + 1, "at": sha}
+    save(key, st)
 
 
 def hook(repo, st, due):

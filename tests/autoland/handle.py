@@ -819,6 +819,37 @@ R.settle_repo({"repo": "sam/r", "private": False, "default": "main"}, {"sam/r"})
 assert not [x for x in WROTE if "rulesets/" in x or "protection" in x], WROTE
 C.gh = gh_stub
 
+# A red default branch gets one Claude job, and nothing more while it works
+# or its PR is open; a second if it ends with the branch still red, then the
+# owner. Green again, it starts over.
+def default(state, sha="c" * 40):
+    return {"defaultBranchRef": {"name": "main", "target": {"oid": sha, "statusCheckRollup": {"state": state}}}}
+
+
+repo_r = {"repo": "sam/r", "private": False, "default": "main"}
+JOBS.clear()
+mine = []
+R.watch_default(repo_r, default("SUCCESS"), [], mine)
+R.watch_default(repo_r, default("PENDING"), [], mine)
+R.watch_default(repo_r, {}, [], mine)
+assert JOBS == [] and mine == []
+R.watch_default(repo_r, default("FAILURE"), [], mine)
+assert len(JOBS) == 1 and "is red: CI failed on " + "c" * 40 in JOBS[0] and "autoland/red-cccccccccccc" in JOBS[0], JOBS
+R.watch_default(repo_r, default("FAILURE"), [], mine)
+assert len(JOBS) == 1, JOBS  # still running
+STATES["job-1"] = "done"
+R.watch_default(repo_r, default("FAILURE"), [mkpr(branch="autoland/red-cccccccccccc")], mine)
+assert len(JOBS) == 1, JOBS  # its PR is open
+R.watch_default(repo_r, default("ERROR", sha="d" * 40), [], mine)
+assert len(JOBS) == 2 and "d" * 40 in JOBS[1], JOBS
+STATES["job-2"] = "done"
+R.watch_default(repo_r, default("FAILURE", sha="d" * 40), [], mine)
+assert len(JOBS) == 2 and mine and mine[0][0] == "The default branch is red", mine
+mine.clear()
+R.watch_default(repo_r, default("SUCCESS"), [], mine)
+R.watch_default(repo_r, default("FAILURE"), [], mine)
+assert len(JOBS) == 3 and mine == [], (JOBS, mine)
+
 # `status` (a dry run) reads the seal the real passes' judges use, and makes
 # none of its own while there's one.
 C._key.clear()
