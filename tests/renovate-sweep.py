@@ -165,6 +165,16 @@ for said in (verdict(3, "ok", base="release"), {"author": {"login": "me"}, "body
     assert len(calls) == 1 and "#3 " in calls[0][-1] and verb == "close", (said, calls, verb)
 assert "baseRefName" in calls[0][-1] and "a marker written any other way doesn't count" in calls[0][-1], calls
 
+# One handed over before verdicts were sealed is handed over once more, for
+# a sealed one: its old verdict no longer counts.
+kept = tempfile.mkdtemp(dir=tmp)
+os.makedirs(os.path.join(kept, "renovate-sweep"))
+with open(os.path.join(kept, "renovate-sweep", f"{REPO.replace('/', '_')}-2"), "w") as f:
+    f.write(f"{2:040x} verdict on main\n")
+unsealed = {"author": {"login": "me"}, "body": f"<!-- major-verdict: held {2:040x} on main -->"}
+calls, (verb, _) = sweep([pr(2)], {2: [unsealed]}, state=kept)
+assert len(calls) == 1 and "#2 " in calls[0][-1] and verb == "close", (calls, verb)
+
 # The job seals its verdict with the token its task gives it, for the majors
 # that task handed it: what it prints is a verdict the next sweep counts.
 kept = tempfile.mkdtemp(dir=tmp)

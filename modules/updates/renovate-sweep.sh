@@ -106,9 +106,9 @@ for d in "$src"/*/; do
       seen=$(cat "$key" 2>/dev/null || true)
       # A major's key also says the job was asked for a verdict on this base,
       # so one retargeted since (or handed over before verdicts named their
-      # base) is handed over once more.
+      # base, or were sealed) is handed over once more.
       want=$sha
-      [ "$major" != true ] || want="$sha verdict on $base"
+      [ "$major" != true ] || want="$sha sealed verdict on $base"
       [ "$security" != true ] || want="$sha $(date +%F)"
       # Red since it was handed over (a proof run later, say): another job
       # fixes that, verdict or not.
