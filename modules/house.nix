@@ -9,12 +9,18 @@ let
   cfg = config.burrow.house;
   inherit (config.burrow) user;
   inherit (lib) mkOption types;
+  # The rules the running system has: /etc moves to a switch's new ones
+  # before it starts anything, so a pass started under older rules can tell.
+  current = "burrow/house-rules.md";
+  lockDir = "/run/house-sync";
 
   sync = pkgs.writeShellApplication {
     name = "house-sync";
-    runtimeInputs = with pkgs; [ gh jq coreutils gnugrep gnused diffutils ];
+    runtimeInputs = with pkgs; [ gh jq coreutils gnugrep gnused diffutils util-linux ];
     text = ''
       RULES=${../house/rules.md}
+      CURRENT=/etc/${current}
+      LOCK=${lockDir}/lock
       OWNERS=${lib.escapeShellArg (lib.concatStringsSep " " cfg.owners)}
       EXCLUDE=${lib.escapeShellArg (lib.concatStringsSep " " cfg.exclude)}
       NOTIFY=${config.burrow.tools.notify}/bin/${config.burrow.prefix}-notify
@@ -59,6 +65,11 @@ in
   config = lib.mkIf cfg.enable {
     burrow.notify.enable = true;
     environment.systemPackages = [ sync ];
+    environment.etc.${current}.source = ../house/rules.md;
+    # Every pass, full or one repo's, takes this lock: burrow-events lines
+    # them up, but not across its own restarts, and two passes at once can
+    # each close the other's PR.
+    systemd.tmpfiles.rules = [ "d ${lockDir} 0755 ${user} ${config.users.users.${user}.group} -" ];
 
     # A push to a repo's default branch (a house PR merged, AGENTS.md edited
     # by hand, a new repo's first commits) starts house-sync@OWNER-REPO, its

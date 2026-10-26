@@ -7,6 +7,7 @@ The gh stand-in answers from a fake GitHub (repos, their AGENTS.md, open PRs)
 and runs --jq through jq, as gh does, so the script's own filters are tested.
 """
 
+import fcntl
 import json
 import os
 import shlex
@@ -104,16 +105,26 @@ STALE = CURRENT.replace("These hold in every repo.", "These held in every repo."
 assert STALE != CURRENT
 
 
-def sync(repos, *args, owners="Sam", exclude="", ok=True):
-    """Run one pass; return (the repos it wrote to, the gh calls, notices)."""
+LOCK = os.path.join(tmp, "lock")
+
+
+def start(repos, *args, owners="Sam", exclude="", current=RULES):
+    """Start one pass, with the system's rules at `current`."""
     for f in ("gh.log", "notify.log"):
         open(os.path.join(tmp, f), "w").close()
     json.dump({"repos": {r["full_name"]: r for r in repos}}, open(os.path.join(tmp, "github.json"), "w"))
-    env = {"RULES": RULES, "OWNERS": owners, "EXCLUDE": exclude, "NOTIFY": notify}
+    env = {"RULES": RULES, "CURRENT": current, "LOCK": LOCK, "OWNERS": owners, "EXCLUDE": exclude, "NOTIFY": notify}
     script = "".join(f"{k}={shlex.quote(v)}\n" for k, v in env.items()) + SYNC
-    run = subprocess.run(["bash", "-c", script, "house-sync", *args], capture_output=True, text=True, check=False,
-                         env={**os.environ, "PATH": bin_ + ":" + os.environ["PATH"]})
-    sys.stdout.write(run.stdout + run.stderr)
+    return subprocess.Popen(["bash", "-c", script, "house-sync", *args], stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, text=True,
+                            env={**os.environ, "PATH": bin_ + ":" + os.environ["PATH"]})
+
+
+def sync(repos, *args, ok=True, **kw):
+    """Run one pass; return (the repos it wrote to, the gh calls, notices)."""
+    run = start(repos, *args, **kw)
+    out, _ = run.communicate()
+    sys.stdout.write(out)
     assert (run.returncode == 0) == ok, (args, run.returncode)
     calls = [json.loads(x) for x in open(os.path.join(tmp, "gh.log"))]
     notices = [json.loads(x)[:2] for x in open(os.path.join(tmp, "notify.log"))]
@@ -178,3 +189,32 @@ wrote, calls, notices = sync(everyone, "status", "sam/a")
 assert wrote == [] and read(calls) == ["sam/a"] and notices == [], (wrote, calls, notices)
 assert not any(c[:2] == ["api", "-X"] or c[1] == "repos/sam/a/git/refs" for c in calls), calls
 print("status: ok")
+
+# One pass at a time: while another holds the lock, a pass waits, full or one
+# repo's, and starts once it's free.
+for args in ((), ("sam/a",)):
+    held = open(LOCK, "w")
+    fcntl.flock(held, fcntl.LOCK_EX)
+    run = start(everyone, *args)
+    try:
+        run.wait(timeout=2)
+        raise AssertionError(f"{args}: ran while another pass held the lock")
+    except subprocess.TimeoutExpired:
+        pass
+    assert open(os.path.join(tmp, "gh.log")).read() == "", args
+    held.close()
+    out, _ = run.communicate(timeout=30)
+    sys.stdout.write(out)
+    assert run.returncode == 0, (args, run.returncode)
+    assert any(json.loads(c)[:2] == ["pr", "create"] for c in open(os.path.join(tmp, "gh.log"))), args
+print("lock: ok")
+
+# A pass whose rules aren't the system's any more (it began, or waited for
+# the lock, across a switch) does nothing, so it can't close the new rules' PR.
+other = os.path.join(tmp, "other-rules.md")
+open(other, "w").write(rules.replace("These hold in every repo.", "These hold everywhere."))
+for args in ((), ("sam/a",)):
+    wrote, calls, notices = sync(everyone + [gh_repo("sam/n", STALE, prs=[{"number": 7, "headRefName": "house/rules-0ther"}])],
+                                 *args, current=other)
+    assert calls == [] and notices == [], (args, calls, notices)
+print("superseded: ok")

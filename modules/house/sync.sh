@@ -2,7 +2,7 @@
 # house/rules.md) the same as burrow's. A repo whose block differs gets one
 # PR that rewrites only what's between the markers, from an ordinary
 # branch, so the steward reviews and lands it like any other PR. (RULES,
-# OWNERS, EXCLUDE, DRY_RUN and NOTIFY come from ../house.nix.)
+# CURRENT, LOCK, OWNERS, EXCLUDE, DRY_RUN and NOTIFY come from ../house.nix.)
 #
 #   house-sync                     one pass over every repo
 #   house-sync OWNER/REPO          one over that repo (a push to its default branch)
@@ -14,6 +14,19 @@ if [ "${1:-}" = status ]; then
   shift
 fi
 only=${1:-}
+
+# One pass at a time, and only for the rules the system has now: a pass
+# from before a switch, still running or still waiting here, would close
+# the PR for the new rules as one for older ones. A pass that waited for the
+# lock checks the rules after it, when it would start.
+if [ -z "${DRY_RUN:-}" ]; then
+  exec 9>"$LOCK"
+  flock 9
+fi
+if ! cmp -s "$RULES" "$CURRENT"; then
+  echo "house-sync: the system has other house rules than this pass; the pass for those does the work"
+  exit 0
+fi
 
 begin_re='^<!-- house:rules v[0-9]+ begin'
 end_re='^<!-- house:rules end -->$'

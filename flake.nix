@@ -128,7 +128,7 @@
         '';
         # Which repos house-sync passes over, and when it tells the owner, with
         # stand-ins for gh and the notifier.
-        house-sync = pkgs.runCommand "house-sync-check" { nativeBuildInputs = [ pkgs.python3 pkgs.jq ]; } ''
+        house-sync = pkgs.runCommand "house-sync-check" { nativeBuildInputs = [ pkgs.python3 pkgs.jq pkgs.util-linux pkgs.diffutils ]; } ''
           python3 -I ${./tests/house-sync.py} ${./modules/house/sync.sh} ${./house/rules.md}
           touch $out
         '';
