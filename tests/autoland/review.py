@@ -2,6 +2,7 @@
 see), and the service that runs them on it."""
 
 import contextlib
+import fcntl
 import io
 import json
 import os
@@ -152,6 +153,16 @@ C.NOW = time.time()
 UPSTREAM = []
 
 
+def balance(*left, status="200 OK"):
+    """What DeepSeek's API says the account has left: (currency, amount)s."""
+    body = json.dumps({"is_available": True, "balance_infos": [
+        {"currency": c, "total_balance": v, "granted_balance": "0.00", "topped_up_balance": v} for c, v in left]})
+    return f"HTTP/1.1 {status}\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n{len(body):x}\r\n{body}\r\n0\r\n\r\n".encode()
+
+
+BALANCE = [balance(("USD", "20.00"))]
+
+
 def upstream(host, tls):
     a, b = socket.socketpair()
 
@@ -164,7 +175,10 @@ def upstream(host, tls):
         except TimeoutError:
             pass
         UPSTREAM.append((host, tls, got.decode()))
-        b.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+        if got.startswith(b"GET /user/balance "):
+            b.sendall(BALANCE[0])
+        else:
+            b.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
         b.close()
     threading.Thread(target=answer, daemon=True).start()
     return Upstream(a) if tls else a
@@ -227,8 +241,14 @@ assert re.fullmatch(r"http://127\.0\.0\.1:\d+/anthropic", run["env"]["DEEPSEEK_B
 assert "GH_TOKEN" not in run["env"] and "ghp_" not in json.dumps(run["env"]), run["env"]
 said = http_said()
 assert said[0].endswith("\r\n\r\nok") and [x.split("\r\n")[0] for x in said[1:]] == ["HTTP/1.1 403 Forbidden"] * 2, said
-(host, tls, sent), = UPSTREAM
+(host, tls, sent), (bhost, btls, asked) = UPSTREAM
 assert host == "api.deepseek.com" and tls and sent.startswith("POST /anthropic/v1/messages HTTP/1.1\r\n"), UPSTREAM
+# Then what the account has left, asked with the key outside the sandbox,
+# kept for the steward: plenty, so the owner hears nothing.
+assert bhost == "api.deepseek.com" and btls and asked.startswith("GET /user/balance HTTP/1.1\r\n"), asked
+assert "Authorization: Bearer sk-test-0123456789\r\n" in asked, asked
+assert json.load(open(f"{tmp}/state/{V.BALANCE}"))["left"] == {"USD": 20.0}
+assert V.low_balance() == []
 assert "x-api-key: sk-test-0123456789\r\n" in sent and "the-gate-holds-it" not in sent, sent
 assert "Host: api.deepseek.com\r\n" in sent and "Host: x" not in sent and sent.endswith("\r\n\r\n{}"), sent
 UPSTREAM.clear()
@@ -256,6 +276,8 @@ p = run["prompt"]
 assert "never call eval" in p and "root rule" in p and "eval is fine" not in p
 assert "Not a bug: b is meant." in p and "someone else" not in p and "approve" not in p and "codex's" not in p
 assert "cert.pem" in p and "secrets/remi.yaml" in p and "#5 in sam/r" in p
+# All of them at once: a held-back finding costs a round.
+assert "Find them all in this one look." in p and "not only the first or the worst" in p
 # Its own key never leaves in what it says.
 assert "sk-test-0123456789" not in json.dumps(back) and "[redacted]" in json.dumps(back), back
 
@@ -269,7 +291,7 @@ agent(codex={"answer": {"findings": [], "summary": "ok"},
                       {"env": "HTTPS_PROXY", "send": "CONNECT chatgpt.com:80 HTTP/1.1\r\n\r\n"},
                       {"env": "HTTPS_PROXY", "send": "POST /v1/messages HTTP/1.1\r\nContent-Length: 0\r\n\r\n"}]})
 back = queue_and_work("codex")
-assert back == {"result": "review", "answer": {"findings": [], "summary": "ok"}, "at": back["at"]}, back
+assert back == {"result": "review", "answer": {"findings": [], "summary": "ok"}, "at": back["at"], "head": pr_head, "base": "main"}, back
 run, = agent_runs()
 a = run["args"]
 assert a[0] == "exec" and a[a.index("--cd") + 1] == snap and "--sandbox" not in a
@@ -315,6 +337,26 @@ for err in ("dsh: AUTH: Authentication Fails, Your api key: ****0123 is invalid 
             "dsh: LLM: 402 Insufficient Balance"):
     agent(dsh={"rc": 1, "err": err})
     assert queue_and_work("deepseek")["result"] == "out", err
+# Under lowBalance after a review, the owner's issue says so; in every
+# currency the account has, since one is what it spends. A look that
+# fails keeps the last one.
+BALANCE[0] = balance(("USD", "3.10"))
+agent(dsh={"say": json.dumps({"findings": [], "summary": "ok"})})
+assert queue_and_work("deepseek")["result"] == "review"
+low, = V.low_balance()
+assert low[:2] == ("DeepSeek's balance is running low", "DeepSeek") and "3.10 USD left" in low[2], low
+BALANCE[0] = balance(("USD", "3.10"), ("CNY", "80.00"))
+assert queue_and_work("deepseek")["result"] == "review" and V.low_balance() == []
+BALANCE[0] = balance(("USD", "0.00"))
+agent(dsh={"rc": 1, "err": "dsh: LLM: 402 Insufficient Balance"})
+assert queue_and_work("deepseek")["result"] == "out" and "0.00 USD left" in V.low_balance()[0][2]
+for answer in (balance(("USD", "50.00"), status="500 Internal Server Error"), b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"):
+    BALANCE[0] = answer
+    agent(dsh={"say": json.dumps({"findings": [], "summary": "ok"})})
+    assert queue_and_work("deepseek")["result"] == "review" and "0.00 USD left" in V.low_balance()[0][2]
+BALANCE[0] = balance(("USD", "20.00"))
+assert queue_and_work("deepseek")["result"] == "review" and V.low_balance() == []
+UPSTREAM.clear()
 # A finding that only mentions auth is no outage.
 agent(dsh={"say": json.dumps({"findings": [{"path": "a", "line": 1, "severity": "P1", "title": "auth", "body": "AUTH bypass"}]})})
 assert queue_and_work("deepseek")["result"] == "review"
@@ -357,9 +399,40 @@ W.work()
 assert os.listdir(f"{tmp}/state/{V.QUEUE}") == []
 assert json.load(open(f"{tmp}/state/{V.DONE}/deepseek--unread.json"))["result"] == "error"
 os.remove(f"{tmp}/state/{V.DONE}/deepseek--unread.json")
+# So does one that's there but can't be opened, or it'd be handed out forever.
+os.mkdir(f"{tmp}/state/{V.QUEUE}/deepseek--dir.json")
+W.review("deepseek--dir.json")
+assert os.listdir(f"{tmp}/state/{V.QUEUE}") == []
+assert json.load(open(f"{tmp}/state/{V.DONE}/deepseek--dir.json"))["result"] == "error"
+os.remove(f"{tmp}/state/{V.DONE}/deepseek--dir.json")
 # Taken by the service and the sweep at once: whichever comes second finds
 # it gone, and carries on.
 V.remove(f"{tmp}/state/{V.QUEUE}/deepseek--unread.json")
+# One a sweep takes off the queue (its PR moved on) while the service waits
+# for the entry's lock is never begun: no agent, no answer.
+V.queue("sam/r", snap_pr, "pr-sam_r-5.json", "deepseek")
+entry, = os.listdir(f"{tmp}/state/{V.QUEUE}")
+held = open(f"{tmp}/state/{V.QUEUE}/{entry}")
+fcntl.flock(held, fcntl.LOCK_EX)
+t = threading.Thread(target=W.review, args=(entry,))
+t.start()
+time.sleep(0.5)
+os.remove(f"{tmp}/state/{V.QUEUE}/{entry}")
+held.close()
+t.join()
+assert agent_runs() == [] and os.listdir(f"{tmp}/state/{V.DONE}") == [], os.listdir(f"{tmp}/state/{V.DONE}")
+# And one it's under way on holds its entry's lock: the sweep leaves it.
+agent(dsh={"sleep": 2})
+V.queue("sam/r", snap_pr, "pr-sam_r-5.json", "deepseek")
+entry, = os.listdir(f"{tmp}/state/{V.QUEUE}")
+t = threading.Thread(target=W.review, args=(entry,))
+t.start()
+time.sleep(1)
+assert not V.taken(f"{tmp}/state/{V.QUEUE}/{entry}")
+t.join()
+back = json.load(open(f"{tmp}/state/{V.DONE}/{entry}"))
+assert back["result"] == "review" and back["head"] == pr_head and back["base"] == "main", back
+os.remove(f"{tmp}/state/{V.DONE}/{entry}")
 
 # A review done with and queued again (a retry) while another is still
 # running is taken again, not left until the service next starts.
@@ -378,6 +451,25 @@ with open(f"{tmp}/state/{V.QUEUE}/{again}.json", "w") as f:
 worker.join()
 assert os.listdir(f"{tmp}/state/{V.QUEUE}") == [] and os.path.exists(f"{tmp}/state/{V.DONE}/{again}.json")
 assert sorted(x["agent"] for x in agent_runs()) == ["codex", "codex", "dsh"]
+for x in os.listdir(f"{tmp}/state/{V.DONE}"):
+    os.remove(f"{tmp}/state/{V.DONE}/{x}")
+agent()
+
+# A reviewer's next free place goes to the pipeline's own repos first
+# (pipelineRepos, any case), then to the review queued longest.
+V.queue("sam/r", snap_pr, "pr-sam_r-5.json", "deepseek")
+entry, = os.listdir(f"{tmp}/state/{V.QUEUE}")
+item = json.load(open(f"{tmp}/state/{V.QUEUE}/{entry}"))
+os.remove(f"{tmp}/state/{V.QUEUE}/{entry}")
+for n, repo, at in (("deepseek--a-old.json", "sam/r", 1), ("deepseek--b-pipe.json", "sam/pipe", 3), ("deepseek--c-new.json", "sam/r", 2)):
+    C.save(f"{V.QUEUE}/{n}", {**item, "repo": repo, "at": at})
+W.CFG["reviewers"]["deepseek"]["parallel"] = 1
+W.work()
+W.CFG["reviewers"]["deepseek"]["parallel"] = 2
+order = [re.search(r"in (sam/\w+)", x["prompt"]).group(1) for x in agent_runs()]
+assert order == ["sam/pipe", "sam/r", "sam/r"], order
+done = [json.load(open(f"{tmp}/state/{V.DONE}/deepseek--{n}.json"))["at"] for n in ("b-pipe", "a-old", "c-new")]
+assert done == sorted(done), done
 for x in os.listdir(f"{tmp}/state/{V.DONE}"):
     os.remove(f"{tmp}/state/{V.DONE}/{x}")
 agent()

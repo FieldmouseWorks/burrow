@@ -9,6 +9,7 @@ what came back (`post`), under the steward's login and marked as that
 reviewer's, and reads each reviewer's verdict back from those posts
 (`verdict`)."""
 
+import fcntl
 import hashlib
 import json
 import os
@@ -24,8 +25,11 @@ NAMES = {"codex": "Codex", "deepseek": "DeepSeek"}
 # Under STATE: what's asked for, the snapshot each one reads, what came back,
 # and a clone per repo the snapshots are taken from.
 QUEUE, SNAP, DONE, GIT = "review/queue", "review/snap", "review/done", "review/git"
+# What the reviewers' accounts have left, as their service last read it.
+ACCOUNT = "review/account"
 ORIGIN = "https://github.com/{}.git"
 OUT = "reviewers.json"  # a reviewer out of service, and until when
+BALANCE = f"{ACCOUNT}/deepseek.json"
 
 
 def on(repo):
@@ -39,6 +43,18 @@ def out(r):
     None. Out, it isn't asked and isn't waited for."""
     o = load(OUT, {}).get(r)
     return o["why"] if o and C.NOW < o["until"] else None
+
+
+def low_balance():
+    """The owner's line when DeepSeek's account, as its last review left it,
+    is down to under `lowBalance` (it stops reviewing at nothing), or none."""
+    rv = CFG["reviewers"]["deepseek"]
+    left = load(BALANCE, {}).get("left") or {}
+    if not rv["enable"] or not left or any(v >= rv["lowBalance"] for v in left.values()):
+        return []
+    said = " and ".join(f"{v:.2f} {c}" for c, v in sorted(left.items()))
+    return [("DeepSeek's balance is running low", "DeepSeek",
+             f"{said} left. Top it up: once it's spent, DeepSeek is out of service and PRs merge on the other reviewers' word")]
 
 
 def review_re(r):
@@ -285,16 +301,73 @@ def drop(name):
             pass
 
 
+def mine(d, key, r):
+    """The names of the reviewer's entries in `d` (the queue, the answers),
+    for any head, for the PR whose state file is `key`: parsed, not matched
+    by prefix, since sam/r-5's names start with sam/r PR 5's. [] if there's
+    no such directory (a status run that couldn't make it)."""
+    try:
+        names = [x.removesuffix(".json") for x in os.listdir(os.path.join(STATE, d))]
+    except OSError:
+        return []
+    return sorted(n for n in names if n.partition("--")[0] == r and n.partition("--")[2].rsplit("-", 2)[0] == key[:-5])
+
+
+def answered(key, r):
+    """The names of the reviewer's answers, for any head, to the PR."""
+    return mine(DONE, key, r)
+
+
+def under_way(key, r, base):
+    """The names of the reviewer's looks at the PR on `base`, for any head,
+    that the reviewers' service is on now (on another base, the PR was
+    another change). Those it hasn't begun are taken off the queue
+    (`taken`), so none begins after this."""
+    on = snap_name(key, "", base).rsplit("-", 1)[1]
+    return [name for name in mine(QUEUE, key, r)
+            if name.rsplit("-", 1)[1] == on and not taken(os.path.join(STATE, QUEUE, name + ".json"))]
+
+
+def taken(path):
+    """Takes the queued review at path off the queue unless the reviewers'
+    service is on it (it holds the entry's lock while it is: review_worker
+    `review`). False if it is, or if it can't be opened to tell."""
+    try:
+        f = open(path)
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    with f:
+        try:
+            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return False
+        remove(path)  # under the lock: the service, waiting on it, sees it gone
+        return True
+
+
 def sweep(repos, live):
     """For the repos this pass read (`repos`, as state file names spell
     them): the snapshots, queue entries and answers of heads none of their
-    open PRs has any more (`live`: the snapshot names of the heads they have)."""
-    for d in (QUEUE, DONE, SNAP):
+    open PRs has any more (`live`: the snapshot names of the heads they have).
+    An open PR's earlier head keeps a look the reviewers' service is on, the
+    snapshot it reads, and what came back, which the PR's next pass posts
+    on the commit it read (steward.py's `overtaken`)."""
+    prs = {s.rsplit("-", 2)[0] for s in live}
+    keep = set()
+    for d in (QUEUE, DONE, SNAP):  # the queue first: a look still running keeps its snapshot
         for x in os.listdir(os.path.join(STATE, d)):
             snap = x.removesuffix(".json")
             if d != SNAP:
                 snap = snap.partition("--")[2]
-            if snap.rsplit("-", 3)[0].removeprefix("pr-") in repos and snap not in live:
+            if snap.rsplit("-", 3)[0].removeprefix("pr-") not in repos or snap in live:
+                continue
+            ours = snap.rsplit("-", 2)[0] in prs
+            if d == QUEUE and ours:
+                if not taken(os.path.join(STATE, d, x)):
+                    keep.add(snap)
+            elif not (ours and (d == DONE or snap in keep)):
                 remove(os.path.join(STATE, d, x))
 
 
@@ -418,12 +491,13 @@ def post(repo, pr, r, answer):
             if on is None:
                 loose.append(f"- `{quiet(f['path'])}`: " + msg.replace("\n\n", " "))
             else:
-                whole_file.append({"path": on, "body": f"{msg}\n\n(In `{quiet(f['path'])}`, which this PR doesn't change.)\n\n{mark}"})
+                whole_file.append(({"path": on, "body": f"{msg}\n\n(In `{quiet(f['path'])}`, which this PR doesn't change.)\n\n{mark}"},
+                                   f"- `{quiet(f['path'])}`: " + msg.replace("\n\n", " ")))
             continue
         if not lines:
             # Changed, but with no new side to comment on (deleted, binary,
             # a mode change): a thread on the whole file, still a finding.
-            whole_file.append({"path": f["path"], "body": msg + "\n\n" + mark})
+            whole_file.append(({"path": f["path"], "body": msg + "\n\n" + mark}, f"- `{quiet(f['path'])}`: " + msg.replace("\n\n", " ")))
             continue
         try:
             want = int(f.get("line"))
@@ -438,14 +512,19 @@ def post(repo, pr, r, answer):
         body += f"\n\n{quiet(answer['summary'])}"
     if loose:
         body += "\n\nFindings with no changed file to go on:\n" + "\n".join(loose)
+    if whole_file:
+        # In full here too: the threads below are separate calls, and a
+        # finding mustn't hang on one of them.
+        body += "\n\nFindings on whole files (each a thread too):\n" + "\n".join(text for _, text in whole_file)
     body += f"\n\n<!-- {r}-review:v1 " + json.dumps({"commit_sha": head, "base": pr["baseRefName"], "findings": k}) + " -->"
     if not isinstance(C.write("api", "-X", "POST", f"repos/{repo}/pulls/{n}/reviews", "--input", "-",
                               input=json.dumps({"commit_id": head, "event": "COMMENT", "body": body, "comments": comments}),
                               check=False), dict):
         raise RuntimeError("GitHub didn't take the review")
-    # A review can't hold file-level comments: they go on their own. The
-    # review already counts them, so a lost one still keeps the PR unsettled.
-    for c in whole_file:
+    # A review can't hold file-level comments: they go on their own, after
+    # it, so a review GitHub turns away (posted again next pass) leaves none
+    # behind. Its body has them already, so one GitHub won't take loses nothing.
+    for c, _ in whole_file:
         if not isinstance(C.write("api", "-X", "POST", f"repos/{repo}/pulls/{n}/comments", "--input", "-",
                                   input=json.dumps({**c, "commit_id": head, "subject_type": "file"}), check=False), dict):
             log(f"{repo}#{n}: couldn't post {who}'s finding on {c['path']}")

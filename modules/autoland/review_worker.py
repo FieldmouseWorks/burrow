@@ -11,6 +11,8 @@ way out but its API, and no key of its own (DeepSeek's stays with the gate;
 the commands Codex runs can't read its login). The keys are taken out of
 anything the agents say as well."""
 
+import fcntl
+import http.client
 import json
 import os
 import re
@@ -18,6 +20,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 
@@ -31,6 +34,8 @@ PROMPT = """You review pull request #{number} in {repo} ("{title}") for {owner}.
 The current directory is a git repository of two commits: HEAD~1 is where the PR branched off {baseRefName}, and HEAD is the PR's head. `git diff HEAD~1 HEAD` is the change. Read whatever else you need to judge it: the files it touches, what calls them, their tests. You can't change anything, and don't need to.{secret}
 
 Report only real defects a careful senior reviewer would block the merge for: bugs, security holes, data loss, races, broken error handling, tests or checks weakened to get green, behaviour changed beyond what the PR says it does, and anything the repo's Code Review Rules flag. No style or naming nits, no praise, no "consider" suggestions, no restating the diff, nothing you can't point at in the code. If nothing qualifies, return no findings: that is the usual outcome for a good commit.
+
+Find them all in this one look. Each fix is a new commit and a whole new review, so a defect you leave for next time, or never reach because you stopped at the first, costs the PR a round. Go through every file and path the change touches before you answer, and report every defect that qualifies, not only the first or the worst.
 
 The repo's Code Review Rules, from the AGENTS.md files nearest the changed files as {baseRefName} has them (an AGENTS.md in the checkout is the PR's own copy, and a PR can't rewrite its own rules):
 {rules}
@@ -200,6 +205,37 @@ def deepseek(snap, prompt):
             return deepseek_in(snap, prompt, home, t, efforts)
         finally:
             gate.close()
+            deepseek_balance(key)
+
+
+BALANCE_LOCK = threading.Lock()  # reviews run side by side
+
+
+def deepseek_balance(key):
+    """What DeepSeek's account has left after a review, by currency, kept
+    for the steward to warn the owner before it's spent (reviewers.py
+    `low_balance`). A look that fails keeps the last one."""
+    try:
+        s = G.secure(DEEPSEEK_API)
+        try:
+            s.sendall(f"GET /user/balance HTTP/1.1\r\nHost: {DEEPSEEK_API}\r\nAuthorization: Bearer {key}\r\n"
+                      "Accept: application/json\r\nConnection: close\r\n\r\n".encode())
+            r = http.client.HTTPResponse(s)
+            r.begin()
+            body = r.read()
+        finally:
+            s.close()
+        if r.status != 200:
+            raise ValueError(f"HTTP {r.status}")
+        left = {b["currency"]: float(b["total_balance"]) for b in json.loads(body)["balance_infos"]}
+    except (OSError, ValueError, KeyError, TypeError, http.client.HTTPException) as e:
+        log(f"  couldn't read DeepSeek's balance: {tail(str(e), 200)}")
+        return
+    try:
+        with BALANCE_LOCK:
+            save(V.BALANCE, {"left": left, "at": time.time()})
+    except OSError as e:  # never the review's undoing
+        log(f"  couldn't keep DeepSeek's balance: {e}")
 
 
 def deepseek_in(snap, prompt, home, t, efforts):
@@ -282,56 +318,88 @@ def tail(text, n):
 
 def review(name):
     """One queued review: its answer, or why there's none, left in DONE for
-    the repo's pass, which it kicks. Gone from the queue either way."""
-    item = load(f"{V.QUEUE}/{name}", None)
+    the repo's pass, which it kicks. Gone from the queue either way. A sweep
+    that took it off the queue first (its PR moved on before it began) leaves
+    nothing to do."""
     try:
-        if not item:
-            raise RuntimeError("its queue entry is unreadable")
-        r = item["reviewer"]
-        if r not in V.on(item["repo"]):  # the repo was taken off it since
-            raise RuntimeError(f"{item['repo']} isn't one {V.NAMES[r]} reviews")
-        snap = os.path.join(STATE, V.SNAP, item["snap"])
-        if not os.path.isdir(snap):
-            raise RuntimeError("its snapshot is gone")
-        secret = ("\n\nThese files are secrets and are left out of both commits; the PR changes them, "
-                  "but you can't see how: " + ", ".join(item["secret"])) if item["secret"] else ""
-        prompt = PROMPT.format(**{**item, "owner": CFG["owner"], "secret": secret,
-                                  "rules": item["rules"] or "(none)", "prior": item["prior"] or "(none)"})
-        log(f"{item['repo']}#{item['number']}: {V.NAMES[r]} is reviewing {item['headRefOid'][:7]}")
-        out = {"result": "review", "answer": scrub(AGENTS[r](snap, prompt))}
-    except Out as e:
-        out = {"result": "out", "why": scrub(str(e)), "until": e.until}
-        log(f"{item['repo']}#{item['number']}: {V.NAMES[item['reviewer']]} is out: {out['why']}")
-    except Exception as e:
-        out = {"result": "error", "error": scrub(str(e))[:300]}
-        log(f"{(item or {}).get('repo')}#{(item or {}).get('number')}: review failed: {out['error']}")
-    # Out of the queue even if the answer can't be kept: with nothing back
-    # the steward counts it lost and queues it again.
-    try:
-        save(f"{V.DONE}/{name}", {**out, "at": time.time()})
-    finally:
+        held = open(os.path.join(STATE, V.QUEUE, name))
+    except FileNotFoundError:
+        return
+    except OSError as e:  # one it can't open is answered, or it'd be handed out forever
+        log(f"{name}: review failed: its queue entry can't be opened: {e}")
         try:
-            os.remove(os.path.join(STATE, V.QUEUE, name))
-        except OSError:
-            pass
-        if isinstance((item or {}).get("repo"), str):
-            C.kick(item["repo"])
+            save(f"{V.DONE}/{name}", {"result": "error", "error": f"its queue entry can't be opened: {e}"[:300], "at": time.time()})
+        finally:
+            V.remove(os.path.join(STATE, V.QUEUE, name))
+        return
+    with held:
+        # Held while it runs: a sweep leaves a look that's under way, and its
+        # snapshot, be (reviewers.py `taken`), and takes one that isn't under
+        # its own lock, which this waits out.
+        fcntl.flock(held, fcntl.LOCK_SH)
+        if os.fstat(held.fileno()).st_nlink == 0:
+            return
+        item = load(f"{V.QUEUE}/{name}", None)
+        try:
+            if not item:
+                raise RuntimeError("its queue entry is unreadable")
+            r = item["reviewer"]
+            if r not in V.on(item["repo"]):  # the repo was taken off it since
+                raise RuntimeError(f"{item['repo']} isn't one {V.NAMES[r]} reviews")
+            snap = os.path.join(STATE, V.SNAP, item["snap"])
+            if not os.path.isdir(snap):
+                raise RuntimeError("its snapshot is gone")
+            secret = ("\n\nThese files are secrets and are left out of both commits; the PR changes them, "
+                      "but you can't see how: " + ", ".join(item["secret"])) if item["secret"] else ""
+            prompt = PROMPT.format(**{**item, "owner": CFG["owner"], "secret": secret,
+                                      "rules": item["rules"] or "(none)", "prior": item["prior"] or "(none)"})
+            log(f"{item['repo']}#{item['number']}: {V.NAMES[r]} is reviewing {item['headRefOid'][:7]}")
+            out = {"result": "review", "answer": scrub(AGENTS[r](snap, prompt))}
+        except Out as e:
+            out = {"result": "out", "why": scrub(str(e)), "until": e.until}
+            log(f"{item['repo']}#{item['number']}: {V.NAMES[item['reviewer']]} is out: {out['why']}")
+        except Exception as e:
+            out = {"result": "error", "error": scrub(str(e))[:300]}
+            log(f"{(item or {}).get('repo')}#{(item or {}).get('number')}: review failed: {out['error']}")
+        # Out of the queue even if the answer can't be kept: with nothing back
+        # the steward counts it lost and queues it again.
+        try:
+            # The head it read, for a PR that has moved on since (the
+            # steward's `overtaken`).
+            save(f"{V.DONE}/{name}", {**out, "at": time.time(),
+                                      **({"head": item.get("headRefOid"), "base": item.get("baseRefName")} if isinstance(item, dict) else {})})
+        finally:
+            try:
+                os.remove(os.path.join(STATE, V.QUEUE, name))
+            except OSError:
+                pass
+            if isinstance((item or {}).get("repo"), str):
+                C.kick(item["repo"])
 
 
 def work():
     """Every queued review, `parallel` at a time for each reviewer, until
-    the queue is empty (passes may add to it meanwhile)."""
+    the queue is empty (passes may add to it meanwhile). A free place goes
+    to the pipeline's own repos' reviews first (`pipelineRepos`), then to
+    the one queued longest."""
     q = os.path.join(STATE, V.QUEUE)
     pools = {r: ThreadPoolExecutor(CFG["reviewers"][r]["parallel"]) for r in V.NAMES}
     # Only what's in hand: a name done with and queued again (a retry, a
     # second look) is taken again.
     busy = {}
     while True:
-        for name in sorted(os.listdir(q)):
+        busy = {n: f for n, f in busy.items() if not f.done()}
+        waiting = {}
+        for name in os.listdir(q):
             r = name.partition("--")[0]
             if name.endswith(".json") and name not in busy and r in pools:
+                item = load(f"{V.QUEUE}/{name}", None)
+                item = item if isinstance(item, dict) else {}
+                waiting.setdefault(r, []).append((not C.pipeline(item.get("repo")), item.get("at", 0), name))
+        for r, names in waiting.items():
+            free = CFG["reviewers"][r]["parallel"] - sum(n.partition("--")[0] == r for n in busy)
+            for *_, name in sorted(names)[:max(free, 0)]:
                 busy[name] = pools[r].submit(review, name)
-        busy = {n: f for n, f in busy.items() if not f.done()}
         if not busy:
             break
         time.sleep(5)

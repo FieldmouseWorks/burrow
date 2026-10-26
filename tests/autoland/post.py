@@ -102,7 +102,24 @@ assert '"findings": 3' in posted["body"] and "**DeepSeek review**" in posted["bo
 assert [c["line"] for c in posted["comments"]] == [13]
 assert "@​evil" in posted["comments"][0]["body"] and posted["comments"][0]["body"].startswith("**DeepSeek · P0**")
 assert "<!-- deepseek-review" not in posted["comments"][0]["body"]
-assert posted["body"].count("<!-- deepseek-review:v1") == 1
+assert posted["body"].count("<!-- deepseek-review:v1") == 1 and "no changed file to go on" not in posted["body"]
+# File-level ones are in the review's own body in full too, so one GitHub
+# won't take as a thread loses nothing, with no second call to fail.
+assert "- `gone.txt`: **DeepSeek · P2** t b" in posted["body"], posted["body"]
+assert "- `nope.py`: **DeepSeek · P1** t2 b2" in posted["body"] and V.finding("deepseek") not in posted["body"], posted["body"]
+WROTE.clear()
+C.write = lambda *a, **k: write(*a, **k) if "/reviews" in a[3] else None
+assert V.post("sam/r", pr, "deepseek", answer) == "findings"
+assert [a[2] for a, _ in WROTE] == ["POST"] and "- `gone.txt`: " in json.loads(WROTE[0][1])["body"], WROTE
+# One GitHub won't take leaves no file-level threads to be posted again.
+WROTE.clear()
+C.write = lambda *a, **k: write(*a, **k) if "/comments" in a[3] else None
+try:
+    V.post("sam/r", pr, "deepseek", answer)
+    raise AssertionError("a review GitHub didn't take passed")
+except RuntimeError:
+    assert WROTE == [], WROTE
+C.write = write
 
 # Its verdict comes back from the review, and only from one the steward posted.
 mine = {"author": {"login": "sam"}, "body": posted["body"], "commit": {"oid": head},

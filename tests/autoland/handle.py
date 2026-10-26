@@ -4,8 +4,10 @@ check those)."""
 
 import hashlib
 import hmac
+import fcntl
 import json
 import os
+import shutil
 import subprocess
 
 from harness import (C, CI_GREEN, COMMITS, DDIR, FAIL, JOBS, POSTED, PR_DIFF, QDIR, R, S, STATES, STUB, T0, V,
@@ -52,6 +54,244 @@ worker()
 status, _ = run(mkpr(), 650)
 assert sorted(POSTED) == [("codex", head, 0), ("deepseek", head, 0)] and os.listdir(DDIR) == [], POSTED
 assert "Codex and DeepSeek found nothing" in status and merged(), status
+
+# A look at an earlier head that comes back after the PR moved on is posted
+# on the commit it read, so its findings go into the next push. Its
+# "nothing found" says nothing about the new head, which both look at.
+fresh_pr_state()
+run(mkpr(), 0)
+run(mkpr(), 600)
+newer = "9" * 40
+status, _ = run(mkpr(sha=newer), 700)
+assert queued() == ["codex", "deepseek"] and "Waiting for Codex's review" in status, status
+worker(deepseek={"result": "review", "answer": {"findings": [{"path": "a.py"}, {"path": "a.py"}]}})
+status, _ = run(mkpr(sha=newer), 710)
+assert sorted(POSTED) == [("codex", head, 0), ("deepseek", head, 2)] and os.listdir(DDIR) == [], POSTED
+assert not merged() and queued() == [] and "Waiting for Codex's review" in status, status
+# Its findings were a round, and the new head's own looks come once it's sat still.
+status, _ = run(mkpr(sha=newer, reviews=[rv_review("codex", 0), rv_review("deepseek", 2)], threads=[False, False]), 1300)
+assert "2 open review threads" in status and queued() == ["codex", "deepseek"], status
+# Retargeted since, what an earlier head got on the old base isn't posted.
+fresh_pr_state()
+run(mkpr(), 0)
+run(mkpr(), 600)
+worker(deepseek={"result": "review", "answer": {"findings": [{"path": "a.py"}]}})
+run(mkpr(sha=newer, base="release/1.x"), 700)
+assert POSTED == [] and os.listdir(DDIR) == [], POSTED
+# Findings on an earlier head, posted while the new one is already clean
+# and green, hold the pass back from landing: the threads it read are from
+# before them.
+fresh_pr_state()
+run(mkpr(), 0)
+run(mkpr(), 600)
+worker(deepseek={"result": "review", "answer": {"findings": [{"path": "a.py"}]}})
+status, _ = run(clean(sha=newer), 700)
+assert ("deepseek", head, 1) in POSTED and not merged(), (POSTED, WROTE)
+assert "state=pending" in status and f"review findings on {head[:7]}" in status, status
+# So are an out-of-service reviewer's: its look came back before it went out.
+fresh_pr_state()
+run(mkpr(), 0)
+run(mkpr(), 600)
+worker(deepseek={"result": "review", "answer": {"findings": [{"path": "a.py"}]}})
+C.save(V.OUT, {"deepseek": {"why": "balance", "until": C.ts(T0) + 86400}})
+status, _ = run(mkpr(sha=newer, reviews=[rv_review("codex", 0, newer)]), 700)
+assert ("deepseek", head, 1) in POSTED and not merged() and os.listdir(DDIR) == [], (POSTED, WROTE)
+assert f"review findings on {head[:7]}" in status, status
+# A finished look at this head by one out of service is posted too, and its
+# findings hold the pass back though its verdict isn't waited for.
+fresh_pr_state()
+run(mkpr(), 0)
+run(mkpr(), 600)
+worker(deepseek={"result": "review", "answer": {"findings": [{"path": "a.py"}]}})
+C.save(V.OUT, {"deepseek": {"why": "balance", "until": C.ts(T0) + 86400}})
+status, _ = run(mkpr(), 650)
+assert ("deepseek", head, 1) in POSTED and not merged() and os.listdir(DDIR) == [], (POSTED, WROTE)
+assert f"review findings on {head[:7]}" in status, status
+# So are they when an earlier head's answer puts it out in the same pass.
+fresh_pr_state()
+run(mkpr(), 0)
+run(mkpr(), 600)
+worker(deepseek={"result": "review", "answer": {"findings": [{"path": "a.py"}]}})
+C.save(f"{V.DONE}/{V.item_name('pr-sam_r-5.json', 'deepseek', newer, 'main')}.json",
+       {"result": "out", "why": "balance", "until": C.ts(T0) + 86400, "head": newer, "base": "main"})
+status, _ = run(mkpr(), 650)
+assert V.out("deepseek") and ("deepseek", head, 1) in POSTED and not merged(), (POSTED, WROTE)
+assert f"review findings on {head[:7]}" in status, status
+# An earlier head's out answer that comes in after the pass began puts it
+# out too, rather than being dropped with the reviewer still taken for in.
+fresh_pr_state()
+run(mkpr(), 0)
+real_answered, late_out = V.answered, []
+def answered(key, r):
+    names = real_answered(key, r)
+    if r == "deepseek" and not late_out:
+        late_out.append(C.save(f"{V.DONE}/{V.item_name('pr-sam_r-5.json', 'deepseek', newer, 'main')}.json",
+                               {"result": "out", "why": "balance", "until": C.ts(T0) + 86400, "head": newer, "base": "main"}))
+    return names
+V.answered = answered
+run(mkpr(reviews=[rv_review("codex", 0)]), 600)
+V.answered = real_answered
+assert late_out and V.out("deepseek") and os.listdir(DDIR) == [], (os.listdir(DDIR), WROTE)
+os.remove(f"{tmp}/state/{V.OUT}")
+# One GitHub wouldn't take is kept and tried again, and the PR waits for it.
+fresh_pr_state()
+run(mkpr(), 0)
+run(mkpr(), 600)
+worker(deepseek={"result": "review", "answer": {"findings": [{"path": "a.py"}]}})
+STUB["post"] = RuntimeError("HTTP 502")
+for t in (700, 760):
+    status, _ = run(clean(sha=newer), t)
+    assert not merged() and len(os.listdir(DDIR)) == 2 and C.WAKE, (t, WROTE, os.listdir(DDIR))
+    assert f"Posting DeepSeek's review of {head[:7]}" in status, status
+STUB["post"] = None
+status, _ = run(clean(sha=newer), 820)
+assert ("deepseek", head, 1) in POSTED and os.listdir(DDIR) == [] and not merged(), (POSTED, status)
+assert "late" not in pr_state()["rv"]["deepseek"], pr_state()
+# The third failure gives up on it: the new head's own reviews still decide.
+fresh_pr_state()
+run(mkpr(), 0)
+run(mkpr(), 600)
+worker(deepseek={"result": "review", "answer": {"findings": [{"path": "a.py"}]}})
+STUB["post"] = RuntimeError("HTTP 502")
+for t in (700, 760):
+    run(clean(sha=newer), t)
+    assert not merged(), WROTE
+status, _ = run(clean(sha=newer), 820)
+STUB["post"] = None
+assert os.listdir(DDIR) == [] and "late" not in pr_state()["rv"]["deepseek"], (os.listdir(DDIR), pr_state())
+assert POSTED == [] and merged(), (POSTED, status)
+# Only a clean look at this head by the same reviewer covers what it found
+# there: out of service, it never comes, so the answer stays, the PR waits
+# and the owner hears. Back and clean on this head, it's let go.
+fresh_pr_state()
+run(mkpr(), 0)
+run(mkpr(), 600)
+worker(deepseek={"result": "review", "answer": {"findings": [{"path": "a.py"}]}})
+C.save(V.OUT, {"deepseek": {"why": "balance", "until": C.ts(T0) + 86400}})
+STUB["post"] = RuntimeError("HTTP 422")
+for t in (700, 760, 820, 880):
+    status, digest = run(mkpr(sha=newer, reviews=[rv_review("codex", 0, newer)]), t)
+    assert not merged() and V.item_name("pr-sam_r-5.json", "deepseek", head, "main") + ".json" in os.listdir(DDIR), (t, WROTE)
+assert ("A review couldn't be posted", f"[sam/r#5](u) t", f"DeepSeek's review of {head[:7]}, 4 tries") in digest, digest
+os.remove(f"{tmp}/state/{V.OUT}")
+status, _ = run(clean(sha=newer), 940)
+STUB["post"] = None
+assert os.listdir(DDIR) == [] and merged(), (os.listdir(DDIR), status)
+# Its look at this head is the same: kept while it's out, however often
+# GitHub turns it away, and the PR waits.
+fresh_pr_state()
+run(mkpr(), 0)
+run(mkpr(), 600)
+worker(deepseek={"result": "review", "answer": {"findings": [{"path": "a.py"}]}})
+C.save(V.OUT, {"deepseek": {"why": "balance", "until": C.ts(T0) + 86400}})
+STUB["post"] = RuntimeError("HTTP 502")
+for t in (650, 710, 770, 830):
+    status, digest = run(mkpr(reviews=[rv_review("codex", 0)]), t)
+    assert not merged() and f"Posting DeepSeek's review of {head[:7]}" in status, (t, WROTE)
+    assert V.item_name("pr-sam_r-5.json", "deepseek", head, "main") + ".json" in os.listdir(DDIR), t
+assert ("A review couldn't be posted", "[sam/r#5](u) t", f"DeepSeek's review of {head[:7]}, 4 tries") in digest, digest
+STUB["post"] = None
+status, _ = run(mkpr(reviews=[rv_review("codex", 0)]), 890)
+assert ("deepseek", head, 1) in POSTED and not merged() and os.listdir(DDIR) == [], (POSTED, status)
+os.remove(f"{tmp}/state/{V.OUT}")
+# Put out in the pass that would have dropped it, by an earlier head's
+# answer, it's kept too.
+fresh_pr_state()
+run(mkpr(), 0)
+run(mkpr(), 600)
+worker(deepseek={"result": "review", "answer": {"findings": [{"path": "a.py"}]}})
+STUB["post"] = RuntimeError("HTTP 502")
+run(mkpr(reviews=[rv_review("codex", 0)]), 650)
+run(mkpr(reviews=[rv_review("codex", 0)]), 710)
+C.save(f"{V.DONE}/{V.item_name('pr-sam_r-5.json', 'deepseek', newer, 'main')}.json",
+       {"result": "out", "why": "balance", "until": C.ts(T0) + 86400, "head": newer, "base": "main"})
+status, _ = run(mkpr(reviews=[rv_review("codex", 0)]), 770)
+STUB["post"] = None
+assert V.out("deepseek") and not merged() and f"Posting DeepSeek's review of {head[:7]}" in status, (status, WROTE)
+assert V.item_name("pr-sam_r-5.json", "deepseek", head, "main") + ".json" in os.listdir(DDIR), os.listdir(DDIR)
+os.remove(f"{tmp}/state/{V.OUT}")
+# And in service through three failed posts, so dropped to be asked again,
+# then put out (by another PR's pass, say): the head is held for it.
+fresh_pr_state()
+run(mkpr(), 0)
+run(mkpr(), 600)
+worker(deepseek={"result": "review", "answer": {"findings": [{"path": "a.py"}]}})
+STUB["post"] = RuntimeError("HTTP 502")
+for t in (650, 710, 770):
+    run(mkpr(reviews=[rv_review("codex", 0)]), t)
+STUB["post"] = None
+C.save(V.OUT, {"deepseek": {"why": "balance", "until": C.ts(T0) + 86400}})
+status, _ = run(mkpr(reviews=[rv_review("codex", 0)]), 830)
+assert not merged() and f"DeepSeek's findings on {head[:7]} couldn't be posted" in status, status
+# Nor past the same head retargeted, which is another change.
+rel = mkpr(base="release/1.x", reviews=[rv_review("codex", 0, base="release/1.x")])
+status, _ = run(rel, 900)
+assert merged() and "couldn't be posted" not in status, status
+# Not past a new head, which it never read.
+status, _ = run(mkpr(sha=newer, reviews=[rv_review("codex", 0, newer)]), 1500)
+assert merged() and "lost" not in pr_state()["rv"]["deepseek"], (status, pr_state())
+os.remove(f"{tmp}/state/{V.OUT}")
+# Nor is a look at an earlier head still under way passed over by one out
+# of service: the PR waits for what it finds.
+fresh_pr_state()
+run(mkpr(), 0)
+run(mkpr(), 600)
+os.remove(f"{QDIR}/{V.item_name('pr-sam_r-5.json', 'deepseek', head, 'main')}.json")
+worker()
+C.save(V.OUT, {"deepseek": {"why": "balance", "until": C.ts(T0) + 86400}})
+under_way = V.item_name("pr-sam_r-5.json", "deepseek", "c" * 40, "main")
+C.save(f"{V.QUEUE}/{under_way}.json", {})
+held = open(f"{QDIR}/{under_way}.json")
+fcntl.flock(held, fcntl.LOCK_SH)
+status, _ = run(mkpr(), 650)
+assert not merged() and "DeepSeek is still reviewing it, though out of service" in status, status
+held.close()
+# One the service hasn't begun is taken off the queue, so none begins once
+# the PR has landed on the other's word.
+status, _ = run(mkpr(reviews=[rv_review("codex", 0)]), 700)
+assert merged() and os.listdir(QDIR) == [], (status, os.listdir(QDIR))
+# Its look at this head the same.
+fresh_pr_state()
+run(mkpr(), 0)
+run(mkpr(), 600)
+mine = V.item_name("pr-sam_r-5.json", "deepseek", head, "main")
+os.rename(f"{QDIR}/{mine}.json", f"{tmp}/{mine}.json")
+worker()
+os.rename(f"{tmp}/{mine}.json", f"{QDIR}/{mine}.json")
+C.save(V.OUT, {"deepseek": {"why": "balance", "until": C.ts(T0) + 86400}})
+held = open(f"{QDIR}/{mine}.json")
+fcntl.flock(held, fcntl.LOCK_SH)
+status, _ = run(mkpr(), 650)
+assert not merged() and "DeepSeek is still reviewing it, though out of service" in status, status
+held.close()
+status, _ = run(mkpr(reviews=[rv_review("codex", 0)]), 700)
+assert merged() and os.listdir(QDIR) == [], (status, os.listdir(QDIR))
+# One on the PR's old base, which it answers about another change, doesn't.
+fresh_pr_state()
+C.save(V.OUT, {"deepseek": {"why": "balance", "until": C.ts(T0) + 86400}})
+old_base = V.item_name("pr-sam_r-5.json", "deepseek", head, "release/1.x")
+C.save(f"{V.QUEUE}/{old_base}.json", {})
+held = open(f"{QDIR}/{old_base}.json")
+fcntl.flock(held, fcntl.LOCK_SH)
+status, _ = run(mkpr(reviews=[rv_review("codex", 0)]), 700)
+held.close()
+assert merged() and "still reviewing" not in status, status
+os.remove(f"{QDIR}/{old_base}.json")
+# An entry it can't open to tell is taken as under way: left be.
+os.mkdir(f"{QDIR}/{old_base}.json")
+assert not V.taken(f"{QDIR}/{old_base}.json") and os.path.isdir(f"{QDIR}/{old_base}.json")
+os.rmdir(f"{QDIR}/{old_base}.json")
+os.remove(f"{tmp}/state/{V.OUT}")
+# The answers it posts are this PR's alone: sam/r-5's PR 3 isn't sam/r's PR 5.
+fresh_pr_state()
+for k in ("pr-sam_r-5.json", "pr-sam_r-5-3.json", "pr-sam_r-50.json"):
+    C.save(f"{V.DONE}/codex--{V.snap_name(k, head, 'main')}.json", {})
+assert V.answered("pr-sam_r-5.json", "codex") == [V.item_name("pr-sam_r-5.json", "codex", head, "main")]
+assert V.answered("pr-sam_r-5.json", "deepseek") == []
+# And a status run with no answers directory reads none.
+shutil.rmtree(DDIR)
+assert V.answered("pr-sam_r-5.json", "codex") == []
+fresh_pr_state()
 
 # Only reviews the steward posted count.
 fresh_pr_state()
@@ -784,11 +1024,31 @@ for s in (gone, live_snap, other_repo, dashed, retargeted):
     C.save(f"{V.SNAP}/{s}.json", {})
     C.save(f"{V.QUEUE}/deepseek--{s}.json", {})
     C.save(f"{V.DONE}/codex--{s}.json", {})
+# PR 5 is still open: an earlier head's look that's under way (its queue
+# entry locked, as the reviewers' service holds it) keeps its snapshot, and
+# what came back from its earlier heads stays for its next pass to post.
+running = V.snap_name("pr-sam_r-5.json", "c" * 40, "main")
+os.makedirs(f"{tmp}/state/{V.SNAP}/{running}")
+C.save(f"{V.SNAP}/{running}.json", {})
+C.save(f"{V.QUEUE}/codex--{running}.json", {})
+held = open(f"{tmp}/state/{V.QUEUE}/codex--{running}.json")
+fcntl.flock(held, fcntl.LOCK_SH)
 V.sweep({"sam_r", "sam_lo-k"}, {live_snap})
+held.close()
 left = sorted(x for d in (V.SNAP, V.QUEUE, V.DONE) for x in os.listdir(f"{tmp}/state/{d}"))
 assert left == sorted([live_snap, live_snap + ".json", other_repo, other_repo + ".json",
                        f"deepseek--{live_snap}.json", f"deepseek--{other_repo}.json",
-                       f"codex--{live_snap}.json", f"codex--{other_repo}.json"]), left
+                       f"codex--{live_snap}.json", f"codex--{other_repo}.json",
+                       running, running + ".json", f"codex--{running}.json",
+                       f"codex--{gone}.json", f"codex--{retargeted}.json"]), left
+# Once it's done, the next sweep takes its snapshot.
+V.remove(f"{tmp}/state/{V.QUEUE}/codex--{running}.json")
+V.sweep({"sam_r", "sam_lo-k"}, {live_snap})
+assert not os.path.exists(f"{tmp}/state/{V.SNAP}/{running}") and os.path.exists(f"{tmp}/state/{V.DONE}/codex--{gone}.json")
+# And a PR that's gone takes everything with it.
+V.sweep({"sam_r", "sam_lo-k"}, set())
+left = sorted(x for d in (V.SNAP, V.QUEUE, V.DONE) for x in os.listdir(f"{tmp}/state/{d}"))
+assert left == sorted([other_repo, other_repo + ".json", f"deepseek--{other_repo}.json", f"codex--{other_repo}.json"]), left
 
 # Every repo gets the hold and needs-owner labels, once a day.
 fresh_pr_state()

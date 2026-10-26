@@ -100,6 +100,7 @@ let
       skipPaths = [ ];
     };
     repos = cfg.repos;
+    inherit (cfg) pipelineRepos;
     # Every repo's hook to burrow-events (repos.py), with what each of its
     # handlers takes.
     webhook = {
@@ -110,7 +111,7 @@ let
     kick = "${config.burrow.events.kick}/autoland";
     reviewers = {
       codex = { inherit (rv.codex) enable effort parallel; };
-      deepseek = { inherit (rv.deepseek) enable effort parallel; };
+      deepseek = { inherit (rv.deepseek) enable effort parallel lowBalance; };
     };
     inherit (rv) skipPaths;
     agents = "${agents}/bin";
@@ -187,6 +188,19 @@ in
       default = [ ];
       example = [ "sam/scratch-*" ];
       description = "Repos to leave alone (OWNER/NAME globs).";
+    };
+
+    pipelineRepos = mkOption {
+      type = types.listOf types.str;
+      default = [ ];
+      example = [ "sam/burrow" "sam/box" ];
+      description = ''
+        The repos whose PRs work on this pipeline itself (OWNER/NAMEs, any
+        case): the steward, its reviewers, the machine they run on. Their
+        reviews take a reviewer's next free place before anyone else's, and
+        their Claude jobs go ahead of the line (`proj run --first`), so the
+        work queued behind them gets the speedup sooner.
+      '';
     };
 
     dryRun = mkOption {
@@ -360,6 +374,15 @@ in
           default = 4;
           description = "At most this many DeepSeek reviews at once.";
         };
+        lowBalance = mkOption {
+          type = types.number;
+          default = 5;
+          description = ''
+            Under this much left on DeepSeek's account (in its own currency),
+            after any review, the steward's issue for the owner says so. Spent,
+            DeepSeek is out of service and PRs merge on the other reviewers.
+          '';
+        };
       };
 
       skipPaths = mkOption {
@@ -494,7 +517,7 @@ in
           ProtectSystem = "strict";
           ProtectHome = true;
           PrivateTmp = true;
-          ReadWritePaths = [ reviewerHome "${reviewDir}/queue" "${reviewDir}/done" ];
+          ReadWritePaths = [ reviewerHome "${reviewDir}/queue" "${reviewDir}/done" "${reviewDir}/account" ];
         } // lib.optionalAttrs rv.deepseek.enable {
           LoadCredential = "deepseek:${rv.deepseek.envFile}";
         };
@@ -506,9 +529,9 @@ in
     };
 
     # The steward's state, and the reviews: it queues them and takes the
-    # snapshots; the reviewers' user reads those, answers in done/ and takes
-    # what it answered off the queue. The clones the snapshots come from are
-    # the steward's alone.
+    # snapshots; the reviewers' user reads those, answers in done/, takes
+    # what it answered off the queue and notes its accounts' balances in
+    # account/. The clones the snapshots come from are the steward's alone.
     systemd.tmpfiles.settings.burrow = let
       dir = mode: group: { d = { inherit mode user group; }; };
     in {
@@ -516,6 +539,7 @@ in
       ${reviewDir} = dir "2750" reviewer;
       "${reviewDir}/queue" = dir "2770" reviewer;
       "${reviewDir}/done" = dir "2770" reviewer;
+      "${reviewDir}/account" = dir "2770" reviewer;
       "${reviewDir}/snap" = dir "2750" reviewer;
       "${reviewDir}/git" = dir "0700" account.group;
     };

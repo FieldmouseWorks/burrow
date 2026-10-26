@@ -573,7 +573,24 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
         # in, say, is the owner's to do.
         if live and away[r] and not any(x[:2] == ("A reviewer is out of service", V.NAMES[r]) for x in digest):
             digest.append(("A reviewer is out of service", V.NAMES[r], away[r]))
-    said = {r: V.verdict(pr, head, r) for r in live}  # verdict, when, rounds with findings
+    said = {r: V.verdict(pr, head, r) for r in names}  # verdict, when, rounds with findings
+    found = []  # the reviewers whose findings on this head this pass posted
+    late, unposted = [], []  # earlier heads whose findings this pass posted; reviews it couldn't post yet
+
+    def went_out(r, back):
+        o = load(V.OUT, {})
+        o[r] = {"why": back["why"], "until": back["until"]}
+        save(V.OUT, o)
+        log(f"{tag}: {V.NAMES[r]} is out of service until {back['until']:.0f}: {back['why']}")
+
+    def outs(r):
+        """An earlier head's look that found the reviewer out of service:
+        recorded before anything this pass decides on whether it's out."""
+        for name in V.answered(key, r):
+            back = load(f"{V.DONE}/{name}.json", None) or {}
+            if name != V.item_name(key, r, head, pr["baseRefName"]) and back.get("result") == "out" and not DRY:
+                went_out(r, back)
+                V.drop(name)
 
     def consume(r):
         """What came back from the reviewer's service for this head, if
@@ -587,22 +604,32 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
                     v = V.post(repo, pr, r, back["answer"])
                     _, _, rr = said[r]
                     said[r] = (v, C.NOW, rr + (v == "findings"))
+                    if v == "findings":
+                        found.append(r)
                     rs.pop("fails", None)
                     rs.pop("failedAt", None)
+                    rs.pop("lost", None)
                 except ValueError as e:  # an answer that's no review
                     rs["fails"], rs["failedAt"] = rs.get("fails", 0) + 1, C.NOW
                     log(f"{tag}: {V.NAMES[r]}'s answer wasn't a review ({rs['fails']}): {e}")
-                except RuntimeError as e:  # GitHub: the same answer goes again next pass, twice more
+                except RuntimeError as e:  # GitHub: the same answer goes again next pass
                     rs["fails"], rs["failedAt"] = rs.get("fails", 0) + 1, C.NOW
                     log(f"{tag}: couldn't post {V.NAMES[r]}'s review ({rs['fails']}): {e}")
-                    if rs["fails"] < 3:
+                    # Three tries; one out of service then isn't asked again,
+                    # so its answer stays, the pass waits and the owner hears.
+                    if rs["fails"] < 3 or V.out(r):
+                        x = f"{V.NAMES[r]}'s review of {head[:7]}"
+                        unposted.append(x)
+                        if rs["fails"] >= 3:
+                            digest.append(("A review couldn't be posted", line, f"{x}, {rs['fails']} tries"))
                         after(C.NOW, 1)
                         return
+                    if back["answer"].get("findings"):
+                        # Dropped, it's asked again; one out of service by
+                        # then isn't, so the head's held for it meanwhile.
+                        rs["lost"] = [head, pr["baseRefName"]]
             elif back["result"] == "out":
-                o = load(V.OUT, {})
-                o[r] = {"why": back["why"], "until": back["until"]}
-                save(V.OUT, o)
-                log(f"{tag}: {V.NAMES[r]} is out of service until {back['until']:.0f}: {back['why']}")
+                went_out(r, back)
             else:  # the agent, the network, its JSON: tried again next pass
                 rs["fails"], rs["failedAt"] = rs.get("fails", 0) + 1, C.NOW
                 log(f"{tag}: {V.NAMES[r]}'s review failed ({rs['fails']}): {back.get('error', '')[:200]}")
@@ -623,9 +650,78 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
                 rs["gone"] = True
                 after(C.NOW, 1)  # the second look
 
-    for r in live:
+    def overtaken(r):
+        """What came back from the reviewer's looks at the PR's earlier heads
+        after it moved on (V.sweep keeps them): posted on the commit each
+        one read, so what it found goes into the next push instead of
+        waiting for its look at this head. Findings there count as a round,
+        and hold this pass back from landing: the threads it read are from
+        before them. "Nothing found" there says nothing about this head."""
+        rs = st["rv"].setdefault(r, {})
+        mine = V.answered(key, r)
+        tries = {n: k for n, k in rs.get("late", {}).items() if n in mine}
+        for name in mine:
+            if name == V.item_name(key, r, head, pr["baseRefName"]):
+                continue
+            back = load(f"{V.DONE}/{name}.json", None) or {}
+            if DRY:
+                continue
+            if back.get("result") == "out":  # in since outs() looked
+                went_out(r, back)
+            elif back.get("result") == "review" and back.get("base") == pr["baseRefName"] and isinstance(back.get("head"), str):
+                try:
+                    if V.post(repo, {**pr, "headRefOid": back["head"]}, r, back["answer"]) == "findings":
+                        v, at, rr = said[r]
+                        said[r] = (v, at, rr + 1)
+                        late.append(back["head"][:7])
+                except ValueError as e:  # an answer that's no review
+                    log(f"{tag}: {V.NAMES[r]}'s review of {back['head'][:7]} wasn't a review: {e}")
+                except RuntimeError as e:  # GitHub: the same answer goes again next pass
+                    tries[name] = tries.get(name, 0) + 1
+                    log(f"{tag}: couldn't post {V.NAMES[r]}'s review of {back['head'][:7]} ({tries[name]}): {e}")
+                    # Three tries, and then only until the reviewer finds this
+                    # head clean, which covers what it found there; one out of
+                    # service may never, so the owner hears.
+                    if tries[name] < 3 or said[r][0] != "clean":
+                        x = f"{V.NAMES[r]}'s review of {back['head'][:7]}"
+                        unposted.append(x)
+                        if tries[name] >= 3:
+                            digest.append(("A review couldn't be posted", line, f"{x}, {tries[name]} tries"))
+                        after(C.NOW, 1)
+                        continue
+            tries.pop(name, None)
+            V.drop(name)
+        if tries:
+            rs["late"] = tries
+        else:
+            rs.pop("late", None)
+
+    for r in names:
+        outs(r)
+
+    def reading(rs):
+        """Those of `rs` with a look at the PR, at any head, still under way:
+        out of service, their verdict on this head doesn't cover it, so the
+        pass waits for what it finds. One not begun never will be. Asked
+        before this pass reads what came back, so one that ends meanwhile
+        is read."""
+        return [r for r in rs if not DRY and said[r][0] != "clean" and V.under_way(key, r, pr["baseRefName"])]
+
+    was_out = [r for r in names if V.out(r)]
+    under_way = reading(was_out)
+    for r in names:
+        # One out of service too, or put out by one of these answers: its
+        # looks came back before it went out, and posting them asks nothing
+        # of it.
         consume(r)
+    for r in names:
+        overtaken(r)
+    # Put out by an answer this pass read: its others.
+    under_way += reading([r for r in names if V.out(r) and r not in was_out])
     live = [r for r in live if not V.out(r)]
+    # The findings of one out now on this head are threads this pass never
+    # read, and its verdict isn't waited for: they hold the pass back.
+    late += [head[:7] for r in found if r not in live]
     for r in names:
         if V.out(r):
             # Back in service then: its look at this head is asked for.
@@ -681,7 +777,14 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
     quiet = age >= rc["settleDelay"] * MIN
     if not quiet and any(said[r][0] == "none" for r in live):
         after(st["seen"], rc["settleDelay"])  # the reviewers are asked then
-    waiting = []
+    waiting = [f"Posting {x}" for x in unposted]
+    for r in names:
+        rs = st["rv"].setdefault(r, {})
+        if rs.get("lost") != [head, pr["baseRefName"]]:
+            rs.pop("lost", None)
+        elif r not in live:
+            waiting.append(f"{V.NAMES[r]}'s findings on {head[:7]} couldn't be posted, and it's out of service")
+    waiting += [f"{V.NAMES[r]} is still reviewing it, though out of service" for r in under_way]
     if not live:
         why = "; ".join(f"{V.NAMES[r]}: {away[r] or V.out(r)}" for r in names) or "none is on"
         waiting.append(f"No reviewer can review it now ({why})")
@@ -705,13 +808,15 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
         what.append(f"{open_threads} open review thread{'s' * (open_threads > 1)}")
     if changes:
         what.append("changes requested by " + ", ".join(changes))
+    if late:
+        what.append("review findings on " + ", ".join(sorted(set(late))))
     if waiting:
         settle("pending", "; ".join(waiting + stuck + what))
         # One reviewer's threads needn't wait for the other to finish.
         if what and not swept and handoff_due("handed"):
             hand_off(", ".join(what))
-    elif not clean or open_threads or changes:
-        if not open_threads and not changes:
+    elif not clean or what:
+        if not what:
             # Every finding answered without a new commit: the reviewers that
             # had findings look again.
             for r in live:
@@ -767,7 +872,7 @@ def main():
         review_worker.work()
         return
     try:
-        for d in ("", V.QUEUE, V.SNAP, V.DONE, V.GIT):
+        for d in ("", V.QUEUE, V.SNAP, V.DONE, V.ACCOUNT, V.GIT):
             os.makedirs(os.path.join(STATE, d), exist_ok=True)
     except OSError:
         if not DRY:
@@ -860,8 +965,9 @@ def main():
     if kick is None:
         R.unhook_gone(repos + R.hook_projects(repos))
     # Last: GitHub failing it leaves the pass's state saved. A line more than
-    # one repo has (a reviewer out of service) is listed once.
-    R.publish(list(dict.fromkeys(tuple(x) for repo in sorted(digest) for x in digest[repo])))
+    # one repo has (a reviewer out of service) is listed once, and one that's
+    # no repo's (DeepSeek's balance) goes with them.
+    R.publish(list(dict.fromkeys(tuple(x) for repo in sorted(digest) for x in digest[repo])) + V.low_balance())
 
 
 if __name__ == "__main__":
