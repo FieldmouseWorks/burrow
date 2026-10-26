@@ -318,12 +318,11 @@ def answered(key, r):
     return mine(DONE, key, r)
 
 
-def under_way(key, r, keep):
-    """The names of the reviewer's looks at the PR's other heads than `keep`
-    (an item name) that the reviewers' service is on now. Those it hasn't
-    begun are taken off the queue (`taken`), so none begins after this."""
-    return [name for name in mine(QUEUE, key, r)
-            if name != keep and not taken(os.path.join(STATE, QUEUE, name + ".json"))]
+def under_way(key, r):
+    """The names of the reviewer's looks at the PR, for any head, that the
+    reviewers' service is on now. Those it hasn't begun are taken off the
+    queue (`taken`), so none begins after this."""
+    return [name for name in mine(QUEUE, key, r) if not taken(os.path.join(STATE, QUEUE, name + ".json"))]
 
 
 def taken(path):
@@ -502,13 +501,6 @@ def post(repo, pr, r, answer):
         line = want if want in lines else min(lines, key=lambda x: abs(x - want))
         comments.append({"path": f["path"], "line": line, "side": "RIGHT", "body": msg + "\n\n" + mark})
     k = len(comments) + len(whole_file) + len(loose)
-    # A review can't hold file-level comments: they go on their own, first,
-    # and one GitHub won't take is written into the review instead.
-    for c, text in whole_file:
-        if not isinstance(C.write("api", "-X", "POST", f"repos/{repo}/pulls/{n}/comments", "--input", "-",
-                                  input=json.dumps({**c, "commit_id": head, "subject_type": "file"}), check=False), dict):
-            log(f"{repo}#{n}: couldn't post {who}'s finding on {c['path']}")
-            loose.append(text)
     body = (f"**{who} review** of {head[:7]}: "
             + (f"{k} finding{'s' * (k > 1)}. Fix or answer each, then resolve its thread." if k else "nothing found."))
     if answer.get("summary"):
@@ -516,9 +508,24 @@ def post(repo, pr, r, answer):
     if loose:
         body += "\n\nFindings with no changed file to go on:\n" + "\n".join(loose)
     body += f"\n\n<!-- {r}-review:v1 " + json.dumps({"commit_sha": head, "base": pr["baseRefName"], "findings": k}) + " -->"
-    if not isinstance(C.write("api", "-X", "POST", f"repos/{repo}/pulls/{n}/reviews", "--input", "-",
-                              input=json.dumps({"commit_id": head, "event": "COMMENT", "body": body, "comments": comments}),
-                              check=False), dict):
+    done = C.write("api", "-X", "POST", f"repos/{repo}/pulls/{n}/reviews", "--input", "-",
+                   input=json.dumps({"commit_id": head, "event": "COMMENT", "body": body, "comments": comments}), check=False)
+    if not isinstance(done, dict) or "id" not in done:
         raise RuntimeError("GitHub didn't take the review")
+    # A review can't hold file-level comments: they go on their own, after
+    # it, so a review GitHub turns away (posted again next pass) leaves none
+    # behind. One it won't take is written into the review instead.
+    lost = []
+    for c, text in whole_file:
+        if not isinstance(C.write("api", "-X", "POST", f"repos/{repo}/pulls/{n}/comments", "--input", "-",
+                                  input=json.dumps({**c, "commit_id": head, "subject_type": "file"}), check=False), dict):
+            log(f"{repo}#{n}: couldn't post {who}'s finding on {c['path']}")
+            lost.append(text)
+    if lost:
+        mark_at = body.rindex(f"\n\n<!-- {r}-review:v1 ")
+        body = body[:mark_at] + "\n\nFindings GitHub wouldn't take as threads:\n" + "\n".join(lost) + body[mark_at:]
+        if not isinstance(C.write("api", "-X", "PUT", f"repos/{repo}/pulls/{n}/reviews/{done['id']}", "--input", "-",
+                                  input=json.dumps({"body": body}), check=False), dict):
+            log(f"{repo}#{n}: couldn't add {who}'s {len(lost)} lost finding(s) to its review either")
     log(f"{repo}#{n}: {who}'s review posted, {k} finding(s)")
     return "findings" if k else "clean"

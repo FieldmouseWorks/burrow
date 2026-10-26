@@ -91,8 +91,8 @@ answer = {"findings": [
     {"path": "nope.py", "line": 1, "severity": "PX", "title": "t2", "body": "b2"}], "summary": "s"}
 assert V.post("sam/r", pr, "deepseek", answer) == "findings"
 posts = [(a, json.loads(i)) for a, i in WROTE]
-assert [a[3].rsplit("/", 1)[1] for a, _ in posts] == ["comments", "comments", "reviews"]
-whole, elsewhere, posted = posts[0][1], posts[1][1], posts[2][1]
+assert [a[3].rsplit("/", 1)[1] for a, _ in posts] == ["reviews", "comments", "comments"]
+posted, whole, elsewhere = posts[0][1], posts[1][1], posts[2][1]
 assert whole["path"] == "gone.txt" and whole["subject_type"] == "file" and whole["commit_id"] == head
 assert V.finding("deepseek") in whole["body"]
 assert elsewhere["path"] == "src/app.py" and elsewhere["subject_type"] == "file" and V.finding("deepseek") in elsewhere["body"]
@@ -108,9 +108,18 @@ assert posted["body"].count("<!-- deepseek-review:v1") == 1 and "no changed file
 WROTE.clear()
 C.write = lambda *a, **k: write(*a, **k) if "/reviews" in a[3] else None
 assert V.post("sam/r", pr, "deepseek", answer) == "findings"
-posted = json.loads(WROTE[-1][1])
-assert '"findings": 3' in posted["body"] and "- `gone.txt`: **DeepSeek · P2** t b" in posted["body"], posted["body"]
-assert "- `nope.py`: **DeepSeek · P1** t2 b2" in posted["body"] and V.finding("deepseek") not in posted["body"], posted["body"]
+(put, edited), = [(a, json.loads(i)) for a, i in WROTE if a[2] == "PUT"]
+assert put[3] == "repos/sam/r/pulls/7/reviews/99" and edited["body"].count("<!-- deepseek-review:v1") == 1, put
+assert '"findings": 3' in edited["body"] and "- `gone.txt`: **DeepSeek · P2** t b" in edited["body"], edited["body"]
+assert "- `nope.py`: **DeepSeek · P1** t2 b2" in edited["body"] and V.finding("deepseek") not in edited["body"], edited["body"]
+# One GitHub won't take leaves no file-level threads to be posted again.
+WROTE.clear()
+C.write = lambda *a, **k: write(*a, **k) if "/comments" in a[3] else None
+try:
+    V.post("sam/r", pr, "deepseek", answer)
+    raise AssertionError("a review GitHub didn't take passed")
+except RuntimeError:
+    assert WROTE == [], WROTE
 C.write = write
 
 # Its verdict comes back from the review, and only from one the steward posted.

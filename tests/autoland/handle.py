@@ -207,10 +207,26 @@ C.save(f"{V.QUEUE}/{under_way}.json", {})
 held = open(f"{QDIR}/{under_way}.json")
 fcntl.flock(held, fcntl.LOCK_SH)
 status, _ = run(mkpr(), 650)
-assert not merged() and "DeepSeek is still reviewing an earlier commit" in status, status
+assert not merged() and "DeepSeek is still reviewing it, though out of service" in status, status
 held.close()
 # One the service hasn't begun is taken off the queue, so none begins once
 # the PR has landed on the other's word.
+status, _ = run(mkpr(reviews=[rv_review("codex", 0)]), 700)
+assert merged() and os.listdir(QDIR) == [], (status, os.listdir(QDIR))
+# Its look at this head the same.
+fresh_pr_state()
+run(mkpr(), 0)
+run(mkpr(), 600)
+mine = V.item_name("pr-sam_r-5.json", "deepseek", head, "main")
+os.rename(f"{QDIR}/{mine}.json", f"{tmp}/{mine}.json")
+worker()
+os.rename(f"{tmp}/{mine}.json", f"{QDIR}/{mine}.json")
+C.save(V.OUT, {"deepseek": {"why": "balance", "until": C.ts(T0) + 86400}})
+held = open(f"{QDIR}/{mine}.json")
+fcntl.flock(held, fcntl.LOCK_SH)
+status, _ = run(mkpr(), 650)
+assert not merged() and "DeepSeek is still reviewing it, though out of service" in status, status
+held.close()
 status, _ = run(mkpr(reviews=[rv_review("codex", 0)]), 700)
 assert merged() and os.listdir(QDIR) == [], (status, os.listdir(QDIR))
 # The answers it posts are this PR's alone: sam/r-5's PR 3 isn't sam/r's PR 5.

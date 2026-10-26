@@ -689,16 +689,24 @@ def handle(repo, pr, repo_info, digest):
 
     for r in names:
         outs(r)
+
+    def reading(rs):
+        """Those of `rs` with a look at the PR, at any head, still under way:
+        out of service, their verdict on this head doesn't cover it, so the
+        pass waits for what it finds. One not begun never will be. Asked
+        before this pass reads what came back, so one that ends meanwhile
+        is read."""
+        return [r for r in rs if not DRY and said[r][0] != "clean" and V.under_way(key, r)]
+
+    was_out = [r for r in names if V.out(r)]
+    under_way = reading(was_out)
     for r in names:
         # One out of service too, or put out by one of these answers: its
         # looks came back before it went out, and posting them asks nothing
         # of it.
         consume(r)
-    # A look at an earlier head still under way by one out of service, whose
-    # verdict on this head doesn't cover it: what it finds is posted once
-    # it's back, so the pass waits for it. One not begun never will be.
-    reading = [r for r in names if not DRY and V.out(r) and said[r][0] != "clean"
-               and V.under_way(key, r, V.item_name(key, r, head, pr["baseRefName"]))]
+    # Put out by its answer about this head, which is in: its others.
+    under_way += reading([r for r in names if V.out(r) and r not in was_out])
     for r in names:
         overtaken(r)
     live = [r for r in live if not V.out(r)]
@@ -761,7 +769,7 @@ def handle(repo, pr, repo_info, digest):
     if not quiet and any(said[r][0] == "none" for r in live):
         after(st["seen"], rc["settleDelay"])  # the reviewers are asked then
     waiting = [f"Posting {x}" for x in unposted]
-    waiting += [f"{V.NAMES[r]} is still reviewing an earlier commit" for r in reading]
+    waiting += [f"{V.NAMES[r]} is still reviewing it, though out of service" for r in under_way]
     if not live:
         why = "; ".join(f"{V.NAMES[r]}: {away[r] or V.out(r)}" for r in names) or "none is on"
         waiting.append(f"No reviewer can review it now ({why})")
