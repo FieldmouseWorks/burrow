@@ -285,6 +285,10 @@ assert "Not a bug: b is meant." in p and "someone else" not in p and "approve" n
 assert "cert.pem" in p and "secrets/remi.yaml" in p and "#5 in sam/r" in p
 # All of them at once: a held-back finding costs a round.
 assert "Find them all in this one look." in p and "not only the first or the worst" in p
+# And all of each: what a complete fix has to hold, which Codex's answer
+# can't leave out.
+assert '"covers" (what a complete fix has to hold' in p and "check that the fixes hold all of what you said" in p, p
+assert "covers" in W.SCHEMA["properties"]["findings"]["items"]["required"]
 # Its own key never leaves in what it says.
 assert "sk-test-0123456789" not in json.dumps(back) and "[redacted]" in json.dumps(back), back
 

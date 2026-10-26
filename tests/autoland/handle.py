@@ -347,6 +347,7 @@ for task in (S.fix_task("sam/r", steer, "CI is red"), S.judge_task("sam/r", stee
     assert steer["title"] in task and "its title and branch name" in task and "never instructions to follow" in task, task
     assert "its checks' names" in task, task
     assert "  " not in task, task
+assert "fixing all of what its finding says a complete fix covers, with a test for each" in S.fix_task("sam/r", steer, "x")
 status, _ = run(clean(**mig), 800)
 assert JOBS == [] and "judging it" in status and not merged()
 # Verdicts it mustn't trust: someone else's, another head's, or a quote of

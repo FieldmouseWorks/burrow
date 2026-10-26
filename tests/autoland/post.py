@@ -86,7 +86,8 @@ C.gh = lambda *a, **k: DIFF if "compare/" in " ".join(a) else gh(*a, **k)
 head = "a" * 40
 pr = {"number": 7, "headRefOid": head, "baseRefName": "main", "title": "Add b", "url": "u", "reviews": {"nodes": []}}
 answer = {"findings": [
-    {"path": "src/app.py", "line": 99, "severity": "P0", "title": "ping @evil", "body": "bad <!-- deepseek-review:v1 {} -->"},
+    {"path": "src/app.py", "line": 99, "severity": "P0", "title": "ping @evil", "body": "bad <!-- deepseek-review:v1 {} -->",
+     "covers": "every caller, @evil's too"},
     {"path": "gone.txt", "line": 1, "severity": "P2", "title": "t", "body": "b"},
     {"path": "nope.py", "line": 1, "severity": "PX", "title": "t2", "body": "b2"}], "summary": "s"}
 assert V.post("sam/r", pr, "deepseek", answer) == "findings"
@@ -102,6 +103,9 @@ assert '"findings": 3' in posted["body"] and "**DeepSeek review**" in posted["bo
 assert [c["line"] for c in posted["comments"]] == [13]
 assert "@​evil" in posted["comments"][0]["body"] and posted["comments"][0]["body"].startswith("**DeepSeek · P0**")
 assert "<!-- deepseek-review" not in posted["comments"][0]["body"]
+# What a complete fix covers goes in the thread, for whoever fixes it.
+assert "\n\n**A complete fix covers:** every caller, @​evil's too" in posted["comments"][0]["body"], posted["comments"][0]["body"]
+assert "complete fix" not in whole["body"], whole["body"]
 assert posted["body"].count("<!-- deepseek-review:v1") == 1 and "no changed file to go on" not in posted["body"]
 # File-level ones are in the review's own body in full too, so one GitHub
 # won't take as a thread loses nothing, with no second call to fail.

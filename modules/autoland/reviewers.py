@@ -506,6 +506,8 @@ def post(repo, pr, r, answer):
     for f in found:
         sev = f.get("severity") if f.get("severity") in ("P0", "P1", "P2") else "P1"
         msg = f"**{who} · {sev}** {quiet(f['title'])}\n\n{quiet(f['body'])}"
+        if isinstance(f.get("covers"), str) and f["covers"].strip():
+            msg += f"\n\n**A complete fix covers:** {quiet(f['covers'])}"
         lines = files.get(f["path"])
         if lines is None:
             # Not a file this PR changes (a caller it breaks, say): still a
