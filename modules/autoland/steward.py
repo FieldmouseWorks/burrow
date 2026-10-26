@@ -204,7 +204,7 @@ def land(repo, pr, repo_info):
     return True
 
 
-def handle(repo, pr, repo_info, digest):
+def handle(repo, pr, repo_info, digest, obsolete=False):
     rc = repo_cfg(repo)
     n, head = pr["number"], pr["headRefOid"]
     # The judge reads the diff against the base, so its verdict (and its
@@ -435,6 +435,12 @@ def handle(repo, pr, repo_info, digest):
                              ("comments", pr["comments"]["pageInfo"]["hasPreviousPage"])) if more]
     if cut:
         settle("pending", f"Too many {' and '.join(cut)} to read: {CFG['owner']} merges it", "Too much to read")
+        save(key, st)
+        return
+    if obsolete:
+        # A red-branch fix its branch went green without (R.watch_default),
+        # waiting to be closed: like a hold, nothing may merge it.
+        settle("pending", f"Not needed: {pr['baseRefName']} is green again without it")
         save(key, st)
         return
     if CFG["labels"]["hold"] in labels:
@@ -802,17 +808,15 @@ def main():
             owner, name = repo.split("/")
             info, prs = open_prs(owner, name)
             read.add(repo.replace("/", "_"))
-            # First, so a fix PR it closes isn't merged by this same pass.
+            # First, so a fix PR it made obsolete isn't merged by this same pass.
             obsolete = R.watch_default(r, info, prs, mine) or set()
             heads = set()
             seen_to = True
             for pr in prs:
                 heads.add(pr["headRefName"])
                 live.add(V.snap_name(f"pr-{repo.replace('/', '_')}-{pr['number']}.json", pr["headRefOid"], pr["baseRefName"]))
-                if pr["number"] in obsolete:
-                    continue
                 try:
-                    handle(repo, pr, info, mine)
+                    handle(repo, pr, info, mine, pr["number"] in obsolete)
                 except Exception as e:  # one bad PR mustn't stop the rest
                     log(f"{repo}#{pr['number']}: {e}")
                     seen_to = False

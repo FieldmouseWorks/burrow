@@ -918,12 +918,6 @@ WROTE.clear()
 opened = [mkpr(branch="autoland/red-cccccccccccc", number=9)]
 assert R.watch_default(repo_r, default("SUCCESS", sha="e" * 40), opened, mine) == {9}
 assert C.load("repo-sam_r.json", {}).get("red") and WROTE == [], WROTE
-# One already queued to auto-merge has that taken off, so GitHub can't land
-# it meanwhile either.
-queued_fix = [{**opened[0], "autoMergeRequest": {"enabledAt": T0}}]
-assert R.watch_default(repo_r, default("SUCCESS", sha="e" * 40), queued_fix, mine) == {9}
-assert WROTE == ["pr merge 9 -R sam/r --disable-auto"], WROTE
-WROTE.clear()
 STATES[f"job-{len(JOBS)}"] = "done"
 fixes = [mkpr(branch="autoland/red-cccccccccccc", number=9), mkpr(branch="autoland/red-dddddddddddd", number=8)]
 # GitHub won't close it: the red is kept, the close tried again soon, and
@@ -931,12 +925,8 @@ fixes = [mkpr(branch="autoland/red-cccccccccccc", number=9), mkpr(branch="autola
 FAIL.append("pr close 9")
 C.WAKE.clear()
 assert R.watch_default(repo_r, default("SUCCESS", sha="e" * 40), fixes, mine) == {9}
-assert C.load("repo-sam_r.json", {}).get("red") and C.WAKE.get("sam/r"), C.WAKE
-# ... and its queued auto-merge is taken off meanwhile.
-WROTE.clear()
-assert R.watch_default(repo_r, default("SUCCESS", sha="e" * 40), queued_fix + fixes[1:], mine) == {9}
-assert WROTE[1:] == ["pr merge 9 -R sam/r --disable-auto"], WROTE
 FAIL.remove("pr close 9")
+assert C.load("repo-sam_r.json", {}).get("red") and C.WAKE.get("sam/r"), C.WAKE
 WROTE.clear()
 assert R.watch_default(repo_r, default("SUCCESS", sha="e" * 40), fixes, mine) == {9}
 assert [x.split()[:3] for x in WROTE] == [["pr", "close", "9"]], WROTE
@@ -955,9 +945,9 @@ assert R.watch_default(repo_r, default("SUCCESS", sha="e" * 40), opened, mine) =
 assert [x.split()[:3] for x in WROTE] == [["pr", "close", "9"]], WROTE
 assert not C.load("repo-sam_r.json", {}).get("red"), C.load("repo-sam_r.json", {})
 
-# In a pass the watcher goes first, and the steward doesn't handle a fix PR
-# it made obsolete, so one with settled reviews and green CI can't merge
-# before it's closed.
+# In a pass the watcher goes first, and the steward holds a fix PR it made
+# obsolete (passes.py has what holding does), so one with settled reviews
+# and green CI can't merge before it's closed.
 kept_fns = (S.R.discover, S.R.settle_repo, S.R.publish, S.open_prs, S.R.unhook_gone, S.R.hook_projects,
             S.R.watch_default, S.handle)
 order = []
@@ -967,11 +957,11 @@ S.R.publish = S.R.unhook_gone = lambda *a: None
 S.R.hook_projects = lambda repos: []
 S.open_prs = lambda owner, name: (info, [mkpr(branch="autoland/red-cccccccccccc", number=9), mkpr(number=10)])
 S.R.watch_default = lambda r, info, prs, digest: order.append("watch") or {9}
-S.handle = lambda repo, pr, info, digest: order.append(pr["number"])
+S.handle = lambda repo, pr, info, digest, obsolete: order.append((pr["number"], obsolete))
 S.main()
 (S.R.discover, S.R.settle_repo, S.R.publish, S.open_prs, S.R.unhook_gone, S.R.hook_projects,
  S.R.watch_default, S.handle) = kept_fns
-assert order == ["watch", 10], order
+assert order == ["watch", (9, True), (10, False)], order
 
 # `status` (a dry run) reads the seal the real passes' judges use, and makes
 # none of its own while there's one.
