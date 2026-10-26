@@ -135,16 +135,12 @@ let
       schedule = [ "at any time" ];
     };
 
-    # Transitive fixes arrive through a fresh lockfile, daily. A lockfile
-    # refresh has no release timestamp, and Renovate (42 on) holds an update
-    # without one at a pending stability check for good, so these never
-    # merged. Taken as stable without one, they keep minimumReleaseAge itself:
-    # npm and Poetry still resolve only what's older than it.
+    # Transitive fixes arrive through a fresh lockfile, daily (but see the
+    # lock file rules below).
     lockFileMaintenance = {
       enabled = true;
       schedule = [ "before 5am" ];
       automerge = true;
-      minimumReleaseAgeBehaviour = "timestamp-optional";
     };
 
     # Merged by Renovate itself once every check is green, so it doesn't
@@ -180,6 +176,32 @@ let
       { matchCategories = [ "python" ]; matchUpdateTypes = [ "minor" "patch" ]; groupName = "Python packages"; }
       { matchCategories = [ "ci" ]; matchUpdateTypes = [ "minor" "patch" "digest" "pin" ]; groupName = "CI actions"; }
       { matchCategories = [ "nix" ]; groupName = "Nix inputs"; }
+      {
+        # One lock file refresh per manager, so one that can't merge (below)
+        # holds up no other.
+        matchUpdateTypes = [ "lockFileMaintenance" ];
+        additionalBranchPrefix = "{{manager}}-";
+        commitMessageExtra = "({{manager}})";
+      }
+      {
+        # A lock file refresh has no release timestamp, and Renovate (42 on)
+        # holds an update without one at a pending stability check for
+        # good. Taken as stable without one where the three days still hold
+        # some other way: npm resolves package-lock.json with --before
+        # minimumReleaseAge, and Nix inputs are commits, not registry
+        # releases, which HOST-update already deploys the hour they land.
+        # Cargo enforces nothing of the kind (`cargo update` takes the
+        # newest), and neither do pnpm and yarn here, so theirs still wait.
+        matchUpdateTypes = [ "lockFileMaintenance" ];
+        matchManagers = [ "nix" ];
+        minimumReleaseAgeBehaviour = "timestamp-optional";
+      }
+      {
+        matchUpdateTypes = [ "lockFileMaintenance" ];
+        matchManagers = [ "npm" ];
+        matchJsonata = [ "$exists(managerData.npmLock)" ];
+        minimumReleaseAgeBehaviour = "timestamp-optional";
+      }
     ] ++ lib.optional (githubRepo != null) {
       # The machine's own flake.lock is HOST-update's: it deploys what it bumps.
       matchRepositories = [ githubRepo ];
