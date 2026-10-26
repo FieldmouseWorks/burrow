@@ -810,6 +810,15 @@ R.settle_repo({"repo": "sam/r", "private": False, "default": "main"}, {"sam/r"})
 puts = [x for x in WROTE if "rulesets/" in x]
 assert len(puts) == 1 and puts[0].startswith("api -X PUT repos/sam/r/rulesets/2 "), WROTE
 assert "api -X PATCH repos/sam/r/branches/main/protection/required_status_checks -F strict=false" in WROTE, WROTE
+# A repo set to have no baseline ruleset still gets its own rules' turned off.
+SETTINGS["repos/sam/r/rulesets/2"]["rules"][1]["parameters"]["strict_required_status_checks_policy"] = True
+S.C.CFG["repos"]["sam/r"] = {**S.C.CFG["repos"].get("sam/r", {}), "ruleset": False}
+C.NOW += 86400
+WROTE.clear()
+R.settle_repo({"repo": "sam/r", "private": False, "default": "main"}, {"sam/r"})
+del S.C.CFG["repos"]["sam/r"]["ruleset"]
+puts = [x for x in WROTE if "rulesets/" in x]
+assert len(puts) == 1 and puts[0].startswith("api -X PUT repos/sam/r/rulesets/2 "), WROTE
 # Already off, or no classic checks at all: nothing to change.
 SETTINGS["repos/sam/r/rulesets/2"]["rules"][1]["parameters"]["strict_required_status_checks_policy"] = False
 SETTINGS["repos/sam/r/branches/main"] = {"protection": {"required_status_checks": {"enforcement_level": "off"}}}

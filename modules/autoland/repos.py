@@ -100,15 +100,16 @@ def settle_repo(r, known):
             st["autoMergeRefused"] = True
     C.write("api", "-X", "PUT", f"repos/{repo}/vulnerability-alerts", check=False)
 
-    if CFG["rulesets"] and rc["ruleset"]:
-        existing = C.gh("api", f"repos/{repo}/rulesets", check=False)
-        # None: the plan doesn't offer rules on this repo (private, free account).
-        if isinstance(existing, list) and not any(x["name"] == "baseline" for x in existing):
+    existing = C.gh("api", f"repos/{repo}/rulesets", check=False)
+    # None: the plan doesn't offer rules on this repo (private, free account).
+    if isinstance(existing, list):
+        if CFG["rulesets"] and rc["ruleset"] and not any(x["name"] == "baseline" for x in existing):
             log(f"{repo}: adding the baseline ruleset")
             C.write("api", "-X", "POST", f"repos/{repo}/rulesets", "--input", "-",
                     input=json.dumps(baseline_ruleset(rc, r["default"])), check=False)
-        if isinstance(existing, list):
-            not_strict(repo, existing)
+        # Whether or not the repo gets the baseline ruleset, its own rules
+        # don't make branches be up to date.
+        not_strict(repo, existing)
     not_strict_protection(repo, r["default"])
 
     st["settings"] = C.NOW
