@@ -164,7 +164,6 @@ in
     # issue's events start the look at its repo (proj-watch@OWNER-REPO), and so
     # does the end of a turn that awaits it; the deadline is booked in its
     # wake file.
-    burrow.events.enable = true;
     burrow.events.handlers.proj-watch = {
       events = [ "pull_request" "pull_request_review" "pull_request_review_comment" "issue_comment" "issues" "check_suite" "status" ];
       unit = "proj-watch";

@@ -35,10 +35,18 @@ let
 in
 {
   options.burrow.events = {
-    enable = lib.mkEnableOption ''
-      burrow-events: GitHub's webhook deliveries, local kicks and the passes'
-      own wake-ups start each handler's pass. nginx on this machine has to
-      serve `host` over HTTPS'';
+    enable = mkOption {
+      type = types.bool;
+      # A module that registers a handler has no other way to run it.
+      default = cfg.handlers != { };
+      defaultText = lib.literalExpression "config.burrow.events.handlers != { }";
+      description = ''
+        Whether to run burrow-events: GitHub's webhook deliveries, local
+        kicks and the passes' own wake-ups start each handler's pass. nginx
+        on this machine has to serve `host` over HTTPS. On whenever a module
+        registers a handler, since that's the only thing that runs it.
+      '';
+    };
 
     host = mkOption {
       type = types.nullOr types.str;

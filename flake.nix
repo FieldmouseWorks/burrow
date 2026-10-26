@@ -60,14 +60,17 @@
         # Each module on its own, with only what it imports: evaluating is the
         # check, so these build nothing. A service that says how it runs (a
         # Type) has something to run too: systemd refuses one without
-        # ExecStart or ExecStop, and only when it starts.
+        # ExecStart or ExecStop, and only when it starts. A module that
+        # registers a burrow-events handler has burrow-events to run it.
         standalone = let
           runnable = name: machine: let
             s = machine.config.systemd.services;
             empty = builtins.filter (n: s.${n}.enable && s.${n}.serviceConfig ? Type
               && !(s.${n}.serviceConfig ? ExecStart || s.${n}.serviceConfig ? ExecStop)) (builtins.attrNames s);
-          in if empty == [ ] then machine
-             else throw "${name}: services with nothing to run: ${builtins.concatStringsSep ", " empty}";
+            unrun = machine.config.burrow.events.handlers or { } != { } && !(s ? burrow-events);
+          in if empty != [ ] then throw "${name}: services with nothing to run: ${builtins.concatStringsSep ", " empty}"
+             else if unrun then throw "${name}: burrow-events handlers with no burrow-events to start them"
+             else machine;
         in pkgs.writeText "burrow-standalone" (nixpkgs.lib.concatMapStrings (name:
           let
             machine = nixpkgs.lib.nixosSystem {
@@ -121,6 +124,12 @@
         # Which Renovate PRs renovate-sweep hands over and lists, with stand-ins for gh and proj.
         renovate-sweep = pkgs.runCommand "renovate-sweep-check" { nativeBuildInputs = [ pkgs.python3 pkgs.git pkgs.jq pkgs.gnused ]; } ''
           python3 -I ${./tests/renovate-sweep.py} ${./modules/updates/renovate-sweep.sh}
+          touch $out
+        '';
+        # Which repos house-sync passes over, and when it tells the owner, with
+        # stand-ins for gh and the notifier.
+        house-sync = pkgs.runCommand "house-sync-check" { nativeBuildInputs = [ pkgs.python3 pkgs.jq pkgs.util-linux pkgs.diffutils ]; } ''
+          python3 -I ${./tests/house-sync.py} ${./modules/house/sync.sh} ${./house/rules.md}
           touch $out
         '';
         # Stale Remote Control servers catch up once idle, with a stand-in for Claude.

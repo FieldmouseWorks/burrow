@@ -2,13 +2,31 @@
 # house/rules.md) the same as burrow's. A repo whose block differs gets one
 # PR that rewrites only what's between the markers, from an ordinary
 # branch, so the steward reviews and lands it like any other PR. (RULES,
-# OWNERS, EXCLUDE, DRY_RUN and NOTIFY come from ../house.nix.)
+# CURRENT, LOCK, OWNERS, EXCLUDE, DRY_RUN and NOTIFY come from ../house.nix.)
 #
-#   house-sync          one pass
-#   house-sync status   what a pass would do, changing nothing
+#   house-sync                     one pass over every repo
+#   house-sync OWNER/REPO          one over that repo (a push to its default branch)
+#   house-sync status [OWNER/REPO] what a pass would do, changing nothing
 
 set -euo pipefail
-[ "${1:-}" = status ] && DRY_RUN=1
+if [ "${1:-}" = status ]; then
+  DRY_RUN=1
+  shift
+fi
+only=${1:-}
+
+# One pass at a time, and only for the rules the system has now: a pass
+# from before a switch, still running or still waiting here, would close
+# the PR for the new rules as one for older ones. A pass that waited for the
+# lock checks the rules after it, when it would start.
+if [ -z "${DRY_RUN:-}" ]; then
+  exec 9>"$LOCK"
+  flock 9
+fi
+if ! cmp -s "$RULES" "$CURRENT"; then
+  echo "house-sync: the system has other house rules than this pass; the pass for those does the work"
+  exit 0
+fi
 
 begin_re='^<!-- house:rules v[0-9]+ begin'
 end_re='^<!-- house:rules end -->$'
@@ -30,15 +48,31 @@ excluded() {
 
 read -ra owners <<<"$OWNERS"
 : >"$tmp/repos"
-for owner in "${owners[@]}"; do
-  # An owner whose list can't be read is a failure too; the others go on.
-  if ! gh repo list "$owner" --no-archived --source --limit 1000 \
-    --json nameWithOwner,defaultBranchRef \
-    --jq '.[] | select(.defaultBranchRef != null) | "\(.nameWithOwner) \(.defaultBranchRef.name)"' >>"$tmp/repos"; then
-    say "$owner: couldn't list its repos, trying again next pass"
-    echo "$owner (its repo list)" >>"$tmp/failed"
+if [ -n "$only" ]; then
+  # One repo: only one of the owners', as a full pass would list it.
+  if ! gh api "repos/$only" --jq 'select((.archived or .fork) | not) | "\(.full_name) \(.default_branch) \(.owner.login)"' >"$tmp/one"; then
+    say "$only: couldn't read it, trying again next pass"
+    exit 1
   fi
-done
+  if read -r repo base login <"$tmp/one"; then
+    for owner in "${owners[@]}"; do
+      if [ "${owner,,}" = "${login,,}" ]; then
+        echo "$repo $base" >"$tmp/repos"
+      fi
+    done
+  fi
+  [ -s "$tmp/repos" ] || say "$only: not a repo it keeps"
+else
+  for owner in "${owners[@]}"; do
+    # An owner whose list can't be read is a failure too; the others go on.
+    if ! gh repo list "$owner" --no-archived --source --limit 1000 \
+      --json nameWithOwner,defaultBranchRef \
+      --jq '.[] | select(.defaultBranchRef != null) | "\(.nameWithOwner) \(.defaultBranchRef.name)"' >>"$tmp/repos"; then
+      say "$owner: couldn't list its repos, trying again next pass"
+      echo "$owner (its repo list)" >>"$tmp/failed"
+    fi
+  done
+fi
 
 # Every gh call below is checked by hand: set -e doesn't reach into a
 # function called with ||, and one repo's failure shouldn't end the pass.
@@ -133,6 +167,13 @@ while read -r repo base <&3; do
 done 3<"$tmp/repos"
 
 [ -n "${DRY_RUN:-}" ] && exit 0
+# The owner's notices are about every repo, so only a full pass changes them.
+# One repo's pass that failed says so to the journal, and the next full pass
+# puts it in the notice.
+if [ -n "$only" ]; then
+  [ -s "$tmp/failed" ] && exit 1
+  exit 0
+fi
 if [ -s "$tmp/mangled" ]; then
   "$NOTIFY" open house-markers "The house block's markers are broken" \
     "house-sync can't find exactly one house block in these repos' AGENTS.md, so it can't keep them current: $(paste -sd, "$tmp/mangled" | sed 's/,/, /g'). Put back one begin and one end marker line, as burrow's house/rules.md has them."
@@ -142,7 +183,7 @@ elif ! [ -s "$tmp/failed" ]; then
 fi
 if [ -s "$tmp/failed" ]; then
   "$NOTIFY" open house-sync "house-sync failed on some repos" \
-    "These couldn't be checked or updated on the last pass (see journalctl -u house-sync): $(paste -sd, "$tmp/failed" | sed 's/,/, /g'). It tries again every day."
+    "These couldn't be checked or updated on the last pass (see journalctl -u house-sync): $(paste -sd, "$tmp/failed" | sed 's/,/, /g'). It tries again on the next pass: a push to the repo's default branch, or the hourly catch-up."
 else
   "$NOTIFY" close house-sync "house-sync got through every repo again."
 fi
