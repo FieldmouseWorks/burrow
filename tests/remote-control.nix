@@ -127,6 +127,14 @@ pkgs.testers.runNixOSTest {
         assert left is not None and left < 10, left
         machine.wait_until_succeeds("grep -qx new /data/dev/src/waiting/started", timeout=60)
 
+    with subtest("a burst of status changes leaves the scan's watchers watching"):
+        # Thirty in six seconds: past systemd's default start limit (5 in 10s).
+        pid = machine.succeed("cat /data/dev/src/waiting/session.pid").strip()
+        machine.succeed(f"for i in $(seq 30); do echo '{{\"pid\":{pid},\"status\":\"idle\",\"statusUpdatedAt\":0}}' >/home/dev/.claude/sessions/{pid}.json; sleep 0.2; done")
+        machine.succeed("systemctl --user -M dev@ is-active -q claude-rc-scan-sessions.path claude-rc-scan.path")
+        machine.succeed("mkdir /data/dev/src/later && chown dev:dev /data/dev/src/later")
+        machine.wait_until_succeeds("grep -qx new /data/dev/src/later/started", timeout=60)
+
     with subtest("a server already on the new one stays up, and nothing is booked"):
         session("waiting", "busy", 0)
         time.sleep(5)

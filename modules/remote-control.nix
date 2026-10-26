@@ -239,7 +239,14 @@ in
     systemd.user.services.claude-rc-scan = {
       description = "Start a Remote Control server for each project folder";
       wantedBy = [ "default.target" ];
-      unitConfig.ConditionUser = user;
+      unitConfig = {
+        ConditionUser = user;
+        # Its path units start it on every change, and a burst of them (many
+        # sessions at once) would hit the default start limit, which fails
+        # the path units too and leaves nothing watching. A start while one
+        # runs only joins it, so there's nothing to limit.
+        StartLimitIntervalSec = 0;
+      };
       serviceConfig = {
         Type = "oneshot";
         ExecStart = "${scan}/bin/claude-rc-scan";
