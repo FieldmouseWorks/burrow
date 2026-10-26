@@ -64,10 +64,21 @@ let
 
   scan = pkgs.writeShellApplication {
     name = "claude-rc-scan";
-    runtimeInputs = [ pkgs.systemd pkgs.coreutils pkgs.gnugrep pkgs.procps pkgs.jq ];
+    runtimeInputs = [ pkgs.systemd pkgs.coreutils pkgs.findutils pkgs.gnugrep pkgs.procps pkgs.jq ];
     text = ''
       # Start a server for every project folder, stop the ones whose folder is gone,
       # and restart the stale ones once they hold no session.
+      #
+      # A path unit starts no scan while one runs: what changed meanwhile
+      # (a session's status, a folder added or gone) would go unseen. So a
+      # scan that saw either change goes round again.
+      sessions=$HOME/.claude/sessions
+      seen() {
+        { find "$sessions" -mindepth 1 -maxdepth 1 -printf '%p %T@\n' 2>/dev/null || true; } | sort
+        { find ${lib.escapeShellArg projectsDir} -mindepth 1 -maxdepth 1 -printf '%p\n' 2>/dev/null || true; } | sort
+      }
+      while :; do
+      before=$(seen)
       # A linked git worktree (its .git is a file) is a checkout of a project
       # that already has its own server, so it gets none; neither does a folder
       # matching burrow.remoteControl.skip.
@@ -115,7 +126,7 @@ let
       # held SESSION: whether it holds its server; `until` says until when,
       # at the soonest.
       held() {
-        local f=$HOME/.claude/sessions/$1.json status at
+        local f=$sessions/$1.json status at
         until=$(( now + quiet ))
         [ -r "$f" ] || return 0
         status=$(jq -r '.status // ""' "$f") || return 0
@@ -152,6 +163,8 @@ let
         systemd-run --user --quiet --unit=claude-rc-scan --on-active="$(( (wake - now) / 1000 + 1 ))s" \
           --timer-property=AccuracySec=1s --timer-property=RemainAfterElapse=no
       fi
+      [ "$(seen)" != "$before" ] || break
+      done
     '';
   };
 in
