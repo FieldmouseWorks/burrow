@@ -216,7 +216,7 @@ def deepseek(snap, prompt):
 
 
 BALANCE_LOCK = threading.Lock()  # reviews run side by side
-DAY = "deepseek-day.json"
+DAY = f"{V.ACCOUNT}/deepseek-day.json"  # the service may write only there, the queue and the answers
 
 
 def deepseek_balance(key):

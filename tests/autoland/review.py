@@ -398,6 +398,7 @@ agent()
 # machine's next day, without being run. A top-up isn't money back, and a
 # new day starts over.
 C.CFG["reviewers"]["deepseek"]["dailyBudget"] = 5
+assert W.DAY.startswith(V.ACCOUNT + "/") and V.BALANCE.startswith(V.ACCOUNT + "/"), "outside the service's ReadWritePaths"
 BALANCE[0] = balance(("USD", "10.00"))
 os.remove(f"{tmp}/state/{W.DAY}")
 assert queue_and_work("deepseek")["result"] == "review"
