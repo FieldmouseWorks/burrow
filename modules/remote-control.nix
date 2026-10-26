@@ -69,16 +69,40 @@ let
       # Start a server for every project folder, stop the ones whose folder is gone,
       # and restart the stale ones once they hold no session.
       #
-      # A path unit starts no scan while one runs: what changed meanwhile
-      # (a session's status, a folder added or gone) would go unseen. So a
-      # scan that saw either change goes round again.
+      # A start while a scan runs (a path unit's, the booked timer's) only
+      # joins it, until it has stopped, so what changed meanwhile would go
+      # unseen: a session's status, a folder added or gone, a quiet spell's
+      # end. So each scan notes what it saw as it began and when its spells
+      # end, and as it stops (`claude-rc-scan done`) asks for a look after it
+      # (claude-rc-again@ID, `claude-rc-scan again ID`), which waits for it to
+      # be stopped and scans again if anything changed since or a spell is
+      # over. That look has a unit of its own, so no start joins it; and its
+      # start comes once this scan's is over, so nothing is lost after it
+      # either: a scan already running then has a look of its own to come.
       sessions=$HOME/.claude/sessions
+      notes=$XDG_RUNTIME_DIR/claude-rc-scan
       seen() {
         { find "$sessions" -mindepth 1 -maxdepth 1 -printf '%p %T@\n' 2>/dev/null || true; } | sort
         { find ${lib.escapeShellArg projectsDir} -mindepth 1 -maxdepth 1 -printf '%p\n' 2>/dev/null || true; } | sort
       }
-      while :; do
-      before=$(seen)
+      case ''${1:-} in
+        done)
+          exec systemctl --user start --no-block "claude-rc-again@$INVOCATION_ID.service"
+          ;;
+        again)
+          note=$notes/$2
+          wake=$(cat "$note.wake" 2>/dev/null || true)
+          if [ "$(seen)" != "$(cat "$note.seen" 2>/dev/null || true)" ] ||
+            { [ -n "$wake" ] && (( wake <= $(date +%s%3N) )); }; then
+            systemctl --user start --no-block claude-rc-scan.service
+          fi
+          rm -f "$note.seen" "$note.wake"
+          exit 0
+          ;;
+      esac
+      mkdir -p "$notes"
+      note=$notes/$INVOCATION_ID
+      seen >"$note.seen"
       # A linked git worktree (its .git is a file) is a checkout of a project
       # that already has its own server, so it gets none; neither does a folder
       # matching burrow.remoteControl.skip.
@@ -159,15 +183,18 @@ let
       done
       # The wake-up: a timer of its own for this unit, gone once it fires.
       systemctl --user stop claude-rc-scan.timer 2>/dev/null || true
+      echo "$wake" >"$note.wake"
       if [ -n "$wake" ]; then
-        # From the clock now, not the scan's start: a slow scan books no later.
+        # From the clock now, not the scan's start: a slow scan books no
+        # later. In milliseconds: a timer never fires early, so the scan it
+        # starts finds the spell over. A spell over already is the look
+        # after this scan's to see.
         left=$(( wake - $(date +%s%3N) ))
-        (( left > 0 )) || left=0
-        systemd-run --user --quiet --unit=claude-rc-scan --on-active="$(( left / 1000 + 1 ))s" \
-          --timer-property=AccuracySec=1s --timer-property=RemainAfterElapse=no
+        if (( left > 0 )); then
+          systemd-run --user --quiet --unit=claude-rc-scan --on-active="''${left}ms" \
+            --timer-property=AccuracySec=1s --timer-property=RemainAfterElapse=no
+        fi
       fi
-      [ "$(seen)" != "$before" ] || break
-      done
     '';
   };
 in
@@ -269,6 +296,19 @@ in
       serviceConfig = {
         Type = "oneshot";
         ExecStart = "${scan}/bin/claude-rc-scan";
+        # Failed or not.
+        ExecStopPost = "${scan}/bin/claude-rc-scan done";
+      };
+    };
+
+    # The look after scan %i, once it has stopped (see claude-rc-scan).
+    systemd.user.services."claude-rc-again@" = {
+      description = "Scan again for what changed while a scan ran";
+      after = [ "claude-rc-scan.service" ];
+      unitConfig.ConditionUser = user;
+      serviceConfig = {
+        Type = "oneshot";
+        ExecStart = "${scan}/bin/claude-rc-scan again %i";
       };
     };
 
