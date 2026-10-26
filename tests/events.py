@@ -34,6 +34,50 @@ h = {"events": ["push"], "unit": "autoland", "wake": None}
 assert E.unit(h, "sam/r") == "autoland@sam-r.service" and E.unit(h, E.FULL) == "autoland.service"
 print("units: ok")
 
+# A handler takes the repos it names, case-blind: none named, every repo;
+# [], none. A name is a name, never a pattern.
+assert E.covers({}, "sam/r") and E.covers({"repos": None}, "sam/r") and not E.covers({"repos": []}, "sam/r")
+named = {"repos": ["Sam/R", "kim/r"]}
+assert [E.covers(named, r) for r in ("sam/r", "KIM/R", "sam/q")] == [True, True, False]
+assert not E.covers({"repos": ["sam/*"]}, "sam/r")
+
+
+def payload(repo="sam/r", **kw):
+    return {"repository": {"full_name": repo, "default_branch": "main"}, **kw}
+
+
+# Which deliveries start a handler's pass: its events, its repos, pushes
+# to the default branch only if it says so, and the rest only about its
+# branches if it names some (an event about no branch still counts).
+picky = {"events": ["push", "pull_request", "check_suite", "check_run", "status", "issues"], "unit": "renovate",
+         "repos": ["sam/r"], "pushes": "default", "branches": ["renovate/*"]}
+cases = [
+    ("push", payload(ref="refs/heads/main"), True),
+    ("push", payload(ref="refs/heads/renovate/x"), False),
+    ("push", payload(ref="refs/tags/main"), False),
+    ("push", payload(repo="kim/r", ref="refs/heads/main"), False),
+    ("push", {"repository": {"full_name": "sam/r"}, "ref": "refs/heads/None"}, False),
+    ("pull_request", payload(pull_request={"head": {"ref": "renovate/x"}}), True),
+    ("pull_request", payload(pull_request={"head": {"ref": "fix"}}), False),
+    ("check_suite", payload(check_suite={"head_branch": "renovate/x"}), True),
+    ("check_suite", payload(check_suite={"head_branch": "main"}), False),
+    ("check_suite", payload(check_suite={"head_branch": None}), False),
+    ("check_run", payload(check_run={"check_suite": {"head_branch": "renovate/x"}}), True),
+    ("status", payload(branches=[{"name": "fix"}, {"name": "renovate/x"}]), True),
+    ("status", payload(branches=[{"name": "fix"}]), False),
+    ("status", payload(branches="odd"), False),
+    ("issues", payload(), True),
+    ("issue_comment", payload(), False),
+]
+for event, p, want in cases:
+    assert E.takes(picky, event, p) == want, (event, p)
+# A handler that asks for none of that takes any push, and every branch.
+plain = {"events": ["push", "check_suite"], "unit": "autoland"}
+assert E.takes(plain, "push", payload(ref="refs/heads/fix")) and E.takes(plain, "check_suite", payload(check_suite={"head_branch": "fix"}))
+# One with no pass over one repo gets its full pass for a repo's event.
+assert E.place(plain, "sam/r") == "sam/r" and E.place({**plain, "perRepo": False}, "sam/r") == E.FULL
+print("filters: ok")
+
 # A burst of events is one pass, a few seconds on; one repo's passes are GAP
 # apart; only a wake-up booked since its last pass started counts; and a
 # full pass sees to every repo whose event has come in, GAP or not.
@@ -78,10 +122,12 @@ print("line: ok")
 # repo or none (a full pass).
 handlers = {"autoland": {"events": ["push", "pull_request", "status"], "unit": "autoland", "wake": None,
                          "ownStatuses": ["review-settled"]},
-            "inbox": {"events": ["issues", "pull_request", "status"], "unit": "proj-inbox", "wake": None}}
+            "inbox": {"events": ["issues", "pull_request", "status"], "unit": "proj-inbox", "wake": None},
+            "update": {"events": ["push"], "unit": "remi-update", "wake": None, "perRepo": False,
+                       "repos": ["sam/r"], "pushes": "default"}}
 lines = {name: E.Line() for name in handlers}
 hooks = http.server.HTTPServer(("127.0.0.1", 0), E.deliveries(handlers, lines, "hook-secret"))
-kicks = http.server.HTTPServer(("127.0.0.1", 0), E.kicks(lines))
+kicks = http.server.HTTPServer(("127.0.0.1", 0), E.kicks(handlers, lines))
 for srv in (hooks, kicks):
     threading.Thread(target=srv.serve_forever, daemon=True).start()
 
@@ -99,7 +145,16 @@ def deliver(data, signature, event):
 
 
 def due():
-    return {name: sorted(line.due) for name, line in lines.items()}
+    return {name: sorted(line.due) for name, line in lines.items() if name != "update"}
+
+
+def clear():
+    for line in lines.values():
+        line.due.clear()
+
+
+def signs(data):
+    return "sha256=" + hmac.new(b"hook-secret", data, hashlib.sha256).hexdigest()
 
 
 assert deliver(body, "sha256=" + "0" * 64, "push") == 401 and due() == {"autoland": [], "inbox": []}
@@ -110,13 +165,19 @@ assert deliver(odd, "sha256=" + hmac.new(b"hook-secret", odd, hashlib.sha256).he
 assert due() == {"autoland": [], "inbox": []}
 assert deliver(body, sig, "push") == 202 and due() == {"autoland": ["sam/r"], "inbox": []}, due()
 assert deliver(body, sig, "pull_request") == 202 and due() == {"autoland": ["sam/r"], "inbox": ["sam/r"]}, due()
-lines["autoland"].due.clear()
-lines["inbox"].due.clear()
+assert lines["update"].due == {}, lines["update"].due
+clear()
+# A push to the default branch of a repo the update handler takes is its
+# full pass; one to another branch, or another repo, isn't.
+for repo, ref, want in (("sam/q", "main", {}), ("sam/r", "fix", {}), ("Sam/R", "main", {E.FULL})):
+    data = json.dumps(payload(repo, ref="refs/heads/" + ref)).encode()
+    assert deliver(data, signs(data), "push") == 202 and set(lines["update"].due) == set(want), (repo, ref, lines["update"].due)
+clear()
 
 
 def status(context):
     data = json.dumps({"repository": {"full_name": "sam/r"}, "context": context}).encode()
-    return deliver(data, "sha256=" + hmac.new(b"hook-secret", data, hashlib.sha256).hexdigest(), "status")
+    return deliver(data, signs(data), "status")
 
 
 # The steward's own status is no news to it; to another handler (a job
@@ -131,6 +192,10 @@ assert post(kicks, "/kick/autoland") == 202 and due() == {"autoland": [E.FULL], 
 for bad in ("/kick/nope/sam/r", "/kick/inbox/--help/x", "/kick/inbox/sam", "/kick", "/burrow/hook"):
     assert post(kicks, bad) == 404, bad
 assert due() == {"autoland": [E.FULL], "inbox": ["sam/q"]}, due()
+# A kick for a repo the handler doesn't take is none; for one it does, a
+# handler with no pass over one repo gets its full pass.
+assert post(kicks, "/kick/update/sam/q") == 404 and lines["update"].due == {}, lines["update"].due
+assert post(kicks, "/kick/update/sam/r") == 202 and set(lines["update"].due) == {E.FULL}, lines["update"].due
 # The kick port takes no deliveries, however they're signed.
 assert post(kicks, "/burrow/hook", body, {"X-Hub-Signature-256": sig, "X-GitHub-Event": "push"}) == 404
 print("deliveries and kicks: ok")

@@ -2,9 +2,14 @@
 #
 # Renovate merges its own PRs once CI is green. The ones it can't (CI red,
 # or a major version, which needs a verdict first) would otherwise sit there.
-# Every few hours this hands a repo's stuck PRs to one Claude job in that
-# project, which fixes them on their branches so they can merge. Once per PR
-# head, so a fix that's pushed gets a fresh look only if it's still stuck.
+# This hands a repo's stuck PRs to one Claude job in that project, which
+# fixes them on their branches so they can merge. Once per PR head, so a fix
+# that's pushed gets a fresh look only if it's still stuck.
+#
+#   renovate-sweep              every repo, and the owner's notices
+#   renovate-sweep OWNER/REPO   that repo's PRs only (burrow-events runs it
+#                               when one of its Renovate PRs opens, moves or
+#                               finishes CI); the notices wait for a full one
 # The autoland steward's own status (SETTLED) doesn't count as a check. (DIR,
 # SRC, OWNER, NOTIFY, SETTLED and COVERED come from ../updates.nix.)
 #
@@ -28,6 +33,7 @@
 # short, and a cause outside the repo (a broken runner) can clear without a
 # push. One still open a day after Renovate opened it goes in a notice,
 # whatever is holding it.
+only=${1:-}
 OK="major-ok"
 HELD="major-held"
 me=$(gh api user --jq .login 2>/dev/null || true)
@@ -45,6 +51,7 @@ for d in "$src"/*/; do
   url=$(git -C "$d" remote get-url origin 2>/dev/null) || continue
   repo=$(sed -E 's#^(https://github.com/|git@github.com:)##; s#\.git$##' <<<"$url")
   [[ $repo == */* ]] || continue
+  [ -z "$only" ] || [ "${repo,,}" = "${only,,}" ] || continue
   # repos.json names each repo as GitHub spells it; the clone's remote may
   # not (GitHub doesn't mind case), so the two are matched without it.
   # shellcheck disable=SC2016 # jq's $r
@@ -164,6 +171,9 @@ Make them mergeable. Look for a cause they share first (often the same failure o
   fi
   rm -f "$todo"
 done
+
+# The notices list every repo's: one repo's pass leaves them be.
+[ -z "$only" ] || exit 0
 
 # The majors waiting on the owner: one notice listing them all, the held
 # ones apart from the ok ones in repos no steward merges in.

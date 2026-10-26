@@ -53,11 +53,12 @@ def verdict(n, v, base="main"):
     return {"author": {"login": "me"}, "body": f"Read it.\n<!-- major-verdict: {v} {n:040x} on {base} -->"}
 
 
-def sweep(prs, comments=None, covered=None, age=0, proofs=None, state=None, failed=()):
+def sweep(prs, comments=None, covered=None, age=0, proofs=None, state=None, failed=(), args=(), projects=src):
     """Run one sweep; return (proj calls, the majors notice as (verb, body)).
     covered: the repos the steward's repos.json lists, written age seconds ago,
     each with proofs as its proofJobs; failed: ones it lists whose pass failed.
-    state: a state dir to keep between sweeps."""
+    state: a state dir to keep between sweeps. args: the sweep's (a repo);
+    then it returns no notice, and checks it sent none."""
     for f in ("proj.log", "notify.log"):
         open(os.path.join(tmp, f), "w").close()
     json.dump(prs, open(os.path.join(tmp, "prs.json"), "w"))
@@ -68,11 +69,15 @@ def sweep(prs, comments=None, covered=None, age=0, proofs=None, state=None, fail
         cov = os.path.join(state, "repos.json")
         repos = {r: {"proofJobs": proofs or {}, "covered": r not in failed} for r in [*covered, *failed]}
         json.dump({"at": time.time() - age, "repos": repos}, open(cov, "w"))
-    env = {"DIR": state, "SRC": src, "OWNER": "Sam", "NOTIFY": notify, "SETTLED": "review-settled", "COVERED": cov}
+    env = {"DIR": state, "SRC": projects, "OWNER": "Sam", "NOTIFY": notify, "SETTLED": "review-settled", "COVERED": cov}
     script = "set -euo pipefail\n" + "".join(f"{k}={shlex.quote(v)}\n" for k, v in env.items()) + SWEEP
-    subprocess.run(["bash", "-c", script], check=True, env={**os.environ, "PATH": bin_ + ":" + os.environ["PATH"]})
+    subprocess.run(["bash", "-c", script, "renovate-sweep", *args], check=True,
+                   env={**os.environ, "PATH": bin_ + ":" + os.environ["PATH"]})
     calls = [json.loads(x) for x in open(os.path.join(tmp, "proj.log"))]
     notices = [json.loads(x) for x in open(os.path.join(tmp, "notify.log"))]
+    if args:
+        assert notices == [], notices
+        return calls, None
     majors = [(n[0], n[-1]) for n in notices if n[1] == "majors"]
     assert len(majors) == 1, notices
     return calls, majors[0]
@@ -175,5 +180,17 @@ assert len(calls) == 1 and "ssh remi proof" in calls[0][-1], calls
 calls, _ = sweep([pr(6, labels=(), conclusion="FAILURE")], covered=[REPO], age=7 * 3600,
                  proofs={"remi-proof": "ssh remi proof"})
 assert len(calls) == 1 and "ssh remi proof" in calls[0][-1], calls
+
+# One repo's sweep hands over that repo's PRs only (named as GitHub spells
+# it, whatever the clone's remote says), and leaves the notices, which list
+# every repo's, to a full one.
+two = os.path.join(tmp, "two")
+for name in ("r", "q"):
+    subprocess.run(["git", "init", "-q", os.path.join(two, name)], check=True)
+    subprocess.run(["git", "-C", os.path.join(two, name), "remote", "add", "origin", f"https://github.com/sam/{name}.git"], check=True)
+calls, _ = sweep([pr(1)], projects=two)
+assert sorted(c[1] for c in calls) == ["q", "r"], calls
+calls, notice = sweep([pr(1)], projects=two, args=["Sam/R"])
+assert [c[1] for c in calls] == ["r"] and notice is None, calls
 
 print("renovate-sweep: ok")

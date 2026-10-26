@@ -1,10 +1,15 @@
 # Staying current, top to bottom, without anyone asking.
 #
-#   - HOST-update: every 15 minutes, bump the flake's inputs and Claude Code,
-#     build, VM-test, switch with the dead man's switch, health-check,
-#     confirm, push to main. Breakage reverts itself and goes to a Claude job.
+#   - HOST-update: on each push to the flake's main (a merged PR) or to an
+#     input it watches, and hourly for the ones that send no event (nixpkgs,
+#     Claude Code), bump the flake's inputs and Claude Code, build, VM-test,
+#     switch with the dead man's switch, health-check, confirm, push to main.
+#     Breakage reverts itself and goes to a Claude job.
 #   - Renovate: dependency PRs for every repo you own, merged on green CI;
-#     renovate-sweep gives the stuck ones to a Claude job.
+#     renovate-sweep gives the stuck ones to a Claude job. A repo's push to
+#     its default branch, or its Renovate PRs moving or finishing CI, start
+#     both for that repo (burrow.events); all of them go hourly, for the
+#     releases upstream that send no event.
 #   - advisory-watch: new CVEs in what the box and its projects run, hourly,
 #     each one handed to a Claude job the same hour.
 #   - firmware-check: firmware on offer goes to the owner (flashing is theirs).
@@ -192,6 +197,12 @@ let
     // lib.optionalAttrs (rcfg.gitAuthor != null) { inherit (rcfg) gitAuthor; })
     rcfg.settings;
 
+  # Whether Renovate's autodiscoverFilter takes a repo, by Renovate's own code
+  # (updates/renovate-covers.mjs), on the node it runs on.
+  coversTool = lib.escapeShellArgs [
+    (lib.getExe pkgs.nodejs_24) "${./updates/renovate-covers.mjs}" "${pkgs.renovate}" (builtins.toJSON renovateSettings.autodiscoverFilter)
+  ];
+
   renovateConfig = pkgs.runCommand "renovate-config.json"
     {
       nativeBuildInputs = [ pkgs.jq pkgs.renovate ];
@@ -215,6 +226,7 @@ in
     { key = "burrow/notify"; imports = [ (import ./notify.nix inputs) ]; }
     { key = "burrow/switch"; imports = [ (import ./switch.nix inputs) ]; }
     { key = "burrow/proj"; imports = [ (import ./proj.nix inputs) ]; }
+    { key = "burrow/events"; imports = [ (import ./events.nix inputs) ]; }
   ];
 
   options.burrow.updates = {
@@ -249,10 +261,18 @@ in
       description = "The dead man's switch window for an update (it health-checks for up to 3 minutes in it).";
     };
 
-    every = lib.mkOption {
-      type = lib.types.str;
-      default = "*:0/15";
-      description = "When HOST-update runs (systemd calendar event).";
+    watch = lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      default = lib.optional (githubRepo != null) githubRepo;
+      defaultText = lib.literalExpression "[ OWNER/NAME of origin, when it's on GitHub ]";
+      example = [ "sam/homelab" "sam/burrow" ];
+      description = ''
+        GitHub repos whose pushes to their default branch start HOST-update
+        (burrow.events, which needs their webhooks, as autoland keeps them):
+        the flake's own, so a merged PR goes live at once, and the inputs
+        that live on GitHub. Everything else (nixpkgs, Claude Code) it looks
+        for hourly, in burrow-events' catch-up.
+      '';
     };
 
     claudeManifest = lib.mkOption {
@@ -412,12 +432,15 @@ in
           Nice = 10;
         };
       };
-      systemd.timers.${update} = {
-        wantedBy = [ "timers.target" ];
-        timerConfig = {
-          OnBootSec = "10min";
-          OnCalendar = cfg.every;
-        };
+      # A push to the flake's main or a watched input's default branch starts
+      # a run within seconds; burrow-events' catch-up starts one when it
+      # starts and hourly, for upstreams that send no event.
+      burrow.events.handlers.update = {
+        events = [ "push" ];
+        unit = update;
+        perRepo = false;
+        repos = cfg.watch;
+        pushes = "default";
       };
 
       systemd.tmpfiles.settings.burrow = {
@@ -430,7 +453,7 @@ in
 
         ${config.networking.hostName} keeps itself current; nobody runs updates by hand.
 
-        - `${update}` (timer) bumps every flake input${lib.optionalString (cfg.claudeManifest != null) " and Claude Code"},
+        - `${update}` (on each push to main or a watched input, and hourly) bumps every flake input${lib.optionalString (cfg.claudeManifest != null) " and Claude Code"},
           builds, runs the VM tests, switches, checks health, confirms and pushes
           to main. It deploys main too, so a merged PR goes live the same way. It
           holds off while a switch is pending or while ${config.networking.hostName} runs changes that
@@ -517,49 +540,77 @@ in
       }];
       environment.systemPackages = [ renovateSweep pkgs.renovate ];
 
-      # Renovate as the user, with gh's login, like the other jobs that talk to GitHub.
-      systemd.services.renovate = online // {
-        description = "Renovate: dependency PRs for every repo";
+      # What moves a repo's Renovate PRs (burrow.events): its default branch
+      # (to rebase on, or a dependency changed), and its Renovate PRs being
+      # opened, edited or closed, or their CI finishing (Renovate merges a
+      # green one on its next run). Each starts Renovate on that repo, and
+      # renovate-sweep for its stuck PRs. Both full passes, every repo and the
+      # owner's notices, are burrow-events' catch-up, when it starts and
+      # hourly: new releases upstream send no event.
+      burrow.events.handlers = {
+        renovate = {
+          events = [ "push" "pull_request" "check_suite" "status" ];
+          unit = "renovate";
+          pushes = "default";
+          branches = [ "renovate/*" ];
+        };
+        renovate-sweep = {
+          events = [ "pull_request" "check_suite" "status" ];
+          unit = "renovate-sweep";
+          branches = [ "renovate/*" ];
+        };
+      };
+
+      # Renovate as the user, with gh's login, like the other jobs that talk to
+      # GitHub: every repo it covers, or (renovate@) the one its instance names.
+      # One at a time, however started: they share the clones.
+      systemd.services = lib.genAttrs [ "renovate" "renovate@" ] (name: online // {
+        description = if name == "renovate" then "Renovate: dependency PRs for every repo" else "Renovate: dependency PRs for %I";
         # A switch leaves a running one be (see burrow.switch's check).
         restartIfChanged = false;
         environment = {
           RENOVATE_CONFIG_FILE = renovateConfig;
           LOG_LEVEL = "info";
         };
-        path = [ pkgs.renovate pkgs.gh pkgs.git pkgs.openssh config.nix.package ] ++ rcfg.path;
+        path = [ pkgs.renovate pkgs.gh pkgs.git pkgs.openssh pkgs.util-linux config.nix.package ] ++ rcfg.path;
         serviceConfig = {
           Type = "oneshot";
           User = user;
           TimeoutStartSec = "2h";
           Nice = 10;
         };
+        scriptArgs = lib.optionalString (name == "renovate@") "%I";
         script = ''
           RENOVATE_TOKEN=$(gh auth token)
           export RENOVATE_TOKEN GITHUB_COM_TOKEN=$RENOVATE_TOKEN
-          exec renovate
+          if [ -z "''${1:-}" ]; then
+            exec flock ${rcfg.dir}/run.lock renovate
+          fi
+          # Only a repo a full run covers: any repo's events reach this unit.
+          # Renovate's own code applies its autodiscoverFilter here, to the
+          # repo as GitHub spells it (burrow-events has it in lower case, and a
+          # /regex/ filter can mind case). Then its own autodiscovery, narrowed
+          # to this repo, applies the rest (topics, forks, archived, mirrors).
+          repo=$(gh api "repos/$1" --jq .full_name)
+          covers=0
+          ${coversTool} "$repo" || covers=$?
+          case $covers in
+            0) ;;
+            10) echo "$repo: not one of Renovate's (autodiscoverFilter)"; exit 0 ;;
+            *) echo "$repo: couldn't apply autodiscoverFilter" >&2; exit 1 ;;
+          esac
+          exec flock ${rcfg.dir}/run.lock renovate --autodiscover-filter="[\"$repo\"]"
         '';
-      };
-      systemd.timers.renovate = {
-        wantedBy = [ "timers.target" ];
-        timerConfig = {
-          OnBootSec = "30min";
-          OnCalendar = "hourly";
-        };
-      };
-
-      systemd.services.renovate-sweep = {
-        description = "Hand stuck Renovate PRs to a Claude job";
-        after = [ "renovate.service" ];
+      }) // lib.genAttrs [ "renovate-sweep" "renovate-sweep@" ] (name: {
+        description = "Hand stuck Renovate PRs to a Claude job${lib.optionalString (name == "renovate-sweep@") " (%I)"}";
+        # The full one sees what the full Renovate pass left.
+        after = lib.optional (name == "renovate-sweep") "renovate.service";
         serviceConfig = {
           Type = "oneshot";
           User = user;
-          ExecStart = "${renovateSweep}/bin/renovate-sweep";
+          ExecStart = "${renovateSweep}/bin/renovate-sweep${lib.optionalString (name == "renovate-sweep@") " %I"}";
         };
-      };
-      systemd.timers.renovate-sweep = {
-        wantedBy = [ "timers.target" ];
-        timerConfig.OnCalendar = "*-*-* 0/4:40:00";
-      };
+      });
 
       systemd.tmpfiles.settings.burrow = {
         ${rcfg.dir}.d = { mode = "0755"; inherit user; group = account.group; };

@@ -105,6 +105,19 @@
           python3 -I ${./tests/events.py} ${./modules/events}/events.py
           touch $out
         '';
+        # Which repos a run of Renovate on one repo covers: the ones its
+        # autodiscoverFilter takes, as Renovate's own code has it.
+        renovate-covers = pkgs.runCommand "renovate-covers-check" { } ''
+          # A /regex/ minds case: Sam/Secret is out, sam/secret isn't (so
+          # renovate@ asks with GitHub's spelling).
+          covers() { ${pkgs.lib.getExe pkgs.nodejs_24} ${./modules/updates/renovate-covers.mjs} ${pkgs.renovate} '["sam/*", "Kim/r", "!sam/{old,archive}", "!/^sam\/tmp-/", "!/^Sam\/Secret$/"]' "$1"; }
+          for r in sam/r SAM/X kim/r sam/secret; do covers "$r" || { echo "$r: not covered"; exit 1; }; done
+          for r in sam/old sam/archive sam/tmp-1 Sam/Secret kim/q other/r; do
+            rc=0; covers "$r" || rc=$?
+            [ "$rc" = 10 ] || { echo "$r: $rc, not 10"; exit 1; }
+          done
+          touch $out
+        '';
         # Which Renovate PRs renovate-sweep hands over and lists, with stand-ins for gh and proj.
         renovate-sweep = pkgs.runCommand "renovate-sweep-check" { nativeBuildInputs = [ pkgs.python3 pkgs.git pkgs.jq pkgs.gnused ]; } ''
           python3 -I ${./tests/renovate-sweep.py} ${./modules/updates/renovate-sweep.sh}

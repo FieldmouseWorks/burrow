@@ -2,15 +2,18 @@
 it calls for within seconds (../events.nix runs it). Nothing waits for a
 timer to come round.
 
-Each handler (the steward, proj-watch, proj-inbox) names the GitHub events it
-cares about and a systemd unit: UNIT.service is its full pass, and
-UNIT@OWNER-REPO.service its pass over one repo. Three things put a repo in a
-handler's line:
+Each handler (the steward, proj-watch, proj-inbox, HOST-update, Renovate)
+names the GitHub events it cares about and a systemd unit: UNIT.service is its
+full pass, and UNIT@OWNER-REPO.service its pass over one repo. A handler with
+no pass over one repo (`perRepo` off) gets its full pass for a repo's event.
+Three things put a repo in a handler's line:
 
   - A webhook delivery from GitHub (the steward keeps each repo's hook) whose
     X-GitHub-Event is one of the handler's. Only a delivery signed with the
     hook's secret counts, and all it says is which repo changed: the pass
-    reads the rest from GitHub.
+    reads the rest from GitHub. A handler can take only the repos it names (`repos`),
+    only pushes to a repo's default branch (`pushes`), and only the other
+    events about some branches (`branches`).
   - A kick on the local port: POST /kick/HANDLER/OWNER/REPO for one repo, or
     /kick/HANDLER for a full pass. Something on this machine that just
     changed what a pass would find kicks it: a proj job's turn ending, a
@@ -28,6 +31,7 @@ A handler's passes run one at a time. When the service starts, every handler
 gets a full pass, which catches up on whatever happened while it was down.
 """
 
+import fnmatch
 import hashlib
 import hmac
 import http.server
@@ -74,6 +78,58 @@ def escape(s):
 
 def unit(h, repo):
     return f"{h['unit']}.service" if repo == FULL else f"{h['unit']}@{escape(repo)}.service"
+
+
+def covers(h, repo):
+    """Whether the handler takes this repo: one of its `repos`, case-blind,
+    or any repo when it names none."""
+    names = h.get("repos")
+    return names is None or repo.lower() in (n.lower() for n in names)
+
+
+def branches(event, payload):
+    """The branches a delivery other than a push is about: a pull request's
+    head, the commit's whose checks or status it reports. None: it's about
+    no branch (an issue, a comment)."""
+    def get(*keys):
+        v = payload
+        for k in keys:
+            v = v.get(k) if isinstance(v, dict) else None
+        return v
+    if event.startswith("pull_request"):
+        names = [get("pull_request", "head", "ref")]
+    elif event == "check_suite":
+        names = [get("check_suite", "head_branch")]
+    elif event == "check_run":
+        names = [get("check_run", "check_suite", "head_branch")]
+    elif event == "workflow_run":
+        names = [get("workflow_run", "head_branch")]
+    elif event == "status":
+        names = [b.get("name") for b in get("branches") or [] if isinstance(b, dict)]
+    else:
+        return None
+    return [n for n in names if isinstance(n, str)]
+
+
+def takes(h, event, payload):
+    """Whether this delivery (its repo already checked) starts the
+    handler's pass."""
+    if event not in h["events"] or not covers(h, payload["repository"]["full_name"]):
+        return False
+    if event == "status" and payload.get("context") in h.get("ownStatuses", ()):
+        return False
+    if event == "push":
+        default = payload["repository"].get("default_branch")
+        return h.get("pushes", "any") == "any" or (isinstance(default, str) and payload.get("ref") == "refs/heads/" + default)
+    pats = h.get("branches")
+    names = branches(event, payload) if pats is not None else None
+    return names is None or any(fnmatch.fnmatchcase(n, p) for n in names for p in pats)
+
+
+def place(h, repo):
+    """Where a repo's event goes in the handler's line: the repo's own pass,
+    or its full pass when it has none over one repo."""
+    return repo if h.get("perRepo", True) else FULL
 
 
 class Line:
@@ -211,8 +267,8 @@ class Quiet(http.server.BaseHTTPRequestHandler):
 
 def deliveries(handlers, lines, secret):
     """The webhook's deliveries, nginx passes them on: each goes to the
-    handlers that take its event, but a commit status goes to none whose
-    own passes posted it (`ownStatuses`), which is no news to them."""
+    handlers that take it (`takes`). A commit status goes to none whose own
+    passes posted it (`ownStatuses`), which is no news to them."""
 
     class Delivery(Quiet):
         def do_POST(self):
@@ -231,20 +287,18 @@ def deliveries(handlers, lines, secret):
                 return answer(self, 204)  # nothing about a repo
             if not isinstance(repo, str) or not REPO_RE.match(repo):
                 return answer(self, 204)
-            event = self.headers.get("X-GitHub-Event")
+            event = self.headers.get("X-GitHub-Event") or ""
             for name, h in handlers.items():
-                if event not in h["events"]:
-                    continue
-                if event == "status" and payload.get("context") in h.get("ownStatuses", ()):
-                    continue
-                lines[name].event(repo, time.time())
+                if takes(h, event, payload):
+                    lines[name].event(place(h, repo), time.time())
             answer(self, 202)
 
     return Delivery
 
 
-def kicks(lines):
-    """POST /kick/HANDLER[/OWNER/REPO], from this machine."""
+def kicks(handlers, lines):
+    """POST /kick/HANDLER[/OWNER/REPO], from this machine. A repo the
+    handler doesn't take (`repos`) is no kick."""
 
     class Kick(Quiet):
         def do_POST(self):
@@ -253,10 +307,10 @@ def kicks(lines):
             parts = self.path.split("?")[0].split("/")
             if len(parts) not in (3, 5) or parts[:2] != ["", "kick"] or parts[2] not in lines:
                 return answer(self, 404)
-            repo = "/".join(parts[3:]) or FULL
-            if repo != FULL and not REPO_RE.match(repo):
+            h, repo = handlers[parts[2]], "/".join(parts[3:]) or FULL
+            if repo != FULL and not (REPO_RE.match(repo) and covers(h, repo)):
                 return answer(self, 404)
-            lines[parts[2]].event(repo, time.time() - DEBOUNCE if repo == FULL else time.time())
+            lines[parts[2]].event(place(h, repo), time.time() - DEBOUNCE if repo == FULL else time.time())
             answer(self, 202)
 
     return Kick
@@ -280,7 +334,7 @@ def main():
             secret = f.read().strip()
         listen(cfg["port"], deliveries(handlers, lines, secret))
         log(f"deliveries on 127.0.0.1:{cfg['port']}")
-    listen(cfg["kickPort"], kicks(lines))
+    listen(cfg["kickPort"], kicks(handlers, lines))
     log(f"kicks on 127.0.0.1:{cfg['kickPort']}: {', '.join(handlers)}")
     for name, h in handlers.items():
         threading.Thread(target=serve, args=(name, h, lines[name]), daemon=True).start()

@@ -19,7 +19,7 @@ let
   configFile = pkgs.writeText "burrow-events.json" (builtins.toJSON {
     inherit (cfg) kickPort;
     port = if hooked then cfg.port else null;
-    handlers = lib.mapAttrs (_: h: { inherit (h) events unit wake ownStatuses; }) cfg.handlers;
+    handlers = lib.mapAttrs (_: h: { inherit (h) events unit wake ownStatuses perRepo repos pushes branches; }) cfg.handlers;
   });
   src = pkgs.runCommand "burrow-events" { nativeBuildInputs = [ pkgs.python3.pkgs.flake8 ]; } ''
     mkdir $out
@@ -86,7 +86,8 @@ in
       description = ''
         What burrow-events starts, by name (the NAME a kick gives). UNIT.service
         is the handler's full pass and UNIT@.service, a template, its pass over
-        the one repo its instance names (`%I` is OWNER/REPO).
+        the one repo its instance names (`%I` is OWNER/REPO), unless `perRepo`
+        is off.
       '';
       type = types.attrsOf (types.submodule {
         options = {
@@ -97,6 +98,44 @@ in
           unit = mkOption {
             type = types.str;
             description = "The units' name, without @ or .service.";
+          };
+          perRepo = mkOption {
+            type = types.bool;
+            default = true;
+            description = ''
+              Whether the handler has a pass over one repo (UNIT@.service). Off,
+              a repo's event starts its full pass, and UNIT.service is all
+              there is.
+            '';
+          };
+          repos = mkOption {
+            type = types.nullOr (types.listOf types.str);
+            default = null;
+            example = [ "sam/homelab" ];
+            description = ''
+              The repos (OWNER/NAME, case-blind) whose deliveries and kicks
+              start the handler's passes. null: every repo; [ ]: none, so only
+              full passes (a kick, the catch-up).
+            '';
+          };
+          pushes = mkOption {
+            type = types.enum [ "any" "default" ];
+            default = "any";
+            description = ''
+              Which pushes count, if `events` has push: to any branch, or only
+              to the repo's default branch (a merge, say).
+            '';
+          };
+          branches = mkOption {
+            type = types.nullOr (types.listOf types.str);
+            default = null;
+            example = [ "renovate/*" ];
+            description = ''
+              For the events about a branch other than a push (a pull
+              request's head, the commit a check suite or status is for): only
+              those about one of these branches count (globs). An event about
+              no branch (an issue, a comment) always does. null: every branch.
+            '';
           };
           ownStatuses = mkOption {
             type = types.listOf types.str;
