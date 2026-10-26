@@ -151,12 +151,15 @@ pkgs.testers.runNixOSTest {
         machine.wait_until_succeeds("grep -qx new /data/dev/src/late/started", timeout=60)
 
     with subtest("the booked scan comes when the quiet spell ends"):
-        session("waiting", "waiting", 30 * 60 - 8)
-        time.sleep(3)
+        # The spell ends 30 seconds on: the scan this status starts books its
+        # wake for then, however long that scan takes to run.
+        session("waiting", "waiting", 30 * 60 - 30)
+        deadline = time.time() + 25
+        while (left := wake_in()) is None or left > 32:
+            assert time.time() < deadline, left
+            time.sleep(0.5)
         assert started("waiting") == ["old"], started("waiting")
-        left = wake_in()
-        assert left is not None and left < 10, left
-        machine.wait_until_succeeds("grep -qx new /data/dev/src/waiting/started", timeout=60)
+        machine.wait_until_succeeds("grep -qx new /data/dev/src/waiting/started", timeout=90)
 
     with subtest("status changes one after another leave the scan's watchers watching"):
         # Each one its own scan, a dozen in a row: past the start limit (5 in
