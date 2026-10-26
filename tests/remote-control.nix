@@ -78,10 +78,12 @@ pkgs.testers.runNixOSTest {
         return machine.succeed(f"cat /data/dev/src/{project}/started").split()
 
     def session(project, status, ago):
-        # What Claude Code writes when a session's status changes.
+        # What Claude Code writes when a session's status changes; returns
+        # its statusUpdatedAt, in seconds.
         pid = machine.succeed(f"cat /data/dev/src/{project}/session.pid").strip()
         at = int(time.time() * 1000) - ago * 1000
         machine.succeed(f"echo '{{\"pid\":{pid},\"status\":\"{status}\",\"statusUpdatedAt\":{at}}}' >/home/dev/.claude/sessions/{pid}.json")
+        return at / 1000
 
     def wake_in():
         # Seconds until the booked scan, or None.
@@ -151,12 +153,15 @@ pkgs.testers.runNixOSTest {
         machine.wait_until_succeeds("grep -qx new /data/dev/src/late/started", timeout=60)
 
     with subtest("the booked scan comes when the quiet spell ends"):
-        session("waiting", "waiting", 30 * 60 - 8)
-        time.sleep(3)
+        # The spell ends 30 seconds on: the scan this status starts books its
+        # wake for then, however long that scan takes to run.
+        ends = session("waiting", "waiting", 30 * 60 - 30) + 30 * 60
+        deadline = time.time() + 25
+        while (left := wake_in()) is None or left > ends - time.time() + 2:
+            assert time.time() < deadline, (left, ends - time.time())
+            time.sleep(0.5)
         assert started("waiting") == ["old"], started("waiting")
-        left = wake_in()
-        assert left is not None and left < 10, left
-        machine.wait_until_succeeds("grep -qx new /data/dev/src/waiting/started", timeout=60)
+        machine.wait_until_succeeds("grep -qx new /data/dev/src/waiting/started", timeout=90)
 
     with subtest("status changes one after another leave the scan's watchers watching"):
         # Each one its own scan, a dozen in a row: past the start limit (5 in
