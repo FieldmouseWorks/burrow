@@ -76,7 +76,8 @@ query($owner: String!, $name: String!, $cursor: String) {
             __typename
             ... on CheckRun { name status conclusion }
             ... on StatusContext { context state description }
-          } } } } }
+          } } }
+          checkSuites(first: 100) { pageInfo { hasNextPage } nodes { conclusion workflowRun { workflow { name } } } } } }
         }
       }
     }
@@ -133,14 +134,22 @@ def ci_state(pr, proofs=()):
     """green / pending / red / none (no checks at all) over every check on
     the head except ours, and the names of the ones that aren't green. A
     proof (a check a Claude job runs on a machine) that hasn't reported yet
-    is pending: nothing posts it until its job runs."""
+    is pending: nothing posts it until its job runs. A workflow GitHub
+    couldn't start (a bad file, a pin missing an input) leaves no check run,
+    only its suite: red, or a broken workflow would read as no CI."""
     nodes = pr["commits"]["nodes"]
-    rollup = (nodes[0]["commit"].get("statusCheckRollup") or {}) if nodes else {}
-    contexts = rollup.get("contexts") or {}
-    if (contexts.get("pageInfo") or {}).get("hasNextPage"):
+    commit = nodes[0]["commit"] if nodes else {}
+    contexts = (commit.get("statusCheckRollup") or {}).get("contexts") or {}
+    suites = commit.get("checkSuites") or {}
+    if any((x.get("pageInfo") or {}).get("hasNextPage") for x in (contexts, suites)):
         # Only the first 100 come back; one past them could be red.
         return "pending", ["over 100 checks, too many to read"]
     red, pending, seen = [], [], 0
+    for s in suites.get("nodes", []):
+        if s["conclusion"] == "STARTUP_FAILURE":
+            seen += 1
+            workflow = ((s.get("workflowRun") or {}).get("workflow") or {}).get("name") or "a workflow"
+            red.append(f"{workflow} (failed to start)")
     for c in contexts.get("nodes", []):
         if c["__typename"] == "CheckRun":
             seen += 1

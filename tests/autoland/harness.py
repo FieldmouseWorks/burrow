@@ -287,7 +287,7 @@ CI_GREEN = [{"__typename": "CheckRun", "name": "ci", "status": "COMPLETED", "con
 
 
 def mkpr(reviews=(), comments=(), threads=(), draft=False, number=5, sha=head, files=("a.py",), labels=(),
-         branch="feat", title="t", checks=CI_GREEN, base="main", body=""):
+         branch="feat", title="t", checks=CI_GREEN, base="main", body="", suites=()):
     return {
         "id": "x", "number": number, "title": title, "url": "u", "isDraft": draft, "isCrossRepository": False,
         "headRefName": branch, "headRefOid": sha, "baseRefName": base, "createdAt": T0, "updatedAt": T0, "body": body,
@@ -298,7 +298,8 @@ def mkpr(reviews=(), comments=(), threads=(), draft=False, number=5, sha=head, f
         "reviewThreads": {"pageInfo": {"hasNextPage": False}, "nodes": [{"isResolved": r} for r in threads]},
         "reviews": {"pageInfo": {"hasPreviousPage": False}, "nodes": list(reviews)},
         "commits": {"nodes": [{"commit": {"oid": sha, "statusCheckRollup": {"contexts": {
-            "pageInfo": {"hasNextPage": False}, "nodes": list(checks)}}}}]},
+            "pageInfo": {"hasNextPage": False}, "nodes": list(checks)}},
+            "checkSuites": {"pageInfo": {"hasNextPage": False}, "nodes": list(suites)}}}]},
     }
 
 
