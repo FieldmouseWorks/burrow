@@ -723,21 +723,26 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
     # Put out by an answer this pass read: its others.
     under_way += reading([r for r in names if V.out(r) and r not in was_out])
     live = [r for r in live if not V.out(r)]
-    # The findings of one out now on this head are threads this pass never
-    # read, and its verdict isn't waited for: they hold the pass back.
-    late += [head[:7] for r in found if r not in live]
     for r in names:
         if V.out(r):
             # Back in service then: its look at this head is asked for.
             C.wake(repo, load(V.OUT, {})[r]["until"] + 1)
-    rounds = max((said[r][2] for r in live), default=0)
+    # Every reviewer's rounds, in service or not: one going out doesn't take
+    # a PR back under the limit.
+    rounds = max((said[r][2] for r in names), default=0)
     clean = bool(live) and all(said[r][0] == "clean" for r in live)
     # Past the round limit, the reviewers aren't asked again: every look so
     # far has found more, so more looks only drip-feed more rounds. A Claude
     # job settles what's left on its merits, fixing what's real and answering
     # the rest, and a judge decides whether it lands. Only what the judge
-    # can't call (a one-way door) waits for the owner.
+    # can't call (a one-way door) waits for the owner. A look already on its
+    # way is waited for, and one whose findings couldn't be posted is asked
+    # again: that's the same round, not another.
     capped = rounds >= rc["rounds"] and not clean
+    # Findings on this head this pass posted are threads it never read: one
+    # out now isn't waited for, and past the limit no look follows to cover
+    # them, so they hold the pass back.
+    late += [head[:7] for r in found if r not in live or capped]
 
     def ask(r):
         """Queue the reviewer on this head, unless it's already on its way.
@@ -766,7 +771,9 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
 
     # 1. The reviewers.
     quiet = age >= rc["settleDelay"] * MIN
-    if not capped and not quiet and any(said[r][0] == "none" for r in live):
+    looking = [r for r in live if said[r][0] == "none" and (
+        not capped or st["rv"].get(r, {}).get("queued") or st["rv"].get(r, {}).get("lost") == [head, pr["baseRefName"]])]
+    if not quiet and looking:
         after(st["seen"], rc["settleDelay"])  # the reviewers are asked then
     waiting = [f"Posting {x}" for x in unposted]
     for r in names:
@@ -776,16 +783,15 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
         elif r not in live:
             waiting.append(f"{V.NAMES[r]}'s findings on {head[:7]} couldn't be posted, and it's out of service")
     waiting += [f"{V.NAMES[r]} is still reviewing it, though out of service" for r in under_way]
-    if not live:
+    if not live and not capped:
         why = "; ".join(f"{V.NAMES[r]}: {away[r] or V.out(r)}" for r in names) or "none is on"
         waiting.append(f"No reviewer can review it now ({why})")
         digest.append(("No reviewer can review it", line, why))
-    for r in live:
-        if said[r][0] == "none" and not capped:
-            if quiet:
-                ask(r)
-            waiting.append(f"{V.NAMES[r]} is reviewing this commit" if st["rv"].get(r, {}).get("queued")
-                           else f"Waiting for {V.NAMES[r]}'s review of this commit")
+    for r in looking:
+        if quiet:
+            ask(r)
+        waiting.append(f"{V.NAMES[r]} is reviewing this commit" if st["rv"].get(r, {}).get("queued")
+                       else f"Waiting for {V.NAMES[r]}'s review of this commit")
     # A look that can't happen, a first one or a second: the owner hears either way.
     stuck = []
     for r in live:

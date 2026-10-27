@@ -582,6 +582,44 @@ fresh_pr_state()
 status, _ = run(mkpr(reviews=[*stuck["reviews"], rv_review("codex", 0), rv_review("deepseek", 0)], threads=[True]), 700)
 assert merged() and JOBS == [], (status, JOBS)
 
+# A look already on its way when the limit's reached is waited for, and what
+# it finds holds the pass back, whatever the judge said.
+fresh_pr_state()
+four = {"reviews": [rv_review("codex", 1)] * 4, "threads": [True]}
+five = {"reviews": [rv_review("codex", 1)] * 5, "threads": [True]}
+run(mkpr(**four), 0)
+run(mkpr(**four), 600)
+assert queued() == ["deepseek"], queued()
+status, _ = run(mkpr(**five), 700)
+assert JOBS == [] and not merged() and "DeepSeek is reviewing this commit" in status, (status, JOBS)
+worker(deepseek={"result": "review", "answer": {"findings": [{"path": "a.py"}]}})
+status, _ = run(mkpr(comments=[said(judgment("land", n=5))], **five), 800)
+assert not merged() and f"Past the review-round limit (5): review findings on {head[:7]}" in status, status
+# Findings that couldn't be posted aren't dropped for want of another look:
+# that one's asked again, the same round.
+fresh_pr_state()
+run(mkpr(**four), 0)
+run(mkpr(**four), 600)
+worker(deepseek={"result": "review", "answer": {"findings": [{"path": "a.py"}]}})
+STUB["post"] = RuntimeError("HTTP 502")
+for t in (650, 710, 770):
+    run(mkpr(**five), t)
+STUB["post"] = None
+assert pr_state()["rv"]["deepseek"].get("lost") == [head, "main"], pr_state()
+status, _ = run(mkpr(comments=[said(judgment("land", n=5))], **five), 830)
+assert not merged() and JOBS == [] and "Waiting for DeepSeek's review" in status, (status, JOBS)
+status, _ = run(mkpr(comments=[said(judgment("land", n=5))], **five), 770 + 3700)
+assert queued() == ["deepseek"] and not merged() and JOBS == [], (queued(), status, JOBS)
+# The limit holds while the reviewer that reached it is out of service, and
+# with none in service the judge still decides.
+for out in (["codex"], ["codex", "deepseek"]):
+    fresh_pr_state()
+    C.save(V.OUT, {r: {"why": "usage", "until": C.ts(T0) + 86400} for r in out})
+    status, digest = run(mkpr(**five), 700)
+    assert queued() == [] and len(JOBS) == 1 and "past its review-round limit" in JOBS[0], (out, queued(), status, JOBS)
+    assert "No reviewer can review it" not in [x[0] for x in digest], digest
+    os.remove(f"{tmp}/state/{V.OUT}")
+
 # No CI at all: the judge builds and tests it itself.
 fresh_pr_state()
 status, _ = run(clean(checks=[]), 700)
