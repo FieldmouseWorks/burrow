@@ -35,7 +35,7 @@
       # The ledger's machines take Conary from its own flake; burrow's checks
       # build theirs with a stand-in for its `cn`.
       cnStandIn = pkgs.writeShellScriptBin "cn" "exit 1";
-      names = [ "claude" "undo" "switch" "notify" "updates" "proj" "remote-control" "agents" "robot" "ops" "toolbox" "autoland" "house" "events" "ledger" ];
+      names = [ "claude" "undo" "switch" "notify" "updates" "proj" "remote-control" "agents" "robot" "ops" "toolbox" "autoland" "house" "events" "ledger" "browser" ];
     in
     {
       # A project's dev shell and gate in a few lines; see lib/project.nix.
@@ -153,6 +153,9 @@
         '';
         # Stale Remote Control servers catch up once idle, with a stand-in for Claude.
         remote-control = import ./tests/remote-control.nix { inherit self pkgs; };
+        # The signed-in browser: Claude driving it, its logins kept, its ports
+        # and profile kept from everyone else.
+        browser = import ./tests/browser.nix { inherit self pkgs; };
         # lib/project.nix's package of a Rust workspace: every member's binaries.
         house-rust-package = let
           pkg = (self.lib.project { self = ./tests/house/rust; systems = [ system ]; rust = { }; }).packages.${system}.default;
