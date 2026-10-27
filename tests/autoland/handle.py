@@ -605,7 +605,7 @@ STUB["post"] = RuntimeError("HTTP 502")
 for t in (650, 710, 770):
     run(mkpr(**five), t)
 STUB["post"] = None
-assert pr_state()["lostOn"]["deepseek"] == [head, "main"], pr_state()
+assert pr_state()["lostOn"]["deepseek"] == {"main": head}, pr_state()
 status, _ = run(mkpr(comments=[said(judgment("land", n=5))], **five), 830)
 assert not merged() and JOBS == [] and "Waiting for DeepSeek's review" in status, (status, JOBS)
 status, _ = run(mkpr(comments=[said(judgment("land", n=5))], **five), 770 + 3700)
@@ -660,7 +660,7 @@ worker()
 run(mkpr(sha=newer, **five), 770)
 V.post = real_post
 assert ("codex", head, 0) in POSTED, POSTED
-assert pr_state()["lostOn"]["codex"] == [newer, "main"], pr_state()
+assert pr_state()["lostOn"]["codex"] == {"main": newer}, pr_state()
 status, _ = run(mkpr(**landed_newer), 830)
 assert not merged() and JOBS == [] and "Waiting for Codex's review" in status, (status, JOBS)
 # A loss recorded before lostOn, in its head's rv, still holds after a push.
@@ -668,7 +668,22 @@ fresh_pr_state()
 C.save("pr-sam_r-5.json", {"head": head, "seen": C.ts(T0), "rv": {"codex": {"lost": [head, "main"]}}})
 status, _ = run(mkpr(**landed_newer), 700)
 assert not merged() and JOBS == [] and "Waiting for Codex's review" in status, (status, JOBS)
-assert pr_state()["lostOn"] == {"codex": [head, "main"]} and "lost" not in pr_state()["rv"].get("codex", {}), pr_state()
+assert pr_state()["lostOn"] == {"codex": {"main": head}} and "lost" not in pr_state()["rv"].get("codex", {}), pr_state()
+# Nor does a look at the PR on another base: retargeted and back, the loss
+# on this one still holds.
+fresh_pr_state()
+V.queue("sam/r", mkpr(), "pr-sam_r-5.json", "codex")
+worker(codex={"result": "review", "answer": {"findings": [{"path": "a.py"}]}})
+STUB["post"] = RuntimeError("HTTP 502")
+for t in (650, 710, 770):
+    run(mkpr(**five), t)
+STUB["post"] = None
+V.queue("sam/r", mkpr(base="release/1.x"), "pr-sam_r-5.json", "codex")
+worker()
+run(mkpr(base="release/1.x", **five), 800)
+assert ("codex", head, 0) in POSTED and pr_state()["lostOn"] == {"codex": {"main": head}}, (POSTED, pr_state())
+status, _ = run(mkpr(comments=[said(judgment("land", n=5))], **five), 830)
+assert not merged() and JOBS == [] and "Codex is reviewing this commit" in status, (status, JOBS)
 # The limit holds while the reviewer that reached it is out of service, and
 # with none in service the judge still decides.
 for out in (["codex"], ["codex", "deepseek"]):

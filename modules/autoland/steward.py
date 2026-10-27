@@ -225,15 +225,17 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
     judged_at = f"{head} {pr['baseRefName']}"
     key = f"pr-{repo.replace('/', '_')}-{n}.json"
     st = load(key, {})
-    # Findings a reviewer couldn't post, by reviewer: the [head, base] they
-    # were on, until it posts a look at the PR's head then. Kept across
-    # heads, since past the round limit no new head's look would cover
-    # them. State from before kept the loss in its head's rv: moved here
-    # before a new head clears that.
+    # Findings a reviewer couldn't post: by reviewer, then base (on another
+    # base the PR is another change), the head they were on, until it posts
+    # a look at the PR's head on that base. Kept across heads, since past
+    # the round limit no new head's look would cover them. State from
+    # before kept the loss in its head's rv: moved here before a new head
+    # clears that.
     lost_on = st.setdefault("lostOn", {})
     for r, rs in st.get("rv", {}).items():
         if rs.get("lost"):
-            lost_on[r] = rs.pop("lost")
+            was, base = rs.pop("lost")
+            lost_on.setdefault(r, {})[base] = was
     if st.get("head") != head:
         st.update(head=head, seen=C.NOW, handed=None, landFails=0, rv={})
     st.setdefault("rv", {})
@@ -622,8 +624,10 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
                     rs.pop("fails", None)
                     rs.pop("failedAt", None)
                     # A look at the PR's head covers what one at it or an
-                    # earlier head found.
-                    lost_on.pop(r, None)
+                    # earlier head on its base found.
+                    lost_on.get(r, {}).pop(pr["baseRefName"], None)
+                    if not lost_on.get(r, True):
+                        lost_on.pop(r)
                 except ValueError as e:  # an answer that's no review
                     rs["fails"], rs["failedAt"] = rs.get("fails", 0) + 1, C.NOW
                     log(f"{tag}: {V.NAMES[r]}'s answer wasn't a review ({rs['fails']}): {e}")
@@ -642,7 +646,7 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
                     if back["answer"].get("findings"):
                         # Dropped, it's asked again; one out of service by
                         # then isn't, so the head's held for it meanwhile.
-                        lost_on[r] = [head, pr["baseRefName"]]
+                        lost_on.setdefault(r, {})[pr["baseRefName"]] = head
             elif back["result"] == "out":
                 went_out(r, back)
             else:  # the agent, the network, its JSON: tried again next pass
@@ -757,7 +761,7 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
         head or an earlier one (it's asked again on this head: that's the
         same round, not another)."""
         base = pr["baseRefName"]
-        return bool(V.in_queue(key, r, base) or V.answered(key, r) or (lost_on.get(r) or [None, None])[1] == base)
+        return bool(V.in_queue(key, r, base) or V.answered(key, r) or base in lost_on.get(r, {}))
     # Findings on this head this pass posted are threads it never read: one
     # out now isn't waited for, and past the limit no look follows to cover
     # them, so they hold the pass back.
@@ -797,7 +801,7 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
     for r in names:
         if r in live:
             continue
-        if lost_on.get(r) == [head, pr["baseRefName"]]:
+        if lost_on.get(r, {}).get(pr["baseRefName"]) == head:
             waiting.append(f"{V.NAMES[r]}'s findings on {head[:7]} couldn't be posted, and it's out of service")
         elif capped and owed(r) and r not in under_way:
             waiting.append(f"{V.NAMES[r]} still owes it a review, and it's out of service")
@@ -807,7 +811,7 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
         waiting.append(f"No reviewer can review it now ({why})")
         digest.append(("No reviewer can review it", line, why))
     for r in looking:
-        if quiet and (not capped or (lost_on.get(r) or [None, None])[1] == pr["baseRefName"]):
+        if quiet and (not capped or pr["baseRefName"] in lost_on.get(r, {})):
             ask(r)
         waiting.append(f"{V.NAMES[r]} is reviewing this commit" if st["rv"].get(r, {}).get("queued")
                        else f"Waiting for {V.NAMES[r]}'s review" + ("" if capped else " of this commit"))
