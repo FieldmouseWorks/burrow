@@ -8,5 +8,10 @@ on:
 jobs:
   check:
     uses: FieldmouseWorks/burrow/.github/workflows/flake-check.yml@main
+    # What the shared workflow needs to attest its result.
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     # On a self-hosted NixOS runner (a private repo out of hosted minutes):
     # with: { runner: remi, install-nix: false }
