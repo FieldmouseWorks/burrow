@@ -82,10 +82,11 @@ change nothing else in the same PR.
    way, or a flake), its PR is closed once the job has ended.
 
 Waiting for the owner instead, listed in one issue: what a judge job sent
-them (or anyone labelled `needs-owner`), PRs past the round limit, held
-Renovate majors, and outside contributions. Everything else is
-pre-approved: merges, GitHub settings changes and cleanup don't wait for
-the owner. Dependency bots' minor updates skip review: CI is their review,
+them (or anyone labelled `needs-owner`), held Renovate majors, and outside
+contributions. A PR past the round limit isn't the owner's: its reviewers stop
+looking, a Claude job fixes or answers their last findings, and a judge
+decides. Everything else is pre-approved: merges, GitHub settings changes and
+cleanup don't wait for the owner. Dependency bots' minor updates skip review: CI is their review,
 except a change to `.github/` beyond repinning the actions its workflows
 use: that's the gate, so it goes through the review loop like any other PR.
 Apart from CODEOWNERS, `.github/` isn't one-way. A Renovate

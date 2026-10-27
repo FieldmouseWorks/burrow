@@ -10,7 +10,7 @@
 #
 # A draft is work in progress: nothing happens to it until it's ready. The
 # owner only sees what needs them, in one issue: what a judge job couldn't
-# decide, PRs past the round limit, outside contributions, anything stuck. It also keeps every
+# decide, outside contributions, anything stuck. It also keeps every
 # repo's settings at the baseline (docs/repo-baseline.md), new repos included.
 inputs:
 { config, lib, pkgs, ... }:
@@ -219,7 +219,7 @@ in
     rounds = mkOption {
       type = types.ints.positive;
       default = 5;
-      description = "Review rounds with findings (one reviewer's, whichever has had more) before it stops and asks you.";
+      description = "Review rounds with findings (one reviewer's, whichever has had more) before its reviewers stop looking: a Claude job then fixes or answers what's left, and a judge decides whether it lands.";
     };
 
     oneWay = mkOption {
@@ -578,7 +578,8 @@ in
       - ${config.burrow.owner}'s standing authority: merges, GitHub settings changes and cleanup
         are pre-approved. Take the judgment call first; only a genuine one-way door
         you can't decide waits for them, labelled `${cfg.labels.owner}` and listed in one issue
-        (so are outside contributions and PRs past ${toString cfg.rounds} review rounds).
+        (so are outside contributions). A PR past ${toString cfg.rounds} review rounds isn't theirs:
+        its last findings are fixed or answered, and a judge decides.
         `${cfg.labels.hold}` keeps the steward off a PR.
       - `autoland-steward status` shows where every open PR stands, changing nothing.
       - Every repo, new ones too, is kept at the baseline in burrow's

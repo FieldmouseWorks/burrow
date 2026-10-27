@@ -229,7 +229,7 @@ status, _ = run(rel, 900)
 assert merged() and "couldn't be posted" not in status, status
 # Not past a new head, which it never read.
 status, _ = run(mkpr(sha=newer, reviews=[rv_review("codex", 0, newer)]), 1500)
-assert merged() and "lost" not in pr_state()["rv"]["deepseek"], (status, pr_state())
+assert merged(), status
 os.remove(f"{tmp}/state/{V.OUT}")
 # Nor is a look at an earlier head still under way passed over by one out
 # of service: the PR waits for what it finds.
@@ -484,7 +484,7 @@ failed = said(f"`cargo test` fails.\n\n{judgment('failed')}")
 status, _ = run(clean(**mig), 700)
 assert len(JOBS) == 1 and f"autoland-judgment: failed {head}" in JOBS[0]
 status, digest = run(clean(comments=[failed], **mig), 800)
-assert len(JOBS) == 1 and "build or tests failing" in JOBS[0] and "isn't settled" in JOBS[0], JOBS
+assert len(JOBS) == 1 and "something failing" in JOBS[0] and "isn't settled" in JOBS[0], JOBS
 assert "a Claude job is fixing it" in status and not merged() and digest == [], (status, digest)
 status, _ = run(clean(comments=[failed], **mig), 900)
 assert JOBS == [] and "a Claude job is fixing it" in status
@@ -501,14 +501,14 @@ status, _ = run(clean(comments=[failed], **mig), 7400)
 assert JOBS == [] and "a Claude job is fixing it" in status, (status, JOBS)
 STATES["job-1"] = "done"
 status, _ = run(clean(comments=[failed], **mig), 7500)
-assert len(JOBS) == 1 and "build or tests failing" in JOBS[0], (status, JOBS)
+assert len(JOBS) == 1 and "something failing" in JOBS[0], (status, JOBS)
 # That one ends with it still failing (it pushed nothing): handed once more
 # once two passes have seen it ended, then listed for the owner.
 STATES["job-1"] = "error"
 status, digest = run(clean(comments=[failed], **mig), 7600)
 assert JOBS == [] and digest == [], (JOBS, digest)
 status, digest = run(clean(comments=[failed], **mig), 7700)
-assert len(JOBS) == 1 and "build or tests failing" in JOBS[0], (status, JOBS)
+assert len(JOBS) == 1 and "something failing" in JOBS[0], (status, JOBS)
 run(clean(comments=[failed], **mig), 7800)
 status, digest = run(clean(comments=[failed], **mig), 7900)
 assert JOBS == [] and [x[0] for x in digest] == ["Two Claude jobs ended without fixing it"], (JOBS, digest)
@@ -548,33 +548,159 @@ for kw in ({"checks": [{"__typename": "CheckRun", "name": "ci", "status": "COMPL
     status, digest = run(clean(labels=["needs-owner"], **kw), 7200)
     assert JOBS == [] and not merged() and [x[0] for x in digest] == ["Labelled needs-owner"], (kw, status, digest)
 
-# Past the round limit: the owner's label, then one comment. A label that
-# won't go on (none in the repo) isn't taken as on: no comment, and the next
-# pass tries again rather than starting the rounds over.
+# Past the round limit the reviewers aren't asked again, and neither is the
+# owner: a Claude job settles what's left on its merits, then a judge decides.
 fresh_pr_state()
 stuck = {"reviews": [rv_review("codex", 1)] * 5, "threads": [False]}
-FAIL.append("--add-label")
-for t in (700, 800):
-    status, _ = run(mkpr(**stuck), t)
-    assert "--add-label needs-owner" in " ".join(WROTE) and not any("/comments" in x for x in WROTE), WROTE
-    assert "Unsettled after the round limit" not in status and "Still unsettled" in status, status
-FAIL.clear()
-status, _ = run(mkpr(**stuck), 900)
-assert any("/comments" in x for x in WROTE) and JOBS == [], WROTE
-status, _ = run(mkpr(labels=["needs-owner"], **stuck), 1000)
-assert not any("--add-label" in x for x in WROTE), "labelled once"
-# Clean reviews since don't land it while the label is on; taking it off does.
-status, digest = run(clean(labels=["needs-owner"]), 1100)
-assert not merged() and JOBS == [] and [x[0] for x in digest] == ["Unsettled after the round limit"], (status, digest)
-status, _ = run(clean(), 1200)
-assert merged(), status
-# Taken off with findings still open: the rounds start over rather than
-# going straight back to the owner.
+status, digest = run(mkpr(**stuck), 0)
+assert not any("--add-label" in x or "/comments" in x for x in WROTE) and digest == [], (WROTE, digest)
+status, digest = run(mkpr(**stuck), 7200)
+assert not any("--add-label" in x or "/comments" in x for x in WROTE) and digest == [], (WROTE, digest)
+assert queued() == [] and "Past the review-round limit (5): 1 open review thread" in status, (queued(), status)
+assert len(JOBS) == 1 and "won't look again" in JOBS[0] and "answer the rest with why" in JOBS[0], JOBS
+# Answered without a push: still no look, a judge instead, told to read the answers too.
+answered = {"reviews": stuck["reviews"], "threads": [True]}
+status, digest = run(mkpr(**answered), 7300)
+assert queued() == [] and len(JOBS) == 1 and "past its review-round limit" in JOBS[0], (queued(), JOBS)
+assert "a finding answered away" in JOBS[0] and "found nothing" not in JOBS[0], JOBS
+assert "a Claude job is judging it (it went past the review-round limit" in status and not merged() and digest == [], status
+status, _ = run(mkpr(comments=[said(judgment("land", n=5))], **answered), 7400)
+assert merged() and "judged it fine to land" in status, status
+# A push past the limit isn't looked at either: the judge reads it, and a
+# finding it says was answered away for real goes to a fix job.
 fresh_pr_state()
-run(mkpr(**stuck), 700)
-run(mkpr(labels=["needs-owner"], **stuck), 800)
-status, _ = run(mkpr(**stuck), 900)
-assert "Still unsettled" not in status and not any("--add-label" in x for x in WROTE), (status, WROTE)
+pushed = {**answered, "sha": newer}
+status, _ = run(mkpr(**pushed), 0)
+assert queued() == [] and len(JOBS) == 1 and "past its review-round limit" in JOBS[0], (queued(), JOBS)
+status, _ = run(mkpr(comments=[said(judgment("failed", n=5, sha=newer))], **pushed), 7300)
+assert not merged() and len(JOBS) == 1 and "a finding left unfixed" in JOBS[0], (status, JOBS)
+# The owner hears only if the judge sends it to them.
+status, digest = run(mkpr(comments=[said(judgment("owner", n=5, sha=newer))], **pushed), 7400)
+assert not merged() and [x[0] for x in digest] == ["Judged yours to decide"], digest
+# A clean look that comes back on the head anyway is a clean head like any other.
+fresh_pr_state()
+status, _ = run(mkpr(reviews=[*stuck["reviews"], rv_review("codex", 0), rv_review("deepseek", 0)], threads=[True]), 700)
+assert merged() and JOBS == [], (status, JOBS)
+
+# A look already on its way when the limit's reached is waited for, and what
+# it finds holds the pass back, whatever the judge said.
+fresh_pr_state()
+four = {"reviews": [rv_review("codex", 1)] * 4, "threads": [True]}
+five = {"reviews": [rv_review("codex", 1)] * 5, "threads": [True]}
+run(mkpr(**four), 0)
+run(mkpr(**four), 600)
+assert queued() == ["deepseek"], queued()
+status, _ = run(mkpr(**five), 700)
+assert JOBS == [] and not merged() and "DeepSeek is reviewing this commit" in status, (status, JOBS)
+worker(deepseek={"result": "review", "answer": {"findings": [{"path": "a.py"}]}})
+status, _ = run(mkpr(comments=[said(judgment("land", n=5))], **five), 800)
+assert not merged() and f"Past the review-round limit (5): review findings on {head[:7]}" in status, status
+# Findings that couldn't be posted aren't dropped for want of another look:
+# that one's asked again, the same round.
+fresh_pr_state()
+run(mkpr(**four), 0)
+run(mkpr(**four), 600)
+worker(deepseek={"result": "review", "answer": {"findings": [{"path": "a.py"}]}})
+STUB["post"] = RuntimeError("HTTP 502")
+for t in (650, 710, 770):
+    run(mkpr(**five), t)
+STUB["post"] = None
+assert pr_state()["lostOn"]["deepseek"] == {"main": head}, pr_state()
+status, _ = run(mkpr(comments=[said(judgment("land", n=5))], **five), 830)
+assert not merged() and JOBS == [] and "Waiting for DeepSeek's review" in status, (status, JOBS)
+status, _ = run(mkpr(comments=[said(judgment("land", n=5))], **five), 770 + 3700)
+assert queued() == ["deepseek"] and not merged() and JOBS == [], (queued(), status, JOBS)
+# So is a look at this head after findings on it, or at an earlier head:
+# what's still in the queue for the PR, begun or not, is waited for.
+for at, pushed_to in ((head, head), (head, newer)):
+    fresh_pr_state()
+    V.queue("sam/r", mkpr(sha=at), "pr-sam_r-5.json", "codex")
+    status, _ = run(mkpr(sha=pushed_to, **five), 700)
+    assert JOBS == [] and not merged() and "Waiting for Codex's review" in status, (pushed_to, status, JOBS)
+    worker(codex={"result": "review", "answer": {"findings": [{"path": "a.py"}]}})
+    status, _ = run(mkpr(sha=pushed_to, comments=[said(judgment("land", n=5, sha=pushed_to))], **five), 800)
+    assert not merged() and f"review findings on {at[:7]}" in status, (pushed_to, status)
+# Findings lost after earlier ones on the head, then a push: still owed, and
+# asked for on the new head.
+fresh_pr_state()
+V.queue("sam/r", mkpr(), "pr-sam_r-5.json", "codex")
+worker(codex={"result": "review", "answer": {"findings": [{"path": "a.py"}]}})
+STUB["post"] = RuntimeError("HTTP 502")
+for t in (650, 710, 770):
+    run(mkpr(**five), t)
+STUB["post"] = None
+landed_newer = {**five, "sha": newer, "comments": [said(judgment("land", n=5, sha=newer))]}
+status, _ = run(mkpr(**landed_newer), 800)
+assert not merged() and JOBS == [] and "Waiting for Codex's review" in status, (status, JOBS)
+status, _ = run(mkpr(**landed_newer), 1500)
+assert queued() == ["codex"] and not merged(), (queued(), status)
+worker()
+status, _ = run(mkpr(reviews=[*five["reviews"], rv_review("codex", 0, newer)], threads=[True], sha=newer,
+                     comments=landed_newer["comments"]), 1600)
+assert "lostOn" not in pr_state() or not pr_state()["lostOn"], pr_state()
+# A look at an earlier head posting in the pass that loses one at this head
+# doesn't cover the lost one.
+fresh_pr_state()
+V.queue("sam/r", mkpr(sha=newer), "pr-sam_r-5.json", "codex")
+worker(codex={"result": "review", "answer": {"findings": [{"path": "a.py"}]}})
+real_post = V.post
+
+
+def post_but_newer(repo, pr, r, answer):
+    if pr["headRefOid"] == newer:
+        raise RuntimeError("HTTP 502")
+    return real_post(repo, pr, r, answer)
+
+
+V.post = post_but_newer
+for t in (650, 710):
+    run(mkpr(sha=newer, **five), t)
+V.queue("sam/r", mkpr(), "pr-sam_r-5.json", "codex")
+worker()
+run(mkpr(sha=newer, **five), 770)
+V.post = real_post
+assert ("codex", head, 0) in POSTED, POSTED
+assert pr_state()["lostOn"]["codex"] == {"main": newer}, pr_state()
+status, _ = run(mkpr(**landed_newer), 830)
+assert not merged() and JOBS == [] and "Waiting for Codex's review" in status, (status, JOBS)
+# A loss recorded before lostOn, in its head's rv, still holds after a push.
+fresh_pr_state()
+C.save("pr-sam_r-5.json", {"head": head, "seen": C.ts(T0), "rv": {"codex": {"lost": [head, "main"]}}})
+status, _ = run(mkpr(**landed_newer), 700)
+assert not merged() and JOBS == [] and "Waiting for Codex's review" in status, (status, JOBS)
+assert pr_state()["lostOn"] == {"codex": {"main": head}} and "lost" not in pr_state()["rv"].get("codex", {}), pr_state()
+# Nor does a look at the PR on another base: retargeted and back, the loss
+# on this one still holds.
+fresh_pr_state()
+V.queue("sam/r", mkpr(), "pr-sam_r-5.json", "codex")
+worker(codex={"result": "review", "answer": {"findings": [{"path": "a.py"}]}})
+STUB["post"] = RuntimeError("HTTP 502")
+for t in (650, 710, 770):
+    run(mkpr(**five), t)
+STUB["post"] = None
+V.queue("sam/r", mkpr(base="release/1.x"), "pr-sam_r-5.json", "codex")
+worker()
+run(mkpr(base="release/1.x", **five), 800)
+assert ("codex", head, 0) in POSTED and pr_state()["lostOn"] == {"codex": {"main": head}}, (POSTED, pr_state())
+status, _ = run(mkpr(comments=[said(judgment("land", n=5))], **five), 830)
+assert not merged() and JOBS == [] and "Codex is reviewing this commit" in status, (status, JOBS)
+# Nor are findings from a look on a base the PR has since left: owed there.
+fresh_pr_state()
+V.queue("sam/r", mkpr(base="release/1.x"), "pr-sam_r-5.json", "codex")
+worker(codex={"result": "review", "answer": {"findings": [{"path": "a.py"}]}})
+run(mkpr(**five), 700)
+assert POSTED == [] and pr_state()["lostOn"] == {"codex": {"release/1.x": head}}, (POSTED, pr_state())
+status, _ = run(mkpr(base="release/1.x", comments=[said(judgment("land", n=5, base="release/1.x"))], **five), 800)
+assert not merged() and JOBS == [] and "Codex" in status, (status, JOBS)
+# The limit holds while the reviewer that reached it is out of service, and
+# with none in service the judge still decides.
+for out in (["codex"], ["codex", "deepseek"]):
+    fresh_pr_state()
+    C.save(V.OUT, {r: {"why": "usage", "until": C.ts(T0) + 86400} for r in out})
+    status, digest = run(mkpr(**five), 700)
+    assert queued() == [] and len(JOBS) == 1 and "past its review-round limit" in JOBS[0], (out, queued(), status, JOBS)
+    assert "No reviewer can review it" not in [x[0] for x in digest], digest
+    os.remove(f"{tmp}/state/{V.OUT}")
 
 # No CI at all: the judge builds and tests it itself.
 fresh_pr_state()
@@ -603,7 +729,7 @@ assert JOBS == [] and not merged() and "a Claude job is judging it" in status, (
 for v in ("owner", "failed"):
     status, _ = run(clean(checks=CI_GREEN, comments=[said(judgment(v, n=5))]), 900)
     assert not merged(), (v, status)
-assert len(JOBS) == 1 and "build or tests failing" in JOBS[0], JOBS
+assert len(JOBS) == 1 and "something failing" in JOBS[0], JOBS
 fresh_pr_state()
 run(clean(checks=[]), 700)
 status, _ = run(clean(checks=CI_GREEN, comments=[said(judgment("land", n=5))]), 900)
@@ -616,7 +742,7 @@ run(clean(checks=[]), 700)
 status, digest = run(clean(checks=busy_ci, comments=[said(judgment("owner", n=5))]), 800)
 assert "Judged yours to decide" in [x[0] for x in digest] and any("--add-label needs-owner" in x for x in WROTE), (status, digest)
 status, _ = run(clean(checks=busy_ci, comments=[said(judgment("failed", n=5))]), 900)
-assert len(JOBS) == 1 and "build or tests failing" in JOBS[0], (status, JOBS)
+assert len(JOBS) == 1 and "something failing" in JOBS[0], (status, JOBS)
 status, _ = run(clean(checks=busy_ci, comments=[said(judgment("land", n=5))]), 1000)
 assert not merged() and "waiting for CI" in status, status
 
