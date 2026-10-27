@@ -113,13 +113,15 @@ let
   '';
   # lock-age holds Cargo and npm refreshes to the longest age the machine's
   # policy and the repo's own config set, presets and all. It takes the
-  # policy from the store, so the command Renovate runs has no arguments to
-  # quote.
+  # policy from the store, so the command Renovate runs has only the branch
+  # the refresh is for, which Renovate fills in: a ref name has no spaces,
+  # and one with anything but these characters isn't allowed to run.
   lockAge = pkgs.writeShellScriptBin "lock-age" ''
     exec ${lockAgePython}/bin/python3 -I ${lockAgeSrc}/lock-age.py \
-      ${pkgs.writeText "lock-age-policy.json" (builtins.toJSON renovatePolicy)} ${releaseAges}/bin/release-ages
+      ${pkgs.writeText "lock-age-policy.json" (builtins.toJSON renovatePolicy)} ${releaseAges}/bin/release-ages "$@"
   '';
-  lockAgeCommand = "${lockAge}/bin/lock-age";
+  lockAgeCommand = "${lockAge}/bin/lock-age {{{baseBranch}}}";
+  lockAgeAllowed = "^${lib.escapeRegex "${lockAge}/bin/lock-age"} [A-Za-z0-9._/+-]+$";
   # Cargo's and npm's lock file refreshes resolve to registry releases, with
   # no cutoff Renovate keeps (cargo has none; npm's --before is dropped
   # whenever it fails to resolve). lock-age holds them to the age itself:
@@ -270,7 +272,7 @@ let
     rcfg.settings;
   renovateSettings = renovatePolicy // {
     # The one command a repo's refresh may run after it (lock-age).
-    allowedCommands = (renovatePolicy.allowedCommands or [ ]) ++ [ "^${lib.escapeRegex lockAgeCommand}$" ];
+    allowedCommands = (renovatePolicy.allowedCommands or [ ]) ++ [ lockAgeAllowed ];
     packageRules = (renovatePolicy.packageRules or [ ]) ++ [ lockAgeRule ];
   };
 

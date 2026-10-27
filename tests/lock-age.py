@@ -39,6 +39,9 @@ def repo(files):
             f.write(text)
     git("add", "-A")
     git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "base")
+    # As Renovate's clone has it: main is the default branch.
+    git("update-ref", "refs/remotes/origin/main", "HEAD")
+    git("symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
     return d
 
 
@@ -110,7 +113,7 @@ def release_ages(resolver, config):
     assert resolver == ["release-ages"], resolver
     RESOLVED.append(config)
     ages = []
-    got = {"inheritConfig": bool(config.get("inheritConfig")), "baseBranchPatterns": bool(config.get("baseBranchPatterns"))}
+    got = {"inheritConfig": bool(config.get("inheritConfig"))}
     if "configFileNames" in config:
         got["configFileNames"] = config["configFileNames"]
 
@@ -141,9 +144,8 @@ def release_ages(resolver, config):
 
 
 # What lock-age makes of release-ages' answer, or its failure.
-answer = '{"ages": [86400000, 1000], "inheritConfig": false, "baseBranchPatterns": false}'
-assert L.release_ages(["sh", "-c", f"cat >/dev/null; echo '{answer}'"], {}) == \
-    {"ages": [86400, 1], "inheritConfig": False, "baseBranchPatterns": False}
+answer = '{"ages": [86400000, 1000], "inheritConfig": false}'
+assert L.release_ages(["sh", "-c", f"cat >/dev/null; echo '{answer}'"], {}) == {"ages": [86400, 1], "inheritConfig": False}
 try:
     L.release_ages(["sh", "-c", "echo 'Error: no such preset' >&2; exit 1"], {})
     raise AssertionError("release-ages failed, and lock-age took its answer")
@@ -153,12 +155,12 @@ L.crate_index, L.run, L.get_json, L.release_ages = crate_index, run, get_json, r
 POLICY = {"minimumReleaseAge": "3 days"}
 
 
-def lock_age(policy=POLICY):
+def lock_age(policy=POLICY, branch="main"):
     RAN.clear()
     RESOLVED.clear()
     path = os.path.join(tempfile.mkdtemp(), "policy.json")
     write(path, json.dumps(policy))
-    return L.main(["lock-age", path, "release-ages"])
+    return L.main(["lock-age", path, "release-ages", branch])
 
 
 def versions(path="Cargo.lock"):
@@ -224,7 +226,9 @@ for d in ("my dir", "caf\u00e9", 'a\t"b'):
 os.chdir(tempfile.mkdtemp())
 git("init", "-q")
 write("Cargo.lock", cargo_lock(("c", "0.4.1")))
+default_branch, L.default_branch = L.default_branch, lambda: "main"
 assert lock_age() == 1
+L.default_branch = default_branch
 
 # A version the base had from another source isn't taken as checked: here
 # the base's f 1.0.0 was a git dependency, the refresh's is from crates.io.
@@ -303,13 +307,14 @@ for policy in ({"minimumReleaseAge": None}, {}):
 repo({"Cargo.lock": cargo_lock(("b", "2.0.0"), ("h", "1.0.0")), ".gitlab/renovate.json5": "{minimumReleaseAge: '2 weeks'}"})
 write("Cargo.lock", cargo_lock(("b", "2.1.0"), ("h", "1.1.0")))
 assert lock_age() == 0 and versions()["h"] == "1.0.0", versions()
-# Branches besides the default read the default branch's config, which
-# isn't checked out here: config that targets them fails the refresh.
-for policy, files in (({**POLICY, "baseBranchPatterns": ["main", "release/1"]}, {}),
-                      (POLICY, {"renovate.json": '{"baseBranchPatterns": ["main", "release/1"]}'})):
-    repo({"Cargo.lock": cargo_lock(("b", "2.0.0")), **files})
-    write("Cargo.lock", cargo_lock(("b", "2.1.0")))
-    assert lock_age(policy) == 1 and RAN == [], (policy, files)
+# A refresh for a branch besides the default (Renovate reads the default
+# branch's config for it, not the one checked out) fails, as does one
+# where the default branch can't be told.
+repo({"Cargo.lock": cargo_lock(("b", "2.0.0"))})
+write("Cargo.lock", cargo_lock(("b", "2.1.0")))
+assert lock_age(branch="release/1") == 1 and RAN == []
+git("symbolic-ref", "--delete", "refs/remotes/origin/HEAD")
+assert lock_age() == 1 and RAN == []
 # Config the machine inherits from another repo fails every refresh, set
 # directly or by a preset.
 for policy in ({**POLICY, "inheritConfig": True}, {**POLICY, "extends": ["inherits"]},
@@ -480,8 +485,8 @@ repo({"yarn.lock": "# old\n"})
 write("yarn.lock", "# new\n")
 assert lock_age() == 1
 
-# Arguments: the policy and release-ages.
-for argv in (["lock-age"], ["lock-age", "policy.json"]):
+# Arguments: the policy, release-ages and the branch.
+for argv in (["lock-age"], ["lock-age", "policy.json"], ["lock-age", "policy.json", "release-ages"]):
     assert L.main(argv) == 2, argv
 
 print("lock-age: ok")

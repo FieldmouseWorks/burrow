@@ -167,8 +167,6 @@
           test "$(read '{}' | jq -c '[has("configFileNames"), .inheritConfig]')" = '[false,false]'
           test "$(read '{"configFileNames": null}' | jq -c '[has("configFileNames"), .configFileNames]')" = '[true,null]'
           test "$(read '{"force": {"inheritConfig": true}}' | jq -c .inheritConfig)" = true
-          test "$(read '{"baseBranches": ["main", "release/1"]}' | jq -c .baseBranchPatterns)" = true
-          test "$(read '{}' | jq -c .baseBranchPatterns)" = false
           for bad in '{"extends": ["github>someone/presets"]}' '{"extends": ["config:nope"]}' '{"minimumReleaseAge": "soon"}' '{"minimumReleaseAge": 5}' \
                      '{"repositories": [{"repository": "x/y", "configFileNames": ["c.json"]}]}'; do
             if read "$bad"; then echo "took $bad"; exit 1; fi

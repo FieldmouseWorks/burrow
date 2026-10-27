@@ -1,4 +1,4 @@
-"""lock-age POLICY RELEASE-AGES...: a lock file refresh takes only releases at
+"""lock-age POLICY RELEASE-AGES BRANCH: a lock file refresh takes only releases at
 least the longest release age its Renovate config sets old, or fails.
 
 Renovate runs it after a lock file refresh (a postUpgradeTask, from the
@@ -31,7 +31,9 @@ Renovate's own), with every config migrated and every preset each extends
 resolved, as RELEASE-AGES (updates/release-ages.mjs, Renovate's own code)
 reads them; no age set anywhere is none. A preset it can't resolve, an
 age it can't read, or inheritConfig (config from another repo it can't
-see) fails the refresh. For npm, a cutoff npm's own config sets for the
+see) fails the refresh, as does a refresh for a BRANCH other than the
+default (origin/HEAD): Renovate reads the default branch's config for it,
+which isn't the one checked out. For npm, a cutoff npm's own config sets for the
 lock file's directory (before, min-release-age) holds too when it's
 earlier.
 """
@@ -175,8 +177,8 @@ def repo_config(files):
 
 def release_ages(resolver, config):
     """What the config sets that decides the age, presets resolved:
-    ages (in seconds), configFileNames (only when set, null included),
-    inheritConfig and baseBranchPatterns."""
+    ages (in seconds), configFileNames (only when set, null included) and
+    inheritConfig."""
     p = subprocess.run(resolver, input=json.dumps(config), capture_output=True, text=True)
     if p.returncode != 0:
         why = [x for x in p.stderr.splitlines() if "Error" in x or "validationError" in x] or ["failed"]
@@ -359,13 +361,24 @@ def npm(path, cutoff, bad):
             bad.append(f"{path}: {name} {version} was published within the age")
 
 
+def default_branch():
+    """The repo's default branch, as Renovate's clone has it."""
+    p = run(["git", "rev-parse", "--abbrev-ref", "origin/HEAD"], ".")
+    if p.returncode != 0 or not p.stdout.startswith("origin/"):
+        raise RuntimeError(f"can't tell the default branch: {p.stderr.strip() or p.stdout.strip()}")
+    return p.stdout.strip()[len("origin/"):]
+
+
 def main(argv):
-    if len(argv) < 3:
+    if len(argv) != 4:
         print(__doc__.split("\n\n")[0], file=sys.stderr)
         return 2
-    resolver = argv[2:]
+    resolver, branch = argv[2:3], argv[3]
     bad = []
     try:
+        if branch != default_branch():
+            raise ValueError(f"the refresh is for {branch}, whose config Renovate takes from the default branch, "
+                             "which isn't the one checked out here")
         with open(argv[1]) as f:
             policy = json.load(f)
         glob, machine = (release_ages(resolver, c) for c in ({"extends": policy.get("globalExtends", [])}, policy))
@@ -378,10 +391,6 @@ def main(argv):
         files = (policy["configFileNames"] if "configFileNames" in policy else glob.get("configFileNames")) or []
         repo = repo_config(files)
         got = [glob, machine, *([release_ages(resolver, repo)] if repo is not None else [])]
-        # A maintenance branch for another base reads the default branch's
-        # config, which isn't the one checked out here.
-        if any(g["baseBranchPatterns"] for g in got):
-            raise ValueError("Renovate targets branches besides the default, whose config lock-age can't read")
         ages = [x for g in got for x in g["ages"]]
         age = max(ages, default=0)
         paths = changed()
