@@ -32,11 +32,11 @@ resolved, as RELEASE-AGES (updates/release-ages.mjs, Renovate's own code)
 reads them; no age set anywhere is none. A preset it can't resolve, an
 age it can't read, or inheritConfig (config from another repo it can't
 see) fails the refresh, as does a refresh for a BRANCH other than the
-default (origin/HEAD): Renovate reads the default branch's config for it,
-which isn't the one checked out. origin/HEAD is the default Renovate
-reads its config from only in a clone it has just made from the repo
-itself, so a machine config that keeps clones (persistRepoData) or works
-in forks (forkToken) fails every refresh too. For npm, a cutoff npm's own config sets for the
+default (the remote's HEAD, asked of it now, not the clone's possibly
+stale origin/HEAD): Renovate reads the default branch's config for it,
+which isn't the one checked out. In a fork (forkToken) the remote is the
+fork, not the repo whose default Renovate reads, so a machine config
+that works in forks fails every refresh. For npm, a cutoff npm's own config sets for the
 lock file's directory (before, min-release-age) holds too when it's
 earlier.
 """
@@ -181,7 +181,7 @@ def repo_config(files):
 def release_ages(resolver, config):
     """What the config sets that decides the age, presets resolved:
     ages (in seconds), configFileNames (only when set, null included),
-    inheritConfig and reusesClone."""
+    inheritConfig and forkMode."""
     p = subprocess.run(resolver, input=json.dumps(config), capture_output=True, text=True)
     if p.returncode != 0:
         why = [x for x in p.stderr.splitlines() if "Error" in x or "validationError" in x] or ["failed"]
@@ -365,11 +365,14 @@ def npm(path, cutoff, bad):
 
 
 def default_branch():
-    """The repo's default branch, as Renovate's clone has it."""
-    p = run(["git", "rev-parse", "--abbrev-ref", "origin/HEAD"], ".")
-    if p.returncode != 0 or not p.stdout.startswith("origin/"):
+    """The repo's default branch, asked of the remote now: a clone Renovate
+    kept from an earlier run (persistRepoData, or one whose cleanup
+    failed) can hold an origin/HEAD from before the default changed."""
+    p = run(["git", "ls-remote", "--symref", "origin", "HEAD"], ".")
+    m = re.match(r"ref: refs/heads/(\S+)\tHEAD\n", p.stdout) if p.returncode == 0 else None
+    if not m:
         raise RuntimeError(f"can't tell the default branch: {p.stderr.strip() or p.stdout.strip()}")
-    return p.stdout.strip()[len("origin/"):]
+    return m.group(1)
 
 
 def main(argv):
@@ -388,9 +391,9 @@ def main(argv):
         if glob["inheritConfig"] or machine["inheritConfig"]:
             raise ValueError("the machine's Renovate config inherits config from another repo, which could set "
                              "a release age lock-age can't see")
-        if glob["reusesClone"] or machine["reusesClone"]:
-            raise ValueError("the machine's Renovate config keeps clones or works in forks, where origin/HEAD "
-                             "needn't be the default branch Renovate reads its config from")
+        if glob["forkMode"] or machine["forkMode"]:
+            raise ValueError("the machine's Renovate config works in forks, whose default branch needn't be "
+                             "the one Renovate reads its config from")
         # Renovate settles which files to look in before it resolves the
         # machine's own extends: from the machine's config as it's written,
         # over its globalExtends'. Set to null, only Renovate's own.

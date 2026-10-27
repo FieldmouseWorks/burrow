@@ -39,9 +39,12 @@ def repo(files):
             f.write(text)
     git("add", "-A")
     git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "base")
-    # As Renovate's clone has it: main is the default branch.
-    git("update-ref", "refs/remotes/origin/main", "HEAD")
-    git("symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
+    # The remote, whose default branch is main.
+    origin = tempfile.mkdtemp()
+    git("init", "-q", "--bare", origin)
+    git("--git-dir", origin, "symbolic-ref", "HEAD", "refs/heads/main")
+    git("remote", "add", "origin", origin)
+    git("push", "-q", "origin", "HEAD:refs/heads/main")
     return d
 
 
@@ -114,7 +117,7 @@ def release_ages(resolver, config):
     RESOLVED.append(config)
     ages = []
     got = {"inheritConfig": bool(config.get("inheritConfig")),
-           "reusesClone": bool(config.get("persistRepoData") or config.get("forkToken"))}
+           "forkMode": bool(config.get("forkToken"))}
     if "configFileNames" in config:
         got["configFileNames"] = config["configFileNames"]
 
@@ -145,9 +148,9 @@ def release_ages(resolver, config):
 
 
 # What lock-age makes of release-ages' answer, or its failure.
-answer = '{"ages": [86400000, 1000], "inheritConfig": false, "reusesClone": false}'
+answer = '{"ages": [86400000, 1000], "inheritConfig": false, "forkMode": false}'
 assert L.release_ages(["sh", "-c", f"cat >/dev/null; echo '{answer}'"], {}) == \
-    {"ages": [86400, 1], "inheritConfig": False, "reusesClone": False}
+    {"ages": [86400, 1], "inheritConfig": False, "forkMode": False}
 try:
     L.release_ages(["sh", "-c", "echo 'Error: no such preset' >&2; exit 1"], {})
     raise AssertionError("release-ages failed, and lock-age took its answer")
@@ -315,11 +318,15 @@ assert lock_age() == 0 and versions()["h"] == "1.0.0", versions()
 repo({"Cargo.lock": cargo_lock(("b", "2.0.0"))})
 write("Cargo.lock", cargo_lock(("b", "2.1.0")))
 assert lock_age(branch="release/1") == 1 and RAN == []
-# origin/HEAD is the default only in a fresh clone of the repo itself: a
-# machine that keeps clones or works in forks fails every refresh.
-for policy in ({**POLICY, "persistRepoData": True}, {**POLICY, "forkToken": "t"}):
-    assert lock_age(policy) == 1 and RAN == [], policy
-git("symbolic-ref", "--delete", "refs/remotes/origin/HEAD")
+# The default is the remote's, as it is now, not a clone's stale
+# origin/HEAD from before the default changed to main.
+git("push", "-q", "origin", "HEAD:refs/heads/master")
+git("update-ref", "refs/remotes/origin/master", "HEAD")
+git("symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/master")
+assert lock_age(branch="master") == 1 and RAN == []
+# A machine that works in forks fails every refresh: the remote is the fork.
+assert lock_age({**POLICY, "forkToken": "t"}) == 1 and RAN == []
+git("remote", "remove", "origin")
 assert lock_age() == 1 and RAN == []
 # Config the machine inherits from another repo fails every refresh, set
 # directly or by a preset.
