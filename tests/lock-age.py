@@ -110,7 +110,9 @@ def release_ages(resolver, config):
     assert resolver == ["release-ages"], resolver
     RESOLVED.append(config)
     ages = []
-    got = {"configFileNames": config.get("configFileNames"), "inheritConfig": bool(config.get("inheritConfig"))}
+    got = {"inheritConfig": bool(config.get("inheritConfig"))}
+    if "configFileNames" in config:
+        got["configFileNames"] = config["configFileNames"]
 
     def walk(node, under=""):
         if isinstance(node, dict):
@@ -120,7 +122,7 @@ def release_ages(resolver, config):
                         if x == "slow":
                             ages.append(14 * 86400)
                         elif x == "files":
-                            got["configFileNames"] = got["configFileNames"] or ["ci/slow.json"]
+                            got.setdefault("configFileNames", ["ci/slow.json"])
                         elif x == "inherits":
                             got["inheritConfig"] = True
                         else:
@@ -139,9 +141,8 @@ def release_ages(resolver, config):
 
 
 # What lock-age makes of release-ages' answer, or its failure.
-answer = '{"ages": [86400000, 1000], "configFileNames": null, "inheritConfig": false}'
-assert L.release_ages(["sh", "-c", f"cat >/dev/null; echo '{answer}'"], {}) == \
-    {"ages": [86400, 1], "configFileNames": None, "inheritConfig": False}
+answer = '{"ages": [86400000, 1000], "inheritConfig": false}'
+assert L.release_ages(["sh", "-c", f"cat >/dev/null; echo '{answer}'"], {}) == {"ages": [86400, 1], "inheritConfig": False}
 try:
     L.release_ages(["sh", "-c", "echo 'Error: no such preset' >&2; exit 1"], {})
     raise AssertionError("release-ages failed, and lock-age took its answer")
@@ -307,7 +308,8 @@ for policy in ({**POLICY, "inheritConfig": True}, {**POLICY, "extends": ["inheri
 # Config files a preset adds are read, from globalExtends too; the
 # machine's own configFileNames win over globalExtends'.
 for policy, held in (({**POLICY, "extends": ["files"]}, True), ({**POLICY, "globalExtends": ["files"]}, True),
-                     ({**POLICY, "globalExtends": ["files"], "configFileNames": []}, False)):
+                     ({**POLICY, "globalExtends": ["files"], "configFileNames": []}, False),
+                     ({**POLICY, "globalExtends": ["files"], "configFileNames": None}, False)):
     repo({"Cargo.lock": cargo_lock(("b", "2.0.0"), ("h", "1.0.0")), "ci/slow.json": '{"minimumReleaseAge": "2 weeks"}'})
     write("Cargo.lock", cargo_lock(("b", "2.1.0"), ("h", "1.1.0")))
     assert lock_age(policy) == 0 and versions()["h"] == ("1.0.0" if held else "1.1.0"), (policy, versions())
@@ -384,6 +386,21 @@ for npmrc, days in (({"before": (NOW - dt.timedelta(days=30)).strftime("%a %b %d
     (cmd, _), = [x for x in RAN if x[0][:2] == ["npm", "install"]]
     got = dt.datetime.strptime(re.search(r"--before=(\S+)", " ".join(cmd)).group(1), "%Y-%m-%dT%H:%M:%SZ")
     assert abs((got.replace(tzinfo=dt.timezone.utc) - (NOW - dt.timedelta(days=days))).total_seconds()) < 120, (npmrc, cmd)
+    NPMRC.clear()
+# npm prints before in its local time zone: the same instant, whatever the
+# offset; and an npm without min-release-age (npm 10) says undefined.
+for offset in (-8, 0, 5.5):
+    tz = dt.timezone(dt.timedelta(hours=offset))
+    local = (NOW - dt.timedelta(days=30)).astimezone(tz)
+    NPMRC.update({"before": local.strftime("%a %b %d %Y %H:%M:%S GMT%z (Somewhere)"), "min-release-age": "undefined"})
+    repo({"package-lock.json": npm_lock(("node_modules/left-pad", "1.0.0"))})
+    write("package-lock.json", npm_lock(("node_modules/left-pad", "1.2.0")))
+    RESOLVES["lock"] = npm_lock(("node_modules/left-pad", "1.0.1"))
+    NPM_TIMES["left-pad"]["1.0.1"] = (NOW - dt.timedelta(days=31)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    assert lock_age() == 0, (offset, NPMRC)
+    (cmd, _), = [x for x in RAN if x[0][:2] == ["npm", "install"]]
+    got = dt.datetime.strptime(re.search(r"--before=(\S+)", " ".join(cmd)).group(1), "%Y-%m-%dT%H:%M:%SZ")
+    assert abs((got.replace(tzinfo=dt.timezone.utc) - (NOW - dt.timedelta(days=30))).total_seconds()) < 120, (offset, cmd)
     NPMRC.clear()
 NPMRC["before"] = "next tuesday"
 repo({"package-lock.json": npm_lock(("node_modules/left-pad", "1.0.0"))})

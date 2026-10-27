@@ -1,7 +1,7 @@
 // release-ages RENOVATE < CONFIG: what a Renovate config (JSON) sets that
 // decides a lock file refresh's release age, as JSON on stdout: every
 // release age it sets, in milliseconds (ages), the config files it adds
-// (configFileNames, null when it sets none) and whether it inherits config
+// (configFileNames, left out when it doesn't set it) and whether it inherits config
 // from another repo (inheritConfig).
 // It asks Renovate's own code: the config is migrated (stabilityDays and
 // the like) and every preset it extends, at any scope and through every
@@ -35,4 +35,5 @@ let inheritConfig = false;
     }
   }
 })(config, true);
-console.log(JSON.stringify({ ages, configFileNames: config.configFileNames ?? null, inheritConfig }));
+const files = "configFileNames" in config ? { configFileNames: config.configFileNames } : {};
+console.log(JSON.stringify({ ages, ...files, inheritConfig }));

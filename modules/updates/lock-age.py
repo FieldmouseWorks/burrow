@@ -173,7 +173,8 @@ def repo_config(files):
 
 def release_ages(resolver, config):
     """What the config sets that decides the age, presets resolved:
-    ages (in seconds), configFileNames and inheritConfig."""
+    ages (in seconds), configFileNames (only when set, null included) and
+    inheritConfig."""
     p = subprocess.run(resolver, input=json.dumps(config), capture_output=True, text=True)
     if p.returncode != 0:
         why = [x for x in p.stderr.splitlines() if "Error" in x or "validationError" in x] or ["failed"]
@@ -304,17 +305,20 @@ def npm_cutoff(d, cutoff):
     p = run(["npm", "config", "get", "before", "min-release-age"], d)
     if p.returncode != 0:
         raise RuntimeError(f"npm config get: {p.stderr.strip()}")
-    got = dict(x.split("=", 1) for x in p.stdout.splitlines() if "=" in x)
+    # Unset is null; an npm without the option (npm 10's min-release-age)
+    # says undefined.
+    got = {k: v for k, v in (x.split("=", 1) for x in p.stdout.splitlines() if "=" in x)
+           if v not in ("null", "undefined", "")}
     cutoffs = [cutoff]
-    if got.get("before", "null") != "null":
-        # A JavaScript date: Fri Mar 01 2024 12:30:00 GMT+0000 (...)
+    if "before" in got:
+        # A JavaScript date, in the local time zone: Fri Mar 01 2024 12:30:00 GMT-0800 (...)
         m = re.match(r"\w{3} (\w{3} \d{2} \d{4} \d{2}:\d{2}:\d{2}) GMT([+-]\d{4})", got["before"])
         if not m:
             raise ValueError(f"can't read npm's before {got['before']!r}")
         cutoffs.append(dt.datetime.strptime(" ".join(m.groups()), "%b %d %Y %H:%M:%S %z"))
-    if got.get("min-release-age", "null") != "null":
+    if "min-release-age" in got:
         cutoffs.append(dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=float(got["min-release-age"])))
-    return min(cutoffs)
+    return min(cutoffs).astimezone(dt.timezone.utc)
 
 
 def npm(path, cutoff, bad):
@@ -365,7 +369,8 @@ def main(argv):
         if any(m["inheritConfig"] for m in machine):
             raise ValueError("the machine's Renovate config inherits config from another repo, which could set "
                              "a release age lock-age can't see")
-        files = next((m["configFileNames"] for m in reversed(machine) if m["configFileNames"] is not None), [])
+        # Set to null (or not set), Renovate looks only in its own files.
+        files = next((m["configFileNames"] or [] for m in reversed(machine) if "configFileNames" in m), [])
         repo = repo_config(files)
         ages = [x for m in (*machine, *([release_ages(resolver, repo)] if repo is not None else [])) for x in m["ages"]]
         age = max(ages, default=0)

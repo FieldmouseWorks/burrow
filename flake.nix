@@ -164,7 +164,8 @@
           test "$(ages '{"stabilityDays": 14, "packageRules": [{"matchManagers": ["cargo"], "stabilityDays": 10}]}')" = '[1209600000,864000000]'
           # Where else policy comes from.
           test "$(read '{"configFileNames": ["ci/renovate config.json"]}' | jq -c '[.configFileNames, .inheritConfig]')" = '[["ci/renovate config.json"],false]'
-          test "$(read '{}' | jq -c '[.configFileNames, .inheritConfig]')" = '[null,false]'
+          test "$(read '{}' | jq -c '[has("configFileNames"), .inheritConfig]')" = '[false,false]'
+          test "$(read '{"configFileNames": null}' | jq -c '[has("configFileNames"), .configFileNames]')" = '[true,null]'
           test "$(read '{"force": {"inheritConfig": true}}' | jq -c .inheritConfig)" = true
           for bad in '{"extends": ["github>someone/presets"]}' '{"extends": ["config:nope"]}' '{"minimumReleaseAge": "soon"}' '{"minimumReleaseAge": 5}' \
                      '{"repositories": [{"repository": "x/y", "configFileNames": ["c.json"]}]}'; do
