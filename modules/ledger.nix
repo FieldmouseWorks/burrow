@@ -25,6 +25,9 @@ let
       export CONARY_LEDGER=${lib.escapeShellArg cfg.dir}
       export CONARY_ANCHOR_REPO=${lib.escapeShellArg cfg.anchorRepo}
       export CONARY_OWN_CONTEXTS=${lib.escapeShellArg (lib.concatStringsSep "," cfg.ownContexts)}
+      # Sets the ledger up the first time, and is a no-op after. A ledger
+      # whose key was lost fails here until the key is back.
+      cn init >/dev/null
       if [ $# -gt 0 ]; then
         exec cn sync "$1"
       fi
@@ -66,7 +69,8 @@ in
       defaultText = lib.literalExpression ''"''${config.burrow.stateDir}/conary"'';
       description = ''
         The ledger: its op log, readable by everyone, and its signing key,
-        readable by burrow.user only. Persist it if / is ephemeral.
+        readable by burrow.user only. Persist it if / is ephemeral: a ledger
+        whose key is lost stops until the key is put back.
       '';
     };
 
@@ -75,8 +79,8 @@ in
       example = "sam/homelab";
       description = ''
         The GitHub repository (OWNER/NAME) that keeps the ledger's anchor, at
-        `refs/conary/anchor/<key>`. burrow.user's gh login must be able to
-        push to it.
+        `refs/conary/anchor`: one ledger per repository. burrow.user's gh
+        login must be able to push to it.
       '';
     };
 
