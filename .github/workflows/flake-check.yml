@@ -74,13 +74,16 @@ jobs:
           OUTCOME: ${{ steps.gate.outcome }}
           SKIP: ${{ inputs.build-skip }}
           PR_HEAD: ${{ github.event.pull_request.head.sha }}
-          LOG: flake-log-${{ github.run_attempt }}
         run: |
           if [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
             echo "no OIDC token in this run, so no attestation"
             exit 0
           fi
           case $OUTCOME in success) result=pass ;; *) result=fail ;; esac
+          # Artifact names are shared by every job in a run, and a caller may
+          # run this job more than once (a matrix, a re-run), so each log gets
+          # its own.
+          log="flake-log-$(cat /proc/sys/kernel/random/uuid)"
           dir="$RUNNER_TEMP/conary"
           mkdir -p "$dir"
           if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
@@ -100,15 +103,15 @@ jobs:
           fi
           jq -n --arg result "$result" --argjson revision "$revision" \
             --arg tree "$(git rev-parse 'HEAD^{tree}')" --arg skip "$SKIP" \
-            --arg sha256 "$(sha256sum "$RUNNER_TEMP/flake.log" | cut -d' ' -f1)" --arg artifact "$LOG" \
+            --arg sha256 "$(sha256sum "$RUNNER_TEMP/flake.log" | cut -d' ' -f1)" --arg artifact "$log" \
             '{$result, $revision, $tree, skipped: ($skip | split(" ") | map(select(. != ""))), log: {$sha256, $artifact}}' \
             > "$dir/predicate.json"
           cat "$subject" "$dir/predicate.json"
-          echo "path=$subject" >> "$GITHUB_OUTPUT"
+          { echo "path=$subject"; echo "log=$log"; } >> "$GITHUB_OUTPUT"
       - if: ${{ !cancelled() && steps.subject.outputs.path }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: flake-log-${{ github.run_attempt }}
+          name: ${{ steps.subject.outputs.log }}
           path: ${{ runner.temp }}/flake.log
       - if: ${{ !cancelled() && steps.subject.outputs.path }}
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
