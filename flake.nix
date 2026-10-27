@@ -143,7 +143,7 @@
         '';
         # A lock file refresh's too-new releases go back or fail it, with
         # stand-ins for cargo, npm and the registries.
-        lock-age = pkgs.runCommand "lock-age-check" { nativeBuildInputs = [ pkgs.python3 pkgs.git ]; } ''
+        lock-age = pkgs.runCommand "lock-age-check" { nativeBuildInputs = [ (pkgs.python3.withPackages (p: [ p.json5 ])) pkgs.git ]; } ''
           export HOME=$TMPDIR
           python3 -I ${./tests/lock-age.py} ${./modules/updates/lock-age.py}
           touch $out

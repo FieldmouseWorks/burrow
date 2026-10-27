@@ -1,5 +1,5 @@
-"""lock-age AGE_SECONDS: a lock file refresh takes only releases at least
-AGE_SECONDS old, or fails.
+"""lock-age AGE_SECONDS [PRESET...]: a lock file refresh takes only releases
+at least AGE_SECONDS old, or fails.
 
 Renovate runs it after a lock file refresh (a postUpgradeTask, from the
 repo's root, with the refresh in the working tree and HEAD at the base). For
@@ -22,10 +22,12 @@ the base's (Renovate would then commit its own, unchecked), an npm lock
 file without a packages map (npm 6's) or any other lock file changing
 (yarn, pnpm) fails the refresh: Renovate shows it as an artifact failure
 and doesn't merge it. A git dependency's commit is taken as it is, as Nix
-inputs are (burrow#82).
+inputs are, in Cargo.lock and package-lock.json alike (burrow#82).
 
 The age is the longer of AGE_SECONDS and any minimumReleaseAge the repo's
-own Renovate config sets, anywhere in it.
+own Renovate config sets, anywhere in it. The PRESETs are the ones the
+machine's config extends; a repo extending any other fails the refresh,
+as that preset could set an age lock-age can't see.
 """
 
 import datetime as dt
@@ -38,6 +40,8 @@ import time
 import tomllib
 import urllib.parse
 import urllib.request
+
+import json5
 
 UA = "burrow lock-age (https://github.com/FieldmouseWorks/burrow)"
 CRATES_IO = "registry+https://github.com/rust-lang/crates.io-index"
@@ -158,21 +162,51 @@ def duration(text):
     return total
 
 
-def repo_age():
-    """The longest minimumReleaseAge the base's own Renovate config sets
-    anywhere in it (the top level or any rule), in seconds."""
-    longest = 0
+def ages(node, under=None):
+    """Every minimumReleaseAge set anywhere in a config: the top level, a
+    manager's or update type's block, a package rule. statusCheckNames uses
+    the same key for a status check's name, not an age."""
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key == "minimumReleaseAge" and under != "statusCheckNames":
+                yield value
+            else:
+                yield from ages(value, key)
+    elif isinstance(node, list):
+        for value in node:
+            yield from ages(value, under)
+
+
+def repo_age(presets):
+    """The longest minimumReleaseAge in the base's own Renovate config, in
+    seconds. Renovate reads only the first config file it finds, and
+    package.json only for its "renovate" key. A preset other than the
+    machine's own (the PRESET arguments) could set an age lock-age can't
+    see, so it fails the refresh."""
     for name in CONFIGS:
         text = base_text(name)
-        if not text or "minimumReleaseAge" not in text:
+        if text is None:
             continue
-        found = re.findall(r"""minimumReleaseAge["']?\s*:\s*(null|"[^"]*"|'[^']*')""", text)
-        if len(found) != text.count("minimumReleaseAge"):
-            raise ValueError(f"{name}: a minimumReleaseAge lock-age can't read")
-        for value in found:
-            if value != "null":
-                longest = max(longest, duration(value[1:-1]))
-    return longest
+        config = json5.loads(text)
+        if name == "package.json":
+            if "renovate" not in config:
+                continue
+            config = config["renovate"]
+        if not isinstance(config, dict):
+            raise ValueError(f"{name}: not a Renovate config")
+        extends = config.get("extends", [])
+        unknown = [x for x in (extends if isinstance(extends, list) else [extends]) if x not in presets]
+        if unknown:
+            raise ValueError(f"{name}: extends {', '.join(map(str, unknown))}, whose minimumReleaseAge lock-age can't see")
+        longest = 0
+        for value in ages(config):
+            if value is None:
+                continue
+            if not isinstance(value, str):
+                raise ValueError(f"{name}: minimumReleaseAge {value!r} isn't a duration")
+            longest = max(longest, duration(value))
+        return longest
+    return 0
 
 
 def changed():
@@ -315,8 +349,8 @@ def npm(path, cutoff, bad):
     except (ValueError, KeyError, AttributeError):
         had = set()  # nothing the base had counts as checked: all of it is
     for name, version, resolved in npm_entries(lock):
-        if (name, version, resolved) in had:
-            continue
+        if (name, version, resolved) in had or re.fullmatch(r"git\+\S+#[0-9a-f]{40}", resolved or ""):
+            continue  # one the base had, or a pinned git commit, as Cargo's are
         if not (resolved or "").startswith(NPM):
             bad.append(f"{path}: {name} {version} comes from {resolved}, whose publish time isn't known")
         elif npm_published(name, version) > cutoff:
@@ -324,12 +358,12 @@ def npm(path, cutoff, bad):
 
 
 def main(argv):
-    if len(argv) != 2 or not argv[1].isdigit():
+    if len(argv) < 2 or not argv[1].isdigit():
         print(__doc__.split("\n\n")[0], file=sys.stderr)
         return 2
     bad = []
     try:
-        age = max(int(argv[1]), repo_age())
+        age = max(int(argv[1]), repo_age(set(argv[2:])))
         paths = changed()
     except Exception as e:
         log(f"{type(e).__name__}: {e}")

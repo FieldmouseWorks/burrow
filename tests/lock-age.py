@@ -99,9 +99,9 @@ def get_json(url):
 L.crate_index, L.run, L.get_json = crate_index, run, get_json
 
 
-def lock_age():
+def lock_age(*presets):
     RAN.clear()
-    return L.main(["lock-age", str(AGE)])
+    return L.main(["lock-age", str(AGE), *presets])
 
 
 def versions(path="Cargo.lock"):
@@ -187,10 +187,33 @@ assert lock_age() == 0 and versions() == {"b": "2.1.0", "h": "1.0.0"}, versions(
 repo({"Cargo.lock": cargo_lock(("b", "2.0.0"), ("h", "1.0.0"))})
 write("Cargo.lock", cargo_lock(("b", "2.1.0"), ("h", "1.1.0")))
 assert lock_age() == 0 and versions() == {"b": "2.1.0", "h": "1.1.0"}, versions()
-# One it can't read fails the refresh.
-repo({"Cargo.lock": cargo_lock(("b", "2.0.0")), "renovate.json5": "{minimumReleaseAge: someAge}"})
+# What isn't an age doesn't count: a status check's name, a comment, a
+# description, package.json without a "renovate" key.
+for name, text in (("renovate.json5", "// minimumReleaseAge: 2 weeks, one day\n{statusCheckNames: "
+                    "{minimumReleaseAge: 'custom/stability-days'}, description: 'minimumReleaseAge'}"),
+                   ("package.json", json.dumps({"name": "x", "minimumReleaseAge": "2 weeks"}))):
+    repo({"Cargo.lock": cargo_lock(("b", "2.0.0"), ("h", "1.0.0")), name: text})
+    write("Cargo.lock", cargo_lock(("b", "2.1.0"), ("h", "1.1.0")))
+    assert lock_age() == 0 and versions()["h"] == "1.1.0", name
+# package.json's "renovate" key is a config.
+repo({"Cargo.lock": cargo_lock(("b", "2.0.0"), ("h", "1.0.0")),
+      "package.json": json.dumps({"renovate": {"cargo": {"minimumReleaseAge": "14 days"}}})})
+write("Cargo.lock", cargo_lock(("b", "2.1.0"), ("h", "1.1.0")))
+assert lock_age() == 0 and versions()["h"] == "1.0.0", versions()
+# Renovate reads only the first config file it finds.
+repo({"Cargo.lock": cargo_lock(("b", "2.0.0"), ("h", "1.0.0")), "renovate.json": "{}",
+      ".github/renovate.json": json.dumps(config)})
+write("Cargo.lock", cargo_lock(("b", "2.1.0"), ("h", "1.1.0")))
+assert lock_age() == 0 and versions()["h"] == "1.1.0", versions()
+# One it can't read, or a preset other than the machine's, fails the refresh.
+for text in ("{minimumReleaseAge: someAge}", '{"minimumReleaseAge": 5}', '{"minimumReleaseAge": "soon"}',
+             '{"extends": ["config:recommended", "github>someone/presets"]}'):
+    repo({"Cargo.lock": cargo_lock(("b", "2.0.0")), "renovate.json5": text})
+    write("Cargo.lock", cargo_lock(("b", "2.1.0")))
+    assert lock_age("config:recommended") == 1, text
+repo({"Cargo.lock": cargo_lock(("b", "2.0.0")), "renovate.json": '{"extends": ["config:recommended"]}'})
 write("Cargo.lock", cargo_lock(("b", "2.1.0")))
-assert lock_age() == 1
+assert lock_age("config:recommended") == 0
 assert [L.duration(x) for x in ("3 days", "1 week 2 days", "12h", "1 month")] == [259200, 777600, 43200, 2592000]
 for x in ("3", "soon", "3 fortnights"):
     try:
@@ -274,6 +297,16 @@ assert lock_age() == 1
 repo({"package-lock.json": npm_lock(("node_modules/left-pad", "1.2.0", "https://example.org/lp.tgz"))})
 write("package-lock.json", npm_lock(("node_modules/left-pad", "1.2.0")))
 RESOLVES["lock"] = npm_lock(("node_modules/left-pad", "1.2.0"))
+assert lock_age() == 1
+
+# A git dependency's new commit is taken as it is, as Cargo's are; its
+# registry dependencies are still checked.
+GIT = "git+ssh://git@github.com/o/g.git#"
+repo({"package-lock.json": npm_lock(("node_modules/g", "1.0.0", GIT + "a" * 40), ("node_modules/left-pad", "1.0.0"))})
+write("package-lock.json", npm_lock(("node_modules/g", "1.0.0", GIT + "b" * 40), ("node_modules/left-pad", "1.2.0")))
+RESOLVES["lock"] = npm_lock(("node_modules/g", "1.0.0", GIT + "b" * 40), ("node_modules/left-pad", "1.1.0"))
+assert lock_age() == 0
+RESOLVES["lock"] = npm_lock(("node_modules/g", "1.0.0", GIT + "b" * 40), ("node_modules/left-pad", "1.2.0"))
 assert lock_age() == 1
 
 # npm 6's lock files have no packages map to check: they fail it.
