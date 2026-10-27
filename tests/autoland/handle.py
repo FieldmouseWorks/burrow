@@ -684,6 +684,14 @@ run(mkpr(base="release/1.x", **five), 800)
 assert ("codex", head, 0) in POSTED and pr_state()["lostOn"] == {"codex": {"main": head}}, (POSTED, pr_state())
 status, _ = run(mkpr(comments=[said(judgment("land", n=5))], **five), 830)
 assert not merged() and JOBS == [] and "Codex is reviewing this commit" in status, (status, JOBS)
+# Nor are findings from a look on a base the PR has since left: owed there.
+fresh_pr_state()
+V.queue("sam/r", mkpr(base="release/1.x"), "pr-sam_r-5.json", "codex")
+worker(codex={"result": "review", "answer": {"findings": [{"path": "a.py"}]}})
+run(mkpr(**five), 700)
+assert POSTED == [] and pr_state()["lostOn"] == {"codex": {"release/1.x": head}}, (POSTED, pr_state())
+status, _ = run(mkpr(base="release/1.x", comments=[said(judgment("land", n=5, base="release/1.x"))], **five), 800)
+assert not merged() and JOBS == [] and "Codex" in status, (status, JOBS)
 # The limit holds while the reviewer that reached it is out of service, and
 # with none in service the judge still decides.
 for out in (["codex"], ["codex", "deepseek"]):

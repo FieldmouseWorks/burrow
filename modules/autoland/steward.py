@@ -708,6 +708,11 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
                             digest.append(("A review couldn't be posted", line, f"{x}, {tries[name]} tries"))
                         after(C.NOW, 1)
                         continue
+            elif (back.get("result") == "review" and isinstance(back.get("base"), str) and isinstance(back.get("head"), str)
+                  and isinstance(back.get("answer"), dict) and back["answer"].get("findings")):
+                # Findings on another base, which the PR left while the look
+                # was under way: not posted here, but owed if it goes back.
+                lost_on.setdefault(r, {})[back["base"]] = back["head"]
             tries.pop(name, None)
             V.drop(name)
         if tries:
