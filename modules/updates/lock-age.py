@@ -26,11 +26,14 @@ inputs are, in Cargo.lock and package-lock.json alike (burrow#82).
 
 POLICY is the machine's own Renovate config (JSON). The age is the longest
 minimumReleaseAge set anywhere in it, in its globalExtends, or in the
-repo's own config, with every preset each extends resolved, as
-RELEASE-AGES (updates/release-ages.mjs, Renovate's own code) reads them; no
-age set anywhere is none. A preset it can't resolve, an age it can't read,
-or inheritConfig (config from another repo it can't see) fails the
-refresh.
+repo's own config (in the config files the resolved policy adds, then
+Renovate's own), with every config migrated and every preset each extends
+resolved, as RELEASE-AGES (updates/release-ages.mjs, Renovate's own code)
+reads them; no age set anywhere is none. A preset it can't resolve, an
+age it can't read, or inheritConfig (config from another repo it can't
+see) fails the refresh. For npm, a cutoff npm's own config sets for the
+lock file's directory (before, min-release-age) holds too when it's
+earlier.
 """
 
 import datetime as dt
@@ -169,12 +172,14 @@ def repo_config(files):
 
 
 def release_ages(resolver, config):
-    """Every release age the config sets, presets resolved, in seconds."""
+    """What the config sets that decides the age, presets resolved:
+    ages (in seconds), configFileNames and inheritConfig."""
     p = subprocess.run(resolver, input=json.dumps(config), capture_output=True, text=True)
     if p.returncode != 0:
         why = [x for x in p.stderr.splitlines() if "Error" in x or "validationError" in x] or ["failed"]
         raise RuntimeError(f"can't tell the release ages: {why[-1].strip()}")
-    return [ms / 1000 for ms in json.loads(p.stdout)]
+    got = json.loads(p.stdout)
+    return {**got, "ages": [ms / 1000 for ms in got["ages"]]}
 
 
 def changed():
@@ -293,9 +298,29 @@ def npm_entries(lock):
     return got
 
 
+def npm_cutoff(d, cutoff):
+    """The earliest of the cutoff and any npm's own config sets for the
+    directory (before, min-release-age), which --before would override."""
+    p = run(["npm", "config", "get", "before", "min-release-age"], d)
+    if p.returncode != 0:
+        raise RuntimeError(f"npm config get: {p.stderr.strip()}")
+    got = dict(x.split("=", 1) for x in p.stdout.splitlines() if "=" in x)
+    cutoffs = [cutoff]
+    if got.get("before", "null") != "null":
+        # A JavaScript date: Fri Mar 01 2024 12:30:00 GMT+0000 (...)
+        m = re.match(r"\w{3} (\w{3} \d{2} \d{4} \d{2}:\d{2}:\d{2}) GMT([+-]\d{4})", got["before"])
+        if not m:
+            raise ValueError(f"can't read npm's before {got['before']!r}")
+        cutoffs.append(dt.datetime.strptime(" ".join(m.groups()), "%b %d %Y %H:%M:%S %z"))
+    if got.get("min-release-age", "null") != "null":
+        cutoffs.append(dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=float(got["min-release-age"])))
+    return min(cutoffs)
+
+
 def npm(path, cutoff, bad):
     d = os.path.dirname(path) or "."
     base = base_text(path)
+    cutoff = npm_cutoff(d, cutoff)
     os.remove(path)
     p = run(["npm", "install", "--package-lock-only", "--ignore-scripts", "--no-audit", "--no-fund",
              f"--before={cutoff.strftime('%Y-%m-%dT%H:%M:%SZ')}"], d)
@@ -334,11 +359,16 @@ def main(argv):
     try:
         with open(argv[1]) as f:
             policy = json.load(f)
-        if policy.get("inheritConfig"):
+        # globalExtends go under the rest of the machine's config, so its
+        # own configFileNames win.
+        machine = [release_ages(resolver, c) for c in ({"extends": policy.get("globalExtends", [])}, policy)]
+        if any(m["inheritConfig"] for m in machine):
             raise ValueError("the machine's Renovate config inherits config from another repo, which could set "
                              "a release age lock-age can't see")
-        configs = [policy, {"extends": policy.get("globalExtends", [])}, repo_config(policy.get("configFileNames", []))]
-        age = max((x for c in configs if c is not None for x in release_ages(resolver, c)), default=0)
+        files = next((m["configFileNames"] for m in reversed(machine) if m["configFileNames"] is not None), [])
+        repo = repo_config(files)
+        ages = [x for m in (*machine, *([release_ages(resolver, repo)] if repo is not None else [])) for x in m["ages"]]
+        age = max(ages, default=0)
         paths = changed()
     except Exception as e:
         log(f"{type(e).__name__}: {e}")

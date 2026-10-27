@@ -148,19 +148,27 @@
           python3 -I ${./tests/lock-age.py} ${./modules/updates/lock-age.py}
           touch $out
         '';
-        # The release ages a Renovate config sets, as Renovate itself resolves
-        # its presets (at any scope) and reads its durations; what it can't
-        # resolve or read fails.
-        release-ages = pkgs.runCommand "release-ages-check" { } ''
+        # What decides a lock file refresh's release age in a Renovate config,
+        # as Renovate itself migrates it, resolves its presets (at any scope)
+        # and reads its durations; what it can't resolve or read fails.
+        release-ages = pkgs.runCommand "release-ages-check" { nativeBuildInputs = [ pkgs.jq ]; } ''
           export HOME=$TMPDIR
-          ages() { echo "$1" | ${pkgs.lib.getExe pkgs.nodejs_24} ${./modules/updates/release-ages.mjs} ${pkgs.renovate} 2>/dev/null; }
+          read() { echo "$1" | ${pkgs.lib.getExe pkgs.nodejs_24} ${./modules/updates/release-ages.mjs} ${pkgs.renovate} 2>/dev/null; }
+          ages() { read "$1" | jq -c .ages; }
           test "$(ages '{"extends": ["config:best-practices"]}')" = '[259200000]'
           test "$(ages '{"packageRules": [{"matchManagers": ["cargo"], "extends": ["security:minimumReleaseAgeNpm"]}]}')" = '[259200000]'
           test "$(ages '{"cargo": {"extends": ["security:minimumReleaseAgeNpm"]}}')" = '[259200000]'
           test "$(ages '{"cargo": {"minimumReleaseAge": "1 week 2 days"}, "minimumReleaseAge": null, "statusCheckNames": {"minimumReleaseAge": "x"}, "statusCheckWhen": {"minimumReleaseAge": "always"}}')" = '[777600000]'
           test "$(ages '{"extends": ["config:recommended", "helpers:pinGitHubActionDigests"]}')" = '[]'
-          for bad in '{"extends": ["github>someone/presets"]}' '{"extends": ["config:nope"]}' '{"minimumReleaseAge": "soon"}' '{"minimumReleaseAge": 5}'; do
-            if ages "$bad"; then echo "took $bad"; exit 1; fi
+          # Old settings Renovate migrates, at any scope.
+          test "$(ages '{"stabilityDays": 14, "packageRules": [{"matchManagers": ["cargo"], "stabilityDays": 10}]}')" = '[1209600000,864000000]'
+          # Where else policy comes from.
+          test "$(read '{"configFileNames": ["ci/renovate config.json"]}' | jq -c '[.configFileNames, .inheritConfig]')" = '[["ci/renovate config.json"],false]'
+          test "$(read '{}' | jq -c '[.configFileNames, .inheritConfig]')" = '[null,false]'
+          test "$(read '{"force": {"inheritConfig": true}}' | jq -c .inheritConfig)" = true
+          for bad in '{"extends": ["github>someone/presets"]}' '{"extends": ["config:nope"]}' '{"minimumReleaseAge": "soon"}' '{"minimumReleaseAge": 5}' \
+                     '{"repositories": [{"repository": "x/y", "configFileNames": ["c.json"]}]}'; do
+            if read "$bad"; then echo "took $bad"; exit 1; fi
           done
           touch $out
         '';
