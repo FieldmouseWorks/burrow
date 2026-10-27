@@ -106,29 +106,20 @@ let
     flake8 --ignore E501,W503 $out
   '';
   lockAgePython = pkgs.python3.withPackages (p: [ p.json5 ]);
-  lockAge = pkgs.writeShellScriptBin "lock-age" ''
-    exec ${lockAgePython}/bin/python3 -I ${lockAgeSrc}/lock-age.py "$@"
+  # Every release age a Renovate config sets, its presets resolved by
+  # Renovate's own code (updates/release-ages.mjs).
+  releaseAges = pkgs.writeShellScriptBin "release-ages" ''
+    exec ${lib.getExe pkgs.nodejs_24} ${./updates/release-ages.mjs} ${pkgs.renovate}
   '';
-  # Every release age a Renovate config sets, anywhere in it (null is
-  # none). statusCheckNames and statusCheckWhen use the key for a check's
-  # name and when it's set, not for an age.
-  agesIn = v:
-    if builtins.isAttrs v then
-      lib.concatLists (lib.mapAttrsToList (k: x:
-        if lib.hasPrefix "statusCheck" k then [ ]
-        else if k == "minimumReleaseAge" then lib.optional (x != null) x
-        else agesIn x) v)
-    else if builtins.isList v then lib.concatMap agesIn v
-    else [ ];
   # lock-age holds Cargo and npm refreshes to the longest age the machine's
-  # policy sets anywhere, knows the presets and config files it adds, and
-  # fails every refresh if it brings in config it can't see.
-  lockAgeCommand = lib.concatStringsSep " " ([ "${lockAge}/bin/lock-age" ]
-    ++ map (a: "age=${lib.replaceStrings [ " " ] [ "" ] a}") (agesIn renovatePolicy)
-    ++ map (p: "preset=${p}") (lib.toList (renovatePolicy.extends or [ ]))
-    ++ map (f: "file=${f}") (renovatePolicy.configFileNames or [ ])
-    ++ lib.optional (renovatePolicy ? globalExtends) "opaque=globalExtends"
-    ++ lib.optional (renovatePolicy.inheritConfig or false) "opaque=inheritConfig");
+  # policy and the repo's own config set, presets and all. It takes the
+  # policy from the store, so the command Renovate runs has no arguments to
+  # quote.
+  lockAge = pkgs.writeShellScriptBin "lock-age" ''
+    exec ${lockAgePython}/bin/python3 -I ${lockAgeSrc}/lock-age.py \
+      ${pkgs.writeText "lock-age-policy.json" (builtins.toJSON renovatePolicy)} ${releaseAges}/bin/release-ages
+  '';
+  lockAgeCommand = "${lockAge}/bin/lock-age";
   # Cargo's and npm's lock file refreshes resolve to registry releases, with
   # no cutoff Renovate keeps (cargo has none; npm's --before is dropped
   # whenever it fails to resolve). lock-age holds them to the age itself:

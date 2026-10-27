@@ -96,12 +96,55 @@ def get_json(url):
     return {"time": NPM_TIMES[name]}
 
 
-L.crate_index, L.run, L.get_json = crate_index, run, get_json
+# release-ages, Renovate's reading of a config, is checked on its own with
+# Renovate (flake.nix); here a stand-in reads days and weeks, and knows one
+# preset, "slow", that sets 2 weeks. Any other preset it can't resolve.
+RESOLVED = []
 
 
-def lock_age(*more):
+def release_ages(resolver, config):
+    assert resolver == ["release-ages"], resolver
+    RESOLVED.append(config)
+    ages = []
+
+    def walk(node, under=""):
+        if isinstance(node, dict):
+            for k, v in node.items():
+                if k == "extends":
+                    for x in v:
+                        if x != "slow":
+                            raise RuntimeError(f"can't resolve {x}")
+                        ages.append(14 * 86400)
+                elif k == "minimumReleaseAge":
+                    if v is not None:
+                        n, unit = v.split()
+                        ages.append(int(n) * {"days": 86400, "weeks": 604800}[unit])
+                elif not k.startswith("statusCheck"):
+                    walk(v)
+        elif isinstance(node, list):
+            for v in node:
+                walk(v)
+    walk(config)
+    return ages
+
+
+# What lock-age makes of release-ages' answer, or its failure.
+assert L.release_ages(["sh", "-c", "cat >/dev/null; echo '[86400000, 1000]'"], {}) == [86400, 1]
+try:
+    L.release_ages(["sh", "-c", "echo 'Error: no such preset' >&2; exit 1"], {})
+    raise AssertionError("release-ages failed, and lock-age took its answer")
+except RuntimeError:
+    pass
+L.crate_index, L.run, L.get_json, L.release_ages = crate_index, run, get_json, release_ages
+POLICY = {"minimumReleaseAge": "3 days"}
+
+
+def lock_age(policy=POLICY):
     RAN.clear()
-    return L.main(["lock-age", f"age={AGE}s", *more])
+    RESOLVED.clear()
+    path = os.path.join(tempfile.mkdtemp(), "policy.json")
+    write(path, json.dumps(policy))
+    return L.main(["lock-age", path, "release-ages"])
 
 
 def versions(path="Cargo.lock"):
@@ -205,46 +248,47 @@ repo({"Cargo.lock": cargo_lock(("b", "2.0.0"), ("h", "1.0.0")), "renovate.json":
       ".github/renovate.json": json.dumps(config)})
 write("Cargo.lock", cargo_lock(("b", "2.1.0"), ("h", "1.1.0")))
 assert lock_age() == 0 and versions()["h"] == "1.1.0", versions()
-# One it can't read, or a preset other than the machine's, fails the refresh.
-for text in ("{minimumReleaseAge: someAge}", '{"minimumReleaseAge": 5}', '{"minimumReleaseAge": "soon"}',
-             '{"extends": ["config:recommended", "github>someone/presets"]}'):
-    repo({"Cargo.lock": cargo_lock(("b", "2.0.0")), "renovate.json5": text})
-    write("Cargo.lock", cargo_lock(("b", "2.1.0")))
-    assert lock_age("preset=config:recommended") == 1, text
-repo({"Cargo.lock": cargo_lock(("b", "2.0.0")), "renovate.json": '{"extends": ["config:recommended"]}'})
-write("Cargo.lock", cargo_lock(("b", "2.1.0")))
-assert lock_age("preset=config:recommended") == 0
-# A preset extended inside a rule counts too.
-repo({"Cargo.lock": cargo_lock(("b", "2.0.0")),
-      "renovate.json": '{"packageRules": [{"matchManagers": ["cargo"], "extends": ["github>someone/slow"]}]}'})
-write("Cargo.lock", cargo_lock(("b", "2.1.0")))
-assert lock_age("preset=config:recommended") == 1
-# statusCheckWhen's minimumReleaseAge says when the check is set, not an age.
-repo({"Cargo.lock": cargo_lock(("b", "2.0.0"), ("h", "1.0.0")),
-      "renovate.json": '{"statusCheckWhen": {"minimumReleaseAge": "always"}}'})
-write("Cargo.lock", cargo_lock(("b", "2.1.0"), ("h", "1.1.0")))
-assert lock_age() == 0 and versions()["h"] == "1.1.0", versions()
-# JSONC, and a config file the machine adds (file=), read first.
-for files, more in (({"renovate.jsonc": '{/* slow */ "minimumReleaseAge": "2 weeks",}'}, ()),
-                    ({"renovate.json": "{}", "ci/renovate.json": '{"minimumReleaseAge": "2 weeks"}'}, ("file=ci/renovate.json",))):
+# A preset it can resolve counts, in the repo's config or the machine's,
+# at any scope; one it can't fails the refresh.
+for policy, files in ((POLICY, {"renovate.json": '{"extends": ["slow"]}'}),
+                      (POLICY, {"renovate.json": '{"packageRules": [{"matchManagers": ["cargo"], "extends": ["slow"]}]}'}),
+                      ({**POLICY, "extends": ["slow"]}, {}),
+                      ({**POLICY, "cargo": {"extends": ["slow"]}}, {}),
+                      ({**POLICY, "globalExtends": ["slow"]}, {})):
     repo({"Cargo.lock": cargo_lock(("b", "2.0.0"), ("h", "1.0.0")), **files})
     write("Cargo.lock", cargo_lock(("b", "2.1.0"), ("h", "1.1.0")))
-    assert lock_age(*more) == 0 and versions()["h"] == "1.0.0", (files, versions())
-# The machine's longest age holds.
+    assert lock_age(policy) == 0 and versions()["h"] == "1.0.0", (policy, files, versions())
+for policy, files in ((POLICY, {"renovate.json5": '{extends: ["github>someone/presets"]}'}),
+                      (POLICY, {"renovate.json5": "{minimumReleaseAge: someAge}"}),
+                      ({**POLICY, "extends": ["github>someone/presets"]}, {})):
+    repo({"Cargo.lock": cargo_lock(("b", "2.0.0")), **files})
+    write("Cargo.lock", cargo_lock(("b", "2.1.0")))
+    assert lock_age(policy) == 1 and RAN == [], (policy, files)
+# JSONC, and a config file the machine adds (configFileNames), read first,
+# its name whole.
+for files, policy in (({"renovate.jsonc": '{/* slow */ "minimumReleaseAge": "2 weeks",}'}, POLICY),
+                      ({"renovate.json": "{}", "ci/renovate config.json": '{"minimumReleaseAge": "2 weeks"}'},
+                       {**POLICY, "configFileNames": ["ci/renovate config.json"]})):
+    repo({"Cargo.lock": cargo_lock(("b", "2.0.0"), ("h", "1.0.0")), **files})
+    write("Cargo.lock", cargo_lock(("b", "2.1.0"), ("h", "1.1.0")))
+    assert lock_age(policy) == 0 and versions()["h"] == "1.0.0", (files, versions())
+# The machine's longest age holds, wherever in its config it's set.
 repo({"Cargo.lock": cargo_lock(("b", "2.0.0"), ("h", "1.0.0"))})
 write("Cargo.lock", cargo_lock(("b", "2.1.0"), ("h", "1.1.0")))
-assert lock_age("age=1week") == 0 and versions()["h"] == "1.0.0", versions()
-# Config the machine brings in that lock-age can't see fails every refresh.
+assert lock_age({**POLICY, "cargo": {"minimumReleaseAge": "1 weeks"}}) == 0 and versions()["h"] == "1.0.0", versions()
+# A machine that sets no age at all holds to none, and still to the repo's.
+INDEX.update(n={"1.0.0": OLD, "1.1.0": NEW})
+for policy in ({"minimumReleaseAge": None}, {}):
+    repo({"Cargo.lock": cargo_lock(("n", "1.0.0"))})
+    write("Cargo.lock", cargo_lock(("n", "1.1.0")))
+    assert lock_age(policy) == 0 and versions() == {"n": "1.1.0"}, (policy, versions())
+    repo({"Cargo.lock": cargo_lock(("b", "2.0.0"), ("h", "1.0.0")), "renovate.json": json.dumps(config)})
+    write("Cargo.lock", cargo_lock(("b", "2.1.0"), ("h", "1.1.0")))
+    assert lock_age(policy) == 0 and versions()["h"] == "1.0.0", (policy, versions())
+# Config the machine inherits from another repo fails every refresh.
 repo({"Cargo.lock": cargo_lock(("b", "2.0.0"))})
 write("Cargo.lock", cargo_lock(("b", "2.1.0")))
-assert lock_age("opaque=globalExtends") == 1 and RAN == []
-assert [L.duration(x) for x in ("3 days", "1 week 2 days", "12h", "1 month")] == [259200, 777600, 43200, 2592000]
-for x in ("3", "soon", "3 fortnights"):
-    try:
-        L.duration(x)
-        raise AssertionError(x)
-    except ValueError:
-        pass
+assert lock_age({**POLICY, "inheritConfig": True}) == 1 and RAN == []
 
 # One that can't go back at all fails the refresh.
 REFUSE.append(lambda text, name, to: name == "e")
@@ -344,9 +388,8 @@ repo({"yarn.lock": "# old\n"})
 write("yarn.lock", "# new\n")
 assert lock_age() == 1
 
-# Arguments: at least one age=, and only the kinds lock-age knows.
-for argv in (["lock-age"], ["lock-age", "259200"], ["lock-age", "preset=x"], ["lock-age", "age=soon"],
-             ["lock-age", "age=3days", "colour=red"]):
+# Arguments: the policy and release-ages.
+for argv in (["lock-age"], ["lock-age", "policy.json"]):
     assert L.main(argv) == 2, argv
 
 print("lock-age: ok")

@@ -1,5 +1,5 @@
-"""lock-age age=AGE... [preset=PRESET...] [file=NAME...] [opaque=WHAT...]: a lock
-file refresh takes only releases at least the longest AGE old, or fails.
+"""lock-age POLICY RELEASE-AGES...: a lock file refresh takes only releases at
+least the longest release age its Renovate config sets old, or fails.
 
 Renovate runs it after a lock file refresh (a postUpgradeTask, from the
 repo's root, with the refresh in the working tree and HEAD at the base). For
@@ -24,13 +24,13 @@ file without a packages map (npm 6's) or any other lock file changing
 and doesn't merge it. A git dependency's commit is taken as it is, as Nix
 inputs are, in Cargo.lock and package-lock.json alike (burrow#82).
 
-The machine's Renovate config gives every release age it sets (AGEs,
-Renovate's durations without their spaces: 3days), the presets it extends
-and the config files it adds; opaque= names a setting that brings in config
-lock-age can't see (globalExtends, inheritConfig), and fails every refresh.
-The age is the longest of those and of every minimumReleaseAge the repo's
-own config sets. A repo extending a preset the machine doesn't fails the
-refresh too, as that preset could set an age lock-age can't see.
+POLICY is the machine's own Renovate config (JSON). The age is the longest
+minimumReleaseAge set anywhere in it, in its globalExtends, or in the
+repo's own config, with every preset each extends resolved, as
+RELEASE-AGES (updates/release-ages.mjs, Renovate's own code) reads them; no
+age set anywhere is none. A preset it can't resolve, an age it can't read,
+or inheritConfig (config from another repo it can't see) fails the
+refresh.
 """
 
 import datetime as dt
@@ -52,13 +52,10 @@ NPM = "https://registry.npmjs.org/"
 ROUNDS = 6  # passes over a Cargo.lock before what's left is a failure
 TRIES = 5  # older versions asked about per crate per pass
 # Where Renovate looks for a repo's own config on GitHub, in its order,
-# after any configFileNames the machine adds (file=).
+# after any configFileNames the machine adds.
 CONFIGS = ("renovate.json", "renovate.jsonc", "renovate.json5", ".github/renovate.json",
            ".github/renovate.jsonc", ".github/renovate.json5", ".renovaterc", ".renovaterc.json",
            ".renovaterc.jsonc", ".renovaterc.json5", "package.json")
-SECONDS = {"s": 1, "sec": 1, "second": 1, "m": 60, "min": 60, "minute": 60, "h": 3600, "hr": 3600,
-           "hour": 3600, "d": 86400, "day": 86400, "w": 604800, "wk": 604800, "week": 604800,
-           "mo": 2592000, "month": 2592000, "y": 31536000, "yr": 31536000, "year": 31536000}
 
 
 def log(*a):
@@ -152,44 +149,10 @@ def base_text(path):
     return p.stdout if p.returncode == 0 else None
 
 
-def duration(text):
-    """Renovate's "3 days", "1 week 2 days" or "12h", in seconds."""
-    terms = re.findall(r"\s*(\d+)\s*([a-z]+)", text.lower())
-    if not terms or "".join(n + u for n, u in terms) != re.sub(r"\s", "", text.lower()):
-        raise ValueError(f"can't read the duration {text!r}")
-    total = 0
-    for n, unit in terms:
-        unit = unit if unit in SECONDS else unit[:-1] if unit.endswith("s") else unit
-        if unit not in SECONDS:
-            raise ValueError(f"can't read the duration {text!r}")
-        total += int(n) * SECONDS[unit]
-    return total
-
-
-def walk(node, key, under=None):
-    """Every value set for key anywhere in a config: the top level, a
-    manager's or update type's block, a package rule. statusCheckNames and
-    statusCheckWhen use minimumReleaseAge for a check's name and when it's
-    set, not for an age."""
-    if isinstance(node, dict):
-        for k, value in node.items():
-            if (under or "").startswith("statusCheck"):
-                continue
-            if k == key:
-                yield value
-            else:
-                yield from walk(value, key, k)
-    elif isinstance(node, list):
-        for value in node:
-            yield from walk(value, key, under)
-
-
-def repo_age(presets, files):
-    """The longest minimumReleaseAge in the base's own Renovate config, in
-    seconds. Renovate reads only the first config file it finds, and
-    package.json only for its "renovate" key. A preset other than the
-    machine's own, extended anywhere in it, could set an age lock-age
-    can't see, so it fails the refresh."""
+def repo_config(files):
+    """The base's own Renovate config, or None. Renovate reads only the
+    first config file it finds, and package.json only for its "renovate"
+    key."""
     for name in (*files, *CONFIGS):
         text = base_text(name)
         if text is None:
@@ -201,26 +164,17 @@ def repo_age(presets, files):
             config = config["renovate"]
         if not isinstance(config, dict):
             raise ValueError(f"{name}: not a Renovate config")
-        unknown = []
-        for extends in walk(config, "extends"):
-            unknown += [x for x in (extends if isinstance(extends, list) else [extends]) if x not in presets]
-        if unknown:
-            raise ValueError(f"{name}: extends {', '.join(map(str, unknown))}, whose minimumReleaseAge lock-age can't see")
-        return max((duration(value) for value in walk(config, "minimumReleaseAge") if value is not None), default=0)
-    return 0
+        return config
+    return None
 
 
-def args(argv):
-    """age=, preset=, file= and opaque= arguments, by kind."""
-    got = {"age": [], "preset": [], "file": [], "opaque": []}
-    for arg in argv[1:]:
-        kind, _, value = arg.partition("=")
-        if kind not in got or not value:
-            raise ValueError(arg)
-        got[kind].append(value)
-    if not got["age"]:
-        raise ValueError("no age=")
-    return got
+def release_ages(resolver, config):
+    """Every release age the config sets, presets resolved, in seconds."""
+    p = subprocess.run(resolver, input=json.dumps(config), capture_output=True, text=True)
+    if p.returncode != 0:
+        why = [x for x in p.stderr.splitlines() if "Error" in x or "validationError" in x] or ["failed"]
+        raise RuntimeError(f"can't tell the release ages: {why[-1].strip()}")
+    return [ms / 1000 for ms in json.loads(p.stdout)]
 
 
 def changed():
@@ -372,19 +326,19 @@ def npm(path, cutoff, bad):
 
 
 def main(argv):
-    try:
-        a = args(argv)
-        ages = [duration(x) for x in a["age"]]
-    except ValueError as e:
-        print(__doc__.split("\n\n")[0], f"({e})", file=sys.stderr)
+    if len(argv) < 3:
+        print(__doc__.split("\n\n")[0], file=sys.stderr)
         return 2
-    if a["opaque"]:
-        log(f"the machine's Renovate config uses {', '.join(a['opaque'])}, which could set a release age "
-            "lock-age can't see")
-        return 1
+    resolver = argv[2:]
     bad = []
     try:
-        age = max(*ages, repo_age(set(a["preset"]), a["file"]))
+        with open(argv[1]) as f:
+            policy = json.load(f)
+        if policy.get("inheritConfig"):
+            raise ValueError("the machine's Renovate config inherits config from another repo, which could set "
+                             "a release age lock-age can't see")
+        configs = [policy, {"extends": policy.get("globalExtends", [])}, repo_config(policy.get("configFileNames", []))]
+        age = max((x for c in configs if c is not None for x in release_ages(resolver, c)), default=0)
         paths = changed()
     except Exception as e:
         log(f"{type(e).__name__}: {e}")

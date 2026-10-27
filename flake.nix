@@ -148,6 +148,22 @@
           python3 -I ${./tests/lock-age.py} ${./modules/updates/lock-age.py}
           touch $out
         '';
+        # The release ages a Renovate config sets, as Renovate itself resolves
+        # its presets (at any scope) and reads its durations; what it can't
+        # resolve or read fails.
+        release-ages = pkgs.runCommand "release-ages-check" { } ''
+          export HOME=$TMPDIR
+          ages() { echo "$1" | ${pkgs.lib.getExe pkgs.nodejs_24} ${./modules/updates/release-ages.mjs} ${pkgs.renovate} 2>/dev/null; }
+          test "$(ages '{"extends": ["config:best-practices"]}')" = '[259200000]'
+          test "$(ages '{"packageRules": [{"matchManagers": ["cargo"], "extends": ["security:minimumReleaseAgeNpm"]}]}')" = '[259200000]'
+          test "$(ages '{"cargo": {"extends": ["security:minimumReleaseAgeNpm"]}}')" = '[259200000]'
+          test "$(ages '{"cargo": {"minimumReleaseAge": "1 week 2 days"}, "minimumReleaseAge": null, "statusCheckNames": {"minimumReleaseAge": "x"}, "statusCheckWhen": {"minimumReleaseAge": "always"}}')" = '[777600000]'
+          test "$(ages '{"extends": ["config:recommended", "helpers:pinGitHubActionDigests"]}')" = '[]'
+          for bad in '{"extends": ["github>someone/presets"]}' '{"extends": ["config:nope"]}' '{"minimumReleaseAge": "soon"}' '{"minimumReleaseAge": 5}'; do
+            if ages "$bad"; then echo "took $bad"; exit 1; fi
+          done
+          touch $out
+        '';
         # Which repos house-sync passes over, and when it tells the owner, with
         # stand-ins for gh and the notifier.
         house-sync = pkgs.runCommand "house-sync-check" { nativeBuildInputs = [ pkgs.python3 pkgs.jq pkgs.util-linux pkgs.diffutils ]; } ''
