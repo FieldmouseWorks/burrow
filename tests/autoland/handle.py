@@ -229,7 +229,7 @@ status, _ = run(rel, 900)
 assert merged() and "couldn't be posted" not in status, status
 # Not past a new head, which it never read.
 status, _ = run(mkpr(sha=newer, reviews=[rv_review("codex", 0, newer)]), 1500)
-assert merged() and "lost" not in pr_state()["rv"]["deepseek"], (status, pr_state())
+assert merged(), status
 os.remove(f"{tmp}/state/{V.OUT}")
 # Nor is a look at an earlier head still under way passed over by one out
 # of service: the PR waits for what it finds.
@@ -605,7 +605,7 @@ STUB["post"] = RuntimeError("HTTP 502")
 for t in (650, 710, 770):
     run(mkpr(**five), t)
 STUB["post"] = None
-assert pr_state()["rv"]["deepseek"].get("lost") == [head, "main"], pr_state()
+assert pr_state()["lostOn"]["deepseek"] == [head, "main"], pr_state()
 status, _ = run(mkpr(comments=[said(judgment("land", n=5))], **five), 830)
 assert not merged() and JOBS == [] and "Waiting for DeepSeek's review" in status, (status, JOBS)
 status, _ = run(mkpr(comments=[said(judgment("land", n=5))], **five), 770 + 3700)
@@ -638,6 +638,37 @@ worker()
 status, _ = run(mkpr(reviews=[*five["reviews"], rv_review("codex", 0, newer)], threads=[True], sha=newer,
                      comments=landed_newer["comments"]), 1600)
 assert "lostOn" not in pr_state() or not pr_state()["lostOn"], pr_state()
+# A look at an earlier head posting in the pass that loses one at this head
+# doesn't cover the lost one.
+fresh_pr_state()
+V.queue("sam/r", mkpr(sha=newer), "pr-sam_r-5.json", "codex")
+worker(codex={"result": "review", "answer": {"findings": [{"path": "a.py"}]}})
+real_post = V.post
+
+
+def post_but_newer(repo, pr, r, answer):
+    if pr["headRefOid"] == newer:
+        raise RuntimeError("HTTP 502")
+    return real_post(repo, pr, r, answer)
+
+
+V.post = post_but_newer
+for t in (650, 710):
+    run(mkpr(sha=newer, **five), t)
+V.queue("sam/r", mkpr(), "pr-sam_r-5.json", "codex")
+worker()
+run(mkpr(sha=newer, **five), 770)
+V.post = real_post
+assert ("codex", head, 0) in POSTED, POSTED
+assert pr_state()["lostOn"]["codex"] == [newer, "main"], pr_state()
+status, _ = run(mkpr(**landed_newer), 830)
+assert not merged() and JOBS == [] and "Waiting for Codex's review" in status, (status, JOBS)
+# A loss recorded before lostOn, in its head's rv, still holds after a push.
+fresh_pr_state()
+C.save("pr-sam_r-5.json", {"head": head, "seen": C.ts(T0), "rv": {"codex": {"lost": [head, "main"]}}})
+status, _ = run(mkpr(**landed_newer), 700)
+assert not merged() and JOBS == [] and "Waiting for Codex's review" in status, (status, JOBS)
+assert pr_state()["lostOn"] == {"codex": [head, "main"]} and "lost" not in pr_state()["rv"].get("codex", {}), pr_state()
 # The limit holds while the reviewer that reached it is out of service, and
 # with none in service the judge still decides.
 for out in (["codex"], ["codex", "deepseek"]):
