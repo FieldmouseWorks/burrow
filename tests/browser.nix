@@ -48,21 +48,28 @@ let
     p.wait(timeout=30)
   '';
 
-  # The first thing noVNC gets through the viewer's WebSocket: the screen's
-  # RFB greeting.
+  # The first thing noVNC gets through the viewer's WebSocket, opened from a
+  # page at ORIGIN (or none): the screen's RFB greeting. Exits 1 if the
+  # viewer refuses the WebSocket.
   rfb = pkgs.writeText "rfb-greeting.py" ''
     import base64, os, socket, sys
 
-    s = socket.create_connection((sys.argv[1], int(sys.argv[2])), timeout=10)
+    host, port = sys.argv[1], int(sys.argv[2])
+    origin = f"Origin: {sys.argv[3]}\r\n" if len(sys.argv) > 3 else ""
+    s = socket.create_connection((host, port), timeout=10)
     key = base64.b64encode(os.urandom(16)).decode()
-    s.sendall((f"GET /websockify HTTP/1.1\r\nHost: {sys.argv[1]}\r\nUpgrade: websocket\r\n"
+    s.sendall((f"GET /websockify HTTP/1.1\r\nHost: {host}:{port}\r\n{origin}Upgrade: websocket\r\n"
                f"Connection: Upgrade\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n"
                "Sec-WebSocket-Protocol: binary\r\n\r\n").encode())
     data = b""
     while b"\r\n\r\n" not in data:
-        data += s.recv(4096)
-    head, rest = data.split(b"\r\n\r\n", 1)
-    assert head.startswith(b"HTTP/1.1 101"), head
+        chunk = s.recv(4096)
+        if not chunk:
+            break
+        data += chunk
+    head, _, rest = data.partition(b"\r\n\r\n")
+    if not head.startswith(b"HTTP/1.1 101"):
+        sys.exit(f"refused: {head.splitlines()[:1]}")
     while len(rest) < 2 + 12:
         rest += s.recv(4096)
     print(rest[2:14].decode().strip())
@@ -74,6 +81,9 @@ let
       enable = true;
       viewer.interfaces = [ "eth1" ];
     };
+    # eth2 is trusted, as a tailnet often is: the viewer still isn't open there.
+    virtualisation.vlans = [ 1 2 ];
+    networking.firewall.trustedInterfaces = [ "eth2" ];
     virtualisation.memorySize = 2048;
 
     users.users.dev = {
@@ -106,6 +116,7 @@ pkgs.testers.runNixOSTest {
     # The same, with the firewall on nftables.
     nft = browserMachine { networking.nftables.enable = true; };
     client = {
+      virtualisation.vlans = [ 1 2 ];
       environment.systemPackages = [ pkgs.python3 pkgs.curl ];
     };
   };
@@ -144,12 +155,32 @@ pkgs.testers.runNixOSTest {
             ip = node.succeed("ip -4 -o addr show eth1 | awk '{print $4}' | cut -d/ -f1").strip()
             node.fail(f"su other -s /bin/sh -c 'curl -fsS --max-time 5 -o /dev/null http://{ip}:6080/vnc.html'")
 
-    with subtest("the viewer is open on its interface, and the screen speaks VNC through it"):
-        client.wait_until_succeeds("curl -fsS --max-time 5 -o /dev/null http://machine:6080/vnc.html", timeout=60)
-        greeting = client.succeed("python3 ${rfb} machine 6080").strip()
-        assert greeting.startswith("RFB 003."), greeting
-        # Not the DevTools port, from anywhere else.
-        client.fail("curl -fsS --max-time 5 http://machine:9222/json/version")
+    with subtest("the viewer is open on its interface only, and only to its own pages"):
+        for node in (machine, nft):
+            name = node.name
+            client.wait_until_succeeds(f"curl -fsS --max-time 5 -o /dev/null http://{name}:6080/vnc.html", timeout=60)
+            greeting = client.succeed(f"python3 ${rfb} {name} 6080 http://{name}:6080").strip()
+            assert greeting.startswith("RFB 003."), greeting
+            # Another site's page in the owner's browser, or no page at all.
+            client.fail(f"python3 ${rfb} {name} 6080 http://evil.example")
+            client.fail(f"python3 ${rfb} {name} 6080")
+            # Not on eth2, though the firewall trusts it.
+            ip2 = node.succeed("ip -4 -o addr show eth2 | awk '{print $4}' | cut -d/ -f1").strip()
+            client.fail(f"curl -fsS --max-time 5 -o /dev/null http://{ip2}:6080/vnc.html")
+            # Never the DevTools port.
+            client.fail(f"curl -fsS --max-time 5 http://{name}:9222/json/version")
+
+    with subtest("a firewall reload keeps the ports shut"):
+        machine.succeed("systemctl reload firewall")
+        nft.succeed("systemctl reload nftables")
+        for node in (machine, nft):
+            node.succeed("su dev -c '" + cdp + "'")
+            node.fail("su other -s /bin/sh -c '" + cdp + "'")
+            ip2 = node.succeed("ip -4 -o addr show eth2 | awk '{print $4}' | cut -d/ -f1").strip()
+            client.fail(f"curl -fsS --max-time 5 -o /dev/null http://{ip2}:6080/vnc.html")
+        # The old chains are gone, not left beside the new ones.
+        assert machine.succeed("iptables -S OUTPUT | grep -c burrow-browser").strip() == "1"
+        assert machine.succeed("iptables -S INPUT | grep -c burrow-browser").strip() == "1"
 
     with subtest("the screen listens on no TCP port and no abstract socket"):
         out = machine.succeed("ss -Hlntp; ss -Hlxp")
@@ -199,5 +230,14 @@ pkgs.testers.runNixOSTest {
     with subtest("turned off, Claude loses the MCP server"):
         machine.succeed("systemctl stop burrow-browser-mcp.service")
         assert machine.succeed("jq -c .mcpServers.browser /home/dev/.claude.json").strip() == "null"
+
+    with subtest("nothing listens without the firewall"):
+        machine.succeed("systemctl stop firewall")
+        nft.succeed("systemctl stop nftables")
+        for node in (machine, nft):
+            node.wait_until_fails("systemctl is-active -q burrow-browser.service")
+            node.fail("systemctl is-active -q burrow-browser-viewer.service")
+            node.fail("su dev -c '" + cdp + "'")
+            node.fail("su dev -c '" + viewer + "'")
   '';
 }

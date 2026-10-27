@@ -23,6 +23,9 @@ let
   display = ":0";
   ports = [ cfg.cdpPort cfg.viewer.port ];
   home = config.users.users.${user}.home;
+  uid = toString config.users.users.${user}.uid;
+  # What keeps everyone else off its ports: nothing listens without it.
+  firewall = if config.networking.nftables.enable then "nftables.service" else "firewall.service";
 
   # What Claude starts for each session: Playwright's MCP server on the running
   # browser. Snapshots and logs go to the user's runtime dir, not the project.
@@ -123,6 +126,17 @@ in
       };
     };
 
+    viewer.origins = lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      default = map (h: "http://${h}:${toString cfg.viewer.port}") [ "localhost" "127.0.0.1" hostName ];
+      defaultText = lib.literalExpression ''map (h: "http://''${h}:''${toString cfg.viewer.port}") [ "localhost" "127.0.0.1" config.networking.hostName ]'';
+      description = ''
+        The addresses the owner opens the viewer at, as origins: its WebSocket
+        refuses a page from anywhere else, so another site open in their browser
+        can't watch or drive it.
+      '';
+    };
+
     memory = lib.mkOption {
       type = lib.types.str;
       default = "4G";
@@ -163,6 +177,9 @@ in
       "${account}-display" = {
         description = "The browser's screen";
         wantedBy = [ "multi-user.target" ];
+        # Everything else runs on the screen, so it all stops with the firewall.
+        bindsTo = [ firewall ];
+        after = [ firewall ];
         serviceConfig = confined // {
           RuntimeDirectory = account;
           RuntimeDirectoryMode = "0700";
@@ -210,6 +227,8 @@ in
       # noVNC and the WebSocket it talks to the screen through.
       "${account}-viewer" = {
         description = "The owner's view of the browser (noVNC)";
+        # It asks for no password, so a page of any other site in the owner's
+        # browser mustn't get to open its WebSocket.
         requires = [ "${account}-display.service" ];
         after = [ "${account}-display.service" ];
         partOf = [ "${account}-display.service" ];
@@ -219,6 +238,8 @@ in
             (lib.getExe' pkgs.python3Packages.websockify "websockify")
             "--web=${pkgs.novnc}/share/webapps/novnc" "--file-only"
             "--unix-target=${runDir}/vnc.sock"
+            "--auth-plugin=websockify.auth_plugins.ExpectOrigin"
+            "--auth-source=${lib.concatStringsSep " " cfg.viewer.origins}"
             (toString cfg.viewer.port)
           ];
         };
@@ -246,30 +267,51 @@ in
     };
 
     # Only burrow.user may connect to CDP or the viewer from this machine
-    # (connections to its own addresses leave through lo, whatever the address).
+    # (connections to its own addresses leave through lo, whatever the
+    # address), and from elsewhere only the viewer, on viewer.interfaces, even
+    # where the firewall trusts an interface or opens the port more widely.
     networking.firewall = lib.mkMerge [
       { interfaces = lib.genAttrs cfg.viewer.interfaces (_: { allowedTCPPorts = [ cfg.viewer.port ]; }); }
       (lib.mkIf (!config.networking.nftables.enable) {
+        # Built beside the live chains, hooked in, and only then is the old
+        # one unhooked: a reload never leaves the ports open. Nothing in
+        # extraStopCommands: a stopped firewall keeps these, and the browser
+        # stops with it anyway.
         extraCommands = ''
-          ip46tables -D OUTPUT -o lo -p tcp -j ${account} 2>/dev/null || true
-          ip46tables -F ${account} 2>/dev/null || ip46tables -N ${account}
-          ip46tables -A ${account} -p tcp -m multiport --dports ${lib.concatMapStringsSep "," toString ports} \
-            -m owner ! --uid-owner ${toString config.users.users.${user}.uid} -j REJECT --reject-with tcp-reset
-          ip46tables -A OUTPUT -o lo -p tcp -j ${account}
-        '';
-        extraStopCommands = ''
-          ip46tables -D OUTPUT -o lo -p tcp -j ${account} 2>/dev/null || true
-          ip46tables -F ${account} 2>/dev/null || true
-          ip46tables -X ${account} 2>/dev/null || true
+          for c in ${account}-out ${account}-in; do
+            ip46tables -F "$c-new" 2>/dev/null || ip46tables -N "$c-new"
+          done
+          ip46tables -A ${account}-out-new -p tcp -m multiport --dports ${lib.concatMapStringsSep "," toString ports} \
+            -m owner ! --uid-owner ${uid} -j REJECT --reject-with tcp-reset
+          ip46tables -A ${account}-in-new -p tcp ! --dport ${toString cfg.viewer.port} -j RETURN
+          for i in lo ${lib.escapeShellArgs cfg.viewer.interfaces}; do
+            ip46tables -A ${account}-in-new -i "$i" -j RETURN
+          done
+          ip46tables -A ${account}-in-new -p tcp -j REJECT --reject-with tcp-reset
+          ip46tables -I OUTPUT -o lo -p tcp -j ${account}-out-new
+          ip46tables -I INPUT -p tcp -j ${account}-in-new
+          while ip46tables -D OUTPUT -o lo -p tcp -j ${account}-out 2>/dev/null; do :; done
+          while ip46tables -D INPUT -p tcp -j ${account}-in 2>/dev/null; do :; done
+          for c in ${account}-out ${account}-in; do
+            ip46tables -F "$c" 2>/dev/null || true
+            ip46tables -X "$c" 2>/dev/null || true
+            ip46tables -E "$c-new" "$c"
+          done
         '';
       })
     ];
+    # The ruleset loads in one transaction, so a reload never opens them. A drop
+    # in any base chain is final, whatever the firewall's own input accepts.
     networking.nftables.tables.${account} = lib.mkIf config.networking.nftables.enable {
       family = "inet";
       content = ''
         chain output {
           type filter hook output priority filter; policy accept;
-          oifname "lo" tcp dport { ${lib.concatMapStringsSep ", " toString ports} } meta skuid != ${toString config.users.users.${user}.uid} reject with tcp reset
+          oifname "lo" tcp dport { ${lib.concatMapStringsSep ", " toString ports} } meta skuid != ${uid} reject with tcp reset
+        }
+        chain input {
+          type filter hook input priority filter; policy accept;
+          tcp dport ${toString cfg.viewer.port} iifname != { ${lib.concatMapStringsSep ", " (i: ''"${i}"'') ([ "lo" ] ++ cfg.viewer.interfaces)} } reject with tcp reset
         }
       '';
     };
