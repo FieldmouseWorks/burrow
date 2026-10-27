@@ -206,4 +206,58 @@ S.main()
  S.R.watch_default, S.handle) = kept_fns
 assert order == ["watch", (9, True), (10, False)], order
 
+# The daily branch sweep deletes a branch already in the default branch, and
+# one a closed PR was closed at, a bot's included (GitHub deletes on merge,
+# never on close; the PR keeps the commits). One pushed to since its PR
+# closed, an open PR's, a bot's with no closed PR at its tip and a kept one
+# stay; an old one with no PR is listed, never deleted.
+old, young = "2026-09-01T00:00:00Z", "2026-10-23T00:00:00Z"
+BRANCHES = {"in-main": ("1" * 40, 0, young), "closed": ("2" * 40, 3, young), "moved": ("3" * 40, 1, young),
+            "open": ("4" * 40, 2, old), "renovate/x": ("5" * 40, 1, old), "gh-pages": ("6" * 40, 9, old),
+            "old": ("7" * 40, 4, old), "young": ("8" * 40, 4, young), "renovate/closed": ("9" * 40, 1, young),
+            "renovate/again": ("a" * 40, 1, young)}
+CLOSED = {"closed": [{"number": 3, "head": {"sha": "2" * 40}}], "moved": [{"number": 4, "head": {"sha": "f" * 40}}],
+          "renovate/closed": [{"number": 5, "head": {"sha": "9" * 40}}],
+          # Its last PR merged at another tip, and the bot has pushed its next update.
+          "renovate/again": [{"number": 6, "head": {"sha": "b" * 40}}]}
+LOOKED = []
+
+
+def branches_gh(*a, **k):
+    path = (a[2] if a[1:2] == ("--paginate",) else a[1]) if a[:1] == ("api",) and len(a) > 1 else ""
+    if path.startswith("repos/sam/r/branches?"):
+        return "\n".join(f"{n} {sha}" for n, (sha, _, _) in BRANCHES.items())
+    if path.startswith("repos/sam/r/compare/main..."):
+        b = next(x for x in BRANCHES.values() if x[0] == path.rpartition("...")[2])
+        return {"ahead": b[1], "date": b[2]}
+    if path.startswith("repos/sam/r/pulls?state=closed"):
+        name = path.partition("head=sam:")[2]
+        LOOKED.append(name)
+        return CLOSED.get(name, [])
+    return gh_stub(*a, **k)
+
+
+DELETED, kept_delete = [], R.delete_branch
+R.delete_branch = lambda repo, name, sha: DELETED.append((name, sha))
+S.C.CFG["keepBranches"] = ["gh-pages"]
+C.gh = branches_gh
+C.save("repo-sam_r.json", {})
+digest = []
+R.sweep_branches(repo_r, {"open"}, digest)
+assert DELETED == [("in-main", "1" * 40), ("closed", "2" * 40), ("renovate/closed", "9" * 40)], DELETED
+assert sorted(LOOKED) == ["closed", "in-main", "moved", "old", "renovate/again", "renovate/closed", "renovate/x", "young"], LOOKED
+assert [line for _, line, _ in digest] == ["sam/r: `old`"], digest
+# Not again until a day on: the stale list is all a pass shows meanwhile.
+DELETED.clear()
+digest = []
+R.sweep_branches(repo_r, {"open"}, digest)
+assert DELETED == [] and [line for _, line, _ in digest] == ["sam/r: `old`"], (DELETED, digest)
+# GitHub won't say which PRs were closed at it: the branch stays.
+CLOSED["closed"] = None
+C.NOW += 86400
+R.sweep_branches(repo_r, {"open"}, [])
+assert DELETED == [("in-main", "1" * 40), ("renovate/closed", "9" * 40)], DELETED
+R.delete_branch, C.gh = kept_delete, gh_stub
+S.C.CFG["keepBranches"] = []
+
 print("upkeep: ok")

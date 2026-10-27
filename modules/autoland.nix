@@ -283,9 +283,9 @@ in
       type = types.bool;
       default = true;
       description = ''
-        Daily, delete branches whose tip is already in the default branch (no
-        open PR, not a bot's). Unmerged ones older than 30 days are listed for
-        you, never deleted.
+        Daily, delete branches whose tip is already in the default branch or
+        is a closed PR's head (no open PR, not a bot's). Other unmerged ones
+        older than 30 days are listed for you, never deleted.
       '';
     };
 
