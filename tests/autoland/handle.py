@@ -610,6 +610,34 @@ status, _ = run(mkpr(comments=[said(judgment("land", n=5))], **five), 830)
 assert not merged() and JOBS == [] and "Waiting for DeepSeek's review" in status, (status, JOBS)
 status, _ = run(mkpr(comments=[said(judgment("land", n=5))], **five), 770 + 3700)
 assert queued() == ["deepseek"] and not merged() and JOBS == [], (queued(), status, JOBS)
+# So is a look at this head after findings on it, or at an earlier head:
+# what's still in the queue for the PR, begun or not, is waited for.
+for at, pushed_to in ((head, head), (head, newer)):
+    fresh_pr_state()
+    V.queue("sam/r", mkpr(sha=at), "pr-sam_r-5.json", "codex")
+    status, _ = run(mkpr(sha=pushed_to, **five), 700)
+    assert JOBS == [] and not merged() and "Waiting for Codex's review" in status, (pushed_to, status, JOBS)
+    worker(codex={"result": "review", "answer": {"findings": [{"path": "a.py"}]}})
+    status, _ = run(mkpr(sha=pushed_to, comments=[said(judgment("land", n=5, sha=pushed_to))], **five), 800)
+    assert not merged() and f"review findings on {at[:7]}" in status, (pushed_to, status)
+# Findings lost after earlier ones on the head, then a push: still owed, and
+# asked for on the new head.
+fresh_pr_state()
+V.queue("sam/r", mkpr(), "pr-sam_r-5.json", "codex")
+worker(codex={"result": "review", "answer": {"findings": [{"path": "a.py"}]}})
+STUB["post"] = RuntimeError("HTTP 502")
+for t in (650, 710, 770):
+    run(mkpr(**five), t)
+STUB["post"] = None
+landed_newer = {**five, "sha": newer, "comments": [said(judgment("land", n=5, sha=newer))]}
+status, _ = run(mkpr(**landed_newer), 800)
+assert not merged() and JOBS == [] and "Waiting for Codex's review" in status, (status, JOBS)
+status, _ = run(mkpr(**landed_newer), 1500)
+assert queued() == ["codex"] and not merged(), (queued(), status)
+worker()
+status, _ = run(mkpr(reviews=[*five["reviews"], rv_review("codex", 0, newer)], threads=[True], sha=newer,
+                     comments=landed_newer["comments"]), 1600)
+assert "lostOn" not in pr_state() or not pr_state()["lostOn"], pr_state()
 # The limit holds while the reviewer that reached it is out of service, and
 # with none in service the judge still decides.
 for out in (["codex"], ["codex", "deepseek"]):

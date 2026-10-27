@@ -331,6 +331,13 @@ def answered(key, r):
     return mine(DONE, key, r)
 
 
+def in_queue(key, r, base):
+    """The names of the reviewer's looks at the PR on `base`, for any head,
+    still in the queue, begun or not."""
+    on = snap_name(key, "", base).rsplit("-", 1)[1]
+    return [name for name in mine(QUEUE, key, r) if name.rsplit("-", 1)[1] == on]
+
+
 def under_way(key, r, base):
     """The names of the reviewer's looks at the PR on `base`, for any head,
     that the reviewers' service is on now (on another base, the PR was

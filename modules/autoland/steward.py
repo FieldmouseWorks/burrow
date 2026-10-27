@@ -228,6 +228,10 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
     if st.get("head") != head:
         st.update(head=head, seen=C.NOW, handed=None, landFails=0, rv={})
     st.setdefault("rv", {})
+    # The reviewers whose findings couldn't be posted, by base, until they
+    # post a review again: kept across heads, since past the round limit no
+    # new head's look would cover them.
+    lost_on = st.setdefault("lostOn", {})
     labels = {x["name"] for x in pr["labels"]["nodes"]}
     age = C.NOW - st["seen"]
     tag = f"{repo}#{n}"
@@ -613,6 +617,7 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
                     rs.pop("fails", None)
                     rs.pop("failedAt", None)
                     rs.pop("lost", None)
+                    lost_on.pop(r, None)
                 except ValueError as e:  # an answer that's no review
                     rs["fails"], rs["failedAt"] = rs.get("fails", 0) + 1, C.NOW
                     log(f"{tag}: {V.NAMES[r]}'s answer wasn't a review ({rs['fails']}): {e}")
@@ -632,6 +637,7 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
                         # Dropped, it's asked again; one out of service by
                         # then isn't, so the head's held for it meanwhile.
                         rs["lost"] = [head, pr["baseRefName"]]
+                        lost_on[r] = pr["baseRefName"]
             elif back["result"] == "out":
                 went_out(r, back)
             else:  # the agent, the network, its JSON: tried again next pass
@@ -678,6 +684,7 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
                         v, at, rr = said[r]
                         said[r] = (v, at, rr + 1)
                         late.append(back["head"][:7])
+                    lost_on.pop(r, None)
                 except ValueError as e:  # an answer that's no review
                     log(f"{tag}: {V.NAMES[r]}'s review of {back['head'][:7]} wasn't a review: {e}")
                 except RuntimeError as e:  # GitHub: the same answer goes again next pass
@@ -735,10 +742,18 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
     # far has found more, so more looks only drip-feed more rounds. A Claude
     # job settles what's left on its merits, fixing what's real and answering
     # the rest, and a judge decides whether it lands. Only what the judge
-    # can't call (a one-way door) waits for the owner. A look already on its
-    # way is waited for, and one whose findings couldn't be posted is asked
-    # again: that's the same round, not another.
+    # can't call (a one-way door) waits for the owner.
     capped = rounds >= rc["rounds"] and not clean
+
+    def owed(r):
+        """Past the limit, what the reviewer still owes the PR, which the
+        judge mustn't land past: a look at any of its heads on this base
+        still in the queue (begun or not, it's waited for), an answer back
+        but not yet posted, or findings that couldn't be posted, at this
+        head or an earlier one (it's asked again on this head: that's the
+        same round, not another)."""
+        base = pr["baseRefName"]
+        return bool(V.in_queue(key, r, base) or V.answered(key, r) or lost_on.get(r) == base)
     # Findings on this head this pass posted are threads it never read: one
     # out now isn't waited for, and past the limit no look follows to cover
     # them, so they hold the pass back.
@@ -771,8 +786,7 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
 
     # 1. The reviewers.
     quiet = age >= rc["settleDelay"] * MIN
-    looking = [r for r in live if said[r][0] == "none" and (
-        not capped or st["rv"].get(r, {}).get("queued") or st["rv"].get(r, {}).get("lost") == [head, pr["baseRefName"]])]
+    looking = [r for r in live if owed(r)] if capped else [r for r in live if said[r][0] == "none"]
     if not quiet and looking:
         after(st["seen"], rc["settleDelay"])  # the reviewers are asked then
     waiting = [f"Posting {x}" for x in unposted]
@@ -782,16 +796,18 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
             rs.pop("lost", None)
         elif r not in live:
             waiting.append(f"{V.NAMES[r]}'s findings on {head[:7]} couldn't be posted, and it's out of service")
+        if capped and r not in live and owed(r) and rs.get("lost") != [head, pr["baseRefName"]] and r not in under_way:
+            waiting.append(f"{V.NAMES[r]} still owes it a review, and it's out of service")
     waiting += [f"{V.NAMES[r]} is still reviewing it, though out of service" for r in under_way]
     if not live and not capped:
         why = "; ".join(f"{V.NAMES[r]}: {away[r] or V.out(r)}" for r in names) or "none is on"
         waiting.append(f"No reviewer can review it now ({why})")
         digest.append(("No reviewer can review it", line, why))
     for r in looking:
-        if quiet:
+        if quiet and (not capped or lost_on.get(r) == pr["baseRefName"]):
             ask(r)
         waiting.append(f"{V.NAMES[r]} is reviewing this commit" if st["rv"].get(r, {}).get("queued")
-                       else f"Waiting for {V.NAMES[r]}'s review of this commit")
+                       else f"Waiting for {V.NAMES[r]}'s review" + ("" if capped else " of this commit"))
     # A look that can't happen, a first one or a second: the owner hears either way.
     stuck = []
     for r in live:
