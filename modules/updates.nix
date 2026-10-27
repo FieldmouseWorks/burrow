@@ -98,6 +98,19 @@ let
     cp ${./autoland/seal.py} $out/seal.py
     flake8 --ignore E501,W503 $out
   '';
+  # How old a release must be before Renovate takes it (minimumReleaseAge).
+  releaseAgeDays = 3;
+  # What holds a Cargo or npm lock file refresh to that age (updates/lock-age.py),
+  # linted as it's built.
+  lockAgeSrc = pkgs.runCommand "lock-age-src" { nativeBuildInputs = [ pkgs.python3Packages.flake8 ]; } ''
+    mkdir $out
+    cp ${./updates/lock-age.py} $out/lock-age.py
+    flake8 --ignore E501,W503 $out
+  '';
+  lockAge = pkgs.writeShellScriptBin "lock-age" ''
+    exec ${pkgs.python3}/bin/python3 -I ${lockAgeSrc}/lock-age.py "$@"
+  '';
+  lockAgeCommand = "${lockAge}/bin/lock-age ${toString (releaseAgeDays * 86400)}";
   majorSeal = pkgs.writeShellScriptBin "major-seal" ''
     exec ${pkgs.python3}/bin/python3 -E -s ${majorSealSrc}/major-seal.py ${stateDir}/renovate-sweep "$@"
   '';
@@ -137,8 +150,10 @@ let
 
     # Three days before a release counts: hijacked npm and crates releases are
     # usually caught and pulled within that. Security fixes don't wait.
-    minimumReleaseAge = "3 days";
+    minimumReleaseAge = "${toString releaseAgeDays} days";
     internalChecksFilter = "strict";
+    # The one command a repo's refresh may run after it (lock-age, above).
+    allowedCommands = [ "^${lib.escapeRegex lockAgeCommand}$" ];
     osvVulnerabilityAlerts = true;
     vulnerabilityAlerts = {
       enabled = true;
@@ -201,12 +216,27 @@ let
         # holds an update without one at a pending stability check for
         # good. Nix's is taken as stable without one: its inputs are
         # commits, not registry releases, and HOST-update already deploys
-        # them the hour they land. A registry's (Cargo, npm) still waits:
-        # nothing checks the age of what it resolves to (burrow#82; npm's
-        # --before is dropped whenever it fails to resolve).
+        # them the hour they land.
         matchUpdateTypes = [ "lockFileMaintenance" ];
         matchManagers = [ "nix" ];
         minimumReleaseAgeBehaviour = "timestamp-optional";
+      }
+      {
+        # Cargo's and npm's resolve to registry releases, with no cutoff
+        # Renovate keeps (cargo has none; npm's --before is dropped whenever
+        # it fails to resolve). lock-age holds them to the age itself:
+        # each release the refresh brings in is taken back to one old
+        # enough, or the refresh fails as an artifact error and doesn't
+        # merge (burrow#82). So the stability check needn't wait for a
+        # timestamp they don't have.
+        matchUpdateTypes = [ "lockFileMaintenance" ];
+        matchManagers = [ "cargo" "npm" ];
+        minimumReleaseAgeBehaviour = "timestamp-optional";
+        postUpgradeTasks = {
+          commands = [ lockAgeCommand ];
+          fileFilters = [ "**/Cargo.lock" "**/package-lock.json" ];
+          executionMode = "branch";
+        };
       }
     ] ++ lib.optional (githubRepo != null) {
       # The machine's own flake.lock is HOST-update's: it deploys what it bumps.
