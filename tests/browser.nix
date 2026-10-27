@@ -5,7 +5,8 @@
 # and speaks VNC there, the screen listens on no TCP or abstract socket, the
 # profile is the browser's alone, no other site can frame the viewer, Claude
 # gets the MCP server as soon as it has a config and loses it when the browser
-# is turned off, and the iptables rules leave with the module.
+# is turned off, no other firewall manager's accepts get past its rules, and
+# under iptables the rules leave with the module.
 #
 #   nix build .#checks.x86_64-linux.browser -L
 { self, pkgs }:
@@ -184,10 +185,19 @@ pkgs.testers.runNixOSTest {
             node.fail("su other -s /bin/sh -c '" + cdp + "'")
             ip2 = node.succeed("ip -4 -o addr show eth2 | awk '{print $4}' | cut -d/ -f1").strip()
             client.fail(f"curl -fsS --max-time 5 -o /dev/null http://{ip2}:6080/vnc.html")
-        # The old chains are gone, not left beside the new ones.
-        assert machine.succeed("iptables -S OUTPUT | grep -c burrow-browser").strip() == "1"
-        assert machine.succeed("iptables -S INPUT | grep -c burrow-browser").strip() == "1"
-        assert machine.succeed("iptables -S | grep -c -- '-N burrow-browser'").strip() == "2"
+        # The old table is gone, not left beside the new one.
+        assert machine.succeed("nft list tables | grep -c burrow-browser").strip() == "1"
+
+    with subtest("another manager's accepts ahead of everything don't get past it"):
+        # As Tailscale does under iptables: its own accepts first in INPUT.
+        accepts = ["INPUT -i eth2 -j ACCEPT", "OUTPUT -o lo -j ACCEPT"]
+        for rule in accepts:
+            machine.succeed(f"iptables -I {rule} && ip6tables -I {rule}")
+        machine.fail("su other -s /bin/sh -c '" + cdp + "'")
+        ip2 = machine.succeed("ip -4 -o addr show eth2 | awk '{print $4}' | cut -d/ -f1").strip()
+        client.fail(f"curl -fsS --max-time 5 -o /dev/null http://{ip2}:6080/vnc.html")
+        for rule in accepts:
+            machine.succeed(f"iptables -D {rule} && ip6tables -D {rule}")
 
     with subtest("the screen listens on no TCP port and no abstract socket"):
         out = machine.succeed("ss -Hlntp; ss -Hlxp")
@@ -246,8 +256,7 @@ pkgs.testers.runNixOSTest {
             node.fail("systemctl is-active -q burrow-browser-viewer.service")
             node.fail("su dev -c '" + cdp + "'")
             node.fail("su dev -c '" + viewer + "'")
-        # As when the module is turned off or rolled back: no chain left behind.
-        machine.fail("iptables -S | grep -q burrow-browser")
-        machine.fail("ip6tables -S | grep -q burrow-browser")
+        # As when the module is turned off or rolled back: no table left behind.
+        machine.fail("nft list table inet burrow-browser")
   '';
 }

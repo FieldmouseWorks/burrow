@@ -28,74 +28,34 @@ let
   # What keeps everyone else off its ports: nothing listens without it.
   guard = if nft then "nftables.service" else "${account}-guard.service";
 
-  # Under iptables, the rules are a unit of their own rather than the
-  # firewall's extraCommands: those run at every reload, and nothing removes
-  # them once the module is gone (turned off, rolled back, moved to nftables).
-  # Each family's chains and hooks change in one iptables-restore transaction,
-  # so an install or reload, even one that fails, leaves the old rules or the
-  # new, never neither. `remove` runs once the unit has stopped or failed to
-  # start, after everything listening has, and clears each family on its own.
-  hooks = [ "OUTPUT -o lo -p tcp -j ${account}-out" "INPUT -p tcp -j ${account}-in" ];
-  iptablesGuard = pkgs.writeShellApplication {
-    name = "${account}-guard";
-    runtimeInputs = [ config.networking.firewall.package ];
-    text = ''
-      # Whether the hook ($2) is in place in family $1. Anything but "it isn't"
-      # going wrong stops the run.
-      hooked() {
-        local spec rc=0
-        read -ra spec <<<"$2"
-        "$1" -w -S "''${spec[-1]}" >/dev/null 2>&1 || return 1
-        "$1" -w -C "''${spec[@]}" 2>/dev/null || rc=$?
-        [ "$rc" -le 1 ] || exit "$rc"
-        return "$rc"
-      }
-      # The filter table as it should be. Declaring a chain empties it if it's
-      # there, and the hooks go in only where they're missing.
-      table() {
-        echo '*filter'
-        echo ':${account}-out - [0:0]'
-        echo ':${account}-in - [0:0]'
-        echo '-A ${account}-out -p tcp -m multiport --dports ${lib.concatMapStringsSep "," toString ports} -m owner ! --uid-owner ${uid} -j REJECT --reject-with tcp-reset'
-        echo '-A ${account}-in -p tcp ! --dport ${toString cfg.viewer.port} -j RETURN'
-        ${lib.concatMapStringsSep "\n        " (i: "echo ${lib.escapeShellArg "-A ${account}-in -i ${i} -j RETURN"}") ([ "lo" ] ++ cfg.viewer.interfaces)}
-        echo '-A ${account}-in -p tcp -j REJECT --reject-with tcp-reset'
-        # At the top: ahead of the firewall's accepts, trusted interfaces' too.
-        for hook in ${lib.escapeShellArgs hooks}; do
-          hooked "$1" "$hook" || echo "-I $hook"
-        done
-        echo COMMIT
-      }
-      clear() {
-        local hook spec chain
-        for hook in ${lib.escapeShellArgs hooks}; do
-          read -ra spec <<<"$hook"
-          while hooked "$1" "$hook"; do "$1" -w -D "''${spec[@]}"; done
-        done
-        for chain in ${account}-out ${account}-in; do
-          if "$1" -w -S "$chain" >/dev/null 2>&1; then
-            "$1" -w -F "$chain"
-            "$1" -w -X "$chain"
-          fi
-        done
-      }
-      case ''${1:?install or remove} in
-        install)
-          for ipt in iptables ip6tables; do
-            rules=$(table "$ipt")
-            "$ipt-restore" -w --noflush <<<"$rules"
-          done ;;
-        remove)
-          # Each family on its own: one failing mustn't leave the other's.
-          failed=0
-          "$0" clear iptables || failed=1
-          "$0" clear ip6tables || failed=1
-          exit "$failed" ;;
-        clear)
-          clear "$2" ;;
-      esac
-    '';
-  };
+  # Who may reach the ports, as an nftables table under either firewall. A
+  # reject in any base chain is final, so no other chain's accept gets past it:
+  # not the firewall's, a trusted interface's, or one Tailscale or another
+  # manager puts first in iptables' INPUT later. The table covers IPv4 and
+  # IPv6 at once and loads in one transaction.
+  rules = ''
+    chain output {
+      type filter hook output priority filter; policy accept;
+      oifname "lo" tcp dport { ${lib.concatMapStringsSep ", " toString ports} } meta skuid != ${uid} reject with tcp reset
+    }
+    chain input {
+      type filter hook input priority filter; policy accept;
+      tcp dport ${toString cfg.viewer.port} iifname != { ${lib.concatMapStringsSep ", " (i: ''"${i}"'') ([ "lo" ] ++ cfg.viewer.interfaces)} } reject with tcp reset
+    }
+  '';
+  # Under iptables nothing else loads it, so a unit of its own does: replacing
+  # the table in one `nft -f` (an install or reload that fails leaves the old
+  # one), and deleting it the same way, which is a no-op when it's gone and an
+  # error when it can't be done.
+  dropTable = ''
+    table inet ${account} {}
+    delete table inet ${account}
+  '';
+  nftLoad = pkgs.writeText "${account}.nft" (dropTable + ''
+    table inet ${account} {
+    ${rules}}
+  '');
+  nftDrop = pkgs.writeText "${account}-drop.nft" dropTable;
 
   # What Claude starts for each session: Playwright's MCP server on the running
   # browser. Snapshots and logs go to the user's runtime dir, not the project.
@@ -344,32 +304,23 @@ in
     systemd.services."${account}-guard" = lib.mkIf (!nft) {
       description = "Keep everyone but ${user} off the browser's ports";
       wantedBy = [ "multi-user.target" ];
-      # A change swaps the rules in place; a restart would open a gap.
+      # A change replaces the table in place; a restart would open a gap.
       reloadIfChanged = true;
       serviceConfig = {
         Type = "oneshot";
         RemainAfterExit = true;
-        ExecStart = "${lib.getExe iptablesGuard} install";
-        ExecReload = "${lib.getExe iptablesGuard} install";
-        # Post, not Stop: it runs after a failed start too.
-        ExecStopPost = "${lib.getExe iptablesGuard} remove";
+        ExecStart = "${pkgs.nftables}/bin/nft -f ${nftLoad}";
+        ExecReload = "${pkgs.nftables}/bin/nft -f ${nftLoad}";
+        # Post, not Stop: it runs after a failed start too, and after
+        # everything listening has stopped (the screen is After= this unit).
+        ExecStopPost = "${pkgs.nftables}/bin/nft -f ${nftDrop}";
       };
     };
-    # The ruleset loads in one transaction, so a reload never opens them, and
-    # goes with the module. A drop in any base chain is final, whatever the
-    # firewall's own input accepts.
+    # Under nftables, part of the ruleset, which loads in one transaction and
+    # goes with the module.
     networking.nftables.tables.${account} = lib.mkIf nft {
       family = "inet";
-      content = ''
-        chain output {
-          type filter hook output priority filter; policy accept;
-          oifname "lo" tcp dport { ${lib.concatMapStringsSep ", " toString ports} } meta skuid != ${uid} reject with tcp reset
-        }
-        chain input {
-          type filter hook input priority filter; policy accept;
-          tcp dport ${toString cfg.viewer.port} iifname != { ${lib.concatMapStringsSep ", " (i: ''"${i}"'') ([ "lo" ] ++ cfg.viewer.interfaces)} } reject with tcp reset
-        }
-      '';
+      content = rules;
     };
 
     burrow.claude.machineMd = lib.mkOrder 850 ''
