@@ -99,9 +99,9 @@ def get_json(url):
 L.crate_index, L.run, L.get_json = crate_index, run, get_json
 
 
-def lock_age(*presets):
+def lock_age(*more):
     RAN.clear()
-    return L.main(["lock-age", str(AGE), *presets])
+    return L.main(["lock-age", f"age={AGE}s", *more])
 
 
 def versions(path="Cargo.lock"):
@@ -210,10 +210,34 @@ for text in ("{minimumReleaseAge: someAge}", '{"minimumReleaseAge": 5}', '{"mini
              '{"extends": ["config:recommended", "github>someone/presets"]}'):
     repo({"Cargo.lock": cargo_lock(("b", "2.0.0")), "renovate.json5": text})
     write("Cargo.lock", cargo_lock(("b", "2.1.0")))
-    assert lock_age("config:recommended") == 1, text
+    assert lock_age("preset=config:recommended") == 1, text
 repo({"Cargo.lock": cargo_lock(("b", "2.0.0")), "renovate.json": '{"extends": ["config:recommended"]}'})
 write("Cargo.lock", cargo_lock(("b", "2.1.0")))
-assert lock_age("config:recommended") == 0
+assert lock_age("preset=config:recommended") == 0
+# A preset extended inside a rule counts too.
+repo({"Cargo.lock": cargo_lock(("b", "2.0.0")),
+      "renovate.json": '{"packageRules": [{"matchManagers": ["cargo"], "extends": ["github>someone/slow"]}]}'})
+write("Cargo.lock", cargo_lock(("b", "2.1.0")))
+assert lock_age("preset=config:recommended") == 1
+# statusCheckWhen's minimumReleaseAge says when the check is set, not an age.
+repo({"Cargo.lock": cargo_lock(("b", "2.0.0"), ("h", "1.0.0")),
+      "renovate.json": '{"statusCheckWhen": {"minimumReleaseAge": "always"}}'})
+write("Cargo.lock", cargo_lock(("b", "2.1.0"), ("h", "1.1.0")))
+assert lock_age() == 0 and versions()["h"] == "1.1.0", versions()
+# JSONC, and a config file the machine adds (file=), read first.
+for files, more in (({"renovate.jsonc": '{/* slow */ "minimumReleaseAge": "2 weeks",}'}, ()),
+                    ({"renovate.json": "{}", "ci/renovate.json": '{"minimumReleaseAge": "2 weeks"}'}, ("file=ci/renovate.json",))):
+    repo({"Cargo.lock": cargo_lock(("b", "2.0.0"), ("h", "1.0.0")), **files})
+    write("Cargo.lock", cargo_lock(("b", "2.1.0"), ("h", "1.1.0")))
+    assert lock_age(*more) == 0 and versions()["h"] == "1.0.0", (files, versions())
+# The machine's longest age holds.
+repo({"Cargo.lock": cargo_lock(("b", "2.0.0"), ("h", "1.0.0"))})
+write("Cargo.lock", cargo_lock(("b", "2.1.0"), ("h", "1.1.0")))
+assert lock_age("age=1week") == 0 and versions()["h"] == "1.0.0", versions()
+# Config the machine brings in that lock-age can't see fails every refresh.
+repo({"Cargo.lock": cargo_lock(("b", "2.0.0"))})
+write("Cargo.lock", cargo_lock(("b", "2.1.0")))
+assert lock_age("opaque=globalExtends") == 1 and RAN == []
 assert [L.duration(x) for x in ("3 days", "1 week 2 days", "12h", "1 month")] == [259200, 777600, 43200, 2592000]
 for x in ("3", "soon", "3 fortnights"):
     try:
@@ -320,7 +344,9 @@ repo({"yarn.lock": "# old\n"})
 write("yarn.lock", "# new\n")
 assert lock_age() == 1
 
-# Arguments: the age in seconds, nothing else.
-assert L.main(["lock-age"]) == 2 and L.main(["lock-age", "3 days"]) == 2
+# Arguments: at least one age=, and only the kinds lock-age knows.
+for argv in (["lock-age"], ["lock-age", "259200"], ["lock-age", "preset=x"], ["lock-age", "age=soon"],
+             ["lock-age", "age=3days", "colour=red"]):
+    assert L.main(argv) == 2, argv
 
 print("lock-age: ok")

@@ -98,11 +98,8 @@ let
     cp ${./autoland/seal.py} $out/seal.py
     flake8 --ignore E501,W503 $out
   '';
-  # The presets every repo's Renovate config extends (below), which lock-age
-  # knows set no release age of their own.
-  presets = [ "config:recommended" "helpers:pinGitHubActionDigests" ];
-  # What holds a Cargo or npm lock file refresh to that age (updates/lock-age.py),
-  # linted as it's built.
+  # What holds a Cargo or npm lock file refresh to the release age
+  # (updates/lock-age.py), linted as it's built.
   lockAgeSrc = pkgs.runCommand "lock-age-src" { nativeBuildInputs = [ pkgs.python3Packages.flake8 ]; } ''
     mkdir $out
     cp ${./updates/lock-age.py} $out/lock-age.py
@@ -112,7 +109,43 @@ let
   lockAge = pkgs.writeShellScriptBin "lock-age" ''
     exec ${lockAgePython}/bin/python3 -I ${lockAgeSrc}/lock-age.py "$@"
   '';
-  lockAgeCommand = lib.concatStringsSep " " ([ "${lockAge}/bin/lock-age" (toString (rcfg.releaseAge * 86400)) ] ++ presets);
+  # Every release age a Renovate config sets, anywhere in it (null is
+  # none). statusCheckNames and statusCheckWhen use the key for a check's
+  # name and when it's set, not for an age.
+  agesIn = v:
+    if builtins.isAttrs v then
+      lib.concatLists (lib.mapAttrsToList (k: x:
+        if lib.hasPrefix "statusCheck" k then [ ]
+        else if k == "minimumReleaseAge" then lib.optional (x != null) x
+        else agesIn x) v)
+    else if builtins.isList v then lib.concatMap agesIn v
+    else [ ];
+  # lock-age holds Cargo and npm refreshes to the longest age the machine's
+  # policy sets anywhere, knows the presets and config files it adds, and
+  # fails every refresh if it brings in config it can't see.
+  lockAgeCommand = lib.concatStringsSep " " ([ "${lockAge}/bin/lock-age" ]
+    ++ map (a: "age=${lib.replaceStrings [ " " ] [ "" ] a}") (agesIn renovatePolicy)
+    ++ map (p: "preset=${p}") (lib.toList (renovatePolicy.extends or [ ]))
+    ++ map (f: "file=${f}") (renovatePolicy.configFileNames or [ ])
+    ++ lib.optional (renovatePolicy ? globalExtends) "opaque=globalExtends"
+    ++ lib.optional (renovatePolicy.inheritConfig or false) "opaque=inheritConfig");
+  # Cargo's and npm's lock file refreshes resolve to registry releases, with
+  # no cutoff Renovate keeps (cargo has none; npm's --before is dropped
+  # whenever it fails to resolve). lock-age holds them to the age itself:
+  # each release a refresh brings in is taken back to one old enough, or the
+  # refresh fails as an artifact error and doesn't merge (burrow#82). So
+  # the stability check needn't wait for a timestamp they don't have. Last,
+  # so no rule in settings undoes it.
+  lockAgeRule = {
+    matchUpdateTypes = [ "lockFileMaintenance" ];
+    matchManagers = [ "cargo" "npm" ];
+    minimumReleaseAgeBehaviour = "timestamp-optional";
+    postUpgradeTasks = {
+      commands = [ lockAgeCommand ];
+      fileFilters = [ "**/Cargo.lock" "**/package-lock.json" ];
+      executionMode = "branch";
+    };
+  };
   majorSeal = pkgs.writeShellScriptBin "major-seal" ''
     exec ${pkgs.python3}/bin/python3 -E -s ${majorSealSrc}/major-seal.py ${stateDir}/renovate-sweep "$@"
   '';
@@ -127,13 +160,6 @@ let
   # Renovate's settings for every repo (a repo's own renovate.json can add to
   # them). Checked by renovate-config-validator at build time.
   rcfg = cfg.renovate;
-  # Whether a Renovate config sets a minimumReleaseAge anywhere in it
-  # (statusCheckNames uses the key for a status check's name, not an age).
-  hasAge = v:
-    if builtins.isAttrs v then
-      lib.any (k: k == "minimumReleaseAge" || (k != "statusCheckNames" && hasAge v.${k})) (builtins.attrNames v)
-    else if builtins.isList v then lib.any hasAge v
-    else false;
   # Renovate takes a branch with a commit by anyone but its gitAuthor as edited
   # by hand, and leaves it alone. With the user's own email, the fixes Claude
   # pushes to its branches (as the user) look like Renovate's, and its next
@@ -142,7 +168,9 @@ let
   userEmails = lib.concatMap (c: lib.optional (c ? user && c.user ? email) c.user.email) gitConfigs;
   renovateEmail = let m = if rcfg.gitAuthor == null then null else builtins.match ".*<([^>]*)>.*" rcfg.gitAuthor;
     in if m == null then null else lib.head m;
-  renovateSettings = lib.recursiveUpdate ({
+  # Renovate's policy, settings included, before lock-age goes in
+  # (renovateSettings).
+  renovatePolicy = lib.recursiveUpdate ({
     platform = "github";
     autodiscover = true;
     autodiscoverFilter = rcfg.autodiscoverFilter;
@@ -153,15 +181,14 @@ let
     baseDir = "${rcfg.dir}/work";
     cacheDir = "${rcfg.dir}/cache";
     repositoryCache = "enabled";
-    extends = presets;
+    extends = [ "config:recommended" "helpers:pinGitHubActionDigests" ];
     prHourlyLimit = 0;
     prConcurrentLimit = 20;
 
-    # releaseAge's days before a release counts. Security fixes don't wait.
-    minimumReleaseAge = "${toString rcfg.releaseAge} days";
+    # Three days before a release counts: hijacked npm and crates releases are
+    # usually caught and pulled within that. Security fixes don't wait.
+    minimumReleaseAge = "3 days";
     internalChecksFilter = "strict";
-    # The one command a repo's refresh may run after it (lock-age, above).
-    allowedCommands = [ "^${lib.escapeRegex lockAgeCommand}$" ];
     osvVulnerabilityAlerts = true;
     vulnerabilityAlerts = {
       enabled = true;
@@ -229,23 +256,6 @@ let
         matchManagers = [ "nix" ];
         minimumReleaseAgeBehaviour = "timestamp-optional";
       }
-      {
-        # Cargo's and npm's resolve to registry releases, with no cutoff
-        # Renovate keeps (cargo has none; npm's --before is dropped whenever
-        # it fails to resolve). lock-age holds them to the age itself:
-        # each release the refresh brings in is taken back to one old
-        # enough, or the refresh fails as an artifact error and doesn't
-        # merge (burrow#82). So the stability check needn't wait for a
-        # timestamp they don't have.
-        matchUpdateTypes = [ "lockFileMaintenance" ];
-        matchManagers = [ "cargo" "npm" ];
-        minimumReleaseAgeBehaviour = "timestamp-optional";
-        postUpgradeTasks = {
-          commands = [ lockAgeCommand ];
-          fileFilters = [ "**/Cargo.lock" "**/package-lock.json" ];
-          executionMode = "branch";
-        };
-      }
     ] ++ lib.optional (githubRepo != null) {
       # The machine's own flake.lock is HOST-update's: it deploys what it bumps.
       matchRepositories = [ githubRepo ];
@@ -267,6 +277,11 @@ let
   } // lib.optionalAttrs (rcfg.timezone != null) { inherit (rcfg) timezone; }
     // lib.optionalAttrs (rcfg.gitAuthor != null) { inherit (rcfg) gitAuthor; })
     rcfg.settings;
+  renovateSettings = renovatePolicy // {
+    # The one command a repo's refresh may run after it (lock-age).
+    allowedCommands = (renovatePolicy.allowedCommands or [ ]) ++ [ "^${lib.escapeRegex lockAgeCommand}$" ];
+    packageRules = (renovatePolicy.packageRules or [ ]) ++ [ lockAgeRule ];
+  };
 
   # Whether Renovate's autodiscoverFilter takes a repo, by Renovate's own code
   # (updates/renovate-covers.mjs), on the node it runs on.
@@ -423,14 +438,6 @@ in
         type = lib.types.str;
         default = "/var/cache/renovate";
         description = "Renovate's clones and caches.";
-      };
-      releaseAge = lib.mkOption {
-        type = lib.types.ints.positive;
-        default = 3;
-        description = ''
-          Days a release must be out before Renovate takes it, lock file
-          refreshes included. Hijacked npm and crates releases are usually
-          caught and pulled within three.'';
       };
       settings = lib.mkOption {
         type = lib.types.attrs;
@@ -610,14 +617,6 @@ in
 
     (lib.mkIf rcfg.enable {
       assertions = [{
-        # lock-age holds Cargo and npm refreshes to releaseAge, and wouldn't
-        # follow an age set anywhere in settings (a manager's, a rule's).
-        assertion = !(hasAge rcfg.settings);
-        message = ''
-          burrow.updates.renovate.settings sets a minimumReleaseAge, which
-          lock-age wouldn't follow for lock file refreshes. Set
-          burrow.updates.renovate.releaseAge instead.'';
-      } {
         assertion = renovateEmail == null || !(lib.elem renovateEmail userEmails);
         message = ''
           burrow.updates.renovate.gitAuthor uses ${renovateEmail}, the email the
