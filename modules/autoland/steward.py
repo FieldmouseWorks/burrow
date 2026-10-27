@@ -933,12 +933,15 @@ def main():
             read.add(repo.replace("/", "_"))
             # First, so a fix PR it made obsolete isn't merged by this same pass.
             obsolete = R.watch_default(r, info, prs, mine) or set()
-            heads = set()
+            # Every open PR's branches, head and base, drafts and forks' PRs
+            # included: the branch sweep leaves them all (deleting a base
+            # closes the PRs on it).
+            in_use = set()
             seen_to = True
             # Obsolete fixes first: their holds take back a queued merge
             # before anything else this pass waits on.
             for pr in sorted(prs, key=lambda pr: pr["number"] not in obsolete):
-                heads.add(pr["headRefName"])
+                in_use.update((pr["headRefName"], pr["baseRefName"]))
                 live.add(V.snap_name(f"pr-{repo.replace('/', '_')}-{pr['number']}.json", pr["headRefOid"], pr["baseRefName"]))
                 try:
                     handle(repo, pr, info, mine, pr["number"] in obsolete)
@@ -951,7 +954,7 @@ def main():
                 C.wake(repo, C.NOW + 5 * MIN)
             if CFG["cleanBranches"]:
                 # Stale ones the last sweep found are listed every pass.
-                R.sweep_branches(r, heads, mine, sweep=kick is None)
+                R.sweep_branches(r, in_use, mine, sweep=kick is None)
         except Exception as e:
             log(f"{repo}: {e}")
             C.wake(repo, C.NOW + 5 * MIN)  # GitHub, often: another look soon

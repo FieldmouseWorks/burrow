@@ -348,14 +348,17 @@ def closed_at(repo, name, sha):
     GitHub keeps that PR's commits (refs/pull/N/head) and offers to restore
     the branch from its page, so the branch holds nothing the PR doesn't."""
     owner = repo.split("/")[0]
-    prs = C.gh("api", f"repos/{repo}/pulls?state=closed&per_page=100&head={owner}:{urllib.parse.quote(name)}",
-               check=False)
-    if not isinstance(prs, list):
+    # Every page: a branch name reused for many PRs can have its match
+    # past the first hundred.
+    got = C.gh("api", "--paginate", f"repos/{repo}/pulls?state=closed&per_page=100&head={owner}:{urllib.parse.quote(name)}",
+               "--jq", f'.[] | select(.head.sha == "{sha}") | .number', check=False)
+    if got is None:
         return None
-    return next((pr["number"] for pr in prs if (pr.get("head") or {}).get("sha") == sha), None)
+    first = str(got).split("\n")[0]
+    return int(first) if first.isdigit() else None
 
 
-def sweep_branches(r, open_heads, digest, sweep=True):
+def sweep_branches(r, in_use, digest, sweep=True):
     """Delete the merged branches and the closed PRs' branches, and list the
     stale ones, once a day and only when `sweep`; the stale ones the last
     sweep found are listed every time."""
@@ -372,7 +375,7 @@ def sweep_branches(r, open_heads, digest, sweep=True):
                   '.[] | select(.protected | not) | "\\(.name) \\(.commit.sha)"', check=False) or "")
     for x in str(names).split("\n"):
         name, _, sha = x.partition(" ")
-        if not name or not sha or name == r["default"] or name in open_heads:
+        if not name or not sha or name == r["default"] or name in in_use:
             continue
         if any(fnmatch.fnmatch(name, pat) for pat in keep):
             continue

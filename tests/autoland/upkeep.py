@@ -217,7 +217,9 @@ BRANCHES = {"in-main": ("1" * 40, 0, young), "closed": ("2" * 40, 3, young), "mo
             "old": ("7" * 40, 4, old), "young": ("8" * 40, 4, young), "renovate/closed": ("9" * 40, 1, young),
             "renovate/again": ("a" * 40, 1, young)}
 CLOSED = {"closed": [{"number": 3, "head": {"sha": "2" * 40}}], "moved": [{"number": 4, "head": {"sha": "f" * 40}}],
-          "renovate/closed": [{"number": 5, "head": {"sha": "9" * 40}}],
+          # Its match is the 101st closed PR on the name: past gh's first page.
+          "renovate/closed": [{"number": n, "head": {"sha": "c" * 40}} for n in range(100, 200)]
+          + [{"number": 5, "head": {"sha": "9" * 40}}],
           # Its last PR merged at another tip, and the bot has pushed its next update.
           "renovate/again": [{"number": 6, "head": {"sha": "b" * 40}}]}
 LOOKED = []
@@ -231,9 +233,15 @@ def branches_gh(*a, **k):
         b = next(x for x in BRANCHES.values() if x[0] == path.rpartition("...")[2])
         return {"ahead": b[1], "date": b[2]}
     if path.startswith("repos/sam/r/pulls?state=closed"):
+        # gh's --paginate --jq: the matching numbers from every page, a line each.
+        assert a[1] == "--paginate", a
         name = path.partition("head=sam:")[2]
         LOOKED.append(name)
-        return CLOSED.get(name, [])
+        prs = CLOSED.get(name, [])
+        if prs is None:
+            return None
+        want = a[a.index("--jq") + 1].partition('.head.sha == "')[2][:40]
+        return "\n".join(str(pr["number"]) for pr in prs if pr["head"]["sha"] == want)
     return gh_stub(*a, **k)
 
 
