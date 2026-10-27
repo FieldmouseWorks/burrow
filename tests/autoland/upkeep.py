@@ -206,4 +206,35 @@ S.main()
  S.R.watch_default, S.handle) = kept_fns
 assert order == ["watch", (9, True), (10, False)], order
 
+# The daily branch sweep: a merged branch goes, an old unmerged one is
+# listed, and a dependency bot's branch goes only once its PR was closed
+# (one with no PR yet is the bot's work in progress).
+BRANCHES = "\n".join(f"{n} {c * 40}" for n, c in [
+    ("main", "0"), ("merged", "1"), ("old", "2"), ("open-pr", "3"), ("renovate/closed", "4"),
+    ("renovate/new", "5")])
+CLOSED = {"renovate/closed": 1, "renovate/new": 0}
+deleted = []
+
+
+def sweep_gh(*a, **k):
+    path = next(x for x in a if x.startswith("repos/"))
+    if path.startswith("repos/sam/r/branches"):
+        return BRANCHES
+    if path.startswith("repos/sam/r/compare/"):
+        tip = path.split("...")[1]
+        return {"ahead": 0 if tip == "1" * 40 else 3, "date": "2020-01-01T00:00:00Z"}
+    if path.startswith("repos/sam/r/pulls?state=closed&head=sam:"):
+        return CLOSED[path.split(":", 1)[1]]
+    raise AssertionError(a)
+
+
+kept_fns = (C.gh, R.delete_branch)
+C.gh, R.delete_branch = sweep_gh, lambda repo, name, sha: deleted.append(name)
+C.save("repo-sam_r.json", {})
+digest = []
+R.sweep_branches({"repo": "sam/r", "default": "main"}, {"open-pr"}, digest)
+C.gh, R.delete_branch = kept_fns
+assert deleted == ["merged", "renovate/closed"], deleted
+assert [line for _, line, _ in digest] == ["sam/r: `old`"], digest
+
 print("upkeep: ok")
