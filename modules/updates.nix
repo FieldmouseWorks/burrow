@@ -98,6 +98,47 @@ let
     cp ${./autoland/seal.py} $out/seal.py
     flake8 --ignore E501,W503 $out
   '';
+  # What holds a Cargo or npm lock file refresh to the release age
+  # (updates/lock-age.py), linted as it's built.
+  lockAgeSrc = pkgs.runCommand "lock-age-src" { nativeBuildInputs = [ pkgs.python3Packages.flake8 ]; } ''
+    mkdir $out
+    cp ${./updates/lock-age.py} $out/lock-age.py
+    flake8 --ignore E501,W503 $out
+  '';
+  lockAgePython = pkgs.python3.withPackages (p: [ p.json5 ]);
+  # Every release age a Renovate config sets, its presets resolved by
+  # Renovate's own code (updates/release-ages.mjs).
+  releaseAges = pkgs.writeShellScriptBin "release-ages" ''
+    exec ${lib.getExe pkgs.nodejs_24} ${./updates/release-ages.mjs} ${pkgs.renovate}
+  '';
+  # lock-age holds Cargo and npm refreshes to the longest age the machine's
+  # policy and the repo's own config set, presets and all. It takes the
+  # policy from the store, so the command Renovate runs has only the branch
+  # the refresh is for, which Renovate fills in: a ref name has no spaces,
+  # and one with anything but these characters isn't allowed to run.
+  lockAge = pkgs.writeShellScriptBin "lock-age" ''
+    exec ${lockAgePython}/bin/python3 -I ${lockAgeSrc}/lock-age.py \
+      ${pkgs.writeText "lock-age-policy.json" (builtins.toJSON renovatePolicy)} ${releaseAges}/bin/release-ages "$@"
+  '';
+  lockAgeCommand = "${lockAge}/bin/lock-age {{{baseBranch}}}";
+  lockAgeAllowed = "^${lib.escapeRegex "${lockAge}/bin/lock-age"} [A-Za-z0-9._/+-]+$";
+  # Cargo's and npm's lock file refreshes resolve to registry releases, with
+  # no cutoff Renovate keeps (cargo has none; npm's --before is dropped
+  # whenever it fails to resolve). lock-age holds them to the age itself:
+  # each release a refresh brings in is taken back to one old enough, or the
+  # refresh fails as an artifact error and doesn't merge (burrow#82). So
+  # the stability check needn't wait for a timestamp they don't have. Last,
+  # so no rule in settings undoes it.
+  lockAgeRule = {
+    matchUpdateTypes = [ "lockFileMaintenance" ];
+    matchManagers = [ "cargo" "npm" ];
+    minimumReleaseAgeBehaviour = "timestamp-optional";
+    postUpgradeTasks = {
+      commands = [ lockAgeCommand ];
+      fileFilters = [ "**/Cargo.lock" "**/package-lock.json" ];
+      executionMode = "branch";
+    };
+  };
   majorSeal = pkgs.writeShellScriptBin "major-seal" ''
     exec ${pkgs.python3}/bin/python3 -E -s ${majorSealSrc}/major-seal.py ${stateDir}/renovate-sweep "$@"
   '';
@@ -120,7 +161,9 @@ let
   userEmails = lib.concatMap (c: lib.optional (c ? user && c.user ? email) c.user.email) gitConfigs;
   renovateEmail = let m = if rcfg.gitAuthor == null then null else builtins.match ".*<([^>]*)>.*" rcfg.gitAuthor;
     in if m == null then null else lib.head m;
-  renovateSettings = lib.recursiveUpdate ({
+  # Renovate's policy, settings included, before lock-age goes in
+  # (renovateSettings).
+  renovatePolicy = lib.recursiveUpdate ({
     platform = "github";
     autodiscover = true;
     autodiscoverFilter = rcfg.autodiscoverFilter;
@@ -201,9 +244,7 @@ let
         # holds an update without one at a pending stability check for
         # good. Nix's is taken as stable without one: its inputs are
         # commits, not registry releases, and HOST-update already deploys
-        # them the hour they land. A registry's (Cargo, npm) still waits:
-        # nothing checks the age of what it resolves to (burrow#82; npm's
-        # --before is dropped whenever it fails to resolve).
+        # them the hour they land.
         matchUpdateTypes = [ "lockFileMaintenance" ];
         matchManagers = [ "nix" ];
         minimumReleaseAgeBehaviour = "timestamp-optional";
@@ -229,6 +270,11 @@ let
   } // lib.optionalAttrs (rcfg.timezone != null) { inherit (rcfg) timezone; }
     // lib.optionalAttrs (rcfg.gitAuthor != null) { inherit (rcfg) gitAuthor; })
     rcfg.settings;
+  renovateSettings = renovatePolicy // {
+    # The one command a repo's refresh may run after it (lock-age).
+    allowedCommands = (renovatePolicy.allowedCommands or [ ]) ++ [ lockAgeAllowed ];
+    packageRules = (renovatePolicy.packageRules or [ ]) ++ [ lockAgeRule ];
+  };
 
   # Whether Renovate's autodiscoverFilter takes a repo, by Renovate's own code
   # (updates/renovate-covers.mjs), on the node it runs on.

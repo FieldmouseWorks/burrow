@@ -145,6 +145,40 @@
           python3 -I ${./tests/renovate-sweep.py} ${./modules/updates/renovate-sweep.sh} ${./modules/updates/major-seal.py} ${./modules/autoland/seal.py}
           touch $out
         '';
+        # A lock file refresh's too-new releases go back or fail it, with
+        # stand-ins for cargo, npm and the registries.
+        lock-age = pkgs.runCommand "lock-age-check" { nativeBuildInputs = [ (pkgs.python3.withPackages (p: [ p.json5 ])) pkgs.git ]; } ''
+          export HOME=$TMPDIR
+          python3 -I ${./tests/lock-age.py} ${./modules/updates/lock-age.py}
+          touch $out
+        '';
+        # What decides a lock file refresh's release age in a Renovate config,
+        # as Renovate itself migrates it, resolves its presets (at any scope)
+        # and reads its durations; what it can't resolve or read fails.
+        release-ages = pkgs.runCommand "release-ages-check" { nativeBuildInputs = [ pkgs.jq ]; } ''
+          export HOME=$TMPDIR
+          read() { echo "$1" | ${pkgs.lib.getExe pkgs.nodejs_24} ${./modules/updates/release-ages.mjs} ${pkgs.renovate} 2>/dev/null; }
+          ages() { read "$1" | jq -c .ages; }
+          test "$(ages '{"extends": ["config:best-practices"]}')" = '[259200000]'
+          test "$(ages '{"packageRules": [{"matchManagers": ["cargo"], "extends": ["security:minimumReleaseAgeNpm"]}]}')" = '[259200000]'
+          test "$(ages '{"cargo": {"extends": ["security:minimumReleaseAgeNpm"]}}')" = '[259200000]'
+          test "$(ages '{"cargo": {"minimumReleaseAge": "1 week 2 days"}, "minimumReleaseAge": null, "statusCheckNames": {"minimumReleaseAge": "x"}, "statusCheckWhen": {"minimumReleaseAge": "always"}}')" = '[777600000]'
+          test "$(ages '{"extends": ["config:recommended", "helpers:pinGitHubActionDigests"]}')" = '[]'
+          # Old settings Renovate migrates, at any scope.
+          test "$(ages '{"stabilityDays": 14, "packageRules": [{"matchManagers": ["cargo"], "stabilityDays": 10}]}')" = '[1209600000,864000000]'
+          # Where else policy comes from.
+          test "$(read '{"configFileNames": ["ci/renovate config.json"]}' | jq -c '[.configFileNames, .inheritConfig]')" = '[["ci/renovate config.json"],false]'
+          test "$(read '{}' | jq -c '[has("configFileNames"), .inheritConfig]')" = '[false,false]'
+          test "$(read '{"configFileNames": null}' | jq -c '[has("configFileNames"), .configFileNames]')" = '[true,null]'
+          test "$(read '{"force": {"inheritConfig": true}}' | jq -c .inheritConfig)" = true
+          test "$(read '{"forkToken": "t"}' | jq -c .forkMode)" = true
+          test "$(read '{"persistRepoData": true}' | jq -c .forkMode)" = false
+          for bad in '{"extends": ["github>someone/presets"]}' '{"extends": ["config:nope"]}' '{"minimumReleaseAge": "soon"}' '{"minimumReleaseAge": 5}' \
+                     '{"repositories": [{"repository": "x/y", "configFileNames": ["c.json"]}]}'; do
+            if read "$bad"; then echo "took $bad"; exit 1; fi
+          done
+          touch $out
+        '';
         # Which repos house-sync passes over, and when it tells the owner, with
         # stand-ins for gh and the notifier.
         house-sync = pkgs.runCommand "house-sync-check" { nativeBuildInputs = [ pkgs.python3 pkgs.jq pkgs.util-linux pkgs.diffutils ]; } ''
