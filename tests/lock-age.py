@@ -113,7 +113,8 @@ def release_ages(resolver, config):
     assert resolver == ["release-ages"], resolver
     RESOLVED.append(config)
     ages = []
-    got = {"inheritConfig": bool(config.get("inheritConfig"))}
+    got = {"inheritConfig": bool(config.get("inheritConfig")),
+           "reusesClone": bool(config.get("persistRepoData") or config.get("forkToken"))}
     if "configFileNames" in config:
         got["configFileNames"] = config["configFileNames"]
 
@@ -144,8 +145,9 @@ def release_ages(resolver, config):
 
 
 # What lock-age makes of release-ages' answer, or its failure.
-answer = '{"ages": [86400000, 1000], "inheritConfig": false}'
-assert L.release_ages(["sh", "-c", f"cat >/dev/null; echo '{answer}'"], {}) == {"ages": [86400, 1], "inheritConfig": False}
+answer = '{"ages": [86400000, 1000], "inheritConfig": false, "reusesClone": false}'
+assert L.release_ages(["sh", "-c", f"cat >/dev/null; echo '{answer}'"], {}) == \
+    {"ages": [86400, 1], "inheritConfig": False, "reusesClone": False}
 try:
     L.release_ages(["sh", "-c", "echo 'Error: no such preset' >&2; exit 1"], {})
     raise AssertionError("release-ages failed, and lock-age took its answer")
@@ -313,6 +315,10 @@ assert lock_age() == 0 and versions()["h"] == "1.0.0", versions()
 repo({"Cargo.lock": cargo_lock(("b", "2.0.0"))})
 write("Cargo.lock", cargo_lock(("b", "2.1.0")))
 assert lock_age(branch="release/1") == 1 and RAN == []
+# origin/HEAD is the default only in a fresh clone of the repo itself: a
+# machine that keeps clones or works in forks fails every refresh.
+for policy in ({**POLICY, "persistRepoData": True}, {**POLICY, "forkToken": "t"}):
+    assert lock_age(policy) == 1 and RAN == [], policy
 git("symbolic-ref", "--delete", "refs/remotes/origin/HEAD")
 assert lock_age() == 1 and RAN == []
 # Config the machine inherits from another repo fails every refresh, set
