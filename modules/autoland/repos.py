@@ -360,21 +360,9 @@ def sweep_branches(r, open_heads, digest, sweep=True):
                   '.[] | select(.protected | not) | "\\(.name) \\(.commit.sha)"', check=False) or "")
     for x in str(names).split("\n"):
         name, _, sha = x.partition(" ")
-        if not name or not sha or name == r["default"] or name in open_heads:
+        if not name or not sha or name == r["default"] or name in open_heads or DEP_RE.match(name):
             continue
         if any(fnmatch.fnmatch(name, pat) for pat in keep):
-            continue
-        if DEP_RE.match(name):
-            # A dependency bot's branch with no open PR is its work in
-            # progress, unless its tip is the head of a PR that was closed:
-            # then nothing on it is new, and the bot makes it again if it
-            # proposes that update anew. A branch the bot has pushed to since
-            # holds fresh work and is kept.
-            heads = C.gh("api", f"repos/{repo}/pulls?state=closed&head={repo.split('/')[0]}:{name}",
-                         "--jq", "[.[].head.sha]", check=False)
-            if isinstance(heads, list) and sha in heads:
-                log(f"{repo}: deleting {name} at {sha[:7]} (its PR was closed at that tip)")
-                delete_branch(repo, name, sha)
             continue
         # Compared at the tip just listed, and deleted only if it's still there.
         cmp = C.gh("api", f"repos/{repo}/compare/{r['default']}...{sha}", "--jq",
