@@ -102,7 +102,7 @@ let
       group = "users";
     };
 
-    environment.systemPackages = [ pkgs.python3 pkgs.curl pkgs.jq pkgs.iproute2 ];
+    environment.systemPackages = [ pkgs.python3 pkgs.curl pkgs.jq pkgs.iproute2 pkgs.nftables ];
 
     systemd.services.site = {
       wantedBy = [ "multi-user.target" ];
@@ -257,6 +257,7 @@ pkgs.testers.runNixOSTest {
             node.fail("su dev -c '" + cdp + "'")
             node.fail("su dev -c '" + viewer + "'")
         # As when the module is turned off or rolled back: no table left behind.
-        machine.fail("nft list table inet burrow-browser")
+        tables = machine.succeed("nft list tables")
+        assert "burrow-browser" not in tables, tables
   '';
 }
