@@ -1,5 +1,6 @@
 # The smallest machine with every burrow module on: what the `example` check
 # builds. A real one adds its disks, network, boot loader and logins.
+{ pkgs, ... }:
 {
   imports = [ ./machine.nix ];
 
@@ -40,6 +41,11 @@
       reviewers.codex.enable = true;
     };
     house.enable = true;
+    ledger = {
+      enable = true;
+      # A stand-in: a real machine takes Conary's flake's packages.default.
+      package = pkgs.writeShellScriptBin "cn" "exit 1";
+    };
     events = {
       host = "example.org";
       secretFile = "/run/secrets/burrow-webhook";

@@ -11,7 +11,8 @@
 # `nix develop` gets the toolchains; `nix flake check` is the gate: what it
 # runs is the same on a laptop, in an agent's sandbox and in CI. The checks
 # are hermetic (the Nix sandbox, no network). A repo's heavier gates (VM
-# replays, browsers, databases) stay its own and run in `nix develop`.
+# replays, browsers, databases) stay its own and run in `nix develop`. A Rust
+# workspace's binaries are its packages.default, for machines to install.
 { nixpkgs, rust-overlay, crane }:
 {
   self,
@@ -68,9 +69,21 @@ let
       components = toolchainSpec.components ++ extra;
     });
 
+  craneFor = pkgs: (crane.mkLib pkgs).overrideToolchain (toolchainFor pkgs [ ]);
+
+  # The workspace's binaries, built for release: packages.default, what a
+  # machine installs.
+  rustPackage = pkgs: (craneFor pkgs).buildPackage {
+    src = (craneFor pkgs).cleanCargoSource rustDir;
+    strictDeps = true;
+    cargoExtraArgs = "--locked --workspace";
+    # The gate runs the tests.
+    doCheck = false;
+  };
+
   rustChecks = pkgs:
     let
-      craneLib = (crane.mkLib pkgs).overrideToolchain (toolchainFor pkgs [ ]);
+      craneLib = craneFor pkgs;
       # The whole directory, not only the Cargo sources: tests read fixtures.
       src = lib.cleanSource rustDir;
       # Every member of the workspace, not only a root package or its
@@ -118,4 +131,6 @@ in
     // checks pkgs);
 
   formatter = forAll (pkgs: pkgs.nixfmt-rfc-style);
+} // lib.optionalAttrs (rust != null) {
+  packages = forAll (pkgs: { default = rustPackage pkgs; });
 }

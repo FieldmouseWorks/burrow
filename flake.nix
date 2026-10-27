@@ -32,7 +32,10 @@
         key = "burrow/${name}";
         imports = [ (import ./modules/${name}.nix inputs) ];
       };
-      names = [ "claude" "undo" "switch" "notify" "updates" "proj" "remote-control" "agents" "robot" "ops" "toolbox" "autoland" "house" "events" ];
+      # The ledger's machines take Conary from its own flake; burrow's checks
+      # build theirs with a stand-in for its `cn`.
+      cnStandIn = pkgs.writeShellScriptBin "cn" "exit 1";
+      names = [ "claude" "undo" "switch" "notify" "updates" "proj" "remote-control" "agents" "robot" "ops" "toolbox" "autoland" "house" "events" "ledger" ];
     in
     {
       # A project's dev shell and gate in a few lines; see lib/project.nix.
@@ -82,6 +85,7 @@
                 (nixpkgs.lib.optionalAttrs (name == "updates") { burrow.updates.origin = "https://github.com/sam/homelab"; })
                 (nixpkgs.lib.optionalAttrs (name == "autoland") { burrow.autoland = { owners = [ "sam" ]; authors = [ "sam" ]; reviewers = { codex.enable = true; deepseek = { enable = true; envFile = "/run/secrets/deepseek-review"; }; }; }; })
                 (nixpkgs.lib.optionalAttrs (name == "house") { burrow.house.owners = [ "sam" ]; })
+                (nixpkgs.lib.optionalAttrs (name == "ledger") { burrow.ledger = { package = cnStandIn; owners = [ "sam" ]; }; })
                 (nixpkgs.lib.optionalAttrs (builtins.elem name [ "events" "autoland" ]) { burrow.events = { host = "example.org"; secretFile = "/run/secrets/burrow-webhook"; }; })
                 { burrow.${if name == "remote-control" then "remoteControl" else name}.enable = true; }
               ];
@@ -149,6 +153,13 @@
         '';
         # Stale Remote Control servers catch up once idle, with a stand-in for Claude.
         remote-control = import ./tests/remote-control.nix { inherit self pkgs; };
+        # lib/project.nix's package of a Rust workspace: every member's binaries.
+        house-rust-package = let
+          pkg = (self.lib.project { self = ./tests/house/rust; systems = [ system ]; rust = { }; }).packages.${system}.default;
+        in pkgs.runCommand "house-rust-package-check" { } ''
+          [ "$(${pkg}/bin/house-fixture-member)" = 42 ]
+          touch $out
+        '';
       } // nixpkgs.lib.mapAttrs' (name: nixpkgs.lib.nameValuePair "house-${name}") (
         # lib/project.nix's own gates, on the smallest projects that have them.
         (self.lib.project { self = ./tests/house/rust; systems = [ system ]; rust = { }; }).checks.${system}
