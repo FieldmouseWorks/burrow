@@ -54,10 +54,12 @@ CRATES_IO = "registry+https://github.com/rust-lang/crates.io-index"
 NPM = "https://registry.npmjs.org/"
 ROUNDS = 6  # passes over a Cargo.lock before what's left is a failure
 TRIES = 5  # older versions asked about per crate per pass
-# Where Renovate looks for a repo's own config on GitHub, in its order,
-# after any configFileNames the machine adds.
+# Where Renovate looks for a repo's own config, in its order
+# (config/app-strings.ts; it doesn't filter by platform there), after any
+# configFileNames the machine adds.
 CONFIGS = ("renovate.json", "renovate.jsonc", "renovate.json5", ".github/renovate.json",
-           ".github/renovate.jsonc", ".github/renovate.json5", ".renovaterc", ".renovaterc.json",
+           ".github/renovate.jsonc", ".github/renovate.json5", ".gitlab/renovate.json",
+           ".gitlab/renovate.jsonc", ".gitlab/renovate.json5", ".renovaterc", ".renovaterc.json",
            ".renovaterc.jsonc", ".renovaterc.json5", "package.json")
 
 
@@ -173,8 +175,8 @@ def repo_config(files):
 
 def release_ages(resolver, config):
     """What the config sets that decides the age, presets resolved:
-    ages (in seconds), configFileNames (only when set, null included) and
-    inheritConfig."""
+    ages (in seconds), configFileNames (only when set, null included),
+    inheritConfig and baseBranchPatterns."""
     p = subprocess.run(resolver, input=json.dumps(config), capture_output=True, text=True)
     if p.returncode != 0:
         why = [x for x in p.stderr.splitlines() if "Error" in x or "validationError" in x] or ["failed"]
@@ -326,12 +328,15 @@ def npm(path, cutoff, bad):
     base = base_text(path)
     cutoff = npm_cutoff(d, cutoff)
     os.remove(path)
-    p = run(["npm", "install", "--package-lock-only", "--ignore-scripts", "--no-audit", "--no-fund",
-             f"--before={cutoff.strftime('%Y-%m-%dT%H:%M:%SZ')}"], d)
-    if p.returncode != 0:
-        bad.append(f"{path}: npm couldn't resolve with only releases from before {cutoff:%Y-%m-%d %H:%M}Z: "
-                   + (p.stderr.strip().splitlines() or ["no output"])[-1])
-        return
+    # Twice: a lock file made from nothing can come out inconsistent with
+    # package.json until npm runs again over it (Renovate's npmInstallTwice).
+    for _ in range(2):
+        p = run(["npm", "install", "--package-lock-only", "--ignore-scripts", "--no-audit", "--no-fund",
+                 f"--before={cutoff.strftime('%Y-%m-%dT%H:%M:%SZ')}"], d)
+        if p.returncode != 0:
+            bad.append(f"{path}: npm couldn't resolve with only releases from before {cutoff:%Y-%m-%d %H:%M}Z: "
+                       + (p.stderr.strip().splitlines() or ["no output"])[-1])
+            return
     with open(path) as f:
         lock = json.load(f)
     if lock.get("lockfileVersion", 0) < 2 or not isinstance(lock.get("packages"), dict):
@@ -363,16 +368,21 @@ def main(argv):
     try:
         with open(argv[1]) as f:
             policy = json.load(f)
-        # globalExtends go under the rest of the machine's config, so its
-        # own configFileNames win.
-        machine = [release_ages(resolver, c) for c in ({"extends": policy.get("globalExtends", [])}, policy)]
-        if any(m["inheritConfig"] for m in machine):
+        glob, machine = (release_ages(resolver, c) for c in ({"extends": policy.get("globalExtends", [])}, policy))
+        if glob["inheritConfig"] or machine["inheritConfig"]:
             raise ValueError("the machine's Renovate config inherits config from another repo, which could set "
                              "a release age lock-age can't see")
-        # Set to null (or not set), Renovate looks only in its own files.
-        files = next((m["configFileNames"] or [] for m in reversed(machine) if "configFileNames" in m), [])
+        # Renovate settles which files to look in before it resolves the
+        # machine's own extends: from the machine's config as it's written,
+        # over its globalExtends'. Set to null, only Renovate's own.
+        files = (policy["configFileNames"] if "configFileNames" in policy else glob.get("configFileNames")) or []
         repo = repo_config(files)
-        ages = [x for m in (*machine, *([release_ages(resolver, repo)] if repo is not None else [])) for x in m["ages"]]
+        got = [glob, machine, *([release_ages(resolver, repo)] if repo is not None else [])]
+        # A maintenance branch for another base reads the default branch's
+        # config, which isn't the one checked out here.
+        if any(g["baseBranchPatterns"] for g in got):
+            raise ValueError("Renovate targets branches besides the default, whose config lock-age can't read")
+        ages = [x for g in got for x in g["ages"]]
         age = max(ages, default=0)
         paths = changed()
     except Exception as e:

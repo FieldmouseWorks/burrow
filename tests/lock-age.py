@@ -110,7 +110,7 @@ def release_ages(resolver, config):
     assert resolver == ["release-ages"], resolver
     RESOLVED.append(config)
     ages = []
-    got = {"inheritConfig": bool(config.get("inheritConfig"))}
+    got = {"inheritConfig": bool(config.get("inheritConfig")), "baseBranchPatterns": bool(config.get("baseBranchPatterns"))}
     if "configFileNames" in config:
         got["configFileNames"] = config["configFileNames"]
 
@@ -141,8 +141,9 @@ def release_ages(resolver, config):
 
 
 # What lock-age makes of release-ages' answer, or its failure.
-answer = '{"ages": [86400000, 1000], "inheritConfig": false}'
-assert L.release_ages(["sh", "-c", f"cat >/dev/null; echo '{answer}'"], {}) == {"ages": [86400, 1], "inheritConfig": False}
+answer = '{"ages": [86400000, 1000], "inheritConfig": false, "baseBranchPatterns": false}'
+assert L.release_ages(["sh", "-c", f"cat >/dev/null; echo '{answer}'"], {}) == \
+    {"ages": [86400, 1], "inheritConfig": False, "baseBranchPatterns": False}
 try:
     L.release_ages(["sh", "-c", "echo 'Error: no such preset' >&2; exit 1"], {})
     raise AssertionError("release-ages failed, and lock-age took its answer")
@@ -298,6 +299,17 @@ for policy in ({"minimumReleaseAge": None}, {}):
     repo({"Cargo.lock": cargo_lock(("b", "2.0.0"), ("h", "1.0.0")), "renovate.json": json.dumps(config)})
     write("Cargo.lock", cargo_lock(("b", "2.1.0"), ("h", "1.1.0")))
     assert lock_age(policy) == 0 and versions()["h"] == "1.0.0", (policy, versions())
+# .gitlab/'s config files count, as Renovate looks there on GitHub too.
+repo({"Cargo.lock": cargo_lock(("b", "2.0.0"), ("h", "1.0.0")), ".gitlab/renovate.json5": "{minimumReleaseAge: '2 weeks'}"})
+write("Cargo.lock", cargo_lock(("b", "2.1.0"), ("h", "1.1.0")))
+assert lock_age() == 0 and versions()["h"] == "1.0.0", versions()
+# Branches besides the default read the default branch's config, which
+# isn't checked out here: config that targets them fails the refresh.
+for policy, files in (({**POLICY, "baseBranchPatterns": ["main", "release/1"]}, {}),
+                      (POLICY, {"renovate.json": '{"baseBranchPatterns": ["main", "release/1"]}'})):
+    repo({"Cargo.lock": cargo_lock(("b", "2.0.0")), **files})
+    write("Cargo.lock", cargo_lock(("b", "2.1.0")))
+    assert lock_age(policy) == 1 and RAN == [], (policy, files)
 # Config the machine inherits from another repo fails every refresh, set
 # directly or by a preset.
 for policy in ({**POLICY, "inheritConfig": True}, {**POLICY, "extends": ["inherits"]},
@@ -305,9 +317,11 @@ for policy in ({**POLICY, "inheritConfig": True}, {**POLICY, "extends": ["inheri
     repo({"Cargo.lock": cargo_lock(("b", "2.0.0"))})
     write("Cargo.lock", cargo_lock(("b", "2.1.0")))
     assert lock_age(policy) == 1 and RAN == [], policy
-# Config files a preset adds are read, from globalExtends too; the
-# machine's own configFileNames win over globalExtends'.
-for policy, held in (({**POLICY, "extends": ["files"]}, True), ({**POLICY, "globalExtends": ["files"]}, True),
+# Config files the machine adds are read, from its globalExtends too, but
+# not from its ordinary extends (Renovate settles the files before it
+# resolves those); the machine's own configFileNames win over
+# globalExtends', null included.
+for policy, held in (({**POLICY, "extends": ["files"]}, False), ({**POLICY, "globalExtends": ["files"]}, True),
                      ({**POLICY, "globalExtends": ["files"], "configFileNames": []}, False),
                      ({**POLICY, "globalExtends": ["files"], "configFileNames": None}, False)):
     repo({"Cargo.lock": cargo_lock(("b", "2.0.0"), ("h", "1.0.0")), "ci/slow.json": '{"minimumReleaseAge": "2 weeks"}'})
@@ -346,11 +360,20 @@ RESOLVES = {"lock": None, "code": 0}
 
 def npm_does(cmd, cwd):
     path = os.path.join(cwd, "package-lock.json")
-    assert not os.path.exists(path), "npm must resolve from nothing"
-    if RESOLVES["code"]:
+    first = [x[0][:2] for x in RAN].count(["npm", "install"]) == 1
+    assert os.path.exists(path) != first, "npm must resolve from nothing, then again over that"
+    if RESOLVES["code"] if first else RESOLVES.get("second_code"):
         return subprocess.CompletedProcess(cmd, 1, "", "npm error code ETARGET\nnpm error notarget No matching version")
-    write(path, RESOLVES["lock"])
+    if first or RESOLVES.get("second"):
+        write(path, RESOLVES["lock"] if first else RESOLVES["second"])
     return subprocess.CompletedProcess(cmd, 0, "", "")
+
+
+def installs():
+    """npm install ran twice, the same both times: that command."""
+    got = [x for x in RAN if x[0][:2] == ["npm", "install"]]
+    assert len(got) == 2 and got[0] == got[1], got
+    return got[0]
 
 
 NPM_DOES = npm_does
@@ -359,7 +382,7 @@ repo({"web/package-lock.json": npm_lock(("node_modules/left-pad", "1.0.0"), ("no
 write("web/package-lock.json", npm_lock(("node_modules/left-pad", "1.2.0"), ("node_modules/@s/k", "2.0.1")))
 RESOLVES["lock"] = npm_lock(("node_modules/left-pad", "1.1.0"), ("node_modules/@s/k", "2.0.1"))
 assert lock_age() == 0, RAN
-(cmd, cwd), = [x for x in RAN if x[0][:2] == ["npm", "install"]]
+cmd, cwd = installs()
 before = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=AGE))
 got = dt.datetime.strptime(re.search(r"--before=(\S+)", " ".join(cmd)).group(1), "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=dt.timezone.utc)
 assert cwd == "web" and abs((got - before).total_seconds()) < 60, (cmd, got, before)
@@ -383,7 +406,7 @@ for npmrc, days in (({"before": (NOW - dt.timedelta(days=30)).strftime("%a %b %d
     write("package-lock.json", npm_lock(("node_modules/left-pad", "1.2.0")))
     RESOLVES["lock"] = npm_lock(("node_modules/left-pad", "1.1.0"))  # 20 days old
     assert lock_age() == (1 if days == 30 else 0), npmrc
-    (cmd, _), = [x for x in RAN if x[0][:2] == ["npm", "install"]]
+    cmd, _ = installs()
     got = dt.datetime.strptime(re.search(r"--before=(\S+)", " ".join(cmd)).group(1), "%Y-%m-%dT%H:%M:%SZ")
     assert abs((got.replace(tzinfo=dt.timezone.utc) - (NOW - dt.timedelta(days=days))).total_seconds()) < 120, (npmrc, cmd)
     NPMRC.clear()
@@ -398,7 +421,7 @@ for offset in (-8, 0, 5.5):
     RESOLVES["lock"] = npm_lock(("node_modules/left-pad", "1.0.1"))
     NPM_TIMES["left-pad"]["1.0.1"] = (NOW - dt.timedelta(days=31)).strftime("%Y-%m-%dT%H:%M:%SZ")
     assert lock_age() == 0, (offset, NPMRC)
-    (cmd, _), = [x for x in RAN if x[0][:2] == ["npm", "install"]]
+    cmd, _ = installs()
     got = dt.datetime.strptime(re.search(r"--before=(\S+)", " ".join(cmd)).group(1), "%Y-%m-%dT%H:%M:%SZ")
     assert abs((got.replace(tzinfo=dt.timezone.utc) - (NOW - dt.timedelta(days=30))).total_seconds()) < 120, (offset, cmd)
     NPMRC.clear()
@@ -407,6 +430,15 @@ repo({"package-lock.json": npm_lock(("node_modules/left-pad", "1.0.0"))})
 write("package-lock.json", npm_lock(("node_modules/left-pad", "1.2.0")))
 assert lock_age() == 1 and not [x for x in RAN if x[0][:2] == ["npm", "install"]]
 NPMRC.clear()
+
+# npm's second pass fails, or takes something too new: the refresh fails.
+for second in ({"second_code": 1}, {"second": npm_lock(("node_modules/left-pad", "1.2.0"))}):
+    repo({"package-lock.json": npm_lock(("node_modules/left-pad", "1.0.0"))})
+    write("package-lock.json", npm_lock(("node_modules/left-pad", "1.2.0")))
+    RESOLVES.update(lock=npm_lock(("node_modules/left-pad", "1.1.0")), **second)
+    assert lock_age() == 1, second
+    RESOLVES.pop("second_code", None)
+    RESOLVES.pop("second", None)
 
 # npm resolved to something too new anyway, or from somewhere else: it fails.
 for bad in (("node_modules/left-pad", "1.2.0"), ("node_modules/left-pad", "1.1.0", "https://example.org/lp.tgz")):
