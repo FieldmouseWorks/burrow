@@ -2,8 +2,10 @@
 # made each change and why, its revisions, the checks and reviews on them,
 # and where it landed. On each PR event for a repo, burrow-events starts that
 # repo's sync, which records what's new; the full pass syncs every repo of
-# `owners`. It only reads GitHub. `cn why FILE:LINE` in a checkout answers
-# from it.
+# `owners`. It reads GitHub, and writes only the ledger's anchor: a ref in
+# `anchorRepo` holding the log's head, so a log that loses ops is refused.
+# `cn why FILE:LINE` in a checkout answers from it; `cn verify` checks it
+# against the anchor.
 inputs:
 { config, lib, pkgs, ... }:
 let
@@ -21,6 +23,7 @@ let
       CONARY_REVIEWERS=$(gh api user --jq .login)
       export GH_TOKEN CONARY_REVIEWERS
       export CONARY_LEDGER=${lib.escapeShellArg cfg.dir}
+      export CONARY_ANCHOR_REPO=${lib.escapeShellArg cfg.anchorRepo}
       export CONARY_OWN_CONTEXTS=${lib.escapeShellArg (lib.concatStringsSep "," cfg.ownContexts)}
       if [ $# -gt 0 ]; then
         exec cn sync "$1"
@@ -67,6 +70,16 @@ in
       '';
     };
 
+    anchorRepo = mkOption {
+      type = types.strMatching "[^/]+/[^/]+";
+      example = "sam/homelab";
+      description = ''
+        The GitHub repository (OWNER/NAME) that keeps the ledger's anchor, at
+        `refs/conary/anchor/<key>`. burrow.user's gh login must be able to
+        push to it.
+      '';
+    };
+
     owners = mkOption {
       type = types.listOf types.str;
       default = if autoland.enable or false then autoland.owners else [ ];
@@ -88,7 +101,10 @@ in
   config = lib.mkIf cfg.enable {
     # `cn` for everyone, on this ledger.
     environment.systemPackages = [ cfg.package ];
-    environment.variables.CONARY_LEDGER = cfg.dir;
+    environment.variables = {
+      CONARY_LEDGER = cfg.dir;
+      CONARY_ANCHOR_REPO = cfg.anchorRepo;
+    };
 
     systemd.tmpfiles.settings.burrow = {
       ${config.burrow.stateDir}.d = { mode = "0755"; user = "root"; group = "root"; };
