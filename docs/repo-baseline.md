@@ -152,7 +152,10 @@ For reviewers, the review bot included. Flag as P1:
 
 ## Hygiene (the steward, daily)
 
-- Branches whose tip is already in the default branch, with no open PR, are
-  deleted (nothing is lost). Bots' branches and `keepBranches` are left alone.
+- Branches whose tip is already in the default branch, or is the head a
+  closed PR was closed at, with no open PR, are deleted (nothing is lost: the
+  closed PR keeps its commits and can restore the branch). GitHub's
+  delete-on-merge only covers merged PRs. Bots' branches and `keepBranches`
+  are left alone.
 - Unmerged branches with no PR and no commit for 30 days are listed for the
   owner, never deleted.

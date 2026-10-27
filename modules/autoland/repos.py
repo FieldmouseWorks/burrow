@@ -343,10 +343,25 @@ def delete_branch(repo, name, sha):
             log(f"{repo}: kept {name}: {p.stderr.strip()[:200]}")
 
 
-def sweep_branches(r, open_heads, digest, sweep=True):
-    """Delete the merged branches and list the stale ones, once a day and
-    only when `sweep`; the stale ones the last sweep found are listed every
-    time."""
+def closed_at(repo, name, sha):
+    """The closed PR whose head was this branch at `sha`, if there is one.
+    GitHub keeps that PR's commits (refs/pull/N/head) and offers to restore
+    the branch from its page, so the branch holds nothing the PR doesn't."""
+    owner = repo.split("/")[0]
+    # Every page: a branch name reused for many PRs can have its match
+    # past the first hundred.
+    got = C.gh("api", "--paginate", f"repos/{repo}/pulls?state=closed&per_page=100&head={owner}:{urllib.parse.quote(name)}",
+               "--jq", f'.[] | select(.head.sha == "{sha}") | .number', check=False)
+    if got is None:
+        return None
+    first = str(got).split("\n")[0]
+    return int(first) if first.isdigit() else None
+
+
+def sweep_branches(r, in_use, digest, sweep=True):
+    """Delete the merged branches and the closed PRs' branches, and list the
+    stale ones, once a day and only when `sweep`; the stale ones the last
+    sweep found are listed every time."""
     repo = r["repo"]
     st = load(f"repo-{repo.replace('/', '_')}.json", {})
     if not sweep or C.NOW - st.get("branches", 0) < 86400:
@@ -360,9 +375,19 @@ def sweep_branches(r, open_heads, digest, sweep=True):
                   '.[] | select(.protected | not) | "\\(.name) \\(.commit.sha)"', check=False) or "")
     for x in str(names).split("\n"):
         name, _, sha = x.partition(" ")
-        if not name or not sha or name == r["default"] or name in open_heads or DEP_RE.match(name):
+        if not name or not sha or name == r["default"] or name in in_use:
             continue
         if any(fnmatch.fnmatch(name, pat) for pat in keep):
+            continue
+        # GitHub deletes a branch when its PR merges, never when it closes.
+        # Matched by the tip, so a bot's branch pushed anew since (its next
+        # update, with no PR yet) or anyone's pushed after the close stays.
+        if (n := closed_at(repo, name, sha)) is not None:
+            log(f"{repo}: deleting {name} at {sha[:7]} (#{n} was closed at it, and keeps its commits)")
+            delete_branch(repo, name, sha)
+            continue
+        # Any other branch of a dependency bot's is its work in progress.
+        if DEP_RE.match(name):
             continue
         # Compared at the tip just listed, and deleted only if it's still there.
         cmp = C.gh("api", f"repos/{repo}/compare/{r['default']}...{sha}", "--jq",

@@ -165,7 +165,8 @@ S.R.unhook_gone = lambda repos: (_ for _ in ()).throw(AssertionError("hooks take
 S.R.discover = lambda: [{"repo": "sam/r"}, {"repo": "sam/other"}]
 S.R.settle_repo = lambda r, known: (_ for _ in ()).throw(AssertionError("settings in a kicked pass"))
 S.R.publish = published.append
-S.R.sweep_branches = lambda r, heads, digest, sweep=True: swept.append(sweep)
+in_use = []
+S.R.sweep_branches = lambda r, branches, digest, sweep=True: swept.append(sweep) or in_use.append(branches)
 
 
 def kicked_prs(owner, name):
@@ -182,6 +183,9 @@ sys.argv = argv
 S.CFG["cleanBranches"] = False
 S.R.discover, S.R.settle_repo, S.R.publish, S.R.sweep_branches, S.open_prs, S.R.unhook_gone = kept_fns
 assert seen_repos == ["sam/r"] and swept == [False], (seen_repos, swept)
+# The sweep leaves every open PR's branches, its base as well as its head:
+# deleting a base closes the PRs on it.
+assert in_use == [{"feat", "main"}], in_use
 assert C.load("repos.json", None) == {"untouched": True}
 assert C.load("wake.json", None) == {"sam/r": T + 3 * 60 + 1, "sam/other": T + 60}, C.load("wake.json", None)
 assert C.load("digest-repos.json", None) == {"sam/r": [], "sam/other": [["Open over a day", "other line", "x"]]}
