@@ -41,6 +41,7 @@
       reviewers.codex.enable = true;
     };
     house.enable = true;
+    browser.enable = true;
     ledger = {
       enable = true;
       # A stand-in: a real machine takes Conary's flake's packages.default.
