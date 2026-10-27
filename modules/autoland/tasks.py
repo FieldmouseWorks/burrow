@@ -41,6 +41,12 @@ JUDGMENT = "autoland-judgment"
 
 
 REVIEWED = "its reviewers found nothing on that head, every thread is resolved"
+# Past the round limit the reviewers weren't asked again: a fix job's answers
+# stand in for their last look, so the judge reads those too.
+PAST_LIMIT = ("it went past its review-round limit, so its reviewers weren't asked to look again and a Claude job "
+              "fixed or answered their last findings (read each thread as well as the diff: a finding answered away "
+              "that is a real defect counts as failing, the same as a failing build or test, so say which), "
+              "every thread is resolved")
 # A dependency update isn't reviewed: the judge is the first to read it.
 DEP_SEEN = "it's a dependency update, which no reviewer reads, so you're the first to read it; its threads are resolved"
 

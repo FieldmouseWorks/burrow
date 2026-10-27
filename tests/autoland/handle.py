@@ -484,7 +484,7 @@ failed = said(f"`cargo test` fails.\n\n{judgment('failed')}")
 status, _ = run(clean(**mig), 700)
 assert len(JOBS) == 1 and f"autoland-judgment: failed {head}" in JOBS[0]
 status, digest = run(clean(comments=[failed], **mig), 800)
-assert len(JOBS) == 1 and "build or tests failing" in JOBS[0] and "isn't settled" in JOBS[0], JOBS
+assert len(JOBS) == 1 and "something failing" in JOBS[0] and "isn't settled" in JOBS[0], JOBS
 assert "a Claude job is fixing it" in status and not merged() and digest == [], (status, digest)
 status, _ = run(clean(comments=[failed], **mig), 900)
 assert JOBS == [] and "a Claude job is fixing it" in status
@@ -501,14 +501,14 @@ status, _ = run(clean(comments=[failed], **mig), 7400)
 assert JOBS == [] and "a Claude job is fixing it" in status, (status, JOBS)
 STATES["job-1"] = "done"
 status, _ = run(clean(comments=[failed], **mig), 7500)
-assert len(JOBS) == 1 and "build or tests failing" in JOBS[0], (status, JOBS)
+assert len(JOBS) == 1 and "something failing" in JOBS[0], (status, JOBS)
 # That one ends with it still failing (it pushed nothing): handed once more
 # once two passes have seen it ended, then listed for the owner.
 STATES["job-1"] = "error"
 status, digest = run(clean(comments=[failed], **mig), 7600)
 assert JOBS == [] and digest == [], (JOBS, digest)
 status, digest = run(clean(comments=[failed], **mig), 7700)
-assert len(JOBS) == 1 and "build or tests failing" in JOBS[0], (status, JOBS)
+assert len(JOBS) == 1 and "something failing" in JOBS[0], (status, JOBS)
 run(clean(comments=[failed], **mig), 7800)
 status, digest = run(clean(comments=[failed], **mig), 7900)
 assert JOBS == [] and [x[0] for x in digest] == ["Two Claude jobs ended without fixing it"], (JOBS, digest)
@@ -548,33 +548,39 @@ for kw in ({"checks": [{"__typename": "CheckRun", "name": "ci", "status": "COMPL
     status, digest = run(clean(labels=["needs-owner"], **kw), 7200)
     assert JOBS == [] and not merged() and [x[0] for x in digest] == ["Labelled needs-owner"], (kw, status, digest)
 
-# Past the round limit: the owner's label, then one comment. A label that
-# won't go on (none in the repo) isn't taken as on: no comment, and the next
-# pass tries again rather than starting the rounds over.
+# Past the round limit the reviewers aren't asked again, and neither is the
+# owner: a Claude job settles what's left on its merits, then a judge decides.
 fresh_pr_state()
 stuck = {"reviews": [rv_review("codex", 1)] * 5, "threads": [False]}
-FAIL.append("--add-label")
-for t in (700, 800):
-    status, _ = run(mkpr(**stuck), t)
-    assert "--add-label needs-owner" in " ".join(WROTE) and not any("/comments" in x for x in WROTE), WROTE
-    assert "Unsettled after the round limit" not in status and "Still unsettled" in status, status
-FAIL.clear()
-status, _ = run(mkpr(**stuck), 900)
-assert any("/comments" in x for x in WROTE) and JOBS == [], WROTE
-status, _ = run(mkpr(labels=["needs-owner"], **stuck), 1000)
-assert not any("--add-label" in x for x in WROTE), "labelled once"
-# Clean reviews since don't land it while the label is on; taking it off does.
-status, digest = run(clean(labels=["needs-owner"]), 1100)
-assert not merged() and JOBS == [] and [x[0] for x in digest] == ["Unsettled after the round limit"], (status, digest)
-status, _ = run(clean(), 1200)
-assert merged(), status
-# Taken off with findings still open: the rounds start over rather than
-# going straight back to the owner.
+status, digest = run(mkpr(**stuck), 0)
+assert not any("--add-label" in x or "/comments" in x for x in WROTE) and digest == [], (WROTE, digest)
+status, digest = run(mkpr(**stuck), 7200)
+assert not any("--add-label" in x or "/comments" in x for x in WROTE) and digest == [], (WROTE, digest)
+assert queued() == [] and "Past the review-round limit (5): 1 open review thread" in status, (queued(), status)
+assert len(JOBS) == 1 and "won't look again" in JOBS[0] and "answer the rest with why" in JOBS[0], JOBS
+# Answered without a push: still no look, a judge instead, told to read the answers too.
+answered = {"reviews": stuck["reviews"], "threads": [True]}
+status, digest = run(mkpr(**answered), 7300)
+assert queued() == [] and len(JOBS) == 1 and "past its review-round limit" in JOBS[0], (queued(), JOBS)
+assert "a finding answered away" in JOBS[0] and "found nothing" not in JOBS[0], JOBS
+assert "a Claude job is judging it (it went past the review-round limit" in status and not merged() and digest == [], status
+status, _ = run(mkpr(comments=[said(judgment("land", n=5))], **answered), 7400)
+assert merged() and "judged it fine to land" in status, status
+# A push past the limit isn't looked at either: the judge reads it, and a
+# finding it says was answered away for real goes to a fix job.
 fresh_pr_state()
-run(mkpr(**stuck), 700)
-run(mkpr(labels=["needs-owner"], **stuck), 800)
-status, _ = run(mkpr(**stuck), 900)
-assert "Still unsettled" not in status and not any("--add-label" in x for x in WROTE), (status, WROTE)
+pushed = {**answered, "sha": newer}
+status, _ = run(mkpr(**pushed), 0)
+assert queued() == [] and len(JOBS) == 1 and "past its review-round limit" in JOBS[0], (queued(), JOBS)
+status, _ = run(mkpr(comments=[said(judgment("failed", n=5, sha=newer))], **pushed), 7300)
+assert not merged() and len(JOBS) == 1 and "a finding left unfixed" in JOBS[0], (status, JOBS)
+# The owner hears only if the judge sends it to them.
+status, digest = run(mkpr(comments=[said(judgment("owner", n=5, sha=newer))], **pushed), 7400)
+assert not merged() and [x[0] for x in digest] == ["Judged yours to decide"], digest
+# A clean look that comes back on the head anyway is a clean head like any other.
+fresh_pr_state()
+status, _ = run(mkpr(reviews=[*stuck["reviews"], rv_review("codex", 0), rv_review("deepseek", 0)], threads=[True]), 700)
+assert merged() and JOBS == [], (status, JOBS)
 
 # No CI at all: the judge builds and tests it itself.
 fresh_pr_state()
@@ -603,7 +609,7 @@ assert JOBS == [] and not merged() and "a Claude job is judging it" in status, (
 for v in ("owner", "failed"):
     status, _ = run(clean(checks=CI_GREEN, comments=[said(judgment(v, n=5))]), 900)
     assert not merged(), (v, status)
-assert len(JOBS) == 1 and "build or tests failing" in JOBS[0], JOBS
+assert len(JOBS) == 1 and "something failing" in JOBS[0], JOBS
 fresh_pr_state()
 run(clean(checks=[]), 700)
 status, _ = run(clean(checks=CI_GREEN, comments=[said(judgment("land", n=5))]), 900)
@@ -616,7 +622,7 @@ run(clean(checks=[]), 700)
 status, digest = run(clean(checks=busy_ci, comments=[said(judgment("owner", n=5))]), 800)
 assert "Judged yours to decide" in [x[0] for x in digest] and any("--add-label needs-owner" in x for x in WROTE), (status, digest)
 status, _ = run(clean(checks=busy_ci, comments=[said(judgment("failed", n=5))]), 900)
-assert len(JOBS) == 1 and "build or tests failing" in JOBS[0], (status, JOBS)
+assert len(JOBS) == 1 and "something failing" in JOBS[0], (status, JOBS)
 status, _ = run(clean(checks=busy_ci, comments=[said(judgment("land", n=5))]), 1000)
 assert not merged() and "waiting for CI" in status, status
 

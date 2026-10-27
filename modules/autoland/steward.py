@@ -49,7 +49,7 @@ import reviewers as V
 from common import CFG, CONTEXT, DRY, MIN, STATE, load, log, repo_cfg, save, ts
 from seal import MAJOR as MAJOR_VERDICT  # renovate-sweep's, on a Renovate major
 from touches import dep_kind, gate_edit, moved_from, one_way, renovate_edited
-from tasks import DEP_SEEN, JUDGMENT, REVIEWED, fix_task, judge_task, proof_task
+from tasks import DEP_SEEN, JUDGMENT, PAST_LIMIT, REVIEWED, fix_task, judge_task, proof_task
 
 
 PRS = """
@@ -228,7 +228,6 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
     if st.get("head") != head:
         st.update(head=head, seen=C.NOW, handed=None, landFails=0, rv={})
     st.setdefault("rv", {})
-    st.setdefault("rvBase", {})
     labels = {x["name"] for x in pr["labels"]["nodes"]}
     age = C.NOW - st["seen"]
     tag = f"{repo}#{n}"
@@ -383,14 +382,8 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
             # is off, that's the owner's go-ahead. A label taken off before
             # the judge said anything isn't an answer to it.
             st["ownerSaw"] = judged_at
-        if st.get("escalated"):
-            # Labelled here at the round limit: still theirs, clean reviews
-            # since or not, until the label comes off.
-            settle("pending", f"Past the review-round limit: {CFG['owner']} decides (the {CFG['labels']['owner']} label)",
-                   "Unsettled after the round limit")
-        else:
-            settle("pending", f"Settled; {CFG['owner']} decides (the {CFG['labels']['owner']} label)",
-                   "Judged yours to decide" if judged_owner else f"Labelled {CFG['labels']['owner']}")
+        settle("pending", f"Settled; {CFG['owner']} decides (the {CFG['labels']['owner']} label)",
+               "Judged yours to decide" if judged_owner else f"Labelled {CFG['labels']['owner']}")
 
     def judged(why, seen=REVIEWED):
         """Settled, but not something the steward lands on its own word: one
@@ -412,7 +405,8 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
             # has it, and its push is judged again. Its own once a head: a
             # job that answered a finding here without pushing didn't fix this.
             settle("pending", "Settled, but its build or tests fail; a Claude job is fixing it")
-            hand_off("the Claude job that judged it found its build or tests failing on this head (its comment on the PR says what)",
+            hand_off("the Claude job that judged it found something failing on this head, its build or tests or a finding "
+                     "left unfixed (its comment on the PR says what)",
                      "failFixed", judged_at)
         elif update_branch():
             settle("pending", "Settled, but behind its base: brought up to date, reviewed again")
@@ -509,7 +503,7 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
     # finding or a red Dependabot update, goes to a Claude job like any PR's.
     # Sent to the owner (by hand, a fix job or a judge): theirs, whatever else
     # is open on it, and nothing more is asked or handed off until the label
-    # comes off. One past the round limit is listed as that, below.
+    # comes off.
     if CFG["labels"]["owner"] in labels:
         owner_decides()
         save(key, st)
@@ -736,15 +730,14 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
         if V.out(r):
             # Back in service then: its look at this head is asked for.
             C.wake(repo, load(V.OUT, {})[r]["until"] + 1)
-    rounds_of = {r: said[r][2] - st["rvBase"].get(r, 0) for r in live}
-    if st.get("escalated") and CFG["labels"]["owner"] not in labels:
-        # The owner took the label off: another full set of rounds.
-        for r in live:
-            st["rvBase"][r] = st["rvBase"].get(r, 0) + rounds_of[r]
-            rounds_of[r] = 0
-        st["escalated"] = False
-    rounds = max(rounds_of.values(), default=0)
+    rounds = max((said[r][2] for r in live), default=0)
     clean = bool(live) and all(said[r][0] == "clean" for r in live)
+    # Past the round limit, the reviewers aren't asked again: every look so
+    # far has found more, so more looks only drip-feed more rounds. A Claude
+    # job settles what's left on its merits, fixing what's real and answering
+    # the rest, and a judge decides whether it lands. Only what the judge
+    # can't call (a one-way door) waits for the owner.
+    capped = rounds >= rc["rounds"] and not clean
 
     def ask(r):
         """Queue the reviewer on this head, unless it's already on its way.
@@ -772,20 +765,8 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
         rs["queued"] = C.NOW
 
     # 1. The reviewers.
-    if rounds >= rc["rounds"] and not clean:
-        # Escalated only once the label is on: a pass that sees no label takes
-        # it as the owner's go-ahead and starts the rounds over.
-        if not st.get("escalated") and (C.write("pr", "edit", str(n), "-R", repo, "--add-label",
-                                                CFG["labels"]["owner"], check=False) is not None or DRY):
-            C.comment(repo, n, f"{rounds} review rounds and there are still findings, so this stops here and waits for "
-                      f"{CFG['owner']}. Taking the `{CFG['labels']['owner']}` label off gives it another {rc['rounds']}.")
-            st["escalated"] = True
-        settle("pending", f"Still unsettled after {rounds} review rounds: {CFG['owner']} decides", "Unsettled after the round limit")
-        save(key, st)
-        return
-
     quiet = age >= rc["settleDelay"] * MIN
-    if not quiet and any(said[r][0] == "none" for r in live):
+    if not capped and not quiet and any(said[r][0] == "none" for r in live):
         after(st["seen"], rc["settleDelay"])  # the reviewers are asked then
     waiting = [f"Posting {x}" for x in unposted]
     for r in names:
@@ -800,7 +781,7 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
         waiting.append(f"No reviewer can review it now ({why})")
         digest.append(("No reviewer can review it", line, why))
     for r in live:
-        if said[r][0] == "none":
+        if said[r][0] == "none" and not capped:
             if quiet:
                 ask(r)
             waiting.append(f"{V.NAMES[r]} is reviewing this commit" if st["rv"].get(r, {}).get("queued")
@@ -825,7 +806,13 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
         # One reviewer's threads needn't wait for the other to finish.
         if what and not swept and handoff_due("handed"):
             hand_off(", ".join(what))
-    elif not clean or what:
+    elif what and capped:
+        settle("pending", f"Past the review-round limit ({rounds}): " + ", ".join(what))
+        if not swept and handoff_due("handed"):
+            hand_off(f"{', '.join(what)}, after {rounds} review rounds with findings, the limit, so its reviewers won't look again. "
+                     "Weigh each finding on its merits: fix what's a real defect and answer the rest with why. "
+                     "A Claude job judges it after, without the reviewers")
+    elif (not clean and not capped) or what:
         if not what:
             # Every finding answered without a new commit: the reviewers that
             # had findings look again.
@@ -847,15 +834,17 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
         if not swept and handoff_due("redFixed"):
             hand_off("CI is red (" + ", ".join(ci_names) + ")", "redFixed")
     elif held:
-        judged("a Claude job was asked to judge this head")
+        judged("a Claude job was asked to judge this head", PAST_LIMIT if capped else REVIEWED)
     elif proof_only:
         prove()
     elif ci == "pending":
         settle("pending", "Settled; waiting for CI: " + ", ".join(ci_names)[:90])
-    elif gate or unseen or ci == "none" or asked:
+    elif gate or unseen or ci == "none" or asked or capped:
         judged(f"it touches {gate}" if gate else
                f"it changes {', '.join(unseen[:5])}{' and more' * (len(unseen) > 5)}, which the reviewers aren't shown" if unseen
-               else "the repo has no CI" if ci == "none" else "a Claude job was asked to judge this head")
+               else "the repo has no CI" if ci == "none" else "a Claude job was asked to judge this head" if asked
+               else f"it went past the review-round limit ({rounds} rounds with findings)",
+               PAST_LIMIT if capped else REVIEWED)
     else:
         land_now(f"{' and '.join(V.NAMES[r] for r in live)} found nothing on this commit, every thread is resolved, CI is green")
 

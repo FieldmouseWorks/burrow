@@ -64,7 +64,7 @@ def settle_repo(r, known):
     new = repo not in known
     due = C.NOW - st.get("settings", 0) >= 86400
     # The labels the steward and its jobs put on PRs: without them a hold
-    # can't be set and the round limit can't hand a PR to the owner. Made
+    # can't be set and a judge can't hand a PR to the owner. Made
     # again with the daily settings too, in case one was deleted.
     want = [CFG["labels"]["hold"], CFG["labels"]["owner"]]
     if st.get("labels") != want or due:
