@@ -25,12 +25,21 @@ let
       if [ $# -gt 0 ]; then
         exec cn sync "$1"
       fi
+      # One repo or owner failing doesn't hold up the rest, but fails the pass.
+      failed=0
       owners=(${lib.escapeShellArgs cfg.owners})
       for owner in "''${owners[@]}"; do
-        gh repo list "$owner" --limit 1000 --no-archived --source --json nameWithOwner --jq '.[].nameWithOwner'
-      done | while read -r repo; do
-        cn sync "$repo" || echo "couldn't sync $repo" >&2
+        if ! repos=$(gh repo list "$owner" --limit 1000 --no-archived --source --json nameWithOwner --jq '.[].nameWithOwner'); then
+          echo "couldn't list $owner's repos" >&2
+          failed=1
+          continue
+        fi
+        while read -r repo; do
+          [ -n "$repo" ] || continue
+          cn sync "$repo" || { echo "couldn't sync $repo" >&2; failed=1; }
+        done <<<"$repos"
       done
+      exit "$failed"
     '';
   };
 in

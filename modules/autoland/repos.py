@@ -366,12 +366,14 @@ def sweep_branches(r, open_heads, digest, sweep=True):
             continue
         if DEP_RE.match(name):
             # A dependency bot's branch with no open PR is its work in
-            # progress, unless its PR was closed unmerged: then it's done
-            # with, and the bot makes it again if it proposes that update anew.
-            closed = C.gh("api", f"repos/{repo}/pulls?state=closed&head={repo.split('/')[0]}:{name}",
-                          "--jq", "length", check=False)
-            if isinstance(closed, int) and closed > 0:
-                log(f"{repo}: deleting {name} at {sha[:7]} (its PR was closed)")
+            # progress, unless its tip is the head of a PR that was closed:
+            # then nothing on it is new, and the bot makes it again if it
+            # proposes that update anew. A branch the bot has pushed to since
+            # holds fresh work and is kept.
+            heads = C.gh("api", f"repos/{repo}/pulls?state=closed&head={repo.split('/')[0]}:{name}",
+                         "--jq", "[.[].head.sha]", check=False)
+            if isinstance(heads, list) and sha in heads:
+                log(f"{repo}: deleting {name} at {sha[:7]} (its PR was closed at that tip)")
                 delete_branch(repo, name, sha)
             continue
         # Compared at the tip just listed, and deleted only if it's still there.

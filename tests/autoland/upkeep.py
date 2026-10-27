@@ -207,12 +207,13 @@ S.main()
 assert order == ["watch", (9, True), (10, False)], order
 
 # The daily branch sweep: a merged branch goes, an old unmerged one is
-# listed, and a dependency bot's branch goes only once its PR was closed
-# (one with no PR yet is the bot's work in progress).
+# listed, and a dependency bot's branch goes only while its tip is the head
+# of a PR that was closed (one with no PR yet is the bot's work in progress,
+# and one the bot pushed to after its PR was closed holds fresh work).
 BRANCHES = "\n".join(f"{n} {c * 40}" for n, c in [
     ("main", "0"), ("merged", "1"), ("old", "2"), ("open-pr", "3"), ("renovate/closed", "4"),
-    ("renovate/new", "5")])
-CLOSED = {"renovate/closed": 1, "renovate/new": 0}
+    ("renovate/new", "5"), ("renovate/reused", "6")])
+CLOSED = {"renovate/closed": ["4" * 40], "renovate/new": [], "renovate/reused": ["7" * 40]}
 deleted = []
 
 
