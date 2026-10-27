@@ -24,8 +24,53 @@ let
   ports = [ cfg.cdpPort cfg.viewer.port ];
   home = config.users.users.${user}.home;
   uid = toString config.users.users.${user}.uid;
+  nft = config.networking.nftables.enable;
   # What keeps everyone else off its ports: nothing listens without it.
-  firewall = if config.networking.nftables.enable then "nftables.service" else "firewall.service";
+  guard = if nft then "nftables.service" else "${account}-guard.service";
+
+  # Under iptables, the rules are a unit of their own rather than the
+  # firewall's extraCommands: those run at every reload, and nothing removes
+  # them once the module is gone (turned off, rolled back, moved to nftables).
+  # `install` builds the new chains beside the live ones and hooks them in
+  # before unhooking the old, so a change never leaves the ports open; `remove`
+  # runs when the unit stops, after everything listening has.
+  iptablesGuard = pkgs.writeShellApplication {
+    name = "${account}-guard";
+    runtimeInputs = [ config.networking.firewall.package ];
+    text = ''
+      ip46() { iptables -w "$@" && ip6tables -w "$@"; }
+      unhook() {
+        while ip46 -D OUTPUT -o lo -p tcp -j "${account}-out$1" 2>/dev/null; do :; done
+        while ip46 -D INPUT -p tcp -j "${account}-in$1" 2>/dev/null; do :; done
+        for c in "${account}-out$1" "${account}-in$1"; do
+          ip46 -F "$c" 2>/dev/null || true
+          ip46 -X "$c" 2>/dev/null || true
+        done
+      }
+      case ''${1:?install or remove} in
+        install)
+          unhook -new
+          ip46 -N ${account}-out-new
+          ip46 -N ${account}-in-new
+          ip46 -A ${account}-out-new -p tcp -m multiport --dports ${lib.concatMapStringsSep "," toString ports} \
+            -m owner ! --uid-owner ${uid} -j REJECT --reject-with tcp-reset
+          ip46 -A ${account}-in-new -p tcp ! --dport ${toString cfg.viewer.port} -j RETURN
+          for i in lo ${lib.escapeShellArgs cfg.viewer.interfaces}; do
+            ip46 -A ${account}-in-new -i "$i" -j RETURN
+          done
+          ip46 -A ${account}-in-new -p tcp -j REJECT --reject-with tcp-reset
+          # At the top: ahead of the firewall's accepts, trusted interfaces' too.
+          ip46 -I OUTPUT -o lo -p tcp -j ${account}-out-new
+          ip46 -I INPUT -p tcp -j ${account}-in-new
+          unhook ""
+          ip46 -E ${account}-out-new ${account}-out
+          ip46 -E ${account}-in-new ${account}-in ;;
+        remove)
+          unhook -new
+          unhook "" ;;
+      esac
+    '';
+  };
 
   # What Claude starts for each session: Playwright's MCP server on the running
   # browser. Snapshots and logs go to the user's runtime dir, not the project.
@@ -177,9 +222,9 @@ in
       "${account}-display" = {
         description = "The browser's screen";
         wantedBy = [ "multi-user.target" ];
-        # Everything else runs on the screen, so it all stops with the firewall.
-        bindsTo = [ firewall ];
-        after = [ firewall ];
+        # Everything else runs on the screen, so it all stops with the rules.
+        bindsTo = [ guard ];
+        after = [ guard ];
         serviceConfig = confined // {
           RuntimeDirectory = account;
           RuntimeDirectoryMode = "0700";
@@ -235,7 +280,7 @@ in
         wantedBy = [ "multi-user.target" ];
         serviceConfig = confined // {
           ExecStart = lib.escapeShellArgs [
-            (lib.getExe' pkgs.python3Packages.websockify "websockify")
+            "${pkgs.python3.withPackages (ps: [ ps.websockify ])}/bin/python3" "-I" "${./browser/viewer.py}"
             "--web=${pkgs.novnc}/share/webapps/novnc" "--file-only"
             "--unix-target=${runDir}/vnc.sock"
             "--auth-plugin=websockify.auth_plugins.ExpectOrigin"
@@ -270,39 +315,24 @@ in
     # (connections to its own addresses leave through lo, whatever the
     # address), and from elsewhere only the viewer, on viewer.interfaces, even
     # where the firewall trusts an interface or opens the port more widely.
-    networking.firewall = lib.mkMerge [
-      { interfaces = lib.genAttrs cfg.viewer.interfaces (_: { allowedTCPPorts = [ cfg.viewer.port ]; }); }
-      (lib.mkIf (!config.networking.nftables.enable) {
-        # Built beside the live chains, hooked in, and only then is the old
-        # one unhooked: a reload never leaves the ports open. Nothing in
-        # extraStopCommands: a stopped firewall keeps these, and the browser
-        # stops with it anyway.
-        extraCommands = ''
-          for c in ${account}-out ${account}-in; do
-            ip46tables -F "$c-new" 2>/dev/null || ip46tables -N "$c-new"
-          done
-          ip46tables -A ${account}-out-new -p tcp -m multiport --dports ${lib.concatMapStringsSep "," toString ports} \
-            -m owner ! --uid-owner ${uid} -j REJECT --reject-with tcp-reset
-          ip46tables -A ${account}-in-new -p tcp ! --dport ${toString cfg.viewer.port} -j RETURN
-          for i in lo ${lib.escapeShellArgs cfg.viewer.interfaces}; do
-            ip46tables -A ${account}-in-new -i "$i" -j RETURN
-          done
-          ip46tables -A ${account}-in-new -p tcp -j REJECT --reject-with tcp-reset
-          ip46tables -I OUTPUT -o lo -p tcp -j ${account}-out-new
-          ip46tables -I INPUT -p tcp -j ${account}-in-new
-          while ip46tables -D OUTPUT -o lo -p tcp -j ${account}-out 2>/dev/null; do :; done
-          while ip46tables -D INPUT -p tcp -j ${account}-in 2>/dev/null; do :; done
-          for c in ${account}-out ${account}-in; do
-            ip46tables -F "$c" 2>/dev/null || true
-            ip46tables -X "$c" 2>/dev/null || true
-            ip46tables -E "$c-new" "$c"
-          done
-        '';
-      })
-    ];
-    # The ruleset loads in one transaction, so a reload never opens them. A drop
-    # in any base chain is final, whatever the firewall's own input accepts.
-    networking.nftables.tables.${account} = lib.mkIf config.networking.nftables.enable {
+    networking.firewall.interfaces = lib.genAttrs cfg.viewer.interfaces (_: { allowedTCPPorts = [ cfg.viewer.port ]; });
+    systemd.services."${account}-guard" = lib.mkIf (!nft) {
+      description = "Keep everyone but ${user} off the browser's ports";
+      wantedBy = [ "multi-user.target" ];
+      # A change swaps the rules in place; a restart would open a gap.
+      reloadIfChanged = true;
+      serviceConfig = {
+        Type = "oneshot";
+        RemainAfterExit = true;
+        ExecStart = "${lib.getExe iptablesGuard} install";
+        ExecReload = "${lib.getExe iptablesGuard} install";
+        ExecStop = "${lib.getExe iptablesGuard} remove";
+      };
+    };
+    # The ruleset loads in one transaction, so a reload never opens them, and
+    # goes with the module. A drop in any base chain is final, whatever the
+    # firewall's own input accepts.
+    networking.nftables.tables.${account} = lib.mkIf nft {
       family = "inet";
       content = ''
         chain output {

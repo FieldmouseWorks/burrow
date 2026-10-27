@@ -3,8 +3,9 @@
 # burrow.user on the machine reaches its DevTools port and its viewer (under
 # iptables and under nftables), the viewer is open on the interface it's given
 # and speaks VNC there, the screen listens on no TCP or abstract socket, the
-# profile is the browser's alone, and Claude gets the MCP server as soon as it
-# has a config, and loses it when the browser is turned off.
+# profile is the browser's alone, no other site can frame the viewer, Claude
+# gets the MCP server as soon as it has a config and loses it when the browser
+# is turned off, and the iptables rules leave with the module.
 #
 #   nix build .#checks.x86_64-linux.browser -L
 { self, pkgs }:
@@ -169,9 +170,14 @@ pkgs.testers.runNixOSTest {
             client.fail(f"curl -fsS --max-time 5 -o /dev/null http://{ip2}:6080/vnc.html")
             # Never the DevTools port.
             client.fail(f"curl -fsS --max-time 5 http://{name}:9222/json/version")
+            # No other site gets to frame it and lay its own page over the owner's clicks.
+            for page in ("vnc.html", "vnc_lite.html"):
+                head = client.succeed(f"curl -fsSI --max-time 5 http://{name}:6080/{page}").lower()
+                assert "content-security-policy: frame-ancestors 'none'" in head, head
 
-    with subtest("a firewall reload keeps the ports shut"):
+    with subtest("a reload of the firewall or the rules keeps the ports shut"):
         machine.succeed("systemctl reload firewall")
+        machine.succeed("systemctl reload burrow-browser-guard")
         nft.succeed("systemctl reload nftables")
         for node in (machine, nft):
             node.succeed("su dev -c '" + cdp + "'")
@@ -181,6 +187,7 @@ pkgs.testers.runNixOSTest {
         # The old chains are gone, not left beside the new ones.
         assert machine.succeed("iptables -S OUTPUT | grep -c burrow-browser").strip() == "1"
         assert machine.succeed("iptables -S INPUT | grep -c burrow-browser").strip() == "1"
+        assert machine.succeed("iptables -S | grep -c -- '-N burrow-browser'").strip() == "2"
 
     with subtest("the screen listens on no TCP port and no abstract socket"):
         out = machine.succeed("ss -Hlntp; ss -Hlxp")
@@ -231,13 +238,16 @@ pkgs.testers.runNixOSTest {
         machine.succeed("systemctl stop burrow-browser-mcp.service")
         assert machine.succeed("jq -c .mcpServers.browser /home/dev/.claude.json").strip() == "null"
 
-    with subtest("nothing listens without the firewall"):
-        machine.succeed("systemctl stop firewall")
+    with subtest("nothing listens without its rules, and the rules go with it"):
+        machine.succeed("systemctl stop burrow-browser-guard")
         nft.succeed("systemctl stop nftables")
         for node in (machine, nft):
             node.wait_until_fails("systemctl is-active -q burrow-browser.service")
             node.fail("systemctl is-active -q burrow-browser-viewer.service")
             node.fail("su dev -c '" + cdp + "'")
             node.fail("su dev -c '" + viewer + "'")
+        # As when the module is turned off or rolled back: no chain left behind.
+        machine.fail("iptables -S | grep -q burrow-browser")
+        machine.fail("ip6tables -S | grep -q burrow-browser")
   '';
 }
