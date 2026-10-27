@@ -14,17 +14,24 @@ each lock file the refresh changed:
     npm's `--before` set to the cutoff, and failing if npm can't resolve
     under it (Renovate drops `--before` and resolves again without it).
 
-Then every new version is checked against its registry's publish time.
+Then every new version is checked against its registry's publish time. A
+version the base already had counts as checked only from the same source.
 One still too young, a registry it can't ask (a crate from another
-registry, a tarball from elsewhere) or any other lock file changing (yarn,
-pnpm) fails the refresh: Renovate shows it as an artifact failure and
-doesn't merge it. A git dependency's commit is taken as it is, as Nix
+registry, a tarball from elsewhere), a lock file taken all the way back to
+the base's (Renovate would then commit its own, unchecked), an npm lock
+file without a packages map (npm 6's) or any other lock file changing
+(yarn, pnpm) fails the refresh: Renovate shows it as an artifact failure
+and doesn't merge it. A git dependency's commit is taken as it is, as Nix
 inputs are (burrow#82).
+
+The age is the longer of AGE_SECONDS and any minimumReleaseAge the repo's
+own Renovate config sets, anywhere in it.
 """
 
 import datetime as dt
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -37,6 +44,13 @@ CRATES_IO = "registry+https://github.com/rust-lang/crates.io-index"
 NPM = "https://registry.npmjs.org/"
 ROUNDS = 6  # passes over a Cargo.lock before what's left is a failure
 TRIES = 5  # older versions asked about per crate per pass
+# Where Renovate looks for a repo's own config, in its order.
+CONFIGS = ("renovate.json", "renovate.json5", ".github/renovate.json", ".github/renovate.json5",
+           ".gitlab/renovate.json", ".gitlab/renovate.json5", ".renovaterc", ".renovaterc.json",
+           ".renovaterc.json5", "package.json")
+SECONDS = {"s": 1, "sec": 1, "second": 1, "m": 60, "min": 60, "minute": 60, "h": 3600, "hr": 3600,
+           "hour": 3600, "d": 86400, "day": 86400, "w": 604800, "wk": 604800, "week": 604800,
+           "mo": 2592000, "month": 2592000, "y": 31536000, "yr": 31536000, "year": 31536000}
 
 
 def log(*a):
@@ -130,17 +144,69 @@ def base_text(path):
     return p.stdout if p.returncode == 0 else None
 
 
+def duration(text):
+    """Renovate's "3 days", "1 week 2 days" or "12h", in seconds."""
+    terms = re.findall(r"\s*(\d+)\s*([a-z]+)", text.lower())
+    if not terms or "".join(n + u for n, u in terms) != re.sub(r"\s", "", text.lower()):
+        raise ValueError(f"can't read the duration {text!r}")
+    total = 0
+    for n, unit in terms:
+        unit = unit if unit in SECONDS else unit[:-1] if unit.endswith("s") else unit
+        if unit not in SECONDS:
+            raise ValueError(f"can't read the duration {text!r}")
+        total += int(n) * SECONDS[unit]
+    return total
+
+
+def repo_age():
+    """The longest minimumReleaseAge the base's own Renovate config sets
+    anywhere in it (the top level or any rule), in seconds."""
+    longest = 0
+    for name in CONFIGS:
+        text = base_text(name)
+        if not text or "minimumReleaseAge" not in text:
+            continue
+        found = re.findall(r"""minimumReleaseAge["']?\s*:\s*(null|"[^"]*"|'[^']*')""", text)
+        if len(found) != text.count("minimumReleaseAge"):
+            raise ValueError(f"{name}: a minimumReleaseAge lock-age can't read")
+        for value in found:
+            if value != "null":
+                longest = max(longest, duration(value[1:-1]))
+    return longest
+
+
+def changed():
+    """Every file the refresh changed, added or left untracked. NUL-separated,
+    so no path is quoted or split."""
+    paths = set()
+    for cmd in (["git", "diff", "-z", "--name-only", "HEAD"], ["git", "ls-files", "-z", "--others", "--exclude-standard"]):
+        p = run(cmd, ".")
+        if p.returncode != 0:
+            raise RuntimeError(f"{' '.join(cmd)}: {p.stderr.strip()}")
+        paths.update(x for x in p.stdout.split("\0") if x)
+    return sorted(paths)
+
+
+def same_as_base(path, base):
+    with open(path) as f:
+        return f.read() == base
+
+
 def cargo_packages(text):
     return tomllib.loads(text).get("package", []) if text else []
 
 
+def ident(p):
+    return p["name"], p["version"], p.get("source")
+
+
 def cargo_new(path, base):
-    """The packages in the lock file that the base's doesn't have, by
-    (name, version, source)."""
-    had = {(p["name"], p["version"]) for p in cargo_packages(base)}
+    """The packages in the lock file that the base's doesn't have from the
+    same source (a path crate has none, and is the repo's own)."""
+    had = {ident(p) for p in cargo_packages(base)}
     with open(path) as f:
         now = cargo_packages(f.read())
-    return [p for p in now if (p["name"], p["version"]) not in had and "source" in p], now
+    return [p for p in now if ident(p) not in had and "source" in p], now
 
 
 def cargo_young(path, base, cutoff, bad):
@@ -167,9 +233,11 @@ def precise(d, name, version, to):
 def cargo(path, cutoff, bad):
     d = os.path.dirname(path) or "."
     base = base_text(path)
+    # The base's crates.io versions, the only ones to go back to.
     base_versions = {}
     for p in cargo_packages(base):
-        base_versions.setdefault(p["name"], []).append(p["version"])
+        if p.get("source") == CRATES_IO:
+            base_versions.setdefault(p["name"], []).append(p["version"])
     for _ in range(ROUNDS):
         young = cargo_young(path, base, cutoff, [])
         if not young:
@@ -196,23 +264,25 @@ def cargo(path, cutoff, bad):
             _, now = cargo_new(path, base)
             with open(path) as f:
                 pkgs = cargo_packages(f.read())
-            moved = {(q["name"], q["version"]) for q in now}
+            moved = {ident(q) for q in now}
             for q in pkgs:
                 needs = {x.split(" ")[0] for x in q.get("dependencies", [])}
-                if name in needs and (q["name"], q["version"]) in moved and q["name"] in base_versions:
+                if name in needs and ident(q) in moved and q.get("source") == CRATES_IO and q["name"] in base_versions:
                     to = max(base_versions[q["name"]], key=semver_key)
                     if precise(d, q["name"], q["version"], to):
                         log(f"{path}: {q['name']} {q['version']} needs {name} {version}, kept the base's {to}")
     for p in cargo_young(path, base, cutoff, bad):
         bad.append(f"{path}: {p['name']} {p['version']} was published within the age, and couldn't be taken back")
+    if same_as_base(path, base):
+        bad.append(f"{path}: nothing in the refresh was old enough, so it went back to the base's, and Renovate "
+                   "would commit its own instead")
 
 
-def npm_entries(text):
-    """(name, version, resolved) of every installed package in a lock file."""
-    if not text:
-        return []
+def npm_entries(lock):
+    """(name, version, resolved) of every installed package in a lock file
+    with a packages map (npm 7 on)."""
     got = []
-    for key, p in json.loads(text).get("packages", {}).items():
+    for key, p in lock["packages"].items():
         # The root, workspace members and links are the repo's own, and a
         # bundled one comes inside its parent's tarball.
         if "node_modules/" not in key or p.get("link") or p.get("inBundle") or "version" not in p:
@@ -231,11 +301,21 @@ def npm(path, cutoff, bad):
         bad.append(f"{path}: npm couldn't resolve with only releases from before {cutoff:%Y-%m-%d %H:%M}Z: "
                    + (p.stderr.strip().splitlines() or ["no output"])[-1])
         return
-    had = {(n, v) for n, v, _ in npm_entries(base)}
     with open(path) as f:
-        now = npm_entries(f.read())
-    for name, version, resolved in now:
-        if (name, version) in had:
+        lock = json.load(f)
+    if lock.get("lockfileVersion", 0) < 2 or not isinstance(lock.get("packages"), dict):
+        bad.append(f"{path}: lock file version {lock.get('lockfileVersion')} has no packages map to check")
+        return
+    if same_as_base(path, base):
+        bad.append(f"{path}: nothing in the refresh was old enough, so it came out as the base's, and Renovate "
+                   "would commit its own instead")
+        return
+    try:
+        had = set(npm_entries(json.loads(base))) if base else set()
+    except (ValueError, KeyError, AttributeError):
+        had = set()  # nothing the base had counts as checked: all of it is
+    for name, version, resolved in npm_entries(lock):
+        if (name, version, resolved) in had:
             continue
         if not (resolved or "").startswith(NPM):
             bad.append(f"{path}: {name} {version} comes from {resolved}, whose publish time isn't known")
@@ -247,11 +327,15 @@ def main(argv):
     if len(argv) != 2 or not argv[1].isdigit():
         print(__doc__.split("\n\n")[0], file=sys.stderr)
         return 2
-    cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=int(argv[1]))
-    changed = run(["git", "diff", "--name-only", "HEAD"], ".").stdout.split()
-    changed += run(["git", "ls-files", "--others", "--exclude-standard"], ".").stdout.split()
     bad = []
-    for path in sorted(set(changed)):
+    try:
+        age = max(int(argv[1]), repo_age())
+        paths = changed()
+    except Exception as e:
+        log(f"{type(e).__name__}: {e}")
+        return 1
+    cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=age)
+    for path in paths:
         name = os.path.basename(path)
         try:
             if name == "Cargo.lock":

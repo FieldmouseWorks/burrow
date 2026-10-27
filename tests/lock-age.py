@@ -19,8 +19,9 @@ spec.loader.exec_module(L)
 
 NOW = dt.datetime.now(dt.timezone.utc)
 AGE = 3 * 86400
-OLD = (NOW - dt.timedelta(days=10)).strftime("%Y-%m-%dT%H:%M:%SZ")
+OLD = (NOW - dt.timedelta(days=20)).strftime("%Y-%m-%dT%H:%M:%SZ")
 NEW = (NOW - dt.timedelta(hours=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
+MID = (NOW - dt.timedelta(days=5)).strftime("%Y-%m-%dT%H:%M:%SZ")  # past the 3 days, not 14
 CRATES = "registry+https://github.com/rust-lang/crates.io-index"
 
 
@@ -123,26 +124,80 @@ assert versions() == {"a": "1.0.1", "b": "2.1.0", "g": "0.3.0", "me": "0.1.0"}, 
 
 # In a member's directory: cargo runs there.
 INDEX.update(c={"0.4.0": OLD, "0.4.1": NEW})
-repo({"server/Cargo.lock": cargo_lock(("c", "0.4.0"))})
-write("server/Cargo.lock", cargo_lock(("c", "0.4.1")))
-assert lock_age() == 0 and versions("server/Cargo.lock") == {"c": "0.4.0"}
+repo({"server/Cargo.lock": cargo_lock(("b", "2.0.0"), ("c", "0.4.0"))})
+write("server/Cargo.lock", cargo_lock(("b", "2.1.0"), ("c", "0.4.1")))
+assert lock_age() == 0 and versions("server/Cargo.lock") == {"b": "2.1.0", "c": "0.4.0"}
 assert [cwd for cmd, cwd in RAN if cmd[0] == "cargo"] == ["server"], RAN
 
 # None older than the new one is old enough, but the base's is: back to it.
 INDEX.update(d={"1.0.0": NEW, "1.1.0": NEW})
 INDEX["d"]["0.9.0"] = OLD  # the base's, older than every other
-repo({"Cargo.lock": cargo_lock(("d", "0.9.0"))})
+repo({"Cargo.lock": cargo_lock(("b", "2.0.0"), ("d", "0.9.0"))})
 INDEX["d"]["0.9.0"] = NEW  # (as a base can hold a too-new one, merged on purpose)
-write("Cargo.lock", cargo_lock(("d", "1.1.0")))
-assert lock_age() == 0 and versions() == {"d": "0.9.0"}, versions()
+write("Cargo.lock", cargo_lock(("b", "2.1.0"), ("d", "1.1.0")))
+assert lock_age() == 0 and versions() == {"b": "2.1.0", "d": "0.9.0"}, versions()
 
 # A crate the refresh moved needs the too-new one: that crate goes back to
 # the base's version too, and then the too-new one can.
 INDEX.update(e={"1.0.0": OLD, "1.0.1": NEW}, q={"1.0.0": OLD, "1.1.0": OLD})
-repo({"Cargo.lock": cargo_lock(("e", "1.0.0"), ("q", "1.0.0", CRATES, ["e"]))})
-write("Cargo.lock", cargo_lock(("e", "1.0.1"), ("q", "1.1.0", CRATES, ["e"])))
+repo({"Cargo.lock": cargo_lock(("b", "2.0.0"), ("e", "1.0.0"), ("q", "1.0.0", CRATES, ["e"]))})
+write("Cargo.lock", cargo_lock(("b", "2.1.0"), ("e", "1.0.1"), ("q", "1.1.0", CRATES, ["e"])))
 REFUSE.append(lambda text, name, to: name == "e" and 'name = "q"\nversion = "1.1.0"' in text)
-assert lock_age() == 0 and versions() == {"e": "1.0.0", "q": "1.0.0"}, versions()
+assert lock_age() == 0 and versions() == {"b": "2.1.0", "e": "1.0.0", "q": "1.0.0"}, versions()
+
+# Taken all the way back to the base's, the lock file would look unchanged,
+# and Renovate would commit its own refresh instead: that fails it.
+repo({"Cargo.lock": cargo_lock(("c", "0.4.0"))})
+write("Cargo.lock", cargo_lock(("c", "0.4.1")))
+assert lock_age() == 1 and versions() == {"c": "0.4.0"}, versions()
+
+# Even when another lock file did change.
+repo({"Cargo.lock": cargo_lock(("c", "0.4.0")), "x/Cargo.lock": cargo_lock(("b", "2.0.0"))})
+write("Cargo.lock", cargo_lock(("c", "0.4.1")))
+write("x/Cargo.lock", cargo_lock(("b", "2.1.0")))
+assert lock_age() == 1
+
+# Paths come through whole: a space, a tab, a quote, non-ASCII.
+for d in ("my dir", "caf\u00e9", 'a\t"b'):
+    repo({f"{d}/Cargo.lock": cargo_lock(("b", "2.0.0"), ("c", "0.4.0"))})
+    write(f"{d}/Cargo.lock", cargo_lock(("b", "2.1.0"), ("c", "0.4.1")))
+    assert lock_age() == 0 and versions(f"{d}/Cargo.lock") == {"b": "2.1.0", "c": "0.4.0"}, d
+
+# A git that can't say what changed (no base commit here) fails it.
+os.chdir(tempfile.mkdtemp())
+git("init", "-q")
+write("Cargo.lock", cargo_lock(("c", "0.4.1")))
+assert lock_age() == 1
+
+# A version the base had from another source isn't taken as checked: here
+# the base's f 1.0.0 was a git dependency, the refresh's is from crates.io.
+INDEX.update(f={"0.9.0": OLD, "1.0.0": NEW})
+repo({"Cargo.lock": cargo_lock(("b", "2.0.0"), ("f", "1.0.0", "git+https://example.org/f#abc"))})
+write("Cargo.lock", cargo_lock(("b", "2.1.0"), ("f", "1.0.0")))
+assert lock_age() == 0 and versions() == {"b": "2.1.0", "f": "0.9.0"}, versions()
+
+# The repo's own config asks for longer (anywhere in it): that age holds.
+INDEX.update(h={"1.0.0": OLD, "1.1.0": MID})
+config = {"packageRules": [{"matchManagers": ["cargo"], "minimumReleaseAge": "2 weeks"}],
+          "vulnerabilityAlerts": {"minimumReleaseAge": None}}
+repo({"Cargo.lock": cargo_lock(("b", "2.0.0"), ("h", "1.0.0")), ".github/renovate.json": json.dumps(config)})
+write("Cargo.lock", cargo_lock(("b", "2.1.0"), ("h", "1.1.0")))
+assert lock_age() == 0 and versions() == {"b": "2.1.0", "h": "1.0.0"}, versions()
+# Without it, 5 days is old enough.
+repo({"Cargo.lock": cargo_lock(("b", "2.0.0"), ("h", "1.0.0"))})
+write("Cargo.lock", cargo_lock(("b", "2.1.0"), ("h", "1.1.0")))
+assert lock_age() == 0 and versions() == {"b": "2.1.0", "h": "1.1.0"}, versions()
+# One it can't read fails the refresh.
+repo({"Cargo.lock": cargo_lock(("b", "2.0.0")), "renovate.json5": "{minimumReleaseAge: someAge}"})
+write("Cargo.lock", cargo_lock(("b", "2.1.0")))
+assert lock_age() == 1
+assert [L.duration(x) for x in ("3 days", "1 week 2 days", "12h", "1 month")] == [259200, 777600, 43200, 2592000]
+for x in ("3", "soon", "3 fortnights"):
+    try:
+        L.duration(x)
+        raise AssertionError(x)
+    except ValueError:
+        pass
 
 # One that can't go back at all fails the refresh.
 REFUSE.append(lambda text, name, to: name == "e")
@@ -208,6 +263,24 @@ for bad in (("node_modules/left-pad", "1.2.0"), ("node_modules/left-pad", "1.1.0
     write("package-lock.json", npm_lock(("node_modules/left-pad", "1.2.0")))
     RESOLVES["lock"] = npm_lock(bad)
     assert lock_age() == 1, bad
+
+# Resolved under the cutoff to just what the base had: fails, as for Cargo.
+repo({"package-lock.json": npm_lock(("node_modules/left-pad", "1.0.0"))})
+write("package-lock.json", npm_lock(("node_modules/left-pad", "1.2.0")))
+RESOLVES["lock"] = npm_lock(("node_modules/left-pad", "1.0.0"))
+assert lock_age() == 1
+
+# A version the base had from another tarball isn't taken as checked.
+repo({"package-lock.json": npm_lock(("node_modules/left-pad", "1.2.0", "https://example.org/lp.tgz"))})
+write("package-lock.json", npm_lock(("node_modules/left-pad", "1.2.0")))
+RESOLVES["lock"] = npm_lock(("node_modules/left-pad", "1.2.0"))
+assert lock_age() == 1
+
+# npm 6's lock files have no packages map to check: they fail it.
+repo({"package-lock.json": npm_lock(("node_modules/left-pad", "1.0.0"))})
+write("package-lock.json", npm_lock(("node_modules/left-pad", "1.2.0")))
+RESOLVES["lock"] = json.dumps({"lockfileVersion": 1, "dependencies": {"left-pad": {"version": "1.1.0"}}})
+assert lock_age() == 1
 
 # A lock file it can't check fails the refresh.
 repo({"yarn.lock": "# old\n"})

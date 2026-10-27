@@ -594,6 +594,14 @@ in
 
     (lib.mkIf rcfg.enable {
       assertions = [{
+        # lock-age holds Cargo and npm refreshes to releaseAgeDays, which a
+        # different age here would leave behind.
+        assertion = !(rcfg.settings ? minimumReleaseAge);
+        message = ''
+          burrow.updates.renovate.settings can't set minimumReleaseAge: lock-age
+          holds lock file refreshes to burrow's releaseAgeDays, and wouldn't
+          follow it. Change releaseAgeDays in burrow's modules/updates.nix.'';
+      } {
         assertion = renovateEmail == null || !(lib.elem renovateEmail userEmails);
         message = ''
           burrow.updates.renovate.gitAuthor uses ${renovateEmail}, the email the
