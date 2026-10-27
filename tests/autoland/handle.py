@@ -582,6 +582,20 @@ status, _ = run(clean(checks=[]), 700)
 assert len(JOBS) == 1 and "run its build and tests yourself" in JOBS[0] and not merged()
 assert "whatever its build, tests or CI log print" in JOBS[0], "what it runs isn't the judge's to obey"
 assert "the repo has no CI" in status
+# A workflow GitHub couldn't start leaves no check run, only its suite (and
+# an app's that never ran): red CI, not none, so no judge lands it.
+broken = [{"conclusion": "STARTUP_FAILURE", "workflowRun": {"workflow": {"name": "flake"}}},
+          {"conclusion": None, "workflowRun": None}]
+fresh_pr_state()
+run(clean(checks=[], suites=broken), 0)
+status, _ = run(clean(checks=[], suites=broken), 7200)
+assert not merged() and "the repo has no CI" not in status, status
+assert len(JOBS) == 1 and "CI is red (flake (failed to start))" in JOBS[0], (status, JOBS)
+many_suites = clean(checks=[], suites=broken)
+many_suites["commits"]["nodes"][0]["commit"]["checkSuites"]["pageInfo"]["hasNextPage"] = True
+assert S.ci_state(many_suites) == ("pending", ["over 100 checks, too many to read"])
+fresh_pr_state()
+run(clean(checks=[]), 700)
 # CI that shows up while the judge works doesn't pass it by: its verdict on
 # this head still decides.
 status, _ = run(clean(checks=CI_GREEN), 800)
