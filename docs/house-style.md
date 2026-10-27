@@ -49,7 +49,9 @@ Every repo with code gets a `flake.nix` from the template
   format`, once a repo has been formatted).
 - CI is `.github/workflows/flake.yml` from the template, which calls burrow's
   shared [`flake-check`](../.github/workflows/flake-check.yml) workflow
-  (`runner` and `install-nix: false` put it on a self-hosted NixOS runner). A
+  (`runner` and `install-nix: false` put it on a self-hosted NixOS runner).
+  On a public repo it also attests the gate's result for Conary's ledger, so
+  the caller's job grants it `id-token: write` and `attestations: write`. A
   repo's heavier gates (VM replays, browser tiers, databases) stay its own
   jobs, alongside it, and run their tools from `nix develop`.
 - Renovate keeps `flake.lock` current, so a repo's toolchains and gate move

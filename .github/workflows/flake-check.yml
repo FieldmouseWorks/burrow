@@ -1,7 +1,10 @@
 # The shared CI for every repo whose gate is its flake (burrow's
-# lib/project.nix): check out, install Nix, `nix flake check`. Called from a
-# repo's own workflow with `uses:`. Its actions are pinned to commits (repos that
-# allow only pinned actions need that), and Renovate keeps the pins current.
+# lib/project.nix): check out, install Nix, `nix flake check`, then attest the
+# result for Conary's ledger. Called from a repo's own workflow with `uses:`,
+# whose job grants `id-token: write` and `attestations: write` (a called job
+# gets no more than its caller gives). Its actions are pinned to commits (repos
+# that allow only pinned actions need that), and Renovate keeps the pins
+# current.
 name: flake-check
 on:
   workflow_call:
@@ -24,6 +27,12 @@ on:
 jobs:
   check:
     runs-on: ${{ inputs.runner }}
+    permissions:
+      contents: read
+      # The attestation: a GitHub OIDC token to sign it with, and the API
+      # that keeps it.
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -32,17 +41,78 @@ jobs:
           persist-credentials: false
       - if: inputs.install-nix
         uses: cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b # v31.11.3
-      - if: inputs.build-skip == ''
-        run: nix flake check -L --keep-going
-      - if: inputs.build-skip != ''
+      - id: gate
+        shell: bash
         env:
           SKIP: ${{ inputs.build-skip }}
         run: |
-          nix flake check --no-build -L
-          system=$(nix eval --impure --raw --expr builtins.currentSystem)
-          targets=()
-          for c in $(nix eval --raw ".#checks.$system" --apply 'cs: toString (builtins.attrNames cs)'); do
-            case " $SKIP " in *" $c "*) echo "not building $c"; continue ;; esac
-            targets+=(".#checks.$system.$c")
-          done
-          nix build -L --no-link --keep-going "${targets[@]}"
+          gate() {
+            if [ -z "$SKIP" ]; then
+              nix flake check -L --keep-going
+              return
+            fi
+            nix flake check --no-build -L
+            system=$(nix eval --impure --raw --expr builtins.currentSystem)
+            targets=()
+            for c in $(nix eval --raw ".#checks.$system" --apply 'cs: toString (builtins.attrNames cs)'); do
+              case " $SKIP " in *" $c "*) echo "not building $c"; continue ;; esac
+              targets+=(".#checks.$system.$c")
+            done
+            nix build -L --no-link --keep-going "${targets[@]}"
+          }
+          gate 2>&1 | tee "$RUNNER_TEMP/flake.log"
+      # The gate's result, signed with this job's own GitHub identity, in the
+      # format Conary reads (FieldmouseWorks/Conary, docs/ci-attestation.md).
+      # GitHub attests for private repositories only on Enterprise Cloud, and
+      # a run with no OIDC token (a fork's PR, Dependabot's) can't sign, so
+      # those get none and their results don't count as evidence.
+      - id: subject
+        if: ${{ !cancelled() && steps.gate.outcome != 'skipped' && !github.event.repository.private && (github.event_name == 'push' || github.event_name == 'pull_request') }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OUTCOME: ${{ steps.gate.outcome }}
+          SKIP: ${{ inputs.build-skip }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          LOG: flake-log-${{ github.run_attempt }}
+        run: |
+          if [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
+            echo "no OIDC token in this run, so no attestation"
+            exit 0
+          fi
+          case $OUTCOME in success) result=pass ;; *) result=fail ;; esac
+          dir="$RUNNER_TEMP/conary"
+          mkdir -p "$dir"
+          if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
+            # The checked commit is GitHub's merge of the head onto the base
+            # branch; its parents name both. The raw commit, since a shallow
+            # clone hides a commit's parents from git log.
+            { read -r tip; read -r head; } < <(git cat-file commit HEAD | sed -n 's/^parent //p')
+            [ "$head" = "$PR_HEAD" ] || { echo "checked $GITHUB_SHA isn't a merge of $PR_HEAD"; exit 1; }
+            base=$(gh api "repos/$GITHUB_REPOSITORY/compare/$tip...$head" --jq .merge_base_commit.sha)
+            subject="$dir/conary-revision"
+            printf 'conary revision v1\n%s\n%s\n' "$base" "$head" > "$subject"
+            revision=$(jq -n --arg base "$base" --arg head "$head" '{$base, $head}')
+          else
+            subject="$dir/conary-commit"
+            printf 'conary commit v1\n%s\n' "$GITHUB_SHA" > "$subject"
+            revision=null
+          fi
+          jq -n --arg result "$result" --argjson revision "$revision" \
+            --arg tree "$(git rev-parse 'HEAD^{tree}')" --arg skip "$SKIP" \
+            --arg sha256 "$(sha256sum "$RUNNER_TEMP/flake.log" | cut -d' ' -f1)" --arg artifact "$LOG" \
+            '{$result, $revision, $tree, skipped: ($skip | split(" ") | map(select(. != ""))), log: {$sha256, $artifact}}' \
+            > "$dir/predicate.json"
+          cat "$subject" "$dir/predicate.json"
+          echo "path=$subject" >> "$GITHUB_OUTPUT"
+      - if: ${{ !cancelled() && steps.subject.outputs.path }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: flake-log-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/flake.log
+      - if: ${{ !cancelled() && steps.subject.outputs.path }}
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: ${{ steps.subject.outputs.path }}
+          predicate-type: https://github.com/FieldmouseWorks/Conary/blob/main/docs/ci-attestation.md#v1
+          predicate-path: ${{ runner.temp }}/conary/predicate.json
