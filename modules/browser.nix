@@ -58,9 +58,7 @@ let
         echo ':${account}-in - [0:0]'
         echo '-A ${account}-out -p tcp -m multiport --dports ${lib.concatMapStringsSep "," toString ports} -m owner ! --uid-owner ${uid} -j REJECT --reject-with tcp-reset'
         echo '-A ${account}-in -p tcp ! --dport ${toString cfg.viewer.port} -j RETURN'
-        for i in lo ${lib.escapeShellArgs cfg.viewer.interfaces}; do
-          echo "-A ${account}-in -i $i -j RETURN"
-        done
+        ${lib.concatMapStringsSep "\n        " (i: "echo ${lib.escapeShellArg "-A ${account}-in -i ${i} -j RETURN"}") ([ "lo" ] ++ cfg.viewer.interfaces)}
         echo '-A ${account}-in -p tcp -j REJECT --reject-with tcp-reset'
         # At the top: ahead of the firewall's accepts, trusted interfaces' too.
         for hook in ${lib.escapeShellArgs hooks}; do
