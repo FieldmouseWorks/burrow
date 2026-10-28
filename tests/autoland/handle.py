@@ -10,7 +10,7 @@ import os
 import shutil
 import subprocess
 
-from harness import (C, CI_GREEN, DDIR, FAIL, JOBS, POSTED, PR_DIFF, QDIR, R, S, STATES, STUB, T0, V,
+from harness import (C, CI_GREEN, DDIR, FAIL, JOBS, POSTED, PR_DIFF, QDIR, P, R, S, STATES, STUB, T0, V,
                      W, WROTE, agent, agent_runs, clean, fresh_pr_state, head, info, judgment, merged,
                      gh_stub, mkpr, pr_state, queued, run, rv_review, said, stand_in, swept, tmp, worker)
 
@@ -493,9 +493,11 @@ status, _ = run(clean(**mig), 700)
 assert len(JOBS) == 1 and f"autoland-judgment: failed {head}" in JOBS[0]
 status, digest = run(clean(comments=[failed], **mig), 800)
 assert len(JOBS) == 1 and "something failing" in JOBS[0] and "isn't settled" in JOBS[0], JOBS
-assert "a Claude job is fixing it" in status and not merged() and digest == [], (status, digest)
+fixing = f"Settled, but its build or tests fail; a Claude job has it since {S.clock(C.ts(T0) + 800)}"
+assert fixing == "Settled, but its build or tests fail; a Claude job has it since 12:13am UTC"
+assert fixing in status and not merged() and digest == [], (status, digest)
 status, _ = run(clean(comments=[failed], **mig), 900)
-assert JOBS == [] and "a Claude job is fixing it" in status
+assert JOBS == [] and fixing in status, status
 # A fix job that answered a finding on this head without pushing didn't fix
 # what the judge found failing: that gets its own job, once the first one
 # has ended (two on one branch push over each other).
@@ -506,7 +508,7 @@ assert len(JOBS) == 1 and "isn't settled" in JOBS[0], JOBS
 run(clean(**mig), 7300)
 assert len(JOBS) == 1 and f"autoland-judgment: failed {head}" in JOBS[0], JOBS
 status, _ = run(clean(comments=[failed], **mig), 7400)
-assert JOBS == [] and "a Claude job is fixing it" in status, (status, JOBS)
+assert JOBS == [] and "a Claude job takes it once the one on its findings ends" in status, (status, JOBS)
 STATES["job-1"] = "done"
 status, _ = run(clean(comments=[failed], **mig), 7500)
 assert len(JOBS) == 1 and "something failing" in JOBS[0], (status, JOBS)
@@ -556,15 +558,41 @@ STATES.clear()
 # PR its own Claude session opened (its body links it) that session is on
 # them, so a job waits out the longer quiet, in case it's gone; anything it
 # pushes or says starts that wait over.
+# Its status says who has them, and until or since when; a job that takes
+# them puts 👀 on each open thread.
+reacted = lambda: [x for x in WROTE if x.endswith("/reactions -f content=eyes")]  # noqa: E731
+# The threads' first comments, as eyes() reads them (only then, not with
+# every PR: P.THREADS).
+ASKED = []
+graphql_kept = C.graphql
+C.graphql = lambda q, **v: ASKED.append((q, v)) or {"node": {"reviewThreads": {"nodes": [
+    {"isResolved": False, "comments": {"nodes": [{"databaseId": 900}]}},
+    {"isResolved": True, "comments": {"nodes": [{"databaseId": 901}]}}]}}}
+assert "comments" not in next(x for x in P.PRS.splitlines() if "reviewThreads" in x), "the PR list reads no thread comments"
 fresh_pr_state()
-run(clean(threads=[False]), 0)
-run(clean(threads=[False]), 31 * 60)
+status, _ = run(clean(threads=[False, True]), 0)
+assert JOBS == [] and status.endswith("1 open review thread; a Claude job takes it at 12:30am UTC -f target_url=u"), status
+status, _ = run(clean(threads=[False, True]), 31 * 60)
 assert len(JOBS) == 1 and "isn't settled" in JOBS[0], JOBS
+assert "push before you reply" in JOBS[0] and "Never push over it" in JOBS[0], "a fix job's reply names what landed"
+assert "1 open review thread; a Claude job has it since 12:31am UTC" in status, status
+assert reacted() == ["api -X POST repos/sam/r/pulls/comments/900/reactions -f content=eyes"], WROTE
+assert ASKED == [(P.THREADS, {"id": "x"})], ASKED
+status, _ = run(clean(threads=[False, True]), 40 * 60)
+assert JOBS == [] and reacted() == [] and "a Claude job has it since 12:31am UTC" in status, (status, WROTE)
+STATES["job-1"] = "queued"
+status, _ = run(clean(threads=[False, True]), 41 * 60)
+assert "a Claude job is queued for it since 12:31am UTC" in status, status
+STATES["job-1"] = "done"
+status, _ = run(clean(threads=[False, True]), 42 * 60)
+assert JOBS == [] and "1 open review thread; its Claude job just ended" in status, status
+STATES.clear()
 fresh_pr_state()
 linked = {"threads": [False], "body": "Does it.\n\nhttps://claude.ai/code/session_01AbCdEf"}
 run(clean(**linked), 0)
 status, _ = run(clean(**linked), 31 * 60)
-assert JOBS == [] and "1 open review thread" in status, (JOBS, status)
+assert JOBS == [] and reacted() == [], (JOBS, WROTE)
+assert "1 open review thread; the Claude session that opened it has it until 1:30am UTC, then a Claude job" in status, status
 replied = {**clean(**linked), "updatedAt": "2026-10-24T01:20:00Z"}
 run(replied, 91 * 60)
 assert JOBS == [], JOBS
@@ -573,6 +601,7 @@ assert len(JOBS) == 1 and "isn't settled" in JOBS[0], JOBS
 # Its replies start that wait over, not the deadline of the job at work.
 run({**replied, "updatedAt": "2026-10-24T02:55:00Z"}, 176 * 60)
 assert JOBS == [] and C.WAKE["sam/r"] == C.ts(T0) + (171 + 65) * 60, C.WAKE
+C.graphql = graphql_kept
 
 # The needs-owner label goes straight to the owner: no judge job.
 fresh_pr_state()
@@ -594,9 +623,9 @@ for kw in ({"checks": [{"__typename": "CheckRun", "name": "ci", "status": "COMPL
 fresh_pr_state()
 stuck = {"reviews": [rv_review("codex", 1)] * 5, "threads": [False]}
 status, digest = run(mkpr(**stuck), 0)
-assert not any("--add-label" in x or "/comments" in x for x in WROTE) and digest == [], (WROTE, digest)
+assert not any("--add-label" in x or "/comments " in x for x in WROTE) and digest == [], (WROTE, digest)
 status, digest = run(mkpr(**stuck), 7200)
-assert not any("--add-label" in x or "/comments" in x for x in WROTE) and digest == [], (WROTE, digest)
+assert not any("--add-label" in x or "/comments " in x for x in WROTE) and digest == [], (WROTE, digest)
 assert queued() == [] and "Past the review-round limit (5): 1 open review thread" in status, (queued(), status)
 assert len(JOBS) == 1 and "won't look again" in JOBS[0] and "answer the rest with why" in JOBS[0], JOBS
 # Answered without a push: still no look, a judge instead, told to read the answers too.

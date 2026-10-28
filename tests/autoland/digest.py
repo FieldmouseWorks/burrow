@@ -1,0 +1,180 @@
+"""The digest's two issues: what only the owner can settle goes to the issue
+assigned to them, and what the pipeline is stuck on to one the inbox hands to
+a Claude job; when the inbox can't take it, all of it is the owner's."""
+
+import os
+
+from harness import C, R, fresh_pr_state, sh, tmp
+
+CALLS = []
+OPEN = {}  # the open issue under each label, as `gh issue list` finds it
+GH = {"login": "sam", "fail": ""}  # who the steward is; a write that fails
+
+
+def gh(*a, **k):
+    CALLS.append(a)
+    if a[:2] == ("api", "user"):
+        return GH["login"]
+    if a[:2] == ("issue", "list"):
+        n = OPEN.get(a[a.index("--label") + 1])
+        return [{"number": n, "body": ""}] if n else []
+    return None if GH["fail"] and a[:2] == ("issue", GH["fail"]) else {}
+
+
+def made(label):
+    """The `gh issue create` under label, as {flag: value}."""
+    got = [a for a in CALLS if a[:2] == ("issue", "create") and a[a.index("--label") + 1] == label]
+    assert len(got) <= 1, got
+    return dict(zip(got[0][2::2], got[0][3::2])) if got else None
+
+
+def said(n):
+    """The comments on issue n since CALLS was cleared."""
+    return [a[a.index("--body") + 1] for a in CALLS if a[:3] == ("issue", "comment", str(n))]
+
+
+def fresh(enable=True, login="sam"):
+    CALLS.clear()
+    OPEN.clear()
+    fresh_pr_state()
+    C._me.clear()
+    GH.update(login=login, fail="")
+    R.CFG["inbox"] = {"enable": enable, "label": "claude", "authors": ["sam"]}
+
+
+def later(digest):
+    """A publish an hour on, when even an unchanged digest is looked at again."""
+    C.NOW += 3601
+    CALLS.clear()
+    R.publish(digest)
+
+
+kept = (C.gh, R.CFG["inbox"], dict(R.CFG["notify"]), R.CFG["projectsDir"])
+C.gh = gh
+R.CFG["notify"].update(repo="sam/notes", assignee="sam")
+# notify.repo cloned in projectsDir, where proj-inbox looks.
+R.CFG["projectsDir"] = f"{tmp}/projects"
+os.makedirs(f"{tmp}/projects/notes")
+sh("git", "init", "-q", f"{tmp}/projects/notes")
+sh("git", "-C", f"{tmp}/projects/notes", "remote", "add", "origin", "https://github.com/sam/notes.git")
+DIGEST = [
+    ("Outside contributions", "sam/r#1", "Outside contribution: Sam reviews and merges it"),
+    ("Labelled needs-owner", "sam/r#2", ""),
+    ("Stale branches (unmerged, no PR, 30+ days)", "sam/r: `old`", ""),
+    ("Rival couldn't review it", "sam/r#3", "rival exited 1 (journalctl -u autoland-review)"),
+    ("Couldn't merge", "sam/r#4", "gh pr merge keeps failing (journalctl -u autoland)"),
+    ("Two Claude jobs ended without fixing it", "sam/r#5", "its findings"),
+]
+
+# The inbox takes it: the owner's issue lists only their calls, assigned to
+# them; the rest is a Claude job's, labelled for the inbox and assigned to
+# nobody.
+fresh()
+R.publish(DIGEST)
+owner, stuck = made("autoland"), made("claude")
+assert owner and owner["--title"] == "[autoland] PRs waiting for you" and owner["--assignee"] == "sam", CALLS
+assert all(x in owner["--body"] for x in ("sam/r#1", "sam/r#2", "`old`")), owner["--body"]
+assert not any(x in owner["--body"] for x in ("sam/r#3", "sam/r#4", "sam/r#5", "Stuck")), owner["--body"]
+assert stuck and stuck["--title"] == "[autoland] Stuck in the pipeline" and "--assignee" not in stuck, CALLS
+assert stuck["--body"].startswith(R.stuck_brief()) and f"{tmp}/state" in stuck["--body"], stuck["--body"]
+assert all(x in stuck["--body"] for x in ("sam/r#3", "sam/r#4", "sam/r#5")), stuck["--body"]
+assert not any(x in stuck["--body"] for x in ("sam/r#1", "sam/r#2", "`old`")), stuck["--body"]
+
+# Every kind the owner settles is one the steward lists: a renamed one
+# would go to the inbox, never to the owner.
+src = "".join(open(os.path.join(os.path.dirname(R.__file__), f)).read() for f in ("steward.py", "repos.py"))
+for kind in R.OWNERS:
+    assert src.count(f'"{kind}"') >= 2, kind
+
+# Unstuck: its issue closes, and the owner's stays as it was.
+OPEN.update(autoland=7, claude=8)
+CALLS.clear()
+C.NOW += 1
+R.publish(DIGEST[:3])
+assert ("issue", "close", "8", "-R", "sam/notes", "--comment", "Nothing stuck.") in CALLS, CALLS
+assert not any(a[:2] in (("issue", "edit"), ("issue", "comment"), ("issue", "close")) and a[2] == "7" for a in CALLS), CALLS
+# Stuck again: what's new to its issue comes as a comment, which is what
+# hands it to the job there.
+OPEN.pop("claude")
+R.publish(DIGEST[:4])
+OPEN["claude"] = 9
+CALLS.clear()
+R.publish(DIGEST)
+assert said(9) == ["New:\n- Couldn't merge: sam/r#4: gh pr merge keeps failing (journalctl -u autoland)\n"
+                   "- Two Claude jobs ended without fixing it: sam/r#5: its findings"], said(9)
+# A PR already listed, listed again for something else: news too, kind and
+# diagnosis with it.
+CALLS.clear()
+R.publish(DIGEST + [("Open over a day", "sam/r#4", "unsettled")])
+assert said(9) == ["New:\n- Open over a day: sam/r#4: unsettled"], said(9)
+# The same kind on the same PR with another diagnosis: news.
+moved = [x if x[0] != "Couldn't merge" else (x[0], x[1], "GitHub says it's behind") for x in DIGEST]
+CALLS.clear()
+R.publish(moved)
+assert said(9) == ["New:\n- Couldn't merge: sam/r#4: GitHub says it's behind"], said(9)
+# Nothing changed: no comment, even when it's looked at again.
+later(moved)
+assert said(9) == [], CALLS
+# A comment GitHub doesn't take is tried again, and once only.
+GH["fail"] = "comment"
+again = moved + [("A review couldn't be posted", "sam/r#6", "Rival, 3 tries")]
+later(again)
+assert said(9) == ["New:\n- A review couldn't be posted: sam/r#6: Rival, 3 tries"], CALLS
+GH["fail"] = ""
+CALLS.clear()
+R.publish(again)
+assert said(9) == ["New:\n- A review couldn't be posted: sam/r#6: Rival, 3 tries"], CALLS
+later(again)
+assert said(9) == [], CALLS
+
+# The inbox can't take it: the steward's login isn't one of its authors, so
+# the job would never start. All of it is the owner's, with why, and a stuck
+# issue still open closes.
+fresh(login="eve")
+OPEN["claude"] = 9
+R.publish(DIGEST)
+owner = made("autoland")
+assert owner and all(f"sam/r#{n}" in owner["--body"] for n in range(1, 6)), owner
+assert "the steward's login, eve, isn't one of its authors" in owner["--body"], owner["--body"]
+assert made("claude") is None and ("issue", "close", "9", "-R", "sam/notes", "--comment", "Nothing stuck.") in CALLS, CALLS
+# Nor when notify.repo isn't cloned where proj-inbox looks; and the clone
+# going away later is seen on the next pass.
+fresh()
+R.CFG["projectsDir"] = f"{tmp}/none"
+R.publish(DIGEST)
+owner = made("autoland")
+assert owner and f"sam/notes isn't cloned in {tmp}/none" in owner["--body"] and "sam/r#4" in owner["--body"], owner
+assert made("claude") is None, CALLS
+R.CFG["projectsDir"] = f"{tmp}/projects"
+# With nothing stuck, there's nothing to say about the inbox.
+fresh(login="eve")
+R.publish(DIGEST[:3])
+assert "proj's inbox" not in made("autoland")["--body"], CALLS
+# Off: all of it is the owner's, and that's no misconfiguration.
+fresh(enable=False)
+R.publish(DIGEST)
+owner = made("autoland")
+assert owner and all(f"sam/r#{n}" in owner["--body"] for n in range(1, 6)), owner
+assert "proj's inbox" not in owner["--body"] and made("claude") is None, owner
+# No notify.repo: the digest goes to the journal, with a project cloned and
+# the inbox on, and the stuck half is the owner's there too.
+LOGGED = []
+log_kept, R.log = R.log, lambda *a: LOGGED.append(" ".join(map(str, a)))
+for nrepo in (None, ""):
+    fresh()
+    LOGGED.clear()
+    R.CFG["notify"]["repo"] = nrepo
+    R.publish(DIGEST)
+    assert not [a for a in CALLS if a[0] == "issue"], CALLS
+    mine = next(x for x in LOGGED if x.startswith("--- [autoland] PRs waiting for you ---"))
+    assert all(f"sam/r#{n}" in mine for n in range(1, 6)) and "notify.repo isn't set" in mine, LOGGED
+    assert "--- [autoland] Stuck in the pipeline ---\n(nothing)" in LOGGED, LOGGED
+R.log = log_kept
+R.CFG["notify"]["repo"] = "sam/notes"
+
+C.gh, R.CFG["inbox"], R.CFG["projectsDir"] = kept[0], kept[1], kept[3]
+R.CFG["notify"].clear()
+R.CFG["notify"].update(kept[2])
+C._me.clear()
+fresh_pr_state()
+print("digest: ok")

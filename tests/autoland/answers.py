@@ -38,11 +38,17 @@ assert "state=success" in status and merged(), status
 # with findings is on record.
 fresh_pr_state()
 answered = mkpr(reviews=[ds2, cx], threads=[True, True])
+t = 5000
+run(answered, t)
 for i in range(3):
-    run(answered, 5000 + i)
     assert queued() == ["rival"], i
     worker(rival={"result": "error", "error": "rival exited 1"})
-status, digest = run(answered, 5100)
+    t += 10
+    run(answered, t)  # its failure comes back
+    t += 300
+    if i < 2:
+        run(answered, t)  # and five minutes on it's asked again
+status, digest = run(answered, 6000)
 assert any(x[0] == "Rival couldn't review it" for x in digest), digest
 assert "Findings answered; Rival failed 3 times" in status and queued() == [], status
 
@@ -53,14 +59,16 @@ run(mkpr(reviews=[cx]), 600)
 worker(rival={"result": "review", "answer": {"summary": "couldn't finish"}})
 status, _ = run(mkpr(reviews=[cx]), 610)
 assert POSTED == [] and not merged() and pr_state()["rv"]["rival"]["fails"] == 1, status
-assert queued() == ["rival"] and os.listdir(DDIR) == []
+assert queued() == [] and os.listdir(DDIR) == []
+run(mkpr(reviews=[cx]), 910)
+assert queued() == ["rival"]
 # One GitHub won't take stays where it is and is posted by the next pass.
 worker()
 STUB["post"] = RuntimeError("GitHub didn't take the review")
-status, _ = run(mkpr(reviews=[cx]), 620)
+status, _ = run(mkpr(reviews=[cx]), 920)
 assert len(os.listdir(DDIR)) == 1 and pr_state()["rv"]["rival"]["fails"] == 2 and not merged(), status
 STUB["post"] = None
-status, _ = run(mkpr(reviews=[cx]), 630)
+status, _ = run(mkpr(reviews=[cx]), 930)
 assert POSTED == [("rival", head, 0)] and os.listdir(DDIR) == [] and merged(), status
 # Posted, its earlier failures are behind it: none left to report.
 assert "fails" not in pr_state()["rv"]["rival"], pr_state()["rv"]
@@ -92,25 +100,35 @@ os.remove(f"{QDIR}/{os.listdir(QDIR)[0]}")
 run(mkpr(reviews=[cx]), 610)
 assert "fails" not in pr_state()["rv"]["rival"] and queued() == []
 status, _ = run(mkpr(reviews=[cx]), 620)
+assert pr_state()["rv"]["rival"]["fails"] == 1 and queued() == [], status
+status, _ = run(mkpr(reviews=[cx]), 920)
 assert pr_state()["rv"]["rival"]["fails"] == 1 and queued() == ["rival"], status
 # Still queued, however long it takes: no failure, nothing asked twice.
-status, _ = run(mkpr(reviews=[cx]), 620 + 2 * 86400)
+status, _ = run(mkpr(reviews=[cx]), 920 + 2 * 86400)
 assert "Rival is reviewing this commit" in status and queued() == ["rival"], status
 assert pr_state()["rv"]["rival"]["fails"] == 1
 
-# Rival down: each failure comes back to the next pass, which queues it
-# again; after three the owner hears, and an hour on it's tried again.
+# Rival down: each failure comes back to a pass, and it's queued again five
+# minutes after it failed, however many passes come before that (a burst of
+# events would spend all three tries in a minute, before a hiccup passes);
+# after three it's the pipeline's to look into, and an hour on it's tried
+# again.
 fresh_pr_state()
 run(mkpr(reviews=[cx]), 0)
 run(mkpr(reviews=[cx]), 600)
 for i in range(3):
     worker(rival={"result": "error", "error": "down"})
-    status, digest = run(mkpr(reviews=[cx]), 610 + i)
+    status, digest = run(mkpr(reviews=[cx]), 610 + 310 * i)
+    if i < 2:
+        assert queued() == [] and C.WAKE["sam/r"] == C.ts(T0) + 610 + 310 * i + 300 + 1, (i, C.WAKE)
+        for t in (620, 900, 910):
+            run(mkpr(reviews=[cx]), 310 * i + t)
+            assert queued() == (["rival"] if t == 910 else []), (i, t)
 assert any(x[0] == "Rival couldn't review it" for x in digest) and "Waiting for Rival" in status
 assert queued() == []
-run(mkpr(reviews=[cx]), 1000)
+run(mkpr(reviews=[cx]), 1600)
 assert queued() == []
-run(mkpr(reviews=[cx]), 4400)
+run(mkpr(reviews=[cx]), 5000)
 assert queued() == ["rival"]
 
 # Out of service (Codex's plan spent): recorded for every PR, which settle on

@@ -1,5 +1,6 @@
 """The repos: finding them, keeping their settings at the baseline, the
-daily branch sweep, and the one issue that lists what waits for the owner."""
+daily branch sweep, and the issues that list what waits for the owner and
+what the pipeline is stuck on."""
 
 import fnmatch
 import hashlib
@@ -405,19 +406,77 @@ def sweep_branches(r, in_use, digest, sweep=True):
         digest.append(("Stale branches (unmerged, no PR, 30+ days)", f"{repo}: `{b}`", ""))
 
 
+# What only the owner can settle: their call (a label, a judge's or an
+# outside contribution's), a login, a branch nobody has decided on. The rest
+# of the digest is the pipeline's own trouble (a job that keeps failing, a
+# review that won't run, a merge GitHub won't take, a PR stuck a day), which
+# a Claude job on this machine takes when proj's inbox is on.
+OWNERS = ("Judged yours to decide", "Outside contributions", "Too much to read", "A reviewer is out of service",
+          "No reviewer can review it", "Stale branches (unmerged, no PR, 30+ days)")
+
+
 def publish(digest):
-    """One issue in config.notify.repo listing what waits for the owner."""
+    """What waits for the owner, in one issue in config.notify.repo assigned
+    to them; what the pipeline is stuck on, in another the inbox hands to a
+    Claude job. All of it is the owner's when the inbox can't take it."""
+    owners = (*OWNERS, f"Labelled {CFG['labels']['owner']}")
+    off = inbox_off()
+    owner = [x for x in digest if x[0] in owners or off]
+    if CFG["inbox"]["enable"] and off and len(owner) > len([x for x in digest if x[0] in owners]):
+        owner.append(("What's stuck is listed here: proj's inbox can't take it", off, ""))
+    issue("digest.json", "[autoland] PRs waiting for you", CFG["notify"]["label"], CFG["notify"]["assignee"], "",
+          owner, "Nothing waiting.")
+    # Closed once the inbox can't take it: what's in it is the owner's then.
+    issue("stuck.json", "[autoland] Stuck in the pipeline", CFG["inbox"]["label"], "", stuck_brief(),
+          [x for x in digest if x not in owner], "Nothing stuck.")
+
+
+def inbox_off():
+    """Why proj's inbox won't take the stuck issue, or "" when it will: it
+    looks only at repos cloned in projectsDir, and only at issues one of its
+    authors opened, and the steward opens this one as its own login. Asked
+    each pass, so it follows a clone or a login that goes away."""
+    ib, nrepo = CFG["inbox"], CFG["notify"]["repo"]
+    if not ib["enable"]:
+        return "it's off"
+    if not nrepo:  # the digest goes to the journal: there's no issue to take
+        return "notify.repo isn't set"
+    if not C.project_dir(nrepo):
+        return f"{nrepo} isn't cloned in {CFG['projectsDir']}"
+    if C.me() not in ib["authors"]:
+        return f"the steward's login, {C.me()}, isn't one of its authors"
+    return ""
+
+
+def stuck_brief():
+    who = CFG["notify"]["assignee"] or "the owner"
+    return f"""The PR pipeline on this machine is stuck on what's below, and none of it is {who}'s to settle. For each \
+one, find out why: `journalctl -u autoland` and `-u autoland-review` here, and the steward's state in \
+{CFG['stateDir']}. Fix the cause: a burrow PR with a test that fails on the bug when it's burrow's code, the fix on \
+this machine when it's the machine. Then get it moving again (`autoland-steward kick OWNER/REPO` starts a repo's \
+pass). Your answer, posted here, says what you found and did for each. The steward keeps this issue up to date: \
+something new stuck comes as a comment, and it closes the issue itself once nothing is, so don't close it. If one \
+really does need {who} (a login only they can do, a call that's theirs), say exactly what and assign this issue to \
+them.
+
+"""
+
+
+def issue(key, title, label, assignee, intro, digest, done):
+    """One issue in config.notify.repo listing digest, kept up to date: each
+    new or changed entry is a comment too, and it's closed once there's none."""
     nrepo = CFG["notify"]["repo"]
     groups = {}
     for why, line, desc in digest:
         groups.setdefault(why, []).append(f"- {line}" + (f": {desc}" if desc else ""))
     body = "\n\n".join(f"**{why}**\n" + "\n".join(lines) for why, lines in groups.items())
+    # Whole entries, so a PR listed again for something else, or for the
+    # same thing with another diagnosis, is news too.
+    entries = sorted({f"{why}: {line}" + (f": {desc}" if desc else "") for why, line, desc in digest})
     if DRY or not nrepo:
-        log("--- waiting for the owner ---\n" + (body or "(nothing)"))
+        log(f"--- {title} ---\n" + (body or "(nothing)"))
         return
-    title = "[autoland] PRs waiting for you"
-    label = CFG["notify"]["label"]
-    prev = load("digest.json", {"lines": []})
+    prev = load(key, {"entries": []})
     # Unchanged since the last look, under an hour ago: nothing to read or write.
     if prev.get("body") == body and C.NOW - prev.get("checked", 0) < 3600:
         return
@@ -426,29 +485,28 @@ def publish(digest):
     if not isinstance(found, list):
         return  # couldn't look (no quota?): try next pass, and don't open a second issue
     found = [i for i in found if i]
-    lines = sorted({line for _, line, _ in digest})
     # Recorded as published only once every call went through, so a failed
     # one is tried again next pass rather than an hour later.
     ok = True
     if not digest:
         if found:
-            ok = C.gh("issue", "close", str(found[0]["number"]), "-R", nrepo, "--comment", "Nothing waiting.", check=False) is not None
+            ok = C.gh("issue", "close", str(found[0]["number"]), "-R", nrepo, "--comment", done, check=False) is not None
         if ok:
-            save("digest.json", {"lines": [], "body": body, "checked": C.NOW})
+            save(key, {"entries": [], "body": body, "checked": C.NOW})
         return
-    full = body + "\n\n_Kept up to date by autoland-steward on " + os.uname().nodename + "._"
+    full = intro + body + "\n\n_Kept up to date by autoland-steward on " + os.uname().nodename + "._"
     if not found:
         C.gh("label", "create", label, "-R", nrepo, "--color", "B60205", check=False)
         args = ["issue", "create", "-R", nrepo, "--label", label, "--title", title, "--body", full]
-        if CFG["notify"]["assignee"]:
-            args += ["--assignee", CFG["notify"]["assignee"]]
+        if assignee:
+            args += ["--assignee", assignee]
         ok = C.gh(*args, check=False) is not None
     else:
         num = str(found[0]["number"])
         if found[0]["body"] != full:
             ok = C.gh("issue", "edit", num, "-R", nrepo, "--body", full, check=False) is not None
-        added = [x for x in lines if x not in prev["lines"]]
+        added = [x for x in entries if x not in prev.get("entries", [])]
         if added and ok:
             ok = C.gh("issue", "comment", num, "-R", nrepo, "--body", "New:\n" + "\n".join(f"- {x}" for x in added), check=False) is not None
     if ok:
-        save("digest.json", {"lines": lines, "body": body, "checked": C.NOW})
+        save(key, {"entries": entries, "body": body, "checked": C.NOW})

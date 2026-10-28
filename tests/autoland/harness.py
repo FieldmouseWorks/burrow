@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 
 tmp = tempfile.mkdtemp()
 
@@ -148,7 +149,7 @@ with open(f"{tmp}/config.json", "w") as f:
         "owners": ["sam"], "exclude": [], "context": "review-settled", "rulesets": True, "keepBranches": [],
         "baselineJobs": False, "baselinePerPass": 1, "authors": ["sam", "dependabot", "renovate"],
         "stateDir": f"{tmp}/state", "majorKey": f"{tmp}/sweep.key", "projectsDir": f"{tmp}/none", "renovateEmail": "bot@renovateapp.com", "proj": "proj", "jobTimeout": 60, "jobIdle": 20, "reviewTimeout": 30, "owner": "Sam", "cleanBranches": False,
-        "labels": {"hold": "hold", "owner": "needs-owner"}, "notify": {"repo": "", "assignee": "", "label": "autoland"},
+        "labels": {"hold": "hold", "owner": "needs-owner"}, "notify": {"repo": "", "assignee": "", "label": "autoland"}, "inbox": {"enable": False, "label": "claude", "authors": ["sam"]},
         "defaults": {"rounds": 5,
                      "oneWay": ONE_WAY, "handoffAfter": 30, "sessionHandoffAfter": 90, "settleDelay": 3,
                      "directPush": False, "ruleset": True, "requireCi": True,
@@ -250,6 +251,9 @@ def post(repo, pr, r, answer):
 
 STATES = {}  # a job's state, by id, as `proj state` says it: running unless set
 T0 = "2026-10-24T00:00:00Z"
+# The times a PR's status names (S.clock) are in the machine's zone: UTC here.
+os.environ["TZ"] = "UTC"
+time.tzset()
 T = C.ts(T0)
 info = {"squashMergeAllowed": True, "mergeCommitAllowed": False, "rebaseMergeAllowed": False}
 

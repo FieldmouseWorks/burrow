@@ -42,6 +42,7 @@ import fcntl
 import os
 import re
 import sys
+import time
 
 import common as C
 import repos as R
@@ -50,11 +51,18 @@ from common import CFG, DRY, MIN, STATE, load, log, repo_cfg, save, ts
 from seal import MAJOR as MAJOR_VERDICT  # renovate-sweep's, on a Renovate major
 from touches import dep_kind, gate_edit, moved_from, one_way, renovate_edited
 from tasks import DEP_SEEN, JUDGMENT, PAST_LIMIT, REVIEWED, fix_task, judge_task, proof_task
-from prs import ci_state, land, open_prs, our_status, post_status
+from prs import ci_state, eyes, land, open_prs, our_status, post_status
 
 
 # The link Claude Code puts in a PR its session opens.
 SESSION = re.compile(r"https://claude\.ai/code/session_\w+")
+# What a fix job of each kind is on, for a PR's status while another waits.
+ON = {"handed": "its findings", "redFixed": "its red CI", "failFixed": "what its judge found failing"}
+
+
+def clock(t):
+    """A time in a PR's status, in the machine's own time zone: 6:47pm PDT."""
+    return time.strftime("%-I:%M%p %Z", time.localtime(t)).replace("AM", "am").replace("PM", "pm")
 
 
 def handle(repo, pr, repo_info, digest, obsolete=False):
@@ -91,17 +99,19 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
     # Open a day, it's listed for the owner (below): a pass then says so.
     after(ts(pr["createdAt"]), 24 * 60)
 
-    def handoff_due(kind):
-        """Whether findings or red CI have sat long enough for a Claude job
-        to take them (it's booked a pass for when they will, if not). A PR
-        that links the Claude session that opened it is that session's to
-        settle: it hears of every finding and failure and is likely at work
-        on them, so a job takes over only after a longer quiet, in case the
-        session is gone. Every push or reply starts either wait over."""
-        wait = rc["sessionHandoffAfter"] if SESSION.search(pr.get("body") or "") else rc["handoffAfter"]
+    session = bool(SESSION.search(pr.get("body") or ""))
+
+    def handoff_at():
+        """When findings or red CI will have sat long enough for a Claude job
+        to take them (a pass is booked for then). A PR that links the Claude
+        session that opened it is that session's to settle: it hears of
+        every finding and failure and is likely at work on them, so a job
+        takes over only after a longer quiet, in case the session is gone.
+        Every push or reply starts either wait over."""
+        wait = rc["sessionHandoffAfter"] if session else rc["handoffAfter"]
         since = max(ts(pr["updatedAt"]), st["seen"])
         after(since, wait)
-        return C.NOW - since > wait * MIN
+        return since + wait * MIN
 
     def settle(state, desc, why=None):
         ok = post_status(repo, pr, state, desc)
@@ -139,15 +149,18 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
         C.wake(repo, due if due > C.NOW else C.NOW + 15 * MIN)
 
     def running(kind, at=head):
-        """Whether this head's job of the kind (at: on its base, for the
-        judge's and the fix it asks for) is still queued or running, or proj
-        can't say. One that is keeps its deadline, since each pass replaces
-        the repo's wake-ups."""
+        """This head's job of the kind (at: on its base, for the judge's and
+        the fix it asks for) while it's still queued or running, or proj
+        can't say: "queued", "running" or "unknown"; else "". One that is
+        keeps its deadline, since each pass replaces the repo's wake-ups."""
         jid = st.get(kind + "Job")
-        if st.get(kind) != at or not jid or C.job_state(jid) not in (None, "queued", "running"):
-            return False
+        if st.get(kind) != at or not jid:
+            return ""
+        state = C.job_state(jid)
+        if state not in (None, "queued", "running"):
+            return ""
         deadline(kind)
-        return True
+        return state or "unknown"
 
     def started(kind, task, at=head):
         """A Claude job, once per head (at: once per head on its base, for
@@ -199,32 +212,49 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
                 return k
         return None
 
-    def hand_off(why, desc, due, kind="handed", at=head):
+    def hand_off(why, desc, kind="handed", at=head, wait=True, ours=True):
         """Pending on desc while a Claude job fixes why, one of each kind a
-        head (at), started once it's due. One that ended with this still to
-        fix (it crashed, timed out, went quiet or pushed nothing) is handed
-        once more; after a second the status fails and the owner hears, until
-        a new head. Never while another fix job is still working on this
-        head: two on one branch push over each other."""
+        head (at), and the status says who has it: that job and since when,
+        the Claude session that opened the PR and until when, or when a job
+        takes it. A job does once it has sat long enough (handoff_at), or at
+        once if it isn't to wait; never if it isn't ours to hand (a Renovate
+        update renovate-sweep has). One that ended with this still to fix (it
+        crashed, timed out, went quiet or pushed nothing) is handed once
+        more; after a second the status fails and the owner hears, until a
+        new head. Never while another fix job is still working on this head:
+        two on one branch push over each other."""
         retry = st.get(kind) == at
-        gone = retry and lost(kind, at)
+        state = retry and running(kind, at)
+        gone = retry and not state and lost(kind, at)
         if gone and st.get(kind + "Again") == at:
             settle("failure", f"Two Claude jobs ended without fixing it: {desc}"[:140],
                    "Two Claude jobs ended without fixing it")
             return
-        settle("pending", desc)
-        if not due or (retry and not gone):
-            return
-        busy = fixing()
-        if busy:
+        if state:
+            who = f"a Claude job {'is queued for it' if state == 'queued' else 'has it'} since {clock(st[kind + 'At'])}"
+        elif retry and not gone:
+            who = "its Claude job just ended"  # the second look is booked
+        elif not ours:
+            who = ""
+        elif wait and (due := handoff_at()) >= C.NOW:
+            who = (f"the Claude session that opened it has it until {clock(due)}, then a Claude job" if session
+                   else f"a Claude job takes it at {clock(due)}")
+        elif busy := fixing():
             log(f"{tag}: a Claude job ({busy}) is still working on this head; {kind} waits for it")
-            return
-        proofs = {c: rc["proofJobs"][c] for c in ci_names if c in rc["proofJobs"]} if ci == "red" else {}
-        if not started(kind, fix_task(repo, pr, why, proofs), at):
-            digest.append(("Couldn't start a Claude job to fix it", line, why))
-        elif retry:
-            st[kind + "Again"] = at
-            st.pop(kind + "Lost", None)
+            who = f"a Claude job takes it once the one on {ON[busy]} ends"
+        else:
+            proofs = {c: rc["proofJobs"][c] for c in ci_names if c in rc["proofJobs"]} if ci == "red" else {}
+            if started(kind, fix_task(repo, pr, why, proofs), at):
+                if retry:
+                    st[kind + "Again"] = at
+                    st.pop(kind + "Lost", None)
+                if kind == "handed":
+                    eyes(repo, pr)
+                who = f"a Claude job has it since {clock(C.NOW)}"
+            else:
+                digest.append(("Couldn't start a Claude job to fix it", line, why))
+                who = "no Claude job could start"
+        settle("pending", f"{desc}; {who}" if who else desc)
 
     def merge():
         # Marked landed only once GitHub has queued or done the merge, so a
@@ -279,7 +309,7 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
             # job that answered a finding here without pushing didn't fix this.
             hand_off("the Claude job that judged it found something failing on this head, its build or tests or a finding "
                      "left unfixed (its comment on the PR says what)",
-                     "Settled, but its build or tests fail; a Claude job is fixing it", True, "failFixed", judged_at)
+                     "Settled, but its build or tests fail", "failFixed", judged_at, wait=False)
         elif update_branch():
             settle("pending", "Settled, but behind its base: brought up to date, reviewed again")
         elif lost("judged", judged_at):
@@ -399,7 +429,7 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
         elif threads or ci == "red":
             what = threads or "CI is red (" + ", ".join(ci_names) + ")"
             kind = "handed" if threads else "redFixed"
-            hand_off(what, f"Dependency update; {what}", handoff_due(kind), kind)
+            hand_off(what, f"Dependency update; {what}", kind)
         elif dep == "major" and renovate and major_verdict != "ok":
             # renovate-sweep's verdict comes first, and its job runs the proofs
             # until then: neither a judge nor a proof job of the steward's
@@ -646,6 +676,11 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
         if rs.get("fails", 0) >= 3:
             after(rs.get("failedAt", 0), 60)
             return
+        if rs.get("fails") and C.NOW - rs["failedAt"] < 5 * MIN:
+            # Tries five minutes apart, however many events come meanwhile:
+            # a hiccup gets time to pass before all three are spent.
+            after(rs["failedAt"], 5)
+            return
         try:
             V.queue(repo, pr, key, r)
         except Exception as e:  # the snapshot: GitHub, git, the disk
@@ -697,14 +732,14 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
     if waiting:
         # One reviewer's threads needn't wait for the other to finish.
         if what:
-            hand_off(", ".join(what), "; ".join(waiting + stuck + what), not swept and handoff_due("handed"))
+            hand_off(", ".join(what), "; ".join(waiting + stuck + what), ours=not swept)
         else:
             settle("pending", "; ".join(waiting + stuck))
     elif what and capped:
         hand_off(f"{', '.join(what)}, after {rounds} review rounds with findings, the limit, so its reviewers won't look again. "
                  "Weigh each finding on its merits: fix what's a real defect and answer the rest with why. "
                  "A Claude job judges it after, without the reviewers",
-                 f"Past the review-round limit ({rounds}): " + ", ".join(what), not swept and handoff_due("handed"))
+                 f"Past the review-round limit ({rounds}): " + ", ".join(what), ours=not swept)
     elif (not clean and not capped) or what:
         if not what:
             # Every finding answered without a new commit: the reviewers that
@@ -716,13 +751,13 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
                         ask(r)
             settle("pending", "Findings answered; " + ("; ".join(stuck) if stuck else f"review round {rounds + 1} next"))
         else:
-            hand_off(", ".join(what), f"Round {rounds}: " + ", ".join(what), not swept and handoff_due("handed"))
+            hand_off(", ".join(what), f"Round {rounds}: " + ", ".join(what), ours=not swept)
     # 2. The reviewers are clean on this head and nothing is open: CI, then land.
     elif ci == "red":
         # Its own once a head, apart from a findings job's: one that answered
         # a finding here without pushing didn't fix a check that failed since.
         hand_off("CI is red (" + ", ".join(ci_names) + ")", "CI is red: " + ", ".join(ci_names)[:100],
-                 not swept and handoff_due("redFixed"), "redFixed")
+                 "redFixed", ours=not swept)
     elif held:
         judged("a Claude job was asked to judge this head", PAST_LIMIT if capped else REVIEWED)
     elif proof_only:
