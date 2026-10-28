@@ -10,7 +10,8 @@
 #
 # A draft is work in progress: nothing happens to it until it's ready. The
 # owner only sees what needs them, in one issue: what a judge job couldn't
-# decide, outside contributions, anything stuck. It also keeps every
+# decide, outside contributions. What's stuck goes to a Claude job, through
+# proj's inbox. It also keeps every
 # repo's settings at the baseline (docs/repo-baseline.md), new repos included.
 inputs:
 { config, lib, pkgs, ... }:
@@ -91,6 +92,10 @@ let
       inherit (config.burrow.notify) repo assignee;
       label = config.burrow.notify.label;
     };
+    # What the pipeline is stuck on goes to proj's inbox, as an issue in
+    # notify.repo with its label, for a Claude job to take (repos.py publish);
+    # the steward's gh login has to be one of inbox.authors for that.
+    inbox = if config.burrow.proj.inbox.enable then config.burrow.proj.inbox.label else "";
     defaults = {
       inherit (cfg) rounds oneWay;
       handoffAfter = cfg.handoffAfterMinutes;

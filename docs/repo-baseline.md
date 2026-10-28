@@ -81,9 +81,12 @@ change nothing else in the same PR.
 
 Waiting for the owner instead, listed in one issue: what a judge job sent
 them (or anyone labelled `needs-owner`), held Renovate majors, and outside
-contributions. A PR past the round limit isn't the owner's: its reviewers stop
-looking, a Claude job fixes or answers their last findings, and a judge
-decides. Everything else is pre-approved: merges, GitHub settings changes and
+contributions. What the pipeline itself is stuck on (a reviewer that keeps
+failing, a merge GitHub won't take, two Claude jobs that ended without an
+answer) isn't the owner's either: with proj's inbox on, it's listed in an
+issue of its own, which a Claude job takes. A PR past the round limit isn't
+the owner's: its reviewers stop looking, a Claude job fixes or answers their
+last findings, and a judge decides. Everything else is pre-approved: merges, GitHub settings changes and
 cleanup don't wait for the owner. Dependency bots' minor updates skip review: CI is their review,
 except a change to `.github/` beyond repinning the actions its workflows
 use: that's the gate, so it goes through the review loop like any other PR.
