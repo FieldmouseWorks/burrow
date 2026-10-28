@@ -1,0 +1,38 @@
+# Flaky tests around a gate, as steps of a GitHub Actions job
+# (docs/flaky-tests.md):
+#
+#   permissions:
+#     issues: write
+#   steps:
+#     - uses: FieldmouseWorks/burrow/.github/actions/flaky@<commit>
+#       with: { step: start }
+#     - run: ./gate        # reads FLAKY_QUARANTINE, writes FLAKY_REPORT
+#     - uses: FieldmouseWorks/burrow/.github/actions/flaky@<commit>
+#       if: ${{ !cancelled() }}
+#       with: { step: file }
+name: flaky
+description: Quarantine flaky tests around a gate, and file the ones it finds
+inputs:
+  step:
+    description: "start, before the gate: FLAKY_QUARANTINE and FLAKY_REPORT for it; file, after it: its report filed"
+    required: true
+  token:
+    description: A token that can read and write the repo's issues
+    default: ${{ github.token }}
+runs:
+  using: composite
+  steps:
+    # From this action's own commit, on the runner's cargo: once a job, by
+    # start, for file to run too.
+    - name: Build flaky
+      if: inputs.step == 'start'
+      shell: bash
+      env:
+        CARGO_TARGET_DIR: ${{ runner.temp }}/flaky-build
+      run: cargo build --release --locked --quiet --manifest-path "$GITHUB_ACTION_PATH/../../../tools/flaky/Cargo.toml"
+    - name: Run flaky's step
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        STEP: ${{ inputs.step }}
+      run: '"$RUNNER_TEMP/flaky-build/release/flaky" action "$STEP"'

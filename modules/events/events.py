@@ -14,7 +14,7 @@ Three things put a repo in a handler's line:
     reads the rest from GitHub. A handler can take only the repos it names (`repos`),
     only pushes to a repo's default branch (`pushes`), only the other
     events about some branches (`branches`), and only `issues` events about
-    an issue with one of some titles (`issueTitles`).
+    an issue whose title matches one of some globs (`issueTitles`).
   - A kick on the local port: POST /kick/HANDLER/OWNER/REPO for one repo, or
     /kick/HANDLER for a full pass. Something on this machine that just
     changed what a pass would find kicks it: a proj job's turn ending, a
@@ -126,7 +126,7 @@ def takes(h, event, payload):
     titles = h.get("issueTitles")
     if event == "issues" and titles is not None:
         title = (payload.get("issue") or {}).get("title")
-        return isinstance(title, str) and title in titles
+        return isinstance(title, str) and any(fnmatch.fnmatchcase(title, p) for p in titles)
     pats = h.get("branches")
     names = branches(event, payload) if pats is not None else None
     return names is None or any(fnmatch.fnmatchcase(n, p) for n in names for p in pats)

@@ -412,7 +412,8 @@ def sweep_branches(r, in_use, digest, sweep=True):
 # review that won't run, a merge GitHub won't take, a PR stuck a day), which
 # a Claude job on this machine takes when proj's inbox is on.
 OWNERS = ("Judged yours to decide", "Outside contributions", "Too much to read", "A reviewer is out of service",
-          "No reviewer can review it", "Stale branches (unmerged, no PR, 30+ days)")
+          "No reviewer can review it", "Stale branches (unmerged, no PR, 30+ days)",
+          "Flaky tests someone else quarantined")
 
 
 def publish(digest):
