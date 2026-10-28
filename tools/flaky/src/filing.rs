@@ -1,5 +1,7 @@
-//! A gate's report on its tests' issues: a test with an open issue gets a
-//! comment, one without gets a new issue, which quarantines it.
+//! A gate's report on its tests' issues. A quarantined test's failure goes
+//! on the issue that quarantined it when the run began, whatever's become of
+//! it since: a run that only saw a failure can't quarantine a test again.
+//! A flaky one goes on its open issue, or opens one, which quarantines it.
 
 use serde_json::json;
 
@@ -23,18 +25,28 @@ pub struct Filed {
     pub new: bool,
 }
 
-/// File each test's entries (a test reported twice gets one comment) on
-/// `open` (quarantine::list), in the order the report has them. `place` says
-/// where it happened, in Markdown: a run's link, a PR, a commit.
+/// File each test's entries (a test reported twice gets one comment), in the
+/// order the report has them. `held` is the quarantine the gate was given,
+/// `open` the one there is now (quarantine::list, both). `place` says where
+/// it happened, in Markdown: a run's link, a PR, a commit. A test reported
+/// quarantined that the gate wasn't given is an error, and nothing is filed:
+/// its failure counted for nothing, and should have failed the gate.
 pub fn file(
     api: &mut dyn Api,
     repo: &str,
     entries: &[Entry],
+    held: &[Quarantined],
     open: &[Quarantined],
     place: &str,
 ) -> Result<Vec<Filed>, Error> {
     let mut groups: Vec<(&str, Outcome, Vec<&str>)> = Vec::new();
     for e in entries {
+        if e.outcome == Outcome::Quarantined && !held.iter().any(|q| q.test == e.test) {
+            return Err(Error(format!(
+                "the gate says `{}` is quarantined, but it wasn't given it: its failure fails the gate",
+                e.test
+            )));
+        }
         let detail = e.detail.as_deref().filter(|d| !d.trim().is_empty());
         match groups
             .iter_mut()
@@ -48,26 +60,41 @@ pub fn file(
     let mut out = Vec::new();
     for (test, outcome, details) in groups {
         let shown = show(outcome, &details);
-        if let Some(q) = open.iter().find(|q| q.test == test) {
-            let said = match outcome {
-                Outcome::Flaky => {
-                    format!("Flaky again, in {place}: it failed, then passed when it ran again.")
-                }
-                Outcome::Quarantined => {
-                    format!("Failed again, in {place}, where it's quarantined.")
-                }
-            };
+        let on = |qs: &[Quarantined]| qs.iter().find(|q| q.test == test).map(|q| q.issue);
+        let again = match outcome {
+            Outcome::Quarantined => {
+                let n = on(held).expect("checked above");
+                Some((
+                    n,
+                    if on(open) == Some(n) {
+                        format!("Failed again, in {place}, where it's quarantined.")
+                    } else {
+                        format!(
+                            "Failed again, in {place}, which began while this issue quarantined it, so it failed \
+                             nothing there. This issue doesn't quarantine it any more, so its next failure fails."
+                        )
+                    },
+                ))
+            }
+            Outcome::Flaky => on(open).map(|n| {
+                (
+                    n,
+                    format!("Flaky again, in {place}: it failed, then passed when it ran again."),
+                )
+            }),
+        };
+        if let Some((n, said)) = again {
             call(
                 api,
                 "POST",
-                &format!("repos/{repo}/issues/{}/comments", q.issue),
+                &format!("repos/{repo}/issues/{n}/comments"),
                 Some(&json!({"body": said + &shown})),
                 None,
             )?;
             out.push(Filed {
                 test: test.into(),
                 outcome,
-                issue: q.issue,
+                issue: n,
                 new: false,
             });
             continue;
@@ -76,19 +103,11 @@ pub fn file(
             label(api, repo)?;
             labelled = true;
         }
-        let what = match outcome {
-            Outcome::Flaky => format!(
-                "`{test}` failed, then passed when it ran again on the same tree, in {place}."
-            ),
-            Outcome::Quarantined => format!(
-                "`{test}` failed in {place}, where it was quarantined, but no issue quarantines it now: \
-                 this one does, until it's seen to."
-            ),
-        };
         let body = format!(
-            "{what}\n\nWhile this issue is open the test is quarantined: every gate still runs it, but its failures fail \
-             nothing, and each one is noted here. A Claude job looks for the cause, and the pull request with its fix \
-             closes this issue, which lifts the quarantine. How it works: [burrow's docs/flaky-tests.md]({DOCS}).{shown}"
+            "`{test}` failed, then passed when it ran again on the same tree, in {place}.\n\nWhile this issue is open \
+             the test is quarantined: every gate still runs it, but its failures fail nothing, and each one is noted \
+             here. A Claude job looks for the cause, and the pull request with its fix closes this issue, which lifts \
+             the quarantine. How it works: [burrow's docs/flaky-tests.md]({DOCS}).{shown}"
         );
         let r = call(
             api,
@@ -209,14 +228,20 @@ mod tests {
         gh
     }
 
+    fn q(test: &str, issue: u64) -> Quarantined {
+        Quarantined {
+            test: test.into(),
+            issue,
+            author: "github-actions[bot]".into(),
+        }
+    }
+
     #[test]
     fn new_and_again() {
         let mut gh = gh();
-        let open = [Quarantined {
-            test: "old".into(),
-            issue: 12,
-            author: "github-actions[bot]".into(),
-        }];
+        // `gone`'s fix merged while the gate ran, closing its issue.
+        let held = [q("old", 12), q("gone", 20)];
+        let open = [q("old", 12)];
         let got = file(
             &mut gh,
             "sam/game",
@@ -231,6 +256,7 @@ mod tests {
                 entry("old", Outcome::Flaky, None),
                 entry("gone", Outcome::Quarantined, None),
             ],
+            &held,
             &open,
             "[run 5](https://x) on PR #3",
         )
@@ -247,7 +273,7 @@ mod tests {
                 f("new", Outcome::Flaky, 31, true),
                 f("old", Outcome::Quarantined, 12, false),
                 f("old", Outcome::Flaky, 12, false),
-                f("gone", Outcome::Quarantined, 32, true),
+                f("gone", Outcome::Quarantined, 20, false),
             ]
         );
         let posts = gh.asked("POST");
@@ -279,15 +305,47 @@ mod tests {
                 "Flaky again, in [run 5](https://x) on PR #3: it failed, then passed when it ran again."
             )
         );
+        // Its failure is noted where it was quarantined, and quarantines
+        // nothing again.
+        assert_eq!(posts[4].1, "repos/sam/game/issues/20/comments");
         let gone = posts[4].2.as_ref().unwrap()["body"].as_str().unwrap();
-        assert!(gone.starts_with("`gone` failed in [run 5](https://x) on PR #3, where it was quarantined, but no issue"), "{gone}");
+        assert!(
+            gone.starts_with("Failed again, in [run 5](https://x) on PR #3, which began while this issue quarantined it")
+                && gone.contains("doesn't quarantine it any more"),
+            "{gone}"
+        );
         assert_eq!(posts.len(), 5);
+    }
+
+    #[test]
+    fn a_failure_it_wasnt_given_isnt_quarantined() {
+        let mut gh = gh();
+        let e = file(
+            &mut gh,
+            "sam/game",
+            &[
+                entry("wobbly", Outcome::Flaky, None),
+                entry("loose", Outcome::Quarantined, None),
+            ],
+            &[q("held", 4)],
+            &[q("held", 4), q("loose", 5)],
+            "x",
+        )
+        .unwrap_err();
+        assert!(
+            e.0.contains("`loose` is quarantined, but it wasn't given it"),
+            "{e}"
+        );
+        assert!(gh.asked.is_empty());
     }
 
     #[test]
     fn nothing_to_file_asks_nothing() {
         let mut gh = Fake::default();
-        assert_eq!(file(&mut gh, "sam/game", &[], &[], "x").unwrap(), vec![]);
+        assert_eq!(
+            file(&mut gh, "sam/game", &[], &[], &[], "x").unwrap(),
+            vec![]
+        );
         assert!(gh.asked.is_empty());
     }
 
@@ -307,6 +365,7 @@ mod tests {
             &mut gh,
             "sam/game",
             &[entry("a", Outcome::Flaky, None)],
+            &[],
             &[],
             "x",
         )

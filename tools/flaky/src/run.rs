@@ -68,7 +68,7 @@ pub fn run(
                 return Ok(Vec::new());
             }
             let open = quarantine::list(api, repo, cache).map_err(|e| e.to_string())?;
-            filing::file(api, repo, &entries, &open, &place).map_err(|e| e.to_string())
+            filing::file(api, repo, &entries, &tests, &open, &place).map_err(|e| e.to_string())
         });
     match filed {
         Ok(f) => {
@@ -150,13 +150,18 @@ mod tests {
     }
 
     fn quarantined() -> serde_json::Value {
-        json!([{"number": 4, "title": "flaky: held", "labels": [{"name": "flaky"}], "author_association": "OWNER", "user": {"login": "sam", "type": "User"}}])
+        json!([{"number": 4, "title": "flaky: held", "labels": [{"name": "flaky"}], "user": {"login": "github-actions[bot]", "type": "Bot"}}])
     }
 
     #[test]
     fn gives_the_gate_its_files_and_files_its_report() {
         let mut gh = Fake::default();
-        gh.on("GET", LIST, vec![ok(200, quarantined(), &[])]);
+        // `held`'s fix merges while the gate runs.
+        gh.on(
+            "GET",
+            LIST,
+            vec![ok(200, quarantined(), &[]), ok(200, json!([]), &[])],
+        );
         gh.on(
             "POST",
             "repos/sam/game/labels",
@@ -173,7 +178,7 @@ mod tests {
             vec![ok(201, json!({"number": 9}), &[])],
         );
         // The gate reads the quarantine and reports a flaky test and a
-        // quarantined one's failure.
+        // quarantined one's failure, which goes on the issue that held it.
         let script = r#"test "$(cat "$FLAKY_QUARANTINE")" = held || exit 7
             echo '{"test": "wobbly", "outcome": "flaky", "detail": "first try"}' >> "$FLAKY_REPORT"
             echo '{"test": "held", "outcome": "quarantined"}' >> "$FLAKY_REPORT""#;

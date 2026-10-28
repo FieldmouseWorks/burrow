@@ -6,14 +6,12 @@ use std::process::ExitCode;
 
 use flaky::github::Gh;
 use flaky::quarantine::{self, default_cache};
-use flaky::{actions, filing, report, run};
+use flaky::{actions, run};
 
 const USAGE: &str = "usage:
   flaky quarantine OWNER/REPO [--json]
       the tests OWNER/REPO quarantines, one a line; with --json, one
       {\"test\", \"issue\", \"author\"} a line, every open issue
-  flaky file OWNER/REPO REPORT [--where MARKDOWN]
-      a gate's report on its tests' issues
   flaky run OWNER/REPO [--where MARKDOWN] -- COMMAND [ARG...]
       COMMAND (a gate) with FLAKY_QUARANTINE and FLAKY_REPORT set, then
       its report filed
@@ -73,45 +71,6 @@ fn go(args: &[String]) -> Result<i32, Usage> {
                 }
                 Err(e) => fail(e.to_string()),
             })
-        }
-        ["file", repo, path, rest @ ..] => {
-            let repo = repo_arg(repo)?;
-            let place = match rest {
-                [] => format!("a run whose report is `{path}`"),
-                ["--where", w] => w.to_string(),
-                _ => return Err(Usage(format!("unexpected {rest:?}"))),
-            };
-            let entries = match std::fs::read_to_string(path)
-                .map_err(|e| e.to_string())
-                .and_then(|t| report::parse(&t))
-            {
-                Ok(e) => e,
-                Err(e) => {
-                    eprintln!("flaky: {path}: {e}");
-                    return Ok(2);
-                }
-            };
-            if entries.is_empty() {
-                return Ok(0);
-            }
-            Ok(
-                match quarantine::list(&mut gh, repo, cache)
-                    .and_then(|open| filing::file(&mut gh, repo, &entries, &open, &place))
-                {
-                    Ok(filed) => {
-                        for f in filed {
-                            println!(
-                                "{} {}: {repo}#{}",
-                                f.test,
-                                if f.new { "quarantined by" } else { "noted on" },
-                                f.issue
-                            );
-                        }
-                        0
-                    }
-                    Err(e) => fail(e.to_string()),
-                },
-            )
         }
         ["run", repo, rest @ ..] => {
             let repo = repo_arg(repo)?;

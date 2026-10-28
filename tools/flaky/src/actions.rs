@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use crate::github::{Api, Error};
+use crate::quarantine::Quarantined;
 use crate::report::Outcome;
 use crate::run::lines;
 use crate::{filing, quarantine, report};
@@ -23,12 +24,18 @@ fn need(env: Env, name: &str) -> Result<String, Error> {
     })
 }
 
+/// Where the step keeps its files, for the job's later steps.
+fn dir(env: Env) -> Result<PathBuf, Error> {
+    Ok(PathBuf::from(need(env, "RUNNER_TEMP")?).join("flaky"))
+}
+
 /// The repo's quarantine to a file, and FLAKY_QUARANTINE and FLAKY_REPORT
-/// (an empty file) set for the job's later steps. A quarantine it can't read
-/// is a warning: every test counts this run.
+/// (an empty file) set for the job's later steps; and which issue held each
+/// test, for `file`. A quarantine it can't read is a warning: every test
+/// counts this run.
 pub fn start(api: &mut dyn Api, env: Env, cache: Option<&Path>) -> Result<(), Error> {
     let repo = need(env, "GITHUB_REPOSITORY")?;
-    let dir = PathBuf::from(need(env, "RUNNER_TEMP")?).join("flaky");
+    let dir = dir(env)?;
     let (q, r) = (dir.join("quarantine"), dir.join("report.jsonl"));
     let tests = match quarantine::list(api, &repo, cache) {
         Ok(t) => t,
@@ -45,6 +52,11 @@ pub fn start(api: &mut dyn Api, env: Env, cache: Option<&Path>) -> Result<(), Er
     let io = |e: std::io::Error| Error(format!("{}: {e}", dir.display()));
     fs::create_dir_all(&dir).map_err(io)?;
     fs::write(&q, lines(&tests)).map_err(io)?;
+    let held: String = tests
+        .iter()
+        .map(|t| format!("{} {} {}\n", t.issue, t.test, t.author))
+        .collect();
+    fs::write(dir.join("held"), held).map_err(io)?;
     fs::write(&r, "").map_err(io)?;
     append(
         &need(env, "GITHUB_ENV")?,
@@ -104,8 +116,9 @@ pub fn file(api: &mut dyn Api, env: Env, cache: Option<&Path>) -> Result<(), Err
         }
         return Ok(());
     }
+    let held = held(&dir(env)?.join("held"))?;
     let open = quarantine::list(api, &repo, cache)?;
-    let filed = filing::file(api, &repo, &entries, &open, &place(env, &event)?)?;
+    let filed = filing::file(api, &repo, &entries, &held, &open, &place(env, &event)?)?;
     let server = need(env, "GITHUB_SERVER_URL")?;
     let mut summary = String::from("### Flaky tests\n\n");
     for f in &filed {
@@ -125,6 +138,31 @@ pub fn file(api: &mut dyn Api, env: Env, cache: Option<&Path>) -> Result<(), Err
         append(&s, &summary)?;
     }
     Ok(())
+}
+
+/// The quarantine `start` gave the gate: none if it hasn't run.
+fn held(path: &Path) -> Result<Vec<Quarantined>, Error> {
+    let text = match fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(Error(format!("{}: {e}", path.display()))),
+    };
+    text.lines()
+        .map(|l| {
+            let mut f = l.splitn(3, ' ');
+            match (f.next().and_then(|n| n.parse().ok()), f.next(), f.next()) {
+                (Some(issue), Some(test), Some(author)) => Ok(Quarantined {
+                    test: test.into(),
+                    issue,
+                    author: author.into(),
+                }),
+                _ => Err(Error(format!(
+                    "{}: {l:?} isn't ISSUE TEST AUTHOR",
+                    path.display()
+                ))),
+            }
+        })
+        .collect()
 }
 
 /// Where the job ran, in Markdown: its run (and try), the PR and its head,
@@ -248,7 +286,18 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         let mut vars = job(&dir, Some("Sam/Game"));
         let mut gh = Fake::default();
-        gh.on("GET", LIST, vec![ok(200, json!([{"number": 4, "title": "flaky: held", "labels": [{"name": "flaky"}], "author_association": "NONE", "user": {"login": "github-actions[bot]", "type": "Bot"}}]), &[])]);
+        let held = json!([{"number": 4, "title": "flaky: held", "labels": [{"name": "flaky"}], "user": {"login": "github-actions[bot]", "type": "Bot"}}]);
+        // Its fix merges while the gate runs.
+        gh.on(
+            "GET",
+            LIST,
+            vec![ok(200, held, &[]), ok(200, json!([]), &[])],
+        );
+        gh.on(
+            "POST",
+            "repos/sam/game/issues/4/comments",
+            vec![ok(201, json!({}), &[])],
+        );
         gh.on(
             "POST",
             "repos/sam/game/labels",
@@ -275,8 +324,16 @@ mod tests {
             )
         );
         assert_eq!(fs::read_to_string(&q).unwrap(), "held\n");
-        // The gate reports one.
-        fs::write(&r, "{\"test\": \"wobbly\", \"outcome\": \"flaky\"}\n").unwrap();
+        assert_eq!(
+            fs::read_to_string(dir.join("flaky/held")).unwrap(),
+            "4 held github-actions[bot]\n"
+        );
+        // The gate reports a flaky test, and the quarantined one failing.
+        fs::write(
+            &r,
+            "{\"test\": \"wobbly\", \"outcome\": \"flaky\"}\n{\"test\": \"held\", \"outcome\": \"quarantined\"}\n",
+        )
+        .unwrap();
         vars.insert("FLAKY_REPORT", r.display().to_string());
         let env = |k: &str| vars.get(k).cloned();
         file(&mut gh, &env, None).unwrap();
@@ -295,7 +352,17 @@ mod tests {
         );
         assert_eq!(
             fs::read_to_string(dir.join("summary")).unwrap(),
-            "### Flaky tests\n\n- `wobbly` failed, then passed when it ran again: quarantined by [#9](https://github.com/sam/game/issues/9)\n"
+            "### Flaky tests\n\n- `wobbly` failed, then passed when it ran again: quarantined by [#9](https://github.com/sam/game/issues/9)\n- `held` failed, and is quarantined: noted on [#4](https://github.com/sam/game/issues/4)\n"
+        );
+        // Noted where it was held: no new issue quarantines it again.
+        let posts: Vec<&str> = gh.asked("POST").iter().map(|p| p.1.as_str()).collect();
+        assert_eq!(
+            posts,
+            [
+                "repos/sam/game/labels",
+                "repos/sam/game/issues",
+                "repos/sam/game/issues/4/comments"
+            ]
         );
         fs::remove_dir_all(&dir).unwrap();
     }

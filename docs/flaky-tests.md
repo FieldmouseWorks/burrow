@@ -15,12 +15,16 @@ fixes it, and the fix lifts the quarantine, with nobody in the loop.
 4. The steward (`autoland`, [flakes.py](../modules/autoland/flakes.py)) hands
    the issue to a Claude job, which finds the cause and opens a PR that says
    `Closes #N`. Merged, it closes the issue, and the quarantine lifts at the
-   next gate. One still open a day after its job goes to the pipeline's stuck
-   issue.
+   next gate. One still open a day after its job ends goes to the pipeline's
+   stuck issue.
 
 The quarantine is the set of open issues, so it changes the moment one opens
 or closes, on every branch at once, with no file to edit. Close an issue to
 lift its quarantine by hand; open one with that title and label to add one.
+A closed one stays lifted: reopened, it quarantines nothing, and a test that
+flakes again gets a new issue. A gate that began while a test was
+quarantined notes its failure on that issue, even one closed since, and
+never quarantines the test again: only a new flake does.
 
 ## What a gate does
 
@@ -60,11 +64,13 @@ other.
 
 The flaky tool (`tools/flaky`, Rust, on `gh`) reads the quarantine before the
 gate and files its report after. It asks GitHub once a run for the open
-`flaky` issues, conditionally with the last answer's etag (kept in
+`flaky` issues, and once for each person who opened one whether they can
+push, each conditionally with the last answer's etag (kept in
 `$XDG_CACHE_HOME/flaky`), so a run with nothing new costs no rate limit; it
 writes only when a test flaked or a quarantined one failed. A quarantine it
 can't read counts every test; a report it can't file fails a run that passed,
-since an unrecorded flake is one nobody fixes.
+since an unrecorded flake is one nobody fixes. So does a report that calls a
+test quarantined that the gate wasn't given: its failure counted for nothing.
 
 In GitHub Actions, burrow's step goes on each side of the gate, with the
 job's token, which needs `issues: write`. It builds the tool from its own
@@ -100,8 +106,12 @@ quarantined.
 
 ## Who can quarantine a test
 
-Only an issue opened by someone who can push to the repo (its owner, a member
-of its organization, a collaborator) or by an app (a repo's own CI files as
-`github-actions[bot]`) quarantines a test: anyone can open an issue on a
-public repo. The steward hands a job only the issues its own login, one of
-its authors or the CI opened; one someone else opened is listed for the owner.
+Only an issue opened by someone who can push to the repo (GitHub's `write`,
+`maintain` or `admin`, asked of GitHub each time, since a member or
+collaborator can have only triage, which labels issues but pushes nothing),
+or by the repo's own CI (`github-actions[bot]`), quarantines a test: anyone
+can open an issue on a public repo. No other app's issue does. The steward
+hands a job only the issues its own login, one of its authors or the CI
+opened; one someone else opened is listed for the owner. The job is handed
+each issue's text and what those same logins said on it, and told to read
+nothing else there: anyone can comment on a public repo's issue.
