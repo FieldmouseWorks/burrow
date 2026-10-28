@@ -210,6 +210,47 @@ running = {**pr(9), "statusCheckRollup": [{"__typename": "CheckRun", "name": "ci
 calls, (verb, _) = sweep([running], {9: [verdict(9, "ok")]})
 assert calls == [] and verb == "close", (calls, verb)
 
+
+def ci(n, *runs):
+    """PR n with these check runs: (status, conclusion) each."""
+    return {**pr(n), "statusCheckRollup": [{"__typename": "CheckRun", "name": f"ci{i}", "status": s, "conclusion": c}
+                                           for i, (s, c) in enumerate(runs)]}
+
+
+# A major with no verdict waits for its CI: a job handed it while CI runs has
+# nothing to read a verdict off, and if it leaves, nobody comes back. Once CI
+# finishes green it's handed over, once.
+kept = tempfile.mkdtemp(dir=tmp)
+calls, _ = sweep([ci(10, ("IN_PROGRESS", ""))], state=kept)
+assert calls == [], calls
+calls, _ = sweep([pr(10)], state=kept)
+assert len(calls) == 1 and "#10 " in calls[0][-1] and "a major version bump" in calls[0][-1], calls
+calls, _ = sweep([pr(10)], state=kept)
+assert calls == [], calls
+# One already red doesn't wait for the rest: a job fixes the red first.
+calls, _ = sweep([ci(11, ("IN_PROGRESS", ""), ("COMPLETED", "FAILURE"))])
+assert len(calls) == 1 and "#11 " in calls[0][-1] and "CI fails" in calls[0][-1], calls
+# A job that reran a red one's CI and left: green on the same head goes to
+# another job for its verdict.
+kept = tempfile.mkdtemp(dir=tmp)
+calls, _ = sweep([pr(12, conclusion="FAILURE")], state=kept)
+assert len(calls) == 1 and "CI fails" in calls[0][-1], calls
+calls, _ = sweep([ci(12, ("IN_PROGRESS", ""))], state=kept)
+assert calls == [], calls
+calls, _ = sweep([pr(12)], state=kept)
+assert len(calls) == 1 and "#12 " in calls[0][-1] and "CI fails" not in calls[0][-1], calls
+assert "don't wait for CI you pushed or reran" in calls[0][-1], calls
+# One handed over before verdicts waited for CI is handed over once more:
+# its job may have left while CI ran, as LoK-web#598's did.
+kept = tempfile.mkdtemp(dir=tmp)
+os.makedirs(os.path.join(kept, "renovate-sweep"))
+with open(os.path.join(kept, "renovate-sweep", f"{REPO.replace('/', '_')}-13"), "w") as f:
+    f.write(f"{13:040x} sealed verdict on main\n")
+calls, _ = sweep([pr(13)], state=kept)
+assert len(calls) == 1 and "#13 " in calls[0][-1], calls
+calls, _ = sweep([pr(13)], state=kept)
+assert calls == [], calls
+
 # Handed over for its verdict, then red on the same head (a proof run since):
 # handed over again, ok or not; once a head red.
 kept = tempfile.mkdtemp(dir=tmp)
