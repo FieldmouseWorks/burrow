@@ -1,0 +1,47 @@
+{
+  "conary": "note v1",
+  "change": "4wkxmjft7va6cy4rxtpzw6x4d0",
+  "repo": {
+    "owner": "fieldmouseworks",
+    "name": "burrow"
+  },
+  "pr": 123,
+  "url": "https://github.com/fieldmouseworks/burrow/pull/123",
+  "summary": "heartbeat: an outside Healthchecks check alerts the owner when the machine goes quiet",
+  "task": "https://claude.ai/code/project/chan_01Ad4f4oDXfFTCEzLHzMTD8q?thread=cmsg_01Ad4f4oDXfFTCEzLHzMTD8qJri7iNzwPvCDFGSYDnpzw7",
+  "author": {
+    "kind": "agent",
+    "login": "TusanHomichi",
+    "session": "https://claude.ai/code/session_01BkHcyDdpq6y7eVM3kjvBZ6"
+  },
+  "landing": {
+    "revision": "c071c86d3aed19991b46c1d79c858b2f0b8d6ea73e00ae8b86edb91341905cde",
+    "before": "652c91e0b30880258cc823b8c2a8d5129a00b4b0",
+    "after": "2742a38d0d6e575d2305389103ce744d7db4864b",
+    "by": {
+      "kind": "status",
+      "login": "TusanHomichi"
+    },
+    "at": 1793231268619
+  },
+  "evidence": [
+    {
+      "kind": "review",
+      "check": "codex",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/123#pullrequestreview-5690804111"
+    },
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/40783676515/job/123151394637"
+    },
+    {
+      "kind": "ci",
+      "check": "agents",
+      "result": "pass",
+      "source": "status agents"
+    }
+  ]
+}
