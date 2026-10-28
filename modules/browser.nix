@@ -250,6 +250,11 @@ in
             "--no-first-run"
             "--no-default-browser-check"
             "--start-maximized"
+            # Its tabs come back after a restart, and with them the cookies
+            # that have no expiry date, which many sites keep a login in:
+            # without it, every restart (a deploy, a reboot) signs the owner
+            # out of those.
+            "--restore-last-session"
           ];
         };
       };

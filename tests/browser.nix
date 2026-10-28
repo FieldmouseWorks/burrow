@@ -11,10 +11,11 @@
 #   nix build .#checks.x86_64-linux.browser -L
 { self, pkgs }:
 let
-  # A site with a login: the page sets a cookie that lasts a year.
+  # A site with a login: the page sets a cookie that lasts a year, and one
+  # with no expiry date, as many sites keep a login in.
   site = pkgs.writeTextDir "index.html" ''
     <html><head><title>burrow test page</title></head>
-    <body><script>document.cookie = "login=yes; max-age=31536000; path=/"</script></body></html>
+    <body><script>document.cookie = "login=yes; max-age=31536000; path=/"; document.cookie = "session=yes; path=/"</script></body></html>
   '';
 
   # An MCP client, as Claude is one: starts burrow-browser-mcp, makes the
@@ -135,7 +136,7 @@ pkgs.testers.runNixOSTest {
         # Another page of the site, which sets nothing: the cookie is the old one.
         out = drive(node, ["browser_navigate", {"url": "http://127.0.0.1:8088/other"}],
                     ["browser_evaluate", {"function": "() => document.cookie"}])
-        assert "login=yes" in out, out
+        assert "login=yes" in out and "session=yes" in out, out
 
     cdp = "curl -fsS --max-time 5 http://127.0.0.1:9222/json/version"
     viewer = "curl -fsS --max-time 5 -o /dev/null http://127.0.0.1:6080/vnc.html"
