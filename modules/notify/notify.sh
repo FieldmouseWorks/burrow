@@ -6,9 +6,13 @@
 #
 #   HOST-notify open KEY "title" "body"
 #   HOST-notify close KEY "what fixed it"
+#   HOST-notify pending KEY
 #
 # Never fails the caller: a notice that can't be sent is logged and dropped.
-# With no REPO, every notice only goes to the journal.
+# With no REPO, every notice only goes to the journal. `pending` answers with
+# its exit status, asking nothing of GitHub: 0 while a notice this opened is
+# still open (its close hasn't got through), 1 once it's closed or never was,
+# so a caller can retry a close until it has.
 
 repo=$REPO
 state=$DIR
@@ -20,8 +24,12 @@ if [ "$(id -un)" != "$BURROW_USER" ]; then
   exec runuser -u "$BURROW_USER" -- env HOME="$HOME_DIR" "$0" "$@"
 fi
 
-key=${2:?usage: $NOTIFY open|close KEY ...}
+key=${2:?usage: $NOTIFY open|close|pending KEY ...}
 tag="[$key]"
+if [ "$1" = pending ]; then
+  [ -e "$state/$key" ]
+  exit
+fi
 if [ -z "$repo" ]; then
   echo "$NOTIFY $*" | systemd-cat -t "$NOTIFY" -p "$([ "$1" = open ] && echo warning || echo notice)"
   exit 0
@@ -57,7 +65,7 @@ find_issue() {
         rm -f "$state/$key"
       ;;
     *)
-      echo "usage: $NOTIFY open|close KEY ..." >&2
+      echo "usage: $NOTIFY open|close|pending KEY ..." >&2
       exit 2
       ;;
   esac

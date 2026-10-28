@@ -1,8 +1,8 @@
-"""burrow-watchdog, with proj, notify and burrow-events' kick port stood in
-for: what it does with an item past its deadline, step by step, and when
-it looks again.
+"""burrow-watchdog, with proj, GitHub (notify's gh) and burrow-events' kick
+port stood in for: what it does with an item past its deadline, step by
+step, and when it looks again.
 
-  python3 -I tests/watchdog.py modules/watchdog/watchdog.py
+  python3 -I tests/watchdog.py modules/watchdog/watchdog.py modules/notify/notify.sh
   nix build .#checks.x86_64-linux.watchdog
 """
 
@@ -35,9 +35,15 @@ port = http.server.HTTPServer(("127.0.0.1", 0), Kicks)
 threading.Thread(target=port.serve_forever, daemon=True).start()
 
 # proj: `run` records the job and prints its id (or fails, when told to);
-# `state` answers from STATES.
+# `state` answers from STATES. notify is the real one, each call logged; its
+# gh keeps the issues in GITHUB, and fails every call while GitHub is down.
 PROJ_LOG, STATES = f"{tmp}/proj-log", f"{tmp}/states.json"
-NOTIFY_LOG = f"{tmp}/notify-log"
+NOTIFY_LOG, GITHUB, BIN = f"{tmp}/notify-log", f"{tmp}/github.json", f"{tmp}/bin"
+os.makedirs(BIN)
+user = subprocess.run(["id", "-un"], capture_output=True, text=True, check=True).stdout.strip()
+notify_env = {"NOTIFY": "box-notify", "REPO": "sam/homelab", "ASSIGNEE": "", "LABEL": "updates",
+              "DIR": f"{tmp}/notices", "BURROW_USER": user, "HOME_DIR": tmp}
+os.makedirs(notify_env["DIR"])
 for name, body in (("proj", f"""
 import json, sys
 a = sys.argv[1:]
@@ -51,8 +57,31 @@ if a[0] == "run":
 elif a[0] == "state":
     print(states.get(a[1], "done"))
 """), ("notify", f"""
-import json, sys
+import json, os, subprocess, sys
 open({NOTIFY_LOG!r}, "a").write(json.dumps(sys.argv[1:]) + "\\n")
+env = {{**os.environ, **{notify_env!r}, "PATH": {BIN!r} + ":" + os.environ["PATH"]}}
+sys.exit(subprocess.run(["bash", "-euo", "pipefail", {sys.argv[2]!r}, *sys.argv[1:]], env=env).returncode)
+"""), ("bin/gh", f"""
+import json, sys
+a = sys.argv[1:]
+gh = json.load(open({GITHUB!r}))
+if gh["down"]:
+    sys.exit("gh: couldn't reach GitHub")
+opt = dict(zip(a, a[1:]))
+issues = gh["issues"]
+if a[:2] == ["issue", "list"]:
+    tag = opt["--search"].split('"')[1]
+    print(next((i["number"] for i in issues if i["open"] and i["title"].startswith(tag)), ""))
+elif a[:2] == ["issue", "create"]:
+    issues.append({{"number": len(issues) + 1, "title": opt["--title"], "open": True, "comments": 0}})
+elif a[:2] == ["issue", "comment"]:
+    issues[int(a[2]) - 1]["comments"] += 1
+elif a[:2] == ["issue", "close"]:
+    issues[int(a[2]) - 1]["open"] = False
+json.dump(gh, open({GITHUB!r}, "w"))
+"""), ("bin/systemd-cat", """
+import sys
+sys.stdin.read()
 """)):
     with open(f"{tmp}/{name}", "w") as f:
         f.write(f"#!{sys.executable}\n{body}")
@@ -103,12 +132,31 @@ def lines(path):
         return []
 
 
+def github(down=False, issues=None):
+    """GitHub as notify's gh finds it: up or down, and its issues."""
+    got = issues if issues is not None else json.load(open(GITHUB))["issues"]
+    with open(GITHUB, "w") as f:
+        json.dump({"down": down, "issues": got}, f)
+
+
+def opened():
+    """The owner's notices open on GitHub, by title."""
+    return [i["title"] for i in json.load(open(GITHUB))["issues"] if i["open"]]
+
+
+def notices():
+    """What notify was asked to send: not its `pending` answers."""
+    return [x for x in lines(NOTIFY_LOG) if x[0] != "pending"]
+
+
 def reset():
-    for p in (PROJ_LOG, NOTIFY_LOG, STEWARD, LINE, *(f"{tmp}/state/{n}" for n in os.listdir(f"{tmp}/state"))):
+    for p in (PROJ_LOG, NOTIFY_LOG, STEWARD, LINE, *(f"{tmp}/state/{n}" for n in os.listdir(f"{tmp}/state")),
+              *(f"{notify_env['DIR']}/{n}" for n in os.listdir(notify_env["DIR"]))):
         if os.path.exists(p):
             os.remove(p)
     KICKS.clear()
     states()
+    github(issues=[])
 
 
 def run(now, fresh=True):
@@ -195,33 +243,80 @@ assert run(T + MIN)[0] == T + MIN + W.GRACE and escalated() == []
 run(T + MIN + W.GRACE)
 assert len(escalated()) == 1 and KICKS == ["/kick/autoland"]
 # Still stuck ownerAfter later: the owner hears, a notice for the stall. It
-# stays on the stuck issue, whose job keeps at it: notify can't say the
-# notice got through.
+# stays on the stuck issue, whose job keeps at it.
 TOLD = T + MIN + W.GRACE + 14400
 run(TOLD - 1)
 assert not lines(NOTIFY_LOG)
 run(TOLD)
-(told,) = lines(NOTIFY_LOG)
+(told,) = notices()
 assert told[0] == "open" and told[1].startswith("stalled-") and told[2] == "Stuck: PR #7 in sam/r (\"fix it\")", told
 assert "https://github.com/sam/r/pull/7" in told[3] and len(escalated()) == 1, told
-# For the same reason it's sent again every RENOTIFY while it lasts (notify
-# makes a repeat a comment a day at most), by whatever pass comes first.
+assert opened() == [f"[{told[1]}] Stuck: PR #7 in sam/r (\"fix it\")"], opened()
+# notify can't say it got through, so it's sent again every RENOTIFY while
+# it lasts, by whatever pass comes first: one issue all the same.
 run(TOLD + W.RENOTIFY - 1)
-assert len(lines(NOTIFY_LOG)) == 1
+assert len(notices()) == 1
 run(TOLD + W.RENOTIFY)
-assert lines(NOTIFY_LOG)[1] == told, lines(NOTIFY_LOG)
-# Once it moves, the notice closes and nothing's left of the stall; the close
-# is sent again on the passes of the next day, then forgotten.
+assert notices()[1] == told and len(opened()) == 1, (notices(), opened())
+# Once it moves, the notice closes and nothing's left of the stall.
 write(STEWARD, {})
 MOVED = TOLD + 2 * W.RENOTIFY
-assert run(MOVED)[1] == {} and lines(NOTIFY_LOG)[2] == ["close", told[1], "It's moving again."]
-assert escalated() == [] and KICKS[-1] == "/kick/autoland", KICKS
-run(MOVED + 3600)
-assert lines(NOTIFY_LOG)[3] == ["close", told[1], "It's moving again."]
-run(MOVED + W.CLOSING)
-run(MOVED + W.CLOSING + 3600)
-assert len(lines(NOTIFY_LOG)) == 5 and W.load("state.json", {})["closing"] == {}, lines(NOTIFY_LOG)
+assert run(MOVED)[1] == {} and notices()[2] == ["close", told[1], "It's moving again."]
+assert opened() == [] and escalated() == [] and KICKS[-1] == "/kick/autoland", (opened(), KICKS)
+assert W.load("state.json", {})["closing"] == {}
 print("stuck issue, then the owner: ok")
+
+
+def told_at():
+    """A stall taken to the owner, in the fewest passes: when they heard."""
+    write(STEWARD, {"sam/r#7": item(T - 3 * 3600, T - MIN, kick=None)})
+    run(T)
+    run(T + MIN)
+    run(T + MIN + W.GRACE)
+    run(T + MIN + W.GRACE + 14400)
+    return T + MIN + W.GRACE + 14400
+
+
+# GitHub down: a notice that didn't get through is sent again once it's
+# back, and a close is sent on every pass until it has, days if need be.
+reset()
+github(down=True)
+TOLD = told_at()
+assert notices()[0][0] == "open" and opened() == []
+github()
+run(TOLD + W.RENOTIFY)
+assert len(opened()) == 1
+github(down=True)
+write(STEWARD, {})
+for days in range(4):
+    run(T + 86400 * (days + 1))
+    assert len(opened()) == 1 and len(W.load("state.json", {})["closing"]) == 1
+github()
+run(T + 86400 * 5)
+assert opened() == [] and W.load("state.json", {})["closing"] == {}
+closes = len(notices())
+run(T + 86400 * 6)
+assert len(notices()) == closes
+print("GitHub down: ok")
+
+# Back as it was before its close got through (gone from the file a while,
+# its source stale, its deadline moved): it carries on from where it had got
+# to, and its notice, still open, isn't closed under it.
+reset()
+told_at()
+assert len(opened()) == 1
+github(down=True)
+write(STEWARD, {})
+run(T + 6 * 3600)
+github()
+closes = sum(x[0] == "close" for x in notices())
+write(STEWARD, {"sam/r#7": item(T - 3 * 3600, T - MIN, kick=None)})
+wake, stalls = run(T + 6 * 3600 + MIN)
+(st,) = stalls.values()
+assert st.get("told") and len(escalated()) == 1 and not W.load("state.json", {})["closing"], st
+run(T + 6 * 3600 + 2 * MIN)
+assert len(opened()) == 1 and sum(x[0] == "close" for x in notices()) == closes == 1, notices()
+print("back again: ok")
 
 # Every stall ready in one pass goes to one job: often one cause.
 reset()
@@ -290,7 +385,7 @@ run(T + W.GRACE, fresh=False)
 assert "the PR steward" in job[9] and "burrow-watchdog snooze autoland - MINUTES" in job[9]
 states(**{"job-1": "running"})
 run(T + W.GRACE + 7200, fresh=False)
-assert escalated() == [] and lines(NOTIFY_LOG)[0][2] == "Stuck: the PR steward"
+assert escalated() == [] and notices()[0][2] == "Stuck: the PR steward"
 # A source that has never written its file goes stale from when that was
 # first seen.
 reset()
@@ -307,7 +402,7 @@ run(T)
 states(**{"job-1": "done"})
 run(T + MIN)
 run(T + MIN + W.GRACE)
-assert len(lines(NOTIFY_LOG)) == 1 and escalated() == [] and not KICKS
+assert len(notices()) == 1 and escalated() == [] and not KICKS
 W.CFG["stewardKick"] = "autoland"
 print("no steward: ok")
 

@@ -32,13 +32,15 @@ each stall a step further, and no further while that step has time left:
      (notify), closed once it clears. It stays on the stuck issue too.
 
 notify never says whether GitHub took a notice, so one is sent again every
-RENOTIFY while its stall lasts (notify adds a comment at most once a day),
-and a close for a day after it clears (a close that went through makes the
-rest no-ops). The hourly catch-up's pass is the latest a retry waits.
+RENOTIFY while its stall lasts (notify adds a comment at most once a day).
+A close is sent again on every pass until `notify pending` says it got
+through, and the stall waits beside it meanwhile: back as it was (its source
+stale a while, say), it carries on from where it had got to, its notice still
+open. The hourly catch-up's pass is the latest a retry waits.
 
-A stall that clears is forgotten, and so is all it escalated. A job that
-finds an item legitimately still under way (a long build, a busy CI queue)
-gives it more time, once and with a reason:
+A stall that clears is otherwise forgotten, and so is all it escalated. A
+job that finds an item legitimately still under way (a long build, a busy
+CI queue) gives it more time, once and with a reason:
 
   burrow-watchdog snooze SOURCE KEY MINUTES WHY
 
@@ -63,7 +65,6 @@ GRACE = 5 * MIN  # for a kicked pass, or a job's fix, to show
 START = 15 * MIN  # for the watchdog's own job to get a slot
 RETRY = 5 * MIN  # a job that couldn't start
 RENOTIFY = 60 * MIN  # a notice to the owner sent again, while its stall lasts
-CLOSING = 24 * 60 * MIN  # a cleared stall's notice closed again, this long
 SNOOZE_MAX = 6 * 60  # minutes
 STEWARD = "autoland"  # the source that publishes the stuck issue
 PROJ = "proj"  # the source whose items are proj jobs
@@ -202,6 +203,10 @@ def start_job(stalls):
     return out if rc == 0 and out else None
 
 
+def notice_key(s):
+    return "stalled-" + hashlib.sha256(s.encode()).hexdigest()[:12]
+
+
 def notice(s, st, up):
     """The owner's notice of one stall (notify): opened, or closed once it
     clears."""
@@ -209,7 +214,7 @@ def notice(s, st, up):
         if up:
             log(f"no notify to tell {CFG['owner']} with: {line(st)}")
         return
-    key = "stalled-" + hashlib.sha256(s.encode()).hexdigest()[:12]
+    key = notice_key(s)
     if up:
         subprocess.run([CFG["notify"], "open", key, f"Stuck: {st['what']}"[:200],
                         f"{line(st)} has been stuck since {clock(st['since'])}: {st['phase']}. A Claude job couldn't "
@@ -217,6 +222,12 @@ def notice(s, st, up):
                         f"{CFG['host']} show where it stands."], check=False)
     else:
         subprocess.run([CFG["notify"], "close", key, "It's moving again."], check=False)
+
+
+def held(s):
+    """Whether the stall's notice is still open: notify says so (pending), or
+    can't say."""
+    return subprocess.run([CFG["notify"], "pending", notice_key(s)]).returncode != 1
 
 
 def escalate(s, st, now, wakes):
@@ -255,11 +266,14 @@ def run(now):
     for s in [s for s in stalls if s not in found]:
         log(f"moving again: {line(stalls[s])}")
         if stalls[s].get("told") and CFG["notify"]:
-            closing[s] = {"what": stalls[s]["what"], "link": stalls[s]["link"], "cleared": now}
+            closing[s] = stalls[s]
         del stalls[s]
+    for s in [s for s in closing if s in found]:
+        log(f"stalled again, its notice still open: {line(closing[s])}")
+        stalls[s] = closing.pop(s)
     for s, st in list(closing.items()):
         notice(s, st, False)
-        if now >= st["cleared"] + CLOSING:
+        if not held(s):
             del closing[s]
 
     # The watchdog's own jobs in proj's line are its own steps' to time:
@@ -362,6 +376,8 @@ def status(now):
         print(f"{name}: written {clock(got[0])}, {len(got[1])} waiting")
         for key, it in sorted(got[1].items(), key=lambda kv: kv[1]["due"]):
             print(f"  {'OVERDUE ' if it['due'] <= now else ''}{key}: {it['phase']} (since {clock(it['since'])}, due {clock(it['due'])})")
+    for st in saved.get("closing", {}).values():
+        print(f"moving again, its notice still to close: {line(st)}")
     for st in saved.get("stalls", {}).values():
         step = ("told the owner" if st.get("told") else "on the stuck issue" if st.get("escalated")
                 else f"more time: {st['why']}" if st.get("snoozed", 0) > now

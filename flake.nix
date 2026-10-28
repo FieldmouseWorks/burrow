@@ -120,9 +120,10 @@
           };
         in builtins.head (builtins.filter (p: (p.name or "") == "autoland-steward") machine.config.environment.systemPackages);
         # The stall watchdog's ladder (kick, Claude job, stuck issue, owner),
-        # with stand-ins for proj, notify and burrow-events' kick port.
-        watchdog = pkgs.runCommand "watchdog-check" { nativeBuildInputs = [ pkgs.python3 ]; } ''
-          python3 -I ${./tests/watchdog.py} ${./modules/watchdog}/watchdog.py
+        # with the real notify and stand-ins for proj, notify's gh and
+        # burrow-events' kick port.
+        watchdog = pkgs.runCommand "watchdog-check" { nativeBuildInputs = [ pkgs.python3 pkgs.bash ]; } ''
+          python3 -I ${./tests/watchdog.py} ${./modules/watchdog}/watchdog.py ${./modules/notify}/notify.sh
           touch $out
         '';
         # burrow-events for real: deliveries, kicks and wake-ups starting a
