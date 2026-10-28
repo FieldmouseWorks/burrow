@@ -1,9 +1,10 @@
 """handle() on dependency updates: a Renovate major waits for
 renovate-sweep's sealed verdict on its head, a minor or a security fix
-merges itself, a Dependabot major is judged, and whose each one's threads
-and red CI are."""
+merges itself, a Dependabot major is judged, one a Claude job fixed is
+reviewed, and whose each one's threads and red CI are."""
 
 from harness import COMMITS, JOBS, S, T0, clean, fresh_pr_state, head, judgment, merged, mkpr, run, said, swept
+from touches import DEPENDABOT_EMAIL
 
 other = "c" * 40  # another head
 busy = [{"__typename": "CheckRun", "name": "build", "status": "IN_PROGRESS", "conclusion": None}]
@@ -131,5 +132,25 @@ status, _ = run(mkpr(checks=red_ci, threads=[False], **edited), 7200)
 assert JOBS == [] and not merged(), (status, JOBS)
 status, _ = run(clean(checks=red_ci, **edited), 7200)
 assert JOBS == [] and "CI is red" in status, (status, JOBS)
+
+# So is a Dependabot one a Claude job fixed: the steward merges those, and
+# what the job pushed is code no reviewer has read.
+fresh_pr_state()
+COMMITS[15] = [DEPENDABOT_EMAIL, "claude@remi"]
+dedited = {"branch": "dependabot/cargo/sqlx-0.8.7", "title": "Bump sqlx from 0.8.6 to 0.8.7", "number": 15}
+status, _ = run(mkpr(**dedited), 900)
+assert not merged() and "Dependency update" not in status, status
+status, _ = run(clean(**dedited), 900)
+assert merged(), status
+# If its commits can't be read, it isn't merged on CI alone.
+fresh_pr_state()
+COMMITS[15] = None
+status, _ = run(mkpr(**dedited), 900)
+assert not merged() and "Dependency update" not in status, status
+# One only Dependabot wrote is still merged on CI alone.
+fresh_pr_state()
+COMMITS[15] = [DEPENDABOT_EMAIL]
+status, _ = run(mkpr(**dedited), 900)
+assert merged() and "Dependency update, CI green" in status, status
 
 print("deps: ok")
