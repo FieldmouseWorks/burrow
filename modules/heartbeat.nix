@@ -63,8 +63,8 @@ in
       defaultText = lib.literalExpression "config.networking.hostName";
       description = ''
         The check's slug in that project: the pings go to URL/KEY/SLUG. Make it
-        by hand, with a period of `every` and a grace that covers `failAfter`
-        beats and a reboot (10 minutes on the defaults), and wire it to
+        by hand, with a period of `every` and a grace that covers a reboot and
+        a late beat (10 minutes on the defaults), and wire it to
         whatever should reach the owner. A ping to a check that isn't there
         is only logged here; it shows there as the check going quiet.
       '';
@@ -81,8 +81,8 @@ in
       default = 2;
       description = ''
         How many beats running a health check has to fail before the beat
-        says so, which alerts at once. Until then it's only logged: a switch
-        restarting a service shouldn't wake anyone.
+        says so, which alerts at once. Until then the beat is still a success
+        that names it: a switch restarting a service shouldn't wake anyone.
       '';
     };
 

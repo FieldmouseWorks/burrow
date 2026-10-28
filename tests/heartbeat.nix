@@ -1,11 +1,14 @@
 # heartbeat's beats, for real: the example machine's own beat, with a stand-in
 # for HOST-health and a local stand-in for Healthchecks, checks that a healthy
 # machine pings success with its skipped checks left out, that a check failing
-# one beat is only logged (a failed unit riding along), that one failing two
-# beats running pings fail and names it, that passing again clears its streak,
-# that the ping key is read trimmed from the unit's credential, and that a ping
-# Healthchecks refuses is reported but never fails the beat (a failed unit
-# would make HOST-update's health compare revert a switch).
+# for fewer than two beats still pings success and names it (blips taking
+# turns too, so every beat keeps the check alive), with a failed unit riding
+# along, that one failing two beats running pings fail and names it, that
+# passing again clears its streak, that a HOST-health run that fails says
+# nothing about health (no success, every streak kept), that no checks at all
+# is healthy, that the ping key is read trimmed from the unit's credential, and
+# that a ping Healthchecks refuses is reported but never fails the beat (a
+# failed unit would make HOST-update's health compare revert a switch).
 #
 #   nix build .#checks.x86_64-linux.heartbeat -L
 { self, pkgs }:
@@ -13,8 +16,12 @@ let
   inherit (pkgs) lib;
   port = 18093;
 
-  # HOST-health, as far as the beat can tell: the lines in $HEALTH_REPORT.
-  health = pkgs.writeShellScriptBin "burrow-health" ''cat "$HEALTH_REPORT"'';
+  # HOST-health, as far as the beat can tell: the lines in $HEALTH_REPORT,
+  # then exit $HEALTH_EXIT.
+  health = pkgs.writeShellScriptBin "burrow-health" ''
+    cat "$HEALTH_REPORT"
+    exit "''${HEALTH_EXIT:-0}"
+  '';
   machine = self.nixosConfigurations.example.extendModules {
     modules = [{
       burrow.tools.health = lib.mkForce health;
@@ -64,8 +71,8 @@ pkgs.runCommand "heartbeat-check" { nativeBuildInputs = [ pkgs.python3 pkgs.jq p
   expect "" "healthy: 2 checks pass" "healthy, github skipped"
 
   beat "check:sshd ok" "check:events fail" "unit:autoland.service fail"
-  expect /log "failing, not for long yet: events" "one bad beat"
-  expect /log "failed units (not counted): autoland.service" "one bad beat's units"
+  expect "" "failing for less: events" "one bad beat"
+  expect "" "failed units (not counted): autoland.service" "one bad beat's units"
 
   beat "check:sshd ok" "check:events fail" "check:zfs fail"
   expect /fail "failing for 2 beats or more: events" "two bad beats"
@@ -74,7 +81,19 @@ pkgs.runCommand "heartbeat-check" { nativeBuildInputs = [ pkgs.python3 pkgs.jq p
   beat "check:sshd ok" "check:events ok" "check:zfs ok"
   expect "" "healthy: 3 checks pass" "recovered"
   beat "check:sshd ok" "check:events fail" "check:zfs ok"
-  expect /log "failing, not for long yet: events" "a streak starts over"
+  expect "" "failing for less: events" "a streak starts over"
+  beat "check:sshd ok" "check:events ok" "check:zfs fail"
+  expect "" "failing for less: zfs" "blips taking turns"
+
+  # HOST-health dies after saying zfs is fine: that says nothing, and zfs's
+  # streak stands, so its next failure is its second.
+  HEALTH_EXIT=3 beat "check:sshd ok" "check:events ok" "check:zfs ok"
+  expect /log "burrow-health failed (exit 3), so this beat can't tell how the machine is" "a failed HOST-health"
+  beat "check:sshd ok" "check:events ok" "check:zfs fail"
+  expect /fail "failing for 2 beats or more: zfs" "a streak across a failed HOST-health"
+
+  beat
+  expect "" "healthy: 0 checks pass" "no checks"
 
   printf 'NOTKEY\n' >creds/ping-key
   ${beat} 2>err >/dev/null || { echo "a refused ping failed the beat"; exit 1; }

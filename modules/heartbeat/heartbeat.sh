@@ -2,9 +2,11 @@
 # (../heartbeat.nix runs it every few minutes and sets HEARTBEAT, URL, CHECK,
 # FAIL_AFTER, SKIP and HEALTH; the ping key is the unit's credential).
 #
-#   every health check passes (bar SKIP)   a success ping
-#   one fails, fewer than FAIL_AFTER beats a log ping: on the record, no alert
-#   one fails FAIL_AFTER beats running     a fail ping naming it: alerts at once
+#   no check has failed FAIL_AFTER beats   a success ping (one failing for
+#                                          less is named in it: a blip)
+#   one has, running                       a fail ping naming it: alerts at once
+#   HEALTH itself fails                    a log ping: no success, no state
+#                                          change, every streak kept
 #
 # Silence alerts too, once the check's period and grace run out: the machine
 # down, hung or cut off. Failed units ride along in the body for whoever
@@ -14,38 +16,45 @@ key=$(tr -d '[:space:]' <"${CREDENTIALS_DIRECTORY:?run as the $HEARTBEAT unit}/p
 # How many beats running each check has failed. Lost on a reboot, which is fine.
 streaks=${RUNTIME_DIRECTORY:?run as the $HEARTBEAT unit}
 
-pass=0 down=() blips=() units=()
-# HOST-health prints `check:NAME ok|fail` per check and `unit:NAME fail` per failed unit.
-while read -r what state; do
-  case $what in
-    check:*)
-      name=${what#check:}
-      [[ " $SKIP " == *" $name "* ]] && continue
-      if [ "$state" = ok ]; then
-        pass=$((pass + 1))
-        rm -f "$streaks/$name"
-        continue
-      fi
-      n=$(($(cat "$streaks/$name" 2>/dev/null || echo 0) + 1))
-      echo "$n" >"$streaks/$name"
-      if [ "$n" -ge "$FAIL_AFTER" ]; then down+=("$name"); else blips+=("$name"); fi
-      ;;
-    unit:* | user-unit:*) units+=("${what#*:}") ;;
-  esac
-done < <("$HEALTH")
-
-if [ ${#down[@]} -gt 0 ]; then
-  suffix=/fail
-  body="failing for $FAIL_AFTER beats or more: ${down[*]}"
-  [ ${#blips[@]} -eq 0 ] || body+=$'\n'"failing for less: ${blips[*]}"
-elif [ ${#blips[@]} -gt 0 ]; then
+# The whole report or none of it: a run that dies halfway can't say "healthy".
+rc=0
+report=$("$HEALTH") || rc=$?
+if [ "$rc" -ne 0 ]; then
   suffix=/log
-  body="failing, not for long yet: ${blips[*]}"
+  body="${HEALTH##*/} failed (exit $rc), so this beat can't tell how the machine is"
 else
-  suffix=
-  body="healthy: $pass checks pass"
+  pass=0 down=() blips=() units=()
+  # HOST-health prints `check:NAME ok|fail` per check and `unit:NAME fail` per failed unit.
+  while read -r what state; do
+    case $what in
+      check:*)
+        name=${what#check:}
+        [[ " $SKIP " == *" $name "* ]] && continue
+        if [ "$state" = ok ]; then
+          pass=$((pass + 1))
+          rm -f "$streaks/$name"
+          continue
+        fi
+        n=$(($(cat "$streaks/$name" 2>/dev/null || echo 0) + 1))
+        echo "$n" >"$streaks/$name"
+        if [ "$n" -ge "$FAIL_AFTER" ]; then down+=("$name"); else blips+=("$name"); fi
+        ;;
+      unit:* | user-unit:*) units+=("${what#*:}") ;;
+    esac
+  done <<<"$report"
+
+  if [ ${#down[@]} -gt 0 ]; then
+    suffix=/fail
+    body="failing for $FAIL_AFTER beats or more: ${down[*]}"
+  else
+    # A blip still counts as alive: only pings that change nothing would let
+    # blips taking turns run the check's grace out with every beat arriving.
+    suffix=
+    body="healthy: $pass checks pass"
+  fi
+  [ ${#blips[@]} -eq 0 ] || body+=$'\n'"failing for less: ${blips[*]}"
+  [ ${#units[@]} -eq 0 ] || body+=$'\n'"failed units (not counted): ${units[*]}"
 fi
-[ ${#units[@]} -eq 0 ] || body+=$'\n'"failed units (not counted): ${units[*]}"
 
 echo "${suffix:-/} $body"
 # The key goes in through a config on a pipe, not argv, where any user on the
