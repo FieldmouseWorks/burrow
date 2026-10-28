@@ -29,7 +29,8 @@ never quarantines the test again: only a new flake does.
 ## What a gate does
 
 A gate (a repo's test runner, or the script that drives its suites) reads two
-environment variables. Without them it runs as it always did: no retries, and
+environment variables, which the flaky tool always sets together. Unless both
+are set, and neither is empty, it runs as it always did: no retries, and
 every failure fails.
 
 - `FLAKY_QUARANTINE`: a file of the quarantined tests' names, one a line.
@@ -64,9 +65,10 @@ other.
 
 The flaky tool (`tools/flaky`, Rust, on `gh`) reads the quarantine before the
 gate and files its report after. It asks GitHub once a run for the open
-`flaky` issues, and once for each person who opened one whether they can
-push, each conditionally with the last answer's etag (kept in
-`$XDG_CACHE_HOME/flaky`), so a run with nothing new costs no rate limit; it
+`flaky` issues, once for each one's history, and once for each person in
+them whether they can push, each conditionally with the last answer's etag
+(kept in `$XDG_CACHE_HOME/flaky`), so a run with nothing new costs no rate
+limit; it
 writes only when a test flaked or a quarantined one failed. A quarantine it
 can't read counts every test; a report it can't file fails a run that passed,
 since an unrecorded flake is one nobody fixes. So does a report that calls a
@@ -108,10 +110,20 @@ quarantined.
 
 Only an issue opened by someone who can push to the repo (GitHub's `write`,
 `maintain` or `admin`, asked of GitHub each time, since a member or
-collaborator can have only triage, which labels issues but pushes nothing),
-or by the repo's own CI (`github-actions[bot]`), quarantines a test: anyone
-can open an issue on a public repo. No other app's issue does. The steward
-hands a job only the issues its own login, one of its authors or the CI
-opened; one someone else opened is listed for the owner. The job is handed
-each issue's text and what those same logins said on it, and told to read
-nothing else there: anyone can comment on a public repo's issue.
+collaborator can have only triage, which labels and retitles issues but
+pushes nothing), or by the repo's own CI (`github-actions[bot]`), quarantines
+a test: anyone can open an issue on a public repo. No other app's issue
+does. Every retitle since, and every time its `flaky` label went on, must be
+by one of those too, or the issue quarantines nothing: triage could
+otherwise rename the CI's issue to quarantine another test. Such an issue
+stays that way; a test that flakes again gets a new one.
+
+The steward hands a job only the issues its own login, one of its authors or
+the CI opened; one someone else opened is listed for the owner. The job is
+handed each issue's body and what those same logins said on it, each only
+if nobody else has edited it since (a body someone else edited is left out,
+and the job is told so), and told to read nothing else there: anyone can
+comment on a public repo's issue, and triage can edit its body. A job takes
+as many of a repo's issues, oldest first, as fit 64 KiB of task, since the
+task is one argument and Linux takes none over 128 KiB; the next job takes
+the rest.

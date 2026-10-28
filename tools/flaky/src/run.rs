@@ -163,6 +163,11 @@ mod tests {
             vec![ok(200, quarantined(), &[]), ok(200, json!([]), &[])],
         );
         gh.on(
+            "GET",
+            "repos/sam/game/issues/4/events",
+            vec![ok(200, json!([]), &[])],
+        );
+        gh.on(
             "POST",
             "repos/sam/game/labels",
             vec![ok(201, json!({}), &[])],

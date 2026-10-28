@@ -1,8 +1,9 @@
-//! The tests a repo quarantines: one open issue each (test.rs), opened by
-//! the repo's own GitHub Actions or by someone who can push to it. A list is
-//! one request, and one more for each person who opened one; with a cache,
-//! each is a conditional one, which GitHub doesn't count against the login's
-//! rate limit when nothing changed.
+//! The tests a repo quarantines: one open issue each (test.rs), opened, and
+//! if retitled or labelled since, changed by the repo's own GitHub Actions or
+//! by someone who can push to it. A list is one request, one more for each
+//! such issue's history, and one for each person in it; with a cache, each is
+//! a conditional one, which GitHub doesn't count against the login's rate
+//! limit when nothing changed.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -30,26 +31,13 @@ pub fn list(
     let path = format!("repos/{repo}/issues?labels={LABEL}&state=open&per_page=100");
     let file = cache.map(|d| d.join(format!("{repo}.json")));
     let kept = file.as_deref().and_then(read).unwrap_or(Value::Null);
-    let first = call(api, "GET", &path, None, kept["etag"].as_str())?;
-    let (etag, issues) = if first.status == 304 {
-        (
-            kept["etag"].as_str().map(String::from),
-            kept["issues"].clone(),
-        )
-    } else {
-        let mut all = page(&first)?;
-        let mut next = first.next();
-        // A cached first page can't vouch for the others.
-        let one = next.is_none();
-        while let Some(p) = next {
-            let r = call(api, "GET", &p, None, None)?;
-            all.extend(page(&r)?);
-            next = r.next();
-        }
-        let etag = first.header("etag").filter(|_| one).map(String::from);
-        (etag, Value::Array(all.iter().map(keep).collect()))
+    let (etag, issues) = all(api, &path, &kept["issues"], keep)?;
+    let mut who = Who {
+        repo,
+        kept: &kept["pushers"],
+        pushers: Map::new(),
     };
-    let mut pushers = Map::new();
+    let mut histories = Map::new();
     let mut out = Vec::new();
     for i in issues.as_array().into_iter().flatten() {
         let (Some(test), Some(issue), Some(author)) = (
@@ -59,14 +47,23 @@ pub fn list(
         ) else {
             continue;
         };
-        let trusted = if author == ACTIONS {
-            true
-        } else if i["user"]["type"].as_str() == Some("Bot") {
-            false
-        } else {
-            pushes(api, repo, author, &kept["pushers"][author], &mut pushers)?
-        };
-        if trusted {
+        if !who.may(api, &i["user"])? {
+            continue;
+        }
+        let n = issue.to_string();
+        let path = format!("repos/{repo}/issues/{n}/events?per_page=100");
+        let (tag, changes) = all(api, &path, &kept["histories"][n.as_str()], change)?;
+        histories.insert(n, json!({"etag": tag, "items": changes}));
+        let mut vouched = true;
+        for c in changes
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|c| !c.is_null())
+        {
+            vouched = vouched && who.may(api, &c["actor"])?;
+        }
+        if vouched {
             out.push(Quarantined {
                 test,
                 issue,
@@ -78,7 +75,7 @@ pub fn list(
         match etag {
             Some(tag) => write(
                 f,
-                &json!({"etag": tag, "issues": issues, "pushers": pushers}),
+                &json!({"issues": {"etag": tag, "items": issues}, "pushers": who.pushers, "histories": histories}),
             ),
             None => {
                 let _ = fs::remove_file(f);
@@ -89,37 +86,92 @@ pub fn list(
     Ok(out)
 }
 
-/// Whether `login`, a person, can push to the repo: asked once a list (and
-/// noted in `pushers`), conditionally with `kept`, the last answer. Being an
-/// owner, a member of its organization or a collaborator isn't enough: a
-/// member can have only triage, which labels an issue but pushes nothing.
-fn pushes(
+/// Every page of a list: what `kept` (the last answer: `etag` and `items`)
+/// had if GitHub says nothing changed, else each item as `pick` keeps it,
+/// with the etag to ask with next time (none for more than one page: a
+/// cached first page can't vouch for the others).
+fn all(
     api: &mut dyn Api,
-    repo: &str,
-    login: &str,
+    path: &str,
     kept: &Value,
-    pushers: &mut Map<String, Value>,
-) -> Result<bool, Error> {
-    if let Some(p) = pushers.get(login) {
-        return Ok(p["permission"].as_str().is_some_and(can_push));
+    pick: fn(&Value) -> Value,
+) -> Result<(Option<String>, Value), Error> {
+    let tag = kept["etag"].as_str();
+    let first = call(api, "GET", path, None, tag)?;
+    if first.status == 304 {
+        return Ok((tag.map(String::from), kept["items"].clone()));
     }
-    let path = format!("repos/{repo}/collaborators/{login}/permission");
-    let now = match call(api, "GET", &path, None, kept["etag"].as_str()) {
-        Ok(r) if r.status == 304 => kept.clone(),
-        Ok(r) => json!({"etag": r.header("etag"), "permission": r.json()?["permission"]}),
-        // No such person any more.
-        Err(e) if e.0.contains("HTTP 404") => json!({"permission": "none"}),
-        Err(e) => return Err(e),
-    };
-    let can = now["permission"].as_str().is_some_and(can_push);
-    pushers.insert(login.to_string(), now);
-    Ok(can)
+    let mut items = page(&first)?;
+    let mut next = first.next();
+    let one = next.is_none();
+    while let Some(p) = next {
+        let r = call(api, "GET", &p, None, None)?;
+        items.extend(page(&r)?);
+        next = r.next();
+    }
+    let etag = first.header("etag").filter(|_| one).map(String::from);
+    Ok((etag, Value::Array(items.iter().map(pick).collect())))
+}
+
+/// Who may quarantine a test, asked of GitHub once a list.
+struct Who<'a> {
+    repo: &'a str,
+    /// The last list's answers, by login.
+    kept: &'a Value,
+    /// This one's.
+    pushers: Map<String, Value>,
+}
+
+impl Who<'_> {
+    /// Whether `user` (a login and a type, as GitHub gives them) may: the
+    /// repo's own GitHub Actions, or a person who can push to it. Being an
+    /// owner, a member of its organization or a collaborator isn't enough:
+    /// a member can have only triage, which labels and retitles an issue
+    /// but pushes nothing.
+    fn may(&mut self, api: &mut dyn Api, user: &Value) -> Result<bool, Error> {
+        let Some(login) = user["login"].as_str() else {
+            return Ok(false); // a deleted account
+        };
+        if login == ACTIONS {
+            return Ok(true);
+        }
+        if user["type"].as_str() == Some("Bot") {
+            return Ok(false);
+        }
+        if let Some(p) = self.pushers.get(login) {
+            return Ok(p["permission"].as_str().is_some_and(can_push));
+        }
+        let path = format!("repos/{}/collaborators/{login}/permission", self.repo);
+        let kept = &self.kept[login];
+        let now = match call(api, "GET", &path, None, kept["etag"].as_str()) {
+            Ok(r) if r.status == 304 => kept.clone(),
+            Ok(r) => json!({"etag": r.header("etag"), "permission": r.json()?["permission"]}),
+            // No such person any more.
+            Err(e) if e.0.contains("HTTP 404") => json!({"permission": "none"}),
+            Err(e) => return Err(e),
+        };
+        let can = now["permission"].as_str().is_some_and(can_push);
+        self.pushers.insert(login.to_string(), now);
+        Ok(can)
+    }
+}
+
+/// Of an issue's history, what changes the test it quarantines: a retitle,
+/// or its label put on. Who did it is all a cache keeps; anything else is
+/// null.
+fn change(e: &Value) -> Value {
+    let labelled = e["event"] == "labeled" && e["label"]["name"] == LABEL;
+    if e["event"] == "renamed" || labelled {
+        json!({"actor": {"login": e["actor"]["login"], "type": e["actor"]["type"]}})
+    } else {
+        Value::Null
+    }
 }
 
 fn page(r: &crate::github::Response) -> Result<Vec<Value>, Error> {
     match r.json()? {
         Value::Array(a) => Ok(a),
-        _ => Err(Error("GitHub's list of issues isn't a list".into())),
+        _ => Err(Error("GitHub's list isn't a list".into())),
     }
 }
 
@@ -169,24 +221,25 @@ pub fn default_cache() -> Option<PathBuf> {
 mod tests {
     use super::*;
     use crate::github::fake::{Fake, ok};
+    use crate::github::{Failed, Response};
 
     fn issue(n: u64, title: &str, login: &str) -> Value {
+        json!({"number": n, "title": title, "labels": [{"name": "flaky", "color": "d93f0b"}],
+               "user": user(login), "body": "long"})
+    }
+
+    fn user(login: &str) -> Value {
         let kind = if login.ends_with("[bot]") {
             "Bot"
         } else {
             "User"
         };
-        json!({"number": n, "title": title, "labels": [{"name": "flaky", "color": "d93f0b"}],
-               "user": {"login": login, "type": kind}, "body": "long"})
+        json!({"login": login, "type": kind, "id": 1})
     }
 
     const PATH: &str = "repos/sam/game/issues?labels=flaky&state=open&per_page=100";
 
-    fn may(
-        gh: &mut Fake,
-        login: &str,
-        answers: Vec<Result<crate::github::Response, crate::github::Failed>>,
-    ) {
+    fn may(gh: &mut Fake, login: &str, answers: Vec<Result<Response, Failed>>) {
         gh.on(
             "GET",
             &format!("repos/sam/game/collaborators/{login}/permission"),
@@ -194,12 +247,25 @@ mod tests {
         );
     }
 
-    fn can(permission: &str) -> Result<crate::github::Response, crate::github::Failed> {
+    fn can(permission: &str) -> Result<Response, Failed> {
         ok(
             200,
             json!({"permission": permission, "role_name": "x"}),
             &[],
         )
+    }
+
+    /// Issue n's history: (event, by whom, the label it's about).
+    fn history(gh: &mut Fake, n: u64, events: &[(&str, &str, &str)]) {
+        let events: Vec<Value> = events
+            .iter()
+            .map(|(e, by, label)| json!({"event": e, "actor": user(by), "label": {"name": label}, "rename": {"from": "a", "to": "b"}}))
+            .collect();
+        gh.on(
+            "GET",
+            &format!("repos/sam/game/issues/{n}/events"),
+            vec![ok(200, Value::Array(events), &[])],
+        );
     }
 
     #[test]
@@ -235,6 +301,9 @@ mod tests {
             "gone",
             vec![ok(404, json!({"message": "Not Found"}), &[])],
         );
+        for n in [2, 4, 8, 9] {
+            history(&mut gh, n, &[("labeled", "sam", "flaky")]);
+        }
         let got = list(&mut gh, "sam/game", None).unwrap();
         let q = |t: &str, n, a: &str| Quarantined {
             test: t.into(),
@@ -250,18 +319,76 @@ mod tests {
                 q("e", 8, "sam")
             ]
         );
-        // Each person once; no app.
+        // Each person once, and each history of an issue someone who may
+        // opened; no app's permission.
         let asked: Vec<&str> = gh.asked.iter().map(|a| a.1.as_str()).collect();
         assert_eq!(
             asked,
             [
                 PATH,
                 "repos/sam/game/collaborators/sam/permission",
+                "repos/sam/game/issues/9/events?per_page=100",
+                "repos/sam/game/issues/4/events?per_page=100",
                 "repos/sam/game/collaborators/tri/permission",
                 "repos/sam/game/collaborators/wri/permission",
-                "repos/sam/game/collaborators/gone/permission"
+                "repos/sam/game/issues/2/events?per_page=100",
+                "repos/sam/game/collaborators/gone/permission",
+                "repos/sam/game/issues/8/events?per_page=100",
             ]
         );
+    }
+
+    #[test]
+    fn who_changed_it_counts_too() {
+        let mut gh = Fake::default();
+        gh.on(
+            "GET",
+            PATH,
+            vec![ok(
+                200,
+                json!([
+                    issue(4, "flaky: retitled", ACTIONS),
+                    issue(5, "flaky: relabelled", ACTIONS),
+                    issue(6, "flaky: fixed-up", ACTIONS),
+                    issue(7, "flaky: other-label", ACTIONS),
+                    issue(8, "flaky: by-an-app", ACTIONS),
+                ]),
+                &[],
+            )],
+        );
+        may(&mut gh, "tri", vec![can("read")]);
+        may(&mut gh, "wri", vec![can("write")]);
+        // Triage retitled it to name another test.
+        history(
+            &mut gh,
+            4,
+            &[("labeled", ACTIONS, "flaky"), ("renamed", "tri", "")],
+        );
+        // Triage took its label off and put it back.
+        history(
+            &mut gh,
+            5,
+            &[("unlabeled", "tri", "flaky"), ("labeled", "tri", "flaky")],
+        );
+        // Someone who can push retitled it; triage only closed and labelled
+        // it otherwise.
+        history(
+            &mut gh,
+            6,
+            &[
+                ("renamed", "wri", ""),
+                ("labeled", "tri", "bug"),
+                ("assigned", "tri", ""),
+            ],
+        );
+        history(&mut gh, 7, &[("labeled", "tri", "needs-owner")]);
+        history(&mut gh, 8, &[("labeled", "renovate[bot]", "flaky")]);
+        let got: Vec<u64> = list(&mut gh, "sam/game", None)
+            .unwrap()
+            .iter()
+            .map(|q| q.issue)
+            .collect();
+        assert_eq!(got, [6, 7]);
     }
 
     #[test]
@@ -275,6 +402,20 @@ mod tests {
         may(
             &mut gh,
             "sam",
+            vec![ok(403, json!({"message": "Resource not accessible"}), &[])],
+        );
+        let e = list(&mut gh, "sam/game", None).unwrap_err();
+        assert!(e.0.contains("HTTP 403"), "{e}");
+        // And a history.
+        let mut gh = Fake::default();
+        gh.on(
+            "GET",
+            PATH,
+            vec![ok(200, json!([issue(9, "flaky: b", ACTIONS)]), &[])],
+        );
+        gh.on(
+            "GET",
+            "repos/sam/game/issues/9/events",
             vec![ok(403, json!({"message": "Resource not accessible"}), &[])],
         );
         let e = list(&mut gh, "sam/game", None).unwrap_err();
@@ -298,6 +439,18 @@ mod tests {
                 ok(304, Value::Null, &[("ETag", "W/\"one\"")]),
             ],
         );
+        gh.on(
+            "GET",
+            "repos/sam/game/issues/4/events",
+            vec![
+                ok(
+                    200,
+                    json!([{"event": "labeled", "actor": user("sam"), "label": {"name": "flaky"}, "url": "long"}]),
+                    &[("ETag", "W/\"h\"")],
+                ),
+                ok(304, Value::Null, &[]),
+            ],
+        );
         may(
             &mut gh,
             "sam",
@@ -313,10 +466,23 @@ mod tests {
         assert_eq!(first.len(), 1);
         assert_eq!(first, second);
         let etags: Vec<Option<&str>> = gh.asked.iter().map(|a| a.3.as_deref()).collect();
-        assert_eq!(etags, [None, None, Some("W/\"one\""), Some("W/\"w\"")]);
+        assert_eq!(
+            etags,
+            [
+                None,
+                None,
+                None,
+                Some("W/\"one\""),
+                Some("W/\"w\""),
+                Some("W/\"h\"")
+            ]
+        );
         // Only what quarantined_by and list read is kept.
         let kept = fs::read_to_string(dir.join("sam/game.json")).unwrap();
-        assert!(!kept.contains("long") && !kept.contains("d93f0b"), "{kept}");
+        assert!(
+            !kept.contains("long") && !kept.contains("d93f0b") && kept.contains("W/\\\"h\\\""),
+            "{kept}"
+        );
         assert!(list(&mut gh, "sam/game", Some(&dir)).unwrap().is_empty());
         fs::remove_dir_all(&dir).unwrap();
     }
@@ -341,6 +507,11 @@ mod tests {
                 json!([issue(1, "flaky: a", ACTIONS)]),
                 &[("ETag", "W/\"p1\""), ("Link", link)],
             )],
+        );
+        gh.on(
+            "GET",
+            "repos/sam/game/issues/",
+            vec![ok(200, json!([]), &[])],
         );
         let got = list(&mut gh, "sam/game", Some(&dir)).unwrap();
         assert_eq!(got.len(), 2);

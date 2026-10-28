@@ -15,7 +15,8 @@ repo's own CI, which files as github-actions[bot]. Only one opened by the
 steward's own login, one of its authors or the CI goes to a job: one
 someone else opened quarantines the test all the same, and is the owner's
 to look at. A job is handed the issue and what those same logins said on
-it, nothing else: anyone can comment on an issue in a public repo."""
+it, each only if nobody else has edited it since, and nothing else: anyone
+can comment on an issue in a public repo, and triage can edit its body."""
 
 import json
 import os
@@ -31,9 +32,21 @@ OTHERS = "Flaky tests someone else quarantined"
 # The app a repo's GitHub Actions workflows act as.
 ACTIONS = "github-actions[bot]"
 # What a job is handed of each issue: its body and its last few comments
-# from ours(), each cut to its start and end, and no more issues at once
-# than fit a job's task; the rest wait for the next job.
-COMMENTS, CLIP, BATCH = 2, 2500, 8
+# from ours(), each cut to its start and end (in bytes, as UTF-8), and no
+# more issues at once than fit BUDGET bytes of task; the rest wait for the
+# next job. The task is one argument to proj, and Linux takes no argument
+# over 128 KiB; one issue, cut as said() cuts it, is far under BUDGET.
+COMMENTS, CLIP, BUDGET = 2, 2500, 64 * 1024
+
+# An issue's body and comments as said() reads them, each with who wrote it
+# and everyone who has edited it since. The last 100 comments are enough:
+# one of ours buried under more than that from anyone else goes unread.
+TEXT = "author { login __typename } body userContentEdits(first: 100) { totalCount nodes { editor { login __typename } } }"
+ISSUE = """
+query($owner: String!, $name: String!, $n: Int!) {
+  repository(owner: $owner, name: $name) { issue(number: $n) { %s comments(last: 100) { nodes { %s } } } }
+}
+""" % (TEXT, TEXT)
 
 
 def quarantine(repo):
@@ -106,15 +119,22 @@ def act(repo, st, mine):
                 C.wake(repo, it["ended"] + DAY)
     if not todo or busy:
         return
-    jid = C.job(repo, task(repo, [(n, it, said(repo, n)) for n, it in todo[:BATCH]]), clone=True)
+    # The oldest first, as many as fit; the next job takes the rest.
+    handed = []
+    for n, it in todo:
+        more = handed + [(n, it, said(repo, n))]
+        if handed and len(task(repo, more).encode()) > BUDGET:
+            break
+        handed = more
+    jid = C.job(repo, task(repo, handed), clone=True)
     if not jid:
         log(f"{repo}: couldn't start a Claude job for its flaky tests (no checkout, or proj refused)")
         for n, it in todo:
             mine.append((NO_JOB, f"{repo}#{n}", f"for the flaky test `{it['test']}`"))
         C.wake(repo, C.NOW + 5 * MIN)
         return
-    log(f"{repo}: a Claude job {jid} for {len(todo[:BATCH])} flaky tests")
-    for _, it in todo[:BATCH]:
+    log(f"{repo}: a Claude job {jid} for {len(handed)} flaky tests")
+    for _, it, _ in handed:
         it["handed"], it["job"] = C.NOW, jid
     st["job"], st["jobAt"] = jid, C.NOW
     C.wake(repo, C.NOW + (CFG["jobTimeout"] + 5) * MIN)
@@ -122,21 +142,44 @@ def act(repo, st, mine):
 
 def said(repo, n):
     """Issue n's body, then its last COMMENTS comments by ours(), as a job is
-    handed them: who said it, and what."""
-    issue = C.gh("api", f"repos/{repo}/issues/{n}")
-    pages = C.gh("api", "--paginate", "--slurp", f"repos/{repo}/issues/{n}/comments?per_page=100")
-    comments = [c for c in sum(pages or [], []) if ours((c.get("user") or {}).get("login", ""))]
-    out = [(issue["user"]["login"], "opened it", issue.get("body") or "")]
-    out += [(c["user"]["login"], "commented", c.get("body") or "") for c in comments[-COMMENTS:]]
-    return "\n\n".join(f"{who} {did}:\n\n{clip(text)}" for who, did, text in out)
+    handed them: who said it, and what. Text anyone else has edited since
+    isn't theirs any more: a comment like that is left out, and a body is
+    said to be."""
+    owner, name = repo.split("/")
+    issue = C.graphql(ISSUE, owner=owner, name=name, n=int(n))["repository"]["issue"]
+    body = issue["body"] if vouched(issue) else "[Its body is left out: someone else has edited it.]"
+    comments = [c for c in issue["comments"]["nodes"] if vouched(c)]
+    out = [(login(issue["author"]), "opened it", body)]
+    out += [(login(c["author"]), "commented", c["body"]) for c in comments[-COMMENTS:]]
+    return "\n\n".join(f"{who} {did}:\n\n{clip(text or '')}" for who, did, text in out)
+
+
+def login(actor):
+    """A GraphQL actor's login, an app's with its `[bot]`, as REST gives it
+    ("" for a deleted account)."""
+    if not actor:
+        return ""
+    return actor["login"] + ("[bot]" if actor["__typename"] == "Bot" else "")
+
+
+def vouched(text):
+    """Whether ours() wrote a body or comment and nobody else has edited it:
+    every edit in its history is by ours() (a history too long to read
+    isn't vouched for)."""
+    edits = text["userContentEdits"]
+    return (ours(login(text["author"])) and edits["totalCount"] <= len(edits["nodes"])
+            and all(ours(login(e["editor"])) for e in edits["nodes"]))
 
 
 def clip(text):
-    """Its start, which says where it happened, and its end, how it failed."""
-    if len(text) <= CLIP:
+    """Its start, which says where it happened, and its end, how it failed:
+    CLIP bytes of it, cut between characters."""
+    b = text.encode()
+    if len(b) <= CLIP:
         return text
     head = CLIP // 5
-    return f"{text[:head]}\n[{len(text) - CLIP} characters left out]\n{text[-(CLIP - head):]}"
+    start, end = b[:head].decode(errors="ignore"), b[-(CLIP - head):].decode(errors="ignore")
+    return f"{start}\n[{len(b) - CLIP} bytes left out]\n{end}"
 
 
 def task(repo, todo):
