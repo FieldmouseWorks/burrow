@@ -1,8 +1,10 @@
 # proj's limits, for real: a machine with proj on and a stand-in for Claude
 # (burrow.claude.package) checks that jobs past maxJobs wait in line, that
-# --first goes ahead but can't starve a turn that has waited long, that a job
-# whose turn has ended frees its slot, that one waiting on a PR or issue
-# (proj await) is resumed when it changes, even before the turn ended and
+# --first goes ahead but can't starve a turn that has waited long, that a
+# pipeline job's every turn takes the slot kept for them when the rest are
+# full, that a job whose turn has ended frees its slot, that one waiting on a
+# PR or issue (proj await) is resumed when it changes, even before the turn
+# ended and
 # from proj-watch's own unit, but never for proj-inbox's own comment, or once
 # its deadline passes with GitHub unreadable, that a reply meanwhile owns the
 # job's waits, that a turn's end kicks what it was started to and proj-watch
@@ -87,7 +89,11 @@ pkgs.testers.runNixOSTest {
       claude.package = claude;
       proj = {
         enable = true;
-        maxJobs = 2;
+        # Two slots for anyone, one more for pipeline jobs alone, and no cap
+        # that binds before the slots run out (pick.sh's own check has those).
+        maxJobs = 3;
+        pipelineSlots = 1;
+        maxJobsPerProject = 2;
         # The VM is small: only the slot count holds jobs back here.
         minFreeMemory = 0;
         jobMemoryMax = "128M";
@@ -222,6 +228,22 @@ pkgs.testers.runNixOSTest {
         proj(f"stop {b}")
         machine.wait_until_succeeds(f"su - dev -c 'proj state {d}' | grep -x done", timeout=120)
         assert started(c) < started(d), (started(c), started(d))
+
+    with subtest("a pipeline job takes its own slot while the others are full, every turn of it"):
+        a = proj('run web "sleep 600"')
+        b = proj('run web "sleep 600"')
+        for j in (a, b):
+            machine.wait_until_succeeds(f"su - dev -c 'proj state {j}' | grep -x running", timeout=120)
+        c = proj('run --first web "sleep 1"')
+        p = proj('run --pipeline web "sleep 1"')
+        machine.wait_until_succeeds(f"su - dev -c 'proj state {p}' | grep -x done", timeout=120)
+        proj(f'reply {p} "sleep 1"')
+        machine.wait_until_succeeds(f"su - dev -c 'proj state {p}' | grep -x done", timeout=120)
+        assert state(c) == "queued", state(c)
+        machine.fail(f"""su - dev -c 'proj reply --pipeline {p} "sleep 1"'""")
+        proj(f"stop {a}")
+        machine.wait_until_succeeds(f"su - dev -c 'proj state {c}' | grep -x done", timeout=120)
+        proj(f"stop {b}")
 
     with subtest("a job waiting on a PR is resumed when the PR changes"):
         def github(endpoint, answer):

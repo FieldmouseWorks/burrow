@@ -281,14 +281,16 @@ def project_dir(repo):
 
 def pipeline(repo):
     """Whether repo is one whose PRs work on this pipeline itself
-    (`pipelineRepos`): its reviews and Claude jobs go ahead of the others',
-    so everything after them is quicker."""
+    (`pipelineRepos`): its reviews go ahead of the others', so everything
+    after them is quicker."""
     return isinstance(repo, str) and repo.lower() in {x.lower() for x in CFG["pipelineRepos"]}
 
 
 def job(repo, task, clone=False):
-    """Hand a task to a Claude job in the repo's project, ahead of the line
-    for the pipeline's own repos. Returns the job id."""
+    """Hand a task to a Claude job in the repo's project. Every one is
+    pipeline work (proj run --pipeline): it settles a PR or the branch PRs
+    land on, so it goes ahead of the line, in a slot kept for it. Returns
+    the job id."""
     d = project_dir(repo)
     if d is None and clone and not DRY:
         d = repo.split("/")[1]
@@ -302,7 +304,7 @@ def job(repo, task, clone=False):
     # Each of its turns that ends starts the repo's pass, which reads what it
     # did; one that goes quiet for jobIdle, or runs past jobTimeout, is
     # stopped, and ends then.
-    p = subprocess.run([CFG["proj"], "run", *(["--first"] if pipeline(repo) else []), "--timeout", f"{CFG['jobTimeout']}m",
+    p = subprocess.run([CFG["proj"], "run", "--pipeline", "--timeout", f"{CFG['jobTimeout']}m",
                         "--idle", f"{CFG['jobIdle']}m", "--kick", f"autoland/{repo}", d, task],
                        capture_output=True, text=True)
     return p.stdout.strip() or None
