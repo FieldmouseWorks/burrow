@@ -1,24 +1,25 @@
-# house: every repo's copy of the house block (house/rules.md, between its
-# markers in AGENTS.md) kept the same as burrow's (house/sync.sh). A change to
-# the rules here reaches each repo as one PR, which the steward lands. Nothing
-# waits for a timer: a switch that brings new rules starts a pass over every
-# repo, and a push to a repo's default branch one over that repo.
+# house: every repo's copies of the house blocks (the files in house/, each
+# between its markers in AGENTS.md) kept the same as burrow's (house/sync.sh).
+# A change to a block here reaches each repo as one PR, which the steward
+# lands. Nothing waits for a timer: a switch that brings new blocks starts a
+# pass over every repo, and a push to a repo's default branch one over that
+# repo.
 inputs:
 { config, lib, pkgs, ... }:
 let
   cfg = config.burrow.house;
   inherit (config.burrow) user;
   inherit (lib) mkOption types;
-  # The rules the running system has: /etc moves to a switch's new ones
-  # before it starts anything, so a pass started under older rules can tell.
-  current = "burrow/house-rules.md";
+  # The blocks the running system has: /etc moves to a switch's new ones
+  # before it starts anything, so a pass started under older blocks can tell.
+  current = "burrow/house";
   lockDir = "/run/house-sync";
 
   sync = pkgs.writeShellApplication {
     name = "house-sync";
-    runtimeInputs = with pkgs; [ gh jq coreutils gnugrep gnused diffutils util-linux ];
+    runtimeInputs = with pkgs; [ gh jq coreutils gnugrep gnused gawk diffutils util-linux ];
     text = ''
-      RULES=${../house/rules.md}
+      HOUSE=${../house}
       CURRENT=/etc/${current}
       LOCK=${lockDir}/lock
       OWNERS=${lib.escapeShellArg (lib.concatStringsSep " " cfg.owners)}
@@ -36,7 +37,7 @@ in
   ];
 
   options.burrow.house = {
-    enable = lib.mkEnableOption "house-sync, every repo's house block kept current";
+    enable = lib.mkEnableOption "house-sync, every repo's house blocks kept current";
 
     owners = mkOption {
       type = types.listOf types.str;
@@ -50,7 +51,7 @@ in
       default = [ ];
       description = ''
         Repos to leave alone (OWNER/NAME globs). Not autoland's exclude: a repo
-        that lands its own PRs still keeps the house rules, and gets its
+        that lands its own PRs still keeps the house blocks, and gets its
         house PR to land its own way.
       '';
     };
@@ -65,7 +66,7 @@ in
   config = lib.mkIf cfg.enable {
     burrow.notify.enable = true;
     environment.systemPackages = [ sync ];
-    environment.etc.${current}.source = ../house/rules.md;
+    environment.etc.${current}.source = ../house;
     # Every pass, full or one repo's, takes this lock: burrow-events lines
     # them up, but not across its own restarts, and two passes at once can
     # each close the other's PR.
@@ -81,7 +82,7 @@ in
       pushes = "default";
     };
     systemd.services = lib.genAttrs [ "house-sync" "house-sync@" ] (name: {
-      description = "house-sync: ${if name == "house-sync" then "every repo's" else "%I's"} house block, as burrow has it";
+      description = "house-sync: ${if name == "house-sync" then "every repo's" else "%I's"} house blocks, as burrow has them";
       # A switch leaves a running one be (see burrow.switch's check).
       restartIfChanged = false;
       after = [ "network-online.target" ];
@@ -94,14 +95,14 @@ in
         Nice = 10;
       };
     }) // {
-      # New rules arrive with a switch, which changes this unit and so starts
+      # New blocks arrive with a switch, which changes this unit and so starts
       # it again: it asks burrow-events for a full pass, in line with the
       # handler's others.
       house-sync-rules = {
-        description = "house-sync: a full pass for the house rules this system has";
+        description = "house-sync: a full pass for the house blocks this system has";
         wantedBy = [ "multi-user.target" ];
         after = [ "burrow-events.service" ];
-        restartTriggers = [ ../house/rules.md ];
+        restartTriggers = [ ../house ];
         path = [ pkgs.curl ];
         script = "curl -fsS --retry 10 --retry-connrefused --retry-delay 1 -d '' ${config.burrow.events.kick}/house";
         serviceConfig = {
@@ -112,12 +113,13 @@ in
     };
 
     burrow.claude.machineMd = lib.mkOrder 1060 ''
-      ## The house rules
+      ## The house blocks
 
-      The house rules block in every repo's AGENTS.md is a copy of burrow's
-      house/rules.md, and `house-sync` (on new rules, and each repo's pushes to
-      its default branch) opens a PR wherever a copy differs.
-      To change a house rule, change it in burrow, never between a repo's markers.
+      The house blocks in every repo's AGENTS.md (the house rules, and the
+      Pull requests section) are copies of the files in burrow's house/, and
+      `house-sync` (on new blocks, and each repo's pushes to its default
+      branch) opens a PR wherever a copy differs. To change one, change it in
+      burrow, never between a repo's markers.
     '';
   };
 }
