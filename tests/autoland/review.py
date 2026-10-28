@@ -394,6 +394,13 @@ t = time.time()
 back = queue_and_work("deepseek")
 assert back["result"] == "error" and "still at it after 0.02 minutes" in back["error"] and time.time() - t < 20, back
 assert len(agent_runs()) == 1, agent_runs()
+# A look at max that used most of the deadline leaves the one at high only
+# the rest, where it would have answered given a deadline of its own.
+C.CFG["reviewTimeout"] = 0.05  # three seconds
+agent(dsh={"effort": "high", "sleep": 2})
+back = queue_and_work("deepseek")
+assert back["result"] == "error" and "still at it after 0.05 minutes" in back["error"], back
+assert len(agent_runs()) == 2, agent_runs()
 C.CFG["reviewTimeout"] = 30
 # Nor what it read on the way (the PR's own files, in its events), nor a
 # 401 inside a longer number.
