@@ -154,6 +154,7 @@ let
     cp ${./autoland/tasks.py} $out/tasks.py
     cp ${./autoland/touches.py} $out/touches.py
     cp ${./autoland/seal.py} $out/seal.py
+    cp ${./autoland/prs.py} $out/prs.py
     flake8 --ignore E501,W503 $out
   '';
   # The command, with this machine's config, so `autoland-steward status`

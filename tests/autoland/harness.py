@@ -189,6 +189,7 @@ os.environ["GH_TOKEN"] = "ghp_steward_token"  # never passed on to an agent
 sys.path.insert(0, os.path.dirname(os.path.abspath(sys.argv[1])))
 sys.argv = ["steward"]
 import common as C  # noqa: E402,F401
+import prs as P  # noqa: E402,F401
 import repos as R  # noqa: E402,F401
 import review_worker as W  # noqa: E402,F401
 import reviewers as V  # noqa: E402,F401

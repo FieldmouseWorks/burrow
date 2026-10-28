@@ -6,7 +6,7 @@ import json
 import os
 import sys
 
-from harness import (FAIL, KICKS, QDIR, REAL, STATES, STUB, T, WROTE, C, R, S, V, W, clean, fresh_pr_state, head,
+from harness import (FAIL, KICKS, QDIR, REAL, STATES, STUB, T, WROTE, C, P, R, S, V, W, clean, fresh_pr_state, head,
                      info, mkpr, pr_state, queued, run, rv_review, tmp, worker)
 
 # A pass that waits on time books its repo's next pass for when the wait
@@ -222,8 +222,8 @@ graphql_kept, C.graphql = C.graphql, graphql
 _, prs = S.open_prs("sam", "r")
 C.graphql = graphql_kept
 assert prs[0]["reviews"] == page(["r1", "r2"]) and prs[0]["comments"] == page(["c1"]), prs
-assert ASKED == [("prs", None), ("older reviews", "c-r2")] + [("older comments", "PR_3")] * S.OLDER_PAGES, ASKED
-assert len(prs[2]["comments"]["nodes"]) == 1 + S.OLDER_PAGES and prs[2]["comments"]["pageInfo"]["hasPreviousPage"], prs[2]
+assert ASKED == [("prs", None), ("older reviews", "c-r2")] + [("older comments", "PR_3")] * P.OLDER_PAGES, ASKED
+assert len(prs[2]["comments"]["nodes"]) == 1 + P.OLDER_PAGES and prs[2]["comments"]["pageInfo"]["hasPreviousPage"], prs[2]
 # Cut short, it's still just an outside contribution.
 fresh_pr_state()
 long_outside = mkpr()
