@@ -1,0 +1,47 @@
+{
+  "conary": "note v1",
+  "change": "673bk5zrngyptxv4kf1sq21x7k",
+  "repo": {
+    "owner": "fieldmouseworks",
+    "name": "burrow"
+  },
+  "pr": 116,
+  "url": "https://github.com/fieldmouseworks/burrow/pull/116",
+  "summary": "updates: pins on our own repos skip the release soak",
+  "task": null,
+  "author": {
+    "kind": "agent",
+    "login": "TusanHomichi",
+    "session": "https://claude.ai/code/session_01LUSpz65cwD3ABEEydMWsoV"
+  },
+  "landing": {
+    "revision": "0dff946db1004f50919543ec14a4dc50ad124f01a337de9c40a411d86721789b",
+    "before": "ac56e01ed3bef13f70e8fc59392118e5b1d0be23",
+    "after": "84d59c8bde6b38c212ed929267f320197a994df6",
+    "by": {
+      "kind": "status",
+      "login": "TusanHomichi"
+    },
+    "at": 1793207508425
+  },
+  "evidence": [
+    {
+      "kind": "review",
+      "check": "codex",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/116#pullrequestreview-5686620131"
+    },
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/40731671142/job/122969327421"
+    },
+    {
+      "kind": "ci",
+      "check": "agents",
+      "result": "pass",
+      "source": "status agents"
+    }
+  ]
+}
