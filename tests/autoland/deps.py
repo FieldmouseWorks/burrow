@@ -142,6 +142,14 @@ status, _ = run(mkpr(**dedited), 900)
 assert not merged() and "Dependency update" not in status, status
 status, _ = run(clean(**dedited), 900)
 assert merged(), status
+# Retargeted, it's another set of commits: read again, not taken from the
+# base it was read for.
+fresh_pr_state()
+COMMITS[15] = [DEPENDABOT_EMAIL]
+run(mkpr(checks=busy, **dedited), 900)
+COMMITS[15] = [DEPENDABOT_EMAIL, "claude@remi"]
+status, _ = run(mkpr(base="release", **dedited), 900)
+assert not merged() and "Dependency update" not in status, status
 # If its commits can't be read, it isn't merged on CI alone.
 fresh_pr_state()
 COMMITS[15] = None

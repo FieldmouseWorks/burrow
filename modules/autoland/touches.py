@@ -82,20 +82,22 @@ DEPENDABOT_EMAIL = "49699333+dependabot[bot]@users.noreply.github.com"
 def bot_edited(repo, pr, st):
     """Whether a dependency bot's branch has a commit no bot wrote (a Claude
     job's fix): code no reviewer has read, which Renovate won't merge either.
-    Asked once per head. A failed ask is asked again: on a Renovate branch it
+    Asked once per head and base, since retargeting changes which commits are
+    the PR's. A failed ask is asked again: on a Renovate branch it
     counts as not edited meanwhile, since Renovate checks for itself before
     it merges; on a Dependabot one, which the steward merges, as edited."""
     renovate = pr["headRefName"].startswith("renovate/")
     if renovate and not CFG["renovateEmail"]:
         return False
-    if st.get("editedHead") != pr["headRefOid"]:
+    seen = [pr["headRefOid"], pr["baseRefName"]]
+    if st.get("editedHead") != seen:
         got = C.gh("pr", "view", str(pr["number"]), "-R", repo, "--json", "commits", check=False)
         if not got:
             return not renovate
         bots = {CFG["renovateEmail"], DEPENDABOT_EMAIL}
         st["edited"] = any(a.get("email") not in bots
                            for c in got["commits"] for a in c["authors"])
-        st["editedHead"] = pr["headRefOid"]
+        st["editedHead"] = seen
     return st["edited"]
 
 
