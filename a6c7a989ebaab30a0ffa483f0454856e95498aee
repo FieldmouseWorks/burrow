@@ -1,0 +1,47 @@
+{
+  "conary": "note v1",
+  "change": "0nmeq7c8g4mh547gca6s7126c8",
+  "repo": {
+    "owner": "FieldmouseWorks",
+    "name": "burrow"
+  },
+  "pr": 108,
+  "url": "https://github.com/FieldmouseWorks/burrow/pull/108",
+  "summary": "house: sync the Pull requests section as a block, like the rules",
+  "task": "fieldmouseworks/burrow#87",
+  "author": {
+    "kind": "agent",
+    "login": "TusanHomichi",
+    "session": "https://claude.ai/code/session_01QzLmB1pT9Tck6N9Vf13a9M"
+  },
+  "landing": {
+    "revision": "4832a29b437d5d91cdf188d0dc1bd503ecf9d23d2adba3c303061c75e7e14414",
+    "before": "b556799e62340c388d7e166ade9b772f8c2d9ad6",
+    "after": "a6c7a989ebaab30a0ffa483f0454856e95498aee",
+    "by": {
+      "kind": "status",
+      "login": "TusanHomichi"
+    },
+    "at": 1793160210517
+  },
+  "evidence": [
+    {
+      "kind": "review",
+      "check": "codex",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/108#pullrequestreview-5677326199"
+    },
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/40625091318/job/122607995118"
+    },
+    {
+      "kind": "ci",
+      "check": "agents",
+      "result": "pass",
+      "source": "status agents"
+    }
+  ]
+}
