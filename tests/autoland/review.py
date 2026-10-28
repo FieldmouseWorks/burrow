@@ -310,6 +310,25 @@ W.work()
 assert os.listdir(f"{tmp}/state/{V.QUEUE}") == []
 assert json.load(open(f"{tmp}/state/{V.DONE}/codex--unread.json"))["result"] == "error"
 os.remove(f"{tmp}/state/{V.DONE}/codex--unread.json")
+# One for a reviewer this machine doesn't have (removed since it was queued)
+# leaves the queue unanswered, or the queue watcher would start the service
+# until systemd gave up on it; Codex's work beside it goes on. One a worker
+# from before is still on (it holds the entry's lock) stays to that worker.
+V.queue("sam/r", snap_pr, "pr-sam_r-5.json", "codex")
+entry, = os.listdir(f"{tmp}/state/{V.QUEUE}")
+for gone in ("gone", "old"):
+    with open(f"{tmp}/state/{V.QUEUE}/{entry}") as f, open(f"{tmp}/state/{V.QUEUE}/{gone}--{entry.partition('--')[2]}", "w") as g:
+        json.dump({**json.load(f), "reviewer": gone}, g)
+held = open(f"{tmp}/state/{V.QUEUE}/old--{entry.partition('--')[2]}")
+fcntl.flock(held, fcntl.LOCK_SH)
+W.work()
+assert os.listdir(f"{tmp}/state/{V.QUEUE}") == [f"old--{entry.partition('--')[2]}"], os.listdir(f"{tmp}/state/{V.QUEUE}")
+assert os.listdir(f"{tmp}/state/{V.DONE}") == [entry] and len(agent_runs()) == 1, os.listdir(f"{tmp}/state/{V.DONE}")
+held.close()
+W.work()
+assert os.listdir(f"{tmp}/state/{V.QUEUE}") == [] and os.listdir(f"{tmp}/state/{V.DONE}") == [entry]
+os.remove(f"{tmp}/state/{V.DONE}/{entry}")
+agent()
 # So does one that's there but can't be opened, or it'd be handed out forever.
 os.mkdir(f"{tmp}/state/{V.QUEUE}/codex--dir.json")
 W.review("codex--dir.json")

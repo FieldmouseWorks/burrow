@@ -440,10 +440,20 @@ def work():
         waiting = {}
         for name in os.listdir(q):
             r = name.partition("--")[0]
-            if name.endswith(".json") and name not in busy and r in pools:
-                item = load(f"{V.QUEUE}/{name}", None)
-                item = item if isinstance(item, dict) else {}
-                waiting.setdefault(r, []).append((not C.pipeline(item.get("repo")), item.get("at", 0), name))
+            if not name.endswith(".json") or name in busy:
+                continue
+            if r not in pools:
+                # A reviewer this machine no longer has (one removed since
+                # it was queued): nothing would ever take it, and the queue
+                # watcher would start this again and again until systemd
+                # gave up on it, and on Codex's reviews with it. Taken off
+                # unanswered, unless a worker from before is still on it.
+                if V.taken(os.path.join(q, name)):
+                    log(f"{name}: dropped from the queue: there's no reviewer {r} here")
+                continue
+            item = load(f"{V.QUEUE}/{name}", None)
+            item = item if isinstance(item, dict) else {}
+            waiting.setdefault(r, []).append((not C.pipeline(item.get("repo")), item.get("at", 0), name))
         # One look at a time in a session: a PR's next head waits for the
         # look at its last one, and resumes it.
         sessions = {session_of(n) for n in busy}
