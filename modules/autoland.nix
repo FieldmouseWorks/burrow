@@ -153,22 +153,27 @@ let
   };
 
   configFile = pkgs.writeText "autoland.json" (builtins.toJSON settings);
-  # steward.py and the modules it imports from beside it, linted as they're
-  # built.
+  # steward.py and every module beside it, linted as they're built: all of
+  # them, so a new one can't be left behind.
   stewardSrc = pkgs.runCommand "autoland-steward-src"
     { nativeBuildInputs = [ pkgs.python3Packages.flake8 ]; } ''
     mkdir $out
-    cp ${./autoland/steward.py} $out/steward.py
-    cp ${./autoland/common.py} $out/common.py
-    cp ${./autoland/reviewers.py} $out/reviewers.py
-    cp ${./autoland/review_worker.py} $out/review_worker.py
-    cp ${./autoland/egress.py} $out/egress.py
-    cp ${./autoland/repos.py} $out/repos.py
-    cp ${./autoland/tasks.py} $out/tasks.py
-    cp ${./autoland/touches.py} $out/touches.py
-    cp ${./autoland/seal.py} $out/seal.py
-    cp ${./autoland/prs.py} $out/prs.py
+    cp ${./autoland}/*.py $out/
     flake8 --ignore E501,W503 $out
+  '';
+  # Each of them imported from the package, with this machine's settings, as
+  # part of the system's build: an import that doesn't resolve there (a
+  # module the package lacks) fails the build, not every pass once it's live.
+  # review_worker is imported only by the reviews' runs, so each one is.
+  stewardImports = pkgs.runCommand "autoland-steward-imports" { } ''
+    cd ${stewardSrc}
+    AUTOLAND_CONFIG=${configFile} ${pkgs.python3}/bin/python3 -I -c '
+    import importlib, pathlib, sys
+    sys.path.insert(0, ".")
+    for p in sorted(pathlib.Path(".").glob("*.py")):
+        importlib.import_module(p.stem)
+    '
+    touch $out
   '';
   # The command, with this machine's config, so `autoland-steward status`
   # works from any shell, not only in the service.
@@ -471,6 +476,7 @@ in
   };
 
   config = lib.mkIf cfg.enable {
+    system.checks = [ stewardImports ];
     assertions = [{
       assertion = rv.codex.enable;
       message = "burrow.autoland needs its reviewer: turn on burrow.autoland.reviewers.codex.";

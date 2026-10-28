@@ -112,6 +112,8 @@ def gh(*a, **k):
 
 def fresh(path, etag=None):
     CALLS.append(("fresh", path, etag))
+    if "raise" in ISSUE:
+        raise ISSUE["raise"]
     if etag == ISSUE["etag"]:
         return None
     return ISSUE["etag"], ISSUE["issue"]
@@ -154,6 +156,10 @@ if "If-None-Match: W/\\"one\\"" in a:
     sys.stdout.write("HTTP/1.1 304 Not Modified\\nEtag: \\"one\\"\\r\\n\\r\\n"); sys.exit(1)
 if a[-1].endswith("/9"):
     sys.stdout.write("HTTP/1.1 404 Not Found\\nX-A: b\\r\\n\\r\\n{{}}"); sys.stderr.write("gh: Not Found (HTTP 404)\\n"); sys.exit(1)
+if a[-1].endswith("/10"):
+    sys.stdout.write("HTTP/1.1 410 Gone\\nX-A: b\\r\\n\\r\\n{{}}"); sys.stderr.write("gh: This issue was deleted (HTTP 410)\\n"); sys.exit(1)
+if a[-1].endswith("/11"):
+    sys.stdout.write("HTTP/1.1 403 Forbidden\\nX-A: b\\r\\n\\r\\n{{}}"); sys.stderr.write("gh: Resource not accessible (HTTP 403)\\n"); sys.exit(1)
 if a[-1].endswith("/8"):
     sys.stderr.write("gh: API rate limit exceeded for user (HTTP 403)\\n"); sys.exit(1)
 sys.stdout.write('HTTP/1.1 200 OK\\nX-A: b\\r\\nETag: W/"one"\\r\\n\\r\\n{{"body": "a\\\\r\\\\n\\\\nb"}}')
@@ -164,7 +170,7 @@ os.environ["PATH"] = f"{tmp}/fake-gh:{path}"
 C.limited = lambda stderr: None  # it asks gh for the reset: not this gh's
 assert C.fresh("repos/sam/r/issues/7") == ('W/"one"', {"body": "a\r\n\nb"}), C.fresh("repos/sam/r/issues/7")
 assert C.fresh("repos/sam/r/issues/7", 'W/"one"') is None
-for n, kind in ((9, RuntimeError), (8, C.Unavailable)):
+for n, kind in ((9, C.Gone), (10, C.Gone), (11, RuntimeError), (8, C.Unavailable)):
     try:
         C.fresh(f"repos/sam/r/issues/{n}")
         raise AssertionError(n)
@@ -235,26 +241,52 @@ assert C.load("dashboard-sam_r.json", {})["items"]["problem WARN: Found renovate
     "since": T + 4 * DAY + 300, "section": "Repository Problems", "what": "WARN: Found renovate config warnings", "failing": True}
 STATES.clear()
 
-# A dashboard someone else opened, or one closed or renamed, isn't read for
-# anything: it's looked for again a day later.
-for change in ({"who": "eve"}, {"state": "closed"}, {"title": "Dependency Dashboard!"}):
+# A dashboard someone else opened, or one deleted, closed or renamed, isn't
+# read for anything: its number, etag and items go, and the one Renovate
+# opens in its place is found two hours on.
+for change in ({"who": "eve"}, {"state": "closed"}, {"title": "Dependency Dashboard!"},
+               {"raise": C.Gone("gh api repos/sam/r/issues/7: gh: Not Found (HTTP 404)")}):
     C.save("dashboard-sam_r.json", {})
     dashboard(BODY)
     look(0)
-    dashboard(BODY, **change)
+    look(DAY)  # with items handed to a job
+    STARTED.clear()
+    if "raise" in change:
+        ISSUE.update(change)
+    else:
+        dashboard(BODY, **change)
     assert look(10 * DAY) == [] and not JOBS, (change, JOBS)
-    assert C.load("dashboard-sam_r.json", {}) == {"looked": T + 10 * DAY}, change
+    assert C.load("dashboard-sam_r.json", {}) == {"next": T + 10 * DAY + 2 * D.HOUR}, change
     look(10 * DAY + 60)
     assert not [a for a in CALLS if "search/issues" in a or a[0] == "fresh"], CALLS
-    look(11 * DAY + 1)
-    assert [a for a in CALLS if "search/issues" in a], CALLS
+    ISSUE.pop("raise", None)
+    dashboard(BODY)
+    GH["hits"] = [{"number": 12, "title": "Dependency Dashboard"}]
+    look(10 * DAY + 2 * D.HOUR)
+    assert [a for a in CALLS if "search/issues" in a] and ("fresh", "repos/sam/r/issues/12", None) in CALLS, CALLS
+    assert set(C.load("dashboard-sam_r.json", {})["items"]) == set(D.read(BODY)), change
+    GH["hits"] = [{"number": 7, "title": "Dependency Dashboard"}]
+
+# GitHub not answering keeps all of it, for the next pass to read again.
+C.save("dashboard-sam_r.json", {})
+dashboard(BODY)
+look(0)
+was = C.load("dashboard-sam_r.json", {})
+ISSUE["raise"] = C.Unavailable("gh api repos/sam/r/issues/7: HTTP 502")
+try:
+    look(60)
+    raise AssertionError("no raise")
+except C.Unavailable:
+    pass
+assert C.load("dashboard-sam_r.json", {}) == was
+ISSUE.pop("raise")
 
 # None found, or only an issue by another title: no read, and the search
 # waits a day; and a pass searches for so many repos at most.
 GH["hits"] = [{"number": 9, "title": "Dependency Dashboard (old)"}]
 C.save("dashboard-sam_r.json", {})
 look(0)
-assert C.load("dashboard-sam_r.json", {}) == {"looked": T, "n": None} and not [a for a in CALLS if a[0] == "fresh"], CALLS
+assert C.load("dashboard-sam_r.json", {}) == {"n": None, "next": T + DAY} and not [a for a in CALLS if a[0] == "fresh"], CALLS
 look(DAY - 1)
 assert not CALLS, CALLS
 C.NOW = T

@@ -22,7 +22,7 @@ import time
 import common as C
 from common import CFG, MIN, load, log, save
 
-DAY = 86400
+HOUR, DAY = 3600, 86400
 STUCK = "Still on Renovate's dashboard a day after a Claude job"
 NO_JOB = "Couldn't start a Claude job"
 # Repos whose dashboard a pass may look for, at most: GitHub's search allows
@@ -65,18 +65,20 @@ def read(body):
 
 def find(repo, st):
     """The number of the repo's dashboard: the one it had, else one looked
-    for once a day (a repo Renovate doesn't cover has none)."""
+    for, then once a day while there's none (a repo Renovate doesn't cover
+    has none)."""
     if st.get("n"):
         return st["n"]
-    if C.NOW - st.get("looked", 0) < DAY or len(FOUND) >= FINDS:
+    if C.NOW < st.get("next", 0) or len(FOUND) >= FINDS:
         return None
     FOUND.append(repo)
     title = CFG["dashboard"]["title"]
     q = f'repo:{repo} is:issue is:open in:title "{title}" author:{C.me()}'
     hits = C.gh("api", "-X", "GET", "search/issues", "-f", f"q={q}", "--jq", "[.items[] | {number, title}]")
     st.clear()
-    st["looked"] = C.NOW
     st["n"] = next((i["number"] for i in hits or [] if i.get("title") == title), None)
+    if not st["n"]:
+        st["next"] = C.NOW + DAY
     return st["n"]
 
 
@@ -92,14 +94,19 @@ def watch(repo, mine):
     st = load(name, {})
     n = find(repo, st)
     if n:
-        got = C.fresh(f"repos/{repo}/issues/{n}", st.get("etag"))
+        try:
+            got = C.fresh(f"repos/{repo}/issues/{n}", st.get("etag"))
+        except C.Gone:
+            got = None, {}
         if got is not None:
             etag, issue = got
             if (issue.get("state") != "open" or issue.get("title") != CFG["dashboard"]["title"]
                     or (issue.get("user") or {}).get("login") != C.me()):
-                # Closed (Renovate does that when it's turned off), renamed,
-                # or not one Renovate wrote: looked for again tomorrow.
-                st = {"looked": C.NOW}
+                # Deleted, closed (Renovate does that when it's turned off),
+                # renamed, or not one Renovate wrote: what it had goes, and
+                # one in its place is looked for in two hours, by when
+                # Renovate's next run (hourly at the latest) has opened it.
+                st = {"next": C.NOW + 2 * HOUR}
                 n = None
             else:
                 was = st.get("items", {})
