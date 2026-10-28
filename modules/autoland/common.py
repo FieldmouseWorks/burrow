@@ -134,6 +134,20 @@ def app_call(method, path, jwt):
         raise Unavailable(f"{method} {path}: {e}") from None
 
 
+def installations(jwt):
+    """The App's installations, by owner (lower case), every page of them: a
+    public App can be on accounts that aren't among the owners, and they
+    take up pages too. A page GitHub didn't answer raises, so a lookup cut
+    short is never read as an owner it isn't on."""
+    found, page = {}, 1
+    while True:
+        got = app_call("GET", f"app/installations?per_page=100&page={page}", jwt)
+        found.update({str((i.get("account") or {}).get("login", "")).lower(): i["id"] for i in got})
+        if len(got) < 100:
+            return found
+        page += 1
+
+
 def token(owner):
     """A token of the App's installation on owner (lower case). One lasts an
     hour and a pass twenty minutes at most, so each is minted once a
@@ -144,8 +158,7 @@ def token(owner):
     jwt = app_jwt()
     if owner not in _installs:
         _installs.clear()
-        _installs.update({str((i.get("account") or {}).get("login", "")).lower(): i["id"]
-                          for i in app_call("GET", "app/installations?per_page=100", jwt)})
+        _installs.update(installations(jwt))
     if owner not in _installs:
         raise RuntimeError(f"the App {CFG['app']['slug']} isn't installed on {owner}")
     got = app_call("POST", f"app/installations/{_installs[owner]}/access_tokens", jwt)

@@ -1,5 +1,6 @@
-"""What a pass keeps up in every repo: the labels, the rulesets' up-to-date
-branches, and a red default branch's fix job."""
+"""What a pass keeps up in every repo: the labels, the rules' up-to-date
+branches and the App their required status comes from, and a red default
+branch's fix job."""
 
 import json
 
@@ -13,7 +14,7 @@ C._for.append("sam")
 # Every repo gets the hold and needs-owner labels, once a day.
 fresh_pr_state()
 C.NOW = C.ts(T0)
-C.save("repo-sam_r.json", {"settings": C.NOW})
+C.save("repo-sam_r.json", {"settings": C.NOW, "app": 7})
 WROTE.clear()
 R.settle_repo({"repo": "sam/r", "private": False, "default": "main"}, {"sam/r"})
 assert sorted(x.split()[2] for x in WROTE if x.startswith("label create")) == ["hold", "needs-owner"], WROTE
@@ -25,9 +26,11 @@ C.NOW += 86400
 R.settle_repo({"repo": "sam/r", "private": False, "default": "main"}, {"sam/r"})
 assert sorted(x.split()[2] for x in WROTE if x.startswith("label create")) == ["hold", "needs-owner"], WROTE
 
-# Up-to-date branches go off wherever the repo has them: its own rulesets
-# and the default branch's classic protection. Tag rulesets, and ones that
-# don't ask for it, are left as they are.
+# Wherever the repo has rules (its own rulesets and the default branch's
+# classic protection), up-to-date branches go off and the steward's status
+# is required from its App only (App 7 here): the same context from anyone
+# else, the owner's login included, satisfies nothing. Tag rulesets, and
+# ones that ask for neither, are left as they are, and so are other checks.
 checks = {"type": "required_status_checks", "parameters": {
     "strict_required_status_checks_policy": True, "required_status_checks": [{"context": "gate"}]}}
 LISTED = [{"id": 1, "name": "baseline", "target": "branch", "source_type": "Repository"},
@@ -52,14 +55,20 @@ SETTINGS = {
 def settings(*a, **k):
     if a[:1] != ("api",) or a[1:2] == () or a[1] not in SETTINGS:
         return gh_stub(*a, **k)
-    got = SETTINGS[a[1]]
+    got = json.loads(json.dumps(SETTINGS[a[1]]))  # a copy, as GitHub's answer is
     # A listing comes in pages: all of them with --paginate --slurp, else the first.
     return got if "rulesets?" not in a[1] or "--slurp" in a else got[0]
 
 
+def sent(*a, **k):
+    if "input" in k and ("rulesets" in a[3] or "protection" in a[3]):
+        BODIES.append((a[3], json.loads(k["input"])))
+    return write(*a, **k)
+
+
 C.gh = settings
 BODIES, write = [], C.write
-C.write = lambda *a, **k: (BODIES.append(json.loads(k["input"])) if "rulesets" in " ".join(a) else None) or write(*a, **k)
+C.write = sent
 C.NOW += 86400
 WROTE.clear()
 R.settle_repo({"repo": "sam/r", "private": False, "default": "main"}, {"sam/r"})
@@ -69,10 +78,71 @@ assert len(puts) == 1 and puts[0].startswith("api -X PUT repos/sam/r/rulesets/2 
 # branches and bypass are what they were.
 want = json.loads(json.dumps({k: v for k, v in gates.items() if k != "source_type"}))
 want["rules"][1]["parameters"]["strict_required_status_checks_policy"] = False
-assert BODIES == [want], BODIES
-assert "api -X PATCH repos/sam/r/branches/main/protection/required_status_checks -F strict=false" in WROTE, WROTE
+PROTECTION = "repos/sam/r/branches/main/protection/required_status_checks"
+assert BODIES == [("repos/sam/r/rulesets/2", want), (PROTECTION, {"strict": False})], BODIES
+assert f"api -X PATCH {PROTECTION} --input -" in WROTE, WROTE
+# The steward's status, required from anyone, is pinned to the App: in a
+# ruleset (integration_id) and in classic protection (app_id). The other
+# checks keep their sources: one any App may set stays so (GitHub lists it
+# with no app_id, and takes -1 for it).
+SETTINGS["repos/sam/r/rulesets/2"]["rules"][1]["parameters"].update(
+    strict_required_status_checks_policy=False,
+    required_status_checks=[{"context": "gate"}, {"context": "review-settled"}, {"context": "ci", "integration_id": 15368}])
+SETTINGS[PROTECTION] = {"strict": False, "checks": [{"context": "gate", "app_id": None},
+                                                    {"context": "review-settled", "app_id": None},
+                                                    {"context": "ci", "app_id": 15368}]}
+C.NOW += 86400
+WROTE.clear()
+BODIES.clear()
+R.settle_repo({"repo": "sam/r", "private": False, "default": "main"}, {"sam/r"})
+want = json.loads(json.dumps({k: v for k, v in SETTINGS["repos/sam/r/rulesets/2"].items() if k != "source_type"}))
+want["rules"][1]["parameters"]["required_status_checks"][1]["integration_id"] = 7
+assert BODIES == [("repos/sam/r/rulesets/2", want),
+                  (PROTECTION, {"checks": [{"context": "gate", "app_id": -1}, {"context": "review-settled", "app_id": 7},
+                                           {"context": "ci", "app_id": 15368}]})], BODIES
+assert C.load("repo-sam_r.json", {})["app"] == 7
+# Once pinned, nothing to change. Pinned to another App (the steward's old
+# one, say), it's moved to this one.
+for x in SETTINGS["repos/sam/r/rulesets/2"]["rules"][1]["parameters"]["required_status_checks"]:
+    x.setdefault("integration_id", 7)
+SETTINGS[PROTECTION]["checks"] = [{"context": "gate", "app_id": -1}, {"context": "review-settled", "app_id": 7}]
+C.NOW += 86400
+WROTE.clear()
+R.settle_repo({"repo": "sam/r", "private": False, "default": "main"}, {"sam/r"})
+assert not [x for x in WROTE if "rulesets/" in x or "protection" in x], WROTE
+SETTINGS[PROTECTION]["checks"][1]["app_id"] = 99
+C.NOW += 86400
+WROTE.clear()
+BODIES.clear()
+R.settle_repo({"repo": "sam/r", "private": False, "default": "main"}, {"sam/r"})
+assert BODIES == [(PROTECTION, {"checks": [{"context": "gate", "app_id": -1}, {"context": "review-settled", "app_id": 7}]})], BODIES
+SETTINGS[PROTECTION] = {"strict": False}
+# Another App than the one a repo was settled for: its settings are due
+# straight away, not a day later. Until its checks are known to be pinned
+# (GitHub not saying what the protection's are, say), they stay due.
+C.save("repo-sam_r.json", {**C.load("repo-sam_r.json", {}), "settings": C.NOW, "app": 6})
+SETTINGS[PROTECTION] = None
+WROTE.clear()
+R.settle_repo({"repo": "sam/r", "private": False, "default": "main"}, {"sam/r"})
+assert "api -X PUT repos/sam/r/vulnerability-alerts" in WROTE and C.load("repo-sam_r.json", {})["app"] == 6, WROTE
+SETTINGS[PROTECTION] = {"strict": False}
+WROTE.clear()
+R.settle_repo({"repo": "sam/r", "private": False, "default": "main"}, {"sam/r"})
+assert "api -X PUT repos/sam/r/vulnerability-alerts" in WROTE and C.load("repo-sam_r.json", {})["app"] == 7, WROTE
+WROTE.clear()
+R.settle_repo({"repo": "sam/r", "private": False, "default": "main"}, {"sam/r"})
+assert WROTE == [], WROTE
+# A public repo's rulesets not listed is GitHub not answering: not pinned.
+# A private one's is a plan without rules: nothing there to pin.
+rulesets_kept = SETTINGS.pop("repos/sam/r/rulesets?per_page=100")
+for private, pinned in ((False, 6), (True, 7)):
+    C.save("repo-sam_r.json", {**C.load("repo-sam_r.json", {}), "app": 6})
+    R.settle_repo({"repo": "sam/r", "private": private, "default": "main"}, {"sam/r"})
+    assert C.load("repo-sam_r.json", {})["app"] == pinned, private
+SETTINGS["repos/sam/r/rulesets?per_page=100"] = rulesets_kept
 # A repo set to have no baseline ruleset still gets its own rules' turned off.
 SETTINGS["repos/sam/r/rulesets/2"]["rules"][1]["parameters"]["strict_required_status_checks_policy"] = True
+SETTINGS[PROTECTION] = {"strict": True}
 S.C.CFG["repos"]["sam/r"] = {**S.C.CFG["repos"].get("sam/r", {}), "ruleset": False}
 C.NOW += 86400
 WROTE.clear()
@@ -85,8 +155,8 @@ assert len(puts) == 1 and puts[0].startswith("api -X PUT repos/sam/r/rulesets/2 
 SETTINGS["repos/sam/r/branches/release%2F1.0"] = SETTINGS["repos/sam/r/branches/main"]
 SETTINGS["repos/sam/r/branches/release%2F1.0/protection/required_status_checks"] = {"strict": True}
 WROTE.clear()
-R.not_strict_protection("sam/r", "release/1.0")
-assert WROTE == ["api -X PATCH repos/sam/r/branches/release%2F1.0/protection/required_status_checks -F strict=false"], WROTE
+assert R.keep_protection("sam/r", "release/1.0")
+assert WROTE == ["api -X PATCH repos/sam/r/branches/release%2F1.0/protection/required_status_checks --input -"], WROTE
 # Already off, or no classic checks at all: nothing to change.
 SETTINGS["repos/sam/r/rulesets/2"]["rules"][1]["parameters"]["strict_required_status_checks_policy"] = False
 SETTINGS["repos/sam/r/branches/main"] = {"protection": {"required_status_checks": {"enforcement_level": "off"}}}
@@ -100,12 +170,15 @@ C.NOW += 86400
 WROTE.clear()
 R.settle_repo({"repo": "sam/r", "private": False, "default": "main"}, {"sam/r"})
 assert not [x for x in WROTE if "rulesets" in x], WROTE
-# And with none at all, it's added.
+# And with none at all, it's added, its required status from the App only.
 SETTINGS["repos/sam/r/rulesets?per_page=100"] = [[]]
 C.NOW += 86400
 WROTE.clear()
+BODIES.clear()
 R.settle_repo({"repo": "sam/r", "private": False, "default": "main"}, {"sam/r"})
 assert [x for x in WROTE if "rulesets" in x] == ["api -X POST repos/sam/r/rulesets --input -"], WROTE
+required = [y for y in BODIES[0][1]["rules"] if y["type"] == "required_status_checks"]
+assert required[0]["parameters"]["required_status_checks"] == [{"context": "review-settled", "integration_id": 7}], required
 C.gh, C.write = gh_stub, write
 
 # A red default branch gets one Claude job, and nothing more while it works

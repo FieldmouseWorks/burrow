@@ -367,6 +367,25 @@ WROTE.clear()
 R.unhook_gone([{"repo": "sam/r"}] + more)
 assert not [x for x in WROTE if "eve/p" in x], WROTE
 os.remove(f"{tmp}/state/repo-eve_p.json")
+# Another owner's project the App isn't installed on gets no hook, and the
+# others still get theirs; it's kept for unhook_gone all the same, since
+# what its hook is now can't be asked.
+
+
+def uninstalled(*a, **k):
+    if C._for and C._for[-1] == "mallory":
+        raise RuntimeError("the App steward isn't installed on mallory")
+    return [] if a[:2] == ("api", "repos/eve/p/hooks") else gh_kept(*a, **k)
+
+
+C.gh = uninstalled
+C.projects = lambda: iter([("x", "mallory/x"), ("p", "eve/p")])
+WROTE.clear()
+more = R.hook_projects([{"repo": "sam/r"}])
+assert more == [{"repo": "eve/p"}, {"repo": "mallory/x"}], more
+assert [x for x in WROTE if "hooks" in x] == ["api -X POST repos/eve/p/hooks --input -"], WROTE
+os.remove(f"{tmp}/state/repo-eve_p.json")
+os.remove(f"{tmp}/state/repo-mallory_x.json")
 C.gh, C.projects = gh_kept, projects_kept
 # A repo no longer seen to (excluded, archived) has its hook taken off, on
 # a full pass; one that won't come off is tried again a day later.

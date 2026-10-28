@@ -19,7 +19,8 @@ change nothing else in the same PR.
 - A `baseline` ruleset on the default branch, where the plan allows one: no
   force pushes or deleting the branch, changes only through PRs, review
   threads resolved, CODEOWNERS honoured, and the `review-settled` status
-  required. Repo admins can still merge past it from the PR page. A repo whose
+  required from the steward's App. Repo admins can still merge past it from
+  the PR page. A repo whose
   automation pushes to its default branch (`directPush`) gets only the first
   two. Existing rules stay; the ruleset only adds.
 - No rule makes a branch be up to date with its base before it merges, the
@@ -29,6 +30,10 @@ change nothing else in the same PR.
   so the PRs take turns. It guards only against two PRs that pass alone and
   break the branch together, and the default branch's own CI catches that
   (step 8 of the PR flow undoes it). There's no merge queue either.
+- Wherever a rule requires `review-settled` (those rulesets and branch
+  protection too), it's required from the steward's App: GitHub then takes
+  that status from no one else, auto-merge included. The steward pins it
+  where it finds it, and straight away when the App changes.
 - The `hold` and `needs-owner` labels (`burrow.autoland.labels`), which the
   steward and its jobs put on PRs.
 

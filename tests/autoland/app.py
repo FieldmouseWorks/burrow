@@ -23,7 +23,7 @@ sh("openssl", "pkey", "-in", KEY, "-pubout", "-out", PUB)
 # GitHub's API, standing in: the App's installations (sam spelled as GitHub
 # has it), and a token for each, numbered.
 SEEN, MINTED = [], []
-API = {"down": False}
+API = {"down": False, "page2": True}
 
 
 class GitHub(http.server.BaseHTTPRequestHandler):
@@ -38,8 +38,15 @@ class GitHub(http.server.BaseHTTPRequestHandler):
         SEEN.append(("GET", self.path, self.headers.get("Authorization")))
         if API["down"]:
             return self.answer(503, {"message": "down"})
-        if self.path == "/app/installations?per_page=100":
-            return self.answer(200, [{"id": 11, "account": {"login": "Sam"}}, {"id": 12, "account": {"login": "eve"}}])
+        # A hundred to a page: sam's on the first, among others' (the App is
+        # public), and eve's on the second.
+        if self.path == "/app/installations?per_page=100&page=1":
+            return self.answer(200, [{"id": 11, "account": {"login": "Sam"}}]
+                               + [{"id": 100 + k, "account": {"login": f"other{k}"}} for k in range(99)])
+        if self.path == "/app/installations?per_page=100&page=2":
+            if not API["page2"]:
+                return self.answer(502, {"message": "Bad Gateway"})
+            return self.answer(200, [{"id": 12, "account": {"login": "eve"}}])
         self.answer(404, {"message": "Not Found"})
 
     def do_POST(self):
@@ -67,6 +74,9 @@ def unb64(s):
 # JWT its key signed, saying it's App 7, for at most ten minutes.
 assert REAL_TOKEN("sam") == "ghs_minted1"
 assert MINTED == ["/app/installations/11/access_tokens"], MINTED
+# Every page of the installations was read, not just the first.
+assert [p for _, p, _ in SEEN] == ["/app/installations?per_page=100&page=1", "/app/installations?per_page=100&page=2",
+                                   "/app/installations/11/access_tokens"], SEEN
 for method, path, auth in SEEN:
     assert auth.startswith("Bearer "), SEEN
     jwt = auth[len("Bearer "):]
@@ -105,6 +115,16 @@ try:
 except C.Unavailable as e:
     assert "HTTP 503" in str(e), e
 API["down"] = False
+# Nor a page of them: an owner that might be on it isn't said to be missing.
+API["page2"] = False
+C._installs.clear()
+C._tokens.clear()
+try:
+    REAL_TOKEN("eve")
+    raise AssertionError("a token with a page of installations unread")
+except C.Unavailable as e:
+    assert "HTTP 502" in str(e), e
+API["page2"] = True
 # Without the key (a pass not given the credential), nothing is signed.
 os.rename(KEY, KEY + ".gone")
 try:
