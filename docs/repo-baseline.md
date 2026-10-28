@@ -103,15 +103,18 @@ owner, since nothing else merges it.
   The CI is the flake gate the [house style](house-style.md#the-gate-is-the-flake)
   describes: a `flake.nix` from burrow's template, and the workflow that calls
   `nix flake check`. Jobs the flake can't hold stay alongside it.
-- **AGENTS.md** with the two sections below, plus whatever the repo's own
-  agents need (how to build, test and run it). Keep the repo's existing text.
+- **AGENTS.md** with the Code Review Rules section below, plus whatever the
+  repo's own agents need (how to build, test and run it). Keep the repo's
+  existing text.
   The reviewers apply only the `## Code Review Rules` section of the
   AGENTS.md nearest each changed file, as the base branch has it (`###`
   subheadings group its checks), so review rules under any other heading
   move under that one.
-- **The house block** in AGENTS.md: [`house/rules.md`](../house/rules.md),
-  copied in verbatim with its marker lines, as [the house style](house-style.md)
-  says, so the house sync can find and update it later.
+- **The house blocks** in AGENTS.md: [`house/rules.md`](../house/rules.md)
+  and [`house/prs.md`](../house/prs.md) (the Pull requests section), each
+  copied in verbatim with its marker lines, as
+  [the house style](house-style.md#the-house-blocks) says, so the house sync
+  can find and update them later.
 - **CLAUDE.md** containing `@AGENTS.md`, then anything only Claude needs, so
   there's one source of truth.
 - **README.md**: what it is, how to build and run it, and its license.
@@ -124,22 +127,13 @@ owner, since nothing else merges it.
 - **CODEOWNERS** only for paths the owner must sign off on themselves, never
   `*`: the owner can't approve PRs their own Claude sessions open.
 
-### AGENTS.md: the shared sections
+### AGENTS.md: the Code Review Rules section
 
-They call Codex "the review bot", so they pass the name guards some repos run
-over their guidance (and the house rule against naming models).
+It calls Codex "the review bot", as the Pull requests block does, so it passes
+the name guards some repos run over their guidance (and the house rule against
+naming models).
 
 ```markdown
-## Pull requests
-
-Open PRs ready for review, never as drafts, and leave them to the steward: it
-asks the review bot for a review, and once the bot finds nothing on your head,
-every review thread is resolved and CI is green, it merges the PR. Fix or
-answer every finding: push the fix and reply with the commit, or reply with
-why it's wrong, then resolve the thread. A PR touching a one-way path
-(secrets, migrations, CODEOWNERS) gets a judgment first: it lands unless it
-can't be undone or is the owner's to decide.
-
 ## Code Review Rules
 
 For reviewers, the review bot included. Flag as P1:

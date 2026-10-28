@@ -127,8 +127,8 @@ let
     baselineTask = ''
       REPO is new, and doesn't meet the baseline every repo of ${config.burrow.owner}'s keeps yet. Read
       ${baselineDocs}/docs/repo-baseline.md and bring this repo up to its "Files" section: open one PR, ready for review (not a draft), that adds
-      what's missing (CI that builds and runs the tests through the repo's flake, AGENTS.md with the house block and the shared "Pull requests" and
-      "Code Review Rules" sections, CLAUDE.md, README, .gitignore, LICENSE if it's public) and changes
+      what's missing (CI that builds and runs the tests through the repo's flake, AGENTS.md with the house blocks and the shared
+      "Code Review Rules" section, CLAUDE.md, README, .gitignore, LICENSE if it's public) and changes
       nothing else. Don't ask for a review or merge it: the steward does that.
     '';
   };
