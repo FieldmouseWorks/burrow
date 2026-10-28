@@ -1,0 +1,47 @@
+{
+  "conary": "note v1",
+  "change": "7nxehy379xvampw801h3kfj3k3",
+  "repo": {
+    "owner": "fieldmouseworks",
+    "name": "burrow"
+  },
+  "pr": 112,
+  "url": "https://github.com/fieldmouseworks/burrow/pull/112",
+  "summary": "ledger: ask which login the token is once a day, not every pass",
+  "task": "fieldmouseworks/burrow#109",
+  "author": {
+    "kind": "person",
+    "login": "TusanHomichi",
+    "session": null
+  },
+  "landing": {
+    "revision": "1fa6fa4698759ab1d6cc115b6545a02c90f3292898ae3561dfed8387b491bb7e",
+    "before": "e354144a1379658a0a296bbd541a390fec637766",
+    "after": "94e0f0d158d6da49c46459016dcaa9422ea656bc",
+    "by": {
+      "kind": "status",
+      "login": "TusanHomichi"
+    },
+    "at": 1793167472018
+  },
+  "evidence": [
+    {
+      "kind": "review",
+      "check": "codex",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/112#pullrequestreview-5678412435"
+    },
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/40640500474/job/122657268929"
+    },
+    {
+      "kind": "ci",
+      "check": "agents",
+      "result": "pass",
+      "source": "status agents"
+    }
+  ]
+}
