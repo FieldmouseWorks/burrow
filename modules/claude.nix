@@ -57,7 +57,6 @@ let
     "rclone rmdirs *"
     "rclone sync *"
     "gh repo delete *"
-    "gh repo archive *"
     "gh release delete *"
     "git push --force origin main*"
     "git push -f origin main*"
