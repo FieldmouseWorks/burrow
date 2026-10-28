@@ -2,10 +2,12 @@
 # made each change and why, its revisions, the checks and reviews on them,
 # and where it landed. On each PR event for a repo, burrow-events starts that
 # repo's sync, which records what's new; the full pass syncs every repo of
-# `owners`. It reads GitHub, and writes only the ledger's anchor: a ref in
-# `anchorRepo` holding the log's head, so a log that loses ops is refused.
-# `cn why FILE:LINE` in a checkout answers from it; `cn verify` checks it
-# against the anchor.
+# `owners`. It reads GitHub, and writes only the ledger's anchor (a ref in
+# `anchorRepo` holding the log's head, so a log that loses ops is refused)
+# and each repo's notes (`refs/notes/conary`, a landed change's public-safe
+# slice on its trunk commit). `cn why FILE:LINE` in a checkout answers from
+# the ledger here, and from the notes in any other clone; `cn verify` checks
+# the ledger against the anchor.
 inputs:
 { config, lib, pkgs, ... }:
 let
@@ -25,6 +27,7 @@ let
       export CONARY_LEDGER=${lib.escapeShellArg cfg.dir}
       export CONARY_ANCHOR_REPO=${lib.escapeShellArg cfg.anchorRepo}
       export CONARY_OWN_CONTEXTS=${lib.escapeShellArg (lib.concatStringsSep "," cfg.ownContexts)}
+      export CONARY_SESSION_LINKS=${lib.escapeShellArg (lib.concatStringsSep "," cfg.sessionLinks)}
       # Sets the ledger up the first time, and is a no-op after. A ledger
       # whose key was lost fails here until the key is back.
       cn init >/dev/null
@@ -89,6 +92,18 @@ in
       default = if autoland.enable or false then autoland.owners else [ ];
       defaultText = lib.literalExpression "config.burrow.autoland.owners";
       description = "GitHub users and orgs whose repos the full pass syncs (every non-archived, non-fork repo).";
+    };
+
+    sessionLinks = mkOption {
+      type = types.listOf (types.strMatching "[^/]+/[^/]+");
+      default = [ ];
+      example = [ "sam/homelab" ];
+      description = ''
+        Repositories (OWNER/NAME) whose notes may link the agent sessions and
+        threads their changes came from. Every other repo's notes leave them
+        out, so a repo whose rules keep those links out of its history stays
+        clean by default.
+      '';
     };
 
     ownContexts = mkOption {
