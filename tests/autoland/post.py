@@ -202,7 +202,7 @@ C.gh = REAL_GH
 with open(f"{fake}/gh", "w") as f:
     f.write("#!/bin/sh\necho 'gh: API rate limit exceeded for user ID 1. (HTTP 403)' >&2\nexit 1\n")
 try:
-    V.post("sam/r", pr, "codex", answer)
+    V.post("sam/r", pr, "rival", answer)
     raise AssertionError("posted with GitHub unavailable")
 except C.Unavailable as e:
     assert "rate limit" in str(e), e

@@ -6,7 +6,7 @@ import json
 import os
 import sys
 
-from harness import (FAIL, KICKS, QDIR, REAL, STATES, STUB, T, WROTE, C, P, R, S, V, W, clean, fresh_pr_state, head,
+from harness import (FAIL, KICKS, REAL_GH, QDIR, REAL, STATES, STUB, T, WROTE, C, P, R, S, V, W, clean, fresh_pr_state, head,
                      info, mkpr, pr_state, queued, run, rv_review, tmp, worker)
 
 # A pass that waits on time books its repo's next pass for when the wait
@@ -191,6 +191,44 @@ assert C.load("wake.json", None) == {"sam/r": T + 3 * 60 + 1, "sam/other": T + 6
 assert C.load("digest-repos.json", None) == {"sam/r": [], "sam/other": [["Open over a day", "other line", "x"]]}
 assert published == [[("Open over a day", "other line", "x")]], published
 print("kick: ok")
+
+# A pass GitHub's rate limit turns away books the repo's next pass for when
+# the limit resets (`gh api rate_limit`, free), not five minutes on or the
+# hourly pass: none before then could do anything, one then waits on nothing.
+fresh_pr_state()
+C.NOW = T
+C.save("wake.json", {})
+fake = os.path.join(tmp, "limited-bin")
+os.makedirs(fake)
+with open(f"{fake}/gh", "w") as f:
+    f.write(f"""#!/bin/sh
+if [ "$1 $2" = "api rate_limit" ]; then echo {T + 1800:.0f}; exit 0; fi
+echo 'gh: API rate limit exceeded for user ID 1. (HTTP 403)' >&2
+exit 1
+""")
+os.chmod(f"{fake}/gh", 0o755)
+path, os.environ["PATH"] = os.environ["PATH"], fake + os.pathsep + os.environ["PATH"]
+kept_fns = (S.R.discover, S.open_prs)
+S.R.discover = lambda: [{"repo": "sam/r"}]
+S.open_prs = lambda owner, name: REAL_GH("api", f"repos/{owner}/{name}")
+sys.argv = ["steward", "kick", "sam/r"]
+C.WAKE.clear()
+C.LIMITED.clear()
+S.main()
+sys.argv = argv
+os.environ["PATH"] = path
+S.R.discover, S.open_prs = kept_fns
+assert C.LIMITED == [T + 1800] and C.load("wake.json", None) == {"sam/r": T + 1800 + 1}, (C.LIMITED, C.load("wake.json", None))
+# Booked for later, any wait this pass works out still waits for the reset;
+# without a limit met, it's as asked.
+C.WAKE.clear()
+C.wake("sam/r", T + 60)
+assert C.WAKE == {"sam/r": T + 1800 + 1}, C.WAKE
+C.LIMITED.clear()
+C.WAKE.clear()
+C.wake("sam/r", T + 60)
+assert C.WAKE == {"sam/r": T + 60}, C.WAKE
+print("rate limit: ok")
 
 # A long PR's older reviews and comments are read too, a page at a time,
 # oldest first: its verdicts, markers and rounds can be past the last 100.

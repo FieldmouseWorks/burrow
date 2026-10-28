@@ -38,12 +38,32 @@ class Unavailable(RuntimeError):
 UNAVAILABLE = re.compile(r"rate limit|HTTP (429|5\d\d)|error connecting|connection (reset|refused)|timed? ?out", re.I)
 
 
+# When the rate limit that turned one of this pass's calls away resets, once
+# a call has met it: no pass of any repo before then (wake) could do anything.
+LIMITED = []
+
+
+def limited(stderr):
+    """Note when the rate limit gh met resets. `gh api rate_limit` costs
+    nothing against it; a limit with none spent (a secondary one) notes
+    nothing."""
+    if LIMITED or not re.search(r"rate limit", stderr, re.I):
+        return
+    p = subprocess.run(["gh", "api", "rate_limit", "--jq", "[.resources[] | select(.remaining == 0) | .reset] | max // 0"],
+                       capture_output=True, text=True)
+    try:
+        LIMITED.append(float(p.stdout.strip()) if p.returncode == 0 else 0.0)
+    except ValueError:
+        LIMITED.append(0.0)
+
+
 def gh(*args, input=None, check=True):
     """Run gh; return its stdout (parsed as JSON when it is JSON). Raises
     Unavailable when GitHub didn't answer, RuntimeError when it said no."""
     p = subprocess.run(["gh", *args], input=input, capture_output=True, text=True)
     if p.returncode != 0:
         why = f"gh {' '.join(args[:3])}: {p.stderr.strip()[:300]}"
+        limited(p.stderr)
         if check:
             raise (Unavailable if UNAVAILABLE.search(p.stderr) else RuntimeError)(why)
         log("  failed:", why)
@@ -146,7 +166,10 @@ WAKE = {}
 
 
 def wake(repo, at):
-    """Ask for a pass of repo at `at`, if that's still to come."""
+    """Ask for a pass of repo at `at`, if that's still to come, and not
+    before a rate limit this pass met resets."""
+    if LIMITED and LIMITED[0] > NOW:
+        at = max(at, LIMITED[0] + 1)
     if at > NOW:
         WAKE[repo] = min(WAKE.get(repo, at), at)
 
