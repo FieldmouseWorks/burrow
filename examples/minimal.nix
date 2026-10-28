@@ -42,6 +42,13 @@
     };
     house.enable = true;
     browser.enable = true;
+    backup = {
+      enable = true;
+      repository = "rclone:offsite:backups/burrow";
+      passwordFile = "/run/secrets/backup-password";
+      datasets = [ "rpool/safe/home" "rpool/safe/data" ];
+      after = [ "sanoid.service" ];
+    };
     ledger = {
       enable = true;
       # A stand-in: a real machine takes Conary's flake's packages.default.
