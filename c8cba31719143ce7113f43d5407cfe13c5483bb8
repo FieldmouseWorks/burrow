@@ -1,0 +1,47 @@
+{
+  "conary": "note v1",
+  "change": "349yd94dfw5vxq11jtjv8r8mcb",
+  "repo": {
+    "owner": "FieldmouseWorks",
+    "name": "burrow"
+  },
+  "pr": 111,
+  "url": "https://github.com/FieldmouseWorks/burrow/pull/111",
+  "summary": "autoland: say who has a PR's findings, and send the pipeline's own trouble to a Claude job",
+  "task": "FieldmouseWorks/remi#85",
+  "author": {
+    "kind": "agent",
+    "login": "TusanHomichi",
+    "session": "https://claude.ai/code/session_01LUSpz65cwD3ABEEydMWsoV"
+  },
+  "landing": {
+    "revision": "22e1a06a35407ad6a189552d385406d0bf6329ac7b9fe3e2e980bd132ac099c0",
+    "before": "110da989153e5312cde64106689ab868eb5d3423",
+    "after": "c8cba31719143ce7113f43d5407cfe13c5483bb8",
+    "by": {
+      "kind": "status",
+      "login": "TusanHomichi"
+    },
+    "at": 1793166414223
+  },
+  "evidence": [
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/40636757954/job/122645392766"
+    },
+    {
+      "kind": "ci",
+      "check": "agents",
+      "result": "pass",
+      "source": "status agents"
+    },
+    {
+      "kind": "review",
+      "check": "codex",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/111#pullrequestreview-5678084331"
+    }
+  ]
+}
