@@ -1,0 +1,47 @@
+{
+  "conary": "note v1",
+  "change": "4tgnnfaptcdb4ez8qn48dn5jna",
+  "repo": {
+    "owner": "fieldmouseworks",
+    "name": "burrow"
+  },
+  "pr": 106,
+  "url": "https://github.com/fieldmouseworks/burrow/pull/106",
+  "summary": "claude: give Claude every module's MCP servers through one unit",
+  "task": null,
+  "author": {
+    "kind": "agent",
+    "login": "TusanHomichi",
+    "session": "https://claude.ai/code/session_01BkHcyDYaKnE7mRRMdYCFVC"
+  },
+  "landing": {
+    "revision": "4d1f2312dd70fed5eb0282aae5a4146f15adb9d9baaa5d5d34f6cb045bb77f24",
+    "before": "10c173b2441cbb714211d0ce58799b82960c3295",
+    "after": "b556799e62340c388d7e166ade9b772f8c2d9ad6",
+    "by": {
+      "kind": "status",
+      "login": "TusanHomichi"
+    },
+    "at": 1793152096085
+  },
+  "evidence": [
+    {
+      "kind": "review",
+      "check": "codex",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/106#pullrequestreview-5676737199"
+    },
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/40615923636/job/122578263778"
+    },
+    {
+      "kind": "ci",
+      "check": "agents",
+      "result": "pass",
+      "source": "status agents"
+    }
+  ]
+}
