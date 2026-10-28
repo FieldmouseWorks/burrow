@@ -6,7 +6,8 @@
 # from proj-watch's own unit, but never for proj-inbox's own comment, or once
 # its deadline passes with GitHub unreadable, that a reply meanwhile owns the
 # job's waits, that a turn's end kicks what it was started to and proj-watch
-# for the repos it awaits, that _watch and proj-inbox given a repo look at
+# for the repos it awaits, that a job's own --timeout stops its turns (and
+# still kicks), that _watch and proj-inbox given a repo look at
 # that repo alone and book when it next needs a look, that proj-inbox posts
 # every finished turn's answer (one
 # resumed before it looked too, none misread while a turn starts) and ends
@@ -242,6 +243,13 @@ pkgs.testers.runNixOSTest {
         e2 = proj('run --kick autoland/o/q \"my web%n\" hello')
         machine.wait_until_succeeds(f"su - dev -c 'proj state \"{e2}\"' | grep -x done", timeout=120)
         machine.wait_until_succeeds("grep -x /kick/autoland/o/q /tmp/kicks", timeout=30)
+        # A job's own --timeout stops its turn then, well before TIMEOUT, and
+        # the stop still kicks what it was started to.
+        machine.succeed("truncate -s 0 /tmp/kicks")
+        e3 = proj('run --timeout 3s --kick autoland/o/t web "sleep 600"')
+        machine.wait_until_succeeds(f"su - dev -c 'proj state {e3}' | grep -x 'timed out after 3s'", timeout=60)
+        machine.wait_until_succeeds("grep -x /kick/autoland/o/t /tmp/kicks", timeout=30)
+        machine.fail("su - dev -c 'proj run --timeout soon web hello'")
         # proj-watch's next look at o/r is booked for the wait's deadline.
         since = int(machine.succeed(f"cut -f2 /data/dev/jobs/{e}/await").strip())
         proj("_watch")

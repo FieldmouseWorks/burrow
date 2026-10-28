@@ -82,6 +82,7 @@ let
     majorKey = if (config.burrow.updates.enable or false) && (config.burrow.updates.renovate.enable or false) then "${stateDir}/renovate-sweep/verdict.key" else null;
     projectsDir = config.burrow.projectsDir;
     proj = "${config.burrow.tools.proj}/bin/proj";
+    jobTimeout = cfg.jobTimeoutMinutes;
     owner = config.burrow.owner;
     cleanBranches = cfg.cleanBranches;
     labels = { inherit (cfg.labels) hold owner; };
@@ -117,6 +118,7 @@ let
       deepseek = { inherit (rv.deepseek) enable effort parallel lowBalance; };
     };
     inherit (rv) skipPaths;
+    reviewTimeout = rv.timeoutMinutes;
     agents = "${agents}/bin";
     sandbox = "${pkgs.bubblewrap}/bin/bwrap";
     box = {
@@ -262,6 +264,19 @@ in
       description = "How long a new head sits still before the reviewers are asked, so a burst of pushes gets one review.";
     };
 
+    jobTimeoutMinutes = mkOption {
+      type = types.ints.positive;
+      default = 60;
+      description = ''
+        How long each turn of a Claude job the steward starts (a fix, a
+        judge, a proof run) may run before proj stops it. Its end, however
+        it ends, starts the repo's pass, and the steward books one for this
+        deadline too in case that doesn't get through: a job that ended
+        without its answer is started once more, and a second is a failed
+        status on the PR.
+      '';
+    };
+
     context = mkOption {
       type = types.str;
       default = "review-settled";
@@ -387,6 +402,16 @@ in
             DeepSeek is out of service and PRs merge on the other reviewers.
           '';
         };
+      };
+
+      timeoutMinutes = mkOption {
+        type = types.ints.positive;
+        default = 30;
+        description = ''
+          How long one review may run before it's stopped and counted a
+          failed try, like any other error: the steward asks again, three
+          tries in all, then three more an hour on.
+        '';
       };
 
       skipPaths = mkOption {

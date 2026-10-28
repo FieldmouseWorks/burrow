@@ -8,6 +8,8 @@
 #   proj run --first PROJECT "task"  ahead of the line (someone is waiting on it)
 #   proj run --kick NAME PROJECT "task"  kick NAME (HANDLER or HANDLER/OWNER/REPO,
 #                               one of burrow-events') each time a turn ends
+#   proj run --timeout DUR PROJECT "task"  each turn stopped after DUR (as
+#                               timeout(1) reads it: 90m, 2h) instead of TIMEOUT
 #   proj reply [--first] ID "message"  continue that job's conversation
 #   proj status                 recent jobs and their state
 #   proj log ID [--turn N]      the job's latest answer, or turn N's (--raw for
@@ -28,8 +30,9 @@
 # ones ahead, then oldest first, and a turn that has waited MAX_WAIT seconds
 # counts as --first itself, so a stream of them can't starve it. A waiting
 # turn is just this shell. Every turn runs in SLICE, which the machine caps,
-# so jobs can't take memory from anything else, and gets TIMEOUT before it's
-# stopped, so a stuck one can't hold its slot for good.
+# so jobs can't take memory from anything else, and gets TIMEOUT (or the
+# job's own --timeout) before it's stopped, so a stuck one can't hold its
+# slot for good.
 #
 # A turn ends at its answer. Claude -p stays up after it while anything it
 # left in the background runs (a CI watch, say), holding a slot to do
@@ -249,7 +252,7 @@ fingerprint() { # repo n
 
 case "${1:-status}" in
   run | reply)
-    cmd=$1 vm='' first='' kick=()
+    cmd=$1 vm='' first='' kick=() limit=
     shift
     while :; do
       case ${1:-} in
@@ -260,20 +263,27 @@ case "${1:-status}" in
           kick+=("$2")
           shift
           ;;
+        --timeout)
+          [ "$cmd" = run ] || { echo "proj reply has no --timeout: the job's own is kept" >&2; exit 2; }
+          [[ ${2:-} =~ ^[1-9][0-9]*[smhd]?$ ]] || { echo "proj run --timeout DUR (a number, then s, m, h or d)" >&2; exit 2; }
+          limit=$2
+          shift
+          ;;
         --first) first=first ;;
         *) break ;;
       esac
       shift
     done
     if [ "$cmd" = run ]; then
-      p=${1:?usage: proj run [--vm] [--first] [--kick NAME]... PROJECT \"task\"}
-      task=${2:?usage: proj run [--vm] [--first] [--kick NAME]... PROJECT \"task\"}
+      p=${1:?usage: proj run [--vm] [--first] [--timeout DUR] [--kick NAME]... PROJECT \"task\"}
+      task=${2:?usage: proj run [--vm] [--first] [--timeout DUR] [--kick NAME]... PROJECT \"task\"}
       [ -d "$src/$p" ] || { echo "no such project: $src/$p" >&2; exit 1; }
       mkdir -p "$jobs"
       # Unique even when two jobs start in the same second.
       id=$(basename "$(mktemp -d "$jobs/$p-$(date +%Y%m%d-%H%M%S)-XXXX")")
       echo "$src/$p" >"$jobs/$id/project"
       [ ${#kick[@]} = 0 ] || printf '%s\n' "${kick[@]}" >"$jobs/$id/kick"
+      [ -z "$limit" ] || echo "$limit" >"$jobs/$id/timeout"
       if [ -n "$vm" ]; then agent new "$p" >"$jobs/$id/agent"; fi
     else
       id=${1:?usage: proj reply [--first] ID \"message\"}
@@ -483,16 +493,17 @@ Carry on from there. Anything you left in the background last turn was stopped w
     # its own to await.next, and await only once it ends.
     rm -f "$dir/await" "$dir/await.next"
     take_slot "$id" "$n" "$3"
+    limit=$(cat "$dir/timeout" 2>/dev/null || echo "$TIMEOUT")
     args=(-p --output-format stream-json --verbose)
     if [ -s "$dir/session" ]; then args+=(--resume "$(cat "$dir/session")"); fi
     : >"$dir/$n.jsonl"
     if [ -s "$dir/agent" ]; then
-      timeout -k 1m "$TIMEOUT" agent sh "$(cat "$dir/agent")" claude "${args[@]}" <"$dir/prompt.$n" >"$dir/$n.jsonl" &
+      timeout -k 1m "$limit" agent sh "$(cat "$dir/agent")" claude "${args[@]}" <"$dir/prompt.$n" >"$dir/$n.jsonl" &
     else
       args+=(--append-system-prompt "This is proj job $id, running headless. Your turn ends with your answer, and anything you left running in the background is stopped then, so don't wait on GitHub (CI, reviews, merges) in the background or with sleep. Run \`proj await URL\` for each PR or issue you're still waiting on, then end your turn saying what you wait for: the job is resumed, with this conversation, once one of them changes (checks finish, a review, comment or push, merged or closed).")
       # A login shell, so the job sees the same PATH and env as an SSH login.
       # shellcheck disable=SC2016 # expanded by that shell
-      PROJ_JOB=$id timeout -k 1m "$TIMEOUT" bash -lc 'exec claude "$@" <"$0"' "$dir/prompt.$n" "${args[@]}" >"$dir/$n.jsonl" &
+      PROJ_JOB=$id timeout -k 1m "$limit" bash -lc 'exec claude "$@" <"$0"' "$dir/prompt.$n" "${args[@]}" >"$dir/$n.jsonl" &
     fi
     pid=$!
     # The answer ends the turn: a few seconds to exit by itself, then Claude
@@ -518,7 +529,7 @@ Carry on from there. Anything you left in the background last turn was stopped w
       fi
       rm -f "$dir/await.next"
     elif [ "$rc" -eq 124 ]; then
-      echo "timed out after $TIMEOUT" >"$dir/$n.outcome"
+      echo "timed out after $limit" >"$dir/$n.outcome"
     else
       echo failed >"$dir/$n.outcome"
     fi

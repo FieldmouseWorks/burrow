@@ -206,7 +206,10 @@ def codex(snap, prompt, home, sid):
             p = subprocess.run(sandboxed(snap, home, t, ["HTTPS_PROXY"], argv,
                                          [f"{login}/auth.json"] if os.path.exists(f"{login}/auth.json") else [],
                                          [f"{login}/config.toml"] if os.path.exists(f"{login}/config.toml") else []),
-                               input=prompt, capture_output=True, text=True, env=env(CODEX_HOME=home))
+                               input=prompt, capture_output=True, text=True, env=env(CODEX_HOME=home),
+                               timeout=CFG["reviewTimeout"] * 60)
+        except subprocess.TimeoutExpired:
+            raise RuntimeError(f"codex was still at it after {CFG['reviewTimeout']} minutes") from None
         finally:
             gate.close()
             try:

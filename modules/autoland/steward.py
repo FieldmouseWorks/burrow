@@ -290,6 +290,14 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
         st["updated"] = head
         return True
 
+    def deadline(kind):
+        """A pass when this kind's job is due to have ended (proj stops a turn
+        at jobTimeout), and every quarter hour past that while it still
+        hasn't (it waited for a slot first): its end kicks one, and this is
+        the one that sees it if that kick never got through."""
+        due = st.get(kind + "At", C.NOW) + (CFG["jobTimeout"] + 5) * MIN
+        C.wake(repo, due if due > C.NOW else C.NOW + 15 * MIN)
+
     def started(kind, task, at=head):
         """A Claude job, once per head (at: once per head on its base, for
         the judge's; recorded once it has started; until then it's tried
@@ -298,6 +306,8 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
         if jid:
             st[kind] = at
             st[kind + "Job"] = jid
+            st[kind + "At"] = C.NOW
+            deadline(kind)
             log(f"{tag}: a Claude job {jid} ({kind})")
         else:
             log(f"{tag}: couldn't start a Claude job (no checkout, or proj refused)")
@@ -309,7 +319,10 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
         (it crashed, timed out, or never posted it). Seen on two passes: the
         first may have read the PR just before its answer went up."""
         jid = st.get(kind + "Job")
-        if st.get(kind) != at or not jid or C.job_state(jid) in (None, "queued", "running"):
+        if st.get(kind) != at or not jid:
+            return False
+        if C.job_state(jid) in (None, "queued", "running"):
+            deadline(kind)
             return False
         seen = st.get(kind + "Lost") == at
         st[kind + "Lost"] = at
@@ -319,9 +332,9 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
 
     def again(kind, task, doing, answer, at=head):
         """A job that ended without its answer is started once more; one that
-        does that twice is listed for the owner."""
+        does that twice fails the PR's status and is listed for the owner."""
         if st.get(kind + "Again") == at:
-            settle("pending", f"Settled, but two Claude jobs ended without {answer}"[:140],
+            settle("failure", f"Settled, but two Claude jobs ended without {answer}"[:140],
                    f"Two Claude jobs ended without {answer}")
         elif started(kind, task, at):
             st[kind + "Again"] = at

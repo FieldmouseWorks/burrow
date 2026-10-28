@@ -451,22 +451,30 @@ PR_DIFF["v"] = ""
 
 # A judge that ends without a verdict (crashed, timed out, said nothing) is
 # started once more, after a second pass sees it ended; a second one that
-# does the same is listed for the owner.
+# does the same fails the status and is listed for the owner.
 fresh_pr_state()
 run(clean(**mig), 700)
-STATES["job-1"] = "error"
-status, _ = run(clean(**mig), 800)
+# Its end kicks a pass; one is booked for its deadline too (jobTimeout and
+# five minutes), and every quarter hour past it while it hasn't ended.
+assert C.WAKE["sam/r"] == C.ts(T0) + 700 + 65 * 60, C.WAKE
+run(clean(**mig), 800)
+assert C.WAKE["sam/r"] == C.ts(T0) + 700 + 65 * 60, C.WAKE
+run(clean(**mig), 700 + 70 * 60)
+assert C.WAKE["sam/r"] == C.ts(T0) + 700 + 85 * 60, C.WAKE
+STATES["job-1"] = "timed out after 60m"
+status, _ = run(clean(**mig), 5000)
 assert JOBS == [] and "judging it" in status, (status, JOBS)
-status, digest = run(clean(**mig), 900)
+status, digest = run(clean(**mig), 5100)
 assert len(JOBS) == 1 and "judging it again" in status and digest == [], (status, digest)
 STATES["job-1"] = "running"  # the second one (ids restart each pass here)
-status, _ = run(clean(**mig), 1000)
+status, _ = run(clean(**mig), 5200)
 assert JOBS == [] and "judging it" in status and not merged(), status
 STATES["job-1"] = "failed"
-status, digest = run(clean(**mig), 1100)
+status, digest = run(clean(**mig), 5300)
 assert JOBS == [] and not merged() and digest == [], (status, JOBS, digest)
-status, digest = run(clean(**mig), 1200)
+status, digest = run(clean(**mig), 5400)
 assert JOBS == [] and [x[0] for x in digest] == ["Two Claude jobs ended without a verdict"], (status, digest)
+assert "state=failure" in status and not merged(), status
 # One still running, or one proj can't say about, isn't lost.
 for state in ("running", None):
     fresh_pr_state()
