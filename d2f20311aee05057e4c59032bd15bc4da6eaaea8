@@ -1,0 +1,47 @@
+{
+  "conary": "note v1",
+  "change": "4mxb827expka9y4skxh1cvxw5e",
+  "repo": {
+    "owner": "fieldmouseworks",
+    "name": "burrow"
+  },
+  "pr": 104,
+  "url": "https://github.com/fieldmouseworks/burrow/pull/104",
+  "summary": "browser: restore the last session on start, so logins in no-expiry cookies survive a restart",
+  "task": "https://claude.ai/code/project/chan_01Ad4f4oDXfFTCEzLHzMTD8q?thread=cmsg_01Ad4f4oDXfFTCEzLHzMTD8qNwpFZMy2Bt5gVgWskb48ah",
+  "author": {
+    "kind": "agent",
+    "login": "TusanHomichi",
+    "session": "https://claude.ai/code/session_01BkHcyDew4AYnp5ujZ4JEZe"
+  },
+  "landing": {
+    "revision": "c8eff85e4b10da9e1015b53320785ceeccbb778ea787040e99ea2d5acb3abfbb",
+    "before": "eb95564379fd166b7c941b3fa144ce185dd9cc70",
+    "after": "d2f20311aee05057e4c59032bd15bc4da6eaaea8",
+    "by": {
+      "kind": "status",
+      "login": "TusanHomichi"
+    },
+    "at": 1793150621362
+  },
+  "evidence": [
+    {
+      "kind": "review",
+      "check": "codex",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/104#pullrequestreview-5676598388"
+    },
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/40613649824/job/122570950284"
+    },
+    {
+      "kind": "ci",
+      "check": "agents",
+      "result": "pass",
+      "source": "status agents"
+    }
+  ]
+}
