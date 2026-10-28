@@ -38,6 +38,10 @@ let
       GH_TOKEN=$(gh auth token)
       login_file=${lib.escapeShellArg "${passDir}/login"}
       key=$(printf %s "$GH_TOKEN" | sha256sum | cut -d' ' -f1)
+      # Looked up and refreshed under a lock: passes that overlap (a full
+      # one and a repo's) reuse one answer instead of racing to write it.
+      exec {login_lock}>>"$login_file.lock"
+      flock "$login_lock"
       if read -r was at who <"$login_file" 2>/dev/null && [ "$was" = "$key" ] &&
         [[ $at =~ ^[0-9]+$ ]] && [ $(($(date +%s) - at)) -lt 86400 ] && [ -n "$who" ]; then
         CONARY_REVIEWERS=$who
@@ -46,6 +50,7 @@ let
         (umask 077 && printf '%s %s %s\n' "$key" "$(date +%s)" "$CONARY_REVIEWERS" >"$login_file.new") &&
           mv -f "$login_file.new" "$login_file"
       fi
+      exec {login_lock}>&-
       export GH_TOKEN CONARY_REVIEWERS
       export CONARY_LEDGER=${lib.escapeShellArg cfg.dir}
       export CONARY_ANCHOR_REPO=${lib.escapeShellArg cfg.anchorRepo}

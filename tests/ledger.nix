@@ -12,7 +12,11 @@ let
   gh = pkgs.writeShellScriptBin "gh" ''
     case "$*" in
       "auth token") cat /tmp/gh-token 2>/dev/null || echo gho_stand_in ;;
-      "api user --jq .login") echo user >>/tmp/gh-calls; echo sam ;;
+      "api user --jq .login")
+        echo user >>/tmp/gh-calls
+        # As long as the test says: so two passes overlap.
+        while [ -e /tmp/gh-slow ]; do sleep 0.1; done
+        echo sam ;;
       "repo list sam "*) echo sam/r ;;
       *) echo "gh $*: not a stand-in answer" >&2; exit 1 ;;
     esac
@@ -68,6 +72,16 @@ pkgs.testers.runNixOSTest {
         machine.succeed("systemctl start burrow-ledger@sam-r.service")
         assert machine.succeed("cat /tmp/gh-calls") == "user\nuser\n"
         machine.succeed("rm /tmp/gh-token")
+
+    with subtest("passes that overlap ask once, and none fails for the other"):
+        machine.succeed("rm /var/lib/burrow/ledger/login /tmp/gh-calls")
+        machine.succeed("touch /tmp/gh-slow")
+        machine.succeed("systemctl start --no-block burrow-ledger@sam-r.service burrow-ledger@sam-q.service")
+        machine.sleep(1)
+        machine.succeed("rm /tmp/gh-slow")
+        machine.wait_until_succeeds("systemctl show -p ActiveState --value burrow-ledger@sam-r.service burrow-ledger@sam-q.service | grep -v activating | grep -c inactive | grep -x 2", timeout=60)
+        machine.succeed("systemctl show -p Result --value burrow-ledger@sam-r.service burrow-ledger@sam-q.service | grep -cx success | grep -x 2")
+        assert machine.succeed("cat /tmp/gh-calls") == "user\n"
 
     with subtest("GitHub unavailable books the repo's next pass, and the unit hasn't failed"):
         machine.succeed("echo 75 >/tmp/cn-exit")
