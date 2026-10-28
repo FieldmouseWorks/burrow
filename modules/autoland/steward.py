@@ -123,7 +123,7 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
         if why:
             digest.append((why, line, desc))
         # Not settled (any more): nothing may merge it.
-        if state != "success" and (pr["autoMergeRequest"] or st.get("landed")):
+        if state != "success" and (C.queued(pr) or st.get("landed")):
             if C.unland(repo, pr):
                 st["landed"] = None
             else:
@@ -135,14 +135,23 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
 
     def update_branch():
         """Bring a settled head up to date with a base whose rules want it
-        (the merge won't). The merged-in head is reviewed like any other."""
-        if pr.get("mergeStateStatus") != "BEHIND" or st.get("updated") == head:
+        (the merge won't): the merged-in head is reviewed like any other.
+        GitHub makes it a moment later, and its push kicks a pass; one that
+        hasn't come ten minutes on is asked for again. True while it's being
+        brought up to date, False if it isn't behind, None if GitHub didn't
+        take the ask (again in a minute)."""
+        if pr.get("mergeStateStatus") != "BEHIND":
             return False
+        if st.get("updated") == head and C.NOW - st.get("updatedAt", 0) < 10 * MIN:
+            after(st["updatedAt"], 10)
+            return True
         if C.write("api", "-X", "PUT", f"repos/{repo}/pulls/{n}/update-branch",
                    "-f", f"expected_head_sha={head}", check=False) is None:
-            return False
+            after(C.NOW, 1)
+            return None
         log(f"{tag}: behind its base, brought up to date")
-        st["updated"] = head
+        st["updated"], st["updatedAt"] = head, C.NOW
+        after(C.NOW, 10)
         return True
 
     def deadline(kind):
@@ -274,16 +283,22 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
             digest.append(("Couldn't merge", line, "GitHub keeps refusing the merge (journalctl -u autoland)"))
 
     def land_now(desc):
+        # Behind a base whose rules want it up to date, GitHub refuses the
+        # merge until it is: brought up to date instead, and the merged-in
+        # head is reviewed and its CI run like any other before it lands.
+        behind = update_branch()
+        if behind is not False:
+            settle("pending", "Settled, but behind its base: " +
+                   ("brought up to date" if behind else "GitHub didn't take the update, again in a minute"))
+            return
         settle("success", desc)
         # Still open with a merge queued on it: GitHub's to merge later, which
         # land never leaves it to (a steward before it did). Merged now instead.
-        if st.get("landed") == head and pr["autoMergeRequest"]:
+        if st.get("landed") == head and C.queued(pr):
             st["landed"] = None
         if st.get("landed") != head:
             log(f"{tag}: settled, landing")
             merge()
-        else:
-            update_branch()
 
     def owner_decides():
         """Sent to the owner by hand, by a fix job or by a judge (the label):
@@ -458,11 +473,11 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
             judged("a major dependency update", DEP_SEEN)
         elif dep == "major":
             land_now("Major update renovate-sweep cleared, CI green")
-        else:
+        elif renovate:
+            # Renovate merges its own.
             settle("success", "Dependency update, CI green")
-            # Renovate merges its own; Dependabot's need merging.
-            if not renovate and st.get("landed") != head:
-                merge()
+        else:
+            land_now("Dependency update, CI green")
         # Renovate's stuck ones are renovate-sweep's; a Dependabot one that
         # still hasn't merged after a day is the owner's to look at.
         if (not renovate and C.NOW - ts(pr["createdAt"]) > 86400

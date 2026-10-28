@@ -17,6 +17,7 @@ query($owner: String!, $name: String!, $cursor: String) {
         createdAt updatedAt mergeStateStatus body
         author { login }
         autoMergeRequest { enabledAt }
+        mergeQueueEntry { id }
         labels(first: 100) { pageInfo { hasNextPage } nodes { name } }
         files(first: 100) { nodes { path changeType } }
         changedFiles

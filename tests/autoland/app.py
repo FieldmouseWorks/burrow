@@ -10,7 +10,8 @@ import sys
 import threading
 import time
 
-from harness import FAIL, REAL_TOKEN, WROTE, C, P, R, S, V, clean, fresh_pr_state, merges, mkpr, run, sh, stand_in, tmp
+from harness import (FAIL, REAL_TOKEN, WROTE, C, P, R, S, T, V, clean, fresh_pr_state, judgment, merges, mkpr, run, said, sh,
+                     stand_in, tmp)
 from harness import head as HEAD
 
 import dashboard as D  # noqa: E402 (harness puts the steward on the path)
@@ -244,6 +245,60 @@ FAIL.append("--disable-auto")
 run(queued_pr, 800)
 FAIL.remove("--disable-auto")
 assert merges() == [] and "pr merge 5 -R sam/r --disable-auto" in WROTE, WROTE
+# A place in a merge queue is a merge queued too, and turning auto-merge
+# off doesn't take a PR out of one: it's taken out itself, with or without
+# auto-merge on. Not settled (held, say), it's taken out and nothing merges;
+# if GitHub doesn't take it out, the pass goes again in a minute.
+assert "mergeQueueEntry { id }" in P.PRS, "the PR list reads each PR's place in a merge queue"
+DEQUEUE = f"api graphql -f query={C.DEQUEUE} -f id=x"
+in_queue = {**clean(), "mergeQueueEntry": {"id": "q"}}
+fresh_pr_state()
+run(in_queue, 600)
+assert WROTE[-2:] == [DEQUEUE, merges()[0]] and "--disable-auto" not in " ".join(WROTE), WROTE
+fresh_pr_state()
+run({**in_queue, "autoMergeRequest": {"enabledAt": "x"}}, 600)
+assert WROTE[-3:] == ["pr merge 5 -R sam/r --disable-auto", DEQUEUE, merges()[0]], WROTE
+fresh_pr_state()
+FAIL.append("dequeuePullRequest")
+run(in_queue, 600)
+assert merges() == [] and DEQUEUE in WROTE, WROTE
+held = {**clean(labels=["hold"]), "mergeQueueEntry": {"id": "q"}}
+status, _ = run(held, 700)
+assert DEQUEUE in WROTE and "state=pending" in status and C.WAKE["sam/r"] == C.NOW + 60 + 1, (WROTE, C.WAKE)
+FAIL.remove("dequeuePullRequest")
+run(held, 800)
+assert DEQUEUE in WROTE and merges() == [] and C.WAKE.get("sam/r") != C.NOW + 60 + 1, (WROTE, C.WAKE)
+
+# Behind a base whose rules want it up to date, GitHub refuses the merge
+# until it is: a settled head is brought up to date instead, from the head
+# that was checked, and isn't merged. The merged-in head is a new one,
+# settled like any other. Ordinary, judged and Dependabot PRs, on the
+# default base or another.
+BUMP = {"branch": "dependabot/npm/foo-1", "title": "Bump foo from 1.4 to 1.5", "number": 13}
+for pr in (clean(), clean(base="release"), clean(files=(".github/CODEOWNERS",), number=6, comments=[said(judgment("land"))]),
+           mkpr(**BUMP)):
+    update = f"api -X PUT repos/sam/r/pulls/{pr['number']}/update-branch -f expected_head_sha={HEAD}"
+    fresh_pr_state()
+    status, _ = run(pr, 900)
+    assert merges() and update not in WROTE, (pr["number"], WROTE)
+    fresh_pr_state()
+    behind = {**pr, "mergeStateStatus": "BEHIND"}
+    status, _ = run(behind, 900)
+    assert merges() == [] and update in WROTE, (pr["number"], WROTE)
+    assert "state=pending" in status and "behind its base: brought up to date" in status, (pr["number"], status)
+    # GitHub makes the new head a moment later: a pass before then asks for
+    # nothing, and merges nothing; ten minutes on without it, it's asked again.
+    status, _ = run(behind, 960)
+    assert merges() == [] and update not in WROTE and "behind its base" in status, (pr["number"], WROTE)
+    assert C.WAKE["sam/r"] == T + 900 + 600 + 1, C.WAKE
+    run(behind, 900 + 600)
+    assert merges() == [] and update in WROTE, (pr["number"], WROTE)
+    # One GitHub didn't take: again in a minute, and still nothing merged.
+    fresh_pr_state()
+    FAIL.append("/update-branch")
+    status, _ = run(behind, 900)
+    FAIL.remove("/update-branch")
+    assert merges() == [] and "didn't take the update" in status and C.WAKE["sam/r"] == C.NOW + 60 + 1, (status, C.WAKE)
 (C.gh, C.write, C.job, C.job_state, V.queue, V.post) = stood
 fresh_pr_state()
 print("app: ok")

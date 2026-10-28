@@ -364,11 +364,24 @@ def acted_on(pr):
     return not pr["isDraft"] and not pr["isCrossRepository"] and (pr["author"] or {}).get("login") in CFG["authors"]
 
 
+DEQUEUE = "mutation($id: ID!) { dequeuePullRequest(input: {id: $id}) { clientMutationId } }"
+
+
+def queued(pr):
+    """Whether a merge waits on it for GitHub to make later: auto-merge, or
+    a place in a merge queue. Either can be there without the other."""
+    return bool(pr["autoMergeRequest"] or pr["mergeQueueEntry"])
+
+
 def unland(repo, pr):
-    """Take off a merge queued on it (auto-merge), so GitHub merges nothing
-    later. False if GitHub didn't take it."""
-    return not pr["autoMergeRequest"] or write(
+    """Take off every merge waiting on it, so GitHub merges nothing later:
+    its auto-merge, and its place in a merge queue, which turning auto-merge
+    off leaves where it is. False if GitHub didn't take one off."""
+    off = not pr["autoMergeRequest"] or write(
         "pr", "merge", str(pr["number"]), "-R", repo, "--disable-auto", check=False) is not None
+    out = not pr["mergeQueueEntry"] or write(
+        "api", "graphql", "-f", f"query={DEQUEUE}", "-f", f"id={pr['id']}", check=False) is not None
+    return off and out
 
 
 def repo_cfg(repo):

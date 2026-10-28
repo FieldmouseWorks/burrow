@@ -40,7 +40,11 @@ change nothing else in the same PR.
 - The steward merges a settled PR itself, at the head it checked, or not
   at all. It never leaves one for GitHub to merge later (auto-merge, a
   merge queue), which would merge whatever head the base's rules let
-  through, and it takes off a merge queued on a PR before it merges it.
+  through. It takes off any merge waiting on a PR, its auto-merge and its
+  place in a merge queue, whenever the PR isn't settled and before it
+  merges it. A settled PR behind a base that wants it up to date (an org's
+  rule the steward can't turn off) is brought up to date instead, and the
+  new head is settled like any other.
 - The `hold` and `needs-owner` labels (`burrow.autoland.labels`), which the
   steward and its jobs put on PRs.
 
@@ -60,8 +64,9 @@ install it too (installing it gives nobody else anything), and these
 repository permissions: read and write on administration (the settings and
 ruleset above), contents (merges and deleting branches), issues (the labels
 and the digest's issues), pull requests (reviews, comments and merges),
-commit statuses, webhooks, and workflows (a merge that changes
-`.github/workflows`); read on checks and actions. Install it on each of
+commit statuses, webhooks, workflows (a merge that changes
+`.github/workflows`), and merge queues (taking a PR out of one someone else
+put it in); read on checks and actions. Install it on each of
 `owners`, for all repositories, so new ones are covered too: the repos the
 steward keeps are the ones its installations reach (GitHub never reports an
 App as a repo's admin). Its private key goes in `app.keyFile`, readable by
