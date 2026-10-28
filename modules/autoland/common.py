@@ -70,10 +70,9 @@ _me = []
 
 def me():
     """The login the steward runs as, read once a pass. Its Claude jobs and
-    the reviewers' reviews post as it too, and nobody else can. gh's own
-    record of it: asking GitHub would cost a call every pass."""
+    the reviewers' reviews post as it too, and nobody else can."""
     if not _me:
-        _me.append(gh("config", "get", "user", "-h", "github.com"))
+        _me.append(gh("api", "user", "--jq", ".login"))
     return _me[0]
 
 

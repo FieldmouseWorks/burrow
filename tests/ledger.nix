@@ -8,6 +8,15 @@
 #   nix build .#checks.x86_64-linux.ledger -L
 { self, pkgs }:
 let
+  # GitHub's answers the pass asks gh for: its token and its login.
+  gh = pkgs.writeShellScriptBin "gh" ''
+    case "$*" in
+      "auth token") echo gho_stand_in ;;
+      "api user --jq .login") echo sam ;;
+      "repo list sam "*) echo sam/r ;;
+      *) echo "gh $*: not a stand-in answer" >&2; exit 1 ;;
+    esac
+  '';
   # Notes each call; `init` keeps the anchor's copy, as set-up's last step
   # does, and `sync` exits with what /tmp/cn-exit says.
   cn = pkgs.writeShellScriptBin "cn" ''
@@ -26,6 +35,7 @@ pkgs.testers.runNixOSTest {
     burrow.ledger = {
       enable = true;
       package = cn;
+      inherit gh;
       owners = [ "sam" ];
       anchorRepo = "sam/homelab";
     };
@@ -43,12 +53,6 @@ pkgs.testers.runNixOSTest {
         return machine.succeed("cat /tmp/cn-calls 2>/dev/null || true").splitlines()
 
     machine.wait_for_unit("multi-user.target")
-    # gh's own record of its login, as `gh auth login` leaves it.
-    machine.succeed(
-        "install -d -o dev -m 0700 /home/dev/.config /home/dev/.config/gh",
-        "printf 'github.com:\\n    oauth_token: gho_stand_in\\n    user: sam\\n' >/home/dev/.config/gh/hosts.yml",
-        "chown dev /home/dev/.config/gh/hosts.yml",
-    )
 
     with subtest("the first pass sets the ledger up, and the next only syncs"):
         machine.succeed("systemctl start burrow-ledger@sam-r.service")
@@ -64,6 +68,24 @@ pkgs.testers.runNixOSTest {
         booked = json.loads(machine.succeed("cat /var/lib/burrow/ledger/wake.json"))
         assert list(booked) == ["sam/r"], booked
         assert before + 290 < booked["sam/r"] < time.time() + 310, booked
+
+    with subtest("a booking stays, however overdue, when another repo books its own"):
+        machine.succeed("""echo '{"sam/old": 1}' >/var/lib/burrow/ledger/wake.json""")
+        machine.succeed("systemctl start burrow-ledger@sam-r.service")
+        booked = json.loads(machine.succeed("cat /var/lib/burrow/ledger/wake.json"))
+        assert sorted(booked) == ["sam/old", "sam/r"] and booked["sam/old"] == 1, booked
+
+    with subtest("a booking that can't be written fails the pass, and the bookings stay"):
+        machine.succeed("echo 'not json' >/var/lib/burrow/ledger/wake.json")
+        machine.fail("systemctl start burrow-ledger@sam-r.service")
+        machine.succeed("grep -x 'not json' /var/lib/burrow/ledger/wake.json")
+        # The full pass too, where a repo's sync runs as `sync || ...`.
+        machine.fail("systemctl start burrow-ledger.service")
+        machine.succeed("grep -x 'not json' /var/lib/burrow/ledger/wake.json")
+        machine.succeed("rm /var/lib/burrow/ledger/wake.json")
+        machine.succeed("systemctl start burrow-ledger.service")
+        assert list(json.loads(machine.succeed("cat /var/lib/burrow/ledger/wake.json"))) == ["sam/r"]
+        machine.succeed("rm /var/lib/burrow/ledger/wake.json")
 
     with subtest("anything else fails it"):
         machine.succeed("echo 1 >/tmp/cn-exit")

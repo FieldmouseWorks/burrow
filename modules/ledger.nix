@@ -26,14 +26,11 @@ let
 
   sync = pkgs.writeShellApplication {
     name = "burrow-ledger-sync";
-    runtimeInputs = [ cfg.package pkgs.gh pkgs.coreutils pkgs.jq pkgs.util-linux ];
+    runtimeInputs = [ cfg.package cfg.gh pkgs.coreutils pkgs.jq pkgs.util-linux ];
     text = ''
       # The user's own gh login reads GitHub; its reviews are the steward's.
-      # The login is gh's own record of it: asking GitHub would cost a call
-      # every pass.
       GH_TOKEN=$(gh auth token)
-      CONARY_REVIEWERS=$(gh config get user -h github.com)
-      [ -n "$CONARY_REVIEWERS" ] || { echo "gh has no login for github.com" >&2; exit 1; }
+      CONARY_REVIEWERS=$(gh api user --jq .login)
       export GH_TOKEN CONARY_REVIEWERS
       export CONARY_LEDGER=${lib.escapeShellArg cfg.dir}
       export CONARY_ANCHOR_REPO=${lib.escapeShellArg cfg.anchorRepo}
@@ -50,21 +47,31 @@ let
       # GitHub couldn't be asked (its rate limit, its errors, the network;
       # cn exits 75): the repo's pass is booked for five minutes on, and
       # this one hasn't failed. A failed unit is for what retrying won't fix,
-      # which is what fails a switch that runs meanwhile.
+      # which is what fails a switch that runs meanwhile. Only a booking
+      # written makes it no failure.
       sync_repo() {
         local rc=0
         cn sync "$1" || rc=$?
         [ "$rc" = 75 ] || return "$rc"
         echo "$1: GitHub is unavailable; again in five minutes" >&2
-        exec {lk}>>"$wake.lock"
-        flock "$lk"
-        local now booked
-        now=$(date +%s)
-        booked=$(jq -c 'if type == "object" then . else {} end' "$wake" 2>/dev/null) || booked='{}'
-        jq -c --arg repo "$1" --argjson now "$now" --argjson at "$((now + 300))" \
-          'with_entries(select((.value | type) == "number" and .value > $now)) + {($repo): $at}' <<<"$booked" >"$wake.new"
-        mv -f "$wake.new" "$wake"
-        exec {lk}>&-
+        book "$1" "$(($(date +%s) + 300))"
+      }
+
+      # Books a repo's next pass at a time. Every other repo's booking stays,
+      # however overdue: burrow-events reads the file only once this pass
+      # ends, and takes a booking only if it came after that repo's last
+      # pass started, so one already seen to is no pass. Runs as `x || y`
+      # does, without errexit, so each step says when it fails.
+      book() {
+        (
+          flock 9 || exit 1
+          booked='{}'
+          if [ -e "$wake" ]; then
+            booked=$(jq -c 'if type == "object" then . else error("not {repo: epoch}") end' "$wake") || exit 1
+          fi
+          jq -c --arg repo "$1" --argjson at "$2" '. + {($repo): $at}' <<<"$booked" >"$wake.new" || exit 1
+          mv -f "$wake.new" "$wake"
+        ) 9>>"$wake.lock"
       }
 
       if [ $# -gt 0 ]; then
@@ -129,6 +136,14 @@ in
       default = if autoland.enable or false then autoland.owners else [ ];
       defaultText = lib.literalExpression "config.burrow.autoland.owners";
       description = "GitHub users and orgs whose repos the full pass syncs (every non-archived, non-fork repo).";
+    };
+
+    gh = mkOption {
+      type = types.package;
+      default = pkgs.gh;
+      defaultText = lib.literalExpression "pkgs.gh";
+      internal = true;
+      description = "The gh the ledger's passes ask GitHub with (the test's is a stand-in).";
     };
 
     sessionLinks = mkOption {

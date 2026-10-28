@@ -128,7 +128,7 @@ GH = []
 def gh(*args, input=None, check=True):
     GH.append((args, input))
     a = " ".join(args)
-    if a == "config get user -h github.com":
+    if a == "api user --jq .login":
         return "sam"
     if "/comments?per_page" in a:
         return "\n".join(json.dumps(x) for x in [
