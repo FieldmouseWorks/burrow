@@ -8,8 +8,7 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use crate::github::{Api, Error};
-use crate::quarantine::Quarantined;
-use crate::report::Outcome;
+use crate::quarantine::{Quarantined, now};
 use crate::run::lines;
 use crate::{filing, quarantine, report};
 
@@ -29,46 +28,54 @@ fn dir(env: Env) -> Result<PathBuf, Error> {
     Ok(PathBuf::from(need(env, "RUNNER_TEMP")?).join("flaky"))
 }
 
-/// The repo's quarantine to a file, and FLAKY_QUARANTINE and FLAKY_REPORT
-/// (an empty file) set for the job's later steps; and which issue held each
-/// test, for `file`. A quarantine it can't read is a warning: every test
-/// counts this run.
+/// The tests whose quarantine has run out to a file, and FLAKY_EXPIRED and
+/// FLAKY_REPORT (an empty file) set for the job's later steps; and which
+/// issue held each test, for `file`. A quarantine it can't read is a
+/// warning, and both are set empty: which tests' quarantine has run out is
+/// unknown, so the gate gives no test a second try.
 pub fn start(api: &mut dyn Api, env: Env, cache: Option<&Path>) -> Result<(), Error> {
     let repo = need(env, "GITHUB_REPOSITORY")?;
     let dir = dir(env)?;
-    let (q, r) = (dir.join("quarantine"), dir.join("report.jsonl"));
-    let tests = match quarantine::list(api, &repo, cache) {
+    let (x, r) = (dir.join("expired"), dir.join("report.jsonl"));
+    let tests = match quarantine::list(api, &repo, cache, now()) {
         Ok(t) => t,
         Err(e) => {
             println!(
                 "::warning title=Flaky tests::{}",
                 data(&format!(
-                    "Couldn't read the quarantine, so every test counts: {e}"
+                    "Couldn't read the quarantine, so no test gets a second try this run: {e}"
                 ))
             );
-            Vec::new()
+            return append(&need(env, "GITHUB_ENV")?, "FLAKY_EXPIRED=\nFLAKY_REPORT=\n");
         }
     };
     let io = |e: std::io::Error| Error(format!("{}: {e}", dir.display()));
     fs::create_dir_all(&dir).map_err(io)?;
-    fs::write(&q, lines(&tests)).map_err(io)?;
+    let expired = quarantine::expired(&tests);
+    fs::write(&x, lines(&expired)).map_err(io)?;
     let held: String = tests
         .iter()
-        .map(|t| format!("{} {} {}\n", t.issue, t.test, t.author))
+        .map(|t| format!("{} {} {} {}\n", t.issue, t.test, t.author, t.expired))
         .collect();
     fs::write(dir.join("held"), held).map_err(io)?;
     fs::write(&r, "").map_err(io)?;
     append(
         &need(env, "GITHUB_ENV")?,
         &format!(
-            "FLAKY_QUARANTINE={}\nFLAKY_REPORT={}\n",
-            q.display(),
+            "FLAKY_EXPIRED={}\nFLAKY_REPORT={}\n",
+            x.display(),
             r.display()
         ),
     )?;
-    match lines(&tests).lines().collect::<Vec<_>>() {
+    match quarantine::tests(&tests) {
         t if t.is_empty() => println!("No tests quarantined in {repo}."),
         t => println!("Quarantined in {repo}: {}", t.join(", ")),
+    }
+    if !expired.is_empty() {
+        println!(
+            "Their quarantine has run out, so a failure fails at once: {}",
+            expired.join(", ")
+        );
     }
     Ok(())
 }
@@ -77,9 +84,21 @@ pub fn start(api: &mut dyn Api, env: Env, cache: Option<&Path>) -> Result<(), Er
 /// job's summary.
 pub fn file(api: &mut dyn Api, env: Env, cache: Option<&Path>) -> Result<(), Error> {
     let repo = need(env, "GITHUB_REPOSITORY")?;
-    let path = env("FLAKY_REPORT").filter(|v| !v.is_empty()).ok_or_else(|| {
-        Error("FLAKY_REPORT isn't set: run burrow's flaky step with `step: start` before the gate".into())
-    })?;
+    let path = match env("FLAKY_REPORT") {
+        None => {
+            return Err(Error(
+                "FLAKY_REPORT isn't set: run burrow's flaky step with `step: start` before the gate"
+                    .into(),
+            ));
+        }
+        Some(p) if p.is_empty() => {
+            println!(
+                "Nothing to file: the quarantine couldn't be read, so no test had a second try."
+            );
+            return Ok(());
+        }
+        Some(p) => p,
+    };
     let text = match fs::read_to_string(&path) {
         Ok(t) => t,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
@@ -99,17 +118,15 @@ pub fn file(api: &mut dyn Api, env: Env, cache: Option<&Path>) -> Result<(), Err
             format!("### Flaky tests\n\nNot filed: this PR comes from a fork, {fork}.\n\n");
         let mut seen = Vec::new();
         for e in entries.iter().filter(|e| {
-            let new = !seen.contains(&(&e.test, e.outcome));
-            seen.push((&e.test, e.outcome));
+            let new = !seen.contains(&&e.test);
+            seen.push(&e.test);
             new
         }) {
-            let (title, what) = says(e.outcome);
             println!(
-                "::warning title={}::{}",
-                property(title),
-                data(&format!("{} {what}", e.test))
+                "::warning title={TITLE}::{}",
+                data(&format!("{} {FLAKED}", e.test))
             );
-            summary += &format!("- `{}` {what}\n", e.test);
+            summary += &format!("- `{}` {FLAKED}\n", e.test);
         }
         if let Some(s) = env("GITHUB_STEP_SUMMARY").filter(|v| !v.is_empty()) {
             append(&s, &summary)?;
@@ -117,20 +134,18 @@ pub fn file(api: &mut dyn Api, env: Env, cache: Option<&Path>) -> Result<(), Err
         return Ok(());
     }
     let held = held(&dir(env)?.join("held"))?;
-    let open = quarantine::list(api, &repo, cache)?;
+    let open = quarantine::list(api, &repo, cache, now())?;
     let filed = filing::file(api, &repo, &entries, &held, &open, &place(env, &event)?)?;
     let server = need(env, "GITHUB_SERVER_URL")?;
     let mut summary = String::from("### Flaky tests\n\n");
     for f in &filed {
-        let (title, what) = says(f.outcome);
         let how = if f.new { "quarantined by" } else { "noted on" };
         println!(
-            "::warning title={}::{}",
-            property(title),
-            data(&format!("{} {what}: {how} #{}", f.test, f.issue))
+            "::warning title={TITLE}::{}",
+            data(&format!("{} {FLAKED}: {how} #{}", f.test, f.issue))
         );
         summary += &format!(
-            "- `{}` {what}: {how} [#{}]({server}/{repo}/issues/{})\n",
+            "- `{}` {FLAKED}: {how} [#{}]({server}/{repo}/issues/{})\n",
             f.test, f.issue, f.issue
         );
     }
@@ -149,15 +164,22 @@ fn held(path: &Path) -> Result<Vec<Quarantined>, Error> {
     };
     text.lines()
         .map(|l| {
-            let mut f = l.splitn(3, ' ');
-            match (f.next().and_then(|n| n.parse().ok()), f.next(), f.next()) {
-                (Some(issue), Some(test), Some(author)) => Ok(Quarantined {
+            let mut f = l.split(' ');
+            match (
+                f.next().and_then(|n| n.parse().ok()),
+                f.next(),
+                f.next(),
+                f.next().and_then(|x| x.parse().ok()),
+                f.next(),
+            ) {
+                (Some(issue), Some(test), Some(author), Some(expired), None) => Ok(Quarantined {
                     test: test.into(),
                     issue,
                     author: author.into(),
+                    expired,
                 }),
                 _ => Err(Error(format!(
-                    "{}: {l:?} isn't ISSUE TEST AUTHOR",
+                    "{}: {l:?} isn't ISSUE TEST AUTHOR EXPIRED",
                     path.display()
                 ))),
             }
@@ -207,13 +229,9 @@ fn event(env: Env) -> Value {
         .unwrap_or(Value::Null)
 }
 
-/// An outcome's annotation title, and what it says the test did.
-fn says(outcome: Outcome) -> (&'static str, &'static str) {
-    match outcome {
-        Outcome::Flaky => ("Flaky test", "failed, then passed when it ran again"),
-        Outcome::Quarantined => ("Quarantined test failed", "failed, and is quarantined"),
-    }
-}
+/// A flaky test's annotation title, and what it says the test did.
+const TITLE: &str = "Flaky test";
+const FLAKED: &str = "failed, then passed when it ran again";
 
 fn short(sha: &str) -> &str {
     &sha[..sha.len().min(12)]
@@ -245,6 +263,7 @@ mod tests {
     use super::*;
     use crate::github::fake::{Fake, ok};
     use crate::run::scratch;
+    use crate::test::iso;
     use serde_json::json;
     use std::collections::HashMap;
 
@@ -286,7 +305,12 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         let mut vars = job(&dir, Some("Sam/Game"));
         let mut gh = Fake::default();
-        let held = json!([{"number": 4, "title": "flaky: held", "labels": [{"name": "flaky"}], "user": {"login": "github-actions[bot]", "type": "Bot"}}]);
+        // `held` quarantined for a minute, `stale` for three days.
+        let at = |n, test: &str, ago: u64| {
+            json!({"number": n, "title": format!("flaky: {test}"), "labels": [{"name": "flaky"}],
+                   "user": {"login": "github-actions[bot]", "type": "Bot"}, "created_at": iso(now() - ago)})
+        };
+        let held = json!([at(4, "held", 60), at(5, "stale", 3 * 86400)]);
         // Its fix merges while the gate runs.
         gh.on(
             "GET",
@@ -295,7 +319,7 @@ mod tests {
         );
         gh.on(
             "GET",
-            "repos/sam/game/issues/4/events",
+            "repos/sam/game/issues/",
             vec![ok(200, json!([]), &[])],
         );
         gh.on(
@@ -318,27 +342,23 @@ mod tests {
             start(&mut gh, &env, None).unwrap();
         }
         let set = fs::read_to_string(dir.join("env")).unwrap();
-        let q = dir.join("flaky/quarantine");
+        let x = dir.join("flaky/expired");
         let r = dir.join("flaky/report.jsonl");
         assert_eq!(
             set,
             format!(
-                "FLAKY_QUARANTINE={}\nFLAKY_REPORT={}\n",
-                q.display(),
+                "FLAKY_EXPIRED={}\nFLAKY_REPORT={}\n",
+                x.display(),
                 r.display()
             )
         );
-        assert_eq!(fs::read_to_string(&q).unwrap(), "held\n");
+        assert_eq!(fs::read_to_string(&x).unwrap(), "stale\n");
         assert_eq!(
             fs::read_to_string(dir.join("flaky/held")).unwrap(),
-            "4 held github-actions[bot]\n"
+            "4 held github-actions[bot] false\n5 stale github-actions[bot] true\n"
         );
-        // The gate reports a flaky test, and the quarantined one failing.
-        fs::write(
-            &r,
-            "{\"test\": \"wobbly\", \"outcome\": \"flaky\"}\n{\"test\": \"held\", \"outcome\": \"quarantined\"}\n",
-        )
-        .unwrap();
+        // The gate reports two flaky tests, one of them quarantined.
+        fs::write(&r, "{\"test\": \"wobbly\"}\n{\"test\": \"held\"}\n").unwrap();
         vars.insert("FLAKY_REPORT", r.display().to_string());
         let env = |k: &str| vars.get(k).cloned();
         file(&mut gh, &env, None).unwrap();
@@ -357,7 +377,7 @@ mod tests {
         );
         assert_eq!(
             fs::read_to_string(dir.join("summary")).unwrap(),
-            "### Flaky tests\n\n- `wobbly` failed, then passed when it ran again: quarantined by [#9](https://github.com/sam/game/issues/9)\n- `held` failed, and is quarantined: noted on [#4](https://github.com/sam/game/issues/4)\n"
+            "### Flaky tests\n\n- `wobbly` failed, then passed when it ran again: quarantined by [#9](https://github.com/sam/game/issues/9)\n- `held` failed, then passed when it ran again: noted on [#4](https://github.com/sam/game/issues/4)\n"
         );
         // Noted where it was held: no new issue quarantines it again.
         let posts: Vec<&str> = gh.asked("POST").iter().map(|p| p.1.as_str()).collect();
@@ -369,6 +389,12 @@ mod tests {
                 "repos/sam/game/issues/4/comments"
             ]
         );
+        // A gate that passes a test whose quarantine ran out on a second
+        // try files nothing, and fails.
+        fs::write(&r, "{\"test\": \"stale\"}\n").unwrap();
+        let e = file(&mut gh, &env, None).unwrap_err();
+        assert!(e.0.contains("`stale`"), "{e}");
+        assert_eq!(gh.asked("POST").len(), 3);
         fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -402,6 +428,32 @@ mod tests {
     }
 
     #[test]
+    fn a_quarantine_it_cant_read_means_no_second_tries() {
+        let dir = scratch("flaky-actions");
+        fs::create_dir_all(&dir).unwrap();
+        let mut vars = job(&dir, Some("sam/game"));
+        let mut gh = Fake::default();
+        gh.on(
+            "GET",
+            LIST,
+            vec![ok(401, json!({"message": "Bad credentials"}), &[])],
+        );
+        {
+            let env = |k: &str| vars.get(k).cloned();
+            start(&mut gh, &env, None).unwrap();
+        }
+        assert_eq!(
+            fs::read_to_string(dir.join("env")).unwrap(),
+            "FLAKY_EXPIRED=\nFLAKY_REPORT=\n"
+        );
+        vars.insert("FLAKY_REPORT", String::new());
+        let env = |k: &str| vars.get(k).cloned();
+        file(&mut gh, &env, None).unwrap();
+        assert_eq!(gh.asked.len(), 1);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn a_forks_pr_shows_what_it_would_file() {
         let dir = scratch("flaky-actions");
         fs::create_dir_all(&dir).unwrap();
@@ -409,7 +461,7 @@ mod tests {
         let r = dir.join("report.jsonl");
         fs::write(
             &r,
-            "{\"test\": \"wobbly\", \"outcome\": \"flaky\"}\n{\"test\": \"wobbly\", \"outcome\": \"flaky\"}\n{\"test\": \"held\", \"outcome\": \"quarantined\"}\n",
+            "{\"test\": \"wobbly\"}\n{\"test\": \"wobbly\"}\n{\"test\": \"held\"}\n",
         )
         .unwrap();
         vars.insert("FLAKY_REPORT", r.display().to_string());
@@ -419,7 +471,7 @@ mod tests {
         assert!(gh.asked.is_empty());
         assert_eq!(
             fs::read_to_string(dir.join("summary")).unwrap(),
-            "### Flaky tests\n\nNot filed: this PR comes from a fork, stranger/game.\n\n- `wobbly` failed, then passed when it ran again\n- `held` failed, and is quarantined\n"
+            "### Flaky tests\n\nNot filed: this PR comes from a fork, stranger/game.\n\n- `wobbly` failed, then passed when it ran again\n- `held` failed, then passed when it ran again\n"
         );
         fs::remove_dir_all(&dir).unwrap();
     }

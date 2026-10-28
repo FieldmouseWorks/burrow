@@ -11,9 +11,9 @@ use flaky::{actions, run};
 const USAGE: &str = "usage:
   flaky quarantine OWNER/REPO [--json]
       the tests OWNER/REPO quarantines, one a line; with --json, one
-      {\"test\", \"issue\", \"author\"} a line, every open issue
+      {\"test\", \"issue\", \"author\", \"expired\"} a line, every open issue
   flaky run OWNER/REPO [--where MARKDOWN] -- COMMAND [ARG...]
-      COMMAND (a gate) with FLAKY_QUARANTINE and FLAKY_REPORT set, then
+      COMMAND (a gate) with FLAKY_EXPIRED and FLAKY_REPORT set, then
       its report filed
   flaky action start|file
       the same around a gate, as a step of a GitHub Actions job";
@@ -55,22 +55,24 @@ fn go(args: &[String]) -> Result<i32, Usage> {
                 _ => return Err(Usage(format!("unexpected {rest:?}"))),
             };
             let repo = repo_arg(repo)?;
-            Ok(match quarantine::list(&mut gh, repo, cache) {
-                Ok(q) if json => {
-                    for x in q {
-                        println!(
-                            "{}",
-                            serde_json::json!({"test": x.test, "issue": x.issue, "author": x.author})
-                        );
+            Ok(
+                match quarantine::list(&mut gh, repo, cache, quarantine::now()) {
+                    Ok(q) if json => {
+                        for x in q {
+                            println!(
+                                "{}",
+                                serde_json::json!({"test": x.test, "issue": x.issue, "author": x.author, "expired": x.expired})
+                            );
+                        }
+                        0
                     }
-                    0
-                }
-                Ok(q) => {
-                    print!("{}", run::lines(&q));
-                    0
-                }
-                Err(e) => fail(e.to_string()),
-            })
+                    Ok(q) => {
+                        print!("{}", run::lines(&quarantine::tests(&q)));
+                        0
+                    }
+                    Err(e) => fail(e.to_string()),
+                },
+            )
         }
         ["run", repo, rest @ ..] => {
             let repo = repo_arg(repo)?;

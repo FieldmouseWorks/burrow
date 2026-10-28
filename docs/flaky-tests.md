@@ -2,56 +2,60 @@
 
 A flaky test fails some runs and passes others on the same code. Rerunning the
 whole gate until it's green wastes the run and hides the flake; skipping the
-test by hand loses it. So a gate that finds one quarantines it, a Claude job
-fixes it, and the fix lifts the quarantine, with nobody in the loop.
+test by hand loses it. So a gate gives a failed test one more try, a Claude
+job fixes what flaked, and a flake nobody fixed blocks again, with nobody in
+the loop.
 
 1. A test fails. The gate runs it once more, on the same tree.
 2. It fails again: a real failure, and the gate fails. It passes: the test is
    flaky. The gate passes, and reports it.
 3. The report opens an issue titled `flaky: TEST`, labelled `flaky`, saying
    where it flaked and the end of what the failed try printed. While that
-   issue is open the test is quarantined: every gate still runs it, but its
-   failure fails nothing, and is noted on the issue.
+   issue is open the test is quarantined: each time it flakes again it's
+   noted on the issue, and a failure that fails both tries fails the gate,
+   as any test's does.
 4. The steward (`autoland`, [flakes.py](../modules/autoland/flakes.py)) hands
    the issue to a Claude job, which finds the cause and opens a PR that says
-   `Closes #N`. Merged, it closes the issue, and the quarantine lifts at the
-   next gate. One still open a day after its job ends goes to the pipeline's
-   stuck issue.
+   `Closes #N`. Merged, it closes the issue. One still open a day after its
+   job ends goes to the pipeline's stuck issue.
+5. Two days after the issue opened, the quarantine runs out. Until the issue
+   closes, the test gets no second try: any failure fails the gate at once.
+   A flake nobody fixed blocks again instead of passing quietly for good.
 
 The quarantine is the set of open issues, so it changes the moment one opens
 or closes, on every branch at once, with no file to edit. Close an issue to
-lift its quarantine by hand; open one with that title and label to add one.
-A closed one stays lifted: reopened, it quarantines nothing, and a test that
-flakes again gets a new issue. A gate that began while a test was
-quarantined notes its failure on that issue, even one closed since, and
-never quarantines the test again: only a new flake does.
+lift its quarantine by hand. A closed one stays lifted: reopened, it
+quarantines nothing, and a test that flakes again gets a new issue. A gate
+that began while a test was quarantined notes its flake on that issue, even
+one closed since, and never quarantines the test again: only a new flake
+does. A test with two open issues is as old as its oldest, and one whose
+opening time can't be read has run out.
 
 ## What a gate does
 
 A gate (a repo's test runner, or the script that drives its suites) reads two
 environment variables, which the flaky tool always sets together. Unless both
-are set, and neither is empty, it runs as it always did: no retries, and
+are set, and neither is empty, it runs as it always did: no second tries, and
 every failure fails.
 
-- `FLAKY_QUARANTINE`: a file of the quarantined tests' names, one a line.
-- `FLAKY_REPORT`: a file it appends its report to, one JSON object a line:
+- `FLAKY_EXPIRED`: a file of the names of the tests whose quarantine has run
+  out, one a line.
+- `FLAKY_REPORT`: a file it appends its report to, one JSON object a line for
+  each test that failed, then passed when it ran again:
 
   ```json
-  {"test": "browser/stream", "outcome": "flaky", "detail": "the end of what the failed try printed"}
+  {"test": "browser/stream", "detail": "the end of what the failed try printed"}
   ```
 
-  `outcome` is `flaky` (it failed, then passed when it ran again) or
-  `quarantined` (it failed, and is quarantined). `detail` is optional; the
-  issue shows its last 60 lines. It goes on an issue, so it carries no
-  secrets and nothing the repo keeps private.
+  `detail` is optional; the issue shows its last 60 lines. It goes on an
+  issue, so it carries no secrets and nothing the repo keeps private.
 
 With both set:
 
 - A test that fails runs once more, on its own if it can, the same way. A
-  pass reports it `flaky` and counts as a pass; a second failure fails the
-  gate.
-- A quarantined test runs as usual. Its failure reports it `quarantined` and
-  fails nothing; its pass reports nothing.
+  pass reports it and counts as a pass; a second failure fails the gate.
+- A test named in `FLAKY_EXPIRED` gets no second try: its failure fails the
+  gate at once.
 - Anything else the gate does is unchanged: a build that breaks, a check
   that isn't a test, fails as before.
 
@@ -68,11 +72,12 @@ gate and files its report after. It asks GitHub once a run for the open
 `flaky` issues, once for each one's history, and once for each person in
 them whether they can push, each conditionally with the last answer's etag
 (kept in `$XDG_CACHE_HOME/flaky`), so a run with nothing new costs no rate
-limit; it
-writes only when a test flaked or a quarantined one failed. A quarantine it
-can't read counts every test; a report it can't file fails a run that passed,
-since an unrecorded flake is one nobody fixes. So does a report that calls a
-test quarantined that the gate wasn't given: its failure counted for nothing.
+limit; it writes only when a test flaked. A quarantine it can't read sets
+both variables empty, so the gate gives no test a second try: which tests'
+quarantine has run out is unknown. A report it can't file fails a run that
+passed, since an unrecorded flake is one nobody fixes. So does a report of a
+test whose quarantine had run out: the gate gave it a second try it wasn't
+allowed.
 
 In GitHub Actions, burrow's step goes on each side of the gate, with the
 job's token, which needs `issues: write`. It builds the tool from its own

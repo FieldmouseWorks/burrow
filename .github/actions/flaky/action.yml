@@ -6,7 +6,7 @@
 #   steps:
 #     - uses: FieldmouseWorks/burrow/.github/actions/flaky@<commit>
 #       with: { step: start }
-#     - run: ./gate        # reads FLAKY_QUARANTINE, writes FLAKY_REPORT
+#     - run: ./gate        # reads FLAKY_EXPIRED, writes FLAKY_REPORT
 #     - uses: FieldmouseWorks/burrow/.github/actions/flaky@<commit>
 #       if: ${{ !cancelled() }}
 #       with: { step: file }
@@ -14,7 +14,7 @@ name: flaky
 description: Quarantine flaky tests around a gate, and file the ones it finds
 inputs:
   step:
-    description: "start, before the gate: FLAKY_QUARANTINE and FLAKY_REPORT for it; file, after it: its report filed"
+    description: "start, before the gate: FLAKY_EXPIRED and FLAKY_REPORT for it; file, after it: its report filed"
     required: true
   token:
     description: A token that can read and write the repo's issues

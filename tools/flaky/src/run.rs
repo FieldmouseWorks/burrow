@@ -10,10 +10,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::github::Api;
 use crate::{filing, quarantine, report};
 
-/// Run `cmd` with FLAKY_QUARANTINE and FLAKY_REPORT set, then file what it
+/// Run `cmd` with FLAKY_EXPIRED and FLAKY_REPORT set, then file what it
 /// reported. Its exit code is the command's; one that passed but whose
 /// flaky tests couldn't be filed (or whose report can't be read) fails,
-/// since a passing try only counts once it's on its issue.
+/// since a passing try only counts once it's on its issue. If the
+/// quarantine can't be read, neither is set: which tests' quarantine has
+/// run out is unknown, so no test gets a second try.
 pub fn run(
     api: &mut dyn Api,
     repo: &str,
@@ -21,37 +23,38 @@ pub fn run(
     cmd: &[String],
     cache: Option<&Path>,
 ) -> i32 {
-    let tests = match quarantine::list(api, repo, cache) {
+    let mut gate = Command::new(&cmd[0]);
+    gate.args(&cmd[1..]);
+    let tests = match quarantine::list(api, repo, cache, quarantine::now()) {
         Ok(q) => q,
         Err(e) => {
-            eprintln!("flaky: couldn't read {repo}'s quarantine, so every test counts: {e}");
-            Vec::new()
+            eprintln!(
+                "flaky: couldn't read {repo}'s quarantine, so no test gets a second try: {e}"
+            );
+            gate.env_remove("FLAKY_EXPIRED").env_remove("FLAKY_REPORT");
+            return code(&cmd[0], gate.status());
         }
     };
     let dir = scratch("flaky-run");
-    let (q, r) = (dir.join("quarantine"), dir.join("report.jsonl"));
+    let (x, r) = (dir.join("expired"), dir.join("report.jsonl"));
+    let expired = quarantine::expired(&tests);
     if let Err(e) = fs::create_dir_all(&dir)
-        .and_then(|_| fs::write(&q, lines(&tests)))
+        .and_then(|_| fs::write(&x, lines(&expired)))
         .and_then(|_| fs::write(&r, ""))
     {
         eprintln!("flaky: {}: {e}", dir.display());
         return 1;
     }
-    for t in dedup(&tests) {
-        eprintln!("flaky: quarantined: {t}");
+    for t in quarantine::tests(&tests) {
+        let out = if expired.contains(&t) {
+            ", run out: a failure fails at once"
+        } else {
+            ""
+        };
+        eprintln!("flaky: quarantined: {t}{out}");
     }
-    let status = Command::new(&cmd[0])
-        .args(&cmd[1..])
-        .env("FLAKY_QUARANTINE", &q)
-        .env("FLAKY_REPORT", &r)
-        .status();
-    let mut code = match status {
-        Ok(s) => exit_code(s),
-        Err(e) => {
-            eprintln!("flaky: {}: {e}", cmd[0]);
-            127
-        }
-    };
+    gate.env("FLAKY_EXPIRED", &x).env("FLAKY_REPORT", &r);
+    let mut code = code(&cmd[0], gate.status());
     let shown = cmd.join(" ").replace('`', "'");
     let place = match place {
         Some(p) => p.to_string(),
@@ -67,7 +70,8 @@ pub fn run(
             if entries.is_empty() {
                 return Ok(Vec::new());
             }
-            let open = quarantine::list(api, repo, cache).map_err(|e| e.to_string())?;
+            let open =
+                quarantine::list(api, repo, cache, quarantine::now()).map_err(|e| e.to_string())?;
             filing::file(api, repo, &entries, &tests, &open, &place).map_err(|e| e.to_string())
         });
     match filed {
@@ -105,15 +109,9 @@ pub fn scratch(name: &str) -> std::path::PathBuf {
     ))
 }
 
-/// The tests, one a line, each once.
-pub fn lines(q: &[quarantine::Quarantined]) -> String {
-    dedup(q).iter().map(|t| format!("{t}\n")).collect()
-}
-
-fn dedup(q: &[quarantine::Quarantined]) -> Vec<&str> {
-    let mut t: Vec<&str> = q.iter().map(|x| x.test.as_str()).collect();
-    t.dedup();
-    t
+/// The tests, one a line.
+pub fn lines(t: &[&str]) -> String {
+    t.iter().map(|t| format!("{t}\n")).collect()
 }
 
 fn head() -> Option<String> {
@@ -124,6 +122,17 @@ fn head() -> Option<String> {
     out.status
         .success()
         .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// The gate's exit code, or 127 if it couldn't start.
+fn code(name: &str, status: std::io::Result<std::process::ExitStatus>) -> i32 {
+    match status {
+        Ok(s) => exit_code(s),
+        Err(e) => {
+            eprintln!("flaky: {name}: {e}");
+            127
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -141,6 +150,7 @@ fn exit_code(s: std::process::ExitStatus) -> i32 {
 mod tests {
     use super::*;
     use crate::github::fake::{Fake, ok};
+    use crate::test::iso;
     use serde_json::json;
 
     const LIST: &str = "repos/sam/game/issues?labels=flaky";
@@ -149,8 +159,14 @@ mod tests {
         vec!["sh".into(), "-c".into(), script.into()]
     }
 
+    /// `held` quarantined for a minute, `stale` for three days.
     fn quarantined() -> serde_json::Value {
-        json!([{"number": 4, "title": "flaky: held", "labels": [{"name": "flaky"}], "user": {"login": "github-actions[bot]", "type": "Bot"}}])
+        let at = |n, test: &str, ago: u64| {
+            json!({"number": n, "title": format!("flaky: {test}"), "labels": [{"name": "flaky"}],
+                   "user": {"login": "github-actions[bot]", "type": "Bot"},
+                   "created_at": iso(quarantine::now() - ago)})
+        };
+        json!([at(4, "held", 60), at(5, "stale", 3 * 86400)])
     }
 
     #[test]
@@ -164,7 +180,7 @@ mod tests {
         );
         gh.on(
             "GET",
-            "repos/sam/game/issues/4/events",
+            "repos/sam/game/issues/",
             vec![ok(200, json!([]), &[])],
         );
         gh.on(
@@ -182,11 +198,12 @@ mod tests {
             "repos/sam/game/issues",
             vec![ok(201, json!({"number": 9}), &[])],
         );
-        // The gate reads the quarantine and reports a flaky test and a
-        // quarantined one's failure, which goes on the issue that held it.
-        let script = r#"test "$(cat "$FLAKY_QUARANTINE")" = held || exit 7
-            echo '{"test": "wobbly", "outcome": "flaky", "detail": "first try"}' >> "$FLAKY_REPORT"
-            echo '{"test": "held", "outcome": "quarantined"}' >> "$FLAKY_REPORT""#;
+        // The gate reads which quarantine ran out and reports two tests that
+        // passed on a second try: a new one, and `held`, which goes on the
+        // issue that held it.
+        let script = r#"test "$(cat "$FLAKY_EXPIRED")" = stale || exit 7
+            echo '{"test": "wobbly", "detail": "first try"}' >> "$FLAKY_REPORT"
+            echo '{"test": "held"}' >> "$FLAKY_REPORT""#;
         assert_eq!(
             run(
                 &mut gh,
@@ -212,6 +229,20 @@ mod tests {
                 .unwrap()
                 .contains("in the gate on PR #3.")
         );
+    }
+
+    #[test]
+    fn a_test_whose_quarantine_ran_out_cant_pass_on_a_second_try() {
+        let mut gh = Fake::default();
+        gh.on("GET", LIST, vec![ok(200, quarantined(), &[])]);
+        gh.on(
+            "GET",
+            "repos/sam/game/issues/",
+            vec![ok(200, json!([]), &[])],
+        );
+        let stale = sh(r#"echo '{"test": "stale"}' >> "$FLAKY_REPORT""#);
+        assert_eq!(run(&mut gh, "sam/game", None, &stale, None), 1);
+        assert!(gh.asked("POST").is_empty());
     }
 
     #[test]
@@ -247,7 +278,7 @@ mod tests {
             "repos/sam/game/labels",
             vec![ok(403, json!({"message": "no"}), &[])],
         );
-        let flaky = sh(r#"echo '{"test": "wobbly", "outcome": "flaky"}' >> "$FLAKY_REPORT""#);
+        let flaky = sh(r#"echo '{"test": "wobbly"}' >> "$FLAKY_REPORT""#);
         assert_eq!(run(&mut gh, "sam/game", None, &flaky, None), 1);
         // A report it can't read is the gate's bug: a failure too.
         assert_eq!(
@@ -266,7 +297,7 @@ mod tests {
                 &mut gh,
                 "sam/game",
                 None,
-                &sh(r#"echo '{"test": "w", "outcome": "flaky"}' >> "$FLAKY_REPORT"; exit 5"#),
+                &sh(r#"echo '{"test": "w"}' >> "$FLAKY_REPORT"; exit 5"#),
                 None
             ),
             5
@@ -274,7 +305,7 @@ mod tests {
     }
 
     #[test]
-    fn no_quarantine_means_every_test_counts() {
+    fn a_quarantine_it_cant_read_means_no_second_tries() {
         let mut gh = Fake::default();
         gh.on(
             "GET",
@@ -286,7 +317,7 @@ mod tests {
                 &mut gh,
                 "sam/game",
                 None,
-                &sh(r#"test ! -s "$FLAKY_QUARANTINE""#),
+                &sh(r#"test -z "${FLAKY_EXPIRED+set}${FLAKY_REPORT+set}""#),
                 None
             ),
             0

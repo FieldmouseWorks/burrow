@@ -1,4 +1,4 @@
-//! What names a test, and which issues quarantine one.
+//! What names a test, which issues quarantine one, and for how long.
 
 use serde_json::Value;
 
@@ -21,6 +21,65 @@ pub fn valid(id: &str) -> bool {
 
 pub fn title(test: &str) -> String {
     format!("{PREFIX}{test}")
+}
+
+/// How long an issue quarantines its test: two days from when it opened.
+/// A flaky test passes when its second try does, quarantined or not; what
+/// the quarantine adds is its issue, the fix job it gets, and this clock.
+/// Once it runs out, the test's failures fail at once, with no second try,
+/// until the fix closes the issue: nothing stays flaky for long unnoticed.
+pub const EXPIRES: u64 = 2 * 24 * 3600;
+
+/// Seconds since 1970 of a time as GitHub gives one, `2026-10-28T23:28:42Z`.
+pub fn seconds(t: &str) -> Option<u64> {
+    let b = t.as_bytes();
+    let shape = b.len() == 20
+        && b.iter().enumerate().all(|(i, c)| match i {
+            4 | 7 => *c == b'-',
+            10 => *c == b'T',
+            13 | 16 => *c == b':',
+            19 => *c == b'Z',
+            _ => c.is_ascii_digit(),
+        });
+    if !shape {
+        return None;
+    }
+    let n = |r: std::ops::Range<usize>| t[r].parse::<i64>().ok();
+    let (y, m, d) = (n(0..4)?, n(5..7)?, n(8..10)?);
+    let (h, min, s) = (n(11..13)?, n(14..16)?, n(17..19)?);
+    if !(1..=12).contains(&m) || !(1..=31).contains(&d) || h > 23 || min > 59 || s > 60 {
+        return None;
+    }
+    // Days from 1970-01-01 to y-m-d, by Howard Hinnant's days_from_civil.
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    u64::try_from(days * 86_400 + h * 3600 + min * 60 + s).ok()
+}
+
+/// A time as GitHub gives one, for tests.
+#[cfg(test)]
+pub fn iso(secs: u64) -> String {
+    let (days, rest) = (secs / 86400, secs % 86400);
+    // Civil from days, by Howard Hinnant's algorithm.
+    let z = days as i64 + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    format!(
+        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z",
+        rest / 3600,
+        rest % 3600 / 60,
+        rest % 60
+    )
 }
 
 /// The one app whose issues quarantine a test: a repo's own GitHub Actions,
@@ -99,6 +158,27 @@ mod tests {
         assert!(quarantined_by(&reopened).is_none());
         reopened["state_reason"] = Value::Null;
         assert!(quarantined_by(&reopened).is_some());
+    }
+
+    #[test]
+    fn times() {
+        assert_eq!(seconds("1970-01-01T00:00:00Z"), Some(0));
+        assert_eq!(seconds("2000-03-01T00:00:00Z"), Some(951_868_800));
+        assert_eq!(seconds("2026-10-28T23:28:42Z"), Some(1_793_230_122));
+        for bad in [
+            "",
+            "2026-10-28 23:28:42Z",
+            "2026-10-28T23:28:42",
+            "2026-10-28T23:28:42+00:00",
+            "2026-13-28T23:28:42Z",
+            "1969-12-31T23:59:59Z",
+            "2026-1a-28T23:28:42Z",
+        ] {
+            assert_eq!(seconds(bad), None, "{bad}");
+        }
+        for t in [0, 951_868_800, 1_793_230_122, crate::quarantine::now()] {
+            assert_eq!(seconds(&iso(t)), Some(t), "{t}");
+        }
     }
 
     #[test]

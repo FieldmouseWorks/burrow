@@ -186,8 +186,9 @@ def task(repo, todo):
     lines = "\n".join(f"- `{it['test']}`: https://github.com/{repo}/issues/{n}" for n, it, _ in todo)
     issues = "\n\n".join(f"### {repo}#{n}, `{it['test']}`\n\n{text}" for n, it, text in todo)
     return f"""These tests in {repo} are flaky: each one failed in a run of its gate, then passed when the gate ran it \
-again on the same tree. The gate quarantined each one with an issue: it still runs, but its failures fail nothing \
-until the issue closes (https://github.com/FieldmouseWorks/burrow/blob/main/docs/flaky-tests.md).
+again on the same tree. The gate quarantined each one with an issue: a failure that passes on its second try still \
+counts as a pass, but two days after the issue opened that runs out, and until the issue closes any failure of the \
+test fails the gate at once (https://github.com/FieldmouseWorks/burrow/blob/main/docs/flaky-tests.md).
 {lines}
 For each one, find the cause and fix it, in the test or in the code it tests, whichever is wrong. Its issue says where \
 it failed and how, and the latest runs that noted it since are below it. Anything else on the issues is from people \
