@@ -1,0 +1,41 @@
+{
+  "conary": "note v1",
+  "change": "5zwqencm2ex1v5neepeyrgrpk4",
+  "repo": {
+    "owner": "fieldmouseworks",
+    "name": "burrow"
+  },
+  "pr": 103,
+  "url": "https://github.com/fieldmouseworks/burrow/pull/103",
+  "summary": "autoland: every job and review has a deadline, and DeepSeek is gone",
+  "task": null,
+  "author": {
+    "kind": "agent",
+    "login": "TusanHomichi",
+    "session": "https://claude.ai/code/session_01LUSpz65cwD3ABEEydMWsoV"
+  },
+  "landing": {
+    "revision": "b78026acf6e98dc58a1ea10fd23993dbc500b7aa0e0b66c89a21ebf329750bc7",
+    "before": "9ebeaa95ad2af4713878e0b8858f3b6731f7cd67",
+    "after": "339267b98296f2f4e2861901a4832b6ae52eb35d",
+    "by": {
+      "kind": "status",
+      "login": "TusanHomichi"
+    },
+    "at": 1793160354198
+  },
+  "evidence": [
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/40626254600/job/122611770038"
+    },
+    {
+      "kind": "ci",
+      "check": "agents",
+      "result": "pass",
+      "source": "status agents"
+    }
+  ]
+}
