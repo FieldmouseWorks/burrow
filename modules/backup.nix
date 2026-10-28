@@ -8,7 +8,8 @@
 # when the units in `after` finish, so each new snapshot is off the box
 # minutes after it's taken, and once a day regardless, in case they stop.
 # Once a day it also forgets what `keep` doesn't keep, reads a share of the
-# repository back and runs a restore drill (backup/backup.sh).
+# repository back, checks the newest backup holds everything its snapshot
+# had, and restores a few paths to compare byte for byte (backup/backup.sh).
 inputs:
 { config, lib, pkgs, ... }:
 let
@@ -24,14 +25,11 @@ let
     REPO = cfg.repository;
     PASSWORD = cfg.passwordFile;
     RCLONE_CONFIG_FILE = if cfg.rcloneConfigFile == null then "" else cfg.rcloneConfigFile;
-    DATASETS = lib.concatStringsSep " " cfg.datasets;
     PATTERN = cfg.snapshots;
     EXCLUDE_FILE = pkgs.writeText "${name}-exclude" (lib.concatLines cfg.exclude);
-    KEEP = lib.concatStringsSep " " (lib.mapAttrsToList (k: n: "--keep-${k} ${toString n}") cfg.keep);
     VERIFY_DAYS = toString cfg.verifyDays;
     PACK_SIZE = toString cfg.packSize;
     STALE_AFTER = toString cfg.staleAfter;
-    DRILL = lib.concatStringsSep " " cfg.drill;
     SCRATCH = config.burrow.scratchDir;
     PROJ = lib.optionalString (tools ? proj) "${tools.proj}/bin/proj";
     PROJECT = baseNameOf config.burrow.flake;
@@ -42,10 +40,18 @@ let
     USER_UID = toString account.uid;
   };
 
+  # Lists, as bash arrays: a path with a space in it stays one path.
+  lists = {
+    DATASETS = cfg.datasets;
+    DRILL = cfg.drill;
+    KEEP = lib.concatLists (lib.mapAttrsToList (k: n: [ "--keep-${k}" (toString n) ]) cfg.keep);
+  };
+
   backup = pkgs.writeShellApplication {
     inherit name;
     runtimeInputs = with pkgs; [ restic rclone jq coreutils findutils diffutils gnugrep gawk util-linux bash config.boot.zfs.package ];
     text = lib.concatStrings (lib.mapAttrsToList (n: v: "${n}=${lib.escapeShellArg v}\n") vars)
+      + lib.concatStrings (lib.mapAttrsToList (n: v: "${n}=(${lib.escapeShellArgs v})\n") lists)
       + builtins.readFile ./backup/backup.sh;
   };
 in
@@ -161,9 +167,12 @@ in
       default = [ config.burrow.flake ];
       defaultText = literalExpression "[ config.burrow.flake ]";
       description = ''
-        What the daily restore drill brings back from the newest backup and
-        compares with the snapshot it was read from. `HOST-backup drill PATH`
-        drills anything else.
+        What the daily drill restores from the newest backup and compares
+        with the snapshot it was read from, entry for entry and byte for
+        byte: directories, files or symlinks. Before that, the drill checks
+        the backup holds everything the snapshot had (what the backup's own
+        rules leave out aside), which costs a backup pass, not a restore.
+        `HOST-backup drill PATH` drills anything else.
       '';
     };
 

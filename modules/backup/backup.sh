@@ -8,9 +8,9 @@
 #                          the repository back and run the drill
 #   HOST-backup status     the last backup, and what's in the repository
 #   HOST-backup drill [PATH...]
-#                          restore PATHs (default DRILL) from the newest backup
-#                          to scratch and compare them with the snapshot they
-#                          came from, byte for byte
+#                          check the newest backup holds everything its
+#                          snapshot had, then restore PATHs (default DRILL) to
+#                          scratch and compare them with it, byte for byte
 #   HOST-backup restic ARGS...
 #                          restic itself, on this repository (to restore by
 #                          hand: restic restore latest --target DIR --include PATH)
@@ -21,31 +21,146 @@
 
 [ "$(id -u)" = 0 ] || exec sudo "$0" "$@"
 
+self=$(readlink -f "$0")
 state=$DIR
-read -r -a datasets <<<"$DATASETS"
-read -r -a drill_paths <<<"$DRILL"
 hold=burrow-backup
+cmd=${1:-run}
+[ "$#" = 0 ] || shift
+
+# Where a dataset is mounted (its own root, not a bind mount out of it).
+mountpoint_of() {
+  findmnt -rn -o TARGET,FSROOT -S "$1" | awk '$2 == "/" { print $1; exit }'
+}
+
+# Each dataset's mountpoint and name, parents before their children, so
+# mounting one never hides another.
+mounts() {
+  local ds m
+  for ds in "${DATASETS[@]}"; do
+    m=$(mountpoint_of "$ds")
+    [ -n "$m" ] || { echo "$ds isn't mounted" >&2; return 1; }
+    [ "$m" != / ] || { echo "$ds is mounted at /, which can't be read from its snapshot" >&2; return 1; }
+    printf '%s\t%s\n' "$m" "$ds"
+  done | LC_ALL=C sort -t $'\t' -k1,1
+}
+
+# CMD with each dataset's snapshot SNAP mounted read-only over its own path, in
+# a mount namespace of its own: restic sees the paths it saw last time, so it
+# reads only the files that changed since. --bind SRC DST first puts SRC
+# where CMD can still see it.
+in_snapshot() {
+  unshare --mount --propagation private -- "$self" __in-snapshot "$@"
+}
+
+# Kind, mode and owner of each NUL-separated ./PATH in $2 under $1, and size
+# and mtime of the regular files among them.
+meta() {
+  (cd "$1" && xargs -0r -a "$2" bash -c \
+    'exec find -P "$@" -maxdepth 0 \( -type f -printf "%p %y %m %U %G %s %T@\n" -o -printf "%p %y %m %U %G\n" \)' find-meta) | LC_ALL=C sort
+}
+
+# (In the snapshot's namespace.) Each PATH restored under BASE/tree must be
+# exactly what the backup holds there (BASE/expected, its listing), and what
+# the snapshot had: the same entries, bytes, kinds, modes, owners, sizes and
+# mtimes. Names only, never contents, go to the log.
+compare() {
+  local base=$1 p work bad=0
+  shift
+  work=$(mktemp -d)
+  for p in "$@"; do
+    [ "$p" = / ] || p=${p%/}
+    P=$p awk 'BEGIN { RS = ORS = "\0"; p = ENVIRON["P"] } $0 == p || index($0, p "/") == 1' "$base/expected" | LC_ALL=C sort -z >"$work/want"
+    if [ ! -s "$work/want" ]; then
+      echo "drill: $p isn't in the backup"; bad=1; continue
+    fi
+    { find -P "$base/tree$p" -print0 2>/dev/null || true; } |
+      R=$base/tree awk 'BEGIN { RS = ORS = "\0"; r = ENVIRON["R"] } { print substr($0, length(r) + 1) }' | LC_ALL=C sort -z >"$work/have"
+    if ! cmp -s "$work/want" "$work/have"; then
+      echo "drill: restoring $p didn't bring back what the backup holds (< only in the backup, > only restored):"
+      { LC_ALL=C comm -z -23 "$work/want" "$work/have" | tr '\0' '\n' | sed 's/^/< /'
+        LC_ALL=C comm -z -13 "$work/want" "$work/have" | tr '\0' '\n' | sed 's/^/> /'; } | head -20
+      bad=1; continue
+    fi
+    # What the snapshot has beyond the backup, the backup's own rules left
+    # out (the dry run checked that).
+    out=$(LC_ALL=C diff -rq --no-dereference "$p" "$base/tree$p" 2>&1 | grep -vF "Only in $p" || true)
+    if [ -n "$out" ]; then
+      echo "drill: $p as restored isn't what the snapshot had:"; head -20 <<<"$out"; bad=1; continue
+    fi
+    awk 'BEGIN { RS = ORS = "\0" } { print "." $0 }' "$work/want" >"$work/rel"
+    if ! diff <(meta / "$work/rel") <(meta "$base/tree" "$work/rel") >"$work/meta"; then
+      echo "drill: the metadata of $p as restored isn't what the snapshot had (< snapshot, > restored):"; head -20 "$work/meta"; bad=1; continue
+    fi
+    echo "drill: $p is what the snapshot had ($(tr -cd '\0' <"$work/want" | wc -c) entries)"
+  done
+  rm -rf "$work"
+  return "$bad"
+}
+
+case $cmd in
+  __in-snapshot)
+    snap=$1
+    shift
+    if [ "${1:-}" = --bind ]; then
+      mkdir -p "$3"
+      mount --bind "$2" "$3"
+      shift 3
+    fi
+    list=$(mounts)
+    while IFS=$'\t' read -r m ds; do
+      mount -t zfs -o ro "$ds@$snap" "$m"
+    done <<<"$list"
+    exec "$@"
+    ;;
+  __compare)
+    compare "$@"
+    exit
+    ;;
+esac
+
 mkdir -p "$state"
 chmod 700 "$state"
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+
+# One at a time: a backup, a drill, a restore by hand. Each of them may
+# refresh rclone's token.
+exec 9>"/run/$NAME.lock"
+if [ "$cmd" = status ]; then
+  if [ -e "$state/last.json" ]; then
+    jq -r '"last backup \(.time): \(.snapshot), \(.files) files, \(.bytes / 1e9 * 100 | round / 100) GB read, \(.added / 1e6 * 100 | round / 100) MB sent"' "$state/last.json"
+  else
+    echo "no backup yet"
+  fi
+  [ ! -e "$state/failed-since" ] || echo "failing since $(date -d "@$(cat "$state/failed-since")" -Is)"
+  [ ! -e "$state/maintained" ] || echo "pruned, checked and drilled $(date -r "$state/maintained" -Is)"
+  flock -n 9 || { echo "a backup or drill is running (journalctl -u $NAME)"; exit 0; }
+else
+  flock -n 9 || { echo "waiting for the backup that's running" >&2; flock 9; }
+fi
 
 export RESTIC_REPOSITORY=$REPO
 export RESTIC_PASSWORD_FILE=$PASSWORD
 export RESTIC_CACHE_DIR=$state/cache
 export RESTIC_PACK_SIZE=$PACK_SIZE
 export RESTIC_COMPRESSION=auto
-tmp=$(mktemp -d)
-trap 'rm -rf "$tmp"' EXIT
-# rclone writes refreshed tokens back to its config: a copy of its own, so the
-# secret it came from stays as it is.
+# Each mount of a snapshot is a device of its own: without this, restic would
+# write every directory's tree again on every run.
+export RESTIC_FEATURES=device-id-for-hardlinks
+# rclone writes refreshed tokens back to its config, and some remotes' refresh
+# tokens work only once: a copy of its own that keeps them, started over only
+# when the secret it came from changes.
 if [ -n "$RCLONE_CONFIG_FILE" ]; then
-  install -m 600 "$RCLONE_CONFIG_FILE" "$tmp/rclone.conf"
-  export RCLONE_CONFIG=$tmp/rclone.conf
+  seed=$(sha256sum <"$RCLONE_CONFIG_FILE")
+  if [ ! -s "$state/rclone.conf" ] || [ "$(cat "$state/rclone.seed" 2>/dev/null)" != "$seed" ]; then
+    install -m 600 "$RCLONE_CONFIG_FILE" "$state/rclone.conf"
+    echo "$seed" >"$state/rclone.seed"
+  fi
+  export RCLONE_CONFIG=$state/rclone.conf
 fi
 
-# Where a dataset is mounted (its own root, not a bind mount out of it).
-mountpoint_of() {
-  findmnt -rn -o TARGET,FSROOT -S "$1" | awk '$2 == "/" { print $1; exit }'
-}
+# The same rules for every run, and for the drill's dry run.
+backup_flags=(--host "$HOST" --one-file-system --exclude-caches --exclude-if-present .nobackup --exclude-file "$EXCLUDE_FILE")
 
 # The newest snapshot matching PATTERN that every dataset has, as
 # NAME<TAB>CREATION (epoch seconds); nothing if there's none.
@@ -55,12 +170,12 @@ newest_snapshot() {
     name=${name#*@}
     # shellcheck disable=SC2053 # PATTERN is a glob on purpose
     [[ $name == $PATTERN ]] || continue
-    for ds in "${datasets[@]:1}"; do
+    for ds in "${DATASETS[@]:1}"; do
       zfs list -H -o name "$ds@$name" >/dev/null 2>&1 || continue 2
     done
     printf '%s\t%s\n' "$name" "$creation"
     return
-  done < <(zfs list -H -p -t snapshot -o name,creation -S creation -d 1 "${datasets[0]}")
+  done < <(zfs list -H -p -t snapshot -o name,creation -S creation -d 1 "${DATASETS[0]}")
 }
 
 # The restic snapshot of the newest backup, as JSON.
@@ -68,86 +183,87 @@ latest() {
   restic snapshots --json --latest 1 --host "$HOST" | jq -e 'sort_by(.time) | last'
 }
 
-case "${1:-run}" in
+# Let go of the backup's holds on every snapshot of the datasets but KEEP (the
+# newest one off the box, if any): ones from runs that died stay held no
+# longer than the next run.
+release_except() {
+  local keep=$1 ds s
+  for ds in "${DATASETS[@]}"; do
+    while IFS= read -r s; do
+      if [ "$s" != "$ds@$keep" ] && zfs holds -H "$s" | cut -f2 | grep -qxF "$hold"; then
+        zfs release "$hold" "$s"
+      fi
+    done < <(zfs list -H -t snapshot -o name,userrefs -d 1 "$ds" | awk -F '\t' '$2 > 0 { print $1 }')
+  done
+}
+
+# Check the newest backup against the snapshot it was read from (held until
+# the next one, so it's there), then restore drill_paths from it and compare.
+drill() {
+  local snap id name ds paths=() changed restored inc includes=() p rc=0
+  snap=$(latest) || { echo "drill: no backup to restore"; return 1; }
+  id=$(jq -r .id <<<"$snap")
+  name=$(jq -r '.tags[0]' <<<"$snap")
+  for ds in "${DATASETS[@]}"; do
+    zfs list -H -o name "$ds@$name" >/dev/null 2>&1 || { echo "drill: $ds@$name is gone, nothing to check backup ${id:0:8} against"; return 1; }
+  done
+  while IFS=$'\t' read -r m _; do paths+=("$m"); done <<<"$(mounts)"
+
+  # Everything the snapshot has, the backup has, as the backup's own rules
+  # leave it: the same backup, dry, against it finds nothing new or changed
+  # but the directories above the datasets, which aren't in the snapshot.
+  if ! in_snapshot "$name" restic backup --dry-run --json -vv --parent "$id" "${backup_flags[@]}" "${paths[@]}" \
+      >"$tmp/dry" 2>"$tmp/dry.err"; then
+    echo "drill: the dry run against backup ${id:0:8} failed:"; tail -5 "$tmp/dry.err"; return 1
+  fi
+  changed=$(jq -r --args '
+      select(.message_type == "verbose_status" and (.action == "new" or .action == "modified"))
+      | .item | (if . == "/" then . else rtrimstr("/") end) as $i
+      | select(($i == "/" or any($ARGS.positional[]; startswith($i + "/"))) | not) | $i' "${paths[@]}" <"$tmp/dry" | head -20)
+  if [ -n "$changed" ]; then
+    echo "drill: backup ${id:0:8} doesn't hold all of $name; new or changed since:"; echo "$changed"; return 1
+  fi
+  echo "drill: backup ${id:0:8} holds all of $name"
+
+  [ "${#drill_paths[@]}" -gt 0 ] || return 0
+  mkdir -p "$SCRATCH"
+  restored=$(mktemp -d "$SCRATCH/$NAME-drill.XXXXXX")
+  # A cache to restic, so no backup reads it should a snapshot catch it.
+  printf 'Signature: 8a477f597d28d172789f06886806bc55\n' >"$restored/CACHEDIR.TAG"
+  for p in "${drill_paths[@]}"; do
+    inc=${p//\\/\\\\}; inc=${inc//\*/\\*}; inc=${inc//\?/\\?}; inc=${inc//\[/\\[}
+    includes+=(--include "$inc")
+  done
+  if ! restic ls --json "$id" | jq -j 'select(.message_type == "node") | .path + "\u0000"' >"$restored/expected"; then
+    echo "drill: couldn't list backup ${id:0:8}"; rc=1
+  elif ! restic restore "$id" --target "$restored/tree" "${includes[@]}" -q; then
+    echo "drill: restic restore ${id:0:8} failed"; rc=1
+  else
+    in_snapshot "$name" --bind "$restored" "/run/$NAME-drill" "$self" __compare "/run/$NAME-drill" "${drill_paths[@]}" || rc=1
+  fi
+  rm -rf "$restored"
+  rmdir "/run/$NAME-drill" 2>/dev/null || true
+  return "$rc"
+}
+
+drill_paths=("${DRILL[@]}")
+case $cmd in
   restic)
-    shift
     exec restic "$@"
     ;;
   status)
-    if [ -e "$state/last.json" ]; then
-      jq -r '"last backup \(.time): \(.snapshot), \(.files) files, \(.bytes / 1e9 * 100 | round / 100) GB read, \(.added / 1e6 * 100 | round / 100) MB sent"' "$state/last.json"
-    else
-      echo "no backup yet"
-    fi
-    [ ! -e "$state/failed-since" ] || echo "failing since $(date -d "@$(cat "$state/failed-since")" -Is)"
-    [ ! -e "$state/maintained" ] || echo "pruned, checked and drilled $(date -r "$state/maintained" -Is)"
     restic snapshots --compact --host "$HOST" --latest 3 2>/dev/null || echo "repository unreachable"
     restic stats --mode raw-data 2>/dev/null | grep -E 'Total (Uncompressed )?Size|Compression Ratio' || true
     exit 0
     ;;
   drill)
-    shift
     [ "$#" = 0 ] || drill_paths=("$@")
+    drill
+    exit
     ;;
   run) ;;
   *) echo "usage: $NAME [status | drill [PATH...] | restic ARGS...]" >&2; exit 2 ;;
 esac
-
-exec 9>"/run/$NAME.lock"
-flock 9
-
-# Kind, mode, owner and size of each of $tmp/files under $1, and the mtime of
-# the regular files among them.
-meta() {
-  (cd "$1" && xargs -0r -a "$tmp/files" bash -c \
-    'exec find -P "$@" -maxdepth 0 \( -type f -printf "%p %y %m %U %G %s %T@\n" -o -printf "%p %y %m %U %G\n" \)' find-meta) | LC_ALL=C sort
-}
-
-# Restore drill_paths from the newest backup into scratch and compare them
-# with the snapshot that backup was read from (held until the next one, so it's
-# there). Everything the backup has must be what the snapshot had; what the
-# snapshot has beyond it can only be what the backup leaves out (EXCLUDE_FILE,
-# caches, .nobackup).
-drill() {
-  local snap id name restored p ds m mnt src out ok=1 args=()
-  snap=$(latest) || { echo "drill: no backup to restore"; return 1; }
-  id=$(jq -r .short_id <<<"$snap")
-  name=$(jq -r '.tags[0]' <<<"$snap")
-  mkdir -p "$SCRATCH"
-  restored=$(mktemp -d "$SCRATCH/$NAME-drill.XXXXXX")
-  # A cache to restic, so no backup reads it should a snapshot catch it.
-  printf 'Signature: 8a477f597d28d172789f06886806bc55\n' >"$restored/CACHEDIR.TAG"
-  for p in "${drill_paths[@]}"; do args+=(--include "$p"); done
-  restic restore "$id" --target "$restored" "${args[@]}" -q || { echo "drill: restic restore $id failed"; ok=; }
-  for p in "${drill_paths[@]}"; do
-    [ -n "$ok" ] || break
-    mnt=
-    for ds in "${datasets[@]}"; do
-      m=$(mountpoint_of "$ds")
-      case ${p%/}/ in "${m%/}"/*) [ "${#m}" -le "${#mnt}" ] || mnt=$m ;; esac
-    done
-    [ -n "$mnt" ] || { echo "drill: $p is on none of $DATASETS"; ok=; break; }
-    src=${mnt%/}/.zfs/snapshot/$name${p#"${mnt%/}"}
-    [ -e "$restored$p" ] || { echo "drill: $p isn't in backup $id"; ok=; break; }
-    [ -e "$src" ] || { echo "drill: $src is gone, nothing to compare $p with"; ok=; break; }
-    out=$(LC_ALL=C diff -r --no-dereference "$src" "$restored$p" 2>&1 | grep -v "^Only in $src" || true)
-    if [ -n "$out" ]; then
-      echo "drill: $p in backup $id isn't what $name had:"; head -20 <<<"$out"; ok=; break
-    fi
-    (cd "$restored$p" && find . -mindepth 1 ! -type d -print0) >"$tmp/files"
-    if ! diff <(meta "$src") <(meta "$restored$p") >"$tmp/meta"; then
-      echo "drill: the metadata of $p in backup $id isn't what $name had:"; head -20 "$tmp/meta"; ok=; break
-    fi
-    echo "drill: $p from backup $id is what $name had ($(tr -cd '\0' <"$tmp/files" | wc -c) files)"
-  done
-  rm -rf "$restored"
-  [ -n "$ok" ]
-}
-
-if [ "${1:-run}" = drill ]; then
-  drill
-  exit
-fi
 
 # Hand a failure to a Claude job in the machine's own project, once while one
 # is still on it (or was in the last 6 hours). The owner hears only once the
@@ -183,26 +299,26 @@ maintain() {
   if [ -e "$state/maintained" ] && [ $(($(date +%s) - $(stat -c %Y "$state/maintained"))) -lt 72000 ]; then
     return 0
   fi
-  # shellcheck disable=SC2086 # KEEP is a list of flags
-  restic forget --host "$HOST" $KEEP --prune -q || failed "restic forget --prune failed"
+  restic forget --host "$HOST" "${KEEP[@]}" --prune -q || failed "restic forget --prune failed"
   local part=$((10#$(date +%j) % VERIFY_DAYS + 1))
   restic check -q --read-data-subset="$part/$VERIFY_DAYS" \
     || failed "restic check found damage reading part $part/$VERIFY_DAYS of the repository back"
-  if [ "${#drill_paths[@]}" -gt 0 ]; then
-    drill || failed "the restore drill failed"
-  fi
+  drill || failed "the restore drill failed"
   touch "$state/maintained"
 }
 
+last=$(cat "$state/last" 2>/dev/null || true)
+release_except "$last"
+
 snap=
 IFS=$'\t' read -r snap created < <(newest_snapshot) || true
-[ -n "$snap" ] || failed "no snapshot of ${datasets[0]} matches $PATTERN"
+[ -n "$snap" ] || failed "no snapshot of ${DATASETS[0]} matches $PATTERN"
 if [ $(($(date +%s) - created)) -ge $((STALE_AFTER * 3600)) ]; then
   failed "the newest snapshot matching $PATTERN, $snap, is more than $STALE_AFTER hours old: is whatever takes them still running?"
 fi
 
 restic unlock -q 2>/dev/null || true
-if [ "$(cat "$state/last" 2>/dev/null)" != "$snap" ]; then
+if [ "$last" != "$snap" ]; then
   rc=0
   restic cat config >/dev/null 2>"$tmp/err" || rc=$?
   case $rc in
@@ -211,39 +327,27 @@ if [ "$(cat "$state/last" 2>/dev/null)" != "$snap" ]; then
     *) failed "couldn't open the repository at $REPO (restic exit $rc): $(tail -3 "$tmp/err")" ;;
   esac
 
-  # Hold the snapshot while it's read, and after, for the drill.
-  prev=$(cat "$state/last" 2>/dev/null || true)
-  for ds in "${datasets[@]}"; do zfs hold "$hold" "$ds@$snap" 2>/dev/null || true; done
-  release() {
-    for ds in "${datasets[@]}"; do zfs release "$hold" "$ds@$1" 2>/dev/null || true; done
-  }
-
-  # Each dataset's snapshot mounted over its own path, in a mount namespace of
-  # the backup's own: restic sees the paths it saw last time, so it reads only
-  # the files that changed since.
+  # Held while it's read, and after, for the drill.
+  for ds in "${DATASETS[@]}"; do zfs hold "$hold" "$ds@$snap" 2>/dev/null || true; done
   paths=()
-  mounts=
-  for ds in "${datasets[@]}"; do
-    m=$(mountpoint_of "$ds")
-    [ -n "$m" ] || { release "$snap"; failed "$ds isn't mounted"; }
-    paths+=("$m")
-    mounts+="mount -t zfs -o ro $(printf %q "$ds@$snap") $(printf %q "$m") && "
-  done
+  if ! list=$(mounts 2>"$tmp/err"); then
+    release_except "$last"
+    failed "$(cat "$tmp/err")"
+  fi
+  while IFS=$'\t' read -r m _; do paths+=("$m"); done <<<"$list"
   rc=0
-  unshare --mount --propagation private -- bash -c "${mounts}exec \"\$@\"" backup \
-    restic backup --json --quiet --host "$HOST" --tag "$snap" --time "$(date -d "@$created" '+%F %T')" \
-      --one-file-system --exclude-caches --exclude-if-present .nobackup --exclude-file "$EXCLUDE_FILE" \
-      "${paths[@]}" >"$tmp/out" 2>"$tmp/err" || rc=$?
+  in_snapshot "$snap" restic backup --json --quiet --tag "$snap" --time "$(date -d "@$created" '+%F %T')" \
+    "${backup_flags[@]}" "${paths[@]}" >"$tmp/out" 2>"$tmp/err" || rc=$?
   summary=$(jq -c 'select(.message_type == "summary")' "$tmp/out" 2>/dev/null | tail -1)
   if [ "$rc" != 0 ] || [ -z "$summary" ]; then
-    release "$snap"
+    release_except "$last"
     failed "restic backup of $snap exited $rc: $( (jq -r 'select(.message_type == "error") | "\(.item // ""): \(.error.message // .error)"' "$tmp/err" 2>/dev/null || tail -5 "$tmp/err") | head -5)"
   fi
   jq -n --argjson s "$summary" --arg snap "$snap" --arg t "$(date -Is)" --argjson e "$(date +%s)" \
     '{time: $t, epoch: $e, snapshot: $snap, id: $s.snapshot_id, files: $s.total_files_processed,
       bytes: $s.total_bytes_processed, added: $s.data_added_packed}' >"$state/last.json"
   echo "$snap" >"$state/last"
-  if [ -n "$prev" ] && [ "$prev" != "$snap" ]; then release "$prev"; fi
+  release_except "$snap"
   jq -r '"backed up \(.snapshot): \(.files) files, \(.bytes / 1e9 * 100 | round / 100) GB read, \(.added / 1e6 * 100 | round / 100) MB sent"' "$state/last.json"
 fi
 
