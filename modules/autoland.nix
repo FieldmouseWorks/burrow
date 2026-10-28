@@ -254,8 +254,9 @@ in
         CODEOWNERS (who signs off on what) and secrets. The rest of
         `.github/` isn't on it: the reviewers read workflow changes like any
         other, and the steward merges them once settled. Nor are database
-        migrations: a project's deploy backs its data up before a new release
-        migrates it, and that backup is what undoes a bad one.
+        migrations: what undoes a bad one is the backup its deploy takes
+        before migrating, not a wait at merge. A repo whose deploy takes no
+        such backup can put `(^|/)migrations?/` on its own list (`repos`).
       '';
     };
 
