@@ -1,6 +1,6 @@
 """What starts the steward's passes, as burrow-events runs them: the
 wake-ups a pass books, a kicked pass over one repo, each repo's hook, and
-the kicks from DeepSeek's reviews and Claude jobs."""
+the kicks from reviews and Claude jobs coming back."""
 
 import json
 import os
@@ -16,7 +16,7 @@ run(mkpr(), 10)
 assert C.WAKE == {"sam/r": T + 10 + 3 * 60 + 1}, C.WAKE
 # The reviewers queued: their answers kick it (below), so there's only the day.
 run(mkpr(), 200)
-assert queued() == ["codex", "deepseek"] and C.WAKE == {"sam/r": T + 86400 + 1}, C.WAKE
+assert queued() == ["codex", "rival"] and C.WAKE == {"sam/r": T + 86400 + 1}, C.WAKE
 fresh_pr_state()
 run(clean(threads=[False]), 300)
 assert C.WAKE == {"sam/r": T + 300 + 30 * 60 + 1}, C.WAKE
@@ -63,14 +63,14 @@ assert "pr merge 5 -R sam/r --disable-auto" in WROTE and C.load(key, {})["landed
 # Every finding answered: the reviewer looks again once the settle delay
 # after its review is up.
 fresh_pr_state()
-run(mkpr(reviews=[rv_review("codex", 1), rv_review("deepseek", 0)]), 700)
+run(mkpr(reviews=[rv_review("codex", 1), rv_review("rival", 0)]), 700)
 assert C.WAKE == {"sam/r": T + 660 + 3 * 60 + 1}, C.WAKE
 # A reviewer out of service: its look is asked for once it's back.
 fresh_pr_state()
 run(mkpr(), 0)
 C.save(V.OUT, {"codex": {"why": "its usage is spent", "until": T + 5000}})
 run(mkpr(), 600)
-assert queued() == ["deepseek"] and C.WAKE == {"sam/r": T + 5000 + 1}, C.WAKE
+assert queued() == ["rival"] and C.WAKE == {"sam/r": T + 5000 + 1}, C.WAKE
 C.save(V.OUT, {})
 
 # Whatever didn't go through is looked at again soon: a merge that failed, a
@@ -109,14 +109,14 @@ assert C.WAKE["sam/r"] == T + 700 + 60 + 1, C.WAKE
 fresh_pr_state()
 run(mkpr(), 0)
 run(mkpr(), 600)
-assert queued() == ["codex", "deepseek"]
+assert queued() == ["codex", "rival"]
 for x in os.listdir(QDIR):
     os.remove(f"{QDIR}/{x}")
 run(mkpr(), 700)
 assert C.WAKE["sam/r"] == T + 700 + 60 + 1, C.WAKE
 # Three failed reviews: tried again an hour after the last.
 st = pr_state()
-for r in ("codex", "deepseek"):
+for r in ("codex", "rival"):
     st["rv"][r] = {"fails": 3, "failedAt": T + 650}
 C.save("pr-sam_r-5.json", st)
 run(mkpr(), 800)

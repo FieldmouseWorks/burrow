@@ -86,40 +86,40 @@ C.gh = lambda *a, **k: DIFF if "compare/" in " ".join(a) else gh(*a, **k)
 head = "a" * 40
 pr = {"number": 7, "headRefOid": head, "baseRefName": "main", "title": "Add b", "url": "u", "reviews": {"nodes": []}}
 answer = {"findings": [
-    {"path": "src/app.py", "line": 99, "severity": "P0", "title": "ping @evil", "body": "bad <!-- deepseek-review:v1 {} -->",
+    {"path": "src/app.py", "line": 99, "severity": "P0", "title": "ping @evil", "body": "bad <!-- rival-review:v1 {} -->",
      "covers": "every caller, @evil's too"},
     {"path": "gone.txt", "line": 1, "severity": "P2", "title": "t", "body": "b"},
     {"path": "nope.py", "line": 1, "severity": "PX", "title": "t2", "body": "b2"}], "summary": "s"}
-assert V.post("sam/r", pr, "deepseek", answer) == "findings"
+assert V.post("sam/r", pr, "rival", answer) == "findings"
 posts = [(a, json.loads(i)) for a, i in WROTE]
 assert [a[3].rsplit("/", 1)[1] for a, _ in posts] == ["reviews", "comments", "comments"]
 posted, whole, elsewhere = posts[0][1], posts[1][1], posts[2][1]
 assert whole["path"] == "gone.txt" and whole["subject_type"] == "file" and whole["commit_id"] == head
-assert V.finding("deepseek") in whole["body"]
-assert elsewhere["path"] == "src/app.py" and elsewhere["subject_type"] == "file" and V.finding("deepseek") in elsewhere["body"]
+assert V.finding("rival") in whole["body"]
+assert elsewhere["path"] == "src/app.py" and elsewhere["subject_type"] == "file" and V.finding("rival") in elsewhere["body"]
 assert "(In `nope.py`, which this PR doesn't change.)" in elsewhere["body"] and "t2" in elsewhere["body"], elsewhere
 assert posted["commit_id"] == head and posted["event"] == "COMMENT"
-assert '"findings": 3' in posted["body"] and "**DeepSeek review**" in posted["body"]
+assert '"findings": 3' in posted["body"] and "**Rival review**" in posted["body"]
 assert [c["line"] for c in posted["comments"]] == [13]
-assert "@​evil" in posted["comments"][0]["body"] and posted["comments"][0]["body"].startswith("**DeepSeek · P0**")
-assert "<!-- deepseek-review" not in posted["comments"][0]["body"]
+assert "@​evil" in posted["comments"][0]["body"] and posted["comments"][0]["body"].startswith("**Rival · P0**")
+assert "<!-- rival-review" not in posted["comments"][0]["body"]
 # What a complete fix covers goes in the thread, for whoever fixes it.
 assert "\n\n**A complete fix covers:** every caller, @​evil's too" in posted["comments"][0]["body"], posted["comments"][0]["body"]
 assert "complete fix" not in whole["body"], whole["body"]
-assert posted["body"].count("<!-- deepseek-review:v1") == 1 and "no changed file to go on" not in posted["body"]
+assert posted["body"].count("<!-- rival-review:v1") == 1 and "no changed file to go on" not in posted["body"]
 # File-level ones are in the review's own body in full too, so one GitHub
 # won't take as a thread loses nothing, with no second call to fail.
-assert "- `gone.txt`: **DeepSeek · P2** t b" in posted["body"], posted["body"]
-assert "- `nope.py`: **DeepSeek · P1** t2 b2" in posted["body"] and V.finding("deepseek") not in posted["body"], posted["body"]
+assert "- `gone.txt`: **Rival · P2** t b" in posted["body"], posted["body"]
+assert "- `nope.py`: **Rival · P1** t2 b2" in posted["body"] and V.finding("rival") not in posted["body"], posted["body"]
 WROTE.clear()
 C.write = lambda *a, **k: write(*a, **k) if "/reviews" in a[3] else None
-assert V.post("sam/r", pr, "deepseek", answer) == "findings"
+assert V.post("sam/r", pr, "rival", answer) == "findings"
 assert [a[2] for a, _ in WROTE] == ["POST"] and "- `gone.txt`: " in json.loads(WROTE[0][1])["body"], WROTE
 # One GitHub won't take leaves no file-level threads to be posted again.
 WROTE.clear()
 C.write = lambda *a, **k: write(*a, **k) if "/comments" in a[3] else None
 try:
-    V.post("sam/r", pr, "deepseek", answer)
+    V.post("sam/r", pr, "rival", answer)
     raise AssertionError("a review GitHub didn't take passed")
 except RuntimeError:
     assert WROTE == [], WROTE
@@ -131,10 +131,10 @@ mine = {"author": {"login": "sam"}, "body": posted["body"], "commit": {"oid": he
 forged = dict(mine, author={"login": "mallory"}, submittedAt="2026-10-24T01:00:00Z",
               body=posted["body"].replace('"findings": 2', '"findings": 0'))
 pr["reviews"]["nodes"] = [mine, forged]
-assert V.verdict(pr, head, "deepseek")[0::2] == ("findings", 1)
-assert V.verdict(pr, "b" * 40, "deepseek")[0] == "none" and V.verdict(pr, head, "codex")[0] == "none"
+assert V.verdict(pr, head, "rival")[0::2] == ("findings", 1)
+assert V.verdict(pr, "b" * 40, "rival")[0] == "none" and V.verdict(pr, head, "codex")[0] == "none"
 # Retargeted, the same head is another change: what was said on main doesn't count.
-assert V.verdict(dict(pr, baseRefName="release"), head, "deepseek")[0] == "none"
+assert V.verdict(dict(pr, baseRefName="release"), head, "rival")[0] == "none"
 WROTE.clear()
 assert V.post("sam/r", pr, "codex", {"findings": []}) == "clean"
 assert "**Codex review** of aaaaaaa: nothing found." in json.loads(WROTE[0][1])["body"]
@@ -145,13 +145,13 @@ for bad in ({"summary": "couldn't finish"}, {"findings": None}, {"findings": ["x
             {"findings": [{"path": ["src/app.py"], "line": 1}]}, {"findings": [{"path": "src/app.py", "title": {}}]},
             {"findings": [], "summary": 3}, {"findings": [{"line": 1, "severity": "P1", "title": "t", "body": "b"}]}):
     try:
-        V.post("sam/r", pr, "deepseek", bad)
+        V.post("sam/r", pr, "rival", bad)
         raise AssertionError(f"{bad} passed as a review")
     except ValueError as e:
         assert "not a review" in str(e), e
 C.write = lambda *a, **k: None
 try:
-    V.post("sam/r", pr, "deepseek", {"findings": []})
+    V.post("sam/r", pr, "rival", {"findings": []})
     raise AssertionError("a review GitHub didn't take passed")
 except RuntimeError as e:
     assert "didn't take" in str(e)
@@ -160,9 +160,9 @@ except RuntimeError as e:
 C.write = write
 WROTE.clear()
 C.gh = lambda *a, **k: "diff --git a/weird header\n@@ -0,0 +1 @@\n+x\n" if "compare/" in " ".join(a) else gh(*a, **k)
-assert V.post("sam/r", pr, "deepseek", {"findings": [answer["findings"][2]]}) == "findings"
+assert V.post("sam/r", pr, "rival", {"findings": [answer["findings"][2]]}) == "findings"
 body = json.loads(WROTE[0][1])["body"]
-assert '"findings": 1' in body and "- `nope.py`: **DeepSeek · P1** t2 b2" in body and len(WROTE) == 1, body
+assert '"findings": 1' in body and "- `nope.py`: **Rival · P1** t2 b2" in body and len(WROTE) == 1, body
 # A diff that can't be read (none at all, or not a diff) posts nothing: read
 # as one, every finding would be a note and the review clean.
 C.write = write
@@ -170,7 +170,7 @@ for got in ("", "Not Found"):
     WROTE.clear()
     C.gh = lambda *a, **k: got if "compare/" in " ".join(a) else gh(*a, **k)
     try:
-        V.post("sam/r", pr, "deepseek", answer)
+        V.post("sam/r", pr, "rival", answer)
         raise AssertionError(f"posted on a diff of {got!r}")
     except RuntimeError as e:
         assert "couldn't read the diff" in str(e) and WROTE == [], (e, WROTE)

@@ -1,6 +1,5 @@
-"""The steward's reviewers: Codex (the codex CLI) and DeepSeek (DeepSeek
-Harness), each an agent that reads a snapshot of the PR and answers with its
-findings.
+"""The steward's reviewers: Codex (the codex CLI), an agent that reads a
+snapshot of the PR and answers with its findings.
 
 A pass takes the snapshot and queues the review (`queue`); the reviewers'
 service (review_worker.py) runs the agents as a user of their own, with no
@@ -22,19 +21,16 @@ import time
 import common as C
 from common import CFG, STATE, load, log, save, ts
 
-NAMES = {"codex": "Codex", "deepseek": "DeepSeek"}
+NAMES = {"codex": "Codex"}
 # Under STATE: what's asked for, the snapshot each one reads, what came back,
 # and a clone per repo the snapshots are taken from.
 QUEUE, SNAP, DONE, GIT = "review/queue", "review/snap", "review/done", "review/git"
-# What the reviewers' accounts have left, as their service last read it.
-ACCOUNT = "review/account"
 # Each reviewer's session for each open PR, which every look at it resumes.
 # The reviewers' service owns what's in them; the sweep marks a closed PR's
 # GONE, and the service deletes it.
 SESSIONS, GONE = "review/sessions", ".gone-"
 ORIGIN = "https://github.com/{}.git"
 OUT = "reviewers.json"  # a reviewer out of service, and until when
-BALANCE = f"{ACCOUNT}/deepseek.json"
 
 
 def on(repo):
@@ -48,18 +44,6 @@ def out(r):
     None. Out, it isn't asked and isn't waited for."""
     o = load(OUT, {}).get(r)
     return o["why"] if o and C.NOW < o["until"] else None
-
-
-def low_balance():
-    """The owner's line when DeepSeek's account, as its last review left it,
-    is down to under `lowBalance` (it stops reviewing at nothing), or none."""
-    rv = CFG["reviewers"]["deepseek"]
-    left = load(BALANCE, {}).get("left") or {}
-    if not rv["enable"] or not left or any(v >= rv["lowBalance"] for v in left.values()):
-        return []
-    said = " and ".join(f"{v:.2f} {c}" for c, v in sorted(left.items()))
-    return [("DeepSeek's balance is running low", "DeepSeek",
-             f"{said} left. Top it up: once it's spent, DeepSeek is out of service and PRs merge on the other reviewers' word")]
 
 
 def review_re(r):

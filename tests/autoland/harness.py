@@ -36,29 +36,24 @@ threading.Thread(target=kicks.serve_forever, daemon=True).start()
 os.makedirs(f"{tmp}/state")
 os.makedirs(f"{tmp}/cred")
 os.makedirs(f"{tmp}/home")
-with open(f"{tmp}/cred/deepseek", "w") as f:
-    f.write('DEEPSEEK_API_KEY="sk-test-0123456789"\n')
 with open(f"{tmp}/cred/webhook", "w") as f:
     f.write("hook-secret\n")
 
-# The review agents: each records how it was run, then does what AGENT says
+# The review agent: it records how it was run, then does what AGENT says
 # (requests to send out, then an answer, or an error on stderr and an exit
 # code). What came back to the requests goes in HTTP_LOG.
 AGENT_LOG, AGENT, HTTP_LOG = f"{tmp}/agent-log", f"{tmp}/agent.json", f"{tmp}/http-log"
 os.makedirs(f"{tmp}/agents")
-for name in ("codex", "dsh"):
-    with open(f"{tmp}/agents/{name}", "w") as f:
-        f.write(f"""#!{sys.executable}
+name = "codex"
+with open(f"{tmp}/agents/{name}", "w") as f:
+    f.write(f"""#!{sys.executable}
 import json, os, socket, sys, time, urllib.parse
 args = sys.argv[1:]
 prompt = sys.stdin.read()
 # Its session: the one it's told to resume (an unknown one is an error, as
-# both agents have it), or a new one, kept in its home.
-home = os.environ.get("DSH_HOME") or os.environ.get("CODEX_HOME")
-if {name!r} == "dsh":
-    sid = args[args.index("--session-id") + 1] if "--session-id" in args else None
-else:
-    sid = args[-2] if args[:2] == ["exec", "resume"] else None
+# codex has it), or a new one, kept in its home.
+home = os.environ.get("CODEX_HOME")
+sid = args[-2] if args[:2] == ["exec", "resume"] else None
 if sid and not os.path.exists(os.path.join(home, "sessions", sid)):
     print(f"no session {{sid}}", file=sys.stderr); sys.exit(1)
 resumed, sid = bool(sid), sid or "session-%d" % time.time_ns()
@@ -66,12 +61,10 @@ os.makedirs(os.path.join(home, "sessions"), exist_ok=True)
 open(os.path.join(home, "sessions", sid), "a").write(prompt)
 with open({AGENT_LOG!r}, "a") as f:
     f.write(json.dumps({{"agent": {name!r}, "args": args, "cwd": os.getcwd(), "env": dict(os.environ), "prompt": prompt,
-                        "session": sid, "resumed": resumed, "began": time.time(),
-                        "overlay": open(args[args.index("--patch") + 1]).read() if "--patch" in args else None,
-                        "home": sorted(os.path.relpath(os.path.join(d, x), os.environ["DSH_HOME"])
-                                       for d, _, xs in os.walk(os.environ.get("DSH_HOME", "/nonexistent")) for x in xs)}}) + "\\n")
+                        "session": sid, "resumed": resumed, "began": time.time()}}) + "\\n")
 do = json.load(open({AGENT!r})).get({name!r}, {{}})
-time.sleep(do.get("sleep", 0))
+sleep = do.get("sleep", 0)  # seconds, or {{text in the prompt: seconds}}
+time.sleep(next((v for k, v in sleep.items() if k in prompt), 0) if isinstance(sleep, dict) else sleep)
 for req in do.get("http", []):
     u = urllib.parse.urlsplit(os.environ[req["env"]])
     c = socket.create_connection((u.hostname, u.port))
@@ -81,8 +74,6 @@ for req in do.get("http", []):
         got += data
     with open({HTTP_LOG!r}, "a") as f:
         f.write(json.dumps(got.decode()) + "\\n")
-if "effort" in do and do["effort"] not in json.dumps(args) + (open(args[args.index("--patch") + 1]).read() if "--patch" in args else ""):
-    print("dsh: error: thought too long", file=sys.stderr); sys.exit(1)
 for e in do.get("events", []):  # --json, ahead of an error
     print(json.dumps(e))
 if do.get("rc"):
@@ -99,14 +90,10 @@ if do.get("relogin"):  # a refresh, saved as a new file where the login was
 if "-o" in args:  # codex writes its last message there
     open(args[args.index("-o") + 1], "w").write(out)
 # --json: events, one a line, the session's id among them.
-if {name!r} == "dsh":
-    print(json.dumps({{"type": "session", "sessionId": sid, "cwd": os.getcwd()}}))
-    print(json.dumps({{"type": "final", "text": out}}))
-else:
-    print(json.dumps({{"type": "thread.started", "thread_id": sid}}))
-    print(json.dumps({{"type": "turn.completed"}}))
+print(json.dumps({{"type": "thread.started", "thread_id": sid}}))
+print(json.dumps({{"type": "turn.completed"}}))
 """)
-    os.chmod(f"{tmp}/agents/{name}", 0o755)
+os.chmod(f"{tmp}/agents/{name}", 0o755)
 
 
 # The sandbox: records how it was set up (and the git config it was given),
@@ -165,12 +152,12 @@ with open(f"{tmp}/config.json", "w") as f:
         "defaults": {"rounds": 5,
                      "oneWay": ONE_WAY, "handoffAfter": 30, "sessionHandoffAfter": 90, "settleDelay": 3,
                      "directPush": False, "ruleset": True, "requireCi": True,
-                     "proofJobs": {}, "codex": True, "deepseek": True, "skipPaths": []},
+                     "proofJobs": {}, "codex": True, "rival": True, "skipPaths": []},
         "repos": {}, "pipelineRepos": ["Sam/Pipe"],
         "webhook": {"url": "https://example.org/burrow/hook", "events": ["check_suite", "push"]},
         "kick": f"http://127.0.0.1:{kicks.server_port}/kick/autoland",
         "reviewers": {"codex": {"enable": True, "effort": "high", "parallel": 2},
-                      "deepseek": {"enable": True, "effort": "max", "parallel": 2, "lowBalance": 5}},
+                      "rival": {"enable": True, "parallel": 2}},
         "skipPaths": ["(^|/)secrets?/", r"\.(pem|key|p12|pfx)$", r"(^|/)\.env(\..*)?$"],
         "agents": f"{tmp}/agents",
         "sandbox": f"{tmp}/bwrap",
@@ -196,8 +183,12 @@ import reviewers as V  # noqa: E402,F401
 import steward as S  # noqa: E402,F401
 import touches as G  # noqa: E402,F401
 REAL_GH = C.gh  # the real one, before any check stands in for it
+# A second reviewer beside Codex, standing in for any a machine adds: the
+# steward settles a PR on every reviewer it has, so its checks need two to
+# tell one's word from the other's. review.py runs the one real agent.
+V.NAMES["rival"] = "Rival"
 
-for d in (V.QUEUE, V.SNAP, V.DONE, V.ACCOUNT, V.SESSIONS, V.GIT):
+for d in (V.QUEUE, V.SNAP, V.DONE, V.SESSIONS, V.GIT):
     os.makedirs(f"{tmp}/state/{d}")
 
 
@@ -307,7 +298,7 @@ def mkpr(reviews=(), comments=(), threads=(), draft=False, number=5, sha=head, f
 def clean(sha=head, comments=(), reviews=(), **kw):
     """A PR both reviewers found nothing on, at `sha` on its base."""
     base = kw.get("base", "main")
-    return mkpr(reviews=[*reviews, rv_review("codex", 0, sha, base=base), rv_review("deepseek", 0, sha, base=base)],
+    return mkpr(reviews=[*reviews, rv_review("codex", 0, sha, base=base), rv_review("rival", 0, sha, base=base)],
                 comments=comments, sha=sha, **kw)
 
 
@@ -352,7 +343,7 @@ def pr_state(n=5):
 
 def fresh_pr_state():
     shutil.rmtree(f"{tmp}/state")
-    for d in (V.QUEUE, V.SNAP, V.DONE, V.ACCOUNT, V.SESSIONS, V.GIT):
+    for d in (V.QUEUE, V.SNAP, V.DONE, V.SESSIONS, V.GIT):
         os.makedirs(f"{tmp}/state/{d}")
 
 

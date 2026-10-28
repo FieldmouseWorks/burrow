@@ -9,8 +9,8 @@ event reports):
      `baseline` ruleset); a repo seen for the first time also gets a Claude
      job that brings its files to docs/repo-baseline.md (repos.py).
   2. For each open PR that isn't a draft, work out where it stands and do
-     the next thing: queue a review of its head from each reviewer, Codex
-     and DeepSeek (reviewers.py), post what they found, hand open findings
+     the next thing: queue a review of its head from each reviewer (Codex,
+     reviewers.py), post what they found, hand open findings
      or red CI to a Claude job,
      have a Claude job run the checks only a machine of the owner's runs
      (proofJobs) or judge a PR it won't land on its own word (tasks.py says
@@ -761,7 +761,7 @@ def main():
         review_worker.work()
         return
     try:
-        for d in ("", V.QUEUE, V.SNAP, V.DONE, V.ACCOUNT, V.SESSIONS, V.GIT):
+        for d in ("", V.QUEUE, V.SNAP, V.DONE, V.SESSIONS, V.GIT):
             os.makedirs(os.path.join(STATE, d), exist_ok=True)
     except OSError:
         if not DRY:
@@ -857,9 +857,8 @@ def main():
     if kick is None:
         R.unhook_gone(repos + R.hook_projects(repos))
     # Last: GitHub failing it leaves the pass's state saved. A line more than
-    # one repo has (a reviewer out of service) is listed once, and one that's
-    # no repo's (DeepSeek's balance) goes with them.
-    R.publish(list(dict.fromkeys(tuple(x) for repo in sorted(digest) for x in digest[repo])) + V.low_balance())
+    # one repo has (a reviewer out of service) is listed once.
+    R.publish(list(dict.fromkeys(tuple(x) for repo in sorted(digest) for x in digest[repo])))
 
 
 if __name__ == "__main__":

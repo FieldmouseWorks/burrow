@@ -11,24 +11,24 @@ from harness import (C, DDIR, POSTED, QDIR, S, STUB, T0, V, W, agent, agent_runs
 
 stand_in()
 
-# Codex clean but DeepSeek has findings: nothing merges until they're settled.
+# Codex clean but Rival has findings: nothing merges until they're settled.
 cx = rv_review("codex", 0)
-ds2 = rv_review("deepseek", 2)
+ds2 = rv_review("rival", 2)
 fresh_pr_state()
 run(mkpr(reviews=[cx]), 0)
 run(mkpr(reviews=[cx]), 600)
-assert queued() == ["deepseek"]
-worker(deepseek={"result": "review", "answer": {"findings": [{"path": "a.py"}, {"path": "a.py"}]}})
+assert queued() == ["rival"]
+worker(rival={"result": "review", "answer": {"findings": [{"path": "a.py"}, {"path": "a.py"}]}})
 status, _ = run(mkpr(reviews=[cx]), 650)
-assert POSTED == [("deepseek", head, 2)] and not merged(), (POSTED, status)
+assert POSTED == [("rival", head, 2)] and not merged(), (POSTED, status)
 status, _ = run(mkpr(reviews=[ds2, cx], threads=[False, False]), 700)
 assert "Round 1: 2 open review threads" in status and not merged()
 
 # Its findings answered and resolved without a new commit: it looks again.
 status, _ = run(mkpr(reviews=[ds2, cx], threads=[True, True]), 3600)
-assert queued() == ["deepseek"] and "Findings answered" in status
+assert queued() == ["rival"] and "Findings answered" in status
 status, _ = run(mkpr(reviews=[ds2, cx], threads=[True, True]), 3700)
-assert queued() == ["deepseek"]
+assert queued() == ["rival"]
 worker()
 # Its new review, later than the ask, is what counts.
 status, _ = run(mkpr(reviews=[ds2, cx], threads=[True, True]), 4300)
@@ -40,30 +40,30 @@ fresh_pr_state()
 answered = mkpr(reviews=[ds2, cx], threads=[True, True])
 for i in range(3):
     run(answered, 5000 + i)
-    assert queued() == ["deepseek"], i
-    worker(deepseek={"result": "error", "error": "dsh exited 1"})
+    assert queued() == ["rival"], i
+    worker(rival={"result": "error", "error": "rival exited 1"})
 status, digest = run(answered, 5100)
-assert any(x[0] == "DeepSeek couldn't review it" for x in digest), digest
-assert "Findings answered; DeepSeek failed 3 times" in status and queued() == [], status
+assert any(x[0] == "Rival couldn't review it" for x in digest), digest
+assert "Findings answered; Rival failed 3 times" in status and queued() == [], status
 
 # An answer that's no review is a failed one, never a clean one.
 fresh_pr_state()
 run(mkpr(reviews=[cx]), 0)
 run(mkpr(reviews=[cx]), 600)
-worker(deepseek={"result": "review", "answer": {"summary": "couldn't finish"}})
+worker(rival={"result": "review", "answer": {"summary": "couldn't finish"}})
 status, _ = run(mkpr(reviews=[cx]), 610)
-assert POSTED == [] and not merged() and pr_state()["rv"]["deepseek"]["fails"] == 1, status
-assert queued() == ["deepseek"] and os.listdir(DDIR) == []
+assert POSTED == [] and not merged() and pr_state()["rv"]["rival"]["fails"] == 1, status
+assert queued() == ["rival"] and os.listdir(DDIR) == []
 # One GitHub won't take stays where it is and is posted by the next pass.
 worker()
 STUB["post"] = RuntimeError("GitHub didn't take the review")
 status, _ = run(mkpr(reviews=[cx]), 620)
-assert len(os.listdir(DDIR)) == 1 and pr_state()["rv"]["deepseek"]["fails"] == 2 and not merged(), status
+assert len(os.listdir(DDIR)) == 1 and pr_state()["rv"]["rival"]["fails"] == 2 and not merged(), status
 STUB["post"] = None
 status, _ = run(mkpr(reviews=[cx]), 630)
-assert POSTED == [("deepseek", head, 0)] and os.listdir(DDIR) == [] and merged(), status
+assert POSTED == [("rival", head, 0)] and os.listdir(DDIR) == [] and merged(), status
 # Posted, its earlier failures are behind it: none left to report.
-assert "fails" not in pr_state()["rv"]["deepseek"], pr_state()["rv"]
+assert "fails" not in pr_state()["rv"]["rival"], pr_state()["rv"]
 # Turned down three times, it's dropped and the owner hears, not posted forever.
 fresh_pr_state()
 run(mkpr(reviews=[cx]), 0)
@@ -73,14 +73,14 @@ STUB["post"] = RuntimeError("GitHub didn't take the review")
 for i in range(3):
     status, digest = run(mkpr(reviews=[cx]), 610 + i)
 STUB["post"] = None
-assert os.listdir(DDIR) == [] and queued() == [] and pr_state()["rv"]["deepseek"]["fails"] == 3, status
-assert any(x[0] == "DeepSeek couldn't review it" for x in digest) and not merged(), digest
+assert os.listdir(DDIR) == [] and queued() == [] and pr_state()["rv"]["rival"]["fails"] == 3, status
+assert any(x[0] == "Rival couldn't review it" for x in digest) and not merged(), digest
 # A snapshot that can't be taken is a failed try too.
 fresh_pr_state()
 run(mkpr(reviews=[cx]), 0)
 STUB["queue"] = RuntimeError("the head moved on")
 status, _ = run(mkpr(reviews=[cx]), 600)
-assert queued() == [] and pr_state()["rv"]["deepseek"]["fails"] == 1 and "Waiting for DeepSeek" in status, status
+assert queued() == [] and pr_state()["rv"]["rival"]["fails"] == 1 and "Waiting for Rival" in status, status
 STUB["queue"] = None
 
 # A queued review that leaves the queue with nothing back is lost: seen so on
@@ -90,28 +90,28 @@ run(mkpr(reviews=[cx]), 0)
 run(mkpr(reviews=[cx]), 600)
 os.remove(f"{QDIR}/{os.listdir(QDIR)[0]}")
 run(mkpr(reviews=[cx]), 610)
-assert "fails" not in pr_state()["rv"]["deepseek"] and queued() == []
+assert "fails" not in pr_state()["rv"]["rival"] and queued() == []
 status, _ = run(mkpr(reviews=[cx]), 620)
-assert pr_state()["rv"]["deepseek"]["fails"] == 1 and queued() == ["deepseek"], status
+assert pr_state()["rv"]["rival"]["fails"] == 1 and queued() == ["rival"], status
 # Still queued, however long it takes: no failure, nothing asked twice.
 status, _ = run(mkpr(reviews=[cx]), 620 + 2 * 86400)
-assert "DeepSeek is reviewing this commit" in status and queued() == ["deepseek"], status
-assert pr_state()["rv"]["deepseek"]["fails"] == 1
+assert "Rival is reviewing this commit" in status and queued() == ["rival"], status
+assert pr_state()["rv"]["rival"]["fails"] == 1
 
-# DeepSeek down: each failure comes back to the next pass, which queues it
+# Rival down: each failure comes back to the next pass, which queues it
 # again; after three the owner hears, and an hour on it's tried again.
 fresh_pr_state()
 run(mkpr(reviews=[cx]), 0)
 run(mkpr(reviews=[cx]), 600)
 for i in range(3):
-    worker(deepseek={"result": "error", "error": "down"})
+    worker(rival={"result": "error", "error": "down"})
     status, digest = run(mkpr(reviews=[cx]), 610 + i)
-assert any(x[0] == "DeepSeek couldn't review it" for x in digest) and "Waiting for DeepSeek" in status
+assert any(x[0] == "Rival couldn't review it" for x in digest) and "Waiting for Rival" in status
 assert queued() == []
 run(mkpr(reviews=[cx]), 1000)
 assert queued() == []
 run(mkpr(reviews=[cx]), 4400)
-assert queued() == ["deepseek"]
+assert queued() == ["rival"]
 
 # Out of service (Codex's plan spent): recorded for every PR, which settle on
 # the other reviewer meanwhile, and asked again once it's back.
@@ -120,13 +120,13 @@ run(mkpr(), 0)
 run(mkpr(), 600)
 worker(codex={"result": "out", "why": "its ChatGPT plan's usage is spent", "until": C.ts(T0) + 4200})
 status, _ = run(mkpr(), 650)
-assert "DeepSeek found nothing" in status and "Codex and" not in status and merged(), status
+assert "Rival found nothing" in status and "Codex and" not in status and merged(), status
 assert json.load(open(f"{tmp}/state/{V.OUT}"))["codex"]["until"] == C.ts(T0) + 4200
 run(mkpr(number=6), 700)
 run(mkpr(number=6), 1400)
-assert queued() == ["deepseek"]
+assert queued() == ["rival"]
 run(mkpr(number=6), 4300)
-assert queued() == ["codex", "deepseek"]
+assert queued() == ["codex", "rival"]
 # The owner hears one is out, once however many PRs find it so.
 fresh_pr_state()
 C.save(V.OUT, {"codex": {"why": "it isn't logged in", "until": C.ts(T0) + 86400}})
@@ -139,20 +139,20 @@ assert [x for x in digest if x[0] == "A reviewer is out of service"] == [
 fresh_pr_state()
 C.save(V.OUT, {r: {"why": "spent", "until": C.ts(T0) + 86400} for r in V.NAMES})
 status, digest = run(clean(), 600)
-assert "No reviewer can review it now (Codex: spent; DeepSeek: spent)" in status, status
+assert "No reviewer can review it now (Codex: spent; Rival: spent)" in status, status
 assert [x[0] for x in digest] == ["No reviewer can review it"] and queued() == [] and not merged(), digest
 
 # A repo set to Codex alone lands on Codex's word, and a review queued
-# before it was taken off DeepSeek isn't sent.
+# before it was taken off Rival isn't sent.
 fresh_pr_state()
 run(mkpr(reviews=[cx]), 0)
 run(mkpr(reviews=[cx]), 600)
 name, = os.listdir(QDIR)
-S.CFG["repos"]["sam/r"] = {"deepseek": False}
+S.CFG["repos"]["sam/r"] = {"rival": False}
 agent()
 W.review(name)
 back = json.load(open(f"{DDIR}/{name}"))
-assert back["result"] == "error" and "isn't one DeepSeek reviews" in back["error"] and agent_runs() == [], back
+assert back["result"] == "error" and "isn't one Rival reviews" in back["error"] and agent_runs() == [], back
 status, _ = run(mkpr(reviews=[cx]), 700)
 assert "state=success" in status and "Codex found nothing" in status and merged()
 del S.CFG["repos"]["sam/r"]
@@ -168,7 +168,7 @@ assert retargeted != live_snap
 for s in (gone, live_snap, other_repo, dashed, retargeted):
     os.makedirs(f"{tmp}/state/{V.SNAP}/{s}")
     C.save(f"{V.SNAP}/{s}.json", {})
-    C.save(f"{V.QUEUE}/deepseek--{s}.json", {})
+    C.save(f"{V.QUEUE}/rival--{s}.json", {})
     C.save(f"{V.DONE}/codex--{s}.json", {})
 # PR 5 is still open: an earlier head's look that's under way (its queue
 # entry locked, as the reviewers' service holds it) keeps its snapshot, and
@@ -183,7 +183,7 @@ V.sweep({"sam_r", "sam_lo-k"}, {live_snap})
 held.close()
 left = sorted(x for d in (V.SNAP, V.QUEUE, V.DONE) for x in os.listdir(f"{tmp}/state/{d}"))
 assert left == sorted([live_snap, live_snap + ".json", other_repo, other_repo + ".json",
-                       f"deepseek--{live_snap}.json", f"deepseek--{other_repo}.json",
+                       f"rival--{live_snap}.json", f"rival--{other_repo}.json",
                        f"codex--{live_snap}.json", f"codex--{other_repo}.json",
                        running, running + ".json", f"codex--{running}.json",
                        f"codex--{gone}.json", f"codex--{retargeted}.json"]), left
@@ -194,6 +194,6 @@ assert not os.path.exists(f"{tmp}/state/{V.SNAP}/{running}") and os.path.exists(
 # And a PR that's gone takes everything with it.
 V.sweep({"sam_r", "sam_lo-k"}, set())
 left = sorted(x for d in (V.SNAP, V.QUEUE, V.DONE) for x in os.listdir(f"{tmp}/state/{d}"))
-assert left == sorted([other_repo, other_repo + ".json", f"deepseek--{other_repo}.json", f"codex--{other_repo}.json"]), left
+assert left == sorted([other_repo, other_repo + ".json", f"rival--{other_repo}.json", f"codex--{other_repo}.json"]), left
 
 print("answers: ok")
