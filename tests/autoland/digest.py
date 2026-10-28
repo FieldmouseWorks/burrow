@@ -8,13 +8,11 @@ from harness import C, R, fresh_pr_state, sh, tmp
 
 CALLS = []
 OPEN = {}  # the open issue under each label, as `gh issue list` finds it
-GH = {"login": "sam", "fail": ""}  # who the steward is; a write that fails
+GH = {"fail": ""}  # a write that fails
 
 
 def gh(*a, **k):
     CALLS.append(a)
-    if a[:2] == ("api", "user"):
-        return GH["login"]
     if a[:2] == ("issue", "list"):
         n = OPEN.get(a[a.index("--label") + 1])
         return [{"number": n, "body": ""}] if n else []
@@ -33,13 +31,13 @@ def said(n):
     return [a[a.index("--body") + 1] for a in CALLS if a[:3] == ("issue", "comment", str(n))]
 
 
-def fresh(enable=True, login="sam"):
+def fresh(enable=True, app=True):
+    """With app, the steward's App is one of the inbox's authors, as autoland.nix makes it."""
     CALLS.clear()
     OPEN.clear()
     fresh_pr_state()
-    C._me.clear()
-    GH.update(login=login, fail="")
-    R.CFG["inbox"] = {"enable": enable, "label": "claude", "authors": ["sam"]}
+    GH.update(fail="")
+    R.CFG["inbox"] = {"enable": enable, "label": "claude", "authors": ["sam"] + (["steward[bot]"] if app else [])}
 
 
 def later(digest):
@@ -127,15 +125,15 @@ assert said(9) == ["New:\n- A review couldn't be posted: sam/r#6: Rival, 3 tries
 later(again)
 assert said(9) == [], CALLS
 
-# The inbox can't take it: the steward's login isn't one of its authors, so
+# The inbox can't take it: the steward's App isn't one of its authors, so
 # the job would never start. All of it is the owner's, with why, and a stuck
 # issue still open closes.
-fresh(login="eve")
+fresh(app=False)
 OPEN["claude"] = 9
 R.publish(DIGEST)
 owner = made("autoland")
 assert owner and all(f"sam/r#{n}" in owner["--body"] for n in range(1, 6)), owner
-assert "the steward's login, eve, isn't one of its authors" in owner["--body"], owner["--body"]
+assert "the steward's login, steward[bot], isn't one of its authors" in owner["--body"], owner["--body"]
 assert made("claude") is None and ("issue", "close", "9", "-R", "sam/notes", "--comment", "Nothing stuck.") in CALLS, CALLS
 # Nor when notify.repo isn't cloned where proj-inbox looks; and the clone
 # going away later is seen on the next pass.
@@ -147,7 +145,7 @@ assert owner and f"sam/notes isn't cloned in {tmp}/none" in owner["--body"] and 
 assert made("claude") is None, CALLS
 R.CFG["projectsDir"] = f"{tmp}/projects"
 # With nothing stuck, there's nothing to say about the inbox.
-fresh(login="eve")
+fresh(app=False)
 R.publish(DIGEST[:3])
 assert "proj's inbox" not in made("autoland")["--body"], CALLS
 # Off: all of it is the owner's, and that's no misconfiguration.
@@ -175,6 +173,5 @@ R.CFG["notify"]["repo"] = "sam/notes"
 C.gh, R.CFG["inbox"], R.CFG["projectsDir"] = kept[0], kept[1], kept[3]
 R.CFG["notify"].clear()
 R.CFG["notify"].update(kept[2])
-C._me.clear()
 fresh_pr_state()
 print("digest: ok")

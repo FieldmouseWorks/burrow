@@ -147,6 +147,7 @@ with open(sys.argv[2]) as f:
 with open(f"{tmp}/config.json", "w") as f:
     json.dump({
         "owners": ["sam"], "exclude": [], "context": "review-settled", "rulesets": True, "keepBranches": [],
+        "app": {"id": 7, "slug": "steward"},
         "baselineJobs": False, "baselinePerPass": 1, "authors": ["sam", "dependabot", "renovate"],
         "stateDir": f"{tmp}/state", "majorKey": f"{tmp}/sweep.key", "projectsDir": f"{tmp}/none", "renovateEmail": "bot@renovateapp.com", "proj": "proj", "jobTimeout": 60, "jobIdle": 20, "reviewTimeout": 30, "owner": "Sam", "cleanBranches": False,
         "labels": {"hold": "hold", "owner": "needs-owner"}, "notify": {"repo": "", "assignee": "", "label": "autoland"}, "inbox": {"enable": False, "label": "claude", "authors": ["sam"]},
@@ -186,6 +187,9 @@ import reviewers as V  # noqa: E402,F401
 import steward as S  # noqa: E402,F401
 import touches as G  # noqa: E402,F401
 REAL_GH = C.gh  # the real one, before any check stands in for it
+REAL_TOKEN = C.token
+# The App's installation tokens, one an owner (passes.py checks the real one).
+C.token = lambda owner: f"ghs_app_{owner}"
 # A second reviewer beside Codex, standing in for any a machine adds: the
 # steward settles a PR on every reviewer it has, so its checks need two to
 # tell one's word from the other's. review.py runs the one real agent.
@@ -205,9 +209,18 @@ COMMITS = {}  # a PR's commits' author emails, by number, as `pr view --json com
 PR_DIFF = {"v": ""}  # what `gh pr diff` gives
 
 
+ACTING = []  # the owner each stood-in call to GitHub was made for
+
+
+def acting():
+    """Every call to GitHub is made for an owner (C.acting_for): one that
+    isn't would go as the machine user's own login."""
+    assert C._for, "a call to GitHub outside acting_for"
+    ACTING.append(C._for[-1])
+
+
 def gh_stub(*a, **k):
-    if a[:2] == ("api", "user"):
-        return "sam"
+    acting()
     if a[:2] == ("pr", "view") and "commits" in a:
         return {"commits": [{"authors": [{"email": e}]} for e in COMMITS.get(int(a[2]), ["bot@renovateapp.com"])]}
     if a[:2] == ("api", "repos/sam/r"):
@@ -221,6 +234,7 @@ FAIL = []  # writes that fail (gh's None), by a piece of their arguments
 
 
 def write(*a, **k):
+    acting()
     WROTE.append(" ".join(a))
     return None if any(f in " ".join(a) for f in FAIL) else {}
 
@@ -260,9 +274,15 @@ T = C.ts(T0)
 info = {"squashMergeAllowed": True, "mergeCommitAllowed": False, "rebaseMergeAllowed": False}
 
 
-def rv_review(r, k, sha=head, at="2026-10-24T00:11:00Z", who="sam", base="main"):
-    """A review the steward posted for reviewer r, with k findings."""
-    return {"author": {"login": who}, "state": "COMMENTED", "submittedAt": at, "commit": {"oid": sha},
+# The steward's App, as GraphQL gives its posts' author (no "[bot]").
+STEWARD = {"login": "steward", "__typename": "Bot"}
+
+
+def rv_review(r, k, sha=head, at="2026-10-24T00:11:00Z", who=None, base="main"):
+    """A review the steward posted for reviewer r, with k findings; with
+    who, one a user of that login posted with the same marker."""
+    author = STEWARD if who is None else {"login": who, "__typename": "User"}
+    return {"author": author, "state": "COMMENTED", "submittedAt": at, "commit": {"oid": sha},
             "body": f"<!-- {r}-review:v1 " + json.dumps({"commit_sha": sha, "base": base, "findings": k}) + " -->"}
 
 
@@ -320,7 +340,8 @@ def run(pr, after, obsolete=False):
     C.LIMITED.clear()
     POSTED.clear()
     digest = []
-    S.handle("sam/r", pr, info, digest, obsolete)
+    with C.acting_for("sam/r"):
+        S.handle("sam/r", pr, info, digest, obsolete)
     return " ".join(x for x in WROTE if "/statuses/" in x), digest
 
 

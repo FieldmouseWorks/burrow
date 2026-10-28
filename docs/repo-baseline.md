@@ -32,6 +32,27 @@ change nothing else in the same PR.
 - The `hold` and `needs-owner` labels (`burrow.autoland.labels`), which the
   steward and its jobs put on PRs.
 
+## The steward's GitHub App
+
+The steward does everything on GitHub as a GitHub App of the owner's
+(`burrow.autoland.app`), never as the machine user's own login, which its
+Claude jobs and every Claude session share. So only the App can post
+`review-settled` or the reviewers' reviews: a status or review with the same
+marks from anyone else, the owner's own login included, isn't the steward's
+word, and the ledger (`burrow.ledger.reviewers`) doesn't count a merge on it
+as a landing.
+
+Make the App under the account that owns most of the repos: no webhook
+(burrow-events has its own), public only so the owner's other accounts can
+install it too (installing it gives nobody else anything), and these
+repository permissions: read and write on administration (the settings and
+ruleset above), contents (merges and deleting branches), issues (the labels
+and the digest's issues), pull requests (reviews, comments and merges),
+commit statuses, webhooks, and workflows (a merge that changes
+`.github/workflows`); read on checks and actions. Install it on each of
+`owners`, for all repositories, so new ones are covered too. Its private key
+goes in `app.keyFile`, readable by root only.
+
 ## The PR flow (the steward)
 
 1. PRs are opened ready for review. A draft is work in progress: the steward
@@ -40,7 +61,7 @@ change nothing else in the same PR.
    Codex, through the codex CLI on the owner's ChatGPT plan. The steward
    takes a snapshot of the change with secrets paths left out; the agent
    reads it read-only, with no GitHub login, and the steward posts its
-   findings as review threads marked as Codex's. A look at a head the PR has since moved past still
+   findings, as its App, as review threads marked as Codex's. A look at a head the PR has since moved past still
    finishes, and its findings are posted on the commit it read, so they go
    into the next push. Codex keeps one session per PR: every look
    resumes the one before, told which head it last read, and still judges
@@ -53,9 +74,9 @@ change nothing else in the same PR.
    PR whose body links the Claude session that opened it, since that session
    is fixing them itself.
 4. The reviewers look again, until none of them finds anything on the exact head.
-5. With no thread open, no changes requested and CI green, the steward posts
-   `review-settled` and merges it, `.github/` changes included; the branch is
-   deleted.
+5. With no thread open, no changes requested and CI green, the steward's App
+   posts `review-settled` and merges it, `.github/` changes included; the
+   branch is deleted.
 6. A settled PR it won't land on its own word gets one Claude job a head
    that judges it: one touching a one-way path (`burrow.autoland.oneWay`:
    CODEOWNERS, secrets, migrations), one in a repo with no CI yet (the job
@@ -65,9 +86,10 @@ change nothing else in the same PR.
    and sends the owner only what can't be undone (data dropped or rewritten
    for good, a secret exposed) or is theirs to decide. Its verdict is a
    comment ending `<!-- autoland-judgment: land|owner|failed SHA SEAL -->`,
-   trusted only for that exact head, only from the steward's own login, and
-   only with the seal the steward gave that job for that verdict: every
-   Claude job posts as that login, so a job quoting PR text isn't a verdict.
+   trusted only for that exact head, only from one of the authors' logins
+   (Claude jobs post as the machine user's), and only with the seal the
+   steward gave that job for that verdict: every Claude job posts as that
+   login, so a job quoting PR text isn't a verdict.
 7. Checks that run on a machine rather than in CI (the repo names them in
    `proofJobs`, with how to run each): once a settled PR waits on nothing
    else, one Claude job a head runs them on that commit and records each
@@ -85,8 +107,8 @@ contributions. What the pipeline itself is stuck on (a reviewer that keeps
 failing, a merge GitHub won't take, two Claude jobs that ended without an
 answer) isn't the owner's either: it's listed in an issue of its own, which
 proj's inbox hands to a Claude job. That needs the inbox on, `notify.repo`
-cloned in `projectsDir` and the steward's login one of the inbox's authors;
-without them it's the owner's, with why. A PR past the round limit isn't
+cloned in `projectsDir` and the steward's App one of the inbox's authors
+(autoland makes it one); without them it's the owner's, with why. A PR past the round limit isn't
 the owner's: its reviewers stop looking, a Claude job fixes or answers their
 last findings, and a judge decides. Everything else is pre-approved: merges, GitHub settings changes and
 cleanup don't wait for the owner. Dependency bots' minor updates skip review: CI is their review,

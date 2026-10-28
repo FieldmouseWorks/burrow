@@ -6,6 +6,9 @@ import json
 from harness import (C, FAIL, JOBS, R, S, STATES, T0, WROTE, fresh_pr_state, info, gh_stub, mkpr, stand_in)
 
 stand_in()
+# Its parts are called straight here, so they're for sam's repos as a pass
+# has them (steward.run_pass's acting_for).
+C._for.append("sam")
 
 # Every repo gets the hold and needs-owner labels, once a day.
 fresh_pr_state()
@@ -267,5 +270,6 @@ R.sweep_branches(repo_r, {"open"}, [])
 assert DELETED == [("in-main", "1" * 40), ("renovate/closed", "9" * 40)], DELETED
 R.delete_branch, C.gh = kept_delete, gh_stub
 S.C.CFG["keepBranches"] = []
+C._for.pop()
 
 print("upkeep: ok")

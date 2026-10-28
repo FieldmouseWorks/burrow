@@ -1,7 +1,16 @@
 """What every part of the steward shares: its settings, gh, its state files,
-and Claude jobs. Calls that touch the outside (gh, write, job, kick, me) are used
-as `C.gh(...)` and so on, so a test can stand in for them in one place."""
+and Claude jobs. Calls that touch the outside (gh, write, job, kick, token) are used
+as `C.gh(...)` and so on, so a test can stand in for them in one place.
 
+The steward talks to GitHub only as its GitHub App (config.app): the API
+through gh and git both, each owner's repos with a token of the App's
+installation on that owner. Whose repos a call is about is set around it
+(`acting_for`); a call outside one fails rather than going as the machine
+user's own gh login, which every Claude session on the machine shares.
+`autoland-steward status` changes nothing, and reads as whoever runs it."""
+
+import base64
+import contextlib
 import hmac
 import json
 import os
@@ -9,6 +18,7 @@ import re
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.request
 from datetime import datetime
 
@@ -48,27 +58,120 @@ UNAVAILABLE = re.compile(r"rate limit|HTTP (429|5\d\d)|error connecting|connecti
 LIMITED = []
 
 
-def limited(stderr):
+def limited(stderr, env):
     """Note when the rate limit gh met resets. `gh api rate_limit` costs
     nothing against it; a limit with none spent (a secondary one) notes
-    nothing."""
+    nothing. Each owner's installation has a budget of its own, and a pass
+    that met one waits for it as if it were all of them."""
     if LIMITED or not re.search(r"rate limit", stderr, re.I):
         return
     p = subprocess.run(["gh", "api", "rate_limit", "--jq", "[.resources[] | select(.remaining == 0) | .reset] | max // 0"],
-                       capture_output=True, text=True)
+                       capture_output=True, text=True, env=env)
     try:
         LIMITED.append(float(p.stdout.strip()) if p.returncode == 0 else 0.0)
     except ValueError:
         LIMITED.append(0.0)
 
 
+# git's credential, for a fetch from or a push to GitHub: gh's, so the
+# App's token in gh_env(), and none of the machine user's helpers.
+GIT_AUTH = ("-c", "credential.helper=", "-c", "credential.helper=!gh auth git-credential")
+# GitHub's REST API, where the App's own calls (its installations, their
+# tokens) go: gh can't make them, since it sends a JWT as a token, not as
+# the bearer GitHub wants. A check points it at a stand-in.
+API = "https://api.github.com"
+# Whose repos the calls now are about, innermost last (acting_for).
+_for = []
+# The App's installations, by owner (lower case), and their tokens: each
+# minted once a process and kept in memory only. The state dir is the
+# machine user's, so a token written there would let anything of theirs act
+# as the App for the rest of its hour.
+_installs, _tokens = {}, {}
+
+
+@contextlib.contextmanager
+def acting_for(repo):
+    """The GitHub calls inside are about the repos of repo's owner (OWNER or
+    OWNER/NAME): they go as the App's installation on that owner."""
+    _for.append(repo.split("/")[0].lower())
+    try:
+        yield
+    finally:
+        _for.pop()
+
+
+def _b64(b):
+    return base64.urlsafe_b64encode(b).rstrip(b"=").decode()
+
+
+def app_jwt():
+    """A JWT that says this is the App, good for nine minutes, signed with
+    its key: systemd's credential app-key, which only the steward's passes
+    are given. Python's standard library has no RSA, so openssl signs it."""
+    now = int(time.time())
+    signed = ".".join(_b64(json.dumps(x, separators=(",", ":")).encode()) for x in (
+        {"alg": "RS256", "typ": "JWT"}, {"iat": now - 60, "exp": now + 540, "iss": str(CFG["app"]["id"])}))
+    key = os.path.join(os.environ.get("CREDENTIALS_DIRECTORY", ""), "app-key")
+    p = subprocess.run(["openssl", "dgst", "-sha256", "-sign", key, "-binary"], input=signed.encode(), capture_output=True)
+    if p.returncode != 0:
+        raise RuntimeError(f"couldn't sign as the App: {p.stderr.decode(errors='replace').strip()[:200]}")
+    return f"{signed}.{_b64(p.stdout)}"
+
+
+def app_call(method, path, jwt):
+    """A call the App makes as itself; raises as gh() does."""
+    req = urllib.request.Request(f"{API}/{path}", method=method, data=b"" if method == "POST" else None, headers={
+        "Authorization": f"Bearer {jwt}", "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "burrow-autoland"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return json.load(r)
+    except urllib.error.HTTPError as e:
+        why = f"{method} {path}: HTTP {e.code} {e.read(300).decode(errors='replace')}"
+        out = e.code in (429,) or e.code >= 500 or e.headers.get("x-ratelimit-remaining") == "0"
+        raise (Unavailable if out else RuntimeError)(why) from None
+    except OSError as e:  # no answer at all (URLError is one)
+        raise Unavailable(f"{method} {path}: {e}") from None
+
+
+def token(owner):
+    """A token of the App's installation on owner (lower case). One lasts an
+    hour and a pass twenty minutes at most, so each is minted once a
+    process, and again only if it has under ten minutes left."""
+    have = _tokens.get(owner)
+    if have and have[1] - time.time() > 600:
+        return have[0]
+    jwt = app_jwt()
+    if owner not in _installs:
+        _installs.clear()
+        _installs.update({str((i.get("account") or {}).get("login", "")).lower(): i["id"]
+                          for i in app_call("GET", "app/installations?per_page=100", jwt)})
+    if owner not in _installs:
+        raise RuntimeError(f"the App {CFG['app']['slug']} isn't installed on {owner}")
+    got = app_call("POST", f"app/installations/{_installs[owner]}/access_tokens", jwt)
+    _tokens[owner] = (got["token"], ts(got["expires_at"]))
+    return got["token"]
+
+
+def gh_env(repo=None):
+    """The environment gh runs in, and git with gh as its only credential
+    helper (GIT_AUTH): the App's token for repo's owner, else for the owner
+    it's acting for. A status run only reads, as whoever runs it."""
+    if DRY:
+        return None
+    if repo is None and not _for:
+        raise RuntimeError("a GitHub call outside acting_for: it would go as the machine user's own login")
+    return {**os.environ, "GH_TOKEN": token(repo.split("/")[0].lower() if repo else _for[-1])}
+
+
 def gh(*args, input=None, check=True):
     """Run gh; return its stdout (parsed as JSON when it is JSON). Raises
     Unavailable when GitHub didn't answer, RuntimeError when it said no."""
-    p = subprocess.run(["gh", *args], input=input, capture_output=True, text=True)
+    env = gh_env()
+    p = subprocess.run(["gh", *args], input=input, capture_output=True, text=True, env=env)
     if p.returncode != 0:
         why = f"gh {' '.join(args[:3])}: {p.stderr.strip()[:300]}"
-        limited(p.stderr)
+        limited(p.stderr, env)
         if check:
             raise (Unavailable if UNAVAILABLE.search(p.stderr) else RuntimeError)(why)
         log("  failed:", why)
@@ -86,8 +189,9 @@ def fresh(path, etag=None):
     it answers 304 against the rate limit, so a look at something that
     rarely changes costs nothing most of the times it's taken. Raises as
     gh() does, and Gone when there's no such thing."""
+    env = gh_env()
     p = subprocess.run(["gh", "api", "-i", *(["-H", f"If-None-Match: {etag}"] if etag else []), path],
-                       capture_output=True, text=True)
+                       capture_output=True, text=True, env=env)
     status, _, rest = p.stdout.partition("\n")
     code = status.split(" ")[1:2]
     if code == ["304"]:
@@ -95,7 +199,7 @@ def fresh(path, etag=None):
     head, _, body = rest.partition("\n\n")  # text mode reads GitHub's \r\n as \n
     if p.returncode != 0:
         why = f"gh api {path}: {p.stderr.strip()[:300]}"
-        limited(p.stderr)
+        limited(p.stderr, env)
         if code in (["404"], ["410"]):
             raise Gone(why)
         raise (Unavailable if UNAVAILABLE.search(p.stderr) else RuntimeError)(why)
@@ -123,15 +227,18 @@ def comment(repo, n, body):
     return write("api", f"repos/{repo}/issues/{n}/comments", "-f", f"body={body}", check=False)
 
 
-_me = []
-
-
 def me():
-    """The login the steward runs as, read once a pass. Its Claude jobs and
-    the reviewers' reviews post as it too, and nobody else can."""
-    if not _me:
-        _me.append(gh("api", "user", "--jq", ".login"))
-    return _me[0]
+    """The steward's login as REST gives it: its App's bot. The reviewers'
+    reviews, its statuses, comments and merges are posted as it, and nobody
+    else can post as it: a user's login can't have "[bot]" in it."""
+    return CFG["app"]["slug"] + "[bot]"
+
+
+def mine(actor):
+    """Whether a GraphQL author is the steward. GraphQL gives a bot's login
+    without "[bot]", and a user can hold that name as theirs, so only the
+    App's Bot is."""
+    return bool(actor) and actor.get("__typename") == "Bot" and actor.get("login") == CFG["app"]["slug"]
 
 
 _key = []
@@ -162,14 +269,15 @@ def seal(repo, n, name, verdict, head, base):
 
 def marker(pr, name, head, repo=None, base=None):
     """The verdict in the newest `<!-- NAME: VERDICT SHA -->` on the PR for
-    exactly this head, from the steward's own login only; else None. With
+    exactly this head, from one of its authors (the login its Claude jobs,
+    the judges among them, post as) only; else None. With
     repo, only a marker that also carries its seal, for this head on the PR's
     base as it is now, counts; with base, only one that names that base
     (`<!-- NAME: VERDICT SHA on BASE -->`)."""
     pat = re.compile(rf"<!-- {re.escape(name)}: ([a-z]+) ([0-9a-f]{{40}})(?: on (\S+))?(?: ([0-9a-f]{{32}}))? -->")
     verdict = None
     for c in pr["comments"]["nodes"]:  # oldest first
-        if (c["author"] or {}).get("login") != me():
+        if (c["author"] or {}).get("login") not in CFG["authors"]:
             continue
         for m in pat.finditer(c["body"] or ""):
             if m.group(2) != head or (base is not None and m.group(3) != base):
@@ -292,6 +400,8 @@ def job(repo, task, clone=False):
     d = project_dir(repo)
     if d is None and clone and not DRY:
         d = repo.split("/")[1]
+        # The project's clone is the machine user's, for its jobs to push
+        # from as them: cloned as them, not as the App.
         subprocess.run(["gh", "repo", "clone", repo, os.path.join(CFG["projectsDir"], d)], check=False)
         d = project_dir(repo)
     if d is None:

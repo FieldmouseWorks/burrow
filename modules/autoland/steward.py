@@ -28,8 +28,9 @@ and 5), the one burrow-events starts within seconds of what changes it:
 a webhook delivery, a Claude job's turn ending, a reviewer's answer coming
 back, or a wait the last pass booked ending (common.wake).
 
-Everything talks to GitHub through `gh`, with the user's own login, so the
-reviewers' reviews and the Claude jobs' verdicts are posted under it too.
+Everything talks to GitHub as the steward's own GitHub App (common.py), so
+its statuses, merges and the reviewers' reviews are posted as the App, and
+nobody else's count as its word. Its Claude jobs work as the machine user.
 Settings are in the JSON file $AUTOLAND_CONFIG (../autoland.nix). State is
 in config.stateDir: one JSON file per PR, one per repo.
 
@@ -864,57 +865,58 @@ def run_pass(kick):
     for r in repos:
         repo = r["repo"]
         digest[repo] = mine = []
-        try:
-            new = kick is None and R.settle_repo(r, known)
-            if (new and CFG["baselineJobs"] and started < CFG["baselinePerPass"]
-                    and C.NOW - failed.get(repo, 0) > 86400):
-                jid = C.job(repo, CFG["baselineTask"].replace("REPO", repo), clone=True)
-                started += 1
-                if jid:
-                    log(f"{repo}: baseline job {jid}")
-                    known.add(repo)
-                    failed.pop(repo, None)
-                else:
-                    log(f"{repo}: baseline job didn't start (no checkout, or proj refused); trying again tomorrow")
-                    failed[repo] = C.NOW
-            elif new and not CFG["baselineJobs"]:
-                known.add(repo)
-            owner, name = repo.split("/")
-            info, prs = open_prs(owner, name)
-            read.add(repo.replace("/", "_"))
-            # First, so a fix PR it made obsolete isn't merged by this same pass.
-            obsolete = R.watch_default(r, info, prs, mine) or set()
-            # Every open PR's branches, head and base, drafts and forks' PRs
-            # included: the branch sweep leaves them all (deleting a base
-            # closes the PRs on it).
-            in_use = set()
-            seen_to = True
-            # Obsolete fixes first: their holds take back a queued merge
-            # before anything else this pass waits on.
-            for pr in sorted(prs, key=lambda pr: pr["number"] not in obsolete):
-                in_use.update((pr["headRefName"], pr["baseRefName"]))
-                live.add(V.snap_name(f"pr-{repo.replace('/', '_')}-{pr['number']}.json", pr["headRefOid"], pr["baseRefName"]))
-                try:
-                    handle(repo, pr, info, mine, pr["number"] in obsolete)
-                except Exception as e:  # one bad PR mustn't stop the rest
-                    log(f"{repo}#{pr['number']}: {e}")
-                    seen_to = False
-            if seen_to:
-                covered.append(r)
-            else:
-                C.wake(repo, C.NOW + 5 * MIN)
-            if CFG["cleanBranches"]:
-                # Stale ones the last sweep found are listed every pass.
-                R.sweep_branches(r, in_use, mine, sweep=kick is None)
-        except Exception as e:
-            log(f"{repo}: {e}")
-            C.wake(repo, C.NOW + 5 * MIN)  # GitHub, often: another look soon
-        if CFG["dashboard"]["enable"]:
+        with C.acting_for(repo):
             try:
-                D.watch(repo, mine)
-            except Exception as e:  # its own: the repo's PRs were seen to all the same
-                log(f"{repo}: its dashboard: {e}")
-                C.wake(repo, C.NOW + 5 * MIN)
+                new = kick is None and R.settle_repo(r, known)
+                if (new and CFG["baselineJobs"] and started < CFG["baselinePerPass"]
+                        and C.NOW - failed.get(repo, 0) > 86400):
+                    jid = C.job(repo, CFG["baselineTask"].replace("REPO", repo), clone=True)
+                    started += 1
+                    if jid:
+                        log(f"{repo}: baseline job {jid}")
+                        known.add(repo)
+                        failed.pop(repo, None)
+                    else:
+                        log(f"{repo}: baseline job didn't start (no checkout, or proj refused); trying again tomorrow")
+                        failed[repo] = C.NOW
+                elif new and not CFG["baselineJobs"]:
+                    known.add(repo)
+                owner, name = repo.split("/")
+                info, prs = open_prs(owner, name)
+                read.add(repo.replace("/", "_"))
+                # First, so a fix PR it made obsolete isn't merged by this same pass.
+                obsolete = R.watch_default(r, info, prs, mine) or set()
+                # Every open PR's branches, head and base, drafts and forks' PRs
+                # included: the branch sweep leaves them all (deleting a base
+                # closes the PRs on it).
+                in_use = set()
+                seen_to = True
+                # Obsolete fixes first: their holds take back a queued merge
+                # before anything else this pass waits on.
+                for pr in sorted(prs, key=lambda pr: pr["number"] not in obsolete):
+                    in_use.update((pr["headRefName"], pr["baseRefName"]))
+                    live.add(V.snap_name(f"pr-{repo.replace('/', '_')}-{pr['number']}.json", pr["headRefOid"], pr["baseRefName"]))
+                    try:
+                        handle(repo, pr, info, mine, pr["number"] in obsolete)
+                    except Exception as e:  # one bad PR mustn't stop the rest
+                        log(f"{repo}#{pr['number']}: {e}")
+                        seen_to = False
+                if seen_to:
+                    covered.append(r)
+                else:
+                    C.wake(repo, C.NOW + 5 * MIN)
+                if CFG["cleanBranches"]:
+                    # Stale ones the last sweep found are listed every pass.
+                    R.sweep_branches(r, in_use, mine, sweep=kick is None)
+            except Exception as e:
+                log(f"{repo}: {e}")
+                C.wake(repo, C.NOW + 5 * MIN)  # GitHub, often: another look soon
+            if CFG["dashboard"]["enable"]:
+                try:
+                    D.watch(repo, mine)
+                except Exception as e:  # its own: the repo's PRs were seen to all the same
+                    log(f"{repo}: its dashboard: {e}")
+                    C.wake(repo, C.NOW + 5 * MIN)
     # This pass's wake-ups and owner's lines replace the ones it had for the
     # repos it saw; a full pass's, all of them.
     seen = {r["repo"] for r in repos}

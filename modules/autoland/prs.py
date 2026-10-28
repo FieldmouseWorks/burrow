@@ -28,7 +28,7 @@ query($owner: String!, $name: String!, $cursor: String) {
           nodes { commit { oid statusCheckRollup { contexts(first: 100) { pageInfo { hasNextPage } nodes {
             __typename
             ... on CheckRun { name status conclusion }
-            ... on StatusContext { context state description }
+            ... on StatusContext { context state description creator { login __typename } }
           } } }
           checkSuites(first: 100) { pageInfo { hasNextPage } nodes { conclusion workflowRun { workflow { name } } } } } }
         }
@@ -40,8 +40,8 @@ query($owner: String!, $name: String!, $cursor: String) {
 
 
 # What each review and comment is read for, in PRS and the older pages.
-OLDER = {"reviews": "author { login } state body submittedAt commit { oid }",
-         "comments": "databaseId body createdAt updatedAt author { login }"}
+OLDER = {"reviews": "author { login __typename } state body submittedAt commit { oid }",
+         "comments": "databaseId body createdAt updatedAt author { login __typename }"}
 PRS = PRS % (OLDER["reviews"], OLDER["comments"])
 OLDER_PAGE = """
 query($id: ID!, $cursor: String) {
@@ -129,10 +129,13 @@ def ci_state(pr, proofs=()):
 
 
 def our_status(pr):
+    """The steward's own status on the head: its context, posted by its App.
+    Anyone who can push can post the context; theirs isn't the steward's
+    word, and the ruleset doesn't count it either."""
     nodes = pr["commits"]["nodes"]
     rollup = (nodes[0]["commit"].get("statusCheckRollup") or {}) if nodes else {}
     for c in (rollup.get("contexts") or {}).get("nodes", []):
-        if c["__typename"] == "StatusContext" and c["context"] == CONTEXT:
+        if c["__typename"] == "StatusContext" and c["context"] == CONTEXT and C.mine(c.get("creator")):
             return c["state"].lower(), c.get("description") or ""
     return None, ""
 

@@ -18,8 +18,10 @@ from tasks import RED_BRANCH, red_default_task
 def discover():
     seen = []
     for owner in CFG["owners"]:
-        for r in C.gh("repo", "list", owner, "--no-archived", "--source", "--limit", "100000",
-                      "--json", "nameWithOwner,isPrivate,viewerPermission,defaultBranchRef") or []:
+        with C.acting_for(owner):
+            found = C.gh("repo", "list", owner, "--no-archived", "--source", "--limit", "100000",
+                         "--json", "nameWithOwner,isPrivate,viewerPermission,defaultBranchRef") or []
+        for r in found:
             name = r["nameWithOwner"]
             if any(fnmatch.fnmatch(name, pat) for pat in CFG["exclude"]):
                 continue
@@ -287,7 +289,8 @@ def hook_projects(repos):
         if due:
             st["hookAt"] = C.NOW
             save(name, st)
-        hook(repo, st, due)
+        with C.acting_for(repo):
+            hook(repo, st, due)
     return [{"repo": repo} for repo in more]
 
 
@@ -311,19 +314,24 @@ up, is tried again a day later. A
         if not st.get("hookId") or C.NOW - st.get("unhookTried", 0) < 86400:
             continue
         repo = name[len("repo-"):-len(".json")].replace("_", "/", 1)  # an owner has no _
-        now = C.gh("api", f"repos/{repo}", check=False)
-        if not isinstance(now, dict):  # not known to be gone: the old path may lead to a live repo
+        try:
+            with C.acting_for(repo):
+                now = C.gh("api", f"repos/{repo}", check=False)
+                gone = isinstance(now, dict) and str(now.get("full_name", "")).lower() not in live
+                if gone:
+                    log(f"{repo}: no longer seen to, taking its webhook off")
+                off = gone and C.write("api", "-X", "DELETE", f"repos/{repo}/hooks/{st['hookId']}", check=False) is not None
+        except RuntimeError as e:  # the App isn't on its owner (any more), say
+            log(f"{repo}: {e}")
+            now = off = None
+        if not isinstance(now, dict) or (gone and not off):
+            # Not known to be gone (the old path may lead to a live repo), or
+            # its hook wouldn't come off.
             st["unhookTried"] = C.NOW
             save(name, st)
             continue
-        if str(now.get("full_name", "")).lower() in live:
+        if not gone:
             log(f"{repo}: renamed to {now['full_name']}, which keeps the webhook")
-        else:
-            log(f"{repo}: no longer seen to, taking its webhook off")
-            if C.write("api", "-X", "DELETE", f"repos/{repo}/hooks/{st['hookId']}", check=False) is None:
-                st["unhookTried"] = C.NOW
-                save(name, st)
-                continue
         for k in ("hook", "hookId", "unhookTried"):
             st.pop(k, None)
         save(name, st)
@@ -337,9 +345,9 @@ def delete_branch(repo, name, sha):
         return
     with tempfile.TemporaryDirectory() as d:
         subprocess.run(["git", "init", "-q", "--bare", d], check=False)
-        p = subprocess.run(["git", "-C", d, "push", "-q", f"--force-with-lease=refs/heads/{name}:{sha}",
+        p = subprocess.run(["git", "-C", d, *C.GIT_AUTH, "push", "-q", f"--force-with-lease=refs/heads/{name}:{sha}",
                             f"https://github.com/{repo}.git", f":refs/heads/{name}"],
-                           capture_output=True, text=True)
+                           capture_output=True, text=True, env=C.gh_env(repo))
         if p.returncode != 0:
             log(f"{repo}: kept {name}: {p.stderr.strip()[:200]}")
 
@@ -424,11 +432,13 @@ def publish(digest):
     owner = [x for x in digest if x[0] in owners or off]
     if CFG["inbox"]["enable"] and off and len(owner) > len([x for x in digest if x[0] in owners]):
         owner.append(("What's stuck is listed here: proj's inbox can't take it", off, ""))
-    issue("digest.json", "[autoland] PRs waiting for you", CFG["notify"]["label"], CFG["notify"]["assignee"], "",
-          owner, "Nothing waiting.")
-    # Closed once the inbox can't take it: what's in it is the owner's then.
-    issue("stuck.json", "[autoland] Stuck in the pipeline", CFG["inbox"]["label"], "", stuck_brief(),
-          [x for x in digest if x not in owner], "Nothing stuck.")
+    # No notify.repo: the digest goes to the journal, asking GitHub nothing.
+    with C.acting_for(CFG["notify"]["repo"] or ""):
+        issue("digest.json", "[autoland] PRs waiting for you", CFG["notify"]["label"], CFG["notify"]["assignee"], "",
+              owner, "Nothing waiting.")
+        # Closed once the inbox can't take it: what's in it is the owner's then.
+        issue("stuck.json", "[autoland] Stuck in the pipeline", CFG["inbox"]["label"], "", stuck_brief(),
+              [x for x in digest if x not in owner], "Nothing stuck.")
 
 
 def inbox_off():
