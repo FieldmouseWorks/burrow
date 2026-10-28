@@ -520,7 +520,12 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
                 except ValueError as e:  # an answer that's no review
                     rs["fails"], rs["failedAt"] = rs.get("fails", 0) + 1, C.NOW
                     log(f"{tag}: {V.NAMES[r]}'s answer wasn't a review ({rs['fails']}): {e}")
-                except RuntimeError as e:  # GitHub: the same answer goes again next pass
+                except C.Unavailable as e:  # GitHub didn't answer: no try spent, the answer's kept
+                    log(f"{tag}: couldn't post {V.NAMES[r]}'s review, GitHub's unavailable: {e}")
+                    unposted.append(f"{V.NAMES[r]}'s review of {head[:7]}")
+                    after(C.NOW, 1)
+                    return
+                except RuntimeError as e:  # GitHub said no: the same answer goes again next pass
                     rs["fails"], rs["failedAt"] = rs.get("fails", 0) + 1, C.NOW
                     log(f"{tag}: couldn't post {V.NAMES[r]}'s review ({rs['fails']}): {e}")
                     # Three tries; one out of service then isn't asked again,
@@ -584,7 +589,12 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
                         late.append(back["head"][:7])
                 except ValueError as e:  # an answer that's no review
                     log(f"{tag}: {V.NAMES[r]}'s review of {back['head'][:7]} wasn't a review: {e}")
-                except RuntimeError as e:  # GitHub: the same answer goes again next pass
+                except C.Unavailable as e:  # GitHub didn't answer: no try spent, the answer's kept
+                    log(f"{tag}: couldn't post {V.NAMES[r]}'s review of {back['head'][:7]}, GitHub's unavailable: {e}")
+                    unposted.append(f"{V.NAMES[r]}'s review of {back['head'][:7]}")
+                    after(C.NOW, 1)
+                    continue
+                except RuntimeError as e:  # GitHub said no: the same answer goes again next pass
                     tries[name] = tries.get(name, 0) + 1
                     log(f"{tag}: couldn't post {V.NAMES[r]}'s review of {back['head'][:7]} ({tries[name]}): {e}")
                     # Three tries, and then only until the reviewer finds this
@@ -810,6 +820,29 @@ def main():
         # One pass at a time, full or kicked: two would act on the same PRs.
         lock = open(os.path.join(STATE, "pass.lock"), "w")
         fcntl.flock(lock, fcntl.LOCK_EX)
+    try:
+        run_pass(kick)
+    finally:
+        if C.LIMITED and C.LIMITED[0] > C.NOW:
+            after_limit(kick)
+
+
+def after_limit(kick):
+    """GitHub's rate limit turned the pass away somewhere, finding its repos,
+    in its PRs or after (the hooks, the owner's issue): it comes back whole
+    at the reset, a full pass as one (its settings, hooks and issue too:
+    burrow-events takes "" for it), a kicked one for its repos, whatever
+    they had booked. Every other wake-up waits for the reset too, the ones
+    booked before it was met and other passes'. None sooner could do
+    anything, and none then waits on another event or the hourly pass."""
+    at = C.LIMITED[0] + 1
+    again = [""] if kick is None else kick
+    wakes = {k: max(v, at) for k, v in load("wake.json", {}).items()
+             if v > C.NOW and k.lower() not in {r.lower() for r in again}}
+    save("wake.json", {**wakes, **dict.fromkeys(again, at)})
+
+
+def run_pass(kick):
     repos = R.discover()
     if kick is not None:
         repos = [r for r in repos if r["repo"].lower() in kick]  # GitHub's names are case-blind

@@ -315,6 +315,7 @@ def run(pr, after, obsolete=False):
     WROTE.clear()
     JOBS.clear()
     C.WAKE.clear()
+    C.LIMITED.clear()
     POSTED.clear()
     digest = []
     S.handle("sam/r", pr, info, digest, obsolete)

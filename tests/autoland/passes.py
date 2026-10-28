@@ -6,7 +6,7 @@ import json
 import os
 import sys
 
-from harness import (FAIL, KICKS, QDIR, REAL, STATES, STUB, T, WROTE, C, P, R, S, V, W, clean, fresh_pr_state, head,
+from harness import (FAIL, KICKS, REAL_GH, QDIR, REAL, STATES, STUB, T, WROTE, C, P, R, S, V, W, clean, fresh_pr_state, head,
                      info, mkpr, pr_state, queued, run, rv_review, tmp, worker)
 
 # A pass that waits on time books its repo's next pass for when the wait
@@ -191,6 +191,61 @@ assert C.load("wake.json", None) == {"sam/r": T + 3 * 60 + 1, "sam/other": T + 6
 assert C.load("digest-repos.json", None) == {"sam/r": [], "sam/other": [["Open over a day", "other line", "x"]]}
 assert published == [[("Open over a day", "other line", "x")]], published
 print("kick: ok")
+
+# A pass GitHub's rate limit turns away books its repos' next pass for when
+# the limit resets (`gh api rate_limit`, free), not five minutes on, the
+# event runner's backoff or the hourly pass: none before then could do
+# anything, one then waits on nothing. Wherever the pass meets it: finding
+# its repos, in a repo's PRs, or after its wake-ups were saved (the owner's
+# issue). Every wake-up waits for it, booked before or by another pass.
+fake = os.path.join(tmp, "limited-bin")
+os.makedirs(fake)
+with open(f"{fake}/gh", "w") as f:
+    f.write(f"""#!/bin/sh
+if [ "$1 $2" = "api rate_limit" ]; then echo {T + 1800:.0f}; exit 0; fi
+echo 'gh: API rate limit exceeded for user ID 1. (HTTP 403)' >&2
+exit 1
+""")
+os.chmod(f"{fake}/gh", 0o755)
+limited = lambda *a, **k: REAL_GH("api", "repos/sam/r")  # noqa: E731
+kept_fns = (S.R.discover, S.open_prs, S.R.publish)
+for where in ("discovery", "prs", "after"):
+    fresh_pr_state()
+    C.NOW = T
+    C.save("wake.json", {"sam/other": T + 60, "Sam/R": T + 9000})
+    S.R.discover = limited if where == "discovery" else (lambda: [{"repo": "sam/r"}])
+    S.open_prs = limited if where == "prs" else (lambda owner, name: (info, [mkpr()]))
+    S.R.publish = limited if where == "after" else (lambda lines: None)
+    path, os.environ["PATH"] = os.environ["PATH"], fake + os.pathsep + os.environ["PATH"]
+    C.WAKE.clear()
+    C.LIMITED.clear()
+    # The repo it was for comes back at the reset, whatever it had booked,
+    # however it's spelled; a full pass comes back as one, whatever it got to
+    # (its settings, hooks and the owner's issue are its own).
+    for argv_now in (["steward", "kick", "sam/r"],) + ((["steward"],) if where != "prs" else ()):
+        sys.argv = argv_now
+        try:
+            S.main()
+            assert where != "discovery", "found its repos with GitHub turning it away"
+        except RuntimeError as e:
+            assert isinstance(e, C.Unavailable) and where != "prs", (where, e)
+        assert C.LIMITED == [T + 1800], (where, C.LIMITED)
+        woke = C.load("wake.json", None)
+        if len(argv_now) > 1:
+            assert woke == {"sam/r": T + 1800 + 1, "sam/other": T + 1800 + 1}, (where, woke)
+        else:  # what the full pass booked for its repos as well, none sooner
+            assert woke[""] == T + 1800 + 1 and woke["sam/other"] == T + 1800 + 1, (where, woke)
+            assert min(woke.values()) == T + 1800 + 1, (where, woke)
+        C.save("wake.json", {"sam/other": T + 60, "Sam/R": T + 9000})
+    os.environ["PATH"] = path
+sys.argv = argv
+S.R.discover, S.open_prs, S.R.publish = kept_fns
+# Without a limit met, the wake-ups are as booked.
+C.LIMITED.clear()
+fresh_pr_state()
+run(mkpr(), 10)
+assert C.WAKE == {"sam/r": T + 10 + 3 * 60 + 1}, C.WAKE
+print("rate limit: ok")
 
 # A long PR's older reviews and comments are read too, a page at a time,
 # oldest first: its verdicts, markers and rounds can be past the last 100.

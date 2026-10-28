@@ -29,13 +29,43 @@ def log(*a):
     print(*a, flush=True)
 
 
+class Unavailable(RuntimeError):
+    """GitHub didn't answer: a rate limit, a 5xx, no connection. Nothing the
+    call asked for was wrong, so it counts against nobody: the same call goes
+    again next pass."""
+
+
+UNAVAILABLE = re.compile(r"rate limit|HTTP (429|5\d\d)|error connecting|connection (reset|refused)|timed? ?out|\bEOF\b|network is unreachable|no such host|TLS handshake", re.I)
+
+
+# When the rate limit that turned one of this pass's calls away resets, once
+# a call has met it: no pass of any repo before then could do anything.
+LIMITED = []
+
+
+def limited(stderr):
+    """Note when the rate limit gh met resets. `gh api rate_limit` costs
+    nothing against it; a limit with none spent (a secondary one) notes
+    nothing."""
+    if LIMITED or not re.search(r"rate limit", stderr, re.I):
+        return
+    p = subprocess.run(["gh", "api", "rate_limit", "--jq", "[.resources[] | select(.remaining == 0) | .reset] | max // 0"],
+                       capture_output=True, text=True)
+    try:
+        LIMITED.append(float(p.stdout.strip()) if p.returncode == 0 else 0.0)
+    except ValueError:
+        LIMITED.append(0.0)
+
+
 def gh(*args, input=None, check=True):
-    """Run gh; return its stdout (parsed as JSON when it is JSON)."""
+    """Run gh; return its stdout (parsed as JSON when it is JSON). Raises
+    Unavailable when GitHub didn't answer, RuntimeError when it said no."""
     p = subprocess.run(["gh", *args], input=input, capture_output=True, text=True)
     if p.returncode != 0:
         why = f"gh {' '.join(args[:3])}: {p.stderr.strip()[:300]}"
+        limited(p.stderr)
         if check:
-            raise RuntimeError(why)
+            raise (Unavailable if UNAVAILABLE.search(p.stderr) else RuntimeError)(why)
         log("  failed:", why)
         return None
     out = p.stdout.strip()
@@ -136,7 +166,8 @@ WAKE = {}
 
 
 def wake(repo, at):
-    """Ask for a pass of repo at `at`, if that's still to come."""
+    """Ask for a pass of repo at `at`, if that's still to come (one a rate
+    limit turned away waits for its reset: steward.after_limit)."""
     if at > NOW:
         WAKE[repo] = min(WAKE.get(repo, at), at)
 
