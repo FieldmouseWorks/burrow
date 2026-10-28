@@ -58,7 +58,7 @@ change nothing else in the same PR.
    deleted.
 6. A settled PR it won't land on its own word gets one Claude job a head
    that judges it: one touching a one-way path (`burrow.autoland.oneWay`:
-   CODEOWNERS, secrets, migrations), one in a repo with no CI yet (the job
+   CODEOWNERS, secrets), one in a repo with no CI yet (the job
    builds and tests it itself, unless the repo is set `requireCi = false`:
    nothing to test), a dependency update touching a one-way path, and a
    Dependabot major. The job lands anything a revert or a follow-up can undo,
@@ -90,8 +90,10 @@ without them it's the owner's, with why. A PR past the round limit isn't
 the owner's: its reviewers stop looking, a Claude job fixes or answers their
 last findings, and a judge decides. Everything else is pre-approved: merges, GitHub settings changes and
 cleanup don't wait for the owner. Dependency bots' minor updates skip review: CI is their review,
-except a change to `.github/` beyond repinning the actions its workflows
-use: that's the gate, so it goes through the review loop like any other PR.
+except one with a commit no bot wrote (a Claude job's fix), which is code
+nobody has read, or a change to `.github/` beyond repinning the actions its
+workflows use, which is the gate. Either goes through the review loop like
+any other PR.
 Apart from CODEOWNERS, `.github/` isn't one-way. A Renovate
 major merges once its CI is green and renovate-sweep's job has given it an
 ok verdict for that head; a security fix merges on green CI alone, a major

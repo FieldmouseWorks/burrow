@@ -201,7 +201,7 @@ def sh(*a, cwd=None):
 
 head = "a" * 40
 WROTE, JOBS, POSTED = [], [], []
-COMMITS = {}  # a PR's commits' author emails, by number, as `pr view --json commits` gives them
+COMMITS = {}  # a PR's commits' author emails, by number, as `pr view --json commits` gives them (None: the ask fails)
 PR_DIFF = {"v": ""}  # what `gh pr diff` gives
 
 
@@ -209,7 +209,8 @@ def gh_stub(*a, **k):
     if a[:2] == ("api", "user"):
         return "sam"
     if a[:2] == ("pr", "view") and "commits" in a:
-        return {"commits": [{"authors": [{"email": e}]} for e in COMMITS.get(int(a[2]), ["bot@renovateapp.com"])]}
+        got = COMMITS.get(int(a[2]), ["bot@renovateapp.com"])
+        return None if got is None else {"commits": [{"authors": [{"email": e}]} for e in got]}
     if a[:2] == ("api", "repos/sam/r"):
         return {"allow_auto_merge": True, "delete_branch_on_merge": True, "allow_squash_merge": True}
     if a[:2] == ("pr", "diff"):

@@ -53,7 +53,7 @@ import repos as R
 import reviewers as V
 from common import CFG, DRY, MIN, STATE, load, log, repo_cfg, save, ts
 from seal import MAJOR as MAJOR_VERDICT  # renovate-sweep's, on a Renovate major
-from touches import dep_kind, gate_edit, moved_from, one_way, renovate_edited
+from touches import bot_edited, dep_kind, gate_edit, moved_from, one_way
 from tasks import DEP_SEEN, JUDGMENT, PAST_LIMIT, REVIEWED, fix_task, judge_task, proof_task
 from prs import ci_state, eyes, land, open_prs, our_status, post_status
 
@@ -385,13 +385,13 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
     gate = one_way(pr, rc, moved_from(repo, pr, st))
     renovate = pr["headRefName"].startswith("renovate/")
     proof_only = ci == "pending" and bool(ci_names) and all(c in rc["proofJobs"] for c in ci_names)
-    # A minor Renovate PR a Claude job fixed carries Claude's code, and Renovate
-    # won't merge it; a bot's PR that changes a workflow beyond repinning its
-    # actions changes the gate. Either goes through the review loop below like
-    # a Claude PR. While a Renovate one's CI is red it's renovate-sweep's to
-    # hand over, findings and all: a job from each on one branch would push
-    # over each other. The sweep's push makes a new head, and the reviewers read it
-    # again.
+    # A minor dependency PR a Claude job fixed carries Claude's code, which no
+    # reviewer has read (and Renovate won't merge); a bot's PR that changes a
+    # workflow beyond repinning its actions changes the gate. Either goes
+    # through the review loop below like a Claude PR. While a Renovate one's CI
+    # is red it's renovate-sweep's to hand over, findings and all: a job from
+    # each on one branch would push over each other. The sweep's push makes a
+    # new head, and the reviewers read it again.
     # A judge asked for on this head and base (the repo had no CI then, say)
     # still decides once CI shows up: its owner or failed verdict isn't
     # dropped for a green check.
@@ -400,7 +400,7 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
     # Its owner or failed verdict holds it whatever CI is still doing; only
     # a land waits for CI.
     held = asked and judge_said in ("owner", "failed")
-    fixed = dep == "minor" and not gate and (renovate_edited(repo, pr, st) or gate_edit(repo, pr, st))
+    fixed = dep == "minor" and not gate and (bot_edited(repo, pr, st) or gate_edit(repo, pr, st))
     swept = fixed and ci == "red" and renovate
 
     # Dependency bumps: CI is the review. Renovate merges its own minor

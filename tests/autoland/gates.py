@@ -4,15 +4,16 @@ the gate."""
 from harness import ONE_WAY, PR_DIFF, WROTE, G, S, mkpr, run
 
 
-# The module's one-way paths: CODEOWNERS, secrets and migrations are judged
-# before they land; the rest of .github/ is settled and merged like anything else.
+# The module's one-way paths: CODEOWNERS and secrets are judged before they
+# land; the rest of .github/, and migrations (a deploy backs the data up before
+# it migrates), are settled and merged like anything else.
 def touching(*paths):
     return {"labels": {"nodes": []}, "files": {"nodes": [{"path": p} for p in paths]}, "changedFiles": len(paths)}
 
 
-for p in (".github/workflows/flake.yml", ".github/dependabot.yml"):
+for p in (".github/workflows/flake.yml", ".github/dependabot.yml", "server/migrations/0002_users.sql", "migrations/1.sql"):
     assert G.one_way(touching("src/app.py", p), {"oneWay": ONE_WAY}) is None, (p, ONE_WAY)
-for p in (".github/CODEOWNERS", "secrets/remi.yaml", ".sops.yaml", "server/migrations/0002_users.sql"):
+for p in (".github/CODEOWNERS", "secrets/remi.yaml", ".sops.yaml", "app/secret/key.yaml"):
     assert G.one_way(touching(".github/workflows/flake.yml", p), {"oneWay": ONE_WAY}) == p, (p, ONE_WAY)
 assert G.one_way(touching("CODEOWNERS.bak"), {"oneWay": ONE_WAY}, [".github/CODEOWNERS"]) == ".github/CODEOWNERS"
 assert G.unquote('"secrets/caf\\303\\251.yaml"') == "secrets/caf\u00e9.yaml" and G.unquote("a b") == "a b"

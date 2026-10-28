@@ -246,14 +246,17 @@ in
 
     oneWay = mkOption {
       type = types.listOf types.str;
-      default = [ "(^|/)CODEOWNERS$" "(^|/)secrets?/" "(^|/)\\.sops\\.yaml$" "\\.sops\\.(ya?ml|json|env)$" "(^|/)migrations?/" ];
+      default = [ "(^|/)CODEOWNERS$" "(^|/)secrets?/" "(^|/)\\.sops\\.yaml$" "\\.sops\\.(ya?ml|json|env)$" ];
       description = ''
         Path regexes that make a settled PR one a Claude job judges before it
         lands: it lands anything a revert or a follow-up can undo, and sends
         you only what can't be undone or is yours to decide. The default is
-        CODEOWNERS (who signs off on what), secrets and database migrations.
-        The rest of `.github/` isn't on it: the reviewers read workflow
-        changes like any other, and the steward merges them once settled.
+        CODEOWNERS (who signs off on what) and secrets. The rest of
+        `.github/` isn't on it: the reviewers read workflow changes like any
+        other, and the steward merges them once settled. Nor are database
+        migrations: what undoes a bad one is the backup its deploy takes
+        before migrating, not a wait at merge. A repo whose deploy takes no
+        such backup can put `(^|/)migrations?/` on its own list (`repos`).
       '';
     };
 
@@ -611,7 +614,7 @@ in
       - Once it finds nothing on the exact head, every thread is resolved and CI is
         green, it posts `${cfg.context}` and merges it, `.github/` changes included; the
         branch goes too.
-      - A settled PR that touches a one-way path (secrets, migrations, CODEOWNERS), or
+      - A settled PR that touches a one-way path (secrets, CODEOWNERS), or
         a repo with no CI, gets a Claude job that judges it: it lands what a revert or a
         follow-up can undo, and sends ${config.burrow.owner} only what can't be undone or is theirs to decide.
         The judge doesn't merge: the steward lands the PR on its verdict. Outside a
