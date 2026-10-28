@@ -249,7 +249,20 @@ let
         matchManagers = [ "nix" ];
         minimumReleaseAgeBehaviour = "timestamp-optional";
       }
-    ] ++ lib.optional (githubRepo != null) {
+    ] ++ lib.optional (rcfg.trustedOwners != [ ]) {
+      # A dependency on a repo of trustedOwners' (a pinned workflow, an
+      # action, a flake input) waits for nothing: the soak is against someone
+      # else's hijacked release, and on a repo that's still moving it never
+      # ends. Each new commit restarts the three days, so a pin on burrow's
+      # main sat in "pending status checks" while burrow merged daily. Only
+      # where the source URL is the repo the datasource fetches from (GitHub's
+      # own, git's): a registry's package (a Docker image, an npm package)
+      # claims whatever source URL it likes, and an OWNER/NAME on another host
+      # is someone else's.
+      matchDatasources = [ "github-tags" "github-digest" "github-releases" "git-refs" "git-tags" ];
+      matchSourceUrls = map (o: "https://github.com/${o}/*") rcfg.trustedOwners;
+      minimumReleaseAge = null;
+    } ++ lib.optional (githubRepo != null) {
       # The machine's own flake.lock is HOST-update's: it deploys what it bumps.
       matchRepositories = [ githubRepo ];
       matchManagers = [ "nix" ];
@@ -409,6 +422,18 @@ in
         type = lib.types.listOf lib.types.str;
         example = [ "sam/*" ];
         description = "Which repos Renovate covers (new ones included).";
+      };
+      trustedOwners = lib.mkOption {
+        type = lib.types.listOf lib.types.str;
+        default = lib.optionals (config.burrow.autoland.enable or false) config.burrow.autoland.owners;
+        defaultText = lib.literalExpression "burrow.autoland.owners, when autoland is on";
+        example = [ "sam" "sams-org" ];
+        description = ''
+          GitHub users and orgs whose repos are yours: an update to one of
+          their repos on github.com (a pinned action or workflow, a git
+          dependency) goes ahead without the three days' soak other releases
+          get.
+        '';
       };
       gitAuthor = lib.mkOption {
         type = lib.types.nullOr lib.types.str;
