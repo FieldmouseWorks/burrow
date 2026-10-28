@@ -2,8 +2,9 @@
 # machine with a second pool mounted too, a backup pool only noauto mounts use
 # and an extra pool by GUID, it checks the pools the machine needs (rpool,
 # tank, the GUID's) and only those. A missing or unhealthy pool fails, a GUID
-# names whichever pool has it and no other, and zpool failing fails. A machine
-# with ZFS support and no pool it needs has no ZFS check.
+# names whichever pool has it and no other, and zpool failing fails, whatever
+# it printed first. A machine with ZFS support and no pool it needs has no ZFS
+# check.
 #
 #   nix build .#checks.x86_64-linux.health-zfs -L
 { self, pkgs }:
@@ -27,22 +28,24 @@ let
   };
 
   # zpool, as far as the check can tell: the pools in $POOLS, a line each of
-  # name, GUID and health.
+  # name, GUID and health. With $ZPOOL_FAIL naming the subcommand, that one
+  # says all that and fails anyway.
   zpool = pkgs.writeShellScriptBin "zpool" ''
     case "$1" in
       list)
         while read -r name guid _; do printf '%s\t%s\n' "$guid" "$name"; done <"$POOLS" ;;
       status)
+        found=
         while read -r name _ health; do
           if [ "$name" = "$3" ]; then
             if [ "$health" = ONLINE ]; then echo "pool '$name' is healthy"
             else printf '  pool: %s\n state: %s\n' "$name" "$health"; fi
-            exit 0
+            found=1
           fi
         done <"$POOLS"
-        echo "cannot open '$3': no such pool" >&2
-        exit 1 ;;
+        [ -n "$found" ] || { echo "cannot open '$3': no such pool" >&2; exit 1; } ;;
     esac
+    [ "''${ZPOOL_FAIL:-}" != "$1" ]
   '';
   check = pkgs.writeShellScript "health-zfs" ''
     export PATH=${lib.makeBinPath [ zpool pkgs.coreutils pkgs.gnugrep ]}
@@ -74,6 +77,9 @@ pkgs.runCommand "health-zfs-check" { } ''
   fails "another pool with the GUID's pool's name"
   pools "rpool 1 ONLINE" "tank 2 ONLINE" "extra 12345 FAULTED"
   fails "the GUID's pool faulted"
+  pools "rpool 1 ONLINE" "tank 2 ONLINE" "extra 12345 ONLINE"
+  ZPOOL_FAIL=status fails "zpool status failing after saying healthy"
+  ZPOOL_FAIL=list fails "zpool list failing after listing the GUID"
   rm pools
   fails "zpool failing"
 

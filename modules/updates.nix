@@ -522,14 +522,21 @@ in
         events = "systemctl -q is-active burrow-events.service";
       } // lib.optionalAttrs (zfsPools != [ ]) {
         # A degraded mirror keeps running on one disk, quietly, until the other
-        # goes. A pool that isn't there fails too. A GUID (pool names start
-        # with a letter) is whichever imported pool has it, whatever its name.
+        # goes. A pool that isn't there fails too, and so does zpool failing,
+        # whatever it printed first. A GUID (pool names start with a letter) is
+        # whichever imported pool has it, whatever its name.
         zfs = ''
-          healthy() { [ -n "$1" ] && zpool status -x "$1" | grep -qxF "pool '$1' is healthy"; }
-          named() { zpool list -H -o guid,name | while read -r guid name; do
-            if [ "$guid" = "$1" ]; then echo "$name"; fi; done; }
+          healthy() {
+            local out
+            [ -n "$1" ] && out=$(zpool status -x "$1") && grep -qxF "pool '$1' is healthy" <<<"$out"
+          }
+          named() {
+            local pools guid name
+            pools=$(zpool list -H -o guid,name) || return 1
+            while read -r guid name; do if [ "$guid" = "$1" ]; then echo "$name"; fi; done <<<"$pools"
+          }
         '' + lib.concatMapStrings (p: if builtins.match "[0-9]+" p != null
-          then "healthy \"$(named ${p})\" || exit 1\n"
+          then "name=$(named ${p}) && healthy \"$name\" || exit 1\n"
           else "healthy ${lib.escapeShellArg p} || exit 1\n") zfsPools;
       } // lib.optionalAttrs (config.burrow.claude.enable or false) {
         # As the user, the way the operator runs it (runuser is root's only).
