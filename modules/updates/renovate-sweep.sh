@@ -64,6 +64,7 @@ for d in "$src"/*/; do
   # how, so it can rerun one it broke, whether or not the steward is still
   # running.
   covered=false
+  proofnames=$(jq -c --arg r "$repo" '['"$mine"'.proofJobs // {} | keys[]]' "$COVERED" 2>/dev/null || echo '[]')
   proofs=$(jq -r --arg r "$repo" '['"$mine"'.proofJobs // {} | to_entries[] | " \(.key) isn'"'"'t CI: it runs on a machine, like this: \(.value) Rerun it that way on what you push."] | join("")' "$COVERED" 2>/dev/null || true)
   if [ -n "$COVERED" ] && jq -e --argjson now "$(date +%s)" '$now - .at < 6 * 3600' "$COVERED" >/dev/null 2>&1; then
     covered=$(jq -r --arg r "$repo" "$mine"' | .covered == true' "$COVERED")
@@ -86,14 +87,23 @@ for d in "$src"/*/; do
       # Each check but the steward's own, green, pending or red as the
       # steward reads it (ci_state in ../autoland/steward.py), so a head
       # neither calls the other's is never left between them.
-      ci=$(jq -c '[.statusCheckRollup[]? | select((.context // .name) != $settled)
-        | if .__typename == "StatusContext" then
+      # A proof the steward runs on a machine (proofJobs) is no CI to wait
+      # for: a major's job runs it itself.
+      ci=$(jq -c --argjson proofs "$proofnames" '[.statusCheckRollup[]? | select((.context // .name) != $settled)
+        | {name: (.context // .name), proof: ((.context // .name) as $c | $proofs | index($c) != null),
+           at: (if .__typename == "StatusContext" then .startedAt else .completedAt end),
+           state: (if .__typename == "StatusContext" then
             (if .state == "SUCCESS" then "green" elif .state == "PENDING" or .state == "EXPECTED" then "pending" else "red" end)
           elif .status != "COMPLETED" then "pending"
           elif .conclusion == "SUCCESS" or .conclusion == "NEUTRAL" or .conclusion == "SKIPPED" then "green"
-          else "red" end]' --arg settled "$SETTLED" <<<"$pr")
-      red=$(jq '[.[] | select(. == "red")] | length' <<<"$ci")
-      pending=$(jq '[.[] | select(. == "pending")] | length' <<<"$ci")
+          else "red" end)}]' --arg settled "$SETTLED" <<<"$pr")
+      red=$(jq '[.[] | select(.state == "red")] | length' <<<"$ci")
+      pending=$(jq '[.[] | select(.state == "pending")] | length' <<<"$ci")
+      running=$(jq '[.[] | select(.state == "pending" and (.proof | not))] | length' <<<"$ci")
+      # Which CI finished, and when: it changes when CI on this head runs
+      # again (a job's rerun) or turns up late (after an empty rollup).
+      finished=$(jq -r '[.[] | select(.state != "pending" and (.proof | not)) | "\(.name) \(.at)"] | sort | join("\n")' <<<"$ci" |
+        md5sum | cut -d' ' -f1)
       # No checks at all isn't "passed CI": nothing has tested it yet.
       checks=$(jq length <<<"$ci")
       # A major is what the steward takes for one (dep_kind in
@@ -105,15 +115,21 @@ for d in "$src"/*/; do
       key="$state/${repo//\//_}-$n"
       seen=$(cat "$key" 2>/dev/null || true)
       # A major's key also says the job was asked for a verdict on this base,
-      # once its CI had finished, so one retargeted since (or handed over
-      # before verdicts named their base, were sealed or waited for CI) is
-      # handed over once more.
+      # so one retargeted since (or handed over before verdicts named their
+      # base or were sealed) is handed over once more.
       want=$sha
-      [ "$major" != true ] || want="$sha sealed verdict on $base after CI"
+      [ "$major" != true ] || want="$sha sealed verdict on $base"
       [ "$security" != true ] || want="$sha $(date +%F)"
       # Red since it was handed over (a proof run later, say): another job
-      # fixes that, verdict or not.
-      [ "$red" -eq 0 ] || want="$want red"
+      # fixes that, verdict or not. Otherwise a major's key names the CI its
+      # job was handed: CI that finishes again on the same head, after a job
+      # reran it and left (as LoK-web#598's did) or turned up after the job
+      # saw none, brings another job if there's still no verdict.
+      if [ "$red" -gt 0 ]; then
+        want="$want red"
+      elif [ "$major" = true ]; then
+        want="$want after CI $finished"
+      fi
       verdict=""
       if [ "$major" = true ] && [ -n "$me" ]; then
         # The newest one with its seal, of our own login's for this head on this base.
@@ -146,9 +162,9 @@ for d in "$src"/*/; do
       [ "$red" -gt 0 ] || [ "$major" = true ] || continue
       # A major waits for its CI to finish, unless some of it is red already:
       # its verdict is read off finished CI, and a job handed one still
-      # running has to wait it out or leave with nobody to come back for the
-      # verdict. Its CI finishing starts this again.
-      [ "$red" -gt 0 ] || [ "$pending" -eq 0 ] || continue
+      # running has to wait it out. Its CI finishing starts this again. Its
+      # proofs it doesn't wait for: its job runs those.
+      [ "$red" -gt 0 ] || [ "$running" -eq 0 ] || continue
       [ "$seen" != "$want" ] || continue
       # A job that pushed its fix and then cleared the new head is done:
       # nothing for another job to do there.

@@ -251,6 +251,55 @@ assert len(calls) == 1 and "#13 " in calls[0][-1], calls
 calls, _ = sweep([pr(13)], state=kept)
 assert calls == [], calls
 
+# A job handed it green that reran its CI and left, or handed it before any
+# CI turned up: CI finishing again on the same head goes to another job, once,
+# unless the verdict came.
+def at(p, t):
+    return {**p, "statusCheckRollup": [{**c, "completedAt": t} for c in p["statusCheckRollup"]]}
+
+
+kept = tempfile.mkdtemp(dir=tmp)
+calls, _ = sweep([at(pr(14), "2099-01-01T01:00:00Z")], state=kept)
+assert len(calls) == 1, calls
+calls, _ = sweep([ci(14, ("IN_PROGRESS", ""))], state=kept)
+assert calls == [], calls
+calls, _ = sweep([at(pr(14), "2099-01-01T02:00:00Z")], state=kept)
+assert len(calls) == 1 and "#14 " in calls[0][-1], calls
+calls, _ = sweep([at(pr(14), "2099-01-01T02:00:00Z")], state=kept)
+assert calls == [], calls
+calls, _ = sweep([at(pr(14), "2099-01-01T03:00:00Z")], {14: [verdict(14, "ok")]}, state=kept)
+assert calls == [], calls
+kept = tempfile.mkdtemp(dir=tmp)
+calls, _ = sweep([{**pr(15), "statusCheckRollup": []}], state=kept)
+assert len(calls) == 1, calls
+calls, _ = sweep([pr(15)], state=kept)
+assert len(calls) == 1 and "#15 " in calls[0][-1], calls
+calls, _ = sweep([pr(15)], state=kept)
+assert calls == [], calls
+
+# A proof the steward runs on a machine isn't CI to wait for: its job runs
+# it, pending or not posted yet. Its result doesn't hand the PR over again.
+remi = {"remi-proof": "ssh remi proof"}
+proof = {"__typename": "StatusContext", "context": "remi-proof", "state": "PENDING", "startedAt": "2099-01-01T01:00:00Z"}
+kept = tempfile.mkdtemp(dir=tmp)
+for rollup in ([{**proof, "state": "EXPECTED"}], [proof], []):
+    calls, _ = sweep([{**pr(16), "statusCheckRollup": [*pr(16)["statusCheckRollup"], *rollup]}], covered=[REPO], proofs=remi)
+    assert len(calls) == 1 and "#16 " in calls[0][-1], (rollup, calls)
+calls, _ = sweep([{**pr(16), "statusCheckRollup": [*pr(16)["statusCheckRollup"], proof]}], covered=[REPO], proofs=remi,
+                 state=kept)
+assert len(calls) == 1, calls
+done = {**proof, "state": "SUCCESS", "startedAt": "2099-01-01T02:00:00Z"}
+calls, _ = sweep([{**pr(16), "statusCheckRollup": [*pr(16)["statusCheckRollup"], done]}], covered=[REPO], proofs=remi,
+                 state=kept)
+assert calls == [], calls
+# CI still running alongside it holds it, as does a pending status no repo
+# names as a proof: that's CI.
+calls, _ = sweep([{**ci(16, ("IN_PROGRESS", "")), "statusCheckRollup": [*ci(16, ("IN_PROGRESS", ""))["statusCheckRollup"], proof]}],
+                 covered=[REPO], proofs=remi)
+assert calls == [], calls
+calls, _ = sweep([{**pr(16), "statusCheckRollup": [*pr(16)["statusCheckRollup"], proof]}], covered=[REPO])
+assert calls == [], calls
+
 # Handed over for its verdict, then red on the same head (a proof run since):
 # handed over again, ok or not; once a head red.
 kept = tempfile.mkdtemp(dir=tmp)
