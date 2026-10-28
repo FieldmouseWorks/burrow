@@ -169,7 +169,10 @@ let
     autodiscoverFilter = rcfg.autodiscoverFilter;
     onboarding = false;
     requireConfig = "optional";
-    dependencyDashboard = false;
+    # Each repo's issue listing what Renovate hasn't opened a PR for, and
+    # why: the autoland steward reads it for what's stuck there (its
+    # dashboard option).
+    dependencyDashboard = true;
     binarySource = "global";
     baseDir = "${rcfg.dir}/work";
     cacheDir = "${rcfg.dir}/cache";

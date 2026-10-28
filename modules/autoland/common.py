@@ -75,6 +75,26 @@ def gh(*args, input=None, check=True):
         return out
 
 
+def fresh(path, etag=None):
+    """GET path unless it's unchanged since GitHub gave it etag: (its etag,
+    its JSON), or None when it's unchanged. GitHub doesn't count a request
+    it answers 304 against the rate limit, so a look at something that
+    rarely changes costs nothing most of the times it's taken. Raises as
+    gh() does."""
+    p = subprocess.run(["gh", "api", "-i", *(["-H", f"If-None-Match: {etag}"] if etag else []), path],
+                       capture_output=True, text=True)
+    status, _, rest = p.stdout.partition("\n")
+    if status.split(" ")[1:2] == ["304"]:
+        return None
+    head, _, body = rest.partition("\n\n")  # text mode reads GitHub's \r\n as \n
+    if p.returncode != 0:
+        why = f"gh api {path}: {p.stderr.strip()[:300]}"
+        limited(p.stderr)
+        raise (Unavailable if UNAVAILABLE.search(p.stderr) else RuntimeError)(why)
+    tag = next((h.split(":", 1)[1].strip() for h in head.split("\n") if h.lower().startswith("etag:")), None)
+    return tag, json.loads(body)
+
+
 def write(*args, **kw):
     """A gh call that changes something: skipped (and logged) in status mode."""
     if DRY:

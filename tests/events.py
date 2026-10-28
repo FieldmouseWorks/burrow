@@ -74,6 +74,20 @@ for event, p, want in cases:
 # A handler that asks for none of that takes any push, and every branch.
 plain = {"events": ["push", "check_suite"], "unit": "autoland"}
 assert E.takes(plain, "push", payload(ref="refs/heads/fix")) and E.takes(plain, "check_suite", payload(check_suite={"head_branch": "fix"}))
+# One that names issue titles takes an issue's event only for one of those,
+# exactly; a comment, or an event about a branch, is no issue's.
+titled = {"events": ["issues", "issue_comment", "push"], "unit": "autoland", "issueTitles": ["Dependency Dashboard"]}
+cases = [
+    ("issues", payload(issue={"title": "Dependency Dashboard"}), True),
+    ("issues", payload(issue={"title": "Dependency Dashboard (old)"}), False),
+    ("issues", payload(issue={"title": "dependency dashboard"}), False),
+    ("issues", payload(issue={"title": None}), False),
+    ("issues", payload(), False),
+    ("issue_comment", payload(issue={"title": "Something else"}), True),
+    ("push", payload(ref="refs/heads/main"), True),
+]
+for event, p, want in cases:
+    assert E.takes(titled, event, p) == want, (event, p)
 # One with no pass over one repo gets its full pass for a repo's event.
 assert E.place(plain, "sam/r") == "sam/r" and E.place({**plain, "perRepo": False}, "sam/r") == E.FULL
 print("filters: ok")

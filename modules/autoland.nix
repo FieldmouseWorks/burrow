@@ -72,6 +72,11 @@ let
   renovateAuthor = config.burrow.updates.renovate.gitAuthor or null;
   renovateMatch = if renovateAuthor == null then null else builtins.match ".*<([^>]*)>.*" renovateAuthor;
 
+  # The title Renovate gives each repo's dashboard (its
+  # dependencyDashboardTitle default): the issue dashboard.py reads, and the
+  # one whose events start a pass.
+  dashboardTitle = "Dependency Dashboard";
+
   settings = {
     renovateEmail = if renovateMatch == null then null else lib.head renovateMatch;
     inherit (cfg) owners exclude context rulesets keepBranches baselineJobs baselinePerPass;
@@ -97,6 +102,13 @@ let
     # when the inbox will: notify.repo cloned in projectsDir, and the
     # steward's gh login one of inbox.authors. Otherwise it's the owner's.
     inbox = { inherit (config.burrow.proj.inbox) enable label authors; };
+    # Renovate's dashboards (dashboard.py), and where a job that ticks a box
+    # on one kicks Renovate to read it.
+    dashboard = {
+      inherit (cfg.dashboard) enable waitDays errorDays;
+      title = dashboardTitle;
+      renovateKick = if config.burrow.updates.renovate.enable or false then "${config.burrow.events.kick}/renovate" else null;
+    };
     defaults = {
       inherit (cfg) rounds oneWay;
       handoffAfter = cfg.handoffAfterMinutes;
@@ -318,6 +330,35 @@ in
       '';
     };
 
+    dashboard = {
+      enable = mkOption {
+        type = types.bool;
+        default = (config.burrow.updates.enable or false) && (config.burrow.updates.renovate.enable or false);
+        defaultText = lib.literalExpression "burrow.updates.renovate.enable";
+        description = ''
+          Watch each repo's Renovate Dependency Dashboard (autoland/dashboard.py):
+          an update that sits on it too long without a PR goes to a Claude job,
+          and one still there a day after that job to the stuck issue. Its
+          job reads Renovate's journal, so it wants Renovate on this machine.
+        '';
+      };
+      waitDays = mkOption {
+        type = types.ints.positive;
+        default = 4;
+        description = ''
+          How long an update waiting on something (a release's soak, its
+          schedule, a rate limit, an approval) sits on the dashboard before
+          it's stuck. Keep it a day past the soak Renovate gives a release
+          (minimumReleaseAge, burrow.updates), or every soak is stuck.
+        '';
+      };
+      errorDays = mkOption {
+        type = types.ints.positive;
+        default = 1;
+        description = "How long an error, a problem with the repo or a failed lookup sits on the dashboard before it's stuck.";
+      };
+    };
+
     keepBranches = mkOption {
       type = types.listOf types.str;
       default = [ "gh-pages" "release/*" "releases/*" ];
@@ -465,7 +506,10 @@ in
       # their threads, comments (a judge's verdict), CI finishing, and commit
       # statuses (a proof's verdict).
       events = [ "push" "pull_request" "pull_request_review" "pull_request_review_comment"
-        "pull_request_review_thread" "issue_comment" "check_suite" "status" ];
+        "pull_request_review_thread" "issue_comment" "check_suite" "status" ]
+        ++ lib.optional cfg.dashboard.enable "issues";
+      # Of the issues, only Renovate's dashboard (dashboard.py).
+      issueTitles = [ dashboardTitle ];
       unit = "autoland";
       wake = "${stateDir}/autoland/wake.json";
       # Its own status tells it nothing (a job awaiting the PR does want it).
