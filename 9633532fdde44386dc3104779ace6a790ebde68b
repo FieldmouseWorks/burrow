@@ -1,0 +1,47 @@
+{
+  "conary": "note v1",
+  "change": "2mt82staspcg55kdm2y98cw8gq",
+  "repo": {
+    "owner": "FieldmouseWorks",
+    "name": "burrow"
+  },
+  "pr": 70,
+  "url": "https://github.com/FieldmouseWorks/burrow/pull/70",
+  "summary": "autoland: leave a PR's findings to the Claude session that opened it",
+  "task": "FieldmouseWorks/burrow#69",
+  "author": {
+    "kind": "agent",
+    "login": "TusanHomichi",
+    "session": "https://claude.ai/code/session_01LUSpz65cwD3ABEEydMWsoV"
+  },
+  "landing": {
+    "revision": "6a9e2608b4d9e7941349c267f3a522adfc59128fe52b96d9d76a09403dc90aa0",
+    "before": "9d847ff704b0f004ab6e44fceb58cdacc88b5fd4",
+    "after": "9633532fdde44386dc3104779ace6a790ebde68b",
+    "by": {
+      "kind": "status",
+      "login": "TusanHomichi"
+    },
+    "at": 1793141734125
+  },
+  "evidence": [
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/40292896185/job/121476070736"
+    },
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "fail",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/40292896185/job/121471913596"
+    },
+    {
+      "kind": "review",
+      "check": "deepseek",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/70#pullrequestreview-5649354856"
+    }
+  ]
+}

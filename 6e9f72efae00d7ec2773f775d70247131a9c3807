@@ -1,0 +1,35 @@
+{
+  "conary": "note v1",
+  "change": "6jkacmfgar0ex3wx3rrdvzw168",
+  "repo": {
+    "owner": "FieldmouseWorks",
+    "name": "burrow"
+  },
+  "pr": 35,
+  "url": "https://github.com/FieldmouseWorks/burrow/pull/35",
+  "summary": "remote-control: an open but idle session no longer pins a stale server",
+  "task": "FieldmouseWorks/remi#44",
+  "author": {
+    "kind": "person",
+    "login": "TusanHomichi",
+    "session": null
+  },
+  "landing": {
+    "revision": "fffcd8bf9fc4179ac17addae3d41b43580a6f5891273db50bf29309b1bc41d7f",
+    "before": "9c150758cd7fa32ea4f83c614de3f646779bd702",
+    "after": "6e9f72efae00d7ec2773f775d70247131a9c3807",
+    "by": {
+      "kind": "status",
+      "login": "TusanHomichi"
+    },
+    "at": 1793141643250
+  },
+  "evidence": [
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/40068561464/job/120796857770"
+    }
+  ]
+}

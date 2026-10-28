@@ -1,0 +1,47 @@
+{
+  "conary": "note v1",
+  "change": "7jwjqyvp5djyyan2f6y2r28h11",
+  "repo": {
+    "owner": "FieldmouseWorks",
+    "name": "burrow"
+  },
+  "pr": 96,
+  "url": "https://github.com/FieldmouseWorks/burrow/pull/96",
+  "summary": "ledger: name the repo that keeps the ledger's anchor, and set it up",
+  "task": null,
+  "author": {
+    "kind": "agent",
+    "login": "TusanHomichi",
+    "session": "https://claude.ai/code/session_01BkHcyDYaKnE7mRRMdYCFVC"
+  },
+  "landing": {
+    "revision": "fedbd57d6e072a5c26e1d04c12d28978b249c7962d827cf7de5d31b7b0d9b6e1",
+    "before": "18c6ea7371d80ed7864c15714a9e402b3cf2066f",
+    "after": "a8c0d7dbb6988eb46f6c0ae1ee8ad1415e604ce8",
+    "by": {
+      "kind": "status",
+      "login": "TusanHomichi"
+    },
+    "at": 1793141809519
+  },
+  "evidence": [
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/40576352622/job/122443713071"
+    },
+    {
+      "kind": "ci",
+      "check": "agents",
+      "result": "pass",
+      "source": "status agents"
+    },
+    {
+      "kind": "review",
+      "check": "codex",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/96#pullrequestreview-5673774453"
+    }
+  ]
+}

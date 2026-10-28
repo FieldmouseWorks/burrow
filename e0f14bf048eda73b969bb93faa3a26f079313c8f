@@ -1,0 +1,47 @@
+{
+  "conary": "note v1",
+  "change": "2tmj6y1bd5fe44s61ccn0yhts6",
+  "repo": {
+    "owner": "fieldmouseworks",
+    "name": "burrow"
+  },
+  "pr": 101,
+  "url": "https://github.com/fieldmouseworks/burrow/pull/101",
+  "summary": "project: let a Rust project's tests run the tools they ask for",
+  "task": null,
+  "author": {
+    "kind": "agent",
+    "login": "TusanHomichi",
+    "session": "https://claude.ai/code/session_01BkHcyDYaKnE7mRRMdYCFVC"
+  },
+  "landing": {
+    "revision": "420c078755c3df15f7b2452a0c892c8db855709ebcb3d7f5a2b38321836a6059",
+    "before": "252b4794da7377bd3e3b0e7668c25235bbdb3cb6",
+    "after": "e0f14bf048eda73b969bb93faa3a26f079313c8f",
+    "by": {
+      "kind": "status",
+      "login": "TusanHomichi"
+    },
+    "at": 1793145848171
+  },
+  "evidence": [
+    {
+      "kind": "review",
+      "check": "codex",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/101#pullrequestreview-5675836288"
+    },
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/40602462408/job/122533739691"
+    },
+    {
+      "kind": "ci",
+      "check": "agents",
+      "result": "pass",
+      "source": "status agents"
+    }
+  ]
+}

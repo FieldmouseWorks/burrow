@@ -1,0 +1,41 @@
+{
+  "conary": "note v1",
+  "change": "7k4y4hfb0vtkh00v8h972hs13y",
+  "repo": {
+    "owner": "FieldmouseWorks",
+    "name": "burrow"
+  },
+  "pr": 57,
+  "url": "https://github.com/FieldmouseWorks/burrow/pull/57",
+  "summary": "updates: start HOST-update, Renovate and renovate-sweep from events",
+  "task": null,
+  "author": {
+    "kind": "agent",
+    "login": "TusanHomichi",
+    "session": "https://claude.ai/code/session_01LUSpz65cwD3ABEEydMWsoV"
+  },
+  "landing": {
+    "revision": "40ac408e1ebce774881776746a0a1af7c0a3cb0ce37e857cce22f47f884dfc2e",
+    "before": "e7a022dd93959b88be728ccab96a31fe1a7d6466",
+    "after": "830f515a3306cff2a6dc74536bdeb0952a5dea28",
+    "by": {
+      "kind": "status",
+      "login": "TusanHomichi"
+    },
+    "at": 1793141710902
+  },
+  "evidence": [
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/40250110223/job/121339941534"
+    },
+    {
+      "kind": "review",
+      "check": "codex",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/57#pullrequestreview-5646205916"
+    }
+  ]
+}

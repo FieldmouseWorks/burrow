@@ -1,0 +1,47 @@
+{
+  "conary": "note v1",
+  "change": "6jkf6941ayxb58wf96as6a2t3q",
+  "repo": {
+    "owner": "FieldmouseWorks",
+    "name": "burrow"
+  },
+  "pr": 64,
+  "url": "https://github.com/FieldmouseWorks/burrow/pull/64",
+  "summary": "house: sync on pushes and new rules, not once a day",
+  "task": null,
+  "author": {
+    "kind": "agent",
+    "login": "TusanHomichi",
+    "session": "https://claude.ai/code/session_01LUSpz65cwD3ABEEydMWsoV"
+  },
+  "landing": {
+    "revision": "eafd9715c422f5114b8171e5a55b4a525a65fef2d2e2f08e74dba0610999afd4",
+    "before": "37a2abb375d006c95c83dedfb3c6fee75392e2b6",
+    "after": "1b1b97072108bcaf28b0c2c3374551a9ac48b605",
+    "by": {
+      "kind": "status",
+      "login": "TusanHomichi"
+    },
+    "at": 1793141720883
+  },
+  "evidence": [
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/40266448465/job/121389802495"
+    },
+    {
+      "kind": "review",
+      "check": "codex",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/64#pullrequestreview-5647198618"
+    },
+    {
+      "kind": "review",
+      "check": "deepseek",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/64#pullrequestreview-5647454161"
+    }
+  ]
+}

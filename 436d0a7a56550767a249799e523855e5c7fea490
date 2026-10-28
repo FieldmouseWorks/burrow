@@ -1,0 +1,41 @@
+{
+  "conary": "note v1",
+  "change": "4at6ty9aa635qdtykyzq3kzrd4",
+  "repo": {
+    "owner": "FieldmouseWorks",
+    "name": "burrow"
+  },
+  "pr": 77,
+  "url": "https://github.com/FieldmouseWorks/burrow/pull/77",
+  "summary": "autoland: ask Codex again within the hour when its plan's usage is spent",
+  "task": null,
+  "author": {
+    "kind": "agent",
+    "login": "TusanHomichi",
+    "session": "https://claude.ai/code/session_01LUSpz65cwD3ABEEydMWsoV"
+  },
+  "landing": {
+    "revision": "e1a220d9389b881af36d3edb1ff0afafb97db7a73c8bfb8bcb8dcfcd90609335",
+    "before": "39ce4860ea609cf9a5fa09d75e06abd327f60787",
+    "after": "436d0a7a56550767a249799e523855e5c7fea490",
+    "by": {
+      "kind": "status",
+      "login": "TusanHomichi"
+    },
+    "at": 1793141753162
+  },
+  "evidence": [
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/40346636355/job/121655192567"
+    },
+    {
+      "kind": "review",
+      "check": "codex",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/77#pullrequestreview-5654326389"
+    }
+  ]
+}

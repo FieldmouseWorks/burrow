@@ -1,0 +1,41 @@
+{
+  "conary": "note v1",
+  "change": "5szw2x2p0qyhdy6pwqf31fpb2b",
+  "repo": {
+    "owner": "FieldmouseWorks",
+    "name": "burrow"
+  },
+  "pr": 72,
+  "url": "https://github.com/FieldmouseWorks/burrow/pull/72",
+  "summary": "remote-control: the booked-scan test waits for the scan's booking, and a slow scan books on time",
+  "task": "FieldmouseWorks/burrow#71",
+  "author": {
+    "kind": "person",
+    "login": "TusanHomichi",
+    "session": null
+  },
+  "landing": {
+    "revision": "a192996ac2ab93ad9ecef4d16156be35372e91e12855395bc324b8150307c1d8",
+    "before": "6269eb488cbcd2bef2b0ad81018431860f4312f9",
+    "after": "b738ca1c1bd0d67af0a5503127924dc1bfd22161",
+    "by": {
+      "kind": "status",
+      "login": "TusanHomichi"
+    },
+    "at": 1793141740652
+  },
+  "evidence": [
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/40298691185/job/121490959646"
+    },
+    {
+      "kind": "review",
+      "check": "deepseek",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/72#pullrequestreview-5649886191"
+    }
+  ]
+}

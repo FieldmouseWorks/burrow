@@ -1,0 +1,35 @@
+{
+  "conary": "note v1",
+  "change": "0vfpard6meqgq35wakdpp6yp8b",
+  "repo": {
+    "owner": "FieldmouseWorks",
+    "name": "burrow"
+  },
+  "pr": 40,
+  "url": "https://github.com/FieldmouseWorks/burrow/pull/40",
+  "summary": "updates: Renovate refreshes lockfiles with Node 24 and npm 11",
+  "task": null,
+  "author": {
+    "kind": "person",
+    "login": "TusanHomichi",
+    "session": null
+  },
+  "landing": {
+    "revision": "9b2d45f8c0a6dcbb9f83c47da54ec1d4dba4a7583f4b4a1b3c6c748e85011507",
+    "before": "93fda8c17fedf286111cfaf60e5b4eb78ba05861",
+    "after": "1e91ac549bc21a9af629fe2751ebda85b3ae46ee",
+    "by": {
+      "kind": "status",
+      "login": "TusanHomichi"
+    },
+    "at": 1793141652523
+  },
+  "evidence": [
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/40091261738/job/120864240013"
+    }
+  ]
+}

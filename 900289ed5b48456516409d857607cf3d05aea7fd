@@ -1,0 +1,47 @@
+{
+  "conary": "note v1",
+  "change": "63afwap792xg9509w2qjw23614",
+  "repo": {
+    "owner": "FieldmouseWorks",
+    "name": "burrow"
+  },
+  "pr": 100,
+  "url": "https://github.com/FieldmouseWorks/burrow/pull/100",
+  "summary": "flake-check: attest the gate's result for Conary's ledger",
+  "task": "FieldmouseWorks/Conary#15",
+  "author": {
+    "kind": "agent",
+    "login": "TusanHomichi",
+    "session": "https://claude.ai/code/session_01BkHcyDYaKnE7mRRMdYCFVC"
+  },
+  "landing": {
+    "revision": "ca154eda39606d17af3b122e523c8a84e8e3aa798b524c09a6b9af99d92938e9",
+    "before": "58c509eeb63fa340d0dce1767abf32b711579585",
+    "after": "900289ed5b48456516409d857607cf3d05aea7fd",
+    "by": {
+      "kind": "status",
+      "login": "TusanHomichi"
+    },
+    "at": 1793143209317
+  },
+  "evidence": [
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/40598649719/job/122520902290"
+    },
+    {
+      "kind": "ci",
+      "check": "agents",
+      "result": "pass",
+      "source": "status agents"
+    },
+    {
+      "kind": "review",
+      "check": "codex",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/100#pullrequestreview-5675545911"
+    }
+  ]
+}

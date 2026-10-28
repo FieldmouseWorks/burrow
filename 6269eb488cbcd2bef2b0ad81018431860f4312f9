@@ -1,0 +1,41 @@
+{
+  "conary": "note v1",
+  "change": "7n6gw0mf4cghg0zbx5nk5fvp5k",
+  "repo": {
+    "owner": "FieldmouseWorks",
+    "name": "burrow"
+  },
+  "pr": 73,
+  "url": "https://github.com/FieldmouseWorks/burrow/pull/73",
+  "summary": "autoland: put python3 on the reviewers' PATH",
+  "task": null,
+  "author": {
+    "kind": "agent",
+    "login": "TusanHomichi",
+    "session": "https://claude.ai/code/session_01LUSpz65cwD3ABEEydMWsoV"
+  },
+  "landing": {
+    "revision": "c8b246e5fc734707a006f48cf788fce4aaa3ddeab5de84d1c3e35b9888bbf1b5",
+    "before": "9633532fdde44386dc3104779ace6a790ebde68b",
+    "after": "6269eb488cbcd2bef2b0ad81018431860f4312f9",
+    "by": {
+      "kind": "status",
+      "login": "TusanHomichi"
+    },
+    "at": 1793141737361
+  },
+  "evidence": [
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/40295785569/job/121481379664"
+    },
+    {
+      "kind": "review",
+      "check": "deepseek",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/73#pullrequestreview-5649576076"
+    }
+  ]
+}

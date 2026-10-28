@@ -1,0 +1,41 @@
+{
+  "conary": "note v1",
+  "change": "0pzwc4k788e99drnpsww65ry5f",
+  "repo": {
+    "owner": "FieldmouseWorks",
+    "name": "burrow"
+  },
+  "pr": 63,
+  "url": "https://github.com/FieldmouseWorks/burrow/pull/63",
+  "summary": "autoland: let a repo hide its own private paths from the reviewers",
+  "task": "https://claude.ai/code/project/chan_01Ad4f4oDXfFTCEzLHzMTD8q?thread=cmsg_01Ad4f4oDXfFTCEzLHzMTD8qTKNHjcQpfB7Kr8dRByK81V",
+  "author": {
+    "kind": "agent",
+    "login": "TusanHomichi",
+    "session": "https://claude.ai/code/session_01Wh8DYzuPvs2YbGJbrP7mjL"
+  },
+  "landing": {
+    "revision": "632b0248e8f2f645e77cb8c0f3283a6a5ddc3e56c8f352976d67e2392c7b8c77",
+    "before": "7f967ec77e87c7ef4f6fac60f5c567d8e913716e",
+    "after": "f43eba9b319bb848d434f6e0c4e1780074a71aeb",
+    "by": {
+      "kind": "status",
+      "login": "TusanHomichi"
+    },
+    "at": 1793141714310
+  },
+  "evidence": [
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/40261623435/job/121375037083"
+    },
+    {
+      "kind": "review",
+      "check": "deepseek",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/63#pullrequestreview-5646926652"
+    }
+  ]
+}

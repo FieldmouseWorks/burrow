@@ -1,0 +1,47 @@
+{
+  "conary": "note v1",
+  "change": "0mntjd5sdzspxgp49k0wrxxmf3",
+  "repo": {
+    "owner": "FieldmouseWorks",
+    "name": "burrow"
+  },
+  "pr": 85,
+  "url": "https://github.com/FieldmouseWorks/burrow/pull/85",
+  "summary": "autoland: seal renovate-sweep's verdicts on majors like the judge's",
+  "task": "FieldmouseWorks/burrow#43",
+  "author": {
+    "kind": "agent",
+    "login": "TusanHomichi",
+    "session": "https://claude.ai/code/session_01QzLmB1pT9Tck6N9Vf13a9M"
+  },
+  "landing": {
+    "revision": "e11991a3351cf0a3e6191ccede76464e98ab325133537e627a5dac00f0f79814",
+    "before": "ac450d42f8b2d05847b2b5f86f4868fb946ecab3",
+    "after": "f2df4193fb5e8f7870455a5539a99c785f11d5a9",
+    "by": {
+      "kind": "status",
+      "login": "TusanHomichi"
+    },
+    "at": 1793141777652
+  },
+  "evidence": [
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/40388984023/job/121804687821"
+    },
+    {
+      "kind": "ci",
+      "check": "agents",
+      "result": "pass",
+      "source": "status agents"
+    },
+    {
+      "kind": "review",
+      "check": "codex",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/85#pullrequestreview-5658004089"
+    }
+  ]
+}

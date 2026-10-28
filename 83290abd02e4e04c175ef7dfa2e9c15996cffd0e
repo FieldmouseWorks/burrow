@@ -1,0 +1,41 @@
+{
+  "conary": "note v1",
+  "change": "1fg4e7n15dkb73acbvbttjehqk",
+  "repo": {
+    "owner": "FieldmouseWorks",
+    "name": "burrow"
+  },
+  "pr": 52,
+  "url": "https://github.com/FieldmouseWorks/burrow/pull/52",
+  "summary": "fix(deps): update dependency node-linux-x64 to v26",
+  "task": null,
+  "author": {
+    "kind": "person",
+    "login": "TusanHomichi",
+    "session": null
+  },
+  "landing": {
+    "revision": "72ea422892a7bbe544378405784d256d55631a154a0428df061dc29c5b24d787",
+    "before": "c52bce9d78ce1b6b8440842ab005e15726d6dc2e",
+    "after": "83290abd02e4e04c175ef7dfa2e9c15996cffd0e",
+    "by": {
+      "kind": "status",
+      "login": "TusanHomichi"
+    },
+    "at": 1793141692549
+  },
+  "evidence": [
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/40191246813/job/121162526924"
+    },
+    {
+      "kind": "ci",
+      "check": "renovate/stability-days",
+      "result": "pass",
+      "source": "https://docs.renovatebot.com/key-concepts/minimum-release-age/"
+    }
+  ]
+}

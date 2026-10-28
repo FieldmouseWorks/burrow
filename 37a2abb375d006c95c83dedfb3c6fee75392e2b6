@@ -1,0 +1,47 @@
+{
+  "conary": "note v1",
+  "change": "53q40yt6jxenpzqkv609pva8ty",
+  "repo": {
+    "owner": "FieldmouseWorks",
+    "name": "burrow"
+  },
+  "pr": 60,
+  "url": "https://github.com/FieldmouseWorks/burrow/pull/60",
+  "summary": "remote-control: prove the rescan and the start limit with checks that can't miss",
+  "task": "FieldmouseWorks/burrow#58",
+  "author": {
+    "kind": "agent",
+    "login": "TusanHomichi",
+    "session": "https://claude.ai/code/session_01LUSpz65cwD3ABEEydMWsoV"
+  },
+  "landing": {
+    "revision": "b775810cb80b98e518c7792923081eb9c50744761835501bf3dbb59d665e56a1",
+    "before": "f43eba9b319bb848d434f6e0c4e1780074a71aeb",
+    "after": "37a2abb375d006c95c83dedfb3c6fee75392e2b6",
+    "by": {
+      "kind": "status",
+      "login": "TusanHomichi"
+    },
+    "at": 1793141717661
+  },
+  "evidence": [
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/40260854933/job/121372724141"
+    },
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/40260635635/job/121372062659"
+    },
+    {
+      "kind": "review",
+      "check": "deepseek",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/60#pullrequestreview-5646982379"
+    }
+  ]
+}

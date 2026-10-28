@@ -1,0 +1,35 @@
+{
+  "conary": "note v1",
+  "change": "1wpbtvvqg0zvcdaq49aq2awv2h",
+  "repo": {
+    "owner": "FieldmouseWorks",
+    "name": "burrow"
+  },
+  "pr": 26,
+  "url": "https://github.com/FieldmouseWorks/burrow/pull/26",
+  "summary": "autoland: PRs open ready, land everything a revert can undo, judge the rest first",
+  "task": "FieldmouseWorks/burrow#25",
+  "author": {
+    "kind": "agent",
+    "login": "TusanHomichi",
+    "session": "https://claude.ai/code/session_01LUSpz65cwD3ABEEydMWsoV"
+  },
+  "landing": {
+    "revision": "7042e5f3f7f22c6124f8e96fdcfc53a544201c12a53eca9f17c61d44a51a89b5",
+    "before": "fe1da4bfcfb8f556fba5cf1ca788829c2b7fb71f",
+    "after": "34041aa8500e8ad387dfe17b925e022f2268dd48",
+    "by": {
+      "kind": "status",
+      "login": "TusanHomichi"
+    },
+    "at": 1793141679126
+  },
+  "evidence": [
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/40164527104/job/121082738457"
+    }
+  ]
+}

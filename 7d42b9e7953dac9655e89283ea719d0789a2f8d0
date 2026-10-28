@@ -1,0 +1,41 @@
+{
+  "conary": "note v1",
+  "change": "638jnvrs3fpt87es4xnekrdsfv",
+  "repo": {
+    "owner": "FieldmouseWorks",
+    "name": "burrow"
+  },
+  "pr": 74,
+  "url": "https://github.com/FieldmouseWorks/burrow/pull/74",
+  "summary": "autoland: relay the gate's TLS requests on one thread",
+  "task": null,
+  "author": {
+    "kind": "agent",
+    "login": "TusanHomichi",
+    "session": "https://claude.ai/code/session_01LUSpz65cwD3ABEEydMWsoV"
+  },
+  "landing": {
+    "revision": "372510c0c02edaaeba51a4a8b2aaef129e0c2c2fddd13eb1ffdf84adfac209ab",
+    "before": "b738ca1c1bd0d67af0a5503127924dc1bfd22161",
+    "after": "7d42b9e7953dac9655e89283ea719d0789a2f8d0",
+    "by": {
+      "kind": "status",
+      "login": "TusanHomichi"
+    },
+    "at": 1793141743988
+  },
+  "evidence": [
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/40322104527/job/121569346368"
+    },
+    {
+      "kind": "review",
+      "check": "deepseek",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/74#pullrequestreview-5651992511"
+    }
+  ]
+}

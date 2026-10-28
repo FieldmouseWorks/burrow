@@ -1,0 +1,47 @@
+{
+  "conary": "note v1",
+  "change": "3vtasqk2gdq8qx6663kggwemed",
+  "repo": {
+    "owner": "FieldmouseWorks",
+    "name": "burrow"
+  },
+  "pr": 83,
+  "url": "https://github.com/FieldmouseWorks/burrow/pull/83",
+  "summary": "remote-control: a look after each scan catches what it missed",
+  "task": "FieldmouseWorks/burrow#79",
+  "author": {
+    "kind": "agent",
+    "login": "TusanHomichi",
+    "session": "https://claude.ai/code/session_01QzLmB1pT9Tck6N9Vf13a9M"
+  },
+  "landing": {
+    "revision": "cbe511b1eccaa2719c81c15f76a62e291486bca51a749f8e2f57ed46d4d6b3d7",
+    "before": "618f869e66a45d721f18ab328c06c7fa727ae1b7",
+    "after": "3d7c69a09c350c4e3008685192f63d781796517a",
+    "by": {
+      "kind": "status",
+      "login": "TusanHomichi"
+    },
+    "at": 1793141770804
+  },
+  "evidence": [
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/40385433673/job/121792330370"
+    },
+    {
+      "kind": "ci",
+      "check": "agents",
+      "result": "pass",
+      "source": "status agents"
+    },
+    {
+      "kind": "review",
+      "check": "codex",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/83#pullrequestreview-5657729059"
+    }
+  ]
+}

@@ -1,0 +1,35 @@
+{
+  "conary": "note v1",
+  "change": "2nx8ayvttpjyrwb8xjh7rs775z",
+  "repo": {
+    "owner": "FieldmouseWorks",
+    "name": "burrow"
+  },
+  "pr": 33,
+  "url": "https://github.com/FieldmouseWorks/burrow/pull/33",
+  "summary": "proj: an ended turn frees its slot; waiting on GitHub resumes later; no starving",
+  "task": "FieldmouseWorks/burrow#30",
+  "author": {
+    "kind": "person",
+    "login": "TusanHomichi",
+    "session": null
+  },
+  "landing": {
+    "revision": "f5e759fa62b10790e96d6e83a7cd221f2bb3833773f6aff18c137e55d9e70791",
+    "before": "d169e99f5f54a5a855604ab4383071adb4613a69",
+    "after": "75594bfa6243d9d34ddc02da38b50f55c5e599c6",
+    "by": {
+      "kind": "status",
+      "login": "TusanHomichi"
+    },
+    "at": 1793141659542
+  },
+  "evidence": [
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/40125622670/job/120966286588"
+    }
+  ]
+}

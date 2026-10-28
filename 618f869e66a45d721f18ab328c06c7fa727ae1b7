@@ -1,0 +1,41 @@
+{
+  "conary": "note v1",
+  "change": "6btv3sgy9asjcf81jb3c7y73wn",
+  "repo": {
+    "owner": "FieldmouseWorks",
+    "name": "burrow"
+  },
+  "pr": 81,
+  "url": "https://github.com/FieldmouseWorks/burrow/pull/81",
+  "summary": "updates: Nix lockfile refreshes merge without a release timestamp",
+  "task": "FieldmouseWorks/burrow#82",
+  "author": {
+    "kind": "agent",
+    "login": "TusanHomichi",
+    "session": "https://claude.ai/code/session_01QzLmB1pT9Tck6N9Vf13a9M"
+  },
+  "landing": {
+    "revision": "17e187c1b0ce04824c6079205da72817c2e5a7d546bb2f961346a67b48000831",
+    "before": "b9e24616b776c9715d8096cfa4f17abd618240f0",
+    "after": "618f869e66a45d721f18ab328c06c7fa727ae1b7",
+    "by": {
+      "kind": "status",
+      "login": "TusanHomichi"
+    },
+    "at": 1793141763630
+  },
+  "evidence": [
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/40379339470/job/121771009403"
+    },
+    {
+      "kind": "review",
+      "check": "codex",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/81#pullrequestreview-5657203416"
+    }
+  ]
+}

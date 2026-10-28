@@ -1,0 +1,41 @@
+{
+  "conary": "note v1",
+  "change": "175pmrx94w8swpchybk11c9nkb",
+  "repo": {
+    "owner": "FieldmouseWorks",
+    "name": "burrow"
+  },
+  "pr": 58,
+  "url": "https://github.com/FieldmouseWorks/burrow/pull/58",
+  "summary": "remote-control: scan for stale servers on what changes, not every 5 minutes",
+  "task": null,
+  "author": {
+    "kind": "agent",
+    "login": "TusanHomichi",
+    "session": "https://claude.ai/code/session_01LUSpz65cwD3ABEEydMWsoV"
+  },
+  "landing": {
+    "revision": "a0561c74241887104373e13f513c2bd37a5b5d4cee1c322fb3d27f16418eac34",
+    "before": "830f515a3306cff2a6dc74536bdeb0952a5dea28",
+    "after": "7f967ec77e87c7ef4f6fac60f5c567d8e913716e",
+    "by": {
+      "kind": "status",
+      "login": "TusanHomichi"
+    },
+    "at": 1793141707353
+  },
+  "evidence": [
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/40252483043/job/121347188834"
+    },
+    {
+      "kind": "review",
+      "check": "codex",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/58#pullrequestreview-5646336131"
+    }
+  ]
+}

@@ -1,0 +1,41 @@
+{
+  "conary": "note v1",
+  "change": "5tpjfjfpbz7xtjngwc6kc4vyt4",
+  "repo": {
+    "owner": "FieldmouseWorks",
+    "name": "burrow"
+  },
+  "pr": 62,
+  "url": "https://github.com/FieldmouseWorks/burrow/pull/62",
+  "summary": "autoland: faster reviews, and the pipeline's own repos first",
+  "task": null,
+  "author": {
+    "kind": "agent",
+    "login": "TusanHomichi",
+    "session": "https://claude.ai/code/session_01LUSpz65cwD3ABEEydMWsoV"
+  },
+  "landing": {
+    "revision": "acff4fdf08774b506425a35e80e951fd3d73bda22280ce8d23ceae6e662b3a9d",
+    "before": "7d42b9e7953dac9655e89283ea719d0789a2f8d0",
+    "after": "39ce4860ea609cf9a5fa09d75e06abd327f60787",
+    "by": {
+      "kind": "status",
+      "login": "TusanHomichi"
+    },
+    "at": 1793141747879
+  },
+  "evidence": [
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/40319716322/job/121561246220"
+    },
+    {
+      "kind": "review",
+      "check": "deepseek",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/62#pullrequestreview-5652003016"
+    }
+  ]
+}

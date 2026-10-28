@@ -1,0 +1,53 @@
+{
+  "conary": "note v1",
+  "change": "51as8qjk5zzp7j8btbhst8p5pr",
+  "repo": {
+    "owner": "FieldmouseWorks",
+    "name": "burrow"
+  },
+  "pr": 61,
+  "url": "https://github.com/FieldmouseWorks/burrow/pull/61",
+  "summary": "autoland: keep up-to-date branches off, and hand a red default branch to a fix job",
+  "task": "https://claude.ai/code/project/chan_01Ad4f4oDXfFTCEzLHzMTD8q?thread=cmsg_01Ad4f4oDXfFTCEzLHzMTD8qCh9bNLJGfcnUZuzemDo2ej",
+  "author": {
+    "kind": "agent",
+    "login": "TusanHomichi",
+    "session": "https://claude.ai/code/session_01Wi1B1ddP2xsjWeh1exzjQM"
+  },
+  "landing": {
+    "revision": "9ef1895927cde0172223098f961be837476a80c474c90083c913b4d0e7c59400",
+    "before": "664480a1eef3205f2e4a38c761516aec509ebd74",
+    "after": "9d847ff704b0f004ab6e44fceb58cdacc88b5fd4",
+    "by": {
+      "kind": "status",
+      "login": "TusanHomichi"
+    },
+    "at": 1793141730445
+  },
+  "evidence": [
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/40278940665/job/121430514851"
+    },
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "fail",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/40278940665/job/121427687061"
+    },
+    {
+      "kind": "review",
+      "check": "codex",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/61#pullrequestreview-5648105464"
+    },
+    {
+      "kind": "review",
+      "check": "deepseek",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/61#pullrequestreview-5648220614"
+    }
+  ]
+}

@@ -1,0 +1,41 @@
+{
+  "conary": "note v1",
+  "change": "0d9n1fyeb9xym47zk0anwx81rw",
+  "repo": {
+    "owner": "FieldmouseWorks",
+    "name": "burrow"
+  },
+  "pr": 53,
+  "url": "https://github.com/FieldmouseWorks/burrow/pull/53",
+  "summary": "autoland: give each DeepSeek review a home of its own",
+  "task": null,
+  "author": {
+    "kind": "agent",
+    "login": "TusanHomichi",
+    "session": "https://claude.ai/code/session_016C6gz7SwJ6AJRZQj3RboZx"
+  },
+  "landing": {
+    "revision": "e9d7f448d1771c54b494bd7134235c6d58f6df500aabcfc0969c91c94ad20bf1",
+    "before": "83290abd02e4e04c175ef7dfa2e9c15996cffd0e",
+    "after": "e9115fcf198b3cf2b36e2845ca159b321608bcb0",
+    "by": {
+      "kind": "status",
+      "login": "TusanHomichi"
+    },
+    "at": 1793141695836
+  },
+  "evidence": [
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/40216219164/job/121237801445"
+    },
+    {
+      "kind": "review",
+      "check": "deepseek",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/53#pullrequestreview-5644496750"
+    }
+  ]
+}

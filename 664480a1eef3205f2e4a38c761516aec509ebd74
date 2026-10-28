@@ -1,0 +1,53 @@
+{
+  "conary": "note v1",
+  "change": "5hzfjrs839va26k27gsezpkf10",
+  "repo": {
+    "owner": "FieldmouseWorks",
+    "name": "burrow"
+  },
+  "pr": 65,
+  "url": "https://github.com/FieldmouseWorks/burrow/pull/65",
+  "summary": "autoland: show a reviewer's sandbox only its own closure of the store",
+  "task": "https://claude.ai/code/project/chan_01Ad4f4oDXfFTCEzLHzMTD8q?thread=cmsg_01Ad4f4oDXfFTCEzLHzMTD8qTKNHjcQpfB7Kr8dRByK81V",
+  "author": {
+    "kind": "agent",
+    "login": "TusanHomichi",
+    "session": "https://claude.ai/code/session_01Wh8DYzuPvs2YbGJbrP7mjL"
+  },
+  "landing": {
+    "revision": "faeef909776964031420ec8623244b2901b86760b829c63b2a3dd87b89a48ada",
+    "before": "1b1b97072108bcaf28b0c2c3374551a9ac48b605",
+    "after": "664480a1eef3205f2e4a38c761516aec509ebd74",
+    "by": {
+      "kind": "status",
+      "login": "TusanHomichi"
+    },
+    "at": 1793141726542
+  },
+  "evidence": [
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/40273516094/job/121414121812"
+    },
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "fail",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/40273516094/job/121411281285"
+    },
+    {
+      "kind": "review",
+      "check": "codex",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/65#pullrequestreview-5647716610"
+    },
+    {
+      "kind": "review",
+      "check": "deepseek",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/65#pullrequestreview-5647788047"
+    }
+  ]
+}

@@ -1,0 +1,35 @@
+{
+  "conary": "note v1",
+  "change": "4j3nb2c1k0f368b45m2ct77dfv",
+  "repo": {
+    "owner": "FieldmouseWorks",
+    "name": "burrow"
+  },
+  "pr": 45,
+  "url": "https://github.com/FieldmouseWorks/burrow/pull/45",
+  "summary": "autoland: settled .github/ changes merge like any other",
+  "task": null,
+  "author": {
+    "kind": "agent",
+    "login": "TusanHomichi",
+    "session": "https://claude.ai/code/session_01LUSpz65cwD3ABEEydMWsoV"
+  },
+  "landing": {
+    "revision": "7c4c95a91eab6d4c73b1cc24f89a783324cb5c4c56f5a9b5611f3ade4d1fb669",
+    "before": "2f1f93eb5122469be17d5335c1d773c1e0547c29",
+    "after": "97586c2d70bc67e6f5c99e674e73c9b0c12d277b",
+    "by": {
+      "kind": "status",
+      "login": "TusanHomichi"
+    },
+    "at": 1793141669607
+  },
+  "evidence": [
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/40142558153/job/121017156353"
+    }
+  ]
+}

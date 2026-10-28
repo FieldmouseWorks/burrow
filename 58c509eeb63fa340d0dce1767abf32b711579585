@@ -1,0 +1,47 @@
+{
+  "conary": "note v1",
+  "change": "3ma7zt5j38gsyjsqbt4swwnyv7",
+  "repo": {
+    "owner": "FieldmouseWorks",
+    "name": "burrow"
+  },
+  "pr": 97,
+  "url": "https://github.com/FieldmouseWorks/burrow/pull/97",
+  "summary": "browser: a signed-in Chromium that Claude drives and the owner watches",
+  "task": "https://claude.ai/code/project/chan_01Ad4f4oDXfFTCEzLHzMTD8q?thread=cmsg_01Ad4f4oDXfFTCEzLHzMTD8qNwpFZMy2Bt5gVgWskb48ah",
+  "author": {
+    "kind": "agent",
+    "login": "TusanHomichi",
+    "session": "https://claude.ai/code/session_01BkHcyDew4AYnp5ujZ4JEZe"
+  },
+  "landing": {
+    "revision": "fd5abcee79c5a3b6a11e27a706074158880580d32aa05f1f69d79ef24cb0d55e",
+    "before": "1dfea53e553394df578d41e14a20d5ee79ceb93e",
+    "after": "58c509eeb63fa340d0dce1767abf32b711579585",
+    "by": {
+      "kind": "status",
+      "login": "TusanHomichi"
+    },
+    "at": 1793141820317
+  },
+  "evidence": [
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/40587639736/job/122483262908"
+    },
+    {
+      "kind": "ci",
+      "check": "agents",
+      "result": "pass",
+      "source": "status agents"
+    },
+    {
+      "kind": "review",
+      "check": "codex",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/97#pullrequestreview-5674718230"
+    }
+  ]
+}

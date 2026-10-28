@@ -1,0 +1,47 @@
+{
+  "conary": "note v1",
+  "change": "63pcx2dkxr6wadex32jcawsrnt",
+  "repo": {
+    "owner": "FieldmouseWorks",
+    "name": "burrow"
+  },
+  "pr": 94,
+  "url": "https://github.com/FieldmouseWorks/burrow/pull/94",
+  "summary": "autoland: sweep every branch a closed PR was closed at",
+  "task": "https://claude.ai/code/project/chan_01Ad4f4oDXfFTCEzLHzMTD8q?thread=cmsg_01Ad4f4oDXfFTCEzLHzMTD8qDNZDa7BfYSzbkAKyMX8vhH",
+  "author": {
+    "kind": "agent",
+    "login": "TusanHomichi",
+    "session": "https://claude.ai/code/session_01BkHcyCreyXv5hMjgDJVZvh"
+  },
+  "landing": {
+    "revision": "559e5517a9faedf1fab8569b603e60143efefe258822d5aafcad77df12f3add2",
+    "before": "0e52a22bd45b6104e9d985059cca44bb5a2f23be",
+    "after": "18c6ea7371d80ed7864c15714a9e402b3cf2066f",
+    "by": {
+      "kind": "status",
+      "login": "TusanHomichi"
+    },
+    "at": 1793141806309
+  },
+  "evidence": [
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/40565234830/job/122404606208"
+    },
+    {
+      "kind": "ci",
+      "check": "agents",
+      "result": "pass",
+      "source": "status agents"
+    },
+    {
+      "kind": "review",
+      "check": "codex",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/94#pullrequestreview-5672756685"
+    }
+  ]
+}

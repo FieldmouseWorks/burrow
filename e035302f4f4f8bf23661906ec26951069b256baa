@@ -1,0 +1,35 @@
+{
+  "conary": "note v1",
+  "change": "3taq9jbvw6wdy5ab48jkgky5py",
+  "repo": {
+    "owner": "FieldmouseWorks",
+    "name": "burrow"
+  },
+  "pr": 31,
+  "url": "https://github.com/FieldmouseWorks/burrow/pull/31",
+  "summary": "proj: keep every answer of a turn, not only the last",
+  "task": "FieldmouseWorks/burrow#29",
+  "author": {
+    "kind": "person",
+    "login": "TusanHomichi",
+    "session": null
+  },
+  "landing": {
+    "revision": "fd6b723784468b7234a05d1b4722e9e5cfda2a25175ae4eda1ade6a236913fa6",
+    "before": "c0bfd09990f6b6ee9d2e0db01fba57f01ecba4c0",
+    "after": "e035302f4f4f8bf23661906ec26951069b256baa",
+    "by": {
+      "kind": "status",
+      "login": "TusanHomichi"
+    },
+    "at": 1793141685866
+  },
+  "evidence": [
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/40176231356/job/121117392616"
+    }
+  ]
+}

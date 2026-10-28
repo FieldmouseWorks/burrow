@@ -1,0 +1,35 @@
+{
+  "conary": "note v1",
+  "change": "1nn510zb7jge7hr0jahsenxkdn",
+  "repo": {
+    "owner": "FieldmouseWorks",
+    "name": "burrow"
+  },
+  "pr": 46,
+  "url": "https://github.com/FieldmouseWorks/burrow/pull/46",
+  "summary": "switch: long oneshots don't hold a switch past its revert",
+  "task": null,
+  "author": {
+    "kind": "person",
+    "login": "TusanHomichi",
+    "session": null
+  },
+  "landing": {
+    "revision": "5cede5a1f78862b89d35963d9638e4884fa6b43a4c9c34435e2c58b79ea3f361",
+    "before": "97586c2d70bc67e6f5c99e674e73c9b0c12d277b",
+    "after": "fe1da4bfcfb8f556fba5cf1ca788829c2b7fb71f",
+    "by": {
+      "kind": "status",
+      "login": "TusanHomichi"
+    },
+    "at": 1793141673010
+  },
+  "evidence": [
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/40151560742/job/121043981404"
+    }
+  ]
+}

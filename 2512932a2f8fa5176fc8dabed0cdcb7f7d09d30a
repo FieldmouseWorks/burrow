@@ -1,0 +1,47 @@
+{
+  "conary": "note v1",
+  "change": "2eardcgf67xcyj5310bdjxfbkv",
+  "repo": {
+    "owner": "FieldmouseWorks",
+    "name": "burrow"
+  },
+  "pr": 95,
+  "url": "https://github.com/FieldmouseWorks/burrow/pull/95",
+  "summary": "updates: hold Cargo and npm lock file refreshes to the release age",
+  "task": "FieldmouseWorks/burrow#82",
+  "author": {
+    "kind": "agent",
+    "login": "TusanHomichi",
+    "session": "https://claude.ai/code/session_01BkHcyCreyXv5hMjgDJVZvh"
+  },
+  "landing": {
+    "revision": "476f12acd22be64cbb127ee4f041661921fa733d18545f3fd4e5b7ed75ffefc6",
+    "before": "a8c0d7dbb6988eb46f6c0ae1ee8ad1415e604ce8",
+    "after": "2512932a2f8fa5176fc8dabed0cdcb7f7d09d30a",
+    "by": {
+      "kind": "status",
+      "login": "TusanHomichi"
+    },
+    "at": 1793141813206
+  },
+  "evidence": [
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/40584432665/job/122472041551"
+    },
+    {
+      "kind": "ci",
+      "check": "agents",
+      "result": "pass",
+      "source": "status agents"
+    },
+    {
+      "kind": "review",
+      "check": "codex",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/95#pullrequestreview-5674476347"
+    }
+  ]
+}

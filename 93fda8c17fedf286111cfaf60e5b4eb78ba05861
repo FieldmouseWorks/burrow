@@ -1,0 +1,35 @@
+{
+  "conary": "note v1",
+  "change": "5m8a5rjt7vz2r315q369b9y98t",
+  "repo": {
+    "owner": "FieldmouseWorks",
+    "name": "burrow"
+  },
+  "pr": 22,
+  "url": "https://github.com/FieldmouseWorks/burrow/pull/22",
+  "summary": "autoland: DeepSeek reviews every PR head next to Codex",
+  "task": "https://claude.ai/code/project/chan_01Ad4f4oDXfFTCEzLHzMTD8q?thread=cmsg_01Ad4f4oDXfFTCEzLHzMTD8qGrtb1ZNUUTYYS7gKZRgxot",
+  "author": {
+    "kind": "agent",
+    "login": "TusanHomichi",
+    "session": "https://claude.ai/code/session_016C6gz7SwJ6AJRZQj3RboZx"
+  },
+  "landing": {
+    "revision": "a83d0987d5b3ad856462a2c4478ea85ddc4ae60c10c7a3854ee3e3ca4f1df6e4",
+    "before": "6e9f72efae00d7ec2773f775d70247131a9c3807",
+    "after": "93fda8c17fedf286111cfaf60e5b4eb78ba05861",
+    "by": {
+      "kind": "status",
+      "login": "TusanHomichi"
+    },
+    "at": 1793141646952
+  },
+  "evidence": [
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/40078894754/job/120828116502"
+    }
+  ]
+}

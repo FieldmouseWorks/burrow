@@ -1,0 +1,35 @@
+{
+  "conary": "note v1",
+  "change": "1cvfr2jdvcymp84exte312g3ak",
+  "repo": {
+    "owner": "FieldmouseWorks",
+    "name": "burrow"
+  },
+  "pr": 44,
+  "url": "https://github.com/FieldmouseWorks/burrow/pull/44",
+  "summary": "proj: each turn keeps its own outcome, answer and slot",
+  "task": "FieldmouseWorks/burrow#33",
+  "author": {
+    "kind": "agent",
+    "login": "TusanHomichi",
+    "session": "https://claude.ai/code/session_01LUSpz65cwD3ABEEydMWsoV"
+  },
+  "landing": {
+    "revision": "3eade6bd33c8e50b89b6b1c27d37dfc8d7514ab89077851743631aa83f3061ba",
+    "before": "0747136a3439b8645cf740527b124b161bf64685",
+    "after": "2f1f93eb5122469be17d5335c1d773c1e0547c29",
+    "by": {
+      "kind": "status",
+      "login": "TusanHomichi"
+    },
+    "at": 1793141665911
+  },
+  "evidence": [
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/40138712499/job/121005675557"
+    }
+  ]
+}

@@ -1,0 +1,47 @@
+{
+  "conary": "note v1",
+  "change": "1ye2z8p4fcqw3cdav66sykff9y",
+  "repo": {
+    "owner": "FieldmouseWorks",
+    "name": "burrow"
+  },
+  "pr": 99,
+  "url": "https://github.com/FieldmouseWorks/burrow/pull/99",
+  "summary": "autoland: past the round limit, a judge decides instead of the owner",
+  "task": null,
+  "author": {
+    "kind": "agent",
+    "login": "TusanHomichi",
+    "session": "https://claude.ai/code/session_01LUSpz65cwD3ABEEydMWsoV"
+  },
+  "landing": {
+    "revision": "4d736ac61ebedf6159b8d76425a7757c234ba77e304dcc56e108223eb5693e6d",
+    "before": "900289ed5b48456516409d857607cf3d05aea7fd",
+    "after": "252b4794da7377bd3e3b0e7668c25235bbdb3cb6",
+    "by": {
+      "kind": "status",
+      "login": "TusanHomichi"
+    },
+    "at": 1793143213760
+  },
+  "evidence": [
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/40599406034/job/122523468689"
+    },
+    {
+      "kind": "ci",
+      "check": "agents",
+      "result": "pass",
+      "source": "status agents"
+    },
+    {
+      "kind": "review",
+      "check": "codex",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/99#pullrequestreview-5675626673"
+    }
+  ]
+}

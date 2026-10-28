@@ -1,0 +1,47 @@
+{
+  "conary": "note v1",
+  "change": "4rpvjae39rpr6hgr7mqjrbe74e",
+  "repo": {
+    "owner": "FieldmouseWorks",
+    "name": "burrow"
+  },
+  "pr": 89,
+  "url": "https://github.com/FieldmouseWorks/burrow/pull/89",
+  "summary": "autoland: a workflow that failed to start is red CI, not none",
+  "task": "FieldmouseWorks/burrow#88",
+  "author": {
+    "kind": "person",
+    "login": "TusanHomichi",
+    "session": null
+  },
+  "landing": {
+    "revision": "16db8c05b5e6fd81f44f23be4adc028bf5ccd7e83d38f278845a7d7eb8133ec8",
+    "before": "ee3442ac6b475a166a4d4e726ed2c1650268af15",
+    "after": "ced6a3e8cbb0cedc63cb02abbb0348deaf40408b",
+    "by": {
+      "kind": "status",
+      "login": "TusanHomichi"
+    },
+    "at": 1793141786795
+  },
+  "evidence": [
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/40449363013/job/122008203414"
+    },
+    {
+      "kind": "ci",
+      "check": "agents",
+      "result": "pass",
+      "source": "status agents"
+    },
+    {
+      "kind": "review",
+      "check": "codex",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/89#pullrequestreview-5662194782"
+    }
+  ]
+}

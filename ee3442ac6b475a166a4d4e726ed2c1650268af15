@@ -1,0 +1,47 @@
+{
+  "conary": "note v1",
+  "change": "7q9ce1h77r0tc74y6jp5ca92m7",
+  "repo": {
+    "owner": "FieldmouseWorks",
+    "name": "burrow"
+  },
+  "pr": 86,
+  "url": "https://github.com/FieldmouseWorks/burrow/pull/86",
+  "summary": "autoland: each finding says what a complete fix covers",
+  "task": null,
+  "author": {
+    "kind": "agent",
+    "login": "TusanHomichi",
+    "session": "https://claude.ai/code/session_01LUSpz65cwD3ABEEydMWsoV"
+  },
+  "landing": {
+    "revision": "374b54b4345ffb6a608392ce1b95e23ef9129af453c1459f9a8c5376a33eae49",
+    "before": "f2df4193fb5e8f7870455a5539a99c785f11d5a9",
+    "after": "ee3442ac6b475a166a4d4e726ed2c1650268af15",
+    "by": {
+      "kind": "status",
+      "login": "TusanHomichi"
+    },
+    "at": 1793141781053
+  },
+  "evidence": [
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/40409442471/job/121875851085"
+    },
+    {
+      "kind": "ci",
+      "check": "agents",
+      "result": "pass",
+      "source": "status agents"
+    },
+    {
+      "kind": "review",
+      "check": "codex",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/86#pullrequestreview-5659744265"
+    }
+  ]
+}

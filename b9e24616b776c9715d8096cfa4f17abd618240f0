@@ -1,0 +1,41 @@
+{
+  "conary": "note v1",
+  "change": "1gw8vdpg85mqjh58m9wn06q8em",
+  "repo": {
+    "owner": "FieldmouseWorks",
+    "name": "burrow"
+  },
+  "pr": 80,
+  "url": "https://github.com/FieldmouseWorks/burrow/pull/80",
+  "summary": "autoland: read Codex's failure from what it says went wrong, not all it printed",
+  "task": null,
+  "author": {
+    "kind": "agent",
+    "login": "TusanHomichi",
+    "session": "https://claude.ai/code/session_01LUSpz65cwD3ABEEydMWsoV"
+  },
+  "landing": {
+    "revision": "fc24d522b1b05b5decc231eb4d63a693bb59fd493c3ef8f451dda2f5e0dca8f8",
+    "before": "88ece7d9ea2a94db25577cc184f2349791d48fb7",
+    "after": "b9e24616b776c9715d8096cfa4f17abd618240f0",
+    "by": {
+      "kind": "status",
+      "login": "TusanHomichi"
+    },
+    "at": 1793141759923
+  },
+  "evidence": [
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/40355039859/job/121685090666"
+    },
+    {
+      "kind": "review",
+      "check": "codex",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/80#pullrequestreview-5655092716"
+    }
+  ]
+}

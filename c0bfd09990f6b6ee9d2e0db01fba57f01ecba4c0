@@ -1,0 +1,35 @@
+{
+  "conary": "note v1",
+  "change": "2mae5bnkdpakk1dfcyfqt3g9nx",
+  "repo": {
+    "owner": "FieldmouseWorks",
+    "name": "burrow"
+  },
+  "pr": 17,
+  "url": "https://github.com/FieldmouseWorks/burrow/pull/17",
+  "summary": "chore(deps): update actions/checkout action to v7",
+  "task": null,
+  "author": {
+    "kind": "person",
+    "login": "TusanHomichi",
+    "session": null
+  },
+  "landing": {
+    "revision": "389cb4c0dcdad9ef7307877eeaeb55b7ae7b0952bc4755f438972e813e388809",
+    "before": "34041aa8500e8ad387dfe17b925e022f2268dd48",
+    "after": "c0bfd09990f6b6ee9d2e0db01fba57f01ecba4c0",
+    "by": {
+      "kind": "status",
+      "login": "TusanHomichi"
+    },
+    "at": 1793141682365
+  },
+  "evidence": [
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/40173673402/job/121109705031"
+    }
+  ]
+}

@@ -1,0 +1,47 @@
+{
+  "conary": "note v1",
+  "change": "7rkazwjwy6gjry7rzxrr73a183",
+  "repo": {
+    "owner": "FieldmouseWorks",
+    "name": "burrow"
+  },
+  "pr": 54,
+  "url": "https://github.com/FieldmouseWorks/burrow/pull/54",
+  "summary": "autoland: call env by its store path in autoland-codex-login",
+  "task": null,
+  "author": {
+    "kind": "agent",
+    "login": "TusanHomichi",
+    "session": "https://claude.ai/code/session_016C6gz7SwJ6AJRZQj3RboZx"
+  },
+  "landing": {
+    "revision": "8bfe0f831ce7c61d380b8a75420ecb03caed90f8793cea7249ee7d69820dc0d0",
+    "before": "e9115fcf198b3cf2b36e2845ca159b321608bcb0",
+    "after": "ae8bd241563ef9d2eff6e2ed9d6adab8ef93c72a",
+    "by": {
+      "kind": "status",
+      "login": "TusanHomichi"
+    },
+    "at": 1793141699037
+  },
+  "evidence": [
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/40222605989/job/121257221726"
+    },
+    {
+      "kind": "review",
+      "check": "codex",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/54#pullrequestreview-5644711673"
+    },
+    {
+      "kind": "review",
+      "check": "deepseek",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/54#pullrequestreview-5644775400"
+    }
+  ]
+}

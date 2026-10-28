@@ -1,0 +1,41 @@
+{
+  "conary": "note v1",
+  "change": "4ckyckgqn1jjkpxb65270m771c",
+  "repo": {
+    "owner": "FieldmouseWorks",
+    "name": "burrow"
+  },
+  "pr": 76,
+  "url": "https://github.com/FieldmouseWorks/burrow/pull/76",
+  "summary": "autoland: one session per PR for each reviewer, gone when the PR closes",
+  "task": null,
+  "author": {
+    "kind": "agent",
+    "login": "TusanHomichi",
+    "session": "https://claude.ai/code/session_01LUSpz65cwD3ABEEydMWsoV"
+  },
+  "landing": {
+    "revision": "deb586f86e180c66635af22a6571bf6702791a9bd74092ec367bc74a3ec77e27",
+    "before": "436d0a7a56550767a249799e523855e5c7fea490",
+    "after": "88ece7d9ea2a94db25577cc184f2349791d48fb7",
+    "by": {
+      "kind": "status",
+      "login": "TusanHomichi"
+    },
+    "at": 1793141756610
+  },
+  "evidence": [
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/40353154087/job/121678393166"
+    },
+    {
+      "kind": "review",
+      "check": "codex",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/76#pullrequestreview-5654967008"
+    }
+  ]
+}
