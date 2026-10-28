@@ -148,7 +148,8 @@ let
 
   # What the health checks may call, beyond the system's own PATH.
   checkPath = lib.makeBinPath ((with pkgs; [ coreutils systemd curl jq getent util-linux gnugrep ])
-    ++ lib.optional config.services.tailscale.enable config.services.tailscale.package);
+    ++ lib.optional config.services.tailscale.enable config.services.tailscale.package
+    ++ lib.optional config.boot.zfs.enabled config.boot.zfs.package);
 
   # Renovate's settings for every repo (a repo's own renovate.json can add to
   # them). Checked by renovate-config-validator at build time.
@@ -388,8 +389,10 @@ in
       description = ''
         Shell commands that exit 0 while the machine is healthy, by name.
         HOST-update compares them before and after every switch: one that passed
-        before and fails after reverts the switch. burrow adds its own (sshd,
-        the nix daemon, the operator, DNS, GitHub, Claude Code...).
+        before and fails after reverts the switch, and burrow.heartbeat tells
+        the owner about one that keeps failing. burrow adds its own (sshd, the
+        nix daemon, the operator, burrow-events, the ZFS pools, DNS, GitHub,
+        Claude Code...).
       '';
     };
 
@@ -476,7 +479,11 @@ in
     };
   };
 
-  config = lib.mkIf cfg.enable (lib.mkMerge [
+  config = lib.mkMerge [
+  # Always built, so heartbeat runs the same checks whether or not updates is on.
+  { burrow.tools.health = healthTool; }
+
+  (lib.mkIf cfg.enable (lib.mkMerge [
     {
       assertions = [
         {
@@ -502,6 +509,12 @@ in
         operator = "systemctl --user -M ${user}@ -q is-active claude-rc@${project}.service";
       } // lib.optionalAttrs config.services.tailscale.enable {
         tailscale = "tailscale status --json | jq -e '.BackendState == \"Running\"'";
+      } // lib.optionalAttrs config.burrow.events.enable {
+        # What starts every handler's pass: down, nothing on GitHub moves anything here.
+        events = "systemctl -q is-active burrow-events.service";
+      } // lib.optionalAttrs config.boot.zfs.enabled {
+        # A degraded mirror keeps running on one disk, quietly, until the other goes.
+        zfs = "zpool status -x | grep -qx 'all pools are healthy'";
       } // lib.optionalAttrs (config.burrow.claude.enable or false) {
         # As the user, the way the operator runs it (runuser is root's only).
         claude = ''
@@ -750,5 +763,6 @@ in
         };
       };
     })
-  ]);
+  ]))
+  ];
 }

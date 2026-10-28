@@ -35,7 +35,7 @@
       # The ledger's machines take Conary from its own flake; burrow's checks
       # build theirs with a stand-in for its `cn`.
       cnStandIn = pkgs.writeShellScriptBin "cn" "exit 1";
-      names = [ "claude" "undo" "switch" "notify" "updates" "proj" "remote-control" "agents" "robot" "ops" "toolbox" "autoland" "house" "events" "ledger" "browser" ];
+      names = [ "claude" "undo" "switch" "notify" "updates" "proj" "remote-control" "agents" "robot" "ops" "toolbox" "autoland" "house" "events" "ledger" "browser" "heartbeat" ];
     in
     {
       # A project's dev shell and gate in a few lines; see lib/project.nix.
@@ -122,6 +122,8 @@
         # burrow-events for real: deliveries, kicks and wake-ups starting a
         # handler's units through polkit.
         events-service = import ./tests/events.nix { inherit self pkgs; };
+        # heartbeat's beats, with stand-ins for HOST-health and Healthchecks.
+        heartbeat = import ./tests/heartbeat.nix { inherit self pkgs; };
         # The ledger's pass over one repo, with a stand-in for cn.
         ledger = import ./tests/ledger.nix { inherit self pkgs; };
         # Which deliveries and kicks start whose pass, with a stand-in for systemctl.
