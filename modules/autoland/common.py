@@ -35,11 +35,11 @@ class Unavailable(RuntimeError):
     again next pass."""
 
 
-UNAVAILABLE = re.compile(r"rate limit|HTTP (429|5\d\d)|error connecting|connection (reset|refused)|timed? ?out", re.I)
+UNAVAILABLE = re.compile(r"rate limit|HTTP (429|5\d\d)|error connecting|connection (reset|refused)|timed? ?out|\bEOF\b|network is unreachable|no such host|TLS handshake", re.I)
 
 
 # When the rate limit that turned one of this pass's calls away resets, once
-# a call has met it: no pass of any repo before then (wake) could do anything.
+# a call has met it: no pass of any repo before then could do anything.
 LIMITED = []
 
 
@@ -166,10 +166,8 @@ WAKE = {}
 
 
 def wake(repo, at):
-    """Ask for a pass of repo at `at`, if that's still to come, and not
-    before a rate limit this pass met resets."""
-    if LIMITED and LIMITED[0] > NOW:
-        at = max(at, LIMITED[0] + 1)
+    """Ask for a pass of repo at `at`, if that's still to come (one a rate
+    limit turned away waits for its reset: steward.after_limit)."""
     if at > NOW:
         WAKE[repo] = min(WAKE.get(repo, at), at)
 

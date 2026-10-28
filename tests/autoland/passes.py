@@ -192,12 +192,12 @@ assert C.load("digest-repos.json", None) == {"sam/r": [], "sam/other": [["Open o
 assert published == [[("Open over a day", "other line", "x")]], published
 print("kick: ok")
 
-# A pass GitHub's rate limit turns away books the repo's next pass for when
-# the limit resets (`gh api rate_limit`, free), not five minutes on or the
-# hourly pass: none before then could do anything, one then waits on nothing.
-fresh_pr_state()
-C.NOW = T
-C.save("wake.json", {})
+# A pass GitHub's rate limit turns away books its repos' next pass for when
+# the limit resets (`gh api rate_limit`, free), not five minutes on, the
+# event runner's backoff or the hourly pass: none before then could do
+# anything, one then waits on nothing. Wherever the pass meets it: finding
+# its repos, in a repo's PRs, or after its wake-ups were saved (the owner's
+# issue). Every wake-up waits for it, booked before or by another pass.
 fake = os.path.join(tmp, "limited-bin")
 os.makedirs(fake)
 with open(f"{fake}/gh", "w") as f:
@@ -207,27 +207,38 @@ echo 'gh: API rate limit exceeded for user ID 1. (HTTP 403)' >&2
 exit 1
 """)
 os.chmod(f"{fake}/gh", 0o755)
-path, os.environ["PATH"] = os.environ["PATH"], fake + os.pathsep + os.environ["PATH"]
-kept_fns = (S.R.discover, S.open_prs)
-S.R.discover = lambda: [{"repo": "sam/r"}]
-S.open_prs = lambda owner, name: REAL_GH("api", f"repos/{owner}/{name}")
-sys.argv = ["steward", "kick", "sam/r"]
-C.WAKE.clear()
-C.LIMITED.clear()
-S.main()
+limited = lambda *a, **k: REAL_GH("api", "repos/sam/r")  # noqa: E731
+kept_fns = (S.R.discover, S.open_prs, S.R.publish)
+for where in ("discovery", "prs", "after"):
+    fresh_pr_state()
+    C.NOW = T
+    C.save("wake.json", {"sam/other": T + 60})
+    C.save("repos.json", {"at": T, "repos": {"sam/r": {}, "sam/other": {}}})
+    S.R.discover = limited if where == "discovery" else (lambda: [{"repo": "sam/r"}])
+    S.open_prs = limited if where == "prs" else (lambda owner, name: (info, [mkpr()]))
+    S.R.publish = limited if where == "after" else (lambda lines: None)
+    path, os.environ["PATH"] = os.environ["PATH"], fake + os.pathsep + os.environ["PATH"]
+    C.WAKE.clear()
+    C.LIMITED.clear()
+    # A full pass that can't find its repos books the ones it had last.
+    for argv_now in (["steward", "kick", "sam/r"],) + ((["steward"],) if where == "discovery" else ()):
+        sys.argv = argv_now
+        try:
+            S.main()
+            assert where != "discovery", "found its repos with GitHub turning it away"
+        except RuntimeError as e:
+            assert isinstance(e, C.Unavailable) and where != "prs", (where, e)
+        assert C.LIMITED == [T + 1800], (where, C.LIMITED)
+        assert C.load("wake.json", None) == {"sam/r": T + 1800 + 1, "sam/other": T + 1800 + 1}, (where, argv_now, C.load("wake.json", None))
+        C.save("wake.json", {"sam/other": T + 60})
+    os.environ["PATH"] = path
 sys.argv = argv
-os.environ["PATH"] = path
-S.R.discover, S.open_prs = kept_fns
-assert C.LIMITED == [T + 1800] and C.load("wake.json", None) == {"sam/r": T + 1800 + 1}, (C.LIMITED, C.load("wake.json", None))
-# Booked for later, any wait this pass works out still waits for the reset;
-# without a limit met, it's as asked.
-C.WAKE.clear()
-C.wake("sam/r", T + 60)
-assert C.WAKE == {"sam/r": T + 1800 + 1}, C.WAKE
+S.R.discover, S.open_prs, S.R.publish = kept_fns
+# Without a limit met, the wake-ups are as booked.
 C.LIMITED.clear()
-C.WAKE.clear()
-C.wake("sam/r", T + 60)
-assert C.WAKE == {"sam/r": T + 60}, C.WAKE
+fresh_pr_state()
+run(mkpr(), 10)
+assert C.WAKE == {"sam/r": T + 10 + 3 * 60 + 1}, C.WAKE
 print("rate limit: ok")
 
 # A long PR's older reviews and comments are read too, a page at a time,

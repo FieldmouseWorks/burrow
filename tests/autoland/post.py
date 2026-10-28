@@ -190,6 +190,8 @@ assert "gh pr edit 5: 'needs-owner' not found" in out.getvalue(), out.getvalue()
 # whose diff it couldn't read then says which (steward.py keeps the answer).
 for said, unavailable in (("gh: API rate limit exceeded for user ID 1. (HTTP 403)", True),
                           ("gh: Server Error (HTTP 502)", True),
+                          ('Post "https://api.github.com/graphql": unexpected EOF', True),
+                          ("dial tcp: connect: network is unreachable", True),
                           ("gh: Validation Failed (HTTP 422)", False)):
     with open(f"{fake}/gh", "w") as f:
         f.write(f"#!/bin/sh\necho '{said}' >&2\nexit 1\n")

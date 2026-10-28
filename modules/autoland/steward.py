@@ -785,6 +785,29 @@ def main():
         # One pass at a time, full or kicked: two would act on the same PRs.
         lock = open(os.path.join(STATE, "pass.lock"), "w")
         fcntl.flock(lock, fcntl.LOCK_EX)
+    try:
+        run_pass(kick)
+    finally:
+        if C.LIMITED and C.LIMITED[0] > C.NOW:
+            after_limit(kick)
+
+
+def after_limit(kick):
+    """GitHub's rate limit turned the pass away somewhere, finding its repos,
+    in its PRs or after (the hooks, the owner's issue): every wake-up waits
+    for the reset, the ones booked before it was met and other passes' too,
+    and each repo the pass was for gets one then. None sooner could do
+    anything, and none then waits on another event or the hourly pass."""
+    at = C.LIMITED[0] + 1
+    wakes = {k: max(v, at) for k, v in load("wake.json", {}).items() if v > C.NOW}
+    names = kick if kick is not None else list(load("repos.json", {}).get("repos", {}))
+    for repo in names:
+        if not any(k.lower() == repo.lower() for k in wakes):
+            wakes[repo] = at
+    save("wake.json", wakes)
+
+
+def run_pass(kick):
     repos = R.discover()
     if kick is not None:
         repos = [r for r in repos if r["repo"].lower() in kick]  # GitHub's names are case-blind
