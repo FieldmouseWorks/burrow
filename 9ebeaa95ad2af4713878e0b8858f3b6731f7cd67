@@ -1,0 +1,71 @@
+{
+  "conary": "note v1",
+  "change": "6tpcbsey62vvthvqzgr1zh1amf",
+  "repo": {
+    "owner": "FieldmouseWorks",
+    "name": "burrow"
+  },
+  "pr": 107,
+  "url": "https://github.com/FieldmouseWorks/burrow/pull/107",
+  "summary": "claude: stop asking before archiving a repo",
+  "task": "https://claude.ai/code/project/chan_01Ad4f4oDXfFTCEzLHzMTD8q?thread=cmsg_01Ad4f4oDXfFTCEzLHzMTD8qDHGz7HGVkXVmpWc3KyAaeV",
+  "author": {
+    "kind": "agent",
+    "login": "TusanHomichi",
+    "session": "https://claude.ai/code/session_01BkHcyBa7nQpKXXAEX68JGv"
+  },
+  "landing": {
+    "revision": "2bcdd094aacaad0b39495a2dad8227bdb73bf47575e84e7cdd889c520fe2ccfc",
+    "before": "a6c7a989ebaab30a0ffa483f0454856e95498aee",
+    "after": "9ebeaa95ad2af4713878e0b8858f3b6731f7cd67",
+    "by": {
+      "kind": "status",
+      "login": "TusanHomichi"
+    },
+    "at": 1793160261611
+  },
+  "evidence": [
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/40621675730/job/122596946664"
+    },
+    {
+      "kind": "review",
+      "check": "codex",
+      "result": "fail",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/107#pullrequestreview-5677358593"
+    },
+    {
+      "kind": "review",
+      "check": "codex",
+      "result": "fail",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/107#pullrequestreview-5677370247"
+    },
+    {
+      "kind": "review",
+      "check": "codex",
+      "result": "fail",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/107#pullrequestreview-5677381778"
+    },
+    {
+      "kind": "review",
+      "check": "codex",
+      "result": "fail",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/107#pullrequestreview-5677392223"
+    },
+    {
+      "kind": "review",
+      "check": "codex",
+      "result": "fail",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/107#pullrequestreview-5677404779"
+    },
+    {
+      "kind": "ci",
+      "check": "agents",
+      "result": "pass",
+      "source": "status agents"
+    }
+  ]
+}
