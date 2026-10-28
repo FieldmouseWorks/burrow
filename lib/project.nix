@@ -20,7 +20,8 @@
   # Rust: fmt, clippy (all targets, warnings are errors) and the tests of the
   # Cargo workspace in DIR, built with the toolchain DIR/rust-toolchain.toml
   # (or the repo root's) pins; latest stable without one. `test = false` skips
-  # the tests (say, when they need a database).
+  # the tests (say, when they need a database); `testInputs = pkgs: [ pkgs.git ]`
+  # puts tools the tests run on their PATH.
   rust ? null,
   # Python: ruff's error rules (syntax errors, undefined names) over DIRS.
   # `format = true` also holds them to `ruff format`.
@@ -40,7 +41,7 @@ let
     overlays = [ rust-overlay.overlays.default ];
   }));
 
-  rustCfg = { dir = "."; test = true; } // (if rust == null then { } else rust);
+  rustCfg = { dir = "."; test = true; testInputs = _: [ ]; } // (if rust == null then { } else rust);
   pyCfg = { dirs = [ "." ]; format = false; } // (if python == null then { } else python);
   rustDir = if rustCfg.dir == "." then self else self + "/${rustCfg.dir}";
 
@@ -99,7 +100,10 @@ let
         cargoClippyExtraArgs = "--all-targets -- -D warnings";
       });
     } // lib.optionalAttrs rustCfg.test {
-      rust-test = craneLib.cargoTest (common // { inherit cargoArtifacts; });
+      rust-test = craneLib.cargoTest (common // {
+        inherit cargoArtifacts;
+        nativeBuildInputs = rustCfg.testInputs pkgs;
+      });
     };
 
   pyChecks = pkgs:

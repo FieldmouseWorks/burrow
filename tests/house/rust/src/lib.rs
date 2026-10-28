@@ -19,4 +19,11 @@ mod tests {
     fn overflow_panics_as_in_cargo_test() {
         super::add(std::hint::black_box(u32::MAX), 1);
     }
+
+    // A tool the project asks for (`testInputs`) is on the tests' PATH.
+    #[test]
+    fn runs_a_tool_the_project_asked_for() {
+        let git = std::process::Command::new("git").arg("--version").output();
+        assert!(git.is_ok_and(|out| out.status.success()));
+    }
 }
