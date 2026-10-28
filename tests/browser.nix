@@ -5,8 +5,10 @@
 # and speaks VNC there, the screen listens on no TCP or abstract socket, the
 # profile is the browser's alone, no other site can frame the viewer, Claude
 # gets the MCP server as soon as it has a config and loses it when the browser
-# is turned off, no other firewall manager's accepts get past its rules, and
-# under iptables the rules leave with the module.
+# is turned off, what the MCP server saves (even a file Claude names) lands in
+# the user's runtime dir and not the folder Claude works in, no other firewall
+# manager's accepts get past its rules, and under iptables the rules leave
+# with the module.
 #
 #   nix build .#checks.x86_64-linux.browser -L
 { self, pkgs }:
@@ -18,11 +20,11 @@ let
     <body><script>document.cookie = "login=yes; max-age=31536000; path=/"; document.cookie = "session=yes; path=/"</script></body></html>
   '';
 
-  # An MCP client, as Claude is one: starts burrow-browser-mcp, makes the
-  # calls it's given (a JSON list of [tool, arguments]) in one session and
-  # prints their text.
+  # An MCP client, as Claude is one: starts burrow-browser-mcp, gives it the
+  # folder it works in as its root, as Claude does, makes the calls it's given
+  # (a JSON list of [tool, arguments]) in one session and prints their text.
   mcp = pkgs.writeText "mcp-call.py" ''
-    import json, subprocess, sys
+    import json, os, pathlib, subprocess, sys
 
     p = subprocess.Popen(["burrow-browser-mcp"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
     n = 0
@@ -37,10 +39,14 @@ let
         p.stdin.flush()
         while not notify:
             r = json.loads(p.stdout.readline())
-            if r.get("id") == n:
+            if r.get("method") == "roots/list":
+                root = {"uri": pathlib.Path(os.getcwd()).as_uri()}
+                p.stdin.write(json.dumps({"jsonrpc": "2.0", "id": r["id"], "result": {"roots": [root]}}) + "\n")
+                p.stdin.flush()
+            elif r.get("id") == n:
                 return r
 
-    call("initialize", {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "test", "version": "0"}})
+    call("initialize", {"protocolVersion": "2025-06-18", "capabilities": {"roots": {}}, "clientInfo": {"name": "test", "version": "0"}})
     call("notifications/initialized", {}, notify=True)
     for tool, args in json.loads(sys.argv[1]):
         r = call("tools/call", {"name": tool, "arguments": args})
@@ -229,6 +235,16 @@ pkgs.testers.runNixOSTest {
         assert "http://127.0.0.1:8088/" in tabs, tabs
         # Snapshots go to the runtime dir, not the folder Claude works in.
         machine.succeed("ls /run/user/1001/burrow-browser/ | grep -q .")
+
+    with subtest("so does a file Claude names, even with no folder in its name"):
+        drive(machine, ["browser_navigate", {"url": "http://127.0.0.1:8088/"}],
+              ["browser_evaluate", {"function": "() => document.title", "filename": "title.txt"}],
+              ["browser_take_screenshot", {"filename": "shots/page.png"}])
+        machine.succeed("grep -q 'burrow test page' /run/user/1001/burrow-browser/title.txt")
+        machine.succeed("test -s /run/user/1001/burrow-browser/shots/page.png")
+        # drive works in dev's home, its root.
+        machine.fail("test -e /home/dev/title.txt")
+        machine.fail("test -e /home/dev/shots")
 
     with subtest("a login outlives the browser"):
         machine.succeed("systemctl restart burrow-browser.service")
