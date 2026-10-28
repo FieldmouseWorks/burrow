@@ -1,0 +1,47 @@
+{
+  "conary": "note v1",
+  "change": "31e98bcwh4wh5xyavjfx0bypef",
+  "repo": {
+    "owner": "fieldmouseworks",
+    "name": "burrow"
+  },
+  "pr": 110,
+  "url": "https://github.com/fieldmouseworks/burrow/pull/110",
+  "summary": "autoland: GitHub's rate limit costs no reviewer a try, and passes resume when it resets",
+  "task": "FieldmouseWorks/remi#111",
+  "author": {
+    "kind": "person",
+    "login": "TusanHomichi",
+    "session": null
+  },
+  "landing": {
+    "revision": "8b1baa804416bf7b0a7989f12203de43ae47b040a17c3fda14d0bcaf1069f0c0",
+    "before": "c8cba31719143ce7113f43d5407cfe13c5483bb8",
+    "after": "e354144a1379658a0a296bbd541a390fec637766",
+    "by": {
+      "kind": "status",
+      "login": "TusanHomichi"
+    },
+    "at": 1793167419504
+  },
+  "evidence": [
+    {
+      "kind": "review",
+      "check": "codex",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/110#pullrequestreview-5678397822"
+    },
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/40640101833/job/122656001125"
+    },
+    {
+      "kind": "ci",
+      "check": "agents",
+      "result": "pass",
+      "source": "status agents"
+    }
+  ]
+}
