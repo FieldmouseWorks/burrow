@@ -1,0 +1,47 @@
+{
+  "conary": "note v1",
+  "change": "4xnt125b3yfye1az3d7x6ztb9y",
+  "repo": {
+    "owner": "fieldmouseworks",
+    "name": "burrow"
+  },
+  "pr": 113,
+  "url": "https://github.com/fieldmouseworks/burrow/pull/113",
+  "summary": "chore(deps): lock file maintenance (nix)",
+  "task": null,
+  "author": {
+    "kind": "person",
+    "login": "TusanHomichi",
+    "session": null
+  },
+  "landing": {
+    "revision": "01d127f73ca2d7b1e9bbe7fff20362b6120970fb0fb5657e22711ba0f6a21b4c",
+    "before": "94e0f0d158d6da49c46459016dcaa9422ea656bc",
+    "after": "bc14574d60635c83ab965b1afd066e0a7f631319",
+    "by": {
+      "kind": "status",
+      "login": "TusanHomichi"
+    },
+    "at": 1793172135222
+  },
+  "evidence": [
+    {
+      "kind": "ci",
+      "check": "renovate/stability-days",
+      "result": "pass",
+      "source": "https://docs.renovatebot.com/key-concepts/minimum-release-age/"
+    },
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/40647348080/job/122679142329"
+    },
+    {
+      "kind": "ci",
+      "check": "agents",
+      "result": "pass",
+      "source": "status agents"
+    }
+  ]
+}
