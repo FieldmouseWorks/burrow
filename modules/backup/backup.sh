@@ -107,8 +107,18 @@ case $cmd in
       shift 3
     fi
     list=$(mounts)
+    # ZFS won't mount on a directory that isn't empty, so each snapshot goes
+    # to an empty one first, on a tmpfs only this namespace sees, then over
+    # its dataset's path.
+    stage=/run/$NAME-snapshot
+    mkdir -p "$stage"
+    mount -t tmpfs -o mode=700 "$NAME" "$stage"
+    i=0
     while IFS=$'\t' read -r m ds; do
-      mount -t zfs -o ro "$ds@$snap" "$m"
+      i=$((i + 1))
+      mkdir "$stage/$i"
+      mount -t zfs -o ro "$ds@$snap" "$stage/$i"
+      mount --bind "$stage/$i" "$m"
     done <<<"$list"
     exec "$@"
     ;;
