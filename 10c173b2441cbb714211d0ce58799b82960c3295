@@ -1,0 +1,47 @@
+{
+  "conary": "note v1",
+  "change": "49nt7ctf9651c8c39fkk7rp7wr",
+  "repo": {
+    "owner": "fieldmouseworks",
+    "name": "burrow"
+  },
+  "pr": 105,
+  "url": "https://github.com/fieldmouseworks/burrow/pull/105",
+  "summary": "ledger: serve the ledger on a socket with conaryd",
+  "task": null,
+  "author": {
+    "kind": "agent",
+    "login": "TusanHomichi",
+    "session": "https://claude.ai/code/session_01BkHcyDYaKnE7mRRMdYCFVC"
+  },
+  "landing": {
+    "revision": "57bb3dae8679609aeea87c4dfa7b790dbdda97a773f03ca1367b1147b847b725",
+    "before": "d2f20311aee05057e4c59032bd15bc4da6eaaea8",
+    "after": "10c173b2441cbb714211d0ce58799b82960c3295",
+    "by": {
+      "kind": "status",
+      "login": "TusanHomichi"
+    },
+    "at": 1793150998746
+  },
+  "evidence": [
+    {
+      "kind": "review",
+      "check": "codex",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/105#pullrequestreview-5676644462"
+    },
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/40614392477/job/122573368869"
+    },
+    {
+      "kind": "ci",
+      "check": "agents",
+      "result": "pass",
+      "source": "status agents"
+    }
+  ]
+}
