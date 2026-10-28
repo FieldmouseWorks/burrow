@@ -439,6 +439,8 @@ def inbox_off():
     ib, nrepo = CFG["inbox"], CFG["notify"]["repo"]
     if not ib["enable"]:
         return "it's off"
+    if not nrepo:  # the digest goes to the journal: there's no issue to take
+        return "notify.repo isn't set"
     if not C.project_dir(nrepo):
         return f"{nrepo} isn't cloned in {CFG['projectsDir']}"
     if C.me() not in ib["authors"]:

@@ -156,6 +156,21 @@ R.publish(DIGEST)
 owner = made("autoland")
 assert owner and all(f"sam/r#{n}" in owner["--body"] for n in range(1, 6)), owner
 assert "proj's inbox" not in owner["--body"] and made("claude") is None, owner
+# No notify.repo: the digest goes to the journal, with a project cloned and
+# the inbox on, and the stuck half is the owner's there too.
+LOGGED = []
+log_kept, R.log = R.log, lambda *a: LOGGED.append(" ".join(map(str, a)))
+for nrepo in (None, ""):
+    fresh()
+    LOGGED.clear()
+    R.CFG["notify"]["repo"] = nrepo
+    R.publish(DIGEST)
+    assert not [a for a in CALLS if a[0] == "issue"], CALLS
+    mine = next(x for x in LOGGED if x.startswith("--- [autoland] PRs waiting for you ---"))
+    assert all(f"sam/r#{n}" in mine for n in range(1, 6)) and "notify.repo isn't set" in mine, LOGGED
+    assert "--- [autoland] Stuck in the pipeline ---\n(nothing)" in LOGGED, LOGGED
+R.log = log_kept
+R.CFG["notify"]["repo"] = "sam/notes"
 
 C.gh, R.CFG["inbox"], R.CFG["projectsDir"] = kept[0], kept[1], kept[3]
 R.CFG["notify"].clear()
