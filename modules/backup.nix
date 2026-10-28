@@ -98,7 +98,8 @@ in
       example = [ "rpool/safe/persist" "rpool/safe/home" "rpool/safe/data" ];
       description = ''
         The ZFS datasets to back up, each at the path it's mounted on. Child
-        datasets aren't included: list them too.
+        datasets aren't included: list them too. None may be mounted at /, or
+        over /nix/store or /run, which the backup runs from.
       '';
     };
 
@@ -171,7 +172,8 @@ in
         with the snapshot it was read from, entry for entry and byte for
         byte: directories, files or symlinks. Before that, the drill checks
         the backup holds everything the snapshot had (what the backup's own
-        rules leave out aside), which costs a backup pass, not a restore.
+        rules leave out aside) by backing the snapshot up again and comparing
+        the two listings: a backup pass, forgotten after, not a restore.
         `HOST-backup drill PATH` drills anything else.
       '';
     };

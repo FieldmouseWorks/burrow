@@ -6,9 +6,10 @@
 # rclone's refreshed config; and keeps nothing readable without the password.
 # The drill restores and compares directories, files, symlinks and paths with
 # spaces, and fails when the backup is missing something its snapshot had or
-# a restore isn't what it should be, without printing what's in the files. A
-# damaged repository fails the day's check, and a stale snapshot fails the
-# pass and tells the owner.
+# a restore isn't what it should be, without printing what's in the files,
+# and passes when a remount moves the snapshot to another device. A damaged
+# repository fails the day's check, and a pass that can't start, fails along
+# the way or finds a stale snapshot tells the owner.
 #
 #   nix build .#checks.x86_64-linux.backup -L
 { self, pkgs }:
@@ -17,7 +18,7 @@ pkgs.testers.runNixOSTest {
 
   nodes.machine = { pkgs, ... }: {
     imports = [ self.nixosModules.backup ];
-    environment.systemPackages = [ pkgs.restic pkgs.jq ];
+    environment.systemPackages = [ pkgs.restic pkgs.jq pkgs.e2fsprogs ];
     virtualisation.emptyDiskImages = [ 2048 ];
     virtualisation.memorySize = 2048;
     boot.supportedFilesystems = [ "zfs" ];
@@ -32,10 +33,12 @@ pkgs.testers.runNixOSTest {
       passwordFile = "/etc/backup-password";
       rcloneConfigFile = "/var/lib/rclone-secret.conf";
       # A child before its parent: mounting /data mustn't hide /data/nested.
+      # tank/keep's mountpoint has a space in it, which findmnt's plain output
+      # escapes.
       datasets = [ "tank/data/nested" "tank/data" "tank/keep" ];
       snapshots = "snap-*";
       exclude = [ "/data/skip" ];
-      drill = [ "/data/dev/src/proj" "/srv/keep" "/data/with space" ];
+      drill = [ "/data/dev/src/proj" "/srv/keep it" "/data/with space" ];
       verifyDays = 1;
       # Nothing forgotten, so the day's prune has nothing to repack and the
       # check is what reads a damaged pack.
@@ -60,13 +63,19 @@ pkgs.testers.runNixOSTest {
     def snapshot(name):
         machine.succeed(f"zfs snapshot {' '.join(d + '@' + name for d in datasets)}")
 
+    def notices():
+        return int(machine.succeed("journalctl -t machine-notify | grep -c 'open backup' || true"))
+
+    def told_owner(before):
+        machine.wait_until_succeeds(f"[ $(journalctl -t machine-notify | grep -c 'open backup') -gt {before} ]")
+
     machine.wait_for_unit("multi-user.target")
     machine.succeed(
         "printf '[offsite]\\ntype = local\\n' >/var/lib/rclone-secret.conf",
         "zpool create -O mountpoint=none -O compression=zstd tank /dev/vdb",
         "zfs create -o mountpoint=/data tank/data",
         "zfs create -o mountpoint=/data/nested tank/data/nested",
-        "zfs create -o mountpoint=/srv/keep tank/keep",
+        "zfs create -o 'mountpoint=/srv/keep it' tank/keep",
         "mkdir -p /data/dev/src/proj/sub /data/skip /data/proj2/target /data/marked '/data/with space'",
         "echo burrow-plaintext-marker >/data/dev/src/proj/a.txt",
         "head -c 48M /dev/urandom >/data/dev/src/proj/sub/big.bin",
@@ -75,12 +84,14 @@ pkgs.testers.runNixOSTest {
         "chown 1000:100 /data/dev/src/proj/a.txt && chmod 640 /data/dev/src/proj/a.txt",
         "echo spaced >'/data/with space/f'",
         "echo nested >/data/nested/n.txt",
+        "echo linked >/data/nested/h1 && ln /data/nested/h1 /data/nested/h2",
+        "ln -s nested/n.txt /data/toplink",
         "echo left-out >/data/skip/x",
         "printf 'Signature: 8a477f597d28d172789f06886806bc55\\n' >/data/proj2/target/CACHEDIR.TAG",
         "echo build >/data/proj2/target/out",
         "echo kept >/data/proj2/main.rs",
         "touch /data/marked/.nobackup && echo left-out >/data/marked/x",
-        "echo keep >/srv/keep/k.txt",
+        "echo keep >'/srv/keep it/k.txt'",
     )
 
     with subtest("no snapshot to back up fails the pass and tells the owner"):
@@ -93,10 +104,11 @@ pkgs.testers.runNixOSTest {
         machine.succeed("systemctl start machine-backup")
         [b] = backups()
         assert b["tags"] == ["snap-1"], b
-        assert sorted(b["paths"]) == ["/data", "/data/nested", "/srv/keep"], b
+        assert sorted(b["paths"]) == ["/data", "/data/nested", "/srv/keep it"], b
         got = files()
         for want in ["/data/dev/src/proj/a.txt", "/data/dev/src/proj/sub/big.bin", "/data/dev/src/proj/link",
-                     "/data/dev/src/proj/dangling", "/data/proj2/main.rs", "/data/nested/n.txt", "/data/with space/f", "/srv/keep/k.txt"]:
+                     "/data/dev/src/proj/dangling", "/data/proj2/main.rs", "/data/nested/n.txt", "/data/nested/h2",
+                     "/data/toplink", "/data/with space/f", "/srv/keep it/k.txt"]:
             assert want in got, (want, got)
         for unwanted in ["/data/dev/src/proj/after.txt", "/data/skip/x", "/data/proj2/target/out", "/data/marked/x"]:
             assert unwanted not in got, (unwanted, got)
@@ -107,7 +119,7 @@ pkgs.testers.runNixOSTest {
         # The day's upkeep ran, drill included.
         machine.succeed("test -e /var/lib/burrow/backup/maintained")
         journal = machine.succeed("journalctl -u machine-backup")
-        for want in ["holds all of snap-1", "drill: /data/dev/src/proj is what the snapshot had", "drill: /srv/keep is what", "drill: /data/with space is what"]:
+        for want in ["holds all of snap-1", "drill: /data/dev/src/proj is what the snapshot had", "drill: /srv/keep it is what", "drill: /data/with space is what"]:
             assert want in journal, (want, journal)
 
     with subtest("nothing is readable without the password"):
@@ -125,6 +137,23 @@ pkgs.testers.runNixOSTest {
         machine.succeed("echo '# rotated' >>/var/lib/rclone-secret.conf")
         machine.succeed("systemctl start machine-backup")
         machine.succeed("cmp /var/lib/rclone-secret.conf /var/lib/burrow/backup/rclone.conf")
+
+    with subtest("a pass that can't start tells the owner"):
+        n = notices()
+        machine.succeed("mv /var/lib/rclone-secret.conf /var/lib/rclone-secret.away")
+        machine.fail("systemctl start machine-backup")
+        machine.succeed("mv /var/lib/rclone-secret.away /var/lib/rclone-secret.conf")
+        machine.succeed("journalctl -u machine-backup | grep \"can't read rclone's config\"")
+        machine.succeed("test -e /var/lib/burrow/backup/failed-since")
+        told_owner(n)
+
+    with subtest("so does whatever else stops a pass"):
+        n = notices()
+        machine.succeed("chattr +i /var/lib/burrow/backup")
+        machine.fail("systemctl start machine-backup")
+        machine.succeed("chattr -i /var/lib/burrow/backup")
+        machine.succeed("journalctl -u machine-backup | grep -F 'chmod 700 \"$state\" exited 1'")
+        told_owner(n)
 
     with subtest("the next snapshot sends only what changed, and the hold moves to it"):
         machine.succeed("printf X | dd of=/data/dev/src/proj/sub/big.bin bs=1 seek=25000000 conv=notrunc")
@@ -146,6 +175,18 @@ pkgs.testers.runNixOSTest {
         machine.succeed("machine-backup drill")
         out = machine.succeed("machine-backup drill /data/dev/src/proj/a.txt /data/dev/src/proj/link /data/dev/src/proj/dangling /data 2>&1")
         assert out.count("is what the snapshot had") == 4, out
+
+    with subtest("the drill passes when the snapshot comes back on another device"):
+        # Restic keeps the device of hardlinked files, and a mount takes the
+        # lowest free device number: a tmpfs mounted first moves the
+        # snapshot's off the one it was backed up from.
+        def device():
+            return machine.succeed("unshare --mount --propagation private machine-backup __in-snapshot snap-2 stat -c %d /data/nested/h1").strip()
+        before = device()
+        machine.succeed("mkdir -p /mnt/shift && mount -t tmpfs shift /mnt/shift")
+        assert device() != before, before
+        machine.succeed("machine-backup drill")
+        machine.succeed("umount /mnt/shift")
 
     with subtest("the comparison fails on a restore that's missing, changed or wrong"):
         # A restore made by hand, compared with the live files.
@@ -185,9 +226,16 @@ pkgs.testers.runNixOSTest {
         machine.succeed("rm -rf /var/lib/offsite/repo && mv /tmp/repo-good /var/lib/offsite/repo")
 
     with subtest("the drill fails when the backup is missing what its snapshot had"):
+        # A symlink restic reports nothing about, beside a dataset nested in
+        # the same directory.
+        machine.succeed("machine-backup restic rewrite --forget --exclude /data/toplink latest")
+        out = machine.fail("machine-backup drill 2>&1")
+        assert "doesn't hold all of snap-2" in out and "> /data/toplink" in out and "big.bin" not in out, out
         machine.succeed("machine-backup restic rewrite --forget --exclude /data/dev/src/proj/sub/big.bin latest")
         out = machine.fail("machine-backup drill 2>&1")
-        assert "doesn't hold all of snap-2" in out and "/data/dev/src/proj/sub/big.bin" in out, out
+        assert "> /data/dev/src/proj/sub/big.bin" in out, out
+        # The fresh backups it checked against are gone.
+        assert all(not b["hostname"].endswith("-drill") for b in backups()), backups()
 
     with subtest("a snapshot older than staleAfter fails the pass"):
         machine.succeed("date -s '+7 hours'")
