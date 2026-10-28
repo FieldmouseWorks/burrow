@@ -7,7 +7,9 @@
 # and each repo's notes (`refs/notes/conary`, a landed change's public-safe
 # slice on its trunk commit). `cn why FILE:LINE` in a checkout answers from
 # the ledger here, and from the notes in any other clone; `cn verify` checks
-# the ledger against the anchor.
+# the ledger against the anchor. With `daemon`, conaryd serves the ledger's
+# calls on a socket for everything else on the machine: read-only, as a user
+# of its own, with no network and no git.
 inputs:
 { config, lib, pkgs, ... }:
 let
@@ -15,6 +17,8 @@ let
   inherit (config.burrow) user;
   inherit (lib) mkOption types;
   autoland = lib.attrByPath [ "burrow" "autoland" ] { } config;
+  # Where conaryd listens. Its directory is conaryd's own (RuntimeDirectory).
+  socket = "/run/conary/conaryd.sock";
 
   sync = pkgs.writeShellApplication {
     name = "burrow-ledger-sync";
@@ -106,6 +110,12 @@ in
       '';
     };
 
+    daemon = lib.mkEnableOption ''
+      conaryd, which serves the ledger's calls on ${socket} to everyone on the
+      machine. They can already read the op log, so it shows them nothing
+      new. The package must have conaryd (Conary from FieldmouseWorks/Conary#18)
+    '';
+
     ownContexts = mkOption {
       type = types.listOf types.str;
       default = lib.optional (autoland.enable or false) autoland.context;
@@ -123,7 +133,7 @@ in
     environment.variables = {
       CONARY_LEDGER = cfg.dir;
       CONARY_ANCHOR_REPO = cfg.anchorRepo;
-    };
+    } // lib.optionalAttrs cfg.daemon { CONARY_SOCKET = socket; };
 
     systemd.tmpfiles.settings.burrow = {
       ${config.burrow.stateDir}.d = { mode = "0755"; user = "root"; group = "root"; };
@@ -136,6 +146,11 @@ in
       events = [ "pull_request" "pull_request_review" "check_suite" "status" ];
       unit = "burrow-ledger";
       ownStatuses = cfg.ownContexts;
+    };
+    # Started once the first sync has set the ledger up, and kept running.
+    systemd.paths.conaryd = lib.mkIf cfg.daemon {
+      wantedBy = [ "paths.target" ];
+      pathConfig.PathExists = "${cfg.dir}/key.pub";
     };
     systemd.services = lib.genAttrs [ "burrow-ledger" "burrow-ledger@" ] (name: {
       description = if name == "burrow-ledger"
@@ -153,6 +168,34 @@ in
         TimeoutStartSec = "30min";
         Nice = 10;
       };
-    });
+    }) // {
+      conaryd = lib.mkIf cfg.daemon {
+        description = "ledger: serve Conary's ledger on ${socket}";
+        wantedBy = [ "multi-user.target" ];
+        unitConfig.ConditionPathExists = "${cfg.dir}/key.pub";
+        environment = {
+          CONARY_LEDGER = cfg.dir;
+          CONARY_SOCKET = socket;
+        };
+        serviceConfig = {
+          ExecStart = "${cfg.package}/bin/conaryd";
+          # It only reads the ledger, which everyone may, so it runs as no one
+          # in particular, can write nothing but its socket's directory, and
+          # reaches nothing but Unix sockets.
+          DynamicUser = true;
+          RuntimeDirectory = "conary";
+          RuntimeDirectoryMode = "0755";
+          # Everyone may connect: the socket is as open as the log it reads.
+          # conaryd keeps its start lock to itself.
+          UMask = "0000";
+          ProtectHome = true;
+          PrivateNetwork = true;
+          RestrictAddressFamilies = [ "AF_UNIX" ];
+          CapabilityBoundingSet = "";
+          Restart = "always";
+          RestartSec = 1;
+        };
+      };
+    };
   };
 }
