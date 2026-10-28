@@ -10,9 +10,9 @@
 #
 # Never fails the caller: a notice that can't be sent is logged and dropped.
 # With no REPO, every notice only goes to the journal. `pending` answers with
-# its exit status, asking nothing of GitHub: 0 while a notice this opened is
-# still open (its close hasn't got through), 1 once it's closed or never was,
-# so a caller can retry a close until it has.
+# its exit status, asking nothing of GitHub: 0 while a notice this asked for
+# may be open, 1 once GitHub has shown it closed or never opened, so a caller
+# can retry a close until it has.
 
 repo=$REPO
 state=$DIR
@@ -35,33 +35,45 @@ if [ -z "$repo" ]; then
   exit 0
 fi
 
-# Fails when GitHub can't be asked, so a close isn't mistaken for "no issue".
-find_issue() {
-  gh issue list -R "$repo" --label "$LABEL" --state open --search "\"$tag\" in:title" \
-    --json number,title --jq "[.[] | select(.title | startswith(\"$tag\")) | .number] | first // empty" 2>/dev/null
+# KEY's open issues, a number a line, read from the issues themselves: the
+# search index lags a new one. Fails when GitHub can't be asked, so that isn't
+# mistaken for "no issue".
+find_issues() {
+  gh api -X GET --paginate "repos/$repo/issues" -f state=open -f labels="$LABEL" -F per_page=100 \
+    --jq ".[] | select(.pull_request == null and (.title | startswith(\"$tag\"))) | .number" 2>/dev/null
+}
+
+# Closes each issue in $1 (a number a line), saying $2.
+close_issues() {
+  local n
+  while read -r n; do
+    [ -z "$n" ] || gh issue close "$n" -R "$repo" --comment "$2" || return
+  done <<<"$1"
 }
 
 {
   case $1 in
     open)
       title=${3:?} body=${4:?}
-      n=$(find_issue)
-      if [ -z "$n" ]; then
-        gh label create "$LABEL" -R "$repo" --color B60205 --description "$NOTIFY's notices" >/dev/null 2>&1 || true
-        gh issue create -R "$repo" --label "$LABEL" ${ASSIGNEE:+--assignee "$ASSIGNEE"} --title "$tag $title" --body "$body" &&
-          date +%s >"$state/$key"
-      elif [ $(($(date +%s) - $(cat "$state/$key" 2>/dev/null || echo 0))) -gt 86400 ]; then
-        gh issue comment "$n" -R "$repo" --body "Still happening: $body" &&
-          date +%s >"$state/$key"
-      fi
+      n=$(find_issues) &&
+        if [ -z "$n" ]; then
+          gh label create "$LABEL" -R "$repo" --color B60205 --description "$NOTIFY's notices" >/dev/null 2>&1 || true
+          # Kept before it's asked for: GitHub can open it and the answer
+          # still be lost, and then only this says it needs closing.
+          date +%s >"$state/$key" &&
+            gh issue create -R "$repo" --label "$LABEL" ${ASSIGNEE:+--assignee "$ASSIGNEE"} --title "$tag $title" --body "$body"
+        elif [ $(($(date +%s) - $(cat "$state/$key" 2>/dev/null || echo 0))) -gt 86400 ]; then
+          gh issue comment "${n%%$'\n'*}" -R "$repo" --body "Still happening: $body" &&
+            date +%s >"$state/$key"
+        fi
       ;;
     close)
-      # Only what this opened (saves an API call every run).
+      # Only what this asked for (saves an API call every run).
       [ -e "$state/$key" ] || exit 0
-      # Forget it only once it's closed (or gone), so a failed close is
-      # retried by the next one.
-      n=$(find_issue) &&
-        { [ -z "$n" ] || gh issue close "$n" -R "$repo" --comment "${3:-Cleared.}"; } &&
+      # Forget it only once none is open, so a failed close is retried by
+      # the next one.
+      n=$(find_issues) &&
+        close_issues "$n" "${3:-Cleared.}" &&
         rm -f "$state/$key"
       ;;
     *)

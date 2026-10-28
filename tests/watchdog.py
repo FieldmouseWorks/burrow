@@ -36,7 +36,9 @@ threading.Thread(target=port.serve_forever, daemon=True).start()
 
 # proj: `run` records the job and prints its id (or fails, when told to);
 # `state` answers from STATES. notify is the real one, each call logged; its
-# gh keeps the issues in GITHUB, and fails every call while GitHub is down.
+# gh keeps the issues in GITHUB, and fails every call while GitHub is down,
+# or the calls to the commands it's told to fail. It can lose its answer to
+# an issue it opened, or open one the search index doesn't have yet.
 PROJ_LOG, STATES = f"{tmp}/proj-log", f"{tmp}/states.json"
 NOTIFY_LOG, GITHUB, BIN = f"{tmp}/notify-log", f"{tmp}/github.json", f"{tmp}/bin"
 os.makedirs(BIN)
@@ -65,15 +67,26 @@ sys.exit(subprocess.run(["bash", "-euo", "pipefail", {sys.argv[2]!r}, *sys.argv[
 import json, sys
 a = sys.argv[1:]
 gh = json.load(open({GITHUB!r}))
-if gh["down"]:
+if gh["down"] or a[0] in gh["fail"]:
     sys.exit("gh: couldn't reach GitHub")
 opt = dict(zip(a, a[1:]))
 issues = gh["issues"]
-if a[:2] == ["issue", "list"]:
+if a[0] == "api":
+    assert "repos/sam/homelab/issues" in a and "labels=updates" in a and "state=open" in a, a
+    tag = opt["--jq"].split('startswith("')[1].split('"')[0]
+    for i in issues:
+        if i["open"] and i["title"].startswith(tag):
+            print(i["number"])
+elif a[:2] == ["issue", "list"]:
     tag = opt["--search"].split('"')[1]
-    print(next((i["number"] for i in issues if i["open"] and i["title"].startswith(tag)), ""))
+    print(next((i["number"] for i in issues if i["open"] and i["indexed"] and i["title"].startswith(tag)), ""))
 elif a[:2] == ["issue", "create"]:
-    issues.append({{"number": len(issues) + 1, "title": opt["--title"], "open": True, "comments": 0}})
+    issues.append({{"number": len(issues) + 1, "title": opt["--title"], "open": True, "comments": 0,
+                   "indexed": not gh["lag"]}})
+    if gh["lose"]:
+        gh["lose"] = False
+        json.dump(gh, open({GITHUB!r}, "w"))
+        sys.exit("gh: connection reset")
 elif a[:2] == ["issue", "comment"]:
     issues[int(a[2]) - 1]["comments"] += 1
 elif a[:2] == ["issue", "close"]:
@@ -132,11 +145,13 @@ def lines(path):
         return []
 
 
-def github(down=False, issues=None):
-    """GitHub as notify's gh finds it: up or down, and its issues."""
+def github(down=False, issues=None, fail=(), lose=False, lag=False):
+    """GitHub as notify's gh finds it: up or down, its issues, the commands
+    that fail, and whether it loses its answer to the next issue it opens or
+    leaves new ones out of the search index."""
     got = issues if issues is not None else json.load(open(GITHUB))["issues"]
     with open(GITHUB, "w") as f:
-        json.dump({"down": down, "issues": got}, f)
+        json.dump({"down": down, "issues": got, "fail": list(fail), "lose": lose, "lag": lag}, f)
 
 
 def opened():
@@ -317,6 +332,30 @@ assert st.get("told") and len(escalated()) == 1 and not W.load("state.json", {})
 run(T + 6 * 3600 + 2 * MIN)
 assert len(opened()) == 1 and sum(x[0] == "close" for x in notices()) == closes == 1, notices()
 print("back again: ok")
+
+# GitHub slipping: a notice it opened without saying so, or one too new for
+# its search, still closes when the stall clears, however soon. While it
+# can't say which notices are open, none is opened twice, and a twin left
+# from before closes with the rest.
+for slip in ({"lose": True}, {"lag": True}):
+    reset()
+    github(**slip)
+    TOLD = told_at()
+    assert len(opened()) == 1, (slip, opened())
+    write(STEWARD, {})
+    run(TOLD + MIN)
+    assert opened() == [] and W.load("state.json", {})["closing"] == {}, (slip, opened())
+reset()
+TOLD = told_at()
+github(fail=["api"])
+run(TOLD + W.RENOTIFY)
+assert len(opened()) == 1, opened()
+issues = json.load(open(GITHUB))["issues"]
+github(issues=issues + [{**issues[0], "number": 2}])
+write(STEWARD, {})
+run(TOLD + W.RENOTIFY + MIN)
+assert opened() == [], opened()
+print("GitHub slipping: ok")
 
 # Every stall ready in one pass goes to one job: often one cause.
 reset()
