@@ -22,7 +22,6 @@ let
   # Its own X server in a private /tmp: no other display to clash with.
   display = ":0";
   ports = [ cfg.cdpPort cfg.viewer.port ];
-  home = config.users.users.${user}.home;
   uid = toString config.users.users.${user}.uid;
   nft = config.networking.nftables.enable;
   # What keeps everyone else off its ports: nothing listens without it.
@@ -66,26 +65,6 @@ let
         --output-dir "''${XDG_RUNTIME_DIR:?}/burrow-browser" "$@"
     '';
   };
-  # A stable path, so Claude's config never changes when the package does.
-  server = builtins.toJSON { type = "stdio"; command = "/run/current-system/sw/bin/burrow-browser-mcp"; args = [ ]; };
-  register = pkgs.writeShellApplication {
-    name = "burrow-browser-register";
-    runtimeInputs = [ config.burrow.claude.package pkgs.jq pkgs.systemd ];
-    text = ''
-      want=${lib.escapeShellArg server}
-      case ''${1:?add or remove} in
-        add)
-          jq -e --argjson w "$want" '.mcpServers.browser == $w' ~/.claude.json >/dev/null && exit 0
-          claude mcp remove -s user browser >/dev/null 2>&1 || true
-          claude mcp add-json -s user browser "$want" ;;
-        remove)
-          # Shutting down isn't turning it off.
-          [ "$(systemctl is-system-running || true)" = stopping ] && exit 0
-          claude mcp remove -s user browser ;;
-      esac
-    '';
-  };
-
   # Each piece runs as the browser's user, sees no /home, and writes only its
   # state and runtime dirs. Chromium's own sandbox needs user namespaces, so
   # those stay allowed.
@@ -195,6 +174,8 @@ in
     fonts.enableDefaultPackages = lib.mkDefault true;
 
     environment.systemPackages = [ mcp ];
+    # Claude's tools for it, in every session of burrow.user's.
+    burrow.claude.mcpServers.browser.command = "/run/current-system/sw/bin/burrow-browser-mcp";
 
     systemd.slices.${account} = {
       description = "The signed-in browser";
@@ -279,26 +260,6 @@ in
           ];
         };
       };
-
-      # Claude's tools for it, in burrow.user's Claude config (user scope, so
-      # every session has them). Waits for Claude to have a config: making one
-      # would read as logged in.
-      "${account}-mcp" = {
-        description = "Give Claude Code the browser's MCP server";
-        wantedBy = [ "multi-user.target" ];
-        unitConfig.ConditionPathExists = "${home}/.claude.json";
-        serviceConfig = {
-          Type = "oneshot";
-          RemainAfterExit = true;
-          User = user;
-          ExecStart = "${lib.getExe register} add";
-          ExecStop = "${lib.getExe register} remove";
-        };
-      };
-    };
-    systemd.paths."${account}-mcp" = {
-      wantedBy = [ "paths.target" ];
-      pathConfig.PathExists = "${home}/.claude.json";
     };
 
     # Only burrow.user may connect to CDP or the viewer from this machine

@@ -9,7 +9,8 @@
 # the ledger here, and from the notes in any other clone; `cn verify` checks
 # the ledger against the anchor. With `daemon`, conaryd serves the ledger's
 # calls on a socket for everything else on the machine: read-only, as a user
-# of its own, with no network and no git.
+# of its own, with no network and no git. Every Claude of burrow.user gets
+# them, and `why`, as the `conary` MCP server (conary-mcp).
 inputs:
 { config, lib, pkgs, ... }:
 let
@@ -112,8 +113,10 @@ in
 
     daemon = lib.mkEnableOption ''
       conaryd, which serves the ledger's calls on ${socket} to everyone on the
-      machine. They can already read the op log, so it shows them nothing
-      new. The package must have conaryd (Conary from FieldmouseWorks/Conary#18)
+      machine, and burrow.user's Claude the `conary` MCP server on it. They
+      can already read the op log, so it shows them nothing new. The package
+      must have conaryd and conary-mcp (Conary from
+      FieldmouseWorks/Conary#19)
     '';
 
     ownContexts = mkOption {
@@ -146,6 +149,12 @@ in
       events = [ "pull_request" "pull_request_review" "check_suite" "status" ];
       unit = "burrow-ledger";
       ownStatuses = cfg.ownContexts;
+    };
+    # conary-mcp answers `why` in the session's own checkout, and asks
+    # conaryd for the rest. Its own default socket is the user's runtime dir.
+    burrow.claude.mcpServers.conary = lib.mkIf cfg.daemon {
+      command = "/run/current-system/sw/bin/conary-mcp";
+      args = [ "--socket" socket ];
     };
     # Started once the first sync has set the ledger up, and kept running.
     systemd.paths.conaryd = lib.mkIf cfg.daemon {
