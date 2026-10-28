@@ -29,7 +29,12 @@ each stall a step further, and no further while that step has time left:
      steward publishes escalated.json with the rest of that issue). With no
      steward, or when the steward is what's stuck, the owner hears instead.
   4. Still stuck ownerAfter after that: the owner hears, one notice a stall
-     (notify), closed once it clears.
+     (notify), closed once it clears. It stays on the stuck issue too.
+
+notify never says whether GitHub took a notice, so one is sent again every
+RENOTIFY while its stall lasts (notify adds a comment at most once a day),
+and a close for a day after it clears (a close that went through makes the
+rest no-ops). The hourly catch-up's pass is the latest a retry waits.
 
 A stall that clears is forgotten, and so is all it escalated. A job that
 finds an item legitimately still under way (a long build, a busy CI queue)
@@ -57,6 +62,8 @@ MIN = 60
 GRACE = 5 * MIN  # for a kicked pass, or a job's fix, to show
 START = 15 * MIN  # for the watchdog's own job to get a slot
 RETRY = 5 * MIN  # a job that couldn't start
+RENOTIFY = 60 * MIN  # a notice to the owner sent again, while its stall lasts
+CLOSING = 24 * 60 * MIN  # a cleared stall's notice closed again, this long
 SNOOZE_MAX = 6 * 60  # minutes
 STEWARD = "autoland"  # the source that publishes the stuck issue
 PROJ = "proj"  # the source whose items are proj jobs
@@ -199,7 +206,8 @@ def notice(s, st, up):
     """The owner's notice of one stall (notify): opened, or closed once it
     clears."""
     if not CFG["notify"]:
-        log(f"no notify to tell {CFG['owner']} with: {line(st)}")
+        if up:
+            log(f"no notify to tell {CFG['owner']} with: {line(st)}")
         return
     key = "stalled-" + hashlib.sha256(s.encode()).hexdigest()[:12]
     if up:
@@ -215,35 +223,44 @@ def escalate(s, st, now, wakes):
     """The step after a job: the steward's stuck issue, or the owner when
     there's no steward to publish it or it's the steward that's stuck."""
     st["escalated"] = now
-    st["entry"] = [ESCALATED, f"[{st['what']}]({st['link']})" if st["link"] else st["what"],
-                   f"{st['phase']}, since {clock(st['since'])}"]
     if CFG["stewardKick"] and not (st["source"] == STEWARD and st["key"] == ""):
         log(f"still stalled, on the stuck issue: {line(st)}")
+        st["entry"] = [ESCALATED, f"[{st['what']}]({st['link']})" if st["link"] else st["what"],
+                       f"{st['phase']}, since {clock(st['since'])}"]
         wakes.append(now + CFG["ownerAfter"])
     else:
         log(f"still stalled, telling {CFG['owner']}: {line(st)}")
-        st["told"] = now
-        notice(s, st, True)
+        tell(s, st, now)
+
+
+def tell(s, st, now):
+    """The owner's notice, sent (again: notify can't say it went through)."""
+    st["told"] = now
+    notice(s, st, True)
 
 
 def published(stalls):
-    """What the stuck issue carries: the escalated stalls the steward can
-    publish."""
-    return sorted(st["entry"] for st in stalls.values() if st.get("escalated") and not st.get("told"))
+    """What the stuck issue carries: every stall escalated to it, the ones
+    the owner has heard of since too (the issue's job keeps at it)."""
+    return sorted(st["entry"] for st in stalls.values() if st.get("entry"))
 
 
 def run(now):
     saved = load("state.json", {})
-    stalls, missing = saved.get("stalls", {}), saved.get("missing", {})
+    stalls, missing, closing = saved.get("stalls", {}), saved.get("missing", {}), saved.get("closing", {})
     before = published(stalls)
     found, due = overdue(now, missing)
     wakes = [due] if due else []
 
     for s in [s for s in stalls if s not in found]:
         log(f"moving again: {line(stalls[s])}")
-        if stalls[s].get("told"):
-            notice(s, stalls[s], False)
+        if stalls[s].get("told") and CFG["notify"]:
+            closing[s] = {"what": stalls[s]["what"], "link": stalls[s]["link"], "cleared": now}
         del stalls[s]
+    for s, st in list(closing.items()):
+        notice(s, st, False)
+        if now >= st["cleared"] + CLOSING:
+            del closing[s]
 
     # The watchdog's own jobs in proj's line are its own steps' to time:
     # another job for one would queue behind it.
@@ -257,12 +274,12 @@ def run(now):
         if st.get("snoozed", 0) > now:
             wakes.append(st["snoozed"])
         elif st.get("told"):
-            pass
+            if now >= st["told"] + RENOTIFY:
+                tell(s, st, now)
         elif st.get("escalated"):
             if now >= st["escalated"] + CFG["ownerAfter"]:
                 log(f"still stalled, telling {CFG['owner']}: {line(st)}")
-                notice(s, st, True)
-                st["told"] = now
+                tell(s, st, now)
             else:
                 wakes.append(st["escalated"] + CFG["ownerAfter"])
         elif st.get("job"):
@@ -289,7 +306,7 @@ def run(now):
         elif st.get("tried") and now >= st["first"] + CFG["escalateAfter"]:
             escalate(s, st, now, wakes)  # no job could take it all that time
         elif st.get("tried") and now < st["tried"] + RETRY:
-            wakes.append(st["tried"] + RETRY)
+            wakes.append(min(st["tried"] + RETRY, st["first"] + CFG["escalateAfter"]))
         else:
             ready.append(s)
 
@@ -302,7 +319,12 @@ def run(now):
             else:
                 log(f"stalled, and no job could start: {line(stalls[s])}")
                 stalls[s]["tried"] = now
-        wakes.append(now + (START if jid else RETRY))
+        # Its next look comes by the time its next step could: a queued job's
+        # escalation, or a retry's (escalateAfter may be the shorter).
+        if jid:
+            wakes.append(now + min(START, CFG["escalateAfter"]))
+        else:
+            wakes.append(min(now + RETRY, min(stalls[s]["first"] for s in ready) + CFG["escalateAfter"]))
 
     # The stuck issue: the steward publishes this with the rest of it, on the
     # pass this kicks when it changed.
@@ -310,7 +332,7 @@ def run(now):
     save("escalated.json", after)
     if after != before and CFG["stewardKick"]:
         kick(CFG["stewardKick"])
-    save("state.json", {"stalls": stalls, "missing": missing})
+    save("state.json", {"stalls": stalls, "missing": missing, "closing": closing})
     save("wake.json", {"": min(wakes)} if wakes else {})
 
 

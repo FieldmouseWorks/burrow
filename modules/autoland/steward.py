@@ -887,7 +887,7 @@ def run_pass(kick):
             owner, name = repo.split("/")
             info, prs = open_prs(owner, name)
             read.add(repo.replace("/", "_"))
-            waits.read(repo)
+            waits.read(repo, prs)
             # First, so a fix PR it made obsolete isn't merged by this same pass.
             obsolete = R.watch_default(r, info, prs, mine) or set()
             # Every open PR's branches, head and base, drafts and forks' PRs
@@ -915,8 +915,7 @@ def run_pass(kick):
                 R.sweep_branches(r, in_use, mine, sweep=kick is None)
         except Exception as e:
             log(f"{repo}: {e}")
-            if repo not in waits.NOTED:
-                waits.failed(repo)
+            waits.failed(repo)
             C.wake(repo, C.NOW + 5 * MIN)  # GitHub, often: another look soon
         if CFG["dashboard"]["enable"]:
             try:

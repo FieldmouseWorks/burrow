@@ -1,7 +1,8 @@
 """What the steward waits on, for the stall watchdog (waits.py): every open
 PR's wait as its status says it, since when and by when, saved each pass;
-which PRs aren't watched; a kicked pass, a failing repo or PR, and what the
-watchdog escalated going on the stuck issue."""
+which PRs aren't watched; a new head; a kicked pass; a repo or PR the pass
+fails on, before, between or after its PRs; and what the watchdog escalated
+going on the stuck issue."""
 
 import json
 import os
@@ -14,7 +15,8 @@ import waits
 stand_in()
 MIN = 60
 published = []
-kept_fns = (S.R.discover, S.R.settle_repo, S.R.publish, S.open_prs, S.R.unhook_gone, S.R.hook_projects)
+kept_fns = (S.R.discover, S.R.settle_repo, S.R.publish, S.open_prs, S.R.unhook_gone, S.R.hook_projects,
+            S.R.watch_default, S.R.sweep_branches, S.V.snap_name)
 S.R.settle_repo = lambda r, known: False
 S.R.publish = published.append
 S.R.unhook_gone = lambda repos: None
@@ -85,6 +87,12 @@ assert kicked(), KICKS
 again = run(200)
 assert again["sam/r#5"]["since"] == T + 100 and again["sam/r#5"]["due"] == T + 100 + 120 * MIN, again
 assert again == items and not kicked(), (again, KICKS)
+# A new head saying the same thing (a Renovate major rebased, still waiting
+# for renovate-sweep's verdict on this head) is new work: a new start.
+OPEN["sam/r"][3] = pr("sam/r", 8, sha="c" * 40, **major)
+rebased = run(250)
+assert rebased["sam/r#8"]["phase"] == items["sam/r#8"]["phase"], rebased
+assert rebased["sam/r#8"]["since"] == T + 250 and rebased["sam/r#8"]["due"] == T + 250 + 120 * MIN and kicked(), rebased
 # On to the next thing (findings answered, CI, a job...): a new start and a
 # new deadline, and the watchdog hears.
 OPEN["sam/r"][0] = pr("sam/r", 5, threads=[False])
@@ -127,8 +135,39 @@ assert sorted(run(1100)) == ["sam/q#2", "sam/r#5"]
 OPEN["sam/r"] = [pr("sam/r", 5), {"number": 9, "headRefName": "x", "baseRefName": "main", "headRefOid": "b" * 40}]
 items = run(1200)
 assert items["sam/r#9"] == {"what": "sam/r#9", "link": None, "phase": waits.FAILS, "since": T + 1200,
-                            "due": T + 1200 + 120 * MIN, "kick": "autoland/sam/r"}, items
+                            "due": T + 1200 + 120 * MIN, "kick": "autoland/sam/r", "rev": None}, items
 assert items["sam/r#5"]["since"] == T + 1100, items
+
+
+def broken(*a, **kw):
+    raise RuntimeError("GitHub said no")
+
+
+# Failing on the repo after reading its PRs: before it got to them, they all
+# keep the waits they had, and the repo is watched.
+OPEN["sam/r"] = [pr("sam/r", 5), pr("sam/r", 7, labels=["hold"])]
+items = run(1300)
+S.R.watch_default = broken
+OPEN["sam/r"][0] = pr("sam/r", 5, threads=[False])  # a new phase, had the pass seen to it
+failing = run(1400)
+assert failing["sam/r#5"] == items["sam/r#5"] and failing["sam/r#7"] == items["sam/r#7"], failing
+assert failing["sam/r"]["phase"] == waits.FAILS and failing["sam/r"]["since"] == T + 1400, failing
+S.R.watch_default = kept_fns[6]
+# Between them: what it saw to is as it noted, the rest as they were.
+S.V.snap_name = lambda name, *a: broken() if name.endswith("-7.json") else kept_fns[8](name, *a)
+OPEN["sam/r"][1] = pr("sam/r", 7)  # off hold, had the pass seen to it
+failing = run(1500)
+assert failing["sam/r#5"]["phase"] != items["sam/r#5"]["phase"] and failing["sam/r#5"]["since"] == T + 1500, failing
+assert failing["sam/r#7"] == items["sam/r#7"] and failing["sam/r"]["since"] == T + 1400, failing
+S.V.snap_name = kept_fns[8]
+# After them: all as noted, and a PR that's closed is gone.
+S.CFG["cleanBranches"], S.R.sweep_branches = True, broken
+OPEN["sam/r"] = OPEN["sam/r"][:1]
+failing = run(1600, "sam/r")
+assert sorted(failing) == ["sam/q#2", "sam/r", "sam/r#5"] and failing["sam/r#5"]["since"] == T + 1500, failing
+assert failing["sam/r"]["since"] == T + 1400, failing
+S.CFG["cleanBranches"], S.R.sweep_branches = False, kept_fns[7]
+assert sorted(run(1700)) == ["sam/q#2", "sam/r#5"]
 print("waits failing: ok")
 
 # Open over a day, it's on the stuck issue, which has it from then on.
@@ -163,6 +202,7 @@ assert not os.path.exists(f"{tmp}/state/watch.json") and waits.escalated() == []
 S.CFG["watch"] = watch
 print("waits off: ok")
 
-S.R.discover, S.R.settle_repo, S.R.publish, S.open_prs, S.R.unhook_gone, S.R.hook_projects = kept_fns
+(S.R.discover, S.R.settle_repo, S.R.publish, S.open_prs, S.R.unhook_gone, S.R.hook_projects,
+ S.R.watch_default, S.R.sweep_branches, S.V.snap_name) = kept_fns
 OPEN.clear()
 fresh_pr_state()

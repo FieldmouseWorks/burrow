@@ -194,17 +194,33 @@ states(**{"job-1": "done"})
 assert run(T + MIN)[0] == T + MIN + W.GRACE and escalated() == []
 run(T + MIN + W.GRACE)
 assert len(escalated()) == 1 and KICKS == ["/kick/autoland"]
-# Still stuck ownerAfter later: the owner hears, a notice for the stall, and
-# it's off the stuck issue (theirs now).
-run(T + MIN + W.GRACE + 14400 - 1)
+# Still stuck ownerAfter later: the owner hears, a notice for the stall. It
+# stays on the stuck issue, whose job keeps at it: notify can't say the
+# notice got through.
+TOLD = T + MIN + W.GRACE + 14400
+run(TOLD - 1)
 assert not lines(NOTIFY_LOG)
-run(T + MIN + W.GRACE + 14400)
+run(TOLD)
 (told,) = lines(NOTIFY_LOG)
 assert told[0] == "open" and told[1].startswith("stalled-") and told[2] == "Stuck: PR #7 in sam/r (\"fix it\")", told
-assert "https://github.com/sam/r/pull/7" in told[3] and escalated() == [], told
-# Once it moves, the notice closes and nothing's left.
+assert "https://github.com/sam/r/pull/7" in told[3] and len(escalated()) == 1, told
+# For the same reason it's sent again every RENOTIFY while it lasts (notify
+# makes a repeat a comment a day at most), by whatever pass comes first.
+run(TOLD + W.RENOTIFY - 1)
+assert len(lines(NOTIFY_LOG)) == 1
+run(TOLD + W.RENOTIFY)
+assert lines(NOTIFY_LOG)[1] == told, lines(NOTIFY_LOG)
+# Once it moves, the notice closes and nothing's left of the stall; the close
+# is sent again on the passes of the next day, then forgotten.
 write(STEWARD, {})
-assert run(T + 6 * 3600)[1] == {} and lines(NOTIFY_LOG)[1] == ["close", told[1], "It's moving again."]
+MOVED = TOLD + 2 * W.RENOTIFY
+assert run(MOVED)[1] == {} and lines(NOTIFY_LOG)[2] == ["close", told[1], "It's moving again."]
+assert escalated() == [] and KICKS[-1] == "/kick/autoland", KICKS
+run(MOVED + 3600)
+assert lines(NOTIFY_LOG)[3] == ["close", told[1], "It's moving again."]
+run(MOVED + W.CLOSING)
+run(MOVED + W.CLOSING + 3600)
+assert len(lines(NOTIFY_LOG)) == 5 and W.load("state.json", {})["closing"] == {}, lines(NOTIFY_LOG)
 print("stuck issue, then the owner: ok")
 
 # Every stall ready in one pass goes to one job: often one cause.
@@ -233,6 +249,31 @@ assert len(runs()) == 2 and not escalated()
 run(T + 7200)
 assert len(escalated()) == 1
 print("no job: ok")
+
+# Each look comes by the time its next step could, even with an escalateAfter
+# shorter than START or RETRY: a queued job's, or one that couldn't start.
+for refuse in (False, True):
+    reset()
+    W.CFG["escalateAfter"] = 60
+    states(refuse=refuse)
+    write(STEWARD, {"sam/r#7": item(T - 3 * 3600, T - MIN, kick=None)})
+    assert run(T)[0] == T + 60, refuse
+    states(refuse=refuse, **{"job-1": "queued"})
+    run(T + 60)
+    assert len(escalated()) == 1, refuse
+# And a retry's deadline between two retries.
+reset()
+W.CFG["escalateAfter"] = W.RETRY + 60
+states(refuse=True)
+write(STEWARD, {"sam/r#7": item(T - 3 * 3600, T - MIN, kick=None)})
+run(T)
+assert run(T + W.RETRY)[0] == T + W.RETRY + 60 and len(runs()) == 2
+# A pass for something else in between books it all the same.
+assert run(T + W.RETRY + 30)[0] == T + W.RETRY + 60 and len(runs()) == 2
+run(T + W.RETRY + 60)
+assert len(escalated()) == 1
+W.CFG["escalateAfter"] = 7200
+print("looks in time: ok")
 
 # A stale source is one stall, not one an item: its kick, then a job. When
 # that's the steward, the owner hears in place of its stuck issue, which it

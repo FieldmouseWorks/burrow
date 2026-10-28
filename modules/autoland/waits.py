@@ -5,6 +5,12 @@ that stops changing is a steward that has stopped. Past an item's deadline
 the watchdog kicks its pass, then hands it to a Claude job, then to the
 stuck issue, which the steward publishes (escalated()).
 
+A wait is the same one while its phase and what it's about (the PR's head
+and base, its `rev`) are: a new head saying the same thing is new work, with
+a deadline of its own. An open PR a pass noted nothing for (it failed on
+the repo first, or left the PR's status as it was) keeps the wait it had; a
+repo it fails on is watched itself.
+
 Not watched: a draft, or a major renovate-sweep held for the owner (nobody
 waits on the pipeline there), and a PR this pass listed for the owner or on
 the stuck issue (it's theirs, or that issue's job's, already). One on hold
@@ -22,12 +28,14 @@ from common import CFG, MIN, load, log, repo_cfg, save
 STEWARD, HOLD, SWEEP = "steward", "hold", "sweep"
 FAILS = "the steward's pass fails on it (journalctl -u autoland)"
 
-NOTED = {}  # this pass's waits, by repo whose PRs it read, then by key
-FAILED = {}  # the repos this pass failed on before it read their PRs
+NOTED = {}  # this pass's waits, by repo whose PRs it read, then by key (None: nothing to watch)
+OPEN = {}  # the keys of each repo's open PRs, as this pass read them
+FAILED = {}  # the repos this pass failed on, before, between or after their PRs
 
 
 def begin():
     NOTED.clear()
+    OPEN.clear()
     FAILED.clear()
 
 
@@ -35,61 +43,76 @@ def repo_of(key):
     return key.partition("#")[0]
 
 
-def read(repo):
-    """The repo's PRs were read: what's noted for it now replaces what it had."""
+def key_of(repo, pr):
+    return f"{repo}#{pr['number']}"
+
+
+def read(repo, prs):
+    """The repo's open PRs were read: what's noted for them replaces what
+    they had, and a closed one's is gone."""
     NOTED[repo] = {}
+    OPEN[repo] = {key_of(repo, pr) for pr in prs}
 
 
-def item(repo, pr, phase, minutes, kick):
+def item(repo, pr, phase, minutes, kick, rev):
     # .get: what failed may be the PR's own record.
     return {"what": f"{repo}#{pr['number']} {pr.get('title', '')}".strip(), "link": pr.get("url"), "phase": phase,
-            "minutes": minutes, "kick": kick}
+            "minutes": minutes, "kick": kick, "rev": rev}
 
 
 def note(repo, pr, phase, wait):
     """The PR's wait as its status says it (its last in a pass stands); wait
     None: nothing to watch."""
-    key = f"{repo}#{pr['number']}"
     if wait is None:
-        NOTED.setdefault(repo, {}).pop(key, None)
+        NOTED.setdefault(repo, {})[key_of(repo, pr)] = None
         return
     sweep = wait == SWEEP and CFG["watch"] and CFG["watch"]["renovateSweep"]
     kick = None if wait == HOLD else f"renovate-sweep/{repo}" if sweep else f"autoland/{repo}"
-    NOTED.setdefault(repo, {})[key] = item(repo, pr, phase, repo_cfg(repo)["holdStallAfter" if wait == HOLD else "stallAfter"], kick)
+    minutes = repo_cfg(repo)["holdStallAfter" if wait == HOLD else "stallAfter"]
+    rev = f"{pr['headRefOid']} {pr['baseRefName']}"
+    NOTED.setdefault(repo, {})[key_of(repo, pr)] = item(repo, pr, phase, minutes, kick, rev)
 
 
 def failed(repo, pr=None):
-    """The pass failed on the PR, or on the repo before it read its PRs."""
+    """The pass failed on the PR, or on the repo. Whatever its head, it's the
+    steward's pass that fails: no rev."""
     minutes, kick = repo_cfg(repo)["stallAfter"], f"autoland/{repo}"
     if pr:
-        NOTED.setdefault(repo, {})[f"{repo}#{pr['number']}"] = item(repo, pr, FAILS, minutes, kick)
+        NOTED.setdefault(repo, {})[key_of(repo, pr)] = item(repo, pr, FAILS, minutes, kick, None)
     else:
         FAILED[repo] = {"what": repo, "link": f"https://github.com/{repo}", "phase": FAILS, "minutes": minutes,
-                        "kick": kick}
+                        "kick": kick, "rev": None}
 
 
 def publish(seen, digest, full):
-    """watch.json: this pass's waits for the repos it saw (one whose PRs it
-    couldn't read keeps the ones it had), and a kicked pass keeps the other
-    repos' as they were. A wait in the phase it had keeps its start; a PR
-    listed in this pass's digest isn't one. The watchdog is kicked when they
-    changed: what's new may fall due before the pass it booked, and what has
-    moved on is no stall."""
+    """watch.json: this pass's waits for the repos it saw, and a kicked pass
+    keeps the other repos' as they were. An open PR it noted nothing for
+    (every one, in a repo whose PRs it couldn't read) keeps the wait it had.
+    The same wait keeps its start; a PR listed in this pass's digest isn't
+    one. The watchdog is kicked when they changed: what's new may fall due
+    before the pass it booked, and what has moved on is no stall."""
     if not CFG["watch"]:
         return
     was = load("watch.json", {}).get("items", {})
-    items = {k: v for k, v in was.items()
-             if (repo_of(k) not in seen and not full) or (repo_of(k) in seen and repo_of(k) not in NOTED and k != repo_of(k))}
+    items = {k: v for k, v in was.items() if repo_of(k) not in seen and not full}
     for repo in seen:
+        noted = NOTED.get(repo)
         listed = [x[1] for x in digest.get(repo, [])]
-        now = {**NOTED.get(repo, {}), **({repo: FAILED[repo]} if repo in FAILED else {})}
+
+        def theirs(key):
+            return any(x.startswith(f"[{key}](") for x in listed)
+
+        items.update({k: v for k, v in was.items() if repo_of(k) == repo and k != repo and not theirs(k)
+                      and (noted is None or (k in OPEN[repo] and k not in noted))})
+        now = {**{k: v for k, v in (noted or {}).items() if v}, **({repo: FAILED[repo]} if repo in FAILED else {})}
         for key, it in now.items():
-            if any(x.startswith(f"[{key}](") for x in listed):
+            if theirs(key):
                 continue
             old = was.get(key, {})
-            since = old["since"] if old.get("phase") == it["phase"] else C.NOW
+            same = old.get("phase") == it["phase"] and old.get("rev") == it["rev"]
+            since = old["since"] if same else C.NOW
             items[key] = {"what": it["what"], "link": it["link"], "phase": it["phase"], "since": since,
-                          "due": since + it["minutes"] * MIN, "kick": it["kick"]}
+                          "due": since + it["minutes"] * MIN, "kick": it["kick"], "rev": it["rev"]}
     save("watch.json", {"at": C.NOW, "items": items})
     if items != was:
         log(f"waits changed: {len(items)} watched")
