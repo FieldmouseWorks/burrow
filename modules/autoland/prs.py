@@ -20,7 +20,7 @@ query($owner: String!, $name: String!, $cursor: String) {
         labels(first: 100) { pageInfo { hasNextPage } nodes { name } }
         files(first: 100) { nodes { path changeType } }
         changedFiles
-        reviewThreads(first: 100) { pageInfo { hasNextPage } nodes { isResolved } }
+        reviewThreads(first: 100) { pageInfo { hasNextPage } nodes { isResolved comments(first: 1) { nodes { databaseId } } } }
         reviews(last: 100) { pageInfo { hasPreviousPage startCursor } nodes { %s } }
         comments(last: 100) { pageInfo { hasPreviousPage startCursor } nodes { %s } }
         reactions(last: 20) { nodes { content createdAt user { login } } }
@@ -145,6 +145,17 @@ def post_status(repo, pr, state, desc):
     return C.write("api", f"repos/{repo}/statuses/{pr['headRefOid']}", "-f", f"state={state}",
                    "-f", f"context={CONTEXT}", "-f", f"description={desc}", "-f", f"target_url={pr['url']}",
                    check=False) is not None
+
+
+def eyes(repo, pr):
+    """👀 on each open review thread's first comment: a Claude job has its
+    findings. Best effort, and GitHub keeps one per person however often
+    it's asked."""
+    for t in pr["reviewThreads"]["nodes"]:
+        first = t["comments"]["nodes"]
+        if not t["isResolved"] and first:
+            C.write("api", "-X", "POST", f"repos/{repo}/pulls/comments/{first[0]['databaseId']}/reactions",
+                    "-f", "content=eyes", check=False)
 
 
 def merge_method(repo_info):

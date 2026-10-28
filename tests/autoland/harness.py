@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 
 tmp = tempfile.mkdtemp()
 
@@ -250,6 +251,9 @@ def post(repo, pr, r, answer):
 
 STATES = {}  # a job's state, by id, as `proj state` says it: running unless set
 T0 = "2026-10-24T00:00:00Z"
+# The times a PR's status names (S.clock) are in the machine's zone: UTC here.
+os.environ["TZ"] = "UTC"
+time.tzset()
 T = C.ts(T0)
 info = {"squashMergeAllowed": True, "mergeCommitAllowed": False, "rebaseMergeAllowed": False}
 
@@ -287,7 +291,8 @@ def mkpr(reviews=(), comments=(), threads=(), draft=False, number=5, sha=head, f
         "labels": {"pageInfo": {"hasNextPage": False}, "nodes": [{"name": x} for x in labels]},
         "files": {"nodes": [{"path": f, "changeType": "MODIFIED"} for f in files]},
         "changedFiles": len(files), "reactions": {"nodes": []}, "comments": {"pageInfo": {"hasPreviousPage": False}, "nodes": list(comments)},
-        "reviewThreads": {"pageInfo": {"hasNextPage": False}, "nodes": [{"isResolved": r} for r in threads]},
+        "reviewThreads": {"pageInfo": {"hasNextPage": False}, "nodes": [{"isResolved": r, "comments": {"nodes": [{"databaseId": 900 + i}]}}
+                                                                      for i, r in enumerate(threads)]},
         "reviews": {"pageInfo": {"hasPreviousPage": False}, "nodes": list(reviews)},
         "commits": {"nodes": [{"commit": {"oid": sha, "statusCheckRollup": {"contexts": {
             "pageInfo": {"hasNextPage": False}, "nodes": list(checks)}},
