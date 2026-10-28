@@ -511,7 +511,8 @@ STATES["job-1"] = "done"
 status, _ = run(clean(comments=[failed], **mig), 7500)
 assert len(JOBS) == 1 and "something failing" in JOBS[0], (status, JOBS)
 # That one ends with it still failing (it pushed nothing): handed once more
-# once two passes have seen it ended, then listed for the owner.
+# once two passes have seen it ended, then its status fails and it's listed
+# for the owner.
 STATES["job-1"] = "error"
 status, digest = run(clean(comments=[failed], **mig), 7600)
 assert JOBS == [] and digest == [], (JOBS, digest)
@@ -520,6 +521,35 @@ assert len(JOBS) == 1 and "something failing" in JOBS[0], (status, JOBS)
 run(clean(comments=[failed], **mig), 7800)
 status, digest = run(clean(comments=[failed], **mig), 7900)
 assert JOBS == [] and [x[0] for x in digest] == ["Two Claude jobs ended without fixing it"], (JOBS, digest)
+assert "state=failure" in status and "state=pending" not in status and not merged(), status
+STATES.clear()
+
+# So do findings', red CI's and a dependency update's, however the two end
+# (stopped at jobTimeout, gone quiet, crashed). A new head starts over, and
+# so does one whose fix landed without a push (its threads answered).
+ci_red = [{"__typename": "CheckRun", "name": "ci", "status": "COMPLETED", "conclusion": "FAILURE"}]
+for mk, kw, end in ((clean, {"threads": [False]}, "timed out after 60m"),
+                    (clean, {"checks": ci_red}, "went quiet for 20m"),
+                    (mkpr, {"threads": [False], "branch": "dependabot/npm/foo-1",
+                            "title": "Bump foo from 1.4 to 1.5", "number": 11}, "error")):
+    fresh_pr_state()
+    run(mk(**kw), 0)
+    run(mk(**kw), 7200)
+    assert len(JOBS) == 1 and "isn't settled" in JOBS[0], (kw, JOBS)
+    STATES["job-1"] = end
+    run(mk(**kw), 7300)
+    status, _ = run(mk(**kw), 7400)
+    assert len(JOBS) == 1 and "state=pending" in status, (kw, status, JOBS)
+    run(mk(**kw), 7500)
+    status, digest = run(mk(**kw), 7600)
+    assert JOBS == [] and [x[0] for x in digest] == ["Two Claude jobs ended without fixing it"], (kw, digest)
+    assert "state=failure" in status and "state=pending" not in status and not merged(), (kw, status)
+    assert "Two Claude jobs ended without fixing it: " in status, status
+    fixed = {k: v for k, v in kw.items() if k not in ("threads", "checks")}
+    status, digest = run(mk(**fixed), 7700)
+    assert "state=failure" not in status and digest == [], (kw, status, digest)
+    status, digest = run(mk(**{**kw, "sha": newer}), 7800)
+    assert "state=failure" not in status and digest == [], (kw, status, digest)
 STATES.clear()
 
 # Findings sat handoffAfter with nobody on them: a fix job takes them. On a
@@ -540,6 +570,9 @@ run(replied, 91 * 60)
 assert JOBS == [], JOBS
 run(replied, 171 * 60)
 assert len(JOBS) == 1 and "isn't settled" in JOBS[0], JOBS
+# Its replies start that wait over, not the deadline of the job at work.
+run({**replied, "updatedAt": "2026-10-24T02:55:00Z"}, 176 * 60)
+assert JOBS == [] and C.WAKE["sam/r"] == C.ts(T0) + (171 + 65) * 60, C.WAKE
 
 # The needs-owner label goes straight to the owner: no judge job.
 fresh_pr_state()
@@ -852,6 +885,8 @@ run(clean(checks=proof), 7300)
 assert len(JOBS) == 1 and "just proof" in JOBS[0], JOBS
 status, _ = run(clean(checks=red), 7350)
 assert JOBS == [] and "CI is red: remi-proof" in status, (status, JOBS)
+# Whichever way a pass goes, the job it waits on keeps its deadline.
+assert C.WAKE["sam/r"] == C.ts(T0) + 7200 + 65 * 60, C.WAKE
 STATES["job-1"] = "done"
 status, _ = run(clean(checks=red), 7400)
 assert len(JOBS) == 1 and "CI is red: remi-proof" in status and "isn't settled" in JOBS[0], (status, JOBS)

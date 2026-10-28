@@ -138,6 +138,17 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
         due = st.get(kind + "At", C.NOW) + (CFG["jobTimeout"] + 5) * MIN
         C.wake(repo, due if due > C.NOW else C.NOW + 15 * MIN)
 
+    def running(kind, at=head):
+        """Whether this head's job of the kind (at: on its base, for the
+        judge's and the fix it asks for) is still queued or running, or proj
+        can't say. One that is keeps its deadline, since each pass replaces
+        the repo's wake-ups."""
+        jid = st.get(kind + "Job")
+        if st.get(kind) != at or not jid or C.job_state(jid) not in (None, "queued", "running"):
+            return False
+        deadline(kind)
+        return True
+
     def started(kind, task, at=head):
         """A Claude job, once per head (at: once per head on its base, for
         the judge's; recorded once it has started; until then it's tried
@@ -158,11 +169,7 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
         """This head's job of the kind ended without the answer it was for
         (it crashed, timed out, or never posted it). Seen on two passes: the
         first may have read the PR just before its answer went up."""
-        jid = st.get(kind + "Job")
-        if st.get(kind) != at or not jid:
-            return False
-        if C.job_state(jid) in (None, "queued", "running"):
-            deadline(kind)
+        if st.get(kind) != at or not st.get(kind + "Job") or running(kind, at):
             return False
         seen = st.get(kind + "Lost") == at
         st[kind + "Lost"] = at
@@ -188,23 +195,25 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
         """The kind of fix job handed on this head that's still queued or
         running (or that proj can't say about), else None."""
         for k in ("handed", "redFixed", "failFixed"):
-            jid = st.get(k + "Job")
-            if st.get(k) == (judged_at if k == "failFixed" else head) and jid \
-                    and C.job_state(jid) in (None, "queued", "running"):
+            if running(k, judged_at if k == "failFixed" else head):
                 return k
         return None
 
-    def hand_off(why, kind="handed", at=head):
-        """A Claude job fixes it, one of each kind a head (at). One that ended
-        with this still to fix (it crashed, or pushed nothing) is handed once
-        more, and after a second it's listed for the owner. Never while
-        another fix job is still working on this head: two on one branch
-        push over each other."""
+    def hand_off(why, desc, due, kind="handed", at=head):
+        """Pending on desc while a Claude job fixes why, one of each kind a
+        head (at), started once it's due. One that ended with this still to
+        fix (it crashed, timed out, went quiet or pushed nothing) is handed
+        once more; after a second the status fails and the owner hears, until
+        a new head. Never while another fix job is still working on this
+        head: two on one branch push over each other."""
         retry = st.get(kind) == at
-        if retry and not lost(kind, at):
+        gone = retry and lost(kind, at)
+        if gone and st.get(kind + "Again") == at:
+            settle("failure", f"Two Claude jobs ended without fixing it: {desc}"[:140],
+                   "Two Claude jobs ended without fixing it")
             return
-        if retry and st.get(kind + "Again") == at:
-            digest.append(("Two Claude jobs ended without fixing it", line, why))
+        settle("pending", desc)
+        if not due or (retry and not gone):
             return
         busy = fixing()
         if busy:
@@ -268,10 +277,9 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
             # The judge's own build or tests failed on this head: a fix job
             # has it, and its push is judged again. Its own once a head: a
             # job that answered a finding here without pushing didn't fix this.
-            settle("pending", "Settled, but its build or tests fail; a Claude job is fixing it")
             hand_off("the Claude job that judged it found something failing on this head, its build or tests or a finding "
                      "left unfixed (its comment on the PR says what)",
-                     "failFixed", judged_at)
+                     "Settled, but its build or tests fail; a Claude job is fixing it", True, "failFixed", judged_at)
         elif update_branch():
             settle("pending", "Settled, but behind its base: brought up to date, reviewed again")
         elif lost("judged", judged_at):
@@ -391,9 +399,7 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
         elif threads or ci == "red":
             what = threads or "CI is red (" + ", ".join(ci_names) + ")"
             kind = "handed" if threads else "redFixed"
-            settle("pending", f"Dependency update; {what}"[:140])
-            if handoff_due(kind):
-                hand_off(what, kind)
+            hand_off(what, f"Dependency update; {what}", handoff_due(kind), kind)
         elif dep == "major" and renovate and major_verdict != "ok":
             # renovate-sweep's verdict comes first, and its job runs the proofs
             # until then: neither a judge nor a proof job of the steward's
@@ -689,16 +695,16 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
     if late:
         what.append("review findings on " + ", ".join(sorted(set(late))))
     if waiting:
-        settle("pending", "; ".join(waiting + stuck + what))
         # One reviewer's threads needn't wait for the other to finish.
-        if what and not swept and handoff_due("handed"):
-            hand_off(", ".join(what))
+        if what:
+            hand_off(", ".join(what), "; ".join(waiting + stuck + what), not swept and handoff_due("handed"))
+        else:
+            settle("pending", "; ".join(waiting + stuck))
     elif what and capped:
-        settle("pending", f"Past the review-round limit ({rounds}): " + ", ".join(what))
-        if not swept and handoff_due("handed"):
-            hand_off(f"{', '.join(what)}, after {rounds} review rounds with findings, the limit, so its reviewers won't look again. "
-                     "Weigh each finding on its merits: fix what's a real defect and answer the rest with why. "
-                     "A Claude job judges it after, without the reviewers")
+        hand_off(f"{', '.join(what)}, after {rounds} review rounds with findings, the limit, so its reviewers won't look again. "
+                 "Weigh each finding on its merits: fix what's a real defect and answer the rest with why. "
+                 "A Claude job judges it after, without the reviewers",
+                 f"Past the review-round limit ({rounds}): " + ", ".join(what), not swept and handoff_due("handed"))
     elif (not clean and not capped) or what:
         if not what:
             # Every finding answered without a new commit: the reviewers that
@@ -710,16 +716,13 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
                         ask(r)
             settle("pending", "Findings answered; " + ("; ".join(stuck) if stuck else f"review round {rounds + 1} next"))
         else:
-            settle("pending", f"Round {rounds}: " + ", ".join(what))
-            if not swept and handoff_due("handed"):
-                hand_off(", ".join(what))
+            hand_off(", ".join(what), f"Round {rounds}: " + ", ".join(what), not swept and handoff_due("handed"))
     # 2. The reviewers are clean on this head and nothing is open: CI, then land.
     elif ci == "red":
-        settle("pending", "CI is red: " + ", ".join(ci_names)[:100])
         # Its own once a head, apart from a findings job's: one that answered
         # a finding here without pushing didn't fix a check that failed since.
-        if not swept and handoff_due("redFixed"):
-            hand_off("CI is red (" + ", ".join(ci_names) + ")", "redFixed")
+        hand_off("CI is red (" + ", ".join(ci_names) + ")", "CI is red: " + ", ".join(ci_names)[:100],
+                 not swept and handoff_due("redFixed"), "redFixed")
     elif held:
         judged("a Claude job was asked to judge this head", PAST_LIMIT if capped else REVIEWED)
     elif proof_only:
