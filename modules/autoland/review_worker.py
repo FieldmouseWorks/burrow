@@ -7,9 +7,9 @@ read-only in a sandbox that shows it its head's snapshot (reviewers.py) and
 little else, with no network but its own API (egress.py). So a PR that talks
 an agent into reading, sending or saying something it shouldn't finds nothing
 worth having: no GitHub token, no secrets paths, no other repo's code, no
-way out but its API, and no key of its own (DeepSeek's stays with the gate;
-the commands Codex runs can't read its login). The keys are taken out of
-anything the agents say as well.
+way out but its API, and no key of its own (the commands Codex runs can't
+read its login). The login's keys are taken out of anything it says as
+well.
 
 Each reviewer keeps one session per PR (review/sessions/REVIEWER--PR): the
 agent's home, and the look it last took there, which its next look resumes.
@@ -18,7 +18,6 @@ the PR merges or closes the steward's sweep marks it gone and this service
 deletes it."""
 
 import fcntl
-import http.client
 import json
 import os
 import re
@@ -87,8 +86,7 @@ SCHEMA = {
 
 class Out(Exception):
     """The reviewer can't review anything for now (usage spent, not logged
-    in, its key turned down): it's left out until `until`, and the PRs
-    settle on the other reviewers meanwhile."""
+    in): it's left out until `until`, and PRs wait for it meanwhile."""
 
     def __init__(self, why, until):
         super().__init__(why)
@@ -163,11 +161,9 @@ def sandboxed(snap, home, t, names, argv, binds=(), ro=()):
             "--chdir", CHECKOUT, "--", sys.executable, "-I", G.__file__, f"{t}/egress.sock", ",".join(names), "--", *argv]
 
 
-# Where each agent's API is. Codex goes through the gate as its HTTPS proxy,
-# to these hosts only; DeepSeek sends its requests to the gate, which puts
-# the key in and sends them on.
+# Where Codex's API is: it goes through the gate as its HTTPS proxy, to
+# these hosts only.
 CODEX_HOSTS = ["chatgpt.com", "auth.openai.com", "api.openai.com"]
-DEEPSEEK_API = "api.deepseek.com"
 
 
 LOGIN_LOCK = threading.Lock()  # looks run side by side
@@ -206,7 +202,10 @@ def codex(snap, prompt, home, sid):
             p = subprocess.run(sandboxed(snap, home, t, ["HTTPS_PROXY"], argv,
                                          [f"{login}/auth.json"] if os.path.exists(f"{login}/auth.json") else [],
                                          [f"{login}/config.toml"] if os.path.exists(f"{login}/config.toml") else []),
-                               input=prompt, capture_output=True, text=True, env=env(CODEX_HOME=home))
+                               input=prompt, capture_output=True, text=True, env=env(CODEX_HOME=home),
+                               timeout=CFG["reviewTimeout"] * 60)
+        except subprocess.TimeoutExpired:
+            raise RuntimeError(f"codex was still at it after {CFG['reviewTimeout']} minutes") from None
         finally:
             gate.close()
             try:
@@ -269,113 +268,7 @@ def events(out):
     return found
 
 
-def overlay(effort):
-    """DeepSeek Harness's settings for a review: the effort, the most it may
-    say (its API's ceiling), and nothing it doesn't need: the checkout's own
-    AGENTS.md (the PR's copy), a model call to title the session, the web."""
-    return (f"- id: llm-deepseek\n  config:\n    reasoningEffort: {effort}\n    maxTokens: 384000\n"
-            "- id: agent-instructions\n  disabled: true\n"
-            "- id: session-title-llm\n  disabled: true\n"
-            "- id: tool-web\n  disabled: true\n")
-
-
-def deepseek(snap, prompt, home, sid):
-    """DeepSeek's look, in the PR's session `sid` (a new one if None): its
-    answer, and the session's id. `home` is the PR's own DSH_HOME: dsh keeps
-    every session it runs there, and one PR's look reading another's would
-    post that repo's code in this one."""
-    key = deepseek_key()
-    efforts = [CFG["reviewers"]["deepseek"]["effort"]]
-    if efforts[0] == "max":
-        efforts.append("high")
-    # The machine's settings for it (the model), once, when the session starts.
-    mine = os.path.join(os.environ["HOME"], ".dsh", "profiles")
-    if os.path.isdir(mine) and not os.path.exists(f"{home}/profiles"):
-        shutil.copytree(mine, f"{home}/profiles")
-    with tempfile.TemporaryDirectory() as t:
-        gate = G.Gate(f"{t}/egress.sock", [], (DEEPSEEK_API, {"x-api-key": key}))
-        try:
-            return deepseek_in(snap, prompt, home, t, efforts, sid)
-        finally:
-            gate.close()
-            deepseek_balance(key)
-
-
-BALANCE_LOCK = threading.Lock()  # reviews run side by side
-
-
-def deepseek_balance(key):
-    """What DeepSeek's account has left after a review, by currency, kept
-    for the steward to warn the owner before it's spent (reviewers.py
-    `low_balance`). A look that fails keeps the last one."""
-    try:
-        s = G.secure(DEEPSEEK_API)
-        try:
-            s.sendall(f"GET /user/balance HTTP/1.1\r\nHost: {DEEPSEEK_API}\r\nAuthorization: Bearer {key}\r\n"
-                      "Accept: application/json\r\nConnection: close\r\n\r\n".encode())
-            r = http.client.HTTPResponse(s)
-            r.begin()
-            body = r.read()
-        finally:
-            s.close()
-        if r.status != 200:
-            raise ValueError(f"HTTP {r.status}")
-        left = {b["currency"]: float(b["total_balance"]) for b in json.loads(body)["balance_infos"]}
-    except (OSError, ValueError, KeyError, TypeError, http.client.HTTPException) as e:
-        log(f"  couldn't read DeepSeek's balance: {tail(str(e), 200)}")
-        return
-    try:
-        with BALANCE_LOCK:
-            save(V.BALANCE, {"left": left, "at": time.time()})
-    except OSError as e:  # never the review's undoing
-        log(f"  couldn't keep DeepSeek's balance: {e}")
-
-
-def deepseek_in(snap, prompt, home, t, efforts, sid):
-    """deepseek(), its gate open: at each effort in turn until one answers,
-    in the one session."""
-    while True:
-        with open(f"{t}/overlay.yml", "w") as f:
-            f.write(overlay(efforts[0]))
-        # Its API is the gate, and the key it holds is a stand-in: the gate
-        # puts the real one in.
-        p = subprocess.run(
-            sandboxed(snap, home, t, ["DEEPSEEK_BASE_URL/anthropic"],
-                      [f"{CFG['agents']}/dsh", "--profile", "headless", "--patch", f"{t}/overlay.yml", "--json",
-                       *(["--session-id", sid] if sid else []), "-"]),
-            input=prompt, capture_output=True, text=True,
-            env=env(DSH_HOME=home, DSH_TELEMETRY_MODE="DISABLED", DSH_PERMISSION_MODE="read-only",
-                    DEEPSEEK_API_KEY="the-gate-holds-it"))
-        said = p.stderr.strip()
-        if p.returncode != 0 and re.search(r"\bAUTH\b|CREDENTIAL|\b40[12]\b|insufficient balance", said, re.I):
-            raise Out("its API key was turned down or its balance is spent", time.time() + 3600)
-        seen = events(p.stdout)
-        sid = next((e["sessionId"] for e in seen if e.get("type") == "session"), sid)
-        try:
-            if p.returncode != 0:
-                raise RuntimeError(f"dsh exited {p.returncode}: {tail(said, 300)}")
-            if not sid:
-                raise RuntimeError("dsh named no session")
-            return answer_of("".join(e.get("text", "") for e in seen if e.get("type") == "final")), sid
-        except RuntimeError:
-            # At max effort it can think past its budget without
-            # answering, and asking the same again only does it again:
-            # once more at high.
-            if len(efforts) == 1:
-                raise
-            log(f"  DeepSeek didn't answer at {efforts[0]} effort: asking at {efforts[1]}")
-            efforts.pop(0)
-
-
-def deepseek_key():
-    for x in open(os.path.join(os.environ.get("CREDENTIALS_DIRECTORY", ""), "deepseek")):
-        k, sep, v = x.strip().partition("=")
-        if sep and k == "DEEPSEEK_API_KEY" and v.strip().strip('"'):
-            return v.strip().strip('"')
-    raise Out("no DEEPSEEK_API_KEY in its key file", time.time() + 3600)
-
-
-AGENTS = {"codex": codex, "deepseek": deepseek}
+AGENTS = {"codex": codex}
 
 
 def secrets():
@@ -383,10 +276,6 @@ def secrets():
     quoting its request, say): never let into an answer. Nothing under 16
     characters is one, an empty value least of all."""
     found = []
-    try:
-        found.append(deepseek_key())
-    except (OSError, Out):
-        pass
     try:
         def walk(x):
             if isinstance(x, dict):
@@ -551,10 +440,20 @@ def work():
         waiting = {}
         for name in os.listdir(q):
             r = name.partition("--")[0]
-            if name.endswith(".json") and name not in busy and r in pools:
-                item = load(f"{V.QUEUE}/{name}", None)
-                item = item if isinstance(item, dict) else {}
-                waiting.setdefault(r, []).append((not C.pipeline(item.get("repo")), item.get("at", 0), name))
+            if not name.endswith(".json") or name in busy:
+                continue
+            if r not in pools:
+                # A reviewer this machine no longer has (one removed since
+                # it was queued): nothing would ever take it, and the queue
+                # watcher would start this again and again until systemd
+                # gave up on it, and on Codex's reviews with it. Taken off
+                # unanswered, unless a worker from before is still on it.
+                if V.taken(os.path.join(q, name)):
+                    log(f"{name}: dropped from the queue: there's no reviewer {r} here")
+                continue
+            item = load(f"{V.QUEUE}/{name}", None)
+            item = item if isinstance(item, dict) else {}
+            waiting.setdefault(r, []).append((not C.pipeline(item.get("repo")), item.get("at", 0), name))
         # One look at a time in a session: a PR's next head waits for the
         # look at its last one, and resumes it.
         sessions = {session_of(n) for n in busy}

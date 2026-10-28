@@ -1,10 +1,10 @@
 # autoland: every PR in every repo you own goes from ready to merged on its
 # own, once a reviewer has nothing left to say (autoland/steward.py).
 #
-#   ready -> Codex and DeepSeek review it (agents reading a snapshot of the
-#            head, as a user of their own with no GitHub access)
+#   ready -> Codex reviews it (an agent reading a snapshot of the head, as
+#            a user of its own with no GitHub access)
 #         -> Claude fixes or answers every finding
-#         -> both find nothing on the exact head, CI green
+#         -> it finds nothing on the exact head, CI green
 #         -> (one-way paths, no CI: a Claude job judges it)
 #         -> `review-settled` status -> auto-merge -> branch deleted
 #
@@ -82,6 +82,8 @@ let
     majorKey = if (config.burrow.updates.enable or false) && (config.burrow.updates.renovate.enable or false) then "${stateDir}/renovate-sweep/verdict.key" else null;
     projectsDir = config.burrow.projectsDir;
     proj = "${config.burrow.tools.proj}/bin/proj";
+    jobTimeout = cfg.jobTimeoutMinutes;
+    jobIdle = cfg.jobIdleMinutes;
     owner = config.burrow.owner;
     cleanBranches = cfg.cleanBranches;
     labels = { inherit (cfg.labels) hold owner; };
@@ -99,7 +101,6 @@ let
       requireCi = true;
       proofJobs = { };
       codex = true;
-      deepseek = true;
       skipPaths = [ ];
     };
     repos = cfg.repos;
@@ -114,9 +115,9 @@ let
     kick = "${config.burrow.events.kick}/autoland";
     reviewers = {
       codex = { inherit (rv.codex) enable effort parallel; };
-      deepseek = { inherit (rv.deepseek) enable effort parallel lowBalance; };
     };
     inherit (rv) skipPaths;
+    reviewTimeout = rv.timeoutMinutes;
     agents = "${agents}/bin";
     sandbox = "${pkgs.bubblewrap}/bin/bwrap";
     box = {
@@ -133,9 +134,6 @@ let
     '';
   };
 
-  reviewerNames = lib.concatStringsSep " and "
-    (lib.optional rv.codex.enable "Codex" ++ lib.optional rv.deepseek.enable "DeepSeek");
-
   configFile = pkgs.writeText "autoland.json" (builtins.toJSON settings);
   # steward.py and the modules it imports from beside it, linted as they're
   # built.
@@ -151,6 +149,7 @@ let
     cp ${./autoland/tasks.py} $out/tasks.py
     cp ${./autoland/touches.py} $out/touches.py
     cp ${./autoland/seal.py} $out/seal.py
+    cp ${./autoland/prs.py} $out/prs.py
     flake8 --ignore E501,W503 $out
   '';
   # The command, with this machine's config, so `autoland-steward status`
@@ -262,6 +261,30 @@ in
       description = "How long a new head sits still before the reviewers are asked, so a burst of pushes gets one review.";
     };
 
+    jobTimeoutMinutes = mkOption {
+      type = types.ints.positive;
+      default = 60;
+      description = ''
+        How long each turn of a Claude job the steward starts (a fix, a
+        judge, a proof run) may run before proj stops it. Its end, however
+        it ends, starts the repo's pass, and the steward books one for this
+        deadline too in case that doesn't get through: a job that ended
+        without its answer is started once more, and a second is a failed
+        status on the PR.
+      '';
+    };
+
+    jobIdleMinutes = mkOption {
+      type = types.ints.positive;
+      default = 20;
+      description = ''
+        A turn of one of those jobs whose stream has said nothing this long
+        is stuck, and proj stops it then, however long its work may take: one
+        at work says something at least each time Claude's Bash tool stops a
+        command, ten minutes at most. It ends as one past jobTimeout does.
+      '';
+    };
+
     context = mkOption {
       type = types.str;
       default = "review-settled";
@@ -330,9 +353,9 @@ in
           Codex as a reviewer: the codex CLI, logged in to your ChatGPT plan
           (`autoland-codex-login`, once). Its model is codex's default, unless
           the reviewers' home has a `.codex/config.toml` that names one: which
-          model does what is the machine's business. While the plan's usage is
-          spent, or it's logged out, PRs settle on the other reviewers, and it
-          comes back on its own
+          model does what is the machine's business. It's the steward's one
+          reviewer: while the plan's usage is spent, or it's logged out, PRs
+          wait for it, and it comes back on its own
         '';
         effort = mkOption {
           type = types.enum [ "low" "medium" "high" "xhigh" ];
@@ -346,47 +369,14 @@ in
         };
       };
 
-      deepseek = {
-        enable = lib.mkEnableOption ''
-          DeepSeek as a reviewer: DeepSeek Harness (dsh), headless, on its API.
-          Its model is dsh's default, unless the reviewers' home has a
-          `.dsh/profiles/headless/cordis.patch.yml` that sets one (its
-          `agent-default-model` entry, provider and model both). What it
-          reads goes to DeepSeek, private repos included; `skipPaths` are
-          left out
+      timeoutMinutes = mkOption {
+        type = types.ints.positive;
+        default = 30;
+        description = ''
+          How long one review may run before it's stopped and counted a
+          failed try, like any other error: the steward asks again, three
+          tries in all, then three more an hour on.
         '';
-        envFile = mkOption {
-          type = types.str;
-          example = "/run/secrets/deepseek-review";
-          description = ''
-            A root-only file of KEY=value lines with DEEPSEEK_API_KEY. Only the
-            reviewers' service reads it (systemd's LoadCredential), and the
-            key is taken out of anything an agent says.
-          '';
-        };
-        effort = mkOption {
-          type = types.enum [ "low" "high" "max" ];
-          default = "max";
-          description = ''
-            How hard it thinks. At max, a review that doesn't answer is asked
-            once more at high: it can think past its budget (the API's
-            ceiling, 384k tokens) without answering.
-          '';
-        };
-        parallel = mkOption {
-          type = types.ints.positive;
-          default = 4;
-          description = "At most this many DeepSeek reviews at once.";
-        };
-        lowBalance = mkOption {
-          type = types.number;
-          default = 5;
-          description = ''
-            Under this much left on DeepSeek's account (in its own currency),
-            after any review, the steward's issue for the owner says so. Spent,
-            DeepSeek is out of service and PRs merge on the other reviewers.
-          '';
-        };
       };
 
       skipPaths = mkOption {
@@ -425,9 +415,8 @@ in
         Claude job a head runs them on that commit and records each verdict,
         a failure as a failure), keepBranches
         (more branch globs the cleanup never touches in this repo, on top of
-        the machine's, for branches a repo keeps as evidence), codex and
-        deepseek (false: that reviewer leaves this repo alone, and none of it
-        goes to it), skipPaths (more path regexes the reviewers never read in
+        the machine's, for branches a repo keeps as evidence), codex (false:
+        Codex leaves this repo alone, and none of it goes to it), skipPaths (more path regexes the reviewers never read in
         this repo, on top of `reviewers.skipPaths`, never instead of them: what
         the repo keeps private that isn't a secret anywhere else).
       '';
@@ -436,8 +425,8 @@ in
 
   config = lib.mkIf cfg.enable {
     assertions = [{
-      assertion = rv.codex.enable || rv.deepseek.enable;
-      message = "burrow.autoland needs a reviewer: turn on burrow.autoland.reviewers.codex or .deepseek.";
+      assertion = rv.codex.enable;
+      message = "burrow.autoland needs its reviewer: turn on burrow.autoland.reviewers.codex.";
     } {
       # It keeps every repo's hook, which GitHub's deliveries come in on.
       assertion = config.burrow.events.host != null;
@@ -521,9 +510,7 @@ in
           ProtectSystem = "strict";
           ProtectHome = true;
           PrivateTmp = true;
-          ReadWritePaths = [ reviewerHome "${reviewDir}/queue" "${reviewDir}/done" "${reviewDir}/account" "${reviewDir}/sessions" ];
-        } // lib.optionalAttrs rv.deepseek.enable {
-          LoadCredential = "deepseek:${rv.deepseek.envFile}";
+          ReadWritePaths = [ reviewerHome "${reviewDir}/queue" "${reviewDir}/done" "${reviewDir}/sessions" ];
         };
       };
     };
@@ -538,8 +525,8 @@ in
 
     # The steward's state, and the reviews: it queues them and takes the
     # snapshots; the reviewers' user reads those, answers in done/, takes
-    # what it answered off the queue, notes its accounts' balances in
-    # account/ and keeps each open PR's sessions in sessions/, which the
+    # what it answered off the queue and keeps each open PR's sessions in
+    # sessions/, which the
     # steward marks gone when the PR closes. The clones the snapshots come
     # from are the steward's alone.
     systemd.tmpfiles.settings.burrow = let
@@ -549,7 +536,6 @@ in
       ${reviewDir} = dir "2750" reviewer;
       "${reviewDir}/queue" = dir "2770" reviewer;
       "${reviewDir}/done" = dir "2770" reviewer;
-      "${reviewDir}/account" = dir "2770" reviewer;
       "${reviewDir}/sessions" = dir "2770" reviewer;
       "${reviewDir}/snap" = dir "2750" reviewer;
       "${reviewDir}/git" = dir "0700" account.group;
@@ -562,11 +548,11 @@ in
       steward (`autoland`, on every change to a PR). Open PRs ready for review, never as drafts (a
       draft is left alone until it's ready), then leave them be:
 
-      - ${reviewerNames} review every head; the steward posts their reviews under
-        ${config.burrow.owner}'s login, each thread marked as its reviewer's. Fix or answer
-        every finding (reply on the thread, push the fix) and resolve the thread; the
-        reviewer that raised it looks again once they're all resolved.
-      - Once they all find nothing on the exact head, every thread is resolved and CI is
+      - Codex reviews every head; the steward posts its reviews under
+        ${config.burrow.owner}'s login, each thread marked as Codex's. Fix or answer
+        every finding (reply on the thread, push the fix) and resolve the thread; Codex
+        looks again once they're all resolved.
+      - Once it finds nothing on the exact head, every thread is resolved and CI is
         green, it posts `${cfg.context}` and merges it, `.github/` changes included; the
         branch goes too.
       - A settled PR that touches a one-way path (secrets, migrations, CODEOWNERS), or

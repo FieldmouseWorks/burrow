@@ -95,7 +95,10 @@ in
       example = "90m";
       description = ''
         How long one turn may run (coreutils timeout's units) before it's
-        stopped, so a stuck job can't hold its place for good.
+        stopped, so a stuck job can't hold its place for good. A job can set
+        its own (`proj run --timeout`), and stop sooner once it has gone quiet
+        (`--idle`), as the steward's do (`burrow.autoland.jobTimeoutMinutes`,
+        `jobIdleMinutes`).
       '';
     };
     maxWait = lib.mkOption {

@@ -36,19 +36,17 @@ change nothing else in the same PR.
 
 1. PRs are opened ready for review. A draft is work in progress: the steward
    leaves it alone (a pending `review-settled`, nothing else) until it's ready.
-2. The machine's reviewers (`burrow.autoland.reviewers`) review the head:
-   Codex through the codex CLI on the owner's ChatGPT plan, and DeepSeek
-   through DeepSeek Harness. The steward takes a snapshot of the change with
-   secrets paths left out; each agent reads it read-only, with no GitHub
-   login, and the steward posts its findings as review threads marked as
-   that reviewer's. A look at a head the PR has since moved past still
+2. The machine's reviewer (`burrow.autoland.reviewers`) reviews the head:
+   Codex, through the codex CLI on the owner's ChatGPT plan. The steward
+   takes a snapshot of the change with secrets paths left out; the agent
+   reads it read-only, with no GitHub login, and the steward posts its
+   findings as review threads marked as Codex's. A look at a head the PR has since moved past still
    finishes, and its findings are posted on the commit it read, so they go
-   into the next push. Each reviewer keeps one session per PR: every look
+   into the next push. Codex keeps one session per PR: every look
    resumes the one before, told which head it last read, and still judges
    the whole change at the new head. A PR's sessions are deleted for good
-   once it merges or closes. One whose usage runs out is left out until it's
-   back, and PRs settle on the others meanwhile; DeepSeek's balance running
-   low is listed for the owner first.
+   once it merges or closes. While its usage is spent, or it's logged out,
+   PRs wait for it, and it comes back on its own.
 3. Whoever opened the PR fixes each finding, or replies with why not, and
    resolves its thread. A Claude job on the machine takes over if nobody has
    after `handoffAfterMinutes`, or after `sessionHandoffAfterMinutes` on a

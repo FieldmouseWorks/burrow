@@ -9,8 +9,8 @@ event reports):
      `baseline` ruleset); a repo seen for the first time also gets a Claude
      job that brings its files to docs/repo-baseline.md (repos.py).
   2. For each open PR that isn't a draft, work out where it stands and do
-     the next thing: queue a review of its head from each reviewer, Codex
-     and DeepSeek (reviewers.py), post what they found, hand open findings
+     the next thing: queue a review of its head from each reviewer (Codex,
+     reviewers.py), post what they found, hand open findings
      or red CI to a Claude job,
      have a Claude job run the checks only a machine of the owner's runs
      (proofJobs) or judge a PR it won't land on its own word (tasks.py says
@@ -46,175 +46,15 @@ import sys
 import common as C
 import repos as R
 import reviewers as V
-from common import CFG, CONTEXT, DRY, MIN, STATE, load, log, repo_cfg, save, ts
+from common import CFG, DRY, MIN, STATE, load, log, repo_cfg, save, ts
 from seal import MAJOR as MAJOR_VERDICT  # renovate-sweep's, on a Renovate major
 from touches import dep_kind, gate_edit, moved_from, one_way, renovate_edited
 from tasks import DEP_SEEN, JUDGMENT, PAST_LIMIT, REVIEWED, fix_task, judge_task, proof_task
+from prs import ci_state, land, open_prs, our_status, post_status
 
 
-PRS = """
-query($owner: String!, $name: String!, $cursor: String) {
-  repository(owner: $owner, name: $name) {
-    squashMergeAllowed mergeCommitAllowed rebaseMergeAllowed
-    defaultBranchRef { name target { ... on Commit { oid statusCheckRollup { state } } } }
-    pullRequests(states: OPEN, first: 30, after: $cursor, orderBy: {field: CREATED_AT, direction: ASC}) {
-      pageInfo { hasNextPage endCursor }
-      nodes {
-        id number title url isDraft isCrossRepository headRefName headRefOid baseRefName
-        createdAt updatedAt mergeStateStatus body
-        author { login }
-        autoMergeRequest { enabledAt }
-        labels(first: 100) { pageInfo { hasNextPage } nodes { name } }
-        files(first: 100) { nodes { path changeType } }
-        changedFiles
-        reviewThreads(first: 100) { pageInfo { hasNextPage } nodes { isResolved } }
-        reviews(last: 100) { pageInfo { hasPreviousPage startCursor } nodes { %s } }
-        comments(last: 100) { pageInfo { hasPreviousPage startCursor } nodes { %s } }
-        reactions(last: 20) { nodes { content createdAt user { login } } }
-        commits(last: 1) {
-          nodes { commit { oid statusCheckRollup { contexts(first: 100) { pageInfo { hasNextPage } nodes {
-            __typename
-            ... on CheckRun { name status conclusion }
-            ... on StatusContext { context state description }
-          } } }
-          checkSuites(first: 100) { pageInfo { hasNextPage } nodes { conclusion workflowRun { workflow { name } } } } } }
-        }
-      }
-    }
-  }
-}
-"""
-
-
-# What each review and comment is read for, in PRS and the older pages.
-OLDER = {"reviews": "author { login } state body submittedAt commit { oid }",
-         "comments": "databaseId body createdAt updatedAt author { login }"}
-PRS = PRS % (OLDER["reviews"], OLDER["comments"])
 # The link Claude Code puts in a PR its session opens.
 SESSION = re.compile(r"https://claude\.ai/code/session_\w+")
-OLDER_PAGE = """
-query($id: ID!, $cursor: String) {
-  node(id: $id) { ... on PullRequest { %s(last: 100, before: $cursor) { pageInfo { hasPreviousPage startCursor } nodes { %s } } } }
-}
-"""
-
-
-# Pages of older reviews, and of older comments, read for a PR: up to 1,000
-# of each. Anyone can comment on a public repo's PRs, and every event reads
-# them again, so a PR longer than that is the owner's (the cut in handle).
-OLDER_PAGES = 9
-
-
-def open_prs(owner, name):
-    """The repo's merge settings and every open PR, all pages, with the
-    reviews and comments of each it acts on, up to OLDER_PAGES older pages:
-    a long PR's verdicts, markers and rounds can be older than the last 100.
-    An outside contribution's older pages aren't read: it's the owner's
-    anyway."""
-    prs, cursor = [], None
-    while True:
-        info = C.graphql(PRS, owner=owner, name=name, cursor=cursor)["repository"]
-        page = info.pop("pullRequests")
-        prs += page["nodes"]
-        if not page["pageInfo"]["hasNextPage"]:
-            break
-        cursor = page["pageInfo"]["endCursor"]
-    for pr in filter(C.acted_on, prs):
-        for field, nodes in OLDER.items():
-            for _ in range(OLDER_PAGES):
-                if not pr[field]["pageInfo"]["hasPreviousPage"]:
-                    break
-                got = C.graphql(OLDER_PAGE % (field, nodes), id=pr["id"], cursor=pr[field]["pageInfo"]["startCursor"])
-                older = got["node"][field]
-                pr[field] = {"pageInfo": older["pageInfo"], "nodes": older["nodes"] + pr[field]["nodes"]}
-    return info, prs
-
-
-def ci_state(pr, proofs=()):
-    """green / pending / red / none (no checks at all) over every check on
-    the head except ours, and the names of the ones that aren't green. A
-    proof (a check a Claude job runs on a machine) that hasn't reported yet
-    is pending: nothing posts it until its job runs. A workflow GitHub
-    couldn't start (a bad file, a pin missing an input) leaves no check run,
-    only its suite: red, or a broken workflow would read as no CI."""
-    nodes = pr["commits"]["nodes"]
-    commit = nodes[0]["commit"] if nodes else {}
-    contexts = (commit.get("statusCheckRollup") or {}).get("contexts") or {}
-    suites = commit.get("checkSuites") or {}
-    if any((x.get("pageInfo") or {}).get("hasNextPage") for x in (contexts, suites)):
-        # Only the first 100 come back; one past them could be red.
-        return "pending", ["over 100 checks, too many to read"]
-    red, pending, seen = [], [], 0
-    for s in suites.get("nodes", []):
-        if s["conclusion"] == "STARTUP_FAILURE":
-            seen += 1
-            workflow = ((s.get("workflowRun") or {}).get("workflow") or {}).get("name") or "a workflow"
-            red.append(f"{workflow} (failed to start)")
-    for c in contexts.get("nodes", []):
-        if c["__typename"] == "CheckRun":
-            seen += 1
-            name = c["name"]
-            if c["status"] != "COMPLETED":
-                pending.append(name)
-            elif c["conclusion"] not in ("SUCCESS", "NEUTRAL", "SKIPPED"):
-                red.append(name)
-        else:
-            name = c["context"]
-            if name == CONTEXT:
-                continue
-            seen += 1
-            if c["state"] in ("PENDING", "EXPECTED"):
-                pending.append(name)
-            elif c["state"] != "SUCCESS":
-                red.append(name)
-    named = {c.get("name") or c.get("context") for c in contexts.get("nodes", [])}
-    for name in proofs:
-        if name not in named:
-            seen += 1
-            pending.append(name)
-    if not seen:
-        return "none", []
-    return ("red" if red else "pending" if pending else "green"), red or pending
-
-
-def our_status(pr):
-    nodes = pr["commits"]["nodes"]
-    rollup = (nodes[0]["commit"].get("statusCheckRollup") or {}) if nodes else {}
-    for c in (rollup.get("contexts") or {}).get("nodes", []):
-        if c["__typename"] == "StatusContext" and c["context"] == CONTEXT:
-            return c["state"].lower(), c.get("description") or ""
-    return None, ""
-
-
-def post_status(repo, pr, state, desc):
-    """False if GitHub didn't take it."""
-    desc = desc[:140]
-    if our_status(pr) == (state, desc):
-        return True
-    return C.write("api", f"repos/{repo}/statuses/{pr['headRefOid']}", "-f", f"state={state}",
-                   "-f", f"context={CONTEXT}", "-f", f"description={desc}", "-f", f"target_url={pr['url']}",
-                   check=False) is not None
-
-
-def merge_method(repo_info):
-    for flag, method in (("squashMergeAllowed", "--squash"), ("mergeCommitAllowed", "--merge"),
-                         ("rebaseMergeAllowed", "--rebase")):
-        if repo_info[flag]:
-            return method
-    return "--merge"
-
-
-def land(repo, pr, repo_info):
-    """Auto-merge (or merge now if nothing is left to wait for). False if
-    GitHub took neither."""
-    n = str(pr["number"])
-    if not pr["autoMergeRequest"]:
-        # Only the head that was checked: a push since then waits for the next pass.
-        method = [merge_method(repo_info), "--match-head-commit", pr["headRefOid"]]
-        if C.write("pr", "merge", n, "-R", repo, "--auto", *method, check=False) is None and not DRY:
-            # No branch rules to wait on: GitHub won't queue it, so merge it now.
-            return C.write("pr", "merge", n, "-R", repo, *method, check=False) is not None
-    return True
 
 
 def handle(repo, pr, repo_info, digest, obsolete=False):
@@ -290,6 +130,25 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
         st["updated"] = head
         return True
 
+    def deadline(kind):
+        """A pass when this kind's job is due to have ended (proj stops a turn
+        at jobTimeout), and every quarter hour past that while it still
+        hasn't (it waited for a slot first): its end kicks one, and this is
+        the one that sees it if that kick never got through."""
+        due = st.get(kind + "At", C.NOW) + (CFG["jobTimeout"] + 5) * MIN
+        C.wake(repo, due if due > C.NOW else C.NOW + 15 * MIN)
+
+    def running(kind, at=head):
+        """Whether this head's job of the kind (at: on its base, for the
+        judge's and the fix it asks for) is still queued or running, or proj
+        can't say. One that is keeps its deadline, since each pass replaces
+        the repo's wake-ups."""
+        jid = st.get(kind + "Job")
+        if st.get(kind) != at or not jid or C.job_state(jid) not in (None, "queued", "running"):
+            return False
+        deadline(kind)
+        return True
+
     def started(kind, task, at=head):
         """A Claude job, once per head (at: once per head on its base, for
         the judge's; recorded once it has started; until then it's tried
@@ -298,6 +157,8 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
         if jid:
             st[kind] = at
             st[kind + "Job"] = jid
+            st[kind + "At"] = C.NOW
+            deadline(kind)
             log(f"{tag}: a Claude job {jid} ({kind})")
         else:
             log(f"{tag}: couldn't start a Claude job (no checkout, or proj refused)")
@@ -308,8 +169,7 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
         """This head's job of the kind ended without the answer it was for
         (it crashed, timed out, or never posted it). Seen on two passes: the
         first may have read the PR just before its answer went up."""
-        jid = st.get(kind + "Job")
-        if st.get(kind) != at or not jid or C.job_state(jid) in (None, "queued", "running"):
+        if st.get(kind) != at or not st.get(kind + "Job") or running(kind, at):
             return False
         seen = st.get(kind + "Lost") == at
         st[kind + "Lost"] = at
@@ -319,9 +179,9 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
 
     def again(kind, task, doing, answer, at=head):
         """A job that ended without its answer is started once more; one that
-        does that twice is listed for the owner."""
+        does that twice fails the PR's status and is listed for the owner."""
         if st.get(kind + "Again") == at:
-            settle("pending", f"Settled, but two Claude jobs ended without {answer}"[:140],
+            settle("failure", f"Settled, but two Claude jobs ended without {answer}"[:140],
                    f"Two Claude jobs ended without {answer}")
         elif started(kind, task, at):
             st[kind + "Again"] = at
@@ -335,23 +195,25 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
         """The kind of fix job handed on this head that's still queued or
         running (or that proj can't say about), else None."""
         for k in ("handed", "redFixed", "failFixed"):
-            jid = st.get(k + "Job")
-            if st.get(k) == (judged_at if k == "failFixed" else head) and jid \
-                    and C.job_state(jid) in (None, "queued", "running"):
+            if running(k, judged_at if k == "failFixed" else head):
                 return k
         return None
 
-    def hand_off(why, kind="handed", at=head):
-        """A Claude job fixes it, one of each kind a head (at). One that ended
-        with this still to fix (it crashed, or pushed nothing) is handed once
-        more, and after a second it's listed for the owner. Never while
-        another fix job is still working on this head: two on one branch
-        push over each other."""
+    def hand_off(why, desc, due, kind="handed", at=head):
+        """Pending on desc while a Claude job fixes why, one of each kind a
+        head (at), started once it's due. One that ended with this still to
+        fix (it crashed, timed out, went quiet or pushed nothing) is handed
+        once more; after a second the status fails and the owner hears, until
+        a new head. Never while another fix job is still working on this
+        head: two on one branch push over each other."""
         retry = st.get(kind) == at
-        if retry and not lost(kind, at):
+        gone = retry and lost(kind, at)
+        if gone and st.get(kind + "Again") == at:
+            settle("failure", f"Two Claude jobs ended without fixing it: {desc}"[:140],
+                   "Two Claude jobs ended without fixing it")
             return
-        if retry and st.get(kind + "Again") == at:
-            digest.append(("Two Claude jobs ended without fixing it", line, why))
+        settle("pending", desc)
+        if not due or (retry and not gone):
             return
         busy = fixing()
         if busy:
@@ -415,10 +277,9 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
             # The judge's own build or tests failed on this head: a fix job
             # has it, and its push is judged again. Its own once a head: a
             # job that answered a finding here without pushing didn't fix this.
-            settle("pending", "Settled, but its build or tests fail; a Claude job is fixing it")
             hand_off("the Claude job that judged it found something failing on this head, its build or tests or a finding "
                      "left unfixed (its comment on the PR says what)",
-                     "failFixed", judged_at)
+                     "Settled, but its build or tests fail; a Claude job is fixing it", True, "failFixed", judged_at)
         elif update_branch():
             settle("pending", "Settled, but behind its base: brought up to date, reviewed again")
         elif lost("judged", judged_at):
@@ -538,9 +399,7 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
         elif threads or ci == "red":
             what = threads or "CI is red (" + ", ".join(ci_names) + ")"
             kind = "handed" if threads else "redFixed"
-            settle("pending", f"Dependency update; {what}"[:140])
-            if handoff_due(kind):
-                hand_off(what, kind)
+            hand_off(what, f"Dependency update; {what}", handoff_due(kind), kind)
         elif dep == "major" and renovate and major_verdict != "ok":
             # renovate-sweep's verdict comes first, and its job runs the proofs
             # until then: neither a judge nor a proof job of the steward's
@@ -836,16 +695,16 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
     if late:
         what.append("review findings on " + ", ".join(sorted(set(late))))
     if waiting:
-        settle("pending", "; ".join(waiting + stuck + what))
         # One reviewer's threads needn't wait for the other to finish.
-        if what and not swept and handoff_due("handed"):
-            hand_off(", ".join(what))
+        if what:
+            hand_off(", ".join(what), "; ".join(waiting + stuck + what), not swept and handoff_due("handed"))
+        else:
+            settle("pending", "; ".join(waiting + stuck))
     elif what and capped:
-        settle("pending", f"Past the review-round limit ({rounds}): " + ", ".join(what))
-        if not swept and handoff_due("handed"):
-            hand_off(f"{', '.join(what)}, after {rounds} review rounds with findings, the limit, so its reviewers won't look again. "
-                     "Weigh each finding on its merits: fix what's a real defect and answer the rest with why. "
-                     "A Claude job judges it after, without the reviewers")
+        hand_off(f"{', '.join(what)}, after {rounds} review rounds with findings, the limit, so its reviewers won't look again. "
+                 "Weigh each finding on its merits: fix what's a real defect and answer the rest with why. "
+                 "A Claude job judges it after, without the reviewers",
+                 f"Past the review-round limit ({rounds}): " + ", ".join(what), not swept and handoff_due("handed"))
     elif (not clean and not capped) or what:
         if not what:
             # Every finding answered without a new commit: the reviewers that
@@ -857,16 +716,13 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
                         ask(r)
             settle("pending", "Findings answered; " + ("; ".join(stuck) if stuck else f"review round {rounds + 1} next"))
         else:
-            settle("pending", f"Round {rounds}: " + ", ".join(what))
-            if not swept and handoff_due("handed"):
-                hand_off(", ".join(what))
+            hand_off(", ".join(what), f"Round {rounds}: " + ", ".join(what), not swept and handoff_due("handed"))
     # 2. The reviewers are clean on this head and nothing is open: CI, then land.
     elif ci == "red":
-        settle("pending", "CI is red: " + ", ".join(ci_names)[:100])
         # Its own once a head, apart from a findings job's: one that answered
         # a finding here without pushing didn't fix a check that failed since.
-        if not swept and handoff_due("redFixed"):
-            hand_off("CI is red (" + ", ".join(ci_names) + ")", "redFixed")
+        hand_off("CI is red (" + ", ".join(ci_names) + ")", "CI is red: " + ", ".join(ci_names)[:100],
+                 not swept and handoff_due("redFixed"), "redFixed")
     elif held:
         judged("a Claude job was asked to judge this head", PAST_LIMIT if capped else REVIEWED)
     elif proof_only:
@@ -905,7 +761,7 @@ def main():
         review_worker.work()
         return
     try:
-        for d in ("", V.QUEUE, V.SNAP, V.DONE, V.ACCOUNT, V.SESSIONS, V.GIT):
+        for d in ("", V.QUEUE, V.SNAP, V.DONE, V.SESSIONS, V.GIT):
             os.makedirs(os.path.join(STATE, d), exist_ok=True)
     except OSError:
         if not DRY:
@@ -1001,9 +857,8 @@ def main():
     if kick is None:
         R.unhook_gone(repos + R.hook_projects(repos))
     # Last: GitHub failing it leaves the pass's state saved. A line more than
-    # one repo has (a reviewer out of service) is listed once, and one that's
-    # no repo's (DeepSeek's balance) goes with them.
-    R.publish(list(dict.fromkeys(tuple(x) for repo in sorted(digest) for x in digest[repo])) + V.low_balance())
+    # one repo has (a reviewer out of service) is listed once.
+    R.publish(list(dict.fromkeys(tuple(x) for repo in sorted(digest) for x in digest[repo])))
 
 
 if __name__ == "__main__":
