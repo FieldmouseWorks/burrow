@@ -122,6 +122,8 @@
         # burrow-events for real: deliveries, kicks and wake-ups starting a
         # handler's units through polkit.
         events-service = import ./tests/events.nix { inherit self pkgs; };
+        # The ledger's pass over one repo, with a stand-in for cn.
+        ledger = import ./tests/ledger.nix { inherit self pkgs; };
         # Which deliveries and kicks start whose pass, with a stand-in for systemctl.
         events = pkgs.runCommand "events-check" { nativeBuildInputs = [ pkgs.python3 ]; } ''
           python3 -I ${./tests/events.py} ${./modules/events}/events.py
