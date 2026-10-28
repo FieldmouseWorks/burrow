@@ -83,13 +83,13 @@ assert C.WAKE["sam/r"] == T + 700 + 60 + 1, C.WAKE
 S.land = land
 fresh_pr_state()
 C.job, job = (lambda repo, task, clone=False: None), C.job
-run(clean(files=["migrations/1.sql"]), 700)
+run(clean(files=["secrets/1.yaml"]), 700)
 assert C.WAKE["sam/r"] == T + 700 + 5 * 60 + 1, C.WAKE
 C.job = job
 fresh_pr_state()
-run(clean(files=["migrations/1.sql"]), 700)
+run(clean(files=["secrets/1.yaml"]), 700)
 STATES["job-1"] = "error"
-run(clean(files=["migrations/1.sql"]), 800)
+run(clean(files=["secrets/1.yaml"]), 800)
 assert C.WAKE["sam/r"] == T + 800 + 60 + 1, C.WAKE
 STATES.clear()
 fresh_pr_state()

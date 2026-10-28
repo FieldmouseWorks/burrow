@@ -41,12 +41,12 @@ assert not merged()
 # One touching a one-way path still needs the ok: a judge's land doesn't
 # replace a held or missing verdict.
 fresh_pr_state()
-gated = {**major, "files": ("migrations/0002.sql",)}
+gated = {**major, "files": ("secrets/app.yaml",)}
 for said_ in ([], [said(swept("held"))]):
     status, _ = run(mkpr(comments=[*said_, said(judgment("land", n=8))], **gated), 900)
     assert not merged() and JOBS == [] and "renovate-sweep" in status, said_
 status, _ = run(mkpr(comments=[said(swept("ok"))], **gated), 900)
-assert not merged() and len(JOBS) == 1 and "migrations/" in JOBS[0]
+assert not merged() and len(JOBS) == 1 and "secrets/" in JOBS[0]
 assert "no reviewer reads" in JOBS[0] and "renovate-sweep cleared the major version" in JOBS[0], JOBS[0]
 assert "its reviewers found nothing" not in JOBS[0], JOBS[0]
 status, _ = run(mkpr(comments=[said(swept("ok")),

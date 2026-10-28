@@ -58,7 +58,7 @@ change nothing else in the same PR.
    deleted.
 6. A settled PR it won't land on its own word gets one Claude job a head
    that judges it: one touching a one-way path (`burrow.autoland.oneWay`:
-   CODEOWNERS, secrets, migrations), one in a repo with no CI yet (the job
+   CODEOWNERS, secrets), one in a repo with no CI yet (the job
    builds and tests it itself, unless the repo is set `requireCi = false`:
    nothing to test), a dependency update touching a one-way path, and a
    Dependabot major. The job lands anything a revert or a follow-up can undo,
