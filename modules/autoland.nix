@@ -72,6 +72,11 @@ let
   renovateAuthor = config.burrow.updates.renovate.gitAuthor or null;
   renovateMatch = if renovateAuthor == null then null else builtins.match ".*<([^>]*)>.*" renovateAuthor;
 
+  # The title Renovate gives each repo's dashboard (its
+  # dependencyDashboardTitle default): the issue dashboard.py reads, and the
+  # one whose events start a pass.
+  dashboardTitle = "Dependency Dashboard";
+
   settings = {
     renovateEmail = if renovateMatch == null then null else lib.head renovateMatch;
     inherit (cfg) owners exclude context rulesets keepBranches baselineJobs baselinePerPass;
@@ -97,6 +102,13 @@ let
     # when the inbox will: notify.repo cloned in projectsDir, and the
     # steward's gh login one of inbox.authors. Otherwise it's the owner's.
     inbox = { inherit (config.burrow.proj.inbox) enable label authors; };
+    # Renovate's dashboards (dashboard.py), and where a job that ticks a box
+    # on one kicks Renovate to read it.
+    dashboard = {
+      inherit (cfg.dashboard) enable waitDays errorDays;
+      title = dashboardTitle;
+      renovateKick = if config.burrow.updates.renovate.enable or false then "${config.burrow.events.kick}/renovate" else null;
+    };
     defaults = {
       inherit (cfg) rounds oneWay;
       handoffAfter = cfg.handoffAfterMinutes;
@@ -141,22 +153,27 @@ let
   };
 
   configFile = pkgs.writeText "autoland.json" (builtins.toJSON settings);
-  # steward.py and the modules it imports from beside it, linted as they're
-  # built.
+  # steward.py and every module beside it, linted as they're built: all of
+  # them, so a new one can't be left behind.
   stewardSrc = pkgs.runCommand "autoland-steward-src"
     { nativeBuildInputs = [ pkgs.python3Packages.flake8 ]; } ''
     mkdir $out
-    cp ${./autoland/steward.py} $out/steward.py
-    cp ${./autoland/common.py} $out/common.py
-    cp ${./autoland/reviewers.py} $out/reviewers.py
-    cp ${./autoland/review_worker.py} $out/review_worker.py
-    cp ${./autoland/egress.py} $out/egress.py
-    cp ${./autoland/repos.py} $out/repos.py
-    cp ${./autoland/tasks.py} $out/tasks.py
-    cp ${./autoland/touches.py} $out/touches.py
-    cp ${./autoland/seal.py} $out/seal.py
-    cp ${./autoland/prs.py} $out/prs.py
+    cp ${./autoland}/*.py $out/
     flake8 --ignore E501,W503 $out
+  '';
+  # Each of them imported from the package, with this machine's settings, as
+  # part of the system's build: an import that doesn't resolve there (a
+  # module the package lacks) fails the build, not every pass once it's live.
+  # review_worker is imported only by the reviews' runs, so each one is.
+  stewardImports = pkgs.runCommand "autoland-steward-imports" { } ''
+    cd ${stewardSrc}
+    AUTOLAND_CONFIG=${configFile} ${pkgs.python3}/bin/python3 -I -c '
+    import importlib, pathlib, sys
+    sys.path.insert(0, ".")
+    for p in sorted(pathlib.Path(".").glob("*.py")):
+        importlib.import_module(p.stem)
+    '
+    touch $out
   '';
   # The command, with this machine's config, so `autoland-steward status`
   # works from any shell, not only in the service.
@@ -318,6 +335,35 @@ in
       '';
     };
 
+    dashboard = {
+      enable = mkOption {
+        type = types.bool;
+        default = (config.burrow.updates.enable or false) && (config.burrow.updates.renovate.enable or false);
+        defaultText = lib.literalExpression "burrow.updates.renovate.enable";
+        description = ''
+          Watch each repo's Renovate Dependency Dashboard (autoland/dashboard.py):
+          an update that sits on it too long without a PR goes to a Claude job,
+          and one still there a day after that job to the stuck issue. Its
+          job reads Renovate's journal, so it wants Renovate on this machine.
+        '';
+      };
+      waitDays = mkOption {
+        type = types.ints.positive;
+        default = 4;
+        description = ''
+          How long an update waiting on something (a release's soak, its
+          schedule, a rate limit, an approval) sits on the dashboard before
+          it's stuck. Keep it a day past the soak Renovate gives a release
+          (minimumReleaseAge, burrow.updates), or every soak is stuck.
+        '';
+      };
+      errorDays = mkOption {
+        type = types.ints.positive;
+        default = 1;
+        description = "How long an error, a problem with the repo or a failed lookup sits on the dashboard before it's stuck.";
+      };
+    };
+
     keepBranches = mkOption {
       type = types.listOf types.str;
       default = [ "gh-pages" "release/*" "releases/*" ];
@@ -430,6 +476,7 @@ in
   };
 
   config = lib.mkIf cfg.enable {
+    system.checks = [ stewardImports ];
     assertions = [{
       assertion = rv.codex.enable;
       message = "burrow.autoland needs its reviewer: turn on burrow.autoland.reviewers.codex.";
@@ -465,7 +512,10 @@ in
       # their threads, comments (a judge's verdict), CI finishing, and commit
       # statuses (a proof's verdict).
       events = [ "push" "pull_request" "pull_request_review" "pull_request_review_comment"
-        "pull_request_review_thread" "issue_comment" "check_suite" "status" ];
+        "pull_request_review_thread" "issue_comment" "check_suite" "status" ]
+        ++ lib.optional cfg.dashboard.enable "issues";
+      # Of the issues, only Renovate's dashboard (dashboard.py).
+      issueTitles = [ dashboardTitle ];
       unit = "autoland";
       wake = "${stateDir}/autoland/wake.json";
       # Its own status tells it nothing (a job awaiting the PR does want it).

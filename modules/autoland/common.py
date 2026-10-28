@@ -35,6 +35,11 @@ class Unavailable(RuntimeError):
     again next pass."""
 
 
+class Gone(RuntimeError):
+    """GitHub has no such thing (404), or had it and deleted it (410): asking
+    again won't bring it back."""
+
+
 UNAVAILABLE = re.compile(r"rate limit|HTTP (429|5\d\d)|error connecting|connection (reset|refused)|timed? ?out|\bEOF\b|network is unreachable|no such host|TLS handshake", re.I)
 
 
@@ -73,6 +78,29 @@ def gh(*args, input=None, check=True):
         return json.loads(out) if out else ""
     except ValueError:
         return out
+
+
+def fresh(path, etag=None):
+    """GET path unless it's unchanged since GitHub gave it etag: (its etag,
+    its JSON), or None when it's unchanged. GitHub doesn't count a request
+    it answers 304 against the rate limit, so a look at something that
+    rarely changes costs nothing most of the times it's taken. Raises as
+    gh() does, and Gone when there's no such thing."""
+    p = subprocess.run(["gh", "api", "-i", *(["-H", f"If-None-Match: {etag}"] if etag else []), path],
+                       capture_output=True, text=True)
+    status, _, rest = p.stdout.partition("\n")
+    code = status.split(" ")[1:2]
+    if code == ["304"]:
+        return None
+    head, _, body = rest.partition("\n\n")  # text mode reads GitHub's \r\n as \n
+    if p.returncode != 0:
+        why = f"gh api {path}: {p.stderr.strip()[:300]}"
+        limited(p.stderr)
+        if code in (["404"], ["410"]):
+            raise Gone(why)
+        raise (Unavailable if UNAVAILABLE.search(p.stderr) else RuntimeError)(why)
+    tag = next((h.split(":", 1)[1].strip() for h in head.split("\n") if h.lower().startswith("etag:")), None)
+    return tag, json.loads(body)
 
 
 def write(*args, **kw):

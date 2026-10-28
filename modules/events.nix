@@ -19,7 +19,7 @@ let
   configFile = pkgs.writeText "burrow-events.json" (builtins.toJSON {
     inherit (cfg) kickPort;
     port = if hooked then cfg.port else null;
-    handlers = lib.mapAttrs (_: h: { inherit (h) events unit wake ownStatuses perRepo repos pushes branches; }) cfg.handlers;
+    handlers = lib.mapAttrs (_: h: { inherit (h) events unit wake ownStatuses perRepo repos pushes branches issueTitles; }) cfg.handlers;
   });
   src = pkgs.runCommand "burrow-events" { nativeBuildInputs = [ pkgs.python3.pkgs.flake8 ]; } ''
     mkdir $out
@@ -143,6 +143,17 @@ in
               request's head, the commit a check suite or status is for): only
               those about one of these branches count (globs). An event about
               no branch (an issue, a comment) always does. null: every branch.
+            '';
+          };
+          issueTitles = mkOption {
+            type = types.nullOr (types.listOf types.str);
+            default = null;
+            example = [ "Dependency Dashboard" ];
+            description = ''
+              For `issues` events (an issue opened, edited, closed ...): only
+              those about an issue with one of these titles, exactly, count.
+              null: every issue. Comments are `issue_comment`, which this
+              doesn't touch.
             '';
           };
           ownStatuses = mkOption {

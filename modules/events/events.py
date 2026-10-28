@@ -12,8 +12,9 @@ Three things put a repo in a handler's line:
     X-GitHub-Event is one of the handler's. Only a delivery signed with the
     hook's secret counts, and all it says is which repo changed: the pass
     reads the rest from GitHub. A handler can take only the repos it names (`repos`),
-    only pushes to a repo's default branch (`pushes`), and only the other
-    events about some branches (`branches`).
+    only pushes to a repo's default branch (`pushes`), only the other
+    events about some branches (`branches`), and only `issues` events about
+    an issue with one of some titles (`issueTitles`).
   - A kick on the local port: POST /kick/HANDLER/OWNER/REPO for one repo, or
     /kick/HANDLER for a full pass. Something on this machine that just
     changed what a pass would find kicks it: a proj job's turn ending, a
@@ -122,6 +123,10 @@ def takes(h, event, payload):
     if event == "push":
         default = payload["repository"].get("default_branch")
         return h.get("pushes", "any") == "any" or (isinstance(default, str) and payload.get("ref") == "refs/heads/" + default)
+    titles = h.get("issueTitles")
+    if event == "issues" and titles is not None:
+        title = (payload.get("issue") or {}).get("title")
+        return isinstance(title, str) and title in titles
     pats = h.get("branches")
     names = branches(event, payload) if pats is not None else None
     return names is None or any(fnmatch.fnmatchcase(n, p) for n in names for p in pats)

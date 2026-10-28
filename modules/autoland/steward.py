@@ -18,10 +18,13 @@ event reports):
      merge it, or list it for the owner.
   3. Once a day per repo, delete branches whose tip is already in the
      default branch, and list the stale unmerged ones.
-  4. Keep one issue up to date with everything waiting for the owner.
+  4. Read each repo's Renovate dashboard: what sits on it too long, short
+     of a PR, goes to a Claude job (dashboard.py).
+  5. Keep one issue up to date with everything waiting for the owner, and
+     one with what the pipeline is stuck on, for a Claude job (repos.py).
 
-`autoland-steward kick OWNER/REPO` is a pass over that repo's PRs alone
-(2, and 4), the one burrow-events starts within seconds of what changes it:
+`autoland-steward kick OWNER/REPO` is a pass over that repo alone (2, 4
+and 5), the one burrow-events starts within seconds of what changes it:
 a webhook delivery, a Claude job's turn ending, a reviewer's answer coming
 back, or a wait the last pass booked ending (common.wake).
 
@@ -45,6 +48,7 @@ import sys
 import time
 
 import common as C
+import dashboard as D
 import repos as R
 import reviewers as V
 from common import CFG, DRY, MIN, STATE, load, log, repo_cfg, save, ts
@@ -905,6 +909,12 @@ def run_pass(kick):
         except Exception as e:
             log(f"{repo}: {e}")
             C.wake(repo, C.NOW + 5 * MIN)  # GitHub, often: another look soon
+        if CFG["dashboard"]["enable"]:
+            try:
+                D.watch(repo, mine)
+            except Exception as e:  # its own: the repo's PRs were seen to all the same
+                log(f"{repo}: its dashboard: {e}")
+                C.wake(repo, C.NOW + 5 * MIN)
     # This pass's wake-ups and owner's lines replace the ones it had for the
     # repos it saw; a full pass's, all of them.
     seen = {r["repo"] for r in repos}
