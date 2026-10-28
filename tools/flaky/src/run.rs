@@ -25,7 +25,7 @@ pub fn run(
 ) -> i32 {
     let mut gate = Command::new(&cmd[0]);
     gate.args(&cmd[1..]);
-    let tests = match quarantine::list(api, repo, cache, quarantine::now()) {
+    let q = match quarantine::list(api, repo, cache, quarantine::now()) {
         Ok(q) => q,
         Err(e) => {
             eprintln!(
@@ -37,21 +37,18 @@ pub fn run(
     };
     let dir = scratch("flaky-run");
     let (x, r) = (dir.join("expired"), dir.join("report.jsonl"));
-    let expired = quarantine::expired(&tests);
     if let Err(e) = fs::create_dir_all(&dir)
-        .and_then(|_| fs::write(&x, lines(&expired)))
+        .and_then(|_| fs::write(&x, lines(&q.expired)))
         .and_then(|_| fs::write(&r, ""))
     {
         eprintln!("flaky: {}: {e}", dir.display());
         return 1;
     }
-    for t in quarantine::tests(&tests) {
-        let out = if expired.contains(&t) {
-            ", run out: a failure fails at once"
-        } else {
-            ""
-        };
-        eprintln!("flaky: quarantined: {t}{out}");
+    for t in quarantine::tests(&q.held) {
+        eprintln!("flaky: quarantined: {t}");
+    }
+    for t in &q.expired {
+        eprintln!("flaky: quarantine run out, so a failure fails at once: {t}");
     }
     gate.env("FLAKY_EXPIRED", &x).env("FLAKY_REPORT", &r);
     let mut code = code(&cmd[0], gate.status());
@@ -70,9 +67,10 @@ pub fn run(
             if entries.is_empty() {
                 return Ok(Vec::new());
             }
-            let open =
-                quarantine::list(api, repo, cache, quarantine::now()).map_err(|e| e.to_string())?;
-            filing::file(api, repo, &entries, &tests, &open, &place).map_err(|e| e.to_string())
+            let open = quarantine::list(api, repo, cache, quarantine::now())
+                .map_err(|e| e.to_string())?
+                .held;
+            filing::file(api, repo, &entries, &q, &open, &place).map_err(|e| e.to_string())
         });
     match filed {
         Ok(f) => {
@@ -110,8 +108,8 @@ pub fn scratch(name: &str) -> std::path::PathBuf {
 }
 
 /// The tests, one a line.
-pub fn lines(t: &[&str]) -> String {
-    t.iter().map(|t| format!("{t}\n")).collect()
+pub fn lines<S: AsRef<str>>(t: &[S]) -> String {
+    t.iter().map(|t| format!("{}\n", t.as_ref())).collect()
 }
 
 fn head() -> Option<String> {

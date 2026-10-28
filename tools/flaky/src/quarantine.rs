@@ -1,9 +1,11 @@
 //! The tests a repo quarantines: one open issue each (test.rs), opened, and
 //! if retitled or labelled since, changed by the repo's own GitHub Actions or
-//! by someone who can push to it. A list is one request, one more for each
-//! such issue's history, and one for each person in it; with a cache, each is
-//! a conditional one, which GitHub doesn't count against the login's rate
-//! limit when nothing changed.
+//! by someone who can push to it. And the tests whose quarantine has run
+//! out, which goes by every open `flaky` issue, whoever opened or changed
+//! it. A list is one request, one more for each issue's history, and one
+//! for each person in the histories of the issues that quarantine; with a
+//! cache, each is a conditional one, which GitHub doesn't count against the
+//! login's rate limit when nothing changed.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -13,7 +15,10 @@ use serde_json::{Map, Value, json};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::github::{Api, Error, call};
-use crate::test::{ACTIONS, EXPIRES, LABEL, can_push, quarantined_by, seconds};
+use crate::test::{ACTIONS, EXPIRES, LABEL, PREFIX, can_push, quarantined_by, seconds, valid};
+
+/// What a cache holds: one written in another shape is read as none.
+const CACHE: u64 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Quarantined {
@@ -21,21 +26,36 @@ pub struct Quarantined {
     pub issue: u64,
     /// Who opened the issue: their login (an app's ends in `[bot]`).
     pub author: String,
-    /// Whether its quarantine had run out (test::EXPIRES) when it was listed.
-    pub expired: bool,
 }
 
-/// Every open issue that quarantines a test, by test, then issue (a test
-/// with two has its oldest first), as of `now`.
+/// A repo's quarantine, as of when it was listed.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Quarantine {
+    /// Every open issue that quarantines a test, by test, then issue (a
+    /// test with two has its oldest first).
+    pub held: Vec<Quarantined>,
+    /// The tests whose quarantine has run out (test::EXPIRES), each once,
+    /// sorted. This fails closed: it counts every test an open `flaky` issue
+    /// names or has named, whoever opened, retitled or relabelled it, so
+    /// nobody who can't push can give a test back its second try that way.
+    /// An issue whose opening time can't be read has run out.
+    pub expired: Vec<String>,
+}
+
+/// The repo's quarantine as of `now`.
 pub fn list(
     api: &mut dyn Api,
     repo: &str,
     cache: Option<&Path>,
     now: u64,
-) -> Result<Vec<Quarantined>, Error> {
+) -> Result<Quarantine, Error> {
     let path = format!("repos/{repo}/issues?labels={LABEL}&state=open&per_page=100");
     let file = cache.map(|d| d.join(format!("{repo}.json")));
-    let kept = file.as_deref().and_then(read).unwrap_or(Value::Null);
+    let kept = file
+        .as_deref()
+        .and_then(read)
+        .filter(|k| k["v"] == CACHE)
+        .unwrap_or(Value::Null);
     let (etag, issues) = all(api, &path, &kept["issues"], keep)?;
     let mut who = Who {
         repo,
@@ -43,39 +63,43 @@ pub fn list(
         pushers: Map::new(),
     };
     let mut histories = Map::new();
-    let mut out = Vec::new();
+    let mut out = Quarantine::default();
     for i in issues.as_array().into_iter().flatten() {
-        let (Some(test), Some(issue), Some(author)) = (
-            quarantined_by(i),
-            i["number"].as_u64(),
-            i["user"]["login"].as_str(),
-        ) else {
+        let Some(issue) = i["number"].as_u64() else {
             continue;
         };
-        if !who.may(api, &i["user"])? {
+        if i["pull_request"].is_object() {
             continue;
         }
         let n = issue.to_string();
         let path = format!("repos/{repo}/issues/{n}/events?per_page=100");
         let (tag, changes) = all(api, &path, &kept["histories"][n.as_str()], change)?;
         histories.insert(n, json!({"etag": tag, "items": changes}));
-        let mut vouched = true;
-        for c in changes
+        let changes: Vec<&Value> = changes
             .as_array()
             .into_iter()
             .flatten()
             .filter(|c| !c.is_null())
-        {
+            .collect();
+        let opened = i["created_at"].as_str().and_then(seconds).unwrap_or(0);
+        if now >= opened.saturating_add(EXPIRES) {
+            out.expired.extend(names(i, &changes));
+        }
+        let (Some(test), Some(author)) = (quarantined_by(i), i["user"]["login"].as_str()) else {
+            continue;
+        };
+        if !who.may(api, &i["user"])? {
+            continue;
+        }
+        let mut vouched = true;
+        for c in &changes {
             vouched = vouched && who.may(api, &c["actor"])?;
         }
         if vouched {
-            // One whose opening can't be read has run out: its failures fail.
-            let opened = i["created_at"].as_str().and_then(seconds).unwrap_or(0);
-            out.push(Quarantined {
+            out.held.push(Quarantined {
                 test,
                 issue,
                 author: author.to_string(),
-                expired: now >= opened.saturating_add(EXPIRES),
             });
         }
     }
@@ -83,32 +107,38 @@ pub fn list(
         match etag {
             Some(tag) => write(
                 f,
-                &json!({"issues": {"etag": tag, "items": issues}, "pushers": who.pushers, "histories": histories}),
+                &json!({"v": CACHE, "issues": {"etag": tag, "items": issues}, "pushers": who.pushers, "histories": histories}),
             ),
             None => {
                 let _ = fs::remove_file(f);
             }
         }
     }
-    out.sort_by(|a, b| (&a.test, a.issue).cmp(&(&b.test, b.issue)));
+    out.held
+        .sort_by(|a, b| (&a.test, a.issue).cmp(&(&b.test, b.issue)));
+    out.expired.sort();
+    out.expired.dedup();
     Ok(out)
+}
+
+/// Every test an issue names or has named: by its title, and by each title
+/// a retitle took from it or gave it.
+fn names(issue: &Value, changes: &[&Value]) -> Vec<String> {
+    std::iter::once(&issue["title"])
+        .chain(
+            changes
+                .iter()
+                .flat_map(|c| [&c["rename"]["from"], &c["rename"]["to"]]),
+        )
+        .filter_map(|t| t.as_str()?.strip_prefix(PREFIX))
+        .filter(|t| valid(t))
+        .map(String::from)
+        .collect()
 }
 
 /// The tests quarantined, each once.
 pub fn tests(q: &[Quarantined]) -> Vec<&str> {
     let mut t: Vec<&str> = q.iter().map(|x| x.test.as_str()).collect();
-    t.dedup();
-    t
-}
-
-/// The tests whose quarantine had run out, each once: one with an issue
-/// that has, though a newer one hasn't, is as old as its oldest.
-pub fn expired(q: &[Quarantined]) -> Vec<&str> {
-    let mut t: Vec<&str> = q
-        .iter()
-        .filter(|x| x.expired)
-        .map(|x| x.test.as_str())
-        .collect();
     t.dedup();
     t
 }
@@ -191,12 +221,14 @@ impl Who<'_> {
 }
 
 /// Of an issue's history, what changes the test it quarantines: a retitle,
-/// or its label put on. Who did it is all a cache keeps; anything else is
-/// null.
+/// or its label put on. Who did it, and a retitle's titles, are all a cache
+/// keeps; anything else is null.
 fn change(e: &Value) -> Value {
-    let labelled = e["event"] == "labeled" && e["label"]["name"] == LABEL;
-    if e["event"] == "renamed" || labelled {
-        json!({"actor": {"login": e["actor"]["login"], "type": e["actor"]["type"]}})
+    let actor = json!({"login": e["actor"]["login"], "type": e["actor"]["type"]});
+    if e["event"] == "renamed" {
+        json!({"actor": actor, "rename": {"from": e["rename"]["from"], "to": e["rename"]["to"]}})
+    } else if e["event"] == "labeled" && e["label"]["name"] == LABEL {
+        json!({"actor": actor})
     } else {
         Value::Null
     }
@@ -342,35 +374,46 @@ mod tests {
         for n in [2, 4, 8, 9] {
             history(&mut gh, n, &[("labeled", "sam", "flaky")]);
         }
+        gh.on(
+            "GET",
+            "repos/sam/game/issues/",
+            vec![ok(200, json!([]), &[])],
+        );
         let got = list(&mut gh, "sam/game", None, NOW).unwrap();
         let q = |t: &str, n, a: &str| Quarantined {
             test: t.into(),
             issue: n,
             author: a.into(),
-            expired: false,
         };
         assert_eq!(
             got,
-            vec![
-                q("a", 4, ACTIONS),
-                q("b", 2, "wri"),
-                q("b", 9, "sam"),
-                q("e", 8, "sam")
-            ]
+            Quarantine {
+                held: vec![
+                    q("a", 4, ACTIONS),
+                    q("b", 2, "wri"),
+                    q("b", 9, "sam"),
+                    q("e", 8, "sam")
+                ],
+                expired: vec![]
+            }
         );
-        // Each person once, and each history of an issue someone who may
-        // opened; no app's permission.
+        // Every issue's history, since any of them can run a test's
+        // quarantine out; each person once, and no app's permission.
         let asked: Vec<&str> = gh.asked.iter().map(|a| a.1.as_str()).collect();
         assert_eq!(
             asked,
             [
                 PATH,
-                "repos/sam/game/collaborators/sam/permission",
                 "repos/sam/game/issues/9/events?per_page=100",
+                "repos/sam/game/collaborators/sam/permission",
                 "repos/sam/game/issues/4/events?per_page=100",
+                "repos/sam/game/issues/3/events?per_page=100",
                 "repos/sam/game/collaborators/tri/permission",
-                "repos/sam/game/collaborators/wri/permission",
                 "repos/sam/game/issues/2/events?per_page=100",
+                "repos/sam/game/collaborators/wri/permission",
+                "repos/sam/game/issues/1/events?per_page=100",
+                "repos/sam/game/issues/5/events?per_page=100",
+                "repos/sam/game/issues/6/events?per_page=100",
                 "repos/sam/game/collaborators/gone/permission",
                 "repos/sam/game/issues/8/events?per_page=100",
             ]
@@ -424,10 +467,92 @@ mod tests {
         history(&mut gh, 8, &[("labeled", "renovate[bot]", "flaky")]);
         let got: Vec<u64> = list(&mut gh, "sam/game", None, NOW)
             .unwrap()
+            .held
             .iter()
             .map(|q| q.issue)
             .collect();
         assert_eq!(got, [6, 7]);
+    }
+
+    #[test]
+    fn running_out_fails_closed() {
+        let mut gh = Fake::default();
+        // Three days old, all of them.
+        let old = |n, title: &str, login: &str| {
+            let mut i = issue(n, title, login);
+            i["created_at"] = json!("2026-10-25T23:28:42Z");
+            i
+        };
+        let mut reopened = old(7, "flaky: reopened", ACTIONS);
+        reopened["state_reason"] = json!("reopened");
+        let mut pr = old(9, "flaky: a-pr", ACTIONS);
+        pr["pull_request"] = json!({"url": "x"});
+        gh.on(
+            "GET",
+            PATH,
+            vec![ok(
+                200,
+                json!([
+                    old(4, "flaky: b-now", ACTIONS),
+                    old(5, "flaky: relabelled", ACTIONS),
+                    old(6, "flaky: by-triage", "tri"),
+                    reopened,
+                    old(8, "not a test", ACTIONS),
+                    pr,
+                    old(10, "flaky: no good!", ACTIONS),
+                ]),
+                &[],
+            )],
+        );
+        may(&mut gh, "tri", vec![can("read")]);
+        let renamed = |from: &str, to: &str| json!({"event": "renamed", "actor": user("tri"), "rename": {"from": from, "to": to}});
+        // Triage retitled it to name another test.
+        gh.on(
+            "GET",
+            "repos/sam/game/issues/4/events",
+            vec![ok(
+                200,
+                json!([renamed("flaky: a-before", "flaky: b-now")]),
+                &[],
+            )],
+        );
+        // Triage took its label off and put it back.
+        history(
+            &mut gh,
+            5,
+            &[("unlabeled", "tri", "flaky"), ("labeled", "tri", "flaky")],
+        );
+        // Triage retitled it to name none.
+        gh.on(
+            "GET",
+            "repos/sam/game/issues/8/events",
+            vec![ok(
+                200,
+                json!([renamed("flaky: was-a-test", "not a test")]),
+                &[],
+            )],
+        );
+        gh.on(
+            "GET",
+            "repos/sam/game/issues/",
+            vec![ok(200, json!([]), &[])],
+        );
+        let got = list(&mut gh, "sam/game", None, NOW).unwrap();
+        // None of them quarantines, and nobody who can't push gave a test
+        // its second try back.
+        assert_eq!(got.held, vec![]);
+        assert_eq!(
+            got.expired,
+            [
+                "a-before",
+                "b-now",
+                "by-triage",
+                "relabelled",
+                "reopened",
+                "was-a-test"
+            ]
+        );
+        assert!(!gh.asked.iter().any(|a| a.1.contains("issues/9/")));
     }
 
     #[test]
@@ -464,19 +589,9 @@ mod tests {
             vec![ok(200, json!([]), &[])],
         );
         let got = list(&mut gh, "sam/game", None, NOW).unwrap();
-        let flags: Vec<(u64, bool)> = got.iter().map(|q| (q.issue, q.expired)).collect();
-        assert_eq!(
-            flags,
-            [
-                (4, true),
-                (2, true),
-                (5, true),
-                (6, false),
-                (3, true),
-                (1, false)
-            ]
-        );
-        assert_eq!(expired(&got), ["odd", "old", "twice", "unknown"]);
+        let held: Vec<u64> = got.held.iter().map(|q| q.issue).collect();
+        assert_eq!(held, [4, 2, 5, 6, 3, 1]);
+        assert_eq!(got.expired, ["odd", "old", "twice", "unknown"]);
     }
 
     #[test]
@@ -487,6 +602,7 @@ mod tests {
             PATH,
             vec![ok(200, json!([issue(9, "flaky: b", "sam")]), &[])],
         );
+        history(&mut gh, 9, &[]);
         may(
             &mut gh,
             "sam",
@@ -551,7 +667,7 @@ mod tests {
         );
         let first = list(&mut gh, "sam/game", Some(&dir), NOW).unwrap();
         let second = list(&mut gh, "sam/game", Some(&dir), NOW).unwrap();
-        assert_eq!(first.len(), 1);
+        assert_eq!(first.held.len(), 1);
         assert_eq!(first, second);
         let etags: Vec<Option<&str>> = gh.asked.iter().map(|a| a.3.as_deref()).collect();
         assert_eq!(
@@ -561,8 +677,8 @@ mod tests {
                 None,
                 None,
                 Some("W/\"one\""),
-                Some("W/\"w\""),
-                Some("W/\"h\"")
+                Some("W/\"h\""),
+                Some("W/\"w\"")
             ]
         );
         // Only what quarantined_by and list read is kept.
@@ -574,8 +690,52 @@ mod tests {
         assert!(
             list(&mut gh, "sam/game", Some(&dir), NOW)
                 .unwrap()
+                .held
                 .is_empty()
         );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_cache_keeps_what_a_test_was_called() {
+        let dir = std::env::temp_dir().join(format!("flaky-names-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        // A cache in an older shape, which kept no titles: never read.
+        fs::create_dir_all(dir.join("sam")).unwrap();
+        fs::write(
+            dir.join("sam/game.json"),
+            json!({"issues": {"etag": "W/\"old\"", "items": []}}).to_string(),
+        )
+        .unwrap();
+        let mut i = issue(4, "flaky: b", ACTIONS);
+        i["created_at"] = json!("2026-10-25T23:28:42Z");
+        let mut gh = Fake::default();
+        gh.on(
+            "GET",
+            PATH,
+            vec![
+                ok(200, json!([i]), &[("ETag", "W/\"one\"")]),
+                ok(304, Value::Null, &[]),
+            ],
+        );
+        gh.on(
+            "GET",
+            "repos/sam/game/issues/4/events",
+            vec![
+                ok(
+                    200,
+                    json!([{"event": "renamed", "actor": user(ACTIONS), "rename": {"from": "flaky: a", "to": "flaky: b"}}]),
+                    &[("ETag", "W/\"h\"")],
+                ),
+                ok(304, Value::Null, &[]),
+            ],
+        );
+        let first = list(&mut gh, "sam/game", Some(&dir), NOW).unwrap();
+        let second = list(&mut gh, "sam/game", Some(&dir), NOW).unwrap();
+        assert_eq!(first.expired, ["a", "b"]);
+        assert_eq!(first, second);
+        assert_eq!(gh.asked[0].3, None);
+        assert_eq!(gh.asked[3].3.as_deref(), Some("W/\"h\""));
         fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -606,7 +766,7 @@ mod tests {
             vec![ok(200, json!([]), &[])],
         );
         let got = list(&mut gh, "sam/game", Some(&dir), NOW).unwrap();
-        assert_eq!(got.len(), 2);
+        assert_eq!(got.held.len(), 2);
         // A first page's etag says nothing of the second.
         assert!(!dir.join("sam/game.json").exists());
         let _ = fs::remove_dir_all(&dir);

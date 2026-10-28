@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use crate::github::{Api, Error};
-use crate::quarantine::{Quarantined, now};
+use crate::quarantine::{Quarantine, Quarantined, now};
 use crate::run::lines;
 use crate::{filing, quarantine, report};
 
@@ -37,8 +37,8 @@ pub fn start(api: &mut dyn Api, env: Env, cache: Option<&Path>) -> Result<(), Er
     let repo = need(env, "GITHUB_REPOSITORY")?;
     let dir = dir(env)?;
     let (x, r) = (dir.join("expired"), dir.join("report.jsonl"));
-    let tests = match quarantine::list(api, &repo, cache, now()) {
-        Ok(t) => t,
+    let q = match quarantine::list(api, &repo, cache, now()) {
+        Ok(q) => q,
         Err(e) => {
             println!(
                 "::warning title=Flaky tests::{}",
@@ -51,11 +51,11 @@ pub fn start(api: &mut dyn Api, env: Env, cache: Option<&Path>) -> Result<(), Er
     };
     let io = |e: std::io::Error| Error(format!("{}: {e}", dir.display()));
     fs::create_dir_all(&dir).map_err(io)?;
-    let expired = quarantine::expired(&tests);
-    fs::write(&x, lines(&expired)).map_err(io)?;
-    let held: String = tests
+    fs::write(&x, lines(&q.expired)).map_err(io)?;
+    let held: String = q
+        .held
         .iter()
-        .map(|t| format!("{} {} {} {}\n", t.issue, t.test, t.author, t.expired))
+        .map(|t| format!("{} {} {}\n", t.issue, t.test, t.author))
         .collect();
     fs::write(dir.join("held"), held).map_err(io)?;
     fs::write(&r, "").map_err(io)?;
@@ -67,14 +67,14 @@ pub fn start(api: &mut dyn Api, env: Env, cache: Option<&Path>) -> Result<(), Er
             r.display()
         ),
     )?;
-    match quarantine::tests(&tests) {
+    match quarantine::tests(&q.held) {
         t if t.is_empty() => println!("No tests quarantined in {repo}."),
         t => println!("Quarantined in {repo}: {}", t.join(", ")),
     }
-    if !expired.is_empty() {
+    if !q.expired.is_empty() {
         println!(
-            "Their quarantine has run out, so a failure fails at once: {}",
-            expired.join(", ")
+            "Quarantine run out, so a failure fails at once: {}",
+            q.expired.join(", ")
         );
     }
     Ok(())
@@ -133,9 +133,9 @@ pub fn file(api: &mut dyn Api, env: Env, cache: Option<&Path>) -> Result<(), Err
         }
         return Ok(());
     }
-    let held = held(&dir(env)?.join("held"))?;
-    let open = quarantine::list(api, &repo, cache, now())?;
-    let filed = filing::file(api, &repo, &entries, &held, &open, &place(env, &event)?)?;
+    let start = started(&dir(env)?)?;
+    let open = quarantine::list(api, &repo, cache, now())?.held;
+    let filed = filing::file(api, &repo, &entries, &start, &open, &place(env, &event)?)?;
     let server = need(env, "GITHUB_SERVER_URL")?;
     let mut summary = String::from("### Flaky tests\n\n");
     for f in &filed {
@@ -156,35 +156,40 @@ pub fn file(api: &mut dyn Api, env: Env, cache: Option<&Path>) -> Result<(), Err
 }
 
 /// The quarantine `start` gave the gate: none if it hasn't run.
-fn held(path: &Path) -> Result<Vec<Quarantined>, Error> {
-    let text = match fs::read_to_string(path) {
-        Ok(t) => t,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(e) => return Err(Error(format!("{}: {e}", path.display()))),
+fn started(dir: &Path) -> Result<Quarantine, Error> {
+    let read = |name: &str| {
+        let path = dir.join(name);
+        match fs::read_to_string(&path) {
+            Ok(t) => Ok((path, t)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok((path, String::new())),
+            Err(e) => Err(Error(format!("{}: {e}", path.display()))),
+        }
     };
-    text.lines()
+    let (path, text) = read("held")?;
+    let held = text
+        .lines()
         .map(|l| {
             let mut f = l.split(' ');
             match (
                 f.next().and_then(|n| n.parse().ok()),
                 f.next(),
                 f.next(),
-                f.next().and_then(|x| x.parse().ok()),
                 f.next(),
             ) {
-                (Some(issue), Some(test), Some(author), Some(expired), None) => Ok(Quarantined {
+                (Some(issue), Some(test), Some(author), None) => Ok(Quarantined {
                     test: test.into(),
                     issue,
                     author: author.into(),
-                    expired,
                 }),
                 _ => Err(Error(format!(
-                    "{}: {l:?} isn't ISSUE TEST AUTHOR EXPIRED",
+                    "{}: {l:?} isn't ISSUE TEST AUTHOR",
                     path.display()
                 ))),
             }
         })
-        .collect()
+        .collect::<Result<_, _>>()?;
+    let expired = read("expired")?.1.lines().map(String::from).collect();
+    Ok(Quarantine { held, expired })
 }
 
 /// Where the job ran, in Markdown: its run (and try), the PR and its head,
@@ -355,7 +360,7 @@ mod tests {
         assert_eq!(fs::read_to_string(&x).unwrap(), "stale\n");
         assert_eq!(
             fs::read_to_string(dir.join("flaky/held")).unwrap(),
-            "4 held github-actions[bot] false\n5 stale github-actions[bot] true\n"
+            "4 held github-actions[bot]\n5 stale github-actions[bot]\n"
         );
         // The gate reports two flaky tests, one of them quarantined.
         fs::write(&r, "{\"test\": \"wobbly\"}\n{\"test\": \"held\"}\n").unwrap();

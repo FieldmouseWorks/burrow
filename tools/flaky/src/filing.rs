@@ -7,7 +7,7 @@
 use serde_json::json;
 
 use crate::github::{Api, Error, call};
-use crate::quarantine::{self, Quarantined};
+use crate::quarantine::{Quarantine, Quarantined};
 use crate::report::Entry;
 use crate::test::{EXPIRES, LABEL, title};
 
@@ -26,23 +26,24 @@ pub struct Filed {
 }
 
 /// File each flaky test (one reported twice gets one comment), in the order
-/// the report has them. `held` is the quarantine the gate was given, `open`
-/// the one there is now (quarantine::list, both). `place` says where it
-/// happened, in Markdown: a run's link, a PR, a commit. A test reported
-/// flaky whose quarantine had run out is an error, and nothing is filed: the
-/// gate was told its failure fails, and passed it on a second try.
+/// the report has them. `start` is the quarantine the gate was given, `open`
+/// the issues that quarantine a test now (quarantine::list, both). `place`
+/// says where it happened, in Markdown: a run's link, a PR, a commit. A test
+/// reported flaky whose quarantine had run out is an error, and nothing is
+/// filed: the gate was told its failure fails, and passed it on a second
+/// try.
 pub fn file(
     api: &mut dyn Api,
     repo: &str,
     entries: &[Entry],
-    held: &[Quarantined],
+    start: &Quarantine,
     open: &[Quarantined],
     place: &str,
 ) -> Result<Vec<Filed>, Error> {
-    let expired = quarantine::expired(held);
+    let held = &start.held;
     let mut groups: Vec<(&str, Vec<&str>)> = Vec::new();
     for e in entries {
-        if expired.contains(&e.test.as_str()) {
+        if start.expired.contains(&e.test) {
             return Err(Error(format!(
                 "the gate passed `{}` on a second try, but its quarantine had run out: its failure fails the gate",
                 e.test
@@ -222,7 +223,13 @@ mod tests {
             test: test.into(),
             issue,
             author: "github-actions[bot]".into(),
-            expired: false,
+        }
+    }
+
+    fn held(q: &[Quarantined]) -> Quarantine {
+        Quarantine {
+            held: q.to_vec(),
+            expired: Vec::new(),
         }
     }
 
@@ -231,7 +238,7 @@ mod tests {
         let mut gh = gh();
         // `gone`'s fix merged while the gate ran, closing its issue, and
         // another run opened `mid`'s.
-        let held = [q("old", 12), q("gone", 20)];
+        let held = held(&[q("old", 12), q("gone", 20)]);
         let open = [q("mid", 40), q("old", 12)];
         let got = file(
             &mut gh,
@@ -302,16 +309,16 @@ mod tests {
     #[test]
     fn a_test_whose_quarantine_ran_out_cant_pass_on_a_second_try() {
         let mut gh = gh();
-        let stale = Quarantined {
-            expired: true,
-            ..q("stale", 5)
+        let start = Quarantine {
+            held: vec![q("held", 4), q("stale", 5)],
+            expired: vec!["stale".into()],
         };
         let e = file(
             &mut gh,
             "sam/game",
             &[entry("wobbly", None), entry("stale", None)],
-            &[q("held", 4), stale.clone()],
-            &[q("held", 4), stale],
+            &start,
+            &start.held,
             "x",
         )
         .unwrap_err();
@@ -326,7 +333,7 @@ mod tests {
     fn nothing_to_file_asks_nothing() {
         let mut gh = Fake::default();
         assert_eq!(
-            file(&mut gh, "sam/game", &[], &[], &[], "x").unwrap(),
+            file(&mut gh, "sam/game", &[], &Quarantine::default(), &[], "x").unwrap(),
             vec![]
         );
         assert!(gh.asked.is_empty());
@@ -344,7 +351,15 @@ mod tests {
                 &[],
             )],
         );
-        let e = file(&mut gh, "sam/game", &[entry("a", None)], &[], &[], "x").unwrap_err();
+        let e = file(
+            &mut gh,
+            "sam/game",
+            &[entry("a", None)],
+            &Quarantine::default(),
+            &[],
+            "x",
+        )
+        .unwrap_err();
         assert!(e.0.contains("HTTP 403"), "{e}");
     }
 

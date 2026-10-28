@@ -11,7 +11,7 @@ use flaky::{actions, run};
 const USAGE: &str = "usage:
   flaky quarantine OWNER/REPO [--json]
       the tests OWNER/REPO quarantines, one a line; with --json, one
-      {\"test\", \"issue\", \"author\", \"expired\"} a line, every open issue
+      {\"test\", \"issue\", \"author\"} a line, every open issue that quarantines
   flaky run OWNER/REPO [--where MARKDOWN] -- COMMAND [ARG...]
       COMMAND (a gate) with FLAKY_EXPIRED and FLAKY_REPORT set, then
       its report filed
@@ -58,16 +58,16 @@ fn go(args: &[String]) -> Result<i32, Usage> {
             Ok(
                 match quarantine::list(&mut gh, repo, cache, quarantine::now()) {
                     Ok(q) if json => {
-                        for x in q {
+                        for x in q.held {
                             println!(
                                 "{}",
-                                serde_json::json!({"test": x.test, "issue": x.issue, "author": x.author, "expired": x.expired})
+                                serde_json::json!({"test": x.test, "issue": x.issue, "author": x.author})
                             );
                         }
                         0
                     }
                     Ok(q) => {
-                        print!("{}", run::lines(&quarantine::tests(&q)));
+                        print!("{}", run::lines(&quarantine::tests(&q.held)));
                         0
                     }
                     Err(e) => fail(e.to_string()),

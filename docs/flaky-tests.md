@@ -120,8 +120,18 @@ pushes nothing), or by the repo's own CI (`github-actions[bot]`), quarantines
 a test: anyone can open an issue on a public repo. No other app's issue
 does. Every retitle since, and every time its `flaky` label went on, must be
 by one of those too, or the issue quarantines nothing: triage could
-otherwise rename the CI's issue to quarantine another test. Such an issue
-stays that way; a test that flakes again gets a new one.
+otherwise rename the CI's issue to point its fix job at another test. Such
+an issue stays that way; a test that flakes again gets a new one.
+
+Running out fails closed, so it counts every open `flaky` issue, whoever
+opened or changed it: two days after one opened, every test it names, or
+named before a retitle, gets no second try. Opening, retitling or
+relabelling an issue can take a test's second try away, never give it back.
+Closing the issue, or taking its label off, lifts it, as the fix's merge
+does; anyone GitHub lets close or unlabel an issue can, which on an
+organization's repo includes triage. The tool doesn't read closed or
+unlabelled issues, so it doesn't ask who did that. What it gives back is the
+second try alone: a test that fails both still fails the gate.
 
 The steward hands a job only the issues its own login, one of its authors or
 the CI opened; one someone else opened is listed for the owner. The job is
