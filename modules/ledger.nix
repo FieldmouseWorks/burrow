@@ -21,23 +21,55 @@ let
   # Where conaryd listens. Its directory is conaryd's own (RuntimeDirectory).
   socket = "/run/conary/conaryd.sock";
 
+  # When each repo's next pass is due, for burrow-events: {"OWNER/REPO": epoch}.
+  wake = "${config.burrow.stateDir}/ledger/wake.json";
+
   sync = pkgs.writeShellApplication {
     name = "burrow-ledger-sync";
-    runtimeInputs = [ cfg.package pkgs.gh pkgs.coreutils ];
+    runtimeInputs = [ cfg.package pkgs.gh pkgs.coreutils pkgs.jq pkgs.util-linux ];
     text = ''
       # The user's own gh login reads GitHub; its reviews are the steward's.
+      # The login is gh's own record of it: asking GitHub would cost a call
+      # every pass.
       GH_TOKEN=$(gh auth token)
-      CONARY_REVIEWERS=$(gh api user --jq .login)
+      CONARY_REVIEWERS=$(gh config get user -h github.com)
+      [ -n "$CONARY_REVIEWERS" ] || { echo "gh has no login for github.com" >&2; exit 1; }
       export GH_TOKEN CONARY_REVIEWERS
       export CONARY_LEDGER=${lib.escapeShellArg cfg.dir}
       export CONARY_ANCHOR_REPO=${lib.escapeShellArg cfg.anchorRepo}
       export CONARY_OWN_CONTEXTS=${lib.escapeShellArg (lib.concatStringsSep "," cfg.ownContexts)}
       export CONARY_SESSION_LINKS=${lib.escapeShellArg (lib.concatStringsSep "," cfg.sessionLinks)}
-      # Sets the ledger up the first time, and is a no-op after. A ledger
-      # whose key was lost fails here until the key is back.
-      cn init >/dev/null
+      wake=${lib.escapeShellArg wake}
+      # Sets the ledger up, until set-up has finished: its last step keeps
+      # the anchor's copy beside the log. Run on a ledger that's set up, it
+      # checks the anchor's whole history on GitHub, a call per commit on
+      # it, and every sync adds one. A ledger whose key was lost fails here
+      # until the key is back, and sync refuses one whose anchor moved.
+      [ -e "$CONARY_LEDGER/anchor" ] || cn init >/dev/null
+
+      # GitHub couldn't be asked (its rate limit, its errors, the network;
+      # cn exits 75): the repo's pass is booked for five minutes on, and
+      # this one hasn't failed. A failed unit is for what retrying won't fix,
+      # which is what fails a switch that runs meanwhile.
+      sync_repo() {
+        local rc=0
+        cn sync "$1" || rc=$?
+        [ "$rc" = 75 ] || return "$rc"
+        echo "$1: GitHub is unavailable; again in five minutes" >&2
+        exec {lk}>>"$wake.lock"
+        flock "$lk"
+        local now booked
+        now=$(date +%s)
+        booked=$(jq -c 'if type == "object" then . else {} end' "$wake" 2>/dev/null) || booked='{}'
+        jq -c --arg repo "$1" --argjson now "$now" --argjson at "$((now + 300))" \
+          'with_entries(select((.value | type) == "number" and .value > $now)) + {($repo): $at}' <<<"$booked" >"$wake.new"
+        mv -f "$wake.new" "$wake"
+        exec {lk}>&-
+      }
+
       if [ $# -gt 0 ]; then
-        exec cn sync "$1"
+        sync_repo "$1"
+        exit
       fi
       # One repo or owner failing doesn't hold up the rest, but fails the pass.
       failed=0
@@ -50,7 +82,7 @@ let
         fi
         while read -r repo; do
           [ -n "$repo" ] || continue
-          cn sync "$repo" || { echo "couldn't sync $repo" >&2; failed=1; }
+          sync_repo "$repo" || { echo "couldn't sync $repo" >&2; failed=1; }
         done <<<"$repos"
       done
       exit "$failed"
@@ -141,6 +173,7 @@ in
     systemd.tmpfiles.settings.burrow = {
       ${config.burrow.stateDir}.d = { mode = "0755"; user = "root"; group = "root"; };
       ${cfg.dir}.d = { mode = "0755"; inherit user; group = config.users.users.${user}.group; };
+      "${config.burrow.stateDir}/ledger".d = { mode = "0755"; inherit user; group = config.users.users.${user}.group; };
     };
 
     burrow.events.handlers.ledger = {
@@ -149,6 +182,7 @@ in
       events = [ "pull_request" "pull_request_review" "check_suite" "status" ];
       unit = "burrow-ledger";
       ownStatuses = cfg.ownContexts;
+      inherit wake;
     };
     # conary-mcp answers `why` in the session's own checkout, and asks
     # conaryd for the rest. Its own default socket is the user's runtime dir.
@@ -165,7 +199,9 @@ in
       description = if name == "burrow-ledger"
         then "ledger: record every repo's PRs in Conary's ledger"
         else "ledger: record %I's PRs in Conary's ledger";
-      # A switch leaves a running one be (see burrow.switch's check).
+      # A switch leaves a running one be (see burrow.switch's check). One
+      # that fails while a switch runs fails the switch too, so GitHub being
+      # unavailable isn't a failure: it books the repo's next pass (sync_repo).
       restartIfChanged = false;
       after = [ "network-online.target" ];
       wants = [ "network-online.target" ];
