@@ -271,10 +271,10 @@ pkgs.testers.runNixOSTest {
     with subtest("the drill fails when the backup is missing what its snapshot had"):
         # A symlink restic reports nothing about, beside a dataset nested in
         # the same directory.
-        machine.succeed("machine-backup restic rewrite --forget --exclude /data/toplink latest")
+        machine.succeed("machine-backup restic rewrite --forget --host machine --exclude /data/toplink latest")
         out = machine.fail("machine-backup drill 2>&1")
         assert "doesn't hold all of snap-2" in out and "> /data/toplink" in out and "big.bin" not in out, out
-        machine.succeed("machine-backup restic rewrite --forget --exclude /data/dev/src/proj/sub/big.bin latest")
+        machine.succeed("machine-backup restic rewrite --forget --host machine --exclude /data/dev/src/proj/sub/big.bin latest")
         out = machine.fail("machine-backup drill 2>&1")
         assert "> /data/dev/src/proj/sub/big.bin" in out, out
         # The fresh backups it checked against are gone.
