@@ -4,7 +4,8 @@
 # one beat is only logged (a failed unit riding along), that one failing two
 # beats running pings fail and names it, that passing again clears its streak,
 # that the ping key is read trimmed from the unit's credential, and that a ping
-# Healthchecks refuses fails the beat.
+# Healthchecks refuses is reported but never fails the beat (a failed unit
+# would make HOST-update's health compare revert a switch).
 #
 #   nix build .#checks.x86_64-linux.heartbeat -L
 { self, pkgs }:
@@ -76,7 +77,8 @@ pkgs.runCommand "heartbeat-check" { nativeBuildInputs = [ pkgs.python3 pkgs.jq p
   expect /log "failing, not for long yet: events" "a streak starts over"
 
   printf 'NOTKEY\n' >creds/ping-key
-  if ${beat} >/dev/null 2>&1; then echo "a refused ping passed the beat"; exit 1; fi
+  ${beat} 2>err >/dev/null || { echo "a refused ping failed the beat"; exit 1; }
+  grep -q "didn't land" err || { echo "a refused ping went unreported: $(cat err)"; exit 1; }
 
   touch $out
 ''

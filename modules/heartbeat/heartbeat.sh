@@ -47,9 +47,12 @@ else
 fi
 [ ${#units[@]} -eq 0 ] || body+=$'\n'"failed units (not counted): ${units[*]}"
 
+echo "${suffix:-/} $body"
 # The key goes in through a config on a pipe, not argv, where any user on the
-# machine could read it. A check that doesn't exist (404) fails the unit.
+# machine could read it. A ping that doesn't land never fails the unit: the
+# watcher already alerts when pings stop, and a failed unit would make
+# HOST-update's health compare revert whatever it was switching to.
 printf '%s\n' "$body" |
   curl -fsS --max-time 15 --retry 3 -o /dev/null --data-binary @- \
-    -K <(printf 'url = "%s/%s/%s%s"\n' "$URL" "$key" "$CHECK" "$suffix")
-echo "${suffix:-/} $body"
+    -K <(printf 'url = "%s/%s/%s%s"\n' "$URL" "$key" "$CHECK" "$suffix") ||
+  echo "the ping to $CHECK didn't land; Healthchecks alerts once the check's grace runs out" >&2

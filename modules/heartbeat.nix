@@ -66,7 +66,7 @@ in
         by hand, with a period of `every` and a grace that covers `failAfter`
         beats and a reboot (10 minutes on the defaults), and wire it to
         whatever should reach the owner. A ping to a check that isn't there
-        fails the unit.
+        is only logged here; it shows there as the check going quiet.
       '';
     };
 
