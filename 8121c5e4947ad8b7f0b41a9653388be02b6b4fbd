@@ -1,0 +1,47 @@
+{
+  "conary": "note v1",
+  "change": "5y5fshgpb6n7h6xd9vx7qfdng5",
+  "repo": {
+    "owner": "fieldmouseworks",
+    "name": "burrow"
+  },
+  "pr": 117,
+  "url": "https://github.com/fieldmouseworks/burrow/pull/117",
+  "summary": "autoland: watch Renovate's dashboards and hand what's stuck to a Claude job",
+  "task": null,
+  "author": {
+    "kind": "agent",
+    "login": "TusanHomichi",
+    "session": "https://claude.ai/code/session_01LUSpz65cwD3ABEEydMWsoV"
+  },
+  "landing": {
+    "revision": "a93f63bb198907a554d8866bc6a7147235624ebefe724aa4435cbdd99f540cda",
+    "before": "84d59c8bde6b38c212ed929267f320197a994df6",
+    "after": "8121c5e4947ad8b7f0b41a9653388be02b6b4fbd",
+    "by": {
+      "kind": "status",
+      "login": "TusanHomichi"
+    },
+    "at": 1793211353792
+  },
+  "evidence": [
+    {
+      "kind": "review",
+      "check": "codex",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/117#pullrequestreview-5687231698"
+    },
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/40739036488/job/122995295554"
+    },
+    {
+      "kind": "ci",
+      "check": "agents",
+      "result": "pass",
+      "source": "status agents"
+    }
+  ]
+}
