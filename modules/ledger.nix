@@ -21,16 +21,31 @@ let
   # Where conaryd listens. Its directory is conaryd's own (RuntimeDirectory).
   socket = "/run/conary/conaryd.sock";
 
-  # When each repo's next pass is due, for burrow-events: {"OWNER/REPO": epoch}.
-  wake = "${config.burrow.stateDir}/ledger/wake.json";
+  # The passes' own state: when each repo's next pass is due, for
+  # burrow-events ({"OWNER/REPO": epoch}), and the login gh's token is.
+  passDir = "${config.burrow.stateDir}/ledger";
+  wake = "${passDir}/wake.json";
 
   sync = pkgs.writeShellApplication {
     name = "burrow-ledger-sync";
     runtimeInputs = [ cfg.package cfg.gh pkgs.coreutils pkgs.jq pkgs.util-linux ];
     text = ''
       # The user's own gh login reads GitHub; its reviews are the steward's.
+      # Which login the token is, GitHub is asked once a day per token, not
+      # every pass: a call each, and one that fails when the rate limit is
+      # spent, before cn could say GitHub is unavailable. The answer is kept
+      # under the token's hash, so it's never another token's.
       GH_TOKEN=$(gh auth token)
-      CONARY_REVIEWERS=$(gh api user --jq .login)
+      login_file=${lib.escapeShellArg "${passDir}/login"}
+      key=$(printf %s "$GH_TOKEN" | sha256sum | cut -d' ' -f1)
+      if read -r was at who <"$login_file" 2>/dev/null && [ "$was" = "$key" ] &&
+        [[ $at =~ ^[0-9]+$ ]] && [ $(($(date +%s) - at)) -lt 86400 ] && [ -n "$who" ]; then
+        CONARY_REVIEWERS=$who
+      else
+        CONARY_REVIEWERS=$(gh api user --jq .login)
+        (umask 077 && printf '%s %s %s\n' "$key" "$(date +%s)" "$CONARY_REVIEWERS" >"$login_file.new") &&
+          mv -f "$login_file.new" "$login_file"
+      fi
       export GH_TOKEN CONARY_REVIEWERS
       export CONARY_LEDGER=${lib.escapeShellArg cfg.dir}
       export CONARY_ANCHOR_REPO=${lib.escapeShellArg cfg.anchorRepo}
@@ -190,7 +205,7 @@ in
     systemd.tmpfiles.settings.burrow = {
       ${config.burrow.stateDir}.d = { mode = "0755"; user = "root"; group = "root"; };
       ${cfg.dir}.d = { mode = "0755"; inherit user; group = config.users.users.${user}.group; };
-      "${config.burrow.stateDir}/ledger".d = { mode = "0755"; inherit user; group = config.users.users.${user}.group; };
+      ${passDir}.d = { mode = "0755"; inherit user; group = config.users.users.${user}.group; };
     };
 
     burrow.events.handlers.ledger = {

@@ -11,8 +11,8 @@ let
   # GitHub's answers the pass asks gh for: its token and its login.
   gh = pkgs.writeShellScriptBin "gh" ''
     case "$*" in
-      "auth token") echo gho_stand_in ;;
-      "api user --jq .login") echo sam ;;
+      "auth token") cat /tmp/gh-token 2>/dev/null || echo gho_stand_in ;;
+      "api user --jq .login") echo user >>/tmp/gh-calls; echo sam ;;
       "repo list sam "*) echo sam/r ;;
       *) echo "gh $*: not a stand-in answer" >&2; exit 1 ;;
     esac
@@ -59,6 +59,15 @@ pkgs.testers.runNixOSTest {
         assert calls() == ["init", "sync sam/r"], calls()
         machine.succeed("systemctl start burrow-ledger@sam-r.service")
         assert calls() == ["init", "sync sam/r", "sync sam/r"], calls()
+
+    with subtest("GitHub is asked which login the token is once, until the token changes"):
+        assert machine.succeed("cat /tmp/gh-calls") == "user\n"
+        machine.succeed("stat -c %a /var/lib/burrow/ledger/login | grep -x 600")
+        machine.succeed("echo gho_another >/tmp/gh-token")
+        machine.succeed("systemctl start burrow-ledger@sam-r.service")
+        machine.succeed("systemctl start burrow-ledger@sam-r.service")
+        assert machine.succeed("cat /tmp/gh-calls") == "user\nuser\n"
+        machine.succeed("rm /tmp/gh-token")
 
     with subtest("GitHub unavailable books the repo's next pass, and the unit hasn't failed"):
         machine.succeed("echo 75 >/tmp/cn-exit")
