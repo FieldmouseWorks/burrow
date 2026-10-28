@@ -1,0 +1,47 @@
+{
+  "conary": "note v1",
+  "change": "0b4dbnmqdpm7wdm2ycjnrkxg6q",
+  "repo": {
+    "owner": "fieldmouseworks",
+    "name": "burrow"
+  },
+  "pr": 118,
+  "url": "https://github.com/fieldmouseworks/burrow/pull/118",
+  "summary": "events: a switch that changes a handler kicks its full pass",
+  "task": null,
+  "author": {
+    "kind": "agent",
+    "login": "TusanHomichi",
+    "session": "https://claude.ai/code/session_01LUSpz65cwD3ABEEydMWsoV"
+  },
+  "landing": {
+    "revision": "87ebe471495bdf957306da1bff2a064f6f70d95249e675b6a4f407a882cd0026",
+    "before": "8121c5e4947ad8b7f0b41a9653388be02b6b4fbd",
+    "after": "5a244ccf3f1884aadbe6c6e35806bcfee340ed56",
+    "by": {
+      "kind": "status",
+      "login": "TusanHomichi"
+    },
+    "at": 1793212662890
+  },
+  "evidence": [
+    {
+      "kind": "review",
+      "check": "codex",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/118#pullrequestreview-5687635288"
+    },
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/40744076564/job/123013094949"
+    },
+    {
+      "kind": "ci",
+      "check": "agents",
+      "result": "pass",
+      "source": "status agents"
+    }
+  ]
+}
