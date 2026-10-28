@@ -1,0 +1,47 @@
+{
+  "conary": "note v1",
+  "change": "7dfv0jvkerwnzpyx7096hcr8tx",
+  "repo": {
+    "owner": "fieldmouseworks",
+    "name": "burrow"
+  },
+  "pr": 109,
+  "url": "https://github.com/fieldmouseworks/burrow/pull/109",
+  "summary": "ledger: stop re-reading the anchor's history every pass, and wait out GitHub instead of failing",
+  "task": "FieldmouseWorks/Conary#22",
+  "author": {
+    "kind": "person",
+    "login": "TusanHomichi",
+    "session": null
+  },
+  "landing": {
+    "revision": "4b18daee38a2a0ec1a1fb503595275b6e35655d481c8d87eb5df0dcbace46709",
+    "before": "339267b98296f2f4e2861901a4832b6ae52eb35d",
+    "after": "110da989153e5312cde64106689ab868eb5d3423",
+    "by": {
+      "kind": "status",
+      "login": "TusanHomichi"
+    },
+    "at": 1793161453649
+  },
+  "evidence": [
+    {
+      "kind": "review",
+      "check": "codex",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/109#pullrequestreview-5677716119"
+    },
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/40630853450/job/122626610105"
+    },
+    {
+      "kind": "ci",
+      "check": "agents",
+      "result": "pass",
+      "source": "status agents"
+    }
+  ]
+}
