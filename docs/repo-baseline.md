@@ -83,8 +83,10 @@ Waiting for the owner instead, listed in one issue: what a judge job sent
 them (or anyone labelled `needs-owner`), held Renovate majors, and outside
 contributions. What the pipeline itself is stuck on (a reviewer that keeps
 failing, a merge GitHub won't take, two Claude jobs that ended without an
-answer) isn't the owner's either: with proj's inbox on, it's listed in an
-issue of its own, which a Claude job takes. A PR past the round limit isn't
+answer) isn't the owner's either: it's listed in an issue of its own, which
+proj's inbox hands to a Claude job. That needs the inbox on, `notify.repo`
+cloned in `projectsDir` and the steward's login one of the inbox's authors;
+without them it's the owner's, with why. A PR past the round limit isn't
 the owner's: its reviewers stop looking, a Claude job fixes or answers their
 last findings, and a judge decides. Everything else is pre-approved: merges, GitHub settings changes and
 cleanup don't wait for the owner. Dependency bots' minor updates skip review: CI is their review,

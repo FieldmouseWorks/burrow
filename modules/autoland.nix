@@ -93,9 +93,10 @@ let
       label = config.burrow.notify.label;
     };
     # What the pipeline is stuck on goes to proj's inbox, as an issue in
-    # notify.repo with its label, for a Claude job to take (repos.py publish);
-    # the steward's gh login has to be one of inbox.authors for that.
-    inbox = if config.burrow.proj.inbox.enable then config.burrow.proj.inbox.label else "";
+    # notify.repo with its label, for a Claude job to take (repos.py publish),
+    # when the inbox will: notify.repo cloned in projectsDir, and the
+    # steward's gh login one of inbox.authors. Otherwise it's the owner's.
+    inbox = { inherit (config.burrow.proj.inbox) enable label authors; };
     defaults = {
       inherit (cfg) rounds oneWay;
       handoffAfter = cfg.handoffAfterMinutes;
