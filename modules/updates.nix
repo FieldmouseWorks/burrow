@@ -249,6 +249,15 @@ let
         matchManagers = [ "nix" ];
         minimumReleaseAgeBehaviour = "timestamp-optional";
       }
+      {
+        # A dependency on one of the repos Renovate keeps (a pinned workflow,
+        # an action) waits for nothing: the soak is against someone else's
+        # hijacked release, and on a repo that's still moving it never ends.
+        # Each new commit restarts the three days, so a pin on burrow's main
+        # sat in "pending status checks" while burrow merged daily.
+        matchPackageNames = lib.filter (p: !lib.hasPrefix "!" p) rcfg.autodiscoverFilter;
+        minimumReleaseAge = null;
+      }
     ] ++ lib.optional (githubRepo != null) {
       # The machine's own flake.lock is HOST-update's: it deploys what it bumps.
       matchRepositories = [ githubRepo ];

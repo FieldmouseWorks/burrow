@@ -181,6 +181,21 @@
           done
           touch $out
         '';
+        # The example's Renovate config, as Renovate's own rules read it: a
+        # pin on one of the repos it keeps (sam/*, any case) waits for no
+        # soak, one on anyone else's still does.
+        renovate-soak = pkgs.runCommand "renovate-soak-check" { } ''
+          export HOME=$TMPDIR
+          got=$(${pkgs.lib.getExe pkgs.nodejs_24} ${./tests/renovate-soak.mjs} ${pkgs.renovate} \
+            ${self.nixosConfigurations.example.config.systemd.services.renovate.environment.RENOVATE_CONFIG_FILE} \
+            sam/homelab Sam/Tools actions/checkout samuel/x 2>/dev/null)
+          want='sam/homelab none
+          Sam/Tools none
+          actions/checkout 3 days
+          samuel/x 3 days'
+          [ "$got" = "$(sed 's/^ *//' <<<"$want")" ] || { echo "got: $got"; exit 1; }
+          touch $out
+        '';
         # Which repos house-sync passes over, and when it tells the owner, with
         # stand-ins for gh and the notifier.
         house-sync = pkgs.runCommand "house-sync-check" { nativeBuildInputs = [ pkgs.python3 pkgs.jq pkgs.util-linux pkgs.diffutils ]; } ''
