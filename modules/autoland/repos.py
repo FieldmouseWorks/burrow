@@ -16,16 +16,21 @@ from tasks import RED_BRANCH, red_default_task
 
 
 def discover():
+    """Each owner's repos the App's installation there reaches: which ones
+    are the steward's is which it's installed on. GitHub never reports an
+    App as a repo's admin (an installation's viewerPermission is empty), so
+    that's no test of what it may touch."""
     seen = []
     for owner in CFG["owners"]:
         with C.acting_for(owner):
             found = C.gh("repo", "list", owner, "--no-archived", "--source", "--limit", "100000",
-                         "--json", "nameWithOwner,isPrivate,viewerPermission,defaultBranchRef") or []
+                         "--json", "nameWithOwner,isPrivate,defaultBranchRef") or []
         for r in found:
             name = r["nameWithOwner"]
             if any(fnmatch.fnmatch(name, pat) for pat in CFG["exclude"]):
                 continue
-            if r["viewerPermission"] != "ADMIN" or not r.get("defaultBranchRef"):
+            # An empty repo has no branch to keep.
+            if not r.get("defaultBranchRef"):
                 continue
             seen.append({"repo": name, "private": r["isPrivate"], "default": r["defaultBranchRef"]["name"]})
     return seen

@@ -158,6 +158,28 @@ st = {}
 assert D.find("sam/r", st) is None and st.get("next"), st
 C.gh = gh_kept
 D.FOUND.clear()
+# The repos are the ones the App's installations reach, asked as each
+# owner's: GitHub gives an installation no viewerPermission on any of them.
+# An empty repo (no default branch) and an excluded one aren't the steward's.
+ASKED = []
+
+
+def list_gh(*a, **k):
+    ASKED.append((C._for[-1] if C._for else None, a[2]))
+    return {"sam": [{"nameWithOwner": "sam/r", "isPrivate": True, "defaultBranchRef": {"name": "trunk"}},
+                    {"nameWithOwner": "sam/empty", "isPrivate": False, "defaultBranchRef": None},
+                    {"nameWithOwner": "sam/skip", "isPrivate": False, "defaultBranchRef": {"name": "main"}}],
+            "eve": [{"nameWithOwner": "eve/p", "isPrivate": False, "defaultBranchRef": {"name": "main"}}]}[a[2]]
+
+
+kept = (C.gh, C.CFG["owners"], C.CFG["exclude"])
+C.gh, C.CFG["owners"], C.CFG["exclude"] = list_gh, ["sam", "eve"], ["sam/skip"]
+found = R.discover()
+C.gh, C.CFG["owners"], C.CFG["exclude"] = kept
+assert found == [{"repo": "sam/r", "private": True, "default": "trunk"},
+                 {"repo": "eve/p", "private": False, "default": "main"}], found
+assert ASKED == [("sam", "sam"), ("eve", "eve")], ASKED
+
 # A pass asks about each repo as the App's installation on that repo's
 # owner: its PRs are read for sam/r as sam's, for eve/p as eve's.
 FOR = []
