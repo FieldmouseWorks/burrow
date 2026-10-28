@@ -173,7 +173,7 @@ failed() {
     if id=$(runuser -u "$BURROW_USER" -- env HOME="$HOME_DIR" XDG_RUNTIME_DIR="/run/user/$USER_UID" \
         "$PROJ" run "$PROJECT" "$NAME, the off-site backup, failed on $HOST: $why
 
-The journal has the rest (journalctl -u $NAME). Find the cause and fix it for good: in this flake if it's the machine's config, upstream in burrow (modules/backup.nix) if it's the module. \`$NAME status\` shows where it stands and \`sudo systemctl start $NAME\` runs it again. Never forget, prune or delete anything in the repository by hand, and never remove or re-create it: it's the only copy off the box. If it needs $OWNER (a login only they can renew, say), say exactly what."); then
+The journal has the rest (journalctl -u $NAME). Find the cause and fix it for good: in this flake if it's the machine's config, upstream in burrow (modules/backup.nix) if it's the module. \`$NAME status\` shows where it stands and \`sudo systemctl start $NAME\` runs it again (remove $state/maintained first to redo the day's prune, check and drill). Never forget, prune or delete anything in the repository by hand, and never remove or re-create it: it's the only copy off the box. If it needs $OWNER (a login only they can renew, say), say exactly what."); then
       echo "$id" >"$f"
       echo "handed to Claude: proj log $id"
     fi
@@ -211,6 +211,7 @@ if [ "$cmd" = status ]; then
   fi
   [ ! -e "$state/failed-since" ] || echo "failing since $(date -d "@$(cat "$state/failed-since")" -Is)"
   [ ! -e "$state/maintained" ] || echo "pruned, checked and drilled $(date -r "$state/maintained" -Is)"
+  [ ! -s "$state/problems" ] || { echo "and found:"; cat "$state/problems"; }
   flock -n 9 || { echo "a backup or drill is running (journalctl -u $NAME)"; exit 0; }
 else
   flock -n 9 || { echo "waiting for the backup that's running" >&2; flock 9; }
@@ -369,17 +370,35 @@ case $cmd in
 esac
 
 # Once a day, after a backup: forget what KEEP no longer keeps and prune it,
-# read back the day's share of the repository (all of it every VERIFY_DAYS
-# days), then the drill.
+# read back the next share of the repository in turn (all of it every
+# VERIFY_DAYS days) and every share found damaged until it reads back whole,
+# then the drill. What it finds goes to state/problems, reported on every pass
+# until the next day's upkeep finds it gone: a new backup, or another share
+# reading back fine, clears nothing.
 maintain() {
   if [ -e "$state/maintained" ] && [ $(($(date +%s) - $(stat -c %Y "$state/maintained"))) -lt 72000 ]; then
     return 0
   fi
-  restic forget --host "$HOST" "${KEEP[@]}" --prune -q || failed "restic forget --prune failed"
-  local part=$((10#$(date +%j) % VERIFY_DAYS + 1))
-  restic check -q --read-data-subset="$part/$VERIFY_DAYS" \
-    || failed "restic check found damage reading part $part/$VERIFY_DAYS of the repository back"
-  drill || failed "the restore drill failed"
+  local problems=() part spec specs=()
+  restic forget --host "$HOST" "${KEEP[@]}" --prune -q || problems+=("restic forget --prune failed")
+  part=$(cat "$state/check-next" 2>/dev/null || echo 1)
+  part=$(((part - 1) % VERIFY_DAYS + 1))
+  mapfile -t specs < <({ cat "$state/damaged" 2>/dev/null || true; echo "$part/$VERIFY_DAYS"; } | sort -u)
+  : >"$state/damaged.new"
+  for spec in "${specs[@]}"; do
+    if ! restic check -q --read-data-subset="$spec"; then
+      echo "$spec" >>"$state/damaged.new"
+      problems+=("restic check found damage reading part $spec of the repository back")
+    fi
+  done
+  mv "$state/damaged.new" "$state/damaged"
+  echo $((part % VERIFY_DAYS + 1)) >"$state/check-next"
+  drill || problems+=("the restore drill failed")
+  if [ "${#problems[@]}" = 0 ]; then
+    : >"$state/problems"
+  else
+    printf '%s\n' "${problems[@]}" >"$state/problems"
+  fi
   touch "$state/maintained"
 }
 
@@ -428,7 +447,7 @@ if [ "$last" != "$snap" ]; then
 fi
 
 maintain
-if [ -e "$state/failed-since" ]; then
-  rm -f "$state/failed-since" "$state/job"
-  "$NOTIFY" close backup "Backed up $snap."
-fi
+[ ! -s "$state/problems" ] || failed "$(cat "$state/problems")"
+rm -f "$state/failed-since" "$state/job"
+# A no-op unless a notice is open, and retried until GitHub takes the close.
+"$NOTIFY" close backup "Backed up $snap."

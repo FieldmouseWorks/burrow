@@ -155,11 +155,14 @@ in
     };
 
     verifyDays = mkOption {
-      type = types.ints.positive;
+      type = types.ints.between 1 256;
       default = 30;
       description = ''
-        Each day reads 1/verifyDays of the repository back and checks it, so
-        all of it is read back over that many days.
+        Each day reads the next 1/verifyDays of the repository back and
+        checks it, in turn, so all of it is read back over that many days
+        (256 at most: restic splits the repository by a byte of each pack's
+        ID). A share found damaged is read again each day until it reads
+        back whole, and reported until then.
       '';
     };
 

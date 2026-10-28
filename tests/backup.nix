@@ -8,8 +8,9 @@
 # spaces, and fails when the backup is missing something its snapshot had or
 # a restore isn't what it should be, without printing what's in the files,
 # and passes when a remount moves the snapshot to another device. A damaged
-# repository fails the day's check, and a pass that can't start, fails along
-# the way or finds a stale snapshot tells the owner.
+# share of the repository stays reported until it reads back whole, and a
+# pass that can't start, fails along the way or finds a stale snapshot tells
+# the owner.
 #
 #   nix build .#checks.x86_64-linux.backup -L
 { self, pkgs }:
@@ -39,7 +40,8 @@ pkgs.testers.runNixOSTest {
       snapshots = "snap-*";
       exclude = [ "/data/skip" ];
       drill = [ "/data/dev/src/proj" "/srv/keep it" "/data/with space" ];
-      verifyDays = 1;
+      # Two shares, read back in turn.
+      verifyDays = 2;
       # Nothing forgotten, so the day's prune has nothing to repack and the
       # check is what reads a damaged pack.
       keep.last = 100;
@@ -70,6 +72,8 @@ pkgs.testers.runNixOSTest {
         machine.wait_until_succeeds(f"[ $(journalctl -t machine-notify | grep -c 'open backup') -gt {before} ]")
 
     machine.wait_for_unit("multi-user.target")
+    # Passes run when the test says, not when a clock jump says.
+    machine.succeed("systemctl stop machine-backup.timer")
     machine.succeed(
         "printf '[offsite]\\ntype = local\\n' >/var/lib/rclone-secret.conf",
         "zpool create -O mountpoint=none -O compression=zstd tank /dev/vdb",
@@ -210,20 +214,31 @@ pkgs.testers.runNixOSTest {
         out = machine.fail("machine-backup __compare /tmp/drill /data/dev/src/proj 2>&1")
         assert "< /data/dev/src/proj/link" in out, out
 
-    with subtest("a damaged repository fails the day's check"):
+    with subtest("a damaged share of the repository stays reported until it reads back whole"):
         # Every backup kept and none rewritten yet, so the prune before the
         # check has nothing to repack and the check is what reads the pack.
         machine.succeed("cp -a /var/lib/offsite/repo /tmp/repo-good")
-        machine.succeed("""
-          pack=$(find /var/lib/offsite/repo/data -type f | head -1)
-          printf garbage | dd of="$pack" bs=1 seek=100 conv=notrunc
-        """)
-        machine.succeed("rm /var/lib/burrow/backup/maintained")
+        pack = machine.succeed("find /var/lib/offsite/repo/data -type f | head -1").strip()
+        # restic's share n/t holds the packs whose ID's first byte is n-1 mod t.
+        part = int(pack.split("/")[-2], 16) % 2 + 1
+        machine.succeed(f"printf garbage | dd of={pack} bs=1 seek=100 conv=notrunc")
+        machine.succeed(f"echo {part} >/var/lib/burrow/backup/check-next && rm /var/lib/burrow/backup/maintained")
         snapshot("snap-3")
         machine.fail("systemctl start machine-backup")
-        machine.succeed("journalctl -u machine-backup | grep 'restic check found damage'")
+        machine.succeed(f"journalctl -u machine-backup | grep 'restic check found damage reading part {part}/2'")
         machine.succeed("journalctl -t machine-notify | grep 'open backup'")
+        # The next day backs up a new snapshot and reads the other share back
+        # fine: the damage is still reported.
+        machine.succeed("date -s '+1 day'")
+        snapshot("snap-4")
+        machine.fail("systemctl start machine-backup")
+        assert backups()[-1]["tags"] == ["snap-4"], backups()
+        machine.succeed(f"grep -x {part}/2 /var/lib/burrow/backup/damaged")
+        # Read back whole, it's cleared.
         machine.succeed("rm -rf /var/lib/offsite/repo && mv /tmp/repo-good /var/lib/offsite/repo")
+        machine.succeed("rm /var/lib/burrow/backup/maintained")
+        machine.succeed("systemctl start machine-backup")
+        machine.succeed("test ! -s /var/lib/burrow/backup/damaged && test ! -e /var/lib/burrow/backup/failed-since")
 
     with subtest("the drill fails when the backup is missing what its snapshot had"):
         # A symlink restic reports nothing about, beside a dataset nested in
