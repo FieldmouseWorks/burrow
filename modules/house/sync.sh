@@ -35,7 +35,8 @@ for f in "$HOUSE"/*.md; do
   blocks+=("$(basename "$f" .md)")
 done
 rev=$(cd "$HOUSE" && sha256sum -- *.md | sha256sum | cut -c1-8)
-branch="house/sync-$rev"
+# Every block is part of the house rules, so the branch keeps their name.
+branch="house/rules-$rev"
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
@@ -86,7 +87,7 @@ fi
 close_older() {
   local repo=$1 why=$2 old n failed=0
   old=$(gh pr list -R "$repo" --state open --limit 1000 --json number,headRefName |
-    jq -r --arg b "$branch" '.[] | select((.headRefName | startswith("house/sync-")) and .headRefName != $b) | .number') ||
+    jq -r --arg b "$branch" '.[] | select((.headRefName | startswith("house/rules-")) and .headRefName != $b) | .number') ||
     return 1
   for n in $old; do
     if [ -n "${DRY_RUN:-}" ]; then

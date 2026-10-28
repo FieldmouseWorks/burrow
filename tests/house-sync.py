@@ -280,15 +280,21 @@ for current in (other(lambda d: open(os.path.join(d, "prs.md"), "a").write("More
                 other(lambda d: os.remove(os.path.join(d, "prs.md"))),
                 os.path.join(tmp, "missing")):
     for args in ((), ("sam/a",)):
-        wrote, calls, notices = sync(everyone + [gh_repo("sam/n", STALE, prs=[{"number": 7, "headRefName": "house/sync-0ther"}])],
+        wrote, calls, notices = sync(everyone + [gh_repo("sam/n", STALE, prs=[{"number": 7, "headRefName": "house/rules-0ther"}])],
                                      *args, current=current)
         assert calls == [] and notices == [], (current, args, calls, notices)
 print("superseded: ok")
 
 # A PR for older blocks is closed once a newer one is open, or once the
 # default branch has the current blocks.
-older = {"number": 7, "headRefName": "house/sync-0ther"}
-for agents in (STALE_PRS, CURRENT):
-    wrote, calls, notices = sync([gh_repo("sam/a", agents, prs=[older])], "sam/a")
+# The current one, already open, stays, and so does anyone else's PR.
+rev = subprocess.run("sha256sum -- *.md | sha256sum | cut -c1-8", shell=True, cwd=HOUSE,
+                     capture_output=True, text=True, check=True).stdout.strip()
+older = {"number": 7, "headRefName": "house/rules-0ther"}
+current = {"number": 8, "headRefName": f"house/rules-{rev}", "url": "https://github.com/sam/a/pull/8"}
+theirs = {"number": 9, "headRefName": "house-cleaning"}
+for agents, open_prs in ((STALE_PRS, [older, theirs]), (CURRENT, [older, theirs]), (STALE_PRS, [older, current, theirs])):
+    wrote, calls, notices = sync([gh_repo("sam/a", agents, prs=open_prs)], "sam/a")
     assert [c[:3] for c in calls if c[:2] == ["pr", "close"]] == [["pr", "close", "7"]], (agents, calls)
+    assert wrote == (["sam/a"] if agents == STALE_PRS and current not in open_prs else []), (agents, wrote)
 print("older PRs: ok")
