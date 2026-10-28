@@ -182,17 +182,30 @@
           touch $out
         '';
         # The example's Renovate config, as Renovate's own rules read it: a
-        # pin on one of the repos it keeps (sam/*, any case) waits for no
-        # soak, one on anyone else's still does.
+        # pin on a GitHub repo of its trusted owner's (sam, any case) waits
+        # for no soak; anyone else's still does, and so does a sam/... on
+        # another host or a registry's package that claims a sam repo.
         renovate-soak = pkgs.runCommand "renovate-soak-check" { } ''
           export HOME=$TMPDIR
           got=$(${pkgs.lib.getExe pkgs.nodejs_24} ${./tests/renovate-soak.mjs} ${pkgs.renovate} \
             ${self.nixosConfigurations.example.config.systemd.services.renovate.environment.RENOVATE_CONFIG_FILE} \
-            sam/homelab Sam/Tools actions/checkout samuel/x 2>/dev/null)
-          want='sam/homelab none
-          Sam/Tools none
-          actions/checkout 3 days
-          samuel/x 3 days'
+            '{"datasource":"github-digest","packageName":"sam/homelab"}' \
+            '{"datasource":"github-tags","packageName":"Sam/Tools"}' \
+            '{"datasource":"git-refs","packageName":"https://github.com/sam/homelab.git","manager":"nix","sourceUrl":"https://github.com/sam/homelab"}' \
+            '{"datasource":"github-digest","packageName":"actions/checkout"}' \
+            '{"datasource":"github-tags","packageName":"samuel/x"}' \
+            '{"datasource":"github-tags","packageName":"sam/tools","registryUrl":"https://ghe.example.com"}' \
+            '{"datasource":"docker","packageName":"sam/tools","sourceUrl":"https://github.com/sam/tools"}' \
+            '{"datasource":"npm","packageName":"homelab","manager":"npm","sourceUrl":"https://github.com/sam/homelab"}' \
+            2>/dev/null)
+          want='github-digest sam/homelab none
+          github-tags Sam/Tools none
+          git-refs https://github.com/sam/homelab.git none
+          github-digest actions/checkout 3 days
+          github-tags samuel/x 3 days
+          github-tags sam/tools at https://ghe.example.com 3 days
+          docker sam/tools 3 days
+          npm homelab 3 days'
           [ "$got" = "$(sed 's/^ *//' <<<"$want")" ] || { echo "got: $got"; exit 1; }
           touch $out
         '';
