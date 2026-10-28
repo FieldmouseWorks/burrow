@@ -288,8 +288,8 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
         # head is reviewed and its CI run like any other before it lands.
         behind = update_branch()
         if behind is not False:
-            settle("pending", "Settled, but behind its base: " +
-                   ("brought up to date" if behind else "GitHub didn't take the update, again in a minute"))
+            why = "brought up to date" if behind else "GitHub didn't take the update, again in a minute"
+            settle("pending", f"Settled, but behind its base: {why}")
             return
         settle("success", desc)
         # Still open with a merge queued on it: GitHub's to merge later, which
