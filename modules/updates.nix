@@ -146,10 +146,12 @@ let
     (with pkgs; [ coreutils findutils git gh jq gnused ]) ++ calls
   );
 
-  # The ZFS pools the machine expects: the ones its file systems are on, and
-  # the ones it imports besides. ZFS support alone, with none, has none to check.
+  # The ZFS pools the machine needs imported, as NixOS's zfs module decides
+  # it: the ones its file systems mount from (a pool only noauto mounts use
+  # can be away), and the ones it imports besides, by name or GUID. ZFS support
+  # alone, with none, has none to check.
   zfsPools = lib.unique (map (fs: lib.head (lib.splitString "/" fs.device))
-    (lib.filter (fs: fs.fsType == "zfs") (lib.attrValues config.fileSystems))
+    (lib.filter (fs: fs.fsType == "zfs" && !lib.elem "noauto" fs.options) config.system.build.fileSystems)
     ++ config.boot.zfs.extraPools);
 
   # What the health checks may call, beyond the system's own PATH.
@@ -520,10 +522,15 @@ in
         events = "systemctl -q is-active burrow-events.service";
       } // lib.optionalAttrs (zfsPools != [ ]) {
         # A degraded mirror keeps running on one disk, quietly, until the other
-        # goes. A pool that isn't there fails too (zpool can't open it).
-        zfs = lib.concatMapStrings (p: ''
-          zpool status -x ${lib.escapeShellArg p} | grep -qxF ${lib.escapeShellArg "pool '${p}' is healthy"} || exit 1
-        '') zfsPools;
+        # goes. A pool that isn't there fails too. A GUID (pool names start
+        # with a letter) is whichever imported pool has it, whatever its name.
+        zfs = ''
+          healthy() { [ -n "$1" ] && zpool status -x "$1" | grep -qxF "pool '$1' is healthy"; }
+          named() { zpool list -H -o guid,name | while read -r guid name; do
+            if [ "$guid" = "$1" ]; then echo "$name"; fi; done; }
+        '' + lib.concatMapStrings (p: if builtins.match "[0-9]+" p != null
+          then "healthy \"$(named ${p})\" || exit 1\n"
+          else "healthy ${lib.escapeShellArg p} || exit 1\n") zfsPools;
       } // lib.optionalAttrs (config.burrow.claude.enable or false) {
         # As the user, the way the operator runs it (runuser is root's only).
         claude = ''

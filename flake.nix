@@ -122,18 +122,9 @@
         # burrow-events for real: deliveries, kicks and wake-ups starting a
         # handler's units through polkit.
         events-service = import ./tests/events.nix { inherit self pkgs; };
-        # HOST-health's ZFS check: the pools the machine's file systems are on,
-        # by name, and none at all on a machine with ZFS support but no pool.
-        health-zfs = let
-          base = self.nixosConfigurations.example;
-          noPools = base.extendModules {
-            modules = [{ fileSystems."/" = nixpkgs.lib.mkForce { device = "/dev/sda1"; fsType = "ext4"; }; }];
-          };
-          zfs = base.config.burrow.updates.health.zfs or "";
-        in
-          assert nixpkgs.lib.hasInfix "zpool status -x rpool " zfs;
-          assert noPools.config.boot.zfs.enabled && !(noPools.config.burrow.updates.health ? zfs);
-          pkgs.writeText "health-zfs" zfs;
+        # HOST-health's ZFS check: the pools the machine needs, by name or
+        # GUID, with a stand-in zpool.
+        health-zfs = import ./tests/health-zfs.nix { inherit self pkgs; };
         # heartbeat's beats, with stand-ins for HOST-health and Healthchecks.
         heartbeat = import ./tests/heartbeat.nix { inherit self pkgs; };
         # The ledger's pass over one repo, with a stand-in for cn.
