@@ -47,7 +47,9 @@ as_root() { [ "$(id -u)" = 0 ] || exec /run/wrappers/bin/sudo -n "$0" "$@"; }
 as_user() { [ "$(id -un)" = "$user" ] || exec runuser -u "$user" -- "$0" "$@"; }
 
 # ssh_to ID [SSH OPTIONS...] -- [COMMAND]: ssh into a sandbox as the user, over
-# vsock. With $ssh_timeout set, give up after that many seconds.
+# vsock. With $ssh_timeout set, give up after that many seconds. The vsock
+# connects at once, so ConnectTimeout is the wait for sshd's banner, which a
+# sandbox on a loaded machine can take a while to send.
 ssh_to() {
   local d cid opts=()
   d=$(dir "$1")
@@ -56,7 +58,7 @@ ssh_to() {
   while [ $# -gt 0 ] && [ "$1" != -- ]; do opts+=("$1"); shift; done
   [ $# -eq 0 ] || shift
   ${ssh_timeout:+timeout "$ssh_timeout"} ssh -i "$key" "${opts[@]}" -o BatchMode=yes -o LogLevel=ERROR \
-    -o ConnectTimeout=5 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+    -o ConnectTimeout=60 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
     -o ProxyCommand="socat - VSOCK-CONNECT:$cid:22" "$user@agent-$cid" "$@"
 }
 

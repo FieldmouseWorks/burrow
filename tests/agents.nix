@@ -128,6 +128,14 @@ pkgs.testers.runNixOSTest {
     with subtest("it has KVM of its own, for projects with VMs"):
         vm(a, "test -c /dev/kvm && test -w /dev/kvm")
 
+    with subtest("a sandbox slow to answer, as on a loaded machine, is waited for"):
+        # Its sshd sends its banner 15s late, past the old 5s wait, as one
+        # on a loaded machine did.
+        slow = "/run/systemd/system/sshd-vsock@.service.d"
+        vm(a, f"sudo mkdir -p {slow} && printf '[Service]\\nExecStartPre=/run/current-system/sw/bin/sleep 15\\n' | sudo tee {slow}/slow.conf && sudo systemctl daemon-reload")
+        assert vm(a, "echo up").strip() == "up"
+        vm(a, f"sudo rm -r {slow} && sudo systemctl daemon-reload")
+
     with subtest("egress: the allowlist through the proxy, and nothing else"):
         def connect(url, extra=""):
             return vm(a, f"curl -s -o /dev/null --max-time 10 -w '%{{http_connect}}' {extra} {url} || true").strip()
