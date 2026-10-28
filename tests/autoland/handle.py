@@ -566,6 +566,7 @@ status, _ = run(clean(threads=[False, True]), 0)
 assert JOBS == [] and status.endswith("1 open review thread; a Claude job takes it at 12:30am UTC -f target_url=u"), status
 status, _ = run(clean(threads=[False, True]), 31 * 60)
 assert len(JOBS) == 1 and "isn't settled" in JOBS[0], JOBS
+assert "push before you reply" in JOBS[0] and "Never push over it" in JOBS[0], "a fix job's reply names what landed"
 assert "1 open review thread; a Claude job has it since 12:31am UTC" in status, status
 assert reacted() == ["api -X POST repos/sam/r/pulls/comments/900/reactions -f content=eyes"], WROTE
 status, _ = run(clean(threads=[False, True]), 40 * 60)
