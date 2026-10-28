@@ -199,6 +199,19 @@ pkgs.testers.runNixOSTest {
         machine.succeed("machine-backup drill")
         machine.succeed("umount /mnt/shift")
 
+    with subtest("the drill forgets its own fresh backups and nothing else"):
+        # Another machine's backup in the same repository, under the host name
+        # a drill's fresh backups take, and a fresh backup a drill that died
+        # before forgetting it left behind.
+        machine.succeed("machine-backup restic backup -q --host machine-drill --tag drill /etc/machine-id")
+        tag = "drill-" + "0" * 32
+        machine.succeed(f"machine-backup restic backup -q --host machine-drill --tag {tag} /etc/machine-id")
+        machine.succeed(f"echo {tag} >/var/lib/burrow/backup/probe")
+        machine.succeed("machine-backup drill")
+        left = [b["tags"] for b in backups() if b["hostname"] == "machine-drill"]
+        assert left == [["drill"]], left
+        machine.succeed("test ! -e /var/lib/burrow/backup/probe")
+
     with subtest("the comparison fails on a restore that's missing, changed or wrong"):
         # A restore made by hand, compared with the live files.
         machine.succeed(
@@ -229,10 +242,14 @@ pkgs.testers.runNixOSTest {
         # restic's share n/t holds the packs whose ID's first byte is n-1 mod t.
         part = int(pack.split("/")[-2], 16) % 2 + 1
         machine.succeed(f"printf garbage | dd of={pack} bs=1 seek=100 conv=notrunc")
+        # The day's share is the damaged one; a damage record restic can't
+        # take, from an upkeep cut short, is dropped rather than kept failing.
         machine.succeed(f"echo {part} >/var/lib/burrow/backup/check-next && rm /var/lib/burrow/backup/maintained")
+        machine.succeed("echo 0/2 >/var/lib/burrow/backup/damaged")
         snapshot("snap-3")
         machine.fail("systemctl start machine-backup")
         machine.succeed(f"journalctl -u machine-backup | grep 'restic check found damage reading part {part}/2'")
+        assert machine.succeed("cat /var/lib/burrow/backup/damaged").split() == [f"{part}/2"]
         machine.succeed("journalctl -t machine-notify | grep 'open backup'")
         # The next day backs up a new snapshot and reads the other share back
         # fine: the damage is still reported.
@@ -246,6 +263,10 @@ pkgs.testers.runNixOSTest {
         machine.succeed("rm /var/lib/burrow/backup/maintained")
         machine.succeed("systemctl start machine-backup")
         machine.succeed("test ! -s /var/lib/burrow/backup/damaged && test ! -e /var/lib/burrow/backup/failed-since")
+        # An empty cursor, as from a write cut short, starts at the first share.
+        machine.succeed("truncate -s 0 /var/lib/burrow/backup/check-next && rm /var/lib/burrow/backup/maintained")
+        machine.succeed("systemctl start machine-backup")
+        assert machine.succeed("cat /var/lib/burrow/backup/check-next").strip() == "2"
 
     with subtest("the drill fails when the backup is missing what its snapshot had"):
         # A symlink restic reports nothing about, beside a dataset nested in
@@ -257,7 +278,7 @@ pkgs.testers.runNixOSTest {
         out = machine.fail("machine-backup drill 2>&1")
         assert "> /data/dev/src/proj/sub/big.bin" in out, out
         # The fresh backups it checked against are gone.
-        assert all(not b["hostname"].endswith("-drill") for b in backups()), backups()
+        assert [b["tags"] for b in backups() if b["hostname"] == "machine-drill"] == [["drill"]], backups()
 
     with subtest("a snapshot older than staleAfter fails the pass"):
         machine.succeed("date -s '+7 hours'")

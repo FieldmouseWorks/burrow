@@ -139,7 +139,7 @@ case $cmd in
       shift 2
     fi
     export TMPDIR=$ns/tmp RESTIC_PASSWORD_FILE=$ns/password RESTIC_CACHE_DIR=$ns/state/cache
-    [ -z "${RCLONE_CONFIG:-}" ] || export RCLONE_CONFIG=$ns/state/rclone.conf
+    [ -z "$RCLONE_CONFIG_FILE" ] || export RCLONE_CONFIG=$ns/state/rclone.conf
     i=0
     for ds in "${order[@]}"; do
       i=$((i + 1))
@@ -276,6 +276,19 @@ release_except() {
   done
 }
 
+# Forget the drill's fresh backup: the one tagged with the random tag in
+# state/probe, which nothing but that drill could have given a snapshot.
+forget_probe() {
+  local tag json ids=()
+  tag=$(cat "$state/probe" 2>/dev/null) || return 0
+  if [[ $tag =~ ^drill-[0-9a-f]{32}$ ]]; then
+    json=$(restic snapshots --json --host "$HOST-drill" --tag "$tag") || return 1
+    mapfile -t ids < <(jq -r '.[].id' <<<"$json")
+    [ "${#ids[@]}" = 0 ] || restic forget -q "${ids[@]}" >/dev/null || return 1
+  fi
+  rm -f "$state/probe"
+}
+
 # Everything the snapshot NAME has (at PATHs, the datasets), backup ID has, as
 # the backup's own rules leave it: a fresh backup of the same snapshot lists
 # the same entries, of the same kind, mode, owner, size, times and inode. Not
@@ -283,12 +296,13 @@ release_except() {
 # for hardlinked files. The fresh backup is forgotten after; DIR holds the
 # listings.
 holds_all() {
-  local dir=$1 id=$2 name=$3 old=() check ok=0
+  local dir=$1 id=$2 name=$3 check ok=0 tag
   shift 3
-  # One a drill that died left behind.
-  mapfile -t old < <(restic snapshots --json --host "$HOST-drill" | jq -r '.[].id')
-  [ "${#old[@]}" = 0 ] || restic forget -q "${old[@]}" >/dev/null || true
-  if ! in_snapshot "$name" restic backup --json --quiet --host "$HOST-drill" --tag drill --parent "$id" \
+  # The last drill's, if it died before it could forget it.
+  forget_probe || { echo "drill: couldn't forget the fresh backup a drill left behind"; return 1; }
+  tag=drill-$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
+  echo "$tag" >"$state/probe"
+  if ! in_snapshot "$name" restic backup --json --quiet --host "$HOST-drill" --tag "$tag" --parent "$id" \
       "${backup_flags[@]}" "$@" >"$dir/check.json" 2>"$dir/check.err"; then
     echo "drill: a fresh backup of $name failed:"; tail -5 "$dir/check.err"; return 1
   fi
@@ -296,7 +310,8 @@ holds_all() {
   [ -n "$check" ] || { echo "drill: a fresh backup of $name made no snapshot"; return 1; }
   { restic ls --json "$id" | under fields "$@" | LC_ALL=C sort -T "$dir" >"$dir/held" &&
     restic ls --json "$check" | under fields "$@" | LC_ALL=C sort -T "$dir" >"$dir/fresh"; } || ok=1
-  restic forget -q "$check" >/dev/null || true
+  # Kept in state/probe until it's gone, so the next drill tries again.
+  forget_probe || true
   [ "$ok" = 0 ] || { echo "drill: couldn't list backup ${id:0:8}"; return 1; }
   if ! cmp -s "$dir/held" "$dir/fresh"; then
     echo "drill: backup ${id:0:8} doesn't hold all of $name; where a fresh backup of it differs (< the backup, > fresh):"
@@ -369,6 +384,19 @@ case $cmd in
   *) echo "usage: $NAME [status | drill [PATH...] | restic ARGS...]" >&2; exit 2 ;;
 esac
 
+# The shares found damaged and not yet read back whole, as N/T: only the ones
+# restic takes (1 <= N <= T <= 256), whatever VERIFY_DAYS was when they were
+# found.
+damaged() {
+  local n t
+  { cat "$state/damaged" 2>/dev/null || true; } | while IFS=/ read -r n t; do
+    if [[ $n =~ ^[0-9]{1,3}$ && $t =~ ^[0-9]{1,3}$ ]] && [ "$((10#$n))" -ge 1 ] &&
+      [ "$((10#$n))" -le "$((10#$t))" ] && [ "$((10#$t))" -le 256 ]; then
+      echo "$((10#$n))/$((10#$t))"
+    fi
+  done
+}
+
 # Once a day, after a backup: forget what KEEP no longer keeps and prune it,
 # read back the next share of the repository in turn (all of it every
 # VERIFY_DAYS days) and every share found damaged until it reads back whole,
@@ -381,24 +409,29 @@ maintain() {
   fi
   local problems=() part spec specs=()
   restic forget --host "$HOST" "${KEEP[@]}" --prune -q || problems+=("restic forget --prune failed")
-  part=$(cat "$state/check-next" 2>/dev/null || echo 1)
-  part=$(((part - 1) % VERIFY_DAYS + 1))
-  mapfile -t specs < <({ cat "$state/damaged" 2>/dev/null || true; echo "$part/$VERIFY_DAYS"; } | sort -u)
-  : >"$state/damaged.new"
+  # The day's share. A cursor that isn't a whole number (cut short, say)
+  # starts over at the first; one from a bigger VERIFY_DAYS folds into range.
+  part=$(cat "$state/check-next" 2>/dev/null || true)
+  [[ $part =~ ^[0-9]{1,9}$ ]] && [ "$((10#$part))" -ge 1 ] || part=1
+  part=$(((10#$part - 1) % VERIFY_DAYS + 1))
+  mapfile -t specs < <({ damaged; echo "$part/$VERIFY_DAYS"; } | sort -u)
   for spec in "${specs[@]}"; do
-    if ! restic check -q --read-data-subset="$spec"; then
-      echo "$spec" >>"$state/damaged.new"
+    if ! restic check -q --read-data-subset="$spec" >&2; then
+      echo "$spec"
       problems+=("restic check found damage reading part $spec of the repository back")
     fi
-  done
+  done >"$state/damaged.new"
   mv "$state/damaged.new" "$state/damaged"
-  echo $((part % VERIFY_DAYS + 1)) >"$state/check-next"
   drill || problems+=("the restore drill failed")
   if [ "${#problems[@]}" = 0 ]; then
-    : >"$state/problems"
+    : >"$state/problems.new"
   else
-    printf '%s\n' "${problems[@]}" >"$state/problems"
+    printf '%s\n' "${problems[@]}" >"$state/problems.new"
   fi
+  mv "$state/problems.new" "$state/problems"
+  # Last, so an upkeep cut short is done again in full, on the same share.
+  echo $((part % VERIFY_DAYS + 1)) >"$state/check-next.new"
+  mv "$state/check-next.new" "$state/check-next"
   touch "$state/maintained"
 }
 

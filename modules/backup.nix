@@ -88,8 +88,10 @@ in
       default = null;
       example = "/run/secrets/backup-rclone";
       description = ''
-        An rclone config with the remote the repository names. Each run works
-        on a copy, so the refreshed tokens rclone writes back never touch it.
+        An rclone config with the remote the repository names; an `rclone:`
+        repository needs one, since rclone's default config may sit in a
+        dataset the backup reads a snapshot of. Each run works on a copy of
+        its own, so the refreshed tokens rclone writes back never touch it.
       '';
     };
 
@@ -205,6 +207,10 @@ in
         assertion = cfg.datasets != [ ];
         message = "burrow.backup: set burrow.backup.datasets to the datasets to back up.";
       }
+      {
+        assertion = lib.hasPrefix "rclone:" cfg.repository -> cfg.rcloneConfigFile != null;
+        message = "burrow.backup: an rclone repository needs burrow.backup.rcloneConfigFile.";
+      }
     ];
 
     environment.systemPackages = [ backup ];
@@ -216,6 +222,10 @@ in
       wants = [ "network-online.target" ];
       # A switch never starts it: only what takes snapshots and the backstop do.
       restartIfChanged = false;
+      # Every start is a pass something asked for (a snapshot, the backstop,
+      # someone at the box), and a pass with nothing new to send is over in a
+      # second: none is dropped for coming soon after the last.
+      startLimitIntervalSec = 0;
       serviceConfig = {
         Type = "oneshot";
         ExecStart = "${backup}/bin/${name}";

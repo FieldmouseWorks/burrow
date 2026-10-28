@@ -46,6 +46,7 @@
       enable = true;
       repository = "rclone:offsite:backups/burrow";
       passwordFile = "/run/secrets/backup-password";
+      rcloneConfigFile = "/run/secrets/backup-rclone";
       datasets = [ "rpool/safe/home" "rpool/safe/data" ];
       after = [ "sanoid.service" ];
     };

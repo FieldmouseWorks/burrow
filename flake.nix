@@ -82,7 +82,7 @@
                 ./examples/machine.nix
                 (nixpkgs.lib.optionalAttrs (name == "robot") { burrow.robot.serverIp = "203.0.113.7"; })
                 (nixpkgs.lib.optionalAttrs (name == "undo") { burrow.undo.datasets = [ "rpool/safe/data" ]; })
-                (nixpkgs.lib.optionalAttrs (name == "backup") { burrow.backup = { repository = "rclone:offsite:backups/burrow"; passwordFile = "/run/secrets/backup-password"; datasets = [ "rpool/safe/data" ]; }; })
+                (nixpkgs.lib.optionalAttrs (name == "backup") { burrow.backup = { repository = "rclone:offsite:backups/burrow"; passwordFile = "/run/secrets/backup-password"; rcloneConfigFile = "/run/secrets/backup-rclone"; datasets = [ "rpool/safe/data" ]; }; })
                 (nixpkgs.lib.optionalAttrs (name == "updates") { burrow.updates.origin = "https://github.com/sam/homelab"; })
                 (nixpkgs.lib.optionalAttrs (name == "autoland") { burrow.autoland = { owners = [ "sam" ]; authors = [ "sam" ]; reviewers.codex.enable = true; }; })
                 (nixpkgs.lib.optionalAttrs (name == "house") { burrow.house.owners = [ "sam" ]; })
