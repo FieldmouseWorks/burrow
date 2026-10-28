@@ -41,7 +41,9 @@
 #
 # A turn ends at its answer. Claude -p stays up after it while anything it
 # left in the background runs (a CI watch, say), holding a slot to do
-# nothing; so the answer stops it, and what it left running. A job waiting on
+# nothing; so the answer stops it, and what it left running. That can be
+# work it was waiting on, a build longer than one Bash call: once a turn, it
+# hears it was stopped and answers again, in the same slot. A job waiting on
 # GitHub says so with `proj await`, and `proj _watch` gives it its next turn
 # once what it waits on changes: checks finish, a review, comment or push
 # comes in, or it's merged or closed. Nothing changed in AWAIT_HOURS, and
@@ -104,6 +106,16 @@ answer() { grep '"type":"result"' "$1" 2>/dev/null | jq -rs 'map(.result // "" |
 
 # Swapped in whole, so a reader never finds it missing or half written.
 set_turns() { echo "$2" >"$jobs/$1/turns.new" && mv -f "$jobs/$1/turns.new" "$jobs/$1/turns"; }
+
+# A duration as timeout(1) reads it (90, 90s, 30m, 2h, 1d), in seconds.
+secs() {
+  local per
+  case $1 in *m) per=60 ;; *h) per=3600 ;; *d) per=86400 ;; *) per=1 ;; esac
+  echo $((${1%[smhd]} * per))
+}
+
+# How a job waits on its own long work, which its answer would stop.
+LONG="A command that can outlast one Bash call (ten minutes), a long build or test run, goes to the background with its output and exit code written to a file, and you wait for that file in the foreground, in steps under ten minutes each; answer only once it's there."
 
 # Known not to be running: not "can't say".
 gone() { case $(systemctl --user show -P ActiveState "$1" 2>/dev/null) in inactive | failed) return 0 ;; esac; return 1; }
@@ -500,48 +512,68 @@ Carry on from there. Anything you left in the background last turn was stopped w
     rm -f "$dir/await" "$dir/await.next"
     take_slot "$id" "$n" "$3"
     limit=$(cat "$dir/timeout" 2>/dev/null || echo "$TIMEOUT")
-    args=(-p --output-format stream-json --verbose)
-    if [ -s "$dir/session" ]; then args+=(--resume "$(cat "$dir/session")"); fi
+    deadline=$(($(date +%s) + $(secs "$limit")))
     : >"$dir/$n.jsonl"
-    if [ -s "$dir/agent" ]; then
-      timeout -k 1m "$limit" agent sh "$(cat "$dir/agent")" claude "${args[@]}" <"$dir/prompt.$n" >"$dir/$n.jsonl" &
-    else
-      args+=(--append-system-prompt "This is proj job $id, running headless. Your turn ends with your answer, and anything you left running in the background is stopped then, so don't wait on GitHub (CI, reviews, merges) in the background or with sleep. Run \`proj await URL\` for each PR or issue you're still waiting on, then end your turn saying what you wait for: the job is resumed, with this conversation, once one of them changes (checks finish, a review, comment or push, merged or closed).")
-      # A login shell, so the job sees the same PATH and env as an SSH login.
-      # shellcheck disable=SC2016 # expanded by that shell
-      PROJ_JOB=$id timeout -k 1m "$limit" bash -lc 'exec claude "$@" <"$0"' "$dir/prompt.$n" "${args[@]}" >"$dir/$n.jsonl" &
-    fi
-    pid=$!
-    # Quiet for the job's --idle: stuck, and stopped as one past its timeout
-    # is (its stream is written as it goes, so its age is the quiet).
-    dog=''
-    if [ -s "$dir/idle" ]; then
-      idle=$(cat "$dir/idle")
-      case $idle in *m) per=60 ;; *h) per=3600 ;; *d) per=86400 ;; *) per=1 ;; esac
-      quiet=$(( ${idle%[smhd]} * per ))
-      ( while sleep 1 && kill -0 "$pid" 2>/dev/null; do
-          if [ $(( $(date +%s) - $(stat -c %Y "$dir/$n.jsonl") )) -ge "$quiet" ]; then
-            : >"$dir/$n.quiet"
-            kill "$pid"
-            break
-          fi
-        done ) &
-      dog=$!
-    fi
-    # The answer ends the turn: a few seconds to exit by itself, then Claude
-    # and whatever it left in the background are stopped (the unit takes the
-    # rest when this shell ends), and the slot goes with them.
-    if grep -qm1 '"type":"result"' < <(tail -n +1 -f --pid="$pid" "$dir/$n.jsonl"); then
-      for _ in $(seq 10); do kill -0 "$pid" 2>/dev/null || break; sleep 1; done
-      kill "$pid" 2>/dev/null || true
-    fi
-    rc=0
-    wait "$pid" || rc=$?
-    [ -z "$dog" ] || kill "$dog" 2>/dev/null || true
-    last=$(grep '"type":"result"' "$dir/$n.jsonl" | tail -n 1 || true)
+    prompt=$dir/prompt.$n
+    while :; do
+      args=(-p --output-format stream-json --verbose)
+      if [ -s "$dir/session" ]; then args+=(--resume "$(cat "$dir/session")"); fi
+      # Where this run's stream starts: an earlier run's answer isn't its.
+      from=$(($(wc -l <"$dir/$n.jsonl") + 1))
+      left=$((deadline - $(date +%s)))
+      [ "$left" -gt 0 ] || left=1
+      if [ -s "$dir/agent" ]; then
+        timeout -k 1m "$left" agent sh "$(cat "$dir/agent")" claude "${args[@]}" <"$prompt" >>"$dir/$n.jsonl" &
+      else
+        args+=(--append-system-prompt "This is proj job $id, running headless. Your turn ends with your answer, and anything you left running in the background is stopped then, so don't wait on GitHub (CI, reviews, merges) in the background or with sleep. Run \`proj await URL\` for each PR or issue you're still waiting on, then end your turn saying what you wait for: the job is resumed, with this conversation, once one of them changes (checks finish, a review, comment or push, merged or closed). $LONG")
+        # A login shell, so the job sees the same PATH and env as an SSH login.
+        # shellcheck disable=SC2016 # expanded by that shell
+        PROJ_JOB=$id timeout -k 1m "$left" bash -lc 'exec claude "$@" <"$0"' "$prompt" "${args[@]}" >>"$dir/$n.jsonl" &
+      fi
+      pid=$!
+      # Quiet for the job's --idle: stuck, and stopped as one past its timeout
+      # is (its stream is written as it goes, so its age is the quiet).
+      dog=''
+      if [ -s "$dir/idle" ]; then
+        idle=$(cat "$dir/idle")
+        quiet=$(secs "$idle")
+        ( while sleep 1 && kill -0 "$pid" 2>/dev/null; do
+            if [ $(( $(date +%s) - $(stat -c %Y "$dir/$n.jsonl") )) -ge "$quiet" ]; then
+              : >"$dir/$n.quiet"
+              kill "$pid"
+              break
+            fi
+          done ) &
+        dog=$!
+      fi
+      # The answer ends the turn: a few seconds to exit by itself, then Claude
+      # and whatever it left in the background are stopped (the unit takes the
+      # rest when this shell ends), and the slot goes with them.
+      cut=''
+      if grep -qm1 '"type":"result"' < <(tail -n +"$from" -f --pid="$pid" "$dir/$n.jsonl"); then
+        for _ in $(seq 10); do kill -0 "$pid" 2>/dev/null || break; sleep 1; done
+        if kill -0 "$pid" 2>/dev/null; then cut=1; kill "$pid" 2>/dev/null || true; fi
+      fi
+      rc=0
+      wait "$pid" || rc=$?
+      [ -z "$dog" ] || kill "$dog" 2>/dev/null || true
+      last=$(tail -n +"$from" "$dir/$n.jsonl" | grep '"type":"result"' | tail -n 1 || true)
+      [ -z "$last" ] || jq -r '.session_id' <<<"$last" >"$dir/session"
+      # Still up after its answer, it was waiting on something it left in the
+      # background (a build past one Bash call), which went with it: once a
+      # turn, it's told so in the same conversation and slot, and answers
+      # again. Waiting on GitHub is proj await's.
+      if [ -n "$cut" ] && [ "$prompt" = "$dir/prompt.$n" ] && jq -e '.is_error | not' <<<"$last" >/dev/null 2>&1 &&
+        [ "$(date +%s)" -lt "$deadline" ]; then
+        printf '%s\n' "Your answer ended the turn while something you left running in the background was still going, and it was stopped with it: nothing more from it reaches you, and the turn isn't over. If you were waiting on it, run it again and wait for it now. $LONG If you were waiting on GitHub, run \`proj await URL\` for it. Then answer again." >"$dir/$n.cut"
+        prompt=$dir/$n.cut
+        continue
+      fi
+      break
+    done
+    # The turn ends as its last run did; its answer is every run's.
     if [ -n "$last" ]; then
       rc=0
-      jq -r '.session_id' <<<"$last" >"$dir/session"
       answer "$dir/$n.jsonl" >"$dir/$n.result"
       jq -r 'if .is_error then "error" else "done" end' <<<"$last" >"$dir/$n.outcome"
       # What it awaits, from the baseline `proj await` took; one line per

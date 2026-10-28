@@ -1,7 +1,8 @@
 # proj's limits, for real: a machine with proj on and a stand-in for Claude
 # (burrow.claude.package) checks that jobs past maxJobs wait in line, that
 # --first goes ahead but can't starve a turn that has waited long, that a job
-# whose turn has ended frees its slot, that one waiting on a PR or issue
+# whose turn has ended frees its slot, that one stopped after its answer with
+# work in the background hears so once and answers again, that one waiting on a PR or issue
 # (proj await) is resumed when it changes, even before the turn ended and
 # from proj-watch's own unit, but never for proj-inbox's own comment, or once
 # its deadline passes with GitHub unreadable, that a reply meanwhile owns the
@@ -24,7 +25,8 @@ let
   # "sleep N" sleeps; "eat" holds far more memory than the test's job cap;
   # "twice" answers twice in one turn, "answerfail" answers and then fails;
   # "linger N" answers, then stays up N seconds, as Claude does while
-  # something it left in the background (a CI watch) is still going;
+  # something it left in the background (a CI watch, a long build) is still
+  # going, and so does being told so while /tmp/linger-again exists;
   # "chatter N" says something every second for N seconds, then answers.
   claude = pkgs.writeShellScriptBin "claude" ''
     prompt=$(cat)
@@ -34,6 +36,15 @@ let
       linger*)
         echo '{"type":"result","session_id":"s","result":"waiting on CI","is_error":false}'
         sleep "''${prompt#linger }"
+        exit 0 ;;
+      "Your answer ended the turn while"*)
+        echo "$*" >/tmp/cut-args
+        if [ -e /tmp/linger-again ]; then
+          echo '{"type":"result","session_id":"s","result":"still waiting","is_error":false}'
+          sleep 600
+          exit 0
+        fi
+        echo '{"type":"result","session_id":"s","result":"the build passed","is_error":false}'
         exit 0 ;;
       await*) proj await "''${prompt#await }" >/dev/null ;;
       # Awaits, then takes a while to answer: what changes meanwhile is news.
@@ -103,7 +114,10 @@ pkgs.testers.runNixOSTest {
     # whose kick port the test listens on itself.
     systemd.services.burrow-events.enable = false;
     systemd.timers.burrow-events-catch-up.enable = false;
-    environment.systemPackages = [ pkgs.git pkgs.python3 ];
+    environment.systemPackages = [
+      pkgs.git
+      pkgs.python3
+    ];
 
     users.users.dev = {
       isNormalUser = true;
@@ -207,6 +221,19 @@ pkgs.testers.runNixOSTest {
         c = proj('run web "sleep 1"')
         machine.wait_until_succeeds(f"su - dev -c 'proj state {c}' | grep -x done", timeout=120)
         proj(f"stop {b}")
+
+    with subtest("a turn stopped with work in the background hears so once, in the same slot, and answers again"):
+        a = proj('run web "linger 600"')
+        machine.wait_until_succeeds(f"su - dev -c 'proj state {a}' | grep -x done", timeout=120)
+        assert proj(f"log {a}") == "waiting on CI\n\nthe build passed", proj(f"log {a}")
+        assert machine.succeed(f"cat /data/dev/jobs/{a}/turns").strip() == "1"
+        assert "--resume s" in machine.succeed("cat /tmp/cut-args")
+        # Still up after being told: stopped for good, not told again.
+        machine.succeed("touch /tmp/linger-again")
+        b = proj('run web "linger 600"')
+        machine.wait_until_succeeds(f"su - dev -c 'proj state {b}' | grep -x done", timeout=120)
+        assert proj(f"log {b}") == "waiting on CI\n\nstill waiting", proj(f"log {b}")
+        machine.succeed("rm /tmp/linger-again")
 
     with subtest("a turn that has waited past maxWait goes ahead of a newer --first"):
         a = proj('run web "sleep 600"')
