@@ -407,7 +407,7 @@ release_except "$last"
 
 snap=
 IFS=$'\t' read -r snap created < <(newest_snapshot) || true
-[ -n "$snap" ] || failed "no snapshot of ${DATASETS[0]} matches $PATTERN"
+[ -n "$snap" ] || failed "no snapshot matching $PATTERN that all of ${DATASETS[*]} have under one name (for sanoid, that's recursive = \"zfs\")"
 if [ $(($(date +%s) - created)) -ge $((STALE_AFTER * 3600)) ]; then
   failed "the newest snapshot matching $PATTERN, $snap, is more than $STALE_AFTER hours old: is whatever takes them still running?"
 fi

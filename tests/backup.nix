@@ -99,8 +99,15 @@ pkgs.testers.runNixOSTest {
     )
 
     with subtest("no snapshot to back up fails the pass and tells the owner"):
+        # Snapshots of the datasets one by one, each under its own name, as
+        # sanoid's recursive = true takes them, are none to back up.
+        for i, d in enumerate(datasets):
+            machine.succeed(f"zfs snapshot {d}@snap-0{i}")
         machine.fail("systemctl start machine-backup")
+        machine.succeed("journalctl -u machine-backup | grep 'that all of .* have under one name'")
         machine.succeed("journalctl -t machine-notify | grep 'open backup'")
+        for i, d in enumerate(datasets):
+            machine.succeed(f"zfs destroy {d}@snap-0{i}")
 
     with subtest("the first pass creates the repository and backs up the snapshot, not the live files"):
         snapshot("snap-1")

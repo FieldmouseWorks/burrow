@@ -109,9 +109,11 @@ in
       description = ''
         Which of the datasets' snapshots get backed up, as a glob on the
         snapshot's name; the default is sanoid's hourly ones. Every dataset
-        needs one of the same name. Each pass takes the newest one there is
-        and holds it with the ZFS hold `burrow-backup` until the next is
-        off the box.
+        needs one of the same name, which one `zfs snapshot` of them all
+        gives: sanoid's `recursive = "zfs"` does, but its `recursive = true`
+        names each dataset's own by the second it took it. Each pass takes
+        the newest one there is and holds it with the ZFS hold
+        `burrow-backup` until the next is off the box.
       '';
     };
 
