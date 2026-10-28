@@ -67,7 +67,9 @@ let
           flock 9 || exit 1
           booked='{}'
           if [ -e "$wake" ]; then
-            booked=$(jq -c 'if type == "object" then . else error("not {repo: epoch}") end' "$wake") || exit 1
+            # Exactly one object: jq reads a stream, so an empty file or
+            # two documents would pass a check of each one.
+            booked=$(jq -cs 'if length == 1 and (.[0] | type) == "object" then .[0] else error("not one {repo: epoch}") end' "$wake") || exit 1
           fi
           jq -c --arg repo "$1" --argjson at "$2" '. + {($repo): $at}' <<<"$booked" >"$wake.new" || exit 1
           mv -f "$wake.new" "$wake"

@@ -76,6 +76,10 @@ pkgs.testers.runNixOSTest {
         assert sorted(booked) == ["sam/old", "sam/r"] and booked["sam/old"] == 1, booked
 
     with subtest("a booking that can't be written fails the pass, and the bookings stay"):
+        for bad in ["", "  ", '{"sam/a": 1} {"sam/b": 2}', "[]"]:
+            machine.succeed(f"printf %s '{bad}' >/var/lib/burrow/ledger/wake.json")
+            machine.fail("systemctl start burrow-ledger@sam-r.service")
+            assert machine.succeed("cat /var/lib/burrow/ledger/wake.json") == bad, bad
         machine.succeed("echo 'not json' >/var/lib/burrow/ledger/wake.json")
         machine.fail("systemctl start burrow-ledger@sam-r.service")
         machine.succeed("grep -x 'not json' /var/lib/burrow/ledger/wake.json")
@@ -86,6 +90,8 @@ pkgs.testers.runNixOSTest {
         machine.succeed("systemctl start burrow-ledger.service")
         assert list(json.loads(machine.succeed("cat /var/lib/burrow/ledger/wake.json"))) == ["sam/r"]
         machine.succeed("rm /var/lib/burrow/ledger/wake.json")
+        # Past systemd's start limit by now.
+        machine.succeed("systemctl reset-failed burrow-ledger@sam-r.service")
 
     with subtest("anything else fails it"):
         machine.succeed("echo 1 >/tmp/cn-exit")
