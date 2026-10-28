@@ -676,6 +676,11 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
         if rs.get("fails", 0) >= 3:
             after(rs.get("failedAt", 0), 60)
             return
+        if rs.get("fails") and C.NOW - rs["failedAt"] < 5 * MIN:
+            # Tries five minutes apart, however many events come meanwhile:
+            # a hiccup gets time to pass before all three are spent.
+            after(rs["failedAt"], 5)
+            return
         try:
             V.queue(repo, pr, key, r)
         except Exception as e:  # the snapshot: GitHub, git, the disk
