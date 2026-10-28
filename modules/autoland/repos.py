@@ -113,30 +113,37 @@ def settle_repo(r, known):
             st["autoMergeRefused"] = True
     C.write("api", "-X", "PUT", f"repos/{repo}/vulnerability-alerts", check=False)
 
-    # Every page, an org's rulesets included: one named baseline counts as
-    # the repo's.
-    pages = C.gh("api", f"repos/{repo}/rulesets?per_page=100", "--paginate", "--slurp", check=False)
-    # None: the plan doesn't offer rules on this repo (private, free account).
+    # Every page, an org's rulesets included. Only the repo's own baseline
+    # counts as its baseline: the steward can't pin what the org keeps, so a
+    # repo with the org's gets its own over it, and GitHub enforces both.
+    rules = False
+    try:
+        pages = C.gh("api", f"repos/{repo}/rulesets?per_page=100", "--paginate", "--slurp")
+    except RuntimeError as e:
+        # The plan offers no rules on this repo (private, on a free
+        # account): there are none to pin. Anything else is GitHub not
+        # saying, and nothing's known to be pinned.
+        pages, rules = None, "Upgrade to GitHub Pro" in str(e)
     if isinstance(pages, list):
-        existing = [x for page in pages for x in page]
-        if CFG["rulesets"] and rc["ruleset"] and not any(x["name"] == "baseline" for x in existing):
+        own = [x for page in pages for x in page if x.get("source_type") == "Repository"]
+        made = True
+        if CFG["rulesets"] and rc["ruleset"] and not any(x["name"] == "baseline" for x in own):
             log(f"{repo}: adding the baseline ruleset")
-            C.write("api", "-X", "POST", f"repos/{repo}/rulesets", "--input", "-",
-                    input=json.dumps(baseline_ruleset(rc, r["default"])), check=False)
+            made = C.write("api", "-X", "POST", f"repos/{repo}/rulesets", "--input", "-",
+                           input=json.dumps(baseline_ruleset(rc, r["default"])), check=False) is not None
         # Whether or not the repo gets the baseline ruleset, its own rules
         # are kept in line with it.
-        rules = keep_rules(repo, [x for x in existing if x.get("target") == "branch" and x.get("source_type") == "Repository"])
-    else:
-        # A public repo always has rules to list: there, None was GitHub
-        # not answering.
-        rules = r["private"]
-    # Settled for this App only once its checks are known to be pinned: a
-    # protection or ruleset GitHub didn't answer for is tried next pass.
-    pinned = keep_protection(repo, r["default"]) and rules
+        rules = keep_rules(repo, [x for x in own if x.get("target") == "branch"]) and made
+    # Bound to this App (C.bound) only once every rule is known to take its
+    # status from it alone, and no longer once that's not known: till then
+    # nothing's queued to merge on them, and the settings are due again.
+    pinned = keep_protection(repo) and rules
 
     st["settings"] = C.NOW
     if pinned:
         st["app"] = CFG["app"]["id"]
+    else:
+        st.pop("app", None)
     save(f"repo-{repo.replace('/', '_')}.json", st)
     return new
 
@@ -186,13 +193,23 @@ def keep_rules(repo, rulesets):
     return ok
 
 
-def keep_protection(repo, default):
-    """The same in the default branch's classic protection. Its checks are
-    read only when the branch says it requires some: the endpoint is a 404
-    otherwise. Returns False when GitHub didn't say what they are, or
-    didn't take the change."""
+def keep_protection(repo):
+    """The same in the classic protection of every protected branch, since a
+    PR can be merged into any of them. Returns False when GitHub didn't say
+    what a branch's is, or didn't take the change."""
+    pages = C.gh("api", f"repos/{repo}/branches?protected=true&per_page=100", "--paginate", "--slurp", check=False)
+    if not isinstance(pages, list):
+        return False
+    return all([keep_branch(repo, b["name"]) for page in pages for b in page])
+
+
+def keep_branch(repo, name):
+    """One branch's classic protection, in line. Its checks are read only
+    when the branch says it requires some: the endpoint is a 404 otherwise.
+    Returns False when GitHub didn't say what they are, or didn't take the
+    change."""
     # A slash in the name (release/1.0) is part of it, not of the path.
-    branch = urllib.parse.quote(default, safe="")
+    branch = urllib.parse.quote(name, safe="")
     b = C.gh("api", f"repos/{repo}/branches/{branch}", check=False)
     if not isinstance(b, dict):
         return False
@@ -215,7 +232,7 @@ def keep_protection(repo, default):
         changed.append(f"{CONTEXT} from the App only")
     if not patch:
         return True
-    log(f"{repo}: {', '.join(changed)} in {default}'s protection")
+    log(f"{repo}: {', '.join(changed)} in {name}'s protection")
     return C.write("api", "-X", "PATCH", path, "--input", "-", input=json.dumps(patch), check=False) is not None
 
 

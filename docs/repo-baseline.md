@@ -22,7 +22,9 @@ change nothing else in the same PR.
   required from the steward's App. Repo admins can still merge past it from
   the PR page. A repo whose
   automation pushes to its default branch (`directPush`) gets only the first
-  two. Existing rules stay; the ruleset only adds.
+  two. Existing rules stay; the ruleset only adds. An org's ruleset doesn't
+  stand in for it, whatever its name: the steward can't change the org's, so
+  the repo gets its own as well, and GitHub enforces both.
 - No rule makes a branch be up to date with its base before it merges, the
   repo's own rulesets and branch protection included: the steward turns that
   off where it finds it. With it on, every merge puts every other open PR
@@ -30,10 +32,13 @@ change nothing else in the same PR.
   so the PRs take turns. It guards only against two PRs that pass alone and
   break the branch together, and the default branch's own CI catches that
   (step 8 of the PR flow undoes it). There's no merge queue either.
-- Wherever a rule requires `review-settled` (those rulesets and branch
-  protection too), it's required from the steward's App: GitHub then takes
-  that status from no one else, auto-merge included. The steward pins it
-  where it finds it, and straight away when the App changes.
+- Wherever a rule requires `review-settled` (those rulesets and every
+  protected branch's protection, since a PR can merge into any of them),
+  it's required from the steward's App: GitHub then takes that status from
+  no one else, auto-merge included. The steward pins it where it finds it,
+  and straight away when the App changes. Until it knows a repo's are all
+  pinned, it queues no auto-merge there: it merges a settled PR itself, at
+  the head it checked, and takes off a merge it queued before.
 - The `hold` and `needs-owner` labels (`burrow.autoland.labels`), which the
   steward and its jobs put on PRs.
 

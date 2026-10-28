@@ -275,6 +275,10 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
 
     def land_now(desc):
         settle("success", desc)
+        # Queued before its repo's rules were known to take the status from
+        # the App alone: not left queued on them (land merges it now).
+        if st.get("landed") == head and pr["autoMergeRequest"] and not C.bound(repo):
+            st["landed"] = None
         if st.get("landed") != head:
             log(f"{tag}: settled, landing")
             merge()

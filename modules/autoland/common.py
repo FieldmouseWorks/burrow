@@ -358,6 +358,13 @@ def save(name, value):
             raise
 
 
+def bound(repo):
+    """Whether the repo's rules are known to take the steward's status from
+    its App alone (repos.settle_repo pins them). Until they are, a status
+    from anyone could finish a merge it queued."""
+    return load(f"repo-{repo.replace('/', '_')}.json", {}).get("app") == CFG["app"]["id"]
+
+
 def acted_on(pr):
     """Whether the steward does anything with the PR beyond saying it's not
     its to do: not a draft, and from one of its authors."""

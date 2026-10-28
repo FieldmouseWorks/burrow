@@ -186,11 +186,17 @@ def merge_method(repo_info):
 
 def land(repo, pr, repo_info):
     """Auto-merge (or merge now if nothing is left to wait for). False if
-    GitHub took neither."""
+    GitHub took neither. Queued only where the repo's rules take the
+    steward's status from its App alone (C.bound): elsewhere it's merged
+    now or not at all, and a merge queued before is taken off first."""
     n = str(pr["number"])
+    # Only the head that was checked: a push since then waits for the next pass.
+    method = [merge_method(repo_info), "--match-head-commit", pr["headRefOid"]]
+    if not C.bound(repo):
+        if not C.unland(repo, pr) and not DRY:
+            return False
+        return C.write("pr", "merge", n, "-R", repo, *method, check=False) is not None or DRY
     if not pr["autoMergeRequest"]:
-        # Only the head that was checked: a push since then waits for the next pass.
-        method = [merge_method(repo_info), "--match-head-commit", pr["headRefOid"]]
         if C.write("pr", "merge", n, "-R", repo, "--auto", *method, check=False) is None and not DRY:
             # No branch rules to wait on: GitHub won't queue it, so merge it now.
             return C.write("pr", "merge", n, "-R", repo, *method, check=False) is not None
