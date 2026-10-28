@@ -20,7 +20,8 @@ Three things put a repo in a handler's line:
     review coming back. Kicks only start a pass, which reads
     everything for itself, so the port asks for no secret; it listens on
     127.0.0.1 and nginx never passes anything to it.
-  - A wake-up the handler's last pass booked in its wake file, {repo: epoch},
+  - A wake-up the handler's last pass booked in its wake file, {repo: epoch}
+    ("" for its full pass),
     for when a wait it saw ends (a new head's settle delay, a reviewer's
     timeout, a reply old enough to hand on). Read after each pass the
     service starts, and when it starts.
@@ -157,7 +158,7 @@ class Line:
         started is new (that pass rewrote its repo's)."""
         with self.cond:
             for repo, at in booked.items():
-                if not isinstance(repo, str) or not REPO_RE.match(repo):
+                if not isinstance(repo, str) or not (repo == FULL or REPO_RE.match(repo)):
                     continue
                 repo = repo.lower()
                 if isinstance(at, (int, float)) and at > self.last.get(repo, 0):

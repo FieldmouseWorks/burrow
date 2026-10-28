@@ -794,17 +794,17 @@ def main():
 
 def after_limit(kick):
     """GitHub's rate limit turned the pass away somewhere, finding its repos,
-    in its PRs or after (the hooks, the owner's issue): every wake-up waits
-    for the reset, the ones booked before it was met and other passes' too,
-    and each repo the pass was for gets one then. None sooner could do
+    in its PRs or after (the hooks, the owner's issue): it comes back whole
+    at the reset, a full pass as one (its settings, hooks and issue too:
+    burrow-events takes "" for it), a kicked one for its repos, whatever
+    they had booked. Every other wake-up waits for the reset too, the ones
+    booked before it was met and other passes'. None sooner could do
     anything, and none then waits on another event or the hourly pass."""
     at = C.LIMITED[0] + 1
-    wakes = {k: max(v, at) for k, v in load("wake.json", {}).items() if v > C.NOW}
-    names = kick if kick is not None else list(load("repos.json", {}).get("repos", {}))
-    for repo in names:
-        if not any(k.lower() == repo.lower() for k in wakes):
-            wakes[repo] = at
-    save("wake.json", wakes)
+    again = [""] if kick is None else kick
+    wakes = {k: max(v, at) for k, v in load("wake.json", {}).items()
+             if v > C.NOW and k.lower() not in {r.lower() for r in again}}
+    save("wake.json", {**wakes, **dict.fromkeys(again, at)})
 
 
 def run_pass(kick):

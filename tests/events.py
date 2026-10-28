@@ -106,6 +106,11 @@ line.event("Sam/R", 100)
 line.event("sam/r", 101)
 line.wakes({"SAM/r": 103})
 assert line.take(106) == (["sam/r"], None), line.due
+# A pass can book its handler's full pass too ("": the steward's, after a
+# rate limit turned it away).
+line = E.Line()
+line.wakes({E.FULL: 300})
+assert line.due == {E.FULL: 300} and line.take(300)[0] == [E.FULL], line.due
 # An event between a take that found nothing and the wait after it isn't
 # slept through.
 line = E.Line()

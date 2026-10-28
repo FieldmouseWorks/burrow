@@ -212,16 +212,17 @@ kept_fns = (S.R.discover, S.open_prs, S.R.publish)
 for where in ("discovery", "prs", "after"):
     fresh_pr_state()
     C.NOW = T
-    C.save("wake.json", {"sam/other": T + 60})
-    C.save("repos.json", {"at": T, "repos": {"sam/r": {}, "sam/other": {}}})
+    C.save("wake.json", {"sam/other": T + 60, "Sam/R": T + 9000})
     S.R.discover = limited if where == "discovery" else (lambda: [{"repo": "sam/r"}])
     S.open_prs = limited if where == "prs" else (lambda owner, name: (info, [mkpr()]))
     S.R.publish = limited if where == "after" else (lambda lines: None)
     path, os.environ["PATH"] = os.environ["PATH"], fake + os.pathsep + os.environ["PATH"]
     C.WAKE.clear()
     C.LIMITED.clear()
-    # A full pass that can't find its repos books the ones it had last.
-    for argv_now in (["steward", "kick", "sam/r"],) + ((["steward"],) if where == "discovery" else ()):
+    # The repo it was for comes back at the reset, whatever it had booked,
+    # however it's spelled; a full pass comes back as one, whatever it got to
+    # (its settings, hooks and the owner's issue are its own).
+    for argv_now in (["steward", "kick", "sam/r"],) + ((["steward"],) if where != "prs" else ()):
         sys.argv = argv_now
         try:
             S.main()
@@ -229,8 +230,13 @@ for where in ("discovery", "prs", "after"):
         except RuntimeError as e:
             assert isinstance(e, C.Unavailable) and where != "prs", (where, e)
         assert C.LIMITED == [T + 1800], (where, C.LIMITED)
-        assert C.load("wake.json", None) == {"sam/r": T + 1800 + 1, "sam/other": T + 1800 + 1}, (where, argv_now, C.load("wake.json", None))
-        C.save("wake.json", {"sam/other": T + 60})
+        woke = C.load("wake.json", None)
+        if len(argv_now) > 1:
+            assert woke == {"sam/r": T + 1800 + 1, "sam/other": T + 1800 + 1}, (where, woke)
+        else:  # what the full pass booked for its repos as well, none sooner
+            assert woke[""] == T + 1800 + 1 and woke["sam/other"] == T + 1800 + 1, (where, woke)
+            assert min(woke.values()) == T + 1800 + 1, (where, woke)
+        C.save("wake.json", {"sam/other": T + 60, "Sam/R": T + 9000})
     os.environ["PATH"] = path
 sys.argv = argv
 S.R.discover, S.open_prs, S.R.publish = kept_fns
