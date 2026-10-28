@@ -130,12 +130,12 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
                 ok = False
         if not ok and not DRY:
             # GitHub didn't take the status or the stop: until it does, the
-            # old ones stand and auto-merge can still merge it. Again in a minute.
+            # old ones stand and a merge queued on it can still go. Again in a minute.
             after(C.NOW, 1)
 
     def update_branch():
         """Bring a settled head up to date with a base whose rules want it
-        (auto-merge won't). The merged-in head is reviewed like any other."""
+        (the merge won't). The merged-in head is reviewed like any other."""
         if pr.get("mergeStateStatus") != "BEHIND" or st.get("updated") == head:
             return False
         if C.write("api", "-X", "PUT", f"repos/{repo}/pulls/{n}/update-branch",
@@ -262,8 +262,8 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
         settle("pending", f"{desc}; {who}" if who else desc)
 
     def merge():
-        # Marked landed only once GitHub has queued or done the merge, so a
-        # failed one is tried again next pass, and the owner hears after three.
+        # Marked landed only once GitHub has done the merge, so a failed one
+        # is tried again next pass, and the owner hears after three.
         if land(repo, pr, repo_info):
             st["landed"] = head
             return
@@ -271,13 +271,13 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
         log(f"{tag}: merge failed ({st['landFails']})")
         after(C.NOW, 1)
         if st["landFails"] >= 3:
-            digest.append(("Couldn't merge", line, "gh pr merge keeps failing (journalctl -u autoland)"))
+            digest.append(("Couldn't merge", line, "GitHub keeps refusing the merge (journalctl -u autoland)"))
 
     def land_now(desc):
         settle("success", desc)
-        # Queued before its repo's rules were known to take the status from
-        # the App alone: not left queued on them (land merges it now).
-        if st.get("landed") == head and pr["autoMergeRequest"] and not C.bound(repo):
+        # Still open with a merge queued on it: GitHub's to merge later, which
+        # land never leaves it to (a steward before it did). Merged now instead.
+        if st.get("landed") == head and pr["autoMergeRequest"]:
             st["landed"] = None
         if st.get("landed") != head:
             log(f"{tag}: settled, landing")

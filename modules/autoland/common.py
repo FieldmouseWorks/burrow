@@ -358,13 +358,6 @@ def save(name, value):
             raise
 
 
-def bound(repo):
-    """Whether the repo's rules are known to take the steward's status from
-    its App alone (repos.settle_repo pins them). Until they are, a status
-    from anyone could finish a merge it queued."""
-    return load(f"repo-{repo.replace('/', '_')}.json", {}).get("app") == CFG["app"]["id"]
-
-
 def acted_on(pr):
     """Whether the steward does anything with the PR beyond saying it's not
     its to do: not a draft, and from one of its authors."""
@@ -372,8 +365,8 @@ def acted_on(pr):
 
 
 def unland(repo, pr):
-    """Something new came up after it was settled: stop the merge. False if
-    GitHub didn't take it."""
+    """Take off a merge queued on it (auto-merge), so GitHub merges nothing
+    later. False if GitHub didn't take it."""
     return not pr["autoMergeRequest"] or write(
         "pr", "merge", str(pr["number"]), "-R", repo, "--disable-auto", check=False) is not None
 

@@ -134,9 +134,8 @@ def settle_repo(r, known):
         # Whether or not the repo gets the baseline ruleset, its own rules
         # are kept in line with it.
         rules = keep_rules(repo, [x for x in own if x.get("target") == "branch"]) and made
-    # Bound to this App (C.bound) only once every rule is known to take its
-    # status from it alone, and no longer once that's not known: till then
-    # nothing's queued to merge on them, and the settings are due again.
+    # Settled for this App only once every rule is known to take its status
+    # from it alone; once that's not known, the settings are due again.
     pinned = keep_protection(repo) and rules
 
     st["settings"] = C.NOW

@@ -177,27 +177,23 @@ def eyes(repo, pr):
 
 
 def merge_method(repo_info):
-    for flag, method in (("squashMergeAllowed", "--squash"), ("mergeCommitAllowed", "--merge"),
-                         ("rebaseMergeAllowed", "--rebase")):
+    for flag, method in (("squashMergeAllowed", "squash"), ("mergeCommitAllowed", "merge"),
+                         ("rebaseMergeAllowed", "rebase")):
         if repo_info[flag]:
             return method
-    return "--merge"
+    return "merge"
 
 
 def land(repo, pr, repo_info):
-    """Auto-merge (or merge now if nothing is left to wait for). False if
-    GitHub took neither. Queued only where the repo's rules take the
-    steward's status from its App alone (C.bound): elsewhere it's merged
-    now or not at all, and a merge queued before is taken off first."""
-    n = str(pr["number"])
-    # Only the head that was checked: a push since then waits for the next pass.
-    method = [merge_method(repo_info), "--match-head-commit", pr["headRefOid"]]
-    if not C.bound(repo):
-        if not C.unland(repo, pr) and not DRY:
-            return False
-        return C.write("pr", "merge", n, "-R", repo, *method, check=False) is not None or DRY
-    if not pr["autoMergeRequest"]:
-        if C.write("pr", "merge", n, "-R", repo, "--auto", *method, check=False) is None and not DRY:
-            # No branch rules to wait on: GitHub won't queue it, so merge it now.
-            return C.write("pr", "merge", n, "-R", repo, *method, check=False) is not None
-    return True
+    """Merge it now, at the head that was checked, or not at all: False if
+    GitHub didn't. Nothing is left for GitHub to merge later (auto-merge, a
+    merge queue): that would merge whatever head the base's rules let
+    through, which needn't be one the steward checked. So a merge queued
+    before, by anyone, is taken off first."""
+    if not C.unland(repo, pr) and not DRY:
+        return False
+    # The merge endpoint merges or refuses; a push since the check makes the
+    # sha stale, and it waits for the next pass.
+    return C.write("api", "-X", "PUT", f"repos/{repo}/pulls/{pr['number']}/merge",
+                   "-f", f"merge_method={merge_method(repo_info)}", "-f", f"sha={pr['headRefOid']}",
+                   check=False) is not None or DRY

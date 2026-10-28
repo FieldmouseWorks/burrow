@@ -36,9 +36,11 @@ change nothing else in the same PR.
   protected branch's protection, since a PR can merge into any of them),
   it's required from the steward's App: GitHub then takes that status from
   no one else, auto-merge included. The steward pins it where it finds it,
-  and straight away when the App changes. Until it knows a repo's are all
-  pinned, it queues no auto-merge there: it merges a settled PR itself, at
-  the head it checked, and takes off a merge it queued before.
+  and straight away when the App changes.
+- The steward merges a settled PR itself, at the head it checked, or not
+  at all. It never leaves one for GitHub to merge later (auto-merge, a
+  merge queue), which would merge whatever head the base's rules let
+  through, and it takes off a merge queued on a PR before it merges it.
 - The `hold` and `needs-owner` labels (`burrow.autoland.labels`), which the
   steward and its jobs put on PRs.
 

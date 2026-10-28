@@ -122,8 +122,8 @@ assert BODIES == [(PROTECTION, {"checks": [{"context": "gate", "app_id": -1}, {"
 SETTINGS[PROTECTION] = {"strict": False}
 # Another App than the one a repo was settled for: its settings are due
 # straight away, not a day later. Until its checks are known to be pinned
-# (GitHub not saying what the protection's are, say), no App is known to
-# be bound, and they stay due.
+# (GitHub not saying what the protection's are, say), they're settled for no
+# App, and stay due.
 C.save("repo-sam_r.json", {**C.load("repo-sam_r.json", {}), "settings": C.NOW, "app": 6})
 SETTINGS[PROTECTION] = None
 WROTE.clear()
@@ -138,7 +138,7 @@ R.settle_repo({"repo": "sam/r", "private": False, "default": "main"}, {"sam/r"})
 assert WROTE == [], WROTE
 # A plan without rules (a private repo on a free account) has nothing to
 # pin. Its rulesets not listed for any other reason, on any repo, is GitHub
-# not saying: not pinned, and one bound before isn't any more.
+# not saying: not pinned, and one settled before isn't any more.
 rulesets_kept = SETTINGS["repos/sam/r/rulesets?per_page=100"]
 free = RuntimeError("gh api repos/sam/r/rulesets?per_page=100: gh: Upgrade to GitHub Pro or make this repository "
                     "public to enable this feature. (HTTP 403)")
@@ -147,7 +147,7 @@ for private, said, pinned in ((True, free, True), (True, down, False), (False, d
     SETTINGS["repos/sam/r/rulesets?per_page=100"] = said
     C.save("repo-sam_r.json", {**C.load("repo-sam_r.json", {}), "app": 7, "settings": 0})
     R.settle_repo({"repo": "sam/r", "private": private, "default": "main"}, {"sam/r"})
-    assert C.bound("sam/r") == pinned, (private, said)
+    assert (C.load("repo-sam_r.json", {}).get("app") == 7) == pinned, (private, said)
 SETTINGS["repos/sam/r/rulesets?per_page=100"] = rulesets_kept
 # A baseline ruleset GitHub didn't take: not pinned either.
 SETTINGS["repos/sam/r/rulesets?per_page=100"] = [[]]
@@ -155,7 +155,7 @@ FAIL.append("POST repos/sam/r/rulesets")
 C.save("repo-sam_r.json", {**C.load("repo-sam_r.json", {}), "app": 7, "settings": 0})
 R.settle_repo({"repo": "sam/r", "private": False, "default": "main"}, {"sam/r"})
 FAIL.remove("POST repos/sam/r/rulesets")
-assert not C.bound("sam/r")
+assert "app" not in C.load("repo-sam_r.json", {})
 SETTINGS["repos/sam/r/rulesets?per_page=100"] = rulesets_kept
 # A repo set to have no baseline ruleset still gets its own rules' turned off.
 SETTINGS["repos/sam/r/rulesets/2"]["rules"][1]["parameters"]["strict_required_status_checks_policy"] = True

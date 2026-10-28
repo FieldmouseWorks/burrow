@@ -345,8 +345,13 @@ def run(pr, after, obsolete=False):
     return " ".join(x for x in WROTE if "/statuses/" in x), digest
 
 
+def merges():
+    """The merges written: the merge endpoint's, the one way the steward merges."""
+    return [x for x in WROTE if x.startswith("api -X PUT ") and x.split()[3].endswith("/merge")]
+
+
 def merged():
-    return any(x.startswith("pr merge") for x in WROTE)
+    return bool(merges())
 
 
 def queued():

@@ -6,7 +6,7 @@
 #         -> Claude fixes or answers every finding
 #         -> it finds nothing on the exact head, CI green
 #         -> (one-way paths, no CI: a Claude job judges it)
-#         -> `review-settled` status -> auto-merge -> branch deleted
+#         -> `review-settled` status -> merged at that head -> branch deleted
 #
 # A draft is work in progress: nothing happens to it until it's ready. The
 # owner only sees what needs them, in one issue: what a judge job couldn't

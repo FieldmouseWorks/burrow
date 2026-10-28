@@ -60,7 +60,7 @@ DIGEST = [
     ("Labelled needs-owner", "sam/r#2", ""),
     ("Stale branches (unmerged, no PR, 30+ days)", "sam/r: `old`", ""),
     ("Rival couldn't review it", "sam/r#3", "rival exited 1 (journalctl -u autoland-review)"),
-    ("Couldn't merge", "sam/r#4", "gh pr merge keeps failing (journalctl -u autoland)"),
+    ("Couldn't merge", "sam/r#4", "GitHub keeps refusing the merge (journalctl -u autoland)"),
     ("Two Claude jobs ended without fixing it", "sam/r#5", "its findings"),
 ]
 
@@ -98,7 +98,7 @@ R.publish(DIGEST[:4])
 OPEN["claude"] = 9
 CALLS.clear()
 R.publish(DIGEST)
-assert said(9) == ["New:\n- Couldn't merge: sam/r#4: gh pr merge keeps failing (journalctl -u autoland)\n"
+assert said(9) == ["New:\n- Couldn't merge: sam/r#4: GitHub keeps refusing the merge (journalctl -u autoland)\n"
                    "- Two Claude jobs ended without fixing it: sam/r#5: its findings"], said(9)
 # A PR already listed, listed again for something else: news too, kind and
 # diagnosis with it.

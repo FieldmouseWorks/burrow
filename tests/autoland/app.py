@@ -10,7 +10,7 @@ import sys
 import threading
 import time
 
-from harness import REAL_TOKEN, WROTE, C, P, R, S, V, clean, fresh_pr_state, mkpr, run, sh, stand_in, tmp
+from harness import FAIL, REAL_TOKEN, WROTE, C, P, R, S, V, clean, fresh_pr_state, merges, mkpr, run, sh, stand_in, tmp
 from harness import head as HEAD
 
 import dashboard as D  # noqa: E402 (harness puts the steward on the path)
@@ -224,29 +224,26 @@ S.main()
 (S.R.discover, S.R.publish, S.R.unhook_gone, S.R.hook_projects, C.gh, sys.argv) = kept
 assert FOR == [("sam", "sam"), ("eve", "eve")], FOR
 
-# A merge is queued (auto-merge) only on a repo whose rules are known to
-# take the steward's status from its App alone; on any other, a status from
-# anyone could finish it. There it's merged now, the checked head only, and
-# a merge queued before is taken off first.
-def merges():
-    return [x for x in WROTE if x.startswith("pr merge")]
-
-
+# The steward merges now, the checked head only, or not at all: nothing is
+# left for GitHub to merge later (auto-merge, a merge queue), which would
+# merge whatever head the base's rules let through. A merge queued before,
+# by anyone, is taken off first, and a PR settled and queued by a steward
+# before this one is merged now rather than left queued.
 stood = (C.gh, C.write, C.job, C.job_state, V.queue, V.post)
 stand_in()
 fresh_pr_state()
 run(clean(), 600)
-assert len(merges()) == 1 and "--auto" not in merges()[0] and f"--match-head-commit {HEAD}" in merges()[0], WROTE
-fresh_pr_state()
-C.save("repo-sam_r.json", {"app": 7})
-run(clean(), 600)
-assert len(merges()) == 1 and "--auto" in merges()[0] and f"--match-head-commit {HEAD}" in merges()[0], WROTE
+assert merges() == [f"api -X PUT repos/sam/r/pulls/5/merge -f merge_method=squash -f sha={HEAD}"], WROTE
+assert not any(x.startswith("pr merge") for x in WROTE), WROTE
 queued_pr = {**clean(), "autoMergeRequest": {"enabledAt": "x"}}
 run(queued_pr, 700)
-assert merges() == [], WROTE
-C.save("repo-sam_r.json", {"app": 6})  # pinned to another App: not this one's
+assert WROTE[-2:] == ["pr merge 5 -R sam/r --disable-auto", merges()[0]], WROTE
+# The merge queued that couldn't be taken off: no merge either, and again soon.
+fresh_pr_state()
+FAIL.append("--disable-auto")
 run(queued_pr, 800)
-assert merges()[0] == "pr merge 5 -R sam/r --disable-auto" and len(merges()) == 2 and "--auto" not in merges()[1], WROTE
+FAIL.remove("--disable-auto")
+assert merges() == [] and "pr merge 5 -R sam/r --disable-auto" in WROTE, WROTE
 (C.gh, C.write, C.job, C.job_state, V.queue, V.post) = stood
 fresh_pr_state()
 print("app: ok")
