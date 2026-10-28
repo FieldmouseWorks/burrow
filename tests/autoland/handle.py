@@ -10,7 +10,7 @@ import os
 import shutil
 import subprocess
 
-from harness import (C, CI_GREEN, DDIR, FAIL, JOBS, POSTED, PR_DIFF, QDIR, R, S, STATES, STUB, T0, V,
+from harness import (C, CI_GREEN, DDIR, FAIL, JOBS, POSTED, PR_DIFF, QDIR, P, R, S, STATES, STUB, T0, V,
                      W, WROTE, agent, agent_runs, clean, fresh_pr_state, head, info, judgment, merged,
                      gh_stub, mkpr, pr_state, queued, run, rv_review, said, stand_in, swept, tmp, worker)
 
@@ -561,6 +561,14 @@ STATES.clear()
 # Its status says who has them, and until or since when; a job that takes
 # them puts 👀 on each open thread.
 reacted = lambda: [x for x in WROTE if x.endswith("/reactions -f content=eyes")]  # noqa: E731
+# The threads' first comments, as eyes() reads them (only then, not with
+# every PR: P.THREADS).
+ASKED = []
+graphql_kept = C.graphql
+C.graphql = lambda q, **v: ASKED.append((q, v)) or {"node": {"reviewThreads": {"nodes": [
+    {"isResolved": False, "comments": {"nodes": [{"databaseId": 900}]}},
+    {"isResolved": True, "comments": {"nodes": [{"databaseId": 901}]}}]}}}
+assert "comments" not in next(x for x in P.PRS.splitlines() if "reviewThreads" in x), "the PR list reads no thread comments"
 fresh_pr_state()
 status, _ = run(clean(threads=[False, True]), 0)
 assert JOBS == [] and status.endswith("1 open review thread; a Claude job takes it at 12:30am UTC -f target_url=u"), status
@@ -569,6 +577,7 @@ assert len(JOBS) == 1 and "isn't settled" in JOBS[0], JOBS
 assert "push before you reply" in JOBS[0] and "Never push over it" in JOBS[0], "a fix job's reply names what landed"
 assert "1 open review thread; a Claude job has it since 12:31am UTC" in status, status
 assert reacted() == ["api -X POST repos/sam/r/pulls/comments/900/reactions -f content=eyes"], WROTE
+assert ASKED == [(P.THREADS, {"id": "x"})], ASKED
 status, _ = run(clean(threads=[False, True]), 40 * 60)
 assert JOBS == [] and reacted() == [] and "a Claude job has it since 12:31am UTC" in status, (status, WROTE)
 STATES["job-1"] = "queued"
@@ -592,6 +601,7 @@ assert len(JOBS) == 1 and "isn't settled" in JOBS[0], JOBS
 # Its replies start that wait over, not the deadline of the job at work.
 run({**replied, "updatedAt": "2026-10-24T02:55:00Z"}, 176 * 60)
 assert JOBS == [] and C.WAKE["sam/r"] == C.ts(T0) + (171 + 65) * 60, C.WAKE
+C.graphql = graphql_kept
 
 # The needs-owner label goes straight to the owner: no judge job.
 fresh_pr_state()

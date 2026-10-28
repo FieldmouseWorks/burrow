@@ -20,7 +20,7 @@ query($owner: String!, $name: String!, $cursor: String) {
         labels(first: 100) { pageInfo { hasNextPage } nodes { name } }
         files(first: 100) { nodes { path changeType } }
         changedFiles
-        reviewThreads(first: 100) { pageInfo { hasNextPage } nodes { isResolved comments(first: 1) { nodes { databaseId } } } }
+        reviewThreads(first: 100) { pageInfo { hasNextPage } nodes { isResolved } }
         reviews(last: 100) { pageInfo { hasPreviousPage startCursor } nodes { %s } }
         comments(last: 100) { pageInfo { hasPreviousPage startCursor } nodes { %s } }
         reactions(last: 20) { nodes { content createdAt user { login } } }
@@ -147,11 +147,26 @@ def post_status(repo, pr, state, desc):
                    check=False) is not None
 
 
+# The first comment of each of a PR's review threads, read only for eyes():
+# nested in PRS, a comments connection under every PR's threads would bill
+# each page of the PR list a hundred times over, since GitHub charges a
+# connection by its limits, not by what comes back.
+THREADS = """
+query($id: ID!) {
+  node(id: $id) { ... on PullRequest { reviewThreads(first: 100) { nodes { isResolved comments(first: 1) { nodes { databaseId } } } } } }
+}
+"""
+
+
 def eyes(repo, pr):
     """👀 on each open review thread's first comment: a Claude job has its
     findings. Best effort, and GitHub keeps one per person however often
     it's asked."""
-    for t in pr["reviewThreads"]["nodes"]:
+    try:
+        threads = C.graphql(THREADS, id=pr["id"])["node"]["reviewThreads"]["nodes"]
+    except (RuntimeError, KeyError, TypeError):  # GitHub didn't say: no marker this time
+        return
+    for t in threads:
         first = t["comments"]["nodes"]
         if not t["isResolved"] and first:
             C.write("api", "-X", "POST", f"repos/{repo}/pulls/comments/{first[0]['databaseId']}/reactions",
