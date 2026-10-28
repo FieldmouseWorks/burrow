@@ -388,6 +388,12 @@ agent(codex={"sleep": 30})
 t = time.time()
 back = queue_and_work("codex")
 assert back["result"] == "error" and "still at it after 0.02 minutes" in back["error"] and time.time() - t < 20, back
+# DeepSeek's too, its fallback to high effort within the same deadline.
+agent(dsh={"sleep": 30})
+t = time.time()
+back = queue_and_work("deepseek")
+assert back["result"] == "error" and "still at it after 0.02 minutes" in back["error"] and time.time() - t < 20, back
+assert len(agent_runs()) == 1, agent_runs()
 C.CFG["reviewTimeout"] = 30
 # Nor what it read on the way (the PR's own files, in its events), nor a
 # 401 inside a longer number.

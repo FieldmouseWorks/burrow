@@ -336,19 +336,25 @@ def deepseek_balance(key):
 
 def deepseek_in(snap, prompt, home, t, efforts, sid):
     """deepseek(), its gate open: at each effort in turn until one answers,
-    in the one session."""
+    in the one session, all within the review's deadline."""
+    end = time.time() + CFG["reviewTimeout"] * 60
     while True:
         with open(f"{t}/overlay.yml", "w") as f:
             f.write(overlay(efforts[0]))
         # Its API is the gate, and the key it holds is a stand-in: the gate
         # puts the real one in.
-        p = subprocess.run(
-            sandboxed(snap, home, t, ["DEEPSEEK_BASE_URL/anthropic"],
-                      [f"{CFG['agents']}/dsh", "--profile", "headless", "--patch", f"{t}/overlay.yml", "--json",
-                       *(["--session-id", sid] if sid else []), "-"]),
-            input=prompt, capture_output=True, text=True,
-            env=env(DSH_HOME=home, DSH_TELEMETRY_MODE="DISABLED", DSH_PERMISSION_MODE="read-only",
-                    DEEPSEEK_API_KEY="the-gate-holds-it"))
+        try:
+            p = subprocess.run(
+                sandboxed(snap, home, t, ["DEEPSEEK_BASE_URL/anthropic"],
+                          [f"{CFG['agents']}/dsh", "--profile", "headless", "--patch", f"{t}/overlay.yml", "--json",
+                           *(["--session-id", sid] if sid else []), "-"]),
+                input=prompt, capture_output=True, text=True,
+                env=env(DSH_HOME=home, DSH_TELEMETRY_MODE="DISABLED", DSH_PERMISSION_MODE="read-only",
+                        DEEPSEEK_API_KEY="the-gate-holds-it"),
+                timeout=max(end - time.time(), 1))
+        except subprocess.TimeoutExpired:
+            # Not another effort: the deadline is the whole review's.
+            raise RuntimeError(f"dsh was still at it after {CFG['reviewTimeout']} minutes") from None
         said = p.stderr.strip()
         if p.returncode != 0 and re.search(r"\bAUTH\b|CREDENTIAL|\b40[12]\b|insufficient balance", said, re.I):
             raise Out("its API key was turned down or its balance is spent", time.time() + 3600)
