@@ -203,7 +203,7 @@ in
     };
   };
 
-  config = lib.mkIf cfg.enable {
+  config = lib.mkIf cfg.enable (lib.mkMerge [{
     assertions = [{
       assertion = (cfg.host == null) == (cfg.secretFile == null);
       message = "burrow.events: deliveries need both host and secretFile (or neither, for none).";
@@ -301,5 +301,29 @@ in
         extraConfig = "client_max_body_size 25m;";
       };
     };
-  };
+  } {
+    # A switch that changes a handler's units (its code, its settings, its
+    # tools) starts its full pass then and there, rather than at its next
+    # event or the catch-up: renovate-sweep's fix for majors handed over too
+    # early went live and sat idle until one came. A switch restarts an
+    # active unit that changed, and each of these stays active, with a
+    # handler's units in its triggers, so its start is the kick. Not at boot:
+    # burrow-events' own start runs every full pass then.
+    systemd.services = lib.mapAttrs' (name: h: lib.nameValuePair "burrow-events-switched-${name}" {
+      description = "burrow-events: a full pass of ${name} when a switch changes it";
+      wantedBy = [ "multi-user.target" ];
+      after = [ "burrow-events.service" ];
+      restartTriggers = map (u: config.systemd.units.${u}.unit) ([ "${h.unit}.service" ] ++ lib.optional h.perRepo "${h.unit}@.service");
+      path = [ pkgs.curl config.systemd.package ];
+      script = ''
+        [ "$(systemctl is-system-running || true)" = starting ] && exit 0
+        curl -fsS -m 10 -d "" ${cfg.kick}/${name} >/dev/null || echo "couldn't kick ${name}" >&2
+      '';
+      serviceConfig = {
+        Type = "oneshot";
+        RemainAfterExit = true;
+        User = "burrow-events";
+      };
+    }) cfg.handlers;
+  }]);
 }
