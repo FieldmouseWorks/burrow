@@ -477,7 +477,8 @@ def quiet(text):
 def post(repo, pr, r, answer):
     """The reviewer's answer as one review on the head. Returns "clean" or
     "findings". Raises ValueError if the answer isn't a review, and
-    RuntimeError if GitHub didn't take it (the same answer can go next pass)."""
+    RuntimeError if GitHub didn't take it (the same answer can go next pass),
+    C.Unavailable if GitHub didn't answer."""
     n, head = pr["number"], pr["headRefOid"]
     # Anything but a list of findings is no review at all, never a clean one.
     found = answer.get("findings") if isinstance(answer, dict) else None
@@ -486,7 +487,7 @@ def post(repo, pr, r, answer):
             or not all(isinstance(f, dict) and all(isinstance(f.get(k), str) for k in text) for f in found)):
         raise ValueError(f"not a review: {json.dumps(answer)[:100]}")
     diff = C.gh("api", "-H", "Accept: application/vnd.github.diff",
-                f"repos/{repo}/compare/{pr['baseRefName']}...{head}", check=False)
+                f"repos/{repo}/compare/{pr['baseRefName']}...{head}")
     # Read wrong, every finding would land as a note and the review count as
     # clean.
     if not isinstance(diff, str) or not diff.startswith("diff --git "):
@@ -535,8 +536,7 @@ def post(repo, pr, r, answer):
         body += "\n\nFindings on whole files (each a thread too):\n" + "\n".join(text for _, text in whole_file)
     body += f"\n\n<!-- {r}-review:v1 " + json.dumps({"commit_sha": head, "base": pr["baseRefName"], "findings": k}) + " -->"
     if not isinstance(C.write("api", "-X", "POST", f"repos/{repo}/pulls/{n}/reviews", "--input", "-",
-                              input=json.dumps({"commit_id": head, "event": "COMMENT", "body": body, "comments": comments}),
-                              check=False), dict):
+                              input=json.dumps({"commit_id": head, "event": "COMMENT", "body": body, "comments": comments})), dict):
         raise RuntimeError("GitHub didn't take the review")
     # A review can't hold file-level comments: they go on their own, after
     # it, so a review GitHub turns away (posted again next pass) leaves none

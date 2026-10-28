@@ -185,7 +185,27 @@ path, os.environ["PATH"] = os.environ["PATH"], fake + os.pathsep + os.environ["P
 out = io.StringIO()
 with contextlib.redirect_stdout(out):
     assert REAL_GH("pr", "edit", "5", "--add-label", "needs-owner", check=False) is None
-os.environ["PATH"] = path
 assert "gh pr edit 5: 'needs-owner' not found" in out.getvalue(), out.getvalue()
+# GitHub not answering is told apart from GitHub saying no, and a review
+# whose diff it couldn't read then says which (steward.py keeps the answer).
+for said, unavailable in (("gh: API rate limit exceeded for user ID 1. (HTTP 403)", True),
+                          ("gh: Server Error (HTTP 502)", True),
+                          ("gh: Validation Failed (HTTP 422)", False)):
+    with open(f"{fake}/gh", "w") as f:
+        f.write(f"#!/bin/sh\necho '{said}' >&2\nexit 1\n")
+    try:
+        REAL_GH("api", "repos/sam/r/compare/main...x")
+        raise AssertionError(f"no error on {said!r}")
+    except RuntimeError as e:
+        assert isinstance(e, C.Unavailable) == unavailable and said in str(e), (said, e)
+C.gh = REAL_GH
+with open(f"{fake}/gh", "w") as f:
+    f.write("#!/bin/sh\necho 'gh: API rate limit exceeded for user ID 1. (HTTP 403)' >&2\nexit 1\n")
+try:
+    V.post("sam/r", pr, "codex", answer)
+    raise AssertionError("posted with GitHub unavailable")
+except C.Unavailable as e:
+    assert "rate limit" in str(e), e
+os.environ["PATH"] = path
 
 print("post: ok")

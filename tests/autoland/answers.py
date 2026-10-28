@@ -75,6 +75,22 @@ for i in range(3):
 STUB["post"] = None
 assert os.listdir(DDIR) == [] and queued() == [] and pr_state()["rv"]["rival"]["fails"] == 3, status
 assert any(x[0] == "Rival couldn't review it" for x in digest) and not merged(), digest
+# GitHub not answering (its rate limit, a 5xx) is no fault of the review or
+# the reviewer: however many passes it lasts, the answer's kept, no try is
+# spent and the owner isn't told the reviewer failed.
+fresh_pr_state()
+run(mkpr(reviews=[cx]), 0)
+run(mkpr(reviews=[cx]), 600)
+worker()
+STUB["post"] = C.Unavailable("gh api -H Accept: API rate limit exceeded for user ID 1")
+for i in range(4):
+    status, digest = run(mkpr(reviews=[cx]), 610 + i)
+    assert len(os.listdir(DDIR)) == 1 and "fails" not in pr_state()["rv"]["rival"], (i, pr_state()["rv"])
+    assert f"Posting Rival's review of {head[:7]}" in status and not merged(), status
+    assert not any(x[0] == "Rival couldn't review it" for x in digest), digest
+STUB["post"] = None
+status, _ = run(mkpr(reviews=[cx]), 620)
+assert POSTED == [("rival", head, 0)] and os.listdir(DDIR) == [] and merged(), status
 # A snapshot that can't be taken is a failed try too.
 fresh_pr_state()
 run(mkpr(reviews=[cx]), 0)

@@ -29,13 +29,23 @@ def log(*a):
     print(*a, flush=True)
 
 
+class Unavailable(RuntimeError):
+    """GitHub didn't answer: a rate limit, a 5xx, no connection. Nothing the
+    call asked for was wrong, so it counts against nobody: the same call goes
+    again next pass."""
+
+
+UNAVAILABLE = re.compile(r"rate limit|HTTP (429|5\d\d)|error connecting|connection (reset|refused)|timed? ?out", re.I)
+
+
 def gh(*args, input=None, check=True):
-    """Run gh; return its stdout (parsed as JSON when it is JSON)."""
+    """Run gh; return its stdout (parsed as JSON when it is JSON). Raises
+    Unavailable when GitHub didn't answer, RuntimeError when it said no."""
     p = subprocess.run(["gh", *args], input=input, capture_output=True, text=True)
     if p.returncode != 0:
         why = f"gh {' '.join(args[:3])}: {p.stderr.strip()[:300]}"
         if check:
-            raise RuntimeError(why)
+            raise (Unavailable if UNAVAILABLE.search(p.stderr) else RuntimeError)(why)
         log("  failed:", why)
         return None
     out = p.stdout.strip()
