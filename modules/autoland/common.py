@@ -241,9 +241,10 @@ def job(repo, task, clone=False):
         log(f"  would: proj run {d} ...")
         return "dry"
     # Each of its turns that ends starts the repo's pass, which reads what it
-    # did; one that runs past jobTimeout is stopped, and ends then.
+    # did; one that goes quiet for jobIdle, or runs past jobTimeout, is
+    # stopped, and ends then.
     p = subprocess.run([CFG["proj"], "run", *(["--first"] if pipeline(repo) else []), "--timeout", f"{CFG['jobTimeout']}m",
-                        "--kick", f"autoland/{repo}", d, task],
+                        "--idle", f"{CFG['jobIdle']}m", "--kick", f"autoland/{repo}", d, task],
                        capture_output=True, text=True)
     return p.stdout.strip() or None
 

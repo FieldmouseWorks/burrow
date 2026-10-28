@@ -6,8 +6,8 @@
 # from proj-watch's own unit, but never for proj-inbox's own comment, or once
 # its deadline passes with GitHub unreadable, that a reply meanwhile owns the
 # job's waits, that a turn's end kicks what it was started to and proj-watch
-# for the repos it awaits, that a job's own --timeout stops its turns (and
-# still kicks), that _watch and proj-inbox given a repo look at
+# for the repos it awaits, that a job's own --timeout stops its turns, and
+# its --idle one that has gone quiet (and either still kicks), that _watch and proj-inbox given a repo look at
 # that repo alone and book when it next needs a look, that proj-inbox posts
 # every finished turn's answer (one
 # resumed before it looked too, none misread while a turn starts) and ends
@@ -24,11 +24,13 @@ let
   # "sleep N" sleeps; "eat" holds far more memory than the test's job cap;
   # "twice" answers twice in one turn, "answerfail" answers and then fails;
   # "linger N" answers, then stays up N seconds, as Claude does while
-  # something it left in the background (a CI watch) is still going.
+  # something it left in the background (a CI watch) is still going;
+  # "chatter N" says something every second for N seconds, then answers.
   claude = pkgs.writeShellScriptBin "claude" ''
     prompt=$(cat)
     case $prompt in
       sleep*) sleep "''${prompt#sleep }" ;;
+      chatter*) for _ in $(seq "''${prompt#chatter }"); do echo '{"type":"system"}'; sleep 1; done ;;
       linger*)
         echo '{"type":"result","session_id":"s","result":"waiting on CI","is_error":false}'
         sleep "''${prompt#linger }"
@@ -250,6 +252,14 @@ pkgs.testers.runNixOSTest {
         machine.wait_until_succeeds(f"su - dev -c 'proj state {e3}' | grep -x 'timed out after 3s'", timeout=60)
         machine.wait_until_succeeds("grep -x /kick/autoland/o/t /tmp/kicks", timeout=30)
         machine.fail("su - dev -c 'proj run --timeout soon web hello'")
+        # One whose stream says nothing for its --idle is stuck, and stopped
+        # then, kicking as before; one that keeps talking runs on past it.
+        e4 = proj('run --idle 3s --kick autoland/o/i web "sleep 600"')
+        machine.wait_until_succeeds(f"su - dev -c 'proj state {e4}' | grep -x 'went quiet for 3s'", timeout=60)
+        machine.wait_until_succeeds("grep -x /kick/autoland/o/i /tmp/kicks", timeout=30)
+        e5 = proj('run --idle 3s web "chatter 8"')
+        machine.wait_until_succeeds(f"su - dev -c 'proj state {e5}' | grep -x done", timeout=60)
+        machine.fail("su - dev -c 'proj run --idle 0s web hello'")
         # proj-watch's next look at o/r is booked for the wait's deadline.
         since = int(machine.succeed(f"cut -f2 /data/dev/jobs/{e}/await").strip())
         proj("_watch")

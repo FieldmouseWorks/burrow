@@ -83,6 +83,7 @@ let
     projectsDir = config.burrow.projectsDir;
     proj = "${config.burrow.tools.proj}/bin/proj";
     jobTimeout = cfg.jobTimeoutMinutes;
+    jobIdle = cfg.jobIdleMinutes;
     owner = config.burrow.owner;
     cleanBranches = cfg.cleanBranches;
     labels = { inherit (cfg.labels) hold owner; };
@@ -274,6 +275,17 @@ in
         deadline too in case that doesn't get through: a job that ended
         without its answer is started once more, and a second is a failed
         status on the PR.
+      '';
+    };
+
+    jobIdleMinutes = mkOption {
+      type = types.ints.positive;
+      default = 20;
+      description = ''
+        A turn of one of those jobs whose stream has said nothing this long
+        is stuck, and proj stops it then, however long its work may take: one
+        at work says something at least each time Claude's Bash tool stops a
+        command, ten minutes at most. It ends as one past jobTimeout does.
       '';
     };
 
