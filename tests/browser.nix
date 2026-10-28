@@ -210,15 +210,15 @@ pkgs.testers.runNixOSTest {
         machine.fail("su dev -c 'ls /var/lib/burrow-browser'")
 
     with subtest("Claude gets the MCP server once it has a config, and only then"):
-        machine.succeed("systemctl show -p ActiveState --value burrow-browser-mcp.service | grep -qx inactive")
+        machine.succeed("systemctl show -p ActiveState --value burrow-claude-mcp.service | grep -qx inactive")
         machine.fail("test -e /home/dev/.claude.json")
         machine.succeed("su dev -c 'echo {} >/home/dev/.claude.json'")
-        machine.wait_for_unit("burrow-browser-mcp.service")
+        machine.wait_for_unit("burrow-claude-mcp.service")
         entry = machine.succeed("jq -c .mcpServers.browser /home/dev/.claude.json").strip()
         assert entry == '{"type":"stdio","command":"/run/current-system/sw/bin/burrow-browser-mcp","args":[]}', entry
         # Again, as every boot does: nothing changes.
         before = machine.succeed("stat -c %.9Y /home/dev/.claude.json")
-        add = machine.succeed("sed -n 's/^ExecStart=//p' /etc/systemd/system/burrow-browser-mcp.service").strip()
+        add = machine.succeed("sed -n 's/^ExecStart=//p' /etc/systemd/system/burrow-claude-mcp.service").strip()
         machine.succeed(f"su dev -c {shlex.quote(add)}")
         assert machine.succeed("stat -c %.9Y /home/dev/.claude.json") == before
 
@@ -239,14 +239,14 @@ pkgs.testers.runNixOSTest {
         machine.shutdown()
         machine.start()
         machine.wait_for_unit("burrow-browser.service")
-        machine.wait_for_unit("burrow-browser-mcp.service")
+        machine.wait_for_unit("burrow-claude-mcp.service")
         assert machine.succeed("jq -c .mcpServers.browser /home/dev/.claude.json").strip() == entry
         machine.wait_until_succeeds("su dev -c '" + cdp + "'", timeout=120)
         machine.wait_for_unit("user@1001.service")
         login_kept(machine)
 
     with subtest("turned off, Claude loses the MCP server"):
-        machine.succeed("systemctl stop burrow-browser-mcp.service")
+        machine.succeed("systemctl stop burrow-claude-mcp.service")
         assert machine.succeed("jq -c .mcpServers.browser /home/dev/.claude.json").strip() == "null"
 
     with subtest("nothing listens without its rules, and the rules go with it"):

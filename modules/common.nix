@@ -1,11 +1,12 @@
 # Options every burrow module reads: who the agents run as, where the projects
 # are, where this machine's own flake is checked out, the Claude Code build and
-# the machine CLAUDE.md the modules write into. Every module imports it; the
-# key keeps it in only once.
+# the machine CLAUDE.md and MCP servers (claude/mcp.nix) the modules give it.
+# Every module imports it; the key keeps it in only once.
 inputs:
 {
   key = "burrow/common";
   imports = [
+    ./claude/mcp.nix
     ({ config, lib, pkgs, ... }:
       let
         inherit (lib) mkOption types;

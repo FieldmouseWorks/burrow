@@ -47,6 +47,7 @@
       # A stand-in: a real machine takes Conary's flake's packages.default.
       package = pkgs.writeShellScriptBin "cn" "exit 1";
       anchorRepo = "sam/homelab";
+      daemon = true;
     };
     events = {
       host = "example.org";
