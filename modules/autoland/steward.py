@@ -66,7 +66,8 @@ from prs import ci_state, eyes, land, open_prs, our_status, post_status
 # The link Claude Code puts in a PR its session opens.
 SESSION = re.compile(r"https://claude\.ai/code/session_\w+")
 # What a fix job of each kind is on, for a PR's status while another waits.
-ON = {"handed": "its findings", "redFixed": "its red CI", "failFixed": "what its judge found failing"}
+ON = {"handed": "its findings", "redFixed": "its red CI", "failFixed": "what its judge found failing",
+      "conflictFixed": "its conflicts with its base"}
 
 
 def clock(t):
@@ -160,6 +161,18 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
         after(C.NOW, 10)
         return True
 
+    def conflicted():
+        """Settled, but its changes conflict with its base's: GitHub won't
+        merge it or bring it up to date, so a Claude job merges the base in,
+        once a head on its base. Its push is a new head, reviewed like any other. True while it does."""
+        if pr.get("mergeStateStatus") != "DIRTY":
+            return False
+        base = pr["baseRefName"]
+        hand_off(f"it conflicts with {base}, so GitHub won't merge it: merge {base} into the branch, resolve the "
+                 "conflicts keeping what both sides meant, run the tests and push",
+                 f"Settled, but it conflicts with {base}", "conflictFixed", judged_at, wait=False)
+        return True
+
     def deadline(kind):
         """A pass when this kind's job is due to have ended (proj stops a turn
         at jobTimeout), and every quarter hour past that while it still
@@ -227,8 +240,8 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
     def fixing():
         """The kind of fix job handed on this head that's still queued or
         running (or that proj can't say about), else None."""
-        for k in ("handed", "redFixed", "failFixed"):
-            if running(k, judged_at if k == "failFixed" else head):
+        for k in ON:
+            if running(k, judged_at if k in ("failFixed", "conflictFixed") else head):
                 return k
         return None
 
@@ -292,6 +305,8 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
         # Behind a base whose rules want it up to date, GitHub refuses the
         # merge until it is: brought up to date instead, and the merged-in
         # head is reviewed and its CI run like any other before it lands.
+        if conflicted():
+            return
         behind = update_branch()
         if behind is not False:
             why = "brought up to date" if behind else "GitHub didn't take the update, again in a minute"
@@ -340,6 +355,8 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
             hand_off("the Claude job that judged it found something failing on this head, its build or tests or a finding "
                      "left unfixed (its comment on the PR says what)",
                      "Settled, but its build or tests fail", "failFixed", judged_at, wait=False)
+        elif conflicted():
+            pass  # judged once its merge of the base is a new head
         elif update_branch():
             settle("pending", "Settled, but behind its base: brought up to date, reviewed again")
         elif lost("judged", judged_at):
@@ -836,14 +853,6 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
 
 # ---------------------------------------------------------------- main
 
-def coverage(repos, covered):
-    """repos.json, for renovate-sweep, and when: every repo the steward has,
-    with how its proofs run and whether this pass saw to its PRs."""
-    done = {r["repo"] for r in covered}
-    return {"at": C.NOW, "repos": {r["repo"]: {"proofJobs": repo_cfg(r["repo"])["proofJobs"], "covered": r["repo"] in done}
-                                   for r in repos}}
-
-
 def main():
     if sys.argv[1:] == ["review"]:
         import review_worker
@@ -868,22 +877,7 @@ def main():
         run_pass(kick)
     finally:
         if C.LIMITED and C.LIMITED[0] > C.NOW:
-            after_limit(kick)
-
-
-def after_limit(kick):
-    """GitHub's rate limit turned the pass away somewhere, finding its repos,
-    in its PRs or after (the hooks, the owner's issue): it comes back whole
-    at the reset, a full pass as one (its settings, hooks and issue too:
-    burrow-events takes "" for it), a kicked one for its repos, whatever
-    they had booked. Every other wake-up waits for the reset too, the ones
-    booked before it was met and other passes'. None sooner could do
-    anything, and none then waits on another event or the hourly pass."""
-    at = C.LIMITED[0] + 1
-    again = [""] if kick is None else kick
-    wakes = {k: max(v, at) for k, v in load("wake.json", {}).items()
-             if v > C.NOW and k.lower() not in {r.lower() for r in again}}
-    save("wake.json", {**wakes, **dict.fromkeys(again, at)})
+            C.after_limit(kick)
 
 
 def run_pass(kick):
@@ -981,7 +975,7 @@ def run_pass(kick):
         # For renovate-sweep: it lists the ok majors of the repos this pass
         # didn't see to (one whose pass failed among them), and tells its
         # jobs how every repo's proofs run.
-        save("repos.json", coverage(repos, covered))
+        save("repos.json", C.coverage(repos, covered))
         save("known.json", sorted(known))
         save("baseline-failed.json", failed)
     if not DRY:
