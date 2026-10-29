@@ -1,0 +1,59 @@
+{
+  "conary": "note v1",
+  "change": "7ejv8rrhsk01tjxqw1hfxe6sxw",
+  "repo": {
+    "owner": "fieldmouseworks",
+    "name": "burrow"
+  },
+  "pr": 121,
+  "url": "https://github.com/fieldmouseworks/burrow/pull/121",
+  "summary": "proj: pipeline jobs get a slot of their own, and no project fills the rest",
+  "task": null,
+  "author": {
+    "kind": "agent",
+    "login": "TusanHomichi",
+    "session": "https://claude.ai/code/session_01LUSpz65cwD3ABEEydMWsoV"
+  },
+  "landing": {
+    "revision": "a877e0c06424a984d1cf46f6f5db459babf025c357d2e92206df951c4483ae31",
+    "before": "fc3618adc90e673b2b5a776179c6156b48f550ad",
+    "after": "c4b676658ab6937626d806b90a2487405e5a9885",
+    "by": {
+      "kind": "status",
+      "login": "fieldmouseworks-steward[bot]"
+    },
+    "at": 1793267655657
+  },
+  "evidence": [
+    {
+      "kind": "ci",
+      "check": "check / commits",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/40821956002/job/123276224924"
+    },
+    {
+      "kind": "review",
+      "check": "codex",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/121#pullrequestreview-5693168930"
+    },
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/40821956002/job/123276225285"
+    },
+    {
+      "kind": "review",
+      "check": "codex",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/121#pullrequestreview-5693672621"
+    },
+    {
+      "kind": "ci",
+      "check": "agents",
+      "result": "pass",
+      "source": "status agents"
+    }
+  ]
+}
