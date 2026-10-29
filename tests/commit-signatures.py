@@ -78,11 +78,11 @@ print("verified and unsigned: ok")
 
 # The case it's for: a session's own key on a commit named for a person, so
 # GitHub can't find the key on that person's account. Only that commit is
-# named, with its committer and GitHub's reason, and how to recommit it.
+# named, with GitHub's reason and how to recommit it.
 rc, out, _ = run([commit("a1", "valid"), commit("c3", "unknown_key"), commit("b2", "unsigned")])
 assert rc == 1, (rc, out)
 errors = [line for line in out.splitlines() if line.startswith("::error")]
-assert len(errors) == 1 and "c3 is signed" in errors[0] and "Sam Owner <sam@example.org> (unknown_key)" in errors[0], out
+assert len(errors) == 1 and "c3 is signed" in errors[0] and "(unknown_key)" in errors[0], out
 assert "--reset-author' f0rk" in errors[0], errors[0]
 print("a signature GitHub can't match to its committer: ok")
 
@@ -91,6 +91,13 @@ for reason in ("invalid", "no_user", "bad_email", "unverified_email", "expired_k
     rc, out, _ = run([commit("d4", reason)])
     assert rc == 1 and f"({reason})" in out, (reason, rc, out)
 print("every other unverified signature: ok")
+
+# The log names commits, never people: no committer's name or email, whatever
+# the verdict.
+for reason in ("valid", "unsigned", "unknown_key", "invalid", "no_user", "bad_email"):
+    _, out, _ = run([commit("e5", reason, "Kim Person", "kim@example.org")])
+    assert "Kim" not in out and "kim@example.org" not in out, (reason, out)
+print("no names or emails in the log: ok")
 
 # GitHub not answering fails it: no answer is no verdict.
 rc, out, _ = run([commit("a1", "valid")], fail=True)

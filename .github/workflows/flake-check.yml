@@ -137,19 +137,20 @@ jobs:
           HEAD: ${{ github.event.pull_request.head.sha }}
         run: |
           # The commits the PR adds, the ones HEAD has and its merge base with
-          # BASE doesn't, with GitHub's verdict on each one's signature.
+          # BASE doesn't, with GitHub's verdict on each one's signature. Only
+          # the commit and the verdict go in the log, never who committed it.
           compare="repos/$GITHUB_REPOSITORY/compare/$BASE...$HEAD"
           fork=$(gh api "$compare" --jq .merge_base_commit.sha)
           gh api --paginate "$compare?per_page=100" \
-            --jq '.commits[] | [.sha, .commit.verification.reason, .commit.committer.name, .commit.committer.email] | @tsv' \
+            --jq '.commits[] | [.sha, .commit.verification.reason] | @tsv' \
             > "$RUNNER_TEMP/commits.tsv"
           bad=0
-          while IFS=$'\t' read -r sha reason name email; do
+          while IFS=$'\t' read -r sha reason; do
             case $reason in
               valid | unsigned) echo "$sha: $reason" ;;
               *)
                 bad=1
-                echo "::error title=Unverified commit::$sha is signed, but GitHub can't verify the signature for its committer, $name <$email> ($reason), so it shows as Unverified. Commit as the identity that signs your commits, never under someone else's name and email. To fix it, recommit the branch that way (git rebase --rebase-merges --exec 'git commit --amend --no-edit --reset-author' $fork) and push it with --force-with-lease."
+                echo "::error title=Unverified commit::$sha is signed, but GitHub can't verify the signature for its committer ($reason), so it shows as Unverified. Commit as the identity that signs your commits, never under someone else's name and email. To fix it, recommit the branch that way (git rebase --rebase-merges --exec 'git commit --amend --no-edit --reset-author' $fork) and push it with --force-with-lease."
                 ;;
             esac
           done < "$RUNNER_TEMP/commits.tsv"
