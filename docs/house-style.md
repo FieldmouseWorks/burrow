@@ -60,7 +60,9 @@ Every repo with code gets a `flake.nix` from the template
   have KVM for NixOS VM tests. A private repo pays for hosted minutes, so it
   runs it on a self-hosted NixOS runner (`runner` and `install-nix: false`).
   On a public repo it also attests the gate's result for Conary's ledger, so
-  the caller's job grants it `id-token: write` and `attestations: write`. A
+  the caller's job grants it `id-token: write` and `attestations: write`. On
+  a PR, its `commits` job fails any commit GitHub can't verify: a signed one
+  under a name and email its key isn't for (the house rules' Commits). A
   repo's heavier gates (VM replays, browser tiers, databases) stay its own
   jobs, alongside it, and run their tools from `nix develop`.
 - Renovate keeps `flake.lock` current, so a repo's toolchains and gate move

@@ -229,7 +229,10 @@ let
 
     packageRules = [
       {
-        matchUpdateTypes = [ "minor" "patch" "pin" "digest" "lockFileMaintenance" ];
+        # pinDigest is a commit pin put on what had none (an action's `@v4`,
+        # a workflow's `@main`): its PR is green and unmerged for good
+        # otherwise, since the steward leaves Renovate's PRs to Renovate.
+        matchUpdateTypes = [ "minor" "patch" "pin" "pinDigest" "digest" "lockFileMaintenance" ];
         automerge = true;
       }
       {

@@ -50,6 +50,7 @@
       slug = "sam-workers";
       keyFile = "/run/secrets/workers-key";
     };
+    watchdog.enable = true;
     backup = {
       enable = true;
       repository = "rclone:offsite:backups/burrow";
