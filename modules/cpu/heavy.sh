@@ -43,34 +43,90 @@ case "$wait_for" in ''|*[!0-9]*) [ -z "$wait_for" ] || usage ;; esac
 
 if [ -n "${HEAVY_SLOT:-}" ]; then exec "$@"; fi
 
-deadline=
-[ -z "$wait_for" ] || deadline=$(( $(date +%s) + wait_for ))
-said=
-while true; do
+# The command runs in a session of its own, so cancelling heavy (TERM, INT,
+# HUP) cancels all of it, shells' workers too, and never the caller's group;
+# the slot stays held until every process in it has stopped. Its stdin is the
+# caller's: bash would give a background command /dev/null.
+child='' reaped='' cancelled=''
+# Signals the command's group. Until setsid has made it one, the child is
+# still bash's fork, which would take the signal as heavy's own trap and go on
+# to start the command: wait for the group, or for the child to have died.
+# Once reaped, its pid may be another's: only its group (which keeps the pid
+# from being reused while it lasts) is left to signal.
+stop() {
+  local stat
+  while [ -z "$reaped" ] && read -r stat 2>/dev/null </proc/"$child"/stat; do
+    # shellcheck disable=SC2086 # its fields: state, ppid, pgrp
+    set -- "$1" ${stat##*) }
+    [ "$2" != Z ] && [ "$4" != "$child" ] || break
+    sleep 0.01
+  done
+  kill -"$1" -- "-$child" 2>/dev/null || true
+}
+cancel() {
+  cancelled=1
+  # Before the child's pid is known, run() signals it once it is.
+  [ -z "$child" ] || stop TERM
+}
+run() {
+  export HEAVY_SLOT=$1 HEAVY_JOBS=$share
+  shift
+  export CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-$share} RUST_TEST_THREADS=${RUST_TEST_THREADS:-$share}
+  trap cancel TERM INT HUP
+  exec {in}<&0
+  setsid "$@" <&"$in" {in}<&- {fd}<&- &
+  child=$!
+  exec {in}<&-
+  [ -z "$cancelled" ] || stop TERM
+  # wait returns early when a trapped signal arrives: wait again for the child's own status.
+  while true; do
+    rc=0
+    wait "$child" || rc=$?
+    kill -0 "$child" 2>/dev/null || break
+  done
+  reaped=1
+  if [ -n "$cancelled" ]; then
+    n=0
+    while kill -0 -- "-$child" 2>/dev/null; do
+      n=$(( n + 1 ))
+      [ "$n" -ne 100 ] || stop KILL
+      sleep 0.1
+    done
+  fi
+  exit "$rc"
+}
+
+# Takes the first free slot and runs the command in it; returns when none is free.
+attempt() {
   for i in $(seq 1 "$SLOTS"); do
     exec {fd}<"$DIR/slot$i" || { echo "heavy: cannot open $DIR/slot$i" >&2; exit 1; }
     rc=0
     flock -n -E 75 "$fd" || rc=$?
-    if [ "$rc" -eq 0 ]; then
-      export HEAVY_SLOT=$i HEAVY_JOBS=$share
-      export CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-$share} RUST_TEST_THREADS=${RUST_TEST_THREADS:-$share}
-      "$@" {fd}<&- &
-      child=$!
-      trap 'kill -TERM "$child" 2>/dev/null' TERM INT HUP
-      # wait returns early when a trapped signal arrives: wait again for the child's own status.
-      while true; do
-        rc=0
-        wait "$child" || rc=$?
-        kill -0 "$child" 2>/dev/null || exit "$rc"
-      done
-    fi
+    [ "$rc" -ne 0 ] || run "$i" "$@"
     exec {fd}<&-
     [ "$rc" -eq 75 ] || { echo "heavy: flock failed on $DIR/slot$i ($rc)" >&2; exit "$rc"; }
   done
-  if [ -n "$deadline" ] && [ "$(date +%s)" -ge "$deadline" ]; then
+}
+
+# Microseconds, so a short --wait ends when it says.
+now() { echo "${EPOCHREALTIME//[!0-9]/}"; }
+deadline=''
+[ -z "$wait_for" ] || deadline=$(( $(now) + wait_for * 1000000 ))
+expired() {
+  if [ -n "$deadline" ] && [ "$(now)" -ge "$deadline" ]; then
     echo "heavy: every slot still busy after ${wait_for}s" >&2
     exit 75
   fi
+}
+
+attempt "$@"
+said=''
+while true; do
+  expired
   [ -n "$said" ] || { echo "heavy: all $SLOTS slots busy, waiting (heavy status)" >&2; said=1; }
-  sleep 5
+  nap=1000000
+  [ -z "$deadline" ] || [ $(( deadline - $(now) )) -ge "$nap" ] || nap=$(( deadline - $(now) ))
+  [ "$nap" -le 0 ] || sleep "$(printf '%d.%06d' $(( nap / 1000000 )) $(( nap % 1000000 )))"
+  expired
+  attempt "$@"
 done

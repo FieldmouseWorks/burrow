@@ -93,8 +93,9 @@
           in "${name} ${builtins.unsafeDiscardStringContext (runnable name machine).config.system.build.toplevel.drvPath}\n")
             names + "example ${builtins.unsafeDiscardStringContext (runnable "example" self.nixosConfigurations.example).config.system.build.toplevel.drvPath}\n");
         # heavy's slots: one holder at a time per slot, its share of the
-        # threads, nested calls let through, the exit status passed on, a
-        # bounded wait refused; and the example's gate slice weighted.
+        # threads, nested calls let through, the exit status and stdin passed
+        # on, a cancelled workload stopped before its slot goes, a bounded
+        # wait refused on time; and the example's gate slice weighted.
         cpu = let
           heavy = (self.nixosConfigurations.example.extendModules {
             modules = [{ burrow.cpu.heavy = { slots = 1; dir = "/build/heavy"; }; }];
@@ -118,6 +119,50 @@
           $h status | grep -q '^slot1: busy' || { echo "status: $($h status)"; exit 1; }
           touch done; wait
           $h status | grep -q '^slot1: free' || { echo "status: $($h status)"; exit 1; }
+
+          # The caller's stdin reaches the command: a pipe, a file, a terminal, and nested.
+          rc=0; printf 'exit 7\n' | $h -- sh || rc=$?
+          [ "$rc" = 7 ] || { echo "piped stdin: $rc, not 7"; exit 1; }
+          echo 'exit 8' >script; rc=0; $h -- sh <script || rc=$?
+          [ "$rc" = 8 ] || { echo "redirected stdin: $rc, not 8"; exit 1; }
+          rc=0; printf 'exit 9\n' | HEAVY_SLOT=1 $h -- sh || rc=$?
+          [ "$rc" = 9 ] || { echo "nested stdin: $rc, not 9"; exit 1; }
+          rc=0; printf '6\n' | ${pkgs.util-linux}/bin/script -qec "$h -- sh -c 'test -t 0 || exit 1; read n; exit \$n'" /dev/null >/dev/null || rc=$?
+          [ "$rc" = 6 ] || { echo "terminal stdin: $rc, not 6"; exit 1; }
+
+          # Cancelled, heavy stops the whole workload, a shell's worker too,
+          # and holds the slot until the last of it has gone. (Background
+          # jobs here ignore INT: env gives it back.)
+          for sig in TERM INT HUP; do
+            rm -f worker stopped
+            env --default-signal=INT $h -- sh -c 'sh -c "trap \"sleep 1; touch stopped; exit\" TERM; while :; do sleep 0.1; done" & echo $! >worker; wait' &
+            hp=$!
+            while [ ! -s worker ]; do sleep 0.1; done
+            kill -$sig $hp; wait $hp || true
+            [ -e stopped ] || { echo "$sig: the slot went before the worker stopped"; exit 1; }
+            ! kill -0 "$(cat worker)" 2>/dev/null || { echo "$sig: the worker outlived heavy"; exit 1; }
+            $h status | grep -q '^slot1: free' || { echo "$sig: status: $($h status)"; exit 1; }
+          done
+          # Cancelled as it starts, nothing of the command runs on.
+          for i in $(seq 10); do
+            $h -- sh -c 'sleep 0.3; touch late' & hp=$!
+            kill -TERM $hp; wait $hp || true
+            sleep 0.5
+            [ ! -e late ] || { echo "the command outlived a heavy cancelled at its start"; exit 1; }
+          done 2>/dev/null
+
+          # A bounded wait ends on time, and never starts the command after.
+          rm -f ran
+          $h -- sleep 1.5 & sleep 0.2
+          s=$(date +%s%N); rc=0; $h --wait 1 -- touch ran 2>err || rc=$?; e=$(date +%s%N)
+          [ "$rc" = 75 ] || { echo "--wait 1 with the slot freed after it: $rc, not 75"; exit 1; }
+          [ ! -e ran ] || { echo "--wait 1 ran the command after its wait"; exit 1; }
+          [ $(( (e - s) / 1000000 )) -lt 1800 ] || { echo "--wait 1 took $(( (e - s) / 1000000 ))ms"; exit 1; }
+          rc=0; $h --wait 0 -- touch ran 2>err || rc=$?
+          [ "$rc" = 75 ] && [ ! -e ran ] || { echo "--wait 0: $rc"; exit 1; }
+          $h -- touch ran 2>err
+          [ -e ran ] || { echo "an unbounded wait didn't get the slot"; exit 1; }
+          wait
           touch $out
         '';
         # Sandboxes for real: boot two, work in them, break out of nothing.
