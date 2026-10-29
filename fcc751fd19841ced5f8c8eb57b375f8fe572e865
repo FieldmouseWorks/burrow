@@ -1,0 +1,53 @@
+{
+  "conary": "note v1",
+  "change": "4vqn5fcq31j21a940fkd2tjdwj",
+  "repo": {
+    "owner": "fieldmouseworks",
+    "name": "burrow"
+  },
+  "pr": 158,
+  "url": "https://github.com/fieldmouseworks/burrow/pull/158",
+  "summary": "remote-control: cap each server's memory, so a session past it dies alone",
+  "task": "https://claude.ai/code/project/chan_01Ad4f4oDXfFTCEzLHzMTD8q?thread=cmsg_01Ad4f4oDXfFTCEzLHzMTD8qBdUYJd8hZToVuqe8KCRWSu",
+  "author": {
+    "kind": "agent",
+    "login": "TusanHomichi",
+    "session": "https://claude.ai/code/session_01BkHcyEDfYteVXcw6VC4Hot"
+  },
+  "landing": {
+    "revision": "89b379e728266b955029f615432c1eb79ed6a0b49bd5f767adac0d237c154146",
+    "before": "a02047a6e9c763f8720b0f31a9cbfc5effc50eff",
+    "after": "fcc751fd19841ced5f8c8eb57b375f8fe572e865",
+    "by": {
+      "kind": "status",
+      "login": "fieldmouseworks-steward[bot]"
+    },
+    "at": 1793310959604
+  },
+  "evidence": [
+    {
+      "kind": "ci",
+      "check": "check / commits",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/40956206416/job/123736856725"
+    },
+    {
+      "kind": "review",
+      "check": "codex",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/158#pullrequestreview-5705087424"
+    },
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/40956206416/job/123736857142"
+    },
+    {
+      "kind": "ci",
+      "check": "agents",
+      "result": "pass",
+      "source": "status agents"
+    }
+  ]
+}
