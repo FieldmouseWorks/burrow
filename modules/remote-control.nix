@@ -411,7 +411,13 @@ in
       - Long work is fine. Keep going until it's done, then say so.
     '';
   } {
-    # A server's own settings, in a drop-in for its instance.
+    # A server's own settings, in a drop-in for its instance: the unit name
+    # claude-rc-scan starts, which systemd-escape gives it. escapeSystemdPath
+    # writes the same for printable ASCII only.
+    assertions = lib.mapAttrsToList (name: _: {
+      assertion = builtins.match "[ -~]+" name != null;
+      message = "burrow.remoteControl.servers.\"${name}\": only a folder named in printable ASCII can have settings of its own.";
+    }) cfg.servers;
     systemd.user.services = lib.mapAttrs' (name: server:
       lib.nameValuePair "claude-rc@${utils.escapeSystemdPath name}" {
         overrideStrategy = "asDropin";
