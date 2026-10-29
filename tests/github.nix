@@ -43,12 +43,16 @@ let
     HTTPServer(("127.0.0.1", 8080), GitHub).serve_forever()
   '';
   # github.com's git, over https with a certificate of its own, and over
-  # plain http: each request's logins (Basic's, decoded) are noted in
-  # /tmp/logins. Asked without one, it asks for one, as GitHub does.
+  # plain http: each request's logins are noted in /tmp/logins (Basic's,
+  # decoded, a Kerberos ticket as `negotiate`, its cookies, and the client
+  # certificate it was shown). Asked without one, it asks for one, as GitHub
+  # does, and offers Negotiate too for a repo named kerberos.
   cert = pkgs.runCommand "github-cert" { nativeBuildInputs = [ pkgs.openssl ]; } ''
     mkdir $out
     openssl req -x509 -newkey rsa:2048 -nodes -days 36500 -subj /CN=github.com \
       -addext subjectAltName=DNS:github.com -keyout $out/key.pem -out $out/cert.pem
+    openssl req -x509 -newkey rsa:2048 -nodes -days 36500 -subj /CN=peter \
+      -keyout $out/peter.key -out $out/peter.pem
   '';
   gitServer = pkgs.writers.writePython3 "fake-github-git" { flakeIgnore = [ "E501" ]; } ''
     import base64
@@ -59,11 +63,18 @@ let
 
     class Git(BaseHTTPRequestHandler):
         def do_GET(self):
-            logins = [base64.b64decode(a.split(" ", 1)[1]).decode() for a in self.headers.get_all("Authorization") or []]
+            auth = self.headers.get_all("Authorization") or []
+            logins = ["negotiate" if a.startswith("Negotiate ") else base64.b64decode(a.split(" ", 1)[1]).decode() for a in auth]
+            logins += ["cookie:" + c for c in self.headers.get_all("Cookie") or []]
+            shown = getattr(self.connection, "getpeercert", lambda: None)()
+            if shown:
+                logins.append("cert:" + dict(x[0] for x in shown["subject"])["commonName"])
             with open("/tmp/logins", "a") as f:
                 f.write(" ".join([self.path] + logins) + "\n")
-            self.send_response(404 if logins else 401)
-            if not logins:
+            self.send_response(404 if auth else 401)
+            if not auth:
+                if "/kerberos" in self.path:
+                    self.send_header("WWW-Authenticate", "Negotiate")
                 self.send_header("WWW-Authenticate", 'Basic realm="GitHub"')
             self.send_header("Content-Length", "0")
             self.end_headers()
@@ -73,6 +84,8 @@ let
     server = HTTPServer(("127.0.0.1", 443), Git)
     tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     tls.load_cert_chain("${cert}/cert.pem", "${cert}/key.pem")
+    tls.verify_mode = ssl.CERT_OPTIONAL
+    tls.load_verify_locations("${cert}/peter.pem")
     server.socket = tls.wrap_socket(server.socket, server_side=True)
     server.serve_forever()
   '';
@@ -105,7 +118,7 @@ pkgs.testers.runNixOSTest {
       keyFile = "/run/keys/workers.pem";
       api = "http://127.0.0.1:8080";
     };
-    environment.systemPackages = [ config.burrow.tools.gh config.burrow.tools.gh-token config.burrow.tools.git-lfs pkgs.git pkgs.openssl ];
+    environment.systemPackages = [ config.burrow.tools.gh config.burrow.tools.gh-token config.burrow.tools.git-lfs pkgs.git pkgs.krb5 pkgs.openssl ];
     users.users.dev = { isNormalUser = true; };
     users.users.eve = { isNormalUser = true; };
     # dev's own logins: gh's, and a git helper the way `gh auth setup-git`
@@ -130,6 +143,38 @@ pkgs.testers.runNixOSTest {
     systemd.services.fake-github-git = {
       wantedBy = [ "multi-user.target" ];
       serviceConfig.ExecStart = gitServer;
+    };
+    # A Kerberos realm github.com is in, so that dev can hold a ticket for it.
+    environment.etc."krb5.conf".text = ''
+      [libdefaults]
+        default_realm = TEST
+        dns_canonicalize_hostname = false
+        rdns = false
+      [realms]
+        TEST = {
+          kdc = 127.0.0.1
+        }
+      [domain_realm]
+        github.com = TEST
+    '';
+    systemd.services.kdc = {
+      wantedBy = [ "multi-user.target" ];
+      environment.KRB5_KDC_PROFILE = pkgs.writeText "kdc.conf" ''
+        [realms]
+          TEST = {
+            database_name = /var/lib/kdc/principal
+            key_stash_file = /var/lib/kdc/stash
+            acl_file = /var/lib/kdc/kadm5.acl
+          }
+      '';
+      serviceConfig.StateDirectory = "kdc";
+      script = ''
+        touch /var/lib/kdc/kadm5.acl
+        ${pkgs.krb5}/bin/kdb5_util create -s -r TEST -P master
+        ${pkgs.krb5}/bin/kadmin.local -q "addprinc -pw peter-kerberos peter"
+        ${pkgs.krb5}/bin/kadmin.local -q "addprinc -randkey HTTP/github.com"
+        exec ${pkgs.krb5}/bin/krb5kdc -n
+      '';
     };
   };
 
@@ -294,6 +339,46 @@ pkgs.testers.runNixOSTest {
               assert got and all(login.startswith("x-access-token:ghs_") for login in got), (call, got)
           assert logins("GH_TOKEN_SOCKET=/run/gh-token/none.sock git ls-remote plain") == []
           assert logins("GH_TOKEN_SOCKET=/run/gh-token/none.sock git push plain HEAD:refs/heads/x") == []
+
+      with subtest("git, in the App's env, logs in to GitHub as the App only: no cookie, certificate or ticket of dev's"):
+          # What git has curl log in with from the first request, asking no
+          # helper: dev's cookies, dev's client certificate, and the empty
+          # login that answers Negotiate with dev's Kerberos ticket.
+          machine.wait_for_open_port(88)
+          peter = "${cert}/peter"
+          machine.succeed(dev(" && ".join([
+              "echo peter-kerberos | kinit peter",
+              "printf '.github.com\\tTRUE\\t/\\tFALSE\\t0\\tuser_session\\tpeter\\n' > ~/cookies",
+              "git config --global http.cookieFile ~/cookies",
+              f"git config --global http.sslCert {peter}.pem",
+              f"git config --global http.sslKey {peter}.key",
+              "git config --global http.emptyAuth true",
+          ]), app=False))
+          kerberos = "https://github.com/sam/kerberos.git"
+          # Without the env, curl sends them.
+          assert {"cookie:user_session=peter", "cert:peter"} <= set(logins("git ls-remote origin", app=False))
+          assert {"negotiate", "cookie:user_session=peter", "cert:peter"} <= set(logins(f"git ls-remote {kerberos}", app=False))
+          # With it, only the App's: from git's config, the call's -c for
+          # exactly its URL, a URL git can't read, or git's own variables.
+          exact = " ".join(f"-c http.https://github.com/sam/r.git.{k}" for k in [f"sslCert={peter}.pem", f"sslKey={peter}.key", "cookieFile=$HOME/cookies", "emptyAuth=true"])
+          for call in [
+              "git ls-remote origin",
+              f"git ls-remote {kerberos}",
+              f"git {exact} ls-remote origin",
+              "git ls-remote https://%67ithub.com/sam/r.git",
+              f"GIT_SSL_CERT={peter}.pem GIT_SSL_KEY={peter}.key git ls-remote origin",
+          ]:
+              got = logins(call)
+              assert got and all(login.startswith("x-access-token:ghs_") for login in got), (call, got)
+          # Nowhere to ask for a token, or plain http: none at all, from
+          # the first request.
+          for call in [
+              "GH_TOKEN_SOCKET=/run/gh-token/none.sock git ls-remote origin",
+              f"GH_TOKEN_SOCKET=/run/gh-token/none.sock git ls-remote {kerberos}",
+              "git ls-remote http://github.com/sam/r.git",
+          ]:
+              assert logins(call) == [], call
+          machine.succeed(dev("git config --global --remove-section http && kdestroy", app=False))
 
       with subtest("git-lfs isn't run in the App's env, however git or a config starts it"):
           assert "git-lfs/" in machine.succeed(dev("git lfs version", app=False))

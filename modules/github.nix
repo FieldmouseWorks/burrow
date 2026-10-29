@@ -14,8 +14,9 @@
 # can fall back to a login of the user's: git's other helpers are cleared,
 # git doesn't use SSH (GitHub's SSH remotes go over https), no host hears the
 # logins git's config could send without asking the helper (a URL's, a
-# header's, the netrc's: ./github/src/remote.rs), git-lfs, which would, isn't
-# run, and gh's own login, in a file or the keyring, is out of its reach.
+# header's, a cookie jar's, a client certificate, a Kerberos ticket, the
+# netrc's: ./github/src/remote.rs), git-lfs, which would, isn't run, and gh's
+# own login, in a file or the keyring, is out of its reach.
 # Without that env, all of them are the user's, as before.
 #
 # The env closes what git and gh do by themselves and from config files.

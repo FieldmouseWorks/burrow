@@ -1,16 +1,24 @@
 //! git's http and https (git-remote-http, git-remote-https), as the App's
 //! env has git run them (`GIT_EXEC_PATH`): a remote, whatever its host,
 //! hears only what the credential helper gives git, which is the App's
-//! token for github.com and nothing for any other host. Three things git
-//! would send instead, without asking the helper: the user and password in
-//! the URL; the headers `http.extraHeader` adds (an Authorization of the
-//! user's, say), from any config file or `-c`; and a login of the user's in
-//! their netrc, which curl answers a 401 with before git sees it. So the URL
-//! goes without its user and password; the headers are cleared by an empty
-//! one, set last, for every URL and then for exactly that one (git takes
-//! the headers of the URLs that match it most closely, and of those the
-//! last one's word, and a URL git can't read matches only the first); and
-//! curl's netrc (NETRC, else ~/.netrc) is an empty one.
+//! token for github.com and nothing for any other host. What git would log
+//! in with instead, without asking the helper:
+//!
+//! - the user and password in the URL, which goes without them;
+//! - the headers `http.extraHeader` adds (an Authorization of the user's,
+//!   say), a cookie jar's cookies (`http.cookieFile`), a TLS client
+//!   certificate (`http.sslCert`), and the empty login that has curl answer
+//!   a server's Negotiate with the user's Kerberos ticket
+//!   (`http.emptyAuth`), from any config file or `-c`. Each is cleared
+//!   last, for every URL and then for exactly that one: git takes a setting
+//!   from the URLs that match it most closely, and of those the last one's
+//!   word, and a URL git can't read matches only the first. A key
+//!   (`http.sslKey`) is only ever read for a certificate, so it needs none;
+//! - the certificate `GIT_SSL_CERT` names, which comes after git's config,
+//!   so it goes;
+//! - a login of the user's in their netrc, which curl answers a 401 with
+//!   before git sees it: curl's netrc (NETRC, else ~/.netrc) is an empty
+//!   one.
 //!
 //! None of it asks whether the host is GitHub's. git and curl each read a
 //! host their own way (`github.com.`, `%67ithub.com`), so a reading of ours
@@ -60,7 +68,8 @@ fn command(
     helper
         .arg(remote)
         .arg(&url)
-        .env("GIT_CONFIG_PARAMETERS", no_headers(given, &url))
+        .env("GIT_CONFIG_PARAMETERS", cleared(given, &url))
+        .env_remove("GIT_SSL_CERT")
         .env("NETRC", "/dev/null");
     Ok(helper)
 }
@@ -89,19 +98,40 @@ fn without_login(url: &str) -> String {
     format!("{scheme}://{host}{path}")
 }
 
-/// GIT_CONFIG_PARAMETERS with an empty `http.extraheader`, for every URL
-/// and then for exactly `url`, after the rest, quoted as git quotes them
+/// A path git reads as none: an optional one that's never there. Nothing
+/// can make a file in /proc/self.
+const NONE: &str = ":(optional)/proc/self/gh-token-none";
+
+/// git's `http.` settings that log in without the credential helper, each
+/// with the value that clears it: no headers, no cookie jar, no client
+/// certificate, and no empty login for Negotiate.
+const CLEARED: [(&str, &str); 4] = [
+    ("extraheader", ""),
+    ("cookiefile", NONE),
+    ("sslcert", NONE),
+    ("emptyauth", "false"),
+];
+
+/// GIT_CONFIG_PARAMETERS with each of CLEARED for every URL and then for
+/// exactly `url`, after the rest, quoted as git quotes them
 /// (`'key'='value'`).
-fn no_headers(given: Option<&str>, url: &str) -> String {
-    let key = format!(
-        "'{}'",
-        format!("http.{url}.extraheader").replace('\'', r"'\''")
-    );
-    let cleared = format!("'http.extraheader'='' {key}=''");
-    match given.filter(|g| !g.trim().is_empty()) {
-        Some(g) => format!("{g} {cleared}"),
-        None => cleared,
+fn cleared(given: Option<&str>, url: &str) -> String {
+    let quote = |s: &str| format!("'{}'", s.replace('\'', r"'\''"));
+    let mut all: Vec<String> = given
+        .filter(|g| !g.trim().is_empty())
+        .map(str::to_owned)
+        .into_iter()
+        .collect();
+    for at in ["http".to_owned(), format!("http.{url}")] {
+        for (key, value) in CLEARED {
+            all.push(format!(
+                "{}={}",
+                quote(&format!("{at}.{key}")),
+                quote(value)
+            ));
+        }
     }
+    all.join(" ")
 }
 
 #[cfg(test)]
@@ -162,21 +192,28 @@ mod tests {
         }
     }
 
+    /// CLEARED, for every URL and then for `url`, as `cleared` sets them.
+    fn every_one(url: &str) -> String {
+        let at = |at: &str| {
+            format!(
+                "'{at}.extraheader'='' '{at}.cookiefile'='{NONE}' '{at}.sslcert'='{NONE}' '{at}.emptyauth'='false'"
+            )
+        };
+        format!("{} {}", at("http"), at(&format!("http.{url}")))
+    }
+
     #[test]
-    fn clears_the_headers_last() {
+    fn clears_each_login_git_needs_no_helper_for_last() {
         let u = "https://github.com/sam/r.git";
+        assert_eq!(cleared(None, u), every_one(u));
+        assert_eq!(cleared(Some(" "), u), cleared(None, u));
         assert_eq!(
-            no_headers(None, u),
-            "'http.extraheader'='' 'http.https://github.com/sam/r.git.extraheader'=''"
+            cleared(Some("'http.extraheader'='Authorization: x'"), u),
+            format!("'http.extraheader'='Authorization: x' {}", every_one(u))
         );
-        assert_eq!(no_headers(Some(" "), u), no_headers(None, u));
-        assert_eq!(
-            no_headers(Some("'http.extraheader'='Authorization: x'"), u),
-            "'http.extraheader'='Authorization: x' 'http.extraheader'='' 'http.https://github.com/sam/r.git.extraheader'=''"
-        );
-        assert_eq!(
-            no_headers(None, "https://github.com/it's"),
-            r"'http.extraheader'='' 'http.https://github.com/it'\''s.extraheader'=''"
+        assert!(
+            cleared(None, "https://github.com/it's")
+                .contains(r"'http.https://github.com/it'\''s.extraheader'=''")
         );
     }
 
@@ -191,6 +228,10 @@ mod tests {
                 .and_then(|(_, v)| v.map(|v| v.to_string_lossy().into_owned()))
         };
         let parameters = |c: &Command| env(c, "GIT_CONFIG_PARAMETERS");
+        let removed = |c: &Command, name: &str| {
+            c.get_envs()
+                .any(|(k, v)| k == OsStr::new(name) && v.is_none())
+        };
         // Any host, in any spelling, over https or http.
         for (url, bare) in [
             (
@@ -212,12 +253,11 @@ mod tests {
             assert_eq!(c.get_args().collect::<Vec<_>>(), ["origin", bare], "{url}");
             assert_eq!(
                 parameters(&c),
-                Some(format!(
-                    "'a'='b' 'http.extraheader'='' 'http.{bare}.extraheader'=''"
-                )),
+                Some(format!("'a'='b' {}", every_one(bare))),
                 "{url}"
             );
             assert_eq!(env(&c, "NETRC").as_deref(), Some("/dev/null"), "{url}");
+            assert!(removed(&c, "GIT_SSL_CERT"), "{url}");
         }
         // No socket: git's, as it is.
         let a = ["origin", "https://peter:tok@github.com/sam/r"];
@@ -225,6 +265,7 @@ mod tests {
         assert_eq!(c.get_args().collect::<Vec<_>>(), a);
         assert_eq!(parameters(&c), None);
         assert_eq!(env(&c, "NETRC"), None);
+        assert!(!removed(&c, "GIT_SSL_CERT"));
         // git always says which URL: refused without one.
         assert!(run(&["origin"], socket).is_err());
     }
