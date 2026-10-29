@@ -1,8 +1,9 @@
 # proj's limits, for real: a machine with proj on and a stand-in for Claude
 # (burrow.claude.package) checks that jobs past maxJobs wait in line, that
 # --first goes ahead but can't starve a turn that has waited long, that a
-# pipeline job's every turn takes the slot kept for them when the rest are
-# full, that a job whose turn has ended frees its slot, that one stopped after
+# pipeline job's every turn, in one of the pipeline's own repos, takes the
+# slot kept for them when the rest are full (pick.sh's own check has the other
+# repos'), that a job whose turn has ended frees its slot, that one stopped after
 # its answer with work in the background has the rest of that run stopped,
 # hears so once and answers again (the turn ending as its last run did, its
 # log saying so even when its unit went first, and within one timeout that
@@ -109,12 +110,18 @@ let
     [ -e "$f" ] || exit 1
     if [ -n "$slurp" ]; then ${pkgs.jq}/bin/jq -cs . "$f"; else cat "$f"; fi
   '';
+  # autoland's list of the pipeline's own repos, which proj reads, without
+  # the rest of autoland: web is one of them here.
+  pipelineRepos = {
+    options.burrow.autoland.pipelineRepos = pkgs.lib.mkOption { type = pkgs.lib.types.listOf pkgs.lib.types.str; };
+    config.burrow.autoland.pipelineRepos = [ "O/Web" ];
+  };
 in
 pkgs.testers.runNixOSTest {
   name = "proj";
 
   nodes.machine = {
-    imports = [ self.nixosModules.proj ];
+    imports = [ self.nixosModules.proj pipelineRepos ];
     burrow = {
       claude.package = claude;
       proj = {
@@ -367,7 +374,8 @@ pkgs.testers.runNixOSTest {
         machine.wait_until_succeeds(f"su - dev -c 'proj state {d}' | grep -x done", timeout=120)
         assert started(c) < started(d), (started(c), started(d))
 
-    with subtest("a pipeline job takes its own slot while the others are full, every turn of it"):
+    with subtest("a pipeline job in the pipeline's own repo takes its own slot while the others are full, every turn of it"):
+        machine.succeed("su - dev -c 'git -C /data/dev/src/web init -q && git -C /data/dev/src/web remote add origin https://github.com/o/web.git'")
         a = proj('run web "sleep 600"')
         b = proj('run web "sleep 600"')
         for j in (a, b):

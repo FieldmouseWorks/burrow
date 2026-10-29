@@ -6,8 +6,10 @@
 #   proj run PROJECT "task"     start a job; prints its id
 #   proj run --vm PROJECT "task"  the same, in a fresh agent sandbox (agent.sh)
 #   proj run --first PROJECT "task"  ahead of the line (someone is waiting on it)
-#   proj run --pipeline PROJECT "task"  work on the pipeline itself: ahead of
-#                               everything, and its own slots (every turn of it)
+#   proj run --pipeline PROJECT "task"  work on the pipeline itself: in one of
+#                               its own repos (PIPELINE), ahead of everything,
+#                               and its own slots; in any other, as --first
+#                               (every turn of it, either way)
 #   proj run --kick NAME PROJECT "task"  kick NAME (HANDLER or HANDLER/OWNER/REPO,
 #                               one of burrow-events') each time a turn ends
 #   proj run --timeout DUR PROJECT "task"  each turn stopped after DUR (as
@@ -33,15 +35,15 @@
 # MIN_FREE MiB of memory to spare; the rest wait in line (queued), pipeline
 # jobs' ahead, then --first ones, then oldest first, and a turn that has
 # waited MAX_WAIT seconds counts as --first itself, so a stream of them can't
-# starve it. PIPELINE_SLOTS of the slots are for pipeline jobs alone, and no
-# project's other jobs hold more than PER_PROJECT at once (pick.sh). A waiting
-# turn is just this shell. Every turn runs in SLICE, which the machine caps,
-# so jobs can't take memory from anything else, and gets TIMEOUT (or the
-# job's own --timeout) before it's stopped, so a stuck one can't hold its
-# slot for good. A job's --idle stops a stuck one sooner: a turn at work says
-# something at least each time Claude's Bash tool stops a command (ten
-# minutes at most), so one whose stream has been quiet longer than that is
-# stuck, however long the work itself may take.
+# starve it. PIPELINE_SLOTS of the slots are for pipeline jobs in the
+# pipeline's own repos alone, and no project's other jobs hold more than
+# PER_PROJECT at once (pick.sh). A waiting turn is just this shell. Every turn
+# runs in SLICE, which the machine caps, so jobs can't take memory from
+# anything else, and gets TIMEOUT (or the job's own --timeout) before it's
+# stopped, so a stuck one can't hold its slot for good. A job's --idle stops a
+# stuck one sooner: a turn at work says something at least each time Claude's
+# Bash tool stops a command (ten minutes at most), so one whose stream has
+# been quiet longer than that is stuck, however long the work itself may take.
 #
 # A turn ends at its answer. Claude -p stays up after it while anything it
 # left in the background runs (a CI watch, say), holding a slot to do
@@ -208,12 +210,6 @@ spare() {
   echo $(((kb + arc) / 1024))
 }
 
-# A job's class: pipeline for one run with --pipeline, whatever its turn asks;
-# otherwise first or normal, as the turn was started.
-class() {
-  if [ -e "$jobs/$1/pipeline" ]; then echo pipeline; else echo "${2:-normal}"; fi
-}
-
 # Wait in line for a slot, then hold it on fd $slot until this shell ends.
 # The line is JOBS/.queue: one file per waiting turn, named so that sorting
 # puts pipeline ones ahead, then --first ones, then the oldest, holding the
@@ -260,7 +256,7 @@ take_slot() {
       fid=${f##*/}; fid=${fid#*-}; fid=${fid#*-}
       pid=$(cat "$f" 2>/dev/null) || continue
       if [ -n "$pid" ] && tr '\0' ' ' 2>/dev/null <"/proc/$pid/cmdline" | grep -qF -- " _exec $fid "; then
-        seen+="wait"$'\t'"$f"$'\t'"$(class "$fid" "$([[ ${f##*/} == 2-* ]] && echo normal || echo first)")"
+        seen+="wait"$'\t'"$f"$'\t'"$(class "$jobs/$fid" "$([[ ${f##*/} == 2-* ]] && echo normal || echo first)")"
         seen+=$'\t'"$(cat "$jobs/$fid/project" 2>/dev/null)"$'\n'
       else
         rm -f "$f"
@@ -371,7 +367,12 @@ case "${1:-status}" in
       [ ${#kick[@]} = 0 ] || printf '%s\n' "${kick[@]}" >"$jobs/$id/kick"
       [ -z "$limit" ] || echo "$limit" >"$jobs/$id/timeout"
       [ -z "$idle" ] || echo "$idle" >"$jobs/$id/idle"
-      [ -z "$pipeline" ] || : >"$jobs/$id/pipeline"
+      # Work on the pipeline holds the pipeline's slots only in its own
+      # repos' projects (class, in pick.sh).
+      if [ -z "$pipeline" ]; then :
+      elif pipeline_project "$src/$p"; then : >"$jobs/$id/pipeline"
+      else : >"$jobs/$id/first"
+      fi
       if [ -n "$vm" ]; then agent new "$p" >"$jobs/$id/agent"; fi
     else
       id=${1:?usage: proj reply [--first] ID \"message\"}
@@ -584,7 +585,7 @@ Carry on from there. Anything you left in the background last turn was stopped w
     # The last turn's waits, now that this one has started: this turn writes
     # its own to await.next, and await only once it ends.
     rm -f "$dir/await" "$dir/await.next"
-    take_slot "$id" "$n" "$(class "$id" "$3")"
+    take_slot "$id" "$n" "$(class "$jobs/$id" "$3")"
     limit=$(cat "$dir/timeout" 2>/dev/null || echo "$TIMEOUT")
     # One budget for the whole turn, however many runs it takes and the
     # clearing up between them, to the nanosecond; 0 is none.

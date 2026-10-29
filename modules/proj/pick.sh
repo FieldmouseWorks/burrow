@@ -7,7 +7,7 @@
 # the first turn in line that may start, or nothing.
 #
 # The last PIPELINE_SLOTS of the MAX_JOBS slots are for pipeline turns only
-# (work on the pipeline itself: the steward's jobs, its repos' issues), so
+# (work on the pipeline itself, in its own repos' projects: class says), so
 # one waits only on other pipeline turns, never on everyone else's long
 # jobs; a pipeline turn takes the lowest free slot, which keeps those for the
 # next one. Any other turn waits while its project holds PER_PROJECT slots
@@ -34,4 +34,33 @@ pick() {
         ;;
     esac
   done
+}
+
+# Whether the project at a path is one of the pipeline's own repos'
+# (PIPELINE: their OWNER/NAMEs, any case, as autoland.pipelineRepos has
+# them), by its clone's origin.
+pipeline_project() {
+  local url r name owner
+  url=$(git -C "$1" remote get-url origin 2>/dev/null) || return 1
+  r=${url%/}
+  r=${r%.git}
+  name=${r##*/}
+  r=${r%/*}
+  owner=${r##*[/:]}
+  [ -n "$name" ] && [ -n "$owner" ] || return 1
+  case " ${PIPELINE,,} " in *" ${owner,,}/${name,,} "*) return 0 ;; esac
+  return 1
+}
+
+# A job's class, from its dir: pipeline for one run with --pipeline in one of
+# the pipeline's own projects, every turn of it; first for one run with
+# --pipeline in any other, every turn of it, so it still goes ahead of the
+# line but counts against its project's PER_PROJECT and stays off the
+# pipeline's slots (one repo's PRs, waiting on that repo's own lock, can't
+# fill the machine); otherwise first or normal, as the turn was started.
+class() {
+  if [ -e "$1/pipeline" ]; then echo pipeline
+  elif [ -e "$1/first" ]; then echo first
+  else echo "${2:-normal}"
+  fi
 }
