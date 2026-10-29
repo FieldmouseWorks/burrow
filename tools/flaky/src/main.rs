@@ -130,10 +130,18 @@ mod tests {
 
     #[test]
     fn repo_args() {
-        for r in ["sam/r", "FieldmouseWorks/.github", "sam/my_repo.rs", "a-b/c-d"] {
+        for r in [
+            "sam/r",
+            "FieldmouseWorks/.github",
+            "sam/my_repo.rs",
+            "a-b/c-d",
+        ] {
             assert!(repo_arg(r).is_ok(), "{r}");
         }
-        for r in ["sam", "sam/", "/r", "sam/.", "sam/..", ".sam/r", "-sam/r", "sam/-r", "sam/r/x", "sam/r?x", "sa_m/r"] {
+        for r in [
+            "sam", "sam/", "/r", "sam/.", "sam/..", ".sam/r", "-sam/r", "sam/-r", "sam/r/x",
+            "sam/r?x", "sa_m/r",
+        ] {
             assert!(repo_arg(r).is_err(), "{r}");
         }
     }
