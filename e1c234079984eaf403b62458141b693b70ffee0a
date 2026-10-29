@@ -1,0 +1,53 @@
+{
+  "conary": "note v1",
+  "change": "7wrnaxrbw38j848fks5qtj8rax",
+  "repo": {
+    "owner": "fieldmouseworks",
+    "name": "burrow"
+  },
+  "pr": 129,
+  "url": "https://github.com/fieldmouseworks/burrow/pull/129",
+  "summary": "agents: wait up to a minute for a sandbox's ssh banner",
+  "task": "FieldmouseWorks/remi#138",
+  "author": {
+    "kind": "person",
+    "login": "TusanHomichi",
+    "session": null
+  },
+  "landing": {
+    "revision": "e772df05ba30fbd5803726e2622c7d5aef7e7476a71c9afa92717c6f04a08166",
+    "before": "c7b1e2f247ba5f17f707cc98057e842e0abaa227",
+    "after": "e1c234079984eaf403b62458141b693b70ffee0a",
+    "by": {
+      "kind": "status",
+      "login": "fieldmouseworks-steward[bot]"
+    },
+    "at": 1793255081308
+  },
+  "evidence": [
+    {
+      "kind": "review",
+      "check": "codex",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/129#pullrequestreview-5692977709"
+    },
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/40819405305/job/123268077684"
+    },
+    {
+      "kind": "ci",
+      "check": "agents",
+      "result": "pass",
+      "source": "status agents"
+    },
+    {
+      "kind": "review",
+      "check": "codex",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/129#pullrequestreview-5693680633"
+    }
+  ]
+}
