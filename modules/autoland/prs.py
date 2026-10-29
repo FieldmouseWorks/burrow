@@ -1,8 +1,10 @@
 """A repo's open PRs as GitHub has them, and what the steward writes back
 about one: how its CI stands, its `review-settled` status, the merge."""
 
+import urllib.parse
+
 import common as C
-from common import CONTEXT, DRY
+from common import CONTEXT, DRY, log
 
 
 PRS = """
@@ -177,12 +179,23 @@ def eyes(repo, pr):
                     "-f", "content=eyes", check=False)
 
 
-def merge_method(repo_info):
-    for flag, method in (("squashMergeAllowed", "squash"), ("mergeCommitAllowed", "merge"),
-                         ("rebaseMergeAllowed", "rebase")):
-        if repo_info[flag]:
-            return method
-    return "merge"
+def merge_method(repo, base, repo_info):
+    """The first of squash, merge and rebase that both the repo's settings
+    and every rule on base allow, or None when there's none or GitHub didn't
+    say what the rules are. A ruleset can narrow the settings (a legacy one
+    allowing merge commits alone), and GitHub refuses any other method from
+    the App, which bypasses no rule."""
+    pages = C.gh("api", f"repos/{repo}/rules/branches/{urllib.parse.quote(base, safe='')}?per_page=100",
+                 "--paginate", "--slurp", check=False)
+    if not isinstance(pages, list):
+        return None
+    allowed = {"squash", "merge", "rebase"}
+    for rule in (r for page in pages for r in page):
+        if rule.get("type") == "pull_request":
+            allowed &= set((rule.get("parameters") or {}).get("allowed_merge_methods") or allowed)
+    return next((method for flag, method in (("squashMergeAllowed", "squash"), ("mergeCommitAllowed", "merge"),
+                                             ("rebaseMergeAllowed", "rebase"))
+                 if repo_info[flag] and method in allowed), None)
 
 
 def land(repo, pr, repo_info):
@@ -193,8 +206,13 @@ def land(repo, pr, repo_info):
     before, by anyone, is taken off first."""
     if not C.unland(repo, pr) and not DRY:
         return False
+    method = merge_method(repo, pr["baseRefName"], repo_info)
+    if method is None:
+        log(f"{repo}#{pr['number']}: no merge method both the repo's settings and the rules on "
+            f"{pr['baseRefName']} allow, or GitHub didn't say what the rules are")
+        return False
     # The merge endpoint merges or refuses; a push since the check makes the
     # sha stale, and it waits for the next pass.
     return C.write("api", "-X", "PUT", f"repos/{repo}/pulls/{pr['number']}/merge",
-                   "-f", f"merge_method={merge_method(repo_info)}", "-f", f"sha={pr['headRefOid']}",
+                   "-f", f"merge_method={method}", "-f", f"sha={pr['headRefOid']}",
                    check=False) is not None or DRY
