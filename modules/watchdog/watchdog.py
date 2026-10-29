@@ -198,8 +198,9 @@ def task(stalls):
 
 
 def start_job(stalls):
-    rc, out = proj("run", "--first", "--timeout", f"{CFG['jobTimeout']}m", "--idle", f"{CFG['jobIdle']}m",
-                   "--kick", "watchdog", CFG["project"], task(stalls))
+    # Its end kicks the next pass, which acts on what the job did (--owned).
+    rc, out = proj("run", "--pipeline", "--timeout", f"{CFG['jobTimeout']}m", "--idle", f"{CFG['jobIdle']}m",
+                   "--kick", "watchdog", "--owned", CFG["project"], task(stalls))
     return out if rc == 0 and out else None
 
 
