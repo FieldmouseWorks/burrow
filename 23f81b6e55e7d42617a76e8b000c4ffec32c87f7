@@ -1,0 +1,53 @@
+{
+  "conary": "note v1",
+  "change": "2q6ee5y60cq203nxjqsvkd3pgp",
+  "repo": {
+    "owner": "fieldmouseworks",
+    "name": "burrow"
+  },
+  "pr": 151,
+  "url": "https://github.com/fieldmouseworks/burrow/pull/151",
+  "summary": "proj: every turn says what comes next, and the stall watchdog hears what each job waits on",
+  "task": "fieldmouseworks/burrow#125",
+  "author": {
+    "kind": "agent",
+    "login": "TusanHomichi",
+    "session": "https://claude.ai/code/session_01BkHcyCMNr1M8Dt2dT7aUMs"
+  },
+  "landing": {
+    "revision": "589a3e3aed44d821313681c69b1e0d3d01c57a9e3ecde659cf597a14c72c8679",
+    "before": "a4e4541ce85bac4ef48930b28a48d92ddc93c32f",
+    "after": "23f81b6e55e7d42617a76e8b000c4ffec32c87f7",
+    "by": {
+      "kind": "status",
+      "login": "fieldmouseworks-steward[bot]"
+    },
+    "at": 1793285518722
+  },
+  "evidence": [
+    {
+      "kind": "ci",
+      "check": "check / commits",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/40886532530/job/123491632576"
+    },
+    {
+      "kind": "review",
+      "check": "codex",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/151#pullrequestreview-5698924241"
+    },
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/40886532530/job/123491632295"
+    },
+    {
+      "kind": "ci",
+      "check": "agents",
+      "result": "pass",
+      "source": "status agents"
+    }
+  ]
+}
