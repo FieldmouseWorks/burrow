@@ -5,21 +5,24 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
-use std::{env, fs, thread};
+use std::thread::{self, JoinHandle};
+use std::{env, fs};
 
 use burrow_events::handler::Config;
 use burrow_events::line::{DEBOUNCE, Line, Pass};
 use burrow_events::passes::{Systemctl, serve};
 use burrow_events::routes::{Handlers, Lines, delivery, kick};
-use burrow_events::{http, now};
+use burrow_events::{http, now, supervise};
 
 fn main() -> ExitCode {
     match run() {
-        // The servers and the handlers' lines run until the service stops,
-        // with no handlers too: exiting would be a restart every few seconds.
-        Ok(()) => loop {
-            thread::park();
-        },
+        Ok(threads) => {
+            // With no handlers too: exiting would be a restart every few
+            // seconds.
+            let gone = supervise(threads);
+            eprintln!("burrow-events: {gone} stopped; exiting for a restart");
+            ExitCode::FAILURE
+        }
         Err(e) => {
             eprintln!("burrow-events: {e}");
             ExitCode::FAILURE
@@ -27,7 +30,9 @@ fn main() -> ExitCode {
     }
 }
 
-fn run() -> Result<(), String> {
+/// Start the listeners and the handlers' lines: the threads the service
+/// runs on, by name.
+fn run() -> Result<Vec<(String, JoinHandle<()>)>, String> {
     let path = env::var_os("EVENTS_CONFIG").ok_or("EVENTS_CONFIG isn't set")?;
     let text = fs::read(&path).map_err(|e| format!("{}: {e}", path.to_string_lossy()))?;
     let cfg: Config =
@@ -42,6 +47,7 @@ fn run() -> Result<(), String> {
     for line in lines.values() {
         line.event(Pass::Full, now() - DEBOUNCE); // catching up
     }
+    let mut threads = Vec::new();
 
     // GitHub's deliveries, where the machine takes them (a host and a secret).
     if let Some(port) = cfg.port {
@@ -52,19 +58,24 @@ fn run() -> Result<(), String> {
             .trim()
             .to_owned();
         let (h, l) = (handlers.clone(), lines.clone());
-        let port = http::listen(port, Arc::new(move |req| delivery(&h, &l, &secret, req)))
+        let (port, t) = http::listen(port, Arc::new(move |req| delivery(&h, &l, &secret, req)))
             .map_err(|e| format!("deliveries: {e}"))?;
         eprintln!("deliveries on 127.0.0.1:{port}");
+        threads.push(("deliveries".to_owned(), t));
     }
     let (h, l) = (handlers.clone(), lines.clone());
-    let port = http::listen(cfg.kick_port, Arc::new(move |req| kick(&h, &l, req)))
+    let (port, t) = http::listen(cfg.kick_port, Arc::new(move |req| kick(&h, &l, req)))
         .map_err(|e| format!("kicks: {e}"))?;
     let names: Vec<&str> = handlers.keys().map(String::as_str).collect();
     eprintln!("kicks on 127.0.0.1:{port}: {}", names.join(", "));
+    threads.push(("kicks".to_owned(), t));
 
     for name in handlers.keys() {
-        let (name, h, l) = (name.clone(), handlers.clone(), lines.clone());
-        thread::spawn(move || serve(&name, &h[&name], &l[&name], &Systemctl, false));
+        let (n, h, l) = (name.clone(), handlers.clone(), lines.clone());
+        let t = thread::Builder::new()
+            .spawn(move || serve(&n, &h[&n], &l[&n], &Systemctl, false))
+            .map_err(|e| format!("{name}: {e}"))?;
+        threads.push((name.clone(), t));
     }
-    Ok(())
+    Ok(threads)
 }

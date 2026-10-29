@@ -5,7 +5,7 @@
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::sync::Arc;
-use std::thread;
+use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use hmac::{Hmac, KeyInit, Mac};
@@ -149,26 +149,52 @@ fn linger(stream: &mut TcpStream) {
     let _ = io::copy(&mut stream.take(MAX_BODY as u64), &mut io::sink());
 }
 
+/// What answers a request: the status it gets.
+pub type Handle = Arc<dyn Fn(&Request) -> u16 + Send + Sync>;
+
 /// Serve each request on 127.0.0.1:PORT (0: any free port) with `handle`, a
-/// thread a connection. Returns the port it listens on.
-pub fn listen(port: u16, handle: Arc<dyn Fn(&Request) -> u16 + Send + Sync>) -> io::Result<u16> {
+/// thread a connection, from a thread of its own. Returns the port it
+/// listens on, and that thread, which ends only in a panic: the service is
+/// no use without it (`supervise`).
+pub fn listen(port: u16, handle: Handle) -> io::Result<(u16, JoinHandle<()>)> {
     let listener = TcpListener::bind(("127.0.0.1", port))?;
     let port = listener.local_addr()?.port();
-    thread::spawn(move || {
-        for stream in listener.incoming() {
-            let Ok(mut stream) = stream else { continue };
-            let handle = handle.clone();
-            thread::spawn(move || match read(&mut stream) {
-                Ok(req) => answer(&mut stream, handle(&req)),
-                Err(Some(code)) => {
-                    answer(&mut stream, code);
-                    linger(&mut stream);
-                }
-                Err(None) => {}
-            });
+    let accepting = thread::Builder::new().spawn(move || {
+        accept(&listener, &handle, |work| {
+            thread::Builder::new().spawn(work).map(drop)
+        })
+    })?;
+    Ok((port, accepting))
+}
+
+/// Take connections for as long as the process runs, each on what `spawn`
+/// starts. One that can't get a thread (the process at its limit) is
+/// dropped, and the next one taken: a delivery lost is caught up on, a
+/// listener lost never would be.
+fn accept(
+    listener: &TcpListener,
+    handle: &Handle,
+    spawn: impl Fn(Box<dyn FnOnce() + Send>) -> io::Result<()>,
+) {
+    for stream in listener.incoming() {
+        let Ok(mut stream) = stream else {
+            // Out of descriptors, say: give some time to close.
+            thread::sleep(Duration::from_millis(100));
+            continue;
+        };
+        let handle = handle.clone();
+        let work = Box::new(move || match read(&mut stream) {
+            Ok(req) => answer(&mut stream, handle(&req)),
+            Err(Some(code)) => {
+                answer(&mut stream, code);
+                linger(&mut stream);
+            }
+            Err(None) => {}
+        });
+        if let Err(e) = spawn(work) {
+            eprintln!("no thread for a connection ({e}); dropped it");
         }
-    });
-    Ok(port)
+    }
 }
 
 /// Whether GitHub signed this body with the secret (X-Hub-Signature-256).
@@ -199,15 +225,17 @@ fn unhex(s: &str) -> Option<Vec<u8>> {
 
 #[cfg(test)]
 pub mod tests {
-    use std::io::{Read, Write};
-    use std::net::TcpStream;
+    use std::io::{self, Read, Write};
+    use std::net::{TcpListener, TcpStream};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::thread;
     use std::time::Duration;
 
     use hmac::{Hmac, KeyInit, Mac};
     use sha2::Sha256;
 
-    use super::{listen, signed};
+    use super::{Handle, accept, listen, signed};
 
     pub fn sign(secret: &str, body: &[u8]) -> String {
         let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).unwrap();
@@ -283,7 +311,7 @@ pub mod tests {
     // what isn't a POST with a length is turned away.
     #[test]
     fn requests() {
-        let port = listen(
+        let (port, _) = listen(
             0,
             Arc::new(|req| {
                 if req.body == b"hello" && req.target == "/k?x=1" {
@@ -331,5 +359,32 @@ pub mod tests {
         let start = "POST /k HTTP/1.1\r\nX: ";
         let long = format!("{start}{}", "a".repeat(64 * 1024 + 4 - start.len()));
         assert_eq!(send(port, &[long.as_bytes()]), 431);
+    }
+
+    // A connection that can't get a thread is dropped, and the listener
+    // takes the next one.
+    #[test]
+    fn no_thread() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle: Handle = Arc::new(|_| 202);
+        let tried = AtomicUsize::new(0);
+        thread::spawn(move || {
+            accept(&listener, &handle, |work| {
+                if tried.fetch_add(1, Ordering::SeqCst) == 0 {
+                    Err(io::Error::other("no threads left"))
+                } else {
+                    thread::spawn(work);
+                    Ok(())
+                }
+            })
+        });
+        let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        let _ = s.write_all(b"POST /k HTTP/1.1\r\nContent-Length: 0\r\n\r\n");
+        let mut out = String::new();
+        let _ = s.read_to_string(&mut out);
+        assert_eq!(out, "", "the first one got an answer");
+        assert_eq!(post(port, "/k", b"", &[]), 202);
     }
 }

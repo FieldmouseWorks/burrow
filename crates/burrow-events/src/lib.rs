@@ -40,6 +40,8 @@ pub mod line;
 pub mod passes;
 pub mod routes;
 
+use std::sync::mpsc;
+use std::thread::{self, JoinHandle};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// The time now, in seconds since the epoch, as the wake files have it.
@@ -48,6 +50,29 @@ pub fn now() -> f64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs_f64())
         .unwrap_or(0.0)
+}
+
+/// Wait for any of these threads, by name, to end (in a panic: none of them
+/// returns), and say which. The service is its listeners and its handlers'
+/// lines, so one gone is the service failed: systemd starts it again,
+/// rather than it running on deaf to a port or a handler.
+pub fn supervise(threads: Vec<(String, JoinHandle<()>)>) -> String {
+    let (ended, gone) = mpsc::channel();
+    for (name, t) in threads {
+        let ended = ended.clone();
+        thread::spawn(move || {
+            let _ = t.join();
+            let _ = ended.send(name);
+        });
+    }
+    drop(ended);
+    match gone.recv() {
+        Ok(name) => name,
+        // None to wait for: nothing ends.
+        Err(_) => loop {
+            thread::park();
+        },
+    }
 }
 
 /// OWNER/REPO as GitHub has them, and never one that reads as an option.
@@ -66,7 +91,36 @@ pub fn repo_name(s: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::repo_name;
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::Duration;
+
+    use super::{repo_name, supervise};
+
+    // The first thread to end is the one named, however it ends.
+    #[test]
+    fn supervises() {
+        let forever = thread::spawn(|| {
+            loop {
+                thread::park();
+            }
+        });
+        let dies = thread::spawn(|| {
+            thread::sleep(Duration::from_millis(50));
+            panic!("a bug");
+        });
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            tx.send(supervise(vec![
+                ("kicks".into(), forever),
+                ("autoland".into(), dies),
+            ]))
+        });
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(10)).as_deref(),
+            Ok("autoland")
+        );
+    }
 
     #[test]
     fn repo_names() {

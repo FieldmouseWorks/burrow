@@ -116,13 +116,13 @@ mod tests {
                 .collect(),
         );
         let (hs, ls) = (handlers.clone(), lines.clone());
-        let hooks = listen(
+        let (hooks, _) = listen(
             0,
             Arc::new(move |req| delivery(&hs, &ls, "hook-secret", req)),
         )
         .unwrap();
         let (hs, ls) = (handlers.clone(), lines.clone());
-        let kicks = listen(0, Arc::new(move |req| kick(&hs, &ls, req))).unwrap();
+        let (kicks, _) = listen(0, Arc::new(move |req| kick(&hs, &ls, req))).unwrap();
         (handlers, lines, hooks, kicks)
     }
 
