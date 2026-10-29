@@ -6,7 +6,7 @@ import fcntl
 import json
 import os
 
-from harness import (C, DDIR, POSTED, QDIR, S, STUB, T0, V, W, agent, agent_runs, clean, fresh_pr_state, head, info,
+from harness import (C, DDIR, POSTED, QDIR, H, S, STUB, T0, V, W, agent, agent_runs, clean, fresh_pr_state, head, info,
                      merged, mkpr, pr_state, queued, run, rv_review, stand_in, tmp, worker)
 
 stand_in()
@@ -167,7 +167,7 @@ C.save(V.OUT, {"codex": {"why": "it isn't logged in", "until": C.ts(T0) + 86400}
 digest = []
 for num in (5, 6):
     with C.acting_for("sam/r"):
-        S.handle("sam/r", mkpr(number=num), info, digest)
+        H.handle("sam/r", mkpr(number=num), info, digest)
 assert [x for x in digest if x[0] == "A reviewer is out of service"] == [
     ("A reviewer is out of service", "Codex", "it isn't logged in")], digest
 # Every reviewer out: the owner hears, and nothing is queued or landed.

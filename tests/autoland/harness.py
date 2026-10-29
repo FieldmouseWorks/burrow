@@ -189,6 +189,7 @@ import prs as P  # noqa: E402,F401
 import repos as R  # noqa: E402,F401
 import review_worker as W  # noqa: E402,F401
 import reviewers as V  # noqa: E402,F401
+import step as H  # noqa: E402,F401
 import steward as S  # noqa: E402,F401
 import touches as G  # noqa: E402,F401
 REAL_GH = C.gh  # the real one, before any check stands in for it
@@ -273,7 +274,7 @@ def post(repo, pr, r, answer):
 
 STATES = {}  # a job's state, by id, as `proj state` says it: running unless set
 T0 = "2026-10-24T00:00:00Z"
-# The times a PR's status names (S.clock) are in the machine's zone: UTC here.
+# The times a PR's status names (H.clock) are in the machine's zone: UTC here.
 os.environ["TZ"] = "UTC"
 time.tzset()
 T = C.ts(T0)
@@ -347,7 +348,7 @@ def run(pr, after, obsolete=False):
     POSTED.clear()
     digest = []
     with C.acting_for("sam/r"):
-        S.handle("sam/r", pr, info, digest, obsolete)
+        H.handle("sam/r", pr, info, digest, obsolete)
     return " ".join(x for x in WROTE if "/statuses/" in x), digest
 
 
