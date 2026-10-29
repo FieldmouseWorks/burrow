@@ -6,6 +6,8 @@
 #   proj run PROJECT "task"     start a job; prints its id
 #   proj run --vm PROJECT "task"  the same, in a fresh agent sandbox (agent.sh)
 #   proj run --first PROJECT "task"  ahead of the line (someone is waiting on it)
+#   proj run --pipeline PROJECT "task"  work on the pipeline itself: ahead of
+#                               everything, and its own slots (every turn of it)
 #   proj run --kick NAME PROJECT "task"  kick NAME (HANDLER or HANDLER/OWNER/REPO,
 #                               one of burrow-events') each time a turn ends
 #   proj run --timeout DUR PROJECT "task"  each turn stopped after DUR (as
@@ -28,9 +30,11 @@
 # Everything a job said is kept in JOBS/ID.
 #
 # At most MAX_JOBS turns run Claude at once, and a turn starts only with
-# MIN_FREE MiB of memory to spare; the rest wait in line (queued), --first
-# ones ahead, then oldest first, and a turn that has waited MAX_WAIT seconds
-# counts as --first itself, so a stream of them can't starve it. A waiting
+# MIN_FREE MiB of memory to spare; the rest wait in line (queued), pipeline
+# jobs' ahead, then --first ones, then oldest first, and a turn that has
+# waited MAX_WAIT seconds counts as --first itself, so a stream of them can't
+# starve it. PIPELINE_SLOTS of the slots are for pipeline jobs alone, and no
+# project's other jobs hold more than PER_PROJECT at once (pick.sh). A waiting
 # turn is just this shell. Every turn runs in SLICE, which the machine caps,
 # so jobs can't take memory from anything else, and gets TIMEOUT (or the
 # job's own --timeout) before it's stopped, so a stuck one can't hold its
@@ -145,16 +149,24 @@ spare() {
   echo $(((kb + arc) / 1024))
 }
 
+# A job's class: pipeline for one run with --pipeline, whatever its turn asks;
+# otherwise first or normal, as the turn was started.
+class() {
+  if [ -e "$jobs/$1/pipeline" ]; then echo pipeline; else echo "${2:-normal}"; fi
+}
+
 # Wait in line for a slot, then hold it on fd $slot until this shell ends.
 # The line is JOBS/.queue: one file per waiting turn, named so that sorting
-# puts --first ones ahead and then the oldest, holding the waiting shell's pid.
-# A slot is a lock on JOBS/.slots/N, so a turn that's killed frees its slot
-# (and its place in line) by itself.
+# puts pipeline ones ahead, then --first ones, then the oldest, holding the
+# waiting shell's pid. A slot is a lock on JOBS/.slots/N, and N.who says
+# whose (class and project), so a turn that's killed frees its slot (and its
+# place in line) by itself. pick (pick.sh) says who goes next.
 take_slot() {
-  local id=$1 n=$2 first=$3 me since head f fid pid i fd num busy LC_ALL=C
+  local id=$1 n=$2 class=$3 me since seen got f fid pid i fd lk busy LC_ALL=C
   mkdir -p "$jobs/.queue" "$jobs/.slots"
   since=$(date +%s)
-  me="$jobs/.queue/$([ "$first" = first ] && echo 0 || echo 1)-$(date +%s%N)-$id"
+  case $class in pipeline) me=0 ;; first) me=1 ;; *) me=2 ;; esac
+  me="$jobs/.queue/$me-$(date +%s%N)-$id"
   trap 'rm -f "$me" "${me%/*}/.${me##*/}.new"' EXIT
   trap 'exit 143' TERM INT
   while :; do
@@ -166,43 +178,52 @@ take_slot() {
       mv -f "${me%/*}/.${me##*/}.new" "$me"
     fi
     # Waited long enough: among the --first ones now, by when it came.
-    if [[ ${me##*/} == 1-* ]] && [ $(($(date +%s) - since)) -ge "$MAX_WAIT" ]; then
-      mv -f "$me" "${me%/*}/0-${me##*/1-}" && me="${me%/*}/0-${me##*/1-}"
+    if [[ ${me##*/} == 2-* ]] && [ $(($(date +%s) - since)) -ge "$MAX_WAIT" ]; then
+      mv -f "$me" "${me%/*}/1-${me##*/2-}" && me="${me%/*}/1-${me##*/2-}"
     fi
-    # The head of the line, once the places of shells that are gone are cleared.
-    head=
+    # One waiter looks at a time, and a slot is taken only under this lock,
+    # so one it sees free stays free until it's done.
+    exec {lk}>"$jobs/.slots/.lock"
+    flock "$lk"
+    seen='' busy=''
+    for i in $(seq 1 "$MAX_JOBS"); do
+      exec {fd}>"$jobs/.slots/$i"
+      if flock -n "$fd"; then seen+="slot"$'\t'"$i"$'\t'"free"$'\n'
+      else
+        busy=1
+        seen+="slot"$'\t'"$i"$'\t'"$(cat "$jobs/.slots/$i.who" 2>/dev/null || printf -- '-\t-')"$'\n'
+      fi
+      exec {fd}>&-
+    done
+    # The line, once the places of shells that are gone are cleared.
     for f in "$jobs/.queue"/*; do
       [ -e "$f" ] || continue
       fid=${f##*/}; fid=${fid#*-}; fid=${fid#*-}
       pid=$(cat "$f" 2>/dev/null) || continue
       if [ -n "$pid" ] && tr '\0' ' ' 2>/dev/null <"/proc/$pid/cmdline" | grep -qF -- " _exec $fid "; then
-        head=$f
-        break
+        seen+="wait"$'\t'"$f"$'\t'"$(class "$fid" "$([[ ${f##*/} == 2-* ]] && echo normal || echo first)")"
+        seen+=$'\t'"$(cat "$jobs/$fid/project" 2>/dev/null)"$'\n'
+      else
+        rm -f "$f"
       fi
-      rm -f "$f"
     done
-    if [ "$head" = "$me" ]; then
-      # A free slot, and whether any other is taken.
-      slot='' busy=''
-      for i in $(seq 1 "$MAX_JOBS"); do
-        exec {fd}>"$jobs/.slots/$i"
-        if ! flock -n "$fd"; then busy=1; exec {fd}>&-
-        elif [ -z "$slot" ]; then slot=$fd num=$i
-        else exec {fd}>&-
-        fi
-      done
-      if [ -n "$slot" ]; then
-        # Short of memory matters only while another job runs: with nothing
-        # running, waiting frees nothing.
-        if [ -z "$busy" ] || [ "$(spare)" -ge "$MIN_FREE" ]; then
-          rm -f "$me"
-          trap - EXIT TERM INT
-          echo "$num" >"$jobs/$id/$n.slot"
-          return
-        fi
-        exec {slot}>&-
+    got=$(printf '%s' "$seen" | pick)
+    # Short of memory matters only while another job runs: with nothing
+    # running, waiting frees nothing.
+    if [ "${got%$'\t'*}" = "$me" ] && { [ -z "$busy" ] || [ "$(spare)" -ge "$MIN_FREE" ]; }; then
+      i=${got##*$'\t'}
+      exec {slot}>"$jobs/.slots/$i"
+      if flock -n "$slot"; then
+        printf '%s\t%s\n' "$class" "$(cat "$jobs/$id/project")" >"$jobs/.slots/$i.who"
+        exec {lk}>&-
+        rm -f "$me"
+        trap - EXIT TERM INT
+        echo "$i" >"$jobs/$id/$n.slot"
+        return
       fi
+      exec {slot}>&-
     fi
+    exec {lk}>&-
     sleep 2
   done
 }
@@ -257,7 +278,7 @@ fingerprint() { # repo n
 
 case "${1:-status}" in
   run | reply)
-    cmd=$1 vm='' first='' kick=() limit='' idle=
+    cmd=$1 vm='' first='' pipeline='' kick=() limit='' idle=
     shift
     while :; do
       case ${1:-} in
@@ -275,13 +296,14 @@ case "${1:-status}" in
           shift
           ;;
         --first) first=first ;;
+        --pipeline) [ "$cmd" = run ] || { echo "proj reply has no --pipeline: the job's own class is kept" >&2; exit 2; }; pipeline=1 ;;
         *) break ;;
       esac
       shift
     done
     if [ "$cmd" = run ]; then
-      p=${1:?usage: proj run [--vm] [--first] [--timeout DUR] [--idle DUR] [--kick NAME]... PROJECT \"task\"}
-      task=${2:?usage: proj run [--vm] [--first] [--timeout DUR] [--idle DUR] [--kick NAME]... PROJECT \"task\"}
+      p=${1:?usage: proj run [--vm] [--first] [--pipeline] [--timeout DUR] [--idle DUR] [--kick NAME]... PROJECT \"task\"}
+      task=${2:?usage: proj run [--vm] [--first] [--pipeline] [--timeout DUR] [--idle DUR] [--kick NAME]... PROJECT \"task\"}
       [ -d "$src/$p" ] || { echo "no such project: $src/$p" >&2; exit 1; }
       mkdir -p "$jobs"
       # Unique even when two jobs start in the same second.
@@ -290,6 +312,7 @@ case "${1:-status}" in
       [ ${#kick[@]} = 0 ] || printf '%s\n' "${kick[@]}" >"$jobs/$id/kick"
       [ -z "$limit" ] || echo "$limit" >"$jobs/$id/timeout"
       [ -z "$idle" ] || echo "$idle" >"$jobs/$id/idle"
+      [ -z "$pipeline" ] || : >"$jobs/$id/pipeline"
       if [ -n "$vm" ]; then agent new "$p" >"$jobs/$id/agent"; fi
     else
       id=${1:?usage: proj reply [--first] ID \"message\"}
@@ -498,7 +521,7 @@ Carry on from there. Anything you left in the background last turn was stopped w
     # The last turn's waits, now that this one has started: this turn writes
     # its own to await.next, and await only once it ends.
     rm -f "$dir/await" "$dir/await.next"
-    take_slot "$id" "$n" "$3"
+    take_slot "$id" "$n" "$(class "$id" "$3")"
     limit=$(cat "$dir/timeout" 2>/dev/null || echo "$TIMEOUT")
     args=(-p --output-format stream-json --verbose)
     if [ -s "$dir/session" ]; then args+=(--resume "$(cat "$dir/session")"); fi

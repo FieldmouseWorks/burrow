@@ -37,6 +37,8 @@ inputs:
       # VMs and backups
       qemu_kvm
       rclone
+      # gates: quarantining flaky tests (docs/flaky-tests.md)
+      (callPackage ../tools/flaky/package.nix { })
       # secrets tooling for sops-nix
       age
       sops
