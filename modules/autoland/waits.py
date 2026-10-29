@@ -9,7 +9,9 @@ A wait is the same one while its phase and what it's about (the PR's head
 and base, its `rev`) are: a new head saying the same thing is new work, with
 a deadline of its own. An open PR a pass noted nothing for (it failed on
 the repo first, or left the PR's status as it was) keeps the wait it had; a
-repo it fails on is watched itself.
+repo it fails on is watched itself. One whose step keeps failing the same way
+(step.py's strike) is due at once, whatever its deadline, and its phase says
+what fails.
 
 Not watched: a draft, or a major renovate-sweep held for the owner (nobody
 waits on the pipeline there), and a PR this pass listed for the owner or on
@@ -31,12 +33,14 @@ FAILS = "the steward's pass fails on it (journalctl -u autoland)"
 NOTED = {}  # this pass's waits, by repo whose PRs it read, then by key (None: nothing to watch)
 OPEN = {}  # the keys of each repo's open PRs, as this pass read them
 FAILED = {}  # the repos this pass failed on, before, between or after their PRs
+FAILING = {}  # the PRs whose step keeps failing, by key: what fails
 
 
 def begin():
     NOTED.clear()
     OPEN.clear()
     FAILED.clear()
+    FAILING.clear()
 
 
 def repo_of(key):
@@ -71,6 +75,15 @@ def note(repo, pr, phase, wait):
     minutes = repo_cfg(repo)["holdStallAfter" if wait == HOLD else "stallAfter"]
     rev = f"{pr['headRefOid']} {pr['baseRefName']}"
     NOTED.setdefault(repo, {})[key_of(repo, pr)] = item(repo, pr, phase, minutes, kick, rev)
+
+
+def overdue(repo, pr, why):
+    """The PR's step keeps failing the same way: its wait is due now. False
+    without the watchdog, which nothing then tells."""
+    if not CFG["watch"]:
+        return False
+    FAILING[key_of(repo, pr)] = why
+    return True
 
 
 def failed(repo, pr=None):
@@ -109,10 +122,12 @@ def publish(seen, digest, full):
             if theirs(key):
                 continue
             old = was.get(key, {})
-            same = old.get("phase") == it["phase"] and old.get("rev") == it["rev"]
+            phase = f"{it['phase']}; {FAILING[key]}" if key in FAILING else it["phase"]
+            same = old.get("phase") == phase and old.get("rev") == it["rev"]
             since = old["since"] if same else C.NOW
-            items[key] = {"what": it["what"], "link": it["link"], "phase": it["phase"], "since": since,
-                          "due": since + it["minutes"] * MIN, "kick": it["kick"], "rev": it["rev"]}
+            items[key] = {"what": it["what"], "link": it["link"], "phase": phase, "since": since,
+                          "due": since if key in FAILING else since + it["minutes"] * MIN, "kick": it["kick"],
+                          "rev": it["rev"]}
     save("watch.json", {"at": C.NOW, "items": items})
     if items != was:
         log(f"waits changed: {len(items)} watched")
