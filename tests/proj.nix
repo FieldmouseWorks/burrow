@@ -382,6 +382,8 @@ pkgs.testers.runNixOSTest {
 
     with subtest("a pipeline job in the pipeline's own repo takes its own slot while the others are full, every turn of it"):
         machine.succeed("su - dev -c 'git -C /data/dev/src/web init -q && git -C /data/dev/src/web remote add origin https://github.com/o/web.git'")
+        # A GitHub clone now, so proj-inbox looks at o/web too: it has no issues.
+        machine.succeed("mkdir -p /tmp/gh && echo '[]' >/tmp/gh/repos_o_web_issues")
         a = proj('run web "sleep 600"')
         b = proj('run web "sleep 600"')
         for j in (a, b):
