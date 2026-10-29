@@ -540,9 +540,10 @@ def inbox_off():
 
 def stuck_brief():
     who = CFG["notify"]["assignee"] or "the owner"
+    stalls = " (and `burrow-watchdog status` for what stalled past its deadline)" if CFG["watch"] else ""
     return f"""The PR pipeline on this machine is stuck on what's below, and none of it is {who}'s to settle. For each \
 one, find out why: `journalctl -u autoland` and `-u autoland-review` here, and the steward's state in \
-{CFG['stateDir']}. Fix the cause: a burrow PR with a test that fails on the bug when it's burrow's code, the fix on \
+{CFG['stateDir']}{stalls}. Fix the cause: a burrow PR with a test that fails on the bug when it's burrow's code, the fix on \
 this machine when it's the machine. Then get it moving again (`autoland-steward kick OWNER/REPO` starts a repo's \
 pass). Your answer, posted here, says what you found and did for each. The steward keeps this issue up to date: \
 something new stuck comes as a comment, and it closes the issue itself once nothing is, so don't close it. If one \
