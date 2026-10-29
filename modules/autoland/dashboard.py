@@ -9,7 +9,10 @@ with the repo or its config, dependencies it couldn't look up. An update
 with a PR is the PR pipeline's (handle(), renovate-sweep), and one whose PR
 was closed was closed on purpose, so neither counts. The rest is stuck once
 it has been there `waitDays` (one waiting on something) or `errorDays` (an
-error or a problem), counted from when a pass first saw it.
+error or a problem), counted from when a pass first saw it. An error is
+stuck sooner, once it's still there after two of Renovate's runs on the repo
+have ended since (renovateRuns, which Renovate's unit keeps): it was tried
+twice more.
 
 A pass reads the dashboard with a conditional request, which GitHub doesn't
 count when nothing changed, and only one Renovate's own login opened
@@ -17,6 +20,7 @@ count when nothing changed, and only one Renovate's own login opened
 edits start the repo's pass (burrow-events, `issueTitles`), and each
 deadline books one (C.wake), so nothing waits on a timer."""
 
+import os
 import time
 
 import common as C
@@ -133,9 +137,24 @@ def watch(repo, mine):
     save(name, st)
 
 
+def runs(repo):
+    """When Renovate's runs on the repo ended, its own and those over every
+    repo, oldest first."""
+    d = CFG["dashboard"]["renovateRuns"]
+    ended = []
+    for name in ("all", repo.lower().replace("/", "_")) if d else ():
+        try:
+            with open(os.path.join(d, name)) as f:
+                ended += [int(x) for x in f.read().split() if x.isdigit()]
+        except OSError:
+            pass
+    return sorted(ended)
+
+
 def act(repo, n, st, mine):
     items = st.get("items", {})
     states = {}
+    ended = runs(repo)
 
     def working(jid):
         """Whether the job is still queued or running, or proj can't say."""
@@ -159,6 +178,8 @@ def act(repo, n, st, mine):
                 C.wake(repo, it["handed"] + DAY)  # ends: listed on the stuck issue then
             continue
         at = it["since"] + CFG["dashboard"]["errorDays" if it["failing"] else "waitDays"] * DAY
+        if it["failing"] and len(since := [t for t in ended if t > it["since"]]) >= 2:
+            at = min(at, since[1])
         if C.NOW >= at:
             todo.append(it)
         else:

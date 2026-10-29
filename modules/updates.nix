@@ -74,6 +74,7 @@ let
     APP_OWNERS = lib.concatStringsSep " " cfg.renovate.owners;
     COVERS = coversTool;
     RUN_LOCK = "${cfg.renovate.dir}/run.lock";
+    RUNS = "${cfg.renovate.dir}/runs";
   };
 
   # Each script gets the names it uses (shellcheck rejects the rest), set above
@@ -153,7 +154,7 @@ let
     exec ${pkgs.python3}/bin/python3 -E -s ${majorSealSrc}/major-seal.py ${stateDir}/renovate-sweep "$@"
   '';
   renovateRun = script "renovate-run" ./updates/renovate.sh (
-    [ pkgs.renovate machineGh pkgs.util-linux ] ++ lib.optional (machineApp != null) tools.gh-token
+    [ pkgs.renovate machineGh pkgs.util-linux pkgs.coreutils ] ++ lib.optional (machineApp != null) tools.gh-token
   );
   renovateSweep = script "renovate-sweep" ./updates/renovate-sweep.sh (
     (with pkgs; [ coreutils findutils git jq gnused ]) ++ [ machineGh ] ++ calls
