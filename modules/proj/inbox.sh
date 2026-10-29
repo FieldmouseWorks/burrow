@@ -7,14 +7,18 @@
 # burrow-events (../events.nix) runs it on the repo's issue events, each time
 # one of its jobs' turns ends (proj run --kick), and when a wait it booked in
 # WAKE ends. `proj-inbox status` shows which issue is which job. SRC, JOBS,
-# STATE, SCRATCH, LABEL, AUTHORS, VM, HOST, NOTIFY, MARK, WAKE and PIPELINE
+# STATE, SCRATCH, LABEL, AUTHORS, VM, HOST, NOTIFY, MARK, WAKE, PIPELINE and
+# MACHINERY
 # come from ../proj.nix.
 #
-# The inbox posts as the gh login, which is usually the owner's own account,
-# so its own comments carry MARK and are never read back as replies. Jobs are
-# told not to comment on their issue themselves for the same reason. A job
-# only ever sees the issue and the comments of AUTHORS: on a public repo,
-# anyone else's comments are text from strangers.
+# The inbox posts as its gh's login: the machinery's App (burrow.github.
+# machinery) where there is one, else the owner's own account. Its own
+# comments carry MARK and are never read back as replies; jobs are told not
+# to comment on their issue themselves for the same reason. A job only ever
+# sees the issue and the comments of AUTHORS: on a public repo, anyone else's
+# comments are text from strangers. A person's issue is work they asked for,
+# so its job acts as them; a bot's (the steward's, say) is the machine's own,
+# so its job acts as MACHINERY, where there is one.
 #
 # Everything goes through GitHub's REST API: its GraphQL budget is shared with
 # whatever else runs under the same login, and runs out first.
@@ -46,6 +50,13 @@ allowed() {
   local a
   for a in $AUTHORS; do [ "$a" = "$1" ] && return 0; done
   return 1
+}
+
+# What the job for an issue opened by LOGIN acts as: REST spells a bot
+# SLUG[bot], which no person's login can be.
+acts_as() { # login
+  as=()
+  if [ -n "$MACHINERY" ] && [ "$VM" != 1 ] && [[ $1 == *"[bot]" ]]; then as=(--app "$MACHINERY"); fi
 }
 
 post() { # repo n body
@@ -148,9 +159,10 @@ for repo in "${!project[@]}"; do
     d="$STATE/$key-$n"
     [ ! -e "$d/job" ] || continue
     allowed "$(jq -r .user.login <<<"$issue")" || continue
+    acts_as "$(jq -r .user.login <<<"$issue")"
     # Comments already there are part of the task; replies after this are turns.
     comments=$(gh api "repos/$repo/issues/$n/comments" --paginate --slurp | jq 'add // []') || { miss "$repo"; continue; }
-    id=$(proj run "$(priority "$repo")" "${vm[@]}" --kick "proj-inbox/$repo" --link "$(jq -r '.html_url // ""' <<<"$issue")" "$p" "$(task "$repo" "$issue" "$comments")") || { retry "$repo"; continue; }
+    id=$(proj run "$(priority "$repo")" "${vm[@]}" "${as[@]}" --kick "proj-inbox/$repo" --link "$(jq -r '.html_url // ""' <<<"$issue")" "$p" "$(task "$repo" "$issue" "$comments")") || { retry "$repo"; continue; }
     mkdir -p "$d"
     echo "$repo#$n" >"$d/issue"
     echo "$id" >"$d/job"
@@ -238,7 +250,8 @@ for repo in "${!project[@]}"; do
         [ ! -s "$JOBS/$id/session" ] || { retry "$repo"; continue; }
         # No session to continue (the first turn never got going): start over,
         # from the issue as it stands, replies and all.
-        id=$(proj run "$(priority "$repo")" "${vm[@]}" --kick "proj-inbox/$repo" --link "$(jq -r '.html_url // ""' <<<"$now")" "$p" "$(task "$repo" "$now" "$comments")") || { retry "$repo"; continue; }
+        acts_as "$(jq -r .user.login <<<"$now")"
+        id=$(proj run "$(priority "$repo")" "${vm[@]}" "${as[@]}" --kick "proj-inbox/$repo" --link "$(jq -r '.html_url // ""' <<<"$now")" "$p" "$(task "$repo" "$now" "$comments")") || { retry "$repo"; continue; }
         echo "$id" >"$d/job"
         echo 0 >"$d/answered"
       fi

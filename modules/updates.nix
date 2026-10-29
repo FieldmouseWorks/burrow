@@ -21,6 +21,7 @@ inputs:
 let
   cfg = config.burrow.updates;
   inherit (config.burrow) prefix user stateDir tools;
+  inherit (config.burrow.github) machineApp machineGh;
   account = config.users.users.${user};
   system = pkgs.stdenv.hostPlatform.system;
   update = "${prefix}-update";
@@ -64,6 +65,15 @@ let
     # The repos the steward covers, as it last found them; none without it.
     COVERED = if config.burrow.autoland.enable or false then "${stateDir}/autoland/repos.json" else "";
     SEAL = "${majorSeal}/bin/major-seal";
+    # The App the jobs these start act as (proj run --app), and its bot as
+    # GraphQL names it: none without burrow.github.machinery.
+    APP = if machineApp == null then "" else machineApp.name;
+    BOT = if machineApp == null then "" else machineApp.slug;
+    APP_ENV = if machineApp == null then "" else machineApp.envFile;
+    # Renovate's (updates/renovate.sh).
+    APP_OWNERS = lib.concatStringsSep " " cfg.renovate.owners;
+    COVERS = coversTool;
+    RUN_LOCK = "${cfg.renovate.dir}/run.lock";
   };
 
   # Each script gets the names it uses (shellcheck rejects the rest), set above
@@ -142,8 +152,11 @@ let
   majorSeal = pkgs.writeShellScriptBin "major-seal" ''
     exec ${pkgs.python3}/bin/python3 -E -s ${majorSealSrc}/major-seal.py ${stateDir}/renovate-sweep "$@"
   '';
+  renovateRun = script "renovate-run" ./updates/renovate.sh (
+    [ pkgs.renovate machineGh pkgs.util-linux ] ++ lib.optional (machineApp != null) tools.gh-token
+  );
   renovateSweep = script "renovate-sweep" ./updates/renovate-sweep.sh (
-    (with pkgs; [ coreutils findutils git gh jq gnused ]) ++ calls
+    (with pkgs; [ coreutils findutils git jq gnused ]) ++ [ machineGh ] ++ calls
   );
 
   # The ZFS pools the machine needs imported, as NixOS's zfs module decides
@@ -306,9 +319,11 @@ let
 
   # Whether Renovate's autodiscoverFilter takes a repo, by Renovate's own code
   # (updates/renovate-covers.mjs), on the node it runs on.
-  coversTool = lib.escapeShellArgs [
-    (lib.getExe pkgs.nodejs_24) "${./updates/renovate-covers.mjs}" "${pkgs.renovate}" (builtins.toJSON renovateSettings.autodiscoverFilter)
-  ];
+  coversTool = pkgs.writeShellScript "renovate-covers" ''
+    exec ${lib.escapeShellArgs [
+      (lib.getExe pkgs.nodejs_24) "${./updates/renovate-covers.mjs}" "${pkgs.renovate}" (builtins.toJSON renovateSettings.autodiscoverFilter)
+    ]} "$@"
+  '';
 
   renovateConfig = pkgs.runCommand "renovate-config.json"
     {
@@ -334,6 +349,7 @@ in
     { key = "burrow/switch"; imports = [ (import ./switch.nix inputs) ]; }
     { key = "burrow/proj"; imports = [ (import ./proj.nix inputs) ]; }
     { key = "burrow/events"; imports = [ (import ./events.nix inputs) ]; }
+    { key = "burrow/github"; imports = [ (import ./github.nix inputs) ]; }
   ];
 
   options.burrow.updates = {
@@ -434,11 +450,25 @@ in
     };
 
     renovate = {
-      enable = lib.mkEnableOption "a self-hosted Renovate, as the user with gh's login, for every repo it can see";
+      enable = lib.mkEnableOption ''
+        a self-hosted Renovate for every repo it can see: as the machine's own
+        App (burrow.github.machinery), else as the user, with gh's login'';
       autodiscoverFilter = lib.mkOption {
         type = lib.types.listOf lib.types.str;
         example = [ "sam/*" ];
         description = "Which repos Renovate covers (new ones included).";
+      };
+      owners = lib.mkOption {
+        type = lib.types.listOf lib.types.str;
+        default = lib.optionals (config.burrow.autoland.enable or false) config.burrow.autoland.owners;
+        defaultText = lib.literalExpression "burrow.autoland.owners, when autoland is on";
+        example = [ "sam" "sams-org" ];
+        description = ''
+          As the machine's own App: the GitHub users and orgs its installations
+          are on, whose repos a full pass looks through (autodiscoverFilter
+          still says which it covers). An App's token is one installation's,
+          so each repo's run gets its owner's.
+        '';
       };
       trustedOwners = lib.mkOption {
         type = lib.types.listOf lib.types.str;
@@ -677,6 +707,9 @@ in
 
     (lib.mkIf rcfg.enable {
       assertions = [{
+        assertion = machineApp == null || rcfg.owners != [ ];
+        message = "burrow.updates.renovate.owners: name the accounts the App ${machineApp.slug or ""} is installed on, whose repos Renovate looks through.";
+      } {
         assertion = renovateEmail == null || !(lib.elem renovateEmail userEmails);
         message = ''
           burrow.updates.renovate.gitAuthor uses ${renovateEmail}, the email the
@@ -707,9 +740,10 @@ in
         };
       };
 
-      # Renovate as the user, with gh's login, like the other jobs that talk to
-      # GitHub: every repo it covers, or (renovate@) the one its instance names.
-      # One at a time, however started: they share the clones.
+      # Renovate as the machine's own App, or as the user with gh's login,
+      # like the other jobs that talk to GitHub: every repo it covers, or
+      # (renovate@) the one its instance names. One at a time, however
+      # started: they share the clones.
       systemd.services = lib.genAttrs [ "renovate" "renovate@" ] (name: online // {
         description = if name == "renovate" then "Renovate: dependency PRs for every repo" else "Renovate: dependency PRs for %I";
         # A switch leaves a running one be (see burrow.switch's check).
@@ -718,35 +752,15 @@ in
           RENOVATE_CONFIG_FILE = renovateConfig;
           LOG_LEVEL = "info";
         };
-        path = [ pkgs.renovate pkgs.gh pkgs.git pkgs.openssh pkgs.util-linux config.nix.package ] ++ rcfg.path;
+        # Renovate's own git, and the toolchains it refreshes lockfiles with.
+        path = [ pkgs.git pkgs.openssh config.nix.package ] ++ rcfg.path;
         serviceConfig = {
           Type = "oneshot";
           User = user;
+          ExecStart = "${renovateRun}/bin/renovate-run${lib.optionalString (name == "renovate@") " %I"}";
           TimeoutStartSec = "2h";
           Nice = 10;
         };
-        scriptArgs = lib.optionalString (name == "renovate@") "%I";
-        script = ''
-          RENOVATE_TOKEN=$(gh auth token)
-          export RENOVATE_TOKEN GITHUB_COM_TOKEN=$RENOVATE_TOKEN
-          if [ -z "''${1:-}" ]; then
-            exec flock ${rcfg.dir}/run.lock renovate
-          fi
-          # Only a repo a full run covers: any repo's events reach this unit.
-          # Renovate's own code applies its autodiscoverFilter here, to the
-          # repo as GitHub spells it (burrow-events has it in lower case, and a
-          # /regex/ filter can mind case). Then its own autodiscovery, narrowed
-          # to this repo, applies the rest (topics, forks, archived, mirrors).
-          repo=$(gh api "repos/$1" --jq .full_name)
-          covers=0
-          ${coversTool} "$repo" || covers=$?
-          case $covers in
-            0) ;;
-            10) echo "$repo: not one of Renovate's (autodiscoverFilter)"; exit 0 ;;
-            *) echo "$repo: couldn't apply autodiscoverFilter" >&2; exit 1 ;;
-          esac
-          exec flock ${rcfg.dir}/run.lock renovate --autodiscover-filter="[\"$repo\"]"
-        '';
       }) // lib.genAttrs [ "renovate-sweep" "renovate-sweep@" ] (name: {
         description = "Hand stuck Renovate PRs to a Claude job${lib.optionalString (name == "renovate-sweep@") " (%I)"}";
         # The full one sees what the full Renovate pass left.

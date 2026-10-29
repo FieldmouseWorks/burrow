@@ -31,4 +31,10 @@ dispatch build-main "main doesn't build" >/dev/null
 [ "$(wc -l <"$tmp/proj.log")" = 2 ] || fail "no new job once the last was 6 hours old"
 [ "$(cat "$state/jobs/build-main")" = homelab-2 ] || fail "build-main's job wasn't replaced"
 
+# With a machine App, the job acts as it.
+# shellcheck disable=SC2034 # dispatch's
+APP=workers
+dispatch deploy "the switch failed" >/dev/null
+[ "$(tail -1 "$tmp/proj.log")" = "run --pipeline --app workers homelab the switch failed" ] || fail "proj got: $(tail -1 "$tmp/proj.log")"
+
 echo "update-dispatch: ok"

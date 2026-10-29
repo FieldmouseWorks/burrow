@@ -166,6 +166,24 @@ assert P.our_status(rollup({"login": "steward", "__typename": "Bot"})) == ("succ
 for forged in ({"login": "sam", "__typename": "User"}, {"login": "steward", "__typename": "User"}, None):
     assert P.our_status(rollup(forged)) == (None, ""), forged
 
+# The steward's authors: its people by login, and its bots (the
+# machinery's App's among them) only as GitHub's own Bots. GraphQL gives a
+# bot's login without "[bot]", which a person can hold as theirs; REST spells
+# it SLUG[bot], which no person's can be.
+for actor, ours in [({"login": "sam", "__typename": "User"}, True), ({"login": "sam"}, True),
+                    ({"login": "workers", "__typename": "Bot"}, True), ({"login": "renovate", "__typename": "Bot"}, True),
+                    ({"login": "workers", "__typename": "User"}, False), ({"login": "renovate"}, False),
+                    ({"login": "sam", "__typename": "Bot"}, False), ({"login": "mallory", "__typename": "Bot"}, False),
+                    ({"login": "mallory", "__typename": "User"}, False), (None, False)]:
+    assert C.ours(actor) == ours, actor
+for login, ours in [("sam", True), ("workers[bot]", True), ("dependabot[bot]", True), ("workers", False),
+                    ("renovate", False), ("sam[bot]", False), ("mallory", False), ("", False), (None, False)]:
+    assert C.rest_ours(login) == ours, login
+# A PR the machinery's App opened is the steward's to do; one by a person of
+# the same name isn't.
+assert C.acted_on({**mkpr(), "author": {"login": "workers", "__typename": "Bot"}})
+assert not C.acted_on({**mkpr(), "author": {"login": "workers", "__typename": "User"}})
+
 # Renovate's dashboard is one an author opened (Renovate runs as the
 # machine user's login): a search hit anyone else opened isn't it.
 D.FOUND.clear()
@@ -178,6 +196,16 @@ D.FOUND.clear()
 C.gh = lambda *a, **k: [{"number": 3, "title": "Dependency Dashboard", "user": "mallory"}]
 st = {}
 assert D.find("sam/r", st) is None and st.get("next"), st
+# Renovate as the machine's own App opens it as that App's bot: not an
+# author's from before, nor a person who took the bot's name.
+C.CFG["dashboard"]["renovate"] = "workers[bot]"
+D.FOUND.clear()
+C.gh = lambda *a, **k: [{"number": 3, "title": "Dependency Dashboard", "user": "sam"},
+                        {"number": 4, "title": "Dependency Dashboard", "user": "workers"},
+                        {"number": 5, "title": "Dependency Dashboard", "user": "workers[bot]"}]
+st = {}
+assert D.find("sam/r", st) == 5, st
+C.CFG["dashboard"]["renovate"] = None
 C.gh = gh_kept
 D.FOUND.clear()
 # The repos are the ones the App's installations reach, asked as each

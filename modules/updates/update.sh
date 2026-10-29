@@ -8,8 +8,9 @@
 # One run: take origin/main, bump every flake input and Claude Code, build,
 # run the VM tests, put it live with HOST-switch, check the box is still
 # healthy, HOST-confirm, push to main. Anything that breaks goes back by itself
-# and is handed to a Claude job to fix; the owner hears about it only if that
-# doesn't work. It also deploys main itself, so a merged PR goes live the same
+# and is handed to a Claude job to fix (acting on GitHub as the machine's own
+# App, APP, when it has one); the owner hears about it only if that doesn't
+# work. It also deploys main itself, so a merged PR goes live the same
 # way.
 #
 # It works in its own clone (WORK), never in the operator's checkout, and holds
