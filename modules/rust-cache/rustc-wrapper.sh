@@ -23,7 +23,7 @@ fi
 
 # Only the module's settings: the user's own SCCACHE_ variables could turn
 # client-side mode off (SCCACHE_LOG does) and send the compile to the daemon,
-# whose sandbox can't build it.
+# which refuses it, and the build would go uncached.
 for var in "${!SCCACHE_@}"; do
   unset "$var"
 done
