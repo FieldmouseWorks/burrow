@@ -197,6 +197,14 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
         deadline(kind)
         return state or "unknown"
 
+    def at_work(kind, doing, at=head):
+        """What the status says of this head's job of the kind: queued for
+        its work until proj starts it (a job can wait hours for a slot, and
+        proj kicks a pass when it starts), at it from then on."""
+        if running(kind, at) == "queued":
+            return f"a Claude job is queued for {doing}"
+        return f"a Claude job is {doing}"
+
     def started(kind, task, at=head):
         """A Claude job, once per head (at: once per head on its base, for
         the judge's; recorded once it has started; until then it's tried
@@ -235,7 +243,7 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
         elif started(kind, task, at):
             st[kind + "Again"] = at
             st.pop(kind + "Lost", None)
-            settle("pending", f"Settled; a Claude job is {doing} again (the last one ended without {answer})"[:140])
+            settle("pending", f"Settled; {at_work(kind, doing, at)} again (the last one ended without {answer})"[:140])
         else:
             settle("pending", f"Settled, but no Claude job could start {doing} again"[:140],
                    "Couldn't start a Claude job")
@@ -400,7 +408,7 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
         elif lost("judged", judged_at):
             again("judged", judge_task(repo, pr, why, ci == "none", seen), "judging it", "a verdict", judged_at)
         elif st.get("judged") == judged_at or started("judged", judge_task(repo, pr, why, ci == "none", seen), judged_at):
-            settle("pending", f"Settled; a Claude job is judging it ({why})")
+            settle("pending", f"Settled; {at_work('judged', 'judging it', judged_at)} ({why})")
         else:
             settle("pending", f"Settled, but no Claude job could judge it ({why})", "Couldn't start a Claude job to judge it")
 
@@ -412,7 +420,7 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
         task = proof_task(repo, pr, ci_names, rc["proofJobs"])
         retry = lost("proved")
         if not retry and st.get("proved") == head:
-            settle("pending", f"Settled; a Claude job is {doing}"[:140])
+            settle("pending", f"Settled; {at_work('proved', doing)}"[:140])
             return
         slots = rc.get("proofSlots")
         if slots and not (retry and st.get("provedAgain") == head) and (ahead := P.ahead(repo, n, st, slots)) is not None:
@@ -422,7 +430,7 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
         if retry:
             again("proved", task, doing, "its verdict")
         elif started("proved", task):
-            settle("pending", f"Settled; a Claude job is {doing}"[:140])
+            settle("pending", f"Settled; {at_work('proved', doing)}"[:140])
         else:
             settle("pending", f"Settled, but no Claude job could run {', '.join(ci_names)}"[:140],
                    "Couldn't start a Claude job to run its checks")
