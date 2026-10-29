@@ -70,6 +70,15 @@ for pr in (clean(comments=[said(swept("ok"))], **major), clean(**dependabot)):
     fresh_pr_state()
     status, _ = run(dirty(pr), 700)
     assert len(JOBS) == 1 and "it conflicts with main" in JOBS[0] and "a Claude job has it" in status, (JOBS, status)
+# A conflict job stuck in line (or one whose state can't be read: running,
+# as far as the steward can tell) doesn't keep the PR off the list: still
+# open a day on, it's listed, watchdog or not, a Renovate update a job of
+# ours works included.
+for pr in (clean(), clean(comments=[said(swept("ok"))], **major)):
+    fresh_pr_state()
+    run(dirty(pr), 700)
+    status, digest = run(dirty(pr), 90000)
+    assert "a Claude job has it" in status and [d[0] for d in digest] == ["Open over a day"], (status, digest)
 # One renovate-sweep has is its job's: a red one, or a major with no verdict
 # on this head, gets no job of ours beside it on the branch.
 red = [{"__typename": "CheckRun", "name": "ci", "status": "COMPLETED", "conclusion": "FAILURE"}]
@@ -78,6 +87,9 @@ for pr in (clean(checks=red, **major), clean(**major)):
     status, _ = run(dirty(pr), 700)
     assert JOBS == [] and "Conflicts with main; renovate-sweep has it" in status, (JOBS, status)
     assert waits.NOTED["sam/r"]["sam/r#8"]["kick"] == "renovate-sweep/sam/r", waits.NOTED
+    # Its escalation is renovate-sweep's too: not listed here a day on.
+    status, digest = run(dirty(pr), 90000)
+    assert "renovate-sweep has it" in status and digest == [], (status, digest)
 # And one it held is the owner's: nothing pushes to it.
 fresh_pr_state()
 status, _ = run(dirty(clean(comments=[said(swept("held"))], **major)), 700)

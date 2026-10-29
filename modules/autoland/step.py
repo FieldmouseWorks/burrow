@@ -339,7 +339,7 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
         verdict = C.marker(pr, MAJOR_VERDICT, head, repo, base) if dep == "major" and renovate else None
         if dep and not bot_edited(repo, pr, st):
             settle("pending", f"Conflicts with {base}; its bot rebases it")
-            open_a_day(f"Dependency update; conflicts with {base}")
+            open_a_day(f"Dependency update; conflicts with {base}", swept=renovate)
         elif verdict == "held":
             settle("pending", "Major update; renovate-sweep held it: see its comment", wait=None)
         elif renovate and dep and (ci == "red" or dep == "major" and verdict != "ok"):
@@ -349,12 +349,16 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
                      "branch (a merge commit: never rebase or force-push), resolve every conflict keeping what both sides "
                      "meant, and run the repo's tests before you push. If the two sides can't both be kept, which one stays "
                      "is the owner's call", f"Conflicts with {base}", "conflictFixed", wait=False)
+            # A job stuck in line, or one whose state can't be read, doesn't
+            # keep it off the list.
+            open_a_day(f"Conflicts with {base}")
 
-    def open_a_day(what):
-        """Renovate's stuck ones are renovate-sweep's; a Dependabot one that
-        still hasn't merged after a day is the owner's to look at."""
-        if (not renovate and C.NOW - ts(pr["createdAt"]) > 86400
-                and not any(x[1] == line for x in digest)):
+    def open_a_day(what, swept=False):
+        """Anything not merged a day after it was opened, reviewed clean or
+        not (a check that never reports keeps it pending), is listed, unless
+        it's listed already, watchdog or not. A Renovate update's own stuck
+        ones are renovate-sweep's (swept)."""
+        if not swept and C.NOW - ts(pr["createdAt"]) > 86400 and not any(x[1] == line for x in digest):
             digest.append(("Open over a day", line, what))
 
     def owner_decides():
@@ -555,7 +559,7 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
             settle("success", "Dependency update, CI green")
         else:
             land_now("Dependency update, CI green")
-        open_a_day(f"Dependency update, CI {ci}")
+        open_a_day(f"Dependency update, CI {ci}", swept=renovate)
         save(key, st)
         return
 
@@ -882,8 +886,5 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
     else:
         land_now(f"{' and '.join(V.NAMES[r] for r in live)} found nothing on this commit, every thread is resolved, CI is green")
 
-    # Anything not merged after a day, reviewed clean or not (a check that never
-    # reports keeps it pending), unless it's already listed for the owner.
-    if C.NOW - ts(pr["createdAt"]) > 86400 and not any(x[1] == line for x in digest):
-        digest.append(("Open over a day", line, our_status(pr)[1] or "unsettled"))
+    open_a_day(our_status(pr)[1] or "unsettled")
     save(key, st)
