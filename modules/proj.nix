@@ -16,15 +16,18 @@ let
   inherit (config.burrow) user projectsDir stateDir;
   watchWake = "${stateDir}/proj-watch/wake.json";
   inboxWake = "${stateDir}/proj-inbox/wake.json";
+  # The pipeline's own repos, whose projects' pipeline jobs get its slots,
+  # and the lead ones, what it's built from, whose go first of all (pipeline
+  # repos whether or not pipelineRepos lists them).
+  leadRepos = lib.attrByPath [ "burrow" "autoland" "leadRepos" ] [ ] config;
+  pipelineRepos = lib.escapeShellArg (lib.concatStringsSep " " (lib.attrByPath [ "burrow" "autoland" "pipelineRepos" ] [ ] config ++ leadRepos));
   # What each job waits on, for the stall watchdog, when it's on.
   watchdog = config.burrow.watchdog.enable or false;
   waits = "${cfg.jobsDir}/.waits.json";
-  # What the pipeline is built from: its work goes first (proj run --lead).
-  leadRepos = lib.attrByPath [ "burrow" "autoland" "leadRepos" ] [ ] config;
 
   proj = pkgs.writeShellApplication {
     name = "proj";
-    runtimeInputs = [ pkgs.coreutils pkgs.findutils pkgs.gnugrep pkgs.gnused pkgs.gawk pkgs.jq pkgs.curl pkgs.systemd pkgs.util-linux pkgs.bashInteractive ];
+    runtimeInputs = [ pkgs.coreutils pkgs.findutils pkgs.gnugrep pkgs.gnused pkgs.gawk pkgs.jq pkgs.curl pkgs.git pkgs.systemd pkgs.util-linux pkgs.bashInteractive ];
     text = ''
       SRC=${lib.escapeShellArg projectsDir}
       JOBS=${lib.escapeShellArg cfg.jobsDir}
@@ -41,6 +44,8 @@ let
       MARK=${lib.escapeShellArg inboxMark}
       KICK=${lib.escapeShellArg config.burrow.events.kick}
       WAKE=${lib.escapeShellArg watchWake}
+      PIPELINE=${pipelineRepos}
+      LEAD=${lib.escapeShellArg (lib.concatStringsSep " " leadRepos)}
       WAITS=${lib.escapeShellArg (lib.optionalString watchdog waits)}
       STALL_QUEUED=${toString (cfg.stallAfterMinutes * 60)}
       GRACE=600
@@ -62,8 +67,7 @@ let
       HOST=${lib.escapeShellArg config.networking.hostName}
       NOTIFY=${lib.escapeShellArg (lib.optionalString (config.burrow.tools ? notify) (lib.getExe config.burrow.tools.notify))}
       WAKE=${lib.escapeShellArg inboxWake}
-      PIPELINE=${lib.escapeShellArg (lib.concatStringsSep " " (lib.attrByPath [ "burrow" "autoland" "pipelineRepos" ] [ ] config))}
-      LEAD=${lib.escapeShellArg (lib.concatStringsSep " " leadRepos)}
+      PIPELINE=${pipelineRepos}
     '' + builtins.readFile ./proj/inbox.sh;
   };
 in
@@ -95,10 +99,16 @@ in
       default = if cfg.maxJobs > 1 then 1 else 0;
       defaultText = lib.literalExpression "if maxJobs > 1 then 1 else 0";
       description = ''
-        Of the maxJobs slots, how many only pipeline jobs (`proj run
-        --pipeline`: the steward's jobs, issues in its own repos) may take,
-        so work on the pipeline itself waits only on other such work, never
-        on everyone else's long jobs.
+        Of the maxJobs slots, how many only pipeline jobs in the pipeline's
+        own repos (`proj run --pipeline` in a project whose clone's origin
+        is one of `burrow.autoland.pipelineRepos` or `leadRepos` on GitHub:
+        the steward's jobs there, their issues) may take, so work on the
+        pipeline itself waits only on other such work, never on everyone
+        else's long jobs; a lead repo's go first of all, ahead of the other
+        pipeline jobs too. A pipeline job in any other project goes as
+        `--first`: ahead of the line, but within its project's cap and never
+        in these slots; `proj status` and its turn's journal say so, origin
+        and all.
       '';
     };
     maxJobsPerProject = lib.mkOption {
@@ -106,7 +116,8 @@ in
       default = lib.max 1 (cfg.maxJobs - cfg.pipelineSlots - 1);
       defaultText = lib.literalExpression "max 1 (maxJobs - pipelineSlots - 1)";
       description = ''
-        The most slots one project's jobs hold at once, pipeline jobs aside.
+        The most slots one project's jobs hold at once, the pipeline's own
+        repos' pipeline jobs aside.
         Its next one waits, and lets other projects' by meanwhile, so one
         project's jobs never fill the machine.
       '';
@@ -255,8 +266,7 @@ in
           proj list                         projects in ${projectsDir}
           proj run web "the task"           start a job; prints its id
           proj run --first web "the task"   the same, ahead of the line
-          proj run --pipeline burrow "..."  work on the pipeline itself: ahead of the line, in its own slot
-          proj run --lead burrow "..."      the same, first of all: a lead repo's pipeline work
+          proj run --pipeline burrow "..."  work on the pipeline itself: first of all, in its own slot
           proj status                       what's running, what finished
           proj log ID                       its answer (--turn N for an earlier one, --raw for everything)
           proj reply ID "follow-up"         continue the same conversation
@@ -264,7 +274,7 @@ in
 
       Jobs run in the background and survive this session ending. At most
       ${toString cfg.maxJobs} run at once, ${toString cfg.maxJobsPerProject} from any one project; the rest are queued. Use --first when ${config.burrow.owner} is
-      waiting on the answer, and --pipeline for work on the steward, its reviewers, CI or proj (--lead instead in a lead repo${lib.optionalString (leadRepos != [ ]) ": ${lib.concatStringsSep ", " leadRepos}"}). Check on them,
+      waiting on the answer, and --pipeline for work on the steward, its reviewers, CI or proj${lib.optionalString (leadRepos != [ ]) " (in ${lib.concatStringsSep ", " leadRepos}, what the pipeline is built from, it goes first of all)"}. Check on them,
       relay results to ${config.burrow.owner}, and follow up yourself where the answer is obvious.
       Each turn ends saying what comes next: `proj await PR-URL` when it waits
       on GitHub (CI, a review; it's resumed when the PR changes, holding no slot

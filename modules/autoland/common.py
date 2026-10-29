@@ -421,10 +421,11 @@ def project_dir(repo):
 
 
 def rank(repo):
-    """Where repo's work goes in line, first to last: 0 for a lead repo
+    """Where repo's reviews go in line, first to last: 0 for a lead repo
     (`leadRepos`, what the pipeline itself is built from), ahead of
     everything; 1 for another whose PRs work on this pipeline itself
-    (`pipelineRepos`), so everything after them is quicker; 2 for the rest."""
+    (`pipelineRepos`), so everything after them is quicker; 2 for the rest.
+    proj ranks their Claude jobs the same way, by the clone's origin."""
     r = repo.lower() if isinstance(repo, str) else None
     if r in {x.lower() for x in CFG["leadRepos"]}:
         return 0
@@ -434,8 +435,9 @@ def rank(repo):
 def job(repo, task, clone=False):
     """Hand a task to a Claude job in the repo's project. Every one is
     pipeline work (proj run --pipeline): it settles a PR or the branch PRs
-    land on, so it goes ahead of the line, in a slot kept for it; a lead
-    repo's goes first of all (--lead). Returns the job id."""
+    land on, so it goes ahead of the line, and in the pipeline's own repos
+    (pipelineRepos) in a slot kept for it; proj decides which. Returns the
+    job id."""
     d = project_dir(repo)
     if d is None and clone and not DRY:
         d = repo.split("/")[1]
@@ -452,7 +454,7 @@ def job(repo, task, clone=False):
     # did and acts on it (--owned: the turn needn't say what comes next); one
     # that goes quiet for jobIdle, or runs past jobTimeout, is stopped, and
     # ends then.
-    p = subprocess.run([CFG["proj"], "run", "--lead" if rank(repo) == 0 else "--pipeline", "--timeout", f"{CFG['jobTimeout']}m",
+    p = subprocess.run([CFG["proj"], "run", "--pipeline", "--timeout", f"{CFG['jobTimeout']}m",
                         "--idle", f"{CFG['jobIdle']}m", "--kick", f"autoland/{repo}", "--owned", d, task],
                        capture_output=True, text=True)
     return p.stdout.strip() or None

@@ -283,9 +283,12 @@ in
         The repos whose PRs work on this pipeline itself (OWNER/NAMEs, any
         case): the steward, its reviewers, the machine they run on. Their
         reviews take a reviewer's next free place before anyone else's, and
-        their issues are pipeline work for proj-inbox, as the steward's own
-        Claude jobs are everywhere (`proj run --pipeline`), so the work
-        queued behind them gets the speedup sooner.
+        the Claude jobs in their projects that the steward and proj-inbox
+        start (`proj run --pipeline`) go ahead of everything, in proj's
+        `pipelineSlots`, so the work queued behind them gets the speedup
+        sooner. The steward's jobs in any other repo go ahead of the line as
+        well, but within that project's `maxJobsPerProject`, so one repo's
+        PRs can't fill the machine.
       '';
     };
 
@@ -297,9 +300,9 @@ in
         The repos the pipeline itself is built from (OWNER/NAMEs, any case),
         whose work goes first of all: ahead of everyone else's, the rest of
         `pipelineRepos` included. Their reviews take a reviewer's next free
-        place first, and their Claude jobs and proj-inbox issues go first in
-        proj's line (`proj run --lead`). A lead repo is pipeline work
-        whether or not `pipelineRepos` lists it.
+        place first, and proj puts their pipeline jobs (the steward's Claude
+        jobs, proj-inbox's issues) first in its line. A lead repo is
+        pipeline work whether or not `pipelineRepos` lists it.
       '';
     };
 

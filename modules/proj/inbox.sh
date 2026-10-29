@@ -7,8 +7,8 @@
 # burrow-events (../events.nix) runs it on the repo's issue events, each time
 # one of its jobs' turns ends (proj run --kick), and when a wait it booked in
 # WAKE ends. `proj-inbox status` shows which issue is which job. SRC, JOBS,
-# STATE, SCRATCH, LABEL, AUTHORS, VM, HOST, NOTIFY, MARK, WAKE, PIPELINE and
-# LEAD come from ../proj.nix.
+# STATE, SCRATCH, LABEL, AUTHORS, VM, HOST, NOTIFY, MARK, WAKE and PIPELINE
+# come from ../proj.nix.
 #
 # The inbox posts as the gh login, which is usually the owner's own account,
 # so its own comments carry MARK and are never read back as replies. Jobs are
@@ -22,13 +22,9 @@
 vm=()
 [ "$VM" != 1 ] || vm=(--vm)
 # An issue in one of the pipeline's own repos (PIPELINE) is work on the
-# pipeline itself: ahead of everything, in a slot kept for it, and one in a
-# lead repo (LEAD) goes ahead of that too. Anyone else's goes ahead of the
-# line all the same, since someone's waiting on it.
-priority() {
-  case " ${LEAD,,} " in *" ${1,,} "*) echo --lead; return ;; esac
-  case " ${PIPELINE,,} " in *" ${1,,} "*) echo --pipeline ;; *) echo --first ;; esac
-}
+# pipeline itself: ahead of everything, in a slot kept for it. Anyone else's
+# goes ahead of the line all the same, since someone's waiting on it.
+priority() { case " ${PIPELINE,,} " in *" ${1,,} "*) echo --pipeline ;; *) echo --first ;; esac; }
 mkdir -p "$STATE"
 
 if [ "${1:-}" = status ]; then

@@ -143,9 +143,6 @@ S.CFG.update(proj=proj, projectsDir=f"{tmp}/src")
 C.project_dir, project_dir = (lambda repo: "r"), C.project_dir
 assert REAL["job"]("sam/r", "the task") == "job-9"
 assert open(f"{tmp}/proj-args").read().split() == ["run", "--pipeline", "--timeout", "60m", "--idle", "20m", "--kick", "autoland/sam/r", "--owned", "r", "the", "task"]
-# A lead repo's goes first of all (leadRepos, any case).
-assert REAL["job"]("sam/lead", "the task") == "job-9"
-assert open(f"{tmp}/proj-args").read().split()[:2] == ["run", "--lead"]
 C.project_dir = project_dir
 S.CFG.clear()
 S.CFG.update(kept)
