@@ -45,6 +45,11 @@ class Unavailable(RuntimeError):
     again next pass."""
 
 
+# What GitHub says of any rule on a private repo of a free account: the plan
+# offers none there, so there are none to keep or to merge by.
+NO_RULES = "Upgrade to GitHub Pro"
+
+
 class Gone(RuntimeError):
     """GitHub has no such thing (404), or had it and deleted it (410): asking
     again won't bring it back."""

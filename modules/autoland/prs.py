@@ -183,16 +183,25 @@ def merge_method(repo, base, repo_info):
     """The first of squash, merge and rebase that both the repo's settings
     and every rule on base allow, or None when there's none or GitHub didn't
     say what the rules are. A ruleset can narrow the settings (a legacy one
-    allowing merge commits alone), and GitHub refuses any other method from
-    the App, which bypasses no rule."""
-    pages = C.gh("api", f"repos/{repo}/rules/branches/{urllib.parse.quote(base, safe='')}?per_page=100",
-                 "--paginate", "--slurp", check=False)
+    allowing merge commits alone, or one wanting a linear history), and
+    GitHub refuses any other method from the App, which bypasses no rule. A
+    private repo on a free plan has no rules: its settings alone decide."""
+    try:
+        pages = C.gh("api", f"repos/{repo}/rules/branches/{urllib.parse.quote(base, safe='')}?per_page=100",
+                     "--paginate", "--slurp")
+    except RuntimeError as e:
+        if C.NO_RULES not in str(e):
+            log(f"{repo}: the rules on {base}: {e}")
+            return None
+        pages = []
     if not isinstance(pages, list):
         return None
     allowed = {"squash", "merge", "rebase"}
     for rule in (r for page in pages for r in page):
         if rule.get("type") == "pull_request":
             allowed &= set((rule.get("parameters") or {}).get("allowed_merge_methods") or allowed)
+        elif rule.get("type") == "required_linear_history":
+            allowed.discard("merge")
     return next((method for flag, method in (("squashMergeAllowed", "squash"), ("mergeCommitAllowed", "merge"),
                                              ("rebaseMergeAllowed", "rebase"))
                  if repo_info[flag] and method in allowed), None)
