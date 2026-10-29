@@ -294,9 +294,12 @@ in
         The repos whose PRs work on this pipeline itself (OWNER/NAMEs, any
         case): the steward, its reviewers, the machine they run on. Their
         reviews take a reviewer's next free place before anyone else's, and
-        their issues are pipeline work for proj-inbox, as the steward's own
-        Claude jobs are everywhere (`proj run --pipeline`), so the work
-        queued behind them gets the speedup sooner.
+        the Claude jobs in their projects that the steward and proj-inbox
+        start (`proj run --pipeline`) go ahead of everything, in proj's
+        `pipelineSlots`, so the work queued behind them gets the speedup
+        sooner. The steward's jobs in any other repo go ahead of the line as
+        well, but within that project's `maxJobsPerProject`, so one repo's
+        PRs can't fill the machine.
       '';
     };
 
