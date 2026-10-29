@@ -50,6 +50,7 @@ import time
 
 import common as C
 import dashboard as D
+import proofs as P
 import repos as R
 import reviewers as V
 from common import CFG, DRY, MIN, STATE, load, log, repo_cfg, save, ts
@@ -63,11 +64,6 @@ from prs import ci_state, eyes, land, open_prs, our_status, post_status
 SESSION = re.compile(r"https://claude\.ai/code/session_\w+")
 # What a fix job of each kind is on, for a PR's status while another waits.
 ON = {"handed": "its findings", "redFixed": "its red CI", "failFixed": "what its judge found failing"}
-
-
-# The open PRs of each repo this pass reads (run_pass): another PR's proof
-# job counts against its repo's proofSlots only while that PR is open.
-OPEN = {}
 
 
 def clock(t):
@@ -348,31 +344,6 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
         else:
             settle("pending", f"Settled, but no Claude job could judge it ({why})", "Couldn't start a Claude job to judge it")
 
-    def proofs_ahead():
-        """How many of the repo's open PRs are ahead of this one for a proof
-        job when its repo allows only proofSlots at once (a check that takes
-        the whole machine, so the rest would only wait out their timeout):
-        those whose job is queued or running, and the lower-numbered ones
-        waiting their turn. None when this one may start now. The end of a
-        job's turn kicks the repo's pass, which starts the next."""
-        slots = rc.get("proofSlots")
-        if not slots:
-            return None
-        mine = f"pr-{repo.replace('/', '_')}-"
-        busy = waiting = 0
-        for f in os.listdir(STATE):
-            m = re.fullmatch(re.escape(mine) + r"(\d+)\.json", f)
-            other = m and int(m[1])
-            if not m or other == n or (repo in OPEN and other not in OPEN[repo]):
-                continue
-            o = load(f, {})
-            if o.get("head") and o.get("proved") == o["head"] and o.get("provedJob") and \
-                    C.job_state(o["provedJob"]) in (None, "queued", "running"):
-                busy += 1
-            elif other < n and o.get("head") and o.get("proofWait") == o["head"]:
-                waiting += 1
-        return busy + waiting if busy + waiting >= slots else None
-
     def prove():
         """Only checks that run on a machine, not in CI, are left: a Claude
         job runs them on this head and records their verdicts, once its
@@ -383,11 +354,11 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
         if not retry and st.get("proved") == head:
             settle("pending", f"Settled; a Claude job is {doing}"[:140])
             return
-        if not (retry and st.get("provedAgain") == head) and (ahead := proofs_ahead()) is not None:
-            st["proofWait"] = head
+        slots = rc.get("proofSlots")
+        if slots and not (retry and st.get("provedAgain") == head) and (ahead := P.ahead(repo, n, st, slots)) is not None:
+            P.wait(repo, n)
             settle("pending", f"Settled; waiting its turn to run {', '.join(ci_names)} ({ahead} ahead)"[:140])
             return
-        st.pop("proofWait", None)
         if retry:
             again("proved", task, doing, "its verdict")
         elif started("proved", task):
@@ -395,6 +366,7 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
         else:
             settle("pending", f"Settled, but no Claude job could run {', '.join(ci_names)}"[:140],
                    "Couldn't start a Claude job to run its checks")
+        P.started(st)
 
     if pr["isDraft"]:
         # Work in progress, whoever's it is: nobody reviews it yet, and nobody
@@ -944,7 +916,7 @@ def run_pass(kick):
                     known.add(repo)
                 owner, name = repo.split("/")
                 info, prs = open_prs(owner, name)
-                OPEN[repo] = {pr["number"] for pr in prs}
+                P.begin(repo, (pr["number"] for pr in prs))
                 read.add(repo.replace("/", "_"))
                 # First, so a fix PR it made obsolete isn't merged by this same pass.
                 obsolete = R.watch_default(r, info, prs, mine) or set()
