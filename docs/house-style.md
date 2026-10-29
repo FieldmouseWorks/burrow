@@ -53,7 +53,10 @@ Every repo with code gets a `flake.nix` from the template
   and in CI: rustfmt, clippy on all targets with warnings as errors, and the
   tests of the Cargo workspace, built as `cargo test` builds them (debug
   assertions on); ruff's error rules on Python (and `ruff
-  format`, once a repo has been formatted).
+  format`, once a repo has been formatted). `flake-gate` runs it on a machine
+  exactly as the repo's CI does, the workflow's own gate step with the
+  inputs the repo gives it (such as `eval-apart`, for a flake too big to
+  evaluate at once).
 - CI is `.github/workflows/flake.yml` from the template, which calls burrow's
   shared [`flake-check`](../.github/workflows/flake-check.yml) workflow. A
   public repo runs it on GitHub's hosted runners, which cost it nothing and

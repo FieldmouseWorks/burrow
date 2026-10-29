@@ -51,12 +51,19 @@ shows as Unverified on GitHub, and CI fails it.
 
 ## Build and test
 
-`nix flake check -L` is the gate, the same here as in CI
-(`.github/workflows/flake.yml`, through the shared `flake-check.yml` every
-project calls). It builds the example machine, evaluates each module on its
-own, runs `lib/project.nix`'s gates on the test projects in `tests/house/`, and
-boots the agent sandboxes (`checks.agents`, nested KVM: it needs `/dev/kvm`).
-One check on its own: `nix build .#checks.x86_64-linux.agents -L`.
+`flake-gate` is the gate, the same here as in CI: it runs the gate step of the
+shared `flake-check.yml` every project calls, with the inputs
+`.github/workflows/flake.yml` gives it. That's eval-apart, each output
+evaluated in a nix process of its own, because evaluating the whole flake at
+once holds 6-7G, more than a Claude job on the machine may (a bare
+`nix flake check` gets the job killed); and `agents` evaluated but not built,
+since CI's runners can't boot it (flake.yml says what builds it instead). The
+gate builds the example machine, evaluates each module on its own, runs
+`lib/project.nix`'s gates on the test projects in `tests/house/`, and builds
+the other checks.
+
+One check on its own: `nix build .#checks.x86_64-linux.agents -L` boots the
+agent sandboxes (nested KVM: it needs `/dev/kvm`).
 
 burrow is generic. Anything about one machine (its hostname, users, owner,
 repos, addresses) is an option a machine's flake sets, never a value in a
