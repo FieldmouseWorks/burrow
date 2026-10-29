@@ -22,7 +22,8 @@ with open(f"{tmp}/flaky", "w") as f:
     f.write(f"""#!{sys.executable}
 import json, os, sys
 with open({ASKED!r}, "a") as f:
-    f.write(json.dumps({{"args": sys.argv[1:], "cache": os.environ.get("XDG_CACHE_HOME")}}) + "\\n")
+    f.write(json.dumps({{"args": sys.argv[1:], "cache": os.environ.get("XDG_CACHE_HOME"),
+                        "token": os.environ.get("GH_TOKEN")}}) + "\\n")
 says = json.load(open({FLAKY!r}))
 for q in says.get("open", []):
     print(json.dumps(q))
@@ -52,7 +53,8 @@ def look(at, repo="sam/r"):
     C.WAKE.clear()
     JOBS.clear()
     mine = []
-    F.watch(repo, mine)
+    with C.acting_for(repo):  # as the steward's pass calls it
+        F.watch(repo, mine)
     return mine
 
 
@@ -72,8 +74,7 @@ def text(who, body, *editors, edits=None):
 
 
 def gh(*a, **k):
-    if a[:2] == ("api", "user"):
-        return "sam"
+    assert C._for == ["sam"], "a call to GitHub outside acting_for"
     assert a[:4] == ("api", "graphql", "-f", f"query={F.ISSUE}"), a
     v = dict(x.split("=", 1) for x in a[5::2])
     assert (v["owner"], v["name"], a[8]) == ("sam", "r", "-F"), a
@@ -86,7 +87,6 @@ kept = (C.gh, C.job, C.job_state, C.limited)
 C.gh = gh
 C.job = job
 C.job_state = lambda jid: STATES.get(jid, "done")
-C._me.clear()
 
 # The CI's issue goes to a job at once: cloned if need be, with the test, its
 # issue, what a fix is and how it lifts the quarantine; its end is booked.
@@ -99,9 +99,10 @@ for x in ("`browser/stream`: https://github.com/sam/r/issues/4", "`Closes #N`", 
           "### sam/r#4, `browser/stream`\n\ngithub-actions[bot] opened it:\n\n`t4` flaked in run 1."):
     assert x in task, (x, task)
 assert C.WAKE == {"sam/r": T + (C.CFG["jobTimeout"] + 5) * 60}, C.WAKE
-# It asked the tool once, with the steward's state as its cache.
+# It asked the tool once, with the steward's state as its cache, as the App
+# (its installation on the repo's owner), never the machine user's login.
 asked = [json.loads(x) for x in open(ASKED)]
-assert asked == [{"args": ["quarantine", "sam/r", "--json"], "cache": C.STATE}], asked
+assert asked == [{"args": ["quarantine", "sam/r", "--json"], "cache": C.STATE, "token": "ghs_app_sam"}], asked
 
 # While that job works, a new one waits for it, and one someone else opened
 # is the owner's: listed, never a job.
@@ -163,9 +164,12 @@ mine = look(2 * DAY)
 assert mine == [(F.OTHERS, "sam/r#7", "`unit/disk`, by eve")] and C.load("flaky-sam_r.json", {})["issues"] == {}, mine
 
 # An app's issue (GraphQL's login for it lacks `[bot]`) and one of the
-# authors' go to a job; a login merely ending in an author's doesn't.
+# authors' go to a job, the steward's App's too; a login merely ending in an
+# author's doesn't, nor a person who holds the App's name as theirs.
 assert F.ours("github-actions[bot]") and F.ours("renovate[bot]") and F.ours("sam") and F.ours("dependabot")
+assert F.ours(C.me()) and F.ours(F.login({"login": "steward", "__typename": "Bot"}))
 assert not F.ours("eve") and not F.ours("evil-sam") and not F.ours("sam[bot]x")
+assert not F.ours("steward") and not F.ours(F.login({"login": "steward", "__typename": "User"}))
 
 # A body someone else edited is left out, and the job told so; one only the
 # authors edited is handed on.
@@ -228,7 +232,7 @@ STATES.clear()
 # GitHub not answering is Unavailable, and keeps the state for the next pass;
 # anything else the tool says no to is an error.
 was = C.load("flaky-sam_r.json", {})
-C.limited = lambda stderr: None  # it asks gh for the reset: not this test's
+C.limited = lambda stderr, env: None  # it asks gh for the reset: not this test's
 for err, kind in (("GET repos/sam/r/issues: HTTP 503, 3 times", C.Unavailable),
                   ("GET repos/sam/r/issues: HTTP 403: API rate limit exceeded for user", C.Unavailable),
                   ("GET repos/sam/r/issues: HTTP 404: Not Found", RuntimeError)):
@@ -272,5 +276,4 @@ sys.argv = argv
 S.R.discover, S.R.publish, S.open_prs, F.watch = kept_fns
 
 C.gh, C.job, C.job_state, C.limited = kept
-C._me.clear()
 print("quarantines: ok")

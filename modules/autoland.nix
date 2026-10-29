@@ -6,7 +6,7 @@
 #         -> Claude fixes or answers every finding
 #         -> it finds nothing on the exact head, CI green
 #         -> (one-way paths, no CI: a Claude job judges it)
-#         -> `review-settled` status -> auto-merge -> branch deleted
+#         -> `review-settled` status -> merged at that head -> branch deleted
 #
 # A draft is work in progress: nothing happens to it until it's ready. The
 # owner only sees what needs them, in one issue: what a judge job couldn't
@@ -83,6 +83,7 @@ let
   settings = {
     renovateEmail = if renovateMatch == null then null else lib.head renovateMatch;
     inherit (cfg) owners exclude context rulesets keepBranches baselineJobs baselinePerPass;
+    app = { inherit (cfg.app) id slug; };
     # The bots' logins as GitHub's GraphQL API gives them (no "[bot]").
     authors = cfg.authors ++ [ "dependabot" "renovate" ];
     stateDir = "${stateDir}/autoland";
@@ -103,7 +104,8 @@ let
     # What the pipeline is stuck on goes to proj's inbox, as an issue in
     # notify.repo with its label, for a Claude job to take (repos.py publish),
     # when the inbox will: notify.repo cloned in projectsDir, and the
-    # steward's gh login one of inbox.authors. Otherwise it's the owner's.
+    # steward's App one of inbox.authors (it is: see below). Otherwise it's
+    # the owner's.
     inbox = { inherit (config.burrow.proj.inbox) enable label authors; };
     # Renovate's dashboards (dashboard.py), and where a job that ticks a box
     # on one kicks Renovate to read it.
@@ -205,6 +207,40 @@ in
       type = types.listOf types.str;
       example = [ "sam" "sams-org" ];
       description = "GitHub users and orgs whose repos it covers (every non-archived, non-fork repo, new ones included).";
+    };
+
+    app = {
+      id = mkOption {
+        type = types.ints.positive;
+        example = 123456;
+        description = ''
+          The ID of the GitHub App the steward acts as, installed on every
+          one of `owners` for all their repos. It needs read and write on
+          administration, contents, issues, pull requests, commit statuses,
+          webhooks and workflows, and read on checks and actions
+          (docs/repo-baseline.md). Everything the steward does on GitHub,
+          it does as the App, never as the machine user's own login, which
+          its Claude jobs and every Claude session share: so only the App
+          can post its `context` status or its reviewers' reviews.
+        '';
+      };
+      slug = mkOption {
+        type = types.strMatching "[a-z0-9][a-z0-9-]*";
+        example = "sams-steward";
+        description = "The App's slug: it posts as SLUG[bot].";
+      };
+      keyFile = mkOption {
+        type = types.str;
+        example = "/run/secrets/autoland-app-key";
+        description = ''
+          The App's private key (PEM), in a file only root can read, outside
+          the store: a sops secret, say. Each pass is given it as a systemd
+          credential, and mints the App's tokens from it, in memory only. No
+          sandbox, and no Claude elsewhere holding the owner's GitHub token,
+          can act as the App; a Claude on this machine running as
+          burrow.user, with its sudo, still can.
+        '';
+      };
     };
 
     authors = mkOption {
@@ -510,6 +546,9 @@ in
 
     burrow.proj.enable = true;
     burrow.notify.enable = true;
+    # What the pipeline is stuck on goes to the inbox as an issue the App
+    # opens (repos.py publish).
+    burrow.proj.inbox.authors = [ "${cfg.app.slug}[bot]" ];
 
     environment.systemPackages = [ steward ] ++ lib.optional rv.codex.enable codexLogin;
 
@@ -553,7 +592,8 @@ in
       restartIfChanged = false;
       after = [ "network-online.target" ];
       wants = [ "network-online.target" ];
-      path = [ pkgs.gh pkgs.git pkgs.gnutar pkgs.coreutils config.burrow.tools.proj ];
+      # openssl signs the App's JWT (common.py).
+      path = [ pkgs.gh pkgs.git pkgs.gnutar pkgs.coreutils pkgs.openssl config.burrow.tools.proj ];
       serviceConfig = {
         Type = "oneshot";
         User = user;
@@ -561,8 +601,8 @@ in
           + (if cfg.dryRun then " status" else lib.optionalString (name == "autoland@") " kick %I");
         TimeoutStartSec = "20min";
         Nice = 10;
-        # For the repos' hooks (repos.py).
-        LoadCredential = "webhook:${config.burrow.events.secretFile}";
+        # The repos' hooks' secret (repos.py), and the App's key.
+        LoadCredential = [ "webhook:${config.burrow.events.secretFile}" "app-key:${cfg.app.keyFile}" ];
       };
     }) // {
       # The reviews the passes queue, as soon as there are any, as the
@@ -628,8 +668,8 @@ in
       steward (`autoland`, on every change to a PR). Open PRs ready for review, never as drafts (a
       draft is left alone until it's ready), then leave them be:
 
-      - Codex reviews every head; the steward posts its reviews under
-        ${config.burrow.owner}'s login, each thread marked as Codex's. Fix or answer
+      - Codex reviews every head; the steward posts its reviews as its GitHub App,
+        ${cfg.app.slug}[bot], each thread marked as Codex's. Fix or answer
         every finding (reply on the thread, push the fix) and resolve the thread; Codex
         looks again once they're all resolved.
       - Once it finds nothing on the exact head, every thread is resolved and CI is

@@ -133,8 +133,9 @@ organization's repo includes triage. The tool doesn't read closed or
 unlabelled issues, so it doesn't ask who did that. What it gives back is the
 second try alone: a test that fails both still fails the gate.
 
-The steward hands a job only the issues its own login, one of its authors or
-the CI opened; one someone else opened is listed for the owner. The job is
+The steward reads the quarantine as its App, as it makes every other call,
+and hands a job only the issues its App, one of its authors or the CI
+opened; one someone else opened is listed for the owner. The job is
 handed each issue's body and what those same logins said on it, each only
 if nobody else has edited it since (a body someone else edited is left out,
 and the job is told so), and told to read nothing else there: anyone can

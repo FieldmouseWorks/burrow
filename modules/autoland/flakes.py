@@ -12,7 +12,7 @@ within seconds.
 
 The tool takes an issue from anyone who can push to the repo, and from the
 repo's own CI, which files as github-actions[bot]. Only one opened by the
-steward's own login, one of its authors or the CI goes to a job: one
+steward's App, one of its authors or the CI goes to a job: one
 someone else opened quarantines the test all the same, and is the owner's
 to look at. A job is handed the issue and what those same logins said on
 it, each only if nobody else has edited it since, and nothing else: anyone
@@ -52,19 +52,21 @@ query($owner: String!, $name: String!, $n: Int!) {
 def quarantine(repo):
     """The repo's open issues that quarantine a test, by number (a string, as
     state keeps it): {n: {test, issue, author}}."""
+    env = C.gh_env()  # the tool asks through gh, as the App, as every call here does
     p = subprocess.run([CFG["flaky"]["bin"], "quarantine", repo, "--json"], capture_output=True, text=True,
-                       env={**os.environ, "XDG_CACHE_HOME": C.STATE})
+                       env={**(env or os.environ), "XDG_CACHE_HOME": C.STATE})
     if p.returncode != 0:
         why = f"flaky quarantine {repo}: {p.stderr.strip()[:300]}"
-        C.limited(p.stderr)
+        C.limited(p.stderr, env)
         raise (C.Unavailable if C.UNAVAILABLE.search(p.stderr) else RuntimeError)(why)
     return {str(q["issue"]): q for q in map(json.loads, p.stdout.splitlines())}
 
 
 def ours(author):
-    """Whether a job may take an issue this login opened. GraphQL's logins,
+    """Whether a job may take an issue this login (as REST gives it) opened:
+    the CI's, the steward's App's, or one of its authors'. GraphQL's logins,
     which `authors` has, drop an app's `[bot]`."""
-    return author == ACTIONS or author.removesuffix("[bot]") in {*CFG["authors"], C.me()}
+    return author in (ACTIONS, C.me()) or author.removesuffix("[bot]") in CFG["authors"]
 
 
 def watch(repo, mine):

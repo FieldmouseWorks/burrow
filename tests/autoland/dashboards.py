@@ -97,14 +97,12 @@ assert D.read("This repository currently has no open or pending branches.\n") ==
 assert D.STUCK not in R.OWNERS and D.NO_JOB not in R.OWNERS
 
 CALLS, JOBS, STATES = [], [], {}
-GH = {"hits": [{"number": 7, "title": "Dependency Dashboard"}]}
+GH = {"hits": [{"number": 7, "title": "Dependency Dashboard", "user": "sam"}]}
 ISSUE = {}  # what GitHub has: the issue, and its etag
 
 
 def gh(*a, **k):
     CALLS.append(a)
-    if a[:2] == ("api", "user"):
-        return "sam"
     if "search/issues" in a:
         return GH["hits"]
     raise AssertionError(a)
@@ -167,29 +165,29 @@ sys.stdout.write('HTTP/1.1 200 OK\\nX-A: b\\r\\nETag: W/"one"\\r\\n\\r\\n{{"body
 os.chmod(f"{tmp}/fake-gh/gh", 0o755)
 path, limited = os.environ["PATH"], C.limited
 os.environ["PATH"] = f"{tmp}/fake-gh:{path}"
-C.limited = lambda stderr: None  # it asks gh for the reset: not this gh's
-assert C.fresh("repos/sam/r/issues/7") == ('W/"one"', {"body": "a\r\n\nb"}), C.fresh("repos/sam/r/issues/7")
-assert C.fresh("repos/sam/r/issues/7", 'W/"one"') is None
-for n, kind in ((9, C.Gone), (10, C.Gone), (11, RuntimeError), (8, C.Unavailable)):
-    try:
-        C.fresh(f"repos/sam/r/issues/{n}")
-        raise AssertionError(n)
-    except kind as e:
-        assert type(e) is kind, (n, e)
+C.limited = lambda stderr, env: None  # it asks gh for the reset: not this gh's
+with C.acting_for("sam/r"):
+    assert C.fresh("repos/sam/r/issues/7") == ('W/"one"', {"body": "a\r\n\nb"}), C.fresh("repos/sam/r/issues/7")
+    assert C.fresh("repos/sam/r/issues/7", 'W/"one"') is None
+    for n, kind in ((9, C.Gone), (10, C.Gone), (11, RuntimeError), (8, C.Unavailable)):
+        try:
+            C.fresh(f"repos/sam/r/issues/{n}")
+            raise AssertionError(n)
+        except kind as e:
+            assert type(e) is kind, (n, e)
 os.environ["PATH"], C.limited = path, limited
 
 kept = (C.gh, C.fresh, C.job, C.job_state, dict(C.CFG["dashboard"]))
 C.gh, C.fresh, C.job = gh, fresh, job
 C.job_state = lambda jid: STATES.get(jid, "done")
 C.CFG["dashboard"]["enable"] = True
-C._me.clear()
 
 # Found once, with the steward's own login and the exact title, then read
 # with the etag GitHub gave: unchanged, it costs nothing and nothing moves.
 dashboard(BODY)
 assert look(0) == [] and not JOBS
 search = [a for a in CALLS if "search/issues" in a]
-assert len(search) == 1 and 'repo:sam/r is:issue is:open in:title "Dependency Dashboard" author:sam' in search[0][-3], search
+assert len(search) == 1 and 'repo:sam/r is:issue is:open in:title "Dependency Dashboard"' in search[0][-3], search
 assert ("fresh", "repos/sam/r/issues/7", None) in CALLS, CALLS
 look(60)
 assert not [a for a in CALLS if "search/issues" in a] and ("fresh", "repos/sam/r/issues/7", ISSUE["etag"]) in CALLS, CALLS
@@ -261,11 +259,11 @@ for change in ({"who": "eve"}, {"state": "closed"}, {"title": "Dependency Dashbo
     assert not [a for a in CALLS if "search/issues" in a or a[0] == "fresh"], CALLS
     ISSUE.pop("raise", None)
     dashboard(BODY)
-    GH["hits"] = [{"number": 12, "title": "Dependency Dashboard"}]
+    GH["hits"] = [{"number": 12, "title": "Dependency Dashboard", "user": "sam"}]
     look(10 * DAY + 2 * D.HOUR)
     assert [a for a in CALLS if "search/issues" in a] and ("fresh", "repos/sam/r/issues/12", None) in CALLS, CALLS
     assert set(C.load("dashboard-sam_r.json", {})["items"]) == set(D.read(BODY)), change
-    GH["hits"] = [{"number": 7, "title": "Dependency Dashboard"}]
+    GH["hits"] = [{"number": 7, "title": "Dependency Dashboard", "user": "sam"}]
 
 # GitHub not answering keeps all of it, for the next pass to read again.
 C.save("dashboard-sam_r.json", {})
@@ -283,7 +281,7 @@ ISSUE.pop("raise")
 
 # None found, or only an issue by another title: no read, and the search
 # waits a day; and a pass searches for so many repos at most.
-GH["hits"] = [{"number": 9, "title": "Dependency Dashboard (old)"}]
+GH["hits"] = [{"number": 9, "title": "Dependency Dashboard (old)", "user": "sam"}]
 C.save("dashboard-sam_r.json", {})
 look(0)
 assert C.load("dashboard-sam_r.json", {}) == {"n": None, "next": T + DAY} and not [a for a in CALLS if a[0] == "fresh"], CALLS
@@ -295,7 +293,7 @@ for i in range(D.FINDS + 3):
     C.save(f"dashboard-sam_r{i}.json", {})
     D.watch(f"sam/r{i}", [])
 assert len(D.FOUND) == D.FINDS and C.load(f"dashboard-sam_r{D.FINDS}.json", {}) == {}, D.FOUND
-GH["hits"] = [{"number": 7, "title": "Dependency Dashboard"}]
+GH["hits"] = [{"number": 7, "title": "Dependency Dashboard", "user": "sam"}]
 
 # No job could start: listed, tried again in five minutes, and nothing is
 # taken for handed.
@@ -341,5 +339,4 @@ S.R.discover, S.R.publish, S.open_prs, D.watch = kept_fns
 C.gh, C.fresh, C.job, C.job_state = kept[:4]
 C.CFG["dashboard"].clear()
 C.CFG["dashboard"].update(kept[4])
-C._me.clear()
 print("dashboards: ok")
