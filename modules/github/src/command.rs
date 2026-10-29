@@ -8,7 +8,9 @@
 //! value. The rest is parsed as pflag parses it, with the command's flags and
 //! the ones it inherits: `--name value`, `--name=value`, `-n value`,
 //! `-nvalue`, `-n=value`, short flags run together, and `--` ending the
-//! flags. A flag gh's help doesn't list is refused, as gh refuses it.
+//! flags. A list's value (the help's `strings`) is the values pflag reads
+//! from it, as CSV. A flag gh's help doesn't list is refused, as gh refuses
+//! it, and so is a list pflag couldn't read.
 
 use std::collections::HashMap;
 
@@ -18,7 +20,8 @@ use crate::error::Error;
 pub struct Call {
     /// The command, aliases resolved: `pr checkout` for `co`.
     pub path: Vec<String>,
-    /// The values given to its flags that take one, by long name.
+    /// The values given to its flags that take one, by long name: each of a
+    /// list's on its own.
     pub values: Vec<(String, String)>,
     /// Its positional arguments, each with the names its usage gives that
     /// place (`url` in `[<number> | <url> | <branch>]`), or none.
@@ -54,13 +57,21 @@ struct Help {
     path: Vec<String>,
     /// Its usage's places for positional arguments, in order.
     slots: Vec<Slot>,
-    /// Its flags and the ones it inherits, by long name: whether each takes
-    /// a value.
-    long: HashMap<String, bool>,
+    /// Its flags and the ones it inherits, by long name: what each takes.
+    long: HashMap<String, Takes>,
     /// Their short names.
     short: HashMap<char, String>,
     /// Whether it has subcommands.
     parent: bool,
+}
+
+/// What a flag takes, by the type its help gives it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Takes {
+    Nothing,
+    One,
+    /// `strings`: comma-separated values, each one of the list.
+    List,
 }
 
 #[derive(Debug, PartialEq)]
@@ -108,8 +119,9 @@ impl Help {
     }
 
     /// Its flags, from the FLAGS sections:
-    /// `  -b, --body text   The comment body text` takes a value, and
-    /// `  -w, --web         Open the web browser` doesn't. A section's heading
+    /// `  -b, --body text   The comment body text` takes a value,
+    /// `  -R, --repo strings   Filter on repository` a list of them, and
+    /// `  -w, --web         Open the web browser` nothing. A section's heading
     /// is a line that isn't indented.
     fn read_sections(&mut self, help: &str) {
         let mut in_flags = false;
@@ -132,8 +144,9 @@ impl Help {
                 continue;
             };
             let (name, takes) = match long.split_once(' ') {
-                Some((name, _type)) => (name, true),
-                None => (long, false),
+                Some((name, "strings")) => (name, Takes::List),
+                Some((name, _type)) => (name, Takes::One),
+                None => (long, Takes::Nothing),
             };
             if let Some(c) = short {
                 self.short.insert(c, name.to_owned());
@@ -146,10 +159,12 @@ impl Help {
     /// it looks for subcommands: unless this level knows the flag doesn't.
     fn takes_next(&self, s: &str) -> bool {
         if let Some(name) = s.strip_prefix("--") {
-            !name.contains('=') && self.long.get(name) != Some(&false)
+            !name.contains('=') && self.long.get(name) != Some(&Takes::Nothing)
         } else if let Some(short) = s.strip_prefix('-').filter(|s| s.len() == 1) {
             let c = short.chars().next().unwrap_or_default();
-            self.short.get(&c).is_none_or(|name| self.long[name])
+            self.short
+                .get(&c)
+                .is_none_or(|name| self.long[name] != Takes::Nothing)
         } else {
             false
         }
@@ -179,6 +194,17 @@ impl Help {
         let command = format!("`gh {}`", self.path.join(" "));
         let wants = |name: &str| Error::refused(format!("{command}: --{name} wants a value"));
         let mut values = Vec::new();
+        let mut give = |name: &str, value: String| -> Result<(), Error> {
+            if self.long[name] == Takes::List {
+                let list = csv(&value).ok_or_else(|| {
+                    Error::refused(format!("{command}: --{name} {value:?} isn't a list"))
+                })?;
+                values.extend(list.into_iter().map(|v| (name.to_owned(), v)));
+            } else {
+                values.push((name.to_owned(), value));
+            }
+            Ok(())
+        };
         let mut positional = Vec::new();
         let mut it = args.iter();
         while let Some(s) = it.next() {
@@ -196,10 +222,10 @@ impl Help {
                         )));
                     }
                     // A flag that doesn't take a value, given one or not.
-                    Some(false) => {}
-                    Some(true) => {
+                    Some(Takes::Nothing) => {}
+                    Some(_) => {
                         let value = attached.or_else(|| it.next().cloned());
-                        values.push((name.to_owned(), value.ok_or_else(|| wants(name))?));
+                        give(name, value.ok_or_else(|| wants(name))?)?;
                     }
                 }
             } else if let Some(mut shorts) = s.strip_prefix('-').filter(|s| !s.is_empty()) {
@@ -210,11 +236,11 @@ impl Help {
                         )));
                     };
                     let after = &shorts[c.len_utf8()..];
-                    let takes = self.long[name];
+                    let takes = self.long[name] != Takes::Nothing;
                     // -n=value, for either kind.
                     if let Some(value) = after.strip_prefix('=').filter(|v| !v.is_empty()) {
                         if takes {
-                            values.push((name.clone(), value.to_owned()));
+                            give(name, value.to_owned())?;
                         }
                         break;
                     }
@@ -227,7 +253,7 @@ impl Help {
                     } else {
                         after.to_owned()
                     };
-                    values.push((name.clone(), value));
+                    give(name, value)?;
                     break;
                 }
             } else {
@@ -250,6 +276,49 @@ impl Help {
             values,
             args,
         })
+    }
+}
+
+/// A list flag's value, as pflag reads it: the first record of it as CSV
+/// (Go's encoding/csv), none for an empty one, and None where it couldn't.
+fn csv(value: &str) -> Option<Vec<String>> {
+    let mut fields = Vec::new();
+    if value.is_empty() {
+        return Some(fields);
+    }
+    let mut chars = value.chars().peekable();
+    loop {
+        let mut field = String::new();
+        if chars.peek() == Some(&'"') {
+            chars.next();
+            loop {
+                match chars.next()? {
+                    '"' if chars.peek() == Some(&'"') => {
+                        chars.next();
+                        field.push('"');
+                    }
+                    '"' => break,
+                    c => field.push(c),
+                }
+            }
+            if !matches!(chars.peek(), None | Some(',' | '\n' | '\r')) {
+                return None;
+            }
+        } else {
+            while let Some(&c) = chars.peek() {
+                match c {
+                    ',' | '\n' | '\r' => break,
+                    '"' => return None,
+                    c => field.push(c),
+                }
+                chars.next();
+            }
+        }
+        fields.push(field);
+        match chars.next() {
+            Some(',') => {}
+            _ => return Some(fields),
+        }
     }
 }
 
@@ -377,6 +446,37 @@ pub mod fake {
             "  -b, --branch string     View a specific branch of the repository\n      --json fields       Output JSON with the specified fields\n  -w, --web               Open a repository in the browser\n",
         ),
         (
+            "repo create",
+            &["new"],
+            "[<name>] [flags]",
+            "      --private                Make the new repository private\n  -p, --template repository    Make the new repository based on a template repository\n",
+        ),
+        (
+            "repo fork",
+            &[],
+            "[<repository>] [-- <gitflags>...] [flags]",
+            "      --clone                 Clone the fork\n      --org string            Create the fork in an organization\n",
+        ),
+        (
+            "label",
+            &[],
+            "<command> [flags]",
+            "  -R, --repo [HOST/]OWNER/REPO   Select another repository using the [HOST/]OWNER/REPO format\n",
+        ),
+        (
+            "label clone",
+            &[],
+            "<source-repository> [flags]",
+            "  -f, --force   Overwrite labels in the destination repository\n",
+        ),
+        ("project", &[], "<command>", ""),
+        (
+            "project list",
+            &["ls"],
+            "[flags]",
+            "      --owner string      Login of the owner\n",
+        ),
+        (
             "repo read-file",
             &[],
             "<path> [flags]",
@@ -491,10 +591,12 @@ mod tests {
     #[test]
     fn reads_which_flags_take_a_value_from_the_help() {
         let comment = Help::of(&help(&["issue".into(), "comment".into()]).unwrap(), &[]).unwrap();
-        assert_eq!(comment.long.get("body"), Some(&true));
-        assert_eq!(comment.long.get("web"), Some(&false));
-        assert_eq!(comment.long.get("repo"), Some(&true));
-        assert_eq!(comment.long.get("help"), Some(&false));
+        assert_eq!(comment.long.get("body"), Some(&Takes::One));
+        assert_eq!(comment.long.get("web"), Some(&Takes::Nothing));
+        assert_eq!(comment.long.get("repo"), Some(&Takes::One));
+        assert_eq!(comment.long.get("help"), Some(&Takes::Nothing));
+        let search = Help::of(&help(&["search".into(), "issues".into()]).unwrap(), &[]).unwrap();
+        assert_eq!(search.long.get("repo"), Some(&Takes::List));
         assert_eq!(comment.short.get(&'b').map(String::as_str), Some("body"));
         assert_eq!(comment.short.get(&'R').map(String::as_str), Some("repo"));
         assert!(!comment.parent);
@@ -555,8 +657,27 @@ mod tests {
             read("issue comment 5 -b -R").unwrap().args,
             [("5".to_owned(), vec!["number".to_owned(), "url".to_owned()])]
         );
+        // A list's (`strings`) value, read as pflag reads it: CSV.
+        assert_eq!(
+            values("search issues --repo sam/r,eve/x -R pat/y"),
+            [v("repo", "sam/r"), v("repo", "eve/x"), v("repo", "pat/y")]
+        );
+        assert_eq!(
+            values(r#"search issues --owner "sam,eve",pat"#),
+            [v("owner", "sam,eve"), v("owner", "pat")]
+        );
+        assert_eq!(
+            values(r#"search issues --owner "a""b""#),
+            [v("owner", r#"a"b"#)]
+        );
+        assert_eq!(values("search issues --owner="), []);
+        // Another's is one value, commas and all.
+        assert_eq!(values("issue comment 5 -b a,b"), [v("body", "a,b")]);
         // A flag gh doesn't list, or one missing its value: refused.
         for args in [
+            r#"search issues --owner "sam"#,
+            r#"search issues --owner sa"m"#,
+            r#"search issues --owner "sa"m"#,
             "pr view 5 --nosuch",
             "pr view 5 -z",
             "pr view 5 -R",

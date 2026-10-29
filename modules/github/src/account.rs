@@ -2,9 +2,12 @@
 //! account's installation's: the repo gh itself would act on, found the way
 //! gh finds it, with the call read as gh reads it (command.rs).
 //!
-//! 1. What the call names: `-R`/`--repo`, `--owner` or `--org`, and the
-//!    arguments its usage says are a repository, an owner, an API endpoint
-//!    (`repos/OWNER/...`, `orgs/OWNER/...`) or, first, a URL.
+//! 1. What the call names: `-R`/`--repo`, `--owner` or `--org` (each of a
+//!    list's values), and the arguments its usage says are a repository, an
+//!    owner, an API endpoint (`repos/OWNER/...`, `orgs/OWNER/...`) or,
+//!    first, a URL. A repository it reads from (`<source-repository>`) isn't
+//!    one, and where the usage doesn't say what the command does with one,
+//!    `ACTS_ON` does.
 //! 2. GH_REPO.
 //! 3. The checkout's remote gh picks: the one `gh repo set-default` chose,
 //!    else upstream, github, origin, then the rest by name.
@@ -82,17 +85,27 @@ fn named_in(call: &Call) -> Result<Vec<String>, Error> {
         match flag.as_str() {
             "repo" => owners.push(repo_owner("--repo", value)?),
             "hostname" => github_com("--hostname", value)?,
+            // gh's own word for whoever's logged in.
+            "owner" | "org" if value == "@me" => {}
             "owner" | "org" if is_owner(value) => owners.push(value.clone()),
+            "owner" | "org" => {
+                return Err(Error::refused(format!(
+                    "--{flag} {value:?} isn't an account"
+                )));
+            }
             _ => {}
         }
     }
     for (i, (arg, names)) in call.args.iter().enumerate() {
-        match (role(i, names), url(arg)) {
+        match (role(&call.path, i, names), url(arg)) {
             (Role::Endpoint | Role::Url, Some((host, path))) => {
                 owners.extend(url_owner(host, path)?);
             }
             (Role::Endpoint, None) => owners.extend(endpoint_owner(arg)),
             (Role::Repo, _) => owners.push(repo_owner("the repository", arg)?),
+            (Role::NewRepo, _) if arg.contains('/') => {
+                owners.push(repo_owner("the new repository", arg)?);
+            }
             (Role::Owner, _) => owners.extend(is_owner(arg).then(|| arg.clone())),
             _ => {}
         }
@@ -101,18 +114,38 @@ fn named_in(call: &Call) -> Result<Vec<String>, Error> {
 }
 
 /// What an argument is to gh, by the names its usage gives its place.
+#[derive(Clone, Copy)]
 enum Role {
     Endpoint,
     Repo,
+    /// `[HOST/][OWNER/]NAME`: a repo the call makes, in OWNER's account, or
+    /// with none in the one it would act on anyway.
+    NewRepo,
     Owner,
     Url,
     Data,
 }
 
-fn role(i: usize, names: &[String]) -> Role {
+/// What a command does with an argument, where its usage's name for it
+/// doesn't say: `repo create`'s `<name>` is the repo it makes, and
+/// `repo fork`'s `<repository>` is read from, the fork going to `--org`.
+const ACTS_ON: &[(&[&str], &str, Role)] = &[
+    (&["repo", "create"], "name", Role::NewRepo),
+    (&["repo", "fork"], "repository", Role::Data),
+];
+
+fn role(path: &[String], i: usize, names: &[String]) -> Role {
     let called = |is: fn(&str) -> bool| names.iter().any(|n| is(n));
-    if called(|n| n == "endpoint") {
+    let table = ACTS_ON
+        .iter()
+        .find(|(p, name, _)| *p == path && names.iter().any(|n| n == name));
+    if let Some(&(_, _, role)) = table {
+        role
+    } else if called(|n| n == "endpoint") {
         Role::Endpoint
+    // What the call reads from: the labels `label clone` copies, say.
+    } else if called(|n| n.starts_with("source-")) {
+        Role::Data
     } else if called(|n| n == "repository" || n.ends_with("-repository") || n.ends_with("-repo")) {
         Role::Repo
     } else if called(|n| n == "owner") {
@@ -332,6 +365,20 @@ mod tests {
             ("secret set X --org sam", "sam"),
             ("secret set X -o sam -b https://github.com/eve/x", "sam"),
             ("issue transfer 5 sam/q -R sam/r", "sam"),
+            // What the command does with them, where its usage doesn't say:
+            // the repo `repo create` makes, the account a fork goes to, the
+            // repo labels are cloned into rather than from.
+            ("repo create sam/new --private", "sam"),
+            ("repo new Sam/new", "Sam"),
+            ("repo create github.com/sam/new", "sam"),
+            ("repo create --template pat/t sam/new", "sam"),
+            ("repo fork pat/x --org sam", "sam"),
+            ("label clone pat/x -R sam/r", "sam"),
+            // A list's every value, however given.
+            ("search issues --repo sam/r,Sam/q", "sam"),
+            ("search issues --repo sam/r --repo sam/q", "sam"),
+            ("search issues --owner sam,Sam", "sam"),
+            (r#"search issues --owner "sam" -R sam/r"#, "sam"),
             // A flag's value is data, wherever the flag is and however given.
             (
                 "issue -R sam/r comment 5 --body https://github.com/eve/x",
@@ -364,6 +411,15 @@ mod tests {
             "pr view https://github.com/sam/r/pull/5 -R eve/x",
             "secret set X --org eve -R sam/r",
             "issue transfer 5 eve/x -R sam/r",
+            "repo create ghe.example.com/sam/new",
+            "repo create https://ghe.example.com/sam/new",
+            "search issues --repo sam/r,eve/x",
+            "search issues --owner sam,eve",
+            "search issues --owner sam --repo eve/x",
+            // Not an account, where only one goes.
+            "search issues --owner sam,not!one",
+            "secret set X --org not!one",
+            "project list --owner not!one",
             "pr view 5 -R ghe.example.com/sam/r",
             "pr view 5 -R sam",
             "pr view 5 -R",
@@ -426,6 +482,12 @@ mod tests {
             "pr view 5 --json https://github.com/eve/x",
             "issue comment 5 --body https://gitlab.com/eve/x",
             "issue artifact create 5 https://gitlab.com/eve/x",
+            // What a call reads from, or makes without saying where.
+            "label clone pat/x",
+            "repo fork pat/x",
+            "repo create new",
+            // gh's own word for whoever's logged in.
+            "project list --owner @me",
         ] {
             assert_eq!(
                 account(&call(args), &context(None, &fork, None)).unwrap(),
