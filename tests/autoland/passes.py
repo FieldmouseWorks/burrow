@@ -6,7 +6,7 @@ import json
 import os
 import sys
 
-from harness import (ACTING, FAIL, KICKS, REAL_GH, QDIR, REAL, STATES, STUB, T, WROTE, C, P, R, S, V, W, clean, fresh_pr_state, head,
+from harness import (ACTING, FAIL, KICKS, REAL_GH, QDIR, REAL, STATES, STUB, T, WROTE, C, P, R, H, S, V, W, clean, fresh_pr_state, head,
                      info, mkpr, pr_state, queued, run, rv_review, tmp, worker)
 
 # A pass that waits on time books its repo's next pass for when the wait
@@ -26,7 +26,8 @@ assert C.WAKE == {"sam/r": T + 86400 + 1}, C.WAKE
 run(clean(), 86400 + 10)
 assert C.WAKE == {}, C.WAKE
 # A status or a stop of auto-merge GitHub didn't take is tried again a
-# minute later: until then the old success and the auto-merge stand.
+# minute later, two after a second failure in a row: until then the old
+# success and the auto-merge stand.
 fresh_pr_state()
 run(clean(), 400)
 key = "pr-sam_r-5.json"
@@ -38,7 +39,7 @@ run(held, 500)
 assert C.WAKE["sam/r"] == T + 500 + 60 + 1 and C.load(key, {})["landed"] == head, (C.WAKE, C.load(key, {}))
 FAIL.remove("/statuses/")
 run(held, 600)
-assert C.WAKE["sam/r"] == T + 600 + 60 + 1, C.WAKE
+assert C.WAKE["sam/r"] == T + 600 + 120 + 1, C.WAKE
 FAIL.remove("--disable-auto")
 run(held, 700)
 assert C.WAKE == {"sam/r": T + 86400 + 1} and C.load(key, {})["landed"] is None, (C.WAKE, C.load(key, {}))
@@ -77,14 +78,14 @@ C.save(V.OUT, {})
 # job that couldn't start, a job seen ended with no answer (the second look),
 # a review that couldn't be queued or posted, and one lost from the queue.
 fresh_pr_state()
-S.land, land = (lambda repo, pr, info: False), S.land
+H.land, land = (lambda repo, pr, info: False), H.land
 run(clean(), 700)
 assert C.WAKE["sam/r"] == T + 700 + 60 + 1, C.WAKE
-S.land = land
+H.land = land
 fresh_pr_state()
 C.job, job = (lambda repo, task, clone=False: None), C.job
 run(clean(files=["secrets/1.yaml"]), 700)
-assert C.WAKE["sam/r"] == T + 700 + 5 * 60 + 1, C.WAKE
+assert C.WAKE["sam/r"] == T + 700 + 60 + 1, C.WAKE
 C.job = job
 fresh_pr_state()
 run(clean(files=["secrets/1.yaml"]), 700)
@@ -142,10 +143,10 @@ kept = dict(S.CFG)
 S.CFG.update(proj=proj, projectsDir=f"{tmp}/src")
 C.project_dir, project_dir = (lambda repo: "r"), C.project_dir
 assert REAL["job"]("sam/r", "the task") == "job-9"
-assert open(f"{tmp}/proj-args").read().split() == ["run", "--pipeline", "--timeout", "60m", "--idle", "20m", "--kick", "autoland/sam/r", "r", "the", "task"]
+assert open(f"{tmp}/proj-args").read().split() == ["run", "--pipeline", "--timeout", "60m", "--idle", "20m", "--kick", "autoland/sam/r", "--owned", "r", "the", "task"]
 # One that's project work, with a timeout of its own (a flaky test's).
 assert REAL["job"]("sam/r", "the task", pipeline=False, timeout=240) == "job-9"
-assert open(f"{tmp}/proj-args").read().split() == ["run", "--timeout", "240m", "--idle", "20m", "--kick", "autoland/sam/r", "r", "the", "task"]
+assert open(f"{tmp}/proj-args").read().split() == ["run", "--timeout", "240m", "--idle", "20m", "--kick", "autoland/sam/r", "--owned", "r", "the", "task"]
 C.project_dir = project_dir
 S.CFG.clear()
 S.CFG.update(kept)
