@@ -53,6 +53,9 @@
         };
       };
 
+      # The flaky tool (docs/flaky-tests.md), for a machine to install.
+      packages.${system}.flaky = pkgs.callPackage ./tools/flaky/package.nix { };
+
       # A bare machine with every module on, for the checks and as an example.
       nixosConfigurations.example = nixpkgs.lib.nixosSystem {
         modules = [ self.nixosModules.default ./examples/minimal.nix ];
@@ -98,6 +101,12 @@
         agents = import ./tests/agents.nix { inherit self pkgs; };
         # proj's queue and memory caps, with a stand-in for Claude.
         proj = import ./tests/proj.nix { inherit self pkgs; };
+        # Who takes a free slot: the pipeline's own, and each project's cap.
+        proj-pick = pkgs.runCommand "proj-pick-check" { nativeBuildInputs = [ pkgs.shellcheck ]; } ''
+          shellcheck -s bash ${./modules/proj/pick.sh} ${./tests/proj-pick.sh}
+          bash ${./tests/proj-pick.sh} ${./modules/proj/pick.sh}
+          touch $out
+        '';
         # The steward and its reviewers, with stand-ins for gh, git's remote and
         # the agents, and its one-way paths as the module sets them.
         autoland = pkgs.runCommand "autoland-check" { nativeBuildInputs = [ pkgs.python3 pkgs.git pkgs.openssl ]; } ''
@@ -298,7 +307,10 @@
           [ "$(${pkg}/bin/house-fixture-member)" = 42 ]
           touch $out
         '';
-      } // nixpkgs.lib.mapAttrs' (name: nixpkgs.lib.nameValuePair "house-${name}") (
+      } // nixpkgs.lib.mapAttrs' (name: nixpkgs.lib.nameValuePair "flaky-${name}")
+        # The flaky tool's fmt, clippy and tests.
+        (self.lib.project { inherit self; systems = [ system ]; rust.dir = "tools/flaky"; }).checks.${system}
+      // nixpkgs.lib.mapAttrs' (name: nixpkgs.lib.nameValuePair "house-${name}") (
         # lib/project.nix's own gates, on the smallest projects that have them.
         (self.lib.project { self = ./tests/house/rust; systems = [ system ]; rust.testInputs = pkgs: [ pkgs.git ]; }).checks.${system}
         // (self.lib.project { self = ./tests/house/python; systems = [ system ]; python = { format = true; }; }).checks.${system}
