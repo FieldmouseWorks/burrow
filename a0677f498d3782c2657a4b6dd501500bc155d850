@@ -1,0 +1,41 @@
+{
+  "conary": "note v1",
+  "change": "7t30vakfqnvxtypcj6vqh205br",
+  "repo": {
+    "owner": "fieldmouseworks",
+    "name": "burrow"
+  },
+  "pr": 122,
+  "url": "https://github.com/fieldmouseworks/burrow/pull/122",
+  "summary": "backup: send each new ZFS snapshot off the box with restic",
+  "task": "https://claude.ai/code/project/chan_01Ad4f4oDXfFTCEzLHzMTD8q?thread=cmsg_01Ad4f4oDXfFTCEzLHzMTD8q1mbq5wvQVdjqWpeY8LyWQr",
+  "author": {
+    "kind": "agent",
+    "login": "TusanHomichi",
+    "session": "https://claude.ai/code/session_01BkHcyC3FgP7YSroXS9pLai"
+  },
+  "landing": {
+    "revision": "2fda2cebec00dcf5b8b71f32cb1c0d95fd63caa1f8b64dc6199ec5a61acfbd97",
+    "before": "337b375352b5bd6c555d5fd667309d1942a84e64",
+    "after": "a0677f498d3782c2657a4b6dd501500bc155d850",
+    "by": {
+      "kind": "status",
+      "login": "TusanHomichi"
+    },
+    "at": 1793239346662
+  },
+  "evidence": [
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/40793196252/job/123183186572"
+    },
+    {
+      "kind": "ci",
+      "check": "agents",
+      "result": "pass",
+      "source": "status agents"
+    }
+  ]
+}
