@@ -98,19 +98,23 @@ state() {
   fi
 }
 
-# How turn N ended, for its log: as state says for the latest, and nothing
-# while that's queued or running (a second run included). An earlier one's
-# outcome, or failed if it had a slot, and so would have written one, but its
-# unit went first (stopped, or killed with it); a turn from before turns kept
-# their outcomes says nothing.
+# How turn N ended, for its log: its outcome, or failed when it has none and
+# isn't going (its unit stopped, or killed with it, before it wrote one), as
+# proj state says. Nothing while it's queued or running, a second run
+# included, or for an earlier turn from before turns kept their outcomes (it
+# has no slot either). Looked at under the lock turns start under, so no
+# turn starts halfway through and has its state told as turn N's.
 ended() {
-  local d=$jobs/$1 s
-  if [ "$2" = "$(cat "$d/turns" 2>/dev/null)" ]; then
-    s=$(state "$1")
-    case $s in queued | running) ;; *) echo "$s" ;; esac
-  elif [ -s "$d/$2.outcome" ]; then cat "$d/$2.outcome"
-  elif [ -e "$d/$2.slot" ]; then echo failed
-  fi
+  local d=$jobs/$1
+  (
+    flock -s 9
+    adopt "$1"
+    if [ -s "$d/$2.outcome" ]; then cat "$d/$2.outcome"
+    elif [ "$2" = "$(cat "$d/turns" 2>/dev/null)" ]; then
+      systemctl --user -q is-active "$(unit "$1")" || echo failed
+    elif [ -e "$d/$2.slot" ]; then echo failed
+    fi
+  ) 9>>"$d/lock"
 }
 
 # A turn's answer, from its stream: every result with something to say, in

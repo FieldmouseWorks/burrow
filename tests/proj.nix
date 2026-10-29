@@ -310,6 +310,18 @@ pkgs.testers.runNixOSTest {
             assert log == "waiting on CI\n\n(turn 1 then ended: failed)", (how, log)
         machine.succeed("rm /tmp/cut-mode")
 
+    with subtest("a log waits out a turn being started, and tells only the turn it was asked for"):
+        # A turn held halfway through starting (its number written, its unit
+        # not yet), then put back: the log reads neither half alone.
+        a = proj("run web hello")
+        machine.wait_until_succeeds(f"su - dev -c 'proj state {a}' | grep -x done", timeout=120)
+        d = f"/data/dev/jobs/{a}"
+        machine.execute(f"su - dev -c 'cd {d} && flock lock sh -c \"echo 2 >turns; sleep 10; echo 1 >turns\"' >/dev/null 2>&1 &")
+        machine.wait_until_succeeds(f"grep -x 2 {d}/turns", timeout=30)
+        machine.fail(f"su - dev -c 'timeout 3 proj log {a} --turn 1'")
+        machine.wait_until_succeeds(f"grep -x 1 {d}/turns", timeout=30)
+        assert proj(f"log {a} --turn 1") == "did hello", proj(f"log {a} --turn 1")
+
     with subtest("a turn whose time runs out while the first run's leftovers are stopped gets no second run"):
         # The stray ignores TERM, so stopping it takes about 10s, past the
         # 15s the turn had: no second run starts, not even a short one.
