@@ -387,20 +387,22 @@ shutil.rmtree(f"{tmp}/state/{V.SESSIONS}/{V.session_name('codex', seventh)}")
 shutil.rmtree(f"{tmp}/state/{V.SNAP}/{seventh}")
 agent()
 
-# A reviewer's next free place goes to the pipeline's own repos first
-# (pipelineRepos, any case), then to the review queued longest.
+# A reviewer's next free place goes to the lead repos first (leadRepos, any
+# case), then to the rest of the pipeline's own (pipelineRepos), then to the
+# review queued longest.
 V.queue("sam/r", snap_pr, "pr-sam_r-5.json", "codex")
 entry, = os.listdir(f"{tmp}/state/{V.QUEUE}")
 item = json.load(open(f"{tmp}/state/{V.QUEUE}/{entry}"))
 os.remove(f"{tmp}/state/{V.QUEUE}/{entry}")
-for n, repo, at in (("codex--a-old.json", "sam/r", 1), ("codex--b-pipe.json", "sam/pipe", 3), ("codex--c-new.json", "sam/r", 2)):
+for n, repo, at in (("codex--a-old.json", "sam/r", 1), ("codex--b-pipe.json", "sam/pipe", 3), ("codex--c-new.json", "sam/r", 2),
+                    ("codex--d-lead.json", "sam/lead", 4)):
     C.save(f"{V.QUEUE}/{n}", {**item, "repo": repo, "at": at})
 W.CFG["reviewers"]["codex"]["parallel"] = 1
 W.work()
 W.CFG["reviewers"]["codex"]["parallel"] = 2
 order = [re.search(r"in (sam/\w+)", x["prompt"]).group(1) for x in agent_runs()]
-assert order == ["sam/pipe", "sam/r", "sam/r"], order
-done = [json.load(open(f"{tmp}/state/{V.DONE}/codex--{n}.json"))["at"] for n in ("b-pipe", "a-old", "c-new")]
+assert order == ["sam/lead", "sam/pipe", "sam/r", "sam/r"], order
+done = [json.load(open(f"{tmp}/state/{V.DONE}/codex--{n}.json"))["at"] for n in ("d-lead", "b-pipe", "a-old", "c-new")]
 assert done == sorted(done), done
 for x in os.listdir(f"{tmp}/state/{V.DONE}"):
     os.remove(f"{tmp}/state/{V.DONE}/{x}")

@@ -19,6 +19,8 @@ let
   # What each job waits on, for the stall watchdog, when it's on.
   watchdog = config.burrow.watchdog.enable or false;
   waits = "${cfg.jobsDir}/.waits.json";
+  # What the pipeline is built from: its work goes first (proj run --lead).
+  leadRepos = lib.attrByPath [ "burrow" "autoland" "leadRepos" ] [ ] config;
 
   proj = pkgs.writeShellApplication {
     name = "proj";
@@ -61,6 +63,7 @@ let
       NOTIFY=${lib.escapeShellArg (lib.optionalString (config.burrow.tools ? notify) (lib.getExe config.burrow.tools.notify))}
       WAKE=${lib.escapeShellArg inboxWake}
       PIPELINE=${lib.escapeShellArg (lib.concatStringsSep " " (lib.attrByPath [ "burrow" "autoland" "pipelineRepos" ] [ ] config))}
+      LEAD=${lib.escapeShellArg (lib.concatStringsSep " " leadRepos)}
     '' + builtins.readFile ./proj/inbox.sh;
   };
 in
@@ -252,7 +255,8 @@ in
           proj list                         projects in ${projectsDir}
           proj run web "the task"           start a job; prints its id
           proj run --first web "the task"   the same, ahead of the line
-          proj run --pipeline burrow "..."  work on the pipeline itself: first of all, in its own slot
+          proj run --pipeline burrow "..."  work on the pipeline itself: ahead of the line, in its own slot
+          proj run --lead burrow "..."      the same, first of all: a lead repo's pipeline work
           proj status                       what's running, what finished
           proj log ID                       its answer (--turn N for an earlier one, --raw for everything)
           proj reply ID "follow-up"         continue the same conversation
@@ -260,7 +264,7 @@ in
 
       Jobs run in the background and survive this session ending. At most
       ${toString cfg.maxJobs} run at once, ${toString cfg.maxJobsPerProject} from any one project; the rest are queued. Use --first when ${config.burrow.owner} is
-      waiting on the answer, and --pipeline for work on the steward, its reviewers, CI or proj. Check on them,
+      waiting on the answer, and --pipeline for work on the steward, its reviewers, CI or proj (--lead instead in a lead repo${lib.optionalString (leadRepos != [ ]) ": ${lib.concatStringsSep ", " leadRepos}"}). Check on them,
       relay results to ${config.burrow.owner}, and follow up yourself where the answer is obvious.
       Each turn ends saying what comes next: `proj await PR-URL` when it waits
       on GitHub (CI, a review; it's resumed when the PR changes, holding no slot

@@ -8,6 +8,9 @@
 #   proj run --first PROJECT "task"  ahead of the line (someone is waiting on it)
 #   proj run --pipeline PROJECT "task"  work on the pipeline itself: ahead of
 #                               everything, and its own slots (every turn of it)
+#   proj run --lead PROJECT "task"  pipeline work on a lead repo (what the
+#                               pipeline is built from): ahead of the other
+#                               pipeline work too
 #   proj run --kick NAME PROJECT "task"  kick NAME (HANDLER or HANDLER/OWNER/REPO,
 #                               one of burrow-events') each time a turn ends
 #   proj run --timeout DUR PROJECT "task"  each turn stopped after DUR (as
@@ -38,12 +41,12 @@
 # Everything a job said is kept in JOBS/ID.
 #
 # At most MAX_JOBS turns run Claude at once, and a turn starts only with
-# MIN_FREE MiB of memory to spare; the rest wait in line (queued), pipeline
-# jobs' ahead, then --first ones, then oldest first, and a turn that has
-# waited MAX_WAIT seconds counts as --first itself, so a stream of them can't
-# starve it. PIPELINE_SLOTS of the slots are for pipeline jobs alone, and no
-# project's other jobs hold more than PER_PROJECT at once (pick.sh). A waiting
-# turn is just this shell. Every turn runs in SLICE, which the machine caps,
+# MIN_FREE MiB of memory to spare; the rest wait in line (queued), lead jobs'
+# first, then the other pipeline jobs', then --first ones, then oldest first,
+# and a turn that has waited MAX_WAIT seconds counts as --first itself, so a
+# stream of them can't starve it. PIPELINE_SLOTS of the slots are for
+# pipeline jobs (lead ones included) alone, and no project's other jobs hold
+# more than PER_PROJECT at once (pick.sh). A waiting turn is just this shell. Every turn runs in SLICE, which the machine caps,
 # so jobs can't take memory from anything else, and gets TIMEOUT (or the
 # job's own --timeout) before it's stopped, so a stuck one can't hold its
 # slot for good. A job's --idle stops a stuck one sooner: a turn at work says
@@ -307,23 +310,27 @@ spare() {
   echo $(((kb + arc) / 1024))
 }
 
-# A job's class: pipeline for one run with --pipeline, whatever its turn asks;
-# otherwise first or normal, as the turn was started.
+# A job's class: lead or pipeline for one run with --lead or --pipeline,
+# whatever its turn asks; otherwise first or normal, as the turn was started.
 class() {
-  if [ -e "$jobs/$1/pipeline" ]; then echo pipeline; else echo "${2:-normal}"; fi
+  if [ -e "$jobs/$1/lead" ]; then echo lead
+  elif [ -e "$jobs/$1/pipeline" ]; then echo pipeline
+  else echo "${2:-normal}"
+  fi
 }
 
 # Wait in line for a slot, then hold it on fd $slot until this shell ends.
 # The line is JOBS/.queue: one file per waiting turn, named so that sorting
-# puts pipeline ones ahead, then --first ones, then the oldest, holding the
-# waiting shell's pid. A slot is a lock on JOBS/.slots/N, and N.who says
+# puts pipeline ones (lead ones among them) ahead, then --first ones, then
+# the oldest, holding the waiting shell's pid; pick takes lead ones first of
+# all. A slot is a lock on JOBS/.slots/N, and N.who says
 # whose (class and project), so a turn that's killed frees its slot (and its
 # place in line) by itself. pick (pick.sh) says who goes next.
 take_slot() {
   local id=$1 n=$2 class=$3 me since seen got f fid pid i fd lk busy LC_ALL=C
   mkdir -p "$jobs/.queue" "$jobs/.slots"
   since=$(date +%s)
-  case $class in pipeline) me=0 ;; first) me=1 ;; *) me=2 ;; esac
+  case $class in lead | pipeline) me=0 ;; first) me=1 ;; *) me=2 ;; esac
   me="$jobs/.queue/$me-$(date +%s%N)-$id"
   trap 'rm -f "$me" "${me%/*}/.${me##*/}.new"' EXIT
   trap 'exit 143' TERM INT
@@ -436,7 +443,7 @@ fingerprint() { # repo n
 
 case "${1:-status}" in
   run | reply)
-    cmd=$1 vm='' first='' pipeline='' kick=() limit='' idle='' owned='' link=''
+    cmd=$1 vm='' first='' pipeline='' lead='' kick=() limit='' idle='' owned='' link=''
     shift
     while :; do
       case ${1:-} in
@@ -463,13 +470,14 @@ case "${1:-status}" in
           ;;
         --first) first=first ;;
         --pipeline) [ "$cmd" = run ] || { echo "proj reply has no --pipeline: the job's own class is kept" >&2; exit 2; }; pipeline=1 ;;
+        --lead) [ "$cmd" = run ] || { echo "proj reply has no --lead: the job's own class is kept" >&2; exit 2; }; lead=1 ;;
         *) break ;;
       esac
       shift
     done
     if [ "$cmd" = run ]; then
-      p=${1:?usage: proj run [--vm] [--first] [--pipeline] [--timeout DUR] [--idle DUR] [--kick NAME]... [--owned] [--link URL] PROJECT \"task\"}
-      task=${2:?usage: proj run [--vm] [--first] [--pipeline] [--timeout DUR] [--idle DUR] [--kick NAME]... [--owned] [--link URL] PROJECT \"task\"}
+      p=${1:?usage: proj run [--vm] [--first] [--pipeline | --lead] [--timeout DUR] [--idle DUR] [--kick NAME]... [--owned] [--link URL] PROJECT \"task\"}
+      task=${2:?usage: proj run [--vm] [--first] [--pipeline | --lead] [--timeout DUR] [--idle DUR] [--kick NAME]... [--owned] [--link URL] PROJECT \"task\"}
       [ -d "$src/$p" ] || { echo "no such project: $src/$p" >&2; exit 1; }
       # Owned by what acts on each turn's end, which hears of it by its kick.
       [ -z "$owned" ] || [ ${#kick[@]} -gt 0 ] || { echo "proj run --owned needs a --kick: what acts on each turn's end" >&2; exit 2; }
@@ -481,6 +489,7 @@ case "${1:-status}" in
       [ -z "$limit" ] || echo "$limit" >"$jobs/$id/timeout"
       [ -z "$idle" ] || echo "$idle" >"$jobs/$id/idle"
       [ -z "$pipeline" ] || : >"$jobs/$id/pipeline"
+      [ -z "$lead" ] || : >"$jobs/$id/lead"
       [ -z "$owned" ] || : >"$jobs/$id/owned"
       [ -z "$link" ] || echo "$link" >"$jobs/$id/link"
       if [ -n "$vm" ]; then agent new "$p" >"$jobs/$id/agent"; fi

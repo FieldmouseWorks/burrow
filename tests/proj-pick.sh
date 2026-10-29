@@ -1,6 +1,7 @@
 # proj's choice of who takes a slot (modules/proj/pick.sh), on what take_slot
 # would see: pipeline jobs' slots stay theirs, one project's jobs stop at
-# PER_PROJECT while the others go by, and pipeline ones count against no cap.
+# PER_PROJECT while the others go by, pipeline ones count against no cap, and
+# lead ones go ahead of everyone.
 #
 #   bash tests/proj-pick.sh modules/proj/pick.sh
 set -euo pipefail
@@ -51,5 +52,17 @@ case_ "p 3" "normal /src/psiv" "normal /src/psiv" free free "p pipeline /src/psi
 # read is in none.
 case_ "b 3" "normal /src/my web" "normal /src/my web" free free "a normal /src/my web" "b normal /src/my"
 case_ "a 3" "normal /src/x" "normal /src/x" free free "a normal "
+# A lead turn goes first, from anywhere in the line: ahead of pipeline turns
+# that came before it, and of everyone else.
+case_ "l 1" free free free free "p pipeline /src/remi" "a first /src/web" "l lead /src/burrow"
+case_ "l 4" "normal /src/x" "normal /src/y" "normal /src/z" free "p pipeline /src/remi" "l lead /src/burrow"
+# It takes the pipeline's slot as a pipeline turn does, counts against no cap,
+# and holds none of its project's.
+case_ "l 4" "normal /src/burrow" "normal /src/burrow" "normal /src/z" free "a normal /src/web" "l lead /src/burrow"
+case_ "a 3" "lead /src/burrow" "normal /src/burrow" free free "a normal /src/burrow"
+# With no slot free, nobody goes, lead or not; the first of two lead turns goes
+# first.
+case_ "" "normal /src/x" "normal /src/y" "normal /src/z" "pipeline /src/b" "l lead /src/burrow"
+case_ "l 2" "lead /src/burrow" free free free "p pipeline /src/remi" "l lead /src/burrow" "m lead /src/burrow"
 
 echo "proj-pick: ok"

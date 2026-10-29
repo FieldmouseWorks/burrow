@@ -543,6 +543,24 @@ pkgs.testers.runNixOSTest {
         machine.wait_until_succeeds(f"su - dev -c 'proj state {c}' | grep -x done", timeout=120)
         proj(f"stop {b}")
 
+    with subtest("a lead job goes ahead of a pipeline job queued before it"):
+        a = proj('run web "sleep 600"')
+        b = proj('run web "sleep 600"')
+        for j in (a, b):
+            machine.wait_until_succeeds(f"su - dev -c 'proj state {j}' | grep -x running", timeout=120)
+        q = proj('run --pipeline web "sleep 600"')
+        machine.wait_until_succeeds(f"su - dev -c 'proj state {q}' | grep -x running", timeout=120)
+        p = proj('run --pipeline web "sleep 1"')
+        time.sleep(3)
+        lead = proj('run --lead web "sleep 1"')
+        time.sleep(3)
+        proj(f"stop {q}")
+        machine.wait_until_succeeds(f"su - dev -c 'proj state {p}' | grep -x done", timeout=120)
+        assert started(lead) < started(p), (started(lead), started(p))
+        machine.fail(f"""su - dev -c 'proj reply --lead {lead} "sleep 1"'""")
+        proj(f"stop {a}")
+        proj(f"stop {b}")
+
     with subtest("a job waiting on a PR is resumed when the PR changes"):
         def github(endpoint, answer):
             machine.succeed(f"mkdir -p /tmp/gh && echo '{answer}' >/tmp/gh/{endpoint.replace('/', '_')}")
