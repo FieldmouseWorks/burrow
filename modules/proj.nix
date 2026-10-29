@@ -24,6 +24,8 @@ let
       JOBS=${lib.escapeShellArg cfg.jobsDir}
       SLICE=claude-jobs.slice
       MAX_JOBS=${toString cfg.maxJobs}
+      PIPELINE_SLOTS=${toString cfg.pipelineSlots}
+      PER_PROJECT=${toString cfg.maxJobsPerProject}
       MIN_FREE=${toString cfg.minFreeMemory}
       JOB_MEMORY_MAX=${lib.escapeShellArg cfg.jobMemoryMax}
       TIMEOUT=${lib.escapeShellArg cfg.timeout}
@@ -33,7 +35,7 @@ let
       MARK=${lib.escapeShellArg inboxMark}
       KICK=${lib.escapeShellArg config.burrow.events.kick}
       WAKE=${lib.escapeShellArg watchWake}
-    '' + builtins.readFile ./proj/proj.sh;
+    '' + builtins.readFile ./proj/pick.sh + builtins.readFile ./proj/proj.sh;
   };
 
   inbox = pkgs.writeShellApplication {
@@ -51,6 +53,7 @@ let
       HOST=${lib.escapeShellArg config.networking.hostName}
       NOTIFY=${lib.escapeShellArg (lib.optionalString (config.burrow.tools ? notify) (lib.getExe config.burrow.tools.notify))}
       WAKE=${lib.escapeShellArg inboxWake}
+      PIPELINE=${lib.escapeShellArg (lib.concatStringsSep " " (lib.attrByPath [ "burrow" "autoland" "pipelineRepos" ] [ ] config))}
     '' + builtins.readFile ./proj/inbox.sh;
   };
 in
@@ -74,6 +77,27 @@ in
         How many jobs run Claude at once. The rest wait in line (`proj state`
         says queued), so a launcher can hand over as much work as it likes.
         Each headless Claude holds a few GB.
+      '';
+    };
+    pipelineSlots = lib.mkOption {
+      type = lib.types.ints.unsigned;
+      default = if cfg.maxJobs > 1 then 1 else 0;
+      defaultText = lib.literalExpression "if maxJobs > 1 then 1 else 0";
+      description = ''
+        Of the maxJobs slots, how many only pipeline jobs (`proj run
+        --pipeline`: the steward's jobs, issues in its own repos) may take,
+        so work on the pipeline itself waits only on other such work, never
+        on everyone else's long jobs.
+      '';
+    };
+    maxJobsPerProject = lib.mkOption {
+      type = lib.types.ints.positive;
+      default = lib.max 1 (cfg.maxJobs - cfg.pipelineSlots - 1);
+      defaultText = lib.literalExpression "max 1 (maxJobs - pipelineSlots - 1)";
+      description = ''
+        The most slots one project's jobs hold at once, pipeline jobs aside.
+        Its next one waits, and lets other projects' by meanwhile, so one
+        project's jobs never fill the machine.
       '';
     };
     minFreeMemory = lib.mkOption {
@@ -155,6 +179,10 @@ in
   };
 
   config = lib.mkIf cfg.enable (lib.mkMerge [ {
+    assertions = [{
+      assertion = cfg.pipelineSlots < cfg.maxJobs;
+      message = "burrow.proj.pipelineSlots: leave other jobs at least one of the maxJobs slots.";
+    }];
     # Claude Code too, for when burrow.claude (which also installs it) is off.
     environment.systemPackages = [ proj config.burrow.claude.package ];
     burrow.tools.proj = proj;
@@ -197,14 +225,15 @@ in
           proj list                         projects in ${projectsDir}
           proj run web "the task"           start a job; prints its id
           proj run --first web "the task"   the same, ahead of the line
+          proj run --pipeline burrow "..."  work on the pipeline itself: first of all, in its own slot
           proj status                       what's running, what finished
           proj log ID                       its answer (--turn N for an earlier one, --raw for everything)
           proj reply ID "follow-up"         continue the same conversation
           proj stop ID                      end it: its running turn, and anything it awaits
 
       Jobs run in the background and survive this session ending. At most
-      ${toString cfg.maxJobs} run at once; the rest are queued. Use --first when ${config.burrow.owner} is
-      waiting on the answer. Check on them,
+      ${toString cfg.maxJobs} run at once, ${toString cfg.maxJobsPerProject} from any one project; the rest are queued. Use --first when ${config.burrow.owner} is
+      waiting on the answer, and --pipeline for work on the steward, its reviewers, CI or proj. Check on them,
       relay results to ${config.burrow.owner}, and follow up yourself where the answer is obvious.
       A job waiting on GitHub (CI, a review) ends its turn with `proj await
       PR-URL` and is resumed when the PR changes, holding no slot meanwhile.

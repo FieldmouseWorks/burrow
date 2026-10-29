@@ -283,8 +283,9 @@ in
         The repos whose PRs work on this pipeline itself (OWNER/NAMEs, any
         case): the steward, its reviewers, the machine they run on. Their
         reviews take a reviewer's next free place before anyone else's, and
-        their Claude jobs go ahead of the line (`proj run --first`), so the
-        work queued behind them gets the speedup sooner.
+        their issues are pipeline work for proj-inbox, as the steward's own
+        Claude jobs are everywhere (`proj run --pipeline`), so the work
+        queued behind them gets the speedup sooner.
       '';
     };
 
