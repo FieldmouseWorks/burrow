@@ -1,0 +1,47 @@
+{
+  "conary": "note v1",
+  "change": "4h8b7x6pmaxjdxfzdebcvzhxch",
+  "repo": {
+    "owner": "fieldmouseworks",
+    "name": "burrow"
+  },
+  "pr": 127,
+  "url": "https://github.com/fieldmouseworks/burrow/pull/127",
+  "summary": "browser: save the files Claude names in RAM, not the checkout it works in",
+  "task": "https://claude.ai/code/project/chan_01Ad4f4oDXfFTCEzLHzMTD8q?thread=cmsg_01Ad4f4oDXfFTCEzLHzMTD8qNwpFZMy2Bt5gVgWskb48ah",
+  "author": {
+    "kind": "agent",
+    "login": "TusanHomichi",
+    "session": "https://claude.ai/code/session_01BkHcyDew4AYnp5ujZ4JEZe"
+  },
+  "landing": {
+    "revision": "0910af86ea0485e44975f1d0a0c42172edd17199ec503fb4bee338786930cecf",
+    "before": "2742a38d0d6e575d2305389103ce744d7db4864b",
+    "after": "2735f0690b06499ecf32641ac6ae781eedc6882a",
+    "by": {
+      "kind": "status",
+      "login": "TusanHomichi"
+    },
+    "at": 1793232842256
+  },
+  "evidence": [
+    {
+      "kind": "review",
+      "check": "codex",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/127#pullrequestreview-5690873179"
+    },
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/40784697167/job/123154844023"
+    },
+    {
+      "kind": "ci",
+      "check": "agents",
+      "result": "pass",
+      "source": "status agents"
+    }
+  ]
+}
