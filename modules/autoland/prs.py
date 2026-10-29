@@ -186,8 +186,9 @@ def merge_method(repo, base, repo_info):
     (a legacy ruleset allowing merge commits alone, or a linear history), and
     GitHub refuses any other method from the App, which bypasses no rule."""
     branch = urllib.parse.quote(base, safe="")
-    pages = rules(repo, base, [], f"repos/{repo}/rules/branches/{branch}?per_page=100", "--paginate", "--slurp")
-    protection = rules(repo, base, {}, f"repos/{repo}/branches/{branch}/protection")
+    pages = rules(repo, base, [], (C.NO_RULES,), f"repos/{repo}/rules/branches/{branch}?per_page=100", "--paginate",
+                  "--slurp")
+    protection = rules(repo, base, {}, (C.NO_RULES, UNPROTECTED), f"repos/{repo}/branches/{branch}/protection")
     if not isinstance(pages, list) or not isinstance(protection, dict):
         return None
     allowed = {"squash", "merge", "rebase"}
@@ -203,15 +204,20 @@ def merge_method(repo, base, repo_info):
                  if repo_info[flag] and method in allowed), None)
 
 
-def rules(repo, base, none, *args):
-    """What GitHub says of base's rules at the path in args, `none` when
-    there are none to say (a private repo on a free plan has no rules, and a
-    branch without classic protection is a 404 for it), or None when GitHub
-    didn't say."""
+# What the classic protection endpoint says of a branch without any. Any
+# other 404 is GitHub not saying: it answers one for what a token can't see.
+UNPROTECTED = "Branch not protected (HTTP 404)"
+
+
+def rules(repo, base, none, absent, *args):
+    """What GitHub says of base's rules at the path in args, `none` when it
+    says there are none (one of the answers in absent: a private repo on a
+    free plan has no rules, and a branch without classic protection is
+    UNPROTECTED), or None when GitHub didn't say."""
     try:
         return C.gh("api", *args)
     except RuntimeError as e:
-        if C.NO_RULES in str(e) or "(HTTP 404)" in str(e):
+        if any(x in str(e) for x in absent):
             return none
         log(f"{repo}: the rules on {base}: {e}")
         return None

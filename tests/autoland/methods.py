@@ -80,12 +80,17 @@ assert merged_with() == ["squash"], merges()
 # neither is any when GitHub won't say what the rules are: nothing merges,
 # and it's a merge that didn't go through, tried again a pass later.
 info.update(mergeCommitAllowed=False, rebaseMergeAllowed=False)
+# A 404 other than the protection endpoint's word for no protection is
+# GitHub not saying too: it answers one for what a token can't see.
 DENIED = "Resource not accessible by integration (HTTP 403)"
+HIDDEN = "gh: Not Found (HTTP 404)"
 for rules, protection in (([pull_request("merge", "rebase")], None),
                           (C.Unavailable("gh api repos/sam/r/rules/branches/main: HTTP 502"), None),
                           (RuntimeError(f"gh api repos/sam/r/rules/branches/main: {DENIED}"), None),
+                          (RuntimeError(f"gh api repos/sam/r/rules/branches/main: {HIDDEN}"), None),
                           ([], C.Unavailable("gh api repos/sam/r/branches/main/protection: HTTP 502")),
-                          ([], RuntimeError(f"gh api repos/sam/r/branches/main/protection: {DENIED}"))):
+                          ([], RuntimeError(f"gh api repos/sam/r/branches/main/protection: {DENIED}")),
+                          ([], RuntimeError(f"gh api repos/sam/r/branches/main/protection: {HIDDEN}"))):
     RULES["main"] = rules
     if protection:
         PROTECTION["main"] = protection
