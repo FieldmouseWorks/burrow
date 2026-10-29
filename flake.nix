@@ -147,6 +147,21 @@
             ];
           };
         in builtins.head (builtins.filter (p: (p.name or "") == "autoland-steward") machine.config.environment.systemPackages);
+        # The steward's tools reach a pass however it's started: by hand or
+        # a Claude job (`autoland-steward kick OWNER/REPO`), with no openssl,
+        # gh or proj of its own, gets them from the wrapper.
+        autoland-path = let
+          steward = builtins.head (builtins.filter (p: (p.name or "") == "autoland-steward")
+            self.nixosConfigurations.example.config.environment.systemPackages);
+        in pkgs.runCommand "autoland-path-check" { } ''
+          w=${steward}/bin/autoland-steward
+          line=$(grep '^steward_path=' "$w") || { echo "autoland-steward sets no PATH of its own"; exit 1; }
+          env -i ${pkgs.bash}/bin/bash -c "$line"'; PATH=$steward_path
+            for t in openssl gh git tar proj; do
+              command -v "$t" >/dev/null || { echo "no $t on the steward'"'"'s PATH"; exit 1; }
+            done'
+          touch $out
+        '';
         # The stall watchdog's ladder (kick, Claude job, stuck issue, owner),
         # with the real notify and stand-ins for proj, notify's gh and
         # burrow-events' kick port.

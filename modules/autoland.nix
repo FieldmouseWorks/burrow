@@ -209,8 +209,17 @@ let
   '';
   # The command, with this machine's config, so `autoland-steward status`
   # works from any shell, not only in the service.
+  # What a pass runs: openssl signs the App's JWT (common.py), and the rest
+  # talk to GitHub, unpack its tarballs and start Claude jobs.
+  stewardTools = [ pkgs.gh pkgs.git pkgs.gnutar pkgs.coreutils pkgs.openssl config.burrow.tools.proj ];
+  # A pass gets its tools however it's started: by its units, or by hand or
+  # a Claude job (`autoland-steward kick OWNER/REPO`) with a PATH of its own.
+  # Not a review: its units give the reviewers only what they read with
+  # (reviewTools).
   steward = pkgs.writeShellScriptBin "autoland-steward" ''
     export AUTOLAND_CONFIG=''${AUTOLAND_CONFIG:-${configFile}}
+    steward_path=${lib.makeBinPath stewardTools}
+    [ "''${1:-}" = review ] || export PATH="$steward_path''${PATH:+:$PATH}"
     exec ${pkgs.python3}/bin/python3 -E -s ${stewardSrc}/steward.py "$@"
   '';
 in
@@ -649,8 +658,7 @@ in
       restartIfChanged = false;
       after = [ "network-online.target" ];
       wants = [ "network-online.target" ];
-      # openssl signs the App's JWT (common.py).
-      path = [ pkgs.gh pkgs.git pkgs.gnutar pkgs.coreutils pkgs.openssl config.burrow.tools.proj ];
+      path = stewardTools;
       serviceConfig = {
         Type = "oneshot";
         User = user;
