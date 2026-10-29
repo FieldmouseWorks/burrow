@@ -80,7 +80,7 @@ assert not any(x in stuck["--body"] for x in ("sam/r#1", "sam/r#2", "`old`")), s
 
 # Every kind the owner settles is one the steward lists: a renamed one
 # would go to the inbox, never to the owner.
-src = "".join(open(os.path.join(os.path.dirname(R.__file__), f)).read() for f in ("steward.py", "repos.py"))
+src = "".join(open(os.path.join(os.path.dirname(R.__file__), f)).read() for f in ("step.py", "repos.py"))
 for kind in R.OWNERS:
     assert src.count(f'"{kind}"') >= 2, kind
 

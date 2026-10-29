@@ -6,7 +6,7 @@ import json
 import os
 import sys
 
-from harness import (ACTING, FAIL, KICKS, REAL_GH, QDIR, REAL, STATES, STUB, T, WROTE, C, P, R, S, V, W, clean, fresh_pr_state, head,
+from harness import (ACTING, FAIL, KICKS, REAL_GH, QDIR, REAL, STATES, STUB, T, WROTE, C, P, R, H, S, V, W, clean, fresh_pr_state, head,
                      info, mkpr, pr_state, queued, run, rv_review, tmp, worker)
 
 # A pass that waits on time books its repo's next pass for when the wait
@@ -77,10 +77,10 @@ C.save(V.OUT, {})
 # job that couldn't start, a job seen ended with no answer (the second look),
 # a review that couldn't be queued or posted, and one lost from the queue.
 fresh_pr_state()
-S.land, land = (lambda repo, pr, info: False), S.land
+H.land, land = (lambda repo, pr, info: False), H.land
 run(clean(), 700)
 assert C.WAKE["sam/r"] == T + 700 + 60 + 1, C.WAKE
-S.land = land
+H.land = land
 fresh_pr_state()
 C.job, job = (lambda repo, task, clone=False: None), C.job
 run(clean(files=["secrets/1.yaml"]), 700)
