@@ -169,7 +169,9 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
             return False
         base = pr["baseRefName"]
         hand_off(f"it conflicts with {base}, so GitHub won't merge it: merge {base} into the branch, resolve the "
-                 "conflicts keeping what both sides meant, run the tests and push",
+                 "conflicts keeping what both sides meant, run the tests and push. Just before you merge, and again "
+                 f"before you push, check that the PR is still open on {base} at head {head}: if its base or head "
+                 "moved on, stop without merging or pushing, since the steward hands what it is now to a new job",
                  f"Settled, but it conflicts with {base}", "conflictFixed", judged_at, wait=False)
         return True
 
@@ -238,10 +240,11 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
                    "Couldn't start a Claude job")
 
     def fixing():
-        """The kind of fix job handed on this head that's still queued or
-        running (or that proj can't say about), else None."""
+        """The kind of fix job still queued or running (or that proj can't
+        say about), else None: whatever head or base it was handed on, since
+        each pushes to the branch, and a new head or base doesn't stop it."""
         for k in ON:
-            if running(k, judged_at if k in ("failFixed", "conflictFixed") else head):
+            if st.get(k + "Job") and running(k, st.get(k)):
                 return k
         return None
 
