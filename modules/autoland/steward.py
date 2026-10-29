@@ -9,10 +9,10 @@ event reports):
      `baseline` ruleset); a repo seen for the first time also gets a Claude
      job that brings its files to docs/repo-baseline.md (repos.py).
   2. For each open PR that isn't a draft, work out where it stands and do
-     the next thing (step.py): queue a review of its head from each reviewer (Codex,
-     reviewers.py), post what they found, hand open findings
-     or red CI to a Claude job,
-     have a Claude job run the checks only a machine of the owner's runs
+     the next thing (step.py): queue a review of its head from each
+     reviewer (Codex, reviewers.py), post what they found, hand open
+     findings, red CI or a conflict with its base to a Claude job, have a
+     Claude job run the checks only a machine of the owner's runs
      (proofJobs) or judge a PR it won't land on its own word (tasks.py says
      what each job is told), post the `review-settled` commit status and
      merge it, or list it for the owner.
@@ -169,20 +169,21 @@ def run_pass(kick):
                 if seen_to:
                     covered.append(r)
                 else:
-                    C.wake(repo, C.NOW + 5 * MIN)
+                    C.wake(repo, C.NOW + 5 * MIN)  # ends: waits.failed watches the PR it failed on
                 if CFG["cleanBranches"]:
                     # Stale ones the last sweep found are listed every pass.
                     R.sweep_branches(r, in_use, mine, sweep=kick is None)
             except Exception as e:
                 log(f"{repo}: {e}")
                 waits.failed(repo)
-                C.wake(repo, C.NOW + 5 * MIN)  # GitHub, often: another look soon
+                C.wake(repo, C.NOW + 5 * MIN)  # ends: waits.failed watches the repo; GitHub, often
             if CFG["dashboard"]["enable"]:
                 try:
                     D.watch(repo, mine)
                 except Exception as e:  # its own: the repo's PRs were seen to all the same
                     log(f"{repo}: its dashboard: {e}")
-                    C.wake(repo, C.NOW + 5 * MIN)
+                    waits.failed(repo)
+                    C.wake(repo, C.NOW + 5 * MIN)  # ends: waits.failed watches the repo
     # This pass's wake-ups and owner's lines replace the ones it had for the
     # repos it saw; a full pass's, all of them.
     seen = {r["repo"] for r in repos}
