@@ -355,6 +355,14 @@ in
   options.burrow.updates = {
     enable = lib.mkEnableOption "HOST-update and the rest of the update pipeline";
 
+    repo = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      readOnly = true;
+      default = githubRepo;
+      defaultText = lib.literalMD "OWNER/NAME of `origin`, when it's on GitHub";
+      description = "The flake's repo on GitHub (OWNER/NAME); null when `origin` isn't there.";
+    };
+
     origin = lib.mkOption {
       type = lib.types.str;
       example = "https://github.com/sam/homelab";

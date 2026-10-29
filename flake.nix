@@ -35,7 +35,7 @@
       # The ledger's machines take Conary from its own flake; burrow's checks
       # build theirs with a stand-in for its `cn`.
       cnStandIn = pkgs.writeShellScriptBin "cn" "exit 1";
-      names = [ "claude" "undo" "switch" "notify" "updates" "proj" "remote-control" "agents" "robot" "ops" "toolbox" "autoland" "house" "events" "ledger" "browser" "heartbeat" "backup" "watchdog" "github" "rust-cache" "cpu" ];
+      names = [ "claude" "undo" "switch" "notify" "updates" "proj" "remote-control" "agents" "robot" "ops" "toolbox" "autoland" "house" "events" "ledger" "browser" "heartbeat" "backup" "watchdog" "github" "rust-cache" "cpu" "dispatch" ];
       # gh-token (modules/github): its package, and its gate.
       # Built for every platform lib/project.nix knows, like the module.
       ghToken = self.lib.project {
@@ -118,6 +118,7 @@
                 (nixpkgs.lib.optionalAttrs (name == "updates") { burrow.updates.origin = "https://github.com/sam/homelab"; })
                 (nixpkgs.lib.optionalAttrs (name == "autoland") { burrow.autoland = { owners = [ "sam" ]; authors = [ "sam" ]; app = { id = 123456; slug = "sams-steward"; keyFile = "/run/secrets/autoland-app-key"; }; reviewers.codex.enable = true; }; })
                 (nixpkgs.lib.optionalAttrs (name == "house") { burrow.house.owners = [ "sam" ]; })
+                (nixpkgs.lib.optionalAttrs (name == "dispatch") { burrow.dispatch.runners.ci-runner = { repo = "sam/homelab"; labels = [ "homelab" ]; }; })
                 (nixpkgs.lib.optionalAttrs (name == "ledger") { burrow.ledger = { package = cnStandIn; owners = [ "sam" ]; anchorRepo = "sam/homelab"; reviewers = [ "sams-steward[bot]" ]; sessionLinks = [ "sam/homelab" ]; daemon = true; }; })
                 (nixpkgs.lib.optionalAttrs (builtins.elem name [ "events" "autoland" ]) { burrow.events = { host = "example.org"; secretFile = "/run/secrets/burrow-webhook"; }; })
                 # github has no switch: it's on with an App to serve.
@@ -333,6 +334,44 @@
           [ "$got" = the-stewards ] || { echo "a pass's own call doesn't use the steward's token: $got"; exit 1; }
           touch $out
         '';
+        # The dispatcher's config as the module writes it, read by the binary
+        # (the example's, and one with a deploy to watch): which commit of
+        # each watched repo the running system has, from the flake's own rev
+        # and its flake.lock (tests/dispatch).
+        dispatch-config = let
+          deploying = nixpkgs.lib.nixosSystem {
+            modules = [
+              self.nixosModules.dispatch
+              self.nixosModules.updates
+              ./examples/machine.nix
+              {
+                burrow.dispatch.enable = true;
+                burrow.updates = {
+                  enable = true;
+                  origin = "https://github.com/sam/homelab";
+                  watch = [ "sam/homelab" "sam/kit" "Sam/Tools" "sam/elsewhere" ];
+                };
+                burrow.switch.flakeInputs = {
+                  self = { outPath = ./tests/dispatch; rev = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"; };
+                  kit.rev = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+                  tools.rev = "cccccccccccccccccccccccccccccccccccccccc";
+                  nixpkgs.rev = "dddddddddddddddddddddddddddddddddddddddd";
+                };
+              }
+            ];
+          };
+          running = deploying.config.burrow.dispatch.settings.deploy.running;
+          want = {
+            "sam/homelab" = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+            "sam/kit" = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+            "Sam/Tools" = "cccccccccccccccccccccccccccccccccccccccc";
+          };
+        in assert nixpkgs.lib.assertMsg (running == want) "dispatch: running ${builtins.toJSON running}, not ${builtins.toJSON want}";
+          pkgs.runCommand "dispatch-config-check" { } ''
+            ${self.nixosConfigurations.example.config.systemd.services.burrow-dispatch.serviceConfig.ExecStart} status
+            ${deploying.config.systemd.services.burrow-dispatch.serviceConfig.ExecStart} status
+            touch $out
+          '';
         # HOST-notify's issues, with a stand-in for gh: one a notice, closed
         # when cleared, and pending until GitHub has shown it closed.
         notify = pkgs.runCommand "notify-check" { nativeBuildInputs = [ pkgs.shellcheck pkgs.jq pkgs.bash ]; } ''
