@@ -35,7 +35,7 @@
       # The ledger's machines take Conary from its own flake; burrow's checks
       # build theirs with a stand-in for its `cn`.
       cnStandIn = pkgs.writeShellScriptBin "cn" "exit 1";
-      names = [ "claude" "undo" "switch" "notify" "updates" "proj" "remote-control" "agents" "robot" "ops" "toolbox" "autoland" "house" "events" "ledger" "browser" "heartbeat" "backup" "watchdog" "github" ];
+      names = [ "claude" "undo" "switch" "notify" "updates" "proj" "remote-control" "agents" "robot" "ops" "toolbox" "autoland" "house" "events" "ledger" "browser" "heartbeat" "backup" "watchdog" "github" "rust-cache" ];
       # gh-token (modules/github): its package, and its gate.
       # Built for every platform lib/project.nix knows, like the module.
       ghToken = self.lib.project {
@@ -102,7 +102,7 @@
                 (nixpkgs.lib.optionalAttrs (builtins.elem name [ "events" "autoland" ]) { burrow.events = { host = "example.org"; secretFile = "/run/secrets/burrow-webhook"; }; })
                 # github has no switch: it's on with an App to serve.
                 (if name == "github" then { burrow.github.apps.workers = { id = 2; slug = "sam-workers"; keyFile = "/run/secrets/workers-key"; }; }
-                 else { burrow.${if name == "remote-control" then "remoteControl" else name}.enable = true; })
+                 else { burrow.${{ remote-control = "remoteControl"; rust-cache = "rustCache"; }.${name} or name}.enable = true; })
               ];
             };
           in "${name} ${builtins.unsafeDiscardStringContext (runnable name machine).config.system.build.toplevel.drvPath}\n")
@@ -167,6 +167,9 @@
         # Off-site backups of ZFS snapshots through restic and rclone, and the
         # restore drill that checks them.
         backup = import ./tests/backup.nix { inherit self pkgs; };
+        # The shared compile cache: one daemon per user, the compiles in the
+        # builds that ask for them, and a plain compile whenever it can't help.
+        rust-cache = import ./tests/rust-cache.nix { inherit self pkgs inputs; };
         # The ledger's pass over one repo, with a stand-in for cn.
         ledger = import ./tests/ledger.nix { inherit self pkgs; };
         # An App's tokens: who gets them, and git and gh acting as it.
@@ -222,6 +225,12 @@
         # Which Renovate PRs renovate-sweep hands over and lists, with stand-ins for gh and proj.
         renovate-sweep = pkgs.runCommand "renovate-sweep-check" { nativeBuildInputs = [ pkgs.python3 pkgs.git pkgs.jq pkgs.gnused ]; } ''
           python3 -I ${./tests/renovate-sweep.py} ${./modules/updates/renovate-sweep.sh} ${./modules/updates/major-seal.py} ${./modules/autoland/seal.py}
+          touch $out
+        '';
+        # Which repos Renovate's runs cover, with whose token: gh's login for
+        # all of them, or a run each with its owner's App token.
+        renovate-run = pkgs.runCommand "renovate-run-check" { nativeBuildInputs = [ pkgs.python3 pkgs.util-linux ]; } ''
+          python3 -I ${./tests/renovate-run.py} ${./modules/updates/renovate.sh}
           touch $out
         '';
         # A lock file refresh's too-new releases go back or fail it, with
@@ -328,6 +337,8 @@
         '';
         # Stale Remote Control servers catch up once idle, with a stand-in for Claude.
         remote-control = import ./tests/remote-control.nix { inherit self pkgs; };
+        # A session past its server's memory cap dies alone, with a stand-in for Claude.
+        remote-control-memory = import ./tests/remote-control-memory.nix { inherit self pkgs; };
         # The signed-in browser: Claude driving it, its logins kept, its ports
         # and profile kept from everyone else.
         browser = import ./tests/browser.nix { inherit self pkgs; };

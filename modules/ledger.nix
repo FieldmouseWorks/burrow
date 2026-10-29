@@ -16,6 +16,7 @@ inputs:
 let
   cfg = config.burrow.ledger;
   inherit (config.burrow) user;
+  inherit (config.burrow.github) machineApp;
   inherit (lib) mkOption types;
   autoland = lib.attrByPath [ "burrow" "autoland" ] { } config;
   # Where conaryd listens. Its directory is conaryd's own (RuntimeDirectory).
@@ -29,12 +30,20 @@ let
   sync = pkgs.writeShellApplication {
     name = "burrow-ledger-sync";
     runtimeInputs = [ cfg.package cfg.gh pkgs.coreutils pkgs.jq pkgs.util-linux ];
-    text = ''
-      # The user's own gh login reads GitHub. The steward's word (its
-      # status, its reviewers' reviews) is only what its App posted.
+    text = (if machineApp == null then ''
+      # The user's own gh login reads GitHub and writes the anchor and notes.
       GH_TOKEN=$(gh auth token)
-      CONARY_REVIEWERS=${lib.escapeShellArg (lib.concatStringsSep "," cfg.reviewers)}
-      export GH_TOKEN CONARY_REVIEWERS
+      export GH_TOKEN
+    '' else ''
+      # The machine's own App reads GitHub and writes the anchor and notes:
+      # each repo's token from its owner's installation, asked for each repo.
+      # shellcheck source=/dev/null
+      . ${machineApp.envFile}
+      export CONARY_TOKEN_COMMAND=${lib.escapeShellArg "${config.burrow.tools.gh-token}/bin/gh-token get"}
+    '') + ''
+      # The steward's word (its status, its reviewers' reviews) is only what
+      # its App posted.
+      export CONARY_REVIEWERS=${lib.escapeShellArg (lib.concatStringsSep "," cfg.reviewers)}
       export CONARY_LEDGER=${lib.escapeShellArg cfg.dir}
       export CONARY_ANCHOR_REPO=${lib.escapeShellArg cfg.anchorRepo}
       export CONARY_OWN_CONTEXTS=${lib.escapeShellArg (lib.concatStringsSep "," cfg.ownContexts)}
@@ -105,6 +114,7 @@ in
   imports = [
     (import ./common.nix inputs)
     { key = "burrow/events"; imports = [ (import ./events.nix inputs) ]; }
+    { key = "burrow/github"; imports = [ (import ./github.nix inputs) ]; }
   ];
 
   options.burrow.ledger = {
@@ -131,8 +141,9 @@ in
       example = "sam/homelab";
       description = ''
         The GitHub repository (OWNER/NAME) that keeps the ledger's anchor, at
-        `refs/conary/anchor`: one ledger per repository. burrow.user's gh
-        login must be able to push to it.
+        `refs/conary/anchor`: one ledger per repository. The machine's own App
+        (burrow.github.machinery), else burrow.user's gh login, must be able
+        to push to it.
       '';
     };
 
@@ -145,8 +156,8 @@ in
 
     gh = mkOption {
       type = types.package;
-      default = pkgs.gh;
-      defaultText = lib.literalExpression "pkgs.gh";
+      default = config.burrow.github.machineGh;
+      defaultText = lib.literalExpression "config.burrow.github.machineGh";
       internal = true;
       description = "The gh the ledger's passes ask GitHub with (the test's is a stand-in).";
     };

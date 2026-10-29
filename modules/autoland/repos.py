@@ -123,7 +123,7 @@ def settle_repo(r, known):
         # The plan offers no rules on this repo (private, on a free
         # account): there are none to pin. Anything else is GitHub not
         # saying, and nothing's known to be pinned.
-        pages, rules = None, "Upgrade to GitHub Pro" in str(e)
+        pages, rules = None, C.NO_RULES in str(e)
     if isinstance(pages, list):
         own = [x for page in pages for x in page if x.get("source_type") == "Repository"]
         made = True
@@ -271,7 +271,7 @@ def watch_default(r, info, prs, digest):
         if not open_fix and red.get("job") and not red.get("ended"):
             red["ended"] = True
             save(key, st)
-            C.wake(repo, C.NOW + 60)
+            C.wake(repo, C.NOW + 60)  # ends: the second look, once
             return set()
         unclosed = []
         for pr in open_fix:
@@ -283,7 +283,7 @@ def watch_default(r, info, prs, digest):
         # One GitHub wouldn't close is still known by the red it was for, and
         # tried again soon.
         if unclosed:
-            C.wake(repo, C.NOW + 5 * 60)
+            C.wake(repo, C.NOW + 5 * 60)  # ends: the fix PR's own wait is overdue at its deadline (waits.py)
         else:
             log(f"{repo}: {r['default']} is green again")
             st.pop("red")
@@ -297,7 +297,7 @@ def watch_default(r, info, prs, digest):
     if red.get("job") and not red.get("ended"):
         red["ended"] = True
         save(key, st)
-        C.wake(repo, C.NOW + 60)
+        C.wake(repo, C.NOW + 60)  # ends: the second look, once
         return
     if red.get("jobs", 0) >= 2:
         digest.append(("The default branch is red", line, "two Claude jobs ended with it still red"))
@@ -305,7 +305,7 @@ def watch_default(r, info, prs, digest):
     jid = C.job(repo, red_default_task(repo, r["default"], sha))
     if not jid:
         digest.append(("Couldn't start a Claude job to fix it", line, "the default branch is red"))
-        C.wake(repo, C.NOW + 5 * 60)
+        C.wake(repo, C.NOW + 5 * 60)  # ends: listed on the stuck issue
         return
     log(f"{repo}: {r['default']} is red at {sha[:7]}; a Claude job {jid} fixes it")
     st["red"] = {"job": jid, "jobs": red.get("jobs", 0) + 1, "at": sha}

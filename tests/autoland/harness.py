@@ -148,11 +148,11 @@ with open(f"{tmp}/config.json", "w") as f:
     json.dump({
         "owners": ["sam"], "exclude": [], "context": "review-settled", "rulesets": True, "keepBranches": [],
         "app": {"id": 7, "slug": "steward"},
-        "baselineJobs": False, "baselinePerPass": 1, "authors": ["sam", "dependabot", "renovate"],
+        "baselineJobs": False, "baselinePerPass": 1, "authors": ["sam"], "bots": ["dependabot", "renovate", "workers"], "machinery": None,
         "stateDir": f"{tmp}/state", "majorKey": f"{tmp}/sweep.key", "projectsDir": f"{tmp}/none", "renovateEmail": "bot@renovateapp.com", "proj": "proj", "jobTimeout": 60, "jobIdle": 20, "reviewTimeout": 30, "owner": "Sam", "cleanBranches": False,
         "labels": {"hold": "hold", "owner": "needs-owner"}, "notify": {"repo": "", "assignee": "", "label": "autoland"}, "inbox": {"enable": False, "label": "claude", "authors": ["sam"]},
         "dashboard": {"enable": False, "waitDays": 4, "errorDays": 1, "title": "Dependency Dashboard",
-                      "renovateKick": "http://127.0.0.1:9/kick/renovate"},
+                      "renovateKick": "http://127.0.0.1:9/kick/renovate", "renovate": None},
         "flaky": {"enable": False, "bin": f"{tmp}/flaky"},
         "defaults": {"rounds": 5,
                      "oneWay": ONE_WAY, "handoffAfter": 30, "sessionHandoffAfter": 90, "settleDelay": 3,
@@ -188,6 +188,7 @@ import prs as P  # noqa: E402,F401
 import repos as R  # noqa: E402,F401
 import review_worker as W  # noqa: E402,F401
 import reviewers as V  # noqa: E402,F401
+import step as H  # noqa: E402,F401
 import steward as S  # noqa: E402,F401
 import touches as G  # noqa: E402,F401
 REAL_GH = C.gh  # the real one, before any check stands in for it
@@ -223,8 +224,27 @@ def acting():
     ACTING.append(C._for[-1])
 
 
+RULES = {}  # the rules on a branch of sam/r, by its name in the path: none unless set, or what GitHub raises
+PROTECTION = {}  # the same for a branch's classic protection: a 404 unless set
+
+
 def gh_stub(*a, **k):
     acting()
+    if a[:1] == ("api",) and a[1].startswith("repos/sam/r/rules/branches/"):
+        got = RULES.get(a[1].removeprefix("repos/sam/r/rules/branches/").partition("?")[0], [])
+        if isinstance(got, Exception):
+            if k.get("check", True):
+                raise got
+            return None  # gh's failure, logged
+        return [got]  # --slurp: the pages
+    if a[:1] == ("api",) and a[1].startswith("repos/sam/r/branches/") and a[1].endswith("/protection"):
+        got = PROTECTION.get(a[1].removeprefix("repos/sam/r/branches/").removesuffix("/protection"),
+                             RuntimeError(f"gh api {a[1]}: gh: Branch not protected (HTTP 404)"))
+        if isinstance(got, Exception):
+            if k.get("check", True):
+                raise got
+            return None
+        return got
     if a[:2] == ("pr", "view") and "commits" in a:
         got = COMMITS.get(int(a[2]), ["bot@renovateapp.com"])
         return None if got is None else {"commits": [{"authors": [{"email": e}]} for e in got]}
@@ -272,7 +292,7 @@ def post(repo, pr, r, answer):
 
 STATES = {}  # a job's state, by id, as `proj state` says it: running unless set
 T0 = "2026-10-24T00:00:00Z"
-# The times a PR's status names (S.clock) are in the machine's zone: UTC here.
+# The times a PR's status names (H.clock) are in the machine's zone: UTC here.
 os.environ["TZ"] = "UTC"
 time.tzset()
 T = C.ts(T0)
@@ -346,7 +366,7 @@ def run(pr, after, obsolete=False):
     POSTED.clear()
     digest = []
     with C.acting_for("sam/r"):
-        S.handle("sam/r", pr, info, digest, obsolete)
+        H.handle("sam/r", pr, info, digest, obsolete)
     return " ".join(x for x in WROTE if "/statuses/" in x), digest
 
 

@@ -14,6 +14,7 @@ let
   # What marks proj-inbox's own comments on an issue: never a reply, never news.
   inboxMark = "<!-- proj-inbox -->";
   inherit (config.burrow) user projectsDir stateDir;
+  inherit (config.burrow.github) machineApp;
   watchWake = "${stateDir}/proj-watch/wake.json";
   inboxWake = "${stateDir}/proj-inbox/wake.json";
   # The pipeline's own repos, whose projects' pipeline jobs get its slots,
@@ -49,6 +50,7 @@ let
       WAITS=${lib.escapeShellArg (lib.optionalString watchdog waits)}
       STALL_QUEUED=${toString (cfg.stallAfterMinutes * 60)}
       GRACE=600
+      APPS=${lib.escapeShellArg (lib.concatStrings (lib.mapAttrsToList (name: app: "${name}=${app.envFile}\n") config.burrow.github.apps))}
     '' + builtins.readFile ./proj/pick.sh + builtins.readFile ./proj/waits.sh + builtins.readFile ./proj/proj.sh;
   };
 
@@ -68,6 +70,7 @@ let
       NOTIFY=${lib.escapeShellArg (lib.optionalString (config.burrow.tools ? notify) (lib.getExe config.burrow.tools.notify))}
       WAKE=${lib.escapeShellArg inboxWake}
       PIPELINE=${pipelineRepos}
+      MACHINERY=${lib.escapeShellArg (if machineApp == null then "" else machineApp.name)}
     '' + builtins.readFile ./proj/inbox.sh;
   };
 in
@@ -76,6 +79,7 @@ in
     (import ./common.nix inputs)
     { key = "burrow/events"; imports = [ (import ./events.nix inputs) ]; }
     { key = "burrow/watchdog/sources"; imports = [ ./watchdog/sources.nix ]; }
+    { key = "burrow/github"; imports = [ (import ./github.nix inputs) ]; }
   ];
 
   options.burrow.proj = {
@@ -175,8 +179,8 @@ in
     };
     gh = lib.mkOption {
       type = lib.types.package;
-      default = pkgs.gh;
-      defaultText = lib.literalExpression "pkgs.gh";
+      default = config.burrow.github.machineGh;
+      defaultText = lib.literalExpression "config.burrow.github.machineGh";
       internal = true;
       description = "The gh proj-watch and proj-inbox ask GitHub with (the test's is a stand-in).";
     };
@@ -267,6 +271,7 @@ in
           proj run web "the task"           start a job; prints its id
           proj run --first web "the task"   the same, ahead of the line
           proj run --pipeline burrow "..."  work on the pipeline itself: first of all, in its own slot
+          proj run --app NAME web "task"    acting on GitHub as the App NAME
           proj status                       what's running, what finished
           proj log ID                       its answer (--turn N for an earlier one, --raw for everything)
           proj reply ID "follow-up"         continue the same conversation
@@ -317,7 +322,8 @@ in
       (opened by ${lib.concatStringsSep " or " cfg.inbox.authors}) and within seconds it's a job there.
       The answer comes back as a comment, a reply on the issue continues the job,
       and closing it or taking the label off ends it. `proj-inbox status` shows
-      which issue is which job.
+      which issue is which job.${lib.optionalString (machineApp != null) " A person's issue's job acts on GitHub as
+      them; a bot's acts as the App ${machineApp.slug}."}
     '';
   })
   ]);
