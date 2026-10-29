@@ -180,21 +180,15 @@ def eyes(repo, pr):
 
 
 def merge_method(repo, base, repo_info):
-    """The first of squash, merge and rebase that both the repo's settings
-    and every rule on base allow, or None when there's none or GitHub didn't
-    say what the rules are. A ruleset can narrow the settings (a legacy one
-    allowing merge commits alone, or one wanting a linear history), and
-    GitHub refuses any other method from the App, which bypasses no rule. A
-    private repo on a free plan has no rules: its settings alone decide."""
-    try:
-        pages = C.gh("api", f"repos/{repo}/rules/branches/{urllib.parse.quote(base, safe='')}?per_page=100",
-                     "--paginate", "--slurp")
-    except RuntimeError as e:
-        if C.NO_RULES not in str(e):
-            log(f"{repo}: the rules on {base}: {e}")
-            return None
-        pages = []
-    if not isinstance(pages, list):
+    """The first of squash, merge and rebase that the repo's settings, every
+    ruleset on base and its classic protection allow, or None when there's
+    none or GitHub didn't say what the rules are. Rules narrow the settings
+    (a legacy ruleset allowing merge commits alone, or a linear history), and
+    GitHub refuses any other method from the App, which bypasses no rule."""
+    branch = urllib.parse.quote(base, safe="")
+    pages = rules(repo, base, [], f"repos/{repo}/rules/branches/{branch}?per_page=100", "--paginate", "--slurp")
+    protection = rules(repo, base, {}, f"repos/{repo}/branches/{branch}/protection")
+    if not isinstance(pages, list) or not isinstance(protection, dict):
         return None
     allowed = {"squash", "merge", "rebase"}
     for rule in (r for page in pages for r in page):
@@ -202,9 +196,25 @@ def merge_method(repo, base, repo_info):
             allowed &= set((rule.get("parameters") or {}).get("allowed_merge_methods") or allowed)
         elif rule.get("type") == "required_linear_history":
             allowed.discard("merge")
+    if (protection.get("required_linear_history") or {}).get("enabled"):
+        allowed.discard("merge")
     return next((method for flag, method in (("squashMergeAllowed", "squash"), ("mergeCommitAllowed", "merge"),
                                              ("rebaseMergeAllowed", "rebase"))
                  if repo_info[flag] and method in allowed), None)
+
+
+def rules(repo, base, none, *args):
+    """What GitHub says of base's rules at the path in args, `none` when
+    there are none to say (a private repo on a free plan has no rules, and a
+    branch without classic protection is a 404 for it), or None when GitHub
+    didn't say."""
+    try:
+        return C.gh("api", *args)
+    except RuntimeError as e:
+        if C.NO_RULES in str(e) or "(HTTP 404)" in str(e):
+            return none
+        log(f"{repo}: the rules on {base}: {e}")
+        return None
 
 
 def land(repo, pr, repo_info):

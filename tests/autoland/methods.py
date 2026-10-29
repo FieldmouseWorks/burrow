@@ -1,12 +1,12 @@
 """A settled PR is merged with a method its base's rules allow: the first of
-squash, merge and rebase that the repo's settings and every ruleset on the
-base let through (a linear history lets no merge commit through), since
-GitHub refuses any other from the App. A private repo on a free plan has no
-rules, so its settings decide. With none, or no word from GitHub on the
-rules, nothing is merged and the merge is tried again later, as for any
-refused merge."""
+squash, merge and rebase that the repo's settings, every ruleset on the base
+and its classic protection let through (a linear history lets no merge
+commit through), since GitHub refuses any other from the App. A private repo
+on a free plan has no rules, so its settings decide. With none, or no word
+from GitHub on the rules, nothing is merged and the merge is tried again
+later, as for any refused merge."""
 
-from harness import RULES, C, T, clean, fresh_pr_state, info, merges, pr_state, run, stand_in
+from harness import PROTECTION, RULES, C, T, clean, fresh_pr_state, info, merges, pr_state, run, stand_in
 
 stand_in()
 
@@ -47,13 +47,29 @@ RULES["main"] = [{"type": "required_linear_history"}, pull_request("merge")]
 fresh_pr_state()
 run(clean(), 900)
 assert merges() == [], merges()
+# So does a classic protection's, on the PR's own base.
+RULES["main"] = [pull_request("merge", "rebase")]
+for linear, want in ((True, ["rebase"]), (False, ["merge"])):
+    PROTECTION["main"] = {"required_linear_history": {"enabled": linear}}
+    fresh_pr_state()
+    run(clean(), 900)
+    assert merged_with() == want, (linear, merges())
+PROTECTION["main"] = {"required_linear_history": {"enabled": True}}
+RULES["release%2F1.0"] = [pull_request("merge", "rebase")]
+fresh_pr_state()
+run(clean(base="release/1.0"), 900)
+assert merged_with() == ["merge"], merges()
+PROTECTION.clear()
+del RULES["release%2F1.0"]
 # A private repo on a free plan, whose plan offers no rules, takes its
 # settings' first.
-RULES["main"] = RuntimeError("gh api repos/sam/r/rules/branches/main?per_page=100: gh: Upgrade to GitHub Pro or make "
-                             "this repository public to enable this feature. (HTTP 403)")
+PLAN = "gh: Upgrade to GitHub Pro or make this repository public to enable this feature. (HTTP 403)"
+RULES["main"] = RuntimeError(f"gh api repos/sam/r/rules/branches/main?per_page=100: {PLAN}")
+PROTECTION["main"] = RuntimeError(f"gh api repos/sam/r/branches/main/protection: {PLAN}")
 fresh_pr_state()
 run(clean(), 900)
 assert merged_with() == ["squash"], merges()
+PROTECTION.clear()
 # The rules read are the PR's own base's, a slash in its name kept whole.
 RULES["main"] = [pull_request("rebase")]
 RULES["release%2F1.0"] = [pull_request("squash")]
@@ -64,14 +80,21 @@ assert merged_with() == ["squash"], merges()
 # neither is any when GitHub won't say what the rules are: nothing merges,
 # and it's a merge that didn't go through, tried again a pass later.
 info.update(mergeCommitAllowed=False, rebaseMergeAllowed=False)
-for rules in ([pull_request("merge", "rebase")], C.Unavailable("gh api repos/sam/r/rules/branches/main: HTTP 502"),
-              RuntimeError("gh api repos/sam/r/rules/branches/main: Resource not accessible by integration (HTTP 403)")):
+DENIED = "Resource not accessible by integration (HTTP 403)"
+for rules, protection in (([pull_request("merge", "rebase")], None),
+                          (C.Unavailable("gh api repos/sam/r/rules/branches/main: HTTP 502"), None),
+                          (RuntimeError(f"gh api repos/sam/r/rules/branches/main: {DENIED}"), None),
+                          ([], C.Unavailable("gh api repos/sam/r/branches/main/protection: HTTP 502")),
+                          ([], RuntimeError(f"gh api repos/sam/r/branches/main/protection: {DENIED}"))):
     RULES["main"] = rules
+    if protection:
+        PROTECTION["main"] = protection
     fresh_pr_state()
     status, _ = run(clean(), 900)
     assert merges() == [] and "state=success" in status and not pr_state().get("landed"), (rules, merges(), status)
     assert C.WAKE["sam/r"] <= T + 900 + 2 * 60, (rules, C.WAKE)
     RULES["main"] = []
+    PROTECTION.clear()
     run(clean(), 960)
     assert merged_with() == ["squash"], (rules, merges())
 info.update(kept)
