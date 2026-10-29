@@ -130,7 +130,11 @@ in
         stopped, so a stuck job can't hold its place for good. A job can set
         its own (`proj run --timeout`), and stop sooner once it has gone quiet
         (`--idle`), as the steward's do (`burrow.autoland.jobTimeoutMinutes`,
-        `jobIdleMinutes`).
+        `jobIdleMinutes`). Time a turn spends waiting in line inside its run
+        doesn't count: each turn's commands get PROJ_WAIT_DIR, where one that
+        waits for something shared (a machine-wide lock) keeps a file, locked,
+        saying what for, while it waits; the stall watchdog holds that wait
+        to stallAfterMinutes instead.
       '';
     };
     maxWait = lib.mkOption {
@@ -145,10 +149,12 @@ in
       type = lib.types.ints.positive;
       default = 120;
       description = ''
-        How long a turn may wait in line for a slot before the stall
-        watchdog, when it's on, takes it. A turn running past its timeout,
-        one awaiting GitHub past awaitHours, or one that ended without
-        saying what comes next, it takes then.
+        How long a turn may wait in line, for a slot or inside its run (a
+        command of its holding a file in its PROJ_WAIT_DIR: its timeout
+        stands still meanwhile), before the stall watchdog, when it's on,
+        takes it. A turn running past its timeout, one awaiting GitHub past
+        awaitHours, or one that ended without saying what comes next, it
+        takes then.
       '';
     };
     awaitHours = lib.mkOption {
