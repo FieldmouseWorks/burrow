@@ -190,6 +190,35 @@ mod tests {
     }
 
     #[test]
+    fn answers_with_github_s_token_as_it_comes() {
+        let github = fake::serve(|r| match r.method.as_str() {
+            "GET" => (200, vec![], fake::installations(&[(42, "sam")])),
+            _ => (
+                201,
+                vec![],
+                serde_json::json!({ "token": fake::TOKEN, "expires_at": "2026-10-28T23:00:00Z" })
+                    .to_string(),
+            ),
+        });
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("key"), fake::key(true)).unwrap();
+        fs::create_dir(dir.path().join("cache")).unwrap();
+        let config = Config {
+            api: github.url.clone(),
+            proxy: None,
+            app_id: 7,
+            key: dir.path().join("key"),
+            cache: dir.path().join("cache"),
+        };
+        let now = 1_793_224_800;
+        let answer = format!("token {}\n", fake::TOKEN);
+        assert_eq!(ask(&config, "sam\n", now), answer);
+        // And as it was kept.
+        assert_eq!(ask(&config, "sam\n", now + 60), answer);
+        assert_eq!(github.asked().len(), 2);
+    }
+
+    #[test]
     fn askers_at_once_share_one_mint() {
         let github = fake::serve(|r| match r.method.as_str() {
             "GET" => (200, vec![], fake::installations(&[(42, "sam")])),

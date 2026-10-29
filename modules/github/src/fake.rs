@@ -7,6 +7,10 @@ use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
+/// A token in GitHub's stateless format (`ghs_APPID_` and a JWT): long, and
+/// with dots, hyphens and underscores in it.
+pub const TOKEN: &str = "ghs_5518199_eyJhbGciOiAiUlMyNTYiLCAidHlwIjogIkpXVCJ9.eyJpc3MiOiAiNTUxODE5OSIsICJzdWIiOiAiMTc2MzUxNjUxIiwgImF1ZCI6ICJnaXRodWIuY29tIiwgImlhdCI6IDE3OTMyMjQ4MDAsICJleHAiOiAxNzkzMjI4NDAwLCAicmVwb3NpdG9yaWVzIjogWyJzYW0vciJdLCAicGVybWlzc2lvbnMiOiB7ImNvbnRlbnRzIjogIndyaXRlIiwgInB1bGxfcmVxdWVzdHMiOiAid3JpdGUifSwgImp0aSI6ICJ4eHh4eHh4eCJ9.uCRNAomB1pOve0Vq-O-kytY9KC4Z_xSULCRuUNk1HSJwSoAqccNYC2Nw3kzrKTwySoQjNCVX1OXDhDjw42kQ7ntUtmg2wfvdE9JEHZ4UNNxiymd_to9f5mpGS6rezb0AV2-Na1rDvMgIRLfVCxzGYDREu-fPz4_Aqh7jxjbZ4zn6uEjJtleoU-43wJy_3RSdCzgHsZHd6bYjzNlSgd0YcFtIyJsVA5A4RbuldTlFNR_mtFSFJ2D3NSnPAcqPadzK5Fv1gX3flKovekBwcfDu3GvrmPdotM0z0RdtRNFWOkWl1yEikOt2cMZ4axNZGu2shkeJk4leiyTmEgFKuqa6BA";
+
 pub struct Request {
     pub method: String,
     pub path: String,

@@ -90,13 +90,10 @@ impl App {
         };
         let path = format!("/app/installations/{id}/access_tokens");
         let got: Token = self.post(&jwt, &path, &body)?;
-        // It goes back as one line of the answer, so it's only ever a token.
-        if got.token.is_empty()
-            || !got
-                .token
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'_')
-        {
+        // Opaque, and as long as GitHub likes (its stateless ones are a JWT,
+        // dots and all): only what can't break the line it goes back as, or
+        // git's credential answer, is refused.
+        if got.token.is_empty() || !got.token.bytes().all(|b| b.is_ascii_graphic()) {
             return Err(Error::refused(format!(
                 "{path}: GitHub's answer isn't a token"
             )));
@@ -445,8 +442,22 @@ mod tests {
     }
 
     #[test]
+    fn takes_github_s_tokens_as_they_come() {
+        let got = app(&github(fake::TOKEN), &fake::key(true))
+            .mint(&target("sam"), 0)
+            .unwrap();
+        assert_eq!(got.token, fake::TOKEN);
+    }
+
+    #[test]
     fn hands_out_only_a_token() {
-        for token in ["", "ghs_abc\nrefused x", "ghs abc"] {
+        for token in [
+            "",
+            "ghs_abc\nrefused x",
+            "ghs abc",
+            "ghs_abc\t",
+            "ghs_\u{e9}",
+        ] {
             let e = app(&github(token), &fake::key(true))
                 .mint(&target("sam"), 0)
                 .err()

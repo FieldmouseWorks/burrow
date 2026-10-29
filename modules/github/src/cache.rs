@@ -80,6 +80,20 @@ mod tests {
     }
 
     #[test]
+    fn keeps_github_s_tokens_as_they_come() {
+        let dir = tempfile::tempdir().unwrap();
+        let minted = Minted {
+            token: crate::fake::TOKEN.into(),
+            expires: 3600,
+        };
+        put(dir.path(), "sam", &minted).unwrap();
+        assert_eq!(
+            get(dir.path(), "sam", 0).as_deref(),
+            Some(crate::fake::TOKEN)
+        );
+    }
+
+    #[test]
     fn a_garbled_file_is_no_token() {
         let dir = tempfile::tempdir().unwrap();
         for text in ["", "ghs_abc", "soon ghs_abc", "9999999999 "] {

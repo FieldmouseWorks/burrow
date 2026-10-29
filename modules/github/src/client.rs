@@ -299,6 +299,21 @@ mod tests {
     }
 
     #[test]
+    fn hands_on_github_s_tokens_as_they_come() {
+        let reply: &'static str = format!("token {}\n", crate::fake::TOKEN).leak();
+        let (_dir, path, _) = serve(vec![reply, reply]);
+        assert_eq!(fetch(&path, "sam/r").unwrap(), crate::fake::TOKEN);
+        assert_eq!(
+            credential(
+                "get",
+                "protocol=https\nhost=github.com\npath=sam/r.git\n\n",
+                Some(&path)
+            ),
+            format!("username=x-access-token\npassword={}\n", crate::fake::TOKEN)
+        );
+    }
+
+    #[test]
     fn gives_gh_the_token_for_its_account_unless_it_has_one() {
         let (_dir, path, handle) = serve(vec!["token ghs_abc\n", "token ghs_def\n"]);
         let context = Context {
