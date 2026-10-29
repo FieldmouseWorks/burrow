@@ -3,7 +3,8 @@ a store of its own, with stand-ins for `nix build` and `nix flake check`. Each
 derivation gets a nix process of its own and stays a GC root until it's built,
 only the checks are built, every output is checked as nix flake check checks
 it, a failed evaluation or build fails the gate, and a flake with an output
-eval-apart doesn't know is refused rather than half checked.
+eval-apart doesn't know, or with a nixConfig, is refused rather than half
+checked.
 
   python3 -I tests/gate.py .github/workflows/flake-check.yml
   nix build .#checks.x86_64-linux.gate
@@ -86,10 +87,11 @@ system = subprocess.run([real_nix, "config", "show", "system"],
                         env={**os.environ, **nix_env}, capture_output=True, text=True, check=True).stdout.strip()
 
 
-def flake(outputs):
+def flake(outputs, top=""):
     """A test flake, committed to git as a checkout is."""
     d = tempfile.mkdtemp(dir=tmp)
     open(os.path.join(d, "flake.nix"), "w").write(f"""{{
+  {top}
   outputs = {{ self }}:
     let
       system = "{system}";
@@ -202,6 +204,15 @@ def unknown_outputs():
       "" = { };
     }"""))
     assert rc != 0 and 'this flake also has ["","nixosModules","overlays"]' in out, out
+    assert not entries(calls) and not builds(calls), calls
+
+
+@case
+def nix_config():
+    "a flake with a nixConfig is refused, before anything is evaluated"
+    d = flake("""{ checks.${system}.a = drv "a"; }""", top="nixConfig.allow-import-from-derivation = false;")
+    rc, out, calls = run(d, env={"NIX_CONFIG": nix_env["NIX_CONFIG"] + "\naccept-flake-config = true"})
+    assert rc != 0 and "can't carry this flake's nixConfig" in out, out
     assert not entries(calls) and not builds(calls), calls
 
 

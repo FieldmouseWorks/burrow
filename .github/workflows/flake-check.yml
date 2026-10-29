@@ -32,7 +32,7 @@ on:
           its last build ends. For a flake whose evaluations don't fit in its
           runner's memory together. It knows only those outputs (and
           legacyPackages, which the gate never evaluates), and fails a flake
-          with any other.
+          with any other, or with a nixConfig.
         type: boolean
         default: false
 jobs:
@@ -67,7 +67,8 @@ jobs:
           read -r -d '' plan <<'EOF' || true
           { url, system, skip, entry ? null }:
           let
-            outputs = (builtins.getFlake url).outputs;
+            flake = builtins.getFlake url;
+            inherit (flake) outputs;
             known = [ "checks" "packages" "devShells" "formatter" "nixosConfigurations" "legacyPackages" ];
             set = what: v: if builtins.isAttrs v then v else throw "flake output '${what}' is not an attribute set";
             # An output by system: every system's name has a dash, and only
@@ -97,6 +98,7 @@ jobs:
           if entry == null then
             # legacyPackages has only its system names checked.
             builtins.deepSeq (here "legacyPackages" (_: [ ])) {
+              nixConfig = import "${flake.outPath}/flake.nix" ? nixConfig;
               other = builtins.filter (n: !builtins.elem n known) (builtins.attrNames outputs);
               entries = map (e: { inherit (e) what; build = build e; skip = e.check or false && !build e; }) entries;
             }
@@ -117,6 +119,12 @@ jobs:
             nix-instantiate --eval --strict --json "${args[@]}" > "$RUNNER_TEMP/plan.json"
             if [ "$(jq '.other | length' "$RUNNER_TEMP/plan.json")" != 0 ]; then
               echo "eval-apart knows checks, packages, devShells, formatter, nixosConfigurations and legacyPackages, and this flake also has $(jq -c .other "$RUNNER_TEMP/plan.json"). Its gate is a whole \`nix flake check\`, without eval-apart."
+              return 1
+            fi
+            # nix flake check applies the nixConfig a runner accepts; the
+            # evaluations and the build here would leave it out.
+            if [ "$(jq .nixConfig "$RUNNER_TEMP/plan.json")" = true ]; then
+              echo "eval-apart can't carry this flake's nixConfig to every evaluation and build. Its gate is a whole \`nix flake check\`, without eval-apart."
               return 1
             fi
             # Each evaluation exits before the next starts, so the most memory
