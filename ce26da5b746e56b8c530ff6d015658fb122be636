@@ -1,0 +1,47 @@
+{
+  "conary": "note v1",
+  "change": "48k0b74c4y8t2svn5s8gqb6rdd",
+  "repo": {
+    "owner": "fieldmouseworks",
+    "name": "burrow"
+  },
+  "pr": 134,
+  "url": "https://github.com/fieldmouseworks/burrow/pull/134",
+  "summary": "ci: say why the agents check stays off hosted runners",
+  "task": "https://claude.ai/code/project/chan_01Ad4f4oDXfFTCEzLHzMTD8q?thread=cmsg_01Ad4f4oDXfFTCEzLHzMTD8q1TEXugJZxuaRser5qU9zX4",
+  "author": {
+    "kind": "agent",
+    "login": "TusanHomichi",
+    "session": "https://claude.ai/code/session_01BkHcyEFtVw4JcRyJEKK4dd"
+  },
+  "landing": {
+    "revision": "81e854fd3bbe15aaa5dd6e33dacbeb3263dbe42a4541083e3dbefbdbfca425dc",
+    "before": "a0677f498d3782c2657a4b6dd501500bc155d850",
+    "after": "ce26da5b746e56b8c530ff6d015658fb122be636",
+    "by": {
+      "kind": "status",
+      "login": "TusanHomichi"
+    },
+    "at": 1793242369612
+  },
+  "evidence": [
+    {
+      "kind": "review",
+      "check": "codex",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/134#pullrequestreview-5691923348"
+    },
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/40802631117/job/123214060062"
+    },
+    {
+      "kind": "ci",
+      "check": "agents",
+      "result": "pass",
+      "source": "status agents"
+    }
+  ]
+}
