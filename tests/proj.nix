@@ -2,8 +2,9 @@
 # (burrow.claude.package) checks that jobs past maxJobs wait in line, that
 # --first goes ahead but can't starve a turn that has waited long, that a
 # pipeline job's every turn, in one of the pipeline's own repos, takes the
-# slot kept for them when the rest are full (pick.sh's own check has the other
-# repos'), that a job whose turn has ended frees its slot, that one stopped after
+# slot kept for them when the rest are full, while one anywhere else goes as
+# --first and says so (pick.sh's own check has how origins are told apart),
+# that a job whose turn has ended frees its slot, that one stopped after
 # its answer with work in the background has the rest of that run stopped,
 # hears so once and answers again (the turn ending as its last run did, its
 # log saying so even when its unit went first, and within one timeout that
@@ -113,7 +114,9 @@ let
   # autoland's list of the pipeline's own repos, which proj reads, without
   # the rest of autoland: web is one of them here.
   pipelineRepos = {
-    options.burrow.autoland.pipelineRepos = pkgs.lib.mkOption { type = pkgs.lib.types.listOf pkgs.lib.types.str; };
+    options.burrow.autoland.pipelineRepos = pkgs.lib.mkOption {
+      type = pkgs.lib.types.listOf pkgs.lib.types.str;
+    };
     config.burrow.autoland.pipelineRepos = [ "O/Web" ];
   };
 in
@@ -121,7 +124,10 @@ pkgs.testers.runNixOSTest {
   name = "proj";
 
   nodes.machine = {
-    imports = [ self.nixosModules.proj pipelineRepos ];
+    imports = [
+      self.nixosModules.proj
+      pipelineRepos
+    ];
     burrow = {
       claude.package = claude;
       proj = {
@@ -386,10 +392,18 @@ pkgs.testers.runNixOSTest {
         proj(f'reply {p} "sleep 1"')
         machine.wait_until_succeeds(f"su - dev -c 'proj state {p}' | grep -x done", timeout=120)
         assert state(c) == "queued", state(c)
+        assert "asked as --pipeline" not in proj("status"), proj("status")
         machine.fail(f"""su - dev -c 'proj reply --pipeline {p} "sleep 1"'""")
         proj(f"stop {a}")
         machine.wait_until_succeeds(f"su - dev -c 'proj state {c}' | grep -x done", timeout=120)
         proj(f"stop {b}")
+
+    with subtest("a pipeline job anywhere else goes as --first, and says so in proj status and its turn's journal"):
+        q = proj('run --pipeline ib "sleep 1"')
+        demoted = "asked as --pipeline, but its origin (none) isn't in pipelineRepos: it goes as --first"
+        assert f"[{demoted}]" in proj("status"), proj("status")
+        machine.wait_until_succeeds(f"su - dev -c 'proj state {q}' | grep -x done", timeout=120)
+        machine.wait_until_succeeds(f"journalctl -q '_SYSTEMD_USER_UNIT={unit(q)}' | grep -qF \"proj: {demoted}\"", timeout=30)
 
     with subtest("a job waiting on a PR is resumed when the PR changes"):
         def github(endpoint, answer):

@@ -54,33 +54,59 @@ case_ "b 3" "normal /src/my web" "normal /src/my web" free free "a normal /src/m
 case_ "a 3" "normal /src/x" "normal /src/x" free free "a normal "
 
 # A job run with --pipeline is a pipeline one only in a project of one of the
-# pipeline's own repos, told by its clone's origin (any case, either URL
-# form). Anywhere else it goes as --first, so pick holds it to its project's
-# cap and off the pipeline's slots: one repo's PRs can't fill the machine.
+# pipeline's own repos, told by its clone's origin: on GitHub, in any form git
+# takes, any case. Anywhere else it goes as --first, so pick holds it to its
+# project's cap and off the pipeline's slots: one repo's PRs can't fill the
+# machine.
 export PIPELINE="Sam/Burrow sam/box"
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 export GIT_CEILING_DIRECTORIES=$tmp
 clone() { git init -q "$tmp/$1" && git -C "$tmp/$1" remote add origin "$2"; }
-clone burrow https://github.com/sam/burrow.git
-clone box git@github.com:SAM/BOX
+repo() {
+  local got
+  got=$(github_repo "$tmp/$1")
+  [ "$got" = "$2" ] || { echo "FAIL: github_repo $1: wanted '$2', got '$got'" >&2; exit 1; }
+}
+clone https https://github.com/sam/burrow.git
 clone slash https://github.com/sam/burrow/
+clone user https://sam@github.com/sam/burrow
+clone ssh ssh://git@github.com/sam/burrow.git
+clone port ssh://git@github.com:22/sam/burrow
+clone scp git@github.com:SAM/BOX
 clone psiv https://github.com/sam/psiv
 clone theirs https://github.com/kim/burrow
+clone gitlab https://gitlab.com/sam/burrow.git
+clone lookalike https://github.com.example.net/sam/burrow
+clone suffix https://notgithub.com/sam/burrow
+clone mirror /srv/mirrors/sam/burrow.git
+clone longer https://github.com/sam/burrow/extra
 mkdir "$tmp/plain"
-for d in burrow box slash; do
+for d in https slash user ssh port; do repo "$d" sam/burrow; done
+repo scp sam/box
+repo psiv sam/psiv
+for d in gitlab lookalike suffix mirror longer plain missing; do repo "$d" ""; done
+# No path at all is no clone, not the one it's run in.
+got=$(cd "$tmp/https" && github_repo "")
+[ -z "$got" ] || { echo "FAIL: github_repo '' read the clone it ran in: $got" >&2; exit 1; }
+for d in https ssh scp; do
   pipeline_project "$tmp/$d" || { echo "FAIL: $d isn't the pipeline's" >&2; exit 1; }
 done
-for d in psiv theirs plain missing; do
+for d in psiv theirs gitlab mirror plain missing; do
   ! pipeline_project "$tmp/$d" || { echo "FAIL: $d is the pipeline's" >&2; exit 1; }
 done
 
-# What each turn of a job queues as: what proj run recorded for its
-# --pipeline (pipeline, or first outside the pipeline's repos), whatever the
-# turn asks; otherwise the turn's own.
-mkdir -p "$tmp/jobs/p" "$tmp/jobs/f" "$tmp/jobs/n"
+# What each turn of a job queues as: pipeline for one run with --pipeline in
+# one of the pipeline's projects, first for one anywhere else (asked each
+# time, so a job from before the rule is held to it), whatever the turn
+# asks; otherwise the turn's own.
+mkdir -p "$tmp/jobs/p" "$tmp/jobs/d" "$tmp/jobs/o" "$tmp/jobs/n"
 : >"$tmp/jobs/p/pipeline"
-: >"$tmp/jobs/f/first"
+: >"$tmp/jobs/d/pipeline"
+: >"$tmp/jobs/o/pipeline"
+echo "$tmp/https" >"$tmp/jobs/p/project"
+echo "$tmp/psiv" >"$tmp/jobs/d/project"
+echo "$tmp/https" >"$tmp/jobs/n/project"
 cls() {
   local got
   got=$(class "$tmp/jobs/$1" "$2")
@@ -88,10 +114,22 @@ cls() {
 }
 cls p normal pipeline
 cls p first pipeline
-cls f normal first
-cls f "" first
+cls d normal first
+cls d "" first
+cls o normal first
 cls n first first
 cls n normal normal
 cls n "" normal
+
+# And proj says so of the ones it demotes, origin and all, and of no other.
+dem() {
+  local got
+  got=$(demoted "$tmp/jobs/$1")
+  [ "$got" = "$2" ] || { echo "FAIL: demoted $1: wanted '$2', got '$got'" >&2; exit 1; }
+}
+dem p ""
+dem n ""
+dem d "asked as --pipeline, but its origin (https://github.com/sam/psiv) isn't in pipelineRepos: it goes as --first"
+dem o "asked as --pipeline, but its origin (none) isn't in pipelineRepos: it goes as --first"
 
 echo "proj-pick: ok"

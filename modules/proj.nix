@@ -88,12 +88,13 @@ in
       defaultText = lib.literalExpression "if maxJobs > 1 then 1 else 0";
       description = ''
         Of the maxJobs slots, how many only pipeline jobs in the pipeline's
-        own repos (`proj run --pipeline` in a project of one of
-        `burrow.autoland.pipelineRepos`: the steward's jobs there, their
-        issues) may take, so work on the pipeline itself waits only on other
-        such work, never on everyone else's long jobs. A pipeline job in any
-        other project goes as `--first`: ahead of the line, but within its
-        project's cap and never in these slots.
+        own repos (`proj run --pipeline` in a project whose clone's origin
+        is one of `burrow.autoland.pipelineRepos` on GitHub: the steward's
+        jobs there, their issues) may take, so work on the pipeline itself
+        waits only on other such work, never on everyone else's long jobs. A
+        pipeline job in any other project goes as `--first`: ahead of the
+        line, but within its project's cap and never in these slots; `proj
+        status` and its turn's journal say so, origin and all.
       '';
     };
     maxJobsPerProject = lib.mkOption {

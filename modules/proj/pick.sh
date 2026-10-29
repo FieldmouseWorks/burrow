@@ -36,31 +36,59 @@ pick() {
   done
 }
 
-# Whether the project at a path is one of the pipeline's own repos'
-# (PIPELINE: their OWNER/NAMEs, any case, as autoland.pipelineRepos has
-# them), by its clone's origin.
+# A clone's origin URL, or nothing (no clone, no origin, or no path at all:
+# git -C "" would ask whatever repo it runs in).
+origin() {
+  [ -n "$1" ] || return 0
+  git -C "$1" remote get-url origin 2>/dev/null || true
+}
+
+# The GitHub repo a clone is of, as owner/name in lower case, from its origin
+# in any form git takes (https, ssh:// or scp-like, a user or a .git or not),
+# or nothing for anything else: another host, a local path, a longer path.
+github_repo() {
+  local url
+  url=$(origin "$1")
+  url=${url,,}
+  url=${url%/}
+  url=${url%.git}
+  if [[ $url =~ ^(https?://([^@/]+@)?github\.com/|ssh://([^@/]+@)?github\.com(:[0-9]+)?/|([^@/]+@)?github\.com:)([^/]+/[^/]+)$ ]]; then
+    echo "${BASH_REMATCH[6]}"
+  fi
+}
+
+# Whether the project at a path is a clone of one of the pipeline's own repos
+# (PIPELINE: their OWNER/NAMEs, any case, as autoland.pipelineRepos has them).
 pipeline_project() {
-  local url r name owner
-  url=$(git -C "$1" remote get-url origin 2>/dev/null) || return 1
-  r=${url%/}
-  r=${r%.git}
-  name=${r##*/}
-  r=${r%/*}
-  owner=${r##*[/:]}
-  [ -n "$name" ] && [ -n "$owner" ] || return 1
-  case " ${PIPELINE,,} " in *" ${owner,,}/${name,,} "*) return 0 ;; esac
+  local r
+  r=$(github_repo "$1")
+  [ -n "$r" ] || return 1
+  case " ${PIPELINE,,} " in *" $r "*) return 0 ;; esac
   return 1
 }
 
-# A job's class, from its dir: pipeline for one run with --pipeline in one of
-# the pipeline's own projects, every turn of it; first for one run with
-# --pipeline in any other, every turn of it, so it still goes ahead of the
+# A job's class, from its dir. One run with --pipeline is a pipeline one,
+# every turn of it, only while its project is one of the pipeline's own;
+# anywhere else it's first, every turn of it, so it still goes ahead of the
 # line but counts against its project's PER_PROJECT and stays off the
 # pipeline's slots (one repo's PRs, waiting on that repo's own lock, can't
-# fill the machine); otherwise first or normal, as the turn was started.
+# fill the machine). Asked each time, so a job from before this rule, or one
+# whose repo was taken off the list since, is held to it too. Otherwise first
+# or normal, as the turn was started.
 class() {
-  if [ -e "$1/pipeline" ]; then echo pipeline
-  elif [ -e "$1/first" ]; then echo first
-  else echo "${2:-normal}"
+  if [ ! -e "$1/pipeline" ]; then echo "${2:-normal}"
+  elif pipeline_project "$(cat "$1/project" 2>/dev/null)"; then echo pipeline
+  else echo first
   fi
+}
+
+# What proj says of a job that asked to be pipeline work and isn't, so a
+# mis-set origin or list doesn't quietly demote it: nothing for any other.
+demoted() {
+  local d o
+  [ -e "$1/pipeline" ] || return 0
+  d=$(cat "$1/project" 2>/dev/null) || d=''
+  pipeline_project "$d" && return 0
+  o=$(origin "$d")
+  echo "asked as --pipeline, but its origin (${o:-none}) isn't in pipelineRepos: it goes as --first"
 }

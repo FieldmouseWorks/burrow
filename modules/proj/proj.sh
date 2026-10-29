@@ -7,9 +7,11 @@
 #   proj run --vm PROJECT "task"  the same, in a fresh agent sandbox (agent.sh)
 #   proj run --first PROJECT "task"  ahead of the line (someone is waiting on it)
 #   proj run --pipeline PROJECT "task"  work on the pipeline itself: in one of
-#                               its own repos (PIPELINE), ahead of everything,
-#                               and its own slots; in any other, as --first
-#                               (every turn of it, either way)
+#                               its own repos (PIPELINE, by the clone's GitHub
+#                               origin), ahead of everything, and its own
+#                               slots; in any other, as --first, and status
+#                               and the turn's journal say so (every turn of
+#                               it, either way)
 #   proj run --kick NAME PROJECT "task"  kick NAME (HANDLER or HANDLER/OWNER/REPO,
 #                               one of burrow-events') each time a turn ends
 #   proj run --timeout DUR PROJECT "task"  each turn stopped after DUR (as
@@ -368,10 +370,11 @@ case "${1:-status}" in
       [ -z "$limit" ] || echo "$limit" >"$jobs/$id/timeout"
       [ -z "$idle" ] || echo "$idle" >"$jobs/$id/idle"
       # Work on the pipeline holds the pipeline's slots only in its own
-      # repos' projects (class, in pick.sh).
-      if [ -z "$pipeline" ]; then :
-      elif pipeline_project "$src/$p"; then : >"$jobs/$id/pipeline"
-      else : >"$jobs/$id/first"
+      # repos' projects (class, in pick.sh), and says so when it won't.
+      if [ -n "$pipeline" ]; then
+        : >"$jobs/$id/pipeline"
+        why=$(demoted "$jobs/$id")
+        [ -z "$why" ] || echo "proj: $id $why" >&2
       fi
       if [ -n "$vm" ]; then agent new "$p" >"$jobs/$id/agent"; fi
     else
@@ -391,8 +394,9 @@ case "${1:-status}" in
     mkdir -p "$jobs"
     find "$jobs" -mindepth 1 -maxdepth 1 -type d -not -name '.*' -printf '%T@ %f\n' | sort -rn | head -n "${2:-15}" |
       while read -r _ id; do
-        printf '%-40s %-8s %s%s%s\n' "$id" "$(state "$id")" \
+        printf '%-40s %-8s %s%s%s%s\n' "$id" "$(state "$id")" \
           "$(sed 's/.*/[vm &] /' "$jobs/$id/agent" 2>/dev/null)" \
+          "$(demoted "$jobs/$id" | sed 's/.\+/[&] /')" \
           "$(cut -f1 "$jobs/$id/await" 2>/dev/null | paste -sd' ' | sed 's/.\+/[awaits &] /')" \
           "$(head -c 100 "$jobs/$id/$(cat "$jobs/$id/turns" 2>/dev/null).result" 2>/dev/null | tr '\n' ' ')"
       done
@@ -585,6 +589,9 @@ Carry on from there. Anything you left in the background last turn was stopped w
     # The last turn's waits, now that this one has started: this turn writes
     # its own to await.next, and await only once it ends.
     rm -f "$dir/await" "$dir/await.next"
+    # In the turn's journal too, where its wait would be looked into.
+    why=$(demoted "$dir")
+    [ -z "$why" ] || echo "proj: $why" >&2
     take_slot "$id" "$n" "$(class "$jobs/$id" "$3")"
     limit=$(cat "$dir/timeout" 2>/dev/null || echo "$TIMEOUT")
     # One budget for the whole turn, however many runs it takes and the
