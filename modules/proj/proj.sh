@@ -107,15 +107,41 @@ answer() { grep '"type":"result"' "$1" 2>/dev/null | jq -rs 'map(.result // "" |
 # Swapped in whole, so a reader never finds it missing or half written.
 set_turns() { echo "$2" >"$jobs/$1/turns.new" && mv -f "$jobs/$1/turns.new" "$jobs/$1/turns"; }
 
-# A duration as timeout(1) reads it (90, 90s, 30m, 2h, 1d), in seconds.
+# A duration as timeout(1) reads it (90, 1.5h, 30m, 1d; 0 for none), in
+# whole seconds, rounded up; fails on anything else.
 secs() {
-  local per
-  case $1 in *m) per=60 ;; *h) per=3600 ;; *d) per=86400 ;; *) per=1 ;; esac
-  echo $((${1%[smhd]} * per))
+  awk -v d="$1" 'BEGIN {
+    if (d !~ /^([0-9]+\.?[0-9]*|\.[0-9]+)([eE][-+]?[0-9]+)?[smhd]?$/) exit 1
+    u = substr(d, length(d)); per = 1
+    if (u == "m") per = 60; else if (u == "h") per = 3600; else if (u == "d") per = 86400
+    if (u ~ /[smhd]/) d = substr(d, 1, length(d) - 1)
+    s = d * per; i = int(s); if (i < s) i++
+    print i
+  }'
 }
 
 # How a job waits on its own long work, which its answer would stop.
 LONG="A command that can outlast one Bash call (ten minutes), a long build or test run, goes to the background with its output and exit code written to a file, and you wait for that file in the foreground, in steps under ten minutes each; answer only once it's there."
+
+# Everything in this shell's unit but the shell: what a run left behind, in
+# whatever process group, TERM first, then KILL. Fails if any of it is still
+# there after that.
+reap() {
+  local cg p sig procs others
+  cg=/sys/fs/cgroup$(sed -n 's/^0:://p' /proc/self/cgroup)
+  for sig in TERM 0 0 0 0 0 0 0 0 0 KILL 0 0 0 0 0 0 0 0 0; do
+    others=''
+    mapfile -t procs <"$cg/cgroup.procs"
+    for p in "${procs[@]}"; do
+      [ "$p" = "$$" ] && continue
+      others=1
+      kill -"$sig" "$p" 2>/dev/null || true
+    done
+    [ -n "$others" ] || return 0
+    sleep 1
+  done
+  return 1
+}
 
 # Known not to be running: not "can't say".
 gone() { case $(systemctl --user show -P ActiveState "$1" 2>/dev/null) in inactive | failed) return 0 ;; esac; return 1; }
@@ -347,10 +373,14 @@ case "${1:-status}" in
       cat "$jobs/$id/$n.jsonl"
     elif [ -n "$last" ] && text=$(answer "$jobs/$id/$n.jsonl") && [ -n "$text" ]; then
       printf '%s\n' "$text"
-      # An answer, then an error: say what the turn ended on.
+      # An answer, then an error, or a run told to answer again that ended
+      # without one: say what the turn ended on.
+      outcome=$(cat "$jobs/$id/$n.outcome" 2>/dev/null || true)
       if jq -e .is_error <<<"$last" >/dev/null; then
         printf '\n(turn %s ended in an error)\n' "$n"
         jq -c '.errors // empty' <<<"$last"
+      elif [ -n "$outcome" ] && [ "$outcome" != "done" ]; then
+        printf '\n(turn %s then ended: %s)\n' "$n" "$outcome"
       fi
     else
       # No result yet, or none with anything to say: an error's can hold
@@ -512,7 +542,14 @@ Carry on from there. Anything you left in the background last turn was stopped w
     rm -f "$dir/await" "$dir/await.next"
     take_slot "$id" "$n" "$3"
     limit=$(cat "$dir/timeout" 2>/dev/null || echo "$TIMEOUT")
-    deadline=$(($(date +%s) + $(secs "$limit")))
+    # One budget for the whole turn, however many runs it takes; 0 is none.
+    if ! total=$(secs "$limit"); then
+      echo "proj: the timeout $limit isn't a duration" >&2
+      echo failed >"$dir/$n.outcome"
+      exit 2
+    fi
+    deadline=''
+    [ "$total" -eq 0 ] || deadline=$(($(date +%s) + total))
     : >"$dir/$n.jsonl"
     prompt=$dir/prompt.$n
     while :; do
@@ -520,8 +557,11 @@ Carry on from there. Anything you left in the background last turn was stopped w
       if [ -s "$dir/session" ]; then args+=(--resume "$(cat "$dir/session")"); fi
       # Where this run's stream starts: an earlier run's answer isn't its.
       from=$(($(wc -l <"$dir/$n.jsonl") + 1))
-      left=$((deadline - $(date +%s)))
-      [ "$left" -gt 0 ] || left=1
+      left=0
+      if [ -n "$deadline" ]; then
+        left=$((deadline - $(date +%s)))
+        [ "$left" -gt 0 ] || left=1
+      fi
       if [ -s "$dir/agent" ]; then
         timeout -k 1m "$left" agent sh "$(cat "$dir/agent")" claude "${args[@]}" <"$prompt" >>"$dir/$n.jsonl" &
       else
@@ -562,19 +602,27 @@ Carry on from there. Anything you left in the background last turn was stopped w
       # Still up after its answer, it was waiting on something it left in the
       # background (a build past one Bash call), which went with it: once a
       # turn, it's told so in the same conversation and slot, and answers
-      # again. Waiting on GitHub is proj await's.
-      if [ -n "$cut" ] && [ "$prompt" = "$dir/prompt.$n" ] && jq -e '.is_error | not' <<<"$last" >/dev/null 2>&1 &&
-        [ "$(date +%s)" -lt "$deadline" ]; then
+      # again. Waiting on GitHub is proj await's. Only once all of the last
+      # run is gone, so none of it overlaps the next or writes to its
+      # stream; a sandbox's work is in the VM, out of reach, so a --vm job
+      # isn't told.
+      if [ -n "$cut" ] && [ "$prompt" = "$dir/prompt.$n" ] && [ ! -s "$dir/agent" ] &&
+        jq -e '.is_error | not' <<<"$last" >/dev/null 2>&1 &&
+        { [ -z "$deadline" ] || [ "$(date +%s)" -lt "$deadline" ]; } && reap; then
         printf '%s\n' "Your answer ended the turn while something you left running in the background was still going, and it was stopped with it: nothing more from it reaches you, and the turn isn't over. If you were waiting on it, run it again and wait for it now. $LONG If you were waiting on GitHub, run \`proj await URL\` for it. Then answer again." >"$dir/$n.cut"
         prompt=$dir/$n.cut
+        # The next run's quiet counts from its start, and is its own.
+        rm -f "$dir/$n.quiet"
+        touch "$dir/$n.jsonl"
         continue
       fi
       break
     done
     # The turn ends as its last run did; its answer is every run's.
+    text=$(answer "$dir/$n.jsonl" || true)
+    [ -z "$text" ] || printf '%s\n' "$text" >"$dir/$n.result"
     if [ -n "$last" ]; then
       rc=0
-      answer "$dir/$n.jsonl" >"$dir/$n.result"
       jq -r 'if .is_error then "error" else "done" end' <<<"$last" >"$dir/$n.outcome"
       # What it awaits, from the baseline `proj await` took; one line per
       # target, the first await of it in the turn.
