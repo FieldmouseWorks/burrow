@@ -1,0 +1,47 @@
+{
+  "conary": "note v1",
+  "change": "0k3rr8exd2q34acyh3yv4vetez",
+  "repo": {
+    "owner": "fieldmouseworks",
+    "name": "burrow"
+  },
+  "pr": 120,
+  "url": "https://github.com/fieldmouseworks/burrow/pull/120",
+  "summary": "autoland: act on GitHub only as the steward's own App",
+  "task": "FieldmouseWorks/Conary#14",
+  "author": {
+    "kind": "agent",
+    "login": "TusanHomichi",
+    "session": "https://claude.ai/code/session_01BkHcyDYaKnE7mRRMdYCFVC"
+  },
+  "landing": {
+    "revision": "a3c4ea1867bb073ffbab68483b10714517521ec6e1e119b8ddd886dfcf7c7b3d",
+    "before": "2735f0690b06499ecf32641ac6ae781eedc6882a",
+    "after": "337b375352b5bd6c555d5fd667309d1942a84e64",
+    "by": {
+      "kind": "status",
+      "login": "TusanHomichi"
+    },
+    "at": 1793233076888
+  },
+  "evidence": [
+    {
+      "kind": "review",
+      "check": "codex",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/120#pullrequestreview-5691040054"
+    },
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/40787362629/job/123163787126"
+    },
+    {
+      "kind": "ci",
+      "check": "agents",
+      "result": "pass",
+      "source": "status agents"
+    }
+  ]
+}
