@@ -1,0 +1,47 @@
+{
+  "conary": "note v1",
+  "change": "0ey9x773zb98bftrhwyxrvs3m3",
+  "repo": {
+    "owner": "fieldmouseworks",
+    "name": "burrow"
+  },
+  "pr": 133,
+  "url": "https://github.com/fieldmouseworks/burrow/pull/133",
+  "summary": "autoland: a repo's proofSlots run its proof jobs a few at a time, oldest PR first",
+  "task": "FieldmouseWorks/remi#138",
+  "author": {
+    "kind": "person",
+    "login": "TusanHomichi",
+    "session": null
+  },
+  "landing": {
+    "revision": "a198655238eb68cb42179d146828f5328b5226e0f9bc180f9754101c2b6da2e3",
+    "before": "ce26da5b746e56b8c530ff6d015658fb122be636",
+    "after": "1f083b2cc196264514e0abf35337aa28373af8cc",
+    "by": {
+      "kind": "status",
+      "login": "TusanHomichi"
+    },
+    "at": 1793247723132
+  },
+  "evidence": [
+    {
+      "kind": "review",
+      "check": "codex",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/133#pullrequestreview-5692362042"
+    },
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/40809538076/job/123236328012"
+    },
+    {
+      "kind": "ci",
+      "check": "agents",
+      "result": "pass",
+      "source": "status agents"
+    }
+  ]
+}
