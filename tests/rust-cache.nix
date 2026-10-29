@@ -1,82 +1,248 @@
-# rust-cache's wrapper, for real: the example machine's own RUSTC_WRAPPER,
-# made for a cache directory in the build's sandbox, builds a crate through
-# sccache and a fresh target dir's build of it comes out of the cache. The
-# server listens on a socket in the user's own 0700 directory, and leaves
-# alone a lock the build held: a build under a held gate slot frees it when it
-# ends, server or no server. A cached `cargo check` never stands in for
-# clippy, so the lint still fails. A build sccache won't take (incremental by
-# name), and a user with no cache directory, compile without it.
+# rust-cache, for real: a machine with the cache on for dev and for a CI
+# runner's user, ci. A crate with no dependencies, built without incremental
+# compilation, stands in for a build's dependencies. The checks:
+# - a fresh target dir's build comes out of the cache, for dev and for the
+#   runner, whose sandbox makes the rest of the system read-only, and for a
+#   unit systemd-run started;
+# - all of a user's units share one daemon: a runner that has been building
+#   all along takes what another unit just stored (a daemon of its own would
+#   still miss it), and the compile runs in the runner's unit, not the
+#   daemon's;
+# - a cached `cargo check` never stands in for clippy, and a compile error
+#   still fails the build;
+# - whatever keeps the cache from working compiles without it: incremental
+#   builds sccache won't take, the user's own SCCACHE_ settings, the daemon
+#   stopped, and a socket with no daemon behind it, which mustn't start a
+#   stray server either;
+# - nobody else reaches a user's cache, and the daemon listens on no port.
 #
 #   nix build .#checks.x86_64-linux.rust-cache -L
 { self, pkgs }:
 let
-  # The sandbox's build directory; the check fails at once if it's elsewhere.
-  dir = "/build/rust-cache";
-  machine = self.nixosConfigurations.example.extendModules {
-    modules = [{ burrow.rustCache.dir = dir; }];
-  };
-  wrapper = machine.config.systemd.globalEnvironment.RUSTC_WRAPPER;
+  crate = name: body: pkgs.runCommand "crate-${name}" { } ''
+    mkdir -p $out/src
+    cat >$out/Cargo.toml <<'EOF'
+    [package]
+    name = "${name}"
+    version = "0.1.0"
+    edition = "2021"
+    EOF
+    echo ${pkgs.lib.escapeShellArg body} >$out/src/lib.rs
+  '';
+  # clippy's needless_return, which rustc doesn't mind.
+  ok = crate "ok" "pub fn next(x: i32) -> i32 { return x + 1; }";
+  broken = crate "broken" ''pub fn next(x: i32) -> i32 { "not a number" }'';
+
+  # rustc, noting which cgroup each compile runs in.
+  spy = pkgs.writeShellScript "rustc-spy" ''
+    cat /proc/self/cgroup >>spy.log
+    exec ${pkgs.rustc}/bin/rustc "$@"
+  '';
+
+  # A CI runner, as far as the cache can tell: one long-lived unit, sandboxed
+  # as remi's are, running each job it's given. A job is a script in
+  # queue/; its output and exit status land next to it.
+  runner = pkgs.writeShellScript "runner" ''
+    mkdir -p queue
+    while :; do
+      for job in queue/*.sh; do
+        [ -e "$job" ] || continue
+        status=0
+        bash "$job" >"''${job%.sh}.log" 2>&1 || status=$?
+        echo "$status" >"''${job%.sh}.status"
+        rm "$job"
+      done
+      sleep 0.2
+    done
+  '';
 in
-pkgs.runCommand "rust-cache-check" {
-  nativeBuildInputs = with pkgs; [ cargo rustc clippy sccache util-linux ];
-} ''
-  set -euo pipefail
-  fail() { echo "FAIL: $*" >&2; exit 1; }
-  me=$(id -un)
-  mkdir -p ${dir}
-  mkdir -m 0700 ${dir}/$me
-  export HOME=$PWD/home CARGO_INCREMENTAL=0 RUSTC_WRAPPER=${wrapper}
+pkgs.testers.runNixOSTest {
+  name = "rust-cache";
 
-  mkdir -p crate/src
-  cat >crate/Cargo.toml <<'EOF'
-  [package]
-  name = "crate"
-  version = "0.1.0"
-  edition = "2021"
-  EOF
-  cat >crate/src/lib.rs <<'EOF'
-  pub fn next(x: i32) -> i32 {
-      return x + 1;
-  }
-  EOF
-  cd crate
+  nodes.machine = {
+    imports = [ self.nixosModules.rust-cache ];
+    burrow.rustCache = {
+      enable = true;
+      users = [ "ci" ];
+    };
+    environment.systemPackages = with pkgs; [ cargo rustc clippy python3 ];
 
-  stats() {
-    SCCACHE_SERVER_UDS=$sock sccache --show-stats --stats-format json
-  }
-  hits() { stats | sed -n 's/.*"cache_hits":{"counts":{"Rust":\([0-9]*\).*/\1/p'; }
+    users.users.dev = {
+      isNormalUser = true;
+      uid = 1001;
+      group = "dev";
+    };
+    users.groups.dev.gid = 1001;
+    # Has no cache.
+    users.users.other = {
+      isNormalUser = true;
+      uid = 1002;
+      group = "other";
+    };
+    users.groups.other.gid = 1002;
+    users.users.ci = {
+      isSystemUser = true;
+      group = "ci";
+      home = "/var/lib/ci";
+    };
+    users.groups.ci = { };
 
-  # A build under a gate slot, held the way a shell script holds one.
-  (
-    exec 9>../slot.lock
-    flock 9
-    cargo build -q
-  )
-  sock=$(echo ${dir}/$me/run/*.sock)
-  [ -S "$sock" ] || fail "no server socket in ${dir}/$me/run"
-  [ "$(stat -c %a ${dir}/$me)" = 700 ] || fail "the user's cache directory isn't 0700"
-  [ "$(stat -c %a ${dir}/$me/run)" = 700 ] || fail "the sockets' directory isn't 0700"
-  stats >/dev/null || fail "the server isn't answering"
-  flock -n ../slot.lock true || fail "the server holds the build's gate slot"
+    systemd.services.runner = {
+      wantedBy = [ "multi-user.target" ];
+      path = with pkgs; [ bash coreutils cargo rustc ];
+      serviceConfig = {
+        User = "ci";
+        StateDirectory = "ci";
+        WorkingDirectory = "/var/lib/ci";
+        ExecStart = runner;
+        NoNewPrivileges = true;
+        ProtectHome = true;
+        ProtectSystem = "strict";
+        PrivateTmp = true;
+      };
+    };
+    virtualisation.memorySize = 2048;
+  };
 
-  rm -rf target
-  cargo build -q
-  [ "$(hits)" -ge 1 ] || fail "a fresh target dir's build missed the cache: $(stats)"
+  testScript = { nodes, ... }: ''
+    import json
+    import shlex
 
-  rm -rf target
-  cargo check -q
-  rm -rf target
-  if cargo clippy -q -- -D warnings 2>clippy.log; then
-    fail "clippy passed: the cache stood in for the lint"
-  fi
-  grep -q needless_return clippy.log || fail "clippy failed without the lint: $(cat clippy.log)"
+    sccache = "${nodes.machine.systemd.services.rust-cache-dev.serviceConfig.ExecStart}"
+    build = "CARGO_INCREMENTAL=0 cargo build -q"
 
-  rm -rf target
-  CARGO_INCREMENTAL=1 cargo build -q || fail "an incremental build failed"
+    def place(src, path, owner):
+        machine.succeed(f"cp -rT {src} {path} && chmod -R u+w {path} && chown -R {owner}: {path}")
 
-  rm -rf target
-  USER=nobody cargo build -q || fail "a user with no cache failed to build"
+    def run(cmd, user="dev"):
+        return machine.execute(f"su - {user} -c {shlex.quote(cmd)} 2>&1")
 
-  SCCACHE_SERVER_UDS=$sock sccache --stop-server >/dev/null
-  touch $out
-''
+    jobs = 0
+
+    def job(cmd):
+        global jobs
+        jobs += 1
+        q = f"/var/lib/ci/queue/{jobs}"
+        machine.succeed(f"cat >{q}.tmp <<'EOF'\n{cmd}\nEOF")
+        machine.succeed(f"chown ci: {q}.tmp && mv {q}.tmp {q}.sh")
+        machine.wait_until_succeeds(f"test -e {q}.status")
+        return int(machine.succeed(f"cat {q}.status")), machine.succeed(f"cat {q}.log")
+
+    def oneshot(cmd):
+        return machine.execute(
+            "systemd-run --uid=ci --gid=ci --wait --pipe --collect"
+            " -p StateDirectory=ci -p WorkingDirectory=/var/lib/ci"
+            " -p ProtectSystem=strict -p ProtectHome=yes -p PrivateTmp=yes"
+            " -p Environment=PATH=/run/current-system/sw/bin"
+            f" bash -c {shlex.quote(cmd)} 2>&1"
+        )
+
+    def hits(user):
+        out = machine.succeed(
+            f"runuser -u {user} -- env SCCACHE_SERVER_UDS=/var/cache/sccache/{user}/sccache.sock"
+            f" {sccache} --show-stats --stats-format json"
+        )
+        return json.loads(out)["stats"]["cache_hits"]["counts"].get("Rust", 0)
+
+    def ok(result, what):
+        status, out = result
+        assert status == 0, f"{what} failed: {out}"
+        return out
+
+    machine.wait_for_unit("rust-cache-dev.service")
+    machine.wait_for_unit("rust-cache-ci.service")
+    machine.wait_for_unit("runner.service")
+
+    with subtest("each user's daemon is up, on a socket only its user can reach"):
+        for user in ["dev", "ci"]:
+            d = f"/var/cache/sccache/{user}"
+            assert machine.succeed(f"stat -c '%U %a' {d}").split() == ["root", "711"]
+            for sub in ["run", "cache"]:
+                assert machine.succeed(f"stat -c '%U %a' {d}/{sub}").split() == [user, "700"]
+            assert machine.succeed(f"readlink {d}/sccache.sock").strip() == "run/sccache.sock"
+            machine.wait_until_succeeds(f"test -S {d}/sccache.sock")
+        machine.fail("systemctl cat rust-cache-other.service")
+        machine.fail("ss -Hltnp | grep sccache")
+        status, out = run(
+            "python3 -c 'import socket; socket.socket(socket.AF_UNIX).connect(\"/var/cache/sccache/dev/sccache.sock\")'",
+            "other",
+        )
+        assert status != 0 and "PermissionError" in out, f"other reached dev's daemon: {out}"
+
+    with subtest("a fresh target dir's build comes out of the cache"):
+        place("${ok}", "/home/dev/a", "dev")
+        ok(run(f"cd a && {build}"), "dev's first build")
+        before = hits("dev")
+        ok(run(f"cd a && rm -rf target && {build}"), "dev's second build")
+        assert hits("dev") > before, "dev's fresh target dir missed the cache"
+
+    with subtest("all of a user's units share one daemon, and compile in their own"):
+        # The runner builds first, so anything of its own that serves it is
+        # already running when another unit stores the crate it builds next.
+        place("${ok}", "/var/lib/ci/a", "ci")
+        status, out = job(f"cd a && {build}")
+        assert status == 0, out
+        place("${ok}", "/var/lib/ci/x", "ci")
+        ok(oneshot(f"cd x && {build}"), "the oneshot unit's build")
+        before = hits("ci")
+        status, out = job(f"cd x && rm -rf target && {build}")
+        assert status == 0, out
+        assert hits("ci") > before, "the runner missed what the other unit stored"
+        # A compiler of its own, so a miss: this one compiles.
+        status, out = job(f"cd x && rm -rf target && RUSTC=${spy} {build}")
+        assert status == 0, out
+        cgroups = machine.succeed("cat /var/lib/ci/x/spy.log")
+        assert "runner.service" in cgroups and "rust-cache" not in cgroups, cgroups
+        assert machine.succeed("pgrep -c -u ci sccache").strip() == "1"
+
+    with subtest("a cached check never stands in for clippy, and a compile error still fails"):
+        place("${ok}", "/home/dev/lint", "dev")
+        ok(run("cd lint && CARGO_INCREMENTAL=0 cargo check -q"), "cargo check")
+        status, out = run("cd lint && rm -rf target && CARGO_INCREMENTAL=0 cargo clippy -q -- -D warnings")
+        assert status != 0 and "needless_return" in out, f"clippy let the lint through: {out}"
+        place("${broken}", "/home/dev/broken", "dev")
+        for _ in range(2):
+            status, out = run(f"cd broken && {build}")
+            assert status != 0 and "E0308" in out, f"a broken crate built: {out}"
+
+    with subtest("whatever keeps the cache from working compiles without it"):
+        ok(run("cd a && rm -rf target && CARGO_INCREMENTAL=1 cargo build -q"), "CARGO_INCREMENTAL=1")
+        ok(run("cd a && rm -rf target && CARGO_BUILD_INCREMENTAL=true cargo build -q"), "build.incremental")
+        # cargo itself takes only true and false there; sccache refuses a
+        # compile that has a 1 anyway.
+        ok(
+            run("cd a && CARGO_BUILD_INCREMENTAL=1 $RUSTC_WRAPPER rustc --crate-type lib --edition 2021 src/lib.rs --out-dir out"),
+            "CARGO_BUILD_INCREMENTAL=1",
+        )
+        before = hits("dev")
+        ok(run(f"cd a && rm -rf target && SCCACHE_LOG=debug {build}"), "SCCACHE_LOG")
+        assert hits("dev") > before, "the user's SCCACHE_LOG kept the build out of the cache"
+
+        machine.succeed("systemctl stop rust-cache-dev.service")
+        machine.fail("test -e /var/cache/sccache/dev/run/sccache.sock")
+        out = ok(run(f"cd a && rm -rf target && {build}"), "a build with the daemon stopped")
+        assert "sccache" not in out, out
+
+        # A socket with nobody behind it, as a daemon that died leaves one.
+        ok(
+            run("python3 -c 'import socket; socket.socket(socket.AF_UNIX).bind(\"/var/cache/sccache/dev/run/sccache.sock\")'"),
+            "leaving a socket",
+        )
+        machine.succeed("test -S /var/cache/sccache/dev/run/sccache.sock")
+        ok(run(f"cd a && rm -rf target && {build}"), "a build with a dead daemon's socket")
+        machine.fail("pgrep -u dev sccache")
+        machine.fail("test -e /home/dev/.cache/sccache")
+
+        machine.succeed("systemctl start rust-cache-dev.service")
+        machine.wait_until_succeeds("test -S /var/cache/sccache/dev/sccache.sock")
+        before = hits("dev")
+        ok(run(f"cd a && rm -rf target && {build}"), "a build with the daemon back")
+        assert hits("dev") > before, "the daemon came back without its cache"
+
+        place("${ok}", "/home/other/a", "other")
+        before = hits("dev")
+        ok(run(f"cd a && {build}", "other"), "a build with no cache")
+        ok(run(f"cd a && rm -rf target && USER=dev {build}", "other"), "a build naming someone else's cache")
+        assert hits("dev") == before, "other's build used dev's cache"
+  '';
+}
