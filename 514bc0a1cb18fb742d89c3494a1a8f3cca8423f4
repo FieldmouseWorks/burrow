@@ -1,0 +1,53 @@
+{
+  "conary": "note v1",
+  "change": "6qbhygndqd5h5bsm2388m86yzn",
+  "repo": {
+    "owner": "fieldmouseworks",
+    "name": "burrow"
+  },
+  "pr": 141,
+  "url": "https://github.com/fieldmouseworks/burrow/pull/141",
+  "summary": "autoland: a conflicted PR goes to a Claude job, and no failing step loops quietly",
+  "task": null,
+  "author": {
+    "kind": "agent",
+    "login": "TusanHomichi",
+    "session": "https://claude.ai/code/session_01BkHcyDhMu74PjVCmyWpXkF"
+  },
+  "landing": {
+    "revision": "6e68e2d608dcf6ab6d90a87a87e06884df124b3c2c4e69a0bdc6ccdc232a4d9a",
+    "before": "1f6bb2464e4135b86c5494fbe0580c416f30439a",
+    "after": "514bc0a1cb18fb742d89c3494a1a8f3cca8423f4",
+    "by": {
+      "kind": "status",
+      "login": "fieldmouseworks-steward[bot]"
+    },
+    "at": 1793305126485
+  },
+  "evidence": [
+    {
+      "kind": "ci",
+      "check": "check / commits",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/40913803309/job/123588541491"
+    },
+    {
+      "kind": "review",
+      "check": "codex",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/141#pullrequestreview-5701510905"
+    },
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/40913803309/job/123588540950"
+    },
+    {
+      "kind": "ci",
+      "check": "agents",
+      "result": "pass",
+      "source": "status agents"
+    }
+  ]
+}

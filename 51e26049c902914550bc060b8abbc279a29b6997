@@ -1,0 +1,53 @@
+{
+  "conary": "note v1",
+  "change": "0me2nm3thxfmr69askqkafbpfv",
+  "repo": {
+    "owner": "fieldmouseworks",
+    "name": "burrow"
+  },
+  "pr": 163,
+  "url": "https://github.com/fieldmouseworks/burrow/pull/163",
+  "summary": "house: Rust by default, and new Python says why it isn't",
+  "task": "https://claude.ai/code/project/chan_01Ad4f4oDXfFTCEzLHzMTD8q?thread=cmsg_01Ad4f4oDXfFTCEzLHzMTD8qTPyLKwpVCQ3MT9RmF6tGg4",
+  "author": {
+    "kind": "agent",
+    "login": "TusanHomichi",
+    "session": "https://claude.ai/code/session_01BkHcyEm2wbmtCrFpycgeFM"
+  },
+  "landing": {
+    "revision": "63b32895a84e7484dbae4dbf9b448813bc33e3e79ceb401ab7aa74b56a1a8283",
+    "before": "514bc0a1cb18fb742d89c3494a1a8f3cca8423f4",
+    "after": "51e26049c902914550bc060b8abbc279a29b6997",
+    "by": {
+      "kind": "status",
+      "login": "fieldmouseworks-steward[bot]"
+    },
+    "at": 1793305129531
+  },
+  "evidence": [
+    {
+      "kind": "ci",
+      "check": "check / commits",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/40912818572/job/123585039318"
+    },
+    {
+      "kind": "review",
+      "check": "codex",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/163#pullrequestreview-5701465056"
+    },
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/40912818572/job/123585039196"
+    },
+    {
+      "kind": "ci",
+      "check": "agents",
+      "result": "pass",
+      "source": "status agents"
+    }
+  ]
+}
