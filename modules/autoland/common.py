@@ -332,12 +332,19 @@ def kick(repo):
     """Start the repo's pass now (burrow-events), for something it would find
     that GitHub sends no event for. Best effort: the hourly catch-up is there
     for one that doesn't get through."""
+    poke(f"{CFG['kick']}/{repo}")
+
+
+def poke(url):
+    """Start the pass a burrow-events kick URL names, now: this steward's for
+    a repo, or another handler's (the watchdog's, when what it waits on
+    changed). Best effort, like kick."""
     if DRY:
         return
     try:
-        urllib.request.urlopen(urllib.request.Request(f"{CFG['kick']}/{repo}", data=b"", method="POST"), timeout=5).close()
+        urllib.request.urlopen(urllib.request.Request(url, data=b"", method="POST"), timeout=5).close()
     except OSError as e:
-        log(f"{repo}: couldn't kick its pass: {e}")
+        log(f"couldn't kick {url}: {e}")
 
 
 def load(name, default):

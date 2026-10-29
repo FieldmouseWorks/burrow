@@ -50,8 +50,10 @@ import time
 
 import common as C
 import dashboard as D
+import proofs as P
 import repos as R
 import reviewers as V
+import waits
 from common import CFG, DRY, MIN, STATE, load, log, repo_cfg, save, ts
 from seal import MAJOR as MAJOR_VERDICT  # renovate-sweep's, on a Renovate major
 from touches import bot_edited, dep_kind, gate_edit, moved_from, one_way
@@ -118,10 +120,12 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
         after(since, wait)
         return since + wait * MIN
 
-    def settle(state, desc, why=None):
+    def settle(state, desc, why=None, wait=waits.STEWARD):
+        """The PR's status, and what it waits on for the watchdog (waits.py)."""
         ok = post_status(repo, pr, state, desc)
         if why:
             digest.append((why, line, desc))
+        waits.note(repo, pr, desc, wait)
         # Not settled (any more): nothing may merge it.
         if state != "success" and (C.queued(pr) or st.get("landed")):
             if C.unland(repo, pr):
@@ -345,19 +349,32 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
 
     def prove():
         """Only checks that run on a machine, not in CI, are left: a Claude
-        job runs them on this head and records their verdicts."""
-        if lost("proved"):
-            again("proved", proof_task(repo, pr, ci_names, rc["proofJobs"]), "running " + ", ".join(ci_names), "its verdict")
-        elif st.get("proved") == head or started("proved", proof_task(repo, pr, ci_names, rc["proofJobs"])):
-            settle("pending", f"Settled; a Claude job is running {', '.join(ci_names)}"[:140])
+        job runs them on this head and records their verdicts, once its
+        repo's proofSlots have room for it (a job started again too)."""
+        doing = "running " + ", ".join(ci_names)
+        task = proof_task(repo, pr, ci_names, rc["proofJobs"])
+        retry = lost("proved")
+        if not retry and st.get("proved") == head:
+            settle("pending", f"Settled; a Claude job is {doing}"[:140])
+            return
+        slots = rc.get("proofSlots")
+        if slots and not (retry and st.get("provedAgain") == head) and (ahead := P.ahead(repo, n, st, slots)) is not None:
+            P.wait(repo, n)
+            settle("pending", f"Settled; waiting its turn to run {', '.join(ci_names)} ({ahead} ahead)"[:140])
+            return
+        if retry:
+            again("proved", task, doing, "its verdict")
+        elif started("proved", task):
+            settle("pending", f"Settled; a Claude job is {doing}"[:140])
         else:
             settle("pending", f"Settled, but no Claude job could run {', '.join(ci_names)}"[:140],
                    "Couldn't start a Claude job to run its checks")
+        P.started(st)
 
     if pr["isDraft"]:
         # Work in progress, whoever's it is: nobody reviews it yet, and nobody
         # is told.
-        settle("pending", "Draft: work in progress, reviewed once it's marked ready")
+        settle("pending", "Draft: work in progress, reviewed once it's marked ready", wait=None)
         save(key, st)
         return
     if not C.acted_on(pr):
@@ -384,7 +401,7 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
     if CFG["labels"]["hold"] in labels:
         # Held after it was settled: take back the status and the queued merge.
         log(f"{tag}: on hold")
-        settle("pending", f"On hold (the {CFG['labels']['hold']} label)")
+        settle("pending", f"On hold (the {CFG['labels']['hold']} label)", wait=waits.HOLD)
         save(key, st)
         return
 
@@ -441,15 +458,16 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
         if changes:
             threads = ", ".join([threads] * bool(threads) + ["changes requested by " + ", ".join(changes)])
         if renovate and ci == "red":
-            settle("pending", "Dependency update, CI red; renovate-sweep has it" + (f" ({threads})" if threads else ""))
+            settle("pending", "Dependency update, CI red; renovate-sweep has it" + (f" ({threads})" if threads else ""),
+                   wait=waits.SWEEP)
         elif renovate and dep == "major" and threads and not major_verdict:
             # Until it gives this head a verdict, renovate-sweep's job has it,
             # threads, reviews and all: one job on its branch.
-            settle("pending", f"Major update, {threads}; renovate-sweep has it"[:140])
+            settle("pending", f"Major update, {threads}; renovate-sweep has it"[:140], wait=waits.SWEEP)
         elif renovate and dep == "major" and major_verdict == "held":
             # Held for the owner (renovate-sweep tells them): no job pushes
             # to it, threads or not, and changes what they're deciding on.
-            settle("pending", "Major update; renovate-sweep held it: see its comment")
+            settle("pending", "Major update; renovate-sweep held it: see its comment", wait=None)
         elif threads or ci == "red":
             what = threads or "CI is red (" + ", ".join(ci_names) + ")"
             kind = "handed" if threads else "redFixed"
@@ -458,7 +476,7 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
             # renovate-sweep's verdict comes first, and its job runs the proofs
             # until then: neither a judge nor a proof job of the steward's
             # works the branch beside it.
-            settle("pending", "Major update; waiting for renovate-sweep's verdict on this head")
+            settle("pending", "Major update; waiting for renovate-sweep's verdict on this head", wait=waits.SWEEP)
         elif held:
             judged("a Claude job was asked to judge this head", DEP_SEEN)
         elif proof_only:
@@ -867,6 +885,7 @@ def after_limit(kick):
 
 
 def run_pass(kick):
+    waits.begin()
     repos = R.discover()
     if kick is not None:
         repos = [r for r in repos if r["repo"].lower() in kick]  # GitHub's names are case-blind
@@ -902,7 +921,9 @@ def run_pass(kick):
                     known.add(repo)
                 owner, name = repo.split("/")
                 info, prs = open_prs(owner, name)
+                P.begin(repo, (pr["number"] for pr in prs))
                 read.add(repo.replace("/", "_"))
+                waits.read(repo, prs)
                 # First, so a fix PR it made obsolete isn't merged by this same pass.
                 obsolete = R.watch_default(r, info, prs, mine) or set()
                 # Every open PR's branches, head and base, drafts and forks' PRs
@@ -912,13 +933,15 @@ def run_pass(kick):
                 seen_to = True
                 # Obsolete fixes first: their holds take back a queued merge
                 # before anything else this pass waits on.
-                for pr in sorted(prs, key=lambda pr: pr["number"] not in obsolete):
+                # Then oldest first, so proofSlots go to PRs in their order.
+                for pr in sorted(prs, key=lambda pr: (pr["number"] not in obsolete, pr["number"])):
                     in_use.update((pr["headRefName"], pr["baseRefName"]))
                     live.add(V.snap_name(f"pr-{repo.replace('/', '_')}-{pr['number']}.json", pr["headRefOid"], pr["baseRefName"]))
                     try:
                         handle(repo, pr, info, mine, pr["number"] in obsolete)
                     except Exception as e:  # one bad PR mustn't stop the rest
                         log(f"{repo}#{pr['number']}: {e}")
+                        waits.failed(repo, pr)
                         seen_to = False
                 if seen_to:
                     covered.append(r)
@@ -929,6 +952,7 @@ def run_pass(kick):
                     R.sweep_branches(r, in_use, mine, sweep=kick is None)
             except Exception as e:
                 log(f"{repo}: {e}")
+                waits.failed(repo)
                 C.wake(repo, C.NOW + 5 * MIN)  # GitHub, often: another look soon
             if CFG["dashboard"]["enable"]:
                 try:
@@ -944,6 +968,7 @@ def run_pass(kick):
     if kick is not None:
         digest = {**{k: v for k, v in load("digest-repos.json", {}).items() if k not in seen}, **digest}
     save("digest-repos.json", digest)
+    waits.publish(seen, digest, kick is None)
     if kick is None:
         # For renovate-sweep: it lists the ok majors of the repos this pass
         # didn't see to (one whose pass failed among them), and tells its
@@ -956,8 +981,9 @@ def run_pass(kick):
     if kick is None:
         R.unhook_gone(repos + R.hook_projects(repos))
     # Last: GitHub failing it leaves the pass's state saved. A line more than
-    # one repo has (a reviewer out of service) is listed once.
-    R.publish(list(dict.fromkeys(tuple(x) for repo in sorted(digest) for x in digest[repo])))
+    # one repo has (a reviewer out of service) is listed once. The stalls the
+    # watchdog took past a Claude job go on the stuck issue with the rest.
+    R.publish(list(dict.fromkeys(tuple(x) for repo in sorted(digest) for x in digest[repo])) + waits.escalated())
 
 
 if __name__ == "__main__":

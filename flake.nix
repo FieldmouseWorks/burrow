@@ -35,7 +35,7 @@
       # The ledger's machines take Conary from its own flake; burrow's checks
       # build theirs with a stand-in for its `cn`.
       cnStandIn = pkgs.writeShellScriptBin "cn" "exit 1";
-      names = [ "claude" "undo" "switch" "notify" "updates" "proj" "remote-control" "agents" "robot" "ops" "toolbox" "autoland" "house" "events" "ledger" "browser" "heartbeat" "backup" "rust-cache" ];
+      names = [ "claude" "undo" "switch" "notify" "updates" "proj" "remote-control" "agents" "robot" "ops" "toolbox" "autoland" "house" "events" "ledger" "browser" "heartbeat" "backup" "watchdog" "rust-cache" ];
     in
     {
       # A project's dev shell and gate in a few lines; see lib/project.nix.
@@ -120,6 +120,13 @@
             ];
           };
         in builtins.head (builtins.filter (p: (p.name or "") == "autoland-steward") machine.config.environment.systemPackages);
+        # The stall watchdog's ladder (kick, Claude job, stuck issue, owner),
+        # with the real notify and stand-ins for proj, notify's gh and
+        # burrow-events' kick port.
+        watchdog = pkgs.runCommand "watchdog-check" { nativeBuildInputs = [ pkgs.python3 pkgs.bash ]; } ''
+          python3 -I ${./tests/watchdog.py} ${./modules/watchdog}/watchdog.py ${./modules/notify}/notify.sh
+          touch $out
+        '';
         # burrow-events for real: deliveries, kicks and wake-ups starting a
         # handler's units through polkit.
         events-service = import ./tests/events.nix { inherit self pkgs; };
@@ -251,10 +258,35 @@
           [ "$got" = "$(sed 's/^ *//' <<<"$want")" ] || { echo "got: $got"; exit 1; }
           touch $out
         '';
+        # Which updates Renovate merges itself under the example's config, as
+        # Renovate's own rules read it: all but a major, a commit pin of an
+        # action (pinDigest) included. The steward leaves Renovate's own PRs
+        # to Renovate, so one it won't merge sits green for good.
+        renovate-automerge = pkgs.runCommand "renovate-automerge-check" { } ''
+          export HOME=$TMPDIR
+          got=$(${pkgs.lib.getExe pkgs.nodejs_24} ${./tests/renovate-automerge.mjs} ${pkgs.renovate} \
+            ${self.nixosConfigurations.example.config.systemd.services.renovate.environment.RENOVATE_CONFIG_FILE} 2>/dev/null)
+          want='major no
+          minor yes
+          patch yes
+          pin yes
+          pinDigest yes
+          digest yes
+          lockFileMaintenance yes'
+          [ "$got" = "$(sed 's/^ *//' <<<"$want")" ] || { echo "got: $got"; exit 1; }
+          touch $out
+        '';
         # Which repos house-sync passes over, and when it tells the owner, with
         # stand-ins for gh and the notifier.
         house-sync = pkgs.runCommand "house-sync-check" { nativeBuildInputs = [ pkgs.python3 pkgs.jq pkgs.util-linux pkgs.diffutils ]; } ''
           python3 -I ${./tests/house-sync.py} ${./modules/house/sync.sh} ${./house}
+          touch $out
+        '';
+        # The shared CI's commit check (flake-check.yml's commits job), its
+        # own script with a stand-in for gh: a PR commit signed by a key
+        # GitHub can't match to its committer fails it.
+        commit-signatures = pkgs.runCommand "commit-signatures-check" { nativeBuildInputs = [ (pkgs.python3.withPackages (p: [ p.pyyaml ])) pkgs.jq ]; } ''
+          python3 -I ${./tests/commit-signatures.py} ${./.github/workflows/flake-check.yml}
           touch $out
         '';
         # Stale Remote Control servers catch up once idle, with a stand-in for Claude.
