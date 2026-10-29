@@ -1,30 +1,28 @@
 //! The account a gh call is about, so the token it runs with is that
 //! account's installation's: the repo gh itself would act on, found the way
-//! gh finds it.
+//! gh finds it, with the call read as gh reads it (command.rs).
 //!
-//! 1. What the call names: `-R`/`--repo`, `--owner` or `--org`, a
-//!    github.com URL among its arguments, `gh api`'s `repos/OWNER/` or
-//!    `orgs/OWNER/` endpoint, or `gh repo`'s OWNER/REPO (`gh repo list`'s
-//!    OWNER).
+//! 1. What the call names: `-R`/`--repo`, `--owner` or `--org`, and the
+//!    arguments its usage says are a repository, an owner, an API endpoint
+//!    (`repos/OWNER/...`, `orgs/OWNER/...`) or, first, a URL.
 //! 2. GH_REPO.
 //! 3. The checkout's remote gh picks: the one `gh repo set-default` chose,
 //!    else upstream, github, origin, then the rest by name.
 //! 4. GH_TOKEN_OWNER, for a call about no repo.
 //!
-//! A flag's value is never read as a name, unless the flag is one of those:
-//! which flags take a value is what gh's own help for the command says.
+//! Every other flag value and argument is the call's own data, never a name.
 //! A call that names two accounts is refused, since one token can't be both,
 //! and so is one for another host, by `--hostname`, GH_HOST, a URL, `-R` or
 //! GH_REPO: the App's token is github.com's. Hosts are spelled as gh
 //! spells them: any case, and `*.github.com` is github.com.
 
-use std::collections::HashMap;
 use std::process::Command;
 
+use crate::command::{self, Call};
 use crate::error::Error;
 use crate::target::{is_owner, target_of};
 
-/// Where gh looks besides the call, and what gh says the call's flags are.
+/// Where gh looks besides the call, and what gh's help says of a command.
 pub struct Context<'a> {
     /// GH_REPO.
     pub gh_repo: Option<String>,
@@ -32,7 +30,7 @@ pub struct Context<'a> {
     pub gh_host: Option<String>,
     /// The checkout's remotes, as `git config --get-regexp` lists them.
     pub remotes: &'a dyn Fn() -> String,
-    /// `gh help WORDS`, for the command WORDS begin.
+    /// `gh help WORDS`.
     pub help: &'a dyn Fn(&[String]) -> Result<String, Error>,
     /// GH_TOKEN_OWNER.
     pub default: Option<String>,
@@ -42,14 +40,9 @@ pub fn account(args: &[String], context: &Context) -> Result<String, Error> {
     if let Some(host) = context.gh_host.as_deref().filter(|h| !h.is_empty()) {
         github_com("GH_HOST", host)?;
     }
-    let command: Vec<String> = args
-        .iter()
-        .take_while(|a| !a.starts_with('-'))
-        .cloned()
-        .collect();
-    let flags = Flags::of((context.help)(&command)?.as_str());
+    let call = command::read(args, context.help)?;
     let mut named: Vec<String> = Vec::new();
-    for owner in named_in(args, &flags)? {
+    for owner in named_in(&call)? {
         if !named.iter().any(|n| n.eq_ignore_ascii_case(&owner)) {
             named.push(owner);
         }
@@ -73,117 +66,82 @@ pub fn account(args: &[String], context: &Context) -> Result<String, Error> {
         .default
         .clone()
         .filter(|o| is_owner(o))
-        .ok_or_else(|| Error::refused("which account is this gh call for? Give it -R OWNER/REPO"))
+        .ok_or_else(|| {
+            Error::refused(format!(
+                "which account is `gh {}` for? Give it -R OWNER/REPO",
+                call.path.join(" ")
+            ))
+        })
 }
 
-/// A command's flags that take a value, by long name, and their short
-/// names, from its help's FLAGS sections:
-/// `  -b, --body text   The comment body text` takes one, and
-/// `  -w, --web         Open the web browser` doesn't.
-#[derive(Default)]
-struct Flags {
-    long: Vec<String>,
-    short: HashMap<char, String>,
-}
-
-impl Flags {
-    fn of(help: &str) -> Self {
-        let mut flags = Self::default();
-        let mut in_flags = false;
-        for line in help.lines().filter(|l| !l.is_empty()) {
-            if !line.starts_with(' ') {
-                in_flags = line.ends_with("FLAGS");
-                continue;
-            }
-            let spec = line.trim_start();
-            if !in_flags || !spec.starts_with('-') {
-                continue;
-            }
-            let spec = spec.split("  ").next().unwrap_or_default();
-            let (short, long) = match spec.split_once(", ") {
-                Some((s, l)) => (s.strip_prefix('-').and_then(|s| s.chars().next()), l),
-                None => (None, spec),
-            };
-            let Some((name, _value)) = long.strip_prefix("--").and_then(|l| l.split_once(' '))
-            else {
-                continue;
-            };
-            if let Some(c) = short {
-                flags.short.insert(c, name.to_owned());
-            }
-            flags.long.push(name.to_owned());
-        }
-        flags
-    }
-}
-
-/// The accounts the call itself names.
-fn named_in(args: &[String], flags: &Flags) -> Result<Vec<String>, Error> {
+/// The accounts the call itself names, by its flags and by what its usage
+/// says its arguments are.
+fn named_in(call: &Call) -> Result<Vec<String>, Error> {
     let mut owners = Vec::new();
-    let mut words = Vec::new();
-    let mut it = args.iter();
-    while let Some(a) = it.next() {
-        // What follows is passed on, as `gh repo clone`'s to git.
-        if a == "--" {
-            break;
-        }
-        let (name, attached) = if let Some(long) = a.strip_prefix("--") {
-            match long.split_once('=') {
-                Some((n, v)) => (n.to_owned(), Some(v.to_owned())),
-                None => (long.to_owned(), None),
-            }
-        } else if let Some(cluster) = a.strip_prefix('-').filter(|c| !c.is_empty()) {
-            // Short flags run together: the first that takes a value takes
-            // the rest of the word, or the next one.
-            let Some((i, name)) = cluster
-                .char_indices()
-                .find_map(|(i, c)| flags.short.get(&c).map(|n| (i + c.len_utf8(), n)))
-            else {
-                continue;
-            };
-            let rest = &cluster[i..];
-            (name.clone(), (!rest.is_empty()).then(|| rest.to_owned()))
-        } else {
-            words.push(a.as_str());
-            continue;
-        };
-        if !flags.long.contains(&name) {
-            continue;
-        }
-        let Some(value) = attached.or_else(|| it.next().cloned()) else {
-            return Err(Error::refused(format!("--{name} wants a value")));
-        };
-        match name.as_str() {
-            "repo" => owners.push(repo_owner("--repo", &value)?),
-            "hostname" => github_com("--hostname", &value)?,
-            "owner" | "org" if is_owner(&value) => owners.push(value),
+    for (flag, value) in &call.values {
+        match flag.as_str() {
+            "repo" => owners.push(repo_owner("--repo", value)?),
+            "hostname" => github_com("--hostname", value)?,
+            "owner" | "org" if is_owner(value) => owners.push(value.clone()),
             _ => {}
         }
     }
-    for w in &words {
-        let Some((host, path)) = w
-            .strip_prefix("https://")
-            .or_else(|| w.strip_prefix("http://"))
-            .map(|rest| rest.split_once('/').unwrap_or((rest, "")))
-        else {
-            continue;
-        };
-        github_com("a URL on", host)?;
-        if host.eq_ignore_ascii_case("api.github.com") {
-            owners.extend(endpoint_owner(path));
-        } else {
-            owners.extend(target_of(&format!("github.com/{path}")).map(|t| t.owner));
+    for (i, (arg, names)) in call.args.iter().enumerate() {
+        match (role(i, names), url(arg)) {
+            (Role::Endpoint | Role::Url, Some((host, path))) => {
+                owners.extend(url_owner(host, path)?);
+            }
+            (Role::Endpoint, None) => owners.extend(endpoint_owner(arg)),
+            (Role::Repo, _) => owners.push(repo_owner("the repository", arg)?),
+            (Role::Owner, _) => owners.extend(is_owner(arg).then(|| arg.clone())),
+            _ => {}
         }
-    }
-    match words.as_slice() {
-        ["api", endpoint, ..] => owners.extend(endpoint_owner(endpoint)),
-        ["repo", "list", owner, ..] if is_owner(owner) => owners.push(owner.to_string()),
-        ["repo", sub, repo, ..] if *sub != "list" => {
-            owners.extend(target_of(repo).map(|t| t.owner));
-        }
-        _ => {}
     }
     Ok(owners)
+}
+
+/// What an argument is to gh, by the names its usage gives its place.
+enum Role {
+    Endpoint,
+    Repo,
+    Owner,
+    Url,
+    Data,
+}
+
+fn role(i: usize, names: &[String]) -> Role {
+    let called = |is: fn(&str) -> bool| names.iter().any(|n| is(n));
+    if called(|n| n == "endpoint") {
+        Role::Endpoint
+    } else if called(|n| n == "repository" || n.ends_with("-repository") || n.ends_with("-repo")) {
+        Role::Repo
+    } else if called(|n| n == "owner") {
+        Role::Owner
+    // The first argument's URL is the one gh acts on. A later one (an
+    // artifact's link, say) is data.
+    } else if i == 0 && called(|n| n == "url" || n == "urls" || n.ends_with("-url")) {
+        Role::Url
+    } else {
+        Role::Data
+    }
+}
+
+/// A URL's host and path.
+fn url(arg: &str) -> Option<(&str, &str)> {
+    arg.strip_prefix("https://")
+        .or_else(|| arg.strip_prefix("http://"))
+        .map(|rest| rest.split_once('/').unwrap_or((rest, "")))
+}
+
+/// The account a github.com URL is under: api.github.com's by its endpoint.
+/// Another host's is refused.
+fn url_owner(host: &str, path: &str) -> Result<Option<String>, Error> {
+    github_com("a URL on", host)?;
+    Ok(if host.eq_ignore_ascii_case("api.github.com") {
+        endpoint_owner(path)
+    } else {
+        target_of(&format!("github.com/{path}")).map(|t| t.owner)
+    })
 }
 
 /// The account of an API path under `repos/OWNER/` or `orgs/OWNER/`.
@@ -198,9 +156,16 @@ fn endpoint_owner(endpoint: &str) -> Option<String> {
     is_owner(owner).then(|| owner.to_owned())
 }
 
-/// The account of a `[github.com/]OWNER/REPO` given as `what`.
+/// The account of a `[github.com/]OWNER/REPO` or a URL, given as `what`.
 fn repo_owner(what: &str, v: &str) -> Result<String, Error> {
-    target_of(v)
+    let target = match url(v) {
+        Some((host, path)) => {
+            github_com(what, host)?;
+            target_of(&format!("github.com/{path}"))
+        }
+        None => target_of(v),
+    };
+    target
         .map(|t| t.owner)
         .ok_or_else(|| Error::refused(format!("{what} {v:?} isn't a repo on github.com")))
 }
@@ -296,39 +261,7 @@ pub fn remotes() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// What gh's help says of the commands the tests call, as gh prints it.
-    fn help(command: &[String]) -> Result<String, Error> {
-        let repo = "\nINHERITED FLAGS\n      --help                     Show help for command\n  -R, --repo [HOST/]OWNER/REPO   Select another repository using the [HOST/]OWNER/REPO format\n";
-        let flags = match command.get(..2).unwrap_or(command) {
-            [a, b] if a == "pr" && b == "view" => {
-                "  -c, --comments          View pull request comments\n  -q, --jq expression     Filter JSON output using a jq expression\n      --json fields       Output JSON with the specified fields\n  -w, --web               Open a pull request in the browser\n"
-            }
-            [a, b] if a == "pr" && b == "checkout" => {
-                "  -b, --branch string        Local branch name to use (default [the name of the head branch])\n  -f, --force                Reset the existing local branch to the latest state of the pull request\n"
-            }
-            [a, b] if a == "issue" && b == "comment" => {
-                "  -b, --body text        The comment body text\n  -F, --body-file file   Read body text from file (use \"-\" to read from standard input)\n  -e, --editor           Skip prompts and open the text editor to write the body in\n  -w, --web              Open the web browser to write the comment\n"
-            }
-            [a, b] if a == "secret" && b == "set" => {
-                "  -b, --body string          The value for the secret (reads from standard input if not specified)\n  -o, --org organization     Set organization secret\n  -u, --user                 Set a secret for your user\n"
-            }
-            [a, ..] if a == "api" => {
-                return Ok("FLAGS\n  -F, --field key=value          Add a typed parameter in key=value format\n      --hostname string          The GitHub hostname for the request (default \"github.com\")\n  -i, --include                  Include HTTP response status line and headers in the output\n  -q, --jq string                Query to select values from the response using jq syntax\n  -X, --method string            The HTTP method for the request (default \"GET\")\n      --paginate                 Make additional HTTP requests to fetch all pages of results\n  -f, --raw-field key=value      Add a string parameter in key=value format\n\nINHERITED FLAGS\n  --help   Show help for command\n\nEXAMPLES\n  $ gh api -X GET search/issues -f q='repo:cli/cli is:open remote'\n".into());
-            }
-            [a, b] if a == "repo" && b == "list" => {
-                return Ok("FLAGS\n  -q, --jq expression       Filter JSON output using a jq expression\n  -L, --limit int           Maximum number of repositories to list (default 30)\n      --source              Show only non-forks\n  --help   Show help for command\n".into());
-            }
-            [a, _] if a == "repo" => {
-                return Ok("FLAGS\n  -b, --branch string     View a specific branch of the repository\n      --json fields       Output JSON with the specified fields\n  -w, --web               Open a repository in the browser\n".into());
-            }
-            _ => return Err(Error::refused(format!("gh {command:?} --help: unknown"))),
-        };
-        Ok(format!(
-            "USAGE\n  gh {}\n\nFLAGS\n{flags}{repo}",
-            command.join(" ")
-        ))
-    }
+    use crate::command::fake::help;
 
     fn none() -> String {
         String::new()
@@ -359,30 +292,6 @@ mod tests {
     }
 
     #[test]
-    fn reads_which_flags_take_a_value_from_the_help() {
-        let flags = Flags::of(&help(&call("issue comment")).unwrap());
-        assert_eq!(flags.long, ["body", "body-file", "repo"]);
-        assert_eq!(flags.short.get(&'b').map(String::as_str), Some("body"));
-        assert_eq!(flags.short.get(&'R').map(String::as_str), Some("repo"));
-        assert_eq!(flags.short.get(&'w'), None);
-        // A blank line in a section doesn't end it.
-        assert_eq!(
-            Flags::of("FLAGS\n  -a, --aa x   y\n\n  -b, --bb x   y\n").long,
-            ["aa", "bb"]
-        );
-        // Only under FLAGS: not an example, and not a help without any.
-        let api = Flags::of(&help(&call("api")).unwrap());
-        assert!(
-            api.long.contains(&"method".to_owned()) && !api.long.contains(&"paginate".to_owned())
-        );
-        assert!(
-            Flags::of("USAGE\n  gh x\n\nEXAMPLES\n  -b, --body text   x\n")
-                .long
-                .is_empty()
-        );
-    }
-
-    #[test]
     fn takes_what_the_call_names_first() {
         let in_fork = context(Some("eve/x"), &fork, Some("eve"));
         for (args, owner) in [
@@ -390,37 +299,42 @@ mod tests {
             ("pr view 5 --repo sam/r", "sam"),
             ("pr view 5 --repo=github.com/sam/r", "sam"),
             ("pr view 5 -Rsam/r", "sam"),
+            ("pr view 5 -R=sam/r", "sam"),
             ("pr view 5 -wRsam/r", "sam"),
+            ("pr -R sam/r view 5", "sam"),
             ("pr view https://github.com/sam/r/pull/5", "sam"),
+            ("pr view https://www.GitHub.com/sam/r/pull/5", "sam"),
             ("pr checkout --force https://github.com/sam/r/pull/5", "sam"),
             (
-                "pr checkout -b https://github.com/eve/x https://github.com/sam/r/pull/5",
+                "co -b https://github.com/eve/x https://github.com/sam/r/pull/5",
                 "sam",
             ),
             ("pr view https://github.com/sam/r/pull/5 -R Sam/r", "Sam"),
             ("api repos/sam/r/pulls", "sam"),
+            ("api -- repos/sam/r", "sam"),
             ("api -X POST /repos/sam/r/pulls -f body=repos/eve/x", "sam"),
             (
-                "api -X POST -f title=x -F body=https://github.com/eve/x repos/sam/r/issues",
+                "api -X POST -F body=https://github.com/eve/x repos/sam/r/issues",
                 "sam",
             ),
             ("api https://api.github.com/repos/sam/r/pulls?page=2", "sam"),
-            ("pr view https://www.GitHub.com/sam/r/pull/5", "sam"),
-            ("api --hostname api.github.com repos/sam/r", "sam"),
             ("api orgs/sam/members", "sam"),
             ("api --hostname github.com repos/sam/r", "sam"),
+            ("api --hostname api.github.com repos/sam/r", "sam"),
             ("repo view sam/r", "sam"),
-            ("repo clone sam/r dir", "sam"),
-            ("repo clone sam/r -- https://github.com/eve/x", "sam"),
             ("repo view --json name sam/r", "sam"),
             ("repo view -b main https://github.com/sam/r", "sam"),
+            ("repo clone sam/r dir", "sam"),
+            ("repo clone sam/r -- https://github.com/eve/x", "sam"),
             ("repo list sam", "sam"),
+            ("repo ls sam", "sam"),
             ("repo list --limit 5 sam", "sam"),
             ("secret set X --org sam", "sam"),
             ("secret set X -o sam -b https://github.com/eve/x", "sam"),
-            // A flag's value isn't a name, given either way.
+            ("issue transfer 5 sam/q -R sam/r", "sam"),
+            // A flag's value is data, wherever the flag is and however given.
             (
-                "issue comment 5 -R sam/r --body https://github.com/eve/x",
+                "issue -R sam/r comment 5 --body https://github.com/eve/x",
                 "sam",
             ),
             (
@@ -449,17 +363,20 @@ mod tests {
         for args in [
             "pr view https://github.com/sam/r/pull/5 -R eve/x",
             "secret set X --org eve -R sam/r",
+            "issue transfer 5 eve/x -R sam/r",
             "pr view 5 -R ghe.example.com/sam/r",
             "pr view 5 -R sam",
             "pr view 5 -R",
             "api --hostname ghe.example.com repos/sam/r",
             "api --hostname=ghe.example.com repos/sam/r",
+            "api --hostname github.com.example repos/sam/r",
             "pr view https://sam.ghe.com/sam/r/pull/5",
             "pr view https://gitlab.com/eve/x",
             "api https://ghe.example.com/api/v3/repos/sam/r",
-            "api --hostname github.com.example repos/sam/r",
-            // gh can't say what it takes: neither can this.
+            "repo clone https://ghe.example.com/sam/r",
+            // gh can't say what it is, or would refuse it itself.
             "nosuch 5",
+            "pr view 5 --nosuch",
         ] {
             assert!(account(&call(args), &ctx).is_err(), "{args}");
         }
@@ -498,13 +415,17 @@ mod tests {
             account(&args, &context(None, &fork, Some("eve"))).unwrap(),
             "sam"
         );
-        // Not a URL or a remote, so not a name: a branch, a number, `{owner}`,
-        // a flag's value.
+        // Not a name: a branch, `{owner}`, a query, a file's path, a flag's
+        // value, another host's URL where it's data.
         for args in [
             "pr view feature/x",
             "api repos/{owner}/{repo}/pulls",
             "api graphql -f query=x",
+            "search issues https://github.com/eve/x",
+            "repo read-file docs/x.md",
             "pr view 5 --json https://github.com/eve/x",
+            "issue comment 5 --body https://gitlab.com/eve/x",
+            "issue artifact create 5 https://gitlab.com/eve/x",
         ] {
             assert_eq!(
                 account(&call(args), &context(None, &fork, None)).unwrap(),

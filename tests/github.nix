@@ -166,9 +166,14 @@ pkgs.testers.runNixOSTest {
           assert "no config: keyring-token" in out and "the App's env: no oauth token" in out, out
           out = machine.succeed(dev("gh-token gh ${show} pr view 5 -R sam/r")).strip()
           assert out == "token=ghs_1 args=pr view 5 -R sam/r", out
-          # A flag's value isn't a name, as gh's help says which flags take one.
-          for call in ["issue comment 5 -R sam/r --body https://github.com/eve/x", "repo list --limit 5 sam"]:
+          # The call read as gh reads it, with gh's help: the command, aliases
+          # and flags before it too, which flags take a value (that value is
+          # data), and what each argument is.
+          for call in ["issue -R sam/r comment 5 --body https://github.com/eve/x", "repo ls --limit 5 sam", "api -- repos/sam/r", "pr view 5 -R=sam/r", "search issues https://github.com/eve/x --owner sam"]:
               assert machine.succeed(dev(f"gh-token gh ${show} {call}")).strip() == f"token=ghs_1 args={call}"
+          # gh's help read plain, whatever colours the call asks for.
+          out = machine.succeed(dev("CLICOLOR_FORCE=1 GH_FORCE_TTY=1 gh-token gh ${show} pr view 5 -R sam/r")).strip()
+          assert out == "token=ghs_1 args=pr view 5 -R sam/r", out
           # Another host isn't the App's, however it's named.
           for call in ["GH_HOST=ghe.example.com gh-token gh ${show} pr view 5 -R sam/r", "gh-token gh ${show} api --hostname ghe.example.com repos/sam/r", "gh-token gh ${show} pr view https://ghe.example.com/sam/r/pull/5"]:
               status, out = machine.execute(dev(call + " 2>&1"))

@@ -102,22 +102,17 @@ pub fn git_credential(
 pub fn gh(gh: &str, args: &[String], socket: Option<&Path>) -> Error {
     let mut run = Command::new(gh);
     run.args(args);
-    // `gh help`, not `--help`: an extension given --help would run.
     let help = |words: &[String]| -> Result<String, Error> {
-        let out = Command::new(gh)
-            .arg("help")
-            .args(words)
-            .env("GH_NO_UPDATE_NOTIFIER", "1")
+        let out = help_command(gh, words)
             .output()
             .map_err(|e| Error::refused(format!("{gh} help: {e}")))?;
-        let help = String::from_utf8_lossy(&out.stdout).into_owned();
-        if !out.status.success() || help.is_empty() {
+        if !out.status.success() {
             return Err(Error::refused(format!(
                 "gh doesn't know `gh {}`",
                 words.join(" ")
             )));
         }
-        Ok(help)
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
     };
     let context = Context {
         gh_repo: std::env::var("GH_REPO").ok(),
@@ -140,6 +135,19 @@ pub fn gh(gh: &str, args: &[String], socket: Option<&Path>) -> Error {
     }
     let e = run.exec();
     Error::refused(format!("{gh}: {e}"))
+}
+
+/// `gh help WORDS`, to be read (command.rs): `gh help`, not `--help`, since
+/// an extension given --help would run, and plain, as gh prints it to a pipe
+/// unless told otherwise. The call itself keeps the caller's colours.
+fn help_command(gh: &str, words: &[String]) -> Command {
+    let mut help = Command::new(gh);
+    help.arg("help")
+        .args(words)
+        .env("GH_NO_UPDATE_NOTIFIER", "1")
+        .env_remove("CLICOLOR_FORCE")
+        .env_remove("GH_FORCE_TTY");
+    help
 }
 
 /// The App's token for the call, when there's a socket to ask and gh isn't
@@ -293,14 +301,11 @@ mod tests {
     #[test]
     fn gives_gh_the_token_for_its_account_unless_it_has_one() {
         let (_dir, path, handle) = serve(vec!["token ghs_abc\n", "token ghs_def\n"]);
-        let help = |_: &[String]| {
-            Ok("FLAGS\n  -w, --web   Open in the browser\n\nINHERITED FLAGS\n  -R, --repo [HOST/]OWNER/REPO   Select another repository\n".to_owned())
-        };
         let context = Context {
             gh_repo: None,
             gh_host: None,
             remotes: &String::new,
-            help: &help,
+            help: &crate::command::fake::help,
             default: None,
         };
         let args: Vec<String> = ["pr", "view", "5", "-R", "sam/r"].map(String::from).into();
@@ -326,5 +331,16 @@ mod tests {
         // No account to be had: refused, the socket never asked.
         let nothing: Vec<String> = ["api", "user"].map(String::from).into();
         assert!(token_for(&nothing, None, socket, &context).is_err());
+    }
+
+    #[test]
+    fn reads_gh_s_help_plain_whatever_the_caller_asks_for() {
+        let help = help_command("gh", &["pr".into(), "view".into()]);
+        let args: Vec<_> = help.get_args().collect();
+        assert_eq!(args, ["help", "pr", "view"]);
+        let envs: Vec<_> = help.get_envs().collect();
+        for forced in ["CLICOLOR_FORCE", "GH_FORCE_TTY"] {
+            assert!(envs.contains(&(OsStr::new(forced), None)), "{forced}");
+        }
     }
 }

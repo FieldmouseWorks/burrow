@@ -18,6 +18,7 @@ mod answer;
 mod app;
 mod cache;
 mod client;
+mod command;
 mod error;
 #[cfg(test)]
 mod fake;
