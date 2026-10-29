@@ -16,14 +16,21 @@ from tasks import RED_BRANCH, red_default_task
 
 
 def discover():
+    """Each owner's repos the App's installation there reaches: which ones
+    are the steward's is which it's installed on. GitHub never reports an
+    App as a repo's admin (an installation's viewerPermission is empty), so
+    that's no test of what it may touch."""
     seen = []
     for owner in CFG["owners"]:
-        for r in C.gh("repo", "list", owner, "--no-archived", "--source", "--limit", "100000",
-                      "--json", "nameWithOwner,isPrivate,viewerPermission,defaultBranchRef") or []:
+        with C.acting_for(owner):
+            found = C.gh("repo", "list", owner, "--no-archived", "--source", "--limit", "100000",
+                         "--json", "nameWithOwner,isPrivate,defaultBranchRef") or []
+        for r in found:
             name = r["nameWithOwner"]
             if any(fnmatch.fnmatch(name, pat) for pat in CFG["exclude"]):
                 continue
-            if r["viewerPermission"] != "ADMIN" or not r.get("defaultBranchRef"):
+            # An empty repo has no branch to keep.
+            if not r.get("defaultBranchRef"):
                 continue
             seen.append({"repo": name, "private": r["isPrivate"], "default": r["defaultBranchRef"]["name"]})
     return seen
@@ -43,7 +50,9 @@ def baseline_ruleset(rc, default):
             }},
             {"type": "required_status_checks", "parameters": {
                 "strict_required_status_checks_policy": False,
-                "required_status_checks": [{"context": CONTEXT}],
+                # Only the App's own status: one with the same name from
+                # anyone else (the owner's login included) satisfies nothing.
+                "required_status_checks": [{"context": CONTEXT, "integration_id": CFG["app"]["id"]}],
             }},
         ]
     return {
@@ -63,7 +72,9 @@ def settle_repo(r, known):
     repo, rc = r["repo"], repo_cfg(r["repo"])
     st = load(f"repo-{repo.replace('/', '_')}.json", {})
     new = repo not in known
-    due = C.NOW - st.get("settings", 0) >= 86400
+    # Due daily, and straight away for another App: its required checks are
+    # pinned to the one it was.
+    due = C.NOW - st.get("settings", 0) >= 86400 or st.get("app") != CFG["app"]["id"]
     # The labels the steward and its jobs put on PRs: without them a hold
     # can't be set and a judge can't hand a PR to the owner. Made
     # again with the daily settings too, in case one was deleted.
@@ -102,62 +113,126 @@ def settle_repo(r, known):
             st["autoMergeRefused"] = True
     C.write("api", "-X", "PUT", f"repos/{repo}/vulnerability-alerts", check=False)
 
-    # Every page, an org's rulesets included: one named baseline counts as
-    # the repo's.
-    pages = C.gh("api", f"repos/{repo}/rulesets?per_page=100", "--paginate", "--slurp", check=False)
-    # None: the plan doesn't offer rules on this repo (private, free account).
+    # Every page, an org's rulesets included. Only the repo's own baseline
+    # counts as its baseline: the steward can't pin what the org keeps, so a
+    # repo with the org's gets its own over it, and GitHub enforces both.
+    rules = False
+    try:
+        pages = C.gh("api", f"repos/{repo}/rulesets?per_page=100", "--paginate", "--slurp")
+    except RuntimeError as e:
+        # The plan offers no rules on this repo (private, on a free
+        # account): there are none to pin. Anything else is GitHub not
+        # saying, and nothing's known to be pinned.
+        pages, rules = None, "Upgrade to GitHub Pro" in str(e)
     if isinstance(pages, list):
-        existing = [x for page in pages for x in page]
-        if CFG["rulesets"] and rc["ruleset"] and not any(x["name"] == "baseline" for x in existing):
+        own = [x for page in pages for x in page if x.get("source_type") == "Repository"]
+        made = True
+        if CFG["rulesets"] and rc["ruleset"] and not any(x["name"] == "baseline" for x in own):
             log(f"{repo}: adding the baseline ruleset")
-            C.write("api", "-X", "POST", f"repos/{repo}/rulesets", "--input", "-",
-                    input=json.dumps(baseline_ruleset(rc, r["default"])), check=False)
+            made = C.write("api", "-X", "POST", f"repos/{repo}/rulesets", "--input", "-",
+                           input=json.dumps(baseline_ruleset(rc, r["default"])), check=False) is not None
         # Whether or not the repo gets the baseline ruleset, its own rules
-        # don't make branches be up to date.
-        not_strict(repo, [x for x in existing if x.get("target") == "branch" and x.get("source_type") == "Repository"])
-    not_strict_protection(repo, r["default"])
+        # are kept in line with it.
+        rules = keep_rules(repo, [x for x in own if x.get("target") == "branch"]) and made
+    # Settled for this App only once every rule is known to take its status
+    # from it alone; once that's not known, the settings are due again.
+    pinned = keep_protection(repo) and rules
 
     st["settings"] = C.NOW
+    if pinned:
+        st["app"] = CFG["app"]["id"]
+    else:
+        st.pop("app", None)
     save(f"repo-{repo.replace('/', '_')}.json", st)
     return new
 
 
-def not_strict(repo, rulesets):
-    """Up-to-date branches off in each of the repo's own branch rulesets
-    (docs/repo-baseline.md says why). The listing names a ruleset without
-    its rules, so each one is read."""
+def keep_checks(checks, key):
+    """The steward's own check among a rule's required ones, pinned to its
+    App (under key: a ruleset's integration_id, classic protection's
+    app_id): the same name from anyone else satisfies nothing. Returns
+    whether any changed."""
+    moved = False
+    for c in checks:
+        if c.get("context") == CONTEXT and c.get(key) != CFG["app"]["id"]:
+            c[key] = CFG["app"]["id"]
+            moved = True
+    return moved
+
+
+def keep_rules(repo, rulesets):
+    """Each of the repo's own branch rulesets, in line with the baseline: no
+    up-to-date branches (docs/repo-baseline.md says why), and the steward's
+    status required from its App only. The listing names a ruleset without
+    its rules, so each one is read. Returns False when one couldn't be read
+    or wouldn't take the change."""
+    ok = True
     for x in rulesets:
         rs = C.gh("api", f"repos/{repo}/rulesets/{x['id']}", check=False)
         if not isinstance(rs, dict):
+            ok = False
             continue
-        rules = rs.get("rules") or []
-        strict = [y for y in rules if y.get("type") == "required_status_checks"
-                  and (y.get("parameters") or {}).get("strict_required_status_checks_policy")]
-        if strict:
-            for y in strict:
-                y["parameters"]["strict_required_status_checks_policy"] = False
-            log(f"{repo}: up-to-date branches off in the {rs.get('name')!r} ruleset")
-            # The whole ruleset goes back, so only that one setting changes.
+        changed = []
+        for y in rs.get("rules") or []:
+            if y.get("type") != "required_status_checks":
+                continue
+            params = y.get("parameters") or {}
+            if params.get("strict_required_status_checks_policy"):
+                params["strict_required_status_checks_policy"] = False
+                changed.append("up-to-date branches off")
+            if keep_checks(params.get("required_status_checks") or [], "integration_id"):
+                changed.append(f"{CONTEXT} from the App only")
+        if changed:
+            log(f"{repo}: {', '.join(dict.fromkeys(changed))} in the {rs.get('name')!r} ruleset")
+            # The whole ruleset goes back, so only those settings change.
             keep = {k: rs[k] for k in ("name", "target", "enforcement", "bypass_actors", "conditions") if k in rs}
-            C.write("api", "-X", "PUT", f"repos/{repo}/rulesets/{x['id']}", "--input", "-",
-                    input=json.dumps({**keep, "rules": rules}), check=False)
+            put = C.write("api", "-X", "PUT", f"repos/{repo}/rulesets/{x['id']}", "--input", "-",
+                          input=json.dumps({**keep, "rules": rs["rules"]}), check=False)
+            ok = ok and put is not None
+    return ok
 
 
-def not_strict_protection(repo, default):
-    """The same in the default branch's classic protection. Its checks are
-    read only when the branch says it requires some: the endpoint is a 404
-    otherwise."""
+def keep_protection(repo):
+    """The same in the classic protection of every protected branch, since a
+    PR can be merged into any of them. Returns False when GitHub didn't say
+    what a branch's is, or didn't take the change."""
+    pages = C.gh("api", f"repos/{repo}/branches?protected=true&per_page=100", "--paginate", "--slurp", check=False)
+    if not isinstance(pages, list):
+        return False
+    return all([keep_branch(repo, b["name"]) for page in pages for b in page])
+
+
+def keep_branch(repo, name):
+    """One branch's classic protection, in line. Its checks are read only
+    when the branch says it requires some: the endpoint is a 404 otherwise.
+    Returns False when GitHub didn't say what they are, or didn't take the
+    change."""
     # A slash in the name (release/1.0) is part of it, not of the path.
-    branch = urllib.parse.quote(default, safe="")
+    branch = urllib.parse.quote(name, safe="")
     b = C.gh("api", f"repos/{repo}/branches/{branch}", check=False)
-    checks = ((b.get("protection") or {}).get("required_status_checks") or {}) if isinstance(b, dict) else {}
+    if not isinstance(b, dict):
+        return False
+    checks = (b.get("protection") or {}).get("required_status_checks") or {}
     if checks.get("enforcement_level", "off") == "off":
-        return
+        return True
     path = f"repos/{repo}/branches/{branch}/protection/required_status_checks"
     got = C.gh("api", path, check=False)
-    if isinstance(got, dict) and got.get("strict"):
-        log(f"{repo}: up-to-date branches off in {default}'s protection")
-        C.write("api", "-X", "PATCH", path, "-F", "strict=false", check=False)
+    if not isinstance(got, dict):
+        return False
+    patch, changed = {}, []
+    if got.get("strict"):
+        patch["strict"] = False
+        changed.append("up-to-date branches off")
+    listed = got.get("checks") or []
+    if keep_checks(listed, "app_id"):
+        # The others as they were: GitHub lists one any App may set with no
+        # app_id, and reads one sent without it as "whichever set it last".
+        patch["checks"] = [c if c.get("app_id") is not None else {**c, "app_id": -1} for c in listed]
+        changed.append(f"{CONTEXT} from the App only")
+    if not patch:
+        return True
+    log(f"{repo}: {', '.join(changed)} in {name}'s protection")
+    return C.write("api", "-X", "PATCH", path, "--input", "-", input=json.dumps(patch), check=False) is not None
 
 
 def watch_default(r, info, prs, digest):
@@ -275,7 +350,10 @@ def hook(repo, st, due):
 def hook_projects(repos):
     """The hook on the projects' repos (projectsDir) that it doesn't see to
     (excluded, or another owner's): proj-watch and proj-inbox start from its
-    deliveries too. Returns them, for unhook_gone to keep."""
+    deliveries too. Another owner's gets one only if the App is installed
+    there too; one it can't reach is tried again a day later, and the rest
+    still get theirs. Returns them all, for unhook_gone to keep: a hook
+    whose repo couldn't be asked about stays on."""
     if DRY:
         return []
     seen = {r["repo"].lower() for r in repos}
@@ -287,7 +365,11 @@ def hook_projects(repos):
         if due:
             st["hookAt"] = C.NOW
             save(name, st)
-        hook(repo, st, due)
+        try:
+            with C.acting_for(repo):
+                hook(repo, st, due)
+        except RuntimeError as e:  # the App isn't on its owner, or GitHub didn't answer
+            log(f"{repo}: its webhook: {e}")
     return [{"repo": repo} for repo in more]
 
 
@@ -311,19 +393,24 @@ up, is tried again a day later. A
         if not st.get("hookId") or C.NOW - st.get("unhookTried", 0) < 86400:
             continue
         repo = name[len("repo-"):-len(".json")].replace("_", "/", 1)  # an owner has no _
-        now = C.gh("api", f"repos/{repo}", check=False)
-        if not isinstance(now, dict):  # not known to be gone: the old path may lead to a live repo
+        try:
+            with C.acting_for(repo):
+                now = C.gh("api", f"repos/{repo}", check=False)
+                gone = isinstance(now, dict) and str(now.get("full_name", "")).lower() not in live
+                if gone:
+                    log(f"{repo}: no longer seen to, taking its webhook off")
+                off = gone and C.write("api", "-X", "DELETE", f"repos/{repo}/hooks/{st['hookId']}", check=False) is not None
+        except RuntimeError as e:  # the App isn't on its owner (any more), say
+            log(f"{repo}: {e}")
+            now = off = None
+        if not isinstance(now, dict) or (gone and not off):
+            # Not known to be gone (the old path may lead to a live repo), or
+            # its hook wouldn't come off.
             st["unhookTried"] = C.NOW
             save(name, st)
             continue
-        if str(now.get("full_name", "")).lower() in live:
+        if not gone:
             log(f"{repo}: renamed to {now['full_name']}, which keeps the webhook")
-        else:
-            log(f"{repo}: no longer seen to, taking its webhook off")
-            if C.write("api", "-X", "DELETE", f"repos/{repo}/hooks/{st['hookId']}", check=False) is None:
-                st["unhookTried"] = C.NOW
-                save(name, st)
-                continue
         for k in ("hook", "hookId", "unhookTried"):
             st.pop(k, None)
         save(name, st)
@@ -337,9 +424,9 @@ def delete_branch(repo, name, sha):
         return
     with tempfile.TemporaryDirectory() as d:
         subprocess.run(["git", "init", "-q", "--bare", d], check=False)
-        p = subprocess.run(["git", "-C", d, "push", "-q", f"--force-with-lease=refs/heads/{name}:{sha}",
+        p = subprocess.run(["git", "-C", d, *C.GIT_AUTH, "push", "-q", f"--force-with-lease=refs/heads/{name}:{sha}",
                             f"https://github.com/{repo}.git", f":refs/heads/{name}"],
-                           capture_output=True, text=True)
+                           capture_output=True, text=True, env=C.gh_env(repo))
         if p.returncode != 0:
             log(f"{repo}: kept {name}: {p.stderr.strip()[:200]}")
 
@@ -424,11 +511,13 @@ def publish(digest):
     owner = [x for x in digest if x[0] in owners or off]
     if CFG["inbox"]["enable"] and off and len(owner) > len([x for x in digest if x[0] in owners]):
         owner.append(("What's stuck is listed here: proj's inbox can't take it", off, ""))
-    issue("digest.json", "[autoland] PRs waiting for you", CFG["notify"]["label"], CFG["notify"]["assignee"], "",
-          owner, "Nothing waiting.")
-    # Closed once the inbox can't take it: what's in it is the owner's then.
-    issue("stuck.json", "[autoland] Stuck in the pipeline", CFG["inbox"]["label"], "", stuck_brief(),
-          [x for x in digest if x not in owner], "Nothing stuck.")
+    # No notify.repo: the digest goes to the journal, asking GitHub nothing.
+    with C.acting_for(CFG["notify"]["repo"] or ""):
+        issue("digest.json", "[autoland] PRs waiting for you", CFG["notify"]["label"], CFG["notify"]["assignee"], "",
+              owner, "Nothing waiting.")
+        # Closed once the inbox can't take it: what's in it is the owner's then.
+        issue("stuck.json", "[autoland] Stuck in the pipeline", CFG["inbox"]["label"], "", stuck_brief(),
+              [x for x in digest if x not in owner], "Nothing stuck.")
 
 
 def inbox_off():

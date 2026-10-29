@@ -39,11 +39,20 @@
       enable = true;
       owners = [ "sam" ];
       authors = [ "sam" ];
+      app = { id = 123456; slug = "sams-steward"; keyFile = "/run/secrets/autoland-app-key"; };
       reviewers.codex.enable = true;
     };
     house.enable = true;
     browser.enable = true;
     watchdog.enable = true;
+    backup = {
+      enable = true;
+      repository = "rclone:offsite:backups/burrow";
+      passwordFile = "/run/secrets/backup-password";
+      rcloneConfigFile = "/run/secrets/backup-rclone";
+      datasets = [ "rpool/safe/home" "rpool/safe/data" ];
+      after = [ "sanoid.service" ];
+    };
     ledger = {
       enable = true;
       # A stand-in: a real machine takes Conary's flake's packages.default.

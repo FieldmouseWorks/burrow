@@ -28,8 +28,9 @@ and 5), the one burrow-events starts within seconds of what changes it:
 a webhook delivery, a Claude job's turn ending, a reviewer's answer coming
 back, or a wait the last pass booked ending (common.wake).
 
-Everything talks to GitHub through `gh`, with the user's own login, so the
-reviewers' reviews and the Claude jobs' verdicts are posted under it too.
+Everything talks to GitHub as the steward's own GitHub App (common.py), so
+its statuses, merges and the reviewers' reviews are posted as the App, and
+nobody else's count as its word. Its Claude jobs work as the machine user.
 Settings are in the JSON file $AUTOLAND_CONFIG (../autoland.nix). State is
 in config.stateDir: one JSON file per PR, one per repo.
 
@@ -125,26 +126,35 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
             digest.append((why, line, desc))
         waits.note(repo, pr, desc, wait)
         # Not settled (any more): nothing may merge it.
-        if state != "success" and (pr["autoMergeRequest"] or st.get("landed")):
+        if state != "success" and (C.queued(pr) or st.get("landed")):
             if C.unland(repo, pr):
                 st["landed"] = None
             else:
                 ok = False
         if not ok and not DRY:
             # GitHub didn't take the status or the stop: until it does, the
-            # old ones stand and auto-merge can still merge it. Again in a minute.
+            # old ones stand and a merge queued on it can still go. Again in a minute.
             after(C.NOW, 1)
 
     def update_branch():
         """Bring a settled head up to date with a base whose rules want it
-        (auto-merge won't). The merged-in head is reviewed like any other."""
-        if pr.get("mergeStateStatus") != "BEHIND" or st.get("updated") == head:
+        (the merge won't): the merged-in head is reviewed like any other.
+        GitHub makes it a moment later, and its push kicks a pass; one that
+        hasn't come ten minutes on is asked for again. True while it's being
+        brought up to date, False if it isn't behind, None if GitHub didn't
+        take the ask (again in a minute)."""
+        if pr.get("mergeStateStatus") != "BEHIND":
             return False
+        if st.get("updated") == head and C.NOW - st.get("updatedAt", 0) < 10 * MIN:
+            after(st["updatedAt"], 10)
+            return True
         if C.write("api", "-X", "PUT", f"repos/{repo}/pulls/{n}/update-branch",
                    "-f", f"expected_head_sha={head}", check=False) is None:
-            return False
+            after(C.NOW, 1)
+            return None
         log(f"{tag}: behind its base, brought up to date")
-        st["updated"] = head
+        st["updated"], st["updatedAt"] = head, C.NOW
+        after(C.NOW, 10)
         return True
 
     def deadline(kind):
@@ -264,8 +274,8 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
         settle("pending", f"{desc}; {who}" if who else desc)
 
     def merge():
-        # Marked landed only once GitHub has queued or done the merge, so a
-        # failed one is tried again next pass, and the owner hears after three.
+        # Marked landed only once GitHub has done the merge, so a failed one
+        # is tried again next pass, and the owner hears after three.
         if land(repo, pr, repo_info):
             st["landed"] = head
             return
@@ -273,15 +283,25 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
         log(f"{tag}: merge failed ({st['landFails']})")
         after(C.NOW, 1)
         if st["landFails"] >= 3:
-            digest.append(("Couldn't merge", line, "gh pr merge keeps failing (journalctl -u autoland)"))
+            digest.append(("Couldn't merge", line, "GitHub keeps refusing the merge (journalctl -u autoland)"))
 
     def land_now(desc):
+        # Behind a base whose rules want it up to date, GitHub refuses the
+        # merge until it is: brought up to date instead, and the merged-in
+        # head is reviewed and its CI run like any other before it lands.
+        behind = update_branch()
+        if behind is not False:
+            why = "brought up to date" if behind else "GitHub didn't take the update, again in a minute"
+            settle("pending", f"Settled, but behind its base: {why}")
+            return
         settle("success", desc)
+        # Still open with a merge queued on it: GitHub's to merge later, which
+        # land never leaves it to (a steward before it did). Merged now instead.
+        if st.get("landed") == head and C.queued(pr):
+            st["landed"] = None
         if st.get("landed") != head:
             log(f"{tag}: settled, landing")
             merge()
-        else:
-            update_branch()
 
     def owner_decides():
         """Sent to the owner by hand, by a fix job or by a judge (the label):
@@ -457,11 +477,11 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
             judged("a major dependency update", DEP_SEEN)
         elif dep == "major":
             land_now("Major update renovate-sweep cleared, CI green")
-        else:
+        elif renovate:
+            # Renovate merges its own.
             settle("success", "Dependency update, CI green")
-            # Renovate merges its own; Dependabot's need merging.
-            if not renovate and st.get("landed") != head:
-                merge()
+        else:
+            land_now("Dependency update, CI green")
         # Renovate's stuck ones are renovate-sweep's; a Dependabot one that
         # still hasn't merged after a day is the owner's to look at.
         if (not renovate and C.NOW - ts(pr["createdAt"]) > 86400
@@ -869,60 +889,61 @@ def run_pass(kick):
     for r in repos:
         repo = r["repo"]
         digest[repo] = mine = []
-        try:
-            new = kick is None and R.settle_repo(r, known)
-            if (new and CFG["baselineJobs"] and started < CFG["baselinePerPass"]
-                    and C.NOW - failed.get(repo, 0) > 86400):
-                jid = C.job(repo, CFG["baselineTask"].replace("REPO", repo), clone=True)
-                started += 1
-                if jid:
-                    log(f"{repo}: baseline job {jid}")
-                    known.add(repo)
-                    failed.pop(repo, None)
-                else:
-                    log(f"{repo}: baseline job didn't start (no checkout, or proj refused); trying again tomorrow")
-                    failed[repo] = C.NOW
-            elif new and not CFG["baselineJobs"]:
-                known.add(repo)
-            owner, name = repo.split("/")
-            info, prs = open_prs(owner, name)
-            read.add(repo.replace("/", "_"))
-            waits.read(repo, prs)
-            # First, so a fix PR it made obsolete isn't merged by this same pass.
-            obsolete = R.watch_default(r, info, prs, mine) or set()
-            # Every open PR's branches, head and base, drafts and forks' PRs
-            # included: the branch sweep leaves them all (deleting a base
-            # closes the PRs on it).
-            in_use = set()
-            seen_to = True
-            # Obsolete fixes first: their holds take back a queued merge
-            # before anything else this pass waits on.
-            for pr in sorted(prs, key=lambda pr: pr["number"] not in obsolete):
-                in_use.update((pr["headRefName"], pr["baseRefName"]))
-                live.add(V.snap_name(f"pr-{repo.replace('/', '_')}-{pr['number']}.json", pr["headRefOid"], pr["baseRefName"]))
-                try:
-                    handle(repo, pr, info, mine, pr["number"] in obsolete)
-                except Exception as e:  # one bad PR mustn't stop the rest
-                    log(f"{repo}#{pr['number']}: {e}")
-                    waits.failed(repo, pr)
-                    seen_to = False
-            if seen_to:
-                covered.append(r)
-            else:
-                C.wake(repo, C.NOW + 5 * MIN)
-            if CFG["cleanBranches"]:
-                # Stale ones the last sweep found are listed every pass.
-                R.sweep_branches(r, in_use, mine, sweep=kick is None)
-        except Exception as e:
-            log(f"{repo}: {e}")
-            waits.failed(repo)
-            C.wake(repo, C.NOW + 5 * MIN)  # GitHub, often: another look soon
-        if CFG["dashboard"]["enable"]:
+        with C.acting_for(repo):
             try:
-                D.watch(repo, mine)
-            except Exception as e:  # its own: the repo's PRs were seen to all the same
-                log(f"{repo}: its dashboard: {e}")
-                C.wake(repo, C.NOW + 5 * MIN)
+                new = kick is None and R.settle_repo(r, known)
+                if (new and CFG["baselineJobs"] and started < CFG["baselinePerPass"]
+                        and C.NOW - failed.get(repo, 0) > 86400):
+                    jid = C.job(repo, CFG["baselineTask"].replace("REPO", repo), clone=True)
+                    started += 1
+                    if jid:
+                        log(f"{repo}: baseline job {jid}")
+                        known.add(repo)
+                        failed.pop(repo, None)
+                    else:
+                        log(f"{repo}: baseline job didn't start (no checkout, or proj refused); trying again tomorrow")
+                        failed[repo] = C.NOW
+                elif new and not CFG["baselineJobs"]:
+                    known.add(repo)
+                owner, name = repo.split("/")
+                info, prs = open_prs(owner, name)
+                read.add(repo.replace("/", "_"))
+                waits.read(repo, prs)
+                # First, so a fix PR it made obsolete isn't merged by this same pass.
+                obsolete = R.watch_default(r, info, prs, mine) or set()
+                # Every open PR's branches, head and base, drafts and forks' PRs
+                # included: the branch sweep leaves them all (deleting a base
+                # closes the PRs on it).
+                in_use = set()
+                seen_to = True
+                # Obsolete fixes first: their holds take back a queued merge
+                # before anything else this pass waits on.
+                for pr in sorted(prs, key=lambda pr: pr["number"] not in obsolete):
+                    in_use.update((pr["headRefName"], pr["baseRefName"]))
+                    live.add(V.snap_name(f"pr-{repo.replace('/', '_')}-{pr['number']}.json", pr["headRefOid"], pr["baseRefName"]))
+                    try:
+                        handle(repo, pr, info, mine, pr["number"] in obsolete)
+                    except Exception as e:  # one bad PR mustn't stop the rest
+                        log(f"{repo}#{pr['number']}: {e}")
+                        waits.failed(repo, pr)
+                        seen_to = False
+                if seen_to:
+                    covered.append(r)
+                else:
+                    C.wake(repo, C.NOW + 5 * MIN)
+                if CFG["cleanBranches"]:
+                    # Stale ones the last sweep found are listed every pass.
+                    R.sweep_branches(r, in_use, mine, sweep=kick is None)
+            except Exception as e:
+                log(f"{repo}: {e}")
+                waits.failed(repo)
+                C.wake(repo, C.NOW + 5 * MIN)  # GitHub, often: another look soon
+            if CFG["dashboard"]["enable"]:
+                try:
+                    D.watch(repo, mine)
+                except Exception as e:  # its own: the repo's PRs were seen to all the same
+                    log(f"{repo}: its dashboard: {e}")
+                    C.wake(repo, C.NOW + 5 * MIN)
     # This pass's wake-ups and owner's lines replace the ones it had for the
     # repos it saw; a full pass's, all of them.
     seen = {r["repo"] for r in repos}
