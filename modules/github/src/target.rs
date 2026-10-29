@@ -62,15 +62,16 @@ pub fn is_repo(s: &str) -> bool {
         && s != ".."
 }
 
-/// A host as a URL or git's credential request spells it, read as git and
-/// gh read one: its name in lower case and without a trailing dot, if its
-/// port is none or `default_port`, its scheme's. None on another port.
+/// A host as a URL or git's credential request spells it, read as git
+/// reads one: its name in lower case and without a trailing dot, if its
+/// port is its scheme's `default_port`, as git normalizes a port (none,
+/// empty, or with leading zeros). None on another port.
 pub fn host_name(host: &str, default_port: &str) -> Option<String> {
     let (name, port) = match host.rsplit_once(':') {
         Some((name, port)) => (name, Some(port)),
         None => (host, None),
     };
-    if port.is_some_and(|p| p != default_port) {
+    if port.is_some_and(|p| !p.is_empty() && p.trim_start_matches('0') != default_port) {
         return None;
     }
     Some(name.strip_suffix('.').unwrap_or(name).to_ascii_lowercase())
@@ -187,9 +188,12 @@ mod tests {
             ("github.com:443", "443", Some("github.com")),
             ("github.com.", "443", Some("github.com")),
             ("WWW.GitHub.com.:443", "443", Some("www.github.com")),
+            ("github.com:0443", "443", Some("github.com")),
+            ("github.com:", "443", Some("github.com")),
             ("github.com:8443", "443", None),
             ("github.com:80", "443", None),
-            ("github.com:", "443", None),
+            ("github.com:0", "443", None),
+            ("github.com:4430", "443", None),
         ] {
             assert_eq!(host_name(host, port).as_deref(), name, "{host}");
         }

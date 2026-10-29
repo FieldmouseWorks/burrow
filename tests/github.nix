@@ -42,9 +42,9 @@ let
 
     HTTPServer(("127.0.0.1", 8080), GitHub).serve_forever()
   '';
-  # github.com's git, over https with a certificate of its own: each
-  # request's logins (Basic's, decoded) are noted in /tmp/logins. Asked
-  # without one, it asks for one, as GitHub does.
+  # github.com's git, over https with a certificate of its own, and over
+  # plain http: each request's logins (Basic's, decoded) are noted in
+  # /tmp/logins. Asked without one, it asks for one, as GitHub does.
   cert = pkgs.runCommand "github-cert" { nativeBuildInputs = [ pkgs.openssl ]; } ''
     mkdir $out
     openssl req -x509 -newkey rsa:2048 -nodes -days 36500 -subj /CN=github.com \
@@ -53,6 +53,7 @@ let
   gitServer = pkgs.writers.writePython3 "fake-github-git" { flakeIgnore = [ "E501" ]; } ''
     import base64
     import ssl
+    import threading
     from http.server import BaseHTTPRequestHandler, HTTPServer
 
 
@@ -68,6 +69,7 @@ let
             self.end_headers()
 
 
+    threading.Thread(target=HTTPServer(("127.0.0.1", 80), Git).serve_forever, daemon=True).start()
     server = HTTPServer(("127.0.0.1", 443), Git)
     tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     tls.load_cert_chain("${cert}/cert.pem", "${cert}/key.pem")
@@ -122,7 +124,8 @@ pkgs.testers.runNixOSTest {
       wantedBy = [ "multi-user.target" ];
       serviceConfig.ExecStart = github;
     };
-    networking.hosts."127.0.0.1" = [ "github.com" ];
+    # github.com, and github.com. as curl looks it up.
+    networking.hosts."127.0.0.1" = [ "github.com" "github.com." ];
     security.pki.certificateFiles = [ "${cert}/cert.pem" ];
     systemd.services.fake-github-git = {
       wantedBy = [ "multi-user.target" ];
@@ -181,28 +184,31 @@ pkgs.testers.runNixOSTest {
           status, out = machine.execute(dev(fill % "eve/x.git"))
           assert status != 0 and "peter" not in out, (status, out)
 
-      with subtest("git, in the App's env, takes github.com however it's spelled, and stops for the rest of GitHub"):
+      with subtest("git, in the App's env, takes github.com however it's spelled, and stops for every other host"):
           # dev's own login for any host, and an askpass of dev's: neither is
-          # asked, wherever on GitHub.
+          # asked, for any host.
           machine.succeed(dev("git config --global --add credential.helper '!f() { echo username=peter; echo password=peter-any; }; f' && printf '#!/bin/sh\\necho peter-askpass\\n' > ~/askpass && chmod +x ~/askpass", app=False))
           url_fill = "printf 'url=%s\\n\\n' | GIT_ASKPASS=$HOME/askpass git credential fill"
-          for url in ["https://GitHub.com/sam/r.git", "https://github.com:443/sam/r.git", "https://github.com./sam/r.git"]:
+          for url in [
+              "https://GitHub.com/sam/r.git",
+              "https://github.com:443/sam/r.git",
+              "https://github.com:0443/sam/r.git",
+              "https://github.com:/sam/r.git",
+              "https://github.com./sam/r.git",
+              "https://%67ithub.com/sam/r.git",
+          ]:
               out = machine.succeed(dev(url_fill % url))
               assert "password=ghs_2" in out and "peter" not in out, (url, out)
-          for url in ["https://gist.github.com/abc.git", "https://WWW.GitHub.com/sam/r.git"]:
+          for url in ["https://gist.github.com/abc.git", "https://WWW.GitHub.com/sam/r.git", "https://gitlab.com/sam/r.git", "http://github.com/sam/r.git"]:
               status, out = machine.execute(dev(url_fill % url + " 2>&1"))
               assert status != 0 and "peter" not in out, (url, status, out)
               assert "peter-any" in machine.succeed(dev(url_fill % url, app=False)), url
           machine.succeed(dev("git config --global --unset-all credential.helper", app=False))
 
-      with subtest("git, in the App's env, reaches GitHub over https, never SSH"):
+      with subtest("git, in the App's env, takes GitHub's SSH remotes over https, and never runs SSH"):
           for remote in ["git@github.com:sam/r.git", "ssh://git@github.com/sam/r.git"]:
               assert machine.succeed(dev(f"git ls-remote --get-url {remote}")).strip() == "https://github.com/sam/r.git"
               assert machine.succeed(dev(f"git ls-remote --get-url {remote}", app=False)).strip() == remote
-          # Nor over plain http, in any spelling.
-          for remote in ["http://github.com/sam/r.git", "http://GitHub.com:80/sam/r.git"]:
-              status, out = machine.execute(dev(f"git ls-remote {remote} 2>&1"))
-              assert status != 0 and "over https only" in out, (remote, status, out)
           # Whatever would still take dev's SSH keys stops: an alias, a rewrite of dev's own.
           for call in ["git ls-remote gh:sam/r.git", "git -c url.git@github.com:.insteadOf=https://github.com/ ls-remote https://github.com/sam/r.git"]:
               status, out = machine.execute(dev(call + " 2>&1"))
@@ -248,6 +254,21 @@ pkgs.testers.runNixOSTest {
           assert logins("git ls-remote https://github.com/eve/x.git") == []
           assert logins("GH_TOKEN_SOCKET=/run/gh-token/none.sock git ls-remote origin") == []
 
+          # A header of dev's for every URL, and github.com as git and curl
+          # also read it: with a trailing dot, escaped, over plain http.
+          machine.succeed(dev(f"git config --global http.extraHeader '{header}'", app=False))
+          spellings = ["https://github.com./sam/r.git", "https://%67ithub.com/sam/r.git", "http://github.com/sam/r.git", "http://github.com./sam/r.git"]
+          for url in spellings:
+              assert set(logins(f"git ls-remote {url}", app=False)) == {"peter:header"}, url
+          # With the env, the App's over https, and none over plain http.
+          for url in spellings[:2]:
+              got = logins(f"git ls-remote {url}")
+              assert got and all(login.startswith("x-access-token:ghs_") for login in got), (url, got)
+          for url in spellings[2:]:
+              assert logins(f"git ls-remote {url}") == [], url
+          assert logins(f"GH_TOKEN_SOCKET=/run/gh-token/none.sock git ls-remote {spellings[1]}") == []
+          machine.succeed(dev("git config --global --unset http.extraHeader", app=False))
+
       with subtest("git, in the App's env, logs in to GitHub as the App only: no netrc of dev's"):
           # dev's netrc, for github.com, and another that NETRC names.
           machine.succeed(dev(" && ".join([
@@ -267,6 +288,7 @@ pkgs.testers.runNixOSTest {
               "git ls-remote plain-ssh",
               "git push plain HEAD:refs/heads/x",
               "NETRC=$HOME/other.netrc git ls-remote plain",
+              "git ls-remote https://%67ithub.com/sam/p.git",
           ]:
               got = logins(call)
               assert got and all(login.startswith("x-access-token:ghs_") for login in got), (call, got)
