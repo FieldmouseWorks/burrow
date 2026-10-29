@@ -6,6 +6,7 @@ use std::net::TcpListener;
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::Duration;
 
 /// A token in GitHub's stateless format (`ghs_APPID_` and a JWT): long, and
 /// with dots, hyphens and underscores in it.
@@ -37,7 +38,26 @@ impl Fake {
     }
 }
 
+/// Answers each request on a connection of its own, which it says it closes.
 pub fn serve(route: impl Fn(&Request) -> Answer + Send + 'static) -> Fake {
+    serve_ending(None, route)
+}
+
+/// The same, but not saying so, and closing the connection only `after`
+/// answering: as a server closes one it kept open once it's idle (or an
+/// HTTP/1.0 one, which keeps none, does when it's slow to), with the
+/// next request already sent on it.
+pub fn serve_closing_later(
+    after: Duration,
+    route: impl Fn(&Request) -> Answer + Send + 'static,
+) -> Fake {
+    serve_ending(Some(after), route)
+}
+
+fn serve_ending(
+    later: Option<Duration>,
+    route: impl Fn(&Request) -> Answer + Send + 'static,
+) -> Fake {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     let asked = Arc::new(Mutex::new(Vec::new()));
@@ -79,14 +99,20 @@ pub fn serve(route: impl Fn(&Request) -> Answer + Send + 'static) -> Fake {
             let (status, headers, body) = route(&request);
             kept.lock().unwrap().push(request);
             let mut out = format!(
-                "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n",
+                "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\n",
                 body.len()
             );
+            if later.is_none() {
+                out += "Connection: close\r\n";
+            }
             for (k, v) in headers {
                 out += &format!("{k}: {v}\r\n");
             }
             out += &format!("\r\n{body}");
             s.write_all(out.as_bytes()).unwrap();
+            if let Some(after) = later {
+                thread::sleep(after);
+            }
         }
     });
     Fake { url, asked }
