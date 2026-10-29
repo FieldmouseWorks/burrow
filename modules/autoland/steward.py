@@ -19,7 +19,8 @@ event reports):
   3. Once a day per repo, delete branches whose tip is already in the
      default branch, and list the stale unmerged ones.
   4. Read each repo's Renovate dashboard: what sits on it too long, short
-     of a PR, goes to a Claude job (dashboard.py).
+     of a PR, goes to a Claude job (dashboard.py); and its quarantined
+     flaky tests, each to a Claude job that fixes it (flakes.py).
   5. Keep one issue up to date with everything waiting for the owner, and
      one with what the pipeline is stuck on, for a Claude job (repos.py).
 
@@ -48,6 +49,7 @@ import sys
 
 import common as C
 import dashboard as D
+import flakes as F
 import proofs as P
 import repos as R
 import reviewers as V
@@ -182,6 +184,13 @@ def run_pass(kick):
                     D.watch(repo, mine)
                 except Exception as e:  # its own: the repo's PRs were seen to all the same
                     log(f"{repo}: its dashboard: {e}")
+                    waits.failed(repo)
+                    C.wake(repo, C.NOW + 5 * MIN)  # ends: waits.failed watches the repo
+            if CFG["flaky"]["enable"]:
+                try:
+                    F.watch(repo, mine)
+                except Exception as e:  # likewise
+                    log(f"{repo}: its flaky tests: {e}")
                     waits.failed(repo)
                     C.wake(repo, C.NOW + 5 * MIN)  # ends: waits.failed watches the repo
     # This pass's wake-ups and owner's lines replace the ones it had for the

@@ -53,6 +53,9 @@
         };
       };
 
+      # The flaky tool (docs/flaky-tests.md), for a machine to install.
+      packages.${system}.flaky = pkgs.callPackage ./tools/flaky/package.nix { };
+
       # A bare machine with every module on, for the checks and as an example.
       nixosConfigurations.example = nixpkgs.lib.nixosSystem {
         modules = [ self.nixosModules.default ./examples/minimal.nix ];
@@ -98,6 +101,12 @@
         agents = import ./tests/agents.nix { inherit self pkgs; };
         # proj's queue and memory caps, with a stand-in for Claude.
         proj = import ./tests/proj.nix { inherit self pkgs; };
+        # Who takes a free slot: the pipeline's own, and each project's cap.
+        proj-pick = pkgs.runCommand "proj-pick-check" { nativeBuildInputs = [ pkgs.shellcheck ]; } ''
+          shellcheck -s bash ${./modules/proj/pick.sh} ${./tests/proj-pick.sh}
+          bash ${./tests/proj-pick.sh} ${./modules/proj/pick.sh}
+          touch $out
+        '';
         # The steward and its reviewers, with stand-ins for gh, git's remote and
         # the agents, and its one-way paths as the module sets them.
         autoland = pkgs.runCommand "autoland-check" { nativeBuildInputs = [ pkgs.python3 pkgs.git pkgs.openssl ]; } ''
@@ -255,6 +264,24 @@
           [ "$got" = "$(sed 's/^ *//' <<<"$want")" ] || { echo "got: $got"; exit 1; }
           touch $out
         '';
+        # Which updates Renovate merges itself under the example's config, as
+        # Renovate's own rules read it: all but a major, a commit pin of an
+        # action (pinDigest) included. The steward leaves Renovate's own PRs
+        # to Renovate, so one it won't merge sits green for good.
+        renovate-automerge = pkgs.runCommand "renovate-automerge-check" { } ''
+          export HOME=$TMPDIR
+          got=$(${pkgs.lib.getExe pkgs.nodejs_24} ${./tests/renovate-automerge.mjs} ${pkgs.renovate} \
+            ${self.nixosConfigurations.example.config.systemd.services.renovate.environment.RENOVATE_CONFIG_FILE} 2>/dev/null)
+          want='major no
+          minor yes
+          patch yes
+          pin yes
+          pinDigest yes
+          digest yes
+          lockFileMaintenance yes'
+          [ "$got" = "$(sed 's/^ *//' <<<"$want")" ] || { echo "got: $got"; exit 1; }
+          touch $out
+        '';
         # Which repos house-sync passes over, and when it tells the owner, with
         # stand-ins for gh and the notifier.
         house-sync = pkgs.runCommand "house-sync-check" { nativeBuildInputs = [ pkgs.python3 pkgs.jq pkgs.util-linux pkgs.diffutils ]; } ''
@@ -280,7 +307,10 @@
           [ "$(${pkg}/bin/house-fixture-member)" = 42 ]
           touch $out
         '';
-      } // nixpkgs.lib.mapAttrs' (name: nixpkgs.lib.nameValuePair "house-${name}") (
+      } // nixpkgs.lib.mapAttrs' (name: nixpkgs.lib.nameValuePair "flaky-${name}")
+        # The flaky tool's fmt, clippy and tests.
+        (self.lib.project { inherit self; systems = [ system ]; rust.dir = "tools/flaky"; }).checks.${system}
+      // nixpkgs.lib.mapAttrs' (name: nixpkgs.lib.nameValuePair "house-${name}") (
         # lib/project.nix's own gates, on the smallest projects that have them.
         (self.lib.project { self = ./tests/house/rust; systems = [ system ]; rust.testInputs = pkgs: [ pkgs.git ]; }).checks.${system}
         // (self.lib.project { self = ./tests/house/python; systems = [ system ]; python = { format = true; }; }).checks.${system}
