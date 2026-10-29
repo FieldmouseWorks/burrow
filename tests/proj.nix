@@ -148,7 +148,11 @@ pkgs.testers.runNixOSTest {
         # The VM is small: only the slot count holds jobs back here.
         minFreeMemory = 0;
         jobMemoryMax = "128M";
-        maxWait = 20;
+        # Well past what the --first subtest takes from queueing its plain
+        # job to freeing a slot for it (two runs, a pause and a stop, each
+        # telling the watchdog; over 20s on a loaded host), so that job
+        # never goes ahead for having waited.
+        maxWait = 45;
         inherit gh;
         inbox = {
           enable = true;
@@ -374,7 +378,7 @@ pkgs.testers.runNixOSTest {
         machine.fail("pgrep -f '^proj-stray'")
 
     with subtest("a turn that doesn't say what comes next hears so once, and still silent is the watchdog's at once"):
-        machine.succeed("touch /tmp/silent && truncate -s 0 /tmp/kicks")
+        machine.succeed("touch /tmp/silent && truncate -s 0 /tmp/kicks && rm -f /tmp/told")
         a = proj("run --link https://github.com/o/r/issues/11 web silent")
         machine.wait_until_succeeds(f"su - dev -c 'proj state {a}' | grep -x done", timeout=120)
         told = machine.succeed("cat /tmp/told")
@@ -406,7 +410,7 @@ pkgs.testers.runNixOSTest {
     with subtest("a turn that answers waiting on its own background work, and says nothing more, is a stall"):
         # PSIV's inbox lanes #211 and #212: each answered that it was waiting
         # on a run it had left in the background, and nothing ever woke it.
-        machine.succeed("touch /tmp/silent")
+        machine.succeed("touch /tmp/silent && rm -f /tmp/told")
         a = proj('run web "linger 600"')
         machine.wait_until_succeeds(f"su - dev -c 'proj state {a}' | grep -x done", timeout=120)
         told = machine.succeed("cat /tmp/told")
@@ -488,7 +492,7 @@ pkgs.testers.runNixOSTest {
         for j in (a, b):
             machine.wait_until_succeeds(f"su - dev -c 'proj state {j}' | grep -x running", timeout=120)
         c = proj('run web "sleep 1"')
-        time.sleep(25)
+        time.sleep(50)
         d = proj('run --first web "sleep 1"')
         time.sleep(5)
         proj(f"stop {a}")
