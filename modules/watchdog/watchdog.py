@@ -198,7 +198,7 @@ def task(stalls):
 
 
 def start_job(stalls):
-    rc, out = proj("run", "--first", "--timeout", f"{CFG['jobTimeout']}m", "--idle", f"{CFG['jobIdle']}m",
+    rc, out = proj("run", "--pipeline", "--timeout", f"{CFG['jobTimeout']}m", "--idle", f"{CFG['jobIdle']}m",
                    "--kick", "watchdog", CFG["project"], task(stalls))
     return out if rc == 0 and out else None
 
