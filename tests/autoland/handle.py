@@ -622,7 +622,7 @@ for checks in (CI_GREEN, []):
     assert "a Claude job is running remi-proof" in status, status
 # renovate-sweep is told how a covered repo's proofs run.
 C.NOW = C.ts(T0)
-assert S.coverage([{"repo": "sam/r"}], [{"repo": "sam/r"}]) == {
+assert C.coverage([{"repo": "sam/r"}], [{"repo": "sam/r"}]) == {
     "at": C.NOW, "repos": {"sam/r": {"proofJobs": S.CFG["repos"]["sam/r"]["proofJobs"], "covered": True}}}
 # ... but only the repos a pass saw to are covered: one whose pass failed
 # isn't, so renovate-sweep lists its ok majors itself, and still knows how
@@ -667,7 +667,7 @@ assert UNHOOKED == [S.R.discover() + [{"repo": "eve/p"}]], UNHOOKED
 S.R.discover, S.R.settle_repo, S.R.publish, S.open_prs, S.R.unhook_gone, S.R.hook_projects = kept_fns
 written = json.load(open(f"{tmp}/state/repos.json"))["repos"]
 assert {r: v["covered"] for r, v in written.items()} == {"sam/r": True, "sam/bad": False, "sam/flaky": False}, written
-assert written["sam/bad"]["proofJobs"] == S.repo_cfg("sam/bad")["proofJobs"], written
+assert written["sam/bad"]["proofJobs"] == C.repo_cfg("sam/bad")["proofJobs"], written
 # A proof job that ends without posting its verdict is started once more.
 fresh_pr_state()
 run(clean(checks=CI_GREEN), 700)
