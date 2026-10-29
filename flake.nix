@@ -153,11 +153,17 @@
             ];
           };
         in builtins.head (builtins.filter (p: (p.name or "") == "autoland-steward") machine.config.environment.systemPackages);
-        # The stall watchdog's ladder (kick, Claude job, stuck issue, owner),
-        # with the real notify and stand-ins for proj, notify's gh and
-        # burrow-events' kick port.
-        watchdog = pkgs.runCommand "watchdog-check" { nativeBuildInputs = [ pkgs.python3 pkgs.bash ]; } ''
-          python3 -I ${./tests/watchdog.py} ${./modules/watchdog}/watchdog.py ${./modules/notify}/notify.sh
+        # The example's stall watchdog reads the config its module writes (a
+        # field the binary doesn't know fails it).
+        watchdog-config = pkgs.runCommand "watchdog-config-check" { } ''
+          ${self.nixosConfigurations.example.config.systemd.services.burrow-watchdog.serviceConfig.ExecStart} status
+          touch $out
+        '';
+        # HOST-notify's issues, with a stand-in for gh: one a notice, closed
+        # when cleared, and pending until GitHub has shown it closed.
+        notify = pkgs.runCommand "notify-check" { nativeBuildInputs = [ pkgs.shellcheck pkgs.jq pkgs.bash ]; } ''
+          shellcheck -s bash ${./tests/notify.sh}
+          bash ${./tests/notify.sh} ${./modules/notify/notify.sh}
           touch $out
         '';
         # burrow-events for real: deliveries, kicks and wake-ups starting a
