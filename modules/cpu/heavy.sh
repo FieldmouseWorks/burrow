@@ -45,9 +45,10 @@ if [ -n "${HEAVY_SLOT:-}" ]; then exec "$@"; fi
 
 # The command runs in a session of its own, so cancelling heavy (TERM, INT,
 # HUP) cancels all of it, shells' workers too, and never the caller's group;
-# the slot stays held until every process in it has stopped. Its stdin is the
-# caller's: bash would give a background command /dev/null.
-child='' reaped='' cancelled=''
+# the slot stays held until every process in it has stopped, and whatever is
+# left GRACE seconds after the signal gets KILL. Its stdin is the caller's:
+# bash would give a background command /dev/null.
+child='' reaped='' cancelled='' kill_at=''
 # Signals the command's group. Until setsid has made it one, the child is
 # still bash's fork, which would take the signal as heavy's own trap and go on
 # to start the command: wait for the group, or for the child to have died.
@@ -65,8 +66,23 @@ stop() {
 }
 cancel() {
   cancelled=1
+  [ -n "$kill_at" ] || kill_at=$(( $(now) + GRACE * 1000000 ))
   # Before the child's pid is known, run() signals it once it is.
   [ -z "$child" ] || stop TERM
+}
+# Whether the child is still running (not exited, reaped or not).
+running() {
+  local stat
+  read -r stat 2>/dev/null </proc/"$child"/stat || return 1
+  stat=${stat##*) }
+  [ "${stat%% *}" != Z ]
+}
+# Reaps the child into rc once it has exited; returns 1 while it hasn't.
+reap() {
+  rc=0
+  wait "$child" || rc=$?
+  ! kill -0 "$child" 2>/dev/null || return 1
+  reaped=1
 }
 run() {
   export HEAVY_SLOT=$1 HEAVY_JOBS=$share
@@ -78,18 +94,15 @@ run() {
   child=$!
   exec {in}<&-
   [ -z "$cancelled" ] || stop TERM
-  # wait returns early when a trapped signal arrives: wait again for the child's own status.
-  while true; do
-    rc=0
-    wait "$child" || rc=$?
-    kill -0 "$child" 2>/dev/null || break
-  done
-  reaped=1
+  # wait returns early when a trapped signal arrives: until then, wait for the
+  # child's own status. Once cancelled, poll instead, so the KILL comes on time
+  # even when the command ignores TERM or hangs in its handler.
+  while [ -z "$cancelled" ]; do reap && break; done
   if [ -n "$cancelled" ]; then
-    n=0
-    while kill -0 -- "-$child" 2>/dev/null; do
-      n=$(( n + 1 ))
-      [ "$n" -ne 100 ] || stop KILL
+    killed=''
+    while [ -z "$reaped" ] || kill -0 -- "-$child" 2>/dev/null; do
+      if [ -z "$reaped" ] && ! running; then reap || true; continue; fi
+      [ -n "$killed" ] || [ "$(now)" -lt "$kill_at" ] || { stop KILL; killed=1; }
       sleep 0.1
     done
   fi

@@ -17,6 +17,7 @@ let
     runtimeInputs = [ pkgs.coreutils pkgs.util-linux ];
     text = ''
       SLOTS=${toString cfg.heavy.slots}
+      GRACE=${toString cfg.heavy.grace}
       DIR=${lib.escapeShellArg cfg.heavy.dir}
     '' + builtins.readFile ./cpu/heavy.sh;
   };
@@ -60,6 +61,12 @@ in
           divided by this in HEAVY_JOBS, CARGO_BUILD_JOBS and
           RUST_TEST_THREADS.
         '';
+      };
+      grace = lib.mkOption {
+        type = lib.types.ints.positive;
+        default = 10;
+        internal = true;
+        description = "Seconds a cancelled heavy run gets to stop before its processes are killed (the check's is shorter).";
       };
       dir = lib.mkOption {
         type = lib.types.str;

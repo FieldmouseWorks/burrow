@@ -99,7 +99,7 @@
         # wait refused on time; and the example's gate slice weighted.
         cpu = let
           heavy = (self.nixosConfigurations.example.extendModules {
-            modules = [{ burrow.cpu.heavy = { slots = 1; dir = "/build/heavy"; }; }];
+            modules = [{ burrow.cpu.heavy = { slots = 1; grace = 3; dir = "/build/heavy"; }; }];
           }).config.burrow.tools.heavy;
           weight = self.nixosConfigurations.example.config.systemd.slices.ci.sliceConfig.CPUWeight;
         in pkgs.runCommand "cpu-check" { } ''
@@ -143,6 +143,23 @@
             [ -e stopped ] || { echo "$sig: the slot went before the worker stopped"; exit 1; }
             ! kill -0 "$(cat worker)" 2>/dev/null || { echo "$sig: the worker outlived heavy"; exit 1; }
             $h status | grep -q '^slot1: free' || { echo "$sig: status: $($h status)"; exit 1; }
+          done
+          # A command that ignores the signal, or hangs in its handler with a
+          # worker that ignores everything, is killed GRACE (3) seconds after
+          # the signal, worker too, and only then does the slot go.
+          for sig in TERM INT HUP; do
+            for cmd in \
+              'trap "" TERM INT HUP; echo $$ >worker; while :; do sleep 0.1; done' \
+              'sh -c "trap \"\" TERM INT HUP; while :; do sleep 0.1; done" & echo $! >worker; trap "sleep 60" TERM INT HUP; wait'; do
+              rm -f worker
+              env --default-signal=INT $h -- sh -c "$cmd" & hp=$!
+              while [ ! -s worker ]; do sleep 0.1; done
+              s=$(date +%s%N); kill -$sig $hp; wait $hp || true; e=$(date +%s%N)
+              ms=$(( (e - s) / 1000000 ))
+              [ "$ms" -ge 2900 ] && [ "$ms" -lt 6000 ] || { echo "$sig, stubborn command: heavy took ''${ms}ms, not about 3s"; exit 1; }
+              ! kill -0 "$(cat worker)" 2>/dev/null || { echo "$sig: a stubborn command outlived heavy"; exit 1; }
+              $h status | grep -q '^slot1: free' || { echo "$sig, stubborn: status: $($h status)"; exit 1; }
+            done
           done
           # Cancelled as it starts, nothing of the command runs on.
           for i in $(seq 10); do
