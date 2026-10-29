@@ -519,6 +519,13 @@
           python3 -I ${./tests/gate.py} ${./.github/workflows/flake-check.yml}
           touch $out
         '';
+        # The shared CI's merge step (flake-check.yml), its own script on
+        # real repos: a PR is checked merged with its base as the base is when
+        # the job starts, and one that no longer merges cleanly fails.
+        pr-base = pkgs.runCommand "pr-base-check" { nativeBuildInputs = [ (pkgs.python3.withPackages (p: [ p.pyyaml ])) pkgs.git ]; } ''
+          python3 -I ${./tests/pr-base.py} ${./.github/workflows/flake-check.yml}
+          touch $out
+        '';
         # Stale Remote Control servers catch up once idle, with a stand-in for Claude.
         remote-control = import ./tests/remote-control.nix { inherit self pkgs; };
         # A session past its server's memory cap dies alone, with a stand-in for Claude.
