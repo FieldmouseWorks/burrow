@@ -13,6 +13,7 @@
 //! and for an hour at most. Exit status 75 is "ask again later": GitHub, the
 //! network or the service wasn't there.
 
+mod account;
 mod answer;
 mod app;
 mod cache;

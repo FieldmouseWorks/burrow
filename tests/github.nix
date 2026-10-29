@@ -1,7 +1,8 @@
 # An App's tokens on a machine: its users get them through the socket, and
 # nobody else does; nobody but the service reads the key or the tokens it
 # keeps; and in the App's env, git and gh get the App's token, never the
-# user's own login, even when the App's can't be had. GitHub is a stand-in.
+# user's own login (its file, its keyring, its SSH keys), even when the
+# App's can't be had. GitHub is a stand-in.
 #
 #   nix build .#checks.x86_64-linux.github -L
 { self, pkgs }:
@@ -42,6 +43,17 @@ let
   '';
   # What gh would be run with: the token it was given, if any.
   show = pkgs.writeShellScript "show" ''echo "token=''${GH_TOKEN-} args=$*"'';
+  # dev's login in the keyring, where `gh auth login` keeps it when there's
+  # one: unkeyed, so gh finds it even without a config naming dev. Then gh
+  # without a config, and gh in the App's env, in that session.
+  keyring = env: pkgs.writeShellScript "keyring" ''
+    set -u
+    echo -n pw | ${pkgs.gnome-keyring}/bin/gnome-keyring-daemon --daemonize --unlock --components=secrets >/dev/null
+    for _ in $(seq 50); do ${pkgs.libsecret}/bin/secret-tool search x y >/dev/null 2>&1 && break; sleep 0.2; done
+    echo -n keyring-token | ${pkgs.libsecret}/bin/secret-tool store --label=gh service gh:github.com username ""
+    echo "no config: $(GH_CONFIG_DIR=/run/gh-token/no-login ${pkgs.gh}/bin/gh auth token 2>&1)"
+    echo "the App's env: $(env ${env} ${pkgs.gh}/bin/gh auth token 2>&1)"
+  '';
 in
 pkgs.testers.runNixOSTest {
   name = "github";
@@ -85,8 +97,8 @@ pkgs.testers.runNixOSTest {
 
       ENV = ${builtins.toJSON env}
 
-      def dev(command, app=True):
-          return "su - dev -c " + shlex.quote(("env " + ENV + " " if app else "") + command)
+      def dev(command, app=True, at="~"):
+          return "su - dev -c " + shlex.quote(f"cd {at} && " + ("env " + ENV + " " if app else "") + command)
 
       def asked():
           return machine.succeed("cat /tmp/asked").splitlines()
@@ -102,7 +114,7 @@ pkgs.testers.runNixOSTest {
           assert len(asked()) == 2, asked()
           assert machine.succeed(dev("gh-token get sam/r")).strip() == "ghs_2"
           # An account without the App: refused, not "try later".
-          status, out = machine.execute(dev("gh-token get eve"))
+          status, out = machine.execute(dev("gh-token get eve 2>&1"))
           assert status == 1 and "isn't installed on eve" in out, (status, out)
 
       with subtest("nobody else, and nobody reads the key or what's kept"):
@@ -117,19 +129,42 @@ pkgs.testers.runNixOSTest {
 
       with subtest("git, in the App's env, has the App's token for the repo it names"):
           assert "password=peter-token" in machine.succeed(dev(fill % "sam/r.git", app=False))
+          # sam/r's own token, from before: not one for all of sam's repos.
           out = machine.succeed(dev(fill % "sam/r.git"))
-          assert "username=x-access-token" in out and "password=ghs_1" in out and "peter" not in out, out
+          assert "username=x-access-token" in out and "password=ghs_2" in out and "peter" not in out, out
           # No token to be had: git stops, rather than take dev's login.
           status, out = machine.execute(dev(fill % "eve/x.git"))
           assert status != 0 and "peter" not in out, (status, out)
 
+      with subtest("git, in the App's env, reaches GitHub over https, never SSH"):
+          for remote in ["git@github.com:sam/r.git", "ssh://git@github.com/sam/r.git"]:
+              assert machine.succeed(dev(f"git ls-remote --get-url {remote}")).strip() == "https://github.com/sam/r.git"
+              assert machine.succeed(dev(f"git ls-remote --get-url {remote}", app=False)).strip() == remote
+          # Whatever would still take dev's SSH keys stops: an alias, a rewrite of dev's own.
+          for call in ["git ls-remote gh:sam/r.git", "git -c url.git@github.com:.insteadOf=https://github.com/ ls-remote https://github.com/sam/r.git"]:
+              status, out = machine.execute(dev(call + " 2>&1"))
+              assert status != 0 and "never over SSH" in out, (status, out)
+              status, out = machine.execute(dev(call + " 2>&1", app=False))
+              assert "never over SSH" not in out, out
+
       with subtest("gh, in the App's env, has the App's token, and no login of dev's"):
           assert machine.succeed(dev("gh auth token", app=False)).strip() == "peter-token"
           machine.fail(dev("${pkgs.gh}/bin/gh auth token"))
+          machine.fail("su - dev -c " + shlex.quote("GITHUB_TOKEN=peter-token env " + ENV + " ${pkgs.gh}/bin/gh auth token"))
+          # In dev's keyring: gh finds it with no config, but not in the App's env.
+          out = machine.succeed(dev("${pkgs.dbus}/bin/dbus-run-session -- ${keyring env}", app=False))
+          assert "no config: keyring-token" in out and "the App's env: no oauth token" in out, out
           out = machine.succeed(dev("gh-token gh ${show} pr view 5 -R sam/r")).strip()
           assert out == "token=ghs_1 args=pr view 5 -R sam/r", out
-          # A token given already is the one it runs with.
+          # A token given already is the one it runs with; an empty one isn't one.
           assert machine.succeed(dev("GH_TOKEN=mine gh-token gh ${show} api user")).strip() == "token=mine args=api user"
+          out = machine.succeed(dev("GH_TOKEN= GITHUB_TOKEN=peter-token gh-token gh ${show} api repos/sam/r")).strip()
+          assert out == "token=ghs_1 args=api repos/sam/r", out
+          # The repo gh acts on: a fork's upstream, unless the call names another.
+          machine.succeed(dev("git init -q fork && git -C fork remote add origin git@github.com:eve/r.git && git -C fork remote add upstream https://github.com/sam/r.git", app=False))
+          assert machine.succeed(dev("gh-token gh ${show} pr view 5", at="~/fork")).strip() == "token=ghs_1 args=pr view 5"
+          status, out = machine.execute(dev("gh-token gh ${show} pr view https://github.com/eve/r/pull/5 2>&1", at="~/fork"))
+          assert status == 1 and "isn't installed on eve" in out, (status, out)
           # Outside the App's env, gh is just gh.
           assert machine.succeed(dev("gh-token gh ${show} api user", app=False)).strip() == "token= args=api user"
           # The wrapper on the PATH is this.

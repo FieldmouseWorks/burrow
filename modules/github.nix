@@ -11,14 +11,23 @@
 # (burrow.tools.gh, the one on the PATH) gets a token for the account its call
 # is about, and git's only credential helper is gh-token, which gets one for
 # the repo git names. Neither can fall back to the user's own login: git's
-# other helpers are cleared, and gh's own login is out of its reach. Without
-# that env, both are the user's gh login, as before.
+# other helpers are cleared, git doesn't reach GitHub over SSH (its SSH
+# remotes go over https), and gh's own login, in a file or the keyring, is
+# out of its reach. Without that env, both are the user's, as before.
+#
+# Only github.com: the env's settings for git and gh are its.
 inputs:
 { config, lib, pkgs, ... }:
 let
   inherit (lib) mkOption types;
   cfg = config.burrow.github;
   package = inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.gh-token;
+
+  # git over SSH, in an App's env: the user's own keys, so never.
+  noSsh = pkgs.writeShellScript "gh-token-no-ssh" ''
+    echo "gh-token: acting as the App, git reaches GitHub over https, never over SSH with your keys" >&2
+    exit 1
+  '';
 
   # gh as everyone runs it: the App's token when GH_TOKEN_SOCKET asks for
   # one, the user's own login otherwise (client.rs).
@@ -53,7 +62,7 @@ in
         api = mkOption {
           type = types.str;
           default = "https://api.github.com";
-          description = "GitHub's REST API, where the App is: another for GitHub Enterprise.";
+          description = "GitHub's REST API: another is a stand-in for github.com's, as the tests have.";
         };
         users = mkOption {
           type = types.listOf types.str;
@@ -72,17 +81,29 @@ in
           readOnly = true;
           default = {
             GH_TOKEN_SOCKET = socket;
-            # A gh that isn't the wrapper finds no login, rather than the user's.
+            # A gh that isn't the wrapper finds no login, rather than the
+            # user's: not in its config, not in the keyring (the session bus
+            # it's reached on), not in GitHub's other variable.
             GH_CONFIG_DIR = "/run/gh-token/no-login";
+            DBUS_SESSION_BUS_ADDRESS = "disabled:";
+            GITHUB_TOKEN = "";
             # Set in the environment, so they come after every config file's:
             # the empty helper clears the ones before it.
-            GIT_CONFIG_COUNT = "3";
+            GIT_CONFIG_COUNT = "5";
             GIT_CONFIG_KEY_0 = "credential.https://github.com.helper";
             GIT_CONFIG_VALUE_0 = "";
             GIT_CONFIG_KEY_1 = "credential.https://github.com.helper";
             GIT_CONFIG_VALUE_1 = "!${package}/bin/gh-token git-credential";
             GIT_CONFIG_KEY_2 = "credential.https://github.com.useHttpPath";
             GIT_CONFIG_VALUE_2 = "true";
+            # GitHub's SSH remotes go over https instead, and anything still
+            # over SSH (an alias, a rewrite of the user's own) stops.
+            GIT_CONFIG_KEY_3 = "url.https://github.com/.insteadOf";
+            GIT_CONFIG_VALUE_3 = "git@github.com:";
+            GIT_CONFIG_KEY_4 = "url.https://github.com/.insteadOf";
+            GIT_CONFIG_VALUE_4 = "ssh://git@github.com/";
+            GIT_SSH_COMMAND = "${noSsh}";
+            GIT_SSH_VARIANT = "ssh";
           };
           defaultText = lib.literalMD "GH_TOKEN_SOCKET, and git's and gh's settings for it";
           description = "The environment a process acts as the App in.";

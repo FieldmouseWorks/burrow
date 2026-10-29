@@ -8,8 +8,9 @@
 //!   socket set, gives an answer or stops git: it never lets git fall back
 //!   to the user's own login.
 //! - `gh GH ARGS...`: runs GH with a token for the account the call is
-//!   about, unless GH_TOKEN is already set.
+//!   about (account.rs), unless it's given one already in GH_TOKEN.
 
+use std::ffi::OsStr;
 use std::io::{self, BufRead, Read, Write};
 use std::net::Shutdown;
 use std::os::unix::net::UnixStream;
@@ -18,8 +19,9 @@ use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
 
+use crate::account::{self, Context};
 use crate::error::Error;
-use crate::target::{is_owner, owner_of};
+use crate::target::target_of;
 
 /// The longest answer read: a token is shorter, and so is GitHub's no.
 const MAX_ANSWER: u64 = 4096;
@@ -78,8 +80,9 @@ pub fn git_credential(
     if protocol.as_deref() != Some("https") || host.as_deref() != Some("github.com") {
         return Ok(());
     }
-    let got = match path.and_then(|p| owner_of(&format!("github.com/{p}"))) {
-        Some(owner) => fetch(socket, &owner),
+    // That repo's token, not its account's.
+    let got = match path.and_then(|p| target_of(&format!("github.com/{p}"))) {
+        Some(repo) => fetch(socket, &repo.to_string()),
         None => Err(Error::refused(
             "git didn't say which repo (credential.useHttpPath)",
         )),
@@ -99,62 +102,42 @@ pub fn git_credential(
 pub fn gh(gh: &str, args: &[String], socket: Option<&Path>) -> Error {
     let mut run = Command::new(gh);
     run.args(args);
-    if let Some(socket) = socket.filter(|_| std::env::var_os("GH_TOKEN").is_none()) {
-        let owner = owner_in(args)
-            .or_else(origin_owner)
-            .or_else(|| std::env::var("GH_TOKEN_OWNER").ok().filter(|o| is_owner(o)))
-            .or_else(|| {
-                args.iter().find_map(|a| {
-                    a.starts_with("https://github.com/")
-                        .then(|| owner_of(a))
-                        .flatten()
-                })
-            });
-        let Some(owner) = owner else {
-            return Error::refused("which account is this gh call for? Give it -R OWNER/REPO");
-        };
-        match fetch(socket, &owner) {
-            Ok(token) => {
-                run.env("GH_TOKEN", token);
-            }
-            Err(e) => return e,
+    let context = Context {
+        gh_repo: std::env::var("GH_REPO").ok(),
+        remotes: account::remotes,
+        default: std::env::var("GH_TOKEN_OWNER").ok(),
+    };
+    match token_for(
+        args,
+        std::env::var_os("GH_TOKEN").as_deref(),
+        socket,
+        &context,
+    ) {
+        Ok(Some(token)) => {
+            run.env("GH_TOKEN", token);
         }
+        Ok(None) => {}
+        Err(e) => return e,
     }
     let e = run.exec();
     Error::refused(format!("{gh}: {e}"))
 }
 
-/// The account a gh call names: its `-R`/`--repo`, else an API path under
-/// `repos/OWNER/`.
-fn owner_in(args: &[String]) -> Option<String> {
-    let mut it = args.iter();
-    while let Some(a) = it.next() {
-        if a == "-R" || a == "--repo" {
-            return it.next().and_then(|v| owner_of(v));
+/// The App's token for the call, when there's a socket to ask and gh isn't
+/// given one already. An empty GH_TOKEN is none: gh reads it so, and would
+/// go on to GITHUB_TOKEN.
+fn token_for(
+    args: &[String],
+    given: Option<&OsStr>,
+    socket: Option<&Path>,
+    context: &Context,
+) -> Result<Option<String>, Error> {
+    match socket {
+        Some(socket) if given.is_none_or(OsStr::is_empty) => {
+            fetch(socket, &account::account(args, context)?).map(Some)
         }
-        if let Some(v) = a
-            .strip_prefix("--repo=")
-            .or_else(|| a.strip_prefix("-R").filter(|v| !v.is_empty()))
-        {
-            return owner_of(v);
-        }
+        _ => Ok(None),
     }
-    args.iter().find_map(|a| {
-        let rest = a.strip_prefix('/').unwrap_or(a).strip_prefix("repos/")?;
-        let owner = rest.split('/').next()?;
-        is_owner(owner).then(|| owner.to_owned())
-    })
-}
-
-/// The account of the current directory's origin remote, as gh would read
-/// it.
-fn origin_owner() -> Option<String> {
-    let out = Command::new("git")
-        .args(["config", "--get", "remote.origin.url"])
-        .output()
-        .ok()?;
-    out.status.success().then_some(())?;
-    owner_of(String::from_utf8(out.stdout).ok()?.trim())
 }
 
 #[cfg(test)]
@@ -226,11 +209,23 @@ mod tests {
 
     #[test]
     fn gives_git_the_token_for_the_repo_it_names() {
-        let (_dir, path, handle) = serve(vec!["token ghs_abc\n", "refused not installed\n"]);
+        let (_dir, path, handle) = serve(vec![
+            "token ghs_abc\n",
+            "token ghs_lfs\n",
+            "refused not installed\n",
+        ]);
         let asked = "protocol=https\nhost=github.com\npath=Sam/r.git\n\n";
         assert_eq!(
             credential("get", asked, Some(&path)),
             "username=x-access-token\npassword=ghs_abc\n"
+        );
+        assert_eq!(
+            credential(
+                "get",
+                "protocol=https\nhost=github.com\npath=sam/r.git/info/lfs\n",
+                Some(&path)
+            ),
+            "username=x-access-token\npassword=ghs_lfs\n"
         );
         // A failure stops git: no falling back to the user's own login.
         assert_eq!(
@@ -241,12 +236,20 @@ mod tests {
             ),
             "quit=1\n"
         );
-        assert_eq!(handle.join().unwrap(), ["Sam\n", "eve\n"]);
-        // Nor when git won't say which repo.
-        assert_eq!(
-            credential("get", "protocol=https\nhost=github.com\n", Some(&path)),
-            "quit=1\n"
-        );
+        // Each the repo's own token, never the account's.
+        assert_eq!(handle.join().unwrap(), ["Sam/r\n", "sam/r\n", "eve/x\n"]);
+        // Nor when git won't say which repo, or what it says isn't one.
+        for no_repo in ["", "path=sam\n", "path=sam/..\n"] {
+            assert_eq!(
+                credential(
+                    "get",
+                    &format!("protocol=https\nhost=github.com\n{no_repo}"),
+                    Some(&path)
+                ),
+                "quit=1\n",
+                "{no_repo:?}"
+            );
+        }
         // Not GitHub, not https, not a get, or no socket: the next helper's.
         assert_eq!(
             credential(
@@ -269,21 +272,35 @@ mod tests {
     }
 
     #[test]
-    fn finds_the_account_a_gh_call_names() {
-        let args = |s: &str| s.split(' ').map(str::to_owned).collect::<Vec<_>>();
-        for (call, owner) in [
-            ("pr view 5 -R Sam/r", Some("Sam")),
-            ("pr view 5 --repo sam/r", Some("sam")),
-            ("pr view 5 --repo=github.com/sam/r", Some("sam")),
-            ("pr view 5 -Rsam/r", Some("sam")),
-            ("api repos/sam/r/pulls", Some("sam")),
-            ("api /repos/sam/r/pulls -f body=repos/eve/x", Some("sam")),
-            ("api -R eve/x repos/sam/r", Some("eve")),
-            ("api graphql -f query=x", None),
-            ("pr view 5", None),
-            ("pr view 5 -R", None),
-        ] {
-            assert_eq!(owner_in(&args(call)).as_deref(), owner, "{call}");
-        }
+    fn gives_gh_the_token_for_its_account_unless_it_has_one() {
+        let (_dir, path, handle) = serve(vec!["token ghs_abc\n", "token ghs_def\n"]);
+        let context = Context {
+            gh_repo: None,
+            remotes: String::new,
+            default: None,
+        };
+        let args: Vec<String> = ["pr", "view", "5", "-R", "sam/r"].map(String::from).into();
+        let socket = Some(path.as_path());
+        assert_eq!(
+            token_for(&args, None, socket, &context).unwrap().as_deref(),
+            Some("ghs_abc")
+        );
+        // An empty one is none.
+        assert_eq!(
+            token_for(&args, Some(OsStr::new("")), socket, &context)
+                .unwrap()
+                .as_deref(),
+            Some("ghs_def")
+        );
+        assert_eq!(handle.join().unwrap(), ["sam\n", "sam\n"]);
+        // One given, or no socket: gh's as it is.
+        assert_eq!(
+            token_for(&args, Some(OsStr::new("mine")), socket, &context).unwrap(),
+            None
+        );
+        assert_eq!(token_for(&args, None, None, &context).unwrap(), None);
+        // No account to be had: refused, the socket never asked.
+        let nothing: Vec<String> = ["api", "user"].map(String::from).into();
+        assert!(token_for(&nothing, None, socket, &context).is_err());
     }
 }

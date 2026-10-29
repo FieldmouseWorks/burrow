@@ -62,11 +62,12 @@ pub fn is_repo(s: &str) -> bool {
         && s != ".."
 }
 
-/// The account a GitHub URL, a git remote or a `-R` value names:
+/// The repo a GitHub URL, a git remote or a `-R` value names:
 /// `https://github.com/OWNER/REPO`, `git@github.com:OWNER/REPO.git`,
 /// `ssh://git@github.com/OWNER/REPO`, `github.com/OWNER/REPO` or
-/// `OWNER/REPO`. Another host names none.
-pub fn owner_of(s: &str) -> Option<String> {
+/// `OWNER/REPO`, and anything under it (`/pull/5`, `.git/info/lfs`).
+/// Another host names none.
+pub fn target_of(s: &str) -> Option<Target> {
     let rest = ["https://", "http://", "ssh://"]
         .iter()
         .find_map(|scheme| s.strip_prefix(scheme))
@@ -82,7 +83,11 @@ pub fn owner_of(s: &str) -> Option<String> {
     let mut parts = path.split('/');
     let owner = parts.next()?;
     let repo = parts.next()?;
-    (is_owner(owner) && !repo.is_empty()).then(|| owner.to_owned())
+    let repo = repo.strip_suffix(".git").unwrap_or(repo);
+    (is_owner(owner) && is_repo(repo)).then(|| Target {
+        owner: owner.to_owned(),
+        repo: Some(repo.to_owned()),
+    })
 }
 
 #[cfg(test)]
@@ -129,7 +134,23 @@ mod tests {
             ("./sam/r", None),
             ("https://sam/r", None),
         ] {
-            assert_eq!(owner_of(s).as_deref(), owner, "{s}");
+            assert_eq!(target_of(s).map(|t| t.owner).as_deref(), owner, "{s}");
+        }
+    }
+
+    #[test]
+    fn finds_the_repo_without_its_git_suffix() {
+        for (s, repo) in [
+            ("https://github.com/Sam/R.git", Some("Sam/R")),
+            ("github.com/sam/r.git/info/lfs", Some("sam/r")),
+            ("git@github.com:sam/r.git", Some("sam/r")),
+            ("https://github.com/sam/r/pull/5", Some("sam/r")),
+            ("sam/r", Some("sam/r")),
+            ("github.com/sam/.git", None),
+            ("github.com/sam/..", None),
+            ("github.com/sam/r%20x", None),
+        ] {
+            assert_eq!(target_of(s).map(|t| t.to_string()).as_deref(), repo, "{s}");
         }
     }
 }

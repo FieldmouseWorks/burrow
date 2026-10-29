@@ -37,9 +37,9 @@
       cnStandIn = pkgs.writeShellScriptBin "cn" "exit 1";
       names = [ "claude" "undo" "switch" "notify" "updates" "proj" "remote-control" "agents" "robot" "ops" "toolbox" "autoland" "house" "events" "ledger" "browser" "heartbeat" "github" ];
       # gh-token (modules/github): its package, and its gate.
+      # Built for every platform lib/project.nix knows, like the module.
       ghToken = self.lib.project {
         self = ./modules/github;
-        systems = [ system ];
         rust.testInputs = pkgs: [ pkgs.openssl ];
       };
     in
@@ -279,7 +279,7 @@
         // (self.lib.project { self = ./tests/house/python; systems = [ system ]; python = { format = true; }; }).checks.${system}
       );
 
-      packages.${system}.gh-token = ghToken.packages.${system}.default;
+      packages = nixpkgs.lib.mapAttrs (_: p: { gh-token = p.default; }) ghToken.packages;
 
       formatter.${system} = pkgs.nixfmt-rfc-style;
     };

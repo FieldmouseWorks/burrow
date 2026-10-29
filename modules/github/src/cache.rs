@@ -3,7 +3,7 @@
 //! handed out works for at least that long, and GitHub is asked for a new
 //! one only that often.
 
-use std::fs::{self, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
@@ -18,6 +18,20 @@ pub fn get(dir: &Path, key: &str, now: i64) -> Option<String> {
     let text = fs::read_to_string(dir.join(key)).ok()?;
     let (expires, token) = text.trim_end().split_once(' ')?;
     (expires.parse::<i64>().ok()? - now > MARGIN && !token.is_empty()).then(|| token.to_owned())
+}
+
+/// Held while one asker mints `key`'s token, so the others wait for it and
+/// take what it kept rather than each minting their own. Let go when it's
+/// dropped, or when the process ends, however it ends.
+pub fn lock(dir: &Path, key: &str) -> io::Result<File> {
+    let f = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(dir.join(format!(".{key}.lock")))?;
+    f.lock()?;
+    Ok(f)
 }
 
 /// Keeps it under `key`, readable by this user only, whole or not at all.

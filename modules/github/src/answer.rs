@@ -10,6 +10,8 @@ use std::fs;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
 
+use ring::digest::{SHA256, digest};
+
 use crate::app::App;
 use crate::cache;
 use crate::error::Error;
@@ -61,7 +63,16 @@ pub fn answer(
 fn token(config: &Config, request: &str, now: i64) -> Result<String, Error> {
     let target =
         Target::parse(request).ok_or_else(|| Error::refused("a request is OWNER or OWNER/REPO"))?;
-    let key = target.key();
+    // Kept as this App's, on this GitHub: another's tokens, kept under the
+    // same name before it changed, are never handed out as this one's.
+    let key = format!("{}.{}.{}", config.app_id, tag(&config.api), target.key());
+    if let Some(t) = cache::get(&config.cache, &key, now) {
+        return Ok(t);
+    }
+    // One mint for a target at a time: whoever waited takes what it kept.
+    let _minting = cache::lock(&config.cache, &key)
+        .inspect_err(|e| eprintln!("gh-token: couldn't wait my turn for {target}: {e}"))
+        .ok();
     if let Some(t) = cache::get(&config.cache, &key, now) {
         return Ok(t);
     }
@@ -78,6 +89,14 @@ fn token(config: &Config, request: &str, now: i64) -> Result<String, Error> {
     }
     eprintln!("gh-token: minted a token for {target}");
     Ok(minted.token)
+}
+
+/// A short name for an API's root: its SHA-256's first bytes.
+fn tag(api: &str) -> String {
+    digest(&SHA256, api.trim_end_matches('/').as_bytes()).as_ref()[..4]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 #[cfg(test)]
@@ -122,6 +141,30 @@ mod tests {
         // A repo's is its own.
         ask(&config, "sam/r\n", now);
         assert_eq!(github.asked().len(), 6);
+        // Kept by another App, or for another GitHub, under the same name:
+        // never this one's.
+        let elsewhere = fake::serve(|r| match r.method.as_str() {
+            "GET" => (200, vec![], fake::installations(&[(42, "sam")])),
+            _ => (
+                201,
+                vec![],
+                r#"{"token":"ghs_other","expires_at":"2026-10-28T23:00:00Z"}"#.into(),
+            ),
+        });
+        for (api, app_id) in [(&github.url, 8), (&elsewhere.url, 7)] {
+            let other = Config {
+                api: api.clone(),
+                proxy: None,
+                app_id,
+                key: dir.path().join("key"),
+                cache: dir.path().join("cache"),
+            };
+            ask(&other, "sam\n", now);
+        }
+        assert_eq!(github.asked().len(), 8);
+        assert_eq!(elsewhere.asked().len(), 2);
+        assert_eq!(ask(&config, "sam\n", now + 60), "token ghs_abc\n");
+        assert_eq!(github.asked().len(), 8);
         // Not a target, or too long to be one: refused, GitHub never asked.
         for bad in ["sam/r/x\n", "\n", "", &format!("{}\n", "a".repeat(300))] {
             assert_eq!(
@@ -130,7 +173,7 @@ mod tests {
                 "{bad:?}"
             );
         }
-        assert_eq!(github.asked().len(), 6);
+        assert_eq!(github.asked().len(), 8);
         // No key: refused, and said on one line.
         let config = Config {
             key: dir.path().join("none"),
@@ -143,6 +186,49 @@ mod tests {
                 && reply.ends_with('\n')
                 && reply.lines().count() == 1,
             "{reply}"
+        );
+    }
+
+    #[test]
+    fn askers_at_once_share_one_mint() {
+        let github = fake::serve(|r| match r.method.as_str() {
+            "GET" => (200, vec![], fake::installations(&[(42, "sam")])),
+            _ => {
+                // Long enough that every asker has looked in the cache by
+                // the time it's kept.
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                (
+                    201,
+                    vec![],
+                    r#"{"token":"ghs_abc","expires_at":"2026-10-28T23:00:00Z"}"#.into(),
+                )
+            }
+        });
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("key"), fake::key(true)).unwrap();
+        let config = std::sync::Arc::new(Config {
+            api: github.url.clone(),
+            proxy: None,
+            app_id: 7,
+            key: dir.path().join("key"),
+            cache: dir.path().to_owned(),
+        });
+        let askers: Vec<_> = ["sam", "Sam", "SAM", "sam"]
+            .into_iter()
+            .map(|who| {
+                let config = config.clone();
+                std::thread::spawn(move || ask(&config, who, 1_793_224_800))
+            })
+            .collect();
+        for asker in askers {
+            assert_eq!(asker.join().unwrap(), "token ghs_abc\n");
+        }
+        assert_eq!(
+            github.asked(),
+            [
+                "GET /app/installations?per_page=100&page=1",
+                "POST /app/installations/42/access_tokens"
+            ]
         );
     }
 }
