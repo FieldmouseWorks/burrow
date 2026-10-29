@@ -25,8 +25,9 @@ event reports):
      one with what the pipeline is stuck on, for a Claude job (repos.py).
 
 `autoland-steward kick OWNER/REPO` is a pass over that repo alone (2, 4
-and 5), the one burrow-events starts within seconds of what changes it:
-a webhook delivery, a Claude job's turn ending, a reviewer's answer coming
+and 5), run by its autoland@ unit (only that holds the App's key), the
+one burrow-events starts within seconds of what changes it: a webhook
+delivery, a Claude job's turn ending, a reviewer's answer coming
 back, or a wait the last pass booked ending (common.wake).
 
 Everything talks to GitHub as the steward's own GitHub App (common.py), so

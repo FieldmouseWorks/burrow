@@ -150,7 +150,7 @@ for repo in "${!project[@]}"; do
     allowed "$(jq -r .user.login <<<"$issue")" || continue
     # Comments already there are part of the task; replies after this are turns.
     comments=$(gh api "repos/$repo/issues/$n/comments" --paginate --slurp | jq 'add // []') || { miss "$repo"; continue; }
-    id=$(proj run "$(priority "$repo")" "${vm[@]}" --kick "proj-inbox/$repo" "$p" "$(task "$repo" "$issue" "$comments")") || { retry "$repo"; continue; }
+    id=$(proj run "$(priority "$repo")" "${vm[@]}" --kick "proj-inbox/$repo" --link "$(jq -r '.html_url // ""' <<<"$issue")" "$p" "$(task "$repo" "$issue" "$comments")") || { retry "$repo"; continue; }
     mkdir -p "$d"
     echo "$repo#$n" >"$d/issue"
     echo "$id" >"$d/job"
@@ -238,7 +238,7 @@ for repo in "${!project[@]}"; do
         [ ! -s "$JOBS/$id/session" ] || { retry "$repo"; continue; }
         # No session to continue (the first turn never got going): start over,
         # from the issue as it stands, replies and all.
-        id=$(proj run "$(priority "$repo")" "${vm[@]}" --kick "proj-inbox/$repo" "$p" "$(task "$repo" "$now" "$comments")") || { retry "$repo"; continue; }
+        id=$(proj run "$(priority "$repo")" "${vm[@]}" --kick "proj-inbox/$repo" --link "$(jq -r '.html_url // ""' <<<"$now")" "$p" "$(task "$repo" "$now" "$comments")") || { retry "$repo"; continue; }
         echo "$id" >"$d/job"
         echo 0 >"$d/answered"
       fi

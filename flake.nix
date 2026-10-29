@@ -35,7 +35,13 @@
       # The ledger's machines take Conary from its own flake; burrow's checks
       # build theirs with a stand-in for its `cn`.
       cnStandIn = pkgs.writeShellScriptBin "cn" "exit 1";
-      names = [ "claude" "undo" "switch" "notify" "updates" "proj" "remote-control" "agents" "robot" "ops" "toolbox" "autoland" "house" "events" "ledger" "browser" "heartbeat" "backup" "watchdog" ];
+      names = [ "claude" "undo" "switch" "notify" "updates" "proj" "remote-control" "agents" "robot" "ops" "toolbox" "autoland" "house" "events" "ledger" "browser" "heartbeat" "backup" "watchdog" "github" ];
+      # gh-token (modules/github): its package, and its gate.
+      # Built for every platform lib/project.nix knows, like the module.
+      ghToken = self.lib.project {
+        self = ./modules/github;
+        rust.testInputs = pkgs: [ pkgs.openssl ];
+      };
     in
     {
       # A project's dev shell and gate in a few lines; see lib/project.nix.
@@ -53,8 +59,11 @@
         };
       };
 
-      # The flaky tool (docs/flaky-tests.md), for a machine to install.
-      packages.${system}.flaky = pkgs.callPackage ./tools/flaky/package.nix { };
+      # gh-token, for each platform it's built for, and the flaky tool
+      # (docs/flaky-tests.md), for a machine to install.
+      packages = nixpkgs.lib.recursiveUpdate
+        (nixpkgs.lib.mapAttrs (_: p: { gh-token = p.default; }) ghToken.packages)
+        { ${system}.flaky = pkgs.callPackage ./tools/flaky/package.nix { }; };
 
       # A bare machine with every module on, for the checks and as an example.
       nixosConfigurations.example = nixpkgs.lib.nixosSystem {
@@ -91,7 +100,9 @@
                 (nixpkgs.lib.optionalAttrs (name == "house") { burrow.house.owners = [ "sam" ]; })
                 (nixpkgs.lib.optionalAttrs (name == "ledger") { burrow.ledger = { package = cnStandIn; owners = [ "sam" ]; anchorRepo = "sam/homelab"; reviewers = [ "sams-steward[bot]" ]; sessionLinks = [ "sam/homelab" ]; daemon = true; }; })
                 (nixpkgs.lib.optionalAttrs (builtins.elem name [ "events" "autoland" ]) { burrow.events = { host = "example.org"; secretFile = "/run/secrets/burrow-webhook"; }; })
-                { burrow.${if name == "remote-control" then "remoteControl" else name}.enable = true; }
+                # github has no switch: it's on with an App to serve.
+                (if name == "github" then { burrow.github.apps.workers = { id = 2; slug = "sam-workers"; keyFile = "/run/secrets/workers-key"; }; }
+                 else { burrow.${if name == "remote-control" then "remoteControl" else name}.enable = true; })
               ];
             };
           in "${name} ${builtins.unsafeDiscardStringContext (runnable name machine).config.system.build.toplevel.drvPath}\n")
@@ -105,6 +116,12 @@
         proj-pick = pkgs.runCommand "proj-pick-check" { nativeBuildInputs = [ pkgs.shellcheck ]; } ''
           shellcheck -s bash ${./modules/proj/pick.sh} ${./tests/proj-pick.sh}
           bash ${./tests/proj-pick.sh} ${./modules/proj/pick.sh}
+          touch $out
+        '';
+        # What each job waits on, as the stall watchdog hears it.
+        proj-waits = pkgs.runCommand "proj-waits-check" { nativeBuildInputs = [ pkgs.shellcheck pkgs.jq ]; } ''
+          shellcheck -s bash ${./modules/proj/waits.sh} ${./tests/proj-waits.sh}
+          bash ${./tests/proj-waits.sh} ${./modules/proj/waits.sh}
           touch $out
         '';
         # The steward and its reviewers, with stand-ins for gh, git's remote and
@@ -151,6 +168,8 @@
         backup = import ./tests/backup.nix { inherit self pkgs; };
         # The ledger's pass over one repo, with a stand-in for cn.
         ledger = import ./tests/ledger.nix { inherit self pkgs; };
+        # An App's tokens: who gets them, and git and gh acting as it.
+        github = import ./tests/github.nix { inherit self pkgs; };
         # Which deliveries and kicks start whose pass, with a stand-in for systemctl.
         events = pkgs.runCommand "events-check" { nativeBuildInputs = [ pkgs.python3 ]; } ''
           python3 -I ${./tests/events.py} ${./modules/events}/events.py
@@ -309,7 +328,8 @@
           [ "$(${pkg}/bin/house-fixture-member)" = 42 ]
           touch $out
         '';
-      } // nixpkgs.lib.mapAttrs' (name: nixpkgs.lib.nameValuePair "flaky-${name}")
+      } // nixpkgs.lib.mapAttrs' (name: nixpkgs.lib.nameValuePair "gh-token-${name}") ghToken.checks.${system}
+      // nixpkgs.lib.mapAttrs' (name: nixpkgs.lib.nameValuePair "flaky-${name}")
         # The flaky tool's fmt, clippy and tests.
         (self.lib.project { inherit self; systems = [ system ]; rust.dir = "tools/flaky"; }).checks.${system}
       // nixpkgs.lib.mapAttrs' (name: nixpkgs.lib.nameValuePair "house-${name}") (
