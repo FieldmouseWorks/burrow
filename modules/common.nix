@@ -167,6 +167,16 @@ inputs:
             MemoryMax = config.burrow.claude.memory.max;
           };
         };
+
+        # The git the machine and burrow's units run. curl 8.23 strips the
+        # credentials from the URL it reports, and git 2.54 takes that for a
+        # redirect and forgets them, so a clone with a token-only URL
+        # (Renovate's) fails. Drop the patch once nixpkgs' git has it (it then
+        # stops applying). Here and not an overlay: that would rebuild all
+        # that builds with git.
+        config.programs.git.package = lib.mkDefault (pkgs.git.overrideAttrs (old: {
+          patches = (old.patches or [ ]) ++ [ ../patches/git-curl-effective-url.patch ];
+        }));
       })
   ];
 }
