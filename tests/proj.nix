@@ -2,9 +2,12 @@
 # (burrow.claude.package) checks that jobs past maxJobs wait in line, that
 # --first goes ahead but can't starve a turn that has waited long, that a
 # pipeline job's every turn takes the slot kept for them when the rest are
-# full, that a job whose turn has ended frees its slot, that one waiting on a
-# PR or issue (proj await) is resumed when it changes, even before the turn
-# ended and
+# full, that a job whose turn has ended frees its slot, that one stopped after
+# its answer with work in the background has the rest of that run stopped,
+# hears so once and answers again (the turn ending as its last run did, its
+# log saying so even when its unit went first, and within one timeout that
+# the clearing up between runs counts against), that one waiting on a PR or
+# issue (proj await) is resumed when it changes, even before the turn ended and
 # from proj-watch's own unit, but never for proj-inbox's own comment, or once
 # its deadline passes with GitHub unreadable, that a reply meanwhile owns the
 # job's waits, that a turn's end kicks what it was started to and proj-watch
@@ -26,7 +29,11 @@ let
   # "sleep N" sleeps; "eat" holds far more memory than the test's job cap;
   # "twice" answers twice in one turn, "answerfail" answers and then fails;
   # "linger N" answers, then stays up N seconds, as Claude does while
-  # something it left in the background (a CI watch) is still going;
+  # something it left in the background (a CI watch, a long build) is still
+  # going; "detach N" does too, having left work in its own session that
+  # ignores TERM and writes to the stream. Told so, it answers again, or as
+  # /tmp/cut-mode says: "linger" answers and stays up, "hang" says nothing,
+  # "crash" and "signal" die without a word, "error" fails;
   # "chatter N" says something every second for N seconds, then answers.
   claude = pkgs.writeShellScriptBin "claude" ''
     prompt=$(cat)
@@ -36,6 +43,29 @@ let
       linger*)
         echo '{"type":"result","session_id":"s","result":"waiting on CI","is_error":false}'
         sleep "''${prompt#linger }"
+        exit 0 ;;
+      detach*)
+        # shellcheck disable=SC2016
+        setsid bash -c 'trap "" TERM; exec -a proj-stray bash -c "while :; do echo stray; sleep 1; done"' &
+        echo '{"type":"result","session_id":"s","result":"waiting on CI","is_error":false}'
+        sleep "''${prompt#detach }"
+        exit 0 ;;
+      "Your answer ended the turn while"*)
+        echo "$*" >/tmp/cut-args
+        { pgrep -cf '^proj-stray' || true; } >/tmp/strays
+        echo '{"type":"system","subtype":"told"}'
+        case $(cat /tmp/cut-mode 2>/dev/null) in
+          linger)
+            echo '{"type":"result","session_id":"s","result":"still waiting","is_error":false}'
+            sleep 600 ;;
+          hang) sleep 600 ;;
+          crash) exit 3 ;;
+          signal) kill -KILL $$ ;;
+          error)
+            echo '{"type":"result","session_id":"s","is_error":true,"errors":["boom"]}'
+            exit 1 ;;
+          *) echo '{"type":"result","session_id":"s","result":"the build passed","is_error":false}' ;;
+        esac
         exit 0 ;;
       await*) proj await "''${prompt#await }" >/dev/null ;;
       # Awaits, then takes a while to answer: what changes meanwhile is news.
@@ -109,7 +139,10 @@ pkgs.testers.runNixOSTest {
     # whose kick port the test listens on itself.
     systemd.services.burrow-events.enable = false;
     systemd.timers.burrow-events-catch-up.enable = false;
-    environment.systemPackages = [ pkgs.git pkgs.python3 ];
+    environment.systemPackages = [
+      pkgs.git
+      pkgs.python3
+    ];
 
     users.users.dev = {
       isNormalUser = true;
@@ -213,6 +246,111 @@ pkgs.testers.runNixOSTest {
         c = proj('run web "sleep 1"')
         machine.wait_until_succeeds(f"su - dev -c 'proj state {c}' | grep -x done", timeout=120)
         proj(f"stop {b}")
+
+    with subtest("a turn stopped with work in the background hears so once, in the same slot, and answers again"):
+        a = proj('run web "linger 600"')
+        machine.wait_until_succeeds(f"su - dev -c 'proj state {a}' | grep -x done", timeout=120)
+        assert proj(f"log {a}") == "waiting on CI\n\nthe build passed", proj(f"log {a}")
+        assert machine.succeed(f"cat /data/dev/jobs/{a}/turns").strip() == "1"
+        assert "--resume s" in machine.succeed("cat /tmp/cut-args")
+        # Still up after being told: stopped for good, not told again.
+        machine.succeed("echo linger >/tmp/cut-mode")
+        b = proj('run web "linger 600"')
+        machine.wait_until_succeeds(f"su - dev -c 'proj state {b}' | grep -x done", timeout=120)
+        assert proj(f"log {b}") == "waiting on CI\n\nstill waiting", proj(f"log {b}")
+        machine.succeed("rm /tmp/cut-mode")
+
+    with subtest("what the first run left, in its own session and deaf to TERM, is gone before the second starts"):
+        a = proj('run web "detach 600"')
+        machine.wait_until_succeeds(f"su - dev -c 'proj state {a}' | grep -x done", timeout=120)
+        assert proj(f"log {a}") == "waiting on CI\n\nthe build passed", proj(f"log {a}")
+        assert machine.succeed("cat /tmp/strays").strip() == "0", machine.succeed("cat /tmp/strays")
+        stream = machine.succeed(f"cat /data/dev/jobs/{a}/1.jsonl")
+        assert "stray" in stream.split('"told"')[0], stream
+        assert "stray" not in stream.split('"told"')[1], stream
+        machine.fail("pgrep -f '^proj-stray'")
+
+    with subtest("a second run that ends without an answer: the turn ends as it did, with the first answer kept"):
+        for mode, st, note in [
+            ("crash", "failed", "\n\n(turn 1 then ended: failed)"),
+            ("signal", "failed", "\n\n(turn 1 then ended: failed)"),
+            ("error", "error", '\n\n(turn 1 ended in an error)\n["boom"]'),
+        ]:
+            machine.succeed(f"echo {mode} >/tmp/cut-mode")
+            a = proj('run web "linger 600"')
+            machine.wait_until_succeeds(f"su - dev -c 'proj state {a}' | grep -x {st}", timeout=120)
+            assert proj(f"log {a}") == "waiting on CI" + note, (mode, proj(f"log {a}"))
+            assert machine.succeed(f"cat /data/dev/jobs/{a}/1.result") == "waiting on CI\n", mode
+        # The turn's timeout is both runs': the second gets what's left.
+        machine.succeed("echo hang >/tmp/cut-mode")
+        t0 = time.monotonic()
+        a = proj('run --timeout 15s web "linger 600"')
+        machine.wait_until_succeeds(f"su - dev -c 'proj state {a}' | grep -x 'timed out after 15s'", timeout=120)
+        assert time.monotonic() - t0 < 22, time.monotonic() - t0
+        assert proj(f"log {a}") == "waiting on CI\n\n(turn 1 then ended: timed out after 15s)", proj(f"log {a}")
+        # Its --idle counts from its own start.
+        a = proj('run --idle 12s web "linger 600"')
+        machine.wait_until_succeeds(f"su - dev -c 'proj state {a}' | grep -x 'went quiet for 12s'", timeout=120)
+        assert proj(f"log {a}") == "waiting on CI\n\n(turn 1 then ended: went quiet for 12s)", proj(f"log {a}")
+        assert machine.succeed("cat /tmp/strays").strip() == "0"
+        machine.succeed("rm /tmp/cut-mode")
+
+    with subtest("a second run whose unit goes under it: the log says the turn failed, then and after later turns"):
+        machine.succeed("echo hang >/tmp/cut-mode")
+        # Stopped, or its _exec killed before it could write how it ended.
+        for how in ["stop", "kill --kill-whom=main --signal=KILL"]:
+            machine.succeed("rm -f /tmp/cut-args")
+            a = proj('run web "linger 600"')
+            machine.wait_until_succeeds("test -e /tmp/cut-args", timeout=120)
+            # Still going: nothing to say about how it ended.
+            assert state(a) == "running", (how, state(a))
+            assert proj(f"log {a}") == "waiting on CI", (how, proj(f"log {a}"))
+            machine.succeed(f"systemctl --user -M dev@ {how} '{unit(a)}'")
+            machine.wait_until_succeeds(f"su - dev -c 'proj state {a}' | grep -x failed", timeout=60)
+            assert proj(f"log {a}") == "waiting on CI\n\n(turn 1 then ended: failed)", (how, proj(f"log {a}"))
+            proj(f"reply {a} hello")
+            machine.wait_until_succeeds(f"su - dev -c 'proj state {a}' | grep -x done", timeout=120)
+            log = proj(f"log {a} --turn 1")
+            assert log == "waiting on CI\n\n(turn 1 then ended: failed)", (how, log)
+        machine.succeed("rm /tmp/cut-mode")
+
+    with subtest("a log waits out a turn being started, and tells only the turn it was asked for"):
+        # A turn held halfway through starting (its number written, its unit
+        # not yet), then put back: the log reads neither half alone.
+        a = proj("run web hello")
+        machine.wait_until_succeeds(f"su - dev -c 'proj state {a}' | grep -x done", timeout=120)
+        d = f"/data/dev/jobs/{a}"
+        machine.execute(f"su - dev -c 'cd {d} && flock lock sh -c \"echo 2 >turns; sleep 10; echo 1 >turns\"' >/dev/null 2>&1 &")
+        machine.wait_until_succeeds(f"grep -x 2 {d}/turns", timeout=30)
+        machine.fail(f"su - dev -c 'timeout 3 proj log {a} --turn 1'")
+        machine.wait_until_succeeds(f"grep -x 1 {d}/turns", timeout=30)
+        assert proj(f"log {a} --turn 1") == "did hello", proj(f"log {a} --turn 1")
+
+    with subtest("a turn whose time runs out while the first run's leftovers are stopped gets no second run"):
+        # The stray ignores TERM, so stopping it takes about 10s, past the
+        # 15s the turn had: no second run starts, not even a short one.
+        machine.succeed("rm -f /tmp/cut-args")
+        a = proj('run --timeout 15s web "detach 600"')
+        machine.wait_until_fails(f"su - dev -c 'proj state {a}' | grep -qx -e queued -e running", timeout=120)
+        assert state(a) == "timed out after 15s", state(a)
+        machine.fail("test -e /tmp/cut-args")
+        assert proj(f"log {a}") == "waiting on CI\n\n(turn 1 then ended: timed out after 15s)", proj(f"log {a}")
+        machine.fail("pgrep -f '^proj-stray'")
+
+    with subtest("a timeout reads as timeout(1) reads it: fractions, and 0 for none"):
+        a = proj("run web hello")
+        machine.wait_until_succeeds(f"su - dev -c 'proj state {a}' | grep -x done", timeout=120)
+        for limit, task, st in [
+            ("0", "sleep 3", "done"),
+            ("1.5h", "hello", "done"),
+            ("0.05m", "sleep 600", "timed out after 0.05m"),
+            # A fraction of a second is kept, not rounded up to one.
+            ("0.1s", "sleep 0.5", "timed out after 0.1s"),
+            ("soon", "hello", "failed"),
+        ]:
+            machine.succeed(f"echo {limit} >/data/dev/jobs/{a}/timeout")
+            proj(f'reply {a} "{task}"')
+            machine.wait_until_succeeds(f"su - dev -c 'proj state {a}' | grep -x '{st}'", timeout=120)
 
     with subtest("a turn that has waited past maxWait goes ahead of a newer --first"):
         a = proj('run web "sleep 600"')
