@@ -123,6 +123,7 @@ let
     flaky = {
       inherit (cfg.flaky) enable;
       bin = "${flaky}/bin/flaky";
+      jobTimeout = cfg.flaky.jobTimeoutMinutes;
     };
     # What every open PR waits on, for the stall watchdog (autoland/waits.py),
     # and what it took past a Claude job, for the stuck issue.
@@ -454,6 +455,18 @@ in
         TEST`, labelled `flaky`, that its gate files: docs/flaky-tests.md) to a
         Claude job that fixes them, and one still open a day after that job to
         the stuck issue (autoland/flakes.py).
+      '';
+    };
+
+    flaky.jobTimeoutMinutes = mkOption {
+      type = types.ints.positive;
+      default = 240;
+      description = ''
+        How long a flaky test's Claude job may run. It builds the project,
+        makes the test fail under its gate's load, fixes it and runs it enough
+        times to show the fix holds, on a machine whose gates are busy too:
+        far more than a PR's fix, so it's project work, not the pipeline's,
+        and doesn't hold the slot kept for that.
       '';
     };
 

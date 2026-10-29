@@ -107,16 +107,34 @@ fn go(args: &[String]) -> Result<i32, Usage> {
     }
 }
 
-/// OWNER/REPO, as GitHub allows them: it goes into paths.
+/// OWNER/REPO, as GitHub allows them: it goes into paths. A repo's name may
+/// start with a dot (an org's `.github`), but is never `.` or `..`.
 fn repo_arg(r: &str) -> Result<&str, Usage> {
     let ok = |s: &str, extra: &str| {
         !s.is_empty()
-            && !s.starts_with(['.', '-'])
+            && !s.starts_with('-')
+            && s != "."
+            && s != ".."
             && s.chars()
                 .all(|c| c.is_ascii_alphanumeric() || "-".contains(c) || extra.contains(c))
     };
     match r.split_once('/') {
         Some((o, n)) if ok(o, "") && ok(n, "_.") => Ok(r),
         _ => Err(Usage(format!("{r:?} isn't OWNER/REPO"))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::repo_arg;
+
+    #[test]
+    fn repo_args() {
+        for r in ["sam/r", "FieldmouseWorks/.github", "sam/my_repo.rs", "a-b/c-d"] {
+            assert!(repo_arg(r).is_ok(), "{r}");
+        }
+        for r in ["sam", "sam/", "/r", "sam/.", "sam/..", ".sam/r", "-sam/r", "sam/-r", "sam/r/x", "sam/r?x", "sa_m/r"] {
+            assert!(repo_arg(r).is_err(), "{r}");
+        }
     }
 }
