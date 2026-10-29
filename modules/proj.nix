@@ -249,8 +249,8 @@ in
     }];
     environment.systemPackages = [ inbox ];
     # A repo's issue events start its look (proj-inbox@OWNER-REPO), and so
-    # does the end of each of its jobs' turns (proj run --kick), whose answer
-    # it posts.
+    # do the start and end of each of its jobs' turns (proj run --kick): it
+    # posts the answer once one has ended.
     burrow.events.handlers.proj-inbox = {
       events = [ "issues" "issue_comment" ];
       unit = "proj-inbox";

@@ -17,8 +17,8 @@ Three things put a repo in a handler's line:
     an issue whose title matches one of some globs (`issueTitles`).
   - A kick on the local port: POST /kick/HANDLER/OWNER/REPO for one repo, or
     /kick/HANDLER for a full pass. Something on this machine that just
-    changed what a pass would find kicks it: a proj job's turn ending, a
-    review coming back. Kicks only start a pass, which reads
+    changed what a pass would find kicks it: a proj job's turn starting or
+    ending, a review coming back. Kicks only start a pass, which reads
     everything for itself, so the port asks for no secret; it listens on
     127.0.0.1 and nginx never passes anything to it.
   - A wake-up the handler's last pass booked in its wake file, {repo: epoch}

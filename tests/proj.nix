@@ -10,8 +10,9 @@
 # issue (proj await) is resumed when it changes, even before the turn ended and
 # from proj-watch's own unit, but never for proj-inbox's own comment, or once
 # its deadline passes with GitHub unreadable, that a reply meanwhile owns the
-# job's waits, that a turn's end kicks what it was started to and proj-watch
-# for the repos it awaits, that a job's own --timeout stops its turns, and
+# job's waits, that a turn kicks what it was started to once it takes its slot
+# (not while it waits in line) and again at its end, with proj-watch for the
+# repos it awaits, that a job's own --timeout stops its turns, and
 # its --idle one that has gone quiet (and either still kicks), that _watch and proj-inbox given a repo look at
 # that repo alone and book when it next needs a look, that proj-inbox posts
 # every finished turn's answer (one
@@ -383,6 +384,21 @@ pkgs.testers.runNixOSTest {
         machine.wait_until_succeeds(f"su - dev -c 'proj state {c}' | grep -x done", timeout=120)
         proj(f"stop {b}")
 
+    with subtest("a turn kicks what it was started to once it takes its slot, not while it waits"):
+        a = proj('run web "sleep 600"')
+        b = proj('run web "sleep 600"')
+        for j in (a, b):
+            machine.wait_until_succeeds(f"su - dev -c 'proj state {j}' | grep -x running", timeout=120)
+        machine.succeed("truncate -s 0 /tmp/kicks")
+        q = proj('run --kick autoland/o/s web "sleep 600"')
+        time.sleep(5)
+        assert state(q) == "queued" and kicks() == [], (state(q), kicks())
+        proj(f"stop {a}")
+        machine.wait_until_succeeds("grep -x /kick/autoland/o/s /tmp/kicks", timeout=60)
+        assert state(q) == "running" and kicks() == ["/kick/autoland/o/s"], (state(q), kicks())
+        proj(f"stop {b}")
+        proj(f"stop {q}")
+
     with subtest("a job waiting on a PR is resumed when the PR changes"):
         def github(endpoint, answer):
             machine.succeed(f"mkdir -p /tmp/gh && echo '{answer}' >/tmp/gh/{endpoint.replace('/', '_')}")
@@ -396,27 +412,28 @@ pkgs.testers.runNixOSTest {
         e = proj('run --kick autoland/o/r web "await https://github.com/o/r/pull/5"')
         machine.wait_until_succeeds(f"su - dev -c 'proj state {e}' | grep -x done", timeout=120)
         assert "[awaits o/r#5]" in proj("status"), proj("status")
-        # Its turn's end kicked what it was started to, and proj-watch for o/r.
+        # Its turn kicked what it was started to as it started and as it
+        # ended, and proj-watch for o/r at its end.
         machine.wait_until_succeeds("grep -x /kick/proj-watch/o/r /tmp/kicks", timeout=30)
-        assert sorted(kicks()) == ["/kick/autoland/o/r", "/kick/proj-watch/o/r"], kicks()
+        assert sorted(kicks()) == ["/kick/autoland/o/r", "/kick/autoland/o/r", "/kick/proj-watch/o/r"], kicks()
         # A project folder's name is the job's, whatever it holds.
         machine.succeed("install -d -o dev -g dev '/data/dev/src/my web%n'")
         machine.succeed("truncate -s 0 /tmp/kicks")
         e2 = proj('run --kick autoland/o/q \"my web%n\" hello')
         machine.wait_until_succeeds(f"su - dev -c 'proj state \"{e2}\"' | grep -x done", timeout=120)
-        machine.wait_until_succeeds("grep -x /kick/autoland/o/q /tmp/kicks", timeout=30)
+        machine.wait_until_succeeds("[ $(grep -cx /kick/autoland/o/q /tmp/kicks) = 2 ]", timeout=30)
         # A job's own --timeout stops its turn then, well before TIMEOUT, and
         # the stop still kicks what it was started to.
         machine.succeed("truncate -s 0 /tmp/kicks")
         e3 = proj('run --timeout 3s --kick autoland/o/t web "sleep 600"')
         machine.wait_until_succeeds(f"su - dev -c 'proj state {e3}' | grep -x 'timed out after 3s'", timeout=60)
-        machine.wait_until_succeeds("grep -x /kick/autoland/o/t /tmp/kicks", timeout=30)
+        machine.wait_until_succeeds("[ $(grep -cx /kick/autoland/o/t /tmp/kicks) = 2 ]", timeout=30)
         machine.fail("su - dev -c 'proj run --timeout soon web hello'")
         # One whose stream says nothing for its --idle is stuck, and stopped
         # then, kicking as before; one that keeps talking runs on past it.
         e4 = proj('run --idle 3s --kick autoland/o/i web "sleep 600"')
         machine.wait_until_succeeds(f"su - dev -c 'proj state {e4}' | grep -x 'went quiet for 3s'", timeout=60)
-        machine.wait_until_succeeds("grep -x /kick/autoland/o/i /tmp/kicks", timeout=30)
+        machine.wait_until_succeeds("[ $(grep -cx /kick/autoland/o/i /tmp/kicks) = 2 ]", timeout=30)
         e5 = proj('run --idle 3s web "chatter 8"')
         machine.wait_until_succeeds(f"su - dev -c 'proj state {e5}' | grep -x done", timeout=60)
         machine.fail("su - dev -c 'proj run --idle 0s web hello'")
@@ -560,8 +577,9 @@ pkgs.testers.runNixOSTest {
         machine.succeed("su - dev -c 'proj-inbox O/R'")
         job = machine.succeed("su - dev -c 'proj-inbox status'").split()[-1]
         machine.wait_until_succeeds(f"su - dev -c 'proj state {job}' | grep -x done", timeout=120)
-        # Its turn's end kicks the inbox's look at o/r, which posts the answer.
-        machine.wait_until_succeeds("grep -x /kick/proj-inbox/o/r /tmp/kicks", timeout=30)
+        # Its turn's start and end kick the inbox's look at o/r, which posts
+        # the answer.
+        machine.wait_until_succeeds("[ $(grep -cx /kick/proj-inbox/o/r /tmp/kicks) = 2 ]", timeout=30)
         # Its next turn starts before the inbox looks again, as proj _watch's can.
         proj(f'reply {job} "sleep 1"')
         machine.wait_until_succeeds(f"su - dev -c 'proj state {job}' | grep -x done", timeout=120)

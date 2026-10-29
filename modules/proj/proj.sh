@@ -9,7 +9,8 @@
 #   proj run --pipeline PROJECT "task"  work on the pipeline itself: ahead of
 #                               everything, and its own slots (every turn of it)
 #   proj run --kick NAME PROJECT "task"  kick NAME (HANDLER or HANDLER/OWNER/REPO,
-#                               one of burrow-events') each time a turn ends
+#                               one of burrow-events') each time a turn starts
+#                               (takes its slot) and each time one ends
 #   proj run --timeout DUR PROJECT "task"  each turn stopped after DUR (as
 #                               timeout(1) reads it: 90m, 2h) instead of TIMEOUT
 #   proj run --idle DUR PROJECT "task"  each turn stopped once its stream has
@@ -166,6 +167,14 @@ reap() {
     sleep 1
   done
   return 1
+}
+
+# Kick each handler named on stdin (burrow-events'), once each.
+kick() {
+  [ -n "$KICK" ] || { cat >/dev/null; return 0; }
+  sort -u | while read -r k; do
+    [ -z "$k" ] || curl -fsS -m 5 -d '' "$KICK/$k" >/dev/null || echo "proj: couldn't kick $k" >&2
+  done
 }
 
 # Known not to be running: not "can't say".
@@ -569,12 +578,9 @@ Carry on from there. Anything you left in the background last turn was stopped w
     # in the unit's environment: systemd splits and expands a command line,
     # and a job's id is its project's folder name, spaces, `%` and all.
     id=${PROJ_ENDED:?proj _ended is for the end of a job turn, run by its unit}
-    [ -n "$KICK" ] || exit 0
     { cat "$jobs/$id/kick" 2>/dev/null || true
       cut -f1 "$jobs/$id/await" 2>/dev/null | sed 's/#.*//; s#^#proj-watch/#' || true
-    } | sort -u | while read -r k; do
-      [ -z "$k" ] || curl -fsS -m 5 -d '' "$KICK/$k" >/dev/null || echo "proj: couldn't kick $k" >&2
-    done
+    } | kick
     ;;
   _exec)
     # One turn of a job, inside its own systemd unit.
@@ -585,6 +591,9 @@ Carry on from there. Anything you left in the background last turn was stopped w
     # its own to await.next, and await only once it ends.
     rm -f "$dir/await" "$dir/await.next"
     take_slot "$id" "$n" "$(class "$id" "$3")"
+    # It's at work now, which is news to what it was started to kick: a turn
+    # can wait in line for hours, and the steward says which it is.
+    { cat "$dir/kick" 2>/dev/null || true; } | kick
     limit=$(cat "$dir/timeout" 2>/dev/null || echo "$TIMEOUT")
     # One budget for the whole turn, however many runs it takes and the
     # clearing up between them, to the nanosecond; 0 is none.
