@@ -62,6 +62,10 @@ impl App {
             )
             .user_agent("gh-token")
             .timeout_global(Some(Duration::from_secs(30)))
+            // A connection of its own for each request. They're a few an
+            // hour, and on one kept open the server can close it as the
+            // next goes out, which fails a mint: a POST, never sent twice.
+            .max_idle_connections(0)
             // Every status is read here: which errors are GitHub's limits is
             // told from the answer.
             .http_status_as_error(false)
@@ -328,6 +332,20 @@ mod tests {
                 .verify(signed.as_bytes(), &URL_SAFE_NO_PAD.decode(sig).unwrap())
                 .unwrap();
         }
+    }
+
+    #[test]
+    fn mints_from_a_server_that_closes_a_connection_after_answering() {
+        let github = fake::serve_closing_later(Duration::from_millis(300), |r| {
+            if r.method == "GET" {
+                (200, vec![], fake::installations(&[(42, "sam")]))
+            } else {
+                let token = serde_json::json!({ "token": "ghs_abc", "expires_at": EXPIRES });
+                (201, vec![], token.to_string())
+            }
+        });
+        let got = app(&github, &fake::key(true)).mint(&target("sam"), 0);
+        assert_eq!(got.map(|m| m.token), Ok("ghs_abc".to_owned()));
     }
 
     #[test]
