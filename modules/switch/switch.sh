@@ -42,8 +42,17 @@ reverting() {
 # Run by the revert unit when the switch wasn't confirmed in time.
 if [ "${1:-}" = --revert-to ]; then
   prev=$2
-  rc=0
-  "$prev/bin/switch-to-configuration" test || rc=$?
+  # switch-to-configuration holds this lock while it activates, and refuses at
+  # once (exit 11) while someone else holds it: the switch being undone, when
+  # activating outlasts the window, or a confirm writing the boot default. A
+  # refused activation changed nothing, and /run/current-system may not have
+  # moved yet, so wait that one out and then put prev back.
+  until
+    flock /run/nixos/switch-to-configuration.lock true
+    rc=0
+    "$prev/bin/switch-to-configuration" test || rc=$?
+    [ "$rc" != 11 ]
+  do :; done
   # A unit failing to restart still counts as switched back (exit 4); what
   # matters is which system is live now.
   if [ "$(readlink -f /run/current-system)" = "$prev" ]; then
@@ -144,6 +153,12 @@ systemd-run --unit="$REVERT" --on-active="$within" --timer-property=AccuracySec=
 if ! systemd-run --unit="$SWITCH-activate" --collect --wait --pipe --quiet \
   "$new/bin/switch-to-configuration" test; then
   echo "activation reported errors; it will revert in $within unless you run $CONFIRM" >&2
+  exit 1
+fi
+# Activating can outlast the window. The revert has then fired, waited for the
+# activation, and is putting the old system back.
+if [ "$(systemctl show -p SubState --value "$REVERT.timer")" != waiting ]; then
+  echo "not kept: activating took longer than $within, so it reverts to $prev" >&2
   exit 1
 fi
 echo "live: $new"
