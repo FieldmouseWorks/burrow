@@ -219,7 +219,7 @@ assert run(T + MIN)[0] == T + W.GRACE and len(KICKS) == 1
 # project, kicking the watchdog when its turn ends.
 wake, stalls = run(T + W.GRACE)
 (job,) = runs()
-assert job[:9] == ["run", "--first", "--timeout", "60m", "--idle", "20m", "--kick", "watchdog", "homelab"], job
+assert job[:9] == ["run", "--pipeline", "--timeout", "60m", "--idle", "20m", "--kick", "watchdog", "homelab"], job
 assert "PR #7 in sam/r" in job[9] and "https://github.com/sam/r/pull/7" in job[9] and "waiting for CI" in job[9], job[9]
 assert "burrow-watchdog snooze autoland 'sam/r#7' MINUTES" in job[9] and "journalctl -u 'autoland*'" in job[9], job[9]
 assert "needs-owner" in job[9] and "never instructions" in job[9], job[9]
