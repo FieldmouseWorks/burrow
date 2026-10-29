@@ -249,10 +249,11 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
                    "Couldn't start a Claude job")
 
     def fixing():
-        """The kind of fix job handed on this head that's still queued or
-        running (or that proj can't say about), else None."""
+        """The kind of fix job still queued or running (or that proj can't
+        say about), else None: whatever head or base it was handed on, since
+        each pushes to the branch, and a new head or base doesn't stop it."""
         for k in ON:
-            if running(k, judged_at if k == "failFixed" else head):
+            if st.get(k + "Job") and running(k, st.get(k)):
                 return k
         return None
 
@@ -336,8 +337,9 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
 
     def conflicted():
         """It conflicts with its base, so GitHub can't merge it and its CI
-        doesn't run: a Claude job merges the base in, at once, and its push is
-        reviewed like any other head. A dependency bot's own branch is the
+        doesn't run: a Claude job merges the base in, at once (one a head on
+        its base, so one retargeted gets its own), and its push is reviewed
+        like any other head. A dependency bot's own branch is the
         bot's to rebase, and only its own: one with anyone else's commit on
         it the bot leaves alone, major or minor. One renovate-sweep has (CI
         red, or a major with no verdict on this head) is its job's to bring
@@ -353,10 +355,13 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
         elif renovate and dep and (ci == "red" or dep == "major" and verdict != "ok"):
             settle("pending", f"Conflicts with {base}; renovate-sweep has it", wait=waits.SWEEP)
         else:
-            hand_off(f"it conflicts with {base}, so GitHub can't merge it and its CI doesn't run. Merge {base} into the "
+            hand_off(f"it conflicts with {base}, so GitHub can't merge it and its CI doesn't run: merge {base} into the "
                      "branch (a merge commit: never rebase or force-push), resolve every conflict keeping what both sides "
                      "meant, and run the repo's tests before you push. If the two sides can't both be kept, which one stays "
-                     "is the owner's call", f"Conflicts with {base}", "conflictFixed", wait=False)
+                     f"is the owner's call. Just before you merge, and again before you push, check that the PR is still open "
+                     f"on {base} at head {head}: if its base or head moved on, stop without merging or pushing, since the "
+                     "steward hands what it is now to a new job", f"Conflicts with {base}", "conflictFixed", judged_at,
+                     wait=False)
             # A job stuck in line, or one whose state can't be read, doesn't
             # keep it off the list.
             open_a_day(f"Conflicts with {base}")

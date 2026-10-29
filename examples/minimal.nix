@@ -29,6 +29,7 @@
     remoteControl.enable = true;
     agents.enable = true;
     toolbox.enable = true;
+    rustCache.enable = true;
     ops.enable = true;
     robot = {
       enable = true;
@@ -44,6 +45,12 @@
     };
     house.enable = true;
     browser.enable = true;
+    # The App the machine's own jobs act as, rather than as sam.
+    github.apps.workers = {
+      id = 2;
+      slug = "sam-workers";
+      keyFile = "/run/secrets/workers-key";
+    };
     watchdog.enable = true;
     backup = {
       enable = true;

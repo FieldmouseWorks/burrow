@@ -430,8 +430,9 @@ def pipeline(repo):
 def job(repo, task, clone=False):
     """Hand a task to a Claude job in the repo's project. Every one is
     pipeline work (proj run --pipeline): it settles a PR or the branch PRs
-    land on, so it goes ahead of the line, in a slot kept for it. Returns
-    the job id."""
+    land on, so it goes ahead of the line, and in the pipeline's own repos
+    (pipelineRepos) in a slot kept for it; proj decides which. Returns the
+    job id."""
     d = project_dir(repo)
     if d is None and clone and not DRY:
         d = repo.split("/")[1]
@@ -445,10 +446,11 @@ def job(repo, task, clone=False):
         log(f"  would: proj run {d} ...")
         return "dry"
     # Each of its turns that ends starts the repo's pass, which reads what it
-    # did; one that goes quiet for jobIdle, or runs past jobTimeout, is
-    # stopped, and ends then.
+    # did and acts on it (--owned: the turn needn't say what comes next); one
+    # that goes quiet for jobIdle, or runs past jobTimeout, is stopped, and
+    # ends then.
     p = subprocess.run([CFG["proj"], "run", "--pipeline", "--timeout", f"{CFG['jobTimeout']}m",
-                        "--idle", f"{CFG['jobIdle']}m", "--kick", f"autoland/{repo}", d, task],
+                        "--idle", f"{CFG['jobIdle']}m", "--kick", f"autoland/{repo}", "--owned", d, task],
                        capture_output=True, text=True)
     return p.stdout.strip() or None
 
@@ -460,3 +462,26 @@ def job_state(jid):
         return "running"
     p = subprocess.run([CFG["proj"], "state", jid], capture_output=True, text=True)
     return p.stdout.strip() or None
+
+
+def coverage(repos, covered):
+    """repos.json, for renovate-sweep, and when: every repo the steward has,
+    with how its proofs run and whether this pass saw to its PRs."""
+    done = {r["repo"] for r in covered}
+    return {"at": NOW, "repos": {r["repo"]: {"proofJobs": repo_cfg(r["repo"])["proofJobs"], "covered": r["repo"] in done}
+                                 for r in repos}}
+
+
+def after_limit(kick):
+    """GitHub's rate limit turned the pass away somewhere, finding its repos,
+    in its PRs or after (the hooks, the owner's issue): it comes back whole
+    at the reset, a full pass as one (its settings, hooks and issue too:
+    burrow-events takes "" for it), a kicked one for its repos, whatever
+    they had booked. Every other wake-up waits for the reset too, the ones
+    booked before it was met and other passes'. None sooner could do
+    anything, and none then waits on another event or the hourly pass."""
+    at = LIMITED[0] + 1
+    again = [""] if kick is None else kick
+    wakes = {k: max(v, at) for k, v in load("wake.json", {}).items()
+             if v > NOW and k.lower() not in {r.lower() for r in again}}
+    save("wake.json", {**wakes, **dict.fromkeys(again, at)})
