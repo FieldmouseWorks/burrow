@@ -27,7 +27,8 @@
 # deadline, and an await to its own, the watchdog kicked as they change),
 # while a question, a finished job, a stopped one and an --owned job's end
 # aren't, that a job run --app acts as its App every turn, whatever the login
-# sets, or not at all, and a bot's issue's job as the machinery's App, and
+# sets and if the App goes while it waits, or not at all, and a bot's issue's
+# job as the machinery's App, and
 # that a job past its memory cap is killed by its own cgroup's limit rather
 # than the machine running out.
 #
@@ -107,6 +108,7 @@ pkgs.testers.runNixOSTest {
 
   testScript = ''
     import json
+    import re
     import time
 
     def proj(args):
@@ -433,20 +435,22 @@ pkgs.testers.runNixOSTest {
     with subtest("a job run --app acts as that App every turn, or not at all"):
         e = proj("run --app workers web showenv")
         machine.wait_until_succeeds(f"su - dev -c 'proj state {e}' | grep -x done", timeout=120)
+        # The App's socket and git's settings, and no token of the user's.
         def acts_as_workers(job):
             out = proj(f"log {job}")
-            assert out.startswith("did socket=/run/gh-token/workers.sock count=") and not out.endswith(("=0", "=none")), out
+            assert re.fullmatch(r"did socket=/run/gh-token/workers\.sock count=[1-9][0-9]* token=", out), out
         acts_as_workers(e)
         assert "[as workers]" in proj("status"), proj("status")
-        # A login's own settings come before the App's, so they can't undo it.
-        machine.succeed("echo 'export GH_TOKEN_SOCKET= GIT_CONFIG_COUNT=0' >/home/dev/.bash_profile")
+        # A login's own settings and token come before the App's, so they
+        # can't undo it.
+        machine.succeed("echo 'export GH_TOKEN_SOCKET= GIT_CONFIG_COUNT=0 GH_TOKEN=mine' >/home/dev/.bash_profile")
         proj(f"reply {e} showenv")
         machine.wait_until_succeeds(f"grep -x done /data/dev/jobs/{e}/2.outcome", timeout=120)
         acts_as_workers(e)
         # Without --app, the user's own.
         u = proj("run web showenv")
         machine.wait_until_succeeds(f"su - dev -c 'proj state {u}' | grep -x done", timeout=120)
-        assert proj(f"log {u}") == "did socket= count=0", proj(f"log {u}")
+        assert proj(f"log {u}") == "did socket= count=0 token=mine", proj(f"log {u}")
         machine.succeed("rm /home/dev/.bash_profile")
         # An App the machine hasn't, or one with a sandbox: refused.
         machine.fail("su - dev -c 'proj run --app nosuch web showenv'")
@@ -458,6 +462,20 @@ pkgs.testers.runNixOSTest {
         proj(f"reply {e} showenv")
         machine.wait_until_succeeds(f"grep -q 'no GitHub App gone' /data/dev/jobs/{e}/3.outcome", timeout=120)
         assert not machine.succeed(f"cat /data/dev/jobs/{e}/3.jsonl 2>/dev/null || true").strip()
+        # One whose App goes while it waits for a slot starts as the App all
+        # the same, never as the user: its env was read before it waited.
+        a = proj('run web "sleep 600"')
+        b = proj('run web "sleep 600"')
+        for j in (a, b):
+            machine.wait_until_succeeds(f"su - dev -c 'proj state {j}' | grep -x running", timeout=120)
+        q = proj("run --app workers web showenv")
+        machine.wait_until_succeeds(f"ls /data/dev/jobs/.queue | grep -q -- '-{q}$'", timeout=120)
+        machine.succeed("mv /etc/gh-token/workers.env /tmp/workers.env")
+        proj(f"stop {a}")
+        machine.wait_until_succeeds(f"su - dev -c 'proj state {q}' | grep -x done", timeout=120)
+        machine.succeed("mv /tmp/workers.env /etc/gh-token/workers.env")
+        proj(f"stop {b}")
+        acts_as_workers(q)
 
     with subtest("a turn that has waited past maxWait goes ahead of a newer --first"):
         a = proj('run web "sleep 600"')

@@ -72,8 +72,9 @@
       fail) echo '{"type":"result","session_id":"s","is_error":true,"errors":["refused"]}'; exit 1 ;;
       # An issue's task (proj-inbox) that takes a while to answer.
       *inbox-slow*) sleep 8 ;;
-      # What it would act on GitHub as: its App's socket and git's settings.
-      *showenv*) prompt="socket=''${GH_TOKEN_SOCKET-none} count=''${GIT_CONFIG_COUNT-none}" ;;
+      # What it would act on GitHub as: its App's socket, git's settings and
+      # the token gh would be given.
+      *showenv*) prompt="socket=''${GH_TOKEN_SOCKET-none} count=''${GIT_CONFIG_COUNT-none} token=''${GH_TOKEN-none}" ;;
     esac
     ${pkgs.jq}/bin/jq -nc --arg r "did $prompt" '{type: "result", session_id: "s", result: $r, is_error: false}'
   '';

@@ -87,6 +87,10 @@ let
   # settings for it.
   appEnv = socket: {
     GH_TOKEN_SOCKET = socket;
+    # A token the process already has, from a login's profile, say, is the
+    # user's, and the wrapper would run with it as given (client.rs), so it
+    # goes: an empty one is none, and the wrapper asks the socket.
+    GH_TOKEN = "";
     # A gh that isn't the wrapper finds no login, rather than the
     # user's: not in its config, not in the keyring (the session bus
     # it's reached on), not in gh's other variables, github.com's or
@@ -130,10 +134,9 @@ let
     GIT_EXEC_PATH = "${gitCore}";
   };
 
-  # gh as the App whoever runs it: a token the caller has is theirs, not the
-  # App's, so it goes.
+  # gh as the App whoever runs it.
   appGh = env: pkgs.writeShellScriptBin "gh" ''
-    exec env -u GH_TOKEN ${lib.escapeShellArgs (lib.mapAttrsToList (k: v: "${k}=${v}") env)} ${gh}/bin/gh "$@"
+    exec env ${lib.escapeShellArgs (lib.mapAttrsToList (k: v: "${k}=${v}") env)} ${gh}/bin/gh "$@"
   '';
 in
 {

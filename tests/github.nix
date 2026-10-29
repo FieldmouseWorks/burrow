@@ -490,6 +490,9 @@ pkgs.testers.runNixOSTest {
           assert machine.succeed(dev("GH_TOKEN=mine gh-token gh ${show} api user")).strip() == "token=mine args=api user"
           out = machine.succeed(dev("GH_TOKEN= GITHUB_TOKEN=peter-token gh-token gh ${show} api repos/sam/r")).strip()
           assert out == "token=ghs_1 args=api repos/sam/r", out
+          # One the shell had before it entered the App's env is the user's, and goes.
+          out = machine.succeed("su - dev -c " + shlex.quote("GH_TOKEN=peter-token env " + ENV + " gh-token gh ${show} api repos/sam/r")).strip()
+          assert out == "token=ghs_1 args=api repos/sam/r", out
           # The repo gh acts on: a fork's upstream, unless the call names another.
           machine.succeed(dev("git init -q fork && git -C fork remote add origin git@github.com:eve/r.git && git -C fork remote add upstream https://github.com/sam/r.git", app=False))
           assert machine.succeed(dev("gh-token gh ${show} pr view 5", at="~/fork")).strip() == "token=ghs_1 args=pr view 5"

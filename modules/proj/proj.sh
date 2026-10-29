@@ -739,11 +739,14 @@ Carry on from there. Anything you left in the background last turn was stopped w
     # its own to await.next, and await only once it ends; how it says it
     # ends goes to end.next.
     rm -f "$dir/await" "$dir/await.next" "$dir/end.next"
-    # As its App, or not at all.
-    env=''
+    # As its App, or not at all. Its env, read now, is what every run of the
+    # turn starts in, so none starts as the user if the App goes while the
+    # turn waits for a slot: it acts as an App that's gone, and reaches no
+    # GitHub at all.
+    appenv=''
     if [ -s "$dir/app" ]; then
       env=$(app_env "$(cat "$dir/app")")
-      if [ -z "$env" ] || [ ! -r "$env" ]; then
+      if [ -z "$env" ] || ! appenv=$(cat -- "$env" 2>/dev/null) || [ -z "$appenv" ]; then
         echo "no GitHub App $(cat "$dir/app") on this machine to act as" >"$dir/$n.outcome"
         exit 1
       fi
@@ -788,9 +791,10 @@ Carry on from there. Anything you left in the background last turn was stopped w
           args+=(--append-system-prompt "This is proj job $id, running headless. Your turn ends with your answer, and anything you left running in the background is stopped then, so don't wait on GitHub (CI, reviews, merges) in the background or with sleep. Run \`proj await URL\` for each PR or issue you're still waiting on, then end your turn saying what you wait for: the job is resumed, with this conversation, once one of them changes (checks finish, a review, comment or push, merged or closed). $LONG")
         fi
         # A login shell, so the job sees the same PATH and env as an SSH login,
-        # and then its App's env, which nothing the login sets can undo.
+        # and then its App's env, which nothing the login sets can undo; Claude
+        # starts only once that has.
         # shellcheck disable=SC2016 # expanded by that shell
-        PROJ_JOB=$id PROJ_APP_ENV=$env timeout -k 1m "$left" bash -lc 'if [ -n "$PROJ_APP_ENV" ]; then . "$PROJ_APP_ENV"; fi; unset PROJ_APP_ENV; exec claude "$@" <"$0"' "$prompt" "${args[@]}" >>"$dir/$n.jsonl" &
+        PROJ_JOB=$id PROJ_APP_ENV=$appenv timeout -k 1m "$left" bash -lc 'eval "$PROJ_APP_ENV" && unset PROJ_APP_ENV && exec claude "$@" <"$0"' "$prompt" "${args[@]}" >>"$dir/$n.jsonl" &
       fi
       pid=$!
       # Quiet for the job's --idle: stuck, and stopped as one past its timeout
