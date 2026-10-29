@@ -134,7 +134,7 @@ def act(repo, n, st, mine):
     busy = bool(st.get("job")) and working(st["job"])
     if busy:
         due = st["jobAt"] + (CFG["jobTimeout"] + 5) * MIN
-        C.wake(repo, due if due > C.NOW else C.NOW + 15 * MIN)
+        C.wake(repo, due if due > C.NOW else C.NOW + 15 * MIN)  # ends: what's due a day past its job is listed
     todo = []
     for _, it in sorted(items.items()):
         if "handed" in it:
@@ -142,26 +142,26 @@ def act(repo, n, st, mine):
             if C.NOW >= it["handed"] + DAY and not working(it["job"]):
                 mine.append((STUCK, f"{repo}#{n}", f"{it['section']}: {it['what']}, there since {day(it['since'])}"))
             else:
-                C.wake(repo, it["handed"] + DAY)
+                C.wake(repo, it["handed"] + DAY)  # ends: listed on the stuck issue then
             continue
         at = it["since"] + CFG["dashboard"]["errorDays" if it["failing"] else "waitDays"] * DAY
         if C.NOW >= at:
             todo.append(it)
         else:
-            C.wake(repo, at)
+            C.wake(repo, at)  # ends: a Claude job takes it then
     if not todo or busy:
         return
     jid = C.job(repo, task(repo, n, todo), clone=True)
     if not jid:
         log(f"{repo}: couldn't start a Claude job for its dashboard (no checkout, or proj refused)")
         mine.append((NO_JOB, f"{repo}#{n}", "for what's stuck on Renovate's dashboard"))
-        C.wake(repo, C.NOW + 5 * MIN)
+        C.wake(repo, C.NOW + 5 * MIN)  # ends: listed on the stuck issue
         return
     log(f"{repo}: a Claude job {jid} for {len(todo)} stuck on its dashboard")
     for it in todo:
         it["handed"], it["job"] = C.NOW, jid
     st["job"], st["jobAt"] = jid, C.NOW
-    C.wake(repo, C.NOW + (CFG["jobTimeout"] + 5) * MIN)
+    C.wake(repo, C.NOW + (CFG["jobTimeout"] + 5) * MIN)  # ends: the job's own end, or this look
 
 
 def task(repo, n, todo):
