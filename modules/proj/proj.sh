@@ -98,6 +98,21 @@ state() {
   fi
 }
 
+# How turn N ended, for its log: as state says for the latest, and nothing
+# while that's queued or running (a second run included). An earlier one's
+# outcome, or failed if it had a slot, and so would have written one, but its
+# unit went first (stopped, or killed with it); a turn from before turns kept
+# their outcomes says nothing.
+ended() {
+  local d=$jobs/$1 s
+  if [ "$2" = "$(cat "$d/turns" 2>/dev/null)" ]; then
+    s=$(state "$1")
+    case $s in queued | running) ;; *) echo "$s" ;; esac
+  elif [ -s "$d/$2.outcome" ]; then cat "$d/$2.outcome"
+  elif [ -e "$d/$2.slot" ]; then echo failed
+  fi
+}
+
 # A turn's answer, from its stream: every result with something to say, in
 # order. Claude answers again each time a background task it left running
 # reports back, so the last result can be a line about that task with the
@@ -107,16 +122,18 @@ answer() { grep '"type":"result"' "$1" 2>/dev/null | jq -rs 'map(.result // "" |
 # Swapped in whole, so a reader never finds it missing or half written.
 set_turns() { echo "$2" >"$jobs/$1/turns.new" && mv -f "$jobs/$1/turns.new" "$jobs/$1/turns"; }
 
-# A duration as timeout(1) reads it (90, 1.5h, 30m, 1d; 0 for none), in
-# whole seconds, rounded up; fails on anything else.
-secs() {
+# A duration as timeout(1) reads it (90, 1.5h, 0.1s, 1d; 0 for none), in
+# nanoseconds, rounded up; fails on anything else. Past about 30 years it's
+# held there, as timeout(1) holds one too long for it: neither ever comes.
+nanos() {
   awk -v d="$1" 'BEGIN {
     if (d !~ /^([0-9]+\.?[0-9]*|\.[0-9]+)([eE][-+]?[0-9]+)?[smhd]?$/) exit 1
     u = substr(d, length(d)); per = 1
     if (u == "m") per = 60; else if (u == "h") per = 3600; else if (u == "d") per = 86400
     if (u ~ /[smhd]/) d = substr(d, 1, length(d) - 1)
-    s = d * per; i = int(s); if (i < s) i++
-    print i
+    s = d * per * 1e9; i = int(s); if (i < s) i++
+    if (i > 1e18) i = 1e18
+    printf "%.0f\n", i
   }'
 }
 
@@ -374,8 +391,8 @@ case "${1:-status}" in
     elif [ -n "$last" ] && text=$(answer "$jobs/$id/$n.jsonl") && [ -n "$text" ]; then
       printf '%s\n' "$text"
       # An answer, then an error, or a run told to answer again that ended
-      # without one: say what the turn ended on.
-      outcome=$(cat "$jobs/$id/$n.outcome" 2>/dev/null || true)
+      # without one, its unit included: say what the turn ended on.
+      outcome=$(ended "$id" "$n")
       if jq -e .is_error <<<"$last" >/dev/null; then
         printf '\n(turn %s ended in an error)\n' "$n"
         jq -c '.errors // empty' <<<"$last"
@@ -542,14 +559,15 @@ Carry on from there. Anything you left in the background last turn was stopped w
     rm -f "$dir/await" "$dir/await.next"
     take_slot "$id" "$n" "$3"
     limit=$(cat "$dir/timeout" 2>/dev/null || echo "$TIMEOUT")
-    # One budget for the whole turn, however many runs it takes; 0 is none.
-    if ! total=$(secs "$limit"); then
+    # One budget for the whole turn, however many runs it takes and the
+    # clearing up between them, to the nanosecond; 0 is none.
+    if ! total=$(nanos "$limit"); then
       echo "proj: the timeout $limit isn't a duration" >&2
       echo failed >"$dir/$n.outcome"
       exit 2
     fi
     deadline=''
-    [ "$total" -eq 0 ] || deadline=$(($(date +%s) + total))
+    [ "$total" -eq 0 ] || deadline=$(($(date +%s%N) + total))
     : >"$dir/$n.jsonl"
     prompt=$dir/prompt.$n
     while :; do
@@ -557,10 +575,13 @@ Carry on from there. Anything you left in the background last turn was stopped w
       if [ -s "$dir/session" ]; then args+=(--resume "$(cat "$dir/session")"); fi
       # Where this run's stream starts: an earlier run's answer isn't its.
       from=$(($(wc -l <"$dir/$n.jsonl") + 1))
+      # What's left of it, looked at last thing before the run starts: none
+      # left, and no run starts, so the turn has timed out.
       left=0
       if [ -n "$deadline" ]; then
-        left=$((deadline - $(date +%s)))
-        [ "$left" -gt 0 ] || left=1
+        left=$((deadline - $(date +%s%N)))
+        if [ "$left" -le 0 ]; then last='' rc=124; break; fi
+        left=$((left / 1000000000)).$(printf %09d $((left % 1000000000)))
       fi
       if [ -s "$dir/agent" ]; then
         timeout -k 1m "$left" agent sh "$(cat "$dir/agent")" claude "${args[@]}" <"$prompt" >>"$dir/$n.jsonl" &
@@ -576,7 +597,7 @@ Carry on from there. Anything you left in the background last turn was stopped w
       dog=''
       if [ -s "$dir/idle" ]; then
         idle=$(cat "$dir/idle")
-        quiet=$(secs "$idle")
+        quiet=$((($(nanos "$idle") + 999999999) / 1000000000))
         ( while sleep 1 && kill -0 "$pid" 2>/dev/null; do
             if [ $(( $(date +%s) - $(stat -c %Y "$dir/$n.jsonl") )) -ge "$quiet" ]; then
               : >"$dir/$n.quiet"
@@ -604,11 +625,10 @@ Carry on from there. Anything you left in the background last turn was stopped w
       # turn, it's told so in the same conversation and slot, and answers
       # again. Waiting on GitHub is proj await's. Only once all of the last
       # run is gone, so none of it overlaps the next or writes to its
-      # stream; a sandbox's work is in the VM, out of reach, so a --vm job
-      # isn't told.
+      # stream, and only if the turn still has time once it is; a sandbox's
+      # work is in the VM, out of reach, so a --vm job isn't told.
       if [ -n "$cut" ] && [ "$prompt" = "$dir/prompt.$n" ] && [ ! -s "$dir/agent" ] &&
-        jq -e '.is_error | not' <<<"$last" >/dev/null 2>&1 &&
-        { [ -z "$deadline" ] || [ "$(date +%s)" -lt "$deadline" ]; } && reap; then
+        jq -e '.is_error | not' <<<"$last" >/dev/null 2>&1 && reap; then
         printf '%s\n' "Your answer ended the turn while something you left running in the background was still going, and it was stopped with it: nothing more from it reaches you, and the turn isn't over. If you were waiting on it, run it again and wait for it now. $LONG If you were waiting on GitHub, run \`proj await URL\` for it. Then answer again." >"$dir/$n.cut"
         prompt=$dir/$n.cut
         # The next run's quiet counts from its start, and is its own.
