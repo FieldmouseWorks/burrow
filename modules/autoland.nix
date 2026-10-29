@@ -544,7 +544,9 @@ in
         machine rather than in CI, `{ "<check>" = "<how to run it and record
         its verdict>"; }`: once a settled PR waits on nothing else, one
         Claude job a head runs them on that commit and records each verdict,
-        a failure as a failure), keepBranches
+        a failure as a failure), proofSlots (how many of those jobs the repo
+        may have queued or running at once, for proofs that take the whole
+        machine: the rest wait their turn, oldest PR first; unset, no limit), keepBranches
         (more branch globs the cleanup never touches in this repo, on top of
         the machine's, for branches a repo keeps as evidence), codex (false:
         Codex leaves this repo alone, and none of it goes to it), skipPaths (more path regexes the reviewers never read in
