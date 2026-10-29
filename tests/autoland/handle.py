@@ -686,7 +686,7 @@ for checks in (CI_GREEN, []):
     assert "a Claude job is running remi-proof" in status, status
 # renovate-sweep is told how a covered repo's proofs run.
 C.NOW = C.ts(T0)
-assert S.coverage([{"repo": "sam/r"}], [{"repo": "sam/r"}]) == {
+assert C.coverage([{"repo": "sam/r"}], [{"repo": "sam/r"}]) == {
     "at": C.NOW, "repos": {"sam/r": {"proofJobs": S.CFG["repos"]["sam/r"]["proofJobs"], "covered": True}}}
 # ... but only the repos a pass saw to are covered: one whose pass failed
 # isn't, so renovate-sweep lists its ok majors itself, and still knows how

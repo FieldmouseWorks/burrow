@@ -1,101 +1,21 @@
-"""Nothing the steward does loops quietly: a PR that conflicts with its base
-goes to a Claude job; every merge state GitHub reports has a step; every
-step that fails and is tried again makes the PR's wait overdue on its third
-failure in a row, or lists it on the stuck issue without the watchdog; and
-every wake-up a pass books says what ends the wait it's on."""
+"""Nothing the steward does loops quietly: every merge state GitHub reports
+has a step (conflicts.py has where a conflict goes); every step that fails
+and is tried again makes the PR's wait overdue on its third failure in a
+row, or lists it on the stuck issue without the watchdog; and every wake-up
+a pass books says what ends the wait it's on."""
 
 import json
 import os
 import re
 
-from harness import COMMITS, FAIL, JOBS, STATES, STUB, T, WROTE, C, H, S, clean, fresh_pr_state, merged, mkpr, pr_state, queued, \
-    run, said, stand_in, swept, tmp, worker
-from touches import DEPENDABOT_EMAIL
+from harness import FAIL, JOBS, STUB, T, WROTE, C, H, S, clean, fresh_pr_state, merged, mkpr, pr_state, run, stand_in, tmp, \
+    worker
 
 import waits
 
 stand_in()
 KEY = "sam/r#5"
 
-
-def dirty(pr):
-    return {**pr, "mergeStateStatus": "DIRTY"}
-
-
-def desc(status):
-    return status.partition("description=")[2].partition(" -f target_url")[0]
-
-
-# A conflicted PR, settled otherwise: a Claude job merges its base in at
-# once (GitHub won't merge it and runs no CI on it), and nothing merges it.
-fresh_pr_state()
-status, _ = run(dirty(clean()), 700)
-assert len(JOBS) == 1 and "it conflicts with main" in JOBS[0] and "never rebase or force-push" in JOBS[0], JOBS
-assert desc(status).startswith("Conflicts with main; a Claude job has it since") and not merged(), (status, WROTE)
-# While it works, nothing more starts; one that ends with the conflict still
-# there is handed once more, and after a second the owner hears.
-status, _ = run(dirty(clean()), 800)
-assert JOBS == [] and "a Claude job has it since" in status, (JOBS, status)
-STATES["job-1"] = "done"
-status, _ = run(dirty(clean()), 900)
-assert JOBS == [] and "its Claude job just ended" in status, (JOBS, status)
-run(dirty(clean()), 1000)
-assert len(JOBS) == 1 and "it conflicts with main" in JOBS[0], JOBS
-run(dirty(clean()), 1100)
-status, digest = run(dirty(clean()), 1200)
-assert "state=failure" in status and digest[0][0] == "Two Claude jobs ended without fixing it", (status, digest)
-STATES.clear()
-# Before any review or CI too: neither can settle it while it conflicts.
-fresh_pr_state()
-status, _ = run(dirty(mkpr(checks=[])), 700)
-assert len(JOBS) == 1 and queued() == [] and "Conflicts with main" in status, (JOBS, queued(), status)
-# A bot's own update is the bot's to rebase.
-fresh_pr_state()
-status, _ = run(dirty(clean(branch="renovate/foo-1.x", title="Update foo from 1.4 to 1.5")), 700)
-assert JOBS == [] and "Conflicts with main; its bot rebases it" in status and not merged(), (JOBS, status)
-# A Dependabot one too, and still open a day on, it's listed for the owner.
-dependabot = {"branch": "dependabot/cargo/sqlx-0.8.7", "title": "Bump sqlx from 0.8.6 to 0.8.7", "number": 15}
-COMMITS[15] = [DEPENDABOT_EMAIL]
-fresh_pr_state()
-status, digest = run(dirty(clean(**dependabot)), 90000)
-assert JOBS == [] and "its bot rebases it" in status, (JOBS, status)
-assert digest == [("Open over a day", digest[0][1], "Dependency update; conflicts with main")], digest
-# Only its own, though: with anyone else's commit on it, the bot leaves the
-# branch alone, major or minor, Renovate's or Dependabot's, and a job of
-# ours merges the base in.
-major = {"branch": "renovate/foo-2.x", "title": "Update foo from 1.4 to 2.0", "number": 8}
-COMMITS[8] = ["bot@renovateapp.com", "claude@remi"]
-COMMITS[15] = [DEPENDABOT_EMAIL, "claude@remi"]
-for pr in (clean(comments=[said(swept("ok"))], **major), clean(**dependabot)):
-    fresh_pr_state()
-    status, _ = run(dirty(pr), 700)
-    assert len(JOBS) == 1 and "it conflicts with main" in JOBS[0] and "a Claude job has it" in status, (JOBS, status)
-# A conflict job stuck in line (or one whose state can't be read: running,
-# as far as the steward can tell) doesn't keep the PR off the list: still
-# open a day on, it's listed, watchdog or not, a Renovate update a job of
-# ours works included.
-for pr in (clean(), clean(comments=[said(swept("ok"))], **major)):
-    fresh_pr_state()
-    run(dirty(pr), 700)
-    status, digest = run(dirty(pr), 90000)
-    assert "a Claude job has it" in status and [d[0] for d in digest] == ["Open over a day"], (status, digest)
-# One renovate-sweep has is its job's: a red one, or a major with no verdict
-# on this head, gets no job of ours beside it on the branch.
-red = [{"__typename": "CheckRun", "name": "ci", "status": "COMPLETED", "conclusion": "FAILURE"}]
-for pr in (clean(checks=red, **major), clean(**major)):
-    fresh_pr_state()
-    status, _ = run(dirty(pr), 700)
-    assert JOBS == [] and "Conflicts with main; renovate-sweep has it" in status, (JOBS, status)
-    assert waits.NOTED["sam/r"]["sam/r#8"]["kick"] == "renovate-sweep/sam/r", waits.NOTED
-    # Its escalation is renovate-sweep's too: not listed here a day on.
-    status, digest = run(dirty(pr), 90000)
-    assert "renovate-sweep has it" in status and digest == [], (status, digest)
-# And one it held is the owner's: nothing pushes to it.
-fresh_pr_state()
-status, _ = run(dirty(clean(comments=[said(swept("held"))], **major)), 700)
-assert JOBS == [] and "renovate-sweep held it" in status, (JOBS, status)
-COMMITS.clear()
-print("conflicts: ok")
 
 # Every merge state GitHub's API has gets a step, and one it doesn't know is
 # a refusal: a settled PR is merged, brought up to date, handed to a job for

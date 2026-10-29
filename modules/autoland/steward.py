@@ -56,16 +56,8 @@ import repos as R
 import reviewers as V
 import step
 import waits
-from common import CFG, DRY, MIN, STATE, load, log, repo_cfg, save
+from common import CFG, DRY, MIN, STATE, load, log, save
 from prs import open_prs
-
-
-def coverage(repos, covered):
-    """repos.json, for renovate-sweep, and when: every repo the steward has,
-    with how its proofs run and whether this pass saw to its PRs."""
-    done = {r["repo"] for r in covered}
-    return {"at": C.NOW, "repos": {r["repo"]: {"proofJobs": repo_cfg(r["repo"])["proofJobs"], "covered": r["repo"] in done}
-                                   for r in repos}}
 
 
 def main():
@@ -92,22 +84,7 @@ def main():
         run_pass(kick)
     finally:
         if C.LIMITED and C.LIMITED[0] > C.NOW:
-            after_limit(kick)
-
-
-def after_limit(kick):
-    """GitHub's rate limit turned the pass away somewhere, finding its repos,
-    in its PRs or after (the hooks, the owner's issue): it comes back whole
-    at the reset, a full pass as one (its settings, hooks and issue too:
-    burrow-events takes "" for it), a kicked one for its repos, whatever
-    they had booked. Every other wake-up waits for the reset too, the ones
-    booked before it was met and other passes'. None sooner could do
-    anything, and none then waits on another event or the hourly pass."""
-    at = C.LIMITED[0] + 1
-    again = [""] if kick is None else kick
-    wakes = {k: max(v, at) for k, v in load("wake.json", {}).items()
-             if v > C.NOW and k.lower() not in {r.lower() for r in again}}
-    save("wake.json", {**wakes, **dict.fromkeys(again, at)})
+            C.after_limit(kick)
 
 
 def run_pass(kick):
@@ -207,7 +184,7 @@ def run_pass(kick):
         # For renovate-sweep: it lists the ok majors of the repos this pass
         # didn't see to (one whose pass failed among them), and tells its
         # jobs how every repo's proofs run.
-        save("repos.json", coverage(repos, covered))
+        save("repos.json", C.coverage(repos, covered))
         save("known.json", sorted(known))
         save("baseline-failed.json", failed)
     if not DRY:
