@@ -50,6 +50,7 @@ import time
 
 import common as C
 import dashboard as D
+import proofs as P
 import repos as R
 import reviewers as V
 from common import CFG, DRY, MIN, STATE, load, log, repo_cfg, save, ts
@@ -345,14 +346,27 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
 
     def prove():
         """Only checks that run on a machine, not in CI, are left: a Claude
-        job runs them on this head and records their verdicts."""
-        if lost("proved"):
-            again("proved", proof_task(repo, pr, ci_names, rc["proofJobs"]), "running " + ", ".join(ci_names), "its verdict")
-        elif st.get("proved") == head or started("proved", proof_task(repo, pr, ci_names, rc["proofJobs"])):
-            settle("pending", f"Settled; a Claude job is running {', '.join(ci_names)}"[:140])
+        job runs them on this head and records their verdicts, once its
+        repo's proofSlots have room for it (a job started again too)."""
+        doing = "running " + ", ".join(ci_names)
+        task = proof_task(repo, pr, ci_names, rc["proofJobs"])
+        retry = lost("proved")
+        if not retry and st.get("proved") == head:
+            settle("pending", f"Settled; a Claude job is {doing}"[:140])
+            return
+        slots = rc.get("proofSlots")
+        if slots and not (retry and st.get("provedAgain") == head) and (ahead := P.ahead(repo, n, st, slots)) is not None:
+            P.wait(repo, n)
+            settle("pending", f"Settled; waiting its turn to run {', '.join(ci_names)} ({ahead} ahead)"[:140])
+            return
+        if retry:
+            again("proved", task, doing, "its verdict")
+        elif started("proved", task):
+            settle("pending", f"Settled; a Claude job is {doing}"[:140])
         else:
             settle("pending", f"Settled, but no Claude job could run {', '.join(ci_names)}"[:140],
                    "Couldn't start a Claude job to run its checks")
+        P.started(st)
 
     if pr["isDraft"]:
         # Work in progress, whoever's it is: nobody reviews it yet, and nobody
@@ -902,6 +916,7 @@ def run_pass(kick):
                     known.add(repo)
                 owner, name = repo.split("/")
                 info, prs = open_prs(owner, name)
+                P.begin(repo, (pr["number"] for pr in prs))
                 read.add(repo.replace("/", "_"))
                 # First, so a fix PR it made obsolete isn't merged by this same pass.
                 obsolete = R.watch_default(r, info, prs, mine) or set()
@@ -912,7 +927,8 @@ def run_pass(kick):
                 seen_to = True
                 # Obsolete fixes first: their holds take back a queued merge
                 # before anything else this pass waits on.
-                for pr in sorted(prs, key=lambda pr: pr["number"] not in obsolete):
+                # Then oldest first, so proofSlots go to PRs in their order.
+                for pr in sorted(prs, key=lambda pr: (pr["number"] not in obsolete, pr["number"])):
                     in_use.update((pr["headRefName"], pr["baseRefName"]))
                     live.add(V.snap_name(f"pr-{repo.replace('/', '_')}-{pr['number']}.json", pr["headRefOid"], pr["baseRefName"]))
                     try:
