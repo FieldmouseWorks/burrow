@@ -329,16 +329,33 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
     def conflicted():
         """It conflicts with its base, so GitHub can't merge it and its CI
         doesn't run: a Claude job merges the base in, at once, and its push is
-        reviewed like any other head. A bot's own update is the bot's to
-        rebase."""
+        reviewed like any other head. A dependency bot's own branch is the
+        bot's to rebase, and only its own: one with anyone else's commit on
+        it the bot leaves alone, major or minor. One renovate-sweep has (CI
+        red, or a major with no verdict on this head) is its job's to bring
+        up to date, and one it held is the owner's: no second job pushes to
+        either branch."""
         base = pr["baseRefName"]
-        if dep and not fixed:
+        verdict = C.marker(pr, MAJOR_VERDICT, head, repo, base) if dep == "major" and renovate else None
+        if dep and not bot_edited(repo, pr, st):
             settle("pending", f"Conflicts with {base}; its bot rebases it")
-            return
-        hand_off(f"it conflicts with {base}, so GitHub can't merge it and its CI doesn't run. Merge {base} into the branch "
-                 "(a merge commit: never rebase or force-push), resolve every conflict keeping what both sides meant, and run "
-                 "the repo's tests before you push. If the two sides can't both be kept, which one stays is the owner's call",
-                 f"Conflicts with {base}", "conflictFixed", wait=False, ours=not swept)
+            open_a_day(f"Dependency update; conflicts with {base}")
+        elif verdict == "held":
+            settle("pending", "Major update; renovate-sweep held it: see its comment", wait=None)
+        elif renovate and dep and (ci == "red" or dep == "major" and verdict != "ok"):
+            settle("pending", f"Conflicts with {base}; renovate-sweep has it", wait=waits.SWEEP)
+        else:
+            hand_off(f"it conflicts with {base}, so GitHub can't merge it and its CI doesn't run. Merge {base} into the "
+                     "branch (a merge commit: never rebase or force-push), resolve every conflict keeping what both sides "
+                     "meant, and run the repo's tests before you push. If the two sides can't both be kept, which one stays "
+                     "is the owner's call", f"Conflicts with {base}", "conflictFixed", wait=False)
+
+    def open_a_day(what):
+        """Renovate's stuck ones are renovate-sweep's; a Dependabot one that
+        still hasn't merged after a day is the owner's to look at."""
+        if (not renovate and C.NOW - ts(pr["createdAt"]) > 86400
+                and not any(x[1] == line for x in digest)):
+            digest.append(("Open over a day", line, what))
 
     def owner_decides():
         """Sent to the owner by hand, by a fix job or by a judge (the label):
@@ -538,11 +555,7 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
             settle("success", "Dependency update, CI green")
         else:
             land_now("Dependency update, CI green")
-        # Renovate's stuck ones are renovate-sweep's; a Dependabot one that
-        # still hasn't merged after a day is the owner's to look at.
-        if (not renovate and C.NOW - ts(pr["createdAt"]) > 86400
-                and not any(x[1] == line for x in digest)):
-            digest.append(("Open over a day", line, f"Dependency update, CI {ci}"))
+        open_a_day(f"Dependency update, CI {ci}")
         save(key, st)
         return
 
