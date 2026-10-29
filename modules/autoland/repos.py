@@ -544,8 +544,8 @@ def stuck_brief():
     return f"""The PR pipeline on this machine is stuck on what's below, and none of it is {who}'s to settle. For each \
 one, find out why: `journalctl -u autoland` and `-u autoland-review` here, and the steward's state in \
 {CFG['stateDir']}{stalls}. Fix the cause: a burrow PR with a test that fails on the bug when it's burrow's code, the fix on \
-this machine when it's the machine. Then get it moving again (`autoland-steward kick OWNER/REPO` starts a repo's \
-pass). Your answer, posted here, says what you found and did for each. The steward keeps this issue up to date: \
+this machine when it's the machine. Then get it moving again (`curl -fsS -d '' {CFG['kick']}/OWNER/REPO` starts a \
+repo's pass). Your answer, posted here, says what you found and did for each. The steward keeps this issue up to date: \
 something new stuck comes as a comment, and it closes the issue itself once nothing is, so don't close it. If one \
 really does need {who} (a login only they can do, a call that's theirs), say exactly what and assign this issue to \
 them.

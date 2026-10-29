@@ -430,8 +430,9 @@ def pipeline(repo):
 def job(repo, task, clone=False):
     """Hand a task to a Claude job in the repo's project. Every one is
     pipeline work (proj run --pipeline): it settles a PR or the branch PRs
-    land on, so it goes ahead of the line, in a slot kept for it. Returns
-    the job id."""
+    land on, so it goes ahead of the line, and in the pipeline's own repos
+    (pipelineRepos) in a slot kept for it; proj decides which. Returns the
+    job id."""
     d = project_dir(repo)
     if d is None and clone and not DRY:
         d = repo.split("/")[1]
@@ -445,10 +446,11 @@ def job(repo, task, clone=False):
         log(f"  would: proj run {d} ...")
         return "dry"
     # Each of its turns that ends starts the repo's pass, which reads what it
-    # did; one that goes quiet for jobIdle, or runs past jobTimeout, is
-    # stopped, and ends then.
+    # did and acts on it (--owned: the turn needn't say what comes next); one
+    # that goes quiet for jobIdle, or runs past jobTimeout, is stopped, and
+    # ends then.
     p = subprocess.run([CFG["proj"], "run", "--pipeline", "--timeout", f"{CFG['jobTimeout']}m",
-                        "--idle", f"{CFG['jobIdle']}m", "--kick", f"autoland/{repo}", d, task],
+                        "--idle", f"{CFG['jobIdle']}m", "--kick", f"autoland/{repo}", "--owned", d, task],
                        capture_output=True, text=True)
     return p.stdout.strip() or None
 

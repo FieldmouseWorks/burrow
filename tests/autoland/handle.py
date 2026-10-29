@@ -822,6 +822,9 @@ S.CFG["repos"]["sam/r"] = {"proofJobs": {"remi-proof": "Run `just proof` and pos
 proof = CI_GREEN + [{"__typename": "StatusContext", "context": "remi-proof", "state": "PENDING", "description": ""}]
 status, _ = run(clean(checks=proof), 700)
 assert len(JOBS) == 1 and "just proof" in JOBS[0] and head in JOBS[0] and not merged()
+# Told to wait for its checks in its turn: one left in the background dies
+# when the turn ends, with no verdict (burrow#121's two proof jobs).
+assert "Never end your turn while one runs" in JOBS[0] and "in steps under ten minutes each" in JOBS[0], JOBS[0]
 assert "git worktree add" in JOBS[0] and "never in this checkout's main tree" in JOBS[0], JOBS[0]
 assert "a Claude job is running remi-proof" in status
 status, _ = run(clean(checks=proof), 800)
@@ -903,6 +906,8 @@ run(clean(checks=red), 0)
 status, _ = run(clean(checks=red), 7200)
 assert "CI is red: remi-proof" in status and len(JOBS) == 1 and "isn't settled" in JOBS[0]
 assert "just proof" in JOBS[0] and "Rerun it that way" in JOBS[0], "the job is told how the proof runs"
+assert "Never end your turn while one runs" in JOBS[0], "the job is told to wait out the proof it reruns"
+assert "Never end your turn" not in H.fix_task("sam/r", steer, "x"), "only a job with a proof to rerun is"
 assert "CI log print" in JOBS[0], "the failing log isn't the fix job's to obey"
 # A proof that fails after a findings job answered on this head without
 # pushing gets its own fix job, once that one has ended, not beside it.
