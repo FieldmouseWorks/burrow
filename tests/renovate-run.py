@@ -2,7 +2,7 @@
 and its autodiscoverFilter: which repos get a run, with whose token. As the
 user, gh's login covers every repo in one run; as the machine's own App, each
 repo gets a run of its own with a token of its owner's installation, asked
-for that run.
+for that run once it holds the runs' lock.
 
     python3 -I tests/renovate-run.py modules/updates/renovate.sh
 """
@@ -25,7 +25,12 @@ def stub(name, body):
     path = os.path.join(bin_, name)
     with open(path, "w") as f:
         f.write(f"#!{sys.executable} -I\nimport json, os, sys\nSTUB = {tmp!r}\n"
-                "def note(*a):\n    open(os.path.join(STUB, 'log'), 'a').write(json.dumps(a) + '\\n')\n" + body)
+                "def note(*a):\n    open(os.path.join(STUB, 'log'), 'a').write(json.dumps(a) + '\\n')\n"
+                # Whether the runs' lock is held as it's called: by the run
+                # that called it, since nothing else takes it here.
+                "def locked(what):\n    import subprocess\n"
+                "    note('locked', what, subprocess.run(['flock', '-n', os.path.join(STUB, 'lock'), 'true']).returncode != 0)\n"
+                + body)
     os.chmod(path, 0o755)
     return path
 
@@ -35,6 +40,7 @@ def stub(name, body):
 stub("gh", """a = sys.argv[1:]
 note("gh", a, os.environ.get("GH_TOKEN_OWNER"), os.environ.get("GH_TOKEN_SOCKET"))
 if a == ["auth", "token"]:
+    locked("token")
     print("gho_user")
 elif a[:1] == ["api"] and a[1].startswith("repos/"):
     print({"sam/r": "Sam/R"}.get(a[1][6:], a[1][6:]))
@@ -53,11 +59,13 @@ if not os.environ.get("GH_TOKEN_SOCKET"):
     sys.exit("GH_TOKEN_SOCKET isn't set")
 n = sum(1 for _ in open(os.path.join(STUB, "log"))) if os.path.exists(os.path.join(STUB, "log")) else 0
 note("gh-token", a)
+locked("token")
 print(f"ghs_{a[1]}_{n}")
 """)
 # Renovate: what it was run with, and with whose token; a repo named in
 # renovate-fails fails its run.
 stub("renovate", """note("renovate", sys.argv[1:], os.environ.get("RENOVATE_TOKEN"), os.environ.get("GITHUB_COM_TOKEN"))
+locked("renovate")
 fails = os.path.join(STUB, "renovate-fails")
 if os.path.exists(fails) and any(open(fails).read().strip() in a for a in sys.argv[1:]):
     sys.exit(1)
@@ -93,6 +101,9 @@ def run(*args, app=False, owners="", repos=None, fails=(), uncovered=(), renovat
                        env={**{k: v for k, v in os.environ.items() if k not in ("GH_TOKEN_SOCKET", "GH_TOKEN_OWNER")},
                             "PATH": bin_ + ":" + os.environ["PATH"]})
     calls = [json.loads(x) for x in open(LOG)] if os.path.exists(LOG) else []
+    # Every token is asked for, and every run made, holding the lock: a token
+    # asked for before a wait for it could run out before its run does.
+    assert all(c[2] for c in calls if c[0] == "locked"), calls
     return p.returncode, calls
 
 
@@ -103,6 +114,7 @@ def runs(calls):
 # As the user: a full run is one Renovate over everything, with gh's login.
 code, calls = run()
 assert code == 0 and runs(calls) == [([], "gho_user", "gho_user")], calls
+assert ["locked", "token", True] in calls and ["locked", "renovate", True] in calls, calls
 # One repo: as GitHub spells it, if the filter covers it.
 code, calls = run("sam/r")
 assert code == 0 and runs(calls) == [(['--autodiscover-filter=["Sam/R"]'], "gho_user", "gho_user")], calls
@@ -118,6 +130,7 @@ code, calls = run("sam/r", app=True)
 assert code == 0 and [r[0] for r in runs(calls)] == [['--autodiscover-filter=["Sam/R"]']], calls
 (_, token, com), = runs(calls)
 assert token.startswith("ghs_Sam_") and com == token, calls
+assert ["locked", "token", True] in calls, calls
 assert ["gh-token", ["get", "Sam"]] in calls and ["gh", ["auth", "token"], None, "/run/gh-token/workers.sock"] not in calls, calls
 assert not [c for c in calls if c[0] == "gh" and c[1] == ["auth", "token"]], calls
 # Every gh call is the App's: its env is the run's.
