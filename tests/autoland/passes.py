@@ -6,7 +6,7 @@ import json
 import os
 import sys
 
-from harness import (FAIL, KICKS, REAL_GH, QDIR, REAL, STATES, STUB, T, WROTE, C, P, R, S, V, W, clean, fresh_pr_state, head,
+from harness import (ACTING, FAIL, KICKS, REAL_GH, QDIR, REAL, STATES, STUB, T, WROTE, C, P, R, S, V, W, clean, fresh_pr_state, head,
                      info, mkpr, pr_state, queued, run, rv_review, tmp, worker)
 
 # A pass that waits on time books its repo's next pass for when the wait
@@ -207,7 +207,14 @@ echo 'gh: API rate limit exceeded for user ID 1. (HTTP 403)' >&2
 exit 1
 """)
 os.chmod(f"{fake}/gh", 0o755)
-limited = lambda *a, **k: REAL_GH("api", "repos/sam/r")  # noqa: E731
+
+
+def limited(*a, **k):
+    """discover, open_prs or publish meeting the limit, for sam's repos as each does."""
+    with C.acting_for("sam"):
+        return REAL_GH("api", "repos/sam/r")
+
+
 kept_fns = (S.R.discover, S.open_prs, S.R.publish)
 for where in ("discovery", "prs", "after"):
     fresh_pr_state()
@@ -304,6 +311,8 @@ C.write = write_hook
 fresh_pr_state()
 WROTE.clear()
 st = {}
+# Called straight, for sam's repos as a pass has it (run_pass's acting_for).
+C._for.append("sam")
 R.hook("sam/r", st, False)
 add = [x for x in WROTE if "POST repos/sam/r/hooks" in x]
 assert len(add) == 1 and st["hook"], WROTE
@@ -338,6 +347,7 @@ assert WROTE == [], WROTE
 R.DRY = False
 os.environ["CREDENTIALS_DIRECTORY"] = cred
 C.gh, C.write = gh_kept, write_kept
+C._for.pop()
 # A project of proj's that it doesn't see to (excluded, another owner's)
 # gets the hook too, for proj-watch and proj-inbox, and keeps it.
 projects_kept = C.projects
@@ -345,15 +355,37 @@ C.projects = lambda: iter([("r", "sam/r"), ("R", "Sam/R"), ("p", "eve/p")])
 C.gh = lambda *a, **k: [] if a[:2] == ("api", "repos/eve/p/hooks") else gh_kept(*a, **k)
 C.NOW = T
 WROTE.clear()
+ACTING.clear()
 more = R.hook_projects([{"repo": "sam/r"}])
 assert more == [{"repo": "eve/p"}], more
 assert [x for x in WROTE if "hooks" in x] == ["api -X POST repos/eve/p/hooks --input -"], WROTE
+# As the App's installation on eve, not on sam.
+assert set(ACTING) == {"eve"}, ACTING
 assert C.load("repo-eve_p.json", None)["hookAt"] == T
 C.save("repo-eve_p.json", {"hook": "h", "hookId": 5, "hookAt": T})
 WROTE.clear()
 R.unhook_gone([{"repo": "sam/r"}] + more)
 assert not [x for x in WROTE if "eve/p" in x], WROTE
 os.remove(f"{tmp}/state/repo-eve_p.json")
+# Another owner's project the App isn't installed on gets no hook, and the
+# others still get theirs; it's kept for unhook_gone all the same, since
+# what its hook is now can't be asked.
+
+
+def uninstalled(*a, **k):
+    if C._for and C._for[-1] == "mallory":
+        raise RuntimeError("the App steward isn't installed on mallory")
+    return [] if a[:2] == ("api", "repos/eve/p/hooks") else gh_kept(*a, **k)
+
+
+C.gh = uninstalled
+C.projects = lambda: iter([("x", "mallory/x"), ("p", "eve/p")])
+WROTE.clear()
+more = R.hook_projects([{"repo": "sam/r"}])
+assert more == [{"repo": "eve/p"}, {"repo": "mallory/x"}], more
+assert [x for x in WROTE if "hooks" in x] == ["api -X POST repos/eve/p/hooks --input -"], WROTE
+os.remove(f"{tmp}/state/repo-eve_p.json")
+os.remove(f"{tmp}/state/repo-mallory_x.json")
 C.gh, C.projects = gh_kept, projects_kept
 # A repo no longer seen to (excluded, archived) has its hook taken off, on
 # a full pass; one that won't come off is tried again a day later.

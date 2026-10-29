@@ -39,6 +39,7 @@
       enable = true;
       owners = [ "sam" ];
       authors = [ "sam" ];
+      app = { id = 123456; slug = "sams-steward"; keyFile = "/run/secrets/autoland-app-key"; };
       reviewers.codex.enable = true;
     };
     house.enable = true;

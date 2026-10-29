@@ -96,7 +96,10 @@ run Claude Code's newest release instead of nixpkgs', a release manifest in
 your flake (`burrow.claude.manifest`, and its path for `HOST-update` to bump
 in `burrow.updates.claudeManifest`). Persist `burrow.stateDir` if `/` is
 ephemeral. `HOST-update` pushes to `origin` with the user's git login, and
-everything that reaches GitHub (Renovate, notices) uses their gh login.
+everything that reaches GitHub (Renovate, notices) uses their gh login, except
+the autoland steward: it acts as a GitHub App of yours (`burrow.autoland.app`;
+[docs/repo-baseline.md](docs/repo-baseline.md#the-stewards-github-app) says
+how to make one).
 
 After the first boot, run `claude remote-control` by hand once, anywhere, to
 log in and enable Remote Control. Every project folder after that is trusted

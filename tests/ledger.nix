@@ -8,23 +8,20 @@
 #   nix build .#checks.x86_64-linux.ledger -L
 { self, pkgs }:
 let
-  # GitHub's answers the pass asks gh for: its token and its login.
+  # GitHub's answers the pass asks gh for: its token, and the repos.
   gh = pkgs.writeShellScriptBin "gh" ''
     case "$*" in
-      "auth token") cat /tmp/gh-token 2>/dev/null || echo gho_stand_in ;;
-      "api user --jq .login")
-        echo user >>/tmp/gh-calls
-        # As long as the test says: so two passes overlap.
-        while [ -e /tmp/gh-slow ]; do sleep 0.1; done
-        echo sam ;;
+      "auth token") echo gho_stand_in ;;
       "repo list sam "*) echo sam/r ;;
       *) echo "gh $*: not a stand-in answer" >&2; exit 1 ;;
     esac
   '';
-  # Notes each call; `init` keeps the anchor's copy, as set-up's last step
-  # does, and `sync` exits with what /tmp/cn-exit says.
+  # Notes each call, and whose word it was told the steward's is; `init`
+  # keeps the anchor's copy, as set-up's last step does, and `sync` exits
+  # with what /tmp/cn-exit says.
   cn = pkgs.writeShellScriptBin "cn" ''
     echo "$*" >>/tmp/cn-calls
+    echo "$CONARY_REVIEWERS" >/tmp/cn-reviewers
     case $1 in
       init) touch "$CONARY_LEDGER/anchor" ;;
       sync) exit "$(cat /tmp/cn-exit 2>/dev/null || echo 0)" ;;
@@ -42,6 +39,7 @@ pkgs.testers.runNixOSTest {
       inherit gh;
       owners = [ "sam" ];
       anchorRepo = "sam/homelab";
+      reviewers = [ "steward[bot]" ];
     };
     # Only the pass's units: burrow-events would start a full pass, which
     # lists repos on GitHub.
@@ -64,24 +62,8 @@ pkgs.testers.runNixOSTest {
         machine.succeed("systemctl start burrow-ledger@sam-r.service")
         assert calls() == ["init", "sync sam/r", "sync sam/r"], calls()
 
-    with subtest("GitHub is asked which login the token is once, until the token changes"):
-        assert machine.succeed("cat /tmp/gh-calls") == "user\n"
-        machine.succeed("stat -c %a /var/lib/burrow/ledger/login | grep -x 600")
-        machine.succeed("echo gho_another >/tmp/gh-token")
-        machine.succeed("systemctl start burrow-ledger@sam-r.service")
-        machine.succeed("systemctl start burrow-ledger@sam-r.service")
-        assert machine.succeed("cat /tmp/gh-calls") == "user\nuser\n"
-        machine.succeed("rm /tmp/gh-token")
-
-    with subtest("passes that overlap ask once, and none fails for the other"):
-        machine.succeed("rm /var/lib/burrow/ledger/login /tmp/gh-calls")
-        machine.succeed("touch /tmp/gh-slow")
-        machine.succeed("systemctl start --no-block burrow-ledger@sam-r.service burrow-ledger@sam-q.service")
-        machine.sleep(1)
-        machine.succeed("rm /tmp/gh-slow")
-        machine.wait_until_succeeds("systemctl show -p ActiveState --value burrow-ledger@sam-r.service burrow-ledger@sam-q.service | grep -v activating | grep -c inactive | grep -x 2", timeout=60)
-        machine.succeed("systemctl show -p Result --value burrow-ledger@sam-r.service burrow-ledger@sam-q.service | grep -cx success | grep -x 2")
-        assert machine.succeed("cat /tmp/gh-calls") == "user\n"
+    with subtest("only the steward's App's word is its, never the token's own login"):
+        assert machine.succeed("cat /tmp/cn-reviewers") == "steward[bot]\n"
 
     with subtest("GitHub unavailable books the repo's next pass, and the unit hasn't failed"):
         machine.succeed("echo 75 >/tmp/cn-exit")
