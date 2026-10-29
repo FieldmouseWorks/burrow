@@ -15,6 +15,11 @@ they say something more specific.
   apart.
 - A new check comes with proof that it fails on the bug it's for.
 - Touching a file over about 1,000 lines? Split it in that change.
+- Rust by default. New code that's meant to last starts in Rust, unless its
+  platform picks the language. New Python says why it isn't Rust: a throwaway
+  script, or a tool still being tuned, ported once it settles. Port existing
+  Python whenever Rust buys anything, system and pipeline code first, and let
+  the port redraw where the code lives and what owns it rather than copy it.
 - The code is the memory. When something goes wrong, make the code, a type, a
   test or a check stop it happening again; a new rule in AGENTS.md is the last
   resort. Say in the PR which one you did.
