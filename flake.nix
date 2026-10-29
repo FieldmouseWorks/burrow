@@ -337,6 +337,8 @@
         '';
         # Stale Remote Control servers catch up once idle, with a stand-in for Claude.
         remote-control = import ./tests/remote-control.nix { inherit self pkgs; };
+        # A session past its server's memory cap dies alone, with a stand-in for Claude.
+        remote-control-memory = import ./tests/remote-control-memory.nix { inherit self pkgs; };
         # The signed-in browser: Claude driving it, its logins kept, its ports
         # and profile kept from everyone else.
         browser = import ./tests/browser.nix { inherit self pkgs; };
