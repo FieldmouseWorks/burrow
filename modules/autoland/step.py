@@ -258,11 +258,15 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
         such job is a strike, never counted as an answer, so the third on a
         head makes its wait overdue (the watchdog takes it), and the next
         starts on the pass the strike booked, a minute on, then two, four...
-        up to an hour."""
+        up to an hour. Each pass replaces the repo's wake-ups, so every one
+        that waits for it books that pass again."""
         if st.get(kind + "Broke", [None])[0] != st.get(kind + "At"):
             st[kind + "Broke"] = [st.get(kind + "At"), strike("lost")]
         breaking(kind)
-        return st[kind + "Broke"][1]
+        due = st[kind + "Broke"][1]
+        if due > C.NOW:
+            after(due, 0)  # ends: the retry, on its pass
+        return due
 
     def breaking(kind):
         """Jobs on this head keep breaking: STRIKE_LIMIT or more in a row,
@@ -482,6 +486,10 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
         if not retry and st.get("proved") == head:
             settle("pending", f"Settled; a Claude job is {doing}"[:140])
             return
+        # One that broke is counted, and its retry booked, whether or not
+        # there's room: only the job started in its place waits for a slot.
+        if retry and broke("proved"):
+            retry_at("proved")
         slots = rc.get("proofSlots")
         # One whose next step is failing the PR (again) needs no slot.
         last = retry and st.get("provedAgain") == head and not broke("proved")

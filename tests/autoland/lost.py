@@ -7,10 +7,11 @@ time, never failing the PR, and from the third in a row its wait is overdue
 until a job finishes its turn, so the watchdog takes it."""
 
 import itertools
+import json
 
 import proofs as P
 import waits
-from harness import CI_GREEN, JOBS, STATES, T, C, H, S, clean, fresh_pr_state, merged, mkpr, pr_state, run, stand_in
+from harness import CI_GREEN, JOBS, STATES, T, C, H, S, clean, fresh_pr_state, merged, mkpr, pr_state, run, stand_in, tmp
 
 stand_in()
 kept = C.job
@@ -43,6 +44,26 @@ def a_pass(pr, at):
 
 def overdue(n=5):
     return waits.FAILING.get(f"sam/r#{n}")
+
+
+def stall(n=5):
+    """The PR's wait, as this pass publishes it for the watchdog."""
+    waits.publish({"sam/r"}, {}, False)
+    return json.load(open(f"{tmp}/state/watch.json"))["items"][f"sam/r#{n}"]
+
+
+STUCK = []  # when the run of broken jobs' stall started, once it has
+
+
+def one_stall(i):
+    """From the third broken job in a row, the PR's wait is one stall, its
+    start kept however the status reads (a retry booked, then running), so
+    the watchdog's escalation of it carries on."""
+    it = stall()
+    if overdue() is None:
+        return
+    STUCK[:] = STUCK or [it["since"]]
+    assert it["since"] == it["due"] == STUCK[0] and it["phase"].endswith("; " + LOST), (i, it, STUCK)
 
 
 # A judge that ends without a verdict is started once more, after a second
@@ -128,20 +149,29 @@ for i, (end, said) in enumerate(BROKE):
     ends(end)
     status, _ = a_pass(proof, t + 100)  # the first look
     assert JOBS == [] and RUNNING in status and overdue() == (LOST if i >= 3 else None), (i, status, waits.FAILING)
+    one_stall(i)
     status, digest = a_pass(proof, t + 200)
     due = t + 200 + 2 ** i * 60
     assert JOBS == [] and f"the last Claude job running remi-proof {said}, so another starts at {H.clock(due + T)}" in status, \
         (i, status)
     assert "state=failure" not in status and pr_state()["strikes"] == {"lost": i + 1}, (i, status, pr_state())
     assert C.WAKE["sam/r"] == T + due + 1 and overdue() == late and digest == [], (i, C.WAKE, waits.FAILING, digest)
+    one_stall(i)
+    # A pass in between (a kick, say) books the retry's pass again: each
+    # pass replaces the repo's wake-ups.
     status, _ = a_pass(proof, due - 30)
     assert JOBS == [] and "so another starts at" in status and overdue() == late, (i, status, waits.FAILING)
+    assert C.WAKE["sam/r"] == T + due + 1, (i, C.WAKE)
+    one_stall(i)
     status, digest = a_pass(proof, due)
     assert len(JOBS) == 1 and f"running remi-proof again (the last one {said})" in status and digest == [], (i, status)
     assert overdue() == late, (i, waits.FAILING)
+    one_stall(i)
     status, _ = a_pass(proof, due + 50)
     assert JOBS == [] and RUNNING in status and overdue() == late, (i, status, waits.FAILING)
+    one_stall(i)
     t = due + 50
+assert STUCK, "the run's stall was watched"
 # Without the watchdog, it's listed on the stuck issue each pass instead.
 watch, S.CFG["watch"] = S.CFG["watch"], None
 _, digest = a_pass(proof, t + 100)
@@ -154,6 +184,7 @@ a_pass(proof, t + 200)
 status, digest = a_pass(proof, t + 300)
 assert len(JOBS) == 1 and "running remi-proof again (the last one ended without its verdict)" in status, status
 assert "lost" not in pr_state()["strikes"] and overdue() is None and digest == [], (pr_state(), waits.FAILING)
+assert stall()["since"] != STUCK[0], stall()  # the run's stall is over
 ends("done")
 a_pass(proof, t + 400)
 status, digest = a_pass(proof, t + 500)
@@ -177,7 +208,8 @@ status, _ = a_pass(proof, 1160)
 assert len(JOBS) == 1 and "again (the last one timed out after 60m)" in status, status
 
 # With proofSlots, one started in place of a broken one waits its turn like
-# any other, even after one that gave no verdict.
+# any other, even after one that gave no verdict; the broken one is counted,
+# and its retry booked, while the slot is taken.
 S.CFG["repos"]["sam/r"]["proofSlots"] = 1
 fresh_pr_state()
 P.begin("sam/r", {4, 5})
@@ -187,11 +219,14 @@ a_pass(proof, 800)
 a_pass(proof, 900)
 ends("timed out after 60m")
 a_pass(proof, 1000)
-a_pass(proof, 1100)
 P.begin("sam/r", {4, 5})
-assert RUNNING in run(clean(checks=PROOF, number=4), 1150)[0]  # another PR took the slot meanwhile
-status, _ = a_pass(proof, 1160)
+assert RUNNING in run(clean(checks=PROOF, number=4), 1050)[0]  # another PR took the slot meanwhile
+status, _ = a_pass(proof, 1100)
 assert JOBS == [] and "waiting its turn to run remi-proof (1 ahead)" in status, status
+assert pr_state()["strikes"] == {"lost": 1} and C.WAKE["sam/r"] == T + 1161, (pr_state(), C.WAKE)
+status, _ = a_pass(proof, 1160)
+assert JOBS == [] and "waiting its turn to run remi-proof (1 ahead)" in status and pr_state()["strikes"] == {"lost": 1}, \
+    (status, pr_state())
 del S.CFG["repos"]["sam/r"]
 P.OPEN.clear()
 P.WAITING.clear()
@@ -204,6 +239,8 @@ ends("went quiet for 20m")
 run(clean(**gated), 800)
 status, _ = run(clean(**gated), 900)
 assert JOBS == [] and "the last Claude job judging it went quiet for 20m, so another starts at" in status, status
+status, _ = run(clean(**gated), 930)
+assert JOBS == [] and "so another starts at" in status and C.WAKE["sam/r"] == T + 961, (status, C.WAKE)
 status, _ = run(clean(**gated), 960)
 assert len(JOBS) == 1 and "judging it again (the last one went quiet for 20m)" in status, status
 fresh_pr_state()
@@ -213,6 +250,8 @@ ends("timed out after 60m")
 run(clean(threads=[False]), 7300)
 status, _ = run(clean(threads=[False]), 7400)
 assert JOBS == [] and "the last Claude job on it timed out after 60m, so another takes it at" in status, status
+status, _ = run(clean(threads=[False]), 7430)
+assert JOBS == [] and "so another takes it at" in status and C.WAKE["sam/r"] == T + 7461, (status, C.WAKE)
 status, _ = run(clean(threads=[False]), 7460)
 assert len(JOBS) == 1 and "a Claude job has it since" in status and "state=failure" not in status, status
 assert pr_state().get("handedAgain") is None, pr_state()
