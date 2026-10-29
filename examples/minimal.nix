@@ -44,6 +44,7 @@
     };
     house.enable = true;
     browser.enable = true;
+    watchdog.enable = true;
     backup = {
       enable = true;
       repository = "rclone:offsite:backups/burrow";
