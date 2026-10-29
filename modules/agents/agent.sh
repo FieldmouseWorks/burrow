@@ -46,10 +46,14 @@ stop_vm() { systemctl stop "$(unit "$1")" "microvm-virtiofsd@$1.service" "agent-
 as_root() { [ "$(id -u)" = 0 ] || exec /run/wrappers/bin/sudo -n "$0" "$@"; }
 as_user() { [ "$(id -un)" = "$user" ] || exec runuser -u "$user" -- "$0" "$@"; }
 
+# How long sshd in a sandbox may take to send its banner, and the sandbox to
+# boot: a while, on a loaded machine. The vsock connects at once, so the
+# banner's is ConnectTimeout.
+banner=60
+boot=900
+
 # ssh_to ID [SSH OPTIONS...] -- [COMMAND]: ssh into a sandbox as the user, over
-# vsock. With $ssh_timeout set, give up after that many seconds. The vsock
-# connects at once, so ConnectTimeout is the wait for sshd's banner, which a
-# sandbox on a loaded machine can take a while to send.
+# vsock. With $ssh_timeout set, give up after that many seconds.
 ssh_to() {
   local d cid opts=()
   d=$(dir "$1")
@@ -58,19 +62,19 @@ ssh_to() {
   while [ $# -gt 0 ] && [ "$1" != -- ]; do opts+=("$1"); shift; done
   [ $# -eq 0 ] || shift
   ${ssh_timeout:+timeout "$ssh_timeout"} ssh -i "$key" "${opts[@]}" -o BatchMode=yes -o LogLevel=ERROR \
-    -o ConnectTimeout=60 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+    -o ConnectTimeout="$banner" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
     -o ProxyCommand="socat - VSOCK-CONNECT:$cid:22" "$user@agent-$cid" "$@"
 }
 
 wait_ready() {
-  local i
-  for i in $(seq 1 240); do
-    ssh_timeout=10 ssh_to "$1" -- true 2>/dev/null && return 0
+  local until=$((SECONDS + boot))
+  while [ "$SECONDS" -lt "$until" ]; do
+    ssh_timeout=$((banner + 5)) ssh_to "$1" -- true 2>/dev/null && return 0
     running "$1" || break
     sleep 0.5
   done
   # Once more, out loud, so the reason is on screen.
-  ssh_timeout=10 ssh_to "$1" -o LogLevel=DEBUG1 -- true 2>&1 | tail -n 25 >&2 || true
+  ssh_timeout=$((banner + 5)) ssh_to "$1" -o LogLevel=DEBUG1 -- true 2>&1 | tail -n 25 >&2 || true
   die "$1 did not come up; see: journalctl -u $(unit "$1")"
 }
 
