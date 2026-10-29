@@ -32,7 +32,8 @@ in
         whichever reclaims the most once the root, system or any user's slice
         spends 80% of its time stalled on memory for 30s. The kernel's own OOM
         killer waits until memory and swap are gone, and with zram it can
-        thrash first for as long as it likes. sshd and tailscaled are never
+        thrash first for as long as it likes. sshd (socket-activated or not),
+        tailscaled and the switch's own units (burrow.switch) are never
         picked.
       '';
     };
@@ -81,8 +82,12 @@ in
       enableUserSlices = true;
     };
     systemd.slices."-".sliceConfig.ManagedOOMSwap = lib.mkIf cfg.oomd "kill";
+    # The ways in. openssh always has sshd@ (each connection's sshd, with
+    # startWhenNeeded) and has sshd only without it; naming a unit it doesn't
+    # have would make a stub of it.
     systemd.services = lib.mkIf cfg.oomd (lib.genAttrs
-      (lib.optional config.services.openssh.enable "sshd"
+      (lib.optionals config.services.openssh.enable
+        ([ "sshd@" ] ++ lib.optional (!config.services.openssh.startWhenNeeded) "sshd")
         ++ lib.optional config.services.tailscale.enable "tailscaled")
       (_: { serviceConfig.ManagedOOMPreference = "omit"; }));
 
