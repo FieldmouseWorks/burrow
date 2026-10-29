@@ -731,7 +731,7 @@ assert UNHOOKED == [S.R.discover() + [{"repo": "eve/p"}]], UNHOOKED
 S.R.discover, S.R.settle_repo, S.R.publish, S.open_prs, S.R.unhook_gone, S.R.hook_projects = kept_fns
 written = json.load(open(f"{tmp}/state/repos.json"))["repos"]
 assert {r: v["covered"] for r, v in written.items()} == {"sam/r": True, "sam/bad": False, "sam/flaky": False}, written
-assert written["sam/bad"]["proofJobs"] == S.repo_cfg("sam/bad")["proofJobs"], written
+assert written["sam/bad"]["proofJobs"] == C.repo_cfg("sam/bad")["proofJobs"], written
 # A proof job that ends without posting its verdict is started once more.
 fresh_pr_state()
 run(clean(checks=CI_GREEN), 700)
