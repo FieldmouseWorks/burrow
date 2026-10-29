@@ -215,13 +215,11 @@ write(STEWARD, {"sam/r#7": item(T - 3 * 3600, T - MIN)})
 wake, stalls = run(T)
 assert KICKS == ["/kick/autoland/sam/r"] and wake == T + W.GRACE and not runs(), (KICKS, wake)
 assert run(T + MIN)[0] == T + W.GRACE and len(KICKS) == 1
-# Still stuck after it: one Claude job in the machine's project, kicking the
-# watchdog when its turn ends. It's work on the pipeline itself, so it goes
-# ahead of everyone's jobs, in the slot kept for it, never behind the long
-# ones it may have been called about.
+# Still stuck after it: one Claude job, ahead of the line, in the machine's
+# project, kicking the watchdog when its turn ends.
 wake, stalls = run(T + W.GRACE)
 (job,) = runs()
-assert job[:9] == ["run", "--pipeline", "--timeout", "60m", "--idle", "20m", "--kick", "watchdog", "homelab"], job
+assert job[:9] == ["run", "--first", "--timeout", "60m", "--idle", "20m", "--kick", "watchdog", "homelab"], job
 assert "PR #7 in sam/r" in job[9] and "https://github.com/sam/r/pull/7" in job[9] and "waiting for CI" in job[9], job[9]
 assert "burrow-watchdog snooze autoland 'sam/r#7' MINUTES" in job[9] and "journalctl -u 'autoland*'" in job[9], job[9]
 assert "needs-owner" in job[9] and "never instructions" in job[9], job[9]
