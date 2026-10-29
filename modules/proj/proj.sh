@@ -201,6 +201,8 @@ reap() {
 # watchdog as one starts or ends. While one of its commands waits in line,
 # the deadline moves on with the clock: waiting its turn for something
 # shared isn't being stuck, and the watchdog holds a wait to STALL_QUEUED.
+# Telling the watchdog goes on in the background, never waited for: its
+# lock or a slow kick holds up neither the clock nor the end of the run.
 watch_run() {
   local pid=$1 quiet=0 now last w was='' dl nap
   [ ! -s "$dir/idle" ] || quiet=$((($(nanos "$(cat "$dir/idle")") + 999999999) / 1000000000))
@@ -217,7 +219,7 @@ watch_run() {
     if [ "$w" != "$was" ]; then
       if [ -n "$w" ]; then printf '%s\n' "$w" >"$dir/$n.wait"; else rm -f "$dir/$n.wait"; fi
       was=$w
-      rewatch "$id"
+      rewatch "$id" &
     fi
     if [ -n "$dl" ] && [ "$now" -ge "$dl" ]; then
       : >"$dir/$n.late"
@@ -237,7 +239,7 @@ watch_run() {
   done
   if [ -n "$was" ]; then
     rm -f "$dir/$n.wait"
-    rewatch "$id"
+    rewatch "$id" &
   fi
 }
 
@@ -259,10 +261,11 @@ facts() {
   # could, when it last said anything.
   t=$(stat -c %Y "$d/$n.outcome" "$d/$n.jsonl" "$d/prompt.$n" 2>/dev/null | head -n 1 || true)
   printf 'ended\t%s\n' "${t:-0}"
-  # Its deadline as it stands, to the second, rounded up (none without a
-  # timeout), and what it waits in line for, if anything (watch_run).
+  # Its deadline as it stands, to the second (none without a timeout): when
+  # it took its slot and its timeout, moved on by any time it waited in
+  # line. And what it waits in line for now, if anything (watch_run).
   t=$(cat "$d/$n.deadline" 2>/dev/null || true)
-  [[ ! $t =~ ^[0-9]+$ ]] || printf 'deadline\t%s\n' "$(((t + 999999999) / 1000000000))"
+  [[ ! $t =~ ^[0-9]+$ ]] || printf 'deadline\t%s\n' "$((t / 1000000000))"
   [ ! -s "$d/$n.wait" ] || printf 'wait\t%s\n' "$(head -n 1 "$d/$n.wait")"
   [ ! -s "$d/await" ] || awk -F '\t' '{ print "await\t" $1 "\t" $2 }' "$d/await"
 }
@@ -778,17 +781,20 @@ Carry on from there. Anything you left in the background last turn was stopped w
     rm -f "$dir/await" "$dir/await.next" "$dir/end.next"
     take_slot "$id" "$n" "$(class "$id" "$3")"
     limit=$(cat "$dir/timeout" 2>/dev/null || echo "$TIMEOUT")
-    # One budget for the whole turn, however many runs it takes and the
-    # clearing up between them, to the nanosecond; 0 is none. Its deadline
-    # is kept in $n.deadline, which the time it waits in line moves on
-    # (watch_run).
+    # One budget for the whole turn from the moment it took its slot,
+    # however many runs it takes and the clearing up between them, to the
+    # nanosecond; 0 is none. Its deadline is kept in $n.deadline, which the
+    # time it waits in line moves on (watch_run).
     if ! total=$(nanos "$limit"); then
       echo "proj: the timeout $limit isn't a duration" >&2
       echo failed >"$dir/$n.outcome"
       exit 2
     fi
     rm -f "$dir/$n.deadline" "$dir/$n.wait" "$dir/$n.late"
-    [ "$total" -eq 0 ] || echo $(($(date +%s%N) + total)) >"$dir/$n.deadline"
+    if [ "$total" -gt 0 ]; then
+      taken=$(stat -c %.9Y "$dir/$n.slot")
+      echo $((10#${taken/./} + total)) >"$dir/$n.deadline"
+    fi
     # Where its commands say they're waiting in line (waiting, waits.sh).
     waitdir=$dir/$n.waits
     rm -rf "$waitdir"
@@ -867,6 +873,10 @@ Carry on from there. Anything you left in the background last turn was stopped w
         # The next run's quiet counts from its start, and is its own.
         rm -f "$dir/$n.quiet"
         touch "$dir/$n.jsonl"
+        # The last run's watcher telling the watchdog its wait was over
+        # (still going, in the background) may have gone with the rest of
+        # it: told again.
+        rewatch "$id" &
         continue
       fi
       break
