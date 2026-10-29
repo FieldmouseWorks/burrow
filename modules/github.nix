@@ -12,8 +12,10 @@
 # is about, and git's only credential helper is gh-token, which gets one for
 # the repo git names. Neither can fall back to the user's own login: git's
 # other helpers are cleared, git doesn't reach GitHub over SSH (its SSH
-# remotes go over https), and gh's own login, in a file or the keyring, is
-# out of its reach. Without that env, both are the user's, as before.
+# remotes go over https), GitHub hears none of the logins git's config could
+# send without asking the helper (a URL's, a header's: ./github/src/remote.rs),
+# and gh's own login, in a file or the keyring, is out of its reach. Without
+# that env, both are the user's, as before.
 #
 # Only github.com: the env's settings for git and gh are its.
 inputs:
@@ -27,6 +29,21 @@ let
   noSsh = pkgs.writeShellScript "gh-token-no-ssh" ''
     echo "gh-token: acting as the App, git reaches GitHub over https, never over SSH with your keys" >&2
     exit 1
+  '';
+
+  # git's own helpers (GIT_EXEC_PATH), but for http and https: gh-token's
+  # git-remote, which runs git's with only the credential helper's login. The
+  # machine's git's, so the git a process in the env runs is it.
+  git = config.programs.git.package;
+  gitCore = pkgs.runCommand "gh-token-git-core" { } ''
+    mkdir $out
+    for f in ${git}/libexec/git-core/*; do ln -s "$f" $out/; done
+    for helper in git-remote-http git-remote-https; do
+      rm $out/$helper
+      printf '#!%s\nexec %s git-remote %s "$@"\n' ${pkgs.runtimeShell} ${package}/bin/gh-token \
+        ${git}/libexec/git-core/$helper >$out/$helper
+      chmod +x $out/$helper
+    done
   '';
 
   # gh as everyone runs it: the App's token when GH_TOKEN_SOCKET asks for
@@ -107,6 +124,7 @@ in
             GIT_CONFIG_VALUE_4 = "ssh://git@github.com/";
             GIT_SSH_COMMAND = "${noSsh}";
             GIT_SSH_VARIANT = "ssh";
+            GIT_EXEC_PATH = "${gitCore}";
           };
           defaultText = lib.literalMD "GH_TOKEN_SOCKET, and git's and gh's settings for it";
           description = "The environment a process acts as the App in.";

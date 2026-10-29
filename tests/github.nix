@@ -1,8 +1,9 @@
 # An App's tokens on a machine: its users get them through the socket, and
 # nobody else does; nobody but the service reads the key or the tokens it
 # keeps; and in the App's env, git and gh get the App's token, never the
-# user's own login (its file, its keyring, its SSH keys), even when the
-# App's can't be had. GitHub is a stand-in.
+# user's own login (its file, its keyring, its SSH keys, a header or URL of
+# its in git's config), even when the App's can't be had. GitHub is a
+# stand-in.
 #
 #   nix build .#checks.x86_64-linux.github -L
 { self, pkgs }:
@@ -40,6 +41,38 @@ let
 
 
     HTTPServer(("127.0.0.1", 8080), GitHub).serve_forever()
+  '';
+  # github.com's git, over https with a certificate of its own: each
+  # request's logins (Basic's, decoded) are noted in /tmp/logins. Asked
+  # without one, it asks for one, as GitHub does.
+  cert = pkgs.runCommand "github-cert" { nativeBuildInputs = [ pkgs.openssl ]; } ''
+    mkdir $out
+    openssl req -x509 -newkey rsa:2048 -nodes -days 36500 -subj /CN=github.com \
+      -addext subjectAltName=DNS:github.com -keyout $out/key.pem -out $out/cert.pem
+  '';
+  gitServer = pkgs.writers.writePython3 "fake-github-git" { flakeIgnore = [ "E501" ]; } ''
+    import base64
+    import ssl
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+
+    class Git(BaseHTTPRequestHandler):
+        def do_GET(self):
+            logins = [base64.b64decode(a.split(" ", 1)[1]).decode() for a in self.headers.get_all("Authorization") or []]
+            with open("/tmp/logins", "a") as f:
+                f.write(" ".join([self.path] + logins) + "\n")
+            self.send_response(404 if logins else 401)
+            if not logins:
+                self.send_header("WWW-Authenticate", 'Basic realm="GitHub"')
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+
+    server = HTTPServer(("127.0.0.1", 443), Git)
+    tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    tls.load_cert_chain("${cert}/cert.pem", "${cert}/key.pem")
+    server.socket = tls.wrap_socket(server.socket, server_side=True)
+    server.serve_forever()
   '';
   # What gh would be run with: the token it was given, if any. Its help is
   # gh's, which says what the call's flags are.
@@ -89,6 +122,12 @@ pkgs.testers.runNixOSTest {
       wantedBy = [ "multi-user.target" ];
       serviceConfig.ExecStart = github;
     };
+    networking.hosts."127.0.0.1" = [ "github.com" ];
+    security.pki.certificateFiles = [ "${cert}/cert.pem" ];
+    systemd.services.fake-github-git = {
+      wantedBy = [ "multi-user.target" ];
+      serviceConfig.ExecStart = gitServer;
+    };
   };
 
   testScript = { nodes, ... }:
@@ -97,6 +136,7 @@ pkgs.testers.runNixOSTest {
         nodes.machine.burrow.github.apps.workers.env);
     in
     ''
+      import base64
       import shlex
 
       ENV = ${builtins.toJSON env}
@@ -151,6 +191,44 @@ pkgs.testers.runNixOSTest {
               assert status != 0 and "never over SSH" in out, (status, out)
               status, out = machine.execute(dev(call + " 2>&1", app=False))
               assert "never over SSH" not in out, out
+
+      with subtest("git, in the App's env, logs in to GitHub as the App only: no header or URL of dev's"):
+          machine.wait_for_open_port(443)
+          # dev's own logins, as a checkout's config can carry them: a header
+          # for its repos, and a password in a remote's URL.
+          header = "Authorization: Basic " + base64.b64encode(b"peter:header").decode()
+          machine.succeed(dev(" && ".join([
+              "git init -q own",
+              f"git -C own config http.https://github.com/sam/r.git.extraHeader '{header}'",
+              f"git -C own config http.https://github.com/eve/x.git.extraHeader '{header}'",
+              "git -C own remote add origin https://github.com/sam/r.git",
+              "git -C own remote add login https://peter:url-token@github.com/sam/q.git",
+              "git -C own remote add ssh git@github.com:sam/r.git",
+          ]), app=False))
+
+          # The logins GitHub heard while git ran CALL.
+          def logins(call, app=True):
+              machine.succeed(": > /tmp/logins")
+              machine.execute(dev(call, app=app, at="~/own"))
+              return [login for line in machine.succeed("cat /tmp/logins").splitlines() for login in line.split(" ")[1:]]
+
+          # Without the env, git sends them, the helper never asked.
+          assert logins("git ls-remote origin", app=False) == ["peter:header"]
+          assert logins("git ls-remote login", app=False) == ["peter:url-token"]
+          # With it, only the App's: from git's config, a rewritten SSH
+          # remote's, or the call's own -c.
+          for call in [
+              "git ls-remote origin",
+              "git ls-remote login",
+              "git ls-remote ssh",
+              f"git -c 'http.https://github.com/sam/r.git.extraHeader={header}' ls-remote origin",
+              f"git -c 'http.extraHeader={header}' ls-remote origin",
+          ]:
+              got = logins(call)
+              assert got and all(login.startswith("x-access-token:ghs_") for login in got), (call, got)
+          # No token to be had, or nowhere to ask: none at all.
+          assert logins("git ls-remote https://github.com/eve/x.git") == []
+          assert logins("GH_TOKEN_SOCKET=/run/gh-token/none.sock git ls-remote origin") == []
 
       with subtest("gh, in the App's env, has the App's token, and no login of dev's"):
           assert machine.succeed(dev("gh auth token", app=False)).strip() == "peter-token"

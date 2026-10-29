@@ -1,0 +1,192 @@
+//! git's http and https (git-remote-http, git-remote-https), as the App's
+//! env has git run them (`GIT_EXEC_PATH`): a github.com remote hears only
+//! what the credential helper gives git, the App's token. Two things git
+//! would send instead, without asking the helper: the user and password in
+//! the URL, and the headers `http.extraHeader` adds (an Authorization of the
+//! user's, say), from any config file or `-c`, for any URL that matches. So
+//! the URL goes without its user and password, and the headers are cleared
+//! by an empty one for exactly that URL, set last: git takes the headers of
+//! the URLs that match it most closely, and of those the last one's word.
+
+use std::os::unix::process::CommandExt;
+use std::path::Path;
+use std::process::Command;
+
+use crate::error::Error;
+
+/// Runs REAL, git's own helper, with `args` (REMOTE URL). Returns only when
+/// it couldn't.
+pub fn run(real: &str, args: &[String], socket: Option<&Path>) -> Error {
+    let given = std::env::var("GIT_CONFIG_PARAMETERS").ok();
+    match command(real, args, socket, given.as_deref()) {
+        Ok(mut helper) => Error::refused(format!("{real}: {}", helper.exec())),
+        Err(e) => e,
+    }
+}
+
+/// REAL with `args`, for a github.com URL as above: `given` is the
+/// GIT_CONFIG_PARAMETERS it would have had. Without the socket, as it is.
+fn command(
+    real: &str,
+    args: &[String],
+    socket: Option<&Path>,
+    given: Option<&str>,
+) -> Result<Command, Error> {
+    let mut helper = Command::new(real);
+    let (Some(_), [remote, url]) = (socket, args) else {
+        return match socket {
+            None => {
+                helper.args(args);
+                Ok(helper)
+            }
+            Some(_) => Err(Error::refused(
+                "git's http helper is given its remote and its URL",
+            )),
+        };
+    };
+    match github_url(url) {
+        Some(url) => {
+            helper
+                .arg(remote)
+                .arg(&url)
+                .env("GIT_CONFIG_PARAMETERS", no_headers(given, &url));
+        }
+        // Another host's login isn't the App's to keep from it.
+        None => {
+            helper.args(args);
+        }
+    }
+    Ok(helper)
+}
+
+/// A github.com URL without its user and password, read as git reads one:
+/// the host ends at the first `/`, `?` or `#`, and the user's part before it
+/// at the first `@`. None for another host's.
+fn github_url(url: &str) -> Option<String> {
+    let (scheme, rest) = url.split_once("://")?;
+    if !scheme.eq_ignore_ascii_case("https") && !scheme.eq_ignore_ascii_case("http") {
+        return None;
+    }
+    let (authority, path) = rest.split_at(rest.find(['/', '?', '#']).unwrap_or(rest.len()));
+    let host = authority.split_once('@').map_or(authority, |(_, h)| h);
+    let name = host.split_once(':').map_or(host, |(n, _)| n);
+    let name = name.to_ascii_lowercase();
+    (name == "github.com" || name.ends_with(".github.com"))
+        .then(|| format!("{scheme}://{host}{path}"))
+}
+
+/// GIT_CONFIG_PARAMETERS with an empty `http.URL.extraheader` after the rest,
+/// quoted as git quotes them (`'key'='value'`).
+fn no_headers(given: Option<&str>, url: &str) -> String {
+    let key = format!(
+        "'{}'",
+        format!("http.{url}.extraheader").replace('\'', r"'\''")
+    );
+    match given.filter(|g| !g.trim().is_empty()) {
+        Some(g) => format!("{g} {key}=''"),
+        None => format!("{key}=''"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::OsStr;
+
+    fn args(s: &[&str]) -> Vec<String> {
+        s.iter().map(|a| a.to_string()).collect()
+    }
+
+    #[test]
+    fn reads_a_github_url_without_its_login() {
+        for (url, bare) in [
+            (
+                "https://github.com/sam/r.git",
+                Some("https://github.com/sam/r.git"),
+            ),
+            (
+                "https://peter:tok@github.com/sam/r.git",
+                Some("https://github.com/sam/r.git"),
+            ),
+            (
+                "https://peter@GitHub.com:443/sam/r",
+                Some("https://GitHub.com:443/sam/r"),
+            ),
+            (
+                "HTTP://www.github.com/sam/r",
+                Some("HTTP://www.github.com/sam/r"),
+            ),
+            ("https://github.com", Some("https://github.com")),
+            // Not a login: the `@` is past the host.
+            (
+                "https://github.com/sam/r@x",
+                Some("https://github.com/sam/r@x"),
+            ),
+            (
+                "https://github.com?x@eve.com/",
+                Some("https://github.com?x@eve.com/"),
+            ),
+            // Another host's, however it looks.
+            ("https://gitlab.com/sam/r", None),
+            ("https://github.com.eve.com/sam/r", None),
+            ("https://eve.com/github.com", None),
+            ("https://peter@github.com@eve.com/sam/r", None),
+            ("ssh://git@github.com/sam/r", None),
+            ("sam/r", None),
+        ] {
+            assert_eq!(github_url(url).as_deref(), bare, "{url}");
+        }
+    }
+
+    #[test]
+    fn clears_the_headers_last() {
+        let u = "https://github.com/sam/r.git";
+        assert_eq!(
+            no_headers(None, u),
+            "'http.https://github.com/sam/r.git.extraheader'=''"
+        );
+        assert_eq!(no_headers(Some(" "), u), no_headers(None, u));
+        assert_eq!(
+            no_headers(Some("'http.extraheader'='Authorization: x'"), u),
+            "'http.extraheader'='Authorization: x' 'http.https://github.com/sam/r.git.extraheader'=''"
+        );
+        assert_eq!(
+            no_headers(None, "https://github.com/it's"),
+            r"'http.https://github.com/it'\''s.extraheader'=''"
+        );
+    }
+
+    #[test]
+    fn runs_git_s_helper_with_only_the_app_s_login() {
+        let socket = Some(Path::new("/run/gh-token/workers.sock"));
+        let run =
+            |a: &[&str], socket| command("git-remote-https", &args(a), socket, Some("'a'='b'"));
+        let parameters = |c: &Command| {
+            c.get_envs()
+                .find(|(k, _)| *k == OsStr::new("GIT_CONFIG_PARAMETERS"))
+                .and_then(|(_, v)| v.map(|v| v.to_string_lossy().into_owned()))
+        };
+        let c = run(
+            &["origin", "https://peter:tok@github.com/sam/r.git"],
+            socket,
+        )
+        .unwrap();
+        let given: Vec<_> = c.get_args().collect();
+        assert_eq!(given, ["origin", "https://github.com/sam/r.git"]);
+        assert_eq!(
+            parameters(&c).as_deref(),
+            Some("'a'='b' 'http.https://github.com/sam/r.git.extraheader'=''")
+        );
+        // Another host's, or no socket: git's, as it is.
+        for (a, socket) in [
+            (["origin", "https://peter:tok@gitlab.com/sam/r"], socket),
+            (["origin", "https://peter:tok@github.com/sam/r"], None),
+        ] {
+            let c = run(&a, socket).unwrap();
+            assert_eq!(c.get_args().collect::<Vec<_>>(), a, "{a:?}");
+            assert_eq!(parameters(&c), None, "{a:?}");
+        }
+        // git always says which URL: refused without one.
+        assert!(run(&["origin"], socket).is_err());
+    }
+}

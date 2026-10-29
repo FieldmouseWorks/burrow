@@ -7,6 +7,8 @@
 //!   gh-token git-credential get|store|erase
 //!   gh-token gh GH [ARGS...]
 //!       the askers' side (client.rs), through the socket GH_TOKEN_SOCKET
+//!   gh-token git-remote REAL REMOTE URL
+//!       git's http(s) helper REAL, with the App's login only (remote.rs)
 //!
 //! A token comes back for an account (every repo the App's installation on
 //! it reaches) or for one repo of it. It's good for at least ten minutes,
@@ -22,6 +24,7 @@ mod command;
 mod error;
 #[cfg(test)]
 mod fake;
+mod remote;
 mod target;
 
 use std::io;
@@ -34,7 +37,8 @@ use error::Error;
 const USAGE: &str = "usage: gh-token answer --app-id ID --key FILE --cache DIR [--api URL]
        gh-token get OWNER[/REPO]
        gh-token git-credential get|store|erase
-       gh-token gh GH [ARGS...]";
+       gh-token gh GH [ARGS...]
+       gh-token git-remote REAL REMOTE URL";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -70,6 +74,9 @@ fn run(args: &[String]) -> Result<(), Error> {
         )
         .map_err(io),
         Some("gh") if args.len() >= 2 => Err(client::gh(&args[1], &args[2..], socket.as_deref())),
+        Some("git-remote") if args.len() >= 2 => {
+            Err(remote::run(&args[1], &args[2..], socket.as_deref()))
+        }
         _ => Err(Error::refused(USAGE)),
     }
 }
