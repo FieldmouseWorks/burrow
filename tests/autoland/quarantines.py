@@ -197,11 +197,14 @@ mine = look(2 * DAY)
 assert mine == [(F.OTHERS, "sam/r#7", "`unit/disk`, by eve")] and C.load("flaky-sam_r.json", {})["issues"] == {}, mine
 
 # An app's issue (GraphQL's login for it lacks `[bot]`) and one of the
-# authors' go to a job, the steward's App's too; a login merely ending in an
-# author's doesn't, nor a person who holds the App's name as theirs.
-assert F.ours("github-actions[bot]") and F.ours("renovate[bot]") and F.ours("sam") and F.ours("dependabot")
+# authors' go to a job, the steward's App's and the machinery's too; a login
+# merely ending in an author's doesn't, nor an app named as an author is, nor
+# a person who holds an app's name as theirs.
+assert F.ours("github-actions[bot]") and F.ours("renovate[bot]") and F.ours("sam") and F.ours("dependabot[bot]")
 assert F.ours(C.me()) and F.ours(F.login({"login": "steward", "__typename": "Bot"}))
-assert not F.ours("eve") and not F.ours("evil-sam") and not F.ours("sam[bot]x")
+assert F.ours("workers[bot]") and F.ours(F.login({"login": "workers", "__typename": "Bot"}))
+assert not F.ours("eve") and not F.ours("evil-sam") and not F.ours("sam[bot]x") and not F.ours("sam[bot]")
+assert not F.ours("dependabot") and not F.ours(F.login({"login": "workers", "__typename": "User"}))
 assert not F.ours("steward") and not F.ours(F.login({"login": "steward", "__typename": "User"}))
 
 # A body someone else edited is left out, and the job told so; one only the
