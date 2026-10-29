@@ -12,6 +12,7 @@ checked.
 
 import glob
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -65,24 +66,16 @@ stub("nix", f"""case $1 in
     [ -z "$BUILD_FAIL" ] || case "$*" in *"$BUILD_FAIL"*) exit 1 ;; esac
     exit 0 ;;
   flake) [ "$2" = check ] && {{ echo "$*" >> "$NIX_LOG"; exit 0; }} ;;
+  # Each evaluation, logged as the plan or the entry it evaluates.
+  eval)
+    what=plan
+    for a in "$@"; do
+      case $a in *"; entry = "*) n=${{a##*entry = }}; what="entry ${{n%%;*}}" ;; esac
+    done
+    echo "eval $what" >> "$NIX_LOG" ;;
 esac
 exec {real_nix} "$@"
 """)
-# Each evaluation, logged as the plan or the entry it evaluates.
-stub("nix-instantiate", f"""args=("$@")
-what=plan
-while [ $# -gt 0 ]; do
-  case $1 in
-    --arg) [ "$2" = entry ] && what="entry $3"; shift 3 ;;
-    --argstr | --option) shift 3 ;;
-    --expr | --add-root) shift 2 ;;
-    *) shift ;;
-  esac
-done
-echo "nix-instantiate $what" >> "$NIX_LOG"
-exec {real_bin}/nix-instantiate "${{args[@]}}"
-""")
-
 system = subprocess.run([real_nix, "config", "show", "system"],
                         env={**os.environ, **nix_env}, capture_output=True, text=True, check=True).stdout.strip()
 
@@ -123,7 +116,7 @@ def run(directory, apart=True, skip="", build_fail="", env=None):
 
 
 def entries(calls):
-    return [c for c in calls if c.startswith("nix-instantiate entry ")]
+    return [c for c in calls if c.startswith("eval entry ")]
 
 
 def builds(calls):
@@ -162,8 +155,8 @@ def each_apart():
     rc, out, calls = run(every, skip="vm")
     assert rc == 0, out
     # One plan, then one evaluation per derivation.
-    assert calls[0] == "nix-instantiate plan", calls
-    assert entries(calls) == [f"nix-instantiate entry {i}" for i in range(6)], calls
+    assert calls[0] == "eval plan", calls
+    assert entries(calls) == [f"eval entry {i}" for i in range(6)], calls
     for what in (f"checks.{system}.a", f"checks.{system}.vm", f"packages.{system}.p",
                  f"devShells.{system}.default", f"formatter.{system}", "nixosConfigurations.box"):
         assert f"evaluating {what}\n" in out, (what, out)
@@ -277,6 +270,8 @@ def not_derivations():
              "", "is not in the Nix store"),
             ('checks.${system} = { ok = drv "ok"; fake = { type = "derivation"; name = "x"; drvPath = "/nix/store/00000000000000000000000000000000-x"; }; };',
              "", "is not a valid derivation path"),
+            ('checks.${system}.ok = drv "ok"; packages.${system}.fake = { type = "derivation"; name = "x"; drvPath = "/nix/store/x"; };',
+             "", "is not in the Nix store"),
             ('checks.${system}.ok = drv "ok"; packages.${system}.fake = "/nix/store/x";', "",
              f"flake attribute 'packages.{system}.fake' is not a derivation"),
             ('checks.${system}.ok = drv "ok"; devShells.${system}.fake = { };', "",
@@ -323,12 +318,16 @@ def names():
 
 @case
 def uncommitted():
-    "a checkout with changes not yet committed is evaluated as it is, purely"
+    "a checkout with changes not yet committed is evaluated as it is, purely, with the source's own metadata"
     d = flake("""{ checks.${system}.a = drv "a"; }""")
     open(os.path.join(d, "flake.nix"), "w").write(f"""{{
   outputs = {{ self }}: {{
     checks.{system}.changed = derivation {{ name = "changed"; system = "{system}"; builder = "/bin/sh"; args = [ "-c" "echo > $out" ]; }};
     checks.{system}.pure = if builtins.getEnv "GATE_ENV" == "" then throw "only pure" else null;
+    # What nix flake check gives self for a checkout with changes.
+    checks.{system}.meta = if self ? dirtyShortRev && self.lastModified > 0
+      then derivation {{ name = "meta-${{builtins.replaceStrings [ "-" ] [ "" ] self.dirtyShortRev}}"; system = "{system}"; builder = "/bin/sh"; args = [ "-c" "echo > $out" ]; }}
+      else throw "lost the source's metadata";
   }};
 }}
 """)
@@ -336,6 +335,7 @@ def uncommitted():
     assert rc != 0 and "only pure" in out, out
     [b] = builds(calls)
     assert "-changed.drv^*" in b, b
+    assert re.search(r"-meta-[0-9a-f]+dirty\.drv\^\*", b), b
 
 
 @case

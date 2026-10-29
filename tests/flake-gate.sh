@@ -1,5 +1,5 @@
 # flake-gate (tools/flake-gate): a repo's CI gate step, run as its CI runs it,
-# with a stand-in for gh. And burrow's own gate, as flake-gate runs it here and
+# with GitHub stood in for. And burrow's own gate, as flake-gate runs it here and
 # CI runs it there: the shared workflow's own script, evaluating apart.
 #
 #   bash tests/flake-gate.sh BURROW-SOURCE   (flake-gate, yq and git on PATH)
@@ -67,18 +67,26 @@ d=$(repo "$(caller ./.github/workflows/flake-check.yml)" "$(shared)")
 d=$(repo "$(caller ./.github/workflows/flake-check.yml)" "$(shared "" '          false | true')")
 if (cd "$d" && GATE_OUT=$tmp/out flake-gate); then fail "a pipeline that failed passed"; fi
 
-# The workflow another repo pins, at the commit it pins.
-mkdir "$tmp/bin"
-shared > "$tmp/remote.yml"
-cat > "$tmp/bin/gh" <<GH
-#!$(command -v bash)
-[ "\$*" = "api -H Accept: application/vnd.github.raw+json repos/o/burrow/contents/.github/workflows/flake-check.yml?ref=abc123" ] || { echo "gh \$*" >&2; exit 1; }
-cat $tmp/remote.yml
-GH
-chmod +x "$tmp/bin/gh"
-d=$(repo "$(caller o/burrow/.github/workflows/flake-check.yml@abc123 '    with: { build-skip: vm }')")
-(cd "$d" && PATH=$tmp/bin:$PATH GATE_OUT=$tmp/out flake-gate) || fail "a pinned workflow failed"
-[ "$(cat "$tmp/out")" = "false|vm|false|$d" ] || fail "ran pinned with $(cat "$tmp/out")"
+# The workflow another repo names, at the branch, tag or commit it names,
+# through git with no login (a stand-in for GitHub, in place of its URL).
+remote=$(mktemp -d "$tmp/remote.XXXXXX")
+mkdir -p "$remote/.github/workflows"
+shared > "$remote/.github/workflows/flake-check.yml"
+git -C "$remote" init -q && git -C "$remote" add . && git -C "$remote" commit -qm v1 && git -C "$remote" tag v1
+pinned=$(git -C "$remote" rev-parse HEAD)
+# main moves on, with a gate that fails, so only the named ref's passes.
+shared "" '          false' > "$remote/.github/workflows/flake-check.yml"
+git -C "$remote" commit -qam v2
+git -C "$remote" config uploadpack.allowAnySHA1InWant true
+git config --global url."file://$remote".insteadOf https://github.com/o/burrow
+for ref in "$pinned" v1; do
+  d=$(repo "$(caller "o/burrow/.github/workflows/flake-check.yml@$ref" '    with: { build-skip: vm }')")
+  (cd "$d" && GATE_OUT=$tmp/out flake-gate) || fail "a workflow named by $ref failed"
+  [ "$(cat "$tmp/out")" = "false|vm|false|$d" ] || fail "ran $ref with $(cat "$tmp/out")"
+  (cd "$d" && flake-gate --print) | grep -x 'env: SKIP=vm' > /dev/null || fail "printed $ref wrong"
+done
+d=$(repo "$(caller o/burrow/.github/workflows/flake-check.yml@main)")
+if (cd "$d" && GATE_OUT=$tmp/out flake-gate); then fail "ran another ref's gate than main's"; fi
 
 # What it can't run as GitHub would, it refuses, and runs nothing.
 refused() {

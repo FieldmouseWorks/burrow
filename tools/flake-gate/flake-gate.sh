@@ -29,10 +29,14 @@ trap 'rm -rf -- "$workflow" "$tmp"' EXIT
 case $uses in
   ./*) cp -- "${uses#./}" "$workflow" ;;
   */*/*@*)
-    # OWNER/REPO/PATH@REF, at the commit the caller pins.
+    # OWNER/REPO/PATH@REF, at the branch, tag or commit the caller names,
+    # fetched as git reads any GitHub repo: no token needed for a public one
+    # (an agent sandbox has none), and git's own login for a private one.
     repo=$(cut -d/ -f1-2 <<<"${uses%@*}")
     path=$(cut -d/ -f3- <<<"${uses%@*}")
-    gh api -H "Accept: application/vnd.github.raw+json" "repos/$repo/contents/$path?ref=${uses##*@}" > "$workflow" ;;
+    git init -q "$tmp/workflow-repo"
+    git -C "$tmp/workflow-repo" fetch -q --depth=1 "https://github.com/$repo" "${uses##*@}"
+    git -C "$tmp/workflow-repo" show "FETCH_HEAD:$path" > "$workflow" ;;
   *) echo "flake-gate: can't fetch $uses" >&2; exit 1 ;;
 esac
 

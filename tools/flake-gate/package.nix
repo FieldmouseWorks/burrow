@@ -1,5 +1,5 @@
-# flake-gate (flake-gate.sh): a repo's CI gate, run here. nix, and gh for a
-# workflow another repo pins, are the machine's own (the toolbox has gh).
+# flake-gate (flake-gate.sh): a repo's CI gate, run here, with the machine's
+# own nix.
 { writeShellApplication, git, yq-go, jq }:
 writeShellApplication {
   name = "flake-gate";
