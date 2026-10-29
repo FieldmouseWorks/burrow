@@ -1,0 +1,22 @@
+--- a/src/server.rs
++++ b/src/server.rs
+@@ -896,10 +896,16 @@
+         let me = self.clone();
+         Box::pin(async move {
+             match req.into_inner() {
+-                Request::Compile(compile) => {
+-                    debug!("handle_client: compile");
++                Request::Compile(_) => {
++                    // This daemon only stores: it runs no compiler, and so no
++                    // program a client names. A client compiles in its own
++                    // process (client-side mode), and one that asks anyway is
++                    // told to compile there.
++                    debug!("handle_client: compile, refused");
+                     me.stats.lock().await.compile_requests += 1;
+-                    me.handle_compile(compile).await
++                    Ok(Message::WithoutBody(Response::Compile(
++                        CompileResponse::UnhandledCompile,
++                    )))
+                 }
+                 Request::GetStats => {
+                     debug!("handle_client: get_stats");
