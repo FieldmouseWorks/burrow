@@ -891,6 +891,42 @@ run(clean(checks=CI_GREEN), 800)
 status, _ = run(clean(checks=CI_GREEN), 900)
 assert len(JOBS) == 1 and "just proof" in JOBS[0] and "running remi-proof again" in status, (status, JOBS)
 STATES.clear()
+# proofSlots: a repo's proofs that take the whole machine run one at a
+# time, oldest PR first, the rest waiting their turn rather than their
+# timeout; a job's end kicks the pass that starts the next.
+fresh_pr_state()
+S.CFG["repos"]["sam/r"]["proofSlots"] = 1
+S.OPEN["sam/r"] = {1, 2, 3}
+
+
+def line(n):
+    return run(clean(checks=proof, number=n), 700)[0]
+
+
+assert "a Claude job is running remi-proof" in line(1) and len(JOBS) == 1, JOBS
+assert "waiting its turn to run remi-proof (1 ahead)" in line(2) and JOBS == []
+assert "waiting its turn to run remi-proof (2 ahead)" in line(3) and JOBS == []
+# One closed meanwhile holds nothing up.
+S.OPEN["sam/r"] = {2, 3}
+assert "a Claude job is running remi-proof" in line(2) and len(JOBS) == 1, JOBS
+assert "waiting its turn to run remi-proof (1 ahead)" in line(3) and JOBS == []
+# Its job ended without the verdict: started again, but only in its turn.
+S.OPEN["sam/r"] = {2, 3}
+st = pr_state(2)
+st["provedJob"] = "job-2done"
+json.dump(st, open(f"{tmp}/state/pr-sam_r-2.json", "w"))
+STATES["job-2done"] = "done"
+assert "a Claude job is running remi-proof" in line(3) and len(JOBS) == 1, JOBS
+line(2)
+assert "waiting its turn to run remi-proof (1 ahead)" in line(2) and JOBS == [], JOBS
+st = pr_state(3)
+st["provedJob"] = "job-3done"
+json.dump(st, open(f"{tmp}/state/pr-sam_r-3.json", "w"))
+STATES["job-3done"] = "done"
+assert "running remi-proof again" in line(2) and len(JOBS) == 1, JOBS
+del S.CFG["repos"]["sam/r"]["proofSlots"]
+S.OPEN.clear()
+STATES.clear()
 # Still waiting on ordinary CI too: no job yet.
 fresh_pr_state()
 busy = proof + [{"__typename": "CheckRun", "name": "build", "status": "IN_PROGRESS", "conclusion": None}]
