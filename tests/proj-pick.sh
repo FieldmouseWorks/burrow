@@ -81,11 +81,17 @@ clone lookalike https://github.com.example.net/sam/burrow
 clone suffix https://notgithub.com/sam/burrow
 clone mirror /srv/mirrors/sam/burrow.git
 clone longer https://github.com/sam/burrow/extra
+# Where a token can sit in an origin: what's read from one is a name, or none.
+clone token https://x-access-token:SECRET@github.com/sam/psiv.git
+clone query 'https://github.com/sam/psiv?token=SECRET'
+clone inpath https://github.com/tok:SECRET@sam/psiv
+clone foreign https://sam:SECRET@gitlab.com/sam/psiv.git
 mkdir "$tmp/plain"
 for d in https slash user ssh port; do repo "$d" sam/burrow; done
 repo scp sam/box
 repo psiv sam/psiv
-for d in gitlab lookalike suffix mirror longer plain missing; do repo "$d" ""; done
+repo token sam/psiv
+for d in gitlab lookalike suffix mirror longer query inpath foreign plain missing; do repo "$d" ""; done
 # No path at all is no clone, not the one it's run in.
 got=$(cd "$tmp/https" && github_repo "")
 [ -z "$got" ] || { echo "FAIL: github_repo '' read the clone it ran in: $got" >&2; exit 1; }
@@ -100,13 +106,13 @@ done
 # one of the pipeline's projects, first for one anywhere else (asked each
 # time, so a job from before the rule is held to it), whatever the turn
 # asks; otherwise the turn's own.
-mkdir -p "$tmp/jobs/p" "$tmp/jobs/d" "$tmp/jobs/o" "$tmp/jobs/n"
-: >"$tmp/jobs/p/pipeline"
-: >"$tmp/jobs/d/pipeline"
-: >"$tmp/jobs/o/pipeline"
+for j in p d o n t f; do mkdir -p "$tmp/jobs/$j"; done
+for j in p d o t f; do : >"$tmp/jobs/$j/pipeline"; done
 echo "$tmp/https" >"$tmp/jobs/p/project"
 echo "$tmp/psiv" >"$tmp/jobs/d/project"
 echo "$tmp/https" >"$tmp/jobs/n/project"
+echo "$tmp/token" >"$tmp/jobs/t/project"
+echo "$tmp/foreign" >"$tmp/jobs/f/project"
 cls() {
   local got
   got=$(class "$tmp/jobs/$1" "$2")
@@ -121,15 +127,37 @@ cls n first first
 cls n normal normal
 cls n "" normal
 
-# And proj says so of the ones it demotes, origin and all, and of no other.
+# A waiting turn moves in line, and is admitted and recorded, as what its job
+# is now: one whose project stopped being the pipeline's while it waited goes
+# as first, and back.
+plc() {
+  local got
+  got=$(place "$1" "$tmp/jobs/$2")
+  [ "$got" = "$3$T$4" ] || { echo "FAIL: place $1 $2: wanted '$3 $4', got '${got//$T/ }'" >&2; exit 1; }
+}
+plc 2-17-p-1-x p pipeline 0-17-p-1-x
+plc 0-17-d-1-x d first 1-17-d-1-x
+plc 1-17-p-1-x p pipeline 0-17-p-1-x
+plc 0-17-p-1-x p pipeline 0-17-p-1-x
+plc 2-17-n-1-x n normal 2-17-n-1-x
+plc 1-17-n-1-x n first 1-17-n-1-x
+
+# And proj says so of the ones it demotes, by the repo the origin names and
+# never the origin itself, which can hold a token; and of no other.
 dem() {
   local got
   got=$(demoted "$tmp/jobs/$1")
   [ "$got" = "$2" ] || { echo "FAIL: demoted $1: wanted '$2', got '$got'" >&2; exit 1; }
 }
+for j in t f; do
+  got=$(demoted "$tmp/jobs/$j")
+  [[ ${got,,} != *secret* ]] || { echo "FAIL: demoted $j shows the origin's token: $got" >&2; exit 1; }
+done
 dem p ""
 dem n ""
-dem d "asked as --pipeline, but its origin (https://github.com/sam/psiv) isn't in pipelineRepos: it goes as --first"
-dem o "asked as --pipeline, but its origin (none) isn't in pipelineRepos: it goes as --first"
+dem d "asked as --pipeline, but its origin, github.com/sam/psiv, isn't in pipelineRepos: it goes as --first"
+dem t "asked as --pipeline, but its origin, github.com/sam/psiv, isn't in pipelineRepos: it goes as --first"
+dem f "asked as --pipeline, but its origin isn't a GitHub repo's: it goes as --first"
+dem o "asked as --pipeline, but its project has no origin: it goes as --first"
 
 echo "proj-pick: ok"

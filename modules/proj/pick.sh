@@ -45,14 +45,16 @@ origin() {
 
 # The GitHub repo a clone is of, as owner/name in lower case, from its origin
 # in any form git takes (https, ssh:// or scp-like, a user or a .git or not),
-# or nothing for anything else: another host, a local path, a longer path.
+# or nothing for anything else: another host, a local path, a longer path, a
+# query, or a name GitHub wouldn't give (so what it prints is never more than
+# a repo's name, whatever else the origin holds).
 github_repo() {
   local url
   url=$(origin "$1")
   url=${url,,}
   url=${url%/}
   url=${url%.git}
-  if [[ $url =~ ^(https?://([^@/]+@)?github\.com/|ssh://([^@/]+@)?github\.com(:[0-9]+)?/|([^@/]+@)?github\.com:)([^/]+/[^/]+)$ ]]; then
+  if [[ $url =~ ^(https?://([^@/]+@)?github\.com/|ssh://([^@/]+@)?github\.com(:[0-9]+)?/|([^@/]+@)?github\.com:)([a-z0-9-]+/[a-z0-9._-]+)$ ]]; then
     echo "${BASH_REMATCH[6]}"
   fi
 }
@@ -82,13 +84,30 @@ class() {
   fi
 }
 
+# A waiting turn's class now, and the name its place in line (JOBS/.queue's
+# PREFIX-WHEN-ID) should have for it: 0 pipeline, 1 first, 2 normal, with a
+# tab between. Its prefix says what the turn itself is (2 normal, anything
+# else first: run with --first, or waited past MAX_WAIT), and class what
+# that makes it now, so a job whose origin or list changed while it waits
+# moves in line and is held to its project's cap as what it is now.
+place() {
+  local c p
+  c=$(class "$2" "$([[ $1 == 2-* ]] && echo normal || echo first)")
+  case $c in pipeline) p=0 ;; first) p=1 ;; *) p=2 ;; esac
+  printf '%s\t%s\n' "$c" "$p-${1#?-}"
+}
+
 # What proj says of a job that asked to be pipeline work and isn't, so a
 # mis-set origin or list doesn't quietly demote it: nothing for any other.
+# Never the origin itself, which can hold a token: only the repo it names.
 demoted() {
-  local d o
+  local d r
   [ -e "$1/pipeline" ] || return 0
   d=$(cat "$1/project" 2>/dev/null) || d=''
   pipeline_project "$d" && return 0
-  o=$(origin "$d")
-  echo "asked as --pipeline, but its origin (${o:-none}) isn't in pipelineRepos: it goes as --first"
+  r=$(github_repo "$d")
+  if [ -n "$r" ]; then echo "asked as --pipeline, but its origin, github.com/$r, isn't in pipelineRepos: it goes as --first"
+  elif [ -n "$(origin "$d")" ]; then echo "asked as --pipeline, but its origin isn't a GitHub repo's: it goes as --first"
+  else echo "asked as --pipeline, but its project has no origin: it goes as --first"
+  fi
 }

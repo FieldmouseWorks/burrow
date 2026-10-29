@@ -217,26 +217,36 @@ spare() {
 # puts pipeline ones ahead, then --first ones, then the oldest, holding the
 # waiting shell's pid. A slot is a lock on JOBS/.slots/N, and N.who says
 # whose (class and project), so a turn that's killed frees its slot (and its
-# place in line) by itself. pick (pick.sh) says who goes next.
+# place in line) by itself. pick (pick.sh) says who goes next. The turn is
+# first or normal, as it was started; its job's class (place, in pick.sh)
+# is asked again every pass, and its place in line, its admission and its
+# slot's N.who all go by that one answer.
 take_slot() {
-  local id=$1 n=$2 class=$3 me since seen got f fid pid i fd lk busy LC_ALL=C
+  local id=$1 n=$2 class=$3 me since seen got f fid pid i fd lk busy new LC_ALL=C
   mkdir -p "$jobs/.queue" "$jobs/.slots"
   since=$(date +%s)
-  case $class in pipeline) me=0 ;; first) me=1 ;; *) me=2 ;; esac
+  case $class in first) me=1 ;; *) me=2 ;; esac
   me="$jobs/.queue/$me-$(date +%s%N)-$id"
   trap 'rm -f "$me" "${me%/*}/.${me##*/}.new"' EXIT
   trap 'exit 143' TERM INT
   while :; do
+    # Waited long enough: among the --first ones now, by when it came.
+    if [[ ${me##*/} == 2-* ]] && [ $(($(date +%s) - since)) -ge "$MAX_WAIT" ]; then
+      mv -f "$me" "${me%/*}/1-${me##*/2-}" 2>/dev/null || true
+      me="${me%/*}/1-${me##*/2-}"
+    fi
+    # Where it stands now, and in the journal if that changed while it waits.
+    IFS=$'\t' read -r class new < <(place "${me##*/}" "$jobs/$id")
+    if [ "$new" != "${me##*/}" ]; then
+      if mv -f "$me" "${me%/*}/$new" 2>/dev/null; then echo "proj: it goes as $class now" >&2; fi
+      me="${me%/*}/$new"
+    fi
     # Published whole (a dot file, which the line skips, then renamed), so a
     # waiter clearing out dead places never sees it without its pid. Put
     # back if it went anyway.
     if [ ! -e "$me" ]; then
       echo "$$" >"${me%/*}/.${me##*/}.new"
       mv -f "${me%/*}/.${me##*/}.new" "$me"
-    fi
-    # Waited long enough: among the --first ones now, by when it came.
-    if [[ ${me##*/} == 2-* ]] && [ $(($(date +%s) - since)) -ge "$MAX_WAIT" ]; then
-      mv -f "$me" "${me%/*}/1-${me##*/2-}" && me="${me%/*}/1-${me##*/2-}"
     fi
     # One waiter looks at a time, and a slot is taken only under this lock,
     # so one it sees free stays free until it's done.
@@ -257,8 +267,11 @@ take_slot() {
       [ -e "$f" ] || continue
       fid=${f##*/}; fid=${fid#*-}; fid=${fid#*-}
       pid=$(cat "$f" 2>/dev/null) || continue
-      if [ -n "$pid" ] && tr '\0' ' ' 2>/dev/null <"/proc/$pid/cmdline" | grep -qF -- " _exec $fid "; then
-        seen+="wait"$'\t'"$f"$'\t'"$(class "$jobs/$fid" "$([[ ${f##*/} == 2-* ]] && echo normal || echo first)")"
+      if [ "$f" = "$me" ]; then
+        seen+="wait"$'\t'"$f"$'\t'"$class"
+        seen+=$'\t'"$(cat "$jobs/$id/project" 2>/dev/null)"$'\n'
+      elif [ -n "$pid" ] && tr '\0' ' ' 2>/dev/null <"/proc/$pid/cmdline" | grep -qF -- " _exec $fid "; then
+        seen+="wait"$'\t'"$f"$'\t'"$(place "${f##*/}" "$jobs/$fid" | cut -f1)"
         seen+=$'\t'"$(cat "$jobs/$fid/project" 2>/dev/null)"$'\n'
       else
         rm -f "$f"
@@ -592,7 +605,7 @@ Carry on from there. Anything you left in the background last turn was stopped w
     # In the turn's journal too, where its wait would be looked into.
     why=$(demoted "$dir")
     [ -z "$why" ] || echo "proj: $why" >&2
-    take_slot "$id" "$n" "$(class "$jobs/$id" "$3")"
+    take_slot "$id" "$n" "$3"
     limit=$(cat "$dir/timeout" 2>/dev/null || echo "$TIMEOUT")
     # One budget for the whole turn, however many runs it takes and the
     # clearing up between them, to the nanosecond; 0 is none.

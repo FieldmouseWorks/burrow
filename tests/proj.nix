@@ -402,7 +402,7 @@ pkgs.testers.runNixOSTest {
 
     with subtest("a pipeline job anywhere else goes as --first, and says so in proj status and its turn's journal"):
         q = proj('run --pipeline ib "sleep 1"')
-        demoted = "asked as --pipeline, but its origin (none) isn't in pipelineRepos: it goes as --first"
+        demoted = "asked as --pipeline, but its project has no origin: it goes as --first"
         assert f"[{demoted}]" in proj("status"), proj("status")
         machine.wait_until_succeeds(f"su - dev -c 'proj state {q}' | grep -x done", timeout=120)
         machine.wait_until_succeeds(f"journalctl -q '_SYSTEMD_USER_UNIT={unit(q)}' | grep -qF \"proj: {demoted}\"", timeout=30)
