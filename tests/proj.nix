@@ -13,14 +13,21 @@
 # job's waits, that a turn kicks what it was started to once it takes its slot
 # (not while it waits in line) and again at its end, with proj-watch for the
 # repos it awaits, that a job's own --timeout stops its turns, and
-# its --idle one that has gone quiet (and either still kicks), that _watch and proj-inbox given a repo look at
+# its --idle one that has gone quiet (and either still kicks), that a reply
+# while the last turn's unit is still ending waits for it before its turn is
+# written, that _watch and proj-inbox given a repo look at
 # that repo alone and book when it next needs a look, that proj-inbox posts
 # every finished turn's answer (one
 # resumed before it looked too, none misread while a turn starts) and ends
 # the waits of one whose issue closed (proj stop's, which a watch already
 # asking GitHub keeps to), a stop that fails there not holding up the rest,
 # that a job dir removed or a wait it can't read stops neither proj-inbox nor
-# _watch, and that a job past its memory cap is killed by its own cgroup's
+# _watch, that every turn says what comes next (proj await, ask or done), one
+# that doesn't hearing so once and, still silent, being the stall watchdog's
+# at once (as one that ended in a failure is, a turn in line or running to its
+# deadline, and an await to its own, the watchdog kicked as they change),
+# while a question, a finished job, a stopped one and an --owned job's end
+# aren't, and that a job past its memory cap is killed by its own cgroup's
 # limit rather than the machine running out.
 #
 #   nix build .#checks.x86_64-linux.proj -L
@@ -36,8 +43,15 @@ let
   # /tmp/cut-mode says: "linger" answers and stays up, "hang" says nothing,
   # "crash" and "signal" die without a word, "error" fails;
   # "chatter N" says something every second for N seconds, then answers.
+  # As a job, it says what comes next before it answers (proj done; "ask"
+  # asks, "await" awaits), but "silent" doesn't, and with /tmp/silent nothing
+  # does, even told to; what it's told is kept in /tmp/told.
   claude = pkgs.writeShellScriptBin "claude" ''
     prompt=$(cat)
+    echo "$*" >/tmp/args
+    if [ -n "''${PROJ_JOB:-}" ] && [ ! -e /tmp/silent ]; then
+      case $prompt in silent*) ;; *) proj done >/dev/null ;; esac
+    fi
     case $prompt in
       sleep*) sleep "''${prompt#sleep }" ;;
       chatter*) for _ in $(seq "''${prompt#chatter }"); do echo '{"type":"system"}'; sleep 1; done ;;
@@ -53,6 +67,7 @@ let
         exit 0 ;;
       "Your answer ended the turn while"*)
         echo "$*" >/tmp/cut-args
+        printf '%s' "$prompt" >/tmp/told
         { pgrep -cf '^proj-stray' || true; } >/tmp/strays
         echo '{"type":"system","subtype":"told"}'
         case $(cat /tmp/cut-mode 2>/dev/null) in
@@ -68,6 +83,11 @@ let
           *) echo '{"type":"result","session_id":"s","result":"the build passed","is_error":false}' ;;
         esac
         exit 0 ;;
+      "Your answer didn't say what comes next"*)
+        printf '%s' "$prompt" >/tmp/told
+        echo '{"type":"result","session_id":"s","result":"told","is_error":false}'
+        exit 0 ;;
+      ask) proj ask >/dev/null ;;
       await*) proj await "''${prompt#await }" >/dev/null ;;
       # Awaits, then takes a while to answer: what changes meanwhile is news.
       slowawait*) proj await "''${prompt#slowawait }" >/dev/null; sleep 10 ;;
@@ -115,9 +135,12 @@ pkgs.testers.runNixOSTest {
   name = "proj";
 
   nodes.machine = {
-    imports = [ self.nixosModules.proj ];
+    imports = [ self.nixosModules.proj self.nixosModules.watchdog ];
     burrow = {
       claude.package = claude;
+      # On, so proj keeps its waits and kicks it; it never runs here (no
+      # burrow-events), the test reads what proj writes.
+      watchdog.enable = true;
       proj = {
         enable = true;
         # Two slots for anyone, one more for pipeline jobs alone, and no cap
@@ -128,7 +151,11 @@ pkgs.testers.runNixOSTest {
         # The VM is small: only the slot count holds jobs back here.
         minFreeMemory = 0;
         jobMemoryMax = "128M";
-        maxWait = 20;
+        # Well past what the --first subtest takes from queueing its plain
+        # job to freeing a slot for it (two runs, a pause and a stop, each
+        # telling the watchdog; over 20s on a loaded host), so that job
+        # never goes ahead for having waited.
+        maxWait = 45;
         inherit gh;
         inbox = {
           enable = true;
@@ -195,7 +222,22 @@ pkgs.testers.runNixOSTest {
     machine.wait_for_open_port(8788)
 
     def kicks():
-        return machine.succeed("cat /tmp/kicks").split()
+        # The watchdog's are looked at apart: proj kicks it at every change.
+        return [k for k in machine.succeed("cat /tmp/kicks").split() if k != "/kick/watchdog"]
+
+    def waits(until=None, timeout=30):
+        # What proj last told the watchdog; with `until`, once that holds of
+        # it (a turn's end is told after its state reads as ended).
+        deadline = time.monotonic() + timeout
+        while True:
+            w = json.loads(machine.succeed("cat /data/dev/jobs/.waits.json 2>/dev/null || echo '{\"items\": {}}'"))["items"]
+            if until is None or until(w):
+                return w
+            assert time.monotonic() < deadline, w
+            time.sleep(0.5)
+
+    def end(job, n=1):
+        return machine.succeed(f"cat /data/dev/jobs/{job}/{n}.end").strip()
 
     with subtest("the cap is on claude.slice"):
         out = machine.succeed("systemctl --user -M dev@ show claude.slice -p MemoryHigh -p MemoryMax")
@@ -338,6 +380,124 @@ pkgs.testers.runNixOSTest {
         assert proj(f"log {a}") == "waiting on CI\n\n(turn 1 then ended: timed out after 15s)", proj(f"log {a}")
         machine.fail("pgrep -f '^proj-stray'")
 
+    with subtest("a turn that doesn't say what comes next hears so once, and still silent is the watchdog's at once"):
+        machine.succeed("touch /tmp/silent && truncate -s 0 /tmp/kicks && rm -f /tmp/told")
+        a = proj("run --link https://github.com/o/r/issues/11 web silent")
+        machine.wait_until_succeeds(f"su - dev -c 'proj state {a}' | grep -x done", timeout=120)
+        told = machine.succeed("cat /tmp/told")
+        assert told.startswith("Your answer didn't say what comes next"), told
+        assert all(x in told for x in ("proj await URL", "proj ask", "proj done")), told
+        assert "proj done" in machine.succeed("cat /tmp/args")
+        assert machine.succeed(f"cat /data/dev/jobs/{a}/turns").strip() == "1" and end(a) == "undeclared"
+        assert proj(f"log {a}") == ("did silent\n\ntold\n\n(turn 1 ended without saying what comes next, "
+                                    "even when asked again: nothing resumes the job but a reply)"), proj(f"log {a}")
+        assert "[no next step]" in proj("status"), proj("status")
+        ended = int(machine.succeed(f"stat -c %Y /data/dev/jobs/{a}/1.outcome"))
+        w = waits(lambda w: "ended" in w.get(a, {}).get("phase", ""))[a]
+        assert w["since"] == w["due"] == ended and w["kick"] is None, w
+        assert w["link"] == "https://github.com/o/r/issues/11" and "without saying what comes next" in w["phase"], w
+        assert "/kick/watchdog" in machine.succeed("cat /tmp/kicks").split()
+        # A reply is its next turn, which says it's done: no longer watched.
+        machine.succeed("rm /tmp/silent")
+        proj(f'reply {a} "sleep 1"')
+        machine.wait_until_succeeds(f"su - dev -c 'proj state {a}' | grep -x done", timeout=120)
+        waits(lambda w: a not in w)
+        assert end(a, 2) == "done"
+        # Told, it says, in the same turn and slot: nothing to watch.
+        b = proj("run web silent")
+        machine.wait_until_succeeds(f"su - dev -c 'proj state {b}' | grep -x done", timeout=120)
+        assert proj(f"log {b}") == "did silent\n\ntold", proj(f"log {b}")
+        waits(lambda w: b not in w)
+        assert end(b) == "done"
+
+    with subtest("a turn that answers waiting on its own background work, and says nothing more, is a stall"):
+        # PSIV's inbox lanes #211 and #212: each answered that it was waiting
+        # on a run it had left in the background, and nothing ever woke it.
+        machine.succeed("touch /tmp/silent && rm -f /tmp/told")
+        a = proj('run web "linger 600"')
+        machine.wait_until_succeeds(f"su - dev -c 'proj state {a}' | grep -x done", timeout=120)
+        told = machine.succeed("cat /tmp/told")
+        assert told.startswith("Your answer ended the turn while") and "didn't say what comes next" in told, told
+        assert told.count("A command that can outlast one Bash call") == 1, told
+        assert end(a) == "undeclared"
+        waits(lambda w: "without saying what comes next" in w.get(a, {}).get("phase", ""))
+        # Ended by hand, it's no one's wait.
+        proj(f"stop {a}")
+        assert a not in waits(), waits()
+        machine.succeed("rm /tmp/silent")
+
+    with subtest("a question, a finished job and an --owned job's end aren't watched; a failure is"):
+        a = proj("run web ask")
+        machine.wait_until_succeeds(f"su - dev -c 'proj state {a}' | grep -x done", timeout=120)
+        assert end(a) == "ask" and "[asks]" in proj("status"), proj("status")
+        waits(lambda w: a not in w)
+        # Said from inside a job only, and as nothing more than that.
+        machine.fail("su - dev -c 'proj done'")
+        machine.fail(f"su - dev -c 'PROJ_JOB={a} proj ask \"why\"'")
+        # --owned: what it kicks acts on its end, so it needn't say, isn't
+        # told to, and its end is nobody else's.
+        machine.fail("su - dev -c 'proj run --owned web hello'")
+        machine.succeed("touch /tmp/silent")
+        o = proj("run --owned --kick autoland/o/w web silent")
+        machine.wait_until_succeeds(f"su - dev -c 'proj state {o}' | grep -x done", timeout=120)
+        assert proj(f"log {o}") == "did silent", proj(f"log {o}")
+        assert "proj done" not in machine.succeed("cat /tmp/args")
+        machine.fail(f"test -e /data/dev/jobs/{o}/1.end")
+        o2 = proj("run --owned --kick autoland/o/w web fail")
+        machine.wait_until_succeeds(f"su - dev -c 'proj state {o2}' | grep -x error", timeout=120)
+        waits(lambda w: o not in w and o2 not in w)
+        machine.succeed("rm /tmp/silent")
+        # Anyone else's failure is a stall at once: nothing resumes it.
+        f = proj("run web fail")
+        machine.wait_until_succeeds(f"su - dev -c 'proj state {f}' | grep -x error", timeout=120)
+        waits(lambda w: w.get(f, {}).get("phase") == "turn 1 ended (error), and nothing resumes it")
+        proj(f"stop {f}")
+        assert f not in waits(), waits()
+
+    with subtest("the watchdog hears of a turn in line and one running, each to its deadline"):
+        machine.succeed("truncate -s 0 /tmp/kicks")
+        a = proj('run web "sleep 600"')
+        b = proj('run web "sleep 600"')
+        for j in (a, b):
+            machine.wait_until_succeeds(f"su - dev -c 'proj state {j}' | grep -x running", timeout=120)
+        c = proj('run web "sleep 1"')
+        w = waits(lambda w: all(w.get(j, {}).get("phase") == "turn 1 is running" for j in (a, b)))
+        assert w[a]["since"] == int(started(a)) and w[a]["due"] == w[a]["since"] + 4 * 3600 + 600, w[a]
+        queued = int(machine.succeed(f"stat -c %Y /data/dev/jobs/{c}/prompt.1"))
+        assert w[c]["phase"] == "turn 1 is waiting in line for a slot" and w[c]["due"] == queued + 7200, w[c]
+        assert "/kick/watchdog" in machine.succeed("cat /tmp/kicks").split()
+        # A turn's end changes what it waits on, and kicks it too.
+        machine.succeed("truncate -s 0 /tmp/kicks")
+        proj(f"stop {a}")
+        assert a not in waits() and "/kick/watchdog" in machine.succeed("cat /tmp/kicks").split()
+        machine.wait_until_succeeds(f"su - dev -c 'proj state {c}' | grep -x done", timeout=120)
+        proj(f"stop {b}")
+        waits(lambda w: a not in w and b not in w and c not in w)
+
+    with subtest("a reply while the last turn's unit is still ending waits for it, and its turn isn't written before"):
+        # The turn's end (_ended) held up on the watchdog's lock, as another
+        # job's look at that moment would.
+        a = proj('run web "sleep 5"')
+        waits(lambda w: w.get(a, {}).get("phase") == "turn 1 is running")
+        machine.succeed("touch /tmp/hold")
+        machine.succeed("""(su - dev -c "flock /data/dev/jobs/.waits.lock sh -c 'touch /tmp/held; while [ -e /tmp/hold ]; do sleep 0.2; done'" >/dev/null 2>&1 &)""")
+        machine.wait_until_succeeds("test -e /tmp/held")
+        machine.wait_until_succeeds(f"su - dev -c 'proj state {a}' | grep -x done", timeout=120)
+        assert machine.succeed(f"systemctl --user -M dev@ show -P LoadState '{unit(a)}'").strip() == "loaded"
+        machine.succeed(f"rm -f /tmp/reply.rc; ((su - dev -c 'proj reply {a} hello' >/tmp/reply.out 2>&1; echo $? >/tmp/reply.rc) >/dev/null 2>&1 &)")
+        time.sleep(3)
+        # Still waiting, and turn 2 not written: the ending turn's _ended
+        # would read it as the latest, and as failed.
+        machine.fail("test -e /tmp/reply.rc")
+        assert machine.succeed(f"cat /data/dev/jobs/{a}/turns").strip() == "1"
+        machine.fail(f"test -e /data/dev/jobs/{a}/prompt.2")
+        machine.succeed("rm /tmp/hold /tmp/held")
+        machine.wait_until_succeeds("test -e /tmp/reply.rc", timeout=60)
+        assert machine.succeed("cat /tmp/reply.rc").strip() == "0", machine.succeed("cat /tmp/reply.out")
+        machine.wait_until_succeeds(f"su - dev -c 'proj state {a}' | grep -x done", timeout=120)
+        assert machine.succeed(f"cat /data/dev/jobs/{a}/turns").strip() == "2"
+        waits(lambda w: a not in w)
+
     with subtest("a timeout reads as timeout(1) reads it: fractions, and 0 for none"):
         a = proj("run web hello")
         machine.wait_until_succeeds(f"su - dev -c 'proj state {a}' | grep -x done", timeout=120)
@@ -359,7 +519,7 @@ pkgs.testers.runNixOSTest {
         for j in (a, b):
             machine.wait_until_succeeds(f"su - dev -c 'proj state {j}' | grep -x running", timeout=120)
         c = proj('run web "sleep 1"')
-        time.sleep(25)
+        time.sleep(50)
         d = proj('run --first web "sleep 1"')
         time.sleep(5)
         proj(f"stop {a}")
@@ -412,6 +572,11 @@ pkgs.testers.runNixOSTest {
         e = proj('run --kick autoland/o/r web "await https://github.com/o/r/pull/5"')
         machine.wait_until_succeeds(f"su - dev -c 'proj state {e}' | grep -x done", timeout=120)
         assert "[awaits o/r#5]" in proj("status"), proj("status")
+        # The watchdog's to know past proj-watch's own deadline, which kicks
+        # it first.
+        since = int(machine.succeed(f"cut -f2 /data/dev/jobs/{e}/await").strip())
+        w = waits()[e]
+        assert w["kick"] == "proj-watch/o/r" and w["since"] == since and w["due"] == since + 24 * 3600 + 600, w
         # Its turn kicked what it was started to as it started and as it
         # ended, and proj-watch for o/r at its end.
         machine.wait_until_succeeds("grep -x /kick/proj-watch/o/r /tmp/kicks", timeout=30)

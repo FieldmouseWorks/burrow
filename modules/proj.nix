@@ -5,7 +5,8 @@
 # become jobs too (proj/inbox.sh). A job waiting on a PR doesn't hold a slot:
 # proj-watch resumes it when the PR changes. Both are burrow.events handlers:
 # a repo's webhook deliveries, the end of a turn and their own wake-ups start
-# them, never a timer.
+# them, never a timer. With the stall watchdog on, proj is one of its
+# sources: each job's wait, as of its last change (proj/waits.sh).
 inputs:
 { config, lib, pkgs, ... }:
 let
@@ -15,6 +16,9 @@ let
   inherit (config.burrow) user projectsDir stateDir;
   watchWake = "${stateDir}/proj-watch/wake.json";
   inboxWake = "${stateDir}/proj-inbox/wake.json";
+  # What each job waits on, for the stall watchdog, when it's on.
+  watchdog = config.burrow.watchdog.enable or false;
+  waits = "${cfg.jobsDir}/.waits.json";
 
   proj = pkgs.writeShellApplication {
     name = "proj";
@@ -35,7 +39,10 @@ let
       MARK=${lib.escapeShellArg inboxMark}
       KICK=${lib.escapeShellArg config.burrow.events.kick}
       WAKE=${lib.escapeShellArg watchWake}
-    '' + builtins.readFile ./proj/pick.sh + builtins.readFile ./proj/proj.sh;
+      WAITS=${lib.escapeShellArg (lib.optionalString watchdog waits)}
+      STALL_QUEUED=${toString (cfg.stallAfterMinutes * 60)}
+      GRACE=600
+    '' + builtins.readFile ./proj/pick.sh + builtins.readFile ./proj/waits.sh + builtins.readFile ./proj/proj.sh;
   };
 
   inbox = pkgs.writeShellApplication {
@@ -61,6 +68,7 @@ in
   imports = [
     (import ./common.nix inputs)
     { key = "burrow/events"; imports = [ (import ./events.nix inputs) ]; }
+    { key = "burrow/watchdog/sources"; imports = [ ./watchdog/sources.nix ]; }
   ];
 
   options.burrow.proj = {
@@ -131,6 +139,16 @@ in
       description = ''
         Seconds a queued turn waits before it counts as --first, so --first
         ones can't keep jumping ahead of it.
+      '';
+    };
+    stallAfterMinutes = lib.mkOption {
+      type = lib.types.ints.positive;
+      default = 120;
+      description = ''
+        How long a turn may wait in line for a slot before the stall
+        watchdog, when it's on, takes it. A turn running past its timeout,
+        one awaiting GitHub past awaitHours, or one that ended without
+        saying what comes next, it takes then.
       '';
     };
     awaitHours = lib.mkOption {
@@ -215,6 +233,15 @@ in
       "d ${stateDir}/proj-watch 0755 ${user} ${config.users.users.${user}.group} -"
     ];
 
+    # What every job waits on, for the stall watchdog: proj rewrites it, and
+    # kicks the watchdog, each time a job's wait changes, so an old file is
+    # no news.
+    burrow.watchdog.sources.proj = {
+      file = waits;
+      about = "proj, the machine's Claude jobs";
+      look = "`proj status` lists the jobs, and `proj log ID` (with --raw, its whole stream) shows what one did and where it stopped; `proj reply ID \"...\"` gives it its next turn, and `proj stop ID` ends one that's finished or no longer wanted.";
+    };
+
     burrow.claude.machineMd = lib.mkOrder 700 ''
       ## Projects, from the operator
 
@@ -235,8 +262,11 @@ in
       ${toString cfg.maxJobs} run at once, ${toString cfg.maxJobsPerProject} from any one project; the rest are queued. Use --first when ${config.burrow.owner} is
       waiting on the answer, and --pipeline for work on the steward, its reviewers, CI or proj. Check on them,
       relay results to ${config.burrow.owner}, and follow up yourself where the answer is obvious.
-      A job waiting on GitHub (CI, a review) ends its turn with `proj await
-      PR-URL` and is resumed when the PR changes, holding no slot meanwhile.
+      Each turn ends saying what comes next: `proj await PR-URL` when it waits
+      on GitHub (CI, a review; it's resumed when the PR changes, holding no slot
+      meanwhile), `proj ask` when its answer is a question for you to settle or
+      relay (`proj status` marks it [asks]; `proj reply` answers), `proj done`
+      when it's finished. One that won't say is marked [no next step]${lib.optionalString watchdog ", and the stall watchdog takes it"}.
       A job can't ask ${config.burrow.owner} anything: R2 commands get refused, so bring those to
       them. ${config.burrow.owner} can also open any project's own session directly from their phone.
     '';
