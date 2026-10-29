@@ -25,6 +25,10 @@ let
             data = json.dumps(body).encode()
             self.send_response(status)
             self.send_header("Content-Length", str(len(data)))
+            # It closes each connection, as HTTP/1.0 does, and says so: ureq
+            # keeps an HTTP/1.0 answer's connection without it, and its next
+            # POST, sent down the closed one, can be lost.
+            self.send_header("Connection", "close")
             self.end_headers()
             self.wfile.write(data)
 
