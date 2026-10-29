@@ -10,7 +10,7 @@ from harness import REAL_GH, C, V, tmp
 
 
 def gh(*a, **k):
-    return "sam" if a[:2] == ("api", "user") else ""
+    return ""
 
 
 DIFF = """diff --git a/src/app.py b/src/app.py
@@ -125,12 +125,15 @@ except RuntimeError:
     assert WROTE == [], WROTE
 C.write = write
 
-# Its verdict comes back from the review, and only from one the steward posted.
-mine = {"author": {"login": "sam"}, "body": posted["body"], "commit": {"oid": head},
+# Its verdict comes back from the review, and only from one the steward's
+# App posted: not a user's, even one whose login is the App's name, which
+# GraphQL gives the App's bot too, without "[bot]".
+mine = {"author": {"login": "steward", "__typename": "Bot"}, "body": posted["body"], "commit": {"oid": head},
         "submittedAt": "2026-10-24T00:00:00Z", "state": "COMMENTED"}
-forged = dict(mine, author={"login": "mallory"}, submittedAt="2026-10-24T01:00:00Z",
+forged = dict(mine, author={"login": "mallory", "__typename": "User"}, submittedAt="2026-10-24T01:00:00Z",
               body=posted["body"].replace('"findings": 2', '"findings": 0'))
-pr["reviews"]["nodes"] = [mine, forged]
+namesake = dict(forged, author={"login": "steward", "__typename": "User"})
+pr["reviews"]["nodes"] = [mine, forged, namesake]
 assert V.verdict(pr, head, "rival")[0::2] == ("findings", 1)
 assert V.verdict(pr, "b" * 40, "rival")[0] == "none" and V.verdict(pr, head, "codex")[0] == "none"
 # Retargeted, the same head is another change: what was said on main doesn't count.
@@ -182,32 +185,47 @@ with open(f"{fake}/gh", "w") as f:
     f.write("#!/bin/sh\necho \"'needs-owner' not found\" >&2\nexit 1\n")
 os.chmod(f"{fake}/gh", 0o755)
 path, os.environ["PATH"] = os.environ["PATH"], fake + os.pathsep + os.environ["PATH"]
-out = io.StringIO()
-with contextlib.redirect_stdout(out):
-    assert REAL_GH("pr", "edit", "5", "--add-label", "needs-owner", check=False) is None
-assert "gh pr edit 5: 'needs-owner' not found" in out.getvalue(), out.getvalue()
-# GitHub not answering is told apart from GitHub saying no, and a review
-# whose diff it couldn't read then says which (steward.py keeps the answer).
-for said, unavailable in (("gh: API rate limit exceeded for user ID 1. (HTTP 403)", True),
-                          ("gh: Server Error (HTTP 502)", True),
-                          ('Post "https://api.github.com/graphql": unexpected EOF', True),
-                          ("dial tcp: connect: network is unreachable", True),
-                          ("gh: Validation Failed (HTTP 422)", False)):
-    with open(f"{fake}/gh", "w") as f:
-        f.write(f"#!/bin/sh\necho '{said}' >&2\nexit 1\n")
-    try:
-        REAL_GH("api", "repos/sam/r/compare/main...x")
-        raise AssertionError(f"no error on {said!r}")
-    except RuntimeError as e:
-        assert isinstance(e, C.Unavailable) == unavailable and said in str(e), (said, e)
-C.gh = REAL_GH
-with open(f"{fake}/gh", "w") as f:
-    f.write("#!/bin/sh\necho 'gh: API rate limit exceeded for user ID 1. (HTTP 403)' >&2\nexit 1\n")
+# Outside acting_for, a call to GitHub doesn't go at all: it would go as the
+# machine user's own login. Inside, gh gets the App's token for that owner.
 try:
-    V.post("sam/r", pr, "rival", answer)
-    raise AssertionError("posted with GitHub unavailable")
-except C.Unavailable as e:
-    assert "rate limit" in str(e), e
+    REAL_GH("api", "repos/sam/r")
+    raise AssertionError("a call outside acting_for went out")
+except RuntimeError as e:
+    assert "outside acting_for" in str(e), e
+with open(f"{fake}/gh", "w") as f:
+    f.write(f"#!/bin/sh\necho \"$GH_TOKEN\" >{tmp}/gh-token\n")
+with C.acting_for("sam/r"):
+    REAL_GH("api", "repos/sam/r")
+assert open(f"{tmp}/gh-token").read() == "ghs_app_sam\n"
+with open(f"{fake}/gh", "w") as f:
+    f.write("#!/bin/sh\necho \"'needs-owner' not found\" >&2\nexit 1\n")
+with C.acting_for("sam/r"):
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        assert REAL_GH("pr", "edit", "5", "--add-label", "needs-owner", check=False) is None
+    assert "gh pr edit 5: 'needs-owner' not found" in out.getvalue(), out.getvalue()
+    # GitHub not answering is told apart from GitHub saying no, and a review
+    # whose diff it couldn't read then says which (steward.py keeps the answer).
+    for said, unavailable in (("gh: API rate limit exceeded for user ID 1. (HTTP 403)", True),
+                              ("gh: Server Error (HTTP 502)", True),
+                              ('Post "https://api.github.com/graphql": unexpected EOF', True),
+                              ("dial tcp: connect: network is unreachable", True),
+                              ("gh: Validation Failed (HTTP 422)", False)):
+        with open(f"{fake}/gh", "w") as f:
+            f.write(f"#!/bin/sh\necho '{said}' >&2\nexit 1\n")
+        try:
+            REAL_GH("api", "repos/sam/r/compare/main...x")
+            raise AssertionError(f"no error on {said!r}")
+        except RuntimeError as e:
+            assert isinstance(e, C.Unavailable) == unavailable and said in str(e), (said, e)
+    C.gh = REAL_GH
+    with open(f"{fake}/gh", "w") as f:
+        f.write("#!/bin/sh\necho 'gh: API rate limit exceeded for user ID 1. (HTTP 403)' >&2\nexit 1\n")
+    try:
+        V.post("sam/r", pr, "rival", answer)
+        raise AssertionError("posted with GitHub unavailable")
+    except C.Unavailable as e:
+        assert "rate limit" in str(e), e
 os.environ["PATH"] = path
 
 print("post: ok")

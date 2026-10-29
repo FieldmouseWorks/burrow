@@ -1,0 +1,143 @@
+# watchdog: work that has stopped moving gets a look before anyone has to
+# notice it (watchdog/watchdog.py). Each source (the steward's open PRs, say)
+# keeps a watch file of what it waits on and by when that should have moved
+# on. Past that, the watchdog kicks the item's pass, then hands it to a
+# Claude job, then to the steward's stuck issue, and only then to the owner.
+# It's a burrow-events handler: a source kicks it when its items change, its
+# job's end kicks it, and it books its own next pass at the next deadline.
+# No timer, and no GitHub calls of its own.
+inputs:
+{ config, lib, pkgs, ... }:
+let
+  cfg = config.burrow.watchdog;
+  inherit (lib) mkOption types;
+  inherit (config.burrow) user;
+  inherit (cfg) dir;
+  autoland = config.burrow.autoland.enable or false;
+
+  configFile = pkgs.writeText "burrow-watchdog.json" (builtins.toJSON {
+    stateDir = dir;
+    sources = lib.mapAttrs (_: s: {
+      inherit (s) file about look kick;
+      stale = if s.staleMinutes == null then null else s.staleMinutes * 60;
+    }) cfg.sources;
+    proj = "${config.burrow.tools.proj}/bin/proj";
+    inherit (cfg) project;
+    jobTimeout = cfg.jobTimeoutMinutes;
+    jobIdle = cfg.jobIdleMinutes;
+    inherit (config.burrow.events) kick;
+    escalateAfter = cfg.escalateAfterMinutes * 60;
+    ownerAfter = cfg.ownerAfterMinutes * 60;
+    # The stuck issue is the steward's to publish (autoland/repos.py), on the
+    # pass this kicks.
+    stewardKick = if autoland then "autoland" else null;
+    labels = if autoland then { inherit (config.burrow.autoland.labels) owner hold; } else null;
+    notify = lib.optionalString (config.burrow.tools ? notify) (lib.getExe config.burrow.tools.notify);
+    inherit (config.burrow) owner;
+    host = config.networking.hostName;
+  });
+  src = pkgs.runCommand "burrow-watchdog" { nativeBuildInputs = [ pkgs.python3Packages.flake8 ]; } ''
+    mkdir $out
+    cp ${./watchdog/watchdog.py} $out/watchdog.py
+    flake8 --ignore E501,W503 $out
+  '';
+  # The command, with this machine's config, so its jobs can snooze and
+  # anyone can ask for its status from any shell.
+  watchdog = pkgs.writeShellScriptBin "burrow-watchdog" ''
+    export WATCHDOG_CONFIG=''${WATCHDOG_CONFIG:-${configFile}}
+    exec ${pkgs.python3}/bin/python3 -E -s ${src}/watchdog.py "$@"
+  '';
+in
+{
+  imports = [
+    (import ./common.nix inputs)
+    { key = "burrow/proj"; imports = [ (import ./proj.nix inputs) ]; }
+    { key = "burrow/events"; imports = [ (import ./events.nix inputs) ]; }
+    { key = "burrow/watchdog/sources"; imports = [ ./watchdog/sources.nix ]; }
+  ];
+
+  options.burrow.watchdog = {
+    enable = lib.mkEnableOption ''
+      the stall watchdog: what its sources wait on past its deadline is
+      kicked, then handed to a Claude job, then to the steward's stuck issue,
+      then to the owner
+    '';
+
+    project = mkOption {
+      type = types.str;
+      default = baseNameOf config.burrow.flake;
+      defaultText = lib.literalExpression "baseNameOf config.burrow.flake";
+      description = ''
+        The project (a folder in burrow.projectsDir) its Claude jobs run in:
+        the machine's own flake by default, where the journals, the
+        services and the operator's notes are.
+      '';
+    };
+
+    escalateAfterMinutes = mkOption {
+      type = types.ints.positive;
+      default = 120;
+      description = ''
+        How long its Claude job has with a stall before it goes to the
+        steward's stuck issue (sooner once the job has ended with it still
+        stuck, or if the job hasn't started in 15 minutes).
+      '';
+    };
+
+    ownerAfterMinutes = mkOption {
+      type = types.ints.positive;
+      default = 240;
+      description = ''
+        How long a stall stays on the stuck issue, still stuck, before the
+        owner hears of it (notify).
+      '';
+    };
+
+    jobTimeoutMinutes = mkOption {
+      type = types.ints.positive;
+      default = 60;
+      description = "How long its Claude job's turn may run (proj run --timeout).";
+    };
+
+    jobIdleMinutes = mkOption {
+      type = types.ints.positive;
+      default = 20;
+      description = "How long its Claude job's turn may say nothing before it's stopped as stuck (proj run --idle).";
+    };
+  };
+
+  config = lib.mkIf cfg.enable {
+    burrow.proj.enable = true;
+    environment.systemPackages = [ watchdog ];
+
+    burrow.events.handlers.watchdog = {
+      # Nothing on GitHub: its sources' kicks, its job's end and its own
+      # wake-ups start its passes, which read only this machine.
+      events = [ ];
+      repos = [ ];
+      perRepo = false;
+      unit = "burrow-watchdog";
+      wake = "${dir}/wake.json";
+    };
+    systemd.services.burrow-watchdog = {
+      description = "burrow-watchdog: take what has stopped moving a step further";
+      path = [ config.burrow.tools.proj ];
+      serviceConfig = {
+        Type = "oneshot";
+        # proj's jobs are the user's, and so are its sources' files.
+        User = user;
+        ExecStart = "${watchdog}/bin/burrow-watchdog";
+        TimeoutStartSec = "5min";
+      };
+    };
+    systemd.tmpfiles.settings.burrow.${dir}.d = { mode = "0755"; inherit user; group = config.users.users.${user}.group; };
+
+    burrow.claude.machineMd = lib.mkOrder 1060 ''
+      ## Stalls
+
+      `burrow-watchdog` watches what the pipeline waits on (${lib.concatStringsSep ", " (lib.attrNames cfg.sources)}) and, past
+      each wait's deadline, kicks it, then hands it to a Claude job, then to the stuck issue, then
+      to ${config.burrow.owner}. `burrow-watchdog status` shows what it watches and what's stalled.
+    '';
+  };
+}

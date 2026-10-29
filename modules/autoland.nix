@@ -6,7 +6,7 @@
 #         -> Claude fixes or answers every finding
 #         -> it finds nothing on the exact head, CI green
 #         -> (one-way paths, no CI: a Claude job judges it)
-#         -> `review-settled` status -> auto-merge -> branch deleted
+#         -> `review-settled` status -> merged at that head -> branch deleted
 #
 # A draft is work in progress: nothing happens to it until it's ready. The
 # owner only sees what needs them, in one issue: what a judge job couldn't
@@ -72,6 +72,11 @@ let
   renovateAuthor = config.burrow.updates.renovate.gitAuthor or null;
   renovateMatch = if renovateAuthor == null then null else builtins.match ".*<([^>]*)>.*" renovateAuthor;
 
+  # renovate-sweep runs here: its verdicts on majors count, and its pass is
+  # what a stalled wait on it kicks.
+  sweeping = (config.burrow.updates.enable or false) && (config.burrow.updates.renovate.enable or false);
+  watchdog = config.burrow.watchdog.enable or false;
+
   # The title Renovate gives each repo's dashboard (its
   # dependencyDashboardTitle default): the issue dashboard.py reads, and the
   # one whose events start a pass.
@@ -80,12 +85,13 @@ let
   settings = {
     renovateEmail = if renovateMatch == null then null else lib.head renovateMatch;
     inherit (cfg) owners exclude context rulesets keepBranches baselineJobs baselinePerPass;
+    app = { inherit (cfg.app) id slug; };
     # The bots' logins as GitHub's GraphQL API gives them (no "[bot]").
     authors = cfg.authors ++ [ "dependabot" "renovate" ];
     stateDir = "${stateDir}/autoland";
     # The key renovate-sweep seals its verdicts on majors with (seal.py),
     # when it runs here; without it, none counts.
-    majorKey = if (config.burrow.updates.enable or false) && (config.burrow.updates.renovate.enable or false) then "${stateDir}/renovate-sweep/verdict.key" else null;
+    majorKey = if sweeping then "${stateDir}/renovate-sweep/verdict.key" else null;
     projectsDir = config.burrow.projectsDir;
     proj = "${config.burrow.tools.proj}/bin/proj";
     jobTimeout = cfg.jobTimeoutMinutes;
@@ -100,7 +106,8 @@ let
     # What the pipeline is stuck on goes to proj's inbox, as an issue in
     # notify.repo with its label, for a Claude job to take (repos.py publish),
     # when the inbox will: notify.repo cloned in projectsDir, and the
-    # steward's gh login one of inbox.authors. Otherwise it's the owner's.
+    # steward's App one of inbox.authors (it is: see below). Otherwise it's
+    # the owner's.
     inbox = { inherit (config.burrow.proj.inbox) enable label authors; };
     # Renovate's dashboards (dashboard.py), and where a job that ticks a box
     # on one kicks Renovate to read it.
@@ -109,11 +116,20 @@ let
       title = dashboardTitle;
       renovateKick = if config.burrow.updates.renovate.enable or false then "${config.burrow.events.kick}/renovate" else null;
     };
+    # What every open PR waits on, for the stall watchdog (autoland/waits.py),
+    # and what it took past a Claude job, for the stuck issue.
+    watch = if watchdog then {
+      kick = "${config.burrow.events.kick}/watchdog";
+      escalated = "${config.burrow.watchdog.dir}/escalated.json";
+      renovateSweep = sweeping;
+    } else null;
     defaults = {
       inherit (cfg) rounds oneWay;
       handoffAfter = cfg.handoffAfterMinutes;
       sessionHandoffAfter = cfg.sessionHandoffAfterMinutes;
       settleDelay = cfg.settleDelayMinutes;
+      stallAfter = cfg.stallAfterMinutes;
+      holdStallAfter = cfg.holdStallAfterMinutes;
       directPush = false;
       ruleset = true;
       requireCi = true;
@@ -188,6 +204,7 @@ in
     { key = "burrow/notify"; imports = [ (import ./notify.nix inputs) ]; }
     { key = "burrow/proj"; imports = [ (import ./proj.nix inputs) ]; }
     { key = "burrow/events"; imports = [ (import ./events.nix inputs) ]; }
+    { key = "burrow/watchdog/sources"; imports = [ ./watchdog/sources.nix ]; }
   ];
 
   options.burrow.autoland = {
@@ -197,6 +214,40 @@ in
       type = types.listOf types.str;
       example = [ "sam" "sams-org" ];
       description = "GitHub users and orgs whose repos it covers (every non-archived, non-fork repo, new ones included).";
+    };
+
+    app = {
+      id = mkOption {
+        type = types.ints.positive;
+        example = 123456;
+        description = ''
+          The ID of the GitHub App the steward acts as, installed on every
+          one of `owners` for all their repos. It needs read and write on
+          administration, contents, issues, pull requests, commit statuses,
+          webhooks and workflows, and read on checks and actions
+          (docs/repo-baseline.md). Everything the steward does on GitHub,
+          it does as the App, never as the machine user's own login, which
+          its Claude jobs and every Claude session share: so only the App
+          can post its `context` status or its reviewers' reviews.
+        '';
+      };
+      slug = mkOption {
+        type = types.strMatching "[a-z0-9][a-z0-9-]*";
+        example = "sams-steward";
+        description = "The App's slug: it posts as SLUG[bot].";
+      };
+      keyFile = mkOption {
+        type = types.str;
+        example = "/run/secrets/autoland-app-key";
+        description = ''
+          The App's private key (PEM), in a file only root can read, outside
+          the store: a sops secret, say. Each pass is given it as a systemd
+          credential, and mints the App's tokens from it, in memory only. No
+          sandbox, and no Claude elsewhere holding the owner's GitHub token,
+          can act as the App; a Claude on this machine running as
+          burrow.user, with its sudo, still can.
+        '';
+      };
     };
 
     authors = mkOption {
@@ -285,6 +336,25 @@ in
       type = types.ints.positive;
       default = 1;
       description = "How long a new head sits still before the reviewers are asked, so a burst of pushes gets one review.";
+    };
+
+    stallAfterMinutes = mkOption {
+      type = types.ints.positive;
+      default = 120;
+      description = ''
+        How long a PR may wait on one thing (its status's description: a
+        review, CI, a Claude job, a merge) before the stall watchdog, when
+        it's on, takes it: kicks its pass, then hands it to a Claude job.
+      '';
+    };
+
+    holdStallAfterMinutes = mkOption {
+      type = types.ints.positive;
+      default = 480;
+      description = ''
+        The same for a PR on hold: a Claude job then finds out what it waits
+        on, and moves one that waits on the owner's word to the owner label.
+      '';
     };
 
     jobTimeoutMinutes = mkOption {
@@ -393,7 +463,12 @@ in
       hold = mkOption {
         type = types.str;
         default = "hold";
-        description = "A PR with this label is paused: its status goes back to pending and nothing merges it.";
+        description = ''
+          A PR with this label is paused: its status goes back to pending and
+          nothing merges it. For a wait on something else (another PR, a
+          deploy); one that waits for you takes the owner label, which lists
+          it for you.
+        '';
       };
       owner = mkOption {
         type = types.str;
@@ -460,7 +535,8 @@ in
       '';
       description = ''
         Per-repo overrides (OWNER/NAME): any of rounds, oneWay,
-        handoffAfter, sessionHandoffAfter, settleDelay (minutes), directPush,
+        handoffAfter, sessionHandoffAfter, settleDelay, stallAfter,
+        holdStallAfter (minutes), directPush,
         ruleset (false: no baseline ruleset), requireCi (false: a PR with no
         checks at all counts as green, for a repo with nothing to test; by
         default a Claude job judges a settled PR in a repo with no CI,
@@ -468,7 +544,9 @@ in
         machine rather than in CI, `{ "<check>" = "<how to run it and record
         its verdict>"; }`: once a settled PR waits on nothing else, one
         Claude job a head runs them on that commit and records each verdict,
-        a failure as a failure), keepBranches
+        a failure as a failure), proofSlots (how many of those jobs the repo
+        may have queued or running at once, for proofs that take the whole
+        machine: the rest wait their turn, oldest PR first; unset, no limit), keepBranches
         (more branch globs the cleanup never touches in this repo, on top of
         the machine's, for branches a repo keeps as evidence), codex (false:
         Codex leaves this repo alone, and none of it goes to it), skipPaths (more path regexes the reviewers never read in
@@ -491,6 +569,9 @@ in
 
     burrow.proj.enable = true;
     burrow.notify.enable = true;
+    # What the pipeline is stuck on goes to the inbox as an issue the App
+    # opens (repos.py publish).
+    burrow.proj.inbox.authors = [ "${cfg.app.slug}[bot]" ];
 
     environment.systemPackages = [ steward ] ++ lib.optional rv.codex.enable codexLogin;
 
@@ -532,7 +613,8 @@ in
       restartIfChanged = false;
       after = [ "network-online.target" ];
       wants = [ "network-online.target" ];
-      path = [ pkgs.gh pkgs.git pkgs.gnutar pkgs.coreutils config.burrow.tools.proj ];
+      # openssl signs the App's JWT (common.py).
+      path = [ pkgs.gh pkgs.git pkgs.gnutar pkgs.coreutils pkgs.openssl config.burrow.tools.proj ];
       serviceConfig = {
         Type = "oneshot";
         User = user;
@@ -540,8 +622,8 @@ in
           + (if cfg.dryRun then " status" else lib.optionalString (name == "autoland@") " kick %I");
         TimeoutStartSec = "20min";
         Nice = 10;
-        # For the repos' hooks (repos.py).
-        LoadCredential = "webhook:${config.burrow.events.secretFile}";
+        # The repos' hooks' secret (repos.py), and the App's key.
+        LoadCredential = [ "webhook:${config.burrow.events.secretFile}" "app-key:${cfg.app.keyFile}" ];
       };
     }) // {
       # The reviews the passes queue, as soon as there are any, as the
@@ -600,6 +682,15 @@ in
       "${reviewDir}/git" = dir "0700" account.group;
     };
 
+    burrow.watchdog.sources.autoland = {
+      file = "${settings.stateDir}/watch.json";
+      about = "The PR steward (autoland)";
+      look = "Its status on the PR says what it waits on; `autoland-steward status`, `journalctl -u autoland` and its state in ${settings.stateDir} say why.";
+      kick = "autoland";
+      # It writes on every pass, and has a full one at least hourly.
+      staleMinutes = 120;
+    };
+
     burrow.claude.machineMd = lib.mkOrder 1050 ''
       ## Pull requests
 
@@ -607,8 +698,8 @@ in
       steward (`autoland`, on every change to a PR). Open PRs ready for review, never as drafts (a
       draft is left alone until it's ready), then leave them be:
 
-      - Codex reviews every head; the steward posts its reviews under
-        ${config.burrow.owner}'s login, each thread marked as Codex's. Fix or answer
+      - Codex reviews every head; the steward posts its reviews as its GitHub App,
+        ${cfg.app.slug}[bot], each thread marked as Codex's. Fix or answer
         every finding (reply on the thread, push the fix) and resolve the thread; Codex
         looks again once they're all resolved.
       - Once it finds nothing on the exact head, every thread is resolved and CI is
@@ -625,7 +716,9 @@ in
         you can't decide waits for them, labelled `${cfg.labels.owner}` and listed in one issue
         (so are outside contributions). A PR past ${toString cfg.rounds} review rounds isn't theirs:
         its last findings are fixed or answered, and a judge decides.
-        `${cfg.labels.hold}` keeps the steward off a PR.
+        `${cfg.labels.hold}` keeps the steward off a PR while it waits on something else (another
+        PR, a deploy); one waiting on ${config.burrow.owner}'s OK gets `${cfg.labels.owner}` instead, which
+        lists it for them.${lib.optionalString watchdog " A hold still on after ${toString cfg.holdStallAfterMinutes} minutes gets a Claude job's look."}
       - `autoland-steward status` shows where every open PR stands, changing nothing.
       - Every repo, new ones too, is kept at the baseline in burrow's
         docs/repo-baseline.md.

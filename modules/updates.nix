@@ -146,9 +146,18 @@ let
     (with pkgs; [ coreutils findutils git gh jq gnused ]) ++ calls
   );
 
+  # The ZFS pools the machine needs imported, as NixOS's zfs module decides
+  # it: the ones its file systems mount from (a pool only noauto mounts use
+  # can be away), and the ones it imports besides, by name or GUID. ZFS support
+  # alone, with none, has none to check.
+  zfsPools = lib.unique (map (fs: lib.head (lib.splitString "/" fs.device))
+    (lib.filter (fs: fs.fsType == "zfs" && !lib.elem "noauto" fs.options) config.system.build.fileSystems)
+    ++ config.boot.zfs.extraPools);
+
   # What the health checks may call, beyond the system's own PATH.
   checkPath = lib.makeBinPath ((with pkgs; [ coreutils systemd curl jq getent util-linux gnugrep ])
-    ++ lib.optional config.services.tailscale.enable config.services.tailscale.package);
+    ++ lib.optional config.services.tailscale.enable config.services.tailscale.package
+    ++ lib.optional (zfsPools != [ ]) config.boot.zfs.package);
 
   # Renovate's settings for every repo (a repo's own renovate.json can add to
   # them). Checked by renovate-config-validator at build time.
@@ -220,7 +229,10 @@ let
 
     packageRules = [
       {
-        matchUpdateTypes = [ "minor" "patch" "pin" "digest" "lockFileMaintenance" ];
+        # pinDigest is a commit pin put on what had none (an action's `@v4`,
+        # a workflow's `@main`): its PR is green and unmerged for good
+        # otherwise, since the steward leaves Renovate's PRs to Renovate.
+        matchUpdateTypes = [ "minor" "patch" "pin" "pinDigest" "digest" "lockFileMaintenance" ];
         automerge = true;
       }
       {
@@ -388,8 +400,10 @@ in
       description = ''
         Shell commands that exit 0 while the machine is healthy, by name.
         HOST-update compares them before and after every switch: one that passed
-        before and fails after reverts the switch. burrow adds its own (sshd,
-        the nix daemon, the operator, DNS, GitHub, Claude Code...).
+        before and fails after reverts the switch, and burrow.heartbeat tells
+        the owner about one that keeps failing. burrow adds its own (sshd, the
+        nix daemon, the operator, burrow-events, the ZFS pools, DNS, GitHub,
+        Claude Code...).
       '';
     };
 
@@ -476,7 +490,11 @@ in
     };
   };
 
-  config = lib.mkIf cfg.enable (lib.mkMerge [
+  config = lib.mkMerge [
+  # Always built, so heartbeat runs the same checks whether or not updates is on.
+  { burrow.tools.health = healthTool; }
+
+  (lib.mkIf cfg.enable (lib.mkMerge [
     {
       assertions = [
         {
@@ -502,6 +520,27 @@ in
         operator = "systemctl --user -M ${user}@ -q is-active claude-rc@${project}.service";
       } // lib.optionalAttrs config.services.tailscale.enable {
         tailscale = "tailscale status --json | jq -e '.BackendState == \"Running\"'";
+      } // lib.optionalAttrs config.burrow.events.enable {
+        # What starts every handler's pass: down, nothing on GitHub moves anything here.
+        events = "systemctl -q is-active burrow-events.service";
+      } // lib.optionalAttrs (zfsPools != [ ]) {
+        # A degraded mirror keeps running on one disk, quietly, until the other
+        # goes. A pool that isn't there fails too, and so does zpool failing,
+        # whatever it printed first. A GUID (pool names start with a letter) is
+        # whichever imported pool has it, whatever its name.
+        zfs = ''
+          healthy() {
+            local out
+            [ -n "$1" ] && out=$(zpool status -x "$1") && grep -qxF "pool '$1' is healthy" <<<"$out"
+          }
+          named() {
+            local pools guid name
+            pools=$(zpool list -H -o guid,name) || return 1
+            while read -r guid name; do if [ "$guid" = "$1" ]; then echo "$name"; fi; done <<<"$pools"
+          }
+        '' + lib.concatMapStrings (p: if builtins.match "[0-9]+" p != null
+          then "name=$(named ${p}) && healthy \"$name\" || exit 1\n"
+          else "healthy ${lib.escapeShellArg p} || exit 1\n") zfsPools;
       } // lib.optionalAttrs (config.burrow.claude.enable or false) {
         # As the user, the way the operator runs it (runuser is root's only).
         claude = ''
@@ -750,5 +789,6 @@ in
         };
       };
     })
-  ]);
+  ]))
+  ];
 }

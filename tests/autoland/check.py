@@ -1,5 +1,5 @@
 """The steward, with gh, Claude jobs, GitHub's git remote and the review
-agent stood in for: the reviewers (the snapshot they read, the service that
+agent stood in for: the App it acts as, the reviewers (the snapshot they read, the service that
 runs them, what gets posted), handle() end to end, on dependency updates too,
 and the reviewers' answers through it, what a pass keeps up in each repo,
 what a PR touches, what starts its passes, and the digest's issues.
@@ -17,5 +17,5 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import harness  # noqa: E402,F401 (the steward, set up from argv)
 
-for part in ("review", "post", "handle", "deps", "answers", "upkeep", "gates", "passes", "digest", "dashboards"):
+for part in ("app", "review", "post", "handle", "slots", "deps", "answers", "upkeep", "gates", "passes", "digest", "dashboards", "watched"):
     importlib.import_module(part)
