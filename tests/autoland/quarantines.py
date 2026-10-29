@@ -173,6 +173,22 @@ for at in (5 * 3600, 6 * 3600):
     assert mine == [(F.UNFINISHED, "sam/r#11", f"`browser/a`: job {jid} timed out after 240m"),
                     (F.UNFINISHED, "sam/r#12", f"`browser/b`: job {jid} timed out after 240m")], mine
     assert not JOBS and C.WAKE == {}, (JOBS, C.WAKE)
+# Resumed (proj await, proj reply), it's its latest turn that counts: one
+# that ends done clears it and starts its day then, and a later turn that
+# fails lists it again at once.
+STATES[jid] = "running"
+assert look(7 * 3600) == [] and not JOBS
+STATES[jid] = "done"
+assert look(8 * 3600) == [] and C.WAKE == {"sam/r": T + 8 * 3600 + DAY}, C.WAKE
+STATES[jid] = "running"
+look(9 * 3600)
+STATES[jid] = "failed"
+assert look(10 * 3600) == [(F.UNFINISHED, "sam/r#11", f"`browser/a`: job {jid} failed"),
+                           (F.UNFINISHED, "sam/r#12", f"`browser/b`: job {jid} failed")]
+STATES[jid] = "running"
+look(10 * 3600 + 1800)
+STATES[jid] = "done"
+assert look(11 * 3600) == [] and C.WAKE == {"sam/r": T + 11 * 3600 + DAY}, C.WAKE
 
 # Fixed: its issue closed, so it's gone from the state, and nothing's listed.
 STATES.clear()

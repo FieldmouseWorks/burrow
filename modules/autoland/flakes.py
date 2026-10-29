@@ -131,18 +131,24 @@ def act(repo, st, mine):
         if "handed" not in it:
             todo.append((n, it))
         elif working(it["job"]):
+            if state(it["job"]) is not None:
+                # Resumed (proj await, proj reply): its day starts again
+                # when this turn ends.
+                it.pop("ended", None)
             if not busy:  # an older job proj can't say of: look again
                 C.wake(repo, C.NOW + 15 * MIN)
         else:
             # Its day starts when its job ends (proj's end kicks a pass), not
             # when it was queued: a fix can take that long to land.
             it.setdefault("ended", C.NOW)
-            it.setdefault("outcome", state(it["job"]))
-            if it["outcome"] != "done":
+            # How its latest turn ended, read each pass: a resumed job's
+            # next ending is the one that counts.
+            outcome = state(it["job"])
+            if outcome != "done":
                 # Stopped (its timeout, gone quiet), killed or crashed: it
                 # never got to say what it found, so waiting a day for its
                 # fix to land would be a day lost.
-                mine.append((UNFINISHED, f"{repo}#{n}", f"`{it['test']}`: job {it['job']} {it['outcome']}"))
+                mine.append((UNFINISHED, f"{repo}#{n}", f"`{it['test']}`: job {it['job']} {outcome}"))
             elif C.NOW >= it["ended"] + DAY:
                 mine.append((STUCK, f"{repo}#{n}", f"`{it['test']}`"))
             else:
