@@ -38,6 +38,10 @@ Subjects are `area: plain sentence`, where the area is the module, directory or
 tool the change is about: `autoland: merge only the head that was checked`.
 Lowercase after the colon, no trailing period, no `feat:`/`fix:` prefixes. The
 body, when there is one, says why.
+
+Keep the git identity your machine gives you. Where commits are signed, the key
+belongs to that identity: a signed commit under someone else's name and email
+shows as Unverified on GitHub, and CI fails it.
 <!-- house:rules end -->
 
 ## Build and test
