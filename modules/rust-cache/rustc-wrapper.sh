@@ -11,11 +11,13 @@ if [ "${CARGO_INCREMENTAL:-}" = 1 ] || [ "${CARGO_BUILD_INCREMENTAL:-}" = 1 ]; t
 fi
 
 # The user's own daemon, or none. ROOT/USER is root's, so the socket's link in
-# it is the module's, and it points into run/, which only the user can write:
-# nobody else can stand in for the daemon. A user whose run/ isn't theirs (no
-# cache, or USER naming someone else) builds without.
+# it is the module's, and it points into the daemon's runtime directory, which
+# exists only while the daemon runs and only the user can reach: nobody else
+# can stand in for the daemon. A user whose cache isn't theirs (no cache, or
+# USER naming someone else) builds without, as does anyone while the daemon is
+# down.
 base=$ROOT/${USER:-$(id -un)}
-if [ ! -O "$base/run" ] || [ ! -S "$base/sccache.sock" ]; then
+if [ ! -O "$base/cache" ] || [ ! -S "$base/sccache.sock" ]; then
   exec "$@"
 fi
 

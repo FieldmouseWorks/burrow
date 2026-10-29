@@ -8,6 +8,8 @@
 #   all along takes what another unit just stored (a daemon of its own would
 #   still miss it), and the compile runs in the runner's unit, not the
 #   daemon's;
+# - the daemon runs nothing, even for a build that skips the wrapper and asks
+#   it to compile: it sees no compiler, and can't run one from the cache;
 # - a cached `cargo check` never stands in for clippy, and a compile error
 #   still fails the build;
 # - whatever keeps the cache from working compiles without it: incremental
@@ -137,12 +139,15 @@ pkgs.testers.runNixOSTest {
             f" bash -c {shlex.quote(cmd)} 2>&1"
         )
 
-    def hits(user):
+    def stats(user):
         out = machine.succeed(
             f"runuser -u {user} -- env SCCACHE_SERVER_UDS=/var/cache/sccache/{user}/sccache.sock"
             f" {sccache} --show-stats --stats-format json"
         )
-        return json.loads(out)["stats"]["cache_hits"]["counts"].get("Rust", 0)
+        return json.loads(out)["stats"]
+
+    def hits(user):
+        return stats(user)["cache_hits"]["counts"].get("Rust", 0)
 
     def ok(result, what):
         status, out = result
@@ -157,9 +162,10 @@ pkgs.testers.runNixOSTest {
         for user in ["dev", "ci"]:
             d = f"/var/cache/sccache/{user}"
             assert machine.succeed(f"stat -c '%U %a' {d}").split() == ["root", "711"]
-            for sub in ["run", "cache"]:
-                assert machine.succeed(f"stat -c '%U %a' {d}/{sub}").split() == [user, "700"]
-            assert machine.succeed(f"readlink {d}/sccache.sock").strip() == "run/sccache.sock"
+            run_dir = f"/run/rust-cache-{user}"
+            for sub in [f"{d}/cache", run_dir]:
+                assert machine.succeed(f"stat -c '%U %a' {sub}").split() == [user, "700"]
+            assert machine.succeed(f"readlink {d}/sccache.sock").strip() == f"{run_dir}/sccache.sock"
             machine.wait_until_succeeds(f"test -S {d}/sccache.sock")
         machine.fail("systemctl cat rust-cache-other.service")
         machine.fail("ss -Hltnp | grep sccache")
@@ -195,6 +201,30 @@ pkgs.testers.runNixOSTest {
         assert "runner.service" in cgroups and "rust-cache" not in cgroups, cgroups
         assert machine.succeed("pgrep -c -u ci sccache").strip() == "1"
 
+    with subtest("the daemon runs nothing, whatever a build asks of it"):
+        # A build that skips the wrapper, so sccache asks the daemon to
+        # compile (and first to tell what the compiler is). The daemon can't
+        # find the compiler, and sccache's daemon then never answers, so the
+        # build waits out its timeout: the build's own trouble, in its own
+        # unit.
+        machine.succeed("rm /var/lib/ci/x/spy.log")
+        before = stats("ci")["compile_requests"]
+        job(
+            f"cd x && rm -rf target && RUSTC=${spy} RUSTC_WRAPPER={sccache}"
+            " SCCACHE_SERVER_UDS=/var/cache/sccache/ci/sccache.sock CARGO_INCREMENTAL=0 timeout 120 cargo build -q"
+        )
+        assert stats("ci")["compile_requests"] > before, "the build never asked the daemon to compile"
+        cgroups = machine.execute("cat /var/lib/ci/x/spy.log")[1]
+        assert "rust-cache" not in cgroups, f"the daemon ran a build's compiler: {cgroups}"
+        # It sees no compiler at all, and nothing it can write can be run.
+        pid = machine.succeed("systemctl show -P MainPID rust-cache-ci.service").strip()
+        for path in ["/run/current-system", "/var/lib/ci", "/bin/sh", "${pkgs.rustc}"]:
+            machine.fail(f"test -e /proc/{pid}/root{path}")
+        mounts = [line.split() for line in machine.succeed(f"cat /proc/{pid}/mountinfo").splitlines()]
+        for path in ["/var/cache/sccache/ci/cache", "/run/rust-cache-ci"]:
+            options = [m[5] for m in mounts if m[4] == path]
+            assert options and "noexec" in options[-1].split(","), f"the daemon can run {path}: {options}"
+
     with subtest("a cached check never stands in for clippy, and a compile error still fails"):
         place("${ok}", "/home/dev/lint", "dev")
         ok(run("cd lint && CARGO_INCREMENTAL=0 cargo check -q"), "cargo check")
@@ -219,16 +249,18 @@ pkgs.testers.runNixOSTest {
         assert hits("dev") > before, "the user's SCCACHE_LOG kept the build out of the cache"
 
         machine.succeed("systemctl stop rust-cache-dev.service")
-        machine.fail("test -e /var/cache/sccache/dev/run/sccache.sock")
+        machine.fail("test -e /run/rust-cache-dev")
         out = ok(run(f"cd a && rm -rf target && {build}"), "a build with the daemon stopped")
         assert "sccache" not in out, out
 
-        # A socket with nobody behind it, as a daemon that died leaves one.
+        # A socket with nobody behind it, as a daemon that died before systemd
+        # cleared up after it leaves one.
+        machine.succeed("install -d -o dev -g dev -m 700 /run/rust-cache-dev")
         ok(
-            run("python3 -c 'import socket; socket.socket(socket.AF_UNIX).bind(\"/var/cache/sccache/dev/run/sccache.sock\")'"),
+            run("python3 -c 'import socket; socket.socket(socket.AF_UNIX).bind(\"/run/rust-cache-dev/sccache.sock\")'"),
             "leaving a socket",
         )
-        machine.succeed("test -S /var/cache/sccache/dev/run/sccache.sock")
+        machine.succeed("test -S /var/cache/sccache/dev/sccache.sock")
         ok(run(f"cd a && rm -rf target && {build}"), "a build with a dead daemon's socket")
         machine.fail("pgrep -u dev sccache")
         machine.fail("test -e /home/dev/.cache/sccache")

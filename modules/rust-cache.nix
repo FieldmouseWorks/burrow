@@ -14,8 +14,10 @@
 # its index or writes it: sccache's disk cache keeps the index in memory, so
 # two daemons on one cache would miss each other's entries and overrun its
 # size. The compiles themselves run in the builds, under their own units'
-# limits (sccache's client-side mode); the daemon only stores. burrow.user has
-# one, and so do `users`; anyone else's builds go uncached.
+# limits (sccache's client-side mode); the daemon only stores, and couldn't do
+# more if a build asked it to: it runs in a chroot that holds nothing but
+# sccache itself and the cache, which it can't run anything from. burrow.user
+# has one, and so do `users`; anyone else's builds go uncached.
 inputs:
 { config, lib, pkgs, ... }:
 let
@@ -94,44 +96,57 @@ in
     environment.etc."environment.d/60-rust-cache.conf".text = "RUSTC_WRAPPER=${exe}\n";
     systemd.settings.Manager.DefaultEnvironment = [ "RUSTC_WRAPPER=${exe}" ];
 
-    # DIR/USER is root's, so only root decides where its socket link points;
-    # what it points at, and the cache, are the user's alone.
+    # DIR/USER is root's, so only root decides where its socket link points:
+    # into the daemon's runtime directory, which exists only while the daemon
+    # runs. The cache, and what the link points at, are the user's alone.
     systemd.tmpfiles.rules = [ "d ${cfg.dir} 0755 root root -" ]
       ++ lib.concatMap (u: let g = config.users.users.${u}.group; in [
         "d ${cfg.dir}/${u} 0711 root root -"
         "d ${cfg.dir}/${u}/cache 0700 ${u} ${g} -"
-        "d ${cfg.dir}/${u}/run 0700 ${u} ${g} -"
-        "L+ ${cfg.dir}/${u}/sccache.sock - - - - run/sccache.sock"
+        "L+ ${cfg.dir}/${u}/sccache.sock - - - - /run/rust-cache-${u}/sccache.sock"
       ]) users;
 
-    systemd.services = lib.listToAttrs (map (u: lib.nameValuePair "rust-cache-${u}" {
+    systemd.services = lib.listToAttrs (map (u: let
+      cache = "${cfg.dir}/${u}/cache";
+      run = "/run/rust-cache-${u}";
+    in lib.nameValuePair "rust-cache-${u}" {
       description = "The compile cache of ${u}'s Rust builds";
       wantedBy = [ "multi-user.target" ];
       environment = {
         SCCACHE_CONF = "${conf}";
-        SCCACHE_DIR = "${cfg.dir}/${u}/cache";
+        SCCACHE_DIR = cache;
         SCCACHE_CACHE_SIZE = cfg.size;
-        SCCACHE_SERVER_UDS = "${cfg.dir}/${u}/run/sccache.sock";
+        SCCACHE_SERVER_UDS = "${run}/sccache.sock";
         SCCACHE_START_SERVER = "1";
         SCCACHE_NO_DAEMON = "1";
         SCCACHE_IDLE_TIMEOUT = "0";
       };
+      # It runs nothing: sccache's daemon still takes the compile requests of
+      # a client outside client-side mode, and would run whatever compiler
+      # they name, so it lives in a chroot holding only sccache, its config
+      # and the cache, and the cache and its socket's directory can't be run
+      # from. A client that asks anyway gets an error back and compiles
+      # nothing here.
+      confinement = {
+        enable = true;
+        binSh = null;
+        packages = [ conf ];
+      };
       serviceConfig = {
         User = u;
         ExecStart = lib.getExe sccache;
-        # A build that finds a socket with nobody behind it tries to start a
-        # daemon of its own, fails (the link isn't the build's to replace) and
-        # waits 5 s for one before compiling without; with no socket, it
-        # compiles without at once.
-        ExecStopPost = "${pkgs.coreutils}/bin/rm -f ${cfg.dir}/${u}/run/sccache.sock";
         Restart = "always";
         RestartSec = 1;
-        # It only reads and writes the cache: it never compiles, and listens
-        # on nothing but its socket.
-        ReadWritePaths = [ "${cfg.dir}/${u}/cache" "${cfg.dir}/${u}/run" ];
-        ProtectSystem = "strict";
-        ProtectHome = true;
-        PrivateTmp = true;
+        # systemd removes it, and the socket with it, when the daemon stops,
+        # so a build compiles without the cache at once rather than trying a
+        # socket nobody is behind.
+        RuntimeDirectory = [ "rust-cache-${u}" ];
+        RuntimeDirectoryMode = "0700";
+        BindPaths = [ cache ];
+        # Inside the chroot, hence the +.
+        NoExecPaths = [ "+${cache}" "+${run}" ];
+        # A message being stored takes about twice its size.
+        MemoryMax = "4G";
         PrivateNetwork = true;
         RestrictAddressFamilies = [ "AF_UNIX" ];
         NoNewPrivileges = true;
