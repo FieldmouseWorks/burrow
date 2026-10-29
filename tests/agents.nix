@@ -13,6 +13,14 @@ pkgs.testers.runNixOSTest {
       name = "Test";
       email = "test@example.com";
     };
+    # While its home has .slow-banner, a sandbox's sshd sends its banner
+    # 15s late, past the old 5s wait, as one on a loaded machine did.
+    slowBanner = { pkgs, ... }: {
+      systemd.services."sshd-vsock@" = {
+        overrideStrategy = "asDropin";
+        serviceConfig.ExecStartPre = "${pkgs.bash}/bin/bash -c 'for h in /home/*; do [ ! -e \"$$h/.slow-banner\" ] || exec sleep 15; done'";
+      };
+    };
   in {
     imports = [ self.nixosModules.default identity ];
     burrow = {
@@ -24,7 +32,7 @@ pkgs.testers.runNixOSTest {
       agents.memory = 1536;
       agents.vcpus = 2;
       # Everything the sandboxes log lands in this test's output.
-      agents.guestModules = [ { burrow.agentGuest.consoleLevel = "info"; } identity ];
+      agents.guestModules = [ { burrow.agentGuest.consoleLevel = "info"; } identity slowBanner ];
     };
 
     users.users.dev = {
@@ -128,6 +136,14 @@ pkgs.testers.runNixOSTest {
     with subtest("it has KVM of its own, for projects with VMs"):
         vm(a, "test -c /dev/kvm && test -w /dev/kvm")
 
+    with subtest("a sandbox slow to answer, as on a loaded machine, is waited for, and brought up"):
+        vm(a, "touch ~/.slow-banner")
+        assert vm(a, "echo up").strip() == "up"
+        # Stopped, agent sh starts it again and waits for it to be ready.
+        dev(f"agent stop {a}")
+        assert vm(a, "echo up").strip() == "up"
+        vm(a, "rm ~/.slow-banner")
+
     with subtest("egress: the allowlist through the proxy, and nothing else"):
         def connect(url, extra=""):
             return vm(a, f"curl -s -o /dev/null --max-time 10 -w '%{{http_connect}}' {extra} {url} || true").strip()
@@ -155,8 +171,9 @@ pkgs.testers.runNixOSTest {
         host.succeed("test \"$(cat /data/dev/src/demo/a)\" = one")
         host.fail("test -e /data/dev/src/demo/b")
         host.succeed(f"test -e {clone}/b")
-        # And it comes back by itself.
-        host.wait_until_succeeds(f"su - dev -c 'agent sh {a} true </dev/null'", timeout=120)
+        # And it comes back by itself, however long a loaded machine takes
+        # to boot it (agent.sh's boot).
+        host.wait_until_succeeds(f"su - dev -c 'agent sh {a} true </dev/null'", timeout=960)
 
     with subtest("fetch brings its work back as refs, without running its git config"):
         vm(a, "git checkout -qb feat && echo two >a && git commit -qam two && echo wip >e")
