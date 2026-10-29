@@ -9,7 +9,10 @@ watches (waits.py).
 
 A step that fails (GitHub refuses it, or no job can start) is tried again,
 later each time, and never quietly for ever: the third failure in a row on a
-head makes the PR's wait overdue, so the watchdog takes it (strike)."""
+head makes the PR's wait overdue, so the watchdog takes it (strike). A Claude
+job that stops before it finishes (it times out, goes quiet or crashes) is
+the machine failing, not the job's answer: it's started again the same way
+(retry_at)."""
 
 import os
 import re
@@ -50,6 +53,7 @@ STRIKES = {
     "mergeable": "GitHub won't say it can be merged",
     "job": "no Claude job can start for it",
     "post": "GitHub keeps refusing a review it's to post",
+    "lost": "its Claude jobs keep stopping before they finish (timed out, quiet or crashed)",
 }
 STRIKE_LIMIT = 3  # failures in a row of one step, on one head, that make its wait overdue
 
@@ -87,7 +91,8 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
     tag = f"{repo}#{n}"
     line = f"[{repo}#{n}]({pr['url']}) {pr['title']}"
 
-    struck = set()  # the steps that failed this pass
+    struck = {}  # the steps that failed this pass, and when each is tried again
+    ends = {}  # how this head's job of each kind ended, as proj says (running)
 
     def after(t, minutes):
         """A wait that ends `minutes` after t: this repo gets a pass then."""
@@ -100,16 +105,19 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
         head makes the PR's wait overdue whatever its deadline, so the
         watchdog takes it (a kick, a Claude job, the stuck issue); without
         the watchdog, it's listed on the stuck issue. Once a pass: two
-        reviews it couldn't post are one pass's failure."""
+        reviews it couldn't post are one pass's failure. When it's tried
+        again."""
         if kind in struck:
-            return
-        struck.add(kind)
+            return struck[kind]
         strikes = st.setdefault("strikes", {})
         strikes[kind] = times = strikes.get(kind, 0) + 1
         log(f"{tag}: {STRIKES[kind]} ({times} in a row)")
-        after(C.NOW, min(2 ** (times - 1), 60))  # ends: STRIKE_LIMIT in a row make the wait overdue
+        minutes = min(2 ** (times - 1), 60)
+        struck[kind] = C.NOW + minutes * MIN
+        after(C.NOW, minutes)  # ends: STRIKE_LIMIT in a row make the wait overdue
         if times >= STRIKE_LIMIT and not waits.overdue(repo, pr, STRIKES[kind]):
             digest.append(("Failing again and again", line, f"{STRIKES[kind]}, {times} times in a row (journalctl -u autoland)"))
+        return struck[kind]
 
     def cleared(kind):
         """The step went through: its run of failures is over, unless it
@@ -186,21 +194,29 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
     def running(kind, at=head):
         """This head's job of the kind (at: on its base, for the judge's and
         the fix it asks for) while it's still queued or running, or proj
-        can't say: "queued", "running" or "unknown"; else "". One that is
-        keeps its deadline, since each pass replaces the repo's wake-ups."""
+        can't say: "queued", "running" or "unknown"; else "", and how it
+        ended goes in ends. One that is keeps its deadline, since each pass
+        replaces the repo's wake-ups."""
         jid = st.get(kind + "Job")
         if st.get(kind) != at or not jid:
             return ""
         state = C.job_state(jid)
-        if state not in (None, "queued", "running"):
+        live = state in (None, "queued", "running")
+        if not live:
+            ends[kind] = state
+        if live or broke(kind):
+            breaking(kind)
+        if not live:
             return ""
         deadline(kind)
         return state or "unknown"
 
-    def started(kind, task, at=head):
+    def started(kind, task, at=head, broken=False):
         """A Claude job, once per head (at: once per head on its base, for
         the judge's; recorded once it has started; until then it's tried
-        again (strike), and its caller lists it on the stuck issue)."""
+        again (strike), and its caller lists it on the stuck issue). One
+        that isn't in place of one that broke (retry_at) ends a run of
+        those."""
         jid = C.job(repo, task)
         if jid:
             st[kind] = at
@@ -208,6 +224,8 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
             st[kind + "At"] = C.NOW
             deadline(kind)
             cleared("job")
+            if not broken:
+                cleared("lost")
             log(f"{tag}: a Claude job {jid} ({kind})")
         else:
             log(f"{tag}: couldn't start a Claude job (no checkout, or proj refused)")
@@ -226,16 +244,55 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
             after(C.NOW, 1)  # ends: the second look, once
         return seen
 
+    def broke(kind):
+        """How this head's job of the kind ended, if it stopped before it
+        finished its turn (it timed out, went quiet, crashed, or Claude
+        errored), else None: that's the machine failing, not an answer."""
+        how = ends.get(kind)
+        if how in (None, "done"):
+            return None
+        return {"error": "ended in an error", "failed": "crashed"}.get(how, how)
+
+    def retry_at(kind):
+        """When this head's job of the kind that broke may start again: each
+        such job is a strike, never counted as an answer, so the third on a
+        head makes its wait overdue (the watchdog takes it), and the next
+        starts on the pass the strike booked, a minute on, then two, four...
+        up to an hour."""
+        if st.get(kind + "Broke", [None])[0] != st.get(kind + "At"):
+            st[kind + "Broke"] = [st.get(kind + "At"), strike("lost")]
+        breaking(kind)
+        return st[kind + "Broke"][1]
+
+    def breaking(kind):
+        """Jobs on this head keep breaking: STRIKE_LIMIT or more in a row,
+        this kind's among them. While its step is still this kind's job (one
+        in place of one that broke, waiting to start or running, or another
+        that broke), its wait stays overdue, as a step failing on every pass
+        does (strike): the watchdog takes it, however long the retries go
+        on. One that finishes its turn ends the run (started)."""
+        times = st.get("strikes", {}).get("lost", 0)
+        if times < STRIKE_LIMIT or not st.get(kind + "Broke") or "lost" in struck:
+            return
+        if not waits.overdue(repo, pr, STRIKES["lost"]):
+            digest.append(("Failing again and again", line, f"{STRIKES['lost']}, {times} times in a row (journalctl -u autoland)"))
+
     def again(kind, task, doing, answer, at=head):
         """A job that ended without its answer is started once more; one that
-        does that twice fails the PR's status and is listed for the owner."""
-        if st.get(kind + "Again") == at:
+        does that twice fails the PR's status and is listed for the owner.
+        One that broke is started again once its retry is due, however many
+        times, and doesn't count toward the two (retry_at)."""
+        how = broke(kind)
+        if how and (due := retry_at(kind)) > C.NOW:
+            settle("pending", f"Settled; the last Claude job {doing} {how}, so another starts at {clock(due)}"[:140])
+        elif not how and st.get(kind + "Again") == at:
             settle("failure", f"Settled, but two Claude jobs ended without {answer}"[:140],
                    f"Two Claude jobs ended without {answer}")
-        elif started(kind, task, at):
-            st[kind + "Again"] = at
+        elif started(kind, task, at, bool(how)):
+            if not how:
+                st[kind + "Again"] = at
             st.pop(kind + "Lost", None)
-            settle("pending", f"Settled; a Claude job is {doing} again (the last one ended without {answer})"[:140])
+            settle("pending", f"Settled; a Claude job is {doing} again (the last one {how or f'ended without {answer}'})"[:140])
         else:
             settle("pending", f"Settled, but no Claude job could start {doing} again"[:140],
                    "Couldn't start a Claude job")
@@ -254,15 +311,18 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
         the Claude session that opened the PR and until when, or when a job
         takes it. A job does once it has sat long enough (handoff_at), or at
         once if it isn't to wait; never if it isn't ours to hand (a Renovate
-        update renovate-sweep has). One that ended with this still to fix (it
-        crashed, timed out, went quiet or pushed nothing) is handed once
-        more; after a second the status fails and the owner hears, until a
-        new head. Never while another fix job is still working on this head:
-        two on one branch push over each other."""
+        update renovate-sweep has). One that finished its turn with this
+        still to fix (it pushed nothing) is handed once more; after a second
+        the status fails and the owner hears, until a new head. One that
+        broke (it crashed, timed out or went quiet) is handed again once its
+        retry is due, and doesn't count toward the two (retry_at). Never
+        while another fix job is still working on this head: two on one
+        branch push over each other."""
         retry = st.get(kind) == at
         state = retry and running(kind, at)
         gone = retry and not state and lost(kind, at)
-        if gone and st.get(kind + "Again") == at:
+        how = gone and broke(kind)
+        if gone and not how and st.get(kind + "Again") == at:
             settle("failure", f"Two Claude jobs ended without fixing it: {desc}"[:140],
                    "Two Claude jobs ended without fixing it")
             return
@@ -270,6 +330,8 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
             who = f"a Claude job {'is queued for it' if state == 'queued' else 'has it'} since {clock(st[kind + 'At'])}"
         elif retry and not gone:
             who = "its Claude job just ended"  # the second look is booked
+        elif how and (due := retry_at(kind)) > C.NOW:
+            who = f"the last Claude job on it {how}, so another takes it at {clock(due)}"
         elif not ours:
             who = ""
         elif wait and (due := handoff_at()) >= C.NOW:
@@ -280,9 +342,10 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
             who = f"a Claude job takes it once the one on {ON[busy]} ends"
         else:
             proofs = {c: rc["proofJobs"][c] for c in ci_names if c in rc["proofJobs"]} if ci == "red" else {}
-            if started(kind, fix_task(repo, pr, why, proofs), at):
+            if started(kind, fix_task(repo, pr, why, proofs), at, bool(how)):
                 if retry:
-                    st[kind + "Again"] = at
+                    if not how:
+                        st[kind + "Again"] = at
                     st.pop(kind + "Lost", None)
                 if kind == "handed":
                     eyes(repo, pr)
@@ -415,7 +478,9 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
             settle("pending", f"Settled; a Claude job is {doing}"[:140])
             return
         slots = rc.get("proofSlots")
-        if slots and not (retry and st.get("provedAgain") == head) and (ahead := P.ahead(repo, n, st, slots)) is not None:
+        # One whose next step is failing the PR (again) needs no slot.
+        last = retry and st.get("provedAgain") == head and not broke("proved")
+        if slots and not last and (ahead := P.ahead(repo, n, st, slots)) is not None:
             P.wait(repo, n)
             settle("pending", f"Settled; waiting its turn to run {', '.join(ci_names)} ({ahead} ahead)"[:140])
             return

@@ -137,7 +137,8 @@ CASES = {
     "post": {"pr": mkpr(), "setup": reviewed, "fail": lambda: STUB.update(post=C.Unavailable("GitHub's down")),
              "mend": lambda: STUB.update(post=None)},
 }
-assert set(CASES) == set(H.STRIKES), "each step that's tried again has its case here"
+# A job that broke (lost) is struck once a job, not once a pass: lost.py has its case.
+assert set(CASES) | {"lost"} == set(H.STRIKES), "each step that's tried again has its case here, or in lost.py"
 
 
 def a_pass(pr, at):
