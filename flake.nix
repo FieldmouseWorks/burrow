@@ -121,13 +121,23 @@
           mkdir -p /build/heavy && : >/build/heavy/slot1 && chmod 0444 /build/heavy/slot1
           h=${heavy}/bin/heavy
           threads=$(nproc)
+          # Waits until COMMAND succeeds, for what process PID makes ready, and
+          # fails if PID exits first or it takes over 30 seconds.
+          ready() {
+            local pid=$1 n=0; shift
+            until "$@" 2>/dev/null; do
+              kill -0 "$pid" 2>/dev/null || { echo "pid $pid exited before $*"; exit 1; }
+              n=$(( n + 1 )); [ "$n" -lt 3000 ] || { echo "not $* after 30s"; exit 1; }
+              sleep 0.01
+            done
+          }
           [ "$($h -- printenv HEAVY_JOBS)" = "$threads" ] || { echo "share: not $threads"; exit 1; }
           [ "$(CARGO_BUILD_JOBS=3 $h -- printenv CARGO_BUILD_JOBS)" = 3 ] || { echo "overrode CARGO_BUILD_JOBS"; exit 1; }
           rc=0; $h -- sh -c 'exit 7' || rc=$?
           [ "$rc" = 7 ] || { echo "exit status $rc, not 7"; exit 1; }
           # Inside the slot, a nested call runs at once; a second holder waits, and gives up when told to.
           $h -- sh -c "touch held; while [ ! -e done ]; do sleep 0.1; done" &
-          while [ ! -e held ]; do sleep 0.1; done
+          ready $! test -e held
           rc=0; $h --wait 1 -- true 2>err || rc=$?
           [ "$rc" = 75 ] || { echo "a second holder got in ($rc)"; exit 1; }
           HEAVY_SLOT=1 $h --wait 1 -- true || { echo "a nested call waited"; exit 1; }
@@ -147,12 +157,13 @@
 
           # Cancelled, heavy stops the whole workload, a shell's worker too,
           # and holds the slot until the last of it has gone. (Background
-          # jobs here ignore INT: env gives it back.)
+          # jobs here ignore INT: env gives it back.) Each worker names
+          # itself once its traps are set, so the signal never comes first.
           for sig in TERM INT HUP; do
             rm -f worker stopped
-            env --default-signal=INT $h -- sh -c 'sh -c "trap \"sleep 1; touch stopped; exit\" TERM; while :; do sleep 0.1; done" & echo $! >worker; wait' &
+            env --default-signal=INT $h -- sh -c 'sh -c "trap \"sleep 1; touch stopped; exit\" TERM; echo \$\$ >worker; while :; do sleep 0.1; done" & wait' &
             hp=$!
-            while [ ! -s worker ]; do sleep 0.1; done
+            ready $hp test -s worker
             kill -$sig $hp; wait $hp || true
             [ -e stopped ] || { echo "$sig: the slot went before the worker stopped"; exit 1; }
             ! kill -0 "$(cat worker)" 2>/dev/null || { echo "$sig: the worker outlived heavy"; exit 1; }
@@ -164,10 +175,10 @@
           for sig in TERM INT HUP; do
             for cmd in \
               'trap "" TERM INT HUP; echo $$ >worker; while :; do sleep 0.1; done' \
-              'sh -c "trap \"\" TERM INT HUP; while :; do sleep 0.1; done" & echo $! >worker; trap "sleep 60" TERM INT HUP; wait'; do
+              'trap "sleep 60" TERM INT HUP; sh -c "trap \"\" TERM INT HUP; echo \$\$ >worker; while :; do sleep 0.1; done" & wait'; do
               rm -f worker
               env --default-signal=INT $h -- sh -c "$cmd" & hp=$!
-              while [ ! -s worker ]; do sleep 0.1; done
+              ready $hp test -s worker
               s=$(date +%s%N); kill -$sig $hp; wait $hp || true; e=$(date +%s%N)
               ms=$(( (e - s) / 1000000 ))
               [ "$ms" -ge 2900 ] && [ "$ms" -lt 6000 ] || { echo "$sig, stubborn command: heavy took ''${ms}ms, not about 3s"; exit 1; }
@@ -180,16 +191,16 @@
           # heavy, it reaches only the test's shell, which in the sandbox, under
           # load, can lose it.
           for i in $(seq 10); do
-            $h -- sh -c 'sleep 0.3; touch late' & hp=$!
-            until grep -qF "$h" /proc/$hp/cmdline 2>/dev/null; do :; done
+            $h -- sh -c 'sleep 1; touch late' & hp=$!
+            ready $hp grep -qF "$h" /proc/$hp/cmdline
             kill -TERM $hp; wait $hp || true
-            sleep 0.5
+            sleep 1.2
             [ ! -e late ] || { echo "the command outlived a heavy cancelled at its start"; exit 1; }
           done 2>/dev/null
 
           # A bounded wait ends on time, and never starts the command after.
           rm -f ran
-          $h -- sleep 1.5 & sleep 0.2
+          rm -f held; $h -- sh -c 'touch held; sleep 1.5' & ready $! test -e held
           s=$(date +%s%N); rc=0; $h --wait 1 -- touch ran 2>err || rc=$?; e=$(date +%s%N)
           [ "$rc" = 75 ] || { echo "--wait 1 with the slot freed after it: $rc, not 75"; exit 1; }
           [ ! -e ran ] || { echo "--wait 1 ran the command after its wait"; exit 1; }
