@@ -12,7 +12,11 @@ and one GitHub refused an error.
 
 cn asks this very command for the App's tokens (`autoland-steward token
 OWNER/REPO`, steward.py), one for each repo it calls: printed into cn's
-pipe, never written anywhere."""
+pipe, never written anywhere.
+
+Python, not Rust, only because the steward still is: the train itself is
+Conary's, in Rust, and this is the steward's thin end of it, to go with the
+rest of the steward when that's ported."""
 
 import json
 import os
