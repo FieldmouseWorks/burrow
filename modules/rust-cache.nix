@@ -120,6 +120,10 @@ in
         SCCACHE_START_SERVER = "1";
         SCCACHE_NO_DAEMON = "1";
         SCCACHE_IDLE_TIMEOUT = "0";
+        # A build hands the daemon each compiled crate in one message, and
+        # sccache drops anything over 8 MiB (its default) without a word, so a
+        # big dependency would never come out of the cache.
+        SCCACHE_MAX_FRAME_LENGTH = toString (1024 * 1024 * 1024);
       };
       # It runs nothing: sccache's daemon still takes the compile requests of
       # a client outside client-side mode, and would run whatever compiler

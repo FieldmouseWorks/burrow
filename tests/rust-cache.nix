@@ -10,6 +10,7 @@
 #   daemon's;
 # - the daemon runs nothing, even for a build that skips the wrapper and asks
 #   it to compile: it sees no compiler, and can't run one from the cache;
+# - a crate bigger than sccache's default message size is cached too;
 # - a cached `cargo check` never stands in for clippy, and a compile error
 #   still fails the build;
 # - whatever keeps the cache from working compiles without it: incremental
@@ -181,6 +182,20 @@ pkgs.testers.runNixOSTest {
         before = hits("dev")
         ok(run(f"cd a && rm -rf target && {build}"), "dev's second build")
         assert hits("dev") > before, "dev's fresh target dir missed the cache"
+
+    with subtest("a crate bigger than sccache's default message size is cached too"):
+        place("${ok}", "/home/dev/big", "dev")
+        ok(
+            run(
+                "cd big && head -c 12000000 /dev/urandom >src/blob.bin"
+                " && echo 'pub static BLOB: &[u8] = include_bytes!(\"blob.bin\");' >>src/lib.rs"
+            ),
+            "making the crate big",
+        )
+        ok(run(f"cd big && {build}"), "the big crate's first build")
+        before = hits("dev")
+        ok(run(f"cd big && rm -rf target && {build}"), "the big crate's second build")
+        assert hits("dev") > before, "the big crate missed the cache"
 
     with subtest("all of a user's units share one daemon, and compile in their own"):
         # The runner builds first, so anything of its own that serves it is
