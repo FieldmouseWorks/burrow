@@ -3,7 +3,7 @@ a store of its own, with stand-ins for `nix build` and `nix flake check`. Each
 derivation gets a nix process of its own and stays a GC root until it's built,
 only the checks are built, every output is checked as nix flake check checks
 it, a failed evaluation or build fails the gate, and a flake with an output
-eval-apart doesn't know, or with a nixConfig, is refused rather than half
+eval-apart doesn't check, or with a nixConfig, is refused rather than half
 checked.
 
   python3 -I tests/gate.py .github/workflows/flake-check.yml
@@ -195,16 +195,47 @@ def failing_eval():
 
 
 @case
-def unknown_outputs():
-    "an output it doesn't know is refused, before anything is evaluated"
+def refused_outputs():
+    "an output nix flake check checks some other way is refused, before anything is evaluated"
     rc, out, calls = run(flake("""{
       checks.${system}.a = drv "a";
-      nixosModules.m = { };
       overlays.o = final: prev: { };
+      apps.${system}.x = { type = "app"; program = "/bin/sh"; };
+      lib.f = x: x;
+    }"""))
+    assert rc != 0 and 'this flake has ["apps","overlays"]' in out, out
+    assert not entries(calls) and not builds(calls), calls
+
+
+@case
+def other_outputs():
+    "modules, templates, lib and unknown outputs are checked as nix flake check checks them"
+    rc, out, calls = run(flake("""{
+      checks.${system}.a = drv "a";
+      nixosModules = { m = { }; f = { config, ... }: throw "not applied"; };
+      templates.t = { path = ./.; description = "a template"; welcomeText = "hi"; };
+      lib.deep = throw "not forced";
+      foo = { };
       "" = { };
     }"""))
-    assert rc != 0 and 'this flake also has ["","nixosModules","overlays"]' in out, out
-    assert not entries(calls) and not builds(calls), calls
+    assert rc == 0, out
+    assert "warning: unknown flake output 'foo'" in out and "warning: unknown flake output ''" in out, out
+    assert "warning: unknown flake output 'lib'" not in out, out
+    assert len(entries(calls)) == 1 and builds(calls), calls
+    for outputs, error in (('nixosModules.bad = throw "bad module";', "bad module"),
+                           ("nixosModules = null;", "flake output 'nixosModules' is not an attribute set"),
+                           ('lib = throw "bad lib";', "bad lib"),
+                           ('foo = throw "bad foo";', "bad foo"),
+                           ("templates = null;", "flake output 'templates' is not an attribute set"),
+                           ("templates.t = null;", "flake output 'templates.t' is not an attribute set"),
+                           ('templates.t.description = "d";', "template 'templates.t' lacks attribute 'path'"),
+                           ('templates.t = { path = ./nowhere; description = "d"; };', "refers to a non-existent path"),
+                           ("templates.t.path = ./.;", "template 'templates.t' lacks attribute 'description'"),
+                           ("templates.t = { path = ./.; description = 1; };", "is not a string without context"),
+                           ('templates.t = { path = ./.; description = "d"; extra = 1; };', "has unsupported attribute 'extra'")):
+        rc, out, calls = run(flake(f"{{ checks.${{system}}.a = drv \"a\"; {outputs} }}"))
+        assert rc != 0 and error in out, (outputs, out)
+        assert not entries(calls), (outputs, calls)
 
 
 @case
@@ -288,6 +319,23 @@ def names():
     rc, out, calls = run(flake(r"""{ checks.${system} = { "back\\slash" = drv "n2"; ok = drv "ok"; }; }"""),
                          build_fail="-n2.drv")
     assert rc != 0, out
+
+
+@case
+def uncommitted():
+    "a checkout with changes not yet committed is evaluated as it is, purely"
+    d = flake("""{ checks.${system}.a = drv "a"; }""")
+    open(os.path.join(d, "flake.nix"), "w").write(f"""{{
+  outputs = {{ self }}: {{
+    checks.{system}.changed = derivation {{ name = "changed"; system = "{system}"; builder = "/bin/sh"; args = [ "-c" "echo > $out" ]; }};
+    checks.{system}.pure = if builtins.getEnv "GATE_ENV" == "" then throw "only pure" else null;
+  }};
+}}
+""")
+    rc, out, calls = run(d, env={"GATE_ENV": "set"})
+    assert rc != 0 and "only pure" in out, out
+    [b] = builds(calls)
+    assert "-changed.drv^*" in b, b
 
 
 @case

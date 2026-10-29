@@ -30,9 +30,11 @@ on:
           in a nix process of its own, then build the checks, rather than in
           one `nix flake check` that holds every evaluation in memory until
           its last build ends. For a flake whose evaluations don't fit in its
-          runner's memory together. It knows only those outputs (and
-          legacyPackages, which the gate never evaluates), and fails a flake
-          with any other, or with a nixConfig.
+          runner's memory together. It also checks nixosModules and templates
+          as nix flake check does, and forces lib and the outputs nix flake
+          check doesn't know, warning of these; it fails a flake with an
+          output nix flake check checks some other way (apps, overlays,
+          hydraJobs, bundlers, the old default* ones), or with a nixConfig.
         type: boolean
         default: false
 jobs:
@@ -69,8 +71,28 @@ jobs:
           let
             flake = builtins.getFlake url;
             inherit (flake) outputs;
-            known = [ "checks" "packages" "devShells" "formatter" "nixosConfigurations" "legacyPackages" ];
+            known = [ "checks" "packages" "devShells" "formatter" "nixosConfigurations" "legacyPackages" "nixosModules" "templates" ];
+            # What nix flake check checks that this doesn't.
+            refused = [ "apps" "defaultPackage" "defaultApp" "devShell" "overlay" "overlays" "nixosModule" "hydraJobs" "defaultTemplate" "bundlers" "defaultBundler" ];
+            # What nix flake check only forces, and doesn't warn of.
+            community = [ "lib" "darwinConfigurations" "darwinModules" "flakeModule" "flakeModules" "herculesCI" "homeConfigurations" "homeModule" "homeModules" "nixopsConfigurations" ];
+            names = builtins.attrNames outputs;
             set = what: v: if builtins.isAttrs v then v else throw "flake output '${what}' is not an attribute set";
+            # Every output is forced, and a NixOS module is only forced.
+            forced = builtins.foldl' (a: n: builtins.seq outputs.${n} a) true names;
+            modules = builtins.mapAttrs (_: m: builtins.seq m true) (set "nixosModules" (outputs.nixosModules or { }));
+            template = n: t:
+              let
+                what = "templates.${n}";
+                extra = builtins.filter (a: !builtins.elem a [ "path" "description" "welcomeText" ]) (builtins.attrNames t);
+              in
+              if !(t ? path) then throw "template '${what}' lacks attribute 'path'"
+              else if !builtins.pathExists t.path then throw "template '${what}' refers to a non-existent path '${toString t.path}'"
+              else if !(t ? description) then throw "template '${what}' lacks attribute 'description'"
+              else if !builtins.isString t.description || builtins.hasContext t.description then throw "the description of template '${what}' is not a string without context"
+              else if extra != [ ] then throw "template '${what}' has unsupported attribute '${builtins.head extra}'"
+              else true;
+            templates = builtins.mapAttrs (n: t: template n (set "templates.${n}" t)) (set "templates" (outputs.templates or { }));
             # An output by system: every system's name has a dash, and only
             # this system's outputs are checked further.
             here = name: f:
@@ -97,9 +119,10 @@ jobs:
           in
           if entry == null then
             # legacyPackages has only its system names checked.
-            builtins.deepSeq (here "legacyPackages" (_: [ ])) {
+            builtins.deepSeq [ (here "legacyPackages" (_: [ ])) forced modules templates ] {
               nixConfig = import "${flake.outPath}/flake.nix" ? nixConfig;
-              other = builtins.filter (n: !builtins.elem n known) (builtins.attrNames outputs);
+              other = builtins.filter (n: builtins.elem n refused) names;
+              unknown = builtins.filter (n: !builtins.elem n (known ++ refused ++ community)) names;
               entries = map (e: { inherit (e) what; build = build e; skip = e.check or false && !build e; }) entries;
             }
           else
@@ -113,14 +136,27 @@ jobs:
             else throw "flake attribute '${e.what}' is not a derivation"
           EOF
           apart() {
-            url=$(nix flake metadata --json . | jq -r .url)
+            roots=$(mktemp -d "$RUNNER_TEMP/roots.XXXXXX")
+            trap 'rm -rf -- "$roots"' EXIT
+            nix flake metadata --json . > "$RUNNER_TEMP/flake.json"
+            url=$(jq -r .url "$RUNNER_TEMP/flake.json")
+            # A checkout with changes not yet committed (run here by
+            # flake-gate) has no locked git reference to evaluate purely: its
+            # source as nix flake check sees it, by its hash, kept until the
+            # gate is done.
+            if [ "$(jq '.locked | has("rev")' "$RUNNER_TEMP/flake.json")" != true ]; then
+              source=$(jq -r .path "$RUNNER_TEMP/flake.json")
+              nix-store --add-root "$roots/source" --realise "$source" > /dev/null
+              url="path:$source?narHash=$(jq -r '.locked.narHash | @uri' "$RUNNER_TEMP/flake.json")"
+            fi
             args=(--option pure-eval true --expr "$plan" --argstr url "$url"
               --argstr system "$(nix config show system)" --argstr skip "$SKIP")
             nix-instantiate --eval --strict --json "${args[@]}" > "$RUNNER_TEMP/plan.json"
             if [ "$(jq '.other | length' "$RUNNER_TEMP/plan.json")" != 0 ]; then
-              echo "eval-apart knows checks, packages, devShells, formatter, nixosConfigurations and legacyPackages, and this flake also has $(jq -c .other "$RUNNER_TEMP/plan.json"). Its gate is a whole \`nix flake check\`, without eval-apart."
+              echo "eval-apart doesn't check apps, overlays, hydraJobs, bundlers or the old default* outputs, and this flake has $(jq -c .other "$RUNNER_TEMP/plan.json"). Its gate is a whole \`nix flake check\`, without eval-apart."
               return 1
             fi
+            jq -r '.unknown[] | "warning: unknown flake output \u0027\(.)\u0027"' "$RUNNER_TEMP/plan.json"
             # nix flake check applies the nixConfig a runner accepts; the
             # evaluations and the build here would leave it out.
             if [ "$(jq .nixConfig "$RUNNER_TEMP/plan.json")" = true ]; then
@@ -131,8 +167,6 @@ jobs:
             # in use is one evaluation's, and makes its derivation a GC root
             # before it exits, until the build is done. A failed one fails the
             # gate, after the rest are evaluated and built (--keep-going).
-            roots=$(mktemp -d "$RUNNER_TEMP/roots.XXXXXX")
-            trap 'rm -rf -- "$roots"' EXIT
             failed=0
             targets=()
             n=$(jq '.entries | length' "$RUNNER_TEMP/plan.json")
