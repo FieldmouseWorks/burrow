@@ -148,12 +148,12 @@ in
           issueTitles = mkOption {
             type = types.nullOr (types.listOf types.str);
             default = null;
-            example = [ "Dependency Dashboard" ];
+            example = [ "Dependency Dashboard" "flaky: *" ];
             description = ''
               For `issues` events (an issue opened, edited, closed ...): only
-              those about an issue with one of these titles, exactly, count.
-              null: every issue. Comments are `issue_comment`, which this
-              doesn't touch.
+              those about an issue whose title matches one of these globs
+              (`*`, `?`, `[...]`; case counts) count. null: every issue.
+              Comments are `issue_comment`, which this doesn't touch.
             '';
           };
           ownStatuses = mkOption {

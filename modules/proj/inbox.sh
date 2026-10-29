@@ -7,8 +7,8 @@
 # burrow-events (../events.nix) runs it on the repo's issue events, each time
 # one of its jobs' turns ends (proj run --kick), and when a wait it booked in
 # WAKE ends. `proj-inbox status` shows which issue is which job. SRC, JOBS,
-# STATE, SCRATCH, LABEL, AUTHORS, VM, HOST, NOTIFY, MARK and WAKE come from
-# ../proj.nix.
+# STATE, SCRATCH, LABEL, AUTHORS, VM, HOST, NOTIFY, MARK, WAKE and PIPELINE
+# come from ../proj.nix.
 #
 # The inbox posts as the gh login, which is usually the owner's own account,
 # so its own comments carry MARK and are never read back as replies. Jobs are
@@ -21,6 +21,10 @@
 
 vm=()
 [ "$VM" != 1 ] || vm=(--vm)
+# An issue in one of the pipeline's own repos (PIPELINE) is work on the
+# pipeline itself: ahead of everything, in a slot kept for it. Anyone else's
+# goes ahead of the line all the same, since someone's waiting on it.
+priority() { case " ${PIPELINE,,} " in *" ${1,,} "*) echo --pipeline ;; *) echo --first ;; esac; }
 mkdir -p "$STATE"
 
 if [ "${1:-}" = status ]; then
@@ -146,7 +150,7 @@ for repo in "${!project[@]}"; do
     allowed "$(jq -r .user.login <<<"$issue")" || continue
     # Comments already there are part of the task; replies after this are turns.
     comments=$(gh api "repos/$repo/issues/$n/comments" --paginate --slurp | jq 'add // []') || { miss "$repo"; continue; }
-    id=$(proj run --first "${vm[@]}" --kick "proj-inbox/$repo" "$p" "$(task "$repo" "$issue" "$comments")") || { retry "$repo"; continue; }
+    id=$(proj run "$(priority "$repo")" "${vm[@]}" --kick "proj-inbox/$repo" "$p" "$(task "$repo" "$issue" "$comments")") || { retry "$repo"; continue; }
     mkdir -p "$d"
     echo "$repo#$n" >"$d/issue"
     echo "$id" >"$d/job"
@@ -234,7 +238,7 @@ for repo in "${!project[@]}"; do
         [ ! -s "$JOBS/$id/session" ] || { retry "$repo"; continue; }
         # No session to continue (the first turn never got going): start over,
         # from the issue as it stands, replies and all.
-        id=$(proj run --first "${vm[@]}" --kick "proj-inbox/$repo" "$p" "$(task "$repo" "$now" "$comments")") || { retry "$repo"; continue; }
+        id=$(proj run "$(priority "$repo")" "${vm[@]}" --kick "proj-inbox/$repo" "$p" "$(task "$repo" "$now" "$comments")") || { retry "$repo"; continue; }
         echo "$id" >"$d/job"
         echo 0 >"$d/answered"
       fi

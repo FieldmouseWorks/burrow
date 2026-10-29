@@ -81,6 +81,9 @@ let
   # dependencyDashboardTitle default): the issue dashboard.py reads, and the
   # one whose events start a pass.
   dashboardTitle = "Dependency Dashboard";
+  # The flaky tool, which lists each repo's quarantined tests: the issues
+  # titled `flaky: TEST` (flakes.py, docs/flaky-tests.md).
+  flaky = pkgs.callPackage ../tools/flaky/package.nix { };
 
   settings = {
     renovateEmail = if renovateMatch == null then null else lib.head renovateMatch;
@@ -115,6 +118,11 @@ let
       inherit (cfg.dashboard) enable waitDays errorDays;
       title = dashboardTitle;
       renovateKick = if config.burrow.updates.renovate.enable or false then "${config.burrow.events.kick}/renovate" else null;
+    };
+    # Quarantined flaky tests, each to a Claude job (flakes.py).
+    flaky = {
+      inherit (cfg.flaky) enable;
+      bin = "${flaky}/bin/flaky";
     };
     # What every open PR waits on, for the stall watchdog (autoland/waits.py),
     # and what it took past a Claude job, for the stuck issue.
@@ -275,8 +283,9 @@ in
         The repos whose PRs work on this pipeline itself (OWNER/NAMEs, any
         case): the steward, its reviewers, the machine they run on. Their
         reviews take a reviewer's next free place before anyone else's, and
-        their Claude jobs go ahead of the line (`proj run --first`), so the
-        work queued behind them gets the speedup sooner.
+        their issues are pipeline work for proj-inbox, as the steward's own
+        Claude jobs are everywhere (`proj run --pipeline`), so the work
+        queued behind them gets the speedup sooner.
       '';
     };
 
@@ -435,6 +444,17 @@ in
         default = 1;
         description = "How long an error, a problem with the repo or a failed lookup sits on the dashboard before it's stuck.";
       };
+    };
+
+    flaky.enable = mkOption {
+      type = types.bool;
+      default = true;
+      description = ''
+        Send each repo's quarantined flaky tests (open issues titled `flaky:
+        TEST`, labelled `flaky`, that its gate files: docs/flaky-tests.md) to a
+        Claude job that fixes them, and one still open a day after that job to
+        the stuck issue (autoland/flakes.py).
+      '';
     };
 
     keepBranches = mkOption {
@@ -597,9 +617,11 @@ in
       # statuses (a proof's verdict).
       events = [ "push" "pull_request" "pull_request_review" "pull_request_review_comment"
         "pull_request_review_thread" "issue_comment" "check_suite" "status" ]
-        ++ lib.optional cfg.dashboard.enable "issues";
-      # Of the issues, only Renovate's dashboard (dashboard.py).
-      issueTitles = [ dashboardTitle ];
+        ++ lib.optional (cfg.dashboard.enable || cfg.flaky.enable) "issues";
+      # Of the issues, only Renovate's dashboard (dashboard.py) and flaky
+      # tests' (flakes.py; the flaky tool's test.rs has the title).
+      issueTitles = lib.optional cfg.dashboard.enable dashboardTitle
+        ++ lib.optional cfg.flaky.enable "flaky: *";
       unit = "autoland";
       wake = "${stateDir}/autoland/wake.json";
       # Its own status tells it nothing (a job awaiting the PR does want it).
