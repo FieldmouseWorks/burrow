@@ -1,0 +1,53 @@
+{
+  "conary": "note v1",
+  "change": "37b58y74rx3g296s4cxj1szxgf",
+  "repo": {
+    "owner": "fieldmouseworks",
+    "name": "burrow"
+  },
+  "pr": 149,
+  "url": "https://github.com/fieldmouseworks/burrow/pull/149",
+  "summary": "autoland: hand a PR that conflicts with its base to a Claude job",
+  "task": "FieldmouseWorks/remi#170",
+  "author": {
+    "kind": "person",
+    "login": "TusanHomichi",
+    "session": null
+  },
+  "landing": {
+    "revision": "a0f8e5280bb1736b6a985f4cad45dcff66fc9bb3a1cd8d3178590dd34ab92d14",
+    "before": "fb5245b6f3d326625fd302b73e58ebc17e791f73",
+    "after": "509b3c2c84124a67b12e680a02a3bcc099aec824",
+    "by": {
+      "kind": "status",
+      "login": "fieldmouseworks-steward[bot]"
+    },
+    "at": 1793291249522
+  },
+  "evidence": [
+    {
+      "kind": "ci",
+      "check": "check / commits",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/40907953278/job/123567783418"
+    },
+    {
+      "kind": "review",
+      "check": "codex",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/149#pullrequestreview-5700991839"
+    },
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/40907953278/job/123567782925"
+    },
+    {
+      "kind": "ci",
+      "check": "agents",
+      "result": "pass",
+      "source": "status agents"
+    }
+  ]
+}
