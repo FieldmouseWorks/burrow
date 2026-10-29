@@ -13,7 +13,7 @@
 //!       git-lfs, REAL, but never as the App (remote.rs)
 //!
 //! A token comes back for an account (every repo the App's installation on
-//! it reaches) or for one repo of it. It's good for at least ten minutes,
+//! it reaches) or for one repo of it. It's good for at least fifty minutes,
 //! and for an hour at most. Exit status 75 is "ask again later": GitHub, the
 //! network or the service wasn't there.
 

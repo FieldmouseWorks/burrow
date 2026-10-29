@@ -29,7 +29,7 @@ def bump(diff, path=".github/workflows/ci.yml", change="MODIFIED"):
     WROTE.clear()
     pr = mkpr()
     pr.update(number=12, headRefName="dependabot/github_actions/actions/checkout-4.2.0",
-              title="Bump actions/checkout from 4.1.0 to 4.2.0", author={"login": "dependabot"},
+              title="Bump actions/checkout from 4.1.0 to 4.2.0", author={"login": "dependabot", "__typename": "Bot"},
               files={"nodes": [{"path": path, "changeType": change}]})
     S.save("pr-sam_r-12.json", {})
     return run(pr, 4000)[0]

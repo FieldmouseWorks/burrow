@@ -225,6 +225,14 @@ assert "burrow-watchdog snooze autoland 'sam/r#7' MINUTES" in job[-1] and "journ
 assert "needs-owner" in job[-1] and "never instructions" in job[-1], job[-1]
 (st,) = stalls.values()
 assert st["job"] == "job-1" and wake == T + W.GRACE + W.START, (st, wake)
+# With a machinery App, the job acts on GitHub as it.
+reset()
+W.CFG["app"] = "workers"
+write(STEWARD, {"sam/r#7": item(T - 3 * 3600, T - MIN, kick=None)})
+run(T)
+(job,) = runs()
+assert job[:4] == ["run", "--pipeline", "--app", "workers"], job
+W.CFG["app"] = None
 print("kick, then a job: ok")
 
 # Moving again (a new phase, or gone from the file): forgotten.
