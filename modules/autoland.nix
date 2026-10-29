@@ -207,14 +207,17 @@ let
     '
     touch $out
   '';
-  # The command, with this machine's config, so `autoland-steward status`
-  # works from any shell, not only in the service.
   # What a pass runs: openssl signs the App's JWT (common.py), and the rest
-  # talk to GitHub, unpack its tarballs and start Claude jobs.
-  stewardTools = [ pkgs.gh pkgs.git pkgs.gnutar pkgs.coreutils pkgs.openssl config.burrow.tools.proj ];
-  # A pass gets its tools however it's started: by its units, or by hand or
-  # a Claude job (`autoland-steward kick OWNER/REPO`) with a PATH of its own.
-  # Not a review: its units give the reviewers only what they read with
+  # talk to GitHub, unpack its tarballs and start Claude jobs. gh and git are
+  # the machine's (github.nix): a pass's own calls pass the steward's token
+  # in GH_TOKEN, which they use as given, and the rest (`status`, a
+  # project's clone) go as the caller, its App's socket in a job's env too.
+  stewardTools = [ (config.burrow.tools.gh or pkgs.gh) config.programs.git.package pkgs.gnutar pkgs.coreutils pkgs.openssl config.burrow.tools.proj ];
+  # The command, with this machine's config, so `autoland-steward status`
+  # works from any shell, not only in the service. A pass gets its tools
+  # however it's started: by its units, or by hand or a Claude job
+  # (`autoland-steward kick OWNER/REPO`) with a PATH of its own. Not a
+  # review: its units give the reviewers only what they read with
   # (reviewTools).
   steward = pkgs.writeShellScriptBin "autoland-steward" ''
     export AUTOLAND_CONFIG=''${AUTOLAND_CONFIG:-${configFile}}
