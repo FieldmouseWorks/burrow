@@ -1,5 +1,5 @@
 # events: what happens on GitHub, or on this machine, starts the work it
-# calls for within seconds (events/events.py). Nothing here runs on a timer
+# calls for within seconds (crates/burrow-events). Nothing here runs on a timer
 # but the hourly catch-up, for what no event reports.
 #
 # GitHub posts each repo's events to https://HOST/PATH (the steward keeps
@@ -21,11 +21,7 @@ let
     port = if hooked then cfg.port else null;
     handlers = lib.mapAttrs (_: h: { inherit (h) events unit wake ownStatuses perRepo repos pushes branches issueTitles; }) cfg.handlers;
   });
-  src = pkgs.runCommand "burrow-events" { nativeBuildInputs = [ pkgs.python3.pkgs.flake8 ]; } ''
-    mkdir $out
-    cp ${./events/events.py} $out/events.py
-    flake8 --ignore E501,W503 $out
-  '';
+  package = inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow;
   units = lib.mapAttrsToList (_: h: h.unit) cfg.handlers;
   # Each one best-effort: burrow-events down (restarting, say) runs every
   # full pass when it starts anyway.
@@ -230,7 +226,7 @@ in
       environment.EVENTS_CONFIG = "${configFile}";
       serviceConfig = {
         User = "burrow-events";
-        ExecStart = "${pkgs.python3}/bin/python3 -E -s ${src}/events.py";
+        ExecStart = "${package}/bin/burrow-events";
         Restart = "always";
         RestartSec = 5;
         ProtectSystem = "strict";

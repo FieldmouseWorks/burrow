@@ -65,6 +65,11 @@ the other checks.
 One check on its own: `nix build .#checks.x86_64-linux.agents -L` boots the
 agent sandboxes (nested KVM: it needs `/dev/kvm`).
 
+The programs burrow's modules run are Rust, in one Cargo workspace,
+`crates/`: the flake installs them as `packages.SYSTEM.burrow` and gates them
+as `checks.crates-*`, and `cargo test` there runs the same tests. gh-token and
+the flaky tool still have workspaces of their own until #164.
+
 burrow is generic. Anything about one machine (its hostname, users, owner,
 repos, addresses) is an option a machine's flake sets, never a value in a
 module. `examples/` is the machine the checks build.

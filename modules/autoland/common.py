@@ -45,6 +45,11 @@ class Unavailable(RuntimeError):
     again next pass."""
 
 
+# What GitHub says of any rule on a private repo of a free account: the plan
+# offers none there, so there are none to keep or to merge by.
+NO_RULES = "Upgrade to GitHub Pro"
+
+
 class Gone(RuntimeError):
     """GitHub has no such thing (404), or had it and deleted it (410): asking
     again won't bring it back."""
@@ -254,6 +259,27 @@ def mine(actor):
     return bool(actor) and actor.get("__typename") == "Bot" and actor.get("login") == CFG["app"]["slug"]
 
 
+def ours(actor):
+    """Whether a GraphQL author is one of the steward's authors: a person of
+    `authors`, or one of `bots` as GitHub's own Bot, as `mine` reads one
+    (the machinery's App, whose Claude jobs post and push, among them)."""
+    if not actor:
+        return False
+    if actor.get("__typename") == "Bot":
+        return actor.get("login") in CFG["bots"]
+    return actor.get("login") in CFG["authors"]
+
+
+def rest_ours(login):
+    """The same for a login as REST gives it, which spells a bot SLUG[bot]:
+    a name no person's can be."""
+    if not login:
+        return False
+    if login.endswith("[bot]"):
+        return login[: -len("[bot]")] in CFG["bots"]
+    return login in CFG["authors"]
+
+
 _key = []
 
 
@@ -282,15 +308,15 @@ def seal(repo, n, name, verdict, head, base):
 
 def marker(pr, name, head, repo=None, base=None):
     """The verdict in the newest `<!-- NAME: VERDICT SHA -->` on the PR for
-    exactly this head, from one of its authors (the login its Claude jobs,
-    the judges among them, post as) only; else None. With
+    exactly this head, from one of its authors (`ours`: whoever its Claude
+    jobs, the judges among them, post as) only; else None. With
     repo, only a marker that also carries its seal, for this head on the PR's
     base as it is now, counts; with base, only one that names that base
     (`<!-- NAME: VERDICT SHA on BASE -->`)."""
     pat = re.compile(rf"<!-- {re.escape(name)}: ([a-z]+) ([0-9a-f]{{40}})(?: on (\S+))?(?: ([0-9a-f]{{32}}))? -->")
     verdict = None
     for c in pr["comments"]["nodes"]:  # oldest first
-        if (c["author"] or {}).get("login") not in CFG["authors"]:
+        if not ours(c["author"]):
             continue
         for m in pat.finditer(c["body"] or ""):
             if m.group(2) != head or (base is not None and m.group(3) != base):
@@ -309,7 +335,7 @@ def ts(s):
 # When each repo's PRs next need a pass, as this pass worked out: a wait that
 # ends then (a new head's settle delay, a reviewer's timeout, the time left
 # before a Claude job takes its findings). Saved to wake.json, where
-# burrow-events (../events/events.py) reads it and starts that repo's pass
+# burrow-events (crates/burrow-events) reads it and starts that repo's pass
 # then.
 WAKE = {}
 
@@ -368,7 +394,7 @@ def save(name, value):
 def acted_on(pr):
     """Whether the steward does anything with the PR beyond saying it's not
     its to do: not a draft, and from one of its authors."""
-    return not pr["isDraft"] and not pr["isCrossRepository"] and (pr["author"] or {}).get("login") in CFG["authors"]
+    return not pr["isDraft"] and not pr["isCrossRepository"] and ours(pr["author"])
 
 
 DEQUEUE = "mutation($id: ID!) { dequeuePullRequest(input: {id: $id}) { clientMutationId } }"
@@ -448,8 +474,10 @@ def job(repo, task, clone=False):
     # Each of its turns that ends starts the repo's pass, which reads what it
     # did and acts on it (--owned: the turn needn't say what comes next); one
     # that goes quiet for jobIdle, or runs past jobTimeout, is stopped, and
-    # ends then.
-    p = subprocess.run([CFG["proj"], "run", "--pipeline", "--timeout", f"{CFG['jobTimeout']}m",
+    # ends then. It's the machine's own work, so it acts on GitHub as the
+    # machinery's App, where there is one.
+    app = ["--app", CFG["machinery"]] if CFG.get("machinery") else []
+    p = subprocess.run([CFG["proj"], "run", "--pipeline", *app, "--timeout", f"{CFG['jobTimeout']}m",
                         "--idle", f"{CFG['jobIdle']}m", "--kick", f"autoland/{repo}", "--owned", d, task],
                        capture_output=True, text=True)
     return p.stdout.strip() or None
