@@ -224,8 +224,27 @@ def acting():
     ACTING.append(C._for[-1])
 
 
+RULES = {}  # the rules on a branch of sam/r, by its name in the path: none unless set, or what GitHub raises
+PROTECTION = {}  # the same for a branch's classic protection: a 404 unless set
+
+
 def gh_stub(*a, **k):
     acting()
+    if a[:1] == ("api",) and a[1].startswith("repos/sam/r/rules/branches/"):
+        got = RULES.get(a[1].removeprefix("repos/sam/r/rules/branches/").partition("?")[0], [])
+        if isinstance(got, Exception):
+            if k.get("check", True):
+                raise got
+            return None  # gh's failure, logged
+        return [got]  # --slurp: the pages
+    if a[:1] == ("api",) and a[1].startswith("repos/sam/r/branches/") and a[1].endswith("/protection"):
+        got = PROTECTION.get(a[1].removeprefix("repos/sam/r/branches/").removesuffix("/protection"),
+                             RuntimeError(f"gh api {a[1]}: gh: Branch not protected (HTTP 404)"))
+        if isinstance(got, Exception):
+            if k.get("check", True):
+                raise got
+            return None
+        return got
     if a[:2] == ("pr", "view") and "commits" in a:
         got = COMMITS.get(int(a[2]), ["bot@renovateapp.com"])
         return None if got is None else {"commits": [{"authors": [{"email": e}]} for e in got]}

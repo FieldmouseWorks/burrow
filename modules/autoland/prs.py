@@ -1,8 +1,10 @@
 """A repo's open PRs as GitHub has them, and what the steward writes back
 about one: how its CI stands, its `review-settled` status, the merge."""
 
+import urllib.parse
+
 import common as C
-from common import CONTEXT, DRY
+from common import CONTEXT, DRY, log
 
 
 PRS = """
@@ -177,12 +179,48 @@ def eyes(repo, pr):
                     "-f", "content=eyes", check=False)
 
 
-def merge_method(repo_info):
-    for flag, method in (("squashMergeAllowed", "squash"), ("mergeCommitAllowed", "merge"),
-                         ("rebaseMergeAllowed", "rebase")):
-        if repo_info[flag]:
-            return method
-    return "merge"
+def merge_method(repo, base, repo_info):
+    """The first of squash, merge and rebase that the repo's settings, every
+    ruleset on base and its classic protection allow, or None when there's
+    none or GitHub didn't say what the rules are. Rules narrow the settings
+    (a legacy ruleset allowing merge commits alone, or a linear history), and
+    GitHub refuses any other method from the App, which bypasses no rule."""
+    branch = urllib.parse.quote(base, safe="")
+    pages = rules(repo, base, [], (C.NO_RULES,), f"repos/{repo}/rules/branches/{branch}?per_page=100", "--paginate",
+                  "--slurp")
+    protection = rules(repo, base, {}, (C.NO_RULES, UNPROTECTED), f"repos/{repo}/branches/{branch}/protection")
+    if not isinstance(pages, list) or not isinstance(protection, dict):
+        return None
+    allowed = {"squash", "merge", "rebase"}
+    for rule in (r for page in pages for r in page):
+        if rule.get("type") == "pull_request":
+            allowed &= set((rule.get("parameters") or {}).get("allowed_merge_methods") or allowed)
+        elif rule.get("type") == "required_linear_history":
+            allowed.discard("merge")
+    if (protection.get("required_linear_history") or {}).get("enabled"):
+        allowed.discard("merge")
+    return next((method for flag, method in (("squashMergeAllowed", "squash"), ("mergeCommitAllowed", "merge"),
+                                             ("rebaseMergeAllowed", "rebase"))
+                 if repo_info[flag] and method in allowed), None)
+
+
+# What the classic protection endpoint says of a branch without any. Any
+# other 404 is GitHub not saying: it answers one for what a token can't see.
+UNPROTECTED = "Branch not protected (HTTP 404)"
+
+
+def rules(repo, base, none, absent, *args):
+    """What GitHub says of base's rules at the path in args, `none` when it
+    says there are none (one of the answers in absent: a private repo on a
+    free plan has no rules, and a branch without classic protection is
+    UNPROTECTED), or None when GitHub didn't say."""
+    try:
+        return C.gh("api", *args)
+    except RuntimeError as e:
+        if any(x in str(e) for x in absent):
+            return none
+        log(f"{repo}: the rules on {base}: {e}")
+        return None
 
 
 def land(repo, pr, repo_info):
@@ -193,8 +231,13 @@ def land(repo, pr, repo_info):
     before, by anyone, is taken off first."""
     if not C.unland(repo, pr) and not DRY:
         return False
+    method = merge_method(repo, pr["baseRefName"], repo_info)
+    if method is None:
+        log(f"{repo}#{pr['number']}: no merge method both the repo's settings and the rules on "
+            f"{pr['baseRefName']} allow, or GitHub didn't say what the rules are")
+        return False
     # The merge endpoint merges or refuses; a push since the check makes the
     # sha stale, and it waits for the next pass.
     return C.write("api", "-X", "PUT", f"repos/{repo}/pulls/{pr['number']}/merge",
-                   "-f", f"merge_method={merge_method(repo_info)}", "-f", f"sha={pr['headRefOid']}",
+                   "-f", f"merge_method={method}", "-f", f"sha={pr['headRefOid']}",
                    check=False) is not None or DRY
