@@ -264,7 +264,15 @@ start_turn() {
   # can't start, or a start_turn killed partway, leaves the job as it was.
   printf '%s\n' "$msg" >"$d/prompt.$n"
   set_turns "$id" "$n"
-  systemctl --user reset-failed "$(unit "$id")" 2>/dev/null || true
+  # The last turn reads as ended once it has written its outcome, but its
+  # unit is still there while its _ended runs (telling the watchdog, kicking
+  # proj-watch, which can start this turn), and no unit starts under that
+  # name until it's gone.
+  for _ in $(seq 120); do
+    systemctl --user reset-failed "$(unit "$id")" 2>/dev/null || true
+    [ "$(systemctl --user show -P LoadState "$(unit "$id")" 2>/dev/null)" = loaded ] || break
+    sleep 0.5
+  done
   # Claude is what goes first when memory runs out, not whatever it's next to.
   if ! systemd-run --user --quiet --collect --unit="$(unit "$id")" \
     --slice="$SLICE" \
