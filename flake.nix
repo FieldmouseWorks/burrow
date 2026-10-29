@@ -42,6 +42,9 @@
         self = ./modules/github;
         rust.testInputs = pkgs: [ pkgs.openssl ];
       };
+      # burrow's own programs, one Cargo workspace (crates/): their package
+      # and their gate, built for every platform lib/project.nix knows.
+      crates = self.lib.project { self = ./crates; rust = { }; };
     in
     {
       # A project's dev shell and gate in a few lines; see lib/project.nix.
@@ -59,11 +62,14 @@
         };
       };
 
-      # gh-token, for each platform it's built for, and the flaky tool
-      # (docs/flaky-tests.md), for a machine to install.
-      packages = nixpkgs.lib.recursiveUpdate
+      # burrow's programs (every binary in crates/) and gh-token, for each
+      # platform they're built for, and the flaky tool (docs/flaky-tests.md),
+      # for a machine to install.
+      packages = nixpkgs.lib.foldl' nixpkgs.lib.recursiveUpdate { } [
+        (nixpkgs.lib.mapAttrs (_: p: { burrow = p.default; }) crates.packages)
         (nixpkgs.lib.mapAttrs (_: p: { gh-token = p.default; }) ghToken.packages)
-        { ${system}.flaky = pkgs.callPackage ./tools/flaky/package.nix { }; };
+        { ${system}.flaky = pkgs.callPackage ./tools/flaky/package.nix { }; }
+      ];
 
       # A bare machine with every module on, for the checks and as an example.
       nixosConfigurations.example = nixpkgs.lib.nixosSystem {
@@ -171,11 +177,6 @@
         ledger = import ./tests/ledger.nix { inherit self pkgs; };
         # An App's tokens: who gets them, and git and gh acting as it.
         github = import ./tests/github.nix { inherit self pkgs; };
-        # Which deliveries and kicks start whose pass, with a stand-in for systemctl.
-        events = pkgs.runCommand "events-check" { nativeBuildInputs = [ pkgs.python3 ]; } ''
-          python3 -I ${./tests/events.py} ${./modules/events}/events.py
-          touch $out
-        '';
         # A switch that changes a handler's units kicks that handler's full
         # pass, and only its: the switch restarts an active unit that changed,
         # so the example's burrow-events-switched-autoland must change with
@@ -338,7 +339,8 @@
           [ "$(${pkg}/bin/house-fixture-member)" = 42 ]
           touch $out
         '';
-      } // nixpkgs.lib.mapAttrs' (name: nixpkgs.lib.nameValuePair "gh-token-${name}") ghToken.checks.${system}
+      } // nixpkgs.lib.mapAttrs' (name: nixpkgs.lib.nameValuePair "crates-${name}") crates.checks.${system}
+      // nixpkgs.lib.mapAttrs' (name: nixpkgs.lib.nameValuePair "gh-token-${name}") ghToken.checks.${system}
       // nixpkgs.lib.mapAttrs' (name: nixpkgs.lib.nameValuePair "flaky-${name}")
         # The flaky tool's fmt, clippy and tests.
         (self.lib.project { inherit self; systems = [ system ]; rust.dir = "tools/flaky"; }).checks.${system}

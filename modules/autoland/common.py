@@ -309,7 +309,7 @@ def ts(s):
 # When each repo's PRs next need a pass, as this pass worked out: a wait that
 # ends then (a new head's settle delay, a reviewer's timeout, the time left
 # before a Claude job takes its findings). Saved to wake.json, where
-# burrow-events (../events/events.py) reads it and starts that repo's pass
+# burrow-events (crates/burrow-events) reads it and starts that repo's pass
 # then.
 WAKE = {}
 
