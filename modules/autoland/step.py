@@ -3,9 +3,10 @@ stands (its reviewers' verdicts, CI, its threads, its labels, what GitHub
 says of its merge), and the thing to do now: queue a review, post what came
 back, hand what's open (findings, red CI, a conflict with its base) to a
 Claude job, have a job run its machine checks or judge it, post its
-`review-settled` status and merge it, or list it for the owner or the stuck
-issue. Each step it takes is in the PR's status, and in what the watchdog
-watches (waits.py).
+`review-settled` status and merge it (or, in a repo with its merge train
+on, put it in the train, which lands it: train.py), or list it for the
+owner or the stuck issue. Each step it takes is in the PR's status, and in
+what the watchdog watches (waits.py).
 
 A step that fails (GitHub refuses it, or no job can start) is tried again,
 later each time, and never quietly for ever: the third failure in a row on a
@@ -18,6 +19,7 @@ import time
 import common as C
 import proofs as P
 import reviewers as V
+import train as T
 import waits
 from common import CFG, DRY, MIN, STATE, load, log, repo_cfg, save, ts
 from seal import MAJOR as MAJOR_VERDICT  # renovate-sweep's, on a Renovate major
@@ -62,6 +64,7 @@ def clock(t):
 def handle(repo, pr, repo_info, digest, obsolete=False):
     rc = repo_cfg(repo)
     n, head = pr["number"], pr["headRefOid"]
+    by_train = T.rides(repo, pr, repo_info)
     # The judge reads the diff against the base, so its verdict (and its
     # job) is for this head on this base: one retargeted is judged again.
     judged_at = f"{head} {pr['baseRefName']}"
@@ -135,7 +138,8 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
         return since + wait * MIN
 
     def settle(state, desc, why=None, wait=waits.STEWARD):
-        """The PR's status, and what it waits on for the watchdog (waits.py)."""
+        """The PR's status, and what it waits on for the watchdog (waits.py).
+        False if GitHub didn't take it."""
         ok = post_status(repo, pr, state, desc)
         if why:
             digest.append((why, line, desc))
@@ -152,6 +156,11 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
             # GitHub didn't take the status or the stop: until it does, the
             # old ones stand and a merge queued on it can still go.
             strike("status")
+        # Nor may its train land it. Out after the status: one the train
+        # lands meanwhile needs the status the rules require.
+        if state != "success" and T.seat(repo, n) is not None:
+            T.leave(repo, pr)
+        return ok
 
     def update_branch():
         """Bring a settled head up to date with a base whose rules want it
@@ -281,7 +290,8 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
             who = f"a Claude job takes it once the one on {ON[busy]} ends"
         else:
             proofs = {c: rc["proofJobs"][c] for c in ci_names if c in rc["proofJobs"]} if ci == "red" else {}
-            if started(kind, fix_task(repo, pr, why, proofs), at):
+            train = ci == "red" and bool(T.CONTEXT) and any(c.startswith(f"{T.CONTEXT} (") for c in ci_names)
+            if started(kind, fix_task(repo, pr, why, proofs, train), at):
                 if retry:
                     st[kind + "Again"] = at
                     st.pop(kind + "Lost", None)
@@ -302,15 +312,50 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
             return
         strike("merge")
 
+    def ride(desc):
+        """Settled against the default branch of a repo with its merge train
+        on: into the train at this head, which lands it, rather than merged
+        here; alone if it touches a one-way path. Its status says where in the train it is, or why the
+        train holds it out and until what. Nothing else may merge it: a
+        merge queued on it is taken off, or it's tried again (strike)."""
+        if C.queued(pr) and not C.unland(repo, pr):
+            strike("status")
+            settle("pending", "Settled, but GitHub didn't take its queued merge off; trying again")
+            return
+        where = T.seat(repo, n) if st.get("joined") == head else None
+        if where is None:
+            held = T.join(repo, pr, alone=bool(gate))
+            if held:
+                # What GitHub said, as the train's status on the head has it.
+                said = our_status(pr, T.CONTEXT)[1] or "GitHub refused its merge"
+                settle("pending", f"Settled, but held out of the train: {T.HELD.get(held, held).format(said)}",
+                       wait=waits.TRAIN)
+                return
+            st["joined"] = head
+            where = T.seat(repo, n)
+        if not settle("success", f"In the train, {where}. {desc}"[:140], wait=waits.TRAIN) and not DRY:
+            # Without the status the rules require, its merge would be
+            # refused: out until GitHub takes it (settle strikes it).
+            T.leave(repo, pr)
+
     def land_now(desc):
         """Settled: merged, unless what GitHub says of its merge asks for
         something first (MERGE_STEPS). Behind a base whose rules want it up
         to date, it's brought up to date instead, and the merged-in head is
         reviewed and its CI run like any other before it lands. (One that
-        conflicts with its base never gets here: it's handed on first.)"""
+        conflicts with its base never gets here: it's handed on first.) In a
+        repo with its merge train on, one against the default branch goes in
+        the train instead (ride)."""
         if merging == "update":
             why = "brought up to date" if update_branch() else "GitHub didn't take the update; trying again"
             settle("pending", f"Settled, but behind its base: {why}")
+            return
+        if by_train:
+            # The train merges it onto the default branch itself, so what
+            # GitHub says of merging it alone is no wait of its own: GitHub
+            # works that out afresh each time the branch moves, which the
+            # train's every landing does.
+            ride(desc)
             return
         if merging in ("wait", "refused"):
             settle("pending", "Settled; GitHub is still working out whether it can be merged" if merging == "wait"
@@ -318,6 +363,10 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
             strike("mergeable")
             return
         cleared("mergeable")
+        if T.seat(repo, n) is not None:
+            # Retargeted since it joined: the train lands only onto the
+            # default branch, so it comes out and is merged here.
+            T.leave(repo, pr)
         settle("success", desc)
         # Still open with a merge queued on it: GitHub's to merge later, which
         # land never leaves it to (a steward before it did). Merged now instead.
@@ -470,8 +519,9 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
     ci, ci_names = ci_state(pr, rc["proofJobs"])
     # No checks ran at all ("none"). Unless the repo is set not to need any
     # (docs only), that's not green: nothing has tested it, so a judge job
-    # runs the build and tests itself.
-    if ci == "none" and not rc["requireCi"]:
+    # runs the build and tests itself. One the train lands, the train's CI
+    # is what tests it, merged onto the default branch.
+    if ci == "none" and (not rc["requireCi"] or by_train):
         ci = "green"
     open_threads = sum(1 for t in pr["reviewThreads"]["nodes"] if not t["isResolved"])
     latest = {}
@@ -559,8 +609,8 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
             judged("a major dependency update", DEP_SEEN)
         elif dep == "major":
             land_now("Major update renovate-sweep cleared, CI green")
-        elif renovate:
-            # Renovate merges its own.
+        elif renovate and not by_train:
+            # Renovate merges its own, except the ones the train lands.
             settle("success", "Dependency update, CI green")
         else:
             land_now("Dependency update, CI green")

@@ -25,10 +25,17 @@ FOREGROUND = ("A check can outlast a tool call's time limit: start it in the bac
               "is killed when your turn ends, and no notification of it ever comes back. ")
 
 
-def fix_task(repo, pr, why, proofs=None):
-    """proofs: the failing checks that run on a machine, not in CI, and how."""
+def fix_task(repo, pr, why, proofs=None, train=False):
+    """proofs: the failing checks that run on a machine, not in CI, and how;
+    train: the merge train's failure is among them."""
     machine = "".join(f" {c} isn't CI: it's run on a machine, like this: {how} Rerun it that way on what you push."
                       for c, how in (proofs or {}).items()) + (f" {FOREGROUND.strip()}" if proofs else "")
+    if train:
+        base = pr["baseRefName"]
+        machine += (f" The failing {CFG['train']['context']} status is the merge train's: it merged this head alone onto {base} "
+                    "and CI failed on that merge (the status links the failed check, on a conary/train/ branch). "
+                    f"Merge {base} into the branch, find what breaks when the two meet, fix it and push: the new head goes "
+                    "into the train again once it's settled.")
     return (
         f"{about(repo, pr)} isn't settled: {why}. "
         "Settle it. Check out the branch in your own worktree (git worktree add) under the scratch dir, never in this checkout's main tree. "
