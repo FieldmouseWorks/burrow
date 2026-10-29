@@ -34,6 +34,7 @@
       enable = true;
       serverIp = "203.0.113.7";
     };
+    heartbeat.enable = true;
     autoland = {
       enable = true;
       owners = [ "sam" ];
