@@ -41,8 +41,12 @@ let
 
     HTTPServer(("127.0.0.1", 8080), GitHub).serve_forever()
   '';
-  # What gh would be run with: the token it was given, if any.
-  show = pkgs.writeShellScript "show" ''echo "token=''${GH_TOKEN-} args=$*"'';
+  # What gh would be run with: the token it was given, if any. Its help is
+  # gh's, which says what the call's flags are.
+  show = pkgs.writeShellScript "show" ''
+    [ "$1" = help ] && exec ${pkgs.gh}/bin/gh "$@"
+    echo "token=''${GH_TOKEN-} args=$*"
+  '';
   # dev's login in the keyring, where `gh auth login` keeps it when there's
   # one: unkeyed, so gh finds it even without a config naming dev. Then gh
   # without a config, and gh in the App's env, in that session.
@@ -79,7 +83,7 @@ pkgs.testers.runNixOSTest {
     environment.etc."dev/gitconfig".text = ''
       [credential "https://github.com"]
       	helper =
-      	helper = "!f() { echo password=peter-token; }; f"
+      	helper = "!f() { echo username=peter; echo password=peter-token; }; f"
     '';
     systemd.services.fake-github = {
       wantedBy = [ "multi-user.target" ];
@@ -97,8 +101,9 @@ pkgs.testers.runNixOSTest {
 
       ENV = ${builtins.toJSON env}
 
+      # The whole command in the App's env, pipes and all.
       def dev(command, app=True, at="~"):
-          return "su - dev -c " + shlex.quote(f"cd {at} && " + ("env " + ENV + " " if app else "") + command)
+          return "su - dev -c " + shlex.quote(f"cd {at} && " + ("env " + ENV + " sh -c " + shlex.quote(command) if app else command))
 
       def asked():
           return machine.succeed("cat /tmp/asked").splitlines()
@@ -151,11 +156,23 @@ pkgs.testers.runNixOSTest {
           assert machine.succeed(dev("gh auth token", app=False)).strip() == "peter-token"
           machine.fail(dev("${pkgs.gh}/bin/gh auth token"))
           machine.fail("su - dev -c " + shlex.quote("GITHUB_TOKEN=peter-token env " + ENV + " ${pkgs.gh}/bin/gh auth token"))
+          # Nor another host's, in the variables gh reads for one.
+          for var in ["GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"]:
+              ghe = var + "=peter-token ${pkgs.gh}/bin/gh auth token --hostname ghe.example.com"
+              assert machine.succeed(dev(ghe, app=False)).strip() == "peter-token"
+              machine.fail("su - dev -c " + shlex.quote(var + "=peter-token env " + ENV + " " + ghe.split(" ", 1)[1]))
           # In dev's keyring: gh finds it with no config, but not in the App's env.
           out = machine.succeed(dev("${pkgs.dbus}/bin/dbus-run-session -- ${keyring env}", app=False))
           assert "no config: keyring-token" in out and "the App's env: no oauth token" in out, out
           out = machine.succeed(dev("gh-token gh ${show} pr view 5 -R sam/r")).strip()
           assert out == "token=ghs_1 args=pr view 5 -R sam/r", out
+          # A flag's value isn't a name, as gh's help says which flags take one.
+          for call in ["issue comment 5 -R sam/r --body https://github.com/eve/x", "repo list --limit 5 sam"]:
+              assert machine.succeed(dev(f"gh-token gh ${show} {call}")).strip() == f"token=ghs_1 args={call}"
+          # Another host isn't the App's, however it's named.
+          for call in ["GH_HOST=ghe.example.com gh-token gh ${show} pr view 5 -R sam/r", "gh-token gh ${show} api --hostname ghe.example.com repos/sam/r", "gh-token gh ${show} pr view https://ghe.example.com/sam/r/pull/5"]:
+              status, out = machine.execute(dev(call + " 2>&1"))
+              assert status == 1 and "the App's token is for github.com" in out, (status, out)
           # A token given already is the one it runs with; an empty one isn't one.
           assert machine.succeed(dev("GH_TOKEN=mine gh-token gh ${show} api user")).strip() == "token=mine args=api user"
           out = machine.succeed(dev("GH_TOKEN= GITHUB_TOKEN=peter-token gh-token gh ${show} api repos/sam/r")).strip()

@@ -102,9 +102,28 @@ pub fn git_credential(
 pub fn gh(gh: &str, args: &[String], socket: Option<&Path>) -> Error {
     let mut run = Command::new(gh);
     run.args(args);
+    // `gh help`, not `--help`: an extension given --help would run.
+    let help = |words: &[String]| -> Result<String, Error> {
+        let out = Command::new(gh)
+            .arg("help")
+            .args(words)
+            .env("GH_NO_UPDATE_NOTIFIER", "1")
+            .output()
+            .map_err(|e| Error::refused(format!("{gh} help: {e}")))?;
+        let help = String::from_utf8_lossy(&out.stdout).into_owned();
+        if !out.status.success() || help.is_empty() {
+            return Err(Error::refused(format!(
+                "gh doesn't know `gh {}`",
+                words.join(" ")
+            )));
+        }
+        Ok(help)
+    };
     let context = Context {
         gh_repo: std::env::var("GH_REPO").ok(),
-        remotes: account::remotes,
+        gh_host: std::env::var("GH_HOST").ok(),
+        remotes: &account::remotes,
+        help: &help,
         default: std::env::var("GH_TOKEN_OWNER").ok(),
     };
     match token_for(
@@ -274,9 +293,14 @@ mod tests {
     #[test]
     fn gives_gh_the_token_for_its_account_unless_it_has_one() {
         let (_dir, path, handle) = serve(vec!["token ghs_abc\n", "token ghs_def\n"]);
+        let help = |_: &[String]| {
+            Ok("FLAGS\n  -w, --web   Open in the browser\n\nINHERITED FLAGS\n  -R, --repo [HOST/]OWNER/REPO   Select another repository\n".to_owned())
+        };
         let context = Context {
             gh_repo: None,
-            remotes: String::new,
+            gh_host: None,
+            remotes: &String::new,
+            help: &help,
             default: None,
         };
         let args: Vec<String> = ["pr", "view", "5", "-R", "sam/r"].map(String::from).into();

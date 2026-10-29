@@ -83,10 +83,13 @@ in
             GH_TOKEN_SOCKET = socket;
             # A gh that isn't the wrapper finds no login, rather than the
             # user's: not in its config, not in the keyring (the session bus
-            # it's reached on), not in GitHub's other variable.
+            # it's reached on), not in gh's other variables, github.com's or
+            # another host's (an empty one is none).
             GH_CONFIG_DIR = "/run/gh-token/no-login";
             DBUS_SESSION_BUS_ADDRESS = "disabled:";
             GITHUB_TOKEN = "";
+            GH_ENTERPRISE_TOKEN = "";
+            GITHUB_ENTERPRISE_TOKEN = "";
             # Set in the environment, so they come after every config file's:
             # the empty helper clears the ones before it.
             GIT_CONFIG_COUNT = "5";
