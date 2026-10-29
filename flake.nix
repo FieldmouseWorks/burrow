@@ -35,7 +35,7 @@
       # The ledger's machines take Conary from its own flake; burrow's checks
       # build theirs with a stand-in for its `cn`.
       cnStandIn = pkgs.writeShellScriptBin "cn" "exit 1";
-      names = [ "claude" "undo" "switch" "notify" "updates" "proj" "remote-control" "agents" "robot" "ops" "toolbox" "autoland" "house" "events" "ledger" "browser" "heartbeat" "backup" "watchdog" "github" ];
+      names = [ "claude" "undo" "switch" "notify" "updates" "proj" "remote-control" "agents" "robot" "ops" "toolbox" "autoland" "house" "events" "ledger" "browser" "heartbeat" "backup" "watchdog" "github" "rust-cache" ];
       # gh-token (modules/github): its package, and its gate.
       # Built for every platform lib/project.nix knows, like the module.
       ghToken = self.lib.project {
@@ -102,7 +102,7 @@
                 (nixpkgs.lib.optionalAttrs (builtins.elem name [ "events" "autoland" ]) { burrow.events = { host = "example.org"; secretFile = "/run/secrets/burrow-webhook"; }; })
                 # github has no switch: it's on with an App to serve.
                 (if name == "github" then { burrow.github.apps.workers = { id = 2; slug = "sam-workers"; keyFile = "/run/secrets/workers-key"; }; }
-                 else { burrow.${if name == "remote-control" then "remoteControl" else name}.enable = true; })
+                 else { burrow.${{ remote-control = "remoteControl"; rust-cache = "rustCache"; }.${name} or name}.enable = true; })
               ];
             };
           in "${name} ${builtins.unsafeDiscardStringContext (runnable name machine).config.system.build.toplevel.drvPath}\n")
@@ -112,8 +112,9 @@
         agents = import ./tests/agents.nix { inherit self pkgs; };
         # proj's queue and memory caps, with a stand-in for Claude.
         proj = import ./tests/proj.nix { inherit self pkgs; };
-        # Who takes a free slot: the pipeline's own, and each project's cap.
-        proj-pick = pkgs.runCommand "proj-pick-check" { nativeBuildInputs = [ pkgs.shellcheck ]; } ''
+        # Who takes a free slot: the pipeline's own (only its own repos'
+        # pipeline jobs), and each project's cap.
+        proj-pick = pkgs.runCommand "proj-pick-check" { nativeBuildInputs = [ pkgs.shellcheck pkgs.git ]; } ''
           shellcheck -s bash ${./modules/proj/pick.sh} ${./tests/proj-pick.sh}
           bash ${./tests/proj-pick.sh} ${./modules/proj/pick.sh}
           touch $out
@@ -166,6 +167,9 @@
         # Off-site backups of ZFS snapshots through restic and rclone, and the
         # restore drill that checks them.
         backup = import ./tests/backup.nix { inherit self pkgs; };
+        # The shared compile cache: one daemon per user, the compiles in the
+        # builds that ask for them, and a plain compile whenever it can't help.
+        rust-cache = import ./tests/rust-cache.nix { inherit self pkgs inputs; };
         # The ledger's pass over one repo, with a stand-in for cn.
         ledger = import ./tests/ledger.nix { inherit self pkgs; };
         # An App's tokens: who gets them, and git and gh acting as it.
@@ -314,6 +318,15 @@
         # GitHub can't match to its committer fails it.
         commit-signatures = pkgs.runCommand "commit-signatures-check" { nativeBuildInputs = [ (pkgs.python3.withPackages (p: [ p.pyyaml ])) pkgs.jq ]; } ''
           python3 -I ${./tests/commit-signatures.py} ${./.github/workflows/flake-check.yml}
+          touch $out
+        '';
+        # The shared CI's gate step with eval-apart (flake-check.yml), its own
+        # script with nix evaluating test flakes for real and a stand-in for
+        # its builds: one nix process per derivation, each a GC root until
+        # it's built, every output checked as nix flake check checks it, and a
+        # flake with an output it doesn't know refused.
+        gate = pkgs.runCommand "gate-check" { nativeBuildInputs = [ (pkgs.python3.withPackages (p: [ p.pyyaml ])) pkgs.git pkgs.jq pkgs.nix ]; } ''
+          python3 -I ${./tests/gate.py} ${./.github/workflows/flake-check.yml}
           touch $out
         '';
         # Stale Remote Control servers catch up once idle, with a stand-in for Claude.
