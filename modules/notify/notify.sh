@@ -17,7 +17,7 @@
 repo=$REPO
 state=$DIR
 
-# gh needs the user's login.
+# gh needs the user's login, or the App's socket, which the user may reach.
 if [ "$(id -un)" != "$BURROW_USER" ]; then
   mkdir -p "$state"
   chown "$BURROW_USER": "$state" 2>/dev/null || true

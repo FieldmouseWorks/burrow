@@ -5,7 +5,7 @@
 # connect to. A connection is answered by gh-token (./github, one process each,
 # Accept=yes) as its own user, with the App's key as a credential only that
 # user can read: a token for the account or repo asked for, good for at least
-# ten minutes, kept until then so GitHub mints one at most every fifty.
+# fifty minutes, kept until then so GitHub mints one at most every ten.
 #
 # A process acts as the App with the App's `env` in its environment. Then gh
 # (burrow.tools.gh, the one on the PATH) gets a token for the account its call
@@ -17,7 +17,12 @@
 # header's, a cookie jar's, a client certificate, a Kerberos ticket, the
 # netrc's: ./github/src/remote.rs), git-lfs, which would, isn't run, and gh's
 # own login, in a file or the keyring, is out of its reach.
-# Without that env, all of them are the user's, as before.
+# Without that env, all of them are the user's, as before. Each App's `gh`
+# acts as it whoever runs it, and its `envFile` is the env for a shell to
+# source.
+#
+# `machinery` names the App the machine's own jobs act as, rather than as the
+# user: the modules that run them read it.
 #
 # The env closes what git and gh do by themselves and from config files.
 # What a caller puts on git's own command line (`-c`, GIT_CONFIG_PARAMETERS)
@@ -77,6 +82,59 @@ let
   gh = pkgs.writeShellScriptBin "gh" ''
     exec ${package}/bin/gh-token gh ${pkgs.gh}/bin/gh "$@"
   '';
+
+  # What a process acts as the App in: its socket, and git's and gh's
+  # settings for it.
+  appEnv = socket: {
+    GH_TOKEN_SOCKET = socket;
+    # A gh that isn't the wrapper finds no login, rather than the
+    # user's: not in its config, not in the keyring (the session bus
+    # it's reached on), not in gh's other variables, github.com's or
+    # another host's (an empty one is none).
+    GH_CONFIG_DIR = "/run/gh-token/no-login";
+    DBUS_SESSION_BUS_ADDRESS = "disabled:";
+    GITHUB_TOKEN = "";
+    GH_ENTERPRISE_TOKEN = "";
+    GITHUB_ENTERPRISE_TOKEN = "";
+    # Set in the environment, so they come after every config file's.
+    GIT_CONFIG_COUNT = "9";
+    # gh-token is git's only credential helper, for every URL: the
+    # empty one clears whatever helpers the config files name, for any
+    # URL. It answers github.com over https, however git spells it,
+    # with the App's token, and stops git for every other host.
+    GIT_CONFIG_KEY_0 = "credential.helper";
+    GIT_CONFIG_VALUE_0 = "";
+    GIT_CONFIG_KEY_1 = "credential.helper";
+    GIT_CONFIG_VALUE_1 = "!${package}/bin/gh-token git-credential";
+    GIT_CONFIG_KEY_2 = "credential.useHttpPath";
+    GIT_CONFIG_VALUE_2 = "true";
+    # GitHub's SSH remotes go over https instead, and anything still
+    # over SSH (an alias, a rewrite of the user's own) stops.
+    GIT_CONFIG_KEY_3 = "url.https://github.com/.insteadOf";
+    GIT_CONFIG_VALUE_3 = "git@github.com:";
+    GIT_CONFIG_KEY_4 = "url.https://github.com/.insteadOf";
+    GIT_CONFIG_VALUE_4 = "ssh://git@github.com/";
+    # LFS's filters, whatever git-lfs a config names, are the one that
+    # refuses, and a file they'd filter fails rather than going in or
+    # out as it is.
+    GIT_CONFIG_KEY_5 = "filter.lfs.process";
+    GIT_CONFIG_VALUE_5 = "${gitLfs}/bin/git-lfs filter-process";
+    GIT_CONFIG_KEY_6 = "filter.lfs.smudge";
+    GIT_CONFIG_VALUE_6 = "${gitLfs}/bin/git-lfs smudge -- %f";
+    GIT_CONFIG_KEY_7 = "filter.lfs.clean";
+    GIT_CONFIG_VALUE_7 = "${gitLfs}/bin/git-lfs clean -- %f";
+    GIT_CONFIG_KEY_8 = "filter.lfs.required";
+    GIT_CONFIG_VALUE_8 = "true";
+    GIT_SSH_COMMAND = "${noSsh}";
+    GIT_SSH_VARIANT = "ssh";
+    GIT_EXEC_PATH = "${gitCore}";
+  };
+
+  # gh as the App whoever runs it: a token the caller has is theirs, not the
+  # App's, so it goes.
+  appGh = env: pkgs.writeShellScriptBin "gh" ''
+    exec env -u GH_TOKEN ${lib.escapeShellArgs (lib.mapAttrsToList (k: v: "${k}=${v}") env)} ${gh}/bin/gh "$@"
+  '';
 in
 {
   imports = [ (import ./common.nix inputs) ];
@@ -122,61 +180,73 @@ in
         env = mkOption {
           type = types.attrsOf types.str;
           readOnly = true;
-          default = {
-            GH_TOKEN_SOCKET = socket;
-            # A gh that isn't the wrapper finds no login, rather than the
-            # user's: not in its config, not in the keyring (the session bus
-            # it's reached on), not in gh's other variables, github.com's or
-            # another host's (an empty one is none).
-            GH_CONFIG_DIR = "/run/gh-token/no-login";
-            DBUS_SESSION_BUS_ADDRESS = "disabled:";
-            GITHUB_TOKEN = "";
-            GH_ENTERPRISE_TOKEN = "";
-            GITHUB_ENTERPRISE_TOKEN = "";
-            # Set in the environment, so they come after every config file's.
-            GIT_CONFIG_COUNT = "9";
-            # gh-token is git's only credential helper, for every URL: the
-            # empty one clears whatever helpers the config files name, for any
-            # URL. It answers github.com over https, however git spells it,
-            # with the App's token, and stops git for every other host.
-            GIT_CONFIG_KEY_0 = "credential.helper";
-            GIT_CONFIG_VALUE_0 = "";
-            GIT_CONFIG_KEY_1 = "credential.helper";
-            GIT_CONFIG_VALUE_1 = "!${package}/bin/gh-token git-credential";
-            GIT_CONFIG_KEY_2 = "credential.useHttpPath";
-            GIT_CONFIG_VALUE_2 = "true";
-            # GitHub's SSH remotes go over https instead, and anything still
-            # over SSH (an alias, a rewrite of the user's own) stops.
-            GIT_CONFIG_KEY_3 = "url.https://github.com/.insteadOf";
-            GIT_CONFIG_VALUE_3 = "git@github.com:";
-            GIT_CONFIG_KEY_4 = "url.https://github.com/.insteadOf";
-            GIT_CONFIG_VALUE_4 = "ssh://git@github.com/";
-            # LFS's filters, whatever git-lfs a config names, are the one that
-            # refuses, and a file they'd filter fails rather than going in or
-            # out as it is.
-            GIT_CONFIG_KEY_5 = "filter.lfs.process";
-            GIT_CONFIG_VALUE_5 = "${gitLfs}/bin/git-lfs filter-process";
-            GIT_CONFIG_KEY_6 = "filter.lfs.smudge";
-            GIT_CONFIG_VALUE_6 = "${gitLfs}/bin/git-lfs smudge -- %f";
-            GIT_CONFIG_KEY_7 = "filter.lfs.clean";
-            GIT_CONFIG_VALUE_7 = "${gitLfs}/bin/git-lfs clean -- %f";
-            GIT_CONFIG_KEY_8 = "filter.lfs.required";
-            GIT_CONFIG_VALUE_8 = "true";
-            GIT_SSH_COMMAND = "${noSsh}";
-            GIT_SSH_VARIANT = "ssh";
-            GIT_EXEC_PATH = "${gitCore}";
-          };
+          default = appEnv socket;
           defaultText = lib.literalMD "GH_TOKEN_SOCKET, and git's and gh's settings for it";
           description = "The environment a process acts as the App in.";
+        };
+        envFile = mkOption {
+          type = types.str;
+          readOnly = true;
+          default = "/etc/gh-token/${name}.env";
+          description = "`env`, as a file of `export` lines for a shell to source.";
+        };
+        gh = mkOption {
+          type = types.package;
+          readOnly = true;
+          default = appGh (appEnv socket);
+          defaultText = lib.literalMD "gh in `env`";
+          description = "gh as the App, whoever runs it, with whatever token they have.";
         };
       };
     }));
   };
 
-  config = lib.mkIf (cfg.apps != { }) {
+  options.burrow.github.machinery = mkOption {
+    type = types.nullOr types.str;
+    default = null;
+    example = "workers";
+    description = ''
+      The App, one of `apps`, the machine's own jobs act as on GitHub:
+      Renovate, the ledger's sync, house-sync, notify, proj-inbox's and
+      proj-watch's own calls, and the Claude jobs the steward, the stall
+      watchdog, renovate-sweep, advisory-watch, firmware-check and
+      HOST-update start.
+      null: they act as burrow.user's own gh login. HOST-update's own push
+      to the flake's origin is the user's git login either way.
+      Work the owner asks for (an issue of theirs in the inbox, a session of
+      theirs) acts as them either way.
+    '';
+  };
+
+  options.burrow.github.machineApp = mkOption {
+    type = types.nullOr types.attrs;
+    readOnly = true;
+    internal = true;
+    default = if cfg.machinery == null || !(cfg.apps ? ${cfg.machinery}) then null
+      else cfg.apps.${cfg.machinery} // { name = cfg.machinery; };
+    description = "`machinery`'s App, with its name, for the modules that run the jobs; null for none.";
+  };
+
+  options.burrow.github.machineGh = mkOption {
+    type = types.package;
+    readOnly = true;
+    internal = true;
+    default = if cfg.machineApp == null then pkgs.gh else cfg.machineApp.gh;
+    defaultText = lib.literalMD "`machinery`'s App's gh, else `pkgs.gh`";
+    description = "gh as the machine's own jobs run it: as `machinery`'s App, else as the user's own login.";
+  };
+
+  config = lib.mkIf (cfg.apps != { } || cfg.machinery != null) {
+    assertions = [{
+      assertion = cfg.machinery == null || cfg.apps ? ${cfg.machinery};
+      message = "burrow.github.machinery is ${toString cfg.machinery}, which isn't one of burrow.github.apps.";
+    }];
     burrow.tools.gh = gh;
     burrow.tools.git-lfs = gitLfs;
     burrow.tools.gh-token = package;
+    environment.etc = lib.mapAttrs' (name: app: lib.nameValuePair "gh-token/${name}.env" {
+      text = lib.concatStrings (lib.mapAttrsToList (k: v: "export ${k}=${lib.escapeShellArg v}\n") app.env);
+    }) cfg.apps;
 
     users.users.gh-token = {
       isSystemUser = true;

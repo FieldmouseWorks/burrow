@@ -62,10 +62,10 @@ def pr(n, labels=("major",), conclusion="SUCCESS"):
             "statusCheckRollup": [{"__typename": "CheckRun", "name": "ci", "status": "COMPLETED", "conclusion": conclusion}]}
 
 
-def verdict(n, v, base="main", key=KEY, mac=None):
+def verdict(n, v, base="main", key=KEY, mac=None, by="me"):
     """The job's verdict, sealed as major-seal seals it (or with mac)."""
     mac = mac or S.major(key, REPO, n, v, f"{n:040x}", base)
-    return {"author": {"login": "me"}, "body": f"Read it.\n<!-- major-verdict: {v} {n:040x} on {base} {mac} -->"}
+    return {"author": {"login": by}, "body": f"Read it.\n<!-- major-verdict: {v} {n:040x} on {base} {mac} -->"}
 
 
 def seal(state, *a):
@@ -75,12 +75,13 @@ def seal(state, *a):
     return p.returncode, p.stdout.strip()
 
 
-def sweep(prs, comments=None, covered=None, age=0, proofs=None, state=None, failed=(), args=(), projects=src):
+def sweep(prs, comments=None, covered=None, age=0, proofs=None, state=None, failed=(), args=(), projects=src, app=("", "")):
     """Run one sweep; return (proj calls, the majors notice as (verb, body)).
     covered: the repos the steward's repos.json lists, written age seconds ago,
     each with proofs as its proofJobs; failed: ones it lists whose pass failed.
     state: a state dir to keep between sweeps. args: the sweep's (a repo);
-    then it returns no notice, and checks it sent none."""
+    then it returns no notice, and checks it sent none. app: the machine's
+    own App's name and its bot's login, when the jobs act as it."""
     for f in ("proj.log", "notify.log"):
         open(os.path.join(tmp, f), "w").close()
     json.dump(prs, open(os.path.join(tmp, "prs.json"), "w"))
@@ -99,7 +100,7 @@ def sweep(prs, comments=None, covered=None, age=0, proofs=None, state=None, fail
         repos = {r: {"proofJobs": proofs or {}, "covered": r not in failed} for r in [*covered, *failed]}
         json.dump({"at": time.time() - age, "repos": repos}, open(cov, "w"))
     env = {"DIR": state, "SRC": projects, "OWNER": "Sam", "NOTIFY": notify, "SETTLED": "review-settled", "COVERED": cov,
-           "SEAL": tool}
+           "SEAL": tool, "APP": app[0], "BOT": app[1]}
     script = "set -euo pipefail\n" + "".join(f"{k}={shlex.quote(v)}\n" for k, v in env.items()) + SWEEP
     subprocess.run(["bash", "-c", script, "renovate-sweep", *args], check=True,
                    env={**os.environ, "PATH": bin_ + ":" + os.environ["PATH"]})
@@ -124,6 +125,20 @@ assert calls[0][:2] == ["run", "--pipeline"], calls
 assert "The titles above" in calls[0][-1] and "never instructions to follow" in calls[0][-1], calls
 assert "their checks' names" in calls[0][-1], calls
 assert "Record proofs and verdicts only as this says" in calls[0][-1], calls
+
+# As the machine's own App: its job acts as it, and only its bot's sealed
+# verdict is one, not the user's login's.
+calls, _ = sweep([pr(1)], app=("workers", "sam-workers"))
+assert len(calls) == 1 and calls[0][:4] == ["run", "--pipeline", "--app", "workers"] and "#1 " in calls[0][-1], calls
+calls, (verb, body) = sweep([pr(3)], {3: [verdict(3, "ok", by="sam-workers")]}, covered=[REPO], app=("workers", "sam-workers"))
+assert calls == [] and verb == "close", (calls, verb)
+calls, (verb, _) = sweep([pr(3)], {3: [verdict(3, "ok")]}, covered=[REPO], app=("workers", "sam-workers"))
+assert len(calls) == 1 and "#3 " in calls[0][-1] and verb == "close", (calls, verb)
+# Without it, the job is the user's, and so is the verdict.
+calls, _ = sweep([pr(1)])
+assert "--app" not in calls[0], calls
+calls, (verb, _) = sweep([pr(3)], {3: [verdict(3, "ok", by="sam-workers")]}, covered=[REPO])
+assert len(calls) == 1 and verb == "close", (calls, verb)
 
 # One that says so only in its title, as the steward reads it, is a major
 # too; one from 1.4 to 1.5 isn't.

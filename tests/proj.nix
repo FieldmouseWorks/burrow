@@ -26,109 +26,15 @@
 # at once (as one that ended in a failure is, a turn in line or running to its
 # deadline, and an await to its own, the watchdog kicked as they change),
 # while a question, a finished job, a stopped one and an --owned job's end
-# aren't, and that a job past its memory cap is killed by its own cgroup's
-# limit rather than the machine running out.
+# aren't, that a job run --app acts as its App every turn, whatever the login
+# sets, or not at all, and a bot's issue's job as the machinery's App, and
+# that a job past its memory cap is killed by its own cgroup's limit rather
+# than the machine running out.
 #
 #   nix build .#checks.x86_64-linux.proj -L
 { self, pkgs }:
 let
-  # Claude, as far as proj can tell: reads the prompt, answers in stream-json.
-  # "sleep N" sleeps; "eat" holds far more memory than the test's job cap;
-  # "twice" answers twice in one turn, "answerfail" answers and then fails;
-  # "linger N" answers, then stays up N seconds, as Claude does while
-  # something it left in the background (a CI watch, a long build) is still
-  # going; "detach N" does too, having left work in its own session that
-  # ignores TERM and writes to the stream. Told so, it answers again, or as
-  # /tmp/cut-mode says: "linger" answers and stays up, "hang" says nothing,
-  # "crash" and "signal" die without a word, "error" fails;
-  # "chatter N" says something every second for N seconds, then answers.
-  # As a job, it says what comes next before it answers (proj done; "ask"
-  # asks, "await" awaits), but "silent" doesn't, and with /tmp/silent nothing
-  # does, even told to; what it's told is kept in /tmp/told.
-  claude = pkgs.writeShellScriptBin "claude" ''
-    prompt=$(cat)
-    echo "$*" >/tmp/args
-    if [ -n "''${PROJ_JOB:-}" ] && [ ! -e /tmp/silent ]; then
-      case $prompt in silent*) ;; *) proj done >/dev/null ;; esac
-    fi
-    case $prompt in
-      sleep*) sleep "''${prompt#sleep }" ;;
-      chatter*) for _ in $(seq "''${prompt#chatter }"); do echo '{"type":"system"}'; sleep 1; done ;;
-      linger*)
-        echo '{"type":"result","session_id":"s","result":"waiting on CI","is_error":false}'
-        sleep "''${prompt#linger }"
-        exit 0 ;;
-      detach*)
-        # shellcheck disable=SC2016
-        setsid bash -c 'trap "" TERM; exec -a proj-stray bash -c "while :; do echo stray; sleep 1; done"' &
-        echo '{"type":"result","session_id":"s","result":"waiting on CI","is_error":false}'
-        sleep "''${prompt#detach }"
-        exit 0 ;;
-      "Your answer ended the turn while"*)
-        echo "$*" >/tmp/cut-args
-        printf '%s' "$prompt" >/tmp/told
-        { pgrep -cf '^proj-stray' || true; } >/tmp/strays
-        echo '{"type":"system","subtype":"told"}'
-        case $(cat /tmp/cut-mode 2>/dev/null) in
-          linger)
-            echo '{"type":"result","session_id":"s","result":"still waiting","is_error":false}'
-            sleep 600 ;;
-          hang) sleep 600 ;;
-          crash) exit 3 ;;
-          signal) kill -KILL $$ ;;
-          error)
-            echo '{"type":"result","session_id":"s","is_error":true,"errors":["boom"]}'
-            exit 1 ;;
-          *) echo '{"type":"result","session_id":"s","result":"the build passed","is_error":false}' ;;
-        esac
-        exit 0 ;;
-      "Your answer didn't say what comes next"*)
-        printf '%s' "$prompt" >/tmp/told
-        echo '{"type":"result","session_id":"s","result":"told","is_error":false}'
-        exit 0 ;;
-      ask) proj ask >/dev/null ;;
-      await*) proj await "''${prompt#await }" >/dev/null ;;
-      # Awaits, then takes a while to answer: what changes meanwhile is news.
-      slowawait*) proj await "''${prompt#slowawait }" >/dev/null; sleep 10 ;;
-      eat) head -c 512M /dev/zero | tail >/dev/null; exit 1 ;;
-      # Answers, then answers again once a background task reports back.
-      twice) echo '{"type":"result","session_id":"s","result":"the answer","is_error":false}' ;;
-      # Answers, then fails as "fail" does.
-      answerfail)
-        echo '{"type":"result","session_id":"s","result":"the answer","is_error":false}'
-        echo '{"type":"result","session_id":"s","is_error":true,"errors":["refused"]}'
-        exit 1 ;;
-      # Fails as Claude does when the API refuses it: a result with no text.
-      fail) echo '{"type":"result","session_id":"s","is_error":true,"errors":["refused"]}'; exit 1 ;;
-      # An issue's task (proj-inbox) that takes a while to answer.
-      *inbox-slow*) sleep 8 ;;
-    esac
-    ${pkgs.jq}/bin/jq -nc --arg r "did $prompt" '{type: "result", session_id: "s", result: $r, is_error: false}'
-  '';
-  # GitHub, as far as proj-watch and proj-inbox can tell: each endpoint's
-  # answer is a file in /tmp/gh that the test writes. A file holding one JSON
-  # value per line is one page per line, which --slurp gathers into an array
-  # as gh does. What's posted (-F body=@-) is added to /tmp/gh/posted.
-  gh = pkgs.writeShellScriptBin "gh" ''
-    [ "$1" = api ] || exit 2
-    shift
-    slurp="" post=""
-    while [ $# -gt 0 ]; do
-      case $1 in
-        --slurp) slurp=1 ;;
-        -F | -f) post=1; shift ;;
-        -*) ;;
-        *) ep=''${1%%\?*} ;;
-      esac
-      shift
-    done
-    if [ -n "$post" ]; then cat >>/tmp/gh/posted; echo '{}'; exit 0; fi
-    # /tmp/gh/slow: GitHub takes its time, as it does.
-    [ -e /tmp/gh/slow ] && sleep 2
-    f="/tmp/gh/''${ep//\//_}"
-    [ -e "$f" ] || exit 1
-    if [ -n "$slurp" ]; then ${pkgs.jq}/bin/jq -cs . "$f"; else cat "$f"; fi
-  '';
+  inherit (import ./proj/stand-ins.nix { inherit pkgs; }) claude gh;
 in
 pkgs.testers.runNixOSTest {
   name = "proj";
@@ -158,8 +64,19 @@ pkgs.testers.runNixOSTest {
         inherit gh;
         inbox = {
           enable = true;
-          authors = [ "sam" ];
+          authors = [ "sam" "sam-steward[bot]" ];
         };
+      };
+      # The App the machine's own work acts as. Its socket isn't asked here:
+      # what's checked is that a job runs in its env.
+      github = {
+        apps.workers = {
+          id = 7;
+          slug = "sam-workers";
+          keyFile = "/run/keys/workers.pem";
+          users = [ "dev" ];
+        };
+        machinery = "workers";
       };
     };
     # proj-watch and proj-inbox run by hand here, never from burrow-events,
@@ -180,6 +97,7 @@ pkgs.testers.runNixOSTest {
     systemd.tmpfiles.rules = [
       "d /data/dev/src/web 0755 dev dev -"
       "d /data/dev/src/ib 0755 dev dev -"
+      "d /data/dev/src/bt 0755 dev dev -"
     ];
     virtualisation.memorySize = 2048;
     # The test framework panics on any OOM, a cgroup's own included; a real
@@ -512,6 +430,35 @@ pkgs.testers.runNixOSTest {
             proj(f'reply {a} "{task}"')
             machine.wait_until_succeeds(f"su - dev -c 'proj state {a}' | grep -x '{st}'", timeout=120)
 
+    with subtest("a job run --app acts as that App every turn, or not at all"):
+        e = proj("run --app workers web showenv")
+        machine.wait_until_succeeds(f"su - dev -c 'proj state {e}' | grep -x done", timeout=120)
+        def acts_as_workers(job):
+            out = proj(f"log {job}")
+            assert out.startswith("did socket=/run/gh-token/workers.sock count=") and not out.endswith(("=0", "=none")), out
+        acts_as_workers(e)
+        assert "[as workers]" in proj("status"), proj("status")
+        # A login's own settings come before the App's, so they can't undo it.
+        machine.succeed("echo 'export GH_TOKEN_SOCKET= GIT_CONFIG_COUNT=0' >/home/dev/.bash_profile")
+        proj(f"reply {e} showenv")
+        machine.wait_until_succeeds(f"grep -x done /data/dev/jobs/{e}/2.outcome", timeout=120)
+        acts_as_workers(e)
+        # Without --app, the user's own.
+        u = proj("run web showenv")
+        machine.wait_until_succeeds(f"su - dev -c 'proj state {u}' | grep -x done", timeout=120)
+        assert proj(f"log {u}") == "did socket= count=0", proj(f"log {u}")
+        machine.succeed("rm /home/dev/.bash_profile")
+        # An App the machine hasn't, or one with a sandbox: refused.
+        machine.fail("su - dev -c 'proj run --app nosuch web showenv'")
+        machine.fail("su - dev -c 'proj run --app ../workers web showenv'")
+        machine.fail("su - dev -c 'proj run --vm --app workers web showenv'")
+        machine.fail(f"su - dev -c 'proj reply --app workers {e} showenv'")
+        # One whose App has gone fails its turn rather than run as the user.
+        machine.succeed(f"echo gone >/data/dev/jobs/{e}/app")
+        proj(f"reply {e} showenv")
+        machine.wait_until_succeeds(f"grep -q 'no GitHub App gone' /data/dev/jobs/{e}/3.outcome", timeout=120)
+        assert not machine.succeed(f"cat /data/dev/jobs/{e}/3.jsonl 2>/dev/null || true").strip()
+
     with subtest("a turn that has waited past maxWait goes ahead of a newer --first"):
         a = proj('run web "sleep 600"')
         b = proj('run web "sleep 600"')
@@ -734,6 +681,25 @@ pkgs.testers.runNixOSTest {
         posted = machine.succeed("cat /tmp/gh/posted")
         first = posted.find("did This task comes from GitHub issue o/r#7")
         assert "On it" in posted and -1 < first < posted.find("did sleep 1"), posted
+
+    with subtest("an issue a bot opened is the machine's work, and acts as the machinery's App"):
+        machine.succeed("su - dev -c 'git -C /data/dev/src/bt init -q && git -C /data/dev/src/bt remote add origin https://github.com/o/b'")
+        bot = {"number": 3, "user": {"login": "sam-steward[bot]"}, "html_url": "https://github.com/o/b/issues/3",
+               "title": "t", "body": "showenv", "state": "open", "labels": [{"name": "claude"}]}
+        person = {**bot, "number": 4, "user": {"login": "sam"}, "html_url": "https://github.com/o/b/issues/4"}
+        github("repos/o/b/issues", json.dumps([bot, person]))
+        github("repos/o/b/issues/3/comments", "[]")
+        github("repos/o/b/issues/4/comments", "[]")
+        machine.succeed("su - dev -c 'proj-inbox o/b'")
+        jobs = dict(line.split()[0::2] for line in machine.succeed("su - dev -c 'proj-inbox status'").splitlines() if line.startswith("o/b#"))
+        for j in jobs.values():
+            machine.wait_until_succeeds(f"su - dev -c 'proj state {j}' | grep -x done", timeout=120)
+        assert machine.succeed(f"cat /data/dev/jobs/{jobs['o/b#3']}/app").strip() == "workers"
+        acts_as_workers(jobs["o/b#3"])
+        machine.fail(f"test -e /data/dev/jobs/{jobs['o/b#4']}/app")
+        assert "socket=none" in proj(f"log {jobs['o/b#4']}")
+        github("repos/o/b/issues", "[]")
+        machine.succeed("su - dev -c 'proj-inbox o/b'")
 
     with subtest("a reply under a minute old waits, and the inbox books when it's old enough"):
         now = machine.succeed("date -u +%Y-%m-%dT%H:%M:%SZ").strip()

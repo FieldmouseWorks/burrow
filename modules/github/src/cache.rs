@@ -10,8 +10,11 @@ use std::path::Path;
 
 use crate::app::Minted;
 
-/// Seconds a token handed out still has to run, at least.
-pub const MARGIN: i64 = 600;
+/// Seconds a token handed out still has to run, at least: fifty minutes, so
+/// one taken at a job's start (Renovate's for a repo, which it never asks
+/// again) lasts the job. GitHub's last an hour, so one is minted at most
+/// every ten minutes for each target.
+pub const MARGIN: i64 = 3000;
 
 /// The token kept under `key`, unless it's within MARGIN of expiring.
 pub fn get(dir: &Path, key: &str, now: i64) -> Option<String> {
@@ -91,6 +94,18 @@ mod tests {
             get(dir.path(), "sam", 0).as_deref(),
             Some(crate::fake::TOKEN)
         );
+    }
+
+    #[test]
+    fn hands_out_only_a_token_with_fifty_minutes_to_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let minted = Minted {
+            token: "ghs_abc".into(),
+            expires: 3600,
+        };
+        put(dir.path(), "sam", &minted).unwrap();
+        assert!(get(dir.path(), "sam", 3600 - 50 * 60 - 1).is_some());
+        assert_eq!(get(dir.path(), "sam", 3600 - 50 * 60), None);
     }
 
     #[test]

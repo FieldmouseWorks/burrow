@@ -12,9 +12,8 @@ it has been there `waitDays` (one waiting on something) or `errorDays` (an
 error or a problem), counted from when a pass first saw it.
 
 A pass reads the dashboard with a conditional request, which GitHub doesn't
-count when nothing changed, and only one an author opened: Renovate runs
-as the machine user's gh login, one of them, and anyone can open an issue
-with that title. Its
+count when nothing changed, and only one Renovate's own login opened
+(`renovates`): anyone can open an issue with that title. Its
 edits start the repo's pass (burrow-events, `issueTitles`), and each
 deadline books one (C.wake), so nothing waits on a timer."""
 
@@ -64,6 +63,14 @@ def read(body):
     return found
 
 
+def renovates(login):
+    """Whether a login, as REST gives it, is the one Renovate runs as: the
+    machine's own App's bot (dashboard.renovate), or without one the machine
+    user's gh login, one of the authors."""
+    bot = CFG["dashboard"]["renovate"]
+    return login == bot if bot else login in CFG["authors"]
+
+
 def find(repo, st):
     """The number of the repo's dashboard: the one it had, else one looked
     for, then once a day while there's none (a repo Renovate doesn't cover
@@ -77,9 +84,11 @@ def find(repo, st):
     q = f'repo:{repo} is:issue is:open in:title "{title}"'
     hits = C.gh("api", "-X", "GET", "search/issues", "-f", f"q={q}", "--jq", "[.items[] | {number, title, user: .user.login}]")
     st.clear()
-    st["n"] = next((i["number"] for i in hits or [] if i.get("title") == title and i.get("user") in CFG["authors"]), None)
-    if not st["n"]:
-        st["next"] = C.NOW + DAY
+    hit = next((i for i in hits or [] if i.get("title") == title and renovates(i.get("user"))), None)
+    if hit:
+        st["n"], st["by"] = hit["number"], hit["user"]
+    else:
+        st["n"], st["next"] = None, C.NOW + DAY
     return st["n"]
 
 
@@ -93,6 +102,11 @@ def watch(repo, mine):
     booked."""
     name = f"dashboard-{repo.replace('/', '_')}.json"
     st = load(name, {})
+    if st.get("n") and not renovates(st.get("by")):
+        # Opened by a login Renovate doesn't run as now (it ran as the user
+        # before the machine had its own App): what it had goes, as below.
+        # An unchanged one is never read again to tell.
+        st = {"next": C.NOW + 2 * HOUR}
     n = find(repo, st)
     if n:
         try:
@@ -102,7 +116,7 @@ def watch(repo, mine):
         if got is not None:
             etag, issue = got
             if (issue.get("state") != "open" or issue.get("title") != CFG["dashboard"]["title"]
-                    or (issue.get("user") or {}).get("login") not in CFG["authors"]):
+                    or not renovates((issue.get("user") or {}).get("login"))):
                 # Deleted, closed (Renovate does that when it's turned off),
                 # renamed, or not one Renovate wrote: what it had goes, and
                 # one in its place is looked for in two hours, by when
@@ -111,7 +125,7 @@ def watch(repo, mine):
                 n = None
             else:
                 was = st.get("items", {})
-                st["etag"] = etag
+                st["etag"], st["by"] = etag, issue["user"]["login"]
                 st["items"] = {k: {**was.get(k, {"since": C.NOW}), "section": s, "what": w, "failing": f}
                                for k, (s, w, f) in read(issue.get("body") or "").items()}
     if n:
