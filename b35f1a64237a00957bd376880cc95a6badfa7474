@@ -1,0 +1,53 @@
+{
+  "conary": "note v1",
+  "change": "3tv9v0krn3rranmmrw779jtd1d",
+  "repo": {
+    "owner": "FieldmouseWorks",
+    "name": "burrow"
+  },
+  "pr": 165,
+  "url": "https://github.com/FieldmouseWorks/burrow/pull/165",
+  "summary": "events: burrow-events in Rust, the first crate in burrow's one workspace",
+  "task": "fieldmouseworks/burrow#164",
+  "author": {
+    "kind": "agent",
+    "login": "TusanHomichi",
+    "session": "https://claude.ai/code/session_01BkHcyEm2wbmtCrFpycgeFM"
+  },
+  "landing": {
+    "revision": "37f5a0fc0df331dadbc69cf3df2b0cdd7a07e75e4049e7be3d4f472d880046dc",
+    "before": "e1b45f9442710b746a41a83fd6abfdf8da6dcd7e",
+    "after": "b35f1a64237a00957bd376880cc95a6badfa7474",
+    "by": {
+      "kind": "status",
+      "login": "fieldmouseworks-steward[bot]"
+    },
+    "at": 1793314288898
+  },
+  "evidence": [
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/40920694250/job/123612787988"
+    },
+    {
+      "kind": "ci",
+      "check": "check / commits",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/40920694250/job/123612787314"
+    },
+    {
+      "kind": "review",
+      "check": "codex",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/165#pullrequestreview-5704748757"
+    },
+    {
+      "kind": "ci",
+      "check": "agents",
+      "result": "pass",
+      "source": "status agents"
+    }
+  ]
+}
