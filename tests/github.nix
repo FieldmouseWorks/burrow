@@ -181,10 +181,28 @@ pkgs.testers.runNixOSTest {
           status, out = machine.execute(dev(fill % "eve/x.git"))
           assert status != 0 and "peter" not in out, (status, out)
 
+      with subtest("git, in the App's env, takes github.com however it's spelled, and stops for the rest of GitHub"):
+          # dev's own login for any host, and an askpass of dev's: neither is
+          # asked, wherever on GitHub.
+          machine.succeed(dev("git config --global --add credential.helper '!f() { echo username=peter; echo password=peter-any; }; f' && printf '#!/bin/sh\\necho peter-askpass\\n' > ~/askpass && chmod +x ~/askpass", app=False))
+          url_fill = "printf 'url=%s\\n\\n' | GIT_ASKPASS=$HOME/askpass git credential fill"
+          for url in ["https://GitHub.com/sam/r.git", "https://github.com:443/sam/r.git", "https://github.com./sam/r.git"]:
+              out = machine.succeed(dev(url_fill % url))
+              assert "password=ghs_2" in out and "peter" not in out, (url, out)
+          for url in ["https://gist.github.com/abc.git", "https://WWW.GitHub.com/sam/r.git"]:
+              status, out = machine.execute(dev(url_fill % url + " 2>&1"))
+              assert status != 0 and "peter" not in out, (url, status, out)
+              assert "peter-any" in machine.succeed(dev(url_fill % url, app=False)), url
+          machine.succeed(dev("git config --global --unset-all credential.helper", app=False))
+
       with subtest("git, in the App's env, reaches GitHub over https, never SSH"):
           for remote in ["git@github.com:sam/r.git", "ssh://git@github.com/sam/r.git"]:
               assert machine.succeed(dev(f"git ls-remote --get-url {remote}")).strip() == "https://github.com/sam/r.git"
               assert machine.succeed(dev(f"git ls-remote --get-url {remote}", app=False)).strip() == remote
+          # Nor over plain http, in any spelling.
+          for remote in ["http://github.com/sam/r.git", "http://GitHub.com:80/sam/r.git"]:
+              status, out = machine.execute(dev(f"git ls-remote {remote} 2>&1"))
+              assert status != 0 and "over https only" in out, (remote, status, out)
           # Whatever would still take dev's SSH keys stops: an alias, a rewrite of dev's own.
           for call in ["git ls-remote gh:sam/r.git", "git -c url.git@github.com:.insteadOf=https://github.com/ ls-remote https://github.com/sam/r.git"]:
               status, out = machine.execute(dev(call + " 2>&1"))
@@ -255,7 +273,7 @@ pkgs.testers.runNixOSTest {
           assert logins("GH_TOKEN_SOCKET=/run/gh-token/none.sock git ls-remote plain") == []
           assert logins("GH_TOKEN_SOCKET=/run/gh-token/none.sock git push plain HEAD:refs/heads/x") == []
 
-      with subtest("git-lfs isn't run in the App's env, however git or anyone starts it"):
+      with subtest("git-lfs isn't run in the App's env, however git or a config starts it"):
           assert "git-lfs/" in machine.succeed(dev("git lfs version", app=False))
           machine.succeed(dev(" && ".join([
               "printf '*.bin filter=lfs -text\\n' > .gitattributes",

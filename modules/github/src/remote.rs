@@ -9,7 +9,7 @@
 //! the headers are cleared by an empty one for exactly that URL, set last
 //! (git takes the headers of the URLs that match it most closely, and of
 //! those the last one's word), and curl's netrc (NETRC, else ~/.netrc) is
-//! an empty one.
+//! an empty one. Plain http to GitHub isn't run at all.
 //!
 //! git-lfs does its own HTTP, sending git's headers and the netrc's login
 //! by its own rules, and nothing like this can stop it. So in the App's env
@@ -52,6 +52,17 @@ fn command(
         };
     };
     match github_url(url) {
+        // No App token goes over plain http, and a redirect could take the
+        // user's login with it.
+        Some(url)
+            if url
+                .get(..7)
+                .is_some_and(|s| s.eq_ignore_ascii_case("http://")) =>
+        {
+            return Err(Error::refused(
+                "acting as the App, github.com is reached over https only",
+            ));
+        }
         Some(url) => {
             helper
                 .arg(remote)
@@ -211,6 +222,15 @@ mod tests {
         }
         // git always says which URL: refused without one.
         assert!(run(&["origin"], socket).is_err());
+        // GitHub over plain http, in any spelling, isn't run as the App.
+        for url in [
+            "http://github.com/sam/r",
+            "HTTP://GitHub.com:80/sam/r",
+            "http://www.github.com/sam/r",
+        ] {
+            assert!(run(&["origin", url], socket).is_err(), "{url}");
+            assert!(run(&["origin", url], None).is_ok(), "{url}");
+        }
     }
 
     #[test]

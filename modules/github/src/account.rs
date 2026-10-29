@@ -23,7 +23,7 @@ use std::process::Command;
 
 use crate::command::{self, Call};
 use crate::error::Error;
-use crate::target::{is_owner, target_of};
+use crate::target::{host_name, is_owner, target_of};
 
 /// Where gh looks besides the call, and what gh's help says of a command.
 pub struct Context<'a> {
@@ -41,7 +41,7 @@ pub struct Context<'a> {
 
 pub fn account(args: &[String], context: &Context) -> Result<String, Error> {
     if let Some(host) = context.gh_host.as_deref().filter(|h| !h.is_empty()) {
-        github_com("GH_HOST", host)?;
+        github_com("GH_HOST", host, "443")?;
     }
     let call = command::read(args, context.help)?;
     let mut named: Vec<String> = Vec::new();
@@ -87,7 +87,9 @@ fn named_in(call: &Call) -> Result<Vec<String>, Error> {
             // for --repo, gh's own host, whoever's logged in.
             "repo" | "hostname" | "owner" | "org" if value.is_empty() => {}
             "repo" => owners.push(repo_owner("--repo", value)?),
-            "hostname" => github_com("--hostname", value)?,
+            "hostname" => {
+                github_com("--hostname", value, "443")?;
+            }
             // gh's own word for whoever's logged in.
             "owner" | "org" if value == "@me" => {}
             "owner" | "org" if is_owner(value) => owners.push(value.clone()),
@@ -101,8 +103,8 @@ fn named_in(call: &Call) -> Result<Vec<String>, Error> {
     }
     for (i, (arg, names)) in call.args.iter().enumerate() {
         match (role(&call.path, i, names), url(arg)) {
-            (Role::Endpoint | Role::Url, Some((host, path))) => {
-                owners.extend(url_owner(host, path)?);
+            (Role::Endpoint | Role::Url, Some((host, path, port))) => {
+                owners.extend(url_owner(host, path, port)?);
             }
             (Role::Endpoint, None) => owners.extend(endpoint_owner(arg)),
             (Role::Repo, _) => owners.push(repo_owner("the repository", arg)?),
@@ -162,18 +164,27 @@ fn role(path: &[String], i: usize, names: &[String]) -> Role {
     }
 }
 
-/// A URL's host and path.
-fn url(arg: &str) -> Option<(&str, &str)> {
-    arg.strip_prefix("https://")
-        .or_else(|| arg.strip_prefix("http://"))
-        .map(|rest| rest.split_once('/').unwrap_or((rest, "")))
+/// A URL's host (and port, if it gives one), its path, and its scheme's
+/// default port.
+fn url(arg: &str) -> Option<(&str, &str, &'static str)> {
+    let (rest, port) =
+        [("https://", "443"), ("http://", "80")]
+            .iter()
+            .find_map(|&(scheme, port)| {
+                let given = arg.get(..scheme.len())?;
+                given
+                    .eq_ignore_ascii_case(scheme)
+                    .then(|| (&arg[scheme.len()..], port))
+            })?;
+    let (host, path) = rest.split_once('/').unwrap_or((rest, ""));
+    Some((host, path, port))
 }
 
 /// The account a github.com URL is under: api.github.com's by its endpoint.
 /// Another host's is refused.
-fn url_owner(host: &str, path: &str) -> Result<Option<String>, Error> {
-    github_com("a URL on", host)?;
-    Ok(if host.eq_ignore_ascii_case("api.github.com") {
+fn url_owner(host: &str, path: &str, port: &str) -> Result<Option<String>, Error> {
+    let name = github_com("a URL on", host, port)?;
+    Ok(if name == "api.github.com" {
         endpoint_owner(path)
     } else {
         target_of(&format!("github.com/{path}")).map(|t| t.owner)
@@ -195,8 +206,8 @@ fn endpoint_owner(endpoint: &str) -> Option<String> {
 /// The account of a `[github.com/]OWNER/REPO` or a URL, given as `what`.
 fn repo_owner(what: &str, v: &str) -> Result<String, Error> {
     let target = match url(v) {
-        Some((host, path)) => {
-            github_com(what, host)?;
+        Some((host, path, port)) => {
+            github_com(what, host, port)?;
             target_of(&format!("github.com/{path}"))
         }
         None => target_of(v),
@@ -207,15 +218,14 @@ fn repo_owner(what: &str, v: &str) -> Result<String, Error> {
 }
 
 /// github.com, the only host the App's token is for, as gh reads a host:
-/// in any case, and with any subdomain (`api.`, `www.`).
-fn github_com(what: &str, host: &str) -> Result<(), Error> {
-    let lower = host.to_ascii_lowercase();
-    if lower == "github.com" || lower.ends_with(".github.com") {
-        Ok(())
-    } else {
-        Err(Error::refused(format!(
+/// in any case, with any subdomain (`api.`, `www.`), and on `default_port`
+/// or none (`host_name`). Its name, as read.
+fn github_com(what: &str, host: &str, default_port: &str) -> Result<String, Error> {
+    match host_name(host, default_port) {
+        Some(name) if name == "github.com" || name.ends_with(".github.com") => Ok(name),
+        _ => Err(Error::refused(format!(
             "{what} {host:?}: the App's token is for github.com"
-        )))
+        ))),
     }
 }
 
@@ -340,6 +350,9 @@ mod tests {
             ("pr -R sam/r view 5", "sam"),
             ("pr view https://github.com/sam/r/pull/5", "sam"),
             ("pr view https://www.GitHub.com/sam/r/pull/5", "sam"),
+            ("pr view HTTPS://github.com:443/sam/r/pull/5", "sam"),
+            ("pr view 5 -R https://GitHub.com./sam/r", "sam"),
+            ("api https://api.GitHub.com:443/repos/sam/r", "sam"),
             ("pr checkout --force https://github.com/sam/r/pull/5", "sam"),
             (
                 "co -b https://github.com/eve/x https://github.com/sam/r/pull/5",
@@ -446,6 +459,8 @@ mod tests {
             "api --hostname github.com.example repos/sam/r",
             "pr view https://sam.ghe.com/sam/r/pull/5",
             "pr view https://gitlab.com/eve/x",
+            "pr view https://github.com:8443/sam/r/pull/5",
+            "pr view http://github.com:443/sam/r/pull/5",
             "api https://ghe.example.com/api/v3/repos/sam/r",
             "repo clone https://ghe.example.com/sam/r",
             // gh can't say what it is, or would refuse it itself.

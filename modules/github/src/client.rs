@@ -5,8 +5,9 @@
 //! - `get TARGET`: prints a token.
 //! - `git-credential OP`: git's credential helper, for the repo git names
 //!   (credential.useHttpPath). It's asked before gh's login and, with the
-//!   socket set, gives an answer or stops git: it never lets git fall back
-//!   to the user's own login.
+//!   socket set, gives an answer or stops git for github.com and its
+//!   subdomains, however git spells them: it never lets git fall back to the
+//!   user's own login, or to asking for one.
 //! - `gh GH ARGS...`: runs GH with a token for the account the call is
 //!   about (account.rs), unless it's given one already in GH_TOKEN.
 
@@ -21,7 +22,7 @@ use std::time::Duration;
 
 use crate::account::{self, Context};
 use crate::error::Error;
-use crate::target::target_of;
+use crate::target::{host_name, target_of};
 
 /// The longest answer read: a token is shorter, and so is GitHub's no.
 const MAX_ANSWER: u64 = 4096;
@@ -76,16 +77,28 @@ pub fn git_credential(
             _ => {}
         }
     }
-    // Another host's login isn't the App's to give.
-    if protocol.as_deref() != Some("https") || host.as_deref() != Some("github.com") {
+    // The host as git spells it (GitHub.com, github.com:443), read as git
+    // reads it. Another host's login isn't the App's to give.
+    let https = protocol.as_deref() == Some("https");
+    let name = host
+        .as_deref()
+        .and_then(|h| host_name(h, if https { "443" } else { "80" }));
+    let Some(name) = name.filter(|n| n == "github.com" || n.ends_with(".github.com")) else {
         return Ok(());
-    }
-    // That repo's token, not its account's.
-    let got = match path.and_then(|p| target_of(&format!("github.com/{p}"))) {
-        Some(repo) => fetch(socket, &repo.to_string()),
-        None => Err(Error::refused(
-            "git didn't say which repo (credential.useHttpPath)",
-        )),
+    };
+    let got = if !https || name != "github.com" {
+        Err(Error::refused(format!(
+            "the App's tokens are for https://github.com, not {}://{name}",
+            protocol.as_deref().unwrap_or("")
+        )))
+    } else {
+        // That repo's token, not its account's.
+        match path.and_then(|p| target_of(&format!("github.com/{p}"))) {
+            Some(repo) => fetch(socket, &repo.to_string()),
+            None => Err(Error::refused(
+                "git didn't say which repo (credential.useHttpPath)",
+            )),
+        }
     };
     match got {
         Ok(token) => writeln!(output, "username=x-access-token\npassword={token}"),
@@ -277,25 +290,59 @@ mod tests {
                 "{no_repo:?}"
             );
         }
-        // Not GitHub, not https, not a get, or no socket: the next helper's.
-        assert_eq!(
-            credential(
-                "get",
-                "protocol=https\nhost=gitlab.com\npath=sam/r\n",
-                Some(&path)
-            ),
-            ""
-        );
-        assert_eq!(
-            credential(
-                "get",
-                "protocol=http\nhost=github.com\npath=sam/r\n",
-                Some(&path)
-            ),
-            ""
-        );
+        // Another host, not a get, or no socket: the next helper's.
+        for host in ["gitlab.com", "github.com.eve.com", "github.com:8443"] {
+            assert_eq!(
+                credential(
+                    "get",
+                    &format!("protocol=https\nhost={host}\npath=sam/r\n"),
+                    Some(&path)
+                ),
+                "",
+                "{host}"
+            );
+        }
         assert_eq!(credential("store", asked, Some(&path)), "");
         assert_eq!(credential("get", asked, None), "");
+    }
+
+    #[test]
+    fn reads_github_com_as_git_spells_it_and_stops_git_for_the_rest_of_github() {
+        let (_dir, path, handle) = serve(vec!["token ghs_a\n", "token ghs_b\n", "token ghs_c\n"]);
+        for (host, token) in [
+            ("GitHub.com", "a"),
+            ("github.com:443", "b"),
+            ("github.com.", "c"),
+        ] {
+            assert_eq!(
+                credential(
+                    "get",
+                    &format!("protocol=https\nhost={host}\npath=sam/r.git\n"),
+                    Some(&path)
+                ),
+                format!("username=x-access-token\npassword=ghs_{token}\n"),
+                "{host}"
+            );
+        }
+        assert_eq!(handle.join().unwrap(), ["sam/r\n"; 3]);
+        // GitHub's, but no App's token goes there: git stops, rather than
+        // asking the user's helpers or askpass.
+        for (protocol, host) in [
+            ("https", "gist.github.com"),
+            ("https", "WWW.GitHub.com:443"),
+            ("http", "github.com"),
+            ("http", "GitHub.com:80"),
+        ] {
+            assert_eq!(
+                credential(
+                    "get",
+                    &format!("protocol={protocol}\nhost={host}\npath=sam/r\n"),
+                    Some(&path)
+                ),
+                "quit=1\n",
+                "{protocol}://{host}"
+            );
+        }
     }
 
     #[test]

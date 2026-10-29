@@ -18,7 +18,13 @@
 # login, in a file or the keyring, is out of its reach. Without that env,
 # all of them are the user's, as before.
 #
-# Only github.com: the env's settings for git and gh are its.
+# The env closes what git and gh do by themselves and from config files.
+# What a caller puts on git's own command line (`-c`, GIT_CONFIG_PARAMETERS)
+# comes after it, so a call that names another program for git to run (a
+# git-lfs, a credential helper) runs it: a process acting as the App runs as
+# the user, and can always reach the user's own files.
+#
+# Only github.com, over https: the env's settings for git and gh are its.
 inputs:
 { config, lib, pkgs, ... }:
 let
@@ -119,30 +125,37 @@ in
             GITHUB_ENTERPRISE_TOKEN = "";
             # Set in the environment, so they come after every config file's:
             # the empty helper clears the ones before it.
-            GIT_CONFIG_COUNT = "9";
+            GIT_CONFIG_COUNT = "11";
+            # git matches these as it reads hosts (any case, the default
+            # port), and gh-token's helper answers or stops git for every
+            # spelling of github.com and its subdomains.
             GIT_CONFIG_KEY_0 = "credential.https://github.com.helper";
             GIT_CONFIG_VALUE_0 = "";
             GIT_CONFIG_KEY_1 = "credential.https://github.com.helper";
             GIT_CONFIG_VALUE_1 = "!${package}/bin/gh-token git-credential";
             GIT_CONFIG_KEY_2 = "credential.https://github.com.useHttpPath";
             GIT_CONFIG_VALUE_2 = "true";
+            GIT_CONFIG_KEY_3 = "credential.https://*.github.com.helper";
+            GIT_CONFIG_VALUE_3 = "";
+            GIT_CONFIG_KEY_4 = "credential.https://*.github.com.helper";
+            GIT_CONFIG_VALUE_4 = "!${package}/bin/gh-token git-credential";
             # GitHub's SSH remotes go over https instead, and anything still
             # over SSH (an alias, a rewrite of the user's own) stops.
-            GIT_CONFIG_KEY_3 = "url.https://github.com/.insteadOf";
-            GIT_CONFIG_VALUE_3 = "git@github.com:";
-            GIT_CONFIG_KEY_4 = "url.https://github.com/.insteadOf";
-            GIT_CONFIG_VALUE_4 = "ssh://git@github.com/";
+            GIT_CONFIG_KEY_5 = "url.https://github.com/.insteadOf";
+            GIT_CONFIG_VALUE_5 = "git@github.com:";
+            GIT_CONFIG_KEY_6 = "url.https://github.com/.insteadOf";
+            GIT_CONFIG_VALUE_6 = "ssh://git@github.com/";
             # LFS's filters, whatever git-lfs a config names, are the one that
             # refuses, and a file they'd filter fails rather than going in or
             # out as it is.
-            GIT_CONFIG_KEY_5 = "filter.lfs.process";
-            GIT_CONFIG_VALUE_5 = "${gitLfs}/bin/git-lfs filter-process";
-            GIT_CONFIG_KEY_6 = "filter.lfs.smudge";
-            GIT_CONFIG_VALUE_6 = "${gitLfs}/bin/git-lfs smudge -- %f";
-            GIT_CONFIG_KEY_7 = "filter.lfs.clean";
-            GIT_CONFIG_VALUE_7 = "${gitLfs}/bin/git-lfs clean -- %f";
-            GIT_CONFIG_KEY_8 = "filter.lfs.required";
-            GIT_CONFIG_VALUE_8 = "true";
+            GIT_CONFIG_KEY_7 = "filter.lfs.process";
+            GIT_CONFIG_VALUE_7 = "${gitLfs}/bin/git-lfs filter-process";
+            GIT_CONFIG_KEY_8 = "filter.lfs.smudge";
+            GIT_CONFIG_VALUE_8 = "${gitLfs}/bin/git-lfs smudge -- %f";
+            GIT_CONFIG_KEY_9 = "filter.lfs.clean";
+            GIT_CONFIG_VALUE_9 = "${gitLfs}/bin/git-lfs clean -- %f";
+            GIT_CONFIG_KEY_10 = "filter.lfs.required";
+            GIT_CONFIG_VALUE_10 = "true";
             GIT_SSH_COMMAND = "${noSsh}";
             GIT_SSH_VARIANT = "ssh";
             GIT_EXEC_PATH = "${gitCore}";

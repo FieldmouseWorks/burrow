@@ -62,23 +62,51 @@ pub fn is_repo(s: &str) -> bool {
         && s != ".."
 }
 
+/// A host as a URL or git's credential request spells it, read as git and
+/// gh read one: its name in lower case and without a trailing dot, if its
+/// port is none or `default_port`, its scheme's. None on another port.
+pub fn host_name(host: &str, default_port: &str) -> Option<String> {
+    let (name, port) = match host.rsplit_once(':') {
+        Some((name, port)) => (name, Some(port)),
+        None => (host, None),
+    };
+    if port.is_some_and(|p| p != default_port) {
+        return None;
+    }
+    Some(name.strip_suffix('.').unwrap_or(name).to_ascii_lowercase())
+}
+
 /// The repo a GitHub URL, a git remote or a `-R` value names:
 /// `https://github.com/OWNER/REPO`, `git@github.com:OWNER/REPO.git`,
 /// `ssh://git@github.com/OWNER/REPO`, `github.com/OWNER/REPO` or
-/// `OWNER/REPO`, and anything under it (`/pull/5`, `.git/info/lfs`).
-/// Another host names none.
+/// `OWNER/REPO`, and anything under it (`/pull/5`, `.git/info/lfs`). The
+/// host is github.com in any spelling `host_name` reads as it. Another host
+/// names none.
 pub fn target_of(s: &str) -> Option<Target> {
-    let rest = ["https://", "http://", "ssh://"]
-        .iter()
-        .find_map(|scheme| s.strip_prefix(scheme))
-        .unwrap_or(s);
-    let rest = rest.strip_prefix("git@").unwrap_or(rest);
-    let path = match rest.strip_prefix("github.com") {
-        Some(p) => p.strip_prefix('/').or_else(|| p.strip_prefix(':'))?,
-        // No scheme or user, so OWNER/REPO and nothing else: a path of more
-        // parts is no repo of GitHub's.
-        None if rest.len() == s.len() && s.matches('/').count() == 1 => rest,
-        None => return None,
+    let schemes = [("https://", "443"), ("http://", "80"), ("ssh://", "22")];
+    let scheme = schemes.iter().find(|(scheme, _)| {
+        s.get(..scheme.len())
+            .is_some_and(|p| p.eq_ignore_ascii_case(scheme))
+    });
+    let path = match scheme {
+        // SCHEME://[USER@]HOST[:PORT]/OWNER/REPO
+        Some((scheme, port)) => {
+            let rest = &s[scheme.len()..];
+            let (host, path) = rest.split_once('/')?;
+            let host = host.split_once('@').map_or(host, |(_, h)| h);
+            (host_name(host, port)? == "github.com").then_some(path)?
+        }
+        // [git@]github.com:OWNER/REPO or github.com/OWNER/REPO
+        None => {
+            let rest = s.strip_prefix("git@").unwrap_or(s);
+            match rest.split_once([':', '/']) {
+                Some((host, path)) if host_name(host, "").as_deref() == Some("github.com") => path,
+                // No scheme or user, so OWNER/REPO and nothing else: a path
+                // of more parts is no repo of GitHub's.
+                _ if rest.len() == s.len() && s.matches('/').count() == 1 => rest,
+                _ => return None,
+            }
+        }
     };
     let mut parts = path.split('/');
     let owner = parts.next()?;
@@ -133,8 +161,37 @@ mod tests {
             ("a/b/c", None),
             ("./sam/r", None),
             ("https://sam/r", None),
+            // github.com however git and gh spell it.
+            ("https://GitHub.com/sam/r", Some("sam")),
+            ("HTTPS://github.com:443/sam/r", Some("sam")),
+            ("https://github.com./sam/r", Some("sam")),
+            ("ssh://git@GitHub.com:22/sam/r", Some("sam")),
+            ("git@GitHub.com:sam/r.git", Some("sam")),
+            ("GitHub.com/sam/r", Some("sam")),
+            // Not its own port, nor its port's path read as a repo.
+            ("https://github.com:8443/sam/r", None),
+            ("https://github.com:22/sam/r", None),
+            ("https://www.github.com/sam/r", None),
+            ("https://peter@github.com/sam/r", Some("sam")),
+            ("https://peter@github.com@eve.com/sam/r", None),
         ] {
             assert_eq!(target_of(s).map(|t| t.owner).as_deref(), owner, "{s}");
+        }
+    }
+
+    #[test]
+    fn reads_a_host_as_git_and_gh_do() {
+        for (host, port, name) in [
+            ("github.com", "443", Some("github.com")),
+            ("GitHub.com", "443", Some("github.com")),
+            ("github.com:443", "443", Some("github.com")),
+            ("github.com.", "443", Some("github.com")),
+            ("WWW.GitHub.com.:443", "443", Some("www.github.com")),
+            ("github.com:8443", "443", None),
+            ("github.com:80", "443", None),
+            ("github.com:", "443", None),
+        ] {
+            assert_eq!(host_name(host, port).as_deref(), name, "{host}");
         }
     }
 
