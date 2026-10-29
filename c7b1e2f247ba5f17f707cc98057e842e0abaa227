@@ -1,0 +1,47 @@
+{
+  "conary": "note v1",
+  "change": "3mr69njc135s8q0c93rgec167j",
+  "repo": {
+    "owner": "fieldmouseworks",
+    "name": "burrow"
+  },
+  "pr": 126,
+  "url": "https://github.com/fieldmouseworks/burrow/pull/126",
+  "summary": "watchdog: catch work that has stopped moving before anyone has to",
+  "task": null,
+  "author": {
+    "kind": "agent",
+    "login": "TusanHomichi",
+    "session": "https://claude.ai/code/session_01BkHcyDhMu74PjVCmyWpXkF"
+  },
+  "landing": {
+    "revision": "c90b7d4ea26ba5b171cc1b8d049a7e27198257cfb07a7b3b2c12d4803c8d9a92",
+    "before": "8dd0ee7427d950317189d8f408e6359ea14bdca1",
+    "after": "c7b1e2f247ba5f17f707cc98057e842e0abaa227",
+    "by": {
+      "kind": "status",
+      "login": "TusanHomichi"
+    },
+    "at": 1793254825752
+  },
+  "evidence": [
+    {
+      "kind": "review",
+      "check": "codex",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/126#pullrequestreview-5692939502"
+    },
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/40818809787/job/123266157007"
+    },
+    {
+      "kind": "ci",
+      "check": "agents",
+      "result": "pass",
+      "source": "status agents"
+    }
+  ]
+}
