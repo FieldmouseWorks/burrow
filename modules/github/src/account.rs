@@ -83,6 +83,9 @@ fn named_in(call: &Call) -> Result<Vec<String>, Error> {
     let mut owners = Vec::new();
     for (flag, value) in &call.values {
         match flag.as_str() {
+            // Empty, it's not given, as gh reads it: GH_REPO and the checkout
+            // for --repo, gh's own host, whoever's logged in.
+            "repo" | "hostname" | "owner" | "org" if value.is_empty() => {}
             "repo" => owners.push(repo_owner("--repo", value)?),
             "hostname" => github_com("--hostname", value)?,
             // gh's own word for whoever's logged in.
@@ -379,6 +382,17 @@ mod tests {
             ("search issues --repo sam/r --repo sam/q", "sam"),
             ("search issues --owner sam,Sam", "sam"),
             (r#"search issues --owner "sam" -R sam/r"#, "sam"),
+            // Another flag's last value, as gh keeps it; empty, it's none.
+            ("pr view 5 -R eve/x --repo sam/r", "sam"),
+            ("-R eve/x pr -Reve/q view 5 -R=sam/r", "sam"),
+            ("secret set X --org eve -o sam", "sam"),
+            ("pr view 5 -R eve/x --repo=", "eve"),
+            (
+                "api --hostname ghe.example.com --hostname github.com repos/sam/r",
+                "sam",
+            ),
+            ("api --hostname= repos/sam/r", "sam"),
+            ("repo fork pat/x --org eve --org=", "eve"),
             // A flag's value is data, wherever the flag is and however given.
             (
                 "issue -R sam/r comment 5 --body https://github.com/eve/x",
@@ -416,6 +430,10 @@ mod tests {
             "search issues --repo sam/r,eve/x",
             "search issues --owner sam,eve",
             "search issues --owner sam --repo eve/x",
+            // The last value is the one checked.
+            "pr view 5 -R sam/r --repo eve/x -R ghe.example.com/sam/r",
+            "api --hostname github.com --hostname=ghe.example.com repos/sam/r",
+            "pr view 5 -R eve/x --repo sam/r -R not!one",
             // Not an account, where only one goes.
             "search issues --owner sam,not!one",
             "secret set X --org not!one",

@@ -8,9 +8,10 @@
 //! value. The rest is parsed as pflag parses it, with the command's flags and
 //! the ones it inherits: `--name value`, `--name=value`, `-n value`,
 //! `-nvalue`, `-n=value`, short flags run together, and `--` ending the
-//! flags. A list's value (the help's `strings`) is the values pflag reads
-//! from it, as CSV. A flag gh's help doesn't list is refused, as gh refuses
-//! it, and so is a list pflag couldn't read.
+//! flags. A flag given twice keeps its last value, but a list (the help's
+//! `strings`) keeps every value, each read from it as CSV, as pflag reads
+//! them. A flag gh's help doesn't list is refused, as gh refuses it, and so
+//! is a list pflag couldn't read.
 
 use std::collections::HashMap;
 
@@ -20,8 +21,8 @@ use crate::error::Error;
 pub struct Call {
     /// The command, aliases resolved: `pr checkout` for `co`.
     pub path: Vec<String>,
-    /// The values given to its flags that take one, by long name: each of a
-    /// list's on its own.
+    /// The values its flags take, by long name, as pflag keeps them: a
+    /// flag's last value, and every value of a list's, each on its own.
     pub values: Vec<(String, String)>,
     /// Its positional arguments, each with the names its usage gives that
     /// place (`url` in `[<number> | <url> | <branch>]`), or none.
@@ -201,6 +202,8 @@ impl Help {
                 })?;
                 values.extend(list.into_iter().map(|v| (name.to_owned(), v)));
             } else {
+                // Given again, the flag has its new value, not both.
+                values.retain(|(n, _)| n != name);
                 values.push((name.to_owned(), value));
             }
             Ok(())
@@ -671,6 +674,25 @@ mod tests {
             [v("owner", r#"a"b"#)]
         );
         assert_eq!(values("search issues --owner="), []);
+        // Another's last value is its value, however and wherever given.
+        assert_eq!(
+            values("pr view 5 -R eve/x --repo sam/r"),
+            [v("repo", "sam/r")]
+        );
+        assert_eq!(values("pr -Reve/x view 5 -R=sam/r"), [v("repo", "sam/r")]);
+        assert_eq!(
+            values("--repo=eve/x pr view -wRsam/r 5"),
+            [v("repo", "sam/r")]
+        );
+        assert_eq!(
+            values("api --hostname ghe.example.com repos/sam/r --hostname github.com"),
+            [v("hostname", "github.com")]
+        );
+        assert_eq!(
+            values("issue comment 5 -R sam/r -b x -R eve/x -b y"),
+            [v("repo", "eve/x"), v("body", "y")]
+        );
+        assert_eq!(values("pr view 5 -R sam/r --repo="), [v("repo", "")]);
         // Another's is one value, commas and all.
         assert_eq!(values("issue comment 5 -b a,b"), [v("body", "a,b")]);
         // A flag gh doesn't list, or one missing its value: refused.

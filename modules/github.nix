@@ -13,9 +13,10 @@
 # the repo git names. Neither can fall back to the user's own login: git's
 # other helpers are cleared, git doesn't reach GitHub over SSH (its SSH
 # remotes go over https), GitHub hears none of the logins git's config could
-# send without asking the helper (a URL's, a header's: ./github/src/remote.rs),
-# and gh's own login, in a file or the keyring, is out of its reach. Without
-# that env, both are the user's, as before.
+# send without asking the helper (a URL's, a header's, the netrc's:
+# ./github/src/remote.rs), git-lfs, which would, isn't run, and gh's own
+# login, in a file or the keyring, is out of its reach. Without that env,
+# all of them are the user's, as before.
 #
 # Only github.com: the env's settings for git and gh are its.
 inputs:
@@ -31,13 +32,22 @@ let
     exit 1
   '';
 
+  # git-lfs as everyone runs it: never in an App's env, where it would send
+  # the user's own login (remote.rs), git-lfs otherwise.
+  gitLfs = pkgs.writeShellScriptBin "git-lfs" ''
+    exec ${package}/bin/gh-token git-lfs ${pkgs.git-lfs}/bin/git-lfs "$@"
+  '';
+
   # git's own helpers (GIT_EXEC_PATH), but for http and https: gh-token's
-  # git-remote, which runs git's with only the credential helper's login. The
-  # machine's git's, so the git a process in the env runs is it.
+  # git-remote, which runs git's with only the credential helper's login.
+  # And git-lfs: git puts these first on the PATH of what it runs (`git lfs`,
+  # hooks, filters). The machine's git's, so the git a process in the env
+  # runs is it.
   git = config.programs.git.package;
   gitCore = pkgs.runCommand "gh-token-git-core" { } ''
     mkdir $out
     for f in ${git}/libexec/git-core/*; do ln -s "$f" $out/; done
+    ln -s ${gitLfs}/bin/git-lfs $out/git-lfs
     for helper in git-remote-http git-remote-https; do
       rm $out/$helper
       printf '#!%s\nexec %s git-remote %s "$@"\n' ${pkgs.runtimeShell} ${package}/bin/gh-token \
@@ -109,7 +119,7 @@ in
             GITHUB_ENTERPRISE_TOKEN = "";
             # Set in the environment, so they come after every config file's:
             # the empty helper clears the ones before it.
-            GIT_CONFIG_COUNT = "5";
+            GIT_CONFIG_COUNT = "9";
             GIT_CONFIG_KEY_0 = "credential.https://github.com.helper";
             GIT_CONFIG_VALUE_0 = "";
             GIT_CONFIG_KEY_1 = "credential.https://github.com.helper";
@@ -122,6 +132,17 @@ in
             GIT_CONFIG_VALUE_3 = "git@github.com:";
             GIT_CONFIG_KEY_4 = "url.https://github.com/.insteadOf";
             GIT_CONFIG_VALUE_4 = "ssh://git@github.com/";
+            # LFS's filters, whatever git-lfs a config names, are the one that
+            # refuses, and a file they'd filter fails rather than going in or
+            # out as it is.
+            GIT_CONFIG_KEY_5 = "filter.lfs.process";
+            GIT_CONFIG_VALUE_5 = "${gitLfs}/bin/git-lfs filter-process";
+            GIT_CONFIG_KEY_6 = "filter.lfs.smudge";
+            GIT_CONFIG_VALUE_6 = "${gitLfs}/bin/git-lfs smudge -- %f";
+            GIT_CONFIG_KEY_7 = "filter.lfs.clean";
+            GIT_CONFIG_VALUE_7 = "${gitLfs}/bin/git-lfs clean -- %f";
+            GIT_CONFIG_KEY_8 = "filter.lfs.required";
+            GIT_CONFIG_VALUE_8 = "true";
             GIT_SSH_COMMAND = "${noSsh}";
             GIT_SSH_VARIANT = "ssh";
             GIT_EXEC_PATH = "${gitCore}";
@@ -135,6 +156,7 @@ in
 
   config = lib.mkIf (cfg.apps != { }) {
     burrow.tools.gh = gh;
+    burrow.tools.git-lfs = gitLfs;
     burrow.tools.gh-token = package;
 
     users.users.gh-token = {

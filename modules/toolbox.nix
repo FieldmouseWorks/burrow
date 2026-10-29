@@ -10,9 +10,10 @@ inputs:
 
   config = lib.mkIf config.burrow.toolbox.enable {
     environment.systemPackages = with pkgs; [
-      # VCS. gh is github.nix's, which can act as an App, where there is one.
+      # VCS. gh and git-lfs are github.nix's, which know an App's env, where
+      # there is one.
       (config.burrow.tools.gh or gh)
-      git-lfs
+      (config.burrow.tools.git-lfs or git-lfs)
       jujutsu
       mergiraf
       # search and files

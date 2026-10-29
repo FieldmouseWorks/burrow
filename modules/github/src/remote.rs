@@ -1,12 +1,19 @@
 //! git's http and https (git-remote-http, git-remote-https), as the App's
 //! env has git run them (`GIT_EXEC_PATH`): a github.com remote hears only
-//! what the credential helper gives git, the App's token. Two things git
+//! what the credential helper gives git, the App's token. Three things git
 //! would send instead, without asking the helper: the user and password in
-//! the URL, and the headers `http.extraHeader` adds (an Authorization of the
-//! user's, say), from any config file or `-c`, for any URL that matches. So
-//! the URL goes without its user and password, and the headers are cleared
-//! by an empty one for exactly that URL, set last: git takes the headers of
-//! the URLs that match it most closely, and of those the last one's word.
+//! the URL; the headers `http.extraHeader` adds (an Authorization of the
+//! user's, say), from any config file or `-c`, for any URL that matches; and
+//! a login of the user's in their netrc, which curl answers GitHub's 401
+//! with before git sees it. So the URL goes without its user and password,
+//! the headers are cleared by an empty one for exactly that URL, set last
+//! (git takes the headers of the URLs that match it most closely, and of
+//! those the last one's word), and curl's netrc (NETRC, else ~/.netrc) is
+//! an empty one.
+//!
+//! git-lfs does its own HTTP, sending git's headers and the netrc's login
+//! by its own rules, and nothing like this can stop it. So in the App's env
+//! it isn't run at all: `lfs` refuses it.
 
 use std::os::unix::process::CommandExt;
 use std::path::Path;
@@ -49,7 +56,8 @@ fn command(
             helper
                 .arg(remote)
                 .arg(&url)
-                .env("GIT_CONFIG_PARAMETERS", no_headers(given, &url));
+                .env("GIT_CONFIG_PARAMETERS", no_headers(given, &url))
+                .env("NETRC", "/dev/null");
         }
         // Another host's login isn't the App's to keep from it.
         None => {
@@ -57,6 +65,18 @@ fn command(
         }
     }
     Ok(helper)
+}
+
+/// git-lfs, REAL, with `args`, but never in the App's env (with the
+/// socket). Returns only when it couldn't, or wouldn't.
+pub fn lfs(real: &str, args: &[String], socket: Option<&Path>) -> Error {
+    if socket.is_some() {
+        return Error::refused(
+            "acting as the App, git-lfs isn't run: it would send your own login (git's headers, your netrc) without asking for the App's",
+        );
+    }
+    let e = Command::new(real).args(args).exec();
+    Error::refused(format!("{real}: {e}"))
 }
 
 /// A github.com URL without its user and password, read as git reads one:
@@ -161,11 +181,12 @@ mod tests {
         let socket = Some(Path::new("/run/gh-token/workers.sock"));
         let run =
             |a: &[&str], socket| command("git-remote-https", &args(a), socket, Some("'a'='b'"));
-        let parameters = |c: &Command| {
+        let env = |c: &Command, name: &str| {
             c.get_envs()
-                .find(|(k, _)| *k == OsStr::new("GIT_CONFIG_PARAMETERS"))
+                .find(|(k, _)| *k == OsStr::new(name))
                 .and_then(|(_, v)| v.map(|v| v.to_string_lossy().into_owned()))
         };
+        let parameters = |c: &Command| env(c, "GIT_CONFIG_PARAMETERS");
         let c = run(
             &["origin", "https://peter:tok@github.com/sam/r.git"],
             socket,
@@ -177,6 +198,7 @@ mod tests {
             parameters(&c).as_deref(),
             Some("'a'='b' 'http.https://github.com/sam/r.git.extraheader'=''")
         );
+        assert_eq!(env(&c, "NETRC").as_deref(), Some("/dev/null"));
         // Another host's, or no socket: git's, as it is.
         for (a, socket) in [
             (["origin", "https://peter:tok@gitlab.com/sam/r"], socket),
@@ -185,8 +207,22 @@ mod tests {
             let c = run(&a, socket).unwrap();
             assert_eq!(c.get_args().collect::<Vec<_>>(), a, "{a:?}");
             assert_eq!(parameters(&c), None, "{a:?}");
+            assert_eq!(env(&c, "NETRC"), None, "{a:?}");
         }
         // git always says which URL: refused without one.
         assert!(run(&["origin"], socket).is_err());
+    }
+
+    #[test]
+    fn never_runs_git_lfs_as_the_app() {
+        let e = lfs(
+            "/nonexistent/git-lfs",
+            &args(&["pre-push", "origin"]),
+            Some(Path::new("/run/gh-token/workers.sock")),
+        );
+        assert!(e.what.contains("acting as the App"), "{e}");
+        // Outside the env it's git-lfs, as it is: here, one that isn't there.
+        let e = lfs("/nonexistent/git-lfs", &args(&["version"]), None);
+        assert!(e.what.starts_with("/nonexistent/git-lfs: "), "{e}");
     }
 }

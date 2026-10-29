@@ -103,7 +103,7 @@ pkgs.testers.runNixOSTest {
       keyFile = "/run/keys/workers.pem";
       api = "http://127.0.0.1:8080";
     };
-    environment.systemPackages = [ config.burrow.tools.gh config.burrow.tools.gh-token pkgs.git pkgs.openssl ];
+    environment.systemPackages = [ config.burrow.tools.gh config.burrow.tools.gh-token config.burrow.tools.git-lfs pkgs.git pkgs.openssl ];
     users.users.dev = { isNormalUser = true; };
     users.users.eve = { isNormalUser = true; };
     # dev's own logins: gh's, and a git helper the way `gh auth setup-git`
@@ -229,6 +229,58 @@ pkgs.testers.runNixOSTest {
           # No token to be had, or nowhere to ask: none at all.
           assert logins("git ls-remote https://github.com/eve/x.git") == []
           assert logins("GH_TOKEN_SOCKET=/run/gh-token/none.sock git ls-remote origin") == []
+
+      with subtest("git, in the App's env, logs in to GitHub as the App only: no netrc of dev's"):
+          # dev's netrc, for github.com, and another that NETRC names.
+          machine.succeed(dev(" && ".join([
+              "printf 'machine github.com login peter password netrc\\n' > ~/.netrc",
+              "printf 'default login peter password netrc-default\\n' > ~/other.netrc",
+              "chmod 600 ~/.netrc ~/other.netrc",
+              "git -C own remote add plain https://github.com/sam/p.git",
+              "git -C own remote add plain-ssh git@github.com:sam/p.git",
+              "git -C own -c user.name=dev -c user.email=dev@example.org commit -q --allow-empty -m x",
+          ]), app=False))
+          # Without the env, curl answers GitHub's 401 with it, the helper never asked.
+          assert logins("git ls-remote plain", app=False) == ["peter:netrc"]
+          assert logins("NETRC=$HOME/other.netrc git ls-remote plain", app=False) == ["peter:netrc-default"]
+          # With it, only the App's: fetch and push, over https or SSH rewritten.
+          for call in [
+              "git ls-remote plain",
+              "git ls-remote plain-ssh",
+              "git push plain HEAD:refs/heads/x",
+              "NETRC=$HOME/other.netrc git ls-remote plain",
+          ]:
+              got = logins(call)
+              assert got and all(login.startswith("x-access-token:ghs_") for login in got), (call, got)
+          assert logins("GH_TOKEN_SOCKET=/run/gh-token/none.sock git ls-remote plain") == []
+          assert logins("GH_TOKEN_SOCKET=/run/gh-token/none.sock git push plain HEAD:refs/heads/x") == []
+
+      with subtest("git-lfs isn't run in the App's env, however git or anyone starts it"):
+          assert "git-lfs/" in machine.succeed(dev("git lfs version", app=False))
+          machine.succeed(dev(" && ".join([
+              "printf '*.bin filter=lfs -text\\n' > .gitattributes",
+              "echo data > x.bin",
+              "printf '#!/bin/sh\\ngit lfs pre-push \"$@\"\\n' > .git/hooks/pre-push",
+              "printf '#!/bin/sh\\ngit-lfs pre-push \"$@\"\\n' > .git/hooks/post-checkout",
+              "chmod +x .git/hooks/pre-push .git/hooks/post-checkout",
+          ]), app=False, at="~/own"))
+          for call in [
+              "git lfs version",
+              "git-lfs version",
+              "git hook run pre-push -- origin https://github.com/sam/r.git </dev/null",
+              "git hook run post-checkout -- HEAD HEAD 1",
+              # A filter: the file goes in neither as it is nor as LFS's.
+              "git add x.bin",
+              "git -c filter.lfs.required=false add x.bin",
+          ]:
+              status, out = machine.execute(dev(call + " 2>&1", at="~/own"))
+              assert status != 0 and "git-lfs isn't run" in out, (call, status, out)
+              assert machine.succeed(dev("git ls-files x.bin", at="~/own")).strip() == "", call
+          # A checkout's config naming another git-lfs, the one LFS installs, say.
+          machine.succeed(dev("git -C own config filter.lfs.process '${pkgs.git-lfs}/bin/git-lfs filter-process'", app=False))
+          status, out = machine.execute(dev("git add x.bin 2>&1", at="~/own"))
+          assert status != 0 and "git-lfs isn't run" in out, (status, out)
+          assert machine.succeed(dev("git ls-files x.bin", at="~/own")).strip() == ""
 
       with subtest("gh, in the App's env, has the App's token, and no login of dev's"):
           assert machine.succeed(dev("gh auth token", app=False)).strip() == "peter-token"
