@@ -46,21 +46,29 @@ let
     exec ${package}/bin/gh-token git-lfs ${pkgs.git-lfs}/bin/git-lfs "$@"
   '';
 
-  # git's own helpers (GIT_EXEC_PATH), but for http and https: gh-token's
+  # git's own helpers (GIT_EXEC_PATH), but for curl's: gh-token's
   # git-remote, which runs git's with only the credential helper's login.
-  # And git-lfs: git puts these first on the PATH of what it runs (`git lfs`,
-  # hooks, filters). The machine's git's, so the git a process in the env
-  # runs is it.
+  # curl's are git-remote-http and every name git gives it (https, ftp,
+  # ftps), found as the files that are it, so a name a later git adds is
+  # one too. And git-lfs: git puts these first on the PATH of what it runs
+  # (`git lfs`, hooks, filters). The machine's git's, so the git a process
+  # in the env runs is it.
   git = config.programs.git.package;
   gitCore = pkgs.runCommand "gh-token-git-core" { } ''
     mkdir $out
-    for f in ${git}/libexec/git-core/*; do ln -s "$f" $out/; done
+    core=${git}/libexec/git-core
+    for f in $core/*; do ln -s "$f" $out/; done
     ln -s ${gitLfs}/bin/git-lfs $out/git-lfs
-    for helper in git-remote-http git-remote-https; do
+    for f in $core/*; do
+      [ "$f" -ef $core/git-remote-http ] || continue
+      helper=$(basename "$f")
       rm $out/$helper
       printf '#!%s\nexec %s git-remote %s "$@"\n' ${pkgs.runtimeShell} ${package}/bin/gh-token \
-        ${git}/libexec/git-core/$helper >$out/$helper
+        $core/$helper >$out/$helper
       chmod +x $out/$helper
+    done
+    for helper in git-remote-http git-remote-https; do
+      grep -q 'gh-token git-remote' $out/$helper || { echo "$helper isn't git-remote-http" >&2; exit 1; }
     done
   '';
 

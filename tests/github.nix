@@ -46,7 +46,9 @@ let
   # plain http: each request's logins are noted in /tmp/logins (Basic's,
   # decoded, a Kerberos ticket as `negotiate`, its cookies, and the client
   # certificate it was shown). Asked without one, it asks for one, as GitHub
-  # does, and offers Negotiate too for a repo named kerberos.
+  # does, and offers Negotiate too for a repo named kerberos. Over FTP, and
+  # FTPS with that certificate, it notes each login it's offered, as
+  # `ftp:USER:PASS`, and takes none.
   cert = pkgs.runCommand "github-cert" { nativeBuildInputs = [ pkgs.openssl ]; } ''
     mkdir $out
     openssl req -x509 -newkey rsa:2048 -nodes -days 36500 -subj /CN=github.com \
@@ -56,6 +58,7 @@ let
   '';
   gitServer = pkgs.writers.writePython3 "fake-github-git" { flakeIgnore = [ "E501" ]; } ''
     import base64
+    import socketserver
     import ssl
     import threading
     from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -80,12 +83,33 @@ let
             self.end_headers()
 
 
-    threading.Thread(target=HTTPServer(("127.0.0.1", 80), Git).serve_forever, daemon=True).start()
-    server = HTTPServer(("127.0.0.1", 443), Git)
+    class Ftp(socketserver.StreamRequestHandler):
+        def handle(self):
+            self.wfile.write(b"220 github.com\r\n")
+            user = ""
+            for line in self.rfile:
+                command, _, arg = line.decode(errors="replace").strip().partition(" ")
+                if command.upper() == "USER":
+                    user = arg
+                    self.wfile.write(b"331 password\r\n")
+                elif command.upper() == "PASS":
+                    with open("/tmp/logins", "a") as f:
+                        f.write(f"ftp ftp:{user}:{arg}\n")
+                    self.wfile.write(b"530 no\r\n")
+                else:
+                    self.wfile.write(b"530 log in first\r\n")
+
+
     tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     tls.load_cert_chain("${cert}/cert.pem", "${cert}/key.pem")
     tls.verify_mode = ssl.CERT_OPTIONAL
     tls.load_verify_locations("${cert}/peter.pem")
+    threading.Thread(target=HTTPServer(("127.0.0.1", 80), Git).serve_forever, daemon=True).start()
+    threading.Thread(target=socketserver.ThreadingTCPServer(("127.0.0.1", 21), Ftp).serve_forever, daemon=True).start()
+    ftps = socketserver.ThreadingTCPServer(("127.0.0.1", 990), Ftp)
+    ftps.socket = tls.wrap_socket(ftps.socket, server_side=True)
+    threading.Thread(target=ftps.serve_forever, daemon=True).start()
+    server = HTTPServer(("127.0.0.1", 443), Git)
     server.socket = tls.wrap_socket(server.socket, server_side=True)
     server.serve_forever()
   '';
@@ -233,7 +257,9 @@ pkgs.testers.runNixOSTest {
           # dev's own login for any host, and an askpass of dev's: neither is
           # asked, for any host.
           machine.succeed(dev("git config --global --add credential.helper '!f() { echo username=peter; echo password=peter-any; }; f' && printf '#!/bin/sh\\necho peter-askpass\\n' > ~/askpass && chmod +x ~/askpass", app=False))
-          url_fill = "printf 'url=%s\\n\\n' | GIT_ASKPASS=$HOME/askpass git credential fill"
+          # The URL as printf's argument, never its format: `%67ithub.com` is one.
+          def url_fill(url):
+              return f"printf 'url=%s\\n\\n' {shlex.quote(url)} | GIT_ASKPASS=$HOME/askpass git credential fill"
           for url in [
               "https://GitHub.com/sam/r.git",
               "https://github.com:443/sam/r.git",
@@ -242,12 +268,12 @@ pkgs.testers.runNixOSTest {
               "https://github.com./sam/r.git",
               "https://%67ithub.com/sam/r.git",
           ]:
-              out = machine.succeed(dev(url_fill % url))
+              out = machine.succeed(dev(url_fill(url)))
               assert "password=ghs_2" in out and "peter" not in out, (url, out)
           for url in ["https://gist.github.com/abc.git", "https://WWW.GitHub.com/sam/r.git", "https://gitlab.com/sam/r.git", "http://github.com/sam/r.git"]:
-              status, out = machine.execute(dev(url_fill % url + " 2>&1"))
+              status, out = machine.execute(dev(url_fill(url) + " 2>&1"))
               assert status != 0 and "peter" not in out, (url, status, out)
-              assert "peter-any" in machine.succeed(dev(url_fill % url, app=False)), url
+              assert "peter-any" in machine.succeed(dev(url_fill(url), app=False)), url
           machine.succeed(dev("git config --global --unset-all credential.helper", app=False))
 
       with subtest("git, in the App's env, takes GitHub's SSH remotes over https, and never runs SSH"):
@@ -339,6 +365,27 @@ pkgs.testers.runNixOSTest {
               assert got and all(login.startswith("x-access-token:ghs_") for login in got), (call, got)
           assert logins("GH_TOKEN_SOCKET=/run/gh-token/none.sock git ls-remote plain") == []
           assert logins("GH_TOKEN_SOCKET=/run/gh-token/none.sock git push plain HEAD:refs/heads/x") == []
+          # FTP and FTPS, the other names of git's curl helper, from the
+          # URL, a rewrite, or a remote's own helper: dev's logins without
+          # the env, an anonymous one with it, with a broker or none.
+          machine.succeed(dev(" && ".join([
+              "git -C own config url.ftp://github.com/.insteadOf https://ftp.example/",
+              "git -C own remote add viaftps https://github.com/sam/p.git",
+              "git -C own config remote.viaftps.vcs ftps",
+          ]), app=False))
+          assert logins("git ls-remote ftp://github.com/sam/p.git", app=False) == ["ftp:peter:netrc"]
+          assert logins("git ls-remote ftps://github.com/sam/p.git", app=False) == ["ftp:peter:netrc"]
+          assert logins("git ls-remote ftp://peter:url-token@github.com/sam/p.git", app=False) == ["ftp:peter:url-token"]
+          for call in [
+              "git ls-remote ftp://github.com/sam/p.git",
+              "git ls-remote ftps://github.com/sam/p.git",
+              "git ls-remote ftp://peter:url-token@github.com/sam/p.git",
+              "git ls-remote https://ftp.example/sam/p.git",
+              "git ls-remote viaftps",
+              "GH_TOKEN_SOCKET=/run/gh-token/none.sock git ls-remote ftp://peter:url-token@github.com/sam/p.git",
+          ]:
+              got = logins(call)
+              assert got and not any("peter" in login for login in got), (call, got)
 
       with subtest("git, in the App's env, logs in to GitHub as the App only: no cookie, certificate or ticket of dev's"):
           # What git has curl log in with from the first request, asking no
@@ -378,6 +425,18 @@ pkgs.testers.runNixOSTest {
               "git ls-remote http://github.com/sam/r.git",
           ]:
               assert logins(call) == [], call
+          # A bundle's download, which git runs the helper for with the URL
+          # alone: the App's token, and none of dev's; and not at all for a
+          # URL with a login, which git sends again where it can't be dropped.
+          def heard(call):
+              machine.succeed(": > /tmp/logins")
+              machine.execute(dev(call, at="~/own"))
+              return machine.succeed("cat /tmp/logins").splitlines()
+          got = heard("git -c fetch.bundleURI=https://github.com/sam/r.bundle fetch origin")
+          assert any(line.startswith("/sam/r.bundle x-access-token:ghs_") for line in got), got
+          assert not any("peter" in line for line in got), got
+          got = heard("git -c fetch.bundleURI=https://peter:url-token@github.com/sam/r.bundle fetch origin")
+          assert not any(line.startswith("/sam/r.bundle") or "peter" in line for line in got), got
           machine.succeed(dev("git config --global --remove-section http && kdestroy", app=False))
 
       with subtest("git-lfs isn't run in the App's env, however git or a config starts it"):

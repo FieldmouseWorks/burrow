@@ -1,8 +1,9 @@
-//! git's http and https (git-remote-http, git-remote-https), as the App's
-//! env has git run them (`GIT_EXEC_PATH`): a remote, whatever its host,
-//! hears only what the credential helper gives git, which is the App's
-//! token for github.com and nothing for any other host. What git would log
-//! in with instead, without asking the helper:
+//! git's curl helper (git-remote-http, and git-remote-https, -ftp and -ftps,
+//! its other names), as the App's env has git run it (`GIT_EXEC_PATH`): a
+//! remote, whatever its host or scheme, hears only what the credential
+//! helper gives git, which is the App's token for github.com and nothing for
+//! any other host. What git would log in with instead, without asking the
+//! helper:
 //!
 //! - the user and password in the URL, which goes without them;
 //! - the headers `http.extraHeader` adds (an Authorization of the user's,
@@ -34,8 +35,9 @@ use std::process::Command;
 
 use crate::error::Error;
 
-/// Runs REAL, git's own helper, with `args` (REMOTE URL). Returns only when
-/// it couldn't.
+/// Runs REAL, git's own helper, with `args`: REMOTE URL, as git runs it for
+/// a remote, or URL alone, as it runs it to download a bundle. Returns only
+/// when it couldn't.
 pub fn run(real: &str, args: &[String], socket: Option<&Path>) -> Error {
     let given = std::env::var("GIT_CONFIG_PARAMETERS").ok();
     match command(real, args, socket, given.as_deref()) {
@@ -53,21 +55,36 @@ fn command(
     given: Option<&str>,
 ) -> Result<Command, Error> {
     let mut helper = Command::new(real);
-    let (Some(_), [remote, url]) = (socket, args) else {
-        return match socket {
-            None => {
-                helper.args(args);
-                Ok(helper)
-            }
-            Some(_) => Err(Error::refused(
-                "git's http helper is given its remote and its URL",
-            )),
-        };
+    if socket.is_none() {
+        helper.args(args);
+        return Ok(helper);
+    }
+    let url = match args {
+        [remote, url] => {
+            let url = without_login(url);
+            helper.arg(remote).arg(&url);
+            url
+        }
+        // A bundle's download, which names its URL again on the helper's
+        // stdin (`get URL FILE`), where a login can't be dropped: run only
+        // for a URL without one. A word that isn't a URL would be a
+        // remote's name, whose URL git's config gives.
+        [url] if url.contains("://") && without_login(url) == *url => {
+            helper.arg(url);
+            url.clone()
+        }
+        [_] => {
+            return Err(Error::refused(
+                "acting as the App, git's http helper isn't run for a URL with a login, or a remote's name, alone",
+            ));
+        }
+        _ => {
+            return Err(Error::refused(
+                "git's http helper is given its URL, after its remote's name or alone",
+            ));
+        }
     };
-    let url = without_login(url);
     helper
-        .arg(remote)
-        .arg(&url)
         .env("GIT_CONFIG_PARAMETERS", cleared(given, &url))
         .env_remove("GIT_SSL_CERT")
         .env("NETRC", "/dev/null");
@@ -266,8 +283,35 @@ mod tests {
         assert_eq!(parameters(&c), None);
         assert_eq!(env(&c, "NETRC"), None);
         assert!(!removed(&c, "GIT_SSL_CERT"));
-        // git always says which URL: refused without one.
-        assert!(run(&["origin"], socket).is_err());
+        // A bundle's download: the URL alone, cleared the same way, but
+        // never one with a login (git sends it again on stdin), nor a
+        // remote's name in its place.
+        let bundle = "https://github.com/sam/r.bundle";
+        let c = run(&[bundle], socket).unwrap();
+        assert_eq!(c.get_args().collect::<Vec<_>>(), [bundle]);
+        assert_eq!(
+            parameters(&c),
+            Some(format!("'a'='b' {}", every_one(bundle)))
+        );
+        assert_eq!(env(&c, "NETRC").as_deref(), Some("/dev/null"));
+        assert!(removed(&c, "GIT_SSL_CERT"));
+        for refused in [
+            "https://peter:tok@github.com/sam/r.bundle",
+            "https://peter@github.com@eve.com/x",
+            "origin",
+            "",
+        ] {
+            assert!(run(&[refused], socket).is_err(), "{refused}");
+        }
+        // Without the socket, as git gives it.
+        let c = run(&["https://peter:tok@github.com/sam/r.bundle"], None).unwrap();
+        assert_eq!(
+            c.get_args().collect::<Vec<_>>(),
+            ["https://peter:tok@github.com/sam/r.bundle"]
+        );
+        // Nothing, or more than git gives: refused.
+        assert!(run(&[], socket).is_err());
+        assert!(run(&["origin", bundle, "x"], socket).is_err());
     }
 
     #[test]
