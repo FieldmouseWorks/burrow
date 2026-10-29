@@ -29,6 +29,7 @@
     remoteControl.enable = true;
     agents.enable = true;
     toolbox.enable = true;
+    rustCache.enable = true;
     ops.enable = true;
     robot = {
       enable = true;

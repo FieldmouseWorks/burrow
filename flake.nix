@@ -35,7 +35,7 @@
       # The ledger's machines take Conary from its own flake; burrow's checks
       # build theirs with a stand-in for its `cn`.
       cnStandIn = pkgs.writeShellScriptBin "cn" "exit 1";
-      names = [ "claude" "undo" "switch" "notify" "updates" "proj" "remote-control" "agents" "robot" "ops" "toolbox" "autoland" "house" "events" "ledger" "browser" "heartbeat" ];
+      names = [ "claude" "undo" "switch" "notify" "updates" "proj" "remote-control" "agents" "robot" "ops" "toolbox" "autoland" "house" "events" "ledger" "browser" "heartbeat" "rust-cache" ];
     in
     {
       # A project's dev shell and gate in a few lines; see lib/project.nix.
@@ -87,7 +87,7 @@
                 (nixpkgs.lib.optionalAttrs (name == "house") { burrow.house.owners = [ "sam" ]; })
                 (nixpkgs.lib.optionalAttrs (name == "ledger") { burrow.ledger = { package = cnStandIn; owners = [ "sam" ]; anchorRepo = "sam/homelab"; reviewers = [ "sams-steward[bot]" ]; sessionLinks = [ "sam/homelab" ]; daemon = true; }; })
                 (nixpkgs.lib.optionalAttrs (builtins.elem name [ "events" "autoland" ]) { burrow.events = { host = "example.org"; secretFile = "/run/secrets/burrow-webhook"; }; })
-                { burrow.${if name == "remote-control" then "remoteControl" else name}.enable = true; }
+                { burrow.${{ remote-control = "remoteControl"; rust-cache = "rustCache"; }.${name} or name}.enable = true; }
               ];
             };
           in "${name} ${builtins.unsafeDiscardStringContext (runnable name machine).config.system.build.toplevel.drvPath}\n")
@@ -127,6 +127,8 @@
         health-zfs = import ./tests/health-zfs.nix { inherit self pkgs; };
         # heartbeat's beats, with stand-ins for HOST-health and Healthchecks.
         heartbeat = import ./tests/heartbeat.nix { inherit self pkgs; };
+        # The shared compile cache's wrapper, building a crate through sccache.
+        rust-cache = import ./tests/rust-cache.nix { inherit self pkgs; };
         # The ledger's pass over one repo, with a stand-in for cn.
         ledger = import ./tests/ledger.nix { inherit self pkgs; };
         # Which deliveries and kicks start whose pass, with a stand-in for systemctl.
