@@ -2,9 +2,9 @@
 a store of its own, with stand-ins for `nix build` and `nix flake check`. Each
 derivation gets a nix process of its own and stays a GC root until it's built,
 only the checks are built, every output is checked as nix flake check checks
-it, a failed evaluation or build fails the gate, and a flake with an output
-eval-apart doesn't check, or with a nixConfig, is refused rather than half
-checked.
+it, a failed evaluation or build fails the gate, every evaluation reads one
+snapshot of the checkout, and a flake with an output eval-apart doesn't check,
+or with a nixConfig, is refused rather than half checked.
 
   python3 -I tests/gate.py .github/workflows/flake-check.yml
   nix build .#checks.x86_64-linux.gate
@@ -72,7 +72,9 @@ stub("nix", f"""case $1 in
     for a in "$@"; do
       case $a in *"; entry = "*) n=${{a##*entry = }}; what="entry ${{n%%;*}}" ;; esac
     done
-    echo "eval $what" >> "$NIX_LOG" ;;
+    echo "eval $what" >> "$NIX_LOG"
+    # The checkout edited once the plan is made, if asked.
+    [ -z "$EDIT" ] || [ "$what" != "entry 0" ] || cp -- "$EDIT" "$EDIT_TO" ;;
 esac
 exec {real_nix} "$@"
 """)
@@ -111,7 +113,7 @@ def run(directory, apart=True, skip="", build_fail="", env=None):
                        cwd=directory, env=full, capture_output=True, text=True)
     calls = open(log).read().splitlines() if os.path.exists(log) else []
     # The roots last only as long as the gate.
-    assert not glob.glob(os.path.join(tmp, "roots.*")), "GC roots left behind"
+    assert not glob.glob(os.path.join(tmp, "eval-apart.*")), "GC roots or the snapshot left behind"
     return p.returncode, p.stdout + p.stderr, calls
 
 
@@ -266,12 +268,8 @@ def not_derivations():
             ('checks.${system} = { ok = drv "ok"; fake = { drvPath = ""; }; };', "", fake),
             ('checks.${system} = { ok = drv "ok"; fake = { drvPath = ""; }; };', "fake", fake),
             ('checks.${system} = { ok = drv "ok"; fake = { type = "derivation"; name = "x"; }; };', "", "drvPath"),
-            ('checks.${system} = { ok = drv "ok"; fake = { type = "derivation"; name = "x"; drvPath = "/nix/store/x"; }; };',
-             "", "is not in the Nix store"),
-            ('checks.${system} = { ok = drv "ok"; fake = { type = "derivation"; name = "x"; drvPath = "/nix/store/00000000000000000000000000000000-x"; }; };',
-             "", "is not a valid derivation path"),
-            ('checks.${system}.ok = drv "ok"; packages.${system}.fake = { type = "derivation"; name = "x"; drvPath = "/nix/store/x"; };',
-             "", "is not in the Nix store"),
+            ('checks.${system} = { ok = drv "ok"; fake = { type = "derivation"; name = "x"; drvPath = "/nix/store/00000000000000000000000000000000-x.drv"; }; };',
+             "", "is not valid"),
             ('checks.${system}.ok = drv "ok"; packages.${system}.fake = "/nix/store/x";', "",
              f"flake attribute 'packages.{system}.fake' is not a derivation"),
             ('checks.${system}.ok = drv "ok"; devShells.${system}.fake = { };', "",
@@ -284,6 +282,76 @@ def not_derivations():
         assert rc != 0 and error in out, (outputs, out)
         # The rest are still built.
         assert any("-ok.drv^*" in b for b in builds(calls)), (outputs, calls)
+
+
+@case
+def invalid_derivations():
+    "a derivation nix flake check wouldn't read fails it, as a check built or skipped, a package, a dev shell or a formatter"
+    for value, error in (
+            ('drv "x" // { name = throw "bad name"; }', "bad name"),
+            ('removeAttrs (drv "x") [ "name" ]', "derivation name missing"),
+            ('drv "x" // { name = 1; }', "is not a string without context"),
+            ('drv "x" // { name = "${drv "y"}"; }', "is not a string without context"),
+            ('drv "x" // { drvPath = throw "bad drvPath"; }', "bad drvPath"),
+            ('drv "x" // { drvPath = ""; }', "is not a store derivation's path"),
+            ('drv "x" // { drvPath = (drv "x").drvPath + "\\n"; }', "is not a store derivation's path"),
+            ('drv "x" // { drvPath = " " + (drv "x").drvPath; }', "is not a store derivation's path"),
+            ('drv "x" // { drvPath = (drv "x").outPath; }', "is not a store derivation's path"),
+            ('drv "x" // { drvPath = "/elsewhere/00000000000000000000000000000000-x.drv"; }', "is not a store derivation's path"),
+            ('drv "x" // { drvPath = 1; }', "is not a store derivation's path")):
+        ok = 'checks.${system}.ok = drv "ok";'
+        for where, skip in ((f'checks.${{system}} = {{ ok = drv "ok"; fake = {value}; }};', ""),
+                            (f'checks.${{system}} = {{ ok = drv "ok"; fake = {value}; }};', "fake"),
+                            (f"{ok} packages.${{system}}.fake = {value};", ""),
+                            (f"{ok} devShells.${{system}}.fake = {value};", ""),
+                            (f"{ok} formatter.${{system}} = {value};", "")):
+            # A NixOS system alongside, whose own result is no derivation path.
+            rc, out, calls = run(flake(f"""{{
+              nixosConfigurations.box.config.system.build.toplevel = drv "box";
+              {where}
+            }}"""), skip=skip)
+            assert rc != 0 and error in out, (value, where, skip, out)
+            assert any("-ok.drv^*" in b for b in builds(calls)), (value, where, out, calls)
+
+
+@case
+def snapshot():
+    "an edit to the checkout while the gate runs changes nothing it evaluates, and nothing writes the checkout"
+    d = flake("""{ checks.${system} = { a = drv "a"; b = drv "b"; }; }""")
+    edit = os.path.join(tmp, "edited.nix")
+    open(edit, "w").write(f"""{{
+  outputs = {{ self }}: {{
+    checks.{system} = {{
+      b = derivation {{ name = "b2"; system = "{system}"; builder = "/bin/sh"; args = [ "-c" "echo > $out" ]; }};
+      c = derivation {{ name = "c"; system = "{system}"; builder = "/bin/sh"; args = [ "-c" "echo > $out" ]; }};
+    }};
+  }};
+}}
+""")
+    rc, out, calls = run(d, skip="a", env={"EDIT": edit, "EDIT_TO": os.path.join(d, "flake.nix")})
+    assert rc == 0, out
+    assert open(os.path.join(d, "flake.nix")).read() == open(edit).read(), "the edit wasn't made"
+    [b] = builds(calls)
+    assert "-b.drv^*" in b and "-a.drv" not in b and "-b2.drv" not in b and "-c.drv" not in b, b
+    # A lock file that needs changing fails it, and isn't written.
+    dep = flake("{ }")
+    rc, out, calls = run(flake(f"""{{ checks.${{system}}.a = drv "a"; }}""", top=f'inputs.dep.url = "path:{dep}";'))
+    assert rc != 0 and not builds(calls), out
+    assert "lock file" in out, out
+
+
+@case
+def committed():
+    "a clean checkout is evaluated with its commit as self's"
+    d = flake("""{
+      checks.${system}.meta = if self ? rev && self ? revCount && self.lastModified > 0
+        then drv "meta-${self.shortRev}" else throw "lost the commit";
+    }""")
+    rev = subprocess.run(["git", "rev-parse", "--short=7", "HEAD"], cwd=d, capture_output=True, text=True, check=True).stdout.strip()
+    rc, out, calls = run(d)
+    assert rc == 0, out
+    [b] = builds(calls)
+    assert f"-meta-{rev}.drv^*" in b, (rev, b)
 
 
 @case

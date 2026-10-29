@@ -35,6 +35,9 @@ on:
           check doesn't know, warning of these; it fails a flake with an
           output nix flake check checks some other way (apps, overlays,
           hydraJobs, bundlers, the old default* ones), or with a nixConfig.
+          It evaluates one snapshot of the checkout throughout, so it fails a
+          flake whose lock file needs changing, where nix flake check would
+          write it.
         type: boolean
         default: false
 jobs:
@@ -61,13 +64,16 @@ jobs:
           APART: ${{ inputs.eval-apart }}
         run: |
           # eval-apart: what `nix flake check` checks of the outputs it knows,
-          # given the flake's outputs as `nix eval` evaluates the checkout
-          # (purely, with the same source and self as nix flake check, a
-          # checkout with uncommitted changes included). With no entry, the
-          # plan: the outputs it can't check or doesn't know, and each
-          # derivation it evaluates, and whether it's a check. With an entry's
-          # index, that one: its derivation's path, or for a NixOS system
-          # nothing, once its toplevel is a derivation.
+          # given the flake's outputs as `nix eval` evaluates the checkout's
+          # snapshot (purely, with the same source and self as nix flake
+          # check, a checkout with uncommitted changes included). With no
+          # entry, the plan: the outputs it can't check or doesn't know, and
+          # each derivation it evaluates, whether it's a check and whether
+          # it's a NixOS system. With an entry's index, that one: for a NixOS
+          # system nothing, once its toplevel is a derivation; for the rest
+          # its derivation's path, once it's a derivation as nix flake check
+          # reads one (a name that's a string without context) with a drvPath
+          # that's a store derivation's path.
           read -r -d '' plan <<'EOF' || true
           { system, entry ? null }: outputs:
           let
@@ -114,13 +120,26 @@ jobs:
                 (n: { what = "nixosConfigurations.${n}"; path = [ "nixosConfigurations" n "config" "system" "build" "toplevel" ]; nixos = true; })
                 (builtins.attrNames (set "nixosConfigurations" (outputs.nixosConfigurations or { })));
             isDerivation = v: (v.type or null) == "derivation";
+            store = builtins.storeDir + "/";
+            # A store path's hash and name, as nix prints them.
+            drvName = "[0-9a-df-np-sv-z]{32}-[A-Za-z0-9+_?=-][A-Za-z0-9+._?=-]*[.]drv";
+            drvPath = e: v:
+              if !isDerivation v then throw "flake attribute '${e.what}' is not a derivation"
+              else if !(v ? name) then throw "derivation name missing in ${e.what}"
+              else if !builtins.isString v.name || builtins.hasContext v.name then throw "the name of ${e.what} is not a string without context"
+              else if !(v ? drvPath) then throw "${e.what} has no drvPath"
+              else if !builtins.isString v.drvPath
+                || builtins.substring 0 (builtins.stringLength store) v.drvPath != store
+                || builtins.match drvName (builtins.substring (builtins.stringLength store) (builtins.stringLength v.drvPath) v.drvPath) == null
+              then throw "the drvPath of ${e.what} is not a store derivation's path"
+              else v.drvPath;
           in
           if entry == null then
             # legacyPackages has only its system names checked.
             builtins.deepSeq [ (here "legacyPackages" (_: [ ])) forced modules templates ] {
               other = builtins.filter (n: builtins.elem n refused) names;
               unknown = builtins.filter (n: !builtins.elem n (known ++ refused ++ community)) names;
-              entries = map (e: { inherit (e) what; check = e.check or false; name = e.n or null; }) entries;
+              entries = map (e: { inherit (e) what; check = e.check or false; name = e.n or null; nixos = e.nixos or false; }) entries;
             }
           else
             let
@@ -128,23 +147,53 @@ jobs:
               v = builtins.foldl' (v: n: v.${n}) outputs e.path;
             in
             if e.nixos or false then
-              (if isDerivation v then "" else throw "'config.system.build.toplevel' of ${e.what} is not a derivation")
-            else if isDerivation v then v.drvPath
-            else throw "flake attribute '${e.what}' is not a derivation"
+              (if isDerivation v then { } else throw "'config.system.build.toplevel' of ${e.what} is not a derivation")
+            else { drv = drvPath e v; }
           EOF
           apart() {
             system=$(nix config show system)
             [[ $system =~ ^[A-Za-z0-9_-]+$ ]] || { echo "can't evaluate for system $system"; return 1; }
+            work=$(mktemp -d "$RUNNER_TEMP/eval-apart.XXXXXX")
+            trap 'rm -rf -- "$work"' EXIT
+            # One snapshot of the checkout, as nix reads it: the files git
+            # tracks as they are now, git's index, HEAD and its history (the
+            # repo's own objects, shared), so self is what nix flake check
+            # gives it. Everything here reads the snapshot and nothing writes
+            # it (the lock file is used as it is), so an edit to the checkout
+            # while the gate runs can't mix two sources in one result.
+            source=$work/source
+            if top=$(git rev-parse --show-toplevel 2> /dev/null); then
+              prefix=$(git rev-parse --show-prefix)
+              git init -q "$source"
+              echo "$(git rev-parse --path-format=absolute --git-common-dir)/objects" > "$source/.git/objects/info/alternates"
+              shallow=$(git rev-parse --path-format=absolute --git-path shallow)
+              if [ -f "$shallow" ]; then cp -- "$shallow" "$source/.git/shallow"; fi
+              if rev=$(git rev-parse -q --verify 'HEAD^{commit}'); then
+                if ref=$(git symbolic-ref -q HEAD); then
+                  git -C "$source" symbolic-ref HEAD "$ref"
+                  git -C "$source" update-ref "$ref" "$rev"
+                else
+                  git -C "$source" update-ref --no-deref HEAD "$rev"
+                fi
+              fi
+              cp -- "$(git rev-parse --path-format=absolute --git-path index)" "$source/.git/index"
+              git -C "$top" ls-files -z | (cd "$top" && while IFS= read -r -d '' f; do
+                if [ -L "$f" ] || [ -f "$f" ]; then printf '%s\0' "$f"; fi
+              done | tar --null --no-recursion -T - -cf -) | tar -xf - -C "$source"
+              flake=$source/$prefix
+            else
+              cp -a . "$source"
+              flake=$source
+            fi
             # nix flake check applies the nixConfig a runner accepts; the
             # evaluations and the build here would leave it out.
-            source=$(nix flake metadata --json . | jq -r .path)
-            if [ "$(nix-instantiate --eval --expr "(import $source/flake.nix) ? nixConfig")" = true ]; then
+            if [ "$(nix-instantiate --eval --argstr f "$flake/flake.nix" --expr '{ f }: (import f) ? nixConfig')" = true ]; then
               echo "eval-apart can't carry this flake's nixConfig to every evaluation and build. Its gate is a whole \`nix flake check\`, without eval-apart."
               return 1
             fi
-            # The flake's outputs (".#."), as nix flake check evaluates them,
+            # The flake's outputs ("#."), as nix flake check evaluates them,
             # each time afresh.
-            evaluate() { nix eval --option eval-cache false --apply "($plan) { system = \"$system\"; $1 }" "${@:2}" '.#.'; }
+            evaluate() { nix eval --no-update-lock-file --option eval-cache false --apply "($plan) { system = \"$system\"; $1 }" "${@:2}" "$flake#."; }
             evaluate "" --json > "$RUNNER_TEMP/plan.json"
             if [ "$(jq '.other | length' "$RUNNER_TEMP/plan.json")" != 0 ]; then
               echo "eval-apart doesn't check apps, overlays, hydraJobs, bundlers or the old default* outputs, and this flake has $(jq -c .other "$RUNNER_TEMP/plan.json"). Its gate is a whole \`nix flake check\`, without eval-apart."
@@ -162,17 +211,19 @@ jobs:
             # (or that a GC took in between) fails the gate. A
             # failed evaluation fails the gate, after the rest are evaluated
             # and built (--keep-going).
-            roots=$(mktemp -d "$RUNNER_TEMP/roots.XXXXXX")
-            trap 'rm -rf -- "$roots"' EXIT
+            roots=$work/roots
+            mkdir "$roots"
             failed=0
             targets=()
             n=$(jq length "$RUNNER_TEMP/entries.json")
             for ((i = 0; i < n; i++)); do
               what=$(jq -r ".[$i].what" "$RUNNER_TEMP/entries.json")
               echo "evaluating $what"
-              if ! drv=$(evaluate "entry = $i;" --raw); then
+              if ! result=$(evaluate "entry = $i;" --json); then
                 failed=1
-              elif [ -n "$drv" ] && ! nix-instantiate --add-root "$roots/$i" --argstr drv "$drv" \
+              elif [ "$(jq ".[$i].nixos" "$RUNNER_TEMP/entries.json")" = true ]; then
+                :
+              elif ! drv=$(jq -er .drv <<< "$result") || ! nix-instantiate --add-root "$roots/$i" --argstr drv "$drv" \
                   --expr '{ drv }: { type = "derivation"; name = "root"; outputName = "out"; drvPath = drv; }' > /dev/null; then
                 echo "evaluating $what gave no derivation"
                 failed=1
