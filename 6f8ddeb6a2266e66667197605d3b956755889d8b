@@ -1,0 +1,59 @@
+{
+  "conary": "note v1",
+  "change": "54g84jwyfc6aakj2w6bqe80h9f",
+  "repo": {
+    "owner": "fieldmouseworks",
+    "name": "burrow"
+  },
+  "pr": 138,
+  "url": "https://github.com/fieldmouseworks/burrow/pull/138",
+  "summary": "updates: Renovate merges a commit pin of its own too",
+  "task": "https://claude.ai/code/project/chan_01Ad4f4oDXfFTCEzLHzMTD8q?thread=cmsg_01Ad4f4oDXfFTCEzLHzMTD8q9EyBzD8gnhLS59fsBCwVLV",
+  "author": {
+    "kind": "agent",
+    "login": "TusanHomichi",
+    "session": "https://claude.ai/code/session_01BkHcyAbeGroquwxzKiJoHX"
+  },
+  "landing": {
+    "revision": "29a5705adbbf8737da5afbc889d69e2bc5dd323a818c65683b625868848c467a",
+    "before": "e1c234079984eaf403b62458141b693b70ffee0a",
+    "after": "6f8ddeb6a2266e66667197605d3b956755889d8b",
+    "by": {
+      "kind": "status",
+      "login": "fieldmouseworks-steward[bot]"
+    },
+    "at": 1793255384469
+  },
+  "evidence": [
+    {
+      "kind": "ci",
+      "check": "check / commits",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/40820306225/job/123270974601"
+    },
+    {
+      "kind": "review",
+      "check": "codex",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/138#pullrequestreview-5693040000"
+    },
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/40820306225/job/123270974725"
+    },
+    {
+      "kind": "review",
+      "check": "codex",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/138#pullrequestreview-5693698576"
+    },
+    {
+      "kind": "ci",
+      "check": "agents",
+      "result": "pass",
+      "source": "status agents"
+    }
+  ]
+}
