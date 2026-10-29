@@ -93,23 +93,26 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
         """A wait that ends `minutes` after t: this repo gets a pass then."""
         C.wake(repo, t + minutes * MIN + 1)  # ends: as each call says
 
-    def strike(kind):
-        """The step (STRIKES) failed: tried again on a pass booked later each
-        time, a minute on, then two, four... up to an hour, so a lasting
-        failure costs little. Its STRIKE_LIMIT-th failure in a row on this
-        head makes the PR's wait overdue whatever its deadline, so the
-        watchdog takes it (a kick, a Claude job, the stuck issue); without
-        the watchdog, it's listed on the stuck issue. Once a pass: two
+    def strike(kind, said=None):
+        """The step (STRIKES) failed, GitHub saying why when it said: tried
+        again on a pass booked later each time, a minute on, then two,
+        four... up to an hour, so a lasting failure costs little. Its
+        STRIKE_LIMIT-th failure in a row on this head makes the PR's wait
+        overdue whatever its deadline, so the watchdog takes it (a kick, a
+        Claude job, the stuck issue); without the watchdog, it's listed on
+        the stuck issue. Either says what GitHub said. Once a pass: two
         reviews it couldn't post are one pass's failure."""
         if kind in struck:
             return
         struck.add(kind)
         strikes = st.setdefault("strikes", {})
         strikes[kind] = times = strikes.get(kind, 0) + 1
-        log(f"{tag}: {STRIKES[kind]} ({times} in a row)")
+        why = f"{STRIKES[kind]}: {said}" if said else STRIKES[kind]
+        log(f"{tag}: {STRIKES[kind]} ({times} in a row){f': {said}' if said else ''}")
         after(C.NOW, min(2 ** (times - 1), 60))  # ends: STRIKE_LIMIT in a row make the wait overdue
-        if times >= STRIKE_LIMIT and not waits.overdue(repo, pr, STRIKES[kind]):
-            digest.append(("Failing again and again", line, f"{STRIKES[kind]}, {times} times in a row (journalctl -u autoland)"))
+        if times >= STRIKE_LIMIT and not waits.overdue(repo, pr, why):
+            digest.append(("Failing again and again", line, f"{STRIKES[kind]}, {times} times in a row"
+                           + (f": {said}" if said else " (journalctl -u autoland)")))
 
     def cleared(kind):
         """The step went through: its run of failures is over, unless it
@@ -165,9 +168,10 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
         if st.get("updated") == head and C.NOW - st.get("updatedAt", 0) < 10 * MIN:
             after(st["updatedAt"], 10)  # ends: a wait that stays the same is overdue at its deadline
             return True
-        if C.write("api", "-X", "PUT", f"repos/{repo}/pulls/{n}/update-branch",
-                   "-f", f"expected_head_sha={head}", check=False) is None:
-            strike("update")
+        try:
+            C.write("api", "-X", "PUT", f"repos/{repo}/pulls/{n}/update-branch", "-f", f"expected_head_sha={head}")
+        except RuntimeError as e:
+            strike("update", C.said(e))
             return None
         cleared("update")
         log(f"{tag}: behind its base, brought up to date")
@@ -295,12 +299,13 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
 
     def merge():
         # Marked landed only once GitHub has done the merge, so a failed one
-        # is tried again (strike).
-        if land(repo, pr, repo_info):
+        # is tried again (strike), saying why.
+        refused = land(repo, pr, repo_info)
+        if refused is None:
             st["landed"] = head
             cleared("merge")
             return
-        strike("merge")
+        strike("merge", refused)
 
     def land_now(desc):
         """Settled: merged, unless what GitHub says of its merge asks for
@@ -630,7 +635,7 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
                 except C.Unavailable as e:  # GitHub didn't answer: no try spent, the answer's kept
                     log(f"{tag}: couldn't post {V.NAMES[r]}'s review, GitHub's unavailable: {e}")
                     unposted.append(f"{V.NAMES[r]}'s review of {head[:7]}")
-                    strike("post")
+                    strike("post", C.said(e))
                     return
                 except RuntimeError as e:  # GitHub said no: the same answer goes again next pass
                     rs["fails"], rs["failedAt"] = rs.get("fails", 0) + 1, C.NOW
@@ -642,7 +647,7 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
                         unposted.append(x)
                         if rs["fails"] >= 3:
                             digest.append(("A review couldn't be posted", line, f"{x}, {rs['fails']} tries"))
-                        strike("post")
+                        strike("post", C.said(e))
                         return
                     if back["answer"].get("findings"):
                         # Dropped, it's asked again; one out of service by
@@ -700,7 +705,7 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
                 except C.Unavailable as e:  # GitHub didn't answer: no try spent, the answer's kept
                     log(f"{tag}: couldn't post {V.NAMES[r]}'s review of {back['head'][:7]}, GitHub's unavailable: {e}")
                     unposted.append(f"{V.NAMES[r]}'s review of {back['head'][:7]}")
-                    strike("post")
+                    strike("post", C.said(e))
                     continue
                 except RuntimeError as e:  # GitHub said no: the same answer goes again next pass
                     tries[name] = tries.get(name, 0) + 1
@@ -713,7 +718,7 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
                         unposted.append(x)
                         if tries[name] >= 3:
                             digest.append(("A review couldn't be posted", line, f"{x}, {tries[name]} tries"))
-                        strike("post")
+                        strike("post", C.said(e))
                         continue
             elif (back.get("result") == "review" and isinstance(back.get("base"), str) and isinstance(back.get("head"), str)
                   and isinstance(back.get("answer"), dict) and back["answer"].get("findings")):

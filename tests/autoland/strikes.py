@@ -35,8 +35,10 @@ print("merge states: ok")
 
 # Every step that's tried again, failing for good: a pass booked a minute
 # on, then two, then four, and on the third failure in a row its wait is
-# overdue, saying what fails. The watchdog then takes it at once.
-real_land, real_job = H.land, C.job
+# overdue, saying what fails, and what GitHub said when it refused (on one
+# line). The watchdog then takes it at once.
+real_job = C.job
+SAID = "Repository rule violations found; Merge method squash is not allowed for this base branch (HTTP 405)"
 
 
 def reviewed():
@@ -48,14 +50,13 @@ def reviewed():
 CASES = {
     "status": {"pr": clean(labels=["hold"]), "fail": lambda: FAIL.append("/statuses/"), "mend": FAIL.clear},
     "update": {"pr": {**clean(), "mergeStateStatus": "BEHIND"}, "fail": lambda: FAIL.append("/update-branch"),
-               "mend": FAIL.clear},
-    "merge": {"pr": clean(), "fail": lambda: setattr(H, "land", lambda *a: False),
-              "mend": lambda: setattr(H, "land", real_land)},
+               "mend": FAIL.clear, "said": SAID},
+    "merge": {"pr": clean(), "fail": lambda: FAIL.append("/merge"), "mend": FAIL.clear, "said": SAID},
     "mergeable": {"pr": {**clean(), "mergeStateStatus": "UNKNOWN"}, "mended": clean()},
     "job": {"pr": clean(files=["secrets/1.yaml"]), "fail": lambda: setattr(C, "job", lambda *a, **k: None),
             "mend": lambda: setattr(C, "job", real_job)},
     "post": {"pr": mkpr(), "setup": reviewed, "fail": lambda: STUB.update(post=C.Unavailable("GitHub's down")),
-             "mend": lambda: STUB.update(post=None)},
+             "mend": lambda: STUB.update(post=None), "said": "GitHub's down"},
 }
 assert set(CASES) == set(H.STRIKES), "each step that's tried again has its case here"
 
@@ -72,7 +73,7 @@ def watched():
 
 
 for kind, case in CASES.items():
-    why = H.STRIKES[kind]
+    why = H.STRIKES[kind] + (f": {case['said']}" if "said" in case else "")
     fresh_pr_state()
     case.get("setup", lambda: None)()
     case.get("fail", lambda: None)()
@@ -88,8 +89,8 @@ for kind, case in CASES.items():
     watch, S.CFG["watch"] = S.CFG["watch"], None
     _, digest = a_pass(case["pr"], 1200)
     S.CFG["watch"] = watch
-    assert ("Failing again and again", f"[{KEY}](u) t", f"{why}, 4 times in a row (journalctl -u autoland)") in digest, \
-        (kind, digest)
+    listed = f"{H.STRIKES[kind]}, 4 times in a row" + (f": {case['said']}" if "said" in case else " (journalctl -u autoland)")
+    assert ("Failing again and again", f"[{KEY}](u) t", listed) in digest, (kind, digest)
     assert C.WAKE["sam/r"] == T + 1200 + 8 * 60 + 1, (kind, C.WAKE)
     # Once it goes through, the run is over, and its wait has its deadline.
     case.get("mend", lambda: None)()
@@ -97,7 +98,7 @@ for kind, case in CASES.items():
     assert kind not in pr_state()["strikes"] and waits.FAILING == {}, (kind, pr_state())
     it = watched()
     minutes = S.CFG["defaults"]["holdStallAfter" if kind == "status" else "stallAfter"]  # status's case is on hold
-    assert it["due"] == it["since"] + minutes * 60 and why not in it["phase"], (kind, it)
+    assert it["due"] == it["since"] + minutes * 60 and H.STRIKES[kind] not in it["phase"], (kind, it)
 # The backoff stops at an hour, and a new head starts the count over.
 fresh_pr_state()
 for i in range(9):

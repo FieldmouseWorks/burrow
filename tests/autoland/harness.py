@@ -255,13 +255,19 @@ def gh_stub(*a, **k):
     return ""
 
 
-FAIL = []  # writes that fail (gh's None), by a piece of their arguments
+FAIL = []  # writes that fail, by a piece of their arguments: gh's None, or with check what gh() raises
+# What GitHub says to each, as gh prints it: two lines, as it can be.
+REFUSAL = "Repository rule violations found\nMerge method squash is not allowed for this base branch (HTTP 405)"
 
 
 def write(*a, **k):
     acting()
     WROTE.append(" ".join(a))
-    return None if any(f in " ".join(a) for f in FAIL) else {}
+    if not any(f in " ".join(a) for f in FAIL):
+        return {}
+    if k.get("check", True):
+        raise RuntimeError(f"gh {' '.join(a[:3])}: gh: {REFUSAL}")
+    return None
 
 
 def job(repo, task, clone=False):
