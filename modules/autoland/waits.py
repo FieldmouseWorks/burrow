@@ -33,7 +33,8 @@ FAILS = "the steward's pass fails on it (journalctl -u autoland)"
 NOTED = {}  # this pass's waits, by repo whose PRs it read, then by key (None: nothing to watch)
 OPEN = {}  # the keys of each repo's open PRs, as this pass read them
 FAILED = {}  # the repos this pass failed on, before, between or after their PRs
-FAILING = {}  # the PRs whose step keeps failing, by key: what fails
+FAILING = {}  # the PRs whose step keeps failing, by key: what fails, which is the stall
+SAID = {}  # what GitHub said to the latest try of each, by key: shown, but not the stall
 
 
 def begin():
@@ -41,6 +42,7 @@ def begin():
     OPEN.clear()
     FAILED.clear()
     FAILING.clear()
+    SAID.clear()
 
 
 def repo_of(key):
@@ -77,12 +79,15 @@ def note(repo, pr, phase, wait):
     NOTED.setdefault(repo, {})[key_of(repo, pr)] = item(repo, pr, phase, minutes, kick, rev)
 
 
-def overdue(repo, pr, why):
-    """The PR's step keeps failing the same way: its wait is due now. False
-    without the watchdog, which nothing then tells."""
+def overdue(repo, pr, why, said=None):
+    """The PR's step keeps failing the same way: its wait is due now, saying
+    what GitHub said to the latest try when it said. False without the
+    watchdog, which nothing then tells."""
     if not CFG["watch"]:
         return False
     FAILING[key_of(repo, pr)] = why
+    if said:
+        SAID[key_of(repo, pr)] = said
     return True
 
 
@@ -123,8 +128,13 @@ def publish(seen, digest, full):
                 continue
             old = was.get(key, {})
             phase = f"{it['phase']}; {FAILING[key]}" if key in FAILING else it["phase"]
-            same = old.get("phase") == phase and old.get("rev") == it["rev"]
+            # What GitHub says can change from try to try (a 502, then a
+            # 503): the failure goes on, and so does its stall.
+            same = old.get("rev") == it["rev"] and (old.get("phase") == phase or (
+                key in FAILING and old.get("phase", "").startswith(f"{phase}: ")))
             since = old["since"] if same else C.NOW
+            if key in SAID:
+                phase = f"{phase}: {SAID[key]}"
             items[key] = {"what": it["what"], "link": it["link"], "phase": phase, "since": since,
                           "due": since if key in FAILING else since + it["minutes"] * MIN, "kick": it["kick"],
                           "rev": it["rev"]}

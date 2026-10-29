@@ -107,10 +107,9 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
         struck.add(kind)
         strikes = st.setdefault("strikes", {})
         strikes[kind] = times = strikes.get(kind, 0) + 1
-        why = f"{STRIKES[kind]}: {said}" if said else STRIKES[kind]
         log(f"{tag}: {STRIKES[kind]} ({times} in a row){f': {said}' if said else ''}")
         after(C.NOW, min(2 ** (times - 1), 60))  # ends: STRIKE_LIMIT in a row make the wait overdue
-        if times >= STRIKE_LIMIT and not waits.overdue(repo, pr, why):
+        if times >= STRIKE_LIMIT and not waits.overdue(repo, pr, STRIKES[kind], said):
             digest.append(("Failing again and again", line, f"{STRIKES[kind]}, {times} times in a row"
                            + (f": {said}" if said else " (journalctl -u autoland)")))
 
