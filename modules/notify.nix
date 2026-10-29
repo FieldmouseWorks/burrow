@@ -21,13 +21,16 @@ let
 
   notify = pkgs.writeShellApplication {
     inherit name;
-    runtimeInputs = [ pkgs.coreutils pkgs.util-linux pkgs.systemd pkgs.gh ];
+    runtimeInputs = [ pkgs.coreutils pkgs.util-linux pkgs.systemd config.burrow.github.machineGh ];
     text = lib.concatStrings (lib.mapAttrsToList (n: v: "${n}=${lib.escapeShellArg v}\n") vars)
       + builtins.readFile ./notify/notify.sh;
   };
 in
 {
-  imports = [ (import ./common.nix inputs) ];
+  imports = [
+    (import ./common.nix inputs)
+    { key = "burrow/github"; imports = [ (import ./github.nix inputs) ]; }
+  ];
 
   options.burrow.notify = {
     enable = lib.mkEnableOption "HOST-notify, notices to the owner as GitHub issues";
@@ -37,8 +40,9 @@ in
       default = null;
       example = "sam/homelab";
       description = ''
-        The GitHub repo (OWNER/NAME) the issues go to, opened with the gh login
-        of burrow.user. null: notices only go to the journal.
+        The GitHub repo (OWNER/NAME) the issues go to, opened as the machine's
+        own App (burrow.github.machinery), else with burrow.user's gh login.
+        null: notices only go to the journal.
       '';
     };
 

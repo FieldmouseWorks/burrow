@@ -1,5 +1,6 @@
 # advisory-watch: notice new vulnerabilities in what the machine and its
 # projects actually run, and get a Claude on each one the same hour.
+# Its jobs act on GitHub as the machine's own App, APP, when it has one.
 # (Everything in capitals comes from ../updates.nix.)
 #
 #   advisory-watch          one pass (hourly; the system scan runs daily)
@@ -119,7 +120,7 @@ $list
 
 Renovate opens security PRs for these on its own, without the usual wait. Make sure each fix lands today: if Renovate's PR exists, get its CI green and let it merge; if Renovate can't fix it (a transitive dependency, no fixed version yet, a breaking bump), make the fix yourself on a branch and open a PR. If a vulnerability can't affect this project (dev-only tooling, code path not used), say why in one line instead. If something needs $OWNER, run \`$NOTIFY open advisory-$p \"title\" \"what they need to do\"\`."
   fi
-  if id=$(as_user proj run --first "$p" "$task"); then
+  if id=$(as_user proj run --first ${APP:+--app "$APP"} "$p" "$task"); then
     echo "$(date -Is) $p: handed to Claude, proj log $id" >>"$state/log"
   fi
 done

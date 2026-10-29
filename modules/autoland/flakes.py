@@ -64,9 +64,10 @@ def quarantine(repo):
 
 def ours(author):
     """Whether a job may take an issue this login (as REST gives it) opened:
-    the CI's, the steward's App's, or one of its authors'. GraphQL's logins,
-    which `authors` has, drop an app's `[bot]`."""
-    return author in (ACTIONS, C.me()) or author.removesuffix("[bot]") in CFG["authors"]
+    the CI's, the steward's App's, or one of its authors' or bots', as
+    rest_ours reads them (the machinery's App, whose jobs comment here, among
+    them)."""
+    return author in (ACTIONS, C.me()) or C.rest_ours(author)
 
 
 def watch(repo, mine):

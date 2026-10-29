@@ -15,7 +15,7 @@ query($owner: String!, $name: String!, $cursor: String) {
       nodes {
         id number title url isDraft isCrossRepository headRefName headRefOid baseRefName
         createdAt updatedAt mergeStateStatus body
-        author { login }
+        author { login __typename }
         autoMergeRequest { enabledAt }
         mergeQueueEntry { id }
         labels(first: 100) { pageInfo { hasNextPage } nodes { name } }

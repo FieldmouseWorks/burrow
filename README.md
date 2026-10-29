@@ -34,7 +34,7 @@ MIT licensed. Status: in daily use on one machine; options may still move.
 | `toolbox` | `burrow.toolbox` | The dev tools projects and agents expect (gh, jj, rust, go, node, python, uv, qemu, nix-ld, direnv, and `flaky`, which quarantines a gate's flaky tests: [docs/flaky-tests.md](docs/flaky-tests.md)). The sandboxes always get it. |
 | `rust-cache` | `burrow.rustCache` | Every Rust build on the machine shares a compile cache: cargo runs rustc through [sccache](https://github.com/mozilla/sccache), so a dependency compiled once comes out of the cache in the next fresh worktree or CI checkout. One cache per user, never shared, since a user's builds fill it with what that user's next build trusts: `burrow.user`'s, and those of the `users` you list (CI runners' users, say). Each user's cache has one daemon, `rust-cache-USER`, on a socket only that user can reach (sccache's default TCP port lets any local user compile, and so run code, as whoever started it). The daemon only stores: the compiles run in the builds, under their own units' limits (sccache's client-side mode), so a runner's sandbox needs only to read the cache. A build that asks the daemon to compile anyway is refused (sccache is patched for that) and compiles itself, and the daemon runs in a chroot holding only sccache and the cache, since a client can ask it for any path. Whatever keeps the cache from working compiles without it. The caches live in `/var/cache/sccache`: keep them out of snapshots and backups. |
 | `house` | `burrow.house` | `house-sync` (when the blocks change, and on each repo's pushes to its default branch): every repo's copies of the house blocks (the house rules, [house/rules.md](house/rules.md), and the Pull requests section, [house/prs.md](house/prs.md), each between its markers in AGENTS.md) kept the same as burrow's, as one PR per repo when a block changes. Broken markers, and repos it couldn't get through, go to the owner through `notify`. See [docs/house-style.md](docs/house-style.md). |
-| `github` | `burrow.github` | Tokens of GitHub Apps of yours, for what on the machine should act as an App rather than as your own gh login. Each App's socket (`/run/gh-token/NAME.sock`, its `users` only) is answered by `gh-token` as a user of its own, with the App's key a credential only it can read: an installation token for the account or repo asked for, kept until it has ten minutes left. A process acts as the App with the App's `env`: `gh` then gets a token for the account its call names, and git's only credential helper gets one for the repo it pushes to, and neither can fall back to your login when the App's can't be had. |
+| `github` | `burrow.github` | Tokens of GitHub Apps of yours, for what on the machine should act as an App rather than as your own gh login. Each App's socket (`/run/gh-token/NAME.sock`, its `users` only) is answered by `gh-token` as a user of its own, with the App's key a credential only it can read: an installation token for the account or repo asked for, kept until it has fifty minutes left, so one lasts a job that takes it at the start. A process acts as the App with the App's `env`: `gh` then gets a token for the account its call names, and git's only credential helper gets one for the repo it pushes to, and neither can fall back to your login when the App's can't be had. |
 
 ## Assumptions
 
@@ -100,9 +100,13 @@ servers of your own for every Claude session (`burrow.claude.mcpServers`), and, 
 run Claude Code's newest release instead of nixpkgs', a release manifest in
 your flake (`burrow.claude.manifest`, and its path for `HOST-update` to bump
 in `burrow.updates.claudeManifest`). Persist `burrow.stateDir` if `/` is
-ephemeral. `HOST-update` pushes to `origin` with the user's git login, and
-everything that reaches GitHub (Renovate, notices) uses their gh login, except
-the autoland steward: it acts as a GitHub App of yours (`burrow.autoland.app`;
+ephemeral. `HOST-update` pushes to `origin` with the user's git login. The
+rest of the machine's own GitHub traffic (Renovate, notices, the ledger,
+house-sync, and the Claude jobs it starts by itself) acts as a GitHub App of
+yours when `burrow.github.machinery` names one, and as the user's gh login
+otherwise; work the user asks for (an issue of theirs in the inbox, a session
+of theirs) acts as them either way. The autoland steward acts as an App of its
+own (`burrow.autoland.app`;
 [docs/repo-baseline.md](docs/repo-baseline.md#the-stewards-github-app) says
 how to make one).
 

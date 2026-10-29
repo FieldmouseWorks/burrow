@@ -227,6 +227,12 @@
           python3 -I ${./tests/renovate-sweep.py} ${./modules/updates/renovate-sweep.sh} ${./modules/updates/major-seal.py} ${./modules/autoland/seal.py}
           touch $out
         '';
+        # Which repos Renovate's runs cover, with whose token: gh's login for
+        # all of them, or a run each with its owner's App token.
+        renovate-run = pkgs.runCommand "renovate-run-check" { nativeBuildInputs = [ pkgs.python3 pkgs.util-linux ]; } ''
+          python3 -I ${./tests/renovate-run.py} ${./modules/updates/renovate.sh}
+          touch $out
+        '';
         # A lock file refresh's too-new releases go back or fail it, with
         # stand-ins for cargo, npm and the registries.
         lock-age = pkgs.runCommand "lock-age-check" { nativeBuildInputs = [ (pkgs.python3.withPackages (p: [ p.json5 ])) pkgs.git ]; } ''
