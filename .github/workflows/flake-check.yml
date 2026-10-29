@@ -1,10 +1,10 @@
 # The shared CI for every repo whose gate is its flake (burrow's
 # lib/project.nix): check out, install Nix, `nix flake check`, then attest the
-# result for Conary's ledger. Called from a repo's own workflow with `uses:`,
-# whose job grants `id-token: write` and `attestations: write` (a called job
-# gets no more than its caller gives). Its actions are pinned to commits (repos
-# that allow only pinned actions need that), and Renovate keeps the pins
-# current.
+# result for Conary's ledger; on a PR, also check that GitHub verifies every
+# signed commit it adds. Called from a repo's own workflow with `uses:`, whose
+# job grants `id-token: write` and `attestations: write` (a called job gets no
+# more than its caller gives). Its actions are pinned to commits (repos that
+# allow only pinned actions need that), and Renovate keeps the pins current.
 name: flake-check
 on:
   workflow_call:
@@ -119,3 +119,38 @@ jobs:
           subject-path: ${{ steps.subject.outputs.path }}
           predicate-type: https://github.com/FieldmouseWorks/Conary/blob/main/docs/ci-attestation.md#v1
           predicate-path: ${{ runner.temp }}/conary/predicate.json
+  # A PR's commits as GitHub sees them: each one unsigned, or signed by a key
+  # GitHub matches to its committer. One signed by a key that isn't its
+  # committer's (a session's own key on a commit given someone else's name and
+  # email) shows as Unverified, as if someone were posing as them.
+  commits:
+    if: github.event_name == 'pull_request'
+    runs-on: ${{ inputs.runner }}
+    permissions:
+      contents: read
+    steps:
+      - id: signatures
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          # The commits the PR adds, the ones HEAD has and its merge base with
+          # BASE doesn't, with GitHub's verdict on each one's signature.
+          compare="repos/$GITHUB_REPOSITORY/compare/$BASE...$HEAD"
+          fork=$(gh api "$compare" --jq .merge_base_commit.sha)
+          gh api --paginate "$compare?per_page=100" \
+            --jq '.commits[] | [.sha, .commit.verification.reason, .commit.committer.name, .commit.committer.email] | @tsv' \
+            > "$RUNNER_TEMP/commits.tsv"
+          bad=0
+          while IFS=$'\t' read -r sha reason name email; do
+            case $reason in
+              valid | unsigned) echo "$sha: $reason" ;;
+              *)
+                bad=1
+                echo "::error title=Unverified commit::$sha is signed, but GitHub can't verify the signature for its committer, $name <$email> ($reason), so it shows as Unverified. Commit as the identity that signs your commits, never under someone else's name and email. To fix it, recommit the branch that way (git rebase --rebase-merges --exec 'git commit --amend --no-edit --reset-author' $fork) and push it with --force-with-lease."
+                ;;
+            esac
+          done < "$RUNNER_TEMP/commits.tsv"
+          exit "$bad"

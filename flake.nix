@@ -254,6 +254,13 @@
           python3 -I ${./tests/house-sync.py} ${./modules/house/sync.sh} ${./house}
           touch $out
         '';
+        # The shared CI's commit check (flake-check.yml's commits job), its
+        # own script with a stand-in for gh: a PR commit signed by a key
+        # GitHub can't match to its committer fails it.
+        commit-signatures = pkgs.runCommand "commit-signatures-check" { nativeBuildInputs = [ (pkgs.python3.withPackages (p: [ p.pyyaml ])) pkgs.jq ]; } ''
+          python3 -I ${./tests/commit-signatures.py} ${./.github/workflows/flake-check.yml}
+          touch $out
+        '';
         # Stale Remote Control servers catch up once idle, with a stand-in for Claude.
         remote-control = import ./tests/remote-control.nix { inherit self pkgs; };
         # The signed-in browser: Claude driving it, its logins kept, its ports
