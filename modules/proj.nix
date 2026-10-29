@@ -16,13 +16,15 @@ let
   inherit (config.burrow) user projectsDir stateDir;
   watchWake = "${stateDir}/proj-watch/wake.json";
   inboxWake = "${stateDir}/proj-inbox/wake.json";
+  # The pipeline's own repos, whose projects' pipeline jobs get its slots.
+  pipelineRepos = lib.escapeShellArg (lib.concatStringsSep " " (lib.attrByPath [ "burrow" "autoland" "pipelineRepos" ] [ ] config));
   # What each job waits on, for the stall watchdog, when it's on.
   watchdog = config.burrow.watchdog.enable or false;
   waits = "${cfg.jobsDir}/.waits.json";
 
   proj = pkgs.writeShellApplication {
     name = "proj";
-    runtimeInputs = [ pkgs.coreutils pkgs.findutils pkgs.gnugrep pkgs.gnused pkgs.gawk pkgs.jq pkgs.curl pkgs.systemd pkgs.util-linux pkgs.bashInteractive ];
+    runtimeInputs = [ pkgs.coreutils pkgs.findutils pkgs.gnugrep pkgs.gnused pkgs.gawk pkgs.jq pkgs.curl pkgs.git pkgs.systemd pkgs.util-linux pkgs.bashInteractive ];
     text = ''
       SRC=${lib.escapeShellArg projectsDir}
       JOBS=${lib.escapeShellArg cfg.jobsDir}
@@ -39,6 +41,7 @@ let
       MARK=${lib.escapeShellArg inboxMark}
       KICK=${lib.escapeShellArg config.burrow.events.kick}
       WAKE=${lib.escapeShellArg watchWake}
+      PIPELINE=${pipelineRepos}
       WAITS=${lib.escapeShellArg (lib.optionalString watchdog waits)}
       STALL_QUEUED=${toString (cfg.stallAfterMinutes * 60)}
       GRACE=600
@@ -60,7 +63,7 @@ let
       HOST=${lib.escapeShellArg config.networking.hostName}
       NOTIFY=${lib.escapeShellArg (lib.optionalString (config.burrow.tools ? notify) (lib.getExe config.burrow.tools.notify))}
       WAKE=${lib.escapeShellArg inboxWake}
-      PIPELINE=${lib.escapeShellArg (lib.concatStringsSep " " (lib.attrByPath [ "burrow" "autoland" "pipelineRepos" ] [ ] config))}
+      PIPELINE=${pipelineRepos}
     '' + builtins.readFile ./proj/inbox.sh;
   };
 in
@@ -92,10 +95,14 @@ in
       default = if cfg.maxJobs > 1 then 1 else 0;
       defaultText = lib.literalExpression "if maxJobs > 1 then 1 else 0";
       description = ''
-        Of the maxJobs slots, how many only pipeline jobs (`proj run
-        --pipeline`: the steward's jobs, issues in its own repos) may take,
-        so work on the pipeline itself waits only on other such work, never
-        on everyone else's long jobs.
+        Of the maxJobs slots, how many only pipeline jobs in the pipeline's
+        own repos (`proj run --pipeline` in a project whose clone's origin
+        is one of `burrow.autoland.pipelineRepos` on GitHub: the steward's
+        jobs there, their issues) may take, so work on the pipeline itself
+        waits only on other such work, never on everyone else's long jobs. A
+        pipeline job in any other project goes as `--first`: ahead of the
+        line, but within its project's cap and never in these slots; `proj
+        status` and its turn's journal say so, origin and all.
       '';
     };
     maxJobsPerProject = lib.mkOption {
@@ -103,7 +110,8 @@ in
       default = lib.max 1 (cfg.maxJobs - cfg.pipelineSlots - 1);
       defaultText = lib.literalExpression "max 1 (maxJobs - pipelineSlots - 1)";
       description = ''
-        The most slots one project's jobs hold at once, pipeline jobs aside.
+        The most slots one project's jobs hold at once, the pipeline's own
+        repos' pipeline jobs aside.
         Its next one waits, and lets other projects' by meanwhile, so one
         project's jobs never fill the machine.
       '';

@@ -7,7 +7,7 @@
 # the first turn in line that may start, or nothing.
 #
 # The last PIPELINE_SLOTS of the MAX_JOBS slots are for pipeline turns only
-# (work on the pipeline itself: the steward's jobs, its repos' issues), so
+# (work on the pipeline itself, in its own repos' projects: class says), so
 # one waits only on other pipeline turns, never on everyone else's long
 # jobs; a pipeline turn takes the lowest free slot, which keeps those for the
 # next one. Any other turn waits while its project holds PER_PROJECT slots
@@ -34,4 +34,80 @@ pick() {
         ;;
     esac
   done
+}
+
+# A clone's origin URL, or nothing (no clone, no origin, or no path at all:
+# git -C "" would ask whatever repo it runs in).
+origin() {
+  [ -n "$1" ] || return 0
+  git -C "$1" remote get-url origin 2>/dev/null || true
+}
+
+# The GitHub repo a clone is of, as owner/name in lower case, from its origin
+# in any form git takes (https, ssh:// or scp-like, a user or a .git or not),
+# or nothing for anything else: another host, a local path, a longer path, a
+# query, or a name GitHub wouldn't give (so what it prints is never more than
+# a repo's name, whatever else the origin holds).
+github_repo() {
+  local url
+  url=$(origin "$1")
+  url=${url,,}
+  url=${url%/}
+  url=${url%.git}
+  if [[ $url =~ ^(https?://([^@/]+@)?github\.com/|ssh://([^@/]+@)?github\.com(:[0-9]+)?/|([^@/]+@)?github\.com:)([a-z0-9-]+/[a-z0-9._-]+)$ ]]; then
+    echo "${BASH_REMATCH[6]}"
+  fi
+}
+
+# Whether the project at a path is a clone of one of the pipeline's own repos
+# (PIPELINE: their OWNER/NAMEs, any case, as autoland.pipelineRepos has them).
+pipeline_project() {
+  local r
+  r=$(github_repo "$1")
+  [ -n "$r" ] || return 1
+  case " ${PIPELINE,,} " in *" $r "*) return 0 ;; esac
+  return 1
+}
+
+# A job's class, from its dir. One run with --pipeline is a pipeline one,
+# every turn of it, only while its project is one of the pipeline's own;
+# anywhere else it's first, every turn of it, so it still goes ahead of the
+# line but counts against its project's PER_PROJECT and stays off the
+# pipeline's slots (one repo's PRs, waiting on that repo's own lock, can't
+# fill the machine). Asked each time, so a job from before this rule, or one
+# whose repo was taken off the list since, is held to it too. Otherwise first
+# or normal, as the turn was started.
+class() {
+  if [ ! -e "$1/pipeline" ]; then echo "${2:-normal}"
+  elif pipeline_project "$(cat "$1/project" 2>/dev/null)"; then echo pipeline
+  else echo first
+  fi
+}
+
+# A waiting turn's class now, and the name its place in line (JOBS/.queue's
+# PREFIX-WHEN-ID) should have for it: 0 pipeline, 1 first, 2 normal, with a
+# tab between. Its prefix says what the turn itself is (2 normal, anything
+# else first: run with --first, or waited past MAX_WAIT), and class what
+# that makes it now, so a job whose origin or list changed while it waits
+# moves in line and is held to its project's cap as what it is now.
+place() {
+  local c p
+  c=$(class "$2" "$([[ $1 == 2-* ]] && echo normal || echo first)")
+  case $c in pipeline) p=0 ;; first) p=1 ;; *) p=2 ;; esac
+  printf '%s\t%s\n' "$c" "$p-${1#?-}"
+}
+
+# What proj says of a job that asked to be pipeline work and isn't, so a
+# mis-set origin or list doesn't quietly demote it: nothing for any other.
+# Never the origin itself, which can hold a token: only the repo it names.
+demoted() {
+  local d r
+  [ -e "$1/pipeline" ] || return 0
+  d=$(cat "$1/project" 2>/dev/null) || d=''
+  pipeline_project "$d" && return 0
+  r=$(github_repo "$d")
+  if [ -n "$r" ]; then echo "asked as --pipeline, but its origin, github.com/$r, isn't in pipelineRepos: it goes as --first"
+  elif [ -n "$(origin "$d")" ]; then echo "asked as --pipeline, but its origin isn't a GitHub repo's: it goes as --first"
+  else echo "asked as --pipeline, but its project has no origin: it goes as --first"
+  fi
 }

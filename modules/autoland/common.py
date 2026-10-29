@@ -430,8 +430,9 @@ def pipeline(repo):
 def job(repo, task, clone=False):
     """Hand a task to a Claude job in the repo's project. Every one is
     pipeline work (proj run --pipeline): it settles a PR or the branch PRs
-    land on, so it goes ahead of the line, in a slot kept for it. Returns
-    the job id."""
+    land on, so it goes ahead of the line, and in the pipeline's own repos
+    (pipelineRepos) in a slot kept for it; proj decides which. Returns the
+    job id."""
     d = project_dir(repo)
     if d is None and clone and not DRY:
         d = repo.split("/")[1]
