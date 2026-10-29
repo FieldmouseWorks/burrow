@@ -164,7 +164,7 @@ pkgs.testers.runNixOSTest {
         b = proj('run --idle 15s web "later 600 the heavy-run lock"')
         for j in (a, b):
             wait_of(j, lambda w: w["phase"] == "turn 1 is running")
-        machine.succeed("systemd-run --unit=hold-waits flock /data/dev/jobs/.waits.lock sleep 600")
+        machine.succeed("systemd-run --unit=hold-waits flock /data/dev/jobs/.waits.lock ${pkgs.coreutils}/bin/sleep 600")
         machine.wait_until_fails("flock -n /data/dev/jobs/.waits.lock true", timeout=10)
         # Its twenty seconds and three in line; quiet for fifteen, still in line.
         machine.wait_until_succeeds(f"su - dev -c 'proj state {a}' | grep -x 'timed out after 20s'", timeout=60)
@@ -181,7 +181,7 @@ pkgs.testers.runNixOSTest {
         wait_of(a, lambda w: "waiting in line: the gate lock" in w["phase"])
         # Held while the run is cut short and its leftovers stopped, telling
         # the watchdog its wait was over with them.
-        machine.succeed("systemd-run --unit=hold-waits flock /data/dev/jobs/.waits.lock sleep 600")
+        machine.succeed("systemd-run --unit=hold-waits flock /data/dev/jobs/.waits.lock ${pkgs.coreutils}/bin/sleep 600")
         machine.wait_until_fails("flock -n /data/dev/jobs/.waits.lock true", timeout=10)
         machine.wait_until_succeeds(f"test -s /data/dev/jobs/{a}/1.cut", timeout=60)
         machine.succeed("systemctl stop hold-waits")
