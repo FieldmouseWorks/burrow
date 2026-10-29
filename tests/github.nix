@@ -428,15 +428,41 @@ pkgs.testers.runNixOSTest {
           # A bundle's download, which git runs the helper for with the URL
           # alone: the App's token, and none of dev's; and not at all for a
           # URL with a login, which git sends again where it can't be dropped.
-          def heard(call):
+          def heard(call, app=True):
               machine.succeed(": > /tmp/logins")
-              machine.execute(dev(call, at="~/own"))
+              machine.execute(dev(call, app=app, at="~/own"))
               return machine.succeed("cat /tmp/logins").splitlines()
           got = heard("git -c fetch.bundleURI=https://github.com/sam/r.bundle fetch origin")
           assert any(line.startswith("/sam/r.bundle x-access-token:ghs_") for line in got), got
           assert not any("peter" in line for line in got), got
           got = heard("git -c fetch.bundleURI=https://peter:url-token@github.com/sam/r.bundle fetch origin")
           assert not any(line.startswith("/sam/r.bundle") or "peter" in line for line in got), got
+          # git's helper reads its settings for the URL its config resolves
+          # the bundle's to, while the bundle is asked for as given: a URL
+          # rewritten to another host, a remote named like it, and a rewrite
+          # that adds a login. Without the env, dev's header and login for
+          # those URLs go to GitHub; with it, none.
+          own = "git -C own config"
+          resolved = [
+              f"{own} url.https://eve.example/b/.insteadOf https://github.com/sam/rewritten.bundle",
+              f"{own} http.https://eve.example/.extraHeader '{header}'",
+              f"{own} remote.https://github.com/sam/named.bundle.url https://eve.example/c",
+              f"{own} url.https://peter:rewritten@login.example/.insteadOf https://github.com/sam/login.bundle",
+          ]
+          machine.succeed(dev(" && ".join(resolved), app=False))
+          for bundle, theirs in [("rewritten", "peter:header"), ("named", "peter:header"), ("login", "peter:rewritten")]:
+              call = f"git -c fetch.bundleURI=https://github.com/sam/{bundle}.bundle fetch origin"
+              got = heard(call, app=False)
+              assert any(line.startswith(f"/sam/{bundle}.bundle") and theirs in line for line in got), (bundle, got)
+              got = heard(call)
+              assert any(line.startswith(f"/sam/{bundle}.bundle x-access-token:ghs_") for line in got), (bundle, got)
+              assert not any("peter" in line for line in got), (bundle, got)
+              got = heard("GH_TOKEN_SOCKET=/run/gh-token/none.sock " + call)
+              assert not any("peter" in line for line in got), (bundle, got)
+          machine.succeed(dev(" && ".join(f"{own} --remove-section {s}" for s in [
+              "url.https://eve.example/b/", "http.https://eve.example/", "remote.https://github.com/sam/named.bundle",
+              "url.https://peter:rewritten@login.example/",
+          ]), app=False))
           machine.succeed(dev("git config --global --remove-section http && kdestroy", app=False))
 
       with subtest("git-lfs isn't run in the App's env, however git or a config starts it"):

@@ -38,6 +38,14 @@ use crate::error::Error;
 /// Runs REAL, git's own helper, with `args`: REMOTE URL, as git runs it for
 /// a remote, or URL alone, as it runs it to download a bundle. Returns only
 /// when it couldn't.
+///
+/// The helper reads its settings for the URL after the remote. Given a URL
+/// alone, it takes that word for a remote's name and reads them for that
+/// remote's URL instead, which git's config can change: a remote named like
+/// the URL gives its own, and an `insteadOf` rewrites it, to another host, a
+/// scheme or a URL with a login. The bundle's `get` still asks for the URL
+/// as given. So a URL alone is run as `URL URL`, and the helper reads its
+/// settings for the URL that was cleared.
 pub fn run(real: &str, args: &[String], socket: Option<&Path>) -> Error {
     let given = std::env::var("GIT_CONFIG_PARAMETERS").ok();
     match command(real, args, socket, given.as_deref()) {
@@ -67,10 +75,11 @@ fn command(
         }
         // A bundle's download, which names its URL again on the helper's
         // stdin (`get URL FILE`), where a login can't be dropped: run only
-        // for a URL without one. A word that isn't a URL would be a
-        // remote's name, whose URL git's config gives.
+        // for a URL without one, and given it after itself (see `run`). A
+        // word that isn't a URL would be a remote's name, whose URL git's
+        // config gives.
         [url] if url.contains("://") && without_login(url) == *url => {
-            helper.arg(url);
+            helper.arg(url).arg(url);
             url.clone()
         }
         [_] => {
@@ -283,12 +292,13 @@ mod tests {
         assert_eq!(parameters(&c), None);
         assert_eq!(env(&c, "NETRC"), None);
         assert!(!removed(&c, "GIT_SSL_CERT"));
-        // A bundle's download: the URL alone, cleared the same way, but
-        // never one with a login (git sends it again on stdin), nor a
-        // remote's name in its place.
+        // A bundle's download: the URL alone, given after itself, so the
+        // helper's settings are the cleared URL's and not those of the URL
+        // git's config resolves it to; never one with a login (git sends
+        // it again on stdin), nor a remote's name in its place.
         let bundle = "https://github.com/sam/r.bundle";
         let c = run(&[bundle], socket).unwrap();
-        assert_eq!(c.get_args().collect::<Vec<_>>(), [bundle]);
+        assert_eq!(c.get_args().collect::<Vec<_>>(), [bundle, bundle]);
         assert_eq!(
             parameters(&c),
             Some(format!("'a'='b' {}", every_one(bundle)))
