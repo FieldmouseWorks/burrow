@@ -142,6 +142,7 @@ let
       ruleset = true;
       requireCi = true;
       proofJobs = { };
+      proofBuilds = { };
       codex = true;
       skipPaths = [ ];
     };
@@ -162,6 +163,8 @@ let
     reviewTimeout = rv.timeoutMinutes;
     agents = "${agents}/bin";
     sandbox = "${pkgs.bubblewrap}/bin/bwrap";
+    # What a proof would build, and whether it's built (proofs.py).
+    nix = "${config.nix.package}/bin";
     box = {
       store = "${reviewStore}/store-paths";
       caBundle = config.security.pki.caBundle;
@@ -568,8 +571,13 @@ in
         its verdict>"; }`: once a settled PR waits on nothing else, one
         Claude job a head runs them on that commit and records each verdict,
         a failure as a failure), proofSlots (how many of those jobs the repo
-        may have queued or running at once, for proofs that take the whole
-        machine: the rest wait their turn, oldest PR first; unset, no limit), keepBranches
+        may have building at once, for proofs that take the whole machine:
+        the rest wait their turn, oldest PR first; unset, no limit),
+        proofBuilds (the flake attribute each proof check builds, `{
+        "<check>" = "checks.x86_64-linux.<name>"; }`: a proof whose
+        attribute's outputs are all in the store, or being built by a proof
+        already running, skips the line and holds no slot; a job running a
+        check without one holds a slot of its own), keepBranches
         (more branch globs the cleanup never touches in this repo, on top of
         the machine's, for branches a repo keeps as evidence), codex (false:
         Codex leaves this repo alone, and none of it goes to it), skipPaths (more path regexes the reviewers never read in

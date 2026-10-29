@@ -3,20 +3,33 @@ or running at once, for proofs that take the whole machine (the rest would
 only wait out their timeout). The others wait their turn, oldest PR first,
 and the end of a job's turn kicks the repo's pass, which starts the next.
 
-What a slot is held by is the proof jobs themselves, by id, whatever head
-they were started on: a PR pushed again, or marked a draft, while its job
-runs still has it. A turn in the line is only this pass's: a PR is ahead
-while it's waiting in the same pass (they go in number order), so one held,
-drafted or done since holds nobody up."""
+What a slot is held by is a build: the store paths a running proof job
+builds that aren't built yet (its outputs, from the repo's proofBuilds).
+Jobs building the same paths are one build, since Nix builds a path once
+and the others wait for it; a job whose paths are all built holds nothing,
+and a job whose paths nobody worked out holds a slot of its own until it
+ends. So a proof with nothing new to build skips the line: all its paths
+are built, or being built by a proof already running.
+
+A job is still a job whatever head it was started on: a PR pushed again,
+or marked a draft, while its job runs still has what it holds. A turn in
+the line is only this pass's: a PR is ahead while it's waiting in the same
+pass (they go in number order), so one held, drafted or done since holds
+nobody up."""
 
 import os
 import re
+import subprocess
+import urllib.parse
 
 import common as C
-from common import STATE, load
+import reviewers as V
+from common import CFG, STATE, load, log
 
 OPEN = {}  # the open PRs of each repo this pass reads (begin)
 WAITING = {}  # the PRs of each repo this pass found waiting their turn
+FREE = "nothing new to build"  # ahead's answer for a proof that skips the line
+EVAL_TIMEOUT = 300  # seconds, its inputs fetched included
 
 
 def begin(repo, numbers):
@@ -38,23 +51,86 @@ def running(jid):
 
 def live(st):
     """The PR's proof jobs still queued or running, or that proj can't say
-    about: kept in its state, the ended ones dropped."""
+    about: kept in its state, the ended ones dropped, and what they build
+    with them."""
     st["proofsLive"] = [j for j in jobs(st) if running(j)]
+    if "proofPaths" in st:
+        st["proofPaths"] = {j: p for j, p in st["proofPaths"].items() if j in st["proofsLive"]}
     return st["proofsLive"]
 
 
-def ahead(repo, n, st, slots):
-    """How many proofs are ahead of PR n's: every open PR's live jobs, its
-    own included, and the lower-numbered PRs waiting their turn this pass.
-    None when its job may start now."""
-    busy = len(live(st))
+def nix(*args, timeout=60):
+    p = subprocess.run([f"{CFG['nix']}/{args[0]}", *args[1:]], capture_output=True, text=True, timeout=timeout)
+    if p.returncode != 0:
+        raise RuntimeError(f"{args[0]}: {p.stderr.strip()[-300:]}")
+    return p.stdout
+
+
+def outputs(repo, pr, checks, st):
+    """The store paths PR's proof of checks builds on its head: each check's
+    flake attribute (the repo's proofBuilds) at that exact commit, from the
+    steward's mirror, as the proof job's checkout of it has it (its rev
+    included), with import-from-derivation off. Worked out once a head,
+    and None when it can't be: a check with no attribute, an eval that
+    fails or takes too long."""
+    attrs = C.repo_cfg(repo)["proofBuilds"]
+    if C.DRY or not checks or not all(c in attrs for c in checks):
+        return None
+    n, head = pr["number"], pr["headRefOid"]
+    key = [head, sorted(checks)]
+    got = st.get("proofOutputs")
+    if got and got["for"] == key:
+        return got["paths"]
+    paths = None
+    try:
+        mirror = V.fetch(repo, f"+refs/pull/{n}/head:refs/pr/{n}")
+        url = f"git+file://{urllib.parse.quote(mirror)}?ref=refs/pr/{n}&rev={head}"
+        drvs = [nix("nix", "--extra-experimental-features", "nix-command flakes", "eval", "--raw",
+                    "--option", "allow-import-from-derivation", "false", "--option", "accept-flake-config", "false",
+                    "--no-update-lock-file", f"{url}#{attrs[c]}.drvPath", timeout=EVAL_TIMEOUT) for c in sorted(checks)]
+        paths = sorted(set(nix("nix-store", "--query", "--outputs", *drvs).split())) or None
+    except (RuntimeError, OSError, subprocess.SubprocessError) as e:
+        log(f"{repo}#{n}: can't tell what its proof builds at {head[:12]}: {e}")
+    st["proofOutputs"] = {"for": key, "paths": paths}
+    return paths
+
+
+def unbuilt(paths):
+    """Those of the paths not valid in this machine's store (no substituter
+    asked): all of them, when the store can't say."""
+    if not paths:
+        return set()
+    try:
+        return set(nix("nix-store", "--check-validity", "--print-invalid", *sorted(paths)).split())
+    except (RuntimeError, OSError, subprocess.SubprocessError) as e:
+        log(f"can't tell which store paths are built: {e}")
+        return set(paths)
+
+
+def ahead(repo, n, st, slots, outs=None):
+    """How many proofs are ahead of PR n's: the builds every open PR's live
+    jobs, its own included, are running, and the lower-numbered PRs waiting
+    their turn this pass. None when its job may start now; FREE when it may
+    whatever the line, since all it builds (outs, None when unknown) is
+    built or being built already."""
+    held = [(j, st.get("proofPaths", {}).get(j)) for j in live(st)]
     mine = re.escape(f"pr-{repo.replace('/', '_')}-") + r"(\d+)\.json"
     for f in os.listdir(STATE):
         m = re.fullmatch(mine, f)
         if m and int(m[1]) != n and (repo not in OPEN or int(m[1]) in OPEN[repo]):
-            busy += sum(map(running, jobs(load(f, {}))))
+            other = load(f, {})
+            held += [(j, other.get("proofPaths", {}).get(j)) for j in jobs(other) if running(j)]
+    todo = unbuilt({p for _, ps in held if ps for p in ps} | set(outs or ()))
+    # One a build: the paths a job has still to build, or the job itself
+    # when they're unknown. One with nothing left to build holds nothing.
+    builds = {j if ps is None else frozenset(todo.intersection(ps)) for j, ps in held} - {frozenset()}
     waiting = sum(other < n for other in WAITING.get(repo, ()))
-    return busy + waiting if busy + waiting >= slots else None
+    if len(builds) + waiting < slots:
+        return None
+    building = set().union(*(b for b in builds if isinstance(b, frozenset)))
+    if outs is not None and todo.intersection(outs) <= building:
+        return FREE
+    return len(builds) + waiting
 
 
 def wait(repo, n):
@@ -62,7 +138,10 @@ def wait(repo, n):
     WAITING.setdefault(repo, set()).add(n)
 
 
-def started(st):
-    """The PR's latest proof job, just started (or not): it holds a slot
-    until it ends, whatever job starts after it."""
+def started(st, outs=None):
+    """The PR's latest proof job, just started (or not): it holds what it
+    builds until it ends, whatever job starts after it. outs: what a job
+    started just now builds, when that's known."""
     st["proofsLive"] = jobs(st)
+    if outs is not None:
+        st.setdefault("proofPaths", {})[st["provedJob"]] = outs
