@@ -12,7 +12,9 @@
 # its deadline passes with GitHub unreadable, that a reply meanwhile owns the
 # job's waits, that a turn's end kicks what it was started to and proj-watch
 # for the repos it awaits, that a job's own --timeout stops its turns, and
-# its --idle one that has gone quiet (and either still kicks), that _watch and proj-inbox given a repo look at
+# its --idle one that has gone quiet (and either still kicks), that a reply
+# while the last turn's unit is still ending waits for it before its turn is
+# written, that _watch and proj-inbox given a repo look at
 # that repo alone and book when it next needs a look, that proj-inbox posts
 # every finished turn's answer (one
 # resumed before it looked too, none misread while a turn starts) and ends
@@ -470,6 +472,30 @@ pkgs.testers.runNixOSTest {
         machine.wait_until_succeeds(f"su - dev -c 'proj state {c}' | grep -x done", timeout=120)
         proj(f"stop {b}")
         waits(lambda w: a not in w and b not in w and c not in w)
+
+    with subtest("a reply while the last turn's unit is still ending waits for it, and its turn isn't written before"):
+        # The turn's end (_ended) held up on the watchdog's lock, as another
+        # job's look at that moment would.
+        a = proj('run web "sleep 5"')
+        waits(lambda w: w.get(a, {}).get("phase") == "turn 1 is running")
+        machine.succeed("touch /tmp/hold")
+        machine.succeed("""(su - dev -c "flock /data/dev/jobs/.waits.lock sh -c 'touch /tmp/held; while [ -e /tmp/hold ]; do sleep 0.2; done'" >/dev/null 2>&1 &)""")
+        machine.wait_until_succeeds("test -e /tmp/held")
+        machine.wait_until_succeeds(f"su - dev -c 'proj state {a}' | grep -x done", timeout=120)
+        assert machine.succeed(f"systemctl --user -M dev@ show -P LoadState '{unit(a)}'").strip() == "loaded"
+        machine.succeed(f"rm -f /tmp/reply.rc; ((su - dev -c 'proj reply {a} hello' >/tmp/reply.out 2>&1; echo $? >/tmp/reply.rc) >/dev/null 2>&1 &)")
+        time.sleep(3)
+        # Still waiting, and turn 2 not written: the ending turn's _ended
+        # would read it as the latest, and as failed.
+        machine.fail("test -e /tmp/reply.rc")
+        assert machine.succeed(f"cat /data/dev/jobs/{a}/turns").strip() == "1"
+        machine.fail(f"test -e /data/dev/jobs/{a}/prompt.2")
+        machine.succeed("rm /tmp/hold /tmp/held")
+        machine.wait_until_succeeds("test -e /tmp/reply.rc", timeout=60)
+        assert machine.succeed("cat /tmp/reply.rc").strip() == "0", machine.succeed("cat /tmp/reply.out")
+        machine.wait_until_succeeds(f"su - dev -c 'proj state {a}' | grep -x done", timeout=120)
+        assert machine.succeed(f"cat /data/dev/jobs/{a}/turns").strip() == "2"
+        waits(lambda w: a not in w)
 
     with subtest("a timeout reads as timeout(1) reads it: fractions, and 0 for none"):
         a = proj("run web hello")

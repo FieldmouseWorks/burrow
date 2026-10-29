@@ -257,22 +257,27 @@ waits() {
 }
 
 start_turn() {
-  local id=$1 msg=$2 first=$3 n
+  local id=$1 msg=$2 first=$3 n i
   local d=$jobs/$id
+  # The last turn reads as ended once it has written its outcome, but its
+  # unit is still there while its _ended runs (telling the watchdog, kicking
+  # proj-watch, which can start this turn), and no unit starts under that
+  # name until it's gone. Waited out, for a minute at most, before this turn
+  # is written, so _ended only ever reads the turn it ends as the latest.
+  for i in $(seq 120); do
+    systemctl --user reset-failed "$(unit "$id")" 2>/dev/null || true
+    [ "$(systemctl --user show -P LoadState "$(unit "$id")" 2>/dev/null)" = loaded ] || break
+    if [ "$i" = 120 ]; then
+      echo "proj: $id's last turn is still ending, so its next can't start yet" >&2
+      return 1
+    fi
+    sleep 0.5
+  done
   n=$(($(cat "$d/turns" 2>/dev/null || echo 0) + 1))
   # The last turn's waits are the new turn's to clear (_exec), so a turn that
   # can't start, or a start_turn killed partway, leaves the job as it was.
   printf '%s\n' "$msg" >"$d/prompt.$n"
   set_turns "$id" "$n"
-  # The last turn reads as ended once it has written its outcome, but its
-  # unit is still there while its _ended runs (telling the watchdog, kicking
-  # proj-watch, which can start this turn), and no unit starts under that
-  # name until it's gone.
-  for _ in $(seq 120); do
-    systemctl --user reset-failed "$(unit "$id")" 2>/dev/null || true
-    [ "$(systemctl --user show -P LoadState "$(unit "$id")" 2>/dev/null)" = loaded ] || break
-    sleep 0.5
-  done
   # Claude is what goes first when memory runs out, not whatever it's next to.
   if ! systemd-run --user --quiet --collect --unit="$(unit "$id")" \
     --slice="$SLICE" \
