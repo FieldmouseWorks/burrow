@@ -43,6 +43,10 @@
       reviewers.codex.enable = true;
     };
     house.enable = true;
+    cpu = {
+      enable = true;
+      gates.slices = [ "ci" ];
+    };
     browser.enable = true;
     ledger = {
       enable = true;

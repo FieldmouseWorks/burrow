@@ -35,7 +35,7 @@
       # The ledger's machines take Conary from its own flake; burrow's checks
       # build theirs with a stand-in for its `cn`.
       cnStandIn = pkgs.writeShellScriptBin "cn" "exit 1";
-      names = [ "claude" "undo" "switch" "notify" "updates" "proj" "remote-control" "agents" "robot" "ops" "toolbox" "autoland" "house" "events" "ledger" "browser" "heartbeat" ];
+      names = [ "claude" "undo" "switch" "notify" "updates" "proj" "remote-control" "agents" "robot" "ops" "toolbox" "autoland" "house" "events" "ledger" "browser" "heartbeat" "cpu" ];
     in
     {
       # A project's dev shell and gate in a few lines; see lib/project.nix.
@@ -92,6 +92,34 @@
             };
           in "${name} ${builtins.unsafeDiscardStringContext (runnable name machine).config.system.build.toplevel.drvPath}\n")
             names + "example ${builtins.unsafeDiscardStringContext (runnable "example" self.nixosConfigurations.example).config.system.build.toplevel.drvPath}\n");
+        # heavy's slots: one holder at a time per slot, its share of the
+        # threads, nested calls let through, the exit status passed on, a
+        # bounded wait refused; and the example's gate slice weighted.
+        cpu = let
+          heavy = (self.nixosConfigurations.example.extendModules {
+            modules = [{ burrow.cpu.heavy = { slots = 1; dir = "/build/heavy"; }; }];
+          }).config.burrow.tools.heavy;
+          weight = self.nixosConfigurations.example.config.systemd.slices.ci.sliceConfig.CPUWeight;
+        in pkgs.runCommand "cpu-check" { } ''
+          [ ${toString weight} = 400 ] || { echo "ci.slice weight ${toString weight}"; exit 1; }
+          mkdir -p /build/heavy && : >/build/heavy/slot1 && chmod 0444 /build/heavy/slot1
+          h=${heavy}/bin/heavy
+          threads=$(nproc)
+          [ "$($h -- printenv HEAVY_JOBS)" = "$threads" ] || { echo "share: not $threads"; exit 1; }
+          [ "$(CARGO_BUILD_JOBS=3 $h -- printenv CARGO_BUILD_JOBS)" = 3 ] || { echo "overrode CARGO_BUILD_JOBS"; exit 1; }
+          rc=0; $h -- sh -c 'exit 7' || rc=$?
+          [ "$rc" = 7 ] || { echo "exit status $rc, not 7"; exit 1; }
+          # Inside the slot, a nested call runs at once; a second holder waits, and gives up when told to.
+          $h -- sh -c "touch held; while [ ! -e done ]; do sleep 0.1; done" &
+          while [ ! -e held ]; do sleep 0.1; done
+          rc=0; $h --wait 1 -- true 2>err || rc=$?
+          [ "$rc" = 75 ] || { echo "a second holder got in ($rc)"; exit 1; }
+          HEAVY_SLOT=1 $h --wait 1 -- true || { echo "a nested call waited"; exit 1; }
+          $h status | grep -q '^slot1: busy' || { echo "status: $($h status)"; exit 1; }
+          touch done; wait
+          $h status | grep -q '^slot1: free' || { echo "status: $($h status)"; exit 1; }
+          touch $out
+        '';
         # Sandboxes for real: boot two, work in them, break out of nothing.
         # Nested KVM: run it on a machine that has /dev/kvm.
         agents = import ./tests/agents.nix { inherit self pkgs; };
