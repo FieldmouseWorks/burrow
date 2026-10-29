@@ -2,8 +2,9 @@
 What it builds is worked out once a head, from the steward's mirror at that
 exact commit; one whose outputs are all in the store, or being built by a
 proof already running, starts at once and holds no slot, and says so. A
-slot is held by a build, not a job: jobs building the same paths are one,
-and one whose eval failed, or whose check has no attribute, holds its own."""
+slot is held by a build, not a job: a job whose paths the jobs started
+before it are building holds none, and one whose eval failed, or whose
+check has no attribute, holds its own."""
 
 import itertools
 import json
@@ -28,8 +29,8 @@ for n in range(1, 7):
     sh("git", "push", "-q", f"{origin}/sam/r.git", f"HEAD:refs/pull/{n}/head", cwd=work)
 kept_origin, V.ORIGIN = V.ORIGIN, f"{origin}/{{}}.git"
 
-# nix and nix-store: each head's derivation as NIX says, its output that
-# path less ".drv", and NIX's valid paths built. An eval reads its commit
+# nix and nix-store: each head's derivation as NIX says, its outputs as NIX
+# says or that path less ".drv", and NIX's valid paths built. An eval reads its commit
 # from the URL's repo, so a head the mirror lacks fails as it would.
 NIX, NIX_LOG = f"{tmp}/nix.json", f"{tmp}/nix-log"
 os.makedirs(f"{tmp}/nix")
@@ -44,13 +45,13 @@ know = json.load(open({NIX!r}))
 if a[:2] == ["--check-validity", "--print-invalid"]:
     print("\\n".join(p for p in a[2:] if p not in know["valid"]))
 elif a[:2] == ["--query", "--outputs"]:
-    print("\\n".join(d.removesuffix(".drv") for d in a[2:]))
+    print("\\n".join(o for d in a[2:] for o in know.get("outs", {{}}).get(d, [d.removesuffix(".drv")])))
 else:
     url, _, attr = a[-1].partition("#")
     u = urllib.parse.urlsplit(url)
     rev = urllib.parse.parse_qs(u.query)["rev"][0]
     git = subprocess.run(["git", "-C", urllib.parse.unquote(u.path), "cat-file", "-e", rev + "^{{commit}}"])
-    drv = know["drvs"].get(rev)
+    drv = know["drvs"].get(rev + "#" + attr) or know["drvs"].get(rev)
     if git.returncode or not drv:
         print("error: no", rev, attr, file=sys.stderr)
         sys.exit(1)
@@ -61,10 +62,13 @@ X, Y, Z, W = (f"/nix/store/{c * 32}-proof-{c}" for c in "xyzw")
 VALID = [Z]
 
 
-def nix_knows():
-    json.dump({"drvs": {heads[1]: X + ".drv", heads[2]: Y + ".drv", heads[3]: Z + ".drv", heads[4]: X + ".drv",
-                        heads[6]: W + ".drv"},
-               "valid": VALID}, open(NIX, "w"))
+def nix_knows(drvs=None, outs=None):
+    """Each PR's derivation (by number, or by (number, attribute)), and a
+    derivation's outputs where it has more than one."""
+    drvs = drvs or {1: X, 2: Y, 3: Z, 4: X, 6: W}
+    json.dump({"drvs": {heads[k] if isinstance(k, int) else f"{heads[k[0]]}#{k[1]}.drvPath": d + ".drv"
+                        for k, d in drvs.items()},
+               "outs": {d + ".drv": o for d, o in (outs or {}).items()}, "valid": VALID}, open(NIX, "w"))
     open(NIX_LOG, "w").close()
 
 
@@ -95,7 +99,8 @@ P.begin("sam/r", {1, 2, 3, 4})
 # PR 1 builds X, which isn't built: it takes the only slot.
 status = line(1)
 assert RUNNING in status and SKIPPED not in status and len(JOBS) == 1, (status, JOBS)
-assert pr_state(1)["proofPaths"] == {pr_state(1)["provedJob"]: [X]}, pr_state(1)
+paths = pr_state(1)["proofPaths"]
+assert list(paths) == [pr_state(1)["provedJob"]] and paths[pr_state(1)["provedJob"]]["paths"] == [X], paths
 # PR 2 builds Y: it waits its turn.
 assert ahead(1) in line(2) and JOBS == [], JOBS
 # PR 3's Z is built already: it starts while PR 1 holds the slot, and says why.
@@ -156,6 +161,44 @@ S.CFG["repos"]["sam/r"]["proofSlots"] = 2
 P.begin("sam/r", {1, 5, 6})
 assert RUNNING in line(6, 900) and len(JOBS) == 1, JOBS
 assert ahead(2) in line(5, 900) and JOBS == [], JOBS
+
+# Jobs count in the order they started: one whose paths those before it are
+# building holds nothing, a subset or a cover of several alike; one with a
+# path of its own still holds one. PR 1 builds X and Y; PR 2 only X, so
+# PR 3's Z has the second slot; then PR 4's Y and Z are both being built,
+# and PR 6's W waits behind two builds.
+S.CFG["repos"]["sam/r"].update(proofSlots=2, proofBuilds={"remi-proof": "checks.x86_64-linux.proof"})
+fresh_pr_state()
+VALID[:] = []
+XY = "/nix/store/" + "v" * 32 + "-proof-xy"
+nix_knows({1: XY, 2: X, 3: Z, 4: "/nix/store/" + "u" * 32 + "-proof-yz", 6: W},
+          {XY: [X, Y], "/nix/store/" + "u" * 32 + "-proof-yz": [Y, Z]})
+P.begin("sam/r", {1, 2, 3, 4, 6})
+assert RUNNING in line(1) and RUNNING in line(2) and len(JOBS) == 1, JOBS
+status = line(3)
+assert RUNNING in status and SKIPPED not in status and len(JOBS) == 1, (status, JOBS)
+status = line(4)
+assert RUNNING in status and SKIPPED in status and len(JOBS) == 1, (status, JOBS)
+assert ahead(2) in line(6) and JOBS == [], JOBS
+# PR 1's job ends without them: PR 2's builds X now, and PR 4's Y.
+STATES[pr_state(1)["provedJob"]] = "failed"
+P.begin("sam/r", {1, 2, 3, 4, 6})
+assert ahead(3) in line(6, 800) and JOBS == [], JOBS
+S.CFG["repos"]["sam/r"]["proofSlots"] = 1
+
+# A check pointed at another attribute while its PR waits is worked out
+# again: what the old one built says nothing about the new.
+fresh_pr_state()
+VALID[:] = [Z]
+nix_knows({1: X, 2: Y, (2, "checks.x86_64-linux.other"): Z})
+P.begin("sam/r", {1, 2})
+line(1)
+assert ahead(1) in line(2) and len(evals()) == 2, evals()
+S.CFG["repos"]["sam/r"]["proofBuilds"] = {"remi-proof": "checks.x86_64-linux.other"}
+status = line(2, 800)
+assert RUNNING in status and SKIPPED in status and len(evals()) == 3, (status, evals())
+assert evals()[-1][-1].endswith("#checks.x86_64-linux.other.drvPath"), evals()
+S.CFG["repos"]["sam/r"]["proofBuilds"] = {"remi-proof": "checks.x86_64-linux.proof"}
 
 del S.CFG["repos"]["sam/r"]
 C.job = kept

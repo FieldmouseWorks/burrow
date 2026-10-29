@@ -3,13 +3,14 @@ or running at once, for proofs that take the whole machine (the rest would
 only wait out their timeout). The others wait their turn, oldest PR first,
 and the end of a job's turn kicks the repo's pass, which starts the next.
 
-What a slot is held by is a build: the store paths a running proof job
-builds that aren't built yet (its outputs, from the repo's proofBuilds).
-Jobs building the same paths are one build, since Nix builds a path once
-and the others wait for it; a job whose paths are all built holds nothing,
-and a job whose paths nobody worked out holds a slot of its own until it
-ends. So a proof with nothing new to build skips the line: all its paths
-are built, or being built by a proof already running.
+What a slot is held by is a build: a running proof job with store paths
+still to build that the jobs started before it aren't building (its
+outputs, from the repo's proofBuilds). Nix builds a path once and the
+others wait for it, so a job whose paths are all built, or all being built
+by jobs that started first, holds nothing; a job whose paths nobody worked
+out holds a slot of its own until it ends. So a proof with nothing new to
+build skips the line: all its paths are built, or being built by proofs
+already running.
 
 A job is still a job whatever head it was started on: a PR pushed again,
 or marked a draft, while its job runs still has what it holds. A turn in
@@ -20,6 +21,7 @@ nobody up."""
 import os
 import re
 import subprocess
+import time
 import urllib.parse
 
 import common as C
@@ -54,7 +56,7 @@ def live(st):
     about: kept in its state, the ended ones dropped, and what they build
     with them."""
     st["proofsLive"] = [j for j in jobs(st) if running(j)]
-    if "proofPaths" in st:
+    if "proofPaths" in st:  # {job: {"paths": [...], "at": when it started}}
         st["proofPaths"] = {j: p for j, p in st["proofPaths"].items() if j in st["proofsLive"]}
     return st["proofsLive"]
 
@@ -77,7 +79,7 @@ def outputs(repo, pr, checks, st):
     if C.DRY or not checks or not all(c in attrs for c in checks):
         return None
     n, head = pr["number"], pr["headRefOid"]
-    key = [head, sorted(checks)]
+    key = [head, {c: attrs[c] for c in sorted(checks)}]
     got = st.get("proofOutputs")
     if got and got["for"] == key:
         return got["paths"]
@@ -113,24 +115,32 @@ def ahead(repo, n, st, slots, outs=None):
     their turn this pass. None when its job may start now; FREE when it may
     whatever the line, since all it builds (outs, None when unknown) is
     built or being built already."""
-    held = [(j, st.get("proofPaths", {}).get(j)) for j in live(st)]
+    def held(state, js):
+        return [(rec.get("at", 0), j, rec.get("paths")) for j in js
+                for rec in [state.get("proofPaths", {}).get(j) or {}]]
+
+    jobs_now = held(st, live(st))
     mine = re.escape(f"pr-{repo.replace('/', '_')}-") + r"(\d+)\.json"
     for f in os.listdir(STATE):
         m = re.fullmatch(mine, f)
         if m and int(m[1]) != n and (repo not in OPEN or int(m[1]) in OPEN[repo]):
             other = load(f, {})
-            held += [(j, other.get("proofPaths", {}).get(j)) for j in jobs(other) if running(j)]
-    todo = unbuilt({p for _, ps in held if ps for p in ps} | set(outs or ()))
-    # One a build: the paths a job has still to build, or the job itself
-    # when they're unknown. One with nothing left to build holds nothing.
-    builds = {j if ps is None else frozenset(todo.intersection(ps)) for j, ps in held} - {frozenset()}
+            jobs_now += held(other, [j for j in jobs(other) if running(j)])
+    todo = unbuilt({p for _, _, ps in jobs_now if ps for p in ps} | set(outs or ()))
+    # In the order they started: a job is a build when it has paths still
+    # to build that those before it aren't building, or when they're
+    # unknown.
+    builds, building = 0, set()
+    for _, _, ps in sorted(jobs_now, key=lambda x: x[:2]):
+        rest = todo.intersection(ps) if ps is not None else None
+        builds += rest is None or not rest <= building
+        building |= rest or set()
     waiting = sum(other < n for other in WAITING.get(repo, ()))
-    if len(builds) + waiting < slots:
+    if builds + waiting < slots:
         return None
-    building = set().union(*(b for b in builds if isinstance(b, frozenset)))
     if outs is not None and todo.intersection(outs) <= building:
         return FREE
-    return len(builds) + waiting
+    return builds + waiting
 
 
 def wait(repo, n):
@@ -144,4 +154,5 @@ def started(st, outs=None):
     started just now builds, when that's known."""
     st["proofsLive"] = jobs(st)
     if outs is not None:
-        st.setdefault("proofPaths", {})[st["provedJob"]] = outs
+        # The clock, not the pass's: jobs one pass starts come in order.
+        st.setdefault("proofPaths", {})[st["provedJob"]] = {"paths": outs, "at": time.time()}
