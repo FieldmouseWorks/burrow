@@ -1,9 +1,9 @@
 # house: every repo's copies of the house blocks (the files in house/, each
 # between its markers in AGENTS.md) kept the same as burrow's (house/sync.sh).
 # A change to a block here reaches each repo as one PR, which the steward
-# lands. Nothing waits for a timer: a switch that brings new blocks starts a
-# pass over every repo, and a push to a repo's default branch one over that
-# repo.
+# lands: the machine's own App's (burrow.github.machinery), when it has one.
+# Nothing waits for a timer: a switch that brings new blocks starts a pass
+# over every repo, and a push to a repo's default branch one over that repo.
 inputs:
 { config, lib, pkgs, ... }:
 let
@@ -17,7 +17,7 @@ let
 
   sync = pkgs.writeShellApplication {
     name = "house-sync";
-    runtimeInputs = with pkgs; [ gh jq coreutils gnugrep gnused gawk diffutils util-linux ];
+    runtimeInputs = [ config.burrow.github.machineGh ] ++ (with pkgs; [ jq coreutils gnugrep gnused gawk diffutils util-linux ]);
     text = ''
       HOUSE=${../house}
       CURRENT=/etc/${current}
@@ -34,6 +34,7 @@ in
     (import ./common.nix inputs)
     { key = "burrow/notify"; imports = [ (import ./notify.nix inputs) ]; }
     { key = "burrow/events"; imports = [ (import ./events.nix inputs) ]; }
+    { key = "burrow/github"; imports = [ (import ./github.nix inputs) ]; }
   ];
 
   options.burrow.house = {

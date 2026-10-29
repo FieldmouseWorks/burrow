@@ -265,6 +265,22 @@ for change in ({"who": "eve"}, {"state": "closed"}, {"title": "Dependency Dashbo
     assert set(C.load("dashboard-sam_r.json", {})["items"]) == set(D.read(BODY)), change
     GH["hits"] = [{"number": 7, "title": "Dependency Dashboard", "user": "sam"}]
 
+# Once Renovate runs as the machine's own App, the user's dashboard from
+# before is someone else's: it goes, and the App's is found in its place.
+C.save("dashboard-sam_r.json", {})
+dashboard(BODY)
+look(0)
+assert C.load("dashboard-sam_r.json", {}).get("n") == 7, C.load("dashboard-sam_r.json", {})
+C.CFG["dashboard"]["renovate"] = "workers[bot]"
+assert look(DAY) == [] and not JOBS, JOBS
+assert C.load("dashboard-sam_r.json", {}) == {"next": T + DAY + 2 * D.HOUR}, C.load("dashboard-sam_r.json", {})
+dashboard(BODY, who="workers[bot]")
+GH["hits"] = [{"number": 7, "title": "Dependency Dashboard", "user": "workers[bot]"}]
+look(DAY + 2 * D.HOUR)
+assert set(C.load("dashboard-sam_r.json", {})["items"]) == set(D.read(BODY)), C.load("dashboard-sam_r.json", {})
+C.CFG["dashboard"]["renovate"] = None
+GH["hits"] = [{"number": 7, "title": "Dependency Dashboard", "user": "sam"}]
+
 # GitHub not answering keeps all of it, for the next pass to read again.
 C.save("dashboard-sam_r.json", {})
 dashboard(BODY)

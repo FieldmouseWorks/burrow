@@ -259,7 +259,7 @@ def prior(repo, n, r):
         # Only replies from those whose PRs it reviews: anyone else's text
         # never steers it.
         replies = [x for x in cs if x.get("in_reply_to_id") == c["id"]
-                   and (x["user"] in CFG["authors"] or x["user"] == C.me())]
+                   and (C.rest_ours(x["user"]) or x["user"] == C.me())]
         at = c.get("line") or c.get("original_line")
         text.append(f"- {c['path']}{f':{at}' if at else ''}: {c['body'].replace(mark, '').strip()}\n"
                     + "".join(f"  Reply from {x['user']}: {x['body'].strip()}\n" for x in replies))
