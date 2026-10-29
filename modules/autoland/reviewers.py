@@ -4,7 +4,7 @@ snapshot of the PR and answers with its findings.
 A pass takes the snapshot and queues the review (`queue`); the reviewers'
 service (review_worker.py) runs the agents as a user of their own, with no
 GitHub access and no secrets paths in what they read; the next pass posts
-what came back (`post`), under the steward's login and marked as that
+what came back (`post`), as the steward's App and marked as that
 reviewer's, and reads each reviewer's verdict back from those posts
 (`verdict`)."""
 
@@ -62,7 +62,7 @@ def verdict(pr, head, r):
     v, at, rounds = "none", 0, 0
     for x in pr["reviews"]["nodes"]:
         m = pat.search(x["body"] or "")
-        if not m or (x["author"] or {}).get("login") != C.me():
+        if not m or not C.mine(x["author"]):
             continue
         try:
             said = json.loads(m.group(1))
@@ -170,9 +170,8 @@ def snapshot(repo, pr, key):
     mirror = os.path.join(STATE, GIT, repo.replace("/", "__") + ".git")
     if not os.path.isdir(mirror):
         git("init", "-q", "--bare", mirror)
-    git("-C", mirror, "-c", "credential.helper=", "-c", "credential.helper=!gh auth git-credential",
-        "fetch", "-q", "--no-tags", ORIGIN.format(repo),
-        f"+refs/pull/{n}/head:refs/pr/{n}", f"+refs/heads/{base}:refs/base/{base}")
+    git("-C", mirror, *C.GIT_AUTH, "fetch", "-q", "--no-tags", ORIGIN.format(repo),
+        f"+refs/pull/{n}/head:refs/pr/{n}", f"+refs/heads/{base}:refs/base/{base}", env=C.gh_env(repo))
     mb = git("-C", mirror, "merge-base", f"refs/base/{base}", head).decode().strip()
     changed = names(git("-C", mirror, "diff", "-z", "--name-only", "--no-renames", mb, head))
     # A secret renamed or copied to a plain path is still a secret, so its

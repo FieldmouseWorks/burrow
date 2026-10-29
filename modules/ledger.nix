@@ -22,7 +22,7 @@ let
   socket = "/run/conary/conaryd.sock";
 
   # The passes' own state: when each repo's next pass is due, for
-  # burrow-events ({"OWNER/REPO": epoch}), and the login gh's token is.
+  # burrow-events ({"OWNER/REPO": epoch}).
   passDir = "${config.burrow.stateDir}/ledger";
   wake = "${passDir}/wake.json";
 
@@ -30,27 +30,10 @@ let
     name = "burrow-ledger-sync";
     runtimeInputs = [ cfg.package cfg.gh pkgs.coreutils pkgs.jq pkgs.util-linux ];
     text = ''
-      # The user's own gh login reads GitHub; its reviews are the steward's.
-      # Which login the token is, GitHub is asked once a day per token, not
-      # every pass: a call each, and one that fails when the rate limit is
-      # spent, before cn could say GitHub is unavailable. The answer is kept
-      # under the token's hash, so it's never another token's.
+      # The user's own gh login reads GitHub. The steward's word (its
+      # status, its reviewers' reviews) is only what its App posted.
       GH_TOKEN=$(gh auth token)
-      login_file=${lib.escapeShellArg "${passDir}/login"}
-      key=$(printf %s "$GH_TOKEN" | sha256sum | cut -d' ' -f1)
-      # Looked up and refreshed under a lock: passes that overlap (a full
-      # one and a repo's) reuse one answer instead of racing to write it.
-      exec {login_lock}>>"$login_file.lock"
-      flock "$login_lock"
-      if read -r was at who <"$login_file" 2>/dev/null && [ "$was" = "$key" ] &&
-        [[ $at =~ ^[0-9]+$ ]] && [ $(($(date +%s) - at)) -lt 86400 ] && [ -n "$who" ]; then
-        CONARY_REVIEWERS=$who
-      else
-        CONARY_REVIEWERS=$(gh api user --jq .login)
-        (umask 077 && printf '%s %s %s\n' "$key" "$(date +%s)" "$CONARY_REVIEWERS" >"$login_file.new") &&
-          mv -f "$login_file.new" "$login_file"
-      fi
-      exec {login_lock}>&-
+      CONARY_REVIEWERS=${lib.escapeShellArg (lib.concatStringsSep "," cfg.reviewers)}
       export GH_TOKEN CONARY_REVIEWERS
       export CONARY_LEDGER=${lib.escapeShellArg cfg.dir}
       export CONARY_ANCHOR_REPO=${lib.escapeShellArg cfg.anchorRepo}
@@ -188,6 +171,19 @@ in
       FieldmouseWorks/Conary#19)
     '';
 
+    reviewers = mkOption {
+      type = types.listOf (types.strMatching ".+[[]bot]");
+      default = lib.optional (autoland.enable or false) "${autoland.app.slug}[bot]";
+      defaultText = lib.literalExpression ''[ "''${config.burrow.autoland.app.slug}[bot]" ]'';
+      description = ''
+        The steward's logins, as GitHub's REST API gives them: only their
+        statuses are its landing decision, and only their reviews are its
+        reviewers'. A GitHub App's bot each, since a user's login can't
+        end in "[bot]" and a status from anyone else's mustn't count, the
+        owner's own included.
+      '';
+    };
+
     ownContexts = mkOption {
       type = types.listOf types.str;
       default = lib.optional (autoland.enable or false) autoland.context;
@@ -200,6 +196,11 @@ in
   };
 
   config = lib.mkIf cfg.enable {
+    assertions = [{
+      assertion = cfg.reviewers != [ ];
+      message = "burrow.ledger.reviewers: name the steward's App (its SLUG[bot]), or no merge could be told from a bypass.";
+    }];
+
     # `cn` for everyone, on this ledger.
     environment.systemPackages = [ cfg.package ];
     environment.variables = {

@@ -56,12 +56,31 @@ let
   '');
   nftDrop = pkgs.writeText "${account}-drop.nft" dropTable;
 
+  # Playwright's MCP server saves a file Claude names (a screenshot, a page's
+  # text) in Claude's workspace, the checkout it works in, and only the ones it
+  # names itself in its output dir. A page from a signed-in site, or a key read
+  # off one, would land where git and backups see it. Patched, every file it
+  # writes goes to the output dir unless Claude gives a full path. A Playwright
+  # that no longer has this line fails the build rather than lose the patch.
+  mcpServer = cfg.mcpPackage.override (args: {
+    playwright-test = args.playwright-test.overrideAttrs (old: {
+      postInstall = (old.postInstall or "") + ''
+        response=$out/lib/node_modules/playwright-core/lib/tools/backend/response.js
+        chmod u+w "$response"
+        substituteInPlace "$response" --replace-fail \
+          'fileName = await this.resolveClientFilename(template.suggestedFilename);' \
+          'fileName = await this._context.outputFile(template, { origin: "llm" });'
+      '';
+    });
+  });
+
   # What Claude starts for each session: Playwright's MCP server on the running
-  # browser. Snapshots and logs go to the user's runtime dir, not the project.
+  # browser. What it saves goes to the user's runtime dir (RAM, the user's
+  # alone), not the project, unless Claude gives a full path.
   mcp = pkgs.writeShellApplication {
     name = "burrow-browser-mcp";
     text = ''
-      exec ${lib.getExe cfg.mcpPackage} --cdp-endpoint http://127.0.0.1:${toString cfg.cdpPort} \
+      exec ${lib.getExe mcpServer} --cdp-endpoint http://127.0.0.1:${toString cfg.cdpPort} \
         --output-dir "''${XDG_RUNTIME_DIR:?}/burrow-browser" "$@"
     '';
   };
@@ -106,7 +125,7 @@ in
       type = lib.types.package;
       default = pkgs.playwright-mcp;
       defaultText = lib.literalExpression "pkgs.playwright-mcp";
-      description = "Playwright's MCP server, which Claude drives the browser with.";
+      description = "Playwright's MCP server, which Claude drives the browser with: nixpkgs' playwright-mcp or one built like it, which the module patches so the files Claude names go to its output dir too.";
     };
 
     cdpPort = lib.mkOption {

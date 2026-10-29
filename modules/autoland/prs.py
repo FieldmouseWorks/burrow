@@ -17,6 +17,7 @@ query($owner: String!, $name: String!, $cursor: String) {
         createdAt updatedAt mergeStateStatus body
         author { login }
         autoMergeRequest { enabledAt }
+        mergeQueueEntry { id }
         labels(first: 100) { pageInfo { hasNextPage } nodes { name } }
         files(first: 100) { nodes { path changeType } }
         changedFiles
@@ -28,7 +29,7 @@ query($owner: String!, $name: String!, $cursor: String) {
           nodes { commit { oid statusCheckRollup { contexts(first: 100) { pageInfo { hasNextPage } nodes {
             __typename
             ... on CheckRun { name status conclusion }
-            ... on StatusContext { context state description }
+            ... on StatusContext { context state description creator { login __typename } }
           } } }
           checkSuites(first: 100) { pageInfo { hasNextPage } nodes { conclusion workflowRun { workflow { name } } } } } }
         }
@@ -40,8 +41,8 @@ query($owner: String!, $name: String!, $cursor: String) {
 
 
 # What each review and comment is read for, in PRS and the older pages.
-OLDER = {"reviews": "author { login } state body submittedAt commit { oid }",
-         "comments": "databaseId body createdAt updatedAt author { login }"}
+OLDER = {"reviews": "author { login __typename } state body submittedAt commit { oid }",
+         "comments": "databaseId body createdAt updatedAt author { login __typename }"}
 PRS = PRS % (OLDER["reviews"], OLDER["comments"])
 OLDER_PAGE = """
 query($id: ID!, $cursor: String) {
@@ -129,10 +130,13 @@ def ci_state(pr, proofs=()):
 
 
 def our_status(pr):
+    """The steward's own status on the head: its context, posted by its App.
+    Anyone who can push can post the context; theirs isn't the steward's
+    word, and the ruleset doesn't count it either."""
     nodes = pr["commits"]["nodes"]
     rollup = (nodes[0]["commit"].get("statusCheckRollup") or {}) if nodes else {}
     for c in (rollup.get("contexts") or {}).get("nodes", []):
-        if c["__typename"] == "StatusContext" and c["context"] == CONTEXT:
+        if c["__typename"] == "StatusContext" and c["context"] == CONTEXT and C.mine(c.get("creator")):
             return c["state"].lower(), c.get("description") or ""
     return None, ""
 
@@ -174,21 +178,23 @@ def eyes(repo, pr):
 
 
 def merge_method(repo_info):
-    for flag, method in (("squashMergeAllowed", "--squash"), ("mergeCommitAllowed", "--merge"),
-                         ("rebaseMergeAllowed", "--rebase")):
+    for flag, method in (("squashMergeAllowed", "squash"), ("mergeCommitAllowed", "merge"),
+                         ("rebaseMergeAllowed", "rebase")):
         if repo_info[flag]:
             return method
-    return "--merge"
+    return "merge"
 
 
 def land(repo, pr, repo_info):
-    """Auto-merge (or merge now if nothing is left to wait for). False if
-    GitHub took neither."""
-    n = str(pr["number"])
-    if not pr["autoMergeRequest"]:
-        # Only the head that was checked: a push since then waits for the next pass.
-        method = [merge_method(repo_info), "--match-head-commit", pr["headRefOid"]]
-        if C.write("pr", "merge", n, "-R", repo, "--auto", *method, check=False) is None and not DRY:
-            # No branch rules to wait on: GitHub won't queue it, so merge it now.
-            return C.write("pr", "merge", n, "-R", repo, *method, check=False) is not None
-    return True
+    """Merge it now, at the head that was checked, or not at all: False if
+    GitHub didn't. Nothing is left for GitHub to merge later (auto-merge, a
+    merge queue): that would merge whatever head the base's rules let
+    through, which needn't be one the steward checked. So a merge queued
+    before, by anyone, is taken off first."""
+    if not C.unland(repo, pr) and not DRY:
+        return False
+    # The merge endpoint merges or refuses; a push since the check makes the
+    # sha stale, and it waits for the next pass.
+    return C.write("api", "-X", "PUT", f"repos/{repo}/pulls/{pr['number']}/merge",
+                   "-f", f"merge_method={merge_method(repo_info)}", "-f", f"sha={pr['headRefOid']}",
+                   check=False) is not None or DRY
