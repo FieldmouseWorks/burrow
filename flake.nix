@@ -175,9 +175,13 @@
               $h status | grep -q '^slot1: free' || { echo "$sig, stubborn: status: $($h status)"; exit 1; }
             done
           done
-          # Cancelled as it starts, nothing of the command runs on.
+          # Cancelled as it starts, nothing of the command runs on. The
+          # signal goes to heavy itself: sent before the fork has become
+          # heavy, it reaches only the test's shell, which in the sandbox, under
+          # load, can lose it.
           for i in $(seq 10); do
             $h -- sh -c 'sleep 0.3; touch late' & hp=$!
+            until grep -qF "$h" /proc/$hp/cmdline 2>/dev/null; do :; done
             kill -TERM $hp; wait $hp || true
             sleep 0.5
             [ ! -e late ] || { echo "the command outlived a heavy cancelled at its start"; exit 1; }
