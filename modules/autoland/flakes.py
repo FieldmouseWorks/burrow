@@ -103,14 +103,14 @@ def act(repo, st, mine):
     busy = bool(st.get("job")) and working(st["job"])
     if busy:
         due = st["jobAt"] + (CFG["jobTimeout"] + 5) * MIN
-        C.wake(repo, due if due > C.NOW else C.NOW + 15 * MIN)
+        C.wake(repo, due if due > C.NOW else C.NOW + 15 * MIN)  # ends: the job's end, which kicks a pass; its timeout bounds it once it runs
     todo = []
     for n, it in sorted(st["issues"].items(), key=lambda x: int(x[0])):
         if "handed" not in it:
             todo.append((n, it))
         elif working(it["job"]):
             if not busy:  # an older job proj can't say of: look again
-                C.wake(repo, C.NOW + 15 * MIN)
+                C.wake(repo, C.NOW + 15 * MIN)  # ends: that job's end, as above
         else:
             # Its day starts when its job ends (proj's end kicks a pass), not
             # when it was queued: a fix can take that long to land.
@@ -118,7 +118,7 @@ def act(repo, st, mine):
             if C.NOW >= it["ended"] + DAY:
                 mine.append((STUCK, f"{repo}#{n}", f"`{it['test']}`"))
             else:
-                C.wake(repo, it["ended"] + DAY)
+                C.wake(repo, it["ended"] + DAY)  # ends: a day on, it's listed (STUCK) if still open
     if not todo or busy:
         return
     # The oldest first, as many as fit; the next job takes the rest.
@@ -133,13 +133,13 @@ def act(repo, st, mine):
         log(f"{repo}: couldn't start a Claude job for its flaky tests (no checkout, or proj refused)")
         for n, it in todo:
             mine.append((NO_JOB, f"{repo}#{n}", f"for the flaky test `{it['test']}`"))
-        C.wake(repo, C.NOW + 5 * MIN)
+        C.wake(repo, C.NOW + 5 * MIN)  # ends: a job starting; until then each one is listed (NO_JOB)
         return
     log(f"{repo}: a Claude job {jid} for {len(handed)} flaky tests")
     for _, it, _ in handed:
         it["handed"], it["job"] = C.NOW, jid
     st["job"], st["jobAt"] = jid, C.NOW
-    C.wake(repo, C.NOW + (CFG["jobTimeout"] + 5) * MIN)
+    C.wake(repo, C.NOW + (CFG["jobTimeout"] + 5) * MIN)  # ends: the job's end, which kicks a pass; this look is for a lost kick
 
 
 def said(repo, n):
