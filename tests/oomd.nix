@@ -75,15 +75,17 @@ pkgs.testers.runNixOSTest {
         guarded.succeed(f"grep -qx ManagedOOMPreference=omit {socketed}/sshd@.service")
         guarded.fail(f"test -e {socketed}/sshd.service")
 
+    # systemd says which killer it was: "systemd-oomd killed N process(es) in
+    # this unit", or "The kernel OOM killer killed some processes in this unit".
     with subtest("oomd kills the hog, and the kernel never has to"):
         guarded.succeed("systemctl start hog")
-        guarded.wait_until_succeeds("journalctl -u systemd-oomd | grep -q 'Killed /system.slice/hog.service'", timeout=600)
+        guarded.wait_until_succeeds("journalctl -u hog | grep -q 'systemd-oomd killed'", timeout=600)
         guarded.succeed("true")
         guarded.fail("journalctl -k | grep -q 'Out of memory'")
 
     with subtest("without it, nothing acts until the kernel's OOM killer"):
         control.succeed("systemctl start hog")
         control.wait_until_succeeds("journalctl -k | grep -q 'Out of memory: Killed process'", timeout=600)
-        control.fail("journalctl -u systemd-oomd | grep -q Killed")
+        control.fail("journalctl -u hog | grep -q 'systemd-oomd killed'")
   '';
 }
