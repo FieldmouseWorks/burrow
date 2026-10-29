@@ -11,6 +11,7 @@ pkgs.testers.runNixOSTest {
 
   nodes.machine = {
     imports = [ self.nixosModules.switch ];
+    burrow.switch.enable = true;
     users.users.dev.isNormalUser = true;
     # Activating this one takes 30s, and /run/current-system only moves at the
     # end of the activation script: well past a 10s window.
@@ -23,6 +24,10 @@ pkgs.testers.runNixOSTest {
   testScript = ''
     machine.wait_for_unit("multi-user.target")
     base = machine.succeed("readlink -f /run/current-system").strip()
+    # A test VM boots without the system profile nixos-install makes, and the
+    # switch reverts to that profile, the last confirmed system: point it at
+    # what's running.
+    machine.succeed(f"mkdir -p /nix/var/nix/profiles && ln -sfn {base} /nix/var/nix/profiles/system")
     slow = machine.succeed(f"readlink -f {base}/specialisation/slow").strip()
 
     with subtest("a revert due mid-activation waits for it, then reverts"):
