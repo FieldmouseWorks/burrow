@@ -58,18 +58,7 @@ mkdir -p "$state/jobs" "$state/logs"
 exec 9>"/run/$UPDATE.lock"
 flock -n 9 || { echo "another $UPDATE is running"; exit 0; }
 
-# Hand a problem to a Claude job in the machine's own project, once per problem while
-# one is still working on it (or did in the last 6 hours).
-dispatch() {
-  local prompt=$2 f="$state/jobs/$1" id
-  if [ -s "$f" ] && [ $(($(date +%s) - $(stat -c %Y "$f"))) -lt 21600 ]; then
-    return 0
-  fi
-  if id=$(as_user proj run "$PROJECT" "$prompt"); then
-    echo "$id" >"$f"
-    echo "handed to Claude: proj log $id"
-  fi
-}
+# dispatch, which hands a problem to a Claude job, is ./dispatch.sh.
 settled() { rm -f "$state/jobs/$1" "$state/since-$1"; "$NOTIFY" close "$1" "${2:-Cleared by a later run.}"; }
 # Seconds since a problem was first seen (and stayed unsettled).
 age() {
