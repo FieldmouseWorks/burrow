@@ -123,7 +123,7 @@ def settle_repo(r, known):
         # The plan offers no rules on this repo (private, on a free
         # account): there are none to pin. Anything else is GitHub not
         # saying, and nothing's known to be pinned.
-        pages, rules = None, "Upgrade to GitHub Pro" in str(e)
+        pages, rules = None, C.NO_RULES in str(e)
     if isinstance(pages, list):
         own = [x for page in pages for x in page if x.get("source_type") == "Repository"]
         made = True

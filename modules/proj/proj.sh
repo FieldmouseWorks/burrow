@@ -24,6 +24,8 @@
 #                               needn't say what comes next
 #   proj run --link URL PROJECT "task"  what the job is about (its issue);
 #                               empty for nothing
+#   proj run --app NAME PROJECT "task"  the job acts on GitHub as the App NAME,
+#                               one of burrow.github.apps, never as the user
 #   proj reply [--first] ID "message"  continue that job's conversation
 #   proj status                 recent jobs and their state
 #   proj log ID [--turn N]      the job's latest answer, or turn N's (--raw for
@@ -81,6 +83,10 @@
 # With --vm the job runs in its own microVM on a clone of the project, where
 # nothing is refused at all; the work comes back with `agent fetch` (the
 # sandbox id is in JOBS/ID/agent and in `proj status`).
+#
+# With --app every turn runs in that App's env (../github.nix), its file
+# from APPS, so git and gh act as the App: the machine's own work, not the
+# user's. A turn whose App is gone fails rather than run as the user.
 
 # systemctl --user needs the user's runtime dir, which `su` and cron don't set.
 : "${XDG_RUNTIME_DIR:=/run/user/$(id -u)}"
@@ -91,6 +97,9 @@ jobs=$JOBS
 self=$(readlink -f "$0")
 
 unit() { echo "proj-$(systemd-escape "$1").service"; }
+# The env file of the GitHub App NAME, from APPS' NAME=FILE lines: nothing for
+# one this machine hasn't.
+app_env() { [[ $1 =~ ^[A-Za-z0-9_-]+$ ]] && sed -n "s/^$1=//p" <<<"$APPS" | head -n 1; }
 # Jobs from before each turn kept its own files have the last turn's slot,
 # outcome and answer unnumbered (a turn that ran across the update writes
 # them there too, once it ends). They're turn N's if they're no older than its
@@ -456,7 +465,7 @@ fingerprint() { # repo n
 
 case "${1:-status}" in
   run | reply)
-    cmd=$1 vm='' first='' pipeline='' kick=() limit='' idle='' owned='' link=''
+    cmd=$1 vm='' first='' pipeline='' kick=() limit='' idle='' owned='' link='' app=''
     shift
     while :; do
       case ${1:-} in
@@ -481,6 +490,12 @@ case "${1:-status}" in
           link=$2
           shift
           ;;
+        --app)
+          [ "$cmd" = run ] || { echo "proj reply has no --app: the job's own is kept" >&2; exit 2; }
+          [ -n "$(app_env "${2:-}")" ] || { echo "proj run --app NAME: one of this machine's GitHub Apps (burrow.github.apps)" >&2; exit 2; }
+          app=$2
+          shift
+          ;;
         --first) first=first ;;
         --pipeline) [ "$cmd" = run ] || { echo "proj reply has no --pipeline: the job's own class is kept" >&2; exit 2; }; pipeline=1 ;;
         *) break ;;
@@ -488,11 +503,12 @@ case "${1:-status}" in
       shift
     done
     if [ "$cmd" = run ]; then
-      p=${1:?usage: proj run [--vm] [--first] [--pipeline] [--timeout DUR] [--idle DUR] [--kick NAME]... [--owned] [--link URL] PROJECT \"task\"}
-      task=${2:?usage: proj run [--vm] [--first] [--pipeline] [--timeout DUR] [--idle DUR] [--kick NAME]... [--owned] [--link URL] PROJECT \"task\"}
+      p=${1:?usage: proj run [--vm] [--first] [--pipeline] [--timeout DUR] [--idle DUR] [--kick NAME]... [--owned] [--link URL] [--app NAME] PROJECT \"task\"}
+      task=${2:?usage: proj run [--vm] [--first] [--pipeline] [--timeout DUR] [--idle DUR] [--kick NAME]... [--owned] [--link URL] [--app NAME] PROJECT \"task\"}
       [ -d "$src/$p" ] || { echo "no such project: $src/$p" >&2; exit 1; }
       # Owned by what acts on each turn's end, which hears of it by its kick.
       [ -z "$owned" ] || [ ${#kick[@]} -gt 0 ] || { echo "proj run --owned needs a --kick: what acts on each turn's end" >&2; exit 2; }
+      [ -z "$app" ] || [ -z "$vm" ] || { echo "proj run --app with --vm: a sandbox has no GitHub login to act with" >&2; exit 2; }
       mkdir -p "$jobs"
       # Unique even when two jobs start in the same second.
       id=$(basename "$(mktemp -d "$jobs/$p-$(date +%Y%m%d-%H%M%S)-XXXX")")
@@ -509,6 +525,7 @@ case "${1:-status}" in
       fi
       [ -z "$owned" ] || : >"$jobs/$id/owned"
       [ -z "$link" ] || echo "$link" >"$jobs/$id/link"
+      [ -z "$app" ] || echo "$app" >"$jobs/$id/app"
       if [ -n "$vm" ]; then agent new "$p" >"$jobs/$id/agent"; fi
     else
       id=${1:?usage: proj reply [--first] ID \"message\"}
@@ -527,8 +544,9 @@ case "${1:-status}" in
     mkdir -p "$jobs"
     find "$jobs" -mindepth 1 -maxdepth 1 -type d -not -name '.*' -printf '%T@ %f\n' | sort -rn | head -n "${2:-15}" |
       while read -r _ id; do
-        printf '%-40s %-8s %s%s%s%s%s\n' "$id" "$(state "$id")" \
+        printf '%-40s %-8s %s%s%s%s%s%s\n' "$id" "$(state "$id")" \
           "$(sed 's/.*/[vm &] /' "$jobs/$id/agent" 2>/dev/null)" \
+          "$(sed 's/.*/[as &] /' "$jobs/$id/app" 2>/dev/null)" \
           "$(demoted "$jobs/$id" | sed 's/.\+/[&] /')" \
           "$(cut -f1 "$jobs/$id/await" 2>/dev/null | paste -sd' ' | sed 's/.\+/[awaits &] /')" \
           "$(sed 's/^ask$/[asks] /; s/^undeclared$/[no next step] /; /^\[/!d' "$jobs/$id/$(cat "$jobs/$id/turns" 2>/dev/null).end" 2>/dev/null)" \
@@ -745,6 +763,18 @@ Carry on from there. Anything you left in the background last turn was stopped w
     # its own to await.next, and await only once it ends; how it says it
     # ends goes to end.next.
     rm -f "$dir/await" "$dir/await.next" "$dir/end.next"
+    # As its App, or not at all. Its env, read now, is what every run of the
+    # turn starts in, so none starts as the user if the App goes while the
+    # turn waits for a slot: it acts as an App that's gone, and reaches no
+    # GitHub at all.
+    appenv=''
+    if [ -s "$dir/app" ]; then
+      env=$(app_env "$(cat "$dir/app")")
+      if [ -z "$env" ] || ! appenv=$(cat -- "$env" 2>/dev/null) || [ -z "$appenv" ]; then
+        echo "no GitHub App $(cat "$dir/app") on this machine to act as" >"$dir/$n.outcome"
+        exit 1
+      fi
+    fi
     # In the turn's journal too, where its wait would be looked into.
     why=$(demoted "$dir")
     [ -z "$why" ] || echo "proj: $why" >&2
@@ -790,9 +820,11 @@ Carry on from there. Anything you left in the background last turn was stopped w
         else
           args+=(--append-system-prompt "This is proj job $id, running headless. Your turn ends with your answer, and anything you left running in the background is stopped then, so don't wait on GitHub (CI, reviews, merges) in the background or with sleep. Run \`proj await URL\` for each PR or issue you're still waiting on, then end your turn saying what you wait for: the job is resumed, with this conversation, once one of them changes (checks finish, a review, comment or push, merged or closed). $LONG")
         fi
-        # A login shell, so the job sees the same PATH and env as an SSH login.
+        # A login shell, so the job sees the same PATH and env as an SSH login,
+        # and then its App's env, which nothing the login sets can undo; Claude
+        # starts only once that has.
         # shellcheck disable=SC2016 # expanded by that shell
-        PROJ_JOB=$id timeout -k 1m "$left" bash -lc 'exec claude "$@" <"$0"' "$prompt" "${args[@]}" >>"$dir/$n.jsonl" &
+        PROJ_JOB=$id PROJ_APP_ENV=$appenv timeout -k 1m "$left" bash -lc 'eval "$PROJ_APP_ENV" && unset PROJ_APP_ENV && exec claude "$@" <"$0"' "$prompt" "${args[@]}" >>"$dir/$n.jsonl" &
       fi
       pid=$!
       # Quiet for the job's --idle: stuck, and stopped as one past its timeout

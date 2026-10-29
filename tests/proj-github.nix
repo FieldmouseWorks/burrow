@@ -9,8 +9,9 @@
 # turn's answer (one resumed before it looked too, none misread while a turn
 # starts) and ends the waits of one whose issue closed (proj stop's, which a
 # watch already asking GitHub keeps to), a stop that fails there not holding
-# up the rest, and that a job dir removed or a wait it can't read stops
-# neither proj-inbox nor _watch.
+# up the rest, that an issue a bot opened is the machine's work, its job
+# acting as the machinery's App, and that a job dir removed or a wait it
+# can't read stops neither proj-inbox nor _watch.
 { pkgs }:
 ''
   with subtest("a job waiting on a PR is resumed when the PR changes"):
@@ -206,6 +207,25 @@
       posted = machine.succeed("cat /tmp/gh/posted")
       first = posted.find("did This task comes from GitHub issue o/r#7")
       assert "On it" in posted and -1 < first < posted.find("did sleep 1"), posted
+
+  with subtest("an issue a bot opened is the machine's work, and acts as the machinery's App"):
+      machine.succeed("su - dev -c 'git -C /data/dev/src/bt init -q && git -C /data/dev/src/bt remote add origin https://github.com/o/b'")
+      bot = {"number": 3, "user": {"login": "sam-steward[bot]"}, "html_url": "https://github.com/o/b/issues/3",
+             "title": "t", "body": "showenv", "state": "open", "labels": [{"name": "claude"}]}
+      person = {**bot, "number": 4, "user": {"login": "sam"}, "html_url": "https://github.com/o/b/issues/4"}
+      github("repos/o/b/issues", json.dumps([bot, person]))
+      github("repos/o/b/issues/3/comments", "[]")
+      github("repos/o/b/issues/4/comments", "[]")
+      machine.succeed("su - dev -c 'proj-inbox o/b'")
+      jobs = dict(line.split()[0::2] for line in machine.succeed("su - dev -c 'proj-inbox status'").splitlines() if line.startswith("o/b#"))
+      for j in jobs.values():
+          machine.wait_until_succeeds(f"su - dev -c 'proj state {j}' | grep -x done", timeout=120)
+      assert machine.succeed(f"cat /data/dev/jobs/{jobs['o/b#3']}/app").strip() == "workers"
+      acts_as_workers(jobs["o/b#3"])
+      machine.fail(f"test -e /data/dev/jobs/{jobs['o/b#4']}/app")
+      assert "socket=none" in proj(f"log {jobs['o/b#4']}")
+      github("repos/o/b/issues", "[]")
+      machine.succeed("su - dev -c 'proj-inbox o/b'")
 
   with subtest("a reply under a minute old waits, and the inbox books when it's old enough"):
       now = machine.succeed("date -u +%Y-%m-%dT%H:%M:%SZ").strip()
