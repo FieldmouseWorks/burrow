@@ -24,6 +24,17 @@ on:
           where that check does run.
         type: string
         default: ''
+      eval-apart:
+        description: >-
+          Evaluate each check, package, dev shell, formatter and NixOS system
+          in a nix process of its own, then build the checks, rather than in
+          one `nix flake check` that holds every evaluation in memory until
+          its last build ends. For a flake whose evaluations don't fit in its
+          runner's memory together. It knows only those outputs (and
+          legacyPackages, which the gate never evaluates), and fails a flake
+          with any other.
+        type: boolean
+        default: false
 jobs:
   check:
     runs-on: ${{ inputs.runner }}
@@ -45,8 +56,64 @@ jobs:
         shell: bash
         env:
           SKIP: ${{ inputs.build-skip }}
+          APART: ${{ inputs.eval-apart }}
         run: |
+          # eval-apart's plan: what `nix flake check` would evaluate, one
+          # derivation per entry, and the checks among them it would build.
+          read -r -d '' plan <<'EOF' || true
+          let
+            flake = builtins.getFlake (toString ./.);
+            system = builtins.currentSystem;
+            known = [ "checks" "packages" "devShells" "formatter" "nixosConfigurations" "legacyPackages" ];
+            names = output: builtins.attrNames (flake.${output}.${system} or { });
+            each = output: map (n: "${output}.${system}.\"${n}\"") (names output);
+          in
+          {
+            other = builtins.attrNames (removeAttrs flake.outputs known);
+            checks = map (n: { name = n; attr = "checks.${system}.\"${n}\""; }) (names "checks");
+            evaluate =
+              each "checks" ++ each "packages" ++ each "devShells"
+              ++ (if flake ? formatter.${system} then [ "formatter.${system}" ] else [ ])
+              ++ map (n: "nixosConfigurations.\"${n}\".config.system.build.toplevel")
+                (builtins.attrNames (flake.nixosConfigurations or { }));
+          }
+          EOF
+          apart() {
+            nix eval --impure --json --expr "$plan" > "$RUNNER_TEMP/plan.json"
+            other=$(jq -r '.other | join(" ")' "$RUNNER_TEMP/plan.json")
+            if [ -n "$other" ]; then
+              echo "eval-apart knows checks, packages, devShells, formatter and nixosConfigurations, and this flake also has: $other. Its gate is a whole \`nix flake check\`, without eval-apart."
+              return 1
+            fi
+            # Each evaluation exits before the next starts, so the most memory
+            # in use is one evaluation's. A failed one fails the gate, after
+            # the rest are evaluated and built (--keep-going).
+            failed=0
+            declare -A drv
+            mapfile -t attrs < <(jq -r '.evaluate[]' "$RUNNER_TEMP/plan.json")
+            for attr in "${attrs[@]}"; do
+              echo "evaluating $attr"
+              if d=$(nix eval -L --no-eval-cache --raw ".#$attr.drvPath" < /dev/null); then
+                drv[$attr]=$d
+              else
+                failed=1
+              fi
+            done
+            targets=()
+            while IFS=$'\t' read -r c attr; do
+              case " $SKIP " in *" $c "*) echo "not building $c"; continue ;; esac
+              if [ -n "${drv[$attr]:-}" ]; then targets+=("${drv[$attr]}^*"); fi
+            done < <(jq -r '.checks[] | [.name, .attr] | @tsv' "$RUNNER_TEMP/plan.json")
+            if [ ${#targets[@]} -gt 0 ]; then
+              nix build -L --no-link --keep-going "${targets[@]}" || failed=1
+            fi
+            return $failed
+          }
           gate() {
+            if [ "$APART" = true ]; then
+              apart
+              return
+            fi
             if [ -z "$SKIP" ]; then
               nix flake check -L --keep-going
               return

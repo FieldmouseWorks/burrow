@@ -295,6 +295,14 @@
           python3 -I ${./tests/commit-signatures.py} ${./.github/workflows/flake-check.yml}
           touch $out
         '';
+        # The shared CI's gate step with eval-apart (flake-check.yml), its own
+        # script with nix evaluating test flakes for real and a stand-in for
+        # its builds: one nix process per derivation, and a flake with an
+        # output it doesn't know is refused.
+        gate = pkgs.runCommand "gate-check" { nativeBuildInputs = [ (pkgs.python3.withPackages (p: [ p.pyyaml ])) pkgs.jq pkgs.nix ]; } ''
+          python3 -I ${./tests/gate.py} ${./.github/workflows/flake-check.yml}
+          touch $out
+        '';
         # Stale Remote Control servers catch up once idle, with a stand-in for Claude.
         remote-control = import ./tests/remote-control.nix { inherit self pkgs; };
         # The signed-in browser: Claude driving it, its logins kept, its ports
