@@ -1,7 +1,8 @@
 # proj's choice of who takes a slot (modules/proj/pick.sh), on what take_slot
 # would see: pipeline jobs' slots stay theirs, one project's jobs stop at
 # PER_PROJECT while the others go by, and pipeline ones count against no cap;
-# and which jobs are pipeline ones: only those in the pipeline's own repos.
+# and which jobs are pipeline ones: only those in the pipeline's own repos and
+# the machine's flake.
 #
 #   bash tests/proj-pick.sh modules/proj/pick.sh
 set -euo pipefail
@@ -58,7 +59,7 @@ case_ "a 3" "normal /src/x" "normal /src/x" free free "a normal "
 # takes, any case. Anywhere else it goes as --first, so pick holds it to its
 # project's cap and off the pipeline's slots: one repo's PRs can't fill the
 # machine.
-export PIPELINE="Sam/Burrow sam/box"
+export PIPELINE="Sam/Burrow sam/box" FLAKE=/nowhere
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 export GIT_CEILING_DIRECTORIES=$tmp
@@ -159,5 +160,26 @@ dem d "asked as --pipeline, but its origin, github.com/sam/psiv, isn't in pipeli
 dem t "asked as --pipeline, but its origin, github.com/sam/psiv, isn't in pipelineRepos: it goes as --first"
 dem f "asked as --pipeline, but its origin isn't a GitHub repo's: it goes as --first"
 dem o "asked as --pipeline, but its project has no origin: it goes as --first"
+
+# The machine's own flake is the pipeline's whatever its origin, and with no
+# list at all: the update job's fixes there take the pipeline's slot with the
+# others all taken and the flake's project at its cap. Any other project's
+# --pipeline jobs, and the flake's plain ones, still aren't.
+clone homelab https://github.com/sam/homelab
+mkdir -p "$tmp/jobs/u" "$tmp/jobs/v" "$tmp/jobs/w"
+: >"$tmp/jobs/u/pipeline"
+: >"$tmp/jobs/v/pipeline"
+echo "$tmp/homelab" >"$tmp/jobs/u/project"
+echo "$tmp/psiv" >"$tmp/jobs/v/project"
+echo "$tmp/homelab" >"$tmp/jobs/w/project"
+(
+  export PIPELINE='' FLAKE=$tmp/homelab/
+  cls u normal pipeline
+  cls v normal first
+  cls w normal normal
+  dem u ""
+  case_ "u 4" "normal $tmp/homelab" "normal $tmp/homelab" "normal $tmp/x" free \
+    "w $(class "$tmp/jobs/w" normal) $tmp/homelab" "v $(class "$tmp/jobs/v" normal) $tmp/psiv" "u $(class "$tmp/jobs/u" normal) $tmp/homelab"
+)
 
 echo "proj-pick: ok"

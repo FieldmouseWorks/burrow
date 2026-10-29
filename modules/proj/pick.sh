@@ -59,10 +59,13 @@ github_repo() {
   fi
 }
 
-# Whether the project at a path is a clone of one of the pipeline's own repos
-# (PIPELINE: their OWNER/NAMEs, any case, as autoland.pipelineRepos has them).
+# Whether the project at a path is the pipeline's own: the machine's flake
+# (FLAKE), which deploys everything, wherever its origin is; or a clone of one
+# of the pipeline's own repos (PIPELINE: their OWNER/NAMEs, any case, as
+# autoland.pipelineRepos has them).
 pipeline_project() {
   local r
+  [ -z "$1" ] || [ "${1%/}" != "${FLAKE%/}" ] || return 0
   r=$(github_repo "$1")
   [ -n "$r" ] || return 1
   case " ${PIPELINE,,} " in *" $r "*) return 0 ;; esac
