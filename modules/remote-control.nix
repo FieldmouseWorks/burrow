@@ -20,12 +20,18 @@
 # Those sessions each get their own git worktree (burrow.remoteControl.spawn),
 # and run in burrow.remoteControl.permissionMode: bypassPermissions alongside
 # burrow.claude, like every other session here, so only its one-way doors ask.
+#
+# Each server and every session it holds share one memory cap
+# (burrow.remoteControl.memoryMax). Past it the kernel kills the biggest
+# process there, usually the session that grew, and only that: the server and
+# its other sessions carry on, and the killed one's transcript stays on disk
+# for claude.ai to resume.
 inputs:
-{ config, lib, pkgs, ... }:
+{ config, lib, pkgs, utils, ... }:
 let
   cfg = config.burrow.remoteControl;
   inherit (config.burrow) user projectsDir;
-  tmux = "${pkgs.tmux}/bin/tmux";
+  tmux = "${cfg.tmux}/bin/tmux";
   # How long a stale server waits on a session that has stopped doing anything.
   idleMinutes = 30;
 
@@ -48,7 +54,7 @@ let
   # minutes and the restart fails until then.
   stop = pkgs.writeShellApplication {
     name = "claude-rc-stop";
-    runtimeInputs = [ pkgs.tmux pkgs.coreutils ];
+    runtimeInputs = [ cfg.tmux pkgs.coreutils ];
     text = ''
       sock=rc-''${1:?usage: claude-rc-stop NAME}
       if pid=$(tmux -L "$sock" display-message -p -t rc '#{pane_pid}' 2>/dev/null); then
@@ -129,15 +135,16 @@ let
         [ -n "$keep" ] || systemctl --user stop --no-block "$unit"
       done < <(systemctl --user list-units --plain --no-legend --all 'claude-rc@*.service')
       # A switch leaves running servers alone (restartIfChanged), so a server
-      # keeps the claude-rc-serve it started with: its Claude Code, its
-      # permission mode. One whose tmux runs any other is stale, and restarts
-      # here once none of its sessions is in use. A session (a child of its
-      # Claude) stays open as long as claude.ai keeps it, so being open is
-      # not being in use: Claude Code's ~/.claude/sessions/PID.json says
-      # what it's doing, and only one that is working, or did something in
-      # the last ${toString idleMinutes} minutes, holds the server. Nobody is cut off mid-turn,
-      # and an open but idle session doesn't keep a stale server forever.
-      # Its transcript stays on disk, and claude.ai resumes it on the new one.
+      # keeps the tmux and the claude-rc-serve it started with: its Claude
+      # Code, its permission mode, where its sessions run. One that runs any
+      # other is stale, and restarts here once none of its sessions is in
+      # use. A session (a child of its Claude) stays open as long as
+      # claude.ai keeps it, so being open is not being in use: Claude Code's
+      # ~/.claude/sessions/PID.json says what it's doing, and only one that
+      # is working, or did something in the last ${toString idleMinutes} minutes, holds the
+      # server. Nobody is cut off mid-turn, and an open but idle session
+      # doesn't keep a stale server forever. Its transcript stays on disk,
+      # and claude.ai resumes it on the new one.
       #
       # A held server's scan comes again when what holds it changes: a
       # session's status (the path unit on ~/.claude/sessions), or the end of
@@ -163,7 +170,7 @@ let
       for unit in "''${want[@]}"; do
         pid=$(systemctl --user show -p MainPID --value "$unit")
         [ "$pid" != 0 ] && [ -r "/proc/$pid/cmdline" ] || continue
-        tr '\0' ' ' <"/proc/$pid/cmdline" | grep -qF ${serve}/bin/claude-rc-serve && continue
+        [[ $(tr '\0' ' ' <"/proc/$pid/cmdline") == ${lib.escapeShellArg "${tmux} "}*${lib.escapeShellArg "${serve}/bin/claude-rc-serve"}* ]] && continue
         busy=
         last=0
         for rc in $(pgrep -P "$pid"); do
@@ -252,9 +259,49 @@ in
       example = [ "website" ];
       description = "Project folders whose sessions all work in the folder itself, whatever spawn says.";
     };
+    memoryMax = lib.mkOption {
+      type = lib.types.str;
+      default = "8G";
+      example = "12G";
+      description = ''
+        The most memory one server may hold with all its sessions (its unit's
+        MemoryMax; "infinity" for none), none of it in swap: swap would let
+        it grow past the cap without ever reaching it. Past it the kernel
+        kills the biggest process there, usually the session that grew, and
+        the server and its other sessions carry on (OOMPolicy=continue).
+        Every server is under burrow.claude.memory's cap too.
+      '';
+    };
+    servers = lib.mkOption {
+      type = lib.types.attrsOf (lib.types.submodule {
+        options.memoryMax = lib.mkOption {
+          type = lib.types.str;
+          default = cfg.memoryMax;
+          defaultText = lib.literalExpression "config.burrow.remoteControl.memoryMax";
+          description = "This server's memoryMax.";
+        };
+      });
+      default = { };
+      example = lib.literalExpression ''{ homelab.memoryMax = "12G"; }'';
+      description = "Settings for the servers of some project folders, by folder name.";
+    };
+    tmux = lib.mkOption {
+      type = lib.types.package;
+      default = pkgs.tmux.overrideAttrs (old: {
+        configureFlags = old.configureFlags ++ [ "--disable-cgroups" ];
+      });
+      defaultText = lib.literalMD "tmux, built with `--disable-cgroups`";
+      internal = true;
+      description = ''
+        The tmux the servers run in. Not tmux's usual build: that one moves
+        each pane into a scope of its own, which takes a server and its
+        sessions out of their unit and out from under its cap. The memory
+        test starts its servers on the usual one, to see them catch up.
+      '';
+    };
   };
 
-  config = lib.mkIf cfg.enable {
+  config = lib.mkIf cfg.enable (lib.mkMerge [ {
     systemd.user.services."claude-rc@" = {
       description = "Claude Remote Control for ${projectsDir}/%I";
       after = [ "network-online.target" ];
@@ -276,6 +323,10 @@ in
         RestartSec = 15;
         # Under burrow.claude.memory's cap with the proj jobs (common.nix).
         Slice = "claude-rc.slice";
+        # And its own, for the server and its sessions together (memoryMax).
+        MemoryMax = cfg.memoryMax;
+        MemorySwapMax = 0;
+        OOMPolicy = "continue";
       };
     };
 
@@ -359,5 +410,12 @@ in
         thread; carry on with whatever doesn't depend on it.
       - Long work is fine. Keep going until it's done, then say so.
     '';
-  };
+  } {
+    # A server's own settings, in a drop-in for its instance.
+    systemd.user.services = lib.mapAttrs' (name: server:
+      lib.nameValuePair "claude-rc@${utils.escapeSystemdPath name}" {
+        overrideStrategy = "asDropin";
+        serviceConfig.MemoryMax = server.memoryMax;
+      }) cfg.servers;
+  } ]);
 }
