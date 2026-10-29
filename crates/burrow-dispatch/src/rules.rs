@@ -8,10 +8,11 @@ use burrow_watchdog::watch::Item;
 use burrow_watchdog::words::clock;
 
 use crate::config::Config;
-use crate::snapshot::{Seen, Snapshot};
+use crate::snapshot::{Run, Seen, Snapshot};
 use crate::state::State;
 
-/// Restarts of one runner are counted over this long...
+/// Restarts of one runner, and tries at cancelling one run, are counted
+/// over this long...
 pub const RECENT: f64 = 6.0 * 60.0 * MIN;
 /// ...and it gets at most this many: past them, restarting isn't the fix,
 /// and its wait goes on to the watchdog.
@@ -28,6 +29,30 @@ pub enum Move {
         verb: &'static str,
         why: String,
     },
+    /// Cancel a push run that hasn't started, that a later one of its
+    /// workflow on the same branch has made moot.
+    Cancel {
+        repo: String,
+        run: u64,
+        url: String,
+        why: String,
+    },
+}
+
+impl Move {
+    /// The move in a few words, for its log.
+    pub fn what(&self) -> String {
+        match self {
+            Move::Runner { unit, verb, .. } => format!("{verb} {unit}"),
+            Move::Cancel { url, .. } => format!("cancel {url}"),
+        }
+    }
+
+    pub fn why(&self) -> &str {
+        match self {
+            Move::Runner { why, .. } | Move::Cancel { why, .. } => why,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -73,6 +98,16 @@ pub fn decide(
                 kick: Some(cfg.handler.clone()),
             },
         );
+    }
+    for (repo, runs) in &snap.pushes {
+        moot(repo, runs, st, now, &mut d);
+    }
+    // A repo not read this time keeps its runs' tries.
+    for (run, at) in &st.cancels {
+        let repo = run.rsplit_once('#').map_or("", |(repo, _)| repo);
+        if *at > now - RECENT && !snap.pushes.contains_key(repo) {
+            d.state.cancels.insert(run.clone(), *at);
+        }
     }
     for (unit, r) in &cfg.runners {
         let key = format!("runner/{unit}");
@@ -145,7 +180,7 @@ pub fn decide(
                         "{} the running system wasn't built from, the oldest from {} (the newest {}); {}'s last run: {said}",
                         commits(b.count),
                         clock(b.oldest),
-                        b.newest.get(..7).unwrap_or(&b.newest),
+                        short(&b.newest),
                         dep.unit,
                     ),
                     since: b.oldest,
@@ -242,6 +277,43 @@ fn runner(
     }
 }
 
+/// A push run on the default branch that no job of has started, and that a
+/// later one of its workflow on that branch (queued, next in line, or under
+/// way) checks past, is moot: it's cancelled, so the later one gets its
+/// place. One that has started is left to finish, so the branch always gets
+/// a result. Each run is tried once in RECENT, whatever came of it.
+fn moot(repo: &str, runs: &[Run], st: &State, now: f64, d: &mut Decision) {
+    for r in runs.iter().filter(|r| r.status == "queued") {
+        let Some(later) = runs
+            .iter()
+            .find(|l| l.id != r.id && l.workflow == r.workflow && l.at > r.at)
+        else {
+            continue;
+        };
+        let key = format!("{repo}#{}", r.id);
+        if let Some(at) = st.cancels.get(&key).filter(|&&at| at > now - RECENT) {
+            d.state.cancels.insert(key, *at);
+            continue;
+        }
+        d.moves.push(Move::Cancel {
+            repo: repo.to_owned(),
+            run: r.id,
+            url: r.url.clone(),
+            why: format!(
+                "it checks {} on {} and hasn't started, and {} checks {}, which came after it",
+                short(&r.sha),
+                r.branch,
+                later.url,
+                short(&later.sha)
+            ),
+        });
+    }
+}
+
+fn short(sha: &str) -> &str {
+    sha.get(..7).unwrap_or(sha)
+}
+
 fn book(d: &mut Decision, at: f64) {
     d.wake = Some(d.wake.map_or(at, |w| w.min(at)));
 }
@@ -271,7 +343,7 @@ mod tests {
 
     use super::{Decision, Move, RECENT, decide};
     use crate::snapshot::tests::config;
-    use crate::snapshot::{Behind, Job, Seen, Snapshot};
+    use crate::snapshot::{Behind, Job, Run, Seen, Snapshot};
     use crate::state::State;
     use crate::world::Unit;
 
@@ -307,8 +379,33 @@ mod tests {
     fn restarts(d: &Decision) -> Vec<(&str, &str)> {
         d.moves
             .iter()
-            .map(|Move::Runner { unit, verb, .. }| (unit.as_str(), *verb))
+            .filter_map(|m| match m {
+                Move::Runner { unit, verb, .. } => Some((unit.as_str(), *verb)),
+                Move::Cancel { .. } => None,
+            })
             .collect()
+    }
+
+    fn cancels(d: &Decision) -> Vec<u64> {
+        d.moves
+            .iter()
+            .filter_map(|m| match m {
+                Move::Cancel { run, .. } => Some(*run),
+                Move::Runner { .. } => None,
+            })
+            .collect()
+    }
+
+    fn run(id: u64, workflow: u64, sha: &str, status: &str, at: f64) -> Run {
+        Run {
+            id,
+            url: format!("https://x/runs/{id}"),
+            workflow,
+            branch: "main".into(),
+            sha: sha.into(),
+            status: status.into(),
+            at,
+        }
     }
 
     // An idle runner with work queued is watched from the pass that first
@@ -552,5 +649,60 @@ mod tests {
                 clock(T + 30.0)
             )
         );
+    }
+
+    // A queued push run with a later one of its workflow live on the branch
+    // is cancelled, whatever the later one's state; one that has started,
+    // or has nothing later of its own workflow, is left. A run is tried once
+    // in RECENT, and the tries of a repo not read this time are kept.
+    #[test]
+    fn moot_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = config(dir.path());
+        let none = BTreeMap::new();
+        let s = Snapshot {
+            pushes: BTreeMap::from([(
+                "sam/r".into(),
+                vec![
+                    run(1, 7, "a1a1a1a1a1", "queued", T - 900.0),
+                    run(2, 8, "a1a1a1a1a1", "queued", T - 900.0),
+                    run(3, 7, "b2b2b2b2b2", "in_progress", T - 800.0),
+                    run(4, 7, "c3c3c3c3c3", "pending", T - 600.0),
+                    run(5, 9, "c3c3c3c3c3", "in_progress", T - 600.0),
+                    run(6, 9, "d4d4d4d4d4", "queued", T - 300.0),
+                ],
+            )]),
+            ..Snapshot::default()
+        };
+        let d = decide(&cfg, &s, &State::default(), &none, T);
+        assert_eq!(cancels(&d), [1]);
+        assert!(d.items.is_empty() && d.wake.is_none(), "{d:?}");
+        let Move::Cancel { repo, url, why, .. } = &d.moves[0] else {
+            unreachable!()
+        };
+        assert_eq!((repo.as_str(), url.as_str()), ("sam/r", "https://x/runs/1"));
+        assert_eq!(
+            why,
+            "it checks a1a1a1a on main and hasn't started, and https://x/runs/3 checks b2b2b2b, which came after it"
+        );
+
+        // Tried: not again in RECENT, and the try is kept; a repo not read
+        // keeps its own.
+        let st = State {
+            cancels: BTreeMap::from([
+                ("sam/r#1".into(), T - 60.0),
+                ("sam/o#9".into(), T - 60.0),
+                ("sam/o#8".into(), T - RECENT - 1.0),
+            ]),
+            ..State::default()
+        };
+        let d = decide(&cfg, &s, &st, &none, T);
+        assert!(d.moves.is_empty(), "{d:?}");
+        assert_eq!(
+            d.state.cancels.keys().collect::<Vec<_>>(),
+            ["sam/o#9", "sam/r#1"]
+        );
+        let d = decide(&cfg, &s, &st, &none, T + RECENT);
+        assert_eq!(cancels(&d), [1]);
     }
 }

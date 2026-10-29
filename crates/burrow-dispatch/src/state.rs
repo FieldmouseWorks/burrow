@@ -14,6 +14,9 @@ pub struct State {
     pub restarts: BTreeMap<String, Vec<f64>>,
     /// Each repo GitHub couldn't be read for, since when.
     pub unread: BTreeMap<String, f64>,
+    /// When a pass tried to cancel each run (OWNER/REPO#ID), whatever came
+    /// of it: one is tried once in RECENT.
+    pub cancels: BTreeMap<String, f64>,
     /// What passes did, newest last: the latest LOG of them.
     pub log: Vec<Done>,
 }

@@ -13,6 +13,11 @@
 //!     has failed is started. Never while a switch is in flight, which
 //!     restarts what it changes itself, and at most RESTARTS times in
 //!     RECENT: past that, restarting isn't the fix.
+//!   - A push run on a runner repo's default branch that no job of has
+//!     started, with a later run of its workflow on that branch live, is
+//!     cancelled, so the later one takes its place on the runner. One that
+//!     has started finishes, so the branch always gets a result. Each run
+//!     is tried once in RECENT.
 //!
 //! What it waits on goes in its watch file, a stall watchdog source, so a
 //! move that didn't help is a stall like any other, and the watchdog's
@@ -28,7 +33,8 @@
 //!
 //! burrow-events starts a pass on a runner repo's workflow_job events, a
 //! push to a watched repo's default branch, HOST-update starting and ending,
-//! and the wake-up the last pass booked. `burrow-dispatch status` shows what
+//! and the wake-up the last pass booked, no closer together than its
+//! handler's gap (modules/dispatch.nix). `burrow-dispatch status` shows what
 //! a pass would see and do, and what passes have done, changing nothing.
 
 pub mod config;

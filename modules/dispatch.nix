@@ -1,8 +1,11 @@
 # dispatch: what every PR waits on together, the machine's Actions runners and
 # its deploy, keeps moving (crates/burrow-dispatch). The steward sees to each
 # PR and the stall watchdog to each wait past its deadline; the dispatcher
-# restarts a runner that has stopped taking the jobs queued for it, and
-# watches what the machine hasn't put live yet. What it waits on is one of the
+# restarts a runner that has stopped taking the jobs queued for it, cancels a
+# push run on a default branch that a later one has made moot before it
+# starts, and watches what the machine hasn't put live yet. Cancelling takes
+# Actions: read and write on the machinery's App (or the user's own gh
+# login, without one). What it waits on is one of the
 # watchdog's sources, so a move that didn't help goes up the watchdog's ladder
 # like any other stall. It's a burrow-events handler: a runner repo's job
 # events, a watched repo's push, HOST-update starting and ending, and its own
@@ -60,8 +63,9 @@ in
   options.burrow.dispatch = {
     enable = lib.mkEnableOption ''
       the pipeline dispatcher: a runner that has stopped taking the jobs
-      queued for it is restarted, and what the machine hasn't put live yet is
-      watched, both as stall watchdog sources
+      queued for it is restarted, a push run a later one has made moot is
+      cancelled before it starts, and what the machine hasn't put live yet
+      is watched, as stall watchdog sources
     '';
 
     dir = mkOption {
@@ -158,6 +162,12 @@ in
       repos = lib.unique (lib.mapAttrsToList (_: r: r.repo) cfg.runners ++ lib.optionals deploying watched);
       pushes = "default";
       perRepo = false;
+      # A pass reads every runner repo's live runs and their jobs, some
+      # fifteen calls, and a busy repo's job events come seconds apart: one
+      # every two minutes at most keeps it to a few hundred calls an hour,
+      # out of the hourly budget the machinery's App shares with Renovate
+      # and the rest.
+      gap = 120;
       unit = "burrow-dispatch";
       wake = "${dir}/wake.json";
     };
@@ -202,8 +212,9 @@ in
       ## Runners and deploys
 
       `burrow-dispatch` restarts an Actions runner (${lib.concatStringsSep ", " (lib.attrNames cfg.runners)}) that sits idle
-      with jobs queued for it, at most twice in six hours, and watches commits ${config.networking.hostName} hasn't put
-      live yet; both go to the stall watchdog when they last. `burrow-dispatch status` shows what it sees and did.
+      with jobs queued for it, at most twice in six hours; cancels a push run on a default branch that hasn't
+      started once a later one of its workflow is live; and watches commits ${config.networking.hostName} hasn't put live yet.
+      The waits go to the stall watchdog when they last. `burrow-dispatch status` shows what it sees and did.
     '';
   } (lib.mkIf deploying {
     # HOST-update starting and ending moves what the deploy waits on.

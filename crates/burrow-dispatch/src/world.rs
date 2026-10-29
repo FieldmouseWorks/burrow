@@ -31,6 +31,8 @@ pub trait World {
     fn switching(&self) -> bool;
     /// `systemctl restart` (or `start`) the unit.
     fn restart(&self, unit: &str, verb: &str) -> Result<(), String>;
+    /// Cancel the repo's Actions run.
+    fn cancel(&self, repo: &str, run: u64) -> Result<(), String>;
     /// Start a burrow-events pass now (HANDLER[/OWNER/REPO]). Best effort.
     fn kick(&self, path: &str);
 }
@@ -39,17 +41,24 @@ pub trait World {
 /// cgroup tree.
 pub struct Real<'a>(pub &'a Config);
 
+/// `gh api` with these arguments: what it printed, or why it failed.
+fn gh(args: &[&str]) -> Result<Vec<u8>, String> {
+    let out = Command::new("gh")
+        .args(["api", "-H", "Accept: application/vnd.github+json"])
+        .args(args)
+        .output()
+        .map_err(|e| format!("gh: {e}"))?;
+    if out.status.success() {
+        Ok(out.stdout)
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).trim().to_owned())
+    }
+}
+
 impl World for Real<'_> {
     fn github(&self, path: &str) -> Result<Value, String> {
-        let out = Command::new("gh")
-            .args(["api", "-H", "Accept: application/vnd.github+json", path])
-            .output()
-            .map_err(|e| format!("gh: {e}"))?;
-        if !out.status.success() {
-            let err = String::from_utf8_lossy(&out.stderr);
-            return Err(format!("GET {path}: {}", err.trim()));
-        }
-        serde_json::from_slice(&out.stdout).map_err(|e| format!("GET {path}: {e}"))
+        let out = gh(&[path]).map_err(|e| format!("GET {path}: {e}"))?;
+        serde_json::from_slice(&out).map_err(|e| format!("GET {path}: {e}"))
     }
 
     fn unit(&self, unit: &str) -> Unit {
@@ -112,6 +121,15 @@ impl World for Real<'_> {
         } else {
             Err(String::from_utf8_lossy(&out.stderr).trim().to_owned())
         }
+    }
+
+    fn cancel(&self, repo: &str, run: u64) -> Result<(), String> {
+        gh(&[
+            "-X",
+            "POST",
+            &format!("repos/{repo}/actions/runs/{run}/cancel"),
+        ])
+        .map(drop)
     }
 
     fn kick(&self, path: &str) {

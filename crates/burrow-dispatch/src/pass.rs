@@ -33,18 +33,26 @@ pub fn run(cfg: &Config, world: &dyn World, now: f64) -> Result<(), String> {
         mut state,
     } = decide(cfg, &snap, &st, &was, now);
     for m in moves {
-        let Move::Runner { unit, verb, why } = m;
-        let result = world
-            .restart(&unit, verb)
-            .map_or_else(|e| e, |()| "ok".to_owned());
-        println!("{verb}ed {unit} ({why}): {result}");
-        if result == "ok" {
-            state.restarts.entry(unit.clone()).or_default().push(now);
-        }
+        let done = match &m {
+            Move::Runner { unit, verb, .. } => {
+                let done = world.restart(unit, verb);
+                // One systemd refused isn't counted against the runner.
+                if done.is_ok() {
+                    state.restarts.entry(unit.clone()).or_default().push(now);
+                }
+                done
+            }
+            Move::Cancel { repo, run, .. } => {
+                state.cancels.insert(format!("{repo}#{run}"), now);
+                world.cancel(repo, *run)
+            }
+        };
+        let result = done.map_or_else(|e| e, |()| "ok".to_owned());
+        println!("{} ({}): {result}", m.what(), m.why());
         state.log.push(Done {
             at: now,
-            what: format!("{verb} {unit}"),
-            why,
+            what: m.what(),
+            why: m.why().to_owned(),
             result,
         });
     }
@@ -83,8 +91,8 @@ pub fn status(cfg: &Config, world: &dyn World, now: f64) -> String {
             clock(it.due)
         );
     }
-    for Move::Runner { unit, verb, why } in &d.moves {
-        let _ = writeln!(out, "would {verb} {unit}: {why}");
+    for m in &d.moves {
+        let _ = writeln!(out, "would {}: {}", m.what(), m.why());
     }
     for done in &st.log {
         let _ = writeln!(
@@ -149,7 +157,7 @@ mod tests {
     use burrow_watchdog::watch;
 
     use super::run;
-    use crate::snapshot::tests::{Fake, config, job, runs};
+    use crate::snapshot::tests::{Fake, config, job, push, runs};
     use crate::state::State;
     use crate::world::Unit;
 
@@ -162,14 +170,10 @@ mod tests {
         let mut cfg = config(dir.path());
         cfg.deploy = None;
         cfg.runners.retain(|u, _| u == "ci");
-        let mut w = Fake::default();
+        let mut w = repo();
         w.github.insert(
             "repos/sam/r/actions/runs?status=queued&per_page=100".into(),
             runs(&[1]),
-        );
-        w.github.insert(
-            "repos/sam/r/actions/runs?status=in_progress&per_page=100".into(),
-            runs(&[]),
         );
         w.github.insert(
             "repos/sam/r/actions/runs/1/jobs?filter=latest&per_page=100".into(),
@@ -237,5 +241,59 @@ mod tests {
         );
         let wake: serde_json::Value = load(dir.path(), "wake.json");
         assert_eq!(wake, json!({}));
+    }
+
+    /// sam/r, on main, with nothing live.
+    fn repo() -> Fake {
+        let mut w = Fake::default();
+        w.github
+            .insert("repos/sam/r".into(), Ok(json!({"default_branch": "main"})));
+        for status in ["queued", "in_progress", "pending"] {
+            w.github.insert(
+                format!("repos/sam/r/actions/runs?status={status}&per_page=100"),
+                runs(&[]),
+            );
+        }
+        w
+    }
+
+    // A moot run is cancelled and logged, and tried once, even when GitHub
+    // refuses.
+    #[test]
+    fn cancel() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = config(dir.path());
+        cfg.deploy = None;
+        cfg.runners.retain(|u, _| u == "ci");
+        let mut w = repo();
+        w.github.insert(
+            "repos/sam/r/actions/runs?status=queued&per_page=100".into(),
+            Ok(json!({"workflow_runs": [push(1, 7, "main", "a1", "queued", "2026-10-29T16:00:00Z")]})),
+        );
+        w.github.insert(
+            "repos/sam/r/actions/runs?status=pending&per_page=100".into(),
+            Ok(json!({"workflow_runs": [push(2, 7, "main", "b2", "pending", "2026-10-29T16:10:00Z")]})),
+        );
+        w.github.insert(
+            "repos/sam/r/actions/runs/1/jobs?filter=latest&per_page=100".into(),
+            Ok(json!({"jobs": []})),
+        );
+        w.fails = Some("HTTP 403: Resource not accessible by integration".into());
+        let t = 1_793_293_200.0;
+
+        run(&cfg, &w, t).unwrap();
+        assert_eq!(*w.did.borrow(), ["cancel sam/r#1"]);
+        let st: State = load(dir.path(), "state.json");
+        assert_eq!(st.cancels["sam/r#1"], t);
+        assert_eq!(
+            (st.log[0].what.as_str(), st.log[0].result.as_str()),
+            (
+                "cancel https://github.com/sam/r/actions/runs/1",
+                "HTTP 403: Resource not accessible by integration"
+            )
+        );
+
+        run(&cfg, &w, t + 60.0).unwrap();
+        assert_eq!(*w.did.borrow(), ["cancel sam/r#1"]);
     }
 }

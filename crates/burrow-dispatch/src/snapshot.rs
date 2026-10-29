@@ -1,6 +1,7 @@
 //! One look at what every PR waits on together: each runner, the jobs queued
-//! for it and whether it's at one; each watched repo's commits the running
-//! system wasn't built from; and HOST-update and HOST-switch.
+//! for it and whether it's at one; each runner repo's push runs on its
+//! default branch that haven't finished; each watched repo's commits the
+//! running system wasn't built from; and HOST-update and HOST-switch.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -18,6 +19,9 @@ pub struct Snapshot {
     pub switching: bool,
     /// Each runner, by unit.
     pub runners: BTreeMap<String, Seen>,
+    /// Each runner repo's push runs on its default branch that haven't
+    /// finished, by OWNER/REPO, oldest first.
+    pub pushes: BTreeMap<String, Vec<Run>>,
     /// Each watched repo with a running commit to compare, by OWNER/REPO.
     pub deploys: BTreeMap<String, Behind>,
     /// HOST-update, and what its last run said.
@@ -43,6 +47,21 @@ pub struct Job {
     pub at: f64,
 }
 
+/// A push run on a repo's default branch that hasn't finished.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Run {
+    pub id: u64,
+    pub url: String,
+    pub workflow: u64,
+    pub branch: String,
+    /// The commit it checks.
+    pub sha: String,
+    /// GitHub's: queued (no job started yet), in_progress, or pending (next
+    /// in its concurrency group).
+    pub status: String,
+    pub at: f64,
+}
+
 /// A watched repo's default branch, past the commit the system runs.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Behind {
@@ -63,9 +82,10 @@ pub fn take(cfg: &Config, world: &dyn World) -> Snapshot {
     let mut queues: BTreeMap<&str, Vec<Queued>> = BTreeMap::new();
     for r in cfg.runners.values() {
         if !queues.contains_key(r.repo.as_str()) && !snap.unread.contains_key(&r.repo) {
-            match queued(world, &r.repo) {
-                Ok(q) => {
+            match look(world, &r.repo) {
+                Ok((q, pushes)) => {
                     queues.insert(&r.repo, q);
+                    snap.pushes.insert(r.repo.clone(), pushes);
                 }
                 Err(e) => {
                     snap.unread.insert(r.repo.clone(), e);
@@ -124,10 +144,13 @@ struct Queued {
 }
 
 /// Every job queued in the repo, in its runs that are queued or under way
-/// (a run's later jobs queue once the ones they need are done).
-fn queued(world: &dyn World, repo: &str) -> Result<Vec<Queued>, String> {
+/// (a run's later jobs queue once the ones they need are done); and its push
+/// runs on its default branch that haven't finished, oldest first.
+fn look(world: &dyn World, repo: &str) -> Result<(Vec<Queued>, Vec<Run>), String> {
+    let branch = default_branch(world, repo)?;
     let mut out = Vec::new();
-    for status in ["queued", "in_progress"] {
+    let mut pushes: Vec<Run> = Vec::new();
+    for status in ["queued", "in_progress", "pending"] {
         let runs = world.github(&format!(
             "repos/{repo}/actions/runs?status={status}&per_page=100"
         ))?;
@@ -136,6 +159,26 @@ fn queued(world: &dyn World, repo: &str) -> Result<Vec<Queued>, String> {
                 .get("id")
                 .and_then(Value::as_u64)
                 .ok_or("a run without an id")?;
+            let text = |k| run.get(k).and_then(Value::as_str).unwrap_or("");
+            // One that moved on between the lists is listed once.
+            if text("event") == "push"
+                && text("head_branch") == branch
+                && !pushes.iter().any(|p| p.id == id)
+            {
+                pushes.push(Run {
+                    id,
+                    url: text("html_url").to_owned(),
+                    workflow: run.get("workflow_id").and_then(Value::as_u64).unwrap_or(0),
+                    branch: branch.clone(),
+                    sha: text("head_sha").to_owned(),
+                    status: text("status").to_owned(),
+                    at: time(run.get("created_at")).ok_or("a run without its time")?,
+                });
+            }
+            // A pending run has no jobs yet.
+            if status == "pending" {
+                continue;
+            }
             let jobs = world.github(&format!(
                 "repos/{repo}/actions/runs/{id}/jobs?filter=latest&per_page=100"
             ))?;
@@ -164,7 +207,8 @@ fn queued(world: &dyn World, repo: &str) -> Result<Vec<Queued>, String> {
             }
         }
     }
-    Ok(out)
+    pushes.sort_by(|a, b| a.at.total_cmp(&b.at));
+    Ok((out, pushes))
 }
 
 /// Whether the runner can take a job asking for these labels: every one of
@@ -177,14 +221,18 @@ fn fits(labels: &[String], r: &Runner) -> bool {
         })
 }
 
-/// What the repo's default branch has that `running` doesn't.
-fn behind(world: &dyn World, repo: &str, running: &str) -> Result<Behind, String> {
-    let info = world.github(&format!("repos/{repo}"))?;
-    let branch = info
+fn default_branch(world: &dyn World, repo: &str) -> Result<String, String> {
+    world
+        .github(&format!("repos/{repo}"))?
         .get("default_branch")
         .and_then(Value::as_str)
-        .ok_or_else(|| format!("{repo} has no default branch"))?
-        .to_owned();
+        .map(str::to_owned)
+        .ok_or_else(|| format!("{repo} has no default branch"))
+}
+
+/// What the repo's default branch has that `running` doesn't.
+fn behind(world: &dyn World, repo: &str, running: &str) -> Result<Behind, String> {
+    let branch = default_branch(world, repo)?;
     let cmp = world.github(&format!("repos/{repo}/compare/{running}...{branch}"))?;
     let count = cmp.get("ahead_by").and_then(Value::as_u64).unwrap_or(0);
     let commits = list(&cmp, "commits");
@@ -230,7 +278,7 @@ pub mod tests {
 
     use serde_json::{Value, json};
 
-    use super::{Job, take};
+    use super::{Job, Run, take};
     use crate::config::Config;
     use crate::world::{Unit, World};
 
@@ -260,6 +308,10 @@ pub mod tests {
         }
         fn restart(&self, unit: &str, verb: &str) -> Result<(), String> {
             self.did.borrow_mut().push(format!("{verb} {unit}"));
+            self.fails.clone().map_or(Ok(()), Err)
+        }
+        fn cancel(&self, repo: &str, run: u64) -> Result<(), String> {
+            self.did.borrow_mut().push(format!("cancel {repo}#{run}"));
             self.fails.clone().map_or(Ok(()), Err)
         }
         fn kick(&self, path: &str) {
@@ -293,6 +345,13 @@ pub mod tests {
         Ok(json!({"workflow_runs": ids.iter().map(|id| json!({"id": id})).collect::<Vec<_>>()}))
     }
 
+    /// A push run: its id, workflow, branch, commit, status and time.
+    pub fn push(id: u64, workflow: u64, branch: &str, sha: &str, status: &str, at: &str) -> Value {
+        json!({"id": id, "event": "push", "workflow_id": workflow, "head_branch": branch,
+               "head_sha": sha, "status": status, "created_at": at,
+               "html_url": format!("https://github.com/sam/r/actions/runs/{id}")})
+    }
+
     pub fn job(name: &str, status: &str, at: &str, labels: &[&str]) -> Value {
         json!({"name": name, "status": status, "created_at": at, "labels": labels,
                "html_url": format!("https://github.com/sam/r/actions/runs/1/job/{name}")})
@@ -300,20 +359,41 @@ pub mod tests {
 
     // Each runner gets the queued jobs its labels take, oldest first, from
     // runs that are queued or under way; one GitHub can't be read for is
-    // left out, with why.
+    // left out, with why. Its repo's push runs on its default branch that
+    // haven't finished are listed, oldest first and each once.
     #[test]
     fn runners() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = config(dir.path());
         let mut w = Fake::default();
+        w.github
+            .insert("repos/sam/r".into(), Ok(json!({"default_branch": "main"})));
         w.github.insert(
             "repos/sam/r/actions/runs?status=queued&per_page=100".into(),
-            runs(&[1]),
+            Ok(json!({"workflow_runs": [
+                {"id": 1, "event": "pull_request", "head_branch": "main"},
+                push(3, 7, "main", "c3", "queued", "2026-10-29T16:30:00Z"),
+                push(4, 7, "fix", "c4", "queued", "2026-10-29T16:40:00Z"),
+            ]})),
         );
         w.github.insert(
             "repos/sam/r/actions/runs?status=in_progress&per_page=100".into(),
-            runs(&[2]),
+            Ok(json!({"workflow_runs": [
+                {"id": 2},
+                // Started between the two lists.
+                push(3, 7, "main", "c3", "in_progress", "2026-10-29T16:30:00Z"),
+            ]})),
         );
+        w.github.insert(
+            "repos/sam/r/actions/runs?status=pending&per_page=100".into(),
+            Ok(json!({"workflow_runs": [push(5, 7, "main", "c5", "pending", "2026-10-29T16:50:00Z")]})),
+        );
+        for id in [3, 4] {
+            w.github.insert(
+                format!("repos/sam/r/actions/runs/{id}/jobs?filter=latest&per_page=100"),
+                Ok(json!({"jobs": []})),
+            );
+        }
         w.github.insert(
             "repos/sam/r/actions/runs/1/jobs?filter=latest&per_page=100".into(),
             Ok(json!({"jobs": [
@@ -358,9 +438,23 @@ pub mod tests {
             }
         );
         assert!(!snap.runners.contains_key("other"));
+        assert_eq!(snap.unread["sam/o"], "GET repos/sam/o: HTTP 404");
+        let pushes: Vec<(u64, &str)> = snap.pushes["sam/r"]
+            .iter()
+            .map(|r| (r.id, r.status.as_str()))
+            .collect();
+        assert_eq!(pushes, [(3, "queued"), (5, "pending")]);
         assert_eq!(
-            snap.unread["sam/o"],
-            "GET repos/sam/o/actions/runs?status=queued&per_page=100: HTTP 404"
+            snap.pushes["sam/r"][1],
+            Run {
+                id: 5,
+                url: "https://github.com/sam/r/actions/runs/5".into(),
+                workflow: 7,
+                branch: "main".into(),
+                sha: "c5".into(),
+                status: "pending".into(),
+                at: 1_793_292_600.0,
+            }
         );
     }
 
