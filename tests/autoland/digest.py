@@ -75,12 +75,15 @@ assert all(x in owner["--body"] for x in ("sam/r#1", "sam/r#2", "`old`")), owner
 assert not any(x in owner["--body"] for x in ("sam/r#3", "sam/r#4", "sam/r#5", "Stuck")), owner["--body"]
 assert stuck and stuck["--title"] == "[autoland] Stuck in the pipeline" and "--assignee" not in stuck, CALLS
 assert stuck["--body"].startswith(R.stuck_brief()) and f"{tmp}/state" in stuck["--body"], stuck["--body"]
+# The kick it gives works from a job's shell: burrow-events starts the
+# unit, which alone holds the App's key (`autoland-steward kick` there can't sign).
+assert f"curl -fsS -d '' {R.CFG['kick']}/OWNER/REPO" in stuck["--body"] and "autoland-steward kick" not in stuck["--body"], stuck["--body"]
 assert all(x in stuck["--body"] for x in ("sam/r#3", "sam/r#4", "sam/r#5")), stuck["--body"]
 assert not any(x in stuck["--body"] for x in ("sam/r#1", "sam/r#2", "`old`")), stuck["--body"]
 
 # Every kind the owner settles is one the steward lists: a renamed one
 # would go to the inbox, never to the owner.
-src = "".join(open(os.path.join(os.path.dirname(R.__file__), f)).read() for f in ("steward.py", "repos.py", "flakes.py"))
+src = "".join(open(os.path.join(os.path.dirname(R.__file__), f)).read() for f in ("step.py", "repos.py", "flakes.py"))
 for kind in R.OWNERS:
     assert src.count(f'"{kind}"') >= 2, kind
 

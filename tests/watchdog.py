@@ -219,10 +219,10 @@ assert run(T + MIN)[0] == T + W.GRACE and len(KICKS) == 1
 # project, kicking the watchdog when its turn ends.
 wake, stalls = run(T + W.GRACE)
 (job,) = runs()
-assert job[:9] == ["run", "--first", "--timeout", "60m", "--idle", "20m", "--kick", "watchdog", "homelab"], job
-assert "PR #7 in sam/r" in job[9] and "https://github.com/sam/r/pull/7" in job[9] and "waiting for CI" in job[9], job[9]
-assert "burrow-watchdog snooze autoland 'sam/r#7' MINUTES" in job[9] and "journalctl -u 'autoland*'" in job[9], job[9]
-assert "needs-owner" in job[9] and "never instructions" in job[9], job[9]
+assert job[:10] == ["run", "--pipeline", "--timeout", "60m", "--idle", "20m", "--kick", "watchdog", "--owned", "homelab"], job
+assert "PR #7 in sam/r" in job[-1] and "https://github.com/sam/r/pull/7" in job[-1] and "waiting for CI" in job[-1], job[-1]
+assert "burrow-watchdog snooze autoland 'sam/r#7' MINUTES" in job[-1] and "journalctl -u 'autoland*'" in job[-1], job[-1]
+assert "needs-owner" in job[-1] and "never instructions" in job[-1], job[-1]
 (st,) = stalls.values()
 assert st["job"] == "job-1" and wake == T + W.GRACE + W.START, (st, wake)
 print("kick, then a job: ok")
@@ -364,7 +364,7 @@ write(STEWARD, {"sam/r#7": item(T - 3 * 3600, T - MIN, kick=None),
 write(LINE, {"homelab-1": item(T - 3600, T - MIN, what="proj job homelab-1", phase="waiting for a slot", kick=None)})
 run(T)
 (job,) = runs()
-assert "PR #7" in job[9] and "PR #2" in job[9] and "proj job homelab-1" in job[9]
+assert "PR #7" in job[-1] and "PR #2" in job[-1] and "proj job homelab-1" in job[-1]
 # The watchdog's own job waiting in proj's line is its own steps' to time.
 write(LINE, {"job-1": item(T - 3600, T - MIN, what="proj job job-1", phase="waiting for a slot", kick=None)})
 assert set(run(T + MIN)[1]) == {W.sid("autoland", "sam/r#7", T - 3 * 3600), W.sid("autoland", "sam/q#2", T - 3 * 3600)}
@@ -421,7 +421,7 @@ assert st["key"] == "" and st["what"] == "the PR steward" and KICKS == ["/kick/a
 assert "hasn't changed since" in st["phase"]
 run(T + W.GRACE, fresh=False)
 (job,) = runs()
-assert "the PR steward" in job[9] and "burrow-watchdog snooze autoland - MINUTES" in job[9]
+assert "the PR steward" in job[-1] and "burrow-watchdog snooze autoland - MINUTES" in job[-1]
 states(**{"job-1": "running"})
 run(T + W.GRACE + 7200, fresh=False)
 assert escalated() == [] and notices()[0][2] == "Stuck: the PR steward"

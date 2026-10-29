@@ -24,6 +24,17 @@ on:
           where that check does run.
         type: string
         default: ''
+      eval-apart:
+        description: >-
+          Evaluate each check, package, dev shell, formatter and NixOS system
+          in a nix process of its own, then build the checks, rather than in
+          one `nix flake check` that holds every evaluation in memory until
+          its last build ends. For a flake whose evaluations don't fit in its
+          runner's memory together. It knows only those outputs (and
+          legacyPackages, which the gate never evaluates), and fails a flake
+          with any other, or with a nixConfig.
+        type: boolean
+        default: false
 jobs:
   check:
     runs-on: ${{ inputs.runner }}
@@ -45,8 +56,112 @@ jobs:
         shell: bash
         env:
           SKIP: ${{ inputs.build-skip }}
+          APART: ${{ inputs.eval-apart }}
         run: |
+          # eval-apart: what `nix flake check` checks of the outputs it knows,
+          # from the flake as locked and evaluated purely, as nix flake check
+          # evaluates it. With no entry, the plan: the outputs it doesn't know,
+          # and each derivation it evaluates and whether it's a check to build.
+          # With an entry's index, that one: its derivation, or for a NixOS
+          # system nothing, once its toplevel is a derivation.
+          read -r -d '' plan <<'EOF' || true
+          { url, system, skip, entry ? null }:
+          let
+            flake = builtins.getFlake url;
+            inherit (flake) outputs;
+            known = [ "checks" "packages" "devShells" "formatter" "nixosConfigurations" "legacyPackages" ];
+            set = what: v: if builtins.isAttrs v then v else throw "flake output '${what}' is not an attribute set";
+            # An output by system: every system's name has a dash, and only
+            # this system's outputs are checked further.
+            here = name: f:
+              let
+                systems = map
+                  (s: if builtins.length (builtins.split "-" s) > 1 then s
+                    else throw "'${s}' in flake output '${name}' is not a valid system type")
+                  (builtins.attrNames (set name outputs.${name}));
+              in
+              if !(outputs ? ${name}) then [ ]
+              else builtins.deepSeq systems (if builtins.elem system systems then f outputs.${name}.${system} else [ ]);
+            each = name: here name (s: map
+              (n: { what = "${name}.${system}.${n}"; path = [ name system n ]; check = name == "checks"; inherit n; })
+              (builtins.attrNames (set "${name}.${system}" s)));
+            entries =
+              each "checks" ++ each "packages" ++ each "devShells"
+              ++ here "formatter" (_: [ { what = "formatter.${system}"; path = [ "formatter" system ]; } ])
+              ++ map
+                (n: { what = "nixosConfigurations.${n}"; path = [ "nixosConfigurations" n "config" "system" "build" "toplevel" ]; nixos = true; })
+                (builtins.attrNames (set "nixosConfigurations" (outputs.nixosConfigurations or { })));
+            skipped = builtins.filter (s: builtins.isString s && s != "") (builtins.split " " skip);
+            build = e: e.check or false && !builtins.elem e.n skipped;
+            isDerivation = v: (v.type or null) == "derivation";
+          in
+          if entry == null then
+            # legacyPackages has only its system names checked.
+            builtins.deepSeq (here "legacyPackages" (_: [ ])) {
+              nixConfig = import "${flake.outPath}/flake.nix" ? nixConfig;
+              other = builtins.filter (n: !builtins.elem n known) (builtins.attrNames outputs);
+              entries = map (e: { inherit (e) what; build = build e; skip = e.check or false && !build e; }) entries;
+            }
+          else
+            let
+              e = builtins.elemAt entries entry;
+              v = builtins.foldl' (v: n: v.${n}) outputs e.path;
+            in
+            if e.nixos or false then
+              (if isDerivation v then [ ] else throw "'config.system.build.toplevel' of ${e.what} is not a derivation")
+            else if isDerivation v then v
+            else throw "flake attribute '${e.what}' is not a derivation"
+          EOF
+          apart() {
+            url=$(nix flake metadata --json . | jq -r .url)
+            args=(--option pure-eval true --expr "$plan" --argstr url "$url"
+              --argstr system "$(nix config show system)" --argstr skip "$SKIP")
+            nix-instantiate --eval --strict --json "${args[@]}" > "$RUNNER_TEMP/plan.json"
+            if [ "$(jq '.other | length' "$RUNNER_TEMP/plan.json")" != 0 ]; then
+              echo "eval-apart knows checks, packages, devShells, formatter, nixosConfigurations and legacyPackages, and this flake also has $(jq -c .other "$RUNNER_TEMP/plan.json"). Its gate is a whole \`nix flake check\`, without eval-apart."
+              return 1
+            fi
+            # nix flake check applies the nixConfig a runner accepts; the
+            # evaluations and the build here would leave it out.
+            if [ "$(jq .nixConfig "$RUNNER_TEMP/plan.json")" = true ]; then
+              echo "eval-apart can't carry this flake's nixConfig to every evaluation and build. Its gate is a whole \`nix flake check\`, without eval-apart."
+              return 1
+            fi
+            # Each evaluation exits before the next starts, so the most memory
+            # in use is one evaluation's, and makes its derivation a GC root
+            # before it exits, until the build is done. A failed one fails the
+            # gate, after the rest are evaluated and built (--keep-going).
+            roots=$(mktemp -d "$RUNNER_TEMP/roots.XXXXXX")
+            trap 'rm -rf -- "$roots"' EXIT
+            failed=0
+            targets=()
+            n=$(jq '.entries | length' "$RUNNER_TEMP/plan.json")
+            for ((i = 0; i < n; i++)); do
+              what=$(jq -r ".entries[$i].what" "$RUNNER_TEMP/plan.json")
+              echo "evaluating $what"
+              if ! nix-instantiate --add-root "$roots/$i" --arg entry "$i" "${args[@]}" > /dev/null; then
+                failed=1
+              elif [ "$(jq ".entries[$i].build" "$RUNNER_TEMP/plan.json")" = true ]; then
+                if drv=$(readlink "$roots/$i"); then
+                  targets+=("$drv^*")
+                else
+                  echo "evaluating $what gave no derivation"
+                  failed=1
+                fi
+              elif [ "$(jq ".entries[$i].skip" "$RUNNER_TEMP/plan.json")" = true ]; then
+                echo "not building $what"
+              fi
+            done
+            if [ ${#targets[@]} -gt 0 ]; then
+              nix build -L --no-link --keep-going "${targets[@]}" || failed=1
+            fi
+            return $failed
+          }
           gate() {
+            if [ "$APART" = true ]; then
+              apart
+              return
+            fi
             if [ -z "$SKIP" ]; then
               nix flake check -L --keep-going
               return
