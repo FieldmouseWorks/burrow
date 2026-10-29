@@ -118,6 +118,8 @@
         agents = import ./tests/agents.nix { inherit self pkgs; };
         # proj's queue and memory caps, with a stand-in for Claude.
         proj = import ./tests/proj.nix { inherit self pkgs; };
+        # A turn's clock, which stands still while it waits in line.
+        proj-clock = import ./tests/proj-clock.nix { inherit self pkgs; };
         # Who takes a free slot: the pipeline's own (only its own repos'
         # pipeline jobs), and each project's cap.
         proj-pick = pkgs.runCommand "proj-pick-check" { nativeBuildInputs = [ pkgs.shellcheck pkgs.git ]; } ''
@@ -126,7 +128,7 @@
           touch $out
         '';
         # What each job waits on, as the stall watchdog hears it.
-        proj-waits = pkgs.runCommand "proj-waits-check" { nativeBuildInputs = [ pkgs.shellcheck pkgs.jq ]; } ''
+        proj-waits = pkgs.runCommand "proj-waits-check" { nativeBuildInputs = [ pkgs.shellcheck pkgs.jq pkgs.util-linux ]; } ''
           shellcheck -s bash ${./modules/proj/waits.sh} ${./tests/proj-waits.sh}
           bash ${./tests/proj-waits.sh} ${./modules/proj/waits.sh}
           touch $out
