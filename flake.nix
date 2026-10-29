@@ -53,6 +53,9 @@
         };
       };
 
+      # The flaky tool (docs/flaky-tests.md), for a machine to install.
+      packages.${system}.flaky = pkgs.callPackage ./tools/flaky/package.nix { };
+
       # A bare machine with every module on, for the checks and as an example.
       nixosConfigurations.example = nixpkgs.lib.nixosSystem {
         modules = [ self.nixosModules.default ./examples/minimal.nix ];
@@ -298,7 +301,10 @@
           [ "$(${pkg}/bin/house-fixture-member)" = 42 ]
           touch $out
         '';
-      } // nixpkgs.lib.mapAttrs' (name: nixpkgs.lib.nameValuePair "house-${name}") (
+      } // nixpkgs.lib.mapAttrs' (name: nixpkgs.lib.nameValuePair "flaky-${name}")
+        # The flaky tool's fmt, clippy and tests.
+        (self.lib.project { inherit self; systems = [ system ]; rust.dir = "tools/flaky"; }).checks.${system}
+      // nixpkgs.lib.mapAttrs' (name: nixpkgs.lib.nameValuePair "house-${name}") (
         # lib/project.nix's own gates, on the smallest projects that have them.
         (self.lib.project { self = ./tests/house/rust; systems = [ system ]; rust.testInputs = pkgs: [ pkgs.git ]; }).checks.${system}
         // (self.lib.project { self = ./tests/house/python; systems = [ system ]; python = { format = true; }; }).checks.${system}

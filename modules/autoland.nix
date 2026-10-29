@@ -81,6 +81,9 @@ let
   # dependencyDashboardTitle default): the issue dashboard.py reads, and the
   # one whose events start a pass.
   dashboardTitle = "Dependency Dashboard";
+  # The flaky tool, which lists each repo's quarantined tests: the issues
+  # titled `flaky: TEST` (flakes.py, docs/flaky-tests.md).
+  flaky = pkgs.callPackage ../tools/flaky/package.nix { };
 
   settings = {
     renovateEmail = if renovateMatch == null then null else lib.head renovateMatch;
@@ -115,6 +118,11 @@ let
       inherit (cfg.dashboard) enable waitDays errorDays;
       title = dashboardTitle;
       renovateKick = if config.burrow.updates.renovate.enable or false then "${config.burrow.events.kick}/renovate" else null;
+    };
+    # Quarantined flaky tests, each to a Claude job (flakes.py).
+    flaky = {
+      inherit (cfg.flaky) enable;
+      bin = "${flaky}/bin/flaky";
     };
     # What every open PR waits on, for the stall watchdog (autoland/waits.py),
     # and what it took past a Claude job, for the stuck issue.
@@ -437,6 +445,17 @@ in
       };
     };
 
+    flaky.enable = mkOption {
+      type = types.bool;
+      default = true;
+      description = ''
+        Send each repo's quarantined flaky tests (open issues titled `flaky:
+        TEST`, labelled `flaky`, that its gate files: docs/flaky-tests.md) to a
+        Claude job that fixes them, and one still open a day after that job to
+        the stuck issue (autoland/flakes.py).
+      '';
+    };
+
     keepBranches = mkOption {
       type = types.listOf types.str;
       default = [ "gh-pages" "release/*" "releases/*" ];
@@ -597,9 +616,11 @@ in
       # statuses (a proof's verdict).
       events = [ "push" "pull_request" "pull_request_review" "pull_request_review_comment"
         "pull_request_review_thread" "issue_comment" "check_suite" "status" ]
-        ++ lib.optional cfg.dashboard.enable "issues";
-      # Of the issues, only Renovate's dashboard (dashboard.py).
-      issueTitles = [ dashboardTitle ];
+        ++ lib.optional (cfg.dashboard.enable || cfg.flaky.enable) "issues";
+      # Of the issues, only Renovate's dashboard (dashboard.py) and flaky
+      # tests' (flakes.py; the flaky tool's test.rs has the title).
+      issueTitles = lib.optional cfg.dashboard.enable dashboardTitle
+        ++ lib.optional cfg.flaky.enable "flaky: *";
       unit = "autoland";
       wake = "${stateDir}/autoland/wake.json";
       # Its own status tells it nothing (a job awaiting the PR does want it).

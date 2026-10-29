@@ -74,13 +74,17 @@ for event, p, want in cases:
 # A handler that asks for none of that takes any push, and every branch.
 plain = {"events": ["push", "check_suite"], "unit": "autoland"}
 assert E.takes(plain, "push", payload(ref="refs/heads/fix")) and E.takes(plain, "check_suite", payload(check_suite={"head_branch": "fix"}))
-# One that names issue titles takes an issue's event only for one of those,
-# exactly; a comment, or an event about a branch, is no issue's.
-titled = {"events": ["issues", "issue_comment", "push"], "unit": "autoland", "issueTitles": ["Dependency Dashboard"]}
+# One that names issue titles takes an issue's event only for one that
+# matches one of those globs, case and all; a comment, or an event about a
+# branch, is no issue's.
+titled = {"events": ["issues", "issue_comment", "push"], "unit": "autoland", "issueTitles": ["Dependency Dashboard", "flaky: *"]}
 cases = [
     ("issues", payload(issue={"title": "Dependency Dashboard"}), True),
     ("issues", payload(issue={"title": "Dependency Dashboard (old)"}), False),
     ("issues", payload(issue={"title": "dependency dashboard"}), False),
+    ("issues", payload(issue={"title": "flaky: browser/stream[2]"}), True),
+    ("issues", payload(issue={"title": "Flaky: browser/stream"}), False),
+    ("issues", payload(issue={"title": "not flaky: x"}), False),
     ("issues", payload(issue={"title": None}), False),
     ("issues", payload(), False),
     ("issue_comment", payload(issue={"title": "Something else"}), True),
