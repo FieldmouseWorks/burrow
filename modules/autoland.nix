@@ -625,7 +625,7 @@ in
         oneWay path rides alone, landing only while the default branch is
         still the base its CI ran on. CI on the PRs themselves is optional:
         with none, a reviewed PR goes straight in. It needs burrow.ledger,
-        and has no proofJobs yet), trainSize (the
+        isn't directPush, and has no proofJobs yet), trainSize (the
         most PRs a candidate holds, 8), trainRequire (checks the train's CI
         waits for even before they report, when more than one workflow
         runs there), trainStallAfter (minutes, trainStallAfterMinutes).
@@ -649,6 +649,10 @@ in
       # A proof runs on a PR's head; the train's evidence is its candidates'.
       assertion = lib.all (r: (cfg.repos.${r}.proofJobs or { }) == { }) trains;
       message = "burrow.autoland: a repo with its train on can't have proofJobs yet.";
+    } {
+      # Its rules are what keep anything but the train off its default branch.
+      assertion = lib.all (r: !(cfg.repos.${r}.directPush or false)) trains;
+      message = "burrow.autoland: a repo with its train on can't be directPush: only the train may move its default branch.";
     }];
 
     burrow.proj.enable = true;
