@@ -139,6 +139,8 @@
         # burrow-events for real: deliveries, kicks and wake-ups starting a
         # handler's units through polkit.
         events-service = import ./tests/events.nix { inherit self pkgs; };
+        # HOST-switch's revert when the window runs out mid-activation.
+        switch = import ./tests/switch.nix { inherit self pkgs; };
         # HOST-health's ZFS check: the pools the machine needs, by name or
         # GUID, with a stand-in zpool.
         health-zfs = import ./tests/health-zfs.nix { inherit self pkgs; };
