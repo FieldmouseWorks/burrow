@@ -271,7 +271,7 @@ def watch_default(r, info, prs, digest):
         if not open_fix and red.get("job") and not red.get("ended"):
             red["ended"] = True
             save(key, st)
-            C.wake(repo, C.NOW + 60)
+            C.wake(repo, C.NOW + 60)  # ends: the second look, once
             return set()
         unclosed = []
         for pr in open_fix:
@@ -283,7 +283,7 @@ def watch_default(r, info, prs, digest):
         # One GitHub wouldn't close is still known by the red it was for, and
         # tried again soon.
         if unclosed:
-            C.wake(repo, C.NOW + 5 * 60)
+            C.wake(repo, C.NOW + 5 * 60)  # ends: the fix PR's own wait is overdue at its deadline (waits.py)
         else:
             log(f"{repo}: {r['default']} is green again")
             st.pop("red")
@@ -297,7 +297,7 @@ def watch_default(r, info, prs, digest):
     if red.get("job") and not red.get("ended"):
         red["ended"] = True
         save(key, st)
-        C.wake(repo, C.NOW + 60)
+        C.wake(repo, C.NOW + 60)  # ends: the second look, once
         return
     if red.get("jobs", 0) >= 2:
         digest.append(("The default branch is red", line, "two Claude jobs ended with it still red"))
@@ -305,7 +305,7 @@ def watch_default(r, info, prs, digest):
     jid = C.job(repo, red_default_task(repo, r["default"], sha))
     if not jid:
         digest.append(("Couldn't start a Claude job to fix it", line, "the default branch is red"))
-        C.wake(repo, C.NOW + 5 * 60)
+        C.wake(repo, C.NOW + 5 * 60)  # ends: listed on the stuck issue
         return
     log(f"{repo}: {r['default']} is red at {sha[:7]}; a Claude job {jid} fixes it")
     st["red"] = {"job": jid, "jobs": red.get("jobs", 0) + 1, "at": sha}
@@ -499,7 +499,8 @@ def sweep_branches(r, in_use, digest, sweep=True):
 # review that won't run, a merge GitHub won't take, a PR stuck a day), which
 # a Claude job on this machine takes when proj's inbox is on.
 OWNERS = ("Judged yours to decide", "Outside contributions", "Too much to read", "A reviewer is out of service",
-          "No reviewer can review it", "Stale branches (unmerged, no PR, 30+ days)")
+          "No reviewer can review it", "Stale branches (unmerged, no PR, 30+ days)",
+          "Flaky tests someone else quarantined")
 
 
 def publish(digest):
@@ -539,11 +540,12 @@ def inbox_off():
 
 def stuck_brief():
     who = CFG["notify"]["assignee"] or "the owner"
+    stalls = " (and `burrow-watchdog status` for what stalled past its deadline)" if CFG["watch"] else ""
     return f"""The PR pipeline on this machine is stuck on what's below, and none of it is {who}'s to settle. For each \
 one, find out why: `journalctl -u autoland` and `-u autoland-review` here, and the steward's state in \
-{CFG['stateDir']}. Fix the cause: a burrow PR with a test that fails on the bug when it's burrow's code, the fix on \
-this machine when it's the machine. Then get it moving again (`autoland-steward kick OWNER/REPO` starts a repo's \
-pass). Your answer, posted here, says what you found and did for each. The steward keeps this issue up to date: \
+{CFG['stateDir']}{stalls}. Fix the cause: a burrow PR with a test that fails on the bug when it's burrow's code, the fix on \
+this machine when it's the machine. Then get it moving again (`curl -fsS -d '' {CFG['kick']}/OWNER/REPO` starts a \
+repo's pass). Your answer, posted here, says what you found and did for each. The steward keeps this issue up to date: \
 something new stuck comes as a comment, and it closes the issue itself once nothing is, so don't close it. If one \
 really does need {who} (a login only they can do, a call that's theirs), say exactly what and assign this issue to \
 them.

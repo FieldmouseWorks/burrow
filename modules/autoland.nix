@@ -72,10 +72,18 @@ let
   renovateAuthor = config.burrow.updates.renovate.gitAuthor or null;
   renovateMatch = if renovateAuthor == null then null else builtins.match ".*<([^>]*)>.*" renovateAuthor;
 
+  # renovate-sweep runs here: its verdicts on majors count, and its pass is
+  # what a stalled wait on it kicks.
+  sweeping = (config.burrow.updates.enable or false) && (config.burrow.updates.renovate.enable or false);
+  watchdog = config.burrow.watchdog.enable or false;
+
   # The title Renovate gives each repo's dashboard (its
   # dependencyDashboardTitle default): the issue dashboard.py reads, and the
   # one whose events start a pass.
   dashboardTitle = "Dependency Dashboard";
+  # The flaky tool, which lists each repo's quarantined tests: the issues
+  # titled `flaky: TEST` (flakes.py, docs/flaky-tests.md).
+  flaky = pkgs.callPackage ../tools/flaky/package.nix { };
 
   settings = {
     renovateEmail = if renovateMatch == null then null else lib.head renovateMatch;
@@ -86,7 +94,7 @@ let
     stateDir = "${stateDir}/autoland";
     # The key renovate-sweep seals its verdicts on majors with (seal.py),
     # when it runs here; without it, none counts.
-    majorKey = if (config.burrow.updates.enable or false) && (config.burrow.updates.renovate.enable or false) then "${stateDir}/renovate-sweep/verdict.key" else null;
+    majorKey = if sweeping then "${stateDir}/renovate-sweep/verdict.key" else null;
     projectsDir = config.burrow.projectsDir;
     proj = "${config.burrow.tools.proj}/bin/proj";
     jobTimeout = cfg.jobTimeoutMinutes;
@@ -111,11 +119,25 @@ let
       title = dashboardTitle;
       renovateKick = if config.burrow.updates.renovate.enable or false then "${config.burrow.events.kick}/renovate" else null;
     };
+    # Quarantined flaky tests, each to a Claude job (flakes.py).
+    flaky = {
+      inherit (cfg.flaky) enable;
+      bin = "${flaky}/bin/flaky";
+    };
+    # What every open PR waits on, for the stall watchdog (autoland/waits.py),
+    # and what it took past a Claude job, for the stuck issue.
+    watch = if watchdog then {
+      kick = "${config.burrow.events.kick}/watchdog";
+      escalated = "${config.burrow.watchdog.dir}/escalated.json";
+      renovateSweep = sweeping;
+    } else null;
     defaults = {
       inherit (cfg) rounds oneWay;
       handoffAfter = cfg.handoffAfterMinutes;
       sessionHandoffAfter = cfg.sessionHandoffAfterMinutes;
       settleDelay = cfg.settleDelayMinutes;
+      stallAfter = cfg.stallAfterMinutes;
+      holdStallAfter = cfg.holdStallAfterMinutes;
       directPush = false;
       ruleset = true;
       requireCi = true;
@@ -190,6 +212,7 @@ in
     { key = "burrow/notify"; imports = [ (import ./notify.nix inputs) ]; }
     { key = "burrow/proj"; imports = [ (import ./proj.nix inputs) ]; }
     { key = "burrow/events"; imports = [ (import ./events.nix inputs) ]; }
+    { key = "burrow/watchdog/sources"; imports = [ ./watchdog/sources.nix ]; }
   ];
 
   options.burrow.autoland = {
@@ -260,8 +283,12 @@ in
         The repos whose PRs work on this pipeline itself (OWNER/NAMEs, any
         case): the steward, its reviewers, the machine they run on. Their
         reviews take a reviewer's next free place before anyone else's, and
-        their Claude jobs go ahead of the line (`proj run --first`), so the
-        work queued behind them gets the speedup sooner.
+        the Claude jobs in their projects that the steward and proj-inbox
+        start (`proj run --pipeline`) go ahead of everything, in proj's
+        `pipelineSlots`, so the work queued behind them gets the speedup
+        sooner. The steward's jobs in any other repo go ahead of the line as
+        well, but within that project's `maxJobsPerProject`, so one repo's
+        PRs can't fill the machine.
       '';
     };
 
@@ -321,6 +348,25 @@ in
       type = types.ints.positive;
       default = 1;
       description = "How long a new head sits still before the reviewers are asked, so a burst of pushes gets one review.";
+    };
+
+    stallAfterMinutes = mkOption {
+      type = types.ints.positive;
+      default = 120;
+      description = ''
+        How long a PR may wait on one thing (its status's description: a
+        review, CI, a Claude job, a merge) before the stall watchdog, when
+        it's on, takes it: kicks its pass, then hands it to a Claude job.
+      '';
+    };
+
+    holdStallAfterMinutes = mkOption {
+      type = types.ints.positive;
+      default = 480;
+      description = ''
+        The same for a PR on hold: a Claude job then finds out what it waits
+        on, and moves one that waits on the owner's word to the owner label.
+      '';
     };
 
     jobTimeoutMinutes = mkOption {
@@ -403,6 +449,17 @@ in
       };
     };
 
+    flaky.enable = mkOption {
+      type = types.bool;
+      default = true;
+      description = ''
+        Send each repo's quarantined flaky tests (open issues titled `flaky:
+        TEST`, labelled `flaky`, that its gate files: docs/flaky-tests.md) to a
+        Claude job that fixes them, and one still open a day after that job to
+        the stuck issue (autoland/flakes.py).
+      '';
+    };
+
     keepBranches = mkOption {
       type = types.listOf types.str;
       default = [ "gh-pages" "release/*" "releases/*" ];
@@ -429,7 +486,12 @@ in
       hold = mkOption {
         type = types.str;
         default = "hold";
-        description = "A PR with this label is paused: its status goes back to pending and nothing merges it.";
+        description = ''
+          A PR with this label is paused: its status goes back to pending and
+          nothing merges it. For a wait on something else (another PR, a
+          deploy); one that waits for you takes the owner label, which lists
+          it for you.
+        '';
       };
       owner = mkOption {
         type = types.str;
@@ -496,7 +558,8 @@ in
       '';
       description = ''
         Per-repo overrides (OWNER/NAME): any of rounds, oneWay,
-        handoffAfter, sessionHandoffAfter, settleDelay (minutes), directPush,
+        handoffAfter, sessionHandoffAfter, settleDelay, stallAfter,
+        holdStallAfter (minutes), directPush,
         ruleset (false: no baseline ruleset), requireCi (false: a PR with no
         checks at all counts as green, for a repo with nothing to test; by
         default a Claude job judges a settled PR in a repo with no CI,
@@ -504,7 +567,9 @@ in
         machine rather than in CI, `{ "<check>" = "<how to run it and record
         its verdict>"; }`: once a settled PR waits on nothing else, one
         Claude job a head runs them on that commit and records each verdict,
-        a failure as a failure), keepBranches
+        a failure as a failure), proofSlots (how many of those jobs the repo
+        may have queued or running at once, for proofs that take the whole
+        machine: the rest wait their turn, oldest PR first; unset, no limit), keepBranches
         (more branch globs the cleanup never touches in this repo, on top of
         the machine's, for branches a repo keeps as evidence), codex (false:
         Codex leaves this repo alone, and none of it goes to it), skipPaths (more path regexes the reviewers never read in
@@ -555,9 +620,11 @@ in
       # statuses (a proof's verdict).
       events = [ "push" "pull_request" "pull_request_review" "pull_request_review_comment"
         "pull_request_review_thread" "issue_comment" "check_suite" "status" ]
-        ++ lib.optional cfg.dashboard.enable "issues";
-      # Of the issues, only Renovate's dashboard (dashboard.py).
-      issueTitles = [ dashboardTitle ];
+        ++ lib.optional (cfg.dashboard.enable || cfg.flaky.enable) "issues";
+      # Of the issues, only Renovate's dashboard (dashboard.py) and flaky
+      # tests' (flakes.py; the flaky tool's test.rs has the title).
+      issueTitles = lib.optional cfg.dashboard.enable dashboardTitle
+        ++ lib.optional cfg.flaky.enable "flaky: *";
       unit = "autoland";
       wake = "${stateDir}/autoland/wake.json";
       # Its own status tells it nothing (a job awaiting the PR does want it).
@@ -640,6 +707,15 @@ in
       "${reviewDir}/git" = dir "0700" account.group;
     };
 
+    burrow.watchdog.sources.autoland = {
+      file = "${settings.stateDir}/watch.json";
+      about = "The PR steward (autoland)";
+      look = "Its status on the PR says what it waits on; `autoland-steward status`, `journalctl -u autoland` and its state in ${settings.stateDir} say why.";
+      kick = "autoland";
+      # It writes on every pass, and has a full one at least hourly.
+      staleMinutes = 120;
+    };
+
     burrow.claude.machineMd = lib.mkOrder 1050 ''
       ## Pull requests
 
@@ -665,7 +741,9 @@ in
         you can't decide waits for them, labelled `${cfg.labels.owner}` and listed in one issue
         (so are outside contributions). A PR past ${toString cfg.rounds} review rounds isn't theirs:
         its last findings are fixed or answered, and a judge decides.
-        `${cfg.labels.hold}` keeps the steward off a PR.
+        `${cfg.labels.hold}` keeps the steward off a PR while it waits on something else (another
+        PR, a deploy); one waiting on ${config.burrow.owner}'s OK gets `${cfg.labels.owner}` instead, which
+        lists it for them.${lib.optionalString watchdog " A hold still on after ${toString cfg.holdStallAfterMinutes} minutes gets a Claude job's look."}
       - `autoland-steward status` shows where every open PR stands, changing nothing.
       - Every repo, new ones too, is kept at the baseline in burrow's
         docs/repo-baseline.md.

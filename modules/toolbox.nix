@@ -10,9 +10,10 @@ inputs:
 
   config = lib.mkIf config.burrow.toolbox.enable {
     environment.systemPackages = with pkgs; [
-      # VCS
-      gh
-      git-lfs
+      # VCS. gh and git-lfs are github.nix's, which know an App's env, where
+      # there is one.
+      (config.burrow.tools.gh or gh)
+      (config.burrow.tools.git-lfs or git-lfs)
       jujutsu
       mergiraf
       # search and files
@@ -37,6 +38,8 @@ inputs:
       # VMs and backups
       qemu_kvm
       rclone
+      # gates: quarantining flaky tests (docs/flaky-tests.md)
+      (callPackage ../tools/flaky/package.nix { })
       # secrets tooling for sops-nix
       age
       sops

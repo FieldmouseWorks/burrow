@@ -4,7 +4,7 @@ branch's fix job."""
 
 import json
 
-from harness import (C, FAIL, JOBS, R, S, STATES, T0, WROTE, fresh_pr_state, info, gh_stub, mkpr, stand_in)
+from harness import (C, FAIL, JOBS, R, H, S, STATES, T0, WROTE, fresh_pr_state, info, gh_stub, mkpr, stand_in)
 
 stand_in()
 # Its parts are called straight here, so they're for sam's repos as a pass
@@ -300,7 +300,7 @@ assert not C.load("repo-sam_r.json", {}).get("red"), C.load("repo-sam_r.json", {
 # obsolete (passes.py has what holding does) before any other PR, so one
 # with settled reviews and green CI can't merge before it's closed.
 kept_fns = (S.R.discover, S.R.settle_repo, S.R.publish, S.open_prs, S.R.unhook_gone, S.R.hook_projects,
-            S.R.watch_default, S.handle)
+            S.R.watch_default, H.handle)
 order = []
 S.R.discover = lambda: [{"repo": "sam/r", "default": "main"}]
 S.R.settle_repo = lambda r, known: False
@@ -308,10 +308,10 @@ S.R.publish = S.R.unhook_gone = lambda *a: None
 S.R.hook_projects = lambda repos: []
 S.open_prs = lambda owner, name: (info, [mkpr(number=10), mkpr(branch="autoland/red-cccccccccccc", number=9)])
 S.R.watch_default = lambda r, info, prs, digest: order.append("watch") or {9}
-S.handle = lambda repo, pr, info, digest, obsolete: order.append((pr["number"], obsolete))
+H.handle = lambda repo, pr, info, digest, obsolete: order.append((pr["number"], obsolete))
 S.main()
 (S.R.discover, S.R.settle_repo, S.R.publish, S.open_prs, S.R.unhook_gone, S.R.hook_projects,
- S.R.watch_default, S.handle) = kept_fns
+ S.R.watch_default, H.handle) = kept_fns
 assert order == ["watch", (9, True), (10, False)], order
 
 # The daily branch sweep deletes a branch already in the default branch, and
