@@ -1,0 +1,53 @@
+{
+  "conary": "note v1",
+  "change": "6cvfef4gbfafgsbtdhktye78bt",
+  "repo": {
+    "owner": "fieldmouseworks",
+    "name": "burrow"
+  },
+  "pr": 137,
+  "url": "https://github.com/fieldmouseworks/burrow/pull/137",
+  "summary": "ci: fail a PR commit whose signature GitHub can't verify",
+  "task": "https://claude.ai/code/project/chan_01Ad4f4oDXfFTCEzLHzMTD8q?thread=cmsg_01Ad4f4oDXfFTCEzLHzMTD8q9EyBzD8gnhLS59fsBCwVLV",
+  "author": {
+    "kind": "agent",
+    "login": "TusanHomichi",
+    "session": "https://claude.ai/code/session_01BkHcyAbeGroquwxzKiJoHX"
+  },
+  "landing": {
+    "revision": "58ee84cb30da607e2ff1183c82d5cba24824d5d14a3be2aa8c47d09e71b1daa3",
+    "before": "1f083b2cc196264514e0abf35337aa28373af8cc",
+    "after": "8dd0ee7427d950317189d8f408e6359ea14bdca1",
+    "by": {
+      "kind": "status",
+      "login": "TusanHomichi"
+    },
+    "at": 1793249340711
+  },
+  "evidence": [
+    {
+      "kind": "ci",
+      "check": "check / commits",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/40811053947/job/123241196529"
+    },
+    {
+      "kind": "review",
+      "check": "codex",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/137#pullrequestreview-5692438064"
+    },
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/40811053947/job/123241196298"
+    },
+    {
+      "kind": "ci",
+      "check": "agents",
+      "result": "pass",
+      "source": "status agents"
+    }
+  ]
+}
