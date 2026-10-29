@@ -9,7 +9,8 @@
 #   still miss it), and the compile runs in the runner's unit, not the
 #   daemon's;
 # - the daemon runs nothing, even for a build that skips the wrapper and asks
-#   it to compile: it sees no compiler, and can't run one from the cache;
+#   it to compile a program it can reach, and it sees nothing but sccache and
+#   the cache;
 # - a crate bigger than sccache's default message size is cached too;
 # - a cached `cargo check` never stands in for clippy, and a compile error
 #   still fails the build;
@@ -20,7 +21,7 @@
 # - nobody else reaches a user's cache, and the daemon listens on no port.
 #
 #   nix build .#checks.x86_64-linux.rust-cache -L
-{ self, pkgs }:
+{ self, pkgs, inputs }:
 let
   crate = name: body: pkgs.runCommand "crate-${name}" { } ''
     mkdir -p $out/src
@@ -35,6 +36,20 @@ let
   # clippy's needless_return, which rustc doesn't mind.
   ok = crate "ok" "pub fn next(x: i32) -> i32 { return x + 1; }";
   broken = crate "broken" ''pub fn next(x: i32) -> i32 { "not a number" }'';
+
+  # A program a build plants where the daemon can reach it, noting which
+  # cgroup it runs in. Linked against the glibc of the daemon's own sccache,
+  # so it would run in the daemon's chroot too.
+  planted = inputs.nixpkgs-unstable.legacyPackages.${pkgs.stdenv.hostPlatform.system}.writeCBin "planted" ''
+    #include <stdio.h>
+    int main(void) {
+      FILE *in = fopen("/proc/self/cgroup", "r"), *out = fopen("/dev/shm/planted.log", "a");
+      int c;
+      if (!in || !out) return 1;
+      while ((c = fgetc(in)) != EOF) fputc(c, out);
+      return 0;
+    }
+  '';
 
   # rustc, noting which cgroup each compile runs in.
   spy = pkgs.writeShellScript "rustc-spy" ''
@@ -216,29 +231,25 @@ pkgs.testers.runNixOSTest {
         assert "runner.service" in cgroups and "rust-cache" not in cgroups, cgroups
         assert machine.succeed("pgrep -c -u ci sccache").strip() == "1"
 
-    with subtest("the daemon runs nothing, whatever a build asks of it"):
-        # A build that skips the wrapper, so sccache asks the daemon to
-        # compile (and first to tell what the compiler is). The daemon can't
-        # find the compiler, and sccache's daemon then never answers, so the
-        # build waits out its timeout: the build's own trouble, in its own
-        # unit.
-        machine.succeed("rm /var/lib/ci/x/spy.log")
+    with subtest("the daemon runs nothing a build names, and sees only its cache"):
+        # A build that skips the wrapper, so sccache asks the daemon to compile
+        # (and first to tell what the compiler is), with a compiler in
+        # /dev/shm, which the daemon shares with the host, from /, which it
+        # has too. The daemon refuses, and sccache compiles in the build.
         before = stats("ci")["compile_requests"]
-        job(
-            f"cd x && rm -rf target && RUSTC=${spy} RUSTC_WRAPPER={sccache}"
-            " SCCACHE_SERVER_UDS=/var/cache/sccache/ci/sccache.sock CARGO_INCREMENTAL=0 timeout 120 cargo build -q"
+        status, out = job(
+            "install -m 755 ${planted}/bin/planted /dev/shm/rustc"
+            " && cd / && SCCACHE_SERVER_UDS=/var/cache/sccache/ci/sccache.sock"
+            f" timeout 120 {sccache} /dev/shm/rustc -vV"
         )
+        ran = machine.succeed("cat /dev/shm/planted.log")
+        assert "rust-cache" not in ran, f"the daemon ran a build's compiler: {ran}"
         assert stats("ci")["compile_requests"] > before, "the build never asked the daemon to compile"
-        cgroups = machine.execute("cat /var/lib/ci/x/spy.log")[1]
-        assert "rust-cache" not in cgroups, f"the daemon ran a build's compiler: {cgroups}"
-        # It sees no compiler at all, and nothing it can write can be run.
+        assert status == 0 and "runner.service" in ran, f"the build didn't compile itself: {out} {ran}"
+        # A key can name any path, so the daemon's root holds nothing else.
         pid = machine.succeed("systemctl show -P MainPID rust-cache-ci.service").strip()
-        for path in ["/run/current-system", "/var/lib/ci", "/bin/sh", "${pkgs.rustc}"]:
+        for path in ["/run/current-system", "/var/lib/ci", "/home", "/bin/sh", "${pkgs.rustc}"]:
             machine.fail(f"test -e /proc/{pid}/root{path}")
-        mounts = [line.split() for line in machine.succeed(f"cat /proc/{pid}/mountinfo").splitlines()]
-        for path in ["/var/cache/sccache/ci/cache", "/run/rust-cache-ci"]:
-            options = [m[5] for m in mounts if m[4] == path]
-            assert options and "noexec" in options[-1].split(","), f"the daemon can run {path}: {options}"
 
     with subtest("a cached check never stands in for clippy, and a compile error still fails"):
         place("${ok}", "/home/dev/lint", "dev")

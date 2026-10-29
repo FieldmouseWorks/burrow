@@ -15,17 +15,23 @@
 # two daemons on one cache would miss each other's entries and overrun its
 # size. The compiles themselves run in the builds, under their own units'
 # limits (sccache's client-side mode); the daemon only stores, and couldn't do
-# more if a build asked it to: it runs in a chroot that holds nothing but
-# sccache itself and the cache, which it can't run anything from. burrow.user
-# has one, and so do `users`; anyone else's builds go uncached.
+# more if a build asked it to: it refuses to compile, and sees nothing but
+# sccache itself and the cache. burrow.user has one, and so do `users`;
+# anyone else's builds go uncached.
 inputs:
 { config, lib, pkgs, ... }:
 let
   cfg = config.burrow.rustCache;
   inherit (lib) mkOption types;
 
-  # Client-side mode is new in sccache 0.19; burrow's nixpkgs has 0.15.
-  sccache = inputs.nixpkgs-unstable.legacyPackages.${pkgs.stdenv.hostPlatform.system}.sccache;
+  # Client-side mode is new in sccache 0.19; burrow's nixpkgs has 0.15. Its
+  # daemon still runs whatever compiler a client outside client-side mode
+  # names, so this one is patched to refuse, and the client compiles itself.
+  # Only the local disk cache is used, so none of the cloud backends either.
+  sccache = inputs.nixpkgs-unstable.legacyPackages.${pkgs.stdenv.hostPlatform.system}.sccache.overrideAttrs (old: {
+    patches = (old.patches or [ ]) ++ [ ./rust-cache/sccache-storage-only.patch ];
+    cargoBuildNoDefaultFeatures = true;
+  });
   # No config file: the environment below is all of it, for the daemon and
   # the builds alike, whatever a user keeps in ~/.config/sccache.
   conf = pkgs.writeText "sccache.conf" "";
@@ -125,12 +131,9 @@ in
         # big dependency would never come out of the cache.
         SCCACHE_MAX_FRAME_LENGTH = toString (1024 * 1024 * 1024);
       };
-      # It runs nothing: sccache's daemon still takes the compile requests of
-      # a client outside client-side mode, and would run whatever compiler
-      # they name, so it lives in a chroot holding only sccache, its config
-      # and the cache, and the cache and its socket's directory can't be run
-      # from. A client that asks anyway gets an error back and compiles
-      # nothing here.
+      # A client can ask the daemon for any key, and a key can name a path
+      # outside the cache, so the daemon reaches nothing else: a chroot
+      # holding only sccache, its config and the cache.
       confinement = {
         enable = true;
         binSh = null;
@@ -147,8 +150,6 @@ in
         RuntimeDirectory = [ "rust-cache-${u}" ];
         RuntimeDirectoryMode = "0700";
         BindPaths = [ cache ];
-        # Inside the chroot, hence the +.
-        NoExecPaths = [ "+${cache}" "+${run}" ];
         # A message being stored takes about twice its size.
         MemoryMax = "4G";
         PrivateNetwork = true;

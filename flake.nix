@@ -133,7 +133,7 @@
         backup = import ./tests/backup.nix { inherit self pkgs; };
         # The shared compile cache: one daemon per user, the compiles in the
         # builds that ask for them, and a plain compile whenever it can't help.
-        rust-cache = import ./tests/rust-cache.nix { inherit self pkgs; };
+        rust-cache = import ./tests/rust-cache.nix { inherit self pkgs inputs; };
         # The ledger's pass over one repo, with a stand-in for cn.
         ledger = import ./tests/ledger.nix { inherit self pkgs; };
         # Which deliveries and kicks start whose pass, with a stand-in for systemctl.
