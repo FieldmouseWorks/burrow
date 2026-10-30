@@ -84,6 +84,9 @@
 
       checks.${system} = {
         example = self.nixosConfigurations.example.config.system.build.toplevel;
+        # lib/project.nix's secrets check over all of burrow's tracked files;
+        # the projects below each see only their own directory.
+        secrets = (self.lib.project { inherit self; systems = [ system ]; }).checks.${system}.secrets;
         # Each module on its own, with only what it imports: evaluating is the
         # check, so these build nothing. A service that says how it runs (a
         # Type) has something to run too: systemd refuses one without
