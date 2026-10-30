@@ -17,8 +17,11 @@ let
   inherit (config.burrow.github) machineApp;
   watchWake = "${stateDir}/proj-watch/wake.json";
   inboxWake = "${stateDir}/proj-inbox/wake.json";
-  # The pipeline's own repos, whose projects' pipeline jobs get its slots.
-  pipelineRepos = lib.escapeShellArg (lib.concatStringsSep " " (lib.attrByPath [ "burrow" "autoland" "pipelineRepos" ] [ ] config));
+  # The pipeline's own repos, whose projects' pipeline jobs get its slots,
+  # and the lead ones, what it's built from, whose go first of all (pipeline
+  # repos whether or not pipelineRepos lists them).
+  leadRepos = lib.attrByPath [ "burrow" "autoland" "leadRepos" ] [ ] config;
+  pipelineRepos = lib.escapeShellArg (lib.concatStringsSep " " (lib.attrByPath [ "burrow" "autoland" "pipelineRepos" ] [ ] config ++ leadRepos));
   # What each job waits on, for the stall watchdog, when it's on.
   watchdog = config.burrow.watchdog.enable or false;
   waits = "${cfg.jobsDir}/.waits.json";
@@ -43,6 +46,7 @@ let
       KICK=${lib.escapeShellArg config.burrow.events.kick}
       WAKE=${lib.escapeShellArg watchWake}
       PIPELINE=${pipelineRepos}
+      LEAD=${lib.escapeShellArg (lib.concatStringsSep " " leadRepos)}
       WAITS=${lib.escapeShellArg (lib.optionalString watchdog waits)}
       STALL_QUEUED=${toString (cfg.stallAfterMinutes * 60)}
       GRACE=600
@@ -101,12 +105,14 @@ in
       description = ''
         Of the maxJobs slots, how many only pipeline jobs in the pipeline's
         own repos (`proj run --pipeline` in a project whose clone's origin
-        is one of `burrow.autoland.pipelineRepos` on GitHub: the steward's
-        jobs there, their issues) may take, so work on the pipeline itself
-        waits only on other such work, never on everyone else's long jobs. A
-        pipeline job in any other project goes as `--first`: ahead of the
-        line, but within its project's cap and never in these slots; `proj
-        status` and its turn's journal say so, origin and all.
+        is one of `burrow.autoland.pipelineRepos` or `leadRepos` on GitHub:
+        the steward's jobs there, their issues) may take, so work on the
+        pipeline itself waits only on other such work, never on everyone
+        else's long jobs; a lead repo's go first of all, ahead of the other
+        pipeline jobs too. A pipeline job in any other project goes as
+        `--first`: ahead of the line, but within its project's cap and never
+        in these slots; `proj status` and its turn's journal say so, origin
+        and all.
       '';
     };
     maxJobsPerProject = lib.mkOption {
@@ -142,7 +148,11 @@ in
         stopped, so a stuck job can't hold its place for good. A job can set
         its own (`proj run --timeout`), and stop sooner once it has gone quiet
         (`--idle`), as the steward's do (`burrow.autoland.jobTimeoutMinutes`,
-        `jobIdleMinutes`).
+        `jobIdleMinutes`). Time a turn spends waiting in line inside its run
+        doesn't count: each turn's commands get PROJ_WAIT_DIR, where one that
+        waits for something shared (a machine-wide lock) keeps a file, locked,
+        saying what for, while it waits; the stall watchdog holds that wait
+        to stallAfterMinutes instead.
       '';
     };
     maxWait = lib.mkOption {
@@ -157,10 +167,12 @@ in
       type = lib.types.ints.positive;
       default = 120;
       description = ''
-        How long a turn may wait in line for a slot before the stall
-        watchdog, when it's on, takes it. A turn running past its timeout,
-        one awaiting GitHub past awaitHours, or one that ended without
-        saying what comes next, it takes then.
+        How long a turn may wait in line, for a slot or inside its run (a
+        command of its holding a file in its PROJ_WAIT_DIR: its timeout
+        stands still meanwhile), before the stall watchdog, when it's on,
+        takes it. A turn running past its timeout, one awaiting GitHub past
+        awaitHours, or one that ended without saying what comes next, it
+        takes then.
       '';
     };
     awaitHours = lib.mkOption {
@@ -273,7 +285,7 @@ in
 
       Jobs run in the background and survive this session ending. At most
       ${toString cfg.maxJobs} run at once, ${toString cfg.maxJobsPerProject} from any one project; the rest are queued. Use --first when ${config.burrow.owner} is
-      waiting on the answer, and --pipeline for work on the steward, its reviewers, CI or proj. Check on them,
+      waiting on the answer, and --pipeline for work on the steward, its reviewers, CI or proj${lib.optionalString (leadRepos != [ ]) " (in ${lib.concatStringsSep ", " leadRepos}, what the pipeline is built from, it goes first of all)"}. Check on them,
       relay results to ${config.burrow.owner}, and follow up yourself where the answer is obvious.
       Each turn ends saying what comes next: `proj await PR-URL` when it waits
       on GitHub (CI, a review; it's resumed when the PR changes, holding no slot

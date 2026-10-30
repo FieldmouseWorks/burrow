@@ -10,8 +10,8 @@ and base, its `rev`) are: a new head saying the same thing is new work, with
 a deadline of its own. An open PR a pass noted nothing for (it failed on
 the repo first, or left the PR's status as it was) keeps the wait it had; a
 repo it fails on is watched itself. One whose step keeps failing the same way
-(step.py's strike) is due at once, whatever its deadline, and its phase says
-what fails.
+(step.py's strike) is due at once, whatever its deadline, its phase says
+what fails, and it stays the one wait while that goes on.
 
 Not watched: a draft, or a major renovate-sweep held for the owner (nobody
 waits on the pipeline there), and a PR this pass listed for the owner or on
@@ -128,10 +128,13 @@ def publish(seen, digest, full):
                 continue
             old = was.get(key, {})
             phase = f"{it['phase']}; {FAILING[key]}" if key in FAILING else it["phase"]
-            # What GitHub says can change from try to try (a 502, then a
-            # 503): the failure goes on, and so does its stall.
-            same = old.get("rev") == it["rev"] and (old.get("phase") == phase or (
-                key in FAILING and old.get("phase", "").startswith(f"{phase}: ")))
+            # A step that keeps failing the same way is one wait however its
+            # status reads from pass to pass (a job's retry booked, then
+            # running) and whatever GitHub says from try to try (a 502, then
+            # a 503), so the watchdog's escalation of it carries on.
+            gone = old.get("phase", "")
+            same = old.get("rev") == it["rev"] and (gone == phase or (key in FAILING and (
+                gone.endswith(f"; {FAILING[key]}") or f"; {FAILING[key]}: " in gone)))
             since = old["since"] if same else C.NOW
             if key in SAID:
                 phase = f"{phase}: {SAID[key]}"

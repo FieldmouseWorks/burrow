@@ -345,7 +345,7 @@ def ts(s):
 # When each repo's PRs next need a pass, as this pass worked out: a wait that
 # ends then (a new head's settle delay, a reviewer's timeout, the time left
 # before a Claude job takes its findings). Saved to wake.json, where
-# burrow-events (../events/events.py) reads it and starts that repo's pass
+# burrow-events (crates/burrow-events) reads it and starts that repo's pass
 # then.
 WAKE = {}
 
@@ -456,11 +456,16 @@ def project_dir(repo):
     return next((d for d, url in projects() if url.lower() == repo.lower()), None)
 
 
-def pipeline(repo):
-    """Whether repo is one whose PRs work on this pipeline itself
-    (`pipelineRepos`): its reviews go ahead of the others', so everything
-    after them is quicker."""
-    return isinstance(repo, str) and repo.lower() in {x.lower() for x in CFG["pipelineRepos"]}
+def rank(repo):
+    """Where repo's reviews go in line, first to last: 0 for a lead repo
+    (`leadRepos`, what the pipeline itself is built from), ahead of
+    everything; 1 for another whose PRs work on this pipeline itself
+    (`pipelineRepos`), so everything after them is quicker; 2 for the rest.
+    proj ranks their Claude jobs the same way, by the clone's origin."""
+    r = repo.lower() if isinstance(repo, str) else None
+    if r in {x.lower() for x in CFG["leadRepos"]}:
+        return 0
+    return 1 if r in {x.lower() for x in CFG["pipelineRepos"]} else 2
 
 
 def job(repo, task, clone=False):
