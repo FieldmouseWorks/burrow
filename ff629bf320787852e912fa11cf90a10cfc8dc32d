@@ -1,0 +1,53 @@
+{
+  "conary": "note v1",
+  "change": "64efv5sgp71kt01ma804ad2xmj",
+  "repo": {
+    "owner": "fieldmouseworks",
+    "name": "burrow"
+  },
+  "pr": 180,
+  "url": "https://github.com/fieldmouseworks/burrow/pull/180",
+  "summary": "autoland: a pass started by hand or by a job gets the steward's tools",
+  "task": "FieldmouseWorks/remi#170",
+  "author": {
+    "kind": "person",
+    "login": "TusanHomichi",
+    "session": null
+  },
+  "landing": {
+    "revision": "3b241204ff79026bf77c3580930f43ddcf2b30be7102a4849cda68682696cc38",
+    "before": "ee344553452ca0e8c7ac37e3ebe8eb26594675cc",
+    "after": "ff629bf320787852e912fa11cf90a10cfc8dc32d",
+    "by": {
+      "kind": "status",
+      "login": "fieldmouseworks-steward[bot]"
+    },
+    "at": 1793323235985
+  },
+  "evidence": [
+    {
+      "kind": "ci",
+      "check": "check / commits",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/40972456016/job/123792261351"
+    },
+    {
+      "kind": "review",
+      "check": "codex",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/180#pullrequestreview-5706231262"
+    },
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/40972456016/job/123792261532"
+    },
+    {
+      "kind": "ci",
+      "check": "agents",
+      "result": "pass",
+      "source": "status agents"
+    }
+  ]
+}
