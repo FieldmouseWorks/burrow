@@ -21,6 +21,10 @@ const NONE_AGAIN: f64 = 6.0 * 3600.0;
 /// Failed reads in a row before the owner hears the meter can't be read,
 /// and failed tries in a week before the watcher stops trying it.
 const TRIES: u32 = 3;
+/// How far a week's end has to move on for the meter to be in another week:
+/// weeks end a week apart, give or take a clock change, and anything nearer
+/// is the same week's end moved.
+const ROLLOVER: f64 = 6.0 * 86400.0;
 
 /// The account's weekly meter, as a pass reads it.
 #[derive(Debug, Clone, PartialEq)]
@@ -62,8 +66,10 @@ pub trait Account {
 pub struct State {
     /// The last good reading: when, and how much of the week was used.
     pub last: Option<(f64, f64)>,
-    /// The week everything below is about. A new one starts them over.
+    /// The week everything below is about, and when it ends by itself. A
+    /// new one starts them over.
     pub week: Option<String>,
+    pub ends: Option<f64>,
     /// A reset was confirmed this week: never another, even if the meter
     /// didn't show it take.
     pub pressed: bool,
@@ -162,15 +168,20 @@ pub fn pass(
     if let Some(then) = state.unsettled.clone() {
         // The pass that pressed it didn't see how it went: this reading
         // says.
-        settle(&mut state, &mut notices, &then, &reading, now);
+        settle(&mut state, &mut notices, &then, &reading);
     }
     if state.week.as_deref() != Some(&reading.week) {
-        // A new week: what the last one found is no news about this one, and
-        // its burn isn't this one's.
-        state = State {
-            week: Some(reading.week.clone()),
-            ..State::default()
-        };
+        if state.pressed && state.ends.is_some_and(|ends| !rolled_over(ends, &reading)) {
+            // The spent week's end moved, the reset's doing: still the
+            // spent week.
+            state.week = Some(reading.week.clone());
+            state.ends = Some(reading.ends);
+            state.last = None;
+        } else {
+            // A new week: what the last one found is no news about this
+            // one, and its burn isn't this one's.
+            state = fresh(&reading);
+        }
     }
 
     let limit = if state.at_limit_only {
@@ -202,7 +213,7 @@ pub fn pass(
                 state.pressed = true;
                 match account.read() {
                     Ok(r) => {
-                        settle(&mut state, &mut notices, &then, &r, now);
+                        settle(&mut state, &mut notices, &then, &r);
                         reading = r;
                     }
                     Err(e) => {
@@ -272,19 +283,34 @@ pub fn pass(
     }
 }
 
-/// How a reset confirmed at THEN went, from the reading R at NOW, and the
-/// owner hears it. Before THEN's week was to end by itself, a meter that
-/// dropped or a week that moved is the reset's doing: it took, and the week
-/// R is in is the one it spent. One that didn't didn't take, and the week is
-/// spent all the same. Once THEN's week has ended by itself, whatever
-/// happened to the reset, that week is over and R's starts unspent.
-fn settle(state: &mut State, notices: &mut Vec<Notice>, then: &Unsettled, r: &Reading, now: f64) {
+/// The meter is in a later week than the one that was to end at ENDS: it
+/// has rolled over by itself since, once or more.
+fn rolled_over(ends: f64, r: &Reading) -> bool {
+    r.ends >= ends + ROLLOVER
+}
+
+/// What the passes keep, starting R's week.
+fn fresh(r: &Reading) -> State {
+    State {
+        week: Some(r.week.clone()),
+        ends: Some(r.ends),
+        ..State::default()
+    }
+}
+
+/// How a reset confirmed at THEN went, from the reading R, and the owner
+/// hears it. If THEN's week has rolled over by itself since, that week is
+/// over whatever the reset did, and R's starts unspent. If not, a meter that
+/// dropped or a week's end that moved is the reset's doing: it took, and
+/// R's week is the spent one. One that didn't didn't take, and the week is
+/// spent all the same.
+fn settle(state: &mut State, notices: &mut Vec<Notice>, then: &Unsettled, r: &Reading) {
     state.unsettled = None;
     let answer = match &then.said {
         Some(said) => format!("Claude Code: \"{said}\""),
         None => "the pass that did was cut off before Claude Code answered".to_owned(),
     };
-    if now >= then.ends {
+    if rolled_over(then.ends, r) {
         notices.push(Notice::Open(
             USED,
             format!("Pressed the banked weekly Claude reset at {:.0}% used", then.used),
@@ -297,10 +323,7 @@ fn settle(state: &mut State, notices: &mut Vec<Notice>, then: &Unsettled, r: &Re
             USED,
             "Nothing to do: that's the record.".to_owned(),
         ));
-        *state = State {
-            week: Some(r.week.clone()),
-            ..State::default()
-        };
+        *state = fresh(r);
     } else if r.used < then.used || r.week != then.week {
         notices.push(Notice::Open(
             USED,
@@ -318,6 +341,7 @@ fn settle(state: &mut State, notices: &mut Vec<Notice>, then: &Unsettled, r: &Re
         // it isn't the burn after.
         state.pressed = true;
         state.week = Some(r.week.clone());
+        state.ends = Some(r.ends);
         state.last = None;
     } else {
         notices.push(Notice::Open(
@@ -552,6 +576,7 @@ mod tests {
     fn kept(used: f64) -> State {
         State {
             week: Some(WEEK.to_owned()),
+            ends: Some(ENDS),
             pressed: true,
             unsettled: Some(Unsettled {
                 used,
@@ -590,7 +615,7 @@ mod tests {
 
         // Its week's end moved: the reset's doing, and the moved week is
         // the spent one.
-        let moved = || week_of("2026-11-06T05:00", 1_793_941_200.0, 99.5);
+        let moved = || week_of(MOVED, MOVED_ENDS, 99.5);
         let mut a = fake(vec![Ok(moved())], vec![]);
         let o = run(&mut a, kept(99.0), 200.0);
         assert_eq!(keys(&o.notices)[0], "open usage-reset");
@@ -631,7 +656,7 @@ mod tests {
         assert_eq!(o.wake, 100.0 + RETRY);
         // The next reading is in a week the reset moved: that week is the
         // spent one, and the owner hears what Claude Code said.
-        let moved = || week_of("2026-11-06T05:00", 1_793_941_200.0, 99.0);
+        let moved = || week_of(MOVED, MOVED_ENDS, 99.0);
         let mut a = fake(vec![Ok(moved())], vec![]);
         let o = run(&mut a, o.state, 400.0);
         assert_eq!(a.asked, 0);
@@ -642,6 +667,75 @@ mod tests {
         let mut a = fake(vec![Ok(moved())], vec![]);
         run(&mut a, o.state, 500.0);
         assert_eq!(a.asked, 0);
+    }
+
+    /// The week the fixtures' reset moves the end to, and the one after it.
+    const MOVED: &str = "2026-11-06T05:00";
+    const MOVED_ENDS: f64 = 1_793_941_200.0;
+
+    #[test]
+    fn a_moved_end_stays_spent_past_the_old_end() {
+        // Settled after the old end, in the week the reset moved it to:
+        // that week is the spent one.
+        let mut a = fake(vec![Ok(week_of(MOVED, MOVED_ENDS, 99.0))], vec![]);
+        let o = run(&mut a, kept(99.0), ENDS + 60.0);
+        assert_eq!(a.asked, 0);
+        let Notice::Open(_, title, _) = &o.notices[0] else {
+            panic!()
+        };
+        assert!(title.starts_with("Used"), "{title}");
+        assert!(o.state.pressed);
+        let mut a = fake(vec![Ok(week_of(MOVED, MOVED_ENDS, 99.5))], vec![]);
+        let o = run(&mut a, o.state, ENDS + 120.0);
+        assert_eq!(a.asked, 0);
+        // A week on from the moved end is a new week.
+        let next = || week_of("2026-11-13T05:00", MOVED_ENDS + 7.0 * 86400.0, 99.0);
+        let mut a = fake(
+            vec![
+                Ok(next()),
+                Ok(week_of("2026-11-13T05:00", MOVED_ENDS + 7.0 * 86400.0, 0.0)),
+            ],
+            vec![Reset::Pressed(String::new())],
+        );
+        run(&mut a, o.state, MOVED_ENDS + 60.0);
+        assert_eq!(a.asked, 1);
+
+        // A spent week, settled, whose end moves later: still spent.
+        let spent = State {
+            week: Some(WEEK.to_owned()),
+            ends: Some(ENDS),
+            pressed: true,
+            ..State::default()
+        };
+        let mut a = fake(vec![Ok(week_of(MOVED, MOVED_ENDS, 99.5))], vec![]);
+        let o = run(&mut a, spent, 100.0);
+        assert_eq!(a.asked, 0);
+        assert!(o.state.pressed);
+        assert_eq!(o.state.week.as_deref(), Some(MOVED));
+    }
+
+    #[test]
+    fn a_pass_across_the_weeks_end_leaves_the_next_unspent() {
+        // Confirmed in the old week, read after in the new one: the drop is
+        // the new week's.
+        let next = |used| week_of("2026-11-11T19:00", 1_794_423_600.0, used);
+        let mut a = fake(
+            vec![Ok(at(99.0)), Ok(next(2.0))],
+            vec![Reset::Pressed("Weekly limit refilled".to_owned())],
+        );
+        let o = run(&mut a, State::default(), 100.0);
+        let Notice::Open(_, title, body) = &o.notices[0] else {
+            panic!()
+        };
+        assert!(title.starts_with("Pressed"), "{title}");
+        assert!(body.contains("ended by itself"), "{body}");
+        assert!(!o.state.pressed && o.state.unsettled.is_none());
+        let mut a = fake(
+            vec![Ok(next(99.0)), Ok(next(0.0))],
+            vec![Reset::Pressed(String::new())],
+        );
+        run(&mut a, o.state, 200.0);
+        assert_eq!(a.asked, 1);
     }
 
     #[test]
@@ -679,6 +773,7 @@ mod tests {
     fn a_new_week_starts_over() {
         let state = State {
             week: Some("2026-10-28T19:00".to_owned()),
+            ends: Some(ENDS - 7.0 * 86400.0),
             pressed: true,
             last: Some((0.0, 99.0)),
             ..State::default()
