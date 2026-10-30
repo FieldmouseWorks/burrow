@@ -136,8 +136,13 @@
             modules = [{ burrow.cpu.heavy = { slots = 1; grace = 3; dir = "/build/heavy"; }; }];
           }).config.burrow.tools.heavy;
           weight = self.nixosConfigurations.example.config.systemd.slices.ci.sliceConfig.CPUWeight;
+          # A gate slice with a dash in its name would be nested: refused.
+          nested = (builtins.tryEval (builtins.deepSeq
+            (self.nixosConfigurations.example.extendModules { modules = [{ burrow.cpu.gates.slices = [ "nix-builds" ]; }]; }).config.burrow.cpu.gates.slices
+            true)).success;
         in pkgs.runCommand "cpu-check" { } ''
           [ ${toString weight} = 400 ] || { echo "ci.slice weight ${toString weight}"; exit 1; }
+          ${pkgs.lib.optionalString nested "echo 'a nested gate slice (nix-builds) was taken'; exit 1"}
           mkdir -p /build/heavy && : >/build/heavy/slot1 && chmod 0444 /build/heavy/slot1
           h=${heavy}/bin/heavy
           threads=$(nproc)
