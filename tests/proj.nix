@@ -209,10 +209,12 @@ pkgs.testers.runNixOSTest {
         assert ".queue" not in listed and ".slots" not in listed, listed
         out = machine.succeed(f"systemctl --user -M dev@ show '{unit(a)}' -p Slice -p MemoryMax")
         assert "Slice=claude-jobs.slice" in out and "MemoryMax=134217728" in out, out
+        # One slot at a time: two free at once go to both in one look, and
+        # which starts first is then only which looks first.
         proj(f"stop {a}")
+        machine.wait_until_succeeds(f"su - dev -c 'proj state {d}' | grep -x done", timeout=120)
         proj(f"stop {b}")
         machine.wait_until_succeeds(f"su - dev -c 'proj state {c}' | grep -x done", timeout=120)
-        machine.wait_until_succeeds(f"su - dev -c 'proj state {d}' | grep -x done", timeout=120)
         assert started(d) < started(c), (started(d), started(c))
 
     with subtest("a job whose turn has ended frees its slot"):

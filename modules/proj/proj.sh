@@ -408,7 +408,7 @@ spare() {
 # puts pipeline ones ahead, then --first ones, then the oldest, holding the
 # waiting shell's pid. A slot is a lock on JOBS/.slots/N, and N.who says
 # whose (class and project), so a turn that's killed frees its slot (and its
-# place in line) by itself. pick (pick.sh) says who goes next. The turn is
+# place in line) by itself. pick (pick.sh) says who has a slot. The turn is
 # first or normal, as it was started; its job's class (place, in pick.sh)
 # is asked again every pass, and its place in line, its admission and its
 # slot's N.who all go by that one answer.
@@ -468,11 +468,11 @@ take_slot() {
         rm -f "$f"
       fi
     done
-    got=$(printf '%s' "$seen" | pick)
+    got=$(printf '%s' "$seen" | pick | picked "$me")
     # Short of memory matters only while another job runs: with nothing
     # running, waiting frees nothing.
-    if [ "${got%$'\t'*}" = "$me" ] && { [ -z "$busy" ] || [ "$(spare)" -ge "$MIN_FREE" ]; }; then
-      i=${got##*$'\t'}
+    if [ -n "$got" ] && { [ -z "$busy" ] || [ "$(spare)" -ge "$MIN_FREE" ]; }; then
+      i=$got
       exec {slot}>"$jobs/.slots/$i"
       if flock -n "$slot"; then
         printf '%s\t%s\n' "$class" "$(cat "$jobs/$id/project")" >"$jobs/.slots/$i.who"
