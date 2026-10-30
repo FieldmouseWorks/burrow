@@ -45,8 +45,8 @@ change nothing else in the same PR.
   merges it. A settled PR behind a base that wants it up to date (an org's
   rule the steward can't turn off) is brought up to date instead, and the
   new head is settled like any other.
-- The `hold` and `needs-owner` labels (`burrow.autoland.labels`), which the
-  steward and its jobs put on PRs.
+- The `hold`, `needs-owner` and `first` labels (`burrow.autoland.labels`),
+  which the steward, its jobs and the owner put on PRs.
 
 ## The steward's GitHub App
 

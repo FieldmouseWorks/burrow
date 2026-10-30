@@ -76,15 +76,17 @@ def settle_repo(r, known):
     # pinned to the one it was.
     due = C.NOW - st.get("settings", 0) >= 86400 or st.get("app") != CFG["app"]["id"]
     # The labels the steward and its jobs put on PRs: without them a hold
-    # can't be set and a judge can't hand a PR to the owner. Made
-    # again with the daily settings too, in case one was deleted.
-    want = [CFG["labels"]["hold"], CFG["labels"]["owner"]]
+    # can't be set, a judge can't hand a PR to the owner and no PR can go
+    # first in its proof line. Made again with the daily settings too, in
+    # case one was deleted.
+    want = [CFG["labels"]["hold"], CFG["labels"]["owner"], CFG["labels"]["first"]]
     if st.get("labels") != want or due:
         about = ("The steward leaves this PR alone",
-                 f"Waits for {CFG['owner']}; take the label off to let the steward carry on")
+                 f"Waits for {CFG['owner']}; take the label off to let the steward carry on",
+                 "Goes ahead of the PRs without it in the line for proofs that take the machine")
         made = [C.write("label", "create", name, "-R", repo, "--force", "--color", color,
                         "--description", text, check=False) is not None
-                for name, color, text in zip(want, ("fbca04", "b60205"), about)]
+                for name, color, text in zip(want, ("fbca04", "b60205", "0e8a16"), about)]
         if all(made):
             log(f"{repo}: labels {', '.join(want)}")
             st["labels"] = want

@@ -106,7 +106,7 @@ let
     jobIdle = cfg.jobIdleMinutes;
     owner = config.burrow.owner;
     cleanBranches = cfg.cleanBranches;
-    labels = { inherit (cfg.labels) hold owner; };
+    labels = { inherit (cfg.labels) hold owner first; };
     notify = {
       inherit (config.burrow.notify) repo assignee;
       label = config.burrow.notify.label;
@@ -523,6 +523,15 @@ in
         default = "needs-owner";
         description = "Marks a PR that waits for you; take it off to let the steward carry on.";
       };
+      first = mkOption {
+        type = types.str;
+        default = "first";
+        description = ''
+          A PR with this label goes ahead of every PR without it in its repo's
+          line for proofSlots, and the oldest first among those with it: for a
+          fix the rest of the line waits on, opened after them.
+        '';
+      };
     };
 
     reviewers = {
@@ -594,7 +603,8 @@ in
         Claude job a head runs them on that commit and records each verdict,
         a failure as a failure), proofSlots (how many of those jobs the repo
         may have queued or running at once, for proofs that take the whole
-        machine: the rest wait their turn, oldest PR first; unset, no limit), keepBranches
+        machine: the rest wait their turn, those labelled `labels.first` first,
+        then the oldest PR first; unset, no limit), keepBranches
         (more branch globs the cleanup never touches in this repo, on top of
         the machine's, for branches a repo keeps as evidence), codex (false:
         Codex leaves this repo alone, and none of it goes to it), skipPaths (more path regexes the reviewers never read in

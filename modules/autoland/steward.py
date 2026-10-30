@@ -124,7 +124,12 @@ def run_pass(kick):
                     known.add(repo)
                 owner, name = repo.split("/")
                 info, prs = open_prs(owner, name)
-                P.begin(repo, (pr["number"] for pr in prs))
+                # The PRs labelled to go first in the proof line. One whose
+                # labels can't be read isn't, and fails in its own step below:
+                # one bad PR mustn't stop the rest.
+                first = {pr["number"] for pr in prs if CFG["labels"]["first"] in
+                         {x.get("name") for x in pr.get("labels", {}).get("nodes", ())}}
+                P.begin(repo, (pr["number"] for pr in prs), first)
                 read.add(repo.replace("/", "_"))
                 waits.read(repo, prs)
                 # First, so a fix PR it made obsolete isn't merged by this same pass.
@@ -136,8 +141,8 @@ def run_pass(kick):
                 seen_to = True
                 # Obsolete fixes first: their holds take back a queued merge
                 # before anything else this pass waits on.
-                # Then oldest first, so proofSlots go to PRs in their order.
-                for pr in sorted(prs, key=lambda pr: (pr["number"] not in obsolete, pr["number"])):
+                # Then in the proof line's order, so proofSlots go to PRs in it.
+                for pr in sorted(prs, key=lambda pr: (pr["number"] not in obsolete, P.place(repo, pr["number"]))):
                     in_use.update((pr["headRefName"], pr["baseRefName"]))
                     live.add(V.snap_name(f"pr-{repo.replace('/', '_')}-{pr['number']}.json", pr["headRefOid"], pr["baseRefName"]))
                     try:
