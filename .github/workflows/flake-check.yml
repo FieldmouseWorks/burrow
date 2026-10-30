@@ -10,8 +10,10 @@
 # Each job runs once a PR at a time: a PR's new run (a push, say) cancels
 # what its last run still has going, which was checking a head the PR no
 # longer has. Anything else (a push to a branch, a train's candidate) is a
-# run of its own that nothing cancels. A caller calls it once a workflow:
-# a second call in the same workflow would share the first's groups.
+# run of its own that nothing cancels. A job's concurrency group is its
+# caller's workflow, its inputs and the PR (or the run), so calls in one
+# workflow with inputs of their own (a matrix's legs, say) never cancel each
+# other; two calls alike would be the same check twice.
 name: flake-check
 on:
   workflow_call:
@@ -62,7 +64,7 @@ jobs:
     if: ${{ !inputs.pr-gate && github.event_name == 'pull_request' }}
     runs-on: ${{ inputs.runner }}
     concurrency:
-      group: flake-check-${{ github.workflow }}-train-pr-${{ github.event.pull_request.number }}
+      group: ${{ format('flake-check {0} train {1} {2} {3} {4} [{5}] {6}', github.workflow, inputs.runner, inputs.install-nix, inputs.eval-apart, inputs.pr-gate, inputs.build-skip, format('pr-{0}', github.event.pull_request.number)) }}
       cancel-in-progress: true
     permissions: {}
     outputs:
@@ -86,7 +88,7 @@ jobs:
     if: ${{ !cancelled() && needs.train.result != 'cancelled' && (inputs.pr-gate || github.event_name != 'pull_request' || needs.train.outputs.lands != 'true') }}
     runs-on: ${{ inputs.runner }}
     concurrency:
-      group: flake-check-${{ github.workflow }}-check-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id) }}
+      group: ${{ format('flake-check {0} check {1} {2} {3} {4} [{5}] {6}', github.workflow, inputs.runner, inputs.install-nix, inputs.eval-apart, inputs.pr-gate, inputs.build-skip, github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id)) }}
       cancel-in-progress: true
     permissions:
       contents: read
@@ -367,7 +369,7 @@ jobs:
     if: github.event_name == 'pull_request'
     runs-on: ${{ inputs.runner }}
     concurrency:
-      group: flake-check-${{ github.workflow }}-commits-pr-${{ github.event.pull_request.number }}
+      group: ${{ format('flake-check {0} commits {1} {2} {3} {4} [{5}] {6}', github.workflow, inputs.runner, inputs.install-nix, inputs.eval-apart, inputs.pr-gate, inputs.build-skip, format('pr-{0}', github.event.pull_request.number)) }}
       cancel-in-progress: true
     permissions:
       contents: read
