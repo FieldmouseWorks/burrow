@@ -4,8 +4,21 @@ about one: how its CI stands, its `review-settled` status, the merge."""
 import urllib.parse
 
 import common as C
+import train as T
 from common import CONTEXT, DRY, log
 
+
+# What GitHub says of a PR's merge (its mergeStateStatus, every value GitHub's
+# API has) and the step that calls for once it's settled. A value this doesn't
+# know is "refused": not merged, and counted like a merge GitHub turned down.
+MERGE_STEPS = {
+    "CLEAN": "merge", "HAS_HOOKS": "merge",
+    "UNSTABLE": "merge",  # a check failed that its rules don't require
+    "BLOCKED": "merge",  # its rules want what settling gives: the steward's status, its required checks
+    "BEHIND": "update",  # its rules want it up to date with its base
+    "DIRTY": "conflict",
+    "UNKNOWN": "wait", "DRAFT": "wait",  # GitHub is still working it out; a draft is seen to first
+}
 
 PRS = """
 query($owner: String!, $name: String!, $cursor: String) {
@@ -27,6 +40,7 @@ query($owner: String!, $name: String!, $cursor: String) {
         reviews(last: 100) { pageInfo { hasPreviousPage startCursor } nodes { %s } }
         comments(last: 100) { pageInfo { hasPreviousPage startCursor } nodes { %s } }
         reactions(last: 20) { nodes { content createdAt user { login } } }
+        timelineItems(last: 10, itemTypes: [RENAMED_TITLE_EVENT]) { nodes { ... on RenamedTitleEvent { createdAt previousTitle } } }
         commits(last: 1) {
           nodes { commit { oid statusCheckRollup { contexts(first: 100) { pageInfo { hasNextPage } nodes {
             __typename
@@ -90,7 +104,10 @@ def ci_state(pr, proofs=()):
     proof (a check a Claude job runs on a machine) that hasn't reported yet
     is pending: nothing posts it until its job runs. A workflow GitHub
     couldn't start (a bad file, a pin missing an input) leaves no check run,
-    only its suite: red, or a broken workflow would read as no CI."""
+    only its suite: red, or a broken workflow would read as no CI. The merge
+    train's status is its word on the PR, not a check of it, except its
+    failure: CI failed on the head merged alone onto the default branch, which
+    is the head's to fix. Only the App's counts, as with ours."""
     nodes = pr["commits"]["nodes"]
     commit = nodes[0]["commit"] if nodes else {}
     contexts = (commit.get("statusCheckRollup") or {}).get("contexts") or {}
@@ -116,6 +133,10 @@ def ci_state(pr, proofs=()):
             name = c["context"]
             if name == CONTEXT:
                 continue
+            if name == T.CONTEXT:
+                if c["state"] != "FAILURE" or not C.mine(c.get("creator")):
+                    continue
+                name = f"{name} ({c.get('description') or 'red alone'})"
             seen += 1
             if c["state"] in ("PENDING", "EXPECTED"):
                 pending.append(name)
@@ -131,14 +152,15 @@ def ci_state(pr, proofs=()):
     return ("red" if red else "pending" if pending else "green"), red or pending
 
 
-def our_status(pr):
-    """The steward's own status on the head: its context, posted by its App.
-    Anyone who can push can post the context; theirs isn't the steward's
-    word, and the ruleset doesn't count it either."""
+def our_status(pr, context=CONTEXT):
+    """The steward's own status on the head: its context (or the train's,
+    which cn posts as its App), posted by its App. Anyone who can push can
+    post the context; theirs isn't the steward's word, and the ruleset
+    doesn't count it either."""
     nodes = pr["commits"]["nodes"]
     rollup = (nodes[0]["commit"].get("statusCheckRollup") or {}) if nodes else {}
     for c in (rollup.get("contexts") or {}).get("nodes", []):
-        if c["__typename"] == "StatusContext" and c["context"] == CONTEXT and C.mine(c.get("creator")):
+        if c["__typename"] == "StatusContext" and c["context"] == context and C.mine(c.get("creator")):
             return c["state"].lower(), c.get("description") or ""
     return None, ""
 

@@ -22,8 +22,11 @@
 # aren't, that a job run --app acts as its App every turn, whatever the login
 # sets and if the App goes while it waits, or not at all, and that a job
 # past its memory cap is killed by its own cgroup's limit rather than the
-# machine running out. Its GitHub side, proj await, proj-watch and
-# proj-inbox, is proj-github.nix's part of the same script.
+# machine running out, that what's killed is the command that outgrew it,
+# the turn carrying on to its answer, and that a turn killed before it
+# answers can still be continued, in its own session. Its GitHub side, proj
+# await, proj-watch and proj-inbox, is proj-github.nix's part of the same
+# script.
 #
 #   nix build .#checks.x86_64-linux.proj -L
 { self, pkgs }:
@@ -551,10 +554,31 @@ pkgs.testers.runNixOSTest {
         time.sleep(3)
         lead = proj('run --pipeline lead "sleep 1"')
         time.sleep(3)
-        proj(f"stop {q}")
+        proj(f"stop {a}")
         machine.wait_until_succeeds(f"su - dev -c 'proj state {p}' | grep -x done", timeout=120)
         assert started(lead) < started(p), (started(lead), started(p))
         assert "asked as --pipeline" not in proj("status"), proj("status")
+        proj(f"stop {b}")
+        proj(f"stop {q}")
+
+    with subtest("a lead job leaves the pipeline's own slot to another pipeline job in line, and takes it when none is"):
+        a = proj('run web "sleep 600"')
+        b = proj('run web "sleep 600"')
+        for j in (a, b):
+            machine.wait_until_succeeds(f"su - dev -c 'proj state {j}' | grep -x running", timeout=120)
+        q = proj('run --pipeline web "sleep 600"')
+        machine.wait_until_succeeds(f"su - dev -c 'proj state {q}' | grep -x running", timeout=120)
+        lead = proj('run --pipeline lead "sleep 600"')
+        time.sleep(3)
+        p = proj('run --pipeline web "sleep 1"')
+        time.sleep(3)
+        proj(f"stop {q}")
+        machine.wait_until_succeeds(f"su - dev -c 'proj state {p}' | grep -x done", timeout=120)
+        machine.wait_until_succeeds(f"su - dev -c 'proj state {lead}' | grep -x running", timeout=120)
+        assert started(p) < started(lead), (started(p), started(lead))
+        proj(f"stop {lead}")
+        lead = proj('run --pipeline lead "sleep 1"')
+        machine.wait_until_succeeds(f"su - dev -c 'proj state {lead}' | grep -x done", timeout=120)
         proj(f"stop {a}")
         proj(f"stop {b}")
 
@@ -600,5 +624,23 @@ pkgs.testers.runNixOSTest {
         e = proj("run web eat")
         machine.wait_until_succeeds(f"su - dev -c 'proj state {e}' | grep -x failed", timeout=120)
         machine.succeed("journalctl -k | grep -q 'Memory cgroup out of memory'")
+
+    with subtest("a turn killed before it answers can still be continued, in its own session"):
+        # As its unit goes when systemd-oomd kills it, or when Claude itself is
+        # what outgrows the job's memory cap.
+        e = proj('run web "named 600"')
+        machine.wait_until_succeeds(f"su - dev -c 'proj state {e}' | grep -x running", timeout=120)
+        machine.wait_until_succeeds(f"grep -q named /data/dev/jobs/{e}/1.jsonl", timeout=60)
+        machine.succeed(f"systemctl --user -M dev@ kill --signal=KILL '{unit(e)}'")
+        machine.wait_until_fails(f"systemctl --user -M dev@ is-active -q '{unit(e)}'", timeout=60)
+        proj(f'reply {e} "carry on"')
+        machine.wait_until_succeeds(f"su - dev -c 'proj state {e}' | grep -x done", timeout=120)
+        assert "--resume named" in machine.succeed("cat /tmp/args"), machine.succeed("cat /tmp/args")
+
+    with subtest("a command a job runs past its cap is killed, and the turn carries on to its answer"):
+        o = proj("run web outgrow")
+        machine.wait_until_succeeds(f"su - dev -c 'proj state {o}' | grep -x done", timeout=120)
+        answer = proj(f"log {o}")
+        assert "it exited 137" in answer, answer
   '';
 }

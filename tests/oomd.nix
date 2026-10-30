@@ -60,11 +60,13 @@ pkgs.testers.runNixOSTest {
         # A test VM drops swapDevices for its own, so make the swap here.
         m.succeed("fallocate -l 1G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile")
 
-    with subtest("oomd watches swap on the root, and pressure on the root and system slices"):
+    # Pressure on the root or user.slice is never watched: oomd would ignore a
+    # user's units' opt-outs there (tests/remote-control-oomd.nix).
+    with subtest("oomd watches swap on the root, and pressure on the system slice"):
         swap = monitored(guarded, "Swap Monitored CGroups")
         pressure = monitored(guarded, "Memory Pressure Monitored CGroups")
         assert swap == {"/"}, swap
-        assert {"/", "/system.slice"} <= pressure, pressure
+        assert "/system.slice" in pressure and not pressure & {"/", "/user.slice"}, pressure
         assert monitored(control, "Swap Monitored CGroups") == set()
         assert monitored(control, "Memory Pressure Monitored CGroups") == set()
 

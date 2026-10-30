@@ -1,5 +1,5 @@
 # watchdog: work that has stopped moving gets a look before anyone has to
-# notice it (watchdog/watchdog.py). Each source (the steward's open PRs, say)
+# notice it (crates/burrow-watchdog). Each source (the steward's open PRs, say)
 # keeps a watch file of what it waits on and by when that should have moved
 # on. Past that, the watchdog kicks the item's pass, then hands it to a
 # Claude job, then to the steward's stuck issue, and only then to the owner.
@@ -39,16 +39,11 @@ let
     inherit (config.burrow) owner;
     host = config.networking.hostName;
   });
-  src = pkgs.runCommand "burrow-watchdog" { nativeBuildInputs = [ pkgs.python3Packages.flake8 ]; } ''
-    mkdir $out
-    cp ${./watchdog/watchdog.py} $out/watchdog.py
-    flake8 --ignore E501,W503 $out
-  '';
   # The command, with this machine's config, so its jobs can snooze and
   # anyone can ask for its status from any shell.
   watchdog = pkgs.writeShellScriptBin "burrow-watchdog" ''
     export WATCHDOG_CONFIG=''${WATCHDOG_CONFIG:-${configFile}}
-    exec ${pkgs.python3}/bin/python3 -E -s ${src}/watchdog.py "$@"
+    exec ${inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow}/bin/burrow-watchdog "$@"
   '';
 in
 {

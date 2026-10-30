@@ -42,6 +42,8 @@
       authors = [ "sam" ];
       app = { id = 123456; slug = "sams-steward"; keyFile = "/run/secrets/autoland-app-key"; };
       reviewers.codex.enable = true;
+      # Its PRs land through its merge train (on the ledger, below).
+      repos."sam/homelab".train = true;
     };
     house.enable = true;
     cpu = {
@@ -59,6 +61,13 @@
       machinery = "workers";
     };
     watchdog.enable = true;
+    dispatch = {
+      enable = true;
+      runners.ci-runner = {
+        repo = "sam/homelab";
+        labels = [ "homelab" ];
+      };
+    };
     backup = {
       enable = true;
       repository = "rclone:offsite:backups/burrow";

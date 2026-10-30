@@ -19,8 +19,9 @@ change nothing else in the same PR.
 - A `baseline` ruleset on the default branch, where the plan allows one: no
   force pushes or deleting the branch, changes only through PRs, review
   threads resolved, CODEOWNERS honoured, and the `review-settled` status
-  required from the steward's App. Repo admins can still merge past it from
-  the PR page. A repo whose
+  required from the steward's App (in a repo with its merge train on, the
+  train's `conary/train` too, from the same App). Repo admins can still
+  merge past it from the PR page. A repo whose
   automation pushes to its default branch (`directPush`) gets only the first
   two. Existing rules stay; the ruleset only adds. An org's ruleset doesn't
   stand in for it, whatever its name: the steward can't change the org's, so
@@ -45,8 +46,8 @@ change nothing else in the same PR.
   merges it. A settled PR behind a base that wants it up to date (an org's
   rule the steward can't turn off) is brought up to date instead, and the
   new head is settled like any other.
-- The `hold` and `needs-owner` labels (`burrow.autoland.labels`), which the
-  steward and its jobs put on PRs.
+- The `hold`, `needs-owner` and `first` labels (`burrow.autoland.labels`),
+  which the steward, its jobs and the owner put on PRs.
 
 ## The steward's GitHub App
 
@@ -95,7 +96,13 @@ root only.
 4. The reviewers look again, until none of them finds anything on the exact head.
 5. With no thread open, no changes requested and CI green, the steward's App
    posts `review-settled` and merges it, `.github/` changes included; the
-   branch is deleted.
+   branch is deleted. In a repo with its merge train on (`train`), it goes
+   into the train instead, CI on the PR itself optional: Conary's `cn train`
+   merges the PRs in the train onto the default branch together, has CI run
+   on that, and once it's green posts `conary/train` on each PR's head and
+   merges them in order. A red one is split until the PR that broke it is
+   alone; that PR gets a `conary/train` failure, which a Claude job fixes as
+   red CI. A PR that stops being settled comes out of the train.
 6. A settled PR it won't land on its own word gets one Claude job a head
    that judges it: one touching a one-way path (`burrow.autoland.oneWay`:
    CODEOWNERS, secrets), one in a repo with no CI yet (the job
@@ -196,7 +203,12 @@ For reviewers, the review bot included. Flag as P1:
 - Branches whose tip is already in the default branch, or is the head a
   closed PR was closed at, with no open PR, are deleted (nothing is lost: the
   closed PR keeps its commits and can restore the branch). GitHub's
-  delete-on-merge only covers merged PRs. Bots' branches and `keepBranches`
-  are left alone.
-- Unmerged branches with no PR and no commit for 30 days are listed for the
-  owner, never deleted.
+  delete-on-merge only covers merged PRs. `keepBranches` are left alone, and
+  bots' branches go only this way.
+- Unmerged branches with no PR and no commit for 14 days are archived, then
+  deleted: the steward keeps the tip at `refs/archive/BRANCH/SHA` in the same
+  repo, a ref GitHub keeps but lists with neither branches nor tags, and
+  deletes the branch only if it's still at that tip. `git ls-remote origin
+  'refs/archive/*'` lists them; `gh api repos/OWNER/REPO/git/refs -f
+  ref=refs/heads/BRANCH -f sha=SHA` restores one. One GitHub won't archive
+  stays, and goes to the issue of what the pipeline is stuck on.
