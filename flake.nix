@@ -358,6 +358,50 @@
           bash ${./tests/update-dispatch.sh} ${./modules/updates/dispatch.sh}
           touch $out
         '';
+        # HOST-update's own PR in a train repo (modules/updates/propose.sh):
+        # real git, with a stand-in for gh.
+        update-propose = pkgs.runCommand "update-propose-check" { nativeBuildInputs = [ pkgs.shellcheck pkgs.git pkgs.jq ]; } ''
+          shellcheck -s bash ${./modules/updates/propose.sh} ${./tests/update-propose.sh}
+          bash ${./tests/update-propose.sh} ${./modules/updates/propose.sh}
+          touch $out
+        '';
+        # Which repo the flake's origin is, and so whether HOST-update goes
+        # through its train: the same in every spelling of GitHub's URLs
+        # (scheme, host case, a trailing dot, the default port, either SSH
+        # form, .git, a trailing slash), whatever the case of autoland's name
+        # for it; nothing for a repo elsewhere, even one with github.com in its
+        # path; and a GitHub origin it can't read refused, never read as no
+        # train.
+        update-origin = let
+          lib = nixpkgs.lib;
+          machine = origin: (self.nixosConfigurations.example.extendModules {
+            modules = [{ burrow.updates.origin = lib.mkForce origin; }];
+          }).config;
+          train = origin: (machine origin).burrow.updates.throughTrain;
+          refused = origin: lib.any (a: !a.assertion && lib.hasInfix "OWNER/NAME" a.message) (machine origin).assertions;
+          forms = [
+            "https://github.com/sam/homelab" "https://github.com/sam/homelab.git" "https://github.com/sam/homelab/"
+            "https://github.com/Sam/HomeLab" "https://GitHub.com/sam/homelab.git" "https://github.com./sam/homelab"
+            "HTTPS://github.com:443/sam/homelab" "git@github.com:sam/homelab.git" "git@github.com:sam/homelab"
+            "git@GITHUB.COM.:sam/homelab/" "ssh://git@github.com/sam/homelab.git" "ssh://git@github.com:22/sam/homelab/"
+            "ssh://git@GitHub.com.:22/sam/homelab"
+          ];
+          wrong = lib.filter (o: !train o || refused o) forms
+            ++ lib.filter (o: train o || refused o) [
+              "https://git.example.org/sam/homelab" "https://github.com/sam/other" "/srv/mirrors/github.com/sam/homelab"
+              "https://git.example.org/github.com/sam/homelab"
+            ]
+            ++ lib.filter (o: !refused o) [
+              "https://github.com/sam" "https://www.github.com/sam/homelab" "git@github.com:sam/homelab/extra"
+              "https://github.com:8443/sam/homelab" "http://github.com/sam/homelab" "https://sam@github.com/sam/homelab"
+              "ssh://sam@github.com/sam/homelab" "git://GitHub.com/sam/homelab"
+            ];
+        in pkgs.runCommand "update-origin-check" { } ''
+          ${lib.concatMapStrings (o: "echo 'wrong for ${o}'
+") wrong}
+          [ ${toString (builtins.length wrong)} = 0 ]
+          touch $out
+        '';
         # burrow-events for real: deliveries, kicks and wake-ups starting a
         # handler's units through polkit.
         events-service = import ./tests/events.nix { inherit self pkgs; };
