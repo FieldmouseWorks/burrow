@@ -201,15 +201,13 @@ mkdir -p "$tmp/jobs/u" "$tmp/jobs/v" "$tmp/jobs/w"
 echo "$tmp/homelab" >"$tmp/jobs/u/project"
 echo "$tmp/psiv" >"$tmp/jobs/v/project"
 echo "$tmp/homelab" >"$tmp/jobs/w/project"
-(
-  export PIPELINE='' FLAKE=$tmp/homelab/
-  cls u normal pipeline
-  cls v normal first
-  cls w normal normal
-  dem u ""
-  case_ "u 4" "normal $tmp/homelab" "normal $tmp/homelab" "normal $tmp/x" free \
-    "w $(class "$tmp/jobs/w" normal) $tmp/homelab" "v $(class "$tmp/jobs/v" normal) $tmp/psiv" "u $(class "$tmp/jobs/u" normal) $tmp/homelab"
-)
+PIPELINE='' FLAKE=$tmp/homelab/
+cls u normal pipeline
+cls v normal first
+cls w normal normal
+dem u ""
+case_ "u 4" "normal $tmp/homelab" "normal $tmp/homelab" "normal $tmp/x" free \
+  "w $(class "$tmp/jobs/w" normal) $tmp/homelab" "v $(class "$tmp/jobs/v" normal) $tmp/psiv" "u $(class "$tmp/jobs/u" normal) $tmp/homelab"
 
 # The flake is the same directory however either side spells it: doubled and
 # trailing slashes, dots, a symlink to it. Its --pipeline job takes the
@@ -220,15 +218,13 @@ for flake in "$tmp/homelab" "$tmp//homelab/" "$tmp/./homelab" "$tmp/jobs/../home
   for proj in "$tmp//homelab" "$tmp/homelab/" "$tmp/./homelab" "$tmp/flake-link"; do
     echo "$proj" >"$tmp/jobs/u/project"
     echo "$proj" >"$tmp/jobs/w/project"
-    (
-      export PIPELINE='' LEAD='' FLAKE=$flake
-      cls u normal pipeline
-      cls v normal first
-      cls w normal normal
-      dem u ""
-      case_ "u 4" "normal $proj" "normal $proj" "normal $tmp/x" free \
-        "w $(class "$tmp/jobs/w" normal) $proj" "v $(class "$tmp/jobs/v" normal) $tmp/psiv" "u $(class "$tmp/jobs/u" normal) $proj"
-    ) || exit 1
+    PIPELINE='' LEAD='' FLAKE=$flake
+    cls u normal pipeline
+    cls v normal first
+    cls w normal normal
+    dem u ""
+    case_ "u 4" "normal $proj" "normal $proj" "normal $tmp/x" free \
+      "w $(class "$tmp/jobs/w" normal) $proj" "v $(class "$tmp/jobs/v" normal) $tmp/psiv" "u $(class "$tmp/jobs/u" normal) $proj"
   done
 done
 
@@ -238,10 +234,8 @@ mkdir -p "$tmp/jobs/e"
 : >"$tmp/jobs/e/pipeline"
 for pair in "$tmp/gone|$tmp/gone" "|" "|$tmp/homelab" "$tmp/homelab|"; do
   printf '%s\n' "${pair#*|}" >"$tmp/jobs/e/project"
-  (
-    export PIPELINE='' LEAD='' FLAKE=${pair%%|*}
-    cls e normal first
-  ) || exit 1
+  PIPELINE='' LEAD='' FLAKE=${pair%%|*}
+  cls e normal first
 done
 
 echo "proj-pick: ok"
