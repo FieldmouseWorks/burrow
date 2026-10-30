@@ -500,32 +500,44 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
     def prove():
         """Only checks that run on a machine, not in CI, are left: a Claude
         job runs them on this head and records their verdicts, once its
-        repo's proofSlots have room for it (a job started again too)."""
+        repo's proofSlots have room for it (a job started again too), or it
+        has nothing new to build (proofs.py)."""
         doing = "running " + ", ".join(ci_names)
         task = proof_task(repo, pr, ci_names, rc["proofJobs"])
         retry = lost("proved")
+
+        def running_now():
+            skipped = "; nothing new to build, so it skipped the line" if st.get("provedFree") == head else ""
+            settle("pending", f"Settled; {at_work('proved', doing)}{skipped}"[:140])
+
         if not retry and st.get("proved") == head:
-            settle("pending", f"Settled; {at_work('proved', doing)}"[:140])
+            running_now()
             return
         # One that broke is counted, and its retry booked, whether or not
         # there's room: only the job started in its place waits for a slot.
         if retry and broke("proved"):
             retry_at("proved")
         slots = rc.get("proofSlots")
+        outs = P.outputs(repo, pr, ci_names, st) if slots else None
+        free = False
         # One whose next step is failing the PR (again) needs no slot.
         last = retry and st.get("provedAgain") == head and not broke("proved")
-        if slots and not last and (ahead := P.ahead(repo, n, st, slots)) is not None:
-            P.wait(repo, n)
-            settle("pending", f"Settled; waiting its turn to run {', '.join(ci_names)} ({ahead} ahead)"[:140])
-            return
+        if slots and not last and (ahead := P.ahead(repo, n, st, slots, outs)) is not None:
+            if ahead != P.FREE:
+                P.wait(repo, n)
+                settle("pending", f"Settled; waiting its turn to run {', '.join(ci_names)} ({ahead} ahead)"[:140])
+                return
+            free = True
+        before = st.get("provedJob")
+        st["provedFree"] = head if free else None
         if retry:
             again("proved", task, doing, "its verdict")
         elif started("proved", task):
-            settle("pending", f"Settled; {at_work('proved', doing)}"[:140])
+            running_now()
         else:
             settle("pending", f"Settled, but no Claude job could run {', '.join(ci_names)}"[:140],
                    "Couldn't start a Claude job to run its checks")
-        P.started(st)
+        P.started(st, outs if st.get("provedJob") != before else None)
 
     if pr["isDraft"]:
         # Work in progress, whoever's it is: nobody reviews it yet, and nobody
