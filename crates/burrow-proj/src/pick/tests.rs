@@ -215,7 +215,22 @@ fn picks() {
     );
     case(
         &cfg,
-        "l 4",
+        "l 3",
+        &[
+            "normal /src/x",
+            "normal /src/y",
+            "free",
+            "free",
+            "p pipeline /src/remi",
+            "l lead /src/burrow",
+        ],
+    );
+    // But the pipeline's own slot stays the other pipeline turns' while one
+    // waits, so a lead repo's backlog can't stop the work on what deploys
+    // it: the lead turn waits for the next slot.
+    case(
+        &cfg,
+        "p 4",
         &[
             "normal /src/x",
             "normal /src/y",
@@ -225,8 +240,21 @@ fn picks() {
             "l lead /src/burrow",
         ],
     );
-    // It takes the pipeline's slot as a pipeline turn does, counts against
-    // no cap, and holds none of its project's.
+    case(
+        &cfg,
+        "p 4",
+        &[
+            "lead /src/burrow",
+            "lead /src/burrow",
+            "lead /src/burrow",
+            "free",
+            "l lead /src/burrow",
+            "m lead /src/burrow",
+            "p pipeline /src/remi",
+        ],
+    );
+    // With none of those in line it takes the pipeline's slot as a pipeline
+    // turn does, counts against no cap, and holds none of its project's.
     case(
         &cfg,
         "l 4",

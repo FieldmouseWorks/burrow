@@ -3,7 +3,9 @@ renovate-sweep's sealed verdict on its head, a minor or a security fix
 merges itself, a Dependabot major is judged, one a Claude job fixed is
 reviewed, and whose each one's threads and red CI are."""
 
-from harness import COMMITS, JOBS, S, T0, clean, fresh_pr_state, head, judgment, merged, mkpr, run, said, swept
+import time
+
+from harness import CI_GREEN, COMMITS, JOBS, C, S, T0, clean, fresh_pr_state, head, judgment, merged, mkpr, run, said, swept
 from touches import DEPENDABOT_EMAIL
 
 other = "c" * 40  # another head
@@ -90,6 +92,83 @@ red_ci = [{"__typename": "CheckRun", "name": "ci", "status": "COMPLETED", "concl
 run(mkpr(checks=red_ci, **minor), 0)
 status, _ = run(mkpr(checks=red_ci, **minor), 7200)
 assert JOBS == [] and "renovate-sweep has it" in status, status
+# A lock file refresh lock-age refused only because nothing in it is old
+# enough yet isn't red CI to fix: it waits for the day Renovate's comment
+# gives, renovate-sweep's to have it refreshed then. Anything else red on it,
+# anything else in the failure, or the comment from anyone but Renovate,
+# and it's red CI again.
+fresh_pr_state()
+lock = {"branch": "renovate/cargo-lock-file-maintenance", "title": "Lock file maintenance (cargo)", "number": 16}
+artifacts = {"__typename": "StatusContext", "context": "renovate/artifacts", "state": "FAILURE"}
+
+
+def refused(also="", who="sam"):
+    return said("### \u26a0\ufe0f Artifact update problem\n\nRenovate failed to update an artifact related to this branch.\n\n"
+                "##### File name: undefined\n\n```\nCommand failed: /nix/store/x-lock-age/bin/lock-age main\n"
+                "lock-age: Cargo.lock: ctutils 0.4.7 is too new, took 0.4.6\n"
+                f"lock-age: nothing in the refresh is old enough until 2026-10-27T00:03:00Z\n{also}\n```\n\n", who=who)
+
+
+run(mkpr(checks=[*CI_GREEN, artifacts], comments=[refused()], **lock), 0)
+status, _ = run(mkpr(checks=[*CI_GREEN, artifacts], comments=[refused()], **lock), 7200)
+assert JOBS == [] and "old enough until Oct 27, 12:03am UTC; renovate-sweep has it refreshed then" in status, status
+for checks, comment in (([*red_ci, artifacts], refused()), ([*CI_GREEN, artifacts], refused("error: no matching package")),
+                        ([*CI_GREEN, artifacts], refused(who="mallory")), ([*CI_GREEN, artifacts], said("Not now.")),
+                        ([*CI_GREEN, artifacts], {**refused(), "author": {"login": "sam", "__typename": "Bot"}})):
+    status, _ = run(mkpr(checks=checks, comments=[comment], **lock), 7200)
+    assert JOBS == [] and "Dependency update, CI red; renovate-sweep has it" in status, (checks, comment, status)
+
+def at(after):
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(C.ts(T0) + after))
+
+
+def renamed(after):
+    return {"createdAt": at(after), "previousTitle": "rebase!Update foo from 1.4 to 1.5"}
+
+
+# A review thread on a green Renovate PR goes to a job, but not while a
+# rebase! request stands: Renovate would redo the branch over the job's fix.
+fresh_pr_state()
+asking = {"branch": "renovate/foo-3", "title": "rebase!Update foo from 1.4 to 1.5", "number": 17}
+run(mkpr(threads=[False], **asking), 0)
+status, _ = run(mkpr(threads=[False], **asking), 7200)
+assert JOBS == [] and "1 open review thread" in status, status
+# A run that read it may still be going for a run's length after it came off,
+# not after a pass last saw it: last seen at 7200, gone at 7200 + 3500.
+asked = {**asking, "title": "Update foo from 1.4 to 1.5", "renames": [renamed(7200 + 3500)]}
+run(mkpr(threads=[False], **asked), 7300)
+assert JOBS == [], "a run that read it may still be going"
+run(mkpr(threads=[False], **asked), 7200 + 7300)
+assert JOBS == [], "the run counts from when it came off, not from when it was last seen"
+# On a head of its own too: that may be what the run has pushed so far.
+run(mkpr(threads=[False], sha=other, **asked), 7200 + 7400)
+run(mkpr(threads=[False], sha=other, **asked), 7200 + 7400 + 3000)
+assert JOBS == [], "a new head doesn't end the run"
+run(mkpr(threads=[False], sha=other, **asked), 7200 + 3500 + 7300)
+assert JOBS, "a job once the request is gone and its run over"
+JOBS.clear()
+
+# A request no pass ever saw, on and off between two, counts the same. Nor
+# does the fence hang on the watchdog: without it there's still a job to fence.
+fresh_pr_state()
+quiet = {**asked, "renames": [{"createdAt": at(100), "previousTitle": "Update foo from 1.4 to 1.5"}, renamed(200)]}
+watch, S.CFG["watch"] = S.CFG["watch"], None
+run(mkpr(threads=[False], **quiet), 0)
+status, _ = run(mkpr(threads=[False], **quiet), 7000)
+assert JOBS == [] and "1 open review thread" in status, status
+run(mkpr(threads=[False], **quiet), 200 + 7300)
+assert JOBS, "a job once its run is over"
+JOBS.clear()
+S.CFG["watch"] = watch
+
+# Only a rename off the request counts: an ordinary retitle holds nothing back.
+fresh_pr_state()
+plain = {**asked, "renames": [{"createdAt": at(0), "previousTitle": "Update foo"}]}
+run(mkpr(threads=[False], **plain), 0)
+run(mkpr(threads=[False], **plain), 7300)
+assert JOBS, "a job: no request was ever made"
+JOBS.clear()
+
 # A red Dependabot one has no sweep: it goes to a job.
 fresh_pr_state()
 bump = {"branch": "dependabot/npm/foo-1", "title": "Bump foo from 1.4 to 1.5", "number": 13}

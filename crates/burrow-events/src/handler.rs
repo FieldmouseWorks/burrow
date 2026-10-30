@@ -39,10 +39,17 @@ pub struct Handler {
     pub branches: Option<Vec<String>>,
     #[serde(default)]
     pub issue_titles: Option<Vec<String>>,
+    /// Seconds one of its passes starts after the last, at least.
+    #[serde(default = "gap")]
+    pub gap: f64,
 }
 
 fn yes() -> bool {
     true
+}
+
+fn gap() -> f64 {
+    crate::line::GAP
 }
 
 /// Which pushes count: to any branch, or only to the repo's default branch.

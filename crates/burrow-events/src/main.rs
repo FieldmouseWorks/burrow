@@ -40,8 +40,8 @@ fn run() -> Result<Vec<(String, JoinHandle<()>)>, String> {
     let handlers: Handlers = Arc::new(cfg.handlers);
     let lines: Lines = Arc::new(
         handlers
-            .keys()
-            .map(|name| (name.clone(), Line::default()))
+            .iter()
+            .map(|(name, h)| (name.clone(), Line::new(h.gap)))
             .collect::<BTreeMap<_, _>>(),
     );
     for line in lines.values() {

@@ -7,7 +7,9 @@
 //! jobs; a pipeline turn takes the lowest free slot, which keeps those for the
 //! next one. A lead turn (pipeline work in a lead repo's project, what the
 //! pipeline is built from) is a pipeline turn that goes first of all: ahead
-//! of the whole line, the other pipeline turns included. Any other turn waits
+//! of the whole line, the other pipeline turns included, except that it
+//! leaves them the pipeline's own slots while one waits, so a lead repo's
+//! backlog can't stop the work on what deploys it. Any other turn waits
 //! while its project holds maxJobsPerProject slots (pipeline turns not
 //! counted), and lets those behind it by meanwhile, so one project's jobs
 //! never fill the machine.
@@ -88,6 +90,8 @@ pub fn pick(cfg: &Config, slots: &[Slot], line: &[Waiter]) -> Option<(usize, usi
             }
         }
     }
+    let general = cfg.max_jobs.saturating_sub(cfg.pipeline_slots);
+    let others = line.iter().any(|w| w.class == Class::Pipeline);
     let lead = line
         .iter()
         .enumerate()
@@ -102,10 +106,10 @@ pub fn pick(cfg: &Config, slots: &[Slot], line: &[Waiter]) -> Option<(usize, usi
         {
             continue;
         }
-        if let Some(&n) = free
-            .iter()
-            .find(|&&n| w.class.pipeline() || n <= cfg.max_jobs.saturating_sub(cfg.pipeline_slots))
-        {
+        if let Some(&n) = free.iter().find(|&&n| {
+            (w.class != Class::Lead || !others || n <= general)
+                && (w.class.pipeline() || n <= general)
+        }) {
             return Some((i, n));
         }
     }

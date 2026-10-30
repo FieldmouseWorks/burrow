@@ -67,6 +67,10 @@ let
   train = cfg.enable && autolandRepo != null && (autoland.enable or false)
     && (autoland.repos.${autolandRepo}.train or false);
 
+  # The longest a Renovate run goes on (seconds): renovate-sweep waits that
+  # long after taking a refresh request back before a job may push.
+  renovateRunFor = 2 * 3600;
+
   vars = {
     UPDATE = update;
     HEALTH = health;
@@ -104,6 +108,9 @@ let
     # The repos the steward covers, as it last found them; none without it.
     COVERED = if config.burrow.autoland.enable or false then "${stateDir}/autoland/repos.json" else "";
     SEAL = "${majorSeal}/bin/major-seal";
+    # When a lock file refresh lock-age refused for age only can go again.
+    LOCK_WAIT = "${lockWait}/bin/lock-wait";
+    RENOVATE_RUN = toString renovateRunFor;
     # The App the jobs these start act as (proj run --app), and its bot as
     # GraphQL names it: none without burrow.github.machinery.
     APP = if machineApp == null then "" else machineApp.name;
@@ -130,7 +137,7 @@ let
   calls = [ tools.proj tools.notify ];
   healthTool = script health ./updates/health.sh (with pkgs; [ coreutils gnugrep gnused gawk systemd ]);
   # Its own functions first (they run only once update.sh has defined what they call).
-  updateTool = script update [ ./updates/dispatch.sh ./updates/propose.sh ./updates/update.sh ] (
+  updateTool = script update [ ./updates/dispatch.sh ./updates/propose.sh ./updates/push.sh ./updates/update.sh ] (
     (with pkgs; [ coreutils jq curl util-linux systemd gnugrep gnused gawk vulnix config.nix.package ])
     ++ [ config.programs.git.package healthTool tools.switch tools.confirm machineGh ] ++ calls ++ lib.optional (tools ? boot) tools.boot
   );
@@ -190,6 +197,16 @@ let
       executionMode = "branch";
     };
   };
+  # What reads lock-age's refusal for age in Renovate's comment
+  # (autoland/lock_wait.py, the steward's too), linted as it's built.
+  lockWaitSrc = pkgs.runCommand "lock-wait-src" { nativeBuildInputs = [ pkgs.python3Packages.flake8 ]; } ''
+    mkdir $out
+    cp ${./autoland/lock_wait.py} $out/lock_wait.py
+    flake8 --ignore E501,W503 $out
+  '';
+  lockWait = pkgs.writeShellScriptBin "lock-wait" ''
+    exec ${pkgs.python3}/bin/python3 -I ${lockWaitSrc}/lock_wait.py "$@"
+  '';
   majorSeal = pkgs.writeShellScriptBin "major-seal" ''
     exec ${pkgs.python3}/bin/python3 -E -s ${majorSealSrc}/major-seal.py ${stateDir}/renovate-sweep "$@"
   '';
@@ -278,6 +295,18 @@ let
     # require PRs to be up to date would leave them green but unmerged, and
     # renovate-sweep reports security PRs stuck that way.
     rebaseWhen = "conflicted";
+
+    # The rules below take a lock file refresh without a release timestamp on
+    # purpose, and each time Renovate warns that it did. A warning lands on the
+    # dashboard's Repository Problems, where nothing can clear it and the
+    # steward takes it for something stuck. Only the warning for an upgrade
+    # that went ahead: any other still counts.
+    logLevelRemap = [
+      {
+        matchMessage = "/^Some upgrade\\(s\\) did not have a releaseTimestamp, but as we're running with minimumReleaseAgeBehaviour=timestamp-optional, proceeding\\./";
+        newLogLevel = "debug";
+      }
+    ];
 
     nix.enabled = true;
 
@@ -395,6 +424,14 @@ in
 
   options.burrow.updates = {
     enable = lib.mkEnableOption "HOST-update and the rest of the update pipeline";
+
+    repo = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      readOnly = true;
+      default = githubRepo;
+      defaultText = lib.literalMD "OWNER/NAME of `origin`, when it's on GitHub";
+      description = "The flake's repo on GitHub (OWNER/NAME); null when `origin` isn't there.";
+    };
 
     origin = lib.mkOption {
       type = lib.types.str;
@@ -819,7 +856,7 @@ in
           Type = "oneshot";
           User = user;
           ExecStart = "${renovateRun}/bin/renovate-run${lib.optionalString (name == "renovate@") " %I"}";
-          TimeoutStartSec = "2h";
+          TimeoutStartSec = renovateRunFor;
           Nice = 10;
         };
       }) // lib.genAttrs [ "renovate-sweep" "renovate-sweep@" ] (name: {

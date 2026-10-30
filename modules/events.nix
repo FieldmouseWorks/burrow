@@ -19,7 +19,7 @@ let
   configFile = pkgs.writeText "burrow-events.json" (builtins.toJSON {
     inherit (cfg) kickPort;
     port = if hooked then cfg.port else null;
-    handlers = lib.mapAttrs (_: h: { inherit (h) events unit wake ownStatuses perRepo repos pushes branches issueTitles; }) cfg.handlers;
+    handlers = lib.mapAttrs (_: h: { inherit (h) events unit wake ownStatuses perRepo repos pushes branches issueTitles gap; }) cfg.handlers;
   });
   package = inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow;
   units = lib.mapAttrsToList (_: h: h.unit) cfg.handlers;
@@ -169,6 +169,17 @@ in
               A JSON file, {"OWNER/REPO": epoch}, the handler's passes write:
               when each repo next needs a pass. Read after each pass, and when
               burrow-events starts.
+            '';
+          };
+          gap = mkOption {
+            type = types.ints.positive;
+            default = 20;
+            description = ''
+              Seconds one of its passes (over a repo, or its full pass)
+              starts after the last, at least: what events, kicks and
+              wake-ups in between come to. A handler whose passes read a lot
+              of GitHub, on events that come thick and fast, sets a longer
+              one.
             '';
           };
         };
