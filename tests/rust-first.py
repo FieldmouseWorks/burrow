@@ -2,9 +2,10 @@
 PR that adds Python, or grows the Python it had past the line a fix stays
 under, fails unless its body has a "Why not Rust:" line with a reason; one
 that doesn't passes whatever its body says. The verdict is a commit status
-for the PR, which a newer run replaces, and a fork's PR, which can't post
-one, gets it as the job's result. And every caller runs it again when the
-body is edited, with a token that can post the status.
+for the PR, which a newer run replaces, posted again whenever the PR changed
+while it was judged, so the last word is for the PR as it is; a fork's PR,
+which can't post one, gets it as the job's result. And every caller runs it
+again when the body is edited, with a token that can post the status.
 
   python3 -I tests/rust-first.py .github/workflows/rust-first-check.yml \\
     .github/workflows/rust-first.yml templates/project/.github/workflows/rust-first.yml
@@ -44,11 +45,12 @@ tmp = tempfile.mkdtemp()
 script = os.path.join(tmp, "python.sh")
 open(script, "w").write(step["run"])
 
-# gh as the job calls it: the PR (and its body alone, with --jq, as it is
-# when the verdict is made), its files (--paginate: every page, one after
-# another), the merge base (--jq), a file's raw content at a commit, answered
-# from files under tmp; and the status it posts, kept as a JSON line. Every
-# call logged.
+# gh as the job calls it: the PR, its files (--paginate: every page, one
+# after another), the merge base (--jq), a file's raw content at a commit,
+# answered from files under tmp; and the statuses it posts, kept as JSON
+# lines. Before its Nth post, what CHANGES/N holds happens: the PR or its
+# files change, and other runs post theirs. RESTLESS: the PR's body changes
+# every time it's read. Every call logged.
 bin_dir = os.path.join(tmp, "bin")
 os.mkdir(bin_dir)
 gh = os.path.join(bin_dir, "gh")
@@ -68,20 +70,34 @@ while [ $# -gt 0 ]; do
   shift
 done
 if [ "$method" != GET ] || [ ${#fields[@]} -gt 0 ]; then
-  [ "$method $path" = 'POST repos/sam/r/statuses/4ead' ] || exit 4
-  exec jq -cn '$ARGS.positional | map(index("=") as $i | {(.[:$i]): .[$i + 1:]}) | add' --args "${fields[@]}" \
-    >> "$STATUSES"
+  case "$method $path" in 'POST repos/sam/r/statuses/'*) ;; *) exit 4 ;; esac
+  n=$(($(cat "$POSTS" 2>/dev/null || echo 0) + 1))
+  echo "$n" > "$POSTS"
+  if [ -d "$CHANGES/$n" ]; then
+    [ ! -f "$CHANGES/$n/pr.json" ] || cp "$CHANGES/$n/pr.json" "$PR"
+    [ ! -f "$CHANGES/$n/files.json" ] || cp "$CHANGES/$n/files.json" "$FILES"
+    [ ! -f "$CHANGES/$n/statuses" ] || cat "$CHANGES/$n/statuses" >> "$STATUSES"
+  fi
+  exec jq -cn --arg sha "${path##*/}" \
+    '$ARGS.positional | map(index("=") as $i | {(.[:$i]): .[$i + 1:]}) | add | .sha = $sha' \
+    --args "${fields[@]}" >> "$STATUSES"
 fi
 case $path in
   */files\?per_page=100) f=$FILES ;;
-  repos/sam/r/compare/ba5e...4ead\?per_page=1) f=$COMPARE ;;
+  repos/sam/r/compare/*...*\?per_page=1) f=$COMPARE ;;
   */contents/*)
     p=${path#*/contents/}
     raw=${p%%\?ref=*}
     f=$TREES/${p##*\?ref=}/$(printf '%b' "$(sed 's/%/\\x/g' <<<"$raw")")
     [ -f "$f" ] || exit 1
     ;;
-  repos/sam/r/pulls/7) f=$PR; [ -z "$expr" ] || f=$PR_NOW ;;
+  repos/sam/r/pulls/7)
+    f=$PR
+    if [ -n "$RESTLESS" ]; then
+      jq '.body += "!"' "$PR" > "$PR.next"
+      mv "$PR.next" "$PR"
+    fi
+    ;;
   *) exit 3 ;;
 esac
 if [ -n "$expr" ]; then exec jq -r "$expr" "$f"; fi
@@ -97,18 +113,43 @@ def change(status, filename, added=0, removed=0, previous=None):
     return f
 
 
-def run(files, body="", trees=None, growth=growth_default, fail=False, changed=None, fork=False, body_then=None):
-    """The job on a PR whose body is `body` when the verdict is made, and
-    `body_then` (the same unless given) when the job first reads the PR."""
+def pages(files):
+    """Two to a page, as gh --paginate prints pages: one JSON array after another."""
+    return "".join(json.dumps(files[i:i + 2]) for i in range(0, len(files), 2)) or "[]"
+
+
+def run(files, body="", trees=None, growth=growth_default, fail=False, changed=None, fork=False, changes=None,
+        restless=False):
+    """The job, on a PR with these files and body. changes: what happens
+    before its Nth post, {N: {"body", "head" (its sha), "base" (sha, ref),
+    "files", "others" (statuses other runs post meanwhile, as (sha, state))}},
+    each of them optional."""
     pr = os.path.join(tmp, "pr.json")
     head_repo = None if fork is None else {"full_name": "fork/r" if fork else "sam/r"}
-    json.dump({"body": body if body_then is None else body_then, "head": {"sha": "4ead", "repo": head_repo},
-               "base": {"sha": "ba5e"}, "changed_files": len(files) if changed is None else changed}, open(pr, "w"))
-    pr_now = os.path.join(tmp, "pr-now.json")
-    json.dump({"body": body}, open(pr_now, "w"))
-    # Two to a page, as gh --paginate prints pages: one JSON array after another.
+    doc = {"body": body, "head": {"sha": "4ead", "repo": head_repo}, "base": {"sha": "ba5e", "ref": "main"},
+           "changed_files": len(files) if changed is None else changed}
+    json.dump(doc, open(pr, "w"))
     listed = os.path.join(tmp, "files.json")
-    open(listed, "w").write("".join(json.dumps(files[i:i + 2]) for i in range(0, len(files), 2)) or "[]")
+    open(listed, "w").write(pages(files))
+    changes_dir = os.path.join(tmp, "changes")
+    shutil.rmtree(changes_dir, ignore_errors=True)
+    for n, c in sorted((changes or {}).items()):
+        d = os.path.join(changes_dir, str(n))
+        os.makedirs(d)
+        doc = json.loads(json.dumps(doc))
+        if "body" in c:
+            doc["body"] = c["body"]
+        if "head" in c:
+            doc["head"]["sha"] = c["head"]
+        if "base" in c:
+            doc["base"] = {"sha": c["base"][0], "ref": c["base"][1]}
+        if "files" in c:
+            doc["changed_files"] = len(c["files"])
+            open(os.path.join(d, "files.json"), "w").write(pages(c["files"]))
+        json.dump(doc, open(os.path.join(d, "pr.json"), "w"))
+        open(os.path.join(d, "statuses"), "w").write("".join(
+            json.dumps({"state": state, "context": "rust-first (#7)", "sha": sha, "by": "another run"}) + "\n"
+            for sha, state in c.get("others", ())))
     compare = os.path.join(tmp, "compare.json")
     json.dump({"merge_base_commit": {"sha": "3e7b"}}, open(compare, "w"))
     tree_dir = os.path.join(tmp, "trees")
@@ -118,15 +159,16 @@ def run(files, body="", trees=None, growth=growth_default, fail=False, changed=N
             full = os.path.join(tree_dir, sha, path)
             os.makedirs(os.path.dirname(full), exist_ok=True)
             open(full, "w").write(text)
-    log, statuses = os.path.join(tmp, "gh.log"), os.path.join(tmp, "statuses")
-    for f in (log, statuses):
+    log, statuses, posts = os.path.join(tmp, "gh.log"), os.path.join(tmp, "statuses"), os.path.join(tmp, "posts")
+    for f in (log, statuses, posts):
         if os.path.exists(f):
             os.remove(f)
     runner_temp = os.path.join(tmp, "runner")
     shutil.rmtree(runner_temp, ignore_errors=True)
     os.mkdir(runner_temp)
-    env = {"PATH": bin_dir + os.pathsep + os.environ["PATH"], "PR": pr, "PR_NOW": pr_now, "FILES": listed,
-           "COMPARE": compare, "TREES": tree_dir, "GH_LOG": log, "STATUSES": statuses, "GH_FAIL": "1" if fail else "",
+    env = {"PATH": bin_dir + os.pathsep + os.environ["PATH"], "PR": pr, "FILES": listed, "COMPARE": compare,
+           "TREES": tree_dir, "GH_LOG": log, "STATUSES": statuses, "POSTS": posts, "CHANGES": changes_dir,
+           "RESTLESS": "1" if restless else "", "GH_FAIL": "1" if fail else "",
            "GH_TOKEN": "t", "GITHUB_REPOSITORY": "sam/r", "GITHUB_SERVER_URL": "https://github.example",
            "GITHUB_RUN_ID": "99", "NUMBER": "7", "GROWTH": str(growth), "RUNNER_TEMP": runner_temp}
     # GitHub runs `shell: bash` as this.
@@ -138,10 +180,10 @@ def run(files, body="", trees=None, growth=growth_default, fail=False, changed=N
 
 
 def status(state, posted):
-    """The one status a run posted: `state`, for this PR, linking the run."""
+    """The one status a run posted: `state`, for this PR's head, linking the run."""
     assert len(posted) == 1, posted
     (s,) = posted
-    assert s["state"] == state and s["context"] == "rust-first (#7)", s
+    assert s["state"] == state and s["context"] == "rust-first (#7)" and s["sha"] == "4ead", s
     assert s["target_url"] == "https://github.example/sam/r/actions/runs/99", s
     assert 0 < len(s["description"]) <= 140, s
 
@@ -178,7 +220,7 @@ _, calls = passes([change("modified", "src/main.rs", 300, 10), change("added", "
 assert calls[0] == "api repos/sam/r/pulls/7", calls
 assert calls[1] == "api --paginate repos/sam/r/pulls/7/files?per_page=100", calls
 assert calls[2].startswith("api -X POST repos/sam/r/statuses/4ead "), calls
-assert len(calls) == 3, calls
+assert calls[3:] == ["api repos/sam/r/pulls/7"], calls
 print("no Python: ok")
 
 # The case it's for: a new Python file and no reason. It fails, and names
@@ -278,12 +320,44 @@ rc, out, _, posted = run([change("removed", "bin/wend", 0, 80)], REASON, trees={
 assert rc != 0 and "the body says" not in out and not posted, out
 print("no answer from GitHub: ok")
 
-# The body is read for the verdict when it's made, not when the run began: a
-# run that started before an edit can't post after the edit's own run and put
-# back the old verdict.
-passes([change("added", "tools/new_tool.py", 120)], REASON, body_then="")
-fails([change("added", "tools/new_tool.py", 120)], "", body_then=REASON)
-print("the body as it is at the verdict: ok")
+# Runs overlap: every push and every edit starts one, and the newest status
+# wins. A run that read the PR before an edit can post after the edit's own
+# run; reading the PR again after it posts, it posts the verdict for the PR
+# as it is now, so the last word is the newest PR's, whichever way it goes.
+NEW = [change("added", "tools/new_tool.py", 120)]
+RUST = [change("modified", "src/main.rs", 1, 1)]
+
+
+def said(posted):
+    return [(p["sha"], p["state"], p.get("by", "this run")) for p in posted]
+
+
+# The reason taken out after this run read the PR: the edit's run posts its
+# failure first, then this one its old success, and then, having read the PR
+# again, failure. Its files are read once: the head and base held.
+rc, _, calls, posted = run(NEW, REASON, changes={1: {"body": "Adds a tool.", "others": [("4ead", "failure")]}})
+assert rc == 0 and said(posted) == [("4ead", "failure", "another run"), ("4ead", "success", "this run"),
+                                    ("4ead", "failure", "this run")], posted
+assert sum("/files?" in c for c in calls) == 1, calls
+# The reason put in: the last word is success.
+rc, _, _, posted = run(NEW, "Adds a tool.", changes={1: {"body": REASON, "others": [("4ead", "success")]}})
+assert rc == 0 and said(posted)[1:] == [("4ead", "failure", "this run"), ("4ead", "success", "this run")], posted
+# With no Python an edit changes nothing, but it's judged again all the same.
+rc, _, _, posted = run(RUST, changes={1: {"body": "edited"}})
+assert rc == 0 and said(posted) == [("4ead", "success", "this run")] * 2, posted
+# A push while it ran: the new head's files are judged, its status posted on it.
+rc, _, calls, posted = run(RUST, changes={1: {"head": "5ead", "files": NEW}})
+assert rc == 0 and said(posted) == [("4ead", "success", "this run"), ("5ead", "failure", "this run")], posted
+assert sum("/files?" in c for c in calls) == 2, calls
+# A new base: the diff it judges is the new one.
+rc, _, _, posted = run(NEW, changes={1: {"base": ("de5e", "dev"), "files": RUST}})
+assert rc == 0 and said(posted) == [("4ead", "failure", "this run"), ("4ead", "success", "this run")], posted
+# A PR that changes every time it's read: after ten looks it fails, until
+# it's edited again.
+rc, out, _, posted = run(NEW, REASON, restless=True)
+assert rc == 0 and said(posted) == [("4ead", "success", "this run")] * 10 + [("4ead", "failure", "this run")], posted
+assert "kept changing" in posted[-1]["description"] and "::error" in out, out
+print("runs that overlap, and a PR that changes while it's judged: ok")
 
 # A fork's PR (or one whose fork is gone) runs with a token that can't post
 # a status: the job's result is its verdict, and nothing is posted.
