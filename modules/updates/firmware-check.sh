@@ -1,6 +1,7 @@
 # firmware-check: tell the owner when there's firmware to flash. Flashing
 # stays their call (a bad flash can brick a board with no console), so this
-# only looks. (Everything in capitals comes from ../updates.nix.)
+# only looks. Its job acts on GitHub as the machine's own App, APP, when it
+# has one. (Everything in capitals comes from ../updates.nix.)
 #
 #   firmware-check            daily: what fwupd (LVFS) offers for this box
 #   firmware-check --review   monthly: a Claude job checks what LVFS doesn't
@@ -17,7 +18,7 @@ if [ "${1:-}" = --review ]; then
   board=$(dmidecode -s baseboard-product-name 2>/dev/null || echo unknown)
   nvme=$(nvme list -o json 2>/dev/null | jq -r '.Devices[] | "\(.ModelNumber) firmware \(.Firmware)"' | sort -u | paste -sd';' -) || nvme=unknown
   cpu=$(grep -m1 '^model name' /proc/cpuinfo | cut -d: -f2- | sed 's/^ *//') || cpu=unknown
-  as_user proj run "$PROJECT" "Monthly firmware review. Don't flash or change anything; look and report.
+  as_user proj run ${APP:+--app "$APP"} "$PROJECT" "Monthly firmware review. Don't flash or change anything; look and report.
 $HOST: board $board, BIOS $bios ($bios_date), NVMe: $nvme. CPU: $cpu. fwupd's view: \`fwupdmgr get-devices\` and \`fwupdmgr get-updates\`.
 Find the newest firmware the vendors publish for each ($REVIEW_HINTS; microcode itself arrives with NixOS). Say what's out of date and whether any of it fixes a security problem that matters for a server on the internet. If something is worth flashing, run \`$NOTIFY open firmware-review \"title\" \"what, why, and how it would be flashed on $HOST\"\` so $OWNER sees it; flashing is their call. If everything is current, \`$NOTIFY close firmware-review \"current as of $(date +%F)\"\`." >/dev/null
   exit 0

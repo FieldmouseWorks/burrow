@@ -18,6 +18,7 @@ inputs:
 let
   cfg = config.burrow.autoland;
   inherit (config.burrow) user stateDir;
+  inherit (config.burrow.github) machineApp;
   account = config.users.users.${user};
   inherit (lib) mkOption types;
   rv = cfg.reviewers;
@@ -89,8 +90,12 @@ let
     renovateEmail = if renovateMatch == null then null else lib.head renovateMatch;
     inherit (cfg) owners exclude context rulesets keepBranches baselineJobs baselinePerPass;
     app = { inherit (cfg.app) id slug; };
-    # The bots' logins as GitHub's GraphQL API gives them (no "[bot]").
-    authors = cfg.authors ++ [ "dependabot" "renovate" ];
+    inherit (cfg) authors;
+    # The bots whose PRs and comments are the steward's authors' too, by
+    # their Apps' slugs: GraphQL's logins for them, REST's without "[bot]".
+    # The machinery's App posts and pushes the steward's Claude jobs' work.
+    bots = [ "dependabot" "renovate" ] ++ lib.optional (machineApp != null) machineApp.slug;
+    machinery = if machineApp == null then null else machineApp.name;
     stateDir = "${stateDir}/autoland";
     # The key renovate-sweep seals its verdicts on majors with (seal.py),
     # when it runs here; without it, none counts.
@@ -118,6 +123,9 @@ let
       inherit (cfg.dashboard) enable waitDays errorDays;
       title = dashboardTitle;
       renovateKick = if config.burrow.updates.renovate.enable or false then "${config.burrow.events.kick}/renovate" else null;
+      # Whose dashboards they are: Renovate runs as the machine's own App,
+      # else as the user (null: one of `authors`).
+      renovate = if machineApp == null then null else "${machineApp.slug}[bot]";
     };
     # Quarantined flaky tests, each to a Claude job (flakes.py).
     flaky = {
@@ -146,7 +154,7 @@ let
       skipPaths = [ ];
     };
     repos = cfg.repos;
-    inherit (cfg) pipelineRepos;
+    inherit (cfg) pipelineRepos leadRepos;
     # Every repo's hook to burrow-events (repos.py), with what each of its
     # handlers takes.
     webhook = {
@@ -212,6 +220,7 @@ in
     { key = "burrow/notify"; imports = [ (import ./notify.nix inputs) ]; }
     { key = "burrow/proj"; imports = [ (import ./proj.nix inputs) ]; }
     { key = "burrow/events"; imports = [ (import ./events.nix inputs) ]; }
+    { key = "burrow/github"; imports = [ (import ./github.nix inputs) ]; }
     { key = "burrow/watchdog/sources"; imports = [ ./watchdog/sources.nix ]; }
   ];
 
@@ -263,8 +272,10 @@ in
       example = [ "sam" ];
       description = ''
         Whose PRs merge themselves once settled: you, and so your Claude
-        sessions, which push as you. Dependabot and Renovate's app are added. Anyone else's PR
-        gets reviewed the same way and then waits for you.
+        sessions, which push as you. Dependabot's and Renovate's Apps are
+        added, and the machinery's (burrow.github.machinery), which the
+        steward's own Claude jobs act as. Anyone else's PR gets reviewed the
+        same way and then waits for you.
       '';
     };
 
@@ -289,6 +300,20 @@ in
         sooner. The steward's jobs in any other repo go ahead of the line as
         well, but within that project's `maxJobsPerProject`, so one repo's
         PRs can't fill the machine.
+      '';
+    };
+
+    leadRepos = mkOption {
+      type = types.listOf types.str;
+      default = [ ];
+      example = [ "sam/burrow" ];
+      description = ''
+        The repos the pipeline itself is built from (OWNER/NAMEs, any case),
+        whose work goes first of all: ahead of everyone else's, the rest of
+        `pipelineRepos` included. Their reviews take a reviewer's next free
+        place first, and proj puts their pipeline jobs (the steward's Claude
+        jobs, proj-inbox's issues) first in its line. A lead repo is
+        pipeline work whether or not `pipelineRepos` lists it.
       '';
     };
 

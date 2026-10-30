@@ -50,10 +50,13 @@
     };
     browser.enable = true;
     # The App the machine's own jobs act as, rather than as sam.
-    github.apps.workers = {
-      id = 2;
-      slug = "sam-workers";
-      keyFile = "/run/secrets/workers-key";
+    github = {
+      apps.workers = {
+        id = 2;
+        slug = "sam-workers";
+        keyFile = "/run/secrets/workers-key";
+      };
+      machinery = "workers";
     };
     watchdog.enable = true;
     backup = {

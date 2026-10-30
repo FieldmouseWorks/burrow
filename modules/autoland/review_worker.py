@@ -427,8 +427,8 @@ def forget():
 def work():
     """Every queued review, `parallel` at a time for each reviewer, until
     the queue is empty (passes may add to it meanwhile). A free place goes
-    to the pipeline's own repos' reviews first (`pipelineRepos`), then to
-    the one queued longest."""
+    to the lead repos' reviews first (`leadRepos`), then to the rest of the
+    pipeline's own (`pipelineRepos`), then to the one queued longest."""
     q = os.path.join(STATE, V.QUEUE)
     pools = {r: ThreadPoolExecutor(CFG["reviewers"][r]["parallel"]) for r in V.NAMES}
     # Only what's in hand: a name done with and queued again (a retry, a
@@ -453,7 +453,7 @@ def work():
                 continue
             item = load(f"{V.QUEUE}/{name}", None)
             item = item if isinstance(item, dict) else {}
-            waiting.setdefault(r, []).append((not C.pipeline(item.get("repo")), item.get("at", 0), name))
+            waiting.setdefault(r, []).append((C.rank(item.get("repo")), item.get("at", 0), name))
         # One look at a time in a session: a PR's next head waits for the
         # look at its last one, and resumes it.
         sessions = {session_of(n) for n in busy}

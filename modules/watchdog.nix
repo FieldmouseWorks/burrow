@@ -25,6 +25,9 @@ let
     inherit (cfg) project;
     jobTimeout = cfg.jobTimeoutMinutes;
     jobIdle = cfg.jobIdleMinutes;
+    # It's the machine's own work, so its job acts on GitHub as the
+    # machinery's App (proj run --app); null for none.
+    app = if config.burrow.github.machineApp == null then null else config.burrow.github.machineApp.name;
     inherit (config.burrow.events) kick;
     escalateAfter = cfg.escalateAfterMinutes * 60;
     ownerAfter = cfg.ownerAfterMinutes * 60;

@@ -42,6 +42,9 @@
         self = ./modules/github;
         rust.testInputs = pkgs: [ pkgs.openssl ];
       };
+      # burrow's own programs, one Cargo workspace (crates/): their package
+      # and their gate, built for every platform lib/project.nix knows.
+      crates = self.lib.project { self = ./crates; rust = { }; };
     in
     {
       # A project's dev shell and gate in a few lines; see lib/project.nix.
@@ -59,11 +62,14 @@
         };
       };
 
-      # gh-token, for each platform it's built for, and the flaky tool
-      # (docs/flaky-tests.md), for a machine to install.
-      packages = nixpkgs.lib.recursiveUpdate
+      # burrow's programs (every binary in crates/) and gh-token, for each
+      # platform they're built for, and the flaky tool (docs/flaky-tests.md),
+      # for a machine to install.
+      packages = nixpkgs.lib.foldl' nixpkgs.lib.recursiveUpdate { } [
+        (nixpkgs.lib.mapAttrs (_: p: { burrow = p.default; }) crates.packages)
         (nixpkgs.lib.mapAttrs (_: p: { gh-token = p.default; }) ghToken.packages)
-        { ${system}.flaky = pkgs.callPackage ./tools/flaky/package.nix { }; };
+        { ${system}.flaky = pkgs.callPackage ./tools/flaky/package.nix { }; }
+      ];
 
       # A bare machine with every module on, for the checks and as an example.
       nixosConfigurations.example = nixpkgs.lib.nixosSystem {
@@ -76,15 +82,29 @@
         # check, so these build nothing. A service that says how it runs (a
         # Type) has something to run too: systemd refuses one without
         # ExecStart or ExecStop, and only when it starts. A module that
-        # registers a burrow-events handler has burrow-events to run it.
+        # registers a burrow-events handler has burrow-events to run it. And a
+        # memory cap holds swap to it too: a unit that may swap outgrows its
+        # cap without ever reaching it, and the machine thrashes rather than
+        # the kernel killing inside the cap.
         standalone = let
           runnable = name: machine: let
-            s = machine.config.systemd.services;
+            sd = machine.config.systemd;
+            s = sd.services;
             empty = builtins.filter (n: s.${n}.enable && s.${n}.serviceConfig ? Type
               && !(s.${n}.serviceConfig ? ExecStart || s.${n}.serviceConfig ? ExecStop)) (builtins.attrNames s);
             unrun = machine.config.burrow.events.handlers or { } != { } && !(s ? burrow-events);
+            swapping = builtins.concatMap ({ kind, units, section }: builtins.concatMap (n:
+              let c = units.${n}.${section}; in
+              nixpkgs.lib.optional (toString (c.MemoryMax or "infinity") != "infinity"
+                && toString (c.MemorySwapMax or "") != "0") "${kind} ${n}") (builtins.attrNames units)) [
+              { kind = "service"; units = s; section = "serviceConfig"; }
+              { kind = "slice"; units = sd.slices; section = "sliceConfig"; }
+              { kind = "user service"; units = sd.user.services; section = "serviceConfig"; }
+              { kind = "user slice"; units = sd.user.slices; section = "sliceConfig"; }
+            ];
           in if empty != [ ] then throw "${name}: services with nothing to run: ${builtins.concatStringsSep ", " empty}"
              else if unrun then throw "${name}: burrow-events handlers with no burrow-events to start them"
+             else if swapping != [ ] then throw "${name}: memory caps that let their units swap (give each MemorySwapMax = 0): ${builtins.concatStringsSep ", " swapping}"
              else machine;
         in pkgs.writeText "burrow-standalone" (nixpkgs.lib.concatMapStrings (name:
           let
@@ -217,6 +237,8 @@
         agents = import ./tests/agents.nix { inherit self pkgs; };
         # proj's queue and memory caps, with a stand-in for Claude.
         proj = import ./tests/proj.nix { inherit self pkgs; };
+        # A turn's clock, which stands still while it waits in line.
+        proj-clock = import ./tests/proj-clock.nix { inherit self pkgs; };
         # Who takes a free slot: the pipeline's own (only its own repos'
         # pipeline jobs), and each project's cap.
         proj-pick = pkgs.runCommand "proj-pick-check" { nativeBuildInputs = [ pkgs.shellcheck pkgs.git ]; } ''
@@ -225,7 +247,7 @@
           touch $out
         '';
         # What each job waits on, as the stall watchdog hears it.
-        proj-waits = pkgs.runCommand "proj-waits-check" { nativeBuildInputs = [ pkgs.shellcheck pkgs.jq ]; } ''
+        proj-waits = pkgs.runCommand "proj-waits-check" { nativeBuildInputs = [ pkgs.shellcheck pkgs.jq pkgs.util-linux ]; } ''
           shellcheck -s bash ${./modules/proj/waits.sh} ${./tests/proj-waits.sh}
           bash ${./tests/proj-waits.sh} ${./modules/proj/waits.sh}
           touch $out
@@ -264,6 +286,8 @@
         events-service = import ./tests/events.nix { inherit self pkgs; };
         # HOST-switch's revert when the window runs out mid-activation.
         switch = import ./tests/switch.nix { inherit self pkgs; };
+        # systemd-oomd kills what eats the memory before the machine drowns.
+        oomd = import ./tests/oomd.nix { inherit self pkgs; };
         # HOST-health's ZFS check: the pools the machine needs, by name or
         # GUID, with a stand-in zpool.
         health-zfs = import ./tests/health-zfs.nix { inherit self pkgs; };
@@ -279,11 +303,6 @@
         ledger = import ./tests/ledger.nix { inherit self pkgs; };
         # An App's tokens: who gets them, and git and gh acting as it.
         github = import ./tests/github.nix { inherit self pkgs; };
-        # Which deliveries and kicks start whose pass, with a stand-in for systemctl.
-        events = pkgs.runCommand "events-check" { nativeBuildInputs = [ pkgs.python3 ]; } ''
-          python3 -I ${./tests/events.py} ${./modules/events}/events.py
-          touch $out
-        '';
         # A switch that changes a handler's units kicks that handler's full
         # pass, and only its: the switch restarts an active unit that changed,
         # so the example's burrow-events-switched-autoland must change with
@@ -330,6 +349,12 @@
         # Which Renovate PRs renovate-sweep hands over and lists, with stand-ins for gh and proj.
         renovate-sweep = pkgs.runCommand "renovate-sweep-check" { nativeBuildInputs = [ pkgs.python3 pkgs.git pkgs.jq pkgs.gnused ]; } ''
           python3 -I ${./tests/renovate-sweep.py} ${./modules/updates/renovate-sweep.sh} ${./modules/updates/major-seal.py} ${./modules/autoland/seal.py}
+          touch $out
+        '';
+        # Which repos Renovate's runs cover, with whose token: gh's login for
+        # all of them, or a run each with its owner's App token.
+        renovate-run = pkgs.runCommand "renovate-run-check" { nativeBuildInputs = [ pkgs.python3 pkgs.util-linux ]; } ''
+          python3 -I ${./tests/renovate-run.py} ${./modules/updates/renovate.sh}
           touch $out
         '';
         # A lock file refresh's too-new releases go back or fail it, with
@@ -436,6 +461,8 @@
         '';
         # Stale Remote Control servers catch up once idle, with a stand-in for Claude.
         remote-control = import ./tests/remote-control.nix { inherit self pkgs; };
+        # A session past its server's memory cap dies alone, with a stand-in for Claude.
+        remote-control-memory = import ./tests/remote-control-memory.nix { inherit self pkgs; };
         # The signed-in browser: Claude driving it, its logins kept, its ports
         # and profile kept from everyone else.
         browser = import ./tests/browser.nix { inherit self pkgs; };
@@ -446,7 +473,8 @@
           [ "$(${pkg}/bin/house-fixture-member)" = 42 ]
           touch $out
         '';
-      } // nixpkgs.lib.mapAttrs' (name: nixpkgs.lib.nameValuePair "gh-token-${name}") ghToken.checks.${system}
+      } // nixpkgs.lib.mapAttrs' (name: nixpkgs.lib.nameValuePair "crates-${name}") crates.checks.${system}
+      // nixpkgs.lib.mapAttrs' (name: nixpkgs.lib.nameValuePair "gh-token-${name}") ghToken.checks.${system}
       // nixpkgs.lib.mapAttrs' (name: nixpkgs.lib.nameValuePair "flaky-${name}")
         # The flaky tool's fmt, clippy and tests.
         (self.lib.project { inherit self; systems = [ system ]; rust.dir = "tools/flaky"; }).checks.${system}
