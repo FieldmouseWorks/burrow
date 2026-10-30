@@ -24,7 +24,7 @@ in
       description = ''
         What it watches, by name: each a JSON file its source rewrites with
         what it waits on now, `{"at": EPOCH, "items": {KEY: {"what", "link",
-        "phase", "since", "due", "kick"}}}` (watchdog/watchdog.py). The
+        "phase", "since", "due", "kick"}}}` (crates/burrow-watchdog). The
         modules that have such waits add theirs.
       '';
       type = types.attrsOf (types.submodule {
