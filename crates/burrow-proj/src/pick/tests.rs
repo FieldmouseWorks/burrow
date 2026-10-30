@@ -1,9 +1,9 @@
 // proj's choice of who takes a slot, on what a waiting turn would see:
 // pipeline jobs' slots stay theirs, one project's jobs stop at its cap while
 // the others go by, pipeline ones count against no cap, and lead ones go
-// ahead of everyone, every free slot going in one look; and which jobs are pipeline ones: only those in the
-// pipeline's own repos and the machine's flake, and lead ones those in its
-// lead repos.
+// ahead of everyone but leave the rest one slot, every free slot going in
+// one look; and which jobs are pipeline ones: only those in the pipeline's
+// own repos and the machine's flake, and lead ones those in its lead repos.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -468,6 +468,92 @@ fn picks() {
             "l lead /src/burrow",
             "m lead /src/burrow",
             "p pipeline /src/remi",
+        ],
+    );
+    cfg.pipeline_slots = 1;
+    // And one of the slots anyone may take stays everyone else's while one of
+    // theirs waits and none runs, so a lead repo's backlog can't stop all the
+    // rest: here the turn behind four lead ones takes the last one.
+    case(
+        &cfg,
+        "l 1\nm 2\nn 3\nk 4\na 5",
+        &[
+            "free",
+            "free",
+            "free",
+            "free",
+            "free",
+            "pipeline /src/remi",
+            "l lead /src/burrow",
+            "m lead /src/burrow",
+            "n lead /src/burrow",
+            "k lead /src/burrow",
+            "j lead /src/burrow",
+            "a normal /src/web",
+        ],
+    );
+    case(
+        &cfg,
+        "a 5",
+        &[
+            "lead /src/burrow",
+            "lead /src/burrow",
+            "lead /src/burrow",
+            "lead /src/burrow",
+            "free",
+            "pipeline /src/remi",
+            "l lead /src/burrow",
+            "a first /src/web",
+        ],
+    );
+    // With one of theirs running, none of theirs waiting, or none of those slots
+    // free, the lead ones take every slot they're let.
+    case(
+        &cfg,
+        "l 2\nm 3\nn 4\nk 5",
+        &[
+            "normal /src/web",
+            "free",
+            "free",
+            "free",
+            "free",
+            "pipeline /src/remi",
+            "l lead /src/burrow",
+            "m lead /src/burrow",
+            "n lead /src/burrow",
+            "k lead /src/burrow",
+            "a normal /src/lok",
+        ],
+    );
+    case(
+        &cfg,
+        "l 1\nm 2\nn 3\nk 4\nj 5",
+        &[
+            "free",
+            "free",
+            "free",
+            "free",
+            "free",
+            "pipeline /src/remi",
+            "l lead /src/burrow",
+            "m lead /src/burrow",
+            "n lead /src/burrow",
+            "k lead /src/burrow",
+            "j lead /src/burrow",
+        ],
+    );
+    case(
+        &cfg,
+        "l 6",
+        &[
+            "lead /src/burrow",
+            "lead /src/burrow",
+            "lead /src/burrow",
+            "lead /src/burrow",
+            "lead /src/burrow",
+            "free",
+            "l lead /src/burrow",
+            "a normal /src/web",
         ],
     );
 }

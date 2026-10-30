@@ -9,7 +9,9 @@
 //! pipeline is built from) is a pipeline turn that goes first of all: ahead
 //! of the whole line, the other pipeline turns included, except that it
 //! leaves them the pipeline's own slots while one waits, so a lead repo's
-//! backlog can't stop the work on what deploys it. Any other turn waits
+//! backlog can't stop the work on what deploys it, and one of the others
+//! while one of everyone else's waits and none of theirs runs, so it can't
+//! stop all the rest either. Any other turn waits
 //! while its project holds maxJobsPerProject slots (pipeline turns not
 //! counted), and lets those behind it by meanwhile, so one project's jobs
 //! never fill the machine.
@@ -99,10 +101,15 @@ pub fn pick(cfg: &Config, slots: &[Slot], line: &[Waiter]) -> Vec<(usize, usize)
     // Who goes: each in turn, while the slots still go round. lead counts the
     // lead turns chosen and others the rest held to the slots anyone may
     // take; open is how many of the pipeline's own slots the other pipeline
-    // turns in line leave lead ones, and need how many of the slots anyone may
-    // take lead ones must have.
+    // turns in line leave lead ones; keep how many of the free slots anyone
+    // may take lead ones leave everyone else's turns (one, while one of
+    // theirs waits and none of theirs holds a slot, so a lead backlog can't
+    // stop them all); and need how many of the slots anyone may take lead
+    // ones must have.
     let pipeline = line.iter().filter(|w| w.class == Class::Pipeline).count();
     let open = ours.len().saturating_sub(pipeline);
+    let waiting = line.iter().any(|w| !w.class.pipeline());
+    let keep = usize::from(held.is_empty() && waiting && !theirs.is_empty());
     let (mut lead, mut others) = (0, 0);
     let mut went = Vec::new();
     let order = line
@@ -120,7 +127,7 @@ pub fn pick(cfg: &Config, slots: &[Slot], line: &[Waiter]) -> Vec<(usize, usize)
         }
         match w.class {
             Class::Lead => {
-                if lead >= theirs.len() + open {
+                if lead >= theirs.len() - keep + open {
                     continue;
                 }
                 lead += 1;
