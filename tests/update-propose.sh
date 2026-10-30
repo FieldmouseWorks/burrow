@@ -20,8 +20,8 @@ git config --global advice.detachedHead false
 # adds one, `api graphql ... -F n=N` answers N's head with the checks in
 # $tmp/checks (its check runs, statuses and check suites, as GraphQL has them;
 # with $tmp/more there, the checks have a page more), `api repos/R/pulls/N -X
-# PATCH` answers N's URL, and every call goes to $tmp/gh.log. With $tmp/gh-down there, it
-# fails as an unreachable GitHub does.
+# PATCH` answers N's URL, and every call goes to $tmp/gh.log. With
+# $tmp/gh-down there, it fails as an unreachable GitHub does.
 mkdir "$tmp/bin"
 cat >"$tmp/bin/gh" <<EOF
 #!$(command -v bash)
@@ -249,10 +249,10 @@ pushed_before() { # $1 = flake.lock's text in it
 
 # Red, as the steward reads CI: a check on its own head failed, a workflow
 # failed to start, a status failed, or the train found the head red alone
-# (its failure, from the steward's App); it's fetched, for same_tree. Green,
-# pending, rerunning, the steward's own status, the train's error (a merge
-# GitHub refused), its failure from anyone else, over 100 checks, or someone
-# else's head: nothing, so it's ridden (or held) as before. GitHub down, or a
+# (its failure, from the steward's App); it's fetched, for why_not_replace.
+# Green, pending, rerunning, the steward's own status, the train's error (a
+# merge GitHub refused), its failure from anyone else, over 100 checks, or
+# someone else's head: nothing, so it's ridden (or held) as before. GitHub down, or a
 # head that moved since it was listed: a failure, never "not red".
 fresh
 pushed_before v2
@@ -289,8 +289,9 @@ if why=$(red_head "$listed"); then fail "red_head on a head that moved since it 
 grep -q "isn't ${listed#* } any more" <<<"$why" || fail "red_head's word on a moved head: $why"
 echo "red_head: ok"
 
-# A fresh bump for it is the red head's very tree when nothing moved, and
-# isn't once main has.
+# A fresh bump replaces the red head only whole, and other than it: not the
+# red head's very tree (nothing moved), nor one short of an input that didn't
+# build, nor main itself (none did); once main moved, a whole one does.
 fresh
 pushed_before v2
 pr=$(update_pr)
@@ -298,12 +299,17 @@ checks "$(run COMPLETED FAILURE)"
 red_head "$pr" >/dev/null
 at_main
 commit flake.lock v2
-same_tree "$pr" || fail "same_tree on the same bump"
+why=$(why_not_replace "$pr") || fail "why_not_replace let the same bump replace it"
+[ "$why" = "a fresh bump is that same tree" ] || fail "why_not_replace's word on the same bump: $why"
 landed README new
 at_main
-commit flake.lock v2
-! same_tree "$pr" || fail "same_tree once main moved"
-echo "same_tree: ok"
+why=$(why_not_replace "$pr" nixpkgs burrow) || fail "why_not_replace let main itself replace it"
+[ "$why" = "a fresh bump doesn't build with nixpkgs burrow" ] || fail "why_not_replace's word on main itself: $why"
+commit flake.lock v3
+why=$(why_not_replace "$pr" burrow) || fail "why_not_replace let a bump short of burrow replace it"
+[ "$why" = "a fresh bump doesn't build with burrow" ] || fail "why_not_replace's word on a bump short of an input: $why"
+if why=$(why_not_replace "$pr"); then fail "why_not_replace held a whole, new bump: $why"; fi
+echo "why_not_replace: ok"
 
 # Replacing: the fresh bump goes to the branch as the same PR's new head,
 # retitled, and is what HOST-update remembers it pushed. No new PR.

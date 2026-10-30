@@ -15,9 +15,9 @@
 # settles only a green PR, and takes one that goes red out of the train, so
 # that head is in no candidate for a new one to stop, and riding it would
 # hold the box until a Claude job got to it. So it brings in a fresh bump as
-# if none were open, which goes up as the same PR's new head (replace);
-# unless that's the red head's very tree, which can only go red the same way
-# again, so the job has it (same_tree).
+# if none were open, which goes up as the same PR's new head (replace):
+# only a whole one, though, that isn't the red head's very tree
+# (why_not_replace).
 
 # update.sh sets state, REPO, BRANCH, HOST, UPDATE, TRAIN, SETTLED, STEWARD,
 # TRAIN_CONTEXT, riding, changed, as_user and git_.
@@ -33,9 +33,9 @@ update_pr() {
 }
 
 # Whether its open PR $1 ("NUMBER HEAD") is red on a head HOST-update
-# pushed: "red" when it is, with that head fetched (same_tree reads it), and
-# nothing when it isn't, or when the head is anyone else's (ride holds for
-# that). Red is CI as the steward reads it (ci_state in ../autoland/prs.py,
+# pushed: "red" when it is, with that head fetched (why_not_replace reads
+# it), and nothing when it isn't, or when the head is anyone else's (ride
+# holds for that). Red is CI as the steward reads it (ci_state in ../autoland/prs.py,
 # whose rules these are): a check whose latest run failed (so one rerunning
 # is pending), a workflow that failed to start, or a status that's neither
 # success nor pending, except the steward's own (SETTLED) and the train's
@@ -125,10 +125,21 @@ already_live() {
   fi
 }
 
-# Whether HEAD, a fresh bump to replace its red PR $1's head, is that head's
-# very tree: nothing new to put up, only the same red again.
-same_tree() {
-  [ "$(git_ rev-parse 'HEAD^{tree}')" = "$(git_ rev-parse "${1#* }^{tree}")" ]
+# Why HEAD, a fresh bump for its red PR $1, doesn't replace that head, when
+# it doesn't; $2... are the inputs that didn't build into it. One short of
+# any (or of every one, which leaves main itself) could take back what that
+# head put live; one that's that head's very tree would only go red the same
+# way again. Either way the Claude job on the red PR (or a rerun) has it.
+why_not_replace() {
+  local pr=$1
+  shift
+  if [ $# -gt 0 ]; then
+    echo "a fresh bump doesn't build with $*"
+  elif [ "$(git_ rev-parse 'HEAD^{tree}')" = "$(git_ rev-parse "${pr#* }^{tree}")" ]; then
+    echo "a fresh bump is that same tree"
+  else
+    return 1
+  fi
 }
 
 # HEAD as its red PR $1's new head, retitled $2 with body $3: the same PR,

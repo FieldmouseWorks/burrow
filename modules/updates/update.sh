@@ -241,6 +241,8 @@ if [ -z "$riding" ] && { failed_before build || ! new=$(build) || [ -z "$new" ];
       failed+=("$i")
     fi
   done
+  # None of them built: main itself, with nothing new on it.
+  [ "$(git_ rev-parse HEAD)" != "$main" ] || changed=
   new=$(build) || {
     note failed "main itself doesn't build"
     dispatch build-main "$UPDATE: $origin main ($main) doesn't build; the log is $state/logs/build.log. Fix it. $worktree_rules"
@@ -255,11 +257,9 @@ else
 fi
 settled build-main "main builds again."
 
-# A fresh bump for its red PR that came out as that head's very tree (nothing
-# moved, or what did doesn't build): putting it up again would only go red the
-# same way, so the Claude job the steward hands a red PR to (or a rerun) has it.
-if [ -n "$replacing" ] && same_tree "$replacing"; then
-  note held "its PR #${replacing%% *} is red, and a fresh bump is that same tree; holding until its Claude job gets it green"
+# Its red PR's head stays, unless a whole fresh bump other than it replaces it.
+if [ -n "$replacing" ] && why=$(why_not_replace "$replacing" "${failed[@]}"); then
+  note held "its PR #${replacing%% *} is red, and $why; holding for the Claude jobs on it"
   exit 0
 fi
 
