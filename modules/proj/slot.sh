@@ -5,7 +5,8 @@
 # its place in line there, so a change to who goes first reaches everyone
 # waiting and take_slot and pick are always one version. All they share across
 # versions is this hand-over: `proj _exec ID CLASS`, in the same pid, with the
-# place left in JOBS/.queue under that pid. QUEUE_FORMAT names it, and a proj
+# place left in JOBS/.queue under that pid, and the look's lock held on fd 9
+# until that proj is up. QUEUE_FORMAT names it, and a proj
 # that doesn't print the same one isn't handed anything (one from before this,
 # or a switch back to it): the turn stays on the proj it has.
 QUEUE_FORMAT=1
@@ -53,6 +54,10 @@ take_slot() {
     deployed=$(readlink -f "$DEPLOYED" || true)
     if [ "$deployed" != "$self" ] && [ "$deployed" != "$stay" ] && [ -x "$deployed" ]; then
       if [ "$("$deployed" _queue_format 2>/dev/null || true)" = "$QUEUE_FORMAT" ]; then
+        # Mid-exec its cmdline reads empty, and a look clearing out dead places
+        # would take this one for gone: no look runs until it's through (_exec).
+        exec 9>"$jobs/.slots/.lock"
+        flock 9
         exec "$deployed" _exec "$id" "$3"
       fi
       stay=$deployed

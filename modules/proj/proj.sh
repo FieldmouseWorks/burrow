@@ -736,7 +736,9 @@ Carry on from there. Anything you left in the background last turn was stopped w
     ;;
   _queue_format) echo "$QUEUE_FORMAT" ;;
   _exec)
-    # One turn of a job, inside its own systemd unit.
+    # One turn of a job, inside its own systemd unit. Through the exec of a
+    # hand-over (take_slot), if this is one: the looks can go on.
+    exec 9>&-
     id=$2
     dir="$jobs/$id"
     n=$(cat "$dir/turns")

@@ -1,6 +1,7 @@
 # A switch reaches the turns already waiting for a slot: at its next look each
 # one decides by the deployed proj, in the same place in line and on the same
-# clock towards maxWait. A proj that can't take the hand-over is left alone.
+# clock towards maxWait. A proj that can't take the hand-over is left alone,
+# and no look runs during one.
 # The first deployed here has one slot, the next two.
 #
 #   nix build .#checks.x86_64-linux.proj-deployed -L
@@ -11,7 +12,7 @@ in
 pkgs.testers.runNixOSTest {
   name = "proj-deployed";
 
-  nodes.machine = { lib, ... }: {
+  nodes.machine = { config, lib, ... }: {
     imports = [ self.nixosModules.proj ];
     burrow = {
       claude.package = claude;
@@ -40,6 +41,17 @@ pkgs.testers.runNixOSTest {
     specialisation.next.configuration.burrow.proj.maxJobs = 2;
     # A proj from before the hand-over: any command but its own is refused,
     # and one that's run anyway says so.
+    # The real one, but saying whether a look could run as it comes up: the
+    # look's lock free, at the start of a hand-over, would let one clear the
+    # place of a turn whose cmdline is empty mid-exec.
+    specialisation.handing.configuration.environment.systemPackages = [
+      (lib.hiPrio (pkgs.writeShellScriptBin "proj" ''
+        if [ "''${1:-}" = _exec ]; then
+          if ${pkgs.util-linux}/bin/flock -n /data/dev/jobs/.slots/.lock true; then touch /tmp/unlocked; else touch /tmp/locked; fi
+        fi
+        exec ${config.burrow.tools.proj}/bin/proj "$@"
+      ''))
+    ];
     specialisation.older.configuration.environment.systemPackages = [
       (lib.hiPrio (pkgs.writeShellScriptBin "proj" ''
         case ''${1:-} in _exec) touch /tmp/older-ran-exec; sleep 600 ;; esac
@@ -92,10 +104,18 @@ pkgs.testers.runNixOSTest {
             assert place(j) == in_line[j], (place(j), in_line[j])
             assert runs(in_line[j][1]) == first, runs(in_line[j][1])
 
+    with subtest("no look runs while a turn is handed over, so none clears its place"):
+        deploy("handing")
+        machine.wait_until_succeeds("test -e /tmp/locked", timeout=30)
+        machine.fail("test -e /tmp/unlocked")
+        for j in (q, r):
+            assert place(j) == in_line[j], (place(j), in_line[j])
+
     with subtest("a turn already waiting follows the deployed proj: the second slot goes to the head of the line"):
         # Far enough into maxWait that a clock started again here would show.
         time.sleep(max(0, 30 - (time.monotonic() - queued)))
         deploy("next")
+        machine.fail("test -e /tmp/unlocked")
         machine.wait_until_succeeds(f"su - dev -c 'proj state {q}' | grep -x running", timeout=30)
         assert machine.succeed(f"cat /data/dev/jobs/{q}/1.slot").strip() == "2"
         next_proj = machine.succeed("readlink -f /run/current-system/sw/bin/proj").strip()
