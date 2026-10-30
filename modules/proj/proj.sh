@@ -13,6 +13,10 @@
 #                               other pipeline work too; in any other, as
 #                               --first, and status and the turn's journal
 #                               say so (every turn of it, either way)
+#   proj run --unstick PROJECT "task"  what the pipeline is stuck on: never
+#                               in the line, which may be the very thing
+#                               stuck, but in a slot of its own besides
+#                               MAX_JOBS (every turn of it)
 #   proj run --kick NAME PROJECT "task"  kick NAME (HANDLER or HANDLER/OWNER/REPO,
 #                               one of burrow-events') each time a turn starts
 #                               (takes its slot) and each time one ends
@@ -51,7 +55,9 @@
 # first, and a turn that has waited MAX_WAIT seconds counts as --first itself,
 # so a stream of them can't starve it. PIPELINE_SLOTS of the slots are for pipeline jobs in the
 # pipeline's own repos alone, and no project's other jobs hold more than
-# PER_PROJECT at once (pick.sh). A waiting turn is just this shell. Every turn
+# PER_PROJECT at once (pick.sh). A job run --unstick waits in none of that:
+# its turns take a slot of their own, past the MAX_JOBS, one at a time
+# (slot.sh). A waiting turn is just this shell. Every turn
 # runs in SLICE, which the machine caps, so jobs can't take memory from
 # anything else, and gets TIMEOUT (or the job's own --timeout) before it's
 # stopped, so a stuck one can't hold its slot for good. A job's --idle stops a
@@ -278,6 +284,7 @@ facts() {
   n=$(cat "$d/turns" 2>/dev/null) || return 1
   printf 'id\t%s\nturn\t%s\nstate\t%s\n' "$1" "$n" "$(state "$1")"
   [ ! -e "$d/owned" ] || printf 'owned\t1\n'
+  [ ! -e "$d/unstick" ] || printf 'unstick\t1\n'
   [ ! -e "$d/$n.stopped" ] || printf 'stopped\t1\n'
   [ ! -s "$d/$n.end" ] || printf 'end\t%s\n' "$(cat "$d/$n.end")"
   [ ! -s "$d/link" ] || printf 'link\t%s\n' "$(cat "$d/link")"
@@ -390,104 +397,6 @@ start_turn() {
   rewatch "$id"
 }
 
-# Memory to spare, in MiB: what the kernel says is available, plus what the
-# ZFS ARC would give back (the kernel doesn't count it).
-spare() {
-  local kb arc
-  kb=$(awk '/^MemAvailable:/ { print $2 }' /proc/meminfo)
-  arc=0
-  if [ -r /proc/spl/kstat/zfs/arcstats ]; then
-    arc=$(awk '$1 == "size" { s = $3 } $1 == "c_min" { m = $3 } END { print (s > m ? int((s - m) / 1024) : 0) }' /proc/spl/kstat/zfs/arcstats)
-  fi
-  echo $(((kb + arc) / 1024))
-}
-
-# Wait in line for a slot, then hold it on fd $slot until this shell ends.
-# The line is JOBS/.queue: one file per waiting turn, named so that sorting
-# puts pipeline ones ahead, then --first ones, then the oldest, holding the
-# waiting shell's pid. A slot is a lock on JOBS/.slots/N, and N.who says
-# whose (class and project), so a turn that's killed frees its slot (and its
-# place in line) by itself. pick (pick.sh) says who has a slot. The turn is
-# first or normal, as it was started; its job's class (place, in pick.sh)
-# is asked again every pass, and its place in line, its admission and its
-# slot's N.who all go by that one answer.
-take_slot() {
-  local id=$1 n=$2 class=$3 me since seen got f fid pid i fd lk busy new LC_ALL=C
-  mkdir -p "$jobs/.queue" "$jobs/.slots"
-  since=$(date +%s)
-  case $class in first) me=1 ;; *) me=2 ;; esac
-  me="$jobs/.queue/$me-$(date +%s%N)-$id"
-  trap 'rm -f "$me" "${me%/*}/.${me##*/}.new"' EXIT
-  trap 'exit 143' TERM INT
-  while :; do
-    # Waited long enough: among the --first ones now, by when it came.
-    if [[ ${me##*/} == 2-* ]] && [ $(($(date +%s) - since)) -ge "$MAX_WAIT" ]; then
-      mv -f "$me" "${me%/*}/1-${me##*/2-}" 2>/dev/null || true
-      me="${me%/*}/1-${me##*/2-}"
-    fi
-    # Where it stands now, and in the journal if that changed while it waits.
-    IFS=$'\t' read -r class new < <(place "${me##*/}" "$jobs/$id")
-    if [ "$new" != "${me##*/}" ]; then
-      if mv -f "$me" "${me%/*}/$new" 2>/dev/null; then echo "proj: it goes as $class now" >&2; fi
-      me="${me%/*}/$new"
-    fi
-    # Published whole (a dot file, which the line skips, then renamed), so a
-    # waiter clearing out dead places never sees it without its pid. Put
-    # back if it went anyway.
-    if [ ! -e "$me" ]; then
-      echo "$$" >"${me%/*}/.${me##*/}.new"
-      mv -f "${me%/*}/.${me##*/}.new" "$me"
-    fi
-    # One waiter looks at a time, and a slot is taken only under this lock,
-    # so one it sees free stays free until it's done.
-    exec {lk}>"$jobs/.slots/.lock"
-    flock "$lk"
-    seen='' busy=''
-    for i in $(seq 1 "$MAX_JOBS"); do
-      exec {fd}>"$jobs/.slots/$i"
-      if flock -n "$fd"; then seen+="slot"$'\t'"$i"$'\t'"free"$'\n'
-      else
-        busy=1
-        seen+="slot"$'\t'"$i"$'\t'"$(cat "$jobs/.slots/$i.who" 2>/dev/null || printf -- '-\t-')"$'\n'
-      fi
-      exec {fd}>&-
-    done
-    # The line, once the places of shells that are gone are cleared.
-    for f in "$jobs/.queue"/*; do
-      [ -e "$f" ] || continue
-      fid=${f##*/}; fid=${fid#*-}; fid=${fid#*-}
-      pid=$(cat "$f" 2>/dev/null) || continue
-      if [ "$f" = "$me" ]; then
-        seen+="wait"$'\t'"$f"$'\t'"$class"
-        seen+=$'\t'"$(cat "$jobs/$id/project" 2>/dev/null)"$'\n'
-      elif [ -n "$pid" ] && tr '\0' ' ' 2>/dev/null <"/proc/$pid/cmdline" | grep -qF -- " _exec $fid "; then
-        seen+="wait"$'\t'"$f"$'\t'"$(place "${f##*/}" "$jobs/$fid" | cut -f1)"
-        seen+=$'\t'"$(cat "$jobs/$fid/project" 2>/dev/null)"$'\n'
-      else
-        rm -f "$f"
-      fi
-    done
-    got=$(printf '%s' "$seen" | pick | picked "$me")
-    # Short of memory matters only while another job runs: with nothing
-    # running, waiting frees nothing.
-    if [ -n "$got" ] && { [ -z "$busy" ] || [ "$(spare)" -ge "$MIN_FREE" ]; }; then
-      i=$got
-      exec {slot}>"$jobs/.slots/$i"
-      if flock -n "$slot"; then
-        printf '%s\t%s\n' "$class" "$(cat "$jobs/$id/project")" >"$jobs/.slots/$i.who"
-        exec {lk}>&-
-        rm -f "$me"
-        trap - EXIT TERM INT
-        echo "$i" >"$jobs/$id/$n.slot"
-        return
-      fi
-      exec {slot}>&-
-    fi
-    exec {lk}>&-
-    sleep 2
-  done
-}
-
 # OWNER/REPO N from a PR or issue URL, or OWNER/REPO#N.
 target() {
   local t=${1#https://github.com/}
@@ -538,7 +447,7 @@ fingerprint() { # repo n
 
 case "${1:-status}" in
   run | reply)
-    cmd=$1 vm='' first='' pipeline='' kick=() limit='' idle='' owned='' link='' app=''
+    cmd=$1 vm='' first='' pipeline='' unstick='' kick=() limit='' idle='' owned='' link='' app=''
     shift
     while :; do
       case ${1:-} in
@@ -571,13 +480,14 @@ case "${1:-status}" in
           ;;
         --first) first=first ;;
         --pipeline) [ "$cmd" = run ] || { echo "proj reply has no --pipeline: the job's own class is kept" >&2; exit 2; }; pipeline=1 ;;
+        --unstick) [ "$cmd" = run ] || { echo "proj reply has no --unstick: the job's own slot is kept" >&2; exit 2; }; unstick=1 ;;
         *) break ;;
       esac
       shift
     done
     if [ "$cmd" = run ]; then
-      p=${1:?usage: proj run [--vm] [--first] [--pipeline] [--timeout DUR] [--idle DUR] [--kick NAME]... [--owned] [--link URL] [--app NAME] PROJECT \"task\"}
-      task=${2:?usage: proj run [--vm] [--first] [--pipeline] [--timeout DUR] [--idle DUR] [--kick NAME]... [--owned] [--link URL] [--app NAME] PROJECT \"task\"}
+      p=${1:?usage: proj run [--vm] [--first] [--pipeline] [--unstick] [--timeout DUR] [--idle DUR] [--kick NAME]... [--owned] [--link URL] [--app NAME] PROJECT \"task\"}
+      task=${2:?usage: proj run [--vm] [--first] [--pipeline] [--unstick] [--timeout DUR] [--idle DUR] [--kick NAME]... [--owned] [--link URL] [--app NAME] PROJECT \"task\"}
       [ -d "$src/$p" ] || { echo "no such project: $src/$p" >&2; exit 1; }
       # Owned by what acts on each turn's end, which hears of it by its kick.
       [ -z "$owned" ] || [ ${#kick[@]} -gt 0 ] || { echo "proj run --owned needs a --kick: what acts on each turn's end" >&2; exit 2; }
@@ -597,6 +507,8 @@ case "${1:-status}" in
         [ -z "$why" ] || echo "proj: $id $why" >&2
       fi
       [ -z "$owned" ] || : >"$jobs/$id/owned"
+      # Every turn of it in the slot no one else's may take (slot.sh).
+      [ -z "$unstick" ] || : >"$jobs/$id/unstick"
       [ -z "$link" ] || echo "$link" >"$jobs/$id/link"
       [ -z "$app" ] || echo "$app" >"$jobs/$id/app"
       if [ -n "$vm" ]; then agent new "$p" >"$jobs/$id/agent"; fi

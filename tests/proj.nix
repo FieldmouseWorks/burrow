@@ -4,7 +4,9 @@
 # pipeline job's every turn, in one of the pipeline's own repos, takes the
 # slot kept for them when the rest are full, and one in a lead repo goes
 # ahead of the others, while one anywhere else goes as --first and says so
-# (pick.sh's own check has how origins are told apart),
+# (pick.sh's own check has how origins are told apart), that a job run
+# --unstick takes a slot of its own, every turn of it, while every other one
+# is held and turns wait in line, and waits only for another --unstick turn,
 # that a job whose turn has ended frees its slot, that one stopped after
 # its answer with work in the background has the rest of that run stopped,
 # hears so once and answers again (the turn ending as its last run did, its
@@ -583,6 +585,31 @@ pkgs.testers.runNixOSTest {
         machine.wait_until_succeeds(f"su - dev -c 'proj state {lead}' | grep -x done", timeout=120)
         proj(f"stop {a}")
         proj(f"stop {b}")
+
+    with subtest("an --unstick job takes its own slot while every other is held and others wait, every turn of it, one at a time"):
+        a = proj('run web "sleep 600"')
+        b = proj('run web "sleep 600"')
+        q = proj('run --pipeline web "sleep 600"')
+        for j in (a, b, q):
+            machine.wait_until_succeeds(f"su - dev -c 'proj state {j}' | grep -x running", timeout=120)
+        c = proj('run --first web "sleep 1"')
+        u = proj('run --unstick web "sleep 1"')
+        machine.wait_until_succeeds(f"su - dev -c 'proj state {u}' | grep -x done", timeout=120)
+        proj(f'reply {u} "sleep 600"')
+        machine.wait_until_succeeds(f"su - dev -c 'proj state {u}' | grep -x running", timeout=120)
+        machine.fail(f"""su - dev -c 'proj reply --unstick {u} "sleep 1"'""")
+        v = proj('run --unstick web "sleep 1"')
+        w = waits(lambda w: w.get(v, {}).get("unstick") is True)
+        assert w[v]["line"] and w[v]["phase"] == "turn 1 is waiting for the --unstick slot, which another --unstick turn holds", w[v]
+        assert w[c]["unstick"] is False and w[u]["unstick"] is True, (w[c], w[u])
+        time.sleep(3)
+        assert (state(c), state(v)) == ("queued", "queued"), (state(c), state(v))
+        proj(f"stop {u}")
+        machine.wait_until_succeeds(f"su - dev -c 'proj state {v}' | grep -x done", timeout=120)
+        assert state(c) == "queued", state(c)
+        for j in (a, b, q):
+            proj(f"stop {j}")
+        machine.wait_until_succeeds(f"su - dev -c 'proj state {c}' | grep -x done", timeout=120)
 
     with subtest("a pipeline job anywhere else goes as --first, and says so in proj status and its turn's journal"):
         q = proj('run --pipeline ib "sleep 1"')

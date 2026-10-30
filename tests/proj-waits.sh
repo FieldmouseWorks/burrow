@@ -32,7 +32,7 @@ case_() {
   else
     jq -e "$want" <<<"$got" >/dev/null || { echo "FAIL: wanted $want, got '$got' from: $*" >&2; exit 1; }
     # Always the watchdog's whole form.
-    jq -e 'keys == ["due", "kick", "line", "link", "phase", "since", "what"] and (.since | type) == "number"' <<<"$got" >/dev/null ||
+    jq -e 'keys == ["due", "kick", "line", "link", "phase", "since", "unstick", "what"] and (.since | type) == "number"' <<<"$got" >/dev/null ||
       { echo "FAIL: not the watchdog's form: $got" >&2; exit 1; }
   fi
 }
@@ -43,7 +43,13 @@ base=("id web-1" "turn 2" "queued 1000" "slot 2000" "ended 3000" "deadline 5600"
 case_ '.since == 1000 and .due == 8200 and .kick == null and .line == true and .what == "proj job web-1" and (.phase | test("turn 2 .*waiting in line"))' \
   "${base[@]}" "state queued"
 # An --owned job's turns wait in line like anyone's.
-case_ '.due == 8200' "${base[@]}" "state queued" "owned 1"
+case_ '.due == 8200 and .unstick == false' "${base[@]}" "state queued" "owned 1"
+# An --unstick job's say so, in line for its own slot or at work: the
+# watchdog tells the owner of its stall, as the stuck issue would only hand
+# it to itself.
+case_ '.due == 8200 and .line == true and .unstick == true and (.phase | test("turn 2 is waiting for the --unstick slot"))' \
+  "${base[@]}" "state queued" "unstick 1"
+case_ '.due == 6200 and .unstick == true' "${base[@]}" "state running" "unstick 1"
 # Running: to its deadline, and GRACE for proj to have stopped it.
 case_ '.since == 2000 and .due == 6200 and .line == false and (.phase | test("turn 2 is running$"))' "${base[@]}" "state running"
 # No timeout: nothing to hold it to.

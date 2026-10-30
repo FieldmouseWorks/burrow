@@ -568,8 +568,10 @@ def publish(digest):
         issue("digest.json", "[autoland] PRs waiting for you", CFG["notify"]["label"], CFG["notify"]["assignee"], "",
               owner, "Nothing waiting.")
         # Closed once the inbox can't take it: what's in it is the owner's then.
+        # Its job never waits in proj's line (the unstick label), which may be
+        # the very thing stuck.
         issue("stuck.json", "[autoland] Stuck in the pipeline", CFG["inbox"]["label"], "", stuck_brief(),
-              [x for x in digest if x not in owner], "Nothing stuck.")
+              [x for x in digest if x not in owner], "Nothing stuck.", also=CFG["inbox"]["unstickLabel"])
 
 
 def inbox_off():
@@ -604,9 +606,11 @@ them.
 """
 
 
-def issue(key, title, label, assignee, intro, digest, done):
+def issue(key, title, label, assignee, intro, digest, done, also=""):
     """One issue in config.notify.repo listing digest, kept up to date: each
-    new or changed entry is a comment too, and it's closed once there's none."""
+    new or changed entry is a comment too, and it's closed once there's none.
+    It's found by label, and has the label `also` as well, when there is one:
+    put back on the open one when it's gone."""
     nrepo = CFG["notify"]["repo"]
     groups = {}
     for why, line, desc in digest:
@@ -623,7 +627,7 @@ def issue(key, title, label, assignee, intro, digest, done):
     if prev.get("body") == body and C.NOW - prev.get("checked", 0) < 3600:
         return
     found = C.gh("issue", "list", "-R", nrepo, "--label", label, "--state", "open", "--search",
-                 f'"{title}" in:title', "--json", "number,body", check=False)
+                 f'"{title}" in:title', "--json", "number,body,labels", check=False)
     if not isinstance(found, list):
         return  # couldn't look (no quota?): try next pass, and don't open a second issue
     found = [i for i in found if i]
@@ -638,8 +642,11 @@ def issue(key, title, label, assignee, intro, digest, done):
         return
     full = intro + body + "\n\n_Kept up to date by autoland-steward on " + os.uname().nodename + "._"
     if not found:
-        C.gh("label", "create", label, "-R", nrepo, "--color", "B60205", check=False)
-        args = ["issue", "create", "-R", nrepo, "--label", label, "--title", title, "--body", full]
+        for name in (label, also):
+            if name:
+                C.gh("label", "create", name, "-R", nrepo, "--color", "B60205", check=False)
+        args = ["issue", "create", "-R", nrepo, "--label", label, *(["--label", also] if also else []), "--title", title,
+                "--body", full]
         if assignee:
             args += ["--assignee", assignee]
         ok = C.gh(*args, check=False) is not None
@@ -647,6 +654,9 @@ def issue(key, title, label, assignee, intro, digest, done):
         num = str(found[0]["number"])
         if found[0]["body"] != full:
             ok = C.gh("issue", "edit", num, "-R", nrepo, "--body", full, check=False) is not None
+        if also and ok and also not in {x.get("name") for x in found[0].get("labels") or []}:
+            C.gh("label", "create", also, "-R", nrepo, "--color", "B60205", check=False)
+            ok = C.gh("issue", "edit", num, "-R", nrepo, "--add-label", also, check=False) is not None
         added = [x for x in entries if x not in prev.get("entries", [])]
         if added and ok:
             ok = C.gh("issue", "comment", num, "-R", nrepo, "--body", "New:\n" + "\n".join(f"- {x}" for x in added), check=False) is not None
