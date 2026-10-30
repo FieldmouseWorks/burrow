@@ -1,0 +1,53 @@
+{
+  "conary": "note v1",
+  "change": "7wrs3gff8vh1c3erm6x36p499n",
+  "repo": {
+    "owner": "fieldmouseworks",
+    "name": "burrow"
+  },
+  "pr": 231,
+  "url": "https://github.com/fieldmouseworks/burrow/pull/231",
+  "summary": "dispatch: give its watch items the watchdog's new line field",
+  "task": "https://claude.ai/code/project/chan_01Ad4f4oDXfFTCEzLHzMTD8q?thread=cmsg_01Ad4f4oDXfFTCEzLHzMTD8qDFPv3xgW1MqoVMKU8oMt93",
+  "author": {
+    "kind": "agent",
+    "login": "TusanHomichi",
+    "session": "https://claude.ai/code/session_01BkHcyBwMUgoKzQzTrp9Qay"
+  },
+  "landing": {
+    "revision": "d51f239dd00794ceadc8f4dcee61b4504b989583dba05738c2ec8b8251c16fb2",
+    "before": "0fce5b8bdf66c5bcf0436956dcf6a708cd1e8a26",
+    "after": "0d9e10e9f3fafa530cdfed0ab2b53f9abac02334",
+    "by": {
+      "kind": "status",
+      "login": "fieldmouseworks-steward[bot]"
+    },
+    "at": 1793393470901
+  },
+  "evidence": [
+    {
+      "kind": "ci",
+      "check": "check / commits",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/41097143425/job/124205626858"
+    },
+    {
+      "kind": "review",
+      "check": "codex",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/231#pullrequestreview-5715997960"
+    },
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/41097143425/job/124205627502"
+    },
+    {
+      "kind": "ci",
+      "check": "agents",
+      "result": "pass",
+      "source": "status agents"
+    }
+  ]
+}
