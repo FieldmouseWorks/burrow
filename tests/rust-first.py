@@ -1,8 +1,10 @@
 """The shared rust-first check, its own script run with gh stood in for: a
 PR that adds Python, or grows the Python it had past the line a fix stays
 under, fails unless its body has a "Why not Rust:" line with a reason; one
-that doesn't passes whatever its body says. And every caller runs it again
-when the body is edited.
+that doesn't passes whatever its body says. The verdict is a commit status
+for the PR, which a newer run replaces, and a fork's PR, which can't post
+one, gets it as the job's result. And every caller runs it again when the
+body is edited, with a token that can post the status.
 
   python3 -I tests/rust-first.py .github/workflows/rust-first-check.yml \\
     .github/workflows/rust-first.yml templates/project/.github/workflows/rust-first.yml
@@ -21,7 +23,8 @@ import yaml
 workflow = yaml.safe_load(open(sys.argv[1]))
 job = workflow["jobs"]["python"]
 assert job["if"] == "github.event_name == 'pull_request'", job["if"]
-assert job["permissions"] == {"contents": "read", "pull-requests": "read"}, job["permissions"]
+PERMISSIONS = {"contents": "read", "pull-requests": "read", "statuses": "write"}
+assert job["permissions"] == PERMISSIONS, job["permissions"]
 growth_default = workflow[True]["workflow_call"]["inputs"]["growth"]["default"]
 step = next(s for s in job["steps"] if s.get("id") == "python")
 assert step["shell"] == "bash"
@@ -35,31 +38,40 @@ for caller in sys.argv[2:]:
     assert set(on["types"]) == {"opened", "edited", "reopened", "synchronize"}, (caller, on)
     (called,) = c["jobs"].values()
     assert called["uses"].split("@")[0].endswith(".github/workflows/rust-first-check.yml"), (caller, called)
-    assert called["permissions"] == {"contents": "read", "pull-requests": "read"}, (caller, called)
+    assert called["permissions"] == PERMISSIONS, (caller, called)
 
 tmp = tempfile.mkdtemp()
 script = os.path.join(tmp, "python.sh")
 open(script, "w").write(step["run"])
 
-# gh as the job calls it: the PR, its files (--paginate: every page, one
-# after another), the merge base (--jq) and a file's raw content at a commit,
-# answered from files under tmp; every call logged.
+# gh as the job calls it: the PR (and its body alone, with --jq, as it is
+# when the verdict is made), its files (--paginate: every page, one after
+# another), the merge base (--jq), a file's raw content at a commit, answered
+# from files under tmp; and the status it posts, kept as a JSON line. Every
+# call logged.
 bin_dir = os.path.join(tmp, "bin")
 os.mkdir(bin_dir)
 gh = os.path.join(bin_dir, "gh")
 open(gh, "w").write("#!" + shutil.which("bash") + r"""
 echo "$*" >> "$GH_LOG"
 [ -z "$GH_FAIL" ] || exit 1
-path= expr=
+path= expr= method=GET fields=()
 while [ $# -gt 0 ]; do
   case $1 in
     api | --paginate) ;;
     --jq) expr=$2; shift ;;
     -H) [ "$2" = 'Accept: application/vnd.github.raw' ] || exit 2; shift ;;
+    -X) method=$2; shift ;;
+    -f) fields+=("$2"); shift ;;
     *) path=$1 ;;
   esac
   shift
 done
+if [ "$method" != GET ] || [ ${#fields[@]} -gt 0 ]; then
+  [ "$method $path" = 'POST repos/sam/r/statuses/4ead' ] || exit 4
+  exec jq -cn '$ARGS.positional | map(index("=") as $i | {(.[:$i]): .[$i + 1:]}) | add' --args "${fields[@]}" \
+    >> "$STATUSES"
+fi
 case $path in
   */files\?per_page=100) f=$FILES ;;
   repos/sam/r/compare/ba5e...4ead\?per_page=1) f=$COMPARE ;;
@@ -69,7 +81,7 @@ case $path in
     f=$TREES/${p##*\?ref=}/$(printf '%b' "$(sed 's/%/\\x/g' <<<"$raw")")
     [ -f "$f" ] || exit 1
     ;;
-  repos/sam/r/pulls/7) f=$PR ;;
+  repos/sam/r/pulls/7) f=$PR; [ -z "$expr" ] || f=$PR_NOW ;;
   *) exit 3 ;;
 esac
 if [ -n "$expr" ]; then exec jq -r "$expr" "$f"; fi
@@ -85,10 +97,15 @@ def change(status, filename, added=0, removed=0, previous=None):
     return f
 
 
-def run(files, body="", trees=None, growth=growth_default, fail=False, changed=None):
+def run(files, body="", trees=None, growth=growth_default, fail=False, changed=None, fork=False, body_then=None):
+    """The job on a PR whose body is `body` when the verdict is made, and
+    `body_then` (the same unless given) when the job first reads the PR."""
     pr = os.path.join(tmp, "pr.json")
-    json.dump({"body": body, "head": {"sha": "4ead"}, "base": {"sha": "ba5e"},
-               "changed_files": len(files) if changed is None else changed}, open(pr, "w"))
+    head_repo = None if fork is None else {"full_name": "fork/r" if fork else "sam/r"}
+    json.dump({"body": body if body_then is None else body_then, "head": {"sha": "4ead", "repo": head_repo},
+               "base": {"sha": "ba5e"}, "changed_files": len(files) if changed is None else changed}, open(pr, "w"))
+    pr_now = os.path.join(tmp, "pr-now.json")
+    json.dump({"body": body}, open(pr_now, "w"))
     # Two to a page, as gh --paginate prints pages: one JSON array after another.
     listed = os.path.join(tmp, "files.json")
     open(listed, "w").write("".join(json.dumps(files[i:i + 2]) for i in range(0, len(files), 2)) or "[]")
@@ -101,32 +118,55 @@ def run(files, body="", trees=None, growth=growth_default, fail=False, changed=N
             full = os.path.join(tree_dir, sha, path)
             os.makedirs(os.path.dirname(full), exist_ok=True)
             open(full, "w").write(text)
-    log = os.path.join(tmp, "gh.log")
-    if os.path.exists(log):
-        os.remove(log)
+    log, statuses = os.path.join(tmp, "gh.log"), os.path.join(tmp, "statuses")
+    for f in (log, statuses):
+        if os.path.exists(f):
+            os.remove(f)
     runner_temp = os.path.join(tmp, "runner")
     shutil.rmtree(runner_temp, ignore_errors=True)
     os.mkdir(runner_temp)
-    env = {"PATH": bin_dir + os.pathsep + os.environ["PATH"], "PR": pr, "FILES": listed, "COMPARE": compare, "TREES": tree_dir,
-           "GH_LOG": log, "GH_FAIL": "1" if fail else "", "GH_TOKEN": "t", "GITHUB_REPOSITORY": "sam/r",
-           "NUMBER": "7", "GROWTH": str(growth), "RUNNER_TEMP": runner_temp}
+    env = {"PATH": bin_dir + os.pathsep + os.environ["PATH"], "PR": pr, "PR_NOW": pr_now, "FILES": listed,
+           "COMPARE": compare, "TREES": tree_dir, "GH_LOG": log, "STATUSES": statuses, "GH_FAIL": "1" if fail else "",
+           "GH_TOKEN": "t", "GITHUB_REPOSITORY": "sam/r", "GITHUB_SERVER_URL": "https://github.example",
+           "GITHUB_RUN_ID": "99", "NUMBER": "7", "GROWTH": str(growth), "RUNNER_TEMP": runner_temp}
     # GitHub runs `shell: bash` as this.
     p = subprocess.run([shutil.which("bash"), "--noprofile", "--norc", "-eo", "pipefail", script],
                        env=env, capture_output=True, text=True)
     calls = open(log).read().splitlines() if os.path.exists(log) else []
-    return p.returncode, p.stdout + p.stderr, calls
+    posted = [json.loads(line) for line in open(statuses)] if os.path.exists(statuses) else []
+    return p.returncode, p.stdout + p.stderr, calls, posted
+
+
+def status(state, posted):
+    """The one status a run posted: `state`, for this PR, linking the run."""
+    assert len(posted) == 1, posted
+    (s,) = posted
+    assert s["state"] == state and s["context"] == "rust-first (#7)", s
+    assert s["target_url"] == "https://github.example/sam/r/actions/runs/99", s
+    assert 0 < len(s["description"]) <= 140, s
 
 
 def fails(files, body="", **kw):
-    rc, out, _ = run(files, body, **kw)
+    """It fails: the job passes, posting a failed status, or for a fork's PR
+    fails, posting none. The error names what it wants."""
+    rc, out, _, posted = run(files, body, **kw)
     errors = [line for line in out.splitlines() if line.startswith("::error")]
-    assert rc == 1 and len(errors) == 1 and "Why not Rust:" in errors[0], (files, body, rc, out)
+    assert len(errors) == 1 and "Why not Rust:" in errors[0], (files, body, rc, out)
+    if kw.get("fork", False) is not False:
+        assert rc == 1 and not posted, (files, body, rc, out, posted)
+    else:
+        assert rc == 0, (files, body, rc, out)
+        status("failure", posted)
     return errors[0]
 
 
 def passes(files, body="", **kw):
-    rc, out, calls = run(files, body, **kw)
+    rc, out, calls, posted = run(files, body, **kw)
     assert rc == 0 and "::error" not in out, (files, body, rc, out)
+    if kw.get("fork", False) is not False:
+        assert not posted, posted
+    else:
+        status("success", posted)
     return out, calls
 
 
@@ -136,15 +176,17 @@ REASON = "Why not Rust: a throwaway script for one migration."
 # now, every page of its files.
 _, calls = passes([change("modified", "src/main.rs", 300, 10), change("added", "docs/x.md", 40)])
 assert calls[0] == "api repos/sam/r/pulls/7", calls
-assert calls[1:] == ["api --paginate repos/sam/r/pulls/7/files?per_page=100"], calls
+assert calls[1] == "api --paginate repos/sam/r/pulls/7/files?per_page=100", calls
+assert calls[2].startswith("api -X POST repos/sam/r/statuses/4ead "), calls
+assert len(calls) == 3, calls
 print("no Python: ok")
 
 # The case it's for: a new Python file and no reason. It fails, and names
 # neither the files nor anything from the body in the error.
 error = fails([change("added", "tools/new_tool.py", 120)], "Adds a tool.\n\n::warning::from the body")
 assert "new_tool" not in error and "from the body" not in error, error
-rc, out, _ = run([change("added", "tools/new_tool.py", 120)], "::warning::from the body")
-assert "::warning::from the body" not in out, out
+_, out, _, posted = run([change("added", "tools/new_tool.py", 120)], "::warning::from the body")
+assert "::warning::from the body" not in out and "from the body" not in posted[0]["description"], (out, posted)
 print("a new Python file without a reason fails: ok")
 
 # With the line it passes, however the line is written: in the middle of the
@@ -205,8 +247,9 @@ for odd in ("my dir/run 100%", "bin/we\\ird", "bin/tab\there", "bin/new\nline"):
     passes([change("removed", odd, 0, 5)], trees={"3e7b": {odd: "#! /usr/bin/env python\n"}})
 # And printed quoted: a name can't start a line of its own, where the runner
 # would take it for a workflow command.
-rc, out, _ = run([change("added", "tools/a\n::warning::b.py", 5)])
-assert rc == 1 and not any(line.startswith("::warning") for line in out.splitlines()), out
+_, out, _, posted = run([change("added", "tools/a\n::warning::b.py", 5)])
+assert not any(line.startswith("::warning") for line in out.splitlines()), out
+status("failure", posted)
 print("Python by its shebang: ok")
 
 # A file that changes language, by its name or its shebang, counts as the
@@ -227,10 +270,25 @@ print("a file list GitHub cut short: ok")
 
 # GitHub not answering fails it, a file's content included: no answer is no
 # verdict, never "not Python".
-rc, out, _ = run([change("added", "tools/new_tool.py", 120)], REASON, fail=True)
-assert rc != 0, out
-rc, out, _ = run([change("added", "bin/wend", 80)], REASON, trees={})
-assert rc != 0 and "the body says" not in out, out
-rc, out, _ = run([change("removed", "bin/wend", 0, 80)], REASON, trees={"ba5e": {"bin/wend": PY}})
-assert rc != 0 and "the body says" not in out, out
+rc, out, _, posted = run([change("added", "tools/new_tool.py", 120)], REASON, fail=True)
+assert rc != 0 and not posted, out
+rc, out, _, posted = run([change("added", "bin/wend", 80)], REASON, trees={})
+assert rc != 0 and "the body says" not in out and not posted, out
+rc, out, _, posted = run([change("removed", "bin/wend", 0, 80)], REASON, trees={"ba5e": {"bin/wend": PY}})
+assert rc != 0 and "the body says" not in out and not posted, out
 print("no answer from GitHub: ok")
+
+# The body is read for the verdict when it's made, not when the run began: a
+# run that started before an edit can't post after the edit's own run and put
+# back the old verdict.
+passes([change("added", "tools/new_tool.py", 120)], REASON, body_then="")
+fails([change("added", "tools/new_tool.py", 120)], "", body_then=REASON)
+print("the body as it is at the verdict: ok")
+
+# A fork's PR (or one whose fork is gone) runs with a token that can't post
+# a status: the job's result is its verdict, and nothing is posted.
+for fork in (True, None):
+    fails([change("added", "tools/new_tool.py", 120)], fork=fork)
+    passes([change("added", "tools/new_tool.py", 120)], REASON, fork=fork)
+    passes([change("modified", "src/main.rs", 1, 1)], fork=fork)
+print("a fork's PR: ok")

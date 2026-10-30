@@ -102,12 +102,8 @@ for d in "$src"/*/; do
       title=$(jq -r .title <<<"$pr")
       branch=$(jq -r .headRefName <<<"$pr")
       # Each check but the steward's own, green, pending or red as the
-      # steward reads it (ci_state in ../autoland/prs.py), so a head
-      # neither calls the other's is never left between them. One
-      # difference: this counts every run of a check, where the steward
-      # counts only the newest attempt of a job run again on the same head
-      # (gh's list doesn't carry what tells attempts apart). That only ever
-      # reads a head redder than the steward does: a fix job at worst.
+      # steward reads it (ci_state in ../autoland/steward.py), so a head
+      # neither calls the other's is never left between them.
       # A proof the steward runs on a machine (proofJobs) is no CI to wait
       # for: a major's job runs it itself.
       ci=$(jq -c --argjson proofs "$proofnames" '[.statusCheckRollup[]? | select((.context // .name) != $settled)

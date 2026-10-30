@@ -44,7 +44,7 @@ query($owner: String!, $name: String!, $cursor: String) {
         commits(last: 1) {
           nodes { commit { oid statusCheckRollup { contexts(first: 100) { pageInfo { hasNextPage } nodes {
             __typename
-            ... on CheckRun { name status conclusion databaseId checkSuite { workflowRun { event workflow { databaseId } } } }
+            ... on CheckRun { name status conclusion }
             ... on StatusContext { context state description creator { login __typename } }
           } } }
           checkSuites(first: 100) { pageInfo { hasNextPage } nodes { conclusion workflowRun { workflow { name } } } } } }
@@ -98,19 +98,6 @@ def open_prs(owner, name):
     return info, prs
 
 
-def attempt(check):
-    """Which check a check run is an attempt at, and its place among them: a
-    job of one workflow, by the workflow's id, the event it ran for and the
-    job's name, in the order GitHub created them (its id). None for a run
-    without all of that (another App's, say): a check of its own, which
-    nothing supersedes."""
-    run = (check.get("checkSuite") or {}).get("workflowRun") or {}
-    workflow = (run.get("workflow") or {}).get("databaseId")
-    if workflow is None or not run.get("event") or check.get("databaseId") is None:
-        return None
-    return (workflow, run["event"], check["name"]), check["databaseId"]
-
-
 def ci_state(pr, proofs=()):
     """green / pending / red / none (no checks at all) over every check on
     the head except ours, and the names of the ones that aren't green. A
@@ -120,9 +107,7 @@ def ci_state(pr, proofs=()):
     only its suite: red, or a broken workflow would read as no CI. The merge
     train's status is its word on the PR, not a check of it, except its
     failure: CI failed on the head merged alone onto the default branch, which
-    is the head's to fix. Only the App's counts, as with ours. A workflow's job
-    that ran again on the same head for the same event (a rerun, or a run an
-    edited body started) counts only its newest attempt."""
+    is the head's to fix. Only the App's counts, as with ours."""
     nodes = pr["commits"]["nodes"]
     commit = nodes[0]["commit"] if nodes else {}
     contexts = (commit.get("statusCheckRollup") or {}).get("contexts") or {}
@@ -136,14 +121,8 @@ def ci_state(pr, proofs=()):
             seen += 1
             workflow = ((s.get("workflowRun") or {}).get("workflow") or {}).get("name") or "a workflow"
             red.append(f"{workflow} (failed to start)")
-    newest = {}
-    for c in contexts.get("nodes", []):
-        if c["__typename"] == "CheckRun" and (a := attempt(c)):
-            newest[a[0]] = max(newest.get(a[0], a[1]), a[1])
     for c in contexts.get("nodes", []):
         if c["__typename"] == "CheckRun":
-            if (a := attempt(c)) and a[1] < newest[a[0]]:
-                continue
             seen += 1
             name = c["name"]
             if c["status"] != "COMPLETED":

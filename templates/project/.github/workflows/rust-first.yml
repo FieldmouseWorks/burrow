@@ -12,5 +12,6 @@ jobs:
     permissions:
       contents: read
       pull-requests: read
+      statuses: write
     # On a self-hosted NixOS runner (a private repo out of hosted minutes):
     # with: { runner: remi }

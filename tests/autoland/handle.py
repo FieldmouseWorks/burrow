@@ -580,33 +580,6 @@ assert len(JOBS) == 1 and "CI is red (flake (failed to start))" in JOBS[0], (sta
 many_suites = clean(checks=[], suites=broken)
 many_suites["commits"]["nodes"][0]["commit"]["checkSuites"]["pageInfo"]["hasNextPage"] = True
 assert H.ci_state(many_suites) == ("pending", ["over 100 checks, too many to read"])
-
-
-# A workflow's job run again on the same head for the same event (a run an
-# edited body started, say) counts its newest attempt only, by the order
-# GitHub created them, whenever they started: red then green is green, green
-# then red is red, and a newer one still queued is pending.
-def ran(conclusion, n, workflow=7, event="pull_request", status="COMPLETED", at="2026-10-30T20:00:00Z"):
-    return {"__typename": "CheckRun", "name": "rust-first / python", "status": status, "conclusion": conclusion,
-            "databaseId": n, "startedAt": at,
-            "checkSuite": {"workflowRun": {"event": event, "workflow": {"databaseId": workflow}}}}
-
-
-fixed = [ran("FAILURE", 1), ran("SUCCESS", 2)]
-assert H.ci_state(clean(checks=fixed)) == ("green", []), H.ci_state(clean(checks=fixed))
-assert H.ci_state(clean(checks=fixed[::-1])) == ("green", [])
-assert H.ci_state(clean(checks=[ran("SUCCESS", 1), ran("FAILURE", 2)])) == ("red", ["rust-first / python"])
-assert H.ci_state(clean(checks=[*fixed, ran(None, 3, status="QUEUED")])) == ("pending", ["rust-first / python"])
-assert H.ci_state(clean(checks=[ran("SUCCESS", 1, at="2026-10-30T21:00:00Z"), ran("FAILURE", 2)])) == \
-    ("red", ["rust-first / python"])
-assert H.ci_state(clean(checks=[ran("SKIPPED", 1, at=None), ran("FAILURE", 2, at=None)])) == \
-    ("red", ["rust-first / python"])
-# Anything else is a check of its own, red when it's red: another workflow's
-# job of the same name, the same job run for another event (a push, which
-# tests another tree), and a run without its workflow or id (another App's).
-for apart in (ran("FAILURE", 1, workflow=8), ran("FAILURE", 1, event="push"),
-              {**ran("FAILURE", 1), "checkSuite": {"workflowRun": None}}, {**ran("FAILURE", 1), "databaseId": None}):
-    assert H.ci_state(clean(checks=[apart, ran("SUCCESS", 2)])) == ("red", ["rust-first / python"]), apart
 fresh_pr_state()
 run(clean(checks=[]), 700)
 # CI that shows up while the judge works doesn't pass it by: its verdict on

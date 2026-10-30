@@ -681,9 +681,9 @@
         '';
         # The shared rust-first check (rust-first-check.yml), its own script
         # with a stand-in for gh: a PR that adds Python, or grows it past what
-        # a fix adds, fails without a "Why not Rust:" line in its body; and
-        # its callers, burrow's and the template's, run it again when the body
-        # is edited.
+        # a fix adds, fails without a "Why not Rust:" line in its body, as a
+        # commit status a newer run replaces; and its callers, burrow's and
+        # the template's, run it again when the body is edited.
         rust-first = pkgs.runCommand "rust-first-check" { nativeBuildInputs = [ (pkgs.python3.withPackages (p: [ p.pyyaml ])) pkgs.jq ]; } ''
           python3 -I ${./tests/rust-first.py} ${./.github/workflows/rust-first-check.yml} \
             ${./.github/workflows/rust-first.yml} ${./templates/project/.github/workflows/rust-first.yml}

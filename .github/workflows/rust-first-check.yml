@@ -6,8 +6,16 @@
 # it's a workflow of its own rather than a job in flake-check.yml: an edited
 # body would rerun the whole gate.
 #
+# The verdict is a commit status on the PR's head, `rust-first (#N)`, rather
+# than the job's result. Each run is a workflow run of its own, and a failed
+# run's check stays on the head beside every newer one, so a fixed body would
+# still show red; a commit keeps one status per context, the newest. The PR's
+# number in the context keeps another PR at the same commit from replacing
+# it. A fork's PR runs with a token that can't post a status, so there the
+# job's own result is the verdict, and it's the owner's to merge anyway.
+#
 # Called from a repo's own workflow with `uses:`, whose job grants
-# `contents: read` and `pull-requests: read`.
+# `contents: read`, `pull-requests: read` and `statuses: write`.
 name: rust-first-check
 on:
   workflow_call:
@@ -30,6 +38,7 @@ jobs:
     permissions:
       contents: read
       pull-requests: read
+      statuses: write
     steps:
       - id: python
         shell: bash
@@ -38,9 +47,9 @@ jobs:
           NUMBER: ${{ github.event.pull_request.number }}
           GROWTH: ${{ inputs.growth }}
         run: |
-          # The PR as it is now, not as the event saw it: a body edited since
-          # counts. Its files, every page, with what each adds and takes out,
-          # one NUL-ended field each, so a path comes through byte for byte.
+          # The PR as it is now, not as the event saw it. Its files, every
+          # page, with what each adds and takes out, one NUL-ended field
+          # each, so a path comes through byte for byte.
           pr="repos/$GITHUB_REPOSITORY/pulls/$NUMBER"
           gh api "$pr" > "$RUNNER_TEMP/pr.json"
           head=$(jq -r .head.sha "$RUNNER_TEMP/pr.json")
@@ -112,18 +121,28 @@ jobs:
           done < "$RUNNER_TEMP/files"
           echo "lines added to the Python it already had, net: $growth (more than $GROWTH needs a reason)"
 
-          if [ "$listed" -lt "$changed" ]; then
-            echo "GitHub lists $listed of its $changed files, so the rest could be Python"
-          elif [ "$new" -eq 0 ] && [ "$growth" -le "$GROWTH" ]; then
-            echo "no new Python to say why about"
-            exit 0
+          # The verdict. The body is read for it only now, so an edit made
+          # while this ran counts: a run that started before the edit can't
+          # post after the edit's own run and put back the old verdict.
+          state=success why="no new Python to say why about"
+          if [ "$listed" -lt "$changed" ] || [ "$new" -gt 0 ] || [ "$growth" -gt "$GROWTH" ]; then
+            [ "$listed" -ge "$changed" ] || echo "GitHub lists $listed of its $changed files, so the rest could be Python"
+            # The line, in any case, bold or in a list, with a reason after
+            # it. The body is only searched, never printed.
+            body=$(gh api "$pr" --jq '.body // ""' < /dev/null | tr -d '\r')
+            if grep -qiE '^[[:space:]>*_-]*why not rust[*_]*:[*_]*[[:space:]]*[^[:space:]*_]' <<<"$body"; then
+              why="the body says why it isn't Rust"
+            else
+              state=failure why="adds Python, and the body has no 'Why not Rust:' line"
+              echo "::error title=Why not Rust?::This PR adds $new Python file(s) and $growth net line(s) to the Python it had (of the $listed file(s) GitHub lists out of $changed), but its body doesn't say why it isn't Rust. The house rules want new code in Rust unless there's a reason: add a line to the PR body starting 'Why not Rust:' with it (a throwaway script, a tool still being tuned, ported once it settles). Editing the body runs this again."
+            fi
           fi
-          # The line, in any case, bold or in a list, with a reason after it.
-          # The body is only searched, never printed.
-          body=$(jq -r '.body // ""' "$RUNNER_TEMP/pr.json" | tr -d '\r')
-          if grep -qiE '^[[:space:]>*_-]*why not rust[*_]*:[*_]*[[:space:]]*[^[:space:]*_]' <<<"$body"; then
-            echo "the body says why it isn't Rust"
-            exit 0
+          echo "$why"
+          # A fork's PR can't post the status: its verdict is the job's result.
+          if [ "$(jq -r '.head.repo.full_name // ""' "$RUNNER_TEMP/pr.json")" != "$GITHUB_REPOSITORY" ]; then
+            if [ "$state" = success ]; then exit 0; fi
+            exit 1
           fi
-          echo "::error title=Why not Rust?::This PR adds $new Python file(s) and $growth net line(s) to the Python it had (of the $listed file(s) GitHub lists out of $changed), but its body doesn't say why it isn't Rust. The house rules want new code in Rust unless there's a reason: add a line to the PR body starting 'Why not Rust:' with it (a throwaway script, a tool still being tuned, ported once it settles). Editing the body runs this again."
-          exit 1
+          gh api -X POST "repos/$GITHUB_REPOSITORY/statuses/$head" -f state="$state" -f context="rust-first (#$NUMBER)" \
+            -f description="$why" -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            < /dev/null > /dev/null
