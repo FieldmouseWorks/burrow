@@ -2,8 +2,9 @@
 # (burrow.claude.package) checks that jobs past maxJobs wait in line, that
 # --first goes ahead but can't starve a turn that has waited long, that a
 # pipeline job's every turn, in one of the pipeline's own repos, takes the
-# slot kept for them when the rest are full, while one anywhere else goes as
-# --first and says so (pick.sh's own check has how origins are told apart),
+# slot kept for them when the rest are full, and one in a lead repo goes
+# ahead of the others, while one anywhere else goes as --first and says so
+# (pick.sh's own check has how origins are told apart),
 # that a job whose turn has ended frees its slot, that one stopped after
 # its answer with work in the background has the rest of that run stopped,
 # hears so once and answers again (the turn ending as its last run did, its
@@ -28,13 +29,18 @@
 { self, pkgs }:
 let
   inherit (import ./proj/stand-ins.nix { inherit pkgs; }) claude gh;
-  # autoland's list of the pipeline's own repos, which proj reads, without
-  # the rest of autoland: web is one of them here.
+  # autoland's lists of the pipeline's own repos and its lead ones, which
+  # proj reads, without the rest of autoland: web is one of the first here,
+  # and lead the only one of the second.
   pipelineRepos = {
-    options.burrow.autoland.pipelineRepos = pkgs.lib.mkOption {
-      type = pkgs.lib.types.listOf pkgs.lib.types.str;
+    options.burrow.autoland = {
+      pipelineRepos = pkgs.lib.mkOption { type = pkgs.lib.types.listOf pkgs.lib.types.str; };
+      leadRepos = pkgs.lib.mkOption { type = pkgs.lib.types.listOf pkgs.lib.types.str; };
     };
-    config.burrow.autoland.pipelineRepos = [ "O/Web" ];
+    config.burrow.autoland = {
+      pipelineRepos = [ "O/Web" ];
+      leadRepos = [ "o/Lead" ];
+    };
   };
 in
 pkgs.testers.runNixOSTest {
@@ -101,6 +107,7 @@ pkgs.testers.runNixOSTest {
     users.groups.dev.gid = 1001;
     systemd.tmpfiles.rules = [
       "d /data/dev/src/web 0755 dev dev -"
+      "d /data/dev/src/lead 0755 dev dev -"
       "d /data/dev/src/ib 0755 dev dev -"
       "d /data/dev/src/bt 0755 dev dev -"
     ];
@@ -530,6 +537,26 @@ pkgs.testers.runNixOSTest {
         assert state(q) == "running" and kicks() == ["/kick/autoland/o/s"], (state(q), kicks())
         proj(f"stop {b}")
         proj(f"stop {q}")
+
+    with subtest("a pipeline job in a lead repo goes ahead of one in another pipeline repo queued before it"):
+        machine.succeed("su - dev -c 'git -C /data/dev/src/lead init -q && git -C /data/dev/src/lead remote add origin https://github.com/o/lead.git'")
+        machine.succeed("echo '[]' >/tmp/gh/repos_o_lead_issues")
+        a = proj('run web "sleep 600"')
+        b = proj('run web "sleep 600"')
+        for j in (a, b):
+            machine.wait_until_succeeds(f"su - dev -c 'proj state {j}' | grep -x running", timeout=120)
+        q = proj('run --pipeline web "sleep 600"')
+        machine.wait_until_succeeds(f"su - dev -c 'proj state {q}' | grep -x running", timeout=120)
+        p = proj('run --pipeline web "sleep 1"')
+        time.sleep(3)
+        lead = proj('run --pipeline lead "sleep 1"')
+        time.sleep(3)
+        proj(f"stop {q}")
+        machine.wait_until_succeeds(f"su - dev -c 'proj state {p}' | grep -x done", timeout=120)
+        assert started(lead) < started(p), (started(lead), started(p))
+        assert "asked as --pipeline" not in proj("status"), proj("status")
+        proj(f"stop {a}")
+        proj(f"stop {b}")
 
     with subtest("a pipeline job anywhere else goes as --first, and says so in proj status and its turn's journal"):
         q = proj('run --pipeline ib "sleep 1"')

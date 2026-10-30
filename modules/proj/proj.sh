@@ -9,9 +9,10 @@
 #   proj run --pipeline PROJECT "task"  work on the pipeline itself: in one of
 #                               its own repos (PIPELINE, by the clone's GitHub
 #                               origin), ahead of everything, and its own
-#                               slots; in any other, as --first, and status
-#                               and the turn's journal say so (every turn of
-#                               it, either way)
+#                               slots, and in a lead one (LEAD) ahead of the
+#                               other pipeline work too; in any other, as
+#                               --first, and status and the turn's journal
+#                               say so (every turn of it, either way)
 #   proj run --kick NAME PROJECT "task"  kick NAME (HANDLER or HANDLER/OWNER/REPO,
 #                               one of burrow-events') each time a turn starts
 #                               (takes its slot) and each time one ends
@@ -45,10 +46,10 @@
 # Everything a job said is kept in JOBS/ID.
 #
 # At most MAX_JOBS turns run Claude at once, and a turn starts only with
-# MIN_FREE MiB of memory to spare; the rest wait in line (queued), pipeline
-# jobs' ahead, then --first ones, then oldest first, and a turn that has
-# waited MAX_WAIT seconds counts as --first itself, so a stream of them can't
-# starve it. PIPELINE_SLOTS of the slots are for pipeline jobs in the
+# MIN_FREE MiB of memory to spare; the rest wait in line (queued), lead
+# jobs' first, then the other pipeline jobs', then --first ones, then oldest
+# first, and a turn that has waited MAX_WAIT seconds counts as --first itself,
+# so a stream of them can't starve it. PIPELINE_SLOTS of the slots are for pipeline jobs in the
 # pipeline's own repos alone, and no project's other jobs hold more than
 # PER_PROJECT at once (pick.sh). A waiting turn is just this shell. Every turn
 # runs in SLICE, which the machine caps, so jobs can't take memory from
