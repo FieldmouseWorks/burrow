@@ -17,7 +17,8 @@ event reports):
      what each job is told), post the `review-settled` commit status and
      merge it, or list it for the owner.
   3. Once a day per repo, delete branches whose tip is already in the
-     default branch, and list the stale unmerged ones.
+     default branch or a closed PR's head, and archive the stale unmerged
+     ones under refs/archive before deleting them too.
   4. Read each repo's Renovate dashboard: what sits on it too long, short
      of a PR, goes to a Claude job (dashboard.py); and its quarantined
      flaky tests, each to a Claude job that fixes it (flakes.py).
@@ -151,7 +152,7 @@ def run_pass(kick):
                 else:
                     C.wake(repo, C.NOW + 5 * MIN)  # ends: waits.failed watches the PR it failed on
                 if CFG["cleanBranches"]:
-                    # Stale ones the last sweep found are listed every pass.
+                    # Stale ones the last sweep couldn't archive are listed every pass.
                     R.sweep_branches(r, in_use, mine, sweep=kick is None)
             except Exception as e:
                 log(f"{repo}: {e}")
