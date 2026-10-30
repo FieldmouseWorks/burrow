@@ -21,6 +21,11 @@
 //!     cancelled, so the later one takes its place on the runner. One that
 //!     has started finishes, so the branch always gets a result, and one
 //!     someone ran again is theirs. Each run is tried once in RECENT.
+//!   - A job queued for the fresh runners, more than they have idle, gets
+//!     one: registered for that one job (GitHub's JIT config) and started
+//!     as a unit of its own, whose user and state nothing ran as before,
+//!     up to `most` at once. One that sits idle for `quiet` won't take a
+//!     job, and is stopped (fresh.rs).
 //!
 //! What it waits on goes in its watch file, a stall watchdog source, so a
 //! move that didn't help is a stall like any other, and the watchdog's
@@ -31,6 +36,9 @@
 //!     their time, kicking a pass for a fresh look first. It links the
 //!     oldest job and never names it: a job's name is its workflow's, which
 //!     anyone whose PR runs one writes, and the watchdog's jobs read this.
+//!   - fresh: jobs queued for the fresh runners while there's room for
+//!     more, from the pass that first saw it so, due once a start and the
+//!     looks after it have had their time twice over.
 //!   - deploy/OWNER/REPO: commits on a watched repo's default branch that
 //!     the running system wasn't built from, from the oldest, due
 //!     `deploy.after` later, kicking HOST-update; while a run that started
@@ -44,6 +52,7 @@
 //! a pass would see and do, and what passes have done, changing nothing.
 
 pub mod config;
+pub mod fresh;
 pub mod pass;
 pub mod rules;
 pub mod snapshot;

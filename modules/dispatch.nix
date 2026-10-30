@@ -1,9 +1,10 @@
 # dispatch: what every PR waits on together, the machine's Actions runners and
 # its deploy, keeps moving (crates/burrow-dispatch). The steward sees to each
 # PR and the stall watchdog to each wait past its deadline; the dispatcher
-# restarts a runner that has stopped taking the jobs queued for it, cancels a
-# push run on a default branch that a later one has made moot before it
-# starts, and watches what the machine hasn't put live yet. Cancelling takes
+# restarts a runner that has stopped taking the jobs queued for it, starts a
+# runner fresh for one job for each job that asks for one (dispatch/fresh.nix),
+# cancels a push run on a default branch that a later one has made moot before
+# it starts, and watches what the machine hasn't put live yet. Cancelling takes
 # Actions: read and write on the machinery's App (or the user's own gh
 # login, without one). What it waits on is one of the
 # watchdog's sources, so a move that didn't help goes up the watchdog's ladder
@@ -70,6 +71,7 @@ in
     { key = "burrow/github"; imports = [ (import ./github.nix inputs) ]; }
     { key = "burrow/switch"; imports = [ (import ./switch.nix inputs) ]; }
     { key = "burrow/watchdog/sources"; imports = [ ./watchdog/sources.nix ]; }
+    ./dispatch/fresh.nix
   ];
 
   options.burrow.dispatch = {
@@ -145,6 +147,9 @@ in
         };
         switch = if config.burrow.switch.enable or false
           then { state = "/run/${prefix}-switch"; revert = "${prefix}-revert"; } else null;
+        fresh = if !cfg.fresh.enable then null else {
+          inherit (cfg.fresh) owner group repos label prefix most template configs;
+        };
       };
       description = "What burrow-dispatch reads (DISPATCH_CONFIG), as this machine has it.";
     };
@@ -184,7 +189,8 @@ in
       # A runner repo's jobs queued, started and done; a watched repo's main
       # moving.
       events = [ "workflow_job" "push" ];
-      repos = lib.unique (lib.mapAttrsToList (_: r: r.repo) cfg.runners ++ lib.optionals deploying watched);
+      repos = lib.unique (lib.mapAttrsToList (_: r: r.repo) cfg.runners
+        ++ lib.optionals cfg.fresh.enable cfg.fresh.repos ++ lib.optionals deploying watched);
       pushes = "default";
       perRepo = false;
       # A pass reads every runner repo's live runs and their jobs, some
@@ -233,14 +239,17 @@ in
       staleMinutes = 120;
     };
 
-    burrow.claude.machineMd = lib.mkOrder 1065 ''
+    burrow.claude.machineMd = lib.mkOrder 1065 (''
       ## Runners and deploys
 
       `burrow-dispatch` restarts an Actions runner (${lib.concatStringsSep ", " (lib.attrNames cfg.runners)}) that sits idle
       with jobs queued for it, at most twice in six hours; cancels a push run on a default branch that hasn't
       started once a later one of its workflow is live; and watches commits ${config.networking.hostName} hasn't put live yet.
       The waits go to the stall watchdog when they last. `burrow-dispatch status` shows what it sees and did.
-    '';
+    '' + lib.optionalString cfg.fresh.enable ''
+      For each job queued that asks for `${cfg.fresh.label}`, it starts a runner registered for that one job,
+      `${cfg.fresh.template}INSTANCE` (named `${cfg.fresh.prefix}INSTANCE`, ${toString cfg.fresh.most} at most), and stops one left idle.
+    '');
   } (lib.mkIf deploying {
     # HOST-update starting and ending moves what the deploy waits on.
     systemd.services.${update}.serviceConfig = {

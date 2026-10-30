@@ -31,6 +31,35 @@ pub struct Config {
     /// HOST-switch's state directory: a switch is in flight while it holds
     /// `pending`, and its revert unit, while that runs.
     pub switch: Option<Switch>,
+    /// Runners started fresh for one job each, when the machine has them.
+    pub fresh: Option<Fresh>,
+}
+
+/// Runners started fresh for one job each: registered just in time for it
+/// (GitHub's JIT config) with the organization's runner group, each in a
+/// unit of its own whose user and state nothing ran as before.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Fresh {
+    /// The organization they're registered with.
+    pub owner: String,
+    /// Its runner group's id.
+    pub group: u64,
+    /// OWNER/REPO, whose jobs they take.
+    pub repos: Vec<String>,
+    /// The one label each is registered with: a job that asks for it, and
+    /// for nothing else, is theirs.
+    pub label: String,
+    /// What every one's name starts with, then its instance: what a check
+    /// of where a job ran asks for.
+    pub prefix: String,
+    /// Their unit's template, as `NAME@`: each one is `NAME@INSTANCE.service`.
+    pub template: String,
+    /// The most there are at once.
+    pub most: usize,
+    /// Where a JIT config waits, as INSTANCE, for its unit to load it as a
+    /// credential: a directory only this handler's user and root can read.
+    pub configs: PathBuf,
 }
 
 /// A self-hosted runner, as it was registered.

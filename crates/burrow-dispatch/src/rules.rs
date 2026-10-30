@@ -38,6 +38,11 @@ pub enum Move {
         url: String,
         why: String,
     },
+    /// Register a runner for one job, and start its unit as this instance.
+    Fresh { instance: String, why: String },
+    /// Stop a fresh runner's unit that has sat idle: one that hasn't taken
+    /// a job in `quiet` won't.
+    Retire { unit: String, why: String },
 }
 
 impl Move {
@@ -46,12 +51,17 @@ impl Move {
         match self {
             Move::Runner { unit, verb, .. } => format!("{verb} {unit}"),
             Move::Cancel { url, .. } => format!("cancel {url}"),
+            Move::Fresh { instance, .. } => format!("start fresh runner {instance}"),
+            Move::Retire { unit, .. } => format!("stop {unit}"),
         }
     }
 
     pub fn why(&self) -> &str {
         match self {
-            Move::Runner { why, .. } | Move::Cancel { why, .. } => why,
+            Move::Runner { why, .. }
+            | Move::Cancel { why, .. }
+            | Move::Fresh { why, .. }
+            | Move::Retire { why, .. } => why,
         }
     }
 }
@@ -59,8 +69,8 @@ impl Move {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Decision {
     pub moves: Vec<Move>,
-    /// The watch file's items, by key: runner/UNIT, deploy/OWNER/REPO and
-    /// github/OWNER/REPO.
+    /// The watch file's items, by key: runner/UNIT, fresh, deploy/OWNER/REPO
+    /// and github/OWNER/REPO.
     pub items: BTreeMap<String, Item>,
     /// When its next pass should look again, for a move of its own.
     pub wake: Option<f64>,
@@ -143,6 +153,9 @@ pub fn decide(
             now,
             &mut d,
         );
+    }
+    if let (Some(f), Some(pool)) = (&cfg.fresh, &snap.fresh) {
+        crate::fresh::decide(cfg, f, pool, st, now, &mut d);
     }
     if let (Some(dep), Some((update, said))) = (&cfg.deploy, &snap.update) {
         for repo in dep.own.iter().chain(dep.running.keys()) {
@@ -331,11 +344,11 @@ fn short(sha: &str) -> &str {
     sha.get(..7).unwrap_or(sha)
 }
 
-fn book(d: &mut Decision, at: f64) {
+pub(crate) fn book(d: &mut Decision, at: f64) {
     d.wake = Some(d.wake.map_or(at, |w| w.min(at)));
 }
 
-fn jobs(n: usize) -> String {
+pub(crate) fn jobs(n: usize) -> String {
     if n == 1 {
         "1 job".into()
     } else {
@@ -399,7 +412,7 @@ mod tests {
             .iter()
             .filter_map(|m| match m {
                 Move::Runner { unit, verb, .. } => Some((unit.as_str(), *verb)),
-                Move::Cancel { .. } => None,
+                _ => None,
             })
             .collect()
     }
@@ -409,7 +422,7 @@ mod tests {
             .iter()
             .filter_map(|m| match m {
                 Move::Cancel { run, .. } => Some(*run),
-                Move::Runner { .. } => None,
+                _ => None,
             })
             .collect()
     }

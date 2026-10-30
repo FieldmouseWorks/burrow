@@ -1,14 +1,15 @@
 //! One look at what every PR waits on together: each runner, the jobs queued
-//! for it and whether it's at one; each runner repo's push runs on its
-//! default branch that haven't finished; each watched repo's commits the
-//! running system wasn't built from; and HOST-update and HOST-switch.
+//! for it and whether it's at one; the fresh runners and the jobs queued for
+//! them; each runner repo's push runs on its default branch that haven't
+//! finished; each watched repo's commits the running system wasn't built
+//! from; and HOST-update and HOST-switch.
 
 use std::collections::BTreeMap;
 use std::fs;
 
 use serde_json::Value;
 
-use crate::config::{Config, Runner};
+use crate::config::{Config, Fresh, Runner};
 use crate::world::{Unit, World};
 
 #[derive(Clone, Debug, Default)]
@@ -16,6 +17,8 @@ pub struct Snapshot {
     pub switching: bool,
     /// Each runner, by unit.
     pub runners: BTreeMap<String, Seen>,
+    /// The fresh runners, when the machine has them.
+    pub fresh: Option<Pool>,
     /// Each runner repo's push runs on its default branch that haven't
     /// finished, by OWNER/REPO, oldest first.
     pub pushes: BTreeMap<String, Vec<Run>>,
@@ -33,6 +36,17 @@ pub struct Seen {
     pub repo: String,
     pub unit: Unit,
     /// The jobs queued that it could take, oldest first.
+    pub queued: Vec<Job>,
+}
+
+/// The runners started fresh for one job each, and the jobs queued for
+/// them.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Pool {
+    /// Each one's unit, by its instance.
+    pub units: BTreeMap<String, Unit>,
+    /// The jobs queued that ask for their label, oldest first, in the repos
+    /// that could be read.
     pub queued: Vec<Job>,
 }
 
@@ -80,18 +94,22 @@ pub fn take(cfg: &Config, world: &dyn World) -> Snapshot {
         ..Snapshot::default()
     };
     let mut queues: BTreeMap<&str, Vec<Queued>> = BTreeMap::new();
-    for r in cfg.runners.values() {
-        if !queues.contains_key(r.repo.as_str()) && !snap.unread.contains_key(&r.repo) {
-            match look(world, &r.repo) {
+    let fresh_repos = cfg.fresh.iter().flat_map(|f| &f.repos);
+    for repo in cfg.runners.values().map(|r| &r.repo).chain(fresh_repos) {
+        if !queues.contains_key(repo.as_str()) && !snap.unread.contains_key(repo) {
+            match look(world, repo) {
                 Ok((q, pushes)) => {
-                    queues.insert(&r.repo, q);
-                    snap.pushes.insert(r.repo.clone(), pushes);
+                    queues.insert(repo, q);
+                    snap.pushes.insert(repo.clone(), pushes);
                 }
                 Err(e) => {
-                    snap.unread.insert(r.repo.clone(), e);
+                    snap.unread.insert(repo.clone(), e);
                 }
             }
         }
+    }
+    if let Some(f) = &cfg.fresh {
+        snap.fresh = Some(pool(world, f, &queues));
     }
     for (unit, r) in &cfg.runners {
         let Some(q) = queues.get(r.repo.as_str()) else {
@@ -147,6 +165,31 @@ pub fn take(cfg: &Config, world: &dyn World) -> Snapshot {
         }
     }
     snap
+}
+
+/// The fresh runners' units, and the jobs queued in their repos that ask
+/// for their label and nothing else.
+fn pool(world: &dyn World, f: &Fresh, queues: &BTreeMap<&str, Vec<Queued>>) -> Pool {
+    let mut queued: Vec<Job> = f
+        .repos
+        .iter()
+        .filter_map(|r| queues.get(r.as_str()))
+        .flatten()
+        .filter(|j| {
+            !j.labels.is_empty() && j.labels.iter().all(|l| l.eq_ignore_ascii_case(&f.label))
+        })
+        .map(|j| j.job.clone())
+        .collect();
+    queued.sort_by(|a, b| a.at.total_cmp(&b.at));
+    let units = world
+        .instances(&f.template)
+        .into_iter()
+        .map(|i| {
+            let unit = world.unit(&format!("{}{i}.service", f.template));
+            (i, unit)
+        })
+        .collect();
+    Pool { units, queued }
 }
 
 /// A job queued in a repo, and the labels it asks for.
@@ -344,6 +387,8 @@ pub mod tests {
         pub did: RefCell<Vec<String>>,
         pub fails: Option<String>,
         pub peek: Option<std::path::PathBuf>,
+        /// The fresh runners' instances.
+        pub instances: Vec<String>,
     }
 
     impl Fake {
@@ -390,6 +435,12 @@ pub mod tests {
         fn kick(&self, path: &str) {
             self.did.borrow_mut().push(format!("kick {path}"));
         }
+        fn instances(&self, _: &str) -> Vec<String> {
+            self.instances.clone()
+        }
+        fn fresh(&self, f: &crate::config::Fresh, instance: &str) -> Result<(), String> {
+            self.act(format!("fresh {}{instance} for {}", f.prefix, f.owner))
+        }
     }
 
     pub fn config(dir: &std::path::Path) -> Config {
@@ -413,6 +464,16 @@ pub mod tests {
                 "after": 1800.0, "run": 5400.0,
             },
             "switch": {"state": dir.join("switch"), "revert": "box-revert"},
+        }))
+        .unwrap()
+    }
+
+    /// The machine's fresh runners: for sam's sam/r and sam/f, two at most.
+    pub fn fresh(dir: &std::path::Path) -> crate::config::Fresh {
+        serde_json::from_value(json!({
+            "owner": "sam", "group": 1, "repos": ["sam/r", "sam/f"], "label": "fresh-box",
+            "prefix": "fresh-box-", "template": "fresh-runner@", "most": 2,
+            "configs": dir.join("configs"),
         }))
         .unwrap()
     }
@@ -563,6 +624,71 @@ pub mod tests {
         let snap = take(&cfg, &w);
         assert!(!snap.runners.contains_key("ci"));
         assert!(snap.unread["sam/r"].contains("page=2"), "{:?}", snap.unread);
+    }
+
+    // The fresh runners' units, and the jobs queued in their repos, one
+    // read only for them among them, that ask for their label (in any case)
+    // and nothing else, oldest first.
+    #[test]
+    fn fresh_pool() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = config(dir.path());
+        cfg.deploy = None;
+        cfg.fresh = Some(fresh(dir.path()));
+        let mut w = Fake::default();
+        for repo in ["r", "o", "f"] {
+            w.github.insert(
+                format!("repos/sam/{repo}"),
+                Ok(json!({"default_branch": "main"})),
+            );
+            for status in ["queued", "in_progress", "pending"] {
+                w.github.insert(
+                    page(&format!("repos/sam/{repo}/actions/runs?status={status}"), 1),
+                    runs(&[]),
+                );
+            }
+        }
+        w.github.insert(
+            page("repos/sam/r/actions/runs?status=queued", 1),
+            runs(&[1]),
+        );
+        w.github.insert(
+            page("repos/sam/f/actions/runs?status=queued", 1),
+            runs(&[2]),
+        );
+        w.github.insert(
+            page("repos/sam/r/actions/runs/1/jobs?filter=latest", 1),
+            Ok(json!({"jobs": [
+                job("train", "queued", "2026-10-29T17:20:00Z", &["fresh-box"]),
+                job("gate", "queued", "2026-10-29T17:00:00Z", &["self-hosted", "sam"]),
+                job("both", "queued", "2026-10-29T17:00:00Z", &["fresh-box", "sam"]),
+            ]})),
+        );
+        w.github.insert(
+            page("repos/sam/f/actions/runs/2/jobs?filter=latest", 1),
+            Ok(json!({"jobs": [job("other", "queued", "2026-10-29T17:10:00Z", &["Fresh-Box"])]})),
+        );
+        w.instances = vec!["17-0".into()];
+        w.units.insert(
+            "fresh-runner@17-0.service".into(),
+            Unit {
+                state: "active".into(),
+                since: Some(1.0),
+                busy: true,
+            },
+        );
+        let pool = take(&cfg, &w).fresh.unwrap();
+        let names: Vec<&str> = pool
+            .queued
+            .iter()
+            .map(|j| j.url.rsplit('/').next().unwrap())
+            .collect();
+        assert_eq!(names, ["other", "train"]);
+        assert_eq!(pool.units.keys().collect::<Vec<_>>(), ["17-0"]);
+        assert!(pool.units["17-0"].busy);
+        // Without them, nothing's read for them.
+        cfg.fresh = None;
+        assert!(take(&cfg, &w).fresh.is_none());
     }
 
     // A watched repo's commits past the running one: how many, the oldest's

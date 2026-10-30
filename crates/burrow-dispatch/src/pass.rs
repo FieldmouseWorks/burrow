@@ -47,11 +47,17 @@ pub fn run(cfg: &Config, world: &dyn World, now: f64) -> Result<(), String> {
                     Move::Cancel { repo, run, .. } => {
                         state.cancels.insert(format!("{repo}#{run}"), now);
                     }
+                    Move::Fresh { .. } | Move::Retire { .. } => {}
                 }
                 save(dir, "state.json", &state)?;
                 let done = match &m {
                     Move::Runner { unit, verb, .. } => world.restart(unit, verb),
                     Move::Cancel { repo, run, .. } => world.cancel(repo, *run),
+                    Move::Fresh { instance, .. } => match &cfg.fresh {
+                        Some(f) => world.fresh(f, instance),
+                        None => Err("the machine has no fresh runners".into()),
+                    },
+                    Move::Retire { unit, .. } => world.restart(unit, "stop"),
                 };
                 done.map_or_else(|e| e, |()| "ok".to_owned())
             }
@@ -91,6 +97,19 @@ fn still(world: &dyn World, m: &Move) -> Result<(), String> {
             } else if now.busy {
                 Err("it's at a job".into())
             } else if now.state != *state {
+                Err(format!("it's {} now", now.state))
+            } else {
+                Ok(())
+            }
+        }
+        // A start that turns out to be one too many is a runner stopped
+        // `quiet` later.
+        Move::Fresh { .. } => Ok(()),
+        Move::Retire { unit, .. } => {
+            let now = world.unit(unit);
+            if now.busy {
+                Err("it's at a job".into())
+            } else if now.state != "active" {
                 Err(format!("it's {} now", now.state))
             } else {
                 Ok(())
@@ -169,6 +188,26 @@ fn seen(out: &mut String, cfg: &Config, snap: &Snapshot) {
             if s.unit.busy { "at a job" } else { "idle" },
             s.queued.len()
         );
+    }
+    if let (Some(f), Some(pool)) = (&cfg.fresh, &snap.fresh) {
+        let busy = pool.units.values().filter(|u| u.busy).count();
+        let _ = writeln!(
+            out,
+            "fresh runners ({}): {} up, {busy} at a job, of {} at most; {} queued for them",
+            f.label,
+            pool.units.len(),
+            f.most,
+            pool.queued.len()
+        );
+        for (i, u) in &pool.units {
+            let _ = writeln!(
+                out,
+                "  {}{i}: {}{}",
+                f.prefix,
+                u.state,
+                if u.busy { ", at a job" } else { "" }
+            );
+        }
     }
     if let (Some((u, said)), Some(d)) = (&snap.update, &cfg.deploy) {
         let _ = writeln!(out, "{}: {}; its last run: {said}", d.unit, u.state);
@@ -331,6 +370,65 @@ mod tests {
         }
     }
 
+    // A job queued for the fresh runners gets one registered and started,
+    // logged; one left idle is stopped, unless it took a job meanwhile.
+    #[test]
+    fn fresh_runners() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = config(dir.path());
+        cfg.deploy = None;
+        cfg.runners.retain(|u, _| u == "ci");
+        cfg.fresh = Some(crate::snapshot::tests::fresh(dir.path()));
+        let mut w = repo();
+        w.github
+            .insert("repos/sam/f".into(), Ok(json!({"default_branch": "main"})));
+        for status in ["queued", "in_progress", "pending"] {
+            w.github.insert(
+                page(&format!("repos/sam/f/actions/runs?status={status}"), 1),
+                runs(&[]),
+            );
+        }
+        w.github.insert(page(QUEUED, 1), runs(&[1]));
+        w.github.insert(
+            page("repos/sam/r/actions/runs/1/jobs?filter=latest", 1),
+            Ok(json!({"jobs": [job("train", "queued", "2026-10-29T17:00:00Z", &["fresh-box"])]})),
+        );
+        let t = 1_793_293_200.0;
+        run(&cfg, &w, t).unwrap();
+        assert_eq!(
+            *w.did.borrow(),
+            ["fresh fresh-box-1793293200-0 for sam", "kick watchdog"]
+        );
+        let st: State = load(dir.path(), "state.json");
+        assert_eq!(
+            (st.log[0].what.as_str(), st.log[0].result.as_str()),
+            ("start fresh runner 1793293200-0", "ok")
+        );
+
+        // Up since, and idle: stopped once it has had its `quiet`, unless
+        // it's at a job by the second look.
+        w.instances = vec!["1793293200-0".into()];
+        let unit = "fresh-runner@1793293200-0.service";
+        w.units.insert(unit.into(), idle(t));
+        w.github.insert(page(QUEUED, 1), runs(&[]));
+        w.did.borrow_mut().clear();
+        run(&cfg, &w, t + 300.0).unwrap();
+        assert_eq!(w.did.borrow()[0], format!("stop {unit}"));
+        w.then.insert(
+            unit.into(),
+            Unit {
+                busy: true,
+                ..idle(t)
+            },
+        );
+        w.looks.borrow_mut().clear();
+        w.did.borrow_mut().clear();
+        run(&cfg, &w, t + 600.0).unwrap();
+        assert!(w.did.borrow().iter().all(|d| !d.starts_with("stop")));
+        let st: State = load(dir.path(), "state.json");
+        assert_eq!(st.log.last().unwrap().result, "not made: it's at a job");
+    }
+
     /// A machine whose switch begins, when `from`, after its first look.
     struct Switching {
         w: Fake,
@@ -359,6 +457,12 @@ mod tests {
         }
         fn kick(&self, path: &str) {
             self.w.kick(path)
+        }
+        fn instances(&self, template: &str) -> Vec<String> {
+            self.w.instances(template)
+        }
+        fn fresh(&self, f: &crate::config::Fresh, instance: &str) -> Result<(), String> {
+            self.w.fresh(f, instance)
         }
     }
 
