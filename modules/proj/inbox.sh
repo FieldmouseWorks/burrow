@@ -219,14 +219,15 @@ for repo in "${!project[@]}"; do
       post "$repo" "$n" "${body:0:60000}" || { miss "$repo"; continue 2; }
       echo "$k" >"$d/answered"
     done
-    # Labelled to wait in no line after its job started: the job is made one
-    # that doesn't (proj unstick), whatever it's doing. A turn of it still in
-    # line leaves it at its next look, every later turn takes that slot, and
-    # one running carries on.
-    if [ ! -e "$JOBS/$id/unstick" ]; then
-      lane "$(jq -c --argjson n "$n" '.[] | select(.number == $n)' <<<"$open")"
-      [ ${#lane[@]} -eq 0 ] || proj unstick "$id" || { retry "$repo"; continue; }
-    fi
+    # Labelled to wait in no line: the job is made one that doesn't (proj
+    # unstick), whatever it's doing, and again every pass. That tells the
+    # watchdog afresh, since a turn begun before the switch that brought proj
+    # unstick writes the job's waits without it, and its own stall would go
+    # back on the issue it's the job of. A turn of it still in line leaves it
+    # at its next look, every later turn takes that slot, and one running
+    # carries on.
+    lane "$(jq -c --argjson n "$n" '.[] | select(.number == $n)' <<<"$open")"
+    [ ${#lane[@]} -eq 0 ] || proj unstick "$id" || { retry "$repo"; continue; }
     case $st in queued | running) continue ;; esac
 
     # Closed, or the label taken off: done with it, and so is its job, which

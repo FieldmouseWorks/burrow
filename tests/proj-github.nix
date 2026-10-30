@@ -12,8 +12,9 @@
 # up the rest, that an issue a bot opened is the machine's work, its job
 # acting as the machinery's App, that one with the unstick label too (the
 # steward's stuck issue) has a job that waits in no line, one already waiting
-# in it leaving it once the label comes, and that a job dir removed or a wait
-# it can't read stops neither proj-inbox nor _watch.
+# in it leaving it once the label comes, the watchdog told so again each pass
+# whatever an older turn wrote, and that a job dir removed or a wait it can't
+# read stops neither proj-inbox nor _watch.
 { pkgs }:
 ''
   with subtest("a job waiting on a PR is resumed when the PR changes"):
@@ -248,12 +249,27 @@
       time.sleep(3)
       assert state(waiting) == "queued", state(waiting)
       machine.fail(f"test -e /data/dev/jobs/{waiting}/unstick")
-      # The steward's label: the same job, out of the line.
+      # The steward's label: the same job, out of the line, for the --unstick
+      # slot, held here so it waits there.
+      machine.succeed("touch /tmp/uhold")
+      machine.succeed("""(su - dev -c "flock /data/dev/jobs/.slots/unstick sh -c 'touch /tmp/uheld; while [ -e /tmp/uhold ]; do sleep 0.2; done'" >/dev/null 2>&1 &)""")
+      machine.wait_until_succeeds("test -e /tmp/uheld")
       ui["labels"].append({"name": "unstick"})
       github("repos/o/u/issues", json.dumps([ui]))
       machine.succeed("su - dev -c 'proj-inbox o/u'")
       assert inbox_jobs()["o/u#1"] == waiting, inbox_jobs()
       machine.succeed(f"test -e /data/dev/jobs/{waiting}/unstick")
+      w = waits()[waiting]
+      assert w["unstick"] is True and w["phase"] == "turn 1 is waiting for the --unstick slot, which another --unstick turn holds", w
+      # A turn begun before the switch that brought proj unstick writes the
+      # job's waits without it, as it takes a slot, waits inside its run or
+      # ends: every pass tells the watchdog again.
+      machine.succeed(f"cd /data/dev/jobs && ${pkgs.jq}/bin/jq -c 'del(.unstick)' .waits/{waiting} >/tmp/w && cp /tmp/w .waits/{waiting}"
+                      f" && ${pkgs.jq}/bin/jq -c --arg id {waiting} 'del(.items[$id].unstick)' .waits.json >/tmp/w && cp /tmp/w .waits.json")
+      assert "unstick" not in waits()[waiting], waits()[waiting]
+      machine.succeed("su - dev -c 'proj-inbox o/u'")
+      assert waits()[waiting]["unstick"] is True, waits()[waiting]
+      machine.succeed("rm /tmp/uhold /tmp/uheld")
       machine.wait_until_succeeds(f"su - dev -c 'proj state {waiting}' | grep -x done", timeout=120)
       # Labelled so from the start: so from its first turn, slots still full.
       ui2 = {**ui, "number": 2, "html_url": "https://github.com/o/u/issues/2"}
