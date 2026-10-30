@@ -301,6 +301,8 @@ def invalid_derivations():
             ('drv "x" // { drvPath = 1; }', "cannot coerce"),
             ('drv "x" // { drvPath = { outPath = "/nix/store/x.drv"; }; }', "is not a store derivation's path"),
             ('drv "x" // { drvPath = ./flake.nix; }', "is not a store derivation's path"),
+            ('drv "x" // { drvPath = { __toString = _: "/nix/store/x.drv"; outPath = (drv "x").drvPath; }; }', "is not a store derivation's path"),
+            ('drv "x" // { drvPath = { __toString = _: ./flake.nix; }; }', "is not a store derivation's path"),
             ('drv "x" // { drvPath = "/nix/store/00000000000000000000000000000000-${builtins.concatStringsSep "" (builtins.genList (_: "x") 208)}.drv"; }',
              "is not a store derivation's path")):
         ok = 'checks.${system}.ok = drv "ok";'
@@ -323,7 +325,10 @@ def valid_derivations():
     "a derivation nix flake check reads passes, its name dotted or its drvPath a path or an attribute set, wherever it is"
     for value in ('drv ".check"', 'drv "x" // { drvPath = { outPath = (drv "x").drvPath; }; }',
                   'drv "x" // { drvPath = { outPath = /. + builtins.unsafeDiscardStringContext (drv "x").drvPath; }; }',
-                  'drv "x" // { drvPath = /. + builtins.unsafeDiscardStringContext (drv "x").drvPath; }'):
+                  'drv "x" // { drvPath = /. + builtins.unsafeDiscardStringContext (drv "x").drvPath; }',
+                  'drv "x" // { drvPath = { __toString = _: /. + builtins.unsafeDiscardStringContext (drv "x").drvPath; }; }',
+                  'drv "x" // { drvPath = { __toString = _: { outPath = { __toString = _: (drv "x").drvPath; }; }; }; }',
+                  'drv "x" // { drvPath = { __toString = _: (drv "x").drvPath; outPath = "/nix/store/x.drv"; }; }'):
         for where, skip in ((f'checks.${{system}}.fake = {value};', ""), (f'checks.${{system}}.fake = {value};', "fake"),
                             (f"packages.${{system}}.fake = {value};", ""), (f"devShells.${{system}}.fake = {value};", ""),
                             (f"formatter.${{system}} = {value};", "")):
@@ -339,16 +344,35 @@ def git(d, *args):
 
 @case
 def repository_settings():
-    "the repository's own settings hold in the snapshot: a mode git is told to ignore leaves the checkout clean"
-    d = flake("""{
-      checks.${system}.meta = if self ? rev then drv "clean" else throw "seen as dirty";
-    }""")
-    git(d, "config", "core.filemode", "false")
-    os.chmod(os.path.join(d, "flake.nix"), 0o755)
-    rc, out, calls = run(d)
-    assert rc == 0, out
-    [b] = builds(calls)
-    assert "-clean.drv^*" in b, b
+    "the settings in effect hold in the snapshot, set, included or included if: a mode git is told to ignore leaves the checkout clean"
+    user = os.path.join(tmp, ".gitconfig")
+    filemode = os.path.join(tmp, "filemode.inc")
+    open(filemode, "w").write("[core]\n\tfilemode = false\n")
+    for how in ("set", "included", "included if", "the user's, included if"):
+        d = flake("""{
+          checks.${system}.meta = if self ? rev then drv "clean" else throw "seen as dirty";
+        }""")
+        if how == "set":
+            git(d, "config", "core.filemode", "false")
+        elif how == "included":
+            # Relative to the config file that includes it.
+            shutil.copy(filemode, os.path.join(d, ".git", "filemode.inc"))
+            git(d, "config", "include.path", "filemode.inc")
+        elif how == "included if":
+            git(d, "config", f"includeIf.gitdir:{d}/.path", filemode)
+        else:
+            # git init sets the repository's own, which would win.
+            git(d, "config", "--unset", "core.filemode")
+            open(user, "w").write(f'[includeIf "gitdir:{d}/"]\n\tpath = {filemode}\n')
+        os.chmod(os.path.join(d, "flake.nix"), 0o755)
+        try:
+            rc, out, calls = run(d)
+        finally:
+            if os.path.exists(user):
+                os.remove(user)
+        assert rc == 0, (how, out)
+        [b] = builds(calls)
+        assert "-clean.drv^*" in b, (how, b)
 
 
 @case
@@ -371,6 +395,29 @@ def submodules():
     assert rc == 0, out
     [b] = builds(calls)
     assert "-changed.drv^*" in b, b
+
+
+@case
+def relative_submodules():
+    "a clean checkout's submodule at a relative URL, with no remote, is fetched from beside the checkout, not the snapshot"
+    parent = tempfile.mkdtemp(dir=tmp)
+    sub = os.path.join(parent, "sub")
+    os.mkdir(sub)
+    open(os.path.join(sub, "file"), "w").write("beside")
+    git(sub, "init", "-q")
+    git(sub, "add", "file")
+    git(sub, "commit", "-qm", "sub")
+    d = flake("""{
+      checks.${system}.sub = drv (builtins.readFile ./sub/file);
+    }""", top="inputs.self.submodules = true;")
+    top = os.path.join(parent, "top")
+    os.rename(d, top)
+    git(top, "submodule", "add", "-q", "../sub", "sub")
+    git(top, "commit", "-qm", "submodule")
+    rc, out, calls = run(top)
+    assert rc == 0, out
+    [b] = builds(calls)
+    assert "-beside.drv^*" in b, b
 
 
 @case

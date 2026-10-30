@@ -132,12 +132,15 @@ jobs:
               else if !(v ? drvPath) then throw "${e.what} has no drvPath"
               else
                 let
-                  # As nix coerces a drvPath: a string as it is, a path in
-                  # the store as it is (one outside it would be copied in,
-                  # never as a .drv), an attribute set by its outPath.
+                  # As nix coerces a drvPath, copying nothing: a string as it
+                  # is, a path in the store as it is (one outside it would be
+                  # copied in, never as a .drv), an attribute set by what its
+                  # __toString gives, or else by its outPath, coerced the same
+                  # way.
                   coerce = x:
                     if builtins.isPath x then toString x
-                    else if builtins.isAttrs x && !(x ? __toString) && x ? outPath then coerce x.outPath
+                    else if builtins.isAttrs x && x ? __toString then coerce (x.__toString x)
+                    else if builtins.isAttrs x && x ? outPath then coerce x.outPath
                     else "${x}";
                   p = coerce v.drvPath;
                   name = builtins.substring (builtins.stringLength store) (builtins.stringLength p) p;
@@ -178,18 +181,39 @@ jobs:
             # is), so an edit to the checkout while the gate runs can't mix
             # two sources in one result.
             snapshot() {
-              local top=$1 to=$2 common gitdir rev ref line f
+              local top=$1 to=$2 common gitdir rev ref remote line f kv scope
               common=$(git -C "$top" rev-parse --path-format=absolute --git-common-dir)
               gitdir=$(git -C "$top" rev-parse --path-format=absolute --git-dir)
               git init -q --object-format="$(git -C "$top" rev-parse --show-object-format)" "$to"
-              cp -- "$common/config" "$to/.git/config"
-              if [ -f "$gitdir/config.worktree" ]; then cat -- "$gitdir/config.worktree" >> "$to/.git/config"; fi
-              git config -f "$to/.git/config" --unset-all core.worktree || true
+              # The settings in effect there, the user's, the repository's and
+              # the worktree's in that order, each with its includes (relative
+              # and conditional ones too) resolved where the checkout is, and
+              # frozen into the snapshot's own config, so the later ones still
+              # win.
+              : > "$to/.git/config"
+              for scope in --global --local --worktree; do
+                while IFS= read -r -d '' kv; do
+                  case $kv in
+                    *$'\n'*) set -- "${kv%%$'\n'*}" "${kv#*$'\n'}" ;;
+                    *) set -- "$kv" true ;;
+                  esac
+                  case ${1,,} in include.path | includeif.*.path | core.worktree | core.bare) continue ;; esac
+                  git config -f "$to/.git/config" --add "$1" "$2"
+                done < <(git -C "$top" config "$scope" --includes --list -z 2> /dev/null)
+              done
               git config -f "$to/.git/config" core.bare false
+              # A relative submodule URL resolves against the default remote,
+              # or with none against the work tree: the checkout's, not the
+              # snapshot's.
+              ref=$(git -C "$top" symbolic-ref -q HEAD) || ref=
+              remote=$(git -C "$top" config "branch.${ref#refs/heads/}.remote") || remote=
+              if ! git -C "$top" config "remote.${remote:-origin}.url" > /dev/null && ! git -C "$top" config remote.origin.url > /dev/null; then
+                git config -f "$to/.git/config" remote.origin.url "$top"
+              fi
               echo "$common/objects" > "$to/.git/objects/info/alternates"
               if [ -f "$common/shallow" ]; then cp -- "$common/shallow" "$to/.git/shallow"; fi
               if rev=$(git -C "$top" rev-parse -q --verify 'HEAD^{commit}'); then
-                if ref=$(git -C "$top" symbolic-ref -q HEAD); then
+                if [ -n "$ref" ]; then
                   git -C "$to" symbolic-ref HEAD "$ref"
                   git -C "$to" update-ref "$ref" "$rev"
                 else
