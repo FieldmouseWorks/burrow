@@ -13,6 +13,10 @@ repo it fails on is watched itself. One whose step keeps failing the same way
 (step.py's strike) is due at once, whatever its deadline, its phase says
 what fails, and it stays the one wait while that goes on.
 
+A Renovate PR settled green with automerge on waits on Renovate's next run
+on the repo to merge it: past renovateMergeAfter, the watchdog's kick is
+that run.
+
 Not watched: a draft, or a major renovate-sweep held for the owner (nobody
 waits on the pipeline there), and a PR this pass listed for the owner or on
 the stuck issue (it's theirs, or that issue's job's, already). One on hold
@@ -28,10 +32,11 @@ from common import CFG, MIN, load, log, repo_cfg, save
 
 # What a PR's wait is, for its deadline and the pass a stall kicks first:
 # the steward's own, a hold (no pass moves it), one renovate-sweep has (its
-# pass asks for the verdict again), or the merge train's (which steps in the
-# steward's pass).
-STEWARD, HOLD, SWEEP, TRAIN = "steward", "hold", "sweep", "train"
-STALL = {STEWARD: "stallAfter", HOLD: "holdStallAfter", SWEEP: "stallAfter", TRAIN: "trainStallAfter"}
+# pass asks for the verdict again), Renovate's merge (a run on the repo), or the
+# merge train's (which steps in the steward's pass).
+STEWARD, HOLD, SWEEP, RENOVATE, TRAIN = "steward", "hold", "sweep", "renovate", "train"
+STALL = {STEWARD: "stallAfter", HOLD: "holdStallAfter", SWEEP: "stallAfter",
+         RENOVATE: "renovateMergeAfter", TRAIN: "trainStallAfter"}
 FAILS = "the steward's pass fails on it (journalctl -u autoland)"
 
 NOTED = {}  # this pass's waits, by repo whose PRs it read, then by key (None: nothing to watch)
@@ -76,8 +81,10 @@ def note(repo, pr, phase, wait):
     if wait is None:
         NOTED.setdefault(repo, {})[key_of(repo, pr)] = None
         return
-    sweep = wait == SWEEP and CFG["watch"] and CFG["watch"]["renovateSweep"]
-    kick = None if wait == HOLD else f"renovate-sweep/{repo}" if sweep else f"autoland/{repo}"
+    # renovateSweep: Renovate runs here, and renovate-sweep with it.
+    here = CFG["watch"] and CFG["watch"]["renovateSweep"]
+    kick = (None if wait == HOLD else f"renovate-sweep/{repo}" if wait == SWEEP and here
+            else f"renovate/{repo}" if wait == RENOVATE and here else f"autoland/{repo}")
     minutes = repo_cfg(repo)[STALL[wait]]
     rev = f"{pr['headRefOid']} {pr['baseRefName']}"
     NOTED.setdefault(repo, {})[key_of(repo, pr)] = item(repo, pr, phase, minutes, kick, rev)

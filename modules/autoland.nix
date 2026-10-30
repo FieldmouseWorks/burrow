@@ -132,6 +132,9 @@ let
       # Whose dashboards they are: Renovate runs as the machine's own App,
       # else as the user (null: one of `authors`).
       renovate = if machineApp == null then null else "${machineApp.slug}[bot]";
+      # When Renovate's runs ended (updates/renovate.sh's RUNS), for an
+      # error's two runs.
+      renovateRuns = if config.burrow.updates.renovate.enable or false then "${config.burrow.updates.renovate.dir}/runs" else null;
     };
     # Quarantined flaky tests, each to a Claude job (flakes.py).
     flaky = {
@@ -152,6 +155,7 @@ let
       settleDelay = cfg.settleDelayMinutes;
       stallAfter = cfg.stallAfterMinutes;
       holdStallAfter = cfg.holdStallAfterMinutes;
+      renovateMergeAfter = cfg.renovateMergeAfterMinutes;
       directPush = false;
       ruleset = true;
       requireCi = true;
@@ -443,6 +447,16 @@ in
       '';
     };
 
+    renovateMergeAfterMinutes = mkOption {
+      type = types.ints.positive;
+      default = 60;
+      description = ''
+        How long a Renovate PR with automerge on may sit settled and green
+        before the stall watchdog takes it: a Renovate run on its repo, which
+        merges it, then a Claude job.
+      '';
+    };
+
     jobTimeoutMinutes = mkOption {
       type = types.ints.positive;
       default = 60;
@@ -520,7 +534,12 @@ in
       errorDays = mkOption {
         type = types.ints.positive;
         default = 1;
-        description = "How long an error, a problem with the repo or a failed lookup sits on the dashboard before it's stuck.";
+        description = ''
+          How long an error, a problem with the repo or a failed lookup sits on
+          the dashboard before it's stuck, at most: with Renovate on this
+          machine, one still there after two of Renovate's runs on the repo
+          is stuck then.
+        '';
       };
     };
 
@@ -643,7 +662,7 @@ in
       description = ''
         Per-repo overrides (OWNER/NAME): any of rounds, oneWay,
         handoffAfter, sessionHandoffAfter, settleDelay, stallAfter,
-        holdStallAfter (minutes), directPush,
+        holdStallAfter, renovateMergeAfter (minutes), directPush,
         ruleset (false: no baseline ruleset), requireCi (false: a PR with no
         checks at all counts as green, for a repo with nothing to test; by
         default a Claude job judges a settled PR in a repo with no CI,

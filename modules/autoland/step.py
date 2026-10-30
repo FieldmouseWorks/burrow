@@ -26,7 +26,7 @@ import train as T
 import waits
 from common import CFG, DRY, MIN, STATE, load, log, repo_cfg, save, ts
 from seal import MAJOR as MAJOR_VERDICT  # renovate-sweep's, on a Renovate major
-from touches import bot_edited, dep_kind, gate_edit, moved_from, one_way
+from touches import automerges, bot_edited, dep_kind, gate_edit, moved_from, one_way
 from tasks import DEP_SEEN, JUDGMENT, PAST_LIMIT, REVIEWED, fix_task, judge_task, proof_task
 from prs import MERGE_STEPS, ci_state, eyes, land, our_status, post_status
 
@@ -681,8 +681,11 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
         elif dep == "major":
             land_now("Major update renovate-sweep cleared, CI green")
         elif renovate and not by_train:
-            # Renovate merges its own, except the ones the train lands.
-            settle("success", "Dependency update, CI green")
+            # Renovate merges its own, except the ones the train lands, on its
+            # next run on the repo: one with automerge on that's still open
+            # past renovateMergeAfter is a stall, which that run is kicked for
+            # first (waits.py).
+            settle("success", "Dependency update, CI green", wait=waits.RENOVATE if automerges(pr) else waits.STEWARD)
         else:
             land_now("Dependency update, CI green")
         open_a_day(f"Dependency update, CI {ci}", swept=renovate)
