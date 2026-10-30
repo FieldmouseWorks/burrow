@@ -83,9 +83,14 @@ listed() {
 # Whether the project at a path is the pipeline's own: the machine's flake
 # (FLAKE), which deploys everything, wherever its origin is; or a clone of one
 # of the pipeline's own repos (PIPELINE: their OWNER/NAMEs, any case, as
-# autoland.pipelineRepos and leadRepos have them).
+# autoland.pipelineRepos and leadRepos have them). The flake is the same
+# directory however either path spells it (doubled or trailing slashes, dots,
+# symlinks); a path that's empty or isn't there is never it.
 pipeline_project() {
-  [ -z "$1" ] || [ "${1%/}" != "${FLAKE%/}" ] || return 0
+  local p f
+  if p=$(realpath -e -- "$1" 2>/dev/null) && f=$(realpath -e -- "$FLAKE" 2>/dev/null) && [ "$p" = "$f" ]; then
+    return 0
+  fi
   listed "$(github_repo "$1")" "$PIPELINE"
 }
 

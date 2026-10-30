@@ -211,4 +211,37 @@ echo "$tmp/homelab" >"$tmp/jobs/w/project"
     "w $(class "$tmp/jobs/w" normal) $tmp/homelab" "v $(class "$tmp/jobs/v" normal) $tmp/psiv" "u $(class "$tmp/jobs/u" normal) $tmp/homelab"
 )
 
+# The flake is the same directory however either side spells it: doubled and
+# trailing slashes, dots, a symlink to it. Its --pipeline job takes the
+# pipeline's slot by any of them; its plain job, and another project's, still
+# don't.
+ln -s homelab "$tmp/flake-link"
+for flake in "$tmp/homelab" "$tmp//homelab/" "$tmp/./homelab" "$tmp/jobs/../homelab" "$tmp/flake-link" "$tmp/flake-link/"; do
+  for proj in "$tmp//homelab" "$tmp/homelab/" "$tmp/./homelab" "$tmp/flake-link"; do
+    echo "$proj" >"$tmp/jobs/u/project"
+    echo "$proj" >"$tmp/jobs/w/project"
+    (
+      export PIPELINE='' LEAD='' FLAKE=$flake
+      cls u normal pipeline
+      cls v normal first
+      cls w normal normal
+      dem u ""
+      case_ "u 4" "normal $proj" "normal $proj" "normal $tmp/x" free \
+        "w $(class "$tmp/jobs/w" normal) $proj" "v $(class "$tmp/jobs/v" normal) $tmp/psiv" "u $(class "$tmp/jobs/u" normal) $proj"
+    ) || exit 1
+  done
+done
+
+# Nothing that isn't there is the flake: not an empty path on either side,
+# nor one that doesn't exist, even spelled the same.
+mkdir -p "$tmp/jobs/e"
+: >"$tmp/jobs/e/pipeline"
+for pair in "$tmp/gone|$tmp/gone" "|" "|$tmp/homelab" "$tmp/homelab|"; do
+  printf '%s\n' "${pair#*|}" >"$tmp/jobs/e/project"
+  (
+    export PIPELINE='' LEAD='' FLAKE=${pair%%|*}
+    cls e normal first
+  ) || exit 1
+done
+
 echo "proj-pick: ok"
