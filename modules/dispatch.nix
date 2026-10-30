@@ -25,7 +25,10 @@ let
   # flake's own (dirty: none), and each of its own inputs' as its flake.lock
   # pins it (one that follows another's isn't a repo of its own).
   flakeInputs = config.burrow.switch.flakeInputs;
-  lock = lib.importJSON "${flakeInputs.self}/flake.lock";
+  # Read where it is: a flake given as a path (a checkout) isn't copied to
+  # the store, which a read-only evaluation (`nix flake check --no-build`)
+  # can't do.
+  lock = lib.importJSON (flakeInputs.self.outPath + "/flake.lock");
   lockedRepo = locked:
     if (locked.type or "") == "github" then "${locked.owner}/${locked.repo}"
     else let m = builtins.match "https://github.com/([^/]+)/([^/?#]+).*" (locked.url or "");
