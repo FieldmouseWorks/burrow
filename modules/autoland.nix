@@ -35,7 +35,7 @@ let
   # What the reviewers' service runs commands with, and so what an agent
   # reads the snapshot with, and runs the repo's own checks with (python3:
   # the scripts a repo checks itself with).
-  reviewTools = with pkgs; [ bash git bubblewrap coreutils findutils gnugrep gnused diffutils ripgrep python3 ];
+  reviewTools = with pkgs; [ bash config.programs.git.package bubblewrap coreutils findutils gnugrep gnused diffutils ripgrep python3 ];
   # The machine's own /bin/sh, /bin/bash and /usr/bin/env, as an agent's
   # sandbox shows them; a machine without /bin/sh or /usr/bin/env gives the
   # sandbox none either.
