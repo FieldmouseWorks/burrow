@@ -3,8 +3,8 @@
 # pressure is left to the kernel, which kills that session alone at the
 # server's cap. Nor does a proj job pay for claude.slice reaching its
 # MemoryHigh, which slows every job under it. The same pressure anywhere oomd
-# may kill is still oomd's: a CI runner's slice outside system.slice, a login
-# session, a user's app.slice.
+# may kill is still oomd's: a CI runner's slice outside system.slice (with a
+# drop-in of its own), a login session, a slice a user made up on the spot.
 # The control watches pressure the way burrow.ops did before (the root,
 # user.slice and every slice in a user's manager, NixOS's own options) with
 # no opt-out on the server, and loses the whole server to oomd, and the job.
@@ -81,7 +81,7 @@ let
       "d /data/dev/src/busy 0755 dev dev -"
       "p /data/dev/src/busy/go 0600 dev dev -"
       "d /home/dev/session 0755 dev dev -"
-      "d /home/dev/app 0755 dev dev -"
+      "d /home/dev/build 0755 dev dev -"
       "d /home/dev/job 0755 dev dev -"
     ];
     # The test framework panics on any OOM, a cgroup's own included; a real
@@ -97,8 +97,12 @@ pkgs.testers.runNixOSTest {
     burrow.ops.enable = true;
     # proj's jobs, and whatever it says about their slice.
     burrow.proj.enable = true;
-    # A CI runner's slice of its own, beside system.slice.
-    systemd.slices.gate.description = "A CI runner";
+    # A CI runner's slice of its own, beside system.slice, set by a drop-in
+    # (NixOS's overrides.conf).
+    systemd.slices.gate = {
+      overrideStrategy = "asDropin";
+      sliceConfig.CPUWeight = 50;
+    };
     systemd.services.gate-job.serviceConfig = {
       Slice = "gate.slice";
       ExecStart = "${thrash}/bin/thrash";
@@ -186,11 +190,12 @@ pkgs.testers.runNixOSTest {
     for m in (guarded, control):
         m.succeed(f"echo >{DIR}/go")
     # The same pressure where oomd may kill: a CI runner's slice, a login
-    # session (logind's session-N.scope) and a user's app.slice.
+    # session (logind's session-N.scope) and a slice of a user's own, in one
+    # of its own.
     caps = "-p MemoryHigh=48M -p MemoryMax=256M -p MemorySwapMax=0"
     guarded.succeed("systemctl start gate-job")
     guarded.succeed(f"systemd-run --scope --unit=session-thrash.scope --slice=user-1001.slice --uid=dev {caps} sh -c 'cd /home/dev/session && exec ${thrash}/bin/thrash' >/dev/null 2>&1 &")
-    guarded.succeed(f"systemd-run --user -M dev@ --unit=app-thrash -p WorkingDirectory=/home/dev/app {caps} ${thrash}/bin/thrash")
+    guarded.succeed(f"systemd-run --user -M dev@ --unit=build-thrash --slice=build-tests.slice -p WorkingDirectory=/home/dev/build {caps} ${thrash}/bin/thrash")
     retry(lambda _: full(guarded, cgroup[guarded]) > 80, timeout_seconds=120)
 
     with subtest("the control: oomd kills the whole server, every session on it"):
@@ -210,7 +215,7 @@ pkgs.testers.runNixOSTest {
     with subtest("guarded, oomd kills the others under the same pressure"):
         for cg in ("/gate.slice/gate-job.service",
                    "/user.slice/user-1001.slice/session-thrash.scope",
-                   "/user.slice/user-1001.slice/user@1001.service/app.slice/app-thrash.service"):
+                   "/user.slice/user-1001.slice/user@1001.service/build.slice/build-tests.slice/build-thrash.service"):
             retry(lambda _: marked(guarded, cg), timeout_seconds=120)
 
     with subtest("the session goes over the server's cap, and the kernel kills it alone"):
