@@ -1,0 +1,59 @@
+{
+  "conary": "note v1",
+  "change": "73h3bj2xdyxwfyz7e71f96zkgz",
+  "repo": {
+    "owner": "fieldmouseworks",
+    "name": "burrow"
+  },
+  "pr": 183,
+  "url": "https://github.com/fieldmouseworks/burrow/pull/183",
+  "summary": "git: keep a token-only URL's token past curl 8.23",
+  "task": null,
+  "author": {
+    "kind": "person",
+    "login": "TusanHomichi",
+    "session": null
+  },
+  "landing": {
+    "revision": "86cd35a63c5411c0cd3180a346be961204030fc3570d1ca420ebb8b5cb0da262",
+    "before": "6339dae84d4d6b0cd061465848ad4e8d3aaed914",
+    "after": "04779b18aca85b3a74cac3c5cd34b23b056128da",
+    "by": {
+      "kind": "status",
+      "login": "fieldmouseworks-steward[bot]"
+    },
+    "at": 1793354080191
+  },
+  "evidence": [
+    {
+      "kind": "ci",
+      "check": "check / commits",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/40996497980/job/123870743883"
+    },
+    {
+      "kind": "review",
+      "check": "codex",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/183#pullrequestreview-5707702615"
+    },
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/40996497980/job/123870743659"
+    },
+    {
+      "kind": "ci",
+      "check": "agents",
+      "result": "fail",
+      "source": "status agents"
+    },
+    {
+      "kind": "ci",
+      "check": "agents",
+      "result": "pass",
+      "source": "status agents"
+    }
+  ]
+}
