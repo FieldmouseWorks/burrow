@@ -85,9 +85,12 @@ jobs:
   # check run names the base it chose against, and the docs lane's the
   # commit the PR left that base at too: what a PR changes depends on both,
   # so autoland counts a run only for the PR's base, and a docs lane only
-  # while the PR still leaves it there (its prs.py, LANE and DOCS_LANE).
+  # while the PR still leaves it there (its prs.py, LANE and DOCS_LANE). It
+  # runs on every PR, whatever the caller turns on, so a PR retargeted from
+  # a branch that has the docs lane to one that doesn't still gets a run
+  # autoland can tell is for its base.
   lane:
-    if: ${{ github.event_name == 'pull_request' && (!inputs.pr-gate || inputs.docs-paths != '') }}
+    if: ${{ github.event_name == 'pull_request' }}
     name: lane into ${{ github.event.pull_request.base.ref }}
     runs-on: ${{ inputs.runner }}
     permissions:

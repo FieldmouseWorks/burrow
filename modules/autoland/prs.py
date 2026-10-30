@@ -29,8 +29,8 @@ query($owner: String!, $name: String!, $cursor: String) {
     pullRequests(states: OPEN, first: 30, after: $cursor, orderBy: {field: CREATED_AT, direction: ASC}) {
       pageInfo { hasNextPage endCursor }
       nodes {
-        id number title url isDraft isCrossRepository headRefName headRefOid baseRefName baseRefOid
-        createdAt updatedAt mergeStateStatus body
+        id number title url isDraft isCrossRepository headRefName headRefOid baseRefName
+        createdAt updatedAt mergeStateStatus body baseRef { target { oid } }
         author { login __typename }
         autoMergeRequest { enabledAt }
         mergeQueueEntry { id }
@@ -200,9 +200,11 @@ FORKS = {}
 
 def fork_of(repo, pr):
     """The commit the PR's head leaves its base at now (their merge base),
-    None if GitHub didn't say. It moves when the base takes in some of the
-    PR's commits, and so does what the PR changes."""
-    key = (repo, pr.get("baseRefOid"), pr["headRefOid"])
+    None if GitHub didn't say or the base branch is gone. It moves when the
+    base takes in some of the PR's commits, and so does what the PR changes.
+    Against the branch's tip as this pass read it (baseRef), never the PR's
+    baseRefOid, which GitHub can leave at an older commit of the branch."""
+    key = (repo, ((pr.get("baseRef") or {}).get("target") or {}).get("oid"), pr["headRefOid"])
     if repo and key[1] and key not in FORKS:
         got = C.gh("api", f"repos/{repo}/compare/{key[1]}...{key[2]}?per_page=1", "--jq",
                    "{fork: .merge_base_commit.sha}", check=False)

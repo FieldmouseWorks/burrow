@@ -32,7 +32,9 @@ for name in ("docs-paths", "docs-checks"):
     assert inputs[name]["type"] == "string" and inputs[name]["default"] == "", inputs[name]
 
 lane = jobs["lane"]
-assert lane["if"] == "${{ github.event_name == 'pull_request' && (!inputs.pr-gate || inputs.docs-paths != '') }}", lane["if"]
+# On every PR, whatever the caller turns on: its check run is how autoland
+# knows which base a run judged.
+assert lane["if"] == "${{ github.event_name == 'pull_request' }}", lane["if"]
 assert lane["outputs"] == {"gate": "${{ steps.base.outputs.lands == 'true' && 'train' || "
                                    "steps.paths.outputs.docs == 'true' && 'docs' || 'full' }}",
                            "fork": "${{ steps.paths.outputs.fork }}"}, lane["outputs"]

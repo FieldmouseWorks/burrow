@@ -278,7 +278,9 @@ def acting():
     ACTING.append(C._for[-1])
 
 
-FORK = {"v": "f" * 40}  # where a PR's head leaves its base, as GitHub's compare says: None, it says nothing
+# Where a PR's head leaves its base, as GitHub's compare says, by the base's
+# tip ("v" for any other): None, it says nothing.
+FORK = {"v": "f" * 40}
 RULES = {}  # the rules on a branch of sam/r, by its name in the path: none unless set, or what GitHub raises
 PROTECTION = {}  # the same for a branch's classic protection: a 404 unless set
 
@@ -308,7 +310,8 @@ def gh_stub(*a, **k):
     if a[:2] == ("pr", "diff"):
         return PR_DIFF["v"]
     if a[:1] == ("api",) and a[1].startswith("repos/sam/r/compare/") and "{fork: .merge_base_commit.sha}" in a:
-        return {"fork": FORK["v"]} if FORK["v"] else None
+        fork = FORK.get(a[1].removeprefix("repos/sam/r/compare/").partition("...")[0], FORK["v"])
+        return {"fork": fork} if fork else None
     return ""
 
 
@@ -397,7 +400,7 @@ def mkpr(reviews=(), comments=(), threads=(), draft=False, number=5, sha=head, f
          branch="feat", title="t", checks=CI_GREEN, base="main", body="", suites=(), renames=()):
     return {
         "id": "x", "number": number, "title": title, "url": "u", "isDraft": draft, "isCrossRepository": False,
-        "headRefName": branch, "headRefOid": sha, "baseRefName": base, "baseRefOid": "b" * 40, "createdAt": T0, "updatedAt": T0, "body": body,
+        "headRefName": branch, "headRefOid": sha, "baseRefName": base, "baseRef": {"target": {"oid": "b" * 40}}, "createdAt": T0, "updatedAt": T0, "body": body,
         "mergeStateStatus": "CLEAN", "author": {"login": "sam"}, "autoMergeRequest": None, "mergeQueueEntry": None,
         "labels": {"pageInfo": {"hasNextPage": False}, "nodes": [{"name": x} for x in labels]},
         "files": {"nodes": [{"path": f, "changeType": "MODIFIED"} for f in files]},

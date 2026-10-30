@@ -98,6 +98,20 @@ for fork, why in ((G, "the base took in some of its commits"), (None, "GitHub di
     status, landed = at(clean(checks=docs(fork=F), files=("README.md",)))
     assert not landed and JOBS == [] and WAIT in status, (why, status, JOBS)
 FORK["v"] = F
+# Asked against the base branch's tip as the pass read it, not the PR's
+# baseRefOid, which GitHub can leave at an older commit: from there the
+# fork would still read as F.
+pr = clean(checks=docs(fork=F), files=("README.md",))
+pr["baseRefOid"], pr["baseRef"]["target"]["oid"] = "b" * 40, "c" * 40
+FORK["c" * 40] = G
+status, landed = at(pr)
+assert not landed and JOBS == [] and WAIT in status, (status, JOBS)
+del FORK["c" * 40]
+# A base branch that's gone has no tip to ask against.
+pr = clean(checks=docs(fork=F), files=("README.md",))
+pr["baseRef"] = None
+status, landed = at(pr)
+assert not landed and JOBS == [] and WAIT in status, (status, JOBS)
 
 # Retargeted onto `next` after its docs lane against main (or main's run run
 # again since, or another PR's on this head): that run judged another diff.
