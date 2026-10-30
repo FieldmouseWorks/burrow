@@ -65,11 +65,15 @@ pkgs.testers.runNixOSTest {
     def snapshot(name):
         machine.succeed(f"zfs snapshot {' '.join(d + '@' + name for d in datasets)}")
 
-    def notices():
-        return int(machine.succeed("journalctl -t machine-notify | grep -c 'open backup' || true"))
+    # The owner's notices (open: the backup is behind, close: it isn't), as
+    # many as the journal has so far; one is checked for by waiting for the
+    # count to go up, since the journal can have it a moment after the run
+    # that sent it has returned.
+    def notices(kind="open"):
+        return int(machine.succeed(f"journalctl -t machine-notify | grep -c '{kind} backup' || true"))
 
-    def told_owner(before):
-        machine.wait_until_succeeds(f"[ $(journalctl -t machine-notify | grep -c 'open backup') -gt {before} ]")
+    def told_owner(before, kind="open"):
+        machine.wait_until_succeeds(f"[ $(journalctl -t machine-notify | grep -c '{kind} backup') -gt {before} ]")
 
     machine.wait_for_unit("multi-user.target")
     # Passes run when the test says, not when a clock jump says.
@@ -103,15 +107,17 @@ pkgs.testers.runNixOSTest {
         # sanoid's recursive = true takes them, are none to back up.
         for i, d in enumerate(datasets):
             machine.succeed(f"zfs snapshot {d}@snap-0{i}")
+        n = notices()
         machine.fail("systemctl start machine-backup")
         machine.succeed("journalctl -u machine-backup | grep 'that all of .* have under one name'")
-        machine.succeed("journalctl -t machine-notify | grep 'open backup'")
+        told_owner(n)
         for i, d in enumerate(datasets):
             machine.succeed(f"zfs destroy {d}@snap-0{i}")
 
     with subtest("the first pass creates the repository and backs up the snapshot, not the live files"):
         snapshot("snap-1")
         machine.succeed("echo too-late >/data/dev/src/proj/after.txt")
+        n = notices("close")
         machine.succeed("systemctl start machine-backup")
         [b] = backups()
         assert b["tags"] == ["snap-1"], b
@@ -126,7 +132,7 @@ pkgs.testers.runNixOSTest {
         assert holds("snap-1") == ["burrow-backup"], holds("snap-1")
         # The live paths are as they were: the snapshot was mounted only for restic.
         machine.succeed("test -e /data/dev/src/proj/after.txt")
-        machine.succeed("journalctl -t machine-notify | grep 'close backup'")
+        told_owner(n, "close")
         # The day's upkeep ran, drill included.
         machine.succeed("test -e /var/lib/burrow/backup/maintained")
         journal = machine.succeed("journalctl -u machine-backup")
@@ -247,10 +253,11 @@ pkgs.testers.runNixOSTest {
         machine.succeed(f"echo {part} >/var/lib/burrow/backup/check-next && rm /var/lib/burrow/backup/maintained")
         machine.succeed("echo 0/2 >/var/lib/burrow/backup/damaged")
         snapshot("snap-3")
+        n = notices()
         machine.fail("systemctl start machine-backup")
         machine.succeed(f"journalctl -u machine-backup | grep 'restic check found damage reading part {part}/2'")
         assert machine.succeed("cat /var/lib/burrow/backup/damaged").split() == [f"{part}/2"]
-        machine.succeed("journalctl -t machine-notify | grep 'open backup'")
+        told_owner(n)
         # The next day backs up a new snapshot and reads the other share back
         # fine: the damage is still reported.
         machine.succeed("date -s '+1 day'")
