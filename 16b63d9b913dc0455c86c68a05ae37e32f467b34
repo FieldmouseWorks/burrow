@@ -1,0 +1,53 @@
+{
+  "conary": "note v1",
+  "change": "2nzxpwh1fhdm5xzfpverad6xkv",
+  "repo": {
+    "owner": "fieldmouseworks",
+    "name": "burrow"
+  },
+  "pr": 224,
+  "url": "https://github.com/fieldmouseworks/burrow/pull/224",
+  "summary": "proj: pick hands out every free slot in one look",
+  "task": "fieldmouseworks/burrow#222",
+  "author": {
+    "kind": "person",
+    "login": "TusanHomichi",
+    "session": null
+  },
+  "landing": {
+    "revision": "3cc763c81cd7bf08220361e4157ab2c5b75b8389b7fcc9d040b614d0b9d2a155",
+    "before": "07a911b442536d29620164fd79ed97e4cd69ca5a",
+    "after": "16b63d9b913dc0455c86c68a05ae37e32f467b34",
+    "by": {
+      "kind": "status",
+      "login": "fieldmouseworks-steward[bot]"
+    },
+    "at": 1793383240372
+  },
+  "evidence": [
+    {
+      "kind": "ci",
+      "check": "check / commits",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/41084445695/job/124161772808"
+    },
+    {
+      "kind": "review",
+      "check": "codex",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/224#pullrequestreview-5714927442"
+    },
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/41084445695/job/124161773529"
+    },
+    {
+      "kind": "ci",
+      "check": "agents",
+      "result": "pass",
+      "source": "status agents"
+    }
+  ]
+}
