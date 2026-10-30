@@ -1,16 +1,28 @@
-# Waiting in line for a slot (proj.sh's _exec), for a look at a time.
+# Waiting in line for a slot (proj.sh's _exec), for a look at a time, and what
+# a turn hands to the deployed proj.
 #
 # What a waiting turn decides with is the deployed proj's, not the one it
 # started on: at its next look after a switch it execs that one, and picks up
 # its place in line there, so a change to who goes first reaches everyone
-# waiting and take_slot and pick are always one version. All they share across
-# versions is this hand-over: `proj _exec ID CLASS`, in the same pid, with the
-# place left in JOBS/.queue under that pid, and the look's lock held on fd 9
-# until that proj is up. QUEUE_FORMAT names it, and a proj
-# that doesn't print the same one isn't handed anything (one from before this,
-# or a switch back to it): the turn stays on the proj it has.
-QUEUE_FORMAT=1
+# waiting and take_slot and pick are always one version. A running turn stays
+# on its proj, but what it tells the stall watchdog is the deployed one's too
+# (rewatch, proj.sh), so the format of a watch item has one owner. All that
+# crosses versions is these: `proj _exec ID CLASS`, in the same pid, with the
+# place left in JOBS/.queue under that pid and the look's lock held on fd 9
+# until that proj is up; and `proj _rewatch ID...`. HANDOVER_FORMAT names them,
+# and a proj that doesn't print the same one isn't handed anything (one from
+# before this, or a switch back to it): the turn stays on the proj it has.
+HANDOVER_FORMAT=1
 DEPLOYED=/run/current-system/sw/bin/proj
+
+# The deployed proj's store path, so the switch after this one can't move it
+# from under what's run, if it isn't this one and can take a hand-over.
+successor() {
+  local d
+  d=$(readlink -f "$DEPLOYED" || true)
+  [ "$d" != "$self" ] && [ -x "$d" ] && [ "$("$d" _handover_format 2>/dev/null || true)" = "$HANDOVER_FORMAT" ] || return 1
+  echo "$d"
+}
 
 # Memory to spare, in MiB: what the kernel says is available, plus what the
 # ZFS ARC would give back (the kernel doesn't count it).
@@ -34,7 +46,7 @@ spare() {
 # is asked again every pass, and its place in line, its admission and its
 # slot's N.who all go by that one answer.
 take_slot() {
-  local id=$1 n=$2 class=$3 me='' when seen got f fid pid i fd lk busy new deployed stay='' LC_ALL=C
+  local id=$1 n=$2 class=$3 me='' when seen got f fid pid i fd lk busy new deployed LC_ALL=C
   mkdir -p "$jobs/.queue" "$jobs/.slots"
   # The place a proj before this one left, if it handed over.
   for f in "$jobs/.queue"/*-"$id"; do
@@ -50,17 +62,12 @@ take_slot() {
   trap 'exit 143' TERM INT
   while :; do
     # A switch since the last look: on with the deployed proj, in this place.
-    # Its store path, so the switch after this one can't move it mid-exec.
-    deployed=$(readlink -f "$DEPLOYED" || true)
-    if [ "$deployed" != "$self" ] && [ "$deployed" != "$stay" ] && [ -x "$deployed" ]; then
-      if [ "$("$deployed" _queue_format 2>/dev/null || true)" = "$QUEUE_FORMAT" ]; then
-        # Mid-exec its cmdline reads empty, and a look clearing out dead places
-        # would take this one for gone: no look runs until it's through (_exec).
-        exec 9>"$jobs/.slots/.lock"
-        flock 9
-        exec "$deployed" _exec "$id" "$3"
-      fi
-      stay=$deployed
+    if deployed=$(successor); then
+      # Mid-exec its cmdline reads empty, and a look clearing out dead places
+      # would take this one for gone: no look runs until it's through (_exec).
+      exec 9>"$jobs/.slots/.lock"
+      flock 9
+      exec "$deployed" _exec "$id" "$3"
     fi
     # Waited long enough: among the --first ones now, by when it came.
     if [[ ${me##*/} == 2-* ]] && [ $(($(date +%s) - when / 1000000000)) -ge "$MAX_WAIT" ]; then

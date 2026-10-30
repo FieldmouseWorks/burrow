@@ -1,7 +1,8 @@
 # A switch reaches the turns already waiting for a slot: at its next look each
 # one decides by the deployed proj, in the same place in line and on the same
 # clock towards maxWait. A proj that can't take the hand-over is left alone,
-# and no look runs during one.
+# and no look runs during one. A turn already running tells the stall watchdog
+# by the deployed proj too.
 # The first deployed here has one slot, the next two.
 #
 #   nix build .#checks.x86_64-linux.proj-deployed -L
@@ -13,18 +14,21 @@ pkgs.testers.runNixOSTest {
   name = "proj-deployed";
 
   nodes.machine = { config, lib, ... }: {
-    imports = [ self.nixosModules.proj ];
+    imports = [ self.nixosModules.proj self.nixosModules.watchdog ];
     burrow = {
       claude.package = claude;
+      # On, so proj keeps its waits; it never runs here, the test reads them.
+      watchdog.enable = true;
       proj = {
         enable = true;
         maxJobs = lib.mkDefault 1;
         pipelineSlots = 0;
         maxJobsPerProject = 1;
         minFreeMemory = 0;
-        maxWait = 60;
+        maxWait = 120;
       };
     };
+    environment.systemPackages = [ pkgs.jq ];
     systemd.services.burrow-events.enable = false;
     systemd.timers.burrow-events-catch-up.enable = false;
     users.users.dev = {
@@ -38,7 +42,10 @@ pkgs.testers.runNixOSTest {
       "d /data/dev/src/ib 0755 dev dev -"
       "d /data/dev/src/bt 0755 dev dev -"
     ];
-    specialisation.next.configuration.burrow.proj.maxJobs = 2;
+    specialisation.next.configuration.burrow.proj = {
+      maxJobs = 2;
+      stallAfterMinutes = 240;
+    };
     # A proj from before the hand-over: any command but its own is refused,
     # and one that's run anyway says so.
     # A copy of the real one that says, first thing on a hand-over, whether a
@@ -63,6 +70,7 @@ pkgs.testers.runNixOSTest {
   };
 
   testScript = ''
+    import json
     import time
 
     def proj(args):
@@ -124,6 +132,7 @@ pkgs.testers.runNixOSTest {
     with subtest("a turn already waiting follows the deployed proj: the second slot goes to the head of the line"):
         # Far enough into maxWait that a clock started again here would show.
         time.sleep(max(0, 30 - (time.monotonic() - queued)))
+        handed = time.monotonic()
         deploy("next")
         machine.fail("test -e /tmp/unlocked")
         machine.wait_until_succeeds(f"su - dev -c 'proj state {q}' | grep -x running", timeout=30)
@@ -137,9 +146,19 @@ pkgs.testers.runNixOSTest {
         assert place(r) == in_line[r], (place(r), in_line[r])
 
     with subtest("its clock towards maxWait didn't start again"):
-        machine.wait_until_succeeds(f"ls /data/dev/jobs/.queue | grep -q -- '^1-.*-{r}$'", timeout=70)
-        assert time.monotonic() - queued < 80, time.monotonic() - queued
+        # maxWait from when it came, at least 30s before this hand-over: a clock
+        # started again here would run all of it from the hand-over.
+        machine.wait_until_succeeds(f"ls /data/dev/jobs/.queue | grep -q -- '^1-.*-{r}$'", timeout=125)
+        assert time.monotonic() - handed < 105, time.monotonic() - handed
         assert place(r) == in_line[r], (place(r), in_line[r])
+
+    with subtest("a turn already running tells the watchdog by the deployed proj"):
+        # Its command waiting in line: watch_run republishes, due by the
+        # stallAfterMinutes of what's deployed, not of what the turn runs.
+        machine.execute(f"su - dev -c 'cd /data/dev/jobs/{a}/1.waits && echo a lock >held && flock held sleep 20' >/dev/null 2>&1 &")
+        machine.wait_until_succeeds(f"jq -e '.items[\"{a}\"].phase | test(\"waiting in line\")' /data/dev/jobs/.waits.json", timeout=30)
+        item = json.loads(machine.succeed(f"jq -c '.items[\"{a}\"]' /data/dev/jobs/.waits.json"))
+        assert item["due"] - item["since"] == 240 * 60, item
 
     with subtest("and it takes the next slot on the new proj"):
         proj(f"stop {a}")

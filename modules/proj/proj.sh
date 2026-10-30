@@ -307,7 +307,12 @@ facts() {
 # whose dir is gone has none. Without the watchdog there's no WAITS: nothing
 # to do. Never the caller's failure: a turn goes on whether or not the
 # watchdog hears.
-rewatch() { waits "$@" || echo "proj: couldn't update the stall watchdog's waits for $*" >&2; }
+# By the deployed proj's waits, when a turn outlives a switch (slot.sh).
+rewatch() {
+  local d
+  if d=$(successor) && "$d" _rewatch "$@"; then return 0; fi
+  waits "$@" || echo "proj: couldn't update the stall watchdog's waits for $*" >&2
+}
 waits() {
   [ -n "$WAITS" ] || return 0
   local id f wl items was LC_ALL=C
@@ -734,7 +739,8 @@ Carry on from there. Anything you left in the background last turn was stopped w
       cut -f1 "$jobs/$id/await" 2>/dev/null | sed 's/#.*//; s#^#proj-watch/#' || true
     } | kick
     ;;
-  _queue_format) echo "$QUEUE_FORMAT" ;;
+  _handover_format) echo "$HANDOVER_FORMAT" ;;
+  _rewatch) shift; rewatch "$@" ;;
   _exec)
     # One turn of a job, inside its own systemd unit. Through the exec of a
     # hand-over (take_slot), if this is one: the looks can go on.
