@@ -29,6 +29,12 @@ pkgs.testers.runNixOSTest {
     imports = [ (machine null) ];
     specialisation.pinned.configuration.burrow.ops.watchdogIdentity = pkgs.lib.mkForce "i6300ESB timer";
     specialisation.soft.configuration.burrow.ops.watchdogIdentity = pkgs.lib.mkForce "Software Watchdog";
+    # Pinned, with a udev that never gets to an event. The switch restarts
+    # udevd (its rules change), so the stall has to come back with it.
+    specialisation.stalled.configuration = {
+      burrow.ops.watchdogIdentity = pkgs.lib.mkForce "i6300ESB timer";
+      systemd.services.systemd-udevd.serviceConfig.ExecStartPost = "${pkgs.systemd}/bin/udevadm control --stop-exec-queue";
+    };
   };
 
   testScript = { nodes, ... }: let
@@ -87,11 +93,10 @@ pkgs.testers.runNixOSTest {
     # Activation waits for the link while holding the lock the switch's revert
     # needs: a udev that never gets to it must fail the link, not hang there.
     with subtest("a stalled udev fails the link in bounded time"):
-        control.succeed("udevadm control --stop-exec-queue")
-        rc, out = control.execute(f"timeout 300 {base}/specialisation/pinned/bin/switch-to-configuration test 2>&1")
-        control.succeed("udevadm control --start-exec-queue")
+        rc, out = control.execute(f"timeout 300 {base}/specialisation/stalled/bin/switch-to-configuration test 2>&1")
         assert rc != 124, "the switch hung on udev"
-        assert "hardware-watchdog-link.service" in out, out
+        control.succeed("systemctl is-failed --quiet hardware-watchdog-link")
+        control.succeed("udevadm control --start-exec-queue")
         control.succeed("systemctl restart hardware-watchdog-link")
         retry(lambda _: checks(control).get("watchdog") == "ok")
         assert armed(control) == ["i6300ESB timer"], armed(control)
