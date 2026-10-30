@@ -65,10 +65,8 @@ let
     # The repos the steward covers, as it last found them; none without it.
     COVERED = if config.burrow.autoland.enable or false then "${stateDir}/autoland/repos.json" else "";
     SEAL = "${majorSeal}/bin/major-seal";
-    # When a lock file refresh lock-age refused for age only can go again,
-    # and the label that has Renovate refresh it then.
+    # When a lock file refresh lock-age refused for age only can go again.
     LOCK_WAIT = "${lockWait}/bin/lock-wait";
-    REBASE = renovateSettings.rebaseLabel or "rebase";
     # The App the jobs these start act as (proj run --app), and its bot as
     # GraphQL names it: none without burrow.github.machinery.
     APP = if machineApp == null then "" else machineApp.name;

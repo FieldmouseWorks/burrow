@@ -7,10 +7,11 @@ fix but a date: the autoland steward waits for it (step.py), and
 renovate-sweep then has Renovate refresh the branch again, which it won't by
 itself while the branch doesn't conflict.
 
-    lock-wait LOGIN <gh pr view --json comments
+    lock-wait LOGIN <gh api --paginate --slurp repos/OWNER/REPO/issues/N/comments
 
 prints when (seconds since the epoch), for renovate-sweep: LOGIN is who
-Renovate comments as. Nothing when the PR isn't such a refresh."""
+Renovate comments as, as REST spells it: an App's bot as SLUG[bot], a
+name no person's can be. Nothing when the PR isn't such a refresh."""
 
 import calendar
 import json
@@ -52,6 +53,7 @@ def ripe(comments, renovate):
 
 if __name__ == "__main__":
     login = sys.argv[1]
-    got = ripe(json.load(sys.stdin).get("comments") or [], lambda a: (a or {}).get("login") == login)
+    comments = [{"author": c.get("user"), "body": c.get("body")} for page in json.load(sys.stdin) for c in page]
+    got = ripe(comments, lambda a: bool(login) and (a or {}).get("login") == login)
     if got is not None:
         print(got)

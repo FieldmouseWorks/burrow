@@ -111,7 +111,8 @@ run(mkpr(checks=[*CI_GREEN, artifacts], comments=[refused()], **lock), 0)
 status, _ = run(mkpr(checks=[*CI_GREEN, artifacts], comments=[refused()], **lock), 7200)
 assert JOBS == [] and "old enough until Oct 27, 12:03am UTC; renovate-sweep has it refreshed then" in status, status
 for checks, comment in (([*red_ci, artifacts], refused()), ([*CI_GREEN, artifacts], refused("error: no matching package")),
-                        ([*CI_GREEN, artifacts], refused(who="mallory")), ([*CI_GREEN, artifacts], said("Not now."))):
+                        ([*CI_GREEN, artifacts], refused(who="mallory")), ([*CI_GREEN, artifacts], said("Not now.")),
+                        ([*CI_GREEN, artifacts], {**refused(), "author": {"login": "sam", "__typename": "Bot"}})):
     status, _ = run(mkpr(checks=checks, comments=[comment], **lock), 7200)
     assert JOBS == [] and "Dependency update, CI red; renovate-sweep has it" in status, (checks, comment, status)
 

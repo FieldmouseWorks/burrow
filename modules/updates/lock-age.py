@@ -321,9 +321,11 @@ def npm_entries(lock):
     return got
 
 
-def npm_cutoff(d, cutoff):
-    """The earliest of the cutoff and any npm's own config sets for the
-    directory (before, min-release-age), which --before would override."""
+def npm_cutoff(d, age):
+    """The cutoff for the directory: the earliest of the age's and any
+    npm's own config sets for it (before, min-release-age), which --before
+    would override. And the age it's relative to, or None when npm's fixed
+    before is the earliest, which no wait gets past."""
     p = run(["npm", "config", "get", "before", "min-release-age"], d)
     if p.returncode != 0:
         raise RuntimeError(f"npm config get: {p.stderr.strip()}")
@@ -331,16 +333,18 @@ def npm_cutoff(d, cutoff):
     # says undefined.
     got = {k: v for k, v in (x.split("=", 1) for x in p.stdout.splitlines() if "=" in x)
            if v not in ("null", "undefined", "")}
-    cutoffs = [cutoff]
+    if "min-release-age" in got:
+        age = max(age, dt.timedelta(days=float(got["min-release-age"])))
+    cutoff = dt.datetime.now(dt.timezone.utc) - age
     if "before" in got:
         # A JavaScript date, in the local time zone: Fri Mar 01 2024 12:30:00 GMT-0800 (...)
         m = re.match(r"\w{3} (\w{3} \d{2} \d{4} \d{2}:\d{2}:\d{2}) GMT([+-]\d{4})", got["before"])
         if not m:
             raise ValueError(f"can't read npm's before {got['before']!r}")
-        cutoffs.append(dt.datetime.strptime(" ".join(m.groups()), "%b %d %Y %H:%M:%S %z"))
-    if "min-release-age" in got:
-        cutoffs.append(dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=float(got["min-release-age"])))
-    return min(cutoffs).astimezone(dt.timezone.utc)
+        before = dt.datetime.strptime(" ".join(m.groups()), "%b %d %Y %H:%M:%S %z")
+        if before < cutoff:
+            return before.astimezone(dt.timezone.utc), None
+    return cutoff, age
 
 
 def npm_ripe(refresh, base, cutoff, age):
@@ -355,13 +359,13 @@ def npm_ripe(refresh, base, cutoff, age):
     return min((t + age for t in times if t > cutoff), default=None)
 
 
-def npm(path, cutoff, age, bad):
+def npm(path, age, bad):
     """Makes the lock file again under the cutoff. When it comes out as the
     base's, when the first of the refresh's too young releases is old
     enough."""
     d = os.path.dirname(path) or "."
     base = base_text(path)
-    cutoff = npm_cutoff(d, cutoff)
+    cutoff, age = npm_cutoff(d, age)
     with open(path) as f:
         refresh = f.read()
     os.remove(path)
@@ -382,6 +386,9 @@ def npm(path, cutoff, age, bad):
     if same_as_base(path, base):
         log(f"{path}: nothing in the refresh was old enough, so it came out as the base's, and Renovate would "
             "commit its own instead")
+        if age is None:
+            bad.append(f"{path}: npm's own before ({cutoff:%Y-%m-%d %H:%M}Z) holds the refresh back, and no wait ends that")
+            return None
         ripe = npm_ripe(refresh, base, cutoff, age)
         if ripe is None:
             bad.append(f"{path}: the refresh came out as the base's without anything too young in it")
@@ -451,7 +458,7 @@ def main(argv):
             if name == "Cargo.lock":
                 ripe.append(cargo(path, cutoff, age, bad))
             elif name == "package-lock.json":
-                ripe.append(npm(path, cutoff, age, bad))
+                ripe.append(npm(path, age, bad))
             elif name in ("yarn.lock", "pnpm-lock.yaml", "bun.lock", "bun.lockb", "npm-shrinkwrap.json"):
                 bad.append(f"{path}: lock-age can't check this kind of lock file")
         except Exception as e:  # a registry that didn't answer proves nothing

@@ -13,7 +13,7 @@
 # The autoland steward's own status (SETTLED) doesn't count as a check. With
 # the machine's own App, APP, it and its jobs act on GitHub as that App, whose
 # bot GraphQL calls BOT. (DIR, SRC, OWNER, NOTIFY, SETTLED, COVERED, SEAL, APP,
-# BOT, LOCK_WAIT and REBASE come from ../updates.nix.)
+# BOT and LOCK_WAIT come from ../updates.nix.)
 #
 # The job's verdict on a major: ok when it can merge as it is, held when it
 # shouldn't (its comment says why). The job ends that comment with a marker
@@ -47,6 +47,10 @@ if [ -n "$BOT" ]; then
 else
   me=$(gh api user --jq .login 2>/dev/null || true)
 fi
+# Who Renovate comments as, as REST spells it: it runs as the same App, or
+# user, and an App's bot is SLUG[bot] there, a name no person's can be.
+renovate=${BOT:+$BOT[bot]}
+renovate=${renovate:-$me}
 
 state=$DIR/renovate-sweep
 src=$SRC
@@ -172,16 +176,28 @@ for d in "$src"/*/; do
       # lock-age refusing it only because nothing in it is old enough yet,
       # is no fix for a job: it waits for the time Renovate's comment on it
       # gives (LOCK_WAIT, ../autoland/lock_wait.py). Then Renovate is asked
-      # to refresh it again (its rebase label), once a head: it won't by
-      # itself while the branch doesn't conflict.
-      if [ "$(jq -c '[.[] | select(.state == "red") | .name]' <<<"$ci")" = '["renovate/artifacts"]' ] && [ -n "$me" ]; then
-        ripe=$(gh pr view "$n" -R "$repo" --json comments 2>/dev/null | "$LOCK_WAIT" "$me" || true)
+      # to refresh it again, as it won't by itself while the branch doesn't
+      # conflict: the "rebase!" title its every run reads, whatever its
+      # config. A request still standing six hours on, or three that went
+      # without the head or the time moving, and it's red CI for a job.
+      if [ "$(jq -c '[.[] | select(.state == "red") | .name]' <<<"$ci")" = '["renovate/artifacts"]' ] &&
+        [ -n "$renovate" ] && [ "$seen" != "$sha red" ]; then
+        ripe=$(gh api --paginate --slurp "repos/$repo/issues/$n/comments" 2>/dev/null | "$LOCK_WAIT" "$renovate" || true)
         if [ -n "$ripe" ]; then
-          if [ "$(date +%s)" -ge "$ripe" ] && [ "$seen" != "$sha refreshed" ] &&
-            gh api -X POST "repos/$repo/issues/$n/labels" -f "labels[]=$REBASE" >/dev/null; then
-            echo "$sha refreshed" >"$key"
+          now=$(date +%s)
+          read -r was_sha asked was_ripe tries at <<<"$seen" || true
+          [ "${was_sha:-} ${asked:-} ${was_ripe:-}" = "$sha refreshed $ripe" ] || { tries=0; at=0; }
+          standing=false
+          [[ $title != rebase!* ]] || standing=true
+          if [ "$now" -lt "$ripe" ] || [ $((now - at)) -lt 3600 ] ||
+            { [ "$standing" = true ] && [ $((now - at)) -lt 21600 ]; }; then
+            continue
+          elif [ "$standing" = false ] && [ "$tries" -lt 3 ]; then
+            if gh api -X PATCH "repos/$repo/pulls/$n" -f "title=rebase!$title" >/dev/null; then
+              echo "$sha refreshed $ripe $((tries + 1)) $now" >"$key"
+            fi
+            continue
           fi
-          continue
         fi
       fi
       [ "$red" -gt 0 ] || [ "$major" = true ] || continue

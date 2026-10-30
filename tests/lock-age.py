@@ -443,6 +443,17 @@ repo({"package-lock.json": npm_lock(("node_modules/left-pad", "1.1.0"))})
 write("package-lock.json", npm_lock(("node_modules/left-pad", "1.2.0")))
 RESOLVES["lock"] = npm_lock(("node_modules/left-pad", "1.1.0"))
 assert waiting() == (1, ripe(NEW))
+# npm's own longer age for the directory is the one waited for; its fixed
+# before is no wait at all, as nothing then gets past it.
+NPM_TIMES["left-pad"]["1.3.0"] = MID
+write("package-lock.json", npm_lock(("node_modules/left-pad", "1.3.0")))
+NPMRC.update({"min-release-age": "30"})
+assert waiting() == (1, ripe(MID) + dt.timedelta(days=27))
+NPMRC.clear()
+NPMRC.update({"before": (NOW - dt.timedelta(days=30)).strftime("%a %b %d %Y %H:%M:%S GMT+0000 (UTC)")})
+write("package-lock.json", npm_lock(("node_modules/left-pad", "1.3.0")))
+assert waiting() == (1, None)
+NPMRC.clear()
 
 # npm can't resolve under the cutoff: the refresh fails, it isn't retried without.
 repo({"package-lock.json": npm_lock(("node_modules/left-pad", "1.0.0"))})
