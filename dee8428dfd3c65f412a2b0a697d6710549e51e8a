@@ -1,0 +1,53 @@
+{
+  "conary": "note v1",
+  "change": "2fqtpw44zfgy9412fxhhw20js3",
+  "repo": {
+    "owner": "fieldmouseworks",
+    "name": "burrow"
+  },
+  "pr": 233,
+  "url": "https://github.com/fieldmouseworks/burrow/pull/233",
+  "summary": "proj: a lead backlog leaves everyone else one slot",
+  "task": "fieldmouseworks/burrow#222",
+  "author": {
+    "kind": "agent",
+    "login": "TusanHomichi",
+    "session": "https://claude.ai/code/session_01BkHcyBvxAir8tDv9eBgjAU"
+  },
+  "landing": {
+    "revision": "edc084b92a6ce5effde6540f7fab4bf1517d70dc86868577dad1e97745bcd60c",
+    "before": "d9b840a7d07a2f8db393a2b8383112dd01e4e83a",
+    "after": "dee8428dfd3c65f412a2b0a697d6710549e51e8a",
+    "by": {
+      "kind": "status",
+      "login": "fieldmouseworks-steward[bot]"
+    },
+    "at": 1793395627593
+  },
+  "evidence": [
+    {
+      "kind": "ci",
+      "check": "check / commits",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/41107944949/job/124242598079"
+    },
+    {
+      "kind": "review",
+      "check": "codex",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/233#pullrequestreview-5717012183"
+    },
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/41107944949/job/124242598752"
+    },
+    {
+      "kind": "ci",
+      "check": "agents",
+      "result": "pass",
+      "source": "status agents"
+    }
+  ]
+}
