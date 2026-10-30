@@ -101,7 +101,9 @@ For every reviewer, the steward's included. Flag as P1:
 - a review agent that reaches more than its snapshot: a GitHub token, a
   secrets path (`reviewers.skipPaths`), the PR's own copy of its review
   rules, or its own key in what gets posted
-- `HOST-update` confirming or pushing without the VM tests and health checks
-  passing first
+- `HOST-update` going live or confirming without the VM tests and health
+  checks passing first, or pushing to main anything but what went live or
+  that rebased onto a moved main and built (the push's own run tests the
+  rebased tree before it goes live)
 - a job acting on text from anyone outside its configured authors
 - one machine's details hard-coded into a generic module
