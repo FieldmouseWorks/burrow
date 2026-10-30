@@ -1,0 +1,53 @@
+{
+  "conary": "note v1",
+  "change": "6r6cdfy4rh6p4d0q5jpte3514z",
+  "repo": {
+    "owner": "fieldmouseworks",
+    "name": "burrow"
+  },
+  "pr": 191,
+  "url": "https://github.com/fieldmouseworks/burrow/pull/191",
+  "summary": "ops: systemd-oomd never kills a whole Remote Control server",
+  "task": "https://claude.ai/code/project/chan_01Ad4f4oDXfFTCEzLHzMTD8q?thread=cmsg_01Ad4f4oDXfFTCEzLHzMTD8qBdUYJd8hZToVuqe8KCRWSu",
+  "author": {
+    "kind": "agent",
+    "login": "TusanHomichi",
+    "session": "https://claude.ai/code/session_01BkHcyEDfYteVXcw6VC4Hot"
+  },
+  "landing": {
+    "revision": "3c202c9c0f115a3277bac2522818feff8f472cafd7ca70fab1f66030cf641c25",
+    "before": "19bf36cabda6780928f6fed09c5d1926ba0ce509",
+    "after": "1586b87d7ef6b89bb2a593bdfb43b953d0098416",
+    "by": {
+      "kind": "status",
+      "login": "fieldmouseworks-steward[bot]"
+    },
+    "at": 1793337270537
+  },
+  "evidence": [
+    {
+      "kind": "ci",
+      "check": "check / commits",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/40998372936/job/123876732388"
+    },
+    {
+      "kind": "review",
+      "check": "codex",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/191#pullrequestreview-5707803120"
+    },
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/40998372936/job/123876732331"
+    },
+    {
+      "kind": "ci",
+      "check": "agents",
+      "result": "pass",
+      "source": "status agents"
+    }
+  ]
+}
