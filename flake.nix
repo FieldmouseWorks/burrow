@@ -35,7 +35,7 @@
       # The ledger's machines take Conary from its own flake; burrow's checks
       # build theirs with a stand-in for its `cn`.
       cnStandIn = pkgs.writeShellScriptBin "cn" "exit 1";
-      names = [ "claude" "undo" "switch" "notify" "updates" "proj" "remote-control" "agents" "robot" "ops" "toolbox" "autoland" "house" "events" "ledger" "browser" "heartbeat" "backup" "watchdog" "github" "rust-cache" "cpu" "dispatch" ];
+      names = [ "claude" "undo" "switch" "notify" "updates" "proj" "remote-control" "agents" "robot" "ops" "toolbox" "autoland" "house" "events" "ledger" "browser" "heartbeat" "backup" "watchdog" "github" "rust-cache" "cpu" "dispatch" "usage-reset" ];
       # gh-token (modules/github): its package, and its gate.
       # Built for every platform lib/project.nix knows, like the module.
       ghToken = self.lib.project {
@@ -45,6 +45,12 @@
       # burrow's own programs, one Cargo workspace (crates/): their package
       # and their gate, built for every platform lib/project.nix knows.
       crates = self.lib.project { self = ./crates; rust = { }; };
+      # A workspace whose build script finds a native library with
+      # pkg-config: lib/project.nix's native inputs, for its checks.
+      houseNative = {
+        nativeBuildInputs = pkgs: [ pkgs.pkg-config ];
+        buildInputs = pkgs: [ pkgs.zlib ];
+      };
     in
     {
       # A project's dev shell and gate in a few lines; see lib/project.nix.
@@ -123,7 +129,7 @@
                 (nixpkgs.lib.optionalAttrs (builtins.elem name [ "events" "autoland" ]) { burrow.events = { host = "example.org"; secretFile = "/run/secrets/burrow-webhook"; }; })
                 # github has no switch: it's on with an App to serve.
                 (if name == "github" then { burrow.github.apps.workers = { id = 2; slug = "sam-workers"; keyFile = "/run/secrets/workers-key"; }; }
-                 else { burrow.${{ remote-control = "remoteControl"; rust-cache = "rustCache"; }.${name} or name}.enable = true; })
+                 else { burrow.${{ remote-control = "remoteControl"; rust-cache = "rustCache"; usage-reset = "usageReset"; }.${name} or name}.enable = true; })
               ];
             };
           in "${name} ${builtins.unsafeDiscardStringContext (runnable name machine).config.system.build.toplevel.drvPath}\n")
@@ -672,6 +678,13 @@
           python3 -I ${./tests/gate.py} ${./.github/workflows/flake-check.yml}
           touch $out
         '';
+        # The shared CI's attestation step (flake-check.yml), its own script
+        # with stand-ins for curl and gh: a private repo's job signs with its
+        # own token, its audience the digest of the statement kept beside it.
+        attestation = pkgs.runCommand "attestation-check" { nativeBuildInputs = [ (pkgs.python3.withPackages (p: [ p.pyyaml ])) pkgs.git pkgs.jq ]; } ''
+          python3 -I ${./tests/attestation.py} ${./.github/workflows/flake-check.yml}
+          touch $out
+        '';
         # The shared CI's merge step (flake-check.yml), its own script on
         # real repos: a PR is checked merged with its base as the base is when
         # the job starts, and one that no longer merges cleanly fails.
@@ -695,6 +708,14 @@
           [ "$(${pkg}/bin/house-fixture-member)" = 42 ]
           touch $out
         '';
+        # lib/project.nix's package of a workspace that links a native
+        # library: the build found the one the project names.
+        house-native-package = let
+          pkg = (self.lib.project { self = ./tests/house/rust-native; systems = [ system ]; rust = houseNative; }).packages.${system}.default;
+        in pkgs.runCommand "house-native-package-check" { } ''
+          [ "$(${pkg}/bin/house-native)" = ${pkgs.zlib.version} ]
+          touch $out
+        '';
       } // nixpkgs.lib.mapAttrs' (name: nixpkgs.lib.nameValuePair "crates-${name}") crates.checks.${system}
       // nixpkgs.lib.mapAttrs' (name: nixpkgs.lib.nameValuePair "gh-token-${name}") ghToken.checks.${system}
       // nixpkgs.lib.mapAttrs' (name: nixpkgs.lib.nameValuePair "flaky-${name}")
@@ -703,6 +724,8 @@
       // nixpkgs.lib.mapAttrs' (name: nixpkgs.lib.nameValuePair "house-${name}") (
         # lib/project.nix's own gates, on the smallest projects that have them.
         (self.lib.project { self = ./tests/house/rust; systems = [ system ]; rust.testInputs = pkgs: [ pkgs.git ]; }).checks.${system}
+        // nixpkgs.lib.mapAttrs' (name: nixpkgs.lib.nameValuePair "native-${name}")
+          (self.lib.project { self = ./tests/house/rust-native; systems = [ system ]; rust = houseNative; }).checks.${system}
         // (self.lib.project { self = ./tests/house/python; systems = [ system ]; python = { format = true; }; }).checks.${system}
       );
 

@@ -195,6 +195,16 @@ pkgs.testers.runNixOSTest {
         out = machine.fail(f"su - dev -c 'proj log {e}'")
         assert "ended without an answer" in out and "refused" in out, out
 
+    with subtest("a dot-named project's job isn't hidden from what goes through the jobs"):
+        for d in (".dotted", "..dotted", ".-dotted"):
+            machine.succeed(f"install -d -o dev -g dev /data/dev/src/{d}")
+            j = proj(f'run {d} "sleep 1"')
+            assert j[0] not in ".-", j
+            assert j in proj("status"), proj("status")
+            machine.wait_until_succeeds(f"su - dev -c 'proj state {j}' | grep -x done", timeout=120)
+            assert machine.succeed(f"cat /data/dev/jobs/{j}/project").strip() == f"/data/dev/src/{d}"
+            machine.succeed(f"rm -rf /data/dev/src/{d}")
+
     with subtest("past maxJobs, jobs wait in line, and --first goes ahead"):
         a = proj('run web "sleep 600"')
         b = proj('run web "sleep 600"')
@@ -209,10 +219,12 @@ pkgs.testers.runNixOSTest {
         assert ".queue" not in listed and ".slots" not in listed, listed
         out = machine.succeed(f"systemctl --user -M dev@ show '{unit(a)}' -p Slice -p MemoryMax")
         assert "Slice=claude-jobs.slice" in out and "MemoryMax=134217728" in out, out
+        # One slot at a time: two free at once go to both in one look, and
+        # which starts first is then only which looks first.
         proj(f"stop {a}")
+        machine.wait_until_succeeds(f"su - dev -c 'proj state {d}' | grep -x done", timeout=120)
         proj(f"stop {b}")
         machine.wait_until_succeeds(f"su - dev -c 'proj state {c}' | grep -x done", timeout=120)
-        machine.wait_until_succeeds(f"su - dev -c 'proj state {d}' | grep -x done", timeout=120)
         assert started(d) < started(c), (started(d), started(c))
 
     with subtest("a job whose turn has ended frees its slot"):

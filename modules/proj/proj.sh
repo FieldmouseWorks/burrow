@@ -407,7 +407,7 @@ spare() {
 # puts pipeline ones ahead, then --first ones, then the oldest, holding the
 # waiting shell's pid. A slot is a lock on JOBS/.slots/N, and N.who says
 # whose (class and project), so a turn that's killed frees its slot (and its
-# place in line) by itself. pick (pick.sh) says who goes next. The turn is
+# place in line) by itself. pick (pick.sh) says who has a slot. The turn is
 # first or normal, as it was started; its job's class (place, in pick.sh)
 # is asked again every pass, and its place in line, its admission and its
 # slot's N.who all go by that one answer.
@@ -467,11 +467,11 @@ take_slot() {
         rm -f "$f"
       fi
     done
-    got=$(printf '%s' "$seen" | pick)
+    got=$(printf '%s' "$seen" | pick | picked "$me")
     # Short of memory matters only while another job runs: with nothing
     # running, waiting frees nothing.
-    if [ "${got%$'\t'*}" = "$me" ] && { [ -z "$busy" ] || [ "$(spare)" -ge "$MIN_FREE" ]; }; then
-      i=${got##*$'\t'}
+    if [ -n "$got" ] && { [ -z "$busy" ] || [ "$(spare)" -ge "$MIN_FREE" ]; }; then
+      i=$got
       exec {slot}>"$jobs/.slots/$i"
       if flock -n "$slot"; then
         printf '%s\t%s\n' "$class" "$(cat "$jobs/$id/project")" >"$jobs/.slots/$i.who"
@@ -583,8 +583,13 @@ case "${1:-status}" in
       [ -z "$owned" ] || [ ${#kick[@]} -gt 0 ] || { echo "proj run --owned needs a --kick: what acts on each turn's end" >&2; exit 2; }
       [ -z "$app" ] || [ -z "$vm" ] || { echo "proj run --app with --vm: a sandbox has no GitHub login to act with" >&2; exit 2; }
       mkdir -p "$jobs"
-      # Unique even when two jobs start in the same second.
-      id=$(basename "$(mktemp -d "$jobs/$p-$(date +%Y%m%d-%H%M%S)-XXXX")")
+      # Unique even when two jobs start in the same second. Never hidden or
+      # option-like, whatever the project is called (.github, .-x): $jobs's
+      # dotfiles are its own state, what goes through the jobs skips them, and
+      # systemd-escape takes a leading hyphen for an option.
+      name=$p
+      case $p in [.-]*) name=dot$p ;; esac
+      id=$(basename "$(mktemp -d "$jobs/$name-$(date +%Y%m%d-%H%M%S)-XXXX")")
       echo "$src/$p" >"$jobs/$id/project"
       [ ${#kick[@]} = 0 ] || printf '%s\n' "${kick[@]}" >"$jobs/$id/kick"
       [ -z "$limit" ] || echo "$limit" >"$jobs/$id/timeout"

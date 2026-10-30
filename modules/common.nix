@@ -156,6 +156,14 @@ inputs:
           };
         };
 
+        # tmux for the Claudes that run in one (Remote Control servers, the
+        # usage watcher's Claude Code). Not tmux's usual build: that one moves
+        # each pane into a scope of its own, which takes a server and its
+        # sessions out of their unit and out from under its cap.
+        config.burrow.tools.tmux = pkgs.tmux.overrideAttrs (old: {
+          configureFlags = old.configureFlags ++ [ "--disable-cgroups" ];
+        });
+
         # In the user's systemd manager, where proj jobs (claude-jobs.slice)
         # and Remote Control servers (claude-rc.slice) run. Many headless
         # Claudes at a few GB each once ran a machine out of memory and the

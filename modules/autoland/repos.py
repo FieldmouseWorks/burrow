@@ -450,9 +450,10 @@ def delete_branch(repo, name, sha):
             log(f"{repo}: kept {name}: {p.stderr.strip()[:200]}")
 
 
-# Unmerged, with no PR and no commit for this long: given up on. Its commits
-# are kept under ARCHIVE and the branch deleted.
-STALE_DAYS = 14
+# Unmerged, with no PR and no commit for this long: given up on (agents open
+# a PR when they push). Its commits are kept under ARCHIVE and the branch
+# deleted, so a short wait costs nothing.
+STALE_DAYS = 3
 ARCHIVE = "refs/archive"
 
 

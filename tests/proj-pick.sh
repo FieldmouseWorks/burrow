@@ -1,7 +1,9 @@
 # proj's choice of who takes a slot (modules/proj/pick.sh), on what take_slot
 # would see: pipeline jobs' slots stay theirs, one project's jobs stop at
 # PER_PROJECT while the others go by, pipeline ones count against no cap, and
-# lead ones go ahead of everyone; and which jobs are pipeline ones: only those
+# lead ones go ahead of everyone but leave the rest one slot, every free slot
+# going in one look; and which
+# jobs are pipeline ones: only those
 # in the pipeline's own repos and the machine's flake, and lead ones those in
 # its lead repos.
 #
@@ -30,9 +32,10 @@ case_() {
   got=$(printf '%s' "$line" | pick)
   [ "$got" = "${want// /$T}" ] || { echo "FAIL: wanted '$want', got '${got//$T/ }' from: $*" >&2; exit 1; }
 }
+NL=$'\n'
 
 # The head of the line takes the lowest free slot.
-case_ "a 1" free free free free "a normal /src/web" "b normal /src/lok"
+case_ "a 1${NL}b 2" free free free free "a normal /src/web" "b normal /src/lok"
 case_ "a 3" "normal /src/x" "normal /src/y" free free "a normal /src/web" "b first /src/lok"
 # Nothing free: nobody goes.
 case_ "" "normal /src/x" "normal /src/y" "normal /src/z" "pipeline /src/b" "a pipeline /src/b"
@@ -56,8 +59,8 @@ case_ "b 3" "normal /src/my web" "normal /src/my web" free free "a normal /src/m
 case_ "a 3" "normal /src/x" "normal /src/x" free free "a normal "
 # A lead turn goes first, from anywhere in the line: ahead of pipeline turns
 # that came before it, and of everyone else.
-case_ "l 1" free free free free "p pipeline /src/remi" "a first /src/web" "l lead /src/burrow"
-case_ "l 3" "normal /src/x" "normal /src/y" free free "p pipeline /src/remi" "l lead /src/burrow"
+case_ "l 1${NL}p 2${NL}a 3" free free free free "p pipeline /src/remi" "a first /src/web" "l lead /src/burrow"
+case_ "l 3${NL}p 4" "normal /src/x" "normal /src/y" free free "p pipeline /src/remi" "l lead /src/burrow"
 # But the pipeline's own slot stays the other pipeline turns' while one waits,
 # so a lead repo's backlog can't stop the work on what deploys it: the lead
 # turn waits for the next slot.
@@ -70,7 +73,64 @@ case_ "a 3" "lead /src/burrow" "normal /src/burrow" free free "a normal /src/bur
 # With no slot free nobody goes, lead or not; of two lead turns, the first in
 # line goes first.
 case_ "" "normal /src/x" "normal /src/y" "normal /src/z" "pipeline /src/b" "l lead /src/burrow"
-case_ "l 2" "lead /src/burrow" free free free "p pipeline /src/remi" "l lead /src/burrow" "m lead /src/burrow"
+case_ "l 2${NL}m 3${NL}p 4" "lead /src/burrow" free free free "p pipeline /src/remi" "l lead /src/burrow" "m lead /src/burrow"
+case_ "l 4" "lead /src/burrow" "normal /src/x" "normal /src/y" free "l lead /src/burrow" "m lead /src/burrow"
+
+# Every free slot goes in one look, in line order, under the same rules. Lead
+# first, then the line; a pipeline turn gives up a slot anyone may take when a
+# turn behind it needs that one.
+MAX_JOBS=6
+case_ "l 1${NL}p 2${NL}q 6${NL}a 3" free free free "lead /src/burrow" "lead /src/burrow" free \
+  "l lead /src/burrow" "p pipeline /src/remi" "q pipeline /src/remi" "a normal /src/web"
+# Slots ahead of what the line can fill stay free, the pipeline's above all.
+case_ "a 1${NL}p 2" free free free free free free "a normal /src/web" "p pipeline /src/remi"
+# More waiting than free: the head of the line goes, and those behind wait.
+case_ "a 1${NL}b 2" free free "normal /src/x" "normal /src/y" "normal /src/z" "pipeline /src/b" \
+  "a normal /src/web" "b normal /src/lok" "c normal /src/psiv"
+# Nobody but pipeline turns takes the pipeline's slot, however long the line.
+case_ "a 5" "normal /src/x" "normal /src/y" "normal /src/z" "first /src/z" free free \
+  "a normal /src/web" "b normal /src/lok"
+# A pipeline turn ahead of them takes it when that lets one of them go too.
+case_ "p 6${NL}a 5" "normal /src/x" "normal /src/y" "normal /src/z" "first /src/z" free free \
+  "p pipeline /src/remi" "a normal /src/web" "b normal /src/lok"
+# PER_PROJECT counts the slots this look hands out: a project stops at its cap
+# and those behind it go by.
+case_ "a 1${NL}b 2${NL}d 3" free free free free free free \
+  "a normal /src/web" "b first /src/web" "c normal /src/web" "d normal /src/lok"
+case_ "a 1${NL}d 2" free free "normal /src/web" free free free \
+  "a normal /src/web" "c normal /src/web" "d normal /src/lok"
+# The pipeline's slot stays the other pipeline turns' whoever is ahead of them:
+# a turn behind the lead one gets no slot that would push it onto theirs.
+MAX_JOBS=6
+case_ "l 3${NL}p 6" "normal /src/x" "normal /src/y" free "normal /src/z" "first /src/z" free \
+  "l lead /src/burrow" "a normal /src/web" "p pipeline /src/remi"
+# With two of them and one such turn, a lead one has the other in the same look.
+PIPELINE_SLOTS=2
+case_ "l 5${NL}p 6" "normal /src/x" "normal /src/y" "normal /src/z" "first /src/z" free free \
+  "l lead /src/burrow" "m lead /src/burrow" "p pipeline /src/remi"
+PIPELINE_SLOTS=1
+# And one of the slots anyone may take stays everyone else's while one of
+# theirs waits and none runs, so a lead repo's backlog can't stop all the
+# rest: here the turn behind four lead ones takes the last one.
+case_ "l 1${NL}m 2${NL}n 3${NL}k 4${NL}a 5" free free free free free "pipeline /src/remi" \
+  "l lead /src/burrow" "m lead /src/burrow" "n lead /src/burrow" "k lead /src/burrow" "j lead /src/burrow" "a normal /src/web"
+case_ "a 5" "lead /src/burrow" "lead /src/burrow" "lead /src/burrow" "lead /src/burrow" free "pipeline /src/remi" \
+  "l lead /src/burrow" "a first /src/web"
+# With one of theirs running, none of theirs waiting, or none of those slots
+# free, the lead ones take every slot they're let.
+case_ "l 2${NL}m 3${NL}n 4${NL}k 5" "normal /src/web" free free free free "pipeline /src/remi" \
+  "l lead /src/burrow" "m lead /src/burrow" "n lead /src/burrow" "k lead /src/burrow" "a normal /src/lok"
+case_ "l 1${NL}m 2${NL}n 3${NL}k 4${NL}j 5" free free free free free "pipeline /src/remi" \
+  "l lead /src/burrow" "m lead /src/burrow" "n lead /src/burrow" "k lead /src/burrow" "j lead /src/burrow"
+case_ "l 6" "lead /src/burrow" "lead /src/burrow" "lead /src/burrow" "lead /src/burrow" "lead /src/burrow" free \
+  "l lead /src/burrow" "a normal /src/web"
+MAX_JOBS=4
+# A waiter finds its own slot in what pick says, or nothing.
+assigned="a 1${NL}/q/2-1-b 3"
+assigned=${assigned// /$T}
+[ "$(picked /q/2-1-b <<<"$assigned")" = 3 ] || { echo "FAIL: picked didn't find its slot" >&2; exit 1; }
+[ -z "$(picked /q/2-1 <<<"$assigned")" ] || { echo "FAIL: picked found another's slot" >&2; exit 1; }
+[ -z "$(picked a </dev/null)" ] || { echo "FAIL: picked found a slot in nothing" >&2; exit 1; }
 
 # A job run with --pipeline is a pipeline one only in a project of one of the
 # pipeline's own repos, told by its clone's origin: on GitHub, in any form git
