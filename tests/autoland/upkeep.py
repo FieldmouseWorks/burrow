@@ -3,10 +3,12 @@ branches and the App their required status comes from, and a red default
 branch's fix job."""
 
 import json
+import os
+import subprocess
 import time
 import urllib.parse
 
-from harness import (C, FAIL, JOBS, R, H, S, STATES, T0, WROTE, fresh_pr_state, info, gh_stub, mkpr, stand_in)
+from harness import (C, FAIL, JOBS, R, H, S, STATES, T0, V, WROTE, fresh_pr_state, info, gh_stub, mkpr, stand_in, tmp)
 
 stand_in()
 # Its parts are called straight here, so they're for sam's repos as a pass
@@ -214,6 +216,110 @@ assert [x for x in WROTE if "rulesets" in x] == ["api -X POST repos/sam/r/rulese
 required = [y for y in BODIES[0][1]["rules"] if y["type"] == "required_status_checks"]
 assert required[0]["parameters"]["required_status_checks"] == [{"context": "review-settled", "integration_id": 7}], required
 C.gh, C.write = gh_stub, write
+
+# A repo made under the name of one GitHub deleted (made after the steward
+# last settled one of that name) starts over as new: what was kept about
+# the old one goes (another repo's of a like name stays), its settings,
+# labels and hook are set again at once, and it leaves known, so it gets
+# its baseline job. The machine's checkout of the old one, whose root commit
+# GitHub doesn't have, is moved aside where no job takes it; the new one's
+# own checkout stays. GitHub not saying which it is: nothing's forgotten
+# yet, and the pass tries again.
+src = f"{tmp}/remade-src"
+S.CFG["projectsDir"] = src
+
+
+def checkout(d):
+    path = f"{src}/{d}"
+    subprocess.run(["git", "init", "-q", path], check=True)
+    subprocess.run(["git", "-C", path, "remote", "add", "origin", "https://github.com/sam/r"], check=True)
+    subprocess.run(["git", "-C", path, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty",
+                    "-m", d], check=True)
+    return subprocess.run(["git", "-C", path, "rev-list", "--max-parents=0", "HEAD"], capture_output=True, text=True,
+                          check=True).stdout.strip()
+
+
+NEW_ROOT, ANSWER = None, {}
+
+
+def commits(*a, **k):
+    if a[:1] == ("api",) and a[1].startswith("repos/sam/r/commits/"):
+        sha = a[1].rpartition("/")[2]
+        if sha in ANSWER:
+            raise ANSWER[sha]
+        if sha != NEW_ROOT:
+            raise RuntimeError(f"gh api {a[1]}: gh: No commit found for SHA: {sha} (HTTP 422)")
+        return sha
+    return gh_stub(*a, **k)
+
+
+def old_state():
+    fresh_pr_state()
+    C.save("repo-sam_r.json", {"settings": C.ts(T0), "app": 7, "labels": ["hold", "needs-owner", "first"],
+                               "hook": "x", "hookId": 41})
+    for name in ("pr-sam_r-1.json", "dashboard-sam_r.json", "flaky-sam_r.json", "pr-sam_r-x-1.json", "repo-sam_r-x.json"):
+        C.save(name, {"old": True})
+    snap = V.snap_name("pr-sam_r-1.json", "a" * 40, "main")
+    C.save(f"{V.DONE}/codex--{snap}.json", {"result": "ok"})
+    os.makedirs(f"{tmp}/state/{V.SESSIONS}/{V.session_name('codex', snap)}")
+    os.makedirs(f"{tmp}/state/{V.GIT}/sam__r.git")
+
+
+C.gh = commits
+remade = {"repo": "sam/r", "private": False, "default": "main", "created": "2026-10-24T06:00:00Z"}
+old_state()
+OLD_ROOT = checkout("r")
+C.NOW = C.ts(T0) + 7 * 3600
+known = {"sam/r", "sam/r-x"}
+WROTE.clear()
+assert R.settle_repo(remade, known) is True and known == {"sam/r-x"}, known
+left = sorted(os.listdir(f"{tmp}/state"))
+assert "pr-sam_r-1.json" not in left and "dashboard-sam_r.json" not in left and "flaky-sam_r.json" not in left, left
+assert "pr-sam_r-x-1.json" in left and "repo-sam_r-x.json" in left, left
+assert os.listdir(f"{tmp}/state/{V.DONE}") == [] and not os.path.exists(f"{tmp}/state/{V.GIT}/sam__r.git")
+assert all(x.startswith(V.GONE) for x in os.listdir(f"{tmp}/state/{V.SESSIONS}")), os.listdir(f"{tmp}/state/{V.SESSIONS}")
+st = C.load("repo-sam_r.json", {})
+assert st["settings"] == C.NOW and st.get("hookId") != 41, st
+assert sorted(x.split()[2] for x in WROTE if x.startswith("label create")) == ["first", "hold", "needs-owner"], WROTE
+assert "api -X PUT repos/sam/r/vulnerability-alerts" in WROTE, WROTE
+aside = [x for x in os.listdir(src) if x.startswith(".r.gone-")]
+assert not os.path.exists(f"{src}/r") and len(aside) == 1 and C.project_dir("sam/r") is None, os.listdir(src)
+# Settled now, it isn't made again: what's kept about it from here on
+# stays. Until its baseline job starts it's still new.
+C.save("pr-sam_r-2.json", {"new": True})
+assert R.settle_repo(remade, known) is True and known == {"sam/r-x"}
+known.add("sam/r")
+assert R.settle_repo(remade, known) is False and "pr-sam_r-2.json" in os.listdir(f"{tmp}/state")
+# Its job cloned the new one: that checkout stays where it is.
+NEW_ROOT = checkout("r")
+old_state()
+assert R.settle_repo(remade, {"sam/r"}) is True and os.path.isdir(f"{src}/r"), os.listdir(src)
+# GitHub not answering, or answering something else: it raises, and
+# nothing is forgotten or moved.
+for e in (C.Unavailable(f"gh api repos/sam/r/commits/{OLD_ROOT}: gh: HTTP 502"),
+          RuntimeError(f"gh api repos/sam/r/commits/{OLD_ROOT}: gh: Not Found (HTTP 404)")):
+    old_state()
+    os.rename(f"{src}/r", f"{src}/new-r")
+    os.rename(f"{src}/{aside[0]}", f"{src}/r")
+    ANSWER[OLD_ROOT] = e
+    known = {"sam/r"}
+    try:
+        R.settle_repo(remade, known)
+        raise AssertionError(f"{e} was swallowed")
+    except RuntimeError as got:
+        assert got is e, got
+    assert known == {"sam/r"} and os.path.isdir(f"{src}/r") and "pr-sam_r-1.json" in os.listdir(f"{tmp}/state")
+    assert C.load("repo-sam_r.json", {})["hookId"] == 41
+    os.rename(f"{src}/r", f"{src}/{aside[0]}")
+    os.rename(f"{src}/new-r", f"{src}/r")
+ANSWER.clear()
+# One made before the steward settled it is the same repo, whatever else.
+old_state()
+assert R.settle_repo({**remade, "created": "2026-10-23T00:00:00Z"}, {"sam/r"}) is False
+assert "pr-sam_r-1.json" in os.listdir(f"{tmp}/state") and C.load("repo-sam_r.json", {})["hookId"] == 41
+S.CFG["projectsDir"] = f"{tmp}/none"
+C.gh = gh_stub
+print("remade repos: ok")
 
 # A red default branch gets one Claude job, and nothing more while it works
 # or its PR is open; a second if it ends with the branch still red, then the

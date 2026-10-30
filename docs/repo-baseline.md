@@ -6,6 +6,14 @@ day. When it first sees a repo, a Claude job brings the **Files** up to it in
 one PR, opened ready for review, which then goes through the same review loop
 as any other.
 
+A repo made under the name of one that was deleted is a new repo too, though
+GitHub gives it the same name: the steward knows it by being made after the
+steward last settled a repo of that name. What it kept about the old one (its
+settings, hook, PRs, reviews and the reviewers' sessions) is forgotten, and
+the machine's checkout of the old one, if there is one, is moved aside under
+a hidden name in `projectsDir`, so the new one gets its own clone and its
+own baseline job.
+
 A Claude bringing a repo up to the baseline: add only what's missing, keep
 what the repo already does better (a stricter gate, its own license), and
 change nothing else in the same PR.

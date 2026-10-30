@@ -6,14 +6,21 @@ import fnmatch
 import hashlib
 import json
 import os
+import re
+import shutil
 import subprocess
 import tempfile
+import time
 import urllib.parse
 
 import common as C
+import reviewers as V
 import train as T
 from common import CFG, CONTEXT, DEP_RE, DRY, load, log, repo_cfg, save, ts
 from tasks import RED_BRANCH, red_default_task
+
+# What GitHub says of a commit the repo doesn't have.
+NO_COMMIT = "No commit found for SHA"
 
 
 def discover():
@@ -25,7 +32,7 @@ def discover():
     for owner in CFG["owners"]:
         with C.acting_for(owner):
             found = C.gh("repo", "list", owner, "--no-archived", "--source", "--limit", "100000",
-                         "--json", "nameWithOwner,isPrivate,defaultBranchRef") or []
+                         "--json", "nameWithOwner,isPrivate,defaultBranchRef,createdAt") or []
         for r in found:
             name = r["nameWithOwner"]
             if any(fnmatch.fnmatch(name, pat) for pat in CFG["exclude"]):
@@ -33,7 +40,8 @@ def discover():
             # An empty repo has no branch to keep.
             if not r.get("defaultBranchRef"):
                 continue
-            seen.append({"repo": name, "private": r["isPrivate"], "default": r["defaultBranchRef"]["name"]})
+            seen.append({"repo": name, "private": r["isPrivate"], "default": r["defaultBranchRef"]["name"],
+                         "created": r["createdAt"]})
     return seen
 
 
@@ -75,9 +83,20 @@ def baseline_ruleset(rc, default):
 
 
 def settle_repo(r, known):
-    """The repo's settings, at most once a day. Returns True if it's new."""
+    """The repo's settings, at most once a day. Returns True if it's new:
+    never seen before, or made since under the name of one GitHub deleted
+    (which leaves known)."""
     repo, rc = r["repo"], repo_cfg(r["repo"])
     st = load(f"repo-{repo.replace('/', '_')}.json", {})
+    # Settled before the repo was made: what the steward kept is about a repo
+    # of the same name, deleted since (GitHub hands a deleted repo's name to
+    # the next one). This one starts over as new, from a checkout of its own.
+    if st.get("settings", C.NOW) < ts(r.get("created")):
+        log(f"{repo}: made at {r['created']}, after the steward last settled a repo of its name; starting it over as new")
+        retire_checkout(repo)
+        forget(repo)
+        known.discard(repo)
+        st = {}
     new = repo not in known
     # Due daily, and straight away for another App (its required checks are
     # pinned to the one it was) or a train turned on or off (the baseline
@@ -157,6 +176,49 @@ def settle_repo(r, known):
         st.pop("app", None)
     save(f"repo-{repo.replace('/', '_')}.json", st)
     return new
+
+
+def retire_checkout(repo):
+    """The repo's checkout in projectsDir, if it's a clone of the deleted repo
+    whose name it took (GitHub has no root commit of its HEAD), moved aside
+    under a hidden name, which nothing takes for a project: so the repo's
+    next job clones this one, and can't push the old one's history to it.
+    Nothing in it is lost. Raises when GitHub doesn't say."""
+    d = C.project_dir(repo)
+    if d is None:
+        return
+    path = os.path.join(CFG["projectsDir"], d)
+    roots = subprocess.run(["git", "-C", path, "rev-list", "--max-parents=0", "HEAD"],
+                           capture_output=True, text=True).stdout.split()
+    if not roots:
+        return  # no commit in it, so nothing to push
+    try:
+        C.gh("api", f"repos/{repo}/commits/{roots[0]}", "--jq", ".sha")
+        return
+    except RuntimeError as e:
+        if NO_COMMIT not in str(e) or isinstance(e, C.Unavailable):
+            raise
+    aside = os.path.join(CFG["projectsDir"], f".{d}.gone-{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime(C.NOW))}")
+    log(f"{repo}: its checkout {d} is the deleted repo's; moved to {aside}")
+    if not DRY:
+        os.rename(path, aside)
+
+
+def forget(repo):
+    """All the steward kept about the repo, for a deleted one of its name:
+    its settings' and hook's, its PRs' (so a new PR doesn't take on an old
+    one's of the same number), their reviews, snapshots and the reviewers'
+    sessions (so no look at a new PR resumes an old one's), its dashboard's
+    and quarantine's, and the reviewers' clone of it."""
+    if DRY:
+        return
+    k = repo.replace("/", "_")
+    mine = re.compile(rf"(repo|dashboard|flaky)-{re.escape(k)}\.json|pr-{re.escape(k)}-\d+\.json")
+    for name in os.listdir(C.STATE):
+        if mine.fullmatch(name):
+            os.remove(os.path.join(C.STATE, name))
+    V.sweep({k}, set())
+    shutil.rmtree(os.path.join(C.STATE, V.GIT, repo.replace("/", "__") + ".git"), ignore_errors=True)
 
 
 def keep_checks(checks, key):

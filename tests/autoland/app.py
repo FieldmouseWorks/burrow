@@ -10,7 +10,7 @@ import sys
 import threading
 import time
 
-from harness import (FAIL, REAL_TOKEN, WROTE, C, P, R, S, T, V, clean, fresh_pr_state, judgment, merges, mkpr, run, said, sh,
+from harness import (FAIL, REAL_TOKEN, T0, WROTE, C, P, R, S, T, V, clean, fresh_pr_state, judgment, merges, mkpr, run, said, sh,
                      stand_in, tmp)
 from harness import head as HEAD
 
@@ -216,18 +216,19 @@ ASKED = []
 
 def list_gh(*a, **k):
     ASKED.append((C._for[-1] if C._for else None, a[2]))
-    return {"sam": [{"nameWithOwner": "sam/r", "isPrivate": True, "defaultBranchRef": {"name": "trunk"}},
-                    {"nameWithOwner": "sam/empty", "isPrivate": False, "defaultBranchRef": None},
-                    {"nameWithOwner": "sam/skip", "isPrivate": False, "defaultBranchRef": {"name": "main"}}],
-            "eve": [{"nameWithOwner": "eve/p", "isPrivate": False, "defaultBranchRef": {"name": "main"}}]}[a[2]]
+    return {"sam": [{"nameWithOwner": "sam/r", "isPrivate": True, "defaultBranchRef": {"name": "trunk"}, "createdAt": T0},
+                    {"nameWithOwner": "sam/empty", "isPrivate": False, "defaultBranchRef": None, "createdAt": T0},
+                    {"nameWithOwner": "sam/skip", "isPrivate": False, "defaultBranchRef": {"name": "main"}, "createdAt": T0}],
+            "eve": [{"nameWithOwner": "eve/p", "isPrivate": False, "defaultBranchRef": {"name": "main"},
+                     "createdAt": "2026-01-02T03:04:05Z"}]}[a[2]]
 
 
 kept = (C.gh, C.CFG["owners"], C.CFG["exclude"])
 C.gh, C.CFG["owners"], C.CFG["exclude"] = list_gh, ["sam", "eve"], ["sam/skip"]
 found = R.discover()
 C.gh, C.CFG["owners"], C.CFG["exclude"] = kept
-assert found == [{"repo": "sam/r", "private": True, "default": "trunk"},
-                 {"repo": "eve/p", "private": False, "default": "main"}], found
+assert found == [{"repo": "sam/r", "private": True, "default": "trunk", "created": T0},
+                 {"repo": "eve/p", "private": False, "default": "main", "created": "2026-01-02T03:04:05Z"}], found
 assert ASKED == [("sam", "sam"), ("eve", "eve")], ASKED
 
 # A pass asks about each repo as the App's installation on that repo's

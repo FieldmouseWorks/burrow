@@ -7,7 +7,9 @@ event reports):
      `owners`, new ones included. Bring each one's settings to the baseline
      (auto-merge, delete-branch-on-merge, squash, secret scanning, the
      `baseline` ruleset); a repo seen for the first time also gets a Claude
-     job that brings its files to docs/repo-baseline.md (repos.py).
+     job that brings its files to docs/repo-baseline.md (repos.py). So does
+     one made under the name of a repo GitHub deleted: what the steward kept
+     about that one is forgotten, and its checkout moved aside.
   2. For each open PR that isn't a draft, work out where it stands and do
      the next thing (step.py): queue a review of its head from each
      reviewer (Codex, reviewers.py), post what they found, hand open
