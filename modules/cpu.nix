@@ -30,13 +30,17 @@ in
 
     gates = {
       slices = lib.mkOption {
-        type = lib.types.listOf lib.types.str;
+        # A dash nests a slice (nix-builds.slice is in nix.slice), and a
+        # weight only counts against siblings: a nested gate slice would
+        # still meet user.slice at its parent's 100.
+        type = lib.types.listOf (lib.types.strMatching "[A-Za-z0-9_]+");
         default = [ ];
         example = [ "ci" ];
         description = ''
           The system slices (names without `.slice`) that hold gates: CI
           runners and anything else someone waits on to merge. Each gets
-          `gates.weight`.
+          `gates.weight`. They sit at the top of the tree, beside user.slice
+          and system.slice, so a name has no dash.
         '';
       };
       weight = lib.mkOption {

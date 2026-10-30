@@ -17,7 +17,8 @@ event reports):
      what each job is told), post the `review-settled` commit status and
      merge it, or list it for the owner.
   3. Once a day per repo, delete branches whose tip is already in the
-     default branch, and list the stale unmerged ones.
+     default branch or a closed PR's head, and archive the stale unmerged
+     ones under refs/archive before deleting them too.
   4. Read each repo's Renovate dashboard: what sits on it too long, short
      of a PR, goes to a Claude job (dashboard.py); and its quarantined
      flaky tests, each to a Claude job that fixes it (flakes.py).
@@ -124,7 +125,12 @@ def run_pass(kick):
                     known.add(repo)
                 owner, name = repo.split("/")
                 info, prs = open_prs(owner, name)
-                P.begin(repo, (pr["number"] for pr in prs))
+                # The PRs labelled to go first in the proof line. One whose
+                # labels can't be read isn't, and fails in its own step below:
+                # one bad PR mustn't stop the rest.
+                first = {pr["number"] for pr in prs if CFG["labels"]["first"] in
+                         {x.get("name") for x in pr.get("labels", {}).get("nodes", ())}}
+                P.begin(repo, (pr["number"] for pr in prs), first)
                 read.add(repo.replace("/", "_"))
                 waits.read(repo, prs)
                 # First, so a fix PR it made obsolete isn't merged by this same pass.
@@ -136,8 +142,8 @@ def run_pass(kick):
                 seen_to = True
                 # Obsolete fixes first: their holds take back a queued merge
                 # before anything else this pass waits on.
-                # Then oldest first, so proofSlots go to PRs in their order.
-                for pr in sorted(prs, key=lambda pr: (pr["number"] not in obsolete, pr["number"])):
+                # Then in the proof line's order, so proofSlots go to PRs in it.
+                for pr in sorted(prs, key=lambda pr: (pr["number"] not in obsolete, P.place(repo, pr["number"]))):
                     in_use.update((pr["headRefName"], pr["baseRefName"]))
                     live.add(V.snap_name(f"pr-{repo.replace('/', '_')}-{pr['number']}.json", pr["headRefOid"], pr["baseRefName"]))
                     try:
@@ -151,7 +157,7 @@ def run_pass(kick):
                 else:
                     C.wake(repo, C.NOW + 5 * MIN)  # ends: waits.failed watches the PR it failed on
                 if CFG["cleanBranches"]:
-                    # Stale ones the last sweep found are listed every pass.
+                    # Stale ones the last sweep couldn't archive are listed every pass.
                     R.sweep_branches(r, in_use, mine, sweep=kick is None)
             except Exception as e:
                 log(f"{repo}: {e}")

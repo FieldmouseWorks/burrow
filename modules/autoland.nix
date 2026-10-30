@@ -106,7 +106,7 @@ let
     jobIdle = cfg.jobIdleMinutes;
     owner = config.burrow.owner;
     cleanBranches = cfg.cleanBranches;
-    labels = { inherit (cfg.labels) hold owner; };
+    labels = { inherit (cfg.labels) hold owner first; };
     notify = {
       inherit (config.burrow.notify) repo assignee;
       label = config.burrow.notify.label;
@@ -455,8 +455,9 @@ in
       default = true;
       description = ''
         Daily, delete branches whose tip is already in the default branch or
-        is a closed PR's head (no open PR, not a bot's). Other unmerged ones
-        older than 30 days are listed for you, never deleted.
+        is a closed PR's head (no open PR). Other unmerged ones with no commit
+        for 14 days (not a bot's) are kept at refs/archive/BRANCH/SHA, then
+        deleted (docs/repo-baseline.md says how to restore one).
       '';
     };
 
@@ -538,6 +539,15 @@ in
         default = "needs-owner";
         description = "Marks a PR that waits for you; take it off to let the steward carry on.";
       };
+      first = mkOption {
+        type = types.str;
+        default = "first";
+        description = ''
+          A PR with this label goes ahead of every PR without it in its repo's
+          line for proofSlots, and the oldest first among those with it: for a
+          fix the rest of the line waits on, opened after them.
+        '';
+      };
     };
 
     reviewers = {
@@ -609,7 +619,8 @@ in
         Claude job a head runs them on that commit and records each verdict,
         a failure as a failure), proofSlots (how many of those jobs the repo
         may have building at once, for proofs that take the whole machine:
-        the rest wait their turn, oldest PR first; unset, no limit),
+        the rest wait their turn, those labelled `labels.first` first, then
+        the oldest PR first; unset, no limit),
         proofBuilds (the flake attribute each proof check builds, `{
         "<check>" = "checks.x86_64-linux.<name>"; }`: a proof whose
         attribute's outputs are all in the store, or being built by a proof
