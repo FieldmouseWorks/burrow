@@ -334,6 +334,13 @@
           python3 -I ${./tests/watchdog.py} ${./modules/watchdog}/watchdog.py ${./modules/notify}/notify.sh
           touch $out
         '';
+        # The update job's fix jobs: pipeline work, one per problem while it's
+        # recent.
+        update-dispatch = pkgs.runCommand "update-dispatch-check" { nativeBuildInputs = [ pkgs.shellcheck ]; } ''
+          shellcheck -s bash ${./modules/updates/dispatch.sh} ${./tests/update-dispatch.sh}
+          bash ${./tests/update-dispatch.sh} ${./modules/updates/dispatch.sh}
+          touch $out
+        '';
         # burrow-events for real: deliveries, kicks and wake-ups starting a
         # handler's units through polkit.
         events-service = import ./tests/events.nix { inherit self pkgs; };
