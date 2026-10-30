@@ -1,0 +1,53 @@
+{
+  "conary": "note v1",
+  "change": "24bw06n7tzrprz8fn7pagyjdj7",
+  "repo": {
+    "owner": "fieldmouseworks",
+    "name": "burrow"
+  },
+  "pr": 214,
+  "url": "https://github.com/fieldmouseworks/burrow/pull/214",
+  "summary": "proj: a lead repo's backlog leaves the other pipeline turns their own slot",
+  "task": "FieldmouseWorks/remi#212",
+  "author": {
+    "kind": "person",
+    "login": "TusanHomichi",
+    "session": null
+  },
+  "landing": {
+    "revision": "adfa5e86e98304d2c0da5504c1ea687125cc42aaedb3746e544ad2b36a7a0b04",
+    "before": "3366f2830f8d1ba8c943ee045563efac87d4e34d",
+    "after": "6d07b285d5d82a0bed38c1a8128ea5f9a1413828",
+    "by": {
+      "kind": "status",
+      "login": "fieldmouseworks-steward[bot]"
+    },
+    "at": 1793372034751
+  },
+  "evidence": [
+    {
+      "kind": "ci",
+      "check": "check / commits",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/41040282375/job/124011101520"
+    },
+    {
+      "kind": "review",
+      "check": "codex",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/214#pullrequestreview-5710956194"
+    },
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/41040282375/job/124011101134"
+    },
+    {
+      "kind": "ci",
+      "check": "agents",
+      "result": "pass",
+      "source": "status agents"
+    }
+  ]
+}
