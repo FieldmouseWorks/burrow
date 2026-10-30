@@ -1,0 +1,355 @@
+//! A job: its folder in jobs, named by its id, and what proj reads of it.
+//!
+//! Set when it's run: `project` (where it runs), `kick` (what each turn's
+//! start and end kick, a line each), `timeout` and `idle`, `pipeline` and
+//! `owned` (there or not), `link`, `app`, and `agent` (its sandbox, with
+//! --vm). Kept across turns: `turns` (the latest turn's number), `session`
+//! (Claude's, which the next turn resumes) and `lock` (turns start under
+//! it). Each turn N's own: `prompt.N`; `N.slot` (the slot it took, once it
+//! has one), `N.jsonl` (its stream), `N.result` (its answer), `N.outcome`
+//! (how it ended: done, error, or what stopped it), `N.end` (how it said it
+//! ends), `N.deadline` (when its time is up, in nanoseconds), `N.wait` (what
+//! one of its commands waits in line for), `N.waits` (where they say so),
+//! `N.cut` (what it was told when its answer was cut short), and `N.late`,
+//! `N.quiet` and `N.stopped` (what stopped it). And `await` (each PR or
+//! issue an ended turn awaits: TARGET, since, its fingerprint then, a tab
+//! apart), with the running turn's own in `await.next` and `end.next`.
+
+use std::fs::{self, File, OpenOptions};
+use std::io;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use serde_json::Value;
+
+use crate::config::Config;
+use crate::waits::Facts;
+use crate::{filled, mtime, read, swap, systemd};
+
+pub struct Job<'a> {
+    pub cfg: &'a Config,
+    pub id: &'a str,
+    pub dir: PathBuf,
+}
+
+impl<'a> Job<'a> {
+    pub fn new(cfg: &'a Config, id: &'a str) -> Job<'a> {
+        Job {
+            cfg,
+            id,
+            dir: cfg.jobs.join(id),
+        }
+    }
+
+    pub fn path(&self, name: &str) -> PathBuf {
+        self.dir.join(name)
+    }
+
+    /// Turn N's file of this kind: N.slot, N.jsonl...
+    pub fn turn(&self, n: &str, kind: &str) -> PathBuf {
+        self.dir.join(format!("{n}.{kind}"))
+    }
+
+    /// The latest turn's number, as written; None before the first.
+    pub fn turns(&self) -> Option<String> {
+        read(&self.path("turns"))
+    }
+
+    /// Swapped in whole, so a reader never finds it missing or half written.
+    pub fn set_turns(&self, n: u64) -> io::Result<()> {
+        swap(&self.path("turns"), &format!("{n}\n"))
+    }
+
+    /// The job's systemd unit, which runs its turns one at a time.
+    pub fn unit(&self) -> String {
+        format!("proj-{}.service", escape(self.id))
+    }
+
+    /// The lock turns start under: held, no turn starts until it's let go.
+    pub fn lock(&self) -> io::Result<File> {
+        let f = self.lock_file()?;
+        f.lock()?;
+        Ok(f)
+    }
+
+    fn lock_file(&self) -> io::Result<File> {
+        OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(self.path("lock"))
+    }
+
+    /// Jobs from before each turn kept its own files have the last turn's
+    /// slot, outcome and answer unnumbered (a turn that ran across that
+    /// update writes them there too, once it ends). They're turn N's if
+    /// they're no older than its prompt; anything older is an earlier
+    /// turn's, and goes.
+    fn adopt(&self) {
+        let Some(n) = self.turns() else { return };
+        let prompt = mtime_of(&self.path(&format!("prompt.{n}")));
+        for f in ["slot", "outcome", "result"] {
+            let old = self.path(f);
+            let Some(t) = mtime_of(&old) else { continue };
+            let newer = prompt.is_some_and(|p| p > t);
+            // A turn still running the old code reads its outcome back once
+            // it has written it, so that one stays until it has ended.
+            if f == "outcome" && !newer && !systemd::gone(self.cfg, &self.unit()) {
+                continue;
+            }
+            let numbered = self.turn(&n, f);
+            if !numbered.exists() && !newer {
+                let _ = fs::rename(&old, &numbered);
+            } else {
+                let _ = fs::remove_file(&old);
+            }
+        }
+    }
+
+    /// What `proj state` says: queued or running while its unit is up (as
+    /// its latest turn has a slot or not), then how that turn ended, as it
+    /// wrote it, or failed when it wrote nothing.
+    pub fn state(&self) -> String {
+        self.adopt();
+        let n = self.turns().unwrap_or_default();
+        if systemd::active(self.cfg, &self.unit()) {
+            if self.turn(&n, "slot").exists() {
+                "running".into()
+            } else {
+                "queued".into()
+            }
+        } else if filled(&self.turn(&n, "outcome")) {
+            read(&self.turn(&n, "outcome")).unwrap_or_default()
+        } else {
+            "failed".into()
+        }
+    }
+
+    /// How turn N ended, for its log: its outcome, or failed when it has
+    /// none and isn't going (its unit stopped, or killed with it, before it
+    /// wrote one), as `proj state` says. None while it's queued or running,
+    /// a second run included, or for an earlier turn from before turns kept
+    /// their outcomes (it has no slot either). Looked at under the lock
+    /// turns start under, so no turn starts halfway through and has its
+    /// state told as turn N's.
+    pub fn ended(&self, n: &str) -> Option<String> {
+        let lock = self.lock_file().ok()?;
+        lock.lock_shared().ok()?;
+        self.adopt();
+        if filled(&self.turn(n, "outcome")) {
+            read(&self.turn(n, "outcome"))
+        } else if self.turns().as_deref() == Some(n) {
+            (!systemd::active(self.cfg, &self.unit())).then(|| "failed".into())
+        } else if self.turn(n, "slot").exists() {
+            Some("failed".into())
+        } else {
+            None
+        }
+    }
+
+    /// What the stall watchdog's look reads of the latest turn; None before
+    /// the first.
+    pub fn facts(&self) -> Option<Facts> {
+        let n = self.turns()?;
+        let state = self.state();
+        let prompt = self.path(&format!("prompt.{n}"));
+        let opt = |p: PathBuf| filled(&p).then(|| read(&p).unwrap_or_default());
+        Some(Facts {
+            id: self.id.to_owned(),
+            owned: self.path("owned").exists(),
+            stopped: self.turn(&n, "stopped").exists(),
+            end: opt(self.turn(&n, "end")),
+            link: opt(self.path("link")),
+            queued: mtime(&prompt).unwrap_or(0),
+            slot: mtime(&self.turn(&n, "slot")).unwrap_or(0),
+            // When it ended: when it wrote its outcome, or for one stopped
+            // before it could, when it last said anything.
+            ended: [self.turn(&n, "outcome"), self.turn(&n, "jsonl"), prompt]
+                .iter()
+                .find_map(|p| mtime(p))
+                .unwrap_or(0),
+            // Its deadline as it stands, to the second (none without a
+            // timeout): when it took its slot and its timeout, moved on by
+            // any time it waited in line. And what it waits in line for now,
+            // if anything.
+            deadline: read(&self.turn(&n, "deadline"))
+                .filter(|t| !t.is_empty() && t.bytes().all(|b| b.is_ascii_digit()))
+                .and_then(|t| t.parse::<i64>().ok())
+                .map_or(0, |t| t / 1_000_000_000),
+            wait: opt(self.turn(&n, "wait")).map(|w| {
+                let line = w.lines().next().unwrap_or_default();
+                let (since, what) = line.split_once('\t').unwrap_or((line, ""));
+                (since.to_owned(), what.to_owned())
+            }),
+            awaits: if filled(&self.path("await")) {
+                awaits(&read(&self.path("await")).unwrap_or_default())
+                    .into_iter()
+                    .map(|a| (a.target, a.since))
+                    .collect()
+            } else {
+                Vec::new()
+            },
+            turn: n,
+            state,
+        })
+    }
+}
+
+/// When a file last changed, to the nanosecond, if it's there.
+fn mtime_of(path: &Path) -> Option<std::time::SystemTime> {
+    fs::metadata(path).ok()?.modified().ok()
+}
+
+/// One line of a job's await: what it awaits (a PR or issue, OWNER/REPO#N
+/// as `proj await` was given it), since when, and what it was then (its
+/// fingerprint, "" when GitHub couldn't be asked).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Await {
+    pub target: String,
+    pub since: String,
+    pub was: String,
+}
+
+impl Await {
+    pub fn line(&self) -> String {
+        format!("{}\t{}\t{}\n", self.target, self.since, self.was)
+    }
+}
+
+/// An await file's lines, as written: each split at its first two tabs.
+pub fn awaits(text: &str) -> Vec<Await> {
+    text.lines()
+        .map(|l| {
+            let mut f = l.splitn(3, '\t');
+            Await {
+                target: f.next().unwrap_or_default().to_owned(),
+                since: f.next().unwrap_or_default().to_owned(),
+                was: f.next().unwrap_or_default().to_owned(),
+            }
+        })
+        .collect()
+}
+
+/// A turn's answer, from its stream: every result with something to say, in
+/// order. Claude answers again each time a background task it left running
+/// reports back, so the last result can be a line about that task with the
+/// real answer one before it. None when a result can't be read.
+pub fn answer(stream: &Path) -> Option<String> {
+    let text = fs::read(stream).unwrap_or_default();
+    let mut said = Vec::new();
+    for line in String::from_utf8_lossy(&text).lines() {
+        if !line.contains(r#""type":"result""#) {
+            continue;
+        }
+        let v: Value = serde_json::from_str(line).ok()?;
+        match v.get("result") {
+            Some(Value::String(s)) if !s.is_empty() => said.push(s.clone()),
+            _ => (),
+        }
+    }
+    Some(said.join("\n\n"))
+}
+
+/// The last result in a stream from byte `from` on, if any.
+pub fn last_result(stream: &Path, from: u64) -> Option<Value> {
+    let text = fs::read(stream).ok()?;
+    let text = text.get(from as usize..).unwrap_or_default();
+    String::from_utf8_lossy(text)
+        .lines()
+        .filter(|l| l.contains(r#""type":"result""#))
+        .rev()
+        .find_map(|l| serde_json::from_str(l).ok())
+}
+
+/// Whether a result says it's an error.
+pub fn is_error(result: &Value) -> bool {
+    match result.get("is_error") {
+        None | Some(Value::Null) | Some(Value::Bool(false)) => false,
+        Some(_) => true,
+    }
+}
+
+/// Kick each handler named (burrow-events'), once each.
+pub fn kick(cfg: &Config, names: impl IntoIterator<Item = String>) {
+    if cfg.kick.is_empty() {
+        return;
+    }
+    let mut names: Vec<String> = names.into_iter().filter(|k| !k.is_empty()).collect();
+    names.sort();
+    names.dedup();
+    for k in names {
+        let url = format!("{}/{k}", cfg.kick);
+        if burrow_events::kick::kick(&url, Duration::from_secs(5)).is_err() {
+            eprintln!("proj: couldn't kick {k}");
+        }
+    }
+}
+
+/// A unit name's part, as systemd-escape writes it: `/` becomes `-`, and
+/// each byte that isn't a letter, digit, `:`, `_` or `.` (or is a leading
+/// `.`) becomes `\xNN`.
+pub fn escape(s: &str) -> String {
+    let mut out = String::new();
+    for (i, b) in s.bytes().enumerate() {
+        match b {
+            b'/' => out.push('-'),
+            b'.' if i == 0 => out.push_str("\\x2e"),
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b':' | b'_' | b'.' => out.push(b as char),
+            _ => out.push_str(&format!("\\x{b:02x}")),
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use super::{answer, awaits, escape, last_result};
+
+    // As systemd-escape writes them: a job's id is its project's folder
+    // name, spaces, `%` and all.
+    #[test]
+    fn units() {
+        assert_eq!(
+            escape("web-20261030-120000-AbCd"),
+            "web\\x2d20261030\\x2d120000\\x2dAbCd"
+        );
+        assert_eq!(escape("my web%n"), "my\\x20web\\x25n");
+        assert_eq!(escape(".dot/a.b"), "\\x2edot-a.b");
+        assert_eq!(escape("é"), "\\xc3\\xa9");
+    }
+
+    // Every result with something to say, in order; a run's last result is
+    // its own.
+    #[test]
+    fn answers() {
+        let d = tempfile::tempdir().unwrap();
+        let s = d.path().join("1.jsonl");
+        fs::write(
+            &s,
+            concat!(
+                "{\"type\":\"system\",\"session_id\":\"s\"}\n",
+                "{\"type\":\"result\",\"session_id\":\"s\",\"result\":\"waiting on CI\",\"is_error\":false}\n",
+                "{\"type\":\"result\",\"session_id\":\"s\",\"is_error\":true,\"errors\":[\"boom\"]}\n",
+                "{\"type\":\"result\",\"session_id\":\"t\",\"result\":\"the build passed\",\"is_error\":false}\n",
+            ),
+        )
+        .unwrap();
+        assert_eq!(answer(&s).unwrap(), "waiting on CI\n\nthe build passed");
+        assert_eq!(last_result(&s, 0).unwrap()["session_id"], "t");
+        let len = fs::metadata(&s).unwrap().len();
+        assert_eq!(last_result(&s, len), None);
+        fs::write(&s, "{\"type\":\"result\", nope\n").unwrap();
+        assert_eq!(answer(&s), None);
+        assert_eq!(answer(&d.path().join("none")).unwrap(), "");
+    }
+
+    #[test]
+    fn await_lines() {
+        let got = awaits("o/r#5\t100\t{\"state\":\"open\"}\nx/y#1\t200\t\nbad\n");
+        assert_eq!(got.len(), 3);
+        assert_eq!(got[0].was, "{\"state\":\"open\"}");
+        assert_eq!(got[1].line(), "x/y#1\t200\t\n");
+        assert_eq!((got[2].target.as_str(), got[2].since.as_str()), ("bad", ""));
+    }
+}

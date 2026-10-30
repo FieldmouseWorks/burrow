@@ -44,7 +44,11 @@
       };
       # burrow's own programs, one Cargo workspace (crates/): their package
       # and their gate, built for every platform lib/project.nix knows.
-      crates = self.lib.project { self = ./crates; rust = { }; };
+      crates = self.lib.project {
+        self = ./crates;
+        # proj's tests clone repos to read their origins.
+        rust.testInputs = pkgs: [ pkgs.git ];
+      };
     in
     {
       # A project's dev shell and gate in a few lines; see lib/project.nix.
@@ -239,17 +243,11 @@
         proj = import ./tests/proj.nix { inherit self pkgs; };
         # A turn's clock, which stands still while it waits in line.
         proj-clock = import ./tests/proj-clock.nix { inherit self pkgs; };
-        # Who takes a free slot: the pipeline's own (only its own repos'
-        # pipeline jobs), and each project's cap.
-        proj-pick = pkgs.runCommand "proj-pick-check" { nativeBuildInputs = [ pkgs.shellcheck pkgs.git ]; } ''
-          shellcheck -s bash ${./modules/proj/pick.sh} ${./tests/proj-pick.sh}
-          bash ${./tests/proj-pick.sh} ${./modules/proj/pick.sh}
-          touch $out
-        '';
-        # What each job waits on, as the stall watchdog hears it.
-        proj-waits = pkgs.runCommand "proj-waits-check" { nativeBuildInputs = [ pkgs.shellcheck pkgs.jq pkgs.util-linux ]; } ''
-          shellcheck -s bash ${./modules/proj/waits.sh} ${./tests/proj-waits.sh}
-          bash ${./tests/proj-waits.sh} ${./modules/proj/waits.sh}
+        # The example's proj reads the config its module writes (a field the
+        # binary doesn't know fails it), and a job it doesn't have is failed.
+        proj-config = pkgs.runCommand "proj-config-check" { } ''
+          got=$(${self.nixosConfigurations.example.config.burrow.tools.proj}/bin/proj state no-such-job)
+          [ "$got" = failed ] || { echo "proj state said: $got"; exit 1; }
           touch $out
         '';
         # The steward and its reviewers, with stand-ins for gh, git's remote and

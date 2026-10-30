@@ -4,7 +4,7 @@
 # pipeline job's every turn, in one of the pipeline's own repos, takes the
 # slot kept for them when the rest are full, and one in a lead repo goes
 # ahead of the others, while one anywhere else goes as --first and says so
-# (pick.sh's own check has how origins are told apart),
+# (proj's pick tests have how origins are told apart),
 # that a job whose turn has ended frees its slot, that one stopped after
 # its answer with work in the background has the rest of that run stopped,
 # hears so once and answers again (the turn ending as its last run did, its
@@ -60,7 +60,7 @@ pkgs.testers.runNixOSTest {
       proj = {
         enable = true;
         # Two slots for anyone, one more for pipeline jobs alone, and no cap
-        # that binds before the slots run out (pick.sh's own check has those).
+        # that binds before the slots run out (proj's pick tests have those).
         maxJobs = 3;
         pipelineSlots = 1;
         maxJobsPerProject = 2;
