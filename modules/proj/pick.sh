@@ -3,36 +3,49 @@
 # sees, one tab-separated line each: "slot N free", or "slot N CLASS PROJECT"
 # for one that's taken (its turn's class and project, "-" when not known), for
 # every slot in order; then "wait NAME CLASS PROJECT" for every turn in line,
-# the head first. CLASS is pipeline, first or normal. It prints "NAME N" for
-# the first turn in line that may start, or nothing.
+# the head first. CLASS is lead, pipeline, first or normal. It prints "NAME
+# N" for the first turn that may start, or nothing.
 #
 # The last PIPELINE_SLOTS of the MAX_JOBS slots are for pipeline turns only
 # (work on the pipeline itself, in its own repos' projects: class says), so
 # one waits only on other pipeline turns, never on everyone else's long
 # jobs; a pipeline turn takes the lowest free slot, which keeps those for the
-# next one. Any other turn waits while its project holds PER_PROJECT slots
-# (pipeline turns not counted), and lets those behind it by meanwhile, so one
-# project's jobs never fill the machine.
+# next one. A lead turn (pipeline work in a lead repo's project, what the
+# pipeline is built from) is a pipeline turn that goes first of all: ahead
+# of the whole line, the other pipeline turns included. Any other turn waits
+# while its project holds PER_PROJECT slots (pipeline turns not counted), and
+# lets those behind it by meanwhile, so one project's jobs never fill the
+# machine.
 pick() {
-  local kind a b c n free=()
+  local kind a b c n w pass free=() inline=()
   local -A held=()
   while IFS=$'\t' read -r kind a b c; do
     case $kind in
       slot)
         if [ "$b" = free ]; then free+=("$a")
-        elif [ "$b" != pipeline ]; then held[p$c]=$((${held[p$c]:-0} + 1))
+        elif [ "$b" != pipeline ] && [ "$b" != lead ]; then held[p$c]=$((${held[p$c]:-0} + 1))
         fi
         ;;
-      wait)
-        [ "$b" = pipeline ] || [ "${held[p$c]:-0}" -lt "$PER_PROJECT" ] || continue
-        for n in "${free[@]}"; do
-          if [ "$b" = pipeline ] || [ "$n" -le $((MAX_JOBS - PIPELINE_SLOTS)) ]; then
-            printf '%s\t%s\n' "$a" "$n"
-            return
-          fi
-        done
-        ;;
+      wait) inline+=("$a"$'\t'"$b"$'\t'"$c") ;;
     esac
+  done
+  for pass in lead rest; do
+    for w in "${inline[@]}"; do
+      IFS=$'\t' read -r a b c <<<"$w"
+      if [ "$pass" = lead ]; then [ "$b" = lead ] || continue
+      else [ "$b" != lead ] || continue
+      fi
+      case $b in
+        lead | pipeline) ;;
+        *) [ "${held[p$c]:-0}" -lt "$PER_PROJECT" ] || continue ;;
+      esac
+      for n in "${free[@]}"; do
+        if [ "$b" = lead ] || [ "$b" = pipeline ] || [ "$n" -le $((MAX_JOBS - PIPELINE_SLOTS)) ]; then
+          printf '%s\t%s\n' "$a" "$n"
+          return
+        fi
+      done
+    done
   done
 }
 
@@ -59,41 +72,50 @@ github_repo() {
   fi
 }
 
-# Whether the project at a path is a clone of one of the pipeline's own repos
-# (PIPELINE: their OWNER/NAMEs, any case, as autoland.pipelineRepos has them).
-pipeline_project() {
-  local r
-  r=$(github_repo "$1")
-  [ -n "$r" ] || return 1
-  case " ${PIPELINE,,} " in *" $r "*) return 0 ;; esac
+# Whether a repo (github_repo's owner/name) is in a list of OWNER/NAMEs, any
+# case.
+listed() {
+  [ -n "$1" ] || return 1
+  case " ${2,,} " in *" $1 "*) return 0 ;; esac
   return 1
 }
+
+# Whether the project at a path is a clone of one of the pipeline's own repos
+# (PIPELINE: their OWNER/NAMEs, any case, as autoland.pipelineRepos and
+# leadRepos have them).
+pipeline_project() { listed "$(github_repo "$1")" "$PIPELINE"; }
 
 # A job's class, from its dir. One run with --pipeline is a pipeline one,
 # every turn of it, only while its project is one of the pipeline's own;
 # anywhere else it's first, every turn of it, so it still goes ahead of the
 # line but counts against its project's PER_PROJECT and stays off the
 # pipeline's slots (one repo's PRs, waiting on that repo's own lock, can't
-# fill the machine). Asked each time, so a job from before this rule, or one
-# whose repo was taken off the list since, is held to it too. Otherwise first
-# or normal, as the turn was started.
+# fill the machine). In a lead repo's project (LEAD: the ones among PIPELINE
+# that go first of all, as autoland.leadRepos has them) it's lead. Asked each
+# time, so a job from before this rule, or one whose repo was taken off a
+# list since, is held to it too. Otherwise first or normal, as the turn was
+# started.
 class() {
-  if [ ! -e "$1/pipeline" ]; then echo "${2:-normal}"
-  elif pipeline_project "$(cat "$1/project" 2>/dev/null)"; then echo pipeline
+  local r
+  if [ ! -e "$1/pipeline" ]; then echo "${2:-normal}"; return 0; fi
+  r=$(github_repo "$(cat "$1/project" 2>/dev/null)")
+  if listed "$r" "$LEAD"; then echo lead
+  elif listed "$r" "$PIPELINE"; then echo pipeline
   else echo first
   fi
 }
 
 # A waiting turn's class now, and the name its place in line (JOBS/.queue's
-# PREFIX-WHEN-ID) should have for it: 0 pipeline, 1 first, 2 normal, with a
-# tab between. Its prefix says what the turn itself is (2 normal, anything
-# else first: run with --first, or waited past MAX_WAIT), and class what
-# that makes it now, so a job whose origin or list changed while it waits
-# moves in line and is held to its project's cap as what it is now.
+# PREFIX-WHEN-ID) should have for it: 0 lead or pipeline (pick takes lead
+# ones first), 1 first, 2 normal, with a tab between. Its prefix says what
+# the turn itself is (2 normal, anything else first: run with --first, or
+# waited past MAX_WAIT), and class what that makes it now, so a job whose
+# origin or list changed while it waits moves in line and is held to its
+# project's cap as what it is now.
 place() {
   local c p
   c=$(class "$2" "$([[ $1 == 2-* ]] && echo normal || echo first)")
-  case $c in pipeline) p=0 ;; first) p=1 ;; *) p=2 ;; esac
+  case $c in lead | pipeline) p=0 ;; first) p=1 ;; *) p=2 ;; esac
   printf '%s\t%s\n' "$c" "$p-${1#?-}"
 }
 
