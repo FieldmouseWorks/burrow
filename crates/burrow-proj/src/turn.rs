@@ -228,14 +228,6 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
         .watch(child, from);
         let rc = code(status);
         let last = last_result(&stream, from);
-        if let Some(l) = &last {
-            let session = match l.get("session_id") {
-                Some(serde_json::Value::String(s)) => s.clone(),
-                Some(v) => v.to_string(),
-                None => "null".into(),
-            };
-            let _ = fs::write(job.path("session"), format!("{session}\n"));
-        }
         // Still up after its answer, it was waiting on something it left in
         // the background (a build past one Bash call), which went with it.
         // Or it answered without saying what comes next, and nothing would
@@ -426,7 +418,7 @@ impl Run<'_> {
     /// is closer ([`Clock`]).
     fn watch(&self, mut child: Child, from: u64) -> (ExitStatus, bool) {
         let pid = Pid::from_child(&child);
-        let mut said = Said::new(&self.job.turn(self.n, "jsonl"), from);
+        let mut said = Said::new(self.job, self.n, from);
         let mut answered: Option<Instant> = None;
         let mut cut = false;
         let mut clock = Clock {
@@ -444,7 +436,10 @@ impl Run<'_> {
                     Err(_) => break ExitStatus::default(),
                 },
             }
-            if answered.is_none() && said.answered() {
+            if answered.is_none() || !said.named {
+                said.look(false);
+            }
+            if answered.is_none() && said.answered {
                 answered = Some(Instant::now());
             }
             if !cut && answered.is_some_and(|t| t.elapsed() >= Duration::from_secs(10)) {
@@ -462,6 +457,10 @@ impl Run<'_> {
             };
             sleep(until.saturating_duration_since(Instant::now()));
         };
+        // What it said last, before it went, can be what names its session.
+        if !said.named {
+            said.look(true);
+        }
         clock.finish(self);
         (status, cut)
     }
@@ -551,41 +550,69 @@ impl Clock {
     }
 }
 
-/// What a run has said so far, read as it says it.
-struct Said {
+/// What a run has said so far, read as it says it. Its session is kept as
+/// soon as its stream first names it (the first line does), not from its
+/// answer: a run killed before it answers (its unit past its memory cap,
+/// say) can still be continued.
+struct Said<'a> {
+    job: &'a Job<'a>,
     file: Option<File>,
     partial: Vec<u8>,
+    /// A line it has said is a result.
+    answered: bool,
+    /// A line it has said names a session.
+    named: bool,
 }
 
-impl Said {
-    fn new(stream: &Path, from: u64) -> Said {
-        let file = File::open(stream).ok().and_then(|mut f| {
+impl<'a> Said<'a> {
+    fn new(job: &'a Job<'a>, n: &str, from: u64) -> Said<'a> {
+        let file = File::open(job.turn(n, "jsonl")).ok().and_then(|mut f| {
             f.seek(SeekFrom::Start(from)).ok()?;
             Some(f)
         });
         Said {
+            job,
             file,
             partial: Vec::new(),
+            answered: false,
+            named: false,
         }
     }
 
-    /// Whether a line it has said since the last look is a result.
-    fn answered(&mut self) -> bool {
+    /// Reads the lines it has said since the last look; `last` once it's
+    /// gone, when a line it never ended counts too.
+    fn look(&mut self, last: bool) {
         let Some(f) = &mut self.file else {
-            return false;
+            return;
         };
         let mut more = Vec::new();
-        if f.read_to_end(&mut more).is_err() || more.is_empty() {
-            return false;
+        if f.read_to_end(&mut more).is_err() {
+            return;
         }
         self.partial.extend(more);
-        let Some(end) = self.partial.iter().rposition(|&b| b == b'\n') else {
-            return false;
+        let end = if last {
+            self.partial.len()
+        } else {
+            match self.partial.iter().rposition(|&b| b == b'\n') {
+                Some(end) => end + 1,
+                None => return,
+            }
         };
-        let whole: Vec<u8> = self.partial.drain(..=end).collect();
-        String::from_utf8_lossy(&whole)
-            .lines()
-            .any(|l| l.contains(r#""type":"result""#))
+        let whole: Vec<u8> = self.partial.drain(..end).collect();
+        for l in String::from_utf8_lossy(&whole).lines() {
+            if !self.named && l.contains(r#""session_id""#) {
+                self.named = true;
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(l)
+                    && let Some(serde_json::Value::String(s)) = v.get("session_id")
+                    && !s.is_empty()
+                {
+                    let _ = fs::write(self.job.path("session"), format!("{s}\n"));
+                }
+            }
+            if l.contains(r#""type":"result""#) {
+                self.answered = true;
+            }
+        }
     }
 }
 
