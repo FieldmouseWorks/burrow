@@ -274,6 +274,12 @@
             ];
           };
         in builtins.head (builtins.filter (p: (p.name or "") == "autoland-steward") machine.config.environment.systemPackages);
+        # The example's stall watchdog reads the config its module writes (a
+        # field the binary doesn't know fails it).
+        watchdog-config = pkgs.runCommand "watchdog-config-check" { } ''
+          ${self.nixosConfigurations.example.config.systemd.services.burrow-watchdog.serviceConfig.ExecStart} status
+          touch $out
+        '';
         # The steward's tools reach a pass however it's started: by hand or
         # a Claude job (`autoland-steward kick OWNER/REPO`), with no openssl,
         # gh or proj of its own, gets them from the wrapper, ahead of its own
@@ -327,11 +333,11 @@
           [ "$got" = the-stewards ] || { echo "a pass's own call doesn't use the steward's token: $got"; exit 1; }
           touch $out
         '';
-        # The stall watchdog's ladder (kick, Claude job, stuck issue, owner),
-        # with the real notify and stand-ins for proj, notify's gh and
-        # burrow-events' kick port.
-        watchdog = pkgs.runCommand "watchdog-check" { nativeBuildInputs = [ pkgs.python3 pkgs.bash ]; } ''
-          python3 -I ${./tests/watchdog.py} ${./modules/watchdog}/watchdog.py ${./modules/notify}/notify.sh
+        # HOST-notify's issues, with a stand-in for gh: one a notice, closed
+        # when cleared, and pending until GitHub has shown it closed.
+        notify = pkgs.runCommand "notify-check" { nativeBuildInputs = [ pkgs.shellcheck pkgs.jq pkgs.bash ]; } ''
+          shellcheck -s bash ${./tests/notify.sh}
+          bash ${./tests/notify.sh} ${./modules/notify/notify.sh}
           touch $out
         '';
         # The update job's fix jobs: pipeline work, one per problem while it's
