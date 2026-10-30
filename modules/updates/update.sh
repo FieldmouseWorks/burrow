@@ -158,11 +158,12 @@ fi
 # 3. What's new upstream: every flake input, and Claude Code's latest release.
 inputs=$(as_user nix flake metadata --json "$work" | jq -r '.locks.nodes.root.inputs | keys[]')
 
+# Fails when it couldn't find out, or bring in, what's new.
 update_one() {
   if [ "$1" = claude-code ]; then
     [ -n "$manifest" ] || return 0
     local v
-    v=$(curl -fsS --max-time 30 "$claude_releases/latest") || return 0
+    v=$(curl -fsS --max-time 30 "$claude_releases/latest") || return 1
     [ "$v" != "$(jq -r .version "$work/$manifest")" ] || return 0
     curl -fsS --max-time 60 "$claude_releases/$v/manifest.zst.json" -o "$state/manifest.json" &&
       jq -e '.version and .platforms["linux-x64"].checksum' "$state/manifest.json" >/dev/null &&
@@ -205,10 +206,11 @@ remember_failed() { echo "$1:$(tree) $(date +%s)" >>"$state/failed-trees"; }
 
 : >"$state/logs/update.log"
 changed=
+unfetched=() # inputs whose news couldn't be fetched
 if [ -n "$riding" ]; then
   [ "$(git_ rev-parse HEAD)" = "$main" ] || changed=1
 else
-  for i in $inputs claude-code; do update_one "$i" || true; done
+  for i in $inputs claude-code; do update_one "$i" || unfetched+=("$i"); done
   commit && changed=1
 fi
 
@@ -230,8 +232,9 @@ settled build-riding "main with its PR on top builds."
 if [ -z "$riding" ] && { failed_before build || ! new=$(build) || [ -z "$new" ]; }; then
   failed_before build || { cp "$state/logs/build.log" "$state/logs/build-all.log"; remember_failed build; }
   git_ reset -q --hard "$main"
+  unfetched=()
   for i in $inputs claude-code; do
-    update_one "$i" || true
+    update_one "$i" || unfetched+=("$i")
     commit || continue
     if ! failed_before build && new=$(build) && [ -n "$new" ]; then
       echo "$i: builds"
@@ -258,7 +261,7 @@ fi
 settled build-main "main builds again."
 
 # Its red PR's head stays, unless a whole fresh bump other than it replaces it.
-if [ -n "$replacing" ] && why=$(why_not_replace "$replacing" "${failed[@]}"); then
+if [ -n "$replacing" ] && why=$(why_not_replace "$replacing" "$main" "${unfetched[@]}" "${failed[@]}"); then
   note held "its PR #${replacing%% *} is red, and $why; holding for the Claude jobs on it"
   exit 0
 fi

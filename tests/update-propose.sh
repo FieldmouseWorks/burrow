@@ -290,25 +290,30 @@ grep -q "isn't ${listed#* } any more" <<<"$why" || fail "red_head's word on a mo
 echo "red_head: ok"
 
 # A fresh bump replaces the red head only whole, and other than it: not the
-# red head's very tree (nothing moved), nor one short of an input that didn't
-# build, nor main itself (none did); once main moved, a whole one does.
+# red head's very tree (nothing moved), nor main itself with nothing new on it
+# (all its inputs failed, or none could be fetched, or none moved), nor one
+# short of an input; once main moved, a whole one does.
 fresh
 pushed_before v2
 pr=$(update_pr)
 checks "$(run COMPLETED FAILURE)"
 red_head "$pr" >/dev/null
 at_main
+main=$(git_ rev-parse HEAD)
 commit flake.lock v2
-why=$(why_not_replace "$pr") || fail "why_not_replace let the same bump replace it"
+why=$(why_not_replace "$pr" "$main") || fail "why_not_replace let the same bump replace it"
 [ "$why" = "a fresh bump is that same tree" ] || fail "why_not_replace's word on the same bump: $why"
 landed README new
 at_main
-why=$(why_not_replace "$pr" nixpkgs burrow) || fail "why_not_replace let main itself replace it"
-[ "$why" = "a fresh bump doesn't build with nixpkgs burrow" ] || fail "why_not_replace's word on main itself: $why"
+main=$(git_ rev-parse HEAD)
+why=$(why_not_replace "$pr" "$main") || fail "why_not_replace let main itself replace it"
+[ "$why" = "a fresh bump has nothing new on main" ] || fail "why_not_replace's word on main itself: $why"
+why=$(why_not_replace "$pr" "$main" claude-code nixpkgs) || fail "why_not_replace let main itself, short of every input, replace it"
+[ "$why" = "a fresh bump is short of claude-code nixpkgs" ] || fail "why_not_replace's word on main short of every input: $why"
 commit flake.lock v3
-why=$(why_not_replace "$pr" burrow) || fail "why_not_replace let a bump short of burrow replace it"
-[ "$why" = "a fresh bump doesn't build with burrow" ] || fail "why_not_replace's word on a bump short of an input: $why"
-if why=$(why_not_replace "$pr"); then fail "why_not_replace held a whole, new bump: $why"; fi
+why=$(why_not_replace "$pr" "$main" claude-code) || fail "why_not_replace let a bump short of claude-code replace it"
+[ "$why" = "a fresh bump is short of claude-code" ] || fail "why_not_replace's word on a bump short of an input: $why"
+if why=$(why_not_replace "$pr" "$main"); then fail "why_not_replace held a whole, new bump: $why"; fi
 echo "why_not_replace: ok"
 
 # Replacing: the fresh bump goes to the branch as the same PR's new head,

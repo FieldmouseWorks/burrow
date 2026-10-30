@@ -125,17 +125,21 @@ already_live() {
   fi
 }
 
-# Why HEAD, a fresh bump for its red PR $1, doesn't replace that head, when
-# it doesn't; $2... are the inputs that didn't build into it. One short of
-# any (or of every one, which leaves main itself) could take back what that
-# head put live; one that's that head's very tree would only go red the same
-# way again. Either way the Claude job on the red PR (or a rerun) has it.
+# Why HEAD, a fresh bump on main $2 for its red PR $1, doesn't replace that
+# head, when it doesn't; $3... are the inputs that didn't make it in (they
+# didn't build, or what's new in them couldn't be fetched). One short of any,
+# or with nothing new on main at all, could take back what that head put
+# live; one that's that head's very tree would only go red the same way
+# again. Either way the Claude job on the red PR (or a rerun) has it.
 why_not_replace() {
-  local pr=$1
-  shift
+  local pr=$1 main=$2 tree
+  shift 2
+  tree=$(git_ rev-parse 'HEAD^{tree}')
   if [ $# -gt 0 ]; then
-    echo "a fresh bump doesn't build with $*"
-  elif [ "$(git_ rev-parse 'HEAD^{tree}')" = "$(git_ rev-parse "${pr#* }^{tree}")" ]; then
+    echo "a fresh bump is short of $*"
+  elif [ "$tree" = "$(git_ rev-parse "$main^{tree}")" ]; then
+    echo "a fresh bump has nothing new on main"
+  elif [ "$tree" = "$(git_ rev-parse "${pr#* }^{tree}")" ]; then
     echo "a fresh bump is that same tree"
   else
     return 1
