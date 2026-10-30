@@ -33,26 +33,35 @@ BLOCK = re.compile(r"^```\n(.*?)^```", re.S | re.M)
 REQUEST = "rebase!"  # the title's prefix that has Renovate redo the branch, on its every run
 ASKS, STANDING = 3, 6 * 3600  # requests on a head, and how long each may stand
 RELEASES, RELEASE_GAP = 3, 600  # tries to take one back, and how far apart
-PASS = 3600  # the longest between the sweep's passes (a Renovate run's, hourly)
+PASS = 3600  # how often the sweep's timer fires
+
+
+def interval(run):
+    """The longest between the sweep's passes: its timer's, and it waits for
+    a full Renovate run (`run` seconds) started with it."""
+    return PASS + run
 
 
 def drain(run):
-    """The longest from renovate-sweep seeing a request to its job being let
-    at the branch: taking it back, then the longest Renovate run (`run`
-    seconds), which may have read it just before."""
-    return PASS + RELEASES * RELEASE_GAP + run
+    """The longest from renovate-sweep seeing a request to a job's push being
+    safe: a pass for each try at taking it back, one to hand the PR over,
+    however those went, then that job taking it back itself and waiting out
+    the longest Renovate run, which may have read it just before."""
+    return (RELEASES + 1) * max(RELEASE_GAP, interval(run)) + run
 
 
 def recovery(run):
-    """The longest from the date to the sweep handing the PR to a job, each
-    request standing as long as it may."""
-    return ASKS * (STANDING + PASS) + drain(run)
+    """The same from the date, each request standing as long as it may and
+    the next one a pass later."""
+    return ASKS * (STANDING + interval(run)) + drain(run)
 
 
 def guard(run):
-    """What a job the watchdog hands the PR to is told, as the sweep's is."""
-    return (f"; if its title starts with {REQUEST}, which has Renovate redo the branch over what you push, take that "
-            f"off the title first, and push nothing to it for {run // 60} minutes after")
+    """What a job the watchdog hands the PR to is told. Whether or not the
+    title has it now: a request just gone may be what a run is acting on."""
+    return (f"; {REQUEST} at the start of its title has Renovate redo the branch over what you push: if it's there, "
+            f"take it off, and push nothing to it until {run // 60} minutes after it last had it (the PR's timeline "
+            "shows its renamed events)")
 
 
 def when(body):
@@ -81,10 +90,19 @@ def ripe(comments, renovate):
     return when(body) if body else None
 
 
-def refresh(pr, red, names, renovate):
+def requested(pr, st, now, run):
+    """Whether a Renovate PR has a request standing, or had one recently
+    enough for a run that read it to be going on still. st keeps when it was
+    last seen."""
+    if pr["title"].startswith(REQUEST):
+        st["refreshAsked"] = now
+    return now < st.get("refreshAsked", -run) + run or pr["title"].startswith(REQUEST)
+
+
+def refresh(pr, red, names, renovate, asked):
     """What a Renovate PR's wait counts (waits.note), when the sweep may have
-    a refresh of it going on: it's red, or a request stands."""
-    if not red and not pr["title"].startswith(REQUEST):
+    a refresh of it going on: it's red, or a request is about (requested)."""
+    if not red and not asked:
         return {}
     return {"refreshing": True, "ripe": ripe(pr["comments"]["nodes"], renovate) if red and names == [ARTIFACTS] else None}
 

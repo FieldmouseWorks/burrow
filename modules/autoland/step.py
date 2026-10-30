@@ -347,7 +347,7 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
         retry is due, and doesn't count toward the two (retry_at). Never
         while another fix job is still working on this head: two on one
         branch push over each other."""
-        ours = ours and not (renovate and pr["title"].startswith(lock_wait.REQUEST))  # Renovate would redo its branch
+        ours = ours and not requested  # Renovate would redo its branch
         retry = st.get(kind) == at
         state = retry and running(kind, at)
         gone = retry and not state and lost(kind, at)
@@ -601,8 +601,8 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
     fixed = dep == "minor" and not gate and (bot_edited(repo, pr, st) or gate_edit(repo, pr, st))
     swept = fixed and ci == "red" and renovate
     # The date a lock file refresh waits for, renovate-sweep's to have it refreshed then.
-    refresh = lock_wait.refresh(pr, ci == "red", ci_names, D.renovated) if renovate else {}
-    ripe = refresh.get("ripe")
+    requested = renovate and lock_wait.requested(pr, st, C.NOW, waits.renovate_run())
+    refresh = lock_wait.refresh(pr, ci == "red", ci_names, D.renovated, requested) if renovate else {}
 
     # Dependency bumps: CI is the review. Renovate merges its own minor
     # ones; renovate-sweep fixes the red ones (and settles their threads) and
@@ -627,7 +627,7 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
         threads = f"{open_threads} open review thread{'s' * (open_threads > 1)}" if open_threads else ""
         if changes:
             threads = ", ".join([threads] * bool(threads) + ["changes requested by " + ", ".join(changes)])
-        if ripe and not threads:
+        if (ripe := refresh.get("ripe")) and not threads:
             when = time.strftime("%b %-d, ", time.localtime(ripe)) + clock(ripe)
             settle("pending", f"Lock file refresh, nothing in it old enough until {when}; renovate-sweep has it refreshed then", wait=waits.SWEEP)
         elif renovate and ci == "red":

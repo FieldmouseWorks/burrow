@@ -123,8 +123,11 @@ asking = {"branch": "renovate/foo-3", "title": "rebase!Update foo from 1.4 to 1.
 run(mkpr(threads=[False], **asking), 0)
 status, _ = run(mkpr(threads=[False], **asking), 7200)
 assert JOBS == [] and "1 open review thread" in status, status
-run(mkpr(threads=[False], **{**asking, "title": "Update foo from 1.4 to 1.5"}), 7200)
-assert JOBS, "a job once the request is gone"
+asked = {**asking, "title": "Update foo from 1.4 to 1.5"}
+run(mkpr(threads=[False], **asked), 7300)
+assert JOBS == [], "a run that read it may still be going"
+run(mkpr(threads=[False], **asked), 7200 + 7300)
+assert JOBS, "a job once the request is gone and its run over"
 JOBS.clear()
 
 # A red Dependabot one has no sweep: it goes to a job.
