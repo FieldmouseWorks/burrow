@@ -59,13 +59,14 @@ on:
           ("!archive/**"). A PR that changes only these, renames and
           deletions included, takes the docs lane: its run builds only
           docs-checks and attests nothing, its check run is named `docs
-          only into BASE`, and autoland runs none of the repo's proofs on
-          it. Nothing under .github/, no .nix file and no flake.lock is
-          ever documentation here, whatever this says: those define the
-          gate itself. Which paths a PR changes depends on its base, so a
-          caller that sets this runs on pull_request's `edited` too, for an
-          edit that changes the base, and a PR retargeted gets its lane
-          again. Empty, every PR gets the whole gate.
+          only into BASE from FORK` (the commit the PR left BASE at), and
+          autoland runs none of the repo's proofs on it. Nothing under
+          .github/, no .nix file and no flake.lock is ever documentation
+          here, whatever this says: those define the gate itself. Which
+          paths a PR changes depends on its base, so a caller that sets
+          this runs on pull_request's `edited` too, for an edit that
+          changes the base, and a PR retargeted gets its lane again. Empty,
+          every PR gets the whole gate.
         type: string
         default: ''
       docs-checks:
@@ -80,14 +81,20 @@ jobs:
   # and its base is the default branch, compared as git compares refs: an
   # expression's == ignores case, so `Main` would pass for `main`, and the
   # train wouldn't take it), the docs lane when every path it changes is the
-  # repo's documentation (docs-paths), and otherwise the whole gate.
+  # repo's documentation (docs-paths), and otherwise the whole gate. Its
+  # check run names the base it chose against, and the docs lane's the
+  # commit the PR left that base at too: what a PR changes depends on both,
+  # so autoland counts a run only for the PR's base, and a docs lane only
+  # while the PR still leaves it there (its prs.py, LANE and DOCS_LANE).
   lane:
     if: ${{ github.event_name == 'pull_request' && (!inputs.pr-gate || inputs.docs-paths != '') }}
+    name: lane into ${{ github.event.pull_request.base.ref }}
     runs-on: ${{ inputs.runner }}
     permissions:
       contents: read
     outputs:
       gate: ${{ steps.base.outputs.lands == 'true' && 'train' || steps.paths.outputs.docs == 'true' && 'docs' || 'full' }}
+      fork: ${{ steps.paths.outputs.fork }}
     steps:
       - id: base
         shell: bash
@@ -145,6 +152,7 @@ jobs:
             echo "docs=false" >>"$GITHUB_OUTPUT"
             exit 0
           fi
+          echo "fork=$fork" >>"$GITHUB_OUTPUT"
           changed=$(git diff --name-only --no-renames -z "$fork" "$HEAD_SHA" | tr '\0' '\n')
           # Those of them that are the repo's documentation, never what
           # defines the gate: anything under .github/ (the workflows, and so
@@ -443,15 +451,12 @@ jobs:
   # tests reads, so only the checks that read the documentation are built,
   # by name, on the head merged with its base as the whole gate checks it,
   # and nothing else is evaluated. It attests nothing: it ran no gate on the
-  # tree. Its check run's name is how autoland knows the head took it, and
-  # for which base: the lane judged the changes since the PR left that base,
-  # so on a PR to any other (retargeted, or another PR on the same head) it
-  # counts for nothing: autoland skips the repo's proofs on a head only when
-  # it took this lane for the PR's own base (its prs.py, DOCS_LANE).
+  # tree. Its check run's name is how autoland knows the head took it, for
+  # which base, and from which commit on it: the changes the lane judged.
   docs:
     needs: lane
     if: ${{ !cancelled() && needs.lane.outputs.gate == 'docs' }}
-    name: docs only into ${{ github.event.pull_request.base.ref }}
+    name: docs only into ${{ github.event.pull_request.base.ref }} from ${{ needs.lane.outputs.fork }}
     runs-on: ${{ inputs.runner }}
     permissions:
       contents: read

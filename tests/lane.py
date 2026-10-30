@@ -6,9 +6,9 @@ every path is documentation, renames and deletions counted from where the PR
 left its base, takes the docs lane: only the checks that read docs, in a job
 of its own named so autoland knows; anything under .github/, a .nix file or
 a flake.lock never is, whatever the patterns say, and patterns that would
-match everything are refused. That job's name carries the base the lane
-judged against, and a caller that lists docs runs again when a PR's base
-changes.
+match everything are refused. The lane's check run names the base it chose
+against, the docs lane's the commit the PR left that base at too, and a
+caller that lists docs runs again when a PR's base changes.
 
   python3 -I tests/lane.py .github/workflows/flake-check.yml modules/autoland/prs.py .github/workflows/flake.yml
   nix build .#checks.x86_64-linux.lane
@@ -34,7 +34,12 @@ for name in ("docs-paths", "docs-checks"):
 lane = jobs["lane"]
 assert lane["if"] == "${{ github.event_name == 'pull_request' && (!inputs.pr-gate || inputs.docs-paths != '') }}", lane["if"]
 assert lane["outputs"] == {"gate": "${{ steps.base.outputs.lands == 'true' && 'train' || "
-                                   "steps.paths.outputs.docs == 'true' && 'docs' || 'full' }}"}, lane["outputs"]
+                                   "steps.paths.outputs.docs == 'true' && 'docs' || 'full' }}",
+                           "fork": "${{ steps.paths.outputs.fork }}"}, lane["outputs"]
+# Both check runs are named after what autoland looks for.
+names = re.search(r'^LANE, DOCS_LANE = "(.*)", "(.*)"$', open(sys.argv[2]).read(), re.M)
+assert names, "autoland names no lane"
+assert lane["name"] == names[1] + "${{ github.event.pull_request.base.ref }}", (lane["name"], names[1])
 base_step = next(s for s in lane["steps"] if s.get("id") == "base")
 assert base_step["env"] == {"PR_GATE": "${{ inputs.pr-gate }}", "BASE": "${{ github.event.pull_request.base.ref }}",
                             "DEFAULT": "${{ github.event.repository.default_branch }}"}, base_step["env"]
@@ -59,10 +64,8 @@ assert check["if"] == ("${{ !cancelled() && needs.lane.outputs.gate != 'train' &
                        "needs.lane.outputs.gate != 'docs' }}"), check["if"]
 assert "name" not in check, check.get("name")
 assert docs["if"] == "${{ !cancelled() && needs.lane.outputs.gate == 'docs' }}", docs["if"]
-# Named for the base it judged against, after what autoland looks for.
-lane_name = re.search(r'^DOCS_LANE = "(.*)"$', open(sys.argv[2]).read(), re.M)
-assert lane_name, "autoland names no docs lane"
-assert docs["name"] == lane_name[1] + "${{ github.event.pull_request.base.ref }}", (docs["name"], lane_name[1])
+assert docs["name"] == names[2] + "${{ github.event.pull_request.base.ref }} from ${{ needs.lane.outputs.fork }}", (
+    docs["name"], names[2])
 # It reads the tree and attests nothing.
 assert docs["permissions"] == {"contents": "read"}, docs["permissions"]
 assert not any("attest" in s.get("uses", "") for s in docs["steps"]), docs["steps"]
@@ -149,7 +152,7 @@ ALL = "README.md AGENTS.md docs/** **/*.md"
 def pr(docs_paths=ALL, files=(), gone=(), moved=(), main_moves=(), name=[0]):
     """The paths step on a PR branch off main that makes the given change,
     after main itself moved on by changing main_moves, as the lane job's
-    checkout leaves it: (exit code, what it said, its docs output)."""
+    checkout leaves it: (exit code, what it said, its outputs, the head)."""
     name[0] += 1
     branch = f"pr{name[0]}"
     git("checkout", "-q", "-b", branch, fork, cwd=work)
@@ -163,14 +166,17 @@ def pr(docs_paths=ALL, files=(), gone=(), moved=(), main_moves=(), name=[0]):
     git("clone", "-q", "--no-checkout", origin, ws, cwd=tmp)
     git("checkout", "-q", "--detach", head, cwd=ws)
     code, said, out = output(paths_step["run"], cwd=ws, BASE="main", HEAD_SHA=head, DOCS=docs_paths)
-    return code, said, out
+    return code, said, out, head
 
 
 def lane_of(**kw):
-    code, said, out = pr(**kw)
+    """Whether the PR takes the docs lane, and what the step said. It names
+    the commit the PR left main at, as git has it."""
+    code, said, out, head = pr(**kw)
     assert code == 0, said
-    assert out in ("docs=true\n", "docs=false\n"), (out, said)
-    return out == "docs=true\n", said
+    fork_now = git("merge-base", "main", head, cwd=origin)
+    assert out in (f"fork={fork_now}\ndocs={x}\n" for x in ("true", "false")), (out, fork_now, said)
+    return out.endswith("docs=true\n"), said
 
 
 # Documentation only, as the patterns say: the docs lane. `*` stays in its
@@ -212,7 +218,7 @@ print("the docs lane takes documentation only: ok")
 # refused: the job fails, saying why, rather than guessing.
 for bad, why in ((":(top)README.md", "can't start with ':'"), (":!src/**", "can't start with ':'"),
                  ("!src/** !flake.nix", "names no documentation")):
-    code, said, out = pr(docs_paths=bad, files=["README.md"])
+    code, said, out, _ = pr(docs_paths=bad, files=["README.md"])
     assert code != 0 and why in said and "docs=" not in out, (bad, code, said, out)
 print("docs-paths that would take everything is refused: ok")
 

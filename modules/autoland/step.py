@@ -592,7 +592,7 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
         save(key, st)
         return
 
-    ci, ci_names = ci_state(pr, rc["proofJobs"], moved := moved_from(repo, pr, st))
+    ci, ci_names = ci_state(pr, rc["proofJobs"], moved := moved_from(repo, pr, st), repo)
     # No checks ran at all ("none"). Unless the repo is set not to need any
     # (docs only), that's not green: nothing has tested it, so a judge job
     # runs the build and tests itself. One the train lands, the train's CI
@@ -994,7 +994,7 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
                else f"it went past the review-round limit ({rounds} rounds with findings)",
                PAST_LIMIT if capped else REVIEWED)
     else:
-        land_now(f"{' and '.join(V.NAMES[r] for r in live)} found nothing on this commit, every thread is resolved, CI is green{' (docs only)' * docs_lane(pr, moved)}")
+        land_now(f"{' and '.join(V.NAMES[r] for r in live)} found nothing on this commit, every thread is resolved, CI is green{' (docs only)' * docs_lane(pr, moved, repo)}")
 
     open_a_day(our_status(pr)[1] or "unsettled")
     save(key, st)

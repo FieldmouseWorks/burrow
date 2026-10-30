@@ -1,49 +1,57 @@
 """The docs lane: a head burrow's shared CI took in its docs lane for the PR's
-base (every path it changes since it left that base is the repo's
-documentation, nothing its flake builds or tests reads) gets none of the
-repo's proofs, and lands on its reviewers and CI alone, saying so. Only
-GitHub Actions' passed `docs only into BASE` check run counts, and only on a
-PR that changes nothing under .github/, renames out of it included, with
-every file it changes read: there the workflow that judged it is the base
-branch's. A run that took the lane against another base (the PR retargeted
-since, an old run run again, another PR's on the same head) judged another
-diff: none of its check runs is this PR's CI, and until the workflow runs
-for this base, CI is pending. Anything short of that runs the proofs as
-before."""
+diff as it stands (every path it changes since the commit it leaves its base
+at is the repo's documentation, nothing its flake builds or tests reads) gets
+none of the repo's proofs, and lands on its reviewers and CI alone, saying
+so. Only GitHub Actions' passed `docs only into BASE from FORK` check run
+counts, for the PR's base and the commit it leaves that base at now, and
+only on a PR that changes nothing under .github/, renames out of it
+included, with every file it changes read: there the workflow that judged it
+is the base branch's. A run that judged another diff (another base: the PR
+retargeted since, an old run run again, another PR's on the same head; or a
+docs lane from another fork, the base having taken in some of the PR's
+commits since) isn't the PR's CI: none of its check runs counts, and until
+its workflow has run through for the PR's base, CI is pending. Anything short
+of the docs lane runs the proofs as before."""
 
-from harness import JOBS, PR_DIFF, S, clean, fresh_pr_state, merged, run
+from harness import FORK, JOBS, PR_DIFF, S, P, clean, fresh_pr_state, merged, run
 
 S.CFG["repos"]["sam/r"] = {"proofJobs": {"agents": "Run `nix build .#checks.agents` and post the agents status."}}
 PROVING = "a Claude job is running agents"
+F, G = FORK["v"], "e" * 40  # where the PR leaves main, and where it once did
 
 
-def check(name, conclusion="SUCCESS", status="COMPLETED", app="github-actions", suite="s1"):
+def check(name, conclusion="SUCCESS", status="COMPLETED", app="github-actions", suite="s1", workflow="flake",
+          done="COMPLETED"):
     return {"__typename": "CheckRun", "name": name, "status": status, "conclusion": conclusion,
-            "checkSuite": {"id": suite, "app": {"slug": app}}}
+            "checkSuite": {"id": suite, "status": done, "app": {"slug": app},
+                           "workflowRun": {"workflow": {"id": workflow, "name": workflow}}}}
 
 
-def docs(base="main", suite="s1", **kw):
-    """One run of the shared CI that took the docs lane against base."""
-    return [check("check / lane", suite=suite), check("check / check", "SKIPPED", suite=suite),
-            check(f"check / docs only into {base}", suite=suite, **kw)]
+def docs(base="main", fork=F, suite="s1", **kw):
+    """One run of the shared CI that took the docs lane against base, from fork."""
+    return [check(f"check / lane into {base}", suite=suite), check("check / check", "SKIPPED", suite=suite),
+            check(f"check / docs only into {base} from {fork}", suite=suite, **kw)]
 
 
-def whole(suite="s1", conclusion="SUCCESS"):
-    """One that took the whole gate. The docs lane's job, skipped, may keep
-    its name unfilled."""
-    return [check("check / lane", suite=suite), check("check / check", conclusion, suite=suite),
-            check("check / docs only into ${{ github.event.pull_request.base.ref }}", "SKIPPED", suite=suite)]
+def whole(base="main", suite="s1", conclusion="SUCCESS", done="COMPLETED"):
+    """One that took the whole gate. The docs lane's job, skipped, keeps its
+    name unfilled."""
+    return [check(f"check / lane into {base}", suite=suite, done=done),
+            check("check / check", conclusion, suite=suite, done=done),
+            check("check / docs only into ${{ github.event.pull_request.base.ref }} from "
+                  "${{ needs.lane.outputs.fork }}", "SKIPPED", suite=suite, done=done)]
 
 
 def at(pr, t=700):
     """One pass on a fresh PR: its status, and whether it merged."""
     fresh_pr_state()
+    P.FORKS.clear()
     status, _ = run(pr, t)
     return status, merged()
 
 
-# Documentation only, as CI found against the PR's base: no proof, and it
-# lands saying why.
+# Documentation only, as CI found against the PR's base and fork: no proof,
+# and it lands saying why.
 status, landed = at(clean(checks=docs(), files=("README.md", "docs/guide.md")))
 assert landed and JOBS == [] and "CI is green (docs only)" in status, (status, JOBS)
 # Still running: it waits for CI like any check, and no proof starts meanwhile.
@@ -80,24 +88,46 @@ PR_DIFF["v"] = ""
 status, landed = at(pr)
 assert not landed and PROVING in status, status
 
+# A docs lane from another fork: main has taken in some of the PR's commits
+# since (one that changed code, which the PR's head undoes, say), so what the
+# PR changes now isn't what that run judged. Nothing has run for it since:
+# CI is pending, and no proof starts. One whose fork GitHub won't say is the same.
+WAIT = "waiting for CI: flake for main"
+for fork, why in ((G, "the base took in some of its commits"), (None, "GitHub didn't say")):
+    FORK["v"] = fork
+    status, landed = at(clean(checks=docs(fork=F), files=("README.md",)))
+    assert not landed and JOBS == [] and WAIT in status, (why, status, JOBS)
+FORK["v"] = F
+
 # Retargeted onto `next` after its docs lane against main (or main's run run
 # again since, or another PR's on this head): that run judged another diff.
-# Nothing has run for `next` yet, so CI is pending, and no proof starts.
+WAIT = "waiting for CI: flake for next"
 status, landed = at(clean(checks=docs(), files=("README.md",), base="next"))
-assert not landed and JOBS == [] and "waiting for CI: check against next, not main" in status, (status, JOBS)
+assert not landed and JOBS == [] and WAIT in status, (status, JOBS)
 # Even red, it's not this PR's red.
 status, landed = at(clean(checks=docs(conclusion="FAILURE"), files=("README.md",), base="next"))
-assert not landed and "CI is red" not in status and "check against next, not main" in status, status
+assert not landed and "CI is red" not in status and WAIT in status, status
+# Nothing else stands in for a run of that workflow for `next` that has
+# finished: another workflow's check run under the same job name, another
+# App's, a run of it for yet another base, or one for `next` still going.
+for why, more in [
+    ("another workflow", [check("check / report", suite="s2", workflow="report")]),
+    ("another App", [check("check / lane into next", suite="s2", app="some-app")]),
+    ("another base", whole("other", "s2")),
+    ("still going", whole("next", "s2", done="IN_PROGRESS")),
+]:
+    status, landed = at(clean(checks=docs() + more, files=("README.md",), base="next"))
+    assert not landed and JOBS == [] and WAIT in status, (why, status, JOBS)
 # The workflow ran for `next` and took the whole gate: that's the PR's CI,
-# and the proofs run.
+# and the proofs run, whatever the old run said.
 for old in ("SUCCESS", "FAILURE"):
-    status, landed = at(clean(checks=docs(conclusion=old) + whole("s2"), files=("README.md",), base="next"))
+    status, landed = at(clean(checks=docs(conclusion=old) + whole("next", "s2"), files=("README.md",), base="next"))
     assert not landed and PROVING in status and len(JOBS) == 1, (old, status, JOBS)
 # ... and its whole gate red is the PR's red.
-status, landed = at(clean(checks=docs() + whole("s2", "FAILURE"), files=("README.md",), base="next"))
+status, landed = at(clean(checks=docs() + whole("next", "s2", "FAILURE"), files=("README.md",), base="next"))
 assert not landed and "CI is red" in status and "check / check" in status, status
 # It took the docs lane for `next` too: that one counts.
-status, landed = at(clean(checks=docs() + docs("next", "s2"), files=("README.md",), base="next"))
+status, landed = at(clean(checks=docs() + docs("next", suite="s2"), files=("README.md",), base="next"))
 assert landed and JOBS == [] and "CI is green (docs only)" in status, (status, JOBS)
 
 del S.CFG["repos"]["sam/r"]
