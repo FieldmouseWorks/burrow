@@ -12,7 +12,9 @@
 # jobs; a pipeline turn takes the lowest free slot, which keeps those for the
 # next one. A lead turn (pipeline work in a lead repo's project, what the
 # pipeline is built from) is a pipeline turn that goes first of all: ahead
-# of the whole line, the other pipeline turns included. Any other turn waits
+# of the whole line, the other pipeline turns included, except that it leaves
+# them the pipeline's own slots while one waits, so a lead repo's backlog can't
+# stop the work on what deploys it. Any other turn waits
 # while its project holds PER_PROJECT slots (pipeline turns not counted), and
 # lets those behind it by meanwhile, so one project's jobs never fill the
 # machine.
@@ -22,7 +24,7 @@
 # free ordinary slots and takes what's left, so a backlog of pipeline work
 # slows the others and never stops them.
 pick() {
-  local kind a b c n w pass ordinary=0 others=0 owed=0 spare free=() inline=()
+  local kind a b c n w pass ordinary=0 others=0 owed=0 spare pipeline_waits='' free=() inline=()
   local -A held=()
   while IFS=$'\t' read -r kind a b c; do
     case $kind in
@@ -35,7 +37,10 @@ pick() {
           others=$((others + 1))
         fi
         ;;
-      wait) inline+=("$a"$'\t'"$b"$'\t'"$c") ;;
+      wait)
+        inline+=("$a"$'\t'"$b"$'\t'"$c")
+        [ "$b" != pipeline ] || pipeline_waits=1
+        ;;
     esac
   done
   if [ "$others" -lt "$OTHER_SLOTS" ]; then
@@ -59,10 +64,10 @@ pick() {
         *) [ "${held[p$c]:-0}" -lt "$PER_PROJECT" ] || continue ;;
       esac
       for n in "${free[@]}"; do
-        if [ "$b" = lead ] || [ "$b" = pipeline ]; then
-          [ "$n" -gt $((MAX_JOBS - PIPELINE_SLOTS)) ] || [ "$spare" -gt 0 ] || continue
+        if [ "$n" -gt $((MAX_JOBS - PIPELINE_SLOTS)) ]; then
+          [ "$b" = pipeline ] || { [ "$b" = lead ] && [ -z "$pipeline_waits" ]; } || continue
         else
-          [ "$n" -le $((MAX_JOBS - PIPELINE_SLOTS)) ] || continue
+          case $b in lead | pipeline) [ "$spare" -gt 0 ] || continue ;; esac
         fi
         printf '%s\t%s\n' "$a" "$n"
         return

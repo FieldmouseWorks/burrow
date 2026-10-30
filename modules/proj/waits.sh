@@ -11,7 +11,9 @@
 # (waiting's, below), "link URL" for what the job is about, and "await
 # TARGET T" for each PR or issue it has awaited since T. It prints the job's
 # wait as one line of JSON in the watchdog's form, {what, link, phase, since,
-# due, kick}, or nothing when there's nothing to watch.
+# due, kick, line}, or nothing when there's nothing to watch. line says it's
+# waiting for a slot: another job would only join the line, so the watchdog
+# gives it none.
 #
 # Watched: a turn waiting in line, for a slot or inside its run (its clock
 # stands still meanwhile), for STALL_QUEUED seconds; one running, until its
@@ -23,7 +25,7 @@
 # stop ended, and any ended turn of an --owned job.
 job_wait() {
   local k a b id='' turn='' state='' owned='' stopped='' end='' queued=0 slot=0 ended=0 deadline=0 link=''
-  local since due phase kick='' first='' targets='' t at waited='' what=
+  local since due phase kick='' line=false first='' targets='' t at waited='' what=
   while IFS=$'\t' read -r k a b; do
     case $k in
       id) id=$a ;;
@@ -48,7 +50,7 @@ job_wait() {
     esac
   done
   case $state in
-    queued) since=$queued due=$((queued + STALL_QUEUED)) phase="turn $turn is waiting in line for a slot" ;;
+    queued) since=$queued due=$((queued + STALL_QUEUED)) phase="turn $turn is waiting in line for a slot" line=true ;;
     running)
       if [ -n "$waited" ]; then
         since=$waited due=$((waited + STALL_QUEUED)) phase="turn $turn is running, and waiting in line: $what"
@@ -79,9 +81,9 @@ job_wait() {
   esac
   for t in "$since" "$due"; do [[ $t =~ ^[0-9]+$ ]] || return 1; done
   jq -nc --arg what "proj job $id" --arg link "$link" --arg phase "$phase" --argjson since "$since" \
-    --argjson due "$due" --arg kick "$kick" \
+    --argjson due "$due" --arg kick "$kick" --argjson line "$line" \
     '{what: $what, link: (if $link == "" then null else $link end), phase: $phase, since: $since, due: $due,
-      kick: (if $kick == "" then null else $kick end)}'
+      kick: (if $kick == "" then null else $kick end), line: $line}'
 }
 
 # A running turn's wait in line, from its wait dir (each turn's

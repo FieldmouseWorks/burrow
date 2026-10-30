@@ -216,6 +216,7 @@ with open(f"{tmp}/config.json", "w") as f:
         "kick": f"http://127.0.0.1:{kicks.server_port}/kick/autoland",
         "watch": {"kick": f"http://127.0.0.1:{kicks.server_port}/kick/watchdog", "escalated": f"{tmp}/escalated.json",
                   "renovateSweep": True},
+        "renovateRun": 7200,
         "reviewers": {"codex": {"enable": True, "effort": "high", "parallel": 2},
                       "rival": {"enable": True, "parallel": 2}},
         "skipPaths": ["(^|/)secrets?/", r"\.(pem|key|p12|pfx)$", r"(^|/)\.env(\..*)?$"],
@@ -390,14 +391,14 @@ CI_GREEN = [{"__typename": "CheckRun", "name": "ci", "status": "COMPLETED", "con
 
 
 def mkpr(reviews=(), comments=(), threads=(), draft=False, number=5, sha=head, files=("a.py",), labels=(),
-         branch="feat", title="t", checks=CI_GREEN, base="main", body="", suites=()):
+         branch="feat", title="t", checks=CI_GREEN, base="main", body="", suites=(), renames=()):
     return {
         "id": "x", "number": number, "title": title, "url": "u", "isDraft": draft, "isCrossRepository": False,
         "headRefName": branch, "headRefOid": sha, "baseRefName": base, "createdAt": T0, "updatedAt": T0, "body": body,
         "mergeStateStatus": "CLEAN", "author": {"login": "sam"}, "autoMergeRequest": None, "mergeQueueEntry": None,
         "labels": {"pageInfo": {"hasNextPage": False}, "nodes": [{"name": x} for x in labels]},
         "files": {"nodes": [{"path": f, "changeType": "MODIFIED"} for f in files]},
-        "changedFiles": len(files), "reactions": {"nodes": []}, "comments": {"pageInfo": {"hasPreviousPage": False}, "nodes": list(comments)},
+        "changedFiles": len(files), "reactions": {"nodes": []}, "timelineItems": {"nodes": list(renames)}, "comments": {"pageInfo": {"hasPreviousPage": False}, "nodes": list(comments)},
         "reviewThreads": {"pageInfo": {"hasNextPage": False}, "nodes": [{"isResolved": r} for r in threads]},
         "reviews": {"pageInfo": {"hasPreviousPage": False}, "nodes": list(reviews)},
         "commits": {"nodes": [{"commit": {"oid": sha, "statusCheckRollup": {"contexts": {

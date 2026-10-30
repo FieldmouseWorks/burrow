@@ -57,9 +57,14 @@ case_ "a 3" "normal /src/x" "normal /src/x" free free "a normal "
 # A lead turn goes first, from anywhere in the line: ahead of pipeline turns
 # that came before it, and of everyone else.
 case_ "l 1" free free free free "p pipeline /src/remi" "a first /src/web" "l lead /src/burrow"
-case_ "l 4" "normal /src/x" "normal /src/y" "normal /src/z" free "p pipeline /src/remi" "l lead /src/burrow"
-# It takes the pipeline's slot as a pipeline turn does, counts against no cap,
-# and holds none of its project's.
+case_ "l 3" "normal /src/x" "normal /src/y" free free "p pipeline /src/remi" "l lead /src/burrow"
+# But the pipeline's own slot stays the other pipeline turns' while one waits,
+# so a lead repo's backlog can't stop the work on what deploys it: the lead
+# turn waits for the next slot.
+case_ "p 4" "normal /src/x" "normal /src/y" "normal /src/z" free "p pipeline /src/remi" "l lead /src/burrow"
+case_ "p 4" "lead /src/burrow" "lead /src/burrow" "lead /src/burrow" free "l lead /src/burrow" "m lead /src/burrow" "p pipeline /src/remi"
+# With none of those in line it takes the pipeline's slot as a pipeline turn
+# does, counts against no cap, and holds none of its project's.
 case_ "l 4" "normal /src/burrow" "normal /src/burrow" "normal /src/z" free "a normal /src/web" "l lead /src/burrow"
 case_ "a 3" "lead /src/burrow" "normal /src/burrow" free free "a normal /src/burrow"
 # With no slot free nobody goes, lead or not; of two lead turns, the first in
@@ -76,6 +81,11 @@ case_ "p 4" "pipeline /src/remi" "lead /src/burrow" free free "p pipeline /src/r
 # With more free than that it takes the lowest as ever, and the others still
 # have theirs next.
 case_ "l 2" "pipeline /src/remi" free free "lead /src/burrow" "l lead /src/burrow" "a first /src/web"
+# Both rules at once: a lead turn can't have the slot kept for the others, nor
+# the pipeline's own while a pipeline turn waits, so that turn takes it; and
+# with none waiting, the lead turn takes it.
+case_ "p 4" "pipeline /src/remi" "lead /src/burrow" free free "l lead /src/burrow" "p pipeline /src/remi" "a first /src/web"
+case_ "l 4" "pipeline /src/remi" "lead /src/burrow" free free "l lead /src/burrow" "a first /src/web"
 # Nobody of theirs waiting: nothing's kept, and the pipeline takes the last.
 case_ "p 3" "pipeline /src/remi" "lead /src/burrow" free "lead /src/burrow" "p pipeline /src/remi"
 # One of theirs already running: that's their share, and the pipeline goes first.

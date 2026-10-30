@@ -20,6 +20,8 @@ import re
 import time
 
 import common as C
+import dashboard as D
+import lock_wait
 import proofs as P
 import reviewers as V
 import train as T
@@ -137,13 +139,15 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
         after(since, wait)  # ends: a Claude job takes it then
         return since + wait * MIN
 
+    refresh = {}  # what the watchdog's to count of a refresh of it renovate-sweep has (waits.note)
+
     def settle(state, desc, why=None, wait=waits.STEWARD):
         """The PR's status, and what it waits on for the watchdog (waits.py).
         False if GitHub didn't take it."""
         ok = post_status(repo, pr, state, desc)
         if why:
             digest.append((why, line, desc))
-        waits.note(repo, pr, desc, wait)
+        waits.note(repo, pr, desc, wait, **refresh)
         # Not settled (any more): nothing may merge it.
         if state != "success" and (C.queued(pr) or st.get("landed")):
             if C.unland(repo, pr):
@@ -343,6 +347,7 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
         retry is due, and doesn't count toward the two (retry_at). Never
         while another fix job is still working on this head: two on one
         branch push over each other."""
+        ours = ours and not requested  # Renovate would redo its branch
         retry = st.get(kind) == at
         state = retry and running(kind, at)
         gone = retry and not state and lost(kind, at)
@@ -622,6 +627,9 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
     held = asked and judge_said in ("owner", "failed")
     fixed = dep == "minor" and not gate and (bot_edited(repo, pr, st) or gate_edit(repo, pr, st))
     swept = fixed and ci == "red" and renovate
+    # The date a lock file refresh waits for, renovate-sweep's to have it refreshed then.
+    requested = renovate and lock_wait.requested(pr, C.NOW, CFG["renovateRun"] or 0)
+    refresh = lock_wait.refresh(pr, ci == "red", ci_names, D.renovated, requested) if renovate else {}
 
     # Dependency bumps: CI is the review. Renovate merges its own minor
     # ones; renovate-sweep fixes the red ones (and settles their threads) and
@@ -646,7 +654,10 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
         threads = f"{open_threads} open review thread{'s' * (open_threads > 1)}" if open_threads else ""
         if changes:
             threads = ", ".join([threads] * bool(threads) + ["changes requested by " + ", ".join(changes)])
-        if renovate and ci == "red":
+        if (ripe := refresh.get("ripe")) and not threads:
+            when = time.strftime("%b %-d, ", time.localtime(ripe)) + clock(ripe)
+            settle("pending", f"Lock file refresh, nothing in it old enough until {when}; renovate-sweep has it refreshed then", wait=waits.SWEEP)
+        elif renovate and ci == "red":
             settle("pending", "Dependency update, CI red; renovate-sweep has it" + (f" ({threads})" if threads else ""),
                    wait=waits.SWEEP)
         elif renovate and dep == "major" and threads and not major_verdict:

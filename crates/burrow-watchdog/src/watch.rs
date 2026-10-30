@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::fs;
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -21,6 +22,10 @@ pub struct Item {
     pub link: Option<String>,
     /// The burrow-events pass to kick for it: HANDLER[/OWNER/REPO].
     pub kick: Option<String>,
+    /// A turn waiting for a slot in proj's line (proj's job_wait), which a job
+    /// of its own would only join.
+    #[serde(default)]
+    pub line: bool,
 }
 
 /// An item past its deadline, or a source stuck itself (`key` "").
@@ -31,10 +36,24 @@ pub struct Overdue {
     pub item: Item,
 }
 
+/// A watch file whole, as its source writes it.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+pub struct File {
+    /// When the source wrote it.
+    pub at: f64,
+    pub items: BTreeMap<String, Item>,
+}
+
 /// A source's watch file: when it was written, and its items. None when
 /// there's none to read (not written yet, or half of one).
 pub fn watched(src: &Source) -> Option<(f64, BTreeMap<String, Item>)> {
-    let got: Value = serde_json::from_slice(&fs::read(&src.file).ok()?).ok()?;
+    read(&src.file)
+}
+
+/// The watch file at `path`, its malformed items left out: a source reads
+/// its own last one this way too.
+pub fn read(path: &Path) -> Option<(f64, BTreeMap<String, Item>)> {
+    let got: Value = serde_json::from_slice(&fs::read(path).ok()?).ok()?;
     let at = got.get("at").and_then(Value::as_number)?.as_f64()?;
     let items = got.get("items")?.as_object()?;
     Some((
@@ -62,6 +81,7 @@ fn item(it: &Value) -> Option<Item> {
         due: number("due")?,
         link: text("link"),
         kick: text("kick"),
+        line: it.get("line").and_then(Value::as_bool).unwrap_or(false),
     })
 }
 
@@ -109,6 +129,7 @@ pub fn overdue(
                             due: at + stale,
                             link: None,
                             kick: src.kick.clone(),
+                            line: false,
                         },
                     },
                 );

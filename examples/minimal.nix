@@ -61,6 +61,13 @@
       machinery = "workers";
     };
     watchdog.enable = true;
+    dispatch = {
+      enable = true;
+      runners.ci-runner = {
+        repo = "sam/homelab";
+        labels = [ "homelab" ];
+      };
+    };
     backup = {
       enable = true;
       repository = "rclone:offsite:backups/burrow";

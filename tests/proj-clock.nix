@@ -8,8 +8,9 @@
 # lived, that a turn that never waits is due its slot's moment and its
 # timeout, to the nanosecond, and that the watchdog's lock, held, holds up
 # neither a turn's clock nor its end, nor leaves the watchdog a wait that's
-# over when a run is cut short mid-wait. tests/proj.nix has the rest of
-# proj, its plain timeouts included.
+# over when a run is cut short mid-wait, and that a turn killed whole (its
+# unit's cgroup, as systemd-oomd kills) is heard of at once, not at its
+# deadline. tests/proj.nix has the rest of proj, its plain timeouts included.
 #
 #   nix build .#checks.x86_64-linux.proj-clock -L
 { self, pkgs }:
@@ -160,17 +161,18 @@ pkgs.testers.runNixOSTest {
     with subtest("the watchdog's lock, held, holds up neither a turn's clock nor its end"):
         # Both running and heard of before the lock is taken, as starting a
         # turn tells the watchdog itself; each waits in line ten seconds on.
-        a = proj('run --timeout 20s web "later 3 the gate lock"')
+        a = proj('run --timeout 20s web "later 8 the gate lock"')
         b = proj('run --idle 15s web "later 600 the heavy-run lock"')
         for j in (a, b):
             wait_of(j, lambda w: w["phase"] == "turn 1 is running")
         machine.succeed("systemd-run --unit=hold-waits flock /data/dev/jobs/.waits.lock ${pkgs.coreutils}/bin/sleep 600")
         machine.wait_until_fails("flock -n /data/dev/jobs/.waits.lock true", timeout=10)
-        # Its twenty seconds and three in line, less what the once-a-second
-        # reading of the clock misses of the wait; quiet for fifteen, still
-        # in line.
+        # Its twenty seconds and eight in line; quiet for fifteen, still in
+        # line. The clock is read once a second, so a wait counts for up to a
+        # read (a little more, on a loaded machine) more or less than it
+        # lasted: a turn whose wait isn't counted ends at about 21.
         machine.wait_until_succeeds(f"su - dev -c 'proj state {a}' | grep -x 'timed out after 20s'", timeout=60)
-        assert 21 <= took(a) < 35, took(a)
+        assert 26 <= took(a) < 40, took(a)
         machine.wait_until_succeeds(f"su - dev -c 'proj state {b}' | grep -x 'went quiet for 15s'", timeout=60)
         assert 15 <= took(b) < 25, took(b)
         machine.succeed("systemctl stop hold-waits")
@@ -189,5 +191,21 @@ pkgs.testers.runNixOSTest {
         machine.succeed("systemctl stop hold-waits")
         wait_of(a, lambda w: w["phase"] == "turn 1 is running", timeout=30)
         proj(f"stop {a}")
+
+    with subtest("a turn killed whole, its end hook's process with it, is heard of at once"):
+        # As systemd-oomd kills a unit: everything in its cgroup, again and
+        # again until nothing's left, so whatever the unit runs once its
+        # turn is dead (held up here on the watchdog's lock) goes too.
+        a = proj('run --timeout 4h web work')
+        wait_of(a, lambda w: w["phase"] == "turn 1 is running")
+        u = "proj-" + machine.succeed(f"systemd-escape {a}").strip() + ".service"
+        cg = "/sys/fs/cgroup" + machine.succeed(f"systemctl --user -M dev@ show -P ControlGroup '{u}'").strip()
+        machine.succeed("systemd-run --unit=hold-waits flock /data/dev/jobs/.waits.lock ${pkgs.coreutils}/bin/sleep 600")
+        machine.wait_until_fails("flock -n /data/dev/jobs/.waits.lock true", timeout=10)
+        machine.succeed(f"for i in $(seq 20); do [ -e '{cg}/cgroup.kill' ] || break; echo 1 >'{cg}/cgroup.kill' || true; sleep 0.5; done")
+        # Gone, killed.
+        machine.succeed(f"su - dev -c 'proj state {a}' | grep -x failed")
+        machine.succeed("systemctl stop hold-waits")
+        wait_of(a, lambda w: w["phase"].startswith("turn 1 ended"), timeout=30)
   '';
 }
