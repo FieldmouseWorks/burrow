@@ -41,7 +41,7 @@ which isn't the one checked out. In a fork (forkToken) the remote is the
 fork, not the repo whose default Renovate reads, so a machine config
 that works in forks fails every refresh. For npm, a cutoff npm's own config sets for the
 lock file's directory (before, min-release-age) holds too when it's
-earlier.
+earlier, and a release published after its before is never waited for.
 """
 
 import datetime as dt
@@ -322,10 +322,9 @@ def npm_entries(lock):
 
 
 def npm_cutoff(d, age):
-    """The cutoff for the directory: the earliest of the age's and any
-    npm's own config sets for it (before, min-release-age), which --before
-    would override. And the age it's relative to, or None when npm's fixed
-    before is the earliest, which no wait gets past."""
+    """The age for the directory, the longer of the given one and npm's own
+    min-release-age, and npm's own fixed before for it, or None: --before
+    would override both, so the cutoff is the earlier of the two."""
     p = run(["npm", "config", "get", "before", "min-release-age"], d)
     if p.returncode != 0:
         raise RuntimeError(f"npm config get: {p.stderr.strip()}")
@@ -335,28 +334,34 @@ def npm_cutoff(d, age):
            if v not in ("null", "undefined", "")}
     if "min-release-age" in got:
         age = max(age, dt.timedelta(days=float(got["min-release-age"])))
-    cutoff = dt.datetime.now(dt.timezone.utc) - age
+    before = None
     if "before" in got:
         # A JavaScript date, in the local time zone: Fri Mar 01 2024 12:30:00 GMT-0800 (...)
         m = re.match(r"\w{3} (\w{3} \d{2} \d{4} \d{2}:\d{2}:\d{2}) GMT([+-]\d{4})", got["before"])
         if not m:
             raise ValueError(f"can't read npm's before {got['before']!r}")
-        before = dt.datetime.strptime(" ".join(m.groups()), "%b %d %Y %H:%M:%S %z")
-        if before < cutoff:
-            return before.astimezone(dt.timezone.utc), None
-    return cutoff, age
+        before = dt.datetime.strptime(" ".join(m.groups()), "%b %d %Y %H:%M:%S %z").astimezone(dt.timezone.utc)
+    return age, before
 
 
-def npm_ripe(refresh, base, cutoff, age):
+def npm_ripe(path, refresh, base, cutoff, age, before, bad):
     """When the first registry release the refresh brought in that's too
-    young will be old enough, or None."""
+    young will be old enough, or None. One published after npm's fixed
+    before never will be: a refresh with only those is a failure."""
     try:
         had = set(npm_entries(json.loads(base))) if base else set()
         new = [x for x in npm_entries(json.loads(refresh)) if x not in had and (x[2] or "").startswith(NPM)]
     except (ValueError, KeyError, AttributeError, TypeError):
+        new = []
+    young = [t for t in (npm_published(name, version) for name, version, _ in new) if t > cutoff]
+    if not young:
+        bad.append(f"{path}: the refresh came out as the base's without anything too young in it")
         return None
-    times = (npm_published(name, version) for name, version, _ in new)
-    return min((t + age for t in times if t > cutoff), default=None)
+    ripe = min((t + age for t in young if before is None or t <= before), default=None)
+    if ripe is None:
+        bad.append(f"{path}: everything too young in the refresh is past npm's own before ({before:%Y-%m-%d %H:%M}Z), "
+                   "and no wait ends that")
+    return ripe
 
 
 def npm(path, age, bad):
@@ -365,7 +370,10 @@ def npm(path, age, bad):
     enough."""
     d = os.path.dirname(path) or "."
     base = base_text(path)
-    cutoff, age = npm_cutoff(d, age)
+    age, before = npm_cutoff(d, age)
+    cutoff = dt.datetime.now(dt.timezone.utc) - age
+    if before is not None:
+        cutoff = min(cutoff, before)
     with open(path) as f:
         refresh = f.read()
     os.remove(path)
@@ -386,13 +394,7 @@ def npm(path, age, bad):
     if same_as_base(path, base):
         log(f"{path}: nothing in the refresh was old enough, so it came out as the base's, and Renovate would "
             "commit its own instead")
-        if age is None:
-            bad.append(f"{path}: npm's own before ({cutoff:%Y-%m-%d %H:%M}Z) holds the refresh back, and no wait ends that")
-            return None
-        ripe = npm_ripe(refresh, base, cutoff, age)
-        if ripe is None:
-            bad.append(f"{path}: the refresh came out as the base's without anything too young in it")
-        return ripe
+        return npm_ripe(path, refresh, base, cutoff, age, before, bad)
     try:
         had = set(npm_entries(json.loads(base))) if base else set()
     except (ValueError, KeyError, AttributeError):

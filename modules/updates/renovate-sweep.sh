@@ -13,7 +13,7 @@
 # The autoland steward's own status (SETTLED) doesn't count as a check. With
 # the machine's own App, APP, it and its jobs act on GitHub as that App, whose
 # bot GraphQL calls BOT. (DIR, SRC, OWNER, NOTIFY, SETTLED, COVERED, SEAL, APP,
-# BOT and LOCK_WAIT come from ../updates.nix.)
+# BOT, LOCK_WAIT and RENOVATE_RUN come from ../updates.nix.)
 #
 # The job's verdict on a major: ok when it can merge as it is, held when it
 # shouldn't (its comment says why). The job ends that comment with a marker
@@ -49,7 +49,7 @@ else
 fi
 # Who Renovate comments as, as REST spells it: it runs as the same App, or
 # user, and an App's bot is SLUG[bot] there, a name no person's can be.
-renovate=${BOT:+$BOT[bot]}
+renovate=${BOT:+${BOT}[bot]}
 renovate=${renovate:-$me}
 
 state=$DIR/renovate-sweep
@@ -172,16 +172,24 @@ for d in "$src"/*/; do
         fi
         echo "- $title: https://github.com/$repo/pull/$n ($why)" >>"$stuck"
       fi
+      # A head whose refresh request was taken back for a job (below) has
+      # done with requests: when, and how many times it was asked.
+      released="$key.released"
+      rel_sha="" rel_tries=0 rel_at=0
+      [ ! -f "$released" ] || read -r rel_sha rel_tries rel_at <"$released" || true
+      [ "$rel_sha" = "$sha" ] || { rel_tries=0; rel_at=0; }
       # A lock file refresh whose one red check is Renovate's artifacts, from
       # lock-age refusing it only because nothing in it is old enough yet,
       # is no fix for a job: it waits for the time Renovate's comment on it
       # gives (LOCK_WAIT, ../autoland/lock_wait.py). Then Renovate is asked
       # to refresh it again, as it won't by itself while the branch doesn't
       # conflict: the "rebase!" title its every run reads, whatever its
-      # config. A request still standing six hours on, or three that went
-      # without the head or the time moving, and it's red CI for a job.
+      # config. Each ask counts, whether GitHub took it, refused it or never
+      # answered: the title on the next pass says which. A request still
+      # standing six hours on, or three that went without the head or the
+      # time moving, and it's red CI for a job.
       if [ "$(jq -c '[.[] | select(.state == "red") | .name]' <<<"$ci")" = '["renovate/artifacts"]' ] &&
-        [ -n "$renovate" ] && [ "$seen" != "$sha red" ]; then
+        [ -n "$renovate" ] && [ "$seen" != "$sha red" ] && [ "$rel_sha" != "$sha" ]; then
         ripe=$(gh api --paginate --slurp "repos/$repo/issues/$n/comments" 2>/dev/null | "$LOCK_WAIT" "$renovate" || true)
         if [ -n "$ripe" ]; then
           now=$(date +%s)
@@ -193,9 +201,8 @@ for d in "$src"/*/; do
             { [ "$standing" = true ] && [ $((now - at)) -lt 21600 ]; }; then
             continue
           elif [ "$standing" = false ] && [ "$tries" -lt 3 ]; then
-            if gh api -X PATCH "repos/$repo/pulls/$n" -f "title=rebase!$title" >/dev/null; then
-              echo "$sha refreshed $ripe $((tries + 1)) $now" >"$key"
-            fi
+            echo "$sha refreshed $ripe $((tries + 1)) $now" >"$key"
+            gh api -X PATCH "repos/$repo/pulls/$n" -f "title=rebase!$title" >/dev/null 2>&1 || true
             continue
           fi
         fi
@@ -211,6 +218,26 @@ for d in "$src"/*/; do
       # nothing for another job to do there.
       if [ -n "$verdict" ] && [ "$red" -eq 0 ]; then
         echo "$want" >"$key"
+        continue
+      fi
+      # A refresh request still standing ("rebase!", ours or anyone's) has
+      # Renovate redo the branch over whatever a job pushes, as it does
+      # for no other branch someone else pushed to: it comes off first. A
+      # Renovate run that read it before may still be going, so the job
+      # waits out the longest one (RENOVATE_RUN). Three times, ten minutes
+      # apart, that GitHub kept the title, whether it refused or never
+      # answered, and the job is handed it to take off itself.
+      request=""
+      now=$(date +%s)
+      if [[ $title == rebase!* ]] && { [ "$rel_tries" -lt 3 ] || [ $((now - rel_at)) -lt 600 ]; }; then
+        if [ $((now - rel_at)) -ge 600 ]; then
+          echo "$sha $((rel_tries + 1)) $now" >"$released"
+          gh api -X PATCH "repos/$repo/pulls/$n" -f "title=${title#rebase!}" >/dev/null 2>&1 || true
+        fi
+        continue
+      elif [[ $title == rebase!* ]]; then
+        request="; its title still starts with rebase!, which has Renovate redo the branch over what you push: take that off the title first, and push nothing to it for $((RENOVATE_RUN / 60)) minutes after, while a Renovate run that read it may still be going"
+      elif [ "$rel_sha" = "$sha" ] && [ $((now - rel_at)) -lt "$RENOVATE_RUN" ]; then
         continue
       fi
       if [ "$major" = true ]; then
@@ -232,7 +259,7 @@ for d in "$src"/*/; do
       else
         why="its CI fails"
       fi
-      echo "- #$n \"$title\" (branch $branch): $why" >>"$todo"
+      echo "- #$n \"$title\" (branch $branch): $why$request" >>"$todo"
       [ "$major" != true ] || echo "$n" >>"$majors"
     done || true
   if [ -s "$todo" ]; then

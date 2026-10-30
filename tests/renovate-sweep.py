@@ -58,6 +58,8 @@ elif a[:3] == ["api", "--paginate", "--slurp"]:
     print(json.dumps([[{"user": c["author"], "body": c["body"]} for c in got]]))
 elif a[:2] == ["api", "-X"]:
     open(os.path.join(STUB, "gh.log"), "a").write(json.dumps(a[2:]) + "\\n")
+    # GitHub refusing the edit, or never answering.
+    sys.exit(1 if os.path.exists(os.path.join(STUB, "gh.refuses")) else 0)
 """)
 lock_wait = os.path.join(tmp, "lock-wait")
 with open(lock_wait, "w") as f:
@@ -112,7 +114,8 @@ def sweep(prs, comments=None, covered=None, age=0, proofs=None, state=None, fail
         repos = {r: {"proofJobs": proofs or {}, "covered": r not in failed} for r in [*covered, *failed]}
         json.dump({"at": time.time() - age, "repos": repos}, open(cov, "w"))
     env = {"DIR": state, "SRC": projects, "OWNER": "Sam", "NOTIFY": notify, "SETTLED": "review-settled", "COVERED": cov,
-           "SEAL": tool, "APP": app[0], "BOT": app[1], "LOCK_WAIT": lock_wait}
+           "SEAL": tool, "APP": app[0], "BOT": app[1], "LOCK_WAIT": lock_wait,
+           "RENOVATE_RUN": "7200"}
     script = "set -euo pipefail\n" + "".join(f"{k}={shlex.quote(v)}\n" for k, v in env.items()) + SWEEP
     subprocess.run(["bash", "-c", script, "renovate-sweep", *args], check=True,
                    env={**os.environ, "PATH": bin_ + ":" + os.environ["PATH"]})
@@ -403,11 +406,28 @@ def rebase(n):
     return [["PATCH", f"repos/{REPO}/pulls/{n}", "-f", "title=rebase!Lock file maintenance (cargo)"]]
 
 
-def since(state, n, seconds):
+def since(state, n, seconds, suffix="", keep=4):
     """The sweep's last request for PR n, made `seconds` ago."""
-    path = os.path.join(state, "renovate-sweep", f"{REPO.replace('/', '_')}-{n}")
+    path = os.path.join(state, "renovate-sweep", f"{REPO.replace('/', '_')}-{n}{suffix}")
     f = open(path).read().split()
-    open(path, "w").write(" ".join([*f[:4], str(int(time.time()) - seconds)]) + "\n")
+    open(path, "w").write(" ".join([*f[:keep], str(int(time.time()) - seconds)]) + "\n")
+
+
+def released(state, n, seconds):
+    """The sweep's last taking back of PR n's request, `seconds` ago."""
+    since(state, n, seconds, ".released", 2)
+
+
+def unasked(n, title="Lock file maintenance (cargo)"):
+    return [["PATCH", f"repos/{REPO}/pulls/{n}", "-f", f"title={title}"]]
+
+
+def refusing(on):
+    path = os.path.join(tmp, "gh.refuses")
+    if on:
+        open(path, "w").close()
+    elif os.path.exists(path):
+        os.remove(path)
 
 
 kept = tempfile.mkdtemp(dir=tmp)
@@ -430,7 +450,8 @@ calls, _ = sweep(*refresh(20, past), state=kept)
 assert len(calls) == 1 and "#20 " in calls[0][-1] and asked() == [], (calls, asked())
 calls, _ = sweep(*refresh(20, past), state=kept)
 assert calls == [] and asked() == [], "one job a head"
-# A request still standing six hours on is a job's too; a new time on the
+# A request still standing six hours on is a job's too, once it's taken
+# back and a Renovate run that read it is surely over; a new time on the
 # same head starts the requests over.
 kept = tempfile.mkdtemp(dir=tmp)
 sweep(*refresh(22, past), state=kept)
@@ -443,7 +464,65 @@ calls, _ = sweep(*refresh(22, past - 3600), state=kept)
 assert calls == [] and asked() == rebase(22), (calls, asked())
 since(kept, 22, 7 * 3600)
 calls, _ = sweep(*refresh(22, past - 3600, title="rebase!Lock file maintenance (cargo)"), state=kept)
-assert len(calls) == 1 and "#22 " in calls[0][-1], calls
+assert calls == [] and asked() == unasked(22), (calls, asked())
+# Taken back: no more asking on that head, and no job till the run is over.
+calls, _ = sweep(*refresh(22, past - 3600), state=kept)
+assert calls == [] and asked() == [], (calls, asked())
+released(kept, 22, 7300)
+calls, _ = sweep(*refresh(22, past - 3600), state=kept)
+assert len(calls) == 1 and "#22 " in calls[0][-1] and "rebase!" not in calls[0][-1] and asked() == [], calls
+# A request GitHub refused, or never answered, counts as asked all the same:
+# three of them, then it's a job's, not a request every pass for good.
+kept = tempfile.mkdtemp(dir=tmp)
+refusing(True)
+for _ in range(3):
+    calls, _ = sweep(*refresh(24, past), state=kept)
+    assert calls == [] and asked() == rebase(24), (calls, asked())
+    calls, _ = sweep(*refresh(24, past), state=kept)
+    assert calls == [] and asked() == [], (calls, asked())
+    since(kept, 24, 7200)
+calls, _ = sweep(*refresh(24, past), state=kept)
+assert len(calls) == 1 and "#24 " in calls[0][-1] and asked() == [], (calls, asked())
+# One that went through though GitHub didn't say so stands, as any request.
+kept = tempfile.mkdtemp(dir=tmp)
+sweep(*refresh(25, past), state=kept)
+since(kept, 25, 7200)
+calls, _ = sweep(*refresh(25, past, title="rebase!Lock file maintenance (cargo)"), state=kept)
+assert calls == [] and asked() == [], (calls, asked())
+# A request GitHub won't take back: tried three times, ten minutes apart,
+# then the job gets the PR with the request to take back itself.
+standing = refresh(25, past, title="rebase!Lock file maintenance (cargo)")
+since(kept, 25, 7 * 3600)
+for _ in range(3):
+    calls, _ = sweep(*standing, state=kept)
+    assert calls == [] and asked() == unasked(25), (calls, asked())
+    calls, _ = sweep(*standing, state=kept)
+    assert calls == [] and asked() == [], (calls, asked())
+    released(kept, 25, 700)
+calls, _ = sweep(*standing, state=kept)
+assert len(calls) == 1 and "#25 " in calls[0][-1] and "take that off the title first" in calls[0][-1], calls
+assert "for 120 minutes after" in calls[0][-1] and asked() == [], (calls, asked())
+refusing(False)
+# Whatever else sends a PR with a request standing to a job (another red
+# check, a failure that isn't only age, a major), the request comes off
+# first, and the job waits out the run.
+for why in ("check", "failure", "major"):
+    kept = tempfile.mkdtemp(dir=tmp)
+    prs, comments = refresh(26, later, also="error: failed to select a version" if why == "failure" else "",
+                            title="rebase!Update foo26 to v2")
+    if why == "check":
+        prs[0]["statusCheckRollup"][0]["conclusion"] = "FAILURE"
+    if why == "major":
+        prs[0]["statusCheckRollup"] = prs[0]["statusCheckRollup"][:1]
+        prs[0]["labels"] = [{"name": "major"}]
+    calls, _ = sweep(prs, comments, state=kept)
+    assert calls == [] and asked() == unasked(26, "Update foo26 to v2"), (why, calls, asked())
+    prs[0]["title"] = "Update foo26 to v2"
+    calls, _ = sweep(prs, comments, state=kept)
+    assert calls == [] and asked() == [], (why, calls, asked())
+    released(kept, 26, 7300)
+    calls, _ = sweep(prs, comments, state=kept)
+    assert len(calls) == 1 and "#26 " in calls[0][-1] and asked() == [], (why, calls, asked())
 # As the machine's own App: only its bot's comment counts, not a user who
 # holds its name.
 calls, _ = sweep(*refresh(23, later, by="sam-workers[bot]"), app=("workers", "sam-workers"))

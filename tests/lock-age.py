@@ -94,12 +94,14 @@ def run(cmd, cwd):
     if cmd[:2] == ["npm", "install"]:
         return NPM_DOES(cmd, cwd)
     if cmd[:3] == ["npm", "config", "get"]:
-        return subprocess.CompletedProcess(cmd, 0, "".join(f"{k}={NPMRC.get(k, 'null')}\n" for k in cmd[3:]), "")
+        rc = {**NPMRC, **NPMRC_IN.get(cwd, {})}
+        return subprocess.CompletedProcess(cmd, 0, "".join(f"{k}={rc.get(k, 'null')}\n" for k in cmd[3:]), "")
     return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
 
 
 NPM_TIMES = {}
 NPMRC = {}  # npm's own config for the lock file's directory
+NPMRC_IN = {}  # and for one directory only, over that
 
 
 def get_json(url):
@@ -409,7 +411,8 @@ RESOLVES = {"lock": None, "code": 0}
 
 def npm_does(cmd, cwd):
     path = os.path.join(cwd, "package-lock.json")
-    first = [x[0][:2] for x in RAN].count(["npm", "install"]) == 1
+    # Each lock file's first, in its own directory.
+    first = [x[0][:2] for x in RAN if x[1] == cwd].count(["npm", "install"]) == 1
     assert os.path.exists(path) != first, "npm must resolve from nothing, then again over that"
     if RESOLVES["code"] if first else RESOLVES.get("second_code"):
         return subprocess.CompletedProcess(cmd, 1, "", "npm error code ETARGET\nnpm error notarget No matching version")
@@ -454,6 +457,41 @@ NPMRC.update({"before": (NOW - dt.timedelta(days=30)).strftime("%a %b %d %Y %H:%
 write("package-lock.json", npm_lock(("node_modules/left-pad", "1.3.0")))
 assert waiting() == (1, None)
 NPMRC.clear()
+# A fixed before later than the age's cutoff still holds for good what's
+# published after it: a refresh with only such releases is no wait, one with
+# a release before it too waits for that one, and so does every lock file:
+# one in a directory whose own before holds it for good is no wait at all.
+def npmrc_before(days):
+    return {"before": (NOW - dt.timedelta(days=days)).strftime("%a %b %d %Y %H:%M:%S GMT+0000 (UTC)")}
+
+
+TWO = (NOW - dt.timedelta(days=2)).strftime("%Y-%m-%dT%H:%M:%SZ")  # before yesterday, younger than 3 days
+NPM_TIMES["left-pad"]["1.4.0"] = TWO
+NPMRC.update(npmrc_before(1))
+write("package-lock.json", npm_lock(("node_modules/left-pad", "1.2.0")))
+assert waiting() == (1, None)
+NPM_TIMES["@s/k"]["2.1.0"] = TWO
+repo({"package-lock.json": npm_lock(("node_modules/left-pad", "1.1.0"), ("node_modules/@s/k", "2.0.0"))})
+write("package-lock.json", npm_lock(("node_modules/left-pad", "1.2.0"), ("node_modules/@s/k", "2.1.0")))
+RESOLVES["lock"] = npm_lock(("node_modules/left-pad", "1.1.0"), ("node_modules/@s/k", "2.0.0"))
+assert waiting() == (1, ripe(TWO))
+NPMRC.clear()
+repo({"package-lock.json": npm_lock(("node_modules/left-pad", "1.1.0")),
+      "web/package-lock.json": npm_lock(("node_modules/left-pad", "1.1.0"))})
+RESOLVES["lock"] = npm_lock(("node_modules/left-pad", "1.1.0"))
+write("package-lock.json", npm_lock(("node_modules/left-pad", "1.4.0")))
+write("web/package-lock.json", npm_lock(("node_modules/left-pad", "1.2.0")))
+assert waiting() == (1, ripe(NEW))
+NPMRC_IN["web"] = npmrc_before(1)
+write("package-lock.json", npm_lock(("node_modules/left-pad", "1.4.0")))
+write("web/package-lock.json", npm_lock(("node_modules/left-pad", "1.2.0")))
+assert waiting() == (1, None)
+NPMRC_IN.clear()
+NPMRC_IN["."] = npmrc_before(1)
+write("package-lock.json", npm_lock(("node_modules/left-pad", "1.4.0")))
+write("web/package-lock.json", npm_lock(("node_modules/left-pad", "1.2.0")))
+assert waiting() == (1, ripe(NEW))
+NPMRC_IN.clear()
 
 # npm can't resolve under the cutoff: the refresh fails, it isn't retried without.
 repo({"package-lock.json": npm_lock(("node_modules/left-pad", "1.0.0"))})

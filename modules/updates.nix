@@ -32,6 +32,10 @@ let
     let m = builtins.match "(https://github.com/|git@github.com:)([^/]+/[^/]+)" (lib.removeSuffix ".git" cfg.origin);
     in if m == null then null else lib.elemAt m 1;
 
+  # The longest a Renovate run goes on (seconds): renovate-sweep waits that
+  # long after taking a refresh request back before a job may push.
+  renovateRunFor = 2 * 3600;
+
   vars = {
     UPDATE = update;
     HEALTH = health;
@@ -67,6 +71,7 @@ let
     SEAL = "${majorSeal}/bin/major-seal";
     # When a lock file refresh lock-age refused for age only can go again.
     LOCK_WAIT = "${lockWait}/bin/lock-wait";
+    RENOVATE_RUN = toString renovateRunFor;
     # The App the jobs these start act as (proj run --app), and its bot as
     # GraphQL names it: none without burrow.github.machinery.
     APP = if machineApp == null then "" else machineApp.name;
@@ -770,7 +775,7 @@ in
           Type = "oneshot";
           User = user;
           ExecStart = "${renovateRun}/bin/renovate-run${lib.optionalString (name == "renovate@") " %I"}";
-          TimeoutStartSec = "2h";
+          TimeoutStartSec = renovateRunFor;
           Nice = 10;
         };
       }) // lib.genAttrs [ "renovate-sweep" "renovate-sweep@" ] (name: {
