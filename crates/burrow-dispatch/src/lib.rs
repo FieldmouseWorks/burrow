@@ -27,7 +27,8 @@
 //! ladder (a kick, a Claude job, the stuck issue, the owner) takes it on:
 //!
 //!   - runner/UNIT: jobs queued for an idle runner, from the pass that first
-//!     saw it so, due once its restarts have had their time. It links the
+//!     saw it so, due once its restarts, and the looks after them, have had
+//!     their time, kicking a pass for a fresh look first. It links the
 //!     oldest job and never names it: a job's name is its workflow's, which
 //!     anyone whose PR runs one writes, and the watchdog's jobs read this.
 //!   - deploy/OWNER/REPO: commits on a watched repo's default branch that

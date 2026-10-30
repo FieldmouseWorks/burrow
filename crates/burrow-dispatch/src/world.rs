@@ -27,8 +27,10 @@ pub trait World {
     /// GET this path of GitHub's REST API (`repos/OWNER/REPO/...`): its JSON.
     fn github(&self, path: &str) -> Result<Value, String>;
     fn unit(&self, unit: &str) -> Unit;
-    /// The running system's configuration revision, when it's a commit.
-    fn revision(&self) -> Option<String>;
+    /// The running system's configuration revision, when it's a commit:
+    /// none when it's from a dirty tree or unknown, an error when it can't
+    /// be read.
+    fn revision(&self) -> Result<Option<String>, String>;
     /// Whether a switch is in flight: one awaiting its confirm, or its revert
     /// at work. It restarts what it changes, runners among them.
     fn switching(&self) -> bool;
@@ -109,16 +111,19 @@ impl World for Real<'_> {
         Unit { state, since, busy }
     }
 
-    fn revision(&self) -> Option<String> {
-        // As HOST-update reads it.
+    fn revision(&self) -> Result<Option<String>, String> {
+        // As HOST-update reads it; it says "unknown" with a failure when
+        // the system has none.
         let out = Command::new("/run/current-system/sw/bin/nixos-version")
             .arg("--configuration-revision")
             .stderr(Stdio::null())
             .output()
-            .ok()?;
+            .map_err(|e| format!("nixos-version: {e}"))?;
         let rev = String::from_utf8_lossy(&out.stdout).trim().to_owned();
-        (out.status.success() && rev.len() == 40 && rev.bytes().all(|b| b.is_ascii_hexdigit()))
-            .then_some(rev)
+        Ok(
+            (out.status.success() && rev.len() == 40 && rev.bytes().all(|b| b.is_ascii_hexdigit()))
+                .then_some(rev),
+        )
     }
 
     fn switching(&self) -> bool {
@@ -172,17 +177,30 @@ fn shown(out: &str) -> BTreeMap<String, String> {
 }
 
 /// Whether a Runner.Worker process is anywhere in this cgroup: an error
-/// when the cgroup can't be read. A process gone before its name is read
-/// isn't one.
+/// when the cgroup, or the name of a process in it, can't be read. A
+/// process whose name is missing is one gone, unless the cgroup still has
+/// it: then /proc hides it from us.
 fn working(cg: &Path) -> std::io::Result<bool> {
-    let here = fs::read_to_string(cg.join("cgroup.procs"))?
-        .lines()
-        .any(|pid| {
-            fs::read_to_string(format!("/proc/{}/comm", pid.trim()))
-                .is_ok_and(|comm| comm.trim() == "Runner.Worker")
-        });
-    if here {
-        return Ok(true);
+    let procs = |dir: &Path| -> std::io::Result<Vec<String>> {
+        Ok(fs::read_to_string(dir.join("cgroup.procs"))?
+            .lines()
+            .map(|p| p.trim().to_owned())
+            .collect())
+    };
+    let mut missing = Vec::new();
+    for pid in procs(cg)? {
+        match fs::read_to_string(format!("/proc/{pid}/comm")) {
+            Ok(comm) if comm.trim() == "Runner.Worker" => return Ok(true),
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => missing.push(pid),
+            Err(e) => return Err(e),
+        }
+    }
+    if let Some(pid) = procs(cg)?.into_iter().find(|p| missing.contains(p)) {
+        return Err(std::io::Error::other(format!(
+            "process {pid} is in {} but not in /proc",
+            cg.display()
+        )));
     }
     for e in fs::read_dir(cg)? {
         let e = e?;
@@ -197,8 +215,9 @@ fn working(cg: &Path) -> std::io::Result<bool> {
 mod tests {
     use super::{shown, working};
 
-    // A cgroup whose processes can't be read isn't taken for one at no job;
-    // one whose processes are all something else is.
+    // A cgroup whose processes can't be read, or that has one /proc hides,
+    // isn't taken for one at no job; one whose processes are all something
+    // else is.
     #[test]
     fn reads_cgroups() {
         let dir = tempfile::tempdir().unwrap();
@@ -213,6 +232,9 @@ mod tests {
         assert!(working(dir.path()).is_err(), "sub has no cgroup.procs");
         std::fs::write(sub.join("cgroup.procs"), "").unwrap();
         assert!(!working(dir.path()).unwrap());
+        // A process the cgroup has and /proc doesn't show.
+        std::fs::write(sub.join("cgroup.procs"), "4294967295\n").unwrap();
+        assert!(working(dir.path()).is_err());
     }
 
     #[test]

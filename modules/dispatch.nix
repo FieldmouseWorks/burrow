@@ -133,6 +133,7 @@ in
           labels = lib.optionals r.defaultLabels [ "self-hosted" "Linux" arch ] ++ r.labels;
         }) cfg.runners;
         quiet = cfg.quietMinutes * 60;
+        gap = config.burrow.events.handlers.dispatch.gap;
         deploy = if !deploying then null else {
           unit = update;
           handler = "update";

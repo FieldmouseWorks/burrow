@@ -106,8 +106,9 @@ in
       example = lib.literalExpression "inputs";
       description = ''
         The machine flake's inputs. Their revisions go in /etc/burrow/inputs.json,
-        and HOST-switch refuses a system built from an older nixpkgs than the
-        running one (it would quietly undo security fixes) unless told
+        self's is the system's configuration revision (unless the flake sets
+        its own), and HOST-switch refuses a system built from an older nixpkgs
+        than the running one (it would quietly undo security fixes) unless told
         --allow-downgrade.
       '';
     };
@@ -140,6 +141,12 @@ in
 
       environment.systemPackages = [ switchTool confirmTool ];
       burrow.tools = { switch = switchTool; confirm = confirmTool; };
+
+      # The commit the system was built from, `-dirty` from a dirty tree:
+      # `nixos-version --configuration-revision` says it, and HOST-update and
+      # the pipeline dispatcher read it to tell what's running.
+      system.configurationRevision = lib.mkIf (cfg.flakeInputs ? self)
+        (lib.mkDefault (cfg.flakeInputs.self.rev or cfg.flakeInputs.self.dirtyRev or null));
 
       environment.etc."burrow/inputs.json" = lib.mkIf (cfg.flakeInputs != { }) {
         text = builtins.toJSON (

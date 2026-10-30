@@ -200,7 +200,10 @@ pub fn decide(
 /// at a job, and otherwise it's taking none of it. An active runner idle for
 /// `quiet` with work queued has lost GitHub and is restarted; a failed one,
 /// started. Neither while a switch is in flight (it restarts what it
-/// changes), nor past RESTARTS in RECENT.
+/// changes), nor past RESTARTS in RECENT. Its wait falls due once each
+/// restart, and the look after it, has had its `quiet` and the handler's
+/// `gap`; the watchdog then kicks a pass for a fresh look before it goes
+/// further.
 #[allow(clippy::too_many_arguments)]
 fn runner(
     cfg: &Config,
@@ -237,10 +240,9 @@ fn runner(
             what: format!("{unit}, {}'s Actions runner", seen.repo),
             phase,
             since,
-            // Its restarts have had their time by then.
-            due: since + (RESTARTS as f64 + 1.0) * cfg.quiet,
+            due: since + (RESTARTS as f64 + 1.0) * (cfg.quiet + cfg.gap),
             link: Some(oldest.url.clone()),
-            kick: None,
+            kick: Some(cfg.handler.clone()),
         },
     );
     if snap.switching || recent.len() >= RESTARTS {
@@ -360,6 +362,7 @@ mod tests {
 
     const T: f64 = 1_800_000_000.0;
     const Q: f64 = 300.0;
+    const G: f64 = 120.0;
 
     /// A runner's look, with its queued jobs by name (in their links) and time.
     fn seen(state: &str, since: f64, busy: bool, queued: &[(&str, f64)]) -> Seen {
@@ -423,8 +426,10 @@ mod tests {
     // An idle runner with work queued is watched from the pass that first
     // sees it so, restarted once it has been idle `quiet` (and up that long
     // itself), with a look booked `quiet` on, restarted again then, and then
-    // left to the watchdog, whose deadline its restarts don't move. Its
-    // wait names no job: their names are the workflow's.
+    // left to the watchdog, whose deadline its restarts don't move: each
+    // restart and the look after it have had their `quiet` and the
+    // handler's `gap` by then, and the watchdog kicks a fresh look first.
+    // Its wait names no job: their names are the workflow's.
     #[test]
     fn quiet_runner() {
         let dir = tempfile::tempdir().unwrap();
@@ -442,7 +447,10 @@ mod tests {
         assert!(d.moves.is_empty() && d.wake == Some(T + Q), "{d:?}");
         assert_eq!(d.state.idle["ci"], T);
         let it = &d.items["runner/ci"];
-        assert_eq!((it.since, it.due, it.kick.clone()), (T, T + 3.0 * Q, None));
+        assert_eq!(
+            (it.since, it.due, it.kick.as_deref()),
+            (T, T + 3.0 * (Q + G), Some("dispatch"))
+        );
         assert_eq!(it.link.as_deref(), Some("https://x/gate"));
         assert_eq!(
             it.phase,
@@ -473,7 +481,7 @@ mod tests {
         // Twice in RECENT: no more, and its wait falls due as it was.
         let d = decide(&cfg, &s, &st, &none, T + 3.0 * Q);
         assert!(d.moves.is_empty() && d.wake.is_none(), "{d:?}");
-        assert_eq!(d.items["runner/ci"].due, T + 3.0 * Q);
+        assert_eq!(d.items["runner/ci"].due, T + 3.0 * (Q + G));
         // RECENT on, it may be restarted again.
         let d = decide(&cfg, &s, &st, &none, T + 2.0 * Q + RECENT + 1.0);
         assert_eq!(restarts(&d), [("ci", "restart")]);

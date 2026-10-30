@@ -344,8 +344,8 @@ mod tests {
         fn unit(&self, unit: &str) -> Unit {
             self.w.unit(unit)
         }
-        fn revision(&self) -> Option<String> {
-            None
+        fn revision(&self) -> Result<Option<String>, String> {
+            Ok(None)
         }
         fn switching(&self) -> bool {
             // Its first look is before any unit's second.

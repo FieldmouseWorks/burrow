@@ -23,6 +23,9 @@ pub struct Config {
     /// Seconds a runner may sit idle with jobs queued for it before it's
     /// restarted.
     pub quiet: f64,
+    /// Seconds burrow-events holds its passes apart: a pass booked for a
+    /// time may start this much later.
+    pub gap: f64,
     /// HOST-update, when the machine updates itself.
     pub deploy: Option<Deploy>,
     /// HOST-switch's state directory: a switch is in flight while it holds

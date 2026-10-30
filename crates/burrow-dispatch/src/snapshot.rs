@@ -122,9 +122,20 @@ pub fn take(cfg: &Config, world: &dyn World) -> Snapshot {
             })
             .unwrap_or_else(|| "nothing yet".to_owned());
         snap.update = Some((world.unit(&d.unit), said));
-        // Its own repo, when the system says which commit of it it is.
-        let own = d.own.iter().filter_map(|r| Some((r, world.revision()?)));
-        for (repo, running) in own.chain(d.running.iter().map(|(r, c)| (r, c.clone()))) {
+        let mut compare: Vec<(&String, String)> = Vec::new();
+        // Its own repo, when the system says which commit of it it is; one
+        // that can't be asked is a repo it can't read.
+        if let Some(own) = &d.own {
+            match world.revision() {
+                Ok(Some(rev)) => compare.push((own, rev)),
+                Ok(None) => {}
+                Err(e) => {
+                    snap.unread.insert(own.clone(), e);
+                }
+            }
+        }
+        compare.extend(d.running.iter().map(|(r, c)| (r, c.clone())));
+        for (repo, running) in compare {
             match behind(world, repo, &running) {
                 Ok(b) => {
                     snap.deploys.insert(repo.clone(), b);
@@ -328,6 +339,7 @@ pub mod tests {
         pub then: BTreeMap<String, Unit>,
         pub looks: RefCell<BTreeMap<String, usize>>,
         pub revision: Option<String>,
+        pub revision_fails: Option<String>,
         pub switching: bool,
         pub did: RefCell<Vec<String>>,
         pub fails: Option<String>,
@@ -361,8 +373,10 @@ pub mod tests {
                 _ => self.units.get(unit).cloned().unwrap_or_default(),
             }
         }
-        fn revision(&self) -> Option<String> {
-            self.revision.clone()
+        fn revision(&self) -> Result<Option<String>, String> {
+            self.revision_fails
+                .clone()
+                .map_or_else(|| Ok(self.revision.clone()), Err)
         }
         fn switching(&self) -> bool {
             self.switching
@@ -391,6 +405,7 @@ pub mod tests {
                 "other": {"repo": "sam/o", "labels": ["self-hosted", "Linux", "X64", "o"]},
             },
             "quiet": 300.0,
+            "gap": 120.0,
             "deploy": {
                 "unit": "box-update", "handler": "update", "status": dir.join("status.json"),
                 "own": "sam/box",
@@ -553,7 +568,8 @@ pub mod tests {
     // A watched repo's commits past the running one: how many, the oldest's
     // time and the newest; none when it's live. The flake's own repo is
     // compared at the running system's configuration revision, and isn't
-    // when it has none (built from a dirty tree).
+    // when it has none (built from a dirty tree); one that can't be read
+    // leaves the repo unread.
     #[test]
     fn deploys() {
         let dir = tempfile::tempdir().unwrap();
@@ -607,5 +623,12 @@ pub mod tests {
         let snap = take(&cfg, &w);
         assert!(!snap.deploys.contains_key("sam/box") && !snap.unread.contains_key("sam/box"));
         assert_eq!(snap.deploys["sam/kit"].count, 0);
+        // One that can't be asked isn't taken for live.
+        w.revision_fails = Some("nixos-version: No such file or directory".into());
+        let snap = take(&cfg, &w);
+        assert_eq!(
+            snap.unread["sam/box"],
+            "nixos-version: No such file or directory"
+        );
     }
 }

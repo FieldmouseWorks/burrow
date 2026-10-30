@@ -338,8 +338,9 @@
         # (the example's, and one with a deploy to watch): which commit of
         # each watched input the running system has, from the flake's
         # flake.lock (tests/dispatch), with its own repo left to the
-        # configuration revision, so that a build from a dirty tree and the
-        # same tree committed are one system; and each runner's labels,
+        # configuration revision the switch stamps, so that a build from a
+        # dirty tree and the same tree committed are one system; and each
+        # runner's labels,
         # GitHub's defaults for the machine's architecture among them unless
         # it has none.
         dispatch-config = let
@@ -375,6 +376,7 @@
           dirty = machine { dirtyRev = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-dirty"; } [ ];
           arm = machine { } [ { nixpkgs.hostPlatform = lib.mkForce "aarch64-linux"; } ];
           settings = m: m.config.burrow.dispatch.settings;
+          revisions = map (m: m.config.system.configurationRevision) [ committed dirty ];
           deploy = { inherit ((settings committed).deploy) own running; };
           want = {
             own = "sam/homelab";
@@ -389,6 +391,9 @@
           assert lib.assertMsg (deploy == want) "dispatch: ${builtins.toJSON deploy}, not ${builtins.toJSON want}";
           assert lib.assertMsg (settings dirty == settings committed)
             "dispatch: a build from a dirty tree isn't the same tree committed: ${builtins.toJSON (settings dirty)}, ${builtins.toJSON (settings committed)}";
+          # What a pass compares the own repo at: the switch stamps it.
+          assert lib.assertMsg (revisions == [ "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-dirty" ])
+            "dispatch: the systems are stamped ${builtins.toJSON revisions}";
           assert lib.assertMsg (labels committed == wantLabels "X64") "dispatch: x86_64's labels: ${builtins.toJSON (labels committed)}";
           assert lib.assertMsg (labels arm == wantLabels "ARM64") "dispatch: aarch64's labels: ${builtins.toJSON (labels arm)}";
           pkgs.runCommand "dispatch-config-check" { } ''
