@@ -12,7 +12,9 @@
   # ignores TERM and writes to the stream. Told so, it answers again, or as
   # /tmp/cut-mode says: "linger" answers and stays up, "hang" says nothing,
   # "crash" and "signal" die without a word, "error" fails;
-  # "chatter N" says something every second for N seconds, then answers.
+  # "chatter N" says something every second for N seconds, then answers;
+  # "named N" names its session ("named") as Claude's first line does, then
+  # sleeps N seconds without answering.
   # As a job, it says what comes next before it answers (proj done; "ask"
   # asks, "await" awaits), but "silent" doesn't, and with /tmp/silent nothing
   # does, even told to; what it's told is kept in /tmp/told.
@@ -24,6 +26,9 @@
     fi
     case $prompt in
       sleep*) sleep "''${prompt#sleep }" ;;
+      named*)
+        echo '{"type":"system","subtype":"init","session_id":"named"}'
+        sleep "''${prompt#named }" ;;
       chatter*) for _ in $(seq "''${prompt#chatter }"); do echo '{"type":"system"}'; sleep 1; done ;;
       linger*)
         echo '{"type":"result","session_id":"s","result":"waiting on CI","is_error":false}'

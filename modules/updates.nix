@@ -74,6 +74,7 @@ let
     APP_OWNERS = lib.concatStringsSep " " cfg.renovate.owners;
     COVERS = coversTool;
     RUN_LOCK = "${cfg.renovate.dir}/run.lock";
+    RUNS = "${cfg.renovate.dir}/runs";
   };
 
   # Each script gets the names it uses (shellcheck rejects the rest), set above
@@ -90,8 +91,8 @@ let
   calls = [ tools.proj tools.notify ];
   healthTool = script health ./updates/health.sh (with pkgs; [ coreutils gnugrep gnused gawk systemd ]);
   updateTool = script update [ ./updates/dispatch.sh ./updates/update.sh ] (
-    (with pkgs; [ coreutils git jq curl util-linux systemd gnugrep gnused gawk vulnix config.nix.package ])
-    ++ [ healthTool tools.switch tools.confirm ] ++ calls ++ lib.optional (tools ? boot) tools.boot
+    (with pkgs; [ coreutils jq curl util-linux systemd gnugrep gnused gawk vulnix config.nix.package ])
+    ++ [ config.programs.git.package healthTool tools.switch tools.confirm ] ++ calls ++ lib.optional (tools ? boot) tools.boot
   );
   advisoryWatch = script "advisory-watch" ./updates/advisory-watch.sh (
     (with pkgs; [ coreutils curl jq gnugrep gnused gawk util-linux vulnix osv-scanner config.nix.package ]) ++ calls
@@ -153,10 +154,10 @@ let
     exec ${pkgs.python3}/bin/python3 -E -s ${majorSealSrc}/major-seal.py ${stateDir}/renovate-sweep "$@"
   '';
   renovateRun = script "renovate-run" ./updates/renovate.sh (
-    [ pkgs.renovate machineGh pkgs.util-linux ] ++ lib.optional (machineApp != null) tools.gh-token
+    [ pkgs.renovate machineGh pkgs.util-linux pkgs.coreutils ] ++ lib.optional (machineApp != null) tools.gh-token
   );
   renovateSweep = script "renovate-sweep" ./updates/renovate-sweep.sh (
-    (with pkgs; [ coreutils findutils git jq gnused ]) ++ [ machineGh ] ++ calls
+    (with pkgs; [ coreutils findutils jq gnused ]) ++ [ config.programs.git.package machineGh ] ++ calls
   );
 
   # The ZFS pools the machine needs imported, as NixOS's zfs module decides
@@ -755,7 +756,7 @@ in
           LOG_LEVEL = "info";
         };
         # Renovate's own git, and the toolchains it refreshes lockfiles with.
-        path = [ pkgs.git pkgs.openssh config.nix.package ] ++ rcfg.path;
+        path = [ config.programs.git.package pkgs.openssh config.nix.package ] ++ rcfg.path;
         serviceConfig = {
           Type = "oneshot";
           User = user;

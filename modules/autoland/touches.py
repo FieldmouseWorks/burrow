@@ -60,6 +60,15 @@ def moved_from(repo, pr, st):
 MAJOR_RE = re.compile(r"from v?(\d+)\S* to v?(\d+)")
 
 
+AUTOMERGE_RE = re.compile(r"\*\*Automerge\*\*: Enabled\b")
+
+
+def automerges(pr):
+    """Renovate merges this PR of its own once it's green: the configuration
+    section it writes in the PR says so ("🚦 **Automerge**: Enabled.")."""
+    return bool(AUTOMERGE_RE.search(pr.get("body") or ""))
+
+
 def dep_kind(pr):
     """None, 'minor' or 'major' for a dependency bot's PR."""
     if not DEP_RE.match(pr["headRefName"]):
