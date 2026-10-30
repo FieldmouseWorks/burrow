@@ -308,8 +308,7 @@ def review(name):
     """One queued review: its answer, or why there's none, left in DONE for
     the repo's pass, which it kicks. Gone from the queue either way. A sweep
     that took it off the queue first (its PR moved on before it began) leaves
-    nothing to do, and one that took it while it ran (its PR closed, or its
-    repo was remade) leaves nothing to keep: see `swept`."""
+    nothing to do."""
     try:
         held = open(os.path.join(STATE, V.QUEUE, name))
     except FileNotFoundError:
@@ -360,14 +359,9 @@ def review(name):
                 # A session that won't resume (lost, or broken) isn't asked
                 # again: the look's next try starts the PR's next one.
                 if last.get("id"):
-                    with V.writing():
-                        if not swept(held, item):
-                            remove_look(session)
+                    remove_look(session)
                 raise
-            with V.writing():
-                if swept(held, item):
-                    return
-                save(f"{session}/look.json", {"id": sid, "head": head})
+            save(f"{session}/look.json", {"id": sid, "head": head})
             log(f"{item['repo']}#{item['number']}: {V.NAMES[r]} took {time.time() - began:.0f}s"
                 + (" in its session" if last.get("id") else ", starting its session"))
             out = {"result": "review", "answer": scrub(answer)}
@@ -377,42 +371,20 @@ def review(name):
         except Exception as e:
             out = {"result": "error", "error": scrub(str(e))[:300]}
             log(f"{(item or {}).get('repo')}#{(item or {}).get('number')}: review failed: {out['error']}")
+        # Out of the queue even if the answer can't be kept: with nothing back
+        # the steward counts it lost and queues it again.
         try:
-            with V.writing():
-                if swept(held, item):
-                    return
-                # Out of the queue even if the answer can't be kept: with
-                # nothing back the steward counts it lost and queues it again.
-                try:
-                    # The head it read, for a PR that has moved on since (the
-                    # steward's `overtaken`).
-                    save(f"{V.DONE}/{name}", {**out, "at": time.time(),
-                                              **({"head": item.get("headRefOid"), "base": item.get("baseRefName")}
-                                                 if isinstance(item, dict) else {})})
-                finally:
-                    try:
-                        os.remove(os.path.join(STATE, V.QUEUE, name))
-                    except OSError:
-                        pass
+            # The head it read, for a PR that has moved on since (the
+            # steward's `overtaken`).
+            save(f"{V.DONE}/{name}", {**out, "at": time.time(),
+                                      **({"head": item.get("headRefOid"), "base": item.get("baseRefName")} if isinstance(item, dict) else {})})
         finally:
+            try:
+                os.remove(os.path.join(STATE, V.QUEUE, name))
+            except OSError:
+                pass
             if isinstance((item or {}).get("repo"), str):
                 C.kick(item["repo"])
-
-
-def swept(held, item):
-    """Whether the sweep took the look's queue entry (held) off the queue
-    while it ran: its PR closed, or its repo was remade under a deleted
-    one's name. What it found is no open PR's, and the entry, session and
-    answer at the same names may be a PR's that has taken them since (the
-    remade repo's PR of the same number): none of them is this look's to
-    write or take off. Its answer goes nowhere. Asked under V.writing,
-    which the sweep holds too, so the answer holds until the write is
-    done."""
-    if os.fstat(held.fileno()).st_nlink:
-        return False
-    log(f"{(item or {}).get('repo')}#{(item or {}).get('number')}: taken off the queue while it was reviewed; "
-        "what it found is kept nowhere")
-    return True
 
 
 def remove_look(session):

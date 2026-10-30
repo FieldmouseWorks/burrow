@@ -368,57 +368,6 @@ t.join()
 back = json.load(open(f"{tmp}/state/{V.DONE}/{entry}"))
 assert back["result"] == "review" and back["head"] == pr_head and back["base"] == "main", back
 os.remove(f"{tmp}/state/{V.DONE}/{entry}")
-# One the sweep takes off the queue while it runs anyway (its PR closed, or
-# its repo was remade under a deleted one's name) keeps nothing: no answer,
-# and nothing written to or taken off what's at the same names since (the
-# remade repo's PR of the same number queues the same look, and starts the
-# same session).
-agent(codex={"sleep": 2})
-V.queue("sam/r", snap_pr, "pr-sam_r-5.json", "codex")
-entry, = os.listdir(f"{tmp}/state/{V.QUEUE}")
-session = f"{tmp}/state/{V.SESSIONS}/{V.session_name('codex', entry.partition('--')[2].removesuffix('.json'))}"
-t = threading.Thread(target=W.review, args=(entry,))
-t.start()
-time.sleep(1)
-again = open(f"{tmp}/state/{V.QUEUE}/{entry}").read()
-V.remove(f"{tmp}/state/{V.QUEUE}/{entry}")  # as the sweep takes a closed PR's
-os.rename(session, f"{tmp}/state/{V.SESSIONS}/{V.GONE}1-{os.path.basename(session)}")
-os.makedirs(session)
-with open(f"{tmp}/state/{V.QUEUE}/{entry}", "w") as f:
-    f.write(again)
-t.join()
-assert os.listdir(f"{tmp}/state/{V.DONE}") == [] and os.listdir(f"{tmp}/state/{V.QUEUE}") == [entry], os.listdir(f"{tmp}/state/{V.DONE}")
-assert os.listdir(session) == [], os.listdir(session)
-os.remove(f"{tmp}/state/{V.QUEUE}/{entry}")
-# And the sweep and a look's writes take turns (V.writing): a look the
-# sweep takes off while it waits to write what it found writes nothing
-# after, at names the remade repo's PR has taken since. Its session's look
-# stays the new one's, when the look's resume fails too.
-for fails in (False, True):
-    agent(codex={"sleep": 2})
-    V.queue("sam/r", snap_pr, "pr-sam_r-5.json", "codex")
-    entry, = os.listdir(f"{tmp}/state/{V.QUEUE}")
-    sname = V.session_name('codex', entry.partition('--')[2].removesuffix('.json'))
-    session = f"{tmp}/state/{V.SESSIONS}/{sname}"
-    if fails:  # a session the agent hasn't: its resume fails at once
-        os.makedirs(session, exist_ok=True)
-        C.save(f"{V.SESSIONS}/{sname}/look.json", {"id": "lost", "head": pr_head})
-    with V.writing():
-        t = threading.Thread(target=W.review, args=(entry,))
-        t.start()
-        time.sleep(3)
-        again = open(f"{tmp}/state/{V.QUEUE}/{entry}").read()
-        V.remove(f"{tmp}/state/{V.QUEUE}/{entry}")
-        os.rename(session, f"{tmp}/state/{V.SESSIONS}/{V.GONE}{2 + fails}-{sname}")
-        os.makedirs(session)
-        C.save(f"{V.SESSIONS}/{sname}/look.json", {"id": "new", "head": pr_head})
-        with open(f"{tmp}/state/{V.QUEUE}/{entry}", "w") as f:
-            f.write(again)
-    t.join()
-    assert os.listdir(f"{tmp}/state/{V.DONE}") == [] and os.listdir(f"{tmp}/state/{V.QUEUE}") == [entry], fails
-    assert json.load(open(f"{session}/look.json")) == {"id": "new", "head": pr_head}, fails
-    os.remove(f"{tmp}/state/{V.QUEUE}/{entry}")
-    shutil.rmtree(session)
 
 # A review done with and queued again (a retry) while another (PR 7's) is
 # still running is taken again, not left until the service next starts.

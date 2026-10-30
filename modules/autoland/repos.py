@@ -193,9 +193,10 @@ def restart(r, known, failed):
     save("known.json", sorted(known))
     save("baseline-failed.json", failed)
     retire_checkouts(repo, ts(r["created"]))
-    stuck = V.sweep({k}, set())
-    if stuck:
-        raise RuntimeError(f"its reviewers' sessions {', '.join(stuck)} couldn't be marked gone")
+    left = V.sweep({k}, set())
+    if left:
+        raise RuntimeError(f"its reviewers aren't done with {', '.join(left)}: a look under way, or a session "
+                           "that couldn't be marked gone")
     mirror = os.path.join(C.STATE, V.GIT, repo.replace("/", "__") + ".git")
     if os.path.isdir(mirror):
         shutil.rmtree(mirror)
@@ -208,35 +209,45 @@ def restart(r, known, failed):
 
 def retire_checkouts(repo, made):
     """Every clone of the repo in projectsDir that wasn't cloned from it
-    since it was made (at made), so may be the deleted one's, moved aside
+    after it was made (at made), so may be the deleted one's, moved aside
     under a hidden name, which nothing takes for a project: so the repo's
     next job clones this one, and can't push the old one's history to it.
     Nothing in it is lost. The only proof a clone is this one's is its own
     record of being cloned from the repo on GitHub since; one without (an
-    empty repo's clone has none) is moved too, and the next job clones it
-    again.
+    empty repo's clone has none), or from the very second it was made, is
+    moved too, and the next job clones it again.
 
-    First, every Claude job (proj's own list, C.jobs_in) that worked in a
-    clone moved aside, or that started before the repo was made in one
-    kept or where the repo's next clone goes (unless another repo's clone
-    is there), is stopped: it was the
-    deleted one's, and it would go on in the folder its job names, whatever
-    clone is there by then. A job proj won't stop raises before its clone
-    is moved."""
+    Then the deleted one's Claude jobs are stopped, from proj's own record
+    of every job (C.jobs): each that started in a folder before it was
+    moved aside, and each that started no later than the repo was made
+    and is the repo's, by the repo its kicks name (the steward's jobs and
+    proj-inbox's, in whatever folder) or by its folder (a clone of the repo
+    that stays, or the folder its next clone takes, unless another repo's
+    clone is there). The moves go first, so none of them can start in an
+    old clone after the jobs are read, and each is kept with the repo's
+    settings (`retired`), so a later try stops their jobs if this one
+    can't. A job proj won't stop raises."""
+    k = repo.replace("/", "_")
     src = CFG["projectsDir"]
     every = list(C.projects(strict=True))
     mine = {d for d, url in every if url.lower() == repo.lower()}
-    # Where its next clone goes, unless another repo's clone is there.
-    for d in sorted(mine | ({repo.split("/")[1]} - {d for d, _ in every})):
-        path = os.path.join(src, d)
-        gone = d in mine and cloned(path, repo) < made
-        for jid, at in C.jobs_in(path):
-            if gone or at < made:
-                C.stop_job(jid)
-        if gone:
-            aside = os.path.join(src, f".{d}.gone-{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime(C.NOW))}")
-            log(f"{repo}: its checkout {d} wasn't cloned from it since it was made; moved to {aside}")
-            os.rename(path, aside)
+    st = load(f"repo-{k}.json", {})
+    retired = st.setdefault("retired", {})
+    for d in sorted(d for d in mine if cloned(os.path.join(src, d), repo) <= made):
+        aside = os.path.join(src, f".{d}.gone-{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime(C.NOW))}")
+        log(f"{repo}: its checkout {d} wasn't cloned from it since it was made; moving it to {aside}")
+        retired[d] = None  # being moved: every job there so far is its
+        save(f"repo-{k}.json", st)
+        os.rename(os.path.join(src, d), aside)
+        retired[d] = time.time()
+        save(f"repo-{k}.json", st)
+        mine.discard(d)
+    gone = {os.path.join(src, d): at or time.time() for d, at in retired.items()}
+    ours = {os.path.join(src, d) for d in mine | ({repo.split("/")[1]} - {d for d, _ in every})}
+    for jid, project, started, repos in C.jobs():
+        if (started <= gone[project] if project in gone else
+                started <= made and (repo.lower() in repos or project in ours)):
+            C.stop_job(jid)
 
 
 def cloned(path, repo):

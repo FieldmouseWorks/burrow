@@ -15,6 +15,7 @@ import hmac
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 import time
@@ -439,12 +440,29 @@ def projects(strict=False):
     Only a clone of its own counts: a hidden folder, or a worktree of the
     repo (`.git` is a file there) checked out on some other branch, sorts
     first and shares the origin, but a job sent there works on the wrong
-    tree. Strict, one whose origin git can't read (other than having none)
-    raises rather than being left out: for repos.restart, which must see
-    every clone a repo has."""
+    tree. Strict, what can't be read (projectsDir, a folder's `.git`, its
+    origin, other than there being none) raises rather than being left
+    out: for repos.restart, which must see every clone a repo has."""
     src = CFG["projectsDir"]
-    for d in sorted(os.listdir(src)) if os.path.isdir(src) else []:
-        if d.startswith(".") or not os.path.isdir(os.path.join(src, d, ".git")):
+    try:
+        names = sorted(os.listdir(src))
+    except FileNotFoundError:
+        names = []
+    except OSError:
+        if strict:
+            raise
+        names = []
+    for d in names:
+        if d.startswith("."):
+            continue
+        try:
+            if not stat.S_ISDIR(os.stat(os.path.join(src, d, ".git")).st_mode):
+                continue
+        except (FileNotFoundError, NotADirectoryError):
+            continue
+        except OSError:
+            if strict:
+                raise
             continue
         p = subprocess.run(["git", "-C", os.path.join(src, d), "remote", "get-url", "origin"],
                            capture_output=True, text=True)
@@ -518,23 +536,37 @@ def job_state(jid):
     return p.stdout.strip() or None
 
 
-def jobs_in(path):
-    """(id, when it started) for every proj job ever started in the project
-    at path, from proj's own record (jobsDir): `proj run` names a job after
-    its project's folder, and writes the project's path to the job's
-    `project` file as it starts it. Raises when that can't be read."""
-    jobs, name = CFG["jobsDir"], os.path.basename(path)
+def jobs():
+    """(id, project, when it started, the repos it's for) of every job proj
+    ever ran, from its own record (jobsDir): `proj run` writes a job's
+    project folder to its `project` file as it starts it, then its kicks
+    to `kick`, where the steward's jobs and proj-inbox's name their repo
+    (HANDLER/OWNER/REPO, lowercased here). One still being made, with no
+    project yet, is left out: it can only start in its folder as that is
+    by then. Raises when the record can't be read."""
+    root = CFG["jobsDir"]
+    try:
+        ids = sorted(os.listdir(root))
+    except FileNotFoundError:
+        return []
     found = []
-    for jid in sorted(os.listdir(jobs)) if os.path.isdir(jobs) else []:
-        if not re.fullmatch(rf"{re.escape(name)}-\d{{8}}-\d{{6}}-\w+", jid):
+    for jid in ids:
+        d = os.path.join(root, jid)
+        if jid.startswith(".") or not os.path.isdir(d):  # proj's own (.waits.json, .slots)
             continue
-        f = os.path.join(jobs, jid, "project")
         try:
-            with open(f) as fh:
-                if os.path.normpath(fh.read().strip()) == os.path.normpath(path):
-                    found.append((jid, os.stat(f).st_mtime))
+            with open(os.path.join(d, "project")) as f:
+                project = f.read().removesuffix("\n")
+            started = os.stat(os.path.join(d, "project")).st_mtime
         except FileNotFoundError:
-            continue  # being made: it has no turn yet, and none starts before its project is written
+            continue
+        try:
+            with open(os.path.join(d, "kick")) as f:
+                kicks = f.read().splitlines()
+        except FileNotFoundError:
+            kicks = []
+        found.append((jid, os.path.normpath(project), started,
+                      {x.split("/", 1)[1].lower() for x in kicks if x.count("/") == 2}))
     return found
 
 

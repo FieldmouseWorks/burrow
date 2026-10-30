@@ -10,13 +10,14 @@ A repo made under the name of one that was deleted is a new repo too, though
 GitHub gives it the same name: the steward knows it by being made after the
 steward last settled a repo of that name, on the first pass that reads it,
 kicked or full. Before anything acts on it, every clone in `projectsDir`
-that wasn't cloned from it on GitHub since it was made is moved aside under
-a hidden name, and the Claude jobs proj ran in those clones, or started
-before it was made in the folder its next clone takes, are stopped. What
-the steward kept about the old one (its settings, hook, PRs, reviews and
-the reviewers' sessions) is forgotten, so the new one gets its own clone
-and its own baseline job. A pass that fails partway does it all again on
-the next.
+that wasn't cloned from it on GitHub after it was made is moved aside under
+a hidden name. The Claude jobs that started in those clones are stopped,
+and so is every job of the repo's that started no later than it was made,
+known by the repo its kick names or by its folder. Once no review of the
+old one is under way, what the steward kept about it (its settings, hook,
+PRs, reviews and the reviewers' sessions) is forgotten, so the new one gets
+its own clone and its own baseline job. A pass that fails partway, or
+finds a review still under way, does it all again on the next.
 
 A Claude bringing a repo up to the baseline: add only what's missing, keep
 what the repo already does better (a stricter gate, its own license), and
