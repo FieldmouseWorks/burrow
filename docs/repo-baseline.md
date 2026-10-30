@@ -124,7 +124,7 @@ root only.
    finds the cause and opens a PR from `autoland/red-SHA` that reverts the
    merge that broke it, or fixes it, and that PR lands like any other. Nothing
    more while the job works or its PR is open; one more job if the branch is
-   still red after, then the owner. Green again without it (fixed some other
+   still red after, then the pipeline's stuck issue. Green again without it (fixed some other
    way, or a flake), its PR is closed once the job has ended.
 
 Waiting for the owner instead, listed in one issue: what a judge job sent
