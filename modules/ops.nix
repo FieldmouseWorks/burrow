@@ -27,14 +27,15 @@ in
       type = lib.types.bool;
       default = true;
       description = ''
-        Have systemd-oomd watch the whole machine and kill the unit that is
-        drowning it: whichever holds the most swap once swap is 90% full, and
-        whichever reclaims the most once the root, system or any user's slice
-        spends 80% of its time stalled on memory for 30s. The kernel's own OOM
-        killer waits until memory and swap are gone, and with zram it can
-        thrash first for as long as it likes. sshd (socket-activated or not),
-        tailscaled and the switch's own units (burrow.switch) are never
-        picked.
+        Have systemd-oomd kill the unit that is drowning the machine:
+        whichever holds the most swap once swap is 90% full, and whichever
+        reclaims the most once system.slice, a user's app or background
+        slice, or proj's jobs (burrow.proj) spend 80% of their time stalled
+        on memory for 30s. The kernel's own OOM killer waits until memory and
+        swap are gone, and with zram it can thrash first for as long as it
+        likes. sshd (socket-activated or not), tailscaled, the switch's own
+        units (burrow.switch) and Remote Control servers (burrow.remoteControl)
+        are never picked.
       '';
     };
   };
@@ -75,13 +76,24 @@ in
     boot.initrd.systemd.settings.Manager.RuntimeWatchdogSec =
       lib.mkIf (cfg.watchdog && config.boot.initrd.systemd.enable) "30s";
 
+    # Pressure is watched only on slices whose every unit oomd may kill whole,
+    # never on one that holds Remote Control servers: the root, user.slice,
+    # a user's whole manager or its claude.slice. oomd honours a user's unit's
+    # ManagedOOMPreference only for a watch on a cgroup that user owns, so a
+    # watch on the root or user.slice would kill a whole server, every
+    # session on it, and one in the user's manager would kill a bystander for
+    # pressure inside a server. Swap is watched on the root: claude.slice
+    # holds none, so that watch never picks a server either.
     systemd.oomd = lib.mkIf cfg.oomd {
       enable = true;
-      enableRootSlice = true;
       enableSystemSlice = true;
-      enableUserSlices = true;
+      settings.OOM.DefaultMemoryPressureLimit = "80%";
     };
     systemd.slices."-".sliceConfig.ManagedOOMSwap = lib.mkIf cfg.oomd "kill";
+    systemd.user.slices = lib.mkIf cfg.oomd (lib.genAttrs [ "app" "background" ] (_: {
+      overrideStrategy = "asDropin";
+      sliceConfig.ManagedOOMMemoryPressure = "kill";
+    }));
     # The ways in. openssh always has sshd@ (each connection's sshd, with
     # startWhenNeeded) and has sshd only without it; naming a unit it doesn't
     # have would make a stub of it.

@@ -24,6 +24,7 @@ let
   pipelineRepos = lib.escapeShellArg (lib.concatStringsSep " " (lib.attrByPath [ "burrow" "autoland" "pipelineRepos" ] [ ] config ++ leadRepos));
   # What each job waits on, for the stall watchdog, when it's on.
   watchdog = config.burrow.watchdog.enable or false;
+  oomd = (config.burrow.ops.enable or false) && config.burrow.ops.oomd;
   waits = "${cfg.jobsDir}/.waits.json";
 
   proj = pkgs.writeShellApplication {
@@ -231,6 +232,11 @@ in
     # Jobs are units in the user's systemd manager, so they outlive the session
     # that started them.
     users.users.${user}.linger = lib.mkDefault true;
+    # A job that drowns is one systemd-oomd may kill whole (burrow.ops.oomd).
+    systemd.user.slices.claude-jobs = lib.mkIf oomd {
+      overrideStrategy = "asDropin";
+      sliceConfig.ManagedOOMMemoryPressure = "kill";
+    };
 
     # Jobs that ended their turn waiting on GitHub (proj await) get the next
     # one when what they wait on changes, so waiting holds no slot. A PR's or
