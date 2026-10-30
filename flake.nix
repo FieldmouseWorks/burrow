@@ -223,15 +223,21 @@
             [ ! -e late ] || { echo "the command outlived a heavy cancelled at its start"; exit 1; }
           done 2>/dev/null
 
-          # A bounded wait ends on time, and never starts the command after.
-          rm -f ran
-          rm -f held; $h -- sh -c 'touch held; sleep 1.5' & ready $! test -e held
+          # A bounded wait ends on time, and never starts the command after,
+          # once the slot is free. The slot is held until the waits are done,
+          # not for a time: on a loaded runner, starting heavy twice can take
+          # longer than any margin.
+          rm -f ran held done
+          $h -- sh -c 'touch held; while [ ! -e done ]; do sleep 0.1; done' & hp=$!
+          ready $hp test -e held
           s=$(date +%s%N); rc=0; $h --wait 1 -- touch ran 2>err || rc=$?; e=$(date +%s%N)
-          [ "$rc" = 75 ] || { echo "--wait 1 with the slot freed after it: $rc, not 75"; exit 1; }
-          [ ! -e ran ] || { echo "--wait 1 ran the command after its wait"; exit 1; }
+          [ "$rc" = 75 ] || { echo "--wait 1 with the slot held: $rc, not 75"; exit 1; }
           [ $(( (e - s) / 1000000 )) -lt 1800 ] || { echo "--wait 1 took $(( (e - s) / 1000000 ))ms"; exit 1; }
           rc=0; $h --wait 0 -- touch ran 2>err || rc=$?
-          [ "$rc" = 75 ] && [ ! -e ran ] || { echo "--wait 0: $rc"; exit 1; }
+          [ "$rc" = 75 ] || { echo "--wait 0 with the slot held: $rc, not 75"; exit 1; }
+          touch done; wait $hp
+          sleep 0.5
+          [ ! -e ran ] || { echo "a bounded wait ran the command once the slot was free"; exit 1; }
           $h -- touch ran 2>err
           [ -e ran ] || { echo "an unbounded wait didn't get the slot"; exit 1; }
           wait
