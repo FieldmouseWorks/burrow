@@ -116,6 +116,17 @@ for checks, comment in (([*red_ci, artifacts], refused()), ([*CI_GREEN, artifact
     status, _ = run(mkpr(checks=checks, comments=[comment], **lock), 7200)
     assert JOBS == [] and "Dependency update, CI red; renovate-sweep has it" in status, (checks, comment, status)
 
+# A review thread on a green Renovate PR goes to a job, but not while a
+# rebase! request stands: Renovate would redo the branch over the job's fix.
+fresh_pr_state()
+asking = {"branch": "renovate/foo-3", "title": "rebase!Update foo from 1.4 to 1.5", "number": 17}
+run(mkpr(threads=[False], **asking), 0)
+status, _ = run(mkpr(threads=[False], **asking), 7200)
+assert JOBS == [] and "1 open review thread" in status, status
+run(mkpr(threads=[False], **{**asking, "title": "Update foo from 1.4 to 1.5"}), 7200)
+assert JOBS, "a job once the request is gone"
+JOBS.clear()
+
 # A red Dependabot one has no sweep: it goes to a job.
 fresh_pr_state()
 bump = {"branch": "dependabot/npm/foo-1", "title": "Bump foo from 1.4 to 1.5", "number": 13}

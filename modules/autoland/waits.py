@@ -22,6 +22,7 @@ takes it moves one waiting on the owner's word to the owner label."""
 import json
 
 import common as C
+import lock_wait
 from common import CFG, MIN, load, log, repo_cfg, save
 
 # What a PR's wait is, for its deadline and the pass a stall kicks first:
@@ -60,17 +61,20 @@ def read(repo, prs):
     OPEN[repo] = {key_of(repo, pr) for pr in prs}
 
 
-def item(repo, pr, phase, minutes, kick, rev, until=None):
+def item(repo, pr, phase, minutes, kick, rev, until=None, grace=0):
     # .get: what failed may be the PR's own record.
     return {"what": f"{repo}#{pr['number']} {pr.get('title', '')}".strip(), "link": pr.get("url"), "phase": phase,
-            "minutes": minutes, "kick": kick, "rev": rev, "until": until}
+            "minutes": minutes, "kick": kick, "rev": rev, "until": until, "grace": grace}
 
 
-def note(repo, pr, phase, wait, until=None):
+def note(repo, pr, phase, wait, refreshing=False, ripe=None):
     """The PR's wait as its status says it (its last in a pass stands); wait
-    None: nothing to watch. One for a time to come (until: a lock file
-    refresh waiting for its releases to be old enough) is due its minutes
-    after that."""
+    None: nothing to watch. On a Renovate PR renovate-sweep may have a
+    refresh going on (refreshing), no stall goes to a job before the sweep's
+    own would have had the branch: its minutes count from after the sweep's
+    longest recovery from the date a lock file refresh waits for (ripe), or
+    else from after the longest taking back of a request. Past that the job
+    is told what the sweep's would be."""
     if wait is None:
         NOTED.setdefault(repo, {})[key_of(repo, pr)] = None
         return
@@ -78,7 +82,12 @@ def note(repo, pr, phase, wait, until=None):
     kick = None if wait == HOLD else f"renovate-sweep/{repo}" if sweep else f"autoland/{repo}"
     minutes = repo_cfg(repo)["holdStallAfter" if wait == HOLD else "stallAfter"]
     rev = f"{pr['headRefOid']} {pr['baseRefName']}"
-    NOTED.setdefault(repo, {})[key_of(repo, pr)] = item(repo, pr, phase, minutes, kick, rev, until)
+    grace = 0
+    if refreshing and wait != HOLD and CFG["watch"] and CFG["watch"]["renovateSweep"]:
+        run = CFG["watch"]["renovateRun"]
+        grace = lock_wait.recovery(run) if ripe else lock_wait.drain(run)
+        phase += lock_wait.guard(run)
+    NOTED.setdefault(repo, {})[key_of(repo, pr)] = item(repo, pr, phase, minutes, kick, rev, ripe, grace)
 
 
 def overdue(repo, pr, why, said=None):
@@ -141,7 +150,7 @@ def publish(seen, digest, full):
             if key in SAID:
                 phase = f"{phase}: {SAID[key]}"
             items[key] = {"what": it["what"], "link": it["link"], "phase": phase, "since": since,
-                          "due": since if key in FAILING else max(since, it.get("until") or 0) + it["minutes"] * MIN,
+                          "due": since if key in FAILING else max(since, it.get("until") or 0) + it.get("grace", 0) + it["minutes"] * MIN,
                           "kick": it["kick"],
                           "rev": it["rev"]}
     save("watch.json", {"at": C.NOW, "items": items})

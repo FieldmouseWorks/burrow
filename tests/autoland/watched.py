@@ -104,7 +104,33 @@ lock = {"branch": "renovate/cargo-lock-file-maintenance", "title": "Lock file ma
 OPEN["sam/r"].append(pr("sam/r", 9, **lock))
 waiting = run(260)
 assert "old enough until" in waiting["sam/r#9"]["phase"] and waiting["sam/r#9"]["kick"] == "renovate-sweep/sam/r", waiting
-assert waiting["sam/r#9"]["since"] == T + 260 and waiting["sam/r#9"]["due"] == ripe + 120 * MIN, waiting
+# ...and its allowance counts from after all renovate-sweep can take to get it
+# refreshed or hand it to a job itself: every request standing as long as it
+# may, one taken back, and the longest Renovate run that read it. Past that
+# the job the watchdog hands it to is told to take a request back itself.
+recovery = 3 * (6 * 3600 + 3600) + 3600 + 3 * 600 + 7200
+assert waiting["sam/r#9"]["since"] == T + 260 and waiting["sam/r#9"]["due"] == ripe + recovery + 120 * MIN, waiting
+assert "if its title starts with rebase!" in waiting["sam/r#9"]["phase"] and "for 120 minutes after" in waiting["sam/r#9"]["phase"], waiting
+# A date long gone counts the same from when it began waiting, and the wait
+# is the same one whether or not a request stands: asks don't move its deadline.
+past = {**lock, "comments": [said("### Artifact update problem\n\n```\nlock-age: nothing in the refresh is old enough until "
+                                  f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(T - 3600))}\n```\n")]}
+OPEN["sam/r"][-1] = pr("sam/r", 9, **past)
+gone = run(262)
+assert gone["sam/r#9"]["since"] == T + 262 and gone["sam/r#9"]["due"] == T + 262 + recovery + 120 * MIN, gone
+OPEN["sam/r"][-1] = pr("sam/r", 9, **{**past, "title": "rebase!Lock file maintenance (cargo)"})
+asking = run(264)
+assert asking["sam/r#9"]["since"] == T + 262 and asking["sam/r#9"]["due"] == gone["sam/r#9"]["due"], asking
+# Open threads put it down as red CI, which waits for the same date: the sweep
+# hands it over no sooner for them.
+OPEN["sam/r"][-1] = pr("sam/r", 9, **{**past, "threads": [False]})
+threads = run(265)
+assert "CI red" in threads["sam/r#9"]["phase"] and threads["sam/r#9"]["due"] == T + 265 + recovery + 120 * MIN, threads
+# Any other red Renovate PR, whose request (anyone's) the sweep may be taking
+# back: past that, and the longest run that read it, before its allowance.
+OPEN["sam/r"][-1] = pr("sam/r", 9, **{**past, "comments": []})
+red = run(266)
+assert red["sam/r#9"]["due"] == T + 266 + 3600 + 3 * 600 + 7200 + 120 * MIN and "if its title starts with rebase!" in red["sam/r#9"]["phase"], red
 OPEN["sam/r"].pop()
 run(270)
 

@@ -11,7 +11,14 @@ itself while the branch doesn't conflict.
 
 prints when (seconds since the epoch), for renovate-sweep: LOGIN is who
 Renovate comments as, as REST spells it: an App's bot as SLUG[bot], a
-name no person's can be. Nothing when the PR isn't such a refresh."""
+name no person's can be. Nothing when the PR isn't such a refresh.
+
+    lock-wait --limits
+
+prints how far renovate-sweep goes asking for that refresh and taking a
+request back: ASKS STANDING RELEASES RELEASE_GAP. The steward counts the same
+limits into the watchdog's deadline (recovery, drain), so no stall reaches a
+job while the sweep is still at it."""
 
 import calendar
 import json
@@ -23,6 +30,29 @@ ARTIFACTS = "renovate/artifacts"  # the status Renovate fails a refresh's artifa
 PROBLEM = "Artifact update problem"  # the title of Renovate's comment on it
 WAITING = re.compile(r"lock-age: nothing in the refresh is old enough until (\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ)")
 BLOCK = re.compile(r"^```\n(.*?)^```", re.S | re.M)
+REQUEST = "rebase!"  # the title's prefix that has Renovate redo the branch, on its every run
+ASKS, STANDING = 3, 6 * 3600  # requests on a head, and how long each may stand
+RELEASES, RELEASE_GAP = 3, 600  # tries to take one back, and how far apart
+PASS = 3600  # the longest between the sweep's passes (a Renovate run's, hourly)
+
+
+def drain(run):
+    """The longest from renovate-sweep seeing a request to its job being let
+    at the branch: taking it back, then the longest Renovate run (`run`
+    seconds), which may have read it just before."""
+    return PASS + RELEASES * RELEASE_GAP + run
+
+
+def recovery(run):
+    """The longest from the date to the sweep handing the PR to a job, each
+    request standing as long as it may."""
+    return ASKS * (STANDING + PASS) + drain(run)
+
+
+def guard(run):
+    """What a job the watchdog hands the PR to is told, as the sweep's is."""
+    return (f"; if its title starts with {REQUEST}, which has Renovate redo the branch over what you push, take that "
+            f"off the title first, and push nothing to it for {run // 60} minutes after")
 
 
 def when(body):
@@ -51,7 +81,18 @@ def ripe(comments, renovate):
     return when(body) if body else None
 
 
+def refresh(pr, red, names, renovate):
+    """What a Renovate PR's wait counts (waits.note), when the sweep may have
+    a refresh of it going on: it's red, or a request stands."""
+    if not red and not pr["title"].startswith(REQUEST):
+        return {}
+    return {"refreshing": True, "ripe": ripe(pr["comments"]["nodes"], renovate) if red and names == [ARTIFACTS] else None}
+
+
 if __name__ == "__main__":
+    if sys.argv[1] == "--limits":
+        print(ASKS, STANDING, RELEASES, RELEASE_GAP)
+        sys.exit()
     login = sys.argv[1]
     comments = [{"author": c.get("user"), "body": c.get("body")} for page in json.load(sys.stdin) for c in page]
     got = ripe(comments, lambda a: bool(login) and (a or {}).get("login") == login)

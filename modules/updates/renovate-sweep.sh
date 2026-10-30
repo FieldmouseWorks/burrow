@@ -52,6 +52,10 @@ fi
 renovate=${BOT:+${BOT}[bot]}
 renovate=${renovate:-$me}
 
+# How far it goes asking for a lock file refresh and taking a request back
+# (../autoland/lock_wait.py, which the steward's deadline counts them from too).
+read -r asks standing_for releases release_gap < <("$LOCK_WAIT" --limits)
+
 state=$DIR/renovate-sweep
 src=$SRC
 # Each job's token for $SEAL: the repo it's about and the majors it was
@@ -187,7 +191,8 @@ for d in "$src"/*/; do
       # config. Each ask counts, whether GitHub took it, refused it or never
       # answered: the title on the next pass says which. A request still
       # standing six hours on, or three that went without the head or the
-      # time moving, and it's red CI for a job.
+      # time moving, and it's red CI for a job, once a Renovate run that read
+      # the last one is over: Renovate having taken it counts as taking it back.
       if [ "$(jq -c '[.[] | select(.state == "red") | .name]' <<<"$ci")" = '["renovate/artifacts"]' ] &&
         [ -n "$renovate" ] && [ "$seen" != "$sha red" ] && [ "$rel_sha" != "$sha" ]; then
         ripe=$(gh api --paginate --slurp "repos/$repo/issues/$n/comments" 2>/dev/null | "$LOCK_WAIT" "$renovate" || true)
@@ -198,11 +203,14 @@ for d in "$src"/*/; do
           standing=false
           [[ $title != rebase!* ]] || standing=true
           if [ "$now" -lt "$ripe" ] || [ $((now - at)) -lt 3600 ] ||
-            { [ "$standing" = true ] && [ $((now - at)) -lt 21600 ]; }; then
+            { [ "$standing" = true ] && [ $((now - at)) -lt "$standing_for" ]; }; then
             continue
-          elif [ "$standing" = false ] && [ "$tries" -lt 3 ]; then
+          elif [ "$standing" = false ] && [ "$tries" -lt "$asks" ]; then
             echo "$sha refreshed $ripe $((tries + 1)) $now" >"$key"
             gh api -X PATCH "repos/$repo/pulls/$n" -f "title=rebase!$title" >/dev/null 2>&1 || true
+            continue
+          elif [ "$standing" = false ]; then
+            echo "$sha 0 $now" >"$released"
             continue
           fi
         fi
@@ -229,8 +237,8 @@ for d in "$src"/*/; do
       # answered, and the job is handed it to take off itself.
       request=""
       now=$(date +%s)
-      if [[ $title == rebase!* ]] && { [ "$rel_tries" -lt 3 ] || [ $((now - rel_at)) -lt 600 ]; }; then
-        if [ $((now - rel_at)) -ge 600 ]; then
+      if [[ $title == rebase!* ]] && { [ "$rel_tries" -lt "$releases" ] || [ $((now - rel_at)) -lt "$release_gap" ]; }; then
+        if [ $((now - rel_at)) -ge "$release_gap" ]; then
           echo "$sha $((rel_tries + 1)) $now" >"$released"
           gh api -X PATCH "repos/$repo/pulls/$n" -f "title=${title#rebase!}" >/dev/null 2>&1 || true
         fi

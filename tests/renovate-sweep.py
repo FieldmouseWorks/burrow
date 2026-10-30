@@ -446,6 +446,13 @@ for _ in range(2):
     calls, _ = sweep(*refresh(20, past), state=kept)
     assert calls == [] and asked() == rebase(20), (calls, asked())
 since(kept, 20, 7200)
+# ...once a Renovate run that took the last one may be over.
+calls, _ = sweep(*refresh(20, past), state=kept)
+assert calls == [] and asked() == [], (calls, asked())
+released(kept, 20, 7100)
+calls, _ = sweep(*refresh(20, past), state=kept)
+assert calls == [] and asked() == [], (calls, asked())
+released(kept, 20, 7300)
 calls, _ = sweep(*refresh(20, past), state=kept)
 assert len(calls) == 1 and "#20 " in calls[0][-1] and asked() == [], (calls, asked())
 calls, _ = sweep(*refresh(20, past), state=kept)
@@ -481,6 +488,9 @@ for _ in range(3):
     calls, _ = sweep(*refresh(24, past), state=kept)
     assert calls == [] and asked() == [], (calls, asked())
     since(kept, 24, 7200)
+calls, _ = sweep(*refresh(24, past), state=kept)
+assert calls == [] and asked() == [], (calls, asked())
+released(kept, 24, 7300)
 calls, _ = sweep(*refresh(24, past), state=kept)
 assert len(calls) == 1 and "#24 " in calls[0][-1] and asked() == [], (calls, asked())
 # One that went through though GitHub didn't say so stands, as any request.
