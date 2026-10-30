@@ -16,19 +16,38 @@
 # while its project holds PER_PROJECT slots (pipeline turns not counted), and
 # lets those behind it by meanwhile, so one project's jobs never fill the
 # machine.
+#
+# Everyone else's turns hold OTHER_SLOTS slots whenever they have one that may
+# start: until they do, a pipeline turn, lead or not, leaves them that many
+# free ordinary slots and takes what's left, so a backlog of pipeline work
+# slows the others and never stops them.
 pick() {
-  local kind a b c n w pass free=() inline=()
+  local kind a b c n w pass ordinary=0 others=0 owed=0 spare free=() inline=()
   local -A held=()
   while IFS=$'\t' read -r kind a b c; do
     case $kind in
       slot)
-        if [ "$b" = free ]; then free+=("$a")
-        elif [ "$b" != pipeline ] && [ "$b" != lead ]; then held[p$c]=$((${held[p$c]:-0} + 1))
+        if [ "$b" = free ]; then
+          free+=("$a")
+          [ "$a" -gt $((MAX_JOBS - PIPELINE_SLOTS)) ] || ordinary=$((ordinary + 1))
+        elif [ "$b" != pipeline ] && [ "$b" != lead ]; then
+          held[p$c]=$((${held[p$c]:-0} + 1))
+          others=$((others + 1))
         fi
         ;;
       wait) inline+=("$a"$'\t'"$b"$'\t'"$c") ;;
     esac
   done
+  if [ "$others" -lt "$OTHER_SLOTS" ]; then
+    for w in "${inline[@]}"; do
+      IFS=$'\t' read -r a b c <<<"$w"
+      case $b in lead | pipeline) continue ;; esac
+      [ "${held[p$c]:-0}" -lt "$PER_PROJECT" ] || continue
+      owed=$((OTHER_SLOTS - others))
+      break
+    done
+  fi
+  spare=$((ordinary - owed))
   for pass in lead rest; do
     for w in "${inline[@]}"; do
       IFS=$'\t' read -r a b c <<<"$w"
@@ -40,10 +59,13 @@ pick() {
         *) [ "${held[p$c]:-0}" -lt "$PER_PROJECT" ] || continue ;;
       esac
       for n in "${free[@]}"; do
-        if [ "$b" = lead ] || [ "$b" = pipeline ] || [ "$n" -le $((MAX_JOBS - PIPELINE_SLOTS)) ]; then
-          printf '%s\t%s\n' "$a" "$n"
-          return
+        if [ "$b" = lead ] || [ "$b" = pipeline ]; then
+          [ "$n" -gt $((MAX_JOBS - PIPELINE_SLOTS)) ] || [ "$spare" -gt 0 ] || continue
+        else
+          [ "$n" -le $((MAX_JOBS - PIPELINE_SLOTS)) ] || continue
         fi
+        printf '%s\t%s\n' "$a" "$n"
+        return
       done
     done
   done

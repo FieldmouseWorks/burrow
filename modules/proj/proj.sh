@@ -51,7 +51,8 @@
 # first, and a turn that has waited MAX_WAIT seconds counts as --first itself,
 # so a stream of them can't starve it. PIPELINE_SLOTS of the slots are for pipeline jobs in the
 # pipeline's own repos alone, and no project's other jobs hold more than
-# PER_PROJECT at once (pick.sh). A waiting turn is just this shell. Every turn
+# PER_PROJECT at once, and a waiting one of theirs is owed OTHER_SLOTS ahead of
+# the pipeline's (pick.sh). A waiting turn is just this shell. Every turn
 # runs in SLICE, which the machine caps, so jobs can't take memory from
 # anything else, and gets TIMEOUT (or the job's own --timeout) before it's
 # stopped, so a stuck one can't hold its slot for good. A job's --idle stops a
