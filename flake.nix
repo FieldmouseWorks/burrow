@@ -251,6 +251,12 @@
           bash ${./tests/proj-pick.sh} ${./modules/proj/pick.sh}
           touch $out
         '';
+        # What a look at the line costs, and who gets to skip one.
+        proj-line = pkgs.runCommand "proj-line-check" { nativeBuildInputs = [ pkgs.shellcheck pkgs.git pkgs.strace pkgs.util-linux ]; } ''
+          shellcheck -s bash ${./modules/proj/line.sh} ${./tests/proj-line.sh}
+          bash ${./tests/proj-line.sh} ${./modules/proj/pick.sh} ${./modules/proj/line.sh}
+          touch $out
+        '';
         # What each job waits on, as the stall watchdog hears it.
         proj-waits = pkgs.runCommand "proj-waits-check" { nativeBuildInputs = [ pkgs.shellcheck pkgs.jq pkgs.util-linux ]; } ''
           shellcheck -s bash ${./modules/proj/waits.sh} ${./tests/proj-waits.sh}

@@ -29,6 +29,7 @@
 #                               one of burrow.github.apps, never as the user
 #   proj reply [--first] ID "message"  continue that job's conversation
 #   proj status                 recent jobs and their state
+#   proj status --line          every turn in line, next first, and its wait
 #   proj log ID [--turn N]      the job's latest answer, or turn N's (--raw for
 #                               the full stream); fails when there's none
 #   proj state ID               queued, running, done, error or failed
@@ -387,92 +388,6 @@ spare() {
   echo $(((kb + arc) / 1024))
 }
 
-# Wait in line for a slot, then hold it on fd $slot until this shell ends.
-# The line is JOBS/.queue: one file per waiting turn, named so that sorting
-# puts pipeline ones ahead, then --first ones, then the oldest, holding the
-# waiting shell's pid. A slot is a lock on JOBS/.slots/N, and N.who says
-# whose (class and project), so a turn that's killed frees its slot (and its
-# place in line) by itself. pick (pick.sh) says who goes next. The turn is
-# first or normal, as it was started; its job's class (place, in pick.sh)
-# is asked again every pass, and its place in line, its admission and its
-# slot's N.who all go by that one answer.
-take_slot() {
-  local id=$1 n=$2 class=$3 me since seen got f fid pid i fd lk busy new LC_ALL=C
-  mkdir -p "$jobs/.queue" "$jobs/.slots"
-  since=$(date +%s)
-  case $class in first) me=1 ;; *) me=2 ;; esac
-  me="$jobs/.queue/$me-$(date +%s%N)-$id"
-  trap 'rm -f "$me" "${me%/*}/.${me##*/}.new"' EXIT
-  trap 'exit 143' TERM INT
-  while :; do
-    # Waited long enough: among the --first ones now, by when it came.
-    if [[ ${me##*/} == 2-* ]] && [ $(($(date +%s) - since)) -ge "$MAX_WAIT" ]; then
-      mv -f "$me" "${me%/*}/1-${me##*/2-}" 2>/dev/null || true
-      me="${me%/*}/1-${me##*/2-}"
-    fi
-    # Where it stands now, and in the journal if that changed while it waits.
-    IFS=$'\t' read -r class new < <(place "${me##*/}" "$jobs/$id")
-    if [ "$new" != "${me##*/}" ]; then
-      if mv -f "$me" "${me%/*}/$new" 2>/dev/null; then echo "proj: it goes as $class now" >&2; fi
-      me="${me%/*}/$new"
-    fi
-    # Published whole (a dot file, which the line skips, then renamed), so a
-    # waiter clearing out dead places never sees it without its pid. Put
-    # back if it went anyway.
-    if [ ! -e "$me" ]; then
-      echo "$$" >"${me%/*}/.${me##*/}.new"
-      mv -f "${me%/*}/.${me##*/}.new" "$me"
-    fi
-    # One waiter looks at a time, and a slot is taken only under this lock,
-    # so one it sees free stays free until it's done.
-    exec {lk}>"$jobs/.slots/.lock"
-    flock "$lk"
-    seen='' busy=''
-    for i in $(seq 1 "$MAX_JOBS"); do
-      exec {fd}>"$jobs/.slots/$i"
-      if flock -n "$fd"; then seen+="slot"$'\t'"$i"$'\t'"free"$'\n'
-      else
-        busy=1
-        seen+="slot"$'\t'"$i"$'\t'"$(cat "$jobs/.slots/$i.who" 2>/dev/null || printf -- '-\t-')"$'\n'
-      fi
-      exec {fd}>&-
-    done
-    # The line, once the places of shells that are gone are cleared.
-    for f in "$jobs/.queue"/*; do
-      [ -e "$f" ] || continue
-      fid=${f##*/}; fid=${fid#*-}; fid=${fid#*-}
-      pid=$(cat "$f" 2>/dev/null) || continue
-      if [ "$f" = "$me" ]; then
-        seen+="wait"$'\t'"$f"$'\t'"$class"
-        seen+=$'\t'"$(cat "$jobs/$id/project" 2>/dev/null)"$'\n'
-      elif [ -n "$pid" ] && tr '\0' ' ' 2>/dev/null <"/proc/$pid/cmdline" | grep -qF -- " _exec $fid "; then
-        seen+="wait"$'\t'"$f"$'\t'"$(place "${f##*/}" "$jobs/$fid" | cut -f1)"
-        seen+=$'\t'"$(cat "$jobs/$fid/project" 2>/dev/null)"$'\n'
-      else
-        rm -f "$f"
-      fi
-    done
-    got=$(printf '%s' "$seen" | pick)
-    # Short of memory matters only while another job runs: with nothing
-    # running, waiting frees nothing.
-    if [ "${got%$'\t'*}" = "$me" ] && { [ -z "$busy" ] || [ "$(spare)" -ge "$MIN_FREE" ]; }; then
-      i=${got##*$'\t'}
-      exec {slot}>"$jobs/.slots/$i"
-      if flock -n "$slot"; then
-        printf '%s\t%s\n' "$class" "$(cat "$jobs/$id/project")" >"$jobs/.slots/$i.who"
-        exec {lk}>&-
-        rm -f "$me"
-        trap - EXIT TERM INT
-        echo "$i" >"$jobs/$id/$n.slot"
-        return
-      fi
-      exec {slot}>&-
-    fi
-    exec {lk}>&-
-    sleep 2
-  done
-}
-
 # OWNER/REPO N from a PR or issue URL, or OWNER/REPO#N.
 target() {
   local t=${1#https://github.com/}
@@ -600,6 +515,7 @@ case "${1:-status}" in
     ;;
   status)
     mkdir -p "$jobs"
+    if [ "${2:-}" = --line ]; then in_line; exit 0; fi
     find "$jobs" -mindepth 1 -maxdepth 1 -type d -not -name '.*' -printf '%T@ %f\n' | sort -rn | head -n "${2:-15}" |
       while read -r _ id; do
         st=$(state "$id")

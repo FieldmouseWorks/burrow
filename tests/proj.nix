@@ -513,6 +513,11 @@ pkgs.testers.runNixOSTest {
         for j in (a, b):
             machine.wait_until_succeeds(f"su - dev -c 'proj state {j}' | grep -x running", timeout=120)
         c = proj('run --first web "sleep 1"')
+        q = proj('run web "sleep 1"')
+        # The whole line, next first: --first ahead of plain.
+        line = proj("status --line").splitlines()
+        assert [(l.split()[0], l.split()[1]) for l in line] == [(c, "first"), (q, "normal")], line
+        proj(f"stop {q}")
         p = proj('run --pipeline web "sleep 1"')
         machine.wait_until_succeeds(f"su - dev -c 'proj state {p}' | grep -x done", timeout=120)
         proj(f'reply {p} "sleep 1"')
