@@ -1,0 +1,53 @@
+{
+  "conary": "note v1",
+  "change": "7az959vwh4dzz8nh09a6bwx54d",
+  "repo": {
+    "owner": "fieldmouseworks",
+    "name": "burrow"
+  },
+  "pr": 246,
+  "url": "https://github.com/fieldmouseworks/burrow/pull/246",
+  "summary": "fix(deps): update dependency @openai/codex to v0.165.0",
+  "task": null,
+  "author": {
+    "kind": "bot",
+    "login": "fieldmouseworks-workers[bot]",
+    "session": null
+  },
+  "landing": {
+    "revision": "ea40257c64ecfa187bedea4a9f6e613b772e390108715b932a8cfa2978823e80",
+    "before": "d52c8a9e3c78d4dc2ab43835df0b007637e8be8a",
+    "after": "9d1f376621f9d07dbb1896557a97616032a74e6c",
+    "by": {
+      "kind": "status",
+      "login": "fieldmouseworks-steward[bot]"
+    },
+    "at": 1793398016927
+  },
+  "evidence": [
+    {
+      "kind": "ci",
+      "check": "check / commits",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/41125403375/job/124302493690"
+    },
+    {
+      "kind": "ci",
+      "check": "renovate/stability-days",
+      "result": "pass",
+      "source": "https://docs.renovatebot.com/key-concepts/minimum-release-age/"
+    },
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/41125403375/job/124302494271"
+    },
+    {
+      "kind": "ci",
+      "check": "agents",
+      "result": "pass",
+      "source": "status agents"
+    }
+  ]
+}
