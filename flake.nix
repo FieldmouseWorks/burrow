@@ -413,6 +413,11 @@
           grep -q ' http://127.0.0.1:[0-9]*/kick/autoland$' kicks || { echo "kicked: $(cat kicks)"; exit 1; }
           touch $out
         '';
+        # The machine's git clones with a token-only URL, as Renovate does.
+        git-token-url = pkgs.runCommand "git-token-url-check" { nativeBuildInputs = [ pkgs.python3 ]; } ''
+          python3 -I ${./tests/git-token-url.py} ${self.nixosConfigurations.example.config.programs.git.package}/bin/git "$TMPDIR"
+          touch $out
+        '';
         # Which repos a run of Renovate on one repo covers: the ones its
         # autodiscoverFilter takes, as Renovate's own code has it.
         renovate-covers = pkgs.runCommand "renovate-covers-check" { } ''

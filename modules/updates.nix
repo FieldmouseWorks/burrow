@@ -101,8 +101,8 @@ let
   healthTool = script health ./updates/health.sh (with pkgs; [ coreutils gnugrep gnused gawk systemd ]);
   # Its own functions first (they run only once update.sh has defined what they call).
   updateTool = script update [ ./updates/dispatch.sh ./updates/propose.sh ./updates/update.sh ] (
-    (with pkgs; [ coreutils git jq curl util-linux systemd gnugrep gnused gawk vulnix config.nix.package ])
-    ++ [ healthTool tools.switch tools.confirm machineGh ] ++ calls ++ lib.optional (tools ? boot) tools.boot
+    (with pkgs; [ coreutils jq curl util-linux systemd gnugrep gnused gawk vulnix config.nix.package ])
+    ++ [ config.programs.git.package healthTool tools.switch tools.confirm machineGh ] ++ calls ++ lib.optional (tools ? boot) tools.boot
   );
   advisoryWatch = script "advisory-watch" ./updates/advisory-watch.sh (
     (with pkgs; [ coreutils curl jq gnugrep gnused gawk util-linux vulnix osv-scanner config.nix.package ]) ++ calls
@@ -167,7 +167,7 @@ let
     [ pkgs.renovate machineGh pkgs.util-linux pkgs.coreutils ] ++ lib.optional (machineApp != null) tools.gh-token
   );
   renovateSweep = script "renovate-sweep" ./updates/renovate-sweep.sh (
-    (with pkgs; [ coreutils findutils git jq gnused ]) ++ [ machineGh ] ++ calls
+    (with pkgs; [ coreutils findutils jq gnused ]) ++ [ config.programs.git.package machineGh ] ++ calls
   );
 
   # The ZFS pools the machine needs imported, as NixOS's zfs module decides
@@ -779,7 +779,7 @@ in
           LOG_LEVEL = "info";
         };
         # Renovate's own git, and the toolchains it refreshes lockfiles with.
-        path = [ pkgs.git pkgs.openssh config.nix.package ] ++ rcfg.path;
+        path = [ config.programs.git.package pkgs.openssh config.nix.package ] ++ rcfg.path;
         serviceConfig = {
           Type = "oneshot";
           User = user;
