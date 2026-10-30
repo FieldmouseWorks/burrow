@@ -1,0 +1,106 @@
+# The house rules' Rust by default, as a check every repo runs on its PRs: a
+# PR that adds Python, or grows the Python it already has by more than a fix
+# does, fails unless its body says why it isn't Rust, on a line starting
+# `Why not Rust:`. It reads the body when it runs, so a caller runs it on
+# pull_request's `edited` too, and fixing the body runs it again. That's why
+# it's a workflow of its own rather than a job in flake-check.yml: an edited
+# body would rerun the whole gate.
+#
+# Called from a repo's own workflow with `uses:`, whose job grants
+# `contents: read` and `pull-requests: read`.
+name: rust-first-check
+on:
+  workflow_call:
+    inputs:
+      runner:
+        description: The runner label to run on, such as a self-hosted runner's.
+        type: string
+        default: ubuntu-latest
+      growth:
+        description: >-
+          How many lines a PR may add to the Python files it already has, net
+          of the ones it takes out of any, before it needs the line: enough
+          for a fix, not for a feature.
+        type: number
+        default: 50
+jobs:
+  python:
+    if: github.event_name == 'pull_request'
+    runs-on: ${{ inputs.runner }}
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - id: python
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NUMBER: ${{ github.event.pull_request.number }}
+          GROWTH: ${{ inputs.growth }}
+        run: |
+          # The PR as it is now, not as the event saw it: a body edited since
+          # counts. Its files, every page, with what each adds and takes out
+          # (the one field that can be empty last: read splits on runs of tabs).
+          pr="repos/$GITHUB_REPOSITORY/pulls/$NUMBER"
+          gh api "$pr" > "$RUNNER_TEMP/pr.json"
+          head=$(jq -r .head.sha "$RUNNER_TEMP/pr.json")
+          base=$(jq -r .base.sha "$RUNNER_TEMP/pr.json")
+          gh api --paginate "$pr/files?per_page=100" \
+            --jq '.[] | [.status, .additions, .deletions, .filename, (.previous_filename // "")] | @tsv' \
+            > "$RUNNER_TEMP/files.tsv"
+
+          # Whether a path is Python: by its extension, or with none, by a
+          # python shebang on its first line at a commit (the head, or the
+          # base for what the PR takes away).
+          is_python() {
+            local name=${1##*/}
+            case $name in
+              *.py | *.pyi) return 0 ;;
+              *.*) return 1 ;;
+            esac
+            local path
+            path=$(jq -rn --arg p "$1" '$p | split("/") | map(@uri) | join("/")')
+            # Called as a condition, where -e is off: GitHub not answering
+            # ends the run here rather than reading as "not Python".
+            gh api -H 'Accept: application/vnd.github.raw' "repos/$GITHUB_REPOSITORY/contents/$path?ref=$2" \
+              < /dev/null > "$RUNNER_TEMP/first" || exit 1
+            head -n 1 "$RUNNER_TEMP/first" | grep -qE '^#!.*python'
+          }
+
+          # New Python: a file added as Python, or renamed to Python from
+          # something else. Growth: lines added to the rest of the Python,
+          # less every line taken out of it, deleted files included. Paths
+          # are printed after a word of their own, so none can be read as a
+          # workflow command.
+          new=0 growth=0
+          while IFS=$'\t' read -r status added removed file previous; do
+            case $status in
+              removed)
+                if is_python "$file" "$base"; then growth=$((growth - removed)); fi
+                continue
+                ;;
+            esac
+            is_python "$file" "$head" || continue
+            if [ "$status" = added ] || [ "$status" = copied ] \
+                || { [ "$status" = renamed ] && ! is_python "$previous" "$base"; }; then
+              new=$((new + 1))
+              echo "new Python: $file"
+            else
+              growth=$((growth + added - removed))
+            fi
+          done < "$RUNNER_TEMP/files.tsv"
+          echo "lines added to the Python it already had, net: $growth (more than $GROWTH needs a reason)"
+
+          if [ "$new" -eq 0 ] && [ "$growth" -le "$GROWTH" ]; then
+            echo "no new Python to say why about"
+            exit 0
+          fi
+          # The line, in any case, bold or in a list, with a reason after it.
+          # The body is only searched, never printed.
+          body=$(jq -r '.body // ""' "$RUNNER_TEMP/pr.json" | tr -d '\r')
+          if grep -qiE '^[[:space:]>*_-]*why not rust[*_]*:[*_]*[[:space:]]*[^[:space:]*_]' <<<"$body"; then
+            echo "the body says why it isn't Rust"
+            exit 0
+          fi
+          echo "::error title=Why not Rust?::This PR adds $new Python file(s) and $growth net line(s) to the Python it had, but its body doesn't say why it isn't Rust. The house rules want new code in Rust unless there's a reason: add a line to the PR body starting 'Why not Rust:' with it (a throwaway script, a tool still being tuned, ported once it settles). Editing the body runs this again."
+          exit 1

@@ -1,0 +1,16 @@
+# The house rules' Rust by default: a PR that adds Python says why it isn't
+# Rust, through burrow's shared check.
+name: rust-first
+on:
+  pull_request:
+    # edited too: the check reads the PR's body, so fixing the body runs it
+    # again.
+    types: [opened, edited, reopened, synchronize]
+jobs:
+  rust-first:
+    uses: FieldmouseWorks/burrow/.github/workflows/rust-first-check.yml@main
+    permissions:
+      contents: read
+      pull-requests: read
+    # On a self-hosted NixOS runner (a private repo out of hosted minutes):
+    # with: { runner: remi }

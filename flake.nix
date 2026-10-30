@@ -679,6 +679,16 @@
           python3 -I ${./tests/pr-base.py} ${./.github/workflows/flake-check.yml}
           touch $out
         '';
+        # The shared rust-first check (rust-first-check.yml), its own script
+        # with a stand-in for gh: a PR that adds Python, or grows it past what
+        # a fix adds, fails without a "Why not Rust:" line in its body; and
+        # its callers, burrow's and the template's, run it again when the body
+        # is edited.
+        rust-first = pkgs.runCommand "rust-first-check" { nativeBuildInputs = [ (pkgs.python3.withPackages (p: [ p.pyyaml ])) pkgs.jq ]; } ''
+          python3 -I ${./tests/rust-first.py} ${./.github/workflows/rust-first-check.yml} \
+            ${./.github/workflows/rust-first.yml} ${./templates/project/.github/workflows/rust-first.yml}
+          touch $out
+        '';
         # Stale Remote Control servers catch up once idle, with a stand-in for Claude.
         remote-control = import ./tests/remote-control.nix { inherit self pkgs; };
         # A session past its server's memory cap dies alone, with a stand-in for Claude.
