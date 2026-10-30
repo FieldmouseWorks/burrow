@@ -770,6 +770,12 @@ subprocess.run(["git", "-C", f"{src}/r", "worktree", "add", "-q", f"{src}/a-tree
 S.CFG["projectsDir"] = src
 assert C.project_dir("sam/r") == "r", C.project_dir("sam/r")
 assert C.project_dir("sam/q") == "q" and C.project_dir("sam/none") is None
+# A hidden folder counts when it's named for its repo, and only then.
+for d, origin in ((".github", "sam/.github"), (".mirror", "sam/mirrored")):
+    subprocess.run(["git", "init", "-q", f"{src}/{d}"], check=True)
+    subprocess.run(["git", "-C", f"{src}/{d}", "remote", "add", "origin", f"https://github.com/{origin}.git"], check=True)
+assert C.project_dir("sam/.github") == ".github", C.project_dir("sam/.github")
+assert C.project_dir("sam/mirrored") is None, C.project_dir("sam/mirrored")
 S.CFG["projectsDir"] = f"{tmp}/none"
 
 # `status` (a dry run) reads the seal the real passes' judges use, and makes

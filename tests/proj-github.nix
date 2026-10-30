@@ -429,4 +429,17 @@
       prompt = machine.succeed(f"cat /data/dev/jobs/{e}/prompt.3")
       assert "o/r#5: not something proj can watch" in prompt, prompt
       machine.wait_until_succeeds(f"su - dev -c 'proj state {e}' | grep -x done", timeout=120)
+
+  with subtest("the inbox takes a hidden clone named for its repo, and no other hidden clone"):
+      for d, repo, n in ((".github", ".github", 8), (".mirror", "m", 9)):
+          machine.succeed(f"install -d -o dev -g dev /data/dev/src/{d}")
+          machine.succeed(f"su - dev -c 'git init -q /data/dev/src/{d} && git -C /data/dev/src/{d} remote add origin https://github.com/o/{repo}'")
+          issue = {"number": n, "user": {"login": "sam"}, "html_url": f"https://github.com/o/{repo}/issues/{n}",
+                   "title": "t", "body": "sleep 1", "state": "open", "labels": [{"name": "claude"}]}
+          github(f"repos/o/{repo}/issues", json.dumps([issue]))
+          github(f"repos/o/{repo}/issues/{n}/comments", "[]")
+      machine.succeed("su - dev -c 'proj-inbox o/.github'")
+      machine.succeed("su - dev -c 'proj-inbox o/m'")
+      looked = machine.succeed("su - dev -c 'proj-inbox status'")
+      assert "o/.github#8" in looked and "o/m#9" not in looked, looked
 ''
