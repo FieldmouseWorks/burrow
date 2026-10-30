@@ -48,7 +48,13 @@ let
     text = lib.concatStrings (lib.mapAttrsToList (n: v: "${n}=${lib.escapeShellArg v}\n") vars)
       + builtins.readFile ./rust-cache/rustc-wrapper.sh;
   };
-  exe = lib.getExe wrapper;
+  # What RUSTC_WRAPPER names: a path each switch points at that system's
+  # wrapper. A process keeps the environment it started with, and a CI runner
+  # or a Remote Control session outlives many switches, so a store path would
+  # leave it on the wrapper it started with. It also keeps system.conf the
+  # same from one wrapper to the next, so a switch doesn't re-execute systemd
+  # for it.
+  exe = "/etc/rust-cache/rustc-wrapper";
 
   users = lib.unique ([ config.burrow.user ] ++ cfg.users);
 in
@@ -99,6 +105,7 @@ in
     # each user's systemd manager (and so proj's jobs and the Remote Control
     # sessions), and the system manager, for its units (the CI runners) and
     # the ones systemd-run starts alike.
+    environment.etc."rust-cache/rustc-wrapper".source = lib.getExe wrapper;
     environment.sessionVariables.RUSTC_WRAPPER = exe;
     environment.etc."environment.d/60-rust-cache.conf".text = "RUSTC_WRAPPER=${exe}\n";
     systemd.settings.Manager.DefaultEnvironment = [ "RUSTC_WRAPPER=${exe}" ];

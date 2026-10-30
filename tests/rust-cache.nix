@@ -18,7 +18,9 @@
 #   builds sccache won't take, the user's own SCCACHE_ settings, the daemon
 #   stopped, and a socket with no daemon behind it, which mustn't start a
 #   stray server either;
-# - nobody else reaches a user's cache, and the daemon listens on no port.
+# - nobody else reaches a user's cache, and the daemon listens on no port;
+# - a runner that outlives a switch builds with the new system's wrapper, and
+#   a new wrapper leaves system.conf as it was.
 #
 #   nix build .#checks.x86_64-linux.rust-cache -L
 { self, pkgs, inputs }:
@@ -120,6 +122,9 @@ pkgs.testers.runNixOSTest {
       };
     };
     virtualisation.memorySize = 2048;
+    # The same with the cache moved, which changes the wrapper and nothing
+    # about the runner's unit, so a switch to it leaves the runner running.
+    specialisation.moved.configuration.burrow.rustCache.dir = "/var/cache/sccache-moved";
   };
 
   testScript = { nodes, ... }: ''
@@ -302,5 +307,22 @@ pkgs.testers.runNixOSTest {
         ok(run(f"cd a && {build}", "other"), "a build with no cache")
         ok(run(f"cd a && rm -rf target && USER=dev {build}", "other"), "a build naming someone else's cache")
         assert hits("dev") == before, "other's build used dev's cache"
+
+    with subtest("a runner that outlives a switch builds with the new system's wrapper"):
+        base = "${nodes.machine.system.build.toplevel}"
+        pid = machine.succeed("systemctl show -P MainPID runner.service").strip()
+        machine.succeed(f"{base}/specialisation/moved/bin/switch-to-configuration test")
+        assert machine.succeed("systemctl show -P MainPID runner.service").strip() == pid, "the switch restarted the runner"
+        machine.wait_until_succeeds("test -S /var/cache/sccache-moved/ci/sccache.sock")
+        current = machine.succeed(
+            "readlink -f \"$(systemctl show-environment | sed -n 's/^RUSTC_WRAPPER=//p')\""
+        ).strip()
+        assert "sccache-moved" in machine.succeed(f"cat {current}"), f"{current} isn't the moved cache's wrapper"
+        status, out = job(f'readlink -f "$RUSTC_WRAPPER" && cd x && rm -rf target && {build}')
+        assert status == 0, out
+        ran = out.splitlines()[0]
+        assert ran == current, f"the runner builds with {ran}, the system with {current}"
+        # Nor does a new wrapper re-execute systemd.
+        machine.succeed(f"cmp {base}/etc/systemd/system.conf {base}/specialisation/moved/etc/systemd/system.conf")
   '';
 }
