@@ -202,6 +202,25 @@ assert not os.path.exists(f"{tmp}/state/watch.json") and waits.escalated() == []
 S.CFG["watch"] = watch
 print("waits off: ok")
 
+# A Renovate PR settled green with automerge on waits on Renovate's next run
+# on the repo to merge it: overdue an hour on, and the watchdog's kick is
+# that run. One without automerge waits as long as any.
+dep = {"branch": "renovate/foo-1.x", "title": "Update foo to v1.5"}
+auto = "### Configuration\n\n📅 **Schedule**: At any time.\n\n🚦 **Automerge**: Enabled.\n"
+manual = auto.replace("Enabled.", "Disabled by config. Please merge this manually once you are satisfied.")
+fresh_pr_state()
+OPEN["sam/r"], OPEN["sam/q"] = [pr("sam/r", 9, body=auto, **dep), pr("sam/r", 10, body=manual, **dep)], []
+items = run(450)
+nine, ten = items["sam/r#9"], items["sam/r#10"]
+assert nine["phase"] == "Dependency update, CI green" and nine["kick"] == "renovate/sam/r", nine
+assert nine["since"] == T + 450 and nine["due"] == T + 450 + 60 * MIN, nine
+assert ten["phase"] == nine["phase"] and ten["due"] == T + 450 + 120 * MIN and ten["kick"] == "autoland/sam/r", ten
+# Without Renovate on this machine there's no run to kick: its pass is.
+S.CFG["watch"]["renovateSweep"] = False
+assert run(460, "sam/r")["sam/r#9"]["kick"] == "autoland/sam/r"
+S.CFG["watch"]["renovateSweep"] = True
+print("waits on Renovate: ok")
+
 (S.R.discover, S.R.settle_repo, S.R.publish, S.open_prs, S.R.unhook_gone, S.R.hook_projects,
  S.R.watch_default, S.R.sweep_branches, S.V.snap_name) = kept_fns
 OPEN.clear()
