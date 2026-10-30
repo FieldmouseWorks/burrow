@@ -352,6 +352,13 @@
           bash ${./tests/update-dispatch.sh} ${./modules/updates/dispatch.sh}
           touch $out
         '';
+        # The update job's push: what went live reaches main, even when main moved
+        # while it ran.
+        update-push = pkgs.runCommand "update-push-check" { nativeBuildInputs = [ pkgs.shellcheck pkgs.git ]; } ''
+          shellcheck -s bash ${./modules/updates/push.sh} ${./tests/update-push.sh}
+          bash ${./tests/update-push.sh} ${./modules/updates/push.sh}
+          touch $out
+        '';
         # burrow-events for real: deliveries, kicks and wake-ups starting a
         # handler's units through polkit.
         events-service = import ./tests/events.nix { inherit self pkgs; };

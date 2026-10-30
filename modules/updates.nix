@@ -90,7 +90,7 @@ let
 
   calls = [ tools.proj tools.notify ];
   healthTool = script health ./updates/health.sh (with pkgs; [ coreutils gnugrep gnused gawk systemd ]);
-  updateTool = script update [ ./updates/dispatch.sh ./updates/update.sh ] (
+  updateTool = script update [ ./updates/dispatch.sh ./updates/push.sh ./updates/update.sh ] (
     (with pkgs; [ coreutils git jq curl util-linux systemd gnugrep gnused gawk vulnix config.nix.package ])
     ++ [ healthTool tools.switch tools.confirm ] ++ calls ++ lib.optional (tools ? boot) tools.boot
   );
