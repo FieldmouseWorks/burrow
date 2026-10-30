@@ -49,10 +49,30 @@ on:
         type: boolean
         default: true
 jobs:
+  # With pr-gate off, whether this PR is one the train lands: its base is the
+  # default branch, compared as git compares refs. An expression's == ignores
+  # case, so `Main` would pass for `main`, and the train wouldn't take it.
+  train:
+    if: ${{ !inputs.pr-gate && github.event_name == 'pull_request' }}
+    runs-on: ${{ inputs.runner }}
+    permissions: {}
+    outputs:
+      lands: ${{ steps.base.outputs.lands }}
+    steps:
+      - id: base
+        shell: bash
+        env:
+          BASE: ${{ github.event.pull_request.base.ref }}
+          DEFAULT: ${{ github.event.repository.default_branch }}
+        run: |
+          if [ "$BASE" = "$DEFAULT" ]; then lands=true; else lands=false; fi
+          echo "a PR to $BASE (the default branch is $DEFAULT): the train lands it: $lands"
+          echo "lands=$lands" >>"$GITHUB_OUTPUT"
   check:
-    if: >-
-      inputs.pr-gate || github.event_name != 'pull_request' ||
-      github.event.pull_request.base.ref != github.event.repository.default_branch
+    # Unless the train lands it: anything but a clear yes, the train job's
+    # failure included, is a no.
+    needs: train
+    if: ${{ !cancelled() && (inputs.pr-gate || github.event_name != 'pull_request' || needs.train.outputs.lands != 'true') }}
     runs-on: ${{ inputs.runner }}
     permissions:
       contents: read
