@@ -1,0 +1,15 @@
+[package]
+name = "burrow-usage-reset"
+description = "Uses the Claude account's banked weekly reset when the week's usage is nearly gone"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+jiff.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

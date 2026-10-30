@@ -9,7 +9,7 @@ publish.workspace = true
 [dependencies]
 burrow-events = { path = "../burrow-events" }
 burrow-watchdog = { path = "../burrow-watchdog" }
-jiff = { version = "0.2.38", default-features = false, features = ["std"] }
+jiff.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 
