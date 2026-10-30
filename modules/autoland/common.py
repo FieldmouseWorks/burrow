@@ -201,6 +201,16 @@ def gh(*args, input=None, check=True):
         return out
 
 
+def said(e):
+    """What GitHub said, from gh()'s error ("gh ARGS: what gh printed"), on
+    one line for a stuck PR's listing, without gh's own "gh: "; any other
+    error's text as it is."""
+    text = str(e)
+    if text.startswith("gh "):
+        text = text.partition(": ")[2].removeprefix("gh: ")
+    return "; ".join(x.strip() for x in text.splitlines() if x.strip())
+
+
 def fresh(path, etag=None):
     """GET path unless it's unchanged since GitHub gave it etag: (its etag,
     its JSON), or None when it's unchanged. GitHub doesn't count a request

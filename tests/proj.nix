@@ -179,9 +179,9 @@ pkgs.testers.runNixOSTest {
     def end(job, n=1):
         return machine.succeed(f"cat /data/dev/jobs/{job}/{n}.end").strip()
 
-    with subtest("the cap is on claude.slice"):
-        out = machine.succeed("systemctl --user -M dev@ show claude.slice -p MemoryHigh -p MemoryMax")
-        assert "MemoryMax=" in out and "infinity" not in out, out
+    with subtest("the cap is on claude.slice, none of it in swap"):
+        out = machine.succeed("systemctl --user -M dev@ show claude.slice -p MemoryHigh -p MemoryMax -p MemorySwapMax")
+        assert "MemoryMax=" in out and "infinity" not in out and "MemorySwapMax=0" in out.splitlines(), out
 
     with subtest("a look with nothing awaited succeeds, and books nothing"):
         proj("_watch")
