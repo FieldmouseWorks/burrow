@@ -143,11 +143,26 @@ pkgs.testers.runNixOSTest {
         # The stand-in's pid: the pane of the unit's tmux.
         return m.succeed(f"pgrep -P {show(m, 'MainPID')['MainPID']}").strip()
 
-    def full(m, cgroup):
-        # The share of the last 10s all of the cgroup's busy tasks spent
-        # stalled on memory: what oomd's pressure watches read.
+    def psi(m, cgroup):
+        # The cgroup's figures for the time all of its busy tasks spent
+        # stalled on memory: {"avg10": "97.28", ..., "total": "47000000"}, the
+        # total in microseconds.
         line = m.succeed(f"grep ^full /sys/fs/cgroup{cgroup}/memory.pressure")
-        return float(line.split()[1].removeprefix("avg10="))
+        return dict(f.split("=") for f in line.split()[1:])
+
+    def full(m, cgroup):
+        # The share of the last 10s spent so: what oomd's pressure watches
+        # read. A thrash dips under the limit now and then, for a reading or
+        # two, which retry() rides out.
+        return float(psi(m, cgroup)["avg10"])
+
+    def stalled(m, cgroup, seconds):
+        # The share of the next `seconds` spent so, dips and all: a reading
+        # from one instant may land on one.
+        start, began = int(psi(m, cgroup)["total"]), time.monotonic()
+        time.sleep(seconds)
+        spent = int(psi(m, cgroup)["total"]) - start
+        return spent / (time.monotonic() - began) / 1e4
 
     def monitored(m, section):
         """The cgroups oomctl lists under one section (tests/oomd.nix)."""
@@ -205,12 +220,11 @@ pkgs.testers.runNixOSTest {
 
     with subtest("guarded, a minute more of the same pressure, and oomd leaves the server be"):
         # The control has been through the same by now: past oomd's 30s.
-        end = time.monotonic() + 60
-        while time.monotonic() < end:
-            assert alive(guarded, sibling[guarded]) and alive(guarded, srv)
-            assert not marked(guarded, cgroup[guarded])
-            time.sleep(5)
-        assert full(guarded, cgroup[guarded]) > 80, full(guarded, cgroup[guarded])
+        share = stalled(guarded, cgroup[guarded], 60)
+        assert share > 80, share
+        assert alive(guarded, sibling[guarded]) and alive(guarded, srv)
+        assert show(guarded, *state) == before[guarded], show(guarded, *state)
+        assert not marked(guarded, cgroup[guarded])
 
     with subtest("guarded, oomd kills the others under the same pressure"):
         for cg in ("/gate.slice/gate-job.service",
@@ -238,8 +252,8 @@ pkgs.testers.runNixOSTest {
         assert not {p for p in pressure if p.startswith(claude[guarded])}, pressure
         control.wait_until_succeeds(f"journalctl -o cat -u systemd-oomd | grep -qF 'Marked {job[control]} for killing'", timeout=120)
         # Past oomd's 30s here too.
-        time.sleep(30)
-        assert full(guarded, job[guarded]) > 80, full(guarded, job[guarded])
+        share = stalled(guarded, job[guarded], 30)
+        assert share > 80, share
         guarded.succeed("systemctl --user -M dev@ is-active proj-thrash.service")
         assert not marked(guarded, job[guarded])
   '';
