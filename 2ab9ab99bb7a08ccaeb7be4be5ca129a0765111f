@@ -1,0 +1,53 @@
+{
+  "conary": "note v1",
+  "change": "7edg16zsqwg5bn4f450jwe7xvz",
+  "repo": {
+    "owner": "fieldmouseworks",
+    "name": "burrow"
+  },
+  "pr": 201,
+  "url": "https://github.com/fieldmouseworks/burrow/pull/201",
+  "summary": "dispatch: restart idle runners, cancel moot push runs, and watch what isn't live yet",
+  "task": "fieldmouseworks/burrow#169",
+  "author": {
+    "kind": "agent",
+    "login": "TusanHomichi",
+    "session": "https://claude.ai/code/session_01BkHcyDpU3TriXC4QWecqzb"
+  },
+  "landing": {
+    "revision": "c44207e9da2168bfd862ddf8a32609ee474b40228a26cbc203cb6d6366cec902",
+    "before": "1d424c57c9da6c8ae720c0ddba2e298e3aa82e86",
+    "after": "2ab9ab99bb7a08ccaeb7be4be5ca129a0765111f",
+    "by": {
+      "kind": "status",
+      "login": "fieldmouseworks-steward[bot]"
+    },
+    "at": 1793368205541
+  },
+  "evidence": [
+    {
+      "kind": "ci",
+      "check": "check / commits",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/41009808208/job/123912888686"
+    },
+    {
+      "kind": "review",
+      "check": "codex",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/201#pullrequestreview-5708519279"
+    },
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/41009808208/job/123912888932"
+    },
+    {
+      "kind": "ci",
+      "check": "agents",
+      "result": "pass",
+      "source": "status agents"
+    }
+  ]
+}
