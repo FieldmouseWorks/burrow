@@ -80,10 +80,19 @@ listed() {
   return 1
 }
 
-# Whether the project at a path is a clone of one of the pipeline's own repos
-# (PIPELINE: their OWNER/NAMEs, any case, as autoland.pipelineRepos and
-# leadRepos have them).
-pipeline_project() { listed "$(github_repo "$1")" "$PIPELINE"; }
+# Whether the project at a path is the pipeline's own: the machine's flake
+# (FLAKE), which deploys everything, wherever its origin is; or a clone of one
+# of the pipeline's own repos (PIPELINE: their OWNER/NAMEs, any case, as
+# autoland.pipelineRepos and leadRepos have them). The flake is the same
+# directory however either path spells it (doubled or trailing slashes, dots,
+# symlinks); a path that's empty or isn't there is never it.
+pipeline_project() {
+  local p f
+  if p=$(realpath -e -- "$1" 2>/dev/null) && f=$(realpath -e -- "$FLAKE" 2>/dev/null) && [ "$p" = "$f" ]; then
+    return 0
+  fi
+  listed "$(github_repo "$1")" "$PIPELINE"
+}
 
 # A job's class, from its dir. One run with --pipeline is a pipeline one,
 # every turn of it, only while its project is one of the pipeline's own;
@@ -96,11 +105,11 @@ pipeline_project() { listed "$(github_repo "$1")" "$PIPELINE"; }
 # list since, is held to it too. Otherwise first or normal, as the turn was
 # started.
 class() {
-  local r
+  local d
   if [ ! -e "$1/pipeline" ]; then echo "${2:-normal}"; return 0; fi
-  r=$(github_repo "$(cat "$1/project" 2>/dev/null)")
-  if listed "$r" "$LEAD"; then echo lead
-  elif listed "$r" "$PIPELINE"; then echo pipeline
+  d=$(cat "$1/project" 2>/dev/null) || d=''
+  if listed "$(github_repo "$d")" "$LEAD"; then echo lead
+  elif pipeline_project "$d"; then echo pipeline
   else echo first
   fi
 }

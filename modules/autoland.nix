@@ -156,6 +156,7 @@ let
       ruleset = true;
       requireCi = true;
       proofJobs = { };
+      proofBuilds = { };
       codex = true;
       skipPaths = [ ];
       train = false;
@@ -191,6 +192,8 @@ let
     reviewTimeout = rv.timeoutMinutes;
     agents = "${agents}/bin";
     sandbox = "${pkgs.bubblewrap}/bin/bwrap";
+    # What a proof would build, and whether it's built (proofs.py).
+    nix = "${config.nix.package}/bin";
     box = {
       store = "${reviewStore}/store-paths";
       caBundle = config.security.pki.caBundle;
@@ -228,10 +231,22 @@ let
     '
     touch $out
   '';
+  # What a pass runs: openssl signs the App's JWT (common.py), and the rest
+  # talk to GitHub, unpack its tarballs and start Claude jobs. gh and git are
+  # the machine's (github.nix): a pass's own calls pass the steward's token
+  # in GH_TOKEN, which they use as given, and the rest (`status`, a
+  # project's clone) go as the caller, its App's socket in a job's env too.
+  stewardTools = [ (config.burrow.tools.gh or pkgs.gh) config.programs.git.package pkgs.gnutar pkgs.coreutils pkgs.openssl config.burrow.tools.proj ];
   # The command, with this machine's config, so `autoland-steward status`
-  # works from any shell, not only in the service.
+  # works from any shell, not only in the service. A pass gets its tools
+  # however it's started: by its units, or by hand or a Claude job
+  # (`autoland-steward kick OWNER/REPO`) with a PATH of its own. Not a
+  # review: its units give the reviewers only what they read with
+  # (reviewTools).
   steward = pkgs.writeShellScriptBin "autoland-steward" ''
     export AUTOLAND_CONFIG=''${AUTOLAND_CONFIG:-${configFile}}
+    steward_path=${lib.makeBinPath stewardTools}
+    [ "''${1:-}" = review ] || export PATH="$steward_path''${PATH:+:$PATH}"
     exec ${pkgs.python3}/bin/python3 -E -s ${stewardSrc}/steward.py "$@"
   '';
 in
@@ -627,8 +642,13 @@ in
         its verdict>"; }`: once a settled PR waits on nothing else, one
         Claude job a head runs them on that commit and records each verdict,
         a failure as a failure), proofSlots (how many of those jobs the repo
-        may have queued or running at once, for proofs that take the whole
-        machine: the rest wait their turn, oldest PR first; unset, no limit), keepBranches
+        may have building at once, for proofs that take the whole machine:
+        the rest wait their turn, oldest PR first; unset, no limit),
+        proofBuilds (the flake attribute each proof check builds, `{
+        "<check>" = "checks.x86_64-linux.<name>"; }`: a proof whose
+        attribute's outputs are all in the store, or being built by a proof
+        already running, skips the line and holds no slot; a job running a
+        check without one holds a slot of its own), keepBranches
         (more branch globs the cleanup never touches in this repo, on top of
         the machine's, for branches a repo keeps as evidence), codex (false:
         Codex leaves this repo alone, and none of it goes to it), skipPaths (more path regexes the reviewers never read in
@@ -720,8 +740,7 @@ in
       restartIfChanged = false;
       after = [ "network-online.target" ];
       wants = [ "network-online.target" ];
-      # openssl signs the App's JWT (common.py).
-      path = [ pkgs.gh pkgs.git pkgs.gnutar pkgs.coreutils pkgs.openssl config.burrow.tools.proj ];
+      path = stewardTools;
       serviceConfig = {
         Type = "oneshot";
         User = user;

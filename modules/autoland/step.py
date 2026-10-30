@@ -85,30 +85,33 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
 
     struck = {}  # the steps that failed this pass, and when each is tried again
     ends = {}  # how this head's job of each kind ended, as proj says (running)
+    looked = {}  # what running said of each job this pass, by its id
 
     def after(t, minutes):
         """A wait that ends `minutes` after t: this repo gets a pass then."""
         C.wake(repo, t + minutes * MIN + 1)  # ends: as each call says
 
-    def strike(kind):
-        """The step (STRIKES) failed: tried again on a pass booked later each
-        time, a minute on, then two, four... up to an hour, so a lasting
-        failure costs little. Its STRIKE_LIMIT-th failure in a row on this
-        head makes the PR's wait overdue whatever its deadline, so the
-        watchdog takes it (a kick, a Claude job, the stuck issue); without
-        the watchdog, it's listed on the stuck issue. Once a pass: two
+    def strike(kind, said=None):
+        """The step (STRIKES) failed, GitHub saying why when it said: tried
+        again on a pass booked later each time, a minute on, then two,
+        four... up to an hour, so a lasting failure costs little. Its
+        STRIKE_LIMIT-th failure in a row on this head makes the PR's wait
+        overdue whatever its deadline, so the watchdog takes it (a kick, a
+        Claude job, the stuck issue); without the watchdog, it's listed on
+        the stuck issue. Either says what GitHub said. Once a pass: two
         reviews it couldn't post are one pass's failure. When it's tried
         again."""
         if kind in struck:
             return struck[kind]
         strikes = st.setdefault("strikes", {})
         strikes[kind] = times = strikes.get(kind, 0) + 1
-        log(f"{tag}: {STRIKES[kind]} ({times} in a row)")
+        log(f"{tag}: {STRIKES[kind]} ({times} in a row){f': {said}' if said else ''}")
         minutes = min(2 ** (times - 1), 60)
         struck[kind] = C.NOW + minutes * MIN
         after(C.NOW, minutes)  # ends: STRIKE_LIMIT in a row make the wait overdue
-        if times >= STRIKE_LIMIT and not waits.overdue(repo, pr, STRIKES[kind]):
-            digest.append(("Failing again and again", line, f"{STRIKES[kind]}, {times} times in a row (journalctl -u autoland)"))
+        if times >= STRIKE_LIMIT and not waits.overdue(repo, pr, STRIKES[kind], said):
+            digest.append(("Failing again and again", line, f"{STRIKES[kind]}, {times} times in a row"
+                           + (f": {said}" if said else " (journalctl -u autoland)")))
         return struck[kind]
 
     def cleared(kind):
@@ -173,9 +176,10 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
         if st.get("updated") == head and C.NOW - st.get("updatedAt", 0) < 10 * MIN:
             after(st["updatedAt"], 10)  # ends: a wait that stays the same is overdue at its deadline
             return True
-        if C.write("api", "-X", "PUT", f"repos/{repo}/pulls/{n}/update-branch",
-                   "-f", f"expected_head_sha={head}", check=False) is None:
-            strike("update")
+        try:
+            C.write("api", "-X", "PUT", f"repos/{repo}/pulls/{n}/update-branch", "-f", f"expected_head_sha={head}")
+        except RuntimeError as e:
+            strike("update", C.said(e))
             return None
         cleared("update")
         log(f"{tag}: behind its base, brought up to date")
@@ -196,10 +200,18 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
         the fix it asks for) while it's still queued or running, or proj
         can't say: "queued", "running" or "unknown"; else "", and how it
         ended goes in ends. One that is keeps its deadline, since each pass
-        replaces the repo's wake-ups."""
+        replaces the repo's wake-ups. One look a job a pass: asked again,
+        it says the same, and a run of broken jobs is counted once
+        (breaking)."""
         jid = st.get(kind + "Job")
         if st.get(kind) != at or not jid:
             return ""
+        if jid not in looked:
+            looked[jid] = look(kind, jid)
+        return looked[jid]
+
+    def look(kind, jid):
+        """running's look at the job: what proj says of it, once."""
         state = C.job_state(jid)
         live = state in (None, "queued", "running")
         if not live:
@@ -210,6 +222,14 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
             return ""
         deadline(kind)
         return state or "unknown"
+
+    def at_work(kind, doing, at=head):
+        """What the status says of this head's job of the kind: queued for
+        its work until proj starts it (a job can wait hours for a slot, and
+        proj kicks a pass when it starts), at it from then on."""
+        if running(kind, at) == "queued":
+            return f"a Claude job is queued for {doing}"
+        return f"a Claude job is {doing}"
 
     def started(kind, task, at=head, broken=False):
         """A Claude job, once per head (at: once per head on its base, for
@@ -296,7 +316,7 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
             if not how:
                 st[kind + "Again"] = at
             st.pop(kind + "Lost", None)
-            settle("pending", f"Settled; a Claude job is {doing} again (the last one {how or f'ended without {answer}'})"[:140])
+            settle("pending", f"Settled; {at_work(kind, doing, at)} again (the last one {how or f'ended without {answer}'})"[:140])
         else:
             settle("pending", f"Settled, but no Claude job could start {doing} again"[:140],
                    "Couldn't start a Claude job")
@@ -363,12 +383,13 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
 
     def merge():
         # Marked landed only once GitHub has done the merge, so a failed one
-        # is tried again (strike).
-        if land(repo, pr, repo_info):
+        # is tried again (strike), saying why.
+        refused = land(repo, pr, repo_info)
+        if refused is None:
             st["landed"] = head
             cleared("merge")
             return
-        strike("merge")
+        strike("merge", refused)
 
     def land_now(desc):
         """Settled: merged, unless what GitHub says of its merge asks for
@@ -486,39 +507,51 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
         elif lost("judged", judged_at):
             again("judged", judge_task(repo, pr, why, ci == "none", seen), "judging it", "a verdict", judged_at)
         elif st.get("judged") == judged_at or started("judged", judge_task(repo, pr, why, ci == "none", seen), judged_at):
-            settle("pending", f"Settled; a Claude job is judging it ({why})")
+            settle("pending", f"Settled; {at_work('judged', 'judging it', judged_at)} ({why})")
         else:
             settle("pending", f"Settled, but no Claude job could judge it ({why})", "Couldn't start a Claude job to judge it")
 
     def prove():
         """Only checks that run on a machine, not in CI, are left: a Claude
         job runs them on this head and records their verdicts, once its
-        repo's proofSlots have room for it (a job started again too)."""
+        repo's proofSlots have room for it (a job started again too), or it
+        has nothing new to build (proofs.py)."""
         doing = "running " + ", ".join(ci_names)
         task = proof_task(repo, pr, ci_names, rc["proofJobs"])
         retry = lost("proved")
+
+        def running_now():
+            skipped = "; nothing new to build, so it skipped the line" if st.get("provedFree") == head else ""
+            settle("pending", f"Settled; {at_work('proved', doing)}{skipped}"[:140])
+
         if not retry and st.get("proved") == head:
-            settle("pending", f"Settled; a Claude job is {doing}"[:140])
+            running_now()
             return
         # One that broke is counted, and its retry booked, whether or not
         # there's room: only the job started in its place waits for a slot.
         if retry and broke("proved"):
             retry_at("proved")
         slots = rc.get("proofSlots")
+        outs = P.outputs(repo, pr, ci_names, st) if slots else None
+        free = False
         # One whose next step is failing the PR (again) needs no slot.
         last = retry and st.get("provedAgain") == head and not broke("proved")
-        if slots and not last and (ahead := P.ahead(repo, n, st, slots)) is not None:
-            P.wait(repo, n)
-            settle("pending", f"Settled; waiting its turn to run {', '.join(ci_names)} ({ahead} ahead)"[:140])
-            return
+        if slots and not last and (ahead := P.ahead(repo, n, st, slots, outs)) is not None:
+            if ahead != P.FREE:
+                P.wait(repo, n)
+                settle("pending", f"Settled; waiting its turn to run {', '.join(ci_names)} ({ahead} ahead)"[:140])
+                return
+            free = True
+        before = st.get("provedJob")
+        st["provedFree"] = head if free else None
         if retry:
             again("proved", task, doing, "its verdict")
         elif started("proved", task):
-            settle("pending", f"Settled; a Claude job is {doing}"[:140])
+            running_now()
         else:
             settle("pending", f"Settled, but no Claude job could run {', '.join(ci_names)}"[:140],
                    "Couldn't start a Claude job to run its checks")
-        P.started(st)
+        P.started(st, outs if st.get("provedJob") != before else None)
 
     if pr["isDraft"]:
         # Work in progress, whoever's it is: nobody reviews it yet, and nobody
@@ -718,7 +751,7 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
                 except C.Unavailable as e:  # GitHub didn't answer: no try spent, the answer's kept
                     log(f"{tag}: couldn't post {V.NAMES[r]}'s review, GitHub's unavailable: {e}")
                     unposted.append(f"{V.NAMES[r]}'s review of {head[:7]}")
-                    strike("post")
+                    strike("post", C.said(e))
                     return
                 except RuntimeError as e:  # GitHub said no: the same answer goes again next pass
                     rs["fails"], rs["failedAt"] = rs.get("fails", 0) + 1, C.NOW
@@ -730,7 +763,7 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
                         unposted.append(x)
                         if rs["fails"] >= 3:
                             digest.append(("A review couldn't be posted", line, f"{x}, {rs['fails']} tries"))
-                        strike("post")
+                        strike("post", C.said(e))
                         return
                     if back["answer"].get("findings"):
                         # Dropped, it's asked again; one out of service by
@@ -788,7 +821,7 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
                 except C.Unavailable as e:  # GitHub didn't answer: no try spent, the answer's kept
                     log(f"{tag}: couldn't post {V.NAMES[r]}'s review of {back['head'][:7]}, GitHub's unavailable: {e}")
                     unposted.append(f"{V.NAMES[r]}'s review of {back['head'][:7]}")
-                    strike("post")
+                    strike("post", C.said(e))
                     continue
                 except RuntimeError as e:  # GitHub said no: the same answer goes again next pass
                     tries[name] = tries.get(name, 0) + 1
@@ -801,7 +834,7 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
                         unposted.append(x)
                         if tries[name] >= 3:
                             digest.append(("A review couldn't be posted", line, f"{x}, {tries[name]} tries"))
-                        strike("post")
+                        strike("post", C.said(e))
                         continue
             elif (back.get("result") == "review" and isinstance(back.get("base"), str) and isinstance(back.get("head"), str)
                   and isinstance(back.get("answer"), dict) and back["answer"].get("findings")):
@@ -867,36 +900,6 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
     # them, so they hold the pass back.
     late += [head[:7] for r in found if r not in live or capped]
 
-    def ask(r):
-        """Queue the reviewer on this head, unless it's already on its way.
-        Its looks at one head are bounded by `rounds`: each one with findings
-        counts as a round."""
-        rs = st["rv"].setdefault(r, {})
-        if rs.get("queued"):
-            return
-        if DRY:
-            log(f"  would: ask {V.NAMES[r]} to review {tag} at {head[:7]}")
-            return
-        if rs.get("fails", 0) >= 3 and C.NOW - rs.get("failedAt", 0) > 3600:
-            rs["fails"] = 0  # an outage passes: three more tries an hour on
-        if rs.get("fails", 0) >= 3:
-            after(rs.get("failedAt", 0), 60)  # ends: listed (stuck, below), three more tries an hour on
-            return
-        if rs.get("fails") and C.NOW - rs["failedAt"] < 5 * MIN:
-            # Tries five minutes apart, however many events come meanwhile:
-            # a hiccup gets time to pass before all three are spent.
-            after(rs["failedAt"], 5)  # ends: three tries, then hourly, and listed
-            return
-        try:
-            V.queue(repo, pr, key, r)
-        except Exception as e:  # the snapshot: GitHub, git, the disk
-            rs["fails"], rs["failedAt"] = rs.get("fails", 0) + 1, C.NOW
-            log(f"{tag}: couldn't queue {V.NAMES[r]} on {head[:7]} ({rs['fails']}): {str(e)[:200]}")
-            after(C.NOW, 5)  # ends: three tries, then hourly, and listed
-            return
-        log(f"{tag}: queued a {V.NAMES[r]} review of {head[:7]}")
-        rs["queued"] = C.NOW
-
     # 1. The reviewers.
     quiet = age >= rc["settleDelay"] * MIN
     looking = [r for r in live if owed(r)] if capped else [r for r in live if said[r][0] == "none"]
@@ -917,7 +920,7 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
         digest.append(("No reviewer can review it", line, why))
     for r in looking:
         if quiet and (not capped or pr["baseRefName"] in lost_on.get(r, {})):
-            ask(r)
+            V.ask(repo, pr, key, r, st["rv"].setdefault(r, {}), after)
         waiting.append(f"{V.NAMES[r]} is reviewing this commit" if st["rv"].get(r, {}).get("queued")
                        else f"Waiting for {V.NAMES[r]}'s review" + ("" if capped else " of this commit"))
     # A look that can't happen, a first one or a second: the owner hears either way.
@@ -954,7 +957,7 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
                 if said[r][0] == "findings":
                     after(said[r][1], rc["settleDelay"])  # ends: the look it asks for, once
                     if C.NOW - said[r][1] > rc["settleDelay"] * MIN:
-                        ask(r)
+                        V.ask(repo, pr, key, r, st["rv"].setdefault(r, {}), after)
             settle("pending", "Findings answered; " + ("; ".join(stuck) if stuck else f"review round {rounds + 1} next"))
         else:
             hand_off(", ".join(what), f"Round {rounds}: " + ", ".join(what), ours=not swept)
