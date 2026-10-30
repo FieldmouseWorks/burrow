@@ -543,7 +543,8 @@ def jobs():
     to `kick`, where the steward's jobs and proj-inbox's name their repo
     (HANDLER/OWNER/REPO, lowercased here). One still being made, with no
     project yet, is left out: it can only start in its folder as that is
-    by then. Raises when the record can't be read."""
+    by then. Raises when any of the record can't be read: none of it is
+    taken for missing but what isn't there."""
     root = CFG["jobsDir"]
     try:
         ids = sorted(os.listdir(root))
@@ -552,7 +553,12 @@ def jobs():
     found = []
     for jid in ids:
         d = os.path.join(root, jid)
-        if jid.startswith(".") or not os.path.isdir(d):  # proj's own (.waits.json, .slots)
+        if jid.startswith("."):  # proj's own (.waits.json, .slots)
+            continue
+        try:
+            if not stat.S_ISDIR(os.stat(d).st_mode):
+                continue
+        except FileNotFoundError:
             continue
         try:
             with open(os.path.join(d, "project")) as f:

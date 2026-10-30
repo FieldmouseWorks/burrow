@@ -29,7 +29,7 @@ def discover():
     for owner in CFG["owners"]:
         with C.acting_for(owner):
             found = C.gh("repo", "list", owner, "--no-archived", "--source", "--limit", "100000",
-                         "--json", "nameWithOwner,isPrivate,defaultBranchRef,createdAt") or []
+                         "--json", "id,nameWithOwner,isPrivate,defaultBranchRef,createdAt") or []
         for r in found:
             name = r["nameWithOwner"]
             if any(fnmatch.fnmatch(name, pat) for pat in CFG["exclude"]):
@@ -37,8 +37,8 @@ def discover():
             # An empty repo has no branch to keep.
             if not r.get("defaultBranchRef"):
                 continue
-            seen.append({"repo": name, "private": r["isPrivate"], "default": r["defaultBranchRef"]["name"],
-                         "created": r["createdAt"]})
+            seen.append({"repo": name, "id": r["id"], "private": r["isPrivate"],
+                         "default": r["defaultBranchRef"]["name"], "created": r["createdAt"]})
     return seen
 
 
@@ -85,6 +85,11 @@ def settle_repo(r, known):
     repo, rc = r["repo"], repo_cfg(r["repo"])
     st = load(f"repo-{repo.replace('/', '_')}.json", {})
     new = repo not in known
+    # GitHub's id for it, by which restart tells a remade repo: kept once
+    # restart has passed it, settings kept before ids were included.
+    if r.get("id") and st.get("id") != r["id"]:
+        st["id"] = r["id"]
+        save(f"repo-{repo.replace('/', '_')}.json", st)
     # Due daily, and straight away for another App (its required checks are
     # pinned to the one it was) or a train turned on or off (the baseline
     # requires the train's status only while it's on).
@@ -166,40 +171,58 @@ def settle_repo(r, known):
 
 
 def restart(r, known, failed):
-    """A repo made under the name of one GitHub deleted (made after the
-    steward last settled one of that name: GitHub hands a deleted repo's
-    name to the next one) starts over as new, before anything acts on it.
-    The deleted one's clones are moved aside and its Claude jobs stopped
-    (they'd push its history to this one), and all the steward kept about
-    it goes: its PRs' state (so a new PR doesn't take on an old one's of
-    the same number), their reviews, snapshots and the reviewers' sessions
-    (so no look at a new PR resumes an old one's), its dashboard's and
-    quarantine's, and the reviewers' clone of it. It's out of known, and of
-    failed, so its baseline job starts straight away.
+    """A repo made under the name of one GitHub deleted (GitHub hands a
+    deleted repo's name to the next one) starts over as new, before
+    anything acts on it. It's another repo when GitHub's id for it isn't
+    the one kept with the settings the steward last set under its name;
+    for settings kept before the steward kept ids, when they were set
+    before it was made, or in the second it was (createdAt has no finer
+    grain). Its name's state is found in any case: GitHub's names don't go
+    by it. Then `reset`."""
+    repo = r["repo"]
+    k = repo.replace("/", "_").lower()
+    for name in sorted(os.listdir(C.STATE)):
+        m = re.fullmatch(r"repo-(.+)\.json", name)
+        if not m or m.group(1).lower() != k:
+            continue
+        st = load(name, {})
+        if "settings" not in st or (st["id"] == r["id"] if "id" in st else st["settings"] >= ts(r["created"]) + 1):
+            continue
+        log(f"{repo}: made at {r['created']}, and isn't the repo of its name the steward settled; starting it over as new")
+        if not DRY:
+            reset(r, m.group(1), known, failed)
 
-    The repo's settings (repo-K.json) are what says it was remade, so they
-    go last: a pass that fails partway leaves them, and the next one does
-    it all again, each step as safe twice as once. Raises when it can't be
+
+def reset(r, k, known, failed):
+    """The deleted repo whose state is under k goes: its clones are moved
+    aside and its Claude jobs stopped (they'd push its history to the new
+    one), and all the steward kept about it goes: its PRs' state (so a new
+    PR doesn't take on an old one's of the same number), their reviews,
+    snapshots and the reviewers' sessions (so no look at a new PR resumes
+    an old one's), its dashboard's and quarantine's, and the reviewers'
+    clone of it. The name is out of known, and of failed, so the new one's
+    baseline job starts straight away.
+
+    Its settings (repo-K.json) are what says it was remade, so they go
+    last: a pass that fails partway leaves them, and the next one does it
+    all again, each step as safe twice as once. Raises when it can't be
     done, and then nothing may act on the repo this pass."""
-    repo, k = r["repo"], r["repo"].replace("/", "_")
-    settled = load(f"repo-{k}.json", {}).get("settings")
-    if settled is None or settled >= ts(r.get("created")):
-        return
-    log(f"{repo}: made at {r['created']}, after the steward last settled a repo of its name; starting it over as new")
-    if DRY:
-        return
-    known.discard(repo)
-    failed.pop(repo, None)
+    repo = r["repo"]
+    for x in [x for x in known if x.lower() == repo.lower()]:
+        known.discard(x)
+    for x in [x for x in failed if x.lower() == repo.lower()]:
+        failed.pop(x)
     save("known.json", sorted(known))
     save("baseline-failed.json", failed)
-    retire_checkouts(repo, ts(r["created"]))
+    retire_checkouts(repo, k, ts(r["created"]))
     left = V.sweep({k}, set())
     if left:
         raise RuntimeError(f"its reviewers aren't done with {', '.join(left)}: a look under way, or a session "
                            "that couldn't be marked gone")
-    mirror = os.path.join(C.STATE, V.GIT, repo.replace("/", "__") + ".git")
-    if os.path.isdir(mirror):
-        shutil.rmtree(mirror)
+    mirrors = os.path.join(C.STATE, V.GIT)
+    for x in sorted(os.listdir(mirrors)) if os.path.isdir(mirrors) else []:
+        if x.lower() == f"{repo.replace('/', '__')}.git".lower():
+            shutil.rmtree(os.path.join(mirrors, x))
     mine = re.compile(rf"(dashboard|flaky)-{re.escape(k)}\.json|pr-{re.escape(k)}-\d+\.json")
     for name in sorted(os.listdir(C.STATE)):
         if mine.fullmatch(name):
@@ -207,7 +230,7 @@ def restart(r, known, failed):
     os.remove(os.path.join(C.STATE, f"repo-{k}.json"))
 
 
-def retire_checkouts(repo, made):
+def retire_checkouts(repo, k, made):
     """Every clone of the repo in projectsDir that wasn't cloned from it
     after it was made (at made), so may be the deleted one's, moved aside
     under a hidden name, which nothing takes for a project: so the repo's
@@ -223,11 +246,14 @@ def retire_checkouts(repo, made):
     and is the repo's, by the repo its kicks name (the steward's jobs and
     proj-inbox's, in whatever folder) or by its folder (a clone of the repo
     that stays, or the folder its next clone takes, unless another repo's
-    clone is there). The moves go first, so none of them can start in an
-    old clone after the jobs are read, and each is kept with the repo's
-    settings (`retired`), so a later try stops their jobs if this one
-    can't. A job proj won't stop raises."""
-    k = repo.replace("/", "_")
+    clone is there). "No later" takes in the second it was made, which a
+    job's start, finer grained, may fall in. A job whose kicks name only
+    other repos is theirs, wherever it ran. The moves go first, so none of
+    them can start in an old clone after the jobs are read, and each is
+    kept with the repo's settings (`retired`: when it was moved, or None
+    while it's being moved, which a later try takes as just then), so a
+    later try stops their jobs if this one can't. A job proj won't stop
+    raises."""
     src = CFG["projectsDir"]
     every = list(C.projects(strict=True))
     mine = {d for d, url in every if url.lower() == repo.lower()}
@@ -245,8 +271,10 @@ def retire_checkouts(repo, made):
     gone = {os.path.join(src, d): at or time.time() for d, at in retired.items()}
     ours = {os.path.join(src, d) for d in mine | ({repo.split("/")[1]} - {d for d, _ in every})}
     for jid, project, started, repos in C.jobs():
+        if repos and repo.lower() not in repos:
+            continue
         if (started <= gone[project] if project in gone else
-                started <= made and (repo.lower() in repos or project in ours)):
+                started < made + 1 and (repo.lower() in repos or project in ours)):
             C.stop_job(jid)
 
 

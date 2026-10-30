@@ -220,9 +220,10 @@ required = [y for y in BODIES[0][1]["rules"] if y["type"] == "required_status_ch
 assert required[0]["parameters"]["required_status_checks"] == [{"context": "review-settled", "integration_id": 7}], required
 C.gh, C.write = gh_stub, write
 
-# A repo made under the name of one GitHub deleted (made after the steward
-# last settled one of that name) starts over as new, before anything acts
-# on it. Every clone of it that wasn't cloned from it on GitHub since it was
+# A repo made under the name of one GitHub deleted (GitHub's id for it
+# isn't the one the steward kept; for state from before it kept ids, made
+# after the steward last settled one of that name, or in that second)
+# starts over as new, before anything acts on it. Every clone of it that wasn't cloned from it on GitHub since it was
 # made is moved aside, where no job takes it, and the new one's own clone
 # stays. The Claude jobs that started in a clone moved aside are stopped,
 # and so is every job of the repo's (by the repo its kick names, or by its
@@ -232,7 +233,7 @@ C.gh, C.write = gh_stub, write
 # at once, so it gets its baseline job.
 src, jobs = f"{tmp}/remade-src", S.CFG["jobsDir"]
 S.CFG["projectsDir"] = src
-remade = {"repo": "sam/r", "private": False, "default": "main", "created": "2026-10-24T06:00:00Z"}
+remade = {"repo": "sam/r", "id": "R_new", "private": False, "default": "main", "created": "2026-10-24T06:00:00Z"}
 MADE = C.ts(remade["created"])
 origin = f"{tmp}/remade-origin"
 subprocess.run(["git", "init", "-q", origin], check=True)
@@ -301,7 +302,7 @@ made("zz")                                                 # one nobody cloned
 clone("r-new", MADE + 60)                                  # the new one's
 clone("x", MADE - 86400, "https://github.com/sam/r-x")     # another repo's
 old = [job("r", MADE - 3600), job("r-2", MADE + 120),      # in clones that go, whenever they started
-       job("r-new", MADE),                                 # in one that stays, from when it was made
+       job("r-new", MADE + 0.5),                           # in one that stays, from the second it was made
        job("renamed", MADE - 3600, kick="autoland/Sam/R")]  # the repo's by its kick, its folder gone
 new = [job("r-new", MADE + 120), job("r-new", MADE + 200, kick="proj-inbox/sam/r"), job("x", MADE - 3600),
        job("y", MADE - 3600, kick="autoland/sam/r-x"), job("r", MADE - 3600, "/elsewhere/r")]
@@ -327,7 +328,7 @@ assert C.project_dir("sam/r") == "r-new", os.listdir(src)
 WROTE.clear()
 assert R.settle_repo(remade, known) is True
 st = C.load("repo-sam_r.json", {})
-assert st["settings"] == C.NOW and st.get("hookId") != 41, st
+assert st["settings"] == C.NOW and st.get("hookId") != 41 and st["id"] == "R_new", st
 assert sorted(x.split()[2] for x in WROTE if x.startswith("label create")) == ["first", "hold", "needs-owner"], WROTE
 assert "api -X PUT repos/sam/r/vulnerability-alerts" in WROTE, WROTE
 # Settled now, it isn't started over again: what's kept about it from here
@@ -336,14 +337,45 @@ C.save("pr-sam_r-2.json", {"new": True})
 STOPPED.clear()
 R.restart(remade, known, failed)
 assert "pr-sam_r-2.json" in os.listdir(f"{tmp}/state") and STOPPED == [] and os.path.isdir(f"{src}/r-new")
-# Nor is one made before the steward settled it, or one it never settled.
-old_state()
-for r, st in (({**remade, "created": "2026-10-23T00:00:00Z"}, {"sam/r", "sam/r-x"}), (remade, None)):
+# Nor is one the steward never settled, or one whose id is the one it
+# kept, whenever it was settled; or, for state from before it kept ids, one
+# made a second or more before the steward last settled it. Settled in the
+# second it was made, which comes first can't be told: it starts over.
+for st, again in ((None, False), ({"id": "R_new", "settings": MADE - 86400}, False),
+                  ({"id": "R_old", "settings": MADE + 86400}, True), ({"settings": MADE + 1}, False),
+                  ({"settings": MADE + 0.25}, True)):
+    old_state()
     if st is None:
         os.remove(f"{tmp}/state/repo-sam_r.json")
+    else:
+        C.save("repo-sam_r.json", st)
     known = {"sam/r", "sam/r-x"}
-    R.restart(r, known, {})
-    assert known == {"sam/r", "sam/r-x"} and STOPPED == [] and "pr-sam_r-1.json" in os.listdir(f"{tmp}/state")
+    R.restart(remade, known, {})
+    assert (known == {"sam/r-x"}) == again and STOPPED == [], (st, known)
+    assert ("pr-sam_r-1.json" in os.listdir(f"{tmp}/state")) != again, st
+# Its state is found in any case, since GitHub's names don't go by it: a
+# deleted Sam/R's, under that spelling, goes when sam/r is made.
+old_state()
+for name in ("repo-sam_r.json", "pr-sam_r-1.json"):
+    os.rename(f"{tmp}/state/{name}", f"{tmp}/state/{name.replace('sam_r', 'Sam_R')}")
+os.rename(f"{tmp}/state/{V.GIT}/sam__r.git", f"{tmp}/state/{V.GIT}/Sam__R.git")
+known, failed = {"Sam/R", "sam/r-x"}, {"Sam/R": 1}
+R.restart(remade, known, failed)
+assert known == {"sam/r-x"} and failed == {}, (known, failed)
+assert not [x for x in os.listdir(f"{tmp}/state") if x.lower().startswith(("repo-sam_r.", "pr-sam_r-1"))]
+assert os.listdir(f"{tmp}/state/{V.GIT}") == [], os.listdir(f"{tmp}/state/{V.GIT}")
+# A move a try left half done (the folder moved, the time it was not yet
+# kept) is taken as just then: the jobs that started there by then are
+# stopped, but not one whose kicks name another repo, whose it is; nor,
+# once the time is kept, one started there after.
+for at in (None, MADE + 7200):
+    old_state()
+    C.save("repo-sam_r.json", {**C.load("repo-sam_r.json", {}), "retired": {"r-old": at}})
+    old, kim = job("r-old", MADE + 3600), job("r-old", MADE + 3600, kick="proj-inbox/kim/z")
+    later = job("r-old", MADE + 9000)
+    STOPPED.clear()
+    R.restart(remade, set(), {})
+    assert sorted(STOPPED) == sorted([old] + [later] * (at is None)), (at, STOPPED)
 # Where the repo's next clone goes, a job that started before the repo was
 # made was the deleted one's, and goes on in whatever clone is there now:
 # it's stopped, whether the new one's clone is there yet or not, and the
@@ -366,7 +398,7 @@ for there in ("new", None, "theirs"):
 # reset waits for it, whatever code the service runs.
 snap = V.snap_name("pr-sam_r-1.json", "a" * 40, "main")
 for broken, said in (("stop", "couldn't"), ("origin", "can't read its origin"), ("folder", "symbolic links"),
-                     ("look", "aren't done with"), ("sweep", "aren't done with")):
+                     ("record", "symbolic links"), ("look", "aren't done with"), ("sweep", "aren't done with")):
     C.NOW += 1
     old_state()
     clone("r-old", MADE - 86400)
@@ -379,6 +411,8 @@ for broken, said in (("stop", "couldn't"), ("origin", "can't read its origin"), 
     elif broken == "folder":
         os.makedirs(f"{src}/loop")
         os.symlink(".git", f"{src}/loop/.git")
+    elif broken == "record":  # a job proj keeps that can't be read
+        os.symlink("loop-1", f"{jobs}/loop-1")
     elif broken == "look":
         C.save(f"{V.QUEUE}/codex--{snap}.json", {})
         held = open(f"{tmp}/state/{V.QUEUE}/codex--{snap}.json")
@@ -395,13 +429,15 @@ for broken, said in (("stop", "couldn't"), ("origin", "can't read its origin"), 
     C.stop_job, V.sweep = stop, sweep
     assert known == set() and C.load("known.json", None) == [] and "repo-sam_r.json" in os.listdir(f"{tmp}/state")
     assert os.path.isdir(f"{src}/r-old") == (broken in ("origin", "folder")), (broken, os.listdir(src))
-    assert STOPPED == ([] if broken in ("stop", "origin", "folder") else [jid]), (broken, STOPPED)
+    assert STOPPED == ([] if broken in ("stop", "origin", "folder", "record") else [jid]), (broken, STOPPED)
     if broken == "look":
         assert os.listdir(f"{tmp}/state/{V.QUEUE}") == [f"codex--{snap}.json"]
         assert os.path.isdir(f"{tmp}/state/{V.SESSIONS}/{V.session_name('codex', snap)}")
         held.close()
     for d in ("half", "loop"):
         shutil.rmtree(f"{src}/{d}", ignore_errors=True)
+    if broken == "record":
+        os.remove(f"{jobs}/loop-1")
     STOPPED.clear()
     C.NOW += 1
     R.restart(remade, known, failed)

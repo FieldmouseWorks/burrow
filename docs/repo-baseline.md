@@ -7,8 +7,10 @@ one PR, opened ready for review, which then goes through the same review loop
 as any other.
 
 A repo made under the name of one that was deleted is a new repo too, though
-GitHub gives it the same name: the steward knows it by being made after the
-steward last settled a repo of that name, on the first pass that reads it,
+GitHub gives it the same name, in any case: the steward knows it by
+GitHub's id for it, which it keeps with the settings (for settings kept
+before it kept ids, by being made after the steward last settled a repo
+of that name, or in the same second), on the first pass that reads it,
 kicked or full. Before anything acts on it, every clone in `projectsDir`
 that wasn't cloned from it on GitHub after it was made is moved aside under
 a hidden name. The Claude jobs that started in those clones are stopped,
