@@ -24,6 +24,7 @@ import dashboard as D
 import lock_wait
 import proofs as P
 import reviewers as V
+import stopping
 import train as T
 import waits
 from common import CFG, DRY, MIN, STATE, load, log, repo_cfg, save, ts
@@ -47,6 +48,7 @@ STRIKES = {
     "job": "no Claude job can start for it",
     "post": "GitHub keeps refusing a review it's to post",
     "lost": "its Claude jobs keep stopping before they finish (timed out, quiet or crashed)",
+    "stop": "proj keeps refusing to stop its Claude jobs on a head it no longer has",
 }
 STRIKE_LIMIT = 3  # failures in a row of one step, on one head, that make its wait overdue
 
@@ -77,6 +79,7 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
             was, base = rs.pop("lost")
             lost_on.setdefault(r, {})[base] = was
     if st.get("head") != head:
+        stopping.moved(repo, pr, st)  # its jobs on the last head, to be stopped below
         st.update(head=head, seen=C.NOW, handed=None, strikes={}, rv={})
     st.setdefault("rv", {})
     labels = {x["name"] for x in pr["labels"]["nodes"]}
@@ -121,6 +124,13 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
         failed this pass too (one review posted, another not)."""
         if kind not in struck:
             st.setdefault("strikes", {}).pop(kind, None)
+
+    # The jobs a new head left answering for nothing, stopped: one proj
+    # refuses is tried again.
+    if stopping.stop(tag, st):
+        cleared("stop")
+    else:
+        strike("stop")
 
     # Open a day, it's listed for the owner (below): a pass then says so.
     after(ts(pr["createdAt"]), 24 * 60)  # ends: listed for the owner

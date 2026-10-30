@@ -4,7 +4,8 @@ exact commit; one whose outputs are all in the store, or being built by a
 proof already running, starts at once and holds no slot, and says so. A
 slot is held by a build, not a job: a job whose paths the jobs started
 before it are building holds none, and one whose eval failed, or whose
-check has no attribute, holds its own."""
+check has no attribute, holds its own. A job on a head its PR no longer
+has keeps building only what the new head's proof wants."""
 
 import itertools
 import json
@@ -12,7 +13,7 @@ import os
 import sys
 
 import proofs as P
-from harness import C, CI_GREEN, JOBS, STATES, S, V, clean, fresh_pr_state, pr_state, run, sh, tmp
+from harness import C, CI_GREEN, JOBS, STATES, STOPPED, S, V, clean, fresh_pr_state, pr_state, run, sh, tmp
 
 # A repo whose PRs' heads are real commits on its remote, as GitHub has them.
 origin, work = f"{tmp}/builds-origin", f"{tmp}/builds-work"
@@ -199,6 +200,30 @@ status = line(2, 800)
 assert RUNNING in status and SKIPPED in status and len(evals()) == 3, (status, evals())
 assert evals()[-1][-1].endswith("#checks.x86_64-linux.other.drvPath"), evals()
 S.CFG["repos"]["sam/r"]["proofBuilds"] = {"remi-proof": "checks.x86_64-linux.proof"}
+
+# A PR pushed again while its proof builds: the job is left to finish when
+# the new head's proof wants what it's building (its check unchanged), and
+# that proof starts beside it at once, Nix building it once; it's stopped
+# when the new head builds something else, which then takes its slot. Each
+# head is worked out once.
+sh("git", "push", "-q", "-f", f"{origin}/sam/r.git", f"{heads[5]}:refs/pull/1/head", cwd=work)
+for wants, stops in ((X, False), (W, True)):
+    fresh_pr_state()
+    STOPPED.clear()
+    VALID[:] = [Z]
+    nix_knows({1: X, 2: Y, 5: wants})
+    P.begin("sam/r", {1, 2})
+    line(1)
+    job = pr_state(1)["provedJob"]
+    assert ahead(1) in line(2) and JOBS == [], JOBS
+    P.begin("sam/r", {1, 2})
+    status = run(clean(checks=proof, number=1, sha=heads[5]), 800)[0]
+    assert STOPPED == ([job] if stops else []) and RUNNING in status and len(JOBS) == 1, (wants, STOPPED, status, JOBS)
+    assert (SKIPPED in status) != stops, (wants, status)
+    assert ahead(1) in line(2, 800) and JOBS == [], JOBS
+    assert len(evals()) == 3, evals()
+sh("git", "push", "-q", "-f", f"{origin}/sam/r.git", f"{heads[1]}:refs/pull/1/head", cwd=work)
+STOPPED.clear()
 
 del S.CFG["repos"]["sam/r"]
 C.job = kept

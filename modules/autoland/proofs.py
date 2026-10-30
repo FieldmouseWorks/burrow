@@ -13,11 +13,13 @@ out holds a slot of its own until it ends. So a proof with nothing new to
 build skips the line: all its paths are built, or being built by proofs
 already running.
 
-A job is still a job whatever head it was started on: a PR pushed again,
-or marked a draft, while its job runs still has what it holds. A turn in
-the line is only this pass's: a PR is ahead while it's waiting in the same
-pass (they go in their line's order, place), so one held, drafted or
-done since holds nobody up."""
+A job holds what it holds until it ends, whatever its PR does meanwhile
+(marked a draft, say), but for a new head: a verdict on a head the PR no
+longer has proves nothing, so the steward stops it (superseded), unless
+it's building what the new head's proof wants. A turn in the line is only
+this pass's: a PR is ahead while it's waiting in the same pass (they go in
+their line's order, place), so one held, drafted or done since holds
+nobody up."""
 
 import os
 import re
@@ -152,6 +154,24 @@ def ahead(repo, n, st, slots, outs=None):
     if outs is not None and todo.intersection(outs) <= building:
         return FREE
     return builds + waiting
+
+
+def superseded(repo, pr, st):
+    """The PR's head moved on to pr's: of its proof jobs still at work, all
+    on a head it no longer has, the ones to stop. That's every one but a job
+    building something the new head's proof wants (its check, unchanged),
+    which that proof would only wait for (ahead): it's left to finish. One
+    whose builds nobody worked out is stopped, and so is every one when the
+    new head's can't be worked out."""
+    js = live(st)
+    recs = st.get("proofPaths", {})
+    wanted = set()
+    if any((recs.get(j) or {}).get("paths") for j in js) and (last := st.get("proofOutputs")):
+        wanted = unbuilt(outputs(repo, pr, sorted(last["for"][1]), st))
+    keep = [j for j in js if wanted.intersection((recs.get(j) or {}).get("paths") or ())]
+    for j in keep:
+        log(f"{repo}#{pr['number']}: proof job {j}, on its last head, builds what this head's proof wants: left to finish")
+    return [j for j in js if j not in keep]
 
 
 def wait(repo, n):

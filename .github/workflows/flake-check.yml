@@ -6,6 +6,12 @@
 # `attestations: write` (a called job gets no more than its caller gives). Its
 # actions are pinned to commits (repos that allow only pinned actions need
 # that), and Renovate keeps the pins current.
+#
+# Each job runs once a PR at a time: a PR's new run (a push, say) cancels
+# what its last run still has going, which was checking a head the PR no
+# longer has. Anything else (a push to a branch, a train's candidate) is a
+# run of its own that nothing cancels. A caller calls it once a workflow:
+# a second call in the same workflow would share the first's groups.
 name: flake-check
 on:
   workflow_call:
@@ -55,6 +61,9 @@ jobs:
   train:
     if: ${{ !inputs.pr-gate && github.event_name == 'pull_request' }}
     runs-on: ${{ inputs.runner }}
+    concurrency:
+      group: flake-check-${{ github.workflow }}-train-pr-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
     permissions: {}
     outputs:
       lands: ${{ steps.base.outputs.lands }}
@@ -70,10 +79,15 @@ jobs:
           echo "lands=$lands" >>"$GITHUB_OUTPUT"
   check:
     # Unless the train lands it: anything but a clear yes, the train job's
-    # failure included, is a no.
+    # failure included, is a no. A cancelled one means the PR has a newer
+    # run (concurrency), which checks the head it has now: this one checks
+    # nothing.
     needs: train
-    if: ${{ !cancelled() && (inputs.pr-gate || github.event_name != 'pull_request' || needs.train.outputs.lands != 'true') }}
+    if: ${{ !cancelled() && needs.train.result != 'cancelled' && (inputs.pr-gate || github.event_name != 'pull_request' || needs.train.outputs.lands != 'true') }}
     runs-on: ${{ inputs.runner }}
+    concurrency:
+      group: flake-check-${{ github.workflow }}-check-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id) }}
+      cancel-in-progress: true
     permissions:
       contents: read
       # The attestation: a GitHub OIDC token to sign it with, and the API
@@ -352,6 +366,9 @@ jobs:
   commits:
     if: github.event_name == 'pull_request'
     runs-on: ${{ inputs.runner }}
+    concurrency:
+      group: flake-check-${{ github.workflow }}-commits-pr-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
     permissions:
       contents: read
     steps:

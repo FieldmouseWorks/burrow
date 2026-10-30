@@ -351,6 +351,21 @@ def post(repo, pr, r, answer):
 
 
 STATES = {}  # a job's state, by id, as `proj state` says it: running unless set
+STOPPED = []  # the jobs `proj stop` ended, in order
+UNSTOPPABLE = set()  # the jobs `proj stop` can't stop
+
+
+def stop_job(jid):
+    """proj stop: the job's over, and `proj state` says it failed (its turn's
+    unit was stopped before it wrote an outcome); one in UNSTOPPABLE is
+    refused."""
+    if jid in UNSTOPPABLE:
+        return False
+    STOPPED.append(jid)
+    STATES[jid] = "failed"
+    return True
+
+
 T0 = "2026-10-24T00:00:00Z"
 # The times a PR's status names (H.clock) are in the machine's zone: UTC here.
 os.environ["TZ"] = "UTC"
@@ -475,5 +490,6 @@ def stand_in():
     C.write = write
     C.job = job
     C.job_state = lambda jid: STATES.get(jid, "running")
+    C.stop_job = stop_job
     V.queue = queue
     V.post = post
