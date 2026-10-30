@@ -29,13 +29,16 @@ in
       description = ''
         Have systemd-oomd kill the unit that is drowning the machine:
         whichever holds the most swap once swap is 90% full, and whichever
-        reclaims the most once system.slice, a user's app or background
-        slice, or proj's jobs (burrow.proj) spend 80% of their time stalled
-        on memory for 30s. The kernel's own OOM killer waits until memory and
-        swap are gone, and with zram it can thrash first for as long as it
-        likes. sshd (socket-activated or not), tailscaled, the switch's own
-        units (burrow.switch) and Remote Control servers (burrow.remoteControl)
-        are never picked.
+        reclaims the most once a slice spends 80% of its time stalled on
+        memory for 30s. That's every system slice but the root and the users'
+        (a login session is watched on its own), and in each user's manager
+        its app, background and session slices. The kernel's own OOM killer
+        waits until memory and swap are gone, and
+        with zram it can thrash first for as long as it likes. sshd
+        (socket-activated or not), tailscaled, the switch's own units
+        (burrow.switch) and Remote Control servers (burrow.remoteControl) are
+        never picked. claude.slice, with proj's jobs and the servers, is the
+        kernel's: it and each unit in it have a cap of their own and no swap.
       '';
     };
   };
@@ -76,21 +79,56 @@ in
     boot.initrd.systemd.settings.Manager.RuntimeWatchdogSec =
       lib.mkIf (cfg.watchdog && config.boot.initrd.systemd.enable) "30s";
 
-    # Pressure is watched only on slices whose every unit oomd may kill whole,
-    # never on one that holds Remote Control servers: the root, user.slice,
-    # a user's whole manager or its claude.slice. oomd honours a user's unit's
+    # Pressure is watched on every slice but the ones that hold Remote Control
+    # servers: the root, user.slice, user-UID.slice, and in a user's manager
+    # its root and claude.slice. oomd honours a user's unit's
     # ManagedOOMPreference only for a watch on a cgroup that user owns, so a
-    # watch on the root or user.slice would kill a whole server, every
+    # watch on any of the first three would kill a whole server, every
     # session on it, and one in the user's manager would kill a bystander for
-    # pressure inside a server. Swap is watched on the root: claude.slice
-    # holds none, so that watch never picks a server either.
+    # pressure inside a server. Nor inside claude.slice: at its MemoryHigh
+    # every job under it is slowed, which is what that soft limit is for, and
+    # a watch on the jobs would kill one whole for it. Swap is watched on the
+    # root: claude.slice holds none, so that watch never picks a Claude.
     systemd.oomd = lib.mkIf cfg.oomd {
       enable = true;
-      enableSystemSlice = true;
       settings.OOM.DefaultMemoryPressureLimit = "80%";
     };
-    systemd.slices."-".sliceConfig.ManagedOOMSwap = lib.mkIf cfg.oomd "kill";
-    systemd.user.slices = lib.mkIf cfg.oomd (lib.genAttrs [ "app" "background" ] (_: {
+    # Every system slice, but where a slice's own drop-in has the same name
+    # (overrides.conf, for all of NixOS's), the slice's wins outright.
+    systemd.units.slice = lib.mkIf cfg.oomd {
+      text = ''
+        [Slice]
+        ManagedOOMMemoryPressure=kill
+      '';
+      overrideStrategy = "asDropin";
+    };
+    systemd.slices = lib.mkIf cfg.oomd {
+      "-" = {
+        overrideStrategy = "asDropin";
+        sliceConfig = {
+          ManagedOOMSwap = "kill";
+          ManagedOOMMemoryPressure = "auto";
+        };
+      };
+      user = {
+        overrideStrategy = "asDropin";
+        sliceConfig.ManagedOOMMemoryPressure = "auto";
+      };
+      "user-" = {
+        overrideStrategy = "asDropin";
+        sliceConfig.ManagedOOMMemoryPressure = "auto";
+      };
+    };
+    # Each login session (logind's session-N.scope, in user-UID.slice).
+    systemd.units."session-.scope" = lib.mkIf cfg.oomd {
+      text = ''
+        [Scope]
+        ManagedOOMMemoryPressure=kill
+      '';
+      overrideStrategy = "asDropin";
+    };
+    # Everything else a user runs is in these.
+    systemd.user.slices = lib.mkIf cfg.oomd (lib.genAttrs [ "app" "background" "session" ] (_: {
       overrideStrategy = "asDropin";
       sliceConfig.ManagedOOMMemoryPressure = "kill";
     }));

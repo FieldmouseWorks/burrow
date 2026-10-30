@@ -1,9 +1,13 @@
 # systemd-oomd (burrow.ops.oomd) never kills a Remote Control server, which
 # would take every session on it: a session drowning its server in memory
 # pressure is left to the kernel, which kills that session alone at the
-# server's cap. The control watches pressure the way burrow.ops did before
-# (the root, user.slice and every slice in a user's manager, NixOS's own
-# options) with no opt-out on the server, and loses the whole server to oomd.
+# server's cap. Nor does a proj job pay for claude.slice reaching its
+# MemoryHigh, which slows every job under it. The same pressure anywhere oomd
+# may kill is still oomd's: a CI runner's slice outside system.slice, a login
+# session, a user's app.slice.
+# The control watches pressure the way burrow.ops did before (the root,
+# user.slice and every slice in a user's manager, NixOS's own options) with
+# no opt-out on the server, and loses the whole server to oomd, and the job.
 #
 #   nix build .#checks.x86_64-linux.remote-control-oomd -L
 { self, pkgs }:
@@ -76,6 +80,9 @@ let
       "f /home/dev/.claude.json 0600 dev dev - {}"
       "d /data/dev/src/busy 0755 dev dev -"
       "p /data/dev/src/busy/go 0600 dev dev -"
+      "d /home/dev/session 0755 dev dev -"
+      "d /home/dev/app 0755 dev dev -"
+      "d /home/dev/job 0755 dev dev -"
     ];
     # The test framework panics on any OOM, a cgroup's own included; a real
     # machine kills inside the cgroup, which is what the guarded one waits for.
@@ -86,8 +93,21 @@ pkgs.testers.runNixOSTest {
   name = "remote-control-oomd";
 
   nodes.guarded = {
-    imports = [ machine self.nixosModules.ops ];
+    imports = [ machine self.nixosModules.ops self.nixosModules.proj ];
     burrow.ops.enable = true;
+    # proj's jobs, and whatever it says about their slice.
+    burrow.proj.enable = true;
+    # A CI runner's slice of its own, beside system.slice.
+    systemd.slices.gate.description = "A CI runner";
+    systemd.services.gate-job.serviceConfig = {
+      Slice = "gate.slice";
+      ExecStart = "${thrash}/bin/thrash";
+      StateDirectory = "gate-job";
+      WorkingDirectory = "/var/lib/gate-job";
+      MemoryHigh = "48M";
+      MemoryMax = "256M";
+      MemorySwapMax = 0;
+    };
   };
   nodes.control = { lib, ... }: {
     imports = [ machine ];
@@ -135,9 +155,9 @@ pkgs.testers.runNixOSTest {
                 paths.add(line.strip().removeprefix("Path: "))
         return paths
 
-    def marked(m):
+    def marked(m, cgroup):
         # oomd's own word for each kill it makes.
-        return m.execute("journalctl -o cat -u systemd-oomd | grep -F 'for killing'")[1]
+        return m.execute(f"journalctl -o cat -u systemd-oomd | grep -qF 'Marked {cgroup} for killing'")[0] == 0
 
     start_all()
     cgroup = {}
@@ -165,6 +185,12 @@ pkgs.testers.runNixOSTest {
     srv = server(guarded)
     for m in (guarded, control):
         m.succeed(f"echo >{DIR}/go")
+    # The same pressure where oomd may kill: a CI runner's slice, a login
+    # session (logind's session-N.scope) and a user's app.slice.
+    caps = "-p MemoryHigh=48M -p MemoryMax=256M -p MemorySwapMax=0"
+    guarded.succeed("systemctl start gate-job")
+    guarded.succeed(f"systemd-run --scope --unit=session-thrash.scope --slice=user-1001.slice --uid=dev {caps} sh -c 'cd /home/dev/session && exec ${thrash}/bin/thrash' >/dev/null 2>&1 &")
+    guarded.succeed(f"systemd-run --user -M dev@ --unit=app-thrash -p WorkingDirectory=/home/dev/app {caps} ${thrash}/bin/thrash")
     retry(lambda _: full(guarded, cgroup[guarded]) > 80, timeout_seconds=120)
 
     with subtest("the control: oomd kills the whole server, every session on it"):
@@ -172,14 +198,20 @@ pkgs.testers.runNixOSTest {
         control.wait_until_fails(f"kill -0 {sibling[control]}", timeout=30)
         control.wait_until_succeeds(f"[ $(systemctl --user -M dev@ show -p NRestarts --value {UNIT}) -gt {before[control]['NRestarts']} ]", timeout=60)
 
-    with subtest("guarded, a minute of the same pressure leaves oomd nothing to kill"):
+    with subtest("guarded, a minute more of the same pressure, and oomd leaves the server be"):
         # The control has been through the same by now: past oomd's 30s.
         end = time.monotonic() + 60
         while time.monotonic() < end:
             assert alive(guarded, sibling[guarded]) and alive(guarded, srv)
-            assert marked(guarded) == "", marked(guarded)
+            assert not marked(guarded, cgroup[guarded])
             time.sleep(5)
         assert full(guarded, cgroup[guarded]) > 80, full(guarded, cgroup[guarded])
+
+    with subtest("guarded, oomd kills the others under the same pressure"):
+        for cg in ("/gate.slice/gate-job.service",
+                   "/user.slice/user-1001.slice/session-thrash.scope",
+                   "/user.slice/user-1001.slice/user@1001.service/app.slice/app-thrash.service"):
+            retry(lambda _: marked(guarded, cg), timeout_seconds=120)
 
     with subtest("the session goes over the server's cap, and the kernel kills it alone"):
         guarded.succeed(f"systemctl --user -M dev@ set-property --runtime {UNIT} MemoryHigh=infinity")
@@ -187,6 +219,23 @@ pkgs.testers.runNixOSTest {
         guarded.succeed(f"grep -q '^oom_kill [1-9]' /sys/fs/cgroup{cgroup[guarded]}/memory.events")
         assert alive(guarded, sibling[guarded]) and alive(guarded, srv)
         assert show(guarded, *state) == before[guarded], show(guarded, *state)
-        assert marked(guarded) == "", marked(guarded)
+        assert not marked(guarded, cgroup[guarded])
+
+    with subtest("claude.slice at its MemoryHigh slows a job, and that costs it nothing; the control's oomd kills it"):
+        claude = {m: cgroup[m].split("/claude-rc.slice/")[0] for m in (guarded, control)}
+        job = {m: f"{claude[m]}/claude-jobs.slice/proj-thrash.service" for m in (guarded, control)}
+        for m in (guarded, control):
+            current = int(m.succeed(f"cat /sys/fs/cgroup{claude[m]}/memory.current"))
+            m.succeed(f"systemctl --user -M dev@ set-property --runtime claude.slice MemoryHigh={current + (32 << 20)}")
+            m.succeed("systemd-run --user -M dev@ --unit=proj-thrash --slice=claude-jobs.slice -p MemoryMax=256M -p WorkingDirectory=/home/dev/job ${thrash}/bin/thrash")
+        retry(lambda _: full(guarded, job[guarded]) > 80, timeout_seconds=120)
+        pressure = monitored(guarded, "Memory Pressure Monitored CGroups")
+        assert not {p for p in pressure if p.startswith(claude[guarded])}, pressure
+        control.wait_until_succeeds(f"journalctl -o cat -u systemd-oomd | grep -qF 'Marked {job[control]} for killing'", timeout=120)
+        # Past oomd's 30s here too.
+        time.sleep(30)
+        assert full(guarded, job[guarded]) > 80, full(guarded, job[guarded])
+        guarded.succeed("systemctl --user -M dev@ is-active proj-thrash.service")
+        assert not marked(guarded, job[guarded])
   '';
 }
