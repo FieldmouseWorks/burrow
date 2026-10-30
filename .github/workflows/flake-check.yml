@@ -1,10 +1,11 @@
 # The shared CI for every repo whose gate is its flake (burrow's
 # lib/project.nix): check out, install Nix, `nix flake check`, then attest the
 # result for Conary's ledger; on a PR, also check that GitHub verifies every
-# signed commit it adds. Called from a repo's own workflow with `uses:`, whose
-# job grants `id-token: write` and `attestations: write` (a called job gets no
-# more than its caller gives). Its actions are pinned to commits (repos that
-# allow only pinned actions need that), and Renovate keeps the pins current.
+# signed commit it adds (with pr-gate off, only that). Called from a repo's own
+# workflow with `uses:`, whose job grants `id-token: write` and
+# `attestations: write` (a called job gets no more than its caller gives). Its
+# actions are pinned to commits (repos that allow only pinned actions need
+# that), and Renovate keeps the pins current.
 name: flake-check
 on:
   workflow_call:
@@ -35,8 +36,43 @@ on:
           fails a flake with any other, or with a nixConfig.
         type: boolean
         default: false
+      pr-gate:
+        description: >-
+          Run the gate on a PR to the default branch. False in a repo whose
+          PRs land through its merge train, which runs the gate on each
+          candidate it would land (a push to a conary/train/ branch) rather
+          than on the PRs in it, so such a PR's own run checks only its
+          commits. A PR to any other branch, which the train doesn't land,
+          still gets the gate. A caller that turns it off runs on
+          pull_request's `edited` too, so a PR retargeted away from the
+          default branch gets the gate for its new base.
+        type: boolean
+        default: true
 jobs:
+  # With pr-gate off, whether this PR is one the train lands: its base is the
+  # default branch, compared as git compares refs. An expression's == ignores
+  # case, so `Main` would pass for `main`, and the train wouldn't take it.
+  train:
+    if: ${{ !inputs.pr-gate && github.event_name == 'pull_request' }}
+    runs-on: ${{ inputs.runner }}
+    permissions: {}
+    outputs:
+      lands: ${{ steps.base.outputs.lands }}
+    steps:
+      - id: base
+        shell: bash
+        env:
+          BASE: ${{ github.event.pull_request.base.ref }}
+          DEFAULT: ${{ github.event.repository.default_branch }}
+        run: |
+          if [ "$BASE" = "$DEFAULT" ]; then lands=true; else lands=false; fi
+          echo "a PR to $BASE (the default branch is $DEFAULT): the train lands it: $lands"
+          echo "lands=$lands" >>"$GITHUB_OUTPUT"
   check:
+    # Unless the train lands it: anything but a clear yes, the train job's
+    # failure included, is a no.
+    needs: train
+    if: ${{ !cancelled() && (inputs.pr-gate || github.event_name != 'pull_request' || needs.train.outputs.lands != 'true') }}
     runs-on: ${{ inputs.runner }}
     permissions:
       contents: read
