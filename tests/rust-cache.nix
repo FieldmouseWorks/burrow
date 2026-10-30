@@ -1,9 +1,10 @@
 # rust-cache, for real: a machine with the cache on for dev and for a CI
 # runner's user, ci. A crate with no dependencies, built without incremental
 # compilation, stands in for a build's dependencies. The checks:
-# - a fresh target dir's build comes out of the cache, for dev and for the
-#   runner, whose sandbox makes the rest of the system read-only, and for a
-#   unit systemd-run started;
+# - a fresh target dir's build comes out of the cache, wherever the target
+#   dir is and whether CARGO_TARGET_DIR names it, for dev and for the runner,
+#   whose sandbox makes the rest of the system read-only, and for a unit
+#   systemd-run started;
 # - all of a user's units share one daemon: a runner that has been building
 #   all along takes what another unit just stored (a daemon of its own would
 #   still miss it), and the compile runs in the runner's unit, not the
@@ -203,6 +204,11 @@ pkgs.testers.runNixOSTest {
         before = hits("dev")
         ok(run(f"cd a && rm -rf target && {build}"), "dev's second build")
         assert hits("dev") > before, "dev's fresh target dir missed the cache"
+        # However the target dir is named, and wherever it is.
+        for var, dir in [("CARGO_TARGET_DIR", "t1"), ("CARGO_TARGET_DIR", "t2"), ("CARGO_BUILD_TARGET_DIR", "t3")]:
+            before = hits("dev")
+            ok(run(f"cd a && {var}=/home/dev/{dir} {build}"), f"a build into {var}={dir}")
+            assert hits("dev") > before, f"a fresh target dir named by {var} missed the cache"
 
     with subtest("a crate bigger than sccache's default message size is cached too"):
         place("${ok}", "/home/dev/big", "dev")
