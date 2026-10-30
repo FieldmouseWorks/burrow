@@ -269,7 +269,8 @@ in
         it grow past the cap without ever reaching it. Past it the kernel
         kills the biggest process there, usually the session that grew, and
         the server and its other sessions carry on (OOMPolicy=continue).
-        Every server is under burrow.claude.memory's cap too.
+        systemd-oomd never picks a server (burrow.ops.oomd). Every server is
+        under burrow.claude.memory's cap too.
       '';
     };
     servers = lib.mkOption {
@@ -327,6 +328,8 @@ in
         MemoryMax = cfg.memoryMax;
         MemorySwapMax = 0;
         OOMPolicy = "continue";
+        # systemd-oomd kills whole units, here every session at once.
+        ManagedOOMPreference = "omit";
       };
     };
 
