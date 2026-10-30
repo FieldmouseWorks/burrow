@@ -652,6 +652,41 @@ fn in_line() {
     assert!(m.notices().is_empty());
 }
 
+// A stall already on the stuck issue that the issue can't take now goes on
+// to the owner, and off the issue: when there's no steward any more to
+// publish it, or when it turns out to be that issue's own job (made one
+// later, proj unstick), which the issue would only hand to itself.
+#[test]
+fn issue_cant_take_it() {
+    for gone in [true, false] {
+        let mut m = Machine::new();
+        m.write(&m.steward, json!({}), T);
+        let mut it = named(
+            "proj job homelab-9",
+            "turn 1 is waiting in line for a slot",
+            T - 3.0 * H,
+            T - MIN,
+        );
+        it["line"] = true.into();
+        m.write(&m.line, json!({"homelab-9": it.clone()}), T);
+        m.run(T);
+        assert_eq!((m.escalated().len(), m.notices().len()), (1, 0), "{gone}");
+        if gone {
+            m.cfg.steward_kick = None;
+        } else {
+            it["unstick"] = true.into();
+            m.write(&m.line, json!({"homelab-9": it}), T);
+        }
+        m.run(T + MIN);
+        let notices = m.notices();
+        let [notice] = &notices[..] else {
+            panic!("{gone}: {notices:?}")
+        };
+        assert_eq!(notice[0], "open", "{gone}");
+        assert!(m.escalated().is_empty(), "{gone}");
+    }
+}
+
 // A job that couldn't start is tried again RETRY later, and after
 // escalateAfter it's the next step's.
 #[test]

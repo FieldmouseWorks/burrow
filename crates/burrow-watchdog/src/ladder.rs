@@ -74,10 +74,13 @@ pub fn run(cfg: &Config, world: &dyn World, now: f64) -> Result<(), String> {
         let kick = st.item.kick.clone().filter(|k| !k.is_empty());
         if let Some(until) = st.snoozed.filter(|&t| t > now) {
             wakes.push(until);
-        } else if st.entry.is_some() {
+        } else if st.entry.is_some() && issue_takes(cfg, st) {
             // On the stuck issue, whose own job takes it from there: none of
             // it is the owner's. One they were told of before that job took
-            // it on has its notice closed, again each pass until it is.
+            // it on has its notice closed, again each pass until it is. One
+            // the issue can't take now (no steward to publish it, or it has
+            // turned out to be that very job) goes on to the steps below, and
+            // so to the owner.
             if st.told.is_some() {
                 notice(cfg, world, &s, st, Some(ON_ISSUE));
                 if !held(cfg, world, &s) {
@@ -224,16 +227,21 @@ fn start_job(cfg: &Config, world: &dyn World, stalls: &[&Stall]) -> Option<Strin
 /// hand it to itself).
 fn escalate(cfg: &Config, world: &dyn World, s: &str, st: &mut Stall, now: f64) {
     st.escalated = Some(now);
-    if cfg.steward_kick.is_some()
-        && !(st.source == STEWARD && st.key.is_empty())
-        && !st.item.unstick
-    {
+    if issue_takes(cfg, st) {
         println!("still stalled, on the stuck issue: {}", line(&st.item));
         st.entry = Some(entry(&st.item));
     } else {
         println!("still stalled, telling {}: {}", cfg.owner, line(&st.item));
+        st.entry = None;
         tell(cfg, world, s, st, now);
     }
+}
+
+/// Whether the stuck issue can take a stall: there's a steward to publish
+/// it, and it isn't the steward's own stall, nor that of the job that takes
+/// the issue.
+fn issue_takes(cfg: &Config, st: &Stall) -> bool {
+    cfg.steward_kick.is_some() && !(st.source == STEWARD && st.key.is_empty()) && !st.item.unstick
 }
 
 /// The owner's notice, sent (again: notify can't say it went through).
