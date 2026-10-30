@@ -73,7 +73,10 @@ pub fn start(cfg: &Config, id: &str, msg: &str, first: bool) -> Result<(), Strin
     }
     let me = env::current_exe().map_err(|e| format!("proj: {e}"))?;
     // Claude is what goes first when memory runs out, not whatever it's
-    // next to. The job comes to its _ended in the unit's environment:
+    // next to. Past its own cap the kernel kills the job's biggest process
+    // (a build or an evaluation it ran, as a rule) and the turn carries on,
+    // told the command was killed: systemd's default OOMPolicy would stop
+    // the whole turn. The job comes to its _ended in the unit's environment:
     // systemd splits and expands a command line, and a job's id is its
     // project's folder name, spaces, `%` and all.
     let started = systemd::systemd_run(cfg)
@@ -81,6 +84,7 @@ pub fn start(cfg: &Config, id: &str, msg: &str, first: bool) -> Result<(), Strin
         .arg(format!("--unit={unit}"))
         .arg(format!("--slice={}", cfg.slice))
         .arg(format!("--property=MemoryMax={}", cfg.job_memory_max))
+        .arg("--property=OOMPolicy=continue")
         .arg("--property=OOMScoreAdjust=500")
         .arg(format!(
             "--property=WorkingDirectory={}",
