@@ -13,6 +13,7 @@ publish = false
 
 # What more than one crate uses, at one version.
 [workspace.dependencies]
+jiff = { version = "0.2.38", default-features = false, features = ["std", "tz-system", "tzdb-zoneinfo"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 sha2 = "0.11.1"

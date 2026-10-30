@@ -62,8 +62,6 @@ in
       description = "Use the Claude plan's banked weekly reset when the week is nearly gone";
       after = [ "network-online.target" ];
       wants = [ "network-online.target" ];
-      # date, for the notices' times.
-      path = [ pkgs.coreutils ];
       environment.USAGE_RESET_CONFIG = "${configFile}";
       # A switch leaves a running pass to finish, its yes perhaps pressed;
       # the next pass is the new one.

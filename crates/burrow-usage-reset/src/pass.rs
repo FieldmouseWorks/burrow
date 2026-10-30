@@ -30,6 +30,8 @@ pub struct Reading {
     /// When the week's meter resets by itself, as the account says it: the
     /// week's name, so a pass knows a new week from the last one.
     pub week: String,
+    /// The same moment, in seconds since the epoch.
+    pub ends: f64,
 }
 
 /// What asking for the banked reset came to.
@@ -79,12 +81,18 @@ pub struct State {
     pub unsettled: Option<Unsettled>,
 }
 
-/// A reset about to be confirmed: the meter then, and when, as the owner's
-/// clock says it.
+/// A reset about to be confirmed, and the reading it was confirmed at.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Unsettled {
+    /// Percent of the week used then.
     pub used: f64,
+    /// When, as the owner's clock says it.
     pub at: String,
+    /// The week it was for, and when that week was to end by itself.
+    pub week: String,
+    pub ends: f64,
+    /// What Claude Code answered its yes with, once a pass saw it.
+    pub said: Option<String>,
 }
 
 /// Something the owner hears, as HOST-notify keys it.
@@ -154,7 +162,7 @@ pub fn pass(
     if let Some(then) = state.unsettled.clone() {
         // The pass that pressed it didn't see how it went: this reading
         // says.
-        settle(&mut state, &mut notices, &then, None, Ok(reading.clone()));
+        settle(&mut state, &mut notices, &then, &reading, now);
     }
     if state.week.as_deref() != Some(&reading.week) {
         // A new week: what the last one found is no news about this one, and
@@ -176,9 +184,12 @@ pub fn pass(
         && state.none_at.is_none_or(|at| now - at >= NONE_AGAIN);
     let mut reading = reading;
     if due {
-        let then = Unsettled {
+        let mut then = Unsettled {
             used: reading.used,
             at: stamp.to_owned(),
+            week: reading.week.clone(),
+            ends: reading.ends,
+            said: None,
         };
         let reserved = State {
             pressed: true,
@@ -187,9 +198,19 @@ pub fn pass(
         };
         match account.reset(&mut || keep(&reserved)) {
             Reset::Pressed(said) => {
-                let after = account.read();
-                if let Some(r) = settle(&mut state, &mut notices, &then, Some(&said), after) {
-                    reading = r;
+                then.said = Some(said);
+                state.pressed = true;
+                match account.read() {
+                    Ok(r) => {
+                        settle(&mut state, &mut notices, &then, &r, now);
+                        reading = r;
+                    }
+                    Err(e) => {
+                        // Spent, and settled by the next pass that can read
+                        // the meter.
+                        eprintln!("couldn't read the meter after the reset: {e}");
+                        state.unsettled = Some(then);
+                    }
                 }
             }
             Reset::NoneBanked(said) => {
@@ -229,16 +250,20 @@ pub fn pass(
     }
 
     let wake = now
-        + next(
-            &state,
-            &reading,
-            if state.at_limit_only {
-                100.0
-            } else {
-                100.0 - below
-            },
-            now,
-        );
+        + if state.unsettled.is_some() {
+            RETRY
+        } else {
+            next(
+                &state,
+                &reading,
+                if state.at_limit_only {
+                    100.0
+                } else {
+                    100.0 - below
+                },
+                now,
+            )
+        };
     state.last = Some((now, reading.used));
     Outcome {
         state,
@@ -247,59 +272,63 @@ pub fn pass(
     }
 }
 
-/// How a reset confirmed at THEN went, from the meter AFTER: it took if the
-/// meter dropped. Either way the week's reset is spent, and the owner hears
-/// which. SAID is what Claude Code answered, if the pass lived to see it.
-/// The reading it took with, if it did.
-fn settle(
-    state: &mut State,
-    notices: &mut Vec<Notice>,
-    then: &Unsettled,
-    said: Option<&str>,
-    after: Result<Reading, String>,
-) -> Option<Reading> {
-    state.pressed = true;
+/// How a reset confirmed at THEN went, from the reading R at NOW, and the
+/// owner hears it. Before THEN's week was to end by itself, a meter that
+/// dropped or a week that moved is the reset's doing: it took, and the week
+/// R is in is the one it spent. One that didn't didn't take, and the week is
+/// spent all the same. Once THEN's week has ended by itself, whatever
+/// happened to the reset, that week is over and R's starts unspent.
+fn settle(state: &mut State, notices: &mut Vec<Notice>, then: &Unsettled, r: &Reading, now: f64) {
     state.unsettled = None;
-    let answer = match said {
+    let answer = match &then.said {
         Some(said) => format!("Claude Code: \"{said}\""),
         None => "the pass that did was cut off before Claude Code answered".to_owned(),
     };
-    match after {
-        Ok(r) if r.used < then.used => {
-            notices.push(Notice::Open(
-                USED,
-                format!("Used the banked weekly Claude reset at {:.0}% used", then.used),
-                format!(
-                    "At {} the week's meter read {:.0}% used, so the usage watcher used the banked reset ({answer}). It reads {:.0}% now.",
-                    then.at, then.used, r.used
-                ),
-            ));
-            notices.push(Notice::Close(
-                USED,
-                "Nothing to do: that's the record.".to_owned(),
-            ));
-            // The reset may have started a new week, or not; the burn
-            // before it isn't the burn after.
-            state.week = Some(r.week.clone());
-            state.last = None;
-            Some(r)
-        }
-        after => {
-            notices.push(Notice::Open(
-                FAILED,
-                "The banked Claude reset didn't take".to_owned(),
-                format!(
-                    "At {} the week's meter read {:.0}% used and the usage watcher confirmed the banked reset ({answer}), but the meter {}. It won't press it again this week; run /limit-reset in Claude Code to look.",
-                    then.at,
-                    then.used,
-                    match after {
-                        Ok(r) => format!("still reads {:.0}%", r.used),
-                        Err(e) => format!("couldn't be read after: {e}"),
-                    }
-                ),
-            ));
-            None
-        }
+    if now >= then.ends {
+        notices.push(Notice::Open(
+            USED,
+            format!("Pressed the banked weekly Claude reset at {:.0}% used", then.used),
+            format!(
+                "At {} the week's meter read {:.0}% used and the usage watcher confirmed the banked reset ({answer}), but the week ended by itself before it saw whether the reset took. The new week's meter reads {:.0}%; run /limit-reset in Claude Code to see what's left.",
+                then.at, then.used, r.used
+            ),
+        ));
+        notices.push(Notice::Close(
+            USED,
+            "Nothing to do: that's the record.".to_owned(),
+        ));
+        *state = State {
+            week: Some(r.week.clone()),
+            ..State::default()
+        };
+    } else if r.used < then.used || r.week != then.week {
+        notices.push(Notice::Open(
+            USED,
+            format!("Used the banked weekly Claude reset at {:.0}% used", then.used),
+            format!(
+                "At {} the week's meter read {:.0}% used, so the usage watcher used the banked reset ({answer}). It reads {:.0}% now.",
+                then.at, then.used, r.used
+            ),
+        ));
+        notices.push(Notice::Close(
+            USED,
+            "Nothing to do: that's the record.".to_owned(),
+        ));
+        // The reset may have moved the week's end, or not; the burn before
+        // it isn't the burn after.
+        state.pressed = true;
+        state.week = Some(r.week.clone());
+        state.last = None;
+    } else {
+        notices.push(Notice::Open(
+            FAILED,
+            "The banked Claude reset didn't take".to_owned(),
+            format!(
+                "At {} the week's meter read {:.0}% used and the usage watcher confirmed the banked reset ({answer}), but the meter still reads {:.0}%. It won't press it again this week; run /limit-reset in Claude Code to look.",
+                then.at, then.used, r.used
+            ),
+        ));
+        state.pressed = true;
     }
 }
 
@@ -356,10 +385,25 @@ mod tests {
         }
     }
 
+    /// The week the tests run in, and when it ends by itself; the passes
+    /// run near the start of time, long before.
+    const WEEK: &str = "2026-11-04T19:00";
+    const ENDS: f64 = 1_793_818_800.0;
+
     fn at(used: f64) -> Reading {
         Reading {
             used,
-            week: "2026-11-04T19:00".to_owned(),
+            week: WEEK.to_owned(),
+            ends: ENDS,
+        }
+    }
+
+    /// A reading in another week, ending at ENDS.
+    fn week_of(week: &str, ends: f64, used: f64) -> Reading {
+        Reading {
+            used,
+            week: week.to_owned(),
+            ends,
         }
     }
 
@@ -390,10 +434,8 @@ mod tests {
 
     #[test]
     fn under_the_line_presses_once_and_says_so() {
-        let after = Reading {
-            used: 0.0,
-            week: "2026-11-06T05:00".to_owned(),
-        };
+        // A reset that moved the week's end.
+        let after = week_of("2026-11-06T05:00", 1_793_941_200.0, 0.0);
         let mut a = fake(
             vec![Ok(at(98.4)), Ok(after)],
             vec![Reset::Pressed("Weekly reset used · 0 left".to_owned())],
@@ -482,7 +524,10 @@ mod tests {
             kept[0].unsettled,
             Some(Unsettled {
                 used: 99.0,
-                at: "Thu 9:41 PM PDT".to_owned()
+                at: "Thu 9:41 PM PDT".to_owned(),
+                week: WEEK.to_owned(),
+                ends: ENDS,
+                said: None,
             })
         );
         // Settled by the pass that pressed it.
@@ -502,18 +547,26 @@ mod tests {
         assert_eq!(o.state.failed_tries, 1);
     }
 
-    #[test]
-    fn a_pass_cut_off_after_its_yes_is_settled_by_the_next() {
-        // What the cut-off pass kept, and the meter the next one reads.
-        let kept = |used| State {
-            week: Some(at(0.0).week),
+    /// What a pass cut off after its yes kept: the week spent, and the
+    /// reading it was confirmed at.
+    fn kept(used: f64) -> State {
+        State {
+            week: Some(WEEK.to_owned()),
             pressed: true,
             unsettled: Some(Unsettled {
                 used,
                 at: "Thu 9:41 PM PDT".to_owned(),
+                week: WEEK.to_owned(),
+                ends: ENDS,
+                said: None,
             }),
             ..State::default()
-        };
+        }
+    }
+
+    #[test]
+    fn a_pass_cut_off_after_its_yes_is_settled_by_the_next() {
+        // The meter dropped, its week's end where it was.
         let mut a = fake(vec![Ok(at(3.0))], vec![]);
         let o = run(&mut a, kept(99.0), 200.0);
         assert_eq!(a.asked, 0);
@@ -525,14 +578,26 @@ mod tests {
                 "close usage-reset-failed"
             ]
         );
-        let Notice::Open(_, _, body) = &o.notices[0] else {
+        let Notice::Open(_, title, body) = &o.notices[0] else {
             panic!()
         };
+        assert!(title.starts_with("Used"), "{title}");
         assert!(
             body.contains("cut off") && body.contains("reads 3% now"),
             "{body}"
         );
         assert!(o.state.pressed && o.state.unsettled.is_none());
+
+        // Its week's end moved: the reset's doing, and the moved week is
+        // the spent one.
+        let moved = || week_of("2026-11-06T05:00", 1_793_941_200.0, 99.5);
+        let mut a = fake(vec![Ok(moved())], vec![]);
+        let o = run(&mut a, kept(99.0), 200.0);
+        assert_eq!(keys(&o.notices)[0], "open usage-reset");
+        assert_eq!(o.state.week.as_deref(), Some("2026-11-06T05:00"));
+        let mut a = fake(vec![Ok(moved())], vec![]);
+        run(&mut a, o.state, 300.0);
+        assert_eq!(a.asked, 0);
 
         // It didn't take: the owner hears, and it's never pressed again.
         let mut a = fake(vec![Ok(at(99.5))], vec![]);
@@ -548,6 +613,66 @@ mod tests {
         let mut a = fake(vec![Err("offline".to_owned())], vec![]);
         let o = run(&mut a, kept(99.0), 200.0);
         assert!(o.state.unsettled.is_some() && o.state.pressed);
+    }
+
+    #[test]
+    fn a_meter_unread_after_the_yes_leaves_the_week_spent() {
+        let mut a = fake(
+            vec![Ok(at(99.0)), Err("offline".to_owned())],
+            vec![Reset::Pressed("Weekly limit refilled".to_owned())],
+        );
+        let o = run(&mut a, State::default(), 100.0);
+        assert!(o.notices.is_empty());
+        assert!(o.state.pressed);
+        assert_eq!(
+            o.state.unsettled.as_ref().and_then(|u| u.said.as_deref()),
+            Some("Weekly limit refilled")
+        );
+        assert_eq!(o.wake, 100.0 + RETRY);
+        // The next reading is in a week the reset moved: that week is the
+        // spent one, and the owner hears what Claude Code said.
+        let moved = || week_of("2026-11-06T05:00", 1_793_941_200.0, 99.0);
+        let mut a = fake(vec![Ok(moved())], vec![]);
+        let o = run(&mut a, o.state, 400.0);
+        assert_eq!(a.asked, 0);
+        let Notice::Open(_, _, body) = &o.notices[0] else {
+            panic!()
+        };
+        assert!(body.contains("Weekly limit refilled"), "{body}");
+        let mut a = fake(vec![Ok(moved())], vec![]);
+        run(&mut a, o.state, 500.0);
+        assert_eq!(a.asked, 0);
+    }
+
+    #[test]
+    fn a_week_that_ended_by_itself_leaves_the_next_unspent() {
+        // One week on, or two: the meter's drop is the new week's, not the
+        // reset's, and the new week can use one.
+        for (week, ends) in [
+            ("2026-11-11T19:00", 1_794_423_600.0),
+            ("2026-11-18T19:00", 1_795_028_400.0),
+        ] {
+            let mut a = fake(vec![Ok(week_of(week, ends, 4.0))], vec![]);
+            let o = run(&mut a, kept(99.0), ENDS + 60.0);
+            assert_eq!(a.asked, 0);
+            assert_eq!(
+                keys(&o.notices)[..2],
+                ["open usage-reset", "close usage-reset"]
+            );
+            let Notice::Open(_, title, body) = &o.notices[0] else {
+                panic!()
+            };
+            assert!(title.starts_with("Pressed"), "{title}");
+            assert!(body.contains("ended by itself"), "{body}");
+            assert!(!o.state.pressed && o.state.unsettled.is_none());
+            assert_eq!(o.state.week.as_deref(), Some(week));
+            let mut a = fake(
+                vec![Ok(week_of(week, ends, 99.0)), Ok(week_of(week, ends, 0.0))],
+                vec![Reset::Pressed(String::new())],
+            );
+            run(&mut a, o.state, ENDS + 3600.0);
+            assert_eq!(a.asked, 1);
+        }
     }
 
     #[test]

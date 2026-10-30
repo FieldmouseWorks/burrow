@@ -233,11 +233,15 @@ pub fn usage(answer: &Value) -> Result<Reading, String> {
     let resets = week["resets_at"]
         .as_str()
         .ok_or("get_usage has no weekly resets_at")?;
+    let ends = resets
+        .parse::<jiff::Timestamp>()
+        .map_err(|e| format!("get_usage's weekly resets_at {resets}: {e}"))?;
     // To the minute: the same week's end may come back with a different
     // fraction of a second.
     Ok(Reading {
         used,
         week: resets.chars().take(16).collect(),
+        ends: ends.as_second() as f64,
     })
 }
 
@@ -669,7 +673,8 @@ mod tests {
             usage(&answer),
             Ok(Reading {
                 used: 71.4,
-                week: "2026-11-04T19:00".to_owned()
+                week: "2026-11-04T19:00".to_owned(),
+                ends: 1_793_818_800.0,
             })
         );
         // Logged in with an API key, or not at all.

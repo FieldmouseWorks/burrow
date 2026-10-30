@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 use std::{env, fs};
 
+use jiff::tz::TimeZone;
 use serde::Deserialize;
 
 use burrow_usage_reset::claude::ClaudeCode;
@@ -142,13 +143,13 @@ fn tell(notify: &str, notice: Notice) {
 
 /// A moment as the machine's clock (its time zone) says it, for the owner.
 fn local_time(t: f64) -> String {
-    Command::new("date")
-        .args(["-d", &format!("@{}", t.round()), "+%a %-I:%M %p %Z"])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
-        .unwrap_or_else(|| format!("{} (epoch)", t.round()))
+    match jiff::Timestamp::from_second(t.round() as i64) {
+        Ok(at) => at
+            .to_zoned(TimeZone::system())
+            .strftime("%a %-I:%M %p %Z")
+            .to_string(),
+        Err(_) => format!("{} (epoch)", t.round()),
+    }
 }
 
 #[cfg(test)]
