@@ -11,7 +11,8 @@
 # something main never gets. So it rides the PR instead: main with the PR's
 # head on top, which is what the train lands next.
 
-# update.sh sets state, REPO, BRANCH, HOST, UPDATE, as_user and git_.
+# update.sh sets state, REPO, BRANCH, HOST, UPDATE, TRAIN, riding, changed,
+# as_user and git_.
 # shellcheck disable=SC2154
 
 # The open PR, as "NUMBER HEAD"; nothing when there's none. Fails when GitHub
@@ -40,6 +41,21 @@ ride() {
     echo "its PR #$n doesn't merge onto main; holding until it's fixed"
     return 1
   }
+}
+
+# HEAD builds $1, the system HOST runs already. "up" when it's a bump of
+# HOST-update's own to put up, in a train repo and not riding: only once
+# HOST-update put that system live itself (its record in deployed), through
+# the switch and the health check, and then only after the VM tests on HEAD's
+# tree. "hold" when someone else did. Otherwise "current": nothing to do.
+already_live() {
+  if [ -z "$TRAIN" ] || [ -n "$riding" ] || [ -z "$changed" ]; then
+    echo current
+  elif [ "$(cat "$state/deployed" 2>/dev/null)" = "$1" ]; then
+    echo up
+  else
+    echo hold
+  fi
 }
 
 # HEAD as a new PR: title $1, body $2. Only with none open: whatever was on

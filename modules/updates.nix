@@ -27,15 +27,24 @@ let
   update = "${prefix}-update";
   health = "${prefix}-health";
   project = baseNameOf config.burrow.flake;
-  # OWNER/NAME, when the flake lives on GitHub.
+  # OWNER/NAME, when the flake lives on GitHub: over HTTPS, scp-style SSH or
+  # ssh://, with or without .git and a trailing slash. An origin on github.com
+  # in any other form is refused (the assertion below), so a repo's train is
+  # never off only because its URL wasn't read.
   githubRepo =
-    let m = builtins.match "(https://github.com/|git@github.com:)([^/]+/[^/]+)" (lib.removeSuffix ".git" cfg.origin);
-    in if m == null then null else lib.elemAt m 1;
+    let
+      url = lib.removeSuffix ".git" (lib.removeSuffix "/" cfg.origin);
+      m = builtins.match "(https://github\\.com/|git@github\\.com:|ssh://git@github\\.com(:22)?/)([^/]+/[^/]+)" url;
+    in if m == null then null else lib.elemAt m 2;
+  onGithub = builtins.match ".*[@/.]github\\.com[:/].*" cfg.origin != null;
   # Its PRs land through its merge train (burrow.autoland's `train`): then
-  # nothing here pushes to its main, and what would goes up as a PR.
+  # nothing here pushes to its main, and what would goes up as a PR. GitHub
+  # reads names whatever their case, so autoland's repos are matched that way.
   autoland = lib.attrByPath [ "burrow" "autoland" ] { } config;
-  train = cfg.enable && githubRepo != null && (autoland.enable or false)
-    && ((autoland.repos.${githubRepo} or { }).train or false);
+  autolandRepo = lib.findFirst (n: githubRepo != null && lib.toLower n == lib.toLower githubRepo) null
+    (lib.attrNames (autoland.repos or { }));
+  train = cfg.enable && autolandRepo != null && (autoland.enable or false)
+    && (autoland.repos.${autolandRepo}.train or false);
 
   vars = {
     UPDATE = update;
@@ -370,10 +379,11 @@ in
       type = lib.types.str;
       example = "https://github.com/sam/homelab";
       description = ''
-        Where the machine's flake lives (git URL). HOST-update deploys its main
-        branch and pushes the bumps it tested back there, with the user's git
-        login: as a PR from its own branch, HOST-update, when the repo's PRs
-        land through its merge train (`throughTrain`).
+        Where the machine's flake lives (git URL; on GitHub, any of the forms
+        GitHub gives: HTTPS, `git@github.com:` or `ssh://`). HOST-update
+        deploys its main branch and pushes the bumps it tested back there, with
+        the user's git login: as a PR from its own branch, HOST-update, when
+        the repo's PRs land through its merge train (`throughTrain`).
       '';
     };
 
@@ -564,6 +574,10 @@ in
         {
           assertion = (cfg.claudeManifest == null) == (config.burrow.claude.manifest == null);
           message = "Set burrow.updates.claudeManifest and burrow.claude.manifest together (the same file).";
+        }
+        {
+          assertion = onGithub -> githubRepo != null;
+          message = "burrow.updates.origin (${cfg.origin}) is on GitHub, but not as https://github.com/OWNER/NAME, git@github.com:OWNER/NAME or ssh://git@github.com/OWNER/NAME, so which repo it is (and whether its PRs land through a train) can't be read.";
         }
       ];
 

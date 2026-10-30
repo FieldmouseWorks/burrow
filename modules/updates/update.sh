@@ -247,16 +247,25 @@ else
 fi
 settled build-main "main builds again."
 
+live=
 if [ "$new" = "$current" ]; then
   # Running already, and not on main: what a run before put live (its PR
-  # closed, or the train took it while that run was testing a newer one).
-  if [ -n "$TRAIN" ] && [ -z "$riding" ] && [ -n "$changed" ]; then
-    url=$(propose "$(git_ log -1 --format=%s)" "$(pr_body)") || { note failed "$HOST runs $(describe), and its PR didn't open"; exit 1; }
-    note ok "already live; up as $url"
-    exit 0
-  fi
-  note current "nothing new builds; up to date${failed[*]:+ (held back: ${failed[*]})}"
-  exit 0
+  # didn't open, or closed, or the train took it while that run was testing a
+  # newer one), or a bump that changes only what the checks use. It goes up as
+  # a PR with what any other bump has: the switch and the health check it
+  # passed when it went live, and the VM tests below, on this tree (which isn't
+  # the one that went live once main moved under it or the checks' inputs did).
+  case $(already_live "$new") in
+    up) live=1 ;;
+    hold)
+      note current "$HOST runs what $(describe) builds, but $UPDATE didn't put it live, so it never had the health check; holding it until main has it"
+      exit 0
+      ;;
+    *)
+      note current "nothing new builds; up to date${failed[*]:+ (held back: ${failed[*]})}"
+      exit 0
+      ;;
+  esac
 fi
 
 # 5. The VM tests, under KVM, on exactly this tree.
@@ -368,47 +377,50 @@ So they went live without it, under the dead man's switch and the health check. 
 fi
 
 # 6. Live, with the dead man's switch; healthy, or straight back.
-"$HEALTH" snapshot "$state/health-before"
-claude_before=$(as_user claude --version 2>/dev/null || true)
-rc=0
-BURROW_CONFIRM_WITHIN=$WITHIN "$SWITCH" --toplevel "$new" >"$state/logs/switch.log" 2>&1 || rc=$?
-if [ "$rc" = 3 ]; then
-  # Refused before anything went live: an older nixpkgs than the running one.
-  note failed "the switch refused it as a downgrade; nothing changed"
-  dispatch switch "$UPDATE: $SWITCH refused $new ($(describe)) as built from an older nixpkgs than the running system, so nothing went live. The output is $state/logs/switch.log. Find out why the new system looks older (each reads nixpkgs' date from its /etc/burrow/inputs.json) and fix it. $worktree_rules"
-  exit 1
-fi
-if [ "$rc" != 0 ]; then
-  "$SWITCH" --abort >>"$state/logs/switch.log" 2>&1 || true
-  note failed "activation failed; reverted"
-  dispatch activation "$UPDATE: switching to $new ($(describe)) failed during activation and was reverted. The output is $state/logs/switch.log; journalctl has the rest. Fix it. $worktree_rules"
-  exit 1
-fi
-if ! bad=$("$HEALTH" compare "$state/health-before" 180); then
-  "$SWITCH" --abort >>"$state/logs/switch.log" 2>&1 || true
-  note failed "unhealthy after the switch ($bad); reverted"
-  dispatch health "$UPDATE switched $HOST to $new ($(describe)) and these regressed: $bad. It reverted right away. Find out why (journalctl, the unit logs, a diff of the two systems: nix store diff-closures $current $new) and fix it. $worktree_rules"
-  "$NOTIFY" open health "An update broke something and was rolled back" \
-    "$UPDATE switched to $(describe) and then: $bad. $HOST went straight back to the previous system. A Claude job is on it; this closes when an update goes through."
-  exit 1
-fi
-
-# Claude Code itself: if it changed, make sure it still answers. A failure here
-# is noted, not reverted: it can be Anthropic's side as easily as ours.
-if [ "$(as_user claude --version 2>/dev/null || true)" != "$claude_before" ]; then
-  if ! (cd "$HOME_DIR" && as_user timeout 120 claude -p "Reply with the single word OK." --max-turns 1) 2>&1 | grep -q OK; then
-    echo "warning: the new Claude Code didn't answer a one-line prompt" | systemd-cat -t "$UPDATE" -p warning
+# Already live: it went through this when it did.
+if [ -z "$live" ]; then
+  "$HEALTH" snapshot "$state/health-before"
+  claude_before=$(as_user claude --version 2>/dev/null || true)
+  rc=0
+  BURROW_CONFIRM_WITHIN=$WITHIN "$SWITCH" --toplevel "$new" >"$state/logs/switch.log" 2>&1 || rc=$?
+  if [ "$rc" = 3 ]; then
+    # Refused before anything went live: an older nixpkgs than the running one.
+    note failed "the switch refused it as a downgrade; nothing changed"
+    dispatch switch "$UPDATE: $SWITCH refused $new ($(describe)) as built from an older nixpkgs than the running system, so nothing went live. The output is $state/logs/switch.log. Find out why the new system looks older (each reads nixpkgs' date from its /etc/burrow/inputs.json) and fix it. $worktree_rules"
+    exit 1
   fi
-fi
+  if [ "$rc" != 0 ]; then
+    "$SWITCH" --abort >>"$state/logs/switch.log" 2>&1 || true
+    note failed "activation failed; reverted"
+    dispatch activation "$UPDATE: switching to $new ($(describe)) failed during activation and was reverted. The output is $state/logs/switch.log; journalctl has the rest. Fix it. $worktree_rules"
+    exit 1
+  fi
+  if ! bad=$("$HEALTH" compare "$state/health-before" 180); then
+    "$SWITCH" --abort >>"$state/logs/switch.log" 2>&1 || true
+    note failed "unhealthy after the switch ($bad); reverted"
+    dispatch health "$UPDATE switched $HOST to $new ($(describe)) and these regressed: $bad. It reverted right away. Find out why (journalctl, the unit logs, a diff of the two systems: nix store diff-closures $current $new) and fix it. $worktree_rules"
+    "$NOTIFY" open health "An update broke something and was rolled back" \
+      "$UPDATE switched to $(describe) and then: $bad. $HOST went straight back to the previous system. A Claude job is on it; this closes when an update goes through."
+    exit 1
+  fi
 
-"$CONFIRM" >>"$state/logs/switch.log" 2>&1 || {
-  note failed "health was fine but $CONFIRM failed; it reverts by itself"
-  exit 1
-}
-settled switch "An update went through."
-settled activation "An update went through."
-settled health "An update went through."
-[ ${#untested[@]} -gt 0 ] || settled untested "An update passed every VM test again."
+  # Claude Code itself: if it changed, make sure it still answers. A failure here
+  # is noted, not reverted: it can be Anthropic's side as easily as ours.
+  if [ "$(as_user claude --version 2>/dev/null || true)" != "$claude_before" ]; then
+    if ! (cd "$HOME_DIR" && as_user timeout 120 claude -p "Reply with the single word OK." --max-turns 1) 2>&1 | grep -q OK; then
+      echo "warning: the new Claude Code didn't answer a one-line prompt" | systemd-cat -t "$UPDATE" -p warning
+    fi
+  fi
+
+  "$CONFIRM" >>"$state/logs/switch.log" 2>&1 || {
+    note failed "health was fine but $CONFIRM failed; it reverts by itself"
+    exit 1
+  }
+  settled switch "An update went through."
+  settled activation "An update went through."
+  settled health "An update went through."
+  [ ${#untested[@]} -gt 0 ] || settled untested "An update passed every VM test again."
+fi
 
 # 7. Push, and bring the operator's checkout along when it isn't mid-work.
 # (The commit says what was skipped. The running system keeps the old commit
@@ -435,7 +447,7 @@ if [ "$(as_user git -C "$operator" branch --show-current 2>/dev/null)" = main ] 
   as_user git -C "$operator" pull -q --ff-only origin main || true
 fi
 
-note ok "live and confirmed: ${changed:+$(describe)}${changed:-main $(git_ rev-parse --short HEAD)}${riding:+ (riding #$riding)}${url:+ (up as $url)}${failed[*]:+ (held back: ${failed[*]})}"
+note ok "${live:+already }live and confirmed: ${changed:+$(describe)}${changed:-main $(git_ rev-parse --short HEAD)}${riding:+ (riding #$riding)}${url:+ (up as $url)}${failed[*]:+ (held back: ${failed[*]})}"
 [ -z "$BOOT" ] || ! "$BOOT" status | grep -q 'trial queued: /' ||
   echo "the new kernel boots once at the next trial window ($BOOT trial)"
 exit 0
