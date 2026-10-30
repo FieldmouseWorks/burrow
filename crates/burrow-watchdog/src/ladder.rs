@@ -105,6 +105,10 @@ pub fn run(cfg: &Config, world: &dyn World, now: f64) -> Result<(), String> {
             } else {
                 escalate(cfg, world, &s, st, now, &mut wakes);
             }
+        } else if st.item.line {
+            // Waiting for a slot: a job would join the same line, ahead of
+            // it. The stuck issue's one job looks at the line as a whole.
+            escalate(cfg, world, &s, st, now, &mut wakes);
         } else if let (Some(kick), None) = (&kick, st.kicked) {
             println!("stalled, kicked {kick}: {}", line(&st.item));
             world.kick(kick);

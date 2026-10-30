@@ -3,15 +3,15 @@
 # then --first ones, then the oldest, holding the waiting shell's pid. A slot
 # is a lock on JOBS/.slots/N, and N.who says whose (class and project), so a
 # turn that's killed frees its slot (and its place in line) by itself. pick
-# (pick.sh) says who goes next.
+# (pick.sh) says who has a slot.
 #
-# One waiter looks at a time, under JOBS/.slots/.lock, and only the one pick
+# One waiter looks at a time, under JOBS/.slots/.lock, and only those pick
 # names can take a slot, so what a look costs comes out of every waiter's turn
 # at the lock: with the line long, of how soon a free slot gets filled. So a
 # look forks nothing per waiter (and git once per project: class), and it
-# leaves pick's choice in JOBS/.slots/.next. For NEXT_FRESH seconds after that,
-# any waiter it doesn't name has nothing to learn and skips its look. It's only
-# ever a reason not to look: a slot is taken only by a look, under the lock.
+# leaves all of pick's choice in JOBS/.slots/.next. For NEXT_FRESH seconds after
+# that, any waiter it doesn't name has nothing to learn and skips its look. It's
+# only ever a reason not to look: a slot is taken only by a look, under the lock.
 # shellcheck disable=SC2034,SC2154 # jobs, spare (proj.sh) and the_place (pick.sh) when this is checked alone
 NEXT_FRESH=2
 # Whatever the note says, a waiter looks this often, which is as long as a job
@@ -20,14 +20,24 @@ LOOK_EVERY=60
 
 # Whether a waiter with this place, which last looked at this time, should look
 # now: it's never looked, or not lately, or there's no fresh note, or the note
-# names it. The note may be caught half written: that only costs a look.
+# names it. The note is the time and each name, tab-separated, and may be caught
+# half written: that costs a look, or a pass until the writer's done.
 look_due() {
-  local at='' name=''
+  local at='' names=''
   [ $((EPOCHSECONDS - $2)) -lt "$LOOK_EVERY" ] || return 0
-  { IFS=$'\t' read -r at name <"$jobs/.slots/.next"; } 2>/dev/null || return 0
+  { IFS=$'\t' read -r at names <"$jobs/.slots/.next"; } 2>/dev/null || return 0
   [[ $at =~ ^[0-9]+$ ]] || return 0
   [ "$at" -le "$EPOCHSECONDS" ] && [ $((EPOCHSECONDS - at)) -lt "$NEXT_FRESH" ] || return 0
-  [ "$name" = "$1" ]
+  [[ $'\t'$names$'\t' == *$'\t'"$1"$'\t'* ]]
+}
+
+# Leave what pick said (NAME N lines) as the note, for look_due.
+note_next() {
+  local name n note=$EPOCHSECONDS
+  while IFS=$'\t' read -r name n; do
+    [ -z "$name" ] || note+=$'\t'$name
+  done <<<"$1"
+  printf '%s\n' "$note" >"$jobs/.slots/.next"
 }
 
 # Whether the place at a path is a waiting shell's: its pid's cmdline is that
@@ -82,7 +92,7 @@ look() {
 # pick.sh) is asked again at every look, and its place in line, its admission
 # and its slot's N.who all go by that one answer.
 take_slot() {
-  local id=$1 n=$2 class=$3 me since got name i lk new looked=0 project LC_ALL=C
+  local id=$1 n=$2 class=$3 me since got i lk new looked=0 project LC_ALL=C
   mkdir -p "$jobs/.queue" "$jobs/.slots"
   since=$EPOCHSECONDS
   case $class in first) me=1 ;; *) me=2 ;; esac
@@ -124,17 +134,17 @@ take_slot() {
     look "$me" "$id" "$class"
     looked=$EPOCHSECONDS
     got=$(printf '%s' "$seen" | pick)
-    name=${got%$'\t'*}
-    printf '%s\t%s\n' "$EPOCHSECONDS" "$name" >"$jobs/.slots/.next"
+    note_next "$got"
+    i=$(picked "$me" <<<"$got")
     # Short of memory matters only while another job runs: with nothing
     # running, waiting frees nothing.
-    if [ "$name" = "$me" ] && { [ -z "$busy" ] || [ "$(spare)" -ge "$MIN_FREE" ]; }; then
-      i=${got##*$'\t'}
+    if [ -n "$i" ] && { [ -z "$busy" ] || [ "$(spare)" -ge "$MIN_FREE" ]; }; then
       exec {slot}>"$jobs/.slots/$i"
       if flock -n "$slot"; then
         line_of project "$jobs/$id/project"
         printf '%s\t%s\n' "$class" "$project" >"$jobs/.slots/$i.who"
-        # The note named this one: the next to go needn't wait it out.
+        # The note named this one: the next to go needn't wait it out, and
+        # any others it named find theirs in the next look.
         : >"$jobs/.slots/.next"
         exec {lk}>&-
         rm -f "$me"

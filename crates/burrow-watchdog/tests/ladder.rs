@@ -522,6 +522,45 @@ fn one_job_a_pass() {
     );
 }
 
+// A turn that's only waiting for a slot gets no job of its own, which would
+// join the line ahead of it: it goes straight to the stuck issue, whose one job
+// looks at the line as a whole. Then the owner, as any stall does.
+#[test]
+fn in_line() {
+    let m = Machine::new();
+    let waits = |key: &str| {
+        let mut it = named(
+            &format!("proj job {key}"),
+            "turn 1 is waiting in line for a slot",
+            T - 3.0 * H,
+            T - MIN,
+        );
+        it["line"] = true.into();
+        it
+    };
+    m.write(
+        &m.line,
+        json!({"homelab-1": waits("homelab-1"), "homelab-2": waits("homelab-2")}),
+        T,
+    );
+    m.run(T);
+    assert_eq!(m.runs(), Vec::<Vec<String>>::new());
+    assert_eq!(m.escalated().len(), 2);
+    assert!(m.kicks().contains(&"autoland".to_owned()));
+    // Anything else that's stuck beside it still gets its job, and the job's
+    // task doesn't name what's in line.
+    m.write(
+        &m.steward,
+        json!({"sam/r#7": item(T - 3.0 * H, T - MIN, None)}),
+        T,
+    );
+    m.run(T + MIN);
+    let runs = m.runs();
+    let [job] = &runs[..] else { panic!("{runs:?}") };
+    assert!(job[10].contains("PR #7"));
+    assert!(!job[10].contains("homelab-1"));
+}
+
 // A job that couldn't start is tried again RETRY later, and after
 // escalateAfter it's the next step's.
 #[test]

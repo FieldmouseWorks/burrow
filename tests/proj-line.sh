@@ -124,6 +124,11 @@ note "$now$T/q/next"
 due /q/next "$now" || fail "a fresh note names it, and it doesn't look"
 due /q/other 0 || fail "a waiter that never looked doesn't"
 due /q/other $((now - LOOK_EVERY)) || fail "a waiter that hasn't looked in LOOK_EVERY doesn't"
+note "$now$T/q/next$T/q/2-1-b"
+due /q/2-1-b "$now" || fail "a fresh note names it second, and it doesn't look"
+due /q/next "$now" || fail "a fresh note names it first, and it doesn't look"
+! due /q/2-1 "$now" || fail "a fresh note names one its name starts, and it looks"
+! due /q/other "$now" || fail "a fresh note naming two others, and it looks"
 note "$now$T"
 ! due /q/other "$now" || fail "a fresh note that nobody goes, and it looks"
 note "$((now - NEXT_FRESH))$T/q/next"
@@ -137,6 +142,16 @@ due /q/other "$now" || fail "an empty note, and it doesn't look"
 rm "$jobs/.slots/.next"
 due /q/other "$now" || fail "no note, and it doesn't look"
 
+# What pick says becomes the note, every name of it; nothing, a note of nobody.
+note_next "/q/a${T}1"$'\n'"/q/b${T}2"
+due /q/a "$now" || fail "a note left out the first pick named: $(cat "$jobs/.slots/.next")"
+due /q/b "$now" || fail "a note left out the second pick named: $(cat "$jobs/.slots/.next")"
+! due /q/c "$now" || fail "a note named one pick didn't: $(cat "$jobs/.slots/.next")"
+note_next ""
+[ -z "$(cut -s -f2- "$jobs/.slots/.next")" ] || fail "nothing from pick, and a note of someone"
+! due /q/a "$now" || fail "nothing from pick, and a waiter looks"
+rm "$jobs/.slots/.next"
+
 # Whole, with real shells: the line's head takes the free slot within seconds
 # of it coming free, with the rest of the line skipping their looks; and it
 # clears the note, so the next needn't wait it out.
@@ -144,14 +159,14 @@ rm -rf "${jobs:?}/.queue" "${jobs:?}/.slots"
 mkdir -p "$jobs/.queue" "$jobs/.slots"
 sleep 3 # so no place is left of the shell above
 MAX_JOBS=1 PIPELINE_SLOTS=0
-export -f look look_due waiter_alive take_slot pick place class line_of github_repo origin listed flake_project spare
+export -f look look_due note_next waiter_alive take_slot pick picked place class line_of github_repo origin listed flake_project spare
 export jobs NEXT_FRESH LOOK_EVERY MAX_JOBS PIPELINE_SLOTS
 exec {held}>"$jobs/.slots/1"
 flock -n "$held"
 waiter() {
   mkdir -p "$jobs/$1"
   echo "$tmp/web" >"$jobs/$1/project"
-  bash -c 'id=$1; declare -A classes=(); take_slot "$id" 1 normal; echo "$EPOCHSECONDS" >"$jobs/$id/took"; eval "$2"' proj "$1" "$hold" _exec "$1" {held}>&- >/dev/null 2>&1 &
+  bash -c 'id=$1; declare -A classes=(); take_slot "$id" 1 normal; echo "$EPOCHSECONDS" >"$jobs/$id/took"; eval "$2"' proj "$1" "$hold" _exec "$1" {held}>&- {held2}>&- >/dev/null 2>&1 &
   pids+=($!)
 }
 pids=()
@@ -168,6 +183,34 @@ for _ in $(seq 1 200); do [ -e "$jobs/w0/took" ] && break; sleep 0.05; done
 [ $(($(cat "$jobs/w0/took") - freed)) -le 6 ] || fail "the head took a free slot $(($(cat "$jobs/w0/took") - freed))s after it freed"
 for i in 1 2 3 4; do [ ! -e "$jobs/w$i/took" ] || fail "w$i took a slot w0 holds"; done
 [ "$(in_queue)" = 4 ] || fail "w0's place stayed in line"
+
+# Two slots free at once: both go in a look or two, the next two in line, with
+# the note's skipping holding up neither.
+kill "${pids[@]}" 2>/dev/null || true
+wait "${pids[@]}" 2>/dev/null || true
+pids=()
+rm -rf "${jobs:?}/.queue" "${jobs:?}/.slots" "${jobs:?}"/w?
+mkdir -p "$jobs/.queue" "$jobs/.slots"
+MAX_JOBS=2
+exec {held}>"$jobs/.slots/1" {held2}>"$jobs/.slots/2"
+flock -n "$held"
+flock -n "$held2"
+waiter w0
+until [ "$(in_queue)" = 1 ]; do sleep 0.05; done
+waiter w1
+until [ "$(in_queue)" = 2 ]; do sleep 0.05; done
+for i in 2 3 4; do waiter "w$i"; done
+until [ "$(in_queue)" = 5 ]; do sleep 0.05; done
+sleep 3
+freed=$EPOCHSECONDS
+exec {held}>&- {held2}>&-
+for w in w0 w1; do
+  for _ in $(seq 1 200); do [ -e "$jobs/$w/took" ] && break; sleep 0.05; done
+  [ -e "$jobs/$w/took" ] || fail "$w didn't take a slot in 10s"
+  [ $(($(cat "$jobs/$w/took") - freed)) -le 6 ] || fail "$w took a free slot $(($(cat "$jobs/$w/took") - freed))s after it freed"
+done
+for i in 2 3 4; do [ ! -e "$jobs/w$i/took" ] || fail "w$i took a slot ahead of the line"; done
+[ "$(in_queue)" = 3 ] || fail "two took slots, and $(in_queue) are left of five"
 
 # in_line: all of it, in the order pick takes them, each with its wait.
 LEAD=sam/burrow
