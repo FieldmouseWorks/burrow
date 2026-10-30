@@ -313,6 +313,21 @@ assert GITHUB[heads[3]] == {"remi-proof": "success"} and pr_state(3)["strikes"] 
 FAIL.remove("context=other-proof")
 line(3, 1800, pending_two)
 assert from_store() == [] and other_store() == [taken(W)] and not pr_state(3)["strikes"], WROTE
+# GitHub ignores a context's case, and its spelling can change between reads.
+GITHUB[heads[3]] = {"REMI-PROOF": "failure", "Other-Proof": "error"}
+line(3, 1900, pending_two)
+assert from_store() == [] and other_store() == [], WROTE
+GITHUB[heads[3]] = {"REMI-PROOF": "success", "Other-Proof": "pending"}
+line(3, 2000, pending_two)
+assert from_store() == [] and other_store() == [taken(W)], WROTE
+GITHUB[heads[3]] = {"REMI-PROOF": "pending", "OTHER-PROOF": "pending"}
+FAIL.append("context=other-proof")
+line(3, 2100, pending_two)
+assert from_store() == [taken(Z)] and pr_state(3)["strikes"] == {"status": 1}, WROTE
+FAIL.remove("context=other-proof")
+GITHUB[heads[3]] = {"Remi-Proof": "success", "OTHER-PROOF": "pending"}
+line(3, 2200, pending_two)
+assert from_store() == [] and other_store() == [taken(W)] and not pr_state(3)["strikes"], WROTE
 del S.CFG["repos"]["sam/r"]["proofJobs"]["other-proof"]
 S.CFG["repos"]["sam/r"]["proofBuilds"] = {"remi-proof": "checks.x86_64-linux.proof"}
 # One output of two built isn't all of them: a job runs it.

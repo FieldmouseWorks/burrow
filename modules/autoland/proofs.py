@@ -129,15 +129,16 @@ def record(repo, pr, checks, drvs):
     doesn't read as a run. GitHub's word on each check, read fresh, says
     which to post: only one still waiting, so a pass that read it just
     before the last one's status posts nothing again, and one added, remapped
-    or set back to pending since is posted, and a red one is left red. False
+    or set back to pending since is posted, and a red one is left red. A
+    context is the same one however it's spelled: GitHub ignores its case. False
     if GitHub didn't answer or take one: what's left is posted next time."""
     head = pr["headRefOid"]
     now = C.gh("api", f"repos/{repo}/commits/{head}/status?per_page=100", check=False)
     if not isinstance(now, dict):
         return False
-    states = {s["context"]: s["state"] for s in now.get("statuses", [])}
+    settled = {s["context"].lower() for s in now.get("statuses", []) if s["state"] != "pending"}
     for c in checks:
-        if states.get(c, "pending") != "pending":
+        if c.lower() in settled:
             continue
         desc = f"Taken from the store, not run again: {drvs[c]} passed here before"
         if C.write("api", f"repos/{repo}/statuses/{head}", "-f", "state=success", "-f", f"context={c}",
