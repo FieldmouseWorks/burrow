@@ -31,6 +31,11 @@ for a in "$@"; do
 done
 set -- "${args[@]}"
 
+# systemd-oomd (burrow.ops.oomd) never picks the switch's own units: a killed
+# revert would leave the unconfirmed system live with nothing left to undo it,
+# and a killed activation leaves it half switched.
+keep=(--property=ManagedOOMPreference=omit)
+
 # The revert is a oneshot: "activating" for as long as it runs.
 reverting() {
   case $(systemctl show -p ActiveState --value "$REVERT.service") in
@@ -93,7 +98,7 @@ if [ "${1:-}" = --abort ]; then
   # A revert that already fired finishes on its own.
   while reverting; do sleep 1; done
   [ -e $state/pending ] || { echo "already reverted"; exit 0; }
-  systemd-run --unit="$REVERT-now" --collect --wait --pipe --quiet --setenv=PATH="$PATH" \
+  systemd-run --unit="$REVERT-now" "${keep[@]}" --collect --wait --pipe --quiet --setenv=PATH="$PATH" \
     "$(readlink -f "$0")" --revert-to "$(cat $state/prev)"
   exit
 fi
@@ -146,11 +151,11 @@ echo "$new" >$state/pending
 # Arm the revert before touching anything.
 # Transient units start with a bare PATH; hand ours (coreutils, systemd) over.
 systemd-run --unit="$REVERT" --on-active="$within" --timer-property=AccuracySec=1s \
-  --property=Type=oneshot --setenv=PATH="$PATH" \
+  --property=Type=oneshot "${keep[@]}" --setenv=PATH="$PATH" \
   "$(readlink -f "$0")" --revert-to "$prev"
 
 # Activate in its own unit, so it finishes even if it restarts whatever called it.
-if ! systemd-run --unit="$SWITCH-activate" --collect --wait --pipe --quiet \
+if ! systemd-run --unit="$SWITCH-activate" "${keep[@]}" --collect --wait --pipe --quiet \
   "$new/bin/switch-to-configuration" test; then
   echo "activation reported errors; it will revert in $within unless you run $CONFIRM" >&2
   exit 1

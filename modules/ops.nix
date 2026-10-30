@@ -1,7 +1,8 @@
 # Kernel, hardware and firmware tooling for an agent that runs the machine
 # all the way down (run it with sudo), plus a systemd watchdog so a hung box
-# reboots into its last good generation. Firmware updates are on offer;
-# installing one is an R2 (claude.nix).
+# reboots into its last good generation, and systemd-oomd so a box running
+# out of memory loses the job that ate it rather than drowning. Firmware
+# updates are on offer; installing one is an R2 (claude.nix).
 inputs:
 { config, lib, pkgs, ... }:
 let
@@ -20,6 +21,20 @@ in
         30s the board resets itself, in the initrd too. Load your board's
         watchdog driver (boot.kernelModules, and boot.initrd.kernelModules) for
         it to do anything.
+      '';
+    };
+    oomd = lib.mkOption {
+      type = lib.types.bool;
+      default = true;
+      description = ''
+        Have systemd-oomd watch the whole machine and kill the unit that is
+        drowning it: whichever holds the most swap once swap is 90% full, and
+        whichever reclaims the most once the root, system or any user's slice
+        spends 80% of its time stalled on memory for 30s. The kernel's own OOM
+        killer waits until memory and swap are gone, and with zram it can
+        thrash first for as long as it likes. sshd (socket-activated or not),
+        tailscaled and the switch's own units (burrow.switch) are never
+        picked.
       '';
     };
   };
@@ -59,6 +74,22 @@ in
     # (the driver has to be in boot.initrd.kernelModules for that).
     boot.initrd.systemd.settings.Manager.RuntimeWatchdogSec =
       lib.mkIf (cfg.watchdog && config.boot.initrd.systemd.enable) "30s";
+
+    systemd.oomd = lib.mkIf cfg.oomd {
+      enable = true;
+      enableRootSlice = true;
+      enableSystemSlice = true;
+      enableUserSlices = true;
+    };
+    systemd.slices."-".sliceConfig.ManagedOOMSwap = lib.mkIf cfg.oomd "kill";
+    # The ways in. openssh always has sshd@ (each connection's sshd, with
+    # startWhenNeeded) and has sshd only without it; naming a unit it doesn't
+    # have would make a stub of it.
+    systemd.services = lib.mkIf cfg.oomd (lib.genAttrs
+      (lib.optionals config.services.openssh.enable
+        ([ "sshd@" ] ++ lib.optional (!config.services.openssh.startWhenNeeded) "sshd")
+        ++ lib.optional config.services.tailscale.enable "tailscaled")
+      (_: { serviceConfig.ManagedOOMPreference = "omit"; }));
 
     services.fwupd.enable = true;
     services.smartd.enable = true;
