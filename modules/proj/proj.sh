@@ -51,7 +51,8 @@
 # first, and a turn that has waited MAX_WAIT seconds counts as --first itself,
 # so a stream of them can't starve it. PIPELINE_SLOTS of the slots are for pipeline jobs in the
 # pipeline's own repos alone, and no project's other jobs hold more than
-# PER_PROJECT at once (pick.sh). A waiting turn is just this shell. Every turn
+# PER_PROJECT at once (pick.sh). A waiting turn is just this shell, which
+# becomes the deployed proj at its next look after a switch (slot.sh). Every turn
 # runs in SLICE, which the machine caps, so jobs can't take memory from
 # anything else, and gets TIMEOUT (or the job's own --timeout) before it's
 # stopped, so a stuck one can't hold its slot for good. A job's --idle stops a
@@ -388,104 +389,6 @@ start_turn() {
     return 1
   fi
   rewatch "$id"
-}
-
-# Memory to spare, in MiB: what the kernel says is available, plus what the
-# ZFS ARC would give back (the kernel doesn't count it).
-spare() {
-  local kb arc
-  kb=$(awk '/^MemAvailable:/ { print $2 }' /proc/meminfo)
-  arc=0
-  if [ -r /proc/spl/kstat/zfs/arcstats ]; then
-    arc=$(awk '$1 == "size" { s = $3 } $1 == "c_min" { m = $3 } END { print (s > m ? int((s - m) / 1024) : 0) }' /proc/spl/kstat/zfs/arcstats)
-  fi
-  echo $(((kb + arc) / 1024))
-}
-
-# Wait in line for a slot, then hold it on fd $slot until this shell ends.
-# The line is JOBS/.queue: one file per waiting turn, named so that sorting
-# puts pipeline ones ahead, then --first ones, then the oldest, holding the
-# waiting shell's pid. A slot is a lock on JOBS/.slots/N, and N.who says
-# whose (class and project), so a turn that's killed frees its slot (and its
-# place in line) by itself. pick (pick.sh) says who has a slot. The turn is
-# first or normal, as it was started; its job's class (place, in pick.sh)
-# is asked again every pass, and its place in line, its admission and its
-# slot's N.who all go by that one answer.
-take_slot() {
-  local id=$1 n=$2 class=$3 me since seen got f fid pid i fd lk busy new LC_ALL=C
-  mkdir -p "$jobs/.queue" "$jobs/.slots"
-  since=$(date +%s)
-  case $class in first) me=1 ;; *) me=2 ;; esac
-  me="$jobs/.queue/$me-$(date +%s%N)-$id"
-  trap 'rm -f "$me" "${me%/*}/.${me##*/}.new"' EXIT
-  trap 'exit 143' TERM INT
-  while :; do
-    # Waited long enough: among the --first ones now, by when it came.
-    if [[ ${me##*/} == 2-* ]] && [ $(($(date +%s) - since)) -ge "$MAX_WAIT" ]; then
-      mv -f "$me" "${me%/*}/1-${me##*/2-}" 2>/dev/null || true
-      me="${me%/*}/1-${me##*/2-}"
-    fi
-    # Where it stands now, and in the journal if that changed while it waits.
-    IFS=$'\t' read -r class new < <(place "${me##*/}" "$jobs/$id")
-    if [ "$new" != "${me##*/}" ]; then
-      if mv -f "$me" "${me%/*}/$new" 2>/dev/null; then echo "proj: it goes as $class now" >&2; fi
-      me="${me%/*}/$new"
-    fi
-    # Published whole (a dot file, which the line skips, then renamed), so a
-    # waiter clearing out dead places never sees it without its pid. Put
-    # back if it went anyway.
-    if [ ! -e "$me" ]; then
-      echo "$$" >"${me%/*}/.${me##*/}.new"
-      mv -f "${me%/*}/.${me##*/}.new" "$me"
-    fi
-    # One waiter looks at a time, and a slot is taken only under this lock,
-    # so one it sees free stays free until it's done.
-    exec {lk}>"$jobs/.slots/.lock"
-    flock "$lk"
-    seen='' busy=''
-    for i in $(seq 1 "$MAX_JOBS"); do
-      exec {fd}>"$jobs/.slots/$i"
-      if flock -n "$fd"; then seen+="slot"$'\t'"$i"$'\t'"free"$'\n'
-      else
-        busy=1
-        seen+="slot"$'\t'"$i"$'\t'"$(cat "$jobs/.slots/$i.who" 2>/dev/null || printf -- '-\t-')"$'\n'
-      fi
-      exec {fd}>&-
-    done
-    # The line, once the places of shells that are gone are cleared.
-    for f in "$jobs/.queue"/*; do
-      [ -e "$f" ] || continue
-      fid=${f##*/}; fid=${fid#*-}; fid=${fid#*-}
-      pid=$(cat "$f" 2>/dev/null) || continue
-      if [ "$f" = "$me" ]; then
-        seen+="wait"$'\t'"$f"$'\t'"$class"
-        seen+=$'\t'"$(cat "$jobs/$id/project" 2>/dev/null)"$'\n'
-      elif [ -n "$pid" ] && tr '\0' ' ' 2>/dev/null <"/proc/$pid/cmdline" | grep -qF -- " _exec $fid "; then
-        seen+="wait"$'\t'"$f"$'\t'"$(place "${f##*/}" "$jobs/$fid" | cut -f1)"
-        seen+=$'\t'"$(cat "$jobs/$fid/project" 2>/dev/null)"$'\n'
-      else
-        rm -f "$f"
-      fi
-    done
-    got=$(printf '%s' "$seen" | pick | picked "$me")
-    # Short of memory matters only while another job runs: with nothing
-    # running, waiting frees nothing.
-    if [ -n "$got" ] && { [ -z "$busy" ] || [ "$(spare)" -ge "$MIN_FREE" ]; }; then
-      i=$got
-      exec {slot}>"$jobs/.slots/$i"
-      if flock -n "$slot"; then
-        printf '%s\t%s\n' "$class" "$(cat "$jobs/$id/project")" >"$jobs/.slots/$i.who"
-        exec {lk}>&-
-        rm -f "$me"
-        trap - EXIT TERM INT
-        echo "$i" >"$jobs/$id/$n.slot"
-        return
-      fi
-      exec {slot}>&-
-    fi
-    exec {lk}>&-
-    sleep 2
-  done
 }
 
 # OWNER/REPO N from a PR or issue URL, or OWNER/REPO#N.
@@ -831,6 +734,7 @@ Carry on from there. Anything you left in the background last turn was stopped w
       cut -f1 "$jobs/$id/await" 2>/dev/null | sed 's/#.*//; s#^#proj-watch/#' || true
     } | kick
     ;;
+  _queue_format) echo "$QUEUE_FORMAT" ;;
   _exec)
     # One turn of a job, inside its own systemd unit.
     id=$2
@@ -843,7 +747,8 @@ Carry on from there. Anything you left in the background last turn was stopped w
     # As its App, or not at all. Its env, read now, is what every run of the
     # turn starts in, so none starts as the user if the App goes while the
     # turn waits for a slot: it acts as an App that's gone, and reaches no
-    # GitHub at all.
+    # GitHub at all. A switch while it waits brings it back here (take_slot),
+    # to read it again: an App that switch took away fails the turn.
     appenv=''
     if [ -s "$dir/app" ]; then
       env=$(app_env "$(cat "$dir/app")")
