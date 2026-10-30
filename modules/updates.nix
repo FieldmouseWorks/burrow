@@ -31,6 +31,11 @@ let
   githubRepo =
     let m = builtins.match "(https://github.com/|git@github.com:)([^/]+/[^/]+)" (lib.removeSuffix ".git" cfg.origin);
     in if m == null then null else lib.elemAt m 1;
+  # Its PRs land through its merge train (burrow.autoland's `train`): then
+  # nothing here pushes to its main, and what would goes up as a PR.
+  autoland = lib.attrByPath [ "burrow" "autoland" ] { } config;
+  train = cfg.enable && githubRepo != null && (autoland.enable or false)
+    && ((autoland.repos.${githubRepo} or { }).train or false);
 
   vars = {
     UPDATE = update;
@@ -43,6 +48,10 @@ let
     SRC = config.burrow.projectsDir;
     FLAKE = config.burrow.flake;
     ORIGIN = cfg.origin;
+    TRAIN = if train then "1" else "";
+    # Where HOST-update's own PR comes from, in a train repo (updates/propose.sh).
+    REPO = if githubRepo == null then "" else githubRepo;
+    BRANCH = update;
     CONFIG = config.burrow.switch.configName;
     SYSTEM = system;
     MANIFEST = if cfg.claudeManifest == null then "" else cfg.claudeManifest;
@@ -90,9 +99,10 @@ let
 
   calls = [ tools.proj tools.notify ];
   healthTool = script health ./updates/health.sh (with pkgs; [ coreutils gnugrep gnused gawk systemd ]);
-  updateTool = script update [ ./updates/dispatch.sh ./updates/update.sh ] (
+  # Its own functions first (they run only once update.sh has defined what they call).
+  updateTool = script update [ ./updates/dispatch.sh ./updates/propose.sh ./updates/update.sh ] (
     (with pkgs; [ coreutils git jq curl util-linux systemd gnugrep gnused gawk vulnix config.nix.package ])
-    ++ [ healthTool tools.switch tools.confirm ] ++ calls ++ lib.optional (tools ? boot) tools.boot
+    ++ [ healthTool tools.switch tools.confirm machineGh ] ++ calls ++ lib.optional (tools ? boot) tools.boot
   );
   advisoryWatch = script "advisory-watch" ./updates/advisory-watch.sh (
     (with pkgs; [ coreutils curl jq gnugrep gnused gawk util-linux vulnix osv-scanner config.nix.package ]) ++ calls
@@ -362,7 +372,19 @@ in
       description = ''
         Where the machine's flake lives (git URL). HOST-update deploys its main
         branch and pushes the bumps it tested back there, with the user's git
-        login.
+        login: as a PR from its own branch, HOST-update, when the repo's PRs
+        land through its merge train (`throughTrain`).
+      '';
+    };
+
+    throughTrain = lib.mkOption {
+      type = lib.types.bool;
+      readOnly = true;
+      default = train;
+      defaultText = lib.literalMD "whether `origin`'s repo has `train` on in burrow.autoland.repos";
+      description = ''
+        Whether the flake's main moves only through its merge train, so
+        nothing on the machine pushes to it: what would goes up as a PR.
       '';
     };
 
@@ -633,10 +655,11 @@ in
         ${config.networking.hostName} keeps itself current; nobody runs updates by hand.
 
         - `${update}` (on each push to main or a watched input, and hourly) bumps every flake input${lib.optionalString (cfg.claudeManifest != null) " and Claude Code"},
-          builds, runs the VM tests, switches, checks health, confirms and pushes
-          to main. It deploys main too, so a merged PR goes live the same way. It
+          builds, runs the VM tests, switches, checks health, confirms and
+          ${if train then "puts it up as a PR from its branch `${update}`, which the merge train lands (while that's open it brings in nothing newer, and rides it on main instead)" else "pushes to main"}.
+          It deploys main too, so a merged PR goes live the same way. It
           holds off while a switch is pending or while ${config.networking.hostName} runs changes that
-          aren't on main, so commit and push what you switch to.
+          aren't on main, so ${if train then "put what you switch to up as a PR: only the merge train moves main" else "commit and push what you switch to"}.
         - `${update} status` says what the last run did. When ${config.burrow.owner} asks how
           updates are going, start there${lib.optionalString (vars.BOOT != "") ", plus `${vars.BOOT} status`"}.
       '' + lib.optionalString rcfg.enable ''

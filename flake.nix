@@ -352,6 +352,13 @@
           bash ${./tests/update-dispatch.sh} ${./modules/updates/dispatch.sh}
           touch $out
         '';
+        # HOST-update's own PR in a train repo (modules/updates/propose.sh):
+        # real git, with a stand-in for gh.
+        update-propose = pkgs.runCommand "update-propose-check" { nativeBuildInputs = [ pkgs.shellcheck pkgs.git pkgs.jq ]; } ''
+          shellcheck -s bash ${./modules/updates/propose.sh} ${./tests/update-propose.sh}
+          bash ${./tests/update-propose.sh} ${./modules/updates/propose.sh}
+          touch $out
+        '';
         # burrow-events for real: deliveries, kicks and wake-ups starting a
         # handler's units through polkit.
         events-service = import ./tests/events.nix { inherit self pkgs; };
