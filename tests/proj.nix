@@ -195,6 +195,15 @@ pkgs.testers.runNixOSTest {
         out = machine.fail(f"su - dev -c 'proj log {e}'")
         assert "ended without an answer" in out and "refused" in out, out
 
+    with subtest("a dot-named project's job isn't hidden from what goes through the jobs"):
+        machine.succeed("install -d -o dev -g dev /data/dev/src/.dotted")
+        j = proj('run .dotted "sleep 1"')
+        assert not j.startswith("."), j
+        assert j in proj("status"), proj("status")
+        machine.wait_until_succeeds(f"su - dev -c 'proj state {j}' | grep -x done", timeout=120)
+        assert machine.succeed(f"cat /data/dev/jobs/{j}/project").strip() == "/data/dev/src/.dotted"
+        machine.succeed("rm -rf /data/dev/src/.dotted")
+
     with subtest("past maxJobs, jobs wait in line, and --first goes ahead"):
         a = proj('run web "sleep 600"')
         b = proj('run web "sleep 600"')
