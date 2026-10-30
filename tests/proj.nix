@@ -116,6 +116,7 @@ pkgs.testers.runNixOSTest {
       "d /data/dev/src/lead 0755 dev dev -"
       "d /data/dev/src/ib 0755 dev dev -"
       "d /data/dev/src/bt 0755 dev dev -"
+      "d /data/dev/src/uk 0755 dev dev -"
     ];
     virtualisation.memorySize = 2048;
     # The test framework panics on any OOM, a cgroup's own included; a real
