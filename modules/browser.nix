@@ -128,6 +128,13 @@ in
       description = "Playwright's MCP server, which Claude drives the browser with: nixpkgs' playwright-mcp or one built like it, which the module patches so the files Claude names go to its output dir too.";
     };
 
+    profile = lib.mkOption {
+      type = lib.types.strMatching "[^/]+";
+      default = "Default";
+      example = "Profile 1";
+      description = "The Chromium profile it opens, the one your logins are in, by its directory's name in ${stateDir}/profile. It opens that one at every start, so a person added in the viewer doesn't leave it on Chromium's profile picker, where Claude can't reach your logins.";
+    };
+
     cdpPort = lib.mkOption {
       type = lib.types.port;
       default = 9222;
@@ -247,6 +254,9 @@ in
           ExecStart = lib.escapeShellArgs [
             (lib.getExe cfg.package)
             "--user-data-dir=${stateDir}/profile"
+            # With two profiles and none named, Chromium asks which at every
+            # start, and the MCP server gets none of the logins meanwhile.
+            "--profile-directory=${cfg.profile}"
             "--remote-debugging-port=${toString cfg.cdpPort}"
             # No keyring here: Chromium would wait for one.
             "--password-store=basic"

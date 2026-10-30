@@ -22,7 +22,8 @@
 # aren't, that a job run --app acts as its App every turn, whatever the login
 # sets and if the App goes while it waits, or not at all, and that a job
 # past its memory cap is killed by its own cgroup's limit rather than the
-# machine running out. Its GitHub side, proj await, proj-watch and
+# machine running out, and that a turn killed before it answers can still be
+# continued, in its own session. Its GitHub side, proj await, proj-watch and
 # proj-inbox, is proj-github.nix's part of the same script.
 #
 #   nix build .#checks.x86_64-linux.proj -L
@@ -600,5 +601,16 @@ pkgs.testers.runNixOSTest {
         e = proj("run web eat")
         machine.wait_until_succeeds(f"su - dev -c 'proj state {e}' | grep -x failed", timeout=120)
         machine.succeed("journalctl -k | grep -q 'Memory cgroup out of memory'")
+
+    with subtest("a turn killed before it answers can still be continued, in its own session"):
+        # As its unit goes when a command in it is past the job's memory cap.
+        e = proj('run web "named 600"')
+        machine.wait_until_succeeds(f"su - dev -c 'proj state {e}' | grep -x running", timeout=120)
+        machine.wait_until_succeeds(f"grep -q named /data/dev/jobs/{e}/1.jsonl", timeout=60)
+        machine.succeed(f"systemctl --user -M dev@ kill --signal=KILL '{unit(e)}'")
+        machine.wait_until_fails(f"systemctl --user -M dev@ is-active -q '{unit(e)}'", timeout=60)
+        proj(f'reply {e} "carry on"')
+        machine.wait_until_succeeds(f"su - dev -c 'proj state {e}' | grep -x done", timeout=120)
+        assert "--resume named" in machine.succeed("cat /tmp/args"), machine.succeed("cat /tmp/args")
   '';
 }

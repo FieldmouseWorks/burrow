@@ -322,6 +322,28 @@ assert mine == [(D.NO_JOB, "sam/r#7", "for what's stuck on Renovate's dashboard"
 assert not any("handed" in it for it in C.load("dashboard-sam_r.json", {})["items"].values())
 GH.pop("job")
 
+# An error still there after two of Renovate's runs on the repo since it
+# showed up is stuck then, short of a day: one run isn't two, a run before it
+# doesn't count, and the waits wait their days. The runs over every repo
+# count with the repo's own.
+C.save("dashboard-sam_r.json", {})
+dashboard(BODY)
+look(0)
+ran = C.CFG["dashboard"]["renovateRuns"]
+os.makedirs(ran)
+with open(f"{ran}/all", "w") as f:
+    f.write(f"{T - 600}\n{T + 600}\n")
+assert look(1200) == [] and not JOBS and C.WAKE == {"sam/r": T + DAY}, (JOBS, C.WAKE)
+with open(f"{ran}/sam_r", "w") as f:
+    f.write(f"{T + 1500}\n")
+assert look(1800) == [] and len(JOBS) == 1, JOBS
+task = JOBS[0][1]
+assert "Repository Problems: WARN: Found renovate config warnings" in task and "couldn't look up `left-pad`" in task, task
+assert "clap" not in task and "Config Migration Needed" not in task, task
+for f in ("all", "sam_r"):
+    os.remove(f"{ran}/{f}")
+os.rmdir(ran)
+
 # In the steward's pass: each repo's dashboard is looked at, after its PRs,
 # when it's on, and one that fails doesn't stop the rest.
 seen, published = [], []
