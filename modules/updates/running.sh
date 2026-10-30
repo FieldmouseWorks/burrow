@@ -1,8 +1,9 @@
 # What HOST runs, against what HEAD builds. Every system is stamped with the
 # commit it's built from (its configuration revision), so two builds of the
-# same tree from different commits are different store paths. On its own,
-# ahead of update.sh, so a check covers it (tests/update-running.sh); update.sh
-# sets work, CONFIG, state, current, rev, riding, changed, as_user and git_.
+# same tree from different commits are different store paths, and the stamp
+# alone doesn't say which commits are live. On its own, ahead of update.sh, so
+# a check covers it (tests/update-running.sh); update.sh sets work, CONFIG,
+# state, current, rev, riding, changed, as_user and git_.
 # shellcheck disable=SC2154
 
 # Is HEAD's system the one running, apart from the commit it's stamped with?
@@ -42,4 +43,14 @@ already_live() {
   else
     echo hold
   fi
+}
+
+# Every commit of main up to $1 is in $2, the system that runs: what a run
+# found, for burrow-dispatch, which counts main's commits past it as not live
+# yet. The stamp can't say it: a system that runs already keeps an older
+# commit's, and a ride's is a merge never pushed. It names the system, so a
+# switch to another since, by anyone, leaves it saying nothing.
+live_at() {
+  jq -n --arg main "$1" --arg running "$2" '{$main, $running}' >"$state/live.json.new" &&
+    mv "$state/live.json.new" "$state/live.json"
 }

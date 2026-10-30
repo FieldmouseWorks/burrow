@@ -173,3 +173,11 @@ already=$(riding=7 already_live /nix/store/sys-b)
 already=$(changed='' already_live /nix/store/sys-b)
 [ "$already" = current ] || fail "already_live with nothing new: $already"
 echo "already_live: ok"
+
+# What a run found live goes to burrow-dispatch whole: main's commit and the
+# system it's in, as one JSON object, with nothing half written left behind.
+live_at "$(git_ rev-parse main)" /nix/store/sys-b
+[ "$(jq -c . "$state/live.json")" = "{\"main\":\"$(git_ rev-parse main)\",\"running\":\"/nix/store/sys-b\"}" ] ||
+  fail "live_at wrote $(cat "$state/live.json")"
+[ ! -e "$state/live.json.new" ] || fail "live_at left its temporary file"
+echo "live_at: ok"

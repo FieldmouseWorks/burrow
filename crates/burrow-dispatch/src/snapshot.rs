@@ -123,11 +123,12 @@ pub fn take(cfg: &Config, world: &dyn World) -> Snapshot {
             .unwrap_or_else(|| "nothing yet".to_owned());
         snap.update = Some((world.unit(&d.unit), said));
         let mut compare: Vec<(&String, String)> = Vec::new();
-        // Its own repo, when the system says which commit of it it is; one
-        // that can't be asked is a repo it can't read.
+        // Its own repo, when HOST-update has said how far main is live in
+        // the system that runs; a record or a system that can't be read is
+        // a repo it can't read.
         if let Some(own) = &d.own {
-            match world.revision() {
-                Ok(Some(rev)) => compare.push((own, rev)),
+            match live(&d.live, world) {
+                Ok(Some(main)) => compare.push((own, main)),
                 Ok(None) => {}
                 Err(e) => {
                     snap.unread.insert(own.clone(), e);
@@ -276,6 +277,28 @@ fn default_branch(world: &dyn World, repo: &str) -> Result<String, String> {
         .ok_or_else(|| format!("{repo} has no default branch"))
 }
 
+/// The commit HOST-update last found its own repo's main live up to, from
+/// its record at `path`, when that record is of the system that runs: none
+/// without a record (no run has made one yet) or for a system switched to
+/// since (HOST-update hasn't looked at that one). A record or a system that
+/// can't be read is an error, so a wait isn't dropped on a failed read.
+fn live(path: &std::path::Path, world: &dyn World) -> Result<Option<String>, String> {
+    let text = match fs::read(path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("{}: {e}", path.display())),
+    };
+    let v: Value = serde_json::from_slice(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+    let field = |k: &str| {
+        v.get(k)
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| format!("{}: no {k}", path.display()))
+    };
+    let (main, running) = (field("main")?, field("running")?);
+    Ok((running == world.running()?).then(|| main.to_owned()))
+}
+
 /// What the repo's default branch has that `running` doesn't.
 fn behind(world: &dyn World, repo: &str, running: &str) -> Result<Behind, String> {
     let branch = default_branch(world, repo)?;
@@ -338,8 +361,7 @@ pub mod tests {
         pub units: BTreeMap<String, Unit>,
         pub then: BTreeMap<String, Unit>,
         pub looks: RefCell<BTreeMap<String, usize>>,
-        pub revision: Option<String>,
-        pub revision_fails: Option<String>,
+        pub running: Option<String>,
         pub switching: bool,
         pub did: RefCell<Vec<String>>,
         pub fails: Option<String>,
@@ -373,10 +395,10 @@ pub mod tests {
                 _ => self.units.get(unit).cloned().unwrap_or_default(),
             }
         }
-        fn revision(&self) -> Result<Option<String>, String> {
-            self.revision_fails
+        fn running(&self) -> Result<String, String> {
+            self.running
                 .clone()
-                .map_or_else(|| Ok(self.revision.clone()), Err)
+                .ok_or_else(|| "/run/current-system: No such file or directory".to_owned())
         }
         fn switching(&self) -> bool {
             self.switching
@@ -408,7 +430,7 @@ pub mod tests {
             "gap": 120.0,
             "deploy": {
                 "unit": "box-update", "handler": "update", "status": dir.join("status.json"),
-                "own": "sam/box",
+                "own": "sam/box", "live": dir.join("live.json"),
                 "running": {"sam/kit": "bbb"},
                 "after": 1800.0, "run": 5400.0,
             },
@@ -567,9 +589,10 @@ pub mod tests {
 
     // A watched repo's commits past the running one: how many, the oldest's
     // time and the newest; none when it's live. The flake's own repo is
-    // compared at the running system's configuration revision, and isn't
-    // when it has none (built from a dirty tree); one that can't be read
-    // leaves the repo unread.
+    // compared at the commit HOST-update last found main live up to, and
+    // isn't without that record, or when the record is of a system other
+    // than the one that runs; a record or a system that can't be read leaves
+    // the repo unread.
     #[test]
     fn deploys() {
         let dir = tempfile::tempdir().unwrap();
@@ -579,8 +602,10 @@ pub mod tests {
             r#"{"time": "2026-10-29T15:52:00+00:00", "result": "ok", "message": "deployed", "running": "/nix/store/x"}"#,
         )
         .unwrap();
+        let live = dir.path().join("live.json");
+        std::fs::write(&live, r#"{"main": "aaa", "running": "/nix/store/x"}"#).unwrap();
         let mut w = Fake {
-            revision: Some("aaa".into()),
+            running: Some("/nix/store/x".into()),
             ..Fake::default()
         };
         for r in ["box", "kit"] {
@@ -619,16 +644,37 @@ pub mod tests {
             snap.update.as_ref().unwrap().1,
             "ok at 2026-10-29T15:52:00+00:00: deployed"
         );
-        w.revision = None;
+        // A system switched to since, by anyone: HOST-update hasn't looked.
+        w.running = Some("/nix/store/y".into());
         let snap = take(&cfg, &w);
         assert!(!snap.deploys.contains_key("sam/box") && !snap.unread.contains_key("sam/box"));
         assert_eq!(snap.deploys["sam/kit"].count, 0);
-        // One that can't be asked isn't taken for live.
-        w.revision_fails = Some("nixos-version: No such file or directory".into());
+        // No record yet.
+        w.running = Some("/nix/store/x".into());
+        std::fs::remove_file(&live).unwrap();
         let snap = take(&cfg, &w);
+        assert!(!snap.deploys.contains_key("sam/box") && !snap.unread.contains_key("sam/box"));
+        // A record or a system that can't be read isn't taken for live.
+        std::fs::write(&live, r#"{"main": "aaa"}"#).unwrap();
+        let snap = take(&cfg, &w);
+        assert!(
+            snap.unread["sam/box"].ends_with("live.json: no running"),
+            "{:?}",
+            snap.unread
+        );
+        std::fs::write(&live, r#"{"main": "", "running": "/nix/store/x"}"#).unwrap();
+        assert!(take(&cfg, &w).unread["sam/box"].ends_with("live.json: no main"));
+        std::fs::write(&live, "{").unwrap();
+        assert!(take(&cfg, &w).unread.contains_key("sam/box"));
+        std::fs::remove_file(&live).unwrap();
+        std::fs::create_dir(&live).unwrap();
+        assert!(take(&cfg, &w).unread.contains_key("sam/box"));
+        std::fs::remove_dir(&live).unwrap();
+        std::fs::write(&live, r#"{"main": "aaa", "running": "/nix/store/x"}"#).unwrap();
+        w.running = None;
         assert_eq!(
-            snap.unread["sam/box"],
-            "nixos-version: No such file or directory"
+            take(&cfg, &w).unread["sam/box"],
+            "/run/current-system: No such file or directory"
         );
     }
 }
