@@ -1,0 +1,53 @@
+{
+  "conary": "note v1",
+  "change": "3jzy97bshyb558m57v16hy520g",
+  "repo": {
+    "owner": "fieldmouseworks",
+    "name": "burrow"
+  },
+  "pr": 175,
+  "url": "https://github.com/fieldmouseworks/burrow/pull/175",
+  "summary": "ops: systemd-oomd kills what drowns the machine before the machine drowns",
+  "task": "FieldmouseWorks/remi#181",
+  "author": {
+    "kind": "agent",
+    "login": "TusanHomichi",
+    "session": "https://claude.ai/code/session_01BkHcyETwYAPzE4eYpeX71B"
+  },
+  "landing": {
+    "revision": "8298a829a0c1424d07c8cce15ca92597b7c9628ac7a24013dd3a4891420f57cf",
+    "before": "517b4f28321eea537846ba33dda5cc6327b37830",
+    "after": "2e95eb5cf4c00c1fa79ef2cef82ef2ca059ff2ae",
+    "by": {
+      "kind": "status",
+      "login": "fieldmouseworks-steward[bot]"
+    },
+    "at": 1793320161811
+  },
+  "evidence": [
+    {
+      "kind": "ci",
+      "check": "check / commits",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/40956331750/job/123737279092"
+    },
+    {
+      "kind": "review",
+      "check": "codex",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/175#pullrequestreview-5705104023"
+    },
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/40956331750/job/123737278636"
+    },
+    {
+      "kind": "ci",
+      "check": "agents",
+      "result": "pass",
+      "source": "status agents"
+    }
+  ]
+}
