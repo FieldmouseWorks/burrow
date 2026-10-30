@@ -277,6 +277,7 @@ fn run(cfg: &Config, reply: bool, args: &[String]) -> Result<(), Fail> {
 /// when two start in the same second: its id.
 fn new_job(cfg: &Config, project: &str) -> Result<String, Fail> {
     fs::create_dir_all(&cfg.jobs).map_err(|e| io_fail(&cfg.jobs, e))?;
+    let name = id_name(project);
     let when = jiff::Zoned::now().strftime("%Y%m%d-%H%M%S").to_string();
     const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
     let random = RandomState::new();
@@ -291,7 +292,7 @@ fn new_job(cfg: &Config, project: &str) -> Result<String, Fail> {
                 c
             })
             .collect();
-        let id = format!("{project}-{when}-{tag}");
+        let id = format!("{name}-{when}-{tag}");
         match DirBuilder::new().mode(0o700).create(cfg.jobs.join(&id)) {
             Ok(()) => return Ok(id),
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists && attempt < 1000 => continue,
@@ -299,6 +300,19 @@ fn new_job(cfg: &Config, project: &str) -> Result<String, Fail> {
         }
     }
     unreachable!()
+}
+
+/// What a job's id starts with: its project's name, never hidden or
+/// option-like whatever the project is called (.github, .-x). The jobs dir's
+/// dotfiles are its own state, what goes through the jobs skips them, and
+/// systemd-escape takes a leading hyphen for an option. The job's path stays
+/// in its project file.
+fn id_name(project: &str) -> String {
+    if project.starts_with(['.', '-']) {
+        format!("dot{project}")
+    } else {
+        project.to_owned()
+    }
 }
 
 /// `proj status [N]`: the N jobs most recently changed, and how each is.
@@ -574,7 +588,21 @@ fn ended(cfg: &Config) -> Result<(), Fail> {
 
 #[cfg(test)]
 mod tests {
-    use super::kick_name;
+    use super::{id_name, kick_name};
+
+    #[test]
+    fn id_names() {
+        for (project, name) in [
+            ("web", "web"),
+            ("my.repo", "my.repo"),
+            (".github", "dot.github"),
+            ("..x", "dot..x"),
+            (".-x", "dot.-x"),
+            ("-x", "dot-x"),
+        ] {
+            assert_eq!(id_name(project), name, "{project}");
+        }
+    }
 
     #[test]
     fn kicks() {
