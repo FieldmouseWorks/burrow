@@ -110,7 +110,7 @@ pkgs.testers.runNixOSTest {
       keyFile = "/run/keys/workers.pem";
       api = "http://127.0.0.1:8080";
     };
-    environment.systemPackages = [ config.burrow.tools.gh config.burrow.tools.gh-token config.burrow.tools.git-lfs pkgs.git pkgs.krb5 pkgs.openssl ];
+    environment.systemPackages = [ config.burrow.tools.gh config.burrow.tools.gh-token config.burrow.tools.git-lfs config.programs.git.package pkgs.krb5 pkgs.openssl ];
     users.users.dev = { isNormalUser = true; };
     users.users.eve = { isNormalUser = true; };
     # dev's own logins: gh's, and a git helper the way `gh auth setup-git`

@@ -8,12 +8,7 @@
 # them, never a timer. With the stall watchdog on, proj is one of its
 # sources: each job's wait, as of its last change (proj/waits.sh).
 inputs:
-{
-  config,
-  lib,
-  pkgs,
-  ...
-}:
+{ config, lib, pkgs, ... }:
 let
   cfg = config.burrow.proj;
   # What marks proj-inbox's own comments on an issue: never a reply, never news.
@@ -26,30 +21,14 @@ let
   # and the lead ones, what it's built from, whose go first of all (pipeline
   # repos whether or not pipelineRepos lists them).
   leadRepos = lib.attrByPath [ "burrow" "autoland" "leadRepos" ] [ ] config;
-  pipelineRepos = lib.escapeShellArg (
-    lib.concatStringsSep " " (
-      lib.attrByPath [ "burrow" "autoland" "pipelineRepos" ] [ ] config ++ leadRepos
-    )
-  );
+  pipelineRepos = lib.escapeShellArg (lib.concatStringsSep " " (lib.attrByPath [ "burrow" "autoland" "pipelineRepos" ] [ ] config ++ leadRepos));
   # What each job waits on, for the stall watchdog, when it's on.
   watchdog = config.burrow.watchdog.enable or false;
   waits = "${cfg.jobsDir}/.waits.json";
 
   proj = pkgs.writeShellApplication {
     name = "proj";
-    runtimeInputs = [
-      pkgs.coreutils
-      pkgs.findutils
-      pkgs.gnugrep
-      pkgs.gnused
-      pkgs.gawk
-      pkgs.jq
-      pkgs.curl
-      pkgs.git
-      pkgs.systemd
-      pkgs.util-linux
-      pkgs.bashInteractive
-    ];
+    runtimeInputs = [ pkgs.coreutils pkgs.findutils pkgs.gnugrep pkgs.gnused pkgs.gawk pkgs.jq pkgs.curl config.programs.git.package pkgs.systemd pkgs.util-linux pkgs.bashInteractive ];
     text = ''
       SRC=${lib.escapeShellArg projectsDir}
       JOBS=${lib.escapeShellArg cfg.jobsDir}
@@ -73,31 +52,13 @@ let
       WAITS=${lib.escapeShellArg (lib.optionalString watchdog waits)}
       STALL_QUEUED=${toString (cfg.stallAfterMinutes * 60)}
       GRACE=600
-      APPS=${
-        lib.escapeShellArg (
-          lib.concatStrings (
-            lib.mapAttrsToList (name: app: "${name}=${app.envFile}\n") config.burrow.github.apps
-          )
-        )
-      }
-    ''
-    + builtins.readFile ./proj/pick.sh
-    + builtins.readFile ./proj/waits.sh
-    + builtins.readFile ./proj/proj.sh;
+      APPS=${lib.escapeShellArg (lib.concatStrings (lib.mapAttrsToList (name: app: "${name}=${app.envFile}\n") config.burrow.github.apps))}
+    '' + builtins.readFile ./proj/pick.sh + builtins.readFile ./proj/waits.sh + builtins.readFile ./proj/proj.sh;
   };
 
   inbox = pkgs.writeShellApplication {
     name = "proj-inbox";
-    runtimeInputs = [
-      proj
-      pkgs.coreutils
-      pkgs.git
-      cfg.gh
-      pkgs.jq
-      pkgs.gnused
-      pkgs.gnugrep
-      pkgs.util-linux
-    ];
+    runtimeInputs = [ proj pkgs.coreutils config.programs.git.package cfg.gh pkgs.jq pkgs.gnused pkgs.gnugrep pkgs.util-linux ];
     text = ''
       SRC=${lib.escapeShellArg projectsDir}
       JOBS=${lib.escapeShellArg cfg.jobsDir}
@@ -108,33 +69,19 @@ let
       VM=${if cfg.inbox.vm then "1" else "0"}
       MARK=${lib.escapeShellArg inboxMark}
       HOST=${lib.escapeShellArg config.networking.hostName}
-      NOTIFY=${
-        lib.escapeShellArg (
-          lib.optionalString (config.burrow.tools ? notify) (lib.getExe config.burrow.tools.notify)
-        )
-      }
+      NOTIFY=${lib.escapeShellArg (lib.optionalString (config.burrow.tools ? notify) (lib.getExe config.burrow.tools.notify))}
       WAKE=${lib.escapeShellArg inboxWake}
       PIPELINE=${pipelineRepos}
       MACHINERY=${lib.escapeShellArg (if machineApp == null then "" else machineApp.name)}
-    ''
-    + builtins.readFile ./proj/inbox.sh;
+    '' + builtins.readFile ./proj/inbox.sh;
   };
 in
 {
   imports = [
     (import ./common.nix inputs)
-    {
-      key = "burrow/events";
-      imports = [ (import ./events.nix inputs) ];
-    }
-    {
-      key = "burrow/watchdog/sources";
-      imports = [ ./watchdog/sources.nix ];
-    }
-    {
-      key = "burrow/github";
-      imports = [ (import ./github.nix inputs) ];
-    }
+    { key = "burrow/events"; imports = [ (import ./events.nix inputs) ]; }
+    { key = "burrow/watchdog/sources"; imports = [ ./watchdog/sources.nix ]; }
+    { key = "burrow/github"; imports = [ (import ./github.nix inputs) ]; }
   ];
 
   options.burrow.proj = {
@@ -288,154 +235,120 @@ in
     };
   };
 
-  config = lib.mkIf cfg.enable (
-    lib.mkMerge [
-      {
-        assertions = [
-          {
-            assertion = cfg.pipelineSlots < cfg.maxJobs;
-            message = "burrow.proj.pipelineSlots: leave other jobs at least one of the maxJobs slots.";
-          }
-          {
-            assertion = cfg.otherSlots <= cfg.maxJobs - cfg.pipelineSlots;
-            message = "burrow.proj.otherSlots: no more than the maxJobs slots that aren't pipelineSlots.";
-          }
-        ];
-        # Claude Code too, for when burrow.claude (which also installs it) is off.
-        environment.systemPackages = [
-          proj
-          config.burrow.claude.package
-        ];
-        burrow.tools.proj = proj;
-        # Jobs are units in the user's systemd manager, so they outlive the session
-        # that started them.
-        users.users.${user}.linger = lib.mkDefault true;
+  config = lib.mkIf cfg.enable (lib.mkMerge [ {
+    assertions = [{
+      assertion = cfg.pipelineSlots < cfg.maxJobs;
+      message = "burrow.proj.pipelineSlots: leave other jobs at least one of the maxJobs slots.";
+    } {
+      assertion = cfg.otherSlots <= cfg.maxJobs - cfg.pipelineSlots;
+      message = "burrow.proj.otherSlots: no more than the maxJobs slots that aren't pipelineSlots.";
+    }];
+    # Claude Code too, for when burrow.claude (which also installs it) is off.
+    environment.systemPackages = [ proj config.burrow.claude.package ];
+    burrow.tools.proj = proj;
+    # Jobs are units in the user's systemd manager, so they outlive the session
+    # that started them.
+    users.users.${user}.linger = lib.mkDefault true;
 
-        # Jobs that ended their turn waiting on GitHub (proj await) get the next
-        # one when what they wait on changes, so waiting holds no slot. A PR's or
-        # issue's events start the look at its repo (proj-watch@OWNER-REPO), and so
-        # does the end of a turn that awaits it; the deadline is booked in its
-        # wake file.
-        burrow.events.handlers.proj-watch = {
-          events = [
-            "pull_request"
-            "pull_request_review"
-            "pull_request_review_comment"
-            "issue_comment"
-            "issues"
-            "check_suite"
-            "status"
-          ];
-          unit = "proj-watch";
-          wake = watchWake;
-        };
-        systemd.services = lib.genAttrs [ "proj-watch" "proj-watch@" ] (name: {
-          description = "Resume proj jobs whose awaited PRs and issues changed${
-            lib.optionalString (name == "proj-watch@") " in %I"
-          }";
-          after = [ "network-online.target" ];
-          wants = [ "network-online.target" ];
-          serviceConfig = {
-            Type = "oneshot";
-            User = user;
-            ExecStart = "${proj}/bin/proj _watch${lib.optionalString (name == "proj-watch@") " %I"}";
-          };
-        });
-        systemd.tmpfiles.rules = [
-          "d ${cfg.jobsDir} 0755 ${user} ${config.users.users.${user}.group} -"
-          "d ${stateDir}/proj-watch 0755 ${user} ${config.users.users.${user}.group} -"
-        ];
+    # Jobs that ended their turn waiting on GitHub (proj await) get the next
+    # one when what they wait on changes, so waiting holds no slot. A PR's or
+    # issue's events start the look at its repo (proj-watch@OWNER-REPO), and so
+    # does the end of a turn that awaits it; the deadline is booked in its
+    # wake file.
+    burrow.events.handlers.proj-watch = {
+      events = [ "pull_request" "pull_request_review" "pull_request_review_comment" "issue_comment" "issues" "check_suite" "status" ];
+      unit = "proj-watch";
+      wake = watchWake;
+    };
+    systemd.services = lib.genAttrs [ "proj-watch" "proj-watch@" ] (name: {
+      description = "Resume proj jobs whose awaited PRs and issues changed${lib.optionalString (name == "proj-watch@") " in %I"}";
+      after = [ "network-online.target" ];
+      wants = [ "network-online.target" ];
+      serviceConfig = {
+        Type = "oneshot";
+        User = user;
+        ExecStart = "${proj}/bin/proj _watch${lib.optionalString (name == "proj-watch@") " %I"}";
+      };
+    });
+    systemd.tmpfiles.rules = [
+      "d ${cfg.jobsDir} 0755 ${user} ${config.users.users.${user}.group} -"
+      "d ${stateDir}/proj-watch 0755 ${user} ${config.users.users.${user}.group} -"
+    ];
 
-        # What every job waits on, for the stall watchdog: proj rewrites it, and
-        # kicks the watchdog, each time a job's wait changes, so an old file is
-        # no news.
-        burrow.watchdog.sources.proj = {
-          file = waits;
-          about = "proj, the machine's Claude jobs";
-          look = "`proj status` lists the jobs, and `proj log ID` (with --raw, its whole stream) shows what one did and where it stopped; `proj reply ID \"...\"` gives it its next turn, and `proj stop ID` ends one that's finished or no longer wanted.";
-        };
+    # What every job waits on, for the stall watchdog: proj rewrites it, and
+    # kicks the watchdog, each time a job's wait changes, so an old file is
+    # no news.
+    burrow.watchdog.sources.proj = {
+      file = waits;
+      about = "proj, the machine's Claude jobs";
+      look = "`proj status` lists the jobs, and `proj log ID` (with --raw, its whole stream) shows what one did and where it stopped; `proj reply ID \"...\"` gives it its next turn, and `proj stop ID` ends one that's finished or no longer wanted.";
+    };
 
-        burrow.claude.machineMd = lib.mkOrder 700 ''
-          ## Projects, from the operator
+    burrow.claude.machineMd = lib.mkOrder 700 ''
+      ## Projects, from the operator
 
-          ${config.burrow.owner} talks to one chat, the operator, for machine and project work alike. For
-          project work, hand it to a Claude inside that project, so it gets the
-          project's own CLAUDE.md and history:
+      ${config.burrow.owner} talks to one chat, the operator, for machine and project work alike. For
+      project work, hand it to a Claude inside that project, so it gets the
+      project's own CLAUDE.md and history:
 
-              proj list                         projects in ${projectsDir}
-              proj run web "the task"           start a job; prints its id
-              proj run --first web "the task"   the same, ahead of the line
-              proj run --pipeline burrow "..."  work on the pipeline itself: first of all, in its own slot
-              proj run --app NAME web "task"    acting on GitHub as the App NAME
-              proj status                       what's running, what finished
-              proj log ID                       its answer (--turn N for an earlier one, --raw for everything)
-              proj reply ID "follow-up"         continue the same conversation
-              proj stop ID                      end it: its running turn, and anything it awaits
+          proj list                         projects in ${projectsDir}
+          proj run web "the task"           start a job; prints its id
+          proj run --first web "the task"   the same, ahead of the line
+          proj run --pipeline burrow "..."  work on the pipeline itself: first of all, in its own slot
+          proj run --app NAME web "task"    acting on GitHub as the App NAME
+          proj status                       what's running, what finished
+          proj log ID                       its answer (--turn N for an earlier one, --raw for everything)
+          proj reply ID "follow-up"         continue the same conversation
+          proj stop ID                      end it: its running turn, and anything it awaits
 
-          Jobs run in the background and survive this session ending. At most
-          ${toString cfg.maxJobs} run at once, ${toString cfg.maxJobsPerProject} from any one project; the rest are queued. Use --first when ${config.burrow.owner} is
-          waiting on the answer, and --pipeline for work on the steward, its reviewers, CI or proj${
-            lib.optionalString (leadRepos != [ ])
-              " (in ${lib.concatStringsSep ", " leadRepos}, what the pipeline is built from, it goes first of all)"
-          }. Check on them,
-          relay results to ${config.burrow.owner}, and follow up yourself where the answer is obvious.
-          Each turn ends saying what comes next: `proj await PR-URL` when it waits
-          on GitHub (CI, a review; it's resumed when the PR changes, holding no slot
-          meanwhile), `proj ask` when its answer is a question for you to settle or
-          relay (`proj status` marks it [asks]; `proj reply` answers), `proj done`
-          when it's finished. One that won't say is marked [no next step]${lib.optionalString watchdog ", and the stall watchdog takes it"}.
-          A job can't ask ${config.burrow.owner} anything: R2 commands get refused, so bring those to
-          them. ${config.burrow.owner} can also open any project's own session directly from their phone.
-        '';
-      }
+      Jobs run in the background and survive this session ending. At most
+      ${toString cfg.maxJobs} run at once, ${toString cfg.maxJobsPerProject} from any one project; the rest are queued. Use --first when ${config.burrow.owner} is
+      waiting on the answer, and --pipeline for work on the steward, its reviewers, CI or proj${lib.optionalString (leadRepos != [ ]) " (in ${lib.concatStringsSep ", " leadRepos}, what the pipeline is built from, it goes first of all)"}. Check on them,
+      relay results to ${config.burrow.owner}, and follow up yourself where the answer is obvious.
+      Each turn ends saying what comes next: `proj await PR-URL` when it waits
+      on GitHub (CI, a review; it's resumed when the PR changes, holding no slot
+      meanwhile), `proj ask` when its answer is a question for you to settle or
+      relay (`proj status` marks it [asks]; `proj reply` answers), `proj done`
+      when it's finished. One that won't say is marked [no next step]${lib.optionalString watchdog ", and the stall watchdog takes it"}.
+      A job can't ask ${config.burrow.owner} anything: R2 commands get refused, so bring those to
+      them. ${config.burrow.owner} can also open any project's own session directly from their phone.
+    '';
+  }
 
-      (lib.mkIf cfg.inbox.enable {
-        assertions = [
-          {
-            assertion = cfg.inbox.authors != [ ];
-            message = "burrow.proj.inbox.authors: name who may hand Claude issues.";
-          }
-        ];
-        environment.systemPackages = [ inbox ];
-        # A repo's issue events start its look (proj-inbox@OWNER-REPO), and so
-        # do the start and end of each of its jobs' turns (proj run --kick): it
-        # posts the answer once one has ended.
-        burrow.events.handlers.proj-inbox = {
-          events = [
-            "issues"
-            "issue_comment"
-          ];
-          unit = "proj-inbox";
-          wake = inboxWake;
-        };
-        systemd.services = lib.genAttrs [ "proj-inbox" "proj-inbox@" ] (name: {
-          description = "Hand GitHub issues labelled ${cfg.inbox.label} to proj jobs${
-            lib.optionalString (name == "proj-inbox@") " in %I"
-          }";
-          after = [ "network-online.target" ];
-          wants = [ "network-online.target" ];
-          serviceConfig = {
-            Type = "oneshot";
-            User = user;
-            ExecStart = "${inbox}/bin/proj-inbox${lib.optionalString (name == "proj-inbox@") " %I"}";
-          };
-        });
-        systemd.tmpfiles.rules = [
-          "d ${stateDir}/proj-inbox 0755 ${user} ${config.users.users.${user}.group} -"
-        ];
+  (lib.mkIf cfg.inbox.enable {
+    assertions = [{
+      assertion = cfg.inbox.authors != [ ];
+      message = "burrow.proj.inbox.authors: name who may hand Claude issues.";
+    }];
+    environment.systemPackages = [ inbox ];
+    # A repo's issue events start its look (proj-inbox@OWNER-REPO), and so
+    # do the start and end of each of its jobs' turns (proj run --kick): it
+    # posts the answer once one has ended.
+    burrow.events.handlers.proj-inbox = {
+      events = [ "issues" "issue_comment" ];
+      unit = "proj-inbox";
+      wake = inboxWake;
+    };
+    systemd.services = lib.genAttrs [ "proj-inbox" "proj-inbox@" ] (name: {
+      description = "Hand GitHub issues labelled ${cfg.inbox.label} to proj jobs${lib.optionalString (name == "proj-inbox@") " in %I"}";
+      after = [ "network-online.target" ];
+      wants = [ "network-online.target" ];
+      serviceConfig = {
+        Type = "oneshot";
+        User = user;
+        ExecStart = "${inbox}/bin/proj-inbox${lib.optionalString (name == "proj-inbox@") " %I"}";
+      };
+    });
+    systemd.tmpfiles.rules = [ "d ${stateDir}/proj-inbox 0755 ${user} ${config.users.users.${user}.group} -" ];
 
-        burrow.claude.machineMd = lib.mkOrder 701 ''
-          Issues work too: label one `${cfg.inbox.label}` in a project's GitHub repo
-          (opened by ${lib.concatStringsSep " or " cfg.inbox.authors}) and within seconds it's a job there.
-          The answer comes back as a comment, a reply on the issue continues the job,
-          and closing it or taking the label off ends it. `proj-inbox status` shows
-          which issue is which job.${
-            lib.optionalString (machineApp != null)
-              " A person's issue's job acts on GitHub as
-      them; a bot's acts as the App ${machineApp.slug}."
-          }
-        '';
-      })
-    ]
-  );
+    burrow.claude.machineMd = lib.mkOrder 701 ''
+      Issues work too: label one `${cfg.inbox.label}` in a project's GitHub repo
+      (opened by ${lib.concatStringsSep " or " cfg.inbox.authors}) and within seconds it's a job there.
+      The answer comes back as a comment, a reply on the issue continues the job,
+      and closing it or taking the label off ends it. `proj-inbox status` shows
+      which issue is which job.${lib.optionalString (machineApp != null) " A person's issue's job acts on GitHub as
+      them; a bot's acts as the App ${machineApp.slug}."}
+    '';
+  })
+  ]);
 }
