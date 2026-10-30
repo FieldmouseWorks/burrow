@@ -141,7 +141,8 @@ if do.get("rc", {{}}).get(args[1]):
 print(json.dumps(do[args[1]]))
 """)
 os.chmod(f"{tmp}/cn", 0o755)
-IDLE = {"conflicts": [], "verdicts": [], "red": [], "landed": [], "refused": [], "finished": [], "now": {"state": "idle"}}
+IDLE = {"conflicts": [], "verdicts": [], "red": [], "landed": [], "refused": [], "unready": [], "finished": [],
+        "now": {"state": "idle"}}
 
 
 def cn(**do):

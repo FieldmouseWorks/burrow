@@ -13,7 +13,7 @@ import os
 
 import train as T
 import waits
-from harness import (C, CI_GREEN, FAIL, JOBS, P, R, S, STEWARD, WROTE, clean, cn, cn_log, cn_runs, fresh_pr_state,
+from harness import (C, CI_GREEN, FAIL, IDLE, JOBS, P, R, S, STEWARD, WROTE, clean, cn, cn_log, cn_runs, fresh_pr_state,
                      gh_stub, head, info, judgment, merges, mkpr, run, said, stand_in, tmp)
 
 stand_in()
@@ -276,14 +276,19 @@ kicked(show=landed, rc={"step": 1})
 assert C.WAKE["sam/r"] == C.NOW + 5 * 60 and "sam/r" in waits.FAILED, (C.WAKE, waits.FAILED)
 # A PR in it that isn't settled any more, whose status GitHub didn't take,
 # and that cn keeps in while its candidate is landing: its old status stands
-# for the rules, so the train isn't stepped this pass. With the status taken,
-# the rules refuse its merge, and it is.
+# for cn, so the train isn't stepped this pass. With the status taken, cn
+# reads it and takes the PR out instead of landing it (Conary#55), and it is.
 PRS["v"] = [clean(base="trunk", threads=[False])]
 KEEP = {"show": train([5], "green"), "leave": {"left": False, "landing": 5}}
 FAIL.append("/statuses/")
 assert kicked(**KEEP)[-1] == LEAVE and "sam/r" in T.STOPPED, cn_runs()
 FAIL.clear()
 assert kicked(**KEEP)[-1] == STEP, cn_runs()
+# The step says which it took out, as it says which it merged.
+out = io.StringIO()
+with contextlib.redirect_stdout(out):
+    kicked(show=train([5], "green"), step={**IDLE, "landed": [4], "unready": [5]})
+assert "sam/r: train: #4 merged; #5 out, no longer settled" in out.getvalue(), out.getvalue()
 # Nor is it stepped when a PR in it wasn't seen to at all: it may not be
 # settled any more. One that isn't in it stops nothing.
 kept_handle = S.step.handle

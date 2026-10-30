@@ -153,9 +153,10 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
             # GitHub didn't take the status or the stop: until it does, the
             # old ones stand and a merge queued on it can still go.
             strike("status")
-        # Nor may its train land it. Out after the status: one the train
-        # lands meanwhile needs the status the rules require. Still in, with
-        # the old status standing, its train isn't stepped.
+        # Nor may its train land it. Out after the status: cn reads it right
+        # before each landing and takes out a head the steward no longer
+        # says is settled (Conary#55). Still in, with the old status
+        # standing, its train isn't stepped.
         if state != "success" and T.seat(repo, n) is not None and not T.leave(repo, pr) and not ok:
             T.stop(repo, f"#{n} isn't settled, and GitHub hasn't taken its status")
         return ok

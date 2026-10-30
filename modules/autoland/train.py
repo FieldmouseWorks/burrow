@@ -140,8 +140,8 @@ def ride(repo, pr, st, alone, desc, settle, strike, said):
         st["joined"] = head
         where = seat(repo, n)
     if not settle("success", f"In the train, {where}. {desc}"[:140], wait=waits.TRAIN) and not DRY:
-        # Without the status the rules require, its merge would be refused:
-        # out until GitHub takes it (settle strikes it).
+        # Without its status cn wouldn't land it (Conary#55): out until
+        # GitHub takes it (settle strikes it).
         leave(repo, pr)
 
 
@@ -167,7 +167,7 @@ def leave(repo, pr):
 
 def stop(repo, why):
     """No step of the repo's train this pass: what it holds may not all be
-    settled, and nothing says so to the rules."""
+    settled, and its old status, which cn reads, still says it is."""
     STOPPED.setdefault(repo, why)
 
 
@@ -204,6 +204,7 @@ def step(repo):
     said += [f"#{x['pr']} won't merge" for x in got["conflicts"]]
     said += [f"#{x['pr']} refused: {x['why']}" for x in got["refused"]]
     said += [f"#{n} merged" for n in got["landed"]]
+    said += [f"#{n} out, no longer settled" for n in got["unready"]]
     now = got["now"]
     if now["state"] == "gating":
         said.append(f"candidate {short(now['candidate'])} gating on {now['branch']}"
