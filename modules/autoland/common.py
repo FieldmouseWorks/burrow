@@ -468,12 +468,14 @@ def rank(repo):
     return 1 if r in {x.lower() for x in CFG["pipelineRepos"]} else 2
 
 
-def job(repo, task, clone=False):
+def job(repo, task, clone=False, since=None):
     """Hand a task to a Claude job in the repo's project. Every one is
     pipeline work (proj run --pipeline): it settles a PR or the branch PRs
     land on, so it goes ahead of the line, and in the pipeline's own repos
-    (pipelineRepos) in a slot kept for it; proj decides which. Returns the
-    job id."""
+    (pipelineRepos) in a slot kept for it; proj decides which. since, when
+    the work began (a PR's: when it was opened), is where it stands in line
+    among those, so a PR pushed again keeps its place. Returns the job
+    id."""
     d = project_dir(repo)
     if d is None and clone and not DRY:
         d = repo.split("/")[1]
@@ -493,7 +495,9 @@ def job(repo, task, clone=False):
     # stopped, and ends then. It's the machine's own work, so it acts on
     # GitHub as the machinery's App, where there is one.
     app = ["--app", CFG["machinery"]] if CFG.get("machinery") else []
-    p = subprocess.run([CFG["proj"], "run", "--pipeline", *app, "--timeout", f"{CFG['jobTimeout']}m",
+    # Never after now, which proj refuses: a clock that's behind GitHub's.
+    when = ["--since", str(int(min(since, time.time())))] if since else []
+    p = subprocess.run([CFG["proj"], "run", "--pipeline", *app, *when, "--timeout", f"{CFG['jobTimeout']}m",
                         "--idle", f"{CFG['jobIdle']}m", "--kick", f"autoland/{repo}", "--owned", d, task],
                        capture_output=True, text=True)
     return p.stdout.strip() or None

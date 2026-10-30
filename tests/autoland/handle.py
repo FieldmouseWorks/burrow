@@ -10,7 +10,7 @@ import os
 import shutil
 import subprocess
 
-from harness import (C, CI_GREEN, DDIR, FAIL, JOBS, POSTED, PR_DIFF, QDIR, P, R, H, S, STATES, STUB, T0, V,
+from harness import (C, CI_GREEN, DDIR, FAIL, JOBS, POSTED, PR_DIFF, QDIR, P, R, H, S, SINCE, STATES, STUB, T0, V,
                      W, WROTE, agent, agent_runs, clean, fresh_pr_state, head, info, judgment, merged,
                      gh_stub, mkpr, pr_state, queued, run, rv_review, said, stand_in, swept, tmp, worker)
 
@@ -319,6 +319,8 @@ fresh_pr_state()
 C.save(f"{V.SNAP}/{V.snap_name('pr-sam_r-5.json', head, 'main')}.json", {"rules": "", "secret": [".env", "cfg/api.yaml"]})
 status, _ = run(clean(files=[".env", "cfg/api.yaml"]), 700)
 assert len(JOBS) == 1 and not merged() and "it changes .env, cfg/api.yaml, which the reviewers" in JOBS[0], (status, JOBS)
+# It waits in proj's line from when the PR was opened, not from this head.
+assert SINCE == [C.ts(T0)], SINCE
 
 # Retargeted after its reviews, the same head is another change: what they
 # said doesn't count, and they're asked again.

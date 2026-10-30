@@ -258,6 +258,13 @@
           bash ${./tests/proj-pick.sh} ${./modules/proj/pick.sh}
           touch $out
         '';
+        # Where a turn stands in line: from when its job's work began
+        # (--since), --first ones ahead.
+        proj-line = pkgs.runCommand "proj-line-check" { nativeBuildInputs = [ pkgs.shellcheck ]; } ''
+          shellcheck -s bash ${./modules/proj/line.sh} ${./tests/proj-line.sh}
+          bash ${./tests/proj-line.sh} ${./modules/proj/line.sh}
+          touch $out
+        '';
         # What each job waits on, as the stall watchdog hears it.
         proj-waits = pkgs.runCommand "proj-waits-check" { nativeBuildInputs = [ pkgs.shellcheck pkgs.jq pkgs.util-linux ]; } ''
           shellcheck -s bash ${./modules/proj/waits.sh} ${./tests/proj-waits.sh}

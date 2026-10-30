@@ -264,6 +264,7 @@ def sh(*a, cwd=None):
 
 head = "a" * 40
 WROTE, JOBS, POSTED = [], [], []
+SINCE = []  # each job's place in line (C.job's since), in the order they started
 COMMITS = {}  # a PR's commits' author emails, by number, as `pr view --json commits` gives them (None: the ask fails)
 PR_DIFF = {"v": ""}  # what `gh pr diff` gives
 
@@ -324,8 +325,9 @@ def write(*a, **k):
     return None
 
 
-def job(repo, task, clone=False):
+def job(repo, task, clone=False, since=None):
     JOBS.append(task)
+    SINCE.append(since)
     return f"job-{len(JOBS)}"
 
 
@@ -422,6 +424,7 @@ def run(pr, after, obsolete=False):
     C.NOW = C.ts(T0) + after
     WROTE.clear()
     JOBS.clear()
+    SINCE.clear()
     C.WAKE.clear()
     C.LIMITED.clear()
     POSTED.clear()

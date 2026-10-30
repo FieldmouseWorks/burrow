@@ -78,7 +78,7 @@ def evals():
 
 kept = C.job
 ids = itertools.count(1)
-C.job = lambda repo, task, clone=False: JOBS.append(task) or f"build-{next(ids)}"
+C.job = lambda repo, task, clone=False, since=None: JOBS.append(task) or f"build-{next(ids)}"
 S.CFG["repos"]["sam/r"] = {"proofJobs": {"remi-proof": "Run `just proof` and post the remi-proof status."},
                            "proofBuilds": {"remi-proof": "checks.x86_64-linux.proof"}, "proofSlots": 1}
 proof = CI_GREEN + [{"__typename": "StatusContext", "context": "remi-proof", "state": "PENDING", "description": ""}]

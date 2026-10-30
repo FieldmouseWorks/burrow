@@ -1,5 +1,5 @@
 # Which waiting turns take a slot now, and which slots: take_slot's choice
-# (proj.sh), on its own so the flake can check it. It reads what take_slot
+# (line.sh), on its own so the flake can check it. It reads what take_slot
 # sees, one tab-separated line each: "slot N free", or "slot N CLASS PROJECT"
 # for one that's taken (its turn's class and project, "-" when not known), for
 # every slot in order; then "wait NAME CLASS PROJECT" for every turn in line,

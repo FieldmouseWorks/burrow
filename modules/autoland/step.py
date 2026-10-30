@@ -241,7 +241,7 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
         again (strike), and its caller lists it on the stuck issue). One
         that isn't in place of one that broke (retry_at) ends a run of
         those."""
-        jid = C.job(repo, task)
+        jid = C.job(repo, task, since=ts(pr["createdAt"]))
         if jid:
             st[kind] = at
             st[kind + "Job"] = jid

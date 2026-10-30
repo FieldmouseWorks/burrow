@@ -85,7 +85,7 @@ C.CFG["repos"]["sam/r"] = {"skipPaths": [r"(^|/)roms/", r"\.gen$"]}
 assert V.hidden("sam/r", "game.gen") and not V.hidden("sam/other", "game.gen")
 # A repo's list adds to the machine's: its secrets stay hidden.
 assert V.hidden("sam/r", ".env") and V.hidden("sam/r", "secrets/x.yaml")
-snap_pr = {"number": 5, "headRefOid": pr_head, "baseRefName": "main", "title": "Use eval"}
+snap_pr = {"number": 5, "headRefOid": pr_head, "baseRefName": "main", "title": "Use eval", "createdAt": "2026-10-24T00:00:00Z"}
 name, meta = V.snapshot("sam/r", snap_pr, "pr-sam_r-5.json")
 snap = f"{tmp}/state/{V.SNAP}/{name}"
 assert name == V.snap_name("pr-sam_r-5.json", pr_head, "main") and name.startswith(f"pr-sam_r-5-{pr_head[:12]}-")
@@ -396,14 +396,16 @@ agent()
 
 # A reviewer's next free place goes to the lead repos first (leadRepos, any
 # case), then to the rest of the pipeline's own (pipelineRepos), then to the
-# review queued longest.
+# oldest PR's: by when it was opened, so one pushed again (a-old, its new head
+# queued after c-new's) keeps its place.
 V.queue("sam/r", snap_pr, "pr-sam_r-5.json", "codex")
 entry, = os.listdir(f"{tmp}/state/{V.QUEUE}")
 item = json.load(open(f"{tmp}/state/{V.QUEUE}/{entry}"))
+assert item["opened"] == C.ts("2026-10-24T00:00:00Z"), item
 os.remove(f"{tmp}/state/{V.QUEUE}/{entry}")
-for n, repo, at in (("codex--a-old.json", "sam/r", 1), ("codex--b-pipe.json", "sam/pipe", 3), ("codex--c-new.json", "sam/r", 2),
-                    ("codex--d-lead.json", "sam/lead", 4)):
-    C.save(f"{V.QUEUE}/{n}", {**item, "repo": repo, "at": at})
+for n, repo, opened, at in (("codex--a-old.json", "sam/r", 1, 5), ("codex--b-pipe.json", "sam/pipe", 3, 3),
+                            ("codex--c-new.json", "sam/r", 2, 2), ("codex--d-lead.json", "sam/lead", 4, 4)):
+    C.save(f"{V.QUEUE}/{n}", {**item, "repo": repo, "opened": opened, "at": at})
 W.CFG["reviewers"]["codex"]["parallel"] = 1
 W.work()
 W.CFG["reviewers"]["codex"]["parallel"] = 2
