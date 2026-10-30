@@ -20,6 +20,14 @@ let
   updates = config.burrow.updates.enable or false;
   update = "${prefix}-update";
   kick = "${config.burrow.events.kick}/dispatch";
+  # Seconds burrow-events holds its passes apart, which a runner's wait
+  # allows for too. A pass reads every runner repo's live runs and their
+  # jobs, some fifteen calls, and a busy repo's job events come seconds
+  # apart: one every two minutes at most keeps it to a few hundred calls an
+  # hour, out of the hourly budget the machinery's App shares with Renovate
+  # and the rest. Kept here, not read back from the handler, so the settings
+  # hold on a machine that turns the handlers off.
+  gap = 120;
 
   # The commit of each watched input the running system was built from, as
   # the flake's flake.lock pins it (one that follows another's isn't a repo
@@ -133,7 +141,7 @@ in
           labels = lib.optionals r.defaultLabels [ "self-hosted" "Linux" arch ] ++ r.labels;
         }) cfg.runners;
         quiet = cfg.quietMinutes * 60;
-        gap = config.burrow.events.handlers.dispatch.gap;
+        inherit gap;
         deploy = if !deploying then null else {
           unit = update;
           handler = "update";
@@ -187,12 +195,7 @@ in
       repos = lib.unique (lib.mapAttrsToList (_: r: r.repo) cfg.runners ++ lib.optionals deploying watched);
       pushes = "default";
       perRepo = false;
-      # A pass reads every runner repo's live runs and their jobs, some
-      # fifteen calls, and a busy repo's job events come seconds apart: one
-      # every two minutes at most keeps it to a few hundred calls an hour,
-      # out of the hourly budget the machinery's App shares with Renovate
-      # and the rest.
-      gap = 120;
+      inherit gap;
       unit = "burrow-dispatch";
       wake = "${dir}/wake.json";
     };

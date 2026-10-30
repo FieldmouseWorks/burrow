@@ -386,6 +386,8 @@
           committed = machine { rev = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"; } [ ];
           dirty = machine { dirtyRev = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-dirty"; } [ ];
           arm = machine { } [ { nixpkgs.hostPlatform = lib.mkForce "aarch64-linux"; } ];
+          # remi's install rehearsal turns burrow-events' handlers off.
+          unhandled = machine { rev = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"; } [ { burrow.events.handlers = lib.mkForce { }; } ];
           settings = m: m.config.burrow.dispatch.settings;
           revisions = map (m: m.config.system.configurationRevision) [ committed dirty ];
           deploy = { inherit ((settings committed).deploy) own running; };
@@ -407,6 +409,8 @@
             "dispatch: the systems are stamped ${builtins.toJSON revisions}";
           assert lib.assertMsg (labels committed == wantLabels "X64") "dispatch: x86_64's labels: ${builtins.toJSON (labels committed)}";
           assert lib.assertMsg (labels arm == wantLabels "ARM64") "dispatch: aarch64's labels: ${builtins.toJSON (labels arm)}";
+          assert lib.assertMsg (settings unhandled == settings committed)
+            "dispatch: with the handlers off, the settings are ${builtins.toJSON (settings unhandled)}";
           pkgs.runCommand "dispatch-config-check" { } ''
             ${self.nixosConfigurations.example.config.systemd.services.burrow-dispatch.serviceConfig.ExecStart} status
             ${committed.config.systemd.services.burrow-dispatch.serviceConfig.ExecStart} status
