@@ -19,6 +19,7 @@ import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime
 
@@ -199,6 +200,14 @@ def gh(*args, input=None, check=True):
         return json.loads(out) if out else ""
     except ValueError:
         return out
+
+
+def compare(repo, base, head):
+    """The REST path of GitHub's compare of head with base, each a branch's
+    name or a commit. Each goes in quoted whole, which GitHub decodes once:
+    any name git allows (a `#`, `%`, `?` or slash in it) is the branch of
+    exactly that name, never cut short or read as another's."""
+    return f"repos/{repo}/compare/{urllib.parse.quote(base, safe='')}...{urllib.parse.quote(head, safe='')}"
 
 
 def said(e):

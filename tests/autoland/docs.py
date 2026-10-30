@@ -13,7 +13,9 @@ commits since) isn't the PR's CI: none of its check runs counts, and until
 its workflow has run through for the PR's base, CI is pending. Anything short
 of the docs lane runs the proofs as before."""
 
-from harness import FORK, JOBS, PR_DIFF, S, clean, fresh_pr_state, merged, run
+import pathlib
+
+from harness import FORK, FORKS, JOBS, PR_DIFF, C, S, clean, fresh_pr_state, merged, run
 
 S.CFG["repos"]["sam/r"] = {"proofJobs": {"agents": "Run `nix build .#checks.agents` and post the agents status."}}
 PROVING = "a Claude job is running agents"
@@ -119,6 +121,31 @@ for b_base, a_base in (("main", "main"), ("next", "next"), ("main", "other")):
         assert merged() and "CI is green (docs only)" in status, (b_base, a_base, status)
     del FORK[a_base]
 S.CFG["repos"]["sam/r"] = {"proofJobs": {"agents": "Run `nix build .#checks.agents` and post the agents status."}}
+# One decision, one read of where the PR leaves its base: what the step
+# waives and what it lands saying are the same answer's, whatever GitHub says
+# if asked again (the base taking in some of the PR's commits the moment
+# after, say).
+for answers, lands in (([F, G, G], True), ([G, F, F], False)):
+    FORKS[:] = answers
+    status, landed = at(clean(checks=docs(), files=("README.md",)))
+    assert landed == lands and JOBS == [] and FORKS == answers[1:], (answers, status, FORKS)
+    assert "CI is green (docs only)" in status if lands else "waiting for CI: flake for main" in status, status
+FORKS.clear()
+# A base branch's name reaches GitHub as git has it, whatever it holds: a
+# `#`, a `%`, a slash, a Unicode space. Each is its own branch: one named
+# like another's escape (release%2Fnext, release/next's) answers for where
+# the PR leaves it, never for where it would leave the other.
+for base in ("release/next", "release#1", "50%", "release\u00a0next"):
+    status, landed = at(clean(checks=docs(base), files=("README.md",), base=base))
+    assert landed and JOBS == [] and "CI is green (docs only)" in status, (base, status, JOBS)
+FORK["release%2Fnext"] = G
+status, landed = at(clean(checks=docs("release%2Fnext"), files=("README.md",), base="release%2Fnext"))
+assert not landed and JOBS == [] and "waiting for CI: flake for release%2Fnext" in status, (status, JOBS)
+del FORK["release%2Fnext"]
+# So every compare's path is C.compare's: no module writes one itself.
+by_hand = [f"{p.name}:{n}" for p in sorted(pathlib.Path(C.__file__).parent.glob("*.py")) if p.name != "common.py"
+           for n, line in enumerate(p.read_text().splitlines(), 1) if "/compare/" in line]
+assert by_hand == [], by_hand
 # A base branch that's gone has nothing to compare against: GitHub says no.
 FORK["gone"] = None
 status, landed = at(clean(checks=docs("gone"), files=("README.md",), base="gone"))

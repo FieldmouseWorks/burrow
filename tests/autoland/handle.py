@@ -579,7 +579,7 @@ assert not merged() and "the repo has no CI" not in status, status
 assert len(JOBS) == 1 and "CI is red (flake (failed to start))" in JOBS[0], (status, JOBS)
 many_suites = clean(checks=[], suites=broken)
 many_suites["commits"]["nodes"][0]["commit"]["checkSuites"]["pageInfo"]["hasNextPage"] = True
-assert H.ci_state(many_suites) == ("pending", ["over 100 checks, too many to read"])
+assert H.ci_state(many_suites) == ("pending", ["over 100 checks, too many to read"], False)
 fresh_pr_state()
 run(clean(checks=[]), 700)
 # CI that shows up while the judge works doesn't pass it by: its verdict on

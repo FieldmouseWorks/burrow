@@ -101,10 +101,13 @@ def open_prs(owner, name):
 
 def ci_state(pr, proofs=(), moved=None, repo=None):
     """green / pending / red / none (no checks at all) over every check on
-    the head except ours, and the names of the ones that aren't green. A
-    proof (a check a Claude job runs on a machine) that hasn't reported yet
-    is pending: nothing posts it until its job runs, and none is owed on a
-    head CI took in its docs lane (docs_lane, which moved and repo are for).
+    the head except ours, the names of the ones that aren't green, and
+    whether CI took the head in its docs lane for the PR's diff (runs, and
+    docs_lane, which moved is for). That's read once, for the whole decision:
+    what the step waives and what it says it landed on are the one answer,
+    whatever GitHub would say if asked again. A proof (a check a Claude job
+    runs on a machine) that hasn't reported yet is pending: nothing posts it
+    until its job runs, and none is owed on a head in the docs lane.
     A workflow GitHub couldn't start (a bad file, a pin missing an input)
     leaves no check run, only its suite: red, or a broken workflow would read
     as no CI. A run of burrow's shared CI that judged another diff than the
@@ -119,10 +122,11 @@ def ci_state(pr, proofs=(), moved=None, repo=None):
     suites = commit.get("checkSuites") or {}
     if any((x.get("pageInfo") or {}).get("hasNextPage") for x in (contexts, suites)):
         # Only the first 100 come back; one past them could be red.
-        return "pending", ["over 100 checks, too many to read"]
-    if docs_lane(pr, moved, repo):
+        return "pending", ["over 100 checks, too many to read"], False
+    stale, docs, unrun = runs(pr, repo)
+    docs = docs and docs_lane(pr, moved)
+    if docs:
         proofs = ()
-    stale, _, unrun = runs(pr, repo)
     red, pending, seen = [], [], len(unrun)
     pending += [f"{w} for {pr['baseRefName']}" for w in unrun]
     for s in suites.get("nodes", []):
@@ -159,8 +163,8 @@ def ci_state(pr, proofs=(), moved=None, repo=None):
             seen += 1
             pending.append(name)
     if not seen:
-        return "none", []
-    return ("red" if red else "pending" if pending else "green"), red or pending
+        return "none", [], docs
+    return ("red" if red else "pending" if pending else "green"), red or pending, docs
 
 
 # The names burrow's shared CI (flake-check.yml) gives two of its check runs
@@ -185,13 +189,14 @@ def judged(c):
     """What a check run of GitHub Actions' says the shared CI judged its
     head against: (base, None) for its lane, (base, fork) for its docs lane,
     None for any other check. A job GitHub skipped keeps its name unfilled,
-    `${{ … }}` and all, and no branch's name has a space in it."""
+    `${{ … }}` and all, and no branch's name has a space in it (an ASCII
+    one: git allows any other, a Unicode space included)."""
     if c["__typename"] != "CheckRun" or (suite(c).get("app") or {}).get("slug") != "github-actions":
         return None
     job = c["name"].rpartition(" / ")[2]
-    if job.startswith(LANE) and re.fullmatch(r"\S+", job[len(LANE):]):
+    if job.startswith(LANE) and re.fullmatch("[^ ]+", job[len(LANE):]):
         return job[len(LANE):], None
-    m = re.fullmatch(rf"{DOCS_LANE}(\S+) from ([0-9a-f]{{40}})", job)
+    m = re.fullmatch(rf"{DOCS_LANE}([^ ]+) from ([0-9a-f]{{40}})", job)
     return (m[1], m[2]) if m else None
 
 
@@ -203,10 +208,11 @@ def fork_of(repo, pr):
     it is at the asking, after any merge since the PR list was read (another
     PR's earlier in the same pass included): nothing read before stands in
     for it, the PR's baseRefOid least of all, which GitHub can leave at an
-    older commit of the branch."""
+    older commit of the branch. The name goes in as C.compare quotes it, so
+    it's that branch's, whatever it holds."""
     if not repo:
         return None
-    got = C.gh("api", f"repos/{repo}/compare/{pr['baseRefName']}...{pr['headRefOid']}?per_page=1", "--jq",
+    got = C.gh("api", C.compare(repo, pr["baseRefName"], pr["headRefOid"]) + "?per_page=1", "--jq",
                "{fork: .merge_base_commit.sha}", check=False)
     fork = got.get("fork") if isinstance(got, dict) else None
     return fork if re.fullmatch("[0-9a-f]{40}", fork or "") else None
@@ -236,21 +242,18 @@ def runs(pr, repo):
     return stale, docs, unrun
 
 
-def docs_lane(pr, moved, repo=None):
-    """Whether CI ran this head in the docs lane for the PR's diff (runs):
-    every path it changes since it left its base is documentation, nothing
-    the repo's flake builds or tests reads, so the repo's proofs, which check
-    what it builds, have nothing of its to check. GitHub Actions passed the
-    docs lane's check run for that base and fork on the head, and the PR
-    changes nothing under .github/: the workflow that judged it, and the docs
-    paths it read, are then the base branch's own, not ones the PR wrote.
-    moved: where its renames and copies started (touches.moved_from), None
-    if that couldn't be read."""
+def docs_lane(pr, moved):
+    """Whether a docs lane CI ran on this head for the PR's diff (runs) can
+    stand for it: every path it changes since it left its base is then
+    documentation, nothing the repo's flake builds or tests reads, so the
+    repo's proofs, which check what it builds, have nothing of its to check.
+    It can when the PR changes nothing under .github/: the workflow that
+    judged it, and the docs paths it read, are then the base branch's own,
+    not ones the PR wrote. moved: where its renames and copies started
+    (touches.moved_from), None if that couldn't be read."""
     if moved is None or pr["changedFiles"] > len(pr["files"]["nodes"]):
         return False
-    if any(p == ".github" or p.startswith(".github/") for p in [f["path"] for f in pr["files"]["nodes"]] + list(moved)):
-        return False
-    return runs(pr, repo)[1]
+    return not any(p == ".github" or p.startswith(".github/") for p in [f["path"] for f in pr["files"]["nodes"]] + list(moved))
 
 
 def our_status(pr, context=CONTEXT):
