@@ -21,7 +21,9 @@ Not watched: a draft, or a major renovate-sweep held for the owner (nobody
 waits on the pipeline there), and a PR this pass listed for the owner or on
 the stuck issue (it's theirs, or that issue's job's, already). One on hold
 gets holdStallAfter: a hold nobody explains is a stall too, and the job that
-takes it moves one waiting on the owner's word to the owner label."""
+takes it moves one waiting on the owner's word to the owner label. One in
+its repo's merge train, or held out of it, gets trainStallAfter: its phase
+names the candidate in flight, so each candidate is a wait of its own."""
 
 import json
 
@@ -30,8 +32,11 @@ from common import CFG, MIN, load, log, repo_cfg, save
 
 # What a PR's wait is, for its deadline and the pass a stall kicks first:
 # the steward's own, a hold (no pass moves it), one renovate-sweep has (its
-# pass asks for the verdict again), or Renovate's merge (a run on the repo).
-STEWARD, HOLD, SWEEP, RENOVATE = "steward", "hold", "sweep", "renovate"
+# pass asks for the verdict again), Renovate's merge (a run on the repo), or the
+# merge train's (which steps in the steward's pass).
+STEWARD, HOLD, SWEEP, RENOVATE, TRAIN = "steward", "hold", "sweep", "renovate", "train"
+STALL = {STEWARD: "stallAfter", HOLD: "holdStallAfter", SWEEP: "stallAfter",
+         RENOVATE: "renovateMergeAfter", TRAIN: "trainStallAfter"}
 FAILS = "the steward's pass fails on it (journalctl -u autoland)"
 
 NOTED = {}  # this pass's waits, by repo whose PRs it read, then by key (None: nothing to watch)
@@ -80,7 +85,7 @@ def note(repo, pr, phase, wait):
     here = CFG["watch"] and CFG["watch"]["renovateSweep"]
     kick = (None if wait == HOLD else f"renovate-sweep/{repo}" if wait == SWEEP and here
             else f"renovate/{repo}" if wait == RENOVATE and here else f"autoland/{repo}")
-    minutes = repo_cfg(repo)[{HOLD: "holdStallAfter", RENOVATE: "renovateMergeAfter"}.get(wait, "stallAfter")]
+    minutes = repo_cfg(repo)[STALL[wait]]
     rev = f"{pr['headRefOid']} {pr['baseRefName']}"
     NOTED.setdefault(repo, {})[key_of(repo, pr)] = item(repo, pr, phase, minutes, kick, rev)
 

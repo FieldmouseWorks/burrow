@@ -11,7 +11,7 @@ let
 
   guard = pkgs.writeShellApplication {
     name = "claude-guard";
-    runtimeInputs = [ pkgs.jq pkgs.gnugrep pkgs.coreutils pkgs.git config.boot.zfs.package ];
+    runtimeInputs = [ pkgs.jq pkgs.gnugrep pkgs.coreutils config.programs.git.package config.boot.zfs.package ];
     text = ''
       GUARD_SNAPSHOT_DATASETS=(${lib.escapeShellArgs (lib.optionals (config.burrow.undo.enable or false) config.burrow.undo.datasets)})
     '' + builtins.readFile ./claude/guard.sh;
