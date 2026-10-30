@@ -2,9 +2,10 @@
 PR that adds Python, or grows the Python it had past the line a fix stays
 under, fails unless its body has a "Why not Rust:" line with a reason; one
 that doesn't passes whatever its body says. The verdict is a commit status
-for the PR, which a newer run replaces, posted again whenever the PR changed
-while it was judged, so the last word is for the PR as it is; a fork's PR,
-which can't post one, gets it as the job's result. And every caller runs it
+for the PR on the head the event names, which a newer run replaces, posted
+again whenever the PR changed while it was judged, so the last word is for
+the PR as it is; a fork's PR, which can't post one, gets it as the job's
+result. And every caller runs it
 again when the body is edited, with a token that can post the status.
 
   python3 -I tests/rust-first.py .github/workflows/rust-first-check.yml \\
@@ -30,6 +31,7 @@ growth_default = workflow[True]["workflow_call"]["inputs"]["growth"]["default"]
 step = next(s for s in job["steps"] if s.get("id") == "python")
 assert step["shell"] == "bash"
 assert step["env"]["NUMBER"] == "${{ github.event.pull_request.number }}", step["env"]
+assert step["env"]["HEAD_SHA"] == "${{ github.event.pull_request.head.sha }}", step["env"]
 assert step["env"]["GROWTH"] == "${{ inputs.growth }}", step["env"]
 
 # Every caller: on each push and on an edited body, with what the check reads.
@@ -45,12 +47,13 @@ tmp = tempfile.mkdtemp()
 script = os.path.join(tmp, "python.sh")
 open(script, "w").write(step["run"])
 
-# gh as the job calls it: the PR, its files (--paginate: every page, one
-# after another), the merge base (--jq), a file's raw content at a commit,
-# answered from files under tmp; and the statuses it posts, kept as JSON
-# lines. Before its Nth post, what CHANGES/N holds happens: the PR or its
-# files change, and other runs post theirs. RESTLESS: the PR's body changes
-# every time it's read. Every call logged.
+# gh as the job calls it: the PR, the comparison of two commits (its merge
+# base and files), a file's raw content at a commit, answered from files
+# under tmp, and nothing else (not the PR's own files, which follow its head
+# as it moves); and the statuses it posts, kept as JSON lines. Before its Nth
+# post, what CHANGES/N holds happens: the PR changes, and other runs post
+# theirs. RESTLESS: the PR's body changes every time it's read. Every call
+# logged.
 bin_dir = os.path.join(tmp, "bin")
 os.mkdir(bin_dir)
 gh = os.path.join(bin_dir, "gh")
@@ -60,7 +63,7 @@ echo "$*" >> "$GH_LOG"
 path= expr= method=GET fields=()
 while [ $# -gt 0 ]; do
   case $1 in
-    api | --paginate) ;;
+    api) ;;
     --jq) expr=$2; shift ;;
     -H) [ "$2" = 'Accept: application/vnd.github.raw' ] || exit 2; shift ;;
     -X) method=$2; shift ;;
@@ -75,7 +78,6 @@ if [ "$method" != GET ] || [ ${#fields[@]} -gt 0 ]; then
   echo "$n" > "$POSTS"
   if [ -d "$CHANGES/$n" ]; then
     [ ! -f "$CHANGES/$n/pr.json" ] || cp "$CHANGES/$n/pr.json" "$PR"
-    [ ! -f "$CHANGES/$n/files.json" ] || cp "$CHANGES/$n/files.json" "$FILES"
     [ ! -f "$CHANGES/$n/statuses" ] || cat "$CHANGES/$n/statuses" >> "$STATUSES"
   fi
   exec jq -cn --arg sha "${path##*/}" \
@@ -83,8 +85,11 @@ if [ "$method" != GET ] || [ ${#fields[@]} -gt 0 ]; then
     --args "${fields[@]}" >> "$STATUSES"
 fi
 case $path in
-  */files\?per_page=100) f=$FILES ;;
-  repos/sam/r/compare/*...*\?per_page=1) f=$COMPARE ;;
+  repos/sam/r/compare/*...*\?per_page=1)
+    p=${path#repos/sam/r/compare/}
+    f=$COMPARES/${p%\?per_page=1}.json
+    [ -f "$f" ] || exit 1
+    ;;
   */contents/*)
     p=${path#*/contents/}
     raw=${p%%\?ref=*}
@@ -113,24 +118,23 @@ def change(status, filename, added=0, removed=0, previous=None):
     return f
 
 
-def pages(files):
-    """Two to a page, as gh --paginate prints pages: one JSON array after another."""
-    return "".join(json.dumps(files[i:i + 2]) for i in range(0, len(files), 2)) or "[]"
-
-
-def run(files, body="", trees=None, growth=growth_default, fail=False, changed=None, fork=False, changes=None,
-        restless=False):
-    """The job, on a PR with these files and body. changes: what happens
-    before its Nth post, {N: {"body", "head" (its sha), "base" (sha, ref),
-    "files", "others" (statuses other runs post meanwhile, as (sha, state))}},
-    each of them optional."""
+def run(files, body="", trees=None, growth=growth_default, fail=False, fork=False, changes=None,
+        restless=False, compares=None, pr_head="4ead"):
+    """The job, for an event naming head 4ead, on a PR whose head is pr_head
+    with these files (the comparison of base ba5e and 4ead, merge base 3e7b)
+    and body. compares: the files of other comparisons, {(base, head):
+    files}. changes: what happens before its Nth post, {N: {"body", "head"
+    (its sha), "base" (sha, ref), "others" (statuses other runs post
+    meanwhile, as (sha, state))}}, each of them optional."""
     pr = os.path.join(tmp, "pr.json")
     head_repo = None if fork is None else {"full_name": "fork/r" if fork else "sam/r"}
-    doc = {"body": body, "head": {"sha": "4ead", "repo": head_repo}, "base": {"sha": "ba5e", "ref": "main"},
-           "changed_files": len(files) if changed is None else changed}
+    doc = {"body": body, "head": {"sha": pr_head, "repo": head_repo}, "base": {"sha": "ba5e", "ref": "main"}}
     json.dump(doc, open(pr, "w"))
-    listed = os.path.join(tmp, "files.json")
-    open(listed, "w").write(pages(files))
+    compare_dir = os.path.join(tmp, "compares")
+    shutil.rmtree(compare_dir, ignore_errors=True)
+    os.mkdir(compare_dir)
+    for (b, h), fs in {("ba5e", "4ead"): files, **(compares or {})}.items():
+        json.dump({"merge_base_commit": {"sha": "3e7b"}, "files": fs}, open(os.path.join(compare_dir, f"{b}...{h}.json"), "w"))
     changes_dir = os.path.join(tmp, "changes")
     shutil.rmtree(changes_dir, ignore_errors=True)
     for n, c in sorted((changes or {}).items()):
@@ -143,15 +147,10 @@ def run(files, body="", trees=None, growth=growth_default, fail=False, changed=N
             doc["head"]["sha"] = c["head"]
         if "base" in c:
             doc["base"] = {"sha": c["base"][0], "ref": c["base"][1]}
-        if "files" in c:
-            doc["changed_files"] = len(c["files"])
-            open(os.path.join(d, "files.json"), "w").write(pages(c["files"]))
         json.dump(doc, open(os.path.join(d, "pr.json"), "w"))
         open(os.path.join(d, "statuses"), "w").write("".join(
             json.dumps({"state": state, "context": "rust-first (#7)", "sha": sha, "by": "another run"}) + "\n"
             for sha, state in c.get("others", ())))
-    compare = os.path.join(tmp, "compare.json")
-    json.dump({"merge_base_commit": {"sha": "3e7b"}}, open(compare, "w"))
     tree_dir = os.path.join(tmp, "trees")
     shutil.rmtree(tree_dir, ignore_errors=True)
     for sha, contents in (trees or {}).items():
@@ -166,11 +165,10 @@ def run(files, body="", trees=None, growth=growth_default, fail=False, changed=N
     runner_temp = os.path.join(tmp, "runner")
     shutil.rmtree(runner_temp, ignore_errors=True)
     os.mkdir(runner_temp)
-    env = {"PATH": bin_dir + os.pathsep + os.environ["PATH"], "PR": pr, "FILES": listed, "COMPARE": compare,
-           "TREES": tree_dir, "GH_LOG": log, "STATUSES": statuses, "POSTS": posts, "CHANGES": changes_dir,
+    env = {"PATH": bin_dir + os.pathsep + os.environ["PATH"], "PR": pr, "COMPARES": compare_dir, "TREES": tree_dir, "GH_LOG": log, "STATUSES": statuses, "POSTS": posts, "CHANGES": changes_dir,
            "RESTLESS": "1" if restless else "", "GH_FAIL": "1" if fail else "",
            "GH_TOKEN": "t", "GITHUB_REPOSITORY": "sam/r", "GITHUB_SERVER_URL": "https://github.example",
-           "GITHUB_RUN_ID": "99", "NUMBER": "7", "GROWTH": str(growth), "RUNNER_TEMP": runner_temp}
+           "GITHUB_RUN_ID": "99", "NUMBER": "7", "HEAD_SHA": "4ead", "GROWTH": str(growth), "RUNNER_TEMP": runner_temp}
     # GitHub runs `shell: bash` as this.
     p = subprocess.run([shutil.which("bash"), "--noprofile", "--norc", "-eo", "pipefail", script],
                        env=env, capture_output=True, text=True)
@@ -215,10 +213,11 @@ def passes(files, body="", **kw):
 REASON = "Why not Rust: a throwaway script for one migration."
 
 # No Python in the change: it passes, body or none, and reads the PR as it is
-# now, every page of its files.
+# now, and its files as the comparison of its base and the event's head,
+# which never change.
 _, calls = passes([change("modified", "src/main.rs", 300, 10), change("added", "docs/x.md", 40)])
 assert calls[0] == "api repos/sam/r/pulls/7", calls
-assert calls[1] == "api --paginate repos/sam/r/pulls/7/files?per_page=100", calls
+assert calls[1] == "api repos/sam/r/compare/ba5e...4ead?per_page=1", calls
 assert calls[2].startswith("api -X POST repos/sam/r/statuses/4ead "), calls
 assert calls[3:] == ["api repos/sam/r/pulls/7"], calls
 print("no Python: ok")
@@ -277,8 +276,9 @@ passes([change("modified", "bin/wend", 200, 0), change("removed", "bin/old", 0, 
        trees={"4ead": {"bin/wend": "#!/usr/bin/python\n"}, "3e7b": {"bin/wend": PY, "bin/old": "#!/usr/bin/python3\n"},
               "ba5e": {"bin/wend": PY}})
 _, calls = passes([change("added", "README.md", 80), change("added", "x/y.sh", 9)])
-assert not any("/contents/" in c or "/compare/" in c for c in calls), calls
-# The merge base is asked for once, however many paths need it.
+assert not any("/contents/" in c for c in calls), calls
+# The comparison, and with it the merge base, is asked for once, however
+# many paths need it.
 _, calls = passes([change("modified", "bin/a", 3, 1), change("modified", "bin/b", 3, 1)],
                   trees={"4ead": {"bin/a": SH, "bin/b": SH}, "3e7b": {"bin/a": SH, "bin/b": SH}})
 assert sum("/compare/" in c for c in calls) == 1, calls
@@ -304,10 +304,12 @@ passes([change("modified", "m/a.py", 200, 0), change("modified", "bin/run", 30, 
 passes([change("modified", "m/a.py", 200, 0), change("renamed", "src/a.rs", 250, 300, previous="tools/a.py")])
 print("files that change language: ok")
 
-# GitHub lists 3,000 files at most: one it leaves out could be Python, so a
-# PR past that needs the line whatever the listed ones hold.
-fails([change("modified", "src/main.rs", 1, 1)], changed=3001)
-passes([change("modified", "src/main.rs", 1, 1)], REASON, changed=3001)
+# GitHub lists 300 of a comparison's files at most: one it leaves out could
+# be Python, so a PR with that many needs the line whatever they hold.
+MANY = [change("modified", f"src/{i}.rs", 1, 1) for i in range(300)]
+fails(MANY)
+passes(MANY, REASON)
+passes(MANY[1:])
 print("a file list GitHub cut short: ok")
 
 # GitHub not answering fails it, a file's content included: no answer is no
@@ -338,20 +340,28 @@ def said(posted):
 rc, _, calls, posted = run(NEW, REASON, changes={1: {"body": "Adds a tool.", "others": [("4ead", "failure")]}})
 assert rc == 0 and said(posted) == [("4ead", "failure", "another run"), ("4ead", "success", "this run"),
                                     ("4ead", "failure", "this run")], posted
-assert sum("/files?" in c for c in calls) == 1, calls
+assert sum("/compare/" in c for c in calls) == 1, calls
 # The reason put in: the last word is success.
 rc, _, _, posted = run(NEW, "Adds a tool.", changes={1: {"body": REASON, "others": [("4ead", "success")]}})
 assert rc == 0 and said(posted)[1:] == [("4ead", "failure", "this run"), ("4ead", "success", "this run")], posted
 # With no Python an edit changes nothing, but it's judged again all the same.
 rc, _, _, posted = run(RUST, changes={1: {"body": "edited"}})
 assert rc == 0 and said(posted) == [("4ead", "success", "this run")] * 2, posted
-# A push while it ran: the new head's files are judged, its status posted on it.
-rc, _, calls, posted = run(RUST, changes={1: {"head": "5ead", "files": NEW}})
-assert rc == 0 and said(posted) == [("4ead", "success", "this run"), ("5ead", "failure", "this run")], posted
-assert sum("/files?" in c for c in calls) == 2, calls
-# A new base: the diff it judges is the new one.
-rc, _, _, posted = run(NEW, changes={1: {"base": ("de5e", "dev"), "files": RUST}})
+# A run posts only on the head its event named, where its own check keeps the
+# head pending while it works: after a push, the new head is its own run's to
+# judge, and this one stops. So does a run whose head the PR has already left
+# (a re-run of an old one): it posts nothing.
+rc, out, _, posted = run(RUST, changes={1: {"head": "5ead"}}, compares={("ba5e", "5ead"): NEW})
+assert rc == 0 and said(posted) == [("4ead", "success", "this run")], posted
+assert "no longer 4ead" in out, out
+rc, _, calls, posted = run(NEW, pr_head="5ead", compares={("ba5e", "5ead"): RUST})
+assert rc == 0 and not posted and not any("/compare/" in c for c in calls), (calls, posted)
+# A new base: the diff it judges is the new one, the comparison of the new
+# base and its head.
+rc, _, calls, posted = run(NEW, changes={1: {"base": ("de5e", "dev")}}, compares={("de5e", "4ead"): RUST})
 assert rc == 0 and said(posted) == [("4ead", "failure", "this run"), ("4ead", "success", "this run")], posted
+assert [c for c in calls if "/compare/" in c] == ["api repos/sam/r/compare/ba5e...4ead?per_page=1",
+                                                  "api repos/sam/r/compare/de5e...4ead?per_page=1"], calls
 # A PR that changes every time it's read: after ten looks it fails, until
 # it's edited again.
 rc, out, _, posted = run(NEW, REASON, restless=True)

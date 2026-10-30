@@ -6,15 +6,16 @@
 # it's a workflow of its own rather than a job in flake-check.yml: an edited
 # body would rerun the whole gate.
 #
-# The verdict is a commit status on the PR's head, `rust-first (#N)`, rather
-# than the job's result. Each run is a workflow run of its own, and a failed
-# run's check stays on the head beside every newer one, so a fixed body would
-# still show red; a commit keeps one status per context, the newest. The PR's
-# number in the context keeps another PR at the same commit from replacing
-# it. Runs overlap, so each reads the PR again after it posts, and judges and
-# posts again if it changed (the loop below says why that's enough). A fork's
-# PR runs with a token that can't post a status, so there the job's own
-# result is the verdict, and it's the owner's to merge anyway.
+# The verdict is a commit status, `rust-first (#N)`, on the head commit the
+# event names (the commit this run's own check is on), rather than the job's
+# result. Each run is a workflow run of its own, and a failed run's check
+# stays on the head beside every newer one, so a fixed body would still show
+# red; a commit keeps one status per context, the newest. The PR's number in
+# the context keeps another PR at the same commit from replacing it. Runs
+# overlap, so each reads the PR again after it posts, and judges and posts
+# again if it changed (the loop below says why that's enough). A fork's PR
+# runs with a token that can't post a status, so there the job's own result
+# is the verdict, and it's the owner's to merge anyway.
 #
 # Called from a repo's own workflow with `uses:`, whose job grants
 # `contents: read`, `pull-requests: read` and `statuses: write`.
@@ -47,9 +48,13 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           NUMBER: ${{ github.event.pull_request.number }}
+          # The head this run judges, its check is on and its status goes
+          # on, from the event: a re-run keeps it.
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           GROWTH: ${{ inputs.growth }}
         run: |
           pr="repos/$GITHUB_REPOSITORY/pulls/$NUMBER"
+          head=$HEAD_SHA
 
           # Whether a path is Python at a commit: by its extension, or with
           # none, by a python shebang on its first line there. Called as a
@@ -66,34 +71,22 @@ jobs:
               < /dev/null > "$RUNNER_TEMP/first" || exit 1
             head -n 1 "$RUNNER_TEMP/first" | grep -qE '^#!.*python'
           }
-          # The old side of the PR's diff is the merge base, not the base
-          # branch's tip: asked once a classification, the first time a path
-          # needs it.
-          was_python() {
-            case ${1##*/} in
-              *.py | *.pyi) return 0 ;;
-              *.*) return 1 ;;
-            esac
-            if [ -z "$origin" ]; then
-              origin=$(gh api "repos/$GITHUB_REPOSITORY/compare/$base...$head?per_page=1" \
-                --jq .merge_base_commit.sha < /dev/null) || exit 1
-            fi
-            is_python "$1" "$origin"
-          }
 
-          # The PR's files at $head over $base: new, the files that become
-          # Python, and growth, the net lines added to the Python it had.
+          # The diff of $head over $base: new, the files that become Python,
+          # and growth, the net lines added to the Python it had. It's read
+          # as the comparison of those two commits, which never change, in
+          # one answer: the merge base (the diff's old side, not the base
+          # branch's tip) and every file, with what each adds and takes out,
+          # one NUL-ended field each, so a path comes through byte for byte.
           classify() {
-            origin=
-            # Every page, with what each file adds and takes out, one
-            # NUL-ended field each, so a path comes through byte for byte.
-            gh api --paginate "$pr/files?per_page=100" < /dev/null > "$RUNNER_TEMP/files.json"
-            jq --raw-output0 '.[] | .status, (.additions | tostring), (.deletions | tostring), .filename,
-              (.previous_filename // "")' "$RUNNER_TEMP/files.json" > "$RUNNER_TEMP/files"
-            # GitHub lists 3,000 files at most: past that, what it leaves out
-            # could be Python, so the PR needs the line whatever the rest says.
-            listed=$(jq -n '[inputs | length] | add // 0' "$RUNNER_TEMP/files.json")
-            changed=$(jq .changed_files "$RUNNER_TEMP/pr.json")
+            gh api "repos/$GITHUB_REPOSITORY/compare/$base...$head?per_page=1" < /dev/null > "$RUNNER_TEMP/compare.json"
+            origin=$(jq -r .merge_base_commit.sha "$RUNNER_TEMP/compare.json")
+            jq --raw-output0 '.files // [] | .[] | .status, (.additions | tostring), (.deletions | tostring),
+              .filename, (.previous_filename // "")' "$RUNNER_TEMP/compare.json" > "$RUNNER_TEMP/files"
+            # GitHub lists 300 of a comparison's files at most: past that,
+            # what it leaves out could be Python, so the PR needs the line
+            # whatever the rest says.
+            listed=$(jq '.files // [] | length' "$RUNNER_TEMP/compare.json")
             # Each file is Python before (but for one added or copied) and
             # after (but for one removed), or not. Becoming Python makes it
             # new Python, whatever its lines. Growth: lines added to Python
@@ -107,7 +100,7 @@ jobs:
               was=false now=false
               case $status in
                 added | copied) ;;
-                *) was_python "${previous:-$file}" && was=true ;;
+                *) is_python "${previous:-$file}" "$origin" && was=true ;;
               esac
               case $status in
                 removed) ;;
@@ -132,23 +125,28 @@ jobs:
           }
 
           # Judge the PR as it is now, not as the event saw it, post the
-          # verdict, then read the PR again: if its head, base or body has
+          # verdict on $head, then read the PR again: if its base or body has
           # changed since, judge and post again. Every push and every edit
           # starts a run, they overlap, and the newest status posted wins, so
           # a run that read the PR before an edit can post after the edit's
           # own run. Reading again after each post makes the last status
-          # posted on a head the verdict for the PR as it was read after that
-          # post; a change after that read starts a run that posts later.
-          # Until its loop ends a run's check is pending, so nobody takes a
-          # verdict in between for the last word. A PR still changing after
-          # ten looks fails, until it's edited again.
+          # posted on $head the verdict for the PR as it was read after that
+          # post; a change after that read starts a run for the head it has
+          # then, which posts later. Each run posts only on its own head,
+          # where its check stays pending until its loop ends, so nobody
+          # takes a verdict in between for the last word. Once the PR has
+          # another head, $head is no longer this run's to judge: that one's
+          # own run judges it. A PR still changing after ten looks fails,
+          # until it's edited again.
           judged='' at='' looks=0
           while :; do
             gh api "$pr" < /dev/null > "$RUNNER_TEMP/pr.json"
-            seen=$(jq -c '[.head.sha, .base.ref, .body // ""]' "$RUNNER_TEMP/pr.json" | sha256sum)
+            if [ "$(jq -r .head.sha "$RUNNER_TEMP/pr.json")" != "$head" ]; then
+              echo "the PR's head is no longer $head: the run for its new one judges it"
+              break
+            fi
+            seen=$(jq -c '[.base.ref, .body // ""]' "$RUNNER_TEMP/pr.json" | sha256sum)
             [ "$seen" != "$judged" ] || break
-            head=$(jq -r .head.sha "$RUNNER_TEMP/pr.json")
-            base=$(jq -r .base.sha "$RUNNER_TEMP/pr.json")
             if [ "$looks" -eq 10 ]; then
               echo "::error title=Why not Rust?::This PR kept changing while the rust-first check read it. Edit its body to check it again."
               post failure "the PR kept changing while this ran: edit it to check again"
@@ -156,13 +154,14 @@ jobs:
             fi
             looks=$((looks + 1))
             [ -z "$judged" ] || echo "the PR changed while this ran: judging it again"
-            if [ "$head $base" != "$at" ]; then
+            base=$(jq -r .base.sha "$RUNNER_TEMP/pr.json")
+            if [ "$base" != "$at" ]; then
               classify
-              at="$head $base"
+              at=$base
             fi
             state=success why="no new Python to say why about"
-            if [ "$listed" -lt "$changed" ] || [ "$new" -gt 0 ] || [ "$growth" -gt "$GROWTH" ]; then
-              [ "$listed" -ge "$changed" ] || echo "GitHub lists $listed of its $changed files, so the rest could be Python"
+            if [ "$listed" -ge 300 ] || [ "$new" -gt 0 ] || [ "$growth" -gt "$GROWTH" ]; then
+              [ "$listed" -lt 300 ] || echo "GitHub lists 300 files of a comparison at most, so more could be Python"
               # The line, in any case, bold or in a list, with a reason after
               # it. The body is only searched, never printed.
               body=$(jq -r '.body // ""' "$RUNNER_TEMP/pr.json" | tr -d '\r')
@@ -170,7 +169,7 @@ jobs:
                 why="the body says why it isn't Rust"
               else
                 state=failure why="adds Python, and the body has no 'Why not Rust:' line"
-                echo "::error title=Why not Rust?::This PR adds $new Python file(s) and $growth net line(s) to the Python it had (of the $listed file(s) GitHub lists out of $changed), but its body doesn't say why it isn't Rust. The house rules want new code in Rust unless there's a reason: add a line to the PR body starting 'Why not Rust:' with it (a throwaway script, a tool still being tuned, ported once it settles). Editing the body runs this again."
+                echo "::error title=Why not Rust?::This PR adds $new Python file(s) and $growth net line(s) to the Python it had (of the $listed file(s) GitHub lists, at most 300), but its body doesn't say why it isn't Rust. The house rules want new code in Rust unless there's a reason: add a line to the PR body starting 'Why not Rust:' with it (a throwaway script, a tool still being tuned, ported once it settles). Editing the body runs this again."
               fi
             fi
             echo "$why"
