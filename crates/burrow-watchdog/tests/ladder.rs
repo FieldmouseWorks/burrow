@@ -549,7 +549,11 @@ fn in_line() {
     assert!(m.kicks().contains(&"autoland".to_owned()));
     // Anything else that's stuck beside it still gets its job, and the job's
     // task doesn't name what's in line.
-    m.write(&m.steward, json!({"sam/r#7": item(T - 3.0 * H, T - MIN, None)}), T);
+    m.write(
+        &m.steward,
+        json!({"sam/r#7": item(T - 3.0 * H, T - MIN, None)}),
+        T,
+    );
     m.run(T + MIN);
     let runs = m.runs();
     let [job] = &runs[..] else { panic!("{runs:?}") };
