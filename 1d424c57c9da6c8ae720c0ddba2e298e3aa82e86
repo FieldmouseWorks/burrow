@@ -1,0 +1,53 @@
+{
+  "conary": "note v1",
+  "change": "7vkmx813dx43xafx6ffjm8yz6w",
+  "repo": {
+    "owner": "fieldmouseworks",
+    "name": "burrow"
+  },
+  "pr": 190,
+  "url": "https://github.com/fieldmouseworks/burrow/pull/190",
+  "summary": "proj: a command past a job's memory cap is killed, not the whole turn",
+  "task": "FieldmouseWorks/remi#189",
+  "author": {
+    "kind": "person",
+    "login": "TusanHomichi",
+    "session": null
+  },
+  "landing": {
+    "revision": "cf677a4cf2f4281a3710a99e05405a13dc83e6ec3d30e745cf4233eee3b8742b",
+    "before": "58ff7878f56b7618c49909e7217a89a8bb097f6d",
+    "after": "1d424c57c9da6c8ae720c0ddba2e298e3aa82e86",
+    "by": {
+      "kind": "status",
+      "login": "fieldmouseworks-steward[bot]"
+    },
+    "at": 1793364459785
+  },
+  "evidence": [
+    {
+      "kind": "ci",
+      "check": "check / commits",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/41046902247/job/124033086465"
+    },
+    {
+      "kind": "review",
+      "check": "codex",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/190#pullrequestreview-5711486127"
+    },
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/41046902247/job/124033086938"
+    },
+    {
+      "kind": "ci",
+      "check": "agents",
+      "result": "pass",
+      "source": "status agents"
+    }
+  ]
+}
