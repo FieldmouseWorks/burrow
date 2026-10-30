@@ -87,15 +87,29 @@
         # check, so these build nothing. A service that says how it runs (a
         # Type) has something to run too: systemd refuses one without
         # ExecStart or ExecStop, and only when it starts. A module that
-        # registers a burrow-events handler has burrow-events to run it.
+        # registers a burrow-events handler has burrow-events to run it. And a
+        # memory cap holds swap to it too: a unit that may swap outgrows its
+        # cap without ever reaching it, and the machine thrashes rather than
+        # the kernel killing inside the cap.
         standalone = let
           runnable = name: machine: let
-            s = machine.config.systemd.services;
+            sd = machine.config.systemd;
+            s = sd.services;
             empty = builtins.filter (n: s.${n}.enable && s.${n}.serviceConfig ? Type
               && !(s.${n}.serviceConfig ? ExecStart || s.${n}.serviceConfig ? ExecStop)) (builtins.attrNames s);
             unrun = machine.config.burrow.events.handlers or { } != { } && !(s ? burrow-events);
+            swapping = builtins.concatMap ({ kind, units, section }: builtins.concatMap (n:
+              let c = units.${n}.${section}; in
+              nixpkgs.lib.optional (toString (c.MemoryMax or "infinity") != "infinity"
+                && toString (c.MemorySwapMax or "") != "0") "${kind} ${n}") (builtins.attrNames units)) [
+              { kind = "service"; units = s; section = "serviceConfig"; }
+              { kind = "slice"; units = sd.slices; section = "sliceConfig"; }
+              { kind = "user service"; units = sd.user.services; section = "serviceConfig"; }
+              { kind = "user slice"; units = sd.user.slices; section = "sliceConfig"; }
+            ];
           in if empty != [ ] then throw "${name}: services with nothing to run: ${builtins.concatStringsSep ", " empty}"
              else if unrun then throw "${name}: burrow-events handlers with no burrow-events to start them"
+             else if swapping != [ ] then throw "${name}: memory caps that let their units swap (give each MemorySwapMax = 0): ${builtins.concatStringsSep ", " swapping}"
              else machine;
         in pkgs.writeText "burrow-standalone" (nixpkgs.lib.concatMapStrings (name:
           let
@@ -123,6 +137,8 @@
         agents = import ./tests/agents.nix { inherit self pkgs; };
         # proj's queue and memory caps, with a stand-in for Claude.
         proj = import ./tests/proj.nix { inherit self pkgs; };
+        # A turn's clock, which stands still while it waits in line.
+        proj-clock = import ./tests/proj-clock.nix { inherit self pkgs; };
         # Who takes a free slot: the pipeline's own (only its own repos'
         # pipeline jobs), and each project's cap.
         proj-pick = pkgs.runCommand "proj-pick-check" { nativeBuildInputs = [ pkgs.shellcheck pkgs.git ]; } ''
@@ -131,7 +147,7 @@
           touch $out
         '';
         # What each job waits on, as the stall watchdog hears it.
-        proj-waits = pkgs.runCommand "proj-waits-check" { nativeBuildInputs = [ pkgs.shellcheck pkgs.jq ]; } ''
+        proj-waits = pkgs.runCommand "proj-waits-check" { nativeBuildInputs = [ pkgs.shellcheck pkgs.jq pkgs.util-linux ]; } ''
           shellcheck -s bash ${./modules/proj/waits.sh} ${./tests/proj-waits.sh}
           bash ${./tests/proj-waits.sh} ${./modules/proj/waits.sh}
           touch $out
@@ -158,6 +174,59 @@
             ];
           };
         in builtins.head (builtins.filter (p: (p.name or "") == "autoland-steward") machine.config.environment.systemPackages);
+        # The steward's tools reach a pass however it's started: by hand or
+        # a Claude job (`autoland-steward kick OWNER/REPO`), with no openssl,
+        # gh or proj of its own, gets them from the wrapper, ahead of its own
+        # PATH but for a review's. Its gh is the machine's: in an App's env
+        # (a job's), `status` and a project's clone go through the socket,
+        # and a pass's own calls with the steward's token as given.
+        autoland-path = let
+          example = self.nixosConfigurations.example.config;
+          steward = builtins.head (builtins.filter (p: (p.name or "") == "autoland-steward")
+            example.environment.systemPackages);
+          # gh-token's side of the socket: the App's token for whatever's asked.
+          socket = pkgs.writeText "fake-socket.py" ''
+            import os, socket, sys
+            s = socket.socket(socket.AF_UNIX)
+            s.bind(sys.argv[1])
+            s.listen()
+            open(sys.argv[1] + ".up", "w").close()
+            while True:
+                c, _ = s.accept()
+                c.recv(4096)
+                c.sendall(b"token from-the-socket\n")
+                c.close()
+          '';
+        in pkgs.runCommand "autoland-path-check" { nativeBuildInputs = [ pkgs.python3 ]; } ''
+          w=${steward}/bin/autoland-steward
+          # The wrapper, but showing the PATH it would run the steward with.
+          grep -q '^exec .*steward.py' "$w" || { echo "autoland-steward doesn't exec the steward"; exit 1; }
+          sed 's|^exec .*steward.py.*|printf "%s\\n" "$PATH"; exit|' "$w" >path-of
+          for sub in kick status pass; do
+            p=$(env -i PATH=/caller ${pkgs.bash}/bin/bash path-of $sub)
+            case $p in *:/caller) ;; *) echo "$sub: the caller's PATH isn't kept after the steward's: $p"; exit 1 ;; esac
+            [ "$p" != /caller ] || { echo "autoland-steward sets no PATH of its own"; exit 1; }
+            for t in openssl gh git tar proj; do
+              env -i PATH="$p" ${pkgs.bash}/bin/bash -c "command -v $t" >/dev/null || { echo "$sub: no $t on the steward's PATH"; exit 1; }
+            done
+          done
+          p=$(env -i PATH=/caller ${pkgs.bash}/bin/bash path-of review)
+          [ "$p" = /caller ] || { echo "review gets more than its units give it: $p"; exit 1; }
+          p=$(env -i PATH=/caller ${pkgs.bash}/bin/bash path-of status)
+          gh=$(env -i PATH="$p" ${pkgs.bash}/bin/bash -c 'command -v gh')
+          git=$(env -i PATH="$p" ${pkgs.bash}/bin/bash -c 'command -v git')
+          [ "$gh" = ${example.burrow.tools.gh}/bin/gh ] || { echo "the steward's gh isn't the machine's: $gh"; exit 1; }
+          [ "$git" = ${example.programs.git.package}/bin/git ] || { echo "the steward's git isn't the machine's: $git"; exit 1; }
+          # As a job with an App runs it: no token of its own, the socket's.
+          python3 -I ${socket} $PWD/app.sock & while [ ! -e app.sock.up ]; do sleep 0.1; done
+          mkdir no-login
+          ask() { env -i PATH="$p" HOME=$PWD GH_CONFIG_DIR=$PWD/no-login GH_TOKEN_SOCKET=$PWD/app.sock GH_TOKEN_OWNER=sam "$@" gh auth token 2>&1; }
+          got=$(ask GH_TOKEN=) || true
+          [ "$got" = from-the-socket ] || { echo "status in an App's env doesn't go through its socket: $got"; exit 1; }
+          got=$(ask GH_TOKEN=the-stewards) || true
+          [ "$got" = the-stewards ] || { echo "a pass's own call doesn't use the steward's token: $got"; exit 1; }
+          touch $out
+        '';
         # The stall watchdog's ladder (kick, Claude job, stuck issue, owner),
         # with the real notify and stand-ins for proj, notify's gh and
         # burrow-events' kick port.
@@ -170,6 +239,8 @@
         events-service = import ./tests/events.nix { inherit self pkgs; };
         # HOST-switch's revert when the window runs out mid-activation.
         switch = import ./tests/switch.nix { inherit self pkgs; };
+        # systemd-oomd kills what eats the memory before the machine drowns.
+        oomd = import ./tests/oomd.nix { inherit self pkgs; };
         # HOST-health's ZFS check: the pools the machine needs, by name or
         # GUID, with a stand-in zpool.
         health-zfs = import ./tests/health-zfs.nix { inherit self pkgs; };
