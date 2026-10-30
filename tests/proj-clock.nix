@@ -166,9 +166,11 @@ pkgs.testers.runNixOSTest {
             wait_of(j, lambda w: w["phase"] == "turn 1 is running")
         machine.succeed("systemd-run --unit=hold-waits flock /data/dev/jobs/.waits.lock ${pkgs.coreutils}/bin/sleep 600")
         machine.wait_until_fails("flock -n /data/dev/jobs/.waits.lock true", timeout=10)
-        # Its twenty seconds and three in line; quiet for fifteen, still in line.
+        # Its twenty seconds and three in line, less what the once-a-second
+        # reading of the clock misses of the wait; quiet for fifteen, still
+        # in line.
         machine.wait_until_succeeds(f"su - dev -c 'proj state {a}' | grep -x 'timed out after 20s'", timeout=60)
-        assert 23 <= took(a) < 35, took(a)
+        assert 21 <= took(a) < 35, took(a)
         machine.wait_until_succeeds(f"su - dev -c 'proj state {b}' | grep -x 'went quiet for 15s'", timeout=60)
         assert 15 <= took(b) < 25, took(b)
         machine.succeed("systemctl stop hold-waits")
