@@ -155,7 +155,7 @@ owner, since nothing else merges it.
   "green" means nothing and dependency updates can't merge themselves.
   The CI is the flake gate the [house style](house-style.md#the-gate-is-the-flake)
   describes: a `flake.nix` from burrow's template, the workflow that calls
-  `nix flake check`, and the template's rust-first workflow beside it. Jobs
+  `nix flake check`, and the template's house workflow beside it. Jobs
   the flake can't hold stay alongside it.
 - **AGENTS.md** with the Code Review Rules section below, plus whatever the
   repo's own agents need (how to build, test and run it). Keep the repo's

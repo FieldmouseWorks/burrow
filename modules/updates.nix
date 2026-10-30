@@ -262,7 +262,7 @@ let
 
     # Commit subjects and PR titles in the house style, `area: plain
     # sentence` (house/rules.md): "deps: update foo to v1.5". The PR title is
-    # the subject the steward squashes onto main, and house-check fails a PR
+    # the subject the steward squashes onto main, and the house check fails a PR
     # whose title isn't. Left to itself Renovate guesses from each repo's
     # history, and config:recommended's package rules type it fix or chore,
     # so a package rule below has the final word on the type.
