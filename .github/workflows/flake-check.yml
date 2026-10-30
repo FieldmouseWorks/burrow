@@ -38,15 +38,21 @@ on:
         default: false
       pr-gate:
         description: >-
-          Run the gate on a PR. False in a repo whose PRs land through its
-          merge train, which runs the gate on each candidate it would land (a
-          push to a conary/train/ branch) rather than on the PRs in it, so a
-          PR's own run checks only its commits.
+          Run the gate on a PR to the default branch. False in a repo whose
+          PRs land through its merge train, which runs the gate on each
+          candidate it would land (a push to a conary/train/ branch) rather
+          than on the PRs in it, so such a PR's own run checks only its
+          commits. A PR to any other branch, which the train doesn't land,
+          still gets the gate. A caller that turns it off runs on
+          pull_request's `edited` too, so a PR retargeted away from the
+          default branch gets the gate for its new base.
         type: boolean
         default: true
 jobs:
   check:
-    if: inputs.pr-gate || github.event_name != 'pull_request'
+    if: >-
+      inputs.pr-gate || github.event_name != 'pull_request' ||
+      github.event.pull_request.base.ref != github.event.repository.default_branch
     runs-on: ${{ inputs.runner }}
     permissions:
       contents: read
