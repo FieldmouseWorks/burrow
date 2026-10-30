@@ -45,6 +45,12 @@
       # burrow's own programs, one Cargo workspace (crates/): their package
       # and their gate, built for every platform lib/project.nix knows.
       crates = self.lib.project { self = ./crates; rust = { }; };
+      # A workspace whose build script finds a native library with
+      # pkg-config: lib/project.nix's native inputs, for its checks.
+      houseNative = {
+        nativeBuildInputs = pkgs: [ pkgs.pkg-config ];
+        buildInputs = pkgs: [ pkgs.zlib ];
+      };
     in
     {
       # A project's dev shell and gate in a few lines; see lib/project.nix.
@@ -702,6 +708,14 @@
           [ "$(${pkg}/bin/house-fixture-member)" = 42 ]
           touch $out
         '';
+        # lib/project.nix's package of a workspace that links a native
+        # library: the build found the one the project names.
+        house-native-package = let
+          pkg = (self.lib.project { self = ./tests/house/rust-native; systems = [ system ]; rust = houseNative; }).packages.${system}.default;
+        in pkgs.runCommand "house-native-package-check" { } ''
+          [ "$(${pkg}/bin/house-native)" = ${pkgs.zlib.version} ]
+          touch $out
+        '';
       } // nixpkgs.lib.mapAttrs' (name: nixpkgs.lib.nameValuePair "crates-${name}") crates.checks.${system}
       // nixpkgs.lib.mapAttrs' (name: nixpkgs.lib.nameValuePair "gh-token-${name}") ghToken.checks.${system}
       // nixpkgs.lib.mapAttrs' (name: nixpkgs.lib.nameValuePair "flaky-${name}")
@@ -710,6 +724,8 @@
       // nixpkgs.lib.mapAttrs' (name: nixpkgs.lib.nameValuePair "house-${name}") (
         # lib/project.nix's own gates, on the smallest projects that have them.
         (self.lib.project { self = ./tests/house/rust; systems = [ system ]; rust.testInputs = pkgs: [ pkgs.git ]; }).checks.${system}
+        // nixpkgs.lib.mapAttrs' (name: nixpkgs.lib.nameValuePair "native-${name}")
+          (self.lib.project { self = ./tests/house/rust-native; systems = [ system ]; rust = houseNative; }).checks.${system}
         // (self.lib.project { self = ./tests/house/python; systems = [ system ]; python = { format = true; }; }).checks.${system}
       );
 
