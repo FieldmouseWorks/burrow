@@ -501,7 +501,8 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
         """Only checks that run on a machine, not in CI, are left: a Claude
         job runs them on this head and records their verdicts, once its
         repo's proofSlots have room for it (a job started again too), or it
-        has nothing new to build (proofs.py)."""
+        has nothing new to build; none at all, and no job: its verdicts are
+        taken from the store (proofs.py)."""
         doing = "running " + ", ".join(ci_names)
         task = proof_task(repo, pr, ci_names, rc["proofJobs"])
         retry = lost("proved")
@@ -512,6 +513,11 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
 
         if not retry and st.get("proved") == head:
             running_now()
+            return
+        if (drvs := P.built(repo, pr, ci_names, st)) and not P.record(repo, pr, ci_names, drvs, st):
+            strike("status")
+        if drvs:  # Their statuses kick the pass that lands it.
+            settle("pending", f"Settled; {', '.join(ci_names)} taken from the store, not run again"[:140])
             return
         # One that broke is counted, and its retry booked, whether or not
         # there's room: only the job started in its place waits for a slot.

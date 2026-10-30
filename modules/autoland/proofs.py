@@ -13,6 +13,11 @@ out holds a slot of its own until it ends. So a proof with nothing new to
 build skips the line: all its paths are built, or being built by proofs
 already running.
 
+One whose paths are all built takes no job at all. A path is valid in the
+store only once its build has passed, so its checks' verdicts are taken
+from there (built, record), saying so and naming each derivation: that
+exact derivation passed on this machine, once, and isn't run again.
+
 A job is still a job whatever head it was started on: a PR pushed again,
 or marked a draft, while its job runs still has what it holds. A turn in
 the line is only this pass's: a PR is ahead while it's waiting in the same
@@ -94,18 +99,45 @@ def outputs(repo, pr, checks, st):
     got = st.get("proofOutputs")
     if got and got["for"] == key:
         return got["paths"]
-    paths = None
+    drvs = paths = None
     try:
         mirror = V.fetch(repo, f"+refs/pull/{n}/head:refs/pr/{n}")
         url = f"git+file://{urllib.parse.quote(mirror)}?ref=refs/pr/{n}&rev={head}"
-        drvs = [nix("nix", "--extra-experimental-features", "nix-command flakes", "eval", "--raw",
-                    "--option", "allow-import-from-derivation", "false", "--option", "accept-flake-config", "false",
-                    "--no-update-lock-file", f"{url}#{attrs[c]}.drvPath", timeout=EVAL_TIMEOUT) for c in sorted(checks)]
-        paths = sorted(set(nix("nix-store", "--query", "--outputs", *drvs).split())) or None
+        drvs = {c: nix("nix", "--extra-experimental-features", "nix-command flakes", "eval", "--raw",
+                       "--option", "allow-import-from-derivation", "false", "--option", "accept-flake-config", "false",
+                       "--no-update-lock-file", f"{url}#{attrs[c]}.drvPath", timeout=EVAL_TIMEOUT) for c in sorted(checks)}
+        paths = sorted(set(nix("nix-store", "--query", "--outputs", *drvs.values()).split())) or None
     except (RuntimeError, OSError, subprocess.SubprocessError) as e:
         log(f"{repo}#{n}: can't tell what its proof builds at {head[:12]}: {e}")
-    st["proofOutputs"] = {"for": key, "paths": paths}
+    st["proofOutputs"] = {"for": key, "paths": paths, "drvs": drvs if paths else None}
     return paths
+
+
+def built(repo, pr, checks, st):
+    """Each of checks' derivations on PR's head, by check, when every output
+    of them all is valid in this machine's store: each passed here. None
+    when one isn't, or what they build can't be worked out."""
+    outs = outputs(repo, pr, checks, st)
+    if not outs or unbuilt(outs):
+        return None
+    return st["proofOutputs"].get("drvs")
+
+
+def record(repo, pr, checks, drvs, st):
+    """checks' verdicts on PR's head, taken from the store (built), once a
+    head: each a pass that says where it came from and names its
+    derivation, so it doesn't read as a run. False if GitHub didn't take
+    one: all are posted again next time."""
+    head = pr["headRefOid"]
+    if st.get("provedStore") == head:
+        return True
+    for c in checks:
+        desc = f"Taken from the store, not run again: {drvs[c]} passed here before"
+        if C.write("api", f"repos/{repo}/statuses/{head}", "-f", "state=success", "-f", f"context={c}",
+                   "-f", f"description={desc[:140]}", "-f", f"target_url={pr['url']}", check=False) is None:
+            return False
+    st["provedStore"] = head
+    return True
 
 
 def unbuilt(paths):

@@ -1,10 +1,12 @@
 """proofBuilds: a proof with nothing new to build skips its repo's line.
 What it builds is worked out once a head, from the steward's mirror at that
-exact commit; one whose outputs are all in the store, or being built by a
-proof already running, starts at once and holds no slot, and says so. A
-slot is held by a build, not a job: a job whose paths the jobs started
-before it are building holds none, and one whose eval failed, or whose
-check has no attribute, holds its own."""
+exact commit; one whose outputs are being built by a proof already running
+starts at once and holds no slot, and says so, and one whose outputs are
+all in the store takes no job: its verdict is taken from the store, once a
+head, saying so and naming the derivation. A slot is held by a build, not
+a job: a job whose paths the jobs started before it are building holds
+none, and one whose eval failed, or whose check has no attribute, holds its
+own."""
 
 import itertools
 import json
@@ -12,7 +14,7 @@ import os
 import sys
 
 import proofs as P
-from harness import C, CI_GREEN, JOBS, STATES, S, V, clean, fresh_pr_state, pr_state, run, sh, tmp
+from harness import C, CI_GREEN, FAIL, JOBS, STATES, S, V, WROTE, clean, fresh_pr_state, pr_state, run, sh, tmp
 
 # A repo whose PRs' heads are real commits on its remote, as GitHub has them.
 origin, work = f"{tmp}/builds-origin", f"{tmp}/builds-work"
@@ -83,6 +85,17 @@ S.CFG["repos"]["sam/r"] = {"proofJobs": {"remi-proof": "Run `just proof` and pos
                            "proofBuilds": {"remi-proof": "checks.x86_64-linux.proof"}, "proofSlots": 1}
 proof = CI_GREEN + [{"__typename": "StatusContext", "context": "remi-proof", "state": "PENDING", "description": ""}]
 RUNNING, SKIPPED = "a Claude job is running remi-proof", "nothing new to build, so it skipped the line"
+STORE = "Settled; remi-proof taken from the store, not run again"
+
+
+def from_store():
+    """The remi-proof verdicts this pass posted: each one's description."""
+    return [w.split("description=")[1].split(" -f ")[0] for w in WROTE
+            if "/statuses/" in w and "context=remi-proof" in w and "state=success" in w]
+
+
+def taken(drv):
+    return f"Taken from the store, not run again: {drv}.drv passed here before"
 
 
 def line(n, t=700):
@@ -103,17 +116,19 @@ paths = pr_state(1)["proofPaths"]
 assert list(paths) == [pr_state(1)["provedJob"]] and paths[pr_state(1)["provedJob"]]["paths"] == [X], paths
 # PR 2 builds Y: it waits its turn.
 assert ahead(1) in line(2) and JOBS == [], JOBS
-# PR 3's Z is built already: it starts while PR 1 holds the slot, and says why.
+# PR 3's Z is built already: no job, while PR 1 holds the slot; its verdict
+# is taken from the store, saying so and naming Z's derivation.
 status = line(3)
-assert RUNNING in status and SKIPPED in status and len(JOBS) == 1, (status, JOBS)
+assert STORE in status and JOBS == [] and from_store() == [taken(Z)], (status, JOBS, WROTE)
 # PR 4 builds X, which PR 1's job is building: Nix builds it once.
 status = line(4)
 assert RUNNING in status and SKIPPED in status and len(JOBS) == 1, (status, JOBS)
-# The next pass: the two building X are one build, the one with nothing to
-# build holds nothing, and the ones that skipped still say why.
+# The next pass: the two building X are one build, the one that skipped
+# still says why, and PR 3's verdict, posted already, isn't again.
 P.begin("sam/r", {1, 2, 3, 4})
 assert ahead(1) in line(2, 800) and JOBS == [], JOBS
-assert SKIPPED in line(3, 800) and SKIPPED in line(4, 800) and JOBS == []
+assert STORE in line(3, 800) and from_store() == [] and JOBS == [], WROTE
+assert SKIPPED in line(4, 800) and JOBS == []
 # PR 1's job ends without X built (it failed): PR 4's, still building X,
 # holds the slot now.
 STATES[pr_state(1)["provedJob"]] = "failed"
@@ -196,9 +211,32 @@ line(1)
 assert ahead(1) in line(2) and len(evals()) == 2, evals()
 S.CFG["repos"]["sam/r"]["proofBuilds"] = {"remi-proof": "checks.x86_64-linux.other"}
 status = line(2, 800)
-assert RUNNING in status and SKIPPED in status and len(evals()) == 3, (status, evals())
+assert STORE in status and from_store() == [taken(Z)] and len(evals()) == 3, (status, evals())
 assert evals()[-1][-1].endswith("#checks.x86_64-linux.other.drvPath"), evals()
 S.CFG["repos"]["sam/r"]["proofBuilds"] = {"remi-proof": "checks.x86_64-linux.proof"}
+
+# Taken from the store whatever the repo's proofSlots, and a verdict GitHub
+# didn't take is posted again on a later pass, the PR left pending until it
+# is: the store's word is the only one.
+fresh_pr_state()
+VALID[:] = [Z]
+nix_knows()
+del S.CFG["repos"]["sam/r"]["proofSlots"]
+P.begin("sam/r", {3})
+FAIL.append("context=remi-proof")
+status = line(3)
+assert STORE in status and JOBS == [] and "provedStore" not in pr_state(3), (status, JOBS)
+assert pr_state(3)["strikes"] == {"status": 1}, pr_state(3)
+FAIL.remove("context=remi-proof")
+status = line(3, 800)
+assert STORE in status and JOBS == [] and from_store() == [taken(Z)], (status, WROTE)
+assert pr_state(3)["provedStore"] == heads[3] and not pr_state(3)["strikes"], pr_state(3)
+# One output of two built isn't all of them: a job runs it.
+VALID[:] = [X]
+nix_knows({1: XY}, {XY: [X, Y]})
+P.begin("sam/r", {1})
+status = line(1)
+assert RUNNING in status and from_store() == [] and len(JOBS) == 1, (status, WROTE)
 
 del S.CFG["repos"]["sam/r"]
 C.job = kept
