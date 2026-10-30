@@ -1,7 +1,8 @@
 """What the steward's checks share (check.py runs them): its config and
 state in a temp dir; stand-ins for gh, Claude jobs, GitHub's git remote,
-the review agents (each records how it was run, then does what it's told)
-and burrow-events' kick port; and PRs shaped like its query's."""
+the review agents and Conary's `cn` (each records how it was run, then does
+what it's told) and burrow-events' kick port; and PRs shaped like its
+query's."""
 
 import http.server
 import json
@@ -117,6 +118,51 @@ os.execv(a[cut + 1], a[cut + 1:])
 os.chmod(f"{tmp}/bwrap", 0o755)
 
 
+# Conary's cn, for the merge train: it records how it was run, then answers
+# what CN says for its subcommand (show, join, leave, step), or fails with
+# that subcommand's exit code. With "token", it first runs its token command
+# for the repo, as cn does, and records what that did.
+CN, CN_LOG = f"{tmp}/cn.json", f"{tmp}/cn-log"
+with open(f"{tmp}/cn", "w") as f:
+    f.write(f"""#!{sys.executable}
+import json, os, subprocess, sys
+args = sys.argv[1:]
+do = json.load(open({CN!r}))
+token = None
+if do.get("token"):
+    p = subprocess.run(os.environ["CONARY_TOKEN_COMMAND"].split() + [args[2]], capture_output=True, text=True)
+    token = {{"rc": p.returncode, "out": p.stdout, "err": p.stderr}}
+with open({CN_LOG!r}, "a") as f:
+    f.write(json.dumps({{"args": args, "env": {{k: v for k, v in os.environ.items() if k.startswith("CONARY_")}},
+                        "token": token}}) + "\\n")
+if do.get("rc", {{}}).get(args[1]):
+    print("cn: " + args[1] + " failed", file=sys.stderr)
+    sys.exit(do["rc"][args[1]])
+print(json.dumps(do[args[1]]))
+""")
+os.chmod(f"{tmp}/cn", 0o755)
+IDLE = {"conflicts": [], "verdicts": [], "red": [], "landed": [], "refused": [], "unready": [], "finished": [],
+        "now": {"state": "idle"}}
+
+
+def cn(**do):
+    """What cn answers from now on (an empty train, a PR joined, left, an
+    idle step, unless told otherwise), and a log that starts over."""
+    with open(CN, "w") as f:
+        json.dump({"show": {"joined": [], "in_flight": None, "candidates": []}, "join": {"joined": True},
+                   "leave": {"left": True}, "step": IDLE, **do}, f)
+    open(CN_LOG, "w").close()
+
+
+def cn_runs():
+    """How cn was run since its answers were last set, its arguments alone."""
+    return [json.loads(x)["args"] for x in open(CN_LOG)]
+
+
+def cn_log():
+    return [json.loads(x) for x in open(CN_LOG)]
+
+
 def boxes():
     runs = [json.loads(x) for x in open(BOX_LOG)]
     open(BOX_LOG, "w").close()
@@ -141,6 +187,7 @@ def http_said():
 
 
 agent()
+cn()
 # The module's default one-way paths.
 with open(sys.argv[2]) as f:
     ONE_WAY = json.load(f)
@@ -150,25 +197,32 @@ with open(f"{tmp}/config.json", "w") as f:
         "app": {"id": 7, "slug": "steward"},
         "baselineJobs": False, "baselinePerPass": 1, "authors": ["sam"], "bots": ["dependabot", "renovate", "workers"], "machinery": None,
         "stateDir": f"{tmp}/state", "majorKey": f"{tmp}/sweep.key", "projectsDir": f"{tmp}/none", "renovateEmail": "bot@renovateapp.com", "proj": "proj", "jobTimeout": 60, "jobIdle": 20, "reviewTimeout": 30, "owner": "Sam", "cleanBranches": False,
-        "labels": {"hold": "hold", "owner": "needs-owner"}, "notify": {"repo": "", "assignee": "", "label": "autoland"}, "inbox": {"enable": False, "label": "claude", "authors": ["sam"]},
+        "labels": {"hold": "hold", "owner": "needs-owner", "first": "first"}, "notify": {"repo": "", "assignee": "", "label": "autoland"}, "inbox": {"enable": False, "label": "claude", "authors": ["sam"]},
         "dashboard": {"enable": False, "waitDays": 4, "errorDays": 1, "title": "Dependency Dashboard",
-                      "renovateKick": "http://127.0.0.1:9/kick/renovate", "renovate": None},
+                      "renovateKick": "http://127.0.0.1:9/kick/renovate", "renovate": None,
+                      "renovateRuns": f"{tmp}/renovate-runs"},
         "flaky": {"enable": False, "bin": f"{tmp}/flaky"},
         "defaults": {"rounds": 5,
                      "oneWay": ONE_WAY, "handoffAfter": 30, "sessionHandoffAfter": 90, "settleDelay": 3,
-                     "stallAfter": 120, "holdStallAfter": 480,
+                     "stallAfter": 120, "holdStallAfter": 480, "renovateMergeAfter": 60,
                      "directPush": False, "ruleset": True, "requireCi": True,
-                     "proofJobs": {}, "codex": True, "rival": True, "skipPaths": []},
+                     "proofJobs": {}, "proofBuilds": {}, "codex": True, "rival": True, "skipPaths": [],
+                     "train": False, "trainSize": 8, "trainRequire": [], "trainStallAfter": 240},
+        "trainContext": "conary/train",
+        "train": {"cn": f"{tmp}/cn", "env": {"CONARY_LEDGER": f"{tmp}/ledger", "CONARY_ANCHOR_REPO": "sam/homelab"},
+                  "branches": "conary/*"},
         "repos": {}, "pipelineRepos": ["Sam/Pipe"], "leadRepos": ["Sam/Lead"],
         "webhook": {"url": "https://example.org/burrow/hook", "events": ["check_suite", "push"]},
         "kick": f"http://127.0.0.1:{kicks.server_port}/kick/autoland",
         "watch": {"kick": f"http://127.0.0.1:{kicks.server_port}/kick/watchdog", "escalated": f"{tmp}/escalated.json",
                   "renovateSweep": True},
+        "renovateRun": 7200,
         "reviewers": {"codex": {"enable": True, "effort": "high", "parallel": 2},
                       "rival": {"enable": True, "parallel": 2}},
         "skipPaths": ["(^|/)secrets?/", r"\.(pem|key|p12|pfx)$", r"(^|/)\.env(\..*)?$"],
         "agents": f"{tmp}/agents",
         "sandbox": f"{tmp}/bwrap",
+        "nix": f"{tmp}/nix",
         "box": {"store": f"{tmp}/store-paths", "caBundle": f"{tmp}/ca.crt",
                 "links": {"/bin/sh": "/nix/store/dddd-bash/bin/sh", "/usr/bin/env": "/nix/store/eeee-coreutils/bin/env"}},
     }, f)
@@ -302,7 +356,8 @@ T0 = "2026-10-24T00:00:00Z"
 os.environ["TZ"] = "UTC"
 time.tzset()
 T = C.ts(T0)
-info = {"squashMergeAllowed": True, "mergeCommitAllowed": False, "rebaseMergeAllowed": False}
+info = {"squashMergeAllowed": True, "mergeCommitAllowed": False, "rebaseMergeAllowed": False,
+        "defaultBranchRef": {"name": "main"}}
 
 
 # The steward's App, as GraphQL gives its posts' author (no "[bot]").
@@ -336,14 +391,14 @@ CI_GREEN = [{"__typename": "CheckRun", "name": "ci", "status": "COMPLETED", "con
 
 
 def mkpr(reviews=(), comments=(), threads=(), draft=False, number=5, sha=head, files=("a.py",), labels=(),
-         branch="feat", title="t", checks=CI_GREEN, base="main", body="", suites=()):
+         branch="feat", title="t", checks=CI_GREEN, base="main", body="", suites=(), renames=()):
     return {
         "id": "x", "number": number, "title": title, "url": "u", "isDraft": draft, "isCrossRepository": False,
         "headRefName": branch, "headRefOid": sha, "baseRefName": base, "createdAt": T0, "updatedAt": T0, "body": body,
         "mergeStateStatus": "CLEAN", "author": {"login": "sam"}, "autoMergeRequest": None, "mergeQueueEntry": None,
         "labels": {"pageInfo": {"hasNextPage": False}, "nodes": [{"name": x} for x in labels]},
         "files": {"nodes": [{"path": f, "changeType": "MODIFIED"} for f in files]},
-        "changedFiles": len(files), "reactions": {"nodes": []}, "comments": {"pageInfo": {"hasPreviousPage": False}, "nodes": list(comments)},
+        "changedFiles": len(files), "reactions": {"nodes": []}, "timelineItems": {"nodes": list(renames)}, "comments": {"pageInfo": {"hasPreviousPage": False}, "nodes": list(comments)},
         "reviewThreads": {"pageInfo": {"hasNextPage": False}, "nodes": [{"isResolved": r} for r in threads]},
         "reviews": {"pageInfo": {"hasPreviousPage": False}, "nodes": list(reviews)},
         "commits": {"nodes": [{"commit": {"oid": sha, "statusCheckRollup": {"contexts": {

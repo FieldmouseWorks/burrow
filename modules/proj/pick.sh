@@ -12,12 +12,14 @@
 # jobs; a pipeline turn takes the lowest free slot, which keeps those for the
 # next one. A lead turn (pipeline work in a lead repo's project, what the
 # pipeline is built from) is a pipeline turn that goes first of all: ahead
-# of the whole line, the other pipeline turns included. Any other turn waits
+# of the whole line, the other pipeline turns included, except that it leaves
+# them the pipeline's own slots while one waits, so a lead repo's backlog can't
+# stop the work on what deploys it. Any other turn waits
 # while its project holds PER_PROJECT slots (pipeline turns not counted), and
 # lets those behind it by meanwhile, so one project's jobs never fill the
 # machine.
 pick() {
-  local kind a b c n w pass free=() inline=()
+  local kind a b c n w pass others='' free=() inline=()
   local -A held=()
   while IFS=$'\t' read -r kind a b c; do
     case $kind in
@@ -26,7 +28,10 @@ pick() {
         elif [ "$b" != pipeline ] && [ "$b" != lead ]; then held[p$c]=$((${held[p$c]:-0} + 1))
         fi
         ;;
-      wait) inline+=("$a"$'\t'"$b"$'\t'"$c") ;;
+      wait)
+        inline+=("$a"$'\t'"$b"$'\t'"$c")
+        [ "$b" != pipeline ] || others=1
+        ;;
     esac
   done
   for pass in lead rest; do
@@ -40,6 +45,7 @@ pick() {
         *) [ "${held[p$c]:-0}" -lt "$PER_PROJECT" ] || continue ;;
       esac
       for n in "${free[@]}"; do
+        [ "$b" != lead ] || [ -z "$others" ] || [ "$n" -le $((MAX_JOBS - PIPELINE_SLOTS)) ] || continue
         if [ "$b" = lead ] || [ "$b" = pipeline ] || [ "$n" -le $((MAX_JOBS - PIPELINE_SLOTS)) ]; then
           printf '%s\t%s\n' "$a" "$n"
           return
@@ -80,10 +86,19 @@ listed() {
   return 1
 }
 
-# Whether the project at a path is a clone of one of the pipeline's own repos
-# (PIPELINE: their OWNER/NAMEs, any case, as autoland.pipelineRepos and
-# leadRepos have them).
-pipeline_project() { listed "$(github_repo "$1")" "$PIPELINE"; }
+# Whether the project at a path is the pipeline's own: the machine's flake
+# (FLAKE), which deploys everything, wherever its origin is; or a clone of one
+# of the pipeline's own repos (PIPELINE: their OWNER/NAMEs, any case, as
+# autoland.pipelineRepos and leadRepos have them). The flake is the same
+# directory however either path spells it (doubled or trailing slashes, dots,
+# symlinks); a path that's empty or isn't there is never it.
+pipeline_project() {
+  local p f
+  if p=$(realpath -e -- "$1" 2>/dev/null) && f=$(realpath -e -- "$FLAKE" 2>/dev/null) && [ "$p" = "$f" ]; then
+    return 0
+  fi
+  listed "$(github_repo "$1")" "$PIPELINE"
+}
 
 # A job's class, from its dir. One run with --pipeline is a pipeline one,
 # every turn of it, only while its project is one of the pipeline's own;
@@ -96,11 +111,11 @@ pipeline_project() { listed "$(github_repo "$1")" "$PIPELINE"; }
 # list since, is held to it too. Otherwise first or normal, as the turn was
 # started.
 class() {
-  local r
+  local d
   if [ ! -e "$1/pipeline" ]; then echo "${2:-normal}"; return 0; fi
-  r=$(github_repo "$(cat "$1/project" 2>/dev/null)")
-  if listed "$r" "$LEAD"; then echo lead
-  elif listed "$r" "$PIPELINE"; then echo pipeline
+  d=$(cat "$1/project" 2>/dev/null) || d=''
+  if listed "$(github_repo "$d")" "$LEAD"; then echo lead
+  elif pipeline_project "$d"; then echo pipeline
   else echo first
   fi
 }

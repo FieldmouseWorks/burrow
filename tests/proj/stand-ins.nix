@@ -4,6 +4,7 @@
 {
   # Claude, as far as proj can tell: reads the prompt, answers in stream-json.
   # "sleep N" sleeps; "eat" holds far more memory than the test's job cap;
+  # "outgrow" runs something that does, then answers;
   # "twice" answers twice in one turn, "answerfail" answers and then fails;
   # "linger N" answers, then stays up N seconds, as Claude does while
   # something it left in the background (a CI watch, a long build) is still
@@ -11,7 +12,9 @@
   # ignores TERM and writes to the stream. Told so, it answers again, or as
   # /tmp/cut-mode says: "linger" answers and stays up, "hang" says nothing,
   # "crash" and "signal" die without a word, "error" fails;
-  # "chatter N" says something every second for N seconds, then answers.
+  # "chatter N" says something every second for N seconds, then answers;
+  # "named N" names its session ("named") as Claude's first line does, then
+  # sleeps N seconds without answering.
   # As a job, it says what comes next before it answers (proj done; "ask"
   # asks, "await" awaits), but "silent" doesn't, and with /tmp/silent nothing
   # does, even told to; what it's told is kept in /tmp/told.
@@ -23,6 +26,9 @@
     fi
     case $prompt in
       sleep*) sleep "''${prompt#sleep }" ;;
+      named*)
+        echo '{"type":"system","subtype":"init","session_id":"named"}'
+        sleep "''${prompt#named }" ;;
       chatter*) for _ in $(seq "''${prompt#chatter }"); do echo '{"type":"system"}'; sleep 1; done ;;
       linger*)
         echo '{"type":"result","session_id":"s","result":"waiting on CI","is_error":false}'
@@ -61,6 +67,11 @@
       # Awaits, then takes a while to answer: what changes meanwhile is news.
       slowawait*) proj await "''${prompt#slowawait }" >/dev/null; sleep 10 ;;
       eat) head -c 512M /dev/zero | tail >/dev/null; exit 1 ;;
+      # Runs something that outgrows the job's cap, as a whole-flake
+      # evaluation does, and answers with how that went.
+      outgrow)
+        head -c 512M /dev/zero | tail >/dev/null
+        echo "{\"type\":\"result\",\"session_id\":\"s\",\"result\":\"it exited $?\",\"is_error\":false}" ;;
       # Answers, then answers again once a background task reports back.
       twice) echo '{"type":"result","session_id":"s","result":"the answer","is_error":false}' ;;
       # Answers, then fails as "fail" does.

@@ -28,7 +28,7 @@ let
 
   proj = pkgs.writeShellApplication {
     name = "proj";
-    runtimeInputs = [ pkgs.coreutils pkgs.findutils pkgs.gnugrep pkgs.gnused pkgs.gawk pkgs.jq pkgs.curl pkgs.git pkgs.systemd pkgs.util-linux pkgs.bashInteractive ];
+    runtimeInputs = [ pkgs.coreutils pkgs.findutils pkgs.gnugrep pkgs.gnused pkgs.gawk pkgs.jq pkgs.curl config.programs.git.package pkgs.systemd pkgs.util-linux pkgs.bashInteractive ];
     text = ''
       SRC=${lib.escapeShellArg projectsDir}
       JOBS=${lib.escapeShellArg cfg.jobsDir}
@@ -46,6 +46,7 @@ let
       KICK=${lib.escapeShellArg config.burrow.events.kick}
       WAKE=${lib.escapeShellArg watchWake}
       PIPELINE=${pipelineRepos}
+      FLAKE=${lib.escapeShellArg config.burrow.flake}
       LEAD=${lib.escapeShellArg (lib.concatStringsSep " " leadRepos)}
       WAITS=${lib.escapeShellArg (lib.optionalString watchdog waits)}
       STALL_QUEUED=${toString (cfg.stallAfterMinutes * 60)}
@@ -56,7 +57,7 @@ let
 
   inbox = pkgs.writeShellApplication {
     name = "proj-inbox";
-    runtimeInputs = [ proj pkgs.coreutils pkgs.git cfg.gh pkgs.jq pkgs.gnused pkgs.gnugrep pkgs.util-linux ];
+    runtimeInputs = [ proj pkgs.coreutils config.programs.git.package cfg.gh pkgs.jq pkgs.gnused pkgs.gnugrep pkgs.util-linux ];
     text = ''
       SRC=${lib.escapeShellArg projectsDir}
       JOBS=${lib.escapeShellArg cfg.jobsDir}
@@ -104,15 +105,17 @@ in
       defaultText = lib.literalExpression "if maxJobs > 1 then 1 else 0";
       description = ''
         Of the maxJobs slots, how many only pipeline jobs in the pipeline's
-        own repos (`proj run --pipeline` in a project whose clone's origin
-        is one of `burrow.autoland.pipelineRepos` or `leadRepos` on GitHub:
-        the steward's jobs there, their issues) may take, so work on the
-        pipeline itself waits only on other such work, never on everyone
-        else's long jobs; a lead repo's go first of all, ahead of the other
-        pipeline jobs too. A pipeline job in any other project goes as
-        `--first`: ahead of the line, but within its project's cap and never
-        in these slots; `proj status` and its turn's journal say so, origin
-        and all.
+        own projects (`proj run --pipeline` in the machine's flake,
+        `burrow.flake`, or in a project whose clone's origin is one of
+        `burrow.autoland.pipelineRepos` or `leadRepos` on GitHub: the update
+        job's fixes, the steward's jobs there, their issues) may take, so
+        work on the pipeline itself waits only on other such work, never on
+        everyone else's long jobs; a lead repo's go first of all, ahead of
+        the other pipeline jobs too, but leave them these slots while one
+        waits. A pipeline job in any other project goes
+        as `--first`: ahead of the line, but within its project's cap and
+        never in these slots; `proj status` and its turn's journal say so,
+        origin and all.
       '';
     };
     maxJobsPerProject = lib.mkOption {
@@ -137,7 +140,11 @@ in
     jobMemoryMax = lib.mkOption {
       type = lib.types.str;
       default = "8G";
-      description = "The most memory one job may hold (systemd's MemoryMax) before it's killed.";
+      description = ''
+        The most memory one job may hold (systemd's MemoryMax). Past it the
+        kernel kills the job's biggest process, usually a build or evaluation
+        it ran, and the job carries on, told that command was killed.
+      '';
     };
     timeout = lib.mkOption {
       type = lib.types.str;
@@ -252,6 +259,18 @@ in
         ExecStart = "${proj}/bin/proj _watch${lib.optionalString (name == "proj-watch@") " %I"}";
       };
     });
+    # The end of each job's turn (proj _ended), which each turn's unit starts
+    # as it goes: in a unit of its own, so what kills the turn's whole cgroup
+    # (systemd-oomd) leaves it be.
+    systemd.user.services."proj-ended@" = {
+      description = "The end of a turn of proj job %I";
+      unitConfig.ConditionUser = user;
+      environment.PROJ_ENDED = "%I";
+      serviceConfig = {
+        Type = "oneshot";
+        ExecStart = "${proj}/bin/proj _ended";
+      };
+    };
     systemd.tmpfiles.rules = [
       "d ${cfg.jobsDir} 0755 ${user} ${config.users.users.${user}.group} -"
       "d ${stateDir}/proj-watch 0755 ${user} ${config.users.users.${user}.group} -"
@@ -304,8 +323,8 @@ in
     }];
     environment.systemPackages = [ inbox ];
     # A repo's issue events start its look (proj-inbox@OWNER-REPO), and so
-    # does the end of each of its jobs' turns (proj run --kick), whose answer
-    # it posts.
+    # do the start and end of each of its jobs' turns (proj run --kick): it
+    # posts the answer once one has ended.
     burrow.events.handlers.proj-inbox = {
       events = [ "issues" "issue_comment" ];
       unit = "proj-inbox";

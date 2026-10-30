@@ -7,8 +7,9 @@ going on the stuck issue."""
 import json
 import os
 import sys
+import time
 
-from harness import KICKS, WROTE, T, C, S, fresh_pr_state, info, mkpr, stand_in, tmp
+from harness import CI_GREEN, KICKS, WROTE, T, C, S, fresh_pr_state, info, mkpr, said, stand_in, tmp
 
 import waits
 
@@ -93,6 +94,59 @@ OPEN["sam/r"][3] = pr("sam/r", 8, sha="c" * 40, **major)
 rebased = run(250)
 assert rebased["sam/r#8"]["phase"] == items["sam/r#8"]["phase"], rebased
 assert rebased["sam/r#8"]["since"] == T + 250 and rebased["sam/r#8"]["due"] == T + 250 + 120 * MIN and kicked(), rebased
+# A lock file refresh waiting for its releases to be old enough is due its
+# allowance after that, not after it began waiting.
+ripe = T + 3 * 86400
+lock = {"branch": "renovate/cargo-lock-file-maintenance", "title": "Lock file maintenance (cargo)", "checks": [
+    *CI_GREEN, {"__typename": "StatusContext", "context": "renovate/artifacts", "state": "FAILURE"}],
+    "comments": [said("### Artifact update problem\n\n```\nlock-age: nothing in the refresh is old enough until "
+                      f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(ripe))}\n```\n")]}
+OPEN["sam/r"].append(pr("sam/r", 9, **lock))
+waiting = run(260)
+assert "old enough until" in waiting["sam/r#9"]["phase"] and waiting["sam/r#9"]["kick"] == "renovate-sweep/sam/r", waiting
+# ...and its allowance counts from after all renovate-sweep can take to get it
+# refreshed or hand it to a job itself: every request standing as long as it
+# may, one taken back, and the longest Renovate run that read it. Past that
+# the job the watchdog hands it to is told to take a request back itself.
+# A pass is an hour apart at best, and the hour and a run behind it at worst.
+every = 3600 + 7200
+drain = 4 * every + 7200
+recovery = 3 * (6 * 3600 + every) + drain
+assert waiting["sam/r#9"]["since"] == T + 260 and waiting["sam/r#9"]["due"] == ripe + recovery + 120 * MIN, waiting
+assert "rebase! at the start of its title" in waiting["sam/r#9"]["phase"] and "until 120 minutes after it last had it" in waiting["sam/r#9"]["phase"], waiting
+# A date long gone counts the same from when it began waiting, and the wait
+# is the same one whether or not a request stands: asks don't move its deadline.
+past = {**lock, "comments": [said("### Artifact update problem\n\n```\nlock-age: nothing in the refresh is old enough until "
+                                  f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(T - 3600))}\n```\n")]}
+OPEN["sam/r"][-1] = pr("sam/r", 9, **past)
+gone = run(262)
+assert gone["sam/r#9"]["since"] == T + 262 and gone["sam/r#9"]["due"] == T + 262 + recovery + 120 * MIN, gone
+OPEN["sam/r"][-1] = pr("sam/r", 9, **{**past, "title": "rebase!Lock file maintenance (cargo)"})
+asking = run(264)
+assert asking["sam/r#9"]["since"] == T + 262 and asking["sam/r#9"]["due"] == gone["sam/r#9"]["due"], asking
+# Open threads put it down as red CI, which waits for the same date: the sweep
+# hands it over no sooner for them.
+OPEN["sam/r"][-1] = pr("sam/r", 9, **{**past, "threads": [False]})
+threads = run(265)
+assert "CI red" in threads["sam/r#9"]["phase"] and threads["sam/r#9"]["due"] == T + 265 + recovery + 120 * MIN, threads
+# Any other red Renovate PR, whose request (anyone's) the sweep may be taking
+# back: past that, and the longest run that read it, before its allowance.
+OPEN["sam/r"][-1] = pr("sam/r", 9, **{**past, "comments": []})
+red = run(266)
+assert red["sam/r#9"]["due"] == T + 266 + drain + 120 * MIN and "rebase! at the start of its title" in red["sam/r#9"]["phase"], red
+# Past that bound's cases: three failed tries an hour apart, the job at hour
+# four and its wait to hour six are all inside a default stallAfter's deadline.
+assert drain > 6 * 3600, drain
+# Green with a request just gone, the job the watchdog hands it to is told the same.
+OPEN["sam/r"][-1] = pr("sam/r", 9, **{**past, "comments": [], "checks": CI_GREEN, "title": "rebase!Lock file maintenance (cargo)"})
+run(267)
+OPEN["sam/r"][-1] = pr("sam/r", 9, **{**past, "comments": [], "checks": CI_GREEN, "renames": [
+    {"createdAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(T + 267)), "previousTitle": "rebase!Lock file maintenance (cargo)"}]})
+just = run(268)
+assert "rebase! at the start of its title" in just["sam/r#9"]["phase"], just
+OPEN["sam/r"].pop()
+run(270)
+
 # On to the next thing (findings answered, CI, a job...): a new start and a
 # new deadline, and the watchdog hears.
 OPEN["sam/r"][0] = pr("sam/r", 5, threads=[False])
@@ -201,6 +255,25 @@ sys.argv = argv
 assert not os.path.exists(f"{tmp}/state/watch.json") and waits.escalated() == []
 S.CFG["watch"] = watch
 print("waits off: ok")
+
+# A Renovate PR settled green with automerge on waits on Renovate's next run
+# on the repo to merge it: overdue an hour on, and the watchdog's kick is
+# that run. One without automerge waits as long as any.
+dep = {"branch": "renovate/foo-1.x", "title": "Update foo to v1.5"}
+auto = "### Configuration\n\n📅 **Schedule**: At any time.\n\n🚦 **Automerge**: Enabled.\n"
+manual = auto.replace("Enabled.", "Disabled by config. Please merge this manually once you are satisfied.")
+fresh_pr_state()
+OPEN["sam/r"], OPEN["sam/q"] = [pr("sam/r", 9, body=auto, **dep), pr("sam/r", 10, body=manual, **dep)], []
+items = run(450)
+nine, ten = items["sam/r#9"], items["sam/r#10"]
+assert nine["phase"] == "Dependency update, CI green" and nine["kick"] == "renovate/sam/r", nine
+assert nine["since"] == T + 450 and nine["due"] == T + 450 + 60 * MIN, nine
+assert ten["phase"] == nine["phase"] and ten["due"] == T + 450 + 120 * MIN and ten["kick"] == "autoland/sam/r", ten
+# Without Renovate on this machine there's no run to kick: its pass is.
+S.CFG["watch"]["renovateSweep"] = False
+assert run(460, "sam/r")["sam/r#9"]["kick"] == "autoland/sam/r"
+S.CFG["watch"]["renovateSweep"] = True
+print("waits on Renovate: ok")
 
 (S.R.discover, S.R.settle_repo, S.R.publish, S.open_prs, S.R.unhook_gone, S.R.hook_projects,
  S.R.watch_default, S.R.sweep_branches, S.V.snap_name) = kept_fns

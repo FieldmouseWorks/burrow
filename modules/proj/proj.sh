@@ -14,7 +14,8 @@
 #                               --first, and status and the turn's journal
 #                               say so (every turn of it, either way)
 #   proj run --kick NAME PROJECT "task"  kick NAME (HANDLER or HANDLER/OWNER/REPO,
-#                               one of burrow-events') each time a turn ends
+#                               one of burrow-events') each time a turn starts
+#                               (takes its slot) and each time one ends
 #   proj run --timeout DUR PROJECT "task"  each turn stopped after DUR (as
 #                               timeout(1) reads it: 90m, 2h) instead of TIMEOUT
 #   proj run --idle DUR PROJECT "task"  each turn stopped once its stream has
@@ -102,6 +103,8 @@ jobs=$JOBS
 self=$(readlink -f "$0")
 
 unit() { echo "proj-$(systemd-escape "$1").service"; }
+# The unit that ends each of its turns (_ended), outside the turn's own.
+end_unit() { systemd-escape --template=proj-ended@.service "$1"; }
 # The env file of the GitHub App NAME, from APPS' NAME=FILE lines: nothing for
 # one this machine hasn't.
 app_env() { [[ $1 =~ ^[A-Za-z0-9_-]+$ ]] && sed -n "s/^$1=//p" <<<"$APPS" | head -n 1; }
@@ -206,6 +209,14 @@ reap() {
     sleep 1
   done
   return 1
+}
+
+# Kick each handler named on stdin (burrow-events'), once each.
+kick() {
+  [ -n "$KICK" ] || { cat >/dev/null; return 0; }
+  sort -u | while read -r k; do
+    [ -z "$k" ] || curl -fsS -m 5 -d '' "$KICK/$k" >/dev/null || echo "proj: couldn't kick $k" >&2
+  done
 }
 
 # A run's watcher (pid $1, under timeout(1)), once a second until it's gone,
@@ -328,16 +339,20 @@ waits() {
 }
 
 start_turn() {
-  local id=$1 msg=$2 first=$3 n i
+  local id=$1 msg=$2 first=$3 n i hook
   local d=$jobs/$id
   # The last turn reads as ended once it has written its outcome, but its
-  # unit is still there while its _ended runs (telling the watchdog, kicking
-  # proj-watch, which can start this turn), and no unit starts under that
-  # name until it's gone. Waited out, for a minute at most, before this turn
-  # is written, so _ended only ever reads the turn it ends as the latest.
+  # unit is there until it's over, and no unit starts under that name until
+  # it's gone; its _ended (telling the watchdog, kicking proj-watch, which
+  # can start this turn) is queued as it goes, and runs after. Both waited
+  # out, for a minute at most, before this turn is written, so _ended only
+  # ever reads the turn it ends as the latest.
   for i in $(seq 120); do
     systemctl --user reset-failed "$(unit "$id")" 2>/dev/null || true
-    [ "$(systemctl --user show -P LoadState "$(unit "$id")" 2>/dev/null)" = loaded ] || break
+    if [ "$(systemctl --user show -P LoadState "$(unit "$id")" 2>/dev/null)" != loaded ] &&
+      [ -z "$(systemctl --user show -P Job "$(end_unit "$id")" 2>/dev/null)" ]; then
+      break
+    fi
     if [ "$i" = 120 ]; then
       echo "proj: $id's last turn is still ending, so its next can't start yet" >&2
       return 1
@@ -350,13 +365,22 @@ start_turn() {
   printf '%s\n' "$msg" >"$d/prompt.$n"
   set_turns "$id" "$n"
   # Claude is what goes first when memory runs out, not whatever it's next to.
+  # Past its own cap the kernel kills the job's biggest process (a build or
+  # an evaluation it ran, as a rule) and the turn carries on, told the command
+  # was killed: systemd's default OOMPolicy would stop the whole turn.
+  # Its end is a unit of its own, however the turn ends: what kills the turn's
+  # whole cgroup (systemd-oomd does) would take an ExecStopPost with it. The
+  # name is doubled up on its backslashes, which systemd-run reads as escapes.
+  hook=$(end_unit "$id")
+  hook=${hook//\\/\\\\}
   if ! systemd-run --user --quiet --collect --unit="$(unit "$id")" \
     --slice="$SLICE" \
     --property=MemoryMax="$JOB_MEMORY_MAX" \
+    --property=OOMPolicy=continue \
     --property=OOMScoreAdjust=500 \
     --property=WorkingDirectory="$(cat "$d/project")" \
-    --setenv=PROJ_ENDED="$id" \
-    --property=ExecStopPost="$self _ended" \
+    --property=OnSuccess="$hook" \
+    --property=OnFailure="$hook" \
     "$self" _exec "$id" "${first:-normal}"; then
     if [ "$n" = 1 ]; then rm -f "$d/turns"; else set_turns "$id" $((n - 1)); fi
     rm -f "$d/prompt.$n"
@@ -792,21 +816,20 @@ Carry on from there. Anything you left in the background last turn was stopped w
     fi
     ;;
   _ended)
-    # After each turn, however it ended (its unit's ExecStopPost): its wait
+    # After each turn, however it ended (proj-ended@ID, its unit's OnSuccess
+    # and OnFailure): its wait
     # is the stall watchdog's to know, what the job was started to kick
     # (proj run --kick) gets a pass now, and so does
     # proj-watch for each repo the turn awaits, which then sees at once
     # anything that changed since the turn took its baseline. The job comes
-    # in the unit's environment: systemd splits and expands a command line,
-    # and a job's id is its project's folder name, spaces, `%` and all.
-    id=${PROJ_ENDED:?proj _ended is for the end of a job turn, run by its unit}
+    # in the unit's environment, from its instance name: systemd splits and
+    # expands a command line, and a job's id is its project's folder name,
+    # spaces, `%` and all.
+    id=${PROJ_ENDED:?proj _ended is for the end of a job turn, run by proj-ended@ID}
     rewatch "$id"
-    [ -n "$KICK" ] || exit 0
     { cat "$jobs/$id/kick" 2>/dev/null || true
       cut -f1 "$jobs/$id/await" 2>/dev/null | sed 's/#.*//; s#^#proj-watch/#' || true
-    } | sort -u | while read -r k; do
-      [ -z "$k" ] || curl -fsS -m 5 -d '' "$KICK/$k" >/dev/null || echo "proj: couldn't kick $k" >&2
-    done
+    } | kick
     ;;
   _exec)
     # One turn of a job, inside its own systemd unit.
@@ -833,6 +856,9 @@ Carry on from there. Anything you left in the background last turn was stopped w
     why=$(demoted "$dir")
     [ -z "$why" ] || echo "proj: $why" >&2
     take_slot "$id" "$n" "$3"
+    # It's at work now, which is news to what it was started to kick: a turn
+    # can wait in line for hours, and the steward says which it is.
+    { cat "$dir/kick" 2>/dev/null || true; } | kick
     limit=$(cat "$dir/timeout" 2>/dev/null || echo "$TIMEOUT")
     # One budget for the whole turn from the moment it took its slot,
     # however many runs it takes and the clearing up between them, to the
@@ -889,6 +915,14 @@ Carry on from there. Anything you left in the background last turn was stopped w
         PROJ_JOB=$id PROJ_WAIT_DIR=$waitdir PROJ_APP_ENV=$appenv timeout -k 1m 0 bash -lc 'eval "$PROJ_APP_ENV" && unset PROJ_APP_ENV && exec claude "$@" <"$0"' "$prompt" "${args[@]}" >>"$dir/$n.jsonl" &
       fi
       pid=$!
+      # Its session, kept once its stream first names it (the first line
+      # does), not from its answer: a run killed before it answers (its unit
+      # past its memory cap, say) can still be continued.
+      {
+        sid=$(tail -n +"$from" -f --pid="$pid" "$dir/$n.jsonl" | grep -m1 '"session_id"' | jq -rR 'fromjson? | .session_id // empty' || true)
+        [ -z "$sid" ] || echo "$sid" >"$dir/session"
+      } &
+      named=$!
       watch_run "$pid" &
       dog=$!
       # The answer ends the turn: a few seconds to exit by itself, then Claude
@@ -903,8 +937,8 @@ Carry on from there. Anything you left in the background last turn was stopped w
       wait "$pid" || rc=$?
       # Its watcher sees the run gone within a second, and clears up after it.
       wait "$dog" || true
+      wait "$named" || true
       last=$(tail -n +"$from" "$dir/$n.jsonl" | grep '"type":"result"' | tail -n 1 || true)
-      [ -z "$last" ] || jq -r '.session_id' <<<"$last" >"$dir/session"
       # Still up after its answer, it was waiting on something it left in the
       # background (a build past one Bash call), which went with it. Or it
       # answered without saying what comes next, and nothing would ever

@@ -106,8 +106,9 @@ in
       example = lib.literalExpression "inputs";
       description = ''
         The machine flake's inputs. Their revisions go in /etc/burrow/inputs.json,
-        and HOST-switch refuses a system built from an older nixpkgs than the
-        running one (it would quietly undo security fixes) unless told
+        self's is the system's configuration revision (unless the flake sets
+        its own), and HOST-switch refuses a system built from an older nixpkgs
+        than the running one (it would quietly undo security fixes) unless told
         --allow-downgrade.
       '';
     };
@@ -141,6 +142,12 @@ in
       environment.systemPackages = [ switchTool confirmTool ];
       burrow.tools = { switch = switchTool; confirm = confirmTool; };
 
+      # The commit the system was built from, `-dirty` from a dirty tree:
+      # `nixos-version --configuration-revision` says it, and HOST-update and
+      # the pipeline dispatcher read it to tell what's running.
+      system.configurationRevision = lib.mkIf (cfg.flakeInputs ? self)
+        (lib.mkDefault (cfg.flakeInputs.self.rev or cfg.flakeInputs.self.dirtyRev or null));
+
       environment.etc."burrow/inputs.json" = lib.mkIf (cfg.flakeInputs != { }) {
         text = builtins.toJSON (
           lib.mapAttrs (_: i: { rev = i.rev or null; lastModified = i.lastModified or null; })
@@ -160,7 +167,9 @@ in
            `journalctl -u ${switch}-run` in short looks: a switch that restarts your
            own session would otherwise die half done.
         3. Check that what you changed works, then run `${confirm}`.
-        4. Commit and push to main. main must always match what ${config.networking.hostName} runs.
+        4. ${if lib.attrByPath [ "burrow" "updates" "throughTrain" ] false config
+          then "Commit, push a branch and open a PR against main: only the merge train moves main, once the steward has settled the PR."
+          else "Commit and push to main."} main must always match what ${config.networking.hostName} runs.
 
         `${switch} --status` shows anything pending, and `${switch} --abort` reverts
         at once instead of waiting. `nixos-rebuild switch --rollback` or the boot menu

@@ -2,7 +2,8 @@
 # would see: pipeline jobs' slots stay theirs, one project's jobs stop at
 # PER_PROJECT while the others go by, pipeline ones count against no cap, and
 # lead ones go ahead of everyone; and which jobs are pipeline ones: only those
-# in the pipeline's own repos, and lead ones those in its lead repos.
+# in the pipeline's own repos and the machine's flake, and lead ones those in
+# its lead repos.
 #
 #   bash tests/proj-pick.sh modules/proj/pick.sh
 set -euo pipefail
@@ -56,9 +57,14 @@ case_ "a 3" "normal /src/x" "normal /src/x" free free "a normal "
 # A lead turn goes first, from anywhere in the line: ahead of pipeline turns
 # that came before it, and of everyone else.
 case_ "l 1" free free free free "p pipeline /src/remi" "a first /src/web" "l lead /src/burrow"
-case_ "l 4" "normal /src/x" "normal /src/y" "normal /src/z" free "p pipeline /src/remi" "l lead /src/burrow"
-# It takes the pipeline's slot as a pipeline turn does, counts against no cap,
-# and holds none of its project's.
+case_ "l 3" "normal /src/x" "normal /src/y" free free "p pipeline /src/remi" "l lead /src/burrow"
+# But the pipeline's own slot stays the other pipeline turns' while one waits,
+# so a lead repo's backlog can't stop the work on what deploys it: the lead
+# turn waits for the next slot.
+case_ "p 4" "normal /src/x" "normal /src/y" "normal /src/z" free "p pipeline /src/remi" "l lead /src/burrow"
+case_ "p 4" "lead /src/burrow" "lead /src/burrow" "lead /src/burrow" free "l lead /src/burrow" "m lead /src/burrow" "p pipeline /src/remi"
+# With none of those in line it takes the pipeline's slot as a pipeline turn
+# does, counts against no cap, and holds none of its project's.
 case_ "l 4" "normal /src/burrow" "normal /src/burrow" "normal /src/z" free "a normal /src/web" "l lead /src/burrow"
 case_ "a 3" "lead /src/burrow" "normal /src/burrow" free free "a normal /src/burrow"
 # With no slot free nobody goes, lead or not; of two lead turns, the first in
@@ -71,7 +77,7 @@ case_ "l 2" "lead /src/burrow" free free free "p pipeline /src/remi" "l lead /sr
 # takes, any case. Anywhere else it goes as --first, so pick holds it to its
 # project's cap and off the pipeline's slots: one repo's PRs can't fill the
 # machine.
-export PIPELINE="Sam/Burrow sam/box" LEAD=""
+export PIPELINE="Sam/Burrow sam/box" LEAD="" FLAKE=/nowhere
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 export GIT_CEILING_DIRECTORIES=$tmp
@@ -188,5 +194,53 @@ cls n normal normal
 plc 2-17-p-1-x p lead 0-17-p-1-x
 plc 0-17-b-1-x b pipeline 0-17-b-1-x
 dem p ""
+
+# The machine's own flake is the pipeline's whatever its origin, and with no
+# list at all: the update job's fixes there take the pipeline's slot with the
+# others all taken and the flake's project at its cap. Any other project's
+# --pipeline jobs, and the flake's plain ones, still aren't.
+clone homelab https://github.com/sam/homelab
+mkdir -p "$tmp/jobs/u" "$tmp/jobs/v" "$tmp/jobs/w"
+: >"$tmp/jobs/u/pipeline"
+: >"$tmp/jobs/v/pipeline"
+echo "$tmp/homelab" >"$tmp/jobs/u/project"
+echo "$tmp/psiv" >"$tmp/jobs/v/project"
+echo "$tmp/homelab" >"$tmp/jobs/w/project"
+PIPELINE='' FLAKE=$tmp/homelab/
+cls u normal pipeline
+cls v normal first
+cls w normal normal
+dem u ""
+case_ "u 4" "normal $tmp/homelab" "normal $tmp/homelab" "normal $tmp/x" free \
+  "w $(class "$tmp/jobs/w" normal) $tmp/homelab" "v $(class "$tmp/jobs/v" normal) $tmp/psiv" "u $(class "$tmp/jobs/u" normal) $tmp/homelab"
+
+# The flake is the same directory however either side spells it: doubled and
+# trailing slashes, dots, a symlink to it. Its --pipeline job takes the
+# pipeline's slot by any of them; its plain job, and another project's, still
+# don't.
+ln -s homelab "$tmp/flake-link"
+for flake in "$tmp/homelab" "$tmp//homelab/" "$tmp/./homelab" "$tmp/jobs/../homelab" "$tmp/flake-link" "$tmp/flake-link/"; do
+  for proj in "$tmp//homelab" "$tmp/homelab/" "$tmp/./homelab" "$tmp/flake-link"; do
+    echo "$proj" >"$tmp/jobs/u/project"
+    echo "$proj" >"$tmp/jobs/w/project"
+    PIPELINE='' LEAD='' FLAKE=$flake
+    cls u normal pipeline
+    cls v normal first
+    cls w normal normal
+    dem u ""
+    case_ "u 4" "normal $proj" "normal $proj" "normal $tmp/x" free \
+      "w $(class "$tmp/jobs/w" normal) $proj" "v $(class "$tmp/jobs/v" normal) $tmp/psiv" "u $(class "$tmp/jobs/u" normal) $proj"
+  done
+done
+
+# Nothing that isn't there is the flake: not an empty path on either side,
+# nor one that doesn't exist, even spelled the same.
+mkdir -p "$tmp/jobs/e"
+: >"$tmp/jobs/e/pipeline"
+for pair in "$tmp/gone|$tmp/gone" "|" "|$tmp/homelab" "$tmp/homelab|"; do
+  printf '%s\n' "${pair#*|}" >"$tmp/jobs/e/project"
+  PIPELINE='' LEAD='' FLAKE=${pair%%|*}
+  cls e normal first
+done
 
 echo "proj-pick: ok"

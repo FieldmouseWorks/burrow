@@ -1,0 +1,89 @@
+//! burrow-watchdog: work that has stopped moving gets a look before anyone
+//! has to notice it (modules/watchdog.nix runs it).
+//!
+//! Each source (the steward's open PRs, say) keeps a watch file of what it
+//! waits on right now, and by when each wait should have ended:
+//!
+//! ```text
+//! {"at": EPOCH, "items": {KEY: {"what": "...", "link": URL or null,
+//!   "phase": "...", "since": EPOCH, "due": EPOCH, "kick": "HANDLER[/OWNER/REPO]" or null}}}
+//! ```
+//!
+//! `phase` says what the item waits on, and `since` when it started waiting
+//! on that: a new phase is progress, with a deadline of its own. `at` is when
+//! the source last wrote the file. One that should write it at least every
+//! `stale` seconds and hasn't is stuck itself, and its items wait with it:
+//! one stall, not one an item.
+//!
+//! A pass (burrow-events starts one when a source kicks it because its items
+//! changed, when a job of its ends, and at the deadline it booked last) takes
+//! each stall a step further, and no further while that step has time left:
+//!
+//!   1. An item that names a kick is kicked: a delivery GitHub never made,
+//!      say, costs a pass, not a job. It's looked at again GRACE later.
+//!   2. Still stuck: one Claude job (proj, in the machine's own project,
+//!      ahead of the line) gets every stall that's ready, to find why and get
+//!      it moving. Not a turn only waiting for a slot (`line`), which that job
+//!      would only queue ahead of: that goes straight to step 3.
+//!   3. Still stuck GRACE after that job has ended, escalateAfter after it was
+//!      handed, or START after it was handed if it hasn't started (what's
+//!      stuck may be the slot it waits for): it goes to the steward's "Stuck
+//!      in the pipeline" issue, which proj's inbox hands to another Claude job
+//!      (the steward publishes escalated.json with the rest of that issue).
+//!      With no steward, or when the steward is what's stuck, the owner hears
+//!      instead.
+//!   4. Still stuck ownerAfter after that: the owner hears, one notice a
+//!      stall (notify), closed once it clears. It stays on the stuck issue
+//!      too.
+//!
+//! notify never says whether GitHub took a notice, so one is sent again every
+//! RENOTIFY while its stall lasts (notify adds a comment at most once a day).
+//! A close is sent again on every pass until `notify pending` says it got
+//! through, and the stall waits beside it meanwhile: back as it was (its
+//! source stale a while, say), it carries on from where it had got to, its
+//! notice still open. The hourly catch-up's pass is the latest a retry waits.
+//!
+//! A stall that clears is otherwise forgotten, and so is all it escalated. A
+//! job that finds an item legitimately still under way (a long build, a busy
+//! CI queue) gives it more time, once and with a reason:
+//!
+//! ```text
+//! burrow-watchdog snooze SOURCE KEY MINUTES WHY
+//! ```
+//!
+//! `burrow-watchdog status` prints what each source waits on and how far each
+//! stall has gone, changing nothing.
+
+pub mod config;
+pub mod ladder;
+pub mod state;
+pub mod watch;
+pub mod words;
+pub mod world;
+
+/// Seconds in a minute.
+pub const MIN: f64 = 60.0;
+/// For a kicked pass, or a job's fix, to show.
+pub const GRACE: f64 = 5.0 * MIN;
+/// For the watchdog's own job to get a slot.
+pub const START: f64 = 15.0 * MIN;
+/// A job that couldn't start is tried again this long after.
+pub const RETRY: f64 = 5.0 * MIN;
+/// A notice to the owner is sent again this often while its stall lasts.
+pub const RENOTIFY: f64 = 60.0 * MIN;
+/// The most a snooze gives, in minutes.
+pub const SNOOZE_MAX: u64 = 6 * 60;
+/// The source that publishes the stuck issue.
+pub const STEWARD: &str = "autoland";
+/// The source whose items are proj jobs.
+pub const PROJ: &str = "proj";
+/// What the stuck issue says of each stall on it.
+pub const ESCALATED: &str = "Stalled past its deadline, and a Claude job couldn't move it";
+
+/// The time now, in seconds since the epoch, as the watch files have it.
+pub fn now() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0)
+}

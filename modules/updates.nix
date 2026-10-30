@@ -27,10 +27,49 @@ let
   update = "${prefix}-update";
   health = "${prefix}-health";
   project = baseNameOf config.burrow.flake;
-  # OWNER/NAME, when the flake lives on GitHub.
-  githubRepo =
-    let m = builtins.match "(https://github.com/|git@github.com:)([^/]+/[^/]+)" (lib.removeSuffix ".git" cfg.origin);
-    in if m == null then null else lib.elemAt m 1;
+  # The origin's parts, as git reads a URL: scheme://[user@]host[:port]/path,
+  # or scp-style [user@]host:path. Its host is compared as DNS compares one
+  # (any case, a trailing dot or not) and its port only when it isn't the
+  # scheme's default. OWNER/NAME, when the flake lives on GitHub over HTTPS or
+  # SSH (either form), with or without .git and a trailing slash. An origin
+  # whose host is github.com, or anything under it, and that isn't read here
+  # is refused (the assertion below): a repo's train is never off only because
+  # its URL was spelled another way.
+  origin =
+    let
+      o = cfg.origin;
+      url = builtins.match "([A-Za-z][A-Za-z0-9+.-]*)://([^/]*)(/(.*))?" o;
+      scp = builtins.match "([^/:]*):(.*)" o;
+      parts =
+        if url != null then { scheme = lib.toLower (lib.elemAt url 0); authority = lib.elemAt url 1; path = toString (lib.elemAt url 3); }
+        else if scp != null then { scheme = "scp"; authority = lib.elemAt scp 0; path = lib.elemAt scp 1; }
+        else null;
+      a = builtins.match "(([^@]*)@)?([^:]*)(:([0-9]*))?" parts.authority;
+      host = lib.removeSuffix "." (lib.toLower (lib.elemAt a 2));
+      user = lib.elemAt a 1;
+      port = lib.elemAt a 4;
+      default = { https = "443"; ssh = "22"; }.${parts.scheme} or null;
+      name = builtins.match "([^/]+/[^/]+)" (lib.removeSuffix ".git" (lib.removeSuffix "/" parts.path));
+      read = a != null && host == "github.com" && name != null
+        && (port == null || port == default)
+        && (if parts.scheme == "https" then user == null else builtins.elem parts.scheme [ "ssh" "scp" ] && user == "git");
+    in {
+      onGithub = parts != null && a != null && (host == "github.com" || lib.hasSuffix ".github.com" host);
+      repo = if parts != null && read then lib.elemAt name 0 else null;
+    };
+  githubRepo = origin.repo;
+  # Its PRs land through its merge train (burrow.autoland's `train`): then
+  # nothing here pushes to its main, and what would goes up as a PR. GitHub
+  # reads names whatever their case, so autoland's repos are matched that way.
+  autoland = lib.attrByPath [ "burrow" "autoland" ] { } config;
+  autolandRepo = lib.findFirst (n: githubRepo != null && lib.toLower n == lib.toLower githubRepo) null
+    (lib.attrNames (autoland.repos or { }));
+  train = cfg.enable && autolandRepo != null && (autoland.enable or false)
+    && (autoland.repos.${autolandRepo}.train or false);
+
+  # The longest a Renovate run goes on (seconds): renovate-sweep waits that
+  # long after taking a refresh request back before a job may push.
+  renovateRunFor = 2 * 3600;
 
   vars = {
     UPDATE = update;
@@ -43,6 +82,10 @@ let
     SRC = config.burrow.projectsDir;
     FLAKE = config.burrow.flake;
     ORIGIN = cfg.origin;
+    TRAIN = if train then "1" else "";
+    # Where HOST-update's own PR comes from, in a train repo (updates/propose.sh).
+    REPO = if githubRepo == null then "" else githubRepo;
+    BRANCH = update;
     CONFIG = config.burrow.switch.configName;
     SYSTEM = system;
     MANIFEST = if cfg.claudeManifest == null then "" else cfg.claudeManifest;
@@ -65,6 +108,9 @@ let
     # The repos the steward covers, as it last found them; none without it.
     COVERED = if config.burrow.autoland.enable or false then "${stateDir}/autoland/repos.json" else "";
     SEAL = "${majorSeal}/bin/major-seal";
+    # When a lock file refresh lock-age refused for age only can go again.
+    LOCK_WAIT = "${lockWait}/bin/lock-wait";
+    RENOVATE_RUN = toString renovateRunFor;
     # The App the jobs these start act as (proj run --app), and its bot as
     # GraphQL names it: none without burrow.github.machinery.
     APP = if machineApp == null then "" else machineApp.name;
@@ -74,13 +120,14 @@ let
     APP_OWNERS = lib.concatStringsSep " " cfg.renovate.owners;
     COVERS = coversTool;
     RUN_LOCK = "${cfg.renovate.dir}/run.lock";
+    RUNS = "${cfg.renovate.dir}/runs";
   };
 
   # Each script gets the names it uses (shellcheck rejects the rest), set above
   # its own text.
   uses = text: n: lib.length (builtins.split "\\$\\{?${n}([^A-Za-z0-9_]|$)" text) > 1;
-  script = name: file: runtimeInputs:
-    let text = builtins.readFile file;
+  script = name: files: runtimeInputs:
+    let text = lib.concatMapStrings builtins.readFile (lib.toList files);
     in pkgs.writeShellApplication {
       inherit name runtimeInputs;
       text = lib.concatMapStrings (n: "${n}=${lib.escapeShellArg vars.${n}}\n")
@@ -89,9 +136,10 @@ let
 
   calls = [ tools.proj tools.notify ];
   healthTool = script health ./updates/health.sh (with pkgs; [ coreutils gnugrep gnused gawk systemd ]);
-  updateTool = script update ./updates/update.sh (
-    (with pkgs; [ coreutils git jq curl util-linux systemd gnugrep gnused gawk vulnix config.nix.package ])
-    ++ [ healthTool tools.switch tools.confirm ] ++ calls ++ lib.optional (tools ? boot) tools.boot
+  # Its own functions first (they run only once update.sh has defined what they call).
+  updateTool = script update [ ./updates/dispatch.sh ./updates/propose.sh ./updates/push.sh ./updates/update.sh ] (
+    (with pkgs; [ coreutils jq curl util-linux systemd gnugrep gnused gawk vulnix config.nix.package ])
+    ++ [ config.programs.git.package healthTool tools.switch tools.confirm machineGh ] ++ calls ++ lib.optional (tools ? boot) tools.boot
   );
   advisoryWatch = script "advisory-watch" ./updates/advisory-watch.sh (
     (with pkgs; [ coreutils curl jq gnugrep gnused gawk util-linux vulnix osv-scanner config.nix.package ]) ++ calls
@@ -149,14 +197,24 @@ let
       executionMode = "branch";
     };
   };
+  # What reads lock-age's refusal for age in Renovate's comment
+  # (autoland/lock_wait.py, the steward's too), linted as it's built.
+  lockWaitSrc = pkgs.runCommand "lock-wait-src" { nativeBuildInputs = [ pkgs.python3Packages.flake8 ]; } ''
+    mkdir $out
+    cp ${./autoland/lock_wait.py} $out/lock_wait.py
+    flake8 --ignore E501,W503 $out
+  '';
+  lockWait = pkgs.writeShellScriptBin "lock-wait" ''
+    exec ${pkgs.python3}/bin/python3 -I ${lockWaitSrc}/lock_wait.py "$@"
+  '';
   majorSeal = pkgs.writeShellScriptBin "major-seal" ''
     exec ${pkgs.python3}/bin/python3 -E -s ${majorSealSrc}/major-seal.py ${stateDir}/renovate-sweep "$@"
   '';
   renovateRun = script "renovate-run" ./updates/renovate.sh (
-    [ pkgs.renovate machineGh pkgs.util-linux ] ++ lib.optional (machineApp != null) tools.gh-token
+    [ pkgs.renovate machineGh pkgs.util-linux pkgs.coreutils ] ++ lib.optional (machineApp != null) tools.gh-token
   );
   renovateSweep = script "renovate-sweep" ./updates/renovate-sweep.sh (
-    (with pkgs; [ coreutils findutils git jq gnused ]) ++ [ machineGh ] ++ calls
+    (with pkgs; [ coreutils findutils jq gnused ]) ++ [ config.programs.git.package machineGh ] ++ calls
   );
 
   # The ZFS pools the machine needs imported, as NixOS's zfs module decides
@@ -237,6 +295,18 @@ let
     # require PRs to be up to date would leave them green but unmerged, and
     # renovate-sweep reports security PRs stuck that way.
     rebaseWhen = "conflicted";
+
+    # The rules below take a lock file refresh without a release timestamp on
+    # purpose, and each time Renovate warns that it did. A warning lands on the
+    # dashboard's Repository Problems, where nothing can clear it and the
+    # steward takes it for something stuck. Only the warning for an upgrade
+    # that went ahead: any other still counts.
+    logLevelRemap = [
+      {
+        matchMessage = "/^Some upgrade\\(s\\) did not have a releaseTimestamp, but as we're running with minimumReleaseAgeBehaviour=timestamp-optional, proceeding\\./";
+        newLogLevel = "debug";
+      }
+    ];
 
     nix.enabled = true;
 
@@ -355,13 +425,34 @@ in
   options.burrow.updates = {
     enable = lib.mkEnableOption "HOST-update and the rest of the update pipeline";
 
+    repo = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      readOnly = true;
+      default = githubRepo;
+      defaultText = lib.literalMD "OWNER/NAME of `origin`, when it's on GitHub";
+      description = "The flake's repo on GitHub (OWNER/NAME); null when `origin` isn't there.";
+    };
+
     origin = lib.mkOption {
       type = lib.types.str;
       example = "https://github.com/sam/homelab";
       description = ''
-        Where the machine's flake lives (git URL). HOST-update deploys its main
-        branch and pushes the bumps it tested back there, with the user's git
-        login.
+        Where the machine's flake lives (git URL; on GitHub, any of the forms
+        GitHub gives: HTTPS, `git@github.com:` or `ssh://`). HOST-update
+        deploys its main branch and pushes the bumps it tested back there, with
+        the user's git login: as a PR from its own branch, HOST-update, when
+        the repo's PRs land through its merge train (`throughTrain`).
+      '';
+    };
+
+    throughTrain = lib.mkOption {
+      type = lib.types.bool;
+      readOnly = true;
+      default = train;
+      defaultText = lib.literalMD "whether `origin`'s repo has `train` on in burrow.autoland.repos";
+      description = ''
+        Whether the flake's main moves only through its merge train, so
+        nothing on the machine pushes to it: what would goes up as a PR.
       '';
     };
 
@@ -521,8 +612,19 @@ in
   };
 
   config = lib.mkMerge [
-  # Always built, so heartbeat runs the same checks whether or not updates is on.
-  { burrow.tools.health = healthTool; }
+  # Always built and installed, so heartbeat runs the same checks whether or
+  # not updates is on (without it, only the ones other modules add).
+  {
+    burrow.tools.health = healthTool;
+    environment.etc = lib.mapAttrs'
+      (name: cmd: lib.nameValuePair "burrow/health.d/${name}" {
+        source = pkgs.writeShellScript "health-${name}" ''
+          export PATH=${checkPath}:/run/wrappers/bin:/run/current-system/sw/bin
+          ${cmd}
+        '';
+      })
+      cfg.health;
+  }
 
   (lib.mkIf cfg.enable (lib.mkMerge [
     {
@@ -530,6 +632,10 @@ in
         {
           assertion = (cfg.claudeManifest == null) == (config.burrow.claude.manifest == null);
           message = "Set burrow.updates.claudeManifest and burrow.claude.manifest together (the same file).";
+        }
+        {
+          assertion = origin.onGithub -> githubRepo != null;
+          message = "burrow.updates.origin (${cfg.origin}) is on GitHub, but not as https://github.com/OWNER/NAME, git@github.com:OWNER/NAME or ssh://git@github.com/OWNER/NAME, so which repo it is (and whether its PRs land through a train) can't be read.";
         }
       ];
 
@@ -579,15 +685,6 @@ in
         '';
       });
 
-      environment.etc = lib.mapAttrs'
-        (name: cmd: lib.nameValuePair "burrow/health.d/${name}" {
-          source = pkgs.writeShellScript "health-${name}" ''
-            export PATH=${checkPath}:/run/wrappers/bin:/run/current-system/sw/bin
-            ${cmd}
-          '';
-        })
-        cfg.health;
-
       environment.systemPackages = [ updateTool healthTool ];
 
       # VM tests run in the Nix build sandbox, as nixbld users; let them at KVM.
@@ -630,10 +727,11 @@ in
         ${config.networking.hostName} keeps itself current; nobody runs updates by hand.
 
         - `${update}` (on each push to main or a watched input, and hourly) bumps every flake input${lib.optionalString (cfg.claudeManifest != null) " and Claude Code"},
-          builds, runs the VM tests, switches, checks health, confirms and pushes
-          to main. It deploys main too, so a merged PR goes live the same way. It
+          builds, runs the VM tests, switches, checks health, confirms and
+          ${if train then "puts it up as a PR from its branch `${update}`, which the merge train lands (while that's open it brings in nothing newer, and rides it on main instead)" else "pushes to main"}.
+          It deploys main too, so a merged PR goes live the same way. It
           holds off while a switch is pending or while ${config.networking.hostName} runs changes that
-          aren't on main, so commit and push what you switch to.
+          aren't on main, so ${if train then "put what you switch to up as a PR: only the merge train moves main" else "commit and push what you switch to"}.
         - `${update} status` says what the last run did. When ${config.burrow.owner} asks how
           updates are going, start there${lib.optionalString (vars.BOOT != "") ", plus `${vars.BOOT} status`"}.
       '' + lib.optionalString rcfg.enable ''
@@ -753,12 +851,12 @@ in
           LOG_LEVEL = "info";
         };
         # Renovate's own git, and the toolchains it refreshes lockfiles with.
-        path = [ pkgs.git pkgs.openssh config.nix.package ] ++ rcfg.path;
+        path = [ config.programs.git.package pkgs.openssh config.nix.package ] ++ rcfg.path;
         serviceConfig = {
           Type = "oneshot";
           User = user;
           ExecStart = "${renovateRun}/bin/renovate-run${lib.optionalString (name == "renovate@") " %I"}";
-          TimeoutStartSec = "2h";
+          TimeoutStartSec = renovateRunFor;
           Nice = 10;
         };
       }) // lib.genAttrs [ "renovate-sweep" "renovate-sweep@" ] (name: {

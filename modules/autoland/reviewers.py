@@ -19,7 +19,7 @@ import tempfile
 import time
 
 import common as C
-from common import CFG, STATE, load, log, save, ts
+from common import CFG, DRY, MIN, STATE, load, log, save, ts
 
 NAMES = {"codex": "Codex"}
 # Under STATE: what's asked for, the snapshot each one reads, what came back,
@@ -138,6 +138,17 @@ def rules(repo, mirror, rev, paths):
     return "\n\n".join(out)
 
 
+def fetch(repo, *refs):
+    """The steward's bare clone of the repo, which only it reads, with refs
+    fetched into it from GitHub: what the snapshots are taken from, and what
+    a proof's builds are worked out from (proofs.py)."""
+    mirror = os.path.join(STATE, GIT, repo.replace("/", "__") + ".git")
+    if not os.path.isdir(mirror):
+        git("init", "-q", "--bare", mirror)
+    git("-C", mirror, *C.GIT_AUTH, "fetch", "-q", "--no-tags", ORIGIN.format(repo), *refs, env=C.gh_env(repo))
+    return mirror
+
+
 def snap_name(key, head, base):
     """One snapshot a head on a base: retargeted, a PR is another change."""
     return f"{key[:-5]}-{head[:12]}-{hashlib.sha1(base.encode()).hexdigest()[:8]}"
@@ -167,11 +178,7 @@ def snapshot(repo, pr, key):
     meta = load(f"{SNAP}/{name}.json", None)
     if meta:
         return name, meta
-    mirror = os.path.join(STATE, GIT, repo.replace("/", "__") + ".git")
-    if not os.path.isdir(mirror):
-        git("init", "-q", "--bare", mirror)
-    git("-C", mirror, *C.GIT_AUTH, "fetch", "-q", "--no-tags", ORIGIN.format(repo),
-        f"+refs/pull/{n}/head:refs/pr/{n}", f"+refs/heads/{base}:refs/base/{base}", env=C.gh_env(repo))
+    mirror = fetch(repo, f"+refs/pull/{n}/head:refs/pr/{n}", f"+refs/heads/{base}:refs/base/{base}")
     mb = git("-C", mirror, "merge-base", f"refs/base/{base}", head).decode().strip()
     changed = names(git("-C", mirror, "diff", "-z", "--name-only", "--no-renames", mb, head))
     # A secret renamed or copied to a plain path is still a secret, so its
@@ -279,6 +286,39 @@ def queue(repo, pr, key, r):
         "reviewer": r, "snap": snap, "repo": repo, "number": pr["number"], "headRefOid": pr["headRefOid"],
         "baseRefName": pr["baseRefName"], "title": pr["title"], "rules": meta["rules"], "secret": meta["secret"],
         "prior": prior(repo, pr["number"], r), "at": C.NOW})
+
+
+def ask(repo, pr, key, r, rs, after):
+    """Queue the reviewer on the PR's head, unless it's already on its way.
+    Its looks at one head are bounded by `rounds`: each one with findings
+    counts as a round. rs is the reviewer's state on the PR, which keeps
+    its tries; after books the PR's next pass (step.py's)."""
+    head = pr["headRefOid"]
+    tag = f"{repo}#{pr['number']}"
+    if rs.get("queued"):
+        return
+    if DRY:
+        log(f"  would: ask {NAMES[r]} to review {tag} at {head[:7]}")
+        return
+    if rs.get("fails", 0) >= 3 and C.NOW - rs.get("failedAt", 0) > 3600:
+        rs["fails"] = 0  # an outage passes: three more tries an hour on
+    if rs.get("fails", 0) >= 3:
+        after(rs.get("failedAt", 0), 60)  # ends: listed (stuck, step.py), three more tries an hour on
+        return
+    if rs.get("fails") and C.NOW - rs["failedAt"] < 5 * MIN:
+        # Tries five minutes apart, however many events come meanwhile:
+        # a hiccup gets time to pass before all three are spent.
+        after(rs["failedAt"], 5)  # ends: three tries, then hourly, and listed
+        return
+    try:
+        queue(repo, pr, key, r)
+    except Exception as e:  # the snapshot: GitHub, git, the disk
+        rs["fails"], rs["failedAt"] = rs.get("fails", 0) + 1, C.NOW
+        log(f"{tag}: couldn't queue {NAMES[r]} on {head[:7]} ({rs['fails']}): {str(e)[:200]}")
+        after(C.NOW, 5)  # ends: three tries, then hourly, and listed
+        return
+    log(f"{tag}: queued a {NAMES[r]} review of {head[:7]}")
+    rs["queued"] = C.NOW
 
 
 def unseen(key, head, base):
