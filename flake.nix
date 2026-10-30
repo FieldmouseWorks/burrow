@@ -360,9 +360,12 @@
           touch $out
         '';
         # Which repo the flake's origin is, and so whether HOST-update goes
-        # through its train: the same in every form GitHub takes, whatever
-        # the case of autoland's name for it; nothing for a repo elsewhere; and
-        # a GitHub origin it can't read refused, never read as no train.
+        # through its train: the same in every spelling of GitHub's URLs
+        # (scheme, host case, a trailing dot, the default port, either SSH
+        # form, .git, a trailing slash), whatever the case of autoland's name
+        # for it; nothing for a repo elsewhere, even one with github.com in its
+        # path; and a GitHub origin it can't read refused, never read as no
+        # train.
         update-origin = let
           lib = nixpkgs.lib;
           machine = origin: (self.nixosConfigurations.example.extendModules {
@@ -372,12 +375,21 @@
           refused = origin: lib.any (a: !a.assertion && lib.hasInfix "OWNER/NAME" a.message) (machine origin).assertions;
           forms = [
             "https://github.com/sam/homelab" "https://github.com/sam/homelab.git" "https://github.com/sam/homelab/"
-            "https://github.com/Sam/HomeLab" "git@github.com:sam/homelab.git" "git@github.com:sam/homelab"
-            "ssh://git@github.com/sam/homelab.git" "ssh://git@github.com:22/sam/homelab/"
+            "https://github.com/Sam/HomeLab" "https://GitHub.com/sam/homelab.git" "https://github.com./sam/homelab"
+            "HTTPS://github.com:443/sam/homelab" "git@github.com:sam/homelab.git" "git@github.com:sam/homelab"
+            "git@GITHUB.COM.:sam/homelab/" "ssh://git@github.com/sam/homelab.git" "ssh://git@github.com:22/sam/homelab/"
+            "ssh://git@GitHub.com.:22/sam/homelab"
           ];
           wrong = lib.filter (o: !train o || refused o) forms
-            ++ lib.filter train [ "https://git.example.org/sam/homelab" "https://github.com/sam/other" ]
-            ++ lib.filter (o: !refused o) [ "https://github.com/sam" "https://www.github.com/sam/homelab" "git@github.com:sam/homelab/extra" ];
+            ++ lib.filter (o: train o || refused o) [
+              "https://git.example.org/sam/homelab" "https://github.com/sam/other" "/srv/mirrors/github.com/sam/homelab"
+              "https://git.example.org/github.com/sam/homelab"
+            ]
+            ++ lib.filter (o: !refused o) [
+              "https://github.com/sam" "https://www.github.com/sam/homelab" "git@github.com:sam/homelab/extra"
+              "https://github.com:8443/sam/homelab" "http://github.com/sam/homelab" "https://sam@github.com/sam/homelab"
+              "ssh://sam@github.com/sam/homelab" "git://GitHub.com/sam/homelab"
+            ];
         in pkgs.runCommand "update-origin-check" { } ''
           ${lib.concatMapStrings (o: "echo 'wrong for ${o}'
 ") wrong}

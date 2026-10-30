@@ -27,16 +27,37 @@ let
   update = "${prefix}-update";
   health = "${prefix}-health";
   project = baseNameOf config.burrow.flake;
-  # OWNER/NAME, when the flake lives on GitHub: over HTTPS, scp-style SSH or
-  # ssh://, with or without .git and a trailing slash. An origin on github.com
-  # in any other form is refused (the assertion below), so a repo's train is
-  # never off only because its URL wasn't read.
-  githubRepo =
+  # The origin's parts, as git reads a URL: scheme://[user@]host[:port]/path,
+  # or scp-style [user@]host:path. Its host is compared as DNS compares one
+  # (any case, a trailing dot or not) and its port only when it isn't the
+  # scheme's default. OWNER/NAME, when the flake lives on GitHub over HTTPS or
+  # SSH (either form), with or without .git and a trailing slash. An origin
+  # whose host is github.com, or anything under it, and that isn't read here
+  # is refused (the assertion below): a repo's train is never off only because
+  # its URL was spelled another way.
+  origin =
     let
-      url = lib.removeSuffix ".git" (lib.removeSuffix "/" cfg.origin);
-      m = builtins.match "(https://github\\.com/|git@github\\.com:|ssh://git@github\\.com(:22)?/)([^/]+/[^/]+)" url;
-    in if m == null then null else lib.elemAt m 2;
-  onGithub = builtins.match ".*[@/.]github\\.com[:/].*" cfg.origin != null;
+      o = cfg.origin;
+      url = builtins.match "([A-Za-z][A-Za-z0-9+.-]*)://([^/]*)(/(.*))?" o;
+      scp = builtins.match "([^/:]*):(.*)" o;
+      parts =
+        if url != null then { scheme = lib.toLower (lib.elemAt url 0); authority = lib.elemAt url 1; path = toString (lib.elemAt url 3); }
+        else if scp != null then { scheme = "scp"; authority = lib.elemAt scp 0; path = lib.elemAt scp 1; }
+        else null;
+      a = builtins.match "(([^@]*)@)?([^:]*)(:([0-9]*))?" parts.authority;
+      host = lib.removeSuffix "." (lib.toLower (lib.elemAt a 2));
+      user = lib.elemAt a 1;
+      port = lib.elemAt a 4;
+      default = { https = "443"; ssh = "22"; }.${parts.scheme} or null;
+      name = builtins.match "([^/]+/[^/]+)" (lib.removeSuffix ".git" (lib.removeSuffix "/" parts.path));
+      read = a != null && host == "github.com" && name != null
+        && (port == null || port == default)
+        && (if parts.scheme == "https" then user == null else builtins.elem parts.scheme [ "ssh" "scp" ] && user == "git");
+    in {
+      onGithub = parts != null && a != null && (host == "github.com" || lib.hasSuffix ".github.com" host);
+      repo = if parts != null && read then lib.elemAt name 0 else null;
+    };
+  githubRepo = origin.repo;
   # Its PRs land through its merge train (burrow.autoland's `train`): then
   # nothing here pushes to its main, and what would goes up as a PR. GitHub
   # reads names whatever their case, so autoland's repos are matched that way.
@@ -576,7 +597,7 @@ in
           message = "Set burrow.updates.claudeManifest and burrow.claude.manifest together (the same file).";
         }
         {
-          assertion = onGithub -> githubRepo != null;
+          assertion = origin.onGithub -> githubRepo != null;
           message = "burrow.updates.origin (${cfg.origin}) is on GitHub, but not as https://github.com/OWNER/NAME, git@github.com:OWNER/NAME or ssh://git@github.com/OWNER/NAME, so which repo it is (and whether its PRs land through a train) can't be read.";
         }
       ];
