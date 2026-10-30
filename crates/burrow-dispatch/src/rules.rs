@@ -155,7 +155,8 @@ pub fn decide(
         );
     }
     if let (Some(f), Some(pool)) = (&cfg.fresh, &snap.fresh) {
-        crate::fresh::decide(cfg, f, pool, st, now, &mut d);
+        let unread = f.repos.iter().any(|r| snap.unread.contains_key(r));
+        crate::fresh::decide(cfg, f, pool, unread, (st, was), now, &mut d);
     }
     if let (Some(dep), Some((update, said))) = (&cfg.deploy, &snap.update) {
         for repo in dep.own.iter().chain(dep.running.keys()) {
@@ -372,8 +373,8 @@ mod tests {
     use burrow_watchdog::words::clock;
 
     use super::{Decision, Move, RECENT, decide};
-    use crate::snapshot::tests::config;
-    use crate::snapshot::{Behind, Job, Run, Seen, Snapshot};
+    use crate::snapshot::tests::{config, fresh};
+    use crate::snapshot::{Behind, Job, Pool, Run, Seen, Snapshot};
     use crate::state::State;
     use crate::world::Unit;
 
@@ -612,6 +613,39 @@ mod tests {
             d.items.is_empty() && d.state.unread.is_empty() && d.state.idle.is_empty(),
             "{d:?}"
         );
+    }
+
+    // One of the fresh runners' repos not read: their wait is as the last
+    // pass saw it, until a pass reads them all.
+    #[test]
+    fn unread_fresh_repo() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = config(dir.path());
+        cfg.fresh = Some(fresh(dir.path()));
+        let was_item = Item {
+            what: "fresh".into(),
+            since: T - 600.0,
+            due: T + 300.0,
+            ..Item::default()
+        };
+        let was = BTreeMap::from([("fresh".to_owned(), was_item.clone())]);
+        let st = State {
+            fresh: Some(T - 600.0),
+            ..State::default()
+        };
+        let mut s = Snapshot {
+            fresh: Some(Pool::default()),
+            unread: BTreeMap::from([("sam/f".into(), "HTTP 502".into())]),
+            ..Snapshot::default()
+        };
+        let d = decide(&cfg, &s, &st, &was, T);
+        assert_eq!(
+            (&d.items["fresh"], d.state.fresh),
+            (&was_item, Some(T - 600.0))
+        );
+        s.unread.clear();
+        let d = decide(&cfg, &s, &st, &was, T);
+        assert!(d.items.is_empty() && d.state.fresh.is_none(), "{d:?}");
     }
 
     // A watched repo's commits the running system wasn't built from wait from

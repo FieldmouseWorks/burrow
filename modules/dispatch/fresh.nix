@@ -121,6 +121,9 @@ in
       # unit.
       restartIfChanged = false;
       stopIfChanged = false;
+      # A failed one is gone too, not left loaded for the dispatcher to
+      # count, or for a switch's health check to find newly failed.
+      unitConfig.CollectMode = "inactive-or-failed";
       path = with pkgs; [ bash coreutils findutils gnugrep gnused gnutar gzip git config.nix.package ] ++ cfg.packages;
       environment = {
         RUNNER_ROOT = "/var/lib/${state}/%i";
@@ -138,9 +141,6 @@ in
         # Nothing it leaves is any later job's.
         ExecStopPost = "+${pkgs.coreutils}/bin/rm -rf /var/lib/private/${state}/%i /var/lib/${state}/%i";
         Restart = "no";
-        # A failed one is gone too, not left loaded for the dispatcher to
-        # count.
-        CollectMode = "inactive-or-failed";
         KillMode = "control-group";
         # Past a cap the kernel kills a job's biggest process, which fails
         # that step, rather than the runner.

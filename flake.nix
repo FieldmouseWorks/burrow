@@ -409,16 +409,20 @@
             prefix = "fresh-burrow-"; most = 2; template = "burrow-fresh-runner@"; configs = "/run/burrow-fresh";
           };
           freshUnit = committed.config.systemd.services."burrow-fresh-runner@";
+          # Each setting in the section of the unit file systemd reads it
+          # from: one in the wrong one is ignored.
           freshWant = {
-            Type = "exec";
-            DynamicUser = true;
-            StateDirectory = "burrow-fresh-runner/%i";
-            LoadCredential = "jit:/run/burrow-fresh/%i";
-            Restart = "no";
-            CollectMode = "inactive-or-failed";
-            KillMode = "control-group";
+            Unit = [ "CollectMode=inactive-or-failed" ];
+            Service = [
+              "Type=exec" "DynamicUser=true" "StateDirectory=burrow-fresh-runner/%i"
+              "LoadCredential=jit:/run/burrow-fresh/%i" "Restart=no" "KillMode=control-group"
+            ];
           };
-          freshGot = builtins.intersectAttrs freshWant freshUnit.serviceConfig;
+          freshSections = lib.listToAttrs (map (part:
+            let lines = lib.splitString "\n" part;
+            in lib.nameValuePair (lib.removeSuffix "]" (builtins.head lines)) (builtins.tail lines)
+          ) (builtins.tail (lib.splitString "\n[" ("\n" + builtins.unsafeDiscardStringContext committed.config.systemd.units."burrow-fresh-runner@.service".text))));
+          freshGot = lib.mapAttrs (name: want: builtins.filter (l: builtins.elem l (freshSections.${name} or [ ])) want) freshWant;
           handled = committed.config.burrow.events.handlers.dispatch.repos;
         in
           assert lib.assertMsg (deploy == want) "dispatch: ${builtins.toJSON deploy}, not ${builtins.toJSON want}";
