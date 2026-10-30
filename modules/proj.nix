@@ -258,6 +258,20 @@ in
         ExecStart = "${proj}/bin/proj _watch${lib.optionalString (name == "proj-watch@") " %I"}";
       };
     });
+    # The end of each job's turn (proj _ended), which each turn's unit starts
+    # as it goes: in a unit of its own, so what kills the turn's whole cgroup
+    # (systemd-oomd) leaves it be. The job comes in its environment, from the
+    # instance name: a job's id is its project's folder name, spaces, `%` and
+    # all.
+    systemd.user.services."proj-ended@" = {
+      description = "The end of a turn of proj job %I";
+      unitConfig.ConditionUser = user;
+      environment.PROJ_ENDED = "%I";
+      serviceConfig = {
+        Type = "oneshot";
+        ExecStart = "${proj}/bin/proj _ended";
+      };
+    };
     systemd.tmpfiles.rules = [
       "d ${cfg.jobsDir} 0755 ${user} ${config.users.users.${user}.group} -"
       "d ${stateDir}/proj-watch 0755 ${user} ${config.users.users.${user}.group} -"

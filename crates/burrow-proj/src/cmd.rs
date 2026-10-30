@@ -549,15 +549,15 @@ fn ends(cfg: &Config, how: &str, words: usize) -> Result<(), Fail> {
     Ok(())
 }
 
-/// After each turn, however it ended (its unit's ExecStopPost): its wait is
-/// the stall watchdog's to know, what the job was started to kick (proj run
+/// After each turn, however it ended (proj-ended@ID, its unit's OnSuccess
+/// and OnFailure): its wait is the stall watchdog's to know, what the job was started to kick (proj run
 /// --kick) gets a pass now, and so does proj-watch for each repo the turn
 /// awaits, which then sees at once anything that changed since the turn
 /// took its baseline.
 fn ended(cfg: &Config) -> Result<(), Fail> {
     let id = this_job(
         "PROJ_ENDED",
-        "proj _ended is for the end of a job turn, run by its unit",
+        "proj _ended is for the end of a job turn, run by proj-ended@ID",
     )?;
     rewatch(cfg, &[&id]);
     let job = Job::new(cfg, &id);

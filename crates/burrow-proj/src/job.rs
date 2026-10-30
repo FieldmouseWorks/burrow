@@ -65,6 +65,12 @@ impl<'a> Job<'a> {
         format!("proj-{}.service", escape(self.id))
     }
 
+    /// The unit that ends each of its turns (`proj _ended`), outside the
+    /// turn's own: proj-ended@ID.
+    pub fn end_unit(&self) -> String {
+        format!("proj-ended@{}.service", escape(self.id))
+    }
+
     /// The lock turns start under: held, no turn starts until it's let go.
     pub fn lock(&self) -> io::Result<File> {
         let f = self.lock_file()?;
@@ -304,7 +310,8 @@ pub fn escape(s: &str) -> String {
 mod tests {
     use std::fs;
 
-    use super::{answer, awaits, escape, last_result};
+    use super::{Job, answer, awaits, escape, last_result};
+    use crate::config::{Config, tests::example};
 
     // As systemd-escape writes them: a job's id is its project's folder
     // name, spaces, `%` and all.
@@ -317,6 +324,10 @@ mod tests {
         assert_eq!(escape("my web%n"), "my\\x20web\\x25n");
         assert_eq!(escape(".dot/a.b"), "\\x2edot-a.b");
         assert_eq!(escape("é"), "\\xc3\\xa9");
+        let cfg: Config = serde_json::from_value(example()).unwrap();
+        let job = Job::new(&cfg, "web-1");
+        assert_eq!(job.unit(), "proj-web\\x2d1.service");
+        assert_eq!(job.end_unit(), "proj-ended@web\\x2d1.service");
     }
 
     // Every result with something to say, in order; a run's last result is

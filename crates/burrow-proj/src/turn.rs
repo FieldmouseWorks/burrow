@@ -28,15 +28,18 @@ const NEXT: &str = "`proj await URL` for each PR or issue you're still waiting o
 pub fn start(cfg: &Config, id: &str, msg: &str, first: bool) -> Result<(), String> {
     let job = Job::new(cfg, id);
     let unit = job.unit();
+    let end = job.end_unit();
     // The last turn reads as ended once it has written its outcome, but its
-    // unit is still there while its _ended runs (telling the watchdog,
-    // kicking proj-watch, which can start this turn), and no unit starts
-    // under that name until it's gone. Waited out, for a minute at most,
-    // before this turn is written, so _ended only ever reads the turn it ends
-    // as the latest.
+    // unit is there until it's over, and no unit starts under that name
+    // until it's gone; its _ended (telling the watchdog, kicking proj-watch,
+    // which can start this turn) is queued as it goes, and runs after. Both
+    // waited out, for a minute at most, before this turn is written, so
+    // _ended only ever reads the turn it ends as the latest.
     for i in 1..=120 {
         systemd::reset_failed(cfg, &unit);
-        if systemd::show(cfg, &unit, "LoadState") != "loaded" {
+        if systemd::show(cfg, &unit, "LoadState") != "loaded"
+            && systemd::show(cfg, &end, "Job").is_empty()
+        {
             break;
         }
         if i == 120 {
@@ -76,9 +79,11 @@ pub fn start(cfg: &Config, id: &str, msg: &str, first: bool) -> Result<(), Strin
     // next to. Past its own cap the kernel kills the job's biggest process
     // (a build or an evaluation it ran, as a rule) and the turn carries on,
     // told the command was killed: systemd's default OOMPolicy would stop
-    // the whole turn. The job comes to its _ended in the unit's environment:
-    // systemd splits and expands a command line, and a job's id is its
-    // project's folder name, spaces, `%` and all.
+    // the whole turn. Its end is a unit of its own, however the turn ends:
+    // what kills the turn's whole cgroup (systemd-oomd does) would take an
+    // ExecStopPost with it. The name is doubled up on its backslashes, which
+    // systemd-run reads as escapes.
+    let hook = end.replace('\\', "\\\\");
     let started = systemd::systemd_run(cfg)
         .args(["--quiet", "--collect"])
         .arg(format!("--unit={unit}"))
@@ -90,9 +95,9 @@ pub fn start(cfg: &Config, id: &str, msg: &str, first: bool) -> Result<(), Strin
             "--property=WorkingDirectory={}",
             read(&job.path("project")).unwrap_or_default()
         ))
+        .arg(format!("--property=OnSuccess={hook}"))
+        .arg(format!("--property=OnFailure={hook}"))
         .arg(format!("--setenv=PROJ_CONFIG={}", cfg.path.display()))
-        .arg(format!("--setenv=PROJ_ENDED={id}"))
-        .arg(format!("--property=ExecStopPost={} _ended", me.display()))
         .arg(&me)
         .args(["_exec", id, if first { "first" } else { "normal" }])
         .status()
