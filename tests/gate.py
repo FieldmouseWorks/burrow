@@ -4,9 +4,10 @@ each derivation gets a nix process of its own and stays a GC root until it's
 built, only the checks are built, every output is checked as nix flake check
 checks it, a failed evaluation or build fails the gate, and a flake with an
 output eval-apart doesn't know, or with a nixConfig, is refused rather than
-half checked. Without it, nix flake check builds nothing, and the checks are
-built by derivation, kept as GC roots, once the one nix process that evaluated
-them has exited, so no evaluation stays in memory beside the builds.
+half checked. Without it, the checks are built first, by derivation, kept as
+GC roots, once the one nix process that evaluated them has exited, so no
+evaluation stays in memory beside the builds; nix flake check then finds them
+built. A flake with a nixConfig is left to nix flake check alone.
 
   python3 -I tests/gate.py .github/workflows/flake-check.yml
   nix build .#checks.x86_64-linux.gate
@@ -32,7 +33,7 @@ script = os.path.join(tmp, "gate.sh")
 open(script, "w").write(step["run"])
 
 # Real nix for evaluation, in a store under tmp, so this runs in the build
-# sandbox; builds and flake checks are only logged, and fail on request.
+# sandbox; builds are only logged, and fail on request.
 real_nix = shutil.which("nix")
 real_bin = os.path.dirname(real_nix)
 nix_env = {
@@ -57,6 +58,7 @@ def stub(name, body):
 
 # A build collects garbage first, as a GC on the runner could between the
 # evaluations and the build, and every derivation it's given must survive it.
+# A flake check evaluates as nix's does, and builds nothing.
 stub("nix", f"""case $1 in
   build)
     echo "$*" >> "$NIX_LOG"
@@ -66,7 +68,7 @@ stub("nix", f"""case $1 in
     done
     [ -z "$BUILD_FAIL" ] || case "$*" in *"$BUILD_FAIL"*) exit 1 ;; esac
     exit 0 ;;
-  flake) [ "$2" = check ] && {{ echo "$*" >> "$NIX_LOG"; exit 0; }} ;;
+  flake) [ "$2" = check ] && {{ echo "$*" >> "$NIX_LOG"; exec {real_nix} flake check --no-build "${{@:3}}"; }} ;;
 esac
 exec {real_nix} "$@"
 """)
@@ -303,30 +305,65 @@ def no_checks():
 
 @case
 def whole():
-    "without eval-apart, nix flake check builds nothing, then the checks are built by derivation, kept until built"
+    "without eval-apart, the checks are built by derivation, kept until built, then nix flake check finds them built"
+    rc, out, calls = run(every, apart=False)
+    assert rc == 0, out
+    assert calls[0] == "nix-instantiate checks" and calls[2:] == ["flake check -L --keep-going"], calls
+    [b] = builds(calls)
+    assert b.startswith("build -L --no-link --keep-going /nix/store/"), b
+    assert "-a.drv^*" in b and "-vm.drv^*" in b and "-p.drv" not in b, b
+    # With a check it doesn't build, nix flake check builds none.
     rc, out, calls = run(every, apart=False, skip="vm")
     assert rc == 0, out
-    assert calls[:2] == ["flake check --no-build -L --keep-going", "nix-instantiate checks"], calls
+    assert calls[0] == "nix-instantiate checks" and calls[2:] == ["flake check --no-build -L"], calls
     [b] = builds(calls)
-    assert b.startswith("build -L --no-link --keep-going /nix/store/") and b.endswith("-a.drv^*"), b
-    assert "-vm.drv" not in b and "-p.drv" not in b, b
+    assert b.endswith("-a.drv^*") and "-vm.drv" not in b, b
     assert "not building vm" in out, out
 
 
 @case
 def whole_failing():
-    "without eval-apart, a failing check or one that doesn't evaluate fails it"
+    "without eval-apart, a check that fails to build is built once, and one that doesn't evaluate leaves nix flake check the rest"
     rc, out, calls = run(every, apart=False, build_fail="-a.drv")
-    assert rc != 0 and builds(calls), out
-    rc, out, calls = run(flake("""{ checks.${system} = { a = drv "a"; broken = throw "broken check"; }; }"""), apart=False)
-    assert rc != 0 and "broken check" in out, out
+    assert rc != 0, out
+    assert len(builds(calls)) == 1 and calls[-1] == "flake check --no-build -L --keep-going", calls
+    broken = flake("""{ checks.${system} = { a = drv "a"; broken = throw "broken check"; }; }""")
+    for skip in ("", "x"):
+        rc, out, calls = run(broken, apart=False, skip=skip)
+        assert rc != 0 and "broken check" in out, out
+        assert not builds(calls) and calls[1].startswith("flake check"), calls
 
 
 @case
 def whole_no_checks():
     "without eval-apart, no checks, no build"
     rc, out, calls = run(flake("""{ packages.${system}.p = drv "p"; }"""), apart=False)
-    assert rc == 0 and "nix-instantiate checks" in calls and not builds(calls), (out, calls)
+    assert rc == 0 and calls == ["nix-instantiate checks", "flake check -L --keep-going"], (out, calls)
+
+
+@case
+def whole_nix_config():
+    "without eval-apart, a flake with a nixConfig is nix flake check's alone, which applies the config a runner accepts"
+    d = flake("""{ checks.${system} = { a = drv "a"; vm = drv "vm"; }; }""", top='nixConfig.bash-prompt = "x";')
+    rc, out, calls = run(d, apart=False)
+    assert rc == 0 and calls == ["flake check -L --keep-going"], (out, calls)
+    rc, out, calls = run(d, apart=False, skip="vm")
+    assert rc == 0 and calls == ["flake check --no-build -L", f"build -L --no-link --keep-going .#checks.{system}.a"], (out, calls)
+    rc, out, calls = run(d, apart=False, skip="vm", build_fail=".a")
+    assert rc != 0, (out, calls)
+
+
+@case
+def outputs():
+    "a check whose first output isn't out is built, every output of it"
+    d = flake("""{ checks.${system}.multi = derivation {
+      name = "multi"; inherit system; builder = "/bin/sh"; outputs = [ "dev" "out" ]; args = [ "-c" "echo > $dev; echo > $out" ];
+    }; }""")
+    for apart in (True, False):
+        rc, out, calls = run(d, apart=apart)
+        assert rc == 0, out
+        [b] = builds(calls)
+        assert b.endswith("-multi.drv^*"), b
 
 
 if failures:
