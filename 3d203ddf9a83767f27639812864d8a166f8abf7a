@@ -1,0 +1,71 @@
+{
+  "conary": "note v1",
+  "change": "7gfnst80dp62dt7g45c9fyd5mg",
+  "repo": {
+    "owner": "fieldmouseworks",
+    "name": "burrow"
+  },
+  "pr": 216,
+  "url": "https://github.com/fieldmouseworks/burrow/pull/216",
+  "summary": "chore(deps): lock file maintenance (nix)",
+  "task": null,
+  "author": {
+    "kind": "bot",
+    "login": "fieldmouseworks-workers[bot]",
+    "session": null
+  },
+  "landing": {
+    "revision": "e800e325c1e05793a8156ecc3f04406f79d315b1ad100e9b4cf403e4082dae62",
+    "before": "df29c8e39d83f6c34d7b1792a005d68e3725e68a",
+    "after": "3d203ddf9a83767f27639812864d8a166f8abf7a",
+    "by": {
+      "kind": "status",
+      "login": "fieldmouseworks-steward[bot]"
+    },
+    "at": 1793356850272
+  },
+  "evidence": [
+    {
+      "kind": "ci",
+      "check": "check / commits",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/41029892567/job/123976826174"
+    },
+    {
+      "kind": "ci",
+      "check": "renovate/stability-days",
+      "result": "pass",
+      "source": "https://docs.renovatebot.com/key-concepts/minimum-release-age/"
+    },
+    {
+      "kind": "review",
+      "check": "codex",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/216#pullrequestreview-5710124102"
+    },
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "fail",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/41029892567/job/123976825674"
+    },
+    {
+      "kind": "ci",
+      "check": "check / commits",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/41029892567/job/124002009011"
+    },
+    {
+      "kind": "ci",
+      "check": "agents",
+      "result": "pass",
+      "source": "status agents"
+    },
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/41029892567/job/124002006369"
+    }
+  ]
+}
