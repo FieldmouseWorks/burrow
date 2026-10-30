@@ -8,6 +8,7 @@ what came back (`post`), as the steward's App and marked as that
 reviewer's, and reads each reviewer's verdict back from those posts
 (`verdict`)."""
 
+import contextlib
 import fcntl
 import hashlib
 import json
@@ -390,13 +391,30 @@ def taken(path):
         return True
 
 
+@contextlib.contextmanager
+def writing():
+    """Held while the reviewers' service writes what a look found (its
+    answer, its session's look, its entry taken off the queue) and while a
+    sweep takes looks off the queue: so a look the sweep took off can't
+    write after it, at names a PR may take again (review_worker `swept`)."""
+    with open(os.path.join(STATE, "review", "write.lock"), "a") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        yield
+
+
 def sweep(repos, live):
     """For the repos this pass read (`repos`, as state file names spell
     them): the snapshots, queue entries and answers of heads none of their
     open PRs has any more (`live`: the snapshot names of the heads they have).
     An open PR's earlier head keeps a look the reviewers' service is on, the
     snapshot it reads, and what came back, which the PR's next pass posts
-    on the commit it read (steward.py's `overtaken`)."""
+    on the commit it read (steward.py's `overtaken`). Returns the sessions
+    it couldn't mark gone."""
+    with writing():
+        return _sweep(repos, live)
+
+
+def _sweep(repos, live):
     prs = {s.rsplit("-", 2)[0] for s in live}
     keep = set()
     for d in (QUEUE, DONE, SNAP):  # the queue first: a look still running keeps its snapshot
@@ -415,6 +433,7 @@ def sweep(repos, live):
     # And the reviewers' sessions, for good, once their PR is closed (or
     # retargeted): nothing of one PR's carries over to another's.
     on = {f"{pr}-{base}" for pr, _, base in (s.rsplit("-", 2) for s in live)}
+    stuck = []
     for x in os.listdir(os.path.join(STATE, SESSIONS)):
         pr = x.partition("--")[2]
         if x.startswith(GONE) or pr.rsplit("-", 2)[0].removeprefix("pr-") not in repos or pr in on:
@@ -423,6 +442,8 @@ def sweep(repos, live):
             os.rename(os.path.join(STATE, SESSIONS, x), os.path.join(STATE, SESSIONS, f"{GONE}{time.time_ns()}-{x}"))
         except OSError as e:
             log(f"couldn't mark the session {x} gone: {e}")
+            stuck.append(x)
+    return stuck
 
 
 # ---------------------------------------------------------------- posting

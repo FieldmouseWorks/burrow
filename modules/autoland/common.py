@@ -434,21 +434,31 @@ def repo_cfg(repo):
     return c
 
 
-def projects():
+def projects(strict=False):
     """(folder, repo) for each project in projectsDir, by its origin URL.
     Only a clone of its own counts: a hidden folder, or a worktree of the
     repo (`.git` is a file there) checked out on some other branch, sorts
     first and shares the origin, but a job sent there works on the wrong
-    tree."""
+    tree. Strict, one whose origin git can't read (other than having none)
+    raises rather than being left out: for repos.restart, which must see
+    every clone a repo has."""
     src = CFG["projectsDir"]
     for d in sorted(os.listdir(src)) if os.path.isdir(src) else []:
         if d.startswith(".") or not os.path.isdir(os.path.join(src, d, ".git")):
             continue
         p = subprocess.run(["git", "-C", os.path.join(src, d), "remote", "get-url", "origin"],
                            capture_output=True, text=True)
-        url = re.sub(r"^(https://github\.com/|git@github\.com:)", "", p.stdout.strip()).removesuffix(".git")
-        if url.count("/") == 1:
+        if strict and p.returncode and "No such remote" not in p.stderr:
+            raise RuntimeError(f"{d}: git can't read its origin: {p.stderr.strip() or f'exit {p.returncode}'}")
+        url = github_repo(p.stdout.strip())
+        if url:
             yield d, url
+
+
+def github_repo(url):
+    """OWNER/REPO of a GitHub remote URL, or None."""
+    url = re.sub(r"^(https://github\.com/|git@github\.com:)", "", url).removesuffix(".git")
+    return url if url.count("/") == 1 else None
 
 
 def project_dir(repo):
@@ -508,8 +518,24 @@ def job_state(jid):
     return p.stdout.strip() or None
 
 
-# A proj job's id: its project, when it started, and mktemp's four.
-JOB_ID = re.compile(r"[\w.-]+-\d{8}-\d{6}-[A-Za-z0-9]{4}")
+def jobs_in(path):
+    """(id, when it started) for every proj job ever started in the project
+    at path, from proj's own record (jobsDir): `proj run` names a job after
+    its project's folder, and writes the project's path to the job's
+    `project` file as it starts it. Raises when that can't be read."""
+    jobs, name = CFG["jobsDir"], os.path.basename(path)
+    found = []
+    for jid in sorted(os.listdir(jobs)) if os.path.isdir(jobs) else []:
+        if not re.fullmatch(rf"{re.escape(name)}-\d{{8}}-\d{{6}}-\w+", jid):
+            continue
+        f = os.path.join(jobs, jid, "project")
+        try:
+            with open(f) as fh:
+                if os.path.normpath(fh.read().strip()) == os.path.normpath(path):
+                    found.append((jid, os.stat(f).st_mtime))
+        except FileNotFoundError:
+            continue  # being made: it has no turn yet, and none starts before its project is written
+    return found
 
 
 def stop_job(jid):

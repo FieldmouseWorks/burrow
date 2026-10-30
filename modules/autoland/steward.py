@@ -153,7 +153,6 @@ def run_pass(kick):
                     started += 1
                     if jid:
                         log(f"{repo}: baseline job {jid}")
-                        R.baseline_started(repo, jid)
                         known.add(repo)
                         failed.pop(repo, None)
                     else:

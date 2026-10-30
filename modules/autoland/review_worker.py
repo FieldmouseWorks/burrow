@@ -360,11 +360,14 @@ def review(name):
                 # A session that won't resume (lost, or broken) isn't asked
                 # again: the look's next try starts the PR's next one.
                 if last.get("id"):
-                    remove_look(session)
+                    with V.writing():
+                        if not swept(held, item):
+                            remove_look(session)
                 raise
-            if swept(held, item):
-                return
-            save(f"{session}/look.json", {"id": sid, "head": head})
+            with V.writing():
+                if swept(held, item):
+                    return
+                save(f"{session}/look.json", {"id": sid, "head": head})
             log(f"{item['repo']}#{item['number']}: {V.NAMES[r]} took {time.time() - began:.0f}s"
                 + (" in its session" if last.get("id") else ", starting its session"))
             out = {"result": "review", "answer": scrub(answer)}
@@ -374,20 +377,24 @@ def review(name):
         except Exception as e:
             out = {"result": "error", "error": scrub(str(e))[:300]}
             log(f"{(item or {}).get('repo')}#{(item or {}).get('number')}: review failed: {out['error']}")
-        if swept(held, item):
-            return
-        # Out of the queue even if the answer can't be kept: with nothing back
-        # the steward counts it lost and queues it again.
         try:
-            # The head it read, for a PR that has moved on since (the
-            # steward's `overtaken`).
-            save(f"{V.DONE}/{name}", {**out, "at": time.time(),
-                                      **({"head": item.get("headRefOid"), "base": item.get("baseRefName")} if isinstance(item, dict) else {})})
+            with V.writing():
+                if swept(held, item):
+                    return
+                # Out of the queue even if the answer can't be kept: with
+                # nothing back the steward counts it lost and queues it again.
+                try:
+                    # The head it read, for a PR that has moved on since (the
+                    # steward's `overtaken`).
+                    save(f"{V.DONE}/{name}", {**out, "at": time.time(),
+                                              **({"head": item.get("headRefOid"), "base": item.get("baseRefName")}
+                                                 if isinstance(item, dict) else {})})
+                finally:
+                    try:
+                        os.remove(os.path.join(STATE, V.QUEUE, name))
+                    except OSError:
+                        pass
         finally:
-            try:
-                os.remove(os.path.join(STATE, V.QUEUE, name))
-            except OSError:
-                pass
             if isinstance((item or {}).get("repo"), str):
                 C.kick(item["repo"])
 
@@ -398,7 +405,9 @@ def swept(held, item):
     one's name. What it found is no open PR's, and the entry, session and
     answer at the same names may be a PR's that has taken them since (the
     remade repo's PR of the same number): none of them is this look's to
-    write or take off. Its answer goes nowhere."""
+    write or take off. Its answer goes nowhere. Asked under V.writing,
+    which the sweep holds too, so the answer holds until the write is
+    done."""
     if os.fstat(held.fileno()).st_nlink:
         return False
     log(f"{(item or {}).get('repo')}#{(item or {}).get('number')}: taken off the queue while it was reviewed; "

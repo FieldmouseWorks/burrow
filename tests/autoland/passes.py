@@ -199,7 +199,7 @@ S.R.discover, S.R.restart, S.R.settle_repo, S.R.publish, S.R.sweep_branches, S.o
 assert seen_repos == ["sam/r"] and swept == [False], (seen_repos, swept)
 assert order == [("restart", "sam/r"), ("settle", "sam/r")] and NEW_JOBS == [("sam/r", "sam/r is new", True)], \
     (order, NEW_JOBS)
-assert C.load("known.json", None) == ["sam/r"] and C.load("repo-sam_r.json", {})["baselineJob"] == "job-new"
+assert C.load("known.json", None) == ["sam/r"]
 # The sweep leaves every open PR's branches, its base as well as its head:
 # deleting a base closes the PRs on it.
 assert in_use == [{"feat", "main"}], in_use

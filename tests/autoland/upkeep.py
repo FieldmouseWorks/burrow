@@ -4,6 +4,7 @@ branch's fix job."""
 
 import json
 import os
+import shutil
 import subprocess
 import time
 import urllib.parse
@@ -220,12 +221,14 @@ C.gh, C.write = gh_stub, write
 
 # A repo made under the name of one GitHub deleted (made after the steward
 # last settled one of that name) starts over as new, before anything acts
-# on it: the deleted one's Claude jobs are stopped, wherever its state keeps
-# them; every clone that wasn't cloned since it was made is moved aside,
-# where no job takes it, and the new one's own clone stays; what was kept
-# about the old one goes, and another repo's of a like name stays; and it
-# leaves known and failed at once, so it gets its baseline job.
-src = f"{tmp}/remade-src"
+# on it. Every clone of it that wasn't cloned from it on GitHub since it was
+# made is moved aside, where no job takes it, and the new one's own clone
+# stays; the Claude jobs proj ran in a clone moved aside, or started before
+# the repo was made, are stopped, and the new one's, or another repo's, go
+# on; what was kept about the old one goes, and another repo's of a like
+# name stays; and it leaves known and failed at once, so it gets its
+# baseline job.
+src, jobs = f"{tmp}/remade-src", S.CFG["jobsDir"]
 S.CFG["projectsDir"] = src
 remade = {"repo": "sam/r", "private": False, "default": "main", "created": "2026-10-24T06:00:00Z"}
 MADE = C.ts(remade["created"])
@@ -233,13 +236,16 @@ origin = f"{tmp}/remade-origin"
 subprocess.run(["git", "init", "-q", origin], check=True)
 subprocess.run(["git", "-C", origin, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty",
                 "-m", "one"], check=True)
+SEQ = iter(range(100))
 
 
-def clone(d, at, url="https://github.com/sam/r"):
-    """A clone in src/d, made at `at`, whose origin is url."""
-    subprocess.run(["git", "clone", "-q", origin, f"{src}/{d}"], check=True,
+def clone(d, at, frm="https://github.com/sam/r", url=None):
+    """src/d, cloned from frm at `at` (GitHub's frm is origin here), its
+    origin set to url after when there's one."""
+    subprocess.run(["git", "-c", f"url.{origin}.insteadOf={frm}", "clone", "-q", frm, f"{src}/{d}"], check=True,
                    env={**os.environ, "GIT_COMMITTER_DATE": f"@{at:.0f} +0000"})
-    subprocess.run(["git", "-C", f"{src}/{d}", "remote", "set-url", "origin", url], check=True)
+    if url:
+        subprocess.run(["git", "-C", f"{src}/{d}", "remote", "set-url", "origin", url], check=True)
 
 
 def made(d):
@@ -248,19 +254,29 @@ def made(d):
     subprocess.run(["git", "-C", f"{src}/{d}", "remote", "add", "origin", "https://github.com/Sam/R.git"], check=True)
 
 
-JIDS = [f"r-20261023-1200{n:02d}-ab{n:02d}" for n in range(9)]
+def job(d, at, path=None):
+    """A job proj started at `at` in src/d (or in path), as proj records
+    it; its id."""
+    n = next(SEQ)
+    jid = f"{d}-20261023-1200{n:02d}-ab{n:02d}"
+    os.makedirs(f"{jobs}/{jid}")
+    with open(f"{jobs}/{jid}/project", "w") as f:
+        f.write(f"{path or f'{src}/{d}'}\n")
+    os.utime(f"{jobs}/{jid}/project", (at, at))
+    return jid
 
 
 def old_state():
     fresh_pr_state()
+    for d in (src, jobs):
+        shutil.rmtree(d, ignore_errors=True)
+    os.makedirs(src)
     C.save("repo-sam_r.json", {"settings": C.ts(T0), "app": 7, "labels": ["hold", "needs-owner", "first"],
-                               "hook": "x", "hookId": 41, "red": {"job": JIDS[0], "jobs": 1},
-                               "baselineJob": JIDS[1]})
-    C.save("pr-sam_r-1.json", {"fixJob": JIDS[2], "provedJob": JIDS[3], "proofsLive": [JIDS[3], JIDS[4]],
-                               "proofPaths": {JIDS[4]: {"paths": [], "at": 1}}, "fix": "a" * 40})
-    C.save("dashboard-sam_r.json", {"job": JIDS[5], "items": {"7": {"job": JIDS[6]}}})
-    C.save("flaky-sam_r.json", {"job": JIDS[7], "jobAt": 5})
-    C.save("pr-sam_r-x-1.json", {"fixJob": JIDS[8]})
+                               "hook": "x", "hookId": 41})
+    C.save("pr-sam_r-1.json", {"fix": "a" * 40})
+    C.save("dashboard-sam_r.json", {"items": {"7": {}}})
+    C.save("flaky-sam_r.json", {"jobAt": 5})
+    C.save("pr-sam_r-x-1.json", {"fix": "b" * 40})
     C.save("repo-sam_r-x.json", {"settings": C.ts(T0)})
     snap = V.snap_name("pr-sam_r-1.json", "a" * 40, "main")
     C.save(f"{V.DONE}/codex--{snap}.json", {"result": "ok"})
@@ -271,16 +287,22 @@ def old_state():
 
 
 old_state()
-clone("r", MADE - 86400)                                   # the deleted one's
+assert C.jobs_in(f"{src}/r") == []                         # proj has run none yet
+clone("r", MADE - 86400)                                   # the deleted one's, where the next clone goes
 clone("r-2", MADE - 3600)                                  # another of its
+clone("bak", MADE + 30, origin, "https://github.com/sam/r")  # copied from somewhere else since
 made("zz")                                                 # one nobody cloned
 clone("r-new", MADE + 60)                                  # the new one's
 clone("x", MADE - 86400, "https://github.com/sam/r-x")     # another repo's
+old = [job("r", MADE - 3600), job("r-2", MADE + 120)]      # in clones that go, whenever they started
+new = [job("r-new", MADE + 120), job("x", MADE - 3600), job("r", MADE - 3600, "/elsewhere/r")]
+os.makedirs(f"{jobs}/r-20261024-070000-abcd")              # one proj is making: it hasn't started
+assert C.jobs_in(f"{src}/r") == [(old[0], MADE - 3600)], C.jobs_in(f"{src}/r")
 C.NOW = MADE + 3600
 known, failed = {"sam/r", "sam/r-x"}, {"sam/r": 1, "sam/r-x": 2}
 STOPPED.clear()
 R.restart(remade, known, failed)
-assert sorted(STOPPED) == JIDS[:8], STOPPED
+assert sorted(STOPPED) == sorted(old), STOPPED
 assert known == {"sam/r-x"} and failed == {"sam/r-x": 2}, (known, failed)
 assert C.load("known.json", None) == ["sam/r-x"] and C.load("baseline-failed.json", None) == {"sam/r-x": 2}
 left = sorted(os.listdir(f"{tmp}/state"))
@@ -289,7 +311,7 @@ assert "pr-sam_r-x-1.json" in left and "repo-sam_r-x.json" in left, left
 assert os.listdir(f"{tmp}/state/{V.DONE}") == [] and not os.path.exists(f"{tmp}/state/{V.GIT}/sam__r.git")
 assert all(x.startswith(V.GONE) for x in os.listdir(f"{tmp}/state/{V.SESSIONS}")), os.listdir(f"{tmp}/state/{V.SESSIONS}")
 stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(C.NOW))
-assert sorted(os.listdir(src)) == sorted(["r-new", "x", f".r.gone-{stamp}", f".r-2.gone-{stamp}", f".zz.gone-{stamp}"])
+assert sorted(os.listdir(src)) == sorted(["r-new", "x"] + [f".{d}.gone-{stamp}" for d in ("r", "r-2", "bak", "zz")])
 assert C.project_dir("sam/r") == "r-new", os.listdir(src)
 # Then it's settled as new, at once: its settings, labels and hook.
 WROTE.clear()
@@ -312,31 +334,52 @@ for r, st in (({**remade, "created": "2026-10-23T00:00:00Z"}, {"sam/r", "sam/r-x
     known = {"sam/r", "sam/r-x"}
     R.restart(r, known, {})
     assert known == {"sam/r", "sam/r-x"} and STOPPED == [] and "pr-sam_r-1.json" in os.listdir(f"{tmp}/state")
+# Where the repo's next clone goes, a job that started before the repo was
+# made was the deleted one's, and goes on in whatever clone is there now:
+# it's stopped, whether the new one's clone is there yet or not, and the
+# new one's own jobs there go on. Another repo's clone there is its own,
+# and so are its jobs.
+for there in ("new", None, "theirs"):
+    old_state()
+    if there:
+        clone("r", MADE + 60 if there == "new" else MADE - 86400, f"https://github.com/{'sam' if there == 'new' else 'kim'}/r")
+    stale, fresh = job("r", MADE - 3600), job("r", MADE + 120)
+    STOPPED.clear()
+    R.restart(remade, set(), {})
+    assert STOPPED == ([] if there == "theirs" else [stale]) and os.listdir(src) == (["r"] if there else []), \
+        (there, STOPPED, os.listdir(src))
 # A step that fails stops the rest, and leaves the settings that say it was
 # remade: the next pass does it all again, and finishes it. A job proj
-# won't stop leaves the repo's clones and state as they were.
-for broken in ("stop", "sweep"):
+# won't stop leaves its clone where it is, and a clone whose origin git
+# can't read leaves them all, since it may be the repo's.
+for broken, said in (("stop", "couldn't"), ("origin", "can't read its origin"), ("sweep", "couldn't be marked gone")):
     C.NOW += 1
     old_state()
     clone("r", MADE - 86400)
+    jid = job("r", MADE - 3600)
     stop, sweep = C.stop_job, V.sweep
     if broken == "stop":
         C.stop_job = lambda jid: (_ for _ in ()).throw(RuntimeError(f"proj stop {jid}: couldn't"))
+    elif broken == "origin":
+        os.makedirs(f"{src}/half/.git")
     else:
-        V.sweep = lambda *a: (_ for _ in ()).throw(OSError("sweep"))
+        V.sweep = lambda *a: [f"{V.session_name('codex', 'pr-sam_r-1-x')}"]
     known, failed = {"sam/r"}, {}
+    STOPPED.clear()
     try:
         R.restart(remade, known, failed)
         raise AssertionError(f"{broken} failing was swallowed")
-    except (RuntimeError, OSError):
-        pass
+    except RuntimeError as e:
+        assert said in str(e), (broken, e)
     C.stop_job, V.sweep = stop, sweep
     assert known == set() and C.load("known.json", None) == [] and "repo-sam_r.json" in os.listdir(f"{tmp}/state")
-    assert os.path.isdir(f"{src}/r") == (broken == "stop"), (broken, os.listdir(src))
+    assert os.path.isdir(f"{src}/r") == (broken != "sweep") and STOPPED == ([jid] if broken == "sweep" else []), \
+        (broken, STOPPED, os.listdir(src))
+    shutil.rmtree(f"{src}/half", ignore_errors=True)
     STOPPED.clear()
     C.NOW += 1
     R.restart(remade, known, failed)
-    assert sorted(STOPPED) == JIDS[:8] and "repo-sam_r.json" not in os.listdir(f"{tmp}/state"), STOPPED
+    assert STOPPED == [jid] and "repo-sam_r.json" not in os.listdir(f"{tmp}/state"), STOPPED
     assert not os.path.exists(f"{src}/r") and not os.path.exists(f"{tmp}/state/{V.GIT}/sam__r.git")
 # proj stop: a job proj no longer has is over already; anything else it
 # says raises.
@@ -357,6 +400,7 @@ except RuntimeError as e:
 assert open(f"{tmp}/stop-args").read().split("\n")[0] == "stop r-20261023-120000-abcd"
 S.CFG["proj"] = kept_proj
 S.CFG["projectsDir"] = f"{tmp}/none"
+shutil.rmtree(jobs)
 print("remade repos: ok")
 
 # A red default branch gets one Claude job, and nothing more while it works
