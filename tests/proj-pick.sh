@@ -1,7 +1,8 @@
 # proj's choice of who takes a slot (modules/proj/pick.sh), on what take_slot
 # would see: pipeline jobs' slots stay theirs, one project's jobs stop at
 # PER_PROJECT while the others go by, pipeline ones count against no cap, and
-# lead ones go ahead of everyone, every free slot going in one look; and which
+# lead ones go ahead of everyone but leave the rest one slot, every free slot
+# going in one look; and which
 # jobs are pipeline ones: only those
 # in the pipeline's own repos and the machine's flake, and lead ones those in
 # its lead repos.
@@ -108,6 +109,21 @@ PIPELINE_SLOTS=2
 case_ "l 5${NL}p 6" "normal /src/x" "normal /src/y" "normal /src/z" "first /src/z" free free \
   "l lead /src/burrow" "m lead /src/burrow" "p pipeline /src/remi"
 PIPELINE_SLOTS=1
+# And one of the slots anyone may take stays everyone else's while one of
+# theirs waits and none runs, so a lead repo's backlog can't stop all the
+# rest: here the turn behind four lead ones takes the last one.
+case_ "l 1${NL}m 2${NL}n 3${NL}k 4${NL}a 5" free free free free free "pipeline /src/remi" \
+  "l lead /src/burrow" "m lead /src/burrow" "n lead /src/burrow" "k lead /src/burrow" "j lead /src/burrow" "a normal /src/web"
+case_ "a 5" "lead /src/burrow" "lead /src/burrow" "lead /src/burrow" "lead /src/burrow" free "pipeline /src/remi" \
+  "l lead /src/burrow" "a first /src/web"
+# With one of theirs running, none of theirs waiting, or none of those slots
+# free, the lead ones take every slot they're let.
+case_ "l 2${NL}m 3${NL}n 4${NL}k 5" "normal /src/web" free free free free "pipeline /src/remi" \
+  "l lead /src/burrow" "m lead /src/burrow" "n lead /src/burrow" "k lead /src/burrow" "a normal /src/lok"
+case_ "l 1${NL}m 2${NL}n 3${NL}k 4${NL}j 5" free free free free free "pipeline /src/remi" \
+  "l lead /src/burrow" "m lead /src/burrow" "n lead /src/burrow" "k lead /src/burrow" "j lead /src/burrow"
+case_ "l 6" "lead /src/burrow" "lead /src/burrow" "lead /src/burrow" "lead /src/burrow" "lead /src/burrow" free \
+  "l lead /src/burrow" "a normal /src/web"
 MAX_JOBS=4
 # A waiter finds its own slot in what pick says, or nothing.
 assigned="a 1${NL}/q/2-1-b 3"
