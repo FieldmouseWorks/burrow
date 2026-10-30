@@ -1,0 +1,53 @@
+{
+  "conary": "note v1",
+  "change": "6y1che3ssdm9q46qtqkhrkj1hs",
+  "repo": {
+    "owner": "fieldmouseworks",
+    "name": "burrow"
+  },
+  "pr": 176,
+  "url": "https://github.com/fieldmouseworks/burrow/pull/176",
+  "summary": "autoland: a job still in proj's line is queued for its work, not at it",
+  "task": null,
+  "author": {
+    "kind": "agent",
+    "login": "TusanHomichi",
+    "session": "https://claude.ai/code/session_01BkHcyDhMu74PjVCmyWpXkF"
+  },
+  "landing": {
+    "revision": "6e865134b61205ca14416fccf364ea148ac83f480b48d48a9df594c12afaf69b",
+    "before": "18572cc60c5060b35be26d241024880837586472",
+    "after": "ee344553452ca0e8c7ac37e3ebe8eb26594675cc",
+    "by": {
+      "kind": "status",
+      "login": "fieldmouseworks-steward[bot]"
+    },
+    "at": 1793323168033
+  },
+  "evidence": [
+    {
+      "kind": "ci",
+      "check": "check / commits",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/40980812258/job/123820117103"
+    },
+    {
+      "kind": "review",
+      "check": "codex",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/176#pullrequestreview-5706761820"
+    },
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/40980812258/job/123820116545"
+    },
+    {
+      "kind": "ci",
+      "check": "agents",
+      "result": "pass",
+      "source": "status agents"
+    }
+  ]
+}
