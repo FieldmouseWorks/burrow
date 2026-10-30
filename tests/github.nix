@@ -111,13 +111,27 @@ pkgs.testers.runNixOSTest {
       keyFile = "/run/keys/workers.pem";
       api = "http://127.0.0.1:8080";
     };
-    environment.systemPackages = [ config.burrow.tools.gh config.burrow.tools.gh-token config.burrow.tools.git-lfs config.programs.git.package pkgs.krb5 pkgs.openssl ];
+    environment.systemPackages = [ config.burrow.tools.gh config.burrow.tools.gh-token config.burrow.tools.git-lfs config.programs.git.package pkgs.acl pkgs.krb5 pkgs.openssl ];
     users.users.dev = { isNormalUser = true; };
     users.users.eve = { isNormalUser = true; };
     # carol becomes one of its users with a switch, while her user manager,
     # and so every unit under it, runs from before.
     users.users.carol = { isNormalUser = true; uid = 1002; linger = true; };
     specialisation.carol.configuration.burrow.github.apps.workers.users = [ "dev" "carol" ];
+    # The system from before ACLs, as a switch back to it finds it: a group,
+    # and no unit that knows of ACLs.
+    specialisation.groups.configuration = {
+      users.groups.gh-token-workers.members = [ "dev" "eve" ];
+      systemd.services.gh-token-workers-access.enable = false;
+      systemd.sockets.gh-token-workers = {
+        partOf = pkgs.lib.mkForce [ ];
+        socketConfig = {
+          ExecStartPost = pkgs.lib.mkForce [ ];
+          SocketGroup = "gh-token-workers";
+          SocketMode = pkgs.lib.mkForce "0660";
+        };
+      };
+    };
     # dev's own logins: gh's, and a git helper the way `gh auth setup-git`
     # leaves one, its empty helper clearing the system's.
     environment.etc."dev/hosts.yml".text = ''
@@ -508,22 +522,86 @@ pkgs.testers.runNixOSTest {
           # The wrapper on the PATH is this.
           assert "peter" not in machine.succeed(dev("gh auth status 2>&1 || true"))
 
-      with subtest("one who becomes a user gets tokens at once, in what was running before, and stops with the switch that ends it"):
-          machine.wait_for_unit("user@1002.service")
-          # Asked from carol's user manager, which started before the switch.
-          ask = "systemd-run --machine=carol@.host --user --wait --pipe --quiet -E GH_TOKEN_SOCKET=/run/gh-token/workers.sock ${nodes.machine.burrow.tools.gh-token}/bin/gh-token get sam 2>&1"
-          status, out = machine.execute(ask)
-          assert status != 0 and "Permission denied" in out, (status, out)
-          machine.succeed("/run/current-system/specialisation/carol/bin/switch-to-configuration test")
+      gh_token = "GH_TOKEN_SOCKET=/run/gh-token/workers.sock ${nodes.machine.burrow.tools.gh-token}/bin/gh-token get sam 2>&1"
+      # Asked from carol's user manager, which started before any switch.
+      carol = f"systemd-run --machine=carol@.host --user --wait --pipe --quiet -E {gh_token}"
+      # Asked from a fresh login, with the groups the system says now.
+      eve = "su - eve -c " + shlex.quote(gh_token)
+      socket = "/run/gh-token/workers.sock"
+
+      def switch(to):
+          path = f"/run/booted-system/specialisation/{to}" if to else "/run/booted-system"
+          machine.succeed(f"{path}/bin/switch-to-configuration test")
+
+      def allowed(ask):
           out = machine.succeed(ask)
           assert out.strip().startswith("ghs_"), out
-          machine.succeed("/run/booted-system/bin/switch-to-configuration test")
+
+      def denied(ask):
           status, out = machine.execute(ask)
           assert status != 0 and "Permission denied" in out, (status, out)
+
+      def owned(expected):
+          assert machine.succeed(f"stat -c '%U:%G %a' {socket}").strip() == expected
+          return machine.succeed(f"getfacl -c {socket}")
+
+      with subtest("one who becomes a user gets tokens at once, in what was running before, and stops with the switch that ends it"):
+          machine.wait_for_unit("user@1002.service")
+          denied(carol)
+          inode = machine.succeed(f"stat -c %i {socket}")
+          switch("carol")
+          allowed(carol)
+          switch(None)
+          denied(carol)
+          # A change of users never takes the socket down.
+          assert machine.succeed(f"stat -c %i {socket}") == inode
           # A socket made again, as at boot, is its users' again.
           machine.succeed("systemctl restart gh-token-workers.socket")
-          assert machine.succeed(dev("gh-token get sam")).strip().startswith("ghs_")
-          status, out = machine.execute(ask)
+          allowed(dev("gh-token get sam"))
+          status, out = machine.execute(carol)
           assert status != 0 and "ghs_" not in out, (status, out)
+
+      with subtest("a socket is ready only once its users can connect, whatever else has run"):
+          machine.succeed("systemctl stop gh-token-workers-access.service")
+          machine.succeed("systemctl start gh-token-workers.socket")
+          machine.fail("systemctl is-active gh-token-workers-access.service")
+          assert "user:dev:rw-" in owned("root:root 660")
+          allowed(dev("gh-token get sam"))
+          machine.succeed("systemctl start gh-token-workers-access.service")
+
+      with subtest("a switch back to a system from before ACLs leaves its socket as that system says"):
+          switch("carol")
+          allowed(carol)
+          switch("groups")
+          acl = owned("root:gh-token-workers 660")
+          assert "user:" not in acl.replace("user::", ""), acl
+          denied(carol)
+          allowed(eve)
+          allowed(dev("gh-token get sam"))
+
+      with subtest("the first switch from a system before ACLs sets them, with a change of users in it"):
+          switch("carol")
+          acl = owned("root:root 660")
+          assert "user:carol:rw-" in acl and "group::---" in acl, acl
+          allowed(carol)
+          allowed(dev("gh-token get sam"))
+          denied(eve)
+          # And the same from the system's own users, without carol.
+          switch("groups")
+          switch(None)
+          assert "user:carol" not in owned("root:root 660")
+          denied(carol)
+          denied(eve)
+          allowed(dev("gh-token get sam"))
+
+      with subtest("a switch brings back an access unit that isn't running, with a change of users in it"):
+          machine.succeed("systemctl stop gh-token-workers-access.service")
+          machine.succeed("systemctl start gh-token-workers.socket")
+          machine.fail("systemctl is-active gh-token-workers-access.service")
+          switch("carol")
+          machine.succeed("systemctl is-active gh-token-workers-access.service")
+          allowed(carol)
+          switch(None)
+          denied(carol)
     '';
 }
