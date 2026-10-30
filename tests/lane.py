@@ -6,13 +6,16 @@ every path is documentation, renames and deletions counted from where the PR
 left its base, takes the docs lane: only the checks that read docs, in a job
 of its own named so autoland knows; anything under .github/, a .nix file or
 a flake.lock never is, whatever the patterns say, and patterns that would
-match everything are refused.
+match everything are refused. That job's name carries the base the lane
+judged against, and a caller that lists docs runs again when a PR's base
+changes.
 
-  python3 -I tests/lane.py .github/workflows/flake-check.yml modules/autoland/prs.py
+  python3 -I tests/lane.py .github/workflows/flake-check.yml modules/autoland/prs.py .github/workflows/flake.yml
   nix build .#checks.x86_64-linux.lane
 """
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -56,8 +59,10 @@ assert check["if"] == ("${{ !cancelled() && needs.lane.outputs.gate != 'train' &
                        "needs.lane.outputs.gate != 'docs' }}"), check["if"]
 assert "name" not in check, check.get("name")
 assert docs["if"] == "${{ !cancelled() && needs.lane.outputs.gate == 'docs' }}", docs["if"]
-assert docs["name"] == "docs only", docs["name"]
-assert f'DOCS_LANE = "{docs["name"]}"' in open(sys.argv[2]).read(), "autoland looks for another name"
+# Named for the base it judged against, after what autoland looks for.
+lane_name = re.search(r'^DOCS_LANE = "(.*)"$', open(sys.argv[2]).read(), re.M)
+assert lane_name, "autoland names no docs lane"
+assert docs["name"] == lane_name[1] + "${{ github.event.pull_request.base.ref }}", (docs["name"], lane_name[1])
 # It reads the tree and attests nothing.
 assert docs["permissions"] == {"contents": "read"}, docs["permissions"]
 assert not any("attest" in s.get("uses", "") for s in docs["steps"]), docs["steps"]
@@ -65,6 +70,16 @@ nix_step = docs["steps"][2]
 assert nix_step["if"] == "inputs.install-nix && inputs.docs-checks != ''", nix_step
 build = docs["steps"][3]
 assert build["env"] == {"CHECKS": "${{ inputs.docs-checks }}"}, build["env"]
+
+# A caller that lists docs runs again on a new base, and only on that edit:
+# which paths a PR changes depend on its base.
+caller = yaml.safe_load(open(sys.argv[3]))
+callers = [j for j in caller["jobs"].values()
+           if j.get("uses", "").endswith("/flake-check.yml") and j.get("with", {}).get("docs-paths")]
+assert callers, "the caller lists no docs"
+assert "edited" in caller[True]["pull_request"]["types"], caller[True]
+for j in callers:
+    assert j.get("if") == "github.event.action != 'edited' || github.event.changes.base", j.get("if")
 
 tmp = tempfile.mkdtemp()
 env = {"PATH": os.environ["PATH"], "HOME": tmp, "GIT_CONFIG_NOSYSTEM": "1"}

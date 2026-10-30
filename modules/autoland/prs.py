@@ -44,7 +44,7 @@ query($owner: String!, $name: String!, $cursor: String) {
         commits(last: 1) {
           nodes { commit { oid statusCheckRollup { contexts(first: 100) { pageInfo { hasNextPage } nodes {
             __typename
-            ... on CheckRun { name status conclusion checkSuite { app { slug } } }
+            ... on CheckRun { name status conclusion checkSuite { id app { slug } } }
             ... on StatusContext { context state description creator { login __typename } }
           } } }
           checkSuites(first: 100) { pageInfo { hasNextPage } nodes { conclusion workflowRun { workflow { name } } } } } }
@@ -98,14 +98,19 @@ def open_prs(owner, name):
     return info, prs
 
 
-def ci_state(pr, proofs=()):
+def ci_state(pr, proofs=(), moved=None):
     """green / pending / red / none (no checks at all) over every check on
     the head except ours, and the names of the ones that aren't green. A
     proof (a check a Claude job runs on a machine) that hasn't reported yet
-    is pending: nothing posts it until its job runs. A workflow GitHub
-    couldn't start (a bad file, a pin missing an input) leaves no check run,
-    only its suite: red, or a broken workflow would read as no CI. The merge
-    train's status is its word on the PR, not a check of it, except its
+    is pending: nothing posts it until its job runs, and none is owed on a
+    head CI took in its docs lane for this base (docs_lane; moved is for
+    it). A workflow GitHub couldn't start (a bad file, a pin missing an
+    input) leaves no check run, only its suite: red, or a broken workflow
+    would read as no CI. A run that took the docs lane against another base
+    (the PR retargeted since, an old run run again, another PR's on this
+    head) judged another diff, so none of its check runs is this PR's CI;
+    with no run of that workflow since, CI for this base is pending. The
+    merge train's status is its word on the PR, not a check of it, except its
     failure: CI failed on the head merged alone onto the default branch, which
     is the head's to fix. Only the App's counts, as with ours."""
     nodes = pr["commits"]["nodes"]
@@ -115,7 +120,17 @@ def ci_state(pr, proofs=()):
     if any((x.get("pageInfo") or {}).get("hasNextPage") for x in (contexts, suites)):
         # Only the first 100 come back; one past them could be red.
         return "pending", ["over 100 checks, too many to read"]
+    if docs_lane(pr, moved):
+        proofs = ()
+    base, suite = pr["baseRefName"], lambda c: (c.get("checkSuite") or {}).get("id")
+    elsewhere = {suite(c): c for c in contexts.get("nodes", []) if judged_on(c) not in (None, base)}
+    jobs = {c["name"].rpartition(" / ")[0] for c in contexts.get("nodes", [])
+            if c["__typename"] == "CheckRun" and suite(c) not in elsewhere}
     red, pending, seen = [], [], 0
+    for c in elsewhere.values():
+        if (job := c["name"].rpartition(" / ")[0]) not in jobs:
+            seen += 1
+            pending.append(f"{job} against {base}, not {judged_on(c)}")
     for s in suites.get("nodes", []):
         if s["conclusion"] == "STARTUP_FAILURE":
             seen += 1
@@ -123,6 +138,8 @@ def ci_state(pr, proofs=()):
             red.append(f"{workflow} (failed to start)")
     for c in contexts.get("nodes", []):
         if c["__typename"] == "CheckRun":
+            if suite(c) in elsewhere:
+                continue
             seen += 1
             name = c["name"]
             if c["status"] != "COMPLETED":
@@ -152,29 +169,42 @@ def ci_state(pr, proofs=()):
     return ("red" if red else "pending" if pending else "green"), red or pending
 
 
-# The name burrow's shared CI gives its check run on a head it took in the
-# docs lane (flake-check.yml's docs-paths), after the caller's job's name.
-DOCS_LANE = "docs only"
+# The name burrow's shared CI gives the check run of its docs lane
+# (flake-check.yml's docs-paths), after the caller's job's name, and before
+# the base branch the lane judged the PR's changes against.
+DOCS_LANE = "docs only into "
+
+
+def judged_on(c):
+    """The base a docs lane check run of GitHub Actions' judged its head
+    against; None for any other check. A job GitHub skipped may keep its name
+    unfilled, `${{ … }}` and all, and no branch's name has a space in it."""
+    job = c.get("name", "").rpartition(" / ")[2]
+    base = job[len(DOCS_LANE):]
+    if (c["__typename"] != "CheckRun" or not job.startswith(DOCS_LANE) or not base or any(x.isspace() for x in base)
+            or ((c.get("checkSuite") or {}).get("app") or {}).get("slug") != "github-actions"):
+        return None
+    return base
 
 
 def docs_lane(pr, moved):
-    """Whether CI ran this head in the docs lane: every path it changes is
-    documentation, nothing the repo's flake builds or tests reads, so the
-    repo's proofs, which check what it builds, have nothing of its to check.
-    GitHub Actions passed the docs lane's check run on the head, and the PR
-    changes nothing under .github/: the workflow that judged it, and the
-    docs paths it read, are then the base branch's own, not ones the PR
-    wrote. moved: where its renames and copies started (touches.moved_from),
-    None if that couldn't be read."""
+    """Whether CI ran this head in the docs lane for the PR's base: every
+    path it changes since it left that base is documentation, nothing the
+    repo's flake builds or tests reads, so the repo's proofs, which check
+    what it builds, have nothing of its to check. GitHub Actions passed the
+    docs lane's check run for this base on the head, and the PR changes
+    nothing under .github/: the workflow that judged it, and the docs paths
+    it read, are then the base branch's own, not ones the PR wrote. A docs
+    lane for another base judged another diff and counts for nothing here.
+    moved: where its renames and copies started (touches.moved_from), None
+    if that couldn't be read."""
     if moved is None or pr["changedFiles"] > len(pr["files"]["nodes"]):
         return False
     if any(p == ".github" or p.startswith(".github/") for p in [f["path"] for f in pr["files"]["nodes"]] + list(moved)):
         return False
     nodes = pr["commits"]["nodes"]
     contexts = ((nodes[0]["commit"].get("statusCheckRollup") or {}).get("contexts") or {}).get("nodes", []) if nodes else []
-    return any(c["__typename"] == "CheckRun" and c["name"].rpartition(" / ")[2] == DOCS_LANE
-               and c["status"] == "COMPLETED" and c["conclusion"] == "SUCCESS"
-               and ((c.get("checkSuite") or {}).get("app") or {}).get("slug") == "github-actions"
+    return any(judged_on(c) == pr["baseRefName"] and c["status"] == "COMPLETED" and c["conclusion"] == "SUCCESS"
                for c in contexts)
 
 

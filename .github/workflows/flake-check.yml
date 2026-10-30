@@ -59,10 +59,13 @@ on:
           ("!archive/**"). A PR that changes only these, renames and
           deletions included, takes the docs lane: its run builds only
           docs-checks and attests nothing, its check run is named `docs
-          only`, and autoland runs none of the repo's proofs on it. Nothing
-          under .github/, no .nix file and no flake.lock is ever
-          documentation here, whatever this says: those define the gate
-          itself. Empty, every PR gets the whole gate.
+          only into BASE`, and autoland runs none of the repo's proofs on
+          it. Nothing under .github/, no .nix file and no flake.lock is
+          ever documentation here, whatever this says: those define the
+          gate itself. Which paths a PR changes depends on its base, so a
+          caller that sets this runs on pull_request's `edited` too, for an
+          edit that changes the base, and a PR retargeted gets its lane
+          again. Empty, every PR gets the whole gate.
         type: string
         default: ''
       docs-checks:
@@ -441,11 +444,14 @@ jobs:
   # by name, on the head merged with its base as the whole gate checks it,
   # and nothing else is evaluated. It attests nothing: it ran no gate on the
   # tree. Its check run's name is how autoland knows the head took it, and
-  # runs none of the repo's proofs on it (its prs.py, DOCS_LANE).
+  # for which base: the lane judged the changes since the PR left that base,
+  # so on a PR to any other (retargeted, or another PR on the same head) it
+  # counts for nothing: autoland skips the repo's proofs on a head only when
+  # it took this lane for the PR's own base (its prs.py, DOCS_LANE).
   docs:
     needs: lane
     if: ${{ !cancelled() && needs.lane.outputs.gate == 'docs' }}
-    name: docs only
+    name: docs only into ${{ github.event.pull_request.base.ref }}
     runs-on: ${{ inputs.runner }}
     permissions:
       contents: read

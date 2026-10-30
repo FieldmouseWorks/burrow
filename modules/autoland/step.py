@@ -592,8 +592,7 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
         save(key, st)
         return
 
-    docs = docs_lane(pr, moved := moved_from(repo, pr, st))  # no proof has anything of a docs head's to check
-    ci, ci_names = ci_state(pr, proofs := {} if docs else rc["proofJobs"])
+    ci, ci_names = ci_state(pr, rc["proofJobs"], moved := moved_from(repo, pr, st))
     # No checks ran at all ("none"). Unless the repo is set not to need any
     # (docs only), that's not green: nothing has tested it, so a judge job
     # runs the build and tests itself. One the train lands, the train's CI
@@ -610,7 +609,7 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
     dep = dep_kind(pr)
     gate = one_way(pr, rc, moved)
     renovate = pr["headRefName"].startswith("renovate/")
-    proof_only = ci == "pending" and bool(ci_names) and all(c in proofs for c in ci_names)
+    proof_only = ci == "pending" and bool(ci_names) and all(c in rc["proofJobs"] for c in ci_names)
     # A minor dependency PR a Claude job fixed carries Claude's code, which no
     # reviewer has read (and Renovate won't merge); a bot's PR that changes a
     # workflow beyond repinning its actions changes the gate. Either goes
@@ -995,7 +994,7 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
                else f"it went past the review-round limit ({rounds} rounds with findings)",
                PAST_LIMIT if capped else REVIEWED)
     else:
-        land_now(f"{' and '.join(V.NAMES[r] for r in live)} found nothing on this commit, every thread is resolved, CI is green{' (docs only)' * docs}")
+        land_now(f"{' and '.join(V.NAMES[r] for r in live)} found nothing on this commit, every thread is resolved, CI is green{' (docs only)' * docs_lane(pr, moved)}")
 
     open_a_day(our_status(pr)[1] or "unsettled")
     save(key, st)
