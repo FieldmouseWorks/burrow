@@ -76,15 +76,17 @@ def settle_repo(r, known):
     # pinned to the one it was.
     due = C.NOW - st.get("settings", 0) >= 86400 or st.get("app") != CFG["app"]["id"]
     # The labels the steward and its jobs put on PRs: without them a hold
-    # can't be set and a judge can't hand a PR to the owner. Made
-    # again with the daily settings too, in case one was deleted.
-    want = [CFG["labels"]["hold"], CFG["labels"]["owner"]]
+    # can't be set, a judge can't hand a PR to the owner and no PR can go
+    # first in its proof line. Made again with the daily settings too, in
+    # case one was deleted.
+    want = [CFG["labels"]["hold"], CFG["labels"]["owner"], CFG["labels"]["first"]]
     if st.get("labels") != want or due:
         about = ("The steward leaves this PR alone",
-                 f"Waits for {CFG['owner']}; take the label off to let the steward carry on")
+                 f"Waits for {CFG['owner']}; take the label off to let the steward carry on",
+                 "Goes ahead of the PRs without it in the line for proofs that take the machine")
         made = [C.write("label", "create", name, "-R", repo, "--force", "--color", color,
                         "--description", text, check=False) is not None
-                for name, color, text in zip(want, ("fbca04", "b60205"), about)]
+                for name, color, text in zip(want, ("fbca04", "b60205", "0e8a16"), about)]
         if all(made):
             log(f"{repo}: labels {', '.join(want)}")
             st["labels"] = want
@@ -431,6 +433,27 @@ def delete_branch(repo, name, sha):
             log(f"{repo}: kept {name}: {p.stderr.strip()[:200]}")
 
 
+# Unmerged, with no PR and no commit for this long: given up on. Its commits
+# are kept under ARCHIVE and the branch deleted.
+STALE_DAYS = 14
+ARCHIVE = "refs/archive"
+
+
+def archive_branch(repo, name, sha):
+    """Keep the branch's commits at refs/archive/NAME/SHA, a ref GitHub keeps
+    but lists with neither branches nor tags; True once they're kept (by
+    this call or an earlier one), and only then may the branch go."""
+    ref = f"{ARCHIVE}/{name}/{sha}"
+    if DRY:
+        log(f"  would: keep {repo} {name} at {ref}")
+        return True
+    if C.write("api", f"repos/{repo}/git/refs", "-f", f"ref={ref}", "-f", f"sha={sha}", check=False) is not None:
+        return True
+    # Already there: an earlier sweep kept it and then couldn't delete.
+    return C.gh("api", f"repos/{repo}/git/ref/{urllib.parse.quote(ref.removeprefix('refs/'))}",
+                "--jq", f'.object.sha == "{sha}"', check=False) is True
+
+
 def closed_at(repo, name, sha):
     """The closed PR whose head was this branch at `sha`, if there is one.
     GitHub keeps that PR's commits (refs/pull/N/head) and offers to restore
@@ -446,17 +469,20 @@ def closed_at(repo, name, sha):
     return int(first) if first.isdigit() else None
 
 
+UNKEPT = f"Stale branches it couldn't archive (unmerged, no PR, {STALE_DAYS}+ days)"
+
+
 def sweep_branches(r, in_use, digest, sweep=True):
-    """Delete the merged branches and the closed PRs' branches, and list the
-    stale ones, once a day and only when `sweep`; the stale ones the last
-    sweep found are listed every time."""
+    """Delete the merged branches and the closed PRs' branches, and archive
+    and delete the stale ones, once a day and only when `sweep`; the stale
+    ones the last sweep couldn't archive are listed every time."""
     repo = r["repo"]
     st = load(f"repo-{repo.replace('/', '_')}.json", {})
     if not sweep or C.NOW - st.get("branches", 0) < 86400:
-        for b in st.get("stale", []):
-            digest.append(("Stale branches (unmerged, no PR, 30+ days)", f"{repo}: `{b}`", ""))
+        for b in st.get("unkept", []):
+            digest.append((UNKEPT, f"{repo}: `{b}`", ""))
         return
-    stale = []
+    unkept = []
     # The machine's globs, plus the repo's own (evidence branches it cites).
     keep = CFG["keepBranches"] + repo_cfg(repo).get("keepBranches", [])
     names = (C.gh("api", "--paginate", f"repos/{repo}/branches?per_page=100", "--jq",
@@ -485,22 +511,28 @@ def sweep_branches(r, in_use, digest, sweep=True):
         if cmp["ahead"] == 0:
             log(f"{repo}: deleting {name} at {sha[:7]} (already in {r['default']})")
             delete_branch(repo, name, sha)
-        elif cmp.get("date") and C.NOW - ts(cmp["date"]) > 30 * 86400:
-            stale.append(name)
-    st.update(branches=C.NOW, stale=stale)
+        elif cmp.get("date") and C.NOW - ts(cmp["date"]) > STALE_DAYS * 86400:
+            # Nothing is lost: one ref made from the archived one restores it.
+            if archive_branch(repo, name, sha):
+                log(f"{repo}: deleting {name} at {sha[:7]} (unmerged, no PR, {STALE_DAYS}+ days; "
+                    f"kept at {ARCHIVE}/{name}/{sha})")
+                delete_branch(repo, name, sha)
+            else:
+                unkept.append(name)
+    st.pop("stale", None)  # the list it kept before it archived, which nothing reads now
+    st.update(branches=C.NOW, unkept=unkept)
     save(f"repo-{repo.replace('/', '_')}.json", st)
-    for b in stale:
-        digest.append(("Stale branches (unmerged, no PR, 30+ days)", f"{repo}: `{b}`", ""))
+    for b in unkept:
+        digest.append((UNKEPT, f"{repo}: `{b}`", ""))
 
 
 # What only the owner can settle: their call (a label, a judge's or an
-# outside contribution's), a login, a branch nobody has decided on. The rest
-# of the digest is the pipeline's own trouble (a job that keeps failing, a
-# review that won't run, a merge GitHub won't take, a PR stuck a day), which
-# a Claude job on this machine takes when proj's inbox is on.
+# outside contribution's), a login. The rest of the digest is the
+# pipeline's own trouble (a job that keeps failing, a review that won't run,
+# a merge GitHub won't take, a PR stuck a day, a branch it couldn't
+# archive), which a Claude job on this machine takes when proj's inbox is on.
 OWNERS = ("Judged yours to decide", "Outside contributions", "Too much to read", "A reviewer is out of service",
-          "No reviewer can review it", "Stale branches (unmerged, no PR, 30+ days)",
-          "Flaky tests someone else quarantined")
+          "No reviewer can review it", "Flaky tests someone else quarantined")
 
 
 def publish(digest):

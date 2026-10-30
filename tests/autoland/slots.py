@@ -1,14 +1,15 @@
 """proofSlots: a repo's proofs that take the whole machine run a few at a
-time, oldest PR first, the rest waiting their turn rather than their
-timeout; a job's end kicks the pass that starts the next. A slot is held by
-a job until it ends, whatever its PR does meanwhile, and a turn in the line
-only by a PR waiting in this same pass."""
+time, the PRs labelled first ahead of the rest and the oldest first within
+each, the rest waiting their turn rather than their timeout; a job's end
+kicks the pass that starts the next. A slot is held by a job until it ends,
+whatever its PR does meanwhile, and a turn in the line only by a PR waiting
+in this same pass."""
 
 import itertools
 import json
 
 import proofs as P
-from harness import C, CI_GREEN, JOBS, S, STATES, clean, fresh_pr_state, pr_state, run, tmp
+from harness import C, CI_GREEN, JOBS, S, STATES, clean, fresh_pr_state, info, mkpr, pr_state, run, tmp
 
 kept = C.job
 ids = itertools.count(1)
@@ -109,6 +110,34 @@ for kw, obsolete in (({"draft": True}, False), ({"labels": (hold,)}, False), ({"
     status = line(3, 800)
     assert RUNNING in status and len(JOBS) == 1, (kw, status, JOBS)
 
+# Labelled first: ahead of every PR without the label, whatever their
+# numbers, and the oldest first among the labelled.
+first = S.CFG["labels"]["first"]
+fresh_pr_state()
+P.begin("sam/r", {1, 2, 3, 4}, {3, 4})
+assert RUNNING in line(3, labels=(first,)) and len(JOBS) == 1, JOBS
+assert ahead(1) in line(4, labels=(first,)) and JOBS == []
+assert ahead(2) in line(1) and JOBS == []
+assert ahead(3) in line(2) and JOBS == []
+# Once its job ends, the next labelled one starts, ahead of the older ones.
+ends(3)
+P.begin("sam/r", {1, 2, 4}, {4})
+assert RUNNING in line(4, 800, labels=(first,)) and len(JOBS) == 1, JOBS
+assert ahead(1) in line(1, 800) and ahead(2) in line(2, 800) and JOBS == []
+# The pass takes a repo's PRs in that order, so a free slot goes to the
+# first in line.
+order = []
+kept_fns = (S.R.discover, S.R.settle_repo, S.R.publish, S.open_prs, S.R.unhook_gone, S.R.hook_projects, S.step.handle)
+S.R.discover = lambda: [{"repo": "sam/r"}]
+S.R.settle_repo = lambda r, known: False
+S.R.publish = S.R.unhook_gone = lambda *a: None
+S.R.hook_projects = lambda repos: []
+S.open_prs = lambda owner, name: (info, [mkpr(number=k, labels=lb) for k, lb in ((2, ()), (9, (first,)), (1, ()), (7, (first,)))])
+S.step.handle = lambda repo, pr, *a: order.append(pr["number"])
+S.main()
+S.R.discover, S.R.settle_repo, S.R.publish, S.open_prs, S.R.unhook_gone, S.R.hook_projects, S.step.handle = kept_fns
+assert order == [7, 9, 1, 2], order
+
 # Unset, no limit.
 fresh_pr_state()
 del S.CFG["repos"]["sam/r"]["proofSlots"]
@@ -117,6 +146,7 @@ assert RUNNING in line(1) and RUNNING in line(2), JOBS
 del S.CFG["repos"]["sam/r"]
 C.job = kept
 P.OPEN.clear()
+P.FIRST.clear()
 P.WAITING.clear()
 STATES.clear()
 fresh_pr_state()

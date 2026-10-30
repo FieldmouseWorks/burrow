@@ -18,7 +18,9 @@
 #   builds sccache won't take, the user's own SCCACHE_ settings, the daemon
 #   stopped, and a socket with no daemon behind it, which mustn't start a
 #   stray server either;
-# - nobody else reaches a user's cache, and the daemon listens on no port.
+# - nobody else reaches a user's cache, and the daemon listens on no port;
+# - a runner that outlives a switch builds with the new system's wrapper, and
+#   still builds after a switch that turns the cache off.
 #
 #   nix build .#checks.x86_64-linux.rust-cache -L
 { self, pkgs, inputs }:
@@ -120,6 +122,10 @@ pkgs.testers.runNixOSTest {
       };
     };
     virtualisation.memorySize = 2048;
+    # The same with the cache moved, which changes the wrapper, and with it
+    # off. Neither changes the runner's unit, so a switch leaves it running.
+    specialisation.moved.configuration.burrow.rustCache.dir = "/var/cache/sccache-moved";
+    specialisation.off.configuration.burrow.rustCache.enable = pkgs.lib.mkForce false;
   };
 
   testScript = { nodes, ... }: ''
@@ -155,15 +161,15 @@ pkgs.testers.runNixOSTest {
             f" bash -c {shlex.quote(cmd)} 2>&1"
         )
 
-    def stats(user):
+    def stats(user, root="/var/cache/sccache"):
         out = machine.succeed(
-            f"runuser -u {user} -- env SCCACHE_SERVER_UDS=/var/cache/sccache/{user}/sccache.sock"
+            f"runuser -u {user} -- env SCCACHE_SERVER_UDS={root}/{user}/sccache.sock"
             f" {sccache} --show-stats --stats-format json"
         )
         return json.loads(out)["stats"]
 
-    def hits(user):
-        return stats(user)["cache_hits"]["counts"].get("Rust", 0)
+    def hits(user, root="/var/cache/sccache"):
+        return stats(user, root)["cache_hits"]["counts"].get("Rust", 0)
 
     def ok(result, what):
         status, out = result
@@ -302,5 +308,24 @@ pkgs.testers.runNixOSTest {
         ok(run(f"cd a && {build}", "other"), "a build with no cache")
         ok(run(f"cd a && rm -rf target && USER=dev {build}", "other"), "a build naming someone else's cache")
         assert hits("dev") == before, "other's build used dev's cache"
+
+    with subtest("a runner that outlives a switch builds with the new system's wrapper"):
+        base = "${nodes.machine.system.build.toplevel}"
+        pid = machine.succeed("systemctl show -P MainPID runner.service").strip()
+        machine.succeed(f"{base}/specialisation/moved/bin/switch-to-configuration test")
+        assert machine.succeed("systemctl show -P MainPID runner.service").strip() == pid, "the switch restarted the runner"
+        # With the old cache cleared away, only the new wrapper finds a daemon.
+        machine.succeed("rm -rf /var/cache/sccache")
+        machine.wait_until_succeeds("test -S /var/cache/sccache-moved/ci/sccache.sock")
+        status, out = job(f"cd x && rm -rf target && {build} && rm -rf target && {build}")
+        assert status == 0, out
+        assert hits("ci", "/var/cache/sccache-moved") > 0, "the runner built with the wrapper it started with"
+
+    with subtest("a runner that outlives a switch turning the cache off still builds"):
+        machine.succeed(f"{base}/specialisation/off/bin/switch-to-configuration test")
+        assert machine.succeed("systemctl show -P MainPID runner.service").strip() == pid, "the switch restarted the runner"
+        machine.fail("systemctl is-active rust-cache-ci.service")
+        status, out = job(f"cd x && rm -rf target && {build}")
+        assert status == 0, f"the runner's build failed with the cache off: {out}"
   '';
 }

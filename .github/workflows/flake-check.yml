@@ -50,6 +50,31 @@ jobs:
           # The check only reads the tree, and on a self-hosted runner a token
           # left in .git/config outlives the job.
           persist-credentials: false
+          # A PR's head, with every branch's history (a depth of 0 fetches
+          # them all), for the merge step below.
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: ${{ github.event_name == 'pull_request' && '0' || '1' }}
+      # A PR is checked merged with its base branch as that branch is now, when
+      # the job starts. GitHub's merge commit for the run (github.sha) is the
+      # base as it was when the event fired, which a run that waited in a
+      # runner's queue, or a re-run, would test long after its base moved on.
+      - id: merge
+        if: github.event_name == 'pull_request'
+        shell: bash
+        env:
+          BASE: ${{ github.event.pull_request.base.ref }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          tip=$(git rev-parse --verify "refs/remotes/origin/$BASE^{commit}")
+          echo "checking $HEAD_SHA merged with $BASE at $tip"
+          git checkout -q --detach "$tip"
+          # Base first, then the head, as GitHub orders its merge's parents.
+          if ! git -c user.name=flake-check -c user.email=flake-check@localhost -c commit.gpgsign=false \
+              merge -q --no-ff --no-edit "$HEAD_SHA"; then
+            git merge --abort || true
+            echo "::error title=Conflicts with its base::$HEAD_SHA no longer merges cleanly with $BASE at $tip, so nothing was checked. Merge $BASE into the branch and push."
+            exit 1
+          fi
       - if: inputs.install-nix
         uses: cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b # v31.11.3
       - id: gate
@@ -202,11 +227,10 @@ jobs:
           dir="$RUNNER_TEMP/conary"
           mkdir -p "$dir"
           if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
-            # The checked commit is GitHub's merge of the head onto the base
-            # branch; its parents name both. The raw commit, since a shallow
-            # clone hides a commit's parents from git log.
+            # The checked commit is the merge step's merge of the head onto
+            # the base branch; its parents name both.
             { read -r tip; read -r head; } < <(git cat-file commit HEAD | sed -n 's/^parent //p')
-            [ "$head" = "$PR_HEAD" ] || { echo "checked $GITHUB_SHA isn't a merge of $PR_HEAD"; exit 1; }
+            [ "$head" = "$PR_HEAD" ] || { echo "checked $(git rev-parse HEAD) isn't a merge of $PR_HEAD"; exit 1; }
             base=$(gh api "repos/$GITHUB_REPOSITORY/compare/$tip...$head" --jq .merge_base_commit.sha)
             subject="$dir/conary-revision"
             printf 'conary revision v1\n%s\n%s\n' "$base" "$head" > "$subject"

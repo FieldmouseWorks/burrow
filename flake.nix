@@ -140,8 +140,13 @@
             modules = [{ burrow.cpu.heavy = { slots = 1; grace = 3; dir = "/build/heavy"; }; }];
           }).config.burrow.tools.heavy;
           weight = self.nixosConfigurations.example.config.systemd.slices.ci.sliceConfig.CPUWeight;
+          # A gate slice with a dash in its name would be nested: refused.
+          nested = (builtins.tryEval (builtins.deepSeq
+            (self.nixosConfigurations.example.extendModules { modules = [{ burrow.cpu.gates.slices = [ "nix-builds" ]; }]; }).config.burrow.cpu.gates.slices
+            true)).success;
         in pkgs.runCommand "cpu-check" { } ''
           [ ${toString weight} = 400 ] || { echo "ci.slice weight ${toString weight}"; exit 1; }
+          ${pkgs.lib.optionalString nested "echo 'a nested gate slice (nix-builds) was taken'; exit 1"}
           mkdir -p /build/heavy && : >/build/heavy/slot1 && chmod 0444 /build/heavy/slot1
           h=${heavy}/bin/heavy
           threads=$(nproc)
@@ -525,10 +530,19 @@
           python3 -I ${./tests/gate.py} ${./.github/workflows/flake-check.yml}
           touch $out
         '';
+        # The shared CI's merge step (flake-check.yml), its own script on
+        # real repos: a PR is checked merged with its base as the base is when
+        # the job starts, and one that no longer merges cleanly fails.
+        pr-base = pkgs.runCommand "pr-base-check" { nativeBuildInputs = [ (pkgs.python3.withPackages (p: [ p.pyyaml ])) pkgs.git ]; } ''
+          python3 -I ${./tests/pr-base.py} ${./.github/workflows/flake-check.yml}
+          touch $out
+        '';
         # Stale Remote Control servers catch up once idle, with a stand-in for Claude.
         remote-control = import ./tests/remote-control.nix { inherit self pkgs; };
         # A session past its server's memory cap dies alone, with a stand-in for Claude.
         remote-control-memory = import ./tests/remote-control-memory.nix { inherit self pkgs; };
+        # systemd-oomd leaves a Remote Control server whole, with a stand-in for Claude.
+        remote-control-oomd = import ./tests/remote-control-oomd.nix { inherit self pkgs; };
         # The signed-in browser: Claude driving it, its logins kept, its ports
         # and profile kept from everyone else.
         browser = import ./tests/browser.nix { inherit self pkgs; };

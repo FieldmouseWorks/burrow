@@ -1,6 +1,7 @@
 """A repo's proofSlots: how many of its open PRs may have a proof job queued
 or running at once, for proofs that take the whole machine (the rest would
-only wait out their timeout). The others wait their turn, oldest PR first,
+only wait out their timeout). The others wait their turn, the PRs labelled
+`first` (labels.first) ahead of the rest and the oldest first within each,
 and the end of a job's turn kicks the repo's pass, which starts the next.
 
 What a slot is held by is a build: a running proof job with store paths
@@ -15,8 +16,8 @@ already running.
 A job is still a job whatever head it was started on: a PR pushed again,
 or marked a draft, while its job runs still has what it holds. A turn in
 the line is only this pass's: a PR is ahead while it's waiting in the same
-pass (they go in number order), so one held, drafted or done since holds
-nobody up."""
+pass (they go in their line's order, place), so one held, drafted or
+done since holds nobody up."""
 
 import os
 import re
@@ -29,15 +30,25 @@ import reviewers as V
 from common import CFG, STATE, load, log
 
 OPEN = {}  # the open PRs of each repo this pass reads (begin)
+FIRST = {}  # those of them labelled to go first
 WAITING = {}  # the PRs of each repo this pass found waiting their turn
 FREE = "nothing new to build"  # ahead's answer for a proof that skips the line
 EVAL_TIMEOUT = 300  # seconds, its inputs fetched included
 
 
-def begin(repo, numbers):
-    """A pass over the repo's open PRs starts: only theirs count."""
+def begin(repo, numbers, first=()):
+    """A pass over the repo's open PRs starts: only theirs count, and those
+    in first go ahead of the rest."""
     OPEN[repo] = set(numbers)
+    FIRST[repo] = set(first)
     WAITING[repo] = set()
+
+
+def place(repo, n):
+    """Where PR n stands in its repo's line this pass: one labelled first
+    ahead of every one that isn't, and the oldest first within each. The
+    pass takes the PRs in this order, so a slot goes to the first in line."""
+    return n not in FIRST.get(repo, ()), n
 
 
 def jobs(st):
@@ -111,10 +122,10 @@ def unbuilt(paths):
 
 def ahead(repo, n, st, slots, outs=None):
     """How many proofs are ahead of PR n's: the builds every open PR's live
-    jobs, its own included, are running, and the lower-numbered PRs waiting
-    their turn this pass. None when its job may start now; FREE when it may
-    whatever the line, since all it builds (outs, None when unknown) is
-    built or being built already."""
+    jobs, its own included, are running, and the PRs ahead of it in line
+    waiting their turn this pass. None when its job may start now; FREE
+    when it may whatever the line, since all it builds (outs, None when
+    unknown) is built or being built already."""
     def held(state, js):
         return [(rec.get("at", 0), j, rec.get("paths")) for j in js
                 for rec in [state.get("proofPaths", {}).get(j) or {}]]
@@ -135,7 +146,7 @@ def ahead(repo, n, st, slots, outs=None):
         rest = todo.intersection(ps) if ps is not None else None
         builds += rest is None or not rest <= building
         building |= rest or set()
-    waiting = sum(other < n for other in WAITING.get(repo, ()))
+    waiting = sum(place(repo, other) < place(repo, n) for other in WAITING.get(repo, ()))
     if builds + waiting < slots:
         return None
     if outs is not None and todo.intersection(outs) <= building:
