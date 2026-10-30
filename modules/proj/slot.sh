@@ -23,13 +23,10 @@ spare() {
 # first or normal, as it was started; its job's class (place, in pick.sh)
 # is asked again every pass, and its place in line, its admission and its
 # slot's N.who all go by that one answer. A job run --unstick waits in no
-# line at all (unstick_slot).
+# line at all (unstick_slot), and one made so while it waits (proj unstick)
+# leaves the line at its next look.
 take_slot() {
   local id=$1 n=$2 class=$3 me since seen got f fid pid i fd lk busy new LC_ALL=C
-  if [ -e "$jobs/$id/unstick" ]; then
-    unstick_slot "$id" "$n"
-    return
-  fi
   mkdir -p "$jobs/.queue" "$jobs/.slots"
   since=$(date +%s)
   case $class in first) me=1 ;; *) me=2 ;; esac
@@ -37,6 +34,12 @@ take_slot() {
   trap 'rm -f "$me" "${me%/*}/.${me##*/}.new"' EXIT
   trap 'exit 143' TERM INT
   while :; do
+    if [ -e "$jobs/$id/unstick" ]; then
+      rm -f "$me"
+      trap - EXIT TERM INT
+      unstick_slot "$id" "$n"
+      return
+    fi
     # Waited long enough: among the --first ones now, by when it came.
     if [[ ${me##*/} == 2-* ]] && [ $(($(date +%s) - since)) -ge "$MAX_WAIT" ]; then
       mv -f "$me" "${me%/*}/1-${me##*/2-}" 2>/dev/null || true

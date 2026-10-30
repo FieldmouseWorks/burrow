@@ -219,25 +219,13 @@ for repo in "${!project[@]}"; do
       post "$repo" "$n" "${body:0:60000}" || { miss "$repo"; continue 2; }
       echo "$k" >"$d/answered"
     done
-    # Labelled to wait in no line while its first turn still waits in one:
-    # started over as --unstick, from the issue as it stands, which loses
-    # nothing, since that turn never ran, and the issue told which job has it
-    # now. A job that has run keeps the slots it was started for, as every
-    # job does.
-    if [ "$st" = queued ] && [ ! -e "$JOBS/$id/unstick" ] && [ ! -s "$JOBS/$id/session" ]; then
-      it=$(jq -c --argjson n "$n" '.[] | select(.number == $n)' <<<"$open")
-      lane "$it"
-      if [ ${#lane[@]} -gt 0 ]; then
-        all=$(gh api "repos/$repo/issues/$n/comments" --paginate --slurp | jq 'add // []') || { miss "$repo"; continue; }
-        proj stop "$id" || { retry "$repo"; continue; }
-        acts_as "$(jq -r .user.login <<<"$it")"
-        id=$(proj run "$(priority "$repo")" "${lane[@]}" "${vm[@]}" "${as[@]}" --kick "proj-inbox/$repo" --link "$(jq -r '.html_url // ""' <<<"$it")" "$p" "$(task "$repo" "$it" "$all")") || { retry "$repo"; continue; }
-        echo "$id" >"$d/job"
-        echo 0 >"$d/answered"
-        jq -r 'map(.id) | max // 0' <<<"$all" >"$d/seen"
-        touch "$d/unannounced"
-        continue
-      fi
+    # Labelled to wait in no line after its job started: the job is made one
+    # that doesn't (proj unstick), whatever it's doing. A turn of it still in
+    # line leaves it at its next look, every later turn takes that slot, and
+    # one running carries on.
+    if [ ! -e "$JOBS/$id/unstick" ]; then
+      lane "$(jq -c --argjson n "$n" '.[] | select(.number == $n)' <<<"$open")"
+      [ ${#lane[@]} -eq 0 ] || proj unstick "$id" || { retry "$repo"; continue; }
     fi
     case $st in queued | running) continue ;; esac
 

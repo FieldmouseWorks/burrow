@@ -37,6 +37,9 @@
 #                               the full stream); fails when there's none
 #   proj state ID               queued, running, done, error or failed
 #   proj stop ID                end a job: its running turn and its waits
+#   proj unstick ID             make a job one run --unstick from now on: a
+#                               turn of it waiting in line leaves it at its
+#                               next look, one running carries on
 #   proj list                   projects you can run jobs in
 #   proj await TARGET...        from inside a job: resume it once a PR or
 #                               issue (URL or OWNER/REPO#N) changes
@@ -609,6 +612,12 @@ case "${1:-status}" in
       echo "proj: couldn't stop $id" >&2
       exit "$rc"
     fi
+    rewatch "$id"
+    ;;
+  unstick)
+    id=${2:?usage: proj unstick ID}
+    [ -d "$jobs/$id" ] || { echo "no job $id" >&2; exit 1; }
+    : >"$jobs/$id/unstick"
     rewatch "$id"
     ;;
   list) find "$src" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort ;;

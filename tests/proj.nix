@@ -6,7 +6,8 @@
 # ahead of the others, while one anywhere else goes as --first and says so
 # (pick.sh's own check has how origins are told apart), that a job run
 # --unstick takes a slot of its own, every turn of it, while every other one
-# is held and turns wait in line, and waits only for another --unstick turn,
+# is held and turns wait in line, and waits only for another --unstick turn
+# (one made so later, by proj unstick, too: waiting, or at its next turn),
 # that a job whose turn has ended frees its slot, that one stopped after
 # its answer with work in the background has the rest of that run stopped,
 # hears so once and answers again (the turn ending as its last run did, its
@@ -587,6 +588,8 @@ pkgs.testers.runNixOSTest {
         proj(f"stop {b}")
 
     with subtest("an --unstick job takes its own slot while every other is held and others wait, every turn of it, one at a time"):
+        x = proj('run web "sleep 1"')
+        machine.wait_until_succeeds(f"su - dev -c 'proj state {x}' | grep -x done", timeout=120)
         a = proj('run web "sleep 600"')
         b = proj('run web "sleep 600"')
         q = proj('run --pipeline web "sleep 600"')
@@ -602,10 +605,20 @@ pkgs.testers.runNixOSTest {
         w = waits(lambda w: w.get(v, {}).get("unstick") is True)
         assert w[v]["line"] and w[v]["phase"] == "turn 1 is waiting for the --unstick slot, which another --unstick turn holds", w[v]
         assert w[c]["unstick"] is False and w[u]["unstick"] is True, (w[c], w[u])
+        # Made one later (proj unstick): a turn waiting in line leaves it, and
+        # a job that has run takes that slot from its next turn.
+        p = proj('run web "sleep 1"')
         time.sleep(3)
-        assert (state(c), state(v)) == ("queued", "queued"), (state(c), state(v))
+        assert state(p) == "queued", state(p)
+        proj(f"unstick {p}")
+        proj(f"unstick {x}")
+        proj(f'reply {x} "sleep 1"')
+        waits(lambda w: all(w.get(j, {}).get("unstick") is True for j in (p, x)))
+        time.sleep(3)
+        assert [state(j) for j in (c, v, p, x)] == ["queued"] * 4, [state(j) for j in (c, v, p, x)]
         proj(f"stop {u}")
-        machine.wait_until_succeeds(f"su - dev -c 'proj state {v}' | grep -x done", timeout=120)
+        for j in (v, p, x):
+            machine.wait_until_succeeds(f"su - dev -c 'proj state {j}' | grep -x done", timeout=120)
         assert state(c) == "queued", state(c)
         for j in (a, b, q):
             proj(f"stop {j}")
