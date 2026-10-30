@@ -21,6 +21,11 @@ they say something more specific.
   apart.
 - A new check comes with proof that it fails on the bug it's for.
 - Touching a file over about 1,000 lines? Split it in that change.
+- Rust by default. New code that's meant to last starts in Rust, unless its
+  platform picks the language. New Python says why it isn't Rust: a throwaway
+  script, or a tool still being tuned, ported once it settles. Port existing
+  Python whenever Rust buys anything, system and pipeline code first, and let
+  the port redraw where the code lives and what owns it rather than copy it.
 - The code is the memory. When something goes wrong, make the code, a type, a
   test or a check stop it happening again; a new rule in AGENTS.md is the last
   resort. Say in the PR which one you did.
@@ -52,6 +57,11 @@ project calls). It builds the example machine, evaluates each module on its
 own, runs `lib/project.nix`'s gates on the test projects in `tests/house/`, and
 boots the agent sandboxes (`checks.agents`, nested KVM: it needs `/dev/kvm`).
 One check on its own: `nix build .#checks.x86_64-linux.agents -L`.
+
+The programs burrow's modules run are Rust, in one Cargo workspace,
+`crates/`: the flake installs them as `packages.SYSTEM.burrow` and gates them
+as `checks.crates-*`, and `cargo test` there runs the same tests. gh-token and
+the flaky tool still have workspaces of their own until #164.
 
 burrow is generic. Anything about one machine (its hostname, users, owner,
 repos, addresses) is an option a machine's flake sets, never a value in a
