@@ -21,13 +21,19 @@ git clone -q "$tmp/origin.git" "$tmp/work"
 git clone -q "$tmp/origin.git" "$tmp/other"
 
 # Pushes to refuse: before each of the next $moves pushes, something lands.
-moves=0 landed=0
+moves=0
 git_() {
   if [ "$1" = push ] && [ "$moves" -gt 0 ]; then
-    moves=$((moves - 1)) landed=$((landed + 1))
-    land "module.nix" "landed-$landed"
+    moves=$((moves - 1))
+    land "module.nix" "landed-$(git -C "$tmp/other" rev-parse HEAD)"
   fi
   git -C "$tmp/work" "$@"
+}
+# The system's build: which trees it ran on, and whether it fails.
+unbuildable=
+build() {
+  git -C "$tmp/work" rev-parse 'HEAD^{tree}' >>"$tmp/built"
+  [ -n "$unbuildable" ] || echo /nix/store/system
 }
 # shellcheck source=/dev/null
 . "$1"
@@ -62,8 +68,18 @@ bump one-b
 moves=1
 push_main >/dev/null 2>&1 || fail "a push after main moved failed"
 [ "$(on_main flake.lock | head -1)" = one-b ] || fail "the bump didn't reach main after main moved"
-[ "$(on_main module.nix)" = landed-1 ] || fail "what landed is gone from main"
+[ "$(on_main module.nix)" != a ] || fail "what landed is gone from main"
 [ ! -e "$state/deployed-main" ] || fail "main is marked as running what it hasn't deployed"
+[ "$(tail -1 "$tmp/built")" = "$(git -C "$tmp/origin.git" rev-parse 'main^{tree}')" ] || fail "what went on main wasn't what was built"
+
+# What landed doesn't build with the bump: main stays as it is.
+bump one-bad
+unbuildable=1 moves=1
+before_landing=$(git -C "$tmp/origin.git" show main:flake.lock | head -1)
+if out=$(push_main 2>/dev/null); then fail "an update that doesn't build claims it was pushed"; fi
+unbuildable=
+case $out in *"next run"*) ;; *) fail "the failed build isn't explained: $out" ;; esac
+[ "$(on_main flake.lock | head -1)" = "$before_landing" ] || fail "an update that doesn't build reached main"
 
 # Main moved twice over: it goes again.
 bump one-c
@@ -76,9 +92,10 @@ push_main >/dev/null 2>&1 || fail "a push after main moved twice failed"
 # add, and main still isn't what it deployed.
 git -C "$tmp/work" fetch -q origin main
 git -C "$tmp/work" checkout -q -B update origin/main
-moves=1
+moves=1 before_build=$(wc -l <"$tmp/built")
 push_main >/dev/null 2>&1 || fail "deploying main that then moved failed"
 [ ! -e "$state/deployed-main" ] || fail "main is marked as running what landed after the deploy"
+[ "$(wc -l <"$tmp/built")" = "$before_build" ] || fail "it built with nothing of its own to publish"
 
 # What landed touched the same lines: main is left as it is, nothing half done,
 # and the failure says so.

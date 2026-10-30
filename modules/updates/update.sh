@@ -384,14 +384,15 @@ $fixes
 It built and stayed healthy live."
 fi
 echo "$new" >"$state/deployed"
-live=$(git_ rev-parse --short HEAD)
+# What went live, in words: pushing can rebase it onto what hasn't.
+live=${changed:+$(describe)}${changed:-main $(git_ rev-parse --short HEAD)}
 push_main || true
 if [ "$(as_user git -C "$operator" branch --show-current 2>/dev/null)" = main ] &&
   as_user git -C "$operator" diff --quiet HEAD 2>/dev/null; then
   as_user git -C "$operator" pull -q --ff-only origin main || true
 fi
 
-note ok "live and confirmed: ${changed:+$(describe)}${changed:-main $live}${failed[*]:+ (held back: ${failed[*]})}"
+note ok "live and confirmed: $live${failed[*]:+ (held back: ${failed[*]})}"
 [ -z "$BOOT" ] || ! "$BOOT" status | grep -q 'trial queued: /' ||
   echo "the new kernel boots once at the next trial window ($BOOT trial)"
 exit 0
