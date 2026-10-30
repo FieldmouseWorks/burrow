@@ -655,10 +655,13 @@ fn in_line() {
 // A stall already on the stuck issue that the issue can't take now goes on
 // to the owner, and off the issue: when there's no steward any more to
 // publish it, or when it turns out to be that issue's own job (made one
-// later, proj unstick), which the issue would only hand to itself.
+// later, proj unstick), which the issue would only hand to itself. One the
+// owner was told of before (as main told them after ownerAfter, keeping it
+// on the issue) comes off too, its notice kept open and sent again.
 #[test]
 fn issue_cant_take_it() {
-    for gone in [true, false] {
+    for (gone, told) in [(true, false), (false, false), (true, true), (false, true)] {
+        let why = format!("gone {gone}, told {told}");
         let mut m = Machine::new();
         m.write(&m.steward, json!({}), T);
         let mut it = named(
@@ -670,7 +673,17 @@ fn issue_cant_take_it() {
         it["line"] = true.into();
         m.write(&m.line, json!({"homelab-9": it.clone()}), T);
         m.run(T);
-        assert_eq!((m.escalated().len(), m.notices().len()), (1, 0), "{gone}");
+        assert_eq!((m.escalated().len(), m.notices().len()), (1, 0), "{why}");
+        let s = sid("proj", "homelab-9", T - 3.0 * H);
+        let key = burrow_watchdog::ladder::notice_key(&s);
+        if told {
+            let path = m.cfg.state_dir.join("state.json");
+            let mut saved: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            saved["stalls"][&s]["told"] = T.into();
+            fs::write(&path, saved.to_string()).unwrap();
+            m.world.kept.borrow_mut().insert(key.clone());
+            m.world.opened.borrow_mut().insert(key.clone());
+        }
         if gone {
             m.cfg.steward_kick = None;
         } else {
@@ -678,12 +691,16 @@ fn issue_cant_take_it() {
             m.write(&m.line, json!({"homelab-9": it}), T);
         }
         m.run(T + MIN);
-        let notices = m.notices();
-        let [notice] = &notices[..] else {
-            panic!("{gone}: {notices:?}")
-        };
-        assert_eq!(notice[0], "open", "{gone}");
-        assert!(m.escalated().is_empty(), "{gone}");
+        assert!(m.escalated().is_empty(), "{why}");
+        let opens = || m.notices().iter().filter(|n| n[0] == "open").count();
+        assert!(
+            m.notices().iter().all(|n| n[0] == "open"),
+            "{why}: {:?}",
+            m.notices()
+        );
+        assert_eq!((opens(), m.opened()), (usize::from(!told), 1), "{why}");
+        m.run(T + MIN + RENOTIFY);
+        assert_eq!(opens(), 1 + usize::from(!told), "{why}");
     }
 }
 

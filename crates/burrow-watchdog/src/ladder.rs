@@ -72,15 +72,19 @@ pub fn run(cfg: &Config, world: &dyn World, now: f64) -> Result<(), String> {
         st.key = cur.key;
         st.item = cur.item;
         let kick = st.item.kick.clone().filter(|k| !k.is_empty());
+        // On the stuck issue, but one it can't take now (no steward to
+        // publish it, or it has turned out to be that issue's own job): off
+        // it, whatever else stands, and on through the steps below to the
+        // owner, or on with their notice if they've had one.
+        if st.entry.is_some() && !issue_takes(cfg, st) {
+            st.entry = None;
+        }
         if let Some(until) = st.snoozed.filter(|&t| t > now) {
             wakes.push(until);
-        } else if st.entry.is_some() && issue_takes(cfg, st) {
+        } else if st.entry.is_some() {
             // On the stuck issue, whose own job takes it from there: none of
             // it is the owner's. One they were told of before that job took
-            // it on has its notice closed, again each pass until it is. One
-            // the issue can't take now (no steward to publish it, or it has
-            // turned out to be that very job) goes on to the steps below, and
-            // so to the owner.
+            // it on has its notice closed, again each pass until it is.
             if st.told.is_some() {
                 notice(cfg, world, &s, st, Some(ON_ISSUE));
                 if !held(cfg, world, &s) {
@@ -232,7 +236,6 @@ fn escalate(cfg: &Config, world: &dyn World, s: &str, st: &mut Stall, now: f64) 
         st.entry = Some(entry(&st.item));
     } else {
         println!("still stalled, telling {}: {}", cfg.owner, line(&st.item));
-        st.entry = None;
         tell(cfg, world, s, st, now);
     }
 }
