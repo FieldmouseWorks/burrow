@@ -41,7 +41,7 @@ let
       # A login shell's, for the jobs' Claude.
       bash = "${pkgs.bashInteractive}/bin/bash";
       gh = lib.getExe cfg.gh;
-      git = lib.getExe pkgs.git;
+      git = lib.getExe config.programs.git.package;
       systemctl = "${pkgs.systemd}/bin/systemctl";
       systemdRun = "${pkgs.systemd}/bin/systemd-run";
       timeout = "${pkgs.coreutils}/bin/timeout";
@@ -57,7 +57,7 @@ let
 
   inbox = pkgs.writeShellApplication {
     name = "proj-inbox";
-    runtimeInputs = [ proj pkgs.coreutils pkgs.git cfg.gh pkgs.jq pkgs.gnused pkgs.gnugrep pkgs.util-linux ];
+    runtimeInputs = [ proj pkgs.coreutils config.programs.git.package cfg.gh pkgs.jq pkgs.gnused pkgs.gnugrep pkgs.util-linux ];
     text = ''
       SRC=${lib.escapeShellArg projectsDir}
       JOBS=${lib.escapeShellArg cfg.jobsDir}

@@ -160,7 +160,9 @@ in
            `journalctl -u ${switch}-run` in short looks: a switch that restarts your
            own session would otherwise die half done.
         3. Check that what you changed works, then run `${confirm}`.
-        4. Commit and push to main. main must always match what ${config.networking.hostName} runs.
+        4. ${if lib.attrByPath [ "burrow" "updates" "throughTrain" ] false config
+          then "Commit, push a branch and open a PR against main: only the merge train moves main, once the steward has settled the PR."
+          else "Commit and push to main."} main must always match what ${config.networking.hostName} runs.
 
         `${switch} --status` shows anything pending, and `${switch} --abort` reverts
         at once instead of waiting. `nixos-rebuild switch --rollback` or the boot menu

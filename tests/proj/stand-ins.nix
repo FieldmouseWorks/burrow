@@ -4,6 +4,7 @@
 {
   # Claude, as far as proj can tell: reads the prompt, answers in stream-json.
   # "sleep N" sleeps; "eat" holds far more memory than the test's job cap;
+  # "outgrow" runs something that does, then answers;
   # "twice" answers twice in one turn, "answerfail" answers and then fails;
   # "linger N" answers, then stays up N seconds, as Claude does while
   # something it left in the background (a CI watch, a long build) is still
@@ -66,6 +67,11 @@
       # Awaits, then takes a while to answer: what changes meanwhile is news.
       slowawait*) proj await "''${prompt#slowawait }" >/dev/null; sleep 10 ;;
       eat) head -c 512M /dev/zero | tail >/dev/null; exit 1 ;;
+      # Runs something that outgrows the job's cap, as a whole-flake
+      # evaluation does, and answers with how that went.
+      outgrow)
+        head -c 512M /dev/zero | tail >/dev/null
+        echo "{\"type\":\"result\",\"session_id\":\"s\",\"result\":\"it exited $?\",\"is_error\":false}" ;;
       # Answers, then answers again once a background task reports back.
       twice) echo '{"type":"result","session_id":"s","result":"the answer","is_error":false}' ;;
       # Answers, then fails as "fail" does.
