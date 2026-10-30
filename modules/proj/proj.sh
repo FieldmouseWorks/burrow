@@ -350,9 +350,13 @@ start_turn() {
   printf '%s\n' "$msg" >"$d/prompt.$n"
   set_turns "$id" "$n"
   # Claude is what goes first when memory runs out, not whatever it's next to.
+  # Past its own cap the kernel kills the job's biggest process (a build or
+  # an evaluation it ran, as a rule) and the turn carries on, told the command
+  # was killed: systemd's default OOMPolicy would stop the whole turn.
   if ! systemd-run --user --quiet --collect --unit="$(unit "$id")" \
     --slice="$SLICE" \
     --property=MemoryMax="$JOB_MEMORY_MAX" \
+    --property=OOMPolicy=continue \
     --property=OOMScoreAdjust=500 \
     --property=WorkingDirectory="$(cat "$d/project")" \
     --setenv=PROJ_ENDED="$id" \
