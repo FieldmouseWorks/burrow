@@ -123,20 +123,26 @@ def built(repo, pr, checks, st):
     return st["proofOutputs"].get("drvs")
 
 
-def record(repo, pr, checks, drvs, st):
-    """checks' verdicts on PR's head, taken from the store (built), once a
-    head: each a pass that says where it came from and names its
-    derivation, so it doesn't read as a run. False if GitHub didn't take
-    one: all are posted again next time."""
+def record(repo, pr, checks, drvs):
+    """checks' verdicts on PR's head, taken from the store (built): each a
+    pass that says where it came from and names its derivation, so it
+    doesn't read as a run. GitHub's word on each check, read fresh, says
+    which to post: only one still waiting, so a pass that read it just
+    before the last one's status posts nothing again, and one added, remapped
+    or set back to pending since is posted, and a red one is left red. False
+    if GitHub didn't answer or take one: what's left is posted next time."""
     head = pr["headRefOid"]
-    if st.get("provedStore") == head:
-        return True
+    now = C.gh("api", f"repos/{repo}/commits/{head}/status?per_page=100", check=False)
+    if not isinstance(now, dict):
+        return False
+    states = {s["context"]: s["state"] for s in now.get("statuses", [])}
     for c in checks:
+        if states.get(c, "pending") != "pending":
+            continue
         desc = f"Taken from the store, not run again: {drvs[c]} passed here before"
         if C.write("api", f"repos/{repo}/statuses/{head}", "-f", "state=success", "-f", f"context={c}",
                    "-f", f"description={desc[:140]}", "-f", f"target_url={pr['url']}", check=False) is None:
             return False
-    st["provedStore"] = head
     return True
 
 

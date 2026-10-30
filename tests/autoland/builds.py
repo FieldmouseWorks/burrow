@@ -2,8 +2,8 @@
 What it builds is worked out once a head, from the steward's mirror at that
 exact commit; one whose outputs are being built by a proof already running
 starts at once and holds no slot, and says so, and one whose outputs are
-all in the store takes no job: its verdict is taken from the store, once a
-head, saying so and naming the derivation. A slot is held by a build, not
+all in the store takes no job: its verdict is taken from the store, posted
+while GitHub says it's waiting, saying so and naming the derivation. A slot is held by a build, not
 a job: a job whose paths the jobs started before it are building holds
 none, and one whose eval failed, or whose check has no attribute, holds its
 own."""
@@ -11,6 +11,7 @@ own."""
 import itertools
 import json
 import os
+import re
 import sys
 
 import proofs as P
@@ -88,6 +89,32 @@ RUNNING, SKIPPED = "a Claude job is running remi-proof", "nothing new to build, 
 STORE = "Settled; remi-proof taken from the store, not run again"
 
 
+GITHUB = {}  # each head's statuses by context, as a fresh read gets them
+kept_gh, kept_write = C.gh, C.write
+
+
+def read_status(*a, **k):
+    m = re.fullmatch(r"repos/sam/r/commits/(\w+)/status\?per_page=100", a[1]) if a[:1] == ("api",) else None
+    if not m:
+        return kept_gh(*a, **k)
+    if "status-read" in FAIL:
+        return None
+    return {"statuses": [{"context": c, "state": v} for c, v in GITHUB.get(m[1], {}).items()]}
+
+
+def write_status(*a, **k):
+    got = kept_write(*a, **k)
+    m = re.fullmatch(r"repos/sam/r/statuses/(\w+)", a[1]) if a[:1] == ("api",) else None
+    if m and got is not None:
+        args = dict(x.split("=", 1) for x in a[2:] if "=" in x)
+        if args["context"] != "review-settled":
+            GITHUB.setdefault(m[1], {})[args["context"]] = args["state"]
+    return got
+
+
+C.gh, C.write = read_status, write_status
+
+
 def from_store():
     """The remi-proof verdicts this pass posted: each one's description."""
     return [w.split("description=")[1].split(" -f ")[0] for w in WROTE
@@ -98,8 +125,8 @@ def taken(drv):
     return f"Taken from the store, not run again: {drv}.drv passed here before"
 
 
-def line(n, t=700):
-    return run(clean(checks=proof, number=n, sha=heads[n]), t)[0]
+def line(n, t=700, checks=None):
+    return run(clean(checks=checks or proof, number=n, sha=heads[n]), t)[0]
 
 
 def ahead(k):
@@ -219,18 +246,75 @@ S.CFG["repos"]["sam/r"]["proofBuilds"] = {"remi-proof": "checks.x86_64-linux.pro
 # didn't take is posted again on a later pass, the PR left pending until it
 # is: the store's word is the only one.
 fresh_pr_state()
+GITHUB.clear()
 VALID[:] = [Z]
 nix_knows()
 del S.CFG["repos"]["sam/r"]["proofSlots"]
 P.begin("sam/r", {3})
 FAIL.append("context=remi-proof")
 status = line(3)
-assert STORE in status and JOBS == [] and "provedStore" not in pr_state(3), (status, JOBS)
+assert STORE in status and JOBS == [] and heads[3] not in GITHUB, (status, JOBS)
 assert pr_state(3)["strikes"] == {"status": 1}, pr_state(3)
 FAIL.remove("context=remi-proof")
 status = line(3, 800)
 assert STORE in status and JOBS == [] and from_store() == [taken(Z)], (status, WROTE)
-assert pr_state(3)["provedStore"] == heads[3] and not pr_state(3)["strikes"], pr_state(3)
+assert GITHUB[heads[3]] == {"remi-proof": "success"} and not pr_state(3)["strikes"], pr_state(3)
+# The rollup a pass read before that status: nothing posted again.
+assert STORE in line(3, 900) and from_store() == [] and JOBS == [], WROTE
+# Set back to pending on the same head: posted again.
+GITHUB[heads[3]]["remi-proof"] = "pending"
+assert STORE in line(3, 1000) and from_store() == [taken(Z)], WROTE
+# Remapped to another derivation while it's pending: that one's named.
+VALID[:] = [Z, W]
+nix_knows({3: Z, (3, "checks.x86_64-linux.other"): W})
+S.CFG["repos"]["sam/r"]["proofBuilds"] = {"remi-proof": "checks.x86_64-linux.other"}
+GITHUB[heads[3]]["remi-proof"] = "pending"
+assert STORE in line(3, 1100) and from_store() == [taken(W)], WROTE
+S.CFG["repos"]["sam/r"]["proofBuilds"] = {"remi-proof": "checks.x86_64-linux.proof"}
+# Red by now, though this pass's rollup read it pending: left red.
+GITHUB[heads[3]]["remi-proof"] = "failure"
+assert STORE in line(3, 1200) and from_store() == [], WROTE
+assert GITHUB[heads[3]]["remi-proof"] == "failure"
+# GitHub can't say where it stands: nothing posted, a strike, tried again.
+GITHUB[heads[3]]["remi-proof"] = "pending"
+FAIL.append("status-read")
+assert STORE in line(3, 1300) and from_store() == [] and pr_state(3)["strikes"] == {"status": 1}, WROTE
+FAIL.remove("status-read")
+assert STORE in line(3, 1400) and from_store() == [taken(Z)] and not pr_state(3)["strikes"], WROTE
+# Each check's on its own: another check added on the same head, after the
+# first's verdict, is posted alone, and so is whichever is still pending.
+TWO = {"remi-proof": "checks.x86_64-linux.proof", "other-proof": "checks.x86_64-linux.other"}
+pending_two = proof + [{"__typename": "StatusContext", "context": "other-proof", "state": "PENDING", "description": ""}]
+pending_other = CI_GREEN + [{"__typename": "StatusContext", "context": "remi-proof", "state": "SUCCESS", "description": ""},
+                            pending_two[-1]]
+
+
+def other_store():
+    return [w.split("description=")[1].split(" -f ")[0] for w in WROTE
+            if "/statuses/" in w and "context=other-proof" in w and "state=success" in w]
+
+
+VALID[:] = [Z, W]
+nix_knows({3: Z, (3, "checks.x86_64-linux.other"): W})
+S.CFG["repos"]["sam/r"]["proofJobs"]["other-proof"] = "Run the other proof."
+S.CFG["repos"]["sam/r"]["proofBuilds"] = TWO
+GITHUB[heads[3]] = {"remi-proof": "success"}
+status = line(3, 1500, pending_two)
+assert from_store() == [] and other_store() == [taken(W)] and JOBS == [], (status, WROTE)
+# A rollup with only the second pending, the first already passed: the same.
+GITHUB[heads[3]] = {"remi-proof": "success"}
+status = line(3, 1600, pending_other)
+assert from_store() == [] and other_store() == [taken(W)] and JOBS == [], (status, WROTE)
+# One taken, the next refused: only the refused one is posted again.
+GITHUB[heads[3]] = {}
+FAIL.append("context=other-proof")
+line(3, 1700, pending_two)
+assert GITHUB[heads[3]] == {"remi-proof": "success"} and pr_state(3)["strikes"] == {"status": 1}, WROTE
+FAIL.remove("context=other-proof")
+line(3, 1800, pending_two)
+assert from_store() == [] and other_store() == [taken(W)] and not pr_state(3)["strikes"], WROTE
+del S.CFG["repos"]["sam/r"]["proofJobs"]["other-proof"]
+S.CFG["repos"]["sam/r"]["proofBuilds"] = {"remi-proof": "checks.x86_64-linux.proof"}
 # One output of two built isn't all of them: a job runs it.
 VALID[:] = [X]
 nix_knows({1: XY}, {XY: [X, Y]})
@@ -240,6 +324,7 @@ assert RUNNING in status and from_store() == [] and len(JOBS) == 1, (status, WRO
 
 del S.CFG["repos"]["sam/r"]
 C.job = kept
+C.gh, C.write = kept_gh, kept_write
 V.ORIGIN = kept_origin
 P.OPEN.clear()
 P.WAITING.clear()

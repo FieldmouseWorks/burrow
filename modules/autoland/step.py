@@ -514,7 +514,7 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
         if not retry and st.get("proved") == head:
             running_now()
             return
-        if (drvs := P.built(repo, pr, ci_names, st)) and not P.record(repo, pr, ci_names, drvs, st):
+        if (drvs := P.built(repo, pr, ci_names, st)) and not P.record(repo, pr, ci_names, drvs):
             strike("status")
         if drvs:  # Their statuses kick the pass that lands it.
             settle("pending", f"Settled; {', '.join(ci_names)} taken from the store, not run again"[:140])
