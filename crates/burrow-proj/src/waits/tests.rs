@@ -65,7 +65,10 @@ fn case(more: &[&str], want: impl Fn(&Item) -> bool) {
     assert!(want(&got), "{got:?} from {more:?}");
     // Always the watchdog's whole form.
     let keys: Vec<String> = json!(got).as_object().unwrap().keys().cloned().collect();
-    assert_eq!(keys, ["due", "kick", "link", "phase", "since", "what"]);
+    assert_eq!(
+        keys,
+        ["due", "kick", "line", "link", "phase", "since", "what"]
+    );
 }
 
 /// Nothing to watch for these facts alone.
@@ -85,6 +88,7 @@ fn waits() {
         w.since == 1000.0
             && w.due == 8200.0
             && w.kick.is_none()
+            && w.line
             && w.what == "proj job web-1"
             && w.phase == "turn 2 is waiting in line for a slot"
     });
@@ -92,7 +96,7 @@ fn waits() {
     case(&["state queued", "owned 1"], |w| w.due == 8200.0);
     // Running: to its deadline, and GRACE for proj to have stopped it.
     case(&["state running"], |w| {
-        w.since == 2000.0 && w.due == 6200.0 && w.phase == "turn 2 is running"
+        w.since == 2000.0 && w.due == 6200.0 && !w.line && w.phase == "turn 2 is running"
     });
     // No timeout: nothing to hold it to.
     none(&["id web-1", "turn 2", "slot 2000", "state running"]);
@@ -104,6 +108,7 @@ fn waits() {
         |w| {
             w.since == 2500.0
                 && w.due == 9700.0
+                && !w.line
                 && w.phase == "turn 2 is running, and waiting in line: the heavy-run lock (gate)"
         },
     );

@@ -1,7 +1,7 @@
 // proj's choice of who takes a slot, on what a waiting turn would see:
 // pipeline jobs' slots stay theirs, one project's jobs stop at its cap while
 // the others go by, pipeline ones count against no cap, and lead ones go
-// ahead of everyone; and which jobs are pipeline ones: only those in the
+// ahead of everyone, every free slot going in one look; and which jobs are pipeline ones: only those in the
 // pipeline's own repos and the machine's flake, and lead ones those in its
 // lead repos.
 
@@ -23,8 +23,9 @@ fn config() -> Config {
 }
 
 /// The slots, then the line: "free", or a holder's "CLASS PROJECT", for
-/// slots 1 to 4 in order; then "NAME CLASS PROJECT" for each waiting turn.
-/// What's picked is "NAME N", or "" for nobody.
+/// slots 1 to maxJobs in order; then "NAME CLASS PROJECT" for each waiting
+/// turn. What's picked is a line "NAME N" for each turn that goes, in the
+/// order they're chosen, or "" for nobody.
 fn case(cfg: &Config, want: &str, specs: &[&str]) {
     let (mut slots, mut line) = (Vec::new(), Vec::new());
     for (i, s) in specs.iter().enumerate() {
@@ -47,19 +48,21 @@ fn case(cfg: &Config, want: &str, specs: &[&str]) {
             });
         }
     }
-    let got = pick(cfg, &slots, &line)
+    let got: Vec<String> = pick(cfg, &slots, &line)
+        .into_iter()
         .map(|(i, n)| format!("{} {n}", line[i].name))
-        .unwrap_or_default();
+        .collect();
+    let got = got.join("\n");
     assert_eq!(got, want, "from {specs:?}");
 }
 
 #[test]
 fn picks() {
-    let cfg = config();
+    let mut cfg = config();
     // The head of the line takes the lowest free slot.
     case(
         &cfg,
-        "a 1",
+        "a 1\nb 2",
         &[
             "free",
             "free",
@@ -93,8 +96,8 @@ fn picks() {
             "a pipeline /src/b",
         ],
     );
-    // The last slot is the pipeline's: nobody else takes it, and a pipeline
-    // turn behind them does.
+    // The last slot is the pipeline's: nobody else takes it, and a pipeline turn
+    // behind them does.
     case(
         &cfg,
         "",
@@ -126,7 +129,7 @@ fn picks() {
         "p 2",
         &["normal /src/x", "free", "free", "free", "p pipeline /src/b"],
     );
-    // A project holding its cap's slots waits, and lets the others by.
+    // A project holding PER_PROJECT slots waits, and lets the others by.
     case(
         &cfg,
         "b 3",
@@ -173,8 +176,8 @@ fn picks() {
             "p pipeline /src/remi",
         ],
     );
-    // Projects are told apart whole, spaces and all; a turn whose project
-    // can't be read is in none.
+    // Projects are told apart whole, spaces and all; a turn whose project can't be
+    // read is in none.
     case(
         &cfg,
         "b 3",
@@ -198,11 +201,11 @@ fn picks() {
             "a normal ",
         ],
     );
-    // A lead turn goes first, from anywhere in the line: ahead of pipeline
-    // turns that came before it, and of everyone else.
+    // A lead turn goes first, from anywhere in the line: ahead of pipeline turns
+    // that came before it, and of everyone else.
     case(
         &cfg,
-        "l 1",
+        "l 1\np 2\na 3",
         &[
             "free",
             "free",
@@ -215,7 +218,7 @@ fn picks() {
     );
     case(
         &cfg,
-        "l 3",
+        "l 3\np 4",
         &[
             "normal /src/x",
             "normal /src/y",
@@ -225,9 +228,9 @@ fn picks() {
             "l lead /src/burrow",
         ],
     );
-    // But the pipeline's own slot stays the other pipeline turns' while one
-    // waits, so a lead repo's backlog can't stop the work on what deploys
-    // it: the lead turn waits for the next slot.
+    // But the pipeline's own slot stays the other pipeline turns' while one waits,
+    // so a lead repo's backlog can't stop the work on what deploys it: the lead
+    // turn waits for the next slot.
     case(
         &cfg,
         "p 4",
@@ -253,8 +256,8 @@ fn picks() {
             "p pipeline /src/remi",
         ],
     );
-    // With none of those in line it takes the pipeline's slot as a pipeline
-    // turn does, counts against no cap, and holds none of its project's.
+    // With none of those in line it takes the pipeline's slot as a pipeline turn
+    // does, counts against no cap, and holds none of its project's.
     case(
         &cfg,
         "l 4",
@@ -278,8 +281,8 @@ fn picks() {
             "a normal /src/burrow",
         ],
     );
-    // With no slot free nobody goes, lead or not; of two lead turns, the
-    // first in line goes first.
+    // With no slot free nobody goes, lead or not; of two lead turns, the first in
+    // line goes first.
     case(
         &cfg,
         "",
@@ -293,7 +296,7 @@ fn picks() {
     );
     case(
         &cfg,
-        "l 2",
+        "l 2\nm 3\np 4",
         &[
             "lead /src/burrow",
             "free",
@@ -302,6 +305,169 @@ fn picks() {
             "p pipeline /src/remi",
             "l lead /src/burrow",
             "m lead /src/burrow",
+        ],
+    );
+    case(
+        &cfg,
+        "l 4",
+        &[
+            "lead /src/burrow",
+            "normal /src/x",
+            "normal /src/y",
+            "free",
+            "l lead /src/burrow",
+            "m lead /src/burrow",
+        ],
+    );
+
+    // Every free slot goes in one look, in line order, under the same rules. Lead
+    // first, then the line; a pipeline turn gives up a slot anyone may take when a
+    // turn behind it needs that one.
+    cfg.max_jobs = 6;
+    case(
+        &cfg,
+        "l 1\np 2\nq 6\na 3",
+        &[
+            "free",
+            "free",
+            "free",
+            "lead /src/burrow",
+            "lead /src/burrow",
+            "free",
+            "l lead /src/burrow",
+            "p pipeline /src/remi",
+            "q pipeline /src/remi",
+            "a normal /src/web",
+        ],
+    );
+    // Slots ahead of what the line can fill stay free, the pipeline's above all.
+    case(
+        &cfg,
+        "a 1\np 2",
+        &[
+            "free",
+            "free",
+            "free",
+            "free",
+            "free",
+            "free",
+            "a normal /src/web",
+            "p pipeline /src/remi",
+        ],
+    );
+    // More waiting than free: the head of the line goes, and those behind wait.
+    case(
+        &cfg,
+        "a 1\nb 2",
+        &[
+            "free",
+            "free",
+            "normal /src/x",
+            "normal /src/y",
+            "normal /src/z",
+            "pipeline /src/b",
+            "a normal /src/web",
+            "b normal /src/lok",
+            "c normal /src/psiv",
+        ],
+    );
+    // Nobody but pipeline turns takes the pipeline's slot, however long the line.
+    case(
+        &cfg,
+        "a 5",
+        &[
+            "normal /src/x",
+            "normal /src/y",
+            "normal /src/z",
+            "first /src/z",
+            "free",
+            "free",
+            "a normal /src/web",
+            "b normal /src/lok",
+        ],
+    );
+    // A pipeline turn ahead of them takes it when that lets one of them go too.
+    case(
+        &cfg,
+        "p 6\na 5",
+        &[
+            "normal /src/x",
+            "normal /src/y",
+            "normal /src/z",
+            "first /src/z",
+            "free",
+            "free",
+            "p pipeline /src/remi",
+            "a normal /src/web",
+            "b normal /src/lok",
+        ],
+    );
+    // PER_PROJECT counts the slots this look hands out: a project stops at its cap
+    // and those behind it go by.
+    case(
+        &cfg,
+        "a 1\nb 2\nd 3",
+        &[
+            "free",
+            "free",
+            "free",
+            "free",
+            "free",
+            "free",
+            "a normal /src/web",
+            "b first /src/web",
+            "c normal /src/web",
+            "d normal /src/lok",
+        ],
+    );
+    case(
+        &cfg,
+        "a 1\nd 2",
+        &[
+            "free",
+            "free",
+            "normal /src/web",
+            "free",
+            "free",
+            "free",
+            "a normal /src/web",
+            "c normal /src/web",
+            "d normal /src/lok",
+        ],
+    );
+    // The pipeline's slot stays the other pipeline turns' whoever is ahead of them:
+    // a turn behind the lead one gets no slot that would push it onto theirs.
+    cfg.max_jobs = 6;
+    case(
+        &cfg,
+        "l 3\np 6",
+        &[
+            "normal /src/x",
+            "normal /src/y",
+            "free",
+            "normal /src/z",
+            "first /src/z",
+            "free",
+            "l lead /src/burrow",
+            "a normal /src/web",
+            "p pipeline /src/remi",
+        ],
+    );
+    // With two of them and one such turn, a lead one has the other in the same look.
+    cfg.pipeline_slots = 2;
+    case(
+        &cfg,
+        "l 5\np 6",
+        &[
+            "normal /src/x",
+            "normal /src/y",
+            "normal /src/z",
+            "first /src/z",
+            "free",
+            "free",
+            "l lead /src/burrow",
+            "m lead /src/burrow",
+            "p pipeline /src/remi",
         ],
     );
 }

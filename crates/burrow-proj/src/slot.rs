@@ -114,7 +114,9 @@ pub fn take(cfg: &Config, id: &str, n: &str, given: Class) -> io::Result<File> {
         }
         // Short of memory matters only while another job runs: with nothing
         // running, waiting frees nothing.
-        if let Some(&(_, n_slot)) = pick(cfg, &seen, &line).iter().find(|&&(i, _)| line[i].name == me)
+        if let Some(&(_, n_slot)) = pick(cfg, &seen, &line)
+            .iter()
+            .find(|&&(i, _)| line[i].name == me)
             && (!busy || spare() >= cfg.min_free_memory)
         {
             let slot = File::create(slots.join(n_slot.to_string()))?;

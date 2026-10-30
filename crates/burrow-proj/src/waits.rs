@@ -139,6 +139,8 @@ pub fn job_wait(cfg: &Config, f: &Facts) -> Option<Item> {
         due: due as f64,
         link: f.link.clone().filter(|l| !l.is_empty()),
         kick,
+        // Waiting for a slot: another job would only join the line.
+        line: f.state == "queued",
     })
 }
 
