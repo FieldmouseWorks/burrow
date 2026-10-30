@@ -41,15 +41,16 @@ pkgs.testers.runNixOSTest {
     specialisation.next.configuration.burrow.proj.maxJobs = 2;
     # A proj from before the hand-over: any command but its own is refused,
     # and one that's run anyway says so.
-    # The real one, but saying whether a look could run as it comes up: the
-    # look's lock free, at the start of a hand-over, would let one clear the
-    # place of a turn whose cmdline is empty mid-exec.
+    # A copy of the real one that says, first thing on a hand-over, whether a
+    # look could run: the look's lock free as it comes up would let one clear
+    # the place of a turn whose cmdline is empty mid-exec. A copy, so it's the
+    # proj it runs as and the waiters settle on it.
     specialisation.handing.configuration.environment.systemPackages = [
-      (lib.hiPrio (pkgs.writeShellScriptBin "proj" ''
-        if [ "''${1:-}" = _exec ]; then
-          if ${pkgs.util-linux}/bin/flock -n /data/dev/jobs/.slots/.lock true; then touch /tmp/unlocked; else touch /tmp/locked; fi
-        fi
-        exec ${config.burrow.tools.proj}/bin/proj "$@"
+      (lib.hiPrio (pkgs.runCommand "proj-handing" { } ''
+        mkdir -p $out/bin
+        sed '1a if [ "''${1:-}" = _exec ]; then if ${pkgs.util-linux}/bin/flock -n /data/dev/jobs/.slots/.lock true; then touch /tmp/unlocked; else touch /tmp/locked; fi; fi' \
+          ${config.burrow.tools.proj}/bin/proj >$out/bin/proj
+        chmod +x $out/bin/proj
       ''))
     ];
     specialisation.older.configuration.environment.systemPackages = [
@@ -106,8 +107,17 @@ pkgs.testers.runNixOSTest {
 
     with subtest("no look runs while a turn is handed over, so none clears its place"):
         deploy("handing")
-        machine.wait_until_succeeds("test -e /tmp/locked", timeout=30)
+        handing = machine.succeed("readlink -f /run/current-system/sw/bin/proj").strip()
+        assert handing != first
+        for j in (q, r):
+            machine.wait_until_succeeds(f"tr '\\0' '\\n' </proc/{in_line[j][1]}/cmdline | grep -Fx {handing}", timeout=30)
+        machine.succeed("test -e /tmp/locked")
         machine.fail("test -e /tmp/unlocked")
+        # Settled there, each handed over once: a look's worth of waiting later
+        # the marker hasn't been written again, and the place is the same.
+        machine.succeed("rm /tmp/locked")
+        time.sleep(6)
+        machine.fail("test -e /tmp/locked")
         for j in (q, r):
             assert place(j) == in_line[j], (place(j), in_line[j])
 
