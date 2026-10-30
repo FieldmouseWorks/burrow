@@ -7,6 +7,9 @@
 #         -> it finds nothing on the exact head, CI green
 #         -> (one-way paths, no CI: a Claude job judges it)
 #         -> `review-settled` status -> merged at that head -> branch deleted
+#            (a repo with `train` on: into its merge train instead, which
+#            lands it once CI passes it merged onto trunk with the PRs ahead
+#            of it; autoland/train.py)
 #
 # A draft is work in progress: nothing happens to it until it's ready. The
 # owner only sees what needs them, in one issue: what a judge job couldn't
@@ -77,6 +80,9 @@ let
   # what a stalled wait on it kicks.
   sweeping = (config.burrow.updates.enable or false) && (config.burrow.updates.renovate.enable or false);
   watchdog = config.burrow.watchdog.enable or false;
+  ledger = config.burrow.ledger;
+  # The repos whose PRs land through their merge train.
+  trains = lib.attrNames (lib.filterAttrs (_: r: r.train or false) cfg.repos);
 
   # The title Renovate gives each repo's dashboard (its
   # dependencyDashboardTitle default): the issue dashboard.py reads, and the
@@ -157,7 +163,22 @@ let
       proofBuilds = { };
       codex = true;
       skipPaths = [ ];
+      train = false;
+      trainSize = 8;
+      trainRequire = [ ];
+      trainStallAfter = cfg.trainStallAfterMinutes;
     };
+    # The merge train's status, which a repo's baseline requires while its
+    # train is on and gives up once it's off, the ledger on or not.
+    trainContext = ledger.trainContext;
+    # The merge train's `cn` (autoland/train.py), on the ledger's own log:
+    # the train's ops are ledger ops. Its token command is the steward's own.
+    train = if ledger.enable then {
+      cn = "${ledger.package}/bin/cn";
+      inherit (ledger) env;
+      # Its candidates' branches, cn's to make and delete.
+      branches = "conary/*";
+    } else null;
     repos = cfg.repos;
     inherit (cfg) pipelineRepos leadRepos;
     # Every repo's hook to burrow-events (repos.py), with what each of its
@@ -240,6 +261,8 @@ in
     { key = "burrow/proj"; imports = [ (import ./proj.nix inputs) ]; }
     { key = "burrow/events"; imports = [ (import ./events.nix inputs) ]; }
     { key = "burrow/github"; imports = [ (import ./github.nix inputs) ]; }
+    # The train's: its status's name, whether the ledger is on or not.
+    { key = "burrow/ledger"; imports = [ (import ./ledger.nix inputs) ]; }
     { key = "burrow/watchdog/sources"; imports = [ ./watchdog/sources.nix ]; }
   ];
 
@@ -401,6 +424,17 @@ in
         How long a PR may wait on one thing (its status's description: a
         review, CI, a Claude job, a merge) before the stall watchdog, when
         it's on, takes it: kicks its pass, then hands it to a Claude job.
+      '';
+    };
+
+    trainStallAfterMinutes = mkOption {
+      type = types.ints.positive;
+      default = 240;
+      description = ''
+        The same for a PR in its repo's merge train, while one candidate is
+        in flight (its own, or the one ahead of it): long enough for that
+        candidate's CI, a second try of a test that failed, and its PRs'
+        merges.
       '';
     };
 
@@ -649,7 +683,19 @@ in
         the machine's, for branches a repo keeps as evidence), codex (false:
         Codex leaves this repo alone, and none of it goes to it), skipPaths (more path regexes the reviewers never read in
         this repo, on top of `reviewers.skipPaths`, never instead of them: what
-        the repo keeps private that isn't a secret anywhere else).
+        the repo keeps private that isn't a secret anywhere else), train
+        (true: a PR it settles goes into the repo's merge train, Conary's
+        `cn train`, instead of being merged: the train merges the PRs in it
+        onto the default branch together, has CI run on that on a
+        `conary/train/` branch, lands them in order once it's green, and
+        splits a red one to find the PR that broke it. A PR touching a
+        oneWay path rides alone, landing only while the default branch is
+        still the base its CI ran on. CI on the PRs themselves is optional:
+        with none, a reviewed PR goes straight in. It needs burrow.ledger,
+        isn't directPush, and has no proofJobs yet), trainSize (the
+        most PRs a candidate holds, 8), trainRequire (checks the train's CI
+        waits for even before they report, when more than one workflow
+        runs there), trainStallAfter (minutes, trainStallAfterMinutes).
       '';
     };
   };
@@ -663,6 +709,17 @@ in
       # It keeps every repo's hook, which GitHub's deliveries come in on.
       assertion = config.burrow.events.host != null;
       message = "burrow.autoland needs burrow.events.host and .secretFile: GitHub's events reach its passes through them.";
+    } {
+      assertion = trains == [ ] || ledger.enable;
+      message = "burrow.autoland: a repo's train (${lib.concatStringsSep ", " trains}) is on the ledger's log: turn on burrow.ledger.";
+    } {
+      # A proof runs on a PR's head; the train's evidence is its candidates'.
+      assertion = lib.all (r: (cfg.repos.${r}.proofJobs or { }) == { }) trains;
+      message = "burrow.autoland: a repo with its train on can't have proofJobs yet.";
+    } {
+      # Its rules are what keep anything but the train off its default branch.
+      assertion = trains == [ ] || cfg.rulesets && lib.all (r: !(cfg.repos.${r}.directPush or false) && (cfg.repos.${r}.ruleset or true)) trains;
+      message = "burrow.autoland: a repo with its train on needs its baseline ruleset (rulesets, and the repo's ruleset) and can't be directPush: only the train may move its default branch.";
     }];
 
     burrow.proj.enable = true;
@@ -803,7 +860,11 @@ in
         looks again once they're all resolved.
       - Once it finds nothing on the exact head, every thread is resolved and CI is
         green, it posts `${cfg.context}` and merges it, `.github/` changes included; the
-        branch goes too.
+        branch goes too.${lib.optionalString (trains != [ ]) ''
+          In ${lib.concatStringsSep ", " trains} it goes into the repo's merge train
+          instead, which lands it once CI is green on it merged onto the default branch with
+          the PRs ahead of it (`cn train show OWNER/REPO` says where it is). A `${ledger.trainContext}`
+          failure on its head means it broke that merge alone: a Claude job fixes it.''}
       - A settled PR that touches a one-way path (secrets, CODEOWNERS), or
         a repo with no CI, gets a Claude job that judges it: it lands what a revert or a
         follow-up can undo, and sends ${config.burrow.owner} only what can't be undone or is theirs to decide.
