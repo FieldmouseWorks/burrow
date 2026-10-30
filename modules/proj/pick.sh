@@ -17,32 +17,44 @@
 # project, what the pipeline is built from) is a pipeline turn that goes first of all: ahead
 # of the whole line, the other pipeline turns included, except that it leaves
 # them the pipeline's own slots while one waits, so a lead repo's backlog can't
-# stop the work on what deploys it. Any other turn waits
+# stop the work on what deploys it, and one of the others while one of
+# everyone else's waits and none of theirs runs, so it can't stop all the rest
+# either. Any other turn waits
 # while its project holds PER_PROJECT slots (pipeline turns not counted), and
 # lets those behind it by meanwhile, so one project's jobs never fill the
 # machine.
 pick() {
-  local kind a b c w pass t=0 r=0 l=0 q=0 open need loose x=0 y=0 went=() ours=() theirs=() inline=()
+  local kind a b c w pass t=0 r=0 l=0 q=0 o=0 e=0 open keep need loose x=0 y=0 went=() ours=() theirs=() inline=()
   local -A held=()
   while IFS=$'\t' read -r kind a b c; do
     case $kind in
       slot)
         if [ "$b" = free ]; then
           if [ "$a" -le $((MAX_JOBS - PIPELINE_SLOTS)) ]; then theirs+=("$a"); else ours+=("$a"); fi
-        elif [ "$b" != pipeline ] && [ "$b" != lead ]; then held[p$c]=$((${held[p$c]:-0} + 1))
+        elif [ "$b" != pipeline ] && [ "$b" != lead ]; then
+          held[p$c]=$((${held[p$c]:-0} + 1))
+          o=$((o + 1))
         fi
         ;;
       wait)
         inline+=("$a"$'\t'"$b"$'\t'"$c")
-        [ "$b" != pipeline ] || q=$((q + 1))
+        case $b in
+          pipeline) q=$((q + 1)) ;;
+          lead) ;;
+          *) e=1 ;;
+        esac
         ;;
     esac
   done
   # Who goes: each in turn, while the slots still go round. t turns chosen, l
   # of them lead and r held to the slots anyone may take; open is how many of
   # the pipeline's own slots the q other pipeline turns in line leave lead ones,
-  # and need how many of the slots anyone may take lead ones must have.
+  # keep how many of the free slots anyone may take lead ones leave everyone
+  # else's turns (one, while one of theirs waits and they hold none of the o
+  # slots held, so a lead backlog can't stop them all), and need how many of
+  # the slots anyone may take lead ones must have.
   open=$((${#ours[@]} > q ? ${#ours[@]} - q : 0))
+  keep=$((o == 0 && e && ${#theirs[@]} > 0 ? 1 : 0))
   for pass in lead rest; do
     for w in "${inline[@]}"; do
       IFS=$'\t' read -r a b c <<<"$w"
@@ -52,7 +64,7 @@ pick() {
       [ "$t" -lt $((${#theirs[@]} + ${#ours[@]})) ] || continue
       case $b in
         lead)
-          [ "$l" -lt $((${#theirs[@]} + open)) ] || continue
+          [ "$l" -lt $((${#theirs[@]} - keep + open)) ] || continue
           l=$((l + 1))
           went+=("$a"$'\t'"$b")
           ;;
