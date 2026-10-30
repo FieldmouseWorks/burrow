@@ -17,7 +17,9 @@ git config --global advice.detachedHead false
 # gh: `api repos/R/pulls?...` answers the open PRs in $tmp/prs ("NUMBER HEAD
 # [OWNER/REPO BRANCH]" lines, sam/homelab's burrow-update by default) as
 # GitHub does, newest first and filtered by its head=OWNER:BRANCH, `pr create`
-# adds one, and every call goes to $tmp/gh.log. With $tmp/gh-down there, it
+# adds one, `pr view N` answers N's head with the checks in $tmp/checks (its
+# statusCheckRollup, as gh gives it), `api repos/R/pulls/N -X PATCH` answers
+# N's URL, and every call goes to $tmp/gh.log. With $tmp/gh-down there, it
 # fails as an unreachable GitHub does.
 mkdir "$tmp/bin"
 cat >"$tmp/bin/gh" <<EOF
@@ -34,6 +36,9 @@ case "\$1 \$2" in
       | {number: (.[0] | tonumber), sha: .[1], repo: (.[2] // "sam/homelab"), ref: (.[3] // "burrow-update")}
       | select(\$head == "" or \$head == "\(.repo | split("/")[0]):\(.ref)")
       | {number, head: {sha, ref, repo: {full_name: .repo}}}] | reverse' <"$tmp/prs") ;;
+  "pr view") json=\$(jq -Rn --arg n "\$3" --slurpfile checks "$tmp/checks" '[inputs | split(" ") | select(.[0] == \$n)][0]
+      | {headRefOid: .[1], statusCheckRollup: \$checks[0]}' <"$tmp/prs") ;;
+  "api repos/sam/homelab/pulls/"*) json=\$(jq -n --arg url "https://github.com/sam/homelab/pull/\${2##*/}" '{html_url: \$url}') ;;
   "pr create") n=\$((\$(wc -l <"$tmp/prs") + 7)); echo "\$n \$(git -C "$tmp/origin.git" rev-parse refs/heads/burrow-update)" >>"$tmp/prs"
     echo "https://github.com/sam/homelab/pull/\$n"; exit 0 ;;
   *) echo "gh stand-in: \$*?" >&2; exit 2 ;;
@@ -45,7 +50,7 @@ PATH=$tmp/bin:$PATH
 
 # What update.sh gives them.
 # shellcheck disable=SC2034 # propose's
-REPO=sam/homelab BRANCH=burrow-update HOST=box UPDATE=box-update TRAIN=1 riding='' changed=1
+REPO=sam/homelab BRANCH=burrow-update HOST=box UPDATE=box-update TRAIN=1 SETTLED=review-settled riding='' changed=1
 state=$tmp/state work=$tmp/work
 as_user() { "$@"; }
 git_() { git -C "$work" "$@"; }
@@ -66,6 +71,7 @@ fresh() {
   mkdir -p "$state"
   : >"$tmp/prs"
   : >"$tmp/gh.log"
+  echo '[]' >"$tmp/checks"
   git init -q --bare "$tmp/origin.git"
   git clone -q "$tmp/origin.git" "$work" 2>/dev/null
   commit flake.lock v1
@@ -207,3 +213,125 @@ already=$(riding=7 already_live /nix/store/sys-b)
 already=$(changed='' already_live /nix/store/sys-b)
 [ "$already" = current ] || fail "already_live with nothing new: $already"
 echo "already_live: ok"
+
+# A check run ($1 = its status, $2 = its conclusion) and a status ($1 = its
+# context, $2 = its state), as gh's statusCheckRollup has them.
+run() { jq -n --arg s "$1" --arg c "$2" '{__typename: "CheckRun", name: "check / check", status: $s, conclusion: (if $c == "" then null else $c end)}'; }
+status() { jq -n --arg c "$1" --arg s "$2" '{__typename: "StatusContext", context: $c, state: $s}'; }
+# The head's checks are these (each a JSON object).
+checks() { jq -s . <<<"$*" >"$tmp/checks"; }
+
+# A head of its own, pushed by a run before this one from a clone since gone:
+# GitHub's branch has it and this clone doesn't, until it's fetched.
+pushed_before() { # $1 = flake.lock's text in it
+  local other=$tmp/before
+  rm -rf "$other"
+  git clone -q "$tmp/origin.git" "$other"
+  echo "$1" >"$other/flake.lock"
+  git -C "$other" commit -qam "flake.lock: $1"
+  git -C "$other" push -q --force origin HEAD:refs/heads/burrow-update
+  git -C "$other" rev-parse HEAD >"$state/proposed"
+  echo "7 $(git -C "$other" rev-parse HEAD)" >"$tmp/prs"
+}
+
+# Red: a check on its own head failed, or the train turned it away; it's
+# fetched, for same_tree. Green, pending, rerunning, the steward's own status
+# or someone else's head: nothing, so it's ridden (or held) as before. GitHub
+# down, or a head that moved since it was listed: a failure, never "not red".
+fresh
+pushed_before v2
+pr=$(update_pr)
+head=${pr#* }
+for green in "" "$(run IN_PROGRESS '')" "$(run COMPLETED SUCCESS) $(run COMPLETED SKIPPED) $(run COMPLETED NEUTRAL)" \
+  "$(status ci/proof PENDING) $(status conary/train SUCCESS)" "$(status review-settled FAILURE)"; do
+  checks "$green"
+  out=$(red_head "$pr") && [ -z "$out" ] || fail "red_head with $(jq -c . "$tmp/checks"): $out"
+done
+! git_ cat-file -e "$head^{tree}" 2>/dev/null || fail "red_head fetched a head that isn't red"
+for red in "$(run COMPLETED FAILURE)" "$(run COMPLETED TIMED_OUT)" "$(run COMPLETED CANCELLED) $(run COMPLETED SUCCESS)" \
+  "$(status conary/train FAILURE)" "$(status ci/proof ERROR)"; do
+  checks "$red"
+  out=$(red_head "$pr") && [ "$out" = red ] || fail "red_head with $(jq -c . "$tmp/checks"): $out"
+done
+git_ cat-file -e "$head^{tree}" || fail "red_head didn't fetch the red head"
+git_ rev-parse HEAD >"$state/proposed"
+out=$(red_head "$pr") && [ -z "$out" ] || fail "red_head with someone else's head on it: $out"
+echo "$head" >"$state/proposed"
+touch "$tmp/gh-down"
+! red_head "$pr" >/dev/null 2>&1 || fail "red_head with GitHub down said it isn't red"
+rm "$tmp/gh-down"
+listed=$pr
+pushed_before v3 # GitHub's head moves on after the listing
+echo "${listed#* }" >"$state/proposed"
+if why=$(red_head "$listed"); then fail "red_head on a head that moved since it was listed: $why"; fi
+grep -q "isn't ${listed#* } any more" <<<"$why" || fail "red_head's word on a moved head: $why"
+echo "red_head: ok"
+
+# A fresh bump for it is the red head's very tree when nothing moved, and
+# isn't once main has.
+fresh
+pushed_before v2
+pr=$(update_pr)
+checks "$(run COMPLETED FAILURE)"
+red_head "$pr" >/dev/null
+at_main
+commit flake.lock v2
+same_tree "$pr" || fail "same_tree on the same bump"
+landed README new
+at_main
+commit flake.lock v2
+! same_tree "$pr" || fail "same_tree once main moved"
+echo "same_tree: ok"
+
+# Replacing: the fresh bump goes to the branch as the same PR's new head,
+# retitled, and is what HOST-update remembers it pushed. No new PR.
+url=$(replace "$pr" "Update nixpkgs" "body text") || fail "replace failed: $url"
+[ "$url" = "https://github.com/sam/homelab/pull/7, in place of its red head ${pr:2:7}" ] || fail "replace's word: $url"
+fresh_head=$(git_ rev-parse HEAD)
+[ "$(git -C "$tmp/origin.git" rev-parse refs/heads/burrow-update)" = "$fresh_head" ] || fail "replace didn't move the branch"
+[ "$(cat "$state/proposed")" = "$fresh_head" ] || fail "proposed isn't the fresh head"
+grep -qx -- "api repos/sam/homelab/pulls/7 -X PATCH -f title=Update nixpkgs -f body=body text --jq .html_url" "$tmp/gh.log" ||
+  fail "replace's gh: $(cat "$tmp/gh.log")"
+! grep -q "pr create" "$tmp/gh.log" || fail "replace opened a new PR"
+[ "$(git -C "$tmp/origin.git" rev-parse refs/heads/main)" != "$fresh_head" ] || fail "replace pushed to main"
+echo "replace: ok"
+
+# Green again since (a rerun): left as it was, to ride.
+fresh
+pushed_before v2
+pr=$(update_pr)
+checks "$(run IN_PROGRESS '')"
+at_main
+commit flake.lock v3
+if why=$(replace "$pr" t b); then fail "replaced a head that isn't red: $why"; fi
+grep -q "isn't red any more" <<<"$why" || fail "replace's word on a head that isn't red: $why"
+[ "$(git -C "$tmp/origin.git" rev-parse refs/heads/burrow-update)" = "${pr#* }" ] || fail "replace moved a head that isn't red"
+[ "$(cat "$state/proposed")" = "${pr#* }" ] || fail "replace changed proposed for a head that isn't red"
+echo "replace, green again: ok"
+
+# A fix pushed between its look and its push: the push is refused, and the
+# fix stays.
+fresh
+pushed_before v2
+pr=$(update_pr)
+checks "$(run COMPLETED FAILURE)"
+at_main
+commit flake.lock v3
+fix() {
+  local other=$tmp/fix
+  rm -rf "$other"
+  git clone -q -b burrow-update "$tmp/origin.git" "$other" 2>/dev/null
+  echo fixed >"$other/flake.lock"
+  git -C "$other" commit -qam "fix it"
+  git -C "$other" push -q origin HEAD:burrow-update
+  git -C "$other" rev-parse HEAD
+}
+# shellcheck disable=SC2329 # replace calls it
+git_() { [ "$1" != push ] || [ -n "${fixed:-}" ] || fixed=$(fix); git -C "$work" "$@"; }
+if why=$(replace "$pr" t b); then fail "replace pushed over a fix: $why"; fi
+git_() { git -C "$work" "$@"; }
+grep -q "moved on from" <<<"$why" || fail "replace's word on a fix pushed meanwhile: $why"
+[ "$(git -C "$tmp/origin.git" show refs/heads/burrow-update:flake.lock)" = fixed ] || fail "replace pushed over a fix"
+[ "$(cat "$state/proposed")" = "${pr#* }" ] || fail "replace changed proposed when its push was refused"
+! grep -q PATCH "$tmp/gh.log" || fail "replace retitled a PR it didn't push to"
+echo "replace, a fix meanwhile: ok"

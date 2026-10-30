@@ -16,7 +16,8 @@
 # It works in its own clone (WORK), never in the operator's checkout, and holds
 # off while a switch is pending or while the box runs changes that aren't on
 # main yet. In a repo whose PRs land through its merge train, what it would push
-# goes up as a PR instead, and it rides that PR until it lands (propose.sh).
+# goes up as a PR instead, and it rides that PR until it lands, or puts a fresh
+# bump on it when a check fails on it (propose.sh).
 # (Everything in capitals comes from ../updates.nix.)
 
 [ "$(id -u)" = 0 ] || exec sudo "$0" "$@"
@@ -136,14 +137,21 @@ fi
 rm -f "$state/held-since"
 "$NOTIFY" close not-on-main "$HOST is back on main."
 
-# Its PR open, in a train repo: main with that on top, and nothing fresh.
+# Its PR open, in a train repo: main with that on top, and nothing fresh;
+# unless it's red on a head of its own, which a fresh bump replaces.
 riding=
+replacing=
 url=
 if [ -n "$TRAIN" ]; then
   pr=$(update_pr) || { note held "GitHub didn't say whether its PR is open; trying again next run"; exit 0; }
   if [ -n "$pr" ]; then
-    why=$(ride "$pr") || { note held "$why"; exit 0; }
-    riding=${pr%% *}
+    red=$(red_head "$pr") || { note held "$red; trying again next run"; exit 0; }
+    if [ -n "$red" ]; then
+      replacing=$pr
+    else
+      why=$(ride "$pr") || { note held "$why"; exit 0; }
+      riding=${pr%% *}
+    fi
   fi
 fi
 
@@ -246,6 +254,14 @@ else
   settled build-inputs
 fi
 settled build-main "main builds again."
+
+# A fresh bump for its red PR that came out as that head's very tree (nothing
+# moved, or what did doesn't build): putting it up again would only go red the
+# same way, so the Claude job the steward hands a red PR to (or a rerun) has it.
+if [ -n "$replacing" ] && same_tree "$replacing"; then
+  note held "its PR #${replacing%% *} is red, and a fresh bump is that same tree; holding until its Claude job gets it green"
+  exit 0
+fi
 
 live=
 if [ "$new" = "$current" ]; then
@@ -435,9 +451,13 @@ echo "$new" >"$state/deployed"
 # What went live, in words: pushing can rebase it onto what hasn't.
 went=${changed:+$(describe)}${changed:-main $(git_ rev-parse --short HEAD)}
 if [ -n "$TRAIN" ]; then
-  # Riding, or nothing new on main: nothing to put up.
-  [ -n "$riding" ] || [ -z "$changed" ] || url=$(propose "$(git_ log -1 --format=%s)" "$(pr_body)") ||
-    echo "its PR didn't open; the next run opens it"
+  if [ -n "$riding" ] || [ -z "$changed" ]; then
+    : # Riding, or nothing new on main: nothing to put up.
+  elif [ -n "$replacing" ]; then
+    url=$(replace "$replacing" "$(git_ log -1 --format=%s)" "$(pr_body)") || { echo "$url"; url=; }
+  else
+    url=$(propose "$(git_ log -1 --format=%s)" "$(pr_body)") || echo "its PR didn't open; the next run opens it"
+  fi
   [ -n "$changed" ] || git_ rev-parse HEAD >"$state/deployed-main"
 else
   push_main || true

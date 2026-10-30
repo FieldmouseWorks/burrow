@@ -10,9 +10,17 @@
 # PR in that with it; a newer bump put live beside it would leave the box on
 # something main never gets. So it rides the PR instead: main with the PR's
 # head on top, which is what the train lands next.
+#
+# Unless a check failed on a head it pushed itself (red_head). The steward
+# settles only a green PR, and takes one that goes red out of the train, so
+# that head is in no candidate for a new one to stop, and riding it would
+# hold the box until a Claude job got to it. So it brings in a fresh bump as
+# if none were open, which goes up as the same PR's new head (replace);
+# unless that's the red head's very tree, which can only go red the same way
+# again, so the job has it (same_tree).
 
-# update.sh sets state, REPO, BRANCH, HOST, UPDATE, TRAIN, riding, changed,
-# as_user and git_.
+# update.sh sets state, REPO, BRANCH, HOST, UPDATE, TRAIN, SETTLED, riding,
+# changed, as_user and git_.
 # shellcheck disable=SC2154
 
 # The open PR, as "NUMBER HEAD"; nothing when there's none. Fails when GitHub
@@ -22,6 +30,40 @@
 update_pr() {
   as_user gh api "repos/$REPO/pulls?state=open&base=main&head=${REPO%%/*}:$BRANCH" \
     --jq '.[0] // empty | "\(.number) \(.head.sha)"'
+}
+
+# Whether its open PR $1 ("NUMBER HEAD") is red on a head HOST-update
+# pushed: "red" when it is, with that head fetched (same_tree reads it), and
+# nothing when it isn't, or when the head is anyone else's (ride holds for
+# that). Red is a check on the head that failed, its latest run (so one
+# rerunning is pending), or a status other than the steward's own (SETTLED)
+# that's neither success nor pending: CI as the steward reads it (ci_state in
+# ../autoland/prs.py), or the train turning the head away. Fails, saying
+# why, when GitHub doesn't say, or the head moved since $1 was read.
+red_head() {
+  local n head json red
+  read -r n head <<<"$1"
+  [ "$head" = "$(cat "$state/proposed" 2>/dev/null)" ] || return 0
+  json=$(as_user gh pr view "$n" -R "$REPO" --json headRefOid,statusCheckRollup) || {
+    echo "GitHub didn't say how its PR #$n's checks stand"
+    return 1
+  }
+  red=$(jq -r --arg head "$head" --arg settled "$SETTLED" '
+    if .headRefOid != $head then error("moved") else
+      [.statusCheckRollup[]? | select((.context // .name) != $settled)
+        | if .__typename == "StatusContext" then .state | IN("SUCCESS", "PENDING", "EXPECTED") | not
+          else .status == "COMPLETED" and (.conclusion | IN("SUCCESS", "NEUTRAL", "SKIPPED") | not) end]
+      | if any then "red" else empty end
+    end' <<<"$json" 2>/dev/null) || {
+    echo "its PR #$n's head isn't $head any more"
+    return 1
+  }
+  [ -n "$red" ] || return 0
+  git_ fetch -q origin "refs/heads/$BRANCH" && [ "$(git_ rev-parse FETCH_HEAD)" = "$head" ] || {
+    echo "couldn't fetch its PR #$n's head ($head)"
+    return 1
+  }
+  echo red
 }
 
 # Puts the open PR $1 ("NUMBER HEAD") on top of main. Fails, saying why, when
@@ -60,6 +102,32 @@ already_live() {
   fi
 }
 
+# Whether HEAD, a fresh bump to replace its red PR $1's head, is that head's
+# very tree: nothing new to put up, only the same red again.
+same_tree() {
+  [ "$(git_ rev-parse 'HEAD^{tree}')" = "$(git_ rev-parse "${1#* }^{tree}")" ]
+}
+
+# HEAD as its red PR $1's new head, retitled $2 with body $3: the same PR,
+# never a new one. Only while that head is still on it and still red: a head
+# pushed since is someone's fix, and one gone green (a rerun) is the
+# steward's to settle and put in the train, so it's ridden instead. Prints
+# the PR's URL; fails, saying why, with the PR left as it was.
+replace() {
+  local n head red url
+  read -r n head <<<"$1"
+  red=$(red_head "$1") || { echo "$red; its PR #$n stays as it is"; return 1; }
+  [ -n "$red" ] || { echo "its PR #$n isn't red any more, so it stays as it is"; return 1; }
+  git_ push -q --force-with-lease="refs/heads/$BRANCH:$head" origin "HEAD:refs/heads/$BRANCH" 2>/dev/null || {
+    echo "its PR #$n moved on from $head while this ran, so it stays as it is"
+    return 1
+  }
+  git_ rev-parse HEAD >"$state/proposed"
+  url=$(as_user gh api "repos/$REPO/pulls/$n" -X PATCH -f "title=$2" -f "body=$3" --jq .html_url) ||
+    url="https://github.com/$REPO/pull/$n (its title still says the red head's: GitHub didn't take the new one)"
+  echo "$url, in place of its red head ${head:0:7}"
+}
+
 # HEAD as a new PR: title $1, body $2. Only with none open: whatever was on
 # BRANCH (a PR merged or closed) is HOST-update's to replace.
 propose() {
@@ -70,6 +138,6 @@ propose() {
 
 # The PR's body: what HOST-update did with the commit, as its message says.
 pr_body() {
-  printf '%s\n\nIt is live on %s. The steward settles this PR and the merge train lands it; until then %s brings in nothing newer.\n' \
+  printf '%s\n\nIt is live on %s. The steward settles this PR and the merge train lands it; until then %s brings in nothing newer, unless a check fails on it: then a fresh bump replaces it.\n' \
     "$(git_ log -1 --format=%b)" "$HOST" "$UPDATE"
 }
