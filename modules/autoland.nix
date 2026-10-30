@@ -674,7 +674,8 @@ in
         machine rather than in CI, `{ "<check>" = "<how to run it and record
         its verdict>"; }`: once a settled PR waits on nothing else, one
         Claude job a head runs them on that commit and records each verdict,
-        a failure as a failure), proofSlots (how many of those jobs the repo
+        a failure as a failure; none on a head the shared CI took in its docs
+        lane, its flake-check.yml's docs-paths), proofSlots (how many of those jobs the repo
         may have building at once, for proofs that take the whole machine:
         the rest wait their turn, those labelled `labels.first` first, then
         the oldest PR first; unset, no limit),

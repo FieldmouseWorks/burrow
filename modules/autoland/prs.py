@@ -44,7 +44,7 @@ query($owner: String!, $name: String!, $cursor: String) {
         commits(last: 1) {
           nodes { commit { oid statusCheckRollup { contexts(first: 100) { pageInfo { hasNextPage } nodes {
             __typename
-            ... on CheckRun { name status conclusion }
+            ... on CheckRun { name status conclusion checkSuite { app { slug } } }
             ... on StatusContext { context state description creator { login __typename } }
           } } }
           checkSuites(first: 100) { pageInfo { hasNextPage } nodes { conclusion workflowRun { workflow { name } } } } } }
@@ -150,6 +150,32 @@ def ci_state(pr, proofs=()):
     if not seen:
         return "none", []
     return ("red" if red else "pending" if pending else "green"), red or pending
+
+
+# The name burrow's shared CI gives its check run on a head it took in the
+# docs lane (flake-check.yml's docs-paths), after the caller's job's name.
+DOCS_LANE = "docs only"
+
+
+def docs_lane(pr, moved):
+    """Whether CI ran this head in the docs lane: every path it changes is
+    documentation, nothing the repo's flake builds or tests reads, so the
+    repo's proofs, which check what it builds, have nothing of its to check.
+    GitHub Actions passed the docs lane's check run on the head, and the PR
+    changes nothing under .github/: the workflow that judged it, and the
+    docs paths it read, are then the base branch's own, not ones the PR
+    wrote. moved: where its renames and copies started (touches.moved_from),
+    None if that couldn't be read."""
+    if moved is None or pr["changedFiles"] > len(pr["files"]["nodes"]):
+        return False
+    if any(p == ".github" or p.startswith(".github/") for p in [f["path"] for f in pr["files"]["nodes"]] + list(moved)):
+        return False
+    nodes = pr["commits"]["nodes"]
+    contexts = ((nodes[0]["commit"].get("statusCheckRollup") or {}).get("contexts") or {}).get("nodes", []) if nodes else []
+    return any(c["__typename"] == "CheckRun" and c["name"].rpartition(" / ")[2] == DOCS_LANE
+               and c["status"] == "COMPLETED" and c["conclusion"] == "SUCCESS"
+               and ((c.get("checkSuite") or {}).get("app") or {}).get("slug") == "github-actions"
+               for c in contexts)
 
 
 def our_status(pr, context=CONTEXT):

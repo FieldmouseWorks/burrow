@@ -22,3 +22,8 @@ jobs:
       # before every deploy (remi's modules/burrow.nix, `proofJobs` and
       # `checks`).
       build-skip: agents
+      # The docs lane, for a PR that changes only these: nothing burrow
+      # builds or tests reads them. docs/, house/ and templates/ aren't on
+      # it: the steward's config carries them (modules/autoland.nix,
+      # baselineDocs), so every machine's build reads them.
+      docs-paths: README.md AGENTS.md CLAUDE.md

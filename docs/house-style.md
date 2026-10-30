@@ -67,7 +67,13 @@ Every repo with code gets a `flake.nix` from the template
   pushes to `conary/train/**` and on pull_request's `edited` too, and turns
   `pr-gate` off: the gate checks the candidates the train lands, and a PR to
   the default branch gets only its `commits` (one to another branch, or
-  retargeted to one, still gets the gate). A
+  retargeted to one, still gets the gate). A repo that lists its
+  documentation in `docs-paths` (files nothing its flake builds or tests
+  reads; the input says how) gives a PR that changes only those the docs
+  lane: only the checks named in `docs-checks`, and none of autoland's
+  proofs. Check what the build reads before listing a path: burrow's own
+  `docs/` and `house/` are in its machines' config, so they aren't on its
+  list. A
   repo's heavier gates (VM replays, browser tiers, databases) stay its own
   jobs, alongside it, and run their tools from `nix develop`.
 - Renovate keeps `flake.lock` current, so a repo's toolchains and gate move
