@@ -1,0 +1,49 @@
+{
+  "nodes": {
+    "kit": {
+      "locked": {
+        "lastModified": 1793280000,
+        "narHash": "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+        "owner": "Sam",
+        "repo": "Kit",
+        "rev": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "type": "github"
+      },
+      "original": { "owner": "Sam", "repo": "Kit", "type": "github" }
+    },
+    "nixpkgs": {
+      "locked": {
+        "lastModified": 1793180000,
+        "narHash": "sha256-BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=",
+        "ref": "nixos-26.05",
+        "rev": "dddddddddddddddddddddddddddddddddddddddd",
+        "shallow": true,
+        "type": "git",
+        "url": "https://github.com/NixOS/nixpkgs"
+      },
+      "original": { "ref": "nixos-26.05", "shallow": true, "type": "git", "url": "https://github.com/NixOS/nixpkgs" }
+    },
+    "root": {
+      "inputs": {
+        "kit": "kit",
+        "nixpkgs": "nixpkgs",
+        "tools": "tools",
+        "tools-nixpkgs": [ "tools", "nixpkgs" ]
+      }
+    },
+    "tools": {
+      "locked": {
+        "lastModified": 1793285965,
+        "narHash": "sha256-CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC=",
+        "ref": "refs/heads/main",
+        "rev": "cccccccccccccccccccccccccccccccccccccccc",
+        "shallow": true,
+        "type": "git",
+        "url": "https://github.com/sam/tools.git"
+      },
+      "original": { "type": "git", "url": "https://github.com/sam/tools.git" }
+    }
+  },
+  "root": "root",
+  "version": 7
+}

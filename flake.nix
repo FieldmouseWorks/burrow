@@ -35,7 +35,7 @@
       # The ledger's machines take Conary from its own flake; burrow's checks
       # build theirs with a stand-in for its `cn`.
       cnStandIn = pkgs.writeShellScriptBin "cn" "exit 1";
-      names = [ "claude" "undo" "switch" "notify" "updates" "proj" "remote-control" "agents" "robot" "ops" "toolbox" "autoland" "house" "events" "ledger" "browser" "heartbeat" "backup" "watchdog" "github" "rust-cache" "cpu" ];
+      names = [ "claude" "undo" "switch" "notify" "updates" "proj" "remote-control" "agents" "robot" "ops" "toolbox" "autoland" "house" "events" "ledger" "browser" "heartbeat" "backup" "watchdog" "github" "rust-cache" "cpu" "dispatch" ];
       # gh-token (modules/github): its package, and its gate.
       # Built for every platform lib/project.nix knows, like the module.
       ghToken = self.lib.project {
@@ -118,6 +118,7 @@
                 (nixpkgs.lib.optionalAttrs (name == "updates") { burrow.updates.origin = "https://github.com/sam/homelab"; })
                 (nixpkgs.lib.optionalAttrs (name == "autoland") { burrow.autoland = { owners = [ "sam" ]; authors = [ "sam" ]; app = { id = 123456; slug = "sams-steward"; keyFile = "/run/secrets/autoland-app-key"; }; reviewers.codex.enable = true; }; })
                 (nixpkgs.lib.optionalAttrs (name == "house") { burrow.house.owners = [ "sam" ]; })
+                (nixpkgs.lib.optionalAttrs (name == "dispatch") { burrow.dispatch.runners.ci-runner = { repo = "sam/homelab"; labels = [ "homelab" ]; }; })
                 (nixpkgs.lib.optionalAttrs (name == "ledger") { burrow.ledger = { package = cnStandIn; owners = [ "sam" ]; anchorRepo = "sam/homelab"; reviewers = [ "sams-steward[bot]" ]; sessionLinks = [ "sam/homelab" ]; daemon = true; }; })
                 (nixpkgs.lib.optionalAttrs (builtins.elem name [ "events" "autoland" ]) { burrow.events = { host = "example.org"; secretFile = "/run/secrets/burrow-webhook"; }; })
                 # github has no switch: it's on with an App to serve.
@@ -344,6 +345,73 @@
           [ "$got" = the-stewards ] || { echo "a pass's own call doesn't use the steward's token: $got"; exit 1; }
           touch $out
         '';
+        # The dispatcher's config as the module writes it, read by the binary
+        # (the example's, and one with a deploy to watch): which commit of
+        # each watched input the running system has, from the flake's
+        # flake.lock (tests/dispatch), with its own repo left to the
+        # configuration revision the switch stamps, so that a build from a
+        # dirty tree and the same tree committed are one system; and each
+        # runner's labels,
+        # GitHub's defaults for the machine's architecture among them unless
+        # it has none.
+        dispatch-config = let
+          inherit (nixpkgs) lib;
+          machine = own: modules: lib.nixosSystem {
+            modules = [
+              self.nixosModules.dispatch
+              self.nixosModules.updates
+              ./examples/machine.nix
+              {
+                burrow.dispatch = {
+                  enable = true;
+                  runners = {
+                    ci-runner = { repo = "sam/homelab"; labels = [ "homelab" ]; };
+                    bare = { repo = "sam/homelab"; labels = [ "bare" ]; defaultLabels = false; };
+                  };
+                };
+                burrow.updates = {
+                  enable = true;
+                  origin = "https://github.com/sam/homelab";
+                  watch = [ "sam/homelab" "sam/kit" "Sam/Tools" "sam/elsewhere" ];
+                };
+                burrow.switch.flakeInputs = {
+                  self = { outPath = ./tests/dispatch; } // own;
+                  kit.rev = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+                  tools.rev = "cccccccccccccccccccccccccccccccccccccccc";
+                  nixpkgs.rev = "dddddddddddddddddddddddddddddddddddddddd";
+                };
+              }
+            ] ++ modules;
+          };
+          committed = machine { rev = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"; } [ ];
+          dirty = machine { dirtyRev = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-dirty"; } [ ];
+          arm = machine { } [ { nixpkgs.hostPlatform = lib.mkForce "aarch64-linux"; } ];
+          settings = m: m.config.burrow.dispatch.settings;
+          revisions = map (m: m.config.system.configurationRevision) [ committed dirty ];
+          deploy = { inherit ((settings committed).deploy) own running; };
+          want = {
+            own = "sam/homelab";
+            running = {
+              "sam/kit" = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+              "Sam/Tools" = "cccccccccccccccccccccccccccccccccccccccc";
+            };
+          };
+          labels = m: lib.mapAttrs (_: r: r.labels) (settings m).runners;
+          wantLabels = arch: { ci-runner = [ "self-hosted" "Linux" arch "homelab" ]; bare = [ "bare" ]; };
+        in
+          assert lib.assertMsg (deploy == want) "dispatch: ${builtins.toJSON deploy}, not ${builtins.toJSON want}";
+          assert lib.assertMsg (settings dirty == settings committed)
+            "dispatch: a build from a dirty tree isn't the same tree committed: ${builtins.toJSON (settings dirty)}, ${builtins.toJSON (settings committed)}";
+          # What a pass compares the own repo at: the switch stamps it.
+          assert lib.assertMsg (revisions == [ "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-dirty" ])
+            "dispatch: the systems are stamped ${builtins.toJSON revisions}";
+          assert lib.assertMsg (labels committed == wantLabels "X64") "dispatch: x86_64's labels: ${builtins.toJSON (labels committed)}";
+          assert lib.assertMsg (labels arm == wantLabels "ARM64") "dispatch: aarch64's labels: ${builtins.toJSON (labels arm)}";
+          pkgs.runCommand "dispatch-config-check" { } ''
+            ${self.nixosConfigurations.example.config.systemd.services.burrow-dispatch.serviceConfig.ExecStart} status
+            ${committed.config.systemd.services.burrow-dispatch.serviceConfig.ExecStart} status
+            touch $out
+          '';
         # HOST-notify's issues, with a stand-in for gh: one a notice, closed
         # when cleared, and pending until GitHub has shown it closed.
         notify = pkgs.runCommand "notify-check" { nativeBuildInputs = [ pkgs.shellcheck pkgs.jq pkgs.bash ]; } ''
