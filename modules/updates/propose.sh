@@ -16,10 +16,12 @@
 # shellcheck disable=SC2154
 
 # The open PR, as "NUMBER HEAD"; nothing when there's none. Fails when GitHub
-# doesn't say.
+# doesn't say. Only REPO's own BRANCH counts: a fork's PR from a branch of the
+# same name is anyone's to open. GitHub's head filter is OWNER:BRANCH, and
+# allows one open PR per head and base, so there's never a page more.
 update_pr() {
-  as_user gh pr list -R "$REPO" --head "$BRANCH" --base main --state open \
-    --json number,headRefOid --jq '.[0] // empty | "\(.number) \(.headRefOid)"'
+  as_user gh api "repos/$REPO/pulls?state=open&base=main&head=${REPO%%/*}:$BRANCH" \
+    --jq '.[0] // empty | "\(.number) \(.head.sha)"'
 }
 
 # Puts the open PR $1 ("NUMBER HEAD") on top of main. Fails, saying why, when

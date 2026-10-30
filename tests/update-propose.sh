@@ -14,9 +14,11 @@ git config --global user.email test@example.org
 git config --global init.defaultBranch main
 git config --global advice.detachedHead false
 
-# gh: `pr list` answers the open PRs in $tmp/prs ("NUMBER HEAD" lines) as
-# JSON, `pr create` adds one, and every call goes to $tmp/gh.log. With
-# $tmp/gh-down there, it fails as an unreachable GitHub does.
+# gh: `api repos/R/pulls?...` answers the open PRs in $tmp/prs ("NUMBER HEAD
+# [OWNER/REPO BRANCH]" lines, sam/homelab's burrow-update by default) as
+# GitHub does, newest first and filtered by its head=OWNER:BRANCH, `pr create`
+# adds one, and every call goes to $tmp/gh.log. With $tmp/gh-down there, it
+# fails as an unreachable GitHub does.
 mkdir "$tmp/bin"
 cat >"$tmp/bin/gh" <<EOF
 #!$(command -v bash)
@@ -26,7 +28,12 @@ printf '%s\n' "\$*" >>"$tmp/gh.log"
 jq=
 for ((i = 1; i <= \$#; i++)); do [ "\${!i}" != --jq ] || { j=\$((i + 1)); jq=\${!j}; }; done
 case "\$1 \$2" in
-  "pr list") json=\$(jq -Rn '[inputs | split(" ") | {number: (.[0] | tonumber), headRefOid: .[1]}]' <"$tmp/prs") ;;
+  "api repos/sam/homelab/pulls?"*)
+    head=\$(sed -n 's/.*[?&]head=\([^&]*\).*/\1/p' <<<"\$2")
+    json=\$(jq -Rn --arg head "\$head" '[inputs | split(" ")
+      | {number: (.[0] | tonumber), sha: .[1], repo: (.[2] // "sam/homelab"), ref: (.[3] // "burrow-update")}
+      | select(\$head == "" or \$head == "\(.repo | split("/")[0]):\(.ref)")
+      | {number, head: {sha, ref, repo: {full_name: .repo}}}] | reverse' <"$tmp/prs") ;;
   "pr create") n=\$((\$(wc -l <"$tmp/prs") + 7)); echo "\$n \$(git -C "$tmp/origin.git" rev-parse refs/heads/burrow-update)" >>"$tmp/prs"
     echo "https://github.com/sam/homelab/pull/\$n"; exit 0 ;;
   *) echo "gh stand-in: \$*?" >&2; exit 2 ;;
@@ -87,8 +94,14 @@ fresh
 out=$(update_pr) && [ -z "$out" ] || fail "update_pr with none open: $out"
 echo "7 abc" >"$tmp/prs"
 out=$(update_pr) && [ "$out" = "7 abc" ] || fail "update_pr with #7 open: $out"
-grep -q -- "pr list -R sam/homelab --head burrow-update --base main --state open" "$tmp/gh.log" ||
+grep -q -- "api repos/sam/homelab/pulls?state=open&base=main&head=sam:burrow-update" "$tmp/gh.log" ||
   fail "update_pr asked about another PR: $(cat "$tmp/gh.log")"
+# A fork's PR from a branch of the same name, newer than its own or alone:
+# never its own.
+echo "9 def mallory/homelab burrow-update" >>"$tmp/prs"
+out=$(update_pr) && [ "$out" = "7 abc" ] || fail "update_pr with a fork's same-named PR open too: $out"
+echo "9 def mallory/homelab burrow-update" >"$tmp/prs"
+out=$(update_pr) && [ -z "$out" ] || fail "update_pr with only a fork's same-named PR open: $out"
 touch "$tmp/gh-down"
 ! update_pr >/dev/null 2>&1 || fail "update_pr with GitHub down said none open"
 echo "update_pr: ok"
