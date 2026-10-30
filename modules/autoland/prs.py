@@ -8,6 +8,18 @@ import train as T
 from common import CONTEXT, DRY, log
 
 
+# What GitHub says of a PR's merge (its mergeStateStatus, every value GitHub's
+# API has) and the step that calls for once it's settled. A value this doesn't
+# know is "refused": not merged, and counted like a merge GitHub turned down.
+MERGE_STEPS = {
+    "CLEAN": "merge", "HAS_HOOKS": "merge",
+    "UNSTABLE": "merge",  # a check failed that its rules don't require
+    "BLOCKED": "merge",  # its rules want what settling gives: the steward's status, its required checks
+    "BEHIND": "update",  # its rules want it up to date with its base
+    "DIRTY": "conflict",
+    "UNKNOWN": "wait", "DRAFT": "wait",  # GitHub is still working it out; a draft is seen to first
+}
+
 PRS = """
 query($owner: String!, $name: String!, $cursor: String) {
   repository(owner: $owner, name: $name) {

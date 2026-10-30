@@ -1,7 +1,8 @@
 # proj's choice of who takes a slot (modules/proj/pick.sh), on what take_slot
 # would see: pipeline jobs' slots stay theirs, one project's jobs stop at
-# PER_PROJECT while the others go by, and pipeline ones count against no cap;
-# and which jobs are pipeline ones: only those in the pipeline's own repos.
+# PER_PROJECT while the others go by, pipeline ones count against no cap, and
+# lead ones go ahead of everyone; and which jobs are pipeline ones: only those
+# in the pipeline's own repos, and lead ones those in its lead repos.
 #
 #   bash tests/proj-pick.sh modules/proj/pick.sh
 set -euo pipefail
@@ -52,13 +53,25 @@ case_ "p 3" "normal /src/remi" "normal /src/remi" free free "p pipeline /src/rem
 # read is in none.
 case_ "b 3" "normal /src/my web" "normal /src/my web" free free "a normal /src/my web" "b normal /src/my"
 case_ "a 3" "normal /src/x" "normal /src/x" free free "a normal "
+# A lead turn goes first, from anywhere in the line: ahead of pipeline turns
+# that came before it, and of everyone else.
+case_ "l 1" free free free free "p pipeline /src/remi" "a first /src/web" "l lead /src/burrow"
+case_ "l 4" "normal /src/x" "normal /src/y" "normal /src/z" free "p pipeline /src/remi" "l lead /src/burrow"
+# It takes the pipeline's slot as a pipeline turn does, counts against no cap,
+# and holds none of its project's.
+case_ "l 4" "normal /src/burrow" "normal /src/burrow" "normal /src/z" free "a normal /src/web" "l lead /src/burrow"
+case_ "a 3" "lead /src/burrow" "normal /src/burrow" free free "a normal /src/burrow"
+# With no slot free nobody goes, lead or not; of two lead turns, the first in
+# line goes first.
+case_ "" "normal /src/x" "normal /src/y" "normal /src/z" "pipeline /src/b" "l lead /src/burrow"
+case_ "l 2" "lead /src/burrow" free free free "p pipeline /src/remi" "l lead /src/burrow" "m lead /src/burrow"
 
 # A job run with --pipeline is a pipeline one only in a project of one of the
 # pipeline's own repos, told by its clone's origin: on GitHub, in any form git
 # takes, any case. Anywhere else it goes as --first, so pick holds it to its
 # project's cap and off the pipeline's slots: one repo's PRs can't fill the
 # machine.
-export PIPELINE="Sam/Burrow sam/box"
+export PIPELINE="Sam/Burrow sam/box" LEAD=""
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 export GIT_CEILING_DIRECTORIES=$tmp
@@ -159,5 +172,21 @@ dem d "asked as --pipeline, but its origin, github.com/sam/psiv, isn't in pipeli
 dem t "asked as --pipeline, but its origin, github.com/sam/psiv, isn't in pipelineRepos: it goes as --first"
 dem f "asked as --pipeline, but its origin isn't a GitHub repo's: it goes as --first"
 dem o "asked as --pipeline, but its project has no origin: it goes as --first"
+
+# A lead repo's pipeline jobs (LEAD, among PIPELINE, any case) are lead ones,
+# in the same place in line as pipeline ones (pick takes them first); its
+# other jobs, and pipeline ones elsewhere, are as they were.
+LEAD="sam/BURROW"
+mkdir -p "$tmp/jobs/b"
+: >"$tmp/jobs/b/pipeline"
+echo "$tmp/scp" >"$tmp/jobs/b/project"
+cls p normal lead
+cls p first lead
+cls b normal pipeline
+cls d normal first
+cls n normal normal
+plc 2-17-p-1-x p lead 0-17-p-1-x
+plc 0-17-b-1-x b pipeline 0-17-b-1-x
+dem p ""
 
 echo "proj-pick: ok"

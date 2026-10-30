@@ -209,7 +209,7 @@ with open(f"{tmp}/config.json", "w") as f:
         "trainContext": "conary/train",
         "train": {"cn": f"{tmp}/cn", "env": {"CONARY_LEDGER": f"{tmp}/ledger", "CONARY_ANCHOR_REPO": "sam/homelab"},
                   "branches": "conary/*"},
-        "repos": {}, "pipelineRepos": ["Sam/Pipe"],
+        "repos": {}, "pipelineRepos": ["Sam/Pipe"], "leadRepos": ["Sam/Lead"],
         "webhook": {"url": "https://example.org/burrow/hook", "events": ["check_suite", "push"]},
         "kick": f"http://127.0.0.1:{kicks.server_port}/kick/autoland",
         "watch": {"kick": f"http://127.0.0.1:{kicks.server_port}/kick/watchdog", "escalated": f"{tmp}/escalated.json",

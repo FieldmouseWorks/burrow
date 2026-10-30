@@ -24,6 +24,7 @@ import subprocess
 import sys
 
 import common as C
+import waits
 from common import CFG, DRY, log, repo_cfg
 
 TRAIN = CFG["train"] or {}
@@ -113,6 +114,35 @@ def join(repo, pr, alone=False):
     if not any(m["pr"] == n for m in t["joined"]):
         t["joined"].append({"pr": n})
     return None
+
+
+def ride(repo, pr, st, alone, desc, settle, strike, said):
+    """A PR settled against the default branch: into the train at this head,
+    which lands it, rather than merged by the steward; alone if it touches a
+    one-way path. Its status says where in the train it is, or why the train
+    holds it out and until what. Nothing else may merge it: a merge queued on
+    it is taken off, or it's tried again (strike). st is the PR's state, which
+    remembers the head it joined at; settle and strike are its step's own
+    (step.py); said is what GitHub said when it refused its merge, as the
+    train's status on the head has it."""
+    n, head = pr["number"], pr["headRefOid"]
+    if C.queued(pr) and not C.unland(repo, pr):
+        strike("status")
+        settle("pending", "Settled, but GitHub didn't take its queued merge off; trying again")
+        return
+    where = seat(repo, n) if st.get("joined") == head else None
+    if where is None:
+        held = join(repo, pr, alone=alone)
+        if held:
+            said = HELD.get(held, held).format(said or "GitHub refused its merge")
+            settle("pending", f"Settled, but held out of the train: {said}", wait=waits.TRAIN)
+            return
+        st["joined"] = head
+        where = seat(repo, n)
+    if not settle("success", f"In the train, {where}. {desc}"[:140], wait=waits.TRAIN) and not DRY:
+        # Without the status the rules require, its merge would be refused:
+        # out until GitHub takes it (settle strikes it).
+        leave(repo, pr)
 
 
 def leave(repo, pr):
