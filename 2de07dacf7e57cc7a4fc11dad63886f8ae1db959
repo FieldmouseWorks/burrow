@@ -1,0 +1,53 @@
+{
+  "conary": "note v1",
+  "change": "64panba3b7n6jwq2pvwhyz1tww",
+  "repo": {
+    "owner": "fieldmouseworks",
+    "name": "burrow"
+  },
+  "pr": 198,
+  "url": "https://github.com/fieldmouseworks/burrow/pull/198",
+  "summary": "proj: a turn's end runs in a unit of its own, out of reach of what kills the turn",
+  "task": null,
+  "author": {
+    "kind": "person",
+    "login": "TusanHomichi",
+    "session": null
+  },
+  "landing": {
+    "revision": "4589366293a77bf91bb757455167776b351232461dfd7c927395b250d16d0158",
+    "before": "09ba6ba6d1b131caae7fb9869f4957528b329c58",
+    "after": "2de07dacf7e57cc7a4fc11dad63886f8ae1db959",
+    "by": {
+      "kind": "status",
+      "login": "fieldmouseworks-steward[bot]"
+    },
+    "at": 1793374173594
+  },
+  "evidence": [
+    {
+      "kind": "ci",
+      "check": "check / commits",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/41058588399/job/124072275443"
+    },
+    {
+      "kind": "review",
+      "check": "codex",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/198#pullrequestreview-5712529116"
+    },
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/41058588399/job/124072275038"
+    },
+    {
+      "kind": "ci",
+      "check": "agents",
+      "result": "pass",
+      "source": "status agents"
+    }
+  ]
+}
