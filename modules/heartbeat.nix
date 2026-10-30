@@ -7,8 +7,9 @@
 # alive for it.
 #
 # The checks are HOST-health's (burrow.updates.health; without burrow.updates
-# there are none, and the beat only says the machine is up). Its timer is on
-# purpose: silence is the signal, and nothing sends an event when a machine dies.
+# there are only those other modules add, burrow.ops' watchdog say, and with
+# none the beat only says the machine is up). Its timer is on purpose: silence
+# is the signal, and nothing sends an event when a machine dies.
 inputs:
 { config, lib, pkgs, ... }:
 let
