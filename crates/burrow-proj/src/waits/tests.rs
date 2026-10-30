@@ -199,14 +199,29 @@ fn waits() {
     case(&["state queued"], |w| w.link.is_none());
 }
 
-/// A file a waiter holds locked, written at `at`, until it's dropped.
-fn hold(path: &std::path::Path, text: &str, at: u64) -> File {
+/// A file a waiter holds locked, written at `at`, until it's dropped: the
+/// waiter dying.
+fn hold(path: &std::path::Path, text: &str, at: u64) -> Held {
     fs::write(path, text).unwrap();
     let f = File::options().read(true).write(true).open(path).unwrap();
     f.set_modified(UNIX_EPOCH + Duration::from_secs(at))
         .unwrap();
     f.lock().unwrap();
-    f
+    Held(f)
+}
+
+/// A waiter's locked file, which unlocks as it's dropped rather than only
+/// closing. A waiter is a process of its own, and its lock goes when it
+/// dies; here it's a file in a test process whose other tests spawn
+/// children (git, in pick's), and a child forked while the file is open
+/// shares its lock until it execs, so closing the file alone can leave it
+/// held a moment longer.
+struct Held(File);
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        self.0.unlock().unwrap();
+    }
 }
 
 // What a running turn waits in line for, from its wait dir: the oldest file
