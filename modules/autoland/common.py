@@ -508,6 +508,21 @@ def job_state(jid):
     return p.stdout.strip() or None
 
 
+# A proj job's id: its project, when it started, and mktemp's four.
+JOB_ID = re.compile(r"[\w.-]+-\d{8}-\d{6}-[A-Za-z0-9]{4}")
+
+
+def stop_job(jid):
+    """End the job (proj stop): its running turn, and what it waits on to
+    resume. One proj no longer has is over already; any other refusal
+    raises."""
+    if DRY:
+        return
+    p = subprocess.run([CFG["proj"], "stop", jid], capture_output=True, text=True)
+    if p.returncode and not p.stderr.startswith(f"no job {jid}"):
+        raise RuntimeError(f"proj stop {jid}: {p.stderr.strip() or f'exit {p.returncode}'}")
+
+
 def coverage(repos, covered):
     """repos.json, for renovate-sweep, and when: every repo the steward has,
     with how its proofs run and whether this pass saw to its PRs."""

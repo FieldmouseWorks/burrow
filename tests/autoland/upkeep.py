@@ -8,7 +8,8 @@ import subprocess
 import time
 import urllib.parse
 
-from harness import (C, FAIL, JOBS, R, H, S, STATES, T0, V, WROTE, fresh_pr_state, info, gh_stub, mkpr, stand_in, tmp)
+from harness import (C, FAIL, JOBS, R, H, REAL, S, STATES, STOPPED, T0, V, WROTE, fresh_pr_state, info, gh_stub, mkpr,
+                     stand_in, tmp)
 
 stand_in()
 # Its parts are called straight here, so they're for sam's repos as a pass
@@ -218,107 +219,144 @@ assert required[0]["parameters"]["required_status_checks"] == [{"context": "revi
 C.gh, C.write = gh_stub, write
 
 # A repo made under the name of one GitHub deleted (made after the steward
-# last settled one of that name) starts over as new: what was kept about
-# the old one goes (another repo's of a like name stays), its settings,
-# labels and hook are set again at once, and it leaves known, so it gets
-# its baseline job. The machine's checkout of the old one, whose root commit
-# GitHub doesn't have, is moved aside where no job takes it; the new one's
-# own checkout stays. GitHub not saying which it is: nothing's forgotten
-# yet, and the pass tries again.
+# last settled one of that name) starts over as new, before anything acts
+# on it: the deleted one's Claude jobs are stopped, wherever its state keeps
+# them; every clone that wasn't cloned since it was made is moved aside,
+# where no job takes it, and the new one's own clone stays; what was kept
+# about the old one goes, and another repo's of a like name stays; and it
+# leaves known and failed at once, so it gets its baseline job.
 src = f"{tmp}/remade-src"
 S.CFG["projectsDir"] = src
+remade = {"repo": "sam/r", "private": False, "default": "main", "created": "2026-10-24T06:00:00Z"}
+MADE = C.ts(remade["created"])
+origin = f"{tmp}/remade-origin"
+subprocess.run(["git", "init", "-q", origin], check=True)
+subprocess.run(["git", "-C", origin, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty",
+                "-m", "one"], check=True)
 
 
-def checkout(d):
-    path = f"{src}/{d}"
-    subprocess.run(["git", "init", "-q", path], check=True)
-    subprocess.run(["git", "-C", path, "remote", "add", "origin", "https://github.com/sam/r"], check=True)
-    subprocess.run(["git", "-C", path, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty",
-                    "-m", d], check=True)
-    return subprocess.run(["git", "-C", path, "rev-list", "--max-parents=0", "HEAD"], capture_output=True, text=True,
-                          check=True).stdout.strip()
+def clone(d, at, url="https://github.com/sam/r"):
+    """A clone in src/d, made at `at`, whose origin is url."""
+    subprocess.run(["git", "clone", "-q", origin, f"{src}/{d}"], check=True,
+                   env={**os.environ, "GIT_COMMITTER_DATE": f"@{at:.0f} +0000"})
+    subprocess.run(["git", "-C", f"{src}/{d}", "remote", "set-url", "origin", url], check=True)
 
 
-NEW_ROOT, ANSWER = None, {}
+def made(d):
+    """A checkout of sam/r that git didn't clone (init, then an origin)."""
+    subprocess.run(["git", "init", "-q", f"{src}/{d}"], check=True)
+    subprocess.run(["git", "-C", f"{src}/{d}", "remote", "add", "origin", "https://github.com/Sam/R.git"], check=True)
 
 
-def commits(*a, **k):
-    if a[:1] == ("api",) and a[1].startswith("repos/sam/r/commits/"):
-        sha = a[1].rpartition("/")[2]
-        if sha in ANSWER:
-            raise ANSWER[sha]
-        if sha != NEW_ROOT:
-            raise RuntimeError(f"gh api {a[1]}: gh: No commit found for SHA: {sha} (HTTP 422)")
-        return sha
-    return gh_stub(*a, **k)
+JIDS = [f"r-20261023-1200{n:02d}-ab{n:02d}" for n in range(9)]
 
 
 def old_state():
     fresh_pr_state()
     C.save("repo-sam_r.json", {"settings": C.ts(T0), "app": 7, "labels": ["hold", "needs-owner", "first"],
-                               "hook": "x", "hookId": 41})
-    for name in ("pr-sam_r-1.json", "dashboard-sam_r.json", "flaky-sam_r.json", "pr-sam_r-x-1.json", "repo-sam_r-x.json"):
-        C.save(name, {"old": True})
+                               "hook": "x", "hookId": 41, "red": {"job": JIDS[0], "jobs": 1},
+                               "baselineJob": JIDS[1]})
+    C.save("pr-sam_r-1.json", {"fixJob": JIDS[2], "provedJob": JIDS[3], "proofsLive": [JIDS[3], JIDS[4]],
+                               "proofPaths": {JIDS[4]: {"paths": [], "at": 1}}, "fix": "a" * 40})
+    C.save("dashboard-sam_r.json", {"job": JIDS[5], "items": {"7": {"job": JIDS[6]}}})
+    C.save("flaky-sam_r.json", {"job": JIDS[7], "jobAt": 5})
+    C.save("pr-sam_r-x-1.json", {"fixJob": JIDS[8]})
+    C.save("repo-sam_r-x.json", {"settings": C.ts(T0)})
     snap = V.snap_name("pr-sam_r-1.json", "a" * 40, "main")
     C.save(f"{V.DONE}/codex--{snap}.json", {"result": "ok"})
     os.makedirs(f"{tmp}/state/{V.SESSIONS}/{V.session_name('codex', snap)}")
-    os.makedirs(f"{tmp}/state/{V.GIT}/sam__r.git")
+    os.makedirs(f"{tmp}/state/{V.GIT}/sam__r.git/objects")
+    C.save("known.json", ["sam/r", "sam/r-x"])
+    C.save("baseline-failed.json", {"sam/r": 1, "sam/r-x": 2})
 
 
-C.gh = commits
-remade = {"repo": "sam/r", "private": False, "default": "main", "created": "2026-10-24T06:00:00Z"}
 old_state()
-OLD_ROOT = checkout("r")
-C.NOW = C.ts(T0) + 7 * 3600
-known = {"sam/r", "sam/r-x"}
-WROTE.clear()
-assert R.settle_repo(remade, known) is True and known == {"sam/r-x"}, known
+clone("r", MADE - 86400)                                   # the deleted one's
+clone("r-2", MADE - 3600)                                  # another of its
+made("zz")                                                 # one nobody cloned
+clone("r-new", MADE + 60)                                  # the new one's
+clone("x", MADE - 86400, "https://github.com/sam/r-x")     # another repo's
+C.NOW = MADE + 3600
+known, failed = {"sam/r", "sam/r-x"}, {"sam/r": 1, "sam/r-x": 2}
+STOPPED.clear()
+R.restart(remade, known, failed)
+assert sorted(STOPPED) == JIDS[:8], STOPPED
+assert known == {"sam/r-x"} and failed == {"sam/r-x": 2}, (known, failed)
+assert C.load("known.json", None) == ["sam/r-x"] and C.load("baseline-failed.json", None) == {"sam/r-x": 2}
 left = sorted(os.listdir(f"{tmp}/state"))
-assert "pr-sam_r-1.json" not in left and "dashboard-sam_r.json" not in left and "flaky-sam_r.json" not in left, left
+assert not [x for x in left if x.startswith(("pr-sam_r-1", "dashboard-sam_r", "flaky-sam_r", "repo-sam_r."))], left
 assert "pr-sam_r-x-1.json" in left and "repo-sam_r-x.json" in left, left
 assert os.listdir(f"{tmp}/state/{V.DONE}") == [] and not os.path.exists(f"{tmp}/state/{V.GIT}/sam__r.git")
 assert all(x.startswith(V.GONE) for x in os.listdir(f"{tmp}/state/{V.SESSIONS}")), os.listdir(f"{tmp}/state/{V.SESSIONS}")
+stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(C.NOW))
+assert sorted(os.listdir(src)) == sorted(["r-new", "x", f".r.gone-{stamp}", f".r-2.gone-{stamp}", f".zz.gone-{stamp}"])
+assert C.project_dir("sam/r") == "r-new", os.listdir(src)
+# Then it's settled as new, at once: its settings, labels and hook.
+WROTE.clear()
+assert R.settle_repo(remade, known) is True
 st = C.load("repo-sam_r.json", {})
 assert st["settings"] == C.NOW and st.get("hookId") != 41, st
 assert sorted(x.split()[2] for x in WROTE if x.startswith("label create")) == ["first", "hold", "needs-owner"], WROTE
 assert "api -X PUT repos/sam/r/vulnerability-alerts" in WROTE, WROTE
-aside = [x for x in os.listdir(src) if x.startswith(".r.gone-")]
-assert not os.path.exists(f"{src}/r") and len(aside) == 1 and C.project_dir("sam/r") is None, os.listdir(src)
-# Settled now, it isn't made again: what's kept about it from here on
-# stays. Until its baseline job starts it's still new.
+# Settled now, it isn't started over again: what's kept about it from here
+# on stays, its new clone too.
 C.save("pr-sam_r-2.json", {"new": True})
-assert R.settle_repo(remade, known) is True and known == {"sam/r-x"}
-known.add("sam/r")
-assert R.settle_repo(remade, known) is False and "pr-sam_r-2.json" in os.listdir(f"{tmp}/state")
-# Its job cloned the new one: that checkout stays where it is.
-NEW_ROOT = checkout("r")
+STOPPED.clear()
+R.restart(remade, known, failed)
+assert "pr-sam_r-2.json" in os.listdir(f"{tmp}/state") and STOPPED == [] and os.path.isdir(f"{src}/r-new")
+# Nor is one made before the steward settled it, or one it never settled.
 old_state()
-assert R.settle_repo(remade, {"sam/r"}) is True and os.path.isdir(f"{src}/r"), os.listdir(src)
-# GitHub not answering, or answering something else: it raises, and
-# nothing is forgotten or moved.
-for e in (C.Unavailable(f"gh api repos/sam/r/commits/{OLD_ROOT}: gh: HTTP 502"),
-          RuntimeError(f"gh api repos/sam/r/commits/{OLD_ROOT}: gh: Not Found (HTTP 404)")):
+for r, st in (({**remade, "created": "2026-10-23T00:00:00Z"}, {"sam/r", "sam/r-x"}), (remade, None)):
+    if st is None:
+        os.remove(f"{tmp}/state/repo-sam_r.json")
+    known = {"sam/r", "sam/r-x"}
+    R.restart(r, known, {})
+    assert known == {"sam/r", "sam/r-x"} and STOPPED == [] and "pr-sam_r-1.json" in os.listdir(f"{tmp}/state")
+# A step that fails stops the rest, and leaves the settings that say it was
+# remade: the next pass does it all again, and finishes it. A job proj
+# won't stop leaves the repo's clones and state as they were.
+for broken in ("stop", "sweep"):
+    C.NOW += 1
     old_state()
-    os.rename(f"{src}/r", f"{src}/new-r")
-    os.rename(f"{src}/{aside[0]}", f"{src}/r")
-    ANSWER[OLD_ROOT] = e
-    known = {"sam/r"}
+    clone("r", MADE - 86400)
+    stop, sweep = C.stop_job, V.sweep
+    if broken == "stop":
+        C.stop_job = lambda jid: (_ for _ in ()).throw(RuntimeError(f"proj stop {jid}: couldn't"))
+    else:
+        V.sweep = lambda *a: (_ for _ in ()).throw(OSError("sweep"))
+    known, failed = {"sam/r"}, {}
     try:
-        R.settle_repo(remade, known)
-        raise AssertionError(f"{e} was swallowed")
-    except RuntimeError as got:
-        assert got is e, got
-    assert known == {"sam/r"} and os.path.isdir(f"{src}/r") and "pr-sam_r-1.json" in os.listdir(f"{tmp}/state")
-    assert C.load("repo-sam_r.json", {})["hookId"] == 41
-    os.rename(f"{src}/r", f"{src}/{aside[0]}")
-    os.rename(f"{src}/new-r", f"{src}/r")
-ANSWER.clear()
-# One made before the steward settled it is the same repo, whatever else.
-old_state()
-assert R.settle_repo({**remade, "created": "2026-10-23T00:00:00Z"}, {"sam/r"}) is False
-assert "pr-sam_r-1.json" in os.listdir(f"{tmp}/state") and C.load("repo-sam_r.json", {})["hookId"] == 41
+        R.restart(remade, known, failed)
+        raise AssertionError(f"{broken} failing was swallowed")
+    except (RuntimeError, OSError):
+        pass
+    C.stop_job, V.sweep = stop, sweep
+    assert known == set() and C.load("known.json", None) == [] and "repo-sam_r.json" in os.listdir(f"{tmp}/state")
+    assert os.path.isdir(f"{src}/r") == (broken == "stop"), (broken, os.listdir(src))
+    STOPPED.clear()
+    C.NOW += 1
+    R.restart(remade, known, failed)
+    assert sorted(STOPPED) == JIDS[:8] and "repo-sam_r.json" not in os.listdir(f"{tmp}/state"), STOPPED
+    assert not os.path.exists(f"{src}/r") and not os.path.exists(f"{tmp}/state/{V.GIT}/sam__r.git")
+# proj stop: a job proj no longer has is over already; anything else it
+# says raises.
+proj = os.path.join(tmp, "stop-proj")
+with open(proj, "w") as f:
+    f.write(f'#!/bin/sh\necho "$@" >>{tmp}/stop-args\n'
+            '[ "$2" = gone-20261023-120000-abcd ] && { echo "no job $2" >&2; exit 1; }\n'
+            '[ "$2" = stuck-20261023-120000-abcd ] && { echo "proj: couldn\'t stop $2" >&2; exit 1; }\nexit 0\n')
+os.chmod(proj, 0o755)
+S.CFG["proj"], kept_proj = proj, S.CFG["proj"]
+REAL["stop_job"]("r-20261023-120000-abcd")
+REAL["stop_job"]("gone-20261023-120000-abcd")
+try:
+    REAL["stop_job"]("stuck-20261023-120000-abcd")
+    raise AssertionError("a job proj couldn't stop was taken for stopped")
+except RuntimeError as e:
+    assert "couldn't stop" in str(e), e
+assert open(f"{tmp}/stop-args").read().split("\n")[0] == "stop r-20261023-120000-abcd"
+S.CFG["proj"] = kept_proj
 S.CFG["projectsDir"] = f"{tmp}/none"
-C.gh = gh_stub
 print("remade repos: ok")
 
 # A red default branch gets one Claude job, and nothing more while it works

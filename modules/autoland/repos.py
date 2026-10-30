@@ -19,9 +19,6 @@ import train as T
 from common import CFG, CONTEXT, DEP_RE, DRY, load, log, repo_cfg, save, ts
 from tasks import RED_BRANCH, red_default_task
 
-# What GitHub says of a commit the repo doesn't have.
-NO_COMMIT = "No commit found for SHA"
-
 
 def discover():
     """Each owner's repos the App's installation there reaches: which ones
@@ -84,19 +81,9 @@ def baseline_ruleset(rc, default):
 
 def settle_repo(r, known):
     """The repo's settings, at most once a day. Returns True if it's new:
-    never seen before, or made since under the name of one GitHub deleted
-    (which leaves known)."""
+    not in known (restart takes a remade one out)."""
     repo, rc = r["repo"], repo_cfg(r["repo"])
     st = load(f"repo-{repo.replace('/', '_')}.json", {})
-    # Settled before the repo was made: what the steward kept is about a repo
-    # of the same name, deleted since (GitHub hands a deleted repo's name to
-    # the next one). This one starts over as new, from a checkout of its own.
-    if st.get("settings", C.NOW) < ts(r.get("created")):
-        log(f"{repo}: made at {r['created']}, after the steward last settled a repo of its name; starting it over as new")
-        retire_checkout(repo)
-        forget(repo)
-        known.discard(repo)
-        st = {}
     new = repo not in known
     # Due daily, and straight away for another App (its required checks are
     # pinned to the one it was) or a train turned on or off (the baseline
@@ -178,47 +165,100 @@ def settle_repo(r, known):
     return new
 
 
-def retire_checkout(repo):
-    """The repo's checkout in projectsDir, if it's a clone of the deleted repo
-    whose name it took (GitHub has no root commit of its HEAD), moved aside
-    under a hidden name, which nothing takes for a project: so the repo's
-    next job clones this one, and can't push the old one's history to it.
-    Nothing in it is lost. Raises when GitHub doesn't say."""
-    d = C.project_dir(repo)
-    if d is None:
+def restart(r, known, failed):
+    """A repo made under the name of one GitHub deleted (made after the
+    steward last settled one of that name: GitHub hands a deleted repo's
+    name to the next one) starts over as new, before anything acts on it.
+    The deleted one's Claude jobs are stopped (they'd push its history to
+    this one), its clones moved aside, and all the steward kept about it
+    goes: its PRs' state (so a new PR doesn't take on an old one's of the
+    same number), their reviews, snapshots and the reviewers' sessions (so
+    no look at a new PR resumes an old one's), its dashboard's and
+    quarantine's, and the reviewers' clone of it. It's out of known, and of
+    failed, so its baseline job starts straight away.
+
+    The repo's settings (repo-K.json) are what says it was remade, so they
+    go last: a pass that fails partway leaves them, and the next one does
+    it all again, each step as safe twice as once. Raises when it can't be
+    done, and then nothing may act on the repo this pass."""
+    repo, k = r["repo"], r["repo"].replace("/", "_")
+    settled = load(f"repo-{k}.json", {}).get("settings")
+    if settled is None or settled >= ts(r.get("created")):
         return
-    path = os.path.join(CFG["projectsDir"], d)
-    roots = subprocess.run(["git", "-C", path, "rev-list", "--max-parents=0", "HEAD"],
-                           capture_output=True, text=True).stdout.split()
-    if not roots:
-        return  # no commit in it, so nothing to push
-    try:
-        C.gh("api", f"repos/{repo}/commits/{roots[0]}", "--jq", ".sha")
+    log(f"{repo}: made at {r['created']}, after the steward last settled a repo of its name; starting it over as new")
+    if DRY:
         return
-    except RuntimeError as e:
-        if NO_COMMIT not in str(e) or isinstance(e, C.Unavailable):
-            raise
-    aside = os.path.join(CFG["projectsDir"], f".{d}.gone-{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime(C.NOW))}")
-    log(f"{repo}: its checkout {d} is the deleted repo's; moved to {aside}")
-    if not DRY:
+    known.discard(repo)
+    failed.pop(repo, None)
+    save("known.json", sorted(known))
+    save("baseline-failed.json", failed)
+    mine = re.compile(rf"(repo|dashboard|flaky)-{re.escape(k)}\.json|pr-{re.escape(k)}-\d+\.json")
+    kept = sorted(name for name in os.listdir(C.STATE) if mine.fullmatch(name))
+    for name in kept:
+        for jid in sorted(set(job_ids(load(name, None)))):
+            C.stop_job(jid)
+    retire_checkouts(repo, ts(r["created"]))
+    V.sweep({k}, set())
+    mirror = os.path.join(C.STATE, V.GIT, repo.replace("/", "__") + ".git")
+    if os.path.isdir(mirror):
+        shutil.rmtree(mirror)
+    for name in sorted(kept, key=lambda name: name == f"repo-{k}.json"):
+        os.remove(os.path.join(C.STATE, name))
+
+
+def job_ids(value):
+    """Every Claude job's id in a state file, wherever it keeps them: a PR's
+    per kind and its proofs', the red default branch's and the baseline's,
+    a dashboard's or quarantine's and their items'. proj's ids are its
+    own shape (PROJECT-DATE-TIME-XXXX), so they're known by it."""
+    if isinstance(value, dict):
+        for x in value.items():
+            yield from job_ids(list(x))
+    elif isinstance(value, list):
+        for x in value:
+            yield from job_ids(x)
+    elif isinstance(value, str) and C.JOB_ID.fullmatch(value):
+        yield value
+
+
+def retire_checkouts(repo, made):
+    """Every clone of the repo in projectsDir that wasn't cloned since it
+    was made (at made), so may be the deleted one's, moved aside under a
+    hidden name, which nothing takes for a project: so the repo's next job
+    clones this one, and can't push the old one's history to it. Nothing in
+    it is lost. The only proof a clone is this one's is its own record of
+    when it was cloned; one without (an empty repo's clone has none) is
+    moved too, and the next job clones it again."""
+    for d, url in list(C.projects()):
+        if url.lower() != repo.lower():
+            continue
+        path = os.path.join(CFG["projectsDir"], d)
+        if cloned_at(path) >= made:
+            continue
+        aside = os.path.join(CFG["projectsDir"], f".{d}.gone-{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime(C.NOW))}")
+        log(f"{repo}: its checkout {d} wasn't cloned since the repo was made; moved to {aside}")
         os.rename(path, aside)
 
 
-def forget(repo):
-    """All the steward kept about the repo, for a deleted one of its name:
-    its settings' and hook's, its PRs' (so a new PR doesn't take on an old
-    one's of the same number), their reviews, snapshots and the reviewers'
-    sessions (so no look at a new PR resumes an old one's), its dashboard's
-    and quarantine's, and the reviewers' clone of it."""
-    if DRY:
-        return
-    k = repo.replace("/", "_")
-    mine = re.compile(rf"(repo|dashboard|flaky)-{re.escape(k)}\.json|pr-{re.escape(k)}-\d+\.json")
-    for name in os.listdir(C.STATE):
-        if mine.fullmatch(name):
-            os.remove(os.path.join(C.STATE, name))
-    V.sweep({k}, set())
-    shutil.rmtree(os.path.join(C.STATE, V.GIT, repo.replace("/", "__") + ".git"), ignore_errors=True)
+def cloned_at(path):
+    """When git cloned the checkout at path, by the first line of its HEAD's
+    reflog, which `git clone` writes; 0 when that isn't a clone's (one made
+    some other way, or whose first lines expired)."""
+    try:
+        with open(os.path.join(path, ".git", "logs", "HEAD")) as f:
+            first = f.readline()
+    except FileNotFoundError:
+        return 0
+    m = re.match(r"0+ [0-9a-f]+ [^\t]*> (\d+) [+-]\d{4}\tclone: from ", first)
+    return int(m.group(1)) if m else 0
+
+
+def baseline_started(repo, jid):
+    """The repo's baseline job, kept with its settings: so restart stops it
+    if the repo turns out to be a deleted one's."""
+    st = load(f"repo-{repo.replace('/', '_')}.json", {})
+    st["baselineJob"] = jid
+    save(f"repo-{repo.replace('/', '_')}.json", st)
 
 
 def keep_checks(checks, key):

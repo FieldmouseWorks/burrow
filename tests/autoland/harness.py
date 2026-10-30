@@ -263,7 +263,7 @@ def sh(*a, cwd=None):
 
 
 head = "a" * 40
-WROTE, JOBS, POSTED = [], [], []
+WROTE, JOBS, POSTED, STOPPED = [], [], [], []
 COMMITS = {}  # a PR's commits' author emails, by number, as `pr view --json commits` gives them (None: the ask fails)
 PR_DIFF = {"v": ""}  # what `gh pr diff` gives
 
@@ -466,7 +466,7 @@ def fresh_pr_state():
         os.makedirs(f"{tmp}/state/{d}")
 
 
-REAL = {"job": C.job}  # the steward's own, for the checks of what it runs
+REAL = {"job": C.job, "stop_job": C.stop_job}  # the steward's own, for the checks of what it runs
 
 
 def stand_in():
@@ -475,5 +475,6 @@ def stand_in():
     C.write = write
     C.job = job
     C.job_state = lambda jid: STATES.get(jid, "running")
+    C.stop_job = STOPPED.append
     V.queue = queue
     V.post = post

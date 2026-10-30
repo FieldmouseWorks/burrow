@@ -243,15 +243,16 @@ def pass_gh(*a, **k):
                                     "pullRequests": {"pageInfo": {"hasNextPage": False}, "nodes": []}}}}
 
 
-kept = (S.R.discover, S.R.publish, S.R.unhook_gone, S.R.hook_projects, C.gh, sys.argv)
+kept = (S.R.discover, S.R.settle_repo, S.R.publish, S.R.unhook_gone, S.R.hook_projects, C.gh, sys.argv)
 S.R.discover = lambda: [{"repo": "sam/r", "default": "main", "private": False},
                         {"repo": "eve/p", "default": "main", "private": False}]
+S.R.settle_repo = lambda r, known: False
 S.R.publish = S.R.unhook_gone = lambda *a: None
 S.R.hook_projects = lambda repos: []
 C.gh = pass_gh
 sys.argv = ["steward", "kick", "sam/r", "eve/p"]
 S.main()
-(S.R.discover, S.R.publish, S.R.unhook_gone, S.R.hook_projects, C.gh, sys.argv) = kept
+(S.R.discover, S.R.settle_repo, S.R.publish, S.R.unhook_gone, S.R.hook_projects, C.gh, sys.argv) = kept
 assert FOR == [("sam", "sam"), ("eve", "eve")], FOR
 
 # The steward merges now, the checked head only, or not at all: nothing is

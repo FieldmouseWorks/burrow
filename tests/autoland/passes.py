@@ -153,19 +153,24 @@ S.CFG.clear()
 S.CFG.update(kept)
 print("kicks: ok")
 
-# `kick REPO`: only that repo's PRs, none of the full pass's settings, new
-# repos or branch sweep, and its owner's lines and wake-ups replace that
-# repo's while the rest stay. The owner's issue is kept up to date from it.
+# `kick REPO`: only that repo, none of the full pass's branch sweep or
+# hooks, and its owner's lines and wake-ups replace that repo's while the
+# rest stay. First it's started over if it was remade, then its settings
+# are seen to (free unless due): so the first event about a new repo sets
+# it up and starts its baseline job, which its settings and known.json then
+# have. The owner's issue is kept up to date from it.
 fresh_pr_state()
 C.NOW = T
 C.save("wake.json", {"sam/r": T + 50, "sam/other": T + 60, "sam/gone": T - 1})
 C.save("digest-repos.json", {"sam/r": [["Old", "r line", ""]], "sam/other": [["Open over a day", "other line", "x"]]})
 C.save("repos.json", {"untouched": True})
 seen_repos, swept, published = [], [], []
-kept_fns = (S.R.discover, S.R.settle_repo, S.R.publish, S.R.sweep_branches, S.open_prs, S.R.unhook_gone)
+kept_fns = (S.R.discover, S.R.restart, S.R.settle_repo, S.R.publish, S.R.sweep_branches, S.open_prs, S.R.unhook_gone)
 S.R.unhook_gone = lambda repos: (_ for _ in ()).throw(AssertionError("hooks taken off in a kicked pass"))
 S.R.discover = lambda: [{"repo": "sam/r"}, {"repo": "sam/other"}]
-S.R.settle_repo = lambda r, known: (_ for _ in ()).throw(AssertionError("settings in a kicked pass"))
+order = []
+S.R.restart = lambda r, known, failed: order.append(("restart", r["repo"]))
+S.R.settle_repo = lambda r, known: order.append(("settle", r["repo"])) or r["repo"] not in known
 S.R.publish = published.append
 in_use = []
 S.R.sweep_branches = lambda r, branches, digest, sweep=True: swept.append(sweep) or in_use.append(branches)
@@ -180,11 +185,21 @@ S.open_prs, argv = kicked_prs, sys.argv
 S.CFG["cleanBranches"] = True
 sys.argv = ["steward", "kick", "Sam/R"]  # as burrow-events spells it, or not
 C.WAKE.clear()
+C.save("known.json", [])
+NEW_JOBS = []
+C.job, job = (lambda repo, task, clone=False: NEW_JOBS.append((repo, task, clone)) or "job-new"), C.job
+S.CFG.update(baselineJobs=True, baselineTask="REPO is new")
 S.main()
+S.CFG["baselineJobs"] = False
+del S.CFG["baselineTask"]
+C.job = job
 sys.argv = argv
 S.CFG["cleanBranches"] = False
-S.R.discover, S.R.settle_repo, S.R.publish, S.R.sweep_branches, S.open_prs, S.R.unhook_gone = kept_fns
+S.R.discover, S.R.restart, S.R.settle_repo, S.R.publish, S.R.sweep_branches, S.open_prs, S.R.unhook_gone = kept_fns
 assert seen_repos == ["sam/r"] and swept == [False], (seen_repos, swept)
+assert order == [("restart", "sam/r"), ("settle", "sam/r")] and NEW_JOBS == [("sam/r", "sam/r is new", True)], \
+    (order, NEW_JOBS)
+assert C.load("known.json", None) == ["sam/r"] and C.load("repo-sam_r.json", {})["baselineJob"] == "job-new"
 # The sweep leaves every open PR's branches, its base as well as its head:
 # deleting a base closes the PRs on it.
 assert in_use == [{"feat", "main"}], in_use
@@ -193,6 +208,30 @@ assert C.load("wake.json", None) == {"sam/r": T + 3 * 60 + 1, "sam/other": T + 6
 assert C.load("digest-repos.json", None) == {"sam/r": [], "sam/other": [["Open over a day", "other line", "x"]]}
 assert published == [[("Open over a day", "other line", "x")]], published
 print("kick: ok")
+
+# A repo that can't be started over as new, though it was remade, is left
+# alone that pass, its dashboard and flaky tests too: nothing of the deleted
+# one's may act on it. Its next pass, five minutes on, tries again.
+fresh_pr_state()
+C.NOW = T
+seen_repos, watched = [], []
+kept_fns = (S.R.discover, S.R.restart, S.R.settle_repo, S.R.publish, S.open_prs, S.D.watch, S.F.watch)
+S.R.discover = lambda: [{"repo": "sam/r"}]
+S.R.restart = lambda r, known, failed: (_ for _ in ()).throw(RuntimeError("proj stop r-1: couldn't"))
+S.R.settle_repo = lambda r, known: (_ for _ in ()).throw(AssertionError("settled a repo not started over"))
+S.R.publish = lambda lines: None
+S.open_prs = kicked_prs
+S.D.watch = S.F.watch = lambda repo, mine: watched.append(repo)
+S.CFG["dashboard"]["enable"] = S.CFG["flaky"]["enable"] = True
+sys.argv = ["steward", "kick", "sam/r"]
+C.WAKE.clear()
+S.main()
+sys.argv = argv
+S.CFG["dashboard"]["enable"] = S.CFG["flaky"]["enable"] = False
+S.R.discover, S.R.restart, S.R.settle_repo, S.R.publish, S.open_prs, S.D.watch, S.F.watch = kept_fns
+assert seen_repos == [] and watched == [], (seen_repos, watched)
+assert C.load("wake.json", None) == {"sam/r": T + 5 * 60}, C.load("wake.json", None)
+print("remade, not started over: ok")
 
 # A pass GitHub's rate limit turns away books its repos' next pass for when
 # the limit resets (`gh api rate_limit`, free), not five minutes on, the
@@ -217,7 +256,8 @@ def limited(*a, **k):
         return REAL_GH("api", "repos/sam/r")
 
 
-kept_fns = (S.R.discover, S.open_prs, S.R.publish)
+kept_fns = (S.R.discover, S.R.settle_repo, S.open_prs, S.R.publish)
+S.R.settle_repo = lambda r, known: False
 for where in ("discovery", "prs", "after"):
     fresh_pr_state()
     C.NOW = T
@@ -248,7 +288,7 @@ for where in ("discovery", "prs", "after"):
         C.save("wake.json", {"sam/other": T + 60, "Sam/R": T + 9000})
     os.environ["PATH"] = path
 sys.argv = argv
-S.R.discover, S.open_prs, S.R.publish = kept_fns
+S.R.discover, S.R.settle_repo, S.open_prs, S.R.publish = kept_fns
 # Without a limit met, the wake-ups are as booked.
 C.LIMITED.clear()
 fresh_pr_state()

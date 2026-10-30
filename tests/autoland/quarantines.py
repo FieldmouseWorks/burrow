@@ -250,7 +250,8 @@ for err, kind in (("GET repos/sam/r/issues: HTTP 503, 3 times", C.Unavailable),
 # In the steward's pass: each repo's quarantine is looked at, after its PRs,
 # when it's on, and one that fails doesn't stop the rest.
 seen, published = [], []
-kept_fns = (S.R.discover, S.R.publish, S.open_prs, F.watch)
+kept_fns = (S.R.discover, S.R.settle_repo, S.R.publish, S.open_prs, F.watch)
+S.R.settle_repo = lambda r, known: False
 S.R.discover = lambda: [{"repo": "sam/r"}, {"repo": "sam/q"}]
 S.R.publish = published.append
 S.open_prs = lambda owner, name: (seen.append(f"prs {owner}/{name}") or {}, [])
@@ -276,7 +277,7 @@ seen.clear()
 S.main()
 assert seen == ["prs sam/r", "prs sam/q"], seen
 sys.argv = argv
-S.R.discover, S.R.publish, S.open_prs, F.watch = kept_fns
+S.R.discover, S.R.settle_repo, S.R.publish, S.open_prs, F.watch = kept_fns
 
 C.gh, C.job, C.job_state, C.limited = kept
 print("quarantines: ok")
