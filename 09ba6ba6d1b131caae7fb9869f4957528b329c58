@@ -1,0 +1,59 @@
+{
+  "conary": "note v1",
+  "change": "0f082ng8p5hp4zmw5rq80zasb6",
+  "repo": {
+    "owner": "fieldmouseworks",
+    "name": "burrow"
+  },
+  "pr": 192,
+  "url": "https://github.com/fieldmouseworks/burrow/pull/192",
+  "summary": "updates, autoland: a lock refresh refused only for age waits for its date",
+  "task": "TusanHomichi/the-mortal-estate#131",
+  "author": {
+    "kind": "person",
+    "login": "TusanHomichi",
+    "session": null
+  },
+  "landing": {
+    "revision": "b029ac4bd7a8792e3d01d62071f57704085736ed8cb0525be98789f9b2092523",
+    "before": "b92f463e0cefee192690fc0cf76cbf6edc94a531",
+    "after": "09ba6ba6d1b131caae7fb9869f4957528b329c58",
+    "by": {
+      "kind": "status",
+      "login": "fieldmouseworks-steward[bot]"
+    },
+    "at": 1793372744560
+  },
+  "evidence": [
+    {
+      "kind": "ci",
+      "check": "check / commits",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/41044220844/job/124024194573"
+    },
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "fail",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/41044220844/job/124024194242"
+    },
+    {
+      "kind": "ci",
+      "check": "check / commits",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/41044220844/job/124067200812"
+    },
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/41044220844/job/124067198812"
+    },
+    {
+      "kind": "ci",
+      "check": "agents",
+      "result": "pass",
+      "source": "status agents"
+    }
+  ]
+}
