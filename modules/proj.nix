@@ -112,7 +112,8 @@ in
         work on the pipeline itself waits only on other such work, never on
         everyone else's long jobs; a lead repo's go first of all, ahead of
         the other pipeline jobs too, but leave them these slots while one
-        waits. A pipeline job in any other project goes
+        waits, and everyone else one of the other slots while one of theirs
+        waits and none runs. A pipeline job in any other project goes
         as `--first`: ahead of the line, but within its project's cap and
         never in these slots; `proj status` and its turn's journal say so,
         origin and all.
