@@ -79,8 +79,8 @@ let
   # Each script gets the names it uses (shellcheck rejects the rest), set above
   # its own text.
   uses = text: n: lib.length (builtins.split "\\$\\{?${n}([^A-Za-z0-9_]|$)" text) > 1;
-  script = name: file: runtimeInputs:
-    let text = builtins.readFile file;
+  script = name: files: runtimeInputs:
+    let text = lib.concatMapStrings builtins.readFile (lib.toList files);
     in pkgs.writeShellApplication {
       inherit name runtimeInputs;
       text = lib.concatMapStrings (n: "${n}=${lib.escapeShellArg vars.${n}}\n")
@@ -89,7 +89,7 @@ let
 
   calls = [ tools.proj tools.notify ];
   healthTool = script health ./updates/health.sh (with pkgs; [ coreutils gnugrep gnused gawk systemd ]);
-  updateTool = script update ./updates/update.sh (
+  updateTool = script update [ ./updates/dispatch.sh ./updates/update.sh ] (
     (with pkgs; [ coreutils git jq curl util-linux systemd gnugrep gnused gawk vulnix config.nix.package ])
     ++ [ healthTool tools.switch tools.confirm ] ++ calls ++ lib.optional (tools ? boot) tools.boot
   );
@@ -521,8 +521,19 @@ in
   };
 
   config = lib.mkMerge [
-  # Always built, so heartbeat runs the same checks whether or not updates is on.
-  { burrow.tools.health = healthTool; }
+  # Always built and installed, so heartbeat runs the same checks whether or
+  # not updates is on (without it, only the ones other modules add).
+  {
+    burrow.tools.health = healthTool;
+    environment.etc = lib.mapAttrs'
+      (name: cmd: lib.nameValuePair "burrow/health.d/${name}" {
+        source = pkgs.writeShellScript "health-${name}" ''
+          export PATH=${checkPath}:/run/wrappers/bin:/run/current-system/sw/bin
+          ${cmd}
+        '';
+      })
+      cfg.health;
+  }
 
   (lib.mkIf cfg.enable (lib.mkMerge [
     {
@@ -578,15 +589,6 @@ in
           else runuser -u ${user} -- env HOME=${account.home} claude --version; fi
         '';
       });
-
-      environment.etc = lib.mapAttrs'
-        (name: cmd: lib.nameValuePair "burrow/health.d/${name}" {
-          source = pkgs.writeShellScript "health-${name}" ''
-            export PATH=${checkPath}:/run/wrappers/bin:/run/current-system/sw/bin
-            ${cmd}
-          '';
-        })
-        cfg.health;
 
       environment.systemPackages = [ updateTool healthTool ];
 

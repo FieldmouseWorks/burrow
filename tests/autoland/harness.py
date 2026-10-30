@@ -158,7 +158,7 @@ with open(f"{tmp}/config.json", "w") as f:
                      "oneWay": ONE_WAY, "handoffAfter": 30, "sessionHandoffAfter": 90, "settleDelay": 3,
                      "stallAfter": 120, "holdStallAfter": 480,
                      "directPush": False, "ruleset": True, "requireCi": True,
-                     "proofJobs": {}, "codex": True, "rival": True, "skipPaths": []},
+                     "proofJobs": {}, "proofBuilds": {}, "codex": True, "rival": True, "skipPaths": []},
         "repos": {}, "pipelineRepos": ["Sam/Pipe"], "leadRepos": ["Sam/Lead"],
         "webhook": {"url": "https://example.org/burrow/hook", "events": ["check_suite", "push"]},
         "kick": f"http://127.0.0.1:{kicks.server_port}/kick/autoland",
@@ -169,6 +169,7 @@ with open(f"{tmp}/config.json", "w") as f:
         "skipPaths": ["(^|/)secrets?/", r"\.(pem|key|p12|pfx)$", r"(^|/)\.env(\..*)?$"],
         "agents": f"{tmp}/agents",
         "sandbox": f"{tmp}/bwrap",
+        "nix": f"{tmp}/nix",
         "box": {"store": f"{tmp}/store-paths", "caBundle": f"{tmp}/ca.crt",
                 "links": {"/bin/sh": "/nix/store/dddd-bash/bin/sh", "/usr/bin/env": "/nix/store/eeee-coreutils/bin/env"}},
     }, f)
@@ -255,13 +256,19 @@ def gh_stub(*a, **k):
     return ""
 
 
-FAIL = []  # writes that fail (gh's None), by a piece of their arguments
+FAIL = []  # writes that fail, by a piece of their arguments: gh's None, or with check what gh() raises
+# What GitHub says to each, as gh prints it: two lines, as it can be.
+REFUSAL = "Repository rule violations found\nMerge method squash is not allowed for this base branch (HTTP 405)"
 
 
 def write(*a, **k):
     acting()
     WROTE.append(" ".join(a))
-    return None if any(f in " ".join(a) for f in FAIL) else {}
+    if not any(f in " ".join(a) for f in FAIL):
+        return {}
+    if k.get("check", True):
+        raise RuntimeError(f"gh {' '.join(a[:3])}: gh: {REFUSAL}")
+    return None
 
 
 def job(repo, task, clone=False):

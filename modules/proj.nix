@@ -46,6 +46,7 @@ let
       KICK=${lib.escapeShellArg config.burrow.events.kick}
       WAKE=${lib.escapeShellArg watchWake}
       PIPELINE=${pipelineRepos}
+      FLAKE=${lib.escapeShellArg config.burrow.flake}
       LEAD=${lib.escapeShellArg (lib.concatStringsSep " " leadRepos)}
       WAITS=${lib.escapeShellArg (lib.optionalString watchdog waits)}
       STALL_QUEUED=${toString (cfg.stallAfterMinutes * 60)}
@@ -104,15 +105,16 @@ in
       defaultText = lib.literalExpression "if maxJobs > 1 then 1 else 0";
       description = ''
         Of the maxJobs slots, how many only pipeline jobs in the pipeline's
-        own repos (`proj run --pipeline` in a project whose clone's origin
-        is one of `burrow.autoland.pipelineRepos` or `leadRepos` on GitHub:
-        the steward's jobs there, their issues) may take, so work on the
-        pipeline itself waits only on other such work, never on everyone
-        else's long jobs; a lead repo's go first of all, ahead of the other
-        pipeline jobs too. A pipeline job in any other project goes as
-        `--first`: ahead of the line, but within its project's cap and never
-        in these slots; `proj status` and its turn's journal say so, origin
-        and all.
+        own projects (`proj run --pipeline` in the machine's flake,
+        `burrow.flake`, or in a project whose clone's origin is one of
+        `burrow.autoland.pipelineRepos` or `leadRepos` on GitHub: the update
+        job's fixes, the steward's jobs there, their issues) may take, so
+        work on the pipeline itself waits only on other such work, never on
+        everyone else's long jobs; a lead repo's go first of all, ahead of
+        the other pipeline jobs too. A pipeline job in any other project goes
+        as `--first`: ahead of the line, but within its project's cap and
+        never in these slots; `proj status` and its turn's journal say so,
+        origin and all.
       '';
     };
     maxJobsPerProject = lib.mkOption {
@@ -308,8 +310,8 @@ in
     }];
     environment.systemPackages = [ inbox ];
     # A repo's issue events start its look (proj-inbox@OWNER-REPO), and so
-    # does the end of each of its jobs' turns (proj run --kick), whose answer
-    # it posts.
+    # do the start and end of each of its jobs' turns (proj run --kick): it
+    # posts the answer once one has ended.
     burrow.events.handlers.proj-inbox = {
       events = [ "issues" "issue_comment" ];
       unit = "proj-inbox";
