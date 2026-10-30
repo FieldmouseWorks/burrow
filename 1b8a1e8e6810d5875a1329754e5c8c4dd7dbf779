@@ -1,0 +1,53 @@
+{
+  "conary": "note v1",
+  "change": "0cjnyqvh5mwp9w3gk0cfape8zp",
+  "repo": {
+    "owner": "fieldmouseworks",
+    "name": "burrow"
+  },
+  "pr": 200,
+  "url": "https://github.com/fieldmouseworks/burrow/pull/200",
+  "summary": "autoland: archive stale branches and delete them, instead of listing them",
+  "task": "https://claude.ai/code/project/chan_01Ad4f4oDXfFTCEzLHzMTD8q?thread=cmsg_01Ad4f4oDXfFTCEzLHzMTD8qDFPv3xgW1MqoVMKU8oMt93",
+  "author": {
+    "kind": "agent",
+    "login": "TusanHomichi",
+    "session": "https://claude.ai/code/session_01BkHcyBwMUgoKzQzTrp9Qay"
+  },
+  "landing": {
+    "revision": "4eabeb341e31a0d9d29697765a48b5f30fc9d9a33b4aeb106b67166c1b293533",
+    "before": "5acabbae775bb8f60d5e4b351f1483584b89cb42",
+    "after": "1b8a1e8e6810d5875a1329754e5c8c4dd7dbf779",
+    "by": {
+      "kind": "status",
+      "login": "fieldmouseworks-steward[bot]"
+    },
+    "at": 1793338552063
+  },
+  "evidence": [
+    {
+      "kind": "ci",
+      "check": "check / commits",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/41004684132/job/123896779019"
+    },
+    {
+      "kind": "review",
+      "check": "codex",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/200#pullrequestreview-5708202167"
+    },
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/41004684132/job/123896778708"
+    },
+    {
+      "kind": "ci",
+      "check": "agents",
+      "result": "pass",
+      "source": "status agents"
+    }
+  ]
+}
