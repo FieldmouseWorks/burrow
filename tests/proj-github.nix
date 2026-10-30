@@ -10,8 +10,10 @@
 # starts) and ends the waits of one whose issue closed (proj stop's, which a
 # watch already asking GitHub keeps to), a stop that fails there not holding
 # up the rest, that an issue a bot opened is the machine's work, its job
-# acting as the machinery's App, and that a job dir removed or a wait it
-# can't read stops neither proj-inbox nor _watch.
+# acting as the machinery's App, that a job dir removed or a wait it can't
+# read stops neither proj-inbox nor _watch, and that a repo proj-inbox
+# forgets (its name now another repo's) has its open issues taken up as new
+# jobs, once a pass under way has ended.
 { pkgs }:
 ''
   with subtest("a job waiting on a PR is resumed when the PR changes"):
@@ -412,6 +414,28 @@
       machine.succeed(f"su - dev -c 'echo 0 >{gone}/sam_gone'")
       machine.succeed("su - dev -c proj-inbox")
       assert machine.succeed(f"ls -A {gone}").strip() == "", machine.succeed(f"ls -A {gone}")
+
+  with subtest("a repo the inbox forgets has its issues taken up afresh, once a pass under way ends"):
+      listed = machine.succeed("su - dev -c 'proj-inbox status'")
+      was = next(x.split()[-1] for x in listed.splitlines() if x.startswith("o/r#9 "))
+      kept = "/var/lib/burrow/proj-inbox"
+      # Others' of like names, and o/r's label as another spelling has it.
+      machine.succeed(f"su - dev -c 'mkdir {kept}/o_rx-1 {kept}/o_r-x-2 && touch {kept}/.label-O_R {kept}/.label-o_rx'")
+      machine.execute(f"su - dev -c 'flock {kept}/wake.json.lock sleep 10' >/dev/null 2>&1 &")
+      machine.wait_until_fails(f"flock -n {kept}/wake.json.lock true", timeout=30)
+      machine.fail("su - dev -c 'timeout 3 proj-inbox forget O/R'")
+      assert "o/r#9 " in machine.succeed("su - dev -c 'proj-inbox status'")
+      machine.wait_until_succeeds(f"flock -n {kept}/wake.json.lock true", timeout=30)
+      machine.succeed("su - dev -c 'proj-inbox forget O/R'")
+      assert "o/r#" not in machine.succeed("su - dev -c 'proj-inbox status'")
+      machine.succeed(f"test -d {kept}/o_rx-1 && test -d {kept}/o_r-x-2 && test -e {kept}/.label-o_rx")
+      machine.fail(f"test -e {kept}/.label-O_R")
+      machine.succeed(f"rm -r {kept}/o_rx-1 {kept}/o_r-x-2 {kept}/.label-o_rx")
+      machine.succeed("su - dev -c proj-inbox")
+      listed = machine.succeed("su - dev -c 'proj-inbox status'")
+      now = next(x.split()[-1] for x in listed.splitlines() if x.startswith("o/r#9 "))
+      assert now != was, listed
+      machine.wait_until_succeeds(f"su - dev -c 'proj state {now}' | grep -x done", timeout=120)
 
   with subtest("a wait proj can't read is news, and doesn't stop _watch"):
       e = proj('run web "sleep 1"')

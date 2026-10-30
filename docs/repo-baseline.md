@@ -7,19 +7,21 @@ one PR, opened ready for review, which then goes through the same review loop
 as any other.
 
 A repo made under the name of one that was deleted is a new repo too, though
-GitHub gives it the same name, in any case: the steward knows it by
-GitHub's id for it, which it keeps with the settings (for settings kept
-before it kept ids, by being made after the steward last settled a repo
-of that name, or in the same second), on the first pass that reads it,
-kicked or full. Before anything acts on it, every clone in `projectsDir`
-that wasn't cloned from it on GitHub after it was made is moved aside under
-a hidden name. The Claude jobs that started in those clones are stopped,
-and so is every job of the repo's that started no later than it was made,
-known by the repo its kick names or by its folder. Once no review of the
-old one is under way, what the steward kept about it (its settings, hook,
-PRs, reviews and the reviewers' sessions) is forgotten, so the new one gets
-its own clone and its own baseline job. A pass that fails partway, or
-finds a review still under way, does it all again on the next.
+GitHub gives it the same name, in any case, and so is one renamed or moved
+into a name another repo had: the steward knows it by GitHub's id for it,
+which it keeps with the settings (for settings kept before it kept ids, by
+being made after the steward last settled a repo of that name, or in the
+same second), on the first pass that reads it, kicked or full. Before
+anything acts on it, every clone of the name in `projectsDir` is moved aside
+under a hidden name, its own included: which repo a clone is of can't be
+told. Then proj-inbox forgets the repo's issues (`proj-inbox forget`), once
+a pass of its under way has ended, so the new one's issue N is a new job and
+not the old N's, and every Claude job of the repo's is stopped, known by the
+repo its kick names or by its folder. Once no review of the old one is under
+way, what the steward kept about it (its settings, hook, PRs, reviews and
+the reviewers' sessions) is forgotten, so the new one gets its own clone and
+its own baseline job. A pass that fails partway, or finds a review still
+under way, does it all again on the next.
 
 A Claude bringing a repo up to the baseline: add only what's missing, keep
 what the repo already does better (a stricter gate, its own license), and

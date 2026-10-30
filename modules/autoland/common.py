@@ -537,10 +537,10 @@ def job_state(jid):
 
 
 def jobs():
-    """(id, project, when it started, the repos it's for) of every job proj
-    ever ran, from its own record (jobsDir): `proj run` writes a job's
-    project folder to its `project` file as it starts it, then its kicks
-    to `kick`, where the steward's jobs and proj-inbox's name their repo
+    """(id, project, the repos it's for) of every job proj ever ran, from
+    its own record (jobsDir): `proj run` writes a job's project folder to
+    its `project` file as it starts it, then its kicks to `kick`, where
+    the steward's jobs and proj-inbox's name their repo
     (HANDLER/OWNER/REPO, lowercased here). One still being made, with no
     project yet, is left out: it can only start in its folder as that is
     by then. Raises when any of the record can't be read: none of it is
@@ -563,7 +563,6 @@ def jobs():
         try:
             with open(os.path.join(d, "project")) as f:
                 project = f.read().removesuffix("\n")
-            started = os.stat(os.path.join(d, "project")).st_mtime
         except FileNotFoundError:
             continue
         try:
@@ -571,8 +570,7 @@ def jobs():
                 kicks = f.read().splitlines()
         except FileNotFoundError:
             kicks = []
-        found.append((jid, os.path.normpath(project), started,
-                      {x.split("/", 1)[1].lower() for x in kicks if x.count("/") == 2}))
+        found.append((jid, os.path.normpath(project), {x.split("/", 1)[1].lower() for x in kicks if x.count("/") == 2}))
     return found
 
 
@@ -585,6 +583,17 @@ def stop_job(jid):
     p = subprocess.run([CFG["proj"], "stop", jid], capture_output=True, text=True)
     if p.returncode and not p.stderr.startswith(f"no job {jid}"):
         raise RuntimeError(f"proj stop {jid}: {p.stderr.strip() or f'exit {p.returncode}'}")
+
+
+def forget_issues(repo):
+    """proj-inbox forgets the repo's issues (`proj-inbox forget`), once a
+    pass of its under way has ended: which job each is, what of it it has
+    answered. Nothing to forget where there's no inbox; a refusal raises."""
+    if DRY or not CFG["inbox"]["enable"]:
+        return
+    p = subprocess.run([CFG["inbox"]["command"], "forget", repo], capture_output=True, text=True)
+    if p.returncode:
+        raise RuntimeError(f"proj-inbox forget {repo}: {p.stderr.strip() or f'exit {p.returncode}'}")
 
 
 def coverage(repos, covered):

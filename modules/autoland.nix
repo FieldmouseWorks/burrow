@@ -128,7 +128,12 @@ let
     # when the inbox will: notify.repo cloned in projectsDir, and the
     # steward's App one of inbox.authors (it is: see below). Otherwise it's
     # the owner's.
-    inbox = { inherit (config.burrow.proj.inbox) enable label authors; };
+    # `command` is how the steward has the inbox forget a remade repo's
+    # issues (repos.py reset).
+    inbox = {
+      inherit (config.burrow.proj.inbox) enable label authors;
+      command = if config.burrow.proj.inbox.enable then lib.getExe config.burrow.tools.proj-inbox else null;
+    };
     # Renovate's dashboards (dashboard.py), and where a job that ticks a box
     # on one kicks Renovate to read it.
     dashboard = {

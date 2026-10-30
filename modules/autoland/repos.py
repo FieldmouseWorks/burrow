@@ -195,8 +195,9 @@ def restart(r, known, failed):
 
 def reset(r, k, known, failed):
     """The deleted repo whose state is under k goes: its clones are moved
-    aside and its Claude jobs stopped (they'd push its history to the new
-    one), and all the steward kept about it goes: its PRs' state (so a new
+    aside, proj-inbox forgets its issues and its Claude jobs are stopped
+    (they'd push its history to the new one, or answer the new one's
+    issues), and all the steward kept about it goes: its PRs' state (so a new
     PR doesn't take on an old one's of the same number), their reviews,
     snapshots and the reviewers' sessions (so no look at a new PR resumes
     an old one's), its dashboard's and quarantine's, and the reviewers'
@@ -214,7 +215,7 @@ def reset(r, k, known, failed):
         failed.pop(x)
     save("known.json", sorted(known))
     save("baseline-failed.json", failed)
-    retire_checkouts(repo, k, ts(r["created"]))
+    retire_checkouts(repo, k)
     left = V.sweep({k}, set())
     if left:
         raise RuntimeError(f"its reviewers aren't done with {', '.join(left)}: a look under way, or a session "
@@ -230,68 +231,46 @@ def reset(r, k, known, failed):
     os.remove(os.path.join(C.STATE, f"repo-{k}.json"))
 
 
-def retire_checkouts(repo, k, made):
-    """Every clone of the repo in projectsDir that wasn't cloned from it
-    after it was made (at made), so may be the deleted one's, moved aside
-    under a hidden name, which nothing takes for a project: so the repo's
-    next job clones this one, and can't push the old one's history to it.
-    Nothing in it is lost. The only proof a clone is this one's is its own
-    record of being cloned from the repo on GitHub since; one without (an
-    empty repo's clone has none), or from the very second it was made, is
-    moved too, and the next job clones it again.
+def retire_checkouts(repo, k):
+    """Every clone of the repo in projectsDir moved aside under a hidden
+    name, which nothing takes for a project: so the repo's next job clones
+    it afresh, and none can push the deleted one's history to it. Nothing
+    in one is lost. Which repo a clone is of can't be told: all it knows is
+    the name it came from, which may have been the deleted one's then,
+    however long ago the repo there now was made (one renamed into the name
+    may be years older). So the new one's own goes too, and its next job
+    clones it again.
 
-    Then the deleted one's Claude jobs are stopped, from proj's own record
-    of every job (C.jobs): each that started in a folder before it was
-    moved aside, and each that started no later than the repo was made
-    and is the repo's, by the repo its kicks name (the steward's jobs and
-    proj-inbox's, in whatever folder) or by its folder (a clone of the repo
-    that stays, or the folder its next clone takes, unless another repo's
-    clone is there). "No later" takes in the second it was made, which a
-    job's start, finer grained, may fall in. A job whose kicks name only
-    other repos is theirs, wherever it ran. The moves go first, so none of
-    them can start in an old clone after the jobs are read, and each is
-    kept with the repo's settings (`retired`: when it was moved, or None
-    while it's being moved, which a later try takes as just then), so a
-    later try stops their jobs if this one can't. A job proj won't stop
-    raises."""
+    Then proj-inbox forgets the repo's issues (C.forget_issues), so the new
+    one's issue N is a new job, never the deleted one's N, and no answer
+    of an old job's goes to it. Then every Claude job of the repo's is
+    stopped, from proj's own record of every job (C.jobs): each the repo's
+    by the repo its kicks name (the steward's jobs and proj-inbox's, in
+    whatever folder) or by its folder (one moved aside, or the folder the
+    repo's next clone takes, unless another repo's clone is there). A job
+    whose kicks name only other repos is theirs, wherever it ran. The moves
+    go first, and then the inbox waits for a pass of its under way, so a
+    job either starts before the jobs are read or can't start at all: none
+    starts in a clone moved aside, and the inbox starts none for a repo it
+    has no clone of. Each folder is kept with the repo's settings
+    (`retired`) before it's moved, so a later try stops its jobs if this
+    one can't. A job proj won't stop raises."""
     src = CFG["projectsDir"]
     every = list(C.projects(strict=True))
-    mine = {d for d, url in every if url.lower() == repo.lower()}
     st = load(f"repo-{k}.json", {})
-    retired = st.setdefault("retired", {})
-    for d in sorted(d for d in mine if cloned(os.path.join(src, d), repo) <= made):
+    retired = st.setdefault("retired", [])
+    for d in sorted(d for d, url in every if url.lower() == repo.lower()):
         aside = os.path.join(src, f".{d}.gone-{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime(C.NOW))}")
-        log(f"{repo}: its checkout {d} wasn't cloned from it since it was made; moving it to {aside}")
-        retired[d] = None  # being moved: every job there so far is its
-        save(f"repo-{k}.json", st)
+        log(f"{repo}: its checkout {d} may be the deleted one's; moving it to {aside}")
+        if d not in retired:
+            retired.append(d)
+            save(f"repo-{k}.json", st)
         os.rename(os.path.join(src, d), aside)
-        retired[d] = time.time()
-        save(f"repo-{k}.json", st)
-        mine.discard(d)
-    gone = {os.path.join(src, d): at or time.time() for d, at in retired.items()}
-    ours = {os.path.join(src, d) for d in mine | ({repo.split("/")[1]} - {d for d, _ in every})}
-    for jid, project, started, repos in C.jobs():
-        if repos and repo.lower() not in repos:
-            continue
-        if (started <= gone[project] if project in gone else
-                started < made + 1 and (repo.lower() in repos or project in ours)):
+    C.forget_issues(repo)
+    ours = {os.path.join(src, d) for d in set(retired) | ({repo.split("/")[1]} - {d for d, _ in every})}
+    for jid, project, repos in C.jobs():
+        if repo.lower() in repos or (not repos and project in ours):
             C.stop_job(jid)
-
-
-def cloned(path, repo):
-    """When git cloned the checkout at path from the repo on GitHub, by the
-    first line of its HEAD's reflog, which `git clone` writes with where it
-    cloned from; 0 when that isn't a clone of the repo's (one made some
-    other way, cloned from somewhere else, or whose first lines expired)."""
-    try:
-        with open(os.path.join(path, ".git", "logs", "HEAD")) as f:
-            first = f.readline()
-    except FileNotFoundError:
-        return 0
-    m = re.match(r"0+ [0-9a-f]+ [^\t]*> (\d+) [+-]\d{4}\tclone: from (\S+)$", first.rstrip("\n"))
-    if not m or (C.github_repo(m.group(2)) or "").lower() != repo.lower():
-        return 0
-    return int(m.group(1))
 
 
 def keep_checks(checks, key):
