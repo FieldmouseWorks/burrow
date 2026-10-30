@@ -54,11 +54,14 @@ let
   # naming /etc/rust-cache/rustc-wrapper would leave it naming nothing after a
   # switch that turns the cache off, or back to a system from before it. So
   # it names this launcher, which runs whichever wrapper the running system
-  # has there, or rustc itself when there's none. A running process's
-  # environment keeps the launcher from being collected.
+  # has there, or rustc itself when there's none. It runs the wrapper by its
+  # store path, so a switch that removes the /etc entry mid-launch can't pull
+  # it away between the lookup and the exec. A running process's environment
+  # keeps the launcher from being collected.
   exe = toString (pkgs.writeShellScript "rustc-launcher" ''
-    if [ -x /etc/rust-cache/rustc-wrapper ]; then
-      exec /etc/rust-cache/rustc-wrapper "$@"
+    wrapper=$(${pkgs.coreutils}/bin/readlink -e /etc/rust-cache/rustc-wrapper)
+    if [ -x "$wrapper" ]; then
+      exec "$wrapper" "$@"
     fi
     exec "$@"
   '');
