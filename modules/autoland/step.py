@@ -93,6 +93,7 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
 
     struck = {}  # the steps that failed this pass, and when each is tried again
     ends = {}  # how this head's job of each kind ended, as proj says (running)
+    looked = {}  # what running said of each job this pass, by its id
 
     def after(t, minutes):
         """A wait that ends `minutes` after t: this repo gets a pass then."""
@@ -199,10 +200,18 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
         the fix it asks for) while it's still queued or running, or proj
         can't say: "queued", "running" or "unknown"; else "", and how it
         ended goes in ends. One that is keeps its deadline, since each pass
-        replaces the repo's wake-ups."""
+        replaces the repo's wake-ups. One look a job a pass: asked again,
+        it says the same, and a run of broken jobs is counted once
+        (breaking)."""
         jid = st.get(kind + "Job")
         if st.get(kind) != at or not jid:
             return ""
+        if jid not in looked:
+            looked[jid] = look(kind, jid)
+        return looked[jid]
+
+    def look(kind, jid):
+        """running's look at the job: what proj says of it, once."""
         state = C.job_state(jid)
         live = state in (None, "queued", "running")
         if not live:
@@ -213,6 +222,14 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
             return ""
         deadline(kind)
         return state or "unknown"
+
+    def at_work(kind, doing, at=head):
+        """What the status says of this head's job of the kind: queued for
+        its work until proj starts it (a job can wait hours for a slot, and
+        proj kicks a pass when it starts), at it from then on."""
+        if running(kind, at) == "queued":
+            return f"a Claude job is queued for {doing}"
+        return f"a Claude job is {doing}"
 
     def started(kind, task, at=head, broken=False):
         """A Claude job, once per head (at: once per head on its base, for
@@ -299,7 +316,7 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
             if not how:
                 st[kind + "Again"] = at
             st.pop(kind + "Lost", None)
-            settle("pending", f"Settled; a Claude job is {doing} again (the last one {how or f'ended without {answer}'})"[:140])
+            settle("pending", f"Settled; {at_work(kind, doing, at)} again (the last one {how or f'ended without {answer}'})"[:140])
         else:
             settle("pending", f"Settled, but no Claude job could start {doing} again"[:140],
                    "Couldn't start a Claude job")
@@ -476,7 +493,7 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
         elif lost("judged", judged_at):
             again("judged", judge_task(repo, pr, why, ci == "none", seen), "judging it", "a verdict", judged_at)
         elif st.get("judged") == judged_at or started("judged", judge_task(repo, pr, why, ci == "none", seen), judged_at):
-            settle("pending", f"Settled; a Claude job is judging it ({why})")
+            settle("pending", f"Settled; {at_work('judged', 'judging it', judged_at)} ({why})")
         else:
             settle("pending", f"Settled, but no Claude job could judge it ({why})", "Couldn't start a Claude job to judge it")
 
@@ -488,7 +505,7 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
         task = proof_task(repo, pr, ci_names, rc["proofJobs"])
         retry = lost("proved")
         if not retry and st.get("proved") == head:
-            settle("pending", f"Settled; a Claude job is {doing}"[:140])
+            settle("pending", f"Settled; {at_work('proved', doing)}"[:140])
             return
         # One that broke is counted, and its retry booked, whether or not
         # there's room: only the job started in its place waits for a slot.
@@ -504,7 +521,7 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
         if retry:
             again("proved", task, doing, "its verdict")
         elif started("proved", task):
-            settle("pending", f"Settled; a Claude job is {doing}"[:140])
+            settle("pending", f"Settled; {at_work('proved', doing)}"[:140])
         else:
             settle("pending", f"Settled, but no Claude job could run {', '.join(ci_names)}"[:140],
                    "Couldn't start a Claude job to run its checks")
