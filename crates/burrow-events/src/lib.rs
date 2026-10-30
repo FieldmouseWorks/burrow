@@ -36,6 +36,7 @@
 pub mod glob;
 pub mod handler;
 pub mod http;
+pub mod kick;
 pub mod line;
 pub mod passes;
 pub mod routes;

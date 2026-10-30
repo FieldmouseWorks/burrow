@@ -136,8 +136,13 @@
             modules = [{ burrow.cpu.heavy = { slots = 1; grace = 3; dir = "/build/heavy"; }; }];
           }).config.burrow.tools.heavy;
           weight = self.nixosConfigurations.example.config.systemd.slices.ci.sliceConfig.CPUWeight;
+          # A gate slice with a dash in its name would be nested: refused.
+          nested = (builtins.tryEval (builtins.deepSeq
+            (self.nixosConfigurations.example.extendModules { modules = [{ burrow.cpu.gates.slices = [ "nix-builds" ]; }]; }).config.burrow.cpu.gates.slices
+            true)).success;
         in pkgs.runCommand "cpu-check" { } ''
           [ ${toString weight} = 400 ] || { echo "ci.slice weight ${toString weight}"; exit 1; }
+          ${pkgs.lib.optionalString nested "echo 'a nested gate slice (nix-builds) was taken'; exit 1"}
           mkdir -p /build/heavy && : >/build/heavy/slot1 && chmod 0444 /build/heavy/slot1
           h=${heavy}/bin/heavy
           threads=$(nproc)
@@ -274,6 +279,12 @@
             ];
           };
         in builtins.head (builtins.filter (p: (p.name or "") == "autoland-steward") machine.config.environment.systemPackages);
+        # The example's stall watchdog reads the config its module writes (a
+        # field the binary doesn't know fails it).
+        watchdog-config = pkgs.runCommand "watchdog-config-check" { } ''
+          ${self.nixosConfigurations.example.config.systemd.services.burrow-watchdog.serviceConfig.ExecStart} status
+          touch $out
+        '';
         # The steward's tools reach a pass however it's started: by hand or
         # a Claude job (`autoland-steward kick OWNER/REPO`), with no openssl,
         # gh or proj of its own, gets them from the wrapper, ahead of its own
@@ -327,11 +338,11 @@
           [ "$got" = the-stewards ] || { echo "a pass's own call doesn't use the steward's token: $got"; exit 1; }
           touch $out
         '';
-        # The stall watchdog's ladder (kick, Claude job, stuck issue, owner),
-        # with the real notify and stand-ins for proj, notify's gh and
-        # burrow-events' kick port.
-        watchdog = pkgs.runCommand "watchdog-check" { nativeBuildInputs = [ pkgs.python3 pkgs.bash ]; } ''
-          python3 -I ${./tests/watchdog.py} ${./modules/watchdog}/watchdog.py ${./modules/notify}/notify.sh
+        # HOST-notify's issues, with a stand-in for gh: one a notice, closed
+        # when cleared, and pending until GitHub has shown it closed.
+        notify = pkgs.runCommand "notify-check" { nativeBuildInputs = [ pkgs.shellcheck pkgs.jq pkgs.bash ]; } ''
+          shellcheck -s bash ${./tests/notify.sh}
+          bash ${./tests/notify.sh} ${./modules/notify/notify.sh}
           touch $out
         '';
         # The update job's fix jobs: pipeline work, one per problem while it's
@@ -525,6 +536,8 @@
         remote-control = import ./tests/remote-control.nix { inherit self pkgs; };
         # A session past its server's memory cap dies alone, with a stand-in for Claude.
         remote-control-memory = import ./tests/remote-control-memory.nix { inherit self pkgs; };
+        # systemd-oomd leaves a Remote Control server whole, with a stand-in for Claude.
+        remote-control-oomd = import ./tests/remote-control-oomd.nix { inherit self pkgs; };
         # The signed-in browser: Claude driving it, its logins kept, its ports
         # and profile kept from everyone else.
         browser = import ./tests/browser.nix { inherit self pkgs; };
