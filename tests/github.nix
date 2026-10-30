@@ -1,5 +1,6 @@
-# An App's tokens on a machine: its users get them through the socket, and
-# nobody else does; nobody but the service reads the key or the tokens it
+# An App's tokens on a machine: its users get them through the socket, one
+# who becomes a user at once, even in what ran from before, and nobody else
+# does; nobody but the service reads the key or the tokens it
 # keeps; and in the App's env, git and gh get the App's token, never the
 # user's own login (its file, its keyring, its SSH keys, a header or URL of
 # its in git's config), even when the App's can't be had. GitHub is a
@@ -113,6 +114,10 @@ pkgs.testers.runNixOSTest {
     environment.systemPackages = [ config.burrow.tools.gh config.burrow.tools.gh-token config.burrow.tools.git-lfs pkgs.git pkgs.krb5 pkgs.openssl ];
     users.users.dev = { isNormalUser = true; };
     users.users.eve = { isNormalUser = true; };
+    # carol becomes one of its users with a switch, while her user manager,
+    # and so every unit under it, runs from before.
+    users.users.carol = { isNormalUser = true; uid = 1002; linger = true; };
+    specialisation.carol.configuration.burrow.github.apps.workers.users = [ "dev" "carol" ];
     # dev's own logins: gh's, and a git helper the way `gh auth setup-git`
     # leaves one, its empty helper clearing the system's.
     environment.etc."dev/hosts.yml".text = ''
@@ -502,5 +507,23 @@ pkgs.testers.runNixOSTest {
           assert machine.succeed(dev("gh-token gh ${show} api user", app=False)).strip() == "token= args=api user"
           # The wrapper on the PATH is this.
           assert "peter" not in machine.succeed(dev("gh auth status 2>&1 || true"))
+
+      with subtest("one who becomes a user gets tokens at once, in what was running before, and stops with the switch that ends it"):
+          machine.wait_for_unit("user@1002.service")
+          # Asked from carol's user manager, which started before the switch.
+          ask = "systemd-run --machine=carol@.host --user --wait --pipe --quiet -E GH_TOKEN_SOCKET=/run/gh-token/workers.sock ${nodes.machine.burrow.tools.gh-token}/bin/gh-token get sam 2>&1"
+          status, out = machine.execute(ask)
+          assert status != 0 and "Permission denied" in out, (status, out)
+          machine.succeed("/run/current-system/specialisation/carol/bin/switch-to-configuration test")
+          out = machine.succeed(ask)
+          assert out.strip().startswith("ghs_"), out
+          machine.succeed("/run/booted-system/bin/switch-to-configuration test")
+          status, out = machine.execute(ask)
+          assert status != 0 and "Permission denied" in out, (status, out)
+          # A socket made again, as at boot, is its users' again.
+          machine.succeed("systemctl restart gh-token-workers.socket")
+          assert machine.succeed(dev("gh-token get sam")).strip().startswith("ghs_")
+          status, out = machine.execute(ask)
+          assert status != 0 and "ghs_" not in out, (status, out)
     '';
 }

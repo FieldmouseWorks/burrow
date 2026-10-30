@@ -2,7 +2,12 @@
 # rather than as the user's own gh login, from a key none of them can read.
 #
 # Each App gets a socket, /run/gh-token/NAME.sock, that its `users` can
-# connect to. A connection is answered by gh-token (./github, one process each,
+# connect to: by an ACL entry for each user, never a group, so a user who
+# becomes one has it at once. A group would reach only processes started
+# after it was given: a user manager, and every unit under it, keeps the
+# groups it started with until it's restarted. The ACL is set by a unit of
+# its own, run again on every switch that changes `users`: a switch never
+# restarts a changed socket. A connection is answered by gh-token (./github, one process each,
 # Accept=yes) as its own user, with the App's key as a credential only that
 # user can read: a token for the account or repo asked for, good for at least
 # fifty minutes, kept until then so GitHub mints one at most every ten.
@@ -255,8 +260,7 @@ in
       isSystemUser = true;
       group = "gh-token";
     };
-    users.groups = { gh-token = { }; } // lib.mapAttrs' (name: app:
-      lib.nameValuePair "gh-token-${name}" { members = app.users; }) cfg.apps;
+    users.groups.gh-token = { };
 
     systemd.sockets = lib.mapAttrs' (name: app: lib.nameValuePair "gh-token-${name}" {
       description = "Tokens of the GitHub App ${app.slug}";
@@ -264,13 +268,26 @@ in
       listenStreams = [ app.socket ];
       socketConfig = {
         Accept = true;
-        SocketGroup = "gh-token-${name}";
-        SocketMode = "0660";
+        # Nobody's but root's until its users' ACL is set.
+        SocketMode = "0600";
         DirectoryMode = "0755";
       };
     }) cfg.apps;
 
-    systemd.services = lib.mapAttrs' (name: app: lib.nameValuePair "gh-token-${name}@" {
+    systemd.services = lib.mapAttrs' (name: app: lib.nameValuePair "gh-token-${name}-access" {
+      description = "Who may ask for the GitHub App ${app.slug}'s tokens";
+      # With the socket: each time it's made, and again when `users` changes.
+      wantedBy = [ "gh-token-${name}.socket" ];
+      partOf = [ "gh-token-${name}.socket" ];
+      after = [ "gh-token-${name}.socket" ];
+      serviceConfig = {
+        Type = "oneshot";
+        RemainAfterExit = true;
+        # The whole ACL, so a user no longer in `users` loses it.
+        ExecStart = "${pkgs.acl}/bin/setfacl --set ${lib.escapeShellArg (lib.concatStringsSep "," (
+          [ "u::rw" "g::---" "o::---" "m::rw" ] ++ map (u: "u:${u}:rw") app.users))} ${app.socket}";
+      };
+    }) cfg.apps // lib.mapAttrs' (name: app: lib.nameValuePair "gh-token-${name}@" {
       description = "A token of the GitHub App ${app.slug}, for one who asked";
       serviceConfig = {
         ExecStart = "${package}/bin/gh-token answer --api ${lib.escapeShellArg app.api} --app-id ${toString app.id} --key %d/key --cache %t/gh-token-cache/${name}";
