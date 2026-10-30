@@ -13,6 +13,7 @@
 # are hermetic (the Nix sandbox, no network). A repo's heavier gates (VM
 # replays, browsers, databases) stay its own and run in `nix develop`. A Rust
 # workspace's binaries are its packages.default, for machines to install.
+# Every project's gate also looks for secrets in its tracked files.
 { nixpkgs, rust-overlay, crane }:
 {
   self,
@@ -124,6 +125,26 @@ let
       });
     };
 
+  # The house rules' "never commit secrets": gitleaks over every tracked
+  # file (a flake's source is the repo's tracked tree), with its rules for
+  # credentials that have a known shape (GitHub, cloud and API tokens,
+  # private keys), but not its generic "API key" guess, which takes every
+  # invented test password for one. What it finds is printed redacted, since
+  # a public repo's CI log is public too. A false alarm is answered in the
+  # repo: `gitleaks:allow` in a comment on the line, or the finding's
+  # fingerprint in .gitleaksignore. Files over 5 MB (recordings, databases)
+  # aren't read.
+  gitleaksConfig = builtins.toFile "gitleaks.toml" ''
+    [extend]
+    useDefault = true
+    disabledRules = ["generic-api-key"]
+  '';
+  secretsCheck = pkgs: pkgs.runCommand "secrets" { nativeBuildInputs = [ pkgs.gitleaks ]; } ''
+    cd ${self}
+    gitleaks dir --no-banner --verbose --redact --config ${gitleaksConfig} --max-target-megabytes 5 .
+    touch $out
+  '';
+
   pyChecks = pkgs:
     let dirs = lib.escapeShellArgs pyCfg.dirs; in
     {
@@ -151,7 +172,8 @@ in
   });
 
   checks = forAll (pkgs:
-    lib.optionalAttrs (rust != null) (rustChecks pkgs)
+    { secrets = secretsCheck pkgs; }
+    // lib.optionalAttrs (rust != null) (rustChecks pkgs)
     // lib.optionalAttrs (python != null) (pyChecks pkgs)
     // checks pkgs);
 
