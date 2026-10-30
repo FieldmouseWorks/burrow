@@ -32,7 +32,7 @@ case_() {
   else
     jq -e "$want" <<<"$got" >/dev/null || { echo "FAIL: wanted $want, got '$got' from: $*" >&2; exit 1; }
     # Always the watchdog's whole form.
-    jq -e 'keys == ["due", "kick", "link", "phase", "since", "what"] and (.since | type) == "number"' <<<"$got" >/dev/null ||
+    jq -e 'keys == ["due", "kick", "line", "link", "phase", "since", "what"] and (.since | type) == "number"' <<<"$got" >/dev/null ||
       { echo "FAIL: not the watchdog's form: $got" >&2; exit 1; }
   fi
 }
@@ -40,17 +40,17 @@ case_() {
 base=("id web-1" "turn 2" "queued 1000" "slot 2000" "ended 3000" "deadline 5600")
 
 # In line: watched for STALL_QUEUED from when it was started.
-case_ '.since == 1000 and .due == 8200 and .kick == null and .what == "proj job web-1" and (.phase | test("turn 2 .*waiting in line"))' \
+case_ '.since == 1000 and .due == 8200 and .kick == null and .line == true and .what == "proj job web-1" and (.phase | test("turn 2 .*waiting in line"))' \
   "${base[@]}" "state queued"
 # An --owned job's turns wait in line like anyone's.
 case_ '.due == 8200' "${base[@]}" "state queued" "owned 1"
 # Running: to its deadline, and GRACE for proj to have stopped it.
-case_ '.since == 2000 and .due == 6200 and (.phase | test("turn 2 is running$"))' "${base[@]}" "state running"
+case_ '.since == 2000 and .due == 6200 and .line == false and (.phase | test("turn 2 is running$"))' "${base[@]}" "state running"
 # No timeout: nothing to hold it to.
 case_ none "id web-1" "turn 2" "slot 2000" "state running"
 # Waiting in line inside its run (its deadline moving on meanwhile): watched
 # as a turn in line is, from when it started waiting, and says for what.
-case_ '.since == 2500 and .due == 9700 and (.phase | test("turn 2 is running, and waiting in line: the heavy-run lock \\(gate\\)$"))' \
+case_ '.since == 2500 and .due == 9700 and .line == false and (.phase | test("turn 2 is running, and waiting in line: the heavy-run lock \\(gate\\)$"))' \
   "${base[@]}" "state running" "wait 2500 the heavy-run lock (gate)"
 case_ '.since == 2500 and .due == 9700' "id web-1" "turn 2" "slot 2000" "state running" "wait 2500 a lock"
 # Ended, a wait it left is nothing to watch.

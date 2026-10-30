@@ -23,7 +23,8 @@
 //!      say, costs a pass, not a job. It's looked at again GRACE later.
 //!   2. Still stuck: one Claude job (proj, in the machine's own project,
 //!      ahead of the line) gets every stall that's ready, to find why and get
-//!      it moving.
+//!      it moving. Not a turn only waiting for a slot (`line`), which that job
+//!      would only queue ahead of: that goes straight to step 3.
 //!   3. Still stuck GRACE after that job has ended, escalateAfter after it was
 //!      handed, or START after it was handed if it hasn't started (what's
 //!      stuck may be the slot it waits for): it goes to the steward's "Stuck

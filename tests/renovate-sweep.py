@@ -1,8 +1,10 @@
 """renovate-sweep with stand-ins for gh, proj and the notifier: which Renovate
-PRs go to a Claude job, which majors the owner's notice lists, and the seal
-on the job's verdicts (major-seal).
+PRs go to a Claude job, which majors the owner's notice lists, the seal
+on the job's verdicts (major-seal), and the lock file refreshes that only
+wait for their releases to be old enough (lock-wait).
 
-    python3 -I tests/renovate-sweep.py modules/updates/renovate-sweep.sh modules/updates/major-seal.py modules/seal.py
+    python3 -I tests/renovate-sweep.py modules/updates/renovate-sweep.sh modules/updates/major-seal.py \
+      modules/autoland/seal.py modules/autoland/lock_wait.py
 """
 
 import importlib.util
@@ -50,7 +52,19 @@ elif a[:2] == ["pr", "list"]:
     print(open(os.path.join(STUB, "prs.json")).read())
 elif a[:2] == ["pr", "view"]:
     print(json.dumps({"comments": json.load(open(os.path.join(STUB, "comments.json"))).get(a[2], [])}))
+elif a[:3] == ["api", "--paginate", "--slurp"]:
+    # REST's comments, which spell an App's bot SLUG[bot].
+    got = json.load(open(os.path.join(STUB, "comments.json"))).get(a[3].split("/")[-2], [])
+    print(json.dumps([[{"user": c["author"], "body": c["body"]} for c in got]]))
+elif a[:2] == ["api", "-X"]:
+    open(os.path.join(STUB, "gh.log"), "a").write(json.dumps(a[2:]) + "\\n")
+    # GitHub refusing the edit, or never answering.
+    sys.exit(1 if os.path.exists(os.path.join(STUB, "gh.refuses")) else 0)
 """)
+lock_wait = os.path.join(tmp, "lock-wait")
+with open(lock_wait, "w") as f:
+    f.write(f"#!/bin/sh\nexec {sys.executable} -I {sys.argv[4]} \"$@\"\n")
+os.chmod(lock_wait, 0o755)
 stub("proj", """open(os.path.join(STUB, "proj.log"), "a").write(json.dumps(sys.argv[1:]) + "\\n")""")
 notify = stub("notify", """open(os.path.join(STUB, "notify.log"), "a").write(json.dumps(sys.argv[1:]) + "\\n")""")
 
@@ -82,7 +96,7 @@ def sweep(prs, comments=None, covered=None, age=0, proofs=None, state=None, fail
     state: a state dir to keep between sweeps. args: the sweep's (a repo);
     then it returns no notice, and checks it sent none. app: the machine's
     own App's name and its bot's login, when the jobs act as it."""
-    for f in ("proj.log", "notify.log"):
+    for f in ("proj.log", "notify.log", "gh.log"):
         open(os.path.join(tmp, f), "w").close()
     json.dump(prs, open(os.path.join(tmp, "prs.json"), "w"))
     json.dump({str(k): v for k, v in (comments or {}).items()}, open(os.path.join(tmp, "comments.json"), "w"))
@@ -100,7 +114,8 @@ def sweep(prs, comments=None, covered=None, age=0, proofs=None, state=None, fail
         repos = {r: {"proofJobs": proofs or {}, "covered": r not in failed} for r in [*covered, *failed]}
         json.dump({"at": time.time() - age, "repos": repos}, open(cov, "w"))
     env = {"DIR": state, "SRC": projects, "OWNER": "Sam", "NOTIFY": notify, "SETTLED": "review-settled", "COVERED": cov,
-           "SEAL": tool, "APP": app[0], "BOT": app[1]}
+           "SEAL": tool, "APP": app[0], "BOT": app[1], "LOCK_WAIT": lock_wait,
+           "RENOVATE_RUN": "7200"}
     script = "set -euo pipefail\n" + "".join(f"{k}={shlex.quote(v)}\n" for k, v in env.items()) + SWEEP
     subprocess.run(["bash", "-c", script, "renovate-sweep", *args], check=True,
                    env={**os.environ, "PATH": bin_ + ":" + os.environ["PATH"]})
@@ -364,5 +379,175 @@ calls, _ = sweep([pr(1)], projects=two)
 assert sorted(c[-2] for c in calls) == ["q", "r"], calls
 calls, notice = sweep([pr(1)], projects=two, args=["Sam/R"])
 assert [c[-2] for c in calls] == ["r"] and notice is None, calls
+
+# A lock file refresh lock-age refused only because nothing in it is old
+# enough yet (its one red check Renovate's artifacts, and Renovate's comment
+# saying until when) goes to no job: it waits, then Renovate is asked to
+# refresh it again (the "rebase!" title), and asked again only when a
+# request went without anything moving, three times at most.
+def refresh(n, ripe, by="me", also="", title="Lock file maintenance (cargo)"):
+    p = {**pr(n, labels=()), "title": title, "headRefName": "renovate/cargo-lock-file-maintenance"}
+    p["statusCheckRollup"] = [*p["statusCheckRollup"], {"__typename": "StatusContext", "context": "renovate/artifacts",
+                                                        "state": "FAILURE", "startedAt": "2099-01-01T00:00:00Z"}]
+    at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ripe))
+    body = ("### \u26a0\ufe0f Artifact update problem\n\nRenovate failed to update an artifact related to this branch.\n\n"
+            "##### File name: undefined\n\n```\nCommand failed: /nix/store/x-lock-age/bin/lock-age main\n"
+            "lock-age: Cargo.lock: c 0.4.1 is too new, took 0.4.0\nlock-age: Cargo.lock: nothing in the refresh was old "
+            "enough, so it went back to the base's, and Renovate would commit its own instead\n"
+            f"lock-age: nothing in the refresh is old enough until {at}\n{also}\n```\n\n")
+    return [p], {n: [{"author": {"login": by}, "body": body}]}
+
+
+def asked():
+    return [json.loads(x) for x in open(os.path.join(tmp, "gh.log"))]
+
+
+def rebase(n):
+    return [["PATCH", f"repos/{REPO}/pulls/{n}", "-f", "title=rebase!Lock file maintenance (cargo)"]]
+
+
+def since(state, n, seconds, suffix="", keep=4):
+    """The sweep's last request for PR n, made `seconds` ago."""
+    path = os.path.join(state, "renovate-sweep", f"{REPO.replace('/', '_')}-{n}{suffix}")
+    f = open(path).read().split()
+    open(path, "w").write(" ".join([*f[:keep], str(int(time.time()) - seconds)]) + "\n")
+
+
+def released(state, n, seconds):
+    """The sweep's last taking back of PR n's request, `seconds` ago."""
+    since(state, n, seconds, ".released", 2)
+
+
+def unasked(n, title="Lock file maintenance (cargo)"):
+    return [["PATCH", f"repos/{REPO}/pulls/{n}", "-f", f"title={title}"]]
+
+
+def refusing(on):
+    path = os.path.join(tmp, "gh.refuses")
+    if on:
+        open(path, "w").close()
+    elif os.path.exists(path):
+        os.remove(path)
+
+
+kept = tempfile.mkdtemp(dir=tmp)
+later, past = time.time() + 3 * 86400, time.time() - 60
+calls, _ = sweep(*refresh(20, later), state=kept)
+assert calls == [] and asked() == [], (calls, asked())
+calls, _ = sweep(*refresh(20, past), state=kept)
+assert calls == [] and asked() == rebase(20), (calls, asked())
+# Renovate's run comes within the hour: nothing more till then.
+calls, _ = sweep(*refresh(20, past), state=kept)
+assert calls == [] and asked() == [], (calls, asked())
+# Taken and dropped with nothing to show for it: asked again, three times in
+# all, then it's a job's.
+for _ in range(2):
+    since(kept, 20, 7200)
+    calls, _ = sweep(*refresh(20, past), state=kept)
+    assert calls == [] and asked() == rebase(20), (calls, asked())
+since(kept, 20, 7200)
+# ...once a Renovate run that took the last one may be over.
+calls, _ = sweep(*refresh(20, past), state=kept)
+assert calls == [] and asked() == [], (calls, asked())
+released(kept, 20, 7100)
+calls, _ = sweep(*refresh(20, past), state=kept)
+assert calls == [] and asked() == [], (calls, asked())
+released(kept, 20, 7300)
+calls, _ = sweep(*refresh(20, past), state=kept)
+assert len(calls) == 1 and "#20 " in calls[0][-1] and asked() == [], (calls, asked())
+calls, _ = sweep(*refresh(20, past), state=kept)
+assert calls == [] and asked() == [], "one job a head"
+# A request still standing six hours on is a job's too, once it's taken
+# back and a Renovate run that read it is surely over; a new time on the
+# same head starts the requests over.
+kept = tempfile.mkdtemp(dir=tmp)
+sweep(*refresh(22, past), state=kept)
+standing = refresh(22, past, title="rebase!Lock file maintenance (cargo)")
+since(kept, 22, 7200)
+calls, _ = sweep(*standing, state=kept)
+assert calls == [] and asked() == [], (calls, asked())
+since(kept, 22, 7 * 3600)
+calls, _ = sweep(*refresh(22, past - 3600), state=kept)
+assert calls == [] and asked() == rebase(22), (calls, asked())
+since(kept, 22, 7 * 3600)
+calls, _ = sweep(*refresh(22, past - 3600, title="rebase!Lock file maintenance (cargo)"), state=kept)
+assert calls == [] and asked() == unasked(22), (calls, asked())
+# Taken back: no more asking on that head, and no job till the run is over.
+calls, _ = sweep(*refresh(22, past - 3600), state=kept)
+assert calls == [] and asked() == [], (calls, asked())
+released(kept, 22, 7300)
+calls, _ = sweep(*refresh(22, past - 3600), state=kept)
+assert len(calls) == 1 and "#22 " in calls[0][-1] and "rebase!" not in calls[0][-1] and asked() == [], calls
+# A request GitHub refused, or never answered, counts as asked all the same:
+# three of them, then it's a job's, not a request every pass for good.
+kept = tempfile.mkdtemp(dir=tmp)
+refusing(True)
+for _ in range(3):
+    calls, _ = sweep(*refresh(24, past), state=kept)
+    assert calls == [] and asked() == rebase(24), (calls, asked())
+    calls, _ = sweep(*refresh(24, past), state=kept)
+    assert calls == [] and asked() == [], (calls, asked())
+    since(kept, 24, 7200)
+calls, _ = sweep(*refresh(24, past), state=kept)
+assert calls == [] and asked() == [], (calls, asked())
+released(kept, 24, 7300)
+calls, _ = sweep(*refresh(24, past), state=kept)
+assert len(calls) == 1 and "#24 " in calls[0][-1] and asked() == [], (calls, asked())
+# One that went through though GitHub didn't say so stands, as any request.
+kept = tempfile.mkdtemp(dir=tmp)
+sweep(*refresh(25, past), state=kept)
+since(kept, 25, 7200)
+calls, _ = sweep(*refresh(25, past, title="rebase!Lock file maintenance (cargo)"), state=kept)
+assert calls == [] and asked() == [], (calls, asked())
+# A request GitHub won't take back: tried three times, ten minutes apart,
+# then the job gets the PR with the request to take back itself.
+standing = refresh(25, past, title="rebase!Lock file maintenance (cargo)")
+since(kept, 25, 7 * 3600)
+for _ in range(3):
+    calls, _ = sweep(*standing, state=kept)
+    assert calls == [] and asked() == unasked(25), (calls, asked())
+    calls, _ = sweep(*standing, state=kept)
+    assert calls == [] and asked() == [], (calls, asked())
+    released(kept, 25, 700)
+calls, _ = sweep(*standing, state=kept)
+assert len(calls) == 1 and "#25 " in calls[0][-1] and "take that off the title first" in calls[0][-1], calls
+assert "for 120 minutes after" in calls[0][-1] and asked() == [], (calls, asked())
+refusing(False)
+# Whatever else sends a PR with a request standing to a job (another red
+# check, a failure that isn't only age, a major), the request comes off
+# first, and the job waits out the run.
+for why in ("check", "failure", "major"):
+    kept = tempfile.mkdtemp(dir=tmp)
+    prs, comments = refresh(26, later, also="error: failed to select a version" if why == "failure" else "",
+                            title="rebase!Update foo26 to v2")
+    if why == "check":
+        prs[0]["statusCheckRollup"][0]["conclusion"] = "FAILURE"
+    if why == "major":
+        prs[0]["statusCheckRollup"] = prs[0]["statusCheckRollup"][:1]
+        prs[0]["labels"] = [{"name": "major"}]
+    calls, _ = sweep(prs, comments, state=kept)
+    assert calls == [] and asked() == unasked(26, "Update foo26 to v2"), (why, calls, asked())
+    prs[0]["title"] = "Update foo26 to v2"
+    calls, _ = sweep(prs, comments, state=kept)
+    assert calls == [] and asked() == [], (why, calls, asked())
+    released(kept, 26, 7300)
+    calls, _ = sweep(prs, comments, state=kept)
+    assert len(calls) == 1 and "#26 " in calls[0][-1] and asked() == [], (why, calls, asked())
+# As the machine's own App: only its bot's comment counts, not a user who
+# holds its name.
+calls, _ = sweep(*refresh(23, later, by="sam-workers[bot]"), app=("workers", "sam-workers"))
+assert calls == [] and asked() == [], (calls, asked())
+calls, _ = sweep(*refresh(23, later, by="sam-workers"), app=("workers", "sam-workers"))
+assert len(calls) == 1 and "#23 " in calls[0][-1], calls
+# Anything else in the failure, someone else's comment, no comment, or
+# another red check: red CI, a job's to fix.
+for prs, comments in (refresh(21, later, also="error: failed to select a version"), refresh(21, later, by="mallory"),
+                      (refresh(21, later)[0], {})):
+    calls, _ = sweep(prs, comments)
+    assert len(calls) == 1 and "#21 " in calls[0][-1] and asked() == [], (prs, comments, calls)
+prs, comments = refresh(21, later)
+prs[0]["statusCheckRollup"][0]["conclusion"] = "FAILURE"
+calls, _ = sweep(prs, comments)
+assert len(calls) == 1 and "#21 " in calls[0][-1], calls
 
 print("renovate-sweep: ok")

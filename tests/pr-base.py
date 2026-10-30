@@ -2,7 +2,9 @@
 checked merged with its base branch as that branch is when the job starts,
 not as it was when the event fired (a run that waited in the queue, or a
 re-run), the log names both commits, and a head that no longer merges
-cleanly fails the job without anything checked.
+cleanly fails the job without anything checked. With pr-gate off (a train
+repo's), a PR to the default branch gets no gate, and every push and a PR to
+any other branch still do, a branch whose name differs only in case included.
 
   python3 -I tests/pr-base.py .github/workflows/flake-check.yml
   nix build .#checks.x86_64-linux.pr-base
@@ -15,7 +17,21 @@ import tempfile
 
 import yaml
 
-job = yaml.safe_load(open(sys.argv[1]))["jobs"]["check"]
+workflow = yaml.safe_load(open(sys.argv[1]))
+job = workflow["jobs"]["check"]
+# PyYAML reads the `on:` key as True.
+pr_gate = workflow[True]["workflow_call"]["inputs"]["pr-gate"]
+assert pr_gate["type"] == "boolean" and pr_gate["default"] is True, pr_gate
+train = workflow["jobs"]["train"]
+assert train.get("if") == "${{ !inputs.pr-gate && github.event_name == 'pull_request' }}", train.get("if")
+assert job.get("needs") == "train", job.get("needs")
+assert job.get("if") == ("${{ !cancelled() && (inputs.pr-gate || github.event_name != 'pull_request' ||"
+                         " needs.train.outputs.lands != 'true') }}"), job.get("if")
+assert train["outputs"] == {"lands": "${{ steps.base.outputs.lands }}"}, train["outputs"]
+base_step = next(s for s in train["steps"] if s.get("id") == "base")
+assert base_step["shell"] == "bash"
+assert base_step["env"] == {"BASE": "${{ github.event.pull_request.base.ref }}",
+                            "DEFAULT": "${{ github.event.repository.default_branch }}"}, base_step["env"]
 names = [s.get("id") or s.get("uses", "").split("@")[0] for s in job["steps"]]
 # The checkout fetches every branch for a PR, then the merge comes before
 # the gate checks anything.
@@ -31,6 +47,24 @@ assert step["env"] == {"BASE": "${{ github.event.pull_request.base.ref }}",
                        "HEAD_SHA": "${{ github.event.pull_request.head.sha }}"}, step["env"]
 
 tmp = tempfile.mkdtemp()
+
+
+def lands(base, default):
+    """The train job's word on a PR to base, in a repo whose default branch is default."""
+    out = os.path.join(tmp, "train-output")
+    open(out, "w").close()
+    subprocess.run(["bash", "-c", base_step["run"]], check=True, stdout=subprocess.DEVNULL,
+                   env={"PATH": os.environ["PATH"], "BASE": base, "DEFAULT": default, "GITHUB_OUTPUT": out})
+    return open(out).read()
+
+
+# Only the exact default branch is the train's: a case variant is another
+# branch, and so is any other name.
+assert lands("main", "main") == "lands=true\n", lands("main", "main")
+for other in ("Main", "MAIN", "release", "main2", ""):
+    assert lands(other, "main") == "lands=false\n", (other, lands(other, "main"))
+print("train lands only its default branch's PRs: ok")
+
 script = os.path.join(tmp, "merge.sh")
 open(script, "w").write(step["run"])
 env = {"PATH": os.environ["PATH"], "HOME": tmp, "GIT_CONFIG_NOSYSTEM": "1"}
