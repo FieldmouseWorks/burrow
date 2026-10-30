@@ -434,18 +434,21 @@ jobs:
           }
           gate 2>&1 | tee "$RUNNER_TEMP/flake.log"
       # The gate's result, signed with this job's own GitHub identity, in the
-      # format Conary reads (FieldmouseWorks/Conary, docs/ci-attestation.md).
-      # GitHub attests for private repositories only on Enterprise Cloud, and
-      # a run with no OIDC token (a fork's PR, Dependabot's) can't sign, so
-      # those get none and their results don't count as evidence.
+      # format Conary reads (FieldmouseWorks/Conary, docs/ci-attestation.md):
+      # a public repo's as a Sigstore bundle, and a private repo's, which
+      # GitHub attests only on Enterprise Cloud, with the job's own token,
+      # whose audience names the digest of what it attests. A run with no OIDC
+      # token (a fork's PR, Dependabot's) can't sign, so it gets none and its
+      # result doesn't count as evidence.
       - id: subject
-        if: ${{ !cancelled() && steps.gate.outcome != 'skipped' && !github.event.repository.private && (github.event_name == 'push' || github.event_name == 'pull_request') }}
+        if: ${{ !cancelled() && steps.gate.outcome != 'skipped' && (github.event_name == 'push' || github.event_name == 'pull_request') }}
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           OUTCOME: ${{ steps.gate.outcome }}
           SKIP: ${{ inputs.build-skip }}
           PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          PRIVATE: ${{ github.event.repository.private }}
         run: |
           if [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
             echo "no OIDC token in this run, so no attestation"
@@ -453,9 +456,10 @@ jobs:
           fi
           case $OUTCOME in success) result=pass ;; *) result=fail ;; esac
           # Artifact names are shared by every job in a run, and a caller may
-          # run this job more than once (a matrix, a re-run), so each log gets
-          # its own.
-          log="flake-log-$(cat /proc/sys/kernel/random/uuid)"
+          # run this job more than once (a matrix, a re-run), so each job's
+          # log and attestation get names of their own.
+          uuid=$(cat /proc/sys/kernel/random/uuid)
+          log="flake-log-$uuid"
           dir="$RUNNER_TEMP/conary"
           mkdir -p "$dir"
           if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
@@ -479,12 +483,29 @@ jobs:
             > "$dir/predicate.json"
           cat "$subject" "$dir/predicate.json"
           { echo "path=$subject"; echo "log=$log"; } >> "$GITHUB_OUTPUT"
+          if [ "$PRIVATE" = true ]; then
+            # The statement is the subject, then the predicate on one line.
+            # The file keeps the token after it, as its last line.
+            attestation="$dir/conary-attestation"
+            { cat "$subject"; jq -c . "$dir/predicate.json"; } > "$attestation"
+            audience="conary-attestation:v1:sha256:$(sha256sum "$attestation" | cut -d' ' -f1)"
+            echo "signing with this job's token, audience $audience"
+            # Nothing in the audience needs escaping in a URL.
+            curl -fsS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+              "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=$audience" | jq -er .value >> "$attestation"
+            { echo "attestation=$attestation"; echo "attestation-name=conary-attestation-$uuid"; } >> "$GITHUB_OUTPUT"
+          fi
       - if: ${{ !cancelled() && steps.subject.outputs.path }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ steps.subject.outputs.log }}
           path: ${{ runner.temp }}/flake.log
-      - if: ${{ !cancelled() && steps.subject.outputs.path }}
+      - if: ${{ !cancelled() && steps.subject.outputs.attestation }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ steps.subject.outputs.attestation-name }}
+          path: ${{ steps.subject.outputs.attestation }}
+      - if: ${{ !cancelled() && steps.subject.outputs.path && !github.event.repository.private }}
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-path: ${{ steps.subject.outputs.path }}

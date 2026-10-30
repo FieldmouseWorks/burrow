@@ -508,7 +508,7 @@ in
       description = ''
         Daily, delete branches whose tip is already in the default branch or
         is a closed PR's head (no open PR). Other unmerged ones with no commit
-        for 14 days (not a bot's) are kept at refs/archive/BRANCH/SHA, then
+        for 3 days (not a bot's) are kept at refs/archive/BRANCH/SHA, then
         deleted (docs/repo-baseline.md says how to restore one).
       '';
     };
