@@ -224,20 +224,23 @@ def rules(repo, base, none, absent, *args):
 
 
 def land(repo, pr, repo_info):
-    """Merge it now, at the head that was checked, or not at all: False if
-    GitHub didn't. Nothing is left for GitHub to merge later (auto-merge, a
-    merge queue): that would merge whatever head the base's rules let
-    through, which needn't be one the steward checked. So a merge queued
-    before, by anyone, is taken off first."""
+    """Merge it now, at the head that was checked, or not at all: None once
+    GitHub has merged it, else why it hasn't (GitHub's own words, when it
+    refused the merge). Nothing is left for GitHub to merge later
+    (auto-merge, a merge queue): that would merge whatever head the base's
+    rules let through, which needn't be one the steward checked. So a merge
+    queued before, by anyone, is taken off first."""
     if not C.unland(repo, pr) and not DRY:
-        return False
+        return "GitHub didn't take off the merge already queued on it"
     method = merge_method(repo, pr["baseRefName"], repo_info)
     if method is None:
-        log(f"{repo}#{pr['number']}: no merge method both the repo's settings and the rules on "
-            f"{pr['baseRefName']} allow, or GitHub didn't say what the rules are")
-        return False
+        return (f"not asked: no merge method both the repo's settings and the rules on {pr['baseRefName']} allow, "
+                "or GitHub didn't say what the rules are")
     # The merge endpoint merges or refuses; a push since the check makes the
     # sha stale, and it waits for the next pass.
-    return C.write("api", "-X", "PUT", f"repos/{repo}/pulls/{pr['number']}/merge",
-                   "-f", f"merge_method={method}", "-f", f"sha={pr['headRefOid']}",
-                   check=False) is not None or DRY
+    try:
+        C.write("api", "-X", "PUT", f"repos/{repo}/pulls/{pr['number']}/merge",
+                "-f", f"merge_method={method}", "-f", f"sha={pr['headRefOid']}")
+    except RuntimeError as e:
+        return C.said(e)
+    return None

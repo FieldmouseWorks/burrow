@@ -586,6 +586,11 @@ run(clean(checks=[]), 700)
 # this head still decides.
 status, _ = run(clean(checks=CI_GREEN), 800)
 assert JOBS == [] and not merged() and "a Claude job is judging it" in status, (status, JOBS)
+# A judge still in proj's line is queued for it.
+STATES["job-1"] = "queued"
+status, _ = run(clean(checks=CI_GREEN), 810)
+assert JOBS == [] and "a Claude job is queued for judging it" in status, (status, JOBS)
+STATES.clear()
 for v in ("owner", "failed"):
     status, _ = run(clean(checks=CI_GREEN, comments=[said(judgment(v, n=5))]), 900)
     assert not merged(), (v, status)
@@ -619,6 +624,15 @@ assert "git worktree add" in JOBS[0] and "never in this checkout's main tree" in
 assert "a Claude job is running remi-proof" in status
 status, _ = run(clean(checks=proof), 800)
 assert JOBS == [] and "a Claude job is running remi-proof" in status
+# Waiting in proj's line, it's queued for that, not at it, until it starts
+# (proj kicks a pass then).
+STATES["job-1"] = "queued"
+status, _ = run(clean(checks=proof), 810)
+assert JOBS == [] and "a Claude job is queued for running remi-proof" in status, status
+STATES["job-1"] = "running"
+status, _ = run(clean(checks=proof), 820)
+assert JOBS == [] and "a Claude job is running remi-proof" in status, status
+STATES.clear()
 status, _ = run(clean(checks=proof, sha=other), 900)
 assert len(JOBS) == 1 and other in JOBS[0]
 # Not reported at all (nothing posts it before its job runs): the same, not
