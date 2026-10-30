@@ -218,7 +218,7 @@ For reviewers, the review bot included. Flag as P1:
   closed PR keeps its commits and can restore the branch). GitHub's
   delete-on-merge only covers merged PRs. `keepBranches` are left alone, and
   bots' branches go only this way.
-- Unmerged branches with no PR and no commit for 14 days are archived, then
+- Unmerged branches with no PR and no commit for 3 days are archived, then
   deleted: the steward keeps the tip at `refs/archive/BRANCH/SHA` in the same
   repo, a ref GitHub keeps but lists with neither branches nor tags, and
   deletes the branch only if it's still at that tip. `git ls-remote origin

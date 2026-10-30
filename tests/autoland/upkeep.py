@@ -550,7 +550,13 @@ assert order == ["watch", (9, True), (10, False)], order
 # stay. One with no PR and no commit for STALE_DAYS is kept under
 # refs/archive and deleted (one an earlier sweep archived too); one GitHub
 # won't archive stays, listed for the pipeline.
-old, young = "2026-09-01T00:00:00Z", "2026-10-23T00:00:00Z"
+def ago(days):
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(C.NOW - days * 86400))
+
+
+# Given up on a day past STALE_DAYS (3: agents open a PR when they push), or
+# fresh from today.
+old, young = ago(4), ago(1)
 BRANCHES = {"in-main": ("1" * 40, 0, young), "closed": ("2" * 40, 3, young), "moved": ("3" * 40, 1, young),
             "open": ("4" * 40, 2, old), "renovate/x": ("5" * 40, 1, old), "gh-pages": ("6" * 40, 9, old),
             "old": ("7" * 40, 4, old), "young": ("8" * 40, 4, young), "renovate/closed": ("9" * 40, 1, young),
@@ -624,8 +630,7 @@ assert DELETED == [] and [line for _, line, _ in digest] == ["sam/r: `refused`"]
 # deleted again (the stand-in keeps every branch), already kept.
 CLOSED["closed"] = None
 C.NOW += 86400
-recent = time.gmtime(C.NOW - (R.STALE_DAYS - 1) * 86400)
-BRANCHES["recent"] = ("0" * 40, 4, time.strftime("%Y-%m-%dT%H:%M:%SZ", recent))
+BRANCHES["recent"] = ("0" * 40, 4, ago(R.STALE_DAYS - 1))
 R.sweep_branches(repo_r, {"open"}, [])
 assert DELETED == [("in-main", "1" * 40), ("old", "7" * 40), ("renovate/closed", "9" * 40), ("archived", "d" * 40)], DELETED
 assert len(ARCHIVED) == 2, ARCHIVED
