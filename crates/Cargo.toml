@@ -2,7 +2,7 @@
 # (AGENTS.md, Build and test). The flake builds them all as
 # packages.SYSTEM.burrow and gates them as checks.crates-*.
 [workspace]
-members = ["burrow-events"]
+members = ["burrow-events", "burrow-watchdog"]
 resolver = "3"
 
 [workspace.package]
@@ -10,6 +10,13 @@ version = "0.0.0"
 edition = "2024"
 license = "MIT"
 publish = false
+
+# What more than one crate uses, at one version.
+[workspace.dependencies]
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+sha2 = "0.11.1"
+tempfile = "3.27.0"
 
 # crane names the package that holds every binary.
 [workspace.metadata.crane]

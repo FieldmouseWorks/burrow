@@ -136,8 +136,13 @@
             modules = [{ burrow.cpu.heavy = { slots = 1; grace = 3; dir = "/build/heavy"; }; }];
           }).config.burrow.tools.heavy;
           weight = self.nixosConfigurations.example.config.systemd.slices.ci.sliceConfig.CPUWeight;
+          # A gate slice with a dash in its name would be nested: refused.
+          nested = (builtins.tryEval (builtins.deepSeq
+            (self.nixosConfigurations.example.extendModules { modules = [{ burrow.cpu.gates.slices = [ "nix-builds" ]; }]; }).config.burrow.cpu.gates.slices
+            true)).success;
         in pkgs.runCommand "cpu-check" { } ''
           [ ${toString weight} = 400 ] || { echo "ci.slice weight ${toString weight}"; exit 1; }
+          ${pkgs.lib.optionalString nested "echo 'a nested gate slice (nix-builds) was taken'; exit 1"}
           mkdir -p /build/heavy && : >/build/heavy/slot1 && chmod 0444 /build/heavy/slot1
           h=${heavy}/bin/heavy
           threads=$(nproc)
@@ -218,15 +223,21 @@
             [ ! -e late ] || { echo "the command outlived a heavy cancelled at its start"; exit 1; }
           done 2>/dev/null
 
-          # A bounded wait ends on time, and never starts the command after.
-          rm -f ran
-          rm -f held; $h -- sh -c 'touch held; sleep 1.5' & ready $! test -e held
+          # A bounded wait ends on time, and never starts the command after,
+          # once the slot is free. The slot is held until the waits are done,
+          # not for a time: on a loaded runner, starting heavy twice can take
+          # longer than any margin.
+          rm -f ran held done
+          $h -- sh -c 'touch held; while [ ! -e done ]; do sleep 0.1; done' & hp=$!
+          ready $hp test -e held
           s=$(date +%s%N); rc=0; $h --wait 1 -- touch ran 2>err || rc=$?; e=$(date +%s%N)
-          [ "$rc" = 75 ] || { echo "--wait 1 with the slot freed after it: $rc, not 75"; exit 1; }
-          [ ! -e ran ] || { echo "--wait 1 ran the command after its wait"; exit 1; }
+          [ "$rc" = 75 ] || { echo "--wait 1 with the slot held: $rc, not 75"; exit 1; }
           [ $(( (e - s) / 1000000 )) -lt 1800 ] || { echo "--wait 1 took $(( (e - s) / 1000000 ))ms"; exit 1; }
           rc=0; $h --wait 0 -- touch ran 2>err || rc=$?
-          [ "$rc" = 75 ] && [ ! -e ran ] || { echo "--wait 0: $rc"; exit 1; }
+          [ "$rc" = 75 ] || { echo "--wait 0 with the slot held: $rc, not 75"; exit 1; }
+          touch done; wait $hp
+          sleep 0.5
+          [ ! -e ran ] || { echo "a bounded wait ran the command once the slot was free"; exit 1; }
           $h -- touch ran 2>err
           [ -e ran ] || { echo "an unbounded wait didn't get the slot"; exit 1; }
           wait
@@ -274,6 +285,12 @@
             ];
           };
         in builtins.head (builtins.filter (p: (p.name or "") == "autoland-steward") machine.config.environment.systemPackages);
+        # The example's stall watchdog reads the config its module writes (a
+        # field the binary doesn't know fails it).
+        watchdog-config = pkgs.runCommand "watchdog-config-check" { } ''
+          ${self.nixosConfigurations.example.config.systemd.services.burrow-watchdog.serviceConfig.ExecStart} status
+          touch $out
+        '';
         # The steward's tools reach a pass however it's started: by hand or
         # a Claude job (`autoland-steward kick OWNER/REPO`), with no openssl,
         # gh or proj of its own, gets them from the wrapper, ahead of its own
@@ -327,11 +344,11 @@
           [ "$got" = the-stewards ] || { echo "a pass's own call doesn't use the steward's token: $got"; exit 1; }
           touch $out
         '';
-        # The stall watchdog's ladder (kick, Claude job, stuck issue, owner),
-        # with the real notify and stand-ins for proj, notify's gh and
-        # burrow-events' kick port.
-        watchdog = pkgs.runCommand "watchdog-check" { nativeBuildInputs = [ pkgs.python3 pkgs.bash ]; } ''
-          python3 -I ${./tests/watchdog.py} ${./modules/watchdog}/watchdog.py ${./modules/notify}/notify.sh
+        # HOST-notify's issues, with a stand-in for gh: one a notice, closed
+        # when cleared, and pending until GitHub has shown it closed.
+        notify = pkgs.runCommand "notify-check" { nativeBuildInputs = [ pkgs.shellcheck pkgs.jq pkgs.bash ]; } ''
+          shellcheck -s bash ${./tests/notify.sh}
+          bash ${./tests/notify.sh} ${./modules/notify/notify.sh}
           touch $out
         '';
         # The update job's fix jobs: pipeline work, one per problem while it's
@@ -339,6 +356,50 @@
         update-dispatch = pkgs.runCommand "update-dispatch-check" { nativeBuildInputs = [ pkgs.shellcheck ]; } ''
           shellcheck -s bash ${./modules/updates/dispatch.sh} ${./tests/update-dispatch.sh}
           bash ${./tests/update-dispatch.sh} ${./modules/updates/dispatch.sh}
+          touch $out
+        '';
+        # HOST-update's own PR in a train repo (modules/updates/propose.sh):
+        # real git, with a stand-in for gh.
+        update-propose = pkgs.runCommand "update-propose-check" { nativeBuildInputs = [ pkgs.shellcheck pkgs.git pkgs.jq ]; } ''
+          shellcheck -s bash ${./modules/updates/propose.sh} ${./tests/update-propose.sh}
+          bash ${./tests/update-propose.sh} ${./modules/updates/propose.sh}
+          touch $out
+        '';
+        # Which repo the flake's origin is, and so whether HOST-update goes
+        # through its train: the same in every spelling of GitHub's URLs
+        # (scheme, host case, a trailing dot, the default port, either SSH
+        # form, .git, a trailing slash), whatever the case of autoland's name
+        # for it; nothing for a repo elsewhere, even one with github.com in its
+        # path; and a GitHub origin it can't read refused, never read as no
+        # train.
+        update-origin = let
+          lib = nixpkgs.lib;
+          machine = origin: (self.nixosConfigurations.example.extendModules {
+            modules = [{ burrow.updates.origin = lib.mkForce origin; }];
+          }).config;
+          train = origin: (machine origin).burrow.updates.throughTrain;
+          refused = origin: lib.any (a: !a.assertion && lib.hasInfix "OWNER/NAME" a.message) (machine origin).assertions;
+          forms = [
+            "https://github.com/sam/homelab" "https://github.com/sam/homelab.git" "https://github.com/sam/homelab/"
+            "https://github.com/Sam/HomeLab" "https://GitHub.com/sam/homelab.git" "https://github.com./sam/homelab"
+            "HTTPS://github.com:443/sam/homelab" "git@github.com:sam/homelab.git" "git@github.com:sam/homelab"
+            "git@GITHUB.COM.:sam/homelab/" "ssh://git@github.com/sam/homelab.git" "ssh://git@github.com:22/sam/homelab/"
+            "ssh://git@GitHub.com.:22/sam/homelab"
+          ];
+          wrong = lib.filter (o: !train o || refused o) forms
+            ++ lib.filter (o: train o || refused o) [
+              "https://git.example.org/sam/homelab" "https://github.com/sam/other" "/srv/mirrors/github.com/sam/homelab"
+              "https://git.example.org/github.com/sam/homelab"
+            ]
+            ++ lib.filter (o: !refused o) [
+              "https://github.com/sam" "https://www.github.com/sam/homelab" "git@github.com:sam/homelab/extra"
+              "https://github.com:8443/sam/homelab" "http://github.com/sam/homelab" "https://sam@github.com/sam/homelab"
+              "ssh://sam@github.com/sam/homelab" "git://GitHub.com/sam/homelab"
+            ];
+        in pkgs.runCommand "update-origin-check" { } ''
+          ${lib.concatMapStrings (o: "echo 'wrong for ${o}'
+") wrong}
+          [ ${toString (builtins.length wrong)} = 0 ]
           touch $out
         '';
         # burrow-events for real: deliveries, kicks and wake-ups starting a
@@ -393,6 +454,11 @@
           [ ! -e kicks ] || { echo "kicked at boot: $(cat kicks)"; exit 1; }
           PATH=$PWD/bin:$PATH STATE=running ${start}
           grep -q ' http://127.0.0.1:[0-9]*/kick/autoland$' kicks || { echo "kicked: $(cat kicks)"; exit 1; }
+          touch $out
+        '';
+        # The machine's git clones with a token-only URL, as Renovate does.
+        git-token-url = pkgs.runCommand "git-token-url-check" { nativeBuildInputs = [ pkgs.python3 ]; } ''
+          python3 -I ${./tests/git-token-url.py} ${self.nixosConfigurations.example.config.programs.git.package}/bin/git "$TMPDIR"
           touch $out
         '';
         # Which repos a run of Renovate on one repo covers: the ones its
@@ -521,10 +587,19 @@
           python3 -I ${./tests/gate.py} ${./.github/workflows/flake-check.yml}
           touch $out
         '';
+        # The shared CI's merge step (flake-check.yml), its own script on
+        # real repos: a PR is checked merged with its base as the base is when
+        # the job starts, and one that no longer merges cleanly fails.
+        pr-base = pkgs.runCommand "pr-base-check" { nativeBuildInputs = [ (pkgs.python3.withPackages (p: [ p.pyyaml ])) pkgs.git ]; } ''
+          python3 -I ${./tests/pr-base.py} ${./.github/workflows/flake-check.yml}
+          touch $out
+        '';
         # Stale Remote Control servers catch up once idle, with a stand-in for Claude.
         remote-control = import ./tests/remote-control.nix { inherit self pkgs; };
         # A session past its server's memory cap dies alone, with a stand-in for Claude.
         remote-control-memory = import ./tests/remote-control-memory.nix { inherit self pkgs; };
+        # systemd-oomd leaves a Remote Control server whole, with a stand-in for Claude.
+        remote-control-oomd = import ./tests/remote-control-oomd.nix { inherit self pkgs; };
         # The signed-in browser: Claude driving it, its logins kept, its ports
         # and profile kept from everyone else.
         browser = import ./tests/browser.nix { inherit self pkgs; };

@@ -17,7 +17,8 @@ event reports):
      what each job is told), post the `review-settled` commit status and
      merge it, or list it for the owner.
   3. Once a day per repo, delete branches whose tip is already in the
-     default branch, and list the stale unmerged ones.
+     default branch or a closed PR's head, and archive the stale unmerged
+     ones under refs/archive before deleting them too.
   4. Read each repo's Renovate dashboard: what sits on it too long, short
      of a PR, goes to a Claude job (dashboard.py); and its quarantined
      flaky tests, each to a Claude job that fixes it (flakes.py).
@@ -42,6 +43,11 @@ changing anything.
 `autoland-steward review` works through the reviews the passes queued
 (review_worker.py), as the reviewers' own user. A careful look takes an
 agent many minutes, so it runs as its own service and no pass waits for it.
+
+In a repo with `train` on, a settled PR goes into its merge train instead of
+being merged, and a pass ends with a step of the train (train.py). `cn`, which
+runs the train, gets the App's tokens from `autoland-steward token
+OWNER/REPO`, printed on stdout for it alone.
 """
 
 import fcntl
@@ -55,15 +61,35 @@ import proofs as P
 import repos as R
 import reviewers as V
 import step
+import train as T
 import waits
 from common import CFG, DRY, MIN, STATE, load, log, save
 from prs import open_prs
+
+
+# ---------------------------------------------------------------- main
+
+def token(repo):
+    """The App's token for repo's owner, for cn (train.py), which runs it
+    inside a pass: so it takes no lock. Exits 75 when GitHub can't be asked
+    just now, as cn does."""
+    try:
+        print(C.token(repo.split("/")[0].lower()))
+    except C.Unavailable as e:
+        print(f"no token for {repo}: {e}", file=sys.stderr)
+        sys.exit(75)
+    except (RuntimeError, OSError) as e:
+        print(f"no token for {repo}: {e}", file=sys.stderr)
+        sys.exit(1)
 
 
 def main():
     if sys.argv[1:] == ["review"]:
         import review_worker
         review_worker.work()
+        return
+    if sys.argv[1:2] == ["token"] and len(sys.argv) == 3:
+        token(sys.argv[2])
         return
     try:
         for d in ("", V.QUEUE, V.SNAP, V.DONE, V.SESSIONS, V.GIT):
@@ -124,7 +150,13 @@ def run_pass(kick):
                     known.add(repo)
                 owner, name = repo.split("/")
                 info, prs = open_prs(owner, name)
-                P.begin(repo, (pr["number"] for pr in prs))
+                # The PRs labelled to go first in the proof line. One whose
+                # labels can't be read isn't, and fails in its own step below:
+                # one bad PR mustn't stop the rest.
+                first = {pr["number"] for pr in prs if CFG["labels"]["first"] in
+                         {x.get("name") for x in pr.get("labels", {}).get("nodes", ())}}
+                P.begin(repo, (pr["number"] for pr in prs), first)
+                T.begin(repo)
                 read.add(repo.replace("/", "_"))
                 waits.read(repo, prs)
                 # First, so a fix PR it made obsolete isn't merged by this same pass.
@@ -136,8 +168,8 @@ def run_pass(kick):
                 seen_to = True
                 # Obsolete fixes first: their holds take back a queued merge
                 # before anything else this pass waits on.
-                # Then oldest first, so proofSlots go to PRs in their order.
-                for pr in sorted(prs, key=lambda pr: (pr["number"] not in obsolete, pr["number"])):
+                # Then in the proof line's order, so proofSlots go to PRs in it.
+                for pr in sorted(prs, key=lambda pr: (pr["number"] not in obsolete, P.place(repo, pr["number"]))):
                     in_use.update((pr["headRefName"], pr["baseRefName"]))
                     live.add(V.snap_name(f"pr-{repo.replace('/', '_')}-{pr['number']}.json", pr["headRefOid"], pr["baseRefName"]))
                     try:
@@ -146,12 +178,26 @@ def run_pass(kick):
                         log(f"{repo}#{pr['number']}: {e}")
                         waits.failed(repo, pr)
                         seen_to = False
+                        if T.seat(repo, pr["number"]) is not None:
+                            # It may not be settled any more, and still be in.
+                            T.stop(repo, f"#{pr['number']} wasn't seen to")
                 if seen_to:
                     covered.append(r)
                 else:
                     C.wake(repo, C.NOW + 5 * MIN)  # ends: waits.failed watches the PR it failed on
+                if T.on(repo):
+                    # After its PRs, so the ones settled this pass are in it.
+                    try:
+                        T.step(repo)
+                    except C.Unavailable as e:
+                        log(f"{repo}: its train: {e}")
+                        C.wake(repo, C.NOW + 5 * MIN)  # ends: the next pass steps it again
+                    except Exception as e:  # its own: the repo's PRs were seen to all the same
+                        log(f"{repo}: its train: {e}")
+                        waits.failed(repo)
+                        C.wake(repo, C.NOW + 5 * MIN)  # ends: waits.failed watches the repo
                 if CFG["cleanBranches"]:
-                    # Stale ones the last sweep found are listed every pass.
+                    # Stale ones the last sweep couldn't archive are listed every pass.
                     R.sweep_branches(r, in_use, mine, sweep=kick is None)
             except Exception as e:
                 log(f"{repo}: {e}")

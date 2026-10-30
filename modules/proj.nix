@@ -28,7 +28,7 @@ let
 
   proj = pkgs.writeShellApplication {
     name = "proj";
-    runtimeInputs = [ pkgs.coreutils pkgs.findutils pkgs.gnugrep pkgs.gnused pkgs.gawk pkgs.jq pkgs.curl pkgs.git pkgs.systemd pkgs.util-linux pkgs.bashInteractive ];
+    runtimeInputs = [ pkgs.coreutils pkgs.findutils pkgs.gnugrep pkgs.gnused pkgs.gawk pkgs.jq pkgs.curl config.programs.git.package pkgs.systemd pkgs.util-linux pkgs.bashInteractive ];
     text = ''
       SRC=${lib.escapeShellArg projectsDir}
       JOBS=${lib.escapeShellArg cfg.jobsDir}
@@ -57,7 +57,7 @@ let
 
   inbox = pkgs.writeShellApplication {
     name = "proj-inbox";
-    runtimeInputs = [ proj pkgs.coreutils pkgs.git cfg.gh pkgs.jq pkgs.gnused pkgs.gnugrep pkgs.util-linux ];
+    runtimeInputs = [ proj pkgs.coreutils config.programs.git.package cfg.gh pkgs.jq pkgs.gnused pkgs.gnugrep pkgs.util-linux ];
     text = ''
       SRC=${lib.escapeShellArg projectsDir}
       JOBS=${lib.escapeShellArg cfg.jobsDir}
@@ -139,7 +139,11 @@ in
     jobMemoryMax = lib.mkOption {
       type = lib.types.str;
       default = "8G";
-      description = "The most memory one job may hold (systemd's MemoryMax) before it's killed.";
+      description = ''
+        The most memory one job may hold (systemd's MemoryMax). Past it the
+        kernel kills the job's biggest process, usually a build or evaluation
+        it ran, and the job carries on, told that command was killed.
+      '';
     };
     timeout = lib.mkOption {
       type = lib.types.str;

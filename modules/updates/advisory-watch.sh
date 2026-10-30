@@ -107,13 +107,19 @@ sed "s/^/$(date -Is) /" "$found" >>"$state/log"
 # One job per project with everything new for it.
 kernel=
 [ -z "$BOOT" ] || kernel=" If the fix is in the kernel, \`sudo $BOOT trial\` once it's confirmed."
+# Only the merge train moves main in a train repo: the patch goes up as a PR.
+if [ -n "$TRAIN" ]; then
+  deploy="push it to a branch of your own and open a PR against main, which the steward settles and the merge train lands (nothing else may move main); $UPDATE deploys it once it has."
+else
+  deploy="push to main, then \`sudo systemctl start --no-block $UPDATE\` to deploy it now."
+fi
 cut -f1 "$found" | sort -u | while read -r p; do
   list=$(awk -F'\t' -v p="$p" '$1 == p { print "- " $2 }' "$found")
   if [ "$p" = "$PROJECT" ]; then
     task="advisory-watch found new vulnerabilities in what $HOST runs:
 $list
 
-For each one: does it really affect $HOST as it runs now? Check the version and the patches nixpkgs applies; vulnix and name matching both over-report. If the $CHANNEL channel already carries the fix, $UPDATE deploys it on its next run (see \`$UPDATE status\`). If it doesn't, and it matters (known exploited, reachable from the network, or CVSS 9+), patch $HOST now: an overlay in the flake that applies the upstream fix (system.replaceDependencies for a library, so the world doesn't rebuild), noted in docs/patches.md with the CVE and the nixpkgs version that will carry the fix, so the patch can go once the channel has it. Work in your own worktree (git -C $FLAKE worktree add $SCRATCH/fix-\$(date +%s) origin/main), never in $FLAKE itself. Build and run \`nix build -L ${checks[*]/#/.#checks.$SYSTEM.}\`, push to main, then \`sudo systemctl start --no-block $UPDATE\` to deploy it now.$kernel Write one line per CVE (affected or not, and what you did) to $state/verdicts.md. If something needs $OWNER, run \`$NOTIFY open advisory \"title\" \"what they need to do\"\`."
+For each one: does it really affect $HOST as it runs now? Check the version and the patches nixpkgs applies; vulnix and name matching both over-report. If the $CHANNEL channel already carries the fix, $UPDATE deploys it on its next run (see \`$UPDATE status\`). If it doesn't, and it matters (known exploited, reachable from the network, or CVSS 9+), patch $HOST now: an overlay in the flake that applies the upstream fix (system.replaceDependencies for a library, so the world doesn't rebuild), noted in docs/patches.md with the CVE and the nixpkgs version that will carry the fix, so the patch can go once the channel has it. Work in your own worktree (git -C $FLAKE worktree add $SCRATCH/fix-\$(date +%s) origin/main), never in $FLAKE itself. Build and run \`nix build -L ${checks[*]/#/.#checks.$SYSTEM.}\`, $deploy$kernel Write one line per CVE (affected or not, and what you did) to $state/verdicts.md. If something needs $OWNER, run \`$NOTIFY open advisory \"title\" \"what they need to do\"\`."
   else
     task="advisory-watch found new vulnerabilities in this project's dependencies (osv-scanner):
 $list
