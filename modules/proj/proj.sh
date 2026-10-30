@@ -583,8 +583,13 @@ case "${1:-status}" in
       [ -z "$owned" ] || [ ${#kick[@]} -gt 0 ] || { echo "proj run --owned needs a --kick: what acts on each turn's end" >&2; exit 2; }
       [ -z "$app" ] || [ -z "$vm" ] || { echo "proj run --app with --vm: a sandbox has no GitHub login to act with" >&2; exit 2; }
       mkdir -p "$jobs"
-      # Unique even when two jobs start in the same second.
-      id=$(basename "$(mktemp -d "$jobs/$p-$(date +%Y%m%d-%H%M%S)-XXXX")")
+      # Unique even when two jobs start in the same second. Never hidden or
+      # option-like, whatever the project is called (.github, .-x): $jobs's
+      # dotfiles are its own state, what goes through the jobs skips them, and
+      # systemd-escape takes a leading hyphen for an option.
+      name=$p
+      case $p in [.-]*) name=dot$p ;; esac
+      id=$(basename "$(mktemp -d "$jobs/$name-$(date +%Y%m%d-%H%M%S)-XXXX")")
       echo "$src/$p" >"$jobs/$id/project"
       [ ${#kick[@]} = 0 ] || printf '%s\n' "${kick[@]}" >"$jobs/$id/kick"
       [ -z "$limit" ] || echo "$limit" >"$jobs/$id/timeout"

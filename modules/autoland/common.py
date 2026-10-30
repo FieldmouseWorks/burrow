@@ -440,9 +440,11 @@ def projects(strict=False):
     Only a clone of its own counts: a hidden folder, or a worktree of the
     repo (`.git` is a file there) checked out on some other branch, sorts
     first and shares the origin, but a job sent there works on the wrong
-    tree. Strict, what can't be read (projectsDir, a folder's `.git`, its
-    origin, other than there being none) raises rather than being left
-    out: for repos.restart, which must see every clone a repo has."""
+    tree. A hidden folder named for the repo itself is that repo's clone
+    (FieldmouseWorks/.github in .github). Strict, what can't be read
+    (projectsDir, a folder's `.git`, its origin, other than there being
+    none) raises rather than being left out: for repos.restart, which must
+    see every clone a repo has."""
     src = CFG["projectsDir"]
     try:
         names = sorted(os.listdir(src))
@@ -453,8 +455,6 @@ def projects(strict=False):
             raise
         names = []
     for d in names:
-        if d.startswith("."):
-            continue
         try:
             if not stat.S_ISDIR(os.stat(os.path.join(src, d, ".git")).st_mode):
                 continue
@@ -469,7 +469,7 @@ def projects(strict=False):
         if strict and p.returncode and "No such remote" not in p.stderr:
             raise RuntimeError(f"{d}: git can't read its origin: {p.stderr.strip() or f'exit {p.returncode}'}")
         url = github_repo(p.stdout.strip())
-        if url:
+        if url and (not d.startswith(".") or d.lower() == url.split("/")[1].lower()):
             yield d, url
 
 
