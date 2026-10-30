@@ -28,8 +28,8 @@ pub trait World {
     fn github(&self, path: &str) -> Result<Value, String>;
     fn unit(&self, unit: &str) -> Unit;
     /// The running system's configuration revision, when it's a commit:
-    /// none when it's from a dirty tree or unknown, an error when it can't
-    /// be read.
+    /// none when it's from a dirty tree or has none, an error when it can't
+    /// be read or says anything else.
     fn revision(&self) -> Result<Option<String>, String>;
     /// Whether a switch is in flight: one awaiting its confirm, or its revert
     /// at work. It restarts what it changes, runners among them.
@@ -112,17 +112,15 @@ impl World for Real<'_> {
     }
 
     fn revision(&self) -> Result<Option<String>, String> {
-        // As HOST-update reads it; it says "unknown" with a failure when
-        // the system has none.
+        // As HOST-update reads it.
         let out = Command::new("/run/current-system/sw/bin/nixos-version")
             .arg("--configuration-revision")
-            .stderr(Stdio::null())
             .output()
             .map_err(|e| format!("nixos-version: {e}"))?;
-        let rev = String::from_utf8_lossy(&out.stdout).trim().to_owned();
-        Ok(
-            (out.status.success() && rev.len() == 40 && rev.bytes().all(|b| b.is_ascii_hexdigit()))
-                .then_some(rev),
+        revision(
+            out.status.code(),
+            &String::from_utf8_lossy(&out.stdout),
+            &String::from_utf8_lossy(&out.stderr),
         )
     }
 
@@ -176,6 +174,24 @@ fn shown(out: &str) -> BTreeMap<String, String> {
         .collect()
 }
 
+/// What `nixos-version --configuration-revision` said, from its exit code
+/// (none for a signal), stdout and stderr. A commit; none only when it says
+/// so itself (no revision, its own "unknown" with exit 1) or the system is
+/// from a dirty tree (`COMMIT-dirty`, the switch's stamp); anything else is
+/// an error, so a wait isn't dropped on a failed read.
+fn revision(code: Option<i32>, out: &str, err: &str) -> Result<Option<String>, String> {
+    let commit = |s: &str| s.len() == 40 && s.bytes().all(|b| b.is_ascii_hexdigit());
+    let said = out.trim();
+    match code {
+        Some(0) if commit(said) => Ok(Some(said.to_owned())),
+        Some(0) if said.strip_suffix("-dirty").is_some_and(commit) => Ok(None),
+        Some(1) if err.contains("configuration revision is unknown") => Ok(None),
+        Some(0) => Err(format!("nixos-version said {said:?}, not a commit")),
+        Some(c) => Err(format!("nixos-version exited {c}: {}", err.trim())),
+        None => Err("nixos-version was killed by a signal".to_owned()),
+    }
+}
+
 /// Whether a Runner.Worker process is anywhere in this cgroup: an error
 /// when the cgroup, or the name of a process in it, can't be read. A
 /// process whose name is missing is one gone, unless the cgroup still has
@@ -213,7 +229,7 @@ fn working(cg: &Path) -> std::io::Result<bool> {
 
 #[cfg(test)]
 mod tests {
-    use super::{shown, working};
+    use super::{revision, shown, working};
 
     // A cgroup whose processes can't be read, or that has one /proc hides,
     // isn't taken for one at no job; one whose processes are all something
@@ -235,6 +251,26 @@ mod tests {
         // A process the cgroup has and /proc doesn't show.
         std::fs::write(sub.join("cgroup.procs"), "4294967295\n").unwrap();
         assert!(working(dir.path()).is_err());
+    }
+
+    // Only a commit, a dirty tree's stamp or nixos-version's own "unknown"
+    // is an answer; any other exit, a signal or another answer is a read
+    // that failed.
+    #[test]
+    fn reads_revisions() {
+        let c = "0123456789abcdef0123456789abcdef01234567";
+        assert_eq!(
+            revision(Some(0), &format!("{c}\n"), ""),
+            Ok(Some(c.to_owned()))
+        );
+        assert_eq!(revision(Some(0), &format!("{c}-dirty\n"), ""), Ok(None));
+        let unknown = "nixos-version: configuration revision is unknown\n";
+        assert_eq!(revision(Some(1), "", unknown), Ok(None));
+        assert!(revision(Some(0), "main\n", "").is_err());
+        assert!(revision(Some(0), "", "").is_err());
+        assert!(revision(Some(1), "", "Permission denied\n").is_err());
+        assert!(revision(Some(2), "", unknown).is_err());
+        assert!(revision(None, &format!("{c}\n"), "").is_err());
     }
 
     #[test]
