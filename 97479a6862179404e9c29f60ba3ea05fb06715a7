@@ -1,0 +1,53 @@
+{
+  "conary": "note v1",
+  "change": "7yfjahx5g5dmd0d8syv3mrnynd",
+  "repo": {
+    "owner": "fieldmouseworks",
+    "name": "burrow"
+  },
+  "pr": 162,
+  "url": "https://github.com/fieldmouseworks/burrow/pull/162",
+  "summary": "proj, autoland: a lead repo's work goes first of all",
+  "task": null,
+  "author": {
+    "kind": "agent",
+    "login": "TusanHomichi",
+    "session": "https://claude.ai/code/session_01BkHcyBvxAir8tDv9eBgjAU"
+  },
+  "landing": {
+    "revision": "0e415c3e56ba204ed02c57db6abd1546fb660e4932bf735527f27f3b95c5362b",
+    "before": "6434d3be1c15d930758e602febffceab2dd3c9fa",
+    "after": "97479a6862179404e9c29f60ba3ea05fb06715a7",
+    "by": {
+      "kind": "status",
+      "login": "fieldmouseworks-steward[bot]"
+    },
+    "at": 1793319589333
+  },
+  "evidence": [
+    {
+      "kind": "ci",
+      "check": "check / commits",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/40967066652/job/123774132046"
+    },
+    {
+      "kind": "review",
+      "check": "codex",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/162#pullrequestreview-5705891001"
+    },
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/40967066652/job/123774131737"
+    },
+    {
+      "kind": "ci",
+      "check": "agents",
+      "result": "pass",
+      "source": "status agents"
+    }
+  ]
+}
