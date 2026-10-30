@@ -7,10 +7,14 @@ inputs:
 { config, lib, pkgs, ... }:
 let
   cfg = config.burrow.ops;
-  # The board's own watchdog, by a name no other driver can take.
+  # The board's own watchdog, by a name no other driver can take (and not
+  # burrow-watchdog, which is the stall watchdog, watchdog.nix). The name
+  # carries the identity: systemd reopens its watchdog only when the path it's
+  # given changes, so a switch to another identity must change the path too.
   pinned = cfg.watchdog && cfg.watchdogIdentity != null;
-  device = "/dev/burrow-watchdog";
-  rule = ''SUBSYSTEM=="watchdog", ATTR{identity}=="${cfg.watchdogIdentity}", SYMLINK+="burrow-watchdog"'';
+  link = "hardware-watchdog-${lib.strings.sanitizeDerivationName cfg.watchdogIdentity}";
+  device = "/dev/${link}";
+  rule = ''SUBSYSTEM=="watchdog", ATTR{identity}=="${cfg.watchdogIdentity}", SYMLINK+="${link}"'';
   omit = { serviceConfig.ManagedOOMPreference = "omit"; };
 in
 {
@@ -102,8 +106,10 @@ in
     services.udev.extraRules = lib.mkIf pinned rule;
     boot.initrd.services.udev.rules = lib.mkIf (pinned && config.boot.initrd.systemd.enable) rule;
     # A switch that brings the rule only reloads udev's rules, and the link
-    # would wait for the next boot: make it now.
-    systemd.services.burrow-watchdog-link = lib.mkIf pinned {
+    # would wait for the next boot: make it now. Bounded, well inside any
+    # confirm window: activation waits for it while holding the lock the
+    # switch's revert needs, so a stalled udev must fail it, not hang it.
+    systemd.services.hardware-watchdog-link = lib.mkIf pinned {
       description = "Name the board's watchdog for systemd";
       wantedBy = [ "multi-user.target" ];
       after = [ "systemd-udevd.service" ];
@@ -111,9 +117,11 @@ in
       serviceConfig = {
         Type = "oneshot";
         RemainAfterExit = true;
+        TimeoutStartSec = "60s";
         ExecStart = [
           "${config.systemd.package}/bin/udevadm control --reload"
-          "${config.systemd.package}/bin/udevadm trigger --settle --subsystem-match=watchdog --action=change"
+          "${config.systemd.package}/bin/udevadm trigger --subsystem-match=watchdog --action=change"
+          "${config.systemd.package}/bin/udevadm settle --timeout=30"
         ];
       };
     };

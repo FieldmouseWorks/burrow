@@ -521,8 +521,19 @@ in
   };
 
   config = lib.mkMerge [
-  # Always built, so heartbeat runs the same checks whether or not updates is on.
-  { burrow.tools.health = healthTool; }
+  # Always built and installed, so heartbeat runs the same checks whether or
+  # not updates is on (without it, only the ones other modules add).
+  {
+    burrow.tools.health = healthTool;
+    environment.etc = lib.mapAttrs'
+      (name: cmd: lib.nameValuePair "burrow/health.d/${name}" {
+        source = pkgs.writeShellScript "health-${name}" ''
+          export PATH=${checkPath}:/run/wrappers/bin:/run/current-system/sw/bin
+          ${cmd}
+        '';
+      })
+      cfg.health;
+  }
 
   (lib.mkIf cfg.enable (lib.mkMerge [
     {
@@ -578,15 +589,6 @@ in
           else runuser -u ${user} -- env HOME=${account.home} claude --version; fi
         '';
       });
-
-      environment.etc = lib.mapAttrs'
-        (name: cmd: lib.nameValuePair "burrow/health.d/${name}" {
-          source = pkgs.writeShellScript "health-${name}" ''
-            export PATH=${checkPath}:/run/wrappers/bin:/run/current-system/sw/bin
-            ${cmd}
-          '';
-        })
-        cfg.health;
 
       environment.systemPackages = [ updateTool healthTool ];
 
