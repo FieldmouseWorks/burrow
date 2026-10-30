@@ -1,10 +1,12 @@
-"""The shared CI's gate step, eval-apart: nix evaluates test flakes for real, in
-a store of its own, with stand-ins for `nix build` and `nix flake check`. Each
-derivation gets a nix process of its own and stays a GC root until it's built,
-only the checks are built, every output is checked as nix flake check checks
-it, a failed evaluation or build fails the gate, and a flake with an output
-eval-apart doesn't know, or with a nixConfig, is refused rather than half
-checked.
+"""The shared CI's gate step: nix evaluates test flakes for real, in a store of
+its own, with stand-ins for `nix build` and `nix flake check`. With eval-apart,
+each derivation gets a nix process of its own and stays a GC root until it's
+built, only the checks are built, every output is checked as nix flake check
+checks it, a failed evaluation or build fails the gate, and a flake with an
+output eval-apart doesn't know, or with a nixConfig, is refused rather than
+half checked. Without it, nix flake check builds nothing, and the checks are
+built by derivation, kept as GC roots, once the one nix process that evaluated
+them has exited, so no evaluation stays in memory beside the builds.
 
   python3 -I tests/gate.py .github/workflows/flake-check.yml
   nix build .#checks.x86_64-linux.gate
@@ -75,7 +77,8 @@ while [ $# -gt 0 ]; do
   case $1 in
     --arg) [ "$2" = entry ] && what="entry $3"; shift 3 ;;
     --argstr | --option) shift 3 ;;
-    --expr | --add-root) shift 2 ;;
+    --add-root) case $2 in */check) what=checks ;; esac; shift 2 ;;
+    --expr) shift 2 ;;
     *) shift ;;
   esac
 done
@@ -278,13 +281,14 @@ def names():
         "sp ace" = drv "n4"; "tab\there" = drv "n5"; "new\nline" = drv "n6"; "$(touch pwned)" = drv "n7";
       };
     }""")
-    rc, out, calls = run(d, skip="a")
-    assert rc == 0, out
-    [b] = builds(calls)
-    assert "-n0.drv" not in b, b
-    for n in range(1, 8):
-        assert f"-n{n}.drv^*" in b, (n, b)
-    assert not os.path.exists(os.path.join(d, "pwned")), "a name ran as a command"
+    for apart in (True, False):
+        rc, out, calls = run(d, apart=apart, skip="a")
+        assert rc == 0, out
+        [b] = builds(calls)
+        assert "-n0.drv" not in b, b
+        for n in range(1, 8):
+            assert f"-n{n}.drv^*" in b, (n, b)
+        assert not os.path.exists(os.path.join(d, "pwned")), "a name ran as a command"
     rc, out, calls = run(flake(r"""{ checks.${system} = { "back\\slash" = drv "n2"; ok = drv "ok"; }; }"""),
                          build_fail="-n2.drv")
     assert rc != 0, out
@@ -299,9 +303,30 @@ def no_checks():
 
 @case
 def whole():
-    "without eval-apart, nix flake check"
-    rc, _, calls = run(every, apart=False)
-    assert rc == 0 and calls == ["flake check -L --keep-going"], calls
+    "without eval-apart, nix flake check builds nothing, then the checks are built by derivation, kept until built"
+    rc, out, calls = run(every, apart=False, skip="vm")
+    assert rc == 0, out
+    assert calls[:2] == ["flake check --no-build -L --keep-going", "nix-instantiate checks"], calls
+    [b] = builds(calls)
+    assert b.startswith("build -L --no-link --keep-going /nix/store/") and b.endswith("-a.drv^*"), b
+    assert "-vm.drv" not in b and "-p.drv" not in b, b
+    assert "not building vm" in out, out
+
+
+@case
+def whole_failing():
+    "without eval-apart, a failing check or one that doesn't evaluate fails it"
+    rc, out, calls = run(every, apart=False, build_fail="-a.drv")
+    assert rc != 0 and builds(calls), out
+    rc, out, calls = run(flake("""{ checks.${system} = { a = drv "a"; broken = throw "broken check"; }; }"""), apart=False)
+    assert rc != 0 and "broken check" in out, out
+
+
+@case
+def whole_no_checks():
+    "without eval-apart, no checks, no build"
+    rc, out, calls = run(flake("""{ packages.${system}.p = drv "p"; }"""), apart=False)
+    assert rc == 0 and "nix-instantiate checks" in calls and not builds(calls), (out, calls)
 
 
 if failures:

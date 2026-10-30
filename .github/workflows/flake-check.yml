@@ -27,12 +27,12 @@ on:
       eval-apart:
         description: >-
           Evaluate each check, package, dev shell, formatter and NixOS system
-          in a nix process of its own, then build the checks, rather than in
-          one `nix flake check` that holds every evaluation in memory until
-          its last build ends. For a flake whose evaluations don't fit in its
-          runner's memory together. It knows only those outputs (and
-          legacyPackages, which the gate never evaluates), and fails a flake
-          with any other, or with a nixConfig.
+          in a nix process of its own, then build the checks, rather than all
+          of them in `nix flake check --no-build` and the checks to build in
+          one more process. For a flake whose evaluations don't fit in its
+          runner's memory together, even with no build beside them. It knows
+          only those outputs (and legacyPackages, which the gate never
+          evaluates), and fails a flake with any other, or with a nixConfig.
         type: boolean
         default: false
 jobs:
@@ -182,23 +182,46 @@ jobs:
             fi
             return $failed
           }
+          # Without eval-apart: nix flake check checks every output and builds
+          # nothing, then one nix process evaluates the checks to build and
+          # makes each derivation a GC root, and they're built once it has
+          # exited. A nix that builds what it evaluated (nix flake check, nix
+          # build .#...) holds every evaluation in memory until its last build
+          # ends: burrow's checks took 12.6G, and beside its VM tests on a 16G
+          # hosted runner the runner was shut down. A failed evaluation or build
+          # fails the gate, after the rest are built. They go to nix-instantiate
+          # as a list: in an attrset it passes over any name that isn't an
+          # identifier, a.b or "sp ace", without a word.
+          read -r -d '' checks <<'EOF' || true
+          { url, system, skip }:
+          builtins.attrValues (builtins.removeAttrs ((builtins.getFlake url).checks.${system} or { })
+            (builtins.filter (s: builtins.isString s && s != "") (builtins.split " " skip)))
+          EOF
+          whole() {
+            failed=0
+            nix flake check --no-build -L --keep-going || failed=1
+            url=$(nix flake metadata --json . | jq -r .url)
+            roots=$(mktemp -d "$RUNNER_TEMP/roots.XXXXXX")
+            trap 'rm -rf -- "$roots"' EXIT
+            for c in $SKIP; do echo "not building $c"; done
+            targets=()
+            if nix-instantiate --add-root "$roots/check" --option pure-eval true --expr "$checks" \
+              --argstr url "$url" --argstr system "$(nix config show system)" --argstr skip "$SKIP" > "$roots/list"; then
+              while read -r root; do targets+=("$(readlink "$root")^*"); done < "$roots/list"
+            else
+              failed=1
+            fi
+            if [ ${#targets[@]} -gt 0 ]; then
+              nix build -L --no-link --keep-going "${targets[@]}" || failed=1
+            fi
+            return $failed
+          }
           gate() {
             if [ "$APART" = true ]; then
               apart
-              return
+            else
+              whole
             fi
-            if [ -z "$SKIP" ]; then
-              nix flake check -L --keep-going
-              return
-            fi
-            nix flake check --no-build -L
-            system=$(nix eval --impure --raw --expr builtins.currentSystem)
-            targets=()
-            for c in $(nix eval --raw ".#checks.$system" --apply 'cs: toString (builtins.attrNames cs)'); do
-              case " $SKIP " in *" $c "*) echo "not building $c"; continue ;; esac
-              targets+=(".#checks.$system.$c")
-            done
-            nix build -L --no-link --keep-going "${targets[@]}"
           }
           gate 2>&1 | tee "$RUNNER_TEMP/flake.log"
       # The gate's result, signed with this job's own GitHub identity, in the
