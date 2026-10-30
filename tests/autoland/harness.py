@@ -278,8 +278,8 @@ def acting():
     ACTING.append(C._for[-1])
 
 
-# Where a PR's head leaves its base, as GitHub's compare says, by the base's
-# tip ("v" for any other): None, it says nothing.
+# Where a PR's head leaves its base, as GitHub's compare says, by the base
+# branch's name ("v" for any other): None, it says nothing.
 FORK = {"v": "f" * 40}
 RULES = {}  # the rules on a branch of sam/r, by its name in the path: none unless set, or what GitHub raises
 PROTECTION = {}  # the same for a branch's classic protection: a 404 unless set
@@ -400,7 +400,7 @@ def mkpr(reviews=(), comments=(), threads=(), draft=False, number=5, sha=head, f
          branch="feat", title="t", checks=CI_GREEN, base="main", body="", suites=(), renames=()):
     return {
         "id": "x", "number": number, "title": title, "url": "u", "isDraft": draft, "isCrossRepository": False,
-        "headRefName": branch, "headRefOid": sha, "baseRefName": base, "baseRef": {"target": {"oid": "b" * 40}}, "createdAt": T0, "updatedAt": T0, "body": body,
+        "headRefName": branch, "headRefOid": sha, "baseRefName": base, "createdAt": T0, "updatedAt": T0, "body": body,
         "mergeStateStatus": "CLEAN", "author": {"login": "sam"}, "autoMergeRequest": None, "mergeQueueEntry": None,
         "labels": {"pageInfo": {"hasNextPage": False}, "nodes": [{"name": x} for x in labels]},
         "files": {"nodes": [{"path": f, "changeType": "MODIFIED"} for f in files]},

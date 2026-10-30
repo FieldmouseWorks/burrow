@@ -30,7 +30,7 @@ query($owner: String!, $name: String!, $cursor: String) {
       pageInfo { hasNextPage endCursor }
       nodes {
         id number title url isDraft isCrossRepository headRefName headRefOid baseRefName
-        createdAt updatedAt mergeStateStatus body baseRef { target { oid } }
+        createdAt updatedAt mergeStateStatus body
         author { login __typename }
         autoMergeRequest { enabledAt }
         mergeQueueEntry { id }
@@ -195,22 +195,21 @@ def judged(c):
     return (m[1], m[2]) if m else None
 
 
-FORKS = {}
-
-
 def fork_of(repo, pr):
     """The commit the PR's head leaves its base at now (their merge base),
     None if GitHub didn't say or the base branch is gone. It moves when the
     base takes in some of the PR's commits, and so does what the PR changes.
-    Against the branch's tip as this pass read it (baseRef), never the PR's
-    baseRefOid, which GitHub can leave at an older commit of the branch."""
-    key = (repo, ((pr.get("baseRef") or {}).get("target") or {}).get("oid"), pr["headRefOid"])
-    if repo and key[1] and key not in FORKS:
-        got = C.gh("api", f"repos/{repo}/compare/{key[1]}...{key[2]}?per_page=1", "--jq",
-                   "{fork: .merge_base_commit.sha}", check=False)
-        if isinstance(got, dict) and re.fullmatch("[0-9a-f]{40}", got.get("fork") or ""):
-            FORKS[key] = got["fork"]
-    return FORKS.get(key)
+    Asked of the base branch by its name, so GitHub answers for its tip as
+    it is at the asking, after any merge since the PR list was read (another
+    PR's earlier in the same pass included): nothing read before stands in
+    for it, the PR's baseRefOid least of all, which GitHub can leave at an
+    older commit of the branch."""
+    if not repo:
+        return None
+    got = C.gh("api", f"repos/{repo}/compare/{pr['baseRefName']}...{pr['headRefOid']}?per_page=1", "--jq",
+               "{fork: .merge_base_commit.sha}", check=False)
+    fork = got.get("fork") if isinstance(got, dict) else None
+    return fork if re.fullmatch("[0-9a-f]{40}", fork or "") else None
 
 
 def runs(pr, repo):
@@ -226,8 +225,8 @@ def runs(pr, repo):
     base, nodes = pr["baseRefName"], pr["commits"]["nodes"]
     contexts = ((nodes[0]["commit"].get("statusCheckRollup") or {}).get("contexts") or {}).get("nodes", []) if nodes else []
     said = [(c, j) for c in contexts if (j := judged(c))]
-    stale = {suite(c).get("id") for c, (b, fork) in said
-             if b != base or fork is not None and fork != fork_of(repo, pr)} - {None}
+    now = fork_of(repo, pr) if any(b == base and fork for _, (b, fork) in said) else None
+    stale = {suite(c).get("id") for c, (b, fork) in said if b != base or fork is not None and fork != now} - {None}
     docs = any(fork is not None and suite(c).get("id") not in stale and c["status"] == "COMPLETED"
                and c["conclusion"] == "SUCCESS" for c, (_, fork) in said)
     ran = {workflow(c).get("id") for c, (_, fork) in said

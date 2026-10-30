@@ -13,7 +13,7 @@ commits since) isn't the PR's CI: none of its check runs counts, and until
 its workflow has run through for the PR's base, CI is pending. Anything short
 of the docs lane runs the proofs as before."""
 
-from harness import FORK, JOBS, PR_DIFF, S, P, clean, fresh_pr_state, merged, run
+from harness import FORK, JOBS, PR_DIFF, S, clean, fresh_pr_state, merged, run
 
 S.CFG["repos"]["sam/r"] = {"proofJobs": {"agents": "Run `nix build .#checks.agents` and post the agents status."}}
 PROVING = "a Claude job is running agents"
@@ -45,7 +45,6 @@ def whole(base="main", suite="s1", conclusion="SUCCESS", done="COMPLETED"):
 def at(pr, t=700):
     """One pass on a fresh PR: its status, and whether it merged."""
     fresh_pr_state()
-    P.FORKS.clear()
     status, _ = run(pr, t)
     return status, merged()
 
@@ -98,20 +97,33 @@ for fork, why in ((G, "the base took in some of its commits"), (None, "GitHub di
     status, landed = at(clean(checks=docs(fork=F), files=("README.md",)))
     assert not landed and JOBS == [] and WAIT in status, (why, status, JOBS)
 FORK["v"] = F
-# Asked against the base branch's tip as the pass read it, not the PR's
-# baseRefOid, which GitHub can leave at an older commit: from there the
-# fork would still read as F.
-pr = clean(checks=docs(fork=F), files=("README.md",))
-pr["baseRefOid"], pr["baseRef"]["target"]["oid"] = "b" * 40, "c" * 40
-FORK["c" * 40] = G
-status, landed = at(pr)
-assert not landed and JOBS == [] and WAIT in status, (status, JOBS)
-del FORK["c" * 40]
-# A base branch that's gone has no tip to ask against.
-pr = clean(checks=docs(fork=F), files=("README.md",))
-pr["baseRef"] = None
-status, landed = at(pr)
-assert not landed and JOBS == [] and WAIT in status, (status, JOBS)
+# Asked when the PR's turn comes, of the base branch by its name: a PR the
+# pass read before another one landed sees that merge. A lands a merge
+# commit main takes in, which moves where B (read with A) leaves main, so B's
+# docs lane no longer counts; whatever B's snapshot says of the base's tip
+# (its baseRefOid) has no say. The same on a branch other than the default
+# one, and a merge into another branch moves nothing of B's.
+S.CFG["repos"]["sam/r"] = {}
+for b_base, a_base in (("main", "main"), ("next", "next"), ("main", "other")):
+    a = clean(number=6, checks=whole(a_base), files=("src/a.rs",), base=a_base)
+    b = clean(number=7, checks=docs(b_base), files=("README.md",), base=b_base)
+    b["baseRefOid"] = "b" * 40
+    fresh_pr_state()
+    run(a, 700)
+    assert merged(), a_base
+    FORK[a_base] = G  # what GitHub's compare answers for that branch once it has A's commits
+    status, _ = run(b, 700)
+    if a_base == b_base:
+        assert not merged() and JOBS == [] and f"waiting for CI: flake for {b_base}" in status, (b_base, status)
+    else:
+        assert merged() and "CI is green (docs only)" in status, (b_base, a_base, status)
+    del FORK[a_base]
+S.CFG["repos"]["sam/r"] = {"proofJobs": {"agents": "Run `nix build .#checks.agents` and post the agents status."}}
+# A base branch that's gone has nothing to compare against: GitHub says no.
+FORK["gone"] = None
+status, landed = at(clean(checks=docs("gone"), files=("README.md",), base="gone"))
+assert not landed and JOBS == [] and "waiting for CI: flake for gone" in status, (status, JOBS)
+del FORK["gone"]
 
 # Retargeted onto `next` after its docs lane against main (or main's run run
 # again since, or another PR's on this head): that run judged another diff.
