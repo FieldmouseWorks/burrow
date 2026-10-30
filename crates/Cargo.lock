@@ -24,6 +24,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "burrow-dispatch"
+version = "0.0.0"
+dependencies = [
+ "burrow-events",
+ "burrow-watchdog",
+ "jiff",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "burrow-events"
 version = "0.0.0"
 dependencies = [
@@ -32,6 +44,15 @@ dependencies = [
  "serde_json",
  "sha2",
  "tempfile",
+]
+
+[[package]]
+name = "burrow-usage-reset"
+version = "0.0.0"
+dependencies = [
+ "jiff",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

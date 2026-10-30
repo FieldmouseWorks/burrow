@@ -8,7 +8,8 @@ use serde_json::{Map, Value};
 
 /// A repo's first event waits this long for the ones that follow it.
 pub const DEBOUNCE: f64 = 5.0;
-/// One repo's passes start at least this far apart.
+/// One repo's passes start at least this far apart, unless the handler
+/// sets its own `gap`.
 pub const GAP: f64 = 20.0;
 /// A pass that failed runs again this long after, doubling each time it
 /// fails again, up to RETRY_MAX.
@@ -61,13 +62,28 @@ struct State {
     news: bool,
 }
 
-#[derive(Default)]
 pub struct Line {
+    /// How far apart one pass's starts are, at least.
+    gap: f64,
     state: Mutex<State>,
     cond: Condvar,
 }
 
+impl Default for Line {
+    fn default() -> Line {
+        Line::new(GAP)
+    }
+}
+
 impl Line {
+    pub fn new(gap: f64) -> Line {
+        Line {
+            gap,
+            state: Mutex::default(),
+            cond: Condvar::new(),
+        }
+    }
+
     fn lock(&self) -> MutexGuard<'_, State> {
         // A thread that panicked holding it left the maps whole: each change
         // is one insert or remove.
@@ -111,8 +127,9 @@ impl Line {
     pub fn take(&self, now: f64) -> (Vec<Pass>, Option<f64>) {
         let mut s = self.lock();
         s.news = false;
+        let gap = self.gap;
         let ready_at = |s: &State, pass: &Pass, at: f64| {
-            at.max(s.last.get(pass).copied().unwrap_or(0.0) + GAP)
+            at.max(s.last.get(pass).copied().unwrap_or(0.0) + gap)
         };
         let mut ready: Vec<Pass> = s
             .due
@@ -238,6 +255,19 @@ mod tests {
         line.wakes(&booked(json!({"sam/r": 160})));
         assert_eq!(line.take(159.0), (vec![], Some(1.0)));
         assert_eq!(line.take(160.0).0, vec![r("sam/r")]);
+    }
+
+    // A handler's own gap holds its passes apart, wake-ups and all.
+    #[test]
+    fn own_gap() {
+        let line = Line::new(120.0);
+        line.event(Pass::Full, 1000.0);
+        assert_eq!(line.take(1005.0).0, vec![Pass::Full]);
+        line.event(Pass::Full, 1010.0);
+        assert_eq!(line.take(1025.0), (vec![], Some(100.0)));
+        line.wakes(&booked(json!({"": 1050})));
+        assert_eq!(line.take(1124.0), (vec![], Some(1.0)));
+        assert_eq!(line.take(1125.0).0, vec![Pass::Full]);
     }
 
     // A full pass sees to every repo whose event has come in, GAP or not.

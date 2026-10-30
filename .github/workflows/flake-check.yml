@@ -1,10 +1,11 @@
 # The shared CI for every repo whose gate is its flake (burrow's
 # lib/project.nix): check out, install Nix, `nix flake check`, then attest the
 # result for Conary's ledger; on a PR, also check that GitHub verifies every
-# signed commit it adds. Called from a repo's own workflow with `uses:`, whose
-# job grants `id-token: write` and `attestations: write` (a called job gets no
-# more than its caller gives). Its actions are pinned to commits (repos that
-# allow only pinned actions need that), and Renovate keeps the pins current.
+# signed commit it adds (with pr-gate off, only that). Called from a repo's own
+# workflow with `uses:`, whose job grants `id-token: write` and
+# `attestations: write` (a called job gets no more than its caller gives). Its
+# actions are pinned to commits (repos that allow only pinned actions need
+# that), and Renovate keeps the pins current.
 name: flake-check
 on:
   workflow_call:
@@ -27,16 +28,51 @@ on:
       eval-apart:
         description: >-
           Evaluate each check, package, dev shell, formatter and NixOS system
-          in a nix process of its own, then build the checks, rather than in
-          one `nix flake check` that holds every evaluation in memory until
-          its last build ends. For a flake whose evaluations don't fit in its
-          runner's memory together. It knows only those outputs (and
-          legacyPackages, which the gate never evaluates), and fails a flake
-          with any other, or with a nixConfig.
+          in a nix process of its own, then build the checks, rather than the
+          checks in one process and then everything in one `nix flake check`.
+          For a flake whose evaluations don't fit in its runner's memory
+          together, even with no build beside them. It knows only those
+          outputs (and legacyPackages, which the gate never evaluates), and
+          fails a flake with any other, or with a nixConfig.
         type: boolean
         default: false
+      pr-gate:
+        description: >-
+          Run the gate on a PR to the default branch. False in a repo whose
+          PRs land through its merge train, which runs the gate on each
+          candidate it would land (a push to a conary/train/ branch) rather
+          than on the PRs in it, so such a PR's own run checks only its
+          commits. A PR to any other branch, which the train doesn't land,
+          still gets the gate. A caller that turns it off runs on
+          pull_request's `edited` too, so a PR retargeted away from the
+          default branch gets the gate for its new base.
+        type: boolean
+        default: true
 jobs:
+  # With pr-gate off, whether this PR is one the train lands: its base is the
+  # default branch, compared as git compares refs. An expression's == ignores
+  # case, so `Main` would pass for `main`, and the train wouldn't take it.
+  train:
+    if: ${{ !inputs.pr-gate && github.event_name == 'pull_request' }}
+    runs-on: ${{ inputs.runner }}
+    permissions: {}
+    outputs:
+      lands: ${{ steps.base.outputs.lands }}
+    steps:
+      - id: base
+        shell: bash
+        env:
+          BASE: ${{ github.event.pull_request.base.ref }}
+          DEFAULT: ${{ github.event.repository.default_branch }}
+        run: |
+          if [ "$BASE" = "$DEFAULT" ]; then lands=true; else lands=false; fi
+          echo "a PR to $BASE (the default branch is $DEFAULT): the train lands it: $lands"
+          echo "lands=$lands" >>"$GITHUB_OUTPUT"
   check:
+    # Unless the train lands it: anything but a clear yes, the train job's
+    # failure included, is a no.
+    needs: train
+    if: ${{ !cancelled() && (inputs.pr-gate || github.event_name != 'pull_request' || needs.train.outputs.lands != 'true') }}
     runs-on: ${{ inputs.runner }}
     permissions:
       contents: read
@@ -88,9 +124,12 @@ jobs:
           # evaluates it. With no entry, the plan: the outputs it doesn't know,
           # and each derivation it evaluates and whether it's a check to build.
           # With an entry's index, that one: its derivation, or for a NixOS
-          # system nothing, once its toplevel is a derivation.
+          # system nothing, once its toplevel is a derivation. With builds,
+          # every check to build, as a list: in an attrset nix-instantiate
+          # passes over any name that isn't an identifier, a.b or "sp ace",
+          # without a word.
           read -r -d '' plan <<'EOF' || true
-          { url, system, skip, entry ? null }:
+          { url, system, skip, entry ? null, builds ? false }:
           let
             flake = builtins.getFlake url;
             inherit (flake) outputs;
@@ -120,7 +159,9 @@ jobs:
             build = e: e.check or false && !builtins.elem e.n skipped;
             isDerivation = v: (v.type or null) == "derivation";
           in
-          if entry == null then
+          if builds then
+            map (e: builtins.foldl' (v: n: v.${n}) outputs e.path) (builtins.filter build entries)
+          else if entry == null then
             # legacyPackages has only its system names checked.
             builtins.deepSeq (here "legacyPackages" (_: [ ])) {
               nixConfig = import "${flake.outPath}/flake.nix" ? nixConfig;
@@ -137,11 +178,14 @@ jobs:
             else if isDerivation v then v
             else throw "flake attribute '${e.what}' is not a derivation"
           EOF
-          apart() {
+          read_plan() {
             url=$(nix flake metadata --json . | jq -r .url)
             args=(--option pure-eval true --expr "$plan" --argstr url "$url"
               --argstr system "$(nix config show system)" --argstr skip "$SKIP")
             nix-instantiate --eval --strict --json "${args[@]}" > "$RUNNER_TEMP/plan.json"
+          }
+          apart() {
+            read_plan
             if [ "$(jq '.other | length' "$RUNNER_TEMP/plan.json")" != 0 ]; then
               echo "eval-apart knows checks, packages, devShells, formatter, nixosConfigurations and legacyPackages, and this flake also has $(jq -c .other "$RUNNER_TEMP/plan.json"). Its gate is a whole \`nix flake check\`, without eval-apart."
               return 1
@@ -182,38 +226,84 @@ jobs:
             fi
             return $failed
           }
-          gate() {
-            if [ "$APART" = true ]; then
-              apart
-              return
+          # Without eval-apart, the gate is nix flake check, as nix runs it. A
+          # nix that builds what it evaluated holds every evaluation in memory
+          # until its last build ends: burrow's checks took 12.6G, and beside
+          # its VM tests on a 16G hosted runner the runner was shut down. So the
+          # checks are built first, by derivation: one nix-instantiate evaluates
+          # them and makes each a GC root, and once it has exited nix build
+          # builds every output, as nix flake check would, which then finds them
+          # built. A flake with a nixConfig, or whose plan can't be read, is
+          # left to nix flake check alone: only nix applies the config a runner
+          # accepts, and says what's wrong with a flake.
+          whole() {
+            failed=0
+            built=false
+            if read_plan && [ "$(jq .nixConfig "$RUNNER_TEMP/plan.json")" = false ]; then
+              roots=$(mktemp -d "$RUNNER_TEMP/roots.XXXXXX")
+              trap 'rm -rf -- "$roots"' EXIT
+              targets=()
+              if nix-instantiate --add-root "$roots/check" --arg builds true "${args[@]}" > "$roots/list"; then
+                # A derivation whose first output isn't out has its root
+                # printed with that output's name after a !. What's built
+                # stays a root too, until nix flake check has found it.
+                while read -r root; do targets+=("$(readlink "${root%%!*}")^*"); done < "$roots/list"
+                if [ ${#targets[@]} -eq 0 ] || nix build -L --out-link "$roots/out" --keep-going "${targets[@]}"; then
+                  built=true
+                else
+                  # Built once is enough: nix flake check only says what else
+                  # is wrong, rather than build them again beside every
+                  # evaluation.
+                  nix flake check --no-build -L --keep-going || true
+                  return 1
+                fi
+              else
+                # nix flake check says which, and builds the rest.
+                failed=1
+              fi
             fi
             if [ -z "$SKIP" ]; then
-              nix flake check -L --keep-going
-              return
+              nix flake check -L --keep-going || failed=1
+              return $failed
             fi
-            nix flake check --no-build -L
+            nix flake check --no-build -L || return 1
+            if [ "$built" = true ]; then
+              for c in $SKIP; do echo "not building $c"; done
+              return $failed
+            fi
             system=$(nix eval --impure --raw --expr builtins.currentSystem)
             targets=()
             for c in $(nix eval --raw ".#checks.$system" --apply 'cs: toString (builtins.attrNames cs)'); do
               case " $SKIP " in *" $c "*) echo "not building $c"; continue ;; esac
               targets+=(".#checks.$system.$c")
             done
-            nix build -L --no-link --keep-going "${targets[@]}"
+            nix build -L --no-link --keep-going "${targets[@]}" || failed=1
+            return $failed
+          }
+          gate() {
+            if [ "$APART" = true ]; then
+              apart
+            else
+              whole
+            fi
           }
           gate 2>&1 | tee "$RUNNER_TEMP/flake.log"
       # The gate's result, signed with this job's own GitHub identity, in the
-      # format Conary reads (FieldmouseWorks/Conary, docs/ci-attestation.md).
-      # GitHub attests for private repositories only on Enterprise Cloud, and
-      # a run with no OIDC token (a fork's PR, Dependabot's) can't sign, so
-      # those get none and their results don't count as evidence.
+      # format Conary reads (FieldmouseWorks/Conary, docs/ci-attestation.md):
+      # a public repo's as a Sigstore bundle, and a private repo's, which
+      # GitHub attests only on Enterprise Cloud, with the job's own token,
+      # whose audience names the digest of what it attests. A run with no OIDC
+      # token (a fork's PR, Dependabot's) can't sign, so it gets none and its
+      # result doesn't count as evidence.
       - id: subject
-        if: ${{ !cancelled() && steps.gate.outcome != 'skipped' && !github.event.repository.private && (github.event_name == 'push' || github.event_name == 'pull_request') }}
+        if: ${{ !cancelled() && steps.gate.outcome != 'skipped' && (github.event_name == 'push' || github.event_name == 'pull_request') }}
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           OUTCOME: ${{ steps.gate.outcome }}
           SKIP: ${{ inputs.build-skip }}
           PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          PRIVATE: ${{ github.event.repository.private }}
         run: |
           if [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
             echo "no OIDC token in this run, so no attestation"
@@ -221,9 +311,10 @@ jobs:
           fi
           case $OUTCOME in success) result=pass ;; *) result=fail ;; esac
           # Artifact names are shared by every job in a run, and a caller may
-          # run this job more than once (a matrix, a re-run), so each log gets
-          # its own.
-          log="flake-log-$(cat /proc/sys/kernel/random/uuid)"
+          # run this job more than once (a matrix, a re-run), so each job's
+          # log and attestation get names of their own.
+          uuid=$(cat /proc/sys/kernel/random/uuid)
+          log="flake-log-$uuid"
           dir="$RUNNER_TEMP/conary"
           mkdir -p "$dir"
           if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
@@ -247,12 +338,29 @@ jobs:
             > "$dir/predicate.json"
           cat "$subject" "$dir/predicate.json"
           { echo "path=$subject"; echo "log=$log"; } >> "$GITHUB_OUTPUT"
+          if [ "$PRIVATE" = true ]; then
+            # The statement is the subject, then the predicate on one line.
+            # The file keeps the token after it, as its last line.
+            attestation="$dir/conary-attestation"
+            { cat "$subject"; jq -c . "$dir/predicate.json"; } > "$attestation"
+            audience="conary-attestation:v1:sha256:$(sha256sum "$attestation" | cut -d' ' -f1)"
+            echo "signing with this job's token, audience $audience"
+            # Nothing in the audience needs escaping in a URL.
+            curl -fsS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+              "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=$audience" | jq -er .value >> "$attestation"
+            { echo "attestation=$attestation"; echo "attestation-name=conary-attestation-$uuid"; } >> "$GITHUB_OUTPUT"
+          fi
       - if: ${{ !cancelled() && steps.subject.outputs.path }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ steps.subject.outputs.log }}
           path: ${{ runner.temp }}/flake.log
-      - if: ${{ !cancelled() && steps.subject.outputs.path }}
+      - if: ${{ !cancelled() && steps.subject.outputs.attestation }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ steps.subject.outputs.attestation-name }}
+          path: ${{ steps.subject.outputs.attestation }}
+      - if: ${{ !cancelled() && steps.subject.outputs.path && !github.event.repository.private }}
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-path: ${{ steps.subject.outputs.path }}

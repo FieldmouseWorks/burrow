@@ -11,6 +11,7 @@ import tempfile
 import urllib.parse
 
 import common as C
+import train as T
 from common import CFG, CONTEXT, DEP_RE, DRY, load, log, repo_cfg, save, ts
 from tasks import RED_BRANCH, red_default_task
 
@@ -36,6 +37,14 @@ def discover():
     return seen
 
 
+def required(train):
+    """The checks the baseline requires: the App's own status, and in a repo
+    with its train on the train's, which it posts just before it lands a
+    PR. Only the App's: one with the same name from anyone else (the
+    owner's login included) satisfies nothing."""
+    return [{"context": c, "integration_id": CFG["app"]["id"]} for c in [CONTEXT] + [T.CONTEXT] * bool(train)]
+
+
 def baseline_ruleset(rc, default):
     rules = [{"type": "deletion"}, {"type": "non_fast_forward"}]
     if not rc["directPush"]:
@@ -50,9 +59,7 @@ def baseline_ruleset(rc, default):
             }},
             {"type": "required_status_checks", "parameters": {
                 "strict_required_status_checks_policy": False,
-                # Only the App's own status: one with the same name from
-                # anyone else (the owner's login included) satisfies nothing.
-                "required_status_checks": [{"context": CONTEXT, "integration_id": CFG["app"]["id"]}],
+                "required_status_checks": required(rc["train"]),
             }},
         ]
     return {
@@ -72,9 +79,11 @@ def settle_repo(r, known):
     repo, rc = r["repo"], repo_cfg(r["repo"])
     st = load(f"repo-{repo.replace('/', '_')}.json", {})
     new = repo not in known
-    # Due daily, and straight away for another App: its required checks are
-    # pinned to the one it was.
-    due = C.NOW - st.get("settings", 0) >= 86400 or st.get("app") != CFG["app"]["id"]
+    # Due daily, and straight away for another App (its required checks are
+    # pinned to the one it was) or a train turned on or off (the baseline
+    # requires the train's status only while it's on).
+    due = (C.NOW - st.get("settings", 0) >= 86400 or st.get("app") != CFG["app"]["id"]
+           or st.get("train", False) != rc["train"])
     # The labels the steward and its jobs put on PRs: without them a hold
     # can't be set, a judge can't hand a PR to the owner and no PR can go
     # first in its proof line. Made again with the daily settings too, in
@@ -135,7 +144,7 @@ def settle_repo(r, known):
                            input=json.dumps(baseline_ruleset(rc, r["default"])), check=False) is not None
         # Whether or not the repo gets the baseline ruleset, its own rules
         # are kept in line with it.
-        rules = keep_rules(repo, [x for x in own if x.get("target") == "branch"]) and made
+        rules = keep_rules(repo, rc, [x for x in own if x.get("target") == "branch"]) and made
     # Settled for this App only once every rule is known to take its status
     # from it alone; once that's not known, the settings are due again.
     pinned = keep_protection(repo) and rules
@@ -143,6 +152,7 @@ def settle_repo(r, known):
     st["settings"] = C.NOW
     if pinned:
         st["app"] = CFG["app"]["id"]
+        st["train"] = rc["train"]
     else:
         st.pop("app", None)
     save(f"repo-{repo.replace('/', '_')}.json", st)
@@ -150,24 +160,25 @@ def settle_repo(r, known):
 
 
 def keep_checks(checks, key):
-    """The steward's own check among a rule's required ones, pinned to its
-    App (under key: a ruleset's integration_id, classic protection's
-    app_id): the same name from anyone else satisfies nothing. Returns
-    whether any changed."""
+    """The steward's own checks among a rule's required ones (its status,
+    its train's), pinned to its App (under key: a ruleset's integration_id,
+    classic protection's app_id): the same name from anyone else satisfies
+    nothing. Returns whether any changed."""
     moved = False
     for c in checks:
-        if c.get("context") == CONTEXT and c.get(key) != CFG["app"]["id"]:
+        if c.get("context") in (CONTEXT, T.CONTEXT) and c.get(key) != CFG["app"]["id"]:
             c[key] = CFG["app"]["id"]
             moved = True
     return moved
 
 
-def keep_rules(repo, rulesets):
+def keep_rules(repo, rc, rulesets):
     """Each of the repo's own branch rulesets, in line with the baseline: no
     up-to-date branches (docs/repo-baseline.md says why), and the steward's
-    status required from its App only. The listing names a ruleset without
-    its rules, so each one is read. Returns False when one couldn't be read
-    or wouldn't take the change."""
+    status required from its App only; the baseline's own requires the
+    train's too exactly while the repo's train is on. The listing names a
+    ruleset without its rules, so each one is read. Returns False when one
+    couldn't be read or wouldn't take the change."""
     ok = True
     for x in rulesets:
         rs = C.gh("api", f"repos/{repo}/rulesets/{x['id']}", check=False)
@@ -183,7 +194,13 @@ def keep_rules(repo, rulesets):
                 params["strict_required_status_checks_policy"] = False
                 changed.append("up-to-date branches off")
             if keep_checks(params.get("required_status_checks") or [], "integration_id"):
-                changed.append(f"{CONTEXT} from the App only")
+                changed.append("the steward's checks from the App only")
+            listed = params.get("required_status_checks") or []
+            has = any(c.get("context") == T.CONTEXT for c in listed)
+            if rs.get("name") == "baseline" and has != bool(rc["train"]):
+                params["required_status_checks"] = (listed + [{"context": T.CONTEXT, "integration_id": CFG["app"]["id"]}]
+                                                    if rc["train"] else [c for c in listed if c.get("context") != T.CONTEXT])
+                changed.append(f"{T.CONTEXT} {'required' if rc['train'] else 'no longer required'}")
         if changed:
             log(f"{repo}: {', '.join(dict.fromkeys(changed))} in the {rs.get('name')!r} ruleset")
             # The whole ruleset goes back, so only those settings change.
@@ -230,7 +247,7 @@ def keep_branch(repo, name):
         # The others as they were: GitHub lists one any App may set with no
         # app_id, and reads one sent without it as "whichever set it last".
         patch["checks"] = [c if c.get("app_id") is not None else {**c, "app_id": -1} for c in listed]
-        changed.append(f"{CONTEXT} from the App only")
+        changed.append("the steward's checks from the App only")
     if not patch:
         return True
     log(f"{repo}: {', '.join(changed)} in {name}'s protection")
@@ -433,9 +450,10 @@ def delete_branch(repo, name, sha):
             log(f"{repo}: kept {name}: {p.stderr.strip()[:200]}")
 
 
-# Unmerged, with no PR and no commit for this long: given up on. Its commits
-# are kept under ARCHIVE and the branch deleted.
-STALE_DAYS = 14
+# Unmerged, with no PR and no commit for this long: given up on (agents open
+# a PR when they push). Its commits are kept under ARCHIVE and the branch
+# deleted, so a short wait costs nothing.
+STALE_DAYS = 3
 ARCHIVE = "refs/archive"
 
 
@@ -483,8 +501,9 @@ def sweep_branches(r, in_use, digest, sweep=True):
             digest.append((UNKEPT, f"{repo}: `{b}`", ""))
         return
     unkept = []
-    # The machine's globs, plus the repo's own (evidence branches it cites).
-    keep = CFG["keepBranches"] + repo_cfg(repo).get("keepBranches", [])
+    # The machine's globs, plus the repo's own (evidence branches it cites),
+    # and its train's candidates', which cn makes and deletes.
+    keep = CFG["keepBranches"] + repo_cfg(repo).get("keepBranches", []) + [T.TRAIN.get("branches")] * T.on(repo)
     names = (C.gh("api", "--paginate", f"repos/{repo}/branches?per_page=100", "--jq",
                   '.[] | select(.protected | not) | "\\(.name) \\(.commit.sha)"', check=False) or "")
     for x in str(names).split("\n"):

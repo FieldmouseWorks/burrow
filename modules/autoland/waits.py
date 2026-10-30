@@ -21,17 +21,23 @@ Not watched: a draft, or a major renovate-sweep held for the owner (nobody
 waits on the pipeline there), and a PR this pass listed for the owner or on
 the stuck issue (it's theirs, or that issue's job's, already). One on hold
 gets holdStallAfter: a hold nobody explains is a stall too, and the job that
-takes it moves one waiting on the owner's word to the owner label."""
+takes it moves one waiting on the owner's word to the owner label. One in
+its repo's merge train, or held out of it, gets trainStallAfter: its phase
+names the candidate in flight, so each candidate is a wait of its own."""
 
 import json
 
 import common as C
+import lock_wait
 from common import CFG, MIN, load, log, repo_cfg, save
 
 # What a PR's wait is, for its deadline and the pass a stall kicks first:
 # the steward's own, a hold (no pass moves it), one renovate-sweep has (its
-# pass asks for the verdict again), or Renovate's merge (a run on the repo).
-STEWARD, HOLD, SWEEP, RENOVATE = "steward", "hold", "sweep", "renovate"
+# pass asks for the verdict again), Renovate's merge (a run on the repo), or the
+# merge train's (which steps in the steward's pass).
+STEWARD, HOLD, SWEEP, RENOVATE, TRAIN = "steward", "hold", "sweep", "renovate", "train"
+STALL = {STEWARD: "stallAfter", HOLD: "holdStallAfter", SWEEP: "stallAfter",
+         RENOVATE: "renovateMergeAfter", TRAIN: "trainStallAfter"}
 FAILS = "the steward's pass fails on it (journalctl -u autoland)"
 
 NOTED = {}  # this pass's waits, by repo whose PRs it read, then by key (None: nothing to watch)
@@ -64,15 +70,20 @@ def read(repo, prs):
     OPEN[repo] = {key_of(repo, pr) for pr in prs}
 
 
-def item(repo, pr, phase, minutes, kick, rev):
+def item(repo, pr, phase, minutes, kick, rev, until=None, grace=0):
     # .get: what failed may be the PR's own record.
     return {"what": f"{repo}#{pr['number']} {pr.get('title', '')}".strip(), "link": pr.get("url"), "phase": phase,
-            "minutes": minutes, "kick": kick, "rev": rev}
+            "minutes": minutes, "kick": kick, "rev": rev, "until": until, "grace": grace}
 
 
-def note(repo, pr, phase, wait):
+def note(repo, pr, phase, wait, refreshing=False, ripe=None):
     """The PR's wait as its status says it (its last in a pass stands); wait
-    None: nothing to watch."""
+    None: nothing to watch. On a Renovate PR renovate-sweep may have a
+    refresh going on (refreshing), no stall goes to a job before the sweep's
+    own would have had the branch: its minutes count from after the sweep's
+    longest recovery from the date a lock file refresh waits for (ripe), or
+    else from after the longest taking back of a request. Past that the job
+    is told what the sweep's would be."""
     if wait is None:
         NOTED.setdefault(repo, {})[key_of(repo, pr)] = None
         return
@@ -80,9 +91,14 @@ def note(repo, pr, phase, wait):
     here = CFG["watch"] and CFG["watch"]["renovateSweep"]
     kick = (None if wait == HOLD else f"renovate-sweep/{repo}" if wait == SWEEP and here
             else f"renovate/{repo}" if wait == RENOVATE and here else f"autoland/{repo}")
-    minutes = repo_cfg(repo)[{HOLD: "holdStallAfter", RENOVATE: "renovateMergeAfter"}.get(wait, "stallAfter")]
+    minutes = repo_cfg(repo)[STALL[wait]]
     rev = f"{pr['headRefOid']} {pr['baseRefName']}"
-    NOTED.setdefault(repo, {})[key_of(repo, pr)] = item(repo, pr, phase, minutes, kick, rev)
+    grace = 0
+    if refreshing and wait != HOLD and CFG["watch"] and CFG["watch"]["renovateSweep"]:
+        run = CFG["renovateRun"]
+        grace = lock_wait.recovery(run) if ripe else lock_wait.drain(run)
+        phase += lock_wait.guard(run)
+    NOTED.setdefault(repo, {})[key_of(repo, pr)] = item(repo, pr, phase, minutes, kick, rev, ripe, grace)
 
 
 def overdue(repo, pr, why, said=None):
@@ -145,7 +161,8 @@ def publish(seen, digest, full):
             if key in SAID:
                 phase = f"{phase}: {SAID[key]}"
             items[key] = {"what": it["what"], "link": it["link"], "phase": phase, "since": since,
-                          "due": since if key in FAILING else since + it["minutes"] * MIN, "kick": it["kick"],
+                          "due": since if key in FAILING else max(since, it.get("until") or 0) + it.get("grace", 0) + it["minutes"] * MIN,
+                          "kick": it["kick"],
                           "rev": it["rev"]}
     save("watch.json", {"at": C.NOW, "items": items})
     if items != was:

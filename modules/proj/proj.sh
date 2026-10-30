@@ -103,6 +103,8 @@ jobs=$JOBS
 self=$(readlink -f "$0")
 
 unit() { echo "proj-$(systemd-escape "$1").service"; }
+# The unit that ends each of its turns (_ended), outside the turn's own.
+end_unit() { systemd-escape --template=proj-ended@.service "$1"; }
 # The env file of the GitHub App NAME, from APPS' NAME=FILE lines: nothing for
 # one this machine hasn't.
 app_env() { [[ $1 =~ ^[A-Za-z0-9_-]+$ ]] && sed -n "s/^$1=//p" <<<"$APPS" | head -n 1; }
@@ -337,16 +339,20 @@ waits() {
 }
 
 start_turn() {
-  local id=$1 msg=$2 first=$3 n i
+  local id=$1 msg=$2 first=$3 n i hook
   local d=$jobs/$id
   # The last turn reads as ended once it has written its outcome, but its
-  # unit is still there while its _ended runs (telling the watchdog, kicking
-  # proj-watch, which can start this turn), and no unit starts under that
-  # name until it's gone. Waited out, for a minute at most, before this turn
-  # is written, so _ended only ever reads the turn it ends as the latest.
+  # unit is there until it's over, and no unit starts under that name until
+  # it's gone; its _ended (telling the watchdog, kicking proj-watch, which
+  # can start this turn) is queued as it goes, and runs after. Both waited
+  # out, for a minute at most, before this turn is written, so _ended only
+  # ever reads the turn it ends as the latest.
   for i in $(seq 120); do
     systemctl --user reset-failed "$(unit "$id")" 2>/dev/null || true
-    [ "$(systemctl --user show -P LoadState "$(unit "$id")" 2>/dev/null)" = loaded ] || break
+    if [ "$(systemctl --user show -P LoadState "$(unit "$id")" 2>/dev/null)" != loaded ] &&
+      [ -z "$(systemctl --user show -P Job "$(end_unit "$id")" 2>/dev/null)" ]; then
+      break
+    fi
     if [ "$i" = 120 ]; then
       echo "proj: $id's last turn is still ending, so its next can't start yet" >&2
       return 1
@@ -359,13 +365,22 @@ start_turn() {
   printf '%s\n' "$msg" >"$d/prompt.$n"
   set_turns "$id" "$n"
   # Claude is what goes first when memory runs out, not whatever it's next to.
+  # Past its own cap the kernel kills the job's biggest process (a build or
+  # an evaluation it ran, as a rule) and the turn carries on, told the command
+  # was killed: systemd's default OOMPolicy would stop the whole turn.
+  # Its end is a unit of its own, however the turn ends: what kills the turn's
+  # whole cgroup (systemd-oomd does) would take an ExecStopPost with it. The
+  # name is doubled up on its backslashes, which systemd-run reads as escapes.
+  hook=$(end_unit "$id")
+  hook=${hook//\\/\\\\}
   if ! systemd-run --user --quiet --collect --unit="$(unit "$id")" \
     --slice="$SLICE" \
     --property=MemoryMax="$JOB_MEMORY_MAX" \
+    --property=OOMPolicy=continue \
     --property=OOMScoreAdjust=500 \
     --property=WorkingDirectory="$(cat "$d/project")" \
-    --setenv=PROJ_ENDED="$id" \
-    --property=ExecStopPost="$self _ended" \
+    --property=OnSuccess="$hook" \
+    --property=OnFailure="$hook" \
     "$self" _exec "$id" "${first:-normal}"; then
     if [ "$n" = 1 ]; then rm -f "$d/turns"; else set_turns "$id" $((n - 1)); fi
     rm -f "$d/prompt.$n"
@@ -392,7 +407,7 @@ spare() {
 # puts pipeline ones ahead, then --first ones, then the oldest, holding the
 # waiting shell's pid. A slot is a lock on JOBS/.slots/N, and N.who says
 # whose (class and project), so a turn that's killed frees its slot (and its
-# place in line) by itself. pick (pick.sh) says who goes next. The turn is
+# place in line) by itself. pick (pick.sh) says who has a slot. The turn is
 # first or normal, as it was started; its job's class (place, in pick.sh)
 # is asked again every pass, and its place in line, its admission and its
 # slot's N.who all go by that one answer.
@@ -452,11 +467,11 @@ take_slot() {
         rm -f "$f"
       fi
     done
-    got=$(printf '%s' "$seen" | pick)
+    got=$(printf '%s' "$seen" | pick | picked "$me")
     # Short of memory matters only while another job runs: with nothing
     # running, waiting frees nothing.
-    if [ "${got%$'\t'*}" = "$me" ] && { [ -z "$busy" ] || [ "$(spare)" -ge "$MIN_FREE" ]; }; then
-      i=${got##*$'\t'}
+    if [ -n "$got" ] && { [ -z "$busy" ] || [ "$(spare)" -ge "$MIN_FREE" ]; }; then
+      i=$got
       exec {slot}>"$jobs/.slots/$i"
       if flock -n "$slot"; then
         printf '%s\t%s\n' "$class" "$(cat "$jobs/$id/project")" >"$jobs/.slots/$i.who"
@@ -801,14 +816,16 @@ Carry on from there. Anything you left in the background last turn was stopped w
     fi
     ;;
   _ended)
-    # After each turn, however it ended (its unit's ExecStopPost): its wait
+    # After each turn, however it ended (proj-ended@ID, its unit's OnSuccess
+    # and OnFailure): its wait
     # is the stall watchdog's to know, what the job was started to kick
     # (proj run --kick) gets a pass now, and so does
     # proj-watch for each repo the turn awaits, which then sees at once
     # anything that changed since the turn took its baseline. The job comes
-    # in the unit's environment: systemd splits and expands a command line,
-    # and a job's id is its project's folder name, spaces, `%` and all.
-    id=${PROJ_ENDED:?proj _ended is for the end of a job turn, run by its unit}
+    # in the unit's environment, from its instance name: systemd splits and
+    # expands a command line, and a job's id is its project's folder name,
+    # spaces, `%` and all.
+    id=${PROJ_ENDED:?proj _ended is for the end of a job turn, run by proj-ended@ID}
     rewatch "$id"
     { cat "$jobs/$id/kick" 2>/dev/null || true
       cut -f1 "$jobs/$id/await" 2>/dev/null | sed 's/#.*//; s#^#proj-watch/#' || true

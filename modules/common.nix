@@ -156,6 +156,14 @@ inputs:
           };
         };
 
+        # tmux for the Claudes that run in one (Remote Control servers, the
+        # usage watcher's Claude Code). Not tmux's usual build: that one moves
+        # each pane into a scope of its own, which takes a server and its
+        # sessions out of their unit and out from under its cap.
+        config.burrow.tools.tmux = pkgs.tmux.overrideAttrs (old: {
+          configureFlags = old.configureFlags ++ [ "--disable-cgroups" ];
+        });
+
         # In the user's systemd manager, where proj jobs (claude-jobs.slice)
         # and Remote Control servers (claude-rc.slice) run. Many headless
         # Claudes at a few GB each once ran a machine out of memory and the
@@ -172,6 +180,16 @@ inputs:
             MemorySwapMax = 0;
           };
         };
+
+        # The git the machine and burrow's units run. curl 8.23 strips the
+        # credentials from the URL it reports, and git 2.54 takes that for a
+        # redirect and forgets them, so a clone with a token-only URL
+        # (Renovate's) fails. Drop the patch once nixpkgs' git has it (it then
+        # stops applying). Here and not an overlay: that would rebuild all
+        # that builds with git.
+        config.programs.git.package = lib.mkDefault (pkgs.git.overrideAttrs (old: {
+          patches = (old.patches or [ ]) ++ [ ../patches/git-curl-effective-url.patch ];
+        }));
       })
   ];
 }
