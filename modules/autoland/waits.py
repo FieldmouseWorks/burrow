@@ -67,12 +67,6 @@ def item(repo, pr, phase, minutes, kick, rev, until=None, grace=0):
             "minutes": minutes, "kick": kick, "rev": rev, "until": until, "grace": grace}
 
 
-def renovate_run():
-    """The longest a Renovate run goes on, where the sweep has it asked for
-    refreshes: seconds."""
-    return (CFG["watch"] or {}).get("renovateRun") or 0
-
-
 def note(repo, pr, phase, wait, refreshing=False, ripe=None):
     """The PR's wait as its status says it (its last in a pass stands); wait
     None: nothing to watch. On a Renovate PR renovate-sweep may have a
@@ -90,7 +84,7 @@ def note(repo, pr, phase, wait, refreshing=False, ripe=None):
     rev = f"{pr['headRefOid']} {pr['baseRefName']}"
     grace = 0
     if refreshing and wait != HOLD and CFG["watch"] and CFG["watch"]["renovateSweep"]:
-        run = CFG["watch"]["renovateRun"]
+        run = CFG["renovateRun"]
         grace = lock_wait.recovery(run) if ripe else lock_wait.drain(run)
         phase += lock_wait.guard(run)
     NOTED.setdefault(repo, {})[key_of(repo, pr)] = item(repo, pr, phase, minutes, kick, rev, ripe, grace)

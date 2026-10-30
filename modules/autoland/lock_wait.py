@@ -36,6 +36,10 @@ RELEASES, RELEASE_GAP = 3, 600  # tries to take one back, and how far apart
 PASS = 3600  # how often the sweep's timer fires
 
 
+def stamp(s):
+    return calendar.timegm(time.strptime(s, "%Y-%m-%dT%H:%M:%SZ"))
+
+
 def interval(run):
     """The longest between the sweep's passes: its timer's, and it waits for
     a full Renovate run (`run` seconds) started with it."""
@@ -75,7 +79,7 @@ def when(body):
         m = WAITING.fullmatch(lines[-1].strip()) if lines else None
         if not m:
             return None
-        times.append(calendar.timegm(time.strptime(m.group(1), "%Y-%m-%dT%H:%M:%SZ")))
+        times.append(stamp(m.group(1)))
     return max(times, default=None)
 
 
@@ -90,13 +94,15 @@ def ripe(comments, renovate):
     return when(body) if body else None
 
 
-def requested(pr, st, now, run):
+def requested(pr, now, run):
     """Whether a Renovate PR has a request standing, or had one recently
-    enough for a run that read it to be going on still. st keeps when it was
-    last seen."""
+    enough for a run that read it to be going on still: `run` seconds from
+    the rename that took it off, as the PR's timeline has it, so whatever a
+    pass saw of it or when, and whatever the head has done since."""
     if pr["title"].startswith(REQUEST):
-        st["refreshAsked"] = now
-    return now < st.get("refreshAsked", -run) + run or pr["title"].startswith(REQUEST)
+        return True
+    gone = [stamp(e["createdAt"]) for e in pr["timelineItems"]["nodes"] if e["previousTitle"].startswith(REQUEST)]
+    return bool(gone) and now < max(gone) + run
 
 
 def refresh(pr, red, names, renovate, asked):

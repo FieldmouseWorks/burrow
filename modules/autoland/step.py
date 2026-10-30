@@ -601,7 +601,7 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
     fixed = dep == "minor" and not gate and (bot_edited(repo, pr, st) or gate_edit(repo, pr, st))
     swept = fixed and ci == "red" and renovate
     # The date a lock file refresh waits for, renovate-sweep's to have it refreshed then.
-    requested = renovate and lock_wait.requested(pr, st, C.NOW, waits.renovate_run())
+    requested = renovate and lock_wait.requested(pr, C.NOW, CFG["renovateRun"] or 0)
     refresh = lock_wait.refresh(pr, ci == "red", ci_names, D.renovated, requested) if renovate else {}
 
     # Dependency bumps: CI is the review. Renovate merges its own minor

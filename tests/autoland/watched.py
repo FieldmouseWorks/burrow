@@ -140,7 +140,8 @@ assert drain > 6 * 3600, drain
 # Green with a request just gone, the job the watchdog hands it to is told the same.
 OPEN["sam/r"][-1] = pr("sam/r", 9, **{**past, "comments": [], "checks": CI_GREEN, "title": "rebase!Lock file maintenance (cargo)"})
 run(267)
-OPEN["sam/r"][-1] = pr("sam/r", 9, **{**past, "comments": [], "checks": CI_GREEN})
+OPEN["sam/r"][-1] = pr("sam/r", 9, **{**past, "comments": [], "checks": CI_GREEN, "renames": [
+    {"createdAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(T + 267)), "previousTitle": "rebase!Lock file maintenance (cargo)"}]})
 just = run(268)
 assert "rebase! at the start of its title" in just["sam/r#9"]["phase"], just
 OPEN["sam/r"].pop()

@@ -100,6 +100,10 @@ let
     # The key renovate-sweep seals its verdicts on majors with (seal.py),
     # when it runs here; without it, none counts.
     majorKey = if sweeping then "${stateDir}/renovate-sweep/verdict.key" else null;
+    # The longest a Renovate run goes on, when it runs here: how long after a
+    # refresh request a run may still act on it, which the steward's jobs and
+    # the watchdog's deadline have to outlast.
+    renovateRun = if sweeping then config.systemd.services.renovate.serviceConfig.TimeoutStartSec else null;
     projectsDir = config.burrow.projectsDir;
     proj = "${config.burrow.tools.proj}/bin/proj";
     jobTimeout = cfg.jobTimeoutMinutes;
@@ -138,9 +142,6 @@ let
       kick = "${config.burrow.events.kick}/watchdog";
       escalated = "${config.burrow.watchdog.dir}/escalated.json";
       renovateSweep = sweeping;
-      # The longest a Renovate run goes on: the sweep's wait after a refresh
-      # request, which the watchdog's deadline has to outlast.
-      renovateRun = if sweeping then config.systemd.services.renovate.serviceConfig.TimeoutStartSec else null;
     } else null;
     defaults = {
       inherit (cfg) rounds oneWay;
