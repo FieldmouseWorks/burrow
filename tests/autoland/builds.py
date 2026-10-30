@@ -15,7 +15,8 @@ import re
 import sys
 
 import proofs as P
-from harness import C, CI_GREEN, FAIL, JOBS, STATES, S, V, WROTE, clean, fresh_pr_state, pr_state, run, sh, tmp
+from harness import C, CI_GREEN, FAIL, JOBS, STATES, S, V, WROTE, clean, fresh_pr_state, merged, pr_state, run, sh, tmp
+from prs import ci_state
 
 # A repo whose PRs' heads are real commits on its remote, as GitHub has them.
 origin, work = f"{tmp}/builds-origin", f"{tmp}/builds-work"
@@ -328,6 +329,64 @@ FAIL.remove("context=other-proof")
 GITHUB[heads[3]] = {"Remi-Proof": "success", "OTHER-PROOF": "pending"}
 line(3, 2200, pending_two)
 assert from_store() == [] and other_store() == [taken(W)] and not pr_state(3)["strikes"], WROTE
+
+
+# And so does the rollup's, which tells the same proof by the same rule: each
+# check as GitHub spells it this pass, under the name the repo gives it.
+def spelled(**states):
+    return CI_GREEN + [{"__typename": "StatusContext", "context": c.replace("_", "-"), "state": v, "description": ""}
+                       for c, v in states.items()]
+
+
+def ci(**states):
+    return ci_state(clean(checks=spelled(**states)), S.CFG["repos"]["sam/r"]["proofJobs"])
+
+
+assert ci(REMI_PROOF="SUCCESS", Other_Proof="SUCCESS") == ("green", [])
+assert ci(REMI_PROOF="FAILURE", Other_Proof="SUCCESS") == ("red", ["remi-proof"])
+assert ci(REMI_PROOF="ERROR", OTHER_PROOF="FAILURE") == ("red", ["remi-proof", "other-proof"])
+assert ci(REMI_PROOF="PENDING", other_proof="SUCCESS") == ("pending", ["remi-proof"])
+assert ci(REMI_PROOF="SUCCESS") == ("pending", ["other-proof"])
+assert ci(REMI_PROOF="PENDING", remi_proof="EXPECTED", other_proof="SUCCESS") == ("pending", ["remi-proof"])
+assert ci(REMI_PROOF="SUCCESS", remi_proof="FAILURE", other_proof="SUCCESS") == ("red", ["remi-proof"])
+assert ci(UNRELATED="PENDING", remi_proof="SUCCESS", other_proof="SUCCESS") == ("pending", ["UNRELATED"])
+# A pending proof however spelled gets its verdict under the repo's name for
+# it, and is one proof, not a second one to wait for.
+fresh_pr_state()
+GITHUB[heads[3]] = {"REMI-PROOF": "pending", "Other-Proof": "pending"}
+status = line(3, 2300, spelled(REMI_PROOF="PENDING", Other_Proof="PENDING"))
+assert from_store() == [taken(Z)] and other_store() == [taken(W)] and JOBS == [], (status, WROTE)
+# Taken, then one refused: what's left goes on a later pass, spelled anew.
+fresh_pr_state()
+GITHUB[heads[3]] = {"REMI-PROOF": "pending", "other-proof": "pending"}
+FAIL.append("context=other-proof")
+line(3, 2400, spelled(REMI_PROOF="PENDING", other_proof="PENDING"))
+assert from_store() == [taken(Z)] and pr_state(3)["strikes"] == {"status": 1}, WROTE
+FAIL.remove("context=other-proof")
+GITHUB[heads[3]] = {"Remi-Proof": "success", "OTHER-PROOF": "pending"}
+line(3, 2500, spelled(Remi_Proof="SUCCESS", OTHER_PROOF="PENDING"))
+assert from_store() == [] and other_store() == [taken(W)] and not pr_state(3)["strikes"], WROTE
+# With what it builds not built, a job runs it, by the repo's name for it.
+fresh_pr_state()
+VALID[:] = []
+nix_knows({3: Z, (3, "checks.x86_64-linux.other"): W})
+status = line(3, 2600, spelled(REMI_PROOF="PENDING", other_proof="SUCCESS"))
+assert RUNNING in status and len(JOBS) == 1 and "remi-proof: Run `just proof`" in JOBS[0], (status, JOBS)
+# Passed under another spelling: nothing left to prove, so it lands.
+fresh_pr_state()
+GITHUB[heads[3]] = {"REMI-PROOF": "success", "OTHER-PROOF": "success"}
+status = line(3, 2700, spelled(REMI_PROOF="SUCCESS", OTHER_PROOF="SUCCESS"))
+assert merged() and JOBS == [] and from_store() == [] and other_store() == [], (status, WROTE)
+# Failed under another spelling: red, and the job that fixes it is told how
+# the proof runs.
+fresh_pr_state()
+GITHUB[heads[3]] = {"REMI-PROOF": "failure", "other-proof": "success"}
+red = spelled(REMI_PROOF="FAILURE", other_proof="SUCCESS")
+line(3, 2800, red)
+status = line(3, 10000, red)
+assert not merged() and from_store() == [] and len(JOBS) == 1, (status, WROTE, JOBS)
+assert "remi-proof" in JOBS[0] and "Run `just proof`" in JOBS[0], JOBS
+VALID[:] = [X]
 del S.CFG["repos"]["sam/r"]["proofJobs"]["other-proof"]
 S.CFG["repos"]["sam/r"]["proofBuilds"] = {"remi-proof": "checks.x86_64-linux.proof"}
 # One output of two built isn't all of them: a job runs it.

@@ -90,7 +90,9 @@ def ci_state(pr, proofs=()):
     proof (a check a Claude job runs on a machine) that hasn't reported yet
     is pending: nothing posts it until its job runs. A workflow GitHub
     couldn't start (a bad file, a pin missing an input) leaves no check run,
-    only its suite: red, or a broken workflow would read as no CI."""
+    only its suite: red, or a broken workflow would read as no CI. A status
+    is its proof's however it's spelled, since GitHub ignores a context's case,
+    and goes by the name the repo gives the proof, one name once."""
     nodes = pr["commits"]["nodes"]
     commit = nodes[0]["commit"] if nodes else {}
     contexts = (commit.get("statusCheckRollup") or {}).get("contexts") or {}
@@ -98,6 +100,7 @@ def ci_state(pr, proofs=()):
     if any((x.get("pageInfo") or {}).get("hasNextPage") for x in (contexts, suites)):
         # Only the first 100 come back; one past them could be red.
         return "pending", ["over 100 checks, too many to read"]
+    spelled = {p.lower(): p for p in proofs}
     red, pending, seen = [], [], 0
     for s in suites.get("nodes", []):
         if s["conclusion"] == "STARTUP_FAILURE":
@@ -117,18 +120,19 @@ def ci_state(pr, proofs=()):
             if name == CONTEXT:
                 continue
             seen += 1
+            name = spelled.get(name.lower(), name)
             if c["state"] in ("PENDING", "EXPECTED"):
                 pending.append(name)
             elif c["state"] != "SUCCESS":
                 red.append(name)
-    named = {c.get("name") or c.get("context") for c in contexts.get("nodes", [])}
+    named = {c.get("name") or spelled.get(c["context"].lower(), c["context"]) for c in contexts.get("nodes", [])}
     for name in proofs:
         if name not in named:
             seen += 1
             pending.append(name)
     if not seen:
         return "none", []
-    return ("red" if red else "pending" if pending else "green"), red or pending
+    return ("red" if red else "pending" if pending else "green"), list(dict.fromkeys(red or pending))
 
 
 def our_status(pr):
