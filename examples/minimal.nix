@@ -61,6 +61,7 @@
       machinery = "workers";
     };
     watchdog.enable = true;
+    usageReset.enable = true;
     dispatch = {
       enable = true;
       runners.ci-runner = {
