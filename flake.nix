@@ -336,40 +336,64 @@
         '';
         # The dispatcher's config as the module writes it, read by the binary
         # (the example's, and one with a deploy to watch): which commit of
-        # each watched repo the running system has, from the flake's own rev
-        # and its flake.lock (tests/dispatch).
+        # each watched input the running system has, from the flake's
+        # flake.lock (tests/dispatch), with its own repo left to the
+        # configuration revision, so that a build from a dirty tree and the
+        # same tree committed are one system; and each runner's labels,
+        # GitHub's defaults for the machine's architecture among them unless
+        # it has none.
         dispatch-config = let
-          deploying = nixpkgs.lib.nixosSystem {
+          inherit (nixpkgs) lib;
+          machine = own: modules: lib.nixosSystem {
             modules = [
               self.nixosModules.dispatch
               self.nixosModules.updates
               ./examples/machine.nix
               {
-                burrow.dispatch.enable = true;
+                burrow.dispatch = {
+                  enable = true;
+                  runners = {
+                    ci-runner = { repo = "sam/homelab"; labels = [ "homelab" ]; };
+                    bare = { repo = "sam/homelab"; labels = [ "bare" ]; defaultLabels = false; };
+                  };
+                };
                 burrow.updates = {
                   enable = true;
                   origin = "https://github.com/sam/homelab";
                   watch = [ "sam/homelab" "sam/kit" "Sam/Tools" "sam/elsewhere" ];
                 };
                 burrow.switch.flakeInputs = {
-                  self = { outPath = ./tests/dispatch; rev = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"; };
+                  self = { outPath = ./tests/dispatch; } // own;
                   kit.rev = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
                   tools.rev = "cccccccccccccccccccccccccccccccccccccccc";
                   nixpkgs.rev = "dddddddddddddddddddddddddddddddddddddddd";
                 };
               }
-            ];
+            ] ++ modules;
           };
-          running = deploying.config.burrow.dispatch.settings.deploy.running;
+          committed = machine { rev = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"; } [ ];
+          dirty = machine { dirtyRev = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-dirty"; } [ ];
+          arm = machine { } [ { nixpkgs.hostPlatform = lib.mkForce "aarch64-linux"; } ];
+          settings = m: m.config.burrow.dispatch.settings;
+          deploy = { inherit ((settings committed).deploy) own running; };
           want = {
-            "sam/homelab" = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-            "sam/kit" = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-            "Sam/Tools" = "cccccccccccccccccccccccccccccccccccccccc";
+            own = "sam/homelab";
+            running = {
+              "sam/kit" = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+              "Sam/Tools" = "cccccccccccccccccccccccccccccccccccccccc";
+            };
           };
-        in assert nixpkgs.lib.assertMsg (running == want) "dispatch: running ${builtins.toJSON running}, not ${builtins.toJSON want}";
+          labels = m: lib.mapAttrs (_: r: r.labels) (settings m).runners;
+          wantLabels = arch: { ci-runner = [ "self-hosted" "Linux" arch "homelab" ]; bare = [ "bare" ]; };
+        in
+          assert lib.assertMsg (deploy == want) "dispatch: ${builtins.toJSON deploy}, not ${builtins.toJSON want}";
+          assert lib.assertMsg (settings dirty == settings committed)
+            "dispatch: a build from a dirty tree isn't the same tree committed: ${builtins.toJSON (settings dirty)}, ${builtins.toJSON (settings committed)}";
+          assert lib.assertMsg (labels committed == wantLabels "X64") "dispatch: x86_64's labels: ${builtins.toJSON (labels committed)}";
+          assert lib.assertMsg (labels arm == wantLabels "ARM64") "dispatch: aarch64's labels: ${builtins.toJSON (labels arm)}";
           pkgs.runCommand "dispatch-config-check" { } ''
             ${self.nixosConfigurations.example.config.systemd.services.burrow-dispatch.serviceConfig.ExecStart} status
-            ${deploying.config.systemd.services.burrow-dispatch.serviceConfig.ExecStart} status
+            ${committed.config.systemd.services.burrow-dispatch.serviceConfig.ExecStart} status
             touch $out
           '';
         # HOST-notify's issues, with a stand-in for gh: one a notice, closed

@@ -36,8 +36,9 @@ pub struct Config {
 pub struct Runner {
     /// OWNER/REPO, whose jobs it takes.
     pub repo: String,
-    /// The labels it was registered with, beside the ones every runner has
-    /// (self-hosted, its OS and its architecture).
+    /// Every label it has: the ones it was registered with, and the
+    /// defaults (self-hosted, its OS and its architecture) unless it was
+    /// registered without them.
     pub labels: Vec<String>,
 }
 
@@ -49,10 +50,14 @@ pub struct Deploy {
     pub handler: String,
     /// What its last run said (status.json).
     pub status: PathBuf,
-    /// Each repo whose default branch it puts live (OWNER/REPO), and the
-    /// commit of it the running system was built from: null when it wasn't
-    /// built from one (a dirty tree), which HOST-update holds on itself.
-    pub running: BTreeMap<String, Option<String>>,
+    /// The machine's own flake's repo (OWNER/REPO), when HOST-update watches
+    /// it: the running system's commit of it is its configuration revision,
+    /// read as a pass starts, so that a build from a dirty tree and the same
+    /// tree committed stay the same system.
+    pub own: Option<String>,
+    /// Each of the flake's inputs whose default branch it puts live
+    /// (OWNER/REPO), and the commit of it the running system was built from.
+    pub running: BTreeMap<String, String>,
     /// Seconds a commit may wait to go live, and a run of HOST-update may
     /// take.
     pub after: f64,

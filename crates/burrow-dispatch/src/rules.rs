@@ -23,10 +23,11 @@ pub const UNREAD: f64 = 30.0 * MIN;
 #[derive(Clone, Debug, PartialEq)]
 pub enum Move {
     /// `systemctl VERB UNIT`: restart a runner that has stopped taking jobs,
-    /// or start one that has failed.
+    /// or start one that has failed. `state` is the one it was seen in.
     Runner {
         unit: String,
         verb: &'static str,
+        state: String,
         why: String,
     },
     /// Cancel a push run that hasn't started, that a later one of its
@@ -143,7 +144,7 @@ pub fn decide(
         );
     }
     if let (Some(dep), Some((update, said))) = (&cfg.deploy, &snap.update) {
-        for repo in dep.running.keys() {
+        for repo in dep.own.iter().chain(dep.running.keys()) {
             let key = format!("deploy/{repo}");
             let Some(b) = snap.deploys.get(repo) else {
                 // Not read: as the last pass saw it.
@@ -221,9 +222,8 @@ fn runner(
     d.state.idle.insert(unit.to_owned(), since);
     let n = seen.queued.len();
     let queue = format!(
-        "{} queued for it (the oldest, {}, since {})",
+        "{} queued for it (the oldest since {})",
         jobs(n),
-        oldest.name,
         clock(oldest.at)
     );
     let state = seen.unit.state.as_str();
@@ -251,11 +251,16 @@ fn runner(
     }
     let why = format!("idle since {} with {queue}", clock(since));
     match state {
-        "failed" => d.moves.push(Move::Runner {
-            unit: unit.to_owned(),
-            verb: "start",
-            why,
-        }),
+        "failed" => {
+            d.moves.push(Move::Runner {
+                unit: unit.to_owned(),
+                verb: "start",
+                state: state.to_owned(),
+                why,
+            });
+            // Whether it helped: no event says so.
+            book(d, now + cfg.quiet);
+        }
         "active" => {
             let ready = [Some(since), seen.unit.since, recent.last().copied()]
                 .into_iter()
@@ -266,8 +271,10 @@ fn runner(
                 d.moves.push(Move::Runner {
                     unit: unit.to_owned(),
                     verb: "restart",
+                    state: state.to_owned(),
                     why,
                 });
+                book(d, now + cfg.quiet);
             } else {
                 book(d, ready);
             }
@@ -281,9 +288,13 @@ fn runner(
 /// later one of its workflow on that branch (queued, next in line, or under
 /// way) checks past, is moot: it's cancelled, so the later one gets its
 /// place. One that has started is left to finish, so the branch always gets
-/// a result. Each run is tried once in RECENT, whatever came of it.
+/// a result, and so is one someone ran again. Each run is tried once in
+/// RECENT, whatever came of it.
 fn moot(repo: &str, runs: &[Run], st: &State, now: f64, d: &mut Decision) {
-    for r in runs.iter().filter(|r| r.status == "queued") {
+    for r in runs
+        .iter()
+        .filter(|r| r.status == "queued" && r.attempt == 1)
+    {
         let Some(later) = runs
             .iter()
             .find(|l| l.id != r.id && l.workflow == r.workflow && l.at > r.at)
@@ -350,6 +361,7 @@ mod tests {
     const T: f64 = 1_800_000_000.0;
     const Q: f64 = 300.0;
 
+    /// A runner's look, with its queued jobs by name (in their links) and time.
     fn seen(state: &str, since: f64, busy: bool, queued: &[(&str, f64)]) -> Seen {
         Seen {
             repo: "sam/r".into(),
@@ -361,7 +373,6 @@ mod tests {
             queued: queued
                 .iter()
                 .map(|(name, at)| Job {
-                    name: (*name).into(),
                     url: format!("https://x/{name}"),
                     at: *at,
                 })
@@ -404,14 +415,16 @@ mod tests {
             branch: "main".into(),
             sha: sha.into(),
             status: status.into(),
+            attempt: 1,
             at,
         }
     }
 
     // An idle runner with work queued is watched from the pass that first
     // sees it so, restarted once it has been idle `quiet` (and up that long
-    // itself), restarted again `quiet` after that, and then left to the
-    // watchdog, whose deadline its restarts don't move.
+    // itself), with a look booked `quiet` on, restarted again then, and then
+    // left to the watchdog, whose deadline its restarts don't move. Its
+    // wait names no job: their names are the workflow's.
     #[test]
     fn quiet_runner() {
         let dir = tempfile::tempdir().unwrap();
@@ -434,7 +447,7 @@ mod tests {
         assert_eq!(
             it.phase,
             format!(
-                "2 jobs queued for it (the oldest, gate, since {}), and it takes none",
+                "2 jobs queued for it (the oldest since {}), and it takes none",
                 clock(T - 900.0)
             )
         );
@@ -442,6 +455,7 @@ mod tests {
 
         let d = decide(&cfg, &s, &st, &none, T + Q);
         assert_eq!(restarts(&d), [("ci", "restart")]);
+        assert_eq!(d.wake, Some(T + 2.0 * Q));
         assert_eq!(d.items["runner/ci"].since, T);
         st = d.state;
         st.restarts.insert("ci".into(), vec![T + Q]);
@@ -452,6 +466,7 @@ mod tests {
         assert!(d.moves.is_empty() && d.wake == Some(T + 2.0 * Q), "{d:?}");
         let d = decide(&cfg, &s, &st, &none, T + 2.0 * Q);
         assert_eq!(restarts(&d), [("ci", "restart")]);
+        assert_eq!(d.wake, Some(T + 3.0 * Q));
         st = d.state;
         st.restarts.get_mut("ci").unwrap().push(T + 2.0 * Q);
 
@@ -486,9 +501,9 @@ mod tests {
         }
     }
 
-    // A failed runner is started at once; one that's stopped, starting or
-    // stopping is only watched, and looked at again; none moves while a
-    // switch is in flight.
+    // A failed runner is started at once, and looked at again; one that's
+    // stopped, starting or stopping is only watched, and looked at again;
+    // none moves while a switch is in flight.
     #[test]
     fn runner_states() {
         let dir = tempfile::tempdir().unwrap();
@@ -503,6 +518,7 @@ mod tests {
             T,
         );
         assert_eq!(restarts(&d), [("ci", "start")]);
+        assert_eq!(d.wake, Some(T + Q));
         assert!(
             d.items["runner/ci"]
                 .phase
@@ -653,8 +669,9 @@ mod tests {
 
     // A queued push run with a later one of its workflow live on the branch
     // is cancelled, whatever the later one's state; one that has started,
-    // or has nothing later of its own workflow, is left. A run is tried once
-    // in RECENT, and the tries of a repo not read this time are kept.
+    // one someone ran again, or one with nothing later of its own workflow,
+    // is left. A run is tried once in RECENT, and the tries of a repo not
+    // read this time are kept.
     #[test]
     fn moot_runs() {
         let dir = tempfile::tempdir().unwrap();
@@ -670,6 +687,10 @@ mod tests {
                     run(4, 7, "c3c3c3c3c3", "pending", T - 600.0),
                     run(5, 9, "c3c3c3c3c3", "in_progress", T - 600.0),
                     run(6, 9, "d4d4d4d4d4", "queued", T - 300.0),
+                    Run {
+                        attempt: 2,
+                        ..run(10, 8, "a0a0a0a0a0", "queued", T - 1000.0)
+                    },
                 ],
             )]),
             ..Snapshot::default()

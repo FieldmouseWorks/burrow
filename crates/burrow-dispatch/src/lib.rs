@@ -5,8 +5,11 @@
 //! gone on past its deadline. What neither owns is what every PR waits on at
 //! once: the machine's Actions runners, and its deploy. A pass takes one
 //! snapshot of them (snapshot.rs), decides (rules.rs, which only reads it)
-//! and makes the moves its rules call for, from a short, fixed list, each
-//! one logged:
+//! and makes the moves its rules call for, from a short, fixed list. Each is
+//! looked at again just before it's made, since the snapshot may have moved
+//! on while the pass read the rest, and isn't made if it has or can't be
+//! read; it's kept before it's made, so a pass cut short still counts it,
+//! and logged:
 //!
 //!   - A runner with jobs queued that it could take, idle (no Runner.Worker
 //!     in its unit) for `quiet`, has lost GitHub, and is restarted; one that
@@ -16,15 +19,17 @@
 //!   - A push run on a runner repo's default branch that no job of has
 //!     started, with a later run of its workflow on that branch live, is
 //!     cancelled, so the later one takes its place on the runner. One that
-//!     has started finishes, so the branch always gets a result. Each run
-//!     is tried once in RECENT.
+//!     has started finishes, so the branch always gets a result, and one
+//!     someone ran again is theirs. Each run is tried once in RECENT.
 //!
 //! What it waits on goes in its watch file, a stall watchdog source, so a
 //! move that didn't help is a stall like any other, and the watchdog's
 //! ladder (a kick, a Claude job, the stuck issue, the owner) takes it on:
 //!
 //!   - runner/UNIT: jobs queued for an idle runner, from the pass that first
-//!     saw it so, due once its restarts have had their time.
+//!     saw it so, due once its restarts have had their time. It links the
+//!     oldest job and never names it: a job's name is its workflow's, which
+//!     anyone whose PR runs one writes, and the watchdog's jobs read this.
 //!   - deploy/OWNER/REPO: commits on a watched repo's default branch that
 //!     the running system wasn't built from, from the oldest, due
 //!     `deploy.after` later, kicking HOST-update; while a run that started

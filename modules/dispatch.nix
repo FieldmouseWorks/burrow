@@ -21,9 +21,12 @@ let
   update = "${prefix}-update";
   kick = "${config.burrow.events.kick}/dispatch";
 
-  # The commit of each watched repo the running system was built from: the
-  # flake's own (dirty: none), and each of its own inputs' as its flake.lock
-  # pins it (one that follows another's isn't a repo of its own).
+  # The commit of each watched input the running system was built from, as
+  # the flake's flake.lock pins it (one that follows another's isn't a repo
+  # of its own). The flake's own repo is compared at the running system's
+  # configuration revision, which a pass reads as it starts: its own rev in
+  # here would make a build from a dirty tree and the same tree committed
+  # two systems, and HOST-update would hold on the one it couldn't match.
   flakeInputs = config.burrow.switch.flakeInputs;
   # Read where it is: a flake given as a path (a checkout) isn't copied to
   # the store, which a read-only evaluation (`nix flake check --no-build`)
@@ -34,14 +37,20 @@ let
     else let m = builtins.match "https://github.com/([^/]+)/([^/?#]+).*" (locked.url or "");
     in if m == null then null else "${lib.elemAt m 0}/${lib.removeSuffix ".git" (lib.elemAt m 1)}";
   same = a: b: a != null && lib.toLower a == lib.toLower b;
-  runningOf = repo:
-    if same config.burrow.updates.repo repo then flakeInputs.self.rev or null
-    else let
-      roots = lib.filterAttrs (_: lib.isString) lock.nodes.${lock.root}.inputs;
-      named = lib.attrNames (lib.filterAttrs (_: node: same (lockedRepo (lock.nodes.${node}.locked or { })) repo) roots);
-    in if named == [ ] then null else flakeInputs.${lib.head named}.rev or null;
-  watched = lib.filter (r: same config.burrow.updates.repo r || runningOf r != null) config.burrow.updates.watch;
+  runningOf = repo: let
+    roots = lib.filterAttrs (_: lib.isString) lock.nodes.${lock.root}.inputs;
+    named = lib.attrNames (lib.filterAttrs (_: node: same (lockedRepo (lock.nodes.${node}.locked or { })) repo) roots);
+  in if named == [ ] then null else flakeInputs.${lib.head named}.rev or null;
+  own = lib.findFirst (same config.burrow.updates.repo) null config.burrow.updates.watch;
+  pinned = lib.filter (r: !same config.burrow.updates.repo r && runningOf r != null) config.burrow.updates.watch;
+  watched = lib.optional (own != null) own ++ pinned;
   deploying = updates && flakeInputs ? self;
+
+  # GitHub's labels for this machine's runners, but for their own: what
+  # config.sh gives every one unless it's told not to.
+  arch = let p = pkgs.stdenv.hostPlatform; in
+    if p.isx86_64 then "X64" else if p.isAarch64 then "ARM64" else if p.isAarch32 then "ARM"
+    else throw "burrow.dispatch: GitHub's runners don't run on ${p.system}";
 
   configFile = pkgs.writeText "burrow-dispatch.json" (builtins.toJSON cfg.settings);
   # The command, with this machine's config, so anyone can ask for its status
@@ -84,9 +93,8 @@ in
       example = { ci-runner = { repo = "sam/homelab"; labels = [ "homelab" ]; }; };
       description = ''
         The machine's self-hosted Actions runners, by unit: the repo each
-        takes jobs for, and the labels it was registered with (beside
-        self-hosted, Linux and X64, which every one has). A job only it could
-        take, queued while it sits idle, is what it watches.
+        takes jobs for, and the labels it was registered with. A job only it
+        could take, queued while it sits idle, is what it watches.
       '';
       type = types.attrsOf (types.submodule {
         options = {
@@ -97,6 +105,15 @@ in
           labels = mkOption {
             type = types.listOf types.str;
             description = "Its own labels, as `config.sh --labels` registered them.";
+          };
+          defaultLabels = mkOption {
+            type = types.bool;
+            default = true;
+            description = ''
+              Whether it has GitHub's default labels too (self-hosted, Linux
+              and the machine's architecture): false for one registered with
+              `config.sh --no-default-labels`.
+            '';
           };
         };
       });
@@ -111,13 +128,17 @@ in
         inherit (config.burrow.events) kick;
         watchdog = if config.burrow.watchdog.enable or false then "watchdog" else null;
         handler = "dispatch";
-        inherit (cfg) runners;
+        runners = lib.mapAttrs (_: r: {
+          inherit (r) repo;
+          labels = lib.optionals r.defaultLabels [ "self-hosted" "Linux" arch ] ++ r.labels;
+        }) cfg.runners;
         quiet = cfg.quietMinutes * 60;
         deploy = if !deploying then null else {
           unit = update;
           handler = "update";
           status = "${config.burrow.stateDir}/status.json";
-          running = lib.genAttrs watched runningOf;
+          inherit own;
+          running = lib.genAttrs pinned runningOf;
           after = cfg.deploy.afterMinutes * 60;
           run = cfg.deploy.runMinutes * 60;
         };

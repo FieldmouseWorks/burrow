@@ -19,6 +19,7 @@ pub struct Unit {
     /// When it became active, or, while it's activating, when it started.
     pub since: Option<f64>,
     /// Whether a process named Runner.Worker is in it: a runner at a job.
+    /// One running whose processes can't be read counts as at one.
     pub busy: bool,
 }
 
@@ -26,6 +27,8 @@ pub trait World {
     /// GET this path of GitHub's REST API (`repos/OWNER/REPO/...`): its JSON.
     fn github(&self, path: &str) -> Result<Value, String>;
     fn unit(&self, unit: &str) -> Unit;
+    /// The running system's configuration revision, when it's a commit.
+    fn revision(&self) -> Option<String>;
     /// Whether a switch is in flight: one awaiting its confirm, or its revert
     /// at work. It restarts what it changes, runners among them.
     fn switching(&self) -> bool;
@@ -89,13 +92,33 @@ impl World for Real<'_> {
         } else {
             at("ActiveEnterTimestamp")
         };
-        let busy = shown
-            .get("ControlGroup")
-            .filter(|cg| !cg.is_empty())
-            .is_some_and(|cg| {
-                working(&Path::new("/sys/fs/cgroup").join(cg.trim_start_matches('/')))
-            });
+        // A unit that isn't running has no processes; one that is, but
+        // whose processes can't be read, may be at a job.
+        let running = matches!(
+            state.as_str(),
+            "active" | "activating" | "deactivating" | "reloading" | "refreshing"
+        );
+        let busy = running
+            && shown
+                .get("ControlGroup")
+                .filter(|cg| !cg.is_empty())
+                .is_none_or(|cg| {
+                    working(&Path::new("/sys/fs/cgroup").join(cg.trim_start_matches('/')))
+                        .unwrap_or(true)
+                });
         Unit { state, since, busy }
+    }
+
+    fn revision(&self) -> Option<String> {
+        // As HOST-update reads it.
+        let out = Command::new("/run/current-system/sw/bin/nixos-version")
+            .arg("--configuration-revision")
+            .stderr(Stdio::null())
+            .output()
+            .ok()?;
+        let rev = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+        (out.status.success() && rev.len() == 40 && rev.bytes().all(|b| b.is_ascii_hexdigit()))
+            .then_some(rev)
     }
 
     fn switching(&self) -> bool {
@@ -148,24 +171,49 @@ fn shown(out: &str) -> BTreeMap<String, String> {
         .collect()
 }
 
-/// Whether a Runner.Worker process is anywhere in this cgroup.
-fn working(cg: &Path) -> bool {
-    let here = fs::read_to_string(cg.join("cgroup.procs"))
-        .unwrap_or_default()
+/// Whether a Runner.Worker process is anywhere in this cgroup: an error
+/// when the cgroup can't be read. A process gone before its name is read
+/// isn't one.
+fn working(cg: &Path) -> std::io::Result<bool> {
+    let here = fs::read_to_string(cg.join("cgroup.procs"))?
         .lines()
         .any(|pid| {
             fs::read_to_string(format!("/proc/{}/comm", pid.trim()))
                 .is_ok_and(|comm| comm.trim() == "Runner.Worker")
         });
-    here || fs::read_dir(cg).is_ok_and(|d| {
-        d.flatten()
-            .any(|e| e.file_type().is_ok_and(|t| t.is_dir()) && working(&e.path()))
-    })
+    if here {
+        return Ok(true);
+    }
+    for e in fs::read_dir(cg)? {
+        let e = e?;
+        if e.file_type()?.is_dir() && working(&e.path())? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::shown;
+    use super::{shown, working};
+
+    // A cgroup whose processes can't be read isn't taken for one at no job;
+    // one whose processes are all something else is.
+    #[test]
+    fn reads_cgroups() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(working(&dir.path().join("gone")).is_err());
+        let sub = dir.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        std::fs::write(
+            dir.path().join("cgroup.procs"),
+            format!("{}\n", std::process::id()),
+        )
+        .unwrap();
+        assert!(working(dir.path()).is_err(), "sub has no cgroup.procs");
+        std::fs::write(sub.join("cgroup.procs"), "").unwrap();
+        assert!(!working(dir.path()).unwrap());
+    }
 
     #[test]
     fn reads_systemctl_show() {
