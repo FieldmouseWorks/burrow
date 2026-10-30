@@ -1,0 +1,53 @@
+{
+  "conary": "note v1",
+  "change": "2nhnwp8a75jjv5nzara1fmp679",
+  "repo": {
+    "owner": "fieldmouseworks",
+    "name": "burrow"
+  },
+  "pr": 230,
+  "url": "https://github.com/fieldmouseworks/burrow/pull/230",
+  "summary": "flake-check: sign a private repo's gate result with the job's own token",
+  "task": "FieldmouseWorks/Conary#48",
+  "author": {
+    "kind": "agent",
+    "login": "TusanHomichi",
+    "session": "https://claude.ai/code/session_01BkHcyDYaKnE7mRRMdYCFVC"
+  },
+  "landing": {
+    "revision": "7157501d1c110f29e10bb5d5d6b8a8fdc70e74cb8c043d85d527be8f6a72c60a",
+    "before": "2b39ea1665b475f5410d4f28f83b12adc8e8557e",
+    "after": "d9b840a7d07a2f8db393a2b8383112dd01e4e83a",
+    "by": {
+      "kind": "status",
+      "login": "fieldmouseworks-steward[bot]"
+    },
+    "at": 1793393634270
+  },
+  "evidence": [
+    {
+      "kind": "review",
+      "check": "codex",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/230#pullrequestreview-5716587444"
+    },
+    {
+      "kind": "ci",
+      "check": "check / commits",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/41103522283/job/124226432640"
+    },
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/41103522283/job/124226433466"
+    },
+    {
+      "kind": "ci",
+      "check": "agents",
+      "result": "pass",
+      "source": "status agents"
+    }
+  ]
+}
