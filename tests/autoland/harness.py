@@ -159,7 +159,7 @@ with open(f"{tmp}/config.json", "w") as f:
                      "stallAfter": 120, "holdStallAfter": 480,
                      "directPush": False, "ruleset": True, "requireCi": True,
                      "proofJobs": {}, "proofBuilds": {}, "codex": True, "rival": True, "skipPaths": []},
-        "repos": {}, "pipelineRepos": ["Sam/Pipe"],
+        "repos": {}, "pipelineRepos": ["Sam/Pipe"], "leadRepos": ["Sam/Lead"],
         "webhook": {"url": "https://example.org/burrow/hook", "events": ["check_suite", "push"]},
         "kick": f"http://127.0.0.1:{kicks.server_port}/kick/autoland",
         "watch": {"kick": f"http://127.0.0.1:{kicks.server_port}/kick/watchdog", "escalated": f"{tmp}/escalated.json",

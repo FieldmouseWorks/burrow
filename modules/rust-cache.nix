@@ -62,8 +62,9 @@ in
       type = types.str;
       default = "/var/cache/sccache";
       description = ''
-        Where each user's cache (DIR/USER/cache) and its daemon's socket
-        (DIR/USER/run) live. Keep it out of snapshots and backups: it's only
+        Where each user's cache (DIR/USER/cache) and the link to its daemon's
+        socket (DIR/USER/sccache.sock) live; the socket itself is in
+        /run/rust-cache-USER. Keep it out of snapshots and backups: it's only
         a cache, and it churns with every toolchain and dependency bump. An
         ephemeral / is fine; a reboot only costs one cold build each.
       '';

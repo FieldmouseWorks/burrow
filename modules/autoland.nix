@@ -155,7 +155,7 @@ let
       skipPaths = [ ];
     };
     repos = cfg.repos;
-    inherit (cfg) pipelineRepos;
+    inherit (cfg) pipelineRepos leadRepos;
     # Every repo's hook to burrow-events (repos.py), with what each of its
     # handlers takes.
     webhook = {
@@ -303,6 +303,20 @@ in
         sooner. The steward's jobs in any other repo go ahead of the line as
         well, but within that project's `maxJobsPerProject`, so one repo's
         PRs can't fill the machine.
+      '';
+    };
+
+    leadRepos = mkOption {
+      type = types.listOf types.str;
+      default = [ ];
+      example = [ "sam/burrow" ];
+      description = ''
+        The repos the pipeline itself is built from (OWNER/NAMEs, any case),
+        whose work goes first of all: ahead of everyone else's, the rest of
+        `pipelineRepos` included. Their reviews take a reviewer's next free
+        place first, and proj puts their pipeline jobs (the steward's Claude
+        jobs, proj-inbox's issues) first in its line. A lead repo is
+        pipeline work whether or not `pipelineRepos` lists it.
       '';
     };
 
