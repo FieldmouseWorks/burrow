@@ -391,6 +391,13 @@ if [ ${#untested[@]} -gt 0 ]; then
 $fixes
 So they went live without it, under the dead man's switch and the health check. A Claude job is fixing main's test; this closes when an update passes every test again."
 fi
+# The commit says what was skipped (before 6, which can put it up).
+if [ ${#untested[@]} -gt 0 ] && [ -n "$changed" ] && [ -z "$riding" ]; then
+  git_ commit -q --amend -m "Update $(describe | sed 's/, $//')" \
+    -m "Pushed by $UPDATE without the VM test ${untested[*]}, which fails on main itself, because it fixes:
+$fixes
+It built and stayed healthy live."
+fi
 
 # 6. Live, with the dead man's switch; healthy, or straight back.
 # Already live: it went through this when it did.
@@ -428,6 +435,16 @@ if [ -z "$live" ]; then
     fi
   fi
 
+  # A fresh bump for its red PR goes up as that PR's head before it's
+  # confirmed: refused (a fix or a rerun got there first), it goes straight
+  # back, so the box never stays on what nothing will land, and the next run
+  # rides or holds for that PR as usual.
+  if [ -n "$replacing" ] && ! url=$(replace "$replacing" "$(git_ log -1 --format=%s)" "$(pr_body)"); then
+    "$SWITCH" --abort >>"$state/logs/switch.log" 2>&1 || true
+    note held "$url; reverted"
+    exit 0
+  fi
+
   "$CONFIRM" >>"$state/logs/switch.log" 2>&1 || {
     note failed "health was fine but $CONFIRM failed; it reverts by itself"
     exit 1
@@ -439,14 +456,8 @@ if [ -z "$live" ]; then
 fi
 
 # 7. Push, and bring the operator's checkout along when it isn't mid-work.
-# (The commit says what was skipped. The running system keeps the old commit
-# as its revision; "deployed" below is how the next run knows it's this one.)
-if [ ${#untested[@]} -gt 0 ] && [ -n "$changed" ] && [ -z "$riding" ]; then
-  git_ commit -q --amend -m "Update $(describe | sed 's/, $//')" \
-    -m "Pushed by $UPDATE without the VM test ${untested[*]}, which fails on main itself, because it fixes:
-$fixes
-It built and stayed healthy live."
-fi
+# (The running system keeps the old commit as its revision; "deployed" below
+# is how the next run knows it's this one.)
 echo "$new" >"$state/deployed"
 # What went live, in words: pushing can rebase it onto what hasn't.
 went=${changed:+$(describe)}${changed:-main $(git_ rev-parse --short HEAD)}
@@ -454,7 +465,9 @@ if [ -n "$TRAIN" ]; then
   if [ -n "$riding" ] || [ -z "$changed" ]; then
     : # Riding, or nothing new on main: nothing to put up.
   elif [ -n "$replacing" ]; then
-    url=$(replace "$replacing" "$(git_ log -1 --format=%s)" "$(pr_body)") || { echo "$url"; url=; }
+    # Up already, before its confirm (6), unless it was live before this run:
+    # then it goes up now, and a refusal leaves the box as this run found it.
+    [ -z "$live" ] || url=$(replace "$replacing" "$(git_ log -1 --format=%s)" "$(pr_body)") || { echo "$url"; url=; }
   else
     url=$(propose "$(git_ log -1 --format=%s)" "$(pr_body)") || echo "its PR didn't open; the next run opens it"
   fi

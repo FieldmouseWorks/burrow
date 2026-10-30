@@ -19,8 +19,8 @@
 # unless that's the red head's very tree, which can only go red the same way
 # again, so the job has it (same_tree).
 
-# update.sh sets state, REPO, BRANCH, HOST, UPDATE, TRAIN, SETTLED, riding,
-# changed, as_user and git_.
+# update.sh sets state, REPO, BRANCH, HOST, UPDATE, TRAIN, SETTLED, STEWARD,
+# TRAIN_CONTEXT, riding, changed, as_user and git_.
 # shellcheck disable=SC2154
 
 # The open PR, as "NUMBER HEAD"; nothing when there's none. Fails when GitHub
@@ -35,25 +35,48 @@ update_pr() {
 # Whether its open PR $1 ("NUMBER HEAD") is red on a head HOST-update
 # pushed: "red" when it is, with that head fetched (same_tree reads it), and
 # nothing when it isn't, or when the head is anyone else's (ride holds for
-# that). Red is a check on the head that failed, its latest run (so one
-# rerunning is pending), or a status other than the steward's own (SETTLED)
-# that's neither success nor pending: CI as the steward reads it (ci_state in
-# ../autoland/prs.py), or the train turning the head away. Fails, saying
-# why, when GitHub doesn't say, or the head moved since $1 was read.
+# that). Red is CI as the steward reads it (ci_state in ../autoland/prs.py,
+# whose rules these are): a check whose latest run failed (so one rerunning
+# is pending), a workflow that failed to start, or a status that's neither
+# success nor pending, except the steward's own (SETTLED) and the train's
+# (TRAIN_CONTEXT), which counts only as a failure from the steward's App
+# (STEWARD): the head red merged alone. Over 100 checks or suites isn't red:
+# the steward doesn't read past them either. Fails, saying why, when GitHub
+# doesn't say, or the head moved since $1 was read.
 red_head() {
   local n head json red
   read -r n head <<<"$1"
   [ "$head" = "$(cat "$state/proposed" 2>/dev/null)" ] || return 0
-  json=$(as_user gh pr view "$n" -R "$REPO" --json headRefOid,statusCheckRollup) || {
+  # shellcheck disable=SC2016 # GraphQL's variables
+  json=$(as_user gh api graphql -F n="$n" -f owner="${REPO%%/*}" -f name="${REPO#*/}" -f query='
+    query($owner: String!, $name: String!, $n: Int!) {
+      repository(owner: $owner, name: $name) { pullRequest(number: $n) { headRefOid
+        commits(last: 1) { nodes { commit {
+          statusCheckRollup { contexts(first: 100) { pageInfo { hasNextPage } nodes {
+            __typename
+            ... on CheckRun { status conclusion }
+            ... on StatusContext { context state creator { login __typename } }
+          } } }
+          checkSuites(first: 100) { pageInfo { hasNextPage } nodes { conclusion } }
+        } } }
+      } }
+    }') || {
     echo "GitHub didn't say how its PR #$n's checks stand"
     return 1
   }
-  red=$(jq -r --arg head "$head" --arg settled "$SETTLED" '
-    if .headRefOid != $head then error("moved") else
-      [.statusCheckRollup[]? | select((.context // .name) != $settled)
-        | if .__typename == "StatusContext" then .state | IN("SUCCESS", "PENDING", "EXPECTED") | not
-          else .status == "COMPLETED" and (.conclusion | IN("SUCCESS", "NEUTRAL", "SKIPPED") | not) end]
-      | if any then "red" else empty end
+  red=$(jq -r --arg head "$head" --arg settled "$SETTLED" --arg train "$TRAIN_CONTEXT" --arg steward "$STEWARD" '
+    .data.repository.pullRequest as $pr | ($pr.commits.nodes[0].commit // {}) as $c
+    | if $pr.headRefOid != $head then error("moved") else
+      ($c.statusCheckRollup.contexts // {}) as $contexts | ($c.checkSuites // {}) as $suites
+      | if [$contexts, $suites] | any(.pageInfo.hasNextPage) then empty else
+        [($suites.nodes[]? | .conclusion == "STARTUP_FAILURE"),
+         ($contexts.nodes[]?
+          | if .__typename == "CheckRun" then .status == "COMPLETED" and (.conclusion | IN("SUCCESS", "NEUTRAL", "SKIPPED") | not)
+            elif .context == $settled then false
+            elif .context == $train then .state == "FAILURE" and .creator.__typename == "Bot" and .creator.login == $steward
+            else .state | IN("SUCCESS", "PENDING", "EXPECTED") | not end)]
+        | if any then "red" else empty end
+      end
     end' <<<"$json" 2>/dev/null) || {
     echo "its PR #$n's head isn't $head any more"
     return 1
@@ -112,7 +135,9 @@ same_tree() {
 # never a new one. Only while that head is still on it and still red: a head
 # pushed since is someone's fix, and one gone green (a rerun) is the
 # steward's to settle and put in the train, so it's ridden instead. Prints
-# the PR's URL; fails, saying why, with the PR left as it was.
+# the PR's URL; fails, saying why, with the PR left as it was. update.sh
+# calls it once HEAD is live and healthy but before it's confirmed, so a
+# refusal reverts it: the box never stays on a bump nothing will land.
 replace() {
   local n head red url
   read -r n head <<<"$1"

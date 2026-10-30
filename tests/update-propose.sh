@@ -17,9 +17,10 @@ git config --global advice.detachedHead false
 # gh: `api repos/R/pulls?...` answers the open PRs in $tmp/prs ("NUMBER HEAD
 # [OWNER/REPO BRANCH]" lines, sam/homelab's burrow-update by default) as
 # GitHub does, newest first and filtered by its head=OWNER:BRANCH, `pr create`
-# adds one, `pr view N` answers N's head with the checks in $tmp/checks (its
-# statusCheckRollup, as gh gives it), `api repos/R/pulls/N -X PATCH` answers
-# N's URL, and every call goes to $tmp/gh.log. With $tmp/gh-down there, it
+# adds one, `api graphql ... -F n=N` answers N's head with the checks in
+# $tmp/checks (its check runs, statuses and check suites, as GraphQL has them;
+# with $tmp/more there, the checks have a page more), `api repos/R/pulls/N -X
+# PATCH` answers N's URL, and every call goes to $tmp/gh.log. With $tmp/gh-down there, it
 # fails as an unreachable GitHub does.
 mkdir "$tmp/bin"
 cat >"$tmp/bin/gh" <<EOF
@@ -36,8 +37,12 @@ case "\$1 \$2" in
       | {number: (.[0] | tonumber), sha: .[1], repo: (.[2] // "sam/homelab"), ref: (.[3] // "burrow-update")}
       | select(\$head == "" or \$head == "\(.repo | split("/")[0]):\(.ref)")
       | {number, head: {sha, ref, repo: {full_name: .repo}}}] | reverse' <"$tmp/prs") ;;
-  "pr view") json=\$(jq -Rn --arg n "\$3" --slurpfile checks "$tmp/checks" '[inputs | split(" ") | select(.[0] == \$n)][0]
-      | {headRefOid: .[1], statusCheckRollup: \$checks[0]}' <"$tmp/prs") ;;
+  "api graphql") n=; for a in "\$@"; do [ "\${a#n=}" = "\$a" ] || n=\${a#n=}; done
+    json=\$(jq -Rn --arg n "\$n" --slurpfile checks "$tmp/checks" --argjson more "\$([ -e "$tmp/more" ] && echo true || echo false)" '
+      [inputs | split(" ") | select(.[0] == \$n)][0][1] as \$head | \$checks[0] as \$c
+      | {data: {repository: {pullRequest: {headRefOid: \$head, commits: {nodes: [{commit: {
+          statusCheckRollup: {contexts: {pageInfo: {hasNextPage: \$more}, nodes: [\$c[] | select(.__typename != "CheckSuite")]}},
+          checkSuites: {pageInfo: {hasNextPage: false}, nodes: [\$c[] | select(.__typename == "CheckSuite")]}}}]}}}}}' <"$tmp/prs") ;;
   "api repos/sam/homelab/pulls/"*) json=\$(jq -n --arg url "https://github.com/sam/homelab/pull/\${2##*/}" '{html_url: \$url}') ;;
   "pr create") n=\$((\$(wc -l <"$tmp/prs") + 7)); echo "\$n \$(git -C "$tmp/origin.git" rev-parse refs/heads/burrow-update)" >>"$tmp/prs"
     echo "https://github.com/sam/homelab/pull/\$n"; exit 0 ;;
@@ -50,7 +55,9 @@ PATH=$tmp/bin:$PATH
 
 # What update.sh gives them.
 # shellcheck disable=SC2034 # propose's
-REPO=sam/homelab BRANCH=burrow-update HOST=box UPDATE=box-update TRAIN=1 SETTLED=review-settled riding='' changed=1
+REPO=sam/homelab BRANCH=burrow-update HOST=box UPDATE=box-update TRAIN=1 riding='' changed=1
+# shellcheck disable=SC2034 # propose's
+SETTLED=review-settled STEWARD=sams-steward TRAIN_CONTEXT=conary/train
 state=$tmp/state work=$tmp/work
 as_user() { "$@"; }
 git_() { git -C "$work" "$@"; }
@@ -67,7 +74,7 @@ commit() { # $1 = file, $2 = its text, in the work tree
 # A fresh GitHub copy with one commit on main, a clone of it at main, and no
 # PRs; HOST-update has proposed nothing.
 fresh() {
-  rm -rf "$tmp/origin.git" "$work" "$state" "$tmp/gh-down"
+  rm -rf "$tmp/origin.git" "$work" "$state" "$tmp/gh-down" "$tmp/more"
   mkdir -p "$state"
   : >"$tmp/prs"
   : >"$tmp/gh.log"
@@ -214,10 +221,16 @@ already=$(changed='' already_live /nix/store/sys-b)
 [ "$already" = current ] || fail "already_live with nothing new: $already"
 echo "already_live: ok"
 
-# A check run ($1 = its status, $2 = its conclusion) and a status ($1 = its
-# context, $2 = its state), as gh's statusCheckRollup has them.
-run() { jq -n --arg s "$1" --arg c "$2" '{__typename: "CheckRun", name: "check / check", status: $s, conclusion: (if $c == "" then null else $c end)}'; }
-status() { jq -n --arg c "$1" --arg s "$2" '{__typename: "StatusContext", context: $c, state: $s}'; }
+# A check run ($1 = its status, $2 = its conclusion), a status ($1 = its
+# context, $2 = its state, $3 = who posted it, the steward's App's Bot by
+# default, $4 = as what) and a check suite ($1 = its conclusion), as GraphQL
+# has them.
+run() { jq -n --arg s "$1" --arg c "$2" '{__typename: "CheckRun", status: $s, conclusion: (if $c == "" then null else $c end)}'; }
+status() {
+  jq -n --arg c "$1" --arg s "$2" --arg by "${3:-sams-steward}" --arg as "${4:-Bot}" \
+    '{__typename: "StatusContext", context: $c, state: $s, creator: {login: $by, __typename: $as}}'
+}
+suite() { jq -n --arg c "$1" '{__typename: "CheckSuite", conclusion: $c}'; }
 # The head's checks are these (each a JSON object).
 checks() { jq -s . <<<"$*" >"$tmp/checks"; }
 
@@ -234,26 +247,35 @@ pushed_before() { # $1 = flake.lock's text in it
   echo "7 $(git -C "$other" rev-parse HEAD)" >"$tmp/prs"
 }
 
-# Red: a check on its own head failed, or the train turned it away; it's
-# fetched, for same_tree. Green, pending, rerunning, the steward's own status
-# or someone else's head: nothing, so it's ridden (or held) as before. GitHub
-# down, or a head that moved since it was listed: a failure, never "not red".
+# Red, as the steward reads CI: a check on its own head failed, a workflow
+# failed to start, a status failed, or the train found the head red alone
+# (its failure, from the steward's App); it's fetched, for same_tree. Green,
+# pending, rerunning, the steward's own status, the train's error (a merge
+# GitHub refused), its failure from anyone else, over 100 checks, or someone
+# else's head: nothing, so it's ridden (or held) as before. GitHub down, or a
+# head that moved since it was listed: a failure, never "not red".
 fresh
 pushed_before v2
 pr=$(update_pr)
 head=${pr#* }
 for green in "" "$(run IN_PROGRESS '')" "$(run COMPLETED SUCCESS) $(run COMPLETED SKIPPED) $(run COMPLETED NEUTRAL)" \
-  "$(status ci/proof PENDING) $(status conary/train SUCCESS)" "$(status review-settled FAILURE)"; do
+  "$(status ci/proof PENDING) $(status conary/train SUCCESS)" "$(status review-settled FAILURE)" \
+  "$(status conary/train ERROR)" "$(status conary/train FAILURE mallory User)" "$(status conary/train FAILURE sams-steward User)" \
+  "$(status conary/train FAILURE other-app)" "$(suite SUCCESS) $(run COMPLETED SUCCESS)"; do
   checks "$green"
   out=$(red_head "$pr") && [ -z "$out" ] || fail "red_head with $(jq -c . "$tmp/checks"): $out"
 done
 ! git_ cat-file -e "$head^{tree}" 2>/dev/null || fail "red_head fetched a head that isn't red"
 for red in "$(run COMPLETED FAILURE)" "$(run COMPLETED TIMED_OUT)" "$(run COMPLETED CANCELLED) $(run COMPLETED SUCCESS)" \
-  "$(status conary/train FAILURE)" "$(status ci/proof ERROR)"; do
+  "$(status conary/train FAILURE)" "$(status ci/proof ERROR)" "$(status ci/proof FAILURE mallory User)" \
+  "$(suite STARTUP_FAILURE)" "$(suite STARTUP_FAILURE) $(suite SUCCESS) $(run COMPLETED SUCCESS)"; do
   checks "$red"
   out=$(red_head "$pr") && [ "$out" = red ] || fail "red_head with $(jq -c . "$tmp/checks"): $out"
 done
 git_ cat-file -e "$head^{tree}" || fail "red_head didn't fetch the red head"
+touch "$tmp/more"
+out=$(red_head "$pr") && [ -z "$out" ] || fail "red_head with over 100 checks, one red: $out"
+rm "$tmp/more"
 git_ rev-parse HEAD >"$state/proposed"
 out=$(red_head "$pr") && [ -z "$out" ] || fail "red_head with someone else's head on it: $out"
 echo "$head" >"$state/proposed"

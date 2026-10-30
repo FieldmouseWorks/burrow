@@ -105,6 +105,10 @@ let
     REVIEW_HINTS = cfg.firmware.reviewHints;
     # The autoland steward's commit status, which renovate-sweep doesn't count as CI.
     SETTLED = config.burrow.autoland.context or "review-settled";
+    # In a train repo, the steward's App as GraphQL names its bot, and the
+    # train's status, which counts as CI only from that App (updates/propose.sh).
+    STEWARD = if train then autoland.app.slug else "";
+    TRAIN_CONTEXT = if train then config.burrow.ledger.trainContext else "";
     # The repos the steward covers, as it last found them; none without it.
     COVERED = if config.burrow.autoland.enable or false then "${stateDir}/autoland/repos.json" else "";
     SEAL = "${majorSeal}/bin/major-seal";
