@@ -136,10 +136,11 @@ inputs:
               default = "50%";
               example = "30G";
               description = ''
-                The most they may hold between them (claude.slice's MemoryMax). Past
-                it the kernel kills a Claude, proj jobs first, rather than anything
-                else on the machine: CI, services, the ZFS ARC. Leave room for
-                those.
+                The most they may hold between them (claude.slice's MemoryMax), none
+                of it in swap: swap would let them grow past it without ever reaching
+                it. Past it the kernel kills a Claude, proj jobs first, rather than
+                anything else on the machine: CI, services, the ZFS ARC. Leave room
+                for those.
               '';
             };
           };
@@ -159,12 +160,16 @@ inputs:
         # and Remote Control servers (claude-rc.slice) run. Many headless
         # Claudes at a few GB each once ran a machine out of memory and the
         # kernel killed a CI run instead of one of them; capped here, they
-        # can only run out of their own.
+        # can only run out of their own. Not into swap either: what they
+        # swap is past the cap and still costs the machine, zram's in RAM and
+        # a disk's in I/O. One whose caps allowed it thrashed until it hung,
+        # with the kernel killing nothing.
         config.systemd.user.slices.claude = {
           description = "Every Claude that runs on its own";
           sliceConfig = {
             MemoryHigh = config.burrow.claude.memory.high;
             MemoryMax = config.burrow.claude.memory.max;
+            MemorySwapMax = 0;
           };
         };
 

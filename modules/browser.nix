@@ -168,7 +168,7 @@ in
     memory = lib.mkOption {
       type = lib.types.str;
       default = "4G";
-      description = "The most the browser and its display may hold (MemoryMax).";
+      description = "The most the browser and its display may hold (MemoryMax), none of it in swap.";
     };
   };
 
@@ -198,7 +198,10 @@ in
 
     systemd.slices.${account} = {
       description = "The signed-in browser";
-      sliceConfig.MemoryMax = cfg.memory;
+      sliceConfig = {
+        MemoryMax = cfg.memory;
+        MemorySwapMax = 0;
+      };
     };
 
     systemd.services = {

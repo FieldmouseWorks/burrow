@@ -1,0 +1,22 @@
+# burrow's one Cargo workspace: every program a module runs is a crate here
+# (AGENTS.md, Build and test). The flake builds them all as
+# packages.SYSTEM.burrow and gates them as checks.crates-*.
+[workspace]
+members = ["burrow-events"]
+resolver = "3"
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+# crane names the package that holds every binary.
+[workspace.metadata.crane]
+name = "burrow"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }

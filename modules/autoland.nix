@@ -154,7 +154,7 @@ let
       skipPaths = [ ];
     };
     repos = cfg.repos;
-    inherit (cfg) pipelineRepos;
+    inherit (cfg) pipelineRepos leadRepos;
     # Every repo's hook to burrow-events (repos.py), with what each of its
     # handlers takes.
     webhook = {
@@ -207,10 +207,22 @@ let
     '
     touch $out
   '';
+  # What a pass runs: openssl signs the App's JWT (common.py), and the rest
+  # talk to GitHub, unpack its tarballs and start Claude jobs. gh and git are
+  # the machine's (github.nix): a pass's own calls pass the steward's token
+  # in GH_TOKEN, which they use as given, and the rest (`status`, a
+  # project's clone) go as the caller, its App's socket in a job's env too.
+  stewardTools = [ (config.burrow.tools.gh or pkgs.gh) config.programs.git.package pkgs.gnutar pkgs.coreutils pkgs.openssl config.burrow.tools.proj ];
   # The command, with this machine's config, so `autoland-steward status`
-  # works from any shell, not only in the service.
+  # works from any shell, not only in the service. A pass gets its tools
+  # however it's started: by its units, or by hand or a Claude job
+  # (`autoland-steward kick OWNER/REPO`) with a PATH of its own. Not a
+  # review: its units give the reviewers only what they read with
+  # (reviewTools).
   steward = pkgs.writeShellScriptBin "autoland-steward" ''
     export AUTOLAND_CONFIG=''${AUTOLAND_CONFIG:-${configFile}}
+    steward_path=${lib.makeBinPath stewardTools}
+    [ "''${1:-}" = review ] || export PATH="$steward_path''${PATH:+:$PATH}"
     exec ${pkgs.python3}/bin/python3 -E -s ${stewardSrc}/steward.py "$@"
   '';
 in
@@ -300,6 +312,20 @@ in
         sooner. The steward's jobs in any other repo go ahead of the line as
         well, but within that project's `maxJobsPerProject`, so one repo's
         PRs can't fill the machine.
+      '';
+    };
+
+    leadRepos = mkOption {
+      type = types.listOf types.str;
+      default = [ ];
+      example = [ "sam/burrow" ];
+      description = ''
+        The repos the pipeline itself is built from (OWNER/NAMEs, any case),
+        whose work goes first of all: ahead of everyone else's, the rest of
+        `pipelineRepos` included. Their reviews take a reviewer's next free
+        place first, and proj puts their pipeline jobs (the steward's Claude
+        jobs, proj-inbox's issues) first in its line. A lead repo is
+        pipeline work whether or not `pipelineRepos` lists it.
       '';
     };
 
@@ -649,8 +675,7 @@ in
       restartIfChanged = false;
       after = [ "network-online.target" ];
       wants = [ "network-online.target" ];
-      # openssl signs the App's JWT (common.py).
-      path = [ pkgs.gh config.programs.git.package pkgs.gnutar pkgs.coreutils pkgs.openssl config.burrow.tools.proj ];
+      path = stewardTools;
       serviceConfig = {
         Type = "oneshot";
         User = user;

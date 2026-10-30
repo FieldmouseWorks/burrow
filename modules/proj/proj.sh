@@ -9,9 +9,10 @@
 #   proj run --pipeline PROJECT "task"  work on the pipeline itself: in one of
 #                               its own repos (PIPELINE, by the clone's GitHub
 #                               origin), ahead of everything, and its own
-#                               slots; in any other, as --first, and status
-#                               and the turn's journal say so (every turn of
-#                               it, either way)
+#                               slots, and in a lead one (LEAD) ahead of the
+#                               other pipeline work too; in any other, as
+#                               --first, and status and the turn's journal
+#                               say so (every turn of it, either way)
 #   proj run --kick NAME PROJECT "task"  kick NAME (HANDLER or HANDLER/OWNER/REPO,
 #                               one of burrow-events') each time a turn ends
 #   proj run --timeout DUR PROJECT "task"  each turn stopped after DUR (as
@@ -44,10 +45,10 @@
 # Everything a job said is kept in JOBS/ID.
 #
 # At most MAX_JOBS turns run Claude at once, and a turn starts only with
-# MIN_FREE MiB of memory to spare; the rest wait in line (queued), pipeline
-# jobs' ahead, then --first ones, then oldest first, and a turn that has
-# waited MAX_WAIT seconds counts as --first itself, so a stream of them can't
-# starve it. PIPELINE_SLOTS of the slots are for pipeline jobs in the
+# MIN_FREE MiB of memory to spare; the rest wait in line (queued), lead
+# jobs' first, then the other pipeline jobs', then --first ones, then oldest
+# first, and a turn that has waited MAX_WAIT seconds counts as --first itself,
+# so a stream of them can't starve it. PIPELINE_SLOTS of the slots are for pipeline jobs in the
 # pipeline's own repos alone, and no project's other jobs hold more than
 # PER_PROJECT at once (pick.sh). A waiting turn is just this shell. Every turn
 # runs in SLICE, which the machine caps, so jobs can't take memory from
@@ -56,6 +57,11 @@
 # stuck one sooner: a turn at work says something at least each time Claude's
 # Bash tool stops a command (ten minutes at most), so one whose stream has
 # been quiet longer than that is stuck, however long the work itself may take.
+# Waiting its turn isn't being stuck: a command that waits in line inside a
+# turn for something shared (a machine-wide lock) says so in the turn's
+# PROJ_WAIT_DIR (waiting, in waits.sh, has how), and the turn's timeout
+# stands still meanwhile, the stall watchdog holding that wait to
+# STALL_QUEUED instead.
 #
 # A turn ends at its answer. Claude -p stays up after it while anything it
 # left in the background runs (a CI watch, say), holding a slot to do
@@ -202,6 +208,56 @@ reap() {
   return 1
 }
 
+# A run's watcher (pid $1, under timeout(1)), once a second until it's gone,
+# sooner when its turn's deadline is closer: it stops the run (through that
+# timeout(1)) once the deadline in $n.deadline has passed ($n.late), or once
+# its stream has said nothing for the job's --idle ($n.quiet), and keeps the
+# turn's wait in line ($n.wait, from waiting) for rewatch, telling the stall
+# watchdog as one starts or ends. While one of its commands waits in line,
+# the deadline moves on with the clock: waiting its turn for something
+# shared isn't being stuck, and the watchdog holds a wait to STALL_QUEUED.
+# Telling the watchdog goes on in the background, never waited for: its
+# lock or a slow kick holds up neither the clock nor the end of the run.
+watch_run() {
+  local pid=$1 quiet=0 now last w was='' dl nap
+  [ ! -s "$dir/idle" ] || quiet=$((($(nanos "$(cat "$dir/idle")") + 999999999) / 1000000000))
+  last=$(date +%s%N)
+  while kill -0 "$pid" 2>/dev/null; do
+    now=$(date +%s%N)
+    w=$(waiting "$waitdir")
+    dl=$(cat "$dir/$n.deadline" 2>/dev/null || true)
+    if [ -n "$w" ] && [ -n "$dl" ]; then
+      dl=$((dl + now - last))
+      echo "$dl" >"$dir/$n.deadline.new" && mv -f "$dir/$n.deadline.new" "$dir/$n.deadline"
+    fi
+    last=$now
+    if [ "$w" != "$was" ]; then
+      if [ -n "$w" ]; then printf '%s\n' "$w" >"$dir/$n.wait"; else rm -f "$dir/$n.wait"; fi
+      was=$w
+      rewatch "$id" &
+    fi
+    if [ -n "$dl" ] && [ "$now" -ge "$dl" ]; then
+      : >"$dir/$n.late"
+      kill "$pid" 2>/dev/null || true
+      break
+    fi
+    if [ "$quiet" -gt 0 ] && [ $((now / 1000000000 - $(stat -c %Y "$dir/$n.jsonl"))) -ge "$quiet" ]; then
+      : >"$dir/$n.quiet"
+      kill "$pid" 2>/dev/null || true
+      break
+    fi
+    nap=1
+    if [ -n "$dl" ] && [ -z "$w" ] && [ $((dl - now)) -lt 1000000000 ]; then
+      nap=0.$(printf %09d $((dl - now)))
+    fi
+    sleep "$nap"
+  done
+  if [ -n "$was" ]; then
+    rm -f "$dir/$n.wait"
+    rewatch "$id" &
+  fi
+}
+
 # Known not to be running: not "can't say".
 gone() { case $(systemctl --user show -P ActiveState "$1" 2>/dev/null) in inactive | failed) return 0 ;; esac; return 1; }
 
@@ -220,10 +276,12 @@ facts() {
   # could, when it last said anything.
   t=$(stat -c %Y "$d/$n.outcome" "$d/$n.jsonl" "$d/prompt.$n" 2>/dev/null | head -n 1 || true)
   printf 'ended\t%s\n' "${t:-0}"
-  # Its timeout to the second, rounded up; 0 for none, or one that isn't a
-  # duration (its turn fails at once).
-  t=$(nanos "$(cat "$d/timeout" 2>/dev/null || echo "$TIMEOUT")") || t=0
-  printf 'limit\t%s\n' "$(((t + 999999999) / 1000000000))"
+  # Its deadline as it stands, to the second (none without a timeout): when
+  # it took its slot and its timeout, moved on by any time it waited in
+  # line. And what it waits in line for now, if anything (watch_run).
+  t=$(cat "$d/$n.deadline" 2>/dev/null || true)
+  [[ ! $t =~ ^[0-9]+$ ]] || printf 'deadline\t%s\n' "$((t / 1000000000))"
+  [ ! -s "$d/$n.wait" ] || printf 'wait\t%s\n' "$(head -n 1 "$d/$n.wait")"
   [ ! -s "$d/await" ] || awk -F '\t' '{ print "await\t" $1 "\t" $2 }' "$d/await"
 }
 
@@ -535,10 +593,12 @@ case "${1:-status}" in
     mkdir -p "$jobs"
     find "$jobs" -mindepth 1 -maxdepth 1 -type d -not -name '.*' -printf '%T@ %f\n' | sort -rn | head -n "${2:-15}" |
       while read -r _ id; do
-        printf '%-40s %-8s %s%s%s%s%s%s\n' "$id" "$(state "$id")" \
+        st=$(state "$id")
+        printf '%-40s %-8s %s%s%s%s%s%s%s\n' "$id" "$st" \
           "$(sed 's/.*/[vm &] /' "$jobs/$id/agent" 2>/dev/null)" \
           "$(sed 's/.*/[as &] /' "$jobs/$id/app" 2>/dev/null)" \
           "$(demoted "$jobs/$id" | sed 's/.\+/[&] /')" \
+          "$([ "$st" != running ] || cut -f2 "$jobs/$id/$(cat "$jobs/$id/turns" 2>/dev/null).wait" 2>/dev/null | sed 's/.\+/[waiting in line: &] /')" \
           "$(cut -f1 "$jobs/$id/await" 2>/dev/null | paste -sd' ' | sed 's/.\+/[awaits &] /')" \
           "$(sed 's/^ask$/[asks] /; s/^undeclared$/[no next step] /; /^\[/!d' "$jobs/$id/$(cat "$jobs/$id/turns" 2>/dev/null).end" 2>/dev/null)" \
           "$(head -c 100 "$jobs/$id/$(cat "$jobs/$id/turns" 2>/dev/null).result" 2>/dev/null | tr '\n' ' ')"
@@ -773,21 +833,30 @@ Carry on from there. Anything you left in the background last turn was stopped w
     why=$(demoted "$dir")
     [ -z "$why" ] || echo "proj: $why" >&2
     take_slot "$id" "$n" "$3"
-    rewatch "$id"
-    # Whether its turns must say what comes next: an --owned job's starter
-    # acts on each end itself, and a sandbox's Claude can't run proj.
-    must=1
-    [ ! -e "$dir/owned" ] && [ ! -s "$dir/agent" ] || must=''
     limit=$(cat "$dir/timeout" 2>/dev/null || echo "$TIMEOUT")
-    # One budget for the whole turn, however many runs it takes and the
-    # clearing up between them, to the nanosecond; 0 is none.
+    # One budget for the whole turn from the moment it took its slot,
+    # however many runs it takes and the clearing up between them, to the
+    # nanosecond; 0 is none. Its deadline is kept in $n.deadline, which the
+    # time it waits in line moves on (watch_run).
     if ! total=$(nanos "$limit"); then
       echo "proj: the timeout $limit isn't a duration" >&2
       echo failed >"$dir/$n.outcome"
       exit 2
     fi
-    deadline=''
-    [ "$total" -eq 0 ] || deadline=$(($(date +%s%N) + total))
+    rm -f "$dir/$n.deadline" "$dir/$n.wait" "$dir/$n.late"
+    if [ "$total" -gt 0 ]; then
+      taken=$(stat -c %.9Y "$dir/$n.slot")
+      echo $((10#${taken/./} + total)) >"$dir/$n.deadline"
+    fi
+    # Where its commands say they're waiting in line (waiting, waits.sh).
+    waitdir=$dir/$n.waits
+    rm -rf "$waitdir"
+    mkdir "$waitdir"
+    rewatch "$id"
+    # Whether its turns must say what comes next: an --owned job's starter
+    # acts on each end itself, and a sandbox's Claude can't run proj.
+    must=1
+    [ ! -e "$dir/owned" ] && [ ! -s "$dir/agent" ] || must=''
     : >"$dir/$n.jsonl"
     prompt=$dir/prompt.$n
     while :; do
@@ -795,16 +864,18 @@ Carry on from there. Anything you left in the background last turn was stopped w
       if [ -s "$dir/session" ]; then args+=(--resume "$(cat "$dir/session")"); fi
       # Where this run's stream starts: an earlier run's answer isn't its.
       from=$(($(wc -l <"$dir/$n.jsonl") + 1))
-      # What's left of it, looked at last thing before the run starts: none
-      # left, and no run starts, so the turn has timed out.
-      left=0
-      if [ -n "$deadline" ]; then
-        left=$((deadline - $(date +%s%N)))
-        if [ "$left" -le 0 ]; then last='' rc=124; break; fi
-        left=$((left / 1000000000)).$(printf %09d $((left % 1000000000)))
+      # Its deadline, looked at last thing before the run starts: past, and
+      # no run starts, so the turn has timed out.
+      if [ -s "$dir/$n.deadline" ] && [ "$(cat "$dir/$n.deadline")" -le "$(date +%s%N)" ]; then
+        : >"$dir/$n.late"
+        last='' rc=124
+        break
       fi
+      # Each run goes under timeout(1) with no limit of its own: watch_run
+      # stops it through that, which stops all of it (TERM, then KILL a
+      # minute on), as timeout(1) does at a limit.
       if [ -s "$dir/agent" ]; then
-        timeout -k 1m "$left" agent sh "$(cat "$dir/agent")" claude "${args[@]}" <"$prompt" >>"$dir/$n.jsonl" &
+        timeout -k 1m 0 agent sh "$(cat "$dir/agent")" claude "${args[@]}" <"$prompt" >>"$dir/$n.jsonl" &
       else
         if [ -n "$must" ]; then
           args+=(--append-system-prompt "This is proj job $id, running headless. Your turn ends with your answer, and anything you left running in the background is stopped then, so don't wait on anything in the background or with sleep. Before you answer, say what comes next, since nothing else ever resumes this job: run $NEXT. Waiting on anything else (a background run, a notification) is waiting in this turn, in the foreground. $LONG")
@@ -815,24 +886,11 @@ Carry on from there. Anything you left in the background last turn was stopped w
         # and then its App's env, which nothing the login sets can undo; Claude
         # starts only once that has.
         # shellcheck disable=SC2016 # expanded by that shell
-        PROJ_JOB=$id PROJ_APP_ENV=$appenv timeout -k 1m "$left" bash -lc 'eval "$PROJ_APP_ENV" && unset PROJ_APP_ENV && exec claude "$@" <"$0"' "$prompt" "${args[@]}" >>"$dir/$n.jsonl" &
+        PROJ_JOB=$id PROJ_WAIT_DIR=$waitdir PROJ_APP_ENV=$appenv timeout -k 1m 0 bash -lc 'eval "$PROJ_APP_ENV" && unset PROJ_APP_ENV && exec claude "$@" <"$0"' "$prompt" "${args[@]}" >>"$dir/$n.jsonl" &
       fi
       pid=$!
-      # Quiet for the job's --idle: stuck, and stopped as one past its timeout
-      # is (its stream is written as it goes, so its age is the quiet).
-      dog=''
-      if [ -s "$dir/idle" ]; then
-        idle=$(cat "$dir/idle")
-        quiet=$((($(nanos "$idle") + 999999999) / 1000000000))
-        ( while sleep 1 && kill -0 "$pid" 2>/dev/null; do
-            if [ $(( $(date +%s) - $(stat -c %Y "$dir/$n.jsonl") )) -ge "$quiet" ]; then
-              : >"$dir/$n.quiet"
-              kill "$pid"
-              break
-            fi
-          done ) &
-        dog=$!
-      fi
+      watch_run "$pid" &
+      dog=$!
       # The answer ends the turn: a few seconds to exit by itself, then Claude
       # and whatever it left in the background are stopped (the unit takes the
       # rest when this shell ends), and the slot goes with them.
@@ -843,7 +901,8 @@ Carry on from there. Anything you left in the background last turn was stopped w
       fi
       rc=0
       wait "$pid" || rc=$?
-      [ -z "$dog" ] || kill "$dog" 2>/dev/null || true
+      # Its watcher sees the run gone within a second, and clears up after it.
+      wait "$dog" || true
       last=$(tail -n +"$from" "$dir/$n.jsonl" | grep '"type":"result"' | tail -n 1 || true)
       [ -z "$last" ] || jq -r '.session_id' <<<"$last" >"$dir/session"
       # Still up after its answer, it was waiting on something it left in the
@@ -869,6 +928,10 @@ Carry on from there. Anything you left in the background last turn was stopped w
         # The next run's quiet counts from its start, and is its own.
         rm -f "$dir/$n.quiet"
         touch "$dir/$n.jsonl"
+        # The last run's watcher telling the watchdog its wait was over
+        # (still going, in the background) may have gone with the rest of
+        # it: told again.
+        rewatch "$id" &
         continue
       fi
       break
@@ -892,9 +955,10 @@ Carry on from there. Anything you left in the background last turn was stopped w
       fi
       rm -f "$dir/await.next" "$dir/end.next"
     elif [ -e "$dir/$n.quiet" ]; then
-      echo "went quiet for $idle" >"$dir/$n.outcome"
-    elif [ "$rc" -eq 124 ]; then
+      echo "went quiet for $(cat "$dir/idle")" >"$dir/$n.outcome"
+    elif [ -e "$dir/$n.late" ]; then
       echo "timed out after $limit" >"$dir/$n.outcome"
+      rc=124
     else
       echo failed >"$dir/$n.outcome"
     fi
