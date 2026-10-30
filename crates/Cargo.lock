@@ -29,6 +29,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "burrow-usage-reset"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "cfg-if"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"

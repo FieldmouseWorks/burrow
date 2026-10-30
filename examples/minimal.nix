@@ -59,6 +59,7 @@
       machinery = "workers";
     };
     watchdog.enable = true;
+    usageReset.enable = true;
     backup = {
       enable = true;
       repository = "rclone:offsite:backups/burrow";
