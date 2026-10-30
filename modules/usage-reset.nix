@@ -65,12 +65,18 @@ in
       # date, for the notices' times.
       path = [ pkgs.coreutils ];
       environment.USAGE_RESET_CONFIG = "${configFile}";
+      # A switch leaves a running pass to finish, its yes perhaps pressed;
+      # the next pass is the new one.
+      restartIfChanged = false;
       serviceConfig = {
         Type = "oneshot";
         # Claude Code's login, and its config, are the user's.
         User = user;
         ExecStart = "${package}/bin/${name}";
-        TimeoutStartSec = "5min";
+        # Past the longest pass its own waits allow (a minute for each of
+        # Claude Code's screens): one cut off after its yes is settled by the
+        # next, never pressed again.
+        TimeoutStartSec = "15min";
         # A Claude Code at a time, and a short one: the meter alone, or the
         # meter and one /limit-reset.
         MemoryMax = "2G";

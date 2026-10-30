@@ -4,7 +4,8 @@
 //! way the owner would at a terminal. It keys nothing but that command, the
 //! folder-trust answer for its own folder and the confirmation of the reset,
 //! each only once the screen shows what it answers; anything else ends the
-//! session, and ending Claude Code never uses a reset.
+//! session, and ending Claude Code never uses a reset. Once its yes is
+//! pressed, the session lives until Claude Code has its last word on it.
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
@@ -21,6 +22,13 @@ use crate::pass::{Account, Reading, Reset};
 const TIMEOUT: Duration = Duration::from_secs(60);
 /// How often the screen is looked at while waiting on it.
 const POLL: Duration = Duration::from_millis(500);
+/// How long the reset's dialog is left up before its yes is pressed: it
+/// refuses keys that come too soon after it opens.
+const PAUSE: Duration = Duration::from_secs(1);
+/// A press its dialog shows no sign of after this was refused.
+const REFUSED: Duration = Duration::from_secs(3);
+/// Presses of its yes before the dialog is given up on.
+const PRESSES: usize = 3;
 
 pub struct ClaudeCode {
     /// The `claude` to run.
@@ -36,11 +44,11 @@ impl Account for ClaudeCode {
         usage(&self.ask_usage()?)
     }
 
-    fn reset(&mut self) -> Reset {
+    fn reset(&mut self, keep: &mut dyn FnMut() -> Result<(), String>) -> Reset {
         let tmux = Tmux {
             bin: self.tmux.clone(),
         };
-        let outcome = self.drive(&tmux);
+        let outcome = self.drive(&tmux, keep);
         tmux.kill();
         outcome
     }
@@ -103,7 +111,7 @@ impl ClaudeCode {
         Ok(answer["response"].clone())
     }
 
-    fn drive(&self, tmux: &Tmux) -> Reset {
+    fn drive(&self, tmux: &Tmux, keep: &mut dyn FnMut() -> Result<(), String>) -> Reset {
         if let Err(e) = tmux.start(&self.dir, &self.claude) {
             return Reset::NotPressed(e);
         }
@@ -133,9 +141,10 @@ impl ClaudeCode {
         if let Err(e) = tmux.literal(COMMAND).and_then(|()| tmux.keys(&["Enter"])) {
             return Reset::NotPressed(e);
         }
-        // Its answer: a confirmation to give, or a line saying why there's
-        // nothing to confirm.
-        for _ in 0..4 {
+        // Its answer: a confirmation, its cursor brought to its yes, or a
+        // line saying why there's nothing to confirm.
+        let mut moves = 0;
+        loop {
             let seen = tmux.wait(|screen| match read_reset(screen) {
                 Screen::Busy => None,
                 other => Some(other),
@@ -144,13 +153,9 @@ impl ClaudeCode {
                 Err(e) => return Reset::NotPressed(format!("no answer to {COMMAND}: {e}")),
                 Ok(Screen::Busy) => unreachable!(),
                 Ok(Screen::Said(r)) => return r,
-                Ok(Screen::Confirm(Cursor::OnYes)) => {
-                    if let Err(e) = tmux.keys(&["Enter"]) {
-                        return Reset::NotPressed(e);
-                    }
-                    return self.after(tmux);
-                }
-                Ok(Screen::Confirm(cursor)) => {
+                Ok(Screen::Confirm(Cursor::OnYes)) => break,
+                Ok(Screen::Confirm(cursor)) if moves < 3 => {
+                    moves += 1;
                     let key = if cursor == Cursor::Below {
                         "Up"
                     } else {
@@ -161,18 +166,55 @@ impl ClaudeCode {
                     }
                     thread::sleep(POLL);
                 }
+                Ok(Screen::Confirm(_)) => {
+                    return Reset::NotPressed(
+                        "couldn't put the cursor on the reset's yes".to_owned(),
+                    );
+                }
             }
         }
-        Reset::NotPressed("couldn't put the cursor on the reset's yes".to_owned())
+        if let Err(e) = keep() {
+            return Reset::NotPressed(format!(
+                "couldn't keep that this week's reset is being used, so it wasn't: {e}"
+            ));
+        }
+        self.confirm(tmux)
     }
 
-    /// After the confirmation: what Claude Code said it did.
-    fn after(&self, tmux: &Tmux) -> Reset {
-        let said = tmux.wait(|screen| {
-            let said = said(screen);
-            (!said.is_empty() && !matches!(read_reset(screen), Screen::Confirm(_))).then_some(said)
-        });
-        Reset::Pressed(said.unwrap_or_else(|e| format!("it showed nothing after: {e}")))
+    /// Its yes, pressed until its dialog takes it, then Claude Code's last
+    /// word on it. Everything from the first press on may have used the
+    /// reset, so it's Pressed whatever it comes to, even a dialog that
+    /// looks to have taken none: the meter says.
+    fn confirm(&self, tmux: &Tmux) -> Reset {
+        for _ in 0..PRESSES {
+            thread::sleep(PAUSE);
+            if let Err(e) = tmux.keys(&["Enter"]) {
+                return Reset::Pressed(format!("pressing its yes failed: {e}"));
+            }
+            let pressed = Instant::now();
+            let mut last: Option<String> = None;
+            let seen = tmux.wait(|screen| {
+                if still_asking(screen) && pressed.elapsed() >= REFUSED {
+                    return Some(None);
+                }
+                // Its last word, the same on two looks in a row: a frame
+                // half drawn is no answer.
+                let word = finished(screen);
+                if word.is_some() && word == last {
+                    return Some(word);
+                }
+                last = word;
+                None
+            });
+            match seen {
+                Ok(Some(said)) => return Reset::Pressed(said),
+                Ok(None) => continue,
+                Err(e) => return Reset::Pressed(format!("no last word on it: {e}")),
+            }
+        }
+        Reset::Pressed(format!(
+            "its dialog showed none of {PRESSES} presses of its yes taken"
+        ))
     }
 }
 
@@ -204,6 +246,9 @@ const COMMAND: &str = "/limit-reset weekly";
 /// The confirmation's yes, as Claude Code words it unless its server says
 /// otherwise: "Yes, use my weekly reset".
 const YES: &str = "Yes, use my";
+/// What its dialog shows once its yes is taken, while the reset goes
+/// through.
+const WORKING: &str = "Resetting your limits";
 
 /// What the screen shows after COMMAND.
 #[derive(Debug, PartialEq)]
@@ -225,11 +270,16 @@ enum Cursor {
 }
 
 fn read_reset(screen: &str) -> Screen {
-    let lines = answer(screen);
+    // Only its confirmation has its yes, so it counts wherever it's drawn.
+    let lines: Vec<&str> = screen.lines().collect();
     if let Some(yes) = lines.iter().position(|l| l.contains(YES)) {
-        // The choices' cursor, not the input box's (a `❯` under a rule).
-        let cursor = (0..lines.len())
-            .find(|&i| lines[i].trim_start().starts_with('❯') && !(i > 0 && is_rule(lines[i - 1])));
+        // The choices' cursor, not the input box's (a `❯` under a rule) nor
+        // COMMAND's echo.
+        let cursor = (0..lines.len()).find(|&i| {
+            lines[i].trim_start().starts_with('❯')
+                && !(i > 0 && is_rule(lines[i - 1]))
+                && !lines[i].trim_end().ends_with(COMMAND)
+        });
         return Screen::Confirm(match cursor {
             Some(c) if c == yes => Cursor::OnYes,
             Some(c) if c > yes => Cursor::Below,
@@ -238,6 +288,9 @@ fn read_reset(screen: &str) -> Screen {
             _ => Cursor::Above,
         });
     }
+    let Some(lines) = answer(screen) else {
+        return Screen::Busy;
+    };
     let text = lines.join("\n");
     let has = |s: &str| text.contains(s);
     let said = said(screen);
@@ -246,44 +299,71 @@ fn read_reset(screen: &str) -> Screen {
     if has("only works at a usage limit")
         || has("saved for when you reach a usage limit")
         || has("at a limit to use it")
+        || has("once you reach a limit")
+        || has("not at a usage limit")
     {
         Screen::Said(Reset::AtLimitOnly(said))
-    } else if has("No reset to use")
-        || has("No weekly reset to use")
+    } else if has("No reset to use") || has("No weekly reset to use") {
+        Screen::Said(Reset::NoneBanked(said))
+    } else if has("nothing was used")
+        || has("can't be used")
+        || has("Couldn't")
+        || has(" kept")
+        || has("None of your resets refill")
+        // A Claude Code without the command: the owner hears, after its
+        // tries, rather than it passing for an empty bank.
         || has("Unknown command")
         || has("Unknown slash command")
     {
-        Screen::Said(Reset::NoneBanked(said))
-    } else if has("nothing was used") || has("can't be used") || has("Couldn't") || has(" kept") {
         Screen::Said(Reset::NotPressed(said))
     } else {
         Screen::Busy
     }
 }
 
-/// The lines under COMMAND's echo: what Claude Code answered it with, and
-/// none of the notices it started with. The whole screen until it echoes.
-fn answer(screen: &str) -> Vec<&str> {
+/// What Claude Code answered COMMAND with: the lines under its echo in the
+/// transcript, down to its input box. None until it has echoed it: before
+/// then the screen is the notices it started with, the command still in its
+/// box, or a frame drawn before the answer.
+fn answer(screen: &str) -> Option<Vec<&str>> {
     let lines: Vec<&str> = screen.lines().collect();
-    match lines.iter().rposition(|l| l.trim_end().ends_with(COMMAND)) {
-        Some(i) => lines[i + 1..].to_vec(),
-        None => lines,
-    }
+    let echo = (0..lines.len())
+        .rev()
+        .find(|&i| lines[i].trim_end().ends_with(COMMAND) && !(i > 0 && is_rule(lines[i - 1])))?;
+    let end = (echo + 1..lines.len())
+        .find(|&i| {
+            is_rule(lines[i])
+                && lines
+                    .get(i + 1)
+                    .is_some_and(|l| l.trim_start().starts_with('❯'))
+        })
+        .unwrap_or(lines.len());
+    Some(lines[echo + 1..end].to_vec())
 }
 
 /// Its answer's words, as one line for a notice.
 fn said(screen: &str) -> String {
     let words: Vec<&str> = answer(screen)
+        .unwrap_or_default()
         .into_iter()
         .map(|l| l.trim().trim_start_matches(['⎿', '❯', '●', ' ']))
-        .filter(|l| {
-            !l.is_empty()
-                && !l.chars().all(|c| "─▔━".contains(c))
-                && !l.contains("for shortcuts")
-                && !l.contains("bypass permissions")
-        })
+        .filter(|l| !l.is_empty() && !l.chars().all(|c| "─▔━".contains(c)))
         .collect();
     words.join(" / ").chars().take(300).collect()
+}
+
+/// Its dialog is up and still asking, its yes not taken.
+fn still_asking(screen: &str) -> bool {
+    screen.contains(YES) && !screen.contains(WORKING) && !prompt_ready(screen)
+}
+
+/// After its yes: what it answered, once its dialog is gone and it's back at
+/// its input box.
+fn finished(screen: &str) -> Option<String> {
+    if screen.contains(YES) || screen.contains(WORKING) || !prompt_ready(screen) {
+        return None;
+    }
+    Some(said(screen)).filter(|s| !s.is_empty())
 }
 
 /// Its input box is up: a `❯` line right under a rule.
@@ -448,7 +528,15 @@ mod tests {
 
     #[test]
     fn only_its_answer_counts() {
-        // The notices before COMMAND (a kept line among them) settle nothing.
+        // The notices it started with (one says "at a limit to use it")
+        // settle nothing: not before COMMAND is typed, nor with it still in
+        // the box, nor in a frame drawn after Enter and before the echo.
+        assert_eq!(read_reset(UP), Screen::Busy);
+        let typed = UP.replace(
+            "❯ Try \"create a util logging.py that...\"",
+            "❯ /limit-reset weekly",
+        );
+        assert_eq!(read_reset(&typed), Screen::Busy);
         assert_eq!(
             read_reset(&format!("{UP}❯ /limit-reset weekly\n")),
             Screen::Busy
@@ -477,6 +565,11 @@ mod tests {
         assert_eq!(
             read_reset(&dialog("  ", "  ")),
             Screen::Confirm(Cursor::Above)
+        );
+        // Drawn over the transcript, its echo gone.
+        assert_eq!(
+            read_reset(" Use a weekly reset?\n\n ❯ Yes, use my weekly reset\n   No, keep it\n"),
+            Screen::Confirm(Cursor::OnYes)
         );
     }
 
@@ -508,21 +601,56 @@ mod tests {
             Screen::Said(Reset::NotPressed(_))
         ));
         assert!(matches!(
+            said(
+                "Your weekly reset can't be used right now · usable once you reach a limit it refills · you can use nothing here"
+            ),
+            Screen::Said(Reset::AtLimitOnly(_))
+        ));
+        assert!(matches!(
+            said("None of your resets refill your weekly limit"),
+            Screen::Said(Reset::NotPressed(_))
+        ));
+        // A Claude Code without it isn't an empty bank.
+        assert!(matches!(
             said("Unknown command: /limit-reset"),
-            Screen::Said(Reset::NoneBanked(_))
+            Screen::Said(Reset::NotPressed(_))
+        ));
+        assert!(matches!(
+            said("Unknown slash command: limit-reset"),
+            Screen::Said(Reset::NotPressed(_))
         ));
     }
 
     #[test]
-    fn what_it_said_after() {
+    fn its_last_word_after_the_yes() {
+        let dialog = " Use a weekly reset?\n Refills your weekly limit now\n\n ❯ Yes, use my weekly reset\n   No, keep it\n";
+        let top = UP.split("────").next().unwrap();
+        let up = format!("{top}❯ /limit-reset weekly\n{dialog}");
+        // Still asking: the press wasn't taken.
+        assert!(still_asking(&up) && finished(&up).is_none());
+        // Taken, and going through.
+        let working = format!(
+            "{top}❯ /limit-reset weekly\n Use a weekly reset?\n Resetting your limits… this usually takes a few seconds\n"
+        );
+        assert!(!still_asking(&working) && finished(&working).is_none());
+        // The same with its input box drawn under it.
+        let boxed = format!("{working}────────\n❯ \n────────\n");
+        assert!(finished(&boxed).is_none());
+        // Back at its input box, with nothing under the echo yet.
+        assert!(finished(&answered("")).is_none());
         let done = answered(
-            "  ⎿  Weekly reset used · your weekly reset day stays Wednesday · 0 weekly resets left",
+            "  ⎿  Weekly limit refilled · your weekly reset day stays Wednesday · 0 weekly resets left",
         );
-        assert!(!matches!(read_reset(&done), Screen::Confirm(_)));
+        assert!(!still_asking(&done));
         assert_eq!(
-            said(&done),
-            "Weekly reset used · your weekly reset day stays Wednesday · 0 weekly resets left"
+            finished(&done).as_deref(),
+            Some(
+                "Weekly limit refilled · your weekly reset day stays Wednesday · 0 weekly resets left"
+            )
         );
+        let unsure =
+            answered("  ⎿  Couldn't confirm the reset went through · check /usage in a moment");
+        assert!(finished(&unsure).is_some());
     }
 
     #[test]
