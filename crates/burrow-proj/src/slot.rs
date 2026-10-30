@@ -5,7 +5,7 @@
 //! waiting process's pid. A slot is a lock on jobs/.slots/N, and N.who says
 //! whose (class and project), so a turn that's killed frees its slot by
 //! itself; its place in line is cleared by the next look at the line, which
-//! finds its pid no longer that turn's. [`pick`] says who goes next. The turn
+//! finds its pid no longer that turn's. [`pick`] says who has a slot. The turn
 //! is first or normal, as it was started; its job's class ([`place`]) is
 //! asked again every pass, and its place in line, its admission and its
 //! slot's N.who all go by that one answer.
@@ -114,8 +114,7 @@ pub fn take(cfg: &Config, id: &str, n: &str, given: Class) -> io::Result<File> {
         }
         // Short of memory matters only while another job runs: with nothing
         // running, waiting frees nothing.
-        if let Some((i, n_slot)) = pick(cfg, &seen, &line)
-            && line[i].name == me
+        if let Some(&(_, n_slot)) = pick(cfg, &seen, &line).iter().find(|&&(i, _)| line[i].name == me)
             && (!busy || spare() >= cfg.min_free_memory)
         {
             let slot = File::create(slots.join(n_slot.to_string()))?;

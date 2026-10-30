@@ -1,4 +1,4 @@
-//! Which waiting turn takes a slot now, and which slot ([`pick`]); and what
+//! Which waiting turns take a slot now, and which slots ([`pick`]); and what
 //! class each job's turns go as ([`class`]), which that turns on.
 //!
 //! The last pipelineSlots of the maxJobs slots are for pipeline turns only
@@ -75,14 +75,20 @@ pub struct Waiter {
     pub project: String,
 }
 
-/// The first turn in line that may start, by its index in `line`, and the
-/// slot it takes (numbered from 1); None when none may.
-pub fn pick(cfg: &Config, slots: &[Slot], line: &[Waiter]) -> Option<(usize, usize)> {
+/// Every turn in line that may start now, by its index in `line`, with the
+/// slot it takes (numbered from 1), in the order they're chosen. It hands out
+/// every free slot it can in one look: a turn that finds itself here starts,
+/// so free slots never wait on one named waiter's look. A pipeline turn
+/// takes the lowest free slot unless a turn chosen after it needs that one
+/// and only the pipeline's are left for it.
+pub fn pick(cfg: &Config, slots: &[Slot], line: &[Waiter]) -> Vec<(usize, usize)> {
+    let general = cfg.max_jobs.saturating_sub(cfg.pipeline_slots);
     let mut held: HashMap<&str, usize> = HashMap::new();
-    let mut free = Vec::new();
+    let (mut theirs, mut ours) = (Vec::new(), Vec::new());
     for (i, slot) in slots.iter().enumerate() {
         match slot {
-            Slot::Free => free.push(i + 1),
+            Slot::Free if i < general => theirs.push(i + 1),
+            Slot::Free => ours.push(i + 1),
             Slot::Held { class, project } => {
                 if !class.is_some_and(Class::pipeline) {
                     *held.entry(project).or_default() += 1;
@@ -90,30 +96,65 @@ pub fn pick(cfg: &Config, slots: &[Slot], line: &[Waiter]) -> Option<(usize, usi
             }
         }
     }
-    let general = cfg.max_jobs.saturating_sub(cfg.pipeline_slots);
-    let others = line.iter().any(|w| w.class == Class::Pipeline);
-    let lead = line
+    // Who goes: each in turn, while the slots still go round. lead counts the
+    // lead turns chosen and others the rest held to the slots anyone may
+    // take; open is how many of the pipeline's own slots the other pipeline
+    // turns in line leave lead ones, and need how many of the slots anyone may
+    // take lead ones must have.
+    let pipeline = line.iter().filter(|w| w.class == Class::Pipeline).count();
+    let open = ours.len().saturating_sub(pipeline);
+    let (mut lead, mut others) = (0, 0);
+    let mut went = Vec::new();
+    let order = line
         .iter()
         .enumerate()
-        .filter(|(_, w)| w.class == Class::Lead);
-    let rest = line
-        .iter()
-        .enumerate()
-        .filter(|(_, w)| w.class != Class::Lead);
-    for (i, w) in lead.chain(rest) {
-        if !w.class.pipeline()
-            && held.get(w.project.as_str()).copied().unwrap_or(0) >= cfg.max_jobs_per_project
-        {
-            continue;
+        .filter(|(_, w)| w.class == Class::Lead)
+        .chain(
+            line.iter()
+                .enumerate()
+                .filter(|(_, w)| w.class != Class::Lead),
+        );
+    for (i, w) in order {
+        if went.len() >= theirs.len() + ours.len() {
+            break;
         }
-        if let Some(&n) = free.iter().find(|&&n| {
-            (w.class != Class::Lead || !others || n <= general)
-                && (w.class.pipeline() || n <= general)
-        }) {
-            return Some((i, n));
+        match w.class {
+            Class::Lead => {
+                if lead >= theirs.len() + open {
+                    continue;
+                }
+                lead += 1;
+            }
+            Class::Pipeline => {}
+            Class::First | Class::Normal => {
+                let need = lead.saturating_sub(open);
+                let h = held.entry(w.project.as_str()).or_default();
+                if *h >= cfg.max_jobs_per_project || others + need >= theirs.len() {
+                    continue;
+                }
+                *h += 1;
+                others += 1;
+            }
         }
+        went.push(i);
     }
-    None
+    // Which slot each takes, lowest first: pipeline turns may have only what
+    // the others chosen leave them of the slots anyone may take.
+    let mut loose = theirs.len() - others;
+    let (mut theirs, mut ours) = (theirs.into_iter(), ours.into_iter());
+    went.into_iter()
+        .map(|i| {
+            let n = if line[i].class.pipeline() && loose == 0 {
+                ours.next()
+            } else {
+                if line[i].class.pipeline() {
+                    loose -= 1;
+                }
+                theirs.next()
+            };
+            (i, n.expect("every turn chosen has a slot left"))
+        })
+        .collect()
 }
 
 /// A clone's origin URL, or nothing (no clone, no origin, or no path at all:
