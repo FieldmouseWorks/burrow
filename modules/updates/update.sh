@@ -432,22 +432,22 @@ $fixes
 It built and stayed healthy live."
 fi
 echo "$new" >"$state/deployed"
+# What went live, in words: pushing can rebase it onto what hasn't.
+went=${changed:+$(describe)}${changed:-main $(git_ rev-parse --short HEAD)}
 if [ -n "$TRAIN" ]; then
   # Riding, or nothing new on main: nothing to put up.
   [ -n "$riding" ] || [ -z "$changed" ] || url=$(propose "$(git_ log -1 --format=%s)" "$(pr_body)") ||
     echo "its PR didn't open; the next run opens it"
   [ -n "$changed" ] || git_ rev-parse HEAD >"$state/deployed-main"
-elif git_ push -q origin HEAD:main; then
-  git_ rev-parse HEAD >"$state/deployed-main"
 else
-  echo "push to main was rejected (main moved); the next run rebases"
+  push_main || true
 fi
 if [ "$(as_user git -C "$operator" branch --show-current 2>/dev/null)" = main ] &&
   as_user git -C "$operator" diff --quiet HEAD 2>/dev/null; then
   as_user git -C "$operator" pull -q --ff-only origin main || true
 fi
 
-note ok "${live:+already }live and confirmed: ${changed:+$(describe)}${changed:-main $(git_ rev-parse --short HEAD)}${riding:+ (riding #$riding)}${url:+ (up as $url)}${failed[*]:+ (held back: ${failed[*]})}"
+note ok "${live:+already }live and confirmed: $went${riding:+ (riding #$riding)}${url:+ (up as $url)}${failed[*]:+ (held back: ${failed[*]})}"
 [ -z "$BOOT" ] || ! "$BOOT" status | grep -q 'trial queued: /' ||
   echo "the new kernel boots once at the next trial window ($BOOT trial)"
 exit 0
