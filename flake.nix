@@ -439,6 +439,14 @@
           bash ${./tests/update-push.sh} ${./modules/updates/push.sh}
           touch $out
         '';
+        # What HOST-update compares to tell what runs already
+        # (modules/updates/running.sh): a system built again from a new commit
+        # of the same tree runs already. Real git, with a stand-in for nix.
+        update-running = pkgs.runCommand "update-running-check" { nativeBuildInputs = [ pkgs.shellcheck pkgs.git ]; } ''
+          shellcheck -s bash ${./modules/updates/running.sh} ${./tests/update-running.sh}
+          bash ${./tests/update-running.sh} ${./modules/updates/running.sh}
+          touch $out
+        '';
         # HOST-update's own PR in a train repo (modules/updates/propose.sh):
         # real git, with a stand-in for gh.
         update-propose = pkgs.runCommand "update-propose-check" { nativeBuildInputs = [ pkgs.shellcheck pkgs.git pkgs.jq ]; } ''

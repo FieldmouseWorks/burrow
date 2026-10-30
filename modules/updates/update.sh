@@ -98,19 +98,6 @@ build() {
     "$work#nixosConfigurations.$CONFIG.config.system.build.toplevel" 2>"$state/logs/build.log" | tail -n1
 }
 
-# Is the tree's system the one running, apart from the commit it's stamped
-# with? (A build from a dirty checkout, then committed, differs only there.)
-same_as_running() {
-  local r=null out
-  [ -z "$rev" ] || r="\"$rev\""
-  out=$(as_user nix build --impure --no-link --print-out-paths --expr "
-    let f = builtins.getFlake \"git+file://$work?rev=$(git_ rev-parse HEAD)\"; in
-    (f.nixosConfigurations.$CONFIG.extendModules {
-      modules = [ ({ lib, ... }: { system.configurationRevision = lib.mkForce $r; }) ];
-    }).config.system.build.toplevel" 2>>"$state/logs/build.log" | tail -n1) || return 1
-  [ "$out" = "$current" ]
-}
-
 # 2. Does the box run main, or something main has since moved past? Then it's ours
 # to update. If it runs changes that aren't on main, someone is mid-work: hold.
 current=$(readlink -f /run/current-system)
@@ -248,13 +235,18 @@ fi
 settled build-main "main builds again."
 
 live=
-if [ "$new" = "$current" ]; then
+if runs_already "$new"; then
   # Running already, and not on main: what a run before put live (its PR
   # didn't open, or closed, or the train took it while that run was testing a
-  # newer one), or a bump that changes only what the checks use. It goes up as
-  # a PR with what any other bump has: the switch and the health check it
-  # passed when it went live, and the VM tests below, on this tree (which isn't
-  # the one that went live once main moved under it or the checks' inputs did).
+  # newer one, or its push to main was refused), or a bump that changes only
+  # what the checks use. It goes up with what any other bump has: the switch
+  # and the health check it passed when it went live, and the VM tests below,
+  # on this tree (which isn't the one that went live once main moved under it
+  # or the checks' inputs did). Riding, it's what its PR put live, with
+  # nothing since that changes the system: nothing to do until the PR lands.
+  # Nothing is switched either way: the box keeps the system it runs, under
+  # an older commit's stamp.
+  new=$current
   case $(already_live "$new") in
     up) live=1 ;;
     hold)
@@ -262,7 +254,7 @@ if [ "$new" = "$current" ]; then
       exit 0
       ;;
     *)
-      note current "nothing new builds; up to date${failed[*]:+ (held back: ${failed[*]})}"
+      note current "nothing new builds; up to date${riding:+ (riding #$riding)}${failed[*]:+ (held back: ${failed[*]})}"
       exit 0
       ;;
   esac

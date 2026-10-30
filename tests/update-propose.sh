@@ -45,7 +45,7 @@ PATH=$tmp/bin:$PATH
 
 # What update.sh gives them.
 # shellcheck disable=SC2034 # propose's
-REPO=sam/homelab BRANCH=burrow-update HOST=box UPDATE=box-update TRAIN=1 riding='' changed=1
+REPO=sam/homelab BRANCH=burrow-update HOST=box UPDATE=box-update
 state=$tmp/state work=$tmp/work
 as_user() { "$@"; }
 git_() { git -C "$work" "$@"; }
@@ -187,23 +187,3 @@ grep -q "doesn't merge onto main" <<<"$why" || fail "ride's word on a conflict: 
 [ "$(git_ rev-parse HEAD)" = "$main" ] || fail "a conflicted ride moved HEAD"
 [ ! -e "$work/.git/MERGE_HEAD" ] && [ -z "$(git_ status --porcelain)" ] || fail "a conflicted ride left a merge behind"
 echo "ride, conflict: ok"
-
-# Already live, a bump of its own: up only once HOST-update put that very
-# system live (the switch and the health check); held when anyone else did;
-# nothing to do outside a train, while riding, or with nothing new.
-fresh
-already=$(already_live /nix/store/sys-b)
-[ "$already" = hold ] || fail "already_live with nothing deployed: $already"
-echo /nix/store/sys-a >"$state/deployed"
-already=$(already_live /nix/store/sys-b)
-[ "$already" = hold ] || fail "already_live with another system deployed: $already"
-echo /nix/store/sys-b >"$state/deployed"
-already=$(already_live /nix/store/sys-b)
-[ "$already" = up ] || fail "already_live with it deployed: $already"
-already=$(TRAIN='' already_live /nix/store/sys-b)
-[ "$already" = current ] || fail "already_live outside a train: $already"
-already=$(riding=7 already_live /nix/store/sys-b)
-[ "$already" = current ] || fail "already_live riding: $already"
-already=$(changed='' already_live /nix/store/sys-b)
-[ "$already" = current ] || fail "already_live with nothing new: $already"
-echo "already_live: ok"
