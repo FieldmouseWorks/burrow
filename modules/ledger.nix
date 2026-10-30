@@ -41,13 +41,8 @@ let
       . ${machineApp.envFile}
       export CONARY_TOKEN_COMMAND=${lib.escapeShellArg "${config.burrow.tools.gh-token}/bin/gh-token get"}
     '') + ''
-      # The steward's word (its status, its reviewers' reviews) is only what
-      # its App posted.
-      export CONARY_REVIEWERS=${lib.escapeShellArg (lib.concatStringsSep "," cfg.reviewers)}
-      export CONARY_LEDGER=${lib.escapeShellArg cfg.dir}
-      export CONARY_ANCHOR_REPO=${lib.escapeShellArg cfg.anchorRepo}
-      export CONARY_OWN_CONTEXTS=${lib.escapeShellArg (lib.concatStringsSep "," cfg.ownContexts)}
-      export CONARY_SESSION_LINKS=${lib.escapeShellArg (lib.concatStringsSep "," cfg.sessionLinks)}
+      # What cn is told about the ledger (env, below).
+      ${lib.concatStringsSep "\n" (lib.mapAttrsToList (k: v: "export ${k}=${lib.escapeShellArg v}") cfg.env)}
       wake=${lib.escapeShellArg wake}
       # Sets the ledger up, until set-up has finished: its last step keeps
       # the anchor's copy beside the log. Run on a ledger that's set up, it
@@ -204,6 +199,38 @@ in
         is its landing decision, not evidence about the change.
       '';
     };
+
+    env = mkOption {
+      type = types.attrsOf types.str;
+      readOnly = true;
+      default = {
+        CONARY_LEDGER = cfg.dir;
+        CONARY_ANCHOR_REPO = cfg.anchorRepo;
+        # The steward's word (its status, its reviewers' reviews) is only
+        # what its App posted.
+        CONARY_REVIEWERS = lib.concatStringsSep "," cfg.reviewers;
+        CONARY_OWN_CONTEXTS = lib.concatStringsSep "," cfg.ownContexts;
+        CONARY_SESSION_LINKS = lib.concatStringsSep "," cfg.sessionLinks;
+      };
+      defaultText = lib.literalExpression "{ CONARY_LEDGER = dir; CONARY_ANCHOR_REPO = anchorRepo; ... }";
+      description = ''
+        What every writer of the ledger tells `cn` about it: its passes, and
+        the steward's merge train (burrow.autoland's `train`), each with its
+        own CONARY_TOKEN_COMMAND.
+      '';
+    };
+
+    trainContext = mkOption {
+      type = types.str;
+      readOnly = true;
+      default = "conary/train";
+      description = ''
+        The commit status `cn train` posts, as the steward's App, on the
+        head of each PR it lands or turns away (Conary's docs/DESIGN.md,
+        section 4.7), which a train repo's rules require: its word on the
+        PR, not a check of it.
+      '';
+    };
   };
 
   config = lib.mkIf cfg.enable {
@@ -230,7 +257,8 @@ in
       # finishing; a commit status.
       events = [ "pull_request" "pull_request_review" "check_suite" "status" ];
       unit = "burrow-ledger";
-      ownStatuses = cfg.ownContexts;
+      # The train's status is no evidence either: cn never records it.
+      ownStatuses = cfg.ownContexts ++ [ cfg.trainContext ];
       inherit wake;
     };
     # conary-mcp answers `why` in the session's own checkout, and asks
