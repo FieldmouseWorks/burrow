@@ -35,7 +35,7 @@
       # The ledger's machines take Conary from its own flake; burrow's checks
       # build theirs with a stand-in for its `cn`.
       cnStandIn = pkgs.writeShellScriptBin "cn" "exit 1";
-      names = [ "claude" "undo" "switch" "notify" "updates" "proj" "remote-control" "agents" "robot" "ops" "toolbox" "autoland" "house" "events" "ledger" "browser" "heartbeat" "backup" "watchdog" "github" "rust-cache" ];
+      names = [ "claude" "undo" "switch" "notify" "updates" "proj" "remote-control" "agents" "robot" "ops" "toolbox" "autoland" "house" "events" "ledger" "browser" "heartbeat" "backup" "watchdog" "github" "rust-cache" "cpu" ];
       # gh-token (modules/github): its package, and its gate.
       # Built for every platform lib/project.nix knows, like the module.
       ghToken = self.lib.project {
@@ -82,15 +82,29 @@
         # check, so these build nothing. A service that says how it runs (a
         # Type) has something to run too: systemd refuses one without
         # ExecStart or ExecStop, and only when it starts. A module that
-        # registers a burrow-events handler has burrow-events to run it.
+        # registers a burrow-events handler has burrow-events to run it. And a
+        # memory cap holds swap to it too: a unit that may swap outgrows its
+        # cap without ever reaching it, and the machine thrashes rather than
+        # the kernel killing inside the cap.
         standalone = let
           runnable = name: machine: let
-            s = machine.config.systemd.services;
+            sd = machine.config.systemd;
+            s = sd.services;
             empty = builtins.filter (n: s.${n}.enable && s.${n}.serviceConfig ? Type
               && !(s.${n}.serviceConfig ? ExecStart || s.${n}.serviceConfig ? ExecStop)) (builtins.attrNames s);
             unrun = machine.config.burrow.events.handlers or { } != { } && !(s ? burrow-events);
+            swapping = builtins.concatMap ({ kind, units, section }: builtins.concatMap (n:
+              let c = units.${n}.${section}; in
+              nixpkgs.lib.optional (toString (c.MemoryMax or "infinity") != "infinity"
+                && toString (c.MemorySwapMax or "") != "0") "${kind} ${n}") (builtins.attrNames units)) [
+              { kind = "service"; units = s; section = "serviceConfig"; }
+              { kind = "slice"; units = sd.slices; section = "sliceConfig"; }
+              { kind = "user service"; units = sd.user.services; section = "serviceConfig"; }
+              { kind = "user slice"; units = sd.user.slices; section = "sliceConfig"; }
+            ];
           in if empty != [ ] then throw "${name}: services with nothing to run: ${builtins.concatStringsSep ", " empty}"
              else if unrun then throw "${name}: burrow-events handlers with no burrow-events to start them"
+             else if swapping != [ ] then throw "${name}: memory caps that let their units swap (give each MemorySwapMax = 0): ${builtins.concatStringsSep ", " swapping}"
              else machine;
         in pkgs.writeText "burrow-standalone" (nixpkgs.lib.concatMapStrings (name:
           let
@@ -113,11 +127,118 @@
             };
           in "${name} ${builtins.unsafeDiscardStringContext (runnable name machine).config.system.build.toplevel.drvPath}\n")
             names + "example ${builtins.unsafeDiscardStringContext (runnable "example" self.nixosConfigurations.example).config.system.build.toplevel.drvPath}\n");
+        # heavy's slots: one holder at a time per slot, its share of the
+        # threads, nested calls let through, the exit status and stdin passed
+        # on, a cancelled workload stopped before its slot goes, a bounded
+        # wait refused on time; and the example's gate slice weighted.
+        cpu = let
+          heavy = (self.nixosConfigurations.example.extendModules {
+            modules = [{ burrow.cpu.heavy = { slots = 1; grace = 3; dir = "/build/heavy"; }; }];
+          }).config.burrow.tools.heavy;
+          weight = self.nixosConfigurations.example.config.systemd.slices.ci.sliceConfig.CPUWeight;
+        in pkgs.runCommand "cpu-check" { } ''
+          [ ${toString weight} = 400 ] || { echo "ci.slice weight ${toString weight}"; exit 1; }
+          mkdir -p /build/heavy && : >/build/heavy/slot1 && chmod 0444 /build/heavy/slot1
+          h=${heavy}/bin/heavy
+          threads=$(nproc)
+          # Waits until COMMAND succeeds, for what process PID makes ready, and
+          # fails if PID exits first or it takes over 30 seconds.
+          ready() {
+            local pid=$1 n=0; shift
+            until "$@" 2>/dev/null; do
+              kill -0 "$pid" 2>/dev/null || { echo "pid $pid exited before $*"; exit 1; }
+              n=$(( n + 1 )); [ "$n" -lt 3000 ] || { echo "not $* after 30s"; exit 1; }
+              sleep 0.01
+            done
+          }
+          [ "$($h -- printenv HEAVY_JOBS)" = "$threads" ] || { echo "share: not $threads"; exit 1; }
+          [ "$(CARGO_BUILD_JOBS=3 $h -- printenv CARGO_BUILD_JOBS)" = 3 ] || { echo "overrode CARGO_BUILD_JOBS"; exit 1; }
+          rc=0; $h -- sh -c 'exit 7' || rc=$?
+          [ "$rc" = 7 ] || { echo "exit status $rc, not 7"; exit 1; }
+          # Inside the slot, a nested call runs at once; a second holder waits, and gives up when told to.
+          $h -- sh -c "touch held; while [ ! -e done ]; do sleep 0.1; done" &
+          ready $! test -e held
+          rc=0; $h --wait 1 -- true 2>err || rc=$?
+          [ "$rc" = 75 ] || { echo "a second holder got in ($rc)"; exit 1; }
+          HEAVY_SLOT=1 $h --wait 1 -- true || { echo "a nested call waited"; exit 1; }
+          $h status | grep -q '^slot1: busy' || { echo "status: $($h status)"; exit 1; }
+          touch done; wait
+          $h status | grep -q '^slot1: free' || { echo "status: $($h status)"; exit 1; }
+
+          # The caller's stdin reaches the command: a pipe, a file, a terminal, and nested.
+          rc=0; printf 'exit 7\n' | $h -- sh || rc=$?
+          [ "$rc" = 7 ] || { echo "piped stdin: $rc, not 7"; exit 1; }
+          echo 'exit 8' >script; rc=0; $h -- sh <script || rc=$?
+          [ "$rc" = 8 ] || { echo "redirected stdin: $rc, not 8"; exit 1; }
+          rc=0; printf 'exit 9\n' | HEAVY_SLOT=1 $h -- sh || rc=$?
+          [ "$rc" = 9 ] || { echo "nested stdin: $rc, not 9"; exit 1; }
+          rc=0; printf '6\n' | ${pkgs.util-linux}/bin/script -qec "$h -- sh -c 'test -t 0 || exit 1; read n; exit \$n'" /dev/null >/dev/null || rc=$?
+          [ "$rc" = 6 ] || { echo "terminal stdin: $rc, not 6"; exit 1; }
+
+          # Cancelled, heavy stops the whole workload, a shell's worker too,
+          # and holds the slot until the last of it has gone. (Background
+          # jobs here ignore INT: env gives it back.) Each worker names
+          # itself once its traps are set, so the signal never comes first.
+          for sig in TERM INT HUP; do
+            rm -f worker stopped
+            env --default-signal=INT $h -- sh -c 'sh -c "trap \"sleep 1; touch stopped; exit\" TERM; echo \$\$ >worker; while :; do sleep 0.1; done" & wait' &
+            hp=$!
+            ready $hp test -s worker
+            kill -$sig $hp; wait $hp || true
+            [ -e stopped ] || { echo "$sig: the slot went before the worker stopped"; exit 1; }
+            ! kill -0 "$(cat worker)" 2>/dev/null || { echo "$sig: the worker outlived heavy"; exit 1; }
+            $h status | grep -q '^slot1: free' || { echo "$sig: status: $($h status)"; exit 1; }
+          done
+          # A command that ignores the signal, or hangs in its handler with a
+          # worker that ignores everything, is killed GRACE (3) seconds after
+          # the signal, worker too, and only then does the slot go.
+          for sig in TERM INT HUP; do
+            for cmd in \
+              'trap "" TERM INT HUP; echo $$ >worker; while :; do sleep 0.1; done' \
+              'trap "sleep 60" TERM INT HUP; sh -c "trap \"\" TERM INT HUP; echo \$\$ >worker; while :; do sleep 0.1; done" & wait'; do
+              rm -f worker
+              env --default-signal=INT $h -- sh -c "$cmd" & hp=$!
+              ready $hp test -s worker
+              s=$(date +%s%N); kill -$sig $hp; wait $hp || true; e=$(date +%s%N)
+              ms=$(( (e - s) / 1000000 ))
+              [ "$ms" -ge 2900 ] && [ "$ms" -lt 6000 ] || { echo "$sig, stubborn command: heavy took ''${ms}ms, not about 3s"; exit 1; }
+              ! kill -0 "$(cat worker)" 2>/dev/null || { echo "$sig: a stubborn command outlived heavy"; exit 1; }
+              $h status | grep -q '^slot1: free' || { echo "$sig, stubborn: status: $($h status)"; exit 1; }
+            done
+          done
+          # Cancelled as it starts, nothing of the command runs on. The
+          # signal goes to heavy itself: sent before the fork has become
+          # heavy, it reaches only the test's shell, which in the sandbox, under
+          # load, can lose it.
+          for i in $(seq 10); do
+            $h -- sh -c 'sleep 1; touch late' & hp=$!
+            ready $hp grep -qF "$h" /proc/$hp/cmdline
+            kill -TERM $hp; wait $hp || true
+            sleep 1.2
+            [ ! -e late ] || { echo "the command outlived a heavy cancelled at its start"; exit 1; }
+          done 2>/dev/null
+
+          # A bounded wait ends on time, and never starts the command after.
+          rm -f ran
+          rm -f held; $h -- sh -c 'touch held; sleep 1.5' & ready $! test -e held
+          s=$(date +%s%N); rc=0; $h --wait 1 -- touch ran 2>err || rc=$?; e=$(date +%s%N)
+          [ "$rc" = 75 ] || { echo "--wait 1 with the slot freed after it: $rc, not 75"; exit 1; }
+          [ ! -e ran ] || { echo "--wait 1 ran the command after its wait"; exit 1; }
+          [ $(( (e - s) / 1000000 )) -lt 1800 ] || { echo "--wait 1 took $(( (e - s) / 1000000 ))ms"; exit 1; }
+          rc=0; $h --wait 0 -- touch ran 2>err || rc=$?
+          [ "$rc" = 75 ] && [ ! -e ran ] || { echo "--wait 0: $rc"; exit 1; }
+          $h -- touch ran 2>err
+          [ -e ran ] || { echo "an unbounded wait didn't get the slot"; exit 1; }
+          wait
+          touch $out
+        '';
         # Sandboxes for real: boot two, work in them, break out of nothing.
         # Nested KVM: run it on a machine that has /dev/kvm.
         agents = import ./tests/agents.nix { inherit self pkgs; };
         # proj's queue and memory caps, with a stand-in for Claude.
         proj = import ./tests/proj.nix { inherit self pkgs; };
+        # A turn's clock, which stands still while it waits in line.
+        proj-clock = import ./tests/proj-clock.nix { inherit self pkgs; };
         # Who takes a free slot: the pipeline's own (only its own repos'
         # pipeline jobs), and each project's cap.
         proj-pick = pkgs.runCommand "proj-pick-check" { nativeBuildInputs = [ pkgs.shellcheck pkgs.git ]; } ''
@@ -126,7 +247,7 @@
           touch $out
         '';
         # What each job waits on, as the stall watchdog hears it.
-        proj-waits = pkgs.runCommand "proj-waits-check" { nativeBuildInputs = [ pkgs.shellcheck pkgs.jq ]; } ''
+        proj-waits = pkgs.runCommand "proj-waits-check" { nativeBuildInputs = [ pkgs.shellcheck pkgs.jq pkgs.util-linux ]; } ''
           shellcheck -s bash ${./modules/proj/waits.sh} ${./tests/proj-waits.sh}
           bash ${./tests/proj-waits.sh} ${./modules/proj/waits.sh}
           touch $out
@@ -159,6 +280,59 @@
           ${self.nixosConfigurations.example.config.systemd.services.burrow-watchdog.serviceConfig.ExecStart} status
           touch $out
         '';
+        # The steward's tools reach a pass however it's started: by hand or
+        # a Claude job (`autoland-steward kick OWNER/REPO`), with no openssl,
+        # gh or proj of its own, gets them from the wrapper, ahead of its own
+        # PATH but for a review's. Its gh is the machine's: in an App's env
+        # (a job's), `status` and a project's clone go through the socket,
+        # and a pass's own calls with the steward's token as given.
+        autoland-path = let
+          example = self.nixosConfigurations.example.config;
+          steward = builtins.head (builtins.filter (p: (p.name or "") == "autoland-steward")
+            example.environment.systemPackages);
+          # gh-token's side of the socket: the App's token for whatever's asked.
+          socket = pkgs.writeText "fake-socket.py" ''
+            import os, socket, sys
+            s = socket.socket(socket.AF_UNIX)
+            s.bind(sys.argv[1])
+            s.listen()
+            open(sys.argv[1] + ".up", "w").close()
+            while True:
+                c, _ = s.accept()
+                c.recv(4096)
+                c.sendall(b"token from-the-socket\n")
+                c.close()
+          '';
+        in pkgs.runCommand "autoland-path-check" { nativeBuildInputs = [ pkgs.python3 ]; } ''
+          w=${steward}/bin/autoland-steward
+          # The wrapper, but showing the PATH it would run the steward with.
+          grep -q '^exec .*steward.py' "$w" || { echo "autoland-steward doesn't exec the steward"; exit 1; }
+          sed 's|^exec .*steward.py.*|printf "%s\\n" "$PATH"; exit|' "$w" >path-of
+          for sub in kick status pass; do
+            p=$(env -i PATH=/caller ${pkgs.bash}/bin/bash path-of $sub)
+            case $p in *:/caller) ;; *) echo "$sub: the caller's PATH isn't kept after the steward's: $p"; exit 1 ;; esac
+            [ "$p" != /caller ] || { echo "autoland-steward sets no PATH of its own"; exit 1; }
+            for t in openssl gh git tar proj; do
+              env -i PATH="$p" ${pkgs.bash}/bin/bash -c "command -v $t" >/dev/null || { echo "$sub: no $t on the steward's PATH"; exit 1; }
+            done
+          done
+          p=$(env -i PATH=/caller ${pkgs.bash}/bin/bash path-of review)
+          [ "$p" = /caller ] || { echo "review gets more than its units give it: $p"; exit 1; }
+          p=$(env -i PATH=/caller ${pkgs.bash}/bin/bash path-of status)
+          gh=$(env -i PATH="$p" ${pkgs.bash}/bin/bash -c 'command -v gh')
+          git=$(env -i PATH="$p" ${pkgs.bash}/bin/bash -c 'command -v git')
+          [ "$gh" = ${example.burrow.tools.gh}/bin/gh ] || { echo "the steward's gh isn't the machine's: $gh"; exit 1; }
+          [ "$git" = ${example.programs.git.package}/bin/git ] || { echo "the steward's git isn't the machine's: $git"; exit 1; }
+          # As a job with an App runs it: no token of its own, the socket's.
+          python3 -I ${socket} $PWD/app.sock & while [ ! -e app.sock.up ]; do sleep 0.1; done
+          mkdir no-login
+          ask() { env -i PATH="$p" HOME=$PWD GH_CONFIG_DIR=$PWD/no-login GH_TOKEN_SOCKET=$PWD/app.sock GH_TOKEN_OWNER=sam "$@" gh auth token 2>&1; }
+          got=$(ask GH_TOKEN=) || true
+          [ "$got" = from-the-socket ] || { echo "status in an App's env doesn't go through its socket: $got"; exit 1; }
+          got=$(ask GH_TOKEN=the-stewards) || true
+          [ "$got" = the-stewards ] || { echo "a pass's own call doesn't use the steward's token: $got"; exit 1; }
+          touch $out
+        '';
         # HOST-notify's issues, with a stand-in for gh: one a notice, closed
         # when cleared, and pending until GitHub has shown it closed.
         notify = pkgs.runCommand "notify-check" { nativeBuildInputs = [ pkgs.shellcheck pkgs.jq pkgs.bash ]; } ''
@@ -171,6 +345,8 @@
         events-service = import ./tests/events.nix { inherit self pkgs; };
         # HOST-switch's revert when the window runs out mid-activation.
         switch = import ./tests/switch.nix { inherit self pkgs; };
+        # systemd-oomd kills what eats the memory before the machine drowns.
+        oomd = import ./tests/oomd.nix { inherit self pkgs; };
         # HOST-health's ZFS check: the pools the machine needs, by name or
         # GUID, with a stand-in zpool.
         health-zfs = import ./tests/health-zfs.nix { inherit self pkgs; };
