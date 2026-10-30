@@ -455,8 +455,9 @@ in
       default = true;
       description = ''
         Daily, delete branches whose tip is already in the default branch or
-        is a closed PR's head (no open PR, not a bot's). Other unmerged ones
-        older than 30 days are listed for you, never deleted.
+        is a closed PR's head (no open PR). Other unmerged ones with no commit
+        for 14 days (not a bot's) are kept at refs/archive/BRANCH/SHA, then
+        deleted (docs/repo-baseline.md says how to restore one).
       '';
     };
 

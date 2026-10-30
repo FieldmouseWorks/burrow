@@ -196,7 +196,12 @@ For reviewers, the review bot included. Flag as P1:
 - Branches whose tip is already in the default branch, or is the head a
   closed PR was closed at, with no open PR, are deleted (nothing is lost: the
   closed PR keeps its commits and can restore the branch). GitHub's
-  delete-on-merge only covers merged PRs. Bots' branches and `keepBranches`
-  are left alone.
-- Unmerged branches with no PR and no commit for 30 days are listed for the
-  owner, never deleted.
+  delete-on-merge only covers merged PRs. `keepBranches` are left alone, and
+  bots' branches go only this way.
+- Unmerged branches with no PR and no commit for 14 days are archived, then
+  deleted: the steward keeps the tip at `refs/archive/BRANCH/SHA` in the same
+  repo, a ref GitHub keeps but lists with neither branches nor tags, and
+  deletes the branch only if it's still at that tip. `git ls-remote origin
+  'refs/archive/*'` lists them; `gh api repos/OWNER/REPO/git/refs -f
+  ref=refs/heads/BRANCH -f sha=SHA` restores one. One GitHub won't archive
+  stays, and goes to the issue of what the pipeline is stuck on.
