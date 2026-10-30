@@ -7,7 +7,8 @@ output eval-apart doesn't know, or with a nixConfig, is refused rather than
 half checked. Without it, the checks are built first, by derivation, kept as
 GC roots, once the one nix process that evaluated them has exited, so no
 evaluation stays in memory beside the builds; nix flake check then finds them
-built. A flake with a nixConfig is left to nix flake check alone.
+built and its outputs still roots. A flake with a nixConfig is left to nix
+flake check alone, and the flake is only ever read purely.
 
   python3 -I tests/gate.py .github/workflows/flake-check.yml
   nix build .#checks.x86_64-linux.gate
@@ -58,17 +59,26 @@ def stub(name, body):
 
 # A build collects garbage first, as a GC on the runner could between the
 # evaluations and the build, and every derivation it's given must survive it.
-# A flake check evaluates as nix's does, and builds nothing.
+# A flake check evaluates as nix's does, and builds nothing, and whatever a
+# build before it kept as a root must still be one.
 stub("nix", f"""case $1 in
   build)
     echo "$*" >> "$NIX_LOG"
     {real_bin}/nix-store --gc > /dev/null 2>&1
+    prev=
     for a in "$@"; do
+      [ "$prev" = --out-link ] && echo "$a" >> "$NIX_LOG.links"
+      prev=$a
       case $a in /nix/store/*) {real_bin}/nix-store --check-validity "${{a%^*}}" || exit 1 ;; esac
     done
     [ -z "$BUILD_FAIL" ] || case "$*" in *"$BUILD_FAIL"*) exit 1 ;; esac
     exit 0 ;;
-  flake) [ "$2" = check ] && {{ echo "$*" >> "$NIX_LOG"; exec {real_nix} flake check --no-build "${{@:3}}"; }} ;;
+  flake) [ "$2" = check ] && {{
+    echo "$*" >> "$NIX_LOG"
+    if [ -e "$NIX_LOG.links" ]; then
+      while read -r link; do [ -d "${{link%/*}}" ] || {{ echo "the built checks' roots went before nix flake check"; exit 1; }}; done < "$NIX_LOG.links"
+    fi
+    exec {real_nix} flake check --no-build "${{@:3}}"; }} ;;
 esac
 exec {real_nix} "$@"
 """)
@@ -77,10 +87,9 @@ stub("nix-instantiate", f"""args=("$@")
 what=plan
 while [ $# -gt 0 ]; do
   case $1 in
-    --arg) [ "$2" = entry ] && what="entry $3"; shift 3 ;;
+    --arg) case $2 in entry) what="entry $3" ;; builds) what=checks ;; esac; shift 3 ;;
     --argstr | --option) shift 3 ;;
-    --add-root) case $2 in */check) what=checks ;; esac; shift 2 ;;
-    --expr) shift 2 ;;
+    --expr | --add-root) shift 2 ;;
     *) shift ;;
   esac
 done
@@ -113,8 +122,9 @@ def flake(outputs, top=""):
 
 def run(directory, apart=True, skip="", build_fail="", env=None):
     log = os.path.join(tmp, "nix.log")
-    if os.path.exists(log):
-        os.remove(log)
+    for f in (log, log + ".links"):
+        if os.path.exists(f):
+            os.remove(f)
     full = {**nix_env, "PATH": bin_dir + os.pathsep + os.environ["PATH"], "NIX_LOG": log,
             "APART": "true" if apart else "false", "SKIP": skip, "BUILD_FAIL": build_fail,
             "RUNNER_TEMP": tmp, **(env or {})}
@@ -143,8 +153,8 @@ def case(f):
     try:
         f()
         print(f"{f.__doc__}: ok")
-    except AssertionError as e:
-        print(f"{f.__doc__}: FAILED {e}")
+    except Exception as e:
+        print(f"{f.__doc__}: FAILED {e!r}")
         failures.append(f.__doc__)
 
 
@@ -305,17 +315,19 @@ def no_checks():
 
 @case
 def whole():
-    "without eval-apart, the checks are built by derivation, kept until built, then nix flake check finds them built"
+    "without eval-apart, the checks are built by derivation, kept until nix flake check has found them built"
     rc, out, calls = run(every, apart=False)
     assert rc == 0, out
-    assert calls[0] == "nix-instantiate checks" and calls[2:] == ["flake check -L --keep-going"], calls
+    assert calls[:2] == ["nix-instantiate plan", "nix-instantiate checks"], calls
+    assert calls[3:] == ["flake check -L --keep-going"], calls
     [b] = builds(calls)
-    assert b.startswith("build -L --no-link --keep-going /nix/store/"), b
+    assert b.startswith("build -L --out-link ") and "/roots." in b.split()[3], b
     assert "-a.drv^*" in b and "-vm.drv^*" in b and "-p.drv" not in b, b
     # With a check it doesn't build, nix flake check builds none.
     rc, out, calls = run(every, apart=False, skip="vm")
     assert rc == 0, out
-    assert calls[0] == "nix-instantiate checks" and calls[2:] == ["flake check --no-build -L"], calls
+    assert calls[:2] == ["nix-instantiate plan", "nix-instantiate checks"], calls
+    assert calls[3:] == ["flake check --no-build -L"], calls
     [b] = builds(calls)
     assert b.endswith("-a.drv^*") and "-vm.drv" not in b, b
     assert "not building vm" in out, out
@@ -331,14 +343,15 @@ def whole_failing():
     for skip in ("", "x"):
         rc, out, calls = run(broken, apart=False, skip=skip)
         assert rc != 0 and "broken check" in out, out
-        assert not builds(calls) and calls[1].startswith("flake check"), calls
+        assert not builds(calls) and calls[2].startswith("flake check"), calls
 
 
 @case
 def whole_no_checks():
     "without eval-apart, no checks, no build"
     rc, out, calls = run(flake("""{ packages.${system}.p = drv "p"; }"""), apart=False)
-    assert rc == 0 and calls == ["nix-instantiate checks", "flake check -L --keep-going"], (out, calls)
+    assert rc == 0, out
+    assert calls == ["nix-instantiate plan", "nix-instantiate checks", "flake check -L --keep-going"], calls
 
 
 @case
@@ -346,11 +359,27 @@ def whole_nix_config():
     "without eval-apart, a flake with a nixConfig is nix flake check's alone, which applies the config a runner accepts"
     d = flake("""{ checks.${system} = { a = drv "a"; vm = drv "vm"; }; }""", top='nixConfig.bash-prompt = "x";')
     rc, out, calls = run(d, apart=False)
-    assert rc == 0 and calls == ["flake check -L --keep-going"], (out, calls)
+    assert rc == 0 and calls == ["nix-instantiate plan", "flake check -L --keep-going"], (out, calls)
     rc, out, calls = run(d, apart=False, skip="vm")
-    assert rc == 0 and calls == ["flake check --no-build -L", f"build -L --no-link --keep-going .#checks.{system}.a"], (out, calls)
+    assert rc == 0, out
+    assert calls == ["nix-instantiate plan", "flake check --no-build -L",
+                     f"build -L --no-link --keep-going .#checks.{system}.a"], calls
     rc, out, calls = run(d, apart=False, skip="vm", build_fail=".a")
     assert rc != 0, (out, calls)
+
+
+@case
+def whole_pure():
+    "without eval-apart, the flake is only read purely: its flake.nix never sees the runner's environment"
+    d = tempfile.mkdtemp(dir=tmp)
+    open(os.path.join(d, "flake.nix"), "w").write(
+        'builtins.trace "secret=${builtins.getEnv "GATE_SECRET"}" { nixConfig = { }; outputs = { self }: { }; }\n')
+    git = ["git", "-c", "user.name=gate", "-c", "user.email=gate@example.org", "-c", "init.defaultBranch=main"]
+    for cmd in (["init", "-q"], ["add", "flake.nix"], ["commit", "-qm", "flake"]):
+        subprocess.run(git + cmd, cwd=d, check=True, env={**os.environ, "HOME": tmp})
+    for skip in ("", "x"):
+        rc, out, calls = run(d, apart=False, skip=skip, env={"GATE_SECRET": "hunter2"})
+        assert rc != 0 and "hunter2" not in out, out
 
 
 @case

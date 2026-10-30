@@ -88,9 +88,12 @@ jobs:
           # evaluates it. With no entry, the plan: the outputs it doesn't know,
           # and each derivation it evaluates and whether it's a check to build.
           # With an entry's index, that one: its derivation, or for a NixOS
-          # system nothing, once its toplevel is a derivation.
+          # system nothing, once its toplevel is a derivation. With builds,
+          # every check to build, as a list: in an attrset nix-instantiate
+          # passes over any name that isn't an identifier, a.b or "sp ace",
+          # without a word.
           read -r -d '' plan <<'EOF' || true
-          { url, system, skip, entry ? null }:
+          { url, system, skip, entry ? null, builds ? false }:
           let
             flake = builtins.getFlake url;
             inherit (flake) outputs;
@@ -120,7 +123,9 @@ jobs:
             build = e: e.check or false && !builtins.elem e.n skipped;
             isDerivation = v: (v.type or null) == "derivation";
           in
-          if entry == null then
+          if builds then
+            map (e: builtins.foldl' (v: n: v.${n}) outputs e.path) (builtins.filter build entries)
+          else if entry == null then
             # legacyPackages has only its system names checked.
             builtins.deepSeq (here "legacyPackages" (_: [ ])) {
               nixConfig = import "${flake.outPath}/flake.nix" ? nixConfig;
@@ -137,11 +142,14 @@ jobs:
             else if isDerivation v then v
             else throw "flake attribute '${e.what}' is not a derivation"
           EOF
-          apart() {
+          read_plan() {
             url=$(nix flake metadata --json . | jq -r .url)
             args=(--option pure-eval true --expr "$plan" --argstr url "$url"
               --argstr system "$(nix config show system)" --argstr skip "$SKIP")
             nix-instantiate --eval --strict --json "${args[@]}" > "$RUNNER_TEMP/plan.json"
+          }
+          apart() {
+            read_plan
             if [ "$(jq '.other | length' "$RUNNER_TEMP/plan.json")" != 0 ]; then
               echo "eval-apart knows checks, packages, devShells, formatter, nixosConfigurations and legacyPackages, and this flake also has $(jq -c .other "$RUNNER_TEMP/plan.json"). Its gate is a whole \`nix flake check\`, without eval-apart."
               return 1
@@ -189,29 +197,22 @@ jobs:
           # checks are built first, by derivation: one nix-instantiate evaluates
           # them and makes each a GC root, and once it has exited nix build
           # builds every output, as nix flake check would, which then finds them
-          # built. A flake with a nixConfig is left to nix flake check alone,
-          # since only nix applies the config a runner accepts. The checks go to
-          # nix-instantiate as a list: in an attrset it passes over any name
-          # that isn't an identifier, a.b or "sp ace", without a word.
-          read -r -d '' checks <<'EOF' || true
-          { url, system, skip }:
-          builtins.attrValues (builtins.removeAttrs ((builtins.getFlake url).checks.${system} or { })
-            (builtins.filter (s: builtins.isString s && s != "") (builtins.split " " skip)))
-          EOF
+          # built. A flake with a nixConfig, or whose plan can't be read, is
+          # left to nix flake check alone: only nix applies the config a runner
+          # accepts, and says what's wrong with a flake.
           whole() {
             failed=0
             built=false
-            if [ "$(nix eval --impure --expr 'import ./flake.nix ? nixConfig')" = false ]; then
-              url=$(nix flake metadata --json . | jq -r .url)
+            if read_plan && [ "$(jq .nixConfig "$RUNNER_TEMP/plan.json")" = false ]; then
               roots=$(mktemp -d "$RUNNER_TEMP/roots.XXXXXX")
               trap 'rm -rf -- "$roots"' EXIT
               targets=()
-              if nix-instantiate --add-root "$roots/check" --option pure-eval true --expr "$checks" \
-                --argstr url "$url" --argstr system "$(nix config show system)" --argstr skip "$SKIP" > "$roots/list"; then
+              if nix-instantiate --add-root "$roots/check" --arg builds true "${args[@]}" > "$roots/list"; then
                 # A derivation whose first output isn't out has its root
-                # printed with that output's name after a !.
+                # printed with that output's name after a !. What's built
+                # stays a root too, until nix flake check has found it.
                 while read -r root; do targets+=("$(readlink "${root%%!*}")^*"); done < "$roots/list"
-                if [ ${#targets[@]} -eq 0 ] || nix build -L --no-link --keep-going "${targets[@]}"; then
+                if [ ${#targets[@]} -eq 0 ] || nix build -L --out-link "$roots/out" --keep-going "${targets[@]}"; then
                   built=true
                 else
                   # Built once is enough: nix flake check only says what else
