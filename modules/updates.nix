@@ -279,6 +279,18 @@ let
     # renovate-sweep reports security PRs stuck that way.
     rebaseWhen = "conflicted";
 
+    # The rules below take a lock file refresh without a release timestamp on
+    # purpose, and each time Renovate warns that it did. A warning lands on the
+    # dashboard's Repository Problems, where nothing can clear it and the
+    # steward takes it for something stuck. Only the warning for an upgrade
+    # that went ahead: any other still counts.
+    logLevelRemap = [
+      {
+        matchMessage = "/^Some upgrade\\(s\\) did not have a releaseTimestamp, but as we're running with minimumReleaseAgeBehaviour=timestamp-optional, proceeding\\./";
+        newLogLevel = "debug";
+      }
+    ];
+
     nix.enabled = true;
 
     packageRules = [

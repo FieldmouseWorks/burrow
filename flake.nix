@@ -633,6 +633,16 @@
           [ "$got" = "$(sed 's/^ *//' <<<"$want")" ] || { echo "got: $got"; exit 1; }
           touch $out
         '';
+        # What a dashboard's Repository Problems lists under the example's
+        # config, by Renovate's own logger: not the refresh it was told to take
+        # without a release timestamp, but still a warning that's a problem.
+        renovate-problems = pkgs.runCommand "renovate-problems-check" { } ''
+          export HOME=$TMPDIR
+          got=$(LOG_LEVEL=fatal ${pkgs.lib.getExe pkgs.nodejs_24} ${./tests/renovate-problems.mjs} ${pkgs.renovate} \
+            ${self.nixosConfigurations.example.config.systemd.services.renovate.environment.RENOVATE_CONFIG_FILE} 2>/dev/null)
+          [ "$got" = artifactErrors ] || { echo "got: $got"; exit 1; }
+          touch $out
+        '';
         # Which repos house-sync passes over, and when it tells the owner, with
         # stand-ins for gh and the notifier.
         house-sync = pkgs.runCommand "house-sync-check" { nativeBuildInputs = [ pkgs.python3 pkgs.jq pkgs.util-linux pkgs.diffutils ]; } ''
