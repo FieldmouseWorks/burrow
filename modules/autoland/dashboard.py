@@ -71,6 +71,16 @@ def renovates(login):
     return login == bot if bot else login in CFG["authors"]
 
 
+def renovated(actor):
+    """The same for an author as GraphQL gives it: a bot's login without
+    "[bot]", which only GitHub's own Bot of that name holds."""
+    if not actor:
+        return False
+    if actor.get("__typename") == "Bot":
+        return renovates(actor.get("login") + "[bot]")
+    return renovates(actor.get("login"))
+
+
 def find(repo, st):
     """The number of the repo's dashboard: the one it had, else one looked
     for, then once a day while there's none (a repo Renovate doesn't cover

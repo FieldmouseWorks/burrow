@@ -1,8 +1,10 @@
 """renovate-sweep with stand-ins for gh, proj and the notifier: which Renovate
-PRs go to a Claude job, which majors the owner's notice lists, and the seal
-on the job's verdicts (major-seal).
+PRs go to a Claude job, which majors the owner's notice lists, the seal
+on the job's verdicts (major-seal), and the lock file refreshes that only
+wait for their releases to be old enough (lock-wait).
 
-    python3 -I tests/renovate-sweep.py modules/updates/renovate-sweep.sh modules/updates/major-seal.py modules/seal.py
+    python3 -I tests/renovate-sweep.py modules/updates/renovate-sweep.sh modules/updates/major-seal.py \
+      modules/autoland/seal.py modules/autoland/lock_wait.py
 """
 
 import importlib.util
@@ -50,7 +52,13 @@ elif a[:2] == ["pr", "list"]:
     print(open(os.path.join(STUB, "prs.json")).read())
 elif a[:2] == ["pr", "view"]:
     print(json.dumps({"comments": json.load(open(os.path.join(STUB, "comments.json"))).get(a[2], [])}))
+elif a[:3] == ["api", "-X", "POST"]:
+    open(os.path.join(STUB, "gh.log"), "a").write(json.dumps(a[3:]) + "\\n")
 """)
+lock_wait = os.path.join(tmp, "lock-wait")
+with open(lock_wait, "w") as f:
+    f.write(f"#!/bin/sh\nexec {sys.executable} -I {sys.argv[4]} \"$@\"\n")
+os.chmod(lock_wait, 0o755)
 stub("proj", """open(os.path.join(STUB, "proj.log"), "a").write(json.dumps(sys.argv[1:]) + "\\n")""")
 notify = stub("notify", """open(os.path.join(STUB, "notify.log"), "a").write(json.dumps(sys.argv[1:]) + "\\n")""")
 
@@ -82,7 +90,7 @@ def sweep(prs, comments=None, covered=None, age=0, proofs=None, state=None, fail
     state: a state dir to keep between sweeps. args: the sweep's (a repo);
     then it returns no notice, and checks it sent none. app: the machine's
     own App's name and its bot's login, when the jobs act as it."""
-    for f in ("proj.log", "notify.log"):
+    for f in ("proj.log", "notify.log", "gh.log"):
         open(os.path.join(tmp, f), "w").close()
     json.dump(prs, open(os.path.join(tmp, "prs.json"), "w"))
     json.dump({str(k): v for k, v in (comments or {}).items()}, open(os.path.join(tmp, "comments.json"), "w"))
@@ -100,7 +108,7 @@ def sweep(prs, comments=None, covered=None, age=0, proofs=None, state=None, fail
         repos = {r: {"proofJobs": proofs or {}, "covered": r not in failed} for r in [*covered, *failed]}
         json.dump({"at": time.time() - age, "repos": repos}, open(cov, "w"))
     env = {"DIR": state, "SRC": projects, "OWNER": "Sam", "NOTIFY": notify, "SETTLED": "review-settled", "COVERED": cov,
-           "SEAL": tool, "APP": app[0], "BOT": app[1]}
+           "SEAL": tool, "APP": app[0], "BOT": app[1], "LOCK_WAIT": lock_wait, "REBASE": "rebase"}
     script = "set -euo pipefail\n" + "".join(f"{k}={shlex.quote(v)}\n" for k, v in env.items()) + SWEEP
     subprocess.run(["bash", "-c", script, "renovate-sweep", *args], check=True,
                    env={**os.environ, "PATH": bin_ + ":" + os.environ["PATH"]})
@@ -364,5 +372,45 @@ calls, _ = sweep([pr(1)], projects=two)
 assert sorted(c[-2] for c in calls) == ["q", "r"], calls
 calls, notice = sweep([pr(1)], projects=two, args=["Sam/R"])
 assert [c[-2] for c in calls] == ["r"] and notice is None, calls
+
+# A lock file refresh lock-age refused only because nothing in it is old
+# enough yet (its one red check Renovate's artifacts, and Renovate's comment
+# saying until when) goes to no job: it waits, then Renovate is asked to
+# refresh it again, once a head.
+def refresh(n, ripe, by="me", also=""):
+    p = {**pr(n, labels=()), "title": "Lock file maintenance (cargo)", "headRefName": "renovate/cargo-lock-file-maintenance"}
+    p["statusCheckRollup"] = [*p["statusCheckRollup"], {"__typename": "StatusContext", "context": "renovate/artifacts",
+                                                        "state": "FAILURE", "startedAt": "2099-01-01T00:00:00Z"}]
+    at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ripe))
+    body = ("### \u26a0\ufe0f Artifact update problem\n\nRenovate failed to update an artifact related to this branch.\n\n"
+            "##### File name: undefined\n\n```\nCommand failed: /nix/store/x-lock-age/bin/lock-age main\n"
+            "lock-age: Cargo.lock: c 0.4.1 is too new, took 0.4.0\nlock-age: Cargo.lock: nothing in the refresh was old "
+            "enough, so it went back to the base's, and Renovate would commit its own instead\n"
+            f"lock-age: nothing in the refresh is old enough until {at}\n{also}\n```\n\n")
+    return [p], {n: [{"author": {"login": by}, "body": body}]}
+
+
+def labelled():
+    return [json.loads(x) for x in open(os.path.join(tmp, "gh.log"))]
+
+
+kept = tempfile.mkdtemp(dir=tmp)
+later = time.time() + 3 * 86400
+calls, _ = sweep(*refresh(20, later), state=kept)
+assert calls == [] and labelled() == [], (calls, labelled())
+calls, _ = sweep(*refresh(20, time.time() - 60), state=kept)
+assert calls == [] and labelled() == [[f"repos/{REPO}/issues/20/labels", "-f", "labels[]=rebase"]], (calls, labelled())
+calls, _ = sweep(*refresh(20, time.time() - 60), state=kept)
+assert calls == [] and labelled() == [], (calls, labelled())
+# Anything else in the failure, someone else's comment, no comment, or
+# another red check: red CI, a job's to fix.
+for prs, comments in (refresh(21, later, also="error: failed to select a version"), refresh(21, later, by="mallory"),
+                      (refresh(21, later)[0], {})):
+    calls, _ = sweep(prs, comments)
+    assert len(calls) == 1 and "#21 " in calls[0][-1] and labelled() == [], (prs, comments, calls)
+prs, comments = refresh(21, later)
+prs[0]["statusCheckRollup"][0]["conclusion"] = "FAILURE"
+calls, _ = sweep(prs, comments)
+assert len(calls) == 1 and "#21 " in calls[0][-1], calls
 
 print("renovate-sweep: ok")

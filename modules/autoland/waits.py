@@ -60,15 +60,17 @@ def read(repo, prs):
     OPEN[repo] = {key_of(repo, pr) for pr in prs}
 
 
-def item(repo, pr, phase, minutes, kick, rev):
+def item(repo, pr, phase, minutes, kick, rev, until=None):
     # .get: what failed may be the PR's own record.
     return {"what": f"{repo}#{pr['number']} {pr.get('title', '')}".strip(), "link": pr.get("url"), "phase": phase,
-            "minutes": minutes, "kick": kick, "rev": rev}
+            "minutes": minutes, "kick": kick, "rev": rev, "until": until}
 
 
-def note(repo, pr, phase, wait):
+def note(repo, pr, phase, wait, until=None):
     """The PR's wait as its status says it (its last in a pass stands); wait
-    None: nothing to watch."""
+    None: nothing to watch. One for a time to come (until: a lock file
+    refresh waiting for its releases to be old enough) is due its minutes
+    after that."""
     if wait is None:
         NOTED.setdefault(repo, {})[key_of(repo, pr)] = None
         return
@@ -76,7 +78,7 @@ def note(repo, pr, phase, wait):
     kick = None if wait == HOLD else f"renovate-sweep/{repo}" if sweep else f"autoland/{repo}"
     minutes = repo_cfg(repo)["holdStallAfter" if wait == HOLD else "stallAfter"]
     rev = f"{pr['headRefOid']} {pr['baseRefName']}"
-    NOTED.setdefault(repo, {})[key_of(repo, pr)] = item(repo, pr, phase, minutes, kick, rev)
+    NOTED.setdefault(repo, {})[key_of(repo, pr)] = item(repo, pr, phase, minutes, kick, rev, until)
 
 
 def overdue(repo, pr, why, said=None):
@@ -139,7 +141,8 @@ def publish(seen, digest, full):
             if key in SAID:
                 phase = f"{phase}: {SAID[key]}"
             items[key] = {"what": it["what"], "link": it["link"], "phase": phase, "since": since,
-                          "due": since if key in FAILING else since + it["minutes"] * MIN, "kick": it["kick"],
+                          "due": since if key in FAILING else max(since, it.get("until") or 0) + it["minutes"] * MIN,
+                          "kick": it["kick"],
                           "rev": it["rev"]}
     save("watch.json", {"at": C.NOW, "items": items})
     if items != was:

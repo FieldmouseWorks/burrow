@@ -12,8 +12,8 @@
 #                               finishes CI); the notices wait for a full one
 # The autoland steward's own status (SETTLED) doesn't count as a check. With
 # the machine's own App, APP, it and its jobs act on GitHub as that App, whose
-# bot GraphQL calls BOT. (DIR, SRC, OWNER, NOTIFY, SETTLED, COVERED, SEAL, APP
-# and BOT come from ../updates.nix.)
+# bot GraphQL calls BOT. (DIR, SRC, OWNER, NOTIFY, SETTLED, COVERED, SEAL, APP,
+# BOT, LOCK_WAIT and REBASE come from ../updates.nix.)
 #
 # The job's verdict on a major: ok when it can merge as it is, held when it
 # shouldn't (its comment says why). The job ends that comment with a marker
@@ -167,6 +167,22 @@ for d in "$src"/*/; do
         else why="its CI is green and it still hasn't merged"
         fi
         echo "- $title: https://github.com/$repo/pull/$n ($why)" >>"$stuck"
+      fi
+      # A lock file refresh whose one red check is Renovate's artifacts, from
+      # lock-age refusing it only because nothing in it is old enough yet,
+      # is no fix for a job: it waits for the time Renovate's comment on it
+      # gives (LOCK_WAIT, ../autoland/lock_wait.py). Then Renovate is asked
+      # to refresh it again (its rebase label), once a head: it won't by
+      # itself while the branch doesn't conflict.
+      if [ "$(jq -c '[.[] | select(.state == "red") | .name]' <<<"$ci")" = '["renovate/artifacts"]' ] && [ -n "$me" ]; then
+        ripe=$(gh pr view "$n" -R "$repo" --json comments 2>/dev/null | "$LOCK_WAIT" "$me" || true)
+        if [ -n "$ripe" ]; then
+          if [ "$(date +%s)" -ge "$ripe" ] && [ "$seen" != "$sha refreshed" ] &&
+            gh api -X POST "repos/$repo/issues/$n/labels" -f "labels[]=$REBASE" >/dev/null; then
+            echo "$sha refreshed" >"$key"
+          fi
+          continue
+        fi
       fi
       [ "$red" -gt 0 ] || [ "$major" = true ] || continue
       # A major waits for its CI to finish, unless some of it is red already:

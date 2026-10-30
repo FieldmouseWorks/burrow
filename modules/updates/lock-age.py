@@ -21,7 +21,10 @@ registry, a tarball from elsewhere), a lock file taken all the way back to
 the base's (Renovate would then commit its own, unchecked), an npm lock
 file without a packages map (npm 6's) or any other lock file changing
 (yarn, pnpm) fails the refresh: Renovate shows it as an artifact failure
-and doesn't merge it. A git dependency's commit is taken as it is, as Nix
+and doesn't merge it. When the only failure is that nothing in a refresh is
+old enough yet, its last line says when the first of it will be (WAITING),
+for the pipeline to wait for rather than take it for red CI to fix
+(autoland/lock_wait.py). A git dependency's commit is taken as it is, as Nix
 inputs are, in Cargo.lock and package-lock.json alike (burrow#82).
 
 POLICY is the machine's own Renovate config (JSON). The age is the longest
@@ -57,6 +60,10 @@ import json5
 UA = "burrow lock-age (https://github.com/FieldmouseWorks/burrow)"
 CRATES_IO = "registry+https://github.com/rust-lang/crates.io-index"
 NPM = "https://registry.npmjs.org/"
+# lock-age's last line when all it refused is too young, and when the
+# refresh will have something old enough: autoland/lock_wait.py reads it in
+# Renovate's comment on the failure.
+WAITING = "lock-age: nothing in the refresh is old enough until {}"
 ROUNDS = 6  # passes over a Cargo.lock before what's left is a failure
 TRIES = 5  # older versions asked about per crate per pass
 # Where Renovate looks for a repo's own config, in its order
@@ -245,9 +252,13 @@ def precise(d, name, version, to):
     return p.returncode == 0
 
 
-def cargo(path, cutoff, bad):
+def cargo(path, cutoff, age, bad):
+    """Takes the refresh's too young crates back. When that leaves the lock
+    file as the base's, when the first of them is old enough."""
     d = os.path.dirname(path) or "."
     base = base_text(path)
+    young = cargo_young(path, base, cutoff, [])
+    ripe = min((crate_published(p["name"], p["version"]) + age for p in young), default=None)
     # The base's crates.io versions, the only ones to go back to.
     base_versions = {}
     for p in cargo_packages(base):
@@ -289,8 +300,12 @@ def cargo(path, cutoff, bad):
     for p in cargo_young(path, base, cutoff, bad):
         bad.append(f"{path}: {p['name']} {p['version']} was published within the age, and couldn't be taken back")
     if same_as_base(path, base):
-        bad.append(f"{path}: nothing in the refresh was old enough, so it went back to the base's, and Renovate "
-                   "would commit its own instead")
+        log(f"{path}: nothing in the refresh was old enough, so it went back to the base's, and Renovate would "
+            "commit its own instead")
+        if ripe is None:
+            bad.append(f"{path}: the refresh went back to the base's without anything too young in it")
+        return ripe
+    return None
 
 
 def npm_entries(lock):
@@ -328,10 +343,27 @@ def npm_cutoff(d, cutoff):
     return min(cutoffs).astimezone(dt.timezone.utc)
 
 
-def npm(path, cutoff, bad):
+def npm_ripe(refresh, base, cutoff, age):
+    """When the first registry release the refresh brought in that's too
+    young will be old enough, or None."""
+    try:
+        had = set(npm_entries(json.loads(base))) if base else set()
+        new = [x for x in npm_entries(json.loads(refresh)) if x not in had and (x[2] or "").startswith(NPM)]
+    except (ValueError, KeyError, AttributeError, TypeError):
+        return None
+    times = (npm_published(name, version) for name, version, _ in new)
+    return min((t + age for t in times if t > cutoff), default=None)
+
+
+def npm(path, cutoff, age, bad):
+    """Makes the lock file again under the cutoff. When it comes out as the
+    base's, when the first of the refresh's too young releases is old
+    enough."""
     d = os.path.dirname(path) or "."
     base = base_text(path)
     cutoff = npm_cutoff(d, cutoff)
+    with open(path) as f:
+        refresh = f.read()
     os.remove(path)
     # Twice: a lock file made from nothing can come out inconsistent with
     # package.json until npm runs again over it (Renovate's npmInstallTwice).
@@ -341,16 +373,19 @@ def npm(path, cutoff, bad):
         if p.returncode != 0:
             bad.append(f"{path}: npm couldn't resolve with only releases from before {cutoff:%Y-%m-%d %H:%M}Z: "
                        + (p.stderr.strip().splitlines() or ["no output"])[-1])
-            return
+            return None
     with open(path) as f:
         lock = json.load(f)
     if lock.get("lockfileVersion", 0) < 2 or not isinstance(lock.get("packages"), dict):
         bad.append(f"{path}: lock file version {lock.get('lockfileVersion')} has no packages map to check")
-        return
+        return None
     if same_as_base(path, base):
-        bad.append(f"{path}: nothing in the refresh was old enough, so it came out as the base's, and Renovate "
-                   "would commit its own instead")
-        return
+        log(f"{path}: nothing in the refresh was old enough, so it came out as the base's, and Renovate would "
+            "commit its own instead")
+        ripe = npm_ripe(refresh, base, cutoff, age)
+        if ripe is None:
+            bad.append(f"{path}: the refresh came out as the base's without anything too young in it")
+        return ripe
     try:
         had = set(npm_entries(json.loads(base))) if base else set()
     except (ValueError, KeyError, AttributeError):
@@ -362,6 +397,7 @@ def npm(path, cutoff, bad):
             bad.append(f"{path}: {name} {version} comes from {resolved}, whose publish time isn't known")
         elif npm_published(name, version) > cutoff:
             bad.append(f"{path}: {name} {version} was published within the age")
+    return None
 
 
 def default_branch():
@@ -406,21 +442,29 @@ def main(argv):
     except Exception as e:
         log(f"{type(e).__name__}: {e}")
         return 1
-    cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=age)
+    age = dt.timedelta(seconds=age)
+    cutoff = dt.datetime.now(dt.timezone.utc) - age
+    ripe = []  # when each lock file that went back to the base's will have something
     for path in paths:
         name = os.path.basename(path)
         try:
             if name == "Cargo.lock":
-                cargo(path, cutoff, bad)
+                ripe.append(cargo(path, cutoff, age, bad))
             elif name == "package-lock.json":
-                npm(path, cutoff, bad)
+                ripe.append(npm(path, cutoff, age, bad))
             elif name in ("yarn.lock", "pnpm-lock.yaml", "bun.lock", "bun.lockb", "npm-shrinkwrap.json"):
                 bad.append(f"{path}: lock-age can't check this kind of lock file")
         except Exception as e:  # a registry that didn't answer proves nothing
             bad.append(f"{path}: {type(e).__name__}: {e}")
     for line in bad:
         log(line)
-    return 1 if bad else 0
+    ripe = [x for x in ripe if x is not None]
+    if ripe and not bad:
+        # Last, and only when it's all there is: every lock file that went
+        # back has something by then.
+        print(WAITING.format(max(ripe).astimezone(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")),
+              file=sys.stderr, flush=True)
+    return 1 if bad or ripe else 0
 
 
 if __name__ == "__main__":

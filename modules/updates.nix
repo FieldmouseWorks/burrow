@@ -65,6 +65,10 @@ let
     # The repos the steward covers, as it last found them; none without it.
     COVERED = if config.burrow.autoland.enable or false then "${stateDir}/autoland/repos.json" else "";
     SEAL = "${majorSeal}/bin/major-seal";
+    # When a lock file refresh lock-age refused for age only can go again,
+    # and the label that has Renovate refresh it then.
+    LOCK_WAIT = "${lockWait}/bin/lock-wait";
+    REBASE = renovateSettings.rebaseLabel or "rebase";
     # The App the jobs these start act as (proj run --app), and its bot as
     # GraphQL names it: none without burrow.github.machinery.
     APP = if machineApp == null then "" else machineApp.name;
@@ -149,6 +153,16 @@ let
       executionMode = "branch";
     };
   };
+  # What reads lock-age's refusal for age in Renovate's comment
+  # (autoland/lock_wait.py, the steward's too), linted as it's built.
+  lockWaitSrc = pkgs.runCommand "lock-wait-src" { nativeBuildInputs = [ pkgs.python3Packages.flake8 ]; } ''
+    mkdir $out
+    cp ${./autoland/lock_wait.py} $out/lock_wait.py
+    flake8 --ignore E501,W503 $out
+  '';
+  lockWait = pkgs.writeShellScriptBin "lock-wait" ''
+    exec ${pkgs.python3}/bin/python3 -I ${lockWaitSrc}/lock_wait.py "$@"
+  '';
   majorSeal = pkgs.writeShellScriptBin "major-seal" ''
     exec ${pkgs.python3}/bin/python3 -E -s ${majorSealSrc}/major-seal.py ${stateDir}/renovate-sweep "$@"
   '';

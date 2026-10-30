@@ -19,6 +19,8 @@ import re
 import time
 
 import common as C
+import dashboard as D
+import lock_wait
 import proofs as P
 import reviewers as V
 import waits
@@ -145,12 +147,13 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
         after(since, wait)  # ends: a Claude job takes it then
         return since + wait * MIN
 
-    def settle(state, desc, why=None, wait=waits.STEWARD):
-        """The PR's status, and what it waits on for the watchdog (waits.py)."""
+    def settle(state, desc, why=None, wait=waits.STEWARD, until=None):
+        """The PR's status, and what it waits on for the watchdog (waits.py),
+        from until when it's to be counted."""
         ok = post_status(repo, pr, state, desc)
         if why:
             digest.append((why, line, desc))
-        waits.note(repo, pr, desc, wait)
+        waits.note(repo, pr, desc, wait, until)
         # Not settled (any more): nothing may merge it.
         if state != "success" and (C.queued(pr) or st.get("landed")):
             if C.unland(repo, pr):
@@ -619,7 +622,14 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
         threads = f"{open_threads} open review thread{'s' * (open_threads > 1)}" if open_threads else ""
         if changes:
             threads = ", ".join([threads] * bool(threads) + ["changes requested by " + ", ".join(changes)])
-        if renovate and ci == "red":
+        # A lock file refresh with nothing old enough in it yet waits for the
+        # day it has (lock_wait.py), renovate-sweep's to have it refreshed then.
+        ripe = renovate and ci_names == [lock_wait.ARTIFACTS] and lock_wait.ripe(pr["comments"]["nodes"], D.renovated)
+        if ripe and ci == "red" and not threads:
+            when = time.strftime("%b %-d, ", time.localtime(ripe)) + clock(ripe)
+            settle("pending", f"Lock file refresh, nothing in it old enough until {when}; renovate-sweep has it refreshed then",
+                   wait=waits.SWEEP, until=ripe)
+        elif renovate and ci == "red":
             settle("pending", "Dependency update, CI red; renovate-sweep has it" + (f" ({threads})" if threads else ""),
                    wait=waits.SWEEP)
         elif renovate and dep == "major" and threads and not major_verdict:

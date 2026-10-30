@@ -4,8 +4,10 @@ too-new releases are taken back or fail it, and nothing else does.
     python3 -I tests/lock-age.py modules/updates/lock-age.py
 """
 
+import contextlib
 import datetime as dt
 import importlib.util
+import io
 import json
 import os
 import re
@@ -168,6 +170,22 @@ def lock_age(policy=POLICY, branch="main"):
     return L.main(["lock-age", path, "release-ages", branch])
 
 
+def waiting(policy=POLICY):
+    """lock-age's answer, and when its last line says the refresh has
+    something old enough (None: it doesn't say)."""
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        code = lock_age(policy)
+    last = (err.getvalue().strip().splitlines() or [""])[-1]
+    m = re.fullmatch(re.escape(L.WAITING).replace(r"\{\}", r"(\S+)"), last)
+    return code, m and dt.datetime.strptime(m.group(1), "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=dt.timezone.utc)
+
+
+def ripe(published):
+    """When a release published then is old enough, to the second."""
+    return dt.datetime.strptime(published, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=dt.timezone.utc) + dt.timedelta(seconds=AGE)
+
+
 def versions(path="Cargo.lock"):
     return {p["name"]: p["version"] for p in L.cargo_packages(open(path).read())}
 
@@ -210,16 +228,29 @@ REFUSE.append(lambda text, name, to: name == "e" and 'name = "q"\nversion = "1.1
 assert lock_age() == 0 and versions() == {"b": "2.1.0", "e": "1.0.0", "q": "1.0.0"}, versions()
 
 # Taken all the way back to the base's, the lock file would look unchanged,
-# and Renovate would commit its own refresh instead: that fails it.
+# and Renovate would commit its own refresh instead: that fails it, saying
+# last when its first too young release is old enough, for the steward to
+# wait for.
 repo({"Cargo.lock": cargo_lock(("c", "0.4.0"))})
 write("Cargo.lock", cargo_lock(("c", "0.4.1")))
-assert lock_age() == 1 and versions() == {"c": "0.4.0"}, versions()
+assert waiting() == (1, ripe(NEW)) and versions() == {"c": "0.4.0"}, versions()
+# The first of several.
+INDEX.update(g={"1.0.0": OLD, "1.1.0": NEW, "1.2.0": MID})
+repo({"Cargo.lock": cargo_lock(("c", "0.4.0"), ("g", "1.0.0"))})
+write("Cargo.lock", cargo_lock(("c", "0.4.1"), ("g", "1.2.0")))
+assert waiting({"minimumReleaseAge": "1 weeks"}) == (1, ripe(MID) + dt.timedelta(days=4)), versions()
 
 # Even when another lock file did change.
 repo({"Cargo.lock": cargo_lock(("c", "0.4.0")), "x/Cargo.lock": cargo_lock(("b", "2.0.0"))})
 write("Cargo.lock", cargo_lock(("c", "0.4.1")))
 write("x/Cargo.lock", cargo_lock(("b", "2.1.0")))
-assert lock_age() == 1
+assert waiting() == (1, ripe(NEW))
+
+# Anything else wrong with the refresh, and it isn't only a wait.
+repo({"Cargo.lock": cargo_lock(("c", "0.4.0")), "x/Cargo.lock": cargo_lock(("unknown", "1.0.0"))})
+write("Cargo.lock", cargo_lock(("c", "0.4.1")))
+write("x/Cargo.lock", cargo_lock(("unknown", "1.1.0")))
+assert waiting() == (1, None)
 
 # Paths come through whole: a space, a tab, a quote, non-ASCII.
 for d in ("my dir", "caf\u00e9", 'a\t"b'):
@@ -405,6 +436,13 @@ before = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=AGE))
 got = dt.datetime.strptime(re.search(r"--before=(\S+)", " ".join(cmd)).group(1), "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=dt.timezone.utc)
 assert cwd == "web" and abs((got - before).total_seconds()) < 60, (cmd, got, before)
 assert "left-pad" in open("web/package-lock.json").read() and '"1.1.0"' in open("web/package-lock.json").read()
+
+# Made again, it comes out as the base's: the refresh waits for its first
+# too young release, as Cargo's does.
+repo({"package-lock.json": npm_lock(("node_modules/left-pad", "1.1.0"))})
+write("package-lock.json", npm_lock(("node_modules/left-pad", "1.2.0")))
+RESOLVES["lock"] = npm_lock(("node_modules/left-pad", "1.1.0"))
+assert waiting() == (1, ripe(NEW))
 
 # npm can't resolve under the cutoff: the refresh fails, it isn't retried without.
 repo({"package-lock.json": npm_lock(("node_modules/left-pad", "1.0.0"))})

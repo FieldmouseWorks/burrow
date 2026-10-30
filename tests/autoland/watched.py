@@ -7,8 +7,9 @@ going on the stuck issue."""
 import json
 import os
 import sys
+import time
 
-from harness import KICKS, WROTE, T, C, S, fresh_pr_state, info, mkpr, stand_in, tmp
+from harness import CI_GREEN, KICKS, WROTE, T, C, S, fresh_pr_state, info, mkpr, said, stand_in, tmp
 
 import waits
 
@@ -93,6 +94,20 @@ OPEN["sam/r"][3] = pr("sam/r", 8, sha="c" * 40, **major)
 rebased = run(250)
 assert rebased["sam/r#8"]["phase"] == items["sam/r#8"]["phase"], rebased
 assert rebased["sam/r#8"]["since"] == T + 250 and rebased["sam/r#8"]["due"] == T + 250 + 120 * MIN and kicked(), rebased
+# A lock file refresh waiting for its releases to be old enough is due its
+# allowance after that, not after it began waiting.
+ripe = T + 3 * 86400
+lock = {"branch": "renovate/cargo-lock-file-maintenance", "title": "Lock file maintenance (cargo)", "checks": [
+    *CI_GREEN, {"__typename": "StatusContext", "context": "renovate/artifacts", "state": "FAILURE"}],
+    "comments": [said("### Artifact update problem\n\n```\nlock-age: nothing in the refresh is old enough until "
+                      f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(ripe))}\n```\n")]}
+OPEN["sam/r"].append(pr("sam/r", 9, **lock))
+waiting = run(260)
+assert "old enough until" in waiting["sam/r#9"]["phase"] and waiting["sam/r#9"]["kick"] == "renovate-sweep/sam/r", waiting
+assert waiting["sam/r#9"]["since"] == T + 260 and waiting["sam/r#9"]["due"] == ripe + 120 * MIN, waiting
+OPEN["sam/r"].pop()
+run(270)
+
 # On to the next thing (findings answered, CI, a job...): a new start and a
 # new deadline, and the watchdog hears.
 OPEN["sam/r"][0] = pr("sam/r", 5, threads=[False])
