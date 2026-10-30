@@ -21,6 +21,10 @@ pub struct Item {
     pub link: Option<String>,
     /// The burrow-events pass to kick for it: HANDLER[/OWNER/REPO].
     pub kick: Option<String>,
+    /// A turn waiting for a slot in proj's line (proj's job_wait), which a job
+    /// of its own would only join.
+    #[serde(default)]
+    pub line: bool,
 }
 
 /// An item past its deadline, or a source stuck itself (`key` "").
@@ -62,6 +66,7 @@ fn item(it: &Value) -> Option<Item> {
         due: number("due")?,
         link: text("link"),
         kick: text("kick"),
+        line: it.get("line").and_then(Value::as_bool).unwrap_or(false),
     })
 }
 
@@ -109,6 +114,7 @@ pub fn overdue(
                             due: at + stale,
                             link: None,
                             kick: src.kick.clone(),
+                            line: false,
                         },
                     },
                 );
