@@ -1,13 +1,12 @@
-# systemd-oomd (burrow.ops.oomd) never kills a Remote Control server, which
-# would take every session on it: a session drowning its server in memory
-# pressure is left to the kernel, which kills that session alone at the
-# server's cap. Nor does a proj job pay for claude.slice reaching its
+# systemd-oomd (burrow.ops.oomd) never kills a Remote Control server or any
+# of its sessions: a session drowning its server in memory pressure is left
+# to the kernel, which kills that session alone at its own cap. Nor does a proj job pay for claude.slice reaching its
 # MemoryHigh, which slows every job under it. The same pressure anywhere oomd
 # may kill is still oomd's: a CI runner's slice outside system.slice (with a
 # drop-in of its own), a login session, a slice a user made up on the spot.
 # The control watches pressure the way burrow.ops did before (the root,
 # user.slice and every slice in a user's manager, NixOS's own options) with
-# no opt-out on the server, and loses the whole server to oomd, and the job.
+# no opt-out on the server, and loses the session to oomd, and the job.
 #
 #   nix build .#checks.x86_64-linux.remote-control-oomd -L
 { self, pkgs }:
@@ -37,18 +36,23 @@ let
       }
     }
   '';
-  # Claude's server, as far as oomd and the cap can tell: one process with two
-  # sessions. The sibling sleeps; the other waits for a line on the folder's
-  # `go`, then thrashes. The server notes each session's pid (NAME.pid) and
-  # how it ended (NAME.exit).
+  # Claude's server, as far as oomd and the caps can tell: one process with
+  # two sessions, and Claude Code's ~/.claude/sessions/PID.json for each,
+  # which starts the scan that gives it its cgroup. The sibling sleeps; the
+  # other waits for a line on the folder's `go`, then thrashes. The server
+  # notes each session's pid (NAME.pid) and how it ended (NAME.exit).
   claude = pkgs.writeShellScriptBin "claude" ''
+    mkdir -p ~/.claude/sessions
     declare -A names
+    session() {
+      names[$!]=$1
+      echo $! >"$1.pid"
+      echo "{\"pid\":$!,\"status\":\"idle\",\"statusUpdatedAt\":$(( ($(${pkgs.coreutils}/bin/date +%s) - 7200) * 1000 ))}" >~/.claude/sessions/$!.json
+    }
     sleep infinity &
-    names[$!]=sibling
-    echo $! >sibling.pid
+    session sibling
     { read -r _ <go; exec ${thrash}/bin/thrash; } &
-    names[$!]=thrash
-    echo $! >thrash.pid
+    session thrash
     while wait -n -p ended; status=$?; [ -n "''${ended:-}" ]; do
       echo $status >"''${names[$ended]}.exit"
       ended=
@@ -61,12 +65,15 @@ let
       claude.package = claude;
       remoteControl = {
         enable = true;
-        servers.busy.memoryMax = "256M";
+        servers.busy.sessionMemoryMax = "256M";
       };
     };
     # Pressure without waiting for the cap: past MemoryHigh the kernel makes
     # the session sleep off every MiB it takes, which is all memory stall.
-    systemd.user.services."claude-rc@busy".serviceConfig.MemoryHigh = "48M";
+    systemd.user.services."claude-rc@busy" = {
+      overrideStrategy = "asDropin";
+      serviceConfig.MemoryHigh = "48M";
+    };
     environment.systemPackages = [ pkgs.attr ];
 
     users.users.dev = {
@@ -124,6 +131,7 @@ pkgs.testers.runNixOSTest {
   };
 
   testScript = ''
+    import re
     import time
 
     UNIT = "claude-rc@busy.service"
@@ -175,8 +183,9 @@ pkgs.testers.runNixOSTest {
         return paths
 
     def marked(m, cgroup):
-        # oomd's own word for each kill it makes.
-        return m.execute(f"journalctl -o cat -u systemd-oomd | grep -qF 'Marked {cgroup} for killing'")[0] == 0
+        # oomd's own word for each kill it makes, of the cgroup or one under it.
+        out = m.succeed("journalctl -o cat -u systemd-oomd")
+        return re.search(rf"^Marked {re.escape(cgroup)}(/\S+)? for killing", out, re.M) is not None
 
     start_all()
     cgroup = {}
@@ -185,7 +194,7 @@ pkgs.testers.runNixOSTest {
         m.wait_until_succeeds(f"test -s {DIR}/thrash.pid && test -s {DIR}/sibling.pid", timeout=120)
         cgroup[m] = show(m, "ControlGroup")["ControlGroup"]
         for s in ("thrash", "sibling"):
-            m.succeed(f"grep -qx '0::{cgroup[m]}' /proc/{pid(m, s)}/cgroup")
+            m.wait_until_succeeds(f"grep -qx '0::{cgroup[m]}/session-{pid(m, s)}' /proc/{pid(m, s)}/cgroup", timeout=60)
     # The server's cgroup and every one above it: a pressure watch on any of
     # them could pick the server.
     parts = cgroup[guarded].split("/")
@@ -213,10 +222,10 @@ pkgs.testers.runNixOSTest {
     guarded.succeed(f"systemd-run --user -M dev@ --unit=build-thrash --slice=build-tests.slice -p WorkingDirectory=/home/dev/build {caps} ${thrash}/bin/thrash")
     retry(lambda _: full(guarded, cgroup[guarded]) > 80, timeout_seconds=120)
 
-    with subtest("the control: oomd kills the whole server, every session on it"):
-        control.wait_until_succeeds(f"journalctl -o cat -u systemd-oomd | grep -F 'Marked {cgroup[control]} for killing'", timeout=120)
-        control.wait_until_fails(f"kill -0 {sibling[control]}", timeout=30)
-        control.wait_until_succeeds(f"[ $(systemctl --user -M dev@ show -p NRestarts --value {UNIT}) -gt {before[control]['NRestarts']} ]", timeout=60)
+    with subtest("the control: oomd kills the session"):
+        thrash = pid(control, "thrash")
+        retry(lambda _: marked(control, f"{cgroup[control]}/session-{thrash}"), timeout_seconds=120)
+        control.wait_until_fails(f"kill -0 {thrash}", timeout=30)
 
     with subtest("guarded, a minute more of the same pressure, and oomd leaves the server be"):
         # The control has been through the same by now: past oomd's 30s.
@@ -232,7 +241,7 @@ pkgs.testers.runNixOSTest {
                    "/user.slice/user-1001.slice/user@1001.service/build.slice/build-tests.slice/build-thrash.service"):
             retry(lambda _: marked(guarded, cg), timeout_seconds=120)
 
-    with subtest("the session goes over the server's cap, and the kernel kills it alone"):
+    with subtest("the session goes over its own cap, and the kernel kills it alone"):
         guarded.succeed(f"systemctl --user -M dev@ set-property --runtime {UNIT} MemoryHigh=infinity")
         guarded.wait_until_succeeds(f"grep -qx 137 {DIR}/thrash.exit", timeout=120)
         guarded.succeed(f"grep -q '^oom_kill [1-9]' /sys/fs/cgroup{cgroup[guarded]}/memory.events")

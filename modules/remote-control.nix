@@ -21,17 +21,21 @@
 # and run in burrow.remoteControl.permissionMode: bypassPermissions alongside
 # burrow.claude, like every other session here, so only its one-way doors ask.
 #
-# Each server and every session it holds share one memory cap
-# (burrow.remoteControl.memoryMax). Past it the kernel kills the biggest
-# process there, usually the session that grew, and only that: the server and
-# its other sessions carry on, and the killed one's transcript stays on disk
-# for claude.ai to resume.
+# Each session has a memory cap of its own, and so does the server itself
+# (burrow.remoteControl.sessionMemoryMax): claude-rc-scan gives each a cgroup
+# of its own under the server's (crates/burrow-rc-place). Past it the kernel
+# kills the biggest process there, usually the session that grew, and only
+# that: the server and its other sessions carry on, and the killed one's
+# transcript stays on disk for claude.ai to resume.
 inputs:
-{ config, lib, pkgs, utils, ... }:
+{ config, lib, pkgs, ... }:
 let
   cfg = config.burrow.remoteControl;
   inherit (config.burrow) user projectsDir;
   tmux = "${cfg.tmux}/bin/tmux";
+  burrow = inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow;
+  # What systemd and burrow-rc-place both read as a memory cap.
+  memoryCap = lib.types.strMatching "[0-9]+[KMGT]?|infinity";
   # How long a stale server waits on a session that has stopped doing anything.
   idleMinutes = 30;
 
@@ -70,7 +74,7 @@ let
 
   scan = pkgs.writeShellApplication {
     name = "claude-rc-scan";
-    runtimeInputs = [ pkgs.systemd pkgs.coreutils pkgs.findutils pkgs.gnugrep pkgs.procps pkgs.jq ];
+    runtimeInputs = [ pkgs.systemd pkgs.coreutils pkgs.findutils pkgs.gnugrep pkgs.jq ];
     text = ''
       # Start a server for every project folder, stop the ones whose folder is gone,
       # and restart the stale ones once they hold no session.
@@ -113,7 +117,12 @@ let
       # that already has its own server, so it gets none; neither does a folder
       # matching burrow.remoteControl.skip.
       skips=(${lib.escapeShellArgs cfg.skip})
+      # Each server's sessions' cap, by folder (sessionMemoryMax).
+      default=${lib.escapeShellArg cfg.sessionMemoryMax}
+      declare -A caps=(${lib.concatStrings (lib.mapAttrsToList (name: server:
+        "[${lib.escapeShellArg name}]=${lib.escapeShellArg server.sessionMemoryMax} ") cfg.servers)})
       want=()
+      cap=()
       for d in ${lib.escapeShellArg projectsDir}/*/; do
         [ -d "$d" ] || continue
         name=$(basename "$d")
@@ -125,6 +134,7 @@ let
         done
         [ -z "$skip" ] || continue
         want+=("$(systemd-escape --template claude-rc@.service "$name")")
+        cap+=("''${caps[$name]:-$default}")
       done
       for unit in "''${want[@]}"; do
         systemctl --user start --no-block "$unit"
@@ -134,6 +144,36 @@ let
         for w in "''${want[@]}"; do [ "$w" = "$unit" ] && keep=1; done
         [ -n "$keep" ] || systemctl --user stop --no-block "$unit"
       done < <(systemctl --user list-units --plain --no-legend --all 'claude-rc@*.service')
+      # Every running server's sessions, each in a cgroup of its own under
+      # its cap, and the server in one of its own (burrow-rc-place). A
+      # session starts in the server's, and its ~/.claude/sessions/PID.json
+      # starts the scan that moves it out. Exits 1 if it can't tell what the
+      # sessions are, and 2 if it could but couldn't place some: the scan
+      # carries on, and fails once it's done.
+      running=()
+      servers=
+      for i in "''${!want[@]}"; do
+        unit=''${want[$i]}
+        pid=
+        cgroup=
+        while IFS='=' read -r key value; do
+          case $key in
+            MainPID) pid=$value ;;
+            ControlGroup) cgroup=$value ;;
+          esac
+        done < <(systemctl --user show -p MainPID -p ControlGroup "$unit")
+        [ -n "$pid" ] && [ "$pid" != 0 ] && [ -n "$cgroup" ] && [ -r "/proc/$pid/cmdline" ] || continue
+        running+=("$unit $pid")
+        servers+="$unit $pid ''${cap[$i]} /sys/fs/cgroup$cgroup"$'\n'
+      done
+      placed=0
+      found=$(printf %s "$servers" | ${burrow}/bin/burrow-rc-place) || placed=$?
+      declare -A served=()
+      while read -r unit session; do
+        if [ -n "$unit" ]; then
+          served[$unit]+=" $session"
+        fi
+      done <<<"$found"
       # A switch leaves running servers alone (restartIfChanged), so a server
       # keeps the tmux and the claude-rc-serve it started with: its Claude
       # Code, its permission mode, where its sessions run. One that runs any
@@ -167,21 +207,24 @@ let
         (( now < until ))
       }
       wake=
-      for unit in "''${want[@]}"; do
-        pid=$(systemctl --user show -p MainPID --value "$unit")
-        [ "$pid" != 0 ] && [ -r "/proc/$pid/cmdline" ] || continue
+      for server in "''${running[@]}"; do
+        read -r unit pid <<<"$server"
         [[ $(tr '\0' ' ' <"/proc/$pid/cmdline") == ${lib.escapeShellArg "${tmux} "}*${lib.escapeShellArg "${serve}/bin/claude-rc-serve"}* ]] && continue
         busy=
         last=0
-        for rc in $(pgrep -P "$pid"); do
-          # Any state but Z: a zombie is a session that already ended.
-          for s in $(pgrep -P "$rc" -r D,I,R,S,T,t); do
+        if (( placed == 1 )); then
+          # Its sessions unknown, it's held as if one were working.
+          busy=1
+          last=$(( now + quiet ))
+        else
+          read -ra own <<<"''${served[$unit]:-}"
+          for s in "''${own[@]}"; do
             if held "$s"; then
               busy=1
               (( until <= last )) || last=$until
             fi
           done
-        done
+        fi
         if [ -z "$busy" ]; then
           systemctl --user restart --no-block "$unit"
         elif [ -z "$wake" ] || (( last < wake )); then
@@ -202,6 +245,7 @@ let
             --timer-property=AccuracySec=1s --timer-property=RemainAfterElapse=no
         fi
       fi
+      (( placed == 0 ))
     '';
   };
 in
@@ -259,31 +303,34 @@ in
       example = [ "website" ];
       description = "Project folders whose sessions all work in the folder itself, whatever spawn says.";
     };
-    memoryMax = lib.mkOption {
-      type = lib.types.str;
+    sessionMemoryMax = lib.mkOption {
+      type = memoryCap;
       default = "8G";
       example = "12G";
       description = ''
-        The most memory one server may hold with all its sessions (its unit's
-        MemoryMax; "infinity" for none), none of it in swap: swap would let
-        it grow past the cap without ever reaching it. Past it the kernel
-        kills the biggest process there, usually the session that grew, and
-        the server and its other sessions carry on (OOMPolicy=continue).
-        systemd-oomd never picks a server (burrow.ops.oomd). Every server is
-        under burrow.claude.memory's cap too.
+        The most memory each session may hold with everything it runs, in a
+        cgroup of its own, and the server itself the same in one of its own
+        (their memory.max): bytes, with K, M, G or T, or "infinity" for none.
+        None of it in swap: swap would let a session grow past its cap
+        without ever reaching it. Past it the kernel kills the biggest
+        process there, usually the session that grew, and the server and its
+        other sessions carry on (OOMPolicy=continue). A session starts in the
+        server's cgroup and moves to its own at the scan its start sets off.
+        systemd-oomd never picks a server (burrow.ops.oomd). Every server and
+        its sessions are under burrow.claude.memory's cap too.
       '';
     };
     servers = lib.mkOption {
       type = lib.types.attrsOf (lib.types.submodule {
-        options.memoryMax = lib.mkOption {
-          type = lib.types.str;
-          default = cfg.memoryMax;
-          defaultText = lib.literalExpression "config.burrow.remoteControl.memoryMax";
-          description = "This server's memoryMax.";
+        options.sessionMemoryMax = lib.mkOption {
+          type = memoryCap;
+          default = cfg.sessionMemoryMax;
+          defaultText = lib.literalExpression "config.burrow.remoteControl.sessionMemoryMax";
+          description = "This server's sessionMemoryMax.";
         };
       });
       default = { };
-      example = lib.literalExpression ''{ homelab.memoryMax = "12G"; }'';
+      example = lib.literalExpression ''{ homelab.sessionMemoryMax = "12G"; }'';
       description = "Settings for the servers of some project folders, by folder name.";
     };
     tmux = lib.mkOption {
@@ -299,7 +346,7 @@ in
     };
   };
 
-  config = lib.mkIf cfg.enable (lib.mkMerge [ {
+  config = lib.mkIf cfg.enable {
     systemd.user.services."claude-rc@" = {
       description = "Claude Remote Control for ${projectsDir}/%I";
       after = [ "network-online.target" ];
@@ -321,11 +368,16 @@ in
         RestartSec = 15;
         # Under burrow.claude.memory's cap with the proj jobs (common.nix).
         Slice = "claude-rc.slice";
-        # And its own, for the server and its sessions together (memoryMax).
-        MemoryMax = cfg.memoryMax;
+        # And each session under its own, and the server too, in cgroups
+        # under the unit's (sessionMemoryMax): claude-rc-scan hands each its
+        # cgroup, and the unit hands memory down to them. Nothing of the
+        # unit's in swap.
+        Delegate = "memory";
         MemorySwapMax = 0;
         OOMPolicy = "continue";
-        # systemd-oomd kills whole units, here every session at once.
+        # systemd-oomd would kill the whole unit, every session at once,
+        # while it has no groups yet; burrow.ops watches nothing above it
+        # either (ops.nix).
         ManagedOOMPreference = "omit";
       };
     };
@@ -410,18 +462,5 @@ in
         thread; carry on with whatever doesn't depend on it.
       - Long work is fine. Keep going until it's done, then say so.
     '';
-  } {
-    # A server's own settings, in a drop-in for its instance: the unit name
-    # claude-rc-scan starts, which systemd-escape gives it. escapeSystemdPath
-    # writes the same for printable ASCII only.
-    assertions = lib.mapAttrsToList (name: _: {
-      assertion = builtins.match "[ -~]+" name != null;
-      message = "burrow.remoteControl.servers.\"${name}\": only a folder named in printable ASCII can have settings of its own.";
-    }) cfg.servers;
-    systemd.user.services = lib.mapAttrs' (name: server:
-      lib.nameValuePair "claude-rc@${utils.escapeSystemdPath name}" {
-        overrideStrategy = "asDropin";
-        serviceConfig.MemoryMax = server.memoryMax;
-      }) cfg.servers;
-  } ]);
+  };
 }
