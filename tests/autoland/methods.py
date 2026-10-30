@@ -6,7 +6,7 @@ on a free plan has no rules, so its settings decide. With none, or no word
 from GitHub on the rules, nothing is merged and the merge is tried again
 later, as for any refused merge."""
 
-from harness import PROTECTION, RULES, C, T, clean, fresh_pr_state, info, merges, pr_state, run, stand_in
+from harness import PROTECTION, RULES, C, H, T, clean, fresh_pr_state, info, merges, pr_state, run, stand_in
 
 stand_in()
 
@@ -78,7 +78,8 @@ run(clean(base="release/1.0"), 900)
 assert merged_with() == ["squash"], merges()
 # One the repo's settings don't allow (only squash, now) isn't tried, and
 # neither is any when GitHub won't say what the rules are: nothing merges,
-# and it's a merge that didn't go through, tried again a pass later.
+# and it's a merge that didn't go through, tried again a pass later, saying
+# it wasn't asked for.
 info.update(mergeCommitAllowed=False, rebaseMergeAllowed=False)
 # A 404 other than the protection endpoint's word for no protection is
 # GitHub not saying too: it answers one for what a token can't see.
@@ -98,6 +99,8 @@ for rules, protection in (([pull_request("merge", "rebase")], None),
     status, _ = run(clean(), 900)
     assert merges() == [] and "state=success" in status and not pr_state().get("landed"), (rules, merges(), status)
     assert C.WAKE["sam/r"] <= T + 900 + 2 * 60, (rules, C.WAKE)
+    with C.acting_for("sam/r"):
+        assert H.land("sam/r", clean(), info).startswith("not asked: no merge method") and merges() == [], rules
     RULES["main"] = []
     PROTECTION.clear()
     run(clean(), 960)
