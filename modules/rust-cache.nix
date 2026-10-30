@@ -48,13 +48,20 @@ let
     text = lib.concatStrings (lib.mapAttrsToList (n: v: "${n}=${lib.escapeShellArg v}\n") vars)
       + builtins.readFile ./rust-cache/rustc-wrapper.sh;
   };
-  # What RUSTC_WRAPPER names: a path each switch points at that system's
-  # wrapper. A process keeps the environment it started with, and a CI runner
-  # or a Remote Control session outlives many switches, so a store path would
-  # leave it on the wrapper it started with. It also keeps system.conf the
-  # same from one wrapper to the next, so a switch doesn't re-execute systemd
-  # for it.
-  exe = "/etc/rust-cache/rustc-wrapper";
+  # What RUSTC_WRAPPER names. A process keeps the environment it started
+  # with, and a CI runner or a Remote Control session outlives many switches.
+  # Naming the wrapper itself would leave it on the one it started with, and
+  # naming /etc/rust-cache/rustc-wrapper would leave it naming nothing after a
+  # switch that turns the cache off, or back to a system from before it. So
+  # it names this launcher, which runs whichever wrapper the running system
+  # has there, or rustc itself when there's none. A running process's
+  # environment keeps the launcher from being collected.
+  exe = toString (pkgs.writeShellScript "rustc-launcher" ''
+    if [ -x /etc/rust-cache/rustc-wrapper ]; then
+      exec /etc/rust-cache/rustc-wrapper "$@"
+    fi
+    exec "$@"
+  '');
 
   users = lib.unique ([ config.burrow.user ] ++ cfg.users);
 in
@@ -101,11 +108,13 @@ in
       message = "burrow.rustCache.users: there is no user ${u}.";
     }) users;
 
+    # What the launcher runs, replaced by each switch.
+    environment.etc."rust-cache/rustc-wrapper".source = lib.getExe wrapper;
+
     # Every way a process here gets its environment: logins and their shells,
     # each user's systemd manager (and so proj's jobs and the Remote Control
     # sessions), and the system manager, for its units (the CI runners) and
     # the ones systemd-run starts alike.
-    environment.etc."rust-cache/rustc-wrapper".source = lib.getExe wrapper;
     environment.sessionVariables.RUSTC_WRAPPER = exe;
     environment.etc."environment.d/60-rust-cache.conf".text = "RUSTC_WRAPPER=${exe}\n";
     systemd.settings.Manager.DefaultEnvironment = [ "RUSTC_WRAPPER=${exe}" ];
