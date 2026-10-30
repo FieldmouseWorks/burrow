@@ -40,7 +40,7 @@ for pr in (clean(), clean(files=(".github/CODEOWNERS",), number=6, comments=[sai
     status, _ = run(at_odds, 960)
     assert JOBS == [] and merges() == [] and "a Claude job has it" in status, (JOBS, status)
     # It ended without pushing: once more, then the owner hears.
-    STATES["job-1"] = "error"
+    STATES["job-1"] = "done"
     run(at_odds, 1000)
     status, _ = run(at_odds, 1060)
     assert len(JOBS) == 1 and "it conflicts with" in JOBS[0], JOBS
@@ -57,7 +57,7 @@ WAITS = "a Claude job takes it once the one on {} ends"
 # retry doesn't count against it.
 fresh_pr_state()
 run(dirty(), 900)
-STATES["job-1"] = "error"
+STATES["job-1"] = "done"
 run(dirty(), 1000)
 run(dirty(), 1060)
 assert len(JOBS) == 1 and "merge main into" in JOBS[0], JOBS
@@ -71,7 +71,7 @@ STATES["job-1"] = "done"
 status, _ = run(dirty(base="release"), 1200)
 assert len(JOBS) == 1 and "merge release into" in JOBS[0] and "still open on release" in JOBS[0], JOBS
 assert "a Claude job has it since" in status and "state=failure" not in status, status
-STATES["job-1"] = "error"
+STATES["job-1"] = "done"
 run(dirty(base="release"), 1300)
 status, _ = run(dirty(base="release"), 1360)
 assert len(JOBS) == 1 and "merge release into" in JOBS[0] and "state=failure" not in status, (JOBS, status)

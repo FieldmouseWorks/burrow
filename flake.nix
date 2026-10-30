@@ -82,15 +82,29 @@
         # check, so these build nothing. A service that says how it runs (a
         # Type) has something to run too: systemd refuses one without
         # ExecStart or ExecStop, and only when it starts. A module that
-        # registers a burrow-events handler has burrow-events to run it.
+        # registers a burrow-events handler has burrow-events to run it. And a
+        # memory cap holds swap to it too: a unit that may swap outgrows its
+        # cap without ever reaching it, and the machine thrashes rather than
+        # the kernel killing inside the cap.
         standalone = let
           runnable = name: machine: let
-            s = machine.config.systemd.services;
+            sd = machine.config.systemd;
+            s = sd.services;
             empty = builtins.filter (n: s.${n}.enable && s.${n}.serviceConfig ? Type
               && !(s.${n}.serviceConfig ? ExecStart || s.${n}.serviceConfig ? ExecStop)) (builtins.attrNames s);
             unrun = machine.config.burrow.events.handlers or { } != { } && !(s ? burrow-events);
+            swapping = builtins.concatMap ({ kind, units, section }: builtins.concatMap (n:
+              let c = units.${n}.${section}; in
+              nixpkgs.lib.optional (toString (c.MemoryMax or "infinity") != "infinity"
+                && toString (c.MemorySwapMax or "") != "0") "${kind} ${n}") (builtins.attrNames units)) [
+              { kind = "service"; units = s; section = "serviceConfig"; }
+              { kind = "slice"; units = sd.slices; section = "sliceConfig"; }
+              { kind = "user service"; units = sd.user.services; section = "serviceConfig"; }
+              { kind = "user slice"; units = sd.user.slices; section = "sliceConfig"; }
+            ];
           in if empty != [ ] then throw "${name}: services with nothing to run: ${builtins.concatStringsSep ", " empty}"
              else if unrun then throw "${name}: burrow-events handlers with no burrow-events to start them"
+             else if swapping != [ ] then throw "${name}: memory caps that let their units swap (give each MemorySwapMax = 0): ${builtins.concatStringsSep ", " swapping}"
              else machine;
         in pkgs.writeText "burrow-standalone" (nixpkgs.lib.concatMapStrings (name:
           let
@@ -118,6 +132,8 @@
         agents = import ./tests/agents.nix { inherit self pkgs; };
         # proj's queue and memory caps, with a stand-in for Claude.
         proj = import ./tests/proj.nix { inherit self pkgs; };
+        # A turn's clock, which stands still while it waits in line.
+        proj-clock = import ./tests/proj-clock.nix { inherit self pkgs; };
         # Who takes a free slot: the pipeline's own (only its own repos'
         # pipeline jobs), and each project's cap.
         proj-pick = pkgs.runCommand "proj-pick-check" { nativeBuildInputs = [ pkgs.shellcheck pkgs.git ]; } ''
@@ -126,7 +142,7 @@
           touch $out
         '';
         # What each job waits on, as the stall watchdog hears it.
-        proj-waits = pkgs.runCommand "proj-waits-check" { nativeBuildInputs = [ pkgs.shellcheck pkgs.jq ]; } ''
+        proj-waits = pkgs.runCommand "proj-waits-check" { nativeBuildInputs = [ pkgs.shellcheck pkgs.jq pkgs.util-linux ]; } ''
           shellcheck -s bash ${./modules/proj/waits.sh} ${./tests/proj-waits.sh}
           bash ${./tests/proj-waits.sh} ${./modules/proj/waits.sh}
           touch $out
@@ -165,6 +181,8 @@
         events-service = import ./tests/events.nix { inherit self pkgs; };
         # HOST-switch's revert when the window runs out mid-activation.
         switch = import ./tests/switch.nix { inherit self pkgs; };
+        # systemd-oomd kills what eats the memory before the machine drowns.
+        oomd = import ./tests/oomd.nix { inherit self pkgs; };
         # HOST-health's ZFS check: the pools the machine needs, by name or
         # GUID, with a stand-in zpool.
         health-zfs = import ./tests/health-zfs.nix { inherit self pkgs; };
