@@ -898,6 +898,14 @@ Carry on from there. Anything you left in the background last turn was stopped w
         PROJ_JOB=$id PROJ_WAIT_DIR=$waitdir PROJ_APP_ENV=$appenv timeout -k 1m 0 bash -lc 'eval "$PROJ_APP_ENV" && unset PROJ_APP_ENV && exec claude "$@" <"$0"' "$prompt" "${args[@]}" >>"$dir/$n.jsonl" &
       fi
       pid=$!
+      # Its session, kept once its stream first names it (the first line
+      # does), not from its answer: a run killed before it answers (its unit
+      # past its memory cap, say) can still be continued.
+      {
+        sid=$(tail -n +"$from" -f --pid="$pid" "$dir/$n.jsonl" | grep -m1 '"session_id"' | jq -rR 'fromjson? | .session_id // empty' || true)
+        [ -z "$sid" ] || echo "$sid" >"$dir/session"
+      } &
+      named=$!
       watch_run "$pid" &
       dog=$!
       # The answer ends the turn: a few seconds to exit by itself, then Claude
@@ -912,8 +920,8 @@ Carry on from there. Anything you left in the background last turn was stopped w
       wait "$pid" || rc=$?
       # Its watcher sees the run gone within a second, and clears up after it.
       wait "$dog" || true
+      wait "$named" || true
       last=$(tail -n +"$from" "$dir/$n.jsonl" | grep '"type":"result"' | tail -n 1 || true)
-      [ -z "$last" ] || jq -r '.session_id' <<<"$last" >"$dir/session"
       # Still up after its answer, it was waiting on something it left in the
       # background (a build past one Bash call), which went with it. Or it
       # answered without saying what comes next, and nothing would ever
