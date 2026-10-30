@@ -1,0 +1,53 @@
+{
+  "conary": "note v1",
+  "change": "3a79ac4maersmn9s18dyzs1q7g",
+  "repo": {
+    "owner": "FieldmouseWorks",
+    "name": "burrow"
+  },
+  "pr": 172,
+  "url": "https://github.com/FieldmouseWorks/burrow/pull/172",
+  "summary": "autoland: a proof with nothing new to build skips the line",
+  "task": "fieldmouseworks/burrow#167",
+  "author": {
+    "kind": "agent",
+    "login": "TusanHomichi",
+    "session": "https://claude.ai/code/session_01BkHcyBhUYuurexYruuTwkp"
+  },
+  "landing": {
+    "revision": "7a9f030239b912c23dee306bbab46d54e763f86a838623091571128e77686c65",
+    "before": "6cf0da42b7393aa83e3c1e6d96ede40fd16e3384",
+    "after": "ebac4a78c6d4a313a5df0568cade857326c56c0f",
+    "by": {
+      "kind": "status",
+      "login": "fieldmouseworks-steward[bot]"
+    },
+    "at": 1793329216346
+  },
+  "evidence": [
+    {
+      "kind": "ci",
+      "check": "check / commits",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/40985957046/job/123836914116"
+    },
+    {
+      "kind": "review",
+      "check": "codex",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/172#pullrequestreview-5707068220"
+    },
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/40985957046/job/123836913740"
+    },
+    {
+      "kind": "ci",
+      "check": "agents",
+      "result": "pass",
+      "source": "status agents"
+    }
+  ]
+}
