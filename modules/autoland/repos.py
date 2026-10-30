@@ -13,6 +13,7 @@ import urllib.parse
 import common as C
 import train as T
 from common import CFG, CONTEXT, DEP_RE, DRY, load, log, repo_cfg, save, ts
+from prs import PROOF_SLOT, RELEASE_AGE, REVIEWER
 from tasks import RED_BRANCH, red_default_task
 
 
@@ -74,6 +75,13 @@ def baseline_ruleset(rc, default):
     }
 
 
+# What each of the steward's waiting labels (prs.py) says it waits on, and
+# what the PR's status adds.
+WAITING = {RELEASE_AGE: f"Its updates are too new to take yet (the minimum release age); {CONTEXT} says until when",
+           PROOF_SLOT: f"Waits its turn for a proof slot on the machine; {CONTEXT} says how many are ahead",
+           REVIEWER: f"Waits for a reviewer to be back in service; {CONTEXT} says which and why"}
+
+
 def settle_repo(r, known):
     """The repo's settings, at most once a day. Returns True if it's new."""
     repo, rc = r["repo"], repo_cfg(r["repo"])
@@ -85,17 +93,20 @@ def settle_repo(r, known):
     due = (C.NOW - st.get("settings", 0) >= 86400 or st.get("app") != CFG["app"]["id"]
            or st.get("train", False) != rc["train"])
     # The labels the steward and its jobs put on PRs: without them a hold
-    # can't be set, a judge can't hand a PR to the owner and no PR can go
-    # first in its proof line. Made again with the daily settings too, in
-    # case one was deleted.
-    want = [CFG["labels"]["hold"], CFG["labels"]["owner"], CFG["labels"]["first"]]
+    # can't be set, a judge can't hand a PR to the owner, no PR can go first
+    # in its proof line and none can say what it waits on. Made again with
+    # the daily settings too, in case one was deleted.
+    labels = CFG["labels"]
+    about = [(labels["hold"], "fbca04", "The steward leaves this PR alone"),
+             (labels["owner"], "b60205", f"Waits for {CFG['owner']}; take the label off to let the steward carry on"),
+             (labels["first"], "0e8a16", "Goes ahead of the PRs without it in the line for proofs that take the machine"),
+             *((labels["waiting"][kind], "c5def5", text) for kind, text in WAITING.items())]
+    want = [name for name, _, _ in about]
     if st.get("labels") != want or due:
-        about = ("The steward leaves this PR alone",
-                 f"Waits for {CFG['owner']}; take the label off to let the steward carry on",
-                 "Goes ahead of the PRs without it in the line for proofs that take the machine")
+        # GitHub takes a description of up to 100 characters.
         made = [C.write("label", "create", name, "-R", repo, "--force", "--color", color,
-                        "--description", text, check=False) is not None
-                for name, color, text in zip(want, ("fbca04", "b60205", "0e8a16"), about)]
+                        "--description", text[:100], check=False) is not None
+                for name, color, text in about]
         if all(made):
             log(f"{repo}: labels {', '.join(want)}")
             st["labels"] = want

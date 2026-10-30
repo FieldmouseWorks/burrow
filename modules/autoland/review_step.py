@@ -23,6 +23,7 @@ class Looked(NamedTuple):
     late: list  # the heads whose findings this pass posted, short, that hold it back
     waiting: list  # what it still waits on from the reviewers, in words
     stuck: list  # the reviewers whose look keeps failing, in words
+    out_of_service: bool  # what it waits on is a reviewer out of service
 
 
 def look(repo, pr, key, st, lost_on, digest, line, age, after, strike, cleared):
@@ -250,18 +251,24 @@ def look(repo, pr, key, st, lost_on, digest, line, age, after, strike, cleared):
     if not quiet and looking:
         after(st["seen"], rc["settleDelay"])  # ends: the reviewers are asked then, once a head
     waiting = [f"Posting {x}" for x in unposted]
+    # It waits on a reviewer out of service: nothing moves it until that one
+    # is back. (One still reading it, though out, is a look under way.)
+    out_of_service = False
     for r in names:
         if r in live:
             continue
         if lost_on.get(r, {}).get(pr["baseRefName"]) == head:
             waiting.append(f"{V.NAMES[r]}'s findings on {head[:7]} couldn't be posted, and it's out of service")
+            out_of_service = True
         elif capped and owed(r) and r not in under_way:
             waiting.append(f"{V.NAMES[r]} still owes it a review, and it's out of service")
+            out_of_service = True
     waiting += [f"{V.NAMES[r]} is still reviewing it, though out of service" for r in under_way]
     if not live and not capped:
         why = "; ".join(f"{V.NAMES[r]}: {away[r] or V.out(r)}" for r in names) or "none is on"
         waiting.append(f"No reviewer can review it now ({why})")
         digest.append(("No reviewer can review it", line, why))
+        out_of_service = out_of_service or bool(names)
     for r in looking:
         if quiet and (not capped or pr["baseRefName"] in lost_on.get(r, {})):
             V.ask(repo, pr, key, r, st["rv"].setdefault(r, {}), after)
@@ -275,4 +282,4 @@ def look(repo, pr, key, st, lost_on, digest, line, age, after, strike, cleared):
             stuck.append(f"{V.NAMES[r]} {x}")
             digest.append((f"{V.NAMES[r]} couldn't review it", line, x + " (journalctl -u autoland-review)"))
 
-    return Looked(live, said, rounds, clean, capped, unseen, late, waiting, stuck)
+    return Looked(live, said, rounds, clean, capped, unseen, late, waiting, stuck, out_of_service)

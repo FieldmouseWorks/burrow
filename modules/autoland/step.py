@@ -5,8 +5,9 @@ back, hand what's open (findings, red CI, a conflict with its base) to a
 Claude job, have a job run its machine checks or judge it, post its
 `review-settled` status and merge it (or, in a repo with its merge train
 on, put it in the train, which lands it: train.py), or list it for the
-owner or the stuck issue. Each step it takes is in the PR's status, and in
-what the watchdog watches (waits.py).
+owner or the stuck issue. Each step it takes is in the PR's status, in
+what the watchdog watches (waits.py), and when it waits on something one of
+the steward's labels names, in that label (prs.py).
 
 A step that fails (GitHub refuses it, or no job can start) is tried again,
 later each time, and never quietly for ever: the third failure in a row on a
@@ -30,7 +31,7 @@ from common import CFG, DRY, MIN, load, log, repo_cfg, save, ts
 from seal import MAJOR as MAJOR_VERDICT  # renovate-sweep's, on a Renovate major
 from touches import automerges, bot_edited, dep_kind, gate_edit, moved_from, one_way
 from tasks import DEP_SEEN, JUDGMENT, PAST_LIMIT, REVIEWED, fix_task, judge_task, proof_task
-from prs import MERGE_STEPS, ci_state, eyes, land, our_status, post_status
+from prs import MERGE_STEPS, PROOF_SLOT, RELEASE_AGE, REVIEWER, ci_state, eyes, land, our_status, post_status, show_waiting
 
 # The link Claude Code puts in a PR its session opens.
 SESSION = re.compile(r"https://claude\.ai/code/session_\w+")
@@ -141,10 +142,12 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
 
     refresh = {}  # what the watchdog's to count of a refresh of it renovate-sweep has (waits.note)
 
-    def settle(state, desc, why=None, wait=waits.STEWARD):
-        """The PR's status, and what it waits on for the watchdog (waits.py).
-        False if GitHub didn't take it."""
+    def settle(state, desc, why=None, wait=waits.STEWARD, label=None):
+        """The PR's status, what it waits on for the watchdog (waits.py), and
+        its waiting label: label's (prs.py), or none. False if GitHub didn't
+        take the status."""
         ok = post_status(repo, pr, state, desc)
+        show_waiting(repo, pr, labels, label)
         if why:
             digest.append((why, line, desc))
         waits.note(repo, pr, desc, wait, **refresh)
@@ -544,7 +547,8 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
         if slots and not last and (ahead := P.ahead(repo, n, st, slots, outs)) is not None:
             if ahead != P.FREE:
                 P.wait(repo, n)
-                settle("pending", f"Settled; waiting its turn to run {', '.join(ci_names)} ({ahead} ahead)"[:140])
+                settle("pending", f"Settled; waiting its turn to run {', '.join(ci_names)} ({ahead} ahead)"[:140],
+                       label=PROOF_SLOT)
                 return
             free = True
         before = st.get("provedJob")
@@ -656,7 +660,8 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
             threads = ", ".join([threads] * bool(threads) + ["changes requested by " + ", ".join(changes)])
         if (ripe := refresh.get("ripe")) and not threads:
             when = time.strftime("%b %-d, ", time.localtime(ripe)) + clock(ripe)
-            settle("pending", f"Lock file refresh, nothing in it old enough until {when}; renovate-sweep has it refreshed then", wait=waits.SWEEP)
+            settle("pending", f"Lock file refresh, nothing in it old enough until {when}; renovate-sweep has it refreshed then",
+                   wait=waits.SWEEP, label=RELEASE_AGE)
         elif renovate and ci == "red":
             settle("pending", "Dependency update, CI red; renovate-sweep has it" + (f" ({threads})" if threads else ""),
                    wait=waits.SWEEP)
@@ -704,7 +709,7 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
         return
 
     # The reviewers (review_step.py).
-    live, said, rounds, clean, capped, unseen, late, waiting, stuck = review_step.look(
+    live, said, rounds, clean, capped, unseen, late, waiting, stuck, out_of_service = review_step.look(
         repo, pr, key, st, lost_on, digest, line, age, after, strike, cleared)
 
     what = []
@@ -719,7 +724,7 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
         if what:
             hand_off(", ".join(what), "; ".join(waiting + stuck + what), ours=not swept)
         else:
-            settle("pending", "; ".join(waiting + stuck))
+            settle("pending", "; ".join(waiting + stuck), label=REVIEWER if out_of_service else None)
     elif what and capped:
         hand_off(f"{', '.join(what)}, after {rounds} review rounds with findings, the limit, so its reviewers won't look again. "
                  "Weigh each finding on its merits: fix what's a real defect and answer the rest with why. "
