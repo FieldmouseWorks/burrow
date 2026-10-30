@@ -63,6 +63,9 @@ Every repo with code gets a `flake.nix` from the template
   the caller's job grants it `id-token: write` and `attestations: write`. On
   a PR, its `commits` job fails any commit GitHub can't verify: a signed one
   under a name and email its key isn't for (the house rules' Commits). A
+  repo whose PRs land through its merge train (autoland's `train`) runs it on
+  pushes to `conary/train/**` too and turns `pr-gate` off: the gate checks the
+  candidates the train lands, and a PR's own run is only its `commits`. A
   repo's heavier gates (VM replays, browser tiers, databases) stay its own
   jobs, alongside it, and run their tools from `nix develop`.
 - Renovate keeps `flake.lock` current, so a repo's toolchains and gate move

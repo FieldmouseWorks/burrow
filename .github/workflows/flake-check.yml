@@ -1,10 +1,11 @@
 # The shared CI for every repo whose gate is its flake (burrow's
 # lib/project.nix): check out, install Nix, `nix flake check`, then attest the
 # result for Conary's ledger; on a PR, also check that GitHub verifies every
-# signed commit it adds. Called from a repo's own workflow with `uses:`, whose
-# job grants `id-token: write` and `attestations: write` (a called job gets no
-# more than its caller gives). Its actions are pinned to commits (repos that
-# allow only pinned actions need that), and Renovate keeps the pins current.
+# signed commit it adds (with pr-gate off, only that). Called from a repo's own
+# workflow with `uses:`, whose job grants `id-token: write` and
+# `attestations: write` (a called job gets no more than its caller gives). Its
+# actions are pinned to commits (repos that allow only pinned actions need
+# that), and Renovate keeps the pins current.
 name: flake-check
 on:
   workflow_call:
@@ -35,8 +36,17 @@ on:
           fails a flake with any other, or with a nixConfig.
         type: boolean
         default: false
+      pr-gate:
+        description: >-
+          Run the gate on a PR. False in a repo whose PRs land through its
+          merge train, which runs the gate on each candidate it would land (a
+          push to a conary/train/ branch) rather than on the PRs in it, so a
+          PR's own run checks only its commits.
+        type: boolean
+        default: true
 jobs:
   check:
+    if: inputs.pr-gate || github.event_name != 'pull_request'
     runs-on: ${{ inputs.runner }}
     permissions:
       contents: read

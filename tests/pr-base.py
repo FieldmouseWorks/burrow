@@ -2,7 +2,8 @@
 checked merged with its base branch as that branch is when the job starts,
 not as it was when the event fired (a run that waited in the queue, or a
 re-run), the log names both commits, and a head that no longer merges
-cleanly fails the job without anything checked.
+cleanly fails the job without anything checked. With pr-gate off (a train
+repo's), a PR gets no gate at all, and every push still does.
 
   python3 -I tests/pr-base.py .github/workflows/flake-check.yml
   nix build .#checks.x86_64-linux.pr-base
@@ -15,7 +16,12 @@ import tempfile
 
 import yaml
 
-job = yaml.safe_load(open(sys.argv[1]))["jobs"]["check"]
+workflow = yaml.safe_load(open(sys.argv[1]))
+job = workflow["jobs"]["check"]
+# PyYAML reads the `on:` key as True.
+pr_gate = workflow[True]["workflow_call"]["inputs"]["pr-gate"]
+assert pr_gate["type"] == "boolean" and pr_gate["default"] is True, pr_gate
+assert job.get("if") == "inputs.pr-gate || github.event_name != 'pull_request'", job.get("if")
 names = [s.get("id") or s.get("uses", "").split("@")[0] for s in job["steps"]]
 # The checkout fetches every branch for a PR, then the merge comes before
 # the gate checks anything.
