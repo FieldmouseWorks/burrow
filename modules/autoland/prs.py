@@ -44,7 +44,7 @@ query($owner: String!, $name: String!, $cursor: String) {
         commits(last: 1) {
           nodes { commit { oid statusCheckRollup { contexts(first: 100) { pageInfo { hasNextPage } nodes {
             __typename
-            ... on CheckRun { name status conclusion }
+            ... on CheckRun { name status conclusion startedAt checkSuite { workflowRun { workflow { name } } } }
             ... on StatusContext { context state description creator { login __typename } }
           } } }
           checkSuites(first: 100) { pageInfo { hasNextPage } nodes { conclusion workflowRun { workflow { name } } } } } }
@@ -98,6 +98,19 @@ def open_prs(owner, name):
     return info, prs
 
 
+def run_of(check):
+    """Which check a check run is a run of: its name in its workflow. One
+    name in two workflows is two checks."""
+    workflow = ((check.get("checkSuite") or {}).get("workflowRun") or {}).get("workflow") or {}
+    return workflow.get("name"), check["name"]
+
+
+def started(check):
+    """When a check run started, for ordering runs of one check; one with no
+    start yet is the newest."""
+    return check.get("startedAt") or "~"
+
+
 def ci_state(pr, proofs=()):
     """green / pending / red / none (no checks at all) over every check on
     the head except ours, and the names of the ones that aren't green. A
@@ -107,7 +120,9 @@ def ci_state(pr, proofs=()):
     only its suite: red, or a broken workflow would read as no CI. The merge
     train's status is its word on the PR, not a check of it, except its
     failure: CI failed on the head merged alone onto the default branch, which
-    is the head's to fix. Only the App's counts, as with ours."""
+    is the head's to fix. Only the App's counts, as with ours. A check that
+    ran again on the same head (a rerun, or a workflow run again by an edited
+    body) counts only its newest run."""
     nodes = pr["commits"]["nodes"]
     commit = nodes[0]["commit"] if nodes else {}
     contexts = (commit.get("statusCheckRollup") or {}).get("contexts") or {}
@@ -121,8 +136,14 @@ def ci_state(pr, proofs=()):
             seen += 1
             workflow = ((s.get("workflowRun") or {}).get("workflow") or {}).get("name") or "a workflow"
             red.append(f"{workflow} (failed to start)")
+    newest = {}
     for c in contexts.get("nodes", []):
         if c["__typename"] == "CheckRun":
+            newest[run_of(c)] = max(newest.get(run_of(c), ""), started(c))
+    for c in contexts.get("nodes", []):
+        if c["__typename"] == "CheckRun":
+            if started(c) < newest[run_of(c)]:
+                continue
             seen += 1
             name = c["name"]
             if c["status"] != "COMPLETED":

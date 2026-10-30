@@ -580,6 +580,25 @@ assert len(JOBS) == 1 and "CI is red (flake (failed to start))" in JOBS[0], (sta
 many_suites = clean(checks=[], suites=broken)
 many_suites["commits"]["nodes"][0]["commit"]["checkSuites"]["pageInfo"]["hasNextPage"] = True
 assert H.ci_state(many_suites) == ("pending", ["over 100 checks, too many to read"])
+
+
+# A check run again on the same head (a workflow an edited body runs again)
+# counts its newest run only: red then green is green, green then red is red,
+# and a run that hasn't started yet is the newest. One name in two workflows
+# is two checks.
+def ran(conclusion, at, workflow="rust-first", status="COMPLETED"):
+    return {"__typename": "CheckRun", "name": "rust-first / python", "status": status, "conclusion": conclusion,
+            "startedAt": at, "checkSuite": {"workflowRun": {"workflow": {"name": workflow}}}}
+
+
+fixed = [ran("FAILURE", "2026-10-30T20:32:46Z"), ran("SUCCESS", "2026-10-30T20:33:23Z")]
+assert H.ci_state(clean(checks=fixed)) == ("green", []), H.ci_state(clean(checks=fixed))
+assert H.ci_state(clean(checks=fixed[::-1])) == ("green", [])
+broke = [ran("SUCCESS", "2026-10-30T20:32:46Z"), ran("FAILURE", "2026-10-30T20:33:23Z")]
+assert H.ci_state(clean(checks=broke)) == ("red", ["rust-first / python"])
+assert H.ci_state(clean(checks=[*fixed, ran(None, None, status="QUEUED")])) == ("pending", ["rust-first / python"])
+assert H.ci_state(clean(checks=[ran("FAILURE", "2026-10-30T20:32:46Z", workflow="lint"), fixed[1]])) == \
+    ("red", ["rust-first / python"])
 fresh_pr_state()
 run(clean(checks=[]), 700)
 # CI that shows up while the judge works doesn't pass it by: its verdict on

@@ -102,11 +102,18 @@ for d in "$src"/*/; do
       title=$(jq -r .title <<<"$pr")
       branch=$(jq -r .headRefName <<<"$pr")
       # Each check but the steward's own, green, pending or red as the
-      # steward reads it (ci_state in ../autoland/steward.py), so a head
-      # neither calls the other's is never left between them.
+      # steward reads it (ci_state in ../autoland/prs.py), so a head
+      # neither calls the other's is never left between them: a check run
+      # again on the head counts its newest run only, one not started yet
+      # (gh's zero time) the newest.
       # A proof the steward runs on a machine (proofJobs) is no CI to wait
       # for: a major's job runs it itself.
-      ci=$(jq -c --argjson proofs "$proofnames" '[.statusCheckRollup[]? | select((.context // .name) != $settled)
+      ci=$(jq -c --argjson proofs "$proofnames" 'def run: [.workflowName, .name] | tojson;
+        def started: (.startedAt // "") as $s | if $s == "" or ($s | startswith("0001-")) then "~" else $s end;
+        [.statusCheckRollup[]? | select((.context // .name) != $settled)]
+        | (map(select(.__typename == "CheckRun")) | group_by(run) | map({key: (.[0] | run), value: (map(started) | max)})
+          | from_entries) as $newest
+        | [.[] | select(.__typename != "CheckRun" or started >= $newest[run])
         | {name: (.context // .name), proof: ((.context // .name) as $c | $proofs | index($c) != null),
            at: (if .__typename == "StatusContext" then .startedAt else .completedAt end),
            state: (if .__typename == "StatusContext" then

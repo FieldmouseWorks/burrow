@@ -244,6 +244,31 @@ calls, (verb, _) = sweep([running], {9: [verdict(9, "ok")]})
 assert calls == [] and verb == "close", (calls, verb)
 
 
+def reran(n, *runs):
+    """PR n with runs of one check on its head: (conclusion or None for not
+    started, startedAt, workflow) each."""
+    return {**pr(n), "statusCheckRollup": [
+        {"__typename": "CheckRun", "name": "rust-first / python", "workflowName": w,
+         "status": "COMPLETED" if c else "QUEUED", "conclusion": c or "", "startedAt": t} for c, t, w in runs]}
+
+
+# A check run again on the same head (a workflow an edited body runs again)
+# counts its newest run only, as the steward reads it; one gh shows with no
+# start yet (its zero time) is the newest. One name in two workflows is two
+# checks.
+red_first, green_after = ("FAILURE", "2099-01-01T01:00:00Z", "rust-first"), ("SUCCESS", "2099-01-01T02:00:00Z", "rust-first")
+for runs in ((red_first, green_after), (green_after, red_first)):
+    calls, (verb, body) = sweep([reran(9, *runs)], {9: [verdict(9, "ok")]})
+    assert calls == [] and verb == "open" and url + "9" in body, (runs, calls, body)
+calls, _ = sweep([reran(9, ("SUCCESS", "2099-01-01T01:00:00Z", "rust-first"), ("FAILURE", "2099-01-01T02:00:00Z", "rust-first"))],
+                 {9: [verdict(9, "ok")]}, covered=[REPO])
+assert len(calls) == 1 and "CI fails" in calls[0][-1], calls
+calls, (verb, _) = sweep([reran(9, green_after, (None, "0001-01-01T00:00:00Z", "rust-first"))], {9: [verdict(9, "ok")]})
+assert calls == [] and verb == "close", (calls, verb)
+calls, _ = sweep([reran(9, ("FAILURE", "2099-01-01T01:00:00Z", "lint"), green_after)], {9: [verdict(9, "ok")]}, covered=[REPO])
+assert len(calls) == 1 and "CI fails" in calls[0][-1], calls
+
+
 def ci(n, *runs):
     """PR n with these check runs: (status, conclusion) each."""
     return {**pr(n), "statusCheckRollup": [{"__typename": "CheckRun", "name": f"ci{i}", "status": s, "conclusion": c}
