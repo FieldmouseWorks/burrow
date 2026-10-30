@@ -1,7 +1,7 @@
 # proj's choice of who takes a slot (modules/proj/pick.sh), on what take_slot
 # would see: pipeline jobs' slots stay theirs, one project's jobs stop at
 # PER_PROJECT while the others go by, pipeline ones count against no cap, and
-# lead ones go ahead of everyone but the slots owed to the others, every free
+# lead ones go ahead of everyone but the slot owed to the others, every free
 # slot going in one look; and which jobs are pipeline ones: only those
 # in the pipeline's own repos and the machine's flake, and lead ones those in
 # its lead repos.
@@ -10,7 +10,7 @@
 set -euo pipefail
 # shellcheck source=/dev/null
 . "$1"
-export MAX_JOBS=4 PIPELINE_SLOTS=1 PER_PROJECT=2 OTHER_SLOTS=1
+export MAX_JOBS=4 PIPELINE_SLOTS=1 PER_PROJECT=2
 T=$'\t'
 
 # The slots, then the line: "free", or a holder's "CLASS PROJECT", for slots 1
@@ -157,24 +157,13 @@ case_ "p 3" "- -" "lead /src/burrow" free "lead /src/burrow" "p pipeline /src/re
   case_ "p 3" "pipeline /src/remi" "lead /src/burrow" free "lead /src/burrow" "a first /src/web" "p pipeline /src/remi"
 )
 # In one look too, whoever is ahead in the line: pipeline turns stop at what
-# the slots owed leave them, the pipeline's own included, and the others go.
+# the slot owed leaves them, the pipeline's own included, and the others go.
 (
   MAX_JOBS=6
   case_ "p 1${NL}q 6${NL}a 2" free free "lead /src/burrow" "lead /src/burrow" "lead /src/burrow" free \
     "p pipeline /src/remi" "q pipeline /src/remi" "r pipeline /src/remi" "a normal /src/web"
   case_ "l 1${NL}a 2" free free "lead /src/burrow" "lead /src/burrow" "lead /src/burrow" "pipeline /src/remi" \
     "l lead /src/burrow" "m lead /src/burrow" "a normal /src/web"
-)
-# Owing more than one of theirs can use, the pipeline still leaves what's owed.
-(
-  OTHER_SLOTS=2
-  case_ "p 1${NL}q 4${NL}a 2" free free free free \
-    "p pipeline /src/remi" "q pipeline /src/remi" "r pipeline /src/remi" "a normal /src/web"
-)
-# With no slots owed, pipeline work goes ahead of everything, as it's asked.
-(
-  OTHER_SLOTS=0
-  case_ "p 3" "pipeline /src/remi" "lead /src/burrow" free "lead /src/burrow" "p pipeline /src/remi" "a first /src/web"
 )
 
 # A job run with --pipeline is a pipeline one only in a project of one of the

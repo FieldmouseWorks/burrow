@@ -22,10 +22,10 @@
 # lets those behind it by meanwhile, so one project's jobs never fill the
 # machine.
 #
-# Everyone else's turns hold OTHER_SLOTS slots whenever they have one that may
-# start: until they do, a pipeline turn, lead or not, leaves them that many
-# free ordinary slots and takes what's left, so a backlog of pipeline work
-# slows the others and never stops them.
+# Everyone else's turns hold a slot whenever they have one that may start:
+# until they do, a pipeline turn, lead or not, leaves them one free ordinary
+# slot and takes what's left, so a backlog of pipeline work slows the others
+# and never stops them.
 pick() {
   local kind a b c w pass t=0 r=0 l=0 q=0 others=0 owed=0 spare open need loose x=0 y=0 went=() ours=() theirs=() inline=()
   local -A held=()
@@ -45,18 +45,18 @@ pick() {
         ;;
     esac
   done
-  if [ "$others" -lt "$OTHER_SLOTS" ]; then
+  if [ "$others" -eq 0 ]; then
     for w in "${inline[@]}"; do
       IFS=$'\t' read -r a b c <<<"$w"
       case $b in lead | pipeline) continue ;; esac
       [ "${held[p$c]:-0}" -lt "$PER_PROJECT" ] || continue
-      owed=$((OTHER_SLOTS - others))
+      owed=1
       break
     done
   fi
   # Who goes: each in turn, while the slots still go round. t turns chosen, l
   # of them lead and r held to the slots anyone may take; spare is how many of
-  # those the slots owed to the others leave pipeline turns; open is how many
+  # those the slot owed to the others leaves pipeline turns; open is how many
   # of the pipeline's own slots the q other pipeline turns in line leave lead
   # ones, and need how many of the slots anyone may take lead ones must have.
   spare=$((${#theirs[@]} > owed ? ${#theirs[@]} - owed : 0))
@@ -90,7 +90,7 @@ pick() {
     done
   done
   # Which slot each takes, lowest first: pipeline turns may have only what the
-  # others chosen, and the slots owed to them, leave them of the slots anyone
+  # others chosen, and the slot owed to them, leave them of the slots anyone
   # may take.
   loose=$((${#theirs[@]} - r < spare ? ${#theirs[@]} - r : spare))
   for w in "${went[@]}"; do

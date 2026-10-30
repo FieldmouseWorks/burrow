@@ -35,7 +35,6 @@ let
       SLICE=claude-jobs.slice
       MAX_JOBS=${toString cfg.maxJobs}
       PIPELINE_SLOTS=${toString cfg.pipelineSlots}
-      OTHER_SLOTS=${toString cfg.otherSlots}
       PER_PROJECT=${toString cfg.maxJobsPerProject}
       MIN_FREE=${toString cfg.minFreeMemory}
       JOB_MEMORY_MAX=${lib.escapeShellArg cfg.jobMemoryMax}
@@ -113,23 +112,11 @@ in
         work on the pipeline itself waits only on other such work, never on
         everyone else's long jobs; a lead repo's go first of all, ahead of
         the other pipeline jobs too, but leave them these slots while one
-        waits. Everyone else's waiting jobs come ahead of them for
-        `otherSlots` of the other slots. A pipeline job in any other project goes
+        waits. All of them leave everyone else one of the other slots while
+        one of theirs waits and none runs. A pipeline job in any other project goes
         as `--first`: ahead of the line, but within its project's cap and
         never in these slots; `proj status` and its turn's journal say so,
         origin and all.
-      '';
-    };
-    otherSlots = lib.mkOption {
-      type = lib.types.ints.unsigned;
-      default = if cfg.maxJobs > 1 then 1 else 0;
-      defaultText = lib.literalExpression "if maxJobs > 1 then 1 else 0";
-      description = ''
-        How many slots everyone else's jobs hold whenever one of theirs is
-        waiting: until they do, a pipeline job leaves them that many, so a
-        backlog of pipeline work can't stop the other projects' for hours.
-        They're not set aside: with none of theirs waiting, pipeline jobs take
-        them too.
       '';
     };
     maxJobsPerProject = lib.mkOption {
@@ -245,9 +232,6 @@ in
     assertions = [{
       assertion = cfg.pipelineSlots < cfg.maxJobs;
       message = "burrow.proj.pipelineSlots: leave other jobs at least one of the maxJobs slots.";
-    } {
-      assertion = cfg.otherSlots <= cfg.maxJobs - cfg.pipelineSlots;
-      message = "burrow.proj.otherSlots: no more than the maxJobs slots that aren't pipelineSlots.";
     }];
     # Claude Code too, for when burrow.claude (which also installs it) is off.
     environment.systemPackages = [ proj config.burrow.claude.package ];
