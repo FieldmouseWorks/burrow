@@ -57,9 +57,14 @@ case_ "a 3" "normal /src/x" "normal /src/x" free free "a normal "
 # A lead turn goes first, from anywhere in the line: ahead of pipeline turns
 # that came before it, and of everyone else.
 case_ "l 1" free free free free "p pipeline /src/remi" "a first /src/web" "l lead /src/burrow"
-case_ "l 4" "normal /src/x" "normal /src/y" "normal /src/z" free "p pipeline /src/remi" "l lead /src/burrow"
-# It takes the pipeline's slot as a pipeline turn does, counts against no cap,
-# and holds none of its project's.
+case_ "l 3" "normal /src/x" "normal /src/y" free free "p pipeline /src/remi" "l lead /src/burrow"
+# But the pipeline's own slot stays the other pipeline turns' while one waits,
+# so a lead repo's backlog can't stop the work on what deploys it: the lead
+# turn waits for the next slot.
+case_ "p 4" "normal /src/x" "normal /src/y" "normal /src/z" free "p pipeline /src/remi" "l lead /src/burrow"
+case_ "p 4" "lead /src/burrow" "lead /src/burrow" "lead /src/burrow" free "l lead /src/burrow" "m lead /src/burrow" "p pipeline /src/remi"
+# With none of those in line it takes the pipeline's slot as a pipeline turn
+# does, counts against no cap, and holds none of its project's.
 case_ "l 4" "normal /src/burrow" "normal /src/burrow" "normal /src/z" free "a normal /src/web" "l lead /src/burrow"
 case_ "a 3" "lead /src/burrow" "normal /src/burrow" free free "a normal /src/burrow"
 # With no slot free nobody goes, lead or not; of two lead turns, the first in
