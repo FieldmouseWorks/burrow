@@ -39,59 +39,82 @@ jobs:
           GROWTH: ${{ inputs.growth }}
         run: |
           # The PR as it is now, not as the event saw it: a body edited since
-          # counts. Its files, every page, with what each adds and takes out
-          # (the one field that can be empty last: read splits on runs of tabs).
+          # counts. Its files, every page, with what each adds and takes out,
+          # one NUL-ended field each, so a path comes through byte for byte.
           pr="repos/$GITHUB_REPOSITORY/pulls/$NUMBER"
           gh api "$pr" > "$RUNNER_TEMP/pr.json"
           head=$(jq -r .head.sha "$RUNNER_TEMP/pr.json")
           base=$(jq -r .base.sha "$RUNNER_TEMP/pr.json")
-          gh api --paginate "$pr/files?per_page=100" \
-            --jq '.[] | [.status, .additions, .deletions, .filename, (.previous_filename // "")] | @tsv' \
-            > "$RUNNER_TEMP/files.tsv"
+          gh api --paginate "$pr/files?per_page=100" > "$RUNNER_TEMP/files.json"
+          jq --raw-output0 '.[] | .status, (.additions | tostring), (.deletions | tostring), .filename,
+            (.previous_filename // "")' "$RUNNER_TEMP/files.json" > "$RUNNER_TEMP/files"
+          # GitHub lists 3,000 files at most: past that, what it leaves out
+          # could be Python, so the PR needs the line whatever the rest says.
+          listed=$(jq -n '[inputs | length] | add // 0' "$RUNNER_TEMP/files.json")
+          changed=$(jq .changed_files "$RUNNER_TEMP/pr.json")
 
-          # Whether a path is Python: by its extension, or with none, by a
-          # python shebang on its first line at a commit (the head, or the
-          # base for what the PR takes away).
+          # Whether a path is Python at a commit: by its extension, or with
+          # none, by a python shebang on its first line there. Called as a
+          # condition, where -e is off: GitHub not answering ends the run
+          # here rather than reading as "not Python".
           is_python() {
-            local name=${1##*/}
-            case $name in
+            case ${1##*/} in
               *.py | *.pyi) return 0 ;;
               *.*) return 1 ;;
             esac
             local path
             path=$(jq -rn --arg p "$1" '$p | split("/") | map(@uri) | join("/")')
-            # Called as a condition, where -e is off: GitHub not answering
-            # ends the run here rather than reading as "not Python".
             gh api -H 'Accept: application/vnd.github.raw' "repos/$GITHUB_REPOSITORY/contents/$path?ref=$2" \
               < /dev/null > "$RUNNER_TEMP/first" || exit 1
             head -n 1 "$RUNNER_TEMP/first" | grep -qE '^#!.*python'
           }
-
-          # New Python: a file added as Python, or renamed to Python from
-          # something else. Growth: lines added to the rest of the Python,
-          # less every line taken out of it, deleted files included. Paths
-          # are printed after a word of their own, so none can be read as a
-          # workflow command.
-          new=0 growth=0
-          while IFS=$'\t' read -r status added removed file previous; do
-            case $status in
-              removed)
-                if is_python "$file" "$base"; then growth=$((growth - removed)); fi
-                continue
-                ;;
+          # The old side of the PR's diff is the merge base, not the base
+          # branch's tip: asked once, the first time a path needs it.
+          origin=
+          was_python() {
+            case ${1##*/} in
+              *.py | *.pyi) return 0 ;;
+              *.*) return 1 ;;
             esac
-            is_python "$file" "$head" || continue
-            if [ "$status" = added ] || [ "$status" = copied ] \
-                || { [ "$status" = renamed ] && ! is_python "$previous" "$base"; }; then
+            if [ -z "$origin" ]; then
+              origin=$(gh api "repos/$GITHUB_REPOSITORY/compare/$base...$head?per_page=1" \
+                --jq .merge_base_commit.sha < /dev/null) || exit 1
+            fi
+            is_python "$1" "$origin"
+          }
+
+          # Each file is Python before (but for one added or copied) and
+          # after (but for one removed), or not. Becoming Python makes it new
+          # Python, whatever its lines. Growth: lines added to Python that
+          # stays Python, less every line taken out of Python, files that
+          # stop being Python included. Paths are printed quoted, so none
+          # can be read as a workflow command.
+          new=0 growth=0
+          while IFS= read -r -d '' status && IFS= read -r -d '' added && IFS= read -r -d '' removed &&
+            IFS= read -r -d '' file && IFS= read -r -d '' previous; do
+            was=false now=false
+            case $status in
+              added | copied) ;;
+              *) was_python "${previous:-$file}" && was=true ;;
+            esac
+            case $status in
+              removed) ;;
+              *) is_python "$file" "$head" && now=true ;;
+            esac
+            if $now && ! $was; then
               new=$((new + 1))
-              echo "new Python: $file"
-            else
+              printf 'new Python: %q\n' "$file"
+            elif $was && ! $now; then
+              growth=$((growth - removed))
+            elif $now; then
               growth=$((growth + added - removed))
             fi
-          done < "$RUNNER_TEMP/files.tsv"
+          done < "$RUNNER_TEMP/files"
           echo "lines added to the Python it already had, net: $growth (more than $GROWTH needs a reason)"
 
-          if [ "$new" -eq 0 ] && [ "$growth" -le "$GROWTH" ]; then
+          if [ "$listed" -lt "$changed" ]; then
+            echo "GitHub lists $listed of its $changed files, so the rest could be Python"
+          elif [ "$new" -eq 0 ] && [ "$growth" -le "$GROWTH" ]; then
             echo "no new Python to say why about"
             exit 0
           fi
@@ -102,5 +125,5 @@ jobs:
             echo "the body says why it isn't Rust"
             exit 0
           fi
-          echo "::error title=Why not Rust?::This PR adds $new Python file(s) and $growth net line(s) to the Python it had, but its body doesn't say why it isn't Rust. The house rules want new code in Rust unless there's a reason: add a line to the PR body starting 'Why not Rust:' with it (a throwaway script, a tool still being tuned, ported once it settles). Editing the body runs this again."
+          echo "::error title=Why not Rust?::This PR adds $new Python file(s) and $growth net line(s) to the Python it had (of the $listed file(s) GitHub lists out of $changed), but its body doesn't say why it isn't Rust. The house rules want new code in Rust unless there's a reason: add a line to the PR body starting 'Why not Rust:' with it (a throwaway script, a tool still being tuned, ported once it settles). Editing the body runs this again."
           exit 1

@@ -73,11 +73,14 @@ Every repo with code gets a `flake.nix` from the template
 - Beside it, `.github/workflows/rust-first.yml` from the template calls
   burrow's shared [`rust-first-check`](../.github/workflows/rust-first-check.yml)
   on every PR, and again whenever its body is edited: a PR that adds a Python
-  file (by its name, or a python shebang on one without an extension), or adds
-  more net lines to the Python it has than a fix does (its `growth` input),
-  fails unless its body has a line starting `Why not Rust:` with the reason.
-  That's the house rules' Rust by default, held by CI rather than by memory.
-  A private repo runs it on its self-hosted runner, as it does the gate.
+  file (by its name, or a python shebang on one without an extension), turns
+  a file into Python, or adds more net lines to the Python it has than a fix
+  does (its `growth` input), fails unless its body has a line starting
+  `Why not Rust:` with the reason; so does one too big for GitHub to list
+  every file. That's the house rules' Rust by default, held by CI rather than
+  by memory. A private repo runs it on its self-hosted runner, as it does the
+  gate. The steward counts only the newest run of a check run again on the
+  same head, so fixing the body clears it.
 - Renovate keeps `flake.lock` current, so a repo's toolchains and gate move
   when burrow's do. Change a Rust version in `rust-toolchain.toml` only.
 - The template also brings `.editorconfig`. Rust crates forbid `unsafe` in
