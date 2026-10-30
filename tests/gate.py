@@ -298,7 +298,11 @@ def invalid_derivations():
             ('drv "x" // { drvPath = " " + (drv "x").drvPath; }', "is not a store derivation's path"),
             ('drv "x" // { drvPath = (drv "x").outPath; }', "is not a store derivation's path"),
             ('drv "x" // { drvPath = "/elsewhere/00000000000000000000000000000000-x.drv"; }', "is not a store derivation's path"),
-            ('drv "x" // { drvPath = 1; }', "is not a store derivation's path")):
+            ('drv "x" // { drvPath = 1; }', "cannot coerce"),
+            ('drv "x" // { drvPath = { outPath = "/nix/store/x.drv"; }; }', "is not a store derivation's path"),
+            ('drv "x" // { drvPath = ./flake.nix; }', "is not a store derivation's path"),
+            ('drv "x" // { drvPath = "/nix/store/00000000000000000000000000000000-${builtins.concatStringsSep "" (builtins.genList (_: "x") 208)}.drv"; }',
+             "is not a store derivation's path")):
         ok = 'checks.${system}.ok = drv "ok";'
         for where, skip in ((f'checks.${{system}} = {{ ok = drv "ok"; fake = {value}; }};', ""),
                             (f'checks.${{system}} = {{ ok = drv "ok"; fake = {value}; }};', "fake"),
@@ -312,6 +316,61 @@ def invalid_derivations():
             }}"""), skip=skip)
             assert rc != 0 and error in out, (value, where, skip, out)
             assert any("-ok.drv^*" in b for b in builds(calls)), (value, where, out, calls)
+
+
+@case
+def valid_derivations():
+    "a derivation nix flake check reads passes, its name dotted or its drvPath a path or an attribute set, wherever it is"
+    for value in ('drv ".check"', 'drv "x" // { drvPath = { outPath = (drv "x").drvPath; }; }',
+                  'drv "x" // { drvPath = { outPath = /. + builtins.unsafeDiscardStringContext (drv "x").drvPath; }; }',
+                  'drv "x" // { drvPath = /. + builtins.unsafeDiscardStringContext (drv "x").drvPath; }'):
+        for where, skip in ((f'checks.${{system}}.fake = {value};', ""), (f'checks.${{system}}.fake = {value};', "fake"),
+                            (f"packages.${{system}}.fake = {value};", ""), (f"devShells.${{system}}.fake = {value};", ""),
+                            (f"formatter.${{system}} = {value};", "")):
+            rc, out, calls = run(flake(f"{{ {where} }}"), skip=skip)
+            assert rc == 0, (value, where, skip, out)
+
+
+def git(d, *args):
+    subprocess.run(["git", "-c", "user.name=gate", "-c", "user.email=gate@example.org",
+                    "-c", "protocol.file.allow=always", *args], cwd=d, check=True, capture_output=True,
+                   env={**os.environ, "HOME": tmp})
+
+
+@case
+def repository_settings():
+    "the repository's own settings hold in the snapshot: a mode git is told to ignore leaves the checkout clean"
+    d = flake("""{
+      checks.${system}.meta = if self ? rev then drv "clean" else throw "seen as dirty";
+    }""")
+    git(d, "config", "core.filemode", "false")
+    os.chmod(os.path.join(d, "flake.nix"), 0o755)
+    rc, out, calls = run(d)
+    assert rc == 0, out
+    [b] = builds(calls)
+    assert "-clean.drv^*" in b, b
+
+
+@case
+def submodules():
+    "a dirty checkout's submodules are in the snapshot as nix reads them, checked out, uncommitted changes and all"
+    sub = tempfile.mkdtemp(dir=tmp)
+    open(os.path.join(sub, "file"), "w").write("committed")
+    git(sub, "init", "-q")
+    git(sub, "add", "file")
+    git(sub, "commit", "-qm", "sub")
+    d = flake("""{
+      checks.${system}.sub = drv (builtins.readFile ./sub/file);
+    }""", top="inputs.self.submodules = true;")
+    git(d, "submodule", "add", "-q", sub, "sub")
+    git(d, "commit", "-qm", "submodule")
+    open(os.path.join(d, "sub", "file"), "w").write("changed")
+    with open(os.path.join(d, "flake.nix"), "a") as f:
+        f.write("# changed\n")
+    rc, out, calls = run(d)
+    assert rc == 0, out
+    [b] = builds(calls)
+    assert "-changed.drv^*" in b, b
 
 
 @case

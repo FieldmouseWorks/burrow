@@ -121,18 +121,31 @@ jobs:
                 (builtins.attrNames (set "nixosConfigurations" (outputs.nixosConfigurations or { })));
             isDerivation = v: (v.type or null) == "derivation";
             store = builtins.storeDir + "/";
-            # A store path's hash and name, as nix prints them.
-            drvName = "[0-9a-df-np-sv-z]{32}-[A-Za-z0-9+_?=-][A-Za-z0-9+._?=-]*[.]drv";
+            # A store derivation's hash and name, as nix reads a store path's
+            # (a name of at most 211 characters; ending in .drv, it's never
+            # "." or "..").
+            drvName = "[0-9a-df-np-sv-z]{32}-[A-Za-z0-9+._?=-]+[.]drv";
             drvPath = e: v:
               if !isDerivation v then throw "flake attribute '${e.what}' is not a derivation"
               else if !(v ? name) then throw "derivation name missing in ${e.what}"
               else if !builtins.isString v.name || builtins.hasContext v.name then throw "the name of ${e.what} is not a string without context"
               else if !(v ? drvPath) then throw "${e.what} has no drvPath"
-              else if !builtins.isString v.drvPath
-                || builtins.substring 0 (builtins.stringLength store) v.drvPath != store
-                || builtins.match drvName (builtins.substring (builtins.stringLength store) (builtins.stringLength v.drvPath) v.drvPath) == null
-              then throw "the drvPath of ${e.what} is not a store derivation's path"
-              else v.drvPath;
+              else
+                let
+                  # As nix coerces a drvPath: a string as it is, a path in
+                  # the store as it is (one outside it would be copied in,
+                  # never as a .drv), an attribute set by its outPath.
+                  coerce = x:
+                    if builtins.isPath x then toString x
+                    else if builtins.isAttrs x && !(x ? __toString) && x ? outPath then coerce x.outPath
+                    else "${x}";
+                  p = coerce v.drvPath;
+                  name = builtins.substring (builtins.stringLength store) (builtins.stringLength p) p;
+                in
+                if builtins.substring 0 (builtins.stringLength store) p != store
+                  || builtins.match drvName name == null || builtins.stringLength name > 33 + 211
+                then throw "the drvPath of ${e.what} is not a store derivation's path"
+                else p;
           in
           if entry == null then
             # legacyPackages has only its system names checked.
@@ -155,32 +168,47 @@ jobs:
             [[ $system =~ ^[A-Za-z0-9_-]+$ ]] || { echo "can't evaluate for system $system"; return 1; }
             work=$(mktemp -d "$RUNNER_TEMP/eval-apart.XXXXXX")
             trap 'rm -rf -- "$work"' EXIT
-            # One snapshot of the checkout, as nix reads it: the files git
-            # tracks as they are now, git's index, HEAD and its history (the
-            # repo's own objects, shared), so self is what nix flake check
-            # gives it. Everything here reads the snapshot and nothing writes
-            # it (the lock file is used as it is), so an edit to the checkout
-            # while the gate runs can't mix two sources in one result.
-            source=$work/source
-            if top=$(git rev-parse --show-toplevel 2> /dev/null); then
-              prefix=$(git rev-parse --show-prefix)
-              git init -q "$source"
-              echo "$(git rev-parse --path-format=absolute --git-common-dir)/objects" > "$source/.git/objects/info/alternates"
-              shallow=$(git rev-parse --path-format=absolute --git-path shallow)
-              if [ -f "$shallow" ]; then cp -- "$shallow" "$source/.git/shallow"; fi
-              if rev=$(git rev-parse -q --verify 'HEAD^{commit}'); then
-                if ref=$(git symbolic-ref -q HEAD); then
-                  git -C "$source" symbolic-ref HEAD "$ref"
-                  git -C "$source" update-ref "$ref" "$rev"
+            # One snapshot of the checkout, as nix reads it: a git work tree's
+            # tracked files as they are now, modes and all, its index, HEAD
+            # and history (the repo's own objects, shared), its repository and
+            # worktree settings, and each submodule checked out the same way
+            # (any other left empty, as git leaves it), so self, clean or
+            # dirty, is what nix flake check gives it. Everything here reads
+            # the snapshot and nothing writes it (the lock file is used as it
+            # is), so an edit to the checkout while the gate runs can't mix
+            # two sources in one result.
+            snapshot() {
+              local top=$1 to=$2 common gitdir rev ref line f
+              common=$(git -C "$top" rev-parse --path-format=absolute --git-common-dir)
+              gitdir=$(git -C "$top" rev-parse --path-format=absolute --git-dir)
+              git init -q --object-format="$(git -C "$top" rev-parse --show-object-format)" "$to"
+              cp -- "$common/config" "$to/.git/config"
+              if [ -f "$gitdir/config.worktree" ]; then cat -- "$gitdir/config.worktree" >> "$to/.git/config"; fi
+              git config -f "$to/.git/config" --unset-all core.worktree || true
+              git config -f "$to/.git/config" core.bare false
+              echo "$common/objects" > "$to/.git/objects/info/alternates"
+              if [ -f "$common/shallow" ]; then cp -- "$common/shallow" "$to/.git/shallow"; fi
+              if rev=$(git -C "$top" rev-parse -q --verify 'HEAD^{commit}'); then
+                if ref=$(git -C "$top" symbolic-ref -q HEAD); then
+                  git -C "$to" symbolic-ref HEAD "$ref"
+                  git -C "$to" update-ref "$ref" "$rev"
                 else
-                  git -C "$source" update-ref --no-deref HEAD "$rev"
+                  git -C "$to" update-ref --no-deref HEAD "$rev"
                 fi
               fi
-              cp -- "$(git rev-parse --path-format=absolute --git-path index)" "$source/.git/index"
+              if [ -f "$gitdir/index" ]; then cp -- "$gitdir/index" "$to/.git/index"; fi
               git -C "$top" ls-files -z | (cd "$top" && while IFS= read -r -d '' f; do
                 if [ -L "$f" ] || [ -f "$f" ]; then printf '%s\0' "$f"; fi
-              done | tar --null --no-recursion -T - -cf -) | tar -xf - -C "$source"
-              flake=$source/$prefix
+              done | tar --null --no-recursion -T - -cf -) | tar -xpf - -C "$to"
+              while IFS= read -r -d '' line; do
+                f=${line#*$'\t'}
+                if [ -e "$top/$f/.git" ]; then snapshot "$top/$f" "$to/$f" < /dev/null; else mkdir -p -- "$to/$f"; fi
+              done < <(git -C "$top" ls-files -z -s | grep -z '^160000 ')
+            }
+            source=$work/source
+            if top=$(git rev-parse --show-toplevel 2> /dev/null); then
+              snapshot "$top" "$source"
+              flake=$source/$(git rev-parse --show-prefix)
             else
               cp -a . "$source"
               flake=$source
