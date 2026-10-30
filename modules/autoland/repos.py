@@ -38,11 +38,10 @@ def discover():
             name = r["nameWithOwner"]
             if any(fnmatch.fnmatch(name, pat) for pat in CFG["exclude"]):
                 continue
-            # An empty repo has no branch to keep.
-            if not r.get("defaultBranchRef"):
-                continue
+            # An empty repo has no default branch yet (None): only its
+            # settings and hook, until its first push.
             seen.append({"repo": name, "id": r["id"], "private": r["isPrivate"],
-                         "default": r["defaultBranchRef"]["name"], "created": r["createdAt"]})
+                         "default": (r.get("defaultBranchRef") or {}).get("name"), "created": r["createdAt"]})
     return seen
 
 
@@ -495,6 +494,31 @@ def hook(repo, st, due):
     st["hook"], st["hookId"] = want, made
     save(f"repo-{repo.replace('/', '_')}.json", st)
     return True
+
+
+def app_hook():
+    """The App's own webhook, to burrow-events like each repo's, with the same
+    secret: it's how a repo just made is heard (GitHub sends the App the
+    `repository` events of every repo its installations reach, a new one's
+    included, before the repo has a hook of its own). The App's settings
+    turn it on and choose its events; its URL and secret are kept here, set
+    again when they change and once a day, in case they were edited.
+    GitHub never gives the secret back, so it's known by a hash."""
+    if DRY:
+        return
+    wh = CFG["webhook"]
+    want = hashlib.sha256(json.dumps([wh["url"], C.webhook_secret()]).encode()).hexdigest()[:16]
+    st = load("app-hook.json", {})
+    if st.get("hook") == want and C.NOW - st.get("at", 0) < 86400:
+        return
+    try:
+        C.app_call("PATCH", "app/hook/config", C.app_jwt(),
+                   {"url": wh["url"], "content_type": "json", "secret": C.webhook_secret(), "insecure_ssl": "0"})
+    except RuntimeError as e:  # tried again on the next full pass
+        log(f"the App's webhook: {e}")
+        return
+    log("the App's webhook: set")
+    save("app-hook.json", {"hook": want, "at": C.NOW})
 
 
 def hook_projects(repos):

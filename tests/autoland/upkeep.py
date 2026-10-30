@@ -516,6 +516,43 @@ S.CFG["projectsDir"] = f"{tmp}/none"
 shutil.rmtree(jobs)
 print("remade repos: ok")
 
+# The App's own webhook, which hears a repo the moment it's made: its URL
+# and the hooks' secret, set as the App (its JWT), again when either
+# changes and once a day; one GitHub didn't take is tried again next pass.
+CALLS = []
+
+
+def app_call(method, path, jwt, body=None):
+    CALLS.append((method, path, jwt, body))
+    if FAIL_APP:
+        raise FAIL_APP.pop()
+    return {}
+
+
+FAIL_APP = []
+kept_app = (C.app_call, C.app_jwt)
+C.app_call, C.app_jwt = app_call, (lambda: "the-jwt")
+REAL["app_hook"]()
+assert CALLS == [("PATCH", "app/hook/config", "the-jwt", {"url": "https://example.org/burrow/hook", "content_type": "json",
+                                                       "secret": "hook-secret", "insecure_ssl": "0"})], CALLS
+REAL["app_hook"]()
+assert len(CALLS) == 1, CALLS
+C.NOW += 86400
+REAL["app_hook"]()
+assert len(CALLS) == 2, CALLS
+with open(f"{tmp}/cred/webhook", "w") as f:
+    f.write("new-secret\n")
+FAIL_APP.append(C.Unavailable("PATCH app/hook/config: HTTP 502"))
+REAL["app_hook"]()
+REAL["app_hook"]()
+assert len(CALLS) == 4 and CALLS[-1][3]["secret"] == "new-secret", CALLS
+REAL["app_hook"]()
+assert len(CALLS) == 4, CALLS
+with open(f"{tmp}/cred/webhook", "w") as f:
+    f.write("hook-secret\n")
+C.app_call, C.app_jwt = kept_app
+print("the App's webhook: ok")
+
 # A red default branch gets one Claude job, and nothing more while it works
 # or its PR is open; a second if it ends with the branch still red, then the
 # owner. Green again, it starts over.
