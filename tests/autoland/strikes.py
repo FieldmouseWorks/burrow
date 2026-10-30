@@ -11,6 +11,7 @@ import re
 from harness import FAIL, JOBS, STUB, T, WROTE, C, H, S, clean, fresh_pr_state, merged, mkpr, pr_state, run, stand_in, tmp, \
     worker
 
+import harness
 import waits
 
 stand_in()
@@ -35,8 +36,22 @@ print("merge states: ok")
 
 # Every step that's tried again, failing for good: a pass booked a minute
 # on, then two, then four, and on the third failure in a row its wait is
-# overdue, saying what fails. The watchdog then takes it at once.
-real_land, real_job = H.land, C.job
+# overdue, saying what fails, and what GitHub said when it refused (on one
+# line). The watchdog then takes it at once.
+real_job = C.job
+REFUSAL = harness.REFUSAL
+SAID = "Repository rule violations found; Merge method squash is not allowed for this base branch (HTTP 405)"
+
+
+def reworded():
+    """GitHub says something else to the next try."""
+    harness.REFUSAL = "Base branch was modified. Review and try the merge again. (HTTP 405)"
+    return harness.REFUSAL
+
+
+def mended():
+    FAIL.clear()
+    harness.REFUSAL = REFUSAL
 
 
 def reviewed():
@@ -48,16 +63,17 @@ def reviewed():
 CASES = {
     "status": {"pr": clean(labels=["hold"]), "fail": lambda: FAIL.append("/statuses/"), "mend": FAIL.clear},
     "update": {"pr": {**clean(), "mergeStateStatus": "BEHIND"}, "fail": lambda: FAIL.append("/update-branch"),
-               "mend": FAIL.clear},
-    "merge": {"pr": clean(), "fail": lambda: setattr(H, "land", lambda *a: False),
-              "mend": lambda: setattr(H, "land", real_land)},
+               "mend": mended, "said": SAID, "again": reworded},
+    "merge": {"pr": clean(), "fail": lambda: FAIL.append("/merge"), "mend": mended, "said": SAID, "again": reworded},
     "mergeable": {"pr": {**clean(), "mergeStateStatus": "UNKNOWN"}, "mended": clean()},
     "job": {"pr": clean(files=["secrets/1.yaml"]), "fail": lambda: setattr(C, "job", lambda *a, **k: None),
             "mend": lambda: setattr(C, "job", real_job)},
     "post": {"pr": mkpr(), "setup": reviewed, "fail": lambda: STUB.update(post=C.Unavailable("GitHub's down")),
-             "mend": lambda: STUB.update(post=None)},
+             "mend": lambda: STUB.update(post=None), "said": "GitHub's down",
+             "again": lambda: STUB.update(post=C.Unavailable("GitHub's still down")) or "GitHub's still down"},
 }
-assert set(CASES) == set(H.STRIKES), "each step that's tried again has its case here"
+# A job that broke (lost) is struck once a job, not once a pass: lost.py has its case.
+assert set(CASES) | {"lost"} == set(H.STRIKES), "each step that's tried again has its case here, or in lost.py"
 
 
 def a_pass(pr, at):
@@ -73,6 +89,7 @@ def watched():
 
 for kind, case in CASES.items():
     why = H.STRIKES[kind]
+    shown = why + (f": {case['said']}" if "said" in case else "")
     fresh_pr_state()
     case.get("setup", lambda: None)()
     case.get("fail", lambda: None)()
@@ -81,23 +98,32 @@ for kind, case in CASES.items():
         assert pr_state()["strikes"].get(kind) == i + 1, (kind, pr_state())
         assert C.WAKE["sam/r"] == T + at + 2 ** i * 60 + 1, (kind, i, C.WAKE)
         assert waits.FAILING == ({KEY: why} if i == 2 else {}), (kind, i, waits.FAILING)
+        assert waits.SAID == ({KEY: case["said"]} if i == 2 and "said" in case else {}), (kind, i, waits.SAID)
         assert not any(x[0] == "Failing again and again" for x in digest), (kind, digest)
     it = watched()
-    assert it["due"] == it["since"] == C.NOW and it["phase"].endswith("; " + why), (kind, it)
+    assert it["due"] == it["since"] == C.NOW and it["phase"].endswith("; " + shown), (kind, it)
     # Without the watchdog, it's listed on the stuck issue instead.
     watch, S.CFG["watch"] = S.CFG["watch"], None
     _, digest = a_pass(case["pr"], 1200)
     S.CFG["watch"] = watch
-    assert ("Failing again and again", f"[{KEY}](u) t", f"{why}, 4 times in a row (journalctl -u autoland)") in digest, \
-        (kind, digest)
+    listed = f"{H.STRIKES[kind]}, 4 times in a row" + (f": {case['said']}" if "said" in case else " (journalctl -u autoland)")
+    assert ("Failing again and again", f"[{KEY}](u) t", listed) in digest, (kind, digest)
     assert C.WAKE["sam/r"] == T + 1200 + 8 * 60 + 1, (kind, C.WAKE)
+    # What GitHub says can change while the failure goes on: the wait shows
+    # the latest, and its stall (since when) goes on, so the watchdog's
+    # steps on it aren't lost.
+    if "again" in case:
+        said = case["again"]()
+        a_pass(case["pr"], 1250)
+        later = watched()
+        assert later["since"] == it["since"] and later["phase"].endswith(f"; {why}: {said}"), (kind, later, it)
     # Once it goes through, the run is over, and its wait has its deadline.
     case.get("mend", lambda: None)()
     a_pass(case.get("mended", case["pr"]), 1300)
     assert kind not in pr_state()["strikes"] and waits.FAILING == {}, (kind, pr_state())
     it = watched()
     minutes = S.CFG["defaults"]["holdStallAfter" if kind == "status" else "stallAfter"]  # status's case is on hold
-    assert it["due"] == it["since"] + minutes * 60 and why not in it["phase"], (kind, it)
+    assert it["due"] == it["since"] + minutes * 60 and H.STRIKES[kind] not in it["phase"], (kind, it)
 # The backoff stops at an hour, and a new head starts the count over.
 fresh_pr_state()
 for i in range(9):

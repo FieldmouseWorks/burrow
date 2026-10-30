@@ -79,8 +79,8 @@ let
   # Each script gets the names it uses (shellcheck rejects the rest), set above
   # its own text.
   uses = text: n: lib.length (builtins.split "\\$\\{?${n}([^A-Za-z0-9_]|$)" text) > 1;
-  script = name: file: runtimeInputs:
-    let text = builtins.readFile file;
+  script = name: files: runtimeInputs:
+    let text = lib.concatMapStrings builtins.readFile (lib.toList files);
     in pkgs.writeShellApplication {
       inherit name runtimeInputs;
       text = lib.concatMapStrings (n: "${n}=${lib.escapeShellArg vars.${n}}\n")
@@ -89,7 +89,7 @@ let
 
   calls = [ tools.proj tools.notify ];
   healthTool = script health ./updates/health.sh (with pkgs; [ coreutils gnugrep gnused gawk systemd ]);
-  updateTool = script update ./updates/update.sh (
+  updateTool = script update [ ./updates/dispatch.sh ./updates/update.sh ] (
     (with pkgs; [ coreutils git jq curl util-linux systemd gnugrep gnused gawk vulnix config.nix.package ])
     ++ [ healthTool tools.switch tools.confirm ] ++ calls ++ lib.optional (tools ? boot) tools.boot
   );

@@ -138,6 +138,17 @@ def rules(repo, mirror, rev, paths):
     return "\n\n".join(out)
 
 
+def fetch(repo, *refs):
+    """The steward's bare clone of the repo, which only it reads, with refs
+    fetched into it from GitHub: what the snapshots are taken from, and what
+    a proof's builds are worked out from (proofs.py)."""
+    mirror = os.path.join(STATE, GIT, repo.replace("/", "__") + ".git")
+    if not os.path.isdir(mirror):
+        git("init", "-q", "--bare", mirror)
+    git("-C", mirror, *C.GIT_AUTH, "fetch", "-q", "--no-tags", ORIGIN.format(repo), *refs, env=C.gh_env(repo))
+    return mirror
+
+
 def snap_name(key, head, base):
     """One snapshot a head on a base: retargeted, a PR is another change."""
     return f"{key[:-5]}-{head[:12]}-{hashlib.sha1(base.encode()).hexdigest()[:8]}"
@@ -167,11 +178,7 @@ def snapshot(repo, pr, key):
     meta = load(f"{SNAP}/{name}.json", None)
     if meta:
         return name, meta
-    mirror = os.path.join(STATE, GIT, repo.replace("/", "__") + ".git")
-    if not os.path.isdir(mirror):
-        git("init", "-q", "--bare", mirror)
-    git("-C", mirror, *C.GIT_AUTH, "fetch", "-q", "--no-tags", ORIGIN.format(repo),
-        f"+refs/pull/{n}/head:refs/pr/{n}", f"+refs/heads/{base}:refs/base/{base}", env=C.gh_env(repo))
+    mirror = fetch(repo, f"+refs/pull/{n}/head:refs/pr/{n}", f"+refs/heads/{base}:refs/base/{base}")
     mb = git("-C", mirror, "merge-base", f"refs/base/{base}", head).decode().strip()
     changed = names(git("-C", mirror, "diff", "-z", "--name-only", "--no-renames", mb, head))
     # A secret renamed or copied to a plain path is still a secret, so its
