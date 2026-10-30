@@ -11,20 +11,20 @@ stand_in()
 # has them (steward.run_pass's acting_for).
 C._for.append("sam")
 
-# Every repo gets the hold and needs-owner labels, once a day.
+# Every repo gets the hold, needs-owner and first labels, once a day.
 fresh_pr_state()
 C.NOW = C.ts(T0)
 C.save("repo-sam_r.json", {"settings": C.NOW, "app": 7})
 WROTE.clear()
 R.settle_repo({"repo": "sam/r", "private": False, "default": "main"}, {"sam/r"})
-assert sorted(x.split()[2] for x in WROTE if x.startswith("label create")) == ["hold", "needs-owner"], WROTE
+assert sorted(x.split()[2] for x in WROTE if x.startswith("label create")) == ["first", "hold", "needs-owner"], WROTE
 WROTE.clear()
 R.settle_repo({"repo": "sam/r", "private": False, "default": "main"}, {"sam/r"})
 assert WROTE == [], WROTE
 # A day on, they're made again with the settings, in case one was deleted.
 C.NOW += 86400
 R.settle_repo({"repo": "sam/r", "private": False, "default": "main"}, {"sam/r"})
-assert sorted(x.split()[2] for x in WROTE if x.startswith("label create")) == ["hold", "needs-owner"], WROTE
+assert sorted(x.split()[2] for x in WROTE if x.startswith("label create")) == ["first", "hold", "needs-owner"], WROTE
 
 # Wherever the repo has rules (its own rulesets and the default branch's
 # classic protection), up-to-date branches go off and the steward's status
