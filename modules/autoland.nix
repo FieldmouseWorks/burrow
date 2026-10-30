@@ -80,8 +80,7 @@ let
   # what a stalled wait on it kicks.
   sweeping = (config.burrow.updates.enable or false) && (config.burrow.updates.renovate.enable or false);
   watchdog = config.burrow.watchdog.enable or false;
-  # Only a machine that imports burrow.ledger has one.
-  ledger = config.burrow.ledger or { };
+  ledger = config.burrow.ledger;
   # The repos whose PRs land through their merge train.
   trains = lib.attrNames (lib.filterAttrs (_: r: r.train or false) cfg.repos);
 
@@ -164,12 +163,14 @@ let
       trainRequire = [ ];
       trainStallAfter = cfg.trainStallAfterMinutes;
     };
+    # The merge train's status, which a repo's baseline requires while its
+    # train is on and gives up once it's off, the ledger on or not.
+    trainContext = ledger.trainContext;
     # The merge train's `cn` (autoland/train.py), on the ledger's own log:
     # the train's ops are ledger ops. Its token command is the steward's own.
-    train = if ledger.enable or false then {
+    train = if ledger.enable then {
       cn = "${ledger.package}/bin/cn";
       inherit (ledger) env;
-      context = ledger.trainContext;
       # Its candidates' branches, cn's to make and delete.
       branches = "conary/*";
     } else null;
@@ -241,6 +242,8 @@ in
     { key = "burrow/proj"; imports = [ (import ./proj.nix inputs) ]; }
     { key = "burrow/events"; imports = [ (import ./events.nix inputs) ]; }
     { key = "burrow/github"; imports = [ (import ./github.nix inputs) ]; }
+    # The train's: its status's name, whether the ledger is on or not.
+    { key = "burrow/ledger"; imports = [ (import ./ledger.nix inputs) ]; }
     { key = "burrow/watchdog/sources"; imports = [ ./watchdog/sources.nix ]; }
   ];
 
@@ -643,16 +646,17 @@ in
       assertion = config.burrow.events.host != null;
       message = "burrow.autoland needs burrow.events.host and .secretFile: GitHub's events reach its passes through them.";
     } {
-      assertion = trains == [ ] || (ledger.enable or false);
+      assertion = trains == [ ] || ledger.enable;
       message = "burrow.autoland: a repo's train (${lib.concatStringsSep ", " trains}) is on the ledger's log: turn on burrow.ledger.";
     } {
       # A proof runs on a PR's head; the train's evidence is its candidates'.
       assertion = lib.all (r: (cfg.repos.${r}.proofJobs or { }) == { }) trains;
       message = "burrow.autoland: a repo with its train on can't have proofJobs yet.";
     } {
-      # Its rules are what keep anything but the train off its default branch.
-      assertion = lib.all (r: !(cfg.repos.${r}.directPush or false)) trains;
-      message = "burrow.autoland: a repo with its train on can't be directPush: only the train may move its default branch.";
+      # Its rules are what keep anything but the train off its default branch:
+      # the merge of a PR that isn't settled any more is refused.
+      assertion = lib.all (r: !(cfg.repos.${r}.directPush or false) && (cfg.repos.${r}.ruleset or true)) trains;
+      message = "burrow.autoland: a repo with its train on needs its baseline ruleset and can't be directPush: only the train may move its default branch, and only with PRs that are still settled.";
     }];
 
     burrow.proj.enable = true;

@@ -27,13 +27,16 @@ import common as C
 from common import CFG, DRY, log, repo_cfg
 
 TRAIN = CFG["train"] or {}
-CONTEXT = TRAIN.get("context")
+CONTEXT = CFG["trainContext"]
 # Why the train holds a PR out, as cn says it, and until what, in words.
 HELD = {"red": "it was red alone in it, until a new head",
         "conflict": "it won't merge after the PRs ahead of it, until they've landed or left",
         "refused": "{}, until the default branch moves or a new head",
         "elsewhere": "it was just retargeted off the default branch, so it's seen to again"}
 TRAINS = {}  # each train repo's train, as this pass read it (begin)
+# The train repos this pass mustn't step, and why: a PR in the train it
+# couldn't take out, or wasn't sure was still settled.
+STOPPED = {}
 
 
 def on(repo):
@@ -64,6 +67,7 @@ def begin(repo):
     """The repo's train, as the ledger holds it, for this pass: none with
     its train off, whatever an earlier pass read."""
     TRAINS.pop(repo, None)
+    STOPPED.pop(repo, None)
     if on(repo):
         TRAINS[repo] = cn("train", "show", repo)
 
@@ -114,7 +118,8 @@ def join(repo, pr, alone=False):
 def leave(repo, pr):
     """Take the PR out of the train: it isn't settled any more. Not while
     its candidate is landing a PR, which a step settles first: it's out on
-    a pass after that, its status saying it isn't settled meanwhile."""
+    a pass after that, its status saying it isn't settled meanwhile (the
+    rules refuse its merge on that). Returns whether it's out."""
     n = pr["number"]
     if DRY:
         log(f"  would: take {repo}#{n} out of its train")
@@ -122,10 +127,17 @@ def leave(repo, pr):
         got = cn("train", "leave", repo, str(n), "--why", "unready")
         if got.get("landing"):
             log(f"{repo}#{n}: still in its train, unsettled: #{got['landing']} is landing in its candidate")
-            return
+            return False
         log(f"{repo}#{n}: left its train, unsettled")
     t = TRAINS[repo]
     t["joined"] = [m for m in t["joined"] if m["pr"] != n]
+    return True
+
+
+def stop(repo, why):
+    """No step of the repo's train this pass: what it holds may not all be
+    settled, and nothing says so to the rules."""
+    STOPPED.setdefault(repo, why)
 
 
 def idle(t):
@@ -143,6 +155,10 @@ def step(repo):
     event that starts the repo's next pass."""
     t = TRAINS.get(repo)
     if t is None or idle(t):
+        return
+    if repo in STOPPED:
+        # The PR's own pass, booked later, steps it.
+        log(f"{repo}: its train isn't stepped this pass: {STOPPED[repo]}")
         return
     rc = repo_cfg(repo)
     args = ["train", "step", repo, "--size", str(rc["trainSize"])]

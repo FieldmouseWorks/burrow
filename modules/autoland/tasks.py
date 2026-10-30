@@ -32,7 +32,7 @@ def fix_task(repo, pr, why, proofs=None, train=False):
                       for c, how in (proofs or {}).items()) + (f" {FOREGROUND.strip()}" if proofs else "")
     if train:
         base = pr["baseRefName"]
-        machine += (f" The failing {CFG['train']['context']} status is the merge train's: it merged this head alone onto {base} "
+        machine += (f" The failing {CFG['trainContext']} status is the merge train's: it merged this head alone onto {base} "
                     "and CI failed on that merge (the status links the failed check, on a conary/train/ branch). "
                     f"Merge {base} into the branch, find what breaks when the two meet, fix it and push: the new head goes "
                     "into the train again once it's settled.")

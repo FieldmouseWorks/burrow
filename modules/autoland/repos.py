@@ -195,7 +195,7 @@ def keep_rules(repo, rc, rulesets):
                 changed.append("the steward's checks from the App only")
             listed = params.get("required_status_checks") or []
             has = any(c.get("context") == T.CONTEXT for c in listed)
-            if rs.get("name") == "baseline" and T.CONTEXT and has != bool(rc["train"]):
+            if rs.get("name") == "baseline" and has != bool(rc["train"]):
                 params["required_status_checks"] = (listed + [{"context": T.CONTEXT, "integration_id": CFG["app"]["id"]}]
                                                     if rc["train"] else [c for c in listed if c.get("context") != T.CONTEXT])
                 changed.append(f"{T.CONTEXT} {'required' if rc['train'] else 'no longer required'}")

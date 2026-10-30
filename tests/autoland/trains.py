@@ -6,6 +6,7 @@ with a step of the train unless it has nothing to do; cn gets the App's
 tokens from the steward; and the repo's rules require the train's status."""
 
 import contextlib
+import importlib
 import io
 import json
 import os
@@ -273,6 +274,23 @@ kicked(show=landed, rc={"step": 75})
 assert C.WAKE["sam/r"] == C.NOW + 5 * 60 and "sam/r" not in waits.FAILED, (C.WAKE, waits.FAILED)
 kicked(show=landed, rc={"step": 1})
 assert C.WAKE["sam/r"] == C.NOW + 5 * 60 and "sam/r" in waits.FAILED, (C.WAKE, waits.FAILED)
+# A PR in it that isn't settled any more, whose status GitHub didn't take,
+# and that cn keeps in while its candidate is landing: its old status stands
+# for the rules, so the train isn't stepped this pass. With the status taken,
+# the rules refuse its merge, and it is.
+PRS["v"] = [clean(base="trunk", threads=[False])]
+KEEP = {"show": train([5], "green"), "leave": {"left": False, "landing": 5}}
+FAIL.append("/statuses/")
+assert kicked(**KEEP)[-1] == LEAVE and "sam/r" in T.STOPPED, cn_runs()
+FAIL.clear()
+assert kicked(**KEEP)[-1] == STEP, cn_runs()
+# Nor is it stepped when a PR in it wasn't seen to at all: it may not be
+# settled any more. One that isn't in it stops nothing.
+kept_handle = S.step.handle
+S.step.handle = lambda *a: (_ for _ in ()).throw(RuntimeError("GitHub said 502"))
+assert kicked(show=train([5]))[-1] == SHOW, cn_runs()
+assert kicked(show=train([9], joined=(9,)))[-1] == STEP, cn_runs()
+S.step.handle = kept_handle
 # The train off: none of it.
 del S.CFG["repos"]["sam/r"]
 assert kicked(show=landed) == [], cn_runs()
@@ -352,6 +370,17 @@ for on, checks, want in ((True, settled, R.required(True)),
         assert PUT == [], (on, checks, PUT)
     else:
         assert len(PUT) == 1 and json.loads(PUT[0][1])["rules"][0]["parameters"]["required_status_checks"] == want, (on, PUT)
+# Given up with the ledger off as well, when there's no train for cn to run:
+# the status's name isn't the ledger's to say.
+on_rules, off_rules = R.required(True), R.required(False)
+kept_train, C.CFG["train"] = C.CFG["train"], None
+importlib.reload(T)
+RULES["repos/sam/r/rulesets/1"] = ruleset("baseline", on_rules)
+PUT.clear()
+assert R.keep_rules("sam/r", {**rc, "train": False}, [{"id": 1}])
+assert len(PUT) == 1 and json.loads(PUT[0][1])["rules"][0]["parameters"]["required_status_checks"] == off_rules, PUT
+C.CFG["train"] = kept_train
+importlib.reload(T)
 RULES["repos/sam/r/rulesets/2"] = ruleset("gates", [{"context": "conary/train"}])
 PUT.clear()
 assert R.keep_rules("sam/r", {**rc, "train": False}, [{"id": 2}])

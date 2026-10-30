@@ -172,6 +172,9 @@ def run_pass(kick):
                         log(f"{repo}#{pr['number']}: {e}")
                         waits.failed(repo, pr)
                         seen_to = False
+                        if T.seat(repo, pr["number"]) is not None:
+                            # It may not be settled any more, and still be in.
+                            T.stop(repo, f"#{pr['number']} wasn't seen to")
                 if seen_to:
                     covered.append(r)
                 else:

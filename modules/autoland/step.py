@@ -157,9 +157,10 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
             # old ones stand and a merge queued on it can still go.
             strike("status")
         # Nor may its train land it. Out after the status: one the train
-        # lands meanwhile needs the status the rules require.
-        if state != "success" and T.seat(repo, n) is not None:
-            T.leave(repo, pr)
+        # lands meanwhile needs the status the rules require. Still in, with
+        # the old status standing, its train isn't stepped.
+        if state != "success" and T.seat(repo, n) is not None and not T.leave(repo, pr) and not ok:
+            T.stop(repo, f"#{n} isn't settled, and GitHub hasn't taken its status")
         return ok
 
     def update_branch():
@@ -290,7 +291,7 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
             who = f"a Claude job takes it once the one on {ON[busy]} ends"
         else:
             proofs = {c: rc["proofJobs"][c] for c in ci_names if c in rc["proofJobs"]} if ci == "red" else {}
-            train = ci == "red" and bool(T.CONTEXT) and any(c.startswith(f"{T.CONTEXT} (") for c in ci_names)
+            train = ci == "red" and any(c.startswith(f"{T.CONTEXT} (") for c in ci_names)
             if started(kind, fix_task(repo, pr, why, proofs, train), at):
                 if retry:
                     st[kind + "Again"] = at
