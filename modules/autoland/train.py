@@ -118,8 +118,9 @@ def join(repo, pr, alone=False):
 def leave(repo, pr):
     """Take the PR out of the train: it isn't settled any more. Not while
     its candidate is landing a PR, which a step settles first: it's out on
-    a pass after that, its status saying it isn't settled meanwhile (the
-    rules refuse its merge on that). Returns whether it's out."""
+    a pass after that, its status saying it isn't settled meanwhile, which
+    cn reads right before each landing, taking it out instead (Conary#55).
+    Returns whether it's out."""
     n = pr["number"]
     if DRY:
         log(f"  would: take {repo}#{n} out of its train")

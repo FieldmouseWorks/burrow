@@ -653,10 +653,9 @@ in
       assertion = lib.all (r: (cfg.repos.${r}.proofJobs or { }) == { }) trains;
       message = "burrow.autoland: a repo with its train on can't have proofJobs yet.";
     } {
-      # Its rules are what keep anything but the train off its default branch:
-      # the merge of a PR that isn't settled any more is refused.
-      assertion = lib.all (r: !(cfg.repos.${r}.directPush or false) && (cfg.repos.${r}.ruleset or true)) trains;
-      message = "burrow.autoland: a repo with its train on needs its baseline ruleset and can't be directPush: only the train may move its default branch, and only with PRs that are still settled.";
+      # Its rules are what keep anything but the train off its default branch.
+      assertion = trains == [ ] || cfg.rulesets && lib.all (r: !(cfg.repos.${r}.directPush or false) && (cfg.repos.${r}.ruleset or true)) trains;
+      message = "burrow.autoland: a repo with its train on needs its baseline ruleset (rulesets, and the repo's ruleset) and can't be directPush: only the train may move its default branch.";
     }];
 
     burrow.proj.enable = true;
