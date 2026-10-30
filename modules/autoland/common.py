@@ -486,11 +486,12 @@ def job(repo, task, clone=False):
     if DRY:
         log(f"  would: proj run {d} ...")
         return "dry"
-    # Each of its turns that ends starts the repo's pass, which reads what it
-    # did and acts on it (--owned: the turn needn't say what comes next); one
-    # that goes quiet for jobIdle, or runs past jobTimeout, is stopped, and
-    # ends then. It's the machine's own work, so it acts on GitHub as the
-    # machinery's App, where there is one.
+    # Each of its turns starts the repo's pass when it takes its slot (it
+    # sees the job at work, not queued) and when it ends (the pass reads what
+    # it did and acts on it, so --owned: the turn needn't say what comes
+    # next); one that goes quiet for jobIdle, or runs past jobTimeout, is
+    # stopped, and ends then. It's the machine's own work, so it acts on
+    # GitHub as the machinery's App, where there is one.
     app = ["--app", CFG["machinery"]] if CFG.get("machinery") else []
     p = subprocess.run([CFG["proj"], "run", "--pipeline", *app, "--timeout", f"{CFG['jobTimeout']}m",
                         "--idle", f"{CFG['jobIdle']}m", "--kick", f"autoland/{repo}", "--owned", d, task],
