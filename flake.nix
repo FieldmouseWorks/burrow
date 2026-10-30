@@ -533,6 +533,8 @@
         remote-control-memory = import ./tests/remote-control-memory.nix { inherit self pkgs; };
         # systemd-oomd leaves a Remote Control server whole, with a stand-in for Claude.
         remote-control-oomd = import ./tests/remote-control-oomd.nix { inherit self pkgs; };
+        # What a proj job does against its own memory cap is that job's.
+        proj-oomd = import ./tests/proj-oomd.nix { inherit self pkgs; };
         # The signed-in browser: Claude driving it, its logins kept, its ports
         # and profile kept from everyone else.
         browser = import ./tests/browser.nix { inherit self pkgs; };
