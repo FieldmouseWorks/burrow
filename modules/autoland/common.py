@@ -125,11 +125,14 @@ def app_jwt():
     return f"{signed}.{_b64(p.stdout)}"
 
 
-def app_call(method, path, jwt):
-    """A call the App makes as itself; raises as gh() does."""
-    req = urllib.request.Request(f"{API}/{path}", method=method, data=b"" if method == "POST" else None, headers={
+def app_call(method, path, jwt, body=None):
+    """A call the App makes as itself, with body as its JSON; raises as gh()
+    does."""
+    data = json.dumps(body).encode() if body is not None else b"" if method == "POST" else None
+    req = urllib.request.Request(f"{API}/{path}", method=method, data=data, headers={
         "Authorization": f"Bearer {jwt}", "Accept": "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "burrow-autoland"})
+        "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "burrow-autoland",
+        **({"Content-Type": "application/json"} if body is not None else {})})
     try:
         with urllib.request.urlopen(req, timeout=30) as r:
             return json.load(r)
