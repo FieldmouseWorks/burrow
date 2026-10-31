@@ -5,8 +5,9 @@ back, hand what's open (findings, red CI, a conflict with its base) to a
 Claude job, have a job run its machine checks or judge it, post its
 `review-settled` status and merge it (or, in a repo with its merge train
 on, put it in the train, which lands it: train.py), or list it for the
-owner or the stuck issue. Each step it takes is in the PR's status, and in
-what the watchdog watches (waits.py).
+owner or the stuck issue. Each step it takes is in the PR's status, in
+what the watchdog watches (waits.py), and when it waits on something one of
+the steward's labels names, in that label (prs.py).
 
 A step that fails (GitHub refuses it, or no job can start) is tried again,
 later each time, and never quietly for ever: the third failure in a row on a
@@ -15,7 +16,6 @@ job that stops before it finishes (it times out, goes quiet or crashes) is
 the machine failing, not the job's answer: it's started again the same way
 (retry_at)."""
 
-import os
 import re
 import time
 
@@ -23,14 +23,16 @@ import common as C
 import dashboard as D
 import lock_wait
 import proofs as P
+import review_step
 import reviewers as V
+import stopping
 import train as T
 import waits
-from common import CFG, DRY, MIN, STATE, load, log, repo_cfg, save, ts
+from common import CFG, DRY, MIN, load, log, repo_cfg, save, ts
 from seal import MAJOR as MAJOR_VERDICT  # renovate-sweep's, on a Renovate major
 from touches import automerges, bot_edited, dep_kind, gate_edit, moved_from, one_way
-from tasks import DEP_SEEN, JUDGMENT, PAST_LIMIT, REVIEWED, fix_task, judge_task, proof_task
-from prs import MERGE_STEPS, ci_state, eyes, land, our_status, post_status
+from tasks import DEP_SEEN, PAST_LIMIT, REVIEWED, fix_task, judge_task, judged_on, judgment, owed, proof_task
+from prs import MERGE_STEPS, PROOF_SLOT, RELEASE_AGE, REVIEWER, ci_state, eyes, land, our_status, post_status, show_waiting
 
 # The link Claude Code puts in a PR its session opens.
 SESSION = re.compile(r"https://claude\.ai/code/session_\w+")
@@ -47,6 +49,7 @@ STRIKES = {
     "job": "no Claude job can start for it",
     "post": "GitHub keeps refusing a review it's to post",
     "lost": "its Claude jobs keep stopping before they finish (timed out, quiet or crashed)",
+    "stop": "proj keeps refusing to stop its Claude jobs on a head it no longer has",
 }
 STRIKE_LIMIT = 3  # failures in a row of one step, on one head, that make its wait overdue
 
@@ -60,9 +63,9 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
     rc = repo_cfg(repo)
     n, head = pr["number"], pr["headRefOid"]
     by_train = T.rides(repo, pr, repo_info)
-    # The judge reads the diff against the base, so its verdict (and its
-    # job) is for this head on this base: one retargeted is judged again.
-    judged_at = f"{head} {pr['baseRefName']}"
+    # A judge's verdict (and its job) is for this head on this base, with this
+    # description (judged_on): one retargeted or redescribed is judged again.
+    judged_at = f"{head} {judged_on(pr)}"
     key = f"pr-{repo.replace('/', '_')}-{n}.json"
     st = load(key, {})
     # Findings a reviewer couldn't post: by reviewer, then base (on another
@@ -77,6 +80,7 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
             was, base = rs.pop("lost")
             lost_on.setdefault(r, {})[base] = was
     if st.get("head") != head:
+        stopping.moved(repo, pr, st)  # its jobs on the last head, to be stopped below
         st.update(head=head, seen=C.NOW, handed=None, strikes={}, rv={})
     st.setdefault("rv", {})
     labels = {x["name"] for x in pr["labels"]["nodes"]}
@@ -122,6 +126,13 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
         if kind not in struck:
             st.setdefault("strikes", {}).pop(kind, None)
 
+    # The jobs a new head left answering for nothing, stopped: one proj
+    # refuses is tried again.
+    if stopping.stop(tag, st):
+        cleared("stop")
+    else:
+        strike("stop")
+
     # Open a day, it's listed for the owner (below): a pass then says so.
     after(ts(pr["createdAt"]), 24 * 60)  # ends: listed for the owner
 
@@ -141,10 +152,12 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
 
     refresh = {}  # what the watchdog's to count of a refresh of it renovate-sweep has (waits.note)
 
-    def settle(state, desc, why=None, wait=waits.STEWARD):
-        """The PR's status, and what it waits on for the watchdog (waits.py).
-        False if GitHub didn't take it."""
+    def settle(state, desc, why=None, wait=waits.STEWARD, label=None):
+        """The PR's status, what it waits on for the watchdog (waits.py), and
+        its waiting label: label's (prs.py), or none. False if GitHub didn't
+        take the status."""
         ok = post_status(repo, pr, state, desc)
+        show_waiting(repo, pr, labels, label)
         if why:
             digest.append((why, line, desc))
         waits.note(repo, pr, desc, wait, **refresh)
@@ -371,9 +384,12 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
             log(f"{tag}: a Claude job ({busy}) is still working on this head; {kind} waits for it")
             who = f"a Claude job takes it once the one on {ON[busy]} ends"
         else:
-            proofs = {c: rc["proofJobs"][c] for c in ci_names if c in rc["proofJobs"]} if ci == "red" else {}
+            # A conflict's merge is a new head, whose proofs run again anyway:
+            # its job doesn't rerun them, which can outlast it like the gate.
+            conflict = kind == "conflictFixed"
+            proofs = {c: rc["proofJobs"][c] for c in ci_names if c in rc["proofJobs"]} if ci == "red" and not conflict else {}
             train = ci == "red" and any(c.startswith(f"{T.CONTEXT} (") for c in ci_names)
-            if started(kind, fix_task(repo, pr, why, proofs, train), at, bool(how)):
+            if started(kind, fix_task(repo, pr, why, proofs, train, conflict), at, bool(how)):
                 if retry:
                     if not how:
                         st[kind + "Again"] = at
@@ -456,10 +472,10 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
         else:
             hand_off(f"it conflicts with {base}, so GitHub can't merge it and its CI doesn't run: merge {base} into the "
                      "branch (a merge commit: never rebase or force-push), resolve every conflict keeping what both sides "
-                     "meant, and run the repo's tests before you push. If the two sides can't both be kept, which one stays "
+                     "meant. If the two sides can't both be kept, which one stays "
                      f"is the owner's call. Just before you merge, and again before you push, check that the PR is still open "
                      f"on {base} at head {head}: if its base or head moved on, stop without merging or pushing, since the "
-                     "steward hands what it is now to a new job", f"Conflicts with {base}", "conflictFixed", judged_at,
+                     "steward hands what it is now to a new job", f"Conflicts with {base}", "conflictFixed", f"{head} {base}",
                      wait=False)
             # A job stuck in line, or one whose state can't be read, doesn't
             # keep it off the list.
@@ -476,7 +492,7 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
     def owner_decides():
         """Sent to the owner by hand, by a fix job or by a judge (the label):
         listed for them, and no judge job."""
-        judged_owner = C.marker(pr, JUDGMENT, head, repo) == "owner"
+        judged_owner = judgment(pr, head, repo) == "owner"
         if judged_owner:
             # The judge's word, seen labelled on this head: once the label
             # is off, that's the owner's go-ahead. A label taken off before
@@ -488,7 +504,7 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
     def judged(why, seen=REVIEWED):
         """Settled, but not something the steward lands on its own word: one
         Claude job a head judges it, and its verdict on this head decides."""
-        verdict = C.marker(pr, JUDGMENT, head, repo)
+        verdict = judgment(pr, head, repo)
         if verdict == "land":
             land_now(f"Settled; a Claude job judged it fine to land ({why})")
         elif verdict == "owner" and st.get("ownerSaw") == judged_at:
@@ -504,8 +520,8 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
             # The judge's own build or tests failed on this head: a fix job
             # has it, and its push is judged again. Its own once a head: a
             # job that answered a finding here without pushing didn't fix this.
-            hand_off("the Claude job that judged it found something failing on this head, its build or tests or a finding "
-                     "left unfixed (its comment on the PR says what)",
+            hand_off("the Claude job that judged it found something failing on this head, its build or tests, a finding "
+                     "left unfixed or a reason in its description that doesn't hold (its comment on the PR says what)",
                      "Settled, but its build or tests fail", "failFixed", judged_at, wait=False)
         elif update_branch():
             settle("pending", "Settled, but behind its base: brought up to date, reviewed again")
@@ -520,7 +536,8 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
         """Only checks that run on a machine, not in CI, are left: a Claude
         job runs them on this head and records their verdicts, once its
         repo's proofSlots have room for it (a job started again too), or it
-        has nothing new to build (proofs.py)."""
+        has nothing new to build; none at all, and no job: its verdicts are
+        taken from the store (proofs.py)."""
         doing = "running " + ", ".join(ci_names)
         task = proof_task(repo, pr, ci_names, rc["proofJobs"])
         retry = lost("proved")
@@ -531,6 +548,11 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
 
         if not retry and st.get("proved") == head:
             running_now()
+            return
+        if (drvs := P.built(repo, pr, ci_names, st)) and not P.record(repo, pr, ci_names, drvs):
+            strike("status")
+        if drvs:  # Their statuses kick the pass that lands it.
+            settle("pending", f"Settled; {', '.join(ci_names)} taken from the store, not run again"[:140])
             return
         # One that broke is counted, and its retry booked, whether or not
         # there's room: only the job started in its place waits for a slot.
@@ -544,7 +566,8 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
         if slots and not last and (ahead := P.ahead(repo, n, st, slots, outs)) is not None:
             if ahead != P.FREE:
                 P.wait(repo, n)
-                settle("pending", f"Settled; waiting its turn to run {', '.join(ci_names)} ({ahead} ahead)"[:140])
+                settle("pending", f"Settled; waiting its turn to run {', '.join(ci_names)} ({ahead} ahead)"[:140],
+                       label=PROOF_SLOT)
                 return
             free = True
         before = st.get("provedJob")
@@ -618,10 +641,10 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
     # each on one branch would push over each other. The sweep's push makes a
     # new head, and the reviewers read it again.
     # A judge asked for on this head and base (the repo had no CI then, say)
-    # still decides once CI shows up: its owner or failed verdict isn't
-    # dropped for a green check.
-    judge_said = C.marker(pr, JUDGMENT, head, repo)
-    asked = st.get("judged") == judged_at or judge_said is not None
+    # still decides once CI shows up, or the description is edited (then on
+    # the new one): its owner or failed verdict isn't dropped for either.
+    judge_said = judgment(pr, head, repo)
+    asked = owed(pr, head, repo, st.get("judged"))
     # Its owner or failed verdict holds it whatever CI is still doing; only
     # a land waits for CI.
     held = asked and judge_said in ("owner", "failed")
@@ -656,7 +679,8 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
             threads = ", ".join([threads] * bool(threads) + ["changes requested by " + ", ".join(changes)])
         if (ripe := refresh.get("ripe")) and not threads:
             when = time.strftime("%b %-d, ", time.localtime(ripe)) + clock(ripe)
-            settle("pending", f"Lock file refresh, nothing in it old enough until {when}; renovate-sweep has it refreshed then", wait=waits.SWEEP)
+            settle("pending", f"Lock file refresh, nothing in it old enough until {when}; renovate-sweep has it refreshed then",
+                   wait=waits.SWEEP, label=RELEASE_AGE)
         elif renovate and ci == "red":
             settle("pending", "Dependency update, CI red; renovate-sweep has it" + (f" ({threads})" if threads else ""),
                    wait=waits.SWEEP)
@@ -703,247 +727,9 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
         save(key, st)
         return
 
-    # The reviewers (reviewers.py): every one this repo has, but one out of
-    # service (its usage spent, say) isn't waited for meanwhile. Each review
-    # is queued for the reviewers' own service; a pass posts what comes back.
-    names = V.on(repo)
-    # What the reviewers weren't shown: their clean reviews don't cover it,
-    # so a judge, who sees it all, looks before it lands.
-    unseen = V.unseen(key, head, pr["baseRefName"])
-    away = {r: V.out(r) for r in names}
-    live = [r for r in names if not away[r]]
-    for r in names:
-        # Once a pass, whichever PR finds it out, while the others carry on
-        # without it (with none left, the PR says so below): logging it back
-        # in, say, is the owner's to do.
-        if live and away[r] and not any(x[:2] == ("A reviewer is out of service", V.NAMES[r]) for x in digest):
-            digest.append(("A reviewer is out of service", V.NAMES[r], away[r]))
-    said = {r: V.verdict(pr, head, r) for r in names}  # verdict, when, rounds with findings
-    found = []  # the reviewers whose findings on this head this pass posted
-    late, unposted = [], []  # earlier heads whose findings this pass posted; reviews it couldn't post yet
-
-    def went_out(r, back):
-        o = load(V.OUT, {})
-        o[r] = {"why": back["why"], "until": back["until"]}
-        save(V.OUT, o)
-        log(f"{tag}: {V.NAMES[r]} is out of service until {back['until']:.0f}: {back['why']}")
-
-    def outs(r):
-        """An earlier head's look that found the reviewer out of service:
-        recorded before anything this pass decides on whether it's out."""
-        for name in V.answered(key, r):
-            back = load(f"{V.DONE}/{name}.json", None) or {}
-            if name != V.item_name(key, r, head, pr["baseRefName"]) and back.get("result") == "out" and not DRY:
-                went_out(r, back)
-                V.drop(name)
-
-    def consume(r):
-        """What came back from the reviewer's service for this head, if
-        anything: posted as its review, or counted as a failure."""
-        rs = st["rv"].setdefault(r, {})
-        name = V.item_name(key, r, head, pr["baseRefName"])
-        back = load(f"{V.DONE}/{name}.json", None)
-        if back and not DRY:
-            if back["result"] == "review":
-                try:
-                    v = V.post(repo, pr, r, back["answer"])
-                    _, _, rr = said[r]
-                    said[r] = (v, C.NOW, rr + (v == "findings"))
-                    if v == "findings":
-                        found.append(r)
-                    rs.pop("fails", None)
-                    rs.pop("failedAt", None)
-                    cleared("post")
-                    # A look at the PR's head covers what one at it or an
-                    # earlier head on its base found.
-                    lost_on.get(r, {}).pop(pr["baseRefName"], None)
-                    if not lost_on.get(r, True):
-                        lost_on.pop(r)
-                except ValueError as e:  # an answer that's no review
-                    rs["fails"], rs["failedAt"] = rs.get("fails", 0) + 1, C.NOW
-                    log(f"{tag}: {V.NAMES[r]}'s answer wasn't a review ({rs['fails']}): {e}")
-                except C.Unavailable as e:  # GitHub didn't answer: no try spent, the answer's kept
-                    log(f"{tag}: couldn't post {V.NAMES[r]}'s review, GitHub's unavailable: {e}")
-                    unposted.append(f"{V.NAMES[r]}'s review of {head[:7]}")
-                    strike("post", C.said(e))
-                    return
-                except RuntimeError as e:  # GitHub said no: the same answer goes again next pass
-                    rs["fails"], rs["failedAt"] = rs.get("fails", 0) + 1, C.NOW
-                    log(f"{tag}: couldn't post {V.NAMES[r]}'s review ({rs['fails']}): {e}")
-                    # Three tries; one out of service then isn't asked again,
-                    # so its answer stays, the pass waits and the owner hears.
-                    if rs["fails"] < 3 or V.out(r):
-                        x = f"{V.NAMES[r]}'s review of {head[:7]}"
-                        unposted.append(x)
-                        if rs["fails"] >= 3:
-                            digest.append(("A review couldn't be posted", line, f"{x}, {rs['fails']} tries"))
-                        strike("post", C.said(e))
-                        return
-                    if back["answer"].get("findings"):
-                        # Dropped, it's asked again; one out of service by
-                        # then isn't, so the head's held for it meanwhile.
-                        lost_on.setdefault(r, {})[pr["baseRefName"]] = head
-            elif back["result"] == "out":
-                went_out(r, back)
-            else:  # the agent, the network, its JSON: tried again next pass
-                rs["fails"], rs["failedAt"] = rs.get("fails", 0) + 1, C.NOW
-                log(f"{tag}: {V.NAMES[r]}'s review failed ({rs['fails']}): {back.get('error', '')[:200]}")
-            V.drop(name)
-            rs.pop("queued", None)
-            rs.pop("gone", None)
-        elif rs.get("queued") and not DRY and not os.path.exists(os.path.join(STATE, V.QUEUE, name + ".json")):
-            # Out of the queue with nothing back. However long an agent
-            # thinks, its review stays queued until it's answered, so this
-            # is a lost one; seen on two passes, since the service may have
-            # answered between this pass's two looks.
-            if rs.get("gone"):
-                rs.pop("queued")
-                rs.pop("gone")
-                rs["fails"], rs["failedAt"] = rs.get("fails", 0) + 1, C.NOW
-                log(f"{tag}: the queued {V.NAMES[r]} review left the queue without an answer")
-            else:
-                rs["gone"] = True
-                after(C.NOW, 1)  # ends: the second look, once
-
-    def overtaken(r):
-        """What came back from the reviewer's looks at the PR's earlier heads
-        after it moved on (V.sweep keeps them): posted on the commit each
-        one read, so what it found goes into the next push instead of
-        waiting for its look at this head. Findings there count as a round,
-        and hold this pass back from landing: the threads it read are from
-        before them. "Nothing found" there says nothing about this head."""
-        rs = st["rv"].setdefault(r, {})
-        mine = V.answered(key, r)
-        tries = {n: k for n, k in rs.get("late", {}).items() if n in mine}
-        for name in mine:
-            if name == V.item_name(key, r, head, pr["baseRefName"]):
-                continue
-            back = load(f"{V.DONE}/{name}.json", None) or {}
-            if DRY:
-                continue
-            if back.get("result") == "out":  # in since outs() looked
-                went_out(r, back)
-            elif back.get("result") == "review" and back.get("base") == pr["baseRefName"] and isinstance(back.get("head"), str):
-                try:
-                    if V.post(repo, {**pr, "headRefOid": back["head"]}, r, back["answer"]) == "findings":
-                        v, at, rr = said[r]
-                        said[r] = (v, at, rr + 1)
-                        late.append(back["head"][:7])
-                    cleared("post")
-                except ValueError as e:  # an answer that's no review
-                    log(f"{tag}: {V.NAMES[r]}'s review of {back['head'][:7]} wasn't a review: {e}")
-                except C.Unavailable as e:  # GitHub didn't answer: no try spent, the answer's kept
-                    log(f"{tag}: couldn't post {V.NAMES[r]}'s review of {back['head'][:7]}, GitHub's unavailable: {e}")
-                    unposted.append(f"{V.NAMES[r]}'s review of {back['head'][:7]}")
-                    strike("post", C.said(e))
-                    continue
-                except RuntimeError as e:  # GitHub said no: the same answer goes again next pass
-                    tries[name] = tries.get(name, 0) + 1
-                    log(f"{tag}: couldn't post {V.NAMES[r]}'s review of {back['head'][:7]} ({tries[name]}): {e}")
-                    # Three tries, and then only until the reviewer finds this
-                    # head clean, which covers what it found there; one out of
-                    # service may never, so the owner hears.
-                    if tries[name] < 3 or said[r][0] != "clean":
-                        x = f"{V.NAMES[r]}'s review of {back['head'][:7]}"
-                        unposted.append(x)
-                        if tries[name] >= 3:
-                            digest.append(("A review couldn't be posted", line, f"{x}, {tries[name]} tries"))
-                        strike("post", C.said(e))
-                        continue
-            elif (back.get("result") == "review" and isinstance(back.get("base"), str) and isinstance(back.get("head"), str)
-                  and isinstance(back.get("answer"), dict) and back["answer"].get("findings")):
-                # Findings on another base, which the PR left while the look
-                # was under way: not posted here, but owed if it goes back.
-                lost_on.setdefault(r, {})[back["base"]] = back["head"]
-            tries.pop(name, None)
-            V.drop(name)
-        if tries:
-            rs["late"] = tries
-        else:
-            rs.pop("late", None)
-
-    for r in names:
-        outs(r)
-
-    def reading(rs):
-        """Those of `rs` with a look at the PR, at any head, still under way:
-        out of service, their verdict on this head doesn't cover it, so the
-        pass waits for what it finds. One not begun never will be. Asked
-        before this pass reads what came back, so one that ends meanwhile
-        is read."""
-        return [r for r in rs if not DRY and said[r][0] != "clean" and V.under_way(key, r, pr["baseRefName"])]
-
-    was_out = [r for r in names if V.out(r)]
-    under_way = reading(was_out)
-    for r in names:
-        # One out of service too, or put out by one of these answers: its
-        # looks came back before it went out, and posting them asks nothing
-        # of it.
-        consume(r)
-    for r in names:
-        overtaken(r)
-    # Put out by an answer this pass read: its others.
-    under_way += reading([r for r in names if V.out(r) and r not in was_out])
-    live = [r for r in live if not V.out(r)]
-    for r in names:
-        if V.out(r):
-            # Back in service then: its look at this head is asked for.
-            C.wake(repo, load(V.OUT, {})[r]["until"] + 1)  # ends: once; listed while it's out
-    # Every reviewer's rounds, in service or not: one going out doesn't take
-    # a PR back under the limit.
-    rounds = max((said[r][2] for r in names), default=0)
-    clean = bool(live) and all(said[r][0] == "clean" for r in live)
-    # Past the round limit, the reviewers aren't asked again: every look so
-    # far has found more, so more looks only drip-feed more rounds. A Claude
-    # job settles what's left on its merits, fixing what's real and answering
-    # the rest, and a judge decides whether it lands. Only what the judge
-    # can't call (a one-way door) waits for the owner.
-    capped = rounds >= rc["rounds"] and not clean
-
-    def owed(r):
-        """Past the limit, what the reviewer still owes the PR, which the
-        judge mustn't land past: a look at any of its heads on this base
-        still in the queue (begun or not, it's waited for), an answer back
-        but not yet posted, or findings that couldn't be posted, at this
-        head or an earlier one (it's asked again on this head: that's the
-        same round, not another)."""
-        base = pr["baseRefName"]
-        return bool(V.in_queue(key, r, base) or V.answered(key, r) or base in lost_on.get(r, {}))
-    # Findings on this head this pass posted are threads it never read: one
-    # out now isn't waited for, and past the limit no look follows to cover
-    # them, so they hold the pass back.
-    late += [head[:7] for r in found if r not in live or capped]
-
-    # 1. The reviewers.
-    quiet = age >= rc["settleDelay"] * MIN
-    looking = [r for r in live if owed(r)] if capped else [r for r in live if said[r][0] == "none"]
-    if not quiet and looking:
-        after(st["seen"], rc["settleDelay"])  # ends: the reviewers are asked then, once a head
-    waiting = [f"Posting {x}" for x in unposted]
-    for r in names:
-        if r in live:
-            continue
-        if lost_on.get(r, {}).get(pr["baseRefName"]) == head:
-            waiting.append(f"{V.NAMES[r]}'s findings on {head[:7]} couldn't be posted, and it's out of service")
-        elif capped and owed(r) and r not in under_way:
-            waiting.append(f"{V.NAMES[r]} still owes it a review, and it's out of service")
-    waiting += [f"{V.NAMES[r]} is still reviewing it, though out of service" for r in under_way]
-    if not live and not capped:
-        why = "; ".join(f"{V.NAMES[r]}: {away[r] or V.out(r)}" for r in names) or "none is on"
-        waiting.append(f"No reviewer can review it now ({why})")
-        digest.append(("No reviewer can review it", line, why))
-    for r in looking:
-        if quiet and (not capped or pr["baseRefName"] in lost_on.get(r, {})):
-            V.ask(repo, pr, key, r, st["rv"].setdefault(r, {}), after)
-        waiting.append(f"{V.NAMES[r]} is reviewing this commit" if st["rv"].get(r, {}).get("queued")
-                       else f"Waiting for {V.NAMES[r]}'s review" + ("" if capped else " of this commit"))
-    # A look that can't happen, a first one or a second: the owner hears either way.
-    stuck = []
-    for r in live:
-        if st["rv"].get(r, {}).get("fails", 0) >= 3:
-            x = f"failed {st['rv'][r]['fails']} times on {head[:7]}"
-            stuck.append(f"{V.NAMES[r]} {x}")
-            digest.append((f"{V.NAMES[r]} couldn't review it", line, x + " (journalctl -u autoland-review)"))
+    # The reviewers (review_step.py).
+    live, said, rounds, clean, capped, unseen, late, waiting, stuck, out_of_service = review_step.look(
+        repo, pr, key, st, lost_on, digest, line, age, after, strike, cleared)
 
     what = []
     if open_threads:
@@ -957,7 +743,7 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
         if what:
             hand_off(", ".join(what), "; ".join(waiting + stuck + what), ours=not swept)
         else:
-            settle("pending", "; ".join(waiting + stuck))
+            settle("pending", "; ".join(waiting + stuck), label=REVIEWER if out_of_service else None)
     elif what and capped:
         hand_off(f"{', '.join(what)}, after {rounds} review rounds with findings, the limit, so its reviewers won't look again. "
                  "Weigh each finding on its merits: fix what's a real defect and answer the rest with why. "

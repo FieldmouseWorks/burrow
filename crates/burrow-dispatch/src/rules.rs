@@ -97,6 +97,8 @@ pub fn decide(
                 due: since + UNREAD,
                 link: Some(format!("https://github.com/{repo}")),
                 kick: Some(cfg.handler.clone()),
+                line: false,
+                unstick: false,
             },
         );
     }
@@ -174,6 +176,8 @@ pub fn decide(
                     due: start + dep.run,
                     link,
                     kick: None,
+                    line: false,
+                    unstick: false,
                 },
                 _ => Item {
                     what,
@@ -188,6 +192,8 @@ pub fn decide(
                     due: b.oldest + dep.after,
                     link,
                     kick: Some(dep.handler.clone()),
+                    line: false,
+                    unstick: false,
                 },
             };
             d.items.insert(key, item);
@@ -243,6 +249,8 @@ fn runner(
             due: since + (RESTARTS as f64 + 1.0) * (cfg.quiet + cfg.gap),
             link: Some(oldest.url.clone()),
             kick: Some(cfg.handler.clone()),
+            line: false,
+            unstick: false,
         },
     );
     if snap.switching || recent.len() >= RESTARTS {

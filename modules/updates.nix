@@ -90,6 +90,8 @@ let
     SYSTEM = system;
     MANIFEST = if cfg.claudeManifest == null then "" else cfg.claudeManifest;
     CHECKS = lib.concatStringsSep " " cfg.checks;
+    # burrow.cpu's slots, which the VM tests wait for where the machine has them.
+    HEAVY = if config.burrow.cpu.enable then "${tools.heavy}/bin/heavy" else "";
     WITHIN = cfg.confirmWithin;
     CHANNEL = "nixos-${config.system.nixos.release}";
     OWNER = config.burrow.owner;
@@ -105,6 +107,10 @@ let
     REVIEW_HINTS = cfg.firmware.reviewHints;
     # The autoland steward's commit status, which renovate-sweep doesn't count as CI.
     SETTLED = config.burrow.autoland.context or "review-settled";
+    # In a train repo, the steward's App as GraphQL names its bot, and the
+    # train's status, which counts as CI only from that App (updates/propose.sh).
+    STEWARD = if train then autoland.app.slug else "";
+    TRAIN_CONTEXT = if train then config.burrow.ledger.trainContext else "";
     # The repos the steward covers, as it last found them; none without it.
     COVERED = if config.burrow.autoland.enable or false then "${stateDir}/autoland/repos.json" else "";
     SEAL = "${majorSeal}/bin/major-seal";
@@ -137,7 +143,7 @@ let
   calls = [ tools.proj tools.notify ];
   healthTool = script health ./updates/health.sh (with pkgs; [ coreutils gnugrep gnused gawk systemd ]);
   # Its own functions first (they run only once update.sh has defined what they call).
-  updateTool = script update [ ./updates/dispatch.sh ./updates/propose.sh ./updates/push.sh ./updates/update.sh ] (
+  updateTool = script update [ ./updates/dispatch.sh ./updates/propose.sh ./updates/push.sh ./updates/check.sh ./updates/update.sh ] (
     (with pkgs; [ coreutils jq curl util-linux systemd gnugrep gnused gawk vulnix config.nix.package ])
     ++ [ config.programs.git.package healthTool tools.switch tools.confirm machineGh ] ++ calls ++ lib.optional (tools ? boot) tools.boot
   );
@@ -259,6 +265,16 @@ let
     repositoryCache = "enabled";
     extends = [ "config:recommended" "helpers:pinGitHubActionDigests" ];
     prHourlyLimit = 0;
+
+    # Commit subjects and PR titles in the house style, `area: plain
+    # sentence` (house/rules.md): "deps: update foo to v1.5". The PR title is
+    # the subject the steward squashes onto main, and house-check fails a PR
+    # whose title isn't. Left to itself Renovate guesses from each repo's
+    # history, and config:recommended's package rules type it fix or chore,
+    # so a package rule below has the final word on the type.
+    semanticCommits = "enabled";
+    semanticCommitType = "deps";
+    semanticCommitScope = null;
     prConcurrentLimit = 20;
 
     # Three days before a release counts: hijacked npm and crates releases are
@@ -347,6 +363,12 @@ let
         matchManagers = [ "nix" ];
         minimumReleaseAgeBehaviour = "timestamp-optional";
       }
+      {
+        # config:recommended's own rules type a dependency fix and the rest
+        # chore; in the house style every update is "deps:".
+        matchPackageNames = [ "*" ];
+        semanticCommitType = "deps";
+      }
     ] ++ lib.optional (rcfg.trustedOwners != [ ]) {
       # A dependency on a repo of trustedOwners' (a pinned workflow, an
       # action, a flake input) waits for nothing: the soak is against someone
@@ -415,6 +437,7 @@ in
 {
   imports = [
     (import ./common.nix inputs)
+    { key = "burrow/cpu"; imports = [ (import ./cpu.nix inputs) ]; }
     { key = "burrow/notify"; imports = [ (import ./notify.nix inputs) ]; }
     { key = "burrow/switch"; imports = [ (import ./switch.nix inputs) ]; }
     { key = "burrow/proj"; imports = [ (import ./proj.nix inputs) ]; }
@@ -728,7 +751,7 @@ in
 
         - `${update}` (on each push to main or a watched input, and hourly) bumps every flake input${lib.optionalString (cfg.claudeManifest != null) " and Claude Code"},
           builds, runs the VM tests, switches, checks health, confirms and
-          ${if train then "puts it up as a PR from its branch `${update}`, which the merge train lands (while that's open it brings in nothing newer, and rides it on main instead)" else "pushes to main"}.
+          ${if train then "puts it up as a PR from its branch `${update}`, which the merge train lands (while that's open it brings in nothing newer, and rides it on main instead, unless a check fails on it: then a fresh bump replaces its head)" else "pushes to main"}.
           It deploys main too, so a merged PR goes live the same way. It
           holds off while a switch is pending or while ${config.networking.hostName} runs changes that
           aren't on main, so ${if train then "put what you switch to up as a PR: only the merge train moves main" else "commit and push what you switch to"}.

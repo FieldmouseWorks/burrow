@@ -21,6 +21,11 @@ def merged_with():
     return [x.split("merge_method=")[1].split()[0] for x in merges()]
 
 
+def subjects():
+    """The commit subject each merge asked for, None for GitHub's own."""
+    return [x.split("commit_title=")[1].split(" -f sha=")[0] if "commit_title=" in x else None for x in merges()]
+
+
 # A repo whose settings allow every method.
 kept = dict(info)
 info.update(squashMergeAllowed=True, mergeCommitAllowed=True, rebaseMergeAllowed=True)
@@ -31,6 +36,11 @@ for rules in ([], [pull_request(*ALL)], [{"type": "pull_request", "parameters": 
     fresh_pr_state()
     run(clean(), 900)
     assert merged_with() == ["squash"], (rules, merges())
+# A squash's subject is the PR's title, the one house-check holds to the
+# house style, never the subject of the PR's one commit GitHub would take.
+fresh_pr_state()
+run(clean(title="autoland: merge with the title"), 900)
+assert subjects() == ["autoland: merge with the title (#5)"], merges()
 # A legacy ruleset beside the baseline that allows merge commits alone
 # narrows them: the merge is a merge commit.
 RULES["main"] = [pull_request(*ALL), {"type": "deletion"}, pull_request("merge")]
@@ -43,6 +53,8 @@ RULES["main"] = [pull_request("merge", "rebase"), {"type": "required_linear_hist
 fresh_pr_state()
 run(clean(), 900)
 assert merged_with() == ["rebase"], merges()
+# A rebase makes no commit of its own to give a subject.
+assert subjects() == [None], merges()
 RULES["main"] = [{"type": "required_linear_history"}, pull_request("merge")]
 fresh_pr_state()
 run(clean(), 900)
@@ -54,6 +66,7 @@ for linear, want in ((True, ["rebase"]), (False, ["merge"])):
     fresh_pr_state()
     run(clean(), 900)
     assert merged_with() == want, (linear, merges())
+    assert subjects() == [None if want == ["rebase"] else "t (#5)"], merges()
 PROTECTION["main"] = {"required_linear_history": {"enabled": True}}
 RULES["release%2F1.0"] = [pull_request("merge", "rebase")]
 fresh_pr_state()

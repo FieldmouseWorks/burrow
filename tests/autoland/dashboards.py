@@ -347,7 +347,8 @@ os.rmdir(ran)
 # In the steward's pass: each repo's dashboard is looked at, after its PRs,
 # when it's on, and one that fails doesn't stop the rest.
 seen, published = [], []
-kept_fns = (S.R.discover, S.R.publish, S.open_prs, D.watch)
+kept_fns = (S.R.discover, S.R.settle_repo, S.R.publish, S.open_prs, D.watch)
+S.R.settle_repo = lambda r, known: False
 S.R.discover = lambda: [{"repo": "sam/r"}, {"repo": "sam/q"}]
 S.R.publish = published.append
 S.open_prs = lambda owner, name: (seen.append(f"prs {owner}/{name}") or {}, [])
@@ -372,7 +373,7 @@ seen.clear()
 S.main()
 assert seen == ["prs sam/r", "prs sam/q"], seen
 sys.argv = argv
-S.R.discover, S.R.publish, S.open_prs, D.watch = kept_fns
+S.R.discover, S.R.settle_repo, S.R.publish, S.open_prs, D.watch = kept_fns
 
 C.gh, C.fresh, C.job, C.job_state = kept[:4]
 C.CFG["dashboard"].clear()
