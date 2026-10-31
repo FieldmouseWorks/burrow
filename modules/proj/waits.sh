@@ -2,7 +2,8 @@
 # choice (proj.sh), on its own so the flake can check it. It reads what
 # rewatch found of the job's latest turn, one tab-separated line each:
 # "id ID", "turn N", "state S" (proj state's), "owned 1" for a job whose
-# starter acts on each turn's end itself (proj run --owned), "stopped 1" for
+# starter acts on each turn's end itself (proj run --owned), "unstick 1" for
+# one run --unstick (the stuck issue's), "stopped 1" for
 # a turn proj stop ended, "end KIND" for how it said it ends (await, ask, done,
 # or undeclared when it wouldn't say), "queued T", "slot T" and "ended T" for
 # when it was started, took its slot and ended, "deadline T" for when a
@@ -11,7 +12,11 @@
 # (waiting's, below), "link URL" for what the job is about, and "await
 # TARGET T" for each PR or issue it has awaited since T. It prints the job's
 # wait as one line of JSON in the watchdog's form, {what, link, phase, since,
-# due, kick}, or nothing when there's nothing to watch.
+# due, kick, line, unstick}, or nothing when there's nothing to watch. line
+# says it's waiting for a slot: another job would only join the line, so the
+# watchdog gives it none. unstick says it's the job that takes the stuck
+# issue, so the watchdog tells the owner of its stall rather than put it on
+# that issue, where it would only be handed to itself.
 #
 # Watched: a turn waiting in line, for a slot or inside its run (its clock
 # stands still meanwhile), for STALL_QUEUED seconds; one running, until its
@@ -22,14 +27,15 @@
 # a turn that asks a person (their reply resumes it) or is done, one proj
 # stop ended, and any ended turn of an --owned job.
 job_wait() {
-  local k a b id='' turn='' state='' owned='' stopped='' end='' queued=0 slot=0 ended=0 deadline=0 link=''
-  local since due phase kick='' first='' targets='' t at waited='' what=
+  local k a b id='' turn='' state='' owned='' unstick=false stopped='' end='' queued=0 slot=0 ended=0 deadline=0 link=''
+  local since due phase kick='' line=false first='' targets='' t at waited='' what=
   while IFS=$'\t' read -r k a b; do
     case $k in
       id) id=$a ;;
       turn) turn=$a ;;
       state) state=$a ;;
       owned) owned=$a ;;
+      unstick) unstick=true ;;
       stopped) stopped=$a ;;
       end) end=$a ;;
       queued) queued=$a ;;
@@ -48,7 +54,10 @@ job_wait() {
     esac
   done
   case $state in
-    queued) since=$queued due=$((queued + STALL_QUEUED)) phase="turn $turn is waiting in line for a slot" ;;
+    queued)
+      since=$queued due=$((queued + STALL_QUEUED)) line=true phase="turn $turn is waiting in line for a slot"
+      [ "$unstick" = false ] || phase="turn $turn is waiting for the --unstick slot, which another --unstick turn holds"
+      ;;
     running)
       if [ -n "$waited" ]; then
         since=$waited due=$((waited + STALL_QUEUED)) phase="turn $turn is running, and waiting in line: $what"
@@ -79,9 +88,9 @@ job_wait() {
   esac
   for t in "$since" "$due"; do [[ $t =~ ^[0-9]+$ ]] || return 1; done
   jq -nc --arg what "proj job $id" --arg link "$link" --arg phase "$phase" --argjson since "$since" \
-    --argjson due "$due" --arg kick "$kick" \
+    --argjson due "$due" --arg kick "$kick" --argjson line "$line" --argjson unstick "$unstick" \
     '{what: $what, link: (if $link == "" then null else $link end), phase: $phase, since: $since, due: $due,
-      kick: (if $kick == "" then null else $kick end)}'
+      kick: (if $kick == "" then null else $kick end), line: $line, unstick: $unstick}'
 }
 
 # A running turn's wait in line, from its wait dir (each turn's

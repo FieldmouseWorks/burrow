@@ -52,7 +52,7 @@ let
       STALL_QUEUED=${toString (cfg.stallAfterMinutes * 60)}
       GRACE=600
       APPS=${lib.escapeShellArg (lib.concatStrings (lib.mapAttrsToList (name: app: "${name}=${app.envFile}\n") config.burrow.github.apps))}
-    '' + builtins.readFile ./proj/pick.sh + builtins.readFile ./proj/waits.sh + builtins.readFile ./proj/proj.sh;
+    '' + builtins.readFile ./proj/pick.sh + builtins.readFile ./proj/line.sh + builtins.readFile ./proj/waits.sh + builtins.readFile ./proj/proj.sh;
   };
 
   inbox = pkgs.writeShellApplication {
@@ -64,6 +64,7 @@ let
       STATE=${lib.escapeShellArg "${stateDir}/proj-inbox"}
       SCRATCH=${lib.escapeShellArg config.burrow.scratchDir}
       LABEL=${lib.escapeShellArg cfg.inbox.label}
+      UNSTICK_LABEL=${lib.escapeShellArg cfg.inbox.unstickLabel}
       AUTHORS=${lib.escapeShellArg (lib.concatStringsSep " " cfg.inbox.authors)}
       VM=${if cfg.inbox.vm then "1" else "0"}
       MARK=${lib.escapeShellArg inboxMark}
@@ -96,7 +97,8 @@ in
       description = ''
         How many jobs run Claude at once. The rest wait in line (`proj state`
         says queued), so a launcher can hand over as much work as it likes.
-        Each headless Claude holds a few GB.
+        Each headless Claude holds a few GB. One more, run `--unstick` (the
+        stuck issue's, `inbox.unstickLabel`), has a slot of its own besides.
       '';
     };
     pipelineSlots = lib.mkOption {
@@ -112,7 +114,8 @@ in
         work on the pipeline itself waits only on other such work, never on
         everyone else's long jobs; a lead repo's go first of all, ahead of
         the other pipeline jobs too, but leave them these slots while one
-        waits. A pipeline job in any other project goes
+        waits, and everyone else one of the other slots while one of theirs
+        waits and none runs. A pipeline job in any other project goes
         as `--first`: ahead of the line, but within its project's cap and
         never in these slots; `proj status` and its turn's journal say so,
         origin and all.
@@ -139,11 +142,16 @@ in
     };
     jobMemoryMax = lib.mkOption {
       type = lib.types.str;
-      default = "8G";
+      default = "infinity";
+      example = "8G";
       description = ''
-        The most memory one job may hold (systemd's MemoryMax). Past it the
-        kernel kills the job's biggest process, usually a build or evaluation
-        it ran, and the job carries on, told that command was killed.
+        The most memory one job may hold (systemd's MemoryMax). None by
+        default: a job is the first thing the kernel kills when the machine
+        runs short (OOMScoreAdjust 500), and systemd-oomd watches the jobs'
+        slice (burrow.ops.oomd), so a cap only kills one while memory sits
+        free. With one, past it the kernel kills the job's biggest process,
+        usually a build or evaluation it ran, and the job carries on, told
+        that command was killed.
       '';
     };
     timeout = lib.mkOption {
@@ -208,6 +216,17 @@ in
         type = lib.types.str;
         default = "claude";
         description = "The label that hands an issue to Claude. It's created in each repo that lacks it.";
+      };
+      unstickLabel = lib.mkOption {
+        type = lib.types.str;
+        default = "unstick";
+        description = ''
+          An inbox issue with this label too is about what the pipeline is
+          stuck on (the steward's stuck issue has it): its job runs
+          `proj run --unstick`, in a slot of its own past maxJobs, so it never
+          waits in the line it may be about. Put on an issue whose job is
+          still waiting for its first turn, it starts that job over that way.
+        '';
       };
       authors = lib.mkOption {
         type = lib.types.listOf lib.types.str;
@@ -298,6 +317,7 @@ in
           proj run --pipeline burrow "..."  work on the pipeline itself: first of all, in its own slot
           proj run --app NAME web "task"    acting on GitHub as the App NAME
           proj status                       what's running, what finished
+          proj status --line                every turn in line, next first, and its wait
           proj log ID                       its answer (--turn N for an earlier one, --raw for everything)
           proj reply ID "follow-up"         continue the same conversation
           proj stop ID                      end it: its running turn, and anything it awaits
@@ -322,6 +342,8 @@ in
       message = "burrow.proj.inbox.authors: name who may hand Claude issues.";
     }];
     environment.systemPackages = [ inbox ];
+    # The steward has it forget a repo GitHub's name now means another of.
+    burrow.tools.proj-inbox = inbox;
     # A repo's issue events start its look (proj-inbox@OWNER-REPO), and so
     # do the start and end of each of its jobs' turns (proj run --kick): it
     # posts the answer once one has ended.

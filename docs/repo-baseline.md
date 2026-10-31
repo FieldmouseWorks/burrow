@@ -6,6 +6,23 @@ day. When it first sees a repo, a Claude job brings the **Files** up to it in
 one PR, opened ready for review, which then goes through the same review loop
 as any other.
 
+A repo made under the name of one that was deleted is a new repo too, though
+GitHub gives it the same name, in any case, and so is one renamed or moved
+into a name another repo had: the steward knows it by GitHub's id for it,
+which it keeps with the settings (for settings kept before it kept ids, by
+being made after the steward last settled a repo of that name, or in the
+same second), on the first pass that reads it, kicked or full. Before
+anything acts on it, every clone of the name in `projectsDir` is moved aside
+under a hidden name, its own included: which repo a clone is of can't be
+told. Then proj-inbox forgets the repo's issues (`proj-inbox forget`), once
+a pass of its under way has ended, so the new one's issue N is a new job and
+not the old N's, and every Claude job of the repo's is stopped, known by the
+repo its kick names or by its folder. Once no review of the old one is under
+way, what the steward kept about it (its settings, hook, PRs, reviews and
+the reviewers' sessions) is forgotten, so the new one gets its own clone and
+its own baseline job. A pass that fails partway, or finds a review still
+under way, does it all again on the next.
+
 A Claude bringing a repo up to the baseline: add only what's missing, keep
 what the repo already does better (a stricter gate, its own license), and
 change nothing else in the same PR.
@@ -47,7 +64,10 @@ change nothing else in the same PR.
   rule the steward can't turn off) is brought up to date instead, and the
   new head is settled like any other.
 - The `hold`, `needs-owner` and `first` labels (`burrow.autoland.labels`),
-  which the steward, its jobs and the owner put on PRs.
+  which the steward, its jobs and the owner put on PRs, and the steward's
+  own `waiting: release age`, `waiting: proof slot` and `waiting: reviewer`,
+  which say at a glance what a PR waits on while it does (its
+  `review-settled` status says the rest).
 
 ## The steward's GitHub App
 
@@ -124,7 +144,7 @@ root only.
    finds the cause and opens a PR from `autoland/red-SHA` that reverts the
    merge that broke it, or fixes it, and that PR lands like any other. Nothing
    more while the job works or its PR is open; one more job if the branch is
-   still red after, then the owner. Green again without it (fixed some other
+   still red after, then the pipeline's stuck issue. Green again without it (fixed some other
    way, or a flake), its PR is closed once the job has ended.
 
 Waiting for the owner instead, listed in one issue: what a judge job sent
@@ -154,8 +174,9 @@ owner, since nothing else merges it.
   code. Pin actions to a commit (Renovate keeps them current). Without CI,
   "green" means nothing and dependency updates can't merge themselves.
   The CI is the flake gate the [house style](house-style.md#the-gate-is-the-flake)
-  describes: a `flake.nix` from burrow's template, and the workflow that calls
-  `nix flake check`. Jobs the flake can't hold stay alongside it.
+  describes: a `flake.nix` from burrow's template, the workflow that calls
+  `nix flake check`, and the template's rust-first workflow beside it. Jobs
+  the flake can't hold stay alongside it.
 - **AGENTS.md** with the Code Review Rules section below, plus whatever the
   repo's own agents need (how to build, test and run it). Keep the repo's
   existing text.
@@ -205,7 +226,7 @@ For reviewers, the review bot included. Flag as P1:
   closed PR keeps its commits and can restore the branch). GitHub's
   delete-on-merge only covers merged PRs. `keepBranches` are left alone, and
   bots' branches go only this way.
-- Unmerged branches with no PR and no commit for 14 days are archived, then
+- Unmerged branches with no PR and no commit for 3 days are archived, then
   deleted: the steward keeps the tip at `refs/archive/BRANCH/SHA` in the same
   repo, a ref GitHub keeps but lists with neither branches nor tags, and
   deletes the branch only if it's still at that tip. `git ls-remote origin

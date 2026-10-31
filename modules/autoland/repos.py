@@ -6,14 +6,22 @@ import fnmatch
 import hashlib
 import json
 import os
+import re
+import shutil
 import subprocess
 import tempfile
+import time
 import urllib.parse
 
 import common as C
+import reviewers as V
 import train as T
 from common import CFG, CONTEXT, DEP_RE, DRY, load, log, repo_cfg, save, ts
+from prs import PROOF_SLOT, RELEASE_AGE, REVIEWER
 from tasks import RED_BRANCH, red_default_task
+
+# What a project's state says when GitHub had no such repo at its last look.
+GONE = "gone"
 
 
 def discover():
@@ -25,7 +33,7 @@ def discover():
     for owner in CFG["owners"]:
         with C.acting_for(owner):
             found = C.gh("repo", "list", owner, "--no-archived", "--source", "--limit", "100000",
-                         "--json", "nameWithOwner,isPrivate,defaultBranchRef") or []
+                         "--json", "id,nameWithOwner,isPrivate,defaultBranchRef,createdAt") or []
         for r in found:
             name = r["nameWithOwner"]
             if any(fnmatch.fnmatch(name, pat) for pat in CFG["exclude"]):
@@ -33,7 +41,8 @@ def discover():
             # An empty repo has no branch to keep.
             if not r.get("defaultBranchRef"):
                 continue
-            seen.append({"repo": name, "private": r["isPrivate"], "default": r["defaultBranchRef"]["name"]})
+            seen.append({"repo": name, "id": r["id"], "private": r["isPrivate"],
+                         "default": r["defaultBranchRef"]["name"], "created": r["createdAt"]})
     return seen
 
 
@@ -74,28 +83,44 @@ def baseline_ruleset(rc, default):
     }
 
 
+# What each of the steward's waiting labels (prs.py) says it waits on, and
+# what the PR's status adds.
+WAITING = {RELEASE_AGE: f"Its updates are too new to take yet (the minimum release age); {CONTEXT} says until when",
+           PROOF_SLOT: f"Waits its turn for a proof slot on the machine; {CONTEXT} says how many are ahead",
+           REVIEWER: f"Waits for a reviewer to be back in service; {CONTEXT} says which and why"}
+
+
 def settle_repo(r, known):
-    """The repo's settings, at most once a day. Returns True if it's new."""
+    """The repo's settings, at most once a day. Returns True if it's new:
+    not in known (restart takes a remade one out)."""
     repo, rc = r["repo"], repo_cfg(r["repo"])
     st = load(f"repo-{repo.replace('/', '_')}.json", {})
     new = repo not in known
+    # GitHub's id for it, by which restart tells a remade repo: kept once
+    # restart has passed it, settings kept before ids were included.
+    if r.get("id") and st.get("id") != r["id"]:
+        st["id"] = r["id"]
+        save(f"repo-{repo.replace('/', '_')}.json", st)
     # Due daily, and straight away for another App (its required checks are
     # pinned to the one it was) or a train turned on or off (the baseline
     # requires the train's status only while it's on).
     due = (C.NOW - st.get("settings", 0) >= 86400 or st.get("app") != CFG["app"]["id"]
            or st.get("train", False) != rc["train"])
     # The labels the steward and its jobs put on PRs: without them a hold
-    # can't be set, a judge can't hand a PR to the owner and no PR can go
-    # first in its proof line. Made again with the daily settings too, in
-    # case one was deleted.
-    want = [CFG["labels"]["hold"], CFG["labels"]["owner"], CFG["labels"]["first"]]
+    # can't be set, a judge can't hand a PR to the owner, no PR can go first
+    # in its proof line and none can say what it waits on. Made again with
+    # the daily settings too, in case one was deleted.
+    labels = CFG["labels"]
+    about = [(labels["hold"], "fbca04", "The steward leaves this PR alone"),
+             (labels["owner"], "b60205", f"Waits for {CFG['owner']}; take the label off to let the steward carry on"),
+             (labels["first"], "0e8a16", "Goes ahead of the PRs without it in the line for proofs that take the machine"),
+             *((labels["waiting"][kind], "c5def5", text) for kind, text in WAITING.items())]
+    want = [name for name, _, _ in about]
     if st.get("labels") != want or due:
-        about = ("The steward leaves this PR alone",
-                 f"Waits for {CFG['owner']}; take the label off to let the steward carry on",
-                 "Goes ahead of the PRs without it in the line for proofs that take the machine")
+        # GitHub takes a description of up to 100 characters.
         made = [C.write("label", "create", name, "-R", repo, "--force", "--color", color,
-                        "--description", text, check=False) is not None
-                for name, color, text in zip(want, ("fbca04", "b60205", "0e8a16"), about)]
+                        "--description", text[:100], check=False) is not None
+                for name, color, text in about]
         if all(made):
             log(f"{repo}: labels {', '.join(want)}")
             st["labels"] = want
@@ -157,6 +182,109 @@ def settle_repo(r, known):
         st.pop("app", None)
     save(f"repo-{repo.replace('/', '_')}.json", st)
     return new
+
+
+def restart(r, known, failed):
+    """A repo made under the name of one GitHub deleted (GitHub hands a
+    deleted repo's name to the next one) starts over as new, before
+    anything acts on it. It's another repo when GitHub's id for it isn't
+    the one kept with the settings the steward last set under its name;
+    for settings kept before the steward kept ids, when they were set
+    before it was made, or in the second it was (createdAt has no finer
+    grain). Its name's state is found in any case: GitHub's names don't go
+    by it. Then `reset`."""
+    repo = r["repo"]
+    k = repo.replace("/", "_").lower()
+    for name in sorted(os.listdir(C.STATE)):
+        m = re.fullmatch(r"repo-(.+)\.json", name)
+        if not m or m.group(1).lower() != k:
+            continue
+        st = load(name, {})
+        if "settings" not in st or (st["id"] == r["id"] if "id" in st else st["settings"] >= ts(r["created"]) + 1):
+            continue
+        log(f"{repo}: made at {r['created']}, and isn't the repo of its name the steward settled; starting it over as new")
+        if not DRY:
+            reset(r, m.group(1), known, failed)
+
+
+def reset(r, k, known, failed):
+    """The deleted repo whose state is under k goes: its clones are moved
+    aside, proj-inbox forgets its issues and its Claude jobs are stopped
+    (they'd push its history to the new one, or answer the new one's
+    issues), and all the steward kept about it goes: its PRs' state (so a new
+    PR doesn't take on an old one's of the same number), their reviews,
+    snapshots and the reviewers' sessions (so no look at a new PR resumes
+    an old one's), its dashboard's and quarantine's, and the reviewers'
+    clone of it. The name is out of known, and of failed, so the new one's
+    baseline job starts straight away.
+
+    Its settings (repo-K.json) are what says it was remade, so they go
+    last: a pass that fails partway leaves them, and the next one does it
+    all again, each step as safe twice as once. Raises when it can't be
+    done, and then nothing may act on the repo this pass."""
+    repo = r["repo"]
+    for x in [x for x in known if x.lower() == repo.lower()]:
+        known.discard(x)
+    for x in [x for x in failed if x.lower() == repo.lower()]:
+        failed.pop(x)
+    save("known.json", sorted(known))
+    save("baseline-failed.json", failed)
+    retire_checkouts(repo, k)
+    left = V.sweep({k}, set())
+    if left:
+        raise RuntimeError(f"its reviewers aren't done with {', '.join(left)}: a look under way, or a session "
+                           "that couldn't be marked gone")
+    mirrors = os.path.join(C.STATE, V.GIT)
+    for x in sorted(os.listdir(mirrors)) if os.path.isdir(mirrors) else []:
+        if x.lower() == f"{repo.replace('/', '__')}.git".lower():
+            shutil.rmtree(os.path.join(mirrors, x))
+    mine = re.compile(rf"(dashboard|flaky)-{re.escape(k)}\.json|pr-{re.escape(k)}-\d+\.json")
+    for name in sorted(os.listdir(C.STATE)):
+        if mine.fullmatch(name):
+            os.remove(os.path.join(C.STATE, name))
+    os.remove(os.path.join(C.STATE, f"repo-{k}.json"))
+
+
+def retire_checkouts(repo, k):
+    """Every clone of the repo in projectsDir moved aside under a hidden
+    name, which nothing takes for a project: so the repo's next job clones
+    it afresh, and none can push the deleted one's history to it. Nothing
+    in one is lost. Which repo a clone is of can't be told: all it knows is
+    the name it came from, which may have been the deleted one's then,
+    however long ago the repo there now was made (one renamed into the name
+    may be years older). So the new one's own goes too, and its next job
+    clones it again.
+
+    Then proj-inbox forgets the repo's issues (C.forget_issues), so the new
+    one's issue N is a new job, never the deleted one's N, and no answer
+    of an old job's goes to it. Then every Claude job of the repo's is
+    stopped, from proj's own record of every job (C.jobs): each the repo's
+    by the repo its kicks name (the steward's jobs and proj-inbox's, in
+    whatever folder) or by its folder (one moved aside, or the folder the
+    repo's next clone takes, unless another repo's clone is there). A job
+    whose kicks name only other repos is theirs, wherever it ran. The moves
+    go first, and then the inbox waits for a pass of its under way, so a
+    job either starts before the jobs are read or can't start at all: none
+    starts in a clone moved aside, and the inbox starts none for a repo it
+    has no clone of. Each folder is kept with the repo's settings
+    (`retired`) before it's moved, so a later try stops its jobs if this
+    one can't. A job proj won't stop raises, for the next pass to try again."""
+    src = CFG["projectsDir"]
+    every = list(C.projects(strict=True))
+    st = load(f"repo-{k}.json", {})
+    retired = st.setdefault("retired", [])
+    for d in sorted(d for d, url in every if url.lower() == repo.lower()):
+        aside = os.path.join(src, f".{d}.gone-{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime(C.NOW))}")
+        log(f"{repo}: its checkout {d} may be the deleted one's; moving it to {aside}")
+        if d not in retired:
+            retired.append(d)
+            save(f"repo-{k}.json", st)
+        os.rename(os.path.join(src, d), aside)
+    C.forget_issues(repo)
+    ours = {os.path.join(src, d) for d in set(retired) | ({repo.split("/")[1]} - {d for d, _ in every})}
+    for jid, project, repos in C.jobs():
+        if (repo.lower() in repos or (not repos and project in ours)) and not C.stop_job(jid):
+            raise RuntimeError(f"{repo}: proj couldn't stop job {jid}, which may be the deleted one's")
 
 
 def keep_checks(checks, key):
@@ -338,17 +466,18 @@ def hook(repo, st, due):
     deleted or edited. GitHub never gives the secret back, so it's known by a
     hash. The hook is the one with the id it was given, so a new URL moves
     it rather than leaving the old one sending. A status run has neither the secret (only the services get it)
-    nor anything to change, so it leaves the hook alone."""
+    nor anything to change, so it leaves the hook alone. False when GitHub
+    wouldn't give the hooks or take the change."""
     if DRY:
-        return
+        return True
     wh = CFG["webhook"]
     secret = C.webhook_secret()
     want = hashlib.sha256(json.dumps([wh["url"], wh["events"], secret]).encode()).hexdigest()[:16]
     if st.get("hook") == want and not due:
-        return
+        return True
     hooks = C.gh("api", f"repos/{repo}/hooks", check=False)
     if not isinstance(hooks, list):
-        return  # tried again on the next full pass
+        return False  # tried again on the next full pass
     body = json.dumps({"active": True, "events": wh["events"],
                        "config": {"url": wh["url"], "content_type": "json", "secret": secret, "insecure_ssl": "0"}})
     mine = ([x for x in hooks if x.get("id") == st.get("hookId")]
@@ -361,18 +490,24 @@ def hook(repo, st, due):
         done = C.write("api", "-X", "POST", f"repos/{repo}/hooks", "--input", "-",
                        input=json.dumps({"name": "web", **json.loads(body)}), check=False)
         made = done.get("id") if isinstance(done, dict) else None
-    if done is not None:
-        st["hook"], st["hookId"] = want, made
-        save(f"repo-{repo.replace('/', '_')}.json", st)
+    if done is None:
+        return False
+    st["hook"], st["hookId"] = want, made
+    save(f"repo-{repo.replace('/', '_')}.json", st)
+    return True
 
 
 def hook_projects(repos):
     """The hook on the projects' repos (projectsDir) that it doesn't see to
     (excluded, or another owner's): proj-watch and proj-inbox start from its
     deliveries too. Another owner's gets one only if the App is installed
-    there too; one it can't reach is tried again a day later, and the rest
-    still get theirs. Returns them all, for unhook_gone to keep: a hook
-    whose repo couldn't be asked about stays on."""
+    there too, and a clone whose repo GitHub has no more (deleted, or out of
+    the App's reach) gets none. Either is said once, then left alone until a
+    day later, when it's tried again (a gone one by looking the repo up,
+    quietly), and the rest still get theirs. GitHub answers a deleted repo
+    and one the App lost access to alike, so the hook's record stays: back,
+    the repo's hook is the one it had. Returns them all, for unhook_gone to
+    keep: a hook whose repo couldn't be asked about stays on."""
     if DRY:
         return []
     seen = {r["repo"].lower() for r in repos}
@@ -381,14 +516,42 @@ def hook_projects(repos):
         name = f"repo-{repo.replace('/', '_')}.json"
         st = load(name, {})
         due = C.NOW - st.get("hookAt", 0) >= 86400
+        was = st.get("unreached")
+        if was and not due:
+            continue
         if due:
             st["hookAt"] = C.NOW
             save(name, st)
+        why = None
         try:
             with C.acting_for(repo):
-                hook(repo, st, due)
-        except RuntimeError as e:  # the App isn't on its owner, or GitHub didn't answer
+                if was == GONE:
+                    C.fresh(f"repos/{repo}")  # asking for its hooks would only fail again
+                if not hook(repo, st, due):
+                    # Its hooks couldn't be read or set: Gone if it's the
+                    # repo itself that GitHub doesn't have.
+                    C.fresh(f"repos/{repo}")
+        except C.Gone:
+            why = GONE
+        except C.Unavailable as e:  # GitHub didn't answer: nothing new is known
             log(f"{repo}: its webhook: {e}")
+            why = was
+        except RuntimeError as e:  # the App isn't on its owner, or GitHub said no to the lookup
+            why = str(e)
+        if why == was:
+            continue
+        if why == GONE:
+            log(f"{repo}: GitHub has no such repo, so its clone in {CFG['projectsDir']} gets no webhook; "
+                "looked up again daily")
+        elif why:
+            log(f"{repo}: its webhook: {why}; tried again daily")
+        else:
+            log(f"{repo}: {'on GitHub' if was == GONE else 'reached'} again")
+        if why:
+            st["unreached"] = why
+        else:
+            st.pop("unreached", None)
+        save(name, st)
     return [{"repo": repo} for repo in more]
 
 
@@ -396,10 +559,12 @@ def unhook_gone(repos):
     """The hooks this machine gave repos it no longer sees to (excluded,
     archived, out of the owners), off them: their deliveries would start
     passes over nothing, and the URL has no business there. One that can't
-    be taken off (no admin any more, say), or whose name GitHub won't look
-up, is tried again a day later. A
-    renamed repo leaves its old state file behind, and GitHub answers the old
-    name with the new one: that hook is the one hook() adopted under the new
+    be taken off (no admin any more, say), or whose name GitHub doesn't
+    answer for, is tried again a day later. GitHub answers a deleted repo
+    and one the App can't reach any more alike, so the hook stays on record
+    and is looked up again a day later too, but said only once. A renamed
+    repo leaves its old state file behind, and GitHub answers the old name
+    with the new one: that hook is the one hook() adopted under the new
     name, so the old file lets go of it instead."""
     if DRY:
         return
@@ -412,17 +577,22 @@ up, is tried again a day later. A
         if not st.get("hookId") or C.NOW - st.get("unhookTried", 0) < 86400:
             continue
         repo = name[len("repo-"):-len(".json")].replace("_", "/", 1)  # an owner has no _
+        now = off = None
         try:
             with C.acting_for(repo):
-                now = C.gh("api", f"repos/{repo}", check=False)
-                gone = isinstance(now, dict) and str(now.get("full_name", "")).lower() not in live
+                now = C.fresh(f"repos/{repo}")[1]
+                st.pop("unreached", None)
+                gone = str(now.get("full_name", "")).lower() not in live
                 if gone:
                     log(f"{repo}: no longer seen to, taking its webhook off")
                 off = gone and C.write("api", "-X", "DELETE", f"repos/{repo}/hooks/{st['hookId']}", check=False) is not None
-        except RuntimeError as e:  # the App isn't on its owner (any more), say
+        except C.Gone:
+            if st.get("unreached") != GONE:
+                log(f"{repo}: GitHub has no such repo the App can see, so its webhook stays on record; looked up again daily")
+            st["unreached"] = GONE
+        except RuntimeError as e:  # the App isn't on its owner (any more), or GitHub didn't answer
             log(f"{repo}: {e}")
-            now = off = None
-        if not isinstance(now, dict) or (gone and not off):
+        if now is None or (gone and not off):
             # Not known to be gone (the old path may lead to a live repo), or
             # its hook wouldn't come off.
             st["unhookTried"] = C.NOW
@@ -450,36 +620,53 @@ def delete_branch(repo, name, sha):
             log(f"{repo}: kept {name}: {p.stderr.strip()[:200]}")
 
 
-# Unmerged, with no PR and no commit for this long: given up on. Its commits
-# are kept under ARCHIVE and the branch deleted.
-STALE_DAYS = 14
+# Unmerged, with no PR and no commit for this long: given up on (agents open
+# a PR when they push). Its commits are kept under ARCHIVE and the branch
+# deleted, so a short wait costs nothing.
+STALE_DAYS = 3
 ARCHIVE = "refs/archive"
+
+
+def answer(call, *args):
+    """What GitHub answered call(*args) (C.gh or C.write), or None when it
+    said no (a branch with no history in common with the default has no
+    comparison, say). C.Unavailable when it didn't answer, which stops a
+    sweep: one that couldn't look at every branch hasn't swept."""
+    try:
+        return call(*args)
+    except C.Unavailable:
+        raise
+    except RuntimeError as e:
+        log(f"  failed: {e}")
+        return None
 
 
 def archive_branch(repo, name, sha):
     """Keep the branch's commits at refs/archive/NAME/SHA, a ref GitHub keeps
     but lists with neither branches nor tags; True once they're kept (by
-    this call or an earlier one), and only then may the branch go."""
+    this call or an earlier one), and only then may the branch go.
+    C.Unavailable when GitHub didn't answer."""
     ref = f"{ARCHIVE}/{name}/{sha}"
     if DRY:
         log(f"  would: keep {repo} {name} at {ref}")
         return True
-    if C.write("api", f"repos/{repo}/git/refs", "-f", f"ref={ref}", "-f", f"sha={sha}", check=False) is not None:
+    if answer(C.write, "api", f"repos/{repo}/git/refs", "-f", f"ref={ref}", "-f", f"sha={sha}") is not None:
         return True
     # Already there: an earlier sweep kept it and then couldn't delete.
-    return C.gh("api", f"repos/{repo}/git/ref/{urllib.parse.quote(ref.removeprefix('refs/'))}",
-                "--jq", f'.object.sha == "{sha}"', check=False) is True
+    return answer(C.gh, "api", f"repos/{repo}/git/ref/{urllib.parse.quote(ref.removeprefix('refs/'))}",
+                  "--jq", f'.object.sha == "{sha}"') is True
 
 
 def closed_at(repo, name, sha):
     """The closed PR whose head was this branch at `sha`, if there is one.
     GitHub keeps that PR's commits (refs/pull/N/head) and offers to restore
-    the branch from its page, so the branch holds nothing the PR doesn't."""
+    the branch from its page, so the branch holds nothing the PR doesn't.
+    None too when GitHub said no; C.Unavailable when it didn't answer."""
     owner = repo.split("/")[0]
     # Every page: a branch name reused for many PRs can have its match
     # past the first hundred.
-    got = C.gh("api", "--paginate", f"repos/{repo}/pulls?state=closed&per_page=100&head={owner}:{urllib.parse.quote(name)}",
-               "--jq", f'.[] | select(.head.sha == "{sha}") | .number', check=False)
+    got = answer(C.gh, "api", "--paginate", f"repos/{repo}/pulls?state=closed&per_page=100&head={owner}:{urllib.parse.quote(name)}",
+                 "--jq", f'.[] | select(.head.sha == "{sha}") | .number')
     if got is None:
         return None
     first = str(got).split("\n")[0]
@@ -492,19 +679,37 @@ UNKEPT = f"Stale branches it couldn't archive (unmerged, no PR, {STALE_DAYS}+ da
 def sweep_branches(r, in_use, digest, sweep=True):
     """Delete the merged branches and the closed PRs' branches, and archive
     and delete the stale ones, once a day and only when `sweep`; the stale
-    ones the last sweep couldn't archive are listed every time."""
+    ones the last sweep couldn't archive are listed every time. A sweep
+    GitHub didn't list the branches for, or stopped answering partway
+    through, isn't one: the next full pass sweeps again, not a day later
+    (what it deleted stays deleted)."""
     repo = r["repo"]
-    st = load(f"repo-{repo.replace('/', '_')}.json", {})
-    if not sweep or C.NOW - st.get("branches", 0) < 86400:
-        for b in st.get("unkept", []):
-            digest.append((UNKEPT, f"{repo}: `{b}`", ""))
-        return
+    path = f"repo-{repo.replace('/', '_')}.json"
+    st = load(path, {})
+    unkept = st.get("unkept", [])
+    if sweep and C.NOW - st.get("branches", 0) >= 86400:
+        try:
+            unkept = swept(r, in_use)
+        except RuntimeError as e:
+            log(f"{repo}: no branch sweep this pass: {e}")
+        else:
+            st.pop("stale", None)  # the list it kept before it archived, which nothing reads now
+            st.update(branches=C.NOW, unkept=unkept)
+            save(path, st)
+    for b in unkept:
+        digest.append((UNKEPT, f"{repo}: `{b}`", ""))
+
+
+def swept(r, in_use):
+    """Sweep r's branches: the stale ones it couldn't archive. RuntimeError
+    when GitHub didn't list them, C.Unavailable when it stopped answering."""
+    repo = r["repo"]
     unkept = []
     # The machine's globs, plus the repo's own (evidence branches it cites),
     # and its train's candidates', which cn makes and deletes.
     keep = CFG["keepBranches"] + repo_cfg(repo).get("keepBranches", []) + [T.TRAIN.get("branches")] * T.on(repo)
-    names = (C.gh("api", "--paginate", f"repos/{repo}/branches?per_page=100", "--jq",
-                  '.[] | select(.protected | not) | "\\(.name) \\(.commit.sha)"', check=False) or "")
+    names = C.gh("api", "--paginate", f"repos/{repo}/branches?per_page=100", "--jq",
+                 '.[] | select(.protected | not) | "\\(.name) \\(.commit.sha)"')
     for x in str(names).split("\n"):
         name, _, sha = x.partition(" ")
         if not name or not sha or name == r["default"] or name in in_use:
@@ -522,8 +727,8 @@ def sweep_branches(r, in_use, digest, sweep=True):
         if DEP_RE.match(name):
             continue
         # Compared at the tip just listed, and deleted only if it's still there.
-        cmp = C.gh("api", f"repos/{repo}/compare/{r['default']}...{sha}", "--jq",
-                   "{ahead: .ahead_by, date: .commits[-1].commit.committer.date}", check=False)
+        cmp = answer(C.gh, "api", f"repos/{repo}/compare/{r['default']}...{sha}", "--jq",
+                     "{ahead: .ahead_by, date: .commits[-1].commit.committer.date}")
         if not isinstance(cmp, dict):
             continue
         if cmp["ahead"] == 0:
@@ -537,11 +742,7 @@ def sweep_branches(r, in_use, digest, sweep=True):
                 delete_branch(repo, name, sha)
             else:
                 unkept.append(name)
-    st.pop("stale", None)  # the list it kept before it archived, which nothing reads now
-    st.update(branches=C.NOW, unkept=unkept)
-    save(f"repo-{repo.replace('/', '_')}.json", st)
-    for b in unkept:
-        digest.append((UNKEPT, f"{repo}: `{b}`", ""))
+    return unkept
 
 
 # What only the owner can settle: their call (a label, a judge's or an
@@ -567,8 +768,10 @@ def publish(digest):
         issue("digest.json", "[autoland] PRs waiting for you", CFG["notify"]["label"], CFG["notify"]["assignee"], "",
               owner, "Nothing waiting.")
         # Closed once the inbox can't take it: what's in it is the owner's then.
+        # Its job never waits in proj's line (the unstick label), which may be
+        # the very thing stuck.
         issue("stuck.json", "[autoland] Stuck in the pipeline", CFG["inbox"]["label"], "", stuck_brief(),
-              [x for x in digest if x not in owner], "Nothing stuck.")
+              [x for x in digest if x not in owner], "Nothing stuck.", also=CFG["inbox"]["unstickLabel"])
 
 
 def inbox_off():
@@ -603,9 +806,11 @@ them.
 """
 
 
-def issue(key, title, label, assignee, intro, digest, done):
+def issue(key, title, label, assignee, intro, digest, done, also=""):
     """One issue in config.notify.repo listing digest, kept up to date: each
-    new or changed entry is a comment too, and it's closed once there's none."""
+    new or changed entry is a comment too, and it's closed once there's none.
+    It's found by label, and has the label `also` as well, when there is one:
+    put back on the open one when it's gone."""
     nrepo = CFG["notify"]["repo"]
     groups = {}
     for why, line, desc in digest:
@@ -622,7 +827,7 @@ def issue(key, title, label, assignee, intro, digest, done):
     if prev.get("body") == body and C.NOW - prev.get("checked", 0) < 3600:
         return
     found = C.gh("issue", "list", "-R", nrepo, "--label", label, "--state", "open", "--search",
-                 f'"{title}" in:title', "--json", "number,body", check=False)
+                 f'"{title}" in:title', "--json", "number,body,labels", check=False)
     if not isinstance(found, list):
         return  # couldn't look (no quota?): try next pass, and don't open a second issue
     found = [i for i in found if i]
@@ -637,8 +842,11 @@ def issue(key, title, label, assignee, intro, digest, done):
         return
     full = intro + body + "\n\n_Kept up to date by autoland-steward on " + os.uname().nodename + "._"
     if not found:
-        C.gh("label", "create", label, "-R", nrepo, "--color", "B60205", check=False)
-        args = ["issue", "create", "-R", nrepo, "--label", label, "--title", title, "--body", full]
+        for name in (label, also):
+            if name:
+                C.gh("label", "create", name, "-R", nrepo, "--color", "B60205", check=False)
+        args = ["issue", "create", "-R", nrepo, "--label", label, *(["--label", also] if also else []), "--title", title,
+                "--body", full]
         if assignee:
             args += ["--assignee", assignee]
         ok = C.gh(*args, check=False) is not None
@@ -646,6 +854,9 @@ def issue(key, title, label, assignee, intro, digest, done):
         num = str(found[0]["number"])
         if found[0]["body"] != full:
             ok = C.gh("issue", "edit", num, "-R", nrepo, "--body", full, check=False) is not None
+        if also and ok and also not in {x.get("name") for x in found[0].get("labels") or []}:
+            C.gh("label", "create", also, "-R", nrepo, "--color", "B60205", check=False)
+            ok = C.gh("issue", "edit", num, "-R", nrepo, "--add-label", also, check=False) is not None
         added = [x for x in entries if x not in prev.get("entries", [])]
         if added and ok:
             ok = C.gh("issue", "comment", num, "-R", nrepo, "--body", "New:\n" + "\n".join(f"- {x}" for x in added), check=False) is not None

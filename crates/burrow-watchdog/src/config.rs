@@ -24,10 +24,9 @@ pub struct Config {
     pub app: Option<String>,
     /// burrow-events' kick port: `http://127.0.0.1:PORT/kick`.
     pub kick: String,
-    /// Seconds a job has before a stall goes to the stuck issue, and the
-    /// stuck issue before the owner hears.
+    /// Seconds a job has before a stall goes to the stuck issue (or the
+    /// owner, when it's theirs: escalate in ladder.rs).
     pub escalate_after: f64,
-    pub owner_after: f64,
     /// The steward's handler, kicked to publish the stuck issue; None when
     /// there's no steward to publish one.
     pub steward_kick: Option<String>,
@@ -86,7 +85,7 @@ mod tests {
             "stateDir": "/var/lib/burrow/watchdog",
             "sources": {"proj": {"file": "/w.json", "about": "proj's line", "look": "proj status.", "kick": null, "stale": null}},
             "proj": "/bin/proj", "project": "homelab", "jobTimeout": 60, "jobIdle": 20, "app": null,
-            "kick": "http://127.0.0.1:8788/kick", "escalateAfter": 7200, "ownerAfter": 14400,
+            "kick": "http://127.0.0.1:8788/kick", "escalateAfter": 7200,
             "stewardKick": null, "labels": null, "notify": "", "owner": "Sam", "host": "box",
         });
         let cfg: Config = serde_json::from_value(good.clone()).unwrap();

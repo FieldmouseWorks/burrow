@@ -4,7 +4,10 @@
 # pipeline job's every turn, in one of the pipeline's own repos, takes the
 # slot kept for them when the rest are full, and one in a lead repo goes
 # ahead of the others, while one anywhere else goes as --first and says so
-# (pick.sh's own check has how origins are told apart),
+# (pick.sh's own check has how origins are told apart), that a job run
+# --unstick takes a slot of its own, every turn of it, while every other one
+# is held and turns wait in line, and waits only for another --unstick turn
+# (one made so later, by proj unstick, too: waiting, or at its next turn),
 # that a job whose turn has ended frees its slot, that one stopped after
 # its answer with work in the background has the rest of that run stopped,
 # hears so once and answers again (the turn ending as its last run did, its
@@ -113,6 +116,7 @@ pkgs.testers.runNixOSTest {
       "d /data/dev/src/lead 0755 dev dev -"
       "d /data/dev/src/ib 0755 dev dev -"
       "d /data/dev/src/bt 0755 dev dev -"
+      "d /data/dev/src/uk 0755 dev dev -"
     ];
     virtualisation.memorySize = 2048;
     # The test framework panics on any OOM, a cgroup's own included; a real
@@ -172,9 +176,11 @@ pkgs.testers.runNixOSTest {
     def end(job, n=1):
         return machine.succeed(f"cat /data/dev/jobs/{job}/{n}.end").strip()
 
-    with subtest("the cap is on claude.slice, none of it in swap"):
+    with subtest("Claude has no ceiling and no throttle of its own, and may swap"):
+        # The kernel shares the machine's memory out: a cap here only killed
+        # or stalled Claudes while memory sat free.
         out = machine.succeed("systemctl --user -M dev@ show claude.slice -p MemoryHigh -p MemoryMax -p MemorySwapMax")
-        assert "MemoryMax=" in out and "infinity" not in out and "MemorySwapMax=0" in out.splitlines(), out
+        assert sorted(out.split()) == ["MemoryHigh=infinity", "MemoryMax=infinity", "MemorySwapMax=infinity"], out
 
     with subtest("a look with nothing awaited succeeds, and books nothing"):
         proj("_watch")
@@ -195,6 +201,16 @@ pkgs.testers.runNixOSTest {
         out = machine.fail(f"su - dev -c 'proj log {e}'")
         assert "ended without an answer" in out and "refused" in out, out
 
+    with subtest("a dot-named project's job isn't hidden from what goes through the jobs"):
+        for d in (".dotted", "..dotted", ".-dotted"):
+            machine.succeed(f"install -d -o dev -g dev /data/dev/src/{d}")
+            j = proj(f'run {d} "sleep 1"')
+            assert j[0] not in ".-", j
+            assert j in proj("status"), proj("status")
+            machine.wait_until_succeeds(f"su - dev -c 'proj state {j}' | grep -x done", timeout=120)
+            assert machine.succeed(f"cat /data/dev/jobs/{j}/project").strip() == f"/data/dev/src/{d}"
+            machine.succeed(f"rm -rf /data/dev/src/{d}")
+
     with subtest("past maxJobs, jobs wait in line, and --first goes ahead"):
         a = proj('run web "sleep 600"')
         b = proj('run web "sleep 600"')
@@ -209,10 +225,12 @@ pkgs.testers.runNixOSTest {
         assert ".queue" not in listed and ".slots" not in listed, listed
         out = machine.succeed(f"systemctl --user -M dev@ show '{unit(a)}' -p Slice -p MemoryMax")
         assert "Slice=claude-jobs.slice" in out and "MemoryMax=134217728" in out, out
+        # One slot at a time: two free at once go to both in one look, and
+        # which starts first is then only which looks first.
         proj(f"stop {a}")
+        machine.wait_until_succeeds(f"su - dev -c 'proj state {d}' | grep -x done", timeout=120)
         proj(f"stop {b}")
         machine.wait_until_succeeds(f"su - dev -c 'proj state {c}' | grep -x done", timeout=120)
-        machine.wait_until_succeeds(f"su - dev -c 'proj state {d}' | grep -x done", timeout=120)
         assert started(d) < started(c), (started(d), started(c))
 
     with subtest("a job whose turn has ended frees its slot"):
@@ -515,6 +533,13 @@ pkgs.testers.runNixOSTest {
         for j in (a, b):
             machine.wait_until_succeeds(f"su - dev -c 'proj state {j}' | grep -x running", timeout=120)
         c = proj('run --first web "sleep 1"')
+        q = proj('run web "sleep 1"')
+        # The whole line, next first: --first ahead of plain.
+        # A run returns before its turn has its place: wait for both.
+        machine.wait_until_succeeds(f"ls /data/dev/jobs/.queue | grep -c -e '-{c}$' -e '-{q}$' | grep -x 2", timeout=120)
+        line = proj("status --line").splitlines()
+        assert [(l.split()[0], l.split()[1]) for l in line] == [(c, "first"), (q, "normal")], line
+        proj(f"stop {q}")
         p = proj('run --pipeline web "sleep 1"')
         machine.wait_until_succeeds(f"su - dev -c 'proj state {p}' | grep -x done", timeout=120)
         proj(f'reply {p} "sleep 1"')
@@ -581,6 +606,43 @@ pkgs.testers.runNixOSTest {
         machine.wait_until_succeeds(f"su - dev -c 'proj state {lead}' | grep -x done", timeout=120)
         proj(f"stop {a}")
         proj(f"stop {b}")
+
+    with subtest("an --unstick job takes its own slot while every other is held and others wait, every turn of it, one at a time"):
+        x = proj('run web "sleep 1"')
+        machine.wait_until_succeeds(f"su - dev -c 'proj state {x}' | grep -x done", timeout=120)
+        a = proj('run web "sleep 600"')
+        b = proj('run web "sleep 600"')
+        q = proj('run --pipeline web "sleep 600"')
+        for j in (a, b, q):
+            machine.wait_until_succeeds(f"su - dev -c 'proj state {j}' | grep -x running", timeout=120)
+        c = proj('run --first web "sleep 1"')
+        u = proj('run --unstick web "sleep 1"')
+        machine.wait_until_succeeds(f"su - dev -c 'proj state {u}' | grep -x done", timeout=120)
+        proj(f'reply {u} "sleep 600"')
+        machine.wait_until_succeeds(f"su - dev -c 'proj state {u}' | grep -x running", timeout=120)
+        machine.fail(f"""su - dev -c 'proj reply --unstick {u} "sleep 1"'""")
+        v = proj('run --unstick web "sleep 1"')
+        w = waits(lambda w: w.get(v, {}).get("unstick") is True)
+        assert w[v]["line"] and w[v]["phase"] == "turn 1 is waiting for the --unstick slot, which another --unstick turn holds", w[v]
+        assert w[c]["unstick"] is False and w[u]["unstick"] is True, (w[c], w[u])
+        # Made one later (proj unstick): a turn waiting in line leaves it, and
+        # a job that has run takes that slot from its next turn.
+        p = proj('run web "sleep 1"')
+        time.sleep(3)
+        assert state(p) == "queued", state(p)
+        proj(f"unstick {p}")
+        proj(f"unstick {x}")
+        proj(f'reply {x} "sleep 1"')
+        waits(lambda w: all(w.get(j, {}).get("unstick") is True for j in (p, x)))
+        time.sleep(3)
+        assert [state(j) for j in (c, v, p, x)] == ["queued"] * 4, [state(j) for j in (c, v, p, x)]
+        proj(f"stop {u}")
+        for j in (v, p, x):
+            machine.wait_until_succeeds(f"su - dev -c 'proj state {j}' | grep -x done", timeout=120)
+        assert state(c) == "queued", state(c)
+        for j in (a, b, q):
+            proj(f"stop {j}")
+        machine.wait_until_succeeds(f"su - dev -c 'proj state {c}' | grep -x done", timeout=120)
 
     with subtest("a pipeline job anywhere else goes as --first, and says so in proj status and its turn's journal"):
         q = proj('run --pipeline ib "sleep 1"')

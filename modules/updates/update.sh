@@ -16,7 +16,8 @@
 # It works in its own clone (WORK), never in the operator's checkout, and holds
 # off while a switch is pending or while the box runs changes that aren't on
 # main yet. In a repo whose PRs land through its merge train, what it would push
-# goes up as a PR instead, and it rides that PR until it lands (propose.sh).
+# goes up as a PR instead, and it rides that PR until it lands, or puts a fresh
+# bump on it when a check fails on it (propose.sh).
 # (Everything in capitals comes from ../updates.nix.)
 
 [ "$(id -u)" = 0 ] || exec sudo "$0" "$@"
@@ -136,25 +137,33 @@ fi
 rm -f "$state/held-since"
 "$NOTIFY" close not-on-main "$HOST is back on main."
 
-# Its PR open, in a train repo: main with that on top, and nothing fresh.
+# Its PR open, in a train repo: main with that on top, and nothing fresh;
+# unless it's red on a head of its own, which a fresh bump replaces.
 riding=
+replacing=
 url=
 if [ -n "$TRAIN" ]; then
   pr=$(update_pr) || { note held "GitHub didn't say whether its PR is open; trying again next run"; exit 0; }
   if [ -n "$pr" ]; then
-    why=$(ride "$pr") || { note held "$why"; exit 0; }
-    riding=${pr%% *}
+    red=$(red_head "$pr") || { note held "$red; trying again next run"; exit 0; }
+    if [ -n "$red" ]; then
+      replacing=$pr
+    else
+      why=$(ride "$pr") || { note held "$why"; exit 0; }
+      riding=${pr%% *}
+    fi
   fi
 fi
 
 # 3. What's new upstream: every flake input, and Claude Code's latest release.
 inputs=$(as_user nix flake metadata --json "$work" | jq -r '.locks.nodes.root.inputs | keys[]')
 
+# Fails when it couldn't find out, or bring in, what's new.
 update_one() {
   if [ "$1" = claude-code ]; then
     [ -n "$manifest" ] || return 0
     local v
-    v=$(curl -fsS --max-time 30 "$claude_releases/latest") || return 0
+    v=$(curl -fsS --max-time 30 "$claude_releases/latest") || return 1
     [ "$v" != "$(jq -r .version "$work/$manifest")" ] || return 0
     curl -fsS --max-time 60 "$claude_releases/$v/manifest.zst.json" -o "$state/manifest.json" &&
       jq -e '.version and .platforms["linux-x64"].checksum' "$state/manifest.json" >/dev/null &&
@@ -182,7 +191,7 @@ commit() {
   git_ diff --quiet && return 1
   local what
   what=$(describe HEAD)
-  git_ commit -qam "Update ${what%, }" -m "Pushed by $UPDATE after the build, the VM tests and the health check passed."
+  git_ commit -qam "deps: update ${what%, }" -m "Pushed by $UPDATE after the build, the VM tests and the health check passed."
 }
 
 # A tree that failed to build in the last day isn't tried again (nor, below, a
@@ -197,10 +206,11 @@ remember_failed() { echo "$1:$(tree) $(date +%s)" >>"$state/failed-trees"; }
 
 : >"$state/logs/update.log"
 changed=
+unfetched=() # inputs whose news couldn't be fetched
 if [ -n "$riding" ]; then
   [ "$(git_ rev-parse HEAD)" = "$main" ] || changed=1
 else
-  for i in $inputs claude-code; do update_one "$i" || true; done
+  for i in $inputs claude-code; do update_one "$i" || unfetched+=("$i"); done
   commit && changed=1
 fi
 
@@ -222,8 +232,9 @@ settled build-riding "main with its PR on top builds."
 if [ -z "$riding" ] && { failed_before build || ! new=$(build) || [ -z "$new" ]; }; then
   failed_before build || { cp "$state/logs/build.log" "$state/logs/build-all.log"; remember_failed build; }
   git_ reset -q --hard "$main"
+  unfetched=()
   for i in $inputs claude-code; do
-    update_one "$i" || true
+    update_one "$i" || unfetched+=("$i")
     commit || continue
     if ! failed_before build && new=$(build) && [ -n "$new" ]; then
       echo "$i: builds"
@@ -233,6 +244,8 @@ if [ -z "$riding" ] && { failed_before build || ! new=$(build) || [ -z "$new" ];
       failed+=("$i")
     fi
   done
+  # None of them built: main itself, with nothing new on it.
+  [ "$(git_ rev-parse HEAD)" != "$main" ] || changed=
   new=$(build) || {
     note failed "main itself doesn't build"
     dispatch build-main "$UPDATE: $origin main ($main) doesn't build; the log is $state/logs/build.log. Fix it. $worktree_rules"
@@ -246,6 +259,12 @@ else
   settled build-inputs
 fi
 settled build-main "main builds again."
+
+# Its red PR's head stays, unless a whole fresh bump other than it replaces it.
+if [ -n "$replacing" ] && why=$(why_not_replace "$replacing" "$main" "${unfetched[@]}" "${failed[@]}"); then
+  note held "its PR #${replacing%% *} is red, and $why; holding for the Claude jobs on it"
+  exit 0
+fi
 
 live=
 if [ "$new" = "$current" ]; then
@@ -280,10 +299,6 @@ fi
 # now (CVSS 7+, per vulnix). Those go live without the test, under the same dead
 # man's switch and health check as everything else.
 
-# VM test $1 on commit $2, logged to $3.
-run_check() {
-  as_user nix build --no-link -L "git+file://$work?rev=$2#checks.$SYSTEM.$1" >"$3" 2>&1
-}
 # What VM test $1 did on commit $2's tree in the last day: pass, fail or nothing.
 result_of() {
   [ -z "$force" ] && [ -e "$state/check-results" ] || return 0
@@ -375,6 +390,13 @@ if [ ${#untested[@]} -gt 0 ]; then
 $fixes
 So they went live without it, under the dead man's switch and the health check. A Claude job is fixing main's test; this closes when an update passes every test again."
 fi
+# The commit says what was skipped (before 6, which can put it up).
+if [ ${#untested[@]} -gt 0 ] && [ -n "$changed" ] && [ -z "$riding" ]; then
+  git_ commit -q --amend -m "deps: update $(describe | sed 's/, $//')" \
+    -m "Pushed by $UPDATE without the VM test ${untested[*]}, which fails on main itself, because it fixes:
+$fixes
+It built and stayed healthy live."
+fi
 
 # 6. Live, with the dead man's switch; healthy, or straight back.
 # Already live: it went through this when it did.
@@ -412,6 +434,16 @@ if [ -z "$live" ]; then
     fi
   fi
 
+  # A fresh bump for its red PR goes up as that PR's head before it's
+  # confirmed: refused (a fix or a rerun got there first), it goes straight
+  # back, so the box never stays on what nothing will land, and the next run
+  # rides or holds for that PR as usual.
+  if [ -n "$replacing" ] && ! url=$(replace "$replacing" "$(git_ log -1 --format=%s)" "$(pr_body)"); then
+    "$SWITCH" --abort >>"$state/logs/switch.log" 2>&1 || true
+    note held "$url; reverted"
+    exit 0
+  fi
+
   "$CONFIRM" >>"$state/logs/switch.log" 2>&1 || {
     note failed "health was fine but $CONFIRM failed; it reverts by itself"
     exit 1
@@ -423,21 +455,21 @@ if [ -z "$live" ]; then
 fi
 
 # 7. Push, and bring the operator's checkout along when it isn't mid-work.
-# (The commit says what was skipped. The running system keeps the old commit
-# as its revision; "deployed" below is how the next run knows it's this one.)
-if [ ${#untested[@]} -gt 0 ] && [ -n "$changed" ] && [ -z "$riding" ]; then
-  git_ commit -q --amend -m "Update $(describe | sed 's/, $//')" \
-    -m "Pushed by $UPDATE without the VM test ${untested[*]}, which fails on main itself, because it fixes:
-$fixes
-It built and stayed healthy live."
-fi
+# (The running system keeps the old commit as its revision; "deployed" below
+# is how the next run knows it's this one.)
 echo "$new" >"$state/deployed"
 # What went live, in words: pushing can rebase it onto what hasn't.
 went=${changed:+$(describe)}${changed:-main $(git_ rev-parse --short HEAD)}
 if [ -n "$TRAIN" ]; then
-  # Riding, or nothing new on main: nothing to put up.
-  [ -n "$riding" ] || [ -z "$changed" ] || url=$(propose "$(git_ log -1 --format=%s)" "$(pr_body)") ||
-    echo "its PR didn't open; the next run opens it"
+  if [ -n "$riding" ] || [ -z "$changed" ]; then
+    : # Riding, or nothing new on main: nothing to put up.
+  elif [ -n "$replacing" ]; then
+    # Up already, before its confirm (6), unless it was live before this run:
+    # then it goes up now, and a refusal leaves the box as this run found it.
+    [ -z "$live" ] || url=$(replace "$replacing" "$(git_ log -1 --format=%s)" "$(pr_body)") || { echo "$url"; url=; }
+  else
+    url=$(propose "$(git_ log -1 --format=%s)" "$(pr_body)") || echo "its PR didn't open; the next run opens it"
+  fi
   [ -n "$changed" ] || git_ rev-parse HEAD >"$state/deployed-main"
 else
   push_main || true
