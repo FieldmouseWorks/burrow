@@ -30,7 +30,7 @@ import waits
 from common import CFG, DRY, MIN, load, log, repo_cfg, save, ts
 from seal import MAJOR as MAJOR_VERDICT  # renovate-sweep's, on a Renovate major
 from touches import automerges, bot_edited, dep_kind, gate_edit, moved_from, one_way
-from tasks import DEP_SEEN, PAST_LIMIT, REVIEWED, fix_task, judge_task, judged_on, judgment, proof_task
+from tasks import DEP_SEEN, PAST_LIMIT, REVIEWED, fix_task, judge_task, judged_on, judgment, owed, proof_task
 from prs import MERGE_STEPS, PROOF_SLOT, RELEASE_AGE, REVIEWER, ci_state, eyes, land, our_status, post_status, show_waiting
 
 # The link Claude Code puts in a PR its session opens.
@@ -631,7 +631,7 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
     # still decides once CI shows up, or the description is edited (then on
     # the new one): its owner or failed verdict isn't dropped for either.
     judge_said = judgment(pr, head, repo)
-    asked = (st.get("judged") or "").startswith(f"{head} {pr['baseRefName']} ") or judge_said is not None
+    asked = owed(pr, head, repo, st.get("judged"))
     # Its owner or failed verdict holds it whatever CI is still doing; only
     # a land waits for CI.
     held = asked and judge_said in ("owner", "failed")

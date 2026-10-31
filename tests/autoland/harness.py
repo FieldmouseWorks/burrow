@@ -377,10 +377,12 @@ def rv_review(r, k, sha=head, at="2026-10-24T00:11:00Z", who=None, base="main", 
                                                           "description": C.fingerprint(body)}) + " -->"}
 
 
-def judgment(v, n=6, sha=head, base="main", body=""):
+def judgment(v, n=6, sha=head, base="main", body="", on=None):
     """A judge's verdict line, sealed as its task gives it: on the PR's base
-    and the description `body`."""
-    return f"<!-- autoland-judgment: {v} {sha} {C.seal('sam/r', n, 'autoland-judgment', v, sha, f'{base} {C.fingerprint(body)}')} -->"
+    and the description `body`, or on `on` (the base alone, as they were
+    before descriptions were judged)."""
+    on = on or f"{base} {C.fingerprint(body)}"
+    return f"<!-- autoland-judgment: {v} {sha} {C.seal('sam/r', n, 'autoland-judgment', v, sha, on)} -->"
 
 
 def swept(v, n=8, sha=head, base="main"):

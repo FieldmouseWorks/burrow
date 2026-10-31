@@ -86,6 +86,18 @@ def judgment(pr, head, repo):
     return C.marker(pr, JUDGMENT, head, repo, on=judged_on(pr))
 
 
+def owed(pr, head, repo, judged):
+    """Whether a judge was asked for on this head and base, so a verdict on
+    it, on the description as it is now (judgment), still decides: its job
+    started (judged, the state's key, on any description; `HEAD BASE`, as the
+    steward kept it before it judged descriptions, too), or a verdict posted
+    on it, sealed on the description as it is or (as they were before) on
+    the base alone. Neither of those last is a verdict on this description:
+    it only owes one."""
+    return (judged or "").split(" ")[:2] == [head, pr["baseRefName"]] or any(
+        C.marker(pr, JUDGMENT, head, repo, on=on) is not None for on in (judged_on(pr), None))
+
+
 def verdict_line(repo, n, verdict, head, on):
     return f"<!-- {JUDGMENT}: {verdict} {head} {C.seal(repo, n, JUDGMENT, verdict, head, on)} -->"
 

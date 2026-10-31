@@ -652,6 +652,18 @@ run(clean(checks=[]), 700)
 status, _ = run(clean(checks=CI_GREEN, comments=[said(judgment("failed", n=5))], body=edited), 900)
 assert not merged() and len(JOBS) == 1 and "so you judge it" in JOBS[0], (status, JOBS)
 assert JOBS[0].endswith("\n\nIts description:\n> Why not Rust: quicker to write"), JOBS[0]
+# Nor does a judge asked for before descriptions were judged: its job's key
+# (head and base) and its verdicts (sealed on the base alone) still owe one,
+# but none of them is a verdict on the description, so a judge is asked again.
+fresh_pr_state()
+run(clean(checks=[]), 700)
+C.save("pr-sam_r-5.json", {**C.load("pr-sam_r-5.json", {}), "judged": f"{head} main"})
+status, _ = run(clean(checks=CI_GREEN), 900)
+assert not merged() and len(JOBS) == 1 and "so you judge it" in JOBS[0], (status, JOBS)
+for v in ("land", "owner", "failed"):
+    fresh_pr_state()
+    status, _ = run(clean(checks=CI_GREEN, comments=[said(judgment(v, n=5, on="main"))]), 900)
+    assert not merged() and len(JOBS) == 1 and "so you judge it" in JOBS[0], (v, status, JOBS)
 # Nor while that CI is still running: an owner or failed verdict holds it
 # at once, and only a land waits for CI.
 busy_ci = [{"__typename": "CheckRun", "name": "ci", "status": "IN_PROGRESS", "conclusion": None}]
