@@ -1,0 +1,65 @@
+{
+  "conary": "note v1",
+  "change": "4n5t0v5n76vy2en50rgjecd3sy",
+  "repo": {
+    "owner": "fieldmouseworks",
+    "name": "burrow"
+  },
+  "pr": 207,
+  "url": "https://github.com/fieldmouseworks/burrow/pull/207",
+  "summary": "proj: a backlog of pipeline work leaves everyone else a slot",
+  "task": "fieldmouseworks/burrow#208",
+  "author": {
+    "kind": "bot",
+    "login": "fieldmouseworks-workers[bot]",
+    "session": null
+  },
+  "landing": {
+    "revision": "587d40869a43fe6eed57f4904c08e87e44cd5644b5996ee6fb318bd41b62bb95",
+    "before": "bc5d12372f2a69acf472f27c7edd1d519f044671",
+    "after": "98f964c53ec7cb01fa95184f6ddf7bf21cab23ae",
+    "by": {
+      "kind": "status",
+      "login": "fieldmouseworks-steward[bot]"
+    },
+    "at": 1793452142274
+  },
+  "evidence": [
+    {
+      "kind": "ci",
+      "check": "rust-first / python",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/41198059379/job/124528144523"
+    },
+    {
+      "kind": "ci",
+      "check": "check / commits",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/41198059357/job/124528144473"
+    },
+    {
+      "kind": "ci",
+      "check": "rust-first (#207)",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/41198059379"
+    },
+    {
+      "kind": "review",
+      "check": "codex",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/207#pullrequestreview-5722574835"
+    },
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/41198059357/job/124528144693"
+    },
+    {
+      "kind": "ci",
+      "check": "agents",
+      "result": "pass",
+      "source": "status agents"
+    }
+  ]
+}
