@@ -3,8 +3,7 @@
 # one JSON line a run, then does what $HOME/.fake/codex.json says (a
 # value can be {"text in the prompt": value}, for the look whose prompt has it):
 #   wait     seconds, before it refreshes
-#   refresh  a refreshed login, written in place through the link, as codex
-#            writes one
+#   refresh  a refreshed login, written in place, as codex writes one
 #   sleep    seconds
 #   http     [{"env": VAR, "send": TEXT}]: TEXT sent to the proxy VAR names,
 #            what came back recorded in $HOME/.fake/http.log
@@ -12,7 +11,7 @@
 #   rc, err  exit with rc, err on stderr
 #   say      its last message (else "Looked." and `answer`)
 #   gone     its PR closes meanwhile: the sweep marks its session gone
-#   relogin  a refreshed login, saved as a new file where the link was
+#   relogin  a refreshed login, saved as a new file over its copy
 set -euo pipefail
 fake=$HOME/.fake
 todo=$(cat "$fake/codex.json" 2>/dev/null || echo '{}')

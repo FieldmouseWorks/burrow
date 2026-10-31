@@ -3,16 +3,14 @@
 //! network but its own API through the gate (egress.rs).
 
 use std::ffi::OsString;
-use std::fs::{self, File, OpenOptions};
+use std::fs;
 use std::io::{self, Read, Write};
-use std::os::fd::OwnedFd;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt, symlink};
+use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use rustix::fs::{AtFlags, FileType, Mode, OFlags};
 use serde_json::{Value, json};
 
 use crate::egress::Gate;
@@ -282,8 +280,8 @@ fn when(at: f64) -> String {
 
 /// Codex's look in the PR's session `sid` (a new one if None): its answer,
 /// and the session's id. `home` is the PR's own CODEX_HOME, which holds
-/// that session and nothing of any other PR's; the login in it is the
-/// reviewers' one (HOME/.codex/auth.json, linked in).
+/// that session and nothing of any other PR's but the login, a copy lent
+/// for this look (login.rs).
 pub fn look(
     s: &Service,
     snap: &Path,
@@ -291,25 +289,14 @@ pub fn look(
     home: &Path,
     sid: Option<&str>,
 ) -> Result<(Value, String), Failed> {
-    // The login it starts with: one a refresh replaces is still scrubbed.
-    s.keys();
     let err = |e: io::Error| Failed::Error(e.to_string());
     let login = s.home.join(".codex");
     fs::create_dir_all(home).map_err(err)?;
-    for f in ["auth.json", "config.toml"] {
-        if login.join(f).exists() && fs::symlink_metadata(home.join(f)).is_err() {
-            symlink(login.join(f), home.join(f)).map_err(err)?;
-        }
+    let f = "config.toml";
+    if login.join(f).exists() && fs::symlink_metadata(home.join(f)).is_err() {
+        symlink(login.join(f), home.join(f)).map_err(err)?;
     }
-    // The session as it is now, wherever it goes: a PR that closes while
-    // Codex looks has its session marked gone (reviewers.py `sweep`), and a
-    // refresh saved in it still goes back to the login.
-    let held = rustix::fs::open(
-        home,
-        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
-        Mode::empty(),
-    )
-    .map_err(|e| err(e.into()))?;
+    let lent = s.logins.lend(home).map_err(err)?;
     let t = tempfile::tempdir().map_err(err)?;
     let t = t.path();
     fs::write(t.join("schema.json"), schema().to_string()).map_err(err)?;
@@ -357,12 +344,13 @@ pub fn look(
         ]
         .concat(),
     };
-    // The login, where a refresh writes it, and the machine's settings.
-    let mounts: Vec<(&str, PathBuf)> = [("--bind", "auth.json"), ("--ro-bind", "config.toml")]
-        .into_iter()
-        .map(|(flag, f)| (flag, login.join(f)))
-        .filter(|(_, p)| p.exists())
-        .collect();
+    // The machine's settings.
+    let config = login.join(f);
+    let mounts: Vec<(&str, PathBuf)> = if config.exists() {
+        vec![("--ro-bind", config)]
+    } else {
+        Vec::new()
+    };
     let args = sandboxed(s, snap, home, t, &["HTTPS_PROXY"], &argv, &mounts).map_err(err)?;
     let mut cmd = Command::new(&s.cfg.sandbox);
     cmd.args(args).env_clear().envs([
@@ -383,9 +371,9 @@ pub fn look(
         Duration::from_secs_f64(s.cfg.timeout_minutes * 60.0),
     );
     drop(gate);
-    keep_login(s, &held, &login)
+    lent.give_back()
         .map_err(|e| Failed::Error(format!("couldn't keep its login: {e}")))?;
-    // Its keys as they are now it's done, with any it refreshed.
+    // Every key it can have seen, with any it refreshed.
     let keys = s.keys();
     let Some((code, out, stderr)) = ran.map_err(err)? else {
         return Err(Failed::Error(format!(
@@ -442,41 +430,6 @@ pub fn look(
     let answer = fs::read_to_string(t.join("answer.json"))
         .map_err(|e| Failed::Error(format!("its answer: {e}")))?;
     Ok((answer_of(&answer, &keys)?, sid))
-}
-
-/// The reviewers' login as Codex last saved it: one that saved it in place
-/// of the PR's link to it (a refresh written as a new file) puts it back
-/// where every PR's session reads it. `home` is the session's CODEX_HOME,
-/// open, so a session renamed meanwhile is still the one read.
-fn keep_login(s: &Service, home: &OwnedFd, login: &Path) -> io::Result<()> {
-    let st = match rustix::fs::statat(home, "auth.json", AtFlags::SYMLINK_NOFOLLOW) {
-        Ok(st) => st,
-        Err(rustix::io::Errno::NOENT) => return Ok(()),
-        Err(e) => return Err(e.into()),
-    };
-    if FileType::from_raw_mode(st.st_mode) != FileType::RegularFile {
-        return Ok(());
-    }
-    let _one = s.login.lock().unwrap_or_else(|e| e.into_inner());
-    let mut src = File::from(rustix::fs::openat(
-        home,
-        "auth.json",
-        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-        Mode::empty(),
-    )?);
-    let tmp = login.join("auth.json.tmp");
-    let mut dst = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(&tmp)?;
-    io::copy(&mut src, &mut dst)?;
-    fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600))?;
-    fs::rename(&tmp, login.join("auth.json"))?;
-    rustix::fs::unlinkat(home, "auth.json", AtFlags::empty())?;
-    rustix::fs::symlinkat(login.join("auth.json"), home, "auth.json")?;
-    Ok(())
 }
 
 #[cfg(test)]

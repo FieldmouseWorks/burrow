@@ -212,7 +212,7 @@ fn its_keys_stay_out_of_what_it_says() {
 }
 
 /// A key the login gets while a look runs is as much its key as the one it
-/// began with: one the look refreshed through its link, and one a look
+/// began with: one the look refreshed in its copy, and one a look
 /// beside it did, even one that replaces the look's own before it ends.
 #[test]
 fn a_refreshed_logins_keys_stay_out_too() {
@@ -256,4 +256,38 @@ fn a_refreshed_logins_keys_stay_out_too() {
     );
     assert_eq!(back["result"], "review", "{back}");
     assert_eq!(back["answer"]["summary"], "[redacted] [redacted]", "{back}");
+}
+
+/// Two looks refreshing at the same moment, nothing between their writes:
+/// each writes its own copy, so neither key is lost to the other, and each
+/// is out of what either says, cut or not, in an error or in its answer.
+#[test]
+fn looks_refreshing_at_once_keep_both_keys_out() {
+    let rig = Rig::new();
+    let auth = |k: &str| json!({"tokens": {"refresh_token": k}}).to_string();
+    let (start, five, six) = (
+        "codexSTARTrefreshTOKENqwerty",
+        "codexFIVErefreshTOKENasdfghj",
+        "codexSIXrefreshTOKENzxcvbnmm",
+    );
+    fs::write(rig.home().join(".codex/auth.json"), auth(start)).unwrap();
+    rig.agent(json!({
+        "refresh": {"#5": auth(five), "#6": auth(six)}, "sleep": 1,
+        "rc": 2, "err": format!("panic: {five}{} {six} {start}", "x".repeat(259)),
+    }));
+    let entries = [5, 6].map(|n| rig.queue(&rig.snapshot(n, HEAD), n, HEAD, json!({})));
+    rig.work();
+    let said = format!(
+        "{}\n{}\n{}",
+        rig.said(),
+        rig.back(&entries[0]),
+        rig.back(&entries[1])
+    );
+    assert!(said.contains("[redacted]"), "{said}");
+    for k in [start, five, six] {
+        assert!(
+            !(0..k.len() - 7).any(|i| said.contains(&k[i..i + 8])),
+            "{k}: {said}"
+        );
+    }
 }

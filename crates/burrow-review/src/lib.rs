@@ -9,13 +9,13 @@
 //! agent into reading, sending or saying something it shouldn't finds
 //! nothing worth having: no GitHub token, no secrets paths, no other repo's
 //! code, no way out but its API, and no key of its own (the commands Codex
-//! runs can't read its login). The login's keys are taken out of anything
-//! it says as well (scrub.rs).
+//! runs can't read its login). The login's keys, each one it has held
+//! (login.rs), are taken out of anything it says as well (scrub.rs).
 //!
 //! Each reviewer keeps one session per PR (sessions/REVIEWER--PR): the
 //! agent's home, and the look it last took there, which its next look
-//! resumes. Nothing in it is another PR's (only Codex's login is linked
-//! in), and once the PR merges or closes the steward's sweep marks it gone
+//! resumes. Nothing in it is another PR's (a copy of Codex's login is lent
+//! to it for the length of a look), and once the PR merges or closes the steward's sweep marks it gone
 //! and this deletes it.
 //!
 //! What a look is asked is the steward's (its brief, in the queue entry);
@@ -24,13 +24,12 @@
 pub mod codex;
 pub mod config;
 pub mod egress;
+pub mod login;
 pub mod queue;
 pub mod scrub;
 mod work;
 
-use std::collections::BTreeSet;
 use std::ffi::OsString;
-use std::io;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -39,6 +38,7 @@ pub use work::{forget, review, work};
 
 use crate::config::Config;
 use crate::egress::Dial;
+use crate::login::Logins;
 
 /// Where the service says what it did: the journal.
 pub type Log = Arc<dyn Fn(&str) + Send + Sync>;
@@ -54,13 +54,8 @@ pub struct Service {
     /// How the gate reaches an API's host.
     pub dial: Dial,
     pub log: Log,
-    /// Held while a look puts a refreshed login back: looks run side by side.
-    login: Mutex<()>,
-    /// Every key the agents' logins have held while the service read them
-    /// (scrub.rs): what a look says is scrubbed of the ones a refresh wrote
-    /// while it ran, its own or a look's beside it, and of the ones those
-    /// replaced.
-    seen: Arc<Mutex<BTreeSet<String>>>,
+    /// Codex's login, each look's copy of it, and every key they've held.
+    logins: Logins,
 }
 
 impl Service {
@@ -73,14 +68,13 @@ impl Service {
         log: Log,
     ) -> Service {
         Service {
+            logins: Logins::new(&home, log.clone()),
             cfg,
             exe,
             home,
             path,
             dial,
             log,
-            login: Mutex::new(()),
-            seen: Arc::default(),
         }
     }
 
@@ -88,28 +82,10 @@ impl Service {
         (self.log)(line);
     }
 
-    /// The agents' keys: their logins' as they are now, and every one they
-    /// have held since the service began, the longest first, so none is
-    /// left half out by a shorter one inside it.
+    /// The agents' keys: every one their logins have held since the service
+    /// began.
     fn keys(&self) -> Vec<String> {
-        let mut seen = held(&self.seen);
-        seen.extend(scrub::secrets(&self.home));
-        let mut keys: Vec<String> = seen.iter().cloned().collect();
-        keys.sort_by_key(|k| std::cmp::Reverse(k.len()));
-        keys
-    }
-
-    /// The logins watched for each write to them (scrub.rs `Watch`), until
-    /// what's returned is dropped; nothing to watch if there's no login.
-    fn watch(&self) -> Option<scrub::Watch> {
-        match scrub::Watch::start(&self.home, self.seen.clone()) {
-            Ok(w) => Some(w),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => None,
-            Err(e) => {
-                self.say(&format!("couldn't watch the login for refreshes: {e}"));
-                None
-            }
-        }
+        self.logins.keys()
     }
 }
 

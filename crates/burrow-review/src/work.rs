@@ -256,7 +256,7 @@ fn remove_all(path: &Path) -> io::Result<()> {
 /// look at its last one, and resumes it.
 pub fn work(s: Arc<Service>) {
     forget(&s);
-    let _watch = s.watch();
+    let _watch = s.logins.watch();
     let (done_tx, done) = mpsc::channel::<String>();
     // Only what's in hand: a name done with and queued again (a retry, a
     // second look) is taken again.

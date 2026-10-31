@@ -125,10 +125,11 @@ fn another_prs_look_has_its_own_session() {
 }
 
 /// A refresh Codex saves as a new file in the PR's session goes back to
-/// the reviewers' login, which every session links to; so does one saved
-/// while its PR closed, its session marked gone under it. The machine's
-/// settings for Codex are linked in too, and what the link points at is in
-/// the sandbox (read-only), or it'd dangle there.
+/// the reviewers' login; so does one saved while its PR closed, its session
+/// marked gone under it. The session is left with no copy of it, and the
+/// sandbox with no way to the login itself. The machine's settings for
+/// Codex are linked in, and what the link points at is in the sandbox
+/// (read-only), or it'd dangle there.
 #[test]
 fn a_refreshed_login_goes_back_to_every_session() {
     let rig = Rig::new();
@@ -144,13 +145,13 @@ fn a_refreshed_login_goes_back_to_every_session() {
     )
     .unwrap();
     let snap = rig.snapshot(5, HEAD);
-    let link = rig.session(&snap).join("home/auth.json");
+    let copy = rig.session(&snap).join("home/auth.json");
     let entry = rig.queue(&snap, 5, HEAD, json!({}));
     rig.agent(json!({"relogin": r#"{"tokens": {"refresh_token": "new"}}"#}));
     rig.boxes();
     rig.work();
     assert_eq!(rig.back(&entry)["result"], "review");
-    assert_eq!(fs::read_link(&link).unwrap(), login.join("auth.json"));
+    assert!(fs::symlink_metadata(&copy).is_err(), "its copy stays");
     assert_eq!(
         fs::read_to_string(login.join("auth.json")).unwrap(),
         r#"{"tokens": {"refresh_token": "new"}}"#
@@ -164,14 +165,14 @@ fn a_refreshed_login_goes_back_to_every_session() {
         0o600
     );
     assert_eq!(
-        fs::read_link(link.with_file_name("config.toml")).unwrap(),
+        fs::read_link(copy.with_file_name("config.toml")).unwrap(),
         login.join("config.toml")
     );
     let b = &rig.boxes()[0];
     let auth = login.join("auth.json").to_string_lossy().into_owned();
     let config = login.join("config.toml").to_string_lossy().into_owned();
     let binds = b["binds"].as_array().unwrap();
-    assert!(binds.contains(&json!(["--bind", auth, auth])), "{b}");
+    assert!(!b.to_string().contains(&auth), "{b}");
     assert!(binds.contains(&json!(["--ro-bind", config, config])), "{b}");
 
     rig.queue(&snap, 5, HEAD, json!({}));
