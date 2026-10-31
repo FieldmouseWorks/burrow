@@ -140,11 +140,16 @@ in
     };
     jobMemoryMax = lib.mkOption {
       type = lib.types.str;
-      default = "8G";
+      default = "infinity";
+      example = "8G";
       description = ''
-        The most memory one job may hold (systemd's MemoryMax). Past it the
-        kernel kills the job's biggest process, usually a build or evaluation
-        it ran, and the job carries on, told that command was killed.
+        The most memory one job may hold (systemd's MemoryMax). None by
+        default: a job is the first thing the kernel kills when the machine
+        runs short (OOMScoreAdjust 500), and systemd-oomd watches the jobs'
+        slice (burrow.ops.oomd), so a cap only kills one while memory sits
+        free. With one, past it the kernel kills the job's biggest process,
+        usually a build or evaluation it ran, and the job carries on, told
+        that command was killed.
       '';
     };
     timeout = lib.mkOption {

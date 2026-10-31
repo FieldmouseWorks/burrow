@@ -21,11 +21,14 @@
 # and run in burrow.remoteControl.permissionMode: bypassPermissions alongside
 # burrow.claude, like every other session here, so only its one-way doors ask.
 #
-# Each server and every session it holds share one memory cap
-# (burrow.remoteControl.memoryMax). Past it the kernel kills the biggest
-# process there, usually the session that grew, and only that: the server and
-# its other sessions carry on, and the killed one's transcript stays on disk
-# for claude.ai to resume.
+# The servers keep memory back when the machine runs short
+# (burrow.remoteControl.memoryLow): the kernel takes it from proj's jobs, CI
+# and builds first. Each server and every session it holds may grow to half
+# the machine between them (burrow.remoteControl.memoryMax), a backstop for a
+# runaway: past it the kernel kills the biggest process there, the session
+# that grew or a build it ran, and only that. The server and its other
+# sessions carry on, and a killed session's transcript stays on disk for
+# claude.ai to resume.
 inputs:
 { config, lib, pkgs, utils, ... }:
 let
@@ -261,16 +264,35 @@ in
     };
     memoryMax = lib.mkOption {
       type = lib.types.str;
-      default = "8G";
+      default = "50%";
       example = "12G";
       description = ''
         The most memory one server may hold with all its sessions (its unit's
-        MemoryMax; "infinity" for none), none of it in swap: swap would let
-        it grow past the cap without ever reaching it. Past it the kernel
-        kills the biggest process there, usually the session that grew, and
-        the server and its other sessions carry on (OOMPolicy=continue).
-        systemd-oomd never picks a server (burrow.ops.oomd). Every server is
-        under burrow.claude.memory's cap too.
+        MemoryMax, a size or a share of the machine's memory; "infinity" for
+        none), none of it in swap: a backstop for a runaway. systemd-oomd
+        never picks a server (burrow.ops.oomd) and the kernel kills proj's
+        jobs first, so without it one runaway session would take every job
+        down before itself. Past it the kernel kills the
+        biggest process there, the session that grew or a build or
+        evaluation it ran, and the server and its other sessions carry on
+        (OOMPolicy=continue). No swap, so it's a cap that's reached, and so
+        the machine's swap watch, which can't see a server's opt-out of
+        oomd, never picks one.
+      '';
+    };
+    memoryLow = lib.mkOption {
+      type = lib.types.str;
+      default = "10%";
+      example = "6G";
+      description = ''
+        Memory the servers and their sessions keep between them when the
+        machine runs short (MemoryLow, a size or a share of the machine's
+        memory): the kernel takes it from everything else first, proj's
+        jobs, CI and builds among them. It costs nothing while there's room.
+        Set on claude-rc.slice and on every slice above it, since a cgroup
+        keeps no more than its parent does; what the servers don't use of
+        it, the jobs beside them in claude.slice may. 10% is about what all
+        of remi's servers held on a busy evening (6.1G of 62.8G).
       '';
     };
     servers = lib.mkOption {
@@ -319,9 +341,10 @@ in
         ExecStop = "${stop}/bin/claude-rc-stop %I";
         Restart = "always";
         RestartSec = 15;
-        # Under burrow.claude.memory's cap with the proj jobs (common.nix).
+        # Beside the proj jobs in claude.slice (common.nix), and keeping
+        # memory back from them (memoryLow).
         Slice = "claude-rc.slice";
-        # And its own, for the server and its sessions together (memoryMax).
+        # The backstop, for the server and its sessions together (memoryMax).
         MemoryMax = cfg.memoryMax;
         MemorySwapMax = 0;
         OOMPolicy = "continue";
@@ -329,6 +352,19 @@ in
         ManagedOOMPreference = "omit";
       };
     };
+
+    # What the servers keep back (memoryLow), on their slice and each one
+    # above it: in the user's manager, and in the system's from the user's
+    # manager up. Every user's slice and manager gets it, not just
+    # burrow.user's; one using less keeps only what it uses.
+    systemd.user.slices.claude.sliceConfig.MemoryLow = cfg.memoryLow;
+    systemd.user.slices.claude-rc = {
+      description = "Remote Control servers";
+      sliceConfig.MemoryLow = cfg.memoryLow;
+    };
+    systemd.services."user@".serviceConfig.MemoryLow = cfg.memoryLow;
+    systemd.slices."user-".sliceConfig.MemoryLow = cfg.memoryLow;
+    systemd.slices.user.sliceConfig.MemoryLow = cfg.memoryLow;
 
     systemd.user.services.claude-rc-scan = {
       description = "Start a Remote Control server for each project folder";
