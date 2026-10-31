@@ -1,10 +1,10 @@
 """A cancelled check run: a PR's new run on the same head (closed and reopened
 while CI ran, say) cancels its last one, whose suite stays on the head. It goes
-by what its workflow did after it: another suite that has run through for the
-PR's diff clears it, one still going leaves CI pending, and with neither it
-stays not green, as when someone cancelled the run by hand."""
+by what its workflow did after it: another suite that has done that check's
+work for the PR's diff clears it, one still going leaves CI pending, and with
+neither it stays not green, as when someone cancelled the run by hand."""
 
-from docs import at, check, whole
+from docs import at, check, docs, whole
 from harness import JOBS, clean
 from prs import ci_state
 
@@ -55,6 +55,28 @@ other_app["checkSuite"]["workflowRun"] = None
 green_app = check("scan", app="some-app", suite="a2")
 green_app["checkSuite"]["workflowRun"] = None
 assert state([other_app], [green_app]) == ("red", ["scan"])
+# A suite that completed without doing the check's work: a caller skipped on a
+# title edit, the gate skipped with no docs lane in its place, only other jobs
+# run, or a docs lane that was itself skipped. Whether it came before or after.
+for why, run in [
+    ("caller skipped", [check("check", "SKIPPED", suite="s2")]),
+    ("gate skipped", [check("check / lane into main", suite="s2"), check(CHECK, "SKIPPED", suite="s2")]),
+    ("other jobs", [check("check / commits", suite="s2")]),
+    ("docs lane skipped", [check(CHECK, "SKIPPED", suite="s2"),
+                           check("check / docs only into main from " + "f" * 40, "SKIPPED", suite="s2")]),
+]:
+    assert state(old, run) == ("red", [CHECK]), why
+    assert state(run, old) == ("red", [CHECK]), why
+    status, landed = at(clean(checks=old + run))
+    assert not landed and "CI is red" in status, (why, status)
+# The docs lane standing in for the gate it skipped does count, and its red is
+# the head's.
+status, landed = at(clean(checks=old + docs(suite="s2"), files=("README.md",)))
+assert landed and "CI is green (docs only)" in status, status
+status, landed = at(clean(checks=old + docs(suite="s2", conclusion="FAILURE"), files=("README.md",)))
+assert not landed and "CI is red" in status, status
+# From another fork, that docs lane judged another diff: it clears nothing.
+assert state(old, docs(fork="e" * 40, suite="s2"))[0] == "red"
 # A run that judged another base isn't the PR's CI, so it clears nothing: the
 # gate for the PR's own base never ran through.
 assert state(old, whole("next", "s2")) == ("red", [CHECK])

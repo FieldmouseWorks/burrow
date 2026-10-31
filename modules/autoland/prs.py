@@ -216,21 +216,31 @@ def cancelled(c):
 
 def after_cancel(c, contexts, stale):
     """What a cancelled check run's workflow did on the head in its other
-    suites: "finished" once one that judged the PR's diff (stale is those
-    that didn't) has run through, so the cancelled one is no word on the head;
-    "going" while one is still running, whichever diff it's for, since CI
-    isn't done speaking; None with neither, as when someone cancelled the run
-    by hand, which stays not green. A suite with a cancelled check run of its
-    own hasn't run through: two cancelled runs don't clear each other. A
-    check run of no workflow has no other runs to go by."""
+    suites: "finished" once one has done that check's work, so the cancelled
+    run is no word on the head; "going" while one is still running, whichever
+    diff it's for, since CI isn't done speaking; None with neither, as when
+    someone cancelled the run by hand, which stays not green. Done its work:
+    the suite has finished for the PR's diff (stale is those that didn't) with
+    nothing of its own cancelled, so two cancelled runs don't clear each other,
+    and it ran the same check, whatever that said, or skipped it for the docs
+    lane it took instead. Any other skip vouches for nothing: a caller skipped
+    on a title edit completes too, and so would run nothing at all. A check
+    run of no workflow has no other runs to go by."""
     mine, flow = suite(c).get("id"), workflow(c).get("id")
     if mine is None or flow is None:
         return None
     others = [x for x in contexts if workflow(x).get("id") == flow and suite(x).get("id") != mine]
-    gone = {suite(x).get("id") for x in others if cancelled(x)}
-    if any(suite(x).get("status") == "COMPLETED" and suite(x).get("id") not in gone | stale for x in others):
+    gone = {suite(x).get("id") for x in others if cancelled(x)} | stale
+    done = [x for x in others if suite(x).get("status") == "COMPLETED" and suite(x).get("id") not in gone]
+    lanes = {suite(x).get("id") for x in done if ran(x) and (judged(x) or (None, None))[1] is not None}
+    if any(x["name"] == c["name"] and (ran(x) or suite(x).get("id") in lanes) for x in done):
         return "finished"
     return "going" if any(suite(x).get("status") != "COMPLETED" for x in others) else None
+
+
+def ran(c):
+    """Whether a check run did its work: finished, neither skipped nor cancelled."""
+    return c.get("status") == "COMPLETED" and c.get("conclusion") not in ("SKIPPED", "CANCELLED")
 
 
 def fork_of(repo, pr):
