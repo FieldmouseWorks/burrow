@@ -17,5 +17,6 @@ mod commit_signatures;
 mod expr;
 mod gate;
 mod harness;
+mod keep_builds;
 mod lane;
 mod pr_base;

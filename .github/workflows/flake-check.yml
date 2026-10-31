@@ -33,6 +33,21 @@ on:
         description: Install Nix first. False on a runner that has it already (NixOS).
         type: boolean
         default: true
+      keep-builds:
+        description: >-
+          Keep what each push to the default branch's gate needed that no
+          public cache has (what it built, a patched package or the flake's
+          own checks, what it took from these kept builds, and what they
+          hold that its checks were built from) in the Actions cache, and
+          let every later run's gate substitute from them, a leg from the
+          same leg's: a hosted runner starts with an empty store, and builds
+          all of that again otherwise. Only a push to the default branch
+          saves them, so no PR's run puts anything in another run's store,
+          and a check whose derivation hasn't changed since gets the result
+          that push's gate got, as one from a public cache would. Needs
+          install-nix, and jq on the runner, as GitHub's hosted ones have.
+        type: boolean
+        default: false
       build-skip:
         description: >-
           Space-separated checks to evaluate but not build, for a check this
@@ -127,7 +142,7 @@ jobs:
     name: lane into ${{ github.event.pull_request.base.ref }}
     runs-on: ${{ inputs.runner }}
     concurrency:
-      group: ${{ format('flake-check {0} lane {1} {2} {3} {4} [{5}] [{6}] [{7}] {8} {9}', github.workflow, inputs.runner, inputs.install-nix, inputs.eval-apart, inputs.pr-gate, inputs.build-skip, inputs.docs-paths, inputs.docs-checks, inputs.legs, (github.event_name == 'pull_request' && (github.event.action != 'edited' || github.event.changes.base)) && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id)) }}
+      group: ${{ format('flake-check {0} lane {1} {2} {3} {4} [{5}] [{6}] [{7}] {8} {9} {10}', github.workflow, inputs.runner, inputs.install-nix, inputs.eval-apart, inputs.pr-gate, inputs.build-skip, inputs.docs-paths, inputs.docs-checks, inputs.legs, inputs.keep-builds, (github.event_name == 'pull_request' && (github.event.action != 'edited' || github.event.changes.base)) && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id)) }}
       cancel-in-progress: true
     permissions:
       contents: read
@@ -237,7 +252,7 @@ jobs:
         leg: ${{ fromJSON('[[1], [1], [1, 2], [1, 2, 3], [1, 2, 3, 4], [1, 2, 3, 4, 5], [1, 2, 3, 4, 5, 6], [1, 2, 3, 4, 5, 6, 7], [1, 2, 3, 4, 5, 6, 7, 8]]')[inputs.legs] }}
     runs-on: ${{ inputs.runner }}
     concurrency:
-      group: ${{ format('flake-check {0} check {1} {2} {3} {4} [{5}] [{6}] [{7}] {8} leg {9} {10}', github.workflow, inputs.runner, inputs.install-nix, inputs.eval-apart, inputs.pr-gate, inputs.build-skip, inputs.docs-paths, inputs.docs-checks, inputs.legs, matrix.leg, (github.event_name == 'pull_request' && (github.event.action != 'edited' || github.event.changes.base)) && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id)) }}
+      group: ${{ format('flake-check {0} check {1} {2} {3} {4} [{5}] [{6}] [{7}] {8} {9} leg {10} {11}', github.workflow, inputs.runner, inputs.install-nix, inputs.eval-apart, inputs.pr-gate, inputs.build-skip, inputs.docs-paths, inputs.docs-checks, inputs.legs, inputs.keep-builds, matrix.leg, (github.event_name == 'pull_request' && (github.event.action != 'edited' || github.event.changes.base)) && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id)) }}
       cancel-in-progress: true
     # Each leg's log, its digest, the commit it checked and its plan, for the
     # gate job: a matrix's legs combine their outputs, one name each.
@@ -305,8 +320,23 @@ jobs:
             echo "::error title=Conflicts with its base::$HEAD_SHA no longer merges cleanly with $BASE at $tip, so nothing was checked. Merge $BASE into the branch and push."
             exit 1
           fi
+      # keep-builds: the builds the last push to the default branch kept, for
+      # nix to substitute from, unsigned (only that push writes them). The
+      # directory is there before nix, whose config names it, whether or not
+      # there's anything kept to restore into it.
+      - if: inputs.keep-builds && inputs.install-nix
+        shell: bash
+        run: mkdir -p "$RUNNER_TEMP/kept"
+      - if: inputs.keep-builds && inputs.install-nix
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/kept
+          key: flake-kept-${{ github.workflow }}-${{ runner.os }}-leg-${{ matrix.leg }}-of-${{ inputs.legs }}-${{ github.sha }}
+          restore-keys: flake-kept-${{ github.workflow }}-${{ runner.os }}-leg-${{ matrix.leg }}-of-${{ inputs.legs }}-
       - if: inputs.install-nix
         uses: cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b # v31.11.3
+        with:
+          extra_nix_config: ${{ inputs.keep-builds && format('extra-substituters = file://{0}/kept?trusted=true', runner.temp) || '' }}
       - id: gate
         shell: bash
         env:
@@ -743,6 +773,41 @@ jobs:
           subject-path: ${{ steps.subject.outputs.path }}
           predicate-type: https://github.com/FieldmouseWorks/Conary/blob/main/docs/ci-attestation.md#v1
           predicate-path: ${{ runner.temp }}/conary/predicate.json
+      # keep-builds, on a push to the default branch whose gate passed: every
+      # path in the store no one signed, which this gate built or took from
+      # the kept builds (a public cache's are signed), but derivations, which
+      # each evaluation makes again. And what the kept builds hold that this
+      # tree's derivations still make though this gate didn't need it: a
+      # check that hadn't changed came whole from them, without what it was
+      # built from, which the next change to it needs again. Each path on its
+      # own, referring to the rest, for nix to find in a public cache or
+      # among these. Keeping them is for later runs' speed, so a failure here
+      # says so and leaves the gate's result as it is.
+      - id: keep
+        if: ${{ inputs.keep-builds && inputs.install-nix && steps.gate.outcome == 'success' && github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+        continue-on-error: true
+        shell: bash
+        working-directory: ${{ runner.temp }}
+        run: |
+          export LC_ALL=C
+          mkdir -p keep
+          nix path-info --all --json --json-format 2 > store.json
+          jq -r '.storeDir as $d | .info | to_entries[]
+              | select((.value.signatures | length) == 0 and (.key | endswith(".drv") | not)) | "\($d)/\(.key)"' store.json \
+            | sort > keep.list
+          jq -r '.storeDir as $d | .info | keys[] | select(endswith(".drv")) | "\($d)/\(.)"' store.json \
+            | xargs -r nix-store --query --outputs | sort -u > made.list
+          nix path-info --all --store "file://$RUNNER_TEMP/kept" | sort | comm -12 - made.list | comm -23 - keep.list > carry.list
+          xargs -r nix copy --no-recursive --to "file://$RUNNER_TEMP/keep?compression=none" < keep.list
+          xargs -r nix copy --no-recursive --from "file://$RUNNER_TEMP/kept?trusted=true" \
+            --to "file://$RUNNER_TEMP/keep?compression=none" < carry.list
+          echo "kept $(wc -l < keep.list) paths from this gate and $(wc -l < carry.list) from the kept builds, $(du -sh keep | cut -f1)"
+      - if: steps.keep.outcome == 'success'
+        continue-on-error: true
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/keep
+          key: flake-kept-${{ github.workflow }}-${{ runner.os }}-leg-${{ matrix.leg }}-of-${{ inputs.legs }}-${{ github.sha }}
   # With legs, the gate's own verdict: whether every leg passed, on the commit
   # each was to check and with one plan to share out, attested as the gate's
   # result with this tree's subject, and the legs' logs, each the one its leg
@@ -756,7 +821,7 @@ jobs:
     name: ${{ inputs.legs > 1 && 'check' || 'gate' }}
     runs-on: ${{ inputs.runner }}
     concurrency:
-      group: ${{ format('flake-check {0} gate {1} {2} {3} {4} [{5}] [{6}] [{7}] {8} {9}', github.workflow, inputs.runner, inputs.install-nix, inputs.eval-apart, inputs.pr-gate, inputs.build-skip, inputs.docs-paths, inputs.docs-checks, inputs.legs, (github.event_name == 'pull_request' && (github.event.action != 'edited' || github.event.changes.base)) && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id)) }}
+      group: ${{ format('flake-check {0} gate {1} {2} {3} {4} [{5}] [{6}] [{7}] {8} {9} {10}', github.workflow, inputs.runner, inputs.install-nix, inputs.eval-apart, inputs.pr-gate, inputs.build-skip, inputs.docs-paths, inputs.docs-checks, inputs.legs, inputs.keep-builds, (github.event_name == 'pull_request' && (github.event.action != 'edited' || github.event.changes.base)) && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id)) }}
       cancel-in-progress: true
     permissions:
       contents: read
@@ -834,7 +899,7 @@ jobs:
     name: docs only into ${{ github.event.pull_request.base.ref }} from ${{ needs.lane.outputs.fork }}
     runs-on: ${{ inputs.runner }}
     concurrency:
-      group: ${{ format('flake-check {0} docs {1} {2} {3} {4} [{5}] [{6}] [{7}] {8} {9}', github.workflow, inputs.runner, inputs.install-nix, inputs.eval-apart, inputs.pr-gate, inputs.build-skip, inputs.docs-paths, inputs.docs-checks, inputs.legs, (github.event_name == 'pull_request' && (github.event.action != 'edited' || github.event.changes.base)) && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id)) }}
+      group: ${{ format('flake-check {0} docs {1} {2} {3} {4} [{5}] [{6}] [{7}] {8} {9} {10}', github.workflow, inputs.runner, inputs.install-nix, inputs.eval-apart, inputs.pr-gate, inputs.build-skip, inputs.docs-paths, inputs.docs-checks, inputs.legs, inputs.keep-builds, (github.event_name == 'pull_request' && (github.event.action != 'edited' || github.event.changes.base)) && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id)) }}
       cancel-in-progress: true
     permissions:
       contents: read
@@ -864,7 +929,7 @@ jobs:
     if: github.event_name == 'pull_request'
     runs-on: ${{ inputs.runner }}
     concurrency:
-      group: ${{ format('flake-check {0} commits {1} {2} {3} {4} [{5}] [{6}] [{7}] {8} {9}', github.workflow, inputs.runner, inputs.install-nix, inputs.eval-apart, inputs.pr-gate, inputs.build-skip, inputs.docs-paths, inputs.docs-checks, inputs.legs, (github.event_name == 'pull_request' && (github.event.action != 'edited' || github.event.changes.base)) && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id)) }}
+      group: ${{ format('flake-check {0} commits {1} {2} {3} {4} [{5}] [{6}] [{7}] {8} {9} {10}', github.workflow, inputs.runner, inputs.install-nix, inputs.eval-apart, inputs.pr-gate, inputs.build-skip, inputs.docs-paths, inputs.docs-checks, inputs.legs, inputs.keep-builds, (github.event_name == 'pull_request' && (github.event.action != 'edited' || github.event.changes.base)) && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id)) }}
       cancel-in-progress: true
     permissions:
       contents: read
