@@ -444,11 +444,24 @@ def unland(repo, pr):
     return off and out
 
 
+TAKEN = "A folder in the way of a repo's checkout"  # the stuck issue's heading for it
+TAKEN_FILE = "taken.json"
+RETIRING = "A deleted repo's clones and jobs that won't retire"  # likewise
+RETIRING_FILE = "retiring.json"  # {its state's key: {"name": the deleted repo's, "for" and "id": the repo that took it on}}
+
+
 def repo_cfg(repo):
     """The defaults, with this repo's overrides from config.repos on top."""
     c = dict(CFG["defaults"])
     c.update(CFG["repos"].get(repo, {}))
     return c
+
+
+def origin(path):
+    """The GitHub repo (owner/name) the clone at path has for its origin, or
+    None. Never the URL itself, which can hold a token: only the repo it names."""
+    p = subprocess.run(["git", "-C", path, "remote", "get-url", "origin"], capture_output=True, text=True)
+    return github_repo(p.stdout.strip())
 
 
 def projects(strict=False):
@@ -500,6 +513,151 @@ def project_dir(repo):
     return next((d for d, url in projects() if url.lower() == repo.lower()), None)
 
 
+NOW_CALLED = """query($owner: String!, $name: String!) {
+  repository(owner: $owner, name: $name) { id nameWithOwner createdAt }
+}"""
+
+
+def github_now(repo):
+    """What GitHub answers repo's name with, following a rename or transfer:
+    {"id", "nameWithOwner", "createdAt"}, in the ids discover() has; None when
+    it won't say. Asked as its owner's installation, then as each owner's: the
+    App may be long gone from the owner a repo moved away from, and only the
+    one it moved to can see a private repo's new name."""
+    owner, name = repo.split("/")
+    for who in dict.fromkeys([owner, *CFG["owners"]]):
+        try:
+            with acting_for(who):
+                return graphql(NOW_CALLED, owner=owner, name=name)["repository"]
+        except Unavailable as e:
+            log(f"{repo}: what GitHub calls it now: {e}")
+            return None
+        except (RuntimeError, KeyError, TypeError):  # not there as this owner, or the App isn't on it
+            continue
+    return None
+
+
+def kept_state(repo):
+    """(key, state) for each settings file kept under repo's name, whatever
+    its case: GitHub's names don't go by it."""
+    k = repo.replace("/", "_").lower()
+    for name in sorted(os.listdir(STATE)):
+        m = re.fullmatch(r"repo-(.+)\.json", name)
+        if m and m.group(1).lower() == k:
+            yield m.group(1), load(name, {})
+
+
+def replaced(st, now):
+    """Whether settings the steward kept under a name were another repo's than
+    `now` ("id", and "created" or "createdAt"): GitHub hands a deleted repo's
+    name to the next one. By GitHub's id; for settings kept before the
+    steward kept ids, when they were set before it was made, or in the second
+    it was (createdAt has no finer grain)."""
+    if "settings" not in st:
+        return False
+    if "id" in st:
+        return st["id"] != now["id"]
+    return st["settings"] < ts(now.get("created") or now["createdAt"]) + 1
+
+
+def follow_renames(seen=()):
+    """Clones whose origin has an old name of their repo, repointed at the
+    current one, so that everything reading a clone's origin (project_dir,
+    hook_projects, proj's rank, proj-inbox) knows it for that repo. `seen`:
+    names, lower case, known to be current, which needn't be asked about.
+
+    A name the steward knows was a deleted repo's, and that the repo now
+    answering it only took on later, is no rename: that clone holds the
+    deleted one's history, and isn't adopted. It's kept in RETIRING_FILE, which
+    outlives the clone once a try has moved it: a full pass retires it from
+    there (repos.reset), and until then the repo that took the name gets no
+    job (retiring).
+
+    A hidden folder only counts as a project while it's named for its repo
+    (projects). One whose repo takes another name is repointed where it is and
+    stops counting: moving it would strand the jobs that have its path, so the
+    repo's next job clones it afresh, and nothing in the folder is lost."""
+    for d, url in list(projects()):
+        now = None if url.lower() in seen else github_now(url)
+        if not now or now["nameWithOwner"].lower() == url.lower():
+            continue
+        new = now["nameWithOwner"]
+        gone = [k for k, st in kept_state(url) if replaced(st, now)]
+        if gone:
+            log(f"{d}: its origin {url} was a deleted repo's name, which {new} took on: not adopting it")
+            save(RETIRING_FILE, {**load(RETIRING_FILE, {}), **{k: {"name": url, "for": new, "id": now["id"]} for k in gone}})
+            continue
+        path = os.path.join(CFG["projectsDir"], d)
+        raw = subprocess.run(["git", "-C", path, "remote", "get-url", "origin"], capture_output=True, text=True).stdout.strip()
+        p = subprocess.run(["git", "-C", path, "remote", "set-url", "origin", raw.replace(url, new)], capture_output=True, text=True)
+        log(f"{d}: its origin {url} is now {new}" + (", repointed" if p.returncode == 0 else f", and it wouldn't repoint: {p.stderr.strip()[-300:]}"))
+
+
+def retiring(repo):
+    """Whether repo is the one that took on a deleted repo's name whose clones
+    and jobs a full pass hasn't finished retiring: its jobs wait for that. By
+    GitHub's id, so it follows that repo to any later name, and not to whatever
+    takes up one it left. Asked only while something's being retired; one
+    GitHub won't say about waits too."""
+    pending = load(RETIRING_FILE, {})
+    if not pending:
+        return False
+    now = github_now(repo)
+    return not now or any(x["id"] == now["id"] for x in pending.values())
+
+
+def destination(repo):
+    """Where repo's clone goes when it has none."""
+    return os.path.join(CFG["projectsDir"], repo.split("/")[1])
+
+
+def blocked(path):
+    """Whether git can't clone to path: it clones into nothing, or an empty folder."""
+    return os.path.lexists(path) and not (os.path.isdir(path) and not os.listdir(path))
+
+
+def taken(repo):
+    """What's in the way of repo's checkout, as checkout() found it, while it's
+    still what blocks its clone: {"folder", "origin"} (None for one with no
+    GitHub origin), or None. Nothing's asked of GitHub: a folder moved out,
+    emptied or repointed, or another projectsDir, ends it."""
+    had = load(TAKEN_FILE, {}).get(repo)
+    path = destination(repo)
+    if not had or had["folder"] != path or project_dir(repo) or not blocked(path) or origin(path) != had["origin"]:
+        return None
+    return had
+
+
+def taken_line(repo, had):
+    """taken()'s answer as a line of the stuck issue: the same until what's in
+    the way changes, so it's said once."""
+    theirs = f"a clone of {had['origin']}" if had["origin"] else "something with no GitHub origin"
+    return (TAKEN, repo, f"`{had['folder']}` holds {theirs}, which GitHub doesn't answer as {repo}: "
+            f"it needs its checkout there. Its jobs wait until that folder is moved out")
+
+
+def checkout(repo):
+    """Clone repo into projectsDir for a job, unless a clone under an old name
+    turns out to be it. A folder another repo's clone holds is recorded for
+    taken(), once, rather than cloned into; returns None then."""
+    follow_renames()
+    if retiring(repo):  # what that just found may be this repo's to wait for
+        return None
+    d = project_dir(repo)
+    if d:
+        return d
+    path = destination(repo)
+    if blocked(path):
+        had = {"folder": path, "origin": origin(path)}
+        log(f"{repo}: {taken_line(repo, had)[2]}")
+        save(TAKEN_FILE, {**load(TAKEN_FILE, {}), repo: had})
+        return None
+    # The project's clone is the machine user's, for its jobs to push from as
+    # them: cloned as them, not as the App.
+    subprocess.run(["gh", "repo", "clone", repo, path], check=False)
+    return project_dir(repo)
+
+
 def rank(repo):
     """Where repo's reviews go in line, first to last: 0 for a lead repo
     (`leadRepos`, what the pipeline itself is built from), ahead of
@@ -518,13 +676,12 @@ def job(repo, task, clone=False, pipeline=True, timeout=None):
     goes ahead of the line, and in the pipeline's own repos (pipelineRepos)
     in a slot kept for it; proj decides which. Its turns stop after timeout
     minutes (jobTimeout's by default). Returns the job id."""
+    if retiring(repo):
+        log(f"{repo}: no job until the deleted repo whose name it took on is retired")
+        return None
     d = project_dir(repo)
-    if d is None and clone and not DRY:
-        d = repo.split("/")[1]
-        # The project's clone is the machine user's, for its jobs to push
-        # from as them: cloned as them, not as the App.
-        subprocess.run(["gh", "repo", "clone", repo, os.path.join(CFG["projectsDir"], d)], check=False)
-        d = project_dir(repo)
+    if d is None and clone and not DRY and not taken(repo):
+        d = checkout(repo)
     if d is None:
         return None
     if DRY:

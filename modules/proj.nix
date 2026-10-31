@@ -55,7 +55,7 @@ let
       GRACE=600
       APPS=${lib.escapeShellArg (lib.concatStrings (lib.mapAttrsToList (name: app: "${name}=${app.envFile}\n") config.burrow.github.apps))}
       SCRATCH=${lib.escapeShellArg config.burrow.scratchDir}
-    '' + builtins.readFile ./proj/pick.sh + builtins.readFile ./proj/line.sh + builtins.readFile ./proj/waits.sh
+    '' + builtins.readFile ./proj/pick.sh + builtins.readFile ./proj/line.sh + builtins.readFile ./proj/waits.sh + builtins.readFile ./proj/await.sh
       + builtins.readFile ./proj/scratch.sh + builtins.readFile ./proj/run.sh + builtins.readFile ./proj/proj.sh;
   };
 
@@ -117,8 +117,8 @@ in
         work on the pipeline itself waits only on other such work, never on
         everyone else's long jobs; a lead repo's go first of all, ahead of
         the other pipeline jobs too, but leave them these slots while one
-        waits, and everyone else one of the other slots while one of theirs
-        waits and none runs. A pipeline job in any other project goes
+        waits. All of them leave everyone else one of the other slots while
+        one of theirs waits and none runs. A pipeline job in any other project goes
         as `--first`: ahead of the line, but within its project's cap and
         never in these slots; `proj status` and its turn's journal say so,
         origin and all.
