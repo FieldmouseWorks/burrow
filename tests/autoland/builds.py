@@ -48,7 +48,8 @@ with open({NIX_LOG!r}, "a") as f:
     f.write(json.dumps([{tool!r}, *a]) + "\\n")
 know = json.load(open({NIX!r}))
 if a[:2] == ["--check-validity", "--print-invalid"]:
-    print("\\n".join(p for p in a[2:] if p not in know["valid"]))
+    # A derivation is in the store until it's collected; an output once valid.
+    print("\\n".join(p for p in a[2:] if ((p in know.get("collected", [])) if p.endswith(".drv") else (p not in know["valid"]))))
 elif a[:2] == ["--query", "--outputs"]:
     print("\\n".join(o for d in a[2:] for o in know.get("outs", {{}}).get(d, [d.removesuffix(".drv")])))
 else:

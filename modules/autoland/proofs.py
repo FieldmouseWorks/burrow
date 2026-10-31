@@ -37,6 +37,7 @@ nobody up."""
 
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -53,6 +54,7 @@ FREE = "nothing new to build"  # ahead's answer for a proof that skips the line
 EVAL_TIMEOUT = 300  # seconds, its inputs fetched included
 EVAL_RETRY = 15  # minutes before an eval that failed on a head is tried again
 LOG_TAIL = 60  # lines of a failed build's log that go on its PR
+KEEP = 7  # days an ended build's folder, its outputs' roots in it, is kept
 
 
 def begin(repo, numbers, first=()):
@@ -112,7 +114,10 @@ def outputs(repo, pr, checks, st):
     key = [head, {c: attrs[c] for c in sorted(checks)}]
     got = st.get("proofOutputs")
     if got and got["for"] == key and (got["paths"] or C.NOW - got.get("at", 0) < EVAL_RETRY * C.MIN):
-        return got["paths"]
+        # Derivations collected since are worked out again, which puts them
+        # back in the store.
+        if not got["paths"] or not gone(sorted(set((got.get("drvs") or {}).values()))):
+            return got["paths"]
     drvs = paths = None
     try:
         mirror = V.fetch(repo, f"+refs/pull/{n}/head:refs/pr/{n}")
@@ -241,6 +246,7 @@ def build(repo, pr, checks, st):
     if C.DRY:
         log(f"  would: build {', '.join(sorted(set(drvs.values())))}")
         return jid
+    prune()
     os.makedirs(os.path.join(STATE, "builds", jid))
     save(f"builds/{jid}/build.json", {"repo": repo, "number": n, "head": head, "drvs": drvs})
     # Its own command line: this steward, with this config.
@@ -250,6 +256,16 @@ def build(repo, pr, checks, st):
         log(f"{repo}#{n}: couldn't start the build of {', '.join(checks)}: {p.stderr.strip()[-300:]}")
         return None
     return jid
+
+
+def prune():
+    """Ended builds' folders, and the roots of their outputs in them, KEEP
+    days after they ended: their verdicts are long posted by then."""
+    root = os.path.join(STATE, "builds")
+    for jid in os.listdir(root) if os.path.isdir(root) else ():
+        end = load(f"builds/{jid}/end.json", None)
+        if end and time.time() - end["at"] > KEEP * 86400:
+            shutil.rmtree(os.path.join(root, jid), ignore_errors=True)
 
 
 def run(jid):
@@ -262,19 +278,49 @@ def run(jid):
     again); timed out past proofTimeout. Then it kicks its repo's pass,
     which posts them."""
     b = load(f"builds/{jid}/build.json", None)
-    cmd = ([CFG["heavy"], "--"] if CFG.get("heavy") else []) + [
-        f"{CFG['nix']}/nix-store", "--realise", "--keep-going", *sorted(set(b["drvs"].values()))]
-    with open(os.path.join(STATE, "builds", jid, "log"), "wb") as out:
-        p = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT)
-        try:
-            rc = p.wait(timeout=CFG["proofTimeout"] * C.MIN)
-        except subprocess.TimeoutExpired:
-            p.terminate()  # heavy stops all of it, then frees its slot
-            p.wait()
-            rc = None
-    state = "timed out" if rc is None else "done" if rc == 0 or rc >= 100 else "failed"
+    here = os.path.join(STATE, "builds", jid)
+    drvs = sorted(set(b["drvs"].values()))
+    if gone(drvs):
+        # Collected since they were worked out: nothing to build, and no
+        # verdict in that. The pass that sees this works them out again.
+        state, rc = "failed", None
+    else:
+        # Its outputs are roots of the store's until the build's folder goes
+        # (prune), so a collection can't take a pass from them before its
+        # verdict is posted.
+        cmd = ([CFG["heavy"], "--"] if CFG.get("heavy") else []) + [
+            f"{CFG['nix']}/nix-store", "--realise", "--keep-going", "--add-root", os.path.join(here, "out"), "--indirect", *drvs]
+        with open(os.path.join(here, "log"), "wb") as out:
+            p = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT)
+            try:
+                rc = p.wait(timeout=CFG["proofTimeout"] * C.MIN)
+            except subprocess.TimeoutExpired:
+                p.terminate()  # heavy stops all of it, then frees its slot
+                p.wait()
+                rc = None
+        state = state_of(rc)
     save(f"builds/{jid}/end.json", {"state": state, "exit": rc, "at": time.time()})
     C.kick(b["repo"])
+
+
+# nix-store's exit codes for builds that failed: 100 and up, each bit of the
+# rest a way one did (timed out, a hash that didn't match, not
+# deterministic). Anything else, a signal's or heavy's own included, is the
+# machine's failure, not a verdict.
+BUILD_FAILED = range(100, 108)
+
+
+def state_of(rc):
+    """How a build ended, by nix-store's exit (None: stopped at proofTimeout)."""
+    if rc is None:
+        return "timed out"
+    return "done" if rc == 0 or rc in BUILD_FAILED else "failed"
+
+
+def gone(drvs):
+    """Whether any of the derivations has been collected from the store (or
+    the store can't say)."""
+    return bool(drvs) and bool(unbuilt(drvs))
 
 
 def verdicts(jid):
@@ -282,7 +328,10 @@ def verdicts(jid):
     derivation is valid, which nix makes it only once its build has passed,
     a failure otherwise; each names its derivation. None when the store
     can't say."""
-    drvs = load(f"builds/{jid}/build.json", {})["drvs"]
+    drvs = (load(f"builds/{jid}/build.json", None) or {}).get("drvs")
+    if not drvs:
+        log(f"build {jid} has no record of what it built")
+        return None
     try:
         outs = {c: nix("nix-store", "--query", "--outputs", d).split() for c, d in drvs.items()}
         bad = set(nix("nix-store", "--check-validity", "--print-invalid", *sorted({o for p in outs.values() for o in p})).split())

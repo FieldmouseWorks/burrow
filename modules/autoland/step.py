@@ -567,18 +567,32 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
             busy = f"building {names} here" if builds else at_work("proved", doing)
             settle("pending", f"Settled; {busy}{skipped}"[:140])
 
-        # A build of this head that's done: its verdicts, from the store.
+        # This head's proof so far was another stage's: a build before the
+        # Claude jobs, or a Claude job from before its check had a build.
+        # This stage starts afresh, nothing of that one's carried over (its
+        # retries, the two lost answers), and a job left running for a check
+        # that's a build now is stopped: the build does its work.
+        jid = st.get("provedJob")
+        if st.get("proved") == head and jid and jid.startswith(C.BUILD) != bool(builds):
+            if builds and running("proved"):
+                C.stop_job(jid)
+            for k in ("", "Job", "At", "Lost", "Again", "Broke"):
+                st.pop("proved" + k, None)
+            ends.pop("proved", None)
+        # A build of this head that's done: its verdicts, from the store. A
+        # failure's log goes on the PR first, so a comment GitHub didn't take
+        # is tried again before the red status hands the PR to a fix.
         if builds and st.get("proved") == head and not running("proved") and ends.get("proved") == "done":
             jid = st["provedJob"]
             said = P.verdicts(jid)
-            if said is None or not P.record(repo, pr, said):
+            failed = [c for c, (state, _) in (said or {}).items() if state == "failure"]
+            if failed and st.get("provedSaid") != jid:
+                if C.comment(repo, n, P.failed_log(jid, failed)) is not None:
+                    st["provedSaid"] = jid
+            if said is None or failed and st.get("provedSaid") != jid or not P.record(repo, pr, said):
                 strike("status")
                 settle("pending", f"Settled; {names} built here, its verdict not posted yet"[:140])
                 return
-            failed = [c for c, (state, _) in said.items() if state == "failure"]
-            if failed and st.get("provedSaid") != jid:
-                C.comment(repo, n, P.failed_log(jid, failed))
-                st["provedSaid"] = jid
             # Their statuses kick the pass that lands it, or hands it to a fix.
             settle("pending", f"Settled; {names} built here, its verdict posted"[:140])
             return
