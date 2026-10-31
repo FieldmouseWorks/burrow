@@ -20,7 +20,9 @@ git config --global advice.detachedHead false
 # adds one, `api graphql ... -F n=N` answers N's head with the checks in
 # $tmp/checks (its check runs, statuses and check suites, as GraphQL has them;
 # with $tmp/more there, the checks have a page more), `api repos/R/pulls/N -X
-# PATCH` answers N's URL, and every call goes to $tmp/gh.log. With
+# PATCH` answers N's URL, and every call goes to $tmp/gh.log. Like the
+# machine's gh (modules/github), it refuses a graphql call that doesn't say
+# whose repo it's about (GH_REPO). With
 # $tmp/gh-down there, it fails as an unreachable GitHub does.
 mkdir "$tmp/bin"
 cat >"$tmp/bin/gh" <<EOF
@@ -37,7 +39,8 @@ case "\$1 \$2" in
       | {number: (.[0] | tonumber), sha: .[1], repo: (.[2] // "sam/homelab"), ref: (.[3] // "burrow-update")}
       | select(\$head == "" or \$head == "\(.repo | split("/")[0]):\(.ref)")
       | {number, head: {sha, ref, repo: {full_name: .repo}}}] | reverse' <"$tmp/prs") ;;
-  "api graphql") n=; for a in "\$@"; do [ "\${a#n=}" = "\$a" ] || n=\${a#n=}; done
+  "api graphql") [ "\${GH_REPO:-}" = sam/homelab ] || { echo 'which account is gh api graphql for? Give it -R OWNER/REPO' >&2; exit 1; }
+    n=; for a in "\$@"; do [ "\${a#n=}" = "\$a" ] || n=\${a#n=}; done
     json=\$(jq -Rn --arg n "\$n" --slurpfile checks "$tmp/checks" --argjson more "\$([ -e "$tmp/more" ] && echo true || echo false)" '
       [inputs | split(" ") | select(.[0] == \$n)][0][1] as \$head | \$checks[0] as \$c
       | {data: {repository: {pullRequest: {headRefOid: \$head, commits: {nodes: [{commit: {

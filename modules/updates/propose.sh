@@ -47,8 +47,10 @@ red_head() {
   local n head json red
   read -r n head <<<"$1"
   [ "$head" = "$(cat "$state/proposed" 2>/dev/null)" ] || return 0
+  # GraphQL's endpoint names no repo, so GH_REPO says which account's token
+  # the call takes (modules/github), which refuses to guess.
   # shellcheck disable=SC2016 # GraphQL's variables
-  json=$(as_user gh api graphql -F n="$n" -f owner="${REPO%%/*}" -f name="${REPO#*/}" -f query='
+  json=$(as_user env GH_REPO="$REPO" gh api graphql -F n="$n" -f owner="${REPO%%/*}" -f name="${REPO#*/}" -f query='
     query($owner: String!, $name: String!, $n: Int!) {
       repository(owner: $owner, name: $name) { pullRequest(number: $n) { headRefOid
         commits(last: 1) { nodes { commit {
