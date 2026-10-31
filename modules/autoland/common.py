@@ -11,6 +11,7 @@ user's own gh login, which every Claude session on the machine shares.
 
 import base64
 import contextlib
+import hashlib
 import hmac
 import json
 import os
@@ -316,13 +317,25 @@ def seal(repo, n, name, verdict, head, base):
     return S.mac(_key[0], repo, n, name, verdict, head, base)
 
 
-def marker(pr, name, head, repo=None, base=None):
+def quote(body):
+    """A PR's description as the reviewers are shown it: each line quoted,
+    so nothing in it reads as their brief going on."""
+    return "\n".join(f"> {x}".rstrip() for x in body.strip().splitlines()) or "(none)"
+
+
+def fingerprint(body):
+    """What a review or a judge's verdict carries of the description it was
+    on: the reasons a description gives are part of what's judged."""
+    return hashlib.sha256(quote(body).encode()).hexdigest()[:16]
+
+
+def marker(pr, name, head, repo=None, base=None, on=None):
     """The verdict in the newest `<!-- NAME: VERDICT SHA -->` on the PR for
     exactly this head, from one of its authors (`ours`: whoever its Claude
     jobs, the judges among them, post as) only; else None. With
     repo, only a marker that also carries its seal, for this head on the PR's
-    base as it is now, counts; with base, only one that names that base
-    (`<!-- NAME: VERDICT SHA on BASE -->`)."""
+    base as it is now (or on `on`, what else the verdict is on), counts; with
+    base, only one that names that base (`<!-- NAME: VERDICT SHA on BASE -->`)."""
     pat = re.compile(rf"<!-- {re.escape(name)}: ([a-z]+) ([0-9a-f]{{40}})(?: on (\S+))?(?: ([0-9a-f]{{32}}))? -->")
     verdict = None
     for c in pr["comments"]["nodes"]:  # oldest first
@@ -331,7 +344,7 @@ def marker(pr, name, head, repo=None, base=None):
         for m in pat.finditer(c["body"] or ""):
             if m.group(2) != head or (base is not None and m.group(3) != base):
                 continue
-            want = repo and seal(repo, pr["number"], name, m.group(1), head, pr["baseRefName"])
+            want = repo and seal(repo, pr["number"], name, m.group(1), head, on or pr["baseRefName"])
             if repo and not (want and hmac.compare_digest(m.group(4) or "", want)):
                 continue
             verdict = m.group(1)
