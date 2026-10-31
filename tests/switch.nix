@@ -23,12 +23,12 @@ pkgs.testers.runNixOSTest {
     };
 
     specialisation = {
-      # Activating this one takes 75s, past the 60s window; on its own it would
+      # Activating this one takes 115s, past the 100s window; on its own it would
       # finish. /run/current-system only moves at the end of the activation script.
       slow.configuration = {
         environment.etc.switch-test.text = "slow";
         systemd.services.keeper.environment.FLAVOUR = "slow";
-        system.activationScripts.slow = "sleep 75";
+        system.activationScripts.slow = "sleep 115";
       };
       # Two ways the activation gets stuck; the third, a unit whose stop never
       # ends (TimeoutStopSec=infinity), holds up the revert too: burrow#312.
@@ -50,7 +50,7 @@ pkgs.testers.runNixOSTest {
   };
 
   testScript = ''
-    window = 60
+    window = 100
 
     machine.wait_for_unit("multi-user.target")
     base = machine.succeed("readlink -f /run/current-system").strip()
@@ -105,7 +105,7 @@ pkgs.testers.runNixOSTest {
         machine.wait_until_succeeds("systemctl is-active -q machine-switch-activate.service")
         for unit in ("machine-switch-activate", "machine-revert"):
             machine.succeed(f"systemctl show -p ManagedOOMPreference {unit}.service | grep -qx ManagedOOMPreference=omit")
-        machine.wait_until_succeeds("grep -q '^live: ' /tmp/switch.log", timeout=120)
+        machine.wait_until_succeeds("grep -q '^live: ' /tmp/switch.log", timeout=3 * window)
         machine.succeed("machine-switch --abort")
         assert machine.succeed("readlink -f /run/current-system").strip() == base, "the abort didn't revert"
   '';

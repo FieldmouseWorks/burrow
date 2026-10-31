@@ -77,9 +77,10 @@ fi
 # Run as the activation unit stops, with the system it was putting live. Past its
 # deadline, if the timer hasn't fired yet, the revert starts now: the timer would
 # land it after the window. A switch no longer pending (confirmed, aborted,
-# reverted, or replaced by a later switch) is settled: leave it be. A stop job the killed activation left behind still
-# holds up the revert's own job on that unit until systemd's stop timeout ends
-# it; a unit with none (TimeoutStopSec=infinity) holds it for good, burrow#312.
+# reverted, or replaced by a later switch) is settled: leave it be. A stop job the
+# killed activation left behind still holds up the revert's own job on that unit
+# until systemd's stop timeout ends it; a unit with none (TimeoutStopSec=infinity)
+# holds it for good, burrow#312.
 if [ "${1:-}" = --activation-stopped ]; then
   if [ "${SERVICE_RESULT:-}" = timeout ] && [ "$(cat "$state/pending" 2>/dev/null)" = "$2" ] &&
     [ "$(systemctl show -p SubState --value "$REVERT.timer")" = waiting ]; then
