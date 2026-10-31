@@ -12,12 +12,14 @@
 //! exited, so no evaluation stays in memory beside the builds; nix flake
 //! check then finds them built and its outputs still roots. A flake with a
 //! nixConfig is left to nix flake check alone, and the flake is only ever
-//! read purely.
+//! read purely. Where the machine has heavy's slots (the real heavy, on a
+//! slot of its own), a check with a VM test to run waits for one, once the
+//! others are built, and a runner without them takes none.
 //!
 //! Each case has a store, and a scratch directory, of its own. The cases are
 //! by what they hold the gate to: the outputs it checks, the derivations it
-//! takes, the checkout it reads, the gate split across legs, and the gate
-//! without eval-apart.
+//! takes, the checkout it reads, the gate split across legs, the gate without
+//! eval-apart, and the slot its VM tests wait for.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -28,6 +30,7 @@ mod checkout;
 mod derivations;
 mod legs;
 mod outputs;
+mod slots;
 mod whole;
 
 /// A case's runner: real nix for evaluation, in a store under its scratch
@@ -109,6 +112,7 @@ impl Gate {
                 r#"case $1 in
   build)
     echo "$*" >> "$NIX_LOG"
+    [ -z "$HEAVY_SLOT" ] || echo "$*" >> "$NIX_LOG.slot"
     {real_bin}/nix-store --gc > /dev/null 2>&1
     prev=
     for a in "$@"; do
@@ -120,10 +124,19 @@ impl Gate {
     exit 0 ;;
   flake) [ "$2" = check ] && {{
     echo "$*" >> "$NIX_LOG"
+    [ -z "$HEAVY_SLOT" ] || echo "$*" >> "$NIX_LOG.slot"
     if [ -e "$NIX_LOG.links" ]; then
       while read -r link; do [ -d "${{link%/*}}" ] || {{ echo "the built checks' roots went before nix flake check"; exit 1; }}; done < "$NIX_LOG.links"
     fi
     exec {real_nix} flake check --no-build "${{@:3}}"; }} ;;
+  # An older nix's JSON, if asked: store paths for names, structured attrs in
+  # the env.
+  derivation)
+    if [ -n "$OLD_JSON" ]; then
+      {real_nix} "$@" | jq '.derivations | with_entries(.key = "/nix/store/" + .key | .value |= (
+        if .structuredAttrs then .env.__json = (.structuredAttrs | tojson) | del(.structuredAttrs) else . end))'
+      exit
+    fi ;;
   # Each evaluation apart, logged as the plan or the entry it evaluates.
   eval)
     what=
@@ -160,6 +173,20 @@ while [ $# -gt 0 ]; do
 done
 [ -z "$what" ] || echo "nix-instantiate $what" >> "$NIX_LOG"
 exec {real_bin}/nix-instantiate "${{args[@]}}"
+"#
+            ),
+        );
+        // Builds are only logged, so whether an output is built is the
+        // case's to say.
+        s.stub(
+            "nix-store",
+            &format!(
+                r#"if [ "$1" = --add-root ] && [ -n "$ALL_BUILT" ]; then
+  echo "root $2 $5" >> "$NIX_LOG.roots"
+  exit 0
+fi
+if [ "$1" = -q ] && [ "$2" = -R ] && [ -n "$NO_CLOSURE" ]; then exit 1; fi
+exec {real_bin}/nix-store "$@"
 "#
             ),
         );
@@ -232,33 +259,49 @@ exec {real_bin}/nix-instantiate "${{args[@]}}"
         )
     }
 
-    fn run(&self, dir: &Path, r: Run) -> Ran {
-        let log = self.s.join("nix.log");
-        let links = self.s.join("nix.log.links");
-        for f in [&log, &links] {
-            let _ = fs::remove_file(f);
+    /// Where the stand-ins log nix's calls: `.slot` beside it has those made
+    /// in a slot, `.links` the out-links, `.roots` what was rooted.
+    fn log(&self) -> PathBuf {
+        self.s.join("nix.log")
+    }
+
+    /// The gate step's script, and its environment for a run, with the logs
+    /// of a run before cleared.
+    fn gate_step(&self, r: &Run) -> (String, Vec<(String, String)>) {
+        for suffix in ["", ".links", ".slot", ".roots"] {
+            let _ = fs::remove_file(self.s.join(&format!("nix.log{suffix}")));
         }
         let wf = workflow(".github/workflows/flake-check.yml");
-        let (cache, temp) = (
-            self.s.join("cache"),
-            self.s.path().to_str().unwrap().to_owned(),
-        );
+        let path = |p: PathBuf| p.to_str().unwrap().to_owned();
         let (leg, legs) = r.legs.unwrap_or(("1", "1"));
-        let mut env = vec![
-            ("NIX_CONFIG", self.nix_config.as_str()),
-            ("XDG_CACHE_HOME", cache.to_str().unwrap()),
-            ("NIX_LOG", log.to_str().unwrap()),
-            ("APART", if r.whole { "false" } else { "true" }),
-            ("SKIP", r.skip),
-            ("BUILD_FAIL", r.build_fail),
-            ("LEG", leg),
-            ("LEGS", legs),
-            ("RUNNER_TEMP", &temp),
-        ];
-        env.extend(r.env.iter().copied());
-        let ran = self
-            .s
-            .bash(script(step(&wf["jobs"]["check"], "gate")), dir, &env);
+        // A case's own env comes last, so it wins (PATH among it).
+        let env: Vec<(String, String)> = [
+            ("NIX_CONFIG", self.nix_config.clone()),
+            ("XDG_CACHE_HOME", path(self.s.join("cache"))),
+            ("NIX_LOG", path(self.log())),
+            ("APART", (if r.whole { "false" } else { "true" }).to_owned()),
+            ("SKIP", r.skip.to_owned()),
+            ("BUILD_FAIL", r.build_fail.to_owned()),
+            ("LEG", leg.to_owned()),
+            ("LEGS", legs.to_owned()),
+            ("RUNNER_TEMP", path(self.s.path().to_path_buf())),
+        ]
+        .into_iter()
+        .chain(r.env.iter().copied().map(|(k, v)| (k, v.to_owned())))
+        .map(|(k, v)| (k.to_owned(), v))
+        .collect();
+        (script(step(&wf["jobs"]["check"], "gate")).to_owned(), env)
+    }
+
+    fn run(&self, dir: &Path, r: Run) -> Ran {
+        let (script, env) = self.gate_step(&r);
+        let env: Vec<(&str, &str)> = env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        let ran = self.s.bash(&script, dir, &env);
+        self.ran(ran.code, ran.said())
+    }
+
+    /// What a run of the gate came to, from how it ended and what it printed.
+    fn ran(&self, code: i32, out: String) -> Ran {
         // The roots last only as long as the gate.
         let left: Vec<_> = fs::read_dir(self.s.path())
             .unwrap()
@@ -270,18 +313,28 @@ exec {real_bin}/nix-instantiate "${{args[@]}}"
             "GC roots or the snapshot left behind: {left:?}"
         );
         Ran {
-            code: ran.code,
-            out: ran.said(),
-            calls: if log.exists() {
-                read(&log).lines().map(str::to_owned).collect()
-            } else {
-                Vec::new()
-            },
+            code,
+            out,
+            calls: self.calls(),
         }
+    }
+
+    /// nix's calls so far, as the stand-ins logged them.
+    fn calls(&self) -> Vec<String> {
+        lines(&self.log())
     }
 
     fn apart(&self, dir: &Path) -> Ran {
         self.run(dir, Run::default())
+    }
+}
+
+/// A log's lines, none if it isn't there.
+fn lines(path: &Path) -> Vec<String> {
+    if path.exists() {
+        read(path).lines().map(str::to_owned).collect()
+    } else {
+        Vec::new()
     }
 }
 

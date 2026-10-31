@@ -5,7 +5,7 @@
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+use std::process::{Child, Command, Output, Stdio};
 use std::sync::RwLock;
 
 use tempfile::TempDir;
@@ -101,14 +101,53 @@ impl Ran {
 /// A scratch directory: the runner's machine for one test.
 pub struct Scratch {
     dir: TempDir,
+    /// This process's PATH as the runner's: the machine's own tools, but no
+    /// heavy (see [`hide`]).
+    host_path: String,
 }
 
 impl Default for Scratch {
     fn default() -> Self {
         let dir = tempfile::tempdir().expect("a scratch directory");
         fs::create_dir(dir.path().join("bin")).unwrap();
-        Scratch { dir }
+        let host_path = hide(
+            "heavy",
+            &std::env::var_os("PATH").unwrap_or_default(),
+            &dir.path().join("path"),
+        );
+        Scratch { dir, host_path }
     }
+}
+
+/// `path` with every `name` on it hidden: each directory that has one is
+/// replaced by a directory under `shadows` that links to all it holds but
+/// that. The gate step takes a heavy slot when there's a heavy on its PATH,
+/// so a machine's own heavy (burrow.cpu's, on remi) would make a runner with
+/// no slots one with them, and wait on the machine's real slots, its own
+/// test's included. A case that wants slots puts its own heavy first.
+pub fn hide(name: &str, path: &std::ffi::OsStr, shadows: &Path) -> String {
+    let dirs: Vec<PathBuf> = std::env::split_paths(path)
+        .enumerate()
+        .map(|(i, d)| {
+            if !d.join(name).exists() {
+                return d;
+            }
+            let shadow = shadows.join(i.to_string());
+            fs::create_dir_all(&shadow).unwrap();
+            for entry in fs::read_dir(&d).unwrap_or_else(|e| panic!("{}: {e}", d.display())) {
+                let entry = entry.unwrap();
+                if entry.file_name() != name {
+                    std::os::unix::fs::symlink(entry.path(), shadow.join(entry.file_name()))
+                        .unwrap();
+                }
+            }
+            shadow
+        })
+        .collect();
+    std::env::join_paths(dirs)
+        .expect("a PATH")
+        .into_string()
+        .expect("a PATH that's UTF-8")
 }
 
 impl Scratch {
@@ -127,16 +166,12 @@ impl Scratch {
 
     /// A stand-in on the steps' PATH: a bash script.
     pub fn stub(&self, name: &str, body: &str) {
-        let path = self.join("bin").join(name);
-        let _whole = EXEC.write().unwrap_or_else(|e| e.into_inner());
-        fs::write(&path, format!("#!{}\n{body}", which("bash").display())).unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        executable(&self.join("bin").join(name), body);
     }
 
-    /// PATH with the stand-ins first.
+    /// PATH with the stand-ins first, then the machine's (with no heavy).
     pub fn path_var(&self) -> String {
-        let path = std::env::var("PATH").unwrap_or_default();
-        format!("{}:{path}", self.join("bin").display())
+        format!("{}:{}", self.join("bin").display(), self.host_path)
     }
 
     /// A command with nothing of this process's environment but PATH: HOME
@@ -154,6 +189,30 @@ impl Scratch {
     /// A step's script, run in `cwd` as GitHub runs `shell: bash`, with the
     /// step's environment on top of [`Scratch::command`]'s.
     pub fn bash(&self, script: &str, cwd: &Path, env: &[(&str, &str)]) -> Ran {
+        let (cmd, outputs) = self.step_command(script, cwd, env);
+        let out = output(cmd);
+        Ran {
+            code: out.status.code().unwrap_or(-1),
+            stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+            outputs: read(&outputs),
+        }
+    }
+
+    /// A step's script started as [`Scratch::bash`] runs it, for a test to
+    /// watch while it runs: all it prints goes to `log`.
+    pub fn start(&self, script: &str, cwd: &Path, env: &[(&str, &str)], log: &Path) -> Child {
+        let (mut cmd, _) = self.step_command(script, cwd, env);
+        let to = fs::File::create(log).unwrap();
+        cmd.stdin(Stdio::null())
+            .stdout(to.try_clone().unwrap())
+            .stderr(to);
+        let _shared = EXEC.read().unwrap_or_else(|e| e.into_inner());
+        cmd.spawn().unwrap_or_else(|e| panic!("{cmd:?}: {e}"))
+    }
+
+    /// The command that runs a step's script, and its GITHUB_OUTPUT file.
+    fn step_command(&self, script: &str, cwd: &Path, env: &[(&str, &str)]) -> (Command, PathBuf) {
         let dir = self.mkdtemp();
         let (file, outputs) = (dir.join("step.sh"), dir.join("output"));
         fs::write(&file, script).unwrap();
@@ -164,13 +223,7 @@ impl Scratch {
             .current_dir(cwd)
             .env("GITHUB_OUTPUT", &outputs)
             .envs(env.iter().copied());
-        let out = output(cmd);
-        Ran {
-            code: out.status.code().unwrap_or(-1),
-            stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
-            outputs: read(&outputs),
-        }
+        (cmd, outputs)
     }
 
     /// git, as a test sets repos up: it fails the test if git fails, and
@@ -209,10 +262,40 @@ impl Scratch {
     }
 }
 
+/// A bash script at `path`, written under [`EXEC`].
+pub fn executable(path: &Path, body: &str) {
+    let _whole = EXEC.write().unwrap_or_else(|e| e.into_inner());
+    fs::write(path, format!("#!{}\n{body}", which("bash").display())).unwrap();
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
 /// Writes a file, making its directory.
 pub fn write(path: &Path, text: &str) {
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir).unwrap();
     }
     fs::write(path, text).unwrap();
+}
+
+/// A directory with a heavy is swapped for one with all the rest; one
+/// without is left as it is.
+#[test]
+fn heavy_is_hidden_from_the_runners_path() {
+    let t = tempfile::tempdir().unwrap();
+    let (with, without) = (t.path().join("with"), t.path().join("without"));
+    for d in [&with, &without] {
+        fs::create_dir(d).unwrap();
+        executable(&d.join("jq"), "exit 0\n");
+    }
+    executable(&with.join("heavy"), "exit 0\n");
+    let path = std::env::join_paths([&with, &without]).unwrap();
+    let hidden = hide("heavy", &path, &t.path().join("shadows"));
+    let dirs: Vec<PathBuf> = std::env::split_paths(&hidden).collect();
+    assert_eq!(dirs.len(), 2, "{hidden}");
+    assert_ne!(dirs[0], with, "{hidden}");
+    assert!(
+        dirs[0].join("jq").exists() && !dirs[0].join("heavy").exists(),
+        "{hidden}"
+    );
+    assert_eq!(dirs[1], without, "{hidden}");
 }
