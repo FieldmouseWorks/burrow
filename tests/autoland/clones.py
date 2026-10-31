@@ -154,7 +154,11 @@ def full(at, kick=None):
 
 
 T = 2_000_000_000
+clone("swept", "https://github.com/old-org/swept.git")
+NAMES["old-org/swept"] = "sam/swept"
 line = full(T)
+# The pass itself repoints what it finds, before anything needs the checkout.
+assert url("swept") == "https://github.com/sam/swept.git", url("swept")
 assert len(line) == 1 and line[0][1] == "sam/tool", PUBLISHED
 for said in (f"{src}/tool", "eve/tool", "sam/tool"):
     assert said in line[0][2], line
