@@ -3,10 +3,10 @@
 # (lockfiles, SVGs, vendored and minified code) included, it keeps the repo's
 # own answers to a false alarm (`gitleaks:allow`, .gitleaksignore), and its
 # log says where each finding is and never what it is: no token, no part of
-# one, not the password beside one, a private key's body or a token in
-# base64. The secrets are put together here, so no tracked file holds one
-# (GitHub's push protection would turn the push away, and burrow's own
-# secrets check would fail).
+# one, not the password beside one, a private key's body, a token in base64
+# or one pasted into .gitleaksignore. The secrets are put together here, so
+# no tracked file holds one (GitHub's push protection would turn the push
+# away, and burrow's own secrets check would fail).
 #
 #   nix build .#checks.x86_64-linux.house-secrets-leak -L
 { self, pkgs }:
@@ -21,7 +21,7 @@ let
   keyLines = map (n: builtins.substring 0 64 (hex "key ${toString n}")) [ 1 2 3 ];
   key = "-----BEGIN RSA " + "PRIVATE KEY-----\n" + lib.concatMapStrings (l: l + "\n") keyLines
     + "-----END RSA " + "PRIVATE KEY-----";
-  encode = "echo -n '${token "encoded"}' | base64 -w0";
+  encode = seed: "echo -n '${token seed}' | base64 -w0";
   # Where gitleaks' own config looks away, one token each.
   skipped = [
     "package-lock.json"
@@ -40,25 +40,29 @@ let
     cat > deploy-key.pem <<'EOF'
     ${key}
     EOF
-    echo "auth = \"$(${encode})\"" > encoded.txt
+    echo "auth = \"$(${encode "encoded"})\"" > encoded.txt
     ${lib.concatMapStrings (f: ''
       mkdir -p "$(dirname '${f}')"
       echo 'url = "https://ci:${token f}@example.com/"' > '${f}'
     '') skipped}
     echo 'token = "${token "allowed"}" # gitleaks:allow' > allowed.txt
     echo 'token = "${token "ignored"}"' > ignored.txt
+    # A fingerprint, then a token pasted where its fingerprint should be,
+    # plain and in base64.
     echo 'ignored.txt:github-pat:1' > .gitleaksignore
+    echo '${token "pasted"}' >> .gitleaksignore
+    echo "$(${encode "pasted-b64"})" >> .gitleaksignore
   '';
-  secrets = [ password (token "a") (token "b") (token "encoded") (token "allowed") (token "ignored") ]
+  secrets = [ password ] ++ map token [ "a" "b" "encoded" "allowed" "ignored" "pasted" "pasted-b64" ]
     ++ keyLines ++ map token skipped;
   failed = pkgs.testers.testBuildFailure
     (self.lib.project { self = leaky; systems = [ system ]; }).checks.${system}.secrets;
 in
 pkgs.runCommand "house-secrets-leak-check" { } ''
   log=${failed}/testBuildFailure.log
-  # Not one 8-character piece of any secret, the base64 one too. The log
+  # Not one 8-character piece of any secret, the base64 ones too. The log
   # isn't shown when this fails: it would spread what it leaked.
-  for s in ${lib.escapeShellArgs secrets} "$(${encode})"; do
+  for s in ${lib.escapeShellArgs secrets} "$(${encode "encoded"})" "$(${encode "pasted-b64"})"; do
     for ((i = 0; i + 8 <= ''${#s}; i++)); do
       if grep -qF -- "''${s:i:8}" "$log"; then
         echo "the log shows part of a secret"
@@ -75,6 +79,9 @@ pkgs.runCommand "house-secrets-leak-check" { } ''
   expect 'deploy-key.pem:1: private-key ' 1
   expect 'encoded.txt:1: github-pat ' 1
   ${lib.concatMapStrings (f: "expect '${f}:1: github-pat ' 1\n") skipped}
+  expect '.gitleaksignore:2: github-pat ' 1
+  expect '.gitleaksignore:3: github-pat ' 1
+  expect ".gitleaksignore has lines that aren't a fingerprint" 1
   expect 'allowed.txt' 0
   expect 'ignored.txt' 0
   touch $out
