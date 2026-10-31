@@ -2,8 +2,9 @@
 //! from its SDK's `get_usage` request, and the reset through its own
 //! `/limit-reset weekly`, typed into a Claude Code of our own in a tmux, the
 //! way the owner would at a terminal. It keys nothing but that command, the
-//! folder-trust answer for its own folder and the confirmation of the reset,
-//! each only once the screen shows what it answers; anything else ends the
+//! folder-trust answer for its own folder and the confirmation of the reset
+//! (with the arrows that bring each dialog's cursor to its yes), each only
+//! once the screen shows what it answers; anything else ends the
 //! session, and ending Claude Code never uses a reset. Once its yes is
 //! pressed, the session lives until Claude Code has its last word on it.
 
@@ -116,23 +117,49 @@ impl ClaudeCode {
             return Reset::NotPressed(e);
         }
         // Up to its input box, answering only its question about trusting
-        // its own folder, once.
-        let mut trusted = false;
+        // its own folder. That one opens on its no, and refuses keys that
+        // come too soon after it opens, as the reset's does.
+        let (mut moves, mut presses) = (0, 0);
+        let mut pressed: Option<Instant> = None;
         loop {
             let seen = tmux.wait(|screen| {
                 if prompt_ready(screen) {
-                    Some(true)
-                } else {
-                    (!trusted && asks_trust(screen)).then_some(false)
+                    return Some(None);
                 }
+                let cursor = asks_trust(screen)?;
+                // A press it shows no sign of yet may still be taken.
+                if pressed.is_some_and(|at| at.elapsed() < REFUSED) {
+                    return None;
+                }
+                Some(Some(cursor))
             });
             match seen {
-                Ok(true) => break,
-                Ok(false) => {
-                    trusted = true;
+                Ok(None) => break,
+                Ok(Some(Cursor::OnYes)) if presses < PRESSES => {
+                    presses += 1;
+                    thread::sleep(PAUSE);
                     if let Err(e) = tmux.keys(&["Enter"]) {
                         return Reset::NotPressed(e);
                     }
+                    pressed = Some(Instant::now());
+                }
+                Ok(Some(cursor)) if cursor != Cursor::OnYes && moves < 3 => {
+                    moves += 1;
+                    let key = if cursor == Cursor::Below {
+                        "Up"
+                    } else {
+                        "Down"
+                    };
+                    thread::sleep(PAUSE);
+                    if let Err(e) = tmux.keys(&[key]) {
+                        return Reset::NotPressed(e);
+                    }
+                    thread::sleep(POLL);
+                }
+                Ok(Some(_)) => {
+                    return Reset::NotPressed(
+                        "couldn't answer its question about trusting its folder".to_owned(),
+                    );
                 }
                 Err(e) => return Reset::NotPressed(format!("Claude Code didn't come up: {e}")),
             }
@@ -247,6 +274,8 @@ pub fn usage(answer: &Value) -> Result<Reading, String> {
 
 /// What it types.
 const COMMAND: &str = "/limit-reset weekly";
+/// The yes of its question about trusting the folder it was started in.
+const TRUST: &str = "Yes, I trust this folder";
 /// The confirmation's yes, as Claude Code words it unless its server says
 /// otherwise: "Yes, use my weekly reset".
 const YES: &str = "Yes, use my";
@@ -277,20 +306,7 @@ fn read_reset(screen: &str) -> Screen {
     // Only its confirmation has its yes, so it counts wherever it's drawn.
     let lines: Vec<&str> = screen.lines().collect();
     if let Some(yes) = lines.iter().position(|l| l.contains(YES)) {
-        // The choices' cursor, not the input box's (a `❯` under a rule) nor
-        // COMMAND's echo.
-        let cursor = (0..lines.len()).find(|&i| {
-            lines[i].trim_start().starts_with('❯')
-                && !(i > 0 && is_rule(lines[i - 1]))
-                && !lines[i].trim_end().ends_with(COMMAND)
-        });
-        return Screen::Confirm(match cursor {
-            Some(c) if c == yes => Cursor::OnYes,
-            Some(c) if c > yes => Cursor::Below,
-            // No cursor drawn yet reads as above: Down puts it on the first
-            // choice, and the next look sees where.
-            _ => Cursor::Above,
-        });
+        return Screen::Confirm(cursor(&lines, yes));
     }
     let Some(lines) = answer(screen) else {
         return Screen::Busy;
@@ -384,14 +400,33 @@ fn is_rule(line: &str) -> bool {
     !line.is_empty() && line.chars().all(|c| c == '─')
 }
 
-/// It's asking whether to trust the folder it was started in, with the
-/// cursor on yes.
-fn asks_trust(screen: &str) -> bool {
-    screen.to_lowercase().contains("trust")
-        && !prompt_ready(screen)
-        && screen
-            .lines()
-            .any(|l| l.trim_start().starts_with('❯') && l.contains("Yes"))
+/// It's asking whether to trust the folder it was started in: where its
+/// cursor is against the yes, or None when it isn't.
+fn asks_trust(screen: &str) -> Option<Cursor> {
+    if prompt_ready(screen) {
+        return None;
+    }
+    let lines: Vec<&str> = screen.lines().collect();
+    let yes = lines.iter().position(|l| l.contains(TRUST))?;
+    Some(cursor(&lines, yes))
+}
+
+/// Where a dialog's cursor is against its yes, the line YES of LINES: the
+/// choices' cursor, not the input box's (a `❯` under a rule) nor COMMAND's
+/// echo.
+fn cursor(lines: &[&str], yes: usize) -> Cursor {
+    let at = (0..lines.len()).find(|&i| {
+        lines[i].trim_start().starts_with('❯')
+            && !(i > 0 && is_rule(lines[i - 1]))
+            && !lines[i].trim_end().ends_with(COMMAND)
+    });
+    match at {
+        Some(c) if c == yes => Cursor::OnYes,
+        Some(c) if c > yes => Cursor::Below,
+        // No cursor drawn yet reads as above: Down puts it on the first
+        // choice, and the next look sees where.
+        _ => Cursor::Above,
+    }
 }
 
 /// A tmux server of our own, for one Claude Code.
@@ -515,19 +550,35 @@ mod tests {
     #[test]
     fn its_input_box() {
         assert!(prompt_ready(UP));
-        assert!(!asks_trust(UP));
+        assert_eq!(asks_trust(UP), None);
+        // Claude Code 2.1.314's, as remi's tmux showed it: its no first, and
+        // the cursor on it.
         let trust = "
- Do you trust the files in this folder?
+ Accessing workspace:
 
- /var/lib/burrow/usage-reset/claude
+ /var/lib/remi-update/usage-reset/claude
 
- ❯ 1. Yes, I trust this folder
-   2. No, exit
+ Quick safety check: Is this a project you created or one you trust? (Like your own code, a well-known open source project, or work from your team). If not, take a moment to review what's in this folder first.
+
+ Claude Code'll be able to read, edit, and execute files here.
+
+ Security guide
+
+ ❯ No, exit
+   Yes, I trust this folder
+
+ Enter to confirm · Esc to cancel
 ";
-        assert!(asks_trust(trust) && !prompt_ready(trust));
-        assert!(!asks_trust(
-            &trust.replace("❯ 1", "  1").replace("  2. No", "❯ 2. No")
-        ));
+        assert!(!prompt_ready(trust));
+        assert_eq!(asks_trust(trust), Some(Cursor::Above));
+        let on_yes = trust
+            .replace("❯ No, exit", "  No, exit")
+            .replace("  Yes, I trust", "❯ Yes, I trust");
+        assert_eq!(asks_trust(&on_yes), Some(Cursor::OnYes));
+        let no_below = "\n ❯ Yes, I trust this folder\n   No, exit\n"
+            .replace("❯ Yes", "  Yes")
+            .replace("  No, exit", "❯ No, exit");
+        assert_eq!(asks_trust(&no_below), Some(Cursor::Below));
     }
 
     #[test]
