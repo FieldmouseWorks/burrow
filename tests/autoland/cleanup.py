@@ -417,8 +417,9 @@ assert FRESH == [200] and LOOKED == ["gh-pages"], (FRESH, LOOKED)
 # What git says when a delete doesn't go through, read whole: a push that
 # beat it, or a branch already gone, is no refusal (the next listing shows
 # either); GitHub not answering ends the pass; anything else is GitHub's
-# refusal, in its words, on one line and cut short. A name git echoes (the
-# branch, the repo, a URL) that reads like an outage doesn't make one.
+# refusal, in its words, on one line and cut short. A name git echoes (in
+# a URL, a ref or a ref-status line) that reads like an outage doesn't make
+# one, and a name that's one of git's own words doesn't hide a real one.
 run_kept = B.subprocess.run
 long_repo = f"{'o' * 39}/{'r' * 100}"
 for repo, name, said, want in (
@@ -435,8 +436,15 @@ for repo, name, said, want in (
                                  "repository rule violations)", "refused"),
         ("sam/timeout", "x", "fatal: unable to access 'https://github.com/sam/timeout.git/': The requested URL returned "
                              "error: 403", "refused"),
+        ("sam/r", "timeout", "remote: error: GH006: Protected branch update failed for refs/heads/timeout.", "refused"),
         ("sam/eof", "eof", "To https://github.com/sam/eof.git\n ! [remote rejected] eof (protected branch hook declined)\n"
-                           "error: failed to push some refs to sam/eof", "refused"),
+                           "error: failed to push some refs to 'https://github.com/sam/eof.git'", "refused"),
+        ("sam/r", "error", "fatal: unable to access 'https://github.com/sam/r.git/': The requested URL returned error: 502", None),
+        ("sam/r", "502", "error: RPC failed; HTTP 502 curl 22 The requested URL returned error: 502", None),
+        ("sam/host", "host", "fatal: unable to access 'https://github.com/sam/host.git/': Could not resolve host: github.com",
+         None),
+        ("sam/r", "timeout", "fatal: unable to access 'https://github.com/sam/r.git/': Failed to connect to github.com port "
+                             "443: Connection timed out", None),
         (long_repo, "x", f"fatal: unable to access 'https://github.com/{long_repo}.git/': The requested URL returned "
                          "error: 502", None),
         ("sam/r", "x" * 250, f"! [rejected] {'x' * 250} -> {'x' * 250} (stale info)", "")):

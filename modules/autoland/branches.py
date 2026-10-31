@@ -31,11 +31,11 @@ def delete_branch(repo, name, sha):
     said = " ".join(p.stderr.split())
     if p.returncode == 0 or re.search(r"stale info|remote ref does not exist", said):
         return ""
-    # Less the names git echoes (URLs, refs, the branch and the repo), so a
-    # branch called fix/timeout reads as a refusal, not an outage.
-    bare = re.sub(r"https?://\S+|refs/\S+", "", said)
-    for echoed in (name, repo):
-        bare = re.sub(rf"(?<![\w./-]){re.escape(echoed)}(?![\w./-])", "", bare)
+    # Less the fields where git echoes names back (URLs, refs, the names on
+    # its ref-status lines), so a branch called fix/timeout reads as a
+    # refusal, not an outage. Only those fields: a branch called `error`
+    # mustn't take the word out of git's own "returned error: 502".
+    bare = re.sub(r"https?://\S+|refs/\S+|\[[a-z ]+\] \S+", "", said)
     if C.UNAVAILABLE.search(bare) or re.search(r"could not resolve host|returned error: 5\d\d", bare, re.I):
         raise C.Unavailable(f"git push :{name}: {said[:200]}")
     log(f"{repo}: kept {name}: {said[:200]}")
