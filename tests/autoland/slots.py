@@ -128,7 +128,7 @@ assert ahead(1) in line(1, 800) and ahead(2) in line(2, 800) and JOBS == []
 # first in line.
 order = []
 kept_fns = (S.R.discover, S.R.settle_repo, S.R.publish, S.open_prs, S.R.unhook_gone, S.R.hook_projects, S.step.handle)
-S.R.discover = lambda: [{"repo": "sam/r"}]
+S.R.discover = lambda: [{"repo": "sam/r", "default": "main"}]
 S.R.settle_repo = lambda r, known: False
 S.R.publish = S.R.unhook_gone = lambda *a: None
 S.R.hook_projects = lambda repos: []

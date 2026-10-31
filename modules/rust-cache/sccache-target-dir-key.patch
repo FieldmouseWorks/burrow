@@ -1,0 +1,18 @@
+--- a/src/compiler/rust.rs
++++ b/src/compiler/rust.rs
+@@ -1864,10 +1864,15 @@
+             // already uniquely identify the relevant registries.
+             // CARGO_BUILD_JOBS only affects Cargo's parallelism, not rustc output.
+             // CARGO_ENCODED_RUSTFLAGS is already cached in argument list
++            // CARGO_TARGET_DIR and CARGO_BUILD_TARGET_DIR only say where cargo
++            // puts its outputs, as --out-dir does. A crate that reads one
++            // (env!, option_env!) has it in its dep-info's env-deps, hashed above.
+             if var == "CARGO_MAKEFLAGS"
+                 || var.starts_with("CARGO_REGISTRIES_")
+                 || var == "CARGO_BUILD_JOBS"
+                 || var == "CARGO_ENCODED_RUSTFLAGS"
++                || var == "CARGO_TARGET_DIR"
++                || var == "CARGO_BUILD_TARGET_DIR"
+             {
+                 continue;
+             }

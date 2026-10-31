@@ -721,7 +721,7 @@ del S.CFG["repos"]["sam/r"]["proofBuilds"]
 # isn't, so renovate-sweep lists its ok majors itself, and still knows how
 # its proofs run.
 kept_fns = (S.R.discover, S.R.settle_repo, S.R.publish, S.open_prs, S.R.unhook_gone, S.R.hook_projects)
-S.R.discover = lambda: [{"repo": "sam/r"}, {"repo": "sam/bad"}, {"repo": "sam/flaky"}]
+S.R.discover = lambda: [{"repo": f"sam/{n}", "default": "main"} for n in ("r", "bad", "flaky")]
 # A full pass takes the hooks off the repos it no longer sees to, but not
 # off the projects it hooks for proj.
 UNHOOKED = []

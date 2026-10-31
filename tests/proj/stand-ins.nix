@@ -3,8 +3,10 @@
 { pkgs }:
 {
   # Claude, as far as proj can tell: reads the prompt, answers in stream-json.
-  # "sleep N" sleeps; "eat" holds far more memory than the test's job cap;
-  # "outgrow" runs something that does, then answers;
+  # "sleep N" sleeps; "eat" runs something that holds far more memory than
+  # the test's job cap, then fails; "outgrow" does, then answers; "bloat"
+  # grows past the cap itself, as Claude can; told any of those was killed,
+  # it answers, or with /tmp/again grows past it again;
   # "twice" answers twice in one turn, "answerfail" answers and then fails;
   # "linger N" answers, then stays up N seconds, as Claude does while
   # something it left in the background (a CI watch, a long build) is still
@@ -16,21 +18,33 @@
   # works past proj's ten seconds and answers;
   # "chatter N" says something every second for N seconds, then answers;
   # "named N" names its session ("named") as Claude's first line does, then
-  # sleeps N seconds without answering.
+  # sleeps N seconds without answering, as an issue's "inbox-hang" does
+  # ("hang") for good, resumed putting out an empty result first; told it
+  # was cut off, it answers, or with /tmp/again hangs again. "eat" and
+  # "bloat" name theirs too.
+  # "scratch" makes a worktree of web, with a file in it, in its scratch and
+  # says where that is in /tmp/scratch; "scratch ask" then asks.
   # As a job, it says what comes next before it answers (proj done; "ask"
   # asks, "await" awaits), but "silent" doesn't, and with /tmp/silent nothing
   # does, even told to; what it's told is kept in /tmp/told.
   claude = pkgs.writeShellScriptBin "claude" ''
     prompt=$(cat)
-    echo "$*" >/tmp/args
+    args=$*
+    echo "$args" >/tmp/args
+    init() { echo "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"$1\"}"; }
+    bloat() { init bloat; x=$(head -c 512M /dev/zero | tr '\0' x); }
+    hang() {
+      init hang
+      # Resumed, it puts out the empty result Claude Code can first.
+      case " $args " in *" --resume "*) echo '{"type":"result","session_id":"hang","num_turns":0,"result":"","is_error":false}' ;; esac
+      sleep 600
+    }
     if [ -n "''${PROJ_JOB:-}" ] && [ ! -e /tmp/silent ]; then
       case $prompt in silent*) ;; *) proj done >/dev/null ;; esac
     fi
     case $prompt in
       sleep*) sleep "''${prompt#sleep }" ;;
-      named*)
-        echo '{"type":"system","subtype":"init","session_id":"named"}'
-        sleep "''${prompt#named }" ;;
+      named*) init named; sleep "''${prompt#named }" ;;
       chatter*) for _ in $(seq "''${prompt#chatter }"); do echo '{"type":"system"}'; sleep 1; done ;;
       linger*)
         echo '{"type":"result","session_id":"s","result":"waiting on CI","is_error":false}'
@@ -69,10 +83,18 @@
         echo '{"type":"result","session_id":"s","result":"told","is_error":false}'
         exit 0 ;;
       ask) proj ask >/dev/null ;;
+      scratch*)
+        echo "''${PROJ_SCRATCH-}" >/tmp/scratch
+        git -C /data/dev/src/web worktree add -q --detach "$PROJ_SCRATCH/web" && touch "$PROJ_SCRATCH/web/built"
+        case $prompt in *ask) proj ask >/dev/null ;; esac ;;
       await*) proj await "''${prompt#await }" >/dev/null ;;
       # Awaits, then takes a while to answer: what changes meanwhile is news.
       slowawait*) proj await "''${prompt#slowawait }" >/dev/null; sleep 10 ;;
-      eat) head -c 512M /dev/zero | tail >/dev/null; exit 1 ;;
+      eat) init eat; head -c 512M /dev/zero | tail >/dev/null; exit 1 ;;
+      bloat) bloat ;;
+      "Your last run was killed"*) [ ! -e /tmp/again ] || bloat ;;
+      *inbox-hang*) hang ;;
+      "Your last turn was cut off"*) [ ! -e /tmp/again ] || hang ;;
       # Runs something that outgrows the job's cap, as a whole-flake
       # evaluation does, and answers with how that went.
       outgrow)

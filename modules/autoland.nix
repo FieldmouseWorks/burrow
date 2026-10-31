@@ -824,10 +824,11 @@ in
     # catch-up, when it starts and hourly.
     burrow.events.handlers.autoland = {
       # The PR itself (opened, ready, labels, retargeted), pushes, reviews and
-      # their threads, comments (a judge's verdict), CI finishing, and commit
-      # statuses (a proof's verdict).
+      # their threads, comments (a judge's verdict), CI finishing, commit
+      # statuses (a proof's verdict), and the repo itself: made (the App's
+      # own webhook sends that, repos.py app_hook), renamed, archived.
       events = [ "push" "pull_request" "pull_request_review" "pull_request_review_comment"
-        "pull_request_review_thread" "issue_comment" "check_suite" "status" ]
+        "pull_request_review_thread" "issue_comment" "check_suite" "status" "repository" ]
         ++ lib.optional (cfg.dashboard.enable || cfg.flaky.enable) "issues";
       # Of the issues, only Renovate's dashboard (dashboard.py) and flaky
       # tests' (flakes.py; the flaky tool's test.rs has the title).
