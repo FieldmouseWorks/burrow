@@ -195,6 +195,16 @@ pkgs.testers.runNixOSTest {
         out = machine.fail(f"su - dev -c 'proj log {e}'")
         assert "ended without an answer" in out and "refused" in out, out
 
+    with subtest("a dot-named project's job isn't hidden from what goes through the jobs"):
+        for d in (".dotted", "..dotted", ".-dotted"):
+            machine.succeed(f"install -d -o dev -g dev /data/dev/src/{d}")
+            j = proj(f'run {d} "sleep 1"')
+            assert j[0] not in ".-", j
+            assert j in proj("status"), proj("status")
+            machine.wait_until_succeeds(f"su - dev -c 'proj state {j}' | grep -x done", timeout=120)
+            assert machine.succeed(f"cat /data/dev/jobs/{j}/project").strip() == f"/data/dev/src/{d}"
+            machine.succeed(f"rm -rf /data/dev/src/{d}")
+
     with subtest("past maxJobs, jobs wait in line, and --first goes ahead"):
         a = proj('run web "sleep 600"')
         b = proj('run web "sleep 600"')
@@ -517,6 +527,13 @@ pkgs.testers.runNixOSTest {
         for j in (a, b):
             machine.wait_until_succeeds(f"su - dev -c 'proj state {j}' | grep -x running", timeout=120)
         c = proj('run --first web "sleep 1"')
+        q = proj('run web "sleep 1"')
+        # The whole line, next first: --first ahead of plain.
+        # A run returns before its turn has its place: wait for both.
+        machine.wait_until_succeeds(f"ls /data/dev/jobs/.queue | grep -c -e '-{c}$' -e '-{q}$' | grep -x 2", timeout=120)
+        line = proj("status --line").splitlines()
+        assert [(l.split()[0], l.split()[1]) for l in line] == [(c, "first"), (q, "normal")], line
+        proj(f"stop {q}")
         p = proj('run --pipeline web "sleep 1"')
         machine.wait_until_succeeds(f"su - dev -c 'proj state {p}' | grep -x done", timeout=120)
         proj(f'reply {p} "sleep 1"')

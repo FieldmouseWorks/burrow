@@ -1,19 +1,90 @@
-# proj's line: where a turn waits for a slot, and how it takes one
-# (take_slot, which proj.sh's turns call), with pick (pick.sh) saying who goes.
-# Read into one script with the rest of proj (../proj.nix), so jobs, MAX_JOBS,
-# MIN_FREE and the like are proj.sh's.
-# shellcheck disable=SC2154
+# The line for a slot: take_slot, and what it reads. The line is JOBS/.queue:
+# one file per waiting turn, named (entry) so that sorting puts pipeline ones
+# ahead, then --first ones, then the oldest, holding the waiting shell's pid.
+# A slot is a lock on JOBS/.slots/N, and N.who says whose (class and project),
+# so a turn that's killed frees its slot (and its place in line) by itself.
+# pick (pick.sh) says who has a slot.
+#
+# One waiter looks at a time, under JOBS/.slots/.lock, and only those pick
+# names can take a slot, so what a look costs comes out of every waiter's turn
+# at the lock: with the line long, of how soon a free slot gets filled. So a
+# look forks nothing per waiter (and git once per project: class), and it
+# leaves all of pick's choice in JOBS/.slots/.next. For NEXT_FRESH seconds after
+# that, any waiter it doesn't name has nothing to learn and skips its look. It's
+# only ever a reason not to look: a slot is taken only by a look, under the lock.
+# shellcheck disable=SC2034,SC2154 # jobs, spare (proj.sh) and the_place (pick.sh) when this is checked alone
+NEXT_FRESH=2
+# Whatever the note says, a waiter looks this often, which is as long as a job
+# whose class changed can go on holding its old place in line.
+LOOK_EVERY=60
 
-# Memory to spare, in MiB: what the kernel says is available, plus what the
-# ZFS ARC would give back (the kernel doesn't count it).
-spare() {
-  local kb arc
-  kb=$(awk '/^MemAvailable:/ { print $2 }' /proc/meminfo)
-  arc=0
-  if [ -r /proc/spl/kstat/zfs/arcstats ]; then
-    arc=$(awk '$1 == "size" { s = $3 } $1 == "c_min" { m = $3 } END { print (s > m ? int((s - m) / 1024) : 0) }' /proc/spl/kstat/zfs/arcstats)
-  fi
-  echo $(((kb + arc) / 1024))
+# Whether a waiter with this place, which last looked at this time, should look
+# now: it's never looked, or not lately, or there's no fresh note, or the note
+# names it. The note is the time and each name, tab-separated, and may be caught
+# half written: that costs a look, or a pass until the writer's done.
+look_due() {
+  local at='' names=''
+  [ $((EPOCHSECONDS - $2)) -lt "$LOOK_EVERY" ] || return 0
+  { IFS=$'\t' read -r at names <"$jobs/.slots/.next"; } 2>/dev/null || return 0
+  [[ $at =~ ^[0-9]+$ ]] || return 0
+  [ "$at" -le "$EPOCHSECONDS" ] && [ $((EPOCHSECONDS - at)) -lt "$NEXT_FRESH" ] || return 0
+  [[ $'\t'$names$'\t' == *$'\t'"$1"$'\t'* ]]
+}
+
+# Leave what pick said (NAME N lines) as the note, for look_due.
+note_next() {
+  local name n note=$EPOCHSECONDS
+  while IFS=$'\t' read -r name n; do
+    [ -z "$name" ] || note+=$'\t'$name
+  done <<<"$1"
+  printf '%s\n' "$note" >"$jobs/.slots/.next"
+}
+
+# Whether the place at a path is a waiting shell's: its pid's cmdline is that
+# job's _exec.
+waiter_alive() {
+  local pid='' fid=$2
+  local -a args=()
+  line_of pid "$1"
+  [ -n "$pid" ] || return 1
+  { mapfile -d '' -t args <"/proc/$pid/cmdline"; } 2>/dev/null || return 1
+  [[ " ${args[*]} " == *" _exec $fid "* ]]
+}
+
+# A look, for the waiter at ME, job ID, class CLASS: what pick reads, into seen
+# (the slots, then the line, once the places of shells that are gone are
+# cleared), and busy if any slot is taken. Under the lock. A slot's lock can
+# only be tried with flock(1), so that's the forks a look has, one per slot.
+seen='' busy=''
+look() {
+  local me=$1 id=$2 own=$3 i fd who f name fid project
+  seen='' busy=''
+  classes=()
+  for ((i = 1; i <= MAX_JOBS; i++)); do
+    exec {fd}>"$jobs/.slots/$i"
+    if flock -n "$fd"; then seen+="slot"$'\t'"$i"$'\t'"free"$'\n'
+    else
+      busy=1
+      line_of who "$jobs/.slots/$i.who"
+      seen+="slot"$'\t'"$i"$'\t'"${who:-$'-\t-'}"$'\n'
+    fi
+    exec {fd}>&-
+  done
+  for f in "$jobs/.queue"/*; do
+    [ -e "$f" ] || continue
+    name=${f##*/}; fid=${name#*-}; fid=${fid#*-}
+    if [ "$f" = "$me" ]; then
+      the_class=$own
+      line_of project "$jobs/$id/project"
+    elif waiter_alive "$f" "$fid"; then
+      place "$name" "$jobs/$fid"
+      line_of project "$jobs/$fid/project"
+    else
+      rm -f "$f"
+      continue
+    fi
+    seen+="wait"$'\t'"$f"$'\t'"$the_class"$'\t'"$project"$'\n'
+  done
 }
 
 # A turn's place in line, the name JOBS/.queue has for it (PREFIX-WHEN-ID):
@@ -23,34 +94,33 @@ spare() {
 # sorting the names sorts them by when.
 entry() { # id class
   local when
-  if [ -s "$jobs/$1/since" ]; then when=$(cat "$jobs/$1/since")000000000; else when=$(date +%s%N); fi
+  line_of when "$jobs/$1/since"
+  if [ -n "$when" ]; then when+="000000000"; else when=$(date +%s%N); fi
   case $2 in first) echo "1-$when-$1" ;; *) echo "2-$when-$1" ;; esac
 }
 
-# Wait in line for a slot, then hold it on fd $slot until this shell ends.
-# The line is JOBS/.queue: one file per waiting turn, named (entry) so that
-# sorting puts pipeline ones ahead, then --first ones, then the oldest,
-# holding the waiting shell's pid. A slot is a lock on JOBS/.slots/N, and
-# N.who says whose (class and project), so a turn that's killed frees its
-# slot (and its place in line) by itself. pick (pick.sh) says who has a slot. The turn is
-# first or normal, as it was started; its job's class (place, in pick.sh)
-# is asked again every pass, and its place in line, its admission and its
-# slot's N.who all go by that one answer.
+# Wait in line for a slot, then hold it on fd $slot until this shell ends. The
+# turn is first or normal, as it was started; its job's class (place, in
+# pick.sh) is asked again at every look, and its place in line, its admission
+# and its slot's N.who all go by that one answer.
 take_slot() {
-  local id=$1 n=$2 class=$3 me since seen got f fid pid i fd lk busy new LC_ALL=C
+  local id=$1 n=$2 class=$3 me since got i lk new looked=0 project LC_ALL=C
   mkdir -p "$jobs/.queue" "$jobs/.slots"
-  since=$(date +%s)
+  since=$EPOCHSECONDS
   me="$jobs/.queue/$(entry "$id" "$class")"
   trap 'rm -f "$me" "${me%/*}/.${me##*/}.new"' EXIT
   trap 'exit 143' TERM INT
   while :; do
     # Waited long enough: among the --first ones now, by when it came.
-    if [[ ${me##*/} == 2-* ]] && [ $(($(date +%s) - since)) -ge "$MAX_WAIT" ]; then
+    if [[ ${me##*/} == 2-* ]] && [ $((EPOCHSECONDS - since)) -ge "$MAX_WAIT" ]; then
       mv -f "$me" "${me%/*}/1-${me##*/2-}" 2>/dev/null || true
       me="${me%/*}/1-${me##*/2-}"
     fi
+    if ! look_due "$me" "$looked"; then sleep 2; continue; fi
     # Where it stands now, and in the journal if that changed while it waits.
-    IFS=$'\t' read -r class new < <(place "${me##*/}" "$jobs/$id")
+    classes=()
+    place "${me##*/}" "$jobs/$id"
+    class=$the_class new=$the_place
     if [ "$new" != "${me##*/}" ]; then
       if mv -f "$me" "${me%/*}/$new" 2>/dev/null; then echo "proj: it goes as $class now" >&2; fi
       me="${me%/*}/$new"
@@ -62,43 +132,31 @@ take_slot() {
       echo "$$" >"${me%/*}/.${me##*/}.new"
       mv -f "${me%/*}/.${me##*/}.new" "$me"
     fi
-    # One waiter looks at a time, and a slot is taken only under this lock,
-    # so one it sees free stays free until it's done.
+    # A slot is taken only under this lock, so one a look sees free stays free
+    # until it's done. Another waiter's look may have come while this one
+    # waited for it.
     exec {lk}>"$jobs/.slots/.lock"
     flock "$lk"
-    seen='' busy=''
-    for i in $(seq 1 "$MAX_JOBS"); do
-      exec {fd}>"$jobs/.slots/$i"
-      if flock -n "$fd"; then seen+="slot"$'\t'"$i"$'\t'"free"$'\n'
-      else
-        busy=1
-        seen+="slot"$'\t'"$i"$'\t'"$(cat "$jobs/.slots/$i.who" 2>/dev/null || printf -- '-\t-')"$'\n'
-      fi
-      exec {fd}>&-
-    done
-    # The line, once the places of shells that are gone are cleared.
-    for f in "$jobs/.queue"/*; do
-      [ -e "$f" ] || continue
-      fid=${f##*/}; fid=${fid#*-}; fid=${fid#*-}
-      pid=$(cat "$f" 2>/dev/null) || continue
-      if [ "$f" = "$me" ]; then
-        seen+="wait"$'\t'"$f"$'\t'"$class"
-        seen+=$'\t'"$(cat "$jobs/$id/project" 2>/dev/null)"$'\n'
-      elif [ -n "$pid" ] && tr '\0' ' ' 2>/dev/null <"/proc/$pid/cmdline" | grep -qF -- " _exec $fid "; then
-        seen+="wait"$'\t'"$f"$'\t'"$(place "${f##*/}" "$jobs/$fid" | cut -f1)"
-        seen+=$'\t'"$(cat "$jobs/$fid/project" 2>/dev/null)"$'\n'
-      else
-        rm -f "$f"
-      fi
-    done
-    got=$(printf '%s' "$seen" | pick | picked "$me")
+    if ! look_due "$me" "$looked"; then
+      exec {lk}>&-
+      sleep 2
+      continue
+    fi
+    look "$me" "$id" "$class"
+    looked=$EPOCHSECONDS
+    got=$(printf '%s' "$seen" | pick)
+    note_next "$got"
+    i=$(picked "$me" <<<"$got")
     # Short of memory matters only while another job runs: with nothing
     # running, waiting frees nothing.
-    if [ -n "$got" ] && { [ -z "$busy" ] || [ "$(spare)" -ge "$MIN_FREE" ]; }; then
-      i=$got
+    if [ -n "$i" ] && { [ -z "$busy" ] || [ "$(spare)" -ge "$MIN_FREE" ]; }; then
       exec {slot}>"$jobs/.slots/$i"
       if flock -n "$slot"; then
-        printf '%s\t%s\n' "$class" "$(cat "$jobs/$id/project")" >"$jobs/.slots/$i.who"
+        line_of project "$jobs/$id/project"
+        printf '%s\t%s\n' "$class" "$project" >"$jobs/.slots/$i.who"
+        # The note named this one: the next to go needn't wait it out, and
+        # any others it named find theirs in the next look.
+        : >"$jobs/.slots/.next"
         exec {lk}>&-
         rm -f "$me"
         trap - EXIT TERM INT
@@ -111,3 +169,28 @@ take_slot() {
     sleep 2
   done
 }
+
+# Every turn in line, in the order pick takes them (lead ones, then the rest):
+# its job, class, how long it has waited, and its project. Only reads. The wait
+# is from when its place was made, not its name's WHEN, which for a job started
+# --since is when its work began.
+in_line() {
+  local pass f name fid wait project
+  for pass in lead rest; do
+    for f in "$jobs/.queue"/*; do
+      [ -e "$f" ] || continue
+      name=${f##*/}; fid=${name#*-}; fid=${fid#*-}
+      waiter_alive "$f" "$fid" || continue
+      classes=()
+      place "$name" "$jobs/$fid"
+      if [ "$pass" = lead ]; then [ "$the_class" = lead ] || continue
+      else [ "$the_class" != lead ] || continue
+      fi
+      line_of project "$jobs/$fid/project"
+      wait=$(date -r "$f" +%s 2>/dev/null) || continue
+      wait=$((EPOCHSECONDS - wait))
+      printf '%-40s %-8s %4dm%02ds  %s\n' "$fid" "$the_class" $((wait / 60)) $((wait % 60)) "$project"
+    done
+  done
+}
+

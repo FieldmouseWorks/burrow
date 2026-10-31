@@ -154,8 +154,9 @@ owner, since nothing else merges it.
   code. Pin actions to a commit (Renovate keeps them current). Without CI,
   "green" means nothing and dependency updates can't merge themselves.
   The CI is the flake gate the [house style](house-style.md#the-gate-is-the-flake)
-  describes: a `flake.nix` from burrow's template, and the workflow that calls
-  `nix flake check`. Jobs the flake can't hold stay alongside it.
+  describes: a `flake.nix` from burrow's template, the workflow that calls
+  `nix flake check`, and the template's rust-first workflow beside it. Jobs
+  the flake can't hold stay alongside it.
 - **AGENTS.md** with the Code Review Rules section below, plus whatever the
   repo's own agents need (how to build, test and run it). Keep the repo's
   existing text.
@@ -205,7 +206,7 @@ For reviewers, the review bot included. Flag as P1:
   closed PR keeps its commits and can restore the branch). GitHub's
   delete-on-merge only covers merged PRs. `keepBranches` are left alone, and
   bots' branches go only this way.
-- Unmerged branches with no PR and no commit for 14 days are archived, then
+- Unmerged branches with no PR and no commit for 3 days are archived, then
   deleted: the steward keeps the tip at `refs/archive/BRANCH/SHA` in the same
   repo, a ref GitHub keeps but lists with neither branches nor tags, and
   deletes the branch only if it's still at that tip. `git ls-remote origin

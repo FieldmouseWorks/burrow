@@ -122,14 +122,17 @@ miss() {
 }
 
 # One project per GitHub repo: the folder itself, never a linked worktree of it
-# (.git is a file there) or a second clone.
+# (.git is a file there) or a second clone. A hidden folder counts only when
+# it's named for its repo (o/.github in .github).
 declare -A project
-for d in "$SRC"/*/; do
+for d in "$SRC"/*/ "$SRC"/.*/; do
   [ -d "$d/.git" ] || continue
   url=$(git -C "$d" remote get-url origin 2>/dev/null) || continue
   repo=$(sed -E 's#^(https://github.com/|git@github.com:)##; s#\.git$##; s#/$##' <<<"$url")
   [[ $repo == */* ]] || continue
-  [ -n "${project[$repo]:-}" ] || project[$repo]=$(basename "$d")
+  name=$(basename "$d") own=${repo#*/}
+  [[ $name != .* || ${name,,} == "${own,,}" ]] || continue
+  [ -n "${project[$repo]:-}" ] || project[$repo]=$name
 done
 
 looked=()

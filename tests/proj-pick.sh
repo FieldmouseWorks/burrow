@@ -1,12 +1,14 @@
 # proj's choice of who takes a slot (modules/proj/pick.sh), on what take_slot
 # would see: pipeline jobs' slots stay theirs, one project's jobs stop at
 # PER_PROJECT while the others go by, pipeline ones count against no cap, and
-# lead ones go ahead of everyone, every free slot going in one look; and which
+# lead ones go ahead of everyone but leave the rest one slot, every free slot
+# going in one look; and which
 # jobs are pipeline ones: only those
 # in the pipeline's own repos and the machine's flake, and lead ones those in
 # its lead repos.
 #
 #   bash tests/proj-pick.sh modules/proj/pick.sh
+# shellcheck disable=SC2034,SC2154 # classes, the_class and the_place: class and place
 set -euo pipefail
 # shellcheck source=/dev/null
 . "$1"
@@ -108,6 +110,21 @@ PIPELINE_SLOTS=2
 case_ "l 5${NL}p 6" "normal /src/x" "normal /src/y" "normal /src/z" "first /src/z" free free \
   "l lead /src/burrow" "m lead /src/burrow" "p pipeline /src/remi"
 PIPELINE_SLOTS=1
+# And one of the slots anyone may take stays everyone else's while one of
+# theirs waits and none runs, so a lead repo's backlog can't stop all the
+# rest: here the turn behind four lead ones takes the last one.
+case_ "l 1${NL}m 2${NL}n 3${NL}k 4${NL}a 5" free free free free free "pipeline /src/remi" \
+  "l lead /src/burrow" "m lead /src/burrow" "n lead /src/burrow" "k lead /src/burrow" "j lead /src/burrow" "a normal /src/web"
+case_ "a 5" "lead /src/burrow" "lead /src/burrow" "lead /src/burrow" "lead /src/burrow" free "pipeline /src/remi" \
+  "l lead /src/burrow" "a first /src/web"
+# With one of theirs running, none of theirs waiting, or none of those slots
+# free, the lead ones take every slot they're let.
+case_ "l 2${NL}m 3${NL}n 4${NL}k 5" "normal /src/web" free free free free "pipeline /src/remi" \
+  "l lead /src/burrow" "m lead /src/burrow" "n lead /src/burrow" "k lead /src/burrow" "a normal /src/lok"
+case_ "l 1${NL}m 2${NL}n 3${NL}k 4${NL}j 5" free free free free free "pipeline /src/remi" \
+  "l lead /src/burrow" "m lead /src/burrow" "n lead /src/burrow" "k lead /src/burrow" "j lead /src/burrow"
+case_ "l 6" "lead /src/burrow" "lead /src/burrow" "lead /src/burrow" "lead /src/burrow" "lead /src/burrow" free \
+  "l lead /src/burrow" "a normal /src/web"
 MAX_JOBS=4
 # A waiter finds its own slot in what pick says, or nothing.
 assigned="a 1${NL}/q/2-1-b 3"
@@ -176,9 +193,10 @@ echo "$tmp/psiv" >"$tmp/jobs/d/project"
 echo "$tmp/https" >"$tmp/jobs/n/project"
 echo "$tmp/token" >"$tmp/jobs/t/project"
 echo "$tmp/foreign" >"$tmp/jobs/f/project"
+cl() { classes=(); class "$@"; echo "$the_class"; }
 cls() {
   local got
-  got=$(class "$tmp/jobs/$1" "$2")
+  got=$(cl "$tmp/jobs/$1" "$2")
   [ "$got" = "$3" ] || { echo "FAIL: class $1 '$2': wanted $3, got $got" >&2; exit 1; }
 }
 cls p normal pipeline
@@ -195,7 +213,9 @@ cls n "" normal
 # as first, and back.
 plc() {
   local got
-  got=$(place "$1" "$tmp/jobs/$2")
+  classes=()
+  place "$1" "$tmp/jobs/$2"
+  got=$the_class$T$the_place
   [ "$got" = "$3$T$4" ] || { echo "FAIL: place $1 $2: wanted '$3 $4', got '${got//$T/ }'" >&2; exit 1; }
 }
 plc 2-17-p-1-x p pipeline 0-17-p-1-x
@@ -256,7 +276,7 @@ cls v normal first
 cls w normal normal
 dem u ""
 case_ "u 4" "normal $tmp/homelab" "normal $tmp/homelab" "normal $tmp/x" free \
-  "w $(class "$tmp/jobs/w" normal) $tmp/homelab" "v $(class "$tmp/jobs/v" normal) $tmp/psiv" "u $(class "$tmp/jobs/u" normal) $tmp/homelab"
+  "w $(cl "$tmp/jobs/w" normal) $tmp/homelab" "v $(cl "$tmp/jobs/v" normal) $tmp/psiv" "u $(cl "$tmp/jobs/u" normal) $tmp/homelab"
 
 # The flake is the same directory however either side spells it: doubled and
 # trailing slashes, dots, a symlink to it. Its --pipeline job takes the
@@ -273,7 +293,7 @@ for flake in "$tmp/homelab" "$tmp//homelab/" "$tmp/./homelab" "$tmp/jobs/../home
     cls w normal normal
     dem u ""
     case_ "u 4" "normal $proj" "normal $proj" "normal $tmp/x" free \
-      "w $(class "$tmp/jobs/w" normal) $proj" "v $(class "$tmp/jobs/v" normal) $tmp/psiv" "u $(class "$tmp/jobs/u" normal) $proj"
+      "w $(cl "$tmp/jobs/w" normal) $proj" "v $(cl "$tmp/jobs/v" normal) $tmp/psiv" "u $(cl "$tmp/jobs/u" normal) $proj"
   done
 done
 

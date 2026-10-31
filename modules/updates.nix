@@ -259,6 +259,16 @@ let
     repositoryCache = "enabled";
     extends = [ "config:recommended" "helpers:pinGitHubActionDigests" ];
     prHourlyLimit = 0;
+
+    # Commit subjects and PR titles in the house style, `area: plain
+    # sentence` (house/rules.md): "deps: update foo to v1.5". The PR title is
+    # the subject the steward squashes onto main, and house-check fails a PR
+    # whose title isn't. Left to itself Renovate guesses from each repo's
+    # history, and config:recommended's package rules type it fix or chore,
+    # so a package rule below has the final word on the type.
+    semanticCommits = "enabled";
+    semanticCommitType = "deps";
+    semanticCommitScope = null;
     prConcurrentLimit = 20;
 
     # Three days before a release counts: hijacked npm and crates releases are
@@ -346,6 +356,12 @@ let
         matchUpdateTypes = [ "lockFileMaintenance" ];
         matchManagers = [ "nix" ];
         minimumReleaseAgeBehaviour = "timestamp-optional";
+      }
+      {
+        # config:recommended's own rules type a dependency fix and the rest
+        # chore; in the house style every update is "deps:".
+        matchPackageNames = [ "*" ];
+        semanticCommitType = "deps";
       }
     ] ++ lib.optional (rcfg.trustedOwners != [ ]) {
       # A dependency on a repo of trustedOwners' (a pinned workflow, an
