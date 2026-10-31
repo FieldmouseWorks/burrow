@@ -13,6 +13,7 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.parse
 
 tmp = tempfile.mkdtemp()
 
@@ -196,12 +197,12 @@ with open(f"{tmp}/config.json", "w") as f:
         "owners": ["sam"], "exclude": [], "context": "review-settled", "rulesets": True, "keepBranches": [],
         "app": {"id": 7, "slug": "steward"},
         "baselineJobs": False, "baselinePerPass": 1, "authors": ["sam"], "bots": ["dependabot", "renovate", "workers"], "machinery": None,
-        "stateDir": f"{tmp}/state", "majorKey": f"{tmp}/sweep.key", "projectsDir": f"{tmp}/none", "renovateEmail": "bot@renovateapp.com", "proj": "proj", "jobTimeout": 60, "jobIdle": 20, "reviewTimeout": 30, "owner": "Sam", "cleanBranches": False,
-        "labels": {"hold": "hold", "owner": "needs-owner", "first": "first"}, "notify": {"repo": "", "assignee": "", "label": "autoland"}, "inbox": {"enable": False, "label": "claude", "authors": ["sam"]},
+        "stateDir": f"{tmp}/state", "snapDir": f"{tmp}/trees", "majorKey": f"{tmp}/sweep.key", "projectsDir": f"{tmp}/none", "jobsDir": f"{tmp}/jobs", "renovateEmail": "bot@renovateapp.com", "proj": "proj", "jobTimeout": 60, "jobIdle": 20, "proofTimeout": 180, "heavy": None, "reviewTimeout": 30, "owner": "Sam", "cleanBranches": False,
+        "labels": {"hold": "hold", "owner": "needs-owner", "first": "first", "waiting": {"releaseAge": "waiting: release age", "proofSlot": "waiting: proof slot", "reviewer": "waiting: reviewer"}}, "notify": {"repo": "", "assignee": "", "label": "autoland"}, "inbox": {"enable": False, "label": "claude", "unstickLabel": "unstick", "authors": ["sam"]},
         "dashboard": {"enable": False, "waitDays": 4, "errorDays": 1, "title": "Dependency Dashboard",
                       "renovateKick": "http://127.0.0.1:9/kick/renovate", "renovate": None,
                       "renovateRuns": f"{tmp}/renovate-runs"},
-        "flaky": {"enable": False, "bin": f"{tmp}/flaky"},
+        "flaky": {"enable": False, "bin": f"{tmp}/flaky", "jobTimeout": 240},
         "defaults": {"rounds": 5,
                      "oneWay": ONE_WAY, "handoffAfter": 30, "sessionHandoffAfter": 90, "settleDelay": 3,
                      "stallAfter": 120, "holdStallAfter": 480, "renovateMergeAfter": 60,
@@ -254,8 +255,8 @@ C.token = lambda owner: f"ghs_app_{owner}"
 # tell one's word from the other's. review.py runs the one real agent.
 V.NAMES["rival"] = "Rival"
 
-for d in (V.QUEUE, V.SNAP, V.DONE, V.SESSIONS, V.GIT):
-    os.makedirs(f"{tmp}/state/{d}")
+for d in (V.QUEUE, V.SNAP, V.TREES, V.DONE, V.SESSIONS, V.GIT):
+    os.makedirs(os.path.join(f"{tmp}/state", d))
 
 
 def sh(*a, cwd=None):
@@ -263,7 +264,9 @@ def sh(*a, cwd=None):
 
 
 head = "a" * 40
-WROTE, JOBS, POSTED = [], [], []
+WROTE, JOBS, POSTED, FORGOT = [], [], [], []
+SINCE = []  # each job's place in line (C.job's since), in the order they started
+DESCRIBED = []  # the description each posted review was shown (its fingerprint)
 COMMITS = {}  # a PR's commits' author emails, by number, as `pr view --json commits` gives them (None: the ask fails)
 PR_DIFF = {"v": ""}  # what `gh pr diff` gives
 
@@ -278,6 +281,10 @@ def acting():
     ACTING.append(C._for[-1])
 
 
+# Where a PR's head leaves its base, as GitHub's compare says, by the base
+# branch's name ("v" for any other): None, it says nothing. FORKS: its
+# answers in turn, before FORK's, while there are any.
+FORK, FORKS = {"v": "f" * 40}, []
 RULES = {}  # the rules on a branch of sam/r, by its name in the path: none unless set, or what GitHub raises
 PROTECTION = {}  # the same for a branch's classic protection: a 404 unless set
 
@@ -306,6 +313,13 @@ def gh_stub(*a, **k):
         return {"allow_auto_merge": True, "delete_branch_on_merge": True, "allow_squash_merge": True}
     if a[:2] == ("pr", "diff"):
         return PR_DIFF["v"]
+    if a[:1] == ("api",) and a[1].startswith("repos/sam/r/compare/") and "{fork: .merge_base_commit.sha}" in a:
+        # Read as GitHub reads its URL: a `#` ends it, a `?` starts its
+        # query, and what's left is decoded once.
+        path = a[1].removeprefix("repos/sam/r/compare/").partition("#")[0].partition("?")[0]
+        base, dots, _ = path.partition("...")
+        fork = FORKS.pop(0) if FORKS else FORK.get(urllib.parse.unquote(base), FORK["v"]) if dots else None
+        return {"fork": fork} if fork else None
     return ""
 
 
@@ -324,8 +338,9 @@ def write(*a, **k):
     return None
 
 
-def job(repo, task, clone=False):
+def job(repo, task, clone=False, since=None):
     JOBS.append(task)
+    SINCE.append(since)
     return f"job-{len(JOBS)}"
 
 
@@ -338,19 +353,36 @@ def queue(repo, pr, key, r):
     if STUB["queue"]:
         raise STUB["queue"]
     C.save(f"{V.QUEUE}/{V.item_name(key, r, pr['headRefOid'], pr['baseRefName'])}.json",
-           {"reviewer": r, "repo": repo, "number": pr["number"], "headRefOid": pr["headRefOid"], "baseRefName": pr["baseRefName"]})
+           {"reviewer": r, "repo": repo, "number": pr["number"], "headRefOid": pr["headRefOid"], "baseRefName": pr["baseRefName"],
+            "body": pr["body"]})
 
 
-def post(repo, pr, r, answer):
+def post(repo, pr, r, answer, description):
     if STUB["post"]:
         raise STUB["post"]
     if not isinstance(answer, dict) or not isinstance(answer.get("findings"), list):
         raise ValueError("not a review")
     POSTED.append((r, pr["headRefOid"], len(answer["findings"])))
+    DESCRIBED.append(description)
     return "findings" if answer["findings"] else "clean"
 
 
 STATES = {}  # a job's state, by id, as `proj state` says it: running unless set
+STOPPED = []  # the jobs `proj stop` ended, in order
+UNSTOPPABLE = set()  # the jobs `proj stop` can't stop
+
+
+def stop_job(jid):
+    """proj stop: the job's over, and `proj state` says it failed (its turn's
+    unit was stopped before it wrote an outcome); one in UNSTOPPABLE is
+    refused."""
+    if jid in UNSTOPPABLE:
+        return False
+    STOPPED.append(jid)
+    STATES[jid] = "failed"
+    return True
+
+
 T0 = "2026-10-24T00:00:00Z"
 # The times a PR's status names (H.clock) are in the machine's zone: UTC here.
 os.environ["TZ"] = "UTC"
@@ -364,17 +396,22 @@ info = {"squashMergeAllowed": True, "mergeCommitAllowed": False, "rebaseMergeAll
 STEWARD = {"login": "steward", "__typename": "Bot"}
 
 
-def rv_review(r, k, sha=head, at="2026-10-24T00:11:00Z", who=None, base="main"):
-    """A review the steward posted for reviewer r, with k findings; with
-    who, one a user of that login posted with the same marker."""
+def rv_review(r, k, sha=head, at="2026-10-24T00:11:00Z", who=None, base="main", body=""):
+    """A review the steward posted for reviewer r, with k findings, shown
+    the description `body`; with who, one a user of that login posted with
+    the same marker."""
     author = STEWARD if who is None else {"login": who, "__typename": "User"}
     return {"author": author, "state": "COMMENTED", "submittedAt": at, "commit": {"oid": sha},
-            "body": f"<!-- {r}-review:v1 " + json.dumps({"commit_sha": sha, "base": base, "findings": k}) + " -->"}
+            "body": f"<!-- {r}-review:v1 " + json.dumps({"commit_sha": sha, "base": base, "findings": k,
+                                                          "description": C.fingerprint(body)}) + " -->"}
 
 
-def judgment(v, n=6, sha=head, base="main"):
-    """A judge's verdict line, sealed as its task gives it."""
-    return f"<!-- autoland-judgment: {v} {sha} {C.seal('sam/r', n, 'autoland-judgment', v, sha, base)} -->"
+def judgment(v, n=6, sha=head, base="main", body="", on=None):
+    """A judge's verdict line, sealed as its task gives it: on the PR's base
+    and the description `body`, or on `on` (the base alone, as they were
+    before descriptions were judged)."""
+    on = on or f"{base} {C.fingerprint(body)}"
+    return f"<!-- autoland-judgment: {v} {sha} {C.seal('sam/r', n, 'autoland-judgment', v, sha, on)} -->"
 
 
 def swept(v, n=8, sha=head, base="main"):
@@ -408,9 +445,9 @@ def mkpr(reviews=(), comments=(), threads=(), draft=False, number=5, sha=head, f
 
 
 def clean(sha=head, comments=(), reviews=(), **kw):
-    """A PR both reviewers found nothing on, at `sha` on its base."""
-    base = kw.get("base", "main")
-    return mkpr(reviews=[*reviews, rv_review("codex", 0, sha, base=base), rv_review("rival", 0, sha, base=base)],
+    """A PR both reviewers found nothing on, at `sha` on its base, shown its description."""
+    base, body = kw.get("base", "main"), kw.get("body", "")
+    return mkpr(reviews=[*reviews, rv_review("codex", 0, sha, base=base, body=body), rv_review("rival", 0, sha, base=base, body=body)],
                 comments=comments, sha=sha, **kw)
 
 
@@ -422,6 +459,7 @@ def run(pr, after, obsolete=False):
     C.NOW = C.ts(T0) + after
     WROTE.clear()
     JOBS.clear()
+    SINCE.clear()
     C.WAKE.clear()
     C.LIMITED.clear()
     POSTED.clear()
@@ -451,8 +489,10 @@ def worker(**back):
     for x in os.listdir(QDIR):
         r = x.partition("--")[0]
         item = json.load(open(f"{QDIR}/{x}"))
-        C.save(f"{V.DONE}/{x}", {**back.get(r, {"result": "review", "answer": {"findings": []}}), "at": C.NOW,
-                                 "head": item.get("headRefOid"), "base": item.get("baseRefName")})
+        said = back.get(r, {"result": "review", "answer": {"findings": []}})
+        # A review carries the description it was shown, as the service's do.
+        shown = {"description": C.fingerprint(item["body"])} if said["result"] == "review" else {}
+        C.save(f"{V.DONE}/{x}", {**shown, **said, "at": C.NOW, "head": item.get("headRefOid"), "base": item.get("baseRefName")})
         os.remove(f"{QDIR}/{x}")
 
 
@@ -462,18 +502,23 @@ def pr_state(n=5):
 
 def fresh_pr_state():
     shutil.rmtree(f"{tmp}/state")
-    for d in (V.QUEUE, V.SNAP, V.DONE, V.SESSIONS, V.GIT):
-        os.makedirs(f"{tmp}/state/{d}")
+    shutil.rmtree(V.TREES)
+    for d in (V.QUEUE, V.SNAP, V.TREES, V.DONE, V.SESSIONS, V.GIT):
+        os.makedirs(os.path.join(f"{tmp}/state", d))
 
 
-REAL = {"job": C.job}  # the steward's own, for the checks of what it runs
+REAL = {"job": C.job, "stop_job": C.stop_job, "forget_issues": C.forget_issues, "app_hook": R.app_hook}  # the steward's own, for the checks of what it runs
 
 
 def stand_in():
-    """gh, Claude jobs, the queue and the posting, for handle() and the passes."""
+    """gh, Claude jobs, the queue, the posting and the App's webhook, for
+    handle() and the passes."""
     C.gh = gh_stub
     C.write = write
     C.job = job
+    R.app_hook = lambda: None
     C.job_state = lambda jid: STATES.get(jid, "running")
+    C.stop_job = stop_job
+    C.forget_issues = FORGOT.append
     V.queue = queue
     V.post = post

@@ -27,9 +27,16 @@ let
   # Client-side mode is new in sccache 0.19; burrow's nixpkgs has 0.15. Its
   # daemon still runs whatever compiler a client outside client-side mode
   # names, so this one is patched to refuse, and the client compiles itself.
+  # sccache also keys a compile on every CARGO_ variable, so a target dir
+  # named by CARGO_TARGET_DIR or CARGO_BUILD_TARGET_DIR made each new target
+  # dir miss everything; the second patch leaves those two out, as sccache
+  # already leaves out --out-dir.
   # Only the local disk cache is used, so none of the cloud backends either.
   sccache = inputs.nixpkgs-unstable.legacyPackages.${pkgs.stdenv.hostPlatform.system}.sccache.overrideAttrs (old: {
-    patches = (old.patches or [ ]) ++ [ ./rust-cache/sccache-storage-only.patch ];
+    patches = (old.patches or [ ]) ++ [
+      ./rust-cache/sccache-storage-only.patch
+      ./rust-cache/sccache-target-dir-key.patch
+    ];
     cargoBuildNoDefaultFeatures = true;
   });
   # No config file: the environment below is all of it, for the daemon and
@@ -170,9 +177,6 @@ in
         RuntimeDirectory = [ "rust-cache-${u}" ];
         RuntimeDirectoryMode = "0700";
         BindPaths = [ cache ];
-        # A message being stored takes about twice its size.
-        MemoryMax = "4G";
-        MemorySwapMax = 0;
         PrivateNetwork = true;
         RestrictAddressFamilies = [ "AF_UNIX" ];
         NoNewPrivileges = true;

@@ -66,6 +66,9 @@ let
     (lib.attrNames (autoland.repos or { }));
   train = cfg.enable && autolandRepo != null && (autoland.enable or false)
     && (autoland.repos.${autolandRepo}.train or false);
+  # Every repo whose PRs land through its train: Renovate merges none there.
+  trainRepos = lib.optionals (autoland.enable or false)
+    (lib.attrNames (lib.filterAttrs (_: r: r.train or false) (autoland.repos or { })));
 
   # The longest a Renovate run goes on (seconds): renovate-sweep waits that
   # long after taking a refresh request back before a job may push.
@@ -78,7 +81,6 @@ let
     PROJECT = project;
     DIR = stateDir;
     WORK = "${config.burrow.scratchDir}/${update}";
-    SCRATCH = config.burrow.scratchDir;
     SRC = config.burrow.projectsDir;
     FLAKE = config.burrow.flake;
     ORIGIN = cfg.origin;
@@ -90,6 +92,8 @@ let
     SYSTEM = system;
     MANIFEST = if cfg.claudeManifest == null then "" else cfg.claudeManifest;
     CHECKS = lib.concatStringsSep " " cfg.checks;
+    # burrow.cpu's slots, which the VM tests wait for where the machine has them.
+    HEAVY = if config.burrow.cpu.enable then "${tools.heavy}/bin/heavy" else "";
     WITHIN = cfg.confirmWithin;
     CHANNEL = "nixos-${config.system.nixos.release}";
     OWNER = config.burrow.owner;
@@ -105,6 +109,10 @@ let
     REVIEW_HINTS = cfg.firmware.reviewHints;
     # The autoland steward's commit status, which renovate-sweep doesn't count as CI.
     SETTLED = config.burrow.autoland.context or "review-settled";
+    # In a train repo, the steward's App as GraphQL names its bot, and the
+    # train's status, which counts as CI only from that App (updates/propose.sh).
+    STEWARD = if train then autoland.app.slug else "";
+    TRAIN_CONTEXT = if train then config.burrow.ledger.trainContext else "";
     # The repos the steward covers, as it last found them; none without it.
     COVERED = if config.burrow.autoland.enable or false then "${stateDir}/autoland/repos.json" else "";
     SEAL = "${majorSeal}/bin/major-seal";
@@ -137,7 +145,7 @@ let
   calls = [ tools.proj tools.notify ];
   healthTool = script health ./updates/health.sh (with pkgs; [ coreutils gnugrep gnused gawk systemd ]);
   # Its own functions first (they run only once update.sh has defined what they call).
-  updateTool = script update [ ./updates/dispatch.sh ./updates/propose.sh ./updates/push.sh ./updates/update.sh ] (
+  updateTool = script update [ ./updates/dispatch.sh ./updates/running.sh ./updates/propose.sh ./updates/push.sh ./updates/check.sh ./updates/update.sh ] (
     (with pkgs; [ coreutils jq curl util-linux systemd gnugrep gnused gawk vulnix config.nix.package ])
     ++ [ config.programs.git.package healthTool tools.switch tools.confirm machineGh ] ++ calls ++ lib.optional (tools ? boot) tools.boot
   );
@@ -400,7 +408,15 @@ let
   renovateSettings = renovatePolicy // {
     # The one command a repo's refresh may run after it (lock-age).
     allowedCommands = (renovatePolicy.allowedCommands or [ ]) ++ [ lockAgeAllowed ];
-    packageRules = (renovatePolicy.packageRules or [ ]) ++ [ lockAgeRule ];
+    packageRules = (renovatePolicy.packageRules or [ ]) ++ [ lockAgeRule ] ++ lib.optional (trainRepos != [ ]) {
+      # The steward merges these, through the train onto the default branch,
+      # and the rules there refuse anyone else's merge: Renovate only opens them. Last, so it has the
+      # final word over every rule above. A security fix keeps its own
+      # automerge (Renovate applies vulnerabilityAlerts after every package
+      # rule), and the same rules refuse it.
+      matchRepositories = trainRepos;
+      automerge = false;
+    };
   };
 
   # Whether Renovate's autodiscoverFilter takes a repo, by Renovate's own code
@@ -431,6 +447,7 @@ in
 {
   imports = [
     (import ./common.nix inputs)
+    { key = "burrow/cpu"; imports = [ (import ./cpu.nix inputs) ]; }
     { key = "burrow/notify"; imports = [ (import ./notify.nix inputs) ]; }
     { key = "burrow/switch"; imports = [ (import ./switch.nix inputs) ]; }
     { key = "burrow/proj"; imports = [ (import ./proj.nix inputs) ]; }
@@ -744,7 +761,7 @@ in
 
         - `${update}` (on each push to main or a watched input, and hourly) bumps every flake input${lib.optionalString (cfg.claudeManifest != null) " and Claude Code"},
           builds, runs the VM tests, switches, checks health, confirms and
-          ${if train then "puts it up as a PR from its branch `${update}`, which the merge train lands (while that's open it brings in nothing newer, and rides it on main instead)" else "pushes to main"}.
+          ${if train then "puts it up as a PR from its branch `${update}`, which the merge train lands (while that's open it brings in nothing newer, and rides it on main instead, unless a check fails on it: then a fresh bump replaces its head)" else "pushes to main"}.
           It deploys main too, so a merged PR goes live the same way. It
           holds off while a switch is pending or while ${config.networking.hostName} runs changes that
           aren't on main, so ${if train then "put what you switch to up as a PR: only the merge train moves main" else "commit and push what you switch to"}.

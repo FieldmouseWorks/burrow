@@ -91,7 +91,7 @@ let
   robot = config.burrow.robot.enable or false;
 in
 {
-  imports = [ (import ./common.nix inputs) ];
+  imports = [ (import ./common.nix inputs) ./claude/etc.nix ];
 
   options.burrow.claude = {
     enable = lib.mkEnableOption "system-wide Claude Code with reversibility-classed permissions";
@@ -133,8 +133,15 @@ in
   config = lib.mkIf cfg.enable {
     environment.systemPackages = [ cfg.package ];
 
-    environment.etc."claude-code/managed-settings.json".text = builtins.toJSON managed;
-    environment.etc."claude-code/CLAUDE.md".text = cfg.machineMd;
+    # Copies, not links into the store (claude/etc.nix).
+    environment.etc."claude-code/managed-settings.json" = {
+      mode = "0444";
+      text = builtins.toJSON managed;
+    };
+    environment.etc."claude-code/CLAUDE.md" = {
+      mode = "0444";
+      text = cfg.machineMd;
+    };
 
     # Logins and history live in ~/.claude.
 

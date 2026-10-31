@@ -200,7 +200,8 @@ def act(repo, n, st, mine):
     if not jid:
         log(f"{repo}: couldn't start a Claude job for its dashboard (no checkout, or proj refused)")
         mine.append((NO_JOB, f"{repo}#{n}", "for what's stuck on Renovate's dashboard"))
-        C.wake(repo, C.NOW + 5 * MIN)  # ends: listed on the stuck issue
+        if not C.taken(repo):  # no use looking again until that folder moves: a full pass will
+            C.wake(repo, C.NOW + 5 * MIN)  # ends: listed on the stuck issue
         return
     log(f"{repo}: a Claude job {jid} for {len(todo)} stuck on its dashboard")
     for it in todo:

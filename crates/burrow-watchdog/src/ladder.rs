@@ -24,7 +24,17 @@ pub fn run(cfg: &Config, world: &dyn World, now: f64) -> Result<(), String> {
         mut stalls,
         mut missing,
         mut closing,
+        withdraw,
     } = load(dir, "state.json");
+    // A state from before it kept these has every job its stalls on the stuck
+    // issue were handed still to go.
+    let mut withdraw = withdraw.unwrap_or_else(|| {
+        stalls
+            .values()
+            .filter(|st| st.entry.is_some())
+            .filter_map(|st| st.job.clone())
+            .collect()
+    });
     let before = published(&stalls);
     let (found, due) = overdue(cfg, now, &mut missing);
     let mut wakes: Vec<f64> = due.into_iter().collect();
@@ -37,6 +47,7 @@ pub fn run(cfg: &Config, world: &dyn World, now: f64) -> Result<(), String> {
     for s in gone {
         let st = stalls.remove(&s).expect("a stall it has");
         println!("moving again: {}", line(&st.item));
+        withdraw.extend(st.job.clone());
         if st.told.is_some() && !cfg.notify.is_empty() {
             closing.insert(s, st);
         }
@@ -52,7 +63,7 @@ pub fn run(cfg: &Config, world: &dyn World, now: f64) -> Result<(), String> {
         stalls.insert(s, st);
     }
     closing.retain(|s, st| {
-        notice(cfg, world, s, st, false);
+        notice(cfg, world, s, st, Some(MOVING));
         held(cfg, world, s)
     });
 
@@ -72,18 +83,28 @@ pub fn run(cfg: &Config, world: &dyn World, now: f64) -> Result<(), String> {
         st.key = cur.key;
         st.item = cur.item;
         let kick = st.item.kick.clone().filter(|k| !k.is_empty());
+        // On the stuck issue, but one it can't take now (no steward to
+        // publish it, or it has turned out to be that issue's own job): off
+        // it, whatever else stands, and on through the steps below to the
+        // owner, or on with their notice if they've had one.
+        if st.entry.is_some() && !issue_takes(cfg, st) {
+            st.entry = None;
+        }
         if let Some(until) = st.snoozed.filter(|&t| t > now) {
             wakes.push(until);
+        } else if st.entry.is_some() {
+            // On the stuck issue, whose own job takes it from there: none of
+            // it is the owner's. One they were told of before that job took
+            // it on has its notice closed, again each pass until it is.
+            if st.told.is_some() {
+                notice(cfg, world, &s, st, Some(ON_ISSUE));
+                if !held(cfg, world, &s) {
+                    st.told = None;
+                }
+            }
         } else if let Some(told) = st.told {
             if now >= told + RENOTIFY {
                 tell(cfg, world, &s, st, now);
-            }
-        } else if let Some(escalated) = st.escalated {
-            if now >= escalated + cfg.owner_after {
-                println!("still stalled, telling {}: {}", cfg.owner, line(&st.item));
-                tell(cfg, world, &s, st, now);
-            } else {
-                wakes.push(escalated + cfg.owner_after);
             }
         } else if let Some(job) = st.job.clone() {
             let state = world.proj(&["state", &job]).1;
@@ -103,12 +124,13 @@ pub fn run(cfg: &Config, world: &dyn World, now: f64) -> Result<(), String> {
             if now < at {
                 wakes.push(at);
             } else {
-                escalate(cfg, world, &s, st, now, &mut wakes);
+                escalate(cfg, world, &s, st, now);
+                withdraw.insert(job);
             }
         } else if st.item.line {
             // Waiting for a slot: a job would join the same line, ahead of
             // it. The stuck issue's one job looks at the line as a whole.
-            escalate(cfg, world, &s, st, now, &mut wakes);
+            escalate(cfg, world, &s, st, now);
         } else if let (Some(kick), None) = (&kick, st.kicked) {
             println!("stalled, kicked {kick}: {}", line(&st.item));
             world.kick(kick);
@@ -118,7 +140,7 @@ pub fn run(cfg: &Config, world: &dyn World, now: f64) -> Result<(), String> {
             wakes.push(kicked + GRACE);
         } else if st.tried.is_some() && now >= st.first + cfg.escalate_after {
             // No job could take it all that time.
-            escalate(cfg, world, &s, st, now, &mut wakes);
+            escalate(cfg, world, &s, st, now);
         } else if let Some(tried) = st.tried.filter(|&t| now < t + RETRY) {
             wakes.push((tried + RETRY).min(st.first + cfg.escalate_after));
         } else {
@@ -160,6 +182,17 @@ pub fn run(cfg: &Config, world: &dyn World, now: f64) -> Result<(), String> {
         });
     }
 
+    // Its own jobs whose stalls have all moved on, moving again or on to the
+    // stuck issue's job: one still waiting for a slot has done nothing yet,
+    // and would only take one from the line for what's no longer its to fix.
+    // One the owner was told of keeps its job, the only Claude still on it.
+    let needed: BTreeSet<&String> = stalls
+        .values()
+        .filter(|st| st.entry.is_none())
+        .filter_map(|st| st.job.as_ref())
+        .collect();
+    withdraw.retain(|job| needed.contains(job) || !withdrawn(world, job));
+
     // The stuck issue: the steward publishes this with the rest of it, on
     // the pass this kicks when it changed.
     let after = published(&stalls);
@@ -176,6 +209,7 @@ pub fn run(cfg: &Config, world: &dyn World, now: f64) -> Result<(), String> {
             stalls,
             missing,
             closing,
+            withdraw: Some(withdraw),
         },
     )?;
     let wake = match wakes.into_iter().reduce(f64::min) {
@@ -214,31 +248,47 @@ fn start_job(cfg: &Config, world: &dyn World, stalls: &[&Stall]) -> Option<Strin
     (ok && !out.is_empty()).then_some(out)
 }
 
-/// The step after a job: the steward's stuck issue, or the owner when
-/// there's no steward to publish it or it's the steward that's stuck.
-fn escalate(
-    cfg: &Config,
-    world: &dyn World,
-    s: &str,
-    st: &mut Stall,
-    now: f64,
-    wakes: &mut Vec<f64>,
-) {
+/// Its own job ended if its turn still waits for a slot (proj withdraw, which
+/// looks and stops under the lock a turn takes its slot under, so one that
+/// has started is never stopped): whether that's settled, the job withdrawn,
+/// at work or over. One proj can't settle is asked about again next pass.
+fn withdrawn(world: &dyn World, job: &str) -> bool {
+    let (ok, out) = world.proj(&["withdraw", job]);
+    if !ok {
+        println!("couldn't withdraw proj job {job}, none of whose stalls need it now");
+    } else if out == "withdrawn" {
+        println!("withdrew proj job {job}: none of its stalls need it now");
+    }
+    ok
+}
+
+/// The step after a job: the steward's stuck issue, whose own job (proj
+/// run --unstick) takes it from there, so it's never the owner's; or the
+/// owner, when there's no steward to publish that issue, when it's the
+/// steward that's stuck, or when it's that very job (the issue would only
+/// hand it to itself).
+fn escalate(cfg: &Config, world: &dyn World, s: &str, st: &mut Stall, now: f64) {
     st.escalated = Some(now);
-    if cfg.steward_kick.is_some() && !(st.source == STEWARD && st.key.is_empty()) {
+    if issue_takes(cfg, st) {
         println!("still stalled, on the stuck issue: {}", line(&st.item));
         st.entry = Some(entry(&st.item));
-        wakes.push(now + cfg.owner_after);
     } else {
         println!("still stalled, telling {}: {}", cfg.owner, line(&st.item));
         tell(cfg, world, s, st, now);
     }
 }
 
+/// Whether the stuck issue can take a stall: there's a steward to publish
+/// it, and it isn't the steward's own stall, nor that of the job that takes
+/// the issue.
+fn issue_takes(cfg: &Config, st: &Stall) -> bool {
+    cfg.steward_kick.is_some() && !(st.source == STEWARD && st.key.is_empty()) && !st.item.unstick
+}
+
 /// The owner's notice, sent (again: notify can't say it went through).
 fn tell(cfg: &Config, world: &dyn World, s: &str, st: &mut Stall, now: f64) {
     st.told = Some(now);
-    notice(cfg, world, s, st, true);
+    notice(cfg, world, s, st, None);
 }
 
 /// The notice's key in notify: the same for a stall from pass to pass.
@@ -250,21 +300,30 @@ pub fn notice_key(s: &str) -> String {
     format!("stalled-{}", &hex[..12])
 }
 
-/// The owner's notice of one stall (notify): opened, or closed once it
-/// clears.
-fn notice(cfg: &Config, world: &dyn World, s: &str, st: &Stall, up: bool) {
+/// What a notice closes with: its stall cleared.
+const MOVING: &str = "It's moving again.";
+/// What a notice closes with: the stuck issue's job has its stall now.
+const ON_ISSUE: &str =
+    "It's on the pipeline's stuck issue now, whose own Claude job takes it from there.";
+
+/// The owner's notice of one stall (notify): opened (closed None), or closed
+/// saying why.
+fn notice(cfg: &Config, world: &dyn World, s: &str, st: &Stall, closed: Option<&str>) {
     if cfg.notify.is_empty() {
-        if up {
+        if closed.is_none() {
             println!("no notify to tell {} with: {}", cfg.owner, line(&st.item));
         }
         return;
     }
     let key = notice_key(s);
-    if up {
-        let (title, body) = notice_words(cfg, &st.item);
-        world.notify(&["open", &key, &title, &body]);
-    } else {
-        world.notify(&["close", &key, "It's moving again."]);
+    match closed {
+        None => {
+            let (title, body) = notice_words(cfg, &st.item);
+            world.notify(&["open", &key, &title, &body]);
+        }
+        Some(why) => {
+            world.notify(&["close", &key, why]);
+        }
     }
 }
 

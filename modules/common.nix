@@ -67,9 +67,12 @@ inputs:
             default = "${dirOf config.burrow.projectsDir}/scratch";
             defaultText = lib.literalExpression ''"''${dirOf config.burrow.projectsDir}/scratch"'';
             description = ''
-              Throwaway clones and worktrees (the update pipeline's own clone, the
-              fix jobs' worktrees). Outside projectsDir, so they get no Remote
-              Control server.
+              Throwaway clones and worktrees: the update pipeline's own clone, and
+              each proj job's own dir (jobs/ID), cleared once the job is over.
+              Outside projectsDir, so they get no Remote Control server. Keep it
+              out of rolling snapshots (a dataset of its own on ZFS): build
+              output churns through gigabytes, and a snapshot holds on to all of
+              it until the snapshot goes.
             '';
           };
 
@@ -119,32 +122,6 @@ inputs:
             description = "The Claude Code build, here and in the agent sandboxes.";
           };
 
-          claude.memory = {
-            high = mkOption {
-              type = types.str;
-              default = "40%";
-              example = "24G";
-              description = ''
-                Where every Claude this machine runs on its own (proj jobs, Remote
-                Control servers and their sessions) starts being slowed and pushed
-                to give memory back: claude.slice's MemoryHigh, a size or a share
-                of the machine's memory.
-              '';
-            };
-            max = mkOption {
-              type = types.str;
-              default = "50%";
-              example = "30G";
-              description = ''
-                The most they may hold between them (claude.slice's MemoryMax), none
-                of it in swap: swap would let them grow past it without ever reaching
-                it. Past it the kernel kills a Claude, proj jobs first, rather than
-                anything else on the machine: CI, services, the ZFS ARC. Leave room
-                for those.
-              '';
-            };
-          };
-
           claude.machineMd = mkOption {
             type = types.lines;
             default = "";
@@ -164,22 +141,22 @@ inputs:
           configureFlags = old.configureFlags ++ [ "--disable-cgroups" ];
         });
 
-        # In the user's systemd manager, where proj jobs (claude-jobs.slice)
-        # and Remote Control servers (claude-rc.slice) run. Many headless
-        # Claudes at a few GB each once ran a machine out of memory and the
-        # kernel killed a CI run instead of one of them; capped here, they
-        # can only run out of their own. Not into swap either: what they
-        # swap is past the cap and still costs the machine, zram's in RAM and
-        # a disk's in I/O. One whose caps allowed it thrashed until it hung,
-        # with the kernel killing nothing.
-        config.systemd.user.slices.claude = {
-          description = "Every Claude that runs on its own";
-          sliceConfig = {
-            MemoryHigh = config.burrow.claude.memory.high;
-            MemoryMax = config.burrow.claude.memory.max;
-            MemorySwapMax = 0;
-          };
+        # Marks folders trusted in the user's Claude Code config, for the
+        # Claudes that start in one with nobody at their terminal to answer
+        # its question about it (claude/trust.sh).
+        config.burrow.tools.claude-trust = pkgs.writeShellApplication {
+          name = "claude-trust";
+          runtimeInputs = [ pkgs.coreutils pkgs.findutils pkgs.jq ];
+          text = builtins.readFile ./claude/trust.sh;
         };
+
+        # In the user's systemd manager, where proj jobs (claude-jobs.slice)
+        # and Remote Control servers (claude-rc.slice) run. No limit of its
+        # own: the kernel shares memory out, the servers keep theirs back
+        # when the machine runs short (burrow.remoteControl.memoryLow), and
+        # the jobs are what it gives up. A ceiling or a throttle here killed
+        # and stalled Claudes on remi while memory sat free (10-30, 10-31).
+        config.systemd.user.slices.claude.description = "Every Claude that runs on its own";
 
         # The git the machine and burrow's units run. curl 8.23 strips the
         # credentials from the URL it reports, and git 2.54 takes that for a

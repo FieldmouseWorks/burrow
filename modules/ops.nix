@@ -1,8 +1,9 @@
 # Kernel, hardware and firmware tooling for an agent that runs the machine
 # all the way down (run it with sudo), plus a systemd watchdog so a hung box
 # reboots into its last good generation, and systemd-oomd so a box running
-# out of memory loses the job that ate it rather than drowning. Firmware
-# updates are on offer; installing one is an R2 (claude.nix).
+# out of memory loses the job that ate it rather than drowning, with the
+# ways in keeping memory back so you can still reach it. Firmware updates
+# are on offer; installing one is an R2 (claude.nix).
 inputs:
 { config, lib, pkgs, ... }:
 let
@@ -24,6 +25,19 @@ let
   device = "/dev/${link}";
   rule = ''SUBSYSTEM=="watchdog", ATTR{identity}=="${cfg.watchdogIdentity}", SYMLINK+="${link}"'';
   omit = { serviceConfig.ManagedOOMPreference = "omit"; };
+  # The ways in and what minds the machine, each keeping MiB back (protect).
+  # Each connection's sshd@ runs in system-sshd.slice, so that's where theirs
+  # goes.
+  ssh = config.services.openssh;
+  kept = 256;
+  keeping = lib.filterAttrs (_: on: on) {
+    "sshd.service" = ssh.enable && !ssh.startWhenNeeded;
+    "system-sshd.slice" = ssh.enable && ssh.startWhenNeeded;
+    "tailscaled.service" = config.services.tailscale.enable;
+    "systemd-networkd.service" = config.systemd.network.enable;
+    "systemd-journald.service" = true;
+    "systemd-oomd.service" = cfg.oomd;
+  };
 in
 {
   imports = [
@@ -65,18 +79,30 @@ in
         reclaims the most once a slice spends 80% of its time stalled on
         memory for 30s: every slice but the root and the users' (a login
         session is watched on its own), and in each user's manager every
-        slice but its root and claude.slice. The kernel's own OOM killer
-        waits until memory and swap are gone, and with zram it can thrash
-        first for as long as it likes. sshd (socket-activated or not),
+        slice but its root, claude.slice and claude-rc.slice. The kernel's
+        own OOM killer waits until memory and swap are gone, and with zram
+        it can thrash first for as long as it likes. sshd (socket-activated or not),
         tailscaled, the switch's own units (burrow.switch) and Remote Control
-        servers (burrow.remoteControl) are never picked. claude.slice, with
-        proj's jobs and the servers, is the kernel's: it and each unit in it
-        have a cap of their own and no swap.
+        servers (burrow.remoteControl) are never picked, and proj's jobs
+        (claude-jobs.slice) are watched like any other slice. A server's own
+        pressure is the kernel's: past its backstop it kills there alone.
+      '';
+    };
+    protect = lib.mkOption {
+      type = lib.types.bool;
+      default = true;
+      description = ''
+        Have the ways in and what minds the machine keep memory back
+        (systemd's MemoryLow, ${toString kept}M each): sshd and every ssh connection,
+        tailscaled, systemd-networkd, the journal and systemd-oomd. When the
+        machine runs short, the kernel takes memory from everything else
+        first, so you can still get in and oomd can still act. It costs
+        nothing while there's room.
       '';
     };
   };
 
-  config = lib.mkIf cfg.enable {
+  config = lib.mkIf cfg.enable (lib.mkMerge [ {
     environment.systemPackages = with pkgs; [
       # processes and kernel
       strace
@@ -150,15 +176,15 @@ in
 
     # Pressure is watched on every slice but the ones that hold Remote Control
     # servers: the root, user.slice, user-UID.slice, and in a user's manager
-    # its root and claude.slice. oomd honours a user's unit's
+    # its root, claude.slice and claude-rc.slice. oomd honours a user's unit's
     # ManagedOOMPreference only for a watch on a cgroup that user owns, so a
     # watch on any of the first three would kill a whole server, every
     # session on it, and one in the user's manager would kill a bystander for
-    # pressure inside a server. Nor inside claude.slice: at its MemoryHigh
-    # every job under it is slowed, which is what that soft limit is for, and
-    # a watch on the jobs would kill one whole for it. A login session, in
-    # user-UID.slice, is watched on its own. Swap is watched on the root:
-    # claude.slice holds none, so that watch never picks a Claude.
+    # pressure inside a server: one at its own backstop. proj's jobs, in
+    # claude-jobs.slice, are watched like any other slice, and are what it
+    # kills first there. A login session, in user-UID.slice, is watched on
+    # its own. Swap is watched on the root: a server holds none, so that
+    # watch never picks one.
     systemd.oomd = lib.mkIf cfg.oomd {
       enable = true;
       settings.OOM.DefaultMemoryPressureLimit = "80%";
@@ -169,8 +195,8 @@ in
       (pressure "system" "session-.scope" "kill")
       (pressure "user" "slice" "kill")
     ] ++ map (unit: pressure "system" unit "auto") [ "-.slice" "user.slice" "user-.slice" ]
-      # claude-.slice: every slice in claude.slice, proj's and the servers'.
-      ++ map (unit: pressure "user" unit "auto") [ "-.slice" "claude.slice" "claude-.slice" ]);
+      ++ map (unit: pressure "user" unit "auto")
+        [ "-.slice" "claude.slice" "claude-rc.slice" ]);
     # The ways in. openssh always has sshd@ (each connection's sshd, with
     # startWhenNeeded) and has sshd only without it; naming a unit it doesn't
     # have would make a stub of it.
@@ -188,5 +214,16 @@ in
       perf, bpftrace and the bcc tools, strace, gdb, tcpdump, nvme-cli, smartctl,
       dmidecode, sensors, fwupdmgr. Most need sudo.
     '';
-  };
+  } (lib.mkIf cfg.protect {
+    # What the ways in keep back, and system.slice, above them, all of it:
+    # a cgroup keeps no more than its parent does.
+    systemd.services = lib.mapAttrs' (unit: _:
+      lib.nameValuePair (lib.removeSuffix ".service" unit) { serviceConfig.MemoryLow = "${toString kept}M"; })
+      (lib.filterAttrs (unit: _: lib.hasSuffix ".service" unit) keeping);
+    systemd.slices = {
+      system.sliceConfig.MemoryLow = "${toString (kept * builtins.length (builtins.attrNames keeping))}M";
+    } // lib.mapAttrs' (unit: _:
+      lib.nameValuePair (lib.removeSuffix ".slice" unit) { sliceConfig.MemoryLow = "${toString kept}M"; })
+      (lib.filterAttrs (unit: _: lib.hasSuffix ".slice" unit) keeping);
+  }) ]);
 }

@@ -15,7 +15,7 @@ use burrow_watchdog::ladder::{run, snooze};
 use burrow_watchdog::state::{Stall, State, load};
 use burrow_watchdog::watch::sid;
 use burrow_watchdog::world::World;
-use burrow_watchdog::{ESCALATED, GRACE, MIN, RENOTIFY, RETRY, SNOOZE_MAX, START};
+use burrow_watchdog::{ESCALATED, GRACE, IN_LINE, MIN, RENOTIFY, RETRY, SNOOZE_MAX, START};
 use serde_json::{Value, json};
 
 /// The tests' clock.
@@ -26,10 +26,11 @@ const H: f64 = 3600.0;
 struct Fake {
     /// Every proj call's arguments.
     proj: RefCell<Vec<Vec<String>>>,
-    /// What `proj state JOB` answers ("done" for one it doesn't name), and
-    /// whether `proj run` fails.
+    /// What `proj state JOB` answers ("done" for one it doesn't name, failed
+    /// once it's withdrawn), and whether `proj run` or `proj withdraw` fails.
     states: RefCell<HashMap<String, String>>,
     refuse: Cell<bool>,
+    stuck: Cell<bool>,
     kicks: RefCell<Vec<String>>,
     /// notify's calls but `pending`.
     notices: RefCell<Vec<Vec<String>>>,
@@ -47,6 +48,19 @@ impl World for Fake {
         match args[0] {
             "run" if self.refuse.get() => (false, String::new()),
             "run" => (true, format!("job-{}", log.len())),
+            "withdraw" if self.stuck.get() => (false, String::new()),
+            "withdraw" => {
+                let mut states = self.states.borrow_mut();
+                let said = match states.get(args[1]).map(String::as_str) {
+                    Some("queued") => "withdrawn",
+                    Some("running") => "running",
+                    _ => "over",
+                };
+                if said == "withdrawn" {
+                    states.insert(args[1].into(), "failed".into());
+                }
+                (true, said.into())
+            }
             _ => (
                 true,
                 self.states
@@ -139,7 +153,6 @@ impl Machine {
             app: None,
             kick: "http://127.0.0.1:8788/kick".into(),
             escalate_after: 7200.0,
-            owner_after: 14400.0,
             steward_kick: Some("autoland".into()),
             labels: Some(Labels {
                 owner: "needs-owner".into(),
@@ -197,6 +210,17 @@ impl Machine {
             .collect()
     }
 
+    /// Every job it asked proj to withdraw, once an ask.
+    fn withdrawals(&self) -> Vec<String> {
+        self.world
+            .proj
+            .borrow()
+            .iter()
+            .filter(|a| a[0] == "withdraw")
+            .map(|a| a[1].clone())
+            .collect()
+    }
+
     fn kicks(&self) -> Vec<String> {
         self.world.kicks.borrow().clone()
     }
@@ -217,17 +241,13 @@ impl Machine {
     }
 
     /// A stall taken to the owner, in the fewest passes: when they heard.
+    /// The stuck issue's own job waiting for its slot is one. The steward
+    /// writes its file all the while, with nothing in it.
     fn told_at(&self) -> f64 {
-        self.write(
-            &self.steward,
-            json!({"sam/r#7": item(T - 3.0 * H, T - MIN, None)}),
-            T,
-        );
+        self.write(&self.steward, json!({}), T);
+        self.write(&self.line, json!({"homelab-9": unstick(true)}), T);
         self.run(T);
-        self.run(T + MIN);
-        self.run(T + MIN + GRACE);
-        self.run(T + MIN + GRACE + 14400.0);
-        T + MIN + GRACE + 14400.0
+        T
     }
 }
 
@@ -238,6 +258,20 @@ fn item(since: f64, due: f64, kick: Option<&str>) -> Value {
 
 fn named(what: &str, phase: &str, since: f64, due: f64) -> Value {
     json!({"what": what, "link": null, "phase": phase, "since": since, "due": due, "kick": null})
+}
+
+/// The stuck issue's own job (proj run --unstick), past its deadline: waiting
+/// for its slot, or at work.
+fn unstick(line: bool) -> Value {
+    let phase = if line {
+        "turn 2 is waiting for the --unstick slot, which another --unstick turn holds"
+    } else {
+        "turn 2 is running"
+    };
+    let mut it = named("proj job homelab-9", phase, T - 3.0 * H, T - MIN);
+    it["line"] = line.into();
+    it["unstick"] = true.into();
+    it
 }
 
 // Nothing to watch: nothing done, and a pass booked only for when the
@@ -344,7 +378,9 @@ fn machinery_app() {
 
 // The job at work has escalateAfter; one still queued START, since what it's
 // about may be the slot it waits for: then the stuck issue, through the
-// steward's next pass, which is kicked to publish it.
+// steward's next pass, which is kicked to publish it. Nothing more is booked
+// for it, nor does the owner hear: the next look is only for the steward
+// going stale.
 #[test]
 fn jobs_time_up() {
     for (state, until) in [("running", 7200.0), ("queued", START)] {
@@ -372,19 +408,132 @@ fn jobs_time_up() {
         );
         assert_eq!(
             (m.kicks(), wake),
-            (vec!["autoland".to_owned()], Some(T + until + 14400.0))
+            (vec!["autoland".to_owned()], Some(T + until + 86400.0))
         );
         assert!(m.notices().is_empty());
     }
 }
 
-// A job that ended with it still stuck: its fix gets GRACE to show, then the
-// stuck issue. Still stuck ownerAfter later: the owner hears, a notice for
-// the stall, sent again every RENOTIFY while it lasts (notify can't say it
-// got through), by whatever pass comes first. Once it moves, the notice
-// closes and nothing's left of the stall.
+// Its own job, still waiting for a slot once its stalls have moved on, is
+// withdrawn (proj withdraw): it has done nothing, and would only take a slot
+// from the line for what's no longer its. Moving again, or on to the stuck
+// issue (at START, say): at once. One proj can't settle is asked about again
+// on the next pass. A state from before it kept these has the jobs of its
+// stalls on the issue to go.
 #[test]
-fn stuck_issue_then_owner() {
+fn withdraws_its_job() {
+    let stalled = |m: &Machine| {
+        m.write(
+            &m.steward,
+            json!({"sam/r#7": item(T - 3.0 * H, T - MIN, None)}),
+            T,
+        );
+        m.run(T);
+        m.state_of("job-1", "queued");
+        m.run(T + MIN);
+        assert!(m.withdrawals().is_empty());
+    };
+    let gone = |m: &Machine| m.world.states.borrow()["job-1"] == "failed";
+    let kept = |m: &Machine| m.state().withdraw.unwrap_or_default();
+
+    let m = Machine::new();
+    stalled(&m);
+    m.write(&m.steward, json!({}), T);
+    assert_eq!(m.run(T + 2.0 * MIN).1, BTreeMap::new());
+    assert!(m.withdrawals() == ["job-1"] && gone(&m));
+    m.run(T + 3.0 * MIN);
+    assert_eq!(m.withdrawals(), ["job-1"]);
+    assert!(kept(&m).is_empty());
+
+    let m = Machine::new();
+    stalled(&m);
+    m.world.stuck.set(true);
+    m.run(T + START);
+    assert_eq!(
+        (m.escalated().len(), m.withdrawals()),
+        (1, vec!["job-1".into()])
+    );
+    assert_eq!(kept(&m), BTreeSet::from(["job-1".into()]));
+    m.world.stuck.set(false);
+    m.run(T + START + MIN);
+    assert!(m.withdrawals() == ["job-1", "job-1"] && gone(&m));
+    m.run(T + START + 2.0 * MIN);
+    assert!(m.withdrawals().len() == 2 && kept(&m).is_empty());
+    assert_eq!((m.escalated().len(), m.notices()), (1, vec![]));
+
+    let m = Machine::new();
+    stalled(&m);
+    m.world.stuck.set(true);
+    m.run(T + START);
+    let path = m.cfg.state_dir.join("state.json");
+    let mut saved: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    saved.as_object_mut().unwrap().remove("withdraw");
+    fs::write(&path, saved.to_string()).unwrap();
+    m.world.stuck.set(false);
+    m.run(T + START + MIN);
+    assert!(m.withdrawals() == ["job-1", "job-1"] && gone(&m));
+}
+
+// Its own job is left be once it's at work, and while a stall it was handed
+// with still has it: one job takes every stall that's ready in a pass, and
+// one of them moving on leaves the job the rest. One the owner hears of
+// keeps its job too (here, with no steward), queued or not: it's the only
+// Claude still on it.
+#[test]
+fn keeps_a_job_it_needs() {
+    let m = Machine::new();
+    m.write(
+        &m.steward,
+        json!({"sam/r#7": item(T - 3.0 * H, T - MIN, None)}),
+        T,
+    );
+    m.run(T);
+    m.state_of("job-1", "running");
+    m.write(&m.steward, json!({}), T);
+    m.run(T + MIN);
+    m.run(T + 2.0 * MIN);
+    assert_eq!(m.withdrawals(), ["job-1"]);
+    assert_eq!(m.world.states.borrow()["job-1"], "running");
+    assert_eq!(m.state().withdraw, Some(BTreeSet::new()));
+
+    let m = Machine::new();
+    let mut q = item(T - 3.0 * H, T - MIN, None);
+    q["what"] = "PR #2 in sam/q".into();
+    m.write(
+        &m.steward,
+        json!({"sam/r#7": item(T - 3.0 * H, T - MIN, None), "sam/q#2": q}),
+        T,
+    );
+    m.run(T);
+    assert_eq!(m.runs().len(), 1);
+    m.state_of("job-1", "queued");
+    m.write(&m.steward, json!({"sam/q#2": q}), T);
+    assert_eq!(m.run(T + MIN).1.len(), 1);
+    assert!(m.withdrawals().is_empty());
+    m.write(&m.steward, json!({}), T);
+    m.run(T + 2.0 * MIN);
+    assert_eq!(m.withdrawals(), ["job-1"]);
+
+    let mut m = Machine::new();
+    m.cfg.steward_kick = None;
+    m.write(
+        &m.line,
+        json!({"homelab-1": named("proj job homelab-1", "waiting for a slot", T - H, T - MIN)}),
+        T,
+    );
+    m.run(T);
+    m.state_of("job-1", "queued");
+    m.run(T + START);
+    m.run(T + START + MIN);
+    assert_eq!((m.notices().len(), m.withdrawals()), (1, vec![]));
+}
+
+// A job that ended with it still stuck: its fix gets GRACE to show, then the
+// stuck issue, and that's the last step: the issue's own job has it, however
+// long it lasts, and the owner never hears of it. Once it moves, it's gone
+// from the issue.
+#[test]
+fn stuck_issue_is_last() {
     let m = Machine::new();
     m.write(
         &m.steward,
@@ -400,11 +549,69 @@ fn stuck_issue_then_owner() {
         (m.escalated().len(), m.kicks()),
         (1, vec!["autoland".to_owned()])
     );
+    for later in [4.0 * H, 3.0 * 86400.0] {
+        m.run(T + MIN + GRACE + later);
+    }
+    assert_eq!((m.notices(), m.escalated().len()), (vec![], 1));
 
-    let told = T + MIN + GRACE + 14400.0;
-    m.run(told - 1.0);
-    assert!(m.notices().is_empty());
-    m.run(told);
+    m.write(&m.steward, json!({}), T);
+    assert_eq!(m.run(T + 4.0 * 86400.0).1, BTreeMap::new());
+    assert_eq!((m.notices(), m.escalated().len()), (vec![], 0));
+    assert_eq!(m.kicks().last().map(String::as_str), Some("autoland"));
+}
+
+// The owner was told of a stall the stuck issue has now (told before its own
+// job took the issue on): that notice is closed, saying so, and they aren't
+// told again. A close that doesn't get through is sent again every pass.
+#[test]
+fn old_notice_closes() {
+    let m = Machine::new();
+    m.write(
+        &m.steward,
+        json!({"sam/r#7": item(T - 3.0 * H, T - MIN, None)}),
+        T,
+    );
+    m.run(T);
+    m.run(T + MIN);
+    m.run(T + MIN + GRACE);
+    assert_eq!(m.escalated().len(), 1);
+    let s = sid("autoland", "sam/r#7", T - 3.0 * H);
+    let key = burrow_watchdog::ladder::notice_key(&s);
+    let path = m.cfg.state_dir.join("state.json");
+    let mut saved: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    saved["stalls"][&s]["told"] = (T + MIN + GRACE).into();
+    fs::write(&path, saved.to_string()).unwrap();
+    m.world.kept.borrow_mut().insert(key.clone());
+    m.world.opened.borrow_mut().insert(key.clone());
+
+    m.world.down.set(true);
+    m.run(T + H);
+    m.run(T + H + MIN);
+    m.world.down.set(false);
+    let (_, stalls) = m.run(T + H + 2.0 * MIN);
+    let on_issue = [
+        "close",
+        key.as_str(),
+        "It's on the pipeline's stuck issue now, whose own Claude job takes it from there.",
+    ];
+    assert_eq!(m.notices(), vec![on_issue; 3]);
+    assert!(stalls[&s].told.is_none() && stalls[&s].entry.is_some());
+    assert_eq!((m.opened(), m.escalated().len()), (0, 1));
+    m.run(T + H + RENOTIFY);
+    assert_eq!(m.notices().len(), 3);
+}
+
+// The stuck issue's own job is the one stall it can't take, since it would
+// only hand it to itself: waiting for its slot past its deadline, the owner
+// hears at once (a job of its own would only queue too); at work past it, a
+// job looks first. Told, the notice is sent again every RENOTIFY while it
+// lasts (notify can't say it got through), by whatever pass comes first.
+// Once it moves, the notice closes and nothing's left of the stall.
+#[test]
+fn unstick_is_the_owners() {
+    let m = Machine::new();
+    let told = m.told_at();
+    assert!(m.runs().is_empty() && m.escalated().is_empty());
     let notices = m.notices();
     let [notice] = &notices[..] else {
         panic!("{notices:?}")
@@ -414,22 +621,42 @@ fn stuck_issue_then_owner() {
         notice[1].starts_with("stalled-") && notice[1].len() == 20,
         "{notice:?}"
     );
-    assert_eq!(notice[2], "Stuck: PR #7 in sam/r (\"fix it\")");
-    assert!(
-        notice[3].contains("https://github.com/sam/r/pull/7") && notice[3].contains("on box show")
-    );
-    assert_eq!((m.escalated().len(), m.opened()), (1, 1));
+    assert_eq!(notice[2], "Stuck: proj job homelab-9");
+    for want in [
+        "waiting for the --unstick slot",
+        "takes the pipeline's stuck issue",
+        "on box show",
+    ] {
+        assert!(notice[3].contains(want), "{want}: {notice:?}");
+    }
+    assert_eq!(m.opened(), 1);
     m.run(told + RENOTIFY - 1.0);
     assert_eq!(m.notices().len(), 1);
     m.run(told + RENOTIFY);
     assert_eq!((&m.notices()[1], m.opened()), (notice, 1));
 
-    m.write(&m.steward, json!({}), T);
+    m.write(&m.line, json!({}), T);
     assert_eq!(m.run(told + 2.0 * RENOTIFY).1, BTreeMap::new());
     assert_eq!(m.notices()[2], ["close", &notice[1], "It's moving again."]);
     assert_eq!((m.opened(), m.escalated().len()), (0, 0));
-    assert_eq!(m.kicks().last().map(String::as_str), Some("autoland"));
     assert!(m.state().closing.is_empty());
+
+    let m = Machine::new();
+    m.write(&m.line, json!({"homelab-9": unstick(false)}), T);
+    m.run(T);
+    assert_eq!(m.runs().len(), 1);
+    m.state_of("job-1", "done");
+    m.run(T + MIN);
+    m.run(T + MIN + GRACE);
+    let notices = m.notices();
+    let [notice] = &notices[..] else {
+        panic!("{notices:?}")
+    };
+    assert!(
+        notice[0] == "open" && notice[3].contains("takes the pipeline's stuck issue"),
+        "{notice:?}"
+    );
+    assert!(m.escalated().is_empty());
 }
 
 // GitHub down: a notice that didn't get through is sent again once it's
@@ -444,7 +671,7 @@ fn github_down() {
     m.run(told + RENOTIFY);
     assert_eq!(m.opened(), 1);
     m.world.down.set(true);
-    m.write(&m.steward, json!({}), T);
+    m.write(&m.line, json!({}), T);
     for day in 1..=4 {
         m.run(T + 86400.0 * day as f64);
         assert_eq!((m.opened(), m.state().closing.len()), (1, 1), "day {day}");
@@ -466,21 +693,17 @@ fn back_again() {
     m.told_at();
     assert_eq!(m.opened(), 1);
     m.world.down.set(true);
-    m.write(&m.steward, json!({}), T);
+    m.write(&m.line, json!({}), T);
     m.run(T + 6.0 * H);
     m.world.down.set(false);
     let closes = || m.notices().iter().filter(|n| n[0] == "close").count();
     assert_eq!(closes(), 1);
-    m.write(
-        &m.steward,
-        json!({"sam/r#7": item(T - 3.0 * H, T - MIN, None)}),
-        T,
-    );
+    m.write(&m.line, json!({"homelab-9": unstick(true)}), T);
     let (_, stalls) = m.run(T + 6.0 * H + MIN);
     let [st] = &stalls.values().collect::<Vec<_>>()[..] else {
         panic!()
     };
-    assert!(st.told.is_some() && m.escalated().len() == 1 && m.state().closing.is_empty());
+    assert!(st.told.is_some() && m.state().closing.is_empty());
     m.run(T + 6.0 * H + 2.0 * MIN);
     assert_eq!((m.opened(), closes()), (1, 1));
 }
@@ -523,8 +746,9 @@ fn one_job_a_pass() {
 }
 
 // A turn that's only waiting for a slot gets no job of its own, which would
-// join the line ahead of it: it goes straight to the stuck issue, whose one job
-// looks at the line as a whole. Then the owner, as any stall does.
+// join the line ahead of it: it goes straight to the stuck issue, whose one
+// job looks at the line as a whole (it never waits in it), and stays there:
+// the owner doesn't hear.
 #[test]
 fn in_line() {
     let m = Machine::new();
@@ -545,7 +769,11 @@ fn in_line() {
     );
     m.run(T);
     assert_eq!(m.runs(), Vec::<Vec<String>>::new());
-    assert_eq!(m.escalated().len(), 2);
+    let got = m.escalated();
+    assert!(
+        got.len() == 2 && got.iter().all(|e| e[0] == IN_LINE),
+        "{got:?}"
+    );
     assert!(m.kicks().contains(&"autoland".to_owned()));
     // Anything else that's stuck beside it still gets its job, and the job's
     // task doesn't name what's in line.
@@ -559,6 +787,60 @@ fn in_line() {
     let [job] = &runs[..] else { panic!("{runs:?}") };
     assert!(job[10].contains("PR #7"));
     assert!(!job[10].contains("homelab-1"));
+    m.run(T + 86400.0);
+    assert!(m.notices().is_empty());
+}
+
+// A stall already on the stuck issue that the issue can't take now goes on
+// to the owner, and off the issue: when there's no steward any more to
+// publish it, or when it turns out to be that issue's own job (made one
+// later, proj unstick), which the issue would only hand to itself. One the
+// owner was told of before (as main told them after ownerAfter, keeping it
+// on the issue) comes off too, its notice kept open and sent again.
+#[test]
+fn issue_cant_take_it() {
+    for (gone, told) in [(true, false), (false, false), (true, true), (false, true)] {
+        let why = format!("gone {gone}, told {told}");
+        let mut m = Machine::new();
+        m.write(&m.steward, json!({}), T);
+        let mut it = named(
+            "proj job homelab-9",
+            "turn 1 is waiting in line for a slot",
+            T - 3.0 * H,
+            T - MIN,
+        );
+        it["line"] = true.into();
+        m.write(&m.line, json!({"homelab-9": it.clone()}), T);
+        m.run(T);
+        assert_eq!((m.escalated().len(), m.notices().len()), (1, 0), "{why}");
+        let s = sid("proj", "homelab-9", T - 3.0 * H);
+        let key = burrow_watchdog::ladder::notice_key(&s);
+        if told {
+            let path = m.cfg.state_dir.join("state.json");
+            let mut saved: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            saved["stalls"][&s]["told"] = T.into();
+            fs::write(&path, saved.to_string()).unwrap();
+            m.world.kept.borrow_mut().insert(key.clone());
+            m.world.opened.borrow_mut().insert(key.clone());
+        }
+        if gone {
+            m.cfg.steward_kick = None;
+        } else {
+            it["unstick"] = true.into();
+            m.write(&m.line, json!({"homelab-9": it}), T);
+        }
+        m.run(T + MIN);
+        assert!(m.escalated().is_empty(), "{why}");
+        let opens = || m.notices().iter().filter(|n| n[0] == "open").count();
+        assert!(
+            m.notices().iter().all(|n| n[0] == "open"),
+            "{why}: {:?}",
+            m.notices()
+        );
+        assert_eq!((opens(), m.opened()), (usize::from(!told), 1), "{why}");
+        m.run(T + MIN + RENOTIFY);
+        assert_eq!(opens(), 1 + usize::from(!told), "{why}");
+    }
 }
 
 // A job that couldn't start is tried again RETRY later, and after

@@ -201,7 +201,7 @@ other_repo, dashed = V.snap_name("pr-sam_q-1.json", "e" * 40, "main"), V.snap_na
 retargeted = V.snap_name("pr-sam_r-5.json", head, "release/1.x")
 assert retargeted != live_snap
 for s in (gone, live_snap, other_repo, dashed, retargeted):
-    os.makedirs(f"{tmp}/state/{V.SNAP}/{s}")
+    os.makedirs(f"{V.TREES}/{s}")
     C.save(f"{V.SNAP}/{s}.json", {})
     C.save(f"{V.QUEUE}/rival--{s}.json", {})
     C.save(f"{V.DONE}/codex--{s}.json", {})
@@ -209,14 +209,17 @@ for s in (gone, live_snap, other_repo, dashed, retargeted):
 # entry locked, as the reviewers' service holds it) keeps its snapshot, and
 # what came back from its earlier heads stays for its next pass to post.
 running = V.snap_name("pr-sam_r-5.json", "c" * 40, "main")
-os.makedirs(f"{tmp}/state/{V.SNAP}/{running}")
+# And what a take that died partway left of a live head's checkout: the
+# finished one is moved into place whole, so this is never read, and goes.
+os.makedirs(f"{V.TREES}/{live_snap}.new")
+os.makedirs(f"{V.TREES}/{running}")
 C.save(f"{V.SNAP}/{running}.json", {})
 C.save(f"{V.QUEUE}/codex--{running}.json", {})
 held = open(f"{tmp}/state/{V.QUEUE}/codex--{running}.json")
 fcntl.flock(held, fcntl.LOCK_SH)
 V.sweep({"sam_r", "sam_lo-k"}, {live_snap})
 held.close()
-left = sorted(x for d in (V.SNAP, V.QUEUE, V.DONE) for x in os.listdir(f"{tmp}/state/{d}"))
+left = sorted(x for d in (V.TREES, V.SNAP, V.QUEUE, V.DONE) for x in os.listdir(os.path.join(f"{tmp}/state", d)))
 assert left == sorted([live_snap, live_snap + ".json", other_repo, other_repo + ".json",
                        f"rival--{live_snap}.json", f"rival--{other_repo}.json",
                        f"codex--{live_snap}.json", f"codex--{other_repo}.json",
@@ -225,10 +228,34 @@ assert left == sorted([live_snap, live_snap + ".json", other_repo, other_repo + 
 # Once it's done, the next sweep takes its snapshot.
 V.remove(f"{tmp}/state/{V.QUEUE}/codex--{running}.json")
 V.sweep({"sam_r", "sam_lo-k"}, {live_snap})
-assert not os.path.exists(f"{tmp}/state/{V.SNAP}/{running}") and os.path.exists(f"{tmp}/state/{V.DONE}/codex--{gone}.json")
+assert not os.path.exists(f"{V.TREES}/{running}") and os.path.exists(f"{tmp}/state/{V.DONE}/codex--{gone}.json")
 # And a PR that's gone takes everything with it.
 V.sweep({"sam_r", "sam_lo-k"}, set())
-left = sorted(x for d in (V.SNAP, V.QUEUE, V.DONE) for x in os.listdir(f"{tmp}/state/{d}"))
+left = sorted(x for d in (V.TREES, V.SNAP, V.QUEUE, V.DONE) for x in os.listdir(os.path.join(f"{tmp}/state", d)))
 assert left == sorted([other_repo, other_repo + ".json", f"rival--{other_repo}.json", f"codex--{other_repo}.json"]), left
+# All but a look the reviewers' service is on, whoever's code runs it (it
+# need only hold its entry's lock): its entry, its snapshot and its session
+# stay until it ends, so nothing it writes after lands where another PR's
+# would, and the sweep says what it left. Its PR's other sessions go. The
+# next sweep once it's done takes the rest.
+os.makedirs(f"{V.TREES}/{running}")
+C.save(f"{V.SNAP}/{running}.json", {})
+C.save(f"{V.QUEUE}/codex--{running}.json", {})
+on, off = V.session_name("codex", running), V.session_name("rival", running)
+for x in (on, off):
+    os.makedirs(f"{tmp}/state/{V.SESSIONS}/{x}")
+held = open(f"{tmp}/state/{V.QUEUE}/codex--{running}.json")
+fcntl.flock(held, fcntl.LOCK_SH)
+assert V.sweep({"sam_r"}, set()) == [f"codex--{running}.json"]
+assert os.path.isdir(f"{V.TREES}/{running}") and os.path.exists(f"{tmp}/state/{V.QUEUE}/codex--{running}.json")
+sessions = os.listdir(f"{tmp}/state/{V.SESSIONS}")
+assert on in sessions and off not in sessions, sessions
+held.close()
+C.save(f"{V.DONE}/codex--{running}.json", {})  # what came back as it ended
+V.remove(f"{tmp}/state/{V.QUEUE}/codex--{running}.json")
+assert V.sweep({"sam_r"}, set()) == []
+left = sorted(x for d in (V.TREES, V.SNAP, V.QUEUE, V.DONE) for x in os.listdir(os.path.join(f"{tmp}/state", d)))
+assert left == sorted([other_repo, other_repo + ".json", f"rival--{other_repo}.json", f"codex--{other_repo}.json"]), left
+assert all(x.startswith(V.GONE) for x in os.listdir(f"{tmp}/state/{V.SESSIONS}")), os.listdir(f"{tmp}/state/{V.SESSIONS}")
 
 print("answers: ok")

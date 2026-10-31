@@ -1,6 +1,10 @@
 # What a look at proj's line costs (modules/proj/line.sh): the forks it takes
 # don't grow with the line, git runs at most once per project, and the note of
 # who's next lets every other waiter skip its look, for as long as it's fresh.
+# And where a turn stands in it: from when its job's work began (--since),
+# with MAX_WAIT from when it came. And that a turn says it has its slot only
+# under its job's lock, and stops saying it may be withdrawn under that lock
+# before it's handed over.
 #
 #   bash tests/proj-line.sh modules/proj/pick.sh modules/proj/line.sh
 # shellcheck disable=SC2154 # seen and busy, from look
@@ -82,7 +86,7 @@ got=$(wc -l <"$tmp/git.log")
 [ "$got" -le 3 ] || fail "a look ran git $got times for 3 projects"
 [ "$(grep -c '^wait' <<<"$seen")" = 60 ] || fail "a look lost waiters: $seen"
 grep -q "^wait$T$jobs/.queue/2-1000-job0${T}pipeline$T$tmp/burrow\$" <<<"$seen" || fail "job0 as a pipeline one in burrow: $seen"
-grep -q "^wait$T$jobs/.queue/2-1002-job2${T}first$T$tmp/web\$" <<<"$seen" || fail "job2 as first in web: $seen"
+grep -q "^wait$T$jobs/.queue/2-1002-job2${T}steward$T$tmp/web\$" <<<"$seen" || fail "job2 as steward in web: $seen"
 
 # The forks don't grow with the line.
 line_of_size 3
@@ -159,7 +163,7 @@ rm -rf "${jobs:?}/.queue" "${jobs:?}/.slots"
 mkdir -p "$jobs/.queue" "$jobs/.slots"
 sleep 3 # so no place is left of the shell above
 MAX_JOBS=1 PIPELINE_SLOTS=0
-export -f look look_due note_next waiter_alive take_slot pick picked place class line_of github_repo origin listed flake_project spare
+export -f look look_due note_next waiter_alive entry take_slot took_slot pick within_share picked place class line_of github_repo origin listed flake_project spare
 export jobs NEXT_FRESH LOOK_EVERY MAX_JOBS PIPELINE_SLOTS
 exec {held}>"$jobs/.slots/1"
 flock -n "$held"
@@ -212,14 +216,99 @@ done
 for i in 2 3 4; do [ ! -e "$jobs/w$i/took" ] || fail "w$i took a slot ahead of the line"; done
 [ "$(in_queue)" = 3 ] || fail "two took slots, and $(in_queue) are left of five"
 
+# A turn says it has its slot (N.slot, proj state's running) only under its
+# job's lock, which proj withdraw looks and stops under: with that held, the
+# head of the line takes the free slot and waits to say so.
+kill "${pids[@]}" 2>/dev/null || true
+wait "${pids[@]}" 2>/dev/null || true
+pids=()
+rm -rf "${jobs:?}/.queue" "${jobs:?}/.slots" "${jobs:?}"/w?
+mkdir -p "$jobs/.queue" "$jobs/.slots" "$jobs/w0"
+MAX_JOBS=1
+flock "$jobs/w0/lock" sleep 6 &
+pids+=($!)
+until ! flock -n "$jobs/w0/lock" true; do sleep 0.05; done
+waiter w0
+sleep 3
+! flock -n "$jobs/.slots/1" true || fail "w0 took no slot while its job's lock was held"
+[ ! -e "$jobs/w0/1.slot" ] || fail "w0 said it had its slot while its job's lock was held"
+[ -e "$jobs/w0/1.withdrawable" ] || fail "w0 waits in line without saying proj withdraw may stop it"
+for _ in $(seq 1 200); do [ -e "$jobs/w0/took" ] && break; sleep 0.05; done
+[ "$(cat "$jobs/w0/1.slot" 2>/dev/null)" = 1 ] || fail "w0 didn't say it had slot 1 once its job's lock was let go"
+
+# A turn handed over to the deployed proj stops saying it may be withdrawn
+# first, under its job's lock: what it's handed to may take its slot without
+# that lock (a proj from before took_slot, after a switch back to it). The one
+# deployed here takes the hand-over and says whether the turn still did.
+kill "${pids[@]}" 2>/dev/null || true
+wait "${pids[@]}" 2>/dev/null || true
+pids=()
+rm -rf "${jobs:?}/.queue" "${jobs:?}/.slots" "${jobs:?}"/w?
+mkdir -p "$jobs/.queue" "$jobs/.slots" "$jobs/w0" "$tmp/deployed"
+cat >"$tmp/deployed/proj" <<STUB
+#!/bin/sh
+case \$1 in
+  _handover_format) echo 1 ;;
+  _exec) if [ -e "$jobs/\$2/1.withdrawable" ]; then echo marked; else echo unmarked; fi >"$jobs/\$2/handed" ;;
+esac
+STUB
+chmod +x "$tmp/deployed/proj"
+export -f successor unmark
+export HANDOVER_FORMAT DEPLOYED=$tmp/deployed/proj self=/nowhere
+flock "$jobs/w0/lock" sleep 6 &
+pids+=($!)
+until ! flock -n "$jobs/w0/lock" true; do sleep 0.05; done
+waiter w0
+sleep 3
+[ ! -e "$jobs/w0/handed" ] || fail "w0 was handed over while its job's lock was held"
+for _ in $(seq 1 200); do [ -e "$jobs/w0/handed" ] && break; sleep 0.05; done
+[ "$(cat "$jobs/w0/handed" 2>/dev/null)" = unmarked ] || fail "w0 was handed over still saying proj withdraw may stop it"
+export DEPLOYED=/nowhere
+
 # in_line: all of it, in the order pick takes them, each with its wait.
 LEAD=sam/burrow
 kill "${pids[@]}" 2>/dev/null || true
 wait "${pids[@]}" 2>/dev/null || true
 line_of_size 4
 got=$(in_line | awk '{print $1, $2}' | paste -sd,)
-[ "$got" = "job0 lead,job3 lead,job1 pipeline,job2 first" ] || fail "in_line: $got"
+[ "$got" = "job0 lead,job3 lead,job1 pipeline,job2 steward" ] || fail "in_line: $got"
 [ "$(in_queue)" = 4 ] || fail "in_line changed the line"
-in_line | sed -n 1p | grep -qE '^job0 +lead +[0-9]+m[0-9]{2}s +.*/burrow$' || fail "in_line's row: $(in_line | sed -n 1p)"
+# Its wait is from when its place was made, not its name's WHEN (the epoch
+# here, as for a job started --since long ago).
+in_line | sed -n 1p | grep -qE '^job0 +lead +0m[0-9]{2}s +.*/burrow$' || fail "in_line's row: $(in_line | sed -n 1p)"
+
+# A turn's place (entry): one whose job was started --since a time (the
+# steward's, from when its PR was opened) stands from then, ahead of turns that
+# came before it but whose work began later, with --first ones ahead of the
+# rest, and the names sort that way.
+mkdir -p "$jobs/new" "$jobs/old-pr" "$jobs/asked"
+new=$(entry new normal)
+echo 1792800000 >"$jobs/old-pr/since"
+old=$(entry old-pr normal)
+asked=$(entry asked first)
+[ "$old" = 2-1792800000000000000-old-pr ] || fail "old-pr's place from its --since: $old"
+[[ $new =~ ^2-[0-9]{19}-new$ ]] || fail "new's place from now: $new"
+got=$(printf '%s\n' "$new" "$old" "$asked" | LC_ALL=C sort | cut -d- -f3- | paste -sd ' ')
+[ "$got" = "asked old-pr new" ] || fail "places in order: $got"
+
+# MAX_WAIT goes by how long a turn has waited, not by its place's WHEN: one
+# whose work began long ago (--since) waits among the normal turns until it has
+# waited MAX_WAIT itself, then goes among the --first ones from the same WHEN.
+kill "${pids[@]}" 2>/dev/null || true
+wait "${pids[@]}" 2>/dev/null || true
+pids=()
+rm -rf "${jobs:?}/.queue" "${jobs:?}/.slots"
+mkdir -p "$jobs/.queue" "$jobs/.slots" "$jobs/late"
+MAX_JOBS=1
+exec {held}>"$jobs/.slots/1"
+flock -n "$held"
+echo $((EPOCHSECONDS - 7200)) >"$jobs/late/since"
+came=2-$(cat "$jobs/late/since")000000000-late
+MAX_WAIT=4 waiter late
+for _ in $(seq 1 200); do [ -e "$jobs/.queue/$came" ] && break; sleep 0.05; done
+[ -e "$jobs/.queue/$came" ] || fail "late went in as $(find "$jobs/.queue" -mindepth 1 -printf '%f '), not $came"
+for _ in $(seq 1 300); do [ -e "$jobs/.queue/1-${came#2-}" ] && break; sleep 0.05; done
+[ -e "$jobs/.queue/1-${came#2-}" ] || fail "late wasn't among the --first ones past MAX_WAIT: $(find "$jobs/.queue" -mindepth 1 -printf '%f ')"
+exec {held}>&-
 
 echo "proj-line: ok"

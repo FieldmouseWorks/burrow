@@ -32,6 +32,11 @@ let
   reviewer = "autoland-review";
   reviewerHome = "${stateDir}/autoland-review";
   reviewDir = "${stateDir}/autoland/review";
+  # The snapshots' checkouts (reviewers.py TREES): a cache, taken again from
+  # GitHub whenever one is missing, so out of stateDir and whatever snapshots
+  # the machine keeps of it. On a machine whose root is wiped at boot, a boot
+  # empties it too.
+  snapDir = "/var/cache/autoland/snap";
   # What the reviewers' service runs commands with, and so what an agent
   # reads the snapshot with, and runs the repo's own checks with (python3:
   # the scripts a repo checks itself with).
@@ -103,6 +108,7 @@ let
     bots = [ "dependabot" "renovate" ] ++ lib.optional (machineApp != null) machineApp.slug;
     machinery = if machineApp == null then null else machineApp.name;
     stateDir = "${stateDir}/autoland";
+    inherit snapDir;
     # The key renovate-sweep seals its verdicts on majors with (seal.py),
     # when it runs here; without it, none counts.
     majorKey = if sweeping then "${stateDir}/renovate-sweep/verdict.key" else null;
@@ -111,12 +117,18 @@ let
     # the watchdog's deadline have to outlast.
     renovateRun = if sweeping then config.systemd.services.renovate.serviceConfig.TimeoutStartSec else null;
     projectsDir = config.burrow.projectsDir;
+    # proj's record of its jobs, which repos.py reads for a remade repo's.
+    inherit (config.burrow.proj) jobsDir;
     proj = "${config.burrow.tools.proj}/bin/proj";
     jobTimeout = cfg.jobTimeoutMinutes;
     jobIdle = cfg.jobIdleMinutes;
+    # A proof build's (proofs.py): how long it may take, and the
+    # machine-wide heavy slots it takes one of, where the machine has them.
+    proofTimeout = cfg.proofTimeoutMinutes;
+    heavy = if config.burrow.cpu.enable then "${config.burrow.tools.heavy}/bin/heavy" else null;
     owner = config.burrow.owner;
     cleanBranches = cfg.cleanBranches;
-    labels = { inherit (cfg.labels) hold owner first; };
+    labels = { inherit (cfg.labels) hold owner first waiting; };
     notify = {
       inherit (config.burrow.notify) repo assignee;
       label = config.burrow.notify.label;
@@ -125,8 +137,13 @@ let
     # notify.repo with its label, for a Claude job to take (repos.py publish),
     # when the inbox will: notify.repo cloned in projectsDir, and the
     # steward's App one of inbox.authors (it is: see below). Otherwise it's
-    # the owner's.
-    inbox = { inherit (config.burrow.proj.inbox) enable label authors; };
+    # the owner's. It has unstickLabel too, so that job never waits in proj's
+    # line, which may be what's stuck. `command` is how the steward has the
+    # inbox forget a remade repo's issues (repos.py reset).
+    inbox = {
+      inherit (config.burrow.proj.inbox) enable label unstickLabel authors;
+      command = if config.burrow.proj.inbox.enable then lib.getExe config.burrow.tools.proj-inbox else null;
+    };
     # Renovate's dashboards (dashboard.py), and where a job that ticks a box
     # on one kicks Renovate to read it.
     dashboard = {
@@ -144,6 +161,7 @@ let
     flaky = {
       inherit (cfg.flaky) enable;
       bin = "${flaky}/bin/flaky";
+      jobTimeout = cfg.flaky.jobTimeoutMinutes;
     };
     # What every open PR waits on, for the stall watchdog (autoland/waits.py),
     # and what it took past a Claude job, for the stuck issue.
@@ -262,6 +280,8 @@ in
   imports = [
     (import ./common.nix inputs)
     { key = "burrow/notify"; imports = [ (import ./notify.nix inputs) ]; }
+    # The heavy slots its proof builds take, where the machine has them.
+    { key = "burrow/cpu"; imports = [ (import ./cpu.nix inputs) ]; }
     { key = "burrow/proj"; imports = [ (import ./proj.nix inputs) ]; }
     { key = "burrow/events"; imports = [ (import ./events.nix inputs) ]; }
     { key = "burrow/github"; imports = [ (import ./github.nix inputs) ]; }
@@ -345,7 +365,7 @@ in
         `pipelineSlots`, so the work queued behind them gets the speedup
         sooner. The steward's jobs in any other repo go ahead of the line as
         well, but within that project's `maxJobsPerProject`, so one repo's
-        PRs can't fill the machine.
+        PRs can't fill the machine; its other jobs leave them the last slot of that.
       '';
     };
 
@@ -474,6 +494,17 @@ in
       '';
     };
 
+    proofTimeoutMinutes = mkOption {
+      type = types.ints.positive;
+      default = 180;
+      description = ''
+        How long a proof build the steward runs itself (a repo's
+        proofBuilds) may take, its wait for a heavy slot included, before
+        it's stopped and started again: long enough for a NixOS test's own
+        hour (its driver's globalTimeout) after a slot has come free.
+      '';
+    };
+
     jobIdleMinutes = mkOption {
       type = types.ints.positive;
       default = 20;
@@ -558,6 +589,18 @@ in
       '';
     };
 
+    flaky.jobTimeoutMinutes = mkOption {
+      type = types.ints.positive;
+      default = 240;
+      description = ''
+        How long a flaky test's Claude job may run. It builds the project,
+        makes the test fail under its gate's load, fixes it and runs it enough
+        times to show the fix holds, on a machine whose gates are busy too:
+        far more than a PR's fix, so it's project work, not the pipeline's,
+        and doesn't hold the slot kept for that.
+      '';
+    };
+
     keepBranches = mkOption {
       type = types.listOf types.str;
       default = [ "gh-pages" "release/*" "releases/*" ];
@@ -604,6 +647,27 @@ in
           line for proofSlots, and the oldest first among those with it: for a
           fix the rest of the line waits on, opened after them.
         '';
+      };
+      # What a PR waits on, where it shows at a glance: the steward puts one
+      # on with the status that says it and takes it off once that wait is
+      # over (autoland/prs.py). Its status says the rest: until when, how
+      # many are ahead, which reviewer.
+      waiting = {
+        releaseAge = mkOption {
+          type = types.str;
+          default = "waiting: release age";
+          description = "On a lock file refresh none of whose updates is old enough to take yet (the minimum release age).";
+        };
+        proofSlot = mkOption {
+          type = types.str;
+          default = "waiting: proof slot";
+          description = "On a PR waiting its turn for one of its repo's proofSlots.";
+        };
+        reviewer = mkOption {
+          type = types.str;
+          default = "waiting: reviewer";
+          description = "On a PR that can't settle until a reviewer out of service is back.";
+        };
       };
     };
 
@@ -674,15 +738,27 @@ in
         machine rather than in CI, `{ "<check>" = "<how to run it and record
         its verdict>"; }`: once a settled PR waits on nothing else, one
         Claude job a head runs them on that commit and records each verdict,
-        a failure as a failure), proofSlots (how many of those jobs the repo
-        may have building at once, for proofs that take the whole machine:
-        the rest wait their turn, those labelled `labels.first` first, then
-        the oldest PR first; unset, no limit),
-        proofBuilds (the flake attribute each proof check builds, `{
-        "<check>" = "checks.x86_64-linux.<name>"; }`: a proof whose
-        attribute's outputs are all in the store, or being built by a proof
-        already running, skips the line and holds no slot; a job running a
-        check without one holds a slot of its own), keepBranches
+        a failure as a failure; none on a head the shared CI took in its docs
+        lane, its flake-check.yml's docs-paths, for the PR's base and the
+        commit it leaves that base at; a new head stops the last head's job,
+        unless it's building what the new head's proof wants), proofBuilds
+        (checks that are a build and nothing more: `{ "<check>" =
+        "checks.x86_64-linux.<name>"; }`, the flake attribute whose build is
+        the check's verdict. The steward builds them itself, ahead of the
+        proofJobs and with no Claude job: it works out the attribute's
+        derivation at that commit and runs `nix-store --realise` on it in a
+        heavy slot, in a unit of its user's own (proofTimeoutMinutes), and
+        posts each check as its build passed or failed, a failure with its
+        log's end on the PR. One whose outputs are all in the store
+        isn't built again, its verdict taken from the store, saying so and
+        naming the derivation; one whose outputs are being built by a proof
+        already running skips the line and holds no slot. A check named in
+        both is a build; none is built on a head in the docs lane),
+        proofSlots (how many of those proofs, jobs and builds, the repo may
+        have building at once, for proofs that take the whole machine: the
+        rest wait their turn, those labelled `labels.first` first, then the
+        oldest PR first; a job running a check without a build of its own
+        holds a slot of its own; unset, no limit), keepBranches
         (more branch globs the cleanup never touches in this repo, on top of
         the machine's, for branches a repo keeps as evidence), codex (false:
         Codex leaves this repo alone, and none of it goes to it), skipPaths (more path regexes the reviewers never read in
@@ -696,7 +772,7 @@ in
         oneWay path rides alone, landing only while the default branch is
         still the base its CI ran on. CI on the PRs themselves is optional:
         with none, a reviewed PR goes straight in. It needs burrow.ledger,
-        isn't directPush, and has no proofJobs yet), trainSize (the
+        isn't directPush, and has no proofJobs or proofBuilds yet), trainSize (the
         most PRs a candidate holds, 8), trainRequire (checks the train's CI
         waits for even before they report, when more than one workflow
         runs there), trainStallAfter (minutes, trainStallAfterMinutes).
@@ -706,6 +782,10 @@ in
 
   config = lib.mkIf cfg.enable {
     system.checks = [ stewardImports ];
+    # GitHub's contexts ignore case, and so does a check's match here.
+    warnings = lib.concatLists (lib.mapAttrsToList (repo: rc: let builds = map lib.toLower (lib.attrNames (rc.proofBuilds or { })); in map
+      (c: "burrow.autoland.repos.\"${repo}\".proofJobs.${c} is never used: ${c} is in its proofBuilds, so the steward builds it itself.")
+      (lib.filter (c: lib.elem (lib.toLower c) builds) (lib.attrNames (rc.proofJobs or { })))) cfg.repos);
     assertions = [{
       assertion = rv.codex.enable;
       message = "burrow.autoland needs its reviewer: turn on burrow.autoland.reviewers.codex.";
@@ -718,8 +798,8 @@ in
       message = "burrow.autoland: a repo's train (${lib.concatStringsSep ", " trains}) is on the ledger's log: turn on burrow.ledger.";
     } {
       # A proof runs on a PR's head; the train's evidence is its candidates'.
-      assertion = lib.all (r: (cfg.repos.${r}.proofJobs or { }) == { }) trains;
-      message = "burrow.autoland: a repo with its train on can't have proofJobs yet.";
+      assertion = lib.all (r: (cfg.repos.${r}.proofJobs or { }) == { } && (cfg.repos.${r}.proofBuilds or { }) == { }) trains;
+      message = "burrow.autoland: a repo with its train on can't have proofJobs or proofBuilds yet.";
     } {
       # Its rules are what keep anything but the train off its default branch.
       assertion = trains == [ ] || cfg.rulesets && lib.all (r: !(cfg.repos.${r}.directPush or false) && (cfg.repos.${r}.ruleset or true)) trains;
@@ -752,10 +832,11 @@ in
     # catch-up, when it starts and hourly.
     burrow.events.handlers.autoland = {
       # The PR itself (opened, ready, labels, retargeted), pushes, reviews and
-      # their threads, comments (a judge's verdict), CI finishing, and commit
-      # statuses (a proof's verdict).
+      # their threads, comments (a judge's verdict), CI finishing, commit
+      # statuses (a proof's verdict), and the repo itself: made (the App's
+      # own webhook sends that, repos.py app_hook), renamed, archived.
       events = [ "push" "pull_request" "pull_request_review" "pull_request_review_comment"
-        "pull_request_review_thread" "issue_comment" "check_suite" "status" ]
+        "pull_request_review_thread" "issue_comment" "check_suite" "status" "repository" ]
         ++ lib.optional (cfg.dashboard.enable || cfg.flaky.enable) "issues";
       # Of the issues, only Renovate's dashboard (dashboard.py) and flaky
       # tests' (flakes.py; the flaky tool's test.rs has the title).
@@ -763,8 +844,10 @@ in
         ++ lib.optional cfg.flaky.enable "flaky: *";
       unit = "autoland";
       wake = "${stateDir}/autoland/wake.json";
-      # Its own status tells it nothing (a job awaiting the PR does want it).
+      # Its own status tells it nothing (a job awaiting the PR does want it),
+      # nor do its own waiting labels, which it puts on with that status.
       ownStatuses = [ cfg.context ];
+      ownLabels = lib.attrValues cfg.labels.waiting;
     };
     systemd.services = lib.genAttrs [ "autoland" "autoland@" ] (name: {
       description = if name == "autoland"
@@ -825,7 +908,8 @@ in
     };
 
     # The steward's state, and the reviews: it queues them and takes the
-    # snapshots; the reviewers' user reads those, answers in done/, takes
+    # snapshots (their checkouts in snapDir, what each keeps of its base in
+    # snap/); the reviewers' user reads those, answers in done/, takes
     # what it answered off the queue and keeps each open PR's sessions in
     # sessions/, which the
     # steward marks gone when the PR closes. The clones the snapshots come
@@ -840,6 +924,8 @@ in
       "${reviewDir}/sessions" = dir "2770" reviewer;
       "${reviewDir}/snap" = dir "2750" reviewer;
       "${reviewDir}/git" = dir "0700" account.group;
+      "/var/cache/autoland" = dir "0755" account.group;
+      ${snapDir} = dir "2750" reviewer;
     };
 
     burrow.watchdog.sources.autoland = {
@@ -883,6 +969,8 @@ in
         `${cfg.labels.hold}` keeps the steward off a PR while it waits on something else (another
         PR, a deploy); one waiting on ${config.burrow.owner}'s OK gets `${cfg.labels.owner}` instead, which
         lists it for them.${lib.optionalString watchdog " A hold still on after ${toString cfg.holdStallAfterMinutes} minutes gets a Claude job's look."}
+        The steward's own labels (${lib.concatMapStringsSep ", " (x: "`${x}`") (lib.attrValues cfg.labels.waiting)})
+        say what its status says a PR waits on, and come off when that's over: leave them to it.
       - `autoland-steward status` shows where every open PR stands, changing nothing.
       - Every repo, new ones too, is kept at the baseline in burrow's
         docs/repo-baseline.md.

@@ -10,7 +10,7 @@ import sys
 import threading
 import time
 
-from harness import (FAIL, REAL_TOKEN, WROTE, C, P, R, S, T, V, clean, fresh_pr_state, judgment, merges, mkpr, run, said, sh,
+from harness import (FAIL, REAL_TOKEN, T0, WROTE, C, P, R, S, T, V, clean, fresh_pr_state, judgment, merges, mkpr, run, said, sh,
                      stand_in, tmp)
 from harness import head as HEAD
 
@@ -209,26 +209,43 @@ C.CFG["dashboard"]["renovate"] = None
 C.gh = gh_kept
 D.FOUND.clear()
 # The repos are the ones the App's installations reach, asked as each
-# owner's: GitHub gives an installation no viewerPermission on any of them.
-# An empty repo (no default branch) and an excluded one aren't the steward's.
+# owner's, a page at a time: GitHub gives an installation no viewerPermission
+# on any of them. Each is known by its databaseId. An empty repo (no default
+# branch) is one; an excluded or archived one isn't the steward's.
 ASKED = []
 
 
+def node(i, name, private=False, default="main", created=T0, archived=False):
+    return {"databaseId": i, "nameWithOwner": name, "isPrivate": private, "isArchived": archived,
+            "createdAt": created, "defaultBranchRef": default and {"name": default}}
+
+
+PAGES = {("sam", None): ([node(1, "sam/r", True, "trunk"), node(3, "sam/empty", default=None)], "c1"),
+         ("sam", "c1"): ([node(4, "sam/skip"), node(5, "sam/old", archived=True)], None),
+         ("eve", None): ([node(2, "eve/p", created="2026-01-02T03:04:05Z")], None)}
+
+
 def list_gh(*a, **k):
-    ASKED.append((C._for[-1] if C._for else None, a[2]))
-    return {"sam": [{"nameWithOwner": "sam/r", "isPrivate": True, "defaultBranchRef": {"name": "trunk"}},
-                    {"nameWithOwner": "sam/empty", "isPrivate": False, "defaultBranchRef": None},
-                    {"nameWithOwner": "sam/skip", "isPrivate": False, "defaultBranchRef": {"name": "main"}}],
-            "eve": [{"nameWithOwner": "eve/p", "isPrivate": False, "defaultBranchRef": {"name": "main"}}]}[a[2]]
+    assert a[:2] == ("api", "graphql") and "repositoryOwner" in a[3], a
+    v = dict(x.split("=", 1) for x in a[5::2])
+    ASKED.append((C._for[-1] if C._for else None, v["owner"], v.get("cursor")))
+    nodes, more = PAGES[v["owner"], v.get("cursor")]
+    return {"data": {"repositoryOwner": {"repositories": {
+        "nodes": nodes, "pageInfo": {"hasNextPage": more is not None, "endCursor": more}}}}}
 
 
 kept = (C.gh, C.CFG["owners"], C.CFG["exclude"])
 C.gh, C.CFG["owners"], C.CFG["exclude"] = list_gh, ["sam", "eve"], ["sam/skip"]
 found = R.discover()
 C.gh, C.CFG["owners"], C.CFG["exclude"] = kept
-assert found == [{"repo": "sam/r", "private": True, "default": "trunk"},
-                 {"repo": "eve/p", "private": False, "default": "main"}], found
-assert ASKED == [("sam", "sam"), ("eve", "eve")], ASKED
+assert found == [{"repo": "sam/r", "id": 1, "private": True, "default": "trunk", "created": T0},
+                 {"repo": "sam/empty", "id": 3, "private": False, "default": None, "created": T0},
+                 {"repo": "eve/p", "id": 2, "private": False, "default": "main", "created": "2026-01-02T03:04:05Z"}], found
+assert ASKED == [("sam", "sam", None), ("sam", "sam", "c1"), ("eve", "eve", None)], ASKED
+# An owner GitHub has no such login for: none of its repos.
+C.gh, C.CFG["owners"] = (lambda *a, **k: {"data": {"repositoryOwner": None}}), ["gone"]
+assert R.discover() == []
+C.gh, C.CFG["owners"], C.CFG["exclude"] = kept
 
 # A pass asks about each repo as the App's installation on that repo's
 # owner: its PRs are read for sam/r as sam's, for eve/p as eve's.
@@ -242,15 +259,16 @@ def pass_gh(*a, **k):
                                     "pullRequests": {"pageInfo": {"hasNextPage": False}, "nodes": []}}}}
 
 
-kept = (S.R.discover, S.R.publish, S.R.unhook_gone, S.R.hook_projects, C.gh, sys.argv)
+kept = (S.R.discover, S.R.settle_repo, S.R.publish, S.R.unhook_gone, S.R.hook_projects, C.gh, sys.argv)
 S.R.discover = lambda: [{"repo": "sam/r", "default": "main", "private": False},
                         {"repo": "eve/p", "default": "main", "private": False}]
+S.R.settle_repo = lambda r, known: False
 S.R.publish = S.R.unhook_gone = lambda *a: None
 S.R.hook_projects = lambda repos: []
 C.gh = pass_gh
 sys.argv = ["steward", "kick", "sam/r", "eve/p"]
 S.main()
-(S.R.discover, S.R.publish, S.R.unhook_gone, S.R.hook_projects, C.gh, sys.argv) = kept
+(S.R.discover, S.R.settle_repo, S.R.publish, S.R.unhook_gone, S.R.hook_projects, C.gh, sys.argv) = kept
 assert FOR == [("sam", "sam"), ("eve", "eve")], FOR
 
 # The steward merges now, the checked head only, or not at all: nothing is

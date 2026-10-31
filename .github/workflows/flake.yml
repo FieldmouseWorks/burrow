@@ -2,11 +2,17 @@
 # (flake-check.yml), taken from this checkout so a PR runs its own version.
 name: flake
 on:
+  # `edited` for a PR retargeted onto another branch: the shared workflow's
+  # run counts only for the base it judged, and which paths a PR changes,
+  # and so its lane (docs-paths below), depend on its base.
   pull_request:
+    types: [opened, synchronize, reopened, edited]
   push:
     branches: [main]
 jobs:
   check:
+    # Of the edits, only a new base: a title or body changes nothing checked.
+    if: github.event.action != 'edited' || github.event.changes.base
     uses: ./.github/workflows/flake-check.yml
     # What the shared workflow needs to attest its result.
     permissions:
@@ -23,6 +29,11 @@ jobs:
       # `checks`).
       build-skip: agents
       # Evaluating the whole flake at once holds 6-7G until the last build
-      # ends, past a Claude job's memory on remi (burrow.proj.jobMemoryMax),
-      # and flake-gate runs this same gate there, inputs and all.
+      # ends, beside everything else on remi, and flake-gate runs this same
+      # gate in Claude jobs there, inputs and all.
       eval-apart: true
+      # The docs lane, for a PR that changes only these: nothing burrow
+      # builds or tests reads them. docs/, house/ and templates/ aren't on
+      # it: the steward's config carries them (modules/autoland.nix,
+      # baselineDocs), so every machine's build reads them.
+      docs-paths: README.md AGENTS.md CLAUDE.md

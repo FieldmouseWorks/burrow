@@ -2,7 +2,16 @@
 # rather than as the user's own gh login, from a key none of them can read.
 #
 # Each App gets a socket, /run/gh-token/NAME.sock, that its `users` can
-# connect to. A connection is answered by gh-token (./github, one process each,
+# connect to: by an ACL entry for each user, never a group, so a user who
+# becomes one has it at once. A group would reach only processes started
+# after it was given: a user manager, and every unit under it, keeps the
+# groups it started with until it's restarted. The socket sets the ACL as it
+# starts, so it's ready only once its users can connect. A switch never
+# restarts a changed socket, so gh-token-NAME-access brings a running one to
+# what the new system says: a reload when `users` changes. A system without
+# that unit (one from before ACLs, or without the App) stops it and the socket
+# with it, and so starts its own socket, as that system says it should be.
+# A connection is answered by gh-token (./github, one process each,
 # Accept=yes) as its own user, with the App's key as a credential only that
 # user can read: a token for the account or repo asked for, good for at least
 # fifty minutes, kept until then so GitHub mints one at most every ten.
@@ -38,6 +47,13 @@ let
   inherit (lib) mkOption types;
   cfg = config.burrow.github;
   package = inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.gh-token;
+  # Who may connect to an App's socket: the whole ACL, so a user no longer in
+  # `users` loses it, and root's group, whichever a system before left it in.
+  access = app: [
+    "${pkgs.acl}/bin/setfacl --set ${lib.escapeShellArg (lib.concatStringsSep "," (
+      [ "u::rw" "g::---" "o::---" "m::rw" ] ++ map (u: "u:${u}:rw") app.users))} ${app.socket}"
+    "${pkgs.coreutils}/bin/chgrp root ${app.socket}"
+  ];
 
   # git over SSH, in an App's env: the user's own keys, so never.
   noSsh = pkgs.writeShellScript "gh-token-no-ssh" ''
@@ -255,8 +271,7 @@ in
       isSystemUser = true;
       group = "gh-token";
     };
-    users.groups = { gh-token = { }; } // lib.mapAttrs' (name: app:
-      lib.nameValuePair "gh-token-${name}" { members = app.users; }) cfg.apps;
+    users.groups.gh-token = { };
 
     systemd.sockets = lib.mapAttrs' (name: app: lib.nameValuePair "gh-token-${name}" {
       description = "Tokens of the GitHub App ${app.slug}";
@@ -264,13 +279,34 @@ in
       listenStreams = [ app.socket ];
       socketConfig = {
         Accept = true;
-        SocketGroup = "gh-token-${name}";
-        SocketMode = "0660";
+        # Nobody's but root's until its users' ACL is set, before it's ready.
+        SocketMode = "0600";
         DirectoryMode = "0755";
+        ExecStartPost = access app;
       };
+      # Never up without its access unit, whatever stopped or failed that: a
+      # system without the unit stops only an active one, and that stop is
+      # what hands the socket over to that system's own.
+      bindsTo = [ "gh-token-${name}-access.service" ];
     }) cfg.apps;
 
-    systemd.services = lib.mapAttrs' (name: app: lib.nameValuePair "gh-token-${name}@" {
+    systemd.services = lib.mapAttrs' (name: app: lib.nameValuePair "gh-token-${name}-access" {
+      description = "Who may ask for the GitHub App ${app.slug}'s tokens";
+      # Pulled in by the switch itself: starting a socket that's already
+      # running starts nothing with it.
+      wantedBy = [ "multi-user.target" ];
+      requires = [ "gh-token-${name}.socket" ];
+      partOf = [ "gh-token-${name}.socket" ];
+      after = [ "gh-token-${name}.socket" ];
+      # A reload, never a stop: stopping this stops the socket.
+      reloadIfChanged = true;
+      serviceConfig = {
+        Type = "oneshot";
+        RemainAfterExit = true;
+        ExecStart = access app;
+        ExecReload = access app;
+      };
+    }) cfg.apps // lib.mapAttrs' (name: app: lib.nameValuePair "gh-token-${name}@" {
       description = "A token of the GitHub App ${app.slug}, for one who asked";
       serviceConfig = {
         ExecStart = "${package}/bin/gh-token answer --api ${lib.escapeShellArg app.api} --app-id ${toString app.id} --key %d/key --cache %t/gh-token-cache/${name}";
