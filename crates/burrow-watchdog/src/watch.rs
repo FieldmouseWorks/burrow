@@ -26,6 +26,10 @@ pub struct Item {
     /// of its own would only join.
     #[serde(default)]
     pub line: bool,
+    /// The job that takes the stuck issue (proj run --unstick): what's on
+    /// that issue is its to move, so its own stall is the owner's.
+    #[serde(default)]
+    pub unstick: bool,
 }
 
 /// An item past its deadline, or a source stuck itself (`key` "").
@@ -82,6 +86,7 @@ fn item(it: &Value) -> Option<Item> {
         link: text("link"),
         kick: text("kick"),
         line: it.get("line").and_then(Value::as_bool).unwrap_or(false),
+        unstick: it.get("unstick").and_then(Value::as_bool).unwrap_or(false),
     })
 }
 
@@ -130,6 +135,7 @@ pub fn overdue(
                             link: None,
                             kick: src.kick.clone(),
                             line: false,
+                            unstick: false,
                         },
                     },
                 );

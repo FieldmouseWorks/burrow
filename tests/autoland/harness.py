@@ -197,11 +197,11 @@ with open(f"{tmp}/config.json", "w") as f:
         "app": {"id": 7, "slug": "steward"},
         "baselineJobs": False, "baselinePerPass": 1, "authors": ["sam"], "bots": ["dependabot", "renovate", "workers"], "machinery": None,
         "stateDir": f"{tmp}/state", "majorKey": f"{tmp}/sweep.key", "projectsDir": f"{tmp}/none", "renovateEmail": "bot@renovateapp.com", "proj": "proj", "jobTimeout": 60, "jobIdle": 20, "reviewTimeout": 30, "owner": "Sam", "cleanBranches": False,
-        "labels": {"hold": "hold", "owner": "needs-owner", "first": "first", "waiting": {"releaseAge": "waiting: release age", "proofSlot": "waiting: proof slot", "reviewer": "waiting: reviewer"}}, "notify": {"repo": "", "assignee": "", "label": "autoland"}, "inbox": {"enable": False, "label": "claude", "authors": ["sam"]},
+        "labels": {"hold": "hold", "owner": "needs-owner", "first": "first", "waiting": {"releaseAge": "waiting: release age", "proofSlot": "waiting: proof slot", "reviewer": "waiting: reviewer"}}, "notify": {"repo": "", "assignee": "", "label": "autoland"}, "inbox": {"enable": False, "label": "claude", "unstickLabel": "unstick", "authors": ["sam"]},
         "dashboard": {"enable": False, "waitDays": 4, "errorDays": 1, "title": "Dependency Dashboard",
                       "renovateKick": "http://127.0.0.1:9/kick/renovate", "renovate": None,
                       "renovateRuns": f"{tmp}/renovate-runs"},
-        "flaky": {"enable": False, "bin": f"{tmp}/flaky"},
+        "flaky": {"enable": False, "bin": f"{tmp}/flaky", "jobTimeout": 240},
         "defaults": {"rounds": 5,
                      "oneWay": ONE_WAY, "handoffAfter": 30, "sessionHandoffAfter": 90, "settleDelay": 3,
                      "stallAfter": 120, "holdStallAfter": 480, "renovateMergeAfter": 60,
@@ -264,6 +264,7 @@ def sh(*a, cwd=None):
 
 head = "a" * 40
 WROTE, JOBS, POSTED = [], [], []
+DESCRIBED = []  # the description each posted review was shown (its fingerprint)
 COMMITS = {}  # a PR's commits' author emails, by number, as `pr view --json commits` gives them (None: the ask fails)
 PR_DIFF = {"v": ""}  # what `gh pr diff` gives
 
@@ -338,19 +339,36 @@ def queue(repo, pr, key, r):
     if STUB["queue"]:
         raise STUB["queue"]
     C.save(f"{V.QUEUE}/{V.item_name(key, r, pr['headRefOid'], pr['baseRefName'])}.json",
-           {"reviewer": r, "repo": repo, "number": pr["number"], "headRefOid": pr["headRefOid"], "baseRefName": pr["baseRefName"]})
+           {"reviewer": r, "repo": repo, "number": pr["number"], "headRefOid": pr["headRefOid"], "baseRefName": pr["baseRefName"],
+            "body": pr["body"]})
 
 
-def post(repo, pr, r, answer):
+def post(repo, pr, r, answer, description):
     if STUB["post"]:
         raise STUB["post"]
     if not isinstance(answer, dict) or not isinstance(answer.get("findings"), list):
         raise ValueError("not a review")
     POSTED.append((r, pr["headRefOid"], len(answer["findings"])))
+    DESCRIBED.append(description)
     return "findings" if answer["findings"] else "clean"
 
 
 STATES = {}  # a job's state, by id, as `proj state` says it: running unless set
+STOPPED = []  # the jobs `proj stop` ended, in order
+UNSTOPPABLE = set()  # the jobs `proj stop` can't stop
+
+
+def stop_job(jid):
+    """proj stop: the job's over, and `proj state` says it failed (its turn's
+    unit was stopped before it wrote an outcome); one in UNSTOPPABLE is
+    refused."""
+    if jid in UNSTOPPABLE:
+        return False
+    STOPPED.append(jid)
+    STATES[jid] = "failed"
+    return True
+
+
 T0 = "2026-10-24T00:00:00Z"
 # The times a PR's status names (H.clock) are in the machine's zone: UTC here.
 os.environ["TZ"] = "UTC"
@@ -364,17 +382,22 @@ info = {"squashMergeAllowed": True, "mergeCommitAllowed": False, "rebaseMergeAll
 STEWARD = {"login": "steward", "__typename": "Bot"}
 
 
-def rv_review(r, k, sha=head, at="2026-10-24T00:11:00Z", who=None, base="main"):
-    """A review the steward posted for reviewer r, with k findings; with
-    who, one a user of that login posted with the same marker."""
+def rv_review(r, k, sha=head, at="2026-10-24T00:11:00Z", who=None, base="main", body=""):
+    """A review the steward posted for reviewer r, with k findings, shown
+    the description `body`; with who, one a user of that login posted with
+    the same marker."""
     author = STEWARD if who is None else {"login": who, "__typename": "User"}
     return {"author": author, "state": "COMMENTED", "submittedAt": at, "commit": {"oid": sha},
-            "body": f"<!-- {r}-review:v1 " + json.dumps({"commit_sha": sha, "base": base, "findings": k}) + " -->"}
+            "body": f"<!-- {r}-review:v1 " + json.dumps({"commit_sha": sha, "base": base, "findings": k,
+                                                          "description": C.fingerprint(body)}) + " -->"}
 
 
-def judgment(v, n=6, sha=head, base="main"):
-    """A judge's verdict line, sealed as its task gives it."""
-    return f"<!-- autoland-judgment: {v} {sha} {C.seal('sam/r', n, 'autoland-judgment', v, sha, base)} -->"
+def judgment(v, n=6, sha=head, base="main", body="", on=None):
+    """A judge's verdict line, sealed as its task gives it: on the PR's base
+    and the description `body`, or on `on` (the base alone, as they were
+    before descriptions were judged)."""
+    on = on or f"{base} {C.fingerprint(body)}"
+    return f"<!-- autoland-judgment: {v} {sha} {C.seal('sam/r', n, 'autoland-judgment', v, sha, on)} -->"
 
 
 def swept(v, n=8, sha=head, base="main"):
@@ -408,9 +431,9 @@ def mkpr(reviews=(), comments=(), threads=(), draft=False, number=5, sha=head, f
 
 
 def clean(sha=head, comments=(), reviews=(), **kw):
-    """A PR both reviewers found nothing on, at `sha` on its base."""
-    base = kw.get("base", "main")
-    return mkpr(reviews=[*reviews, rv_review("codex", 0, sha, base=base), rv_review("rival", 0, sha, base=base)],
+    """A PR both reviewers found nothing on, at `sha` on its base, shown its description."""
+    base, body = kw.get("base", "main"), kw.get("body", "")
+    return mkpr(reviews=[*reviews, rv_review("codex", 0, sha, base=base, body=body), rv_review("rival", 0, sha, base=base, body=body)],
                 comments=comments, sha=sha, **kw)
 
 
@@ -451,8 +474,10 @@ def worker(**back):
     for x in os.listdir(QDIR):
         r = x.partition("--")[0]
         item = json.load(open(f"{QDIR}/{x}"))
-        C.save(f"{V.DONE}/{x}", {**back.get(r, {"result": "review", "answer": {"findings": []}}), "at": C.NOW,
-                                 "head": item.get("headRefOid"), "base": item.get("baseRefName")})
+        said = back.get(r, {"result": "review", "answer": {"findings": []}})
+        # A review carries the description it was shown, as the service's do.
+        shown = {"description": C.fingerprint(item["body"])} if said["result"] == "review" else {}
+        C.save(f"{V.DONE}/{x}", {**shown, **said, "at": C.NOW, "head": item.get("headRefOid"), "base": item.get("baseRefName")})
         os.remove(f"{QDIR}/{x}")
 
 
@@ -475,5 +500,6 @@ def stand_in():
     C.write = write
     C.job = job
     C.job_state = lambda jid: STATES.get(jid, "running")
+    C.stop_job = stop_job
     V.queue = queue
     V.post = post
