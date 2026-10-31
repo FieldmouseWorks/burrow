@@ -367,19 +367,34 @@ CLOSED = {"closed": [{"number": 3, "head": {"sha": "2" * 40}}], "moved": [{"numb
 LOOKED = []
 # What GitHub has under refs/archive, and what it won't take there.
 ARCHIVED, REFUSED = {f"refs/archive/archived/{'d' * 40}": "d" * 40}, {"refused"}
+# What GitHub answers instead: listing the branches, comparing one (by
+# name), or archiving one (by name).
+LISTING, COMPARE, ARCHIVING = [None], {}, {}
+
+
+def no(k, why):
+    """gh failing with `why`: None with check=False (gh logs it), else what
+    gh raises."""
+    if not k.get("check", True):
+        return None
+    raise (C.Unavailable if C.UNAVAILABLE.search(why) else RuntimeError)(f"gh api: {why}")
 
 
 def branches_gh(*a, **k):
     path = (a[2] if a[1:2] == ("--paginate",) else a[1]) if a[:1] == ("api",) and len(a) > 1 else ""
     if path.startswith("repos/sam/r/branches?"):
+        if LISTING[0]:
+            return no(k, LISTING[0])
         return "\n".join(f"{n} {sha}" for n, (sha, _, _) in BRANCHES.items())
     if path.startswith("repos/sam/r/compare/main..."):
-        b = next(x for x in BRANCHES.values() if x[0] == path.rpartition("...")[2])
+        name, b = next((n, x) for n, x in BRANCHES.items() if x[0] == path.rpartition("...")[2])
+        if name in COMPARE:
+            return no(k, COMPARE[name])
         return {"ahead": b[1], "date": b[2]}
     if path.startswith("repos/sam/r/git/ref/"):
         got = ARCHIVED.get("refs/" + urllib.parse.unquote(path.removeprefix("repos/sam/r/git/ref/")))
         if got is None:
-            return None  # 404
+            return no(k, "HTTP 404: Not Found")
         return got == a[a.index("--jq") + 1].partition('== "')[2][:40]
     if path.startswith("repos/sam/r/pulls?state=closed"):
         # gh's --paginate --jq: the matching numbers from every page, a line each.
@@ -388,7 +403,7 @@ def branches_gh(*a, **k):
         LOOKED.append(name)
         prs = CLOSED.get(name, [])
         if prs is None:
-            return None
+            return no(k, "HTTP 403: Resource not accessible by integration")
         want = a[a.index("--jq") + 1].partition('.head.sha == "')[2][:40]
         return "\n".join(str(pr["number"]) for pr in prs if pr["head"]["sha"] == want)
     return gh_stub(*a, **k)
@@ -398,8 +413,10 @@ def branches_write(*a, **k):
     if a[:2] != ("api", "repos/sam/r/git/refs"):
         return kept_write(*a, **k)
     f = dict(x.split("=", 1) for x in a[2:][1::2])
+    if f["ref"].split("/")[2] in ARCHIVING:
+        return no(k, ARCHIVING[f["ref"].split("/")[2]])
     if f["ref"] in ARCHIVED or f["ref"].split("/")[2] in REFUSED:
-        return None  # gh's failure (already there: a 422), logged
+        return no(k, "HTTP 422: Reference already exists")
     ARCHIVED[f["ref"]] = f["sha"]
     return {"ref": f["ref"], "object": {"sha": f["sha"]}}
 
@@ -431,6 +448,39 @@ BRANCHES["recent"] = ("0" * 40, 4, ago(R.STALE_DAYS - 1))
 R.sweep_branches(repo_r, {"open"}, [])
 assert DELETED == [("in-main", "1" * 40), ("old", "7" * 40), ("renovate/closed", "9" * 40), ("archived", "d" * 40)], DELETED
 assert len(ARCHIVED) == 2, ARCHIVED
+# A sweep that didn't look at every branch isn't one. GitHub not listing
+# them (its rate limit, or a no) leaves the last sweep's time and what it
+# couldn't archive, so the next full pass sweeps again, not a day later.
+del BRANCHES["recent"]
+C.NOW += 86400
+last = C.load("repo-sam_r.json", {})
+for why in ("API rate limit exceeded for installation", "HTTP 403: Resource not accessible by integration"):
+    LISTING[0] = why
+    DELETED.clear()
+    digest = []
+    R.sweep_branches(repo_r, {"open"}, digest)
+    assert DELETED == [] and C.load("repo-sam_r.json", {}) == last, (why, DELETED)
+    assert [line for _, line, _ in digest] == ["sam/r: `refused`"], (why, digest)
+LISTING[0] = None
+# Nor does one GitHub stopped answering partway: what it deleted stays
+# deleted, and the next pass sweeps the rest. Archiving a branch then isn't
+# a branch it couldn't archive.
+for where, name, gone in ((COMPARE, "young", ["in-main", "old"]),
+                          (ARCHIVING, "refused", ["in-main", "old", "renovate/closed", "archived"])):
+    where[name] = "HTTP 502: Bad Gateway"
+    DELETED.clear()
+    R.sweep_branches(repo_r, {"open"}, [])
+    assert [n for n, _ in DELETED] == gone, (name, DELETED)
+    assert C.load("repo-sam_r.json", {}) == last, (name, C.load("repo-sam_r.json", {}))
+    del where[name]
+# A branch GitHub says no about is passed over, and the sweep still counts:
+# one with no history in common with the default has no comparison.
+BRANCHES["orphan"] = ("0" * 40, 1, old)
+COMPARE["orphan"] = "HTTP 404: No common ancestor between main and 0000000"
+DELETED.clear()
+R.sweep_branches(repo_r, {"open"}, [])
+assert DELETED == [("in-main", "1" * 40), ("old", "7" * 40), ("renovate/closed", "9" * 40), ("archived", "d" * 40)], DELETED
+assert C.load("repo-sam_r.json", {}) == {"branches": C.NOW, "unkept": ["refused"]}, C.load("repo-sam_r.json", {})
 R.delete_branch, C.gh, C.write = kept_delete, gh_stub, kept_write
 S.C.CFG["keepBranches"] = []
 C._for.pop()
