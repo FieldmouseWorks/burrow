@@ -15,9 +15,10 @@
 # in it leaving it once the label comes, the watchdog told so again each pass
 # whatever an older turn wrote, that an issue's turn cut off before it
 # answered, its whole unit killed, carries on in its own session, twice in a
-# row at most (a reply's turn starting a new row, a stop ending it) while
-# one that answered first has its answer posted, and that a job dir removed
-# or a wait it can't read stops neither proj-inbox nor _watch.
+# row at most (a reply's turn starting a new row, a stop ending it, one that
+# can't start tried again) while one that answered first has its answer
+# posted, and that a job dir removed or a wait it can't read stops neither
+# proj-inbox nor _watch.
 { pkgs }:
 ''
   with subtest("a job waiting on a PR is resumed when the PR changes"):
@@ -541,9 +542,19 @@
       machine.fail(f"su - dev -c 'proj reply --cut-off 5 {cj} x'")
       assert machine.succeed(f"cat /data/dev/jobs/{cj}/turns").strip() == "5"
       # A turn a reply started is no third in a row, though no pass saw a
-      # turn end between.
+      # turn end between. One whose next turn can't start (its prompt can't
+      # be written, here) is neither posted nor counted, and tried again.
       proj(f'reply {cj} "inbox-hang"')
+      machine.succeed(f"mkdir /data/dev/jobs/{cj}/prompt.7")
+      before = int(machine.succeed("date +%s"))
       cut_off(6)
+      assert machine.succeed(f"cat /data/dev/jobs/{cj}/turns").strip() == "6"
+      assert "turn 6" not in machine.succeed("cat /tmp/gh/posted")
+      assert machine.succeed("cat /var/lib/burrow/proj-inbox/o_c-1/revived").strip() == "5 2"
+      wake = json.loads(machine.succeed("cat /var/lib/burrow/proj-inbox/wake.json"))
+      assert wake.get("o/c", 0) >= before + 300, wake
+      machine.succeed(f"rmdir /data/dev/jobs/{cj}/prompt.7")
+      machine.succeed("su - dev -c 'proj-inbox o/c'")
       assert machine.succeed(f"cat /data/dev/jobs/{cj}/turns").strip() == "7"
       machine.wait_until_succeeds(f"su - dev -c 'proj state {cj}' | grep -x done", timeout=120)
       # One that answered before its unit went has its answer posted, and

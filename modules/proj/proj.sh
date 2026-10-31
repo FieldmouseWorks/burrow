@@ -33,6 +33,7 @@
 #                               one of burrow.github.apps, never as the user
 #   proj reply [--first] ID "message"  continue that job's conversation
 #   proj reply --cut-off N ID "message"  so, if its turn N was cut off
+#                               (else exit 3)
 #   proj status                 recent jobs and their state
 #   proj status --line          every turn in line, next first, and its wait
 #   proj log ID [--turn N]      the job's latest answer, or turn N's (--raw for
@@ -574,13 +575,16 @@ case "${1:-status}" in
     else
       id=${1:?usage: proj reply [--first] [--cut-off N] ID \"message\"}
       task=${2:?usage: proj reply [--first] [--cut-off N] ID \"message\"}
-      [ -s "$jobs/$id/session" ] || { echo "$id has no session to continue (yet)" >&2; exit 1; }
+      # 3: nothing to carry on (--cut-off), as against a turn that can't start.
+      no=1
+      [ -z "$cutoff" ] || no=3
+      [ -s "$jobs/$id/session" ] || { echo "$id has no session to continue (yet)" >&2; exit "$no"; }
       # A job's turns start one at a time, and _watch writes back a wait
       # only under the same lock (held until proj exits).
       exec {lk}>>"$jobs/$id/lock"
       flock "$lk"
-      case $(state "$id") in queued | running) echo "$id is still $(state "$id")" >&2; exit 1 ;; esac
-      [ -z "$cutoff" ] || cut_off "$id" "$cutoff" || { echo "$id's turn $cutoff wasn't cut off" >&2; exit 1; }
+      case $(state "$id") in queued | running) echo "$id is still $(state "$id")" >&2; exit "$no" ;; esac
+      [ -z "$cutoff" ] || cut_off "$id" "$cutoff" || { echo "$id's turn $cutoff wasn't cut off" >&2; exit 3; }
     fi
     start_turn "$id" "$task" "$first"
     echo "$id"

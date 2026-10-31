@@ -222,16 +222,23 @@ for repo in "${!project[@]}"; do
     # the lock it starts the next turn under), and the issue hears so. In a
     # row: the turn the last carrying on started (revived has it, and how
     # many in a row led to it) is the one cut off now.
+    k=$(cat "$d/answered")
     rv=$(cat "$d/revived" 2>/dev/null || true)
     streak=0
     [ "${rv% *}" != "$turns" ] || streak=${rv#* }
     revive=''
-    if [ "$st" = failed ] && [ "$streak" -lt 2 ] && jq -e --argjson n "$n" 'any(.[]; .number == $n)' <<<"$open" >/dev/null &&
-      proj reply --first --cut-off "$turns" "$id" "$CUT_OFF" >/dev/null 2>&1; then
-      revive=1 rv="$((turns + 1)) $((streak + 1))"
-      echo "$rv" >"$d/revived"
+    if [ "$st" = failed ] && [ "$k" -lt "$turns" ] && [ "$streak" -lt 2 ] &&
+      jq -e --argjson n "$n" 'any(.[]; .number == $n)' <<<"$open" >/dev/null; then
+      if proj reply --first --cut-off "$turns" "$id" "$CUT_OFF" >/dev/null; then
+        revive=1 rv="$((turns + 1)) $((streak + 1))"
+        echo "$rv" >"$d/revived"
+      elif [ $? != 3 ]; then
+        # Cut off, but its next turn couldn't start (proj said why): neither
+        # posted nor counted, it's tried again in five minutes.
+        retry "$repo"
+        continue
+      fi
     fi
-    k=$(cat "$d/answered")
     while [ "$k" -lt "$last" ]; do
       k=$((k + 1))
       if [ "$k" = "$turns" ]; then why=" ($st)"; else why=''; fi
