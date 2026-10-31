@@ -680,11 +680,19 @@ case "${1:-status}" in
     for t in "$@"; do
       target "$t" >/dev/null || { echo "not a GitHub PR or issue: $t" >&2; exit 2; }
     done
+    # Every baseline, or none: one GitHub can't give (its token refused, the
+    # PR not there) fails the whole await, with gh's own words, rather than
+    # leaving the job waiting on something proj never read.
+    waits=''
     for t in "$@"; do
       read -r repo num < <(target "$t")
-      # No fingerprint (GitHub can't be asked just now): _watch takes it later.
-      printf '%s\t%s\t%s\n' "$repo#$num" "$(date +%s)" "$(fingerprint "$repo" "$num" </dev/null || true)"
-    done >>"$jobs/$id/await.next"
+      fp=$(fingerprint "$repo" "$num" </dev/null) && [ -n "$fp" ] || {
+        echo "proj: couldn't read $t from GitHub (gh's error is above), so nothing is awaited: fix that and run proj await again, or end the turn with proj ask" >&2
+        exit 1
+      }
+      waits+="$repo#$num"$'\t'"$(date +%s)"$'\t'"$fp"$'\n'
+    done
+    printf '%s' "$waits" >>"$jobs/$id/await.next"
     echo await >"$jobs/$id/end.next"
     echo "Noted. End your turn now: this job is resumed once $* changes."
     ;;

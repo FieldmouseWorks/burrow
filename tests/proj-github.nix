@@ -3,8 +3,8 @@
 # await) is resumed when it changes, even before the turn ended and from
 # proj-watch's own unit (which a turn's kicks reach for the repos it
 # awaits), but never for proj-inbox's own comment, or once its deadline
-# passes with GitHub unreadable, that a reply meanwhile owns the job's
-# waits, that _watch and proj-inbox given a repo look at that repo alone and
+# passes with GitHub unreadable, that an await GitHub can't read fails and
+# awaits nothing, that a reply meanwhile owns the job's waits, that _watch and proj-inbox given a repo look at that repo alone and
 # book when it next needs a look, that proj-inbox posts every finished
 # turn's answer (one resumed before it looked too, none misread while a turn
 # starts) and ends the waits of one whose issue closed (proj stop's, which a
@@ -177,6 +177,24 @@
       github("repos/o/r/issues/6/comments", '[{"id": 1, "body": "did it\\n<!-- proj-inbox -->"}, {"id": 2, "body": "yes"}]')
       proj("_watch")
       machine.wait_until_succeeds(f"grep -x 2 /data/dev/jobs/{e}/turns", timeout=30)
+
+  with subtest("an await GitHub can't read fails, and awaits nothing"):
+      e = proj('run web "sleep 1"')
+      machine.wait_until_succeeds(f"su - dev -c 'proj state {e}' | grep -x done", timeout=120)
+      # o/r#99 isn't there: neither it nor the readable #5 is awaited.
+      status, out = machine.execute(f"su - dev -c 'PROJ_JOB={e} proj await https://github.com/o/r/pull/5 https://github.com/o/r/pull/99' 2>&1")
+      assert status == 1 and "couldn't read https://github.com/o/r/pull/99 from GitHub" in out, (status, out)
+      machine.fail(f"test -e /data/dev/jobs/{e}/await.next")
+      machine.fail(f"test -e /data/dev/jobs/{e}/end.next")
+      # Nor when only the last thing it asks for can't be had.
+      machine.succeed("mv /tmp/gh/repos_o_r_commits_abc_check-runs /tmp/gh/check-runs.kept")
+      status, out = machine.execute(f"su - dev -c 'PROJ_JOB={e} proj await https://github.com/o/r/pull/5' 2>&1")
+      assert status == 1 and "couldn't read https://github.com/o/r/pull/5 from GitHub" in out, (status, out)
+      machine.fail(f"test -e /data/dev/jobs/{e}/await.next")
+      machine.succeed("mv /tmp/gh/check-runs.kept /tmp/gh/repos_o_r_commits_abc_check-runs")
+      machine.succeed(f"su - dev -c 'PROJ_JOB={e} proj await https://github.com/o/r/pull/5'")
+      assert machine.succeed(f"cut -f3 /data/dev/jobs/{e}/await.next").strip().startswith("{"), machine.succeed(f"cat /data/dev/jobs/{e}/await.next")
+      machine.succeed(f"rm /data/dev/jobs/{e}/await.next /data/dev/jobs/{e}/end.next")
 
   with subtest("the await deadline holds while GitHub can't be read"):
       github("repos/o/r/commits/abc/check-runs", '{"check_runs": [{"name": "ci", "status": "in_progress", "conclusion": null}]}')
