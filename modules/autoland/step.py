@@ -459,7 +459,9 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
         else:
             hand_off(f"it conflicts with {base}, so GitHub can't merge it and its CI doesn't run: merge {base} into the "
                      "branch (a merge commit: never rebase or force-push), resolve every conflict keeping what both sides "
-                     "meant, and run the repo's tests before you push. If the two sides can't both be kept, which one stays "
+                     "meant, and run the tests of what the conflicts touched before you push, not the repo's whole gate: it can "
+                     "outlast this job, which would end with the merge unpushed, and CI runs the whole gate once you push. "
+                     "If the two sides can't both be kept, which one stays "
                      f"is the owner's call. Just before you merge, and again before you push, check that the PR is still open "
                      f"on {base} at head {head}: if its base or head moved on, stop without merging or pushing, since the "
                      "steward hands what it is now to a new job", f"Conflicts with {base}", "conflictFixed", judged_at,

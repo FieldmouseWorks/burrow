@@ -61,6 +61,9 @@ STATES["job-1"] = "done"
 run(dirty(), 1000)
 run(dirty(), 1060)
 assert len(JOBS) == 1 and "merge main into" in JOBS[0], JOBS
+# The whole gate can outlast the job on a loaded machine, and then the merge is
+# never pushed: the job runs what the merge touched, and CI has the gate.
+assert "tests of what the conflicts touched" in JOBS[0] and "CI runs the whole gate once you push" in JOBS[0] and "run the repo's tests" not in JOBS[0], JOBS
 STATES["job-1"] = "running"  # the second one (ids restart each pass here)
 for state in ("running", "queued", None):
     STATES["job-1"] = state
