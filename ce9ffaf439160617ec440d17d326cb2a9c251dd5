@@ -1,0 +1,71 @@
+{
+  "conary": "note v1",
+  "change": "4tgq1e851mfc4m4v0s3zhecx1p",
+  "repo": {
+    "owner": "fieldmouseworks",
+    "name": "burrow"
+  },
+  "pr": 197,
+  "url": "https://github.com/fieldmouseworks/burrow/pull/197",
+  "summary": "github: an App's socket is its users' by ACL, so a new user has it at once",
+  "task": "FieldmouseWorks/remi#197",
+  "author": {
+    "kind": "person",
+    "login": "TusanHomichi",
+    "session": null
+  },
+  "landing": {
+    "revision": "e5c437c90565cb321091dd1036218af964896e7cedaa91ef1f97dd1c983f05d1",
+    "before": "3ff17a0775144e063cd07c1654bc8d83c82f3ae0",
+    "after": "ce9ffaf439160617ec440d17d326cb2a9c251dd5",
+    "by": {
+      "kind": "status",
+      "login": "fieldmouseworks-steward[bot]"
+    },
+    "at": 1793446587804
+  },
+  "evidence": [
+    {
+      "kind": "ci",
+      "check": "rust-first / python",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/41178095233/job/124469723444"
+    },
+    {
+      "kind": "ci",
+      "check": "check / commits",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/41178095120/job/124469723102"
+    },
+    {
+      "kind": "ci",
+      "check": "rust-first (#197)",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/41178095233"
+    },
+    {
+      "kind": "review",
+      "check": "codex",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/197#pullrequestreview-5721699891"
+    },
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/41178095120/job/124469723391"
+    },
+    {
+      "kind": "review",
+      "check": "codex",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/197#pullrequestreview-5722159374"
+    },
+    {
+      "kind": "ci",
+      "check": "agents",
+      "result": "pass",
+      "source": "status agents"
+    }
+  ]
+}
