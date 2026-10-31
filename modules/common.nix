@@ -67,9 +67,12 @@ inputs:
             default = "${dirOf config.burrow.projectsDir}/scratch";
             defaultText = lib.literalExpression ''"''${dirOf config.burrow.projectsDir}/scratch"'';
             description = ''
-              Throwaway clones and worktrees (the update pipeline's own clone, the
-              fix jobs' worktrees). Outside projectsDir, so they get no Remote
-              Control server.
+              Throwaway clones and worktrees: the update pipeline's own clone, and
+              each proj job's own dir (jobs/ID), cleared once the job is over.
+              Outside projectsDir, so they get no Remote Control server. Keep it
+              out of rolling snapshots (a dataset of its own on ZFS): build
+              output churns through gigabytes, and a snapshot holds on to all of
+              it until the snapshot goes.
             '';
           };
 

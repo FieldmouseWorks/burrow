@@ -14,7 +14,7 @@ use crate::job::{Job, answer, awaits, is_error, kick, result_of};
 use crate::pick::demoted;
 use crate::turn::{exec, lines, start};
 use crate::waits::rewatch;
-use crate::{Fail, filled, io_fail, now, read, slot, systemd, watch};
+use crate::{Fail, filled, io_fail, now, read, scratch, slot, systemd, watch};
 
 /// What a command prints: a reader that's gone (`proj status | head`) is no
 /// failure of the command's.
@@ -523,11 +523,9 @@ fn stop(cfg: &Config, id: &str) -> Result<(), Fail> {
     if let Some(n) = &n {
         let _ = fs::write(job.turn(n, "stopped"), "");
     }
-    let rc = if systemd::gone(cfg, &unit) {
-        0
-    } else {
-        systemd::stop(cfg, &unit)
-    };
+    // No turn of it running, so no end of one to clear its scratch: this does.
+    let idle = systemd::gone(cfg, &unit);
+    let rc = if idle { 0 } else { systemd::stop(cfg, &unit) };
     // Its waits go whatever the stop said. A failed stop is an error unless
     // the turn is known to be over: one that ended on its own between the
     // look and the stop is stopped all the same, and one systemd can't be
@@ -546,6 +544,9 @@ fn stop(cfg: &Config, id: &str) -> Result<(), Fail> {
         ));
     }
     rewatch(cfg, &[id]);
+    if idle {
+        scratch::clear(cfg, id);
+    }
     Ok(())
 }
 
@@ -642,6 +643,12 @@ fn ended(cfg: &Config) -> Result<(), Fail> {
         ));
     }
     kick(cfg, names);
+    // A job this turn left over has its scratch cleared, after the kicks so
+    // nothing waits on it; its next turn (a reply) starts only once this has
+    // ended, and makes its own afresh.
+    if scratch::over(&job) {
+        scratch::clear(cfg, &id);
+    }
     Ok(())
 }
 

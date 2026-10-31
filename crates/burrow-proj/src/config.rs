@@ -12,6 +12,8 @@ pub struct Config {
     pub projects: PathBuf,
     /// Each job's prompts, streams and answers, a folder a job.
     pub jobs: PathBuf,
+    /// Where each job's scratch goes, under jobs/ (burrow.scratchDir).
+    pub scratch: PathBuf,
     /// The slice every turn runs in, which the machine caps.
     pub slice: String,
     /// How many turns run Claude at once, how many of those slots are the
@@ -114,6 +116,7 @@ pub(crate) mod tests {
         json!({
             "projects": "/data/dev/src",
             "jobs": "/data/dev/jobs",
+            "scratch": "/data/dev/scratch",
             "slice": "claude-jobs.slice",
             "maxJobs": 4,
             "pipelineSlots": 1,

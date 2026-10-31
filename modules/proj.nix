@@ -1,6 +1,8 @@
 # proj: the operator hands project work to a Claude inside that project, as a
 # background job (crates/burrow-proj). Jobs run as burrow.user, in
-# burrow.projectsDir/PROJECT, and keep everything they said in jobsDir.
+# burrow.projectsDir/PROJECT, and keep everything they said in jobsDir. Each
+# makes its worktrees in a scratch dir of its own under burrow.scratchDir,
+# cleared once the job is over (its scratch.rs).
 # With proj.inbox, issues labelled for Claude in the projects' GitHub repos
 # become jobs too (proj/inbox.sh). A job waiting on a PR doesn't hold a slot:
 # proj-watch resumes it when the PR changes. Both are burrow.events handlers:
@@ -29,6 +31,7 @@ let
   configFile = pkgs.writeText "proj.json" (builtins.toJSON {
     projects = projectsDir;
     jobs = cfg.jobsDir;
+    scratch = config.burrow.scratchDir;
     slice = "claude-jobs.slice";
     inherit (cfg) maxJobs pipelineSlots maxJobsPerProject minFreeMemory jobMemoryMax timeout maxWait stallAfterMinutes awaitHours;
     inherit (config.burrow.events) kick;
@@ -66,7 +69,6 @@ let
       SRC=${lib.escapeShellArg projectsDir}
       JOBS=${lib.escapeShellArg cfg.jobsDir}
       STATE=${lib.escapeShellArg "${stateDir}/proj-inbox"}
-      SCRATCH=${lib.escapeShellArg config.burrow.scratchDir}
       LABEL=${lib.escapeShellArg cfg.inbox.label}
       UNSTICK_LABEL=${lib.escapeShellArg cfg.inbox.unstickLabel}
       AUTHORS=${lib.escapeShellArg (lib.concatStringsSep " " cfg.inbox.authors)}
@@ -118,8 +120,8 @@ in
         work on the pipeline itself waits only on other such work, never on
         everyone else's long jobs; a lead repo's go first of all, ahead of
         the other pipeline jobs too, but leave them these slots while one
-        waits, and everyone else one of the other slots while one of theirs
-        waits and none runs. A pipeline job in any other project goes
+        waits. All of them leave everyone else one of the other slots while
+        one of theirs waits and none runs. A pipeline job in any other project goes
         as `--first`: ahead of the line, but within its project's cap and
         never in these slots; `proj status` and its turn's journal say so,
         origin and all.
@@ -299,6 +301,9 @@ in
     systemd.tmpfiles.rules = [
       "d ${cfg.jobsDir} 0755 ${user} ${config.users.users.${user}.group} -"
       "d ${stateDir}/proj-watch 0755 ${user} ${config.users.users.${user}.group} -"
+      # Each job's scratch (burrow-proj's scratch.rs), which it clears itself once the
+      # job is over: no age here.
+      "d ${config.burrow.scratchDir}/jobs 0755 ${user} ${config.users.users.${user}.group} -"
     ];
 
     # What every job waits on, for the stall watchdog: proj rewrites it, and

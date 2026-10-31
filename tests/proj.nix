@@ -28,8 +28,11 @@
 # machine running out, that what's killed is the command that outgrew it,
 # the turn carrying on to its answer, that a run killed for memory before it
 # answers (Claude itself, as a rule) is carried on in its own session, twice
-# a turn at most, and that a turn killed before it answers can still be
-# continued, in its own session. Its GitHub side, proj
+# a turn at most, that a turn killed before it answers can still be
+# continued, in its own session, and that each job has a scratch dir of its
+# own, gone with the worktrees in it once the job is over (done, stopped, or
+# an --owned job's turn that awaits nothing) and kept while it asks
+# (proj's scratch tests have the rest). Its GitHub side, proj
 # await, proj-watch and proj-inbox, is proj-github.nix's part of the same
 # script.
 #
@@ -728,5 +731,43 @@ pkgs.testers.runNixOSTest {
         machine.wait_until_succeeds(f"su - dev -c 'proj state {o}' | grep -x done", timeout=120)
         answer = proj(f"log {o}")
         assert "it exited 137" in answer, answer
+
+    with subtest("a job's scratch is its own, and goes with its worktrees once the job is over"):
+        # web is a git repo since the pipeline subtest: a commit to check out.
+        machine.succeed("su - dev -c 'git -C /data/dev/src/web -c user.name=t -c user.email=t@t commit -q --allow-empty -m one'")
+
+        def trees():
+            return machine.succeed("su - dev -c 'git -C /data/dev/src/web worktree list --porcelain'").count("worktree ")
+
+        def cleared(job):
+            # Its dir goes at once (renamed aside), what was in it and its
+            # worktree's registration on web only after: wait for all three.
+            machine.wait_until_succeeds(
+                f"! test -e /data/dev/scratch/jobs/{job}"
+                " && test -z \"$(find /data/dev/scratch/jobs -maxdepth 1 -name '.gone-*')\""
+                " && test \"$(su - dev -c 'git -C /data/dev/src/web worktree list --porcelain' | grep -c '^worktree ')\" = 1",
+                timeout=60,
+            )
+
+        a = proj("run web scratch")
+        machine.wait_until_succeeds(f"su - dev -c 'proj state {a}' | grep -x done", timeout=120)
+        assert machine.succeed("cat /tmp/scratch").strip() == f"/data/dev/scratch/jobs/{a}", machine.succeed("cat /tmp/scratch")
+        assert f"/data/dev/scratch/jobs/{a} (" in machine.succeed("cat /tmp/args"), machine.succeed("cat /tmp/args")
+        # Done: the turn's end clears it, its worktree off web with it.
+        cleared(a)
+        # Asking, it keeps it for the reply; stopped, it's over.
+        q = proj('run web "scratch ask"')
+        machine.wait_until_succeeds(f"su - dev -c 'proj state {q}' | grep -x done", timeout=120)
+        assert end(q) == "ask", end(q)
+        machine.succeed(f"test -e /data/dev/scratch/jobs/{q}/web/built")
+        assert trees() == 2, trees()
+        proj(f"stop {q}")
+        cleared(q)
+        # An --owned job's turn that awaits nothing is its last.
+        machine.succeed("touch /tmp/silent")
+        o = proj("run --owned --kick autoland/o/w web scratch")
+        machine.wait_until_succeeds(f"su - dev -c 'proj state {o}' | grep -x done", timeout=120)
+        cleared(o)
+        machine.succeed("rm /tmp/silent")
   '';
 }

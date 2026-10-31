@@ -9,12 +9,15 @@
 //! pipeline is built from) is a pipeline turn that goes first of all: ahead
 //! of the whole line, the other pipeline turns included, except that it
 //! leaves them the pipeline's own slots while one waits, so a lead repo's
-//! backlog can't stop the work on what deploys it, and one of the others
-//! while one of everyone else's waits and none of theirs runs, so it can't
-//! stop all the rest either. Any other turn waits
+//! backlog can't stop the work on what deploys it. Any other turn waits
 //! while its project holds maxJobsPerProject slots (pipeline turns not
 //! counted), and lets those behind it by meanwhile, so one project's jobs
 //! never fill the machine.
+//!
+//! Everyone else's turns hold a slot whenever they have one that may start:
+//! until they do, a pipeline turn, lead or not, leaves them one free ordinary
+//! slot and takes what's left, so a backlog of pipeline work slows the others
+//! and never stops them.
 
 use std::collections::HashMap;
 use std::fs;
@@ -98,18 +101,21 @@ pub fn pick(cfg: &Config, slots: &[Slot], line: &[Waiter]) -> Vec<(usize, usize)
             }
         }
     }
+    // A slot's owed to everyone else's turns while none of theirs holds one
+    // and one of them may start: its project's cap can't be holding it back
+    // when none of theirs runs, unless the cap is none.
+    let owed = usize::from(
+        held.is_empty() && cfg.max_jobs_per_project > 0 && line.iter().any(|w| !w.class.pipeline()),
+    );
     // Who goes: each in turn, while the slots still go round. lead counts the
     // lead turns chosen and others the rest held to the slots anyone may
-    // take; open is how many of the pipeline's own slots the other pipeline
-    // turns in line leave lead ones; keep how many of the free slots anyone
-    // may take lead ones leave everyone else's turns (one, while one of
-    // theirs waits and none of theirs holds a slot, so a lead backlog can't
-    // stop them all); and need how many of the slots anyone may take lead
-    // ones must have.
+    // take; spare is how many of those the slot owed leaves pipeline turns;
+    // open is how many of the pipeline's own slots the other pipeline turns
+    // in line leave lead ones; and need how many of the slots anyone may take
+    // lead ones must have.
+    let spare = theirs.len().saturating_sub(owed);
     let pipeline = line.iter().filter(|w| w.class == Class::Pipeline).count();
     let open = ours.len().saturating_sub(pipeline);
-    let waiting = line.iter().any(|w| !w.class.pipeline());
-    let keep = usize::from(held.is_empty() && waiting && !theirs.is_empty());
     let (mut lead, mut others) = (0, 0);
     let mut went = Vec::new();
     let order = line
@@ -127,12 +133,16 @@ pub fn pick(cfg: &Config, slots: &[Slot], line: &[Waiter]) -> Vec<(usize, usize)
         }
         match w.class {
             Class::Lead => {
-                if lead >= theirs.len() - keep + open {
+                if lead >= spare + open {
                     continue;
                 }
                 lead += 1;
             }
-            Class::Pipeline => {}
+            Class::Pipeline => {
+                if went.len() - others >= spare + ours.len() {
+                    continue;
+                }
+            }
             Class::First | Class::Normal => {
                 let need = lead.saturating_sub(open);
                 let h = held.entry(w.project.as_str()).or_default();
@@ -146,8 +156,9 @@ pub fn pick(cfg: &Config, slots: &[Slot], line: &[Waiter]) -> Vec<(usize, usize)
         went.push(i);
     }
     // Which slot each takes, lowest first: pipeline turns may have only what
-    // the others chosen leave them of the slots anyone may take.
-    let mut loose = theirs.len() - others;
+    // the others chosen, and the slot owed to them, leave them of the slots
+    // anyone may take.
+    let mut loose = (theirs.len() - others).min(spare);
     let (mut theirs, mut ours) = (theirs.into_iter(), ours.into_iter());
     went.into_iter()
         .map(|i| {

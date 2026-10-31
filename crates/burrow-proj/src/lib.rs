@@ -56,7 +56,8 @@
 //! settings as every session: no prompts, and an R2 command is refused rather
 //! than asked, so the job reports it and the operator brings it to the owner.
 //! Everything a job said is kept in its folder in jobs ([`job`] has what's
-//! in it).
+//! in it); what it builds goes in a scratch dir of its own, PROJ_SCRATCH,
+//! cleared once the job is over ([`scratch`]).
 //!
 //! At most maxJobs turns run Claude at once, and a turn starts only with
 //! minFreeMemory MiB to spare; the rest wait in line (queued), lead jobs'
@@ -64,8 +65,9 @@
 //! and a turn that has waited maxWait seconds counts as --first itself, so a
 //! stream of them can't starve it. pipelineSlots of the slots are for pipeline
 //! jobs in the pipeline's own repos alone, and no project's other jobs hold
-//! more than maxJobsPerProject at once ([`pick`]). A job run --unstick waits in
-//! none of that: its turns take a slot of their own, past maxJobs, one at a
+//! more than maxJobsPerProject at once, and a waiting one of theirs is owed a
+//! slot ahead of the pipeline's when none runs ([`pick`]). A job run --unstick
+//! waits in none of that: its turns take a slot of their own, past maxJobs, one at a
 //! time ([`slot`]). A waiting turn becomes the deployed proj at its next look
 //! after a switch ([`slot`]). Every turn runs in the
 //! slice, which the machine caps, so jobs can't take memory from anything
@@ -122,6 +124,7 @@ pub mod config;
 pub mod github;
 pub mod job;
 pub mod pick;
+pub mod scratch;
 pub mod slot;
 pub mod systemd;
 pub mod turn;

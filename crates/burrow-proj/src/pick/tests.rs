@@ -1,7 +1,7 @@
 // proj's choice of who takes a slot, on what a waiting turn would see:
 // pipeline jobs' slots stay theirs, one project's jobs stop at its cap while
 // the others go by, pipeline ones count against no cap, and lead ones go
-// ahead of everyone but leave the rest one slot, every free slot going in
+// ahead of everyone but the slot owed to the others, every free slot going in
 // one look; and which jobs are pipeline ones: only those in the pipeline's
 // own repos and the machine's flake, and lead ones those in its lead repos.
 
@@ -62,6 +62,182 @@ fn case(cfg: &Config, want: &str, specs: &[&str]) {
         .collect();
     let got = got.join("\n");
     assert_eq!(got, want, "from {specs:?}");
+}
+
+// A backlog of pipeline work doesn't starve the others: with none of theirs
+// running, a pipeline or lead turn leaves them the last free ordinary slot.
+#[test]
+fn a_backlog_leaves_the_others_a_slot() {
+    let mut cfg = config();
+    case(
+        &cfg,
+        "a 3",
+        &[
+            "pipeline /src/remi",
+            "lead /src/burrow",
+            "free",
+            "lead /src/burrow",
+            "p pipeline /src/remi",
+            "l lead /src/burrow",
+            "a first /src/web",
+        ],
+    );
+    case(
+        &cfg,
+        "a 3",
+        &[
+            "pipeline /src/remi",
+            "lead /src/burrow",
+            "free",
+            "lead /src/burrow",
+            "l lead /src/burrow",
+            "a normal /src/web",
+        ],
+    );
+    // It takes the pipeline's own slot instead, where one's free.
+    case(
+        &cfg,
+        "p 4\na 3",
+        &[
+            "pipeline /src/remi",
+            "lead /src/burrow",
+            "free",
+            "free",
+            "p pipeline /src/remi",
+            "a first /src/web",
+        ],
+    );
+    // With more free than that it takes the lowest as ever, and the others
+    // still have theirs next.
+    case(
+        &cfg,
+        "l 2\na 3",
+        &[
+            "pipeline /src/remi",
+            "free",
+            "free",
+            "lead /src/burrow",
+            "l lead /src/burrow",
+            "a first /src/web",
+        ],
+    );
+    // Both rules at once: a lead turn can't have the slot kept for the others,
+    // nor the pipeline's own while a pipeline turn waits, so that turn takes
+    // it; and with none waiting, the lead turn takes it.
+    case(
+        &cfg,
+        "p 4\na 3",
+        &[
+            "pipeline /src/remi",
+            "lead /src/burrow",
+            "free",
+            "free",
+            "l lead /src/burrow",
+            "p pipeline /src/remi",
+            "a first /src/web",
+        ],
+    );
+    case(
+        &cfg,
+        "l 4\na 3",
+        &[
+            "pipeline /src/remi",
+            "lead /src/burrow",
+            "free",
+            "free",
+            "l lead /src/burrow",
+            "a first /src/web",
+        ],
+    );
+    // Nobody of theirs waiting: nothing's kept, and the pipeline takes the last.
+    case(
+        &cfg,
+        "p 3",
+        &[
+            "pipeline /src/remi",
+            "lead /src/burrow",
+            "free",
+            "lead /src/burrow",
+            "p pipeline /src/remi",
+        ],
+    );
+    // One of theirs already running: that's their share, and the pipeline
+    // goes first.
+    case(
+        &cfg,
+        "p 3",
+        &[
+            "normal /src/x",
+            "lead /src/burrow",
+            "free",
+            "lead /src/burrow",
+            "p pipeline /src/remi",
+            "a first /src/web",
+        ],
+    );
+    // A holder proj can't name is someone else's here too.
+    case(
+        &cfg,
+        "p 3",
+        &[
+            "- -",
+            "lead /src/burrow",
+            "free",
+            "lead /src/burrow",
+            "p pipeline /src/remi",
+            "a first /src/web",
+        ],
+    );
+    // A turn its project's cap holds back can't use what's kept, so nothing is.
+    cfg.max_jobs_per_project = 0;
+    case(
+        &cfg,
+        "p 3",
+        &[
+            "pipeline /src/remi",
+            "lead /src/burrow",
+            "free",
+            "lead /src/burrow",
+            "a first /src/web",
+            "p pipeline /src/remi",
+        ],
+    );
+    // In one look too, whoever is ahead in the line: pipeline turns stop at
+    // what the slot owed leaves them, the pipeline's own included, and the
+    // others go.
+    cfg.max_jobs_per_project = 2;
+    cfg.max_jobs = 6;
+    case(
+        &cfg,
+        "p 1\nq 6\na 2",
+        &[
+            "free",
+            "free",
+            "lead /src/burrow",
+            "lead /src/burrow",
+            "lead /src/burrow",
+            "free",
+            "p pipeline /src/remi",
+            "q pipeline /src/remi",
+            "r pipeline /src/remi",
+            "a normal /src/web",
+        ],
+    );
+    case(
+        &cfg,
+        "l 1\na 2",
+        &[
+            "free",
+            "free",
+            "lead /src/burrow",
+            "lead /src/burrow",
+            "lead /src/burrow",
+            "pipeline /src/remi",
+            "l lead /src/burrow",
+            "m lead /src/burrow",
+            "a normal /src/web",
+        ],
+    );
 }
 
 #[test]

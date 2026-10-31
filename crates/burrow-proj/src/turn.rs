@@ -15,7 +15,9 @@ use crate::config::Config;
 use crate::job::{Job, answer, is_error, kick, last_result, result_of};
 use crate::pick::{Class, demoted};
 use crate::waits::{rewatch, rewatch_later, waiting};
-use crate::{Fail, filled, mtime, mtime_nanos, nanos, now_nanos, read, slot, swap, systemd};
+use crate::{
+    Fail, filled, mtime, mtime_nanos, nanos, now_nanos, read, scratch, slot, swap, systemd,
+};
 
 /// How a job waits on its own long work, which its answer would stop.
 const LONG: &str = "A command that can outlast one Bash call (ten minutes), a long build or test run, goes to the background with its output and exit code written to a file, and you wait for that file in the foreground, in steps under ten minutes each; answer only once it's there.";
@@ -145,6 +147,16 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
                 outcome(&format!("no GitHub App {app} on this machine to act as"));
                 return Err(Fail::quiet(1));
             }
+        }
+    }
+    // Its scratch, made before it takes a slot: one that can't be made fails
+    // the turn rather than leave its work nowhere to go. A sandbox's job works
+    // in the VM's own clone.
+    if !filled(&job.path("agent")) {
+        let dir = scratch::dir(cfg, id);
+        if fs::create_dir_all(&dir).is_err() {
+            outcome(&format!("couldn't make its scratch dir {}", dir.display()));
+            return Err(Fail::quiet(1));
         }
     }
     // In the turn's journal too, where its wait would be looked into.
@@ -410,11 +422,17 @@ fn spawn(
         return c.spawn();
     }
     let id = job.id;
+    let scratch = scratch::dir(cfg, id);
+    // Where its own worktrees go, and how long they last.
+    let keep = format!(
+        "Any worktree, clone or build of your own goes in {} ($PROJ_SCRATCH), yours alone. Push what you mean to keep: it's removed, with everything in it, once this job is over,",
+        scratch.display()
+    );
     args.push("--append-system-prompt".into());
     args.push(if must {
-        format!("This is proj job {id}, running headless. Your turn ends with your answer, and anything you left running in the background is stopped then, so don't wait on anything in the background or with sleep. Before you answer, say what comes next, since nothing else ever resumes this job: run {NEXT}. Waiting on anything else (a background run, a notification) is waiting in this turn, in the foreground. {LONG}")
+        format!("This is proj job {id}, running headless. Your turn ends with your answer, and anything you left running in the background is stopped then, so don't wait on anything in the background or with sleep. Before you answer, say what comes next, since nothing else ever resumes this job: run {NEXT}. Waiting on anything else (a background run, a notification) is waiting in this turn, in the foreground. {LONG} {keep} when a turn of it ends with `proj done`, or it's stopped.")
     } else {
-        format!("This is proj job {id}, running headless. Your turn ends with your answer, and anything you left running in the background is stopped then, so don't wait on GitHub (CI, reviews, merges) in the background or with sleep. Run `proj await URL` for each PR or issue you're still waiting on, then end your turn saying what you wait for: the job is resumed, with this conversation, once one of them changes (checks finish, a review, comment or push, merged or closed). {LONG}")
+        format!("This is proj job {id}, running headless. Your turn ends with your answer, and anything you left running in the background is stopped then, so don't wait on GitHub (CI, reviews, merges) in the background or with sleep. Run `proj await URL` for each PR or issue you're still waiting on, then end your turn saying what you wait for: the job is resumed, with this conversation, once one of them changes (checks finish, a review, comment or push, merged or closed). {LONG} {keep} when a turn of it ends awaiting nothing, or it's stopped.")
     });
     // A login shell, so the job sees the same PATH and env as an SSH login,
     // and then its App's env, which nothing the login sets can undo; Claude
@@ -428,6 +446,7 @@ fn spawn(
         .args(&args)
         .env("PROJ_JOB", id)
         .env("PROJ_WAIT_DIR", waitdir)
+        .env("PROJ_SCRATCH", &scratch)
         .env("PROJ_APP_ENV", app_env)
         .stdin(Stdio::null())
         .spawn()

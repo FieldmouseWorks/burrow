@@ -75,7 +75,7 @@ if [ -n "$TRAIN" ]; then
 else
   to_main="commit and push to main"
 fi
-worktree_rules="Work in your own worktree (git -C $operator worktree add $SCRATCH/fix-\$(date +%s) origin/main), never in $operator itself: that checkout is the operator's. When the toplevel builds and \`nix build -L ${checks[*]/#/.#checks.$SYSTEM.}\` passes there, $to_main; $UPDATE deploys main on its next run, with the dead man's switch. If the right answer is to wait for upstream, say so and change nothing. If it needs $OWNER, say exactly what."
+worktree_rules="Work in your own worktree (git -C $operator worktree add \"\$PROJ_SCRATCH/fix\" origin/main), never in $operator itself: that checkout is the operator's. When the toplevel builds and \`nix build -L ${checks[*]/#/.#checks.$SYSTEM.}\` passes there, $to_main; $UPDATE deploys main on its next run, with the dead man's switch. If the right answer is to wait for upstream, say so and change nothing. If it needs $OWNER, say exactly what."
 
 # Never fight a human: a pending switch is someone mid-change.
 if [ -e "$SWITCH_STATE/pending" ]; then
@@ -97,19 +97,6 @@ main=$(git_ rev-parse HEAD)
 build() {
   as_user nix build --no-link --print-out-paths \
     "$work#nixosConfigurations.$CONFIG.config.system.build.toplevel" 2>"$state/logs/build.log" | tail -n1
-}
-
-# Is the tree's system the one running, apart from the commit it's stamped
-# with? (A build from a dirty checkout, then committed, differs only there.)
-same_as_running() {
-  local r=null out
-  [ -z "$rev" ] || r="\"$rev\""
-  out=$(as_user nix build --impure --no-link --print-out-paths --expr "
-    let f = builtins.getFlake \"git+file://$work?rev=$(git_ rev-parse HEAD)\"; in
-    (f.nixosConfigurations.$CONFIG.extendModules {
-      modules = [ ({ lib, ... }: { system.configurationRevision = lib.mkForce $r; }) ];
-    }).config.system.build.toplevel" 2>>"$state/logs/build.log" | tail -n1) || return 1
-  [ "$out" = "$current" ]
 }
 
 # 2. Does the box run main, or something main has since moved past? Then it's ours
@@ -214,7 +201,8 @@ else
   commit && changed=1
 fi
 
-if [ -z "$changed" ] && [ -z "$force" ] && { [ "$rev" = "$main" ] || [ "$(cat "$state/deployed-main" 2>/dev/null)" = "$main" ] || same_as_running; }; then
+if [ -z "$changed" ] && [ -z "$force" ] && main_runs "$main"; then
+  live_at "$main" "$current"
   note current "up to date"
   exit 0
 fi
@@ -267,13 +255,18 @@ if [ -n "$replacing" ] && why=$(why_not_replace "$replacing" "$main" "${unfetche
 fi
 
 live=
-if [ "$new" = "$current" ]; then
+if runs_already "$new"; then
   # Running already, and not on main: what a run before put live (its PR
   # didn't open, or closed, or the train took it while that run was testing a
-  # newer one), or a bump that changes only what the checks use. It goes up as
-  # a PR with what any other bump has: the switch and the health check it
-  # passed when it went live, and the VM tests below, on this tree (which isn't
-  # the one that went live once main moved under it or the checks' inputs did).
+  # newer one, or its push to main was refused), or a bump that changes only
+  # what the checks use. It goes up with what any other bump has: the switch
+  # and the health check it passed when it went live, and the VM tests below,
+  # on this tree (which isn't the one that went live once main moved under it
+  # or the checks' inputs did). Riding, it's what its PR put live, with
+  # nothing since that changes the system: nothing to do until the PR lands.
+  # Nothing is switched either way: the box keeps the system it runs, under
+  # an older commit's stamp.
+  new=$current
   case $(already_live "$new") in
     up) live=1 ;;
     hold)
@@ -281,7 +274,8 @@ if [ "$new" = "$current" ]; then
       exit 0
       ;;
     *)
-      note current "nothing new builds; up to date${failed[*]:+ (held back: ${failed[*]})}"
+      live_at "$main" "$current"
+      note current "nothing new builds; up to date${riding:+ (riding #$riding)}${failed[*]:+ (held back: ${failed[*]})}"
       exit 0
       ;;
   esac
@@ -479,6 +473,7 @@ if [ "$(as_user git -C "$operator" branch --show-current 2>/dev/null)" = main ] 
   as_user git -C "$operator" pull -q --ff-only origin main || true
 fi
 
+live_at "$(live_through "$main")" "$new"
 note ok "${live:+already }live and confirmed: $went${riding:+ (riding #$riding)}${url:+ (up as $url)}${failed[*]:+ (held back: ${failed[*]})}"
 [ -z "$BOOT" ] || ! "$BOOT" status | grep -q 'trial queued: /' ||
   echo "the new kernel boots once at the next trial window ($BOOT trial)"
