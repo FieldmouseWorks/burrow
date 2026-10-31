@@ -69,12 +69,17 @@
       };
 
       # burrow's programs (every binary in crates/) and gh-token, for each
-      # platform they're built for, and the flaky tool (docs/flaky-tests.md),
-      # for a machine to install.
+      # platform they're built for, the flaky tool (docs/flaky-tests.md) and
+      # flake-gate, for a machine to install.
       packages = nixpkgs.lib.foldl' nixpkgs.lib.recursiveUpdate { } [
         (nixpkgs.lib.mapAttrs (_: p: { burrow = p.default; }) crates.packages)
         (nixpkgs.lib.mapAttrs (_: p: { gh-token = p.default; }) ghToken.packages)
-        { ${system}.flaky = pkgs.callPackage ./tools/flaky/package.nix { }; }
+        {
+          ${system} = {
+            flaky = pkgs.callPackage ./tools/flaky/package.nix { };
+            flake-gate = pkgs.callPackage ./tools/flake-gate/package.nix { };
+          };
+        }
       ];
 
       # A bare machine with every module on, for the checks and as an example.
@@ -262,6 +267,12 @@
         proj-pick = pkgs.runCommand "proj-pick-check" { nativeBuildInputs = [ pkgs.shellcheck pkgs.git ]; } ''
           shellcheck -s bash ${./modules/proj/pick.sh} ${./tests/proj-pick.sh}
           bash ${./tests/proj-pick.sh} ${./modules/proj/pick.sh}
+          touch $out
+        '';
+        # What a look at the line costs, and who gets to skip one.
+        proj-line = pkgs.runCommand "proj-line-check" { nativeBuildInputs = [ pkgs.shellcheck pkgs.git pkgs.strace pkgs.util-linux ]; } ''
+          shellcheck -s bash ${./modules/proj/line.sh} ${./tests/proj-line.sh}
+          bash ${./tests/proj-line.sh} ${./modules/proj/pick.sh} ${./modules/proj/line.sh}
           touch $out
         '';
         # What each job waits on, as the stall watchdog hears it.
@@ -676,6 +687,13 @@
         # flake with an output it doesn't know refused.
         gate = pkgs.runCommand "gate-check" { nativeBuildInputs = [ (pkgs.python3.withPackages (p: [ p.pyyaml ])) pkgs.git pkgs.jq pkgs.nix ]; } ''
           python3 -I ${./tests/gate.py} ${./.github/workflows/flake-check.yml}
+          touch $out
+        '';
+        # flake-gate: a repo's CI gate step, run here as CI runs it, and
+        # burrow's own evaluating apart, so a Claude job's gate holds little.
+        flake-gate = pkgs.runCommand "flake-gate-check" { nativeBuildInputs = [ (pkgs.callPackage ./tools/flake-gate/package.nix { }) pkgs.git pkgs.yq-go pkgs.shellcheck ]; } ''
+          shellcheck -s bash ${./tests/flake-gate.sh}
+          bash ${./tests/flake-gate.sh} ${./.}
           touch $out
         '';
         # The shared CI's attestation step (flake-check.yml), its own script
