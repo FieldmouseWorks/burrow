@@ -451,6 +451,10 @@ fn a_push_is_read_word_by_word_as_the_shell_splits_it() {
         "git -c 'user.name=A B' push -f origin main",
         "/usr/bin/git push -f origin main",
         "git push -f origin main 2>&1 | tail",
+        // A redirect anywhere among its words, and what it runs.
+        "git push 2>&- -f origin main",
+        "git push <&- -f origin main",
+        "cat <(git push -f origin main)",
     ] {
         assert_eq!(
             b.check(cmd, w),

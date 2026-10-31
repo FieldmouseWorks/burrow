@@ -18,8 +18,10 @@ pub fn commands(text: &str) -> Vec<Vec<String>> {
                     lex.in_word = false;
                 }
                 lex.end_word();
+                // The rest of the operator (`>>`, `>&`, `<>`, `>|`); its
+                // target follows, `-` and a descriptor's number included.
                 while chars
-                    .next_if(|c| matches!(c, '<' | '>' | '&' | '|' | '-'))
+                    .next_if(|c| matches!(c, '<' | '>' | '&' | '|'))
                     .is_some()
                 {}
                 lex.target = true;
@@ -96,6 +98,7 @@ impl Lexer {
 
     fn end_command(&mut self) {
         self.end_word();
+        // `<(` is a command, not the redirect's target.
         self.target = false;
         if !self.words.is_empty() {
             self.commands.push(std::mem::take(&mut self.words));
@@ -159,5 +162,12 @@ mod tests {
         );
         assert_eq!(commands("a x2>y b"), want(&[&["a", "x2", "b"]]));
         assert_eq!(commands("a '2'>y b"), want(&[&["a", "2", "b"]]));
+        // `-` is the target that closes a descriptor.
+        assert_eq!(commands("a 3>&- b <&- c"), want(&[&["a", "b", "c"]]));
+        // A process substitution is a command of its own, not a target.
+        assert_eq!(
+            commands("a <(b c) >(d)"),
+            want(&[&["a"], &["b", "c"], &["d"]])
+        );
     }
 }
