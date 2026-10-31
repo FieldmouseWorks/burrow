@@ -31,6 +31,15 @@ QUEUE, SNAP, DONE, GIT = "review/queue", "review/snap", "review/done", "review/g
 SESSIONS, GONE = "review/sessions", ".gone-"
 ORIGIN = "https://github.com/{}.git"
 OUT = "reviewers.json"  # a reviewer out of service, and until when
+META = {"rules", "house", "secret"}  # what a snapshot keeps of its base, for the prompt
+# How the reviewers and a judge weigh the reasons a PR's description gives
+# where the house rules ask for one. That the line is there is CI's to check;
+# whether its reason holds up takes reading the code.
+REASONS = ("Where the house rules ask a PR for a line in its description giving a reason (one starting `Why not Rust:` "
+           "for new code that isn't Rust, say), judge the reason against the rule it answers and against the code, not only "
+           "that it's there. Rust is the default, and a coin toss goes to Rust: a reason that only says it was quicker, that "
+           "it's small, that the code around it is in that language already, or that the code itself contradicts (a "
+           "\"throwaway\" script a service runs, \"glue\" with logic of its own) doesn't hold.")
 
 
 def on(repo):
@@ -54,10 +63,20 @@ def finding(r):
     return f"<!-- {r}-finding -->"
 
 
+def described(pr, seen):
+    """Whether a review that was shown the description `seen` (its
+    fingerprint) was shown the PR's as it is now. The reasons a description
+    gives are part of what a reviewer judges, so a review of another one
+    doesn't cover the PR: a `Why not Rust:` line written in after a clean
+    review (CI wanted one) has had nobody weigh it."""
+    return seen == C.fingerprint(pr["body"])
+
+
 def verdict(pr, head, r):
-    """What the reviewer last said about this exact head on the PR's base
-    (clean, findings or none), when, and how many of its reviews on the PR had findings. Only
-    reviews the steward posted count: anyone can write the marker."""
+    """What the reviewer last said about this exact head on the PR's base,
+    shown its description as it is now (clean, findings or none), when, and
+    how many of its reviews on the PR had findings. Only reviews the steward
+    posted count: anyone can write the marker."""
     pat = review_re(r)
     v, at, rounds = "none", 0, 0
     for x in pr["reviews"]["nodes"]:
@@ -72,7 +91,7 @@ def verdict(pr, head, r):
         rounds += found
         # Retargeted, the PR is another change on the same head: what was
         # said about it on its old base doesn't count.
-        if (said.get("commit_sha") == head and said.get("base") == pr["baseRefName"]
+        if (said.get("commit_sha") == head and said.get("base") == pr["baseRefName"] and described(pr, said.get("description"))
                 and (x["commit"] or {}).get("oid") == head and ts(x["submittedAt"]) >= at):
             v, at = ("findings" if found else "clean"), ts(x["submittedAt"])
     return v, at, rounds
@@ -116,26 +135,31 @@ def hidden(repo, path):
 
 def rules(repo, mirror, rev, paths):
     """The `## Code Review Rules` of the AGENTS.md nearest each changed file,
-    as `rev` (the base branch) has them: a PR can't rewrite its own rules.
-    An AGENTS.md in a secrets path is never read: its rules would reach the
-    reviewers in the prompt."""
+    and the `## House rules` the reasons a PR's description gives answer to,
+    from every AGENTS.md from the root down to each changed file (a nearer
+    one can add to the root's), as `rev` (the base branch) has them: a PR
+    can't rewrite its own rules, and the base it lands on is the one whose
+    rules hold. An AGENTS.md in a secrets path is never read: its rules
+    would reach the reviewers in the prompt. Returns the two, as text."""
     have = {f for f in names(git("-C", mirror, "ls-tree", "-r", "-z", "--name-only", rev)) if not hidden(repo, f)}
-    wanted = set()
+    nearest, above = set(), set()
     for p in paths:
-        d = p
+        mine, d = [], p
         while d:
             d = d.rpartition("/")[0]
             f = f"{d}/AGENTS.md" if d else "AGENTS.md"
             if f in have:
-                wanted.add(f)
-                break
-    out = []
-    for f in sorted(wanted):
+                mine.append(f)
+        nearest.update(mine[:1])
+        above.update(mine)
+    out = {"Code Review Rules": [], "House rules": []}
+    for f in sorted(above):
         text = git("-C", mirror, "show", f"{rev}:{f}").decode(errors="replace")
-        m = re.search(r"^## Code Review Rules\s*$(.*?)(?=^## |\Z)", text, re.M | re.S)
-        if m:
-            out.append(f"From {f}:\n{m.group(1).strip()}")
-    return "\n\n".join(out)
+        for heading, found in out.items():
+            m = re.search(rf"^## {heading}\s*$(.*?)(?=^## |\Z)", text, re.M | re.S)
+            if m and (f in nearest or heading == "House rules"):
+                found.append(f"From {f}:\n{m.group(1).strip()}")
+    return ["\n\n".join(x) for x in out.values()]
 
 
 def fetch(repo, *refs):
@@ -176,7 +200,8 @@ def snapshot(repo, pr, key):
     n, head, base = pr["number"], pr["headRefOid"], pr["baseRefName"]
     name = snap_name(key, head, base)
     meta = load(f"{SNAP}/{name}.json", None)
-    if meta:
+    # One kept by a steward that read less of the base is taken again.
+    if meta and META <= meta.keys():
         return name, meta
     mirror = fetch(repo, f"+refs/pull/{n}/head:refs/pr/{n}", f"+refs/heads/{base}:refs/base/{base}")
     mb = git("-C", mirror, "merge-base", f"refs/base/{base}", head).decode().strip()
@@ -234,8 +259,8 @@ def snapshot(repo, pr, key):
     git("-C", dst, "fetch", "-q", "--no-tags", mirror, f"refs/snap/{name}:refs/heads/review", env=bare)
     git("-C", mirror, "update-ref", "-d", f"refs/snap/{name}")
     git("-C", dst, "checkout", "-q", "review", env=bare)
-    meta = {"rules": rules(repo, mirror, f"refs/base/{base}", [p for p in changed if not (hidden(repo, p) or p in moved)]),
-            "secret": [shown(p) for p in changed if hidden(repo, p) or p in moved]}
+    review, house = rules(repo, mirror, f"refs/base/{base}", [p for p in changed if not (hidden(repo, p) or p in moved)])
+    meta = {"rules": review, "house": house, "secret": [shown(p) for p in changed if hidden(repo, p) or p in moved]}
     save(f"{SNAP}/{name}.json", meta)
     return name, meta
 
@@ -279,13 +304,16 @@ def item_name(key, r, head, base):
 
 
 def queue(repo, pr, key, r):
-    """Queue the reviewer on the head's snapshot, in line by when the PR was
-    opened (opened), so one pushed again keeps its place. Raises if the
-    snapshot can't be taken (the head moved on, GitHub's unreachable)."""
+    """Queue the reviewer on the head's snapshot, with the PR's description
+    as it is now: one edited to answer a finding is what the next look at
+    the same head reads. In line by when the PR was opened (opened), so one
+    pushed again keeps its place. Raises if the snapshot can't be taken (the
+    head moved on, GitHub's unreachable)."""
     snap, meta = snapshot(repo, pr, key)
     save(f"{QUEUE}/{r}--{snap}.json", {
         "reviewer": r, "snap": snap, "repo": repo, "number": pr["number"], "headRefOid": pr["headRefOid"],
-        "baseRefName": pr["baseRefName"], "title": pr["title"], "rules": meta["rules"], "secret": meta["secret"],
+        "baseRefName": pr["baseRefName"], "title": pr["title"], "body": pr["body"],
+        "rules": meta["rules"], "house": meta["house"], "secret": meta["secret"],
         "prior": prior(repo, pr["number"], r), "opened": ts(pr["createdAt"]), "at": C.NOW})
 
 
@@ -514,9 +542,10 @@ def quiet(text):
     return re.sub(r"@(?=[\w-])", "@​", str(text)).replace("<!--", "&lt;!--")
 
 
-def post(repo, pr, r, answer):
-    """The reviewer's answer as one review on the head. Returns "clean" or
-    "findings". Raises ValueError if the answer isn't a review, and
+def post(repo, pr, r, answer, description):
+    """The reviewer's answer as one review on the head, marked with the
+    description it was shown (its fingerprint, or None if that's unknown).
+    Returns "clean" or "findings". Raises ValueError if the answer isn't a review, and
     RuntimeError if GitHub didn't take it (the same answer can go next pass),
     C.Unavailable if GitHub didn't answer."""
     n, head = pr["number"], pr["headRefOid"]
@@ -574,7 +603,7 @@ def post(repo, pr, r, answer):
         # In full here too: the threads below are separate calls, and a
         # finding mustn't hang on one of them.
         body += "\n\nFindings on whole files (each a thread too):\n" + "\n".join(text for _, text in whole_file)
-    body += f"\n\n<!-- {r}-review:v1 " + json.dumps({"commit_sha": head, "base": pr["baseRefName"], "findings": k}) + " -->"
+    body += f"\n\n<!-- {r}-review:v1 " + json.dumps({"commit_sha": head, "base": pr["baseRefName"], "findings": k, "description": description}) + " -->"
     if not isinstance(C.write("api", "-X", "POST", f"repos/{repo}/pulls/{n}/reviews", "--input", "-",
                               input=json.dumps({"commit_id": head, "event": "COMMENT", "body": body, "comments": comments})), dict):
         raise RuntimeError("GitHub didn't take the review")

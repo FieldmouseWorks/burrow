@@ -145,6 +145,9 @@ S.CFG.update(proj=proj, projectsDir=f"{tmp}/src")
 C.project_dir, project_dir = (lambda repo: "r"), C.project_dir
 assert REAL["job"]("sam/r", "the task") == "job-9"
 assert open(f"{tmp}/proj-args").read().split() == ["run", "--pipeline", "--timeout", "60m", "--idle", "20m", "--kick", "autoland/sam/r", "--owned", "r", "the", "task"]
+# One that's project work, with a timeout of its own (a flaky test's).
+assert REAL["job"]("sam/r", "the task", pipeline=False, timeout=240) == "job-9"
+assert open(f"{tmp}/proj-args").read().split() == ["run", "--timeout", "240m", "--idle", "20m", "--kick", "autoland/sam/r", "--owned", "r", "the", "task"]
 # With a machinery App, the job is the machine's own work, and acts as it.
 S.CFG["machinery"] = "workers"
 assert REAL["job"]("sam/r", "the task") == "job-9"

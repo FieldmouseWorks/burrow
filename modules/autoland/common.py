@@ -11,6 +11,7 @@ user's own gh login, which every Claude session on the machine shares.
 
 import base64
 import contextlib
+import hashlib
 import hmac
 import json
 import os
@@ -316,13 +317,25 @@ def seal(repo, n, name, verdict, head, base):
     return S.mac(_key[0], repo, n, name, verdict, head, base)
 
 
-def marker(pr, name, head, repo=None, base=None):
+def quote(body):
+    """A PR's description as the reviewers are shown it: each line quoted,
+    so nothing in it reads as their brief going on."""
+    return "\n".join(f"> {x}".rstrip() for x in body.strip().splitlines()) or "(none)"
+
+
+def fingerprint(body):
+    """What a review or a judge's verdict carries of the description it was
+    on: the reasons a description gives are part of what's judged."""
+    return hashlib.sha256(quote(body).encode()).hexdigest()[:16]
+
+
+def marker(pr, name, head, repo=None, base=None, on=None):
     """The verdict in the newest `<!-- NAME: VERDICT SHA -->` on the PR for
     exactly this head, from one of its authors (`ours`: whoever its Claude
     jobs, the judges among them, post as) only; else None. With
     repo, only a marker that also carries its seal, for this head on the PR's
-    base as it is now, counts; with base, only one that names that base
-    (`<!-- NAME: VERDICT SHA on BASE -->`)."""
+    base as it is now (or on `on`, what else the verdict is on), counts; with
+    base, only one that names that base (`<!-- NAME: VERDICT SHA on BASE -->`)."""
     pat = re.compile(rf"<!-- {re.escape(name)}: ([a-z]+) ([0-9a-f]{{40}})(?: on (\S+))?(?: ([0-9a-f]{{32}}))? -->")
     verdict = None
     for c in pr["comments"]["nodes"]:  # oldest first
@@ -331,7 +344,7 @@ def marker(pr, name, head, repo=None, base=None):
         for m in pat.finditer(c["body"] or ""):
             if m.group(2) != head or (base is not None and m.group(3) != base):
                 continue
-            want = repo and seal(repo, pr["number"], name, m.group(1), head, pr["baseRefName"])
+            want = repo and seal(repo, pr["number"], name, m.group(1), head, on or pr["baseRefName"])
             if repo and not (want and hmac.compare_digest(m.group(4) or "", want)):
                 continue
             verdict = m.group(1)
@@ -469,14 +482,14 @@ def rank(repo):
     return 1 if r in {x.lower() for x in CFG["pipelineRepos"]} else 2
 
 
-def job(repo, task, clone=False, since=None):
-    """Hand a task to a Claude job in the repo's project. Every one is
-    pipeline work (proj run --pipeline): it settles a PR or the branch PRs
-    land on, so it goes ahead of the line, and in the pipeline's own repos
-    (pipelineRepos) in a slot kept for it; proj decides which. since, when
-    the work began (a PR's: when it was opened), is where it stands in line
-    among those, so a PR pushed again keeps its place. Returns the job
-    id."""
+def job(repo, task, clone=False, pipeline=True, timeout=None, since=None):
+    """Hand a task to a Claude job in the repo's project. One that settles a
+    PR or the branch PRs land on is pipeline work (proj run --pipeline): it
+    goes ahead of the line, and in the pipeline's own repos (pipelineRepos)
+    in a slot kept for it; proj decides which. Its turns stop after timeout
+    minutes (jobTimeout's by default). since, when the work began (a PR's:
+    when it was opened), is where it stands in line among those, so a PR
+    pushed again keeps its place. Returns the job id."""
     d = project_dir(repo)
     if d is None and clone and not DRY:
         d = repo.split("/")[1]
@@ -498,7 +511,8 @@ def job(repo, task, clone=False, since=None):
     app = ["--app", CFG["machinery"]] if CFG.get("machinery") else []
     # Never after now, which proj refuses: a clock that's behind GitHub's.
     when = ["--since", str(int(min(since, time.time())))] if since else []
-    p = subprocess.run([CFG["proj"], "run", "--pipeline", *app, *when, "--timeout", f"{CFG['jobTimeout']}m",
+    p = subprocess.run([CFG["proj"], "run", *(["--pipeline"] if pipeline else []), *app, *when,
+                        "--timeout", f"{timeout or CFG['jobTimeout']}m",
                         "--idle", f"{CFG['jobIdle']}m", "--kick", f"autoland/{repo}", "--owned", d, task],
                        capture_output=True, text=True)
     return p.stdout.strip() or None
