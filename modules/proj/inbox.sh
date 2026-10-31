@@ -3,6 +3,8 @@
 # job's answer goes back to the issue as a comment, and a reply there from one
 # of AUTHORS continues the same job (proj reply). Closing the issue or taking
 # the label off ends it; a turn still running gets its answer posted first.
+# A turn cut off before it answered, its whole unit killed, carries on in its
+# own conversation, twice in a row at most.
 # `proj-inbox [OWNER/REPO]` looks at that repo's issues, or every project's;
 # burrow-events (../events.nix) runs it on the repo's issue events, each time
 # one of its jobs' turns ends (proj run --kick), and when a wait it booked in
@@ -110,6 +112,15 @@ don't go and read it. $(rules "$1" "$n") If you change code, open a PR (ready fo
 description says \"Fixes #$n\" (or \"Refs #$n\" if it doesn't settle the issue)."
 }
 
+# A turn cut off from outside before it could answer or say how it ended,
+# its whole unit killed (by systemd-oomd, as a rule): no outcome, not
+# stopped, and its stream named the conversation it carries on in.
+cut_off() { # id turn state
+  [ "$3" = failed ] && [ ! -s "$JOBS/$1/$2.outcome" ] && [ ! -e "$JOBS/$1/$2.stopped" ] &&
+    [ -s "$JOBS/$1/session" ] && grep -q '"session_id"' "$JOBS/$1/$2.jsonl" 2>/dev/null
+}
+CUT_OFF="Your last turn was cut off before you answered: its whole unit was killed (out of memory, as a rule), and everything it had running went with it. Carry on from where you left off: see what had already finished before you run anything again."
+
 only=${1:-}
 
 # When a repo needs another look, as this pass works out: a reply not yet old
@@ -212,12 +223,23 @@ for repo in "${!project[@]}"; do
     # all but the one queued or running now. A job that proj _watch resumed
     # before this pass still has the answer it gave before posted.
     case $st in queued | running) last=$((turns - 1)) ;; *) last=$turns ;; esac
+    # The latest turn, cut off, carries on in its own conversation (below)
+    # while the issue is open, twice in a row at most, and the issue hears so.
+    revive=''
+    if cut_off "$id" "$turns" "$st" && [ "$(cat "$d/revived" 2>/dev/null || echo 0)" -lt 2 ] &&
+      jq -e --argjson n "$n" 'any(.[]; .number == $n)' <<<"$open" >/dev/null; then
+      revive=1
+    fi
     k=$(cat "$d/answered")
     while [ "$k" -lt "$last" ]; do
       k=$((k + 1))
       if [ "$k" = "$turns" ]; then why=" ($st)"; else why=''; fi
-      body=$(proj log "$id" --turn "$k") ||
-        body="The job's turn $k ended without an answer$why. \`proj log $id --turn $k --raw\` on $HOST has what it did."
+      if [ "$k" = "$turns" ] && [ -n "$revive" ]; then
+        body="The job's turn $k was cut off before it answered (its whole unit was killed, out of memory as a rule): it carries on where it left off."
+      else
+        body=$(proj log "$id" --turn "$k") ||
+          body="The job's turn $k ended without an answer$why. \`proj log $id --turn $k --raw\` on $HOST has what it did."
+      fi
       # GitHub takes 65536 characters a comment.
       post "$repo" "$n" "${body:0:60000}" || { miss "$repo"; continue 2; }
       echo "$k" >"$d/answered"
@@ -241,6 +263,14 @@ for repo in "${!project[@]}"; do
       rm -rf "$d"
       continue
     fi
+
+    if [ -n "$revive" ]; then
+      proj reply --first "$id" "$CUT_OFF" >/dev/null || { retry "$repo"; continue; }
+      echo $(($(cat "$d/revived" 2>/dev/null || echo 0) + 1)) >"$d/revived"
+      # Replies wait for the next pass, which its turn's end kicks.
+      continue
+    fi
+    cut_off "$id" "$turns" "$st" || rm -f "$d/revived"
 
     # Replies since the last turn continue the job. Only once they're a minute
     # old: closing with a comment posts the comment first, and the issue list

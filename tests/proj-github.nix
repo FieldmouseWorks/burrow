@@ -13,8 +13,10 @@
 # acting as the machinery's App, that one with the unstick label too (the
 # steward's stuck issue) has a job that waits in no line, one already waiting
 # in it leaving it once the label comes, the watchdog told so again each pass
-# whatever an older turn wrote, and that a job dir removed or a wait it can't
-# read stops neither proj-inbox nor _watch.
+# whatever an older turn wrote, that an issue's turn cut off before it
+# answered, its whole unit killed, carries on in its own session, twice in a
+# row at most, and that a job dir removed or a wait it can't read stops
+# neither proj-inbox nor _watch.
 { pkgs }:
 ''
   with subtest("a job waiting on a PR is resumed when the PR changes"):
@@ -499,4 +501,39 @@
       machine.succeed("su - dev -c 'proj-inbox o/m'")
       looked = machine.succeed("su - dev -c 'proj-inbox status'")
       assert "o/.github#8" in looked and "o/m#9" not in looked, looked
+
+  with subtest("an issue's turn cut off before it answers carries on in its own session, twice in a row at most"):
+      machine.succeed("install -d -o dev -g dev /data/dev/src/cut")
+      machine.succeed("su - dev -c 'git init -q /data/dev/src/cut && git -C /data/dev/src/cut remote add origin https://github.com/o/c'")
+      hung = {"number": 1, "user": {"login": "sam"}, "html_url": "https://github.com/o/c/issues/1",
+              "title": "t", "body": "inbox-hang", "state": "open", "labels": [{"name": "claude"}]}
+      github("repos/o/c/issues", json.dumps([hung]))
+      github("repos/o/c/issues/1/comments", "[]")
+      machine.succeed("su - dev -c 'proj-inbox o/c'")
+      cj = next(x.split()[-1] for x in machine.succeed("su - dev -c 'proj-inbox status'").splitlines() if x.startswith("o/c#1 "))
+      def cut_off(n):
+          # As systemd-oomd kills a unit: all of it, the turn's own shell too.
+          machine.wait_until_succeeds(f"grep -q hang /data/dev/jobs/{cj}/{n}.jsonl && grep -qx hang /data/dev/jobs/{cj}/session", timeout=120)
+          machine.succeed(f"systemctl --user -M dev@ kill --signal=KILL '{unit(cj)}'")
+          machine.wait_until_fails(f"systemctl --user -M dev@ is-active -q '{unit(cj)}'", timeout=60)
+          assert state(cj) == "failed", state(cj)
+          machine.succeed("su - dev -c 'proj-inbox o/c'")
+      cut_off(1)
+      assert machine.succeed(f"cat /data/dev/jobs/{cj}/turns").strip() == "2"
+      machine.wait_until_succeeds(f"su - dev -c 'proj state {cj}' | grep -x done", timeout=120)
+      assert "--resume hang" in machine.succeed("cat /tmp/args"), machine.succeed("cat /tmp/args")
+      machine.succeed("su - dev -c 'proj-inbox o/c'")
+      posted = machine.succeed("cat /tmp/gh/posted")
+      assert "turn 1 was cut off" in posted and "did Your last turn was cut off" in posted, posted
+      # Cut off each time it carries on: the third in a row is posted, and waits.
+      machine.succeed("touch /tmp/again")
+      proj(f'reply {cj} "inbox-hang"')
+      for n in (3, 4, 5):
+          cut_off(n)
+      machine.succeed("rm /tmp/again")
+      assert machine.succeed(f"cat /data/dev/jobs/{cj}/turns").strip() == "5"
+      posted = machine.succeed("cat /tmp/gh/posted")
+      assert "turn 3 was cut off" in posted and "turn 4 was cut off" in posted and "turn 5 ended without an answer" in posted, posted
+      github("repos/o/c/issues", "[]")
+      machine.succeed("su - dev -c 'proj-inbox o/c'")
 ''

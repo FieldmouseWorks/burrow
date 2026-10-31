@@ -74,6 +74,11 @@
 # stands still meanwhile, the stall watchdog holding that wait to
 # STALL_QUEUED instead.
 #
+# A run killed for memory before it answers (Claude itself, as a rule) is
+# carried on in its own conversation and slot, twice a turn at most, rather
+# than start the work over. A turn whose whole unit was killed (systemd-oomd
+# does that) is carried on by proj-inbox, for an issue's job.
+#
 # A turn ends at its answer. Claude -p stays up after it while anything it
 # left in the background runs (a CI watch, say), holding a slot to do
 # nothing; so the answer stops it, and what it left running. That can be
@@ -198,15 +203,25 @@ nanos() {
 # How a job waits on its own long work, which its answer would stop.
 LONG="A command that can outlast one Bash call (ten minutes), a long build or test run, goes to the background with its output and exit code written to a file, and you wait for that file in the foreground, in steps under ten minutes each; answer only once it's there."
 
+# What a run killed for memory before it answered is told in the next.
+KILLED="Your last run was killed for memory before you answered, and everything it had running went with it. Carry on from where you left off: see what had already finished before you run anything again."
+
 # How a turn says what comes next: what resumes the job, if anything.
 NEXT="\`proj await URL\` for each PR or issue you're still waiting on (the job is resumed, with this conversation, once one of them changes: checks finish, a review, comment or push, merged or closed), \`proj ask\` when your answer is a question only a person can settle (their reply resumes it), or \`proj done\` when the work is finished"
+
+# This shell's unit's cgroup.
+cgroup() { echo "/sys/fs/cgroup$(sed -n 's/^0:://p' /proc/self/cgroup)"; }
+
+# How many of the unit's processes the kernel has killed for memory, past
+# whichever cap: the job's own, its slice's or the machine's.
+oom_kills() { awk '$1 == "oom_kill" { k = $2 } END { print k + 0 }' "$(cgroup)/memory.events" 2>/dev/null || echo 0; }
 
 # Everything in this shell's unit but the shell: what a run left behind, in
 # whatever process group, TERM first, then KILL. Fails if any of it is still
 # there after that.
 reap() {
   local cg p sig procs others
-  cg=/sys/fs/cgroup$(sed -n 's/^0:://p' /proc/self/cgroup)
+  cg=$(cgroup)
   for sig in TERM 0 0 0 0 0 0 0 0 0 KILL 0 0 0 0 0 0 0 0 0; do
     others=''
     mapfile -t procs <"$cg/cgroup.procs"
@@ -277,6 +292,19 @@ watch_run() {
     rm -f "$dir/$n.wait"
     rewatch "$id" &
   fi
+}
+
+# The turn's next run, in the same conversation and slot, is told $1, kept
+# in its $n.$2.
+again() {
+  printf '%s\n' "$1" >"$dir/$n.$2"
+  prompt=$dir/$n.$2
+  # The next run's quiet counts from its start, and is its own.
+  rm -f "$dir/$n.quiet"
+  touch "$dir/$n.jsonl"
+  # The last run's watcher telling the watchdog its wait was over (still
+  # going, in the background) may have gone with the rest of it: told again.
+  rewatch "$id" &
 }
 
 # Known not to be running: not "can't say".
@@ -378,7 +406,8 @@ start_turn() {
   # Claude is what goes first when memory runs out, not whatever it's next to.
   # Past its own cap the kernel kills the job's biggest process (a build or
   # an evaluation it ran, as a rule) and the turn carries on, told the command
-  # was killed: systemd's default OOMPolicy would stop the whole turn.
+  # was killed, or in a run of its own when that was Claude (_exec):
+  # systemd's default OOMPolicy would stop the whole turn.
   # Its end is a unit of its own, however the turn ends: what kills the turn's
   # whole cgroup (systemd-oomd does) would take an ExecStopPost with it. The
   # name is doubled up on its backslashes, which systemd-run reads as escapes.
@@ -825,6 +854,7 @@ Carry on from there. Anything you left in the background last turn was stopped w
     [ ! -e "$dir/owned" ] && [ ! -s "$dir/agent" ] || must=''
     : >"$dir/$n.jsonl"
     prompt=$dir/prompt.$n
+    killed=0
     while :; do
       args=(-p --output-format stream-json --verbose)
       if [ -s "$dir/session" ]; then args+=(--resume "$(cat "$dir/session")"); fi
@@ -837,6 +867,7 @@ Carry on from there. Anything you left in the background last turn was stopped w
         last='' rc=124
         break
       fi
+      ooms=$(oom_kills)
       # Each run goes under timeout(1) with no limit of its own: watch_run
       # stops it through that, which stops all of it (TERM, then KILL a
       # minute on), as timeout(1) does at a limit.
@@ -879,6 +910,16 @@ Carry on from there. Anything you left in the background last turn was stopped w
       wait "$dog" || true
       wait "$named" || true
       last=$(tail -n +"$from" "$dir/$n.jsonl" | grep '"type":"result"' | tail -n 1 || true)
+      # Killed for memory before it answered, Claude itself as a rule (a
+      # command it ran that's killed leaves it to answer), and not stopped
+      # for going quiet: carried on in its own conversation, which its
+      # stream named, once all of it is gone.
+      if [ -z "$last" ] && [ "$killed" -lt 2 ] && [ ! -e "$dir/$n.quiet" ] && [ "$(oom_kills)" -gt "$ooms" ] &&
+        grep -q '"session_id"' < <(tail -n +"$from" "$dir/$n.jsonl") && reap; then
+        killed=$((killed + 1))
+        again "$KILLED" killed
+        continue
+      fi
       # Still up after its answer, it was waiting on something it left in the
       # background (a build past one Bash call), which went with it. Or it
       # answered without saying what comes next, and nothing would ever
@@ -895,17 +936,9 @@ Carry on from there. Anything you left in the background last turn was stopped w
       elif [ -n "$cut" ]; then
         told+=" $LONG If you were waiting on GitHub, run \`proj await URL\` for it."
       fi
-      if [ -n "$told" ] && [ "$prompt" = "$dir/prompt.$n" ] && [ ! -s "$dir/agent" ] &&
+      if [ -n "$told" ] && [ ! -e "$dir/$n.cut" ] && [ ! -s "$dir/agent" ] &&
         jq -e '.is_error | not' <<<"$last" >/dev/null 2>&1 && reap; then
-        printf '%s\n' "$told Then answer again." >"$dir/$n.cut"
-        prompt=$dir/$n.cut
-        # The next run's quiet counts from its start, and is its own.
-        rm -f "$dir/$n.quiet"
-        touch "$dir/$n.jsonl"
-        # The last run's watcher telling the watchdog its wait was over
-        # (still going, in the background) may have gone with the rest of
-        # it: told again.
-        rewatch "$id" &
+        again "$told Then answer again." cut
         continue
       fi
       break
