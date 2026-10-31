@@ -117,8 +117,32 @@ fn child() {
     };
     let jobs = env::var(JOBS_ENV).unwrap();
     let max_jobs: usize = env::var(MAX_JOBS_ENV).unwrap().parse().unwrap();
-    let cfg = config(Path::new(&jobs), max_jobs);
+    let mut cfg = config(Path::new(&jobs), max_jobs);
     let mut held = None;
+    // A deployed proj to hand over to, saying whether the turn could still be
+    // withdrawn when it got it. Written here, where nothing else forks, so no
+    // child holds it open for writing as it's run.
+    if what == "hand-over" {
+        let id = env::args().skip_while(|a| a != "_exec").nth(1).unwrap();
+        let stub = cfg.jobs.join("deployed");
+        fs::write(
+            &stub,
+            format!(
+                r#"#!/bin/sh
+case $1 in
+  _handover_format) echo 1 ;;
+  _exec) if [ -e "{jobs}/$2/1.withdrawable" ]; then echo marked; else echo unmarked; fi >"{jobs}/$2/handed" ;;
+esac
+"#
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
+        cfg.deployed = stub;
+        cfg.tools.bash = "sh".into();
+        cfg.tools.flock = "true".into();
+        take(&cfg, &id, "1", Class::Normal).unwrap_err();
+    }
     if what == "take" || what == "leave" {
         let id = env::args().skip_while(|a| a != "_exec").nth(1).unwrap();
         held = Some(take(&cfg, &id, "1", Class::Normal).unwrap());
@@ -360,6 +384,10 @@ fn the_note_is_what_pick_said() {
 }
 
 fn waiter(jobs: &Path, tmp: &TempDir, id: &str, max_jobs: usize) -> Kid {
+    waiter_to("take", jobs, tmp, id, max_jobs)
+}
+
+fn waiter_to(what: &str, jobs: &Path, tmp: &TempDir, id: &str, max_jobs: usize) -> Kid {
     fs::create_dir_all(jobs.join(id)).unwrap();
     fs::write(
         jobs.join(id).join("project"),
@@ -367,7 +395,7 @@ fn waiter(jobs: &Path, tmp: &TempDir, id: &str, max_jobs: usize) -> Kid {
     )
     .unwrap();
     spawn_child(
-        "take",
+        what,
         jobs,
         max_jobs,
         &["_exec".into(), id.into(), "1".into(), "normal".into()],
@@ -602,6 +630,76 @@ fn free(slot: &Path) -> bool {
         f.unlock().unwrap();
     }
     ok
+}
+
+/// Job w0's lock, held as proj withdraw would hold it. Let go of by unlocking,
+/// as [`free`] says.
+fn job_lock(jobs: &Path) -> File {
+    fs::create_dir_all(jobs.join("w0")).unwrap();
+    let lock = File::create(jobs.join("w0/lock")).unwrap();
+    lock.try_lock().unwrap();
+    lock
+}
+
+// A turn says it has its slot (N.slot, proj state's running) only under its
+// job's lock, which proj withdraw looks and stops under: with that held, the
+// head of the line takes the free slot and waits to say so.
+#[test]
+fn a_turn_says_it_has_its_slot_under_its_jobs_lock() {
+    let tmp = TempDir::new().unwrap();
+    let jobs = jobs_dir(&tmp);
+    let lock = job_lock(&jobs);
+    let _kid = waiter(&jobs, &tmp, "w0", 1);
+    let slot = jobs.join(".slots/1");
+    until("w0 takes the free slot", || !free(&slot));
+    sleep(Duration::from_secs(2));
+    assert!(!jobs.join("w0/1.slot").exists(), "said so under the lock");
+    assert!(jobs.join("w0/1.withdrawable").exists());
+    assert_eq!(took(&jobs, "w0"), None);
+    lock.unlock().unwrap();
+    until("w0 says so", || took(&jobs, "w0").is_some());
+    assert_eq!(fs::read_to_string(jobs.join("w0/1.slot")).unwrap(), "1\n");
+}
+
+// An --unstick turn the same, in the slot of its own it takes.
+#[test]
+fn an_unstick_turn_says_so_under_its_jobs_lock_too() {
+    let tmp = TempDir::new().unwrap();
+    let jobs = jobs_dir(&tmp);
+    let lock = job_lock(&jobs);
+    fs::write(jobs.join("w0/unstick"), "").unwrap();
+    let _kid = waiter(&jobs, &tmp, "w0", 1);
+    let slot = jobs.join(".slots/unstick");
+    until("w0 takes its slot", || slot.exists() && !free(&slot));
+    sleep(Duration::from_secs(2));
+    assert!(!jobs.join("w0/1.slot").exists(), "said so under the lock");
+    lock.unlock().unwrap();
+    until("w0 says so", || took(&jobs, "w0").is_some());
+    assert_eq!(
+        fs::read_to_string(jobs.join("w0/1.slot")).unwrap(),
+        "unstick\n"
+    );
+}
+
+// A turn handed over to the deployed proj stops saying it may be withdrawn
+// first, under its job's lock: what it's handed to may take its slot without
+// that lock (a proj from before took_slot, after a switch back to it).
+#[test]
+fn a_turn_handed_over_may_be_withdrawn_no_more() {
+    let tmp = TempDir::new().unwrap();
+    let jobs = jobs_dir(&tmp);
+    let lock = job_lock(&jobs);
+    let _kid = waiter_to("hand-over", &jobs, &tmp, "w0", 1);
+    until("w0 says it may be withdrawn", || {
+        jobs.join("w0/1.withdrawable").exists()
+    });
+    sleep(Duration::from_secs(3));
+    let handed = jobs.join("w0/handed");
+    assert!(!handed.exists(), "handed over under its job's lock");
+    assert!(jobs.join("w0/1.withdrawable").exists());
+    lock.unlock().unwrap();
+    until("w0 is handed over", || handed.exists());
+    assert_eq!(fs::read_to_string(handed).unwrap(), "unmarked\n");
 }
 
 // A slot stays with what its turn left running: with the turn's process

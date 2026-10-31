@@ -5,8 +5,8 @@
 //! `owned` (there or not), `link`, `app`, and `agent` (its sandbox, with
 //! --vm). Kept across turns: `turns` (the latest turn's number), `session`
 //! (Claude's, which the next turn resumes) and `lock` (turns start under
-//! it). Each turn N's own: `prompt.N`; `N.slot` (the slot it took, once it
-//! has one), `N.jsonl` (its stream), `N.result` (its answer), `N.outcome`
+//! it). Each turn N's own: `prompt.N`; `N.withdrawable` (proj withdraw may
+//! stop it while it waits), `N.slot` (the slot it took, once it has one), `N.jsonl` (its stream), `N.result` (its answer), `N.outcome`
 //! (how it ended: done, error, or what stopped it), `N.end` (how it said it
 //! ends), `N.deadline` (when its time is up, in nanoseconds), `N.wait` (what
 //! one of its commands waits in line for), `N.waits` (where they say so),
@@ -90,7 +90,7 @@ impl<'a> Job<'a> {
     /// update writes them there too, once it ends). They're turn N's if
     /// they're no older than its prompt; anything older is an earlier
     /// turn's, and goes.
-    fn adopt(&self) {
+    pub fn adopt(&self) {
         let Some(n) = self.turns() else { return };
         let prompt = mtime_of(&self.path(&format!("prompt.{n}")));
         for f in ["slot", "outcome", "result"] {

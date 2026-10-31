@@ -41,6 +41,9 @@
 //!                             the full stream); fails when there's none
 //! proj state ID               queued, running, done, error or failed
 //! proj stop ID                end a job: its running turn and its waits
+//! proj withdraw ID            end a job only while its turn still waits for
+//!                             a slot: prints withdrawn, or running or over
+//!                             for one it leaves be
 //! proj unstick ID             make a job one run --unstick from now on: a
 //!                             turn of it waiting in line leaves it at its
 //!                             next look, one running carries on

@@ -52,7 +52,8 @@ pub fn dispatch(cfg: &Config, args: &[String]) -> Result<(), Fail> {
             put(&format!("{}\n", Job::new(cfg, id).state()));
             Ok(())
         }
-        Some("stop") => stop(cfg, arg(args, 1, "usage: proj stop ID")?),
+        Some("stop") => stop(cfg, arg(args, 1, "usage: proj stop ID")?, false),
+        Some("withdraw") => stop(cfg, arg(args, 1, "usage: proj withdraw ID")?, true),
         Some("unstick") => {
             let id = arg(args, 1, "usage: proj unstick ID")?;
             let job = Job::new(cfg, id);
@@ -97,7 +98,7 @@ pub fn dispatch(cfg: &Config, args: &[String]) -> Result<(), Fail> {
         }
         Some(_) => Err(Fail::new(
             2,
-            "usage: proj run|reply|status|log|state|stop|unstick|list|await|ask|done",
+            "usage: proj run|reply|status|log|state|stop|withdraw|unstick|list|await|ask|done",
         )),
     }
 }
@@ -507,8 +508,45 @@ fn log(cfg: &Config, args: &[String]) -> Result<(), Fail> {
     Err(Fail::quiet(1))
 }
 
-/// `proj stop ID`: its running turn ended, and its waits.
-fn stop(cfg: &Config, id: &str) -> Result<(), Fail> {
+/// What keeps `proj withdraw` from stopping a job, under its lock: that it's
+/// running or over, which it prints and is settled, or that it can't be told.
+/// Withdrawn only while it has no slot. A turn says it has one only under this
+/// lock too ([`slot`]'s took_slot), so it can't take one between this look and
+/// the stop; one that doesn't (N.withdrawable unsaid: its turn runs an older
+/// proj, or hasn't reached the line) isn't stopped. Failing then, or when
+/// systemd can't say (`active`, its unit's ActiveState), so the caller can ask
+/// again.
+fn left_be(job: &Job, n: &str, active: &str) -> Result<Option<&'static str>, Fail> {
+    let id = job.id;
+    match active {
+        "active" | "activating" | "reloading" => {}
+        "inactive" | "failed" => return Ok(Some("over")),
+        _ => {
+            return Err(Fail::new(
+                1,
+                format!("proj: can't tell whether {id} still waits for a slot"),
+            ));
+        }
+    }
+    job.adopt();
+    if job.turn(n, "slot").exists() {
+        return Ok(Some("running"));
+    }
+    if !job.turn(n, "withdrawable").exists() {
+        return Err(Fail::new(
+            1,
+            format!(
+                "proj: {id}'s turn can't be withdrawn safely yet (it runs an older proj, or isn't in line yet)"
+            ),
+        ));
+    }
+    Ok(None)
+}
+
+/// `proj stop ID`: its running turn ended, and its waits. `proj withdraw ID`:
+/// the same, only while its turn still waits for a slot ([`left_be`]), saying
+/// what it did.
+fn stop(cfg: &Config, id: &str, withdraw: bool) -> Result<(), Fail> {
     let job = Job::new(cfg, id);
     if !job.dir.is_dir() {
         return Err(Fail::new(1, format!("no job {id}")));
@@ -517,9 +555,19 @@ fn stop(cfg: &Config, id: &str) -> Result<(), Fail> {
     // stopping. A stopped job is over: nothing it waited on resumes it.
     let _held = job.lock().map_err(|e| io_fail(&job.path("lock"), e))?;
     let unit = job.unit();
+    let n = job.turns();
+    if withdraw
+        && let Some(said) = left_be(
+            &job,
+            n.as_deref().unwrap_or_default(),
+            &systemd::show(cfg, &unit, "ActiveState"),
+        )?
+    {
+        put(&format!("{said}\n"));
+        return Ok(());
+    }
     // Marked first, so the turn's end already finds it stopped rather than
     // failed: nobody waits on it.
-    let n = job.turns();
     if let Some(n) = &n {
         let _ = fs::write(job.turn(n, "stopped"), "");
     }
@@ -546,6 +594,9 @@ fn stop(cfg: &Config, id: &str) -> Result<(), Fail> {
     rewatch(cfg, &[id]);
     if idle {
         scratch::clear(cfg, id);
+    }
+    if withdraw {
+        put("withdrawn\n");
     }
     Ok(())
 }
@@ -654,8 +705,44 @@ fn ended(cfg: &Config) -> Result<(), Fail> {
 
 #[cfg(test)]
 mod tests {
-    use super::{baselines, id_name, kick_name};
+    use std::fs;
+
+    use super::{baselines, id_name, kick_name, left_be};
     use crate::config::Config;
+    use crate::job::Job;
+
+    // proj withdraw stops only a turn that says it may be, and has no slot: one
+    // that has started or ended it leaves be, saying so, and one from an older
+    // proj, or one systemd can't say about, it fails on, to be asked about again.
+    #[test]
+    fn what_withdraw_leaves_be() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut v = crate::config::tests::example();
+        v["jobs"] = tmp.path().to_str().unwrap().into();
+        let cfg: Config = serde_json::from_value(v).unwrap();
+        fs::create_dir(tmp.path().join("j")).unwrap();
+        fs::write(tmp.path().join("j/turns"), "1\n").unwrap();
+        let job = Job::new(&cfg, "j");
+        let said = |active| left_be(&job, "1", active).map_err(|f| f.code);
+
+        for active in ["inactive", "failed"] {
+            assert_eq!(said(active), Ok(Some("over")), "{active}");
+        }
+        for active in ["", "deactivating", "maintenance"] {
+            assert_eq!(said(active), Err(1), "{active:?}");
+        }
+        assert_eq!(
+            said("active"),
+            Err(1),
+            "unsaid: it isn't known to take its slot locked"
+        );
+        fs::write(job.turn("1", "withdrawable"), "").unwrap();
+        for active in ["active", "activating", "reloading"] {
+            assert_eq!(said(active), Ok(None), "{active}");
+        }
+        fs::write(job.turn("1", "slot"), "2\n").unwrap();
+        assert_eq!(said("active"), Ok(Some("running")));
+    }
 
     // A baseline GitHub can't give fails the whole await, and writes nothing.
     #[test]

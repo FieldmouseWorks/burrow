@@ -142,8 +142,30 @@ fn unstick_slot(cfg: &Config, id: &str, n: &str) -> io::Result<File> {
         slots.join("unstick.who"),
         format!("unstick\t{}\n", project(&job.dir)),
     )?;
-    fs::write(job.turn(n, "slot"), "unstick\n")?;
+    took_slot(&job, n, "unstick")?;
     Ok(slot)
+}
+
+/// Say that this job's turn N has slot S (N.slot, which proj state reads as
+/// running), under the job's lock: proj withdraw stops a turn only while it has
+/// none, and looks under that lock, so none takes one between its look and its
+/// stop. One withdrawn while it waits here is stopped with no slot.
+fn took_slot(job: &Job, n: &str, s: &str) -> io::Result<()> {
+    let _held = job.lock()?;
+    fs::write(job.turn(n, "slot"), format!("{s}\n"))
+}
+
+/// Say this job's turn N may be withdrawn no more, under the job's lock, so none
+/// is stopped on this proj's word once another has it: before a hand-over, to a
+/// proj that may take its slot without that lock (one from before [`took_slot`],
+/// after a switch back to it). One that can be withdrawn says so again itself,
+/// at the top of its [`take`].
+fn unmark(job: &Job, n: &str) -> io::Result<()> {
+    let _held = job.lock()?;
+    match fs::remove_file(job.turn(n, "withdrawable")) {
+        Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
+        _ => Ok(()),
+    }
 }
 
 /// A slot once taken, open across exec to everything the turn starts, as a
@@ -267,6 +289,11 @@ pub fn take(cfg: &Config, id: &str, n: &str, given: Class) -> io::Result<File> {
     fs::create_dir_all(&queue)?;
     fs::create_dir_all(&slots)?;
     let job = Job::new(cfg, id);
+    // This turn says it has its slot only under its job's lock ([`took_slot`]),
+    // so proj withdraw may stop it while it waits. On a proj from before that,
+    // it can't be, never having said so: until it hands over to this one, or
+    // from the moment this one hands it over ([`unmark`]).
+    fs::write(job.turn(n, "withdrawable"), "")?;
     let prefix = if given == Class::First { 1 } else { 2 };
     let mut me = place_left(&queue, id, process::id())
         .unwrap_or_else(|| format!("{prefix}-{}-{id}", now_nanos()));
@@ -291,6 +318,7 @@ pub fn take(cfg: &Config, id: &str, n: &str, given: Class) -> io::Result<File> {
         // place, whether or not a look is due (one the note skips can wait
         // LOOK_EVERY).
         if let Some(to) = successor(cfg) {
+            unmark(&job, n)?;
             let lk = File::create(slots.join(".lock"))?;
             lk.lock()?;
             let failed = hand_over(cfg, &to, id, given);
@@ -358,7 +386,7 @@ pub fn take(cfg: &Config, id: &str, n: &str, given: Class) -> io::Result<File> {
                 fs::write(slots.join(".next"), "")?;
                 drop(lk);
                 let _ = fs::remove_file(queue.join(&me));
-                fs::write(job.turn(n, "slot"), format!("{n_slot}\n"))?;
+                took_slot(&job, n, &n_slot.to_string())?;
                 return Ok(slot);
             }
         }

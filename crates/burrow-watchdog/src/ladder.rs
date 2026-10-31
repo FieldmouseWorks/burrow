@@ -24,7 +24,17 @@ pub fn run(cfg: &Config, world: &dyn World, now: f64) -> Result<(), String> {
         mut stalls,
         mut missing,
         mut closing,
+        withdraw,
     } = load(dir, "state.json");
+    // A state from before it kept these has every job its stalls on the stuck
+    // issue were handed still to go.
+    let mut withdraw = withdraw.unwrap_or_else(|| {
+        stalls
+            .values()
+            .filter(|st| st.entry.is_some())
+            .filter_map(|st| st.job.clone())
+            .collect()
+    });
     let before = published(&stalls);
     let (found, due) = overdue(cfg, now, &mut missing);
     let mut wakes: Vec<f64> = due.into_iter().collect();
@@ -37,6 +47,7 @@ pub fn run(cfg: &Config, world: &dyn World, now: f64) -> Result<(), String> {
     for s in gone {
         let st = stalls.remove(&s).expect("a stall it has");
         println!("moving again: {}", line(&st.item));
+        withdraw.extend(st.job.clone());
         if st.told.is_some() && !cfg.notify.is_empty() {
             closing.insert(s, st);
         }
@@ -114,6 +125,7 @@ pub fn run(cfg: &Config, world: &dyn World, now: f64) -> Result<(), String> {
                 wakes.push(at);
             } else {
                 escalate(cfg, world, &s, st, now);
+                withdraw.insert(job);
             }
         } else if st.item.line {
             // Waiting for a slot: a job would join the same line, ahead of
@@ -170,6 +182,17 @@ pub fn run(cfg: &Config, world: &dyn World, now: f64) -> Result<(), String> {
         });
     }
 
+    // Its own jobs whose stalls have all moved on, moving again or on to the
+    // stuck issue's job: one still waiting for a slot has done nothing yet,
+    // and would only take one from the line for what's no longer its to fix.
+    // One the owner was told of keeps its job, the only Claude still on it.
+    let needed: BTreeSet<&String> = stalls
+        .values()
+        .filter(|st| st.entry.is_none())
+        .filter_map(|st| st.job.as_ref())
+        .collect();
+    withdraw.retain(|job| needed.contains(job) || !withdrawn(world, job));
+
     // The stuck issue: the steward publishes this with the rest of it, on
     // the pass this kicks when it changed.
     let after = published(&stalls);
@@ -186,6 +209,7 @@ pub fn run(cfg: &Config, world: &dyn World, now: f64) -> Result<(), String> {
             stalls,
             missing,
             closing,
+            withdraw: Some(withdraw),
         },
     )?;
     let wake = match wakes.into_iter().reduce(f64::min) {
@@ -222,6 +246,20 @@ fn start_job(cfg: &Config, world: &dyn World, stalls: &[&Stall]) -> Option<Strin
     ]);
     let (ok, out) = world.proj(&args);
     (ok && !out.is_empty()).then_some(out)
+}
+
+/// Its own job ended if its turn still waits for a slot (proj withdraw, which
+/// looks and stops under the lock a turn takes its slot under, so one that
+/// has started is never stopped): whether that's settled, the job withdrawn,
+/// at work or over. One proj can't settle is asked about again next pass.
+fn withdrawn(world: &dyn World, job: &str) -> bool {
+    let (ok, out) = world.proj(&["withdraw", job]);
+    if !ok {
+        println!("couldn't withdraw proj job {job}, none of whose stalls need it now");
+    } else if out == "withdrawn" {
+        println!("withdrew proj job {job}: none of its stalls need it now");
+    }
+    ok
 }
 
 /// The step after a job: the steward's stuck issue, whose own job (proj
