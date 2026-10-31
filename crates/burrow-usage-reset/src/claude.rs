@@ -13,8 +13,8 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
-use std::thread;
 use std::time::{Duration, Instant};
+use std::{env, thread};
 
 use serde_json::Value;
 
@@ -43,7 +43,9 @@ pub struct ClaudeCode {
 
 impl Account for ClaudeCode {
     fn read(&mut self) -> Result<Reading, String> {
-        usage(&self.ask_usage()?)
+        // Looked at before asking: asking can write it.
+        let copied = copied_at();
+        usage(&self.ask_usage()?, copied, crate::now())
     }
 
     fn reset(&mut self, keep: &mut dyn FnMut() -> Result<(), String>) -> Reset {
@@ -214,8 +216,38 @@ impl ClaudeCode {
     }
 }
 
-/// The weekly meter in a `get_usage` answer.
-pub fn usage(answer: &Value) -> Result<Reading, String> {
+/// How old Claude Code's persisted copy of the meter can be for `get_usage`
+/// to answer from it without asking its endpoint at all, in seconds.
+const SNAPSHOT: f64 = 60.0;
+
+/// When Claude Code's persisted copy of the meter was fetched, in seconds
+/// since the epoch: its global config's `cachedUsageUtilization`, for this
+/// user. None if it has none.
+fn copied_at() -> Option<f64> {
+    let dir = env::var_os("CLAUDE_CONFIG_DIR").or_else(|| env::var_os("HOME"))?;
+    let config = std::fs::read(PathBuf::from(dir).join(".claude.json")).ok()?;
+    let config: Value = serde_json::from_slice(&config).ok()?;
+    Some(config["cachedUsageUtilization"]["fetchedAtMs"].as_f64()? / 1000.0)
+}
+
+/// The weekly meter in a `get_usage` answer, asked at NOW with Claude Code's
+/// persisted copy of it fetched at COPIED. An answer that didn't come from
+/// its endpoint just now is an error, so a pass treats it as a meter it
+/// couldn't read: it presses nothing, settles nothing and books nothing on
+/// it, and tries again soon.
+///
+/// Nothing in an answer says it's cached, but two things tell (Claude Code
+/// 2.1.316, checked against a live one):
+/// - Its endpoint refused or failed: the answer is the persisted copy, up to
+///   an hour old, or the last rate-limit headers, and has no
+///   `rate_limits.limits`, which its endpoint's answers have. Should a later
+///   Claude Code or endpoint drop that field, every read here fails and the
+///   owner hears the meter can't be read.
+/// - A copy under SNAPSHOT old: its endpoint isn't asked and the answer is
+///   the copy, `limits` and all. It's a minute old at most, but that's the
+///   whole of the time between a reading and a reset's yes: read after it, it
+///   would say the reset didn't take.
+pub fn usage(answer: &Value, copied: Option<f64>, now: f64) -> Result<Reading, String> {
     if answer["rate_limits_available"] != true {
         return Err(format!(
             "Claude Code has no plan limits to show (subscription {}): is it logged in to a claude.ai plan here?",
@@ -232,6 +264,22 @@ pub fn usage(answer: &Value) -> Result<Reading, String> {
     let ends = resets
         .parse::<jiff::Timestamp>()
         .map_err(|e| format!("get_usage's weekly resets_at {resets}: {e}"))?;
+    let age = copied.map(|at| now - at);
+    if !answer["rate_limits"]["limits"].is_array() {
+        return Err(match age {
+            Some(age) => format!(
+                "get_usage answered {used}% from Claude Code's cached meter, its usage endpoint not answering; the copy was fetched {age:.0}s ago"
+            ),
+            None => format!(
+                "get_usage answered {used}% from Claude Code's cached meter, its usage endpoint not answering"
+            ),
+        });
+    }
+    if let Some(age) = age.filter(|age| (0.0..SNAPSHOT).contains(age)) {
+        return Err(format!(
+            "get_usage answered {used}% from a snapshot {age:.0}s old, its usage endpoint not asked"
+        ));
+    }
     // To the minute: the same week's end may come back with a different
     // fraction of a second.
     Ok(Reading {
@@ -480,6 +528,7 @@ impl Tmux {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pass::{Notice, Outcome, RETRY, State, pass};
     use serde_json::json;
 
     /// Its screen once it's up, as remi's Claude Code 2.1.314 drew it
@@ -663,29 +712,149 @@ mod tests {
         assert!(finished(&unsure).is_some());
     }
 
-    #[test]
-    fn the_meter() {
-        let answer = json!({
+    /// An answer as Claude Code's endpoint gave it, 2.1.316's fields.
+    fn fetched(used: f64) -> Value {
+        json!({
             "session": {"total_cost_usd": 0},
             "subscription_type": "max",
             "rate_limits_available": true,
             "rate_limits": {
                 "five_hour": {"utilization": 35.0, "resets_at": "2026-10-30T06:40:00.412Z"},
-                "seven_day": {"utilization": 71.4, "resets_at": "2026-11-04T19:00:00.412Z"}
+                "seven_day": {"utilization": used, "resets_at": "2026-11-04T19:00:00.412Z"},
+                "limits": [{"kind": "weekly_all", "group": "weekly", "percent": used}]
             },
             "behaviors": null
-        });
+        })
+    }
+
+    /// The same, answered from its persisted copy with its endpoint refusing.
+    fn from_the_copy(used: f64) -> Value {
+        let mut answer = fetched(used);
+        answer["rate_limits"]
+            .as_object_mut()
+            .unwrap()
+            .remove("limits");
+        answer
+    }
+
+    const NOW: f64 = 1_793_000_000.0;
+
+    #[test]
+    fn the_meter() {
         assert_eq!(
-            usage(&answer),
+            usage(&fetched(71.4), None, NOW),
             Ok(Reading {
                 used: 71.4,
                 week: "2026-11-04T19:00".to_owned(),
                 ends: 1_793_818_800.0,
             })
         );
+        // A copy too old to answer from: its endpoint was asked.
+        assert!(usage(&fetched(71.4), Some(NOW - SNAPSHOT), NOW).is_ok());
+        // One from a clock ahead of this one isn't answered from either.
+        assert!(usage(&fetched(71.4), Some(NOW + 5.0), NOW).is_ok());
         // Logged in with an API key, or not at all.
         let none =
             json!({"subscription_type": null, "rate_limits_available": false, "rate_limits": null});
-        assert!(usage(&none).unwrap_err().contains("logged in"));
+        assert!(usage(&none, None, NOW).unwrap_err().contains("logged in"));
+    }
+
+    #[test]
+    fn a_cached_answer_is_no_reading() {
+        let e = usage(&from_the_copy(95.0), Some(NOW - 3000.0), NOW).unwrap_err();
+        assert!(e.contains("cached") && e.contains("3000s"), "{e}");
+        assert!(usage(&from_the_copy(95.0), None, NOW).is_err());
+        let e = usage(&fetched(95.0), Some(NOW - 10.0), NOW).unwrap_err();
+        assert!(e.contains("snapshot 10s"), "{e}");
+    }
+
+    /// An account whose meter is `get_usage` answers, asked at NOW.
+    struct Answers {
+        answers: Vec<(Value, Option<f64>)>,
+        pressed: usize,
+    }
+
+    impl Account for Answers {
+        fn read(&mut self) -> Result<Reading, String> {
+            let (answer, copied) = self.answers.remove(0);
+            usage(&answer, copied, NOW)
+        }
+        fn reset(&mut self, keep: &mut dyn FnMut() -> Result<(), String>) -> Reset {
+            self.pressed += 1;
+            keep().unwrap();
+            Reset::Pressed("Weekly limit refilled".to_owned())
+        }
+    }
+
+    fn pass_over(answers: Vec<(Value, Option<f64>)>, state: State) -> (Outcome, usize) {
+        let mut account = Answers {
+            answers,
+            pressed: 0,
+        };
+        let o = pass(&mut account, &mut |_| Ok(()), state, 2.0, NOW, "now");
+        (o, account.pressed)
+    }
+
+    #[test]
+    fn a_pass_doesnt_trust_a_cached_answer() {
+        // Past the line, but as the meter stood up to an hour ago: the week
+        // it's from may be over or already refilled. Nothing's pressed.
+        let (o, pressed) = pass_over(
+            vec![(from_the_copy(99.0), Some(NOW - 3000.0))],
+            State::default(),
+        );
+        assert_eq!(pressed, 0);
+        assert!(!o.state.pressed);
+        assert_eq!(o.state.failed_reads, 1);
+
+        // Short of the line: its next look isn't booked by a meter this old,
+        // nor does its burn count. A fresh 95 with this much burn would be
+        // booked later, off the room it seems to have.
+        let last = Some((NOW - 3600.0, 90.0));
+        let state = State {
+            last,
+            ..State::default()
+        };
+        let (o, _) = pass_over(vec![(from_the_copy(95.0), Some(NOW - 3000.0))], state);
+        assert_eq!(o.wake, NOW + RETRY);
+        assert_eq!(o.state.last, last);
+        assert!(o.state.week.is_none());
+
+        // Fresh again, the same meter is believed.
+        let (o, pressed) = pass_over(
+            vec![(fetched(99.0), Some(NOW - 3000.0)), (fetched(0.0), None)],
+            o.state,
+        );
+        assert_eq!(pressed, 1);
+        assert_eq!(o.state.failed_reads, 0);
+    }
+
+    #[test]
+    fn a_snapshot_from_before_the_yes_doesnt_settle_it() {
+        // A copy written while the reset's Claude Code came up, still under
+        // SNAPSHOT at the read after its yes, shows the meter from before it.
+        let (o, pressed) = pass_over(
+            vec![(fetched(99.0), None), (fetched(99.0), Some(NOW - 20.0))],
+            State::default(),
+        );
+        assert_eq!(pressed, 1);
+        assert!(keys_of(&o.notices).is_empty(), "{:?}", o.notices);
+        assert!(o.state.pressed && o.state.unsettled.is_some());
+        assert_eq!(o.wake, NOW + RETRY);
+        // The next look, on a fresh answer, sees it took.
+        let (o, pressed) = pass_over(vec![(fetched(3.0), None)], o.state);
+        assert_eq!(pressed, 0);
+        assert_eq!(keys_of(&o.notices)[0], "usage-reset");
+        assert!(o.state.unsettled.is_none());
+    }
+
+    fn keys_of(notices: &[Notice]) -> Vec<&'static str> {
+        notices
+            .iter()
+            .filter_map(|n| match n {
+                Notice::Open(k, ..) => Some(*k),
+                Notice::Close(..) => None,
+            })
+            .collect()
     }
 }
