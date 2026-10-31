@@ -144,6 +144,9 @@ S.CFG.update(proj=proj, projectsDir=f"{tmp}/src")
 C.project_dir, project_dir = (lambda repo: "r"), C.project_dir
 assert REAL["job"]("sam/r", "the task") == "job-9"
 assert open(f"{tmp}/proj-args").read().split() == ["run", "--pipeline", "--timeout", "60m", "--idle", "20m", "--kick", "autoland/sam/r", "--owned", "r", "the", "task"]
+# One that's project work, with a timeout of its own (a flaky test's).
+assert REAL["job"]("sam/r", "the task", pipeline=False, timeout=240) == "job-9"
+assert open(f"{tmp}/proj-args").read().split() == ["run", "--timeout", "240m", "--idle", "20m", "--kick", "autoland/sam/r", "--owned", "r", "the", "task"]
 # With a machinery App, the job is the machine's own work, and acts as it.
 S.CFG["machinery"] = "workers"
 assert REAL["job"]("sam/r", "the task") == "job-9"
@@ -153,19 +156,24 @@ S.CFG.clear()
 S.CFG.update(kept)
 print("kicks: ok")
 
-# `kick REPO`: only that repo's PRs, none of the full pass's settings, new
-# repos or branch sweep, and its owner's lines and wake-ups replace that
-# repo's while the rest stay. The owner's issue is kept up to date from it.
+# `kick REPO`: only that repo, none of the full pass's branch sweep or
+# hooks, and its owner's lines and wake-ups replace that repo's while the
+# rest stay. First it's started over if it was remade, then its settings
+# are seen to (free unless due): so the first event about a new repo sets
+# it up and starts its baseline job, which its settings and known.json then
+# have. The owner's issue is kept up to date from it.
 fresh_pr_state()
 C.NOW = T
 C.save("wake.json", {"sam/r": T + 50, "sam/other": T + 60, "sam/gone": T - 1})
 C.save("digest-repos.json", {"sam/r": [["Old", "r line", ""]], "sam/other": [["Open over a day", "other line", "x"]]})
 C.save("repos.json", {"untouched": True})
 seen_repos, swept, published = [], [], []
-kept_fns = (S.R.discover, S.R.settle_repo, S.R.publish, S.R.sweep_branches, S.open_prs, S.R.unhook_gone)
+kept_fns = (S.R.discover, S.R.restart, S.R.settle_repo, S.R.publish, S.R.sweep_branches, S.open_prs, S.R.unhook_gone)
 S.R.unhook_gone = lambda repos: (_ for _ in ()).throw(AssertionError("hooks taken off in a kicked pass"))
-S.R.discover = lambda: [{"repo": "sam/r"}, {"repo": "sam/other"}]
-S.R.settle_repo = lambda r, known: (_ for _ in ()).throw(AssertionError("settings in a kicked pass"))
+S.R.discover = lambda: [{"repo": "sam/r", "default": "main"}, {"repo": "sam/other", "default": "main"}]
+order = []
+S.R.restart = lambda r, known, failed: order.append(("restart", r["repo"]))
+S.R.settle_repo = lambda r, known: order.append(("settle", r["repo"])) or r["repo"] not in known
 S.R.publish = published.append
 in_use = []
 S.R.sweep_branches = lambda r, branches, digest, sweep=True: swept.append(sweep) or in_use.append(branches)
@@ -180,11 +188,21 @@ S.open_prs, argv = kicked_prs, sys.argv
 S.CFG["cleanBranches"] = True
 sys.argv = ["steward", "kick", "Sam/R"]  # as burrow-events spells it, or not
 C.WAKE.clear()
+C.save("known.json", [])
+NEW_JOBS = []
+C.job, job = (lambda repo, task, clone=False: NEW_JOBS.append((repo, task, clone)) or "job-new"), C.job
+S.CFG.update(baselineJobs=True, baselineTask="REPO is new")
 S.main()
+S.CFG["baselineJobs"] = False
+del S.CFG["baselineTask"]
+C.job = job
 sys.argv = argv
 S.CFG["cleanBranches"] = False
-S.R.discover, S.R.settle_repo, S.R.publish, S.R.sweep_branches, S.open_prs, S.R.unhook_gone = kept_fns
+S.R.discover, S.R.restart, S.R.settle_repo, S.R.publish, S.R.sweep_branches, S.open_prs, S.R.unhook_gone = kept_fns
 assert seen_repos == ["sam/r"] and swept == [False], (seen_repos, swept)
+assert order == [("restart", "sam/r"), ("settle", "sam/r")] and NEW_JOBS == [("sam/r", "sam/r is new", True)], \
+    (order, NEW_JOBS)
+assert C.load("known.json", None) == ["sam/r"]
 # The sweep leaves every open PR's branches, its base as well as its head:
 # deleting a base closes the PRs on it.
 assert in_use == [{"feat", "main"}], in_use
@@ -193,6 +211,55 @@ assert C.load("wake.json", None) == {"sam/r": T + 3 * 60 + 1, "sam/other": T + 6
 assert C.load("digest-repos.json", None) == {"sam/r": [], "sam/other": [["Open over a day", "other line", "x"]]}
 assert published == [[("Open over a day", "other line", "x")]], published
 print("kick: ok")
+
+# A repo that can't be started over as new, though it was remade, is left
+# alone that pass, its dashboard and flaky tests too: nothing of the deleted
+# one's may act on it. Its next pass, five minutes on, tries again.
+fresh_pr_state()
+C.NOW = T
+seen_repos, watched = [], []
+kept_fns = (S.R.discover, S.R.restart, S.R.settle_repo, S.R.publish, S.open_prs, S.D.watch, S.F.watch)
+S.R.discover = lambda: [{"repo": "sam/r", "default": "main"}]
+S.R.restart = lambda r, known, failed: (_ for _ in ()).throw(RuntimeError("proj stop r-1: couldn't"))
+S.R.settle_repo = lambda r, known: (_ for _ in ()).throw(AssertionError("settled a repo not started over"))
+S.R.publish = lambda lines: None
+S.open_prs = kicked_prs
+S.D.watch = S.F.watch = lambda repo, mine: watched.append(repo)
+S.CFG["dashboard"]["enable"] = S.CFG["flaky"]["enable"] = True
+sys.argv = ["steward", "kick", "sam/r"]
+C.WAKE.clear()
+S.main()
+sys.argv = argv
+S.CFG["dashboard"]["enable"] = S.CFG["flaky"]["enable"] = False
+S.R.discover, S.R.restart, S.R.settle_repo, S.R.publish, S.open_prs, S.D.watch, S.F.watch = kept_fns
+assert seen_repos == [] and watched == [], (seen_repos, watched)
+assert C.load("wake.json", None) == {"sam/r": T + 5 * 60}, C.load("wake.json", None)
+print("remade, not started over: ok")
+
+# A repo made empty (no default branch yet): its pass sees to its settings
+# and hook, so its first push is heard, and nothing else: no PRs to read, no
+# baseline job yet (nothing to open a PR on), and it isn't known until then.
+fresh_pr_state()
+settled, seen_repos, NEW_JOBS = [], [], []
+kept_fns = (S.R.discover, S.R.settle_repo, S.R.publish, S.R.unhook_gone, S.R.hook_projects, S.open_prs)
+S.R.discover = lambda: [{"repo": "sam/new", "default": None}]
+S.R.settle_repo = lambda r, known: settled.append(r["repo"]) or r["repo"] not in known
+S.R.publish = S.R.unhook_gone = lambda *a: None
+S.R.hook_projects = lambda repos: []
+S.open_prs = kicked_prs
+C.job, job = (lambda repo, task, clone=False: NEW_JOBS.append(repo) or "job-new"), C.job
+S.CFG.update(baselineJobs=True, baselineTask="REPO is new")
+C.save("known.json", [])
+for args in (["steward", "kick", "sam/new"], ["steward"]):
+    sys.argv = args
+    S.main()
+S.CFG["baselineJobs"] = False
+del S.CFG["baselineTask"]
+C.job, sys.argv = job, argv
+S.R.discover, S.R.settle_repo, S.R.publish, S.R.unhook_gone, S.R.hook_projects, S.open_prs = kept_fns
+assert settled == ["sam/new", "sam/new"] and seen_repos == [] and NEW_JOBS == [], (settled, seen_repos, NEW_JOBS)
+assert C.load("known.json", None) == [], C.load("known.json", None)
+print("empty repos: ok")
 
 # A pass GitHub's rate limit turns away books its repos' next pass for when
 # the limit resets (`gh api rate_limit`, free), not five minutes on, the
@@ -217,12 +284,13 @@ def limited(*a, **k):
         return REAL_GH("api", "repos/sam/r")
 
 
-kept_fns = (S.R.discover, S.open_prs, S.R.publish)
+kept_fns = (S.R.discover, S.R.settle_repo, S.open_prs, S.R.publish)
+S.R.settle_repo = lambda r, known: False
 for where in ("discovery", "prs", "after"):
     fresh_pr_state()
     C.NOW = T
     C.save("wake.json", {"sam/other": T + 60, "Sam/R": T + 9000})
-    S.R.discover = limited if where == "discovery" else (lambda: [{"repo": "sam/r"}])
+    S.R.discover = limited if where == "discovery" else (lambda: [{"repo": "sam/r", "default": "main"}])
     S.open_prs = limited if where == "prs" else (lambda owner, name: (info, [mkpr()]))
     S.R.publish = limited if where == "after" else (lambda lines: None)
     path, os.environ["PATH"] = os.environ["PATH"], fake + os.pathsep + os.environ["PATH"]
@@ -248,7 +316,7 @@ for where in ("discovery", "prs", "after"):
         C.save("wake.json", {"sam/other": T + 60, "Sam/R": T + 9000})
     os.environ["PATH"] = path
 sys.argv = argv
-S.R.discover, S.open_prs, S.R.publish = kept_fns
+S.R.discover, S.R.settle_repo, S.open_prs, S.R.publish = kept_fns
 # Without a limit met, the wake-ups are as booked.
 C.LIMITED.clear()
 fresh_pr_state()
@@ -374,8 +442,12 @@ os.remove(f"{tmp}/state/repo-eve_p.json")
 # what its hook is now can't be asked.
 
 
+TRIED = []  # the calls made for mallory
+
+
 def uninstalled(*a, **k):
     if C._for and C._for[-1] == "mallory":
+        TRIED.append(a)
         raise RuntimeError("the App steward isn't installed on mallory")
     return [] if a[:2] == ("api", "repos/eve/p/hooks") else gh_kept(*a, **k)
 
@@ -386,8 +458,69 @@ WROTE.clear()
 more = R.hook_projects([{"repo": "sam/r"}])
 assert more == [{"repo": "eve/p"}, {"repo": "mallory/x"}], more
 assert [x for x in WROTE if "hooks" in x] == ["api -X POST repos/eve/p/hooks --input -"], WROTE
+# It's said once, and tried again a day later, not on every pass.
+assert C.load("repo-mallory_x.json", None)["unreached"] == "the App steward isn't installed on mallory"
+TRIED.clear()
+assert R.hook_projects([{"repo": "sam/r"}]) == more and TRIED == [], TRIED
+C.NOW = T + 86400
+R.hook_projects([{"repo": "sam/r"}])
+assert TRIED == [("api", "repos/mallory/x/hooks")], TRIED
 os.remove(f"{tmp}/state/repo-eve_p.json")
 os.remove(f"{tmp}/state/repo-mallory_x.json")
+# A clone whose repo GitHub has no more (deleted, or out of the App's reach:
+# GitHub answers both with a 404) gets no hook either. That's said once, and
+# nothing is asked of GitHub on the passes after; a day later the repo is
+# looked up first, quietly, and its hooks asked for only once it's back. The
+# hook it had stays on record, so back, that's the hook it keeps: moved to
+# the URL by its id, not a second one added.
+SAID, LOOKED, HOOKS_ASKED, MISSING = [], [], [], {"repos/sam/gone"}
+log_kept, fresh_kept = R.log, C.fresh
+R.log = lambda *a: SAID.append(" ".join(str(x) for x in a))
+
+
+def looked_up(path, etag=None):
+    LOOKED.append(path)
+    if path in MISSING:
+        raise C.Gone(f"gh api {path}: gh: Not Found (HTTP 404)")
+    return None, {"full_name": path.removeprefix("repos/")}
+
+
+def gone_hooks(*a, **k):
+    if a[:2] == ("api", "repos/sam/gone/hooks"):
+        HOOKS_ASKED.append(C.NOW)
+        if "repos/sam/gone" in MISSING:
+            return None  # gh's 404, which gh() logs
+        return [{"id": 4, "config": {"url": "https://old.example.org/burrow/hook"}}]
+    return gh_kept(*a, **k)
+
+
+C.gh, C.fresh = gone_hooks, looked_up
+C.projects = lambda: iter([("gone", "sam/gone")])
+C.save("repo-sam_gone.json", {"hook": "h", "hookId": 4})
+C.NOW = T
+WROTE.clear()
+assert R.hook_projects([{"repo": "sam/r"}]) == [{"repo": "sam/gone"}]
+assert HOOKS_ASKED == [T] and LOOKED == ["repos/sam/gone"] and WROTE == [], (HOOKS_ASKED, LOOKED, WROTE)
+assert SAID == [f"sam/gone: GitHub has no such repo, so its clone in {S.CFG['projectsDir']} gets no webhook; "
+                "looked up again daily"], SAID
+assert C.load("repo-sam_gone.json", None) == {"hook": "h", "hookId": 4, "hookAt": T, "unreached": "gone"}
+SAID.clear()
+LOOKED.clear()
+for at in (T + 600, T + 3600, T + 86400 + 1, T + 86400 + 600):
+    C.NOW = at
+    R.hook_projects([{"repo": "sam/r"}])
+assert HOOKS_ASKED == [T] and LOOKED == ["repos/sam/gone"] and SAID == [] and WROTE == [], (HOOKS_ASKED, LOOKED, SAID, WROTE)
+MISSING.clear()
+LOOKED.clear()
+C.NOW = T + 2 * (86400 + 1)
+R.hook_projects([{"repo": "sam/r"}])
+assert LOOKED == ["repos/sam/gone"] and HOOKS_ASKED == [T, C.NOW], (LOOKED, HOOKS_ASKED)
+assert [x for x in WROTE if "hooks" in x] == ["api -X PATCH repos/sam/gone/hooks/4 --input -"], WROTE
+assert SAID == ["sam/gone: on GitHub again"], SAID
+back = C.load("repo-sam_gone.json", None)
+assert "unreached" not in back and back["hookId"] == 4 and back["hook"] != "h", back
+os.remove(f"{tmp}/state/repo-sam_gone.json")
+R.log = log_kept
 C.gh, C.projects = gh_kept, projects_kept
 # A repo no longer seen to (excluded, archived) has its hook taken off, on
 # a full pass; one that won't come off is tried again a day later.
@@ -401,8 +534,24 @@ C.save("repo-sam_was.json", {"hook": "h", "hookId": 9, "other": 2})
 # sam/once was renamed to sam/r too, but GitHub doesn't answer the lookup:
 # the old path may lead to sam/r, so nothing is deleted until it does.
 C.save("repo-sam_once.json", {"hook": "h", "hookId": 9})
+# GitHub has no sam/hidden the App can see: deleted, or out of its reach,
+# which GitHub doesn't tell apart. Its hook stays on record, looked up again
+# a day later, said once; once the App can see it again, the hook comes off.
+C.save("repo-sam_hidden.json", {"hook": "h", "hookId": 6, "other": 3})
+SAID.clear()
+R.log = lambda *a: SAID.append(" ".join(str(x) for x in a))
 NAMES = {"repos/sam/R": "sam/r", "repos/sam/was": "sam/r", "repos/sam/old": "sam/old", "repos/sam/stuck": "sam/stuck"}
-C.gh = lambda *a, **k: {"full_name": NAMES[a[1]]} if a[:1] == ("api",) and a[1:2] and a[1] in NAMES else gh_kept(*a, **k)
+
+
+def names(path, etag=None):
+    if path in NAMES:
+        return None, {"full_name": NAMES[path]}
+    if path == "repos/sam/hidden":
+        raise C.Gone(f"gh api {path}: gh: Not Found (HTTP 404)")
+    raise C.Unavailable(f"gh api {path}: gh: HTTP 502")
+
+
+C.fresh = names
 FAIL.append("sam/stuck/hooks")
 C.NOW = T
 WROTE.clear()
@@ -415,18 +564,26 @@ assert C.load("repo-sam_r.json", None)["hookId"] == 9
 assert C.load("repo-sam_R.json", None) == {}
 assert C.load("repo-sam_was.json", None) == {"other": 2}
 assert C.load("repo-sam_once.json", None) == {"hook": "h", "hookId": 9, "unhookTried": T}
+hidden = {"hook": "h", "hookId": 6, "other": 3, "unhookTried": T, "unreached": "gone"}
+assert C.load("repo-sam_hidden.json", None) == hidden
 WROTE.clear()
 R.unhook_gone([{"repo": "sam/r"}])
 assert WROTE == [], WROTE
 C.NOW = T + 86400 + 1
 R.unhook_gone([{"repo": "sam/r"}])
 assert WROTE == ["api -X DELETE repos/sam/stuck/hooks/8"], WROTE
+assert C.load("repo-sam_hidden.json", None) == {**hidden, "unhookTried": C.NOW}
+assert [x for x in SAID if "sam/hidden" in x] == [
+    "sam/hidden: GitHub has no such repo the App can see, so its webhook stays on record; looked up again daily"], SAID
 NAMES["repos/sam/once"] = "sam/r"
+NAMES["repos/sam/hidden"] = "sam/hidden"
 C.NOW = T + 2 * (86400 + 1)
 WROTE.clear()
 R.unhook_gone([{"repo": "sam/r"}])
 assert C.load("repo-sam_once.json", None) == {}
 assert "DELETE repos/sam/once" not in " ".join(WROTE), WROTE
+assert "api -X DELETE repos/sam/hidden/hooks/6" in WROTE and C.load("repo-sam_hidden.json", None) == {"other": 3}, WROTE
+R.log = log_kept
 FAIL.clear()
-C.gh = gh_kept
+C.gh, C.fresh = gh_kept, fresh_kept
 print("hooks: ok")

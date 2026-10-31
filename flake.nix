@@ -262,6 +262,8 @@
         proj = import ./tests/proj.nix { inherit self pkgs; };
         # A turn's clock, which stands still while it waits in line.
         proj-clock = import ./tests/proj-clock.nix { inherit self pkgs; };
+        # A switch reaches the turns already waiting in line, each in its place.
+        proj-deployed = import ./tests/proj-deployed.nix { inherit self pkgs; };
         # Who takes a free slot: the pipeline's own (only its own repos'
         # pipeline jobs), and each project's cap.
         proj-pick = pkgs.runCommand "proj-pick-check" { nativeBuildInputs = [ pkgs.shellcheck pkgs.git ]; } ''
@@ -405,6 +407,10 @@
           dispatchOnly = machine { } [ { burrow.dispatch.fresh.enable = lib.mkForce false; } ];
           dirty = machine { dirtyRev = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-dirty"; } [ ];
           arm = machine { } [ { nixpkgs.hostPlatform = lib.mkForce "aarch64-linux"; } ];
+          # remi's install rehearsal turns burrow-events' handlers off.
+          unhandled = machine { rev = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"; } [ { burrow.events.handlers = lib.mkForce { }; } ];
+          # A machine may space the passes out itself.
+          spaced = machine { } [ { burrow.events.handlers.dispatch.gap = lib.mkForce 600; } ];
           settings = m: m.config.burrow.dispatch.settings;
           revisions = map (m: m.config.system.configurationRevision) [ committed dirty ];
           deploy = { inherit ((settings committed).deploy) own running; };
@@ -457,6 +463,10 @@
             "dispatch: a fresh runner's state outlives it: ${freshUnit.serviceConfig.ExecStopPost}";
           assert lib.assertMsg (!freshUnit.restartIfChanged && !freshUnit.stopIfChanged) "dispatch: a switch can cut a fresh runner's job short";
           assert lib.assertMsg ((settings dispatchOnly).fresh == null) "dispatch: fresh runners nobody asked for";
+          assert lib.assertMsg (settings unhandled == settings committed)
+            "dispatch: with the handlers off, the settings are ${builtins.toJSON (settings unhandled)}";
+          assert lib.assertMsg ((settings committed).gap == 120 && (settings spaced).gap == 600)
+            "dispatch: runners' waits allow for a ${toString (settings committed).gap}s gap, and ${toString (settings spaced).gap}s with passes 600s apart";
           pkgs.runCommand "dispatch-config-check" { } ''
             ${self.nixosConfigurations.example.config.systemd.services.burrow-dispatch.serviceConfig.ExecStart} status
             ${committed.config.systemd.services.burrow-dispatch.serviceConfig.ExecStart} status
@@ -750,7 +760,7 @@
           touch $out
         '';
         # flake-gate: a repo's CI gate step, run here as CI runs it, and
-        # burrow's own evaluating apart, as a Claude job's memory needs.
+        # burrow's own evaluating apart, so a Claude job's gate holds little.
         flake-gate = pkgs.runCommand "flake-gate-check" { nativeBuildInputs = [ (pkgs.callPackage ./tools/flake-gate/package.nix { }) pkgs.git pkgs.yq-go pkgs.shellcheck ]; } ''
           shellcheck -s bash ${./tests/flake-gate.sh}
           bash ${./tests/flake-gate.sh} ${./.}
