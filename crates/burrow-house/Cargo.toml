@@ -1,0 +1,17 @@
+[package]
+name = "burrow-house"
+description = "The house rules a machine can read, held to every PR"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+regex = { version = "1.13.1", default-features = false, features = ["std", "unicode-perl", "unicode-case"] }
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

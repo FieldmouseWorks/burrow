@@ -84,18 +84,20 @@ Every repo with code gets a `flake.nix` from the template
   own `docs/` and `house/` are in its machines' config, so they aren't on
   its list. A repo's heavier gates (VM replays, browser tiers, databases)
   stay its own jobs, alongside it, and run their tools from `nix develop`.
-- Beside it, `.github/workflows/rust-first.yml` from the template calls
-  burrow's shared [`rust-first-check`](../.github/workflows/rust-first-check.yml)
-  on every PR, and again whenever its body is edited: a PR that adds a Python
-  file (by its name, or a python shebang on one without an extension), turns
-  a file into Python, or adds more net lines to the Python it has than a fix
-  does (its `growth` input), fails unless its body has a line starting
-  `Why not Rust:` with the reason; so does one too big for GitHub to list
-  every file. That's the house rules' Rust by default, held by CI rather than
-  by memory. A private repo runs it on its self-hosted runner, as it does the
-  gate. Its verdict is a commit status for the PR, `rust-first (#N)`, which
-  each run replaces, so fixing the body clears it; a fork's PR, whose token
-  can't post one, gets it as the job's result.
+- Beside it, `.github/workflows/house.yml` from the template runs burrow's
+  [house action](../.github/actions/house/action.yml) on every PR, and again
+  whenever its title or body is edited. It holds the PR to the house rules a
+  machine can read ([which, and how](../crates/burrow-house/src/lib.rs)): its
+  title is `area: plain sentence`, and a PR that adds Python or grows Python
+  and shell past a fix, adds a timer, grows a code file past 1,000 lines or
+  names a model has the line in its body that says why, with a reason. Each
+  rule is a commit status for the PR of its own, `house/RULE (#N)`, replaced
+  by the next run's, so fixing the title or body clears it; a fork's PR,
+  whose token can't post them, gets them as the job's result. A repo can set
+  the action's `growth` and `lines`, and one whose subject is models turns
+  off `model-names`. A private repo runs it on its self-hosted runner, as it
+  does the gate: the action builds the check with the runner's cargo and
+  runs it with gh.
 - Renovate keeps `flake.lock` current, so a repo's toolchains and gate move
   when burrow's do. Change a Rust version in `rust-toolchain.toml` only.
 - The template also brings `.editorconfig`. Rust crates forbid `unsafe` in
