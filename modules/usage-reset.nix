@@ -75,10 +75,6 @@ in
         # Claude Code's screens): one cut off after its yes is settled by the
         # next, never pressed again.
         TimeoutStartSec = "15min";
-        # A Claude Code at a time, and a short one: the meter alone, or the
-        # meter and one /limit-reset.
-        MemoryMax = "2G";
-        MemorySwapMax = 0;
       };
     };
     systemd.tmpfiles.settings.burrow.${dir}.d = { mode = "0755"; inherit user; group = config.users.users.${user}.group; };

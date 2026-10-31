@@ -2,11 +2,16 @@
 branches and the App their required status comes from, and a red default
 branch's fix job."""
 
+import fcntl
 import json
+import os
+import shutil
+import subprocess
 import time
 import urllib.parse
 
-from harness import (C, FAIL, JOBS, R, H, S, STATES, T0, WROTE, fresh_pr_state, info, gh_stub, mkpr, stand_in)
+from harness import (C, FAIL, FORGOT, JOBS, R, H, REAL, S, STATES, STOPPED, T0, UNSTOPPABLE, V, WROTE, fresh_pr_state, info, gh_stub, mkpr,
+                     stand_in, tmp)
 
 stand_in()
 # Its parts are called straight here, so they're for sam's repos as a pass
@@ -238,6 +243,278 @@ assert [x for x in WROTE if "rulesets" in x] == ["api -X POST repos/sam/r/rulese
 required = [y for y in BODIES[0][1]["rules"] if y["type"] == "required_status_checks"]
 assert required[0]["parameters"]["required_status_checks"] == [{"context": "review-settled", "integration_id": 7}], required
 C.gh, C.write = gh_stub, write
+
+# A repo made under the name of one GitHub deleted (GitHub's id for it
+# isn't the one the steward kept; for state from before it kept ids, made
+# after the steward last settled one of that name, or in that second)
+# starts over as new, before anything acts on it. Every clone of the name
+# is moved aside, where no job takes it, the new one's own too: which repo
+# one is of can't be told. Once they're gone, proj-inbox forgets the
+# repo's issues, and then every job of the repo's is stopped (by the repo
+# its kick names, or by its folder), wherever it ran; another repo's go
+# on. What was kept about the old one goes, and another repo's of a like
+# name stays; and it leaves known and failed at once, so it gets its
+# baseline job.
+src, jobs = f"{tmp}/remade-src", S.CFG["jobsDir"]
+S.CFG["projectsDir"] = src
+remade = {"repo": "sam/r", "id": "R_new", "private": False, "default": "main", "created": "2026-10-24T06:00:00Z"}
+MADE = C.ts(remade["created"])
+SEQ = iter(range(100))
+
+
+def clone(d, url="https://github.com/sam/r"):
+    """A checkout at src/d whose origin is url."""
+    subprocess.run(["git", "init", "-q", f"{src}/{d}"], check=True)
+    subprocess.run(["git", "-C", f"{src}/{d}", "remote", "add", "origin", url], check=True)
+
+
+def job(d, path=None, kick=None):
+    """A job proj started in src/d (or in path), with its kick, as proj
+    records it; its id."""
+    n = next(SEQ)
+    jid = f"{d}-20261023-1200{n:02d}-ab{n:02d}"
+    os.makedirs(f"{jobs}/{jid}")
+    with open(f"{jobs}/{jid}/project", "w") as f:
+        f.write(f"{path or f'{src}/{d}'}\n")
+    if kick:
+        with open(f"{jobs}/{jid}/kick", "w") as f:
+            f.write(f"{kick}\nother\n")
+    return jid
+
+
+def old_state():
+    fresh_pr_state()
+    for d in (src, jobs):
+        shutil.rmtree(d, ignore_errors=True)
+    os.makedirs(src)
+    C.save("repo-sam_r.json", {"settings": C.ts(T0), "app": 7, "labels": ["hold", "needs-owner", "first"],
+                               "hook": "x", "hookId": 41})
+    C.save("pr-sam_r-1.json", {"fix": "a" * 40})
+    C.save("dashboard-sam_r.json", {"items": {"7": {}}})
+    C.save("flaky-sam_r.json", {"jobAt": 5})
+    C.save("pr-sam_r-x-1.json", {"fix": "b" * 40})
+    C.save("repo-sam_r-x.json", {"settings": C.ts(T0)})
+    snap = V.snap_name("pr-sam_r-1.json", "a" * 40, "main")
+    C.save(f"{V.DONE}/codex--{snap}.json", {"result": "ok"})
+    os.makedirs(f"{tmp}/state/{V.SESSIONS}/{V.session_name('codex', snap)}")
+    os.makedirs(f"{tmp}/state/{V.GIT}/sam__r.git/objects")
+    C.save("known.json", ["sam/r", "sam/r-x"])
+    C.save("baseline-failed.json", {"sam/r": 1, "sam/r-x": 2})
+
+
+def stamp():
+    return time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(C.NOW))
+
+
+old_state()
+assert C.jobs() == []                                      # proj has run none yet
+clone("r")                                                 # where the next clone goes
+clone("r-2")                                               # another
+clone("new", "https://github.com/Sam/R.git")               # the new one's, maybe: whose can't be told
+clone("x", "https://github.com/sam/r-x")                   # another repo's
+clone("y", "https://github.com/kim/r")                     # another owner's of the same name
+old = [job("r"), job("r-2"), job("new"),                   # in clones that go
+       job("renamed", kick="autoland/Sam/R")]              # the repo's by its kick, its folder gone
+kept = [job("x"), job("y"), job("r-2", kick="proj-inbox/kim/z"),  # other repos', by folder or by kick
+        job("z", kick="autoland/sam/r-x"), job("r", "/elsewhere/r")]
+os.makedirs(f"{jobs}/r-20261024-070000-abcd")              # one proj is making: it hasn't started
+os.makedirs(f"{jobs}/.slots")                              # proj's own
+assert (old[3], f"{src}/renamed", {"sam/r"}) in C.jobs() and len(C.jobs()) == 9, C.jobs()
+C.NOW = MADE + 3600
+known, failed = {"sam/r", "sam/r-x"}, {"sam/r": 1, "sam/r-x": 2}
+STOPPED.clear()
+FORGOT.clear()
+forget = C.forget_issues
+C.forget_issues = lambda repo: FORGOT.append((repo, sorted(x for x in os.listdir(src) if x[0] != "."), list(STOPPED)))
+R.restart(remade, known, failed)
+C.forget_issues = forget
+assert FORGOT == [("sam/r", ["x", "y"], [])], FORGOT  # once the clones are gone, before any job is stopped
+assert sorted(STOPPED) == sorted(old), STOPPED
+assert known == {"sam/r-x"} and failed == {"sam/r-x": 2}, (known, failed)
+assert C.load("known.json", None) == ["sam/r-x"] and C.load("baseline-failed.json", None) == {"sam/r-x": 2}
+left = sorted(os.listdir(f"{tmp}/state"))
+assert not [x for x in left if x.startswith(("pr-sam_r-1", "dashboard-sam_r", "flaky-sam_r", "repo-sam_r."))], left
+assert "pr-sam_r-x-1.json" in left and "repo-sam_r-x.json" in left, left
+assert os.listdir(f"{tmp}/state/{V.DONE}") == [] and not os.path.exists(f"{tmp}/state/{V.GIT}/sam__r.git")
+assert all(x.startswith(V.GONE) for x in os.listdir(f"{tmp}/state/{V.SESSIONS}")), os.listdir(f"{tmp}/state/{V.SESSIONS}")
+assert sorted(os.listdir(src)) == sorted(["x", "y"] + [f".{d}.gone-{stamp()}" for d in ("r", "r-2", "new")])
+assert C.project_dir("sam/r") is None, os.listdir(src)
+# Then it's settled as new, at once: its settings, labels and hook.
+WROTE.clear()
+assert R.settle_repo(remade, known) is True
+st = C.load("repo-sam_r.json", {})
+assert st["settings"] == C.NOW and st.get("hookId") != 41 and st["id"] == "R_new", st
+assert sorted(made()) == LABELS, WROTE
+assert "api -X PUT repos/sam/r/vulnerability-alerts" in WROTE, WROTE
+# Settled now, it isn't started over again: what's kept about it from here
+# on stays, its new clone and that clone's jobs too.
+C.save("pr-sam_r-2.json", {"new": True})
+clone("r")
+job("r", kick="autoland/sam/r")
+STOPPED.clear()
+FORGOT.clear()
+R.restart(remade, known, failed)
+assert "pr-sam_r-2.json" in os.listdir(f"{tmp}/state") and STOPPED == FORGOT == [] and os.path.isdir(f"{src}/r")
+# Nor is one the steward never settled, or one whose id is the one it
+# kept, whenever it was settled; or, for state from before it kept ids, one
+# made a second or more before the steward last settled it. Settled in the
+# second it was made, which comes first can't be told: it starts over.
+for st, again in ((None, False), ({"id": "R_new", "settings": MADE - 86400}, False),
+                  ({"id": "R_old", "settings": MADE + 86400}, True), ({"settings": MADE + 1}, False),
+                  ({"settings": MADE + 0.25}, True)):
+    old_state()
+    if st is None:
+        os.remove(f"{tmp}/state/repo-sam_r.json")
+    else:
+        C.save("repo-sam_r.json", st)
+    known = {"sam/r", "sam/r-x"}
+    FORGOT.clear()
+    R.restart(remade, known, {})
+    assert (known == {"sam/r-x"}) == again and (FORGOT == ["sam/r"]) == again and STOPPED == [], (st, known)
+    assert ("pr-sam_r-1.json" in os.listdir(f"{tmp}/state")) != again, st
+# Its state is found in any case, since GitHub's names don't go by it: a
+# deleted Sam/R's, under that spelling, goes when sam/r is made.
+old_state()
+for name in ("repo-sam_r.json", "pr-sam_r-1.json"):
+    os.rename(f"{tmp}/state/{name}", f"{tmp}/state/{name.replace('sam_r', 'Sam_R')}")
+os.rename(f"{tmp}/state/{V.GIT}/sam__r.git", f"{tmp}/state/{V.GIT}/Sam__R.git")
+known, failed = {"Sam/R", "sam/r-x"}, {"Sam/R": 1}
+R.restart(remade, known, failed)
+assert known == {"sam/r-x"} and failed == {}, (known, failed)
+assert not [x for x in os.listdir(f"{tmp}/state") if x.lower().startswith(("repo-sam_r.", "pr-sam_r-1"))]
+assert os.listdir(f"{tmp}/state/{V.GIT}") == [], os.listdir(f"{tmp}/state/{V.GIT}")
+# One renamed into the name, or moved to it, may be years older than what
+# the deleted one left: a clone git made from the name since, and the job
+# working in it, are the deleted one's all the same.
+old_state()
+C.save("repo-sam_r.json", {**C.load("repo-sam_r.json", {}), "id": "R_old"})
+origin = f"{tmp}/remade-origin"
+subprocess.run(["git", "init", "-q", origin], check=True)
+subprocess.run(["git", "-C", origin, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty",
+                "-m", "one"], check=True)
+subprocess.run(["git", "-c", f"url.{origin}.insteadOf=https://github.com/sam/r", "clone", "-q",
+                "https://github.com/sam/r", f"{src}/r"], check=True)
+jid = job("r")
+STOPPED.clear()
+R.restart({**remade, "created": "2019-01-01T00:00:00Z"}, set(), {})
+assert os.listdir(src) == [f".r.gone-{stamp()}"] and STOPPED == [jid], (os.listdir(src), STOPPED)
+# Where the repo's next clone goes, every job is the repo's, whether a
+# clone of it is there yet or not; unless another repo's clone is there,
+# whose they are.
+for there in ("sam", None, "kim"):
+    old_state()
+    if there:
+        clone("r", f"https://github.com/{there}/r")
+    jid = job("r")
+    STOPPED.clear()
+    R.restart(remade, set(), {})
+    assert STOPPED == ([] if there == "kim" else [jid]), (there, STOPPED)
+    assert os.listdir(src) == {"sam": [f".r.gone-{stamp()}"], None: [], "kim": ["r"]}[there], (there, os.listdir(src))
+# A step that fails stops the rest, and leaves the settings that say it was
+# remade, with the clones it moved: the next pass does it all again, and
+# finishes it, their jobs too. A clone whose folder or origin can't be read
+# leaves them all, since it may be the repo's; a look the reviewers'
+# service is on keeps its entry and its session until it ends, and the
+# reset waits for it, whatever code the service runs.
+snap = V.snap_name("pr-sam_r-1.json", "a" * 40, "main")
+for broken, said in (("stop", "couldn't stop job"), ("origin", "can't read its origin"), ("folder", "symbolic links"),
+                     ("forget", "still going"), ("record", "symbolic links"), ("look", "aren't done with"),
+                     ("sweep", "aren't done with")):
+    C.NOW += 1
+    old_state()
+    clone("r-old")
+    jid = job("r-old")  # only that it ran in a clone moved aside says it's the repo's
+    sweep, forget = V.sweep, C.forget_issues
+    if broken == "stop":
+        UNSTOPPABLE.add(jid)
+    elif broken == "origin":
+        os.makedirs(f"{src}/half/.git")
+    elif broken == "folder":
+        os.makedirs(f"{src}/loop")
+        os.symlink(".git", f"{src}/loop/.git")
+    elif broken == "forget":  # a pass of the inbox's that doesn't end
+        C.forget_issues = lambda repo: (_ for _ in ()).throw(RuntimeError(f"proj-inbox forget {repo}: still going"))
+    elif broken == "record":  # a job proj keeps that can't be read
+        os.symlink("loop-1", f"{jobs}/loop-1")
+    elif broken == "look":
+        C.save(f"{V.QUEUE}/codex--{snap}.json", {})
+        held = open(f"{tmp}/state/{V.QUEUE}/codex--{snap}.json")
+        fcntl.flock(held, fcntl.LOCK_SH)
+    else:
+        V.sweep = lambda *a: [V.session_name("codex", "pr-sam_r-1-x")]
+    known, failed = {"sam/r"}, {}
+    STOPPED.clear()
+    try:
+        R.restart(remade, known, failed)
+        raise AssertionError(f"{broken} failing was swallowed")
+    except (RuntimeError, OSError) as e:
+        assert said in str(e), (broken, e)
+    V.sweep, C.forget_issues = sweep, forget
+    UNSTOPPABLE.discard(jid)
+    assert known == set() and C.load("known.json", None) == [] and "repo-sam_r.json" in os.listdir(f"{tmp}/state")
+    assert os.path.isdir(f"{src}/r-old") == (broken in ("origin", "folder")), (broken, os.listdir(src))
+    assert STOPPED == ([] if broken in ("stop", "origin", "folder", "forget", "record") else [jid]), (broken, STOPPED)
+    if broken == "look":
+        assert os.listdir(f"{tmp}/state/{V.QUEUE}") == [f"codex--{snap}.json"]
+        assert os.path.isdir(f"{tmp}/state/{V.SESSIONS}/{V.session_name('codex', snap)}")
+        held.close()
+    for d in ("half", "loop"):
+        shutil.rmtree(f"{src}/{d}", ignore_errors=True)
+    if broken == "record":
+        os.remove(f"{jobs}/loop-1")
+    STOPPED.clear()
+    C.NOW += 1
+    R.restart(remade, known, failed)
+    assert STOPPED == [jid] and "repo-sam_r.json" not in os.listdir(f"{tmp}/state"), (broken, STOPPED)
+    assert not os.path.exists(f"{src}/r-old") and not os.path.exists(f"{tmp}/state/{V.GIT}/sam__r.git")
+    assert os.listdir(f"{tmp}/state/{V.QUEUE}") == [] and \
+        all(x.startswith(V.GONE) for x in os.listdir(f"{tmp}/state/{V.SESSIONS}")), broken
+# Strict, a projectsDir that can't be read raises too, where the listing
+# for picking a project finds none.
+os.symlink("loop", f"{tmp}/loop")
+S.CFG["projectsDir"] = f"{tmp}/loop"
+assert list(C.projects()) == []
+try:
+    list(C.projects(strict=True))
+    raise AssertionError("an unreadable projectsDir was taken for an empty one")
+except OSError as e:
+    assert "symbolic links" in str(e), e
+S.CFG["projectsDir"] = src
+# proj stop: a job proj no longer has is over already; any other refusal
+# is one it may still be at work after.
+proj = os.path.join(tmp, "stop-proj")
+with open(proj, "w") as f:
+    f.write(f'#!/bin/sh\necho "$@" >>{tmp}/stop-args\n'
+            '[ "$2" = gone-20261023-120000-abcd ] && { echo "no job $2" >&2; exit 1; }\n'
+            '[ "$2" = stuck-20261023-120000-abcd ] && { echo "proj: couldn\'t stop $2" >&2; exit 1; }\nexit 0\n')
+os.chmod(proj, 0o755)
+S.CFG["proj"], kept_proj = proj, S.CFG["proj"]
+assert REAL["stop_job"]("r-20261023-120000-abcd") and REAL["stop_job"]("gone-20261023-120000-abcd")
+assert not REAL["stop_job"]("stuck-20261023-120000-abcd"), "a job proj couldn't stop was taken for stopped"
+assert open(f"{tmp}/stop-args").read().split("\n")[0] == "stop r-20261023-120000-abcd"
+S.CFG["proj"] = kept_proj
+# proj-inbox forget: none where there's no inbox; with one, what it
+# refuses raises.
+inbox = os.path.join(tmp, "forget-inbox")
+with open(inbox, "w") as f:
+    f.write(f'#!/bin/sh\necho "$@" >>{tmp}/forget-args\n'
+            '[ "$2" = kim/busy ] && { echo "proj-inbox: a pass is still going after ten minutes" >&2; exit 1; }\nexit 0\n')
+os.chmod(inbox, 0o755)
+REAL["forget_issues"]("sam/r")
+assert not os.path.exists(f"{tmp}/forget-args")
+kept_inbox = S.CFG["inbox"]
+S.CFG["inbox"] = {**kept_inbox, "enable": True, "command": inbox}
+REAL["forget_issues"]("sam/r")
+try:
+    REAL["forget_issues"]("kim/busy")
+    raise AssertionError("an inbox that didn't forget was taken for one that did")
+except RuntimeError as e:
+    assert "still going" in str(e), e
+assert open(f"{tmp}/forget-args").read().splitlines() == ["forget sam/r", "forget kim/busy"]
+S.CFG["inbox"] = kept_inbox
+S.CFG["projectsDir"] = f"{tmp}/none"
+shutil.rmtree(jobs)
+print("remade repos: ok")
 
 # A red default branch gets one Claude job, and nothing more while it works
 # or its PR is open; a second if it ends with the branch still red, then the

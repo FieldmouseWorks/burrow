@@ -234,7 +234,8 @@ print("train PRs: ok")
 
 # A pass ends with a step of the train, after the PRs (so one settled in it
 # is in the candidate it builds), on the repo's default branch.
-kept_fns = (S.R.discover, S.open_prs, S.R.publish, S.R.watch_default)
+kept_fns = (S.R.discover, S.R.settle_repo, S.open_prs, S.R.publish, S.R.watch_default)
+S.R.settle_repo = lambda r, known: False
 S.R.discover = lambda: [{"repo": "sam/r", "private": False, "default": "trunk"}]
 trunk = {**info, "defaultBranchRef": {"name": "trunk", "target": {"oid": "d" * 40, "statusCheckRollup": {"state": "SUCCESS"}}}}
 PRS = {"v": [clean(base="trunk")]}
@@ -299,7 +300,7 @@ S.step.handle = kept_handle
 # The train off: none of it.
 del S.CFG["repos"]["sam/r"]
 assert kicked(show=landed) == [], cn_runs()
-S.R.discover, S.open_prs, S.R.publish, S.R.watch_default = kept_fns
+S.R.discover, S.R.settle_repo, S.open_prs, S.R.publish, S.R.watch_default = kept_fns
 print("train step: ok")
 
 # cn's token command is the steward's `token`, which prints the App's token
