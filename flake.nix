@@ -55,7 +55,9 @@
           include = [
             ".github/workflows/flake-check.yml"
             ".github/workflows/flake.yml"
+            ".github/workflows/flake-retarget.yml"
             "templates/project/.github/workflows/flake.yml"
+            "templates/project/.github/workflows/flake-retarget.yml"
             "modules/autoland/prs.py"
             "modules/cpu/heavy.sh"
           ];
