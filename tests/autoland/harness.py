@@ -196,7 +196,7 @@ with open(f"{tmp}/config.json", "w") as f:
         "owners": ["sam"], "exclude": [], "context": "review-settled", "rulesets": True, "keepBranches": [],
         "app": {"id": 7, "slug": "steward"},
         "baselineJobs": False, "baselinePerPass": 1, "authors": ["sam"], "bots": ["dependabot", "renovate", "workers"], "machinery": None,
-        "stateDir": f"{tmp}/state", "majorKey": f"{tmp}/sweep.key", "projectsDir": f"{tmp}/none", "jobsDir": f"{tmp}/jobs", "renovateEmail": "bot@renovateapp.com", "proj": "proj", "jobTimeout": 60, "jobIdle": 20, "reviewTimeout": 30, "owner": "Sam", "cleanBranches": False,
+        "stateDir": f"{tmp}/state", "snapDir": f"{tmp}/trees", "majorKey": f"{tmp}/sweep.key", "projectsDir": f"{tmp}/none", "jobsDir": f"{tmp}/jobs", "renovateEmail": "bot@renovateapp.com", "proj": "proj", "jobTimeout": 60, "jobIdle": 20, "reviewTimeout": 30, "owner": "Sam", "cleanBranches": False,
         "labels": {"hold": "hold", "owner": "needs-owner", "first": "first", "waiting": {"releaseAge": "waiting: release age", "proofSlot": "waiting: proof slot", "reviewer": "waiting: reviewer"}}, "notify": {"repo": "", "assignee": "", "label": "autoland"}, "inbox": {"enable": False, "label": "claude", "unstickLabel": "unstick", "authors": ["sam"]},
         "dashboard": {"enable": False, "waitDays": 4, "errorDays": 1, "title": "Dependency Dashboard",
                       "renovateKick": "http://127.0.0.1:9/kick/renovate", "renovate": None,
@@ -254,8 +254,8 @@ C.token = lambda owner: f"ghs_app_{owner}"
 # tell one's word from the other's. review.py runs the one real agent.
 V.NAMES["rival"] = "Rival"
 
-for d in (V.QUEUE, V.SNAP, V.DONE, V.SESSIONS, V.GIT):
-    os.makedirs(f"{tmp}/state/{d}")
+for d in (V.QUEUE, V.SNAP, V.TREES, V.DONE, V.SESSIONS, V.GIT):
+    os.makedirs(os.path.join(f"{tmp}/state", d))
 
 
 def sh(*a, cwd=None):
@@ -487,8 +487,9 @@ def pr_state(n=5):
 
 def fresh_pr_state():
     shutil.rmtree(f"{tmp}/state")
-    for d in (V.QUEUE, V.SNAP, V.DONE, V.SESSIONS, V.GIT):
-        os.makedirs(f"{tmp}/state/{d}")
+    shutil.rmtree(V.TREES)
+    for d in (V.QUEUE, V.SNAP, V.TREES, V.DONE, V.SESSIONS, V.GIT):
+        os.makedirs(os.path.join(f"{tmp}/state", d))
 
 
 REAL = {"job": C.job, "stop_job": C.stop_job, "forget_issues": C.forget_issues, "app_hook": R.app_hook}  # the steward's own, for the checks of what it runs

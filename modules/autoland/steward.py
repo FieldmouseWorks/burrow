@@ -99,7 +99,7 @@ def main():
         token(sys.argv[2])
         return
     try:
-        for d in ("", V.QUEUE, V.SNAP, V.DONE, V.SESSIONS, V.GIT):
+        for d in ("", V.QUEUE, V.SNAP, V.TREES, V.DONE, V.SESSIONS, V.GIT):
             os.makedirs(os.path.join(STATE, d), exist_ok=True)
     except OSError:
         if not DRY:
