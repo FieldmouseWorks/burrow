@@ -249,7 +249,9 @@ fn copied_in(config: &[u8]) -> Result<Option<f64>, String> {
 /// The meter from one `get_usage` (ASK), only if it can be shown to be fresh.
 /// The copy is looked at first, then the clock, then it's asked: Claude Code
 /// picks its answer after all of them, so a copy already past SNAPSHOT by this
-/// clock can't be what answers, however long the asking takes. A copy that
+/// clock can't be what answers, however long the asking takes. One dated ahead
+/// of this clock could be, once the clock catches up, so it counts as under
+/// SNAPSHOT. A copy that
 /// changed while it was asked may be what answered, and there's no telling, so
 /// that's no reading either. (A read of its own doesn't change it: it's killed
 /// on its answer, before it writes the copy.)
@@ -316,7 +318,7 @@ pub fn usage(answer: &Value, copied: Option<f64>, now: f64) -> Result<Reading, S
             ),
         });
     }
-    if let Some(age) = age.filter(|age| (0.0..SNAPSHOT).contains(age)) {
+    if let Some(age) = age.filter(|age| *age < SNAPSHOT) {
         return Err(format!(
             "get_usage answered {used}% from a snapshot {age:.0}s old, its usage endpoint not asked"
         ));
@@ -792,8 +794,6 @@ mod tests {
         );
         // A copy too old to answer from: its endpoint was asked.
         assert!(usage(&fetched(71.4), Some(NOW - SNAPSHOT), NOW).is_ok());
-        // One from a clock ahead of this one isn't answered from either.
-        assert!(usage(&fetched(71.4), Some(NOW + 5.0), NOW).is_ok());
         // Logged in with an API key, or not at all.
         let none =
             json!({"subscription_type": null, "rate_limits_available": false, "rate_limits": null});
@@ -829,6 +829,11 @@ mod tests {
         // Under SNAPSHOT when asked, past it by the time the answer's in.
         let e = asked_through(vec![Ok(copy), Ok(copy)], NOW).unwrap_err();
         assert!(e.contains("snapshot 59s"), "{e}");
+        // Dated ahead of the clock, which then may catch up with it before
+        // Claude Code looks.
+        let ahead = Some(NOW + 0.5);
+        let e = asked_through(vec![Ok(ahead), Ok(ahead)], NOW).unwrap_err();
+        assert!(e.contains("snapshot"), "{e}");
         // Past it when asked: it can't have been what answered.
         let old = Some(NOW - 60.0);
         assert!(asked_through(vec![Ok(old), Ok(old)], NOW).is_ok());
