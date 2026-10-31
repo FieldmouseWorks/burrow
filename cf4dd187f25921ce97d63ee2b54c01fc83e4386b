@@ -1,0 +1,95 @@
+{
+  "conary": "note v1",
+  "change": "7abpc8ckdewp02es0x0yxjssy1",
+  "repo": {
+    "owner": "fieldmouseworks",
+    "name": "burrow"
+  },
+  "pr": 251,
+  "url": "https://github.com/fieldmouseworks/burrow/pull/251",
+  "summary": "usage-reset: trust its Claude Code's folder up front, and retry within minutes",
+  "task": "fieldmouseworks/burrow#204",
+  "author": {
+    "kind": "agent",
+    "login": "TusanHomichi",
+    "session": "https://claude.ai/code/session_01BkHcyEC7nnzkqiEYED6LaH"
+  },
+  "landing": {
+    "revision": "0a71ff4230d442c81dffb11d2e324c6dd39e640c27afd2898fc9fd7c27b24c26",
+    "before": "cece8c7c83748c967533873fdf564f7cedb8f8ab",
+    "after": "cf4dd187f25921ce97d63ee2b54c01fc83e4386b",
+    "by": {
+      "kind": "status",
+      "login": "fieldmouseworks-steward[bot]"
+    },
+    "at": 1793450184653
+  },
+  "evidence": [
+    {
+      "kind": "ci",
+      "check": "rust-first / python",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/41151905182/job/124390102495"
+    },
+    {
+      "kind": "ci",
+      "check": "check / commits",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/41151905116/job/124390101993"
+    },
+    {
+      "kind": "ci",
+      "check": "rust-first (#251)",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/41151905182"
+    },
+    {
+      "kind": "review",
+      "check": "codex",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/251#pullrequestreview-5720195972"
+    },
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "fail",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/41151905116/job/124390102341"
+    },
+    {
+      "kind": "ci",
+      "check": "check / commits",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/41151905116/job/124399816863"
+    },
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/41151905116/job/124399815980"
+    },
+    {
+      "kind": "ci",
+      "check": "rust-first / python",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/41158380433/job/124410142947"
+    },
+    {
+      "kind": "ci",
+      "check": "rust-first (#251)",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/41158380433"
+    },
+    {
+      "kind": "review",
+      "check": "codex",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/251#pullrequestreview-5722165423"
+    },
+    {
+      "kind": "ci",
+      "check": "agents",
+      "result": "pass",
+      "source": "status agents"
+    }
+  ]
+}
