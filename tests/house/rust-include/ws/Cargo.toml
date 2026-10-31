@@ -1,0 +1,10 @@
+[package]
+name = "house-include"
+version = "0.1.0"
+edition = "2024"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+# A workspace below the repo's root, whose tests read a file outside it.
+[workspace]

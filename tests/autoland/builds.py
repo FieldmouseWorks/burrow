@@ -519,6 +519,28 @@ assert RUNNING in status and updates(7) == [] and JOBS == ["build 7 remi-proof"]
 del info["defaultBranchRef"]["target"]
 sh("git", "checkout", "-q", "main", cwd=work)
 
+# CI still running once the reviewers are done: a check the steward builds
+# itself starts beside it, not after it, and the status says CI is still
+# going. Its verdict in, it waits for CI like any other PR, and builds
+# nothing more.
+fresh_pr_state()
+VALID[:] = [Z]
+nix_knows()
+P.begin("sam/r", {1})
+busy_ci = [{"__typename": "CheckRun", "name": "ci", "status": "IN_PROGRESS", "conclusion": None}]
+proof_state = {"__typename": "StatusContext", "context": "remi-proof", "description": ""}
+status = line(1, checks=busy_ci + [dict(proof_state, state="PENDING")])
+assert f"Settled; {RUNNING}, CI (ci) beside it" in status and JOBS == ["build 1 remi-proof"], (status, JOBS)
+assert f"Settled; {RUNNING}, CI (ci) beside it" in line(1, 800, busy_ci + [dict(proof_state, state="PENDING")]) and JOBS == []
+status = line(1, 900, busy_ci + [dict(proof_state, state="SUCCESS")])
+assert "Settled; waiting for CI: ci" in status and JOBS == [], (status, JOBS)
+# A check only a Claude job runs still waits for CI to pass.
+S.CFG["repos"]["sam/r"]["proofBuilds"] = {}
+fresh_pr_state()
+status = line(1, checks=busy_ci + [dict(proof_state, state="PENDING")])
+assert "Settled; waiting for CI: ci, remi-proof" in status and JOBS == [], (status, JOBS)
+S.CFG["repos"]["sam/r"]["proofBuilds"] = {"remi-proof": "checks.x86_64-linux.proof"}
+
 del S.CFG["repos"]["sam/r"]
 C.job, P.build = kept, kept_build
 C.gh, C.write = kept_gh, kept_write
