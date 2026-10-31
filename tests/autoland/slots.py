@@ -2,14 +2,14 @@
 time, the PRs labelled first ahead of the rest and the oldest first within
 each, the rest waiting their turn rather than their timeout; a job's end
 kicks the pass that starts the next. A slot is held by a job until it ends,
-whatever its PR does meanwhile, and a turn in the line only by a PR waiting
-in this same pass."""
+whatever its PR does meanwhile but move to a new head (superseded.py), and
+a turn in the line only by a PR waiting in this same pass."""
 
 import itertools
 import json
 
 import proofs as P
-from harness import C, CI_GREEN, JOBS, S, STATES, clean, fresh_pr_state, info, mkpr, pr_state, run, tmp
+from harness import C, CI_GREEN, JOBS, S, STATES, UNSTOPPABLE, clean, fresh_pr_state, info, mkpr, pr_state, run, tmp
 
 kept = C.job
 ids = itertools.count(1)
@@ -43,41 +43,41 @@ assert ahead(2) in line(3) and JOBS == []
 P.begin("sam/r", {2, 3})
 assert RUNNING in line(2) and len(JOBS) == 1, JOBS
 assert ahead(1) in line(3) and JOBS == []
-# A new head on a PR whose job still runs: that job keeps its slot, from
-# the PR itself and from those after it.
+# Marked a draft while its job runs, it still has the slot, from those
+# after it.
 P.begin("sam/r", {2, 3})
-assert ahead(1) in line(2, 800, sha=other) and JOBS == [], JOBS
-assert ahead(2) in line(3, 800) and JOBS == []
-# Marked a draft meanwhile, it still has it.
+assert "Draft" in run(clean(checks=proof, number=2, draft=True), 800)[0]
+assert ahead(1) in line(3, 800) and JOBS == []
+# A new head stops its job on the last one (superseded.py): the slot is the
+# new head's at once, and the next in line still waits.
 P.begin("sam/r", {2, 3})
-assert "Draft" in run(clean(checks=proof, number=2, sha=other, draft=True), 900)[0]
+assert RUNNING in line(2, 900, sha=other) and len(JOBS) == 1, JOBS
 assert ahead(1) in line(3, 900) and JOBS == []
-# Once it ends, the next in line starts.
+# Once that ends, the next in line starts.
 ends(2)
 P.begin("sam/r", {2, 3})
-assert RUNNING in line(2, 1000, sha=other) and len(JOBS) == 1, JOBS
-assert ahead(1) in line(3, 1000) and JOBS == []
-ends(2)
-P.begin("sam/r", {2, 3})
-line(2, 1100, sha=other)  # the first look at a job that ended without its verdict
-assert RUNNING in line(3, 1100) and len(JOBS) == 1, JOBS
+line(2, 1000, sha=other)  # the first look at a job that ended without its verdict
+assert RUNNING in line(3, 1000) and len(JOBS) == 1, JOBS
 # Its job ended without the verdict: started again, but only in its turn.
 P.begin("sam/r", {2, 3})
-assert ahead(1) in line(2, 1200, sha=other) and JOBS == [], JOBS
+assert ahead(1) in line(2, 1100, sha=other) and JOBS == [], JOBS
 ends(3)
 P.begin("sam/r", {2, 3})
-assert "running remi-proof again" in line(2, 1300, sha=other) and len(JOBS) == 1, JOBS
+assert "running remi-proof again" in line(2, 1200, sha=other) and len(JOBS) == 1, JOBS
 
-# Every job a PR started holds a slot, however many heads and launches
-# since: two slots, two jobs on one PR, and the next PR waits.
+# Every job a PR started holds a slot until it ends, however many heads
+# since: one on its last head that proj couldn't stop yet and its new
+# head's are two slots' worth, and the next PR waits.
 fresh_pr_state()
 S.CFG["repos"]["sam/r"]["proofSlots"] = 2
 P.begin("sam/r", {1, 2})
 assert RUNNING in line(1) and len(JOBS) == 1
+UNSTOPPABLE.add(pr_state(1)["provedJob"])
 P.begin("sam/r", {1, 2})
 assert RUNNING in line(1, 800, sha=other) and len(JOBS) == 1
 assert len(pr_state(1)["proofsLive"]) == 2, pr_state(1)
 assert ahead(2) in line(2, 800) and JOBS == []
+UNSTOPPABLE.clear()
 S.CFG["repos"]["sam/r"]["proofSlots"] = 1
 
 # One from before proofsLive was kept: its latest job still holds a slot.
@@ -128,7 +128,7 @@ assert ahead(1) in line(1, 800) and ahead(2) in line(2, 800) and JOBS == []
 # first in line.
 order = []
 kept_fns = (S.R.discover, S.R.settle_repo, S.R.publish, S.open_prs, S.R.unhook_gone, S.R.hook_projects, S.step.handle)
-S.R.discover = lambda: [{"repo": "sam/r"}]
+S.R.discover = lambda: [{"repo": "sam/r", "default": "main"}]
 S.R.settle_repo = lambda r, known: False
 S.R.publish = S.R.unhook_gone = lambda *a: None
 S.R.hook_projects = lambda repos: []

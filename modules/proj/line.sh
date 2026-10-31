@@ -14,11 +14,39 @@
 # leaves all of pick's choice in JOBS/.slots/.next. For NEXT_FRESH seconds after
 # that, any waiter it doesn't name has nothing to learn and skips its look. It's
 # only ever a reason not to look: a slot is taken only by a look, under the lock.
-# shellcheck disable=SC2034,SC2154 # jobs, spare (proj.sh) and the_place (pick.sh) when this is checked alone
+#
+# What a waiting turn decides with is the deployed proj's, not the one it
+# started on: at its next look after a switch it execs that one, and picks up
+# its place in line there, so a change to who goes first reaches everyone
+# waiting and take_slot and pick are always one version. A running turn stays
+# on its proj, but what it tells the stall watchdog is the deployed one's too
+# (rewatch, proj.sh), so the format of a watch item has one owner. All that
+# crosses versions is these: `proj _exec ID CLASS`, in the same pid, with the
+# place left in JOBS/.queue under that pid and the look's lock held on fd 9
+# until that proj is up; and `proj _rewatch ID...`. HANDOVER_FORMAT names them,
+# and a proj that doesn't print the same one isn't handed anything (one from
+# before this, or a switch back to it): the turn stays on the proj it has.
+# shellcheck disable=SC2034,SC2154 # jobs, self, spare (proj.sh) and the_place (pick.sh) when this is checked alone
+HANDOVER_FORMAT=1
+DEPLOYED=/run/current-system/sw/bin/proj
 NEXT_FRESH=2
 # Whatever the note says, a waiter looks this often, which is as long as a job
 # whose class changed can go on holding its old place in line.
 LOOK_EVERY=60
+
+# The deployed proj's store path, into the_successor, so the switch after this
+# one can't move it from under what's run, if it isn't this one and can take a
+# hand-over. Every waiter asks at every pass, so while the deployed proj is
+# this one the answer takes no fork.
+the_successor=''
+successor() {
+  local d
+  the_successor=''
+  [ -e "$DEPLOYED" ] && ! [ "$DEPLOYED" -ef "$self" ] || return 1
+  d=$(readlink -f "$DEPLOYED") || return 1
+  [ -x "$d" ] && [ "$("$d" _handover_format 2>/dev/null || true)" = "$HANDOVER_FORMAT" ] || return 1
+  the_successor=$d
+}
 
 # Whether a waiter with this place, which last looked at this time, should look
 # now: it's never looked, or not lately, or there's no fresh note, or the note
@@ -94,15 +122,23 @@ look() {
 # pick.sh) is asked again at every look, and its place in line, its admission
 # and its slot's N.who all go by that one answer.
 take_slot() {
-  local id=$1 n=$2 class=$3 me since got i lk new looked=0 project LC_ALL=C
+  local id=$1 n=$2 class=$3 me='' when f pid got i lk new looked=0 project LC_ALL=C
   mkdir -p "$jobs/.queue" "$jobs/.slots"
   # This turn says it has its slot only under its job's lock (took_slot), so
-  # proj withdraw may stop it while it waits; a turn from before that can't
-  # be, never having said so.
+  # proj withdraw may stop it while it waits; a turn on a proj from before
+  # that can't be until it hands over to this one, never having said so.
   : >"$jobs/$id/$n.withdrawable"
-  since=$EPOCHSECONDS
-  case $class in first) me=1 ;; *) me=2 ;; esac
-  me="$jobs/.queue/$me-$(date +%s%N)-$id"
+  # The place a proj before this one left, if it handed over.
+  for f in "$jobs/.queue"/*-"$id"; do
+    line_of pid "$f"
+    if [ "$pid" = "$$" ]; then me=$f; fi
+  done
+  if [ -z "$me" ]; then
+    case $class in first) me=1 ;; *) me=2 ;; esac
+    me="$jobs/.queue/$me-$(date +%s%N)-$id"
+  fi
+  # When it came, which its place keeps through a hand-over.
+  when=${me##*/}; when=${when#*-}; when=${when%%-*}
   trap 'rm -f "$me" "${me%/*}/.${me##*/}.new"' EXIT
   trap 'exit 143' TERM INT
   while :; do
@@ -114,9 +150,18 @@ take_slot() {
       return
     fi
     # Waited long enough: among the --first ones now, by when it came.
-    if [[ ${me##*/} == 2-* ]] && [ $((EPOCHSECONDS - since)) -ge "$MAX_WAIT" ]; then
+    if [[ ${me##*/} == 2-* ]] && [ $((EPOCHSECONDS - when / 1000000000)) -ge "$MAX_WAIT" ]; then
       mv -f "$me" "${me%/*}/1-${me##*/2-}" 2>/dev/null || true
       me="${me%/*}/1-${me##*/2-}"
+    fi
+    # A switch since the last pass: on with the deployed proj, in this place,
+    # whether or not a look is due (one the note skips can wait LOOK_EVERY).
+    if successor; then
+      # Mid-exec its cmdline reads empty, and a look clearing out dead places
+      # would take this one for gone: no look runs until it's through (_exec).
+      exec 9>"$jobs/.slots/.lock"
+      flock 9
+      exec "$the_successor" _exec "$id" "$3"
     fi
     if ! look_due "$me" "$looked"; then sleep 2; continue; fi
     # Where it stands now, and in the journal if that changed while it waits.

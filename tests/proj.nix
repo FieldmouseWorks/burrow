@@ -180,9 +180,11 @@ pkgs.testers.runNixOSTest {
     def end(job, n=1):
         return machine.succeed(f"cat /data/dev/jobs/{job}/{n}.end").strip()
 
-    with subtest("the cap is on claude.slice, none of it in swap"):
+    with subtest("Claude has no ceiling and no throttle of its own, and may swap"):
+        # The kernel shares the machine's memory out: a cap here only killed
+        # or stalled Claudes while memory sat free.
         out = machine.succeed("systemctl --user -M dev@ show claude.slice -p MemoryHigh -p MemoryMax -p MemorySwapMax")
-        assert "MemoryMax=" in out and "infinity" not in out and "MemorySwapMax=0" in out.splitlines(), out
+        assert sorted(out.split()) == ["MemoryHigh=infinity", "MemoryMax=infinity", "MemorySwapMax=infinity"], out
 
     with subtest("a look with nothing awaited succeeds, and books nothing"):
         proj("_watch")
@@ -284,6 +286,12 @@ pkgs.testers.runNixOSTest {
         b = proj('run web "linger 600"')
         machine.wait_until_succeeds(f"su - dev -c 'proj state {b}' | grep -x done", timeout=120)
         assert proj(f"log {b}") == "waiting on CI\n\nstill waiting", proj(f"log {b}")
+        # Resumed, it puts out an empty result first and then gets to work:
+        # that's no answer, so the run isn't stopped ten seconds on.
+        machine.succeed("echo resumed >/tmp/cut-mode")
+        c = proj('run web "linger 600"')
+        machine.wait_until_succeeds(f"su - dev -c 'proj state {c}' | grep -x done", timeout=120)
+        assert proj(f"log {c}") == "waiting on CI\n\nthe build passed", proj(f"log {c}")
         machine.succeed("rm /tmp/cut-mode")
 
     with subtest("what the first run left, in its own session and deaf to TERM, is gone before the second starts"):
@@ -707,6 +715,9 @@ pkgs.testers.runNixOSTest {
         machine.wait_until_succeeds(f"su - dev -c 'proj state {f}' | grep -x done", timeout=120)
         assert proj(f"log {f}") == "the answer\n\ndid twice", proj(f"log {f}")
         assert machine.succeed(f"cat /data/dev/jobs/{f}/1.result") == "the answer\n\ndid twice\n"
+        # The answer after the first, read and dropped, isn't a broken pipe in
+        # the turn's journal.
+        machine.fail(f"journalctl -q '_SYSTEMD_USER_UNIT={unit(f)}' | grep -F 'Broken pipe'")
 
     with subtest("an answer, then an error: the log has both"):
         f = proj("run web answerfail")

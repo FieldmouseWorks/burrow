@@ -4,10 +4,15 @@ A full pass (burrow-events runs one when it starts, and hourly, for what no
 event reports):
 
   1. Find the repos: every non-archived, non-fork repo of each owner in
-     `owners`, new ones included. Bring each one's settings to the baseline
-     (auto-merge, delete-branch-on-merge, squash, secret scanning, the
-     `baseline` ruleset); a repo seen for the first time also gets a Claude
-     job that brings its files to docs/repo-baseline.md (repos.py).
+     `owners`, new ones included (one with no commit yet too, which gets
+     only this step, all but the ruleset, until its first push). Bring
+     each one's settings to
+     the baseline (auto-merge, delete-branch-on-merge, squash, secret
+     scanning, the `baseline` ruleset); a repo seen for the first time also gets a Claude
+     job that brings its files to docs/repo-baseline.md (repos.py). So does
+     one made under the name of a repo GitHub deleted, once the deleted
+     one's Claude jobs are stopped, its clones moved aside and what the
+     steward kept about it forgotten: before anything else acts on it.
   2. For each open PR that isn't a draft, work out where it stands and do
      the next thing (step.py): queue a review of its head from each
      reviewer (Codex, reviewers.py), post what they found, hand open
@@ -25,11 +30,13 @@ event reports):
   5. Keep one issue up to date with everything waiting for the owner, and
      one with what the pipeline is stuck on, for a Claude job (repos.py).
 
-`autoland-steward kick OWNER/REPO` is a pass over that repo alone (2, 4
+`autoland-steward kick OWNER/REPO` is a pass over that repo alone (1, 2, 4
 and 5), run by its autoland@ unit (only that holds the App's key), the
 one burrow-events starts within seconds of what changes it: a webhook
-delivery, a Claude job's turn ending, a reviewer's answer coming
-back, or a wait the last pass booked ending (common.wake).
+delivery (the App's own, for a repo just made), a Claude job's turn
+ending, a reviewer's answer coming back, or a wait the last pass booked
+ending (common.wake). Its settings cost nothing unless they're due, so a
+repo is set up from the first event about it.
 
 Everything talks to GitHub as the steward's own GitHub App (common.py), so
 its statuses, merges and the reviewers' reviews are posted as the App, and
@@ -97,10 +104,11 @@ def main():
     except OSError:
         if not DRY:
             raise
-    # `kick REPO...`: just those repos' PRs, now (burrow-events, on what
-    # changed on GitHub or here, or a wait that has ended). The full pass,
-    # when burrow-events starts and hourly, does the rest: the settings, new
-    # repos' baseline jobs and branches.
+    # `kick REPO...`: just those repos, now (burrow-events, on what changed
+    # on GitHub or here, or a wait that has ended). The full pass, when
+    # burrow-events starts and hourly, does the rest: the branch sweep, the
+    # App's webhook, the hooks of repos it no longer sees to, and whatever
+    # no event reported.
     kick = [k.lower() for k in sys.argv[2:]] if sys.argv[1:2] == ["kick"] else None
     if not DRY:
         # One pass at a time, full or kicked: two would act on the same PRs.
@@ -134,7 +142,20 @@ def run_pass(kick):
         digest[repo] = mine = []
         with C.acting_for(repo):
             try:
-                new = kick is None and R.settle_repo(r, known)
+                # First: nothing of a deleted repo's may act on the one that
+                # took its name, so until that's done nothing else is.
+                R.restart(r, known, failed)
+            except Exception as e:
+                log(f"{repo}: starting it over as new: {e}")
+                waits.failed(repo)
+                C.wake(repo, C.NOW + 5 * MIN)  # ends: waits.failed watches the repo
+                continue
+            try:
+                new = R.settle_repo(r, known)
+                if r["default"] is None:
+                    # No commit yet: its settings and hook are set, so its
+                    # first push is heard, and that push's pass does the rest.
+                    continue
                 if (new and CFG["baselineJobs"] and started < CFG["baselinePerPass"]
                         and C.NOW - failed.get(repo, 0) > 86400):
                     jid = C.job(repo, CFG["baselineTask"].replace("REPO", repo), clone=True)
@@ -231,12 +252,13 @@ def run_pass(kick):
         # didn't see to (one whose pass failed among them), and tells its
         # jobs how every repo's proofs run.
         save("repos.json", C.coverage(repos, covered))
-        save("known.json", sorted(known))
-        save("baseline-failed.json", failed)
+    save("known.json", sorted(known))
+    save("baseline-failed.json", failed)
     if not DRY:
         V.sweep(read, live)
     if kick is None:
         R.unhook_gone(repos + R.hook_projects(repos))
+        R.app_hook()
     # Last: GitHub failing it leaves the pass's state saved. A line more than
     # one repo has (a reviewer out of service) is listed once. The stalls the
     # watchdog took past a Claude job go on the stuck issue with the rest.

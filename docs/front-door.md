@@ -69,11 +69,12 @@ pre-approved.
 - With `burrow.remoteControl.spawn = "worktree"` (the default) each session
   started from claude.ai gets its own git worktree, so several threads can work
   in one project at once. A server holds no session until one is asked for
-  (`burrow.remoteControl.idleSession`), and all of them, with the proj jobs,
-  share the memory cap `burrow.claude.memory` sets. Each server and its
-  sessions have a cap of their own too (`burrow.remoteControl.memoryMax`):
-  a session that grows past it is killed alone, and the thread can pick it
-  up again from its transcript (`tests/remote-control-memory.nix`).
+  (`burrow.remoteControl.idleSession`). The servers keep memory back when
+  the machine runs short (`burrow.remoteControl.memoryLow`), and each server
+  and its sessions have a backstop of half the machine
+  (`burrow.remoteControl.memoryMax`): a session that grows past it is killed
+  alone, and the thread can pick it up again from its transcript
+  (`tests/remote-control-memory.nix`).
 - A switch never restarts a server, since that would cut off the session
   confirming it. `claude-rc-scan` (on a switch, when a session's status changes, and when the
   quiet spell it's waiting on ends) restarts

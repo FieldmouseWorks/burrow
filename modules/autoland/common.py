@@ -11,10 +11,12 @@ user's own gh login, which every Claude session on the machine shares.
 
 import base64
 import contextlib
+import hashlib
 import hmac
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 import time
@@ -123,11 +125,14 @@ def app_jwt():
     return f"{signed}.{_b64(p.stdout)}"
 
 
-def app_call(method, path, jwt):
-    """A call the App makes as itself; raises as gh() does."""
-    req = urllib.request.Request(f"{API}/{path}", method=method, data=b"" if method == "POST" else None, headers={
+def app_call(method, path, jwt, body=None):
+    """A call the App makes as itself, with body as its JSON; raises as gh()
+    does."""
+    data = json.dumps(body).encode() if body is not None else b"" if method == "POST" else None
+    req = urllib.request.Request(f"{API}/{path}", method=method, data=data, headers={
         "Authorization": f"Bearer {jwt}", "Accept": "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "burrow-autoland"})
+        "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "burrow-autoland",
+        **({"Content-Type": "application/json"} if body is not None else {})})
     try:
         with urllib.request.urlopen(req, timeout=30) as r:
             return json.load(r)
@@ -316,13 +321,25 @@ def seal(repo, n, name, verdict, head, base):
     return S.mac(_key[0], repo, n, name, verdict, head, base)
 
 
-def marker(pr, name, head, repo=None, base=None):
+def quote(body):
+    """A PR's description as the reviewers are shown it: each line quoted,
+    so nothing in it reads as their brief going on."""
+    return "\n".join(f"> {x}".rstrip() for x in body.strip().splitlines()) or "(none)"
+
+
+def fingerprint(body):
+    """What a review or a judge's verdict carries of the description it was
+    on: the reasons a description gives are part of what's judged."""
+    return hashlib.sha256(quote(body).encode()).hexdigest()[:16]
+
+
+def marker(pr, name, head, repo=None, base=None, on=None):
     """The verdict in the newest `<!-- NAME: VERDICT SHA -->` on the PR for
     exactly this head, from one of its authors (`ours`: whoever its Claude
     jobs, the judges among them, post as) only; else None. With
     repo, only a marker that also carries its seal, for this head on the PR's
-    base as it is now, counts; with base, only one that names that base
-    (`<!-- NAME: VERDICT SHA on BASE -->`)."""
+    base as it is now (or on `on`, what else the verdict is on), counts; with
+    base, only one that names that base (`<!-- NAME: VERDICT SHA on BASE -->`)."""
     pat = re.compile(rf"<!-- {re.escape(name)}: ([a-z]+) ([0-9a-f]{{40}})(?: on (\S+))?(?: ([0-9a-f]{{32}}))? -->")
     verdict = None
     for c in pr["comments"]["nodes"]:  # oldest first
@@ -331,7 +348,7 @@ def marker(pr, name, head, repo=None, base=None):
         for m in pat.finditer(c["body"] or ""):
             if m.group(2) != head or (base is not None and m.group(3) != base):
                 continue
-            want = repo and seal(repo, pr["number"], name, m.group(1), head, pr["baseRefName"])
+            want = repo and seal(repo, pr["number"], name, m.group(1), head, on or pr["baseRefName"])
             if repo and not (want and hmac.compare_digest(m.group(4) or "", want)):
                 continue
             verdict = m.group(1)
@@ -434,22 +451,48 @@ def repo_cfg(repo):
     return c
 
 
-def projects():
+def projects(strict=False):
     """(folder, repo) for each project in projectsDir, by its origin URL.
     Only a clone of its own counts: a hidden folder, or a worktree of the
     repo (`.git` is a file there) checked out on some other branch, sorts
     first and shares the origin, but a job sent there works on the wrong
     tree. A hidden folder named for the repo itself is that repo's clone
-    (FieldmouseWorks/.github in .github)."""
+    (FieldmouseWorks/.github in .github). Strict, what can't be read
+    (projectsDir, a folder's `.git`, its origin, other than there being
+    none) raises rather than being left out: for repos.restart, which must
+    see every clone a repo has."""
     src = CFG["projectsDir"]
-    for d in sorted(os.listdir(src)) if os.path.isdir(src) else []:
-        if not os.path.isdir(os.path.join(src, d, ".git")):
+    try:
+        names = sorted(os.listdir(src))
+    except FileNotFoundError:
+        names = []
+    except OSError:
+        if strict:
+            raise
+        names = []
+    for d in names:
+        try:
+            if not stat.S_ISDIR(os.stat(os.path.join(src, d, ".git")).st_mode):
+                continue
+        except (FileNotFoundError, NotADirectoryError):
+            continue
+        except OSError:
+            if strict:
+                raise
             continue
         p = subprocess.run(["git", "-C", os.path.join(src, d), "remote", "get-url", "origin"],
                            capture_output=True, text=True)
-        url = re.sub(r"^(https://github\.com/|git@github\.com:)", "", p.stdout.strip()).removesuffix(".git")
-        if url.count("/") == 1 and (not d.startswith(".") or d.lower() == url.split("/")[1].lower()):
+        if strict and p.returncode and "No such remote" not in p.stderr:
+            raise RuntimeError(f"{d}: git can't read its origin: {p.stderr.strip() or f'exit {p.returncode}'}")
+        url = github_repo(p.stdout.strip())
+        if url and (not d.startswith(".") or d.lower() == url.split("/")[1].lower()):
             yield d, url
+
+
+def github_repo(url):
+    """OWNER/REPO of a GitHub remote URL, or None."""
+    url = re.sub(r"^(https://github\.com/|git@github\.com:)", "", url).removesuffix(".git")
+    return url if url.count("/") == 1 else None
 
 
 def project_dir(repo):
@@ -469,12 +512,12 @@ def rank(repo):
     return 1 if r in {x.lower() for x in CFG["pipelineRepos"]} else 2
 
 
-def job(repo, task, clone=False):
-    """Hand a task to a Claude job in the repo's project. Every one is
-    pipeline work (proj run --pipeline): it settles a PR or the branch PRs
-    land on, so it goes ahead of the line, and in the pipeline's own repos
-    (pipelineRepos) in a slot kept for it; proj decides which. Returns the
-    job id."""
+def job(repo, task, clone=False, pipeline=True, timeout=None):
+    """Hand a task to a Claude job in the repo's project. One that settles a
+    PR or the branch PRs land on is pipeline work (proj run --pipeline): it
+    goes ahead of the line, and in the pipeline's own repos (pipelineRepos)
+    in a slot kept for it; proj decides which. Its turns stop after timeout
+    minutes (jobTimeout's by default). Returns the job id."""
     d = project_dir(repo)
     if d is None and clone and not DRY:
         d = repo.split("/")[1]
@@ -494,7 +537,8 @@ def job(repo, task, clone=False):
     # stopped, and ends then. It's the machine's own work, so it acts on
     # GitHub as the machinery's App, where there is one.
     app = ["--app", CFG["machinery"]] if CFG.get("machinery") else []
-    p = subprocess.run([CFG["proj"], "run", "--pipeline", *app, "--timeout", f"{CFG['jobTimeout']}m",
+    p = subprocess.run([CFG["proj"], "run", *(["--pipeline"] if pipeline else []), *app,
+                        "--timeout", f"{timeout or CFG['jobTimeout']}m",
                         "--idle", f"{CFG['jobIdle']}m", "--kick", f"autoland/{repo}", "--owned", d, task],
                        capture_output=True, text=True)
     return p.stdout.strip() or None
@@ -507,6 +551,70 @@ def job_state(jid):
         return "running"
     p = subprocess.run([CFG["proj"], "state", jid], capture_output=True, text=True)
     return p.stdout.strip() or None
+
+
+def jobs():
+    """(id, project, the repos it's for) of every job proj ever ran, from
+    its own record (jobsDir): `proj run` writes a job's project folder to
+    its `project` file as it starts it, then its kicks to `kick`, where
+    the steward's jobs and proj-inbox's name their repo
+    (HANDLER/OWNER/REPO, lowercased here). One still being made, with no
+    project yet, is left out: it can only start in its folder as that is
+    by then. Raises when any of the record can't be read: none of it is
+    taken for missing but what isn't there."""
+    root = CFG["jobsDir"]
+    try:
+        ids = sorted(os.listdir(root))
+    except FileNotFoundError:
+        return []
+    found = []
+    for jid in ids:
+        d = os.path.join(root, jid)
+        if jid.startswith("."):  # proj's own (.waits.json, .slots)
+            continue
+        try:
+            if not stat.S_ISDIR(os.stat(d).st_mode):
+                continue
+        except FileNotFoundError:
+            continue
+        try:
+            with open(os.path.join(d, "project")) as f:
+                project = f.read().removesuffix("\n")
+        except FileNotFoundError:
+            continue
+        try:
+            with open(os.path.join(d, "kick")) as f:
+                kicks = f.read().splitlines()
+        except FileNotFoundError:
+            kicks = []
+        found.append((jid, os.path.normpath(project), {x.split("/", 1)[1].lower() for x in kicks if x.count("/") == 2}))
+    return found
+
+
+def stop_job(jid):
+    """End a Claude job (proj stop): its turn, queued or running, and
+    anything it awaits. True once it's over, one proj no longer has
+    included; False if proj couldn't stop it, and it may still be at work."""
+    if DRY:
+        log(f"  would: proj stop {jid}")
+        return True
+    p = subprocess.run([CFG["proj"], "stop", jid], capture_output=True, text=True)
+    if p.returncode and p.stderr.startswith(f"no job {jid}"):
+        return True
+    if p.returncode:
+        log(f"proj stop {jid}: {p.stderr.strip()[-300:]}")
+    return p.returncode == 0
+
+
+def forget_issues(repo):
+    """proj-inbox forgets the repo's issues (`proj-inbox forget`), once a
+    pass of its under way has ended: which job each is, what of it it has
+    answered. Nothing to forget where there's no inbox; a refusal raises."""
+    if DRY or not CFG["inbox"]["enable"]:
+        return
+    p = subprocess.run([CFG["inbox"]["command"], "forget", repo], capture_output=True, text=True)
+    if p.returncode:
+        raise RuntimeError(f"proj-inbox forget {repo}: {p.stderr.strip() or f'exit {p.returncode}'}")
 
 
 def coverage(repos, covered):

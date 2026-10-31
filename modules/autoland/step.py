@@ -25,12 +25,13 @@ import lock_wait
 import proofs as P
 import review_step
 import reviewers as V
+import stopping
 import train as T
 import waits
 from common import CFG, DRY, MIN, load, log, repo_cfg, save, ts
 from seal import MAJOR as MAJOR_VERDICT  # renovate-sweep's, on a Renovate major
 from touches import automerges, bot_edited, dep_kind, gate_edit, moved_from, one_way
-from tasks import DEP_SEEN, JUDGMENT, PAST_LIMIT, REVIEWED, fix_task, judge_task, proof_task
+from tasks import DEP_SEEN, PAST_LIMIT, REVIEWED, fix_task, judge_task, judged_on, judgment, owed, proof_task
 from prs import MERGE_STEPS, PROOF_SLOT, RELEASE_AGE, REVIEWER, ci_state, eyes, land, our_status, post_status, show_waiting
 
 # The link Claude Code puts in a PR its session opens.
@@ -48,6 +49,7 @@ STRIKES = {
     "job": "no Claude job can start for it",
     "post": "GitHub keeps refusing a review it's to post",
     "lost": "its Claude jobs keep stopping before they finish (timed out, quiet or crashed)",
+    "stop": "proj keeps refusing to stop its Claude jobs on a head it no longer has",
 }
 STRIKE_LIMIT = 3  # failures in a row of one step, on one head, that make its wait overdue
 
@@ -61,9 +63,9 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
     rc = repo_cfg(repo)
     n, head = pr["number"], pr["headRefOid"]
     by_train = T.rides(repo, pr, repo_info)
-    # The judge reads the diff against the base, so its verdict (and its
-    # job) is for this head on this base: one retargeted is judged again.
-    judged_at = f"{head} {pr['baseRefName']}"
+    # A judge's verdict (and its job) is for this head on this base, with this
+    # description (judged_on): one retargeted or redescribed is judged again.
+    judged_at = f"{head} {judged_on(pr)}"
     key = f"pr-{repo.replace('/', '_')}-{n}.json"
     st = load(key, {})
     # Findings a reviewer couldn't post: by reviewer, then base (on another
@@ -78,6 +80,7 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
             was, base = rs.pop("lost")
             lost_on.setdefault(r, {})[base] = was
     if st.get("head") != head:
+        stopping.moved(repo, pr, st)  # its jobs on the last head, to be stopped below
         st.update(head=head, seen=C.NOW, handed=None, strikes={}, rv={})
     st.setdefault("rv", {})
     labels = {x["name"] for x in pr["labels"]["nodes"]}
@@ -122,6 +125,13 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
         failed this pass too (one review posted, another not)."""
         if kind not in struck:
             st.setdefault("strikes", {}).pop(kind, None)
+
+    # The jobs a new head left answering for nothing, stopped: one proj
+    # refuses is tried again.
+    if stopping.stop(tag, st):
+        cleared("stop")
+    else:
+        strike("stop")
 
     # Open a day, it's listed for the owner (below): a pass then says so.
     after(ts(pr["createdAt"]), 24 * 60)  # ends: listed for the owner
@@ -374,9 +384,12 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
             log(f"{tag}: a Claude job ({busy}) is still working on this head; {kind} waits for it")
             who = f"a Claude job takes it once the one on {ON[busy]} ends"
         else:
-            proofs = {c: rc["proofJobs"][c] for c in ci_names if c in rc["proofJobs"]} if ci == "red" else {}
+            # A conflict's merge is a new head, whose proofs run again anyway:
+            # its job doesn't rerun them, which can outlast it like the gate.
+            conflict = kind == "conflictFixed"
+            proofs = {c: rc["proofJobs"][c] for c in ci_names if c in rc["proofJobs"]} if ci == "red" and not conflict else {}
             train = ci == "red" and any(c.startswith(f"{T.CONTEXT} (") for c in ci_names)
-            if started(kind, fix_task(repo, pr, why, proofs, train), at, bool(how)):
+            if started(kind, fix_task(repo, pr, why, proofs, train, conflict), at, bool(how)):
                 if retry:
                     if not how:
                         st[kind + "Again"] = at
@@ -459,10 +472,10 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
         else:
             hand_off(f"it conflicts with {base}, so GitHub can't merge it and its CI doesn't run: merge {base} into the "
                      "branch (a merge commit: never rebase or force-push), resolve every conflict keeping what both sides "
-                     "meant, and run the repo's tests before you push. If the two sides can't both be kept, which one stays "
+                     "meant. If the two sides can't both be kept, which one stays "
                      f"is the owner's call. Just before you merge, and again before you push, check that the PR is still open "
                      f"on {base} at head {head}: if its base or head moved on, stop without merging or pushing, since the "
-                     "steward hands what it is now to a new job", f"Conflicts with {base}", "conflictFixed", judged_at,
+                     "steward hands what it is now to a new job", f"Conflicts with {base}", "conflictFixed", f"{head} {base}",
                      wait=False)
             # A job stuck in line, or one whose state can't be read, doesn't
             # keep it off the list.
@@ -479,7 +492,7 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
     def owner_decides():
         """Sent to the owner by hand, by a fix job or by a judge (the label):
         listed for them, and no judge job."""
-        judged_owner = C.marker(pr, JUDGMENT, head, repo) == "owner"
+        judged_owner = judgment(pr, head, repo) == "owner"
         if judged_owner:
             # The judge's word, seen labelled on this head: once the label
             # is off, that's the owner's go-ahead. A label taken off before
@@ -491,7 +504,7 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
     def judged(why, seen=REVIEWED):
         """Settled, but not something the steward lands on its own word: one
         Claude job a head judges it, and its verdict on this head decides."""
-        verdict = C.marker(pr, JUDGMENT, head, repo)
+        verdict = judgment(pr, head, repo)
         if verdict == "land":
             land_now(f"Settled; a Claude job judged it fine to land ({why})")
         elif verdict == "owner" and st.get("ownerSaw") == judged_at:
@@ -507,8 +520,8 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
             # The judge's own build or tests failed on this head: a fix job
             # has it, and its push is judged again. Its own once a head: a
             # job that answered a finding here without pushing didn't fix this.
-            hand_off("the Claude job that judged it found something failing on this head, its build or tests or a finding "
-                     "left unfixed (its comment on the PR says what)",
+            hand_off("the Claude job that judged it found something failing on this head, its build or tests, a finding "
+                     "left unfixed or a reason in its description that doesn't hold (its comment on the PR says what)",
                      "Settled, but its build or tests fail", "failFixed", judged_at, wait=False)
         elif update_branch():
             settle("pending", "Settled, but behind its base: brought up to date, reviewed again")
@@ -628,10 +641,10 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
     # each on one branch would push over each other. The sweep's push makes a
     # new head, and the reviewers read it again.
     # A judge asked for on this head and base (the repo had no CI then, say)
-    # still decides once CI shows up: its owner or failed verdict isn't
-    # dropped for a green check.
-    judge_said = C.marker(pr, JUDGMENT, head, repo)
-    asked = st.get("judged") == judged_at or judge_said is not None
+    # still decides once CI shows up, or the description is edited (then on
+    # the new one): its owner or failed verdict isn't dropped for either.
+    judge_said = judgment(pr, head, repo)
+    asked = owed(pr, head, repo, st.get("judged"))
     # Its owner or failed verdict holds it whatever CI is still doing; only
     # a land waits for CI.
     held = asked and judge_said in ("owner", "failed")

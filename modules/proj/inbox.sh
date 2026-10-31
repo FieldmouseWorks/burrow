@@ -6,7 +6,8 @@
 # `proj-inbox [OWNER/REPO]` looks at that repo's issues, or every project's;
 # burrow-events (../events.nix) runs it on the repo's issue events, each time
 # one of its jobs' turns ends (proj run --kick), and when a wait it booked in
-# WAKE ends. `proj-inbox status` shows which issue is which job. An issue
+# WAKE ends. `proj-inbox status` shows which issue is which job, and
+# `proj-inbox forget OWNER/REPO` drops what it kept of a repo's. An issue
 # that has UNSTICK_LABEL too (the steward's stuck issue) is about what the
 # pipeline is stuck on, so its job never waits in proj's line (proj run
 # --unstick). SRC, JOBS, STATE, SCRATCH, LABEL, UNSTICK_LABEL, AUTHORS, VM,
@@ -45,6 +46,36 @@ fi
 # restart too, or a hand): two could each find an issue without its job and
 # start one, and each writes WAKE from what it saw.
 exec {pass}>>"$WAKE.lock"
+
+# All the inbox kept about a repo's issues (which job each is, what of it
+# has been answered, that the repo has the label), gone once a pass under
+# way has ended, so the next takes each open one up as new: the steward's
+# (autoland's repos.py), when GitHub's repo of that name is another one
+# than the deleted repo it was. Its issue N isn't the deleted one's N, and
+# none of the old job's answers, or its session, are its. The old jobs are
+# the steward's to stop.
+if [ "${1:-}" = forget ]; then
+  [[ ${2:-} == */* ]] || { echo "usage: proj-inbox forget OWNER/REPO" >&2; exit 2; }
+  flock -w 600 "$pass" || { echo "proj-inbox: a pass is still going after ten minutes; nothing forgotten" >&2; exit 1; }
+  # GitHub's names are case-blind: the inbox kept the clone's spelling.
+  want=${2//\//_}
+  want=${want,,}
+  for d in "$STATE"/*/; do
+    n=$(basename "$d")
+    n=${n,,}
+    # An issue's is KEY-N.
+    [ "${n%-*}" != "$n" ] && [ "${n%-*}" = "$want" ] || continue
+    rm -rf "$d"
+  done
+  for f in "$STATE"/.label-* "$STATE"/.unreached/*; do
+    n=${f##*/}
+    n=${n#.label-}
+    [ -e "$f" ] && [ "${n,,}" = "$want" ] || continue
+    rm -f "$f"
+  done
+  exit 0
+fi
+
 flock "$pass"
 
 allowed() {
