@@ -90,6 +90,8 @@ let
     SYSTEM = system;
     MANIFEST = if cfg.claudeManifest == null then "" else cfg.claudeManifest;
     CHECKS = lib.concatStringsSep " " cfg.checks;
+    # burrow.cpu's slots, which the VM tests wait for where the machine has them.
+    HEAVY = if config.burrow.cpu.enable then "${tools.heavy}/bin/heavy" else "";
     WITHIN = cfg.confirmWithin;
     CHANNEL = "nixos-${config.system.nixos.release}";
     OWNER = config.burrow.owner;
@@ -137,7 +139,7 @@ let
   calls = [ tools.proj tools.notify ];
   healthTool = script health ./updates/health.sh (with pkgs; [ coreutils gnugrep gnused gawk systemd ]);
   # Its own functions first (they run only once update.sh has defined what they call).
-  updateTool = script update [ ./updates/dispatch.sh ./updates/propose.sh ./updates/push.sh ./updates/update.sh ] (
+  updateTool = script update [ ./updates/dispatch.sh ./updates/propose.sh ./updates/push.sh ./updates/check.sh ./updates/update.sh ] (
     (with pkgs; [ coreutils jq curl util-linux systemd gnugrep gnused gawk vulnix config.nix.package ])
     ++ [ config.programs.git.package healthTool tools.switch tools.confirm machineGh ] ++ calls ++ lib.optional (tools ? boot) tools.boot
   );
@@ -259,6 +261,16 @@ let
     repositoryCache = "enabled";
     extends = [ "config:recommended" "helpers:pinGitHubActionDigests" ];
     prHourlyLimit = 0;
+
+    # Commit subjects and PR titles in the house style, `area: plain
+    # sentence` (house/rules.md): "deps: update foo to v1.5". The PR title is
+    # the subject the steward squashes onto main, and house-check fails a PR
+    # whose title isn't. Left to itself Renovate guesses from each repo's
+    # history, and config:recommended's package rules type it fix or chore,
+    # so a package rule below has the final word on the type.
+    semanticCommits = "enabled";
+    semanticCommitType = "deps";
+    semanticCommitScope = null;
     prConcurrentLimit = 20;
 
     # Three days before a release counts: hijacked npm and crates releases are
@@ -347,6 +359,12 @@ let
         matchManagers = [ "nix" ];
         minimumReleaseAgeBehaviour = "timestamp-optional";
       }
+      {
+        # config:recommended's own rules type a dependency fix and the rest
+        # chore; in the house style every update is "deps:".
+        matchPackageNames = [ "*" ];
+        semanticCommitType = "deps";
+      }
     ] ++ lib.optional (rcfg.trustedOwners != [ ]) {
       # A dependency on a repo of trustedOwners' (a pinned workflow, an
       # action, a flake input) waits for nothing: the soak is against someone
@@ -415,6 +433,7 @@ in
 {
   imports = [
     (import ./common.nix inputs)
+    { key = "burrow/cpu"; imports = [ (import ./cpu.nix inputs) ]; }
     { key = "burrow/notify"; imports = [ (import ./notify.nix inputs) ]; }
     { key = "burrow/switch"; imports = [ (import ./switch.nix inputs) ]; }
     { key = "burrow/proj"; imports = [ (import ./proj.nix inputs) ]; }

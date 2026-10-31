@@ -265,7 +265,7 @@ stood = (C.gh, C.write, C.job, C.job_state, V.queue, V.post)
 stand_in()
 fresh_pr_state()
 run(clean(), 600)
-assert merges() == [f"api -X PUT repos/sam/r/pulls/5/merge -f merge_method=squash -f sha={HEAD}"], WROTE
+assert merges() == [f"api -X PUT repos/sam/r/pulls/5/merge -f merge_method=squash -f commit_title=t (#5) -f sha={HEAD}"], WROTE
 assert not any(x.startswith("pr merge") for x in WROTE), WROTE
 queued_pr = {**clean(), "autoMergeRequest": {"enabledAt": "x"}}
 run(queued_pr, 700)

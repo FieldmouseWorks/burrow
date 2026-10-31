@@ -7,10 +7,11 @@
 # burrow-events (../events.nix) runs it on the repo's issue events, each time
 # one of its jobs' turns ends (proj run --kick), and when a wait it booked in
 # WAKE ends. `proj-inbox status` shows which issue is which job, and
-# `proj-inbox forget OWNER/REPO` drops what it kept of a repo's. SRC, JOBS,
-# STATE, SCRATCH, LABEL, AUTHORS, VM, HOST, NOTIFY, MARK, WAKE, PIPELINE and
-# MACHINERY
-# come from ../proj.nix.
+# `proj-inbox forget OWNER/REPO` drops what it kept of a repo's. An issue
+# that has UNSTICK_LABEL too (the steward's stuck issue) is about what the
+# pipeline is stuck on, so its job never waits in proj's line (proj run
+# --unstick). SRC, JOBS, STATE, SCRATCH, LABEL, UNSTICK_LABEL, AUTHORS, VM,
+# HOST, NOTIFY, MARK, WAKE, PIPELINE and MACHINERY come from ../proj.nix.
 #
 # The inbox posts as its gh's login: the machinery's App (burrow.github.
 # machinery) where there is one, else the owner's own account. Its own
@@ -88,6 +89,15 @@ allowed() {
 acts_as() { # login
   as=()
   if [ -n "$MACHINERY" ] && [ "$VM" != 1 ] && [[ $1 == *"[bot]" ]]; then as=(--app "$MACHINERY"); fi
+}
+
+# Whether an issue's job waits in no line (proj run --unstick): it has
+# UNSTICK_LABEL as well.
+lane() { # issue
+  lane=()
+  if [ -n "$UNSTICK_LABEL" ] && jq -e --arg l "$UNSTICK_LABEL" 'any(.labels[]?; .name == $l)' <<<"$1" >/dev/null; then
+    lane=(--unstick)
+  fi
 }
 
 post() { # repo n body
@@ -194,9 +204,10 @@ for repo in "${!project[@]}"; do
     [ ! -e "$d/job" ] || continue
     allowed "$(jq -r .user.login <<<"$issue")" || continue
     acts_as "$(jq -r .user.login <<<"$issue")"
+    lane "$issue"
     # Comments already there are part of the task; replies after this are turns.
     comments=$(gh api "repos/$repo/issues/$n/comments" --paginate --slurp | jq 'add // []') || { miss "$repo"; continue; }
-    id=$(proj run "$(priority "$repo")" "${vm[@]}" "${as[@]}" --kick "proj-inbox/$repo" --link "$(jq -r '.html_url // ""' <<<"$issue")" "$p" "$(task "$repo" "$issue" "$comments")") || { retry "$repo"; continue; }
+    id=$(proj run "$(priority "$repo")" "${lane[@]}" "${vm[@]}" "${as[@]}" --kick "proj-inbox/$repo" --link "$(jq -r '.html_url // ""' <<<"$issue")" "$p" "$(task "$repo" "$issue" "$comments")") || { retry "$repo"; continue; }
     mkdir -p "$d"
     echo "$repo#$n" >"$d/issue"
     echo "$id" >"$d/job"
@@ -242,6 +253,15 @@ for repo in "${!project[@]}"; do
       post "$repo" "$n" "${body:0:60000}" || { miss "$repo"; continue 2; }
       echo "$k" >"$d/answered"
     done
+    # Labelled to wait in no line: the job is made one that doesn't (proj
+    # unstick), whatever it's doing, and again every pass. That tells the
+    # watchdog afresh, since a turn begun before the switch that brought proj
+    # unstick writes the job's waits without it, and its own stall would go
+    # back on the issue it's the job of. A turn of it still in line leaves it
+    # at its next look, every later turn takes that slot, and one running
+    # carries on.
+    lane "$(jq -c --argjson n "$n" '.[] | select(.number == $n)' <<<"$open")"
+    [ ${#lane[@]} -eq 0 ] || proj unstick "$id" || { retry "$repo"; continue; }
     case $st in queued | running) continue ;; esac
 
     # Closed, or the label taken off: done with it, and so is its job, which
@@ -285,7 +305,8 @@ for repo in "${!project[@]}"; do
         # No session to continue (the first turn never got going): start over,
         # from the issue as it stands, replies and all.
         acts_as "$(jq -r .user.login <<<"$now")"
-        id=$(proj run "$(priority "$repo")" "${vm[@]}" "${as[@]}" --kick "proj-inbox/$repo" --link "$(jq -r '.html_url // ""' <<<"$now")" "$p" "$(task "$repo" "$now" "$comments")") || { retry "$repo"; continue; }
+        lane "$now"
+        id=$(proj run "$(priority "$repo")" "${lane[@]}" "${vm[@]}" "${as[@]}" --kick "proj-inbox/$repo" --link "$(jq -r '.html_url // ""' <<<"$now")" "$p" "$(task "$repo" "$now" "$comments")") || { retry "$repo"; continue; }
         echo "$id" >"$d/job"
         echo 0 >"$d/answered"
       fi

@@ -18,20 +18,44 @@ stand_in()
 # has them (steward.run_pass's acting_for).
 C._for.append("sam")
 
-# Every repo gets the hold, needs-owner and first labels, once a day.
+# Every repo gets the hold, needs-owner and first labels, and the waiting
+# ones (prs.show_waiting), once a day.
+LABELS = ["first", "hold", "needs-owner", "waiting: proof slot", "waiting: release age", "waiting: reviewer"]
+
+
+def made():
+    """The labels made, and each one's description."""
+    got = {}
+    for x in WROTE:
+        if x.startswith("label create "):
+            name, _, rest = x.removeprefix("label create ").partition(" -R ")
+            got[name] = rest.partition(" --description ")[2]
+    return got
+
+
 fresh_pr_state()
 C.NOW = C.ts(T0)
 C.save("repo-sam_r.json", {"settings": C.NOW, "app": 7})
 WROTE.clear()
 R.settle_repo({"repo": "sam/r", "private": False, "default": "main"}, {"sam/r"})
-assert sorted(x.split()[2] for x in WROTE if x.startswith("label create")) == ["first", "hold", "needs-owner"], WROTE
+assert sorted(made()) == LABELS, WROTE
+# A waiting label says what the PR waits on, and that its status says more,
+# within the 100 characters GitHub takes.
+assert all(len(d) <= 100 for d in made().values()), made()
+assert all("review-settled says" in d for n, d in made().items() if n.startswith("waiting: ")), made()
 WROTE.clear()
 R.settle_repo({"repo": "sam/r", "private": False, "default": "main"}, {"sam/r"})
 assert WROTE == [], WROTE
 # A day on, they're made again with the settings, in case one was deleted.
 C.NOW += 86400
 R.settle_repo({"repo": "sam/r", "private": False, "default": "main"}, {"sam/r"})
-assert sorted(x.split()[2] for x in WROTE if x.startswith("label create")) == ["first", "hold", "needs-owner"], WROTE
+assert sorted(made()) == LABELS, WROTE
+# A repo made the labels before there were waiting ones: they're made at
+# once, not a day on.
+C.save("repo-sam_r.json", {**C.load("repo-sam_r.json", {}), "labels": ["hold", "needs-owner", "first"]})
+WROTE.clear()
+R.settle_repo({"repo": "sam/r", "private": False, "default": "main"}, {"sam/r"})
+assert sorted(made()) == LABELS, WROTE
 
 # Wherever the repo has rules (its own rulesets and the default branch's
 # classic protection), up-to-date branches go off and the steward's status
@@ -320,7 +344,7 @@ WROTE.clear()
 assert R.settle_repo(remade, known) is True
 st = C.load("repo-sam_r.json", {})
 assert st["settings"] == C.NOW and st.get("hookId") != 41 and st["id"] == "R_new", st
-assert sorted(x.split()[2] for x in WROTE if x.startswith("label create")) == ["first", "hold", "needs-owner"], WROTE
+assert sorted(made()) == LABELS, WROTE
 assert "api -X PUT repos/sam/r/vulnerability-alerts" in WROTE, WROTE
 # Settled now, it isn't started over again: what's kept about it from here
 # on stays, its new clone and that clone's jobs too.

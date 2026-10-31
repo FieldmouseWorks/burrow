@@ -64,7 +64,10 @@ change nothing else in the same PR.
   rule the steward can't turn off) is brought up to date instead, and the
   new head is settled like any other.
 - The `hold`, `needs-owner` and `first` labels (`burrow.autoland.labels`),
-  which the steward, its jobs and the owner put on PRs.
+  which the steward, its jobs and the owner put on PRs, and the steward's
+  own `waiting: release age`, `waiting: proof slot` and `waiting: reviewer`,
+  which say at a glance what a PR waits on while it does (its
+  `review-settled` status says the rest).
 
 ## The steward's GitHub App
 
@@ -141,7 +144,7 @@ root only.
    finds the cause and opens a PR from `autoland/red-SHA` that reverts the
    merge that broke it, or fixes it, and that PR lands like any other. Nothing
    more while the job works or its PR is open; one more job if the branch is
-   still red after, then the owner. Green again without it (fixed some other
+   still red after, then the pipeline's stuck issue. Green again without it (fixed some other
    way, or a flake), its PR is closed once the job has ended.
 
 Waiting for the owner instead, listed in one issue: what a judge job sent
@@ -171,8 +174,9 @@ owner, since nothing else merges it.
   code. Pin actions to a commit (Renovate keeps them current). Without CI,
   "green" means nothing and dependency updates can't merge themselves.
   The CI is the flake gate the [house style](house-style.md#the-gate-is-the-flake)
-  describes: a `flake.nix` from burrow's template, and the workflow that calls
-  `nix flake check`. Jobs the flake can't hold stay alongside it.
+  describes: a `flake.nix` from burrow's template, the workflow that calls
+  `nix flake check`, and the template's rust-first workflow beside it. Jobs
+  the flake can't hold stay alongside it.
 - **AGENTS.md** with the Code Review Rules section below, plus whatever the
   repo's own agents need (how to build, test and run it). Keep the repo's
   existing text.
