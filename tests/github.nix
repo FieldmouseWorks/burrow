@@ -11,6 +11,15 @@
 let
   # GitHub's App API, as far as gh-token asks it.
   github = import ./github-app.nix { inherit pkgs; };
+  # Drop-ins that hold the access unit's start until the test says, and fail it.
+  held = pkgs.writeText "held.conf" ''
+    [Service]
+    ExecStartPre=${pkgs.writeShellScript "held" "until [ -e /run/access-go ]; do ${pkgs.coreutils}/bin/sleep 0.1; done"}
+  '';
+  failing = pkgs.writeText "failing.conf" ''
+    [Service]
+    ExecStartPre=${pkgs.coreutils}/bin/false
+  '';
   # github.com's git, over https with a certificate of its own, and over
   # plain http: each request's logins are noted in /tmp/logins (Basic's,
   # decoded, a Kerberos ticket as `negotiate`, its cookies, and the client
@@ -124,7 +133,7 @@ pkgs.testers.runNixOSTest {
       users.groups.gh-token-workers.members = [ "dev" "eve" ];
       systemd.services.gh-token-workers-access.enable = false;
       systemd.sockets.gh-token-workers = {
-        partOf = pkgs.lib.mkForce [ ];
+        bindsTo = pkgs.lib.mkForce [ ];
         socketConfig = {
           ExecStartPost = pkgs.lib.mkForce [ ];
           SocketGroup = "gh-token-workers";
@@ -561,23 +570,66 @@ pkgs.testers.runNixOSTest {
           status, out = machine.execute(carol)
           assert status != 0 and "ghs_" not in out, (status, out)
 
-      with subtest("a socket is ready only once its users can connect, whatever else has run"):
-          machine.succeed("systemctl stop gh-token-workers-access.service")
+      access = "gh-token-workers-access.service"
+      dropins = f"/run/systemd/system/{access}.d"
+
+      def drop_in(path):
+          machine.succeed(f"mkdir -p {dropins} && ln -sf {path} {dropins}/test.conf && systemctl daemon-reload")
+
+      def no_drop_in():
+          machine.succeed(f"rm -rf {dropins} && systemctl daemon-reload")
+
+      with subtest("a socket is ready only once its users can connect, with its access unit yet to run"):
+          drop_in("${held}")
+          machine.succeed("systemctl stop gh-token-workers.socket")
           machine.succeed("systemctl start gh-token-workers.socket")
-          machine.fail("systemctl is-active gh-token-workers-access.service")
+          assert machine.execute(f"systemctl is-active {access}")[1].strip() == "activating"
           assert "user:dev:rw-" in owned("root:root 660")
           allowed(dev("gh-token get sam"))
-          machine.succeed("systemctl start gh-token-workers-access.service")
+          machine.succeed("touch /run/access-go")
+          machine.wait_until_succeeds(f"systemctl is-active {access}")
+          machine.succeed("rm /run/access-go")
+          no_drop_in()
 
-      with subtest("a switch back to a system from before ACLs leaves its socket as that system says"):
-          switch("carol")
-          allowed(carol)
-          switch("groups")
+      def groups_system():
           acl = owned("root:gh-token-workers 660")
           assert "user:" not in acl.replace("user::", ""), acl
           denied(carol)
           allowed(eve)
           allowed(dev("gh-token get sam"))
+
+      with subtest("a socket started on its own has its access unit, so a switch back still replaces it"):
+          switch("carol")
+          machine.succeed(f"systemctl stop {access}")
+          machine.succeed("systemctl start gh-token-workers.socket")
+          machine.wait_until_succeeds(f"systemctl is-active {access}")
+          allowed(carol)
+          switch("groups")
+          groups_system()
+
+      with subtest("a socket doesn't outlive its access unit stopped alone, and a switch back starts that system's"):
+          switch("carol")
+          machine.succeed(f"systemctl stop --job-mode=ignore-dependencies {access}")
+          machine.wait_until_fails("systemctl is-active gh-token-workers.socket")
+          switch("groups")
+          groups_system()
+
+      with subtest("a socket doesn't outlive its access unit failed, and a switch back starts that system's"):
+          switch("carol")
+          drop_in("${failing}")
+          machine.succeed("systemctl stop gh-token-workers.socket")
+          machine.succeed("systemctl start gh-token-workers.socket")
+          machine.wait_until_succeeds(f"systemctl is-failed {access}")
+          machine.wait_until_fails("systemctl is-active gh-token-workers.socket")
+          no_drop_in()
+          switch("groups")
+          groups_system()
+
+      with subtest("a switch back to a system from before ACLs leaves its socket as that system says"):
+          switch("carol")
+          allowed(carol)
+          switch("groups")
+          groups_system()
 
       with subtest("the first switch from a system before ACLs sets them, with a change of users in it"):
           switch("carol")
@@ -595,11 +647,10 @@ pkgs.testers.runNixOSTest {
           allowed(dev("gh-token get sam"))
 
       with subtest("a switch brings back an access unit that isn't running, with a change of users in it"):
-          machine.succeed("systemctl stop gh-token-workers-access.service")
-          machine.succeed("systemctl start gh-token-workers.socket")
-          machine.fail("systemctl is-active gh-token-workers-access.service")
+          machine.succeed(f"systemctl stop {access}")
+          machine.fail("systemctl is-active gh-token-workers.socket")
           switch("carol")
-          machine.succeed("systemctl is-active gh-token-workers-access.service")
+          machine.succeed(f"systemctl is-active {access}")
           allowed(carol)
           switch(None)
           denied(carol)

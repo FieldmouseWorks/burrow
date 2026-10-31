@@ -284,7 +284,10 @@ in
         DirectoryMode = "0755";
         ExecStartPost = access app;
       };
-      partOf = [ "gh-token-${name}-access.service" ];
+      # Never up without its access unit, whatever stopped or failed that: a
+      # system without the unit stops only an active one, and that stop is
+      # what hands the socket over to that system's own.
+      bindsTo = [ "gh-token-${name}-access.service" ];
     }) cfg.apps;
 
     systemd.services = lib.mapAttrs' (name: app: lib.nameValuePair "gh-token-${name}-access" {
