@@ -1,0 +1,21 @@
+[package]
+name = "burrow-proj"
+description = "Project work handed to Claude jobs, each in its own project, in the background"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+burrow-events = { path = "../burrow-events" }
+burrow-watchdog = { path = "../burrow-watchdog" }
+jiff = { version = "0.2.38", default-features = false, features = ["std", "tz-system", "tzdb-zoneinfo"] }
+rustix = { version = "1.1.6", features = ["process"] }
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
