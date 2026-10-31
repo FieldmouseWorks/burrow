@@ -45,12 +45,17 @@ pub struct Config {
     pub lead_repos: Vec<String>,
     /// The machine's own flake, which is the pipeline's wherever its origin is.
     pub flake: PathBuf,
+    /// The proj the machine has deployed, which a waiting turn follows.
+    pub deployed: PathBuf,
     /// Each GitHub App's env file, by its name.
     pub apps: BTreeMap<String, PathBuf>,
     pub tools: Tools,
     /// The file it was read from, which each turn's unit is given too.
     #[serde(skip)]
     pub path: PathBuf,
+    /// The proj this is, whole: PROJ_SELF, its wrapper, as a store path.
+    #[serde(skip)]
+    pub me: PathBuf,
 }
 
 /// The programs it runs.
@@ -58,6 +63,7 @@ pub struct Config {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Tools {
     pub bash: PathBuf,
+    pub flock: PathBuf,
     pub gh: PathBuf,
     pub git: PathBuf,
     pub systemctl: PathBuf,
@@ -72,8 +78,12 @@ impl Config {
         let shown = path.to_string_lossy().into_owned();
         let text = std::fs::read(&path).map_err(|e| format!("{shown}: {e}"))?;
         let cfg: Config = serde_json::from_slice(&text).map_err(|e| format!("{shown}: {e}"))?;
+        let me = std::env::var_os("PROJ_SELF").ok_or("PROJ_SELF isn't set")?;
+        let me =
+            std::fs::canonicalize(&me).map_err(|e| format!("{}: {e}", me.to_string_lossy()))?;
         Ok(Config {
             path: path.into(),
+            me,
             ..cfg
         })
     }
@@ -121,8 +131,9 @@ pub(crate) mod tests {
             "pipelineRepos": ["sam/burrow", "sam/box"],
             "leadRepos": ["sam/burrow"],
             "flake": "/data/dev/src/box",
+            "deployed": "/nowhere/proj",
             "apps": {"workers": "/run/workers.env"},
-            "tools": {"bash": "/bin/bash", "gh": "/bin/gh", "git": "/bin/git", "systemctl": "/bin/systemctl",
+            "tools": {"bash": "/bin/bash", "flock": "/bin/flock", "gh": "/bin/gh", "git": "/bin/git", "systemctl": "/bin/systemctl",
                       "systemdRun": "/bin/systemd-run", "timeout": "/bin/timeout"}
         })
     }

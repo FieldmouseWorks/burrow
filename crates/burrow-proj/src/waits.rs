@@ -14,6 +14,7 @@
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io;
 use std::path::Path;
+use std::process::Command;
 use std::time::Duration;
 
 use burrow_watchdog::watch::Item;
@@ -21,6 +22,7 @@ use serde_json::{Map, Value, json};
 
 use crate::config::Config;
 use crate::job::Job;
+use crate::slot::successor;
 use crate::{GRACE, mtime, now, swap};
 
 /// What [`job_wait`] reads of a job's latest turn.
@@ -32,6 +34,8 @@ pub struct Facts {
     pub state: String,
     /// Its starter acts on each turn's end itself (proj run --owned).
     pub owned: bool,
+    /// It's the job that takes the stuck issue (proj run --unstick).
+    pub unstick: bool,
     /// proj stop ended it.
     pub stopped: bool,
     /// How it said it ends: await, ask, done, or undeclared when it wouldn't.
@@ -62,7 +66,13 @@ pub fn job_wait(cfg: &Config, f: &Facts) -> Option<Item> {
         "queued" => (
             f.queued,
             f.queued + stall,
-            format!("turn {turn} is waiting in line for a slot"),
+            if f.unstick {
+                format!(
+                    "turn {turn} is waiting for the --unstick slot, which another --unstick turn holds"
+                )
+            } else {
+                format!("turn {turn} is waiting in line for a slot")
+            },
         ),
         "running" => match &f.wait {
             Some((waited, what)) => {
@@ -141,6 +151,9 @@ pub fn job_wait(cfg: &Config, f: &Facts) -> Option<Item> {
         kick,
         // Waiting for a slot: another job would only join the line.
         line: f.state == "queued",
+        // The stuck issue's own: its stall goes to the owner, since that
+        // issue would only hand it to itself.
+        unstick: f.unstick,
     })
 }
 
@@ -213,8 +226,18 @@ pub fn waiting(dir: &Path) -> Option<(i64, String)> {
 /// never got here (the machine went down mid-turn) keeps the wait it had,
 /// whose deadline then catches it; one whose dir is gone has none. Without
 /// the watchdog there's no watch file: nothing to do. Never the caller's
-/// failure: a turn goes on whether or not the watchdog hears.
+/// failure: a turn goes on whether or not the watchdog hears. By the deployed
+/// proj's waits, when a turn outlives a switch ([`crate::slot`]).
 pub fn rewatch(cfg: &Config, ids: &[&str]) {
+    if let Some(d) = successor(cfg)
+        && Command::new(d)
+            .arg("_rewatch")
+            .args(ids)
+            .status()
+            .is_ok_and(|s| s.success())
+    {
+        return;
+    }
     if publish(cfg, ids).is_err() {
         eprintln!(
             "proj: couldn't update the stall watchdog's waits for {}",

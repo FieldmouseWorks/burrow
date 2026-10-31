@@ -14,6 +14,10 @@
 //!                             of the other pipeline work too; in any other,
 //!                             as --first, and status and the turn's journal
 //!                             say so (every turn of it, either way)
+//! proj run --unstick PROJECT "task"  what the pipeline is stuck on: never in
+//!                             the line, which may be the very thing stuck, but
+//!                             in a slot of its own besides maxJobs (every turn
+//!                             of it)
 //! proj run --kick NAME PROJECT "task"  kick NAME (HANDLER or HANDLER/OWNER/REPO,
 //!                             one of burrow-events') each time a turn starts
 //!                             (takes its slot) and each time one ends
@@ -35,6 +39,9 @@
 //!                             the full stream); fails when there's none
 //! proj state ID               queued, running, done, error or failed
 //! proj stop ID                end a job: its running turn and its waits
+//! proj unstick ID             make a job one run --unstick from now on: a
+//!                             turn of it waiting in line leaves it at its
+//!                             next look, one running carries on
 //! proj list                   projects you can run jobs in
 //! proj await TARGET...        from inside a job: resume it once a PR or
 //!                             issue (URL or OWNER/REPO#N) changes
@@ -55,7 +62,10 @@
 //! and a turn that has waited maxWait seconds counts as --first itself, so a
 //! stream of them can't starve it. pipelineSlots of the slots are for pipeline
 //! jobs in the pipeline's own repos alone, and no project's other jobs hold
-//! more than maxJobsPerProject at once ([`pick`]). Every turn runs in the
+//! more than maxJobsPerProject at once ([`pick`]). A job run --unstick waits in
+//! none of that: its turns take a slot of their own, past maxJobs, one at a
+//! time ([`slot`]). A waiting turn becomes the deployed proj at its next look
+//! after a switch ([`slot`]). Every turn runs in the
 //! slice, which the machine caps, so jobs can't take memory from anything
 //! else, and gets its timeout before it's stopped, so a stuck one can't hold
 //! its slot for good. A job's --idle stops a stuck one sooner: a turn at work

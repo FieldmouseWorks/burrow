@@ -266,6 +266,8 @@
         proj = import ./tests/proj.nix { inherit self pkgs; };
         # A turn's clock, which stands still while it waits in line.
         proj-clock = import ./tests/proj-clock.nix { inherit self pkgs; };
+        # A switch reaches the turns already waiting in line, each in its place.
+        proj-deployed = import ./tests/proj-deployed.nix { inherit self pkgs; };
         # The example's proj reads the config its module writes (a field the
         # binary doesn't know fails it), and a job it doesn't have is failed.
         proj-config = pkgs.runCommand "proj-config-check" { } ''
@@ -440,6 +442,12 @@
         update-push = pkgs.runCommand "update-push-check" { nativeBuildInputs = [ pkgs.shellcheck pkgs.git ]; } ''
           shellcheck -s bash ${./modules/updates/push.sh} ${./tests/update-push.sh}
           bash ${./tests/update-push.sh} ${./modules/updates/push.sh}
+          touch $out
+        '';
+        # HOST-update's VM tests take a heavy slot.
+        update-check = pkgs.runCommand "update-check-check" { nativeBuildInputs = [ pkgs.shellcheck ]; } ''
+          shellcheck -s bash -e SC2154 ${./modules/updates/check.sh} ${./tests/update-check.sh}
+          bash ${./tests/update-check.sh} ${./modules/updates/check.sh}
           touch $out
         '';
         # HOST-update's own PR in a train repo (modules/updates/propose.sh):
@@ -649,6 +657,27 @@
           [ "$got" = "$(sed 's/^ *//' <<<"$want")" ] || { echo "got: $got"; exit 1; }
           touch $out
         '';
+        # The PR titles Renovate gives the example's updates, as Renovate's
+        # own code writes them: each the house style's `area: plain
+        # sentence`, "deps: ...", whichever type config:recommended would
+        # give it. The title is the subject the steward squashes onto main.
+        renovate-titles = pkgs.runCommand "renovate-titles-check" { } ''
+          export HOME=$TMPDIR
+          got=$(${pkgs.lib.getExe pkgs.nodejs_24} ${./tests/renovate-titles.mjs} ${pkgs.renovate} \
+            ${self.nixosConfigurations.example.config.systemd.services.renovate.environment.RENOVATE_CONFIG_FILE} 2>/dev/null)
+          want='deps: update dependency left-pad to 1.3.1
+          deps: update dependency vitest to 3.2.0
+          deps: update dependency vite to v7
+          deps: lock file maintenance (npm)
+          deps: update dependency net.fabricmc:fabric-loader to 0.20.1
+          deps: lock file maintenance (gradle)
+          deps: update rust crate tokio to 1.41.0
+          deps: lock file maintenance (cargo)
+          deps: update fieldmouseworks/burrow digest to 0fce5b8
+          deps: lock file maintenance (nix)'
+          [ "$got" = "$(sed 's/^ *//' <<<"$want")" ] || { echo "got: $got"; exit 1; }
+          touch $out
+        '';
         # What a dashboard's Repository Problems lists under the example's
         # config, by Renovate's own logger: not the refresh it was told to take
         # without a release timestamp, but still a warning that's a problem.
@@ -682,7 +711,7 @@
           touch $out
         '';
         # flake-gate: a repo's CI gate step, run here as CI runs it, and
-        # burrow's own evaluating apart, as a Claude job's memory needs.
+        # burrow's own evaluating apart, so a Claude job's gate holds little.
         flake-gate = pkgs.runCommand "flake-gate-check" { nativeBuildInputs = [ (pkgs.callPackage ./tools/flake-gate/package.nix { }) pkgs.git pkgs.yq-go pkgs.shellcheck ]; } ''
           shellcheck -s bash ${./tests/flake-gate.sh}
           bash ${./tests/flake-gate.sh} ${./.}

@@ -10,7 +10,7 @@ use std::process::Command;
 
 use crate::config::Config;
 use crate::github::{fingerprint, target};
-use crate::job::{Job, answer, awaits, is_error, kick};
+use crate::job::{Job, answer, awaits, is_error, kick, result_of};
 use crate::pick::demoted;
 use crate::turn::{exec, lines, start};
 use crate::waits::rewatch;
@@ -53,6 +53,16 @@ pub fn dispatch(cfg: &Config, args: &[String]) -> Result<(), Fail> {
             Ok(())
         }
         Some("stop") => stop(cfg, arg(args, 1, "usage: proj stop ID")?),
+        Some("unstick") => {
+            let id = arg(args, 1, "usage: proj unstick ID")?;
+            let job = Job::new(cfg, id);
+            if !job.dir.is_dir() {
+                return Err(Fail::new(1, format!("no job {id}")));
+            }
+            fs::write(job.path("unstick"), "").map_err(|e| io_fail(&job.path("unstick"), e))?;
+            rewatch(cfg, &[id]);
+            Ok(())
+        }
         Some("list") => {
             let mut names: Vec<String> = fs::read_dir(&cfg.projects)
                 .map_err(|e| io_fail(&cfg.projects, e))?
@@ -68,14 +78,26 @@ pub fn dispatch(cfg: &Config, args: &[String]) -> Result<(), Fail> {
         Some(how @ ("ask" | "done")) => ends(cfg, how, args.len()),
         Some("_watch") => watch::look(cfg, args.get(1).map_or("", String::as_str)),
         Some("_ended") => ended(cfg),
-        Some("_exec") => exec(
-            cfg,
-            arg(args, 1, "usage: proj _exec ID first|normal")?,
-            args.get(2).map_or("", String::as_str),
-        ),
+        Some("_handover_format") => {
+            put(&format!("{}\n", slot::HANDOVER_FORMAT));
+            Ok(())
+        }
+        Some("_rewatch") => {
+            let ids: Vec<&str> = args[1..].iter().map(String::as_str).collect();
+            rewatch(cfg, &ids);
+            Ok(())
+        }
+        Some("_exec") => {
+            slot::handed_over(cfg);
+            exec(
+                cfg,
+                arg(args, 1, "usage: proj _exec ID first|normal")?,
+                args.get(2).map_or("", String::as_str),
+            )
+        }
         Some(_) => Err(Fail::new(
             2,
-            "usage: proj run|reply|status|log|state|stop|list|await|ask|done",
+            "usage: proj run|reply|status|log|state|stop|unstick|list|await|ask|done",
         )),
     }
 }
@@ -94,7 +116,8 @@ fn kick_name(k: &str) -> bool {
 
 /// `proj run` and `proj reply`.
 fn run(cfg: &Config, reply: bool, args: &[String]) -> Result<(), Fail> {
-    let (mut vm, mut first, mut pipeline, mut owned) = (false, false, false, false);
+    let (mut vm, mut first, mut pipeline, mut unstick, mut owned) =
+        (false, false, false, false, false);
     let (mut kicks, mut limit, mut idle, mut link, mut app) = (Vec::new(), None, None, None, None);
     let mut i = 0;
     let only_run = |what: &str| -> Result<(), Fail> {
@@ -173,12 +196,16 @@ fn run(cfg: &Config, reply: bool, args: &[String]) -> Result<(), Fail> {
                 only_run("--pipeline: the job's own class is kept")?;
                 pipeline = true;
             }
+            Some("--unstick") => {
+                only_run("--unstick: the job's own slot is kept")?;
+                unstick = true;
+            }
             _ => break,
         }
         i += 1;
     }
     let id = if !reply {
-        let usage = "usage: proj run [--vm] [--first] [--pipeline] [--timeout DUR] [--idle DUR] [--kick NAME]... [--owned] [--link URL] [--app NAME] PROJECT \"task\"";
+        let usage = "usage: proj run [--vm] [--first] [--pipeline] [--unstick] [--timeout DUR] [--idle DUR] [--kick NAME]... [--owned] [--link URL] [--app NAME] PROJECT \"task\"";
         let p = arg(args, i, usage)?;
         arg(args, i + 1, usage)?;
         let project = format!("{}/{p}", cfg.projects.display());
@@ -226,6 +253,10 @@ fn run(cfg: &Config, reply: bool, args: &[String]) -> Result<(), Fail> {
         }
         if owned {
             write("owned", "")?;
+        }
+        // Every turn of it in the slot no one else's may take (slot::take).
+        if unstick {
+            write("unstick", "")?;
         }
         if let Some(l) = &link {
             write("link", &format!("{l}\n"))?;
@@ -423,15 +454,14 @@ fn log(cfg: &Config, args: &[String]) -> Result<(), Fail> {
         return Ok(());
     }
     let text = String::from_utf8_lossy(&text.unwrap_or_default()).into_owned();
-    let last = text.lines().rfind(|l| l.contains(r#""type":"result""#));
-    let said = answer(&stream).filter(|a| !a.is_empty());
-    if let (Some(last), Some(said)) = (last, said) {
+    let last = text.lines().rev().find_map(result_of);
+    let said = Some(answer(&stream)).filter(|a| !a.is_empty());
+    if let (Some(last), Some(said)) = (&last, said) {
         put(&format!("{said}\n"));
         // An answer, then an error, or a run told to answer again that ended
         // without one, its unit included: say what the turn ended on.
         let outcome = job.ended(&n);
-        let last: Option<serde_json::Value> = serde_json::from_str(last).ok();
-        if let Some(last) = last.filter(is_error) {
+        if is_error(last) {
             put(&format!("\n(turn {n} ended in an error)\n"));
             match last.get("errors") {
                 None | Some(serde_json::Value::Null) | Some(serde_json::Value::Bool(false)) => (),

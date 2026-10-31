@@ -162,6 +162,7 @@ impl<'a> Job<'a> {
         Some(Facts {
             id: self.id.to_owned(),
             owned: self.path("owned").exists(),
+            unstick: self.path("unstick").exists(),
             stopped: self.turn(&n, "stopped").exists(),
             end: opt(self.turn(&n, "end")),
             link: opt(self.path("link")),
@@ -235,24 +236,38 @@ pub fn awaits(text: &str) -> Vec<Await> {
         .collect()
 }
 
+/// A line of a stream as a result, but for an empty one: no turn taken, nothing
+/// said, no error. A resumed session whose last run was stopped with work in
+/// the background puts one out before it starts on its prompt, then goes on
+/// working, so it answers nothing.
+pub fn result_of(line: &str) -> Option<Value> {
+    if !line.contains(r#""type":"result""#) {
+        return None;
+    }
+    let v: Value = serde_json::from_str(line).ok()?;
+    let said = match v.get("result") {
+        None | Some(Value::Null) | Some(Value::Bool(false)) => false,
+        Some(Value::String(s)) => !s.is_empty(),
+        Some(_) => true,
+    };
+    let idle = v.get("num_turns").and_then(Value::as_f64) == Some(0.0);
+    (said || !idle || is_error(&v)).then_some(v)
+}
+
 /// A turn's answer, from its stream: every result with something to say, in
 /// order. Claude answers again each time a background task it left running
 /// reports back, so the last result can be a line about that task with the
-/// real answer one before it. None when a result can't be read.
-pub fn answer(stream: &Path) -> Option<String> {
+/// real answer one before it.
+pub fn answer(stream: &Path) -> String {
     let text = fs::read(stream).unwrap_or_default();
     let mut said = Vec::new();
-    for line in String::from_utf8_lossy(&text).lines() {
-        if !line.contains(r#""type":"result""#) {
-            continue;
-        }
-        let v: Value = serde_json::from_str(line).ok()?;
+    for v in String::from_utf8_lossy(&text).lines().filter_map(result_of) {
         match v.get("result") {
             Some(Value::String(s)) if !s.is_empty() => said.push(s.clone()),
             _ => (),
         }
     }
-    Some(said.join("\n\n"))
+    said.join("\n\n")
 }
 
 /// The last result in a stream from byte `from` on, if any.
@@ -261,9 +276,8 @@ pub fn last_result(stream: &Path, from: u64) -> Option<Value> {
     let text = text.get(from as usize..).unwrap_or_default();
     String::from_utf8_lossy(text)
         .lines()
-        .filter(|l| l.contains(r#""type":"result""#))
         .rev()
-        .find_map(|l| serde_json::from_str(l).ok())
+        .find_map(result_of)
 }
 
 /// Whether a result says it's an error.
@@ -310,7 +324,7 @@ pub fn escape(s: &str) -> String {
 mod tests {
     use std::fs;
 
-    use super::{Job, answer, awaits, escape, last_result};
+    use super::{Job, answer, awaits, escape, last_result, result_of};
     use crate::config::{Config, tests::example};
 
     // As systemd-escape writes them: a job's id is its project's folder
@@ -346,13 +360,31 @@ mod tests {
             ),
         )
         .unwrap();
-        assert_eq!(answer(&s).unwrap(), "waiting on CI\n\nthe build passed");
+        assert_eq!(answer(&s), "waiting on CI\n\nthe build passed");
         assert_eq!(last_result(&s, 0).unwrap()["session_id"], "t");
         let len = fs::metadata(&s).unwrap().len();
         assert_eq!(last_result(&s, len), None);
         fs::write(&s, "{\"type\":\"result\", nope\n").unwrap();
-        assert_eq!(answer(&s), None);
-        assert_eq!(answer(&d.path().join("none")).unwrap(), "");
+        assert_eq!(answer(&s), "");
+        assert_eq!(last_result(&s, 0), None);
+        assert_eq!(answer(&d.path().join("none")), "");
+        // What a resumed session puts out before it starts is no answer; a
+        // turn taken with nothing to say, or an error, is a result still.
+        let empty = "{\"type\":\"result\",\"num_turns\":0,\"result\":\"\",\"is_error\":false}";
+        assert!(result_of(empty).is_none());
+        assert!(result_of("{\"type\":\"result\",\"num_turns\":0,\"is_error\":false}").is_none());
+        assert!(
+            result_of("{\"type\":\"result\",\"num_turns\":3,\"result\":\"\",\"is_error\":false}")
+                .is_some()
+        );
+        assert!(result_of("{\"type\":\"result\",\"result\":\"\"}").is_some());
+        assert!(
+            result_of("{\"type\":\"result\",\"num_turns\":0,\"result\":\"\",\"is_error\":true}")
+                .is_some()
+        );
+        assert!(result_of("{\"type\":\"result\",\"num_turns\":0,\"result\":\"hi\"}").is_some());
+        fs::write(&s, format!("{empty}\n")).unwrap();
+        assert_eq!(last_result(&s, 0), None);
     }
 
     #[test]

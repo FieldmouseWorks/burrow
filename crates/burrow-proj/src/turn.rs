@@ -4,15 +4,15 @@
 use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::process;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::thread::sleep;
 use std::time::{Duration, Instant, SystemTime};
-use std::{env, process};
 
 use rustix::process::{Pid, Signal, kill_process};
 
 use crate::config::Config;
-use crate::job::{Job, answer, is_error, kick, last_result};
+use crate::job::{Job, answer, is_error, kick, last_result, result_of};
 use crate::pick::{Class, demoted};
 use crate::waits::{rewatch, rewatch_later, waiting};
 use crate::{Fail, filled, mtime, mtime_nanos, nanos, now_nanos, read, slot, swap, systemd};
@@ -74,7 +74,6 @@ pub fn start(cfg: &Config, id: &str, msg: &str, first: bool) -> Result<(), Strin
         undo();
         return Err(couldnt());
     }
-    let me = env::current_exe().map_err(|e| format!("proj: {e}"))?;
     // Claude is what goes first when memory runs out, not whatever it's
     // next to. Past its own cap the kernel kills the job's biggest process
     // (a build or an evaluation it ran, as a rule) and the turn carries on,
@@ -97,8 +96,7 @@ pub fn start(cfg: &Config, id: &str, msg: &str, first: bool) -> Result<(), Strin
         ))
         .arg(format!("--property=OnSuccess={hook}"))
         .arg(format!("--property=OnFailure={hook}"))
-        .arg(format!("--setenv=PROJ_CONFIG={}", cfg.path.display()))
-        .arg(&me)
+        .arg(&cfg.me)
         .args(["_exec", id, if first { "first" } else { "normal" }])
         .status()
         .is_ok_and(|s| s.success());
@@ -129,7 +127,8 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
     // As its App, or not at all. Its env, read now, is what every run of the
     // turn starts in, so none starts as the user if the App goes while the
     // turn waits for a slot: it acts as an App that's gone, and reaches no
-    // GitHub at all.
+    // GitHub at all. A switch while it waits brings it back here (slot::take),
+    // to read it again: an App that switch took away fails the turn.
     let mut app_env = String::new();
     if filled(&job.path("app")) {
         let app = read(&job.path("app")).unwrap_or_default();
@@ -280,7 +279,7 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
         break (last, rc);
     };
     // The turn ends as its last run did; its answer is every run's.
-    let text = answer(&stream).unwrap_or_default();
+    let text = answer(&stream);
     if !text.is_empty() {
         let _ = fs::write(job.turn(&n, "result"), format!("{text}\n"));
     }
@@ -618,7 +617,7 @@ impl<'a> Said<'a> {
                     let _ = fs::write(self.job.path("session"), format!("{s}\n"));
                 }
             }
-            if l.contains(r#""type":"result""#) {
+            if result_of(l).is_some() {
                 self.answered = true;
             }
         }

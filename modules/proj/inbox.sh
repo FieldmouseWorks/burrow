@@ -6,10 +6,12 @@
 # `proj-inbox [OWNER/REPO]` looks at that repo's issues, or every project's;
 # burrow-events (../events.nix) runs it on the repo's issue events, each time
 # one of its jobs' turns ends (proj run --kick), and when a wait it booked in
-# WAKE ends. `proj-inbox status` shows which issue is which job. SRC, JOBS,
-# STATE, SCRATCH, LABEL, AUTHORS, VM, HOST, NOTIFY, MARK, WAKE, PIPELINE and
-# MACHINERY
-# come from ../proj.nix.
+# WAKE ends. `proj-inbox status` shows which issue is which job, and
+# `proj-inbox forget OWNER/REPO` drops what it kept of a repo's. An issue
+# that has UNSTICK_LABEL too (the steward's stuck issue) is about what the
+# pipeline is stuck on, so its job never waits in proj's line (proj run
+# --unstick). SRC, JOBS, STATE, SCRATCH, LABEL, UNSTICK_LABEL, AUTHORS, VM,
+# HOST, NOTIFY, MARK, WAKE, PIPELINE and MACHINERY come from ../proj.nix.
 #
 # The inbox posts as its gh's login: the machinery's App (burrow.github.
 # machinery) where there is one, else the owner's own account. Its own
@@ -44,6 +46,36 @@ fi
 # restart too, or a hand): two could each find an issue without its job and
 # start one, and each writes WAKE from what it saw.
 exec {pass}>>"$WAKE.lock"
+
+# All the inbox kept about a repo's issues (which job each is, what of it
+# has been answered, that the repo has the label), gone once a pass under
+# way has ended, so the next takes each open one up as new: the steward's
+# (autoland's repos.py), when GitHub's repo of that name is another one
+# than the deleted repo it was. Its issue N isn't the deleted one's N, and
+# none of the old job's answers, or its session, are its. The old jobs are
+# the steward's to stop.
+if [ "${1:-}" = forget ]; then
+  [[ ${2:-} == */* ]] || { echo "usage: proj-inbox forget OWNER/REPO" >&2; exit 2; }
+  flock -w 600 "$pass" || { echo "proj-inbox: a pass is still going after ten minutes; nothing forgotten" >&2; exit 1; }
+  # GitHub's names are case-blind: the inbox kept the clone's spelling.
+  want=${2//\//_}
+  want=${want,,}
+  for d in "$STATE"/*/; do
+    n=$(basename "$d")
+    n=${n,,}
+    # An issue's is KEY-N.
+    [ "${n%-*}" != "$n" ] && [ "${n%-*}" = "$want" ] || continue
+    rm -rf "$d"
+  done
+  for f in "$STATE"/.label-* "$STATE"/.unreached/*; do
+    n=${f##*/}
+    n=${n#.label-}
+    [ -e "$f" ] && [ "${n,,}" = "$want" ] || continue
+    rm -f "$f"
+  done
+  exit 0
+fi
+
 flock "$pass"
 
 allowed() {
@@ -57,6 +89,15 @@ allowed() {
 acts_as() { # login
   as=()
   if [ -n "$MACHINERY" ] && [ "$VM" != 1 ] && [[ $1 == *"[bot]" ]]; then as=(--app "$MACHINERY"); fi
+}
+
+# Whether an issue's job waits in no line (proj run --unstick): it has
+# UNSTICK_LABEL as well.
+lane() { # issue
+  lane=()
+  if [ -n "$UNSTICK_LABEL" ] && jq -e --arg l "$UNSTICK_LABEL" 'any(.labels[]?; .name == $l)' <<<"$1" >/dev/null; then
+    lane=(--unstick)
+  fi
 }
 
 post() { # repo n body
@@ -163,9 +204,10 @@ for repo in "${!project[@]}"; do
     [ ! -e "$d/job" ] || continue
     allowed "$(jq -r .user.login <<<"$issue")" || continue
     acts_as "$(jq -r .user.login <<<"$issue")"
+    lane "$issue"
     # Comments already there are part of the task; replies after this are turns.
     comments=$(gh api "repos/$repo/issues/$n/comments" --paginate --slurp | jq 'add // []') || { miss "$repo"; continue; }
-    id=$(proj run "$(priority "$repo")" "${vm[@]}" "${as[@]}" --kick "proj-inbox/$repo" --link "$(jq -r '.html_url // ""' <<<"$issue")" "$p" "$(task "$repo" "$issue" "$comments")") || { retry "$repo"; continue; }
+    id=$(proj run "$(priority "$repo")" "${lane[@]}" "${vm[@]}" "${as[@]}" --kick "proj-inbox/$repo" --link "$(jq -r '.html_url // ""' <<<"$issue")" "$p" "$(task "$repo" "$issue" "$comments")") || { retry "$repo"; continue; }
     mkdir -p "$d"
     echo "$repo#$n" >"$d/issue"
     echo "$id" >"$d/job"
@@ -211,6 +253,15 @@ for repo in "${!project[@]}"; do
       post "$repo" "$n" "${body:0:60000}" || { miss "$repo"; continue 2; }
       echo "$k" >"$d/answered"
     done
+    # Labelled to wait in no line: the job is made one that doesn't (proj
+    # unstick), whatever it's doing, and again every pass. That tells the
+    # watchdog afresh, since a turn begun before the switch that brought proj
+    # unstick writes the job's waits without it, and its own stall would go
+    # back on the issue it's the job of. A turn of it still in line leaves it
+    # at its next look, every later turn takes that slot, and one running
+    # carries on.
+    lane "$(jq -c --argjson n "$n" '.[] | select(.number == $n)' <<<"$open")"
+    [ ${#lane[@]} -eq 0 ] || proj unstick "$id" || { retry "$repo"; continue; }
     case $st in queued | running) continue ;; esac
 
     # Closed, or the label taken off: done with it, and so is its job, which
@@ -254,7 +305,8 @@ for repo in "${!project[@]}"; do
         # No session to continue (the first turn never got going): start over,
         # from the issue as it stands, replies and all.
         acts_as "$(jq -r .user.login <<<"$now")"
-        id=$(proj run "$(priority "$repo")" "${vm[@]}" "${as[@]}" --kick "proj-inbox/$repo" --link "$(jq -r '.html_url // ""' <<<"$now")" "$p" "$(task "$repo" "$now" "$comments")") || { retry "$repo"; continue; }
+        lane "$now"
+        id=$(proj run "$(priority "$repo")" "${lane[@]}" "${vm[@]}" "${as[@]}" --kick "proj-inbox/$repo" --link "$(jq -r '.html_url // ""' <<<"$now")" "$p" "$(task "$repo" "$now" "$comments")") || { retry "$repo"; continue; }
         echo "$id" >"$d/job"
         echo 0 >"$d/answered"
       fi

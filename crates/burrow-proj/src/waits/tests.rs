@@ -33,6 +33,7 @@ fn facts(lines: &[&str]) -> Facts {
             "turn" => f.turn = v.into(),
             "state" => f.state = v.into(),
             "owned" => f.owned = true,
+            "unstick" => f.unstick = true,
             "stopped" => f.stopped = true,
             "end" => f.end = Some(v.into()),
             "link" => f.link = Some(v.into()),
@@ -67,7 +68,9 @@ fn case(more: &[&str], want: impl Fn(&Item) -> bool) {
     let keys: Vec<String> = json!(got).as_object().unwrap().keys().cloned().collect();
     assert_eq!(
         keys,
-        ["due", "kick", "line", "link", "phase", "since", "what"]
+        [
+            "due", "kick", "line", "link", "phase", "since", "unstick", "what"
+        ]
     );
 }
 
@@ -93,7 +96,22 @@ fn waits() {
             && w.phase == "turn 2 is waiting in line for a slot"
     });
     // An --owned job's turns wait in line like anyone's.
-    case(&["state queued", "owned 1"], |w| w.due == 8200.0);
+    case(&["state queued", "owned 1"], |w| {
+        w.due == 8200.0 && !w.unstick
+    });
+    // An --unstick job's say so, in line for its own slot or at work: the
+    // watchdog tells the owner of its stall, as the stuck issue would only
+    // hand it to itself.
+    case(&["state queued", "unstick 1"], |w| {
+        w.due == 8200.0
+            && w.line
+            && w.unstick
+            && w.phase
+                == "turn 2 is waiting for the --unstick slot, which another --unstick turn holds"
+    });
+    case(&["state running", "unstick 1"], |w| {
+        w.due == 6200.0 && w.unstick
+    });
     // Running: to its deadline, and GRACE for proj to have stopped it.
     case(&["state running"], |w| {
         w.since == 2000.0 && w.due == 6200.0 && !w.line && w.phase == "turn 2 is running"

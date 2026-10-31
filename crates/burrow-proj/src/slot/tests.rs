@@ -19,7 +19,9 @@ use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
 
-use super::{LOOK_EVERY, NEXT_FRESH, in_line, look, look_due, note_next, take};
+use super::{
+    LOOK_EVERY, NEXT_FRESH, came, in_line, look, look_due, note_next, place_left, successor, take,
+};
 use crate::config::Config;
 use crate::config::tests::example;
 use crate::now;
@@ -458,4 +460,107 @@ fn the_line_as_status_shows_it() {
     // Nobody in line, or no line at all, is nothing to show.
     let none = TempDir::new().unwrap();
     assert_eq!(in_line(&config(none.path(), 6)), "");
+}
+
+// A hand-over's place is the job's own, under this pid, and keeps when it came.
+#[test]
+fn a_place_left_by_a_hand_over() {
+    let tmp = TempDir::new().unwrap();
+    let q = tmp.path();
+    fs::write(q.join("2-5000000000-web-1"), "42\n").unwrap();
+    fs::write(q.join("1-6000000000-my-web-1"), "42\n").unwrap();
+    fs::write(q.join("2-7000000000-web-2"), "43\n").unwrap();
+    fs::write(q.join(".2-8000000000-web-3.new"), "44\n").unwrap();
+    assert_eq!(
+        place_left(q, "web-1", 42).as_deref(),
+        Some("2-5000000000-web-1")
+    );
+    assert_eq!(place_left(q, "web-1", 43), None);
+    assert_eq!(place_left(q, "web-3", 44), None);
+    assert_eq!(place_left(q, "web-9", 42), None);
+    assert_eq!(came("2-5000000000-web-1"), 5);
+}
+
+// Who's handed over to: only a proj that isn't this one and prints the same
+// format. Scripts are written and run where nothing else forks, as above.
+#[test]
+fn who_is_handed_over_to() {
+    let tmp = TempDir::new().unwrap();
+    let status = Command::new(env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "slot::tests::successors",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env("BURROW_PROJ_TEST_COUNT", tmp.path())
+        .output()
+        .unwrap();
+    assert!(
+        status.status.success(),
+        "{}",
+        String::from_utf8_lossy(&status.stdout)
+    );
+}
+
+#[test]
+fn successors() {
+    let Ok(dir) = env::var("BURROW_PROJ_TEST_COUNT") else {
+        return;
+    };
+    let dir = Path::new(&dir).canonicalize().unwrap();
+    let mut cfg = config(&dir, 1);
+    let script = |name: &str, body: &str| {
+        let p = dir.join(name);
+        fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
+        fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
+        p
+    };
+    let new = script("new", "[ \"$1\" = _handover_format ] && echo 1");
+    let other = script("other", "echo 2");
+    let older = script("older", "echo 'usage: proj run|reply' >&2; exit 2");
+    cfg.me = dir.join("me");
+    cfg.deployed = dir.join("nowhere");
+    assert_eq!(successor(&cfg), None, "nothing deployed");
+    cfg.deployed = new.clone();
+    assert_eq!(successor(&cfg).as_ref(), Some(&new));
+    cfg.me = new.clone();
+    assert_eq!(successor(&cfg), None, "it's this one");
+    cfg.me = dir.join("me");
+    let link = dir.join("link");
+    std::os::unix::fs::symlink(&new, &link).unwrap();
+    cfg.deployed = link;
+    assert_eq!(successor(&cfg).as_ref(), Some(&new), "its store path");
+    cfg.deployed = other;
+    assert_eq!(successor(&cfg), None, "another format");
+    cfg.deployed = older;
+    assert_eq!(successor(&cfg), None, "from before the hand-over");
+}
+
+// An --unstick turn takes its own slot, past the rest, and joins no line; only
+// another holds it up.
+#[test]
+fn an_unstick_turn_takes_its_own_slot() {
+    let tmp = TempDir::new().unwrap();
+    let jobs = jobs_dir(&tmp);
+    let cfg = config(&jobs, 1);
+    let held = File::create(jobs.join(".slots/1")).unwrap();
+    held.try_lock().unwrap();
+    fs::create_dir_all(jobs.join("u")).unwrap();
+    fs::write(jobs.join("u/project"), "/src/web\n").unwrap();
+    fs::write(jobs.join("u/unstick"), "").unwrap();
+    let slot = take(&cfg, "u", "1", Class::Normal).unwrap();
+    assert_eq!(
+        fs::read_to_string(jobs.join("u/1.slot")).unwrap(),
+        "unstick\n"
+    );
+    assert_eq!(
+        fs::read_to_string(jobs.join(".slots/unstick.who")).unwrap(),
+        "unstick\t/src/web\n"
+    );
+    assert_eq!(in_queue(&jobs), 0);
+    let another = File::create(jobs.join(".slots/unstick")).unwrap();
+    assert!(another.try_lock().is_err(), "the slot isn't held");
+    slot.unlock().unwrap();
+    held.unlock().unwrap();
 }

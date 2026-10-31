@@ -36,10 +36,12 @@ let
     waits = if watchdog then waits else null;
     inherit inboxMark pipelineRepos leadRepos;
     inherit (config.burrow) flake;
+    deployed = "/run/current-system/sw/bin/proj";
     apps = lib.mapAttrs (_: app: app.envFile) config.burrow.github.apps;
     tools = {
       # A login shell's, for the jobs' Claude.
       bash = "${pkgs.bashInteractive}/bin/bash";
+      flock = "${pkgs.util-linux}/bin/flock";
       gh = lib.getExe cfg.gh;
       git = lib.getExe config.programs.git.package;
       systemctl = "${pkgs.systemd}/bin/systemctl";
@@ -49,9 +51,11 @@ let
   });
   # The command, with this machine's config. Always this one: a turn that
   # outlived a switch runs the binary it started with, and its Claude's proj
-  # calls get the new one with its own config, never the old.
+  # calls get the new one with its own config, never the old. PROJ_SELF is how
+  # it knows which it is: this script, not the binary, since a switch can change
+  # the config alone (slot.rs, the hand-over).
   proj = pkgs.writeShellScriptBin "proj" ''
-    export PROJ_CONFIG=${configFile}
+    export PROJ_CONFIG=${configFile} PROJ_SELF=$0
     exec ${inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow}/bin/burrow-proj "$@"
   '';
 
@@ -64,6 +68,7 @@ let
       STATE=${lib.escapeShellArg "${stateDir}/proj-inbox"}
       SCRATCH=${lib.escapeShellArg config.burrow.scratchDir}
       LABEL=${lib.escapeShellArg cfg.inbox.label}
+      UNSTICK_LABEL=${lib.escapeShellArg cfg.inbox.unstickLabel}
       AUTHORS=${lib.escapeShellArg (lib.concatStringsSep " " cfg.inbox.authors)}
       VM=${if cfg.inbox.vm then "1" else "0"}
       MARK=${lib.escapeShellArg inboxMark}
@@ -96,7 +101,8 @@ in
       description = ''
         How many jobs run Claude at once. The rest wait in line (`proj state`
         says queued), so a launcher can hand over as much work as it likes.
-        Each headless Claude holds a few GB.
+        Each headless Claude holds a few GB. One more, run `--unstick` (the
+        stuck issue's, `inbox.unstickLabel`), has a slot of its own besides.
       '';
     };
     pipelineSlots = lib.mkOption {
@@ -140,11 +146,16 @@ in
     };
     jobMemoryMax = lib.mkOption {
       type = lib.types.str;
-      default = "8G";
+      default = "infinity";
+      example = "8G";
       description = ''
-        The most memory one job may hold (systemd's MemoryMax). Past it the
-        kernel kills the job's biggest process, usually a build or evaluation
-        it ran, and the job carries on, told that command was killed.
+        The most memory one job may hold (systemd's MemoryMax). None by
+        default: a job is the first thing the kernel kills when the machine
+        runs short (OOMScoreAdjust 500), and systemd-oomd watches the jobs'
+        slice (burrow.ops.oomd), so a cap only kills one while memory sits
+        free. With one, past it the kernel kills the job's biggest process,
+        usually a build or evaluation it ran, and the job carries on, told
+        that command was killed.
       '';
     };
     timeout = lib.mkOption {
@@ -209,6 +220,17 @@ in
         type = lib.types.str;
         default = "claude";
         description = "The label that hands an issue to Claude. It's created in each repo that lacks it.";
+      };
+      unstickLabel = lib.mkOption {
+        type = lib.types.str;
+        default = "unstick";
+        description = ''
+          An inbox issue with this label too is about what the pipeline is
+          stuck on (the steward's stuck issue has it): its job runs
+          `proj run --unstick`, in a slot of its own past maxJobs, so it never
+          waits in the line it may be about. Put on an issue whose job is
+          still waiting for its first turn, it starts that job over that way.
+        '';
       };
       authors = lib.mkOption {
         type = lib.types.listOf lib.types.str;
@@ -326,6 +348,8 @@ in
       message = "burrow.proj.inbox.authors: name who may hand Claude issues.";
     }];
     environment.systemPackages = [ inbox ];
+    # The steward has it forget a repo GitHub's name now means another of.
+    burrow.tools.proj-inbox = inbox;
     # A repo's issue events start its look (proj-inbox@OWNER-REPO), and so
     # do the start and end of each of its jobs' turns (proj run --kick): it
     # posts the answer once one has ended.
