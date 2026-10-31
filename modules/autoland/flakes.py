@@ -170,7 +170,8 @@ def act(repo, st, mine):
         log(f"{repo}: couldn't start a Claude job for its flaky tests (no checkout, or proj refused)")
         for n, it in todo:
             mine.append((NO_JOB, f"{repo}#{n}", f"for the flaky test `{it['test']}`"))
-        C.wake(repo, C.NOW + 5 * MIN)  # ends: a job starting; until then each one is listed (NO_JOB)
+        if not C.taken(repo):  # no use looking again until that folder moves: a full pass will
+            C.wake(repo, C.NOW + 5 * MIN)  # ends: a job starting; until then each one is listed (NO_JOB)
         return
     log(f"{repo}: a Claude job {jid} for {len(handed)} flaky tests")
     for _, it, _ in handed:

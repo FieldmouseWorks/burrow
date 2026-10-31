@@ -22,9 +22,17 @@ import common as C
 from common import CFG, DRY, MIN, STATE, load, log, save, ts
 
 NAMES = {"codex": "Codex"}
-# Under STATE: what's asked for, the snapshot each one reads, what came back,
-# and a clone per repo the snapshots are taken from.
+# Under STATE: what's asked for, what each snapshot keeps of its base (its
+# NAME.json: the review rules, and the paths the reviewers weren't shown,
+# which a judge looks at before the PR lands), what came back, and a clone
+# per repo the snapshots are taken from.
 QUEUE, SNAP, DONE, GIT = "review/queue", "review/snap", "review/done", "review/git"
+# Each snapshot's checkout, the tree a reviewer reads: rewritten for every
+# head and taken again from GitHub whenever it's missing, so it's a cache,
+# kept out of STATE and whatever snapshots the machine keeps of its state
+# (a big repo's runs to the best part of a gigabyte a head). Absolute, so
+# os.path.join(STATE, TREES) is TREES.
+TREES = CFG["snapDir"]
 # Each reviewer's session for each open PR, which every look at it resumes.
 # The reviewers' service owns what's in them; the sweep marks a closed PR's
 # GONE, and the service deletes it.
@@ -200,8 +208,10 @@ def snapshot(repo, pr, key):
     n, head, base = pr["number"], pr["headRefOid"], pr["baseRefName"]
     name = snap_name(key, head, base)
     meta = load(f"{SNAP}/{name}.json", None)
-    # One kept by a steward that read less of the base is taken again.
-    if meta and META <= meta.keys():
+    dst = os.path.join(TREES, name)
+    # One kept by a steward that read less of the base is taken again, and
+    # so is one whose checkout the cache lost (a reboot, say).
+    if meta and META <= meta.keys() and os.path.isdir(dst):
         return name, meta
     mirror = fetch(repo, f"+refs/pull/{n}/head:refs/pr/{n}", f"+refs/heads/{base}:refs/base/{base}")
     mb = git("-C", mirror, "merge-base", f"refs/base/{base}", head).decode().strip()
@@ -250,15 +260,19 @@ def snapshot(repo, pr, key):
         if os.path.exists(index):
             os.remove(index)
     git("-C", mirror, "update-ref", f"refs/snap/{name}", commit)
-    dst = os.path.join(STATE, SNAP, name)
-    shutil.rmtree(dst, ignore_errors=True)
+    # Made aside and moved into place whole: a checkout under its own name
+    # is always a finished one, which the meta kept from before may vouch for.
+    new = dst + ".new"
+    shutil.rmtree(new, ignore_errors=True)
     # Nothing from the steward's own git config (an LFS filter, say) runs
     # on what the PR put there.
     bare = {**os.environ, "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1"}
-    git("init", "-q", dst, env=bare)
-    git("-C", dst, "fetch", "-q", "--no-tags", mirror, f"refs/snap/{name}:refs/heads/review", env=bare)
+    git("init", "-q", new, env=bare)
+    git("-C", new, "fetch", "-q", "--no-tags", mirror, f"refs/snap/{name}:refs/heads/review", env=bare)
     git("-C", mirror, "update-ref", "-d", f"refs/snap/{name}")
-    git("-C", dst, "checkout", "-q", "review", env=bare)
+    git("-C", new, "checkout", "-q", "review", env=bare)
+    shutil.rmtree(dst, ignore_errors=True)
+    os.rename(new, dst)
     review, house = rules(repo, mirror, f"refs/base/{base}", [p for p in changed if not (hidden(repo, p) or p in moved)])
     meta = {"rules": review, "house": house, "secret": [shown(p) for p in changed if hidden(repo, p) or p in moved]}
     save(f"{SNAP}/{name}.json", meta)
@@ -432,10 +446,10 @@ def sweep(repos, live):
     the sessions it couldn't mark gone."""
     prs = {s.rsplit("-", 2)[0] for s in live}
     keep, busy, left = set(), set(), []
-    for d in (QUEUE, DONE, SNAP):  # the queue first: a look still running keeps its snapshot
+    for d in (QUEUE, DONE, SNAP, TREES):  # the queue first: a look still running keeps its snapshot
         for x in os.listdir(os.path.join(STATE, d)):
             snap = x.removesuffix(".json")
-            if d != SNAP:
+            if d in (QUEUE, DONE):
                 snap = snap.partition("--")[2]
             if snap.rsplit("-", 3)[0].removeprefix("pr-") not in repos or snap in live:
                 continue
@@ -444,7 +458,7 @@ def sweep(repos, live):
                     keep.add(snap)
                     busy.add(session_name(x.partition("--")[0], snap))
                     left.append(x)
-            elif not (snap in keep if d == SNAP else snap.rsplit("-", 2)[0] in prs):
+            elif not (snap in keep if d in (SNAP, TREES) else snap.rsplit("-", 2)[0] in prs):
                 remove(os.path.join(STATE, d, x))
     # And the reviewers' sessions, for good, once their PR is closed (or
     # retargeted): nothing of one PR's carries over to another's.

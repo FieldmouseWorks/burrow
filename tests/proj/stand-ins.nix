@@ -22,6 +22,8 @@
   # ("hang") for good, resumed putting out an empty result first; told it
   # was cut off, it answers, or with /tmp/again hangs again. "eat" and
   # "bloat" name theirs too.
+  # "scratch" makes a worktree of web, with a file in it, in its scratch and
+  # says where that is in /tmp/scratch; "scratch ask" then asks.
   # As a job, it says what comes next before it answers (proj done; "ask"
   # asks, "await" awaits), but "silent" doesn't, and with /tmp/silent nothing
   # does, even told to; what it's told is kept in /tmp/told.
@@ -81,6 +83,10 @@
         echo '{"type":"result","session_id":"s","result":"told","is_error":false}'
         exit 0 ;;
       ask) proj ask >/dev/null ;;
+      scratch*)
+        echo "''${PROJ_SCRATCH-}" >/tmp/scratch
+        git -C /data/dev/src/web worktree add -q --detach "$PROJ_SCRATCH/web" && touch "$PROJ_SCRATCH/web/built"
+        case $prompt in *ask) proj ask >/dev/null ;; esac ;;
       await*) proj await "''${prompt#await }" >/dev/null ;;
       # Awaits, then takes a while to answer: what changes meanwhile is news.
       slowawait*) proj await "''${prompt#slowawait }" >/dev/null; sleep 10 ;;
