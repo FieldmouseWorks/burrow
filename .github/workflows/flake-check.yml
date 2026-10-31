@@ -373,21 +373,29 @@ jobs:
           }
           # Prints which derivations in these ones' closures still have a VM
           # to run, by store name: those requiring kvm or nixos-test with an
-          # output not built yet. A rerun's tests, already built, wait for
-          # nothing.
+          # output it couldn't root as it stands. A rerun's tests, already
+          # built, wait for nothing, and stay built under $roots until the
+          # gate's end; rooting a path builds nothing. Nix's JSON has
+          # structured attrs as structuredAttrs or, before 2.25 or so, in
+          # env.__json, and anything else with no env is an error.
           unbuilt_vms() {
-            local name outs
+            local name out outs i=0 pending
             nix derivation show -r "${@/%/^*}" | jq -r '(.derivations // .) | to_entries[]
-              | select(((.value.env.requiredSystemFeatures // "") | split(" ")) + (.value.structuredAttrs.requiredSystemFeatures // [])
+              | (.value.env | if type != "object" then error("a derivation with no env") else . end) as $env
+              | select(($env.requiredSystemFeatures // "" | split(" "))
+                  + (.value.structuredAttrs.requiredSystemFeatures // [])
+                  + ($env.__json // "{}" | fromjson | .requiredSystemFeatures // [])
                 | any(. == "kvm" or . == "nixos-test"))
               | .key | sub(".*/"; "")' > "$RUNNER_TEMP/vms" || return 1
             while read -r name; do
-              # shellcheck disable=SC2086 # the outputs, one to a line
-              if outs=$(nix-store -q --outputs "${1%/*}/$name") && [ -n "$outs" ] \
-                && [ -z "$(nix-store --check-validity --print-invalid $outs)" ]; then
-                continue
-              fi
-              echo "$name"
+              pending=
+              outs=$(nix-store -q --outputs "${1%/*}/$name") || pending=1
+              [ -n "$outs" ] || pending=1
+              for out in $outs; do
+                i=$((i + 1))
+                nix-store --add-root "$roots/vm-output-$i" --indirect -r "$out" > /dev/null 2>&1 || pending=1
+              done
+              [ -z "$pending" ] || echo "$name"
             done < "$RUNNER_TEMP/vms"
           }
           # Builds these checks (each a derivation and ^*), keeping the outputs
@@ -396,7 +404,7 @@ jobs:
           # by derivation, so neither holds an evaluation. A check that can't
           # be told apart counts as a VM test.
           build_checks() {
-            local link=$1 rc=0 target closure plain=() vms=() plain_link=(--no-link) vm_link=(--no-link)
+            local link=$1 rc=0 target closure found plain=() vms=() plain_link=(--no-link) vm_link=(--no-link)
             shift
             [ -z "$link" ] || { plain_link=(--out-link "$link"); vm_link=(--out-link "$link-vm"); }
             if ! has_slots; then
@@ -408,11 +416,13 @@ jobs:
               vms=("$@")
             else
               for target in "$@"; do
-                if ! closure=$(nix-store -q -R "${target%^\*}") || grep -qFf "$RUNNER_TEMP/unbuilt-vms" <<< "$closure"; then
-                  vms+=("$target")
-                else
-                  plain+=("$target")
+                # grep's 1 is no match, and only that's no VM.
+                found=2
+                if closure=$(nix-store -q -R "${target%^\*}"); then
+                  found=0
+                  grep -qFf "$RUNNER_TEMP/unbuilt-vms" <<< "$closure" || found=$?
                 fi
+                if [ "$found" = 1 ]; then plain+=("$target"); else vms+=("$target"); fi
               done
             fi
             if [ ${#plain[@]} -gt 0 ]; then

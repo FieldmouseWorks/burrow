@@ -87,6 +87,14 @@ stub("nix", f"""case $1 in
       while read -r link; do [ -d "${{link%/*}}" ] || {{ echo "the built checks' roots went before nix flake check"; exit 1; }}; done < "$NIX_LOG.links"
     fi
     exec {real_nix} flake check --no-build "${{@:3}}"; }} ;;
+  # An older nix's JSON, if asked: store paths for names, structured attrs in
+  # the env.
+  derivation)
+    if [ -n "$OLD_JSON" ]; then
+      {real_nix} "$@" | jq '.derivations | with_entries(.key = "/nix/store/" + .key | .value |= (
+        if .structuredAttrs then .env.__json = (.structuredAttrs | tojson) | del(.structuredAttrs) else . end))'
+      exit
+    fi ;;
   # Each evaluation apart, logged as the plan or the entry it evaluates.
   eval)
     what=
@@ -121,7 +129,11 @@ exec {real_bin}/nix-instantiate "${{args[@]}}"
 """)
 
 # Builds are only logged, so whether an output is built is the test's to say.
-stub("nix-store", f"""if [ "$1" = --check-validity ] && [ "$2" = --print-invalid ] && [ -n "$ALL_BUILT" ]; then exit 0; fi
+stub("nix-store", f"""if [ "$1" = --add-root ] && [ -n "$ALL_BUILT" ]; then
+  echo "root $2 $5" >> "$NIX_LOG.roots"
+  exit 0
+fi
+if [ "$1" = -q ] && [ "$2" = -R ] && [ -n "$NO_CLOSURE" ]; then exit 1; fi
 exec {real_bin}/nix-store "$@"
 """)
 system = subprocess.run([real_nix, "config", "show", "system"],
@@ -149,7 +161,7 @@ def flake(outputs, top=""):
 
 def run(directory, apart=True, skip="", build_fail="", env=None):
     log = os.path.join(tmp, "nix.log")
-    for f in (log, log + ".links", log + ".slot"):
+    for f in (log, log + ".links", log + ".slot", log + ".roots"):
         if os.path.exists(f):
             os.remove(f)
     full = {**nix_env, "PATH": bin_dir + os.pathsep + os.environ["PATH"], "NIX_LOG": log,
@@ -692,7 +704,7 @@ def split(calls, out):
 def waits_for_slot():
     "while every slot is held, the gate builds what needs no VM and its VM tests wait, then build holding one"
     log = os.path.join(tmp, "nix.log")
-    for f in (log, log + ".links", log + ".slot"):
+    for f in (log, log + ".links", log + ".slot", log + ".roots"):
         if os.path.exists(f):
             os.remove(f)
     full = {**nix_env, **with_slots, "NIX_LOG": log, "APART": "true", "SKIP": "", "BUILD_FAIL": "",
@@ -741,12 +753,34 @@ def split_with_slots():
 
 @case
 def built_vms_wait_for_nothing():
-    "a VM test already built, a rerun's, takes no slot"
-    rc, out, calls = run(vms, env={**with_slots, "ALL_BUILT": "1"})
+    "a VM test already built, a rerun's, takes no slot, its outputs kept as roots first"
+    for apart in (True, False):
+        rc, out, calls = run(vms, apart=apart, env={**with_slots, "ALL_BUILT": "1"})
+        assert rc == 0, out
+        [b] = builds(calls)
+        assert all(c in b for c in VM_CHECKS + ("-a.drv^*",)), b
+        assert not in_slot(), in_slot()
+        roots = open(os.path.join(tmp, "nix.log.roots")).read().splitlines()
+        # One each: the three VM tests, the one inside the wrapper among them.
+        assert len(roots) == 3 and all(r.split()[2].endswith(("-needs-kvm", "-structured", "-inner")) for r in roots), roots
+        assert len({r.split()[1] for r in roots}) == 3, roots
+
+
+@case
+def old_json():
+    "an older nix's JSON tells the same VM tests apart, structured attrs and all"
+    rc, out, calls = run(vms, env={**with_slots, "OLD_JSON": "1"})
+    assert rc == 0, out
+    split(calls, out)
+
+
+@case
+def closure_unknown():
+    "a check whose closure can't be read builds in the slot"
+    rc, out, calls = run(vms, env={**with_slots, "NO_CLOSURE": "1"})
     assert rc == 0, out
     [b] = builds(calls)
-    assert all(c in b for c in VM_CHECKS + ("-a.drv^*",)), b
-    assert not in_slot(), in_slot()
+    assert in_slot() == [b] and "-a.drv^*" in b, (in_slot(), b)
 
 
 @case
