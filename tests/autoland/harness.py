@@ -13,6 +13,7 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.parse
 
 tmp = tempfile.mkdtemp()
 
@@ -264,6 +265,7 @@ def sh(*a, cwd=None):
 
 head = "a" * 40
 WROTE, JOBS, POSTED, FORGOT = [], [], [], []
+SINCE = []  # each job's place in line (C.job's since), in the order they started
 DESCRIBED = []  # the description each posted review was shown (its fingerprint)
 COMMITS = {}  # a PR's commits' author emails, by number, as `pr view --json commits` gives them (None: the ask fails)
 PR_DIFF = {"v": ""}  # what `gh pr diff` gives
@@ -279,6 +281,10 @@ def acting():
     ACTING.append(C._for[-1])
 
 
+# Where a PR's head leaves its base, as GitHub's compare says, by the base
+# branch's name ("v" for any other): None, it says nothing. FORKS: its
+# answers in turn, before FORK's, while there are any.
+FORK, FORKS = {"v": "f" * 40}, []
 RULES = {}  # the rules on a branch of sam/r, by its name in the path: none unless set, or what GitHub raises
 PROTECTION = {}  # the same for a branch's classic protection: a 404 unless set
 
@@ -307,6 +313,13 @@ def gh_stub(*a, **k):
         return {"allow_auto_merge": True, "delete_branch_on_merge": True, "allow_squash_merge": True}
     if a[:2] == ("pr", "diff"):
         return PR_DIFF["v"]
+    if a[:1] == ("api",) and a[1].startswith("repos/sam/r/compare/") and "{fork: .merge_base_commit.sha}" in a:
+        # Read as GitHub reads its URL: a `#` ends it, a `?` starts its
+        # query, and what's left is decoded once.
+        path = a[1].removeprefix("repos/sam/r/compare/").partition("#")[0].partition("?")[0]
+        base, dots, _ = path.partition("...")
+        fork = FORKS.pop(0) if FORKS else FORK.get(urllib.parse.unquote(base), FORK["v"]) if dots else None
+        return {"fork": fork} if fork else None
     return ""
 
 
@@ -325,8 +338,9 @@ def write(*a, **k):
     return None
 
 
-def job(repo, task, clone=False):
+def job(repo, task, clone=False, since=None):
     JOBS.append(task)
+    SINCE.append(since)
     return f"job-{len(JOBS)}"
 
 
@@ -445,6 +459,7 @@ def run(pr, after, obsolete=False):
     C.NOW = C.ts(T0) + after
     WROTE.clear()
     JOBS.clear()
+    SINCE.clear()
     C.WAKE.clear()
     C.LIMITED.clear()
     POSTED.clear()

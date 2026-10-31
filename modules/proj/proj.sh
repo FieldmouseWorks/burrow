@@ -32,6 +32,11 @@
 #                               empty for nothing
 #   proj run --app NAME PROJECT "task"  the job acts on GitHub as the App NAME,
 #                               one of burrow.github.apps, never as the user
+#   proj run --since TIME PROJECT "task"  its place in line, every turn of it,
+#                               dates from TIME (Unix seconds, not after now)
+#                               rather than from when each turn came: work
+#                               that was waiting already (the steward's for a
+#                               PR, from when the PR was opened) keeps its place
 #   proj reply [--first] ID "message"  continue that job's conversation
 #   proj reply --cut-off N ID "message"  so, if its turn N was cut off
 #                               (else exit 3)
@@ -127,6 +132,8 @@ self=$(readlink -f "$0")
 unit() { echo "proj-$(systemd-escape "$1").service"; }
 # The unit that ends each of its turns (_ended), outside the turn's own.
 end_unit() { systemd-escape --template=proj-ended@.service "$1"; }
+# Whether that unit is still to run, or running.
+end_pending() { [ -n "$(systemctl --user show -P Job "$(end_unit "$1")" 2>/dev/null)" ]; }
 # The env file of the GitHub App NAME, from APPS' NAME=FILE lines: nothing for
 # one this machine hasn't.
 app_env() { [[ $1 =~ ^[A-Za-z0-9_-]+$ ]] && sed -n "s/^$1=//p" <<<"$APPS" | head -n 1; }
@@ -221,31 +228,6 @@ cut_off() {
 # Known not to be running: not "can't say".
 gone() { case $(systemctl --user show -P ActiveState "$1" 2>/dev/null) in inactive | failed) return 0 ;; esac; return 1; }
 
-# What job_wait (waits.sh) reads of a job's latest turn.
-facts() {
-  local d=$jobs/$1 n t
-  n=$(cat "$d/turns" 2>/dev/null) || return 1
-  printf 'id\t%s\nturn\t%s\nstate\t%s\n' "$1" "$n" "$(state "$1")"
-  [ ! -e "$d/owned" ] || printf 'owned\t1\n'
-  [ ! -e "$d/unstick" ] || printf 'unstick\t1\n'
-  [ ! -e "$d/$n.stopped" ] || printf 'stopped\t1\n'
-  [ ! -s "$d/$n.end" ] || printf 'end\t%s\n' "$(cat "$d/$n.end")"
-  [ ! -s "$d/link" ] || printf 'link\t%s\n' "$(cat "$d/link")"
-  printf 'queued\t%s\n' "$(stat -c %Y "$d/prompt.$n" 2>/dev/null || echo 0)"
-  [ ! -e "$d/$n.slot" ] || printf 'slot\t%s\n' "$(stat -c %Y "$d/$n.slot")"
-  # When it ended: when it wrote its outcome, or for one stopped before it
-  # could, when it last said anything.
-  t=$(stat -c %Y "$d/$n.outcome" "$d/$n.jsonl" "$d/prompt.$n" 2>/dev/null | head -n 1 || true)
-  printf 'ended\t%s\n' "${t:-0}"
-  # Its deadline as it stands, to the second (none without a timeout): when
-  # it took its slot and its timeout, moved on by any time it waited in
-  # line. And what it waits in line for now, if anything (watch_run).
-  t=$(cat "$d/$n.deadline" 2>/dev/null || true)
-  [[ ! $t =~ ^[0-9]+$ ]] || printf 'deadline\t%s\n' "$((t / 1000000000))"
-  [ ! -s "$d/$n.wait" ] || printf 'wait\t%s\n' "$(head -n 1 "$d/$n.wait")"
-  [ ! -s "$d/await" ] || awk -F '\t' '{ print "await\t" $1 "\t" $2 }' "$d/await"
-}
-
 # The waits of the jobs named, brought up to date for the stall watchdog:
 # JOBS/.waits/ID has a job's (job_wait's) while it has one, and WAITS all of
 # them, which the watchdog reads. Called after each change to a job (a turn
@@ -304,7 +286,7 @@ start_turn() {
   for i in $(seq 120); do
     systemctl --user reset-failed "$(unit "$id")" 2>/dev/null || true
     if [ "$(systemctl --user show -P LoadState "$(unit "$id")" 2>/dev/null)" != loaded ] &&
-      [ -z "$(systemctl --user show -P Job "$(end_unit "$id")" 2>/dev/null)" ]; then
+      ! end_pending "$id"; then
       break
     fi
     if [ "$i" = 120 ]; then
@@ -359,7 +341,7 @@ spare() {
 
 case "${1:-status}" in
   run | reply)
-    cmd=$1 vm='' first='' pipeline='' unstick='' kick=() limit='' idle='' owned='' link='' app='' cutoff=''
+    cmd=$1 vm='' first='' pipeline='' unstick='' kick=() limit='' idle='' owned='' link='' app='' since='' cutoff=''
     shift
     while :; do
       case ${1:-} in
@@ -390,6 +372,13 @@ case "${1:-status}" in
           app=$2
           shift
           ;;
+        --since)
+          [ "$cmd" = run ] || { echo "proj reply has no --since: the job's own is kept" >&2; exit 2; }
+          [[ ${2:-} =~ ^[1-9][0-9]{9}$ ]] && [ "$2" -le "$(date +%s)" ] ||
+            { echo "proj run --since TIME (Unix seconds, not after now)" >&2; exit 2; }
+          since=$2
+          shift
+          ;;
         --first) first=first ;;
         --cut-off) [ "$cmd" = reply ] && [[ ${2:-} =~ ^[0-9]+$ ]] || { echo "proj reply --cut-off N ID \"message\"" >&2; exit 2; }; cutoff=$2; shift ;;
         --pipeline) [ "$cmd" = run ] || { echo "proj reply has no --pipeline: the job's own class is kept" >&2; exit 2; }; pipeline=1 ;;
@@ -399,8 +388,8 @@ case "${1:-status}" in
       shift
     done
     if [ "$cmd" = run ]; then
-      p=${1:?usage: proj run [--vm] [--first] [--pipeline] [--unstick] [--timeout DUR] [--idle DUR] [--kick NAME]... [--owned] [--link URL] [--app NAME] PROJECT \"task\"}
-      task=${2:?usage: proj run [--vm] [--first] [--pipeline] [--unstick] [--timeout DUR] [--idle DUR] [--kick NAME]... [--owned] [--link URL] [--app NAME] PROJECT \"task\"}
+      p=${1:?usage: proj run [--vm] [--first] [--pipeline] [--unstick] [--timeout DUR] [--idle DUR] [--kick NAME]... [--owned] [--link URL] [--app NAME] [--since TIME] PROJECT \"task\"}
+      task=${2:?usage: proj run [--vm] [--first] [--pipeline] [--unstick] [--timeout DUR] [--idle DUR] [--kick NAME]... [--owned] [--link URL] [--app NAME] [--since TIME] PROJECT \"task\"}
       [ -d "$src/$p" ] || { echo "no such project: $src/$p" >&2; exit 1; }
       # Owned by what acts on each turn's end, which hears of it by its kick.
       [ -z "$owned" ] || [ ${#kick[@]} -gt 0 ] || { echo "proj run --owned needs a --kick: what acts on each turn's end" >&2; exit 2; }
@@ -428,6 +417,7 @@ case "${1:-status}" in
       # Every turn of it in the slot no one else's may take (line.sh).
       [ -z "$unstick" ] || : >"$jobs/$id/unstick"
       [ -z "$link" ] || echo "$link" >"$jobs/$id/link"
+      [ -z "$since" ] || echo "$since" >"$jobs/$id/since"
       [ -z "$app" ] || echo "$app" >"$jobs/$id/app"
       if [ -n "$vm" ]; then agent new "$p" >"$jobs/$id/agent"; fi
     else
@@ -612,6 +602,7 @@ case "${1:-status}" in
     # expands a command line, and a job's id is its project's folder name,
     # spaces, `%` and all.
     id=${PROJ_ENDED:?proj _ended is for the end of a job turn, run by proj-ended@ID}
+    mark_ended "$id"
     rewatch "$id"
     { cat "$jobs/$id/kick" 2>/dev/null || true
       cut -f1 "$jobs/$id/await" 2>/dev/null | sed 's/#.*//; s#^#proj-watch/#' || true

@@ -37,12 +37,14 @@ C.job = REAL["job"]
 # owner's installation can; `gone` doesn't exist.
 NAMES = {"old-org/app": "sam/app", "sam/was": "sam/now", "eve/app": "eve/app", "sam/app": "sam/app"}
 IDS = {}  # the id GitHub answers a current name with, when a check cares
+NODES = {}  # likewise its node id
 ASKED = []
 
 
 def gh(*a, **k):
     if a[:2] != ("api", "graphql"):  # a hook's, say: hook_projects goes on without it
         raise RuntimeError("gh api: HTTP 404")
+    assert "id: databaseId" in C.NOW_CALLED, "a repo is known by its databaseId, as discover() has it"
     args = dict(x.split("=", 1) for x in a[2:] if "=" in x and not x.startswith("query="))
     name = f"{args['owner']}/{args['name']}"
     ASKED.append((C._for[-1], name))
@@ -51,7 +53,7 @@ def gh(*a, **k):
     if name not in NAMES:
         raise RuntimeError("gh api: Could not resolve to a Repository")
     now = NAMES[name]
-    return {"data": {"repository": {"id": IDS.get(now, f"id-{now}"), "nameWithOwner": now, "createdAt": "2026-06-01T00:00:00Z"}}}
+    return {"data": {"repository": {"id": IDS.get(now, f"id-{now}"), "node": NODES.get(now, f"R_{now}"), "nameWithOwner": now, "createdAt": "2026-06-01T00:00:00Z"}}}
 
 
 C.gh = gh
@@ -126,13 +128,15 @@ C.gh = gh
 subprocess.run(["rm", "-rf", f"{src}/later"], check=True)
 
 # A name a deleted repo had, that another took on and then renamed away: no
-# rename. By the id kept under the old name, or without one by when its
-# settings were set. Its clone isn't adopted, and it's handed back to be
-# retired; a settings file with the repo's own id, or newer than the repo, is a
-# genuine rename's.
+# rename. By the databaseId kept under the old name, or without one (a node id
+# kept before says nothing) by when its settings were set. Its clone isn't
+# adopted, and it's handed back to be retired; a settings file with the repo's
+# own databaseId, or newer than the repo, is a genuine rename's.
 MADE = 1780272000  # 2026-06-01T00:00:00Z
-for kept_state, gone in (({"settings": MADE + 99, "id": "id-other"}, True), ({"settings": MADE - 99}, True),
-                         ({"settings": MADE + 99, "id": "id-sam/new"}, False), ({"settings": MADE + 99}, False)):
+for kept_state, gone in (({"settings": MADE + 99, "databaseId": "id-other"}, True), ({"settings": MADE - 99}, True),
+                         ({"databaseId": "id-other"}, True), ({"id": "R_kept", "settings": MADE - 99}, True),
+                         ({"settings": MADE + 99, "databaseId": "id-sam/new"}, False), ({"settings": MADE + 99}, False),
+                         ({"id": "R_kept", "settings": MADE + 99}, False), ({"id": "R_kept"}, False)):
     clone("old", "https://github.com/sam/old.git")
     NAMES["sam/old"] = "sam/new"
     C.save("repo-sam_old.json", kept_state)
@@ -160,7 +164,7 @@ for kept_state, gone in (({"settings": MADE + 99, "id": "id-other"}, True), ({"s
 
 # A job can be what finds such a name, before any pass has: no clone for it.
 clone("old", "https://github.com/sam/old.git")
-C.save("repo-sam_old.json", {"settings": MADE + 99, "id": "id-other"})
+C.save("repo-sam_old.json", {"settings": MADE + 99, "databaseId": "id-other"})
 with C.acting_for("sam/new"):
     assert C.job("sam/new", "t", clone=True) is None
 assert "sam/new" not in tried() and not os.path.exists(f"{src}/new"), tried()
@@ -268,7 +272,7 @@ def reset(r, k, known, failed):
 
 kept_reset, S.R.reset = S.R.reset, reset
 clone("old", "https://github.com/sam/old.git")
-C.save("repo-sam_old.json", {"settings": T, "id": "id-other"})
+C.save("repo-sam_old.json", {"settings": T, "databaseId": "id-other"})
 assert full(T + 90050) == line
 assert RESET == [("sam/old", "sam_old")], RESET
 assert url("old") == "https://github.com/sam/old.git"
@@ -291,6 +295,29 @@ assert not [x for x in PUBLISHED[0] if x[0] == C.RETIRING], PUBLISHED
 C.save(C.RETIRING_FILE, {"sam_gone": {"name": "sam/gone", "for": "sam/took", "id": "id-sam/took"}})
 full(T + 90075)
 assert len(RESET) == 3 and not C.retiring("sam/took"), RESET
+# A hold kept with the node id, from before the steward knew repos by
+# databaseId, holds the same: the repo that took the name gets no job while a
+# retirement keeps failing, at any later name, and a kicked pass doesn't lift
+# it. Another repo that takes up its name goes free, one GitHub won't say about
+# waits, and it ends once retired.
+RESET_FAILS[0] = True
+legacy = {"sam_old": {"name": "sam/old", "for": "sam/took", "id": "R_took"}}
+C.save(C.RETIRING_FILE, legacy)
+NAMES.update({"sam/took": "sam/took", "sam/later": "sam/later"})
+NODES.update({"sam/took": "R_took", "sam/later": "R_took"})
+with C.acting_for("sam/took"):
+    assert C.job("sam/took", "t", clone=True) is None
+full(T + 90080)
+full(T + 90085, "sam/r")
+assert C.load(C.RETIRING_FILE, {}) == legacy
+assert "sam/took" not in tried() and C.retiring("sam/took") and C.retiring("sam/later") and C.retiring("sam/nobody")
+NODES["sam/took"] = "R_other"
+assert not C.retiring("sam/took")
+RESET_FAILS[0] = False
+full(T + 90090)
+assert C.load(C.RETIRING_FILE, {}) == {} and not C.retiring("sam/later")
+NODES.clear()
+del NAMES["sam/took"], NAMES["sam/later"]
 S.R.reset = kept_reset
 os.remove(f"{tmp}/state/repo-sam_old.json")
 # A hidden folder counts only while it's named for its repo. Transferred, it

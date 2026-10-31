@@ -24,23 +24,44 @@ from tasks import RED_BRANCH, red_default_task
 GONE = "gone"
 
 
+# Each owner's own repos, not forks, a page at a time (what `gh repo list
+# --source` asks, with the repo's databaseId, which it can't give).
+REPOS = """query($owner: String!, $cursor: String) {
+  repositoryOwner(login: $owner) {
+    repositories(first: 100, after: $cursor, isFork: false, ownerAffiliations: OWNER) {
+      nodes { databaseId nameWithOwner isPrivate isArchived createdAt defaultBranchRef { name } }
+      pageInfo { hasNextPage endCursor }
+    }
+  }
+}"""
+
+
 def discover():
     """Each owner's repos the App's installation there reaches: which ones
     are the steward's is which it's installed on. GitHub never reports an
     App as a repo's admin (an installation's viewerPermission is empty), so
-    that's no test of what it may touch."""
+    that's no test of what it may touch. Each is known by its databaseId,
+    the number GitHub keeps for the repo whatever it's called (its node id
+    is no such thing: GitHub has changed their format before)."""
     seen = []
     for owner in CFG["owners"]:
+        cursor, found = None, []
         with C.acting_for(owner):
-            found = C.gh("repo", "list", owner, "--no-archived", "--source", "--limit", "100000",
-                         "--json", "id,nameWithOwner,isPrivate,defaultBranchRef,createdAt") or []
+            while True:
+                got = (C.graphql(REPOS, owner=owner, cursor=cursor)["repositoryOwner"] or {}).get("repositories")
+                if not got:
+                    break
+                found += got["nodes"]
+                if not got["pageInfo"]["hasNextPage"]:
+                    break
+                cursor = got["pageInfo"]["endCursor"]
         for r in found:
             name = r["nameWithOwner"]
-            if any(fnmatch.fnmatch(name, pat) for pat in CFG["exclude"]):
+            if r["isArchived"] or any(fnmatch.fnmatch(name, pat) for pat in CFG["exclude"]):
                 continue
             # An empty repo has no default branch yet (None): only its
             # settings and hook, until its first push.
-            seen.append({"repo": name, "id": r["id"], "private": r["isPrivate"],
+            seen.append({"repo": name, "id": r["databaseId"], "private": r["isPrivate"],
                          "default": (r.get("defaultBranchRef") or {}).get("name"), "created": r["createdAt"]})
     return seen
 
@@ -95,10 +116,12 @@ def settle_repo(r, known):
     repo, rc = r["repo"], repo_cfg(r["repo"])
     st = load(f"repo-{repo.replace('/', '_')}.json", {})
     new = repo not in known
-    # GitHub's id for it, by which restart tells a remade repo: kept once
-    # restart has passed it, settings kept before ids were included.
-    if r.get("id") and st.get("id") != r["id"]:
-        st["id"] = r["id"]
+    # GitHub's databaseId for it, by which restart tells a remade repo: kept
+    # once restart has passed it, settings kept before it was included. The
+    # node id kept before it goes: it's no test of which repo this is.
+    if r.get("id") and (st.get("databaseId") != r["id"] or "id" in st):
+        st.pop("id", None)
+        st["databaseId"] = r["id"]
         save(f"repo-{repo.replace('/', '_')}.json", st)
     # Due daily, and straight away for another App (its required checks are
     # pinned to the one it was), a train turned on or off (the baseline
@@ -750,7 +773,7 @@ def swept(r, in_use):
         if DEP_RE.match(name):
             continue
         # Compared at the tip just listed, and deleted only if it's still there.
-        cmp = answer(C.gh, "api", f"repos/{repo}/compare/{r['default']}...{sha}", "--jq",
+        cmp = answer(C.gh, "api", C.compare(repo, r["default"], sha), "--jq",
                      "{ahead: .ahead_by, date: .commits[-1].commit.committer.date}")
         if not isinstance(cmp, dict):
             continue

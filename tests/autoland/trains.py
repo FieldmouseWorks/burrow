@@ -170,10 +170,10 @@ assert "didn't take its queued merge off" in status and cn_runs() == [SHOW], (st
 # (posted just before it lands) and its error count for nothing, and nor
 # does anyone else's under its name. Its failure, the App's, is red CI.
 red = mark("FAILURE", "red alone in candidate ABCDEFGH: ci")
-assert P.ci_state(mkpr(checks=[mark("SUCCESS", "landing with candidate ABCDEFGH")])) == ("none", [])
-assert P.ci_state(mkpr(checks=[mark("ERROR", "GitHub refused its merge: no")])) == ("none", [])
-assert P.ci_state(mkpr(checks=[mark("FAILURE", "red", who={"login": "sam", "__typename": "User"})])) == ("none", [])
-assert P.ci_state(mkpr(checks=CI_GREEN + [red])) == ("red", ["conary/train (red alone in candidate ABCDEFGH: ci)"])
+assert P.ci_state(mkpr(checks=[mark("SUCCESS", "landing with candidate ABCDEFGH")])) == ("none", [], False)
+assert P.ci_state(mkpr(checks=[mark("ERROR", "GitHub refused its merge: no")])) == ("none", [], False)
+assert P.ci_state(mkpr(checks=[mark("FAILURE", "red", who={"login": "sam", "__typename": "User"})])) == ("none", [], False)
+assert P.ci_state(mkpr(checks=CI_GREEN + [red])) == ("red", ["conary/train (red alone in candidate ABCDEFGH: ci)"], False)
 # A fix job takes it, told what the train's failure means.
 fresh_pr_state()
 seen()

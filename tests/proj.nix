@@ -23,8 +23,9 @@
 # while the last turn's unit is still ending waits for it before its turn is
 # written, that every turn says what comes next (proj await, ask or done), one
 # that doesn't hearing so once and, still silent, being the stall watchdog's
-# at once (as one that ended in a failure is, a turn in line or running to its
-# deadline, and an await to its own, the watchdog kicked as they change),
+# at once (one that ended in a failure a grace from its end, even killed with
+# a log hours old, a turn in line or running to its deadline, and an await to
+# its own, the watchdog kicked as they change),
 # while a question, a finished job, a stopped one and an --owned job's end
 # aren't, that a job run --app acts as its App every turn, whatever the login
 # sets and if the App goes while it waits, or not at all, and that a job
@@ -443,12 +444,29 @@ pkgs.testers.runNixOSTest {
         machine.wait_until_succeeds(f"su - dev -c 'proj state {o2}' | grep -x error", timeout=120)
         waits(lambda w: o not in w and o2 not in w)
         machine.succeed("rm /tmp/silent")
-        # Anyone else's failure is a stall at once: nothing resumes it.
+        # Anyone else's failure is a stall once nothing has resumed it.
         f = proj("run web fail")
         machine.wait_until_succeeds(f"su - dev -c 'proj state {f}' | grep -x error", timeout=120)
-        waits(lambda w: w.get(f, {}).get("phase") == "turn 1 ended (error), and nothing resumes it")
+        waits(lambda w: w.get(f, {}).get("phase") == "turn 1 ended (error), and nothing resumed it")
         proj(f"stop {f}")
         assert f not in waits(), waits()
+        # Killed whole with nothing written, as systemd-oomd does, its log
+        # long quiet: the grace counts from the kill, which _ended saw from
+        # outside the cgroup.
+        k = proj('run web "sleep 600"')
+        machine.wait_until_succeeds(f"su - dev -c 'proj state {k}' | grep -x running", timeout=120)
+        machine.succeed(f"su - dev -c 'touch -d \"1 hour ago\" /data/dev/jobs/{k}/1.jsonl /data/dev/jobs/{k}/prompt.1'")
+        before = int(machine.succeed("date +%s"))
+        machine.succeed(f"systemctl --user -M dev@ kill --kill-whom=all --signal=KILL '{unit(k)}'")
+        w = waits(lambda w: "nothing resumed it" in w.get(k, {}).get("phase", ""))[k]
+        assert w["since"] >= before and w["due"] == w["since"] + 120, w
+        machine.succeed(f"test -e /data/dev/jobs/{k}/1.ended")
+        # And the next turn, running, has no end yet.
+        machine.succeed(f"su - dev -c 'echo s >/data/dev/jobs/{k}/session'")
+        proj(f'reply {k} "sleep 600"')
+        machine.wait_until_succeeds(f"su - dev -c 'proj state {k}' | grep -x running", timeout=120)
+        machine.fail(f"test -e /data/dev/jobs/{k}/2.ended")
+        proj(f"stop {k}")
 
     with subtest("the watchdog hears of a turn in line and one running, each to its deadline"):
         machine.succeed("truncate -s 0 /tmp/kicks")
