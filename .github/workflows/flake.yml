@@ -2,7 +2,8 @@
 # (flake-check.yml), taken from this checkout so a PR runs its own version.
 name: flake
 on:
-  # `edited` for a PR retargeted onto another branch: which paths it changes,
+  # `edited` for a PR retargeted onto another branch: the shared workflow's
+  # run counts only for the base it judged, and which paths a PR changes,
   # and so its lane (docs-paths below), depend on its base.
   pull_request:
     types: [opened, synchronize, reopened, edited]

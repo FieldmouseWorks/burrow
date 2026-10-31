@@ -7,10 +7,11 @@ left its base, takes the docs lane: only the checks that read docs, in a job
 of its own named so autoland knows; anything under .github/, a .nix file or
 a flake.lock never is, whatever the patterns say, and patterns that would
 match everything are refused. The lane's check run names the base it chose
-against, the docs lane's the commit the PR left that base at too, and a
-caller that lists docs runs again when a PR's base changes.
+against, the docs lane's the commit the PR left that base at too, and
+every caller runs again when a PR's base changes.
 
-  python3 -I tests/lane.py .github/workflows/flake-check.yml modules/autoland/prs.py .github/workflows/flake.yml
+  python3 -I tests/lane.py .github/workflows/flake-check.yml modules/autoland/prs.py \
+    .github/workflows/flake.yml templates/project/.github/workflows/flake.yml
   nix build .#checks.x86_64-linux.lane
 """
 
@@ -73,15 +74,18 @@ assert nix_step["if"] == "inputs.install-nix && inputs.docs-checks != ''", nix_s
 build = docs["steps"][3]
 assert build["env"] == {"CHECKS": "${{ inputs.docs-checks }}"}, build["env"]
 
-# A caller that lists docs runs again on a new base, and only on that edit:
-# which paths a PR changes depend on its base.
-caller = yaml.safe_load(open(sys.argv[3]))
-callers = [j for j in caller["jobs"].values()
-           if j.get("uses", "").endswith("/flake-check.yml") and j.get("with", {}).get("docs-paths")]
-assert callers, "the caller lists no docs"
-assert "edited" in caller[True]["pull_request"]["types"], caller[True]
-for j in callers:
-    assert j.get("if") == "github.event.action != 'edited' || github.event.changes.base", j.get("if")
+# Every caller (burrow's own, and the template every project copies) runs
+# again on a new base, and only on that edit: autoland counts a run only for
+# the base it judged, and which paths a PR changes depend on its base.
+for path in sys.argv[3:]:
+    caller = yaml.safe_load(open(path))
+    callers = [j for j in caller["jobs"].values() if j.get("uses", "").split("@")[0].endswith("/flake-check.yml")]
+    assert callers, f"{path} doesn't call flake-check.yml"
+    assert "edited" in (caller[True]["pull_request"] or {}).get("types", []), (path, caller[True])
+    for j in callers:
+        assert j.get("if") == "github.event.action != 'edited' || github.event.changes.base", (path, j.get("if"))
+assert any(j.get("with", {}).get("docs-paths") for j in yaml.safe_load(open(sys.argv[3]))["jobs"].values()), \
+    "burrow's caller lists no docs"
 
 tmp = tempfile.mkdtemp()
 env = {"PATH": os.environ["PATH"], "HOME": tmp, "GIT_CONFIG_NOSYSTEM": "1"}
