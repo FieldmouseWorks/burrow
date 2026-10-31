@@ -15,7 +15,7 @@ import sys
 import time
 
 import proofs as P
-from harness import CI_GREEN, FAIL, JOBS, KICKS, REAL, STATES, STOPPED, WROTE, C, S, clean, fresh_pr_state, pr_state, run, stand_in, tmp
+from harness import CI_GREEN, FAIL, T0, JOBS, KICKS, REAL, STATES, STOPPED, WROTE, C, S, clean, fresh_pr_state, pr_state, run, stand_in, tmp
 
 stand_in()
 
@@ -310,7 +310,7 @@ for job_state, stopped in (("running", ["job-old"]), ("done", [])):
     STOPPED.clear()
     tools()
     STATES["job-old"] = job_state
-    C.save("pr-sam_r-5.json", {"proved": "a" * 40, "provedJob": "job-old", "provedAgain": "a" * 40,
+    C.save("pr-sam_r-5.json", {"head": "a" * 40, "seen": C.ts(T0), "proved": "a" * 40, "provedJob": "job-old", "provedAgain": "a" * 40,
                                "provedLost": "a" * 40, "provedAt": C.NOW})
     status, _ = run(clean(checks=VM), 700)
     assert STOPPED == stopped and len(BUILT) == 1 and "Settled; building vm here" in status, (job_state, status, STOPPED)
@@ -322,7 +322,7 @@ BUILT.clear()
 S.CFG["repos"]["sam/r"] = {"proofBuilds": {"vm": "checks.x86_64-linux.vm"}, "proofJobs": {"other": "Run the other proof."}}
 OTHER = CI_GREEN + [{"__typename": "StatusContext", "context": "vm", "state": "SUCCESS", "description": ""},
                     {"__typename": "StatusContext", "context": "other", "state": "PENDING", "description": ""}]
-C.save("pr-sam_r-5.json", {"proved": "a" * 40, "provedJob": made({"vm": X + ".drv"}), "provedAt": C.NOW})
+C.save("pr-sam_r-5.json", {"head": "a" * 40, "seen": C.ts(T0), "proved": "a" * 40, "provedJob": made({"vm": X + ".drv"}), "provedAt": C.NOW})
 STATES[pr_state()["provedJob"]] = "done"
 status, _ = run(clean(checks=OTHER), 700)
 assert len(JOBS) == 1 and "Run the other proof." in JOBS[0] and "again" not in status, (status, JOBS)
