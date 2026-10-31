@@ -743,6 +743,8 @@
             yq -e '.jobs.house.steps[-1].uses | test("^(\./|FieldmouseWorks/burrow/)\.github/actions/house(@|$)")' "$caller"
           done
           action=${./.github/actions/house/action.yml}
+          # Built where rustup finds the crates' pinned toolchain.
+          yq -e '.runs.steps[0]."working-directory" == "''${{ github.action_path }}/../../../crates"' "$action"
           yq -e '.runs.steps[-1].env.NUMBER == "''${{ github.event.pull_request.number }}"' "$action"
           yq -e '.runs.steps[-1].env.HEAD_SHA == "''${{ github.event.pull_request.head.sha }}"' "$action"
           touch $out
