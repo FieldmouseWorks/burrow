@@ -1,11 +1,25 @@
 """A repo's open PRs as GitHub has them, and what the steward writes back
-about one: how its CI stands, its `review-settled` status, the merge."""
+about one: how its CI stands, its `review-settled` status, its waiting
+label, the merge."""
 
 import urllib.parse
 
 import common as C
-from common import CONTEXT, DRY, log
+import train as T
+from common import CFG, CONTEXT, DRY, log
 
+
+# What GitHub says of a PR's merge (its mergeStateStatus, every value GitHub's
+# API has) and the step that calls for once it's settled. A value this doesn't
+# know is "refused": not merged, and counted like a merge GitHub turned down.
+MERGE_STEPS = {
+    "CLEAN": "merge", "HAS_HOOKS": "merge",
+    "UNSTABLE": "merge",  # a check failed that its rules don't require
+    "BLOCKED": "merge",  # its rules want what settling gives: the steward's status, its required checks
+    "BEHIND": "update",  # its rules want it up to date with its base
+    "DIRTY": "conflict",
+    "UNKNOWN": "wait", "DRAFT": "wait",  # GitHub is still working it out; a draft is seen to first
+}
 
 PRS = """
 query($owner: String!, $name: String!, $cursor: String) {
@@ -27,6 +41,7 @@ query($owner: String!, $name: String!, $cursor: String) {
         reviews(last: 100) { pageInfo { hasPreviousPage startCursor } nodes { %s } }
         comments(last: 100) { pageInfo { hasPreviousPage startCursor } nodes { %s } }
         reactions(last: 20) { nodes { content createdAt user { login } } }
+        timelineItems(last: 10, itemTypes: [RENAMED_TITLE_EVENT]) { nodes { ... on RenamedTitleEvent { createdAt previousTitle } } }
         commits(last: 1) {
           nodes { commit { oid statusCheckRollup { contexts(first: 100) { pageInfo { hasNextPage } nodes {
             __typename
@@ -90,7 +105,12 @@ def ci_state(pr, proofs=()):
     proof (a check a Claude job runs on a machine) that hasn't reported yet
     is pending: nothing posts it until its job runs. A workflow GitHub
     couldn't start (a bad file, a pin missing an input) leaves no check run,
-    only its suite: red, or a broken workflow would read as no CI."""
+    only its suite: red, or a broken workflow would read as no CI. A status
+    is its proof's however it's spelled, since GitHub ignores a context's case,
+    and goes by the name the repo gives the proof, one name once. The merge
+    train's status is its word on the PR, not a check of it, except its
+    failure: CI failed on the head merged alone onto the default branch, which
+    is the head's to fix. Only the App's counts, as with ours."""
     nodes = pr["commits"]["nodes"]
     commit = nodes[0]["commit"] if nodes else {}
     contexts = (commit.get("statusCheckRollup") or {}).get("contexts") or {}
@@ -98,6 +118,7 @@ def ci_state(pr, proofs=()):
     if any((x.get("pageInfo") or {}).get("hasNextPage") for x in (contexts, suites)):
         # Only the first 100 come back; one past them could be red.
         return "pending", ["over 100 checks, too many to read"]
+    spelled = {p.lower(): p for p in proofs}
     red, pending, seen = [], [], 0
     for s in suites.get("nodes", []):
         if s["conclusion"] == "STARTUP_FAILURE":
@@ -116,29 +137,35 @@ def ci_state(pr, proofs=()):
             name = c["context"]
             if name == CONTEXT:
                 continue
+            if name == T.CONTEXT:
+                if c["state"] != "FAILURE" or not C.mine(c.get("creator")):
+                    continue
+                name = f"{name} ({c.get('description') or 'red alone'})"
             seen += 1
+            name = spelled.get(name.lower(), name)
             if c["state"] in ("PENDING", "EXPECTED"):
                 pending.append(name)
             elif c["state"] != "SUCCESS":
                 red.append(name)
-    named = {c.get("name") or c.get("context") for c in contexts.get("nodes", [])}
+    named = {c.get("name") or spelled.get(c["context"].lower(), c["context"]) for c in contexts.get("nodes", [])}
     for name in proofs:
         if name not in named:
             seen += 1
             pending.append(name)
     if not seen:
         return "none", []
-    return ("red" if red else "pending" if pending else "green"), red or pending
+    return ("red" if red else "pending" if pending else "green"), list(dict.fromkeys(red or pending))
 
 
-def our_status(pr):
-    """The steward's own status on the head: its context, posted by its App.
-    Anyone who can push can post the context; theirs isn't the steward's
-    word, and the ruleset doesn't count it either."""
+def our_status(pr, context=CONTEXT):
+    """The steward's own status on the head: its context (or the train's,
+    which cn posts as its App), posted by its App. Anyone who can push can
+    post the context; theirs isn't the steward's word, and the ruleset
+    doesn't count it either."""
     nodes = pr["commits"]["nodes"]
     rollup = (nodes[0]["commit"].get("statusCheckRollup") or {}) if nodes else {}
     for c in (rollup.get("contexts") or {}).get("nodes", []):
-        if c["__typename"] == "StatusContext" and c["context"] == CONTEXT and C.mine(c.get("creator")):
+        if c["__typename"] == "StatusContext" and c["context"] == context and C.mine(c.get("creator")):
             return c["state"].lower(), c.get("description") or ""
     return None, ""
 
@@ -151,6 +178,31 @@ def post_status(repo, pr, state, desc):
     return C.write("api", f"repos/{repo}/statuses/{pr['headRefOid']}", "-f", f"state={state}",
                    "-f", f"context={CONTEXT}", "-f", f"description={desc}", "-f", f"target_url={pr['url']}",
                    check=False) is not None
+
+
+# What a PR can wait on that a label of the steward's says, at the top of the
+# PR and in its repo's list (labels.waiting; repos.py makes them): its updates
+# too new to take yet, its turn for a proof slot, a reviewer back in service.
+RELEASE_AGE, PROOF_SLOT, REVIEWER = "releaseAge", "proofSlot", "reviewer"
+
+
+def show_waiting(repo, pr, labels, kind):
+    """The PR's waiting label: the one for kind (one of those, or None) and
+    none of the others, put on with its status, from the same step. labels
+    is the PR's as this pass has them, kept up to date as they change. Best
+    effort: one GitHub didn't take is asked for again by the next pass."""
+    names = CFG["labels"]["waiting"]
+    on = [names[kind]] if kind and names[kind] not in labels else []
+    off = [x for k, x in names.items() if k != kind and x in labels]
+    if not on and not off:
+        return
+    args = [a for x in on for a in ("--add-label", x)] + [a for x in off for a in ("--remove-label", x)]
+    if C.write("pr", "edit", str(pr["number"]), "-R", repo, *args, check=False) is None:
+        if not DRY:
+            log(f"{repo}#{pr['number']}: GitHub didn't take its waiting label ({' '.join(args)})")
+        return
+    labels.difference_update(off)
+    labels.update(on)
 
 
 # The first comment of each of a PR's review threads, read only for eyes():
@@ -224,20 +276,27 @@ def rules(repo, base, none, absent, *args):
 
 
 def land(repo, pr, repo_info):
-    """Merge it now, at the head that was checked, or not at all: False if
-    GitHub didn't. Nothing is left for GitHub to merge later (auto-merge, a
-    merge queue): that would merge whatever head the base's rules let
-    through, which needn't be one the steward checked. So a merge queued
-    before, by anyone, is taken off first."""
+    """Merge it now, at the head that was checked, or not at all: None once
+    GitHub has merged it, else why it hasn't (GitHub's own words, when it
+    refused the merge). Nothing is left for GitHub to merge later
+    (auto-merge, a merge queue): that would merge whatever head the base's
+    rules let through, which needn't be one the steward checked. So a merge
+    queued before, by anyone, is taken off first."""
     if not C.unland(repo, pr) and not DRY:
-        return False
+        return "GitHub didn't take off the merge already queued on it"
     method = merge_method(repo, pr["baseRefName"], repo_info)
     if method is None:
-        log(f"{repo}#{pr['number']}: no merge method both the repo's settings and the rules on "
-            f"{pr['baseRefName']} allow, or GitHub didn't say what the rules are")
-        return False
+        return (f"not asked: no merge method both the repo's settings and the rules on {pr['baseRefName']} allow, "
+                "or GitHub didn't say what the rules are")
     # The merge endpoint merges or refuses; a push since the check makes the
-    # sha stale, and it waits for the next pass.
-    return C.write("api", "-X", "PUT", f"repos/{repo}/pulls/{pr['number']}/merge",
-                   "-f", f"merge_method={method}", "-f", f"sha={pr['headRefOid']}",
-                   check=False) is not None or DRY
+    # sha stale, and it waits for the next pass. A squash or a merge commit
+    # takes the PR's title as its subject, the title house-check holds to the
+    # house style: left to GitHub, a one-commit PR's squash would take that
+    # commit's subject instead, which nothing checked.
+    title = [] if method == "rebase" else ["-f", f"commit_title={pr['title']} (#{pr['number']})"]
+    try:
+        C.write("api", "-X", "PUT", f"repos/{repo}/pulls/{pr['number']}/merge",
+                "-f", f"merge_method={method}", *title, "-f", f"sha={pr['headRefOid']}")
+    except RuntimeError as e:
+        return C.said(e)
+    return None

@@ -78,7 +78,7 @@ C.save(V.OUT, {})
 # job that couldn't start, a job seen ended with no answer (the second look),
 # a review that couldn't be queued or posted, and one lost from the queue.
 fresh_pr_state()
-H.land, land = (lambda repo, pr, info: False), H.land
+H.land, land = (lambda repo, pr, info: "refused"), H.land
 run(clean(), 700)
 assert C.WAKE["sam/r"] == T + 700 + 60 + 1, C.WAKE
 H.land = land

@@ -11,8 +11,9 @@
 # full one is every repo the installations of APP_OWNERS reach. As the user,
 # one run with gh's login covers them all. Runs take RUN_LOCK in turn: they
 # share the clones. A run's token is asked for once it has the lock, so its
-# fifty minutes aren't spent waiting on another's. (APP_ENV, APP_OWNERS,
-# COVERS and RUN_LOCK come from ../updates.nix.)
+# fifty minutes aren't spent waiting on another's. Each run that ends,
+# failed or not, is noted in RUNS (ran). (APP_ENV, APP_OWNERS, COVERS,
+# RUN_LOCK and RUNS come from ../updates.nix.)
 only=${1:-}
 
 if [ -n "$APP_ENV" ]; then
@@ -29,6 +30,18 @@ token() {
   fi
 }
 
+# When a run on NAME ended: the last ten, in a file named for the repo in
+# lower case with its / as _ (`all` for one run over every repo), for
+# autoland's dashboard watcher, which hands on an error still on a repo's
+# dashboard after two of them.
+ran() {
+  local f=${1,,}
+  f=$RUNS/${f//\//_}
+  mkdir -p "$RUNS"
+  { tail -n 9 "$f" 2>/dev/null || true; date +%s; } > "$f.tmp"
+  mv "$f.tmp" "$f"
+}
+
 # Renovate with ARGS, on REPO (or every repo, as the user), in its turn.
 run() {
   local repo=$1
@@ -36,7 +49,10 @@ run() {
   (
     flock 9 || exit
     t=$(token "$repo") || exit
-    RENOVATE_TOKEN=$t GITHUB_COM_TOKEN=$t exec renovate "$@"
+    rc=0
+    RENOVATE_TOKEN=$t GITHUB_COM_TOKEN=$t renovate "$@" || rc=$?
+    ran "${repo:-all}"
+    exit "$rc"
   ) 9>>"$RUN_LOCK"
 }
 

@@ -201,6 +201,16 @@ def gh(*args, input=None, check=True):
         return out
 
 
+def said(e):
+    """What GitHub said, from gh()'s error ("gh ARGS: what gh printed"), on
+    one line for a stuck PR's listing, without gh's own "gh: "; any other
+    error's text as it is."""
+    text = str(e)
+    if text.startswith("gh "):
+        text = text.partition(": ")[2].removeprefix("gh: ")
+    return "; ".join(x.strip() for x in text.splitlines() if x.strip())
+
+
 def fresh(path, etag=None):
     """GET path unless it's unchanged since GitHub gave it etag: (its etag,
     its JSON), or None when it's unchanged. GitHub doesn't count a request
@@ -335,7 +345,7 @@ def ts(s):
 # When each repo's PRs next need a pass, as this pass worked out: a wait that
 # ends then (a new head's settle delay, a reviewer's timeout, the time left
 # before a Claude job takes its findings). Saved to wake.json, where
-# burrow-events (../events/events.py) reads it and starts that repo's pass
+# burrow-events (crates/burrow-events) reads it and starts that repo's pass
 # then.
 WAKE = {}
 
@@ -429,15 +439,16 @@ def projects():
     Only a clone of its own counts: a hidden folder, or a worktree of the
     repo (`.git` is a file there) checked out on some other branch, sorts
     first and shares the origin, but a job sent there works on the wrong
-    tree."""
+    tree. A hidden folder named for the repo itself is that repo's clone
+    (FieldmouseWorks/.github in .github)."""
     src = CFG["projectsDir"]
     for d in sorted(os.listdir(src)) if os.path.isdir(src) else []:
-        if d.startswith(".") or not os.path.isdir(os.path.join(src, d, ".git")):
+        if not os.path.isdir(os.path.join(src, d, ".git")):
             continue
         p = subprocess.run(["git", "-C", os.path.join(src, d), "remote", "get-url", "origin"],
                            capture_output=True, text=True)
         url = re.sub(r"^(https://github\.com/|git@github\.com:)", "", p.stdout.strip()).removesuffix(".git")
-        if url.count("/") == 1:
+        if url.count("/") == 1 and (not d.startswith(".") or d.lower() == url.split("/")[1].lower()):
             yield d, url
 
 
@@ -446,11 +457,16 @@ def project_dir(repo):
     return next((d for d, url in projects() if url.lower() == repo.lower()), None)
 
 
-def pipeline(repo):
-    """Whether repo is one whose PRs work on this pipeline itself
-    (`pipelineRepos`): its reviews go ahead of the others', so everything
-    after them is quicker."""
-    return isinstance(repo, str) and repo.lower() in {x.lower() for x in CFG["pipelineRepos"]}
+def rank(repo):
+    """Where repo's reviews go in line, first to last: 0 for a lead repo
+    (`leadRepos`, what the pipeline itself is built from), ahead of
+    everything; 1 for another whose PRs work on this pipeline itself
+    (`pipelineRepos`), so everything after them is quicker; 2 for the rest.
+    proj ranks their Claude jobs the same way, by the clone's origin."""
+    r = repo.lower() if isinstance(repo, str) else None
+    if r in {x.lower() for x in CFG["leadRepos"]}:
+        return 0
+    return 1 if r in {x.lower() for x in CFG["pipelineRepos"]} else 2
 
 
 def job(repo, task, clone=False, pipeline=True, timeout=None):
@@ -471,11 +487,12 @@ def job(repo, task, clone=False, pipeline=True, timeout=None):
     if DRY:
         log(f"  would: proj run {d} ...")
         return "dry"
-    # Each of its turns that ends starts the repo's pass, which reads what it
-    # did and acts on it (--owned: the turn needn't say what comes next); one
-    # that goes quiet for jobIdle, or runs past jobTimeout, is stopped, and
-    # ends then. It's the machine's own work, so it acts on GitHub as the
-    # machinery's App, where there is one.
+    # Each of its turns starts the repo's pass when it takes its slot (it
+    # sees the job at work, not queued) and when it ends (the pass reads what
+    # it did and acts on it, so --owned: the turn needn't say what comes
+    # next); one that goes quiet for jobIdle, or runs past jobTimeout, is
+    # stopped, and ends then. It's the machine's own work, so it acts on
+    # GitHub as the machinery's App, where there is one.
     app = ["--app", CFG["machinery"]] if CFG.get("machinery") else []
     p = subprocess.run([CFG["proj"], "run", *(["--pipeline"] if pipeline else []), *app,
                         "--timeout", f"{timeout or CFG['jobTimeout']}m",

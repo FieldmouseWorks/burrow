@@ -3,6 +3,8 @@ branches and the App their required status comes from, and a red default
 branch's fix job."""
 
 import json
+import time
+import urllib.parse
 
 from harness import (C, FAIL, JOBS, R, H, S, STATES, T0, WROTE, fresh_pr_state, info, gh_stub, mkpr, stand_in)
 
@@ -11,20 +13,44 @@ stand_in()
 # has them (steward.run_pass's acting_for).
 C._for.append("sam")
 
-# Every repo gets the hold and needs-owner labels, once a day.
+# Every repo gets the hold, needs-owner and first labels, and the waiting
+# ones (prs.show_waiting), once a day.
+LABELS = ["first", "hold", "needs-owner", "waiting: proof slot", "waiting: release age", "waiting: reviewer"]
+
+
+def made():
+    """The labels made, and each one's description."""
+    got = {}
+    for x in WROTE:
+        if x.startswith("label create "):
+            name, _, rest = x.removeprefix("label create ").partition(" -R ")
+            got[name] = rest.partition(" --description ")[2]
+    return got
+
+
 fresh_pr_state()
 C.NOW = C.ts(T0)
 C.save("repo-sam_r.json", {"settings": C.NOW, "app": 7})
 WROTE.clear()
 R.settle_repo({"repo": "sam/r", "private": False, "default": "main"}, {"sam/r"})
-assert sorted(x.split()[2] for x in WROTE if x.startswith("label create")) == ["hold", "needs-owner"], WROTE
+assert sorted(made()) == LABELS, WROTE
+# A waiting label says what the PR waits on, and that its status says more,
+# within the 100 characters GitHub takes.
+assert all(len(d) <= 100 for d in made().values()), made()
+assert all("review-settled says" in d for n, d in made().items() if n.startswith("waiting: ")), made()
 WROTE.clear()
 R.settle_repo({"repo": "sam/r", "private": False, "default": "main"}, {"sam/r"})
 assert WROTE == [], WROTE
 # A day on, they're made again with the settings, in case one was deleted.
 C.NOW += 86400
 R.settle_repo({"repo": "sam/r", "private": False, "default": "main"}, {"sam/r"})
-assert sorted(x.split()[2] for x in WROTE if x.startswith("label create")) == ["hold", "needs-owner"], WROTE
+assert sorted(made()) == LABELS, WROTE
+# A repo made the labels before there were waiting ones: they're made at
+# once, not a day on.
+C.save("repo-sam_r.json", {**C.load("repo-sam_r.json", {}), "labels": ["hold", "needs-owner", "first"]})
+WROTE.clear()
+R.settle_repo({"repo": "sam/r", "private": False, "default": "main"}, {"sam/r"})
+assert sorted(made()) == LABELS, WROTE
 
 # Wherever the repo has rules (its own rulesets and the default branch's
 # classic protection), up-to-date branches go off and the steward's status
@@ -318,12 +344,20 @@ assert order == ["watch", (9, True), (10, False)], order
 # one a closed PR was closed at, a bot's included (GitHub deletes on merge,
 # never on close; the PR keeps the commits). One pushed to since its PR
 # closed, an open PR's, a bot's with no closed PR at its tip and a kept one
-# stay; an old one with no PR is listed, never deleted.
-old, young = "2026-09-01T00:00:00Z", "2026-10-23T00:00:00Z"
+# stay. One with no PR and no commit for STALE_DAYS is kept under
+# refs/archive and deleted (one an earlier sweep archived too); one GitHub
+# won't archive stays, listed for the pipeline.
+def ago(days):
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(C.NOW - days * 86400))
+
+
+# Given up on a day past STALE_DAYS (3: agents open a PR when they push), or
+# fresh from today.
+old, young = ago(4), ago(1)
 BRANCHES = {"in-main": ("1" * 40, 0, young), "closed": ("2" * 40, 3, young), "moved": ("3" * 40, 1, young),
             "open": ("4" * 40, 2, old), "renovate/x": ("5" * 40, 1, old), "gh-pages": ("6" * 40, 9, old),
             "old": ("7" * 40, 4, old), "young": ("8" * 40, 4, young), "renovate/closed": ("9" * 40, 1, young),
-            "renovate/again": ("a" * 40, 1, young)}
+            "renovate/again": ("a" * 40, 1, young), "archived": ("d" * 40, 2, old), "refused": ("e" * 40, 2, old)}
 CLOSED = {"closed": [{"number": 3, "head": {"sha": "2" * 40}}], "moved": [{"number": 4, "head": {"sha": "f" * 40}}],
           # Its match is the 101st closed PR on the name: past gh's first page.
           "renovate/closed": [{"number": n, "head": {"sha": "c" * 40}} for n in range(100, 200)]
@@ -331,6 +365,8 @@ CLOSED = {"closed": [{"number": 3, "head": {"sha": "2" * 40}}], "moved": [{"numb
           # Its last PR merged at another tip, and the bot has pushed its next update.
           "renovate/again": [{"number": 6, "head": {"sha": "b" * 40}}]}
 LOOKED = []
+# What GitHub has under refs/archive, and what it won't take there.
+ARCHIVED, REFUSED = {f"refs/archive/archived/{'d' * 40}": "d" * 40}, {"refused"}
 
 
 def branches_gh(*a, **k):
@@ -340,6 +376,11 @@ def branches_gh(*a, **k):
     if path.startswith("repos/sam/r/compare/main..."):
         b = next(x for x in BRANCHES.values() if x[0] == path.rpartition("...")[2])
         return {"ahead": b[1], "date": b[2]}
+    if path.startswith("repos/sam/r/git/ref/"):
+        got = ARCHIVED.get("refs/" + urllib.parse.unquote(path.removeprefix("repos/sam/r/git/ref/")))
+        if got is None:
+            return None  # 404
+        return got == a[a.index("--jq") + 1].partition('== "')[2][:40]
     if path.startswith("repos/sam/r/pulls?state=closed"):
         # gh's --paginate --jq: the matching numbers from every page, a line each.
         assert a[1] == "--paginate", a
@@ -353,27 +394,44 @@ def branches_gh(*a, **k):
     return gh_stub(*a, **k)
 
 
-DELETED, kept_delete = [], R.delete_branch
+def branches_write(*a, **k):
+    if a[:2] != ("api", "repos/sam/r/git/refs"):
+        return kept_write(*a, **k)
+    f = dict(x.split("=", 1) for x in a[2:][1::2])
+    if f["ref"] in ARCHIVED or f["ref"].split("/")[2] in REFUSED:
+        return None  # gh's failure (already there: a 422), logged
+    ARCHIVED[f["ref"]] = f["sha"]
+    return {"ref": f["ref"], "object": {"sha": f["sha"]}}
+
+
+DELETED, kept_delete, kept_write = [], R.delete_branch, C.write
 R.delete_branch = lambda repo, name, sha: DELETED.append((name, sha))
 S.C.CFG["keepBranches"] = ["gh-pages"]
-C.gh = branches_gh
+C.gh, C.write = branches_gh, branches_write
 C.save("repo-sam_r.json", {})
 digest = []
 R.sweep_branches(repo_r, {"open"}, digest)
-assert DELETED == [("in-main", "1" * 40), ("closed", "2" * 40), ("renovate/closed", "9" * 40)], DELETED
-assert sorted(LOOKED) == ["closed", "in-main", "moved", "old", "renovate/again", "renovate/closed", "renovate/x", "young"], LOOKED
-assert [line for _, line, _ in digest] == ["sam/r: `old`"], digest
-# Not again until a day on: the stale list is all a pass shows meanwhile.
+assert DELETED == [("in-main", "1" * 40), ("closed", "2" * 40), ("old", "7" * 40), ("renovate/closed", "9" * 40),
+                   ("archived", "d" * 40)], DELETED
+assert ARCHIVED == {f"refs/archive/archived/{'d' * 40}": "d" * 40, f"refs/archive/old/{'7' * 40}": "7" * 40}, ARCHIVED
+assert sorted(LOOKED) == ["archived", "closed", "in-main", "moved", "old", "refused", "renovate/again",
+                          "renovate/closed", "renovate/x", "young"], LOOKED
+assert digest == [(R.UNKEPT, "sam/r: `refused`", "")], digest
+# Not again until a day on: what it couldn't archive is all a pass shows meanwhile.
 DELETED.clear()
 digest = []
 R.sweep_branches(repo_r, {"open"}, digest)
-assert DELETED == [] and [line for _, line, _ in digest] == ["sam/r: `old`"], (DELETED, digest)
-# GitHub won't say which PRs were closed at it: the branch stays.
+assert DELETED == [] and [line for _, line, _ in digest] == ["sam/r: `refused`"], (DELETED, digest)
+# GitHub won't say which PRs were closed at it: the branch stays. So does
+# one whose last commit is a day short of STALE_DAYS. The archived ones are
+# deleted again (the stand-in keeps every branch), already kept.
 CLOSED["closed"] = None
 C.NOW += 86400
+BRANCHES["recent"] = ("0" * 40, 4, ago(R.STALE_DAYS - 1))
 R.sweep_branches(repo_r, {"open"}, [])
-assert DELETED == [("in-main", "1" * 40), ("renovate/closed", "9" * 40)], DELETED
-R.delete_branch, C.gh = kept_delete, gh_stub
+assert DELETED == [("in-main", "1" * 40), ("old", "7" * 40), ("renovate/closed", "9" * 40), ("archived", "d" * 40)], DELETED
+assert len(ARCHIVED) == 2, ARCHIVED
+R.delete_branch, C.gh, C.write = kept_delete, gh_stub, kept_write
 S.C.CFG["keepBranches"] = []
 C._for.pop()
 

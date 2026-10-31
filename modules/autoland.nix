@@ -7,6 +7,9 @@
 #         -> it finds nothing on the exact head, CI green
 #         -> (one-way paths, no CI: a Claude job judges it)
 #         -> `review-settled` status -> merged at that head -> branch deleted
+#            (a repo with `train` on: into its merge train instead, which
+#            lands it once CI passes it merged onto trunk with the PRs ahead
+#            of it; autoland/train.py)
 #
 # A draft is work in progress: nothing happens to it until it's ready. The
 # owner only sees what needs them, in one issue: what a judge job couldn't
@@ -32,7 +35,7 @@ let
   # What the reviewers' service runs commands with, and so what an agent
   # reads the snapshot with, and runs the repo's own checks with (python3:
   # the scripts a repo checks itself with).
-  reviewTools = with pkgs; [ bash git bubblewrap coreutils findutils gnugrep gnused diffutils ripgrep python3 ];
+  reviewTools = with pkgs; [ bash config.programs.git.package bubblewrap coreutils findutils gnugrep gnused diffutils ripgrep python3 ];
   # The machine's own /bin/sh, /bin/bash and /usr/bin/env, as an agent's
   # sandbox shows them; a machine without /bin/sh or /usr/bin/env gives the
   # sandbox none either.
@@ -77,6 +80,9 @@ let
   # what a stalled wait on it kicks.
   sweeping = (config.burrow.updates.enable or false) && (config.burrow.updates.renovate.enable or false);
   watchdog = config.burrow.watchdog.enable or false;
+  ledger = config.burrow.ledger;
+  # The repos whose PRs land through their merge train.
+  trains = lib.attrNames (lib.filterAttrs (_: r: r.train or false) cfg.repos);
 
   # The title Renovate gives each repo's dashboard (its
   # dependencyDashboardTitle default): the issue dashboard.py reads, and the
@@ -100,13 +106,17 @@ let
     # The key renovate-sweep seals its verdicts on majors with (seal.py),
     # when it runs here; without it, none counts.
     majorKey = if sweeping then "${stateDir}/renovate-sweep/verdict.key" else null;
+    # The longest a Renovate run goes on, when it runs here: how long after a
+    # refresh request a run may still act on it, which the steward's jobs and
+    # the watchdog's deadline have to outlast.
+    renovateRun = if sweeping then config.systemd.services.renovate.serviceConfig.TimeoutStartSec else null;
     projectsDir = config.burrow.projectsDir;
     proj = "${config.burrow.tools.proj}/bin/proj";
     jobTimeout = cfg.jobTimeoutMinutes;
     jobIdle = cfg.jobIdleMinutes;
     owner = config.burrow.owner;
     cleanBranches = cfg.cleanBranches;
-    labels = { inherit (cfg.labels) hold owner; };
+    labels = { inherit (cfg.labels) hold owner first waiting; };
     notify = {
       inherit (config.burrow.notify) repo assignee;
       label = config.burrow.notify.label;
@@ -126,6 +136,9 @@ let
       # Whose dashboards they are: Renovate runs as the machine's own App,
       # else as the user (null: one of `authors`).
       renovate = if machineApp == null then null else "${machineApp.slug}[bot]";
+      # When Renovate's runs ended (updates/renovate.sh's RUNS), for an
+      # error's two runs.
+      renovateRuns = if config.burrow.updates.renovate.enable or false then "${config.burrow.updates.renovate.dir}/runs" else null;
     };
     # Quarantined flaky tests, each to a Claude job (flakes.py).
     flaky = {
@@ -147,15 +160,32 @@ let
       settleDelay = cfg.settleDelayMinutes;
       stallAfter = cfg.stallAfterMinutes;
       holdStallAfter = cfg.holdStallAfterMinutes;
+      renovateMergeAfter = cfg.renovateMergeAfterMinutes;
       directPush = false;
       ruleset = true;
       requireCi = true;
       proofJobs = { };
+      proofBuilds = { };
       codex = true;
       skipPaths = [ ];
+      train = false;
+      trainSize = 8;
+      trainRequire = [ ];
+      trainStallAfter = cfg.trainStallAfterMinutes;
     };
+    # The merge train's status, which a repo's baseline requires while its
+    # train is on and gives up once it's off, the ledger on or not.
+    trainContext = ledger.trainContext;
+    # The merge train's `cn` (autoland/train.py), on the ledger's own log:
+    # the train's ops are ledger ops. Its token command is the steward's own.
+    train = if ledger.enable then {
+      cn = "${ledger.package}/bin/cn";
+      inherit (ledger) env;
+      # Its candidates' branches, cn's to make and delete.
+      branches = "conary/*";
+    } else null;
     repos = cfg.repos;
-    inherit (cfg) pipelineRepos;
+    inherit (cfg) pipelineRepos leadRepos;
     # Every repo's hook to burrow-events (repos.py), with what each of its
     # handlers takes.
     webhook = {
@@ -171,6 +201,8 @@ let
     reviewTimeout = rv.timeoutMinutes;
     agents = "${agents}/bin";
     sandbox = "${pkgs.bubblewrap}/bin/bwrap";
+    # What a proof would build, and whether it's built (proofs.py).
+    nix = "${config.nix.package}/bin";
     box = {
       store = "${reviewStore}/store-paths";
       caBundle = config.security.pki.caBundle;
@@ -208,10 +240,22 @@ let
     '
     touch $out
   '';
+  # What a pass runs: openssl signs the App's JWT (common.py), and the rest
+  # talk to GitHub, unpack its tarballs and start Claude jobs. gh and git are
+  # the machine's (github.nix): a pass's own calls pass the steward's token
+  # in GH_TOKEN, which they use as given, and the rest (`status`, a
+  # project's clone) go as the caller, its App's socket in a job's env too.
+  stewardTools = [ (config.burrow.tools.gh or pkgs.gh) config.programs.git.package pkgs.gnutar pkgs.coreutils pkgs.openssl config.burrow.tools.proj ];
   # The command, with this machine's config, so `autoland-steward status`
-  # works from any shell, not only in the service.
+  # works from any shell, not only in the service. A pass gets its tools
+  # however it's started: by its units, or by hand or a Claude job
+  # (`autoland-steward kick OWNER/REPO`) with a PATH of its own. Not a
+  # review: its units give the reviewers only what they read with
+  # (reviewTools).
   steward = pkgs.writeShellScriptBin "autoland-steward" ''
     export AUTOLAND_CONFIG=''${AUTOLAND_CONFIG:-${configFile}}
+    steward_path=${lib.makeBinPath stewardTools}
+    [ "''${1:-}" = review ] || export PATH="$steward_path''${PATH:+:$PATH}"
     exec ${pkgs.python3}/bin/python3 -E -s ${stewardSrc}/steward.py "$@"
   '';
 in
@@ -222,6 +266,8 @@ in
     { key = "burrow/proj"; imports = [ (import ./proj.nix inputs) ]; }
     { key = "burrow/events"; imports = [ (import ./events.nix inputs) ]; }
     { key = "burrow/github"; imports = [ (import ./github.nix inputs) ]; }
+    # The train's: its status's name, whether the ledger is on or not.
+    { key = "burrow/ledger"; imports = [ (import ./ledger.nix inputs) ]; }
     { key = "burrow/watchdog/sources"; imports = [ ./watchdog/sources.nix ]; }
   ];
 
@@ -304,6 +350,20 @@ in
       '';
     };
 
+    leadRepos = mkOption {
+      type = types.listOf types.str;
+      default = [ ];
+      example = [ "sam/burrow" ];
+      description = ''
+        The repos the pipeline itself is built from (OWNER/NAMEs, any case),
+        whose work goes first of all: ahead of everyone else's, the rest of
+        `pipelineRepos` included. Their reviews take a reviewer's next free
+        place first, and proj puts their pipeline jobs (the steward's Claude
+        jobs, proj-inbox's issues) first in its line. A lead repo is
+        pipeline work whether or not `pipelineRepos` lists it.
+      '';
+    };
+
     dryRun = mkOption {
       type = types.bool;
       default = false;
@@ -372,12 +432,33 @@ in
       '';
     };
 
+    trainStallAfterMinutes = mkOption {
+      type = types.ints.positive;
+      default = 240;
+      description = ''
+        The same for a PR in its repo's merge train, while one candidate is
+        in flight (its own, or the one ahead of it): long enough for that
+        candidate's CI, a second try of a test that failed, and its PRs'
+        merges.
+      '';
+    };
+
     holdStallAfterMinutes = mkOption {
       type = types.ints.positive;
       default = 480;
       description = ''
         The same for a PR on hold: a Claude job then finds out what it waits
         on, and moves one that waits on the owner's word to the owner label.
+      '';
+    };
+
+    renovateMergeAfterMinutes = mkOption {
+      type = types.ints.positive;
+      default = 60;
+      description = ''
+        How long a Renovate PR with automerge on may sit settled and green
+        before the stall watchdog takes it: a Renovate run on its repo, which
+        merges it, then a Claude job.
       '';
     };
 
@@ -427,8 +508,9 @@ in
       default = true;
       description = ''
         Daily, delete branches whose tip is already in the default branch or
-        is a closed PR's head (no open PR, not a bot's). Other unmerged ones
-        older than 30 days are listed for you, never deleted.
+        is a closed PR's head (no open PR). Other unmerged ones with no commit
+        for 3 days (not a bot's) are kept at refs/archive/BRANCH/SHA, then
+        deleted (docs/repo-baseline.md says how to restore one).
       '';
     };
 
@@ -457,7 +539,12 @@ in
       errorDays = mkOption {
         type = types.ints.positive;
         default = 1;
-        description = "How long an error, a problem with the repo or a failed lookup sits on the dashboard before it's stuck.";
+        description = ''
+          How long an error, a problem with the repo or a failed lookup sits on
+          the dashboard before it's stuck, at most: with Renovate on this
+          machine, one still there after two of Renovate's runs on the repo
+          is stuck then.
+        '';
       };
     };
 
@@ -522,6 +609,36 @@ in
         default = "needs-owner";
         description = "Marks a PR that waits for you; take it off to let the steward carry on.";
       };
+      first = mkOption {
+        type = types.str;
+        default = "first";
+        description = ''
+          A PR with this label goes ahead of every PR without it in its repo's
+          line for proofSlots, and the oldest first among those with it: for a
+          fix the rest of the line waits on, opened after them.
+        '';
+      };
+      # What a PR waits on, where it shows at a glance: the steward puts one
+      # on with the status that says it and takes it off once that wait is
+      # over (autoland/prs.py). Its status says the rest: until when, how
+      # many are ahead, which reviewer.
+      waiting = {
+        releaseAge = mkOption {
+          type = types.str;
+          default = "waiting: release age";
+          description = "On a lock file refresh none of whose updates is old enough to take yet (the minimum release age).";
+        };
+        proofSlot = mkOption {
+          type = types.str;
+          default = "waiting: proof slot";
+          description = "On a PR waiting its turn for one of its repo's proofSlots.";
+        };
+        reviewer = mkOption {
+          type = types.str;
+          default = "waiting: reviewer";
+          description = "On a PR that can't settle until a reviewer out of service is back.";
+        };
+      };
     };
 
     reviewers = {
@@ -583,7 +700,7 @@ in
       description = ''
         Per-repo overrides (OWNER/NAME): any of rounds, oneWay,
         handoffAfter, sessionHandoffAfter, settleDelay, stallAfter,
-        holdStallAfter (minutes), directPush,
+        holdStallAfter, renovateMergeAfter (minutes), directPush,
         ruleset (false: no baseline ruleset), requireCi (false: a PR with no
         checks at all counts as green, for a repo with nothing to test; by
         default a Claude job judges a settled PR in a repo with no CI,
@@ -592,13 +709,33 @@ in
         its verdict>"; }`: once a settled PR waits on nothing else, one
         Claude job a head runs them on that commit and records each verdict,
         a failure as a failure), proofSlots (how many of those jobs the repo
-        may have queued or running at once, for proofs that take the whole
-        machine: the rest wait their turn, oldest PR first; unset, no limit), keepBranches
+        may have building at once, for proofs that take the whole machine:
+        the rest wait their turn, those labelled `labels.first` first, then
+        the oldest PR first; unset, no limit),
+        proofBuilds (the flake attribute each proof check builds, `{
+        "<check>" = "checks.x86_64-linux.<name>"; }`, whose result is the
+        check's verdict: a proof whose attributes' outputs are all in the
+        store takes no job, its verdicts taken from the store, saying so
+        and naming each derivation; one whose outputs are being built by a
+        proof already running skips the line and holds no slot; a job
+        running a check without one holds a slot of its own), keepBranches
         (more branch globs the cleanup never touches in this repo, on top of
         the machine's, for branches a repo keeps as evidence), codex (false:
         Codex leaves this repo alone, and none of it goes to it), skipPaths (more path regexes the reviewers never read in
         this repo, on top of `reviewers.skipPaths`, never instead of them: what
-        the repo keeps private that isn't a secret anywhere else).
+        the repo keeps private that isn't a secret anywhere else), train
+        (true: a PR it settles goes into the repo's merge train, Conary's
+        `cn train`, instead of being merged: the train merges the PRs in it
+        onto the default branch together, has CI run on that on a
+        `conary/train/` branch, lands them in order once it's green, and
+        splits a red one to find the PR that broke it. A PR touching a
+        oneWay path rides alone, landing only while the default branch is
+        still the base its CI ran on. CI on the PRs themselves is optional:
+        with none, a reviewed PR goes straight in. It needs burrow.ledger,
+        isn't directPush, and has no proofJobs yet), trainSize (the
+        most PRs a candidate holds, 8), trainRequire (checks the train's CI
+        waits for even before they report, when more than one workflow
+        runs there), trainStallAfter (minutes, trainStallAfterMinutes).
       '';
     };
   };
@@ -612,6 +749,17 @@ in
       # It keeps every repo's hook, which GitHub's deliveries come in on.
       assertion = config.burrow.events.host != null;
       message = "burrow.autoland needs burrow.events.host and .secretFile: GitHub's events reach its passes through them.";
+    } {
+      assertion = trains == [ ] || ledger.enable;
+      message = "burrow.autoland: a repo's train (${lib.concatStringsSep ", " trains}) is on the ledger's log: turn on burrow.ledger.";
+    } {
+      # A proof runs on a PR's head; the train's evidence is its candidates'.
+      assertion = lib.all (r: (cfg.repos.${r}.proofJobs or { }) == { }) trains;
+      message = "burrow.autoland: a repo with its train on can't have proofJobs yet.";
+    } {
+      # Its rules are what keep anything but the train off its default branch.
+      assertion = trains == [ ] || cfg.rulesets && lib.all (r: !(cfg.repos.${r}.directPush or false) && (cfg.repos.${r}.ruleset or true)) trains;
+      message = "burrow.autoland: a repo with its train on needs its baseline ruleset (rulesets, and the repo's ruleset) and can't be directPush: only the train may move its default branch.";
     }];
 
     burrow.proj.enable = true;
@@ -651,8 +799,10 @@ in
         ++ lib.optional cfg.flaky.enable "flaky: *";
       unit = "autoland";
       wake = "${stateDir}/autoland/wake.json";
-      # Its own status tells it nothing (a job awaiting the PR does want it).
+      # Its own status tells it nothing (a job awaiting the PR does want it),
+      # nor do its own waiting labels, which it puts on with that status.
       ownStatuses = [ cfg.context ];
+      ownLabels = lib.attrValues cfg.labels.waiting;
     };
     systemd.services = lib.genAttrs [ "autoland" "autoland@" ] (name: {
       description = if name == "autoland"
@@ -662,8 +812,7 @@ in
       restartIfChanged = false;
       after = [ "network-online.target" ];
       wants = [ "network-online.target" ];
-      # openssl signs the App's JWT (common.py).
-      path = [ pkgs.gh pkgs.git pkgs.gnutar pkgs.coreutils pkgs.openssl config.burrow.tools.proj ];
+      path = stewardTools;
       serviceConfig = {
         Type = "oneshot";
         User = user;
@@ -753,7 +902,11 @@ in
         looks again once they're all resolved.
       - Once it finds nothing on the exact head, every thread is resolved and CI is
         green, it posts `${cfg.context}` and merges it, `.github/` changes included; the
-        branch goes too.
+        branch goes too.${lib.optionalString (trains != [ ]) ''
+          In ${lib.concatStringsSep ", " trains} it goes into the repo's merge train
+          instead, which lands it once CI is green on it merged onto the default branch with
+          the PRs ahead of it (`cn train show OWNER/REPO` says where it is). A `${ledger.trainContext}`
+          failure on its head means it broke that merge alone: a Claude job fixes it.''}
       - A settled PR that touches a one-way path (secrets, CODEOWNERS), or
         a repo with no CI, gets a Claude job that judges it: it lands what a revert or a
         follow-up can undo, and sends ${config.burrow.owner} only what can't be undone or is theirs to decide.
@@ -768,6 +921,8 @@ in
         `${cfg.labels.hold}` keeps the steward off a PR while it waits on something else (another
         PR, a deploy); one waiting on ${config.burrow.owner}'s OK gets `${cfg.labels.owner}` instead, which
         lists it for them.${lib.optionalString watchdog " A hold still on after ${toString cfg.holdStallAfterMinutes} minutes gets a Claude job's look."}
+        The steward's own labels (${lib.concatMapStringsSep ", " (x: "`${x}`") (lib.attrValues cfg.labels.waiting)})
+        say what its status says a PR waits on, and come off when that's over: leave them to it.
       - `autoland-steward status` shows where every open PR stands, changing nothing.
       - Every repo, new ones too, is kept at the baseline in burrow's
         docs/repo-baseline.md.

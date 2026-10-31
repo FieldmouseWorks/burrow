@@ -111,7 +111,7 @@ let
       pkgs.procps
       pkgs.gnused
       pkgs.jq
-      pkgs.git
+      config.programs.git.package
       pkgs.openssh
       pkgs.socat
       pkgs.systemd

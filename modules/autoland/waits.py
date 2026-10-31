@@ -10,30 +10,41 @@ and base, its `rev`) are: a new head saying the same thing is new work, with
 a deadline of its own. An open PR a pass noted nothing for (it failed on
 the repo first, or left the PR's status as it was) keeps the wait it had; a
 repo it fails on is watched itself. One whose step keeps failing the same way
-(step.py's strike) is due at once, whatever its deadline, and its phase says
-what fails.
+(step.py's strike) is due at once, whatever its deadline, its phase says
+what fails, and it stays the one wait while that goes on.
+
+A Renovate PR settled green with automerge on waits on Renovate's next run
+on the repo to merge it: past renovateMergeAfter, the watchdog's kick is
+that run.
 
 Not watched: a draft, or a major renovate-sweep held for the owner (nobody
 waits on the pipeline there), and a PR this pass listed for the owner or on
 the stuck issue (it's theirs, or that issue's job's, already). One on hold
 gets holdStallAfter: a hold nobody explains is a stall too, and the job that
-takes it moves one waiting on the owner's word to the owner label."""
+takes it moves one waiting on the owner's word to the owner label. One in
+its repo's merge train, or held out of it, gets trainStallAfter: its phase
+names the candidate in flight, so each candidate is a wait of its own."""
 
 import json
 
 import common as C
+import lock_wait
 from common import CFG, MIN, load, log, repo_cfg, save
 
 # What a PR's wait is, for its deadline and the pass a stall kicks first:
-# the steward's own, a hold (no pass moves it), or one renovate-sweep has
-# (its pass asks for the verdict again).
-STEWARD, HOLD, SWEEP = "steward", "hold", "sweep"
+# the steward's own, a hold (no pass moves it), one renovate-sweep has (its
+# pass asks for the verdict again), Renovate's merge (a run on the repo), or the
+# merge train's (which steps in the steward's pass).
+STEWARD, HOLD, SWEEP, RENOVATE, TRAIN = "steward", "hold", "sweep", "renovate", "train"
+STALL = {STEWARD: "stallAfter", HOLD: "holdStallAfter", SWEEP: "stallAfter",
+         RENOVATE: "renovateMergeAfter", TRAIN: "trainStallAfter"}
 FAILS = "the steward's pass fails on it (journalctl -u autoland)"
 
 NOTED = {}  # this pass's waits, by repo whose PRs it read, then by key (None: nothing to watch)
 OPEN = {}  # the keys of each repo's open PRs, as this pass read them
 FAILED = {}  # the repos this pass failed on, before, between or after their PRs
-FAILING = {}  # the PRs whose step keeps failing, by key: what fails
+FAILING = {}  # the PRs whose step keeps failing, by key: what fails, which is the stall
+SAID = {}  # what GitHub said to the latest try of each, by key: shown, but not the stall
 
 
 def begin():
@@ -41,6 +52,7 @@ def begin():
     OPEN.clear()
     FAILED.clear()
     FAILING.clear()
+    SAID.clear()
 
 
 def repo_of(key):
@@ -58,31 +70,46 @@ def read(repo, prs):
     OPEN[repo] = {key_of(repo, pr) for pr in prs}
 
 
-def item(repo, pr, phase, minutes, kick, rev):
+def item(repo, pr, phase, minutes, kick, rev, until=None, grace=0):
     # .get: what failed may be the PR's own record.
     return {"what": f"{repo}#{pr['number']} {pr.get('title', '')}".strip(), "link": pr.get("url"), "phase": phase,
-            "minutes": minutes, "kick": kick, "rev": rev}
+            "minutes": minutes, "kick": kick, "rev": rev, "until": until, "grace": grace}
 
 
-def note(repo, pr, phase, wait):
+def note(repo, pr, phase, wait, refreshing=False, ripe=None):
     """The PR's wait as its status says it (its last in a pass stands); wait
-    None: nothing to watch."""
+    None: nothing to watch. On a Renovate PR renovate-sweep may have a
+    refresh going on (refreshing), no stall goes to a job before the sweep's
+    own would have had the branch: its minutes count from after the sweep's
+    longest recovery from the date a lock file refresh waits for (ripe), or
+    else from after the longest taking back of a request. Past that the job
+    is told what the sweep's would be."""
     if wait is None:
         NOTED.setdefault(repo, {})[key_of(repo, pr)] = None
         return
-    sweep = wait == SWEEP and CFG["watch"] and CFG["watch"]["renovateSweep"]
-    kick = None if wait == HOLD else f"renovate-sweep/{repo}" if sweep else f"autoland/{repo}"
-    minutes = repo_cfg(repo)["holdStallAfter" if wait == HOLD else "stallAfter"]
+    # renovateSweep: Renovate runs here, and renovate-sweep with it.
+    here = CFG["watch"] and CFG["watch"]["renovateSweep"]
+    kick = (None if wait == HOLD else f"renovate-sweep/{repo}" if wait == SWEEP and here
+            else f"renovate/{repo}" if wait == RENOVATE and here else f"autoland/{repo}")
+    minutes = repo_cfg(repo)[STALL[wait]]
     rev = f"{pr['headRefOid']} {pr['baseRefName']}"
-    NOTED.setdefault(repo, {})[key_of(repo, pr)] = item(repo, pr, phase, minutes, kick, rev)
+    grace = 0
+    if refreshing and wait != HOLD and CFG["watch"] and CFG["watch"]["renovateSweep"]:
+        run = CFG["renovateRun"]
+        grace = lock_wait.recovery(run) if ripe else lock_wait.drain(run)
+        phase += lock_wait.guard(run)
+    NOTED.setdefault(repo, {})[key_of(repo, pr)] = item(repo, pr, phase, minutes, kick, rev, ripe, grace)
 
 
-def overdue(repo, pr, why):
-    """The PR's step keeps failing the same way: its wait is due now. False
-    without the watchdog, which nothing then tells."""
+def overdue(repo, pr, why, said=None):
+    """The PR's step keeps failing the same way: its wait is due now, saying
+    what GitHub said to the latest try when it said. False without the
+    watchdog, which nothing then tells."""
     if not CFG["watch"]:
         return False
     FAILING[key_of(repo, pr)] = why
+    if said:
+        SAID[key_of(repo, pr)] = said
     return True
 
 
@@ -123,10 +150,19 @@ def publish(seen, digest, full):
                 continue
             old = was.get(key, {})
             phase = f"{it['phase']}; {FAILING[key]}" if key in FAILING else it["phase"]
-            same = old.get("phase") == phase and old.get("rev") == it["rev"]
+            # A step that keeps failing the same way is one wait however its
+            # status reads from pass to pass (a job's retry booked, then
+            # running) and whatever GitHub says from try to try (a 502, then
+            # a 503), so the watchdog's escalation of it carries on.
+            gone = old.get("phase", "")
+            same = old.get("rev") == it["rev"] and (gone == phase or (key in FAILING and (
+                gone.endswith(f"; {FAILING[key]}") or f"; {FAILING[key]}: " in gone)))
             since = old["since"] if same else C.NOW
+            if key in SAID:
+                phase = f"{phase}: {SAID[key]}"
             items[key] = {"what": it["what"], "link": it["link"], "phase": phase, "since": since,
-                          "due": since if key in FAILING else since + it["minutes"] * MIN, "kick": it["kick"],
+                          "due": since if key in FAILING else max(since, it.get("until") or 0) + it.get("grace", 0) + it["minutes"] * MIN,
+                          "kick": it["kick"],
                           "rev": it["rev"]}
     save("watch.json", {"at": C.NOW, "items": items})
     if items != was:

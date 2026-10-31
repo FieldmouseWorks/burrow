@@ -48,7 +48,23 @@ let
     text = lib.concatStrings (lib.mapAttrsToList (n: v: "${n}=${lib.escapeShellArg v}\n") vars)
       + builtins.readFile ./rust-cache/rustc-wrapper.sh;
   };
-  exe = lib.getExe wrapper;
+  # What RUSTC_WRAPPER names. A process keeps the environment it started
+  # with, and a CI runner or a Remote Control session outlives many switches.
+  # Naming the wrapper itself would leave it on the one it started with, and
+  # naming /etc/rust-cache/rustc-wrapper would leave it naming nothing after a
+  # switch that turns the cache off, or back to a system from before it. So
+  # it names this launcher, which runs whichever wrapper the running system
+  # has there, or rustc itself when there's none. It runs the wrapper by its
+  # store path, so a switch that removes the /etc entry mid-launch can't pull
+  # it away between the lookup and the exec. A running process's environment
+  # keeps the launcher from being collected.
+  exe = toString (pkgs.writeShellScript "rustc-launcher" ''
+    wrapper=$(${pkgs.coreutils}/bin/readlink -e /etc/rust-cache/rustc-wrapper)
+    if [ -x "$wrapper" ]; then
+      exec "$wrapper" "$@"
+    fi
+    exec "$@"
+  '');
 
   users = lib.unique ([ config.burrow.user ] ++ cfg.users);
 in
@@ -62,8 +78,9 @@ in
       type = types.str;
       default = "/var/cache/sccache";
       description = ''
-        Where each user's cache (DIR/USER/cache) and its daemon's socket
-        (DIR/USER/run) live. Keep it out of snapshots and backups: it's only
+        Where each user's cache (DIR/USER/cache) and the link to its daemon's
+        socket (DIR/USER/sccache.sock) live; the socket itself is in
+        /run/rust-cache-USER. Keep it out of snapshots and backups: it's only
         a cache, and it churns with every toolchain and dependency bump. An
         ephemeral / is fine; a reboot only costs one cold build each.
       '';
@@ -93,6 +110,9 @@ in
       assertion = config.users.users ? ${u};
       message = "burrow.rustCache.users: there is no user ${u}.";
     }) users;
+
+    # What the launcher runs, replaced by each switch.
+    environment.etc."rust-cache/rustc-wrapper".source = lib.getExe wrapper;
 
     # Every way a process here gets its environment: logins and their shells,
     # each user's systemd manager (and so proj's jobs and the Remote Control
@@ -152,6 +172,7 @@ in
         BindPaths = [ cache ];
         # A message being stored takes about twice its size.
         MemoryMax = "4G";
+        MemorySwapMax = 0;
         PrivateNetwork = true;
         RestrictAddressFamilies = [ "AF_UNIX" ];
         NoNewPrivileges = true;

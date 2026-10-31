@@ -1,5 +1,5 @@
 # events: what happens on GitHub, or on this machine, starts the work it
-# calls for within seconds (events/events.py). Nothing here runs on a timer
+# calls for within seconds (crates/burrow-events). Nothing here runs on a timer
 # but the hourly catch-up, for what no event reports.
 #
 # GitHub posts each repo's events to https://HOST/PATH (the steward keeps
@@ -19,13 +19,9 @@ let
   configFile = pkgs.writeText "burrow-events.json" (builtins.toJSON {
     inherit (cfg) kickPort;
     port = if hooked then cfg.port else null;
-    handlers = lib.mapAttrs (_: h: { inherit (h) events unit wake ownStatuses perRepo repos pushes branches issueTitles; }) cfg.handlers;
+    handlers = lib.mapAttrs (_: h: { inherit (h) events unit wake ownStatuses ownLabels perRepo repos pushes branches issueTitles gap; }) cfg.handlers;
   });
-  src = pkgs.runCommand "burrow-events" { nativeBuildInputs = [ pkgs.python3.pkgs.flake8 ]; } ''
-    mkdir $out
-    cp ${./events/events.py} $out/events.py
-    flake8 --ignore E501,W503 $out
-  '';
+  package = inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow;
   units = lib.mapAttrsToList (_: h: h.unit) cfg.handlers;
   # Each one best-effort: burrow-events down (restarting, say) runs every
   # full pass when it starts anyway.
@@ -166,6 +162,17 @@ in
               handlers still get it.
             '';
           };
+          ownLabels = mkOption {
+            type = types.listOf types.str;
+            default = [ ];
+            description = ''
+              The labels the handler's passes put on PRs and take off
+              themselves (the steward's waiting labels): a `pull_request`
+              delivery that one went on or came off is no news to it, so it
+              starts none of its passes. Other labels, and other handlers,
+              still count.
+            '';
+          };
           wake = mkOption {
             type = types.nullOr types.str;
             default = null;
@@ -173,6 +180,17 @@ in
               A JSON file, {"OWNER/REPO": epoch}, the handler's passes write:
               when each repo next needs a pass. Read after each pass, and when
               burrow-events starts.
+            '';
+          };
+          gap = mkOption {
+            type = types.ints.positive;
+            default = 20;
+            description = ''
+              Seconds one of its passes (over a repo, or its full pass)
+              starts after the last, at least: what events, kicks and
+              wake-ups in between come to. A handler whose passes read a lot
+              of GitHub, on events that come thick and fast, sets a longer
+              one.
             '';
           };
         };
@@ -230,7 +248,7 @@ in
       environment.EVENTS_CONFIG = "${configFile}";
       serviceConfig = {
         User = "burrow-events";
-        ExecStart = "${pkgs.python3}/bin/python3 -E -s ${src}/events.py";
+        ExecStart = "${package}/bin/burrow-events";
         Restart = "always";
         RestartSec = 5;
         ProtectSystem = "strict";

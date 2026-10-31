@@ -2,7 +2,8 @@
 and its autodiscoverFilter: which repos get a run, with whose token. As the
 user, gh's login covers every repo in one run; as the machine's own App, each
 repo gets a run of its own with a token of its owner's installation, asked
-for that run once it holds the runs' lock.
+for that run once it holds the runs' lock. Each run that ends, failed or not,
+is noted for its repo (or `all`), the last ten.
 
     python3 -I tests/renovate-run.py modules/updates/renovate.sh
 """
@@ -83,8 +84,28 @@ with open(appenv, "w") as f:
     f.write("export GH_TOKEN_SOCKET=/run/gh-token/workers.sock\n")
 
 
-def run(*args, app=False, owners="", repos=None, fails=(), uncovered=(), renovate_fails=None):
-    """One run; (its exit status, every call it made, in order)."""
+RUNS = os.path.join(tmp, "runs")
+
+
+def noted():
+    """The names runs are noted for."""
+    return sorted(os.listdir(RUNS)) if os.path.exists(RUNS) else []
+
+
+def ended(name):
+    """When the runs noted for NAME ended."""
+    try:
+        return [int(x) for x in open(os.path.join(RUNS, name)).read().split()]
+    except FileNotFoundError:
+        return []
+
+
+def run(*args, app=False, owners="", repos=None, fails=(), uncovered=(), renovate_fails=None, keep=False):
+    """One run, with no runs noted before it unless keep; (its exit status,
+    every call it made, in order)."""
+    if not keep and os.path.exists(RUNS):
+        for name in os.listdir(RUNS):
+            os.remove(os.path.join(RUNS, name))
     for name in os.listdir(tmp):
         if name.endswith(("-repos", "-fails")) or name in ("log", "uncovered", "renovate-fails"):
             os.remove(os.path.join(tmp, name))
@@ -95,7 +116,7 @@ def run(*args, app=False, owners="", repos=None, fails=(), uncovered=(), renovat
     open(os.path.join(tmp, "uncovered"), "w").write(" ".join(uncovered))
     if renovate_fails:
         open(os.path.join(tmp, "renovate-fails"), "w").write(renovate_fails)
-    env = {"APP_ENV": appenv if app else "", "APP_OWNERS": owners, "COVERS": covers, "RUN_LOCK": os.path.join(tmp, "lock")}
+    env = {"APP_ENV": appenv if app else "", "APP_OWNERS": owners, "COVERS": covers, "RUN_LOCK": os.path.join(tmp, "lock"), "RUNS": RUNS}
     script = "set -euo pipefail\n" + "".join(f"{k}={shlex.quote(v)}\n" for k, v in env.items()) + RUN
     p = subprocess.run(["bash", "-c", script, "renovate-run", *args],
                        env={**{k: v for k, v in os.environ.items() if k not in ("GH_TOKEN_SOCKET", "GH_TOKEN_OWNER")},
@@ -111,18 +132,28 @@ def runs(calls):
     return [(c[1], c[2], c[3]) for c in calls if c[0] == "renovate"]
 
 
-# As the user: a full run is one Renovate over everything, with gh's login.
+# As the user: a full run is one Renovate over everything, with gh's login,
+# noted as `all`.
 code, calls = run()
 assert code == 0 and runs(calls) == [([], "gho_user", "gho_user")], calls
 assert ["locked", "token", True] in calls and ["locked", "renovate", True] in calls, calls
-# One repo: as GitHub spells it, if the filter covers it.
+assert len(ended("all")) == 1 and noted() == ["all"], noted()
+# One repo: as GitHub spells it, if the filter covers it, noted by its name
+# in lower case.
 code, calls = run("sam/r")
 assert code == 0 and runs(calls) == [(['--autodiscover-filter=["Sam/R"]'], "gho_user", "gho_user")], calls
 assert ["covers", ["Sam/R"]] in calls, calls
+assert len(ended("sam_r")) == 1 and noted() == ["sam_r"], noted()
 code, calls = run("sam/r", uncovered=["Sam/R"])
-assert code == 0 and runs(calls) == [], calls
+assert code == 0 and runs(calls) == [] and ended("sam_r") == [], calls
 code, calls = run("sam/broken")
-assert code == 1 and runs(calls) == [], calls
+assert code == 1 and runs(calls) == [] and noted() == [], calls
+# A run that fails is noted too: it ran. Only the last ten are kept.
+code, calls = run("sam/r", renovate_fails="Sam/R")
+assert code == 1 and len(ended("sam_r")) == 1, calls
+for _ in range(10):
+    run("sam/r", keep=True)
+assert len(ended("sam_r")) == 10 and ended("sam_r") == sorted(ended("sam_r")), ended("sam_r")
 assert not [c for c in calls if c[0] == "gh-token"], calls
 
 # As the App: one repo's run gets its owner's token, never gh's login.
@@ -155,6 +186,7 @@ assert code == 0 and len({r[1] for r in runs(calls)}) == 2, calls
 code, calls = run(app=True, owners="sam kim", repos={"sam": ["sam/a", "sam/b"], "kim": ["kim/c"]}, renovate_fails="sam/a")
 assert code == 1 and [r[0] for r in runs(calls)] == [['--autodiscover-filter=["sam/a"]'], ['--autodiscover-filter=["sam/b"]'],
                                                      ['--autodiscover-filter=["kim/c"]']], calls
+assert noted() == ["kim_c", "sam_a", "sam_b"], noted()
 code, calls = run(app=True, owners="sam kim", repos={"kim": ["kim/c"]}, fails=["sam"])
 assert code == 1 and [r[0] for r in runs(calls)] == [['--autodiscover-filter=["kim/c"]']], calls
 code, calls = run(app=True, owners="sam", repos={"sam": ["sam/broken", "sam/a"]})

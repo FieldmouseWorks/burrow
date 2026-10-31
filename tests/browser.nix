@@ -1,5 +1,6 @@
 # The signed-in browser, for real: Claude's MCP server drives the one browser
-# the owner sees, a login (a cookie) outlives a restart of the browser, only
+# the owner sees, a login (a cookie) outlives a restart of the browser, even
+# once there's a second profile beside the one it's in, only
 # burrow.user on the machine reaches its DevTools port and its viewer (under
 # iptables and under nftables), the viewer is open on the interface it's given
 # and speaks VNC there, the screen listens on no TCP or abstract socket, the
@@ -249,6 +250,21 @@ pkgs.testers.runNixOSTest {
     with subtest("a login outlives the browser"):
         machine.succeed("systemctl restart burrow-browser.service")
         machine.wait_until_succeeds("su dev -c '" + cdp + "'", timeout=120)
+        login_kept(machine)
+
+    with subtest("a second profile doesn't come between Claude and the logins"):
+        # As when someone adds a person in the viewer and uses it. Unpinned,
+        # Chromium then asks which profile at every start, and Claude gets one
+        # without the logins, or none at all.
+        machine.succeed("systemctl stop burrow-browser.service")
+        add = ("jq '.profile.info_cache[\"Profile 1\"] = {name: \"Someone\"} | .profile.last_used = \"Profile 1\""
+               " | .profile.last_active_profiles = [\"Profile 1\"]' 'Local State' > new && mv new 'Local State'"
+               " && mkdir -m 700 'Profile 1'")
+        machine.succeed(f"cd /var/lib/burrow-browser/profile && runuser -u burrow-browser -- sh -c {shlex.quote(add)}")
+        machine.succeed("systemctl start burrow-browser.service")
+        machine.wait_until_succeeds("su dev -c '" + cdp + "'", timeout=120)
+        tabs = machine.succeed("su dev -c 'curl -fsS http://127.0.0.1:9222/json/list'")
+        assert "profile-picker" not in tabs, tabs
         login_kept(machine)
 
     with subtest("a reboot keeps both"):

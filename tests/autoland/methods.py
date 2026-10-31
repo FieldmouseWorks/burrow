@@ -6,7 +6,7 @@ on a free plan has no rules, so its settings decide. With none, or no word
 from GitHub on the rules, nothing is merged and the merge is tried again
 later, as for any refused merge."""
 
-from harness import PROTECTION, RULES, C, T, clean, fresh_pr_state, info, merges, pr_state, run, stand_in
+from harness import PROTECTION, RULES, C, H, T, clean, fresh_pr_state, info, merges, pr_state, run, stand_in
 
 stand_in()
 
@@ -21,6 +21,11 @@ def merged_with():
     return [x.split("merge_method=")[1].split()[0] for x in merges()]
 
 
+def subjects():
+    """The commit subject each merge asked for, None for GitHub's own."""
+    return [x.split("commit_title=")[1].split(" -f sha=")[0] if "commit_title=" in x else None for x in merges()]
+
+
 # A repo whose settings allow every method.
 kept = dict(info)
 info.update(squashMergeAllowed=True, mergeCommitAllowed=True, rebaseMergeAllowed=True)
@@ -31,6 +36,11 @@ for rules in ([], [pull_request(*ALL)], [{"type": "pull_request", "parameters": 
     fresh_pr_state()
     run(clean(), 900)
     assert merged_with() == ["squash"], (rules, merges())
+# A squash's subject is the PR's title, the one house-check holds to the
+# house style, never the subject of the PR's one commit GitHub would take.
+fresh_pr_state()
+run(clean(title="autoland: merge with the title"), 900)
+assert subjects() == ["autoland: merge with the title (#5)"], merges()
 # A legacy ruleset beside the baseline that allows merge commits alone
 # narrows them: the merge is a merge commit.
 RULES["main"] = [pull_request(*ALL), {"type": "deletion"}, pull_request("merge")]
@@ -43,6 +53,8 @@ RULES["main"] = [pull_request("merge", "rebase"), {"type": "required_linear_hist
 fresh_pr_state()
 run(clean(), 900)
 assert merged_with() == ["rebase"], merges()
+# A rebase makes no commit of its own to give a subject.
+assert subjects() == [None], merges()
 RULES["main"] = [{"type": "required_linear_history"}, pull_request("merge")]
 fresh_pr_state()
 run(clean(), 900)
@@ -54,6 +66,7 @@ for linear, want in ((True, ["rebase"]), (False, ["merge"])):
     fresh_pr_state()
     run(clean(), 900)
     assert merged_with() == want, (linear, merges())
+    assert subjects() == [None if want == ["rebase"] else "t (#5)"], merges()
 PROTECTION["main"] = {"required_linear_history": {"enabled": True}}
 RULES["release%2F1.0"] = [pull_request("merge", "rebase")]
 fresh_pr_state()
@@ -78,7 +91,8 @@ run(clean(base="release/1.0"), 900)
 assert merged_with() == ["squash"], merges()
 # One the repo's settings don't allow (only squash, now) isn't tried, and
 # neither is any when GitHub won't say what the rules are: nothing merges,
-# and it's a merge that didn't go through, tried again a pass later.
+# and it's a merge that didn't go through, tried again a pass later, saying
+# it wasn't asked for.
 info.update(mergeCommitAllowed=False, rebaseMergeAllowed=False)
 # A 404 other than the protection endpoint's word for no protection is
 # GitHub not saying too: it answers one for what a token can't see.
@@ -98,6 +112,8 @@ for rules, protection in (([pull_request("merge", "rebase")], None),
     status, _ = run(clean(), 900)
     assert merges() == [] and "state=success" in status and not pr_state().get("landed"), (rules, merges(), status)
     assert C.WAKE["sam/r"] <= T + 900 + 2 * 60, (rules, C.WAKE)
+    with C.acting_for("sam/r"):
+        assert H.land("sam/r", clean(), info).startswith("not asked: no merge method") and merges() == [], rules
     RULES["main"] = []
     PROTECTION.clear()
     run(clean(), 960)

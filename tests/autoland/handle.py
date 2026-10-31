@@ -457,42 +457,6 @@ status, _ = run(renamed("keys/x", 'diff --git "a/secrets/\\377" b/keys/x\nsimila
 assert len(JOBS) == 1 and "secrets/" in JOBS[0] and not merged(), (status, JOBS)
 PR_DIFF["v"] = ""
 
-# A judge that ends without a verdict (crashed, timed out, said nothing) is
-# started once more, after a second pass sees it ended; a second one that
-# does the same fails the status and is listed for the owner.
-fresh_pr_state()
-run(clean(**gated), 700)
-# Its end kicks a pass; one is booked for its deadline too (jobTimeout and
-# five minutes), and every quarter hour past it while it hasn't ended.
-assert C.WAKE["sam/r"] == C.ts(T0) + 700 + 65 * 60, C.WAKE
-run(clean(**gated), 800)
-assert C.WAKE["sam/r"] == C.ts(T0) + 700 + 65 * 60, C.WAKE
-run(clean(**gated), 700 + 70 * 60)
-assert C.WAKE["sam/r"] == C.ts(T0) + 700 + 85 * 60, C.WAKE
-STATES["job-1"] = "timed out after 60m"
-status, _ = run(clean(**gated), 5000)
-assert JOBS == [] and "judging it" in status, (status, JOBS)
-status, digest = run(clean(**gated), 5100)
-assert len(JOBS) == 1 and "judging it again" in status and digest == [], (status, digest)
-STATES["job-1"] = "running"  # the second one (ids restart each pass here)
-status, _ = run(clean(**gated), 5200)
-assert JOBS == [] and "judging it" in status and not merged(), status
-STATES["job-1"] = "failed"
-status, digest = run(clean(**gated), 5300)
-assert JOBS == [] and not merged() and digest == [], (status, JOBS, digest)
-status, digest = run(clean(**gated), 5400)
-assert JOBS == [] and [x[0] for x in digest] == ["Two Claude jobs ended without a verdict"], (status, digest)
-assert "state=failure" in status and not merged(), status
-# One still running, or one proj can't say about, isn't lost.
-for state in ("running", None):
-    fresh_pr_state()
-    run(clean(**gated), 700)
-    STATES["job-1"] = state
-    for t in (800, 900):
-        status, digest = run(clean(**gated), t)
-    assert JOBS == [] and "judging it" in status and digest == [], (state, status)
-STATES.clear()
-
 # The judge's build or tests fail: one fix job a head, not a judge waited on
 # for good.
 fresh_pr_state()
@@ -522,8 +486,8 @@ status, _ = run(clean(comments=[failed], **gated), 7500)
 assert len(JOBS) == 1 and "something failing" in JOBS[0], (status, JOBS)
 # That one ends with it still failing (it pushed nothing): handed once more
 # once two passes have seen it ended, then its status fails and it's listed
-# for the owner.
-STATES["job-1"] = "error"
+# for the owner (lost.py has the rest of jobs that end without their answer).
+STATES["job-1"] = "done"
 status, digest = run(clean(comments=[failed], **gated), 7600)
 assert JOBS == [] and digest == [], (JOBS, digest)
 status, digest = run(clean(comments=[failed], **gated), 7700)
@@ -532,34 +496,6 @@ run(clean(comments=[failed], **gated), 7800)
 status, digest = run(clean(comments=[failed], **gated), 7900)
 assert JOBS == [] and [x[0] for x in digest] == ["Two Claude jobs ended without fixing it"], (JOBS, digest)
 assert "state=failure" in status and "state=pending" not in status and not merged(), status
-STATES.clear()
-
-# So do findings', red CI's and a dependency update's, however the two end
-# (stopped at jobTimeout, gone quiet, crashed). A new head starts over, and
-# so does one whose fix landed without a push (its threads answered).
-ci_red = [{"__typename": "CheckRun", "name": "ci", "status": "COMPLETED", "conclusion": "FAILURE"}]
-for mk, kw, end in ((clean, {"threads": [False]}, "timed out after 60m"),
-                    (clean, {"checks": ci_red}, "went quiet for 20m"),
-                    (mkpr, {"threads": [False], "branch": "dependabot/npm/foo-1",
-                            "title": "Bump foo from 1.4 to 1.5", "number": 11}, "error")):
-    fresh_pr_state()
-    run(mk(**kw), 0)
-    run(mk(**kw), 7200)
-    assert len(JOBS) == 1 and "isn't settled" in JOBS[0], (kw, JOBS)
-    STATES["job-1"] = end
-    run(mk(**kw), 7300)
-    status, _ = run(mk(**kw), 7400)
-    assert len(JOBS) == 1 and "state=pending" in status, (kw, status, JOBS)
-    run(mk(**kw), 7500)
-    status, digest = run(mk(**kw), 7600)
-    assert JOBS == [] and [x[0] for x in digest] == ["Two Claude jobs ended without fixing it"], (kw, digest)
-    assert "state=failure" in status and "state=pending" not in status and not merged(), (kw, status)
-    assert "Two Claude jobs ended without fixing it: " in status, status
-    fixed = {k: v for k, v in kw.items() if k not in ("threads", "checks")}
-    status, digest = run(mk(**fixed), 7700)
-    assert "state=failure" not in status and digest == [], (kw, status, digest)
-    status, digest = run(mk(**{**kw, "sha": newer}), 7800)
-    assert "state=failure" not in status and digest == [], (kw, status, digest)
 STATES.clear()
 
 # Findings sat handoffAfter with nobody on them: a fix job takes them. On a
@@ -650,6 +586,11 @@ run(clean(checks=[]), 700)
 # this head still decides.
 status, _ = run(clean(checks=CI_GREEN), 800)
 assert JOBS == [] and not merged() and "a Claude job is judging it" in status, (status, JOBS)
+# A judge still in proj's line is queued for it.
+STATES["job-1"] = "queued"
+status, _ = run(clean(checks=CI_GREEN), 810)
+assert JOBS == [] and "a Claude job is queued for judging it" in status, (status, JOBS)
+STATES.clear()
 for v in ("owner", "failed"):
     status, _ = run(clean(checks=CI_GREEN, comments=[said(judgment(v, n=5))]), 900)
     assert not merged(), (v, status)
@@ -683,6 +624,15 @@ assert "git worktree add" in JOBS[0] and "never in this checkout's main tree" in
 assert "a Claude job is running remi-proof" in status
 status, _ = run(clean(checks=proof), 800)
 assert JOBS == [] and "a Claude job is running remi-proof" in status
+# Waiting in proj's line, it's queued for that, not at it, until it starts
+# (proj kicks a pass then).
+STATES["job-1"] = "queued"
+status, _ = run(clean(checks=proof), 810)
+assert JOBS == [] and "a Claude job is queued for running remi-proof" in status, status
+STATES["job-1"] = "running"
+status, _ = run(clean(checks=proof), 820)
+assert JOBS == [] and "a Claude job is running remi-proof" in status, status
+STATES.clear()
 status, _ = run(clean(checks=proof, sha=other), 900)
 assert len(JOBS) == 1 and other in JOBS[0]
 # Not reported at all (nothing posts it before its job runs): the same, not
@@ -820,6 +770,12 @@ subprocess.run(["git", "-C", f"{src}/r", "worktree", "add", "-q", f"{src}/a-tree
 S.CFG["projectsDir"] = src
 assert C.project_dir("sam/r") == "r", C.project_dir("sam/r")
 assert C.project_dir("sam/q") == "q" and C.project_dir("sam/none") is None
+# A hidden folder counts when it's named for its repo, and only then.
+for d, origin in ((".github", "sam/.github"), (".mirror", "sam/mirrored")):
+    subprocess.run(["git", "init", "-q", f"{src}/{d}"], check=True)
+    subprocess.run(["git", "-C", f"{src}/{d}", "remote", "add", "origin", f"https://github.com/{origin}.git"], check=True)
+assert C.project_dir("sam/.github") == ".github", C.project_dir("sam/.github")
+assert C.project_dir("sam/mirrored") is None, C.project_dir("sam/mirrored")
 S.CFG["projectsDir"] = f"{tmp}/none"
 
 # `status` (a dry run) reads the seal the real passes' judges use, and makes

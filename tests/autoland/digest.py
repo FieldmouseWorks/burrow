@@ -58,7 +58,7 @@ sh("git", "-C", f"{tmp}/projects/notes", "remote", "add", "origin", "https://git
 DIGEST = [
     ("Outside contributions", "sam/r#1", "Outside contribution: Sam reviews and merges it"),
     ("Labelled needs-owner", "sam/r#2", ""),
-    ("Stale branches (unmerged, no PR, 30+ days)", "sam/r: `old`", ""),
+    ("Judged yours to decide", "sam/r#7", "a Claude job judged it Sam's"),
     ("Rival couldn't review it", "sam/r#3", "rival exited 1 (journalctl -u autoland-review)"),
     ("Couldn't merge", "sam/r#4", "GitHub keeps refusing the merge (journalctl -u autoland)"),
     ("Two Claude jobs ended without fixing it", "sam/r#5", "its findings"),
@@ -71,7 +71,7 @@ fresh()
 R.publish(DIGEST)
 owner, stuck = made("autoland"), made("claude")
 assert owner and owner["--title"] == "[autoland] PRs waiting for you" and owner["--assignee"] == "sam", CALLS
-assert all(x in owner["--body"] for x in ("sam/r#1", "sam/r#2", "`old`")), owner["--body"]
+assert all(x in owner["--body"] for x in ("sam/r#1", "sam/r#2", "sam/r#7")), owner["--body"]
 assert not any(x in owner["--body"] for x in ("sam/r#3", "sam/r#4", "sam/r#5", "Stuck")), owner["--body"]
 assert stuck and stuck["--title"] == "[autoland] Stuck in the pipeline" and "--assignee" not in stuck, CALLS
 assert stuck["--body"].startswith(R.stuck_brief()) and f"{tmp}/state" in stuck["--body"], stuck["--body"]
@@ -79,11 +79,15 @@ assert stuck["--body"].startswith(R.stuck_brief()) and f"{tmp}/state" in stuck["
 # unit, which alone holds the App's key (`autoland-steward kick` there can't sign).
 assert f"curl -fsS -d '' {R.CFG['kick']}/OWNER/REPO" in stuck["--body"] and "autoland-steward kick" not in stuck["--body"], stuck["--body"]
 assert all(x in stuck["--body"] for x in ("sam/r#3", "sam/r#4", "sam/r#5")), stuck["--body"]
-assert not any(x in stuck["--body"] for x in ("sam/r#1", "sam/r#2", "`old`")), stuck["--body"]
+assert not any(x in stuck["--body"] for x in ("sam/r#1", "sam/r#2", "sam/r#7")), stuck["--body"]
+
+# A stale branch the sweep couldn't archive is the pipeline's trouble, not
+# the owner's call: archived, it would have gone on its own.
+assert R.UNKEPT not in R.OWNERS
 
 # Every kind the owner settles is one the steward lists: a renamed one
 # would go to the inbox, never to the owner.
-src = "".join(open(os.path.join(os.path.dirname(R.__file__), f)).read() for f in ("step.py", "repos.py", "flakes.py"))
+src = "".join(open(os.path.join(os.path.dirname(R.__file__), f)).read() for f in ("step.py", "review_step.py", "repos.py", "flakes.py"))
 for kind in R.OWNERS:
     assert src.count(f'"{kind}"') >= 2, kind
 

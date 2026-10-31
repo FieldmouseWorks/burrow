@@ -269,7 +269,8 @@ in
         it grow past the cap without ever reaching it. Past it the kernel
         kills the biggest process there, usually the session that grew, and
         the server and its other sessions carry on (OOMPolicy=continue).
-        Every server is under burrow.claude.memory's cap too.
+        systemd-oomd never picks a server (burrow.ops.oomd). Every server is
+        under burrow.claude.memory's cap too.
       '';
     };
     servers = lib.mkOption {
@@ -287,16 +288,13 @@ in
     };
     tmux = lib.mkOption {
       type = lib.types.package;
-      default = pkgs.tmux.overrideAttrs (old: {
-        configureFlags = old.configureFlags ++ [ "--disable-cgroups" ];
-      });
-      defaultText = lib.literalMD "tmux, built with `--disable-cgroups`";
+      default = config.burrow.tools.tmux;
+      defaultText = lib.literalMD "tmux, built with `--disable-cgroups` (common.nix)";
       internal = true;
       description = ''
-        The tmux the servers run in. Not tmux's usual build: that one moves
-        each pane into a scope of its own, which takes a server and its
-        sessions out of their unit and out from under its cap. The memory
-        test starts its servers on the usual one, to see them catch up.
+        The tmux the servers run in, one that keeps their sessions under
+        their unit's cap. The memory test starts its servers on tmux's
+        usual build, to see them catch up.
       '';
     };
   };
@@ -327,6 +325,8 @@ in
         MemoryMax = cfg.memoryMax;
         MemorySwapMax = 0;
         OOMPolicy = "continue";
+        # systemd-oomd kills whole units, here every session at once.
+        ManagedOOMPreference = "omit";
       };
     };
 
