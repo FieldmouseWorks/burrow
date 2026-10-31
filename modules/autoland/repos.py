@@ -38,11 +38,10 @@ def discover():
             name = r["nameWithOwner"]
             if any(fnmatch.fnmatch(name, pat) for pat in CFG["exclude"]):
                 continue
-            # An empty repo has no branch to keep.
-            if not r.get("defaultBranchRef"):
-                continue
+            # An empty repo has no default branch yet (None): only its
+            # settings and hook, until its first push.
             seen.append({"repo": name, "id": r["id"], "private": r["isPrivate"],
-                         "default": r["defaultBranchRef"]["name"], "created": r["createdAt"]})
+                         "default": (r.get("defaultBranchRef") or {}).get("name"), "created": r["createdAt"]})
     return seen
 
 
@@ -102,10 +101,12 @@ def settle_repo(r, known):
         st["id"] = r["id"]
         save(f"repo-{repo.replace('/', '_')}.json", st)
     # Due daily, and straight away for another App (its required checks are
-    # pinned to the one it was) or a train turned on or off (the baseline
-    # requires the train's status only while it's on).
+    # pinned to the one it was), a train turned on or off (the baseline
+    # requires the train's status only while it's on), or a repo settled
+    # empty that has its first commit now (it's due its ruleset).
+    empty = r["default"] is None
     due = (C.NOW - st.get("settings", 0) >= 86400 or st.get("app") != CFG["app"]["id"]
-           or st.get("train", False) != rc["train"])
+           or st.get("train", False) != rc["train"] or (st.get("empty", False) and not empty))
     # The labels the steward and its jobs put on PRs: without them a hold
     # can't be set, a judge can't hand a PR to the owner, no PR can go first
     # in its proof line and none can say what it waits on. Made again with
@@ -163,7 +164,10 @@ def settle_repo(r, known):
     if isinstance(pages, list):
         own = [x for page in pages for x in page if x.get("source_type") == "Repository"]
         made = True
-        if CFG["rulesets"] and rc["ruleset"] and not any(x["name"] == "baseline" for x in own):
+        # Not on a repo with no commit yet: the ruleset's checks and PR rule
+        # would turn away the push that makes its default branch, the
+        # owner's too (they bypass it only by PR). That push's pass adds it.
+        if CFG["rulesets"] and rc["ruleset"] and not empty and not any(x["name"] == "baseline" for x in own):
             log(f"{repo}: adding the baseline ruleset")
             made = C.write("api", "-X", "POST", f"repos/{repo}/rulesets", "--input", "-",
                            input=json.dumps(baseline_ruleset(rc, r["default"])), check=False) is not None
@@ -175,6 +179,10 @@ def settle_repo(r, known):
     pinned = keep_protection(repo) and rules
 
     st["settings"] = C.NOW
+    if empty:
+        st["empty"] = True
+    else:
+        st.pop("empty", None)
     if pinned:
         st["app"] = CFG["app"]["id"]
         st["train"] = rc["train"]
@@ -187,24 +195,14 @@ def settle_repo(r, known):
 def restart(r, known, failed):
     """A repo made under the name of one GitHub deleted (GitHub hands a
     deleted repo's name to the next one) starts over as new, before
-    anything acts on it. It's another repo when GitHub's id for it isn't
-    the one kept with the settings the steward last set under its name;
-    for settings kept before the steward kept ids, when they were set
-    before it was made, or in the second it was (createdAt has no finer
-    grain). Its name's state is found in any case: GitHub's names don't go
-    by it. Then `reset`."""
+    anything acts on it, when the settings the steward last set under its
+    name were another repo's (C.replaced). Then `reset`."""
     repo = r["repo"]
-    k = repo.replace("/", "_").lower()
-    for name in sorted(os.listdir(C.STATE)):
-        m = re.fullmatch(r"repo-(.+)\.json", name)
-        if not m or m.group(1).lower() != k:
-            continue
-        st = load(name, {})
-        if "settings" not in st or (st["id"] == r["id"] if "id" in st else st["settings"] >= ts(r["created"]) + 1):
-            continue
-        log(f"{repo}: made at {r['created']}, and isn't the repo of its name the steward settled; starting it over as new")
-        if not DRY:
-            reset(r, m.group(1), known, failed)
+    for k, st in C.kept_state(repo):
+        if C.replaced(st, r):
+            log(f"{repo}: made at {r['created']}, and isn't the repo of its name the steward settled; starting it over as new")
+            if not DRY:
+                reset(r, k, known, failed)
 
 
 def reset(r, k, known, failed):
@@ -495,6 +493,31 @@ def hook(repo, st, due):
     st["hook"], st["hookId"] = want, made
     save(f"repo-{repo.replace('/', '_')}.json", st)
     return True
+
+
+def app_hook():
+    """The App's own webhook, to burrow-events like each repo's, with the same
+    secret: it's how a repo just made is heard (GitHub sends the App the
+    `repository` events of every repo its installations reach, a new one's
+    included, before the repo has a hook of its own). The App's settings
+    turn it on and choose its events; its URL and secret are kept here, set
+    again when they or the App change and once a day, in case they were
+    edited. GitHub never gives the secret back, so it's known by a hash."""
+    if DRY:
+        return
+    wh = CFG["webhook"]
+    want = hashlib.sha256(json.dumps([CFG["app"]["id"], wh["url"], C.webhook_secret()]).encode()).hexdigest()[:16]
+    st = load("app-hook.json", {})
+    if st.get("hook") == want and C.NOW - st.get("at", 0) < 86400:
+        return
+    try:
+        C.app_call("PATCH", "app/hook/config", C.app_jwt(),
+                   {"url": wh["url"], "content_type": "json", "secret": C.webhook_secret(), "insecure_ssl": "0"})
+    except RuntimeError as e:  # tried again on the next full pass
+        log(f"the App's webhook: {e}")
+        return
+    log("the App's webhook: set")
+    save("app-hook.json", {"hook": want, "at": C.NOW})
 
 
 def hook_projects(repos):

@@ -36,18 +36,22 @@ C.job = REAL["job"]
 # What GitHub answers: a repo's old names lead to it, as seen by whichever
 # owner's installation can; `gone` doesn't exist.
 NAMES = {"old-org/app": "sam/app", "sam/was": "sam/now", "eve/app": "eve/app", "sam/app": "sam/app"}
+IDS = {}  # the id GitHub answers a current name with, when a check cares
 ASKED = []
 
 
 def gh(*a, **k):
-    assert a[0] == "api" and a[1].startswith("repos/"), a
-    name = a[1][len("repos/"):]
+    if a[:2] != ("api", "graphql"):  # a hook's, say: hook_projects goes on without it
+        raise RuntimeError("gh api: HTTP 404")
+    args = dict(x.split("=", 1) for x in a[2:] if "=" in x and not x.startswith("query="))
+    name = f"{args['owner']}/{args['name']}"
     ASKED.append((C._for[-1], name))
     if C._for[-1] == "old-org":  # the App's long gone from where the repo moved from
         raise RuntimeError("the App steward isn't installed on old-org")
     if name not in NAMES:
-        raise RuntimeError("gh api: HTTP 404")
-    return {"full_name": NAMES[name]}
+        raise RuntimeError("gh api: Could not resolve to a Repository")
+    now = NAMES[name]
+    return {"data": {"repository": {"id": IDS.get(now, f"id-{now}"), "nameWithOwner": now, "createdAt": "2026-06-01T00:00:00Z"}}}
 
 
 C.gh = gh
@@ -121,6 +125,23 @@ assert url("later") == "https://github.com/sam/later.git"
 C.gh = gh
 subprocess.run(["rm", "-rf", f"{src}/later"], check=True)
 
+# A name a deleted repo had, that another took on and then renamed away: no
+# rename. By the id kept under the old name, or without one by when its
+# settings were set. Its clone isn't adopted, and it's handed back to be
+# retired; a settings file with the repo's own id, or newer than the repo, is a
+# genuine rename's.
+MADE = 1780272000  # 2026-06-01T00:00:00Z
+for kept_state, gone in (({"settings": MADE + 99, "id": "id-other"}, True), ({"settings": MADE - 99}, True),
+                         ({"settings": MADE + 99, "id": "id-sam/new"}, False), ({"settings": MADE + 99}, False)):
+    clone("old", "https://github.com/sam/old.git")
+    NAMES["sam/old"] = "sam/new"
+    C.save("repo-sam_old.json", kept_state)
+    found = C.follow_renames()
+    assert (found == [("sam/old", "sam_old")]) == gone, (kept_state, found)
+    assert (url("old") == "https://github.com/sam/old.git") == gone, (kept_state, url("old"))
+    subprocess.run(["rm", "-rf", f"{src}/old"], check=True)
+    os.remove(f"{tmp}/state/repo-sam_old.json")
+
 # A free path is cloned to, an empty folder included, as git would.
 os.makedirs(f"{src}/fresh")
 with C.acting_for("sam/fresh"):
@@ -180,6 +201,36 @@ with C.acting_for("sam/tool"):
     assert C.job("sam/tool", "t", clone=True) is None
 assert tried() == [], tried()
 assert ASKED == [], ASKED
+# What's kept only counts while it's what blocks the clone: another
+# projectsDir has none of it, and neither has a folder emptied of what's in it.
+S.CFG["projectsDir"] = f"{tmp}/clones-elsewhere"
+assert C.taken("sam/tool") is None
+S.CFG["projectsDir"] = src
+os.makedirs(f"{src}/plain/stuff")
+C.save(C.TAKEN_FILE, {**C.load(C.TAKEN_FILE, {}), "sam/plain": {"folder": f"{src}/plain", "origin": None}})
+assert C.taken("sam/plain")
+os.rmdir(f"{src}/plain/stuff")
+assert C.taken("sam/plain") is None
+os.rmdir(f"{src}/plain")
+# A full pass hands the deleted repo's name to repos.reset, on its own, and
+# keeps going if that fails: the next one tries again.
+RESET = []
+
+
+def reset(r, k, known, failed):
+    RESET.append((r["repo"], k))
+    raise RuntimeError("proj won't stop its job")
+
+
+kept_reset, S.R.reset = S.R.reset, reset
+clone("old", "https://github.com/sam/old.git")
+C.save("repo-sam_old.json", {"settings": T, "id": "id-other"})
+assert full(T + 90050) == line
+assert RESET == [("sam/old", "sam_old")], RESET
+assert url("old") == "https://github.com/sam/old.git"
+S.R.reset = kept_reset
+subprocess.run(["rm", "-rf", f"{src}/old"], check=True)
+os.remove(f"{tmp}/state/repo-sam_old.json")
 # Moved out by hand: the line's gone, and the next pass clones it and goes.
 subprocess.run(["mv", f"{src}/tool", f"{tmp}/clones-moved"], check=True)
 assert full(T + 90100) == []

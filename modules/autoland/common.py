@@ -125,11 +125,14 @@ def app_jwt():
     return f"{signed}.{_b64(p.stdout)}"
 
 
-def app_call(method, path, jwt):
-    """A call the App makes as itself; raises as gh() does."""
-    req = urllib.request.Request(f"{API}/{path}", method=method, data=b"" if method == "POST" else None, headers={
+def app_call(method, path, jwt, body=None):
+    """A call the App makes as itself, with body as its JSON; raises as gh()
+    does."""
+    data = json.dumps(body).encode() if body is not None else b"" if method == "POST" else None
+    req = urllib.request.Request(f"{API}/{path}", method=method, data=data, headers={
         "Authorization": f"Bearer {jwt}", "Accept": "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "burrow-autoland"})
+        "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "burrow-autoland",
+        **({"Content-Type": "application/json"} if body is not None else {})})
     try:
         with urllib.request.urlopen(req, timeout=30) as r:
             return json.load(r)
@@ -508,46 +511,98 @@ def project_dir(repo):
     return next((d for d, url in projects() if url.lower() == repo.lower()), None)
 
 
-def github_name(repo):
-    """What GitHub calls repo now, following a rename or transfer; None when
+NOW_CALLED = """query($owner: String!, $name: String!) {
+  repository(owner: $owner, name: $name) { id nameWithOwner createdAt }
+}"""
+
+
+def github_now(repo):
+    """What GitHub answers repo's name with, following a rename or transfer:
+    {"id", "nameWithOwner", "createdAt"}, in the ids discover() has; None when
     it won't say. Asked as its owner's installation, then as each owner's: the
     App may be long gone from the owner a repo moved away from, and only the
     one it moved to can see a private repo's new name."""
-    for who in dict.fromkeys([repo.split("/")[0], *CFG["owners"]]):
+    owner, name = repo.split("/")
+    for who in dict.fromkeys([owner, *CFG["owners"]]):
         try:
             with acting_for(who):
-                now = gh("api", f"repos/{repo}")
+                return graphql(NOW_CALLED, owner=owner, name=name)["repository"]
         except Unavailable as e:
             log(f"{repo}: what GitHub calls it now: {e}")
             return None
-        except RuntimeError:  # not there as this owner, or the App isn't on it
+        except (RuntimeError, KeyError, TypeError):  # not there as this owner, or the App isn't on it
             continue
-        if isinstance(now, dict) and now.get("full_name"):
-            return now["full_name"]
     return None
+
+
+def kept_state(repo):
+    """(key, state) for each settings file kept under repo's name, whatever
+    its case: GitHub's names don't go by it."""
+    k = repo.replace("/", "_").lower()
+    for name in sorted(os.listdir(STATE)):
+        m = re.fullmatch(r"repo-(.+)\.json", name)
+        if m and m.group(1).lower() == k:
+            yield m.group(1), load(name, {})
+
+
+def replaced(st, now):
+    """Whether settings the steward kept under a name were another repo's than
+    `now` ("id", and "created" or "createdAt"): GitHub hands a deleted repo's
+    name to the next one. By GitHub's id; for settings kept before the
+    steward kept ids, when they were set before it was made, or in the second
+    it was (createdAt has no finer grain)."""
+    if "settings" not in st:
+        return False
+    if "id" in st:
+        return st["id"] != now["id"]
+    return st["settings"] < ts(now.get("created") or now["createdAt"]) + 1
 
 
 def follow_renames(seen=()):
     """Clones whose origin has an old name of their repo, repointed at the
     current one, so that everything reading a clone's origin (project_dir,
     hook_projects, proj's rank, proj-inbox) knows it for that repo. `seen`:
-    names, lower case, known to be current, which needn't be asked about."""
+    names, lower case, known to be current, which needn't be asked about.
+
+    A name the steward knows was a deleted repo's, and that the repo now
+    answering it only took on later, is no rename: that clone holds the
+    deleted one's history, and isn't adopted. Returns those as (name, key of
+    its state), for a full pass to retire (repos.reset)."""
+    deleted = []
     for d, url in list(projects()):
-        now = None if url.lower() in seen else github_name(url)
-        if not now or now.lower() == url.lower():
+        now = None if url.lower() in seen else github_now(url)
+        if not now or now["nameWithOwner"].lower() == url.lower():
+            continue
+        gone = [k for k, st in kept_state(url) if replaced(st, now)]
+        if gone:
+            log(f"{d}: its origin {url} was a deleted repo's name, which {now['nameWithOwner']} took on: not adopting it")
+            deleted += [(url, k) for k in gone]
             continue
         path = os.path.join(CFG["projectsDir"], d)
         raw = subprocess.run(["git", "-C", path, "remote", "get-url", "origin"], capture_output=True, text=True).stdout.strip()
-        p = subprocess.run(["git", "-C", path, "remote", "set-url", "origin", raw.replace(url, now)], capture_output=True, text=True)
-        log(f"{d}: its origin {url} is now {now}" + (", repointed" if p.returncode == 0 else f", and it wouldn't repoint: {p.stderr.strip()[-300:]}"))
+        p = subprocess.run(["git", "-C", path, "remote", "set-url", "origin", raw.replace(url, now["nameWithOwner"])], capture_output=True, text=True)
+        log(f"{d}: its origin {url} is now {now['nameWithOwner']}" + (", repointed" if p.returncode == 0 else f", and it wouldn't repoint: {p.stderr.strip()[-300:]}"))
+    return deleted
+
+
+def destination(repo):
+    """Where repo's clone goes when it has none."""
+    return os.path.join(CFG["projectsDir"], repo.split("/")[1])
+
+
+def blocked(path):
+    """Whether git can't clone to path: it clones into nothing, or an empty folder."""
+    return os.path.lexists(path) and not (os.path.isdir(path) and not os.listdir(path))
 
 
 def taken(repo):
     """What's in the way of repo's checkout, as checkout() found it, while it's
-    still there: {"folder", "origin"} (None for one with no GitHub origin), or
-    None. Nothing's asked of GitHub: a folder moved out or repointed ends it."""
+    still what blocks its clone: {"folder", "origin"} (None for one with no
+    GitHub origin), or None. Nothing's asked of GitHub: a folder moved out,
+    emptied or repointed, or another projectsDir, ends it."""
     had = load(TAKEN_FILE, {}).get(repo)
-    if not had or project_dir(repo) or not os.path.lexists(had["folder"]) or origin(had["folder"]) != had["origin"]:
+    path = destination(repo)
+    if not had or had["folder"] != path or project_dir(repo) or not blocked(path) or origin(path) != had["origin"]:
         return None
     return had
 
@@ -568,10 +623,8 @@ def checkout(repo):
     d = project_dir(repo)
     if d:
         return d
-    d = repo.split("/")[1]
-    path = os.path.join(CFG["projectsDir"], d)
-    # git clones into an empty folder, and into nothing else.
-    if os.path.lexists(path) and not (os.path.isdir(path) and not os.listdir(path)):
+    path = destination(repo)
+    if blocked(path):
         had = {"folder": path, "origin": origin(path)}
         log(f"{repo}: {taken_line(repo, had)[2]}")
         save(TAKEN_FILE, {**load(TAKEN_FILE, {}), repo: had})
