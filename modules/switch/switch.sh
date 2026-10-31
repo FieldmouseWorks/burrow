@@ -74,28 +74,97 @@ if [ "${1:-}" = --revert-to ]; then
   exit 0
 fi
 
-# Run as the activation unit stops. Past its deadline, the revert starts now:
-# waiting for the timer would land it after the window. If the timer is no
-# longer armed, a confirm or an abort has already settled this switch.
+# Whether a unit is defined differently in the two systems, drop-ins and
+# template included: what switch-to-configuration acts on.
+unit_differs() {
+  local name suffix names=("$3")
+  case $3 in *@*.*) names+=("${3%%@*}@.${3##*.}") ;; esac
+  for name in "${names[@]}"; do
+    for suffix in "" .d; do
+      [ "$(readlink -e "$1/etc/systemd/system/$name$suffix" || true)" = \
+        "$(readlink -e "$2/etc/systemd/system/$name$suffix" || true)" ] || return 0
+    done
+  done
+  return 1
+}
+
+# The jobs, as ID=UNIT, a killed activation left in systemd. systemd doesn't say
+# who asked for a job, so: those on units the two systems define differently,
+# and those the dependencies that carry a stop or a start pull in from there.
+abandoned_jobs() {
+  local id unit dep grew
+  local -A job=() ours=()
+  while read -r id unit _; do
+    job[$unit]=$id
+    if unit_differs "$1" "$2" "$unit"; then ours[$unit]=1; fi
+  done < <(systemctl list-jobs --plain --no-legend)
+  # A target's dependencies are half the system: they don't make a job ours.
+  grew=1
+  while [ -n "$grew" ]; do
+    grew=
+    for unit in "${!ours[@]}"; do
+      case $unit in *.target) continue ;; esac
+      for dep in $(systemctl show --value -p RequiredBy,BoundBy,ConsistsOf,Requires,BindsTo,Wants -- "$unit"); do
+        case $dep in *.target) continue ;; esac
+        if [ -n "${job[$dep]:-}" ] && [ -z "${ours[$dep]:-}" ]; then
+          ours[$dep]=1
+          grew=1
+        fi
+      done
+    done
+  done
+  for unit in "${!ours[@]}"; do echo "${job[$unit]}=$unit"; done
+}
+
+# Finish those jobs, however many phases they have left: nothing else will, and
+# the revert's own jobs on those units would queue behind them for good. A unit
+# is done once its job is gone and it isn't still stopping: a revert's start
+# replaces the stop job, and the stop's remaining phases go on without it. Jobs
+# the revert adds later have ids not on this list.
+if [ "${1:-}" = --finish-jobs ]; then
+  shift
+  declare -A left=()
+  for arg in "$@"; do left[${arg#*=}]=${arg%%=*}; done
+  while [ "${#left[@]}" != 0 ]; do
+    declare -A live=()
+    while read -r id _ _ job_state; do live[$id]=$job_state; done < <(systemctl list-jobs --plain --no-legend)
+    for unit in "${!left[@]}"; do
+      job_state=${live[${left[$unit]}]:-}
+      if [ "$job_state" = running ] ||
+        [ "$(systemctl show -p ActiveState --value -- "$unit")" = deactivating ]; then
+        echo "killing $unit: what the killed activation asked of it is stuck" | systemd-cat -t "$SWITCH" -p warning
+        systemctl kill --signal=SIGKILL -- "$unit" || true
+      elif [ -z "$job_state" ]; then
+        unset "left[$unit]"
+      fi
+    done
+    unset live
+    sleep 1
+  done
+  exit 0
+fi
+
+# Run as the activation unit stops, with the system it was leaving and the one it
+# was putting live. Past its deadline the jobs it left are finished off and, if
+# the timer hasn't fired yet, the revert starts now: the timer would land it
+# after the window. A switch no longer pending has been settled: leave it be.
+# (That a revert or abort is on its way changes nothing: it waits on those jobs.)
 if [ "${1:-}" = --activation-stopped ]; then
-  if [ "${SERVICE_RESULT:-}" = timeout ] &&
-    [ "$(systemctl show -p SubState --value "$REVERT.timer")" = waiting ]; then
-    echo "activation killed: it hung past its deadline, reverting now" | systemd-cat -t "$SWITCH" -p warning
-    # Killing it leaves its jobs running in systemd, and a stop that never ends
-    # would hold up the revert's start of that unit in turn. Only these need a
-    # hand: the revert itself stops a unit that's stuck starting.
-    while read -r _ unit type job_state; do
-      case $type:$job_state in
-        stop:running | restart:running | reload:running)
-          echo "killing $unit: its $type is stuck" | systemd-cat -t "$SWITCH" -p warning
-          systemctl kill --signal=SIGKILL "$unit" || true
-          ;;
-      esac
-    done < <(systemctl list-jobs --plain --no-legend)
-    # In this order: with the timer gone first, nothing would hold the inactive
-    # transient service loaded.
-    systemctl start --no-block "$REVERT.service"
-    systemctl stop "$REVERT.timer"
+  if [ "${SERVICE_RESULT:-}" = timeout ] && [ "$(cat "$state/pending" 2>/dev/null)" = "$3" ]; then
+    echo "activation killed: it hung past its deadline, reverting" | systemd-cat -t "$SWITCH" -p warning
+    # The list is taken here, before the revert can add jobs of its own. If this
+    # fails, the timer still fires.
+    mapfile -t jobs < <(abandoned_jobs "$2" "$3")
+    if [ "${#jobs[@]}" != 0 ]; then
+      systemd-run --unit="$REVERT-finish" "${keep[@]}" --collect --quiet --setenv=PATH="$PATH" \
+        --property=RuntimeMaxSec="$within" "$(readlink -f "$0")" --finish-jobs "${jobs[@]}"
+    fi
+    if [ "$(systemctl show -p SubState --value "$REVERT.timer")" = waiting ]; then
+      # In this order: with the timer gone first, nothing would hold the inactive
+      # transient service loaded.
+      systemctl start --no-block "$REVERT.service"
+      systemctl stop "$REVERT.timer"
+    fi
   fi
   exit 0
 fi
@@ -171,6 +240,7 @@ prev=$(readlink -f /nix/var/nix/profiles/system)
 # land rather than interrupt it halfway through activation.
 systemctl stop "$REVERT.timer" 2>/dev/null || true
 while reverting; do sleep 1; done
+systemctl stop "$REVERT-finish.service" 2>/dev/null || true
 systemctl reset-failed "$REVERT.timer" "$REVERT.service" 2>/dev/null || true
 rm -f $state/revert-failed
 echo "$prev" >$state/prev
@@ -187,7 +257,7 @@ systemd-run --unit="$REVERT" --on-active="$within" --timer-property=AccuracySec=
 # activation would hold off the revert for good: it gets three quarters of the
 # window, and the rest is the revert's. Killing it halfway leaves nothing behind:
 # the revert picks up the units it stopped from the list switch-to-configuration
-# keeps in /run/nixos, --activation-stopped clears its stuck jobs, and
+# keeps in /run/nixos, --activation-stopped finishes off the jobs it left, and
 # tests/switch.nix holds them to that.
 # (Its "μs:" line, which says "us:" outside a UTF-8 locale.)
 while read -r key value; do
@@ -196,7 +266,7 @@ done < <(systemd-analyze timespan "$within")
 rc=0
 systemd-run --unit="$SWITCH-activate" "${keep[@]}" --collect --wait --pipe --quiet \
   --property=RuntimeMaxSec="$((window_us * 3 / 4))us" --property=TimeoutStopSec=5s \
-  --property=ExecStopPost="$(readlink -f "$0") --activation-stopped" \
+  --property=ExecStopPost="$(readlink -f "$0") --activation-stopped $prev $new" \
   "$new/bin/switch-to-configuration" test || rc=$?
 # The timer's gone once the revert has fired or the deadline started it: the old
 # system is coming back whatever the activation said.
