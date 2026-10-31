@@ -283,6 +283,12 @@
           bash ${./tests/proj-waits.sh} ${./modules/proj/waits.sh}
           touch $out
         '';
+        # When a job is over, so its scratch goes, worktrees and all.
+        proj-scratch = pkgs.runCommand "proj-scratch-check" { nativeBuildInputs = [ pkgs.shellcheck pkgs.git ]; } ''
+          shellcheck -s bash ${./modules/proj/scratch.sh} ${./tests/proj-scratch.sh}
+          bash ${./tests/proj-scratch.sh} ${./modules/proj/scratch.sh}
+          touch $out
+        '';
         # The steward and its reviewers, with stand-ins for gh, git's remote and
         # the agents, and its one-way paths as the module sets them.
         autoland = pkgs.runCommand "autoland-check" { nativeBuildInputs = [ pkgs.python3 pkgs.git pkgs.openssl ]; } ''
