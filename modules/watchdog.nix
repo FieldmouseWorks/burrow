@@ -2,7 +2,9 @@
 # notice it (crates/burrow-watchdog). Each source (the steward's open PRs, say)
 # keeps a watch file of what it waits on and by when that should have moved
 # on. Past that, the watchdog kicks the item's pass, then hands it to a
-# Claude job, then to the steward's stuck issue, and only then to the owner.
+# Claude job, then to the steward's stuck issue, whose own job (proj run
+# --unstick) takes it from there. The owner hears only what that can't take:
+# with no steward, when the steward is what's stuck, or when that job is.
 # It's a burrow-events handler: a source kicks it when its items change, its
 # job's end kicks it, and it books its own next pass at the next deadline.
 # No timer, and no GitHub calls of its own.
@@ -30,7 +32,6 @@ let
     app = if config.burrow.github.machineApp == null then null else config.burrow.github.machineApp.name;
     inherit (config.burrow.events) kick;
     escalateAfter = cfg.escalateAfterMinutes * 60;
-    ownerAfter = cfg.ownerAfterMinutes * 60;
     # The stuck issue is the steward's to publish (autoland/repos.py), on the
     # pass this kicks.
     stewardKick = if autoland then "autoland" else null;
@@ -57,8 +58,9 @@ in
   options.burrow.watchdog = {
     enable = lib.mkEnableOption ''
       the stall watchdog: what its sources wait on past its deadline is
-      kicked, then handed to a Claude job, then to the steward's stuck issue,
-      then to the owner
+      kicked, then handed to a Claude job, then to the steward's stuck issue
+      and its job (the owner hears only when there's no steward, or the
+      steward or that job is what's stuck)
     '';
 
     project = mkOption {
@@ -79,15 +81,6 @@ in
         How long its Claude job has with a stall before it goes to the
         steward's stuck issue (sooner once the job has ended with it still
         stuck, or if the job hasn't started in 15 minutes).
-      '';
-    };
-
-    ownerAfterMinutes = mkOption {
-      type = types.ints.positive;
-      default = 240;
-      description = ''
-        How long a stall stays on the stuck issue, still stuck, before the
-        owner hears of it (notify).
       '';
     };
 
@@ -134,8 +127,9 @@ in
       ## Stalls
 
       `burrow-watchdog` watches what the pipeline waits on (${lib.concatStringsSep ", " (lib.attrNames cfg.sources)}) and, past
-      each wait's deadline, kicks it, then hands it to a Claude job, then to the stuck issue, then
-      to ${config.burrow.owner}. `burrow-watchdog status` shows what it watches and what's stalled.
+      each wait's deadline, kicks it, then hands it to a Claude job, then to the stuck issue, whose
+      own job takes it from there; ${config.burrow.owner} hears only when the steward or that job is
+      what's stuck. `burrow-watchdog status` shows what it watches and what's stalled.
     '';
   };
 }

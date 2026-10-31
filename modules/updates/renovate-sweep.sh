@@ -67,11 +67,14 @@ ready=$(mktemp)
 stuck=$(mktemp)
 trap 'rm -f "$held" "$ready" "$stuck"' EXIT
 
-for d in "$src"/*/; do
+# A hidden folder counts only when it's named for its repo (o/.github in .github).
+for d in "$src"/*/ "$src"/.*/; do
   p=$(basename "$d")
   url=$(git -C "$d" remote get-url origin 2>/dev/null) || continue
   repo=$(sed -E 's#^(https://github.com/|git@github.com:)##; s#\.git$##' <<<"$url")
   [[ $repo == */* ]] || continue
+  own=${repo#*/}
+  [[ $p != .* || ${p,,} == "${own,,}" ]] || continue
   [ -z "$only" ] || [ "${repo,,}" = "${only,,}" ] || continue
   # repos.json names each repo as GitHub spells it; the clone's remote may
   # not (GitHub doesn't mind case), so the two are matched without it.

@@ -197,7 +197,7 @@ with open(f"{tmp}/config.json", "w") as f:
         "app": {"id": 7, "slug": "steward"},
         "baselineJobs": False, "baselinePerPass": 1, "authors": ["sam"], "bots": ["dependabot", "renovate", "workers"], "machinery": None,
         "stateDir": f"{tmp}/state", "majorKey": f"{tmp}/sweep.key", "projectsDir": f"{tmp}/none", "renovateEmail": "bot@renovateapp.com", "proj": "proj", "jobTimeout": 60, "jobIdle": 20, "reviewTimeout": 30, "owner": "Sam", "cleanBranches": False,
-        "labels": {"hold": "hold", "owner": "needs-owner", "first": "first"}, "notify": {"repo": "", "assignee": "", "label": "autoland"}, "inbox": {"enable": False, "label": "claude", "authors": ["sam"]},
+        "labels": {"hold": "hold", "owner": "needs-owner", "first": "first", "waiting": {"releaseAge": "waiting: release age", "proofSlot": "waiting: proof slot", "reviewer": "waiting: reviewer"}}, "notify": {"repo": "", "assignee": "", "label": "autoland"}, "inbox": {"enable": False, "label": "claude", "unstickLabel": "unstick", "authors": ["sam"]},
         "dashboard": {"enable": False, "waitDays": 4, "errorDays": 1, "title": "Dependency Dashboard",
                       "renovateKick": "http://127.0.0.1:9/kick/renovate", "renovate": None,
                       "renovateRuns": f"{tmp}/renovate-runs"},
@@ -351,6 +351,21 @@ def post(repo, pr, r, answer):
 
 
 STATES = {}  # a job's state, by id, as `proj state` says it: running unless set
+STOPPED = []  # the jobs `proj stop` ended, in order
+UNSTOPPABLE = set()  # the jobs `proj stop` can't stop
+
+
+def stop_job(jid):
+    """proj stop: the job's over, and `proj state` says it failed (its turn's
+    unit was stopped before it wrote an outcome); one in UNSTOPPABLE is
+    refused."""
+    if jid in UNSTOPPABLE:
+        return False
+    STOPPED.append(jid)
+    STATES[jid] = "failed"
+    return True
+
+
 T0 = "2026-10-24T00:00:00Z"
 # The times a PR's status names (H.clock) are in the machine's zone: UTC here.
 os.environ["TZ"] = "UTC"
@@ -475,5 +490,6 @@ def stand_in():
     C.write = write
     C.job = job
     C.job_state = lambda jid: STATES.get(jid, "running")
+    C.stop_job = stop_job
     V.queue = queue
     V.post = post

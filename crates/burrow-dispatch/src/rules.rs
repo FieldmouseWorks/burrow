@@ -108,6 +108,7 @@ pub fn decide(
                 link: Some(format!("https://github.com/{repo}")),
                 kick: Some(cfg.handler.clone()),
                 line: false,
+                unstick: false,
             },
         );
     }
@@ -190,6 +191,7 @@ pub fn decide(
                     link,
                     kick: None,
                     line: false,
+                    unstick: false,
                 },
                 _ => Item {
                     what,
@@ -205,6 +207,7 @@ pub fn decide(
                     link,
                     kick: Some(dep.handler.clone()),
                     line: false,
+                    unstick: false,
                 },
             };
             d.items.insert(key, item);
@@ -261,6 +264,7 @@ fn runner(
             link: Some(oldest.url.clone()),
             kick: Some(cfg.handler.clone()),
             line: false,
+            unstick: false,
         },
     );
     if snap.switching || recent.len() >= RESTARTS {

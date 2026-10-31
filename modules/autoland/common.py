@@ -439,15 +439,16 @@ def projects():
     Only a clone of its own counts: a hidden folder, or a worktree of the
     repo (`.git` is a file there) checked out on some other branch, sorts
     first and shares the origin, but a job sent there works on the wrong
-    tree."""
+    tree. A hidden folder named for the repo itself is that repo's clone
+    (FieldmouseWorks/.github in .github)."""
     src = CFG["projectsDir"]
     for d in sorted(os.listdir(src)) if os.path.isdir(src) else []:
-        if d.startswith(".") or not os.path.isdir(os.path.join(src, d, ".git")):
+        if not os.path.isdir(os.path.join(src, d, ".git")):
             continue
         p = subprocess.run(["git", "-C", os.path.join(src, d), "remote", "get-url", "origin"],
                            capture_output=True, text=True)
         url = re.sub(r"^(https://github\.com/|git@github\.com:)", "", p.stdout.strip()).removesuffix(".git")
-        if url.count("/") == 1:
+        if url.count("/") == 1 and (not d.startswith(".") or d.lower() == url.split("/")[1].lower()):
             yield d, url
 
 
@@ -506,6 +507,19 @@ def job_state(jid):
         return "running"
     p = subprocess.run([CFG["proj"], "state", jid], capture_output=True, text=True)
     return p.stdout.strip() or None
+
+
+def stop_job(jid):
+    """End a Claude job (proj stop): its turn, queued or running, and
+    anything it awaits. True once it's over; False if proj couldn't stop it,
+    and it may still be at work."""
+    if DRY:
+        log(f"  would: proj stop {jid}")
+        return True
+    p = subprocess.run([CFG["proj"], "stop", jid], capture_output=True, text=True)
+    if p.returncode:
+        log(f"proj stop {jid}: {p.stderr.strip()[-300:]}")
+    return p.returncode == 0
 
 
 def coverage(repos, covered):

@@ -5,12 +5,16 @@ re-run), the log names both commits, and a head that no longer merges
 cleanly fails the job without anything checked. With pr-gate off (a train
 repo's), a PR to the default branch gets no gate, and every push and a PR to
 any other branch still do, a branch whose name differs only in case included.
+A PR's newer run cancels what its last one still has going, and nothing
+else: not a push's run, another PR's, or a sibling call with inputs of its
+own; and an old run whose train job was cancelled checks nothing.
 
   python3 -I tests/pr-base.py .github/workflows/flake-check.yml
   nix build .#checks.x86_64-linux.pr-base
 """
 
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -25,8 +29,73 @@ assert pr_gate["type"] == "boolean" and pr_gate["default"] is True, pr_gate
 train = workflow["jobs"]["train"]
 assert train.get("if") == "${{ !inputs.pr-gate && github.event_name == 'pull_request' }}", train.get("if")
 assert job.get("needs") == "train", job.get("needs")
-assert job.get("if") == ("${{ !cancelled() && (inputs.pr-gate || github.event_name != 'pull_request' ||"
-                         " needs.train.outputs.lands != 'true') }}"), job.get("if")
+
+
+def text(x):
+    """A value as GitHub puts it in a string."""
+    return "" if x is None else str(x).lower() if isinstance(x, bool) else str(x)
+
+
+def value(expr, ctx):
+    """An Actions expression (${{ ... }}, or text around some) as GitHub
+    works it out, for the little these use: context paths, string literals,
+    format(), cancelled(), !, ==, !=, && and || (which, as in Python, give
+    an operand's value)."""
+    whole = re.fullmatch(r"\$\{\{(.*)\}\}", expr.strip(), re.S)
+    if not whole or "${{" in whole[1]:
+        return re.sub(r"\$\{\{(.*?)\}\}", lambda m: text(value("${{" + m[1] + "}}", ctx)), expr)
+    e = whole[1].replace("cancelled()", "ctx['cancelled()']").replace("format(", "fmt(")
+    e = re.sub(r"\b[a-z_][\w-]*(?:\.[\w-]+)+", lambda m: f"ctx[{m[0]!r}]", e)
+    e = e.replace("!=", " NE ").replace("!", " not ").replace(" NE ", " != ").replace("&&", " and ").replace("||", " or ")
+    return eval(e, {"fmt": lambda f, *a: f.format(*map(text, a)), "ctx": ctx})
+
+
+# Whether the check job runs: with pr-gate, for every event; without it,
+# for anything but a PR the train lands, a train job that failed included
+# (fail closed), but not once its train job was cancelled (a newer run of
+# the PR has it), nor once the run itself was.
+for gate, event, train_result, lands, cancelled, runs in (
+        (True, "pull_request", "skipped", None, False, True),
+        (True, "push", "skipped", None, False, True),
+        (False, "push", "skipped", None, False, True),
+        (False, "pull_request", "success", "true", False, False),
+        (False, "pull_request", "success", "false", False, True),
+        (False, "pull_request", "failure", None, False, True),
+        (False, "pull_request", "cancelled", None, False, False),
+        (True, "pull_request", "skipped", None, True, False)):
+    ctx = {"cancelled()": cancelled, "inputs.pr-gate": gate, "github.event_name": event,
+           "needs.train.result": train_result, "needs.train.outputs.lands": lands}
+    assert bool(value(job["if"], ctx)) == runs, (gate, event, train_result, lands, cancelled, job["if"])
+print("the gate runs where it should: ok")
+
+# Each job's concurrency group: a PR's runs share one, so the newer cancels
+# the older; anything else is its run's own; jobs, workflows, PRs and calls
+# with other inputs never share one.
+INPUTS = {"inputs.runner": "ubuntu-latest", "inputs.install-nix": True, "inputs.eval-apart": False,
+          "inputs.pr-gate": True, "inputs.build-skip": "agents"}
+
+
+def group(name, event="pull_request", pr=12, run=1001, workflow="flake", **inputs):
+    c = workflow_jobs[name]["concurrency"]
+    assert c["cancel-in-progress"] is True, (name, c)
+    ctx = {**INPUTS, **{f"inputs.{k.replace('_', '-')}": v for k, v in inputs.items()}, "github.event_name": event,
+           "github.event.pull_request.number": pr if event == "pull_request" else None, "github.run_id": run,
+           "github.workflow": workflow}
+    return value(c["group"], ctx)
+
+
+workflow_jobs = workflow["jobs"]
+for name in ("train", "check", "commits"):
+    assert group(name) == group(name, run=1002), name  # the PR's next run cancels this one
+    others = [group(name, pr=13), group(name, workflow="other"), group(name, runner="remi"),
+              group(name, build_skip=""), group(name, eval_apart=True), group(name, pr_gate=False),
+              group(name, install_nix=False)]
+    assert group(name) not in others and len(set(others)) == len(others), (name, others)
+assert len({group(n) for n in ("train", "check", "commits")}) == 3
+# A push or a train candidate is a run of its own: none cancels another.
+assert group("check", "push", run=1001) != group("check", "push", run=1002)
+assert group("check", "push", run=12) != group("check", pr=12)
+print("only a PR's newer run cancels: ok")
 assert train["outputs"] == {"lands": "${{ steps.base.outputs.lands }}"}, train["outputs"]
 base_step = next(s for s in train["steps"] if s.get("id") == "base")
 assert base_step["shell"] == "bash"
