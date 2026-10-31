@@ -1,9 +1,10 @@
 # rust-cache, for real: a machine with the cache on for dev and for a CI
 # runner's user, ci. A crate with no dependencies, built without incremental
 # compilation, stands in for a build's dependencies. The checks:
-# - a fresh target dir's build comes out of the cache, for dev and for the
-#   runner, whose sandbox makes the rest of the system read-only, and for a
-#   unit systemd-run started;
+# - a fresh target dir's build comes out of the cache, wherever the target
+#   dir is and whether CARGO_TARGET_DIR names it, for dev and for the runner,
+#   whose sandbox makes the rest of the system read-only, and for a unit
+#   systemd-run started;
 # - all of a user's units share one daemon: a runner that has been building
 #   all along takes what another unit just stored (a daemon of its own would
 #   still miss it), and the compile runs in the runner's unit, not the
@@ -12,6 +13,8 @@
 #   it to compile a program it can reach, and it sees nothing but sccache and
 #   the cache;
 # - a crate bigger than sccache's default message size is cached too;
+# - the C a build script compiles with the cc crate comes out of the cache
+#   too, which cc does only for a RUSTC_WRAPPER named sccache;
 # - a cached `cargo check` never stands in for clippy, and a compile error
 #   still fails the build;
 # - whatever keeps the cache from working compiles without it: incremental
@@ -38,6 +41,21 @@ let
   # clippy's needless_return, which rustc doesn't mind.
   ok = crate "ok" "pub fn next(x: i32) -> i32 { return x + 1; }";
   broken = crate "broken" ''pub fn next(x: i32) -> i32 { "not a number" }'';
+
+  # A crate whose build script compiles C with the cc crate, set up to build
+  # offline from cc and its dependencies, vendored.
+  vendored = pkgs.rustPlatform.importCargoLock { lockFile = ./rust-cache/c-build/Cargo.lock; };
+  cBuild = pkgs.runCommand "crate-c-build" { } ''
+    cp -r ${./rust-cache/c-build} $out
+    chmod -R u+w $out
+    mkdir $out/.cargo
+    cat >$out/.cargo/config.toml <<'EOF'
+    [source.crates-io]
+    replace-with = "vendored"
+    [source.vendored]
+    directory = "${vendored}"
+    EOF
+  '';
 
   # A program a build plants where the daemon can reach it, noting which
   # cgroup it runs in. Linked against the glibc of the daemon's own sccache,
@@ -85,7 +103,7 @@ pkgs.testers.runNixOSTest {
       enable = true;
       users = [ "ci" ];
     };
-    environment.systemPackages = with pkgs; [ cargo rustc clippy python3 ];
+    environment.systemPackages = with pkgs; [ cargo rustc clippy gcc python3 ];
 
     users.users.dev = {
       isNormalUser = true;
@@ -168,8 +186,8 @@ pkgs.testers.runNixOSTest {
         )
         return json.loads(out)["stats"]
 
-    def hits(user, root="/var/cache/sccache"):
-        return stats(user, root)["cache_hits"]["counts"].get("Rust", 0)
+    def hits(user, root="/var/cache/sccache", language="Rust"):
+        return stats(user, root)["cache_hits"]["counts"].get(language, 0)
 
     def ok(result, what):
         status, out = result
@@ -203,6 +221,11 @@ pkgs.testers.runNixOSTest {
         before = hits("dev")
         ok(run(f"cd a && rm -rf target && {build}"), "dev's second build")
         assert hits("dev") > before, "dev's fresh target dir missed the cache"
+        # However the target dir is named, and wherever it is.
+        for var, dir in [("CARGO_TARGET_DIR", "t1"), ("CARGO_TARGET_DIR", "t2"), ("CARGO_BUILD_TARGET_DIR", "t3")]:
+            before = hits("dev")
+            ok(run(f"cd a && {var}=/home/dev/{dir} {build}"), f"a build into {var}={dir}")
+            assert hits("dev") > before, f"a fresh target dir named by {var} missed the cache"
 
     with subtest("a crate bigger than sccache's default message size is cached too"):
         place("${ok}", "/home/dev/big", "dev")
@@ -217,6 +240,13 @@ pkgs.testers.runNixOSTest {
         before = hits("dev")
         ok(run(f"cd big && rm -rf target && {build}"), "the big crate's second build")
         assert hits("dev") > before, "the big crate missed the cache"
+
+    with subtest("a build script's C compiles come out of the cache too"):
+        place("${cBuild}", "/home/dev/c", "dev")
+        ok(run(f"cd c && {build} --offline"), "the C crate's first build")
+        before = hits("dev", language="C/C++")
+        ok(run(f"cd c && rm -rf target && {build} --offline"), "the C crate's second build")
+        assert hits("dev", language="C/C++") > before, "a build script's C compile missed the cache"
 
     with subtest("all of a user's units share one daemon, and compile in their own"):
         # The runner builds first, so anything of its own that serves it is

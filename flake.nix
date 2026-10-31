@@ -43,8 +43,30 @@
         rust.testInputs = pkgs: [ pkgs.openssl ];
       };
       # burrow's own programs, one Cargo workspace (crates/): their package
-      # and their gate, built for every platform lib/project.nix knows.
-      crates = self.lib.project { self = ./crates; rust = { }; };
+      # and their gate, built for every platform lib/project.nix knows. Its
+      # tests include the shared workflows' (crates/burrow-workflows), which
+      # read these files and run git, jq and nix; proj's clone repos to read
+      # their origins.
+      crates = self.lib.project {
+        inherit self;
+        rust = {
+          dir = "crates";
+          include = [
+            ".github/workflows/flake-check.yml"
+            ".github/workflows/flake.yml"
+            "templates/project/.github/workflows/flake.yml"
+            "modules/autoland/prs.py"
+          ];
+          testInputs = pkgs: [ pkgs.git pkgs.jq pkgs.nix ];
+        };
+      };
+      # A workspace below its repo's root whose test reads a file outside
+      # it: lib/project.nix's `include`, for its checks.
+      houseInclude = self.lib.project {
+        self = ./tests/house/rust-include;
+        systems = [ system ];
+        rust = { dir = "ws"; include = [ "spec/fact.txt" ]; };
+      };
       # A workspace whose build script finds a native library with
       # pkg-config: lib/project.nix's native inputs, for its checks.
       houseNative = {
@@ -89,6 +111,9 @@
 
       checks.${system} = {
         example = self.nixosConfigurations.example.config.system.build.toplevel;
+        # lib/project.nix's secrets check over all of burrow's tracked files;
+        # the projects below each see only their own directory.
+        secrets = (self.lib.project { inherit self; systems = [ system ]; }).checks.${system}.secrets;
         # Each module on its own, with only what it imports: evaluating is the
         # check, so these build nothing. A service that says how it runs (a
         # Type) has something to run too: systemd refuses one without
@@ -264,25 +289,22 @@
         proj-clock = import ./tests/proj-clock.nix { inherit self pkgs; };
         # A switch reaches the turns already waiting in line, each in its place.
         proj-deployed = import ./tests/proj-deployed.nix { inherit self pkgs; };
-        # Who takes a free slot: the pipeline's own (only its own repos'
-        # pipeline jobs), and each project's cap.
-        proj-pick = pkgs.runCommand "proj-pick-check" { nativeBuildInputs = [ pkgs.shellcheck pkgs.git ]; } ''
-          shellcheck -s bash ${./modules/proj/pick.sh} ${./tests/proj-pick.sh}
-          bash ${./tests/proj-pick.sh} ${./modules/proj/pick.sh}
-          touch $out
-        '';
-        # What a look at the line costs, and who gets to skip one.
-        proj-line = pkgs.runCommand "proj-line-check" { nativeBuildInputs = [ pkgs.shellcheck pkgs.git pkgs.strace pkgs.util-linux ]; } ''
-          shellcheck -s bash ${./modules/proj/line.sh} ${./tests/proj-line.sh}
-          bash ${./tests/proj-line.sh} ${./modules/proj/pick.sh} ${./modules/proj/line.sh}
-          touch $out
-        '';
-        # What each job waits on, as the stall watchdog hears it.
-        proj-waits = pkgs.runCommand "proj-waits-check" { nativeBuildInputs = [ pkgs.shellcheck pkgs.jq pkgs.util-linux ]; } ''
-          shellcheck -s bash ${./modules/proj/waits.sh} ${./tests/proj-waits.sh}
-          bash ${./tests/proj-waits.sh} ${./modules/proj/waits.sh}
-          touch $out
-        '';
+        # The example's proj reads the config its module writes (a field the
+        # binary doesn't know fails it), and a job it doesn't have is failed;
+        # so does its proj-inbox, with the inbox on, which has no issues yet.
+        proj-config =
+          let
+            inbox = self.nixosConfigurations.example.extendModules {
+              modules = [ { burrow.proj.inbox = { enable = true; authors = [ "octocat" ]; }; } ];
+            };
+          in
+          pkgs.runCommand "proj-config-check" { } ''
+            got=$(${self.nixosConfigurations.example.config.burrow.tools.proj}/bin/proj state no-such-job)
+            [ "$got" = failed ] || { echo "proj state said: $got"; exit 1; }
+            got=$(${inbox.config.burrow.tools.proj-inbox}/bin/proj-inbox status)
+            [ -z "$got" ] || { echo "proj-inbox status said: $got"; exit 1; }
+            touch $out
+          '';
         # The steward and its reviewers, with stand-ins for gh, git's remote and
         # the agents, and its one-way paths as the module sets them.
         autoland = pkgs.runCommand "autoland-check" { nativeBuildInputs = [ pkgs.python3 pkgs.git pkgs.openssl ]; } ''
@@ -309,6 +331,17 @@
         # field the binary doesn't know fails it).
         watchdog-config = pkgs.runCommand "watchdog-config-check" { } ''
           ${self.nixosConfigurations.example.config.systemd.services.burrow-watchdog.serviceConfig.ExecStart} status
+          touch $out
+        '';
+        # Claude Code watches /etc/claude-code and follows what it finds: a
+        # symlink there has it walking the Nix store for as long as it runs.
+        claude-etc = let
+          etc = self.nixosConfigurations.example.config.environment.etc;
+          names = builtins.filter (pkgs.lib.hasPrefix "claude-code/") (builtins.attrNames etc);
+          links = builtins.filter (name: etc.${name}.mode == "symlink") names;
+        in pkgs.runCommand "claude-etc-check" { } ''
+          ${pkgs.lib.optionalString (names == [ ]) ''echo "no claude-code files in /etc"; exit 1''}
+          ${pkgs.lib.optionalString (links != [ ]) ''echo "symlinks into the store: ${toString links}"; exit 1''}
           touch $out
         '';
         # The steward's tools reach a pass however it's started: by hand or
@@ -387,6 +420,7 @@
                     ci-runner = { repo = "sam/homelab"; labels = [ "homelab" ]; };
                     bare = { repo = "sam/homelab"; labels = [ "bare" ]; defaultLabels = false; };
                   };
+                  fresh = { enable = true; owner = "sam-org"; repos = [ "sam-org/homelab" ]; };
                 };
                 burrow.updates = {
                   enable = true;
@@ -403,8 +437,13 @@
             ] ++ modules;
           };
           committed = machine { rev = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"; } [ ];
+          dispatchOnly = machine { } [ { burrow.dispatch.fresh.enable = lib.mkForce false; } ];
           dirty = machine { dirtyRev = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-dirty"; } [ ];
           arm = machine { } [ { nixpkgs.hostPlatform = lib.mkForce "aarch64-linux"; } ];
+          # remi's install rehearsal turns burrow-events' handlers off.
+          unhandled = machine { rev = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"; } [ { burrow.events.handlers = lib.mkForce { }; } ];
+          # A machine may space the passes out itself.
+          spaced = machine { } [ { burrow.events.handlers.dispatch.gap = lib.mkForce 600; } ];
           settings = m: m.config.burrow.dispatch.settings;
           revisions = map (m: m.config.system.configurationRevision) [ committed dirty ];
           deploy = { inherit ((settings committed).deploy) own running; };
@@ -417,15 +456,53 @@
           };
           labels = m: lib.mapAttrs (_: r: r.labels) (settings m).runners;
           wantLabels = arch: { ci-runner = [ "self-hosted" "Linux" arch "homelab" ]; bare = [ "bare" ]; };
+          # The fresh runners: what a pass reads, the repo's queued jobs
+          # among its events, and a unit that starts as a user and in a
+          # state directory nothing had before, with its registration as a
+          # credential only it reads, and that nothing outlives.
+          wantFresh = {
+            owner = "sam-org"; group = 1; repos = [ "sam-org/homelab" ]; label = "fresh-burrow";
+            prefix = "fresh-burrow-"; most = 2; template = "burrow-fresh-runner@"; configs = "/run/burrow-fresh";
+          };
+          freshUnit = committed.config.systemd.services."burrow-fresh-runner@";
+          # Each setting in the section of the unit file systemd reads it
+          # from: one in the wrong one is ignored.
+          freshWant = {
+            Unit = [ "CollectMode=inactive-or-failed" ];
+            Service = [
+              "Type=exec" "DynamicUser=true" "StateDirectory=burrow-fresh-runner/%i"
+              "LoadCredential=jit:/run/burrow-fresh/%i" "Restart=no" "KillMode=control-group"
+            ];
+          };
+          freshSections = lib.listToAttrs (map (part:
+            let lines = lib.splitString "\n" part;
+            in lib.nameValuePair (lib.removeSuffix "]" (builtins.head lines)) (builtins.tail lines)
+          ) (builtins.tail (lib.splitString "\n[" ("\n" + builtins.unsafeDiscardStringContext committed.config.systemd.units."burrow-fresh-runner@.service".text))));
+          freshGot = lib.mapAttrs (name: want: builtins.filter (l: builtins.elem l (freshSections.${name} or [ ])) want) freshWant;
+          handled = committed.config.burrow.events.handlers.dispatch.repos;
         in
           assert lib.assertMsg (deploy == want) "dispatch: ${builtins.toJSON deploy}, not ${builtins.toJSON want}";
           assert lib.assertMsg (settings dirty == settings committed)
             "dispatch: a build from a dirty tree isn't the same tree committed: ${builtins.toJSON (settings dirty)}, ${builtins.toJSON (settings committed)}";
-          # What a pass compares the own repo at: the switch stamps it.
+          # What HOST-update tells main from local changes by: the switch stamps it.
           assert lib.assertMsg (revisions == [ "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-dirty" ])
             "dispatch: the systems are stamped ${builtins.toJSON revisions}";
           assert lib.assertMsg (labels committed == wantLabels "X64") "dispatch: x86_64's labels: ${builtins.toJSON (labels committed)}";
           assert lib.assertMsg (labels arm == wantLabels "ARM64") "dispatch: aarch64's labels: ${builtins.toJSON (labels arm)}";
+          assert lib.assertMsg ((settings committed).fresh == wantFresh) "dispatch: fresh runners ${builtins.toJSON (settings committed).fresh}";
+          assert lib.assertMsg (builtins.elem "sam-org/homelab" handled) "dispatch: the fresh runners' repo's events aren't its: ${builtins.toJSON handled}";
+          assert lib.assertMsg (freshGot == freshWant) "dispatch: a fresh runner's unit has ${builtins.toJSON freshGot}";
+          assert lib.assertMsg (lib.hasInfix "rm -rf /var/lib/private/burrow-fresh-runner/%i" freshUnit.serviceConfig.ExecStopPost)
+            "dispatch: a fresh runner's state outlives it: ${freshUnit.serviceConfig.ExecStopPost}";
+          assert lib.assertMsg (!freshUnit.restartIfChanged && !freshUnit.stopIfChanged) "dispatch: a switch can cut a fresh runner's job short";
+          # The job they're for, burrow's flake-check.yml, calls these.
+          assert lib.assertMsg (lib.all (p: builtins.elem p (map lib.getName freshUnit.path)) [ "jq" "gh" "curl" ])
+            "dispatch: a fresh runner's jobs find ${toString (map lib.getName freshUnit.path)} on PATH";
+          assert lib.assertMsg ((settings dispatchOnly).fresh == null) "dispatch: fresh runners nobody asked for";
+          assert lib.assertMsg (settings unhandled == settings committed)
+            "dispatch: with the handlers off, the settings are ${builtins.toJSON (settings unhandled)}";
+          assert lib.assertMsg ((settings committed).gap == 120 && (settings spaced).gap == 600)
+            "dispatch: runners' waits allow for a ${toString (settings committed).gap}s gap, and ${toString (settings spaced).gap}s with passes 600s apart";
           pkgs.runCommand "dispatch-config-check" { } ''
             ${self.nixosConfigurations.example.config.systemd.services.burrow-dispatch.serviceConfig.ExecStart} status
             ${committed.config.systemd.services.burrow-dispatch.serviceConfig.ExecStart} status
@@ -436,6 +513,34 @@
         notify = pkgs.runCommand "notify-check" { nativeBuildInputs = [ pkgs.shellcheck pkgs.jq pkgs.bash ]; } ''
           shellcheck -s bash ${./tests/notify.sh}
           bash ${./tests/notify.sh} ${./modules/notify/notify.sh}
+          touch $out
+        '';
+        # claude-trust, as the machine gets it, on a stand-in ~/.claude.json:
+        # both spellings of a folder, the rest kept, Claude Code's lock kept to.
+        claude-trust = pkgs.runCommand "claude-trust-check" { nativeBuildInputs = [ pkgs.shellcheck pkgs.jq ]; } ''
+          shellcheck -s bash ${./tests/claude-trust.sh}
+          bash ${./tests/claude-trust.sh} ${pkgs.lib.getExe self.nixosConfigurations.example.config.burrow.tools.claude-trust}
+          touch $out
+        '';
+        # The usage watcher's Claude Code starts in a folder its unit has
+        # trusted already, so it never meets that question with nobody there:
+        # under a state dir with a space in it too, one argument however it's
+        # spelled (systemd's quoting, which bash reads the same for this one).
+        usage-reset-trust = let
+          example = (self.nixosConfigurations.example.extendModules {
+            modules = [{ burrow.stateDir = pkgs.lib.mkForce "/var/lib/burrow state"; }];
+          }).config;
+          pre = map (pkgs.lib.removePrefix "-")
+            (pkgs.lib.toList (example.systemd.services.burrow-usage-reset.serviceConfig.ExecStartPre or [ ]));
+        in pkgs.runCommand "usage-reset-trust-check" { nativeBuildInputs = [ pkgs.jq ]; } ''
+          export HOME=$TMPDIR/home
+          mkdir -p "$HOME"
+          echo '{}' >"$HOME/.claude.json"
+          ${pkgs.lib.concatLines pre}
+          # Where the watcher starts it: its state dir's claude/.
+          dir=${pkgs.lib.escapeShellArg "${example.burrow.stateDir}/usage-reset/claude"}
+          jq -e --arg d "$dir" '.projects[$d].hasTrustDialogAccepted == true' "$HOME/.claude.json" >/dev/null ||
+            { echo "burrow-usage-reset starts its Claude Code in $dir untrusted" >&2; exit 1; }
           touch $out
         '';
         # The update job's fix jobs: pipeline work, one per problem while it's
@@ -450,6 +555,15 @@
         update-push = pkgs.runCommand "update-push-check" { nativeBuildInputs = [ pkgs.shellcheck pkgs.git ]; } ''
           shellcheck -s bash ${./modules/updates/push.sh} ${./tests/update-push.sh}
           bash ${./tests/update-push.sh} ${./modules/updates/push.sh}
+          touch $out
+        '';
+        # What HOST-update compares to tell what runs already
+        # (modules/updates/running.sh): a system built again from a new commit
+        # of the same tree runs already, and its record of what's live says
+        # so. Real git, with a stand-in for nix.
+        update-running = pkgs.runCommand "update-running-check" { nativeBuildInputs = [ pkgs.shellcheck pkgs.git pkgs.jq ]; } ''
+          shellcheck -s bash ${./modules/updates/running.sh} ${./tests/update-running.sh}
+          bash ${./tests/update-running.sh} ${./modules/updates/running.sh}
           touch $out
         '';
         # HOST-update's VM tests take a heavy slot.
@@ -650,11 +764,17 @@
         # Which updates Renovate merges itself under the example's config, as
         # Renovate's own rules read it: all but a major, a commit pin of an
         # action (pinDigest) included. The steward leaves Renovate's own PRs
-        # to Renovate, so one it won't merge sits green for good.
+        # to Renovate, so one it won't merge sits green for good. In a repo
+        # with its train on it merges none: the train lands them all.
         renovate-automerge = pkgs.runCommand "renovate-automerge-check" { } ''
           export HOME=$TMPDIR
-          got=$(${pkgs.lib.getExe pkgs.nodejs_24} ${./tests/renovate-automerge.mjs} ${pkgs.renovate} \
-            ${self.nixosConfigurations.example.config.systemd.services.renovate.environment.RENOVATE_CONFIG_FILE} 2>/dev/null)
+          check() {
+            ${pkgs.lib.getExe pkgs.nodejs_24} ${./tests/renovate-automerge.mjs} ${pkgs.renovate} \
+              ${self.nixosConfigurations.example.config.systemd.services.renovate.environment.RENOVATE_CONFIG_FILE} "$1" 2>/dev/null
+          }
+          train=$(check sam/homelab)
+          [ -z "$(grep -v ' no$' <<<"$train")" ] && [ "$(wc -l <<<"$train")" = 7 ] || { echo "in the train repo: $train"; exit 1; }
+          got=$(check sam/other)
           want='major no
           minor yes
           patch yes
@@ -702,22 +822,6 @@
           python3 -I ${./tests/house-sync.py} ${./modules/house/sync.sh} ${./house}
           touch $out
         '';
-        # The shared CI's commit check (flake-check.yml's commits job), its
-        # own script with a stand-in for gh: a PR commit signed by a key
-        # GitHub can't match to its committer fails it.
-        commit-signatures = pkgs.runCommand "commit-signatures-check" { nativeBuildInputs = [ (pkgs.python3.withPackages (p: [ p.pyyaml ])) pkgs.jq ]; } ''
-          python3 -I ${./tests/commit-signatures.py} ${./.github/workflows/flake-check.yml}
-          touch $out
-        '';
-        # The shared CI's gate step with eval-apart (flake-check.yml), its own
-        # script with nix evaluating test flakes for real and a stand-in for
-        # its builds: one nix process per derivation, each a GC root until
-        # it's built, every output checked as nix flake check checks it, and a
-        # flake with an output it doesn't know refused.
-        gate = pkgs.runCommand "gate-check" { nativeBuildInputs = [ (pkgs.python3.withPackages (p: [ p.pyyaml ])) pkgs.git pkgs.jq pkgs.nix ]; } ''
-          python3 -I ${./tests/gate.py} ${./.github/workflows/flake-check.yml}
-          touch $out
-        '';
         # flake-gate: a repo's CI gate step, run here as CI runs it, and
         # burrow's own evaluating apart, so a Claude job's gate holds little.
         flake-gate = pkgs.runCommand "flake-gate-check" { nativeBuildInputs = [ (pkgs.callPackage ./tools/flake-gate/package.nix { }) pkgs.git pkgs.yq-go pkgs.shellcheck ]; } ''
@@ -725,28 +829,22 @@
           bash ${./tests/flake-gate.sh} ${./.}
           touch $out
         '';
-        # The shared CI's attestation step (flake-check.yml), its own script
-        # with stand-ins for curl and gh: a private repo's job signs with its
-        # own token, its audience the digest of the statement kept beside it.
-        attestation = pkgs.runCommand "attestation-check" { nativeBuildInputs = [ (pkgs.python3.withPackages (p: [ p.pyyaml ])) pkgs.git pkgs.jq ]; } ''
-          python3 -I ${./tests/attestation.py} ${./.github/workflows/flake-check.yml}
-          touch $out
-        '';
-        # The shared CI's merge step (flake-check.yml), its own script on
-        # real repos: a PR is checked merged with its base as the base is when
-        # the job starts, and one that no longer merges cleanly fails.
-        pr-base = pkgs.runCommand "pr-base-check" { nativeBuildInputs = [ (pkgs.python3.withPackages (p: [ p.pyyaml ])) pkgs.git ]; } ''
-          python3 -I ${./tests/pr-base.py} ${./.github/workflows/flake-check.yml}
-          touch $out
-        '';
-        # The shared rust-first check (rust-first-check.yml), its own script
-        # with a stand-in for gh: a PR that adds Python, or grows it past what
-        # a fix adds, fails without a "Why not Rust:" line in its body, as a
-        # commit status a newer run replaces; and its callers, burrow's and
-        # the template's, run it again when the body is edited.
-        rust-first = pkgs.runCommand "rust-first-check" { nativeBuildInputs = [ (pkgs.python3.withPackages (p: [ p.pyyaml ])) pkgs.jq ]; } ''
-          python3 -I ${./tests/rust-first.py} ${./.github/workflows/rust-first-check.yml} \
-            ${./.github/workflows/rust-first.yml} ${./templates/project/.github/workflows/rust-first.yml}
+        # The house action's callers, burrow's and the template's: each runs
+        # it on every push and whenever the title or body is edited, with a
+        # token that can post its statuses, and the action hands the check
+        # the event's PR and head. The check itself is crates/burrow-house,
+        # gated as crates-*.
+        house-callers = pkgs.runCommand "house-callers-check" { nativeBuildInputs = [ pkgs.yq-go ]; } ''
+          for caller in ${./.github/workflows/house.yml} ${./templates/project/.github/workflows/house.yml}; do
+            yq -e '.on.pull_request.types | sort | join(",") == "edited,opened,reopened,synchronize"' "$caller"
+            yq -e '.jobs.house.permissions | to_entries | map(.key + "=" + .value) | join(",") == "contents=read,pull-requests=read,statuses=write"' "$caller"
+            yq -e '.jobs.house.steps[-1].uses | test("^(\./|FieldmouseWorks/burrow/)\.github/actions/house(@|$)")' "$caller"
+          done
+          action=${./.github/actions/house/action.yml}
+          # Built where rustup finds the crates' pinned toolchain.
+          yq -e '.runs.steps[0]."working-directory" == "''${{ github.action_path }}/../../../crates"' "$action"
+          yq -e '.runs.steps[-1].env.NUMBER == "''${{ github.event.pull_request.number }}"' "$action"
+          yq -e '.runs.steps[-1].env.HEAD_SHA == "''${{ github.event.pull_request.head.sha }}"' "$action"
           touch $out
         '';
         # Stale Remote Control servers catch up once idle, with a stand-in for Claude.
@@ -758,6 +856,9 @@
         # The signed-in browser: Claude driving it, its logins kept, its ports
         # and profile kept from everyone else.
         browser = import ./tests/browser.nix { inherit self pkgs; };
+        # lib/project.nix's secrets check fails a project with a token in any
+        # tracked text file, and its log says where, never what.
+        house-secrets-leak = import ./tests/house-secrets.nix { inherit self pkgs; };
         # lib/project.nix's package of a Rust workspace: every member's binaries.
         house-rust-package = let
           pkg = (self.lib.project { self = ./tests/house/rust; systems = [ system ]; rust = { }; }).packages.${system}.default;
@@ -784,7 +885,18 @@
         // nixpkgs.lib.mapAttrs' (name: nixpkgs.lib.nameValuePair "native-${name}")
           (self.lib.project { self = ./tests/house/rust-native; systems = [ system ]; rust = houseNative; }).checks.${system}
         // (self.lib.project { self = ./tests/house/python; systems = [ system ]; python = { format = true; }; }).checks.${system}
-      );
+        // nixpkgs.lib.mapAttrs' (name: nixpkgs.lib.nameValuePair "include-${name}") houseInclude.checks.${system}
+      ) // {
+        # lib/project.nix's `include`: the checks build from the repo's
+        # root with the workspace and only the files named outside it.
+        house-include-source = pkgs.runCommand "house-include-source-check" { } ''
+          cd ${houseInclude.checks.${system}.rust-test.src}
+          got=$(find . -type f | sort)
+          want=$(printf '%s\n' ./spec/fact.txt ./ws/Cargo.lock ./ws/Cargo.toml ./ws/rust-toolchain.toml ./ws/src/lib.rs)
+          [ "$got" = "$want" ] || { printf 'the source has:\n%s\n' "$got"; exit 1; }
+          touch $out
+        '';
+      };
 
       formatter.${system} = pkgs.nixfmt-rfc-style;
     };

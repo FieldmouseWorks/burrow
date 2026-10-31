@@ -10,7 +10,7 @@ import sys
 import threading
 import time
 
-from harness import (FAIL, REAL_TOKEN, T0, WROTE, C, P, R, S, T, V, clean, fresh_pr_state, judgment, merges, mkpr, run, said, sh,
+from harness import (FAIL, REAL_TOKEN, T0, WROTE, B, C, P, R, S, T, V, clean, fresh_pr_state, judgment, merges, mkpr, run, said, sh,
                      stand_in, tmp)
 from harness import head as HEAD
 
@@ -142,10 +142,10 @@ C._installs.clear()
 # git to GitHub (a branch deleted) goes with gh as its only credential
 # helper, and the App's token for that repo's owner in its environment.
 RAN = []
-run_kept = R.subprocess.run
-R.subprocess.run = lambda args, **k: RAN.append((args, k.get("env"))) or subprocess.CompletedProcess(args, 0, "", "")
-R.delete_branch("sam/r", "old", "1" * 40)
-R.subprocess.run = run_kept
+run_kept = B.subprocess.run
+B.subprocess.run = lambda args, **k: RAN.append((args, k.get("env"))) or subprocess.CompletedProcess(args, 0, "", "")
+B.delete_branch("sam/r", "old", "1" * 40)
+B.subprocess.run = run_kept
 push, env = next((a, e) for a, e in RAN if "push" in a)
 assert push[push.index("push") - 4:push.index("push")] == list(C.GIT_AUTH), push
 assert env["GH_TOKEN"] == "ghs_app_sam", env.get("GH_TOKEN")
@@ -209,31 +209,43 @@ C.CFG["dashboard"]["renovate"] = None
 C.gh = gh_kept
 D.FOUND.clear()
 # The repos are the ones the App's installations reach, asked as each
-# owner's: GitHub gives an installation no viewerPermission on any of them.
-# An empty repo (no default branch) and an excluded one aren't the steward's.
+# owner's, a page at a time: GitHub gives an installation no viewerPermission
+# on any of them. Each is known by its databaseId. An empty repo (no default
+# branch) is one; an excluded or archived one isn't the steward's.
 ASKED = []
 
 
+def node(i, name, private=False, default="main", created=T0, archived=False):
+    return {"databaseId": i, "nameWithOwner": name, "isPrivate": private, "isArchived": archived,
+            "createdAt": created, "defaultBranchRef": default and {"name": default}}
+
+
+PAGES = {("sam", None): ([node(1, "sam/r", True, "trunk"), node(3, "sam/empty", default=None)], "c1"),
+         ("sam", "c1"): ([node(4, "sam/skip"), node(5, "sam/old", archived=True)], None),
+         ("eve", None): ([node(2, "eve/p", created="2026-01-02T03:04:05Z")], None)}
+
+
 def list_gh(*a, **k):
-    ASKED.append((C._for[-1] if C._for else None, a[2]))
-    return {"sam": [{"id": "R_1", "nameWithOwner": "sam/r", "isPrivate": True, "defaultBranchRef": {"name": "trunk"},
-                     "createdAt": T0},
-                    {"id": "R_3", "nameWithOwner": "sam/empty", "isPrivate": False, "defaultBranchRef": None, "createdAt": T0},
-                    {"nameWithOwner": "sam/skip", "isPrivate": False, "defaultBranchRef": {"name": "main"}, "createdAt": T0}],
-            "eve": [{"id": "R_2", "nameWithOwner": "eve/p", "isPrivate": False, "defaultBranchRef": {"name": "main"},
-                     "createdAt": "2026-01-02T03:04:05Z"}]}[a[2]]
+    assert a[:2] == ("api", "graphql") and "repositoryOwner" in a[3], a
+    v = dict(x.split("=", 1) for x in a[5::2])
+    ASKED.append((C._for[-1] if C._for else None, v["owner"], v.get("cursor")))
+    nodes, more = PAGES[v["owner"], v.get("cursor")]
+    return {"data": {"repositoryOwner": {"repositories": {
+        "nodes": nodes, "pageInfo": {"hasNextPage": more is not None, "endCursor": more}}}}}
 
 
 kept = (C.gh, C.CFG["owners"], C.CFG["exclude"])
 C.gh, C.CFG["owners"], C.CFG["exclude"] = list_gh, ["sam", "eve"], ["sam/skip"]
 found = R.discover()
 C.gh, C.CFG["owners"], C.CFG["exclude"] = kept
-# An empty repo is one too, with no default branch yet: it gets its settings
-# and hook, so its first push is heard.
-assert found == [{"repo": "sam/r", "id": "R_1", "private": True, "default": "trunk", "created": T0},
-                 {"repo": "sam/empty", "id": "R_3", "private": False, "default": None, "created": T0},
-                 {"repo": "eve/p", "id": "R_2", "private": False, "default": "main", "created": "2026-01-02T03:04:05Z"}], found
-assert ASKED == [("sam", "sam"), ("eve", "eve")], ASKED
+assert found == [{"repo": "sam/r", "id": 1, "private": True, "default": "trunk", "created": T0},
+                 {"repo": "sam/empty", "id": 3, "private": False, "default": None, "created": T0},
+                 {"repo": "eve/p", "id": 2, "private": False, "default": "main", "created": "2026-01-02T03:04:05Z"}], found
+assert ASKED == [("sam", "sam", None), ("sam", "sam", "c1"), ("eve", "eve", None)], ASKED
+# An owner GitHub has no such login for: none of its repos.
+C.gh, C.CFG["owners"] = (lambda *a, **k: {"data": {"repositoryOwner": None}}), ["gone"]
+assert R.discover() == []
+C.gh, C.CFG["owners"], C.CFG["exclude"] = kept
 
 # A pass asks about each repo as the App's installation on that repo's
 # owner: its PRs are read for sam/r as sam's, for eve/p as eve's.

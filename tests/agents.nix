@@ -128,6 +128,7 @@ pkgs.testers.runNixOSTest {
 
     with subtest("Claude is there and never asks"):
         vm(a, "claude --version")
+        vm(a, "test ! -L /etc/claude-code/managed-settings.json")
         settings = json.loads(vm(a, "cat /etc/claude-code/managed-settings.json"))
         assert settings["permissions"]["defaultMode"] == "bypassPermissions"
         assert settings["skipDangerousModePermissionPrompt"] is True

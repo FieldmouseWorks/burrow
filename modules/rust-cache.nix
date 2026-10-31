@@ -5,7 +5,9 @@
 # library crates built without incremental compilation come out of it, which
 # in practice means dependencies: a workspace's own crates, binaries, tests,
 # proc macros and build scripts still compile every time, so a target dir
-# kept between builds, where one can be, saves more still.
+# kept between builds, where one can be, saves more still. The C a build
+# script compiles with the cc crate (a bundled SQLite, aws-lc) comes out of it
+# too.
 #
 # One cache per user, never shared: a user is the trust boundary here (each CI
 # runner's pull requests run as a user of its own), and whatever a user's
@@ -27,9 +29,16 @@ let
   # Client-side mode is new in sccache 0.19; burrow's nixpkgs has 0.15. Its
   # daemon still runs whatever compiler a client outside client-side mode
   # names, so this one is patched to refuse, and the client compiles itself.
+  # sccache also keys a compile on every CARGO_ variable, so a target dir
+  # named by CARGO_TARGET_DIR or CARGO_BUILD_TARGET_DIR made each new target
+  # dir miss everything; the second patch leaves those two out, as sccache
+  # already leaves out --out-dir.
   # Only the local disk cache is used, so none of the cloud backends either.
   sccache = inputs.nixpkgs-unstable.legacyPackages.${pkgs.stdenv.hostPlatform.system}.sccache.overrideAttrs (old: {
-    patches = (old.patches or [ ]) ++ [ ./rust-cache/sccache-storage-only.patch ];
+    patches = (old.patches or [ ]) ++ [
+      ./rust-cache/sccache-storage-only.patch
+      ./rust-cache/sccache-target-dir-key.patch
+    ];
     cargoBuildNoDefaultFeatures = true;
   });
   # No config file: the environment below is all of it, for the daemon and
@@ -54,17 +63,27 @@ let
   # naming /etc/rust-cache/rustc-wrapper would leave it naming nothing after a
   # switch that turns the cache off, or back to a system from before it. So
   # it names this launcher, which runs whichever wrapper the running system
-  # has there, or rustc itself when there's none. It runs the wrapper by its
-  # store path, so a switch that removes the /etc entry mid-launch can't pull
-  # it away between the lookup and the exec. A running process's environment
-  # keeps the launcher from being collected.
-  exe = toString (pkgs.writeShellScript "rustc-launcher" ''
-    wrapper=$(${pkgs.coreutils}/bin/readlink -e /etc/rust-cache/rustc-wrapper)
-    if [ -x "$wrapper" ]; then
-      exec "$wrapper" "$@"
-    fi
-    exec "$@"
-  '');
+  # has there, or the compiler itself when there's none. It runs the wrapper
+  # by its store path, so a switch that removes the /etc entry mid-launch
+  # can't pull it away between the lookup and the exec. A running process's
+  # environment keeps the launcher from being collected.
+  # It's named sccache because the cc crate puts RUSTC_WRAPPER in front of a
+  # build script's C compiles only when its file is named that (cc's
+  # RUSTC_WRAPPER docs); under any other name those compiles go uncached.
+  launcher = pkgs.writeTextFile {
+    name = "rust-cache-launcher";
+    destination = "/bin/sccache";
+    executable = true;
+    text = ''
+      #!${pkgs.runtimeShell}
+      wrapper=$(${pkgs.coreutils}/bin/readlink -e /etc/rust-cache/rustc-wrapper)
+      if [ -x "$wrapper" ]; then
+        exec "$wrapper" "$@"
+      fi
+      exec "$@"
+    '';
+  };
+  exe = "${launcher}/bin/sccache";
 
   users = lib.unique ([ config.burrow.user ] ++ cfg.users);
 in
@@ -179,10 +198,11 @@ in
     burrow.claude.machineMd = lib.mkOrder 1410 ''
       ## Rust builds
 
-      cargo runs rustc through sccache here (`RUSTC_WRAPPER`), with a cache of
-      each user's own in ${cfg.dir}/USER that the user's daemon,
-      rust-cache-USER, keeps: a fresh worktree's build takes every dependency
-      that user compiled before from it. The compile itself still runs in the
+      cargo runs rustc through sccache here (`RUSTC_WRAPPER`), and so does the
+      cc crate the C its build scripts compile, with a cache of each user's
+      own in ${cfg.dir}/USER that the user's daemon, rust-cache-USER, keeps:
+      a fresh worktree's build takes every dependency that user compiled
+      before from it. The compile itself still runs in the
       build. Whatever keeps the cache from working compiles without it, so a
       failed build failed in rustc; to rule the cache out anyway, build with
       `RUSTC_WRAPPER=` once. Never point sccache at a TCP port (its default):

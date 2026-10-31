@@ -8,7 +8,7 @@
 # burrow-events handler that books its own next pass, sooner as the week runs
 # out: no timer, and no model calls.
 inputs:
-{ config, lib, pkgs, ... }:
+{ config, lib, pkgs, utils, ... }:
 let
   cfg = config.burrow.usageReset;
   inherit (lib) mkOption types;
@@ -70,6 +70,11 @@ in
         Type = "oneshot";
         # Claude Code's login, and its config, are the user's.
         User = user;
+        # Claude Code asks whether to trust a folder on its first start
+        # there, and nobody is at this one's terminal: its folder is marked
+        # trusted first, so the question never comes up. Should that fail,
+        # the pass still runs and says so if it meets the question.
+        ExecStartPre = "-${utils.escapeSystemdExecArgs [ (lib.getExe config.burrow.tools.claude-trust) "${dir}/claude" ]}";
         ExecStart = "${package}/bin/${name}";
         # Past the longest pass its own waits allow (a minute for each of
         # Claude Code's screens): one cut off after its yes is settled by the

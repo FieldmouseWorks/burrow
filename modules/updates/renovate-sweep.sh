@@ -84,8 +84,8 @@ for d in "$src"/*/ "$src"/.*/; do
   # how, so it can rerun one it broke, whether or not the steward is still
   # running.
   covered=false
-  proofnames=$(jq -c --arg r "$repo" '['"$mine"'.proofJobs // {} | keys[]]' "$COVERED" 2>/dev/null || echo '[]')
-  proofs=$(jq -r --arg r "$repo" '['"$mine"'.proofJobs // {} | to_entries[] | " \(.key) isn'"'"'t CI: it runs on a machine, like this: \(.value) Rerun it that way on what you push."] | join("")' "$COVERED" 2>/dev/null || true)
+  proofnames=$(jq -c --arg r "$repo" '['"$mine"'.proofs // {} | keys[]]' "$COVERED" 2>/dev/null || echo '[]')
+  proofs=$(jq -r --arg r "$repo" '['"$mine"'.proofs // {} | to_entries[] | " \(.key) isn'"'"'t CI: it runs on a machine, like this: \(.value) Rerun it that way on what you push."] | join("")' "$COVERED" 2>/dev/null || true)
   if [ -n "$COVERED" ] && jq -e --argjson now "$(date +%s)" '$now - .at < 6 * 3600' "$COVERED" >/dev/null 2>&1; then
     covered=$(jq -r --arg r "$repo" "$mine"' | .covered == true' "$COVERED")
   fi
@@ -107,7 +107,7 @@ for d in "$src"/*/ "$src"/.*/; do
       # Each check but the steward's own, green, pending or red as the
       # steward reads it (ci_state in ../autoland/steward.py), so a head
       # neither calls the other's is never left between them.
-      # A proof the steward runs on a machine (proofJobs) is no CI to wait
+      # A proof the steward has run on a machine (proofs) is no CI to wait
       # for: a major's job runs it itself.
       ci=$(jq -c --argjson proofs "$proofnames" '[.statusCheckRollup[]? | select((.context // .name) != $settled)
         | {name: (.context // .name), proof: ((.context // .name) as $c | $proofs | index($c) != null),

@@ -13,6 +13,7 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.parse
 
 tmp = tempfile.mkdtemp()
 
@@ -196,7 +197,7 @@ with open(f"{tmp}/config.json", "w") as f:
         "owners": ["sam"], "exclude": [], "context": "review-settled", "rulesets": True, "keepBranches": [],
         "app": {"id": 7, "slug": "steward"},
         "baselineJobs": False, "baselinePerPass": 1, "authors": ["sam"], "bots": ["dependabot", "renovate", "workers"], "machinery": None,
-        "stateDir": f"{tmp}/state", "majorKey": f"{tmp}/sweep.key", "projectsDir": f"{tmp}/none", "jobsDir": f"{tmp}/jobs", "renovateEmail": "bot@renovateapp.com", "proj": "proj", "jobTimeout": 60, "jobIdle": 20, "reviewTimeout": 30, "owner": "Sam", "cleanBranches": False,
+        "stateDir": f"{tmp}/state", "snapDir": f"{tmp}/trees", "majorKey": f"{tmp}/sweep.key", "projectsDir": f"{tmp}/none", "jobsDir": f"{tmp}/jobs", "renovateEmail": "bot@renovateapp.com", "proj": "proj", "jobTimeout": 60, "jobIdle": 20, "proofTimeout": 180, "heavy": None, "reviewTimeout": 30, "owner": "Sam", "cleanBranches": False,
         "labels": {"hold": "hold", "owner": "needs-owner", "first": "first", "waiting": {"releaseAge": "waiting: release age", "proofSlot": "waiting: proof slot", "reviewer": "waiting: reviewer"}}, "notify": {"repo": "", "assignee": "", "label": "autoland"}, "inbox": {"enable": False, "label": "claude", "unstickLabel": "unstick", "authors": ["sam"]},
         "dashboard": {"enable": False, "waitDays": 4, "errorDays": 1, "title": "Dependency Dashboard",
                       "renovateKick": "http://127.0.0.1:9/kick/renovate", "renovate": None,
@@ -237,6 +238,7 @@ os.environ["GH_TOKEN"] = "ghp_steward_token"  # never passed on to an agent
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(sys.argv[1])))
 sys.argv = ["steward"]
+import branches as B  # noqa: E402,F401
 import common as C  # noqa: E402,F401
 import prs as P  # noqa: E402,F401
 import repos as R  # noqa: E402,F401
@@ -254,8 +256,8 @@ C.token = lambda owner: f"ghs_app_{owner}"
 # tell one's word from the other's. review.py runs the one real agent.
 V.NAMES["rival"] = "Rival"
 
-for d in (V.QUEUE, V.SNAP, V.DONE, V.SESSIONS, V.GIT):
-    os.makedirs(f"{tmp}/state/{d}")
+for d in (V.QUEUE, V.SNAP, V.TREES, V.DONE, V.SESSIONS, V.GIT):
+    os.makedirs(os.path.join(f"{tmp}/state", d))
 
 
 def sh(*a, cwd=None):
@@ -264,6 +266,7 @@ def sh(*a, cwd=None):
 
 head = "a" * 40
 WROTE, JOBS, POSTED, FORGOT = [], [], [], []
+SINCE = []  # each job's place in line (C.job's since), in the order they started
 DESCRIBED = []  # the description each posted review was shown (its fingerprint)
 COMMITS = {}  # a PR's commits' author emails, by number, as `pr view --json commits` gives them (None: the ask fails)
 PR_DIFF = {"v": ""}  # what `gh pr diff` gives
@@ -279,6 +282,10 @@ def acting():
     ACTING.append(C._for[-1])
 
 
+# Where a PR's head leaves its base, as GitHub's compare says, by the base
+# branch's name ("v" for any other): None, it says nothing. FORKS: its
+# answers in turn, before FORK's, while there are any.
+FORK, FORKS = {"v": "f" * 40}, []
 RULES = {}  # the rules on a branch of sam/r, by its name in the path: none unless set, or what GitHub raises
 PROTECTION = {}  # the same for a branch's classic protection: a 404 unless set
 
@@ -307,6 +314,13 @@ def gh_stub(*a, **k):
         return {"allow_auto_merge": True, "delete_branch_on_merge": True, "allow_squash_merge": True}
     if a[:2] == ("pr", "diff"):
         return PR_DIFF["v"]
+    if a[:1] == ("api",) and a[1].startswith("repos/sam/r/compare/") and "{fork: .merge_base_commit.sha}" in a:
+        # Read as GitHub reads its URL: a `#` ends it, a `?` starts its
+        # query, and what's left is decoded once.
+        path = a[1].removeprefix("repos/sam/r/compare/").partition("#")[0].partition("?")[0]
+        base, dots, _ = path.partition("...")
+        fork = FORKS.pop(0) if FORKS else FORK.get(urllib.parse.unquote(base), FORK["v"]) if dots else None
+        return {"fork": fork} if fork else None
     return ""
 
 
@@ -325,8 +339,9 @@ def write(*a, **k):
     return None
 
 
-def job(repo, task, clone=False):
+def job(repo, task, clone=False, since=None):
     JOBS.append(task)
+    SINCE.append(since)
     return f"job-{len(JOBS)}"
 
 
@@ -445,6 +460,7 @@ def run(pr, after, obsolete=False):
     C.NOW = C.ts(T0) + after
     WROTE.clear()
     JOBS.clear()
+    SINCE.clear()
     C.WAKE.clear()
     C.LIMITED.clear()
     POSTED.clear()
@@ -487,8 +503,9 @@ def pr_state(n=5):
 
 def fresh_pr_state():
     shutil.rmtree(f"{tmp}/state")
-    for d in (V.QUEUE, V.SNAP, V.DONE, V.SESSIONS, V.GIT):
-        os.makedirs(f"{tmp}/state/{d}")
+    shutil.rmtree(V.TREES)
+    for d in (V.QUEUE, V.SNAP, V.TREES, V.DONE, V.SESSIONS, V.GIT):
+        os.makedirs(os.path.join(f"{tmp}/state", d))
 
 
 REAL = {"job": C.job, "stop_job": C.stop_job, "forget_issues": C.forget_issues, "app_hook": R.app_hook}  # the steward's own, for the checks of what it runs

@@ -13,6 +13,7 @@
 # are hermetic (the Nix sandbox, no network). A repo's heavier gates (VM
 # replays, browsers, databases) stay its own and run in `nix develop`. A Rust
 # workspace's binaries are its packages.default, for machines to install.
+# Every project's gate also looks for secrets in its tracked files.
 { nixpkgs, rust-overlay, crane }:
 {
   self,
@@ -21,7 +22,10 @@
   # Cargo workspace in DIR, built with the toolchain DIR/rust-toolchain.toml
   # (or the repo root's) pins; latest stable without one. `test = false` skips
   # the tests (say, when they need a database); `testInputs = pkgs: [ pkgs.git ]`
-  # puts tools the tests run on their PATH. A workspace that links native
+  # puts tools the tests run on their PATH. `include = [ "docs/spec.md" ]`
+  # names files outside DIR, from the repo's root, that the tests read: the
+  # checks then build from the root with DIR and only those, so a test finds
+  # each where a checkout has it. A workspace that links native
   # libraries names them for every build, check and the dev shell:
   # `nativeBuildInputs = pkgs: [ pkgs.pkg-config ]` for the tools its build
   # scripts run, `buildInputs = pkgs: [ pkgs.alsa-lib ]` for the libraries.
@@ -48,6 +52,7 @@ let
     dir = ".";
     test = true;
     testInputs = _: [ ];
+    include = [ ];
     nativeBuildInputs = _: [ ];
     buildInputs = _: [ ];
   } // (if rust == null then { } else rust);
@@ -93,16 +98,35 @@ let
     doCheck = false;
   };
 
+  # What the checks build from: the whole directory, not only the Cargo
+  # sources, since tests read fixtures. With files outside it to include, the
+  # repo's root with only DIR and those, and the build in DIR (crane's way
+  # for a workspace below its source's root).
+  rustSrc =
+    if rustCfg.include == [ ] then { src = lib.cleanSource rustDir; }
+    else {
+      src = lib.cleanSourceWith {
+        src = lib.cleanSource self;
+        filter = path: type:
+          let rel = lib.removePrefix "${toString self}/" (toString path); in
+          lib.any (p: rel == p || lib.hasPrefix "${p}/" rel || (type == "directory" && lib.hasPrefix "${rel}/" p))
+            ([ rustCfg.dir ] ++ rustCfg.include);
+      };
+      cargoLock = rustDir + "/Cargo.lock";
+      cargoToml = rustDir + "/Cargo.toml";
+      postUnpack = ''
+        cd "$sourceRoot"/${lib.escapeShellArg rustCfg.dir}
+        sourceRoot=.
+      '';
+    };
+
   rustChecks = pkgs:
     let
       craneLib = craneFor pkgs;
-      # The whole directory, not only the Cargo sources: tests read fixtures.
-      src = lib.cleanSource rustDir;
       # Every member of the workspace, not only a root package or its
       # default-members, built as `cargo test` builds them (crane's default is
       # release, which drops debug assertions and overflow checks).
-      common = {
-        inherit src;
+      common = rustSrc // {
         strictDeps = true;
         cargoExtraArgs = "--locked --workspace";
         CARGO_PROFILE = "dev";
@@ -112,7 +136,7 @@ let
       cargoArtifacts = craneLib.buildDepsOnly common;
     in
     {
-      rust-fmt = craneLib.cargoFmt { inherit src; cargoExtraArgs = "--all"; };
+      rust-fmt = craneLib.cargoFmt (rustSrc // { cargoExtraArgs = "--all"; });
       rust-clippy = craneLib.cargoClippy (common // {
         inherit cargoArtifacts;
         cargoClippyExtraArgs = "--all-targets -- -D warnings";
@@ -123,6 +147,61 @@ let
         nativeBuildInputs = rustCfg.nativeBuildInputs pkgs ++ rustCfg.testInputs pkgs;
       });
     };
+
+  # The house rules' "never commit secrets": gitleaks over every tracked
+  # file (a flake's source is the repo's tracked tree), with its own rules for
+  # credentials that have a known shape (GitHub, cloud and API tokens,
+  # private keys), but not its generic "API key" guess, which takes every
+  # invented test password for one. Its config also skips files by path
+  # (lockfiles, SVGs, vendored and minified code), and a token in any tracked
+  # text file is a leak, so here no allowlist names a path: one that does
+  # nothing else goes, and one that ANDs a path with the rest goes whole
+  # rather than widening to every file. A false alarm is answered in the
+  # repo: `gitleaks:allow` in a comment on the line, or the finding's
+  # fingerprint in .gitleaksignore. Files over 5 MB (recordings, databases)
+  # and binaries aren't read.
+  gitleaksConfig = pkgs: pkgs.runCommand "gitleaks.toml" { nativeBuildInputs = [ pkgs.remarshal pkgs.jq ]; } ''
+    toml2json ${pkgs.gitleaks.src}/config/gitleaks.toml | jq '
+      def unpathed: [ .[]
+        | if has("paths") and ((.condition // "or") | ascii_downcase) == "and" then empty else del(.paths) end
+        | select(has("regexes") or has("stopwords") or has("commits")) ];
+      def allowlists: .allowlists = ((.allowlists // []) + [.allowlist // empty] | unpathed) | del(.allowlist);
+      allowlists
+      | .rules |= map(select(.id != "generic-api-key") | allowlists | if .allowlists == [] then del(.allowlists) end)
+    ' > config.json
+    # Fail closed on a config whose shape this no longer matches.
+    jq -e '([.. | objects | select(has("paths") or has("allowlist"))] == []) and (.rules | length > 100)' config.json >/dev/null
+    json2toml config.json $out
+  '';
+  # A finding is reported by file, line, rule and fingerprint, never by what
+  # the file says: a public repo's CI log is public too. gitleaks' own output
+  # stays out of the log, since it can quote a file: its verbose findings
+  # show the line around a secret with only that secret redacted, and its
+  # warning for a .gitleaksignore line that isn't a fingerprint quotes the
+  # line, a token pasted there included. Leaks exit 2, so any other failure
+  # (a scan that stopped, a bad config) still fails, with a pointer to
+  # gitleaks' log in a build kept with --keep-failed.
+  secretsCheck = pkgs: pkgs.runCommand "secrets" { nativeBuildInputs = [ pkgs.gitleaks pkgs.jq ]; } ''
+    cd ${self}
+    status=0
+    gitleaks dir --no-banner --redact --config ${gitleaksConfig pkgs} --max-target-megabytes 5 \
+      --exit-code 2 --report-format json --report-path "$TMPDIR/leaks.json" . >"$TMPDIR/gitleaks.log" 2>&1 || status=$?
+    if grep -q 'Invalid .gitleaksignore entry' "$TMPDIR/gitleaks.log"; then
+      echo ".gitleaksignore has lines that aren't a fingerprint (FILE:RULE:LINE), and they ignore nothing"
+    fi
+    if [ -e "$TMPDIR/leaks.json" ]; then
+      jq -r '.[] | "\(.File):\(.StartLine): \(.RuleID) (fingerprint \(.Fingerprint))"' "$TMPDIR/leaks.json"
+    fi
+    case $status in
+      0) jq -e 'length == 0' "$TMPDIR/leaks.json" >/dev/null ;;
+      2) exit 1 ;;
+      *)
+        echo "gitleaks stopped (exit $status) before it finished. Its log isn't shown here; nix build this check with --keep-failed and read gitleaks.log in the build directory it keeps."
+        exit 1
+        ;;
+    esac
+    touch $out
+  '';
 
   pyChecks = pkgs:
     let dirs = lib.escapeShellArgs pyCfg.dirs; in
@@ -151,7 +230,8 @@ in
   });
 
   checks = forAll (pkgs:
-    lib.optionalAttrs (rust != null) (rustChecks pkgs)
+    { secrets = secretsCheck pkgs; }
+    // lib.optionalAttrs (rust != null) (rustChecks pkgs)
     // lib.optionalAttrs (python != null) (pyChecks pkgs)
     // checks pkgs);
 

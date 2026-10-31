@@ -21,6 +21,7 @@ import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime
 
@@ -29,8 +30,8 @@ import seal as S
 CFG = json.load(open(os.environ["AUTOLAND_CONFIG"]))
 CONTEXT = CFG["context"]
 DRY = len(sys.argv) > 1 and sys.argv[1] == "status"
-# A dry run keeps its own state, so its once-a-day reads (settings, branches)
-# stay once a day instead of running every pass on the owner's API quota.
+# A dry run keeps its own state, so its once-a-day reads (the settings) stay
+# once a day instead of running every pass on the owner's API quota.
 STATE = CFG["stateDir"] + ("/dry" if DRY else "")
 NOW = time.time()
 MIN = 60
@@ -204,6 +205,14 @@ def gh(*args, input=None, check=True):
         return json.loads(out) if out else ""
     except ValueError:
         return out
+
+
+def compare(repo, base, head):
+    """The REST path of GitHub's compare of head with base, each a branch's
+    name or a commit. Each goes in quoted whole, which GitHub decodes once:
+    any name git allows (a `#`, `%`, `?` or slash in it) is the branch of
+    exactly that name, never cut short or read as another's."""
+    return f"repos/{repo}/compare/{urllib.parse.quote(base, safe='')}...{urllib.parse.quote(head, safe='')}"
 
 
 def said(e):
@@ -444,11 +453,24 @@ def unland(repo, pr):
     return off and out
 
 
+TAKEN = "A folder in the way of a repo's checkout"  # the stuck issue's heading for it
+TAKEN_FILE = "taken.json"
+RETIRING = "A deleted repo's clones and jobs that won't retire"  # likewise
+RETIRING_FILE = "retiring.json"  # {its state's key: {"name": the deleted repo's, "for" and "id": the repo that took it on}}
+
+
 def repo_cfg(repo):
     """The defaults, with this repo's overrides from config.repos on top."""
     c = dict(CFG["defaults"])
     c.update(CFG["repos"].get(repo, {}))
     return c
+
+
+def origin(path):
+    """The GitHub repo (owner/name) the clone at path has for its origin, or
+    None. Never the URL itself, which can hold a token: only the repo it names."""
+    p = subprocess.run(["git", "-C", path, "remote", "get-url", "origin"], capture_output=True, text=True)
+    return github_repo(p.stdout.strip())
 
 
 def projects(strict=False):
@@ -500,6 +522,157 @@ def project_dir(repo):
     return next((d for d, url in projects() if url.lower() == repo.lower()), None)
 
 
+NOW_CALLED = """query($owner: String!, $name: String!) {
+  repository(owner: $owner, name: $name) { id: databaseId node: id nameWithOwner createdAt }
+}"""
+
+
+def github_now(repo):
+    """What GitHub answers repo's name with, following a rename or transfer:
+    {"id", "node", "nameWithOwner", "createdAt"}, its id the databaseId discover()
+    has, node its node id, for the holds retiring() kept by that; None when
+    it won't say. Asked as its owner's installation, then as each owner's: the
+    App may be long gone from the owner a repo moved away from, and only the
+    one it moved to can see a private repo's new name."""
+    owner, name = repo.split("/")
+    for who in dict.fromkeys([owner, *CFG["owners"]]):
+        try:
+            with acting_for(who):
+                return graphql(NOW_CALLED, owner=owner, name=name)["repository"]
+        except Unavailable as e:
+            log(f"{repo}: what GitHub calls it now: {e}")
+            return None
+        except (RuntimeError, KeyError, TypeError):  # not there as this owner, or the App isn't on it
+            continue
+    return None
+
+
+def kept_state(repo):
+    """(key, state) for each settings file kept under repo's name, whatever
+    its case: GitHub's names don't go by it."""
+    k = repo.replace("/", "_").lower()
+    for name in sorted(os.listdir(STATE)):
+        m = re.fullmatch(r"repo-(.+)\.json", name)
+        if m and m.group(1).lower() == k:
+            yield m.group(1), load(name, {})
+
+
+def replaced(st, now):
+    """Whether what the steward kept under a name was another repo's than
+    `now` ("id", its databaseId, and "created" or "createdAt"): GitHub hands
+    a deleted repo's name to the next one. By the databaseId kept, whether or
+    not that repo ever got its settings. For settings kept before the steward
+    kept databaseIds, when they were set before it was made, or in the second
+    it was (createdAt has no finer grain): restart runs before anything
+    settles a repo, so no settings of the old one's can be newer than the new
+    one. With neither, nothing says which repo it was. A node id kept before
+    says nothing either: GitHub has changed their format."""
+    if "databaseId" in st:
+        return st["databaseId"] != now["id"]
+    if "settings" not in st:
+        return False
+    return st["settings"] < ts(now.get("created") or now["createdAt"]) + 1
+
+
+def follow_renames(seen=()):
+    """Clones whose origin has an old name of their repo, repointed at the
+    current one, so that everything reading a clone's origin (project_dir,
+    hook_projects, proj's rank, proj-inbox) knows it for that repo. `seen`:
+    names, lower case, known to be current, which needn't be asked about.
+
+    A name the steward knows was a deleted repo's, and that the repo now
+    answering it only took on later, is no rename: that clone holds the
+    deleted one's history, and isn't adopted. It's kept in RETIRING_FILE, which
+    outlives the clone once a try has moved it: a full pass retires it from
+    there (repos.reset), and until then the repo that took the name gets no
+    job (retiring).
+
+    A hidden folder only counts as a project while it's named for its repo
+    (projects). One whose repo takes another name is repointed where it is and
+    stops counting: moving it would strand the jobs that have its path, so the
+    repo's next job clones it afresh, and nothing in the folder is lost."""
+    for d, url in list(projects()):
+        now = None if url.lower() in seen else github_now(url)
+        if not now or now["nameWithOwner"].lower() == url.lower():
+            continue
+        new = now["nameWithOwner"]
+        gone = [k for k, st in kept_state(url) if replaced(st, now)]
+        if gone:
+            log(f"{d}: its origin {url} was a deleted repo's name, which {new} took on: not adopting it")
+            save(RETIRING_FILE, {**load(RETIRING_FILE, {}), **{k: {"name": url, "for": new, "id": now["id"]} for k in gone}})
+            continue
+        path = os.path.join(CFG["projectsDir"], d)
+        raw = subprocess.run(["git", "-C", path, "remote", "get-url", "origin"], capture_output=True, text=True).stdout.strip()
+        p = subprocess.run(["git", "-C", path, "remote", "set-url", "origin", raw.replace(url, new)], capture_output=True, text=True)
+        log(f"{d}: its origin {url} is now {new}" + (", repointed" if p.returncode == 0 else f", and it wouldn't repoint: {p.stderr.strip()[-300:]}"))
+
+
+def retiring(repo):
+    """Whether repo is the one that took on a deleted repo's name whose clones
+    and jobs a full pass hasn't finished retiring: its jobs wait for that. By
+    GitHub's id, so it follows that repo to any later name, and not to whatever
+    takes up one it left: its databaseId, or the node id of a hold kept before
+    the steward knew repos by databaseId. Asked only while something's being retired; one
+    GitHub won't say about waits too."""
+    pending = load(RETIRING_FILE, {})
+    if not pending:
+        return False
+    now = github_now(repo)
+    return not now or any(x["id"] in (now["id"], now["node"]) for x in pending.values())
+
+
+def destination(repo):
+    """Where repo's clone goes when it has none."""
+    return os.path.join(CFG["projectsDir"], repo.split("/")[1])
+
+
+def blocked(path):
+    """Whether git can't clone to path: it clones into nothing, or an empty folder."""
+    return os.path.lexists(path) and not (os.path.isdir(path) and not os.listdir(path))
+
+
+def taken(repo):
+    """What's in the way of repo's checkout, as checkout() found it, while it's
+    still what blocks its clone: {"folder", "origin"} (None for one with no
+    GitHub origin), or None. Nothing's asked of GitHub: a folder moved out,
+    emptied or repointed, or another projectsDir, ends it."""
+    had = load(TAKEN_FILE, {}).get(repo)
+    path = destination(repo)
+    if not had or had["folder"] != path or project_dir(repo) or not blocked(path) or origin(path) != had["origin"]:
+        return None
+    return had
+
+
+def taken_line(repo, had):
+    """taken()'s answer as a line of the stuck issue: the same until what's in
+    the way changes, so it's said once."""
+    theirs = f"a clone of {had['origin']}" if had["origin"] else "something with no GitHub origin"
+    return (TAKEN, repo, f"`{had['folder']}` holds {theirs}, which GitHub doesn't answer as {repo}: "
+            f"it needs its checkout there. Its jobs wait until that folder is moved out")
+
+
+def checkout(repo):
+    """Clone repo into projectsDir for a job, unless a clone under an old name
+    turns out to be it. A folder another repo's clone holds is recorded for
+    taken(), once, rather than cloned into; returns None then."""
+    follow_renames()
+    if retiring(repo):  # what that just found may be this repo's to wait for
+        return None
+    d = project_dir(repo)
+    if d:
+        return d
+    path = destination(repo)
+    if blocked(path):
+        had = {"folder": path, "origin": origin(path)}
+        log(f"{repo}: {taken_line(repo, had)[2]}")
+        save(TAKEN_FILE, {**load(TAKEN_FILE, {}), repo: had})
+        return None
+    # The project's clone is the machine user's, for its jobs to push from as
+    # them: cloned as them, not as the App.
+    subprocess.run(["gh", "repo", "clone", repo, path], check=False)
+    return project_dir(repo)
+
+
 def rank(repo):
     """Where repo's reviews go in line, first to last: 0 for a lead repo
     (`leadRepos`, what the pipeline itself is built from), ahead of
@@ -512,19 +685,20 @@ def rank(repo):
     return 1 if r in {x.lower() for x in CFG["pipelineRepos"]} else 2
 
 
-def job(repo, task, clone=False, pipeline=True, timeout=None):
+def job(repo, task, clone=False, pipeline=True, timeout=None, since=None):
     """Hand a task to a Claude job in the repo's project. One that settles a
     PR or the branch PRs land on is pipeline work (proj run --pipeline): it
     goes ahead of the line, and in the pipeline's own repos (pipelineRepos)
     in a slot kept for it; proj decides which. Its turns stop after timeout
-    minutes (jobTimeout's by default). Returns the job id."""
+    minutes (jobTimeout's by default). since, when the work began (a PR's:
+    when it was opened), is where it stands in line among those, so a PR
+    pushed again keeps its place. Returns the job id."""
+    if retiring(repo):
+        log(f"{repo}: no job until the deleted repo whose name it took on is retired")
+        return None
     d = project_dir(repo)
-    if d is None and clone and not DRY:
-        d = repo.split("/")[1]
-        # The project's clone is the machine user's, for its jobs to push
-        # from as them: cloned as them, not as the App.
-        subprocess.run(["gh", "repo", "clone", repo, os.path.join(CFG["projectsDir"], d)], check=False)
-        d = project_dir(repo)
+    if d is None and clone and not DRY and not taken(repo):
+        d = checkout(repo)
     if d is None:
         return None
     if DRY:
@@ -537,7 +711,9 @@ def job(repo, task, clone=False, pipeline=True, timeout=None):
     # stopped, and ends then. It's the machine's own work, so it acts on
     # GitHub as the machinery's App, where there is one.
     app = ["--app", CFG["machinery"]] if CFG.get("machinery") else []
-    p = subprocess.run([CFG["proj"], "run", *(["--pipeline"] if pipeline else []), *app,
+    # Never after now, which proj refuses: a clock that's behind GitHub's.
+    when = ["--since", str(int(min(since, time.time())))] if since else []
+    p = subprocess.run([CFG["proj"], "run", *(["--pipeline"] if pipeline else []), *app, *when,
                         "--timeout", f"{timeout or CFG['jobTimeout']}m",
                         "--idle", f"{CFG['jobIdle']}m", "--kick", f"autoland/{repo}", "--owned", d, task],
                        capture_output=True, text=True)
@@ -546,11 +722,63 @@ def job(repo, task, clone=False, pipeline=True, timeout=None):
 
 def job_state(jid):
     """queued, running, or how it ended (done, error, failed, timed out ...);
-    None when proj can't say."""
+    None when proj can't say. A proof build's (build_state) as well."""
     if DRY:
         return "running"
+    if jid.startswith(BUILD):
+        return build_state(jid)
     p = subprocess.run([CFG["proj"], "state", jid], capture_output=True, text=True)
     return p.stdout.strip() or None
+
+
+# A proof build (proofs.build): no Claude job, but a unit of the machine
+# user's own that builds a proof's derivations. Its id starts with this and
+# names its folder under the state dir's builds/, where it says how it
+# ended (end.json); everything that asks after a job asks after it the same
+# way (job_state, stop_job).
+BUILD = "proof-"
+
+
+def build_unit(jid):
+    return f"autoland-{jid}.service"
+
+
+def user_systemctl(*args):
+    """systemctl --user, as the machine user, from a unit that doesn't set
+    the user's runtime dir (proj sets it the same way)."""
+    env = dict(os.environ)
+    env.setdefault("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+    return subprocess.run(["systemctl", "--user", *args], capture_output=True, text=True, env=env)
+
+
+def user_systemctl_run(unit, cmd):
+    """Starts cmd as unit, a transient one of the machine user's that goes
+    once it ends (its end is in its build's folder), with this steward's
+    config and tools."""
+    env = dict(os.environ)
+    env.setdefault("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+    keep = [f"--setenv={k}={os.environ[k]}" for k in ("AUTOLAND_CONFIG", "PATH") if k in os.environ]
+    return subprocess.run(["systemd-run", "--user", "--quiet", "--collect", f"--unit={unit}", *keep, "--", *cmd],
+                          capture_output=True, text=True, env=env)
+
+
+def build_state(jid):
+    """A proof build's state, as job_state says a job's: running while its
+    unit is; done once it built all it could, each check's verdict then in
+    whether its outputs are valid (proofs.verdicts); failed when it stopped
+    short of that (stopped, killed, or nix couldn't build at all), timed out
+    past proofTimeout; None when systemd can't say."""
+    end = load(f"builds/{jid}/end.json", None)
+    if end is not None:
+        return end["state"]
+    p = user_systemctl("show", "-P", "ActiveState", build_unit(jid))
+    if p.returncode:
+        return None
+    if p.stdout.strip() in ("active", "activating", "deactivating", "reloading", "refreshing"):
+        return "running"
+    # Gone, with no end: unless it wrote one just after the first look.
+    end = load(f"builds/{jid}/end.json", None)
+    return end["state"] if end else "failed"
 
 
 def jobs():
@@ -598,6 +826,13 @@ def stop_job(jid):
     if DRY:
         log(f"  would: proj stop {jid}")
         return True
+    if jid.startswith(BUILD):
+        # Stopping a unit stops its build: nix-daemon drops a build whose
+        # client is gone.
+        p = user_systemctl("stop", build_unit(jid))
+        if p.returncode:
+            log(f"systemctl --user stop {build_unit(jid)}: {p.stderr.strip()[-300:]}")
+        return build_state(jid) not in (None, "running")
     p = subprocess.run([CFG["proj"], "stop", jid], capture_output=True, text=True)
     if p.returncode and p.stderr.startswith(f"no job {jid}"):
         return True
@@ -617,11 +852,24 @@ def forget_issues(repo):
         raise RuntimeError(f"proj-inbox forget {repo}: {p.stderr.strip() or f'exit {p.returncode}'}")
 
 
+def machine(rc):
+    """A repo's checks that a machine runs rather than CI, and how a job
+    reruns each on what it pushes: a Claude job's (proofJobs), and the
+    builds the steward runs itself (proofBuilds), which it posts. A check
+    in both, however each spells it (GitHub's contexts ignore case), is the
+    build, by its proofBuilds name."""
+    builds = {c.lower() for c in rc["proofBuilds"]}
+    return {**{c: how for c, how in rc["proofJobs"].items() if c.lower() not in builds}, **{
+        c: (f"`nix build .#{attr} -L` on the commit. The steward builds it itself for each new head and posts the "
+            f"`{c}` status: never post that status yourself.") for c, attr in rc["proofBuilds"].items()}}
+
+
 def coverage(repos, covered):
     """repos.json, for renovate-sweep, and when: every repo the steward has,
-    with how its proofs run and whether this pass saw to its PRs."""
+    with its proofs and how each runs (machine), and whether this pass saw
+    to its PRs."""
     done = {r["repo"] for r in covered}
-    return {"at": NOW, "repos": {r["repo"]: {"proofJobs": repo_cfg(r["repo"])["proofJobs"], "covered": r["repo"] in done}
+    return {"at": NOW, "repos": {r["repo"]: {"proofs": machine(repo_cfg(r["repo"])), "covered": r["repo"] in done}
                                  for r in repos}}
 
 

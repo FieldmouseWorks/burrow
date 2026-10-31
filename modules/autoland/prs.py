@@ -2,6 +2,7 @@
 about one: how its CI stands, its `review-settled` status, its waiting
 label, the merge."""
 
+import re
 import urllib.parse
 
 import common as C
@@ -45,7 +46,7 @@ query($owner: String!, $name: String!, $cursor: String) {
         commits(last: 1) {
           nodes { commit { oid statusCheckRollup { contexts(first: 100) { pageInfo { hasNextPage } nodes {
             __typename
-            ... on CheckRun { name status conclusion }
+            ... on CheckRun { name status conclusion checkSuite { id status app { slug } workflowRun { workflow { id name } } } }
             ... on StatusContext { context state description creator { login __typename } }
           } } }
           checkSuites(first: 100) { pageInfo { hasNextPage } nodes { conclusion workflowRun { workflow { name } } } } } }
@@ -99,27 +100,40 @@ def open_prs(owner, name):
     return info, prs
 
 
-def ci_state(pr, proofs=()):
+def ci_state(pr, proofs=(), moved=None, repo=None):
     """green / pending / red / none (no checks at all) over every check on
-    the head except ours, and the names of the ones that aren't green. A
-    proof (a check a Claude job runs on a machine) that hasn't reported yet
-    is pending: nothing posts it until its job runs. A workflow GitHub
-    couldn't start (a bad file, a pin missing an input) leaves no check run,
-    only its suite: red, or a broken workflow would read as no CI. A status
-    is its proof's however it's spelled, since GitHub ignores a context's case,
-    and goes by the name the repo gives the proof, one name once. The merge
-    train's status is its word on the PR, not a check of it, except its
-    failure: CI failed on the head merged alone onto the default branch, which
-    is the head's to fix. Only the App's counts, as with ours."""
+    the head except ours, the names of the ones that aren't green, and
+    whether CI took the head in its docs lane for the PR's diff (runs, and
+    docs_lane, which moved is for). That's read once, for the whole decision:
+    what the step waives and what it says it landed on are the one answer,
+    whatever GitHub would say if asked again. A proof (a check a Claude job
+    runs on a machine) that hasn't reported yet is pending: nothing posts it
+    until its job runs, and none is owed on a head in the docs lane.
+    A workflow GitHub couldn't start (a bad file, a pin missing an input)
+    leaves no check run, only its suite: red, or a broken workflow would read
+    as no CI. A status is its proof's however it's spelled, since GitHub
+    ignores a context's case, and goes by the name the repo gives the proof,
+    one name once. A run of burrow's shared CI that judged another diff than the
+    PR's (runs) isn't the PR's CI, none of its check runs; until its workflow
+    has run through for the PR's diff, CI is pending. The merge train's
+    status is its word on the PR, not a check of it, except its failure: CI
+    failed on the head merged alone onto the default branch, which is the
+    head's to fix. Only the App's counts, as with ours. A cancelled check run
+    goes by what its workflow did after it (after_cancel)."""
     nodes = pr["commits"]["nodes"]
     commit = nodes[0]["commit"] if nodes else {}
     contexts = (commit.get("statusCheckRollup") or {}).get("contexts") or {}
     suites = commit.get("checkSuites") or {}
     if any((x.get("pageInfo") or {}).get("hasNextPage") for x in (contexts, suites)):
         # Only the first 100 come back; one past them could be red.
-        return "pending", ["over 100 checks, too many to read"]
+        return "pending", ["over 100 checks, too many to read"], False
+    stale, docs, unrun = runs(pr, repo)
+    docs = docs and docs_lane(pr, moved)
+    if docs:
+        proofs = ()
     spelled = {p.lower(): p for p in proofs}
-    red, pending, seen = [], [], 0
+    red, pending, seen = [], [], len(unrun)
+    pending += [f"{w} for {pr['baseRefName']}" for w in unrun]
     for s in suites.get("nodes", []):
         if s["conclusion"] == "STARTUP_FAILURE":
             seen += 1
@@ -127,9 +141,14 @@ def ci_state(pr, proofs=()):
             red.append(f"{workflow} (failed to start)")
     for c in contexts.get("nodes", []):
         if c["__typename"] == "CheckRun":
+            if suite(c).get("id") in stale:
+                continue
+            after = after_cancel(c, contexts.get("nodes", []), stale) if cancelled(c) else None
+            if after == "finished":
+                continue
             seen += 1
             name = c["name"]
-            if c["status"] != "COMPLETED":
+            if c["status"] != "COMPLETED" or after == "going":
                 pending.append(name)
             elif c["conclusion"] not in ("SUCCESS", "NEUTRAL", "SKIPPED"):
                 red.append(name)
@@ -153,8 +172,160 @@ def ci_state(pr, proofs=()):
             seen += 1
             pending.append(name)
     if not seen:
-        return "none", []
-    return ("red" if red else "pending" if pending else "green"), list(dict.fromkeys(red or pending))
+        return "none", [], docs
+    return ("red" if red else "pending" if pending else "green"), list(dict.fromkeys(red or pending)), docs
+
+
+# The names burrow's shared CI (flake-check.yml) gives two of its check runs
+# on a PR, after the caller's job's name: its lane job's, `lane into BASE`,
+# the base it chose the PR's gate against, and its docs lane's (docs-paths),
+# `docs only into BASE from FORK`, FORK the commit the PR left BASE at. Which
+# paths a PR changes, and so which lane it takes, depends on both.
+LANE, DOCS_LANE = "lane into ", "docs only into "
+# Its whole gate's job, skipped in the docs lane and on a PR the train lands.
+GATE = "check"
+
+
+def suite(c):
+    """A check run's suite, its run of a workflow."""
+    return c.get("checkSuite") or {}
+
+
+def workflow(c):
+    """The workflow a check run's suite ran: its id and name."""
+    return (suite(c).get("workflowRun") or {}).get("workflow") or {}
+
+
+def judged(c):
+    """What a check run of GitHub Actions' says the shared CI judged its
+    head against: (base, None) for its lane, (base, fork) for its docs lane,
+    None for any other check. A job GitHub skipped keeps its name unfilled,
+    `${{ … }}` and all, and no branch's name has a space in it (an ASCII
+    one: git allows any other, a Unicode space included)."""
+    if c["__typename"] != "CheckRun" or (suite(c).get("app") or {}).get("slug") != "github-actions":
+        return None
+    job = c["name"].rpartition(" / ")[2]
+    if job.startswith(LANE) and re.fullmatch("[^ ]+", job[len(LANE):]):
+        return job[len(LANE):], None
+    m = re.fullmatch(rf"{DOCS_LANE}([^ ]+) from ([0-9a-f]{{40}})", job)
+    return (m[1], m[2]) if m else None
+
+
+def cancelled(c):
+    """Whether a check run finished by being cancelled."""
+    return c.get("status") == "COMPLETED" and c.get("conclusion") == "CANCELLED"
+
+
+def after_cancel(c, contexts, stale):
+    """What a cancelled check run's workflow did on the head in its other
+    suites: "finished" once one has done that check's work, so the cancelled
+    run is no word on the head; "going" while one is still running, whichever
+    diff it's for, since CI isn't done speaking; None with neither, as when
+    someone cancelled the run by hand, which stays not green. Done its work:
+    the suite has finished for the PR's diff (stale is those that didn't) with
+    nothing of its own cancelled, so two cancelled runs don't clear each other,
+    and it ran the same work (same_work), whatever that said. A skip vouches
+    for nothing: a caller skipped on a title edit completes too. A check of a
+    shared CI call (one with a lane job) must also be matched in a call whose
+    lane ran and chose this PR's base: a push's or a dispatch's run of the same
+    job has no lane, and judged no PR. Jobs beside that call have no lane to
+    ask for. A check run of no workflow has no other runs to go by."""
+    mine, flow = suite(c).get("id"), workflow(c).get("id")
+    if mine is None or flow is None:
+        return None
+    same = [x for x in contexts if workflow(x).get("id") == flow]
+    others = [x for x in same if suite(x).get("id") != mine]
+    gone = {suite(x).get("id") for x in others if cancelled(x)} | stale
+    done = [x for x in others if suite(x).get("status") == "COMPLETED" and suite(x).get("id") not in gone and ran(x)]
+    shared = any(job_of(x)[1].startswith(LANE) and job_of(x)[0] == job_of(c)[0] for x in same)
+    laned = {(suite(x).get("id"), job_of(x)[0]) for x in done if judged(x)}
+    if any(same_work(c, x) and (not shared or (suite(x).get("id"), job_of(x)[0]) in laned) for x in done):
+        return "finished"
+    return "going" if any(suite(x).get("status") != "COMPLETED" for x in others) else None
+
+
+def job_of(c):
+    """A check run's name split: the call it's of, and its job."""
+    caller, _, job = c["name"].rpartition(" / ")
+    return caller, job
+
+
+def same_work(c, x):
+    """Whether check run x does c's work: the same name, or, in one call of
+    the shared CI, its lane, whose name a run may never have filled in, or its
+    gate, which is its whole gate's job or the docs lane's, and no other job."""
+    if c["name"] == x["name"]:
+        return True
+    (mine, a), (theirs, b) = job_of(c), job_of(x)
+    if mine != theirs:
+        return False
+    return (a.startswith(LANE) and b.startswith(LANE)) or (gate_job(a) and gate_job(b))
+
+
+def gate_job(job):
+    """Whether a job's name is the shared CI's gate for a PR, in either lane."""
+    return job == GATE or job.startswith(DOCS_LANE)
+
+
+def ran(c):
+    """Whether a check run did its work: finished, neither skipped nor cancelled."""
+    return c.get("status") == "COMPLETED" and c.get("conclusion") not in ("SKIPPED", "CANCELLED")
+
+
+def fork_of(repo, pr):
+    """The commit the PR's head leaves its base at now (their merge base),
+    None if GitHub didn't say or the base branch is gone. It moves when the
+    base takes in some of the PR's commits, and so does what the PR changes.
+    Asked of the base branch by its name, so GitHub answers for its tip as
+    it is at the asking, after any merge since the PR list was read (another
+    PR's earlier in the same pass included): nothing read before stands in
+    for it, the PR's baseRefOid least of all, which GitHub can leave at an
+    older commit of the branch. The name goes in as C.compare quotes it, so
+    it's that branch's, whatever it holds."""
+    if not repo:
+        return None
+    got = C.gh("api", C.compare(repo, pr["baseRefName"], pr["headRefOid"]) + "?per_page=1", "--jq",
+               "{fork: .merge_base_commit.sha}", check=False)
+    fork = got.get("fork") if isinstance(got, dict) else None
+    return fork if re.fullmatch("[0-9a-f]{40}", fork or "") else None
+
+
+def runs(pr, repo):
+    """The shared CI's runs on the head, by what each judged (judged): the
+    suites that judged another diff than the PR's, as it stands, whether one
+    took the docs lane for the PR's own and passed it, and the workflows,
+    by name, that have run on the head only for another diff. Another diff:
+    another base (the PR retargeted since, an old run run again, another
+    PR's on the same head), or a docs lane from another commit than the one
+    the PR leaves its base at now. A workflow has run for the PR's diff once
+    a run of it chose its lane against the PR's base and has finished, every
+    job of it: a run still going may yet skip the gate."""
+    base, nodes = pr["baseRefName"], pr["commits"]["nodes"]
+    contexts = ((nodes[0]["commit"].get("statusCheckRollup") or {}).get("contexts") or {}).get("nodes", []) if nodes else []
+    said = [(c, j) for c in contexts if (j := judged(c))]
+    now = fork_of(repo, pr) if any(b == base and fork for _, (b, fork) in said) else None
+    stale = {suite(c).get("id") for c, (b, fork) in said if b != base or fork is not None and fork != now} - {None}
+    docs = any(fork is not None and suite(c).get("id") not in stale and c["status"] == "COMPLETED"
+               and c["conclusion"] == "SUCCESS" for c, (_, fork) in said)
+    ran = {workflow(c).get("id") for c, (_, fork) in said
+           if fork is None and suite(c).get("id") not in stale and suite(c).get("status") == "COMPLETED"} - {None}
+    unrun = sorted({workflow(c).get("name") or "CI" for c, _ in said
+                    if suite(c).get("id") in stale and workflow(c).get("id") not in ran})
+    return stale, docs, unrun
+
+
+def docs_lane(pr, moved):
+    """Whether a docs lane CI ran on this head for the PR's diff (runs) can
+    stand for it: every path it changes since it left its base is then
+    documentation, nothing the repo's flake builds or tests reads, so the
+    repo's proofs, which check what it builds, have nothing of its to check.
+    It can when the PR changes nothing under .github/: the workflow that
+    judged it, and the docs paths it read, are then the base branch's own,
+    not ones the PR wrote. moved: where its renames and copies started
+    (touches.moved_from), None if that couldn't be read."""
+    if moved is None or pr["changedFiles"] > len(pr["files"]["nodes"]):
+        return False
+    return not any(p == ".github" or p.startswith(".github/") for p in [f["path"] for f in pr["files"]["nodes"]] + list(moved))
 
 
 def our_status(pr, context=CONTEXT):
@@ -290,8 +461,8 @@ def land(repo, pr, repo_info):
                 "or GitHub didn't say what the rules are")
     # The merge endpoint merges or refuses; a push since the check makes the
     # sha stale, and it waits for the next pass. A squash or a merge commit
-    # takes the PR's title as its subject, the title house-check holds to the
-    # house style: left to GitHub, a one-commit PR's squash would take that
+    # takes the PR's title as its subject, the title the house check holds to
+    # the house style: left to GitHub, a one-commit PR's squash would take that
     # commit's subject instead, which nothing checked.
     title = [] if method == "rebase" else ["-f", f"commit_title={pr['title']} (#{pr['number']})"]
     try:

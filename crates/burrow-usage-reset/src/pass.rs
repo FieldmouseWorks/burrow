@@ -9,7 +9,8 @@ use serde::{Deserialize, Serialize};
 pub const SOONEST: f64 = 120.0;
 /// The latest: the hourly catch-up passes over it anyway.
 pub const LATEST: f64 = 3600.0;
-/// After a pass that couldn't read the meter.
+/// After a pass that couldn't read the meter, or whose try at the reset
+/// confirmed nothing.
 pub const RETRY: f64 = 300.0;
 /// The burn assumed until two readings show a faster one, in percent of the
 /// week a second (6 an hour): busy, so a week near its end is looked at
@@ -54,6 +55,8 @@ pub enum Reset {
 
 /// What the account can be asked: the meter, and to use its banked reset.
 pub trait Account {
+    /// The meter as it stands now. A copy of it from earlier, however it
+    /// looks, is an error: a pass decides and books only on a fresh reading.
     fn read(&mut self) -> Result<Reading, String>;
     /// Ask for the banked reset, calling KEEP once just before its yes is
     /// first pressed. If KEEP fails, nothing is pressed.
@@ -194,6 +197,9 @@ pub fn pass(
         && state.failed_tries < TRIES
         && state.none_at.is_none_or(|at| now - at >= NONE_AGAIN);
     let mut reading = reading;
+    // A try that confirmed nothing, with tries left: the next comes soon,
+    // while the week still has room.
+    let mut again = false;
     if due {
         let mut then = Unsettled {
             used: reading.used,
@@ -234,6 +240,7 @@ pub fn pass(
             }
             Reset::AtLimitOnly(said) | Reset::NotPressed(said) => {
                 state.failed_tries += 1;
+                again = state.failed_tries < TRIES;
                 eprintln!(
                     "the reset wasn't confirmed ({} of {TRIES}): {said}",
                     state.failed_tries
@@ -261,7 +268,7 @@ pub fn pass(
     }
 
     let wake = now
-        + if state.unsettled.is_some() {
+        + if state.unsettled.is_some() || again {
             RETRY
         } else {
             next(
@@ -835,8 +842,9 @@ mod tests {
             } else {
                 vec![]
             };
+            let now = 100.0 * i as f64;
             let mut a = fake(vec![Ok(at(99.0))], resets);
-            let o = run(&mut a, state, 100.0 * i as f64);
+            let o = run(&mut a, state, now);
             assert_eq!(a.asked, usize::from(i <= 3));
             assert_eq!(
                 keys(&o.notices),
@@ -846,6 +854,9 @@ mod tests {
                     vec![]
                 }
             );
+            // A try left comes soon, before the week runs out; once they're
+            // spent, the owner has the notice and nothing's left to try.
+            assert_eq!(o.wake, now + if i < 3 { RETRY } else { LATEST });
             state = o.state;
         }
     }

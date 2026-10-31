@@ -10,7 +10,7 @@ import os
 import shutil
 import subprocess
 
-from harness import (C, CI_GREEN, DDIR, FAIL, JOBS, POSTED, PR_DIFF, QDIR, P, R, H, S, STATES, STUB, T0, V,
+from harness import (C, CI_GREEN, DDIR, FAIL, JOBS, POSTED, PR_DIFF, QDIR, P, R, H, S, SINCE, STATES, STUB, T0, V,
                      W, WROTE, agent, agent_runs, clean, fresh_pr_state, head, info, judgment, merged,
                      gh_stub, mkpr, pr_state, queued, run, rv_review, said, stand_in, swept, tmp, worker)
 
@@ -79,22 +79,29 @@ assert not merged() and queued() == ["codex", "rival"], (status, queued())
 status, _ = run(mkpr(reviews=reviewed, body="Why not Rust: a generated file"), 610)
 assert merged(), status
 
-# A look at an earlier head that comes back after the PR moved on is posted
-# on the commit it read, so its findings go into the next push. Its
-# "nothing found" says nothing about the new head, which both look at.
-fresh_pr_state()
-run(mkpr(), 0)
-run(mkpr(), 600)
+# A look at an earlier head that comes back after the PR moved on can't know
+# what the pushes since fixed: while its reviewer is still to look at the
+# new head, that look decides, so this one is dropped, and counts no round.
+# Not even after a hold, however long it sat: on unhold, it would raise again
+# what was fixed meanwhile.
 newer = "9" * 40
-status, _ = run(mkpr(sha=newer), 700)
-assert queued() == ["codex", "rival"] and "Waiting for Codex's review" in status, status
-worker(rival={"result": "review", "answer": {"findings": [{"path": "a.py"}, {"path": "a.py"}]}})
-status, _ = run(mkpr(sha=newer), 710)
-assert sorted(POSTED) == [("codex", head, 0), ("rival", head, 2)] and os.listdir(DDIR) == [], POSTED
-assert not merged() and queued() == [] and "Waiting for Codex's review" in status, status
-# Its findings were a round, and the new head's own looks come once it's sat still.
-status, _ = run(mkpr(sha=newer, reviews=[rv_review("codex", 0), rv_review("rival", 2)], threads=[False, False]), 1300)
-assert "2 open review threads" in status and queued() == ["codex", "rival"], status
+for held in (False, True):
+    fresh_pr_state()
+    run(mkpr(), 0)
+    run(mkpr(), 600)
+    status, _ = run(mkpr(sha=newer, labels=["hold"] * held), 700)
+    assert queued() == ["codex", "rival"], status
+    worker(rival={"result": "review", "answer": {"findings": [{"path": "a.py"}, {"path": "a.py"}]}})
+    if held:
+        status, _ = run(mkpr(sha=newer, labels=["hold"]), 705)
+        assert POSTED == [] and len(os.listdir(DDIR)) == 2 and "On hold" in status, (POSTED, status)
+    status, _ = run(mkpr(sha=newer), 710)
+    assert POSTED == [] and os.listdir(DDIR) == [] and queued() == [], (held, POSTED, os.listdir(DDIR))
+    assert not merged() and "review findings" not in status and "Waiting for Codex's review" in status, (held, status)
+    assert pr_state()["rv"]["rival"].get("fails") is None, pr_state()
+    # The new head's own looks come once it's sat still.
+    status, _ = run(mkpr(sha=newer), 1300)
+    assert queued() == ["codex", "rival"] and "Rival is reviewing this commit" in status, (held, status)
 # Retargeted since, what an earlier head got on the old base isn't posted.
 fresh_pr_state()
 run(mkpr(), 0)
@@ -102,17 +109,18 @@ run(mkpr(), 600)
 worker(rival={"result": "review", "answer": {"findings": [{"path": "a.py"}]}})
 run(mkpr(sha=newer, base="release/1.x"), 700)
 assert POSTED == [] and os.listdir(DDIR) == [], POSTED
-# Findings on an earlier head, posted while the new one is already clean
-# and green, hold the pass back from landing: the threads it read are from
-# before them.
+# Nor do findings on an earlier head hold back a new one its reviewers
+# found clean: their looks at it decide.
 fresh_pr_state()
 run(mkpr(), 0)
 run(mkpr(), 600)
 worker(rival={"result": "review", "answer": {"findings": [{"path": "a.py"}]}})
 status, _ = run(clean(sha=newer), 700)
-assert ("rival", head, 1) in POSTED and not merged(), (POSTED, WROTE)
-assert "state=pending" in status and f"review findings on {head[:7]}" in status, status
-# So are an out-of-service reviewer's: its look came back before it went out.
+assert POSTED == [] and os.listdir(DDIR) == [] and merged(), (POSTED, status)
+# One out of service won't look at the new head, so what it said of an
+# earlier one is its last word: posted on the commit it read, its findings
+# hold the pass back from landing, since the threads it read are from
+# before them. Its look came back before it went out.
 fresh_pr_state()
 run(mkpr(), 0)
 run(mkpr(), 600)
@@ -157,25 +165,52 @@ run(mkpr(reviews=[rv_review("codex", 0)]), 600)
 V.answered = real_answered
 assert late_out and V.out("rival") and os.listdir(DDIR) == [], (os.listdir(DDIR), WROTE)
 os.remove(f"{tmp}/state/{V.OUT}")
+# Nor is an earlier head's review dropped for a look at this head that an
+# outage in the same listing means won't come, wherever its answer sorts: an
+# earlier head's in once outs() had looked (b sorts after a), or this head's
+# in once consume() had read it.
+for out_at in ("b" * 40, newer):
+    fresh_pr_state()
+    run(mkpr(), 0)
+    run(mkpr(), 600)
+    worker(rival={"result": "review", "answer": {"findings": [{"path": "a.py"}]}})
+    listed = []
+    def answered(key, r, listed=listed, out_at=out_at):
+        listed.append(r)
+        if listed.count("rival") == 2 and r == "rival":  # overtaken()'s listing
+            C.save(f"{V.DONE}/{V.item_name(key, 'rival', out_at, 'main')}.json",
+                   {"result": "out", "why": "spent", "until": C.ts(T0) + 86400, "head": out_at, "base": "main"})
+        return real_answered(key, r)
+    V.answered = answered
+    status, _ = run(mkpr(sha=newer, reviews=[rv_review("codex", 0, newer)]), 700)
+    V.answered = real_answered
+    assert listed.count("rival") >= 2 and V.out("rival") and ("rival", head, 1) in POSTED, (out_at, POSTED, WROTE)
+    assert not merged() and f"review findings on {head[:7]}" in status and os.listdir(DDIR) == [], (out_at, status)
+    os.remove(f"{tmp}/state/{V.OUT}")
 # One GitHub wouldn't take is kept and tried again, and the PR waits for it.
 fresh_pr_state()
 run(mkpr(), 0)
 run(mkpr(), 600)
 worker(rival={"result": "review", "answer": {"findings": [{"path": "a.py"}]}})
+C.save(V.OUT, {"rival": {"why": "spent", "until": C.ts(T0) + 86400}})
 STUB["post"] = RuntimeError("HTTP 502")
 for t in (700, 760):
     status, _ = run(clean(sha=newer), t)
-    assert not merged() and len(os.listdir(DDIR)) == 2 and C.WAKE, (t, WROTE, os.listdir(DDIR))
+    # Codex's, in service, was dropped: its look at the new head decides.
+    assert not merged() and os.listdir(DDIR) == [f"{V.item_name('pr-sam_r-5.json', 'rival', head, 'main')}.json"] and C.WAKE, (
+        t, WROTE, os.listdir(DDIR))
     assert f"Posting Rival's review of {head[:7]}" in status, status
 STUB["post"] = None
 status, _ = run(clean(sha=newer), 820)
 assert ("rival", head, 1) in POSTED and os.listdir(DDIR) == [] and not merged(), (POSTED, status)
 assert "late" not in pr_state()["rv"]["rival"], pr_state()
-# The third failure gives up on it: the new head's own reviews still decide.
+# The third failure gives up on it once the reviewer found the new head
+# clean, which covers what it found there.
 fresh_pr_state()
 run(mkpr(), 0)
 run(mkpr(), 600)
 worker(rival={"result": "review", "answer": {"findings": [{"path": "a.py"}]}})
+C.save(V.OUT, {"rival": {"why": "spent", "until": C.ts(T0) + 86400}})
 STUB["post"] = RuntimeError("HTTP 502")
 for t in (700, 760):
     run(clean(sha=newer), t)
@@ -184,6 +219,7 @@ status, _ = run(clean(sha=newer), 820)
 STUB["post"] = None
 assert os.listdir(DDIR) == [] and "late" not in pr_state()["rv"]["rival"], (os.listdir(DDIR), pr_state())
 assert POSTED == [] and merged(), (POSTED, status)
+os.remove(f"{tmp}/state/{V.OUT}")
 # Only a clean look at this head by the same reviewer covers what it found
 # there: out of service, it never comes, so the answer stays, the PR waits
 # and the owner hears. Back and clean on this head, it's let go.
@@ -343,6 +379,8 @@ fresh_pr_state()
 C.save(f"{V.SNAP}/{V.snap_name('pr-sam_r-5.json', head, 'main')}.json", {"rules": "", "secret": [".env", "cfg/api.yaml"]})
 status, _ = run(clean(files=[".env", "cfg/api.yaml"]), 700)
 assert len(JOBS) == 1 and not merged() and "it changes .env, cfg/api.yaml, which the reviewers" in JOBS[0], (status, JOBS)
+# It waits in proj's line from when the PR was opened, not from this head.
+assert SINCE == [C.ts(T0)], SINCE
 
 # Retargeted after its reviews, the same head is another change: what they
 # said doesn't count, and they're asked again.
@@ -624,7 +662,7 @@ assert not merged() and "the repo has no CI" not in status, status
 assert len(JOBS) == 1 and "CI is red (flake (failed to start))" in JOBS[0], (status, JOBS)
 many_suites = clean(checks=[], suites=broken)
 many_suites["commits"]["nodes"][0]["commit"]["checkSuites"]["pageInfo"]["hasNextPage"] = True
-assert H.ci_state(many_suites) == ("pending", ["over 100 checks, too many to read"])
+assert H.ci_state(many_suites) == ("pending", ["over 100 checks, too many to read"], False)
 fresh_pr_state()
 run(clean(checks=[]), 700)
 # CI that shows up while the judge works doesn't pass it by: its verdict on
@@ -710,7 +748,13 @@ for checks in (CI_GREEN, []):
 # renovate-sweep is told how a covered repo's proofs run.
 C.NOW = C.ts(T0)
 assert C.coverage([{"repo": "sam/r"}], [{"repo": "sam/r"}]) == {
-    "at": C.NOW, "repos": {"sam/r": {"proofJobs": S.CFG["repos"]["sam/r"]["proofJobs"], "covered": True}}}
+    "at": C.NOW, "repos": {"sam/r": {"proofs": S.CFG["repos"]["sam/r"]["proofJobs"], "covered": True}}}
+# A build the steward runs is one of them, told as how a job reruns it.
+S.CFG["repos"]["sam/r"]["proofBuilds"] = {"vm": "checks.x86_64-linux.vm"}
+told = C.coverage([{"repo": "sam/r"}], [])["repos"]["sam/r"]["proofs"]
+assert set(told) == {"remi-proof", "vm"} and "nix build .#checks.x86_64-linux.vm -L" in told["vm"], told
+assert "never post that status yourself" in told["vm"], told
+del S.CFG["repos"]["sam/r"]["proofBuilds"]
 # ... but only the repos a pass saw to are covered: one whose pass failed
 # isn't, so renovate-sweep lists its ok majors itself, and still knows how
 # its proofs run.
@@ -754,7 +798,7 @@ assert UNHOOKED == [S.R.discover() + [{"repo": "eve/p"}]], UNHOOKED
 S.R.discover, S.R.settle_repo, S.R.publish, S.open_prs, S.R.unhook_gone, S.R.hook_projects = kept_fns
 written = json.load(open(f"{tmp}/state/repos.json"))["repos"]
 assert {r: v["covered"] for r, v in written.items()} == {"sam/r": True, "sam/bad": False, "sam/flaky": False}, written
-assert written["sam/bad"]["proofJobs"] == C.repo_cfg("sam/bad")["proofJobs"], written
+assert written["sam/bad"]["proofs"] == C.repo_cfg("sam/bad")["proofJobs"], written
 # A proof job that ends without posting its verdict is started once more.
 fresh_pr_state()
 run(clean(checks=CI_GREEN), 700)

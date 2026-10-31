@@ -1,12 +1,14 @@
 # proj: the operator hands project work to a Claude inside that project, as a
-# background job (proj/proj.sh). Jobs run as burrow.user, in
-# burrow.projectsDir/PROJECT, and keep everything they said in jobsDir.
+# background job (crates/burrow-proj). Jobs run as burrow.user, in
+# burrow.projectsDir/PROJECT, and keep everything they said in jobsDir. Each
+# makes its worktrees in a scratch dir of its own under burrow.scratchDir,
+# cleared once the job is over (its scratch.rs).
 # With proj.inbox, issues labelled for Claude in the projects' GitHub repos
-# become jobs too (proj/inbox.sh). A job waiting on a PR doesn't hold a slot:
-# proj-watch resumes it when the PR changes. Both are burrow.events handlers:
-# a repo's webhook deliveries, the end of a turn and their own wake-ups start
-# them, never a timer. With the stall watchdog on, proj is one of its
-# sources: each job's wait, as of its last change (proj/waits.sh).
+# become jobs too (proj-inbox, in the same crate). A job waiting on a PR
+# doesn't hold a slot: proj-watch resumes it when the PR changes. Both are
+# burrow.events handlers: a repo's webhook deliveries, the end of a turn and
+# their own wake-ups start them, never a timer. With the stall watchdog on,
+# proj is one of its sources: each job's wait, as of its last change.
 inputs:
 { config, lib, pkgs, ... }:
 let
@@ -21,60 +23,59 @@ let
   # and the lead ones, what it's built from, whose go first of all (pipeline
   # repos whether or not pipelineRepos lists them).
   leadRepos = lib.attrByPath [ "burrow" "autoland" "leadRepos" ] [ ] config;
-  pipelineRepos = lib.escapeShellArg (lib.concatStringsSep " " (lib.attrByPath [ "burrow" "autoland" "pipelineRepos" ] [ ] config ++ leadRepos));
+  pipelineRepos = lib.attrByPath [ "burrow" "autoland" "pipelineRepos" ] [ ] config ++ leadRepos;
   # What each job waits on, for the stall watchdog, when it's on.
   watchdog = config.burrow.watchdog.enable or false;
   waits = "${cfg.jobsDir}/.waits.json";
 
-  proj = pkgs.writeShellApplication {
-    name = "proj";
-    runtimeInputs = [ pkgs.coreutils pkgs.findutils pkgs.gnugrep pkgs.gnused pkgs.gawk pkgs.jq pkgs.curl config.programs.git.package pkgs.systemd pkgs.util-linux pkgs.bashInteractive ];
-    text = ''
-      SRC=${lib.escapeShellArg projectsDir}
-      JOBS=${lib.escapeShellArg cfg.jobsDir}
-      SLICE=claude-jobs.slice
-      MAX_JOBS=${toString cfg.maxJobs}
-      PIPELINE_SLOTS=${toString cfg.pipelineSlots}
-      PER_PROJECT=${toString cfg.maxJobsPerProject}
-      MIN_FREE=${toString cfg.minFreeMemory}
-      JOB_MEMORY_MAX=${lib.escapeShellArg cfg.jobMemoryMax}
-      TIMEOUT=${lib.escapeShellArg cfg.timeout}
-      MAX_WAIT=${toString cfg.maxWait}
-      AWAIT_HOURS=${toString cfg.awaitHours}
-      GH=${lib.getExe cfg.gh}
-      MARK=${lib.escapeShellArg inboxMark}
-      KICK=${lib.escapeShellArg config.burrow.events.kick}
-      WAKE=${lib.escapeShellArg watchWake}
-      PIPELINE=${pipelineRepos}
-      FLAKE=${lib.escapeShellArg config.burrow.flake}
-      LEAD=${lib.escapeShellArg (lib.concatStringsSep " " leadRepos)}
-      WAITS=${lib.escapeShellArg (lib.optionalString watchdog waits)}
-      STALL_QUEUED=${toString (cfg.stallAfterMinutes * 60)}
-      GRACE=600
-      APPS=${lib.escapeShellArg (lib.concatStrings (lib.mapAttrsToList (name: app: "${name}=${app.envFile}\n") config.burrow.github.apps))}
-    '' + builtins.readFile ./proj/pick.sh + builtins.readFile ./proj/line.sh + builtins.readFile ./proj/waits.sh + builtins.readFile ./proj/proj.sh;
-  };
+  configFile = pkgs.writeText "proj.json" (builtins.toJSON {
+    projects = projectsDir;
+    jobs = cfg.jobsDir;
+    scratch = config.burrow.scratchDir;
+    slice = "claude-jobs.slice";
+    inherit (cfg) maxJobs pipelineSlots maxJobsPerProject minFreeMemory jobMemoryMax timeout maxWait stallAfterMinutes awaitHours;
+    inherit (config.burrow.events) kick;
+    wake = watchWake;
+    waits = if watchdog then waits else null;
+    inherit inboxMark pipelineRepos leadRepos;
+    inherit (config.burrow) flake;
+    deployed = "/run/current-system/sw/bin/proj";
+    apps = lib.mapAttrs (_: app: app.envFile) config.burrow.github.apps;
+    inbox = if cfg.inbox.enable then {
+      state = "${stateDir}/proj-inbox";
+      inherit (cfg.inbox) label unstickLabel authors vm;
+      host = config.networking.hostName;
+      notify = if config.burrow.tools ? notify then lib.getExe config.burrow.tools.notify else null;
+      wake = inboxWake;
+      machinery = if machineApp == null then null else machineApp.name;
+    } else null;
+    tools = {
+      # A login shell's, for the jobs' Claude.
+      bash = "${pkgs.bashInteractive}/bin/bash";
+      flock = "${pkgs.util-linux}/bin/flock";
+      gh = lib.getExe cfg.gh;
+      git = lib.getExe config.programs.git.package;
+      systemctl = "${pkgs.systemd}/bin/systemctl";
+      systemdRun = "${pkgs.systemd}/bin/systemd-run";
+      timeout = "${pkgs.coreutils}/bin/timeout";
+    };
+  });
+  # The command, with this machine's config. Always this one: a turn that
+  # outlived a switch runs the binary it started with, and its Claude's proj
+  # calls get the new one with its own config, never the old. PROJ_SELF is how
+  # it knows which it is: this script, not the binary, since a switch can change
+  # the config alone (slot.rs, the hand-over).
+  proj = pkgs.writeShellScriptBin "proj" ''
+    export PROJ_CONFIG=${configFile} PROJ_SELF=$0
+    exec ${inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow}/bin/burrow-proj "$@"
+  '';
 
-  inbox = pkgs.writeShellApplication {
-    name = "proj-inbox";
-    runtimeInputs = [ proj pkgs.coreutils config.programs.git.package cfg.gh pkgs.jq pkgs.gnused pkgs.gnugrep pkgs.util-linux ];
-    text = ''
-      SRC=${lib.escapeShellArg projectsDir}
-      JOBS=${lib.escapeShellArg cfg.jobsDir}
-      STATE=${lib.escapeShellArg "${stateDir}/proj-inbox"}
-      SCRATCH=${lib.escapeShellArg config.burrow.scratchDir}
-      LABEL=${lib.escapeShellArg cfg.inbox.label}
-      UNSTICK_LABEL=${lib.escapeShellArg cfg.inbox.unstickLabel}
-      AUTHORS=${lib.escapeShellArg (lib.concatStringsSep " " cfg.inbox.authors)}
-      VM=${if cfg.inbox.vm then "1" else "0"}
-      MARK=${lib.escapeShellArg inboxMark}
-      HOST=${lib.escapeShellArg config.networking.hostName}
-      NOTIFY=${lib.escapeShellArg (lib.optionalString (config.burrow.tools ? notify) (lib.getExe config.burrow.tools.notify))}
-      WAKE=${lib.escapeShellArg inboxWake}
-      PIPELINE=${pipelineRepos}
-      MACHINERY=${lib.escapeShellArg (if machineApp == null then "" else machineApp.name)}
-    '' + builtins.readFile ./proj/inbox.sh;
-  };
+  # proj-inbox, with the same config, whose inbox part is its own. The turns
+  # it starts are proj's (PROJ_SELF), as if a job's Claude had run proj.
+  inbox = pkgs.writeShellScriptBin "proj-inbox" ''
+    export PROJ_CONFIG=${configFile} PROJ_SELF=${proj}/bin/proj
+    exec ${inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow}/bin/burrow-proj-inbox "$@"
+  '';
 in
 {
   imports = [
@@ -114,9 +115,9 @@ in
         work on the pipeline itself waits only on other such work, never on
         everyone else's long jobs; a lead repo's go first of all, ahead of
         the other pipeline jobs too, but leave them these slots while one
-        waits, and everyone else one of the other slots while one of theirs
-        waits and none runs. A pipeline job in any other project goes
-        as `--first`: ahead of the line, but within its project's cap and
+        waits. All of them leave everyone else one of the other slots while
+        one of theirs waits and none runs. A pipeline job in any other project is a
+        steward job: ahead of the line, but within its project's cap and
         never in these slots; `proj status` and its turn's journal say so,
         origin and all.
       '';
@@ -129,7 +130,12 @@ in
         The most slots one project's jobs hold at once, the pipeline's own
         repos' pipeline jobs aside.
         Its next one waits, and lets other projects' by meanwhile, so one
-        project's jobs never fill the machine.
+        project's jobs never fill the machine. The last of these stays free
+        for the project's steward jobs (`proj run --pipeline`, there a pipeline
+        job goes within this cap): its other jobs, `--first` ones and ones
+        that waited `maxWait` included, hold at most maxJobsPerProject - 1,
+        or the one slot when this is 1, so its own lanes can't hold up its
+        gates and conflict fixes. Steward jobs may use the whole share.
       '';
     };
     minFreeMemory = lib.mkOption {
@@ -280,7 +286,9 @@ in
     });
     # The end of each job's turn (proj _ended), which each turn's unit starts
     # as it goes: in a unit of its own, so what kills the turn's whole cgroup
-    # (systemd-oomd) leaves it be.
+    # (systemd-oomd) leaves it be. The job comes in its environment, from the
+    # instance name: a job's id is its project's folder name, spaces, `%` and
+    # all.
     systemd.user.services."proj-ended@" = {
       description = "The end of a turn of proj job %I";
       unitConfig.ConditionUser = user;
@@ -293,6 +301,9 @@ in
     systemd.tmpfiles.rules = [
       "d ${cfg.jobsDir} 0755 ${user} ${config.users.users.${user}.group} -"
       "d ${stateDir}/proj-watch 0755 ${user} ${config.users.users.${user}.group} -"
+      # Each job's scratch (burrow-proj's scratch.rs), which it clears itself once the
+      # job is over: no age here.
+      "d ${config.burrow.scratchDir}/jobs 0755 ${user} ${config.users.users.${user}.group} -"
     ];
 
     # What every job waits on, for the stall watchdog: proj rewrites it, and

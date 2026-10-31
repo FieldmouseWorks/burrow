@@ -1,6 +1,6 @@
-"""The repos: finding them, keeping their settings at the baseline, the
-daily branch sweep, and the issues that list what waits for the owner and
-what the pipeline is stuck on."""
+"""The repos: finding them, keeping their settings at the baseline, and the
+issues that list what waits for the owner and what the pipeline is stuck
+on. Deleting the branches nothing needs is branches.py's."""
 
 import fnmatch
 import hashlib
@@ -8,15 +8,13 @@ import json
 import os
 import re
 import shutil
-import subprocess
-import tempfile
 import time
 import urllib.parse
 
 import common as C
 import reviewers as V
 import train as T
-from common import CFG, CONTEXT, DEP_RE, DRY, load, log, repo_cfg, save, ts
+from common import CFG, CONTEXT, DRY, load, log, repo_cfg, save
 from prs import PROOF_SLOT, RELEASE_AGE, REVIEWER
 from tasks import RED_BRANCH, red_default_task
 
@@ -24,23 +22,44 @@ from tasks import RED_BRANCH, red_default_task
 GONE = "gone"
 
 
+# Each owner's own repos, not forks, a page at a time (what `gh repo list
+# --source` asks, with the repo's databaseId, which it can't give).
+REPOS = """query($owner: String!, $cursor: String) {
+  repositoryOwner(login: $owner) {
+    repositories(first: 100, after: $cursor, isFork: false, ownerAffiliations: OWNER) {
+      nodes { databaseId nameWithOwner isPrivate isArchived createdAt defaultBranchRef { name } }
+      pageInfo { hasNextPage endCursor }
+    }
+  }
+}"""
+
+
 def discover():
     """Each owner's repos the App's installation there reaches: which ones
     are the steward's is which it's installed on. GitHub never reports an
     App as a repo's admin (an installation's viewerPermission is empty), so
-    that's no test of what it may touch."""
+    that's no test of what it may touch. Each is known by its databaseId,
+    the number GitHub keeps for the repo whatever it's called (its node id
+    is no such thing: GitHub has changed their format before)."""
     seen = []
     for owner in CFG["owners"]:
+        cursor, found = None, []
         with C.acting_for(owner):
-            found = C.gh("repo", "list", owner, "--no-archived", "--source", "--limit", "100000",
-                         "--json", "id,nameWithOwner,isPrivate,defaultBranchRef,createdAt") or []
+            while True:
+                got = (C.graphql(REPOS, owner=owner, cursor=cursor)["repositoryOwner"] or {}).get("repositories")
+                if not got:
+                    break
+                found += got["nodes"]
+                if not got["pageInfo"]["hasNextPage"]:
+                    break
+                cursor = got["pageInfo"]["endCursor"]
         for r in found:
             name = r["nameWithOwner"]
-            if any(fnmatch.fnmatch(name, pat) for pat in CFG["exclude"]):
+            if r["isArchived"] or any(fnmatch.fnmatch(name, pat) for pat in CFG["exclude"]):
                 continue
             # An empty repo has no default branch yet (None): only its
             # settings and hook, until its first push.
-            seen.append({"repo": name, "id": r["id"], "private": r["isPrivate"],
+            seen.append({"repo": name, "id": r["databaseId"], "private": r["isPrivate"],
                          "default": (r.get("defaultBranchRef") or {}).get("name"), "created": r["createdAt"]})
     return seen
 
@@ -53,7 +72,17 @@ def required(train):
     return [{"context": c, "integration_id": CFG["app"]["id"]} for c in [CONTEXT] + [T.CONTEXT] * bool(train)]
 
 
-def baseline_ruleset(rc, default):
+def bypass_actors(rc):
+    """Who gets past the baseline. The owner (an admin) can still merge past
+    it from the PR page, and automation that pushes (directPush) past it
+    altogether; in a repo with its train on, no one: only the train lands
+    there."""
+    if rc["train"]:
+        return []
+    return [{"actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "always" if rc["directPush"] else "pull_request"}]
+
+
+def baseline_ruleset(rc):
     rules = [{"type": "deletion"}, {"type": "non_fast_forward"}]
     if not rc["directPush"]:
         rules += [
@@ -75,9 +104,7 @@ def baseline_ruleset(rc, default):
         "target": "branch",
         "enforcement": "active",
         "conditions": {"ref_name": {"include": ["~DEFAULT_BRANCH"], "exclude": []}},
-        # The owner (an admin) can still merge past it, from the PR page.
-        "bypass_actors": [{"actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "pull_request"}]
-        if not rc["directPush"] else [{"actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "always"}],
+        "bypass_actors": bypass_actors(rc),
         "rules": rules,
     }
 
@@ -95,10 +122,12 @@ def settle_repo(r, known):
     repo, rc = r["repo"], repo_cfg(r["repo"])
     st = load(f"repo-{repo.replace('/', '_')}.json", {})
     new = repo not in known
-    # GitHub's id for it, by which restart tells a remade repo: kept once
-    # restart has passed it, settings kept before ids were included.
-    if r.get("id") and st.get("id") != r["id"]:
-        st["id"] = r["id"]
+    # GitHub's databaseId for it, by which restart tells a remade repo: kept
+    # once restart has passed it, settings kept before it was included. The
+    # node id kept before it goes: it's no test of which repo this is.
+    if r.get("id") and (st.get("databaseId") != r["id"] or "id" in st):
+        st.pop("id", None)
+        st["databaseId"] = r["id"]
         save(f"repo-{repo.replace('/', '_')}.json", st)
     # Due daily, and straight away for another App (its required checks are
     # pinned to the one it was), a train turned on or off (the baseline
@@ -170,7 +199,7 @@ def settle_repo(r, known):
         if CFG["rulesets"] and rc["ruleset"] and not empty and not any(x["name"] == "baseline" for x in own):
             log(f"{repo}: adding the baseline ruleset")
             made = C.write("api", "-X", "POST", f"repos/{repo}/rulesets", "--input", "-",
-                           input=json.dumps(baseline_ruleset(rc, r["default"])), check=False) is not None
+                           input=json.dumps(baseline_ruleset(rc)), check=False) is not None
         # Whether or not the repo gets the baseline ruleset, its own rules
         # are kept in line with it.
         rules = keep_rules(repo, rc, [x for x in own if x.get("target") == "branch"]) and made
@@ -195,24 +224,14 @@ def settle_repo(r, known):
 def restart(r, known, failed):
     """A repo made under the name of one GitHub deleted (GitHub hands a
     deleted repo's name to the next one) starts over as new, before
-    anything acts on it. It's another repo when GitHub's id for it isn't
-    the one kept with the settings the steward last set under its name;
-    for settings kept before the steward kept ids, when they were set
-    before it was made, or in the second it was (createdAt has no finer
-    grain). Its name's state is found in any case: GitHub's names don't go
-    by it. Then `reset`."""
+    anything acts on it, when the settings the steward last set under its
+    name were another repo's (C.replaced). Then `reset`."""
     repo = r["repo"]
-    k = repo.replace("/", "_").lower()
-    for name in sorted(os.listdir(C.STATE)):
-        m = re.fullmatch(r"repo-(.+)\.json", name)
-        if not m or m.group(1).lower() != k:
-            continue
-        st = load(name, {})
-        if "settings" not in st or (st["id"] == r["id"] if "id" in st else st["settings"] >= ts(r["created"]) + 1):
-            continue
-        log(f"{repo}: made at {r['created']}, and isn't the repo of its name the steward settled; starting it over as new")
-        if not DRY:
-            reset(r, m.group(1), known, failed)
+    for k, st in C.kept_state(repo):
+        if C.replaced(st, r):
+            log(f"{repo}: made at {r['created']}, and isn't the repo of its name the steward settled; starting it over as new")
+            if not DRY:
+                reset(r, k, known, failed)
 
 
 def reset(r, k, known, failed):
@@ -308,11 +327,33 @@ def keep_checks(checks, key):
     return moved
 
 
+def complete_baseline(rs, rc):
+    """A baseline made before this repo's settings were what they are (say
+    while it pushed directly, with only the first two rules) gets the rules
+    it lacks: with no required-status rule in it there's nothing for
+    keep_rules to require the train's status in. Who may bypass it follows
+    the train going on or off. Returns what changed, in words."""
+    if rs.get("name") != "baseline" or not (CFG["rulesets"] and rc["ruleset"]) or rc["directPush"]:
+        return []
+    changed = []
+    have = {y.get("type") for y in rs.get("rules") or []}
+    missing = [y for y in baseline_ruleset(rc)["rules"] if y["type"] not in have]
+    if missing:
+        rs["rules"] = (rs.get("rules") or []) + missing
+        changed.append(f"{', '.join(y['type'] for y in missing)} added")
+    # Only the train's own turn: a repo's other bypass is its own to keep.
+    if bool(rs.get("bypass_actors")) == bool(rc["train"]):
+        rs["bypass_actors"] = bypass_actors(rc)
+        changed.append("no bypass, only the train lands" if rc["train"] else "the owner's bypass back")
+    return changed
+
+
 def keep_rules(repo, rc, rulesets):
     """Each of the repo's own branch rulesets, in line with the baseline: no
     up-to-date branches (docs/repo-baseline.md says why), and the steward's
-    status required from its App only; the baseline's own requires the
-    train's too exactly while the repo's train is on. The listing names a
+    status required from its App only; the baseline's own has all its rules
+    (complete_baseline) and requires the train's too exactly while the repo's
+    train is on. The listing names a
     ruleset without its rules, so each one is read. Returns False when one
     couldn't be read or wouldn't take the change."""
     ok = True
@@ -321,7 +362,7 @@ def keep_rules(repo, rc, rulesets):
         if not isinstance(rs, dict):
             ok = False
             continue
-        changed = []
+        changed = complete_baseline(rs, rc)
         for y in rs.get("rules") or []:
             if y.get("type") != "required_status_checks":
                 continue
@@ -636,146 +677,6 @@ def unhook_gone(repos):
         for k in ("hook", "hookId", "unhookTried"):
             st.pop(k, None)
         save(name, st)
-
-
-def delete_branch(repo, name, sha):
-    """Delete the branch only if its tip is still `sha`: a push since then
-    keeps it (git's lease; the REST API has no conditional delete)."""
-    if DRY:
-        log(f"  would: delete {repo} {name} if still at {sha[:7]}")
-        return
-    with tempfile.TemporaryDirectory() as d:
-        subprocess.run(["git", "init", "-q", "--bare", d], check=False)
-        p = subprocess.run(["git", "-C", d, *C.GIT_AUTH, "push", "-q", f"--force-with-lease=refs/heads/{name}:{sha}",
-                            f"https://github.com/{repo}.git", f":refs/heads/{name}"],
-                           capture_output=True, text=True, env=C.gh_env(repo))
-        if p.returncode != 0:
-            log(f"{repo}: kept {name}: {p.stderr.strip()[:200]}")
-
-
-# Unmerged, with no PR and no commit for this long: given up on (agents open
-# a PR when they push). Its commits are kept under ARCHIVE and the branch
-# deleted, so a short wait costs nothing.
-STALE_DAYS = 3
-ARCHIVE = "refs/archive"
-
-
-def answer(call, *args):
-    """What GitHub answered call(*args) (C.gh or C.write), or None when it
-    said no (a branch with no history in common with the default has no
-    comparison, say). C.Unavailable when it didn't answer, which stops a
-    sweep: one that couldn't look at every branch hasn't swept."""
-    try:
-        return call(*args)
-    except C.Unavailable:
-        raise
-    except RuntimeError as e:
-        log(f"  failed: {e}")
-        return None
-
-
-def archive_branch(repo, name, sha):
-    """Keep the branch's commits at refs/archive/NAME/SHA, a ref GitHub keeps
-    but lists with neither branches nor tags; True once they're kept (by
-    this call or an earlier one), and only then may the branch go.
-    C.Unavailable when GitHub didn't answer."""
-    ref = f"{ARCHIVE}/{name}/{sha}"
-    if DRY:
-        log(f"  would: keep {repo} {name} at {ref}")
-        return True
-    if answer(C.write, "api", f"repos/{repo}/git/refs", "-f", f"ref={ref}", "-f", f"sha={sha}") is not None:
-        return True
-    # Already there: an earlier sweep kept it and then couldn't delete.
-    return answer(C.gh, "api", f"repos/{repo}/git/ref/{urllib.parse.quote(ref.removeprefix('refs/'))}",
-                  "--jq", f'.object.sha == "{sha}"') is True
-
-
-def closed_at(repo, name, sha):
-    """The closed PR whose head was this branch at `sha`, if there is one.
-    GitHub keeps that PR's commits (refs/pull/N/head) and offers to restore
-    the branch from its page, so the branch holds nothing the PR doesn't.
-    None too when GitHub said no; C.Unavailable when it didn't answer."""
-    owner = repo.split("/")[0]
-    # Every page: a branch name reused for many PRs can have its match
-    # past the first hundred.
-    got = answer(C.gh, "api", "--paginate", f"repos/{repo}/pulls?state=closed&per_page=100&head={owner}:{urllib.parse.quote(name)}",
-                 "--jq", f'.[] | select(.head.sha == "{sha}") | .number')
-    if got is None:
-        return None
-    first = str(got).split("\n")[0]
-    return int(first) if first.isdigit() else None
-
-
-UNKEPT = f"Stale branches it couldn't archive (unmerged, no PR, {STALE_DAYS}+ days)"
-
-
-def sweep_branches(r, in_use, digest, sweep=True):
-    """Delete the merged branches and the closed PRs' branches, and archive
-    and delete the stale ones, once a day and only when `sweep`; the stale
-    ones the last sweep couldn't archive are listed every time. A sweep
-    GitHub didn't list the branches for, or stopped answering partway
-    through, isn't one: the next full pass sweeps again, not a day later
-    (what it deleted stays deleted)."""
-    repo = r["repo"]
-    path = f"repo-{repo.replace('/', '_')}.json"
-    st = load(path, {})
-    unkept = st.get("unkept", [])
-    if sweep and C.NOW - st.get("branches", 0) >= 86400:
-        try:
-            unkept = swept(r, in_use)
-        except RuntimeError as e:
-            log(f"{repo}: no branch sweep this pass: {e}")
-        else:
-            st.pop("stale", None)  # the list it kept before it archived, which nothing reads now
-            st.update(branches=C.NOW, unkept=unkept)
-            save(path, st)
-    for b in unkept:
-        digest.append((UNKEPT, f"{repo}: `{b}`", ""))
-
-
-def swept(r, in_use):
-    """Sweep r's branches: the stale ones it couldn't archive. RuntimeError
-    when GitHub didn't list them, C.Unavailable when it stopped answering."""
-    repo = r["repo"]
-    unkept = []
-    # The machine's globs, plus the repo's own (evidence branches it cites),
-    # and its train's candidates', which cn makes and deletes.
-    keep = CFG["keepBranches"] + repo_cfg(repo).get("keepBranches", []) + [T.TRAIN.get("branches")] * T.on(repo)
-    names = C.gh("api", "--paginate", f"repos/{repo}/branches?per_page=100", "--jq",
-                 '.[] | select(.protected | not) | "\\(.name) \\(.commit.sha)"')
-    for x in str(names).split("\n"):
-        name, _, sha = x.partition(" ")
-        if not name or not sha or name == r["default"] or name in in_use:
-            continue
-        if any(fnmatch.fnmatch(name, pat) for pat in keep):
-            continue
-        # GitHub deletes a branch when its PR merges, never when it closes.
-        # Matched by the tip, so a bot's branch pushed anew since (its next
-        # update, with no PR yet) or anyone's pushed after the close stays.
-        if (n := closed_at(repo, name, sha)) is not None:
-            log(f"{repo}: deleting {name} at {sha[:7]} (#{n} was closed at it, and keeps its commits)")
-            delete_branch(repo, name, sha)
-            continue
-        # Any other branch of a dependency bot's is its work in progress.
-        if DEP_RE.match(name):
-            continue
-        # Compared at the tip just listed, and deleted only if it's still there.
-        cmp = answer(C.gh, "api", f"repos/{repo}/compare/{r['default']}...{sha}", "--jq",
-                     "{ahead: .ahead_by, date: .commits[-1].commit.committer.date}")
-        if not isinstance(cmp, dict):
-            continue
-        if cmp["ahead"] == 0:
-            log(f"{repo}: deleting {name} at {sha[:7]} (already in {r['default']})")
-            delete_branch(repo, name, sha)
-        elif cmp.get("date") and C.NOW - ts(cmp["date"]) > STALE_DAYS * 86400:
-            # Nothing is lost: one ref made from the archived one restores it.
-            if archive_branch(repo, name, sha):
-                log(f"{repo}: deleting {name} at {sha[:7]} (unmerged, no PR, {STALE_DAYS}+ days; "
-                    f"kept at {ARCHIVE}/{name}/{sha})")
-                delete_branch(repo, name, sha)
-            else:
-                unkept.append(name)
-    return unkept
 
 
 # What only the owner can settle: their call (a label, a judge's or an

@@ -13,7 +13,7 @@ import os
 
 import train as T
 import waits
-from harness import (C, CI_GREEN, FAIL, IDLE, JOBS, P, R, S, STEWARD, WROTE, clean, cn, cn_log, cn_runs, fresh_pr_state,
+from harness import (B, C, CI_GREEN, FAIL, IDLE, JOBS, P, R, S, STEWARD, WROTE, clean, cn, cn_log, cn_runs, fresh_pr_state,
                      gh_stub, head, info, judgment, merges, mkpr, run, said, stand_in, tmp)
 
 stand_in()
@@ -170,10 +170,10 @@ assert "didn't take its queued merge off" in status and cn_runs() == [SHOW], (st
 # (posted just before it lands) and its error count for nothing, and nor
 # does anyone else's under its name. Its failure, the App's, is red CI.
 red = mark("FAILURE", "red alone in candidate ABCDEFGH: ci")
-assert P.ci_state(mkpr(checks=[mark("SUCCESS", "landing with candidate ABCDEFGH")])) == ("none", [])
-assert P.ci_state(mkpr(checks=[mark("ERROR", "GitHub refused its merge: no")])) == ("none", [])
-assert P.ci_state(mkpr(checks=[mark("FAILURE", "red", who={"login": "sam", "__typename": "User"})])) == ("none", [])
-assert P.ci_state(mkpr(checks=CI_GREEN + [red])) == ("red", ["conary/train (red alone in candidate ABCDEFGH: ci)"])
+assert P.ci_state(mkpr(checks=[mark("SUCCESS", "landing with candidate ABCDEFGH")])) == ("none", [], False)
+assert P.ci_state(mkpr(checks=[mark("ERROR", "GitHub refused its merge: no")])) == ("none", [], False)
+assert P.ci_state(mkpr(checks=[mark("FAILURE", "red", who={"login": "sam", "__typename": "User"})])) == ("none", [], False)
+assert P.ci_state(mkpr(checks=CI_GREEN + [red])) == ("red", ["conary/train (red alone in candidate ABCDEFGH: ci)"], False)
 # A fix job takes it, told what the train's failure means.
 fresh_pr_state()
 seen()
@@ -210,12 +210,13 @@ status, _ = run(mkpr(branch="renovate/foo-1.x", title="Update foo from 1.4 to 1.
 assert cn_runs() == [SHOW, JOIN] and "In the train" in status, (cn_runs(), status)
 
 # The train lands only onto the default branch: a PR against another one
-# merges as it would without it, judged first with no CI, and Renovate's
-# own merges it there. One retargeted since it joined comes out first.
+# merges as it would without it, judged first with no CI. Renovate merges
+# nothing in a train repo, so its own there is the steward's to merge. One
+# retargeted since it joined comes out first.
 for pr, says, merged_here in (
         (clean(base="release"), "state=success", True), (clean(base="release", checks=()), "the repo has no CI", False),
         (mkpr(branch="renovate/foo-1.x", title="Update foo from 1.4 to 1.5", base="release"),
-         "Dependency update, CI green", False)):
+         "state=success", True)):
     fresh_pr_state()
     seen()
     status, _ = run(pr, 900)
@@ -340,9 +341,9 @@ print("train token: ok")
 rc = C.repo_cfg("sam/r")
 assert R.required(False) == [{"context": "review-settled", "integration_id": 7}]
 assert R.required(True) == [{"context": "review-settled", "integration_id": 7}, {"context": "conary/train", "integration_id": 7}]
-made = R.baseline_ruleset({**rc, "train": True}, "main")
+made = R.baseline_ruleset({**rc, "train": True})
 assert [y for y in made["rules"] if y["type"] == "required_status_checks"][0]["parameters"]["required_status_checks"] == R.required(True)
-made = R.baseline_ruleset(rc, "main")
+made = R.baseline_ruleset(rc)
 assert [y for y in made["rules"] if y["type"] == "required_status_checks"][0]["parameters"]["required_status_checks"] == R.required(False)
 RULES = {}
 PUT = []
@@ -357,10 +358,14 @@ def rules_write(*a, **k):
     return {}
 
 
-def ruleset(name, checks):
-    return {"name": name, "target": "branch", "enforcement": "active", "conditions": {}, "bypass_actors": [],
+OWNER_BYPASS = [{"actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "pull_request"}]
+
+
+def ruleset(name, checks, bypass=()):
+    return {"name": name, "target": "branch", "enforcement": "active", "conditions": {}, "bypass_actors": list(bypass),
             "rules": [{"type": "required_status_checks", "parameters": {
-                "strict_required_status_checks_policy": False, "required_status_checks": checks}}]}
+                "strict_required_status_checks_policy": False, "required_status_checks": checks}},
+                      {"type": "deletion"}, {"type": "non_fast_forward"}, {"type": "pull_request", "parameters": {}}]}
 
 
 kept_gh, kept_write = C.gh, C.write
@@ -369,13 +374,35 @@ settled = [{"context": "review-settled", "integration_id": 7}]
 for on, checks, want in ((True, settled, R.required(True)),
                          (False, R.required(True), R.required(False)),
                          (True, R.required(True), None), (False, settled, None)):
-    RULES["repos/sam/r/rulesets/1"] = ruleset("baseline", checks)
+    RULES["repos/sam/r/rulesets/1"] = ruleset("baseline", checks, () if on else OWNER_BYPASS)
     PUT.clear()
     assert R.keep_rules("sam/r", {**rc, "train": on}, [{"id": 1}])
     if want is None:
         assert PUT == [], (on, checks, PUT)
     else:
         assert len(PUT) == 1 and json.loads(PUT[0][1])["rules"][0]["parameters"]["required_status_checks"] == want, (on, PUT)
+# A baseline from before the train (remi's, made while it pushed directly:
+# only the first two rules, the owner bypassing always) has no required
+# checks to add the train's to: it gets the rules it lacks, and no bypass.
+old = ruleset("baseline", [])
+old["rules"] = [{"type": "deletion"}, {"type": "non_fast_forward"}]
+old["bypass_actors"] = [{**OWNER_BYPASS[0], "bypass_mode": "always"}]
+RULES["repos/sam/r/rulesets/1"] = old
+PUT.clear()
+assert R.keep_rules("sam/r", {**rc, "train": True}, [{"id": 1}])
+sent = json.loads(PUT[0][1])
+assert [y["type"] for y in sent["rules"]] == ["deletion", "non_fast_forward", "pull_request", "required_status_checks"], sent
+assert sent["rules"][3]["parameters"]["required_status_checks"] == R.required(True) and sent["bypass_actors"] == [], sent
+# Its bypass comes back with the train off, a directPush repo's rules stay
+# as they are, and so does any baseline with rulesets off.
+RULES["repos/sam/r/rulesets/1"] = ruleset("baseline", R.required(False))
+PUT.clear()
+assert R.keep_rules("sam/r", {**rc, "train": False}, [{"id": 1}])
+assert json.loads(PUT[0][1])["bypass_actors"] == OWNER_BYPASS, PUT
+for changed in ({"directPush": True}, {"ruleset": False}):
+    RULES["repos/sam/r/rulesets/1"] = {**old, "rules": [{"type": "deletion"}]}
+    PUT.clear()
+    assert R.keep_rules("sam/r", {**rc, "train": False, **changed}, [{"id": 1}]) and PUT == [], (changed, PUT)
 # Given up with the ledger off as well, when there's no train for cn to run:
 # the status's name isn't the ledger's to say.
 on_rules, off_rules = R.required(True), R.required(False)
@@ -406,21 +433,25 @@ for was, due in ((True, False), (False, True)):
         R.settle_repo({"repo": "sam/r", "private": False, "default": "main"}, {"sam/r"})
     assert (("api", "repos/sam/r") in calls) == due, (was, calls)
 
-# The branch sweep leaves the train's candidates' branches to cn.
-BRANCHES = "conary/train/" + CAND + " " + "e" * 40 + "\nold " + "f" * 40
+# The branch watch leaves the train's candidates' branches to cn.
+BRANCHES = [{"name": "conary/train/" + CAND, "commit": {"sha": "e" * 40}}, {"name": "old", "commit": {"sha": "f" * 40}}]
 deleted = []
-kept_sweep = (R.closed_at, R.delete_branch)
-R.closed_at = lambda repo, name, sha: None
-R.delete_branch = lambda repo, name, sha: deleted.append(name)
-C.gh = lambda *a, **k: BRANCHES if "branches?per_page=100" in a[2] else {"ahead": 0}
+kept_watch = (B.closed_at, B.delete_branch, C.fresh, C.NOW)
+B.closed_at = lambda repo, name, sha: 0
+B.delete_branch = lambda repo, name, sha: deleted.append(name)
+C.fresh = lambda path, etag=None: ("tag", BRANCHES if "/branches?" in path else [])  # and no PR closed
+C.gh = lambda *a, **k: {"ahead": 0}
 for on, want in ((True, ["old"]), (False, ["conary/train/" + CAND, "old"])):
     S.CFG["repos"]["sam/r"] = {"train": on}
     fresh_pr_state()
     deleted.clear()
-    R.sweep_branches({"repo": "sam/r", "default": "main"}, set(), [])
+    C.NOW = kept_watch[3]
+    B.watch_branches({"repo": "sam/r", "default": "main"}, set(), [])
+    C.NOW += B.GRACE  # each goes once it has sat that long
+    B.watch_branches({"repo": "sam/r", "default": "main"}, set(), [])
     assert deleted == want, (on, deleted)
 del S.CFG["repos"]["sam/r"]
-R.closed_at, R.delete_branch = kept_sweep
+B.closed_at, B.delete_branch, C.fresh, C.NOW = kept_watch
 C.gh, C.write = kept_gh, kept_write
 fresh_pr_state()
 print("train rules: ok")

@@ -1,0 +1,489 @@
+//! A turn's wait in line for a slot.
+//!
+//! The line is jobs/.queue: one file per waiting turn, named ([`entry`]) so
+//! that sorting puts pipeline ones ahead, then steward and --first ones, then the oldest,
+//! holding the waiting process's pid. A slot is a lock on jobs/.slots/N, and N.who says
+//! whose (class and project). The lock is the turn's and everything it starts
+//! ([`held`]), so a turn that's killed frees its slot by itself, once the last
+//! of what it left is gone too; its place in line is cleared by the next look
+//! at the line, which finds its pid no longer that turn's. [`pick`] says who has a slot. The turn
+//! is first or normal, as it was started; its job's class ([`Classes`]) is
+//! asked again at every look, and its place in line, its admission and its
+//! slot's N.who all go by that one answer.
+//!
+//! One waiter looks at a time, under jobs/.slots/.lock, and only those pick
+//! names can take a slot, so what a look costs comes out of every waiter's
+//! turn at the lock: with the line long, of how soon a free slot gets filled.
+//! So a look runs git once per project ([`Classes`]) and nothing else, and it
+//! leaves all of pick's choice in jobs/.slots/.next. For [`NEXT_FRESH`] seconds
+//! after that, any waiter it doesn't name has nothing to learn and skips its
+//! look. It's only ever a reason not to look: a slot is taken only by a look,
+//! under the lock.
+//!
+//! A job run --unstick waits in no line at all ([`unstick_slot`]), and one made
+//! so while it waits (proj unstick) leaves the line within a pass.
+//!
+//! What a waiting turn decides with is the deployed proj's, not the one it
+//! started on: at its next pass after a switch it execs that one, and picks up
+//! its place in line there, so a change to who goes first reaches everyone
+//! waiting and the line and [`pick`] are always one version. A running turn
+//! stays on its proj, but what it tells the stall watchdog is the deployed
+//! one's too ([`crate::waits::rewatch`]), so the format of a watch item has one
+//! owner. All that crosses versions is these: `proj _exec ID CLASS`, in the
+//! same pid, with the place left in jobs/.queue under that pid and the look's
+//! lock held on fd 9 until that proj is up; and `proj _rewatch ID...`.
+//! [`HANDOVER_FORMAT`] names them, and a proj that doesn't print the same one
+//! isn't handed anything: the turn stays on the proj it has.
+
+use std::fs::{self, File};
+use std::io;
+use std::os::unix::process::CommandExt;
+use std::path::{Path, PathBuf};
+use std::process::{self, Command, Stdio};
+use std::thread::sleep;
+use std::time::Duration;
+
+use crate::config::Config;
+use crate::job::Job;
+use crate::pick::{Class, Classes, Slot, Waiter, pick, project};
+use crate::{mtime, now, now_nanos, read};
+
+pub const HANDOVER_FORMAT: &str = "1";
+const NEXT_FRESH: i64 = 2;
+/// Whatever the note says, a waiter looks this often, which is as long as a
+/// job whose class changed can go on holding its old place in line.
+const LOOK_EVERY: i64 = 60;
+
+/// The deployed proj's store path, so the switch after this one can't move it
+/// from under what's run, if it isn't this one and can take a hand-over. Every
+/// waiter asks at every pass, so while the deployed proj is this one the answer
+/// runs nothing.
+pub fn successor(cfg: &Config) -> Option<PathBuf> {
+    let d = fs::canonicalize(&cfg.deployed).ok()?;
+    if d == cfg.me {
+        return None;
+    }
+    let said = Command::new(&d)
+        .arg("_handover_format")
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    (String::from_utf8_lossy(&said.stdout).trim_end() == HANDOVER_FORMAT).then_some(d)
+}
+
+/// On with the proj at `to`, in this pid, its look's lock on fd 9 until it's up:
+/// mid-exec a waiter's cmdline reads empty, and a look clearing out dead places
+/// would take it for gone. Only returns if the exec fails. This crate holds no
+/// unsafe code, so a shell puts the lock on fd 9; the caller's lock, held till
+/// the exec, and the shell's own cmdline, which holds the _exec, leave no gap
+/// for a look.
+fn hand_over(cfg: &Config, to: &Path, id: &str, given: Class) -> io::Error {
+    Command::new(&cfg.tools.bash)
+        .args(["-c", r#"exec 9>"$0"; "$1" 9; shift; exec "$@""#])
+        .arg(cfg.jobs.join(".slots/.lock"))
+        .arg(&cfg.tools.flock)
+        .arg(to)
+        .args(["_exec", id, given.name()])
+        .exec()
+}
+
+/// What `_exec` does first: lets go of the look's lock a hand-over came with,
+/// so the looks can go on. Unlocking rather than closing, with no unsafe code
+/// to close fd 9 with: what's left open locks nothing.
+pub fn handed_over(cfg: &Config) {
+    if Path::new("/proc/self/fd/9").exists() {
+        let _ = Command::new(&cfg.tools.flock)
+            .args(["-u", "9"])
+            .stderr(Stdio::null())
+            .status();
+    }
+}
+
+/// The place a proj before this one left, if it handed over: this job's, under
+/// this pid, and when it was made, which is when this turn came.
+fn place_left(queue: &Path, id: &str, pid: u32) -> Option<(String, i64)> {
+    let names = fs::read_dir(queue).ok()?;
+    let want = pid.to_string();
+    let name = names
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .find(|n| {
+            !n.starts_with('.')
+                && job_of(n) == id
+                && read(&queue.join(n)).as_deref() == Some(want.as_str())
+        })?;
+    let came = mtime(&queue.join(&name)).unwrap_or_else(now);
+    Some((name, came))
+}
+
+/// A turn's place in line, the name jobs/.queue has for it (PREFIX-WHEN-ID): 1
+/// for a --first turn, 2 for any other ([`Classes::place`] says what that makes
+/// it now), and WHEN, in nanoseconds, from when its job's work began (proj run
+/// --since), or else from now. Every WHEN has the same number of digits, so
+/// sorting the names sorts them by when.
+fn entry(job: &Job, id: &str, given: Class) -> String {
+    let prefix = if given == Class::First { 1 } else { 2 };
+    let since = read(&job.path("since"));
+    let began = since.as_deref().and_then(|s| s.lines().next());
+    match began.filter(|s| !s.is_empty()) {
+        Some(s) => format!("{prefix}-{s}000000000-{id}"),
+        None => format!("{prefix}-{}-{id}", now_nanos()),
+    }
+}
+
+/// A job run --unstick takes what the pipeline is stuck on, and that can be the
+/// line itself ([`pick`] handing out no slots, say, or every slot held by turns
+/// that wait on each other), so its turns never join it: they take a slot of
+/// their own past the maxJobs the line shares, jobs/.slots/unstick, and wait
+/// only for another --unstick turn to give it up. Nor do they wait for memory
+/// to spare: the slice, which the machine caps, holds this turn with the rest,
+/// and the job that finds why the machine is full can't wait for it to empty.
+fn unstick_slot(cfg: &Config, id: &str, n: &str) -> io::Result<File> {
+    let slots = cfg.jobs.join(".slots");
+    let job = Job::new(cfg, id);
+    fs::create_dir_all(&slots)?;
+    let slot = File::create(slots.join("unstick"))?;
+    slot.lock()?;
+    let slot = held(slot)?;
+    fs::write(
+        slots.join("unstick.who"),
+        format!("unstick\t{}\n", project(&job.dir)),
+    )?;
+    took_slot(&job, n, "unstick")?;
+    Ok(slot)
+}
+
+/// Say that this job's turn N has slot S (N.slot, which proj state reads as
+/// running), under the job's lock: proj withdraw stops a turn only while it has
+/// none, and looks under that lock, so none takes one between its look and its
+/// stop. One withdrawn while it waits here is stopped with no slot.
+fn took_slot(job: &Job, n: &str, s: &str) -> io::Result<()> {
+    let _held = job.lock()?;
+    fs::write(job.turn(n, "slot"), format!("{s}\n"))
+}
+
+/// Say this job's turn N may be withdrawn no more, under the job's lock, so none
+/// is stopped on this proj's word once another has it: before a hand-over, to a
+/// proj that may take its slot without that lock (one from before [`took_slot`],
+/// after a switch back to it). One that can be withdrawn says so again itself,
+/// at the top of its [`take`].
+fn unmark(job: &Job, n: &str) -> io::Result<()> {
+    let _held = job.lock()?;
+    match fs::remove_file(job.turn(n, "withdrawable")) {
+        Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
+        _ => Ok(()),
+    }
+}
+
+/// A slot once taken, open across exec to everything the turn starts, as a
+/// shell's descriptor is: the lock is on the file, and it goes only with the
+/// last process holding it. So what the turn leaves running (a child that
+/// ignores TERM, a detached one) keeps the slot after `_exec` has ended or
+/// died, until the unit's stop has taken the last of it, and a waiter can't
+/// take a slot that work still runs in.
+fn held(slot: File) -> io::Result<File> {
+    rustix::io::fcntl_setfd(&slot, rustix::io::FdFlags::empty())?;
+    Ok(slot)
+}
+
+/// Whether a waiter whose place is at this path, which last looked at this
+/// time, should look now: it's never looked, or not lately, or there's no
+/// fresh note, or the note names it. The note is the time and each name,
+/// tab-separated, and may be caught half written (no newline yet): that costs
+/// a look, or a pass until the writer's done.
+fn look_due(note: Option<&str>, me: &str, looked: i64, now: i64) -> bool {
+    if now - looked >= LOOK_EVERY {
+        return true;
+    }
+    let Some((line, _)) = note.and_then(|n| n.split_once('\n')) else {
+        return true;
+    };
+    let mut fields = line.split('\t');
+    let at = fields
+        .next()
+        .filter(|a| !a.is_empty() && a.bytes().all(|b| b.is_ascii_digit()))
+        .and_then(|a| a.parse::<i64>().ok());
+    match at {
+        Some(at) if at <= now && now - at < NEXT_FRESH => fields.any(|f| f == me),
+        _ => true,
+    }
+}
+
+/// Whether the note at jobs/.slots/.next has this waiter look now.
+fn due(slots: &Path, me: &Path, looked: i64) -> bool {
+    let note = fs::read_to_string(slots.join(".next")).ok();
+    look_due(note.as_deref(), &me.to_string_lossy(), looked, now())
+}
+
+/// What pick said, as the note [`look_due`] reads.
+fn note_next(slots: &Path, names: &[String]) -> io::Result<()> {
+    let mut note = now().to_string();
+    for name in names {
+        note.push('\t');
+        note.push_str(name);
+    }
+    note.push('\n');
+    fs::write(slots.join(".next"), note)
+}
+
+/// What a look sees: every slot, whether any is taken, and the line.
+struct Look {
+    slots: Vec<Slot>,
+    busy: bool,
+    line: Vec<Waiter>,
+}
+
+/// A look, for the waiter named `me`, of job `dir`, class `own`, under the
+/// lock: the slots, then the line, once the places of turns that are gone are
+/// cleared.
+fn look(cfg: &Config, me: &str, dir: &Path, own: Class) -> io::Result<Look> {
+    let queue = cfg.jobs.join(".queue");
+    let dirs = cfg.jobs.join(".slots");
+    let mut classes = Classes::default();
+    let mut slots = Vec::new();
+    let mut busy = false;
+    for i in 1..=cfg.max_jobs {
+        let f = File::create(dirs.join(i.to_string()))?;
+        if f.try_lock().is_ok() {
+            // Let go at once, whoever's forking: a child shares this file
+            // until it execs, and closing it wouldn't free the slot till then.
+            let _ = f.unlock();
+            slots.push(Slot::Free);
+        } else {
+            busy = true;
+            let who = read(&dirs.join(format!("{i}.who"))).unwrap_or_else(|| "-\t-".into());
+            let (c, p) = who.split_once('\t').unwrap_or((&who, ""));
+            slots.push(Slot::Held {
+                class: Class::parse(c),
+                project: p.to_owned(),
+            });
+        }
+    }
+    let mut names: Vec<String> = fs::read_dir(&queue)?
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| !n.starts_with('.'))
+        .collect();
+    names.sort();
+    let mut line = Vec::new();
+    for name in names {
+        let fid = job_of(&name);
+        if name == me {
+            line.push(Waiter {
+                name,
+                class: own,
+                project: project(dir),
+            });
+        } else if waiter_alive(&queue.join(&name), fid) {
+            let dir = cfg.jobs.join(fid);
+            line.push(Waiter {
+                class: classes.place(cfg, &name, &dir).0,
+                project: project(&dir),
+                name,
+            });
+        } else {
+            let _ = fs::remove_file(queue.join(&name));
+        }
+    }
+    Ok(Look { slots, busy, line })
+}
+
+/// Wait in line for a slot, then hold it: the slot is this process's until
+/// the file returned is closed, or the process ends.
+pub fn take(cfg: &Config, id: &str, n: &str, given: Class) -> io::Result<File> {
+    let queue = cfg.jobs.join(".queue");
+    let slots = cfg.jobs.join(".slots");
+    fs::create_dir_all(&queue)?;
+    fs::create_dir_all(&slots)?;
+    let job = Job::new(cfg, id);
+    // This turn says it has its slot only under its job's lock ([`took_slot`]),
+    // so proj withdraw may stop it while it waits. On a proj from before that,
+    // it can't be, never having said so: until it hands over to this one, or
+    // from the moment this one hands it over ([`unmark`]).
+    fs::write(job.turn(n, "withdrawable"), "")?;
+    // maxWait goes by when this turn came, not its name's WHEN, which for a job
+    // run --since is when its work began.
+    let (mut me, came) =
+        place_left(&queue, id, process::id()).unwrap_or_else(|| (entry(&job, id, given), now()));
+    let mut looked = 0;
+    loop {
+        // Made --unstick while it waits (proj unstick): it goes now, look or not.
+        if job.path("unstick").exists() {
+            let _ = fs::remove_file(queue.join(&me));
+            return unstick_slot(cfg, id, n);
+        }
+        // Waited long enough: among the --first ones now, in its place by WHEN.
+        if let Some(rest) = me.strip_prefix("2-")
+            && now() - came >= cfg.max_wait as i64
+        {
+            let to = format!("1-{rest}");
+            let _ = fs::rename(queue.join(&me), queue.join(&to));
+            me = to;
+        }
+        // A switch since the last pass: on with the deployed proj, in this
+        // place, whether or not a look is due (one the note skips can wait
+        // LOOK_EVERY).
+        if let Some(to) = successor(cfg) {
+            unmark(&job, n)?;
+            let lk = File::create(slots.join(".lock"))?;
+            lk.lock()?;
+            let failed = hand_over(cfg, &to, id, given);
+            drop(lk);
+            return Err(failed);
+        }
+        if !due(&slots, &queue.join(&me), looked) {
+            sleep(Duration::from_secs(2));
+            continue;
+        }
+        // Where it stands now, and in the journal if that changed while it
+        // waits.
+        let (class, new) = Classes::default().place(cfg, &me, &job.dir);
+        if new != me {
+            if fs::rename(queue.join(&me), queue.join(&new)).is_ok() {
+                eprintln!("proj: it goes as {} now", class.name());
+            }
+            me = new;
+        }
+        // Published whole (a dot file, which the line skips, then renamed),
+        // so a waiter clearing out dead places never sees it without its
+        // pid. Put back if it went anyway.
+        if !queue.join(&me).exists() {
+            let tmp = queue.join(format!(".{me}.new"));
+            fs::write(&tmp, format!("{}\n", process::id()))?;
+            fs::rename(&tmp, queue.join(&me))?;
+        }
+        // A slot is taken only under this lock, so one a look sees free stays
+        // free until it's done. Another waiter's look may have come while this
+        // one waited for it.
+        let lk = File::create(slots.join(".lock"))?;
+        lk.lock()?;
+        if !due(&slots, &queue.join(&me), looked) {
+            drop(lk);
+            sleep(Duration::from_secs(2));
+            continue;
+        }
+        let seen = look(cfg, &me, &job.dir, class)?;
+        looked = now();
+        let picked = pick(cfg, &seen.slots, &seen.line);
+        let names: Vec<String> = picked
+            .iter()
+            .map(|&(i, _)| {
+                queue
+                    .join(&seen.line[i].name)
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        note_next(&slots, &names)?;
+        // Short of memory matters only while another job runs: with nothing
+        // running, waiting frees nothing.
+        if let Some(&(_, n_slot)) = picked.iter().find(|&&(i, _)| seen.line[i].name == me)
+            && (!seen.busy || spare() >= cfg.min_free_memory)
+        {
+            let slot = File::create(slots.join(n_slot.to_string()))?;
+            if slot.try_lock().is_ok() {
+                let slot = held(slot)?;
+                fs::write(
+                    slots.join(format!("{n_slot}.who")),
+                    format!("{}\t{}\n", class.name(), project(&job.dir)),
+                )?;
+                // The note named this one: the next to go needn't wait it
+                // out, and any others it named find theirs in the next look.
+                fs::write(slots.join(".next"), "")?;
+                drop(lk);
+                let _ = fs::remove_file(queue.join(&me));
+                took_slot(&job, n, &n_slot.to_string())?;
+                return Ok(slot);
+            }
+        }
+        drop(lk);
+        sleep(Duration::from_secs(2));
+    }
+}
+
+/// `proj status --line`: every turn in line, in the order pick takes them
+/// (lead ones, then the rest), with its job, class, how long it has waited and
+/// its project. Only reads. The wait is from when its place was made, not its
+/// name's WHEN, which for a job started --since is when its work began.
+pub fn in_line(cfg: &Config) -> String {
+    let queue = cfg.jobs.join(".queue");
+    let mut names: Vec<String> = fs::read_dir(&queue)
+        .map(|d| {
+            d.filter_map(|e| e.ok())
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .filter(|n| !n.starts_with('.'))
+                .collect()
+        })
+        .unwrap_or_default();
+    names.sort();
+    let mut classes = Classes::default();
+    let mut rows: Vec<(Class, String)> = Vec::new();
+    for name in &names {
+        let fid = job_of(name);
+        if !waiter_alive(&queue.join(name), fid) {
+            continue;
+        }
+        let Some(made) = mtime(&queue.join(name)) else {
+            continue;
+        };
+        let dir = cfg.jobs.join(fid);
+        let (class, _) = classes.place(cfg, name, &dir);
+        let wait = now() - made;
+        let row = format!(
+            "{fid:<40} {:<8} {:>4}m{:02}s  {}\n",
+            class.name(),
+            wait / 60,
+            wait % 60,
+            project(&dir)
+        );
+        rows.push((class, row));
+    }
+    rows.sort_by_key(|(c, _)| *c != Class::Lead);
+    rows.into_iter().map(|(_, r)| r).collect()
+}
+
+/// The job a place in line is for: PREFIX-WHEN-ID.
+fn job_of(name: &str) -> &str {
+    name.split_once('-')
+        .and_then(|(_, r)| r.split_once('-'))
+        .map_or(name, |(_, r)| r)
+}
+
+/// Whether the place at a path is a waiting turn's: its pid's command line is
+/// that job's _exec.
+fn waiter_alive(place: &Path, id: &str) -> bool {
+    let Some(pid) = read(place).filter(|p| !p.is_empty()) else {
+        return false;
+    };
+    let Ok(cmdline) = fs::read(Path::new("/proc").join(pid).join("cmdline")) else {
+        return false;
+    };
+    let cmdline: Vec<u8> = cmdline
+        .into_iter()
+        .map(|b| if b == 0 { b' ' } else { b })
+        .collect();
+    String::from_utf8_lossy(&cmdline).contains(&format!(" _exec {id} "))
+}
+
+/// Memory to spare, in MiB: what the kernel says is available, plus what the
+/// ZFS ARC would give back (the kernel doesn't count it).
+pub fn spare() -> u64 {
+    let field = |text: &str, name: &str, at: usize| -> u64 {
+        text.lines()
+            .map(|l| l.split_whitespace().collect::<Vec<_>>())
+            .find(|f| f.first().is_some_and(|k| k.trim_end_matches(':') == name))
+            .and_then(|f| f.get(at).and_then(|v| v.parse().ok()))
+            .unwrap_or(0)
+    };
+    let meminfo = fs::read_to_string("/proc/meminfo").unwrap_or_default();
+    let kb = field(&meminfo, "MemAvailable", 1);
+    let arc = fs::read_to_string("/proc/spl/kstat/zfs/arcstats").map_or(0, |a| {
+        let (size, min) = (field(&a, "size", 2), field(&a, "c_min", 2));
+        size.saturating_sub(min) / 1024
+    });
+    (kb + arc) / 1024
+}
+
+#[cfg(test)]
+mod tests;

@@ -16,7 +16,7 @@ import re
 import sys
 
 import proofs as P
-from harness import C, CI_GREEN, FAIL, JOBS, STATES, STOPPED, S, V, WROTE, clean, fresh_pr_state, merged, pr_state, run, sh, tmp
+from harness import C, CI_GREEN, FAIL, JOBS, STATES, STOPPED, S, V, WROTE, clean, fresh_pr_state, info, merged, pr_state, run, sh, tmp
 from prs import ci_state
 
 # A repo whose PRs' heads are real commits on its remote, as GitHub has them.
@@ -48,7 +48,8 @@ with open({NIX_LOG!r}, "a") as f:
     f.write(json.dumps([{tool!r}, *a]) + "\\n")
 know = json.load(open({NIX!r}))
 if a[:2] == ["--check-validity", "--print-invalid"]:
-    print("\\n".join(p for p in a[2:] if p not in know["valid"]))
+    # A derivation is in the store until it's collected; an output once valid.
+    print("\\n".join(p for p in a[2:] if ((p in know.get("collected", [])) if p.endswith(".drv") else (p not in know["valid"]))))
 elif a[:2] == ["--query", "--outputs"]:
     print("\\n".join(o for d in a[2:] for o in know.get("outs", {{}}).get(d, [d.removesuffix(".drv")])))
 else:
@@ -56,7 +57,9 @@ else:
     u = urllib.parse.urlsplit(url)
     rev = urllib.parse.parse_qs(u.query)["rev"][0]
     git = subprocess.run(["git", "-C", urllib.parse.unquote(u.path), "cat-file", "-e", rev + "^{{commit}}"])
-    drv = know["drvs"].get(rev + "#" + attr) or know["drvs"].get(rev)
+    tree = subprocess.run(["git", "-C", urllib.parse.unquote(u.path), "rev-parse", rev + "^{{tree}}"],
+                          capture_output=True, text=True).stdout.strip()
+    drv = know["drvs"].get(rev + "#" + attr) or know["drvs"].get(rev) or know["drvs"].get("tree:" + tree)
     if git.returncode or not drv:
         print("error: no", rev, attr, file=sys.stderr)
         sys.exit(1)
@@ -68,11 +71,12 @@ VALID = [Z]
 
 
 def nix_knows(drvs=None, outs=None):
-    """Each PR's derivation (by number, or by (number, attribute)), and a
-    derivation's outputs where it has more than one."""
+    """Each PR's derivation (by number, or by (number, attribute), or by a
+    commit's tree as "tree:TREE"), and a derivation's outputs where it has
+    more than one."""
     drvs = drvs or {1: X, 2: Y, 3: Z, 4: X, 6: W}
-    json.dump({"drvs": {heads[k] if isinstance(k, int) else f"{heads[k[0]]}#{k[1]}.drvPath": d + ".drv"
-                        for k, d in drvs.items()},
+    json.dump({"drvs": {heads[k] if isinstance(k, int) else k if isinstance(k, str) else f"{heads[k[0]]}#{k[1]}.drvPath":
+                        d + ".drv" for k, d in drvs.items()},
                "outs": {d + ".drv": o for d, o in (outs or {}).items()}, "valid": VALID}, open(NIX, "w"))
     open(NIX_LOG, "w").close()
 
@@ -81,13 +85,18 @@ def evals():
     return [x for x in map(json.loads, open(NIX_LOG)) if x[0] == "nix"]
 
 
-kept = C.job
+kept, kept_build = C.job, P.build
 ids = itertools.count(1)
-C.job = lambda repo, task, clone=False: JOBS.append(task) or f"build-{next(ids)}"
+C.job = lambda repo, task, clone=False, since=None: JOBS.append(task) or f"job-{next(ids)}"
+# A check with an attribute is built by the steward, not a Claude job: each
+# build started is in JOBS too, as "build N CHECK...".
+P.build = lambda repo, pr, checks, st: JOBS.append(f"build {pr['number']} {' '.join(checks)}") or f"{C.BUILD}{next(ids)}"
 S.CFG["repos"]["sam/r"] = {"proofJobs": {"remi-proof": "Run `just proof` and post the remi-proof status."},
                            "proofBuilds": {"remi-proof": "checks.x86_64-linux.proof"}, "proofSlots": 1}
 proof = CI_GREEN + [{"__typename": "StatusContext", "context": "remi-proof", "state": "PENDING", "description": ""}]
-RUNNING, SKIPPED = "a Claude job is running remi-proof", "nothing new to build, so it skipped the line"
+RUNNING, SKIPPED = "building remi-proof here", "nothing new to build, so it skipped the line"
+RUNNING_JOB = "a Claude job is running remi-proof"  # a check with no attribute
+CANT = "Settled, but what remi-proof builds can't be worked out here yet"
 STORE = "Settled; remi-proof taken from the store, not run again"
 
 
@@ -131,8 +140,8 @@ def line(n, t=700, checks=None):
     return run(clean(checks=checks or proof, number=n, sha=heads[n]), t)[0]
 
 
-def ahead(k):
-    return f"waiting its turn to run remi-proof ({k} ahead)"
+def ahead(k, verb="build"):
+    return f"waiting its turn to {verb} remi-proof ({k} ahead)"
 
 
 fresh_pr_state()
@@ -186,25 +195,28 @@ assert evals() == [["nix", "--extra-experimental-features", "nix-command flakes"
                     f"git+file://{mirror}?ref=refs/pr/{n}&rev={heads[n]}#checks.x86_64-linux.proof.drvPath"]
                    for n in (1, 2)], evals()
 
-# What can't be worked out waits its turn like before: an eval that fails
-# (tried once a head), and a check with no attribute (never tried).
+# A build whose eval fails has nothing to build: no build and no slot, a
+# strike, and the eval tried again EVAL_RETRY minutes on. A check with no
+# attribute is never worked out: a Claude job's, waiting its turn.
 fresh_pr_state()
 nix_knows()
 P.begin("sam/r", {1, 5, 6})
 line(1)
-assert ahead(1) in line(5) and JOBS == [], JOBS
-assert ahead(1) in line(5, 800) and len(evals()) == 2, evals()
+status = line(5)
+assert CANT in status and JOBS == [] and pr_state(5)["strikes"] == {"eval": 1}, (status, JOBS)
+assert CANT in line(5, 800) and len(evals()) == 2, evals()
+assert CANT in line(5, 700 + P.EVAL_RETRY * 60) and len(evals()) == 3, evals()
 S.CFG["repos"]["sam/r"]["proofBuilds"] = {}
 VALID.append(W)  # PR 6's, had it been asked
 nix_knows()
 P.begin("sam/r", {1, 5, 6})
-assert ahead(1) in line(6) and evals() == [], evals()
-# And a job whose paths are unknown holds a slot of its own: PR 1's job
-# building X is one, PR 6's the other.
+assert ahead(1, "run") in line(6) and evals() == [], evals()
+# And a job whose paths are unknown holds a slot of its own: PR 1's build
+# of X is one, PR 6's job the other.
 S.CFG["repos"]["sam/r"]["proofSlots"] = 2
 P.begin("sam/r", {1, 5, 6})
-assert RUNNING in line(6, 900) and len(JOBS) == 1, JOBS
-assert ahead(2) in line(5, 900) and JOBS == [], JOBS
+assert RUNNING_JOB in line(6, 900) and len(JOBS) == 1, JOBS
+assert ahead(2, "run") in line(6, 1000) or RUNNING_JOB in line(6, 1000), JOBS
 
 # Jobs count in the order they started: one whose paths those before it are
 # building holds nothing, a subset or a cover of several alike; one with a
@@ -364,7 +376,7 @@ def spelled(**states):
 
 
 def ci(**states):
-    return ci_state(clean(checks=spelled(**states)), S.CFG["repos"]["sam/r"]["proofJobs"])
+    return ci_state(clean(checks=spelled(**states)), S.CFG["repos"]["sam/r"]["proofJobs"])[:2]
 
 
 assert ci(REMI_PROOF="SUCCESS", Other_Proof="SUCCESS") == ("green", [])
@@ -391,38 +403,146 @@ FAIL.remove("context=other-proof")
 GITHUB[heads[3]] = {"Remi-Proof": "success", "OTHER-PROOF": "pending"}
 line(3, 2500, spelled(Remi_Proof="SUCCESS", OTHER_PROOF="PENDING"))
 assert from_store() == [] and other_store() == [taken(W)] and not pr_state(3)["strikes"], WROTE
-# With what it builds not built, a job runs it, by the repo's name for it.
+# With what it builds not built, it's built, by the repo's name for it.
 fresh_pr_state()
 VALID[:] = []
 nix_knows({3: Z, (3, "checks.x86_64-linux.other"): W})
 status = line(3, 2600, spelled(REMI_PROOF="PENDING", other_proof="SUCCESS"))
-assert RUNNING in status and len(JOBS) == 1 and "remi-proof: Run `just proof`" in JOBS[0], (status, JOBS)
+assert RUNNING in status and JOBS == ["build 3 remi-proof"], (status, JOBS)
 # Passed under another spelling: nothing left to prove, so it lands.
 fresh_pr_state()
 GITHUB[heads[3]] = {"REMI-PROOF": "success", "OTHER-PROOF": "success"}
 status = line(3, 2700, spelled(REMI_PROOF="SUCCESS", OTHER_PROOF="SUCCESS"))
 assert merged() and JOBS == [] and from_store() == [] and other_store() == [], (status, WROTE)
 # Failed under another spelling: red, and the job that fixes it is told how
-# the proof runs.
+# the proof runs: a build's way, the steward's to post.
 fresh_pr_state()
 GITHUB[heads[3]] = {"REMI-PROOF": "failure", "other-proof": "success"}
 red = spelled(REMI_PROOF="FAILURE", other_proof="SUCCESS")
 line(3, 2800, red)
 status = line(3, 10000, red)
 assert not merged() and from_store() == [] and len(JOBS) == 1, (status, WROTE, JOBS)
-assert "remi-proof" in JOBS[0] and "Run `just proof`" in JOBS[0], JOBS
+assert "remi-proof isn't CI" in JOBS[0] and "`nix build .#checks.x86_64-linux.proof -L`" in JOBS[0], JOBS
+assert "Run `just proof`" not in JOBS[0] and "never post that status yourself" in JOBS[0], JOBS
 VALID[:] = [X]
 del S.CFG["repos"]["sam/r"]["proofJobs"]["other-proof"]
 S.CFG["repos"]["sam/r"]["proofBuilds"] = {"remi-proof": "checks.x86_64-linux.proof"}
-# One output of two built isn't all of them: a job runs it.
+# One output of two built isn't all of them: it's built.
 VALID[:] = [X]
 nix_knows({1: XY}, {XY: [X, Y]})
 P.begin("sam/r", {1})
 status = line(1)
 assert RUNNING in status and from_store() == [] and len(JOBS) == 1, (status, WROTE)
 
+# Behind its base, a proof that merged in builds what's built already: the
+# PR is brought up to date instead of built, its new head's verdict then
+# the store's. PR 7 branches from PR 1's head and changes g; main is PR 3's
+# head, which has changed f twice since.
+fresh_pr_state()
+GITHUB.clear()
+sh("git", "push", "-q", f"{origin}/sam/r.git", f"{heads[3]}:refs/heads/main", cwd=work)
+sh("git", "checkout", "-q", "-b", "seven", heads[1], cwd=work)
+for name, n in (("g", 7), ("f", 8)):
+    sh("git", "checkout", "-q", "seven", cwd=work)
+    with open(f"{work}/{name}", "w") as f:
+        f.write(f"pr {n}\n")
+    sh(*GIT, "add", name, cwd=work)
+    sh(*GIT, "commit", "-qm", f"pr {n}", cwd=work)
+    heads[n] = sh("git", "rev-parse", "HEAD", cwd=work).strip()
+    sh("git", "push", "-q", f"{origin}/sam/r.git", f"HEAD:refs/pull/{n}/head", cwd=work)
+    sh("git", "checkout", "-q", "-B", "seven", heads[1], cwd=work)
+up = sh("git", "merge-tree", "--write-tree", heads[3], heads[7], cwd=work).split()[0]
+info["defaultBranchRef"]["target"] = {"oid": heads[3]}  # main's tip, as this pass read it
+UPDATED = "Settled; brought up to date with main, which has remi-proof built here already"
+
+
+def updates(n):
+    return [w for w in WROTE if w.startswith(f"api -X PUT repos/sam/r/pulls/{n}/update-branch")]
+
+
+VALID[:] = [Z]
+nix_knows({7: Y, f"tree:{up}": Z})
+P.begin("sam/r", {7})
+status = line(7)
+assert UPDATED in status and JOBS == [] and from_store() == [], (status, JOBS)
+assert updates(7) == [f"api -X PUT repos/sam/r/pulls/7/update-branch -f expected_head_sha={heads[7]}"], WROTE
+# Worked out once a head on its base's tip: the next pass asks nix nothing,
+# and GitHub isn't asked again while its update is on its way.
+n_evals = len(evals())
+status = line(7, 800)
+assert UPDATED in status and len(evals()) == n_evals and updates(7) == [] and JOBS == [], (status, evals())
+# What it builds merged in isn't built: it's built as it is, not updated.
+fresh_pr_state()
+nix_knows({7: Y, f"tree:{up}": W})
+P.begin("sam/r", {7})
+status = line(7)
+assert RUNNING in status and updates(7) == [] and JOBS == ["build 7 remi-proof"], (status, JOBS)
+# Up to date already (PR 4's head has main's): built, not updated.
+fresh_pr_state()
+nix_knows({4: X})
+P.begin("sam/r", {4})
+status = line(4)
+assert RUNNING in status and updates(4) == [] and JOBS == ["build 4 remi-proof"], (status, JOBS)
+# Its merge with main conflicts (PR 8 changed f too): built as it is.
+fresh_pr_state()
+nix_knows({8: Y})
+P.begin("sam/r", {8})
+status = line(8)
+assert RUNNING in status and updates(8) == [] and JOBS == ["build 8 remi-proof"], (status, JOBS)
+# A dependency update's branch is its bot's: built as it is.
+fresh_pr_state()
+nix_knows({7: Y, f"tree:{up}": Z})
+P.begin("sam/r", {7})
+status = run(clean(checks=proof, number=7, sha=heads[7], branch="renovate/thing"), 700)[0]
+assert RUNNING in status and updates(7) == [] and JOBS == ["build 7 remi-proof"], (status, JOBS)
+# GitHub doesn't take the update: a strike, and asked again next pass.
+fresh_pr_state()
+FAIL.append("update-branch")
+status = line(7)
+assert "GitHub didn't take its update" in status and pr_state(7)["strikes"] == {"update": 1}, (status, WROTE)
+FAIL.remove("update-branch")
+status = line(7, 800)
+assert UPDATED in status and len(updates(7)) == 1 and not pr_state(7)["strikes"], (status, WROTE)
+# Against a base that isn't the default branch, whose tip no pass read: built.
+fresh_pr_state()
+status = run(clean(checks=proof, number=7, sha=heads[7], base="side"), 700)[0]
+assert RUNNING in status and updates(7) == [] and JOBS == ["build 7 remi-proof"], (status, JOBS)
+# main moved on, its new tip merged in building something else: built.
+fresh_pr_state()
+sh("git", "push", "-q", f"{origin}/sam/r.git", f"{heads[4]}:refs/heads/main", cwd=work)
+info["defaultBranchRef"]["target"] = {"oid": heads[4]}
+up4 = sh("git", "merge-tree", "--write-tree", heads[4], heads[7], cwd=work).split()[0]
+nix_knows({7: Y, f"tree:{up}": Z, f"tree:{up4}": W})
+P.begin("sam/r", {7})
+status = line(7)
+assert RUNNING in status and updates(7) == [] and JOBS == ["build 7 remi-proof"], (status, JOBS)
+del info["defaultBranchRef"]["target"]
+sh("git", "checkout", "-q", "main", cwd=work)
+
+# CI still running once the reviewers are done: a check the steward builds
+# itself starts beside it, not after it, and the status says CI is still
+# going. Its verdict in, it waits for CI like any other PR, and builds
+# nothing more.
+fresh_pr_state()
+VALID[:] = [Z]
+nix_knows()
+P.begin("sam/r", {1})
+busy_ci = [{"__typename": "CheckRun", "name": "ci", "status": "IN_PROGRESS", "conclusion": None}]
+proof_state = {"__typename": "StatusContext", "context": "remi-proof", "description": ""}
+status = line(1, checks=busy_ci + [dict(proof_state, state="PENDING")])
+assert f"Settled; {RUNNING}, CI (ci) beside it" in status and JOBS == ["build 1 remi-proof"], (status, JOBS)
+assert f"Settled; {RUNNING}, CI (ci) beside it" in line(1, 800, busy_ci + [dict(proof_state, state="PENDING")]) and JOBS == []
+status = line(1, 900, busy_ci + [dict(proof_state, state="SUCCESS")])
+assert "Settled; waiting for CI: ci" in status and JOBS == [], (status, JOBS)
+# A check only a Claude job runs still waits for CI to pass.
+S.CFG["repos"]["sam/r"]["proofBuilds"] = {}
+fresh_pr_state()
+status = line(1, checks=busy_ci + [dict(proof_state, state="PENDING")])
+assert "Settled; waiting for CI: ci, remi-proof" in status and JOBS == [], (status, JOBS)
+S.CFG["repos"]["sam/r"]["proofBuilds"] = {"remi-proof": "checks.x86_64-linux.proof"}
+
 del S.CFG["repos"]["sam/r"]
-C.job = kept
+C.job, P.build = kept, kept_build
 C.gh, C.write = kept_gh, kept_write
 V.ORIGIN = kept_origin
 P.OPEN.clear()

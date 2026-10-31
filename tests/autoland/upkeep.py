@@ -8,7 +8,6 @@ import os
 import shutil
 import subprocess
 import time
-import urllib.parse
 
 from harness import (C, FAIL, FORGOT, JOBS, R, H, REAL, S, STATES, STOPPED, T0, UNSTOPPABLE, V, WROTE, fresh_pr_state, info, gh_stub, mkpr,
                      stand_in, tmp)
@@ -76,7 +75,8 @@ SETTINGS = {
     # gh's pages: the strict one is on the second.
     "repos/sam/r/rulesets?per_page=100": [LISTED[:1], LISTED[1:]],
     "repos/sam/r/rulesets/1": {"name": "baseline", "target": "branch", "source_type": "Repository",
-                               "rules": [{"type": "deletion"}]},
+                               "bypass_actors": [{"actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "pull_request"}],
+                               "rules": [{"type": y} for y in ("deletion", "non_fast_forward", "pull_request", "required_status_checks")]},
     "repos/sam/r/rulesets/2": gates,
     "repos/sam/r/branches?protected=true&per_page=100": [[{"name": "main"}]],
     "repos/sam/r/branches/main": {"protection": {"required_status_checks": {"enforcement_level": "everyone"}}},
@@ -270,7 +270,7 @@ C.gh, C.write = gh_stub, write
 # baseline job.
 src, jobs = f"{tmp}/remade-src", S.CFG["jobsDir"]
 S.CFG["projectsDir"] = src
-remade = {"repo": "sam/r", "id": "R_new", "private": False, "default": "main", "created": "2026-10-24T06:00:00Z"}
+remade = {"repo": "sam/r", "id": 2002, "private": False, "default": "main", "created": "2026-10-24T06:00:00Z"}
 MADE = C.ts(remade["created"])
 SEQ = iter(range(100))
 
@@ -356,7 +356,7 @@ assert C.project_dir("sam/r") is None, os.listdir(src)
 WROTE.clear()
 assert R.settle_repo(remade, known) is True
 st = C.load("repo-sam_r.json", {})
-assert st["settings"] == C.NOW and st.get("hookId") != 41 and st["id"] == "R_new", st
+assert st["settings"] == C.NOW and st.get("hookId") != 41 and st["databaseId"] == 2002, st
 assert sorted(made()) == LABELS, WROTE
 assert "api -X PUT repos/sam/r/vulnerability-alerts" in WROTE, WROTE
 # Settled now, it isn't started over again: what's kept about it from here
@@ -368,13 +368,25 @@ STOPPED.clear()
 FORGOT.clear()
 R.restart(remade, known, failed)
 assert "pr-sam_r-2.json" in os.listdir(f"{tmp}/state") and STOPPED == FORGOT == [] and os.path.isdir(f"{src}/r")
-# Nor is one the steward never settled, or one whose id is the one it
-# kept, whenever it was settled; or, for state from before it kept ids, one
-# made a second or more before the steward last settled it. Settled in the
-# second it was made, which comes first can't be told: it starts over.
-for st, again in ((None, False), ({"id": "R_new", "settings": MADE - 86400}, False),
-                  ({"id": "R_old", "settings": MADE + 86400}, True), ({"settings": MADE + 1}, False),
-                  ({"settings": MADE + 0.25}, True)):
+# State from before databaseIds, its node id with it, takes this repo's
+# databaseId once restart has passed it, and the node id goes.
+st = {**C.load("repo-sam_r.json", {}), "id": "R_new"}
+del st["databaseId"]
+C.save("repo-sam_r.json", st)
+R.settle_repo(remade, known)
+st = C.load("repo-sam_r.json", {})
+assert st["databaseId"] == 2002 and "id" not in st, st
+# Nor is one the steward never settled, or one whose databaseId is the one
+# it kept, whenever it was settled; or, for state from before it kept them,
+# one made a second or more before the steward last settled it. Settled in
+# the second it was made, which comes first can't be told: it starts over.
+# A databaseId that isn't this repo's says so even where the old one never
+# got its settings. A node id kept before databaseIds were says nothing:
+# GitHub has changed their format, so such state goes by the time.
+for st, again in ((None, False), ({"databaseId": 2002, "settings": MADE - 86400}, False),
+                  ({"databaseId": 1001, "settings": MADE + 86400}, True), ({"databaseId": 1001}, True),
+                  ({"settings": MADE + 1}, False), ({"settings": MADE + 0.25}, True),
+                  ({"id": "R_old", "settings": MADE + 1}, False), ({"id": "R_new"}, False)):
     old_state()
     if st is None:
         os.remove(f"{tmp}/state/repo-sam_r.json")
@@ -400,7 +412,7 @@ assert os.listdir(f"{tmp}/state/{V.GIT}") == [], os.listdir(f"{tmp}/state/{V.GIT
 # the deleted one left: a clone git made from the name since, and the job
 # working in it, are the deleted one's all the same.
 old_state()
-C.save("repo-sam_r.json", {**C.load("repo-sam_r.json", {}), "id": "R_old"})
+C.save("repo-sam_r.json", {**C.load("repo-sam_r.json", {}), "databaseId": 1001})
 origin = f"{tmp}/remade-origin"
 subprocess.run(["git", "init", "-q", origin], check=True)
 subprocess.run(["git", "-C", origin, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty",
@@ -673,149 +685,6 @@ S.main()
  S.R.watch_default, H.handle) = kept_fns
 assert order == ["watch", (9, True), (10, False)], order
 
-# The daily branch sweep deletes a branch already in the default branch, and
-# one a closed PR was closed at, a bot's included (GitHub deletes on merge,
-# never on close; the PR keeps the commits). One pushed to since its PR
-# closed, an open PR's, a bot's with no closed PR at its tip and a kept one
-# stay. One with no PR and no commit for STALE_DAYS is kept under
-# refs/archive and deleted (one an earlier sweep archived too); one GitHub
-# won't archive stays, listed for the pipeline.
-def ago(days):
-    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(C.NOW - days * 86400))
-
-
-# Given up on a day past STALE_DAYS (3: agents open a PR when they push), or
-# fresh from today.
-old, young = ago(4), ago(1)
-BRANCHES = {"in-main": ("1" * 40, 0, young), "closed": ("2" * 40, 3, young), "moved": ("3" * 40, 1, young),
-            "open": ("4" * 40, 2, old), "renovate/x": ("5" * 40, 1, old), "gh-pages": ("6" * 40, 9, old),
-            "old": ("7" * 40, 4, old), "young": ("8" * 40, 4, young), "renovate/closed": ("9" * 40, 1, young),
-            "renovate/again": ("a" * 40, 1, young), "archived": ("d" * 40, 2, old), "refused": ("e" * 40, 2, old)}
-CLOSED = {"closed": [{"number": 3, "head": {"sha": "2" * 40}}], "moved": [{"number": 4, "head": {"sha": "f" * 40}}],
-          # Its match is the 101st closed PR on the name: past gh's first page.
-          "renovate/closed": [{"number": n, "head": {"sha": "c" * 40}} for n in range(100, 200)]
-          + [{"number": 5, "head": {"sha": "9" * 40}}],
-          # Its last PR merged at another tip, and the bot has pushed its next update.
-          "renovate/again": [{"number": 6, "head": {"sha": "b" * 40}}]}
-LOOKED = []
-# What GitHub has under refs/archive, and what it won't take there.
-ARCHIVED, REFUSED = {f"refs/archive/archived/{'d' * 40}": "d" * 40}, {"refused"}
-# What GitHub answers instead: listing the branches, comparing one (by
-# name), or archiving one (by name).
-LISTING, COMPARE, ARCHIVING = [None], {}, {}
-
-
-def no(k, why):
-    """gh failing with `why`: None with check=False (gh logs it), else what
-    gh raises."""
-    if not k.get("check", True):
-        return None
-    raise (C.Unavailable if C.UNAVAILABLE.search(why) else RuntimeError)(f"gh api: {why}")
-
-
-def branches_gh(*a, **k):
-    path = (a[2] if a[1:2] == ("--paginate",) else a[1]) if a[:1] == ("api",) and len(a) > 1 else ""
-    if path.startswith("repos/sam/r/branches?"):
-        if LISTING[0]:
-            return no(k, LISTING[0])
-        return "\n".join(f"{n} {sha}" for n, (sha, _, _) in BRANCHES.items())
-    if path.startswith("repos/sam/r/compare/main..."):
-        name, b = next((n, x) for n, x in BRANCHES.items() if x[0] == path.rpartition("...")[2])
-        if name in COMPARE:
-            return no(k, COMPARE[name])
-        return {"ahead": b[1], "date": b[2]}
-    if path.startswith("repos/sam/r/git/ref/"):
-        got = ARCHIVED.get("refs/" + urllib.parse.unquote(path.removeprefix("repos/sam/r/git/ref/")))
-        if got is None:
-            return no(k, "HTTP 404: Not Found")
-        return got == a[a.index("--jq") + 1].partition('== "')[2][:40]
-    if path.startswith("repos/sam/r/pulls?state=closed"):
-        # gh's --paginate --jq: the matching numbers from every page, a line each.
-        assert a[1] == "--paginate", a
-        name = path.partition("head=sam:")[2]
-        LOOKED.append(name)
-        prs = CLOSED.get(name, [])
-        if prs is None:
-            return no(k, "HTTP 403: Resource not accessible by integration")
-        want = a[a.index("--jq") + 1].partition('.head.sha == "')[2][:40]
-        return "\n".join(str(pr["number"]) for pr in prs if pr["head"]["sha"] == want)
-    return gh_stub(*a, **k)
-
-
-def branches_write(*a, **k):
-    if a[:2] != ("api", "repos/sam/r/git/refs"):
-        return kept_write(*a, **k)
-    f = dict(x.split("=", 1) for x in a[2:][1::2])
-    if f["ref"].split("/")[2] in ARCHIVING:
-        return no(k, ARCHIVING[f["ref"].split("/")[2]])
-    if f["ref"] in ARCHIVED or f["ref"].split("/")[2] in REFUSED:
-        return no(k, "HTTP 422: Reference already exists")
-    ARCHIVED[f["ref"]] = f["sha"]
-    return {"ref": f["ref"], "object": {"sha": f["sha"]}}
-
-
-DELETED, kept_delete, kept_write = [], R.delete_branch, C.write
-R.delete_branch = lambda repo, name, sha: DELETED.append((name, sha))
-S.C.CFG["keepBranches"] = ["gh-pages"]
-C.gh, C.write = branches_gh, branches_write
-C.save("repo-sam_r.json", {})
-digest = []
-R.sweep_branches(repo_r, {"open"}, digest)
-assert DELETED == [("in-main", "1" * 40), ("closed", "2" * 40), ("old", "7" * 40), ("renovate/closed", "9" * 40),
-                   ("archived", "d" * 40)], DELETED
-assert ARCHIVED == {f"refs/archive/archived/{'d' * 40}": "d" * 40, f"refs/archive/old/{'7' * 40}": "7" * 40}, ARCHIVED
-assert sorted(LOOKED) == ["archived", "closed", "in-main", "moved", "old", "refused", "renovate/again",
-                          "renovate/closed", "renovate/x", "young"], LOOKED
-assert digest == [(R.UNKEPT, "sam/r: `refused`", "")], digest
-# Not again until a day on: what it couldn't archive is all a pass shows meanwhile.
-DELETED.clear()
-digest = []
-R.sweep_branches(repo_r, {"open"}, digest)
-assert DELETED == [] and [line for _, line, _ in digest] == ["sam/r: `refused`"], (DELETED, digest)
-# GitHub won't say which PRs were closed at it: the branch stays. So does
-# one whose last commit is a day short of STALE_DAYS. The archived ones are
-# deleted again (the stand-in keeps every branch), already kept.
-CLOSED["closed"] = None
-C.NOW += 86400
-BRANCHES["recent"] = ("0" * 40, 4, ago(R.STALE_DAYS - 1))
-R.sweep_branches(repo_r, {"open"}, [])
-assert DELETED == [("in-main", "1" * 40), ("old", "7" * 40), ("renovate/closed", "9" * 40), ("archived", "d" * 40)], DELETED
-assert len(ARCHIVED) == 2, ARCHIVED
-# A sweep that didn't look at every branch isn't one. GitHub not listing
-# them (its rate limit, or a no) leaves the last sweep's time and what it
-# couldn't archive, so the next full pass sweeps again, not a day later.
-del BRANCHES["recent"]
-C.NOW += 86400
-last = C.load("repo-sam_r.json", {})
-for why in ("API rate limit exceeded for installation", "HTTP 403: Resource not accessible by integration"):
-    LISTING[0] = why
-    DELETED.clear()
-    digest = []
-    R.sweep_branches(repo_r, {"open"}, digest)
-    assert DELETED == [] and C.load("repo-sam_r.json", {}) == last, (why, DELETED)
-    assert [line for _, line, _ in digest] == ["sam/r: `refused`"], (why, digest)
-LISTING[0] = None
-# Nor does one GitHub stopped answering partway: what it deleted stays
-# deleted, and the next pass sweeps the rest. Archiving a branch then isn't
-# a branch it couldn't archive.
-for where, name, gone in ((COMPARE, "young", ["in-main", "old"]),
-                          (ARCHIVING, "refused", ["in-main", "old", "renovate/closed", "archived"])):
-    where[name] = "HTTP 502: Bad Gateway"
-    DELETED.clear()
-    R.sweep_branches(repo_r, {"open"}, [])
-    assert [n for n, _ in DELETED] == gone, (name, DELETED)
-    assert C.load("repo-sam_r.json", {}) == last, (name, C.load("repo-sam_r.json", {}))
-    del where[name]
-# A branch GitHub says no about is passed over, and the sweep still counts:
-# one with no history in common with the default has no comparison.
-BRANCHES["orphan"] = ("0" * 40, 1, old)
-COMPARE["orphan"] = "HTTP 404: No common ancestor between main and 0000000"
-DELETED.clear()
-R.sweep_branches(repo_r, {"open"}, [])
-assert DELETED == [("in-main", "1" * 40), ("old", "7" * 40), ("renovate/closed", "9" * 40), ("archived", "d" * 40)], DELETED
-assert C.load("repo-sam_r.json", {}) == {"branches": C.NOW, "unkept": ["refused"]}, C.load("repo-sam_r.json", {})
-R.delete_branch, C.gh, C.write = kept_delete, gh_stub, kept_write
-S.C.CFG["keepBranches"] = []
 C._for.pop()
 
 print("upkeep: ok")

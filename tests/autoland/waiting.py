@@ -46,7 +46,7 @@ assert "CI red; renovate-sweep has it" in status and edits() == [], (status, WRO
 # Waiting its turn for a proof slot, and not once the turn has come.
 kept, repos = C.job, dict(S.CFG["repos"])
 ids = itertools.count(1)
-C.job = lambda repo, task, clone=False: JOBS.append(task) or f"job-{next(ids)}"
+C.job = lambda repo, task, clone=False, since=None: JOBS.append(task) or f"job-{next(ids)}"
 S.CFG["repos"]["sam/r"] = {"proofJobs": {"remi-proof": "Run `just proof` and post the remi-proof status."}, "proofSlots": 1}
 proof = CI_GREEN + [{"__typename": "StatusContext", "context": "remi-proof", "state": "PENDING", "description": ""}]
 fresh_pr_state()
