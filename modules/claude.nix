@@ -9,13 +9,21 @@ let
   cfg = config.burrow.claude;
   inherit (config.networking) hostName;
 
-  guard = pkgs.writeShellApplication {
-    name = "claude-guard";
-    runtimeInputs = [ pkgs.jq pkgs.gnugrep pkgs.coreutils config.programs.git.package config.boot.zfs.package ];
-    text = ''
-      GUARD_SNAPSHOT_DATASETS=(${lib.escapeShellArgs (lib.optionals (config.burrow.undo.enable or false) config.burrow.undo.datasets)})
-    '' + builtins.readFile ./claude/guard.sh;
-  };
+  # The PreToolUse hook (crates/burrow-guard), with this machine's config
+  # (its src/config.rs). A compiled wrapper rather than a script, since it
+  # runs on every Bash call.
+  guardConfig = pkgs.writeText "claude-guard.json" (builtins.toJSON {
+    git = lib.getExe config.programs.git.package;
+    zfs = "${config.boot.zfs.package}/bin/zfs";
+    snapshotDatasets = lib.optionals (config.burrow.undo.enable or false) config.burrow.undo.datasets;
+  });
+  guard = pkgs.runCommand "claude-guard" {
+    nativeBuildInputs = [ pkgs.makeBinaryWrapper ];
+    meta.mainProgram = "claude-guard";
+  } ''
+    makeBinaryWrapper ${inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow}/bin/burrow-guard \
+      $out/bin/claude-guard --add-flags ${guardConfig}
+  '';
 
   # One rule per command, with and without sudo.
   both = cmds: lib.concatMap (c: [ "Bash(${c})" "Bash(sudo ${c})" ]) cmds;
@@ -80,7 +88,7 @@ let
         hooks = [
           {
             type = "command";
-            command = "${guard}/bin/claude-guard";
+            command = lib.getExe guard;
             timeout = 10;
           }
         ];
@@ -132,6 +140,7 @@ in
 
   config = lib.mkIf cfg.enable {
     environment.systemPackages = [ cfg.package ];
+    burrow.tools.claude-guard = guard;
 
     # Copies, not links into the store (claude/etc.nix).
     environment.etc."claude-code/managed-settings.json" = {
