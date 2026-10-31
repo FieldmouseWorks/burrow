@@ -8,6 +8,7 @@
 # its lead repos.
 #
 #   bash tests/proj-pick.sh modules/proj/pick.sh
+# shellcheck disable=SC2034,SC2154 # classes, the_class and the_place: class and place
 set -euo pipefail
 # shellcheck source=/dev/null
 . "$1"
@@ -192,9 +193,10 @@ echo "$tmp/psiv" >"$tmp/jobs/d/project"
 echo "$tmp/https" >"$tmp/jobs/n/project"
 echo "$tmp/token" >"$tmp/jobs/t/project"
 echo "$tmp/foreign" >"$tmp/jobs/f/project"
+cl() { classes=(); class "$@"; echo "$the_class"; }
 cls() {
   local got
-  got=$(class "$tmp/jobs/$1" "$2")
+  got=$(cl "$tmp/jobs/$1" "$2")
   [ "$got" = "$3" ] || { echo "FAIL: class $1 '$2': wanted $3, got $got" >&2; exit 1; }
 }
 cls p normal pipeline
@@ -211,7 +213,9 @@ cls n "" normal
 # as first, and back.
 plc() {
   local got
-  got=$(place "$1" "$tmp/jobs/$2")
+  classes=()
+  place "$1" "$tmp/jobs/$2"
+  got=$the_class$T$the_place
   [ "$got" = "$3$T$4" ] || { echo "FAIL: place $1 $2: wanted '$3 $4', got '${got//$T/ }'" >&2; exit 1; }
 }
 plc 2-17-p-1-x p pipeline 0-17-p-1-x
@@ -272,7 +276,7 @@ cls v normal first
 cls w normal normal
 dem u ""
 case_ "u 4" "normal $tmp/homelab" "normal $tmp/homelab" "normal $tmp/x" free \
-  "w $(class "$tmp/jobs/w" normal) $tmp/homelab" "v $(class "$tmp/jobs/v" normal) $tmp/psiv" "u $(class "$tmp/jobs/u" normal) $tmp/homelab"
+  "w $(cl "$tmp/jobs/w" normal) $tmp/homelab" "v $(cl "$tmp/jobs/v" normal) $tmp/psiv" "u $(cl "$tmp/jobs/u" normal) $tmp/homelab"
 
 # The flake is the same directory however either side spells it: doubled and
 # trailing slashes, dots, a symlink to it. Its --pipeline job takes the
@@ -289,7 +293,7 @@ for flake in "$tmp/homelab" "$tmp//homelab/" "$tmp/./homelab" "$tmp/jobs/../home
     cls w normal normal
     dem u ""
     case_ "u 4" "normal $proj" "normal $proj" "normal $tmp/x" free \
-      "w $(class "$tmp/jobs/w" normal) $proj" "v $(class "$tmp/jobs/v" normal) $tmp/psiv" "u $(class "$tmp/jobs/u" normal) $proj"
+      "w $(cl "$tmp/jobs/w" normal) $proj" "v $(cl "$tmp/jobs/v" normal) $tmp/psiv" "u $(cl "$tmp/jobs/u" normal) $proj"
   done
 done
 

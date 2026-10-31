@@ -21,7 +21,10 @@
   # Cargo workspace in DIR, built with the toolchain DIR/rust-toolchain.toml
   # (or the repo root's) pins; latest stable without one. `test = false` skips
   # the tests (say, when they need a database); `testInputs = pkgs: [ pkgs.git ]`
-  # puts tools the tests run on their PATH.
+  # puts tools the tests run on their PATH. A workspace that links native
+  # libraries names them for every build, check and the dev shell:
+  # `nativeBuildInputs = pkgs: [ pkgs.pkg-config ]` for the tools its build
+  # scripts run, `buildInputs = pkgs: [ pkgs.alsa-lib ]` for the libraries.
   rust ? null,
   # Python: ruff's error rules (syntax errors, undefined names) over DIRS.
   # `format = true` also holds them to `ruff format`.
@@ -41,7 +44,13 @@ let
     overlays = [ rust-overlay.overlays.default ];
   }));
 
-  rustCfg = { dir = "."; test = true; testInputs = _: [ ]; } // (if rust == null then { } else rust);
+  rustCfg = {
+    dir = ".";
+    test = true;
+    testInputs = _: [ ];
+    nativeBuildInputs = _: [ ];
+    buildInputs = _: [ ];
+  } // (if rust == null then { } else rust);
   pyCfg = { dirs = [ "." ]; format = false; } // (if python == null then { } else python);
   rustDir = if rustCfg.dir == "." then self else self + "/${rustCfg.dir}";
 
@@ -77,6 +86,8 @@ let
   rustPackage = pkgs: (craneFor pkgs).buildPackage {
     src = (craneFor pkgs).cleanCargoSource rustDir;
     strictDeps = true;
+    nativeBuildInputs = rustCfg.nativeBuildInputs pkgs;
+    buildInputs = rustCfg.buildInputs pkgs;
     cargoExtraArgs = "--locked --workspace";
     # The gate runs the tests.
     doCheck = false;
@@ -90,7 +101,14 @@ let
       # Every member of the workspace, not only a root package or its
       # default-members, built as `cargo test` builds them (crane's default is
       # release, which drops debug assertions and overflow checks).
-      common = { inherit src; strictDeps = true; cargoExtraArgs = "--locked --workspace"; CARGO_PROFILE = "dev"; };
+      common = {
+        inherit src;
+        strictDeps = true;
+        cargoExtraArgs = "--locked --workspace";
+        CARGO_PROFILE = "dev";
+        nativeBuildInputs = rustCfg.nativeBuildInputs pkgs;
+        buildInputs = rustCfg.buildInputs pkgs;
+      };
       cargoArtifacts = craneLib.buildDepsOnly common;
     in
     {
@@ -102,7 +120,7 @@ let
     } // lib.optionalAttrs rustCfg.test {
       rust-test = craneLib.cargoTest (common // {
         inherit cargoArtifacts;
-        nativeBuildInputs = rustCfg.testInputs pkgs;
+        nativeBuildInputs = rustCfg.nativeBuildInputs pkgs ++ rustCfg.testInputs pkgs;
       });
     };
 
@@ -121,11 +139,14 @@ in
   devShells = forAll (pkgs: {
     default = pkgs.mkShell {
       packages =
-        lib.optional (rust != null)
-          (toolchainFor pkgs [ "rust-src" "rust-analyzer" ])
+        lib.optionals (rust != null) (
+          [ (toolchainFor pkgs [ "rust-src" "rust-analyzer" ]) ]
+          ++ rustCfg.nativeBuildInputs pkgs
+        )
         ++ lib.optionals (python != null) [ pkgs.python3 pkgs.ruff pkgs.uv ]
         ++ lib.optional (node != null) pkgs.nodejs
         ++ packages pkgs;
+      buildInputs = lib.optionals (rust != null) (rustCfg.buildInputs pkgs);
     };
   });
 

@@ -45,6 +45,12 @@
       # burrow's own programs, one Cargo workspace (crates/): their package
       # and their gate, built for every platform lib/project.nix knows.
       crates = self.lib.project { self = ./crates; rust = { }; };
+      # A workspace whose build script finds a native library with
+      # pkg-config: lib/project.nix's native inputs, for its checks.
+      houseNative = {
+        nativeBuildInputs = pkgs: [ pkgs.pkg-config ];
+        buildInputs = pkgs: [ pkgs.zlib ];
+      };
     in
     {
       # A project's dev shell and gate in a few lines; see lib/project.nix.
@@ -256,6 +262,12 @@
         proj-pick = pkgs.runCommand "proj-pick-check" { nativeBuildInputs = [ pkgs.shellcheck pkgs.git ]; } ''
           shellcheck -s bash ${./modules/proj/pick.sh} ${./tests/proj-pick.sh}
           bash ${./tests/proj-pick.sh} ${./modules/proj/pick.sh}
+          touch $out
+        '';
+        # What a look at the line costs, and who gets to skip one.
+        proj-line = pkgs.runCommand "proj-line-check" { nativeBuildInputs = [ pkgs.shellcheck pkgs.git pkgs.strace pkgs.util-linux ]; } ''
+          shellcheck -s bash ${./modules/proj/line.sh} ${./tests/proj-line.sh}
+          bash ${./tests/proj-line.sh} ${./modules/proj/pick.sh} ${./modules/proj/line.sh}
           touch $out
         '';
         # What each job waits on, as the stall watchdog hears it.
@@ -686,6 +698,16 @@
           python3 -I ${./tests/pr-base.py} ${./.github/workflows/flake-check.yml}
           touch $out
         '';
+        # The shared rust-first check (rust-first-check.yml), its own script
+        # with a stand-in for gh: a PR that adds Python, or grows it past what
+        # a fix adds, fails without a "Why not Rust:" line in its body, as a
+        # commit status a newer run replaces; and its callers, burrow's and
+        # the template's, run it again when the body is edited.
+        rust-first = pkgs.runCommand "rust-first-check" { nativeBuildInputs = [ (pkgs.python3.withPackages (p: [ p.pyyaml ])) pkgs.jq ]; } ''
+          python3 -I ${./tests/rust-first.py} ${./.github/workflows/rust-first-check.yml} \
+            ${./.github/workflows/rust-first.yml} ${./templates/project/.github/workflows/rust-first.yml}
+          touch $out
+        '';
         # Stale Remote Control servers catch up once idle, with a stand-in for Claude.
         remote-control = import ./tests/remote-control.nix { inherit self pkgs; };
         # A session past its server's memory cap dies alone, with a stand-in for Claude.
@@ -702,6 +724,14 @@
           [ "$(${pkg}/bin/house-fixture-member)" = 42 ]
           touch $out
         '';
+        # lib/project.nix's package of a workspace that links a native
+        # library: the build found the one the project names.
+        house-native-package = let
+          pkg = (self.lib.project { self = ./tests/house/rust-native; systems = [ system ]; rust = houseNative; }).packages.${system}.default;
+        in pkgs.runCommand "house-native-package-check" { } ''
+          [ "$(${pkg}/bin/house-native)" = ${pkgs.zlib.version} ]
+          touch $out
+        '';
       } // nixpkgs.lib.mapAttrs' (name: nixpkgs.lib.nameValuePair "crates-${name}") crates.checks.${system}
       // nixpkgs.lib.mapAttrs' (name: nixpkgs.lib.nameValuePair "gh-token-${name}") ghToken.checks.${system}
       // nixpkgs.lib.mapAttrs' (name: nixpkgs.lib.nameValuePair "flaky-${name}")
@@ -710,6 +740,8 @@
       // nixpkgs.lib.mapAttrs' (name: nixpkgs.lib.nameValuePair "house-${name}") (
         # lib/project.nix's own gates, on the smallest projects that have them.
         (self.lib.project { self = ./tests/house/rust; systems = [ system ]; rust.testInputs = pkgs: [ pkgs.git ]; }).checks.${system}
+        // nixpkgs.lib.mapAttrs' (name: nixpkgs.lib.nameValuePair "native-${name}")
+          (self.lib.project { self = ./tests/house/rust-native; systems = [ system ]; rust = houseNative; }).checks.${system}
         // (self.lib.project { self = ./tests/house/python; systems = [ system ]; python = { format = true; }; }).checks.${system}
       );
 
