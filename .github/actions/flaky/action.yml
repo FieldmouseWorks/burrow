@@ -29,7 +29,7 @@ runs:
       shell: bash
       env:
         CARGO_TARGET_DIR: ${{ runner.temp }}/flaky-build
-      run: cargo build --release --locked --quiet --manifest-path "$GITHUB_ACTION_PATH/../../../tools/flaky/Cargo.toml"
+      run: cargo build --release --locked --quiet --manifest-path "$GITHUB_ACTION_PATH/../../../crates/Cargo.toml" -p flaky
     - name: Run flaky's step
       shell: bash
       env:

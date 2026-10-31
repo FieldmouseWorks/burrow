@@ -1,0 +1,17 @@
+[package]
+name = "flaky"
+description = "The GitHub side of quarantining flaky tests (burrow's docs/flaky-tests.md)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+burrow-github = { path = "../burrow-github" }
+serde_json.workspace = true
+
+[dev-dependencies]
+burrow-github = { path = "../burrow-github", features = ["fake"] }
+
+[lints]
+workspace = true

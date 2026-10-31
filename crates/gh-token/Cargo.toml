@@ -1,25 +1,22 @@
 [package]
 name = "gh-token"
-version = "0.0.0"
-edition = "2024"
-license = "MIT"
-publish = false
 description = "GitHub App installation tokens, minted on request from a key the asker can't read"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
 
 [dependencies]
 base64 = "0.23.1"
 ring = "0.17.14"
 rustls-pki-types = "1.15.1"
-serde = { version = "1.0.229", features = ["derive"] }
-serde_json = "1.0.154"
+serde.workspace = true
+serde_json.workspace = true
 time = { version = "0.3.55", features = ["parsing"] }
 ureq = { version = "3.5.0", features = ["json", "platform-verifier"] }
 
 [dev-dependencies]
-tempfile = "3.27.0"
+tempfile.workspace = true
 
-[lints.rust]
-unsafe_code = "forbid"
-
-[lints.clippy]
-all = { level = "warn", priority = -1 }
+[lints]
+workspace = true

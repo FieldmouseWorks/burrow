@@ -36,18 +36,12 @@
       # build theirs with a stand-in for its `cn`.
       cnStandIn = pkgs.writeShellScriptBin "cn" "exit 1";
       names = [ "claude" "undo" "switch" "notify" "updates" "proj" "remote-control" "agents" "robot" "ops" "toolbox" "autoland" "house" "events" "ledger" "browser" "heartbeat" "backup" "watchdog" "github" "rust-cache" "cpu" "dispatch" "usage-reset" ];
-      # gh-token (modules/github): its package, and its gate.
-      # Built for every platform lib/project.nix knows, like the module.
-      ghToken = self.lib.project {
-        self = ./modules/github;
-        rust.testInputs = pkgs: [ pkgs.openssl ];
-      };
       # burrow's own programs, one Cargo workspace (crates/): their package
       # and their gate, built for every platform lib/project.nix knows. Its
       # tests include the shared workflows' (crates/burrow-workflows), which
       # read these files and run git, jq and nix, and the gate's run its VM
       # tests in a slot of the real heavy (flock); proj's clone repos to read
-      # their origins.
+      # their origins, and gh-token's make keys with openssl.
       crates = self.lib.project {
         inherit self;
         rust = {
@@ -59,7 +53,7 @@
             "modules/autoland/prs.py"
             "modules/cpu/heavy.sh"
           ];
-          testInputs = pkgs: [ pkgs.git pkgs.jq pkgs.nix pkgs.util-linux ];
+          testInputs = pkgs: [ pkgs.git pkgs.jq pkgs.nix pkgs.util-linux pkgs.openssl ];
         };
       };
       # A workspace below its repo's root whose test reads a file outside
@@ -92,18 +86,11 @@
         };
       };
 
-      # burrow's programs (every binary in crates/) and gh-token, for each
-      # platform they're built for, the flaky tool (docs/flaky-tests.md) and
-      # flake-gate, for a machine to install.
+      # burrow's programs (every binary in crates/), for each platform
+      # they're built for, and flake-gate, for a machine to install.
       packages = nixpkgs.lib.foldl' nixpkgs.lib.recursiveUpdate { } [
         (nixpkgs.lib.mapAttrs (_: p: { burrow = p.default; }) crates.packages)
-        (nixpkgs.lib.mapAttrs (_: p: { gh-token = p.default; }) ghToken.packages)
-        {
-          ${system} = {
-            flaky = pkgs.callPackage ./tools/flaky/package.nix { };
-            flake-gate = pkgs.callPackage ./tools/flake-gate/package.nix { };
-          };
-        }
+        { ${system}.flake-gate = pkgs.callPackage ./tools/flake-gate/package.nix { }; }
       ];
 
       # A bare machine with every module on, for the checks and as an example.
@@ -901,10 +888,6 @@
           touch $out
         '';
       } // nixpkgs.lib.mapAttrs' (name: nixpkgs.lib.nameValuePair "crates-${name}") crates.checks.${system}
-      // nixpkgs.lib.mapAttrs' (name: nixpkgs.lib.nameValuePair "gh-token-${name}") ghToken.checks.${system}
-      // nixpkgs.lib.mapAttrs' (name: nixpkgs.lib.nameValuePair "flaky-${name}")
-        # The flaky tool's fmt, clippy and tests.
-        (self.lib.project { inherit self; systems = [ system ]; rust.dir = "tools/flaky"; }).checks.${system}
       // nixpkgs.lib.mapAttrs' (name: nixpkgs.lib.nameValuePair "house-${name}") (
         # lib/project.nix's own gates, on the smallest projects that have them.
         (self.lib.project { self = ./tests/house/rust; systems = [ system ]; rust.testInputs = pkgs: [ pkgs.git ]; }).checks.${system}

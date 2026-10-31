@@ -4,7 +4,7 @@
 
 use std::process::ExitCode;
 
-use flaky::github::Gh;
+use burrow_github::Gh;
 use flaky::quarantine::{self, default_cache};
 use flaky::{actions, run};
 
