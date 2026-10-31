@@ -46,7 +46,7 @@ query($owner: String!, $name: String!, $cursor: String) {
         commits(last: 1) {
           nodes { commit { oid statusCheckRollup { contexts(first: 100) { pageInfo { hasNextPage } nodes {
             __typename
-            ... on CheckRun { name status conclusion checkSuite { id status app { slug } workflowRun { workflow { id name } } } }
+            ... on CheckRun { name status conclusion checkSuite { id status app { slug } workflowRun { file { path } workflow { id name } } } }
             ... on StatusContext { context state description creator { login __typename } }
           } } }
           checkSuites(first: 100) { pageInfo { hasNextPage } nodes { conclusion workflowRun { workflow { name } } } } } }
@@ -184,6 +184,8 @@ def ci_state(pr, proofs=(), moved=None, repo=None):
 LANE, DOCS_LANE = "lane into ", "docs only into "
 # Its whole gate's job, skipped in the docs lane and on a PR the train lands.
 GATE = "check"
+# The files of a repo's call to it, and of the same call for a PR's new base.
+FLAKE = (".github/workflows/flake.yml", ".github/workflows/flake-retarget.yml")
 
 
 def suite(c):
@@ -192,8 +194,15 @@ def suite(c):
 
 
 def workflow(c):
-    """The workflow a check run's suite ran, by its name: flake.yml and its
-    flake-retarget.yml are one workflow, and a run of either speaks for it."""
+    """Which workflow a check run's suite ran: its id, but one for the shared
+    CI's caller and its twin for a new base (FLAKE), whose runs speak for each
+    other. By file, not by name: a repo's unrelated workflows can share a name."""
+    run = suite(c).get("workflowRun") or {}
+    return FLAKE[0] if (run.get("file") or {}).get("path") in FLAKE else (run.get("workflow") or {}).get("id")
+
+
+def workflow_name(c):
+    """A check run's workflow's name, to say what CI waits on."""
     return ((suite(c).get("workflowRun") or {}).get("workflow") or {}).get("name")
 
 
@@ -310,7 +319,7 @@ def runs(pr, repo):
                and c["conclusion"] == "SUCCESS" for c, (_, fork) in said)
     ran = {workflow(c) for c, (_, fork) in said
            if fork is None and suite(c).get("id") not in stale and suite(c).get("status") == "COMPLETED"} - {None}
-    unrun = sorted({workflow(c) or "CI" for c, _ in said if suite(c).get("id") in stale and workflow(c) not in ran})
+    unrun = sorted({workflow_name(c) or "CI" for c, _ in said if suite(c).get("id") in stale and workflow(c) not in ran})
     return stale, docs, unrun
 
 

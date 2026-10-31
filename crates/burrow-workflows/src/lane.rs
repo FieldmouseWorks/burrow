@@ -210,7 +210,7 @@ fn callers_run_again_on_a_new_base_from_a_file_of_their_own() {
         );
         // The one name is what makes a retarget supersede the push's run, and
         // the next push the retarget's: github.workflow is in each concurrency
-        // group, and autoland reads the two as one workflow.
+        // group.
         assert_eq!(twin["name"], caller["name"], "{retarget}");
         assert_eq!(twin["permissions"], caller["permissions"], "{retarget}");
         let its = calls(&twin);
@@ -224,6 +224,13 @@ fn callers_run_again_on_a_new_base_from_a_file_of_their_own() {
             assert_eq!(&same, *j, "{retarget}: {name:?}");
         }
     }
+    // Autoland knows the pair by these files (modules/autoland/prs.py's FLAKE).
+    let prs = read(&repo_file("modules/autoland/prs.py"));
+    let (flake, retarget) = CALLERS[0];
+    assert!(
+        prs.contains(&format!("FLAKE = (\"{flake}\", \"{retarget}\")")),
+        "autoland doesn't know {flake} and {retarget} as a pair"
+    );
     let burrow = workflow(CALLERS[0].0);
     assert!(
         burrow["jobs"]

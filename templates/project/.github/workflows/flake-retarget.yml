@@ -3,8 +3,9 @@
 # run only for a new base, so a title or body edit starts one here too, and its
 # job skips. That's why this is a file of its own: in flake.yml the skipped run
 # would become that workflow's latest, and a ruleset requiring `check / check`
-# would stop counting the push's. It keeps flake.yml's name (autoland and the
-# shared workflow's concurrency group take the two as one workflow), and its
+# would stop counting the push's. It keeps flake.yml's name (the shared
+# workflow's concurrency group takes the two as one workflow, as autoland does by
+# these files' names), and its
 # call matches flake.yml's (crates/burrow-workflows/src/lane.rs).
 name: flake
 on:

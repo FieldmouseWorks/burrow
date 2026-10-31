@@ -43,13 +43,23 @@ assert not landed and JOBS == [] and "waiting for CI" in status, (status, JOBS)
 assert state(old, whole(suite="s2", conclusion=CANCEL), whole(suite="s3")) == ("green", [])
 assert state(old, whole(suite="s2", conclusion=CANCEL), going("s3"))[0] == "pending"
 
-# flake.yml and flake-retarget.yml are one workflow: a retarget's run (another
-# file's id, the same name) clears the push's that it cancelled, on the same head.
-retargeted = whole(suite="s2")
-for c in retargeted:
-    c["checkSuite"]["workflowRun"]["workflow"]["id"] = "retarget-id"
+# flake.yml and flake-retarget.yml are one workflow: a retarget's run clears the
+# push's that it cancelled on the same head. Unrelated workflows that only share
+# a name don't clear each other, in either file's place.
+def renamed(run, path, id):
+    for c in run:
+        c["checkSuite"]["workflowRun"].update(file={"path": path}, workflow={"id": id, "name": "flake"})
+    return run
+
+
+retargeted = renamed(whole(suite="s2"), ".github/workflows/flake-retarget.yml", "twin")
 assert state(old, retargeted) == ("green", [])
 assert state(retargeted, old) == ("green", [])
+namesake = renamed(whole(suite="s2"), ".github/workflows/ci.yml", "other")
+assert state(old, namesake) == ("red", [CHECK])
+assert state(namesake, old) == ("red", [CHECK])
+nameless = renamed(whole(suite="s2"), None, "other")
+assert state(old, nameless) == ("red", [CHECK])
 
 # Nothing stands in for a newer run that ran through. Alone, as when cancelled
 # by hand; two cancelled runs, which mustn't clear each other; another
