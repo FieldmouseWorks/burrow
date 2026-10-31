@@ -149,10 +149,14 @@ pub fn decide(
         for repo in dep.own.iter().chain(dep.running.keys()) {
             let key = format!("deploy/{repo}");
             if let Some(why) = snap.unknown.get(repo) {
-                // Not established for the system that runs: a wait from the
-                // last pass's, so a switch or a lost record never drops one,
-                // or from now; only a run of HOST-update can settle it.
-                let since = was.get(&key).map_or(now, |it| it.since);
+                // Not established for the system that runs: a wait as old as
+                // the last pass's (commits behind, or unknown then too), so
+                // a switch or a lost record never drops one, or from now.
+                // Its age is kept apart from any run's: only a run that finds
+                // main live in the system that runs settles it, never one
+                // under way, failed or held.
+                let since = st.going_live.get(repo).copied().unwrap_or(now);
+                d.state.going_live.insert(repo.clone(), since);
                 let what = format!("{repo} going live");
                 let link = Some(format!("https://github.com/{repo}"));
                 let it = going_live(dep, update, said, what, why, since, link, true);
@@ -161,14 +165,20 @@ pub fn decide(
             }
             let Some(b) = snap.deploys.get(repo) else {
                 // Not read: as the last pass saw it.
-                if let (true, Some(it)) = (snap.unread.contains_key(repo), was.get(&key)) {
-                    d.items.insert(key, it.clone());
+                if snap.unread.contains_key(repo) {
+                    if let Some(it) = was.get(&key) {
+                        d.items.insert(key, it.clone());
+                    }
+                    if let Some(t) = st.going_live.get(repo) {
+                        d.state.going_live.insert(repo.clone(), *t);
+                    }
                 }
                 continue;
             };
             if b.count == 0 {
                 continue;
             }
+            d.state.going_live.insert(repo.clone(), b.oldest);
             let link = Some(format!(
                 "https://github.com/{repo}/compare/{}...{}",
                 b.running, b.branch
@@ -708,23 +718,28 @@ mod tests {
     }
 
     // The flake's own repo with what's live unknown (no record, or a switch
-    // since) waits from the last pass's wait for it, so a switch never drops
-    // one, or from now, due `after` later, and the watchdog kicks
-    // HOST-update for it; while any run is at work, it waits on that.
+    // since) waits as long as it has: from the last pass's wait for it,
+    // commits behind or unknown then too, so a switch never drops one, or
+    // from now, due `after` later, and the watchdog kicks HOST-update for
+    // it. While any run is at work, it waits on that, and a run that fails
+    // leaves it as old as it was.
     #[test]
     fn deploy_unknown() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = config(dir.path());
-        let mut s = Snapshot {
-            unknown: BTreeMap::from([("sam/box".into(), "no record".into())]),
-            deploys: BTreeMap::from([("sam/kit".into(), Behind::default())]),
-            update: Some((
+        let idle = |said: &str| {
+            Some((
                 Unit {
                     state: "inactive".into(),
                     ..Unit::default()
                 },
-                "held at then: held".into(),
-            )),
+                said.to_owned(),
+            ))
+        };
+        let mut s = Snapshot {
+            unknown: BTreeMap::from([("sam/box".into(), "no record".into())]),
+            deploys: BTreeMap::from([("sam/kit".into(), Behind::default())]),
+            update: idle("held at then: held"),
             ..Snapshot::default()
         };
         let d = decide(&cfg, &s, &State::default(), &BTreeMap::new(), T + 60.0);
@@ -740,29 +755,63 @@ mod tests {
             it.phase,
             "no record; box-update's last run: held at then: held"
         );
-        // A wait it had already, commits behind or unknown: kept from then.
-        let was = BTreeMap::from([(
-            "deploy/sam/box".to_owned(),
-            Item {
-                since: T - 600.0,
-                ..it.clone()
-            },
-        )]);
-        let it =
-            decide(&cfg, &s, &State::default(), &was, T + 60.0).items["deploy/sam/box"].clone();
+        assert_eq!(
+            d.state.going_live,
+            BTreeMap::from([("sam/box".into(), T + 60.0)])
+        );
+        // Commits behind the pass before: as old as they are.
+        let behind = Snapshot {
+            deploys: BTreeMap::from([(
+                "sam/box".into(),
+                Behind {
+                    count: 1,
+                    oldest: T - 600.0,
+                    ..Behind::default()
+                },
+            )]),
+            update: idle("ok at then: deployed"),
+            ..Snapshot::default()
+        };
+        let d = decide(&cfg, &behind, &State::default(), &BTreeMap::new(), T);
+        assert_eq!(d.state.going_live["sam/box"], T - 600.0);
+        let d = decide(&cfg, &s, &d.state, &d.items, T + 60.0);
+        let it = &d.items["deploy/sam/box"];
         assert_eq!((it.since, it.due), (T - 600.0, T - 600.0 + 1800.0));
-        // A run at work, whenever it started: its wait.
+        // A run at work, whenever it started: its wait, the age kept.
         s.update.as_mut().unwrap().0 = Unit {
             state: "activating".into(),
-            since: Some(T - 900.0),
+            since: Some(T - 300.0),
             busy: false,
         };
-        let it =
-            decide(&cfg, &s, &State::default(), &was, T + 60.0).items["deploy/sam/box"].clone();
+        let d = decide(&cfg, &s, &d.state, &d.items, T + 90.0);
+        let it = &d.items["deploy/sam/box"];
         assert_eq!(
-            (it.since, it.due, it.kick),
-            (T - 900.0, T - 900.0 + 5400.0, None)
+            (it.since, it.due, it.kick.as_deref()),
+            (T - 300.0, T - 300.0 + 5400.0, None)
         );
+        assert_eq!(d.state.going_live["sam/box"], T - 600.0);
+        // It failed: as old as before it, not as its start.
+        s.update = idle("failed at then: activation failed; reverted");
+        let d = decide(&cfg, &s, &d.state, &d.items, T + 120.0);
+        let it = &d.items["deploy/sam/box"];
+        assert_eq!((it.since, it.due), (T - 600.0, T - 600.0 + 1800.0));
+        // Its record unreadable: the wait and its age as they were.
+        let unread = Snapshot {
+            unread: BTreeMap::from([("sam/box".into(), "live.json: bad".into())]),
+            update: idle("ok at then: up to date"),
+            ..Snapshot::default()
+        };
+        let e = decide(&cfg, &unread, &d.state, &d.items, T + 180.0);
+        assert_eq!(e.items["deploy/sam/box"], d.items["deploy/sam/box"]);
+        assert_eq!(e.state.going_live["sam/box"], T - 600.0);
+        // Found live: nothing waits, and the age goes.
+        let live = Snapshot {
+            deploys: BTreeMap::from([("sam/box".into(), Behind::default())]),
+            update: idle("ok at then: up to date"),
+            ..Snapshot::default()
+        };
+        let d = decide(&cfg, &live, &e.state, &e.items, T + 240.0);
+        assert!(d.items.is_empty() && d.state.going_live.is_empty(), "{d:?}");
     }
 
     // A queued push run with a later one of its workflow live on the branch
