@@ -340,9 +340,9 @@ print("train token: ok")
 rc = C.repo_cfg("sam/r")
 assert R.required(False) == [{"context": "review-settled", "integration_id": 7}]
 assert R.required(True) == [{"context": "review-settled", "integration_id": 7}, {"context": "conary/train", "integration_id": 7}]
-made = R.baseline_ruleset({**rc, "train": True}, "main")
+made = R.baseline_ruleset({**rc, "train": True})
 assert [y for y in made["rules"] if y["type"] == "required_status_checks"][0]["parameters"]["required_status_checks"] == R.required(True)
-made = R.baseline_ruleset(rc, "main")
+made = R.baseline_ruleset(rc)
 assert [y for y in made["rules"] if y["type"] == "required_status_checks"][0]["parameters"]["required_status_checks"] == R.required(False)
 RULES = {}
 PUT = []
@@ -357,10 +357,14 @@ def rules_write(*a, **k):
     return {}
 
 
-def ruleset(name, checks):
-    return {"name": name, "target": "branch", "enforcement": "active", "conditions": {}, "bypass_actors": [],
+OWNER_BYPASS = [{"actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "pull_request"}]
+
+
+def ruleset(name, checks, bypass=()):
+    return {"name": name, "target": "branch", "enforcement": "active", "conditions": {}, "bypass_actors": list(bypass),
             "rules": [{"type": "required_status_checks", "parameters": {
-                "strict_required_status_checks_policy": False, "required_status_checks": checks}}]}
+                "strict_required_status_checks_policy": False, "required_status_checks": checks}},
+                      {"type": "deletion"}, {"type": "non_fast_forward"}, {"type": "pull_request", "parameters": {}}]}
 
 
 kept_gh, kept_write = C.gh, C.write
@@ -369,13 +373,35 @@ settled = [{"context": "review-settled", "integration_id": 7}]
 for on, checks, want in ((True, settled, R.required(True)),
                          (False, R.required(True), R.required(False)),
                          (True, R.required(True), None), (False, settled, None)):
-    RULES["repos/sam/r/rulesets/1"] = ruleset("baseline", checks)
+    RULES["repos/sam/r/rulesets/1"] = ruleset("baseline", checks, () if on else OWNER_BYPASS)
     PUT.clear()
     assert R.keep_rules("sam/r", {**rc, "train": on}, [{"id": 1}])
     if want is None:
         assert PUT == [], (on, checks, PUT)
     else:
         assert len(PUT) == 1 and json.loads(PUT[0][1])["rules"][0]["parameters"]["required_status_checks"] == want, (on, PUT)
+# A baseline from before the train (remi's, made while it pushed directly:
+# only the first two rules, the owner bypassing always) has no required
+# checks to add the train's to: it gets the rules it lacks, and no bypass.
+old = ruleset("baseline", [])
+old["rules"] = [{"type": "deletion"}, {"type": "non_fast_forward"}]
+old["bypass_actors"] = [{**OWNER_BYPASS[0], "bypass_mode": "always"}]
+RULES["repos/sam/r/rulesets/1"] = old
+PUT.clear()
+assert R.keep_rules("sam/r", {**rc, "train": True}, [{"id": 1}])
+sent = json.loads(PUT[0][1])
+assert [y["type"] for y in sent["rules"]] == ["deletion", "non_fast_forward", "pull_request", "required_status_checks"], sent
+assert sent["rules"][3]["parameters"]["required_status_checks"] == R.required(True) and sent["bypass_actors"] == [], sent
+# Its bypass comes back with the train off, a directPush repo's rules stay
+# as they are, and so does any baseline with rulesets off.
+RULES["repos/sam/r/rulesets/1"] = ruleset("baseline", R.required(False))
+PUT.clear()
+assert R.keep_rules("sam/r", {**rc, "train": False}, [{"id": 1}])
+assert json.loads(PUT[0][1])["bypass_actors"] == OWNER_BYPASS, PUT
+for changed in ({"directPush": True}, {"ruleset": False}):
+    RULES["repos/sam/r/rulesets/1"] = {**old, "rules": [{"type": "deletion"}]}
+    PUT.clear()
+    assert R.keep_rules("sam/r", {**rc, "train": False, **changed}, [{"id": 1}]) and PUT == [], (changed, PUT)
 # Given up with the ledger off as well, when there's no train for cn to run:
 # the status's name isn't the ledger's to say.
 on_rules, off_rules = R.required(True), R.required(False)

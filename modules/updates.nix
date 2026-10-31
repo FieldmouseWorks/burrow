@@ -66,6 +66,9 @@ let
     (lib.attrNames (autoland.repos or { }));
   train = cfg.enable && autolandRepo != null && (autoland.enable or false)
     && (autoland.repos.${autolandRepo}.train or false);
+  # Every repo whose PRs land through its train: Renovate merges none there.
+  trainRepos = lib.optionals (autoland.enable or false)
+    (lib.attrNames (lib.filterAttrs (_: r: r.train or false) (autoland.repos or { })));
 
   # The longest a Renovate run goes on (seconds): renovate-sweep waits that
   # long after taking a refresh request back before a job may push.
@@ -405,7 +408,15 @@ let
   renovateSettings = renovatePolicy // {
     # The one command a repo's refresh may run after it (lock-age).
     allowedCommands = (renovatePolicy.allowedCommands or [ ]) ++ [ lockAgeAllowed ];
-    packageRules = (renovatePolicy.packageRules or [ ]) ++ [ lockAgeRule ];
+    packageRules = (renovatePolicy.packageRules or [ ]) ++ [ lockAgeRule ] ++ lib.optional (trainRepos != [ ]) {
+      # The train lands these, as it lands every PR there, and the rules refuse
+      # anyone else's merge: Renovate only opens them. Last, so it has the
+      # final word over every rule above. A security fix keeps its own
+      # automerge (Renovate applies vulnerabilityAlerts after every package
+      # rule), and the same rules refuse it.
+      matchRepositories = trainRepos;
+      automerge = false;
+    };
   };
 
   # Whether Renovate's autodiscoverFilter takes a repo, by Renovate's own code
