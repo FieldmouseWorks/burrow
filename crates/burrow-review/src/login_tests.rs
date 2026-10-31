@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use serde_json::json;
 use tempfile::TempDir;
 
-use super::{State, open_dir};
+use super::{State, all_of, open_dir, swap};
 
 fn auth(k: &str) -> String {
     json!({"tokens": {"refresh_token": k}}).to_string()
@@ -208,4 +208,65 @@ fn no_login_lends_nothing() {
     symlink(b.login(), home.join("auth.json")).unwrap();
     b.state.lend(open_dir(&home).unwrap()).unwrap();
     assert!(fs::symlink_metadata(home.join("auth.json")).is_err());
+}
+
+/// A save between the service reading everyone and its hand-over reaching
+/// that look: the hand-over displaces it, and it's read from what comes
+/// back. It's the newest there is, so it's what goes round next. In place
+/// the same, and a write later still to the file it displaced counts too.
+#[test]
+fn a_save_inside_a_hand_over_is_kept() {
+    for write in [
+        (|at: &Path, what: &str| fs::write(at, what).unwrap()) as fn(&Path, &str),
+        saved_over,
+    ] {
+        let mut b = Box::new(A);
+        let ((_, one), (_, two)) = (b.look("one"), b.look("two"));
+        fs::write(&two, auth(C)).unwrap();
+        b.state.read_all().unwrap();
+        write(&one, &auth(B));
+        b.state.hand_over().unwrap();
+        assert!(b.seen(B) && b.seen(C), "{:?}", b.state.seen);
+        for at in [&one, &two, &b.login()] {
+            assert_eq!(fs::read_to_string(at).unwrap(), auth(B), "{at:?}");
+        }
+        // Later still: into the file that was displaced.
+        let mut b = Box::new(A);
+        let ((_, one), (_, two)) = (b.look("one"), b.look("two"));
+        let mut under_way = OpenOptions::new().write(true).open(&one).unwrap();
+        fs::write(&two, auth(C)).unwrap();
+        b.state.read_all().unwrap();
+        b.state.hand_over().unwrap();
+        under_way.set_len(0).unwrap();
+        under_way.write_all(auth(D).as_bytes()).unwrap();
+        drop(under_way);
+        b.state.sync().unwrap();
+        assert!(b.seen(D));
+    }
+}
+
+/// So too a login redone on the machine inside a hand-over to it.
+#[test]
+fn a_login_saved_inside_a_hand_over_is_kept() {
+    let mut b = Box::new(A);
+    let (_, one) = b.look("one");
+    fs::write(&one, auth(C)).unwrap();
+    b.state.read_all().unwrap();
+    saved_over(&b.login(), &auth(B));
+    b.state.hand_over().unwrap();
+    assert!(b.seen(B));
+    assert_eq!(fs::read_to_string(&one).unwrap(), auth(B));
+}
+
+/// A swap brings back exactly what it displaced, leaves nothing beside it,
+/// and with nothing there displaces nothing.
+#[test]
+fn a_swap_brings_back_what_it_displaced() {
+    let t = TempDir::new().unwrap();
+    let dir = open_dir(t.path()).unwrap();
+    assert!(swap(&dir, b"one").unwrap().is_none());
+    let old = swap(&dir, b"two").unwrap().unwrap();
+    assert_eq!(all_of(&old).unwrap(), b"one");
+    assert_eq!(fs::read(t.path().join("auth.json")).unwrap(), b"two");
+    assert_eq!(fs::read_dir(t.path()).unwrap().count(), 1);
 }

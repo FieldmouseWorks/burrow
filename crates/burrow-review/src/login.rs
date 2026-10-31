@@ -23,7 +23,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 
 use rustix::fs::inotify::{self, CreateFlags, ReadFlags, WatchFlags};
-use rustix::fs::{AtFlags, CWD, Mode, OFlags};
+use rustix::fs::{AtFlags, CWD, Mode, OFlags, RenameFlags};
 use serde_json::Value;
 
 use crate::{Log, held};
@@ -34,8 +34,9 @@ const SHORTEST: usize = 16;
 /// The login's name, in its directory and in each look's CODEX_HOME.
 pub const LOGIN: &str = "auth.json";
 
-/// Where a login is written before it's moved into place.
-const TMP: &str = "auth.json.tmp";
+/// Where a login is written before it's swapped in, and where what it
+/// displaced is read from.
+const TMP: &str = "auth.json.burrow";
 
 /// A login as bytes, if they're a whole one: a write still under way isn't.
 fn whole(bytes: Vec<u8>) -> Option<(Vec<u8>, Value)> {
@@ -79,12 +80,11 @@ fn all_of(mut f: &File) -> io::Result<Vec<u8>> {
     Ok(b)
 }
 
-/// bytes as `LOGIN` in dir, whole at once, for its owner alone.
-fn put(dir: &OwnedFd, bytes: &[u8]) -> io::Result<()> {
-    match rustix::fs::unlinkat(dir, TMP, AtFlags::empty()) {
-        Ok(()) | Err(rustix::io::Errno::NOENT) => {}
-        Err(e) => return Err(e.into()),
-    }
+/// bytes as `LOGIN` in dir, whole at once, for its owner alone; and the file
+/// they took the place of, whatever was there at that very moment. Swapped,
+/// not moved over: a save just before this is in what comes back, not lost.
+fn swap(dir: &OwnedFd, bytes: &[u8]) -> io::Result<Option<File>> {
+    gone(dir, TMP)?;
     let fd = rustix::fs::openat(
         dir,
         TMP,
@@ -92,8 +92,32 @@ fn put(dir: &OwnedFd, bytes: &[u8]) -> io::Result<()> {
         Mode::RUSR | Mode::WUSR,
     )?;
     File::from(fd).write_all(bytes)?;
-    rustix::fs::renameat(dir, TMP, dir, LOGIN)?;
-    Ok(())
+    loop {
+        match rustix::fs::renameat_with(dir, TMP, dir, LOGIN, RenameFlags::EXCHANGE) {
+            Ok(()) => {
+                let old = open_file(dir, TMP)?;
+                gone(dir, TMP)?;
+                return Ok(old);
+            }
+            Err(rustix::io::Errno::NOENT) => {
+                match rustix::fs::renameat_with(dir, TMP, dir, LOGIN, RenameFlags::NOREPLACE) {
+                    Ok(()) => return Ok(None),
+                    // Saved in the moment since: that one's swapped.
+                    Err(rustix::io::Errno::EXIST) => {}
+                    Err(e) => return Err(e.into()),
+                }
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
+}
+
+/// `name` in dir removed, if it's there.
+fn gone(dir: &OwnedFd, name: &str) -> io::Result<()> {
+    match rustix::fs::unlinkat(dir, name, AtFlags::empty()) {
+        Ok(()) | Err(rustix::io::Errno::NOENT) => Ok(()),
+        Err(e) => Err(e.into()),
+    }
 }
 
 fn open_dir(dir: &Path) -> io::Result<OwnedFd> {
@@ -142,6 +166,11 @@ impl State {
     /// handed to whoever hasn't got it. A look's write wins over the login
     /// file's: the look can only have made it from what it was lent.
     fn sync(&mut self) -> io::Result<()> {
+        self.read_all()?;
+        self.hand_over()
+    }
+
+    fn read_all(&mut self) -> io::Result<()> {
         match std::fs::read(self.dir.join(LOGIN)) {
             Ok(bytes) => {
                 let known = self.shared.clone();
@@ -159,25 +188,54 @@ impl State {
         let mut looks = std::mem::take(&mut self.looks);
         let read = looks.values_mut().try_for_each(|l| self.read_copy(l));
         self.looks = looks;
-        read?;
-        let Some(current) = self.current.clone() else {
-            return Ok(());
-        };
-        if self.shared.as_ref() != Some(&current) {
-            put(&open_dir(&self.dir)?, &current)?;
-            self.shared = Some(current.clone());
-        }
-        for l in self.looks.values_mut() {
-            if l.last.as_ref() != Some(&current) {
-                // Kept open: a write it's in the middle of lands in this one.
-                if let (Some(old), Some(was)) = (open_file(&l.home, LOGIN)?, l.last.clone()) {
-                    l.replaced.push((old, was));
+        read
+    }
+
+    /// The latest login to whoever hasn't got it. What each hand-over
+    /// displaces is read as it comes back: a save made since they were all
+    /// read is the latest then, and goes round in its turn.
+    fn hand_over(&mut self) -> io::Result<()> {
+        loop {
+            let Some(current) = self.current.clone() else {
+                return Ok(());
+            };
+            let mut news = false;
+            if self.shared.as_ref() != Some(&current) {
+                let old = swap(&open_dir(&self.dir)?, &current)?;
+                let was = self.shared.replace(current.clone());
+                if let Some(f) = old {
+                    news |= self.take_in(all_of(&f)?, was.as_ref()).is_some();
                 }
-                put(&l.home, &current)?;
-                l.last = Some(current.clone());
+            }
+            let mut looks = std::mem::take(&mut self.looks);
+            let handed = looks.values_mut().try_for_each(|l| {
+                news |= self.hand_to(l, &current)?;
+                Ok::<_, io::Error>(())
+            });
+            self.looks = looks;
+            handed?;
+            if !news {
+                return Ok(());
             }
         }
-        Ok(())
+    }
+
+    /// current in a look's copy, if it isn't there. The file it displaces is
+    /// kept open, for a write the look began before that; whether that file
+    /// holds a login not seen yet is what comes back.
+    fn hand_to(&mut self, l: &mut Copy, current: &[u8]) -> io::Result<bool> {
+        if l.last.as_deref() == Some(current) {
+            return Ok(false);
+        }
+        let old = swap(&l.home, current)?;
+        let was = l.last.replace(current.to_owned());
+        let Some(f) = old else {
+            return Ok(false);
+        };
+        let new = self.take_in(all_of(&f)?, was.as_ref());
+        let news = new.is_some();
+        l.replaced.push((f, new.or(was).unwrap_or_default()));
+        Ok(news)
     }
 
     /// What a look has written since it was last read.
@@ -206,11 +264,8 @@ impl State {
             keys_in(&v, &mut self.seen);
         }
         match &self.current {
-            Some(c) => put(&home, c)?,
-            None => match rustix::fs::unlinkat(&home, LOGIN, AtFlags::empty()) {
-                Ok(()) | Err(rustix::io::Errno::NOENT) => {}
-                Err(e) => return Err(e.into()),
-            },
+            Some(c) => drop(swap(&home, c)?),
+            None => gone(&home, LOGIN)?,
         }
         let id = self.next;
         self.next += 1;
@@ -232,10 +287,7 @@ impl State {
         if let Some(l) = self.looks.remove(&id)
             && synced.is_ok()
         {
-            match rustix::fs::unlinkat(&l.home, LOGIN, AtFlags::empty()) {
-                Ok(()) | Err(rustix::io::Errno::NOENT) => {}
-                Err(e) => return Err(e.into()),
-            }
+            gone(&l.home, LOGIN)?;
         }
         synced
     }
