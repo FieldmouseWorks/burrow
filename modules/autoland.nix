@@ -111,6 +111,8 @@ let
     # the watchdog's deadline have to outlast.
     renovateRun = if sweeping then config.systemd.services.renovate.serviceConfig.TimeoutStartSec else null;
     projectsDir = config.burrow.projectsDir;
+    # proj's record of its jobs, which repos.py reads for a remade repo's.
+    inherit (config.burrow.proj) jobsDir;
     proj = "${config.burrow.tools.proj}/bin/proj";
     jobTimeout = cfg.jobTimeoutMinutes;
     jobIdle = cfg.jobIdleMinutes;
@@ -126,8 +128,12 @@ let
     # when the inbox will: notify.repo cloned in projectsDir, and the
     # steward's App one of inbox.authors (it is: see below). Otherwise it's
     # the owner's. It has unstickLabel too, so that job never waits in proj's
-    # line, which may be what's stuck.
-    inbox = { inherit (config.burrow.proj.inbox) enable label unstickLabel authors; };
+    # line, which may be what's stuck. `command` is how the steward has the
+    # inbox forget a remade repo's issues (repos.py reset).
+    inbox = {
+      inherit (config.burrow.proj.inbox) enable label unstickLabel authors;
+      command = if config.burrow.proj.inbox.enable then lib.getExe config.burrow.tools.proj-inbox else null;
+    };
     # Renovate's dashboards (dashboard.py), and where a job that ticks a box
     # on one kicks Renovate to read it.
     dashboard = {

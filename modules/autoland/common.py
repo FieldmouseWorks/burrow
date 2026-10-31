@@ -16,6 +16,7 @@ import hmac
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 import time
@@ -447,22 +448,48 @@ def repo_cfg(repo):
     return c
 
 
-def projects():
+def projects(strict=False):
     """(folder, repo) for each project in projectsDir, by its origin URL.
     Only a clone of its own counts: a hidden folder, or a worktree of the
     repo (`.git` is a file there) checked out on some other branch, sorts
     first and shares the origin, but a job sent there works on the wrong
     tree. A hidden folder named for the repo itself is that repo's clone
-    (FieldmouseWorks/.github in .github)."""
+    (FieldmouseWorks/.github in .github). Strict, what can't be read
+    (projectsDir, a folder's `.git`, its origin, other than there being
+    none) raises rather than being left out: for repos.restart, which must
+    see every clone a repo has."""
     src = CFG["projectsDir"]
-    for d in sorted(os.listdir(src)) if os.path.isdir(src) else []:
-        if not os.path.isdir(os.path.join(src, d, ".git")):
+    try:
+        names = sorted(os.listdir(src))
+    except FileNotFoundError:
+        names = []
+    except OSError:
+        if strict:
+            raise
+        names = []
+    for d in names:
+        try:
+            if not stat.S_ISDIR(os.stat(os.path.join(src, d, ".git")).st_mode):
+                continue
+        except (FileNotFoundError, NotADirectoryError):
+            continue
+        except OSError:
+            if strict:
+                raise
             continue
         p = subprocess.run(["git", "-C", os.path.join(src, d), "remote", "get-url", "origin"],
                            capture_output=True, text=True)
-        url = re.sub(r"^(https://github\.com/|git@github\.com:)", "", p.stdout.strip()).removesuffix(".git")
-        if url.count("/") == 1 and (not d.startswith(".") or d.lower() == url.split("/")[1].lower()):
+        if strict and p.returncode and "No such remote" not in p.stderr:
+            raise RuntimeError(f"{d}: git can't read its origin: {p.stderr.strip() or f'exit {p.returncode}'}")
+        url = github_repo(p.stdout.strip())
+        if url and (not d.startswith(".") or d.lower() == url.split("/")[1].lower()):
             yield d, url
+
+
+def github_repo(url):
+    """OWNER/REPO of a GitHub remote URL, or None."""
+    url = re.sub(r"^(https://github\.com/|git@github\.com:)", "", url).removesuffix(".git")
+    return url if url.count("/") == 1 else None
 
 
 def project_dir(repo):
@@ -523,17 +550,68 @@ def job_state(jid):
     return p.stdout.strip() or None
 
 
+def jobs():
+    """(id, project, the repos it's for) of every job proj ever ran, from
+    its own record (jobsDir): `proj run` writes a job's project folder to
+    its `project` file as it starts it, then its kicks to `kick`, where
+    the steward's jobs and proj-inbox's name their repo
+    (HANDLER/OWNER/REPO, lowercased here). One still being made, with no
+    project yet, is left out: it can only start in its folder as that is
+    by then. Raises when any of the record can't be read: none of it is
+    taken for missing but what isn't there."""
+    root = CFG["jobsDir"]
+    try:
+        ids = sorted(os.listdir(root))
+    except FileNotFoundError:
+        return []
+    found = []
+    for jid in ids:
+        d = os.path.join(root, jid)
+        if jid.startswith("."):  # proj's own (.waits.json, .slots)
+            continue
+        try:
+            if not stat.S_ISDIR(os.stat(d).st_mode):
+                continue
+        except FileNotFoundError:
+            continue
+        try:
+            with open(os.path.join(d, "project")) as f:
+                project = f.read().removesuffix("\n")
+        except FileNotFoundError:
+            continue
+        try:
+            with open(os.path.join(d, "kick")) as f:
+                kicks = f.read().splitlines()
+        except FileNotFoundError:
+            kicks = []
+        found.append((jid, os.path.normpath(project), {x.split("/", 1)[1].lower() for x in kicks if x.count("/") == 2}))
+    return found
+
+
 def stop_job(jid):
     """End a Claude job (proj stop): its turn, queued or running, and
-    anything it awaits. True once it's over; False if proj couldn't stop it,
-    and it may still be at work."""
+    anything it awaits. True once it's over, one proj no longer has
+    included; False if proj couldn't stop it, and it may still be at work."""
     if DRY:
         log(f"  would: proj stop {jid}")
         return True
     p = subprocess.run([CFG["proj"], "stop", jid], capture_output=True, text=True)
+    if p.returncode and p.stderr.startswith(f"no job {jid}"):
+        return True
     if p.returncode:
         log(f"proj stop {jid}: {p.stderr.strip()[-300:]}")
     return p.returncode == 0
+
+
+def forget_issues(repo):
+    """proj-inbox forgets the repo's issues (`proj-inbox forget`), once a
+    pass of its under way has ended: which job each is, what of it it has
+    answered. Nothing to forget where there's no inbox; a refusal raises."""
+    if DRY or not CFG["inbox"]["enable"]:
+        return
+    p = subprocess.run([CFG["inbox"]["command"], "forget", repo], capture_output=True, text=True)
+    if p.returncode:
+        raise RuntimeError(f"proj-inbox forget {repo}: {p.stderr.strip() or f'exit {p.returncode}'}")
 
 
 def coverage(repos, covered):

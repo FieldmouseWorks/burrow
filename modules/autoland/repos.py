@@ -6,11 +6,15 @@ import fnmatch
 import hashlib
 import json
 import os
+import re
+import shutil
 import subprocess
 import tempfile
+import time
 import urllib.parse
 
 import common as C
+import reviewers as V
 import train as T
 from common import CFG, CONTEXT, DEP_RE, DRY, load, log, repo_cfg, save, ts
 from prs import PROOF_SLOT, RELEASE_AGE, REVIEWER
@@ -26,7 +30,7 @@ def discover():
     for owner in CFG["owners"]:
         with C.acting_for(owner):
             found = C.gh("repo", "list", owner, "--no-archived", "--source", "--limit", "100000",
-                         "--json", "nameWithOwner,isPrivate,defaultBranchRef") or []
+                         "--json", "id,nameWithOwner,isPrivate,defaultBranchRef,createdAt") or []
         for r in found:
             name = r["nameWithOwner"]
             if any(fnmatch.fnmatch(name, pat) for pat in CFG["exclude"]):
@@ -34,7 +38,8 @@ def discover():
             # An empty repo has no branch to keep.
             if not r.get("defaultBranchRef"):
                 continue
-            seen.append({"repo": name, "private": r["isPrivate"], "default": r["defaultBranchRef"]["name"]})
+            seen.append({"repo": name, "id": r["id"], "private": r["isPrivate"],
+                         "default": r["defaultBranchRef"]["name"], "created": r["createdAt"]})
     return seen
 
 
@@ -83,10 +88,16 @@ WAITING = {RELEASE_AGE: f"Its updates are too new to take yet (the minimum relea
 
 
 def settle_repo(r, known):
-    """The repo's settings, at most once a day. Returns True if it's new."""
+    """The repo's settings, at most once a day. Returns True if it's new:
+    not in known (restart takes a remade one out)."""
     repo, rc = r["repo"], repo_cfg(r["repo"])
     st = load(f"repo-{repo.replace('/', '_')}.json", {})
     new = repo not in known
+    # GitHub's id for it, by which restart tells a remade repo: kept once
+    # restart has passed it, settings kept before ids were included.
+    if r.get("id") and st.get("id") != r["id"]:
+        st["id"] = r["id"]
+        save(f"repo-{repo.replace('/', '_')}.json", st)
     # Due daily, and straight away for another App (its required checks are
     # pinned to the one it was) or a train turned on or off (the baseline
     # requires the train's status only while it's on).
@@ -168,6 +179,109 @@ def settle_repo(r, known):
         st.pop("app", None)
     save(f"repo-{repo.replace('/', '_')}.json", st)
     return new
+
+
+def restart(r, known, failed):
+    """A repo made under the name of one GitHub deleted (GitHub hands a
+    deleted repo's name to the next one) starts over as new, before
+    anything acts on it. It's another repo when GitHub's id for it isn't
+    the one kept with the settings the steward last set under its name;
+    for settings kept before the steward kept ids, when they were set
+    before it was made, or in the second it was (createdAt has no finer
+    grain). Its name's state is found in any case: GitHub's names don't go
+    by it. Then `reset`."""
+    repo = r["repo"]
+    k = repo.replace("/", "_").lower()
+    for name in sorted(os.listdir(C.STATE)):
+        m = re.fullmatch(r"repo-(.+)\.json", name)
+        if not m or m.group(1).lower() != k:
+            continue
+        st = load(name, {})
+        if "settings" not in st or (st["id"] == r["id"] if "id" in st else st["settings"] >= ts(r["created"]) + 1):
+            continue
+        log(f"{repo}: made at {r['created']}, and isn't the repo of its name the steward settled; starting it over as new")
+        if not DRY:
+            reset(r, m.group(1), known, failed)
+
+
+def reset(r, k, known, failed):
+    """The deleted repo whose state is under k goes: its clones are moved
+    aside, proj-inbox forgets its issues and its Claude jobs are stopped
+    (they'd push its history to the new one, or answer the new one's
+    issues), and all the steward kept about it goes: its PRs' state (so a new
+    PR doesn't take on an old one's of the same number), their reviews,
+    snapshots and the reviewers' sessions (so no look at a new PR resumes
+    an old one's), its dashboard's and quarantine's, and the reviewers'
+    clone of it. The name is out of known, and of failed, so the new one's
+    baseline job starts straight away.
+
+    Its settings (repo-K.json) are what says it was remade, so they go
+    last: a pass that fails partway leaves them, and the next one does it
+    all again, each step as safe twice as once. Raises when it can't be
+    done, and then nothing may act on the repo this pass."""
+    repo = r["repo"]
+    for x in [x for x in known if x.lower() == repo.lower()]:
+        known.discard(x)
+    for x in [x for x in failed if x.lower() == repo.lower()]:
+        failed.pop(x)
+    save("known.json", sorted(known))
+    save("baseline-failed.json", failed)
+    retire_checkouts(repo, k)
+    left = V.sweep({k}, set())
+    if left:
+        raise RuntimeError(f"its reviewers aren't done with {', '.join(left)}: a look under way, or a session "
+                           "that couldn't be marked gone")
+    mirrors = os.path.join(C.STATE, V.GIT)
+    for x in sorted(os.listdir(mirrors)) if os.path.isdir(mirrors) else []:
+        if x.lower() == f"{repo.replace('/', '__')}.git".lower():
+            shutil.rmtree(os.path.join(mirrors, x))
+    mine = re.compile(rf"(dashboard|flaky)-{re.escape(k)}\.json|pr-{re.escape(k)}-\d+\.json")
+    for name in sorted(os.listdir(C.STATE)):
+        if mine.fullmatch(name):
+            os.remove(os.path.join(C.STATE, name))
+    os.remove(os.path.join(C.STATE, f"repo-{k}.json"))
+
+
+def retire_checkouts(repo, k):
+    """Every clone of the repo in projectsDir moved aside under a hidden
+    name, which nothing takes for a project: so the repo's next job clones
+    it afresh, and none can push the deleted one's history to it. Nothing
+    in one is lost. Which repo a clone is of can't be told: all it knows is
+    the name it came from, which may have been the deleted one's then,
+    however long ago the repo there now was made (one renamed into the name
+    may be years older). So the new one's own goes too, and its next job
+    clones it again.
+
+    Then proj-inbox forgets the repo's issues (C.forget_issues), so the new
+    one's issue N is a new job, never the deleted one's N, and no answer
+    of an old job's goes to it. Then every Claude job of the repo's is
+    stopped, from proj's own record of every job (C.jobs): each the repo's
+    by the repo its kicks name (the steward's jobs and proj-inbox's, in
+    whatever folder) or by its folder (one moved aside, or the folder the
+    repo's next clone takes, unless another repo's clone is there). A job
+    whose kicks name only other repos is theirs, wherever it ran. The moves
+    go first, and then the inbox waits for a pass of its under way, so a
+    job either starts before the jobs are read or can't start at all: none
+    starts in a clone moved aside, and the inbox starts none for a repo it
+    has no clone of. Each folder is kept with the repo's settings
+    (`retired`) before it's moved, so a later try stops its jobs if this
+    one can't. A job proj won't stop raises, for the next pass to try again."""
+    src = CFG["projectsDir"]
+    every = list(C.projects(strict=True))
+    st = load(f"repo-{k}.json", {})
+    retired = st.setdefault("retired", [])
+    for d in sorted(d for d, url in every if url.lower() == repo.lower()):
+        aside = os.path.join(src, f".{d}.gone-{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime(C.NOW))}")
+        log(f"{repo}: its checkout {d} may be the deleted one's; moving it to {aside}")
+        if d not in retired:
+            retired.append(d)
+            save(f"repo-{k}.json", st)
+        os.rename(os.path.join(src, d), aside)
+    C.forget_issues(repo)
+    ours = {os.path.join(src, d) for d in set(retired) | ({repo.split("/")[1]} - {d for d, _ in every})}
+    for jid, project, repos in C.jobs():
+        if (repo.lower() in repos or (not repos and project in ours)) and not C.stop_job(jid):
+            raise RuntimeError(f"{repo}: proj couldn't stop job {jid}, which may be the deleted one's")
 
 
 def keep_checks(checks, key):
