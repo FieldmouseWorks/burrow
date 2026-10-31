@@ -101,14 +101,53 @@ impl Ran {
 /// A scratch directory: the runner's machine for one test.
 pub struct Scratch {
     dir: TempDir,
+    /// This process's PATH as the runner's: the machine's own tools, but no
+    /// heavy (see [`hide`]).
+    host_path: String,
 }
 
 impl Default for Scratch {
     fn default() -> Self {
         let dir = tempfile::tempdir().expect("a scratch directory");
         fs::create_dir(dir.path().join("bin")).unwrap();
-        Scratch { dir }
+        let host_path = hide(
+            "heavy",
+            &std::env::var_os("PATH").unwrap_or_default(),
+            &dir.path().join("path"),
+        );
+        Scratch { dir, host_path }
     }
+}
+
+/// `path` with every `name` on it hidden: each directory that has one is
+/// replaced by a directory under `shadows` that links to all it holds but
+/// that. The gate step takes a heavy slot when there's a heavy on its PATH,
+/// so a machine's own heavy (burrow.cpu's, on remi) would make a runner with
+/// no slots one with them, and wait on the machine's real slots, its own
+/// test's included. A case that wants slots puts its own heavy first.
+pub fn hide(name: &str, path: &std::ffi::OsStr, shadows: &Path) -> String {
+    let dirs: Vec<PathBuf> = std::env::split_paths(path)
+        .enumerate()
+        .map(|(i, d)| {
+            if !d.join(name).exists() {
+                return d;
+            }
+            let shadow = shadows.join(i.to_string());
+            fs::create_dir_all(&shadow).unwrap();
+            for entry in fs::read_dir(&d).unwrap_or_else(|e| panic!("{}: {e}", d.display())) {
+                let entry = entry.unwrap();
+                if entry.file_name() != name {
+                    std::os::unix::fs::symlink(entry.path(), shadow.join(entry.file_name()))
+                        .unwrap();
+                }
+            }
+            shadow
+        })
+        .collect();
+    std::env::join_paths(dirs)
+        .expect("a PATH")
+        .into_string()
+        .expect("a PATH that's UTF-8")
 }
 
 impl Scratch {
@@ -130,10 +169,9 @@ impl Scratch {
         executable(&self.join("bin").join(name), body);
     }
 
-    /// PATH with the stand-ins first.
+    /// PATH with the stand-ins first, then the machine's (with no heavy).
     pub fn path_var(&self) -> String {
-        let path = std::env::var("PATH").unwrap_or_default();
-        format!("{}:{path}", self.join("bin").display())
+        format!("{}:{}", self.join("bin").display(), self.host_path)
     }
 
     /// A command with nothing of this process's environment but PATH: HOME
@@ -237,4 +275,27 @@ pub fn write(path: &Path, text: &str) {
         fs::create_dir_all(dir).unwrap();
     }
     fs::write(path, text).unwrap();
+}
+
+/// A directory with a heavy is swapped for one with all the rest; one
+/// without is left as it is.
+#[test]
+fn heavy_is_hidden_from_the_runners_path() {
+    let t = tempfile::tempdir().unwrap();
+    let (with, without) = (t.path().join("with"), t.path().join("without"));
+    for d in [&with, &without] {
+        fs::create_dir(d).unwrap();
+        executable(&d.join("jq"), "exit 0\n");
+    }
+    executable(&with.join("heavy"), "exit 0\n");
+    let path = std::env::join_paths([&with, &without]).unwrap();
+    let hidden = hide("heavy", &path, &t.path().join("shadows"));
+    let dirs: Vec<PathBuf> = std::env::split_paths(&hidden).collect();
+    assert_eq!(dirs.len(), 2, "{hidden}");
+    assert_ne!(dirs[0], with, "{hidden}");
+    assert!(
+        dirs[0].join("jq").exists() && !dirs[0].join("heavy").exists(),
+        "{hidden}"
+    );
+    assert_eq!(dirs[1], without, "{hidden}");
 }
