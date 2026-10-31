@@ -7,8 +7,8 @@ use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::github::Api;
 use crate::{filing, quarantine, report};
+use burrow_github::Api;
 
 /// Run `cmd` with FLAKY_EXPIRED and FLAKY_REPORT set, then file what it
 /// reported. Its exit code is the command's; one that passed but whose
@@ -147,8 +147,8 @@ fn exit_code(s: std::process::ExitStatus) -> i32 {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
-    use crate::github::fake::{Fake, ok};
     use crate::test::iso;
+    use burrow_github::fake::{Fake, ok};
     use serde_json::json;
 
     const LIST: &str = "repos/sam/game/issues?labels=flaky";

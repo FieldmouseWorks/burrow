@@ -1,6 +1,0 @@
-# The toolchain gh-token builds, tests and lints with, locally and in CI (the
-# flake reads it). Renovate keeps it on the latest stable; change it here only.
-[toolchain]
-channel = "1.99.1"
-components = ["rustfmt", "clippy"]
-profile = "minimal"
