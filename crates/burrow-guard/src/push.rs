@@ -13,23 +13,46 @@ use crate::shell;
 const SHARED: [&str; 5] = ["main", "master", "trunk", "HEAD", "@"];
 
 /// The question for each push in `cmd` that can rewrite or delete a shared
-/// branch; `cwd` is where the command runs.
+/// branch; `cwd` is where the command runs. A command nested deeper than
+/// the guard reads asks, since a push in it would go unseen.
 pub fn asks(cmd: &str, cwd: &Path, git: &Path) -> Vec<String> {
-    pushes(cmd, cwd)
+    let mut found = Vec::new();
+    let read = shell::commands(cmd).and_then(|commands| pushes(commands, cwd, 0, &mut found));
+    if read.is_err() {
+        return vec![
+            "The guard couldn't check this command (it nests too deep to read), so it asks."
+                .to_owned(),
+        ];
+    }
+    found
         .into_iter()
         .filter_map(|(at, push)| push.ask(&at, git))
         .collect()
 }
 
-/// Each `git … push …` in `text`, with where it runs, read word by word as
-/// the shell splits them. A word with a command line in it (a script for
-/// `bash -c`, `ssh` or `$(…)`) is read the same way, since it may run.
-fn pushes(text: &str, cwd: &Path) -> Vec<(PathBuf, Push)> {
-    let mut found = Vec::new();
-    for words in shell::commands(text) {
+/// How many times a word may hold a command line that holds another
+/// before the reading gives up.
+const NESTED: usize = 16;
+
+/// Each `git … push …` in `commands`, with where it runs. A word that
+/// reads as more than itself (a script for `bash -c`, `ssh` or `eval`) is
+/// read the same way, since it may run; each such reading is shorter than
+/// the word, so it ends.
+fn pushes(
+    commands: Vec<Vec<String>>,
+    cwd: &Path,
+    depth: usize,
+    found: &mut Vec<(PathBuf, Push)>,
+) -> Result<(), shell::TooDeep> {
+    if depth > NESTED {
+        return Err(shell::TooDeep);
+    }
+    for words in &commands {
         for (i, word) in words.iter().enumerate() {
-            if word.contains(char::is_whitespace) {
-                found.extend(pushes(word, cwd));
+            let inner = shell::commands(word)?;
+            if !matches!(inner.as_slice(), [only] if only.as_slice() == std::slice::from_ref(word))
+            {
+                pushes(inner, cwd, depth + 1, found)?;
             }
             if (word == "git" || word.ends_with("/git"))
                 && let Some(push) = after_git(cwd, &words[i + 1..])
@@ -38,7 +61,7 @@ fn pushes(text: &str, cwd: &Path) -> Vec<(PathBuf, Push)> {
             }
         }
     }
-    found
+    Ok(())
 }
 
 /// What follows `git`, if it's a push: git's own options (each `-C DIR`
@@ -77,16 +100,23 @@ impl Push {
         let mut words = words.iter();
         while let Some(w) = words.next() {
             match w.as_str() {
-                "--force" | "--force-if-includes" | "--delete" => p.force = true,
-                w if w.starts_with("--force-with-lease") => p.force = true,
-                "--all" | "--branches" => p.all = true,
-                // They force-update and delete remote refs by design.
-                "--mirror" | "--prune" => (p.force, p.all) = (true, true),
-                // Options whose value is the next word, not a refspec.
-                "--push-option" | "--receive-pack" | "--exec" | "--repo" => {
-                    words.next();
+                // The rest are refspecs, whatever they look like.
+                "--" => {
+                    p.positional.extend(words.by_ref().cloned());
+                    break;
                 }
-                w if w.starts_with("--") => {}
+                w if let Some(option) = w.strip_prefix("--") => {
+                    let (name, value) = option.split_once('=').unzip();
+                    match long(name.unwrap_or(option)) {
+                        Long::Force => p.force = true,
+                        Long::All => p.all = true,
+                        Long::Everything => (p.force, p.all) = (true, true),
+                        Long::Value if value.is_none() => {
+                            words.next();
+                        }
+                        Long::Value | Long::Other => {}
+                    }
+                }
                 // Short options, apart or together: `-f`, `-d` and `-uf`
                 // force; `-o` takes the rest of its word, or the next word.
                 w if w.starts_with('-') => {
@@ -145,6 +175,67 @@ impl Push {
         Some(format!(
             "Force-push or delete of '{shared}' (R2: rewrites history other clones depend on)."
         ))
+    }
+}
+
+/// What a long option of `git push` means here.
+#[derive(Clone, Copy)]
+enum Long {
+    /// It can rewrite or delete what it targets.
+    Force,
+    /// It targets every branch.
+    All,
+    /// It force-updates and deletes every remote ref by design.
+    Everything,
+    /// Its value is the next word, unless given with `=`.
+    Value,
+    Other,
+}
+
+/// `git push`'s long options (`git push -h`).
+const LONG: [(&str, Long); 28] = [
+    ("verbose", Long::Other),
+    ("quiet", Long::Other),
+    ("repo", Long::Value),
+    ("all", Long::All),
+    ("branches", Long::All),
+    ("mirror", Long::Everything),
+    ("delete", Long::Force),
+    ("tags", Long::Other),
+    ("dry-run", Long::Other),
+    ("porcelain", Long::Other),
+    ("force", Long::Force),
+    ("force-with-lease", Long::Force),
+    ("force-if-includes", Long::Force),
+    ("recurse-submodules", Long::Value),
+    ("thin", Long::Other),
+    ("receive-pack", Long::Value),
+    ("exec", Long::Value),
+    ("set-upstream", Long::Other),
+    ("progress", Long::Other),
+    ("prune", Long::Everything),
+    ("no-verify", Long::Other),
+    ("verify", Long::Other),
+    ("follow-tags", Long::Other),
+    ("signed", Long::Other),
+    ("atomic", Long::Other),
+    ("push-option", Long::Value),
+    ("ipv4", Long::Other),
+    ("ipv6", Long::Other),
+];
+
+/// The option `--NAME` is, as git reads it: the one named so, or the only
+/// one NAME begins (`--del` is `--delete`). A `--no-…` takes no value and
+/// forces nothing, and one that's unknown or could be several stops git
+/// before it pushes.
+fn long(name: &str) -> Long {
+    if let Some(&(_, long)) = LONG.iter().find(|(n, _)| *n == name) {
+        return long;
+    }
+    let mut begun = LONG.iter().filter(|(n, _)| n.starts_with(name));
+    match (begun.next(), begun.next()) {
+        (Some(&(_, long)), None) => long,
+        _ => Long::Other,
     }
 }
 

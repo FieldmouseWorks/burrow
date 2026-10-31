@@ -379,6 +379,11 @@ fn a_push_that_can_rewrite_a_shared_branch_asks() {
         "git push --branches -f",
         "git push --mirror",
         "git push --prune origin",
+        // Long options as git reads them: the only one a word begins.
+        "git push --al -f",
+        "git push --b -f",
+        "git push --m",
+        "git push --pru origin",
     ] {
         assert_eq!(
             b.check(cmd, f),
@@ -455,6 +460,29 @@ fn a_push_is_read_word_by_word_as_the_shell_splits_it() {
         "git push 2>&- -f origin main",
         "git push <&- -f origin main",
         "cat <(git push -f origin main)",
+        // Dollar quotes, and the words around a substitution.
+        "bash -c $'git push -f origin main '",
+        r"bash -c $'git\x20push -f origin \x6dain'",
+        "git push -f origin --receive-pack $(printf git-receive-pack) HEAD:main",
+        r#"echo "$(git push -f origin -o "ci -o" HEAD:main )""#,
+        r#"echo "`git push -f origin -o \"ci -o\" HEAD:main`""#,
+        "git push -f origin &>/dev/null main",
+        // What a redirect's target runs.
+        r#"cat <"$(git push -f origin main )""#,
+        r#"cat <<< "$(git push -f origin main)""#,
+        "echo x > `git push -f origin main`",
+        // Whitespace the shell doesn't split on is just part of a word.
+        "echo 'a\u{a0}b\u{b}c\u{c}d'; git push -f origin main",
+        // Long options as git reads them: the only one a word begins.
+        "git push --del origin main",
+        "git push origin --de main",
+        "git push --force-w origin main",
+        "git push --force-i origin main",
+        "git push --pu 'x y' -f origin main",
+        "git push --rece 'git receive-pack' -f origin main",
+        "git push -f --recurse-submodules check origin main",
+        // After `--`, every word is a refspec.
+        "git push -f origin -- main",
     ] {
         assert_eq!(
             b.check(cmd, w),
@@ -469,9 +497,61 @@ fn a_push_is_read_word_by_word_as_the_shell_splits_it() {
         "git push -f -o 'a b' origin feature",
         "git push -o '-f' origin main",
         "git push -f origin feature > main",
+        "git push -f origin feature <<< main",
+        "git push -f origin feature $(echo main)",
+        // Ambiguous or negated, they stop git or force nothing.
+        "git push --forc origin main",
+        "git push --no-force origin main",
+        "git push --no-repo origin feature",
     ] {
         assert_eq!(b.check(cmd, m), None, "{cmd:?}");
     }
+    // A value an option takes isn't the remote, so this pushes main, the
+    // branch checked out.
+    assert_eq!(
+        b.check("git push -f --recurse-submodules check origin", m),
+        Some(format!("Force-push or delete of 'main' {SHARED}"))
+    );
+}
+
+#[test]
+fn a_command_too_deep_to_read_asks() {
+    let b = Box::new();
+    let work = clone_on("feature");
+    let asks = Some(
+        "The guard couldn't check this command (it nests too deep to read), so it asks.".to_owned(),
+    );
+    let substitutions = format!("echo {}", "$(".repeat(100));
+    assert_eq!(b.check(&substitutions, work.path()), asks);
+    // Scripts in scripts: each `bash -c` quotes the next, which doubles
+    // its backslashes, so 18 deep is half a megabyte.
+    let mut script = "git status".to_owned();
+    for _ in 0..18 {
+        script = format!("bash -c {}", quote(&script));
+    }
+    assert_eq!(b.check(&script, work.path()), asks);
+    // Nested a few times, it's read through.
+    let mut script = "git push -f origin main".to_owned();
+    for _ in 0..4 {
+        script = format!("bash -c {}", quote(&script));
+    }
+    assert_eq!(
+        b.check(&script, work.path()),
+        Some(format!("Force-push or delete of 'main' {SHARED}"))
+    );
+}
+
+/// `s` double-quoted for the shell.
+fn quote(s: &str) -> String {
+    let mut quoted = String::from('"');
+    for c in s.chars() {
+        if matches!(c, '\\' | '"' | '$' | '`') {
+            quoted.push('\\');
+        }
+        quoted.push(c);
+    }
+    quoted.push('"');
+    quoted
 }
 
 #[test]
