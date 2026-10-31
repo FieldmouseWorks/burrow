@@ -8,10 +8,11 @@ import json
 import os
 import re
 
-from harness import FAIL, JOBS, STUB, T, UNSTOPPABLE, WROTE, C, H, S, clean, fresh_pr_state, merged, mkpr, pr_state, run, \
-    stand_in, tmp, worker
+from harness import CI_GREEN, FAIL, JOBS, STUB, T, UNSTOPPABLE, WROTE, C, H, S, clean, fresh_pr_state, merged, mkpr, pr_state, \
+    run, stand_in, tmp, worker
 
 import harness
+import proofs as P
 import waits
 
 stand_in()
@@ -81,6 +82,32 @@ CASES = {
     "stop": {"pr": clean(files=["secrets/1.yaml"], sha="b" * 40), "setup": judging,
              "fail": lambda: UNSTOPPABLE.add("judge-on-a"), "mend": UNSTOPPABLE.clear},
 }
+# A proof the steward builds (proofs.py): one it can't start, and one whose
+# derivations can't be worked out, which it has nothing to build without.
+VM = CI_GREEN + [{"__typename": "StatusContext", "context": "vm", "state": "PENDING", "description": ""}]
+real_outputs, real_built, real_build = P.outputs, P.built, P.build
+
+
+def known(repo, pr, checks, st):
+    st["proofOutputs"] = {"for": None, "paths": ["/nix/store/vm"], "drvs": {"vm": "/nix/store/vm.drv"}}
+    return ["/nix/store/vm"]
+
+
+def proving(outputs=known, build=lambda *a: None):
+    """sam/r's vm check is a build, nothing of it built yet."""
+    S.CFG["repos"]["sam/r"] = {"proofBuilds": {"vm": "checks.x86_64-linux.vm"}}
+    P.outputs, P.built, P.build = outputs, lambda *a: None, build
+
+
+def proved():
+    P.outputs, P.built, P.build = real_outputs, real_built, real_build
+    del S.CFG["repos"]["sam/r"]
+
+
+CASES["build"] = {"pr": clean(checks=VM), "setup": proving,
+                  "mend": lambda: setattr(P, "build", lambda *a: C.BUILD + "1"), "after": proved}
+CASES["eval"] = {"pr": clean(checks=VM), "setup": lambda: proving(lambda *a: None, lambda *a: C.BUILD + "1"),
+                 "mend": lambda: setattr(P, "outputs", known), "after": proved}
 # A job that broke (lost) is struck once a job, not once a pass: lost.py has its case.
 assert set(CASES) | {"lost"} == set(H.STRIKES), "each step that's tried again has its case here, or in lost.py"
 
@@ -133,6 +160,7 @@ for kind, case in CASES.items():
     it = watched()
     minutes = S.CFG["defaults"]["holdStallAfter" if kind == "status" else "stallAfter"]  # status's case is on hold
     assert it["due"] == it["since"] + minutes * 60 and H.STRIKES[kind] not in it["phase"], (kind, it)
+    case.get("after", lambda: None)()
 # The backoff stops at an hour, and a new head starts the count over.
 fresh_pr_state()
 for i in range(9):

@@ -734,11 +734,17 @@
         # Which updates Renovate merges itself under the example's config, as
         # Renovate's own rules read it: all but a major, a commit pin of an
         # action (pinDigest) included. The steward leaves Renovate's own PRs
-        # to Renovate, so one it won't merge sits green for good.
+        # to Renovate, so one it won't merge sits green for good. In a repo
+        # with its train on it merges none: the train lands them all.
         renovate-automerge = pkgs.runCommand "renovate-automerge-check" { } ''
           export HOME=$TMPDIR
-          got=$(${pkgs.lib.getExe pkgs.nodejs_24} ${./tests/renovate-automerge.mjs} ${pkgs.renovate} \
-            ${self.nixosConfigurations.example.config.systemd.services.renovate.environment.RENOVATE_CONFIG_FILE} 2>/dev/null)
+          check() {
+            ${pkgs.lib.getExe pkgs.nodejs_24} ${./tests/renovate-automerge.mjs} ${pkgs.renovate} \
+              ${self.nixosConfigurations.example.config.systemd.services.renovate.environment.RENOVATE_CONFIG_FILE} "$1" 2>/dev/null
+          }
+          train=$(check sam/homelab)
+          [ -z "$(grep -v ' no$' <<<"$train")" ] && [ "$(wc -l <<<"$train")" = 7 ] || { echo "in the train repo: $train"; exit 1; }
+          got=$(check sam/other)
           want='major no
           minor yes
           patch yes

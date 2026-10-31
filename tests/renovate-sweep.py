@@ -92,7 +92,7 @@ def seal(state, *a):
 def sweep(prs, comments=None, covered=None, age=0, proofs=None, state=None, failed=(), args=(), projects=src, app=("", "")):
     """Run one sweep; return (proj calls, the majors notice as (verb, body)).
     covered: the repos the steward's repos.json lists, written age seconds ago,
-    each with proofs as its proofJobs; failed: ones it lists whose pass failed.
+    each with proofs as its proofs; failed: ones it lists whose pass failed.
     state: a state dir to keep between sweeps. args: the sweep's (a repo);
     then it returns no notice, and checks it sent none. app: the machine's
     own App's name and its bot's login, when the jobs act as it."""
@@ -111,7 +111,7 @@ def sweep(prs, comments=None, covered=None, age=0, proofs=None, state=None, fail
     cov = ""
     if covered is not None:
         cov = os.path.join(state, "repos.json")
-        repos = {r: {"proofJobs": proofs or {}, "covered": r not in failed} for r in [*covered, *failed]}
+        repos = {r: {"proofs": proofs or {}, "covered": r not in failed} for r in [*covered, *failed]}
         json.dump({"at": time.time() - age, "repos": repos}, open(cov, "w"))
     env = {"DIR": state, "SRC": projects, "OWNER": "Sam", "NOTIFY": notify, "SETTLED": "review-settled", "COVERED": cov,
            "SEAL": tool, "APP": app[0], "BOT": app[1], "LOCK_WAIT": lock_wait,
