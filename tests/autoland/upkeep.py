@@ -270,7 +270,7 @@ C.gh, C.write = gh_stub, write
 # baseline job.
 src, jobs = f"{tmp}/remade-src", S.CFG["jobsDir"]
 S.CFG["projectsDir"] = src
-remade = {"repo": "sam/r", "id": "R_new", "private": False, "default": "main", "created": "2026-10-24T06:00:00Z"}
+remade = {"repo": "sam/r", "id": 2002, "private": False, "default": "main", "created": "2026-10-24T06:00:00Z"}
 MADE = C.ts(remade["created"])
 SEQ = iter(range(100))
 
@@ -356,7 +356,7 @@ assert C.project_dir("sam/r") is None, os.listdir(src)
 WROTE.clear()
 assert R.settle_repo(remade, known) is True
 st = C.load("repo-sam_r.json", {})
-assert st["settings"] == C.NOW and st.get("hookId") != 41 and st["id"] == "R_new", st
+assert st["settings"] == C.NOW and st.get("hookId") != 41 and st["databaseId"] == 2002, st
 assert sorted(made()) == LABELS, WROTE
 assert "api -X PUT repos/sam/r/vulnerability-alerts" in WROTE, WROTE
 # Settled now, it isn't started over again: what's kept about it from here
@@ -368,13 +368,25 @@ STOPPED.clear()
 FORGOT.clear()
 R.restart(remade, known, failed)
 assert "pr-sam_r-2.json" in os.listdir(f"{tmp}/state") and STOPPED == FORGOT == [] and os.path.isdir(f"{src}/r")
-# Nor is one the steward never settled, or one whose id is the one it
-# kept, whenever it was settled; or, for state from before it kept ids, one
-# made a second or more before the steward last settled it. Settled in the
-# second it was made, which comes first can't be told: it starts over.
-for st, again in ((None, False), ({"id": "R_new", "settings": MADE - 86400}, False),
-                  ({"id": "R_old", "settings": MADE + 86400}, True), ({"settings": MADE + 1}, False),
-                  ({"settings": MADE + 0.25}, True)):
+# State from before databaseIds, its node id with it, takes this repo's
+# databaseId once restart has passed it, and the node id goes.
+st = {**C.load("repo-sam_r.json", {}), "id": "R_new"}
+del st["databaseId"]
+C.save("repo-sam_r.json", st)
+R.settle_repo(remade, known)
+st = C.load("repo-sam_r.json", {})
+assert st["databaseId"] == 2002 and "id" not in st, st
+# Nor is one the steward never settled, or one whose databaseId is the one
+# it kept, whenever it was settled; or, for state from before it kept them,
+# one made a second or more before the steward last settled it. Settled in
+# the second it was made, which comes first can't be told: it starts over.
+# A databaseId that isn't this repo's says so even where the old one never
+# got its settings. A node id kept before databaseIds were says nothing:
+# GitHub has changed their format, so such state goes by the time.
+for st, again in ((None, False), ({"databaseId": 2002, "settings": MADE - 86400}, False),
+                  ({"databaseId": 1001, "settings": MADE + 86400}, True), ({"databaseId": 1001}, True),
+                  ({"settings": MADE + 1}, False), ({"settings": MADE + 0.25}, True),
+                  ({"id": "R_old", "settings": MADE + 1}, False), ({"id": "R_new"}, False)):
     old_state()
     if st is None:
         os.remove(f"{tmp}/state/repo-sam_r.json")
@@ -400,7 +412,7 @@ assert os.listdir(f"{tmp}/state/{V.GIT}") == [], os.listdir(f"{tmp}/state/{V.GIT
 # the deleted one left: a clone git made from the name since, and the job
 # working in it, are the deleted one's all the same.
 old_state()
-C.save("repo-sam_r.json", {**C.load("repo-sam_r.json", {}), "id": "R_old"})
+C.save("repo-sam_r.json", {**C.load("repo-sam_r.json", {}), "databaseId": 1001})
 origin = f"{tmp}/remade-origin"
 subprocess.run(["git", "init", "-q", origin], check=True)
 subprocess.run(["git", "-C", origin, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty",
