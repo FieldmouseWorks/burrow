@@ -681,7 +681,7 @@ def job(repo, task, clone=False, pipeline=True, timeout=None):
     d = project_dir(repo)
     if d is None and clone and not DRY and not taken(repo):
         d = checkout(repo)
-    if d is None or retiring(repo):
+    if d is None:
         return None
     if DRY:
         log(f"  would: proj run {d} ...")

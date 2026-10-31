@@ -254,7 +254,11 @@ assert [x for x in PUBLISHED[0] if x[0] == C.RETIRING and x[1] == "sam/old" and 
 with C.acting_for("sam/new"):
     assert C.job("sam/new", "t", clone=True) is None
 assert "sam/new" not in tried(), tried()
-subprocess.run(["rm", "-rf", f"{src}/old"], check=True)
+# Nor in a checkout of its own that it has already.
+clone("new", "https://github.com/sam/new.git")
+with C.acting_for("sam/new"):
+    assert C.job("sam/new", "t") is None
+subprocess.run(["rm", "-rf", f"{src}/old", f"{src}/new"], check=True)
 assert full(T + 90060) == line
 assert len(RESET) == 2, RESET
 RESET_FAILS[0] = False
