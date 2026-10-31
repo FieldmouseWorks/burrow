@@ -182,6 +182,8 @@ def ci_state(pr, proofs=(), moved=None, repo=None):
 # `docs only into BASE from FORK`, FORK the commit the PR left BASE at. Which
 # paths a PR changes, and so which lane it takes, depends on both.
 LANE, DOCS_LANE = "lane into ", "docs only into "
+# Its whole gate's job, skipped in the docs lane and on a PR the train lands.
+GATE = "check"
 
 
 def suite(c):
@@ -222,20 +224,46 @@ def after_cancel(c, contexts, stale):
     someone cancelled the run by hand, which stays not green. Done its work:
     the suite has finished for the PR's diff (stale is those that didn't) with
     nothing of its own cancelled, so two cancelled runs don't clear each other,
-    and it ran the same check, whatever that said, or skipped it for the docs
-    lane it took instead. Any other skip vouches for nothing: a caller skipped
-    on a title edit completes too, and so would run nothing at all. A check
-    run of no workflow has no other runs to go by."""
+    and it ran the same work (same_work), whatever that said. A skip vouches
+    for nothing: a caller skipped on a title edit completes too. In the shared
+    CI the run must also be of a call whose lane ran and chose this PR's base:
+    a push's or a dispatch's run of the same job has no lane, and judged no
+    PR. A check run of no workflow has no other runs to go by."""
     mine, flow = suite(c).get("id"), workflow(c).get("id")
     if mine is None or flow is None:
         return None
-    others = [x for x in contexts if workflow(x).get("id") == flow and suite(x).get("id") != mine]
+    same = [x for x in contexts if workflow(x).get("id") == flow]
+    others = [x for x in same if suite(x).get("id") != mine]
     gone = {suite(x).get("id") for x in others if cancelled(x)} | stale
-    done = [x for x in others if suite(x).get("status") == "COMPLETED" and suite(x).get("id") not in gone]
-    lanes = {suite(x).get("id") for x in done if ran(x) and (judged(x) or (None, None))[1] is not None}
-    if any(x["name"] == c["name"] and (ran(x) or suite(x).get("id") in lanes) for x in done):
+    done = [x for x in others if suite(x).get("status") == "COMPLETED" and suite(x).get("id") not in gone and ran(x)]
+    shared = any(job_of(x)[1].startswith(LANE) for x in same)
+    laned = {(suite(x).get("id"), job_of(x)[0]) for x in done if judged(x)}
+    if any(same_work(c, x) and (not shared or (suite(x).get("id"), job_of(x)[0]) in laned) for x in done):
         return "finished"
     return "going" if any(suite(x).get("status") != "COMPLETED" for x in others) else None
+
+
+def job_of(c):
+    """A check run's name split: the call it's of, and its job."""
+    caller, _, job = c["name"].rpartition(" / ")
+    return caller, job
+
+
+def same_work(c, x):
+    """Whether check run x does c's work: the same name, or, in one call of
+    the shared CI, its lane, whose name a run may never have filled in, or its
+    gate, which is its whole gate's job or the docs lane's, and no other job."""
+    if c["name"] == x["name"]:
+        return True
+    (mine, a), (theirs, b) = job_of(c), job_of(x)
+    if mine != theirs:
+        return False
+    return (a.startswith(LANE) and b.startswith(LANE)) or (gate_job(a) and gate_job(b))
+
+
+def gate_job(job):
+    """Whether a job's name is the shared CI's gate for a PR, in either lane."""
+    return job == GATE or job.startswith(DOCS_LANE)
 
 
 def ran(c):

@@ -5,14 +5,15 @@ work for the PR's diff clears it, one still going leaves CI pending, and with
 neither it stays not green, as when someone cancelled the run by hand."""
 
 from docs import at, check, docs, whole
-from harness import JOBS, clean
+from harness import JOBS, C, clean
 from prs import ci_state
 
 CANCEL, CHECK = "CANCELLED", "check / check"
 
 
 def state(*checks, base="main"):
-    return ci_state(clean(checks=[c for run in checks for c in run], base=base))[:2]
+    with C.acting_for("sam/r"):
+        return ci_state(clean(checks=[c for run in checks for c in run], base=base), repo="sam/r")[:2]
 
 
 def going(suite):
@@ -77,6 +78,50 @@ status, landed = at(clean(checks=old + docs(suite="s2", conclusion="FAILURE"), f
 assert not landed and "CI is red" in status, status
 # From another fork, that docs lane judged another diff: it clears nothing.
 assert state(old, docs(fork="e" * 40, suite="s2"))[0] == "red"
+# Outside the shared CI, no lane to ask for: by name, and only a job that ran.
+build = check("build", CANCEL, suite="b1", workflow="b")
+assert state([build], [check("build", suite="b2", workflow="b")]) == ("green", [])
+assert state([build], [check("build", "SKIPPED", suite="b2", workflow="b"), check("lint", suite="b2", workflow="b")]) == ("red", ["build"])
+# A push's or a dispatch's run has no lane, so it judged no PR, however its jobs
+# are named and went, before the cancelled gate or after. A lane cancelled
+# before its name was filled in doesn't let one through either.
+UNFILLED = "check / lane into ${{ github.event.pull_request.base.ref }}"
+push = [check(UNFILLED, "SKIPPED", suite="s2"), check(CHECK, suite="s2")]
+assert state(old, push) == ("red", [CHECK])
+assert state(push, old) == ("red", [CHECK])
+assert state(old, [check(CHECK, suite="s2")]) == ("red", [CHECK])
+nameless = [check(UNFILLED, CANCEL, suite="s1"), check(CHECK, CANCEL, suite="s1")]
+assert state(nameless, push) == ("red", [UNFILLED, CHECK])
+assert state(nameless, whole(suite="s2")) == ("green", [])
+# A PR's lane that was itself skipped says nothing of the PR.
+assert state(old, [check("check / lane into main", "SKIPPED", suite="s2"), check(CHECK, suite="s2")]) == ("red", [CHECK])
+# A real run stands beside one of those, and its red is still the head's.
+assert state(old, push, whole(suite="s3")) == ("green", [])
+assert state(old, push, whole(suite="s3", conclusion="FAILURE")) == ("red", [CHECK])
+
+# The docs lane replaces its own call's whole gate and nothing else: not a
+# job it skipped beside itself, not the commits check, not a sibling call's
+# gate or a matrix leg's.
+scan = check("check / scan", CANCEL, suite="s1")
+assert state(old + [scan], docs(suite="s2") + [check("check / scan", "SKIPPED", suite="s2")]) == ("red", ["check / scan"])
+commits = check("check / commits", CANCEL, suite="s1")
+assert state(old + [commits], docs(suite="s2") + [check("check / commits", "SKIPPED", suite="s2")]) == ("red", ["check / commits"])
+assert state(old + [commits], docs(suite="s2") + [check("check / commits", suite="s2")]) == ("green", [])
+sibling = whole(suite="s1") + [check("other / lane into main", suite="s1"), check("other / check", CANCEL, suite="s1")]
+later = docs(suite="s2") + [check("other / lane into main", suite="s2"), check("other / check", "SKIPPED", suite="s2")]
+assert state(sibling, later) == ("red", ["other / check"])
+leg = [check("check (a) / lane into main", suite="s1"), check("check (a) / check", CANCEL, suite="s1")]
+assert state(leg, docs(suite="s2")) == ("red", ["check (a) / check"])
+# Nor does one call's lane vouch for a sibling's job of the same name's run.
+assert state([check("other / check", CANCEL, suite="s1"), check("other / lane into main", suite="s1")],
+             [check("check / lane into main", suite="s2"), check("other / check", suite="s2")]) == ("red", ["other / check"])
+# The whole gate replaces a cancelled docs lane in turn, a docs lane another
+# whose name was never filled in, and the replacement's red is the head's.
+assert state(docs(suite="s1", conclusion=CANCEL), whole(suite="s2")) == ("green", [])
+assert state(docs(suite="s1", conclusion=CANCEL), whole(suite="s2", conclusion="FAILURE")) == ("red", [CHECK])
+blank = "check / docs only into ${{ github.event.pull_request.base.ref }} from ${{ needs.lane.outputs.fork }}"
+assert state(whole(suite="s1")[:1] + [check(blank, CANCEL, suite="s1")], docs(suite="s2")) == ("green", [])
+
 # A run that judged another base isn't the PR's CI, so it clears nothing: the
 # gate for the PR's own base never ran through.
 assert state(old, whole("next", "s2")) == ("red", [CHECK])
