@@ -461,8 +461,8 @@ def land(repo, pr, repo_info):
                 "or GitHub didn't say what the rules are")
     # The merge endpoint merges or refuses; a push since the check makes the
     # sha stale, and it waits for the next pass. A squash or a merge commit
-    # takes the PR's title as its subject, the title house-check holds to the
-    # house style: left to GitHub, a one-commit PR's squash would take that
+    # takes the PR's title as its subject, the title the house check holds to
+    # the house style: left to GitHub, a one-commit PR's squash would take that
     # commit's subject instead, which nothing checked.
     title = [] if method == "rebase" else ["-f", f"commit_title={pr['title']} (#{pr['number']})"]
     try:
