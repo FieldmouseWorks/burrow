@@ -211,6 +211,17 @@ status, _ = run(mkpr(checks=red_ci, threads=[False], **edited), 7200)
 assert JOBS == [] and not merged(), (status, JOBS)
 status, _ = run(clean(checks=red_ci, **edited), 7200)
 assert JOBS == [] and "CI is red" in status, (status, JOBS)
+# Read while the machine had Renovate's address wrong, its own commits looked
+# like a Claude job's fix. Set right, the same head is read again, not taken
+# from that read.
+fresh_pr_state()
+COMMITS[14] = ["bot@renovateapp.com"]
+email, S.CFG["renovateEmail"] = S.CFG["renovateEmail"], "old@renovate"
+status, _ = run(mkpr(checks=red_ci, **edited), 0)
+assert "Dependency update" not in status, status
+S.CFG["renovateEmail"] = email
+status, _ = run(mkpr(checks=red_ci, **edited), 7200)
+assert "Dependency update, CI red; renovate-sweep has it" in status, status
 
 # So is a Dependabot one a Claude job fixed: the steward merges those, and
 # what the job pushed is code no reviewer has read.
