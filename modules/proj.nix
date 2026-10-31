@@ -4,11 +4,11 @@
 # makes its worktrees in a scratch dir of its own under burrow.scratchDir,
 # cleared once the job is over (its scratch.rs).
 # With proj.inbox, issues labelled for Claude in the projects' GitHub repos
-# become jobs too (proj/inbox.sh). A job waiting on a PR doesn't hold a slot:
-# proj-watch resumes it when the PR changes. Both are burrow.events handlers:
-# a repo's webhook deliveries, the end of a turn and their own wake-ups start
-# them, never a timer. With the stall watchdog on, proj is one of its
-# sources: each job's wait, as of its last change.
+# become jobs too (proj-inbox, in the same crate). A job waiting on a PR
+# doesn't hold a slot: proj-watch resumes it when the PR changes. Both are
+# burrow.events handlers: a repo's webhook deliveries, the end of a turn and
+# their own wake-ups start them, never a timer. With the stall watchdog on,
+# proj is one of its sources: each job's wait, as of its last change.
 inputs:
 { config, lib, pkgs, ... }:
 let
@@ -41,6 +41,14 @@ let
     inherit (config.burrow) flake;
     deployed = "/run/current-system/sw/bin/proj";
     apps = lib.mapAttrs (_: app: app.envFile) config.burrow.github.apps;
+    inbox = if cfg.inbox.enable then {
+      state = "${stateDir}/proj-inbox";
+      inherit (cfg.inbox) label unstickLabel authors vm;
+      host = config.networking.hostName;
+      notify = if config.burrow.tools ? notify then lib.getExe config.burrow.tools.notify else null;
+      wake = inboxWake;
+      machinery = if machineApp == null then null else machineApp.name;
+    } else null;
     tools = {
       # A login shell's, for the jobs' Claude.
       bash = "${pkgs.bashInteractive}/bin/bash";
@@ -62,25 +70,12 @@ let
     exec ${inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow}/bin/burrow-proj "$@"
   '';
 
-  inbox = pkgs.writeShellApplication {
-    name = "proj-inbox";
-    runtimeInputs = [ proj pkgs.coreutils config.programs.git.package cfg.gh pkgs.jq pkgs.gnused pkgs.gnugrep pkgs.util-linux ];
-    text = ''
-      SRC=${lib.escapeShellArg projectsDir}
-      JOBS=${lib.escapeShellArg cfg.jobsDir}
-      STATE=${lib.escapeShellArg "${stateDir}/proj-inbox"}
-      LABEL=${lib.escapeShellArg cfg.inbox.label}
-      UNSTICK_LABEL=${lib.escapeShellArg cfg.inbox.unstickLabel}
-      AUTHORS=${lib.escapeShellArg (lib.concatStringsSep " " cfg.inbox.authors)}
-      VM=${if cfg.inbox.vm then "1" else "0"}
-      MARK=${lib.escapeShellArg inboxMark}
-      HOST=${lib.escapeShellArg config.networking.hostName}
-      NOTIFY=${lib.escapeShellArg (lib.optionalString (config.burrow.tools ? notify) (lib.getExe config.burrow.tools.notify))}
-      WAKE=${lib.escapeShellArg inboxWake}
-      PIPELINE=${lib.escapeShellArg (lib.concatStringsSep " " pipelineRepos)}
-      MACHINERY=${lib.escapeShellArg (if machineApp == null then "" else machineApp.name)}
-    '' + builtins.readFile ./proj/inbox.sh;
-  };
+  # proj-inbox, with the same config, whose inbox part is its own. The turns
+  # it starts are proj's (PROJ_SELF), as if a job's Claude had run proj.
+  inbox = pkgs.writeShellScriptBin "proj-inbox" ''
+    export PROJ_CONFIG=${configFile} PROJ_SELF=${proj}/bin/proj
+    exec ${inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow}/bin/burrow-proj-inbox "$@"
+  '';
 in
 {
   imports = [

@@ -272,12 +272,21 @@
         # A switch reaches the turns already waiting in line, each in its place.
         proj-deployed = import ./tests/proj-deployed.nix { inherit self pkgs; };
         # The example's proj reads the config its module writes (a field the
-        # binary doesn't know fails it), and a job it doesn't have is failed.
-        proj-config = pkgs.runCommand "proj-config-check" { } ''
-          got=$(${self.nixosConfigurations.example.config.burrow.tools.proj}/bin/proj state no-such-job)
-          [ "$got" = failed ] || { echo "proj state said: $got"; exit 1; }
-          touch $out
-        '';
+        # binary doesn't know fails it), and a job it doesn't have is failed;
+        # so does its proj-inbox, with the inbox on, which has no issues yet.
+        proj-config =
+          let
+            inbox = self.nixosConfigurations.example.extendModules {
+              modules = [ { burrow.proj.inbox = { enable = true; authors = [ "octocat" ]; }; } ];
+            };
+          in
+          pkgs.runCommand "proj-config-check" { } ''
+            got=$(${self.nixosConfigurations.example.config.burrow.tools.proj}/bin/proj state no-such-job)
+            [ "$got" = failed ] || { echo "proj state said: $got"; exit 1; }
+            got=$(${inbox.config.burrow.tools.proj-inbox}/bin/proj-inbox status)
+            [ -z "$got" ] || { echo "proj-inbox status said: $got"; exit 1; }
+            touch $out
+          '';
         # The steward and its reviewers, with stand-ins for gh, git's remote and
         # the agents, and its one-way paths as the module sets them.
         autoland = pkgs.runCommand "autoland-check" { nativeBuildInputs = [ pkgs.python3 pkgs.git pkgs.openssl ]; } ''
