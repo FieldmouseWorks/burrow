@@ -1,0 +1,65 @@
+{
+  "conary": "note v1",
+  "change": "0w5sp8sj5f9d3jw8021140w3d4",
+  "repo": {
+    "owner": "fieldmouseworks",
+    "name": "burrow"
+  },
+  "pr": 261,
+  "url": "https://github.com/fieldmouseworks/burrow/pull/261",
+  "summary": "autoland: read a bot's branch again once Renovate's address changes",
+  "task": "https://claude.ai/code/project/chan_01Ad4f4oDXfFTCEzLHzMTD8q?thread=cmsg_01Ad4f4oDXfFTCEzLHzMTD8qWJ5H7Afa2xYNxcbPux5bTB",
+  "author": {
+    "kind": "agent",
+    "login": "TusanHomichi",
+    "session": "https://claude.ai/code/session_01BkHcyBkJTvHAHbf4nrFgTQ"
+  },
+  "landing": {
+    "revision": "192700a9acb0100062b06fbc21d51fba7100419f0d44be1375371d007b02f1f2",
+    "before": "4259ba07f47d2d0191a9873aef0f0e390fe272b6",
+    "after": "8b1204390c87ab78face14ff9c8027e101adc196",
+    "by": {
+      "kind": "status",
+      "login": "fieldmouseworks-steward[bot]"
+    },
+    "at": 1793426060659
+  },
+  "evidence": [
+    {
+      "kind": "ci",
+      "check": "check / commits",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/41170896797/job/124448428313"
+    },
+    {
+      "kind": "ci",
+      "check": "rust-first / python",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/41170896690/job/124448427539"
+    },
+    {
+      "kind": "ci",
+      "check": "rust-first (#261)",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/41170896690"
+    },
+    {
+      "kind": "review",
+      "check": "codex",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/261#pullrequestreview-5721387587"
+    },
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/41170896797/job/124448428625"
+    },
+    {
+      "kind": "ci",
+      "check": "agents",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/261"
+    }
+  ]
+}
