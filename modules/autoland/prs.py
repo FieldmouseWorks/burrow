@@ -225,10 +225,11 @@ def after_cancel(c, contexts, stale):
     the suite has finished for the PR's diff (stale is those that didn't) with
     nothing of its own cancelled, so two cancelled runs don't clear each other,
     and it ran the same work (same_work), whatever that said. A skip vouches
-    for nothing: a caller skipped on a title edit completes too. In the shared
-    CI the run must also be of a call whose lane ran and chose this PR's base:
-    a push's or a dispatch's run of the same job has no lane, and judged no
-    PR. A check run of no workflow has no other runs to go by."""
+    for nothing: a caller skipped on a title edit completes too. A check of a
+    shared CI call (one with a lane job) must also be matched in a call whose
+    lane ran and chose this PR's base: a push's or a dispatch's run of the same
+    job has no lane, and judged no PR. Jobs beside that call have no lane to
+    ask for. A check run of no workflow has no other runs to go by."""
     mine, flow = suite(c).get("id"), workflow(c).get("id")
     if mine is None or flow is None:
         return None
@@ -236,7 +237,7 @@ def after_cancel(c, contexts, stale):
     others = [x for x in same if suite(x).get("id") != mine]
     gone = {suite(x).get("id") for x in others if cancelled(x)} | stale
     done = [x for x in others if suite(x).get("status") == "COMPLETED" and suite(x).get("id") not in gone and ran(x)]
-    shared = any(job_of(x)[1].startswith(LANE) for x in same)
+    shared = any(job_of(x)[1].startswith(LANE) and job_of(x)[0] == job_of(c)[0] for x in same)
     laned = {(suite(x).get("id"), job_of(x)[0]) for x in done if judged(x)}
     if any(same_work(c, x) and (not shared or (suite(x).get("id"), job_of(x)[0]) in laned) for x in done):
         return "finished"

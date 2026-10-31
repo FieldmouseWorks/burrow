@@ -122,6 +122,19 @@ assert state(docs(suite="s1", conclusion=CANCEL), whole(suite="s2", conclusion="
 blank = "check / docs only into ${{ github.event.pull_request.base.ref }} from ${{ needs.lane.outputs.fork }}"
 assert state(whole(suite="s1")[:1] + [check(blank, CANCEL, suite="s1")], docs(suite="s2")) == ("green", [])
 
+# A job beside the shared CI's call, top-level or another reusable workflow's,
+# has no lane to ask for: its own run clears it in either order, whichever
+# suite the shared CI's call passed in, a skip doesn't and its red stays red.
+# The shared CI's own checks keep their lane, scoped to their call.
+for name in ("browser-tests", "e2e / browser-tests"):
+    gone = [check(name, CANCEL, suite="s1")]
+    assert state(whole(suite="s1") + gone, whole(suite="s2") + [check(name, suite="s2")]) == ("green", []), name
+    assert state(whole(suite="s2") + [check(name, suite="s2")], whole(suite="s1") + gone) == ("green", []), name
+    assert state(whole(suite="s1") + gone, whole(suite="s2") + [check(name, "SKIPPED", suite="s2")]) == ("red", [name]), name
+    assert state(whole(suite="s1") + gone, whole(suite="s2") + [check(name, "FAILURE", suite="s2")]) == ("red", [name]), name
+    assert state(whole(suite="s1") + gone, whole(suite="s2")) == ("red", [name]), name
+assert state(old + [check("browser-tests", suite="s1")], push + [check("browser-tests", suite="s2")]) == ("red", [CHECK])
+
 # A run that judged another base isn't the PR's CI, so it clears nothing: the
 # gate for the PR's own base never ran through.
 assert state(old, whole("next", "s2")) == ("red", [CHECK])
