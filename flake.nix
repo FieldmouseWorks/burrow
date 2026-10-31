@@ -431,7 +431,7 @@
           assert lib.assertMsg (deploy == want) "dispatch: ${builtins.toJSON deploy}, not ${builtins.toJSON want}";
           assert lib.assertMsg (settings dirty == settings committed)
             "dispatch: a build from a dirty tree isn't the same tree committed: ${builtins.toJSON (settings dirty)}, ${builtins.toJSON (settings committed)}";
-          # What a pass compares the own repo at: the switch stamps it.
+          # What HOST-update tells main from local changes by: the switch stamps it.
           assert lib.assertMsg (revisions == [ "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-dirty" ])
             "dispatch: the systems are stamped ${builtins.toJSON revisions}";
           assert lib.assertMsg (labels committed == wantLabels "X64") "dispatch: x86_64's labels: ${builtins.toJSON (labels committed)}";
@@ -492,6 +492,15 @@
         update-push = pkgs.runCommand "update-push-check" { nativeBuildInputs = [ pkgs.shellcheck pkgs.git ]; } ''
           shellcheck -s bash ${./modules/updates/push.sh} ${./tests/update-push.sh}
           bash ${./tests/update-push.sh} ${./modules/updates/push.sh}
+          touch $out
+        '';
+        # What HOST-update compares to tell what runs already
+        # (modules/updates/running.sh): a system built again from a new commit
+        # of the same tree runs already, and its record of what's live says
+        # so. Real git, with a stand-in for nix.
+        update-running = pkgs.runCommand "update-running-check" { nativeBuildInputs = [ pkgs.shellcheck pkgs.git pkgs.jq ]; } ''
+          shellcheck -s bash ${./modules/updates/running.sh} ${./tests/update-running.sh}
+          bash ${./tests/update-running.sh} ${./modules/updates/running.sh}
           touch $out
         '';
         # HOST-update's VM tests take a heavy slot.

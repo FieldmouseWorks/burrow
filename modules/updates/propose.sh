@@ -19,8 +19,8 @@
 # only a whole one, though, that isn't the red head's very tree
 # (why_not_replace).
 
-# update.sh sets state, REPO, BRANCH, HOST, UPDATE, TRAIN, SETTLED, STEWARD,
-# TRAIN_CONTEXT, riding, changed, as_user and git_.
+# update.sh sets state, REPO, BRANCH, HOST, UPDATE, SETTLED, STEWARD,
+# TRAIN_CONTEXT, as_user and git_.
 # shellcheck disable=SC2154
 
 # gh, about REPO. The machine's gh (gh-token) runs a call with the token of
@@ -112,21 +112,6 @@ ride() {
     echo "its PR #$n doesn't merge onto main; holding until it's fixed"
     return 1
   }
-}
-
-# HEAD builds $1, the system HOST runs already. "up" when it's a bump of
-# HOST-update's own to put up, in a train repo and not riding: only once
-# HOST-update put that system live itself (its record in deployed), through
-# the switch and the health check, and then only after the VM tests on HEAD's
-# tree. "hold" when someone else did. Otherwise "current": nothing to do.
-already_live() {
-  if [ -z "$TRAIN" ] || [ -n "$riding" ] || [ -z "$changed" ]; then
-    echo current
-  elif [ "$(cat "$state/deployed" 2>/dev/null)" = "$1" ]; then
-    echo up
-  else
-    echo hold
-  fi
 }
 
 # Why HEAD, a fresh bump on main $2 for its red PR $1, doesn't replace that
