@@ -806,9 +806,10 @@
         # script with nix evaluating test flakes for real and a stand-in for
         # its builds: one nix process per derivation, each a GC root until
         # it's built, every output checked as nix flake check checks it, and a
-        # flake with an output it doesn't know refused.
-        gate = pkgs.runCommand "gate-check" { nativeBuildInputs = [ (pkgs.python3.withPackages (p: [ p.pyyaml ])) pkgs.git pkgs.jq pkgs.nix ]; } ''
-          python3 -I ${./tests/gate.py} ${./.github/workflows/flake-check.yml}
+        # flake with an output it doesn't know refused. Its VM tests wait for
+        # a slot of the real heavy, once the rest are built.
+        gate = pkgs.runCommand "gate-check" { nativeBuildInputs = [ (pkgs.python3.withPackages (p: [ p.pyyaml ])) pkgs.git pkgs.jq pkgs.nix pkgs.util-linux ]; } ''
+          python3 -I ${./tests/gate.py} ${./.github/workflows/flake-check.yml} ${./modules/cpu/heavy.sh}
           touch $out
         '';
         # flake-gate: a repo's CI gate step, run here as CI runs it, and

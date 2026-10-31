@@ -9,12 +9,15 @@ the checks are built first, by derivation, kept as GC roots, once the one nix
 process that evaluated them has exited, so no evaluation stays in memory beside
 the builds; nix flake check then finds them built and its outputs still roots.
 A flake with a nixConfig is left to nix flake check alone, and the flake is
-only ever read purely.
+only ever read purely. Where the machine has heavy's slots (the real heavy, on
+a slot of its own), a check with a VM test to run waits for one, once the
+others are built, and a runner without them takes none.
 
-  python3 -I tests/gate.py .github/workflows/flake-check.yml
+  python3 -I tests/gate.py .github/workflows/flake-check.yml modules/cpu/heavy.sh
   nix build .#checks.x86_64-linux.gate
 """
 
+import fcntl
 import glob
 import os
 import re
@@ -22,6 +25,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 
 import yaml
 
@@ -66,6 +70,7 @@ def stub(name, body):
 stub("nix", f"""case $1 in
   build)
     echo "$*" >> "$NIX_LOG"
+    [ -z "$HEAVY_SLOT" ] || echo "$*" >> "$NIX_LOG.slot"
     {real_bin}/nix-store --gc > /dev/null 2>&1
     prev=
     for a in "$@"; do
@@ -77,6 +82,7 @@ stub("nix", f"""case $1 in
     exit 0 ;;
   flake) [ "$2" = check ] && {{
     echo "$*" >> "$NIX_LOG"
+    [ -z "$HEAVY_SLOT" ] || echo "$*" >> "$NIX_LOG.slot"
     if [ -e "$NIX_LOG.links" ]; then
       while read -r link; do [ -d "${{link%/*}}" ] || {{ echo "the built checks' roots went before nix flake check"; exit 1; }}; done < "$NIX_LOG.links"
     fi
@@ -114,6 +120,10 @@ done
 exec {real_bin}/nix-instantiate "${{args[@]}}"
 """)
 
+# Builds are only logged, so whether an output is built is the test's to say.
+stub("nix-store", f"""if [ "$1" = --check-validity ] && [ "$2" = --print-invalid ] && [ -n "$ALL_BUILT" ]; then exit 0; fi
+exec {real_bin}/nix-store "$@"
+""")
 system = subprocess.run([real_nix, "config", "show", "system"],
                         env={**os.environ, **nix_env}, capture_output=True, text=True, check=True).stdout.strip()
 
@@ -139,7 +149,7 @@ def flake(outputs, top=""):
 
 def run(directory, apart=True, skip="", build_fail="", env=None):
     log = os.path.join(tmp, "nix.log")
-    for f in (log, log + ".links"):
+    for f in (log, log + ".links", log + ".slot"):
         if os.path.exists(f):
             os.remove(f)
     full = {**nix_env, "PATH": bin_dir + os.pathsep + os.environ["PATH"], "NIX_LOG": log,
@@ -637,6 +647,146 @@ def outputs():
         assert rc == 0, out
         [b] = builds(calls)
         assert b.endswith("-multi.drv^*"), b
+
+
+# heavy itself, as burrow.cpu assembles it, in a directory of one slot.
+slots = os.path.join(tmp, "slots")
+os.mkdir(slots)
+slot = os.path.join(slots, "slot1")
+open(slot, "w").close()
+slotted_bin = os.path.join(tmp, "slotted")
+os.mkdir(slotted_bin)
+heavy = os.path.join(slotted_bin, "heavy")
+open(heavy, "w").write(f"#!{bash}\nset -euo pipefail\nSLOTS=1\nGRACE=3\nDIR={slots}\n" + open(sys.argv[2]).read())
+os.chmod(heavy, 0o755)
+vms = flake("""{
+      checks.${system} = {
+        a = drv "a";
+        needs-kvm = derivation { name = "needs-kvm"; inherit system; builder = "/bin/sh"; args = [ "-c" "echo > $out" ]; requiredSystemFeatures = [ "kvm" "nixos-test" ]; };
+        structured = derivation { name = "structured"; inherit system; builder = "/bin/sh"; args = [ "-c" "echo > $out" ]; __structuredAttrs = true; requiredSystemFeatures = [ "kvm" ]; };
+        # A check around a VM test builds it too.
+        around = derivation { name = "around"; inherit system; builder = "/bin/sh"; args = [ "-c" "echo > $out" ];
+          test = derivation { name = "inner"; inherit system; builder = "/bin/sh"; args = [ "-c" "echo > $out" ]; requiredSystemFeatures = [ "nixos-test" ]; }; };
+      };
+    }""")
+with_slots = {"PATH": slotted_bin + os.pathsep + bin_dir + os.pathsep + os.environ["PATH"]}
+VM_CHECKS = ("-needs-kvm.drv^*", "-structured.drv^*", "-around.drv^*")
+
+
+def in_slot():
+    path = os.path.join(tmp, "nix.log.slot")
+    return open(path).read().splitlines() if os.path.exists(path) else []
+
+
+def split(calls, out):
+    """The check with no VM built first and with no slot, the VM tests after it, in one."""
+    plain, vm = builds(calls)
+    assert plain.endswith("-a.drv^*") and not any(c in plain for c in VM_CHECKS), plain
+    assert all(c in vm for c in VM_CHECKS) and "-a.drv" not in vm, vm
+    assert in_slot() == [vm], (in_slot(), vm)
+    assert vm.split("--max-jobs ")[1].isdigit(), vm
+    assert "waiting for a heavy slot for 3 checks" in out, out
+
+
+@case
+def waits_for_slot():
+    "while every slot is held, the gate builds what needs no VM and its VM tests wait, then build holding one"
+    log = os.path.join(tmp, "nix.log")
+    for f in (log, log + ".links", log + ".slot"):
+        if os.path.exists(f):
+            os.remove(f)
+    full = {**nix_env, **with_slots, "NIX_LOG": log, "APART": "true", "SKIP": "", "BUILD_FAIL": "",
+            "RUNNER_TEMP": tmp}
+
+    def logged():
+        return builds(open(log).read().splitlines()) if os.path.exists(log) else []
+
+    with open(slot) as held:
+        fcntl.flock(held, fcntl.LOCK_EX)
+        p = subprocess.Popen([bash, "--noprofile", "--norc", "-eo", "pipefail", script], cwd=vms, env=full,
+                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        try:
+            deadline = time.time() + 300
+            while not logged() and p.poll() is None and time.time() < deadline:
+                time.sleep(0.2)
+            assert p.poll() is None, p.stdout.read()
+            # Long enough for a gate with no wait in it to have gone on to its
+            # VM tests.
+            time.sleep(5)
+            assert len(logged()) == 1 and logged()[0].endswith("-a.drv^*"), logged()
+        except BaseException:
+            p.kill()
+            raise
+    # The slot's free now.
+    out, _ = p.communicate(timeout=300)
+    assert p.returncode == 0, out
+    assert "all 1 slots busy, waiting" in out, out
+    split(open(log).read().splitlines(), out)
+
+
+@case
+def split_with_slots():
+    "without eval-apart too, and a failed half fails the gate with the other still built"
+    rc, out, calls = run(vms, apart=False, env=with_slots)
+    assert rc == 0, out
+    split(calls, out)
+    # Both halves' outputs stay roots for nix flake check, which then takes no slot.
+    assert calls[-1] == "flake check -L --keep-going", calls
+    links = [b.split()[3] for b in builds(calls)]
+    assert links[1] == links[0] + "-vm", links
+    for fail, apart in (("-a.drv", True), ("-needs-kvm.drv", True), ("-a.drv", False), ("-needs-kvm.drv", False)):
+        rc, out, calls = run(vms, apart=apart, build_fail=fail, env=with_slots)
+        assert rc != 0 and len(builds(calls)) == 2, (fail, apart, out, calls)
+
+
+@case
+def built_vms_wait_for_nothing():
+    "a VM test already built, a rerun's, takes no slot"
+    rc, out, calls = run(vms, env={**with_slots, "ALL_BUILT": "1"})
+    assert rc == 0, out
+    [b] = builds(calls)
+    assert all(c in b for c in VM_CHECKS + ("-a.drv^*",)), b
+    assert not in_slot(), in_slot()
+
+
+@case
+def unsure_takes_slot():
+    "with no telling what's a VM test, every check builds in the slot"
+    broken = os.path.join(tmp, "nojq")
+    os.makedirs(broken, exist_ok=True)
+    jq = os.path.join(broken, "jq")
+    open(jq, "w").write(f"""#!{bash}
+if [[ "$*" == *requiredSystemFeatures* ]]; then exit 1; fi
+exec {shutil.which("jq")} "$@"
+""")
+    os.chmod(jq, 0o755)
+    rc, out, calls = run(vms, env={"PATH": broken + os.pathsep + with_slots["PATH"]})
+    assert rc == 0, out
+    [b] = builds(calls)
+    assert in_slot() == [b], in_slot()
+
+
+@case
+def unsplit_takes_slot():
+    "what nix builds by name, a nixConfig flake's, builds in a slot"
+    d = flake("""{ checks.${system} = { a = drv "a"; vm = drv "vm"; }; }""", top='nixConfig.bash-prompt = "x";')
+    rc, out, calls = run(d, apart=False, env=with_slots)
+    assert rc == 0 and len(in_slot()) == 1 and in_slot()[0].startswith("flake check -L --keep-going"), (out, in_slot())
+    # Its check that only evaluates takes none; the build does.
+    rc, out, calls = run(d, apart=False, skip="vm", env=with_slots)
+    assert rc == 0, out
+    [line] = in_slot()
+    assert line.startswith("build -L --no-link --keep-going"), line
+
+
+@case
+def no_slots():
+    "a runner without slots, a hosted one, builds it all at once, as it always has"
+    rc, out, calls = run(vms)
+    assert rc == 0, out
+    [b] = builds(calls)
+    assert all(c in b for c in VM_CHECKS + ("-a.drv^*",)) and "--max-jobs" not in b, b
+    assert not in_slot() and "heavy slot" not in out, out
 
 
 if failures:
