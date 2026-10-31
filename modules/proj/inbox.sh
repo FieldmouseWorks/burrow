@@ -20,7 +20,9 @@
 # comments carry MARK and are never read back as replies; jobs are told not
 # to comment on their issue themselves for the same reason. A job only ever
 # sees the issue and the comments of AUTHORS: on a public repo, anyone else's
-# comments are text from strangers. A person's issue is work they asked for,
+# comments are text from strangers. A labelled issue someone else opened never
+# becomes a job, and says so once, so whoever labelled it isn't left waiting.
+# A person's issue is work they asked for,
 # so its job acts as them; a bot's (the steward's, say) is the machine's own,
 # so its job acts as MACHINERY, where there is one.
 #
@@ -148,6 +150,7 @@ description says \"Fixes #$n\" (or \"Refs #$n\" if it doesn't settle the issue).
 CUT_OFF="Your last turn was cut off before you answered: its whole unit was killed (out of memory, as a rule), and everything it had running went with it. Carry on from where you left off: see what had already finished before you run anything again."
 
 only=${1:-}
+authors=${AUTHORS// /, }
 
 # When a repo needs another look, as this pass works out: a reply not yet old
 # enough to hand on, a repo GitHub couldn't be asked about.
@@ -208,8 +211,19 @@ for repo in "${!project[@]}"; do
     n=$(jq -r .number <<<"$issue")
     d="$STATE/$key-$n"
     [ ! -e "$d/job" ] || continue
-    allowed "$(jq -r .user.login <<<"$issue")" || continue
-    acts_as "$(jq -r .user.login <<<"$issue")"
+    opener=$(jq -r .user.login <<<"$issue")
+    if ! allowed "$opener"; then
+      # Passed over: said on the issue once, or tried again next pass.
+      [ ! -e "$d/refused" ] || continue
+      if post "$repo" "$n" "No job for this issue: it was opened by \`$opener\`, and only an issue opened by one of $HOST's authors ($authors) starts one. For a job to start, one of them has to open the issue."; then
+        mkdir -p "$d"
+        touch "$d/refused"
+      else
+        miss "$repo"
+      fi
+      continue
+    fi
+    acts_as "$opener"
     lane "$issue"
     # Comments already there are part of the task; replies after this are turns.
     comments=$(gh api "repos/$repo/issues/$n/comments" --paginate --slurp | jq 'add // []') || { miss "$repo"; continue; }

@@ -120,7 +120,8 @@
   # GitHub, as far as proj-watch and proj-inbox can tell: each endpoint's
   # answer is a file in /tmp/gh that the test writes. A file holding one JSON
   # value per line is one page per line, which --slurp gathers into an array
-  # as gh does. What's posted (-F body=@-) is added to /tmp/gh/posted.
+  # as gh does. What's posted (-F body=@-) is added to /tmp/gh/posted, or with
+  # /tmp/gh/nopost fails.
   gh = pkgs.writeShellScriptBin "gh" ''
     [ "$1" = api ] || exit 2
     shift
@@ -134,7 +135,7 @@
       esac
       shift
     done
-    if [ -n "$post" ]; then cat >>/tmp/gh/posted; echo '{}'; exit 0; fi
+    if [ -n "$post" ]; then [ ! -e /tmp/gh/nopost ] || exit 1; cat >>/tmp/gh/posted; echo '{}'; exit 0; fi
     # /tmp/gh/slow: GitHub takes its time, as it does.
     [ -e /tmp/gh/slow ] && sleep 2
     f="/tmp/gh/''${ep//\//_}"
