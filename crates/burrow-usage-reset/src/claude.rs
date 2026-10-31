@@ -43,9 +43,7 @@ pub struct ClaudeCode {
 
 impl Account for ClaudeCode {
     fn read(&mut self) -> Result<Reading, String> {
-        // Looked at before asking: asking can write it.
-        let copied = copied_at();
-        usage(&self.ask_usage()?, copied, crate::now())
+        read_fresh(&mut copied_at, &mut crate::now, &mut || self.ask_usage())
     }
 
     fn reset(&mut self, keep: &mut dyn FnMut() -> Result<(), String>) -> Reset {
@@ -222,12 +220,55 @@ const SNAPSHOT: f64 = 60.0;
 
 /// When Claude Code's persisted copy of the meter was fetched, in seconds
 /// since the epoch: its global config's `cachedUsageUtilization`, for this
-/// user. None if it has none.
-fn copied_at() -> Option<f64> {
-    let dir = env::var_os("CLAUDE_CONFIG_DIR").or_else(|| env::var_os("HOME"))?;
-    let config = std::fs::read(PathBuf::from(dir).join(".claude.json")).ok()?;
-    let config: Value = serde_json::from_slice(&config).ok()?;
-    Some(config["cachedUsageUtilization"]["fetchedAtMs"].as_f64()? / 1000.0)
+/// user.
+fn copied_at() -> Result<Option<f64>, String> {
+    let dir = env::var_os("CLAUDE_CONFIG_DIR")
+        .or_else(|| env::var_os("HOME"))
+        .ok_or("neither CLAUDE_CONFIG_DIR nor HOME is set")?;
+    let file = PathBuf::from(dir).join(".claude.json");
+    match std::fs::read(&file) {
+        Ok(config) => copied_in(&config).map_err(|e| format!("{}: {e}", file.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("{}: {e}", file.display())),
+    }
+}
+
+/// The copy's time in Claude Code's config. None only if the config shows it
+/// has no copy: one it can't make sense of may still be what answers.
+fn copied_in(config: &[u8]) -> Result<Option<f64>, String> {
+    let config: Value = serde_json::from_slice(config).map_err(|e| e.to_string())?;
+    match config.get("cachedUsageUtilization") {
+        None | Some(Value::Null) => Ok(None),
+        Some(copy) => copy["fetchedAtMs"]
+            .as_f64()
+            .map(|ms| Some(ms / 1000.0))
+            .ok_or_else(|| "its cached meter has no fetchedAtMs".to_owned()),
+    }
+}
+
+/// The meter from one `get_usage` (ASK), only if it can be shown to be fresh.
+/// The copy is looked at first, then the clock, then it's asked: Claude Code
+/// picks its answer after all of them, so a copy already past SNAPSHOT by this
+/// clock can't be what answers, however long the asking takes. A copy that
+/// changed while it was asked may be what answered, and there's no telling, so
+/// that's no reading either. (A read of its own doesn't change it: it's killed
+/// on its answer, before it writes the copy.)
+fn read_fresh(
+    copied: &mut dyn FnMut() -> Result<Option<f64>, String>,
+    clock: &mut dyn FnMut() -> f64,
+    ask: &mut dyn FnMut() -> Result<Value, String>,
+) -> Result<Reading, String> {
+    let before = copied()?;
+    let asked = clock();
+    let answer = ask()?;
+    let after = copied()?;
+    if after != before {
+        return Err(
+            "Claude Code's cached meter changed while get_usage was answering, so its answer may be that copy"
+                .to_owned(),
+        );
+    }
+    usage(&answer, before, asked)
 }
 
 /// The weekly meter in a `get_usage` answer, asked at NOW with Claude Code's
@@ -757,6 +798,64 @@ mod tests {
         let none =
             json!({"subscription_type": null, "rate_limits_available": false, "rate_limits": null});
         assert!(usage(&none, None, NOW).unwrap_err().contains("logged in"));
+    }
+
+    /// `read_fresh` where the copy's time reads from COPIES in turn, the clock
+    /// goes on by a minute with every look, and asking is noted.
+    fn asked_through(
+        copies: Vec<Result<Option<f64>, String>>,
+        start: f64,
+    ) -> Result<Reading, String> {
+        let mut copies = copies.into_iter();
+        let mut clock = start;
+        let mut asked = false;
+        let out = read_fresh(
+            &mut || copies.next().unwrap(),
+            &mut || {
+                clock += 60.0;
+                clock - 60.0
+            },
+            &mut || {
+                asked = true;
+                Ok(fetched(95.0))
+            },
+        );
+        out.inspect(|_| assert!(asked))
+    }
+
+    #[test]
+    fn freshness_holds_across_the_asking() {
+        let copy = Some(NOW - 59.0);
+        // Under SNAPSHOT when asked, past it by the time the answer's in.
+        let e = asked_through(vec![Ok(copy), Ok(copy)], NOW).unwrap_err();
+        assert!(e.contains("snapshot 59s"), "{e}");
+        // Past it when asked: it can't have been what answered.
+        let old = Some(NOW - 60.0);
+        assert!(asked_through(vec![Ok(old), Ok(old)], NOW).is_ok());
+        // Nothing there, before or after: its endpoint answered.
+        assert!(asked_through(vec![Ok(None), Ok(None)], NOW).is_ok());
+        // Replaced while it was asked: that copy may be the answer.
+        for after in [Some(NOW + 1.0), None] {
+            let e = asked_through(vec![Ok(old), Ok(after)], NOW).unwrap_err();
+            assert!(e.contains("changed"), "{e}");
+        }
+        let e = asked_through(vec![Ok(None), Ok(Some(NOW + 1.0))], NOW).unwrap_err();
+        assert!(e.contains("changed"), "{e}");
+        // Not known, before or after.
+        let unknown = || Err("unreadable".to_owned());
+        assert!(asked_through(vec![unknown()], NOW).is_err());
+        assert!(asked_through(vec![Ok(old), unknown()], NOW).is_err());
+    }
+
+    #[test]
+    fn only_a_config_showing_no_copy_counts_as_none() {
+        assert_eq!(copied_in(b"{}"), Ok(None));
+        assert_eq!(
+            copied_in(br#"{"cachedUsageUtilization":{"fetchedAtMs":5000}}"#),
+            Ok(Some(5.0))
+        );
+        assert!(copied_in(b"{\"cachedUsage").is_err());
+        assert!(copied_in(br#"{"cachedUsageUtilization":{}}"#).is_err());
     }
 
     #[test]
