@@ -209,10 +209,12 @@ For reviewers, the review bot included. Flag as P1:
   hour at that tip (nothing is lost: the closed PR keeps its commits and can
   restore the branch). GitHub's delete-on-merge only covers merged PRs.
   `keepBranches` are left alone, and bots' branches go only this way.
-- What starts it is the branch changing: a push to it, its PR closing, or
-  the wait it was given ending. No daily sweep: each pass lists the
-  branches with the last listing's ETag, which GitHub answers for free
-  while nothing changed.
+- What starts it is the branch changing: a push to it, a PR of its
+  closing, the default branch moving, or the wait it was given ending. No
+  daily sweep: each pass lists the branches and the PRs closed since the
+  last look with the last listings' ETags, which GitHub answers for free
+  while nothing changed. A branch GitHub wouldn't read for it is looked at
+  again on the hourly pass.
 - Unmerged branches with no PR and no commit for 3 days are archived, then
   deleted: the steward keeps the tip at `refs/archive/BRANCH/SHA` in the same
   repo, a ref GitHub keeps but lists with neither branches nor tags, and

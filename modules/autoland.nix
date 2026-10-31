@@ -512,8 +512,8 @@ in
         closed PR's head (no open PR, and an hour at that tip). Other
         unmerged ones with no commit for 3 days (not a bot's) are kept at
         refs/archive/BRANCH/SHA, then deleted (docs/repo-baseline.md says how
-        to restore one). A push to a branch, its PR closing or that wait
-        ending starts the look.
+        to restore one). A push to a branch, a PR of its closing, the
+        default branch moving or that wait ending starts the look.
       '';
     };
 

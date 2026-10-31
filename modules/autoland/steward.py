@@ -18,8 +18,8 @@ event reports):
      merge it, or list it for the owner.
   3. Delete the branches whose tip is already in the default branch or a
      closed PR's head, and archive the stale unmerged ones under
-     refs/archive before deleting them too, as a push or a PR closing
-     changes them or the wait they were given ends.
+     refs/archive before deleting them too, as a push, a PR closing or
+     the default moving changes them or the wait they were given ends.
   4. Read each repo's Renovate dashboard: what sits on it too long, short
      of a PR, goes to a Claude job (dashboard.py); and its quarantined
      flaky tests, each to a Claude job that fixes it (flakes.py).

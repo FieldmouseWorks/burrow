@@ -340,15 +340,15 @@ S.main()
  S.R.watch_default, H.handle) = kept_fns
 assert order == ["watch", (9, True), (10, False)], order
 
-# Branches nothing needs go on what changes them: a push, a PR closing, or
-# the wait they were given ending. One already in the default branch, or at
-# the tip a closed PR was closed at (a bot's included: GitHub deletes on
-# merge, never on close; the PR keeps the commits), goes once it has sat
-# GRACE at that tip. One with no PR and no commit for STALE_DAYS is kept
-# under refs/archive and deleted (one an earlier look archived too); one
-# GitHub won't archive stays, listed for the pipeline. One pushed to since
-# its PR closed, an open PR's, a bot's with no closed PR at its tip and a
-# kept one stay.
+# Branches nothing needs go on what changes them: a push, a PR closing, the
+# default moving, or the wait they were given ending. One already in the
+# default branch, or at the tip a closed PR was closed at (a bot's included:
+# GitHub deletes on merge, never on close; the PR keeps the commits), goes
+# once it has sat GRACE at that tip. One with no PR and no commit for
+# STALE_DAYS is kept under refs/archive and deleted (one an earlier look
+# archived too); one GitHub won't archive stays, listed for the pipeline.
+# One pushed to since its PR closed, an open PR's, a bot's with no closed PR
+# at its tip, the default and a kept one stay.
 def ago(days):
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(C.NOW - days * 86400))
 
@@ -356,22 +356,28 @@ def ago(days):
 # Given up on a day past STALE_DAYS (3: agents open a PR when they push), or
 # fresh from today.
 old, young = ago(4), ago(1)
-BRANCHES = {"in-main": ("1" * 40, 0, young), "closed": ("2" * 40, 3, young), "moved": ("3" * 40, 1, young),
-            "open": ("4" * 40, 2, old), "renovate/x": ("5" * 40, 1, old), "gh-pages": ("6" * 40, 9, old),
-            "old": ("7" * 40, 4, old), "young": ("8" * 40, 4, young), "renovate/closed": ("9" * 40, 1, young),
-            "renovate/again": ("a" * 40, 1, young), "archived": ("d" * 40, 2, old), "refused": ("e" * 40, 2, old)}
+BRANCHES = {"main": ("ab" * 20, 0, young), "in-main": ("1" * 40, 0, young), "closed": ("2" * 40, 3, young),
+            "moved": ("3" * 40, 1, young), "open": ("4" * 40, 2, old), "renovate/x": ("5" * 40, 1, old),
+            "gh-pages": ("6" * 40, 9, old), "old": ("7" * 40, 4, old), "young": ("8" * 40, 4, young),
+            "renovate/closed": ("9" * 40, 1, young), "renovate/again": ("a" * 40, 1, young),
+            "archived": ("d" * 40, 2, old), "refused": ("e" * 40, 2, old)}
+PROTECTED = set()  # the default here isn't, so it's listed with the rest
 CLOSED = {"closed": [{"number": 3, "head": {"sha": "2" * 40}}], "moved": [{"number": 4, "head": {"sha": "f" * 40}}],
           # Its match is the 101st closed PR on the name: past gh's first page.
           "renovate/closed": [{"number": n, "head": {"sha": "c" * 40}} for n in range(100, 200)]
           + [{"number": 5, "head": {"sha": "9" * 40}}],
           # Its last PR merged at another tip, and the bot has pushed its next update.
           "renovate/again": [{"number": 6, "head": {"sha": "b" * 40}}]}
-LOOKED, FRESH = [], []  # the branches whose closed PRs it read; what each listing got (200 or 304)
+# The closed PRs as GitHub lists them by their last change: each one's
+# branch, tip and repo.
+FEED = [{"number": pr["number"], "updated_at": ago(5), "head": {"ref": name, "sha": pr["head"]["sha"], "repo": {"full_name": "sam/r"}}}
+        for name, prs in CLOSED.items() for pr in prs]
+LOOKED, FRESH, FED = [], [], []  # the branches whose closed PRs it read; what each listing got (200 or 304)
 # What GitHub has under refs/archive, and what it won't take there.
 ARCHIVED, REFUSED = {f"refs/archive/archived/{'d' * 40}": "d" * 40}, {"refused"}
-# What GitHub answers instead: listing the branches, comparing one (by
-# name), or archiving one (by name).
-LISTING, COMPARE, ARCHIVING = [None], {}, {}
+# What GitHub answers instead: listing the branches or the closed PRs,
+# comparing one (by name), or archiving one (by name).
+LISTING, FEEDING, COMPARE, ARCHIVING = [None], [None], {}, {}
 
 
 def no(k, why):
@@ -382,21 +388,36 @@ def no(k, why):
     raise (C.Unavailable if C.UNAVAILABLE.search(why) else RuntimeError)(f"gh api: {why}")
 
 
+def close(name, number, sha, repo="sam/r"):
+    """A PR from `name` (in `repo`) closed at `sha`, now."""
+    CLOSED.setdefault(name, []).append({"number": number, "head": {"sha": sha}})
+    FEED.append({"number": number, "updated_at": ago(0), "head": {"ref": name, "sha": sha, "repo": {"full_name": repo}}})
+
+
 def branches_fresh(path, etag=None):
+    if path == "repos/sam/r/pulls?state=closed&sort=updated&direction=desc&per_page=100":
+        if FEEDING[0]:
+            no({}, FEEDING[0])
+        page = sorted(FEED, key=lambda p: p["updated_at"], reverse=True)[:100]
+        tag = json.dumps(page)
+        FED.append(304 if etag == tag else 200)
+        return None if etag == tag else (tag, page)
     if path != "repos/sam/r/branches?per_page=100":
         return kept_fresh(path, etag)
     if LISTING[0]:
         no({}, LISTING[0])
-    tag = json.dumps(sorted(BRANCHES.items()))
+    # What a listing shows: each branch's tip, not what it's compared to.
+    tag = json.dumps([sorted((n, b[0]) for n, b in BRANCHES.items()), sorted(PROTECTED)])
     FRESH.append(304 if etag == tag else 200)
     if etag == tag:
         return None
-    return tag, [{"name": n, "commit": {"sha": sha}, "protected": False} for n, (sha, _, _) in BRANCHES.items()]
+    return tag, [{"name": n, "commit": {"sha": sha}, "protected": n in PROTECTED} for n, (sha, _, _) in BRANCHES.items()]
 
 
 def branches_gh(*a, **k):
     path = (a[2] if a[1:2] == ("--paginate",) else a[1]) if a[:1] == ("api",) and len(a) > 1 else ""
-    if path.startswith("repos/sam/r/compare/main..."):
+    if path.startswith("repos/sam/r/compare/"):
+        assert path.partition("compare/")[2].partition("...")[0] == repo_r["default"], path
         name, b = next((n, x) for n, x in BRANCHES.items() if x[0] == path.rpartition("...")[2])
         if name in COMPARE:
             return no(k, COMPARE[name])
@@ -441,9 +462,13 @@ def deleted(repo, name, sha):
 def look(in_use=("open",), full=False):
     """A pass's look at sam/r's branches: what it lists for the pipeline."""
     digest = []
-    DELETED.clear(), LOOKED.clear(), FRESH.clear(), C.WAKE.clear()
+    DELETED.clear(), LOOKED.clear(), FRESH.clear(), FED.clear(), C.WAKE.clear()
     R.watch_branches(repo_r, set(in_use), digest, full)
     return [line for _, line, _ in digest]
+
+
+def tips():
+    return C.load("repo-sam_r.json", {})["tips"]
 
 
 DELETED, UNDELETABLE = [], set()
@@ -459,13 +484,15 @@ assert look(full=True) == [] and DELETED == [], DELETED
 assert sorted(LOOKED) == ["archived", "closed", "in-main", "moved", "old", "refused", "renovate/again",
                           "renovate/closed", "renovate/x", "young"], LOOKED
 assert C.WAKE == {"sam/r": C.NOW + R.GRACE}, C.WAKE
-assert sorted(C.load("repo-sam_r.json", {})) == ["branchesEtag", "branchesKeep", "tips"], C.load("repo-sam_r.json", {})
-# That pass, a kicked one: the unchanged listing costs nothing against the
+assert sorted(C.load("repo-sam_r.json", {})) == ["base", "branchesBy", "branchesEtag", "closedEtag", "closedSince",
+                                                 "tips"], C.load("repo-sam_r.json", {})
+# That pass, a kicked one: the unchanged listings cost nothing against the
 # rate limit, and only what's due is judged again. What goes next is the
 # unmerged one from today, STALE_DAYS from its last commit.
 C.NOW += R.GRACE
 assert look() == ["sam/r: `refused`"]
-assert FRESH == [304] and sorted(LOOKED) == ["archived", "closed", "in-main", "old", "refused", "renovate/closed"], (FRESH, LOOKED)
+assert FRESH == FED == [304] and sorted(LOOKED) == ["archived", "closed", "in-main", "old", "refused",
+                                                    "renovate/closed"], (FRESH, FED, LOOKED)
 assert DELETED == [("in-main", "1" * 40), ("closed", "2" * 40), ("old", "7" * 40), ("renovate/closed", "9" * 40),
                    ("archived", "d" * 40)], DELETED
 assert ARCHIVED == {f"refs/archive/archived/{'d' * 40}": "d" * 40, f"refs/archive/old/{'7' * 40}": "7" * 40}, ARCHIVED
@@ -478,16 +505,41 @@ assert look() == ["sam/r: `refused`"] and FRESH == [304] and LOOKED == [] and DE
 assert look(full=True) == ["sam/r: `refused`"] and LOOKED == ["refused"], LOOKED
 # Its PR closing starts the look: an hour later, it goes. Reopened inside
 # that hour, it stays.
-CLOSED["open"] = [{"number": 2, "head": {"sha": "4" * 40}}]
+close("open", 2, "4" * 40)
 look(())
 assert DELETED == [] and C.WAKE["sam/r"] == C.NOW + R.GRACE, (DELETED, C.WAKE)
 C.NOW += R.GRACE
 look()
-assert DELETED == [] and C.load("repo-sam_r.json", {})["tips"]["open"] == {"sha": "4" * 40, "pr": True}
+assert DELETED == [] and tips()["open"] == {"sha": "4" * 40, "pr": True}
 look(())
 C.NOW += R.GRACE
 look(())
 assert DELETED == [("open", "4" * 40)], DELETED
+# So does a PR opened and closed between two passes (their events came as
+# one, or went missing): every pass reads the PRs closed since the last, at
+# no cost while there are none. Not one from a fork's branch of that name,
+# or closed at another tip than the branch's now.
+close("renovate/x", 7, "5" * 40, repo="eve/r")
+close("renovate/again", 8, "b" * 40)
+look(())
+assert FED == [200] and LOOKED == [], (FED, LOOKED)
+close("renovate/x", 9, "5" * 40)
+look(())
+assert FED == [200] and LOOKED == ["renovate/x"] and C.WAKE["sam/r"] == C.NOW + R.GRACE, (FED, LOOKED, C.WAKE)
+look(())
+assert FED == [304] and LOOKED == [], (FED, LOOKED)
+C.NOW += R.GRACE
+look(())
+assert DELETED == [("renovate/x", "5" * 40)], DELETED
+# More closed since the last look than a page holds: every branch is looked
+# at again.
+for n in range(1000, 1100):
+    C.NOW += 1
+    close(f"gone-{n}", n, "0" * 40)
+look(())
+assert FED == [200] and sorted(LOOKED) == sorted(tips()), (FED, LOOKED)
+look(())
+assert FED == [304] and LOOKED == [], (FED, LOOKED)
 # So does a push: to the tip a closed PR was closed at, it goes an hour on.
 BRANCHES["moved"] = ("f" * 40, 1, young)
 look(())
@@ -509,23 +561,54 @@ assert FRESH == [304] and DELETED == [("empty", "0" * 40)], (FRESH, DELETED)
 C.NOW = C.ts(young) + R.STALE_DAYS * 86400
 look(())
 assert DELETED == [("young", "8" * 40)] and f"refs/archive/young/{'8' * 40}" in ARCHIVED, DELETED
-# GitHub not listing them (its rate limit, or a no) changes nothing.
+# The default moving judges every branch again, at the tip it has sat at:
+# one merged into it since goes as one already in it, unarchived, without
+# waiting out STALE_DAYS. Those with no wait of their own (a bot's) are
+# looked at too.
+BRANCHES["later"] = ("1a" * 20, 2, ago(0))
+look(())
+assert tips()["later"]["due"] == C.NOW + R.STALE_DAYS * 86400, tips()["later"]
+C.NOW += R.GRACE
+BRANCHES.update({"main": ("ba" * 20, 0, young), "later": ("1a" * 20, 0, ago(0))})
+look(())
+assert FRESH == [200] and sorted(LOOKED) == sorted(tips()) and "renovate/again" in LOOKED, (FRESH, LOOKED)
+assert DELETED == [("later", "1a" * 20)] and not [ref for ref in ARCHIVED if "/later/" in ref], (DELETED, ARCHIVED)
+look(())
+assert LOOKED == [], LOOKED  # the listing without it: the default is where it was
+# A new default: the old one is judged like any other branch, against the
+# new one, though the listing hasn't changed.
+BRANCHES["trunk"] = ("cd" * 20, 1, ago(0))
+look(())
+repo_r["default"] = "trunk"
+look(())
+assert FRESH == [200] and "main" in LOOKED and "trunk" not in tips(), (FRESH, LOOKED)
+C.NOW += R.GRACE
+look(())
+assert DELETED == [("main", "ba" * 20)], DELETED
+repo_r["default"] = "main"
+BRANCHES["main"] = BRANCHES.pop("trunk")
+look(())
+# GitHub not listing them (its rate limit, or a no), or the PRs closed since,
+# changes nothing.
 look(())
 was = C.load("repo-sam_r.json", {})
-for why in ("API rate limit exceeded for installation", "HTTP 403: Resource not accessible by integration"):
-    LISTING[0] = why
-    assert look(()) == ["sam/r: `refused`"] and C.load("repo-sam_r.json", {}) == was, why
-LISTING[0] = None
-# Nor does GitHub not answering partway lose a branch: what it judged is
-# kept, and the next pass lists again (no ETag kept) and judges the rest.
-# Archiving one then isn't one GitHub wouldn't archive.
+for failing in (LISTING, FEEDING):
+    for why in ("API rate limit exceeded for installation", "HTTP 403: Resource not accessible by integration"):
+        failing[0] = why
+        assert look(()) == ["sam/r: `refused`"] and C.load("repo-sam_r.json", {}) == was, why
+    failing[0] = None
+# Nor does GitHub not answering partway lose a branch or a closed PR: what
+# it judged is kept, and the next pass lists both again (no ETag kept) and
+# judges the rest. Archiving one then isn't one GitHub wouldn't archive.
 BRANCHES.update({"new": ("0" * 40, 1, ago(0)), "newer": ("b" * 40, 1, ago(0))})
+close("elsewhere", 10, "0" * 40, repo="eve/r")
 COMPARE["newer"] = "HTTP 502: Bad Gateway"
 look(())
-assert LOOKED == ["new", "newer"] and C.load("repo-sam_r.json", {})["branchesEtag"] == was["branchesEtag"], LOOKED
+now = C.load("repo-sam_r.json", {})
+assert LOOKED == ["new", "newer"] and (now["branchesEtag"], now["closedEtag"]) == (was["branchesEtag"], was["closedEtag"]), LOOKED
 del COMPARE["newer"]
 look(())
-assert FRESH == [200] and LOOKED == ["newer"], (FRESH, LOOKED)
+assert FRESH == FED == [200] and LOOKED == ["newer"], (FRESH, FED, LOOKED)
 BRANCHES["quiet"] = ("9" * 40, 2, old)
 look(())
 C.NOW += R.GRACE
@@ -534,20 +617,37 @@ assert look(()) == ["sam/r: `refused`"] and DELETED == [], DELETED
 del ARCHIVING["quiet"]
 look(())
 assert DELETED == [("quiet", "9" * 40)], DELETED
-# A branch GitHub says no about is passed over, with no wait of its own:
-# one with no history in common with the default has no comparison.
-BRANCHES["orphan"] = ("c" * 40, 1, old)
-COMPARE["orphan"] = "HTTP 404: No common ancestor between main and ccccccc"
+# A branch GitHub said no about, to its closed PRs or its comparison, waits
+# for a full pass to be judged again: its no may be for now (its access) or
+# for good (no history in common with the default, which reads the same).
+# Once GitHub answers, it's judged as any other, from when it was first seen.
+BRANCHES.update({"orphan": ("c" * 40, 1, old), "shy": ("e1" * 20, 1, old), "renovate/shy": ("e2" * 20, 1, old)})
+COMPARE.update({"orphan": "HTTP 404: No common ancestor between main and ccccccc",
+                "shy": "HTTP 403: Resource not accessible by integration"})
+CLOSED["renovate/shy"] = None
 look(())
-assert DELETED == [] and C.load("repo-sam_r.json", {})["tips"]["orphan"] == {"sha": "c" * 40, "seen": C.NOW}
+seen = C.NOW
+assert DELETED == [] and tips()["orphan"] == {"sha": "c" * 40, "seen": seen, "retry": True}, tips()["orphan"]
+assert tips()["shy"]["retry"] and tips()["renovate/shy"]["retry"], tips()
+look(())
+assert LOOKED == [], LOOKED
+del COMPARE["shy"]
+CLOSED["renovate/shy"] = [{"number": 11, "head": {"sha": "e2" * 20}}]
+C.NOW += R.GRACE
+look(full=True)
+assert sorted(LOOKED) == ["orphan", "refused", "renovate/shy", "shy"], LOOKED
+assert DELETED == [("shy", "e1" * 20), ("renovate/shy", "e2" * 20)] and tips()["orphan"]["retry"], (DELETED, tips())
+assert f"refs/archive/shy/{'e1' * 20}" in ARCHIVED and tips()["shy"]["seen"] == seen, ARCHIVED
 # A branch kept no longer is judged, though the listing hasn't changed.
 S.C.CFG["keepBranches"] = []
 look(())
 assert FRESH == [200] and LOOKED == ["gh-pages"], (FRESH, LOOKED)
-# More than a page of branches: every page, and no ETag for next time.
+# More than a page of branches: every page, and no ETag for next time. A
+# protected one, the default too, isn't the steward's to delete.
 C.fresh = lambda path, etag=None: ("tag", [{"name": f"b{i}", "commit": {"sha": "1" * 40}} for i in range(100)])
-C.gh = lambda *a, **k: "\n".join(f"b{i} {'1' * 40}" for i in range(101)) if a[2].startswith("repos/sam/r/branches?") else None
-assert R.listed_branches("sam/r", None) == (None, {f"b{i}": "1" * 40 for i in range(101)})
+C.gh = lambda *a, **k: "\n".join([f"main {'2' * 40} true"] + [f"b{i} {'1' * 40} false" for i in range(101)]) \
+    if a[2].startswith("repos/sam/r/branches?") else None
+assert R.listed_branches("sam/r", "main", None) == (None, {f"b{i}": "1" * 40 for i in range(101)}, ["main", "2" * 40])
 R.delete_branch, C.gh, C.write, C.fresh = kept_delete, gh_stub, kept_write, kept_fresh
 S.C.CFG["keepBranches"] = []
 C._for.pop()

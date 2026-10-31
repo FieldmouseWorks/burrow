@@ -409,9 +409,9 @@ for was, due in ((True, False), (False, True)):
 BRANCHES = [{"name": "conary/train/" + CAND, "commit": {"sha": "e" * 40}}, {"name": "old", "commit": {"sha": "f" * 40}}]
 deleted = []
 kept_watch = (R.closed_at, R.delete_branch, C.fresh, C.NOW)
-R.closed_at = lambda repo, name, sha: None
+R.closed_at = lambda repo, name, sha: 0
 R.delete_branch = lambda repo, name, sha: deleted.append(name)
-C.fresh = lambda path, etag=None: ("tag", BRANCHES)
+C.fresh = lambda path, etag=None: ("tag", BRANCHES if "/branches?" in path else [])  # and no PR closed
 C.gh = lambda *a, **k: {"ahead": 0}
 for on, want in ((True, ["old"]), (False, ["conary/train/" + CAND, "old"])):
     S.CFG["repos"]["sam/r"] = {"train": on}
