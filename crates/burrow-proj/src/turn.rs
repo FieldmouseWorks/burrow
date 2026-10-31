@@ -42,9 +42,7 @@ pub fn start(cfg: &Config, id: &str, msg: &str, first: bool) -> Result<(), Strin
     // _ended only ever reads the turn it ends as the latest.
     for i in 1..=120 {
         systemd::reset_failed(cfg, &unit);
-        if systemd::show(cfg, &unit, "LoadState") != "loaded"
-            && systemd::show(cfg, &end, "Job").is_empty()
-        {
+        if systemd::show(cfg, &unit, "LoadState") != "loaded" && !job.end_pending() {
             break;
         }
         if i == 120 {

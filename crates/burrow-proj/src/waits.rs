@@ -5,9 +5,11 @@
 //! Watched: a turn waiting in line, for a slot or inside its run (its clock
 //! stands still meanwhile), for stallAfterMinutes; one running, until its
 //! deadline and GRACE (proj stops it before then); one that ended without
-//! saying what comes next even when asked again, or ended in a failure, at
-//! once, since nothing resumes it; one awaiting GitHub, for awaitHours and
-//! GRACE (proj-watch resumes it by then, told nothing changed). Not watched:
+//! saying what comes next even when asked again, at once, since nothing resumes
+//! it; one that ended in a failure, for RESUME_GRACE from its end, since
+//! proj-inbox resumes an issue's job seconds later when a reply waits; one
+//! awaiting GitHub, for awaitHours and GRACE (proj-watch resumes it by then,
+//! told nothing changed). Not watched:
 //! a turn that asks a person (their reply resumes it) or is done, one proj
 //! stop ended, and any ended turn of an --owned job.
 
@@ -23,7 +25,7 @@ use serde_json::{Map, Value, json};
 use crate::config::Config;
 use crate::job::Job;
 use crate::slot::successor;
-use crate::{GRACE, mtime, now, swap};
+use crate::{GRACE, RESUME_GRACE, mtime, now, swap};
 
 /// What [`job_wait`] reads of a job's latest turn.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -42,7 +44,8 @@ pub struct Facts {
     pub end: Option<String>,
     /// What the job is about.
     pub link: Option<String>,
-    /// When it was started, took its slot and ended, in seconds.
+    /// When it was started, took its slot and ended ([`Job::facts`]; 0 while
+    /// it's queued or running), in seconds.
     pub queued: i64,
     pub slot: i64,
     pub ended: i64,
@@ -97,8 +100,8 @@ pub fn job_wait(cfg: &Config, f: &Facts) -> Option<Item> {
             if state != "done" {
                 (
                     f.ended,
-                    f.ended,
-                    format!("turn {turn} ended ({state}), and nothing resumes it"),
+                    f.ended + RESUME_GRACE,
+                    format!("turn {turn} ended ({state}), and nothing resumed it"),
                 )
             } else {
                 match f.end.as_deref() {

@@ -1,8 +1,8 @@
 // What proj tells the stall watchdog a job waits on, from what rewatch would
 // find of its latest turn: a turn in line or running is watched to its
 // deadline (one waiting in line inside its run as one in line for a slot
-// is), one that ended without saying what comes next or in a failure is due
-// at once, an await to its deadline past proj-watch's, and a question for a
+// is), one that ended without saying what comes next is due at once, one that
+// failed once proj-inbox has had time to resume it, an await to its deadline past proj-watch's, and a question for a
 // person, a finished job, a stopped turn and an --owned job's end aren't
 // watched at all. And what a running turn waits in line for: only a waiter
 // that still holds its file, so one that died mid-wait never stops the
@@ -157,12 +157,12 @@ fn waits() {
     });
     // Ended in a failure, or an error: due at once too, and says which.
     case(&["state timed out after 4h"], |w| {
-        w.due == 3000.0 && w.phase.contains("ended (timed out after 4h)")
+        w.since == 3000.0 && w.due == 3120.0 && w.phase.contains("ended (timed out after 4h)")
     });
     case(&["state error", "end done"], |w| {
-        w.due == 3000.0 && w.phase.contains("ended (error)")
+        w.due == 3120.0 && w.phase.contains("ended (error)")
     });
-    case(&["state failed"], |w| w.due == 3000.0);
+    case(&["state failed"], |w| w.due == 3120.0);
     // A question for a person, a finished job, and a turn that didn't have
     // to say (a sandbox's, or one from before turns said) aren't watched.
     none_more(&["state done", "end ask"]);

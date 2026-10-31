@@ -577,7 +577,7 @@ def post(repo, pr, r, answer, description):
             or not all(isinstance(f, dict) and all(isinstance(f.get(k), str) for k in text) for f in found)):
         raise ValueError(f"not a review: {json.dumps(answer)[:100]}")
     diff = C.gh("api", "-H", "Accept: application/vnd.github.diff",
-                f"repos/{repo}/compare/{pr['baseRefName']}...{head}")
+                C.compare(repo, pr["baseRefName"], head))
     # Read wrong, every finding would land as a note and the review count as
     # clean.
     if not isinstance(diff, str) or not diff.startswith("diff --git "):

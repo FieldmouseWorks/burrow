@@ -5,7 +5,8 @@
 //! `owned` (there or not), `link`, `app`, and `agent` (its sandbox, with
 //! --vm). Kept across turns: `turns` (the latest turn's number), `session`
 //! (Claude's, which the next turn resumes) and `lock` (turns start under
-//! it). Each turn N's own: `prompt.N`; `N.withdrawable` (proj withdraw may
+//! it). Each turn N's own: `prompt.N`; `N.ended` (when a turn killed
+//! with nothing written ended, as its `_ended` saw it), `N.withdrawable` (proj withdraw may
 //! stop it while it waits), `N.slot` (the slot it took, once it has one), `N.jsonl` (its stream), `N.result` (its answer), `N.outcome`
 //! (how it ended: done, error, or what stopped it), `N.end` (how it said it
 //! ends), `N.deadline` (when its time is up, in nanoseconds), `N.wait` (what
@@ -24,7 +25,7 @@ use serde_json::Value;
 
 use crate::config::Config;
 use crate::waits::Facts;
-use crate::{filled, mtime, read, swap, systemd};
+use crate::{filled, mtime, now, read, swap, systemd};
 
 pub struct Job<'a> {
     pub cfg: &'a Config,
@@ -168,6 +169,42 @@ impl<'a> Job<'a> {
         }
     }
 
+    /// Whether the unit that ends its turns (`_ended`) is still to run, or
+    /// running.
+    pub fn end_pending(&self) -> bool {
+        !systemd::show(self.cfg, &self.end_unit(), "Job").is_empty()
+    }
+
+    /// When a turn killed before it could write its outcome ended (what kills
+    /// its whole cgroup takes everything in it along), from outside that
+    /// cgroup: its `_ended`'s first act. Only `_ended` writes it, and a new turn
+    /// waits out the last one's `_ended` before it's written, so this is always
+    /// the turn that just ended, and no look at a turn being started can leave
+    /// it on a live one. Kept once written, so nothing moves it.
+    pub fn mark_ended(&self) {
+        let Some(n) = self.turns() else { return };
+        if !self.turn(&n, "outcome").exists() && !self.turn(&n, "ended").exists() {
+            let _ = fs::write(self.turn(&n, "ended"), "");
+        }
+    }
+
+    /// When turn N ended, in seconds; 0 while it's going. When it wrote its
+    /// outcome, or when [`Job::mark_ended`] saw it had. A look that finds neither
+    /// is one in the moment before its `_ended` (now, which that then fixes), or
+    /// at a turn being started, or one whose `_ended` never ran (the machine went
+    /// down): its last write is all that's known, and looking again doesn't move
+    /// it.
+    fn ended_at(&self, n: &str, state: &str, pending: impl FnOnce() -> bool) -> i64 {
+        if matches!(state, "queued" | "running") {
+            return 0;
+        }
+        let first = |files: &[PathBuf]| files.iter().find_map(|p| mtime(p));
+        first(&[self.turn(n, "outcome"), self.turn(n, "ended")])
+            .or_else(|| pending().then(now))
+            .or_else(|| first(&[self.turn(n, "jsonl"), self.path(&format!("prompt.{n}"))]))
+            .unwrap_or(0)
+    }
+
     /// What the stall watchdog's look reads of the latest turn; None before
     /// the first.
     pub fn facts(&self) -> Option<Facts> {
@@ -184,12 +221,7 @@ impl<'a> Job<'a> {
             link: opt(self.path("link")),
             queued: mtime(&prompt).unwrap_or(0),
             slot: mtime(&self.turn(&n, "slot")).unwrap_or(0),
-            // When it ended: when it wrote its outcome, or for one stopped
-            // before it could, when it last said anything.
-            ended: [self.turn(&n, "outcome"), self.turn(&n, "jsonl"), prompt]
-                .iter()
-                .find_map(|p| mtime(p))
-                .unwrap_or(0),
+            ended: self.ended_at(&n, &state, || self.end_pending()),
             // Its deadline as it stands, to the second (none without a
             // timeout): when it took its slot and its timeout, moved on by
             // any time it waited in line. And what it waits in line for now,
@@ -342,6 +374,131 @@ mod tests {
 
     use super::{Job, answer, awaits, escape, last_result, result_of};
     use crate::config::{Config, tests::example};
+    use crate::now;
+    use crate::waits::job_wait;
+
+    fn set_mtime(path: &std::path::Path, secs: u64) {
+        let at = std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs);
+        fs::File::options()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(path)
+            .unwrap()
+            .set_modified(at)
+            .unwrap();
+    }
+
+    // When a turn ended, as the stall watchdog goes by it. A turn killed with
+    // nothing written ended when its _ended saw it had (mark_ended), not when it
+    // last wrote anything. With no systemd here, every job reads as failed unless
+    // it wrote an outcome.
+    #[test]
+    fn when_a_turn_ended() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut v = example();
+        v["jobs"] = tmp.path().to_str().unwrap().into();
+        let cfg: Config = serde_json::from_value(v).unwrap();
+        let new = |id: &'static str| {
+            let job = Job::new(&cfg, id);
+            fs::create_dir(&job.dir).unwrap();
+            job.set_turns(1).unwrap();
+            set_mtime(&job.path("prompt.1"), 1000);
+            job
+        };
+        let wait = |job: &Job| job_wait(&cfg, &job.facts().unwrap());
+        let times = |job: &Job| {
+            let w = wait(job).unwrap();
+            (w.since as i64, w.due as i64)
+        };
+        let before = now();
+
+        // Killed after its stream went quiet, with an old log: its grace is
+        // whole. Then marked and looked at again: it stays where it was.
+        let old = new("old");
+        set_mtime(&old.turn("1", "slot"), 2000);
+        set_mtime(&old.turn("1", "jsonl"), 2000);
+        old.mark_ended();
+        let (since, due) = times(&old);
+        assert!(since >= before && due == since + 120, "{since} {due}");
+        assert!(wait(&old).unwrap().phase.contains("ended (failed)"));
+        set_mtime(&old.turn("1", "ended"), 5000);
+        old.mark_ended();
+        assert_eq!(times(&old), (5000, 5120));
+        assert_eq!(times(&old), (5000, 5120));
+
+        // Killed before any stream, and before it even had a slot.
+        let nostream = new("nostream");
+        set_mtime(&nostream.turn("1", "slot"), 2000);
+        nostream.mark_ended();
+        assert!(times(&nostream).0 >= before);
+        let noslot = new("noslot");
+        noslot.mark_ended();
+        assert!(times(&noslot).0 >= before);
+
+        // A look at a turn being started, its number written and its unit not
+        // yet, reads as failed: it leaves nothing behind, so when the turn it
+        // was is killed hours on, the grace still counts from then.
+        let starting = new("starting");
+        assert_eq!(times(&starting).0, 1000);
+        assert!(!starting.turn("1", "ended").exists());
+        assert_eq!(starting.ended_at("1", "running", || true), 0);
+        assert!(!starting.turn("1", "ended").exists());
+        starting.mark_ended();
+        assert!(times(&starting).0 >= before);
+
+        // A look just before its _ended gets no expired grace, and marks nothing.
+        let window = new("window");
+        assert!(window.ended_at("1", "failed", || true) >= before);
+        assert!(!window.turn("1", "ended").exists());
+
+        // Its _ended never ran (the machine went down): its last write, however
+        // often it's looked at.
+        let unseen = new("unseen");
+        set_mtime(&unseen.turn("1", "jsonl"), 2000);
+        assert_eq!(times(&unseen), (2000, 2120));
+        assert_eq!(times(&unseen), (2000, 2120));
+
+        // One that said how it ended ended then, whatever its log says: an error
+        // or a timeout has its grace from there, and no stamp.
+        for (id, how) in [
+            ("error", "error"),
+            ("timeout", "timed out after 4h"),
+            ("quiet", "went quiet for 1h"),
+        ] {
+            let said = new(id);
+            set_mtime(&said.turn("1", "jsonl"), 2000);
+            fs::write(said.turn("1", "outcome"), format!("{how}\n")).unwrap();
+            set_mtime(&said.turn("1", "outcome"), 3000);
+            said.mark_ended();
+            assert_eq!(times(&said), (3000, 3120), "{how}");
+            assert!(!said.turn("1", "ended").exists(), "{how}");
+        }
+
+        // Undeclared stays due at once.
+        let silent = new("silent");
+        fs::write(silent.turn("1", "outcome"), "done\n").unwrap();
+        fs::write(silent.turn("1", "end"), "undeclared\n").unwrap();
+        set_mtime(&silent.turn("1", "outcome"), 3000);
+        assert_eq!(times(&silent), (3000, 3000));
+
+        // Stopped and --owned stay unwatched, killed or not.
+        let stopped = new("stopped");
+        fs::write(stopped.turn("1", "stopped"), "").unwrap();
+        stopped.mark_ended();
+        assert!(wait(&stopped).is_none());
+        let owned = new("owned");
+        fs::write(owned.path("owned"), "").unwrap();
+        owned.mark_ended();
+        assert!(wait(&owned).is_none());
+
+        // Still going: no end to record.
+        let going = new("going");
+        set_mtime(&going.turn("1", "jsonl"), 2000);
+        for how in ["queued", "running"] {
+            assert_eq!(going.ended_at("1", how, || true), 0, "{how}");
+        }
+    }
 
     // As systemd-escape writes them: a job's id is its project's folder
     // name, spaces, `%` and all.

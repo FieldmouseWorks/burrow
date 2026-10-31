@@ -684,8 +684,9 @@ fn ended(cfg: &Config) -> Result<(), Fail> {
         "PROJ_ENDED",
         "proj _ended is for the end of a job turn, run by proj-ended@ID",
     )?;
-    rewatch(cfg, &[&id]);
     let job = Job::new(cfg, &id);
+    job.mark_ended();
+    rewatch(cfg, &[&id]);
     let mut names = lines(&job.path("kick"));
     for a in awaits(&read(&job.path("await")).unwrap_or_default()) {
         names.push(format!(
