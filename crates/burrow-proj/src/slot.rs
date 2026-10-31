@@ -1,7 +1,7 @@
 //! A turn's wait in line for a slot.
 //!
 //! The line is jobs/.queue: one file per waiting turn, named ([`entry`]) so
-//! that sorting puts pipeline ones ahead, then --first ones, then the oldest,
+//! that sorting puts pipeline ones ahead, then steward and --first ones, then the oldest,
 //! holding the waiting process's pid. A slot is a lock on jobs/.slots/N, and N.who says
 //! whose (class and project). The lock is the turn's and everything it starts
 //! ([`held`]), so a turn that's killed frees its slot by itself, once the last

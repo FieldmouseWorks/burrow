@@ -390,6 +390,7 @@
                     ci-runner = { repo = "sam/homelab"; labels = [ "homelab" ]; };
                     bare = { repo = "sam/homelab"; labels = [ "bare" ]; defaultLabels = false; };
                   };
+                  fresh = { enable = true; owner = "sam-org"; repos = [ "sam-org/homelab" ]; };
                 };
                 burrow.updates = {
                   enable = true;
@@ -406,6 +407,7 @@
             ] ++ modules;
           };
           committed = machine { rev = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"; } [ ];
+          dispatchOnly = machine { } [ { burrow.dispatch.fresh.enable = lib.mkForce false; } ];
           dirty = machine { dirtyRev = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-dirty"; } [ ];
           arm = machine { } [ { nixpkgs.hostPlatform = lib.mkForce "aarch64-linux"; } ];
           # remi's install rehearsal turns burrow-events' handlers off.
@@ -424,6 +426,30 @@
           };
           labels = m: lib.mapAttrs (_: r: r.labels) (settings m).runners;
           wantLabels = arch: { ci-runner = [ "self-hosted" "Linux" arch "homelab" ]; bare = [ "bare" ]; };
+          # The fresh runners: what a pass reads, the repo's queued jobs
+          # among its events, and a unit that starts as a user and in a
+          # state directory nothing had before, with its registration as a
+          # credential only it reads, and that nothing outlives.
+          wantFresh = {
+            owner = "sam-org"; group = 1; repos = [ "sam-org/homelab" ]; label = "fresh-burrow";
+            prefix = "fresh-burrow-"; most = 2; template = "burrow-fresh-runner@"; configs = "/run/burrow-fresh";
+          };
+          freshUnit = committed.config.systemd.services."burrow-fresh-runner@";
+          # Each setting in the section of the unit file systemd reads it
+          # from: one in the wrong one is ignored.
+          freshWant = {
+            Unit = [ "CollectMode=inactive-or-failed" ];
+            Service = [
+              "Type=exec" "DynamicUser=true" "StateDirectory=burrow-fresh-runner/%i"
+              "LoadCredential=jit:/run/burrow-fresh/%i" "Restart=no" "KillMode=control-group"
+            ];
+          };
+          freshSections = lib.listToAttrs (map (part:
+            let lines = lib.splitString "\n" part;
+            in lib.nameValuePair (lib.removeSuffix "]" (builtins.head lines)) (builtins.tail lines)
+          ) (builtins.tail (lib.splitString "\n[" ("\n" + builtins.unsafeDiscardStringContext committed.config.systemd.units."burrow-fresh-runner@.service".text))));
+          freshGot = lib.mapAttrs (name: want: builtins.filter (l: builtins.elem l (freshSections.${name} or [ ])) want) freshWant;
+          handled = committed.config.burrow.events.handlers.dispatch.repos;
         in
           assert lib.assertMsg (deploy == want) "dispatch: ${builtins.toJSON deploy}, not ${builtins.toJSON want}";
           assert lib.assertMsg (settings dirty == settings committed)
@@ -433,6 +459,16 @@
             "dispatch: the systems are stamped ${builtins.toJSON revisions}";
           assert lib.assertMsg (labels committed == wantLabels "X64") "dispatch: x86_64's labels: ${builtins.toJSON (labels committed)}";
           assert lib.assertMsg (labels arm == wantLabels "ARM64") "dispatch: aarch64's labels: ${builtins.toJSON (labels arm)}";
+          assert lib.assertMsg ((settings committed).fresh == wantFresh) "dispatch: fresh runners ${builtins.toJSON (settings committed).fresh}";
+          assert lib.assertMsg (builtins.elem "sam-org/homelab" handled) "dispatch: the fresh runners' repo's events aren't its: ${builtins.toJSON handled}";
+          assert lib.assertMsg (freshGot == freshWant) "dispatch: a fresh runner's unit has ${builtins.toJSON freshGot}";
+          assert lib.assertMsg (lib.hasInfix "rm -rf /var/lib/private/burrow-fresh-runner/%i" freshUnit.serviceConfig.ExecStopPost)
+            "dispatch: a fresh runner's state outlives it: ${freshUnit.serviceConfig.ExecStopPost}";
+          assert lib.assertMsg (!freshUnit.restartIfChanged && !freshUnit.stopIfChanged) "dispatch: a switch can cut a fresh runner's job short";
+          # The job they're for, burrow's flake-check.yml, calls these.
+          assert lib.assertMsg (lib.all (p: builtins.elem p (map lib.getName freshUnit.path)) [ "jq" "gh" "curl" ])
+            "dispatch: a fresh runner's jobs find ${toString (map lib.getName freshUnit.path)} on PATH";
+          assert lib.assertMsg ((settings dispatchOnly).fresh == null) "dispatch: fresh runners nobody asked for";
           assert lib.assertMsg (settings unhandled == settings committed)
             "dispatch: with the handlers off, the settings are ${builtins.toJSON (settings unhandled)}";
           assert lib.assertMsg ((settings committed).gap == 120 && (settings spaced).gap == 600)

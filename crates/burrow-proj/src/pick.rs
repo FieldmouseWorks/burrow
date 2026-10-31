@@ -12,7 +12,14 @@
 //! backlog can't stop the work on what deploys it. Any other turn waits
 //! while its project holds maxJobsPerProject slots (pipeline turns not
 //! counted), and lets those behind it by meanwhile, so one project's jobs
-//! never fill the machine.
+//! never fill the machine. The last of a project's maxJobsPerProject stays free
+//! for its steward turns (run --pipeline, outside the pipeline's own repos), so
+//! its own lanes can't hold up its gates and conflict fixes: only a steward turn
+//! starts when the project's other turns hold maxJobsPerProject - 1, or the one
+//! slot when maxJobsPerProject is 1, so that slot still goes to whoever's in
+//! line. Those other turns are every normal and first one, one that has waited
+//! into first and one run --first alike, and a steward turn may use the whole
+//! share.
 //!
 //! Everyone else's turns hold a slot whenever they have one that may start:
 //! until they do, a pipeline turn, lead or not, leaves them one free ordinary
@@ -34,6 +41,10 @@ pub enum Class {
     Lead,
     /// Pipeline work in one of the pipeline's own projects.
     Pipeline,
+    /// Pipeline work anywhere else, what the steward runs in a project: ahead
+    /// of the line, with the first ones, within its project's cap, and it has
+    /// the slot of that cap the others leave it.
+    Steward,
     /// Ahead of the line: someone's waiting on it.
     First,
     Normal,
@@ -44,20 +55,51 @@ impl Class {
         match self {
             Class::Lead => "lead",
             Class::Pipeline => "pipeline",
+            Class::Steward => "steward",
             Class::First => "first",
             Class::Normal => "normal",
         }
     }
 
     pub fn parse(s: &str) -> Option<Class> {
-        [Class::Lead, Class::Pipeline, Class::First, Class::Normal]
-            .into_iter()
-            .find(|c| c.name() == s)
+        [
+            Class::Lead,
+            Class::Pipeline,
+            Class::Steward,
+            Class::First,
+            Class::Normal,
+        ]
+        .into_iter()
+        .find(|c| c.name() == s)
     }
 
     /// The pipeline's own: its slots are theirs, and no project cap holds them.
     pub fn pipeline(self) -> bool {
         matches!(self, Class::Lead | Class::Pipeline)
+    }
+}
+
+/// What one project's turns hold, pipeline turns not counted, and how much of
+/// it is its turns other than steward ones.
+#[derive(Clone, Copy, Default)]
+struct Share {
+    held: usize,
+    others: usize,
+}
+
+impl Share {
+    /// Whether a turn of this class may start in this project: the last of
+    /// its share stays free for steward turns, unless that's the whole share.
+    fn admits(self, class: Class, per_project: usize) -> bool {
+        self.held < per_project
+            && (class == Class::Steward || self.others < per_project.saturating_sub(1).max(1))
+    }
+
+    fn add(&mut self, class: Option<Class>) {
+        self.held += 1;
+        if class != Some(Class::Steward) {
+            self.others += 1;
+        }
     }
 }
 
@@ -88,7 +130,7 @@ pub struct Waiter {
 /// and only the pipeline's are left for it.
 pub fn pick(cfg: &Config, slots: &[Slot], line: &[Waiter]) -> Vec<(usize, usize)> {
     let general = cfg.max_jobs.saturating_sub(cfg.pipeline_slots);
-    let mut held: HashMap<&str, usize> = HashMap::new();
+    let mut held: HashMap<&str, Share> = HashMap::new();
     let (mut theirs, mut ours) = (Vec::new(), Vec::new());
     for (i, slot) in slots.iter().enumerate() {
         match slot {
@@ -96,7 +138,7 @@ pub fn pick(cfg: &Config, slots: &[Slot], line: &[Waiter]) -> Vec<(usize, usize)
             Slot::Free => ours.push(i + 1),
             Slot::Held { class, project } => {
                 if !class.is_some_and(Class::pipeline) {
-                    *held.entry(project).or_default() += 1;
+                    held.entry(project).or_default().add(*class);
                 }
             }
         }
@@ -143,13 +185,13 @@ pub fn pick(cfg: &Config, slots: &[Slot], line: &[Waiter]) -> Vec<(usize, usize)
                     continue;
                 }
             }
-            Class::First | Class::Normal => {
+            Class::Steward | Class::First | Class::Normal => {
                 let need = lead.saturating_sub(open);
                 let h = held.entry(w.project.as_str()).or_default();
-                if *h >= cfg.max_jobs_per_project || others + need >= theirs.len() {
+                if !h.admits(w.class, cfg.max_jobs_per_project) || others + need >= theirs.len() {
                     continue;
                 }
-                *h += 1;
+                h.add(Some(w.class));
                 others += 1;
             }
         }
@@ -286,8 +328,9 @@ pub struct Classes(HashMap<String, Class>);
 impl Classes {
     /// A job's class, from its dir. One run with --pipeline is a pipeline
     /// one, every turn of it, only while its project is one of the pipeline's
-    /// own; anywhere else it's first, every turn of it, so it still goes ahead
-    /// of the line but counts against its project's cap and stays off the
+    /// own; anywhere else it's steward, every turn of it, so it still goes ahead
+    /// of the line, with the first ones, and has the slot of its project's cap
+    /// the others leave it, but counts against that cap and stays off the
     /// pipeline's slots (one repo's PRs, waiting on that repo's own lock, can't
     /// fill the machine). In a lead repo's project it's lead. Asked anew by
     /// each new Classes, so a job whose repo was taken off a list since is held
@@ -306,7 +349,7 @@ impl Classes {
         } else if flake_project(cfg, &d) || listed(&r, &cfg.pipeline_repos) {
             Class::Pipeline
         } else {
-            Class::First
+            Class::Steward
         };
         self.0.insert(d, c);
         c
@@ -314,7 +357,7 @@ impl Classes {
 
     /// A waiting turn's class now, and the name its place in line
     /// (PREFIX-WHEN-ID) should have for it: 0 lead or pipeline ([`pick`] takes
-    /// lead ones first), 1 first, 2 normal. Its prefix says what the turn
+    /// lead ones first), 1 steward or first, 2 normal. Its prefix says what the turn
     /// itself is (2 normal, anything else first: run with --first, or waited
     /// past maxWait), and its class what that makes it now, so a job whose
     /// origin or list changed while it waits moves in line and is held to its
@@ -328,7 +371,7 @@ impl Classes {
         let c = self.class(cfg, dir, given);
         let p = match c {
             Class::Lead | Class::Pipeline => 0,
-            Class::First => 1,
+            Class::Steward | Class::First => 1,
             Class::Normal => 2,
         };
         let mut chars = name.chars();
@@ -352,12 +395,13 @@ pub fn demoted(cfg: &Config, dir: &Path) -> Option<String> {
     let r = github_repo(cfg, &d);
     Some(if !r.is_empty() {
         format!(
-            "asked as --pipeline, but its origin, github.com/{r}, isn't in pipelineRepos: it goes as --first"
+            "asked as --pipeline, but its origin, github.com/{r}, isn't in pipelineRepos: it goes as a steward job"
         )
     } else if !origin(cfg, &d).is_empty() {
-        "asked as --pipeline, but its origin isn't a GitHub repo's: it goes as --first".to_owned()
+        "asked as --pipeline, but its origin isn't a GitHub repo's: it goes as a steward job"
+            .to_owned()
     } else {
-        "asked as --pipeline, but its project has no origin: it goes as --first".to_owned()
+        "asked as --pipeline, but its project has no origin: it goes as a steward job".to_owned()
     })
 }
 

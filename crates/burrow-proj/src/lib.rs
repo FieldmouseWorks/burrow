@@ -12,8 +12,9 @@
 //!                             GitHub origin), ahead of everything, and its
 //!                             own slots, and in a lead one (leadRepos) ahead
 //!                             of the other pipeline work too; in any other,
-//!                             as --first, and status and the turn's journal
-//!                             say so (every turn of it, either way)
+//!                             as a steward job, ahead of the line within its
+//!                             project's cap, and status and the turn's
+//!                             journal say so (every turn of it, either way)
 //! proj run --unstick PROJECT "task"  what the pipeline is stuck on: never in
 //!                             the line, which may be the very thing stuck, but
 //!                             in a slot of its own besides maxJobs (every turn
@@ -68,7 +69,8 @@
 //! (a job run --since dates from then, every turn of it), and a turn that has waited maxWait seconds counts as --first itself, so a
 //! stream of them can't starve it. pipelineSlots of the slots are for pipeline
 //! jobs in the pipeline's own repos alone, and no project's other jobs hold
-//! more than maxJobsPerProject at once, and a waiting one of theirs is owed a
+//! more than maxJobsPerProject at once, the last of those kept for its steward
+//! jobs, and a waiting one of theirs is owed a
 //! slot ahead of the pipeline's when none runs ([`pick`]). A job run --unstick
 //! waits in none of that: its turns take a slot of their own, past maxJobs, one at a
 //! time ([`slot`]). A waiting turn becomes the deployed proj at its next look

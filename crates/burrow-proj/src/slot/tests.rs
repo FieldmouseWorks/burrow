@@ -269,7 +269,7 @@ fn counted_look() {
     assert_eq!(runs, 3, "a look's git runs for 3 projects");
     assert_eq!(seen.line.len(), 60);
     assert_eq!(seen.line[0].class, Class::Pipeline, "job0, in burrow");
-    assert_eq!(seen.line[2].class, Class::First, "job2, in web");
+    assert_eq!(seen.line[2].class, Class::Steward, "job2, in web");
     assert!(seen.line[0].project.ends_with("/burrow"));
 }
 
@@ -496,7 +496,7 @@ fn the_line_as_status_shows_it() {
             ("job0", "lead"),
             ("job3", "lead"),
             ("job1", "pipeline"),
-            ("job2", "first")
+            ("job2", "steward")
         ]
     );
     assert_eq!(in_queue(&jobs), 4, "it changed the line");
