@@ -4,7 +4,9 @@ each derivation gets a nix process of its own and stays a GC root until it's
 built, only the checks are built, every output is checked as nix flake check
 checks it, a failed evaluation or build fails the gate, every evaluation reads
 one snapshot of the checkout, and a flake with an output eval-apart doesn't
-check, or with a nixConfig, is refused rather than half checked. Without it,
+check, or with a nixConfig, is refused rather than half checked. With legs,
+each leg evaluates its own share of the outputs, every Nth from its own on,
+and builds only the checks among them. Without it,
 the checks are built first, by derivation, kept as GC roots, once the one nix
 process that evaluated them has exited, so no evaluation stays in memory beside
 the builds; nix flake check then finds them built and its outputs still roots.
@@ -28,8 +30,8 @@ import yaml
 job = yaml.safe_load(open(sys.argv[1]))["jobs"]["check"]
 step = next(s for s in job["steps"] if s.get("id") == "gate")
 assert step["shell"] == "bash"
-assert step["env"]["APART"] == "${{ inputs.eval-apart }}", step["env"]
-assert step["env"]["SKIP"] == "${{ inputs.build-skip }}", step["env"]
+assert step["env"] == {"APART": "${{ inputs.eval-apart }}", "SKIP": "${{ inputs.build-skip }}",
+                       "LEGS": "${{ inputs.legs }}", "LEG": "${{ matrix.leg }}"}, step["env"]
 
 tmp = tempfile.mkdtemp()
 script = os.path.join(tmp, "gate.sh")
@@ -137,14 +139,14 @@ def flake(outputs, top=""):
     return d
 
 
-def run(directory, apart=True, skip="", build_fail="", env=None):
+def run(directory, apart=True, skip="", build_fail="", env=None, leg=1, legs=1):
     log = os.path.join(tmp, "nix.log")
     for f in (log, log + ".links"):
         if os.path.exists(f):
             os.remove(f)
     full = {**nix_env, "PATH": bin_dir + os.pathsep + os.environ["PATH"], "NIX_LOG": log,
             "APART": "true" if apart else "false", "SKIP": skip, "BUILD_FAIL": build_fail,
-            "RUNNER_TEMP": tmp, **(env or {})}
+            "LEG": str(leg), "LEGS": str(legs), "RUNNER_TEMP": tmp, **(env or {})}
     # GitHub runs `shell: bash` as this.
     p = subprocess.run([bash, "--noprofile", "--norc", "-eo", "pipefail", script],
                        cwd=directory, env=full, capture_output=True, text=True)
@@ -624,6 +626,53 @@ def whole_pure():
     for skip in ("", "x"):
         rc, out, calls = run(d, apart=False, skip=skip, env={"GATE_SECRET": "hunter2"})
         assert rc != 0 and "hunter2" not in out, out
+
+
+@case
+def legs():
+    "with legs, each leg evaluates every Nth output from its own on, and builds only its checks: together, each once"
+    d = flake("""{
+      checks.${system} = { a = drv "a"; b = drv "b"; c = drv "c"; d = drv "d"; vm = drv "vm"; };
+      packages.${system}.p = drv "p";
+      nixosConfigurations.box.config.system.build.toplevel = drv "box";
+    }""")
+    rc, out, calls = run(d, skip="vm")
+    assert rc == 0, out
+    whole = entries(calls)
+    assert len(whole) == 7, calls
+    for n in (1, 2, 3, 7, 8):
+        seen, built = [], []
+        for k in range(1, n + 1):
+            rc, out, calls = run(d, skip="vm", leg=k, legs=n)
+            assert rc == 0, (n, k, out)
+            # Every leg makes the plan, then evaluates its own share.
+            assert calls[0] == "eval plan", (n, k, calls)
+            mine = entries(calls)
+            assert mine == [f"eval entry {i}" for i in range(k - 1, 7, n)], (n, k, calls)
+            assert (f"leg {k} of {n}:" in out) == (n > 1), (n, k, out)
+            seen += mine
+            built += [t for b in builds(calls) for t in b.split()[4:]]
+        assert sorted(seen) == sorted(whole), (n, seen)
+        # Each check built once, by the leg that evaluated it, and the skipped one by none.
+        assert sorted(t.split("-", 1)[1] for t in built) == ["a.drv^*", "b.drv^*", "c.drv^*", "d.drv^*"], (n, built)
+    # A failure in one leg fails that leg, and only that one.
+    results = [run(d, skip="vm", build_fail="-c.drv", leg=k, legs=3)[0] for k in (1, 2, 3)]
+    assert results[2] != 0 and results[:2] == [0, 0], results
+    broken = flake("""{ checks.${system} = { a = drv "a"; b = throw "broken check"; }; }""")
+    assert run(broken, leg=1, legs=2)[0] == 0
+    rc, out, _ = run(broken, leg=2, legs=2)
+    assert rc != 0 and "broken check" in out, out
+
+
+@case
+def legs_refused():
+    "legs without eval-apart, or a leg that isn't one of 1 to 8, are refused before anything is evaluated"
+    for apart, leg, legs, why in ((False, 1, 2, "legs need eval-apart"), (True, 3, 2, "can't run leg 3 of 2"),
+                                  (True, 1, 9, "can't run leg 1 of 9"), (True, 0, 1, "can't run leg 0 of 1"),
+                                  (True, "", "", "can't run leg  of"), (True, "1", "x", "can't run leg 1 of x")):
+        rc, out, calls = run(every, apart=apart, leg=leg, legs=legs)
+        assert rc != 0 and why in out, (apart, leg, legs, out)
+        assert not calls, (apart, leg, legs, calls)
 
 
 @case

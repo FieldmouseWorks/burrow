@@ -2,15 +2,17 @@
 checked merged with its base branch as that branch is when the job starts,
 not as it was when the event fired (a run that waited in the queue, or a
 re-run), the log names both commits, and a head that no longer merges
-cleanly fails the job without anything checked. The docs lane checks out
+cleanly fails the job without anything checked. With legs, every leg, and
+the gate job after them, merges the head with the base as the lane job
+found it instead, so all of them check one tree. The docs lane checks out
 and merges the same way, with the same steps. Which lane a PR takes, the
 train's, the docs lane or the whole gate, is tests/lane.py's; here, the
 whole gate and the docs lane run on what the lane job says, a lane job that
 failed giving the whole gate, and not at all once the lane job was
-cancelled. A PR's newer run cancels what its last one still has going, and
+cancelled; with legs, the gate job once they've all passed or failed. A PR's newer run cancels what its last one still has going, and
 nothing else: not a push's run, another PR's, a sibling call with inputs of
-its own, or (from a title or body edit, which a retarget isn't) the same
-head's run.
+its own, another of its legs, or (from a title or body edit, which a
+retarget isn't) the same head's run.
 
   python3 -I tests/pr-base.py .github/workflows/flake-check.yml
   nix build .#checks.x86_64-linux.pr-base
@@ -66,6 +68,14 @@ for event, lane_result, lane_gate, cancelled, whole, docs_lane in (
            "needs.lane.result": lane_result, "needs.lane.outputs.gate": lane_gate}
     assert bool(value(job["if"], ctx)) == whole, (event, lane_result, lane_gate, cancelled, job["if"])
     assert bool(value(jobs["docs"]["if"], ctx)) == docs_lane, (event, lane_result, lane_gate, cancelled, jobs["docs"]["if"])
+# The gate job: with legs, once they've all passed or failed; never with one
+# leg, nor once a leg was cancelled or none ran, nor once the run was.
+for legs, check, cancelled, verdict in ((4, "success", False, True), (4, "failure", False, True),
+                                        (4, "cancelled", False, False), (4, "skipped", False, False),
+                                        (4, "success", True, False), (1, "success", False, False),
+                                        (1, "failure", False, False)):
+    ctx = {"cancelled()": cancelled, "inputs.legs": legs, "needs.check.result": check}
+    assert bool(value(jobs["gate"]["if"], ctx)) == verdict, (legs, check, cancelled, jobs["gate"]["if"])
 print("the gate runs where it should: ok")
 
 # Each job's concurrency group: a PR's runs share one, so the newer cancels
@@ -73,27 +83,32 @@ print("the gate runs where it should: ok")
 # jobs, workflows, PRs and calls with other inputs never share one.
 INPUTS = {"inputs.runner": "ubuntu-latest", "inputs.install-nix": True, "inputs.eval-apart": False,
           "inputs.pr-gate": True, "inputs.build-skip": "agents", "inputs.docs-paths": "README.md",
-          "inputs.docs-checks": ""}
+          "inputs.docs-checks": "", "inputs.legs": 1}
 
 
-def group(name, event="pull_request", pr=12, run=1001, workflow="flake", action="synchronize", changes=None, **inputs):
+def group(name, event="pull_request", pr=12, run=1001, workflow="flake", action="synchronize", changes=None, leg=1,
+          **inputs):
     c = jobs[name]["concurrency"]
     assert c["cancel-in-progress"] is True, (name, c)
     ctx = {**INPUTS, **{f"inputs.{k.replace('_', '-')}": v for k, v in inputs.items()}, "github.event_name": event,
+           "matrix.leg": leg if name == "check" else None,
            "github.event.pull_request.number": pr if event == "pull_request" else None, "github.run_id": run,
            "github.workflow": workflow, "github.event.action": action if event == "pull_request" else None,
            "github.event.changes.base": (changes or {}).get("base")}
     return value(c["group"], ctx)
 
 
-JOBS = ("lane", "check", "docs", "commits")
+JOBS = ("lane", "check", "gate", "docs", "commits")
 for name in JOBS:
     assert group(name) == group(name, run=1002), name  # the PR's next run cancels this one
     others = [group(name, pr=13), group(name, workflow="other"), group(name, runner="remi"),
               group(name, build_skip=""), group(name, eval_apart=True), group(name, pr_gate=False),
-              group(name, install_nix=False), group(name, docs_paths="docs/**"), group(name, docs_checks="links")]
+              group(name, install_nix=False), group(name, docs_paths="docs/**"), group(name, docs_checks="links"),
+              group(name, legs=4)]
     assert group(name) not in others and len(set(others)) == len(others), (name, others)
 assert len({group(n) for n in JOBS}) == len(JOBS)
+# A run's legs never cancel each other.
+assert len({group("check", legs=4, leg=k) for k in range(1, 5)}) == 4
 # A push or a train candidate is a run of its own: none cancels another.
 assert group("check", "push", run=1001) != group("check", "push", run=1002)
 assert group("check", "push", run=12) != group("check", pr=12)
@@ -125,9 +140,12 @@ step = job["steps"][1]
 assert step["if"] == "github.event_name == 'pull_request'", step
 assert step["shell"] == "bash"
 assert step["env"] == {"BASE": "${{ github.event.pull_request.base.ref }}",
-                       "HEAD_SHA": "${{ github.event.pull_request.head.sha }}"}, step["env"]
-# The docs lane's job starts with the very same two steps (YAML aliases).
-assert jobs["docs"]["steps"][:2] == job["steps"][:2], jobs["docs"]["steps"][:2]
+                       "HEAD_SHA": "${{ github.event.pull_request.head.sha }}",
+                       "LEGS": "${{ inputs.legs }}", "TIP": "${{ needs.lane.outputs.tip }}"}, step["env"]
+# The docs lane's job and the gate job start with the very same two steps
+# (YAML aliases).
+for other in ("docs", "gate"):
+    assert jobs[other]["steps"][:2] == job["steps"][:2], (other, jobs[other]["steps"][:2])
 
 tmp = tempfile.mkdtemp()
 script = os.path.join(tmp, "merge.sh")
@@ -158,14 +176,14 @@ head = commit(work, "b", "feature\n")
 git("push", "-q", origin, "feat", cwd=work)
 
 
-def run():
+def run(legs=1, tip=""):
     """The checkout as the action leaves it for a PR (every branch fetched,
     the head checked out), then the merge step."""
     ws = tempfile.mkdtemp(dir=tmp)
     git("clone", "-q", "--no-checkout", origin, ws, cwd=tmp)
     git("checkout", "-q", "--detach", head, cwd=ws)
     p = subprocess.run(["bash", "-e", "-o", "pipefail", script], cwd=ws, capture_output=True, text=True,
-                       env={**env, "BASE": "main", "HEAD_SHA": head})
+                       env={**env, "BASE": "main", "HEAD_SHA": head, "LEGS": str(legs), "TIP": tip})
     return p, ws
 
 
@@ -182,6 +200,21 @@ parents = git("cat-file", "commit", "HEAD", cwd=ws).split("\n")
 assert [x.split()[1] for x in parents if x.startswith("parent ")] == [now, head], parents
 assert open(os.path.join(ws, "c")).read() == "later\n" and open(os.path.join(ws, "b")).read() == "feature\n"
 assert git("status", "--porcelain", cwd=ws) == ""
+
+# With legs, it checks the head merged with main where the lane job found
+# it, however main has moved since; and fails, merging nothing, when the
+# lane job didn't say where, or where it said isn't there.
+p, ws = run(legs=4, tip=event_base)
+assert p.returncode == 0, p.stderr
+assert f"checking {head} merged with main at {event_base}" in p.stdout, p.stdout
+parents = git("cat-file", "commit", "HEAD", cwd=ws).split("\n")
+assert [x.split()[1] for x in parents if x.startswith("parent ")] == [event_base, head], parents
+assert not os.path.exists(os.path.join(ws, "c"))
+for tip, why in (("", "the lane job didn't say where main was"), ("0" * 40, "isn't in this checkout")):
+    p, ws = run(legs=4, tip=tip)
+    assert p.returncode != 0 and "::error title=No base to merge with::" in p.stdout and why in p.stdout, (tip, p.stdout)
+    assert git("rev-parse", "HEAD", cwd=ws) == head
+print("with legs, the base where the lane job found it: ok")
 
 # main moved to something the head conflicts with: the job fails, says why,
 # and leaves no merge to check.

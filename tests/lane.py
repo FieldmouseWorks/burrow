@@ -8,7 +8,8 @@ of its own named so autoland knows; anything under .github/, a .nix file or
 a flake.lock never is, whatever the patterns say, and patterns that would
 match everything are refused. The lane's check run names the base it chose
 against, the docs lane's the commit the PR left that base at too, and
-every caller runs again when a PR's base changes.
+every caller runs again when a PR's base changes. With docs-paths or legs,
+the lane job says where the base was, for the legs to merge the head with.
 
   python3 -I tests/lane.py .github/workflows/flake-check.yml modules/autoland/prs.py \
     .github/workflows/flake.yml templates/project/.github/workflows/flake.yml
@@ -38,7 +39,8 @@ lane = jobs["lane"]
 assert lane["if"] == "${{ github.event_name == 'pull_request' }}", lane["if"]
 assert lane["outputs"] == {"gate": "${{ steps.base.outputs.lands == 'true' && 'train' || "
                                    "steps.paths.outputs.docs == 'true' && 'docs' || 'full' }}",
-                           "fork": "${{ steps.paths.outputs.fork }}"}, lane["outputs"]
+                           "fork": "${{ steps.paths.outputs.fork }}",
+                           "tip": "${{ steps.tip.outputs.tip }}"}, lane["outputs"]
 # Both check runs are named after what autoland looks for.
 names = re.search(r'^LANE, DOCS_LANE = "(.*)", "(.*)"$', open(sys.argv[2]).read(), re.M)
 assert names, "autoland names no lane"
@@ -50,11 +52,16 @@ checkout = lane["steps"][1]
 assert checkout["uses"].startswith("actions/checkout@"), checkout
 assert checkout["with"] == {"persist-credentials": False, "ref": "${{ github.event.pull_request.head.sha }}",
                             "fetch-depth": 0, "filter": "blob:none"}, checkout["with"]
-paths_step = lane["steps"][2]
+tip_step, paths_step = lane["steps"][2:4]
+assert tip_step["id"] == "tip" and tip_step["shell"] == "bash"
 assert paths_step["id"] == "paths" and paths_step["shell"] == "bash"
-for s in lane["steps"][1:]:
-    assert s["if"] == "steps.base.outputs.lands != 'true' && inputs.docs-paths != ''", s
+# The base's tip for the docs lane or the legs, which docs only for the docs lane.
+for s in (checkout, tip_step):
+    assert s["if"] == "steps.base.outputs.lands != 'true' && (inputs.docs-paths != '' || inputs.legs > 1)", s
+assert paths_step["if"] == "steps.base.outputs.lands != 'true' && inputs.docs-paths != ''", paths_step
+assert tip_step["env"] == {"BASE": "${{ github.event.pull_request.base.ref }}"}, tip_step["env"]
 assert paths_step["env"] == {"BASE": "${{ github.event.pull_request.base.ref }}",
+                             "TIP": "${{ steps.tip.outputs.tip }}",
                              "HEAD_SHA": "${{ github.event.pull_request.head.sha }}",
                              "DOCS": "${{ inputs.docs-paths }}"}, paths_step["env"]
 
@@ -63,7 +70,8 @@ assert paths_step["env"] == {"BASE": "${{ github.event.pull_request.base.ref }}"
 # own, under the name autoland looks for.
 check, docs = jobs["check"], jobs["docs"]
 assert check["needs"] == "lane" and docs["needs"] == "lane"
-assert "name" not in check, check.get("name")
+# Named check with one leg, as it always was, and after its leg with more.
+assert check["name"] == "${{ inputs.legs > 1 && format('leg {0} of {1}', matrix.leg, inputs.legs) || 'check' }}", check["name"]
 assert docs["name"] == names[2] + "${{ github.event.pull_request.base.ref }} from ${{ needs.lane.outputs.fork }}", (
     docs["name"], names[2])
 # It reads the tree and attests nothing.
@@ -168,8 +176,16 @@ def pr(docs_paths=ALL, files=(), gone=(), moved=(), main_moves=(), name=[0]):
     ws = tempfile.mkdtemp(dir=tmp)
     git("clone", "-q", "--no-checkout", origin, ws, cwd=tmp)
     git("checkout", "-q", "--detach", head, cwd=ws)
-    code, said, out = output(paths_step["run"], cwd=ws, BASE="main", HEAD_SHA=head, DOCS=docs_paths)
+    code, said, out = output(paths_step["run"], cwd=ws, BASE="main", TIP=tip_of(ws), HEAD_SHA=head, DOCS=docs_paths)
     return code, said, out, head
+
+
+def tip_of(ws):
+    """The tip step, as the lane job's checkout leaves it: where the base is."""
+    code, said, out = output(tip_step["run"], cwd=ws, BASE="main")
+    want = git("rev-parse", "main", cwd=origin)
+    assert code == 0 and out == f"tip={want}\n" and f"main is at {want}" in said, (code, said, out, want)
+    return want
 
 
 def lane_of(**kw):
@@ -231,7 +247,7 @@ git("clone", "-q", "--no-checkout", origin, ws, cwd=tmp)
 git("checkout", "-q", "--orphan", "alone", cwd=ws)
 git("rm", "-rqf", ".", cwd=ws)
 alone = change(ws, ["README.md"])
-code, said, out = output(paths_step["run"], cwd=ws, BASE="main", HEAD_SHA=alone, DOCS=ALL)
+code, said, out = output(paths_step["run"], cwd=ws, BASE="main", TIP=tip_of(ws), HEAD_SHA=alone, DOCS=ALL)
 assert code == 0 and out == "docs=false\n" and "shares no history" in said, (code, said, out)
 print("unrelated histories get the whole gate: ok")
 

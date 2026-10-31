@@ -3,7 +3,9 @@ in for: a private repo's job signs its gate's result with its own token,
 whose audience names the digest of the statement it keeps beside the token
 (FieldmouseWorks/Conary, docs/ci-attestation.md), a failed gate is attested
 as failed, a public repo's is left to actions/attest, and a run with no OIDC
-token attests nothing.
+token attests nothing. With legs, no leg attests: the gate job does, with
+the same steps, and passes only when every leg passed on its tree, its log
+the legs' own, each as its leg wrote it.
 
   python3 -I tests/attestation.py .github/workflows/flake-check.yml
   nix build .#checks.x86_64-linux.attestation
@@ -12,6 +14,7 @@ token attests nothing.
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -20,14 +23,16 @@ import urllib.parse
 
 import yaml
 
-job = yaml.safe_load(open(sys.argv[1]))["jobs"]["check"]
+jobs = yaml.safe_load(open(sys.argv[1]))["jobs"]
+job = jobs["check"]
 assert job["permissions"]["id-token"] == "write", job["permissions"]
 steps = job["steps"]
 at = next(i for i, s in enumerate(steps) if s.get("id") == "subject")
 step = steps[at]
 assert step["shell"] == "bash"
-# Every repo's push and PR, a private one's included.
-assert step["if"] == ("${{ !cancelled() && steps.gate.outcome != 'skipped'"
+# Every repo's push and PR, a private one's included; with legs, the gate
+# job's, not a leg's.
+assert step["if"] == ("${{ !cancelled() && steps.gate.outcome != 'skipped' && inputs.legs <= 1"
                       " && (github.event_name == 'push' || github.event_name == 'pull_request') }}"), step["if"]
 assert step["env"]["PRIVATE"] == "${{ github.event.repository.private }}", step["env"]
 assert step["env"]["OUTCOME"] == "${{ steps.gate.outcome }}", step["env"]
@@ -43,6 +48,39 @@ assert token_up["with"] == {"name": "${{ steps.subject.outputs.attestation-name 
 assert bundle["uses"].startswith("actions/attest@"), bundle
 assert bundle["if"] == ("${{ !cancelled() && steps.subject.outputs.path"
                         " && !github.event.repository.private }}"), bundle["if"]
+
+# With legs: each leg's log goes up as an artifact named for it, with its
+# digest and tree as the leg's output, one name per leg, which the job
+# passes on. The gate job, once every leg has finished, passed or failed,
+# checks out and merges as they did, judges them, and attests with the very
+# same steps as the gate's job with one leg, but for whether it runs.
+leg_at = next(i for i, s in enumerate(steps) if s.get("id") == "leg")
+leg_step, leg_up = steps[leg_at], steps[leg_at + 1]
+assert steps[leg_at - 1]["id"] == "gate" and leg_at < at, [s.get("id") for s in steps]
+assert leg_step["if"] == "${{ !cancelled() && steps.gate.outcome != 'skipped' && inputs.legs > 1 }}", leg_step["if"]
+assert leg_step["env"] == {"LEG": "${{ matrix.leg }}"}, leg_step["env"]
+assert leg_up["uses"].startswith("actions/upload-artifact@"), leg_up
+assert leg_up["if"] == "${{ !cancelled() && steps.leg.outputs.name }}", leg_up["if"]
+assert leg_up["with"] == {"name": "${{ steps.leg.outputs.name }}", "path": "${{ runner.temp }}/flake.log"}, leg_up["with"]
+assert job["outputs"] == {f"leg-{k}": f"${{{{ steps.leg.outputs.leg-{k} }}}}" for k in range(1, 9)}, job["outputs"]
+gate = jobs["gate"]
+assert gate["needs"] == ["lane", "check"], gate["needs"]
+assert gate["if"] == ("${{ !cancelled() && inputs.legs > 1"
+                      " && (needs.check.result == 'success' || needs.check.result == 'failure') }}"), gate["if"]
+assert gate["permissions"] == job["permissions"], gate["permissions"]
+g = gate["steps"]
+assert g[:2] == steps[:2], g[:2]
+assert g[2]["uses"].startswith("actions/download-artifact@"), g[2]
+assert g[2]["with"] == {"pattern": "flake-log-leg-*", "path": "${{ runner.temp }}/legs"}, g[2]["with"]
+verdict = g[3]
+assert verdict["id"] == "gate" and verdict["shell"] == "bash" and "if" not in verdict, verdict
+assert verdict["env"] == {"LEGS": "${{ inputs.legs }}", "RESULT": "${{ needs.check.result }}",
+                          "OUTPUTS": "${{ toJSON(needs.check.outputs) }}"}, verdict["env"]
+assert g[4]["id"] == "subject", g[4]
+assert {**g[4], "if": step["if"]} == step, g[4]
+assert g[4]["if"] == ("${{ !cancelled() && steps.gate.outcome != 'skipped'"
+                      " && (github.event_name == 'push' || github.event_name == 'pull_request') }}"), g[4]["if"]
+assert g[5:] == steps[at + 1:], g[5:]
 
 tmp = tempfile.mkdtemp()
 script = os.path.join(tmp, "subject.sh")
@@ -180,3 +218,58 @@ lines = statement.splitlines()
 assert lines[:3] == ["conary revision v1", tip, head], lines
 assert json.loads(lines[3])["revision"] == {"base": tip, "head": head}, lines[3]
 print("a private repo's PR attests its revision: ok")
+
+# The legs, each its own log; then the gate job's verdict on them, as GitHub
+# gives it the legs' combined outputs and their artifacts.
+LEGS = 3
+
+
+def legs(logs, result="success", tamper=None, wrong_tree=None, missing=None, rename=None):
+    """Each leg's step, then the gate job's: its exit code, what it said and
+    the log it leaves to attest."""
+    runner_temp = tempfile.mkdtemp(dir=tmp)
+    outputs = {}
+    for k in range(1, LEGS + 1):
+        leg_temp = tempfile.mkdtemp(dir=tmp)
+        open(os.path.join(leg_temp, "flake.log"), "w").write(logs[k - 1])
+        out = os.path.join(leg_temp, "output")
+        open(out, "w").close()
+        p = subprocess.run(["bash", "-eo", "pipefail", "-c", leg_step["run"]], cwd=repo, capture_output=True, text=True,
+                           env={**env, "RUNNER_TEMP": leg_temp, "GITHUB_OUTPUT": out, "LEG": str(k)})
+        assert p.returncode == 0, p.stderr
+        said = dict(line.split("=", 1) for line in open(out).read().splitlines())
+        name = said["name"]
+        assert re.fullmatch(f"flake-log-leg-{k}-[0-9a-f-]{{36}}", name), name
+        assert set(said) == {"name", f"leg-{k}"}, said
+        if k == missing:
+            continue
+        value = said[f"leg-{k}"]
+        if k == wrong_tree:
+            value = value.rsplit(" ", 1)[0] + " " + "0" * 40
+        if k == rename:
+            value = value.replace(f"leg-{k}-", "leg-9-", 1)
+        outputs[f"leg-{k}"] = value
+        # download-artifact: each artifact in a directory of its own name.
+        os.makedirs(os.path.join(runner_temp, "legs", name))
+        log = open(os.path.join(leg_temp, "flake.log")).read() + ("tampered\n" if k == tamper else "")
+        open(os.path.join(runner_temp, "legs", name, "flake.log"), "w").write(log)
+    p = subprocess.run(["bash", "-eo", "pipefail", "-c", verdict["run"]], cwd=repo, capture_output=True, text=True,
+                       env={**env, "RUNNER_TEMP": runner_temp, "LEGS": str(LEGS), "RESULT": result,
+                            "OUTPUTS": json.dumps(outputs)})
+    return p.returncode, p.stdout + p.stderr, open(os.path.join(runner_temp, "flake.log")).read()
+
+
+LOGS = ["first leg\n", "second leg\n", "third leg\n"]
+code, said, log = legs(LOGS)
+assert code == 0, said
+assert log == "".join(f"leg {k} of {LEGS}:\n{LOGS[k - 1]}" for k in range(1, LEGS + 1)), log
+print("with legs, the gate job passes when every leg did, its log theirs: ok")
+for kw, why in (({"result": "failure"}, "the legs: failure"),
+                ({"missing": 2}, "leg 2 of 3 left no log"),
+                ({"tamper": 3}, "leg 3 of 3: its log here isn't the one it wrote"),
+                ({"rename": 1}, "leg 1 of 3: its log here isn't the one it wrote"),
+                ({"wrong_tree": 2}, "leg 2 of 3 checked tree 0000000000000000000000000000000000000000")):
+    code, said, _ = legs(LOGS, **kw)
+    assert code != 0 and why in said, (kw, code, said)
+print("a failed leg, or a leg's log missing, changed or for another tree, fails the gate job: ok")
+

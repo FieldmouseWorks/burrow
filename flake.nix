@@ -814,8 +814,9 @@
         # The shared CI's gate step with eval-apart (flake-check.yml), its own
         # script with nix evaluating test flakes for real and a stand-in for
         # its builds: one nix process per derivation, each a GC root until
-        # it's built, every output checked as nix flake check checks it, and a
-        # flake with an output it doesn't know refused.
+        # it's built, every output checked as nix flake check checks it, a
+        # flake with an output it doesn't know refused, and each of legs
+        # evaluating and building its own share.
         gate = pkgs.runCommand "gate-check" { nativeBuildInputs = [ (pkgs.python3.withPackages (p: [ p.pyyaml ])) pkgs.git pkgs.jq pkgs.nix ]; } ''
           python3 -I ${./tests/gate.py} ${./.github/workflows/flake-check.yml}
           touch $out
@@ -830,6 +831,8 @@
         # The shared CI's attestation step (flake-check.yml), its own script
         # with stand-ins for curl and gh: a private repo's job signs with its
         # own token, its audience the digest of the statement kept beside it.
+        # With legs, the gate job attests them only once every leg passed on
+        # its tree, with each leg's log as the leg wrote it.
         attestation = pkgs.runCommand "attestation-check" { nativeBuildInputs = [ (pkgs.python3.withPackages (p: [ p.pyyaml ])) pkgs.git pkgs.jq ]; } ''
           python3 -I ${./tests/attestation.py} ${./.github/workflows/flake-check.yml}
           touch $out
@@ -844,7 +847,8 @@
         '';
         # The shared CI's merge step (flake-check.yml), its own script on
         # real repos: a PR is checked merged with its base as the base is when
-        # the job starts, and one that no longer merges cleanly fails.
+        # the job starts (with legs, as the lane job found it, so every leg
+        # checks one tree), and one that no longer merges cleanly fails.
         pr-base = pkgs.runCommand "pr-base-check" { nativeBuildInputs = [ (pkgs.python3.withPackages (p: [ p.pyyaml ])) pkgs.git ]; } ''
           python3 -I ${./tests/pr-base.py} ${./.github/workflows/flake-check.yml}
           touch $out
