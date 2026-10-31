@@ -26,9 +26,17 @@ FOREGROUND = ("A check can outlast a tool call's time limit: start it in the bac
               "is killed when your turn ends, and no notification of it ever comes back. ")
 
 
-def fix_task(repo, pr, why, proofs=None, train=False):
+# What a fix job runs before it pushes. A conflict's job merges and pushes: the
+# whole gate can outlast it, and then the merge is never pushed.
+TESTS = "Run the repo's tests before you push."
+CONFLICT_TESTS = ("Run the tests of what the conflicts touched before you push, not the repo's whole gate: it can outlast this job, "
+                  "which would end with the merge unpushed, and CI runs the whole gate once you push.")
+
+
+def fix_task(repo, pr, why, proofs=None, train=False, conflict=False):
     """proofs: the failing checks that run on a machine, not in CI, and how;
-    train: the merge train's failure is among them."""
+    train: the merge train's failure is among them; conflict: it's handed to
+    merge its base in."""
     machine = "".join(f" {c} isn't CI: it's run on a machine, like this: {how} Rerun it that way on what you push."
                       for c, how in (proofs or {}).items()) + (f" {FOREGROUND.strip()}" if proofs else "")
     if train:
@@ -52,7 +60,7 @@ def fix_task(repo, pr, why, proofs=None, train=False):
         "the branch moved on, someone else is at work on it (the Claude session that opened the PR, say): fetch it, read "
         "what landed, and build on that, or stop if it already settles what you were fixing. Never push over it. "
         "A review that requests changes is the same: address it, then reply on the PR saying what you did. "
-        f"If CI is red, read the failing job's log, fix the cause and push.{machine} Run the repo's tests before you push. "
+        f"If CI is red, read the failing job's log, fix the cause and push.{machine} {CONFLICT_TESTS if conflict else TESTS} "
         "Don't ask for a review and don't merge: the steward does those once you're done. "
         "If something needs the owner (a decision only they can make, a secret), comment on the PR saying exactly what, "
         f"add the {CFG['labels']['owner']} label, and stop."

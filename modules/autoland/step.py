@@ -384,9 +384,12 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
             log(f"{tag}: a Claude job ({busy}) is still working on this head; {kind} waits for it")
             who = f"a Claude job takes it once the one on {ON[busy]} ends"
         else:
-            proofs = {c: rc["proofJobs"][c] for c in ci_names if c in rc["proofJobs"]} if ci == "red" else {}
+            # A conflict's merge is a new head, whose proofs run again anyway:
+            # its job doesn't rerun them, which can outlast it like the gate.
+            conflict = kind == "conflictFixed"
+            proofs = {c: rc["proofJobs"][c] for c in ci_names if c in rc["proofJobs"]} if ci == "red" and not conflict else {}
             train = ci == "red" and any(c.startswith(f"{T.CONTEXT} (") for c in ci_names)
-            if started(kind, fix_task(repo, pr, why, proofs, train), at, bool(how)):
+            if started(kind, fix_task(repo, pr, why, proofs, train, conflict), at, bool(how)):
                 if retry:
                     if not how:
                         st[kind + "Again"] = at
@@ -469,7 +472,7 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
         else:
             hand_off(f"it conflicts with {base}, so GitHub can't merge it and its CI doesn't run: merge {base} into the "
                      "branch (a merge commit: never rebase or force-push), resolve every conflict keeping what both sides "
-                     "meant, and run the repo's tests before you push. If the two sides can't both be kept, which one stays "
+                     "meant. If the two sides can't both be kept, which one stays "
                      f"is the owner's call. Just before you merge, and again before you push, check that the PR is still open "
                      f"on {base} at head {head}: if its base or head moved on, stop without merging or pushing, since the "
                      "steward hands what it is now to a new job", f"Conflicts with {base}", "conflictFixed", f"{head} {base}",
