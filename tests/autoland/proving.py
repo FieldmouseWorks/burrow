@@ -319,12 +319,17 @@ assert "~~~~ no banner" not in said[0] and said[0].count("~~~~") == 2, said  # t
 assert f"`vm` failed on {'a' * 40}" in said[0] and f"`{X}.drv`" in said[0], said
 run(clean(checks=VM), 1000)
 assert comments() == [], WROTE
-# Lines too long for one comment between them: the end of them, cut short
-# of GitHub's 65,536, its last line whole.
-with open(f"{tmp}/state/builds/{BUILT[0]}/log", "w") as f:
-    f.write("".join(f"line {i} " + "x" * 2000 + "\n" for i in range(60)) + "subtest: it boots ... failed: no banner\n")
-said = P.failed_log(BUILT[0], ["vm"])
-assert len(said) < 65536 and said.rstrip().endswith("failed: no banner\n~~~~") and "line 59 " in said, len(said)
+# Lines too long for one comment between them, in ASCII, in characters of
+# three bytes each, or bytes that aren't UTF-8 at all: the end of them, the
+# whole comment short of GitHub's 65,536 characters and of what Linux takes
+# as gh's one argument, its last line whole.
+for line in (b"x" * 2000, "\u754c".encode() * 2000, b"\xff\xfe" * 2000):
+    with open(f"{tmp}/state/builds/{BUILT[0]}/log", "wb") as f:
+        f.write(b"".join(f"line {i} ".encode() + line + b"\n" for i in range(60)) + b"subtest: it boots ... failed: no banner\n")
+    said = P.failed_log(BUILT[0], ["vm"])
+    assert len(said) < 65536 and len(said.encode()) <= P.COMMENT_BYTES, (len(said), len(said.encode()))
+    assert said.rstrip().endswith("failed: no banner\n~~~~") and said.startswith(f"`vm` failed on {'a' * 40}"), said[-200:]
+    subprocess.run(["true", f"body={said}"], check=True)  # E2BIG past 128 KiB
 # GitHub doesn't take the log: no status either, so the PR isn't handed to
 # a fix without it; both go up on the next pass, the log once.
 fresh_pr_state()

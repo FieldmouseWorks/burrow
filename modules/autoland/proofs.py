@@ -62,7 +62,10 @@ FREE = "nothing new to build"  # ahead's answer for a proof that skips the line
 EVAL_TIMEOUT = 300  # seconds, its inputs fetched included
 EVAL_RETRY = 15  # minutes before an eval that failed on a head is tried again
 LOG_TAIL = 60  # lines of a failed build's log that go on its PR
-LOG_CHARS = 60000  # and characters at most: GitHub refuses a comment past 65,536
+# The most a failed build's comment may take, in UTF-8 bytes: under GitHub's
+# 65,536 characters, and under the 128 KiB Linux takes for the one argument
+# gh is given it in.
+COMMENT_BYTES = 60000
 KEEP = 7  # days an ended build's folder, its outputs' roots in it, is kept
 
 
@@ -454,21 +457,25 @@ def verdicts(jid):
 def failed_log(jid, checks):
     """What goes on the PR for a build whose checks failed: which, and the
     end of its log, where a VM test says which subtest failed and how: its
-    last LOG_TAIL lines, cut to their last LOG_CHARS characters, so GitHub
-    always takes it."""
+    last LOG_TAIL lines, cut from the front to what fits in COMMENT_BYTES
+    with the rest of the comment, so GitHub always takes it."""
     b = load(f"builds/{jid}/build.json", {})
     try:
         with open(os.path.join(STATE, "builds", jid, "log"), errors="replace") as f:
             tail = "".join(f.readlines()[-LOG_TAIL:])
-        if len(tail) > LOG_CHARS:
-            tail = "…" + tail[-LOG_CHARS:]
     except OSError:
         tail = "(its log is gone)\n"
     fence = "~~~~"  # a log can hold backticks, not this
     names = ", ".join(f"`{c}`" for c in checks)
     drvs = ", ".join(f"`{b['drvs'][c]}`" for c in checks)
-    return (f"{names} failed on {b['head']}: building {drvs} on this machine failed. "
-            f"The end of its log (`nix log` on the derivation has all of it):\n\n{fence}\n{tail.replace(fence, '~~~')}{fence}\n")
+    top = (f"{names} failed on {b['head']}: building {drvs} on this machine failed. "
+           f"The end of its log (`nix log` on the derivation has all of it):\n\n{fence}\n")
+    log_bytes = tail.replace(fence, "~~~").encode()
+    room = COMMENT_BYTES - len((top + fence + "\n").encode())
+    if len(log_bytes) > room:
+        # A character the cut lands inside is dropped whole.
+        log_bytes = "…".encode() + log_bytes[-(room - len("…".encode())):].decode(errors="ignore").encode()
+    return f"{top}{log_bytes.decode()}{fence}\n"
 
 
 def fits(st, stage):
