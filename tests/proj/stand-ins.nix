@@ -13,7 +13,9 @@
   # going; "detach N" does too, having left work in its own session that
   # ignores TERM and writes to the stream. Told so, it answers again, or as
   # /tmp/cut-mode says: "linger" answers and stays up, "hang" says nothing,
-  # "crash" and "signal" die without a word, "error" fails;
+  # "crash" and "signal" die without a word, "error" fails, "resumed" puts
+  # out the empty result a resumed Claude Code can before it starts, then
+  # works past proj's ten seconds and answers;
   # "chatter N" says something every second for N seconds, then answers;
   # "named N" names its session ("named") as Claude's first line does, then
   # sleeps N seconds without answering, as an issue's "inbox-hang" does
@@ -60,6 +62,10 @@
           error)
             echo '{"type":"result","session_id":"s","is_error":true,"errors":["boom"]}'
             exit 1 ;;
+          resumed)
+            echo '{"type":"result","session_id":"s","num_turns":0,"result":"","is_error":false}'
+            sleep 15
+            echo '{"type":"result","session_id":"s","num_turns":4,"result":"the build passed","is_error":false}' ;;
           *) echo '{"type":"result","session_id":"s","result":"the build passed","is_error":false}' ;;
         esac
         exit 0 ;;
