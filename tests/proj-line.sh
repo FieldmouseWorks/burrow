@@ -1,7 +1,8 @@
 # What a look at proj's line costs (modules/proj/line.sh): the forks it takes
 # don't grow with the line, git runs at most once per project, and the note of
 # who's next lets every other waiter skip its look, for as long as it's fresh.
-# And where a turn stands in it: from when its job's work began (--since).
+# And where a turn stands in it: from when its job's work began (--since),
+# with MAX_WAIT from when it came.
 #
 #   bash tests/proj-line.sh modules/proj/pick.sh modules/proj/line.sh
 # shellcheck disable=SC2154 # seen and busy, from look
@@ -238,5 +239,25 @@ asked=$(entry asked first)
 [[ $new =~ ^2-[0-9]{19}-new$ ]] || fail "new's place from now: $new"
 got=$(printf '%s\n' "$new" "$old" "$asked" | LC_ALL=C sort | cut -d- -f3- | paste -sd ' ')
 [ "$got" = "asked old-pr new" ] || fail "places in order: $got"
+
+# MAX_WAIT goes by how long a turn has waited, not by its place's WHEN: one
+# whose work began long ago (--since) waits among the normal turns until it has
+# waited MAX_WAIT itself, then goes among the --first ones from the same WHEN.
+kill "${pids[@]}" 2>/dev/null || true
+wait "${pids[@]}" 2>/dev/null || true
+pids=()
+rm -rf "${jobs:?}/.queue" "${jobs:?}/.slots"
+mkdir -p "$jobs/.queue" "$jobs/.slots" "$jobs/late"
+MAX_JOBS=1
+exec {held}>"$jobs/.slots/1"
+flock -n "$held"
+echo $((EPOCHSECONDS - 7200)) >"$jobs/late/since"
+came=2-$(cat "$jobs/late/since")000000000-late
+MAX_WAIT=4 waiter late
+for _ in $(seq 1 200); do [ -e "$jobs/.queue/$came" ] && break; sleep 0.05; done
+[ -e "$jobs/.queue/$came" ] || fail "late went in as $(find "$jobs/.queue" -mindepth 1 -printf '%f '), not $came"
+for _ in $(seq 1 300); do [ -e "$jobs/.queue/1-${came#2-}" ] && break; sleep 0.05; done
+[ -e "$jobs/.queue/1-${came#2-}" ] || fail "late wasn't among the --first ones past MAX_WAIT: $(find "$jobs/.queue" -mindepth 1 -printf '%f ')"
+exec {held}>&-
 
 echo "proj-line: ok"

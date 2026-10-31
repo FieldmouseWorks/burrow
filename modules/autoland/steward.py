@@ -7,7 +7,10 @@ event reports):
      `owners`, new ones included. Bring each one's settings to the baseline
      (auto-merge, delete-branch-on-merge, squash, secret scanning, the
      `baseline` ruleset); a repo seen for the first time also gets a Claude
-     job that brings its files to docs/repo-baseline.md (repos.py).
+     job that brings its files to docs/repo-baseline.md (repos.py). So does
+     one made under the name of a repo GitHub deleted, once the deleted
+     one's Claude jobs are stopped, its clones moved aside and what the
+     steward kept about it forgotten: before anything else acts on it.
   2. For each open PR that isn't a draft, work out where it stands and do
      the next thing (step.py): queue a review of its head from each
      reviewer (Codex, reviewers.py), post what they found, hand open
@@ -25,7 +28,7 @@ event reports):
   5. Keep one issue up to date with everything waiting for the owner, and
      one with what the pipeline is stuck on, for a Claude job (repos.py).
 
-`autoland-steward kick OWNER/REPO` is a pass over that repo alone (2, 4
+`autoland-steward kick OWNER/REPO` is a pass over that repo alone (1, 2, 4
 and 5), run by its autoland@ unit (only that holds the App's key), the
 one burrow-events starts within seconds of what changes it: a webhook
 delivery, a Claude job's turn ending, a reviewer's answer coming
@@ -99,8 +102,8 @@ def main():
             raise
     # `kick REPO...`: just those repos' PRs, now (burrow-events, on what
     # changed on GitHub or here, or a wait that has ended). The full pass,
-    # when burrow-events starts and hourly, does the rest: the settings, new
-    # repos' baseline jobs and branches.
+    # when burrow-events starts and hourly, does the rest: the branch sweep,
+    # and the repos no event has named.
     kick = [k.lower() for k in sys.argv[2:]] if sys.argv[1:2] == ["kick"] else None
     if not DRY:
         # One pass at a time, full or kicked: two would act on the same PRs.
@@ -134,7 +137,16 @@ def run_pass(kick):
         digest[repo] = mine = []
         with C.acting_for(repo):
             try:
-                new = kick is None and R.settle_repo(r, known)
+                # First: nothing of a deleted repo's may act on the one that
+                # took its name, so until that's done nothing else is.
+                R.restart(r, known, failed)
+            except Exception as e:
+                log(f"{repo}: starting it over as new: {e}")
+                waits.failed(repo)
+                C.wake(repo, C.NOW + 5 * MIN)  # ends: waits.failed watches the repo
+                continue
+            try:
+                new = R.settle_repo(r, known)
                 if (new and CFG["baselineJobs"] and started < CFG["baselinePerPass"]
                         and C.NOW - failed.get(repo, 0) > 86400):
                     jid = C.job(repo, CFG["baselineTask"].replace("REPO", repo), clone=True)
@@ -231,8 +243,8 @@ def run_pass(kick):
         # didn't see to (one whose pass failed among them), and tells its
         # jobs how every repo's proofs run.
         save("repos.json", C.coverage(repos, covered))
-        save("known.json", sorted(known))
-        save("baseline-failed.json", failed)
+    save("known.json", sorted(known))
+    save("baseline-failed.json", failed)
     if not DRY:
         V.sweep(read, live)
     if kick is None:

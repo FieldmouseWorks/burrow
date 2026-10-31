@@ -262,6 +262,8 @@
         proj = import ./tests/proj.nix { inherit self pkgs; };
         # A turn's clock, which stands still while it waits in line.
         proj-clock = import ./tests/proj-clock.nix { inherit self pkgs; };
+        # A switch reaches the turns already waiting in line, each in its place.
+        proj-deployed = import ./tests/proj-deployed.nix { inherit self pkgs; };
         # Who takes a free slot: the pipeline's own (only its own repos'
         # pipeline jobs), and each project's cap.
         proj-pick = pkgs.runCommand "proj-pick-check" { nativeBuildInputs = [ pkgs.shellcheck pkgs.git ]; } ''
@@ -717,7 +719,7 @@
           touch $out
         '';
         # flake-gate: a repo's CI gate step, run here as CI runs it, and
-        # burrow's own evaluating apart, as a Claude job's memory needs.
+        # burrow's own evaluating apart, so a Claude job's gate holds little.
         flake-gate = pkgs.runCommand "flake-gate-check" { nativeBuildInputs = [ (pkgs.callPackage ./tools/flake-gate/package.nix { }) pkgs.git pkgs.yq-go pkgs.shellcheck ]; } ''
           shellcheck -s bash ${./tests/flake-gate.sh}
           bash ${./tests/flake-gate.sh} ${./.}
