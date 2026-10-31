@@ -450,6 +450,12 @@
           bash ${./tests/update-push.sh} ${./modules/updates/push.sh}
           touch $out
         '';
+        # HOST-update's VM tests take a heavy slot.
+        update-check = pkgs.runCommand "update-check-check" { nativeBuildInputs = [ pkgs.shellcheck ]; } ''
+          shellcheck -s bash -e SC2154 ${./modules/updates/check.sh} ${./tests/update-check.sh}
+          bash ${./tests/update-check.sh} ${./modules/updates/check.sh}
+          touch $out
+        '';
         # HOST-update's own PR in a train repo (modules/updates/propose.sh):
         # real git, with a stand-in for gh.
         update-propose = pkgs.runCommand "update-propose-check" { nativeBuildInputs = [ pkgs.shellcheck pkgs.git pkgs.jq ]; } ''
@@ -654,6 +660,27 @@
           pinDigest yes
           digest yes
           lockFileMaintenance yes'
+          [ "$got" = "$(sed 's/^ *//' <<<"$want")" ] || { echo "got: $got"; exit 1; }
+          touch $out
+        '';
+        # The PR titles Renovate gives the example's updates, as Renovate's
+        # own code writes them: each the house style's `area: plain
+        # sentence`, "deps: ...", whichever type config:recommended would
+        # give it. The title is the subject the steward squashes onto main.
+        renovate-titles = pkgs.runCommand "renovate-titles-check" { } ''
+          export HOME=$TMPDIR
+          got=$(${pkgs.lib.getExe pkgs.nodejs_24} ${./tests/renovate-titles.mjs} ${pkgs.renovate} \
+            ${self.nixosConfigurations.example.config.systemd.services.renovate.environment.RENOVATE_CONFIG_FILE} 2>/dev/null)
+          want='deps: update dependency left-pad to 1.3.1
+          deps: update dependency vitest to 3.2.0
+          deps: update dependency vite to v7
+          deps: lock file maintenance (npm)
+          deps: update dependency net.fabricmc:fabric-loader to 0.20.1
+          deps: lock file maintenance (gradle)
+          deps: update rust crate tokio to 1.41.0
+          deps: lock file maintenance (cargo)
+          deps: update fieldmouseworks/burrow digest to 0fce5b8
+          deps: lock file maintenance (nix)'
           [ "$got" = "$(sed 's/^ *//' <<<"$want")" ] || { echo "got: $got"; exit 1; }
           touch $out
         '';

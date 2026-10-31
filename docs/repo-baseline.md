@@ -47,7 +47,10 @@ change nothing else in the same PR.
   rule the steward can't turn off) is brought up to date instead, and the
   new head is settled like any other.
 - The `hold`, `needs-owner` and `first` labels (`burrow.autoland.labels`),
-  which the steward, its jobs and the owner put on PRs.
+  which the steward, its jobs and the owner put on PRs, and the steward's
+  own `waiting: release age`, `waiting: proof slot` and `waiting: reviewer`,
+  which say at a glance what a PR waits on while it does (its
+  `review-settled` status says the rest).
 
 ## The steward's GitHub App
 
@@ -124,7 +127,7 @@ root only.
    finds the cause and opens a PR from `autoland/red-SHA` that reverts the
    merge that broke it, or fixes it, and that PR lands like any other. Nothing
    more while the job works or its PR is open; one more job if the branch is
-   still red after, then the owner. Green again without it (fixed some other
+   still red after, then the pipeline's stuck issue. Green again without it (fixed some other
    way, or a flake), its PR is closed once the job has ended.
 
 Waiting for the owner instead, listed in one issue: what a judge job sent
