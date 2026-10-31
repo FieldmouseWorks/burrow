@@ -195,24 +195,14 @@ def settle_repo(r, known):
 def restart(r, known, failed):
     """A repo made under the name of one GitHub deleted (GitHub hands a
     deleted repo's name to the next one) starts over as new, before
-    anything acts on it. It's another repo when GitHub's id for it isn't
-    the one kept with the settings the steward last set under its name;
-    for settings kept before the steward kept ids, when they were set
-    before it was made, or in the second it was (createdAt has no finer
-    grain). Its name's state is found in any case: GitHub's names don't go
-    by it. Then `reset`."""
+    anything acts on it, when the settings the steward last set under its
+    name were another repo's (C.replaced). Then `reset`."""
     repo = r["repo"]
-    k = repo.replace("/", "_").lower()
-    for name in sorted(os.listdir(C.STATE)):
-        m = re.fullmatch(r"repo-(.+)\.json", name)
-        if not m or m.group(1).lower() != k:
-            continue
-        st = load(name, {})
-        if "settings" not in st or (st["id"] == r["id"] if "id" in st else st["settings"] >= ts(r["created"]) + 1):
-            continue
-        log(f"{repo}: made at {r['created']}, and isn't the repo of its name the steward settled; starting it over as new")
-        if not DRY:
-            reset(r, m.group(1), known, failed)
+    for k, st in C.kept_state(repo):
+        if C.replaced(st, r):
+            log(f"{repo}: made at {r['created']}, and isn't the repo of its name the steward settled; starting it over as new")
+            if not DRY:
+                reset(r, k, known, failed)
 
 
 def reset(r, k, known, failed):
