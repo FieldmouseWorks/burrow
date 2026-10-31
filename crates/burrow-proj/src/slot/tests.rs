@@ -17,6 +17,7 @@ use std::process::{Child, Command, Stdio};
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
+use rustix::process::{Pid, Signal, kill_process};
 use tempfile::TempDir;
 
 use super::{
@@ -118,9 +119,26 @@ fn child() {
     let max_jobs: usize = env::var(MAX_JOBS_ENV).unwrap().parse().unwrap();
     let cfg = config(Path::new(&jobs), max_jobs);
     let mut held = None;
-    if what == "take" {
+    if what == "take" || what == "leave" {
         let id = env::args().skip_while(|a| a != "_exec").nth(1).unwrap();
         held = Some(take(&cfg, &id, "1", Class::Normal).unwrap());
+        // Work the turn leaves behind: a sleep in the background of a shell
+        // that's gone, so nothing's child, which ignores TERM.
+        if what == "leave" {
+            let left = cfg.jobs.join(&id).join("left");
+            assert!(
+                Command::new("sh")
+                    .args([
+                        "-c",
+                        r#"trap '' TERM; sleep 600 </dev/null >/dev/null 2>&1 & echo $! >"$0""#
+                    ])
+                    .arg(&left)
+                    .stdin(Stdio::null())
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
         fs::write(cfg.jobs.join(&id).join("took"), now().to_string()).unwrap();
     }
     let _ = std::io::stdin().read(&mut [0]);
@@ -563,4 +581,65 @@ fn an_unstick_turn_takes_its_own_slot() {
     assert!(another.try_lock().is_err(), "the slot isn't held");
     slot.unlock().unwrap();
     held.unlock().unwrap();
+}
+
+/// What a test's turn left running, killed however the test ends.
+struct Left(Pid);
+
+impl Drop for Left {
+    fn drop(&mut self) {
+        let _ = kill_process(self.0, Signal::KILL);
+    }
+}
+
+/// Whether a slot is free, as a waiter would find it. Let go of by unlocking,
+/// not by closing: a child another test forks meanwhile shares the file until
+/// it execs.
+fn free(slot: &Path) -> bool {
+    let f = File::create(slot).unwrap();
+    let ok = f.try_lock().is_ok();
+    if ok {
+        f.unlock().unwrap();
+    }
+    ok
+}
+
+// A slot stays with what its turn left running: with the turn's process
+// killed and the work it left (detached, and deaf to TERM) still up, no
+// waiter can take it; once that's gone, it's free. A numbered slot and the
+// --unstick one alike.
+#[test]
+fn a_slot_stays_with_what_its_turn_left() {
+    for (id, slot) in [("t", "1"), ("u", "unstick")] {
+        let tmp = TempDir::new().unwrap();
+        let jobs = jobs_dir(&tmp);
+        fs::create_dir_all(jobs.join(id)).unwrap();
+        fs::write(jobs.join(id).join("project"), "/src/web\n").unwrap();
+        if slot == "unstick" {
+            fs::write(jobs.join(id).join("unstick"), "").unwrap();
+        }
+        let turn = spawn_child(
+            "leave",
+            &jobs,
+            1,
+            &["_exec".into(), id.into(), "1".into(), "normal".into()],
+        );
+        until("the turn takes its slot", || took(&jobs, id).is_some());
+        let pid: i32 = fs::read_to_string(jobs.join(id).join("left"))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let left = Left(Pid::from_raw(pid).unwrap());
+        let slot = jobs.join(".slots").join(slot);
+        drop(turn);
+        kill_process(left.0, Signal::TERM).unwrap();
+        sleep(Duration::from_millis(500));
+        assert!(
+            !free(&slot),
+            "{id}: the slot went with its turn while what it left still runs"
+        );
+        drop(left);
+        until("the slot frees once what was left is gone", || free(&slot));
+    }
 }

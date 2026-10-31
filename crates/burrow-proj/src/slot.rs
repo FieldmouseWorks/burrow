@@ -3,9 +3,10 @@
 //! The line is jobs/.queue: one file per waiting turn, named so that sorting
 //! puts pipeline ones ahead, then --first ones, then the oldest, holding the
 //! waiting process's pid. A slot is a lock on jobs/.slots/N, and N.who says
-//! whose (class and project), so a turn that's killed frees its slot by
-//! itself; its place in line is cleared by the next look at the line, which
-//! finds its pid no longer that turn's. [`pick`] says who has a slot. The turn
+//! whose (class and project). The lock is the turn's and everything it starts
+//! ([`held`]), so a turn that's killed frees its slot by itself, once the last
+//! of what it left is gone too; its place in line is cleared by the next look
+//! at the line, which finds its pid no longer that turn's. [`pick`] says who has a slot. The turn
 //! is first or normal, as it was started; its job's class ([`Classes`]) is
 //! asked again at every look, and its place in line, its admission and its
 //! slot's N.who all go by that one answer.
@@ -136,11 +137,23 @@ fn unstick_slot(cfg: &Config, id: &str, n: &str) -> io::Result<File> {
     fs::create_dir_all(&slots)?;
     let slot = File::create(slots.join("unstick"))?;
     slot.lock()?;
+    let slot = held(slot)?;
     fs::write(
         slots.join("unstick.who"),
         format!("unstick\t{}\n", project(&job.dir)),
     )?;
     fs::write(job.turn(n, "slot"), "unstick\n")?;
+    Ok(slot)
+}
+
+/// A slot once taken, open across exec to everything the turn starts, as a
+/// shell's descriptor is: the lock is on the file, and it goes only with the
+/// last process holding it. So what the turn leaves running (a child that
+/// ignores TERM, a detached one) keeps the slot after `_exec` has ended or
+/// died, until the unit's stop has taken the last of it, and a waiter can't
+/// take a slot that work still runs in.
+fn held(slot: File) -> io::Result<File> {
+    rustix::io::fcntl_setfd(&slot, rustix::io::FdFlags::empty())?;
     Ok(slot)
 }
 
@@ -335,6 +348,7 @@ pub fn take(cfg: &Config, id: &str, n: &str, given: Class) -> io::Result<File> {
         {
             let slot = File::create(slots.join(n_slot.to_string()))?;
             if slot.try_lock().is_ok() {
+                let slot = held(slot)?;
                 fs::write(
                     slots.join(format!("{n_slot}.who")),
                     format!("{}\t{}\n", class.name(), project(&job.dir)),
