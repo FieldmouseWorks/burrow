@@ -79,22 +79,29 @@ assert not merged() and queued() == ["codex", "rival"], (status, queued())
 status, _ = run(mkpr(reviews=reviewed, body="Why not Rust: a generated file"), 610)
 assert merged(), status
 
-# A look at an earlier head that comes back after the PR moved on is posted
-# on the commit it read, so its findings go into the next push. Its
-# "nothing found" says nothing about the new head, which both look at.
-fresh_pr_state()
-run(mkpr(), 0)
-run(mkpr(), 600)
+# A look at an earlier head that comes back after the PR moved on can't know
+# what the pushes since fixed: while its reviewer is still to look at the
+# new head, that look decides, so this one is dropped, and counts no round.
+# Not even after a hold, however long it sat: on unhold, it would raise again
+# what was fixed meanwhile.
 newer = "9" * 40
-status, _ = run(mkpr(sha=newer), 700)
-assert queued() == ["codex", "rival"] and "Waiting for Codex's review" in status, status
-worker(rival={"result": "review", "answer": {"findings": [{"path": "a.py"}, {"path": "a.py"}]}})
-status, _ = run(mkpr(sha=newer), 710)
-assert sorted(POSTED) == [("codex", head, 0), ("rival", head, 2)] and os.listdir(DDIR) == [], POSTED
-assert not merged() and queued() == [] and "Waiting for Codex's review" in status, status
-# Its findings were a round, and the new head's own looks come once it's sat still.
-status, _ = run(mkpr(sha=newer, reviews=[rv_review("codex", 0), rv_review("rival", 2)], threads=[False, False]), 1300)
-assert "2 open review threads" in status and queued() == ["codex", "rival"], status
+for held in (False, True):
+    fresh_pr_state()
+    run(mkpr(), 0)
+    run(mkpr(), 600)
+    status, _ = run(mkpr(sha=newer, labels=["hold"] * held), 700)
+    assert queued() == ["codex", "rival"], status
+    worker(rival={"result": "review", "answer": {"findings": [{"path": "a.py"}, {"path": "a.py"}]}})
+    if held:
+        status, _ = run(mkpr(sha=newer, labels=["hold"]), 705)
+        assert POSTED == [] and len(os.listdir(DDIR)) == 2 and "On hold" in status, (POSTED, status)
+    status, _ = run(mkpr(sha=newer), 710)
+    assert POSTED == [] and os.listdir(DDIR) == [] and queued() == [], (held, POSTED, os.listdir(DDIR))
+    assert not merged() and "review findings" not in status and "Waiting for Codex's review" in status, (held, status)
+    assert pr_state()["rv"]["rival"].get("fails") is None, pr_state()
+    # The new head's own looks come once it's sat still.
+    status, _ = run(mkpr(sha=newer), 1300)
+    assert queued() == ["codex", "rival"] and "Rival is reviewing this commit" in status, (held, status)
 # Retargeted since, what an earlier head got on the old base isn't posted.
 fresh_pr_state()
 run(mkpr(), 0)
@@ -102,17 +109,18 @@ run(mkpr(), 600)
 worker(rival={"result": "review", "answer": {"findings": [{"path": "a.py"}]}})
 run(mkpr(sha=newer, base="release/1.x"), 700)
 assert POSTED == [] and os.listdir(DDIR) == [], POSTED
-# Findings on an earlier head, posted while the new one is already clean
-# and green, hold the pass back from landing: the threads it read are from
-# before them.
+# Nor do findings on an earlier head hold back a new one its reviewers
+# found clean: their looks at it decide.
 fresh_pr_state()
 run(mkpr(), 0)
 run(mkpr(), 600)
 worker(rival={"result": "review", "answer": {"findings": [{"path": "a.py"}]}})
 status, _ = run(clean(sha=newer), 700)
-assert ("rival", head, 1) in POSTED and not merged(), (POSTED, WROTE)
-assert "state=pending" in status and f"review findings on {head[:7]}" in status, status
-# So are an out-of-service reviewer's: its look came back before it went out.
+assert POSTED == [] and os.listdir(DDIR) == [] and merged(), (POSTED, status)
+# One out of service won't look at the new head, so what it said of an
+# earlier one is its last word: posted on the commit it read, its findings
+# hold the pass back from landing, since the threads it read are from
+# before them. Its look came back before it went out.
 fresh_pr_state()
 run(mkpr(), 0)
 run(mkpr(), 600)
@@ -162,20 +170,25 @@ fresh_pr_state()
 run(mkpr(), 0)
 run(mkpr(), 600)
 worker(rival={"result": "review", "answer": {"findings": [{"path": "a.py"}]}})
+C.save(V.OUT, {"rival": {"why": "spent", "until": C.ts(T0) + 86400}})
 STUB["post"] = RuntimeError("HTTP 502")
 for t in (700, 760):
     status, _ = run(clean(sha=newer), t)
-    assert not merged() and len(os.listdir(DDIR)) == 2 and C.WAKE, (t, WROTE, os.listdir(DDIR))
+    # Codex's, in service, was dropped: its look at the new head decides.
+    assert not merged() and os.listdir(DDIR) == [f"{V.item_name('pr-sam_r-5.json', 'rival', head, 'main')}.json"] and C.WAKE, (
+        t, WROTE, os.listdir(DDIR))
     assert f"Posting Rival's review of {head[:7]}" in status, status
 STUB["post"] = None
 status, _ = run(clean(sha=newer), 820)
 assert ("rival", head, 1) in POSTED and os.listdir(DDIR) == [] and not merged(), (POSTED, status)
 assert "late" not in pr_state()["rv"]["rival"], pr_state()
-# The third failure gives up on it: the new head's own reviews still decide.
+# The third failure gives up on it once the reviewer found the new head
+# clean, which covers what it found there.
 fresh_pr_state()
 run(mkpr(), 0)
 run(mkpr(), 600)
 worker(rival={"result": "review", "answer": {"findings": [{"path": "a.py"}]}})
+C.save(V.OUT, {"rival": {"why": "spent", "until": C.ts(T0) + 86400}})
 STUB["post"] = RuntimeError("HTTP 502")
 for t in (700, 760):
     run(clean(sha=newer), t)
@@ -184,6 +197,7 @@ status, _ = run(clean(sha=newer), 820)
 STUB["post"] = None
 assert os.listdir(DDIR) == [] and "late" not in pr_state()["rv"]["rival"], (os.listdir(DDIR), pr_state())
 assert POSTED == [] and merged(), (POSTED, status)
+os.remove(f"{tmp}/state/{V.OUT}")
 # Only a clean look at this head by the same reviewer covers what it found
 # there: out of service, it never comes, so the answer stays, the PR waits
 # and the owner hears. Back and clean on this head, it's let go.

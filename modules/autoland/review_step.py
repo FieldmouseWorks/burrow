@@ -136,13 +136,18 @@ def look(repo, pr, key, st, lost_on, digest, line, age, after, strike, cleared):
                 rs["gone"] = True
                 after(C.NOW, 1)  # ends: the second look, once
 
-    def overtaken(r):
+    def overtaken(r, over):
         """What came back from the reviewer's looks at the PR's earlier heads
-        after it moved on (V.sweep keeps them): posted on the commit each
-        one read, so what it found goes into the next push instead of
-        waiting for its look at this head. Findings there count as a round,
-        and hold this pass back from landing: the threads it read are from
-        before them. "Nothing found" there says nothing about this head."""
+        after it moved on (V.sweep keeps them). Such a look can't know what
+        the pushes since fixed, so while the reviewer is still to look at
+        this head, that look decides and this one is dropped: posted, it
+        would raise again what was fixed meanwhile, and cost a round. One
+        the reviewer won't follow with a look at this head (it's out of
+        service, or the PR is past the round limit: `over`) is its last word
+        on the PR, so it's posted on the commit it read: findings there
+        count as a round, and hold this pass back from landing, since the
+        threads it read are from before them. "Nothing found" there says
+        nothing about this head."""
         rs = st["rv"].setdefault(r, {})
         mine = V.answered(key, r)
         tries = {n: k for n, k in rs.get("late", {}).items() if n in mine}
@@ -154,6 +159,9 @@ def look(repo, pr, key, st, lost_on, digest, line, age, after, strike, cleared):
                 continue
             if back.get("result") == "out":  # in since outs() looked
                 went_out(r, back)
+            elif back.get("result") == "review" and back.get("base") == pr["baseRefName"] and not (over or V.out(r)):
+                log(f"{tag}: dropped {V.NAMES[r]}'s review of {str(back.get('head'))[:7]}, back after the PR moved on: "
+                    f"its look at {head[:7]} decides")
             elif back.get("result") == "review" and back.get("base") == pr["baseRefName"] and isinstance(back.get("head"), str):
                 try:
                     if V.post(repo, {**pr, "headRefOid": back["head"]}, r, back["answer"], back.get("description")) == "findings":
@@ -204,6 +212,21 @@ def look(repo, pr, key, st, lost_on, digest, line, age, after, strike, cleared):
         is read."""
         return [r for r in rs if not DRY and said[r][0] != "clean" and V.under_way(key, r, pr["baseRefName"])]
 
+    def limit():
+        """The most rounds with findings any reviewer has, in service or not
+        (one going out doesn't take a PR back under the limit), whether
+        every one in service found nothing on this head, and whether that
+        leaves it past the repo's round limit (capped). Past it, the
+        reviewers aren't asked again: every look so far has found more, so
+        more looks only drip-feed more rounds. A Claude job settles what's
+        left on its merits, fixing what's real and answering the rest, and a
+        judge decides whether it lands. Only what the judge can't call (a
+        one-way door) waits for the owner."""
+        rounds = max((said[r][2] for r in names), default=0)
+        on = [r for r in live if not V.out(r)]
+        clean = bool(on) and all(said[r][0] == "clean" for r in on)
+        return rounds, clean, rounds >= rc["rounds"] and not clean
+
     was_out = [r for r in names if V.out(r)]
     under_way = reading(was_out)
     for r in names:
@@ -211,8 +234,9 @@ def look(repo, pr, key, st, lost_on, digest, line, age, after, strike, cleared):
         # looks came back before it went out, and posting them asks nothing
         # of it.
         consume(r)
+    over = limit()[2]  # with this head's answers in: no look at it follows
     for r in names:
-        overtaken(r)
+        overtaken(r, over)
     # Put out by an answer this pass read: its others.
     under_way += reading([r for r in names if V.out(r) and r not in was_out])
     live = [r for r in live if not V.out(r)]
@@ -220,16 +244,7 @@ def look(repo, pr, key, st, lost_on, digest, line, age, after, strike, cleared):
         if V.out(r):
             # Back in service then: its look at this head is asked for.
             C.wake(repo, load(V.OUT, {})[r]["until"] + 1)  # ends: once; listed while it's out
-    # Every reviewer's rounds, in service or not: one going out doesn't take
-    # a PR back under the limit.
-    rounds = max((said[r][2] for r in names), default=0)
-    clean = bool(live) and all(said[r][0] == "clean" for r in live)
-    # Past the round limit, the reviewers aren't asked again: every look so
-    # far has found more, so more looks only drip-feed more rounds. A Claude
-    # job settles what's left on its merits, fixing what's real and answering
-    # the rest, and a judge decides whether it lands. Only what the judge
-    # can't call (a one-way door) waits for the owner.
-    capped = rounds >= rc["rounds"] and not clean
+    rounds, clean, capped = limit()
 
     def owed(r):
         """Past the limit, what the reviewer still owes the PR, which the
