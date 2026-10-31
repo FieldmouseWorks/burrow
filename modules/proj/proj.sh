@@ -913,9 +913,10 @@ Carry on from there. Anything you left in the background last turn was stopped w
       # Killed for memory before it answered, Claude itself as a rule (a
       # command it ran that's killed leaves it to answer), and not stopped
       # for going quiet: carried on in its own conversation, which its
-      # stream named, once all of it is gone.
-      if [ -z "$last" ] && [ "$killed" -lt 2 ] && [ ! -e "$dir/$n.quiet" ] && [ "$(oom_kills)" -gt "$ooms" ] &&
-        grep -q '"session_id"' < <(tail -n +"$from" "$dir/$n.jsonl") && reap; then
+      # stream named, once all of it is gone. Not a sandbox's, whose work in
+      # the VM may outlive its unit's.
+      if [ -z "$last" ] && [ "$killed" -lt 2 ] && [ ! -e "$dir/$n.quiet" ] && [ ! -s "$dir/agent" ] &&
+        [ "$(oom_kills)" -gt "$ooms" ] && grep -q '"session_id"' < <(tail -n +"$from" "$dir/$n.jsonl") && reap; then
         killed=$((killed + 1))
         again "$KILLED" killed
         continue

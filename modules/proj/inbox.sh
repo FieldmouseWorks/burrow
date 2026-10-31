@@ -114,10 +114,13 @@ description says \"Fixes #$n\" (or \"Refs #$n\" if it doesn't settle the issue).
 
 # A turn cut off from outside before it could answer or say how it ended,
 # its whole unit killed (by systemd-oomd, as a rule): no outcome, not
-# stopped, and its stream named the conversation it carries on in.
+# stopped, no answer or error in its stream (one there is posted as it is),
+# and its stream named the conversation it carries on in. Not a sandbox's,
+# whose work in the VM may outlive its unit.
 cut_off() { # id turn state
-  [ "$3" = failed ] && [ ! -s "$JOBS/$1/$2.outcome" ] && [ ! -e "$JOBS/$1/$2.stopped" ] &&
-    [ -s "$JOBS/$1/session" ] && grep -q '"session_id"' "$JOBS/$1/$2.jsonl" 2>/dev/null
+  local f=$JOBS/$1/$2.jsonl
+  [ "$3" = failed ] && [ ! -s "$JOBS/$1/$2.outcome" ] && [ ! -e "$JOBS/$1/$2.stopped" ] && [ ! -s "$JOBS/$1/agent" ] &&
+    [ -s "$JOBS/$1/session" ] && grep -q '"session_id"' "$f" 2>/dev/null && ! grep -q '"type":"result"' "$f"
 }
 CUT_OFF="Your last turn was cut off before you answered: its whole unit was killed (out of memory, as a rule), and everything it had running went with it. Carry on from where you left off: see what had already finished before you run anything again."
 
@@ -225,8 +228,13 @@ for repo in "${!project[@]}"; do
     case $st in queued | running) last=$((turns - 1)) ;; *) last=$turns ;; esac
     # The latest turn, cut off, carries on in its own conversation (below)
     # while the issue is open, twice in a row at most, and the issue hears so.
+    # In a row: the turn the last carrying on started (revived has it, and
+    # how many in a row led to it) is the one cut off now.
+    rv=$(cat "$d/revived" 2>/dev/null || true)
+    streak=0
+    [ "${rv% *}" != "$turns" ] || streak=${rv#* }
     revive=''
-    if cut_off "$id" "$turns" "$st" && [ "$(cat "$d/revived" 2>/dev/null || echo 0)" -lt 2 ] &&
+    if cut_off "$id" "$turns" "$st" && [ "$streak" -lt 2 ] &&
       jq -e --argjson n "$n" 'any(.[]; .number == $n)' <<<"$open" >/dev/null; then
       revive=1
     fi
@@ -266,11 +274,10 @@ for repo in "${!project[@]}"; do
 
     if [ -n "$revive" ]; then
       proj reply --first "$id" "$CUT_OFF" >/dev/null || { retry "$repo"; continue; }
-      echo $(($(cat "$d/revived" 2>/dev/null || echo 0) + 1)) >"$d/revived"
+      echo "$(cat "$JOBS/$id/turns") $((streak + 1))" >"$d/revived"
       # Replies wait for the next pass, which its turn's end kicks.
       continue
     fi
-    cut_off "$id" "$turns" "$st" || rm -f "$d/revived"
 
     # Replies since the last turn continue the job. Only once they're a minute
     # old: closing with a comment posts the comment first, and the issue list

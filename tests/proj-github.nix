@@ -15,8 +15,9 @@
 # in it leaving it once the label comes, the watchdog told so again each pass
 # whatever an older turn wrote, that an issue's turn cut off before it
 # answered, its whole unit killed, carries on in its own session, twice in a
-# row at most, and that a job dir removed or a wait it can't read stops
-# neither proj-inbox nor _watch.
+# row at most (a reply's turn starting a new row) while one that answered
+# first has its answer posted, and that a job dir removed or a wait it
+# can't read stops neither proj-inbox nor _watch.
 { pkgs }:
 ''
   with subtest("a job waiting on a PR is resumed when the PR changes"):
@@ -534,6 +535,23 @@
       assert machine.succeed(f"cat /data/dev/jobs/{cj}/turns").strip() == "5"
       posted = machine.succeed("cat /tmp/gh/posted")
       assert "turn 3 was cut off" in posted and "turn 4 was cut off" in posted and "turn 5 ended without an answer" in posted, posted
+      # A turn a reply started is no third in a row, though no pass saw a
+      # turn end between.
+      proj(f'reply {cj} "inbox-hang"')
+      cut_off(6)
+      assert machine.succeed(f"cat /data/dev/jobs/{cj}/turns").strip() == "7"
+      machine.wait_until_succeeds(f"su - dev -c 'proj state {cj}' | grep -x done", timeout=120)
+      # One that answered before its unit went has its answer posted, and
+      # isn't carried on: here its told run hangs, and the unit goes then.
+      machine.succeed("echo hang >/tmp/cut-mode")
+      proj(f'reply {cj} "linger 600"')
+      machine.wait_until_succeeds(f"test -s /data/dev/jobs/{cj}/8.cut", timeout=120)
+      machine.succeed(f"systemctl --user -M dev@ kill --signal=KILL '{unit(cj)}'")
+      machine.wait_until_fails(f"systemctl --user -M dev@ is-active -q '{unit(cj)}'", timeout=60)
+      machine.succeed("rm /tmp/cut-mode")
+      machine.succeed("su - dev -c 'proj-inbox o/c'")
+      assert machine.succeed(f"cat /data/dev/jobs/{cj}/turns").strip() == "8"
+      assert "waiting on CI" in machine.succeed("cat /tmp/gh/posted")
       github("repos/o/c/issues", "[]")
       machine.succeed("su - dev -c 'proj-inbox o/c'")
 ''
