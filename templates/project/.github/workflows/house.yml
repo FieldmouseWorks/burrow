@@ -1,0 +1,20 @@
+# The house rules CI can hold a PR to (its title, Rust by default, timers,
+# file size, model names), through burrow's house action.
+name: house
+on:
+  pull_request:
+    # edited too: the check reads the PR's title and body, so fixing either
+    # runs it again.
+    types: [opened, edited, reopened, synchronize]
+jobs:
+  house:
+    # On a self-hosted runner (a private repo out of hosted minutes), its
+    # label (runs-on: remi). The action builds the check with the runner's
+    # cargo and runs it with gh.
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+      statuses: write
+    steps:
+      - uses: FieldmouseWorks/burrow/.github/actions/house@main
