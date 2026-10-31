@@ -482,12 +482,12 @@ def rank(repo):
     return 1 if r in {x.lower() for x in CFG["pipelineRepos"]} else 2
 
 
-def job(repo, task, clone=False):
-    """Hand a task to a Claude job in the repo's project. Every one is
-    pipeline work (proj run --pipeline): it settles a PR or the branch PRs
-    land on, so it goes ahead of the line, and in the pipeline's own repos
-    (pipelineRepos) in a slot kept for it; proj decides which. Returns the
-    job id."""
+def job(repo, task, clone=False, pipeline=True, timeout=None):
+    """Hand a task to a Claude job in the repo's project. One that settles a
+    PR or the branch PRs land on is pipeline work (proj run --pipeline): it
+    goes ahead of the line, and in the pipeline's own repos (pipelineRepos)
+    in a slot kept for it; proj decides which. Its turns stop after timeout
+    minutes (jobTimeout's by default). Returns the job id."""
     d = project_dir(repo)
     if d is None and clone and not DRY:
         d = repo.split("/")[1]
@@ -507,7 +507,8 @@ def job(repo, task, clone=False):
     # stopped, and ends then. It's the machine's own work, so it acts on
     # GitHub as the machinery's App, where there is one.
     app = ["--app", CFG["machinery"]] if CFG.get("machinery") else []
-    p = subprocess.run([CFG["proj"], "run", "--pipeline", *app, "--timeout", f"{CFG['jobTimeout']}m",
+    p = subprocess.run([CFG["proj"], "run", *(["--pipeline"] if pipeline else []), *app,
+                        "--timeout", f"{timeout or CFG['jobTimeout']}m",
                         "--idle", f"{CFG['jobIdle']}m", "--kick", f"autoland/{repo}", "--owned", d, task],
                        capture_output=True, text=True)
     return p.stdout.strip() or None

@@ -201,7 +201,7 @@ with open(f"{tmp}/config.json", "w") as f:
         "dashboard": {"enable": False, "waitDays": 4, "errorDays": 1, "title": "Dependency Dashboard",
                       "renovateKick": "http://127.0.0.1:9/kick/renovate", "renovate": None,
                       "renovateRuns": f"{tmp}/renovate-runs"},
-        "flaky": {"enable": False, "bin": f"{tmp}/flaky"},
+        "flaky": {"enable": False, "bin": f"{tmp}/flaky", "jobTimeout": 240},
         "defaults": {"rounds": 5,
                      "oneWay": ONE_WAY, "handoffAfter": 30, "sessionHandoffAfter": 90, "settleDelay": 3,
                      "stallAfter": 120, "holdStallAfter": 480, "renovateMergeAfter": 60,

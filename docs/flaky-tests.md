@@ -16,8 +16,10 @@ the loop.
    as any test's does.
 4. The steward (`autoland`, [flakes.py](../modules/autoland/flakes.py)) hands
    the issue to a Claude job, which finds the cause and opens a PR that says
-   `Closes #N`. Merged, it closes the issue. One still open a day after its
-   job ends goes to the pipeline's stuck issue.
+   `Closes #N`. Merged, it closes the issue. The job is the project's, not
+   the pipeline's, and has hours (`flaky.jobTimeoutMinutes`). One still open
+   a day after its job ends goes to the pipeline's stuck issue; at once, when
+   the job was stopped or failed before it finished.
 5. Two days after the issue opened, the quarantine runs out. Until the issue
    closes, the test gets no second try: any failure fails the gate at once.
    A flake nobody fixed blocks again instead of passing quietly for good.
