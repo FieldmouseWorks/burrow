@@ -69,12 +69,17 @@
       };
 
       # burrow's programs (every binary in crates/) and gh-token, for each
-      # platform they're built for, and the flaky tool (docs/flaky-tests.md),
-      # for a machine to install.
+      # platform they're built for, the flaky tool (docs/flaky-tests.md) and
+      # flake-gate, for a machine to install.
       packages = nixpkgs.lib.foldl' nixpkgs.lib.recursiveUpdate { } [
         (nixpkgs.lib.mapAttrs (_: p: { burrow = p.default; }) crates.packages)
         (nixpkgs.lib.mapAttrs (_: p: { gh-token = p.default; }) ghToken.packages)
-        { ${system}.flaky = pkgs.callPackage ./tools/flaky/package.nix { }; }
+        {
+          ${system} = {
+            flaky = pkgs.callPackage ./tools/flaky/package.nix { };
+            flake-gate = pkgs.callPackage ./tools/flake-gate/package.nix { };
+          };
+        }
       ];
 
       # A bare machine with every module on, for the checks and as an example.
@@ -265,6 +270,12 @@
         proj-pick = pkgs.runCommand "proj-pick-check" { nativeBuildInputs = [ pkgs.shellcheck pkgs.git ]; } ''
           shellcheck -s bash ${./modules/proj/pick.sh} ${./tests/proj-pick.sh}
           bash ${./tests/proj-pick.sh} ${./modules/proj/pick.sh}
+          touch $out
+        '';
+        # What a look at the line costs, and who gets to skip one.
+        proj-line = pkgs.runCommand "proj-line-check" { nativeBuildInputs = [ pkgs.shellcheck pkgs.git pkgs.strace pkgs.util-linux ]; } ''
+          shellcheck -s bash ${./modules/proj/line.sh} ${./tests/proj-line.sh}
+          bash ${./tests/proj-line.sh} ${./modules/proj/pick.sh} ${./modules/proj/line.sh}
           touch $out
         '';
         # What each job waits on, as the stall watchdog hears it.
@@ -649,6 +660,27 @@
           [ "$got" = "$(sed 's/^ *//' <<<"$want")" ] || { echo "got: $got"; exit 1; }
           touch $out
         '';
+        # The PR titles Renovate gives the example's updates, as Renovate's
+        # own code writes them: each the house style's `area: plain
+        # sentence`, "deps: ...", whichever type config:recommended would
+        # give it. The title is the subject the steward squashes onto main.
+        renovate-titles = pkgs.runCommand "renovate-titles-check" { } ''
+          export HOME=$TMPDIR
+          got=$(${pkgs.lib.getExe pkgs.nodejs_24} ${./tests/renovate-titles.mjs} ${pkgs.renovate} \
+            ${self.nixosConfigurations.example.config.systemd.services.renovate.environment.RENOVATE_CONFIG_FILE} 2>/dev/null)
+          want='deps: update dependency left-pad to 1.3.1
+          deps: update dependency vitest to 3.2.0
+          deps: update dependency vite to v7
+          deps: lock file maintenance (npm)
+          deps: update dependency net.fabricmc:fabric-loader to 0.20.1
+          deps: lock file maintenance (gradle)
+          deps: update rust crate tokio to 1.41.0
+          deps: lock file maintenance (cargo)
+          deps: update fieldmouseworks/burrow digest to 0fce5b8
+          deps: lock file maintenance (nix)'
+          [ "$got" = "$(sed 's/^ *//' <<<"$want")" ] || { echo "got: $got"; exit 1; }
+          touch $out
+        '';
         # What a dashboard's Repository Problems lists under the example's
         # config, by Renovate's own logger: not the refresh it was told to take
         # without a release timestamp, but still a warning that's a problem.
@@ -679,6 +711,13 @@
         # flake with an output it doesn't know refused.
         gate = pkgs.runCommand "gate-check" { nativeBuildInputs = [ (pkgs.python3.withPackages (p: [ p.pyyaml ])) pkgs.git pkgs.jq pkgs.nix ]; } ''
           python3 -I ${./tests/gate.py} ${./.github/workflows/flake-check.yml}
+          touch $out
+        '';
+        # flake-gate: a repo's CI gate step, run here as CI runs it, and
+        # burrow's own evaluating apart, as a Claude job's memory needs.
+        flake-gate = pkgs.runCommand "flake-gate-check" { nativeBuildInputs = [ (pkgs.callPackage ./tools/flake-gate/package.nix { }) pkgs.git pkgs.yq-go pkgs.shellcheck ]; } ''
+          shellcheck -s bash ${./tests/flake-gate.sh}
+          bash ${./tests/flake-gate.sh} ${./.}
           touch $out
         '';
         # The shared CI's attestation step (flake-check.yml), its own script
