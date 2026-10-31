@@ -142,7 +142,7 @@ let
   calls = [ tools.proj tools.notify ];
   healthTool = script health ./updates/health.sh (with pkgs; [ coreutils gnugrep gnused gawk systemd ]);
   # Its own functions first (they run only once update.sh has defined what they call).
-  updateTool = script update [ ./updates/dispatch.sh ./updates/propose.sh ./updates/push.sh ./updates/check.sh ./updates/update.sh ] (
+  updateTool = script update [ ./updates/dispatch.sh ./updates/running.sh ./updates/propose.sh ./updates/push.sh ./updates/check.sh ./updates/update.sh ] (
     (with pkgs; [ coreutils jq curl util-linux systemd gnugrep gnused gawk vulnix config.nix.package ])
     ++ [ config.programs.git.package healthTool tools.switch tools.confirm machineGh ] ++ calls ++ lib.optional (tools ? boot) tools.boot
   );

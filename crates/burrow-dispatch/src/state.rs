@@ -14,6 +14,11 @@ pub struct State {
     pub restarts: BTreeMap<String, Vec<f64>>,
     /// Each repo GitHub couldn't be read for, since when.
     pub unread: BTreeMap<String, f64>,
+    /// Each repo whose main isn't live in the system that runs, or isn't
+    /// known to be, since when: its oldest commit not live, or the pass that
+    /// first couldn't tell. A run of HOST-update, under way or failed,
+    /// doesn't move it.
+    pub going_live: BTreeMap<String, f64>,
     /// When a pass tried to cancel each run (OWNER/REPO#ID), whatever came
     /// of it: one is tried once in RECENT.
     pub cancels: BTreeMap<String, f64>,
