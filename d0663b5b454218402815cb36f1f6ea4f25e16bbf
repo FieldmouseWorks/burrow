@@ -1,0 +1,71 @@
+{
+  "conary": "note v1",
+  "change": "5cr6mdeb9vv8gvf59rk9ven1ak",
+  "repo": {
+    "owner": "fieldmouseworks",
+    "name": "burrow"
+  },
+  "pr": 283,
+  "url": "https://github.com/fieldmouseworks/burrow/pull/283",
+  "summary": "autoland: a clone under a repo's old name is its checkout, and a folder another repo holds is reported once",
+  "task": "fieldmouseworks/burrow#278",
+  "author": {
+    "kind": "person",
+    "login": "TusanHomichi",
+    "session": null
+  },
+  "landing": {
+    "revision": "74de471507c32243292fe38a0a3c0b9a1b1f17a64660696138bf2bc98e14522e",
+    "before": "98f964c53ec7cb01fa95184f6ddf7bf21cab23ae",
+    "after": "d0663b5b454218402815cb36f1f6ea4f25e16bbf",
+    "by": {
+      "kind": "status",
+      "login": "fieldmouseworks-steward[bot]"
+    },
+    "at": 1793452557343
+  },
+  "evidence": [
+    {
+      "kind": "ci",
+      "check": "check / commits",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/41201354337/job/124537640577"
+    },
+    {
+      "kind": "ci",
+      "check": "rust-first / python",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/41201354358/job/124537640457"
+    },
+    {
+      "kind": "ci",
+      "check": "rust-first / python",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/41201354333/job/124537640424"
+    },
+    {
+      "kind": "ci",
+      "check": "rust-first (#283)",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/41201354358"
+    },
+    {
+      "kind": "ci",
+      "check": "rust-first (#283)",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/41201354333"
+    },
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/41201354337/job/124537641024"
+    },
+    {
+      "kind": "ci",
+      "check": "agents",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/283"
+    }
+  ]
+}
