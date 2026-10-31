@@ -19,7 +19,7 @@ let
   configFile = pkgs.writeText "burrow-events.json" (builtins.toJSON {
     inherit (cfg) kickPort;
     port = if hooked then cfg.port else null;
-    handlers = lib.mapAttrs (_: h: { inherit (h) events unit wake ownStatuses perRepo repos pushes branches issueTitles gap; }) cfg.handlers;
+    handlers = lib.mapAttrs (_: h: { inherit (h) events unit wake ownStatuses ownLabels perRepo repos pushes branches issueTitles gap; }) cfg.handlers;
   });
   package = inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow;
   units = lib.mapAttrsToList (_: h: h.unit) cfg.handlers;
@@ -160,6 +160,17 @@ in
               (the steward's `review-settled`): a `status` delivery for one
               is no news to it, so it starts none of its passes. Other
               handlers still get it.
+            '';
+          };
+          ownLabels = mkOption {
+            type = types.listOf types.str;
+            default = [ ];
+            description = ''
+              The labels the handler's passes put on PRs and take off
+              themselves (the steward's waiting labels): a `pull_request`
+              delivery that one went on or came off is no news to it, so it
+              starts none of its passes. Other labels, and other handlers,
+              still count.
             '';
           };
           wake = mkOption {

@@ -1,0 +1,16 @@
+# burrow's own rust-first check, through the same shared workflow every
+# project calls (rust-first-check.yml), taken from this checkout so a PR runs
+# its own version.
+name: rust-first
+on:
+  pull_request:
+    # edited too: the check reads the PR's body, so fixing the body runs it
+    # again.
+    types: [opened, edited, reopened, synchronize]
+jobs:
+  rust-first:
+    uses: ./.github/workflows/rust-first-check.yml
+    permissions:
+      contents: read
+      pull-requests: read
+      statuses: write
