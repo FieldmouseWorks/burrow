@@ -115,6 +115,8 @@ self=$(readlink -f "$0")
 unit() { echo "proj-$(systemd-escape "$1").service"; }
 # The unit that ends each of its turns (_ended), outside the turn's own.
 end_unit() { systemd-escape --template=proj-ended@.service "$1"; }
+# Whether that unit is still to run, or running.
+end_pending() { [ -n "$(systemctl --user show -P Job "$(end_unit "$1")" 2>/dev/null)" ]; }
 # The env file of the GitHub App NAME, from APPS' NAME=FILE lines: nothing for
 # one this machine hasn't.
 app_env() { [[ $1 =~ ^[A-Za-z0-9_-]+$ ]] && sed -n "s/^$1=//p" <<<"$APPS" | head -n 1; }
@@ -336,7 +338,7 @@ start_turn() {
   for i in $(seq 120); do
     systemctl --user reset-failed "$(unit "$id")" 2>/dev/null || true
     if [ "$(systemctl --user show -P LoadState "$(unit "$id")" 2>/dev/null)" != loaded ] &&
-      [ -z "$(systemctl --user show -P Job "$(end_unit "$id")" 2>/dev/null)" ]; then
+      ! end_pending "$id"; then
       break
     fi
     if [ "$i" = 120 ]; then
@@ -741,6 +743,7 @@ Carry on from there. Anything you left in the background last turn was stopped w
     # expands a command line, and a job's id is its project's folder name,
     # spaces, `%` and all.
     id=${PROJ_ENDED:?proj _ended is for the end of a job turn, run by proj-ended@ID}
+    mark_ended "$id"
     rewatch "$id"
     { cat "$jobs/$id/kick" 2>/dev/null || true
       cut -f1 "$jobs/$id/await" 2>/dev/null | sed 's/#.*//; s#^#proj-watch/#' || true
@@ -755,8 +758,6 @@ Carry on from there. Anything you left in the background last turn was stopped w
     # its own to await.next, and await only once it ends; how it says it
     # ends goes to end.next.
     rm -f "$dir/await" "$dir/await.next" "$dir/end.next"
-    # A look while it was being started may have taken it for ended (facts).
-    rm -f "$dir/$n.ended"
     # As its App, or not at all. Its env, read now, is what every run of the
     # turn starts in, so none starts as the user if the App goes while the
     # turn waits for a slot: it acts as an App that's gone, and reaches no

@@ -95,12 +95,25 @@ job_wait() {
       kick: (if $kick == "" then null else $kick end), line: $line, unstick: $unstick}'
 }
 
+# When a turn killed before it could write its outcome ended (what kills its
+# whole cgroup takes everything in it along), from outside that cgroup: its
+# _ended's first act. Only _ended writes it, and start_turn waits out the last
+# turn's _ended before it writes a new turn, so this is always the turn that
+# just ended, and no look at a turn being started can leave it on a live one.
+# Kept once written, so nothing moves it.
+# shellcheck disable=SC2154 # jobs is proj.sh's
+mark_ended() {
+  local d=$jobs/$1 n
+  n=$(cat "$d/turns" 2>/dev/null) || return 0
+  [ -e "$d/$n.outcome" ] || [ -e "$d/$n.ended" ] || : >"$d/$n.ended"
+}
+
 # What job_wait reads of a job's latest turn, from its dir and proj's state.
-# A turn ended when it wrote its outcome. One killed before it could (what
-# kills its whole cgroup takes everything in it along) ended when it was first
-# seen to have: the first look is _ended's, from outside that cgroup, and
-# $n.ended keeps it, so later looks don't move it. Its stream can't say: it may
-# have been quiet for hours, or never have started.
+# A turn ended when it wrote its outcome, or when mark_ended saw it had. A look
+# that finds neither is one in the moment before its _ended (now, which that
+# then fixes), or at a turn being started, or one whose _ended never ran (the
+# machine went down): its last write is all that's known, and looking again
+# doesn't move it.
 # shellcheck disable=SC2154 # jobs is proj.sh's
 facts() {
   local d=$jobs/$1 n s t
@@ -117,8 +130,14 @@ facts() {
   case $s in
     queued | running) ;;
     *)
-      [ -e "$d/$n.outcome" ] || [ -e "$d/$n.ended" ] || : >"$d/$n.ended"
       t=$(stat -c %Y "$d/$n.outcome" "$d/$n.ended" 2>/dev/null | head -n 1 || true)
+      if [ -z "$t" ]; then
+        if end_pending "$1"; then
+          t=$(date +%s)
+        else
+          t=$(stat -c %Y "$d/$n.jsonl" "$d/prompt.$n" 2>/dev/null | head -n 1 || true)
+        fi
+      fi
       printf 'ended\t%s\n' "${t:-0}"
       ;;
   esac

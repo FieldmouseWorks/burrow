@@ -3,7 +3,7 @@
 # is watched to its deadline (one waiting in line inside its run as one in
 # line for a slot is), one that ended without saying what comes next is due
 # at once, one that failed once proj-inbox has had time to resume it, counted
-# from its end however it died (facts), an await to its deadline past
+# from its end however it died (mark_ended, facts), an await to its deadline past
 # proj-watch's, and a
 # question for a person, a finished job, a stopped turn and an --owned job's
 # end aren't watched at all. And what a running turn waits in line for: only
@@ -98,12 +98,14 @@ case_ none "${base[@]}" "state done" "end await"
 case_ '.link == "https://github.com/a/b/issues/7"' "${base[@]}" "state done" "end undeclared" "link https://github.com/a/b/issues/7"
 case_ '.link == null' "${base[@]}" "state queued"
 
-# What facts finds of a job's dir, as job_wait reads it; proj's state stands
-# in as what the unit says. A turn killed with nothing written ended when
-# it was first seen to have, not when it last wrote anything.
+# What facts finds of a job's dir, as job_wait reads it; proj's state and
+# whether its _ended is still to come stand in as what systemd says. A turn
+# killed with nothing written ended when its _ended saw it had (mark_ended),
+# not when it last wrote anything.
 export jobs
 jobs=$(mktemp -d)
 state() { cat "$jobs/$1/state"; }
+end_pending() { [ -e "$jobs/$1/pending" ]; }
 job() {
   rm -rf "${jobs:?}/$1"
   mkdir "$jobs/$1"
@@ -127,18 +129,47 @@ job old failed
 : >"$jobs/old/1.jsonl"
 touch -d @2000 "$jobs/old/1.slot" "$jobs/old/1.jsonl"
 before=$(date +%s)
+mark_ended old
 seen ".since >= $before and .due == .since + 120 and (.phase | test(\"ended \\\\(failed\\\\)\"))" old
-# Looked at again and again: the end stays where it was, here long ago.
+# Looked at, or marked, again and again: the end stays where it was, here
+# long ago.
 touch -d @5000 "$jobs/old/1.ended"
+mark_ended old
 seen '.since == 5000 and .due == 5120' old
 seen '.since == 5000 and .due == 5120' old
 # Killed before any stream, and before it even had a slot.
 job nostream failed
 : >"$jobs/nostream/1.slot"
 touch -d @2000 "$jobs/nostream/1.slot"
+mark_ended nostream
 seen ".since >= $before and .due == .since + 120" nostream
 job noslot failed
+mark_ended noslot
 seen ".since >= $before and .due == .since + 120" noslot
+# A look at a turn being started, its number written and its unit not yet,
+# reads as failed: it leaves nothing behind, so when the turn it was is killed
+# hours on, the grace still counts from then.
+job starting failed
+seen '.since == 1000' starting
+[ ! -e "$jobs/starting/1.ended" ] || { echo "FAIL: a look stamped a turn being started" >&2; exit 1; }
+echo running >"$jobs/starting/state"
+facts starting >/dev/null
+[ ! -e "$jobs/starting/1.ended" ] || { echo "FAIL: a look stamped a live turn" >&2; exit 1; }
+echo failed >"$jobs/starting/state"
+mark_ended starting
+seen ".since >= $before and .due == .since + 120" starting
+# A look just before its _ended gets no expired grace, and marks nothing.
+job window failed
+: >"$jobs/window/pending"
+seen ".since >= $before and .due == .since + 120" window
+[ ! -e "$jobs/window/1.ended" ] || { echo "FAIL: a look stamped a turn ending" >&2; exit 1; }
+# Its _ended never ran (the machine went down): its last write, however often
+# it's looked at.
+job unseen failed
+: >"$jobs/unseen/1.jsonl"
+touch -d @2000 "$jobs/unseen/1.jsonl"
+seen '.since == 2000 and .due == 2120' unseen
+seen '.since == 2000 and .due == 2120' unseen
 # One that said how it ended ended then, whatever its log or a stray stamp
 # say: an error or a timeout has its grace from there.
 for how in error "timed out after 4h" "went quiet for 1h"; do
@@ -147,6 +178,7 @@ for how in error "timed out after 4h" "went quiet for 1h"; do
   : >"$jobs/said/1.jsonl"
   touch -d @2000 "$jobs/said/1.jsonl"
   touch -d @3000 "$jobs/said/1.outcome"
+  mark_ended said
   seen '.since == 3000 and .due == 3120' said
   [ ! -e "$jobs/said/1.ended" ] || { echo "FAIL: a stamp for a turn with an outcome" >&2; exit 1; }
 done
@@ -159,9 +191,11 @@ seen '.since == 3000 and .due == 3000' quiet
 # Stopped and --owned stay unwatched, killed or not.
 job stopped failed
 : >"$jobs/stopped/1.stopped"
+mark_ended stopped
 seen none stopped
 job owned failed
 : >"$jobs/owned/owned"
+mark_ended owned
 seen none owned
 # Still going: no end to record, so none is there when it does end.
 for how in queued running; do

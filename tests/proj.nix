@@ -405,8 +405,7 @@ pkgs.testers.runNixOSTest {
         assert f not in waits(), waits()
         # Killed whole with nothing written, as systemd-oomd does, its log
         # long quiet: the grace counts from the kill, which _ended saw from
-        # outside the cgroup. And a stamp a look left before the turn began
-        # is no end of it.
+        # outside the cgroup.
         k = proj('run web "sleep 600"')
         machine.wait_until_succeeds(f"su - dev -c 'proj state {k}' | grep -x running", timeout=120)
         machine.succeed(f"su - dev -c 'touch -d \"1 hour ago\" /data/dev/jobs/{k}/1.jsonl /data/dev/jobs/{k}/prompt.1'")
@@ -414,7 +413,8 @@ pkgs.testers.runNixOSTest {
         machine.succeed(f"systemctl --user -M dev@ kill --kill-whom=all --signal=KILL '{unit(k)}'")
         w = waits(lambda w: "nothing resumed it" in w.get(k, {}).get("phase", ""))[k]
         assert w["since"] >= before and w["due"] == w["since"] + 120, w
-        machine.succeed(f"su - dev -c 'touch -d \"1 hour ago\" /data/dev/jobs/{k}/2.ended'")
+        machine.succeed(f"test -e /data/dev/jobs/{k}/1.ended")
+        # And the next turn, running, has no end yet.
         machine.succeed(f"su - dev -c 'echo s >/data/dev/jobs/{k}/session'")
         proj(f'reply {k} "sleep 600"')
         machine.wait_until_succeeds(f"su - dev -c 'proj state {k}' | grep -x running", timeout=120)
