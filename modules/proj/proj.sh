@@ -61,7 +61,8 @@
 # pipeline's own repos alone, and no project's other jobs hold more than
 # PER_PROJECT at once (pick.sh). A job run --unstick waits in none of that:
 # its turns take a slot of their own, past the MAX_JOBS, one at a time
-# (line.sh). A waiting turn is just this shell. Every turn
+# (line.sh). A waiting turn is just this shell, which becomes the deployed proj
+# at its next look after a switch (line.sh). Every turn
 # runs in SLICE, which the machine caps, so jobs can't take memory from
 # anything else, and gets TIMEOUT (or the job's own --timeout) before it's
 # stopped, so a stuck one can't hold its slot for good. A job's --idle stops a
@@ -317,7 +318,11 @@ facts() {
 # whose dir is gone has none. Without the watchdog there's no WAITS: nothing
 # to do. Never the caller's failure: a turn goes on whether or not the
 # watchdog hears.
-rewatch() { waits "$@" || echo "proj: couldn't update the stall watchdog's waits for $*" >&2; }
+# By the deployed proj's waits, when a turn outlives a switch (line.sh).
+rewatch() {
+  if successor && "$the_successor" _rewatch "$@"; then return 0; fi
+  waits "$@" || echo "proj: couldn't update the stall watchdog's waits for $*" >&2
+}
 waits() {
   [ -n "$WAITS" ] || return 0
   local id f wl items was LC_ALL=C
@@ -771,8 +776,12 @@ Carry on from there. Anything you left in the background last turn was stopped w
       cut -f1 "$jobs/$id/await" 2>/dev/null | sed 's/#.*//; s#^#proj-watch/#' || true
     } | kick
     ;;
+  _handover_format) echo "$HANDOVER_FORMAT" ;;
+  _rewatch) shift; rewatch "$@" ;;
   _exec)
-    # One turn of a job, inside its own systemd unit.
+    # One turn of a job, inside its own systemd unit. Through the exec of a
+    # hand-over (take_slot), if this is one: the looks can go on.
+    exec 9>&-
     id=$2
     dir="$jobs/$id"
     n=$(cat "$dir/turns")
@@ -783,7 +792,8 @@ Carry on from there. Anything you left in the background last turn was stopped w
     # As its App, or not at all. Its env, read now, is what every run of the
     # turn starts in, so none starts as the user if the App goes while the
     # turn waits for a slot: it acts as an App that's gone, and reaches no
-    # GitHub at all.
+    # GitHub at all. A switch while it waits brings it back here (take_slot),
+    # to read it again: an App that switch took away fails the turn.
     appenv=''
     if [ -s "$dir/app" ]; then
       env=$(app_env "$(cat "$dir/app")")
