@@ -54,9 +54,10 @@ Every repo with code gets a `flake.nix` from the template
   tests of the Cargo workspace, built as `cargo test` builds them (debug
   assertions on); ruff's error rules on Python (and `ruff
   format`, once a repo has been formatted); and in every repo, gitleaks
-  over its tracked files for credentials with a known shape (tokens,
-  private keys), printed redacted. A false alarm gets `gitleaks:allow` on
-  its line or its fingerprint in `.gitleaksignore`.
+  over every tracked text file for credentials with a known shape (tokens,
+  private keys), reported by file and line, never by what the file says. A
+  false alarm gets `gitleaks:allow` on its line or its fingerprint in
+  `.gitleaksignore`.
 - CI is `.github/workflows/flake.yml` from the template, which calls burrow's
   shared [`flake-check`](../.github/workflows/flake-check.yml) workflow. A
   public repo runs it on GitHub's hosted runners, which cost it nothing and
