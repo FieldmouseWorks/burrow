@@ -33,7 +33,8 @@ into project jobs.
   context. A reply sent while a turn runs waits for it to finish.
 - **Done:** close the issue, or take the label off.
 - **Who:** only `inbox.authors` can hand the box work; everyone else's issues
-  and comments are ignored, labelled or not. A job runs with everything the
+  and comments are ignored, labelled or not, except that a labelled issue
+  someone else opened gets one comment saying no job will start. A job runs with everything the
   box's user can do.
 - Jobs are headless (`claude -p`) and run in the box's normal permission mode.
   They can't stop to ask mid-turn: they end the turn with their question and
