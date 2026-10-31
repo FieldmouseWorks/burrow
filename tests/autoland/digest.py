@@ -8,22 +8,34 @@ from harness import C, R, fresh_pr_state, sh, tmp
 
 CALLS = []
 OPEN = {}  # the open issue under each label, as `gh issue list` finds it
-GH = {"fail": ""}  # a write that fails
+LABELS = {}  # the labels on each open issue, by number, when not the two the stuck one is made with
+GH = {"fail": ""}  # a write that fails: an issue command, or a flag
 
 
 def gh(*a, **k):
     CALLS.append(a)
     if a[:2] == ("issue", "list"):
-        n = OPEN.get(a[a.index("--label") + 1])
-        return [{"number": n, "body": ""}] if n else []
-    return None if GH["fail"] and a[:2] == ("issue", GH["fail"]) else {}
+        label = a[a.index("--label") + 1]
+        n = OPEN.get(label)
+        return [{"number": n, "body": "", "labels": [{"name": x} for x in LABELS.get(n, [label, "unstick"])]}] if n else []
+    # A write that fails: an issue command, or any call with a flag.
+    return None if GH["fail"] and (a[:2] == ("issue", GH["fail"]) or GH["fail"] in a) else {}
 
 
 def made(label):
-    """The `gh issue create` under label, as {flag: value}."""
+    """The `gh issue create` under label, as {flag: value}, its labels as a list."""
     got = [a for a in CALLS if a[:2] == ("issue", "create") and a[a.index("--label") + 1] == label]
     assert len(got) <= 1, got
-    return dict(zip(got[0][2::2], got[0][3::2])) if got else None
+    if not got:
+        return None
+    flags = dict(zip(got[0][2::2], got[0][3::2]))
+    flags["--label"] = [v for f, v in zip(got[0][2::2], got[0][3::2]) if f == "--label"]
+    return flags
+
+
+def relabelled(n):
+    """The labels added to issue n since CALLS was cleared."""
+    return [a[a.index("--add-label") + 1] for a in CALLS if a[:3] == ("issue", "edit", str(n)) and "--add-label" in a]
 
 
 def said(n):
@@ -35,9 +47,11 @@ def fresh(enable=True, app=True):
     """With app, the steward's App is one of the inbox's authors, as autoland.nix makes it."""
     CALLS.clear()
     OPEN.clear()
+    LABELS.clear()
     fresh_pr_state()
     GH.update(fail="")
-    R.CFG["inbox"] = {"enable": enable, "label": "claude", "authors": ["sam"] + (["steward[bot]"] if app else [])}
+    R.CFG["inbox"] = {"enable": enable, "label": "claude", "unstickLabel": "unstick",
+                      "authors": ["sam"] + (["steward[bot]"] if app else [])}
 
 
 def later(digest):
@@ -74,6 +88,10 @@ assert owner and owner["--title"] == "[autoland] PRs waiting for you" and owner[
 assert all(x in owner["--body"] for x in ("sam/r#1", "sam/r#2", "sam/r#7")), owner["--body"]
 assert not any(x in owner["--body"] for x in ("sam/r#3", "sam/r#4", "sam/r#5", "Stuck")), owner["--body"]
 assert stuck and stuck["--title"] == "[autoland] Stuck in the pipeline" and "--assignee" not in stuck, CALLS
+# Its job never waits in proj's line, which may be what's stuck: the inbox
+# runs it --unstick for the second label. The owner's has only its own.
+assert stuck["--label"] == ["claude", "unstick"] and owner["--label"] == ["autoland"], (stuck, owner)
+assert ("label", "create", "unstick", "-R", "sam/notes", "--color", "B60205") in CALLS, CALLS
 assert stuck["--body"].startswith(R.stuck_brief()) and f"{tmp}/state" in stuck["--body"], stuck["--body"]
 # The kick it gives works from a job's shell: burrow-events starts the
 # unit, which alone holds the App's key (`autoland-steward kick` there can't sign).
@@ -107,6 +125,21 @@ CALLS.clear()
 R.publish(DIGEST)
 assert said(9) == ["New:\n- Couldn't merge: sam/r#4: GitHub keeps refusing the merge (journalctl -u autoland)\n"
                    "- Two Claude jobs ended without fixing it: sam/r#5: its findings"], said(9)
+# It had the unstick label all along: nothing to put back. One open from
+# before it had one, or that lost it, gets it back, before the news that
+# hands it on, which only comes once that went through.
+assert relabelled(9) == [], CALLS
+LABELS[9] = ["claude"]
+CALLS.clear()
+GH["fail"] = "--add-label"
+later(DIGEST + [("Open over a day", "sam/r#9", "unsettled")])
+assert relabelled(9) == ["unstick"] and said(9) == [], CALLS
+GH["fail"] = ""
+CALLS.clear()
+R.publish(DIGEST + [("Open over a day", "sam/r#9", "unsettled")])
+assert relabelled(9) == ["unstick"] and said(9) == ["New:\n- Open over a day: sam/r#9: unsettled"], CALLS
+LABELS.pop(9)
+R.publish(DIGEST)
 # A PR already listed, listed again for something else: news too, kind and
 # diagnosis with it.
 CALLS.clear()

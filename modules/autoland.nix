@@ -125,8 +125,9 @@ let
     # notify.repo with its label, for a Claude job to take (repos.py publish),
     # when the inbox will: notify.repo cloned in projectsDir, and the
     # steward's App one of inbox.authors (it is: see below). Otherwise it's
-    # the owner's.
-    inbox = { inherit (config.burrow.proj.inbox) enable label authors; };
+    # the owner's. It has unstickLabel too, so that job never waits in proj's
+    # line, which may be what's stuck.
+    inbox = { inherit (config.burrow.proj.inbox) enable label unstickLabel authors; };
     # Renovate's dashboards (dashboard.py), and where a job that ticks a box
     # on one kicks Renovate to read it.
     dashboard = {
