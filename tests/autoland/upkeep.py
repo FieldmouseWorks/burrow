@@ -76,7 +76,8 @@ SETTINGS = {
     # gh's pages: the strict one is on the second.
     "repos/sam/r/rulesets?per_page=100": [LISTED[:1], LISTED[1:]],
     "repos/sam/r/rulesets/1": {"name": "baseline", "target": "branch", "source_type": "Repository",
-                               "rules": [{"type": "deletion"}]},
+                               "bypass_actors": [{"actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "pull_request"}],
+                               "rules": [{"type": y} for y in ("deletion", "non_fast_forward", "pull_request", "required_status_checks")]},
     "repos/sam/r/rulesets/2": gates,
     "repos/sam/r/branches?protected=true&per_page=100": [[{"name": "main"}]],
     "repos/sam/r/branches/main": {"protection": {"required_status_checks": {"enforcement_level": "everyone"}}},

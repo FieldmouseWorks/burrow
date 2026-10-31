@@ -74,7 +74,17 @@ def required(train):
     return [{"context": c, "integration_id": CFG["app"]["id"]} for c in [CONTEXT] + [T.CONTEXT] * bool(train)]
 
 
-def baseline_ruleset(rc, default):
+def bypass_actors(rc):
+    """Who gets past the baseline. The owner (an admin) can still merge past
+    it from the PR page, and automation that pushes (directPush) past it
+    altogether; in a repo with its train on, no one: only the train lands
+    there."""
+    if rc["train"]:
+        return []
+    return [{"actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "always" if rc["directPush"] else "pull_request"}]
+
+
+def baseline_ruleset(rc):
     rules = [{"type": "deletion"}, {"type": "non_fast_forward"}]
     if not rc["directPush"]:
         rules += [
@@ -96,9 +106,7 @@ def baseline_ruleset(rc, default):
         "target": "branch",
         "enforcement": "active",
         "conditions": {"ref_name": {"include": ["~DEFAULT_BRANCH"], "exclude": []}},
-        # The owner (an admin) can still merge past it, from the PR page.
-        "bypass_actors": [{"actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "pull_request"}]
-        if not rc["directPush"] else [{"actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "always"}],
+        "bypass_actors": bypass_actors(rc),
         "rules": rules,
     }
 
@@ -193,7 +201,7 @@ def settle_repo(r, known):
         if CFG["rulesets"] and rc["ruleset"] and not empty and not any(x["name"] == "baseline" for x in own):
             log(f"{repo}: adding the baseline ruleset")
             made = C.write("api", "-X", "POST", f"repos/{repo}/rulesets", "--input", "-",
-                           input=json.dumps(baseline_ruleset(rc, r["default"])), check=False) is not None
+                           input=json.dumps(baseline_ruleset(rc)), check=False) is not None
         # Whether or not the repo gets the baseline ruleset, its own rules
         # are kept in line with it.
         rules = keep_rules(repo, rc, [x for x in own if x.get("target") == "branch"]) and made
@@ -321,11 +329,33 @@ def keep_checks(checks, key):
     return moved
 
 
+def complete_baseline(rs, rc):
+    """A baseline made before this repo's settings were what they are (say
+    while it pushed directly, with only the first two rules) gets the rules
+    it lacks: with no required-status rule in it there's nothing for
+    keep_rules to require the train's status in. Who may bypass it follows
+    the train going on or off. Returns what changed, in words."""
+    if rs.get("name") != "baseline" or not (CFG["rulesets"] and rc["ruleset"]) or rc["directPush"]:
+        return []
+    changed = []
+    have = {y.get("type") for y in rs.get("rules") or []}
+    missing = [y for y in baseline_ruleset(rc)["rules"] if y["type"] not in have]
+    if missing:
+        rs["rules"] = (rs.get("rules") or []) + missing
+        changed.append(f"{', '.join(y['type'] for y in missing)} added")
+    # Only the train's own turn: a repo's other bypass is its own to keep.
+    if bool(rs.get("bypass_actors")) == bool(rc["train"]):
+        rs["bypass_actors"] = bypass_actors(rc)
+        changed.append("no bypass, only the train lands" if rc["train"] else "the owner's bypass back")
+    return changed
+
+
 def keep_rules(repo, rc, rulesets):
     """Each of the repo's own branch rulesets, in line with the baseline: no
     up-to-date branches (docs/repo-baseline.md says why), and the steward's
-    status required from its App only; the baseline's own requires the
-    train's too exactly while the repo's train is on. The listing names a
+    status required from its App only; the baseline's own has all its rules
+    (complete_baseline) and requires the train's too exactly while the repo's
+    train is on. The listing names a
     ruleset without its rules, so each one is read. Returns False when one
     couldn't be read or wouldn't take the change."""
     ok = True
@@ -334,7 +364,7 @@ def keep_rules(repo, rc, rulesets):
         if not isinstance(rs, dict):
             ok = False
             continue
-        changed = []
+        changed = complete_baseline(rs, rc)
         for y in rs.get("rules") or []:
             if y.get("type") != "required_status_checks":
                 continue
