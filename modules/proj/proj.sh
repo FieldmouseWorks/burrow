@@ -11,8 +11,9 @@
 #                               origin), ahead of everything, and its own
 #                               slots, and in a lead one (LEAD) ahead of the
 #                               other pipeline work too; in any other, as
-#                               --first, and status and the turn's journal
-#                               say so (every turn of it, either way)
+#                               a steward job, ahead of the line within its
+#                               project's cap, and status and the turn's
+#                               journal say so (every turn of it, either way)
 #   proj run --unstick PROJECT "task"  what the pipeline is stuck on: never
 #                               in the line, which may be the very thing
 #                               stuck, but in a slot of its own besides
@@ -70,7 +71,7 @@
 # first, and a turn that has waited MAX_WAIT seconds counts as --first itself,
 # so a stream of them can't starve it. PIPELINE_SLOTS of the slots are for pipeline jobs in the
 # pipeline's own repos alone, and no project's other jobs hold more than
-# PER_PROJECT at once, and a waiting one of theirs is owed a slot ahead of the
+# PER_PROJECT at once, the last of those kept for its steward jobs, and a waiting one of theirs is owed a slot ahead of the
 # pipeline's when none runs (pick.sh). A job run --unstick waits in none of that:
 # its turns take a slot of their own, past the MAX_JOBS, one at a time
 # (line.sh). A waiting turn is just this shell, which becomes the deployed proj

@@ -359,7 +359,7 @@ in
         `pipelineSlots`, so the work queued behind them gets the speedup
         sooner. The steward's jobs in any other repo go ahead of the line as
         well, but within that project's `maxJobsPerProject`, so one repo's
-        PRs can't fill the machine.
+        PRs can't fill the machine; its other jobs leave them the last slot of that.
       '';
     };
 
