@@ -679,10 +679,12 @@ in
         the rest wait their turn, those labelled `labels.first` first, then
         the oldest PR first; unset, no limit),
         proofBuilds (the flake attribute each proof check builds, `{
-        "<check>" = "checks.x86_64-linux.<name>"; }`: a proof whose
-        attribute's outputs are all in the store, or being built by a proof
-        already running, skips the line and holds no slot; a job running a
-        check without one holds a slot of its own), keepBranches
+        "<check>" = "checks.x86_64-linux.<name>"; }`, whose result is the
+        check's verdict: a proof whose attributes' outputs are all in the
+        store takes no job, its verdicts taken from the store, saying so
+        and naming each derivation; one whose outputs are being built by a
+        proof already running skips the line and holds no slot; a job
+        running a check without one holds a slot of its own), keepBranches
         (more branch globs the cleanup never touches in this repo, on top of
         the machine's, for branches a repo keeps as evidence), codex (false:
         Codex leaves this repo alone, and none of it goes to it), skipPaths (more path regexes the reviewers never read in
