@@ -17,7 +17,7 @@ stand_in()
 MIN = 60
 published = []
 kept_fns = (S.R.discover, S.R.settle_repo, S.R.publish, S.open_prs, S.R.unhook_gone, S.R.hook_projects,
-            S.R.watch_default, S.R.watch_branches, S.V.snap_name)
+            S.R.watch_default, S.B.watch_branches, S.V.snap_name)
 S.R.settle_repo = lambda r, known: False
 S.R.publish = published.append
 S.R.unhook_gone = lambda repos: None
@@ -215,12 +215,12 @@ assert failing["sam/r#5"]["phase"] != items["sam/r#5"]["phase"] and failing["sam
 assert failing["sam/r#7"] == items["sam/r#7"] and failing["sam/r"]["since"] == T + 1400, failing
 S.V.snap_name = kept_fns[8]
 # After them: all as noted, and a PR that's closed is gone.
-S.CFG["cleanBranches"], S.R.watch_branches = True, broken
+S.CFG["cleanBranches"], S.B.watch_branches = True, broken
 OPEN["sam/r"] = OPEN["sam/r"][:1]
 failing = run(1600, "sam/r")
 assert sorted(failing) == ["sam/q#2", "sam/r", "sam/r#5"] and failing["sam/r#5"]["since"] == T + 1500, failing
 assert failing["sam/r"]["since"] == T + 1400, failing
-S.CFG["cleanBranches"], S.R.watch_branches = False, kept_fns[7]
+S.CFG["cleanBranches"], S.B.watch_branches = False, kept_fns[7]
 assert sorted(run(1700)) == ["sam/q#2", "sam/r#5"]
 print("waits failing: ok")
 
@@ -276,6 +276,6 @@ S.CFG["watch"]["renovateSweep"] = True
 print("waits on Renovate: ok")
 
 (S.R.discover, S.R.settle_repo, S.R.publish, S.open_prs, S.R.unhook_gone, S.R.hook_projects,
- S.R.watch_default, S.R.watch_branches, S.V.snap_name) = kept_fns
+ S.R.watch_default, S.B.watch_branches, S.V.snap_name) = kept_fns
 OPEN.clear()
 fresh_pr_state()
