@@ -1,0 +1,17 @@
+[package]
+name = "burrow-github"
+description = "GitHub's REST API through gh, for every burrow program that talks to it"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+# A scripted GitHub, for the tests of the programs that use this one.
+fake = []
+
+[dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true

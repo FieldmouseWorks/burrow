@@ -6,10 +6,10 @@
 
 use serde_json::json;
 
-use crate::github::{Api, Error, call};
 use crate::quarantine::{Quarantine, Quarantined};
 use crate::report::Entry;
 use crate::test::{EXPIRES, LABEL, title};
+use burrow_github::{Api, Error, call};
 
 /// Where the rules are, for whoever reads an issue.
 const DOCS: &str = "https://github.com/FieldmouseWorks/burrow/blob/main/docs/flaky-tests.md";
@@ -186,7 +186,7 @@ fn fence(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::github::fake::{Fake, ok};
+    use burrow_github::fake::{Fake, ok};
 
     fn entry(test: &str, detail: Option<&str>) -> Entry {
         Entry {

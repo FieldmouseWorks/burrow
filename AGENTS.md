@@ -84,8 +84,7 @@ agent sandboxes (nested KVM: it needs `/dev/kvm`).
 
 The programs burrow's modules run are Rust, in one Cargo workspace,
 `crates/`: the flake installs them as `packages.SYSTEM.burrow` and gates them
-as `checks.crates-*`, and `cargo test` there runs the same tests. gh-token and
-the flaky tool still have workspaces of their own until #164. The shared
+as `checks.crates-*`, and `cargo test` there runs the same tests. The shared
 workflows' tests are there too, `crates/burrow-workflows`, which ships
 nothing: they run a workflow's own steps, read the files `flake.nix` gives
 them by their place in a checkout, and need git, jq and nix on PATH.

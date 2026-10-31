@@ -1,5 +1,7 @@
 //! GitHub's REST API, through gh: it brings the login (GH_TOKEN, GitHub
-//! Actions' token for one, or gh's own), the proxy and the host.
+//! Actions' token for one, or gh's own), the proxy and the host. burrow's
+//! programs that talk to GitHub share it; with the `fake` feature, their
+//! tests get a GitHub that answers from a script.
 
 use std::io::Write;
 use std::process::{Command, Stdio};
@@ -227,7 +229,7 @@ pub fn parse(out: &str) -> Option<Response> {
     })
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "fake"))]
 pub mod fake {
     //! A GitHub that answers from a script and keeps what it was asked.
 

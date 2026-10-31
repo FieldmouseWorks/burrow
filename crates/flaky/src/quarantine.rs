@@ -14,8 +14,8 @@ use serde_json::{Map, Value, json};
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::github::{Api, Error, call};
 use crate::test::{ACTIONS, EXPIRES, LABEL, PREFIX, can_push, quarantined_by, seconds, valid};
+use burrow_github::{Api, Error, call};
 
 /// What a cache holds: one written in another shape is read as none.
 const CACHE: u64 = 2;
@@ -234,7 +234,7 @@ fn change(e: &Value) -> Value {
     }
 }
 
-fn page(r: &crate::github::Response) -> Result<Vec<Value>, Error> {
+fn page(r: &burrow_github::Response) -> Result<Vec<Value>, Error> {
     match r.json()? {
         Value::Array(a) => Ok(a),
         _ => Err(Error("GitHub's list isn't a list".into())),
@@ -287,8 +287,8 @@ pub fn default_cache() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::github::fake::{Fake, ok};
-    use crate::github::{Failed, Response};
+    use burrow_github::fake::{Fake, ok};
+    use burrow_github::{Failed, Response};
 
     fn issue(n: u64, title: &str, login: &str) -> Value {
         json!({"number": n, "title": title, "labels": [{"name": "flaky", "color": "d93f0b"}],

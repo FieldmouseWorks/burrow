@@ -22,14 +22,17 @@ inputs:
 runs:
   using: composite
   steps:
-    # From this action's own commit, on the runner's cargo: once a job, by
-    # start, for file to run too.
+    # From this action's own commit, on the runner's cargo, in the crates'
+    # directory: rustup reads the toolchain from where cargo runs, so this
+    # builds with the one crates/rust-toolchain.toml pins, not the caller's.
+    # Once a job, by start, for file to run too.
     - name: Build flaky
       if: inputs.step == 'start'
       shell: bash
+      working-directory: ${{ github.action_path }}/../../../crates
       env:
         CARGO_TARGET_DIR: ${{ runner.temp }}/flaky-build
-      run: cargo build --release --locked --quiet --manifest-path "$GITHUB_ACTION_PATH/../../../tools/flaky/Cargo.toml"
+      run: cargo build --release --locked --quiet -p flaky
     - name: Run flaky's step
       shell: bash
       env:
