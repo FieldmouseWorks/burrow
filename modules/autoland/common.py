@@ -575,14 +575,18 @@ def jobs():
 
 
 def stop_job(jid):
-    """End the job (proj stop): its running turn, and what it waits on to
-    resume. One proj no longer has is over already; any other refusal
-    raises."""
+    """End a Claude job (proj stop): its turn, queued or running, and
+    anything it awaits. True once it's over, one proj no longer has
+    included; False if proj couldn't stop it, and it may still be at work."""
     if DRY:
-        return
+        log(f"  would: proj stop {jid}")
+        return True
     p = subprocess.run([CFG["proj"], "stop", jid], capture_output=True, text=True)
-    if p.returncode and not p.stderr.startswith(f"no job {jid}"):
-        raise RuntimeError(f"proj stop {jid}: {p.stderr.strip() or f'exit {p.returncode}'}")
+    if p.returncode and p.stderr.startswith(f"no job {jid}"):
+        return True
+    if p.returncode:
+        log(f"proj stop {jid}: {p.stderr.strip()[-300:]}")
+    return p.returncode == 0
 
 
 def forget_issues(repo):

@@ -265,7 +265,7 @@ def retire_checkouts(repo, k):
     starts in a clone moved aside, and the inbox starts none for a repo it
     has no clone of. Each folder is kept with the repo's settings
     (`retired`) before it's moved, so a later try stops its jobs if this
-    one can't. A job proj won't stop raises."""
+    one can't. A job proj won't stop raises, for the next pass to try again."""
     src = CFG["projectsDir"]
     every = list(C.projects(strict=True))
     st = load(f"repo-{k}.json", {})
@@ -280,8 +280,8 @@ def retire_checkouts(repo, k):
     C.forget_issues(repo)
     ours = {os.path.join(src, d) for d in set(retired) | ({repo.split("/")[1]} - {d for d, _ in every})}
     for jid, project, repos in C.jobs():
-        if repo.lower() in repos or (not repos and project in ours):
-            C.stop_job(jid)
+        if (repo.lower() in repos or (not repos and project in ours)) and not C.stop_job(jid):
+            raise RuntimeError(f"{repo}: proj couldn't stop job {jid}, which may be the deleted one's")
 
 
 def keep_checks(checks, key):

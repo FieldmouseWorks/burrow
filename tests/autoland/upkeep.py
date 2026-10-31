@@ -10,7 +10,7 @@ import subprocess
 import time
 import urllib.parse
 
-from harness import (C, FAIL, FORGOT, JOBS, R, H, REAL, S, STATES, STOPPED, T0, V, WROTE, fresh_pr_state, info, gh_stub, mkpr,
+from harness import (C, FAIL, FORGOT, JOBS, R, H, REAL, S, STATES, STOPPED, T0, UNSTOPPABLE, V, WROTE, fresh_pr_state, info, gh_stub, mkpr,
                      stand_in, tmp)
 
 stand_in()
@@ -417,16 +417,16 @@ for there in ("sam", None, "kim"):
 # service is on keeps its entry and its session until it ends, and the
 # reset waits for it, whatever code the service runs.
 snap = V.snap_name("pr-sam_r-1.json", "a" * 40, "main")
-for broken, said in (("stop", "couldn't"), ("origin", "can't read its origin"), ("folder", "symbolic links"),
+for broken, said in (("stop", "couldn't stop job"), ("origin", "can't read its origin"), ("folder", "symbolic links"),
                      ("forget", "still going"), ("record", "symbolic links"), ("look", "aren't done with"),
                      ("sweep", "aren't done with")):
     C.NOW += 1
     old_state()
     clone("r-old")
     jid = job("r-old")  # only that it ran in a clone moved aside says it's the repo's
-    stop, sweep, forget = C.stop_job, V.sweep, C.forget_issues
+    sweep, forget = V.sweep, C.forget_issues
     if broken == "stop":
-        C.stop_job = lambda jid: (_ for _ in ()).throw(RuntimeError(f"proj stop {jid}: couldn't"))
+        UNSTOPPABLE.add(jid)
     elif broken == "origin":
         os.makedirs(f"{src}/half/.git")
     elif broken == "folder":
@@ -449,7 +449,8 @@ for broken, said in (("stop", "couldn't"), ("origin", "can't read its origin"), 
         raise AssertionError(f"{broken} failing was swallowed")
     except (RuntimeError, OSError) as e:
         assert said in str(e), (broken, e)
-    C.stop_job, V.sweep, C.forget_issues = stop, sweep, forget
+    V.sweep, C.forget_issues = sweep, forget
+    UNSTOPPABLE.discard(jid)
     assert known == set() and C.load("known.json", None) == [] and "repo-sam_r.json" in os.listdir(f"{tmp}/state")
     assert os.path.isdir(f"{src}/r-old") == (broken in ("origin", "folder")), (broken, os.listdir(src))
     assert STOPPED == ([] if broken in ("stop", "origin", "folder", "forget", "record") else [jid]), (broken, STOPPED)
@@ -479,8 +480,8 @@ try:
 except OSError as e:
     assert "symbolic links" in str(e), e
 S.CFG["projectsDir"] = src
-# proj stop: a job proj no longer has is over already; anything else it
-# says raises.
+# proj stop: a job proj no longer has is over already; any other refusal
+# is one it may still be at work after.
 proj = os.path.join(tmp, "stop-proj")
 with open(proj, "w") as f:
     f.write(f'#!/bin/sh\necho "$@" >>{tmp}/stop-args\n'
@@ -488,13 +489,8 @@ with open(proj, "w") as f:
             '[ "$2" = stuck-20261023-120000-abcd ] && { echo "proj: couldn\'t stop $2" >&2; exit 1; }\nexit 0\n')
 os.chmod(proj, 0o755)
 S.CFG["proj"], kept_proj = proj, S.CFG["proj"]
-REAL["stop_job"]("r-20261023-120000-abcd")
-REAL["stop_job"]("gone-20261023-120000-abcd")
-try:
-    REAL["stop_job"]("stuck-20261023-120000-abcd")
-    raise AssertionError("a job proj couldn't stop was taken for stopped")
-except RuntimeError as e:
-    assert "couldn't stop" in str(e), e
+assert REAL["stop_job"]("r-20261023-120000-abcd") and REAL["stop_job"]("gone-20261023-120000-abcd")
+assert not REAL["stop_job"]("stuck-20261023-120000-abcd"), "a job proj couldn't stop was taken for stopped"
 assert open(f"{tmp}/stop-args").read().split("\n")[0] == "stop r-20261023-120000-abcd"
 S.CFG["proj"] = kept_proj
 # proj-inbox forget: none where there's no inbox; with one, what it
