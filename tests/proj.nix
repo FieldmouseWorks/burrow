@@ -740,8 +740,14 @@ pkgs.testers.runNixOSTest {
         # the command. proj() asserts the exit.
         machine.succeed("su - dev -c 'cd /data/dev/jobs && seq -f many-%g 5000 | xargs mkdir'")
         listed = proj("status").splitlines()
+        # Any count means what it means to head, and a bad one still fails.
+        total = int(machine.succeed("find /data/dev/jobs -mindepth 1 -maxdepth 1 -type d -not -name '.*' | wc -l"))
+        counted = {n: len(proj(f"status {n}").splitlines()) for n in ("0", "3", "+3", f"-{total - 10}", "1K")}
+        bad = machine.execute("su - dev -c 'proj status nonsense'")[0]
         machine.succeed("cd /data/dev/jobs && seq -f many-%g 5000 | xargs rm -r")
         assert len(listed) == 15, listed
+        assert counted == {"0": 0, "3": 3, "+3": 3, f"-{total - 10}": 10, "1K": 1024}, counted
+        assert bad == 1, bad
 
     with subtest("every answer in a turn is kept, not only the last"):
         f = proj("run web twice")
