@@ -27,13 +27,14 @@
   # does, even told to; what it's told is kept in /tmp/told.
   claude = pkgs.writeShellScriptBin "claude" ''
     prompt=$(cat)
-    echo "$*" >/tmp/args
+    args=$*
+    echo "$args" >/tmp/args
     init() { echo "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"$1\"}"; }
     bloat() { init bloat; x=$(head -c 512M /dev/zero | tr '\0' x); }
     hang() {
       init hang
       # Resumed, it puts out the empty result Claude Code can first.
-      case " $* " in *" --resume "*) echo '{"type":"result","session_id":"hang","num_turns":0,"result":"","is_error":false}' ;; esac
+      case " $args " in *" --resume "*) echo '{"type":"result","session_id":"hang","num_turns":0,"result":"","is_error":false}' ;; esac
       sleep 600
     }
     if [ -n "''${PROJ_JOB:-}" ] && [ ! -e /tmp/silent ]; then
