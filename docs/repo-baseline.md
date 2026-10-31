@@ -248,7 +248,9 @@ For reviewers, the review bot included. Flag as P1:
   daily sweep: each pass lists the branches and the PRs closed since the
   last look with the last listings' ETags, which GitHub answers for free
   while nothing changed. A branch GitHub wouldn't read for it is looked at
-  again on the hourly pass.
+  again on the hourly pass, and so is one GitHub wouldn't let it delete (a
+  ruleset, say), which also goes to the issue of what the pipeline is stuck
+  on.
 - Unmerged branches with no PR and no commit for 3 days are archived, then
   deleted: the steward keeps the tip at `refs/archive/BRANCH/SHA` in the same
   repo, a ref GitHub keeps but lists with neither branches nor tags, and

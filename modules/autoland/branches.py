@@ -3,6 +3,7 @@ changes them (a push, a PR closing, the default moving, the wait it was
 given ending), with a stale one's commits archived first."""
 
 import fnmatch
+import re
 import subprocess
 import tempfile
 import urllib.parse
@@ -14,17 +15,31 @@ from common import CFG, DEP_RE, DRY, load, log, repo_cfg, save, ts
 
 def delete_branch(repo, name, sha):
     """Delete the branch only if its tip is still `sha`: a push since then
-    keeps it (git's lease; the REST API has no conditional delete)."""
+    keeps it (git's lease; the REST API has no conditional delete). What
+    GitHub said when it refused (a ruleset, a token that can't), else "":
+    deleted, already gone, or kept by a push the next listing shows.
+    C.Unavailable when GitHub didn't answer."""
     if DRY:
         log(f"  would: delete {repo} {name} if still at {sha[:7]}")
-        return
+        return ""
     with tempfile.TemporaryDirectory() as d:
         subprocess.run(["git", "init", "-q", "--bare", d], check=False)
         p = subprocess.run(["git", "-C", d, *C.GIT_AUTH, "push", "-q", f"--force-with-lease=refs/heads/{name}:{sha}",
                             f"https://github.com/{repo}.git", f":refs/heads/{name}"],
                            capture_output=True, text=True, env=C.gh_env(repo))
-        if p.returncode != 0:
-            log(f"{repo}: kept {name}: {p.stderr.strip()[:200]}")
+    # Read whole, shown cut: a long URL mustn't push git's verdict off the end.
+    said = " ".join(p.stderr.split())
+    if p.returncode == 0 or re.search(r"stale info|remote ref does not exist", said):
+        return ""
+    # Less the fields where git echoes names back (URLs, refs, the names on
+    # its ref-status lines), so a branch called fix/timeout reads as a
+    # refusal, not an outage. Only those fields: a branch called `error`
+    # mustn't take the word out of git's own "returned error: 502".
+    bare = re.sub(r"https?://\S+|refs/\S+|\[[a-z ]+\] \S+", "", said)
+    if C.UNAVAILABLE.search(bare) or re.search(r"could not resolve host|returned error: 5\d\d", bare, re.I):
+        raise C.Unavailable(f"git push :{name}: {said[:200]}")
+    log(f"{repo}: kept {name}: {said[:200]}")
+    return said[:200] or f"git exited {p.returncode}"
 
 
 # Unmerged, with no PR and no commit for this long: given up on (agents open
@@ -106,6 +121,7 @@ def closed_heads(repo, since, etag):
 
 
 UNKEPT = f"Stale branches it couldn't archive (unmerged, no PR, {STALE_DAYS}+ days)"
+UNDELETED = "Branches GitHub wouldn't let it delete"
 
 
 # A branch no open PR has goes only once it has sat at one tip this long, so
@@ -121,7 +137,7 @@ def watch_branches(r, in_use, digest, full=False):
     last look), the default moving under it, or the wait it was given
     ending (wake.json). Every pass looks, at no cost to the rate limit while
     nothing changed. A full pass also tries again what GitHub said no to: a
-    stale one's archive, or a read a judgment needed. A pass GitHub stopped
+    stale one's archive, a delete, or a read a judgment needed. A pass GitHub stopped
     answering keeps what it judged and leaves the rest to the next one."""
     repo = r["repo"]
     path = f"repo-{repo.replace('/', '_')}.json"
@@ -154,6 +170,12 @@ def watch_branches(r, in_use, digest, full=False):
             elif was is None or was["sha"] != sha or was.get("pr"):
                 # New, pushed to, or its PR just left the open ones: the wait starts now.
                 tips[name] = judge(repo, r, name, sha, C.NOW)
+            elif was.get("undeleted"):
+                # GitHub refused its delete, which nothing but a push changes
+                # (the default moving or a PR closing would only try it
+                # again): tried again on the full pass alone.
+                if full:
+                    tips[name] = judge(repo, r, name, sha, was["seen"])
             elif heads is None or (name, sha) in heads or moved or looks_again(was, full):
                 # Judged again from when it was first seen at this tip, so
                 # its wait comes out the same however often it's judged: a
@@ -177,6 +199,8 @@ def watch_branches(r, in_use, digest, full=False):
     for name, tip in sorted(tips.items()):
         if tip.get("unkept"):
             digest.append((UNKEPT, f"{repo}: `{name}`", ""))
+        elif tip.get("undeleted"):
+            digest.append((UNDELETED, f"{repo}: `{name}`", tip["undeleted"]))
 
 
 def looks_again(tip, full):
@@ -250,7 +274,8 @@ def judge(repo, r, name, sha, seen):
             return {**tip, "unkept": True}
         why = f"unmerged, no PR, {STALE_DAYS}+ days; kept at {ARCHIVE}/{name}/{sha}"
     log(f"{repo}: deleting {name} at {sha[:7]} ({why})")
-    # Its record stays until the listing drops it: a delete that didn't go
-    # through is tried again next pass.
-    delete_branch(repo, name, sha)
-    return tip
+    # Its record stays until the listing drops it. One GitHub refused is
+    # listed for the pipeline and tried again on the full pass, not on every
+    # pass until then.
+    refused = delete_branch(repo, name, sha)
+    return {**tip, "undeleted": refused} if refused else tip
