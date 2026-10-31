@@ -28,13 +28,16 @@
 //!   3. Still stuck GRACE after that job has ended, escalateAfter after it was
 //!      handed, or START after it was handed if it hasn't started (what's
 //!      stuck may be the slot it waits for): it goes to the steward's "Stuck
-//!      in the pipeline" issue, which proj's inbox hands to another Claude job
-//!      (the steward publishes escalated.json with the rest of that issue).
-//!      With no steward, or when the steward is what's stuck, the owner hears
-//!      instead.
-//!   4. Still stuck ownerAfter after that: the owner hears, one notice a
-//!      stall (notify), closed once it clears. It stays on the stuck issue
-//!      too.
+//!      in the pipeline" issue (the steward publishes escalated.json with the
+//!      rest of that issue), and that's the last step. proj's inbox hands the
+//!      issue to a job of its own, run --unstick so it never waits in proj's
+//!      line, and each new entry is that job's next turn; it puts what's
+//!      truly the owner's in front of them itself.
+//!   4. The owner hears, one notice a stall (notify), closed once it clears,
+//!      only of what the stuck issue can't take: with no steward, when the
+//!      steward is what's stuck, or when it's the stuck issue's own job
+//!      (`unstick`), which the issue would only hand to itself. A notice from
+//!      before the stuck issue took its stall on is closed.
 //!
 //! notify never says whether GitHub took a notice, so one is sent again every
 //! RENOTIFY while its stall lasts (notify adds a comment at most once a day).
@@ -79,6 +82,9 @@ pub const STEWARD: &str = "autoland";
 pub const PROJ: &str = "proj";
 /// What the stuck issue says of each stall on it.
 pub const ESCALATED: &str = "Stalled past its deadline, and a Claude job couldn't move it";
+/// What it says of a turn waiting for a slot past its deadline, which no
+/// job was handed (one would only have queued too).
+pub const IN_LINE: &str = "Waiting in proj's line past its deadline";
 
 /// The time now, in seconds since the epoch, as the watch files have it.
 pub fn now() -> f64 {

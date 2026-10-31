@@ -90,6 +90,8 @@ let
     SYSTEM = system;
     MANIFEST = if cfg.claudeManifest == null then "" else cfg.claudeManifest;
     CHECKS = lib.concatStringsSep " " cfg.checks;
+    # burrow.cpu's slots, which the VM tests wait for where the machine has them.
+    HEAVY = if config.burrow.cpu.enable then "${tools.heavy}/bin/heavy" else "";
     WITHIN = cfg.confirmWithin;
     CHANNEL = "nixos-${config.system.nixos.release}";
     OWNER = config.burrow.owner;
@@ -137,7 +139,7 @@ let
   calls = [ tools.proj tools.notify ];
   healthTool = script health ./updates/health.sh (with pkgs; [ coreutils gnugrep gnused gawk systemd ]);
   # Its own functions first (they run only once update.sh has defined what they call).
-  updateTool = script update [ ./updates/dispatch.sh ./updates/propose.sh ./updates/push.sh ./updates/update.sh ] (
+  updateTool = script update [ ./updates/dispatch.sh ./updates/propose.sh ./updates/push.sh ./updates/check.sh ./updates/update.sh ] (
     (with pkgs; [ coreutils jq curl util-linux systemd gnugrep gnused gawk vulnix config.nix.package ])
     ++ [ config.programs.git.package healthTool tools.switch tools.confirm machineGh ] ++ calls ++ lib.optional (tools ? boot) tools.boot
   );
@@ -431,6 +433,7 @@ in
 {
   imports = [
     (import ./common.nix inputs)
+    { key = "burrow/cpu"; imports = [ (import ./cpu.nix inputs) ]; }
     { key = "burrow/notify"; imports = [ (import ./notify.nix inputs) ]; }
     { key = "burrow/switch"; imports = [ (import ./switch.nix inputs) ]; }
     { key = "burrow/proj"; imports = [ (import ./proj.nix inputs) ]; }

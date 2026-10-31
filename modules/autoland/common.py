@@ -513,6 +513,19 @@ def job_state(jid):
     return p.stdout.strip() or None
 
 
+def stop_job(jid):
+    """End a Claude job (proj stop): its turn, queued or running, and
+    anything it awaits. True once it's over; False if proj couldn't stop it,
+    and it may still be at work."""
+    if DRY:
+        log(f"  would: proj stop {jid}")
+        return True
+    p = subprocess.run([CFG["proj"], "stop", jid], capture_output=True, text=True)
+    if p.returncode:
+        log(f"proj stop {jid}: {p.stderr.strip()[-300:]}")
+    return p.returncode == 0
+
+
 def coverage(repos, covered):
     """repos.json, for renovate-sweep, and when: every repo the steward has,
     with how its proofs run and whether this pass saw to its PRs."""

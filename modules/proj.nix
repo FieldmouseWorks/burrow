@@ -64,6 +64,7 @@ let
       STATE=${lib.escapeShellArg "${stateDir}/proj-inbox"}
       SCRATCH=${lib.escapeShellArg config.burrow.scratchDir}
       LABEL=${lib.escapeShellArg cfg.inbox.label}
+      UNSTICK_LABEL=${lib.escapeShellArg cfg.inbox.unstickLabel}
       AUTHORS=${lib.escapeShellArg (lib.concatStringsSep " " cfg.inbox.authors)}
       VM=${if cfg.inbox.vm then "1" else "0"}
       MARK=${lib.escapeShellArg inboxMark}
@@ -96,7 +97,8 @@ in
       description = ''
         How many jobs run Claude at once. The rest wait in line (`proj state`
         says queued), so a launcher can hand over as much work as it likes.
-        Each headless Claude holds a few GB.
+        Each headless Claude holds a few GB. One more, run `--unstick` (the
+        stuck issue's, `inbox.unstickLabel`), has a slot of its own besides.
       '';
     };
     pipelineSlots = lib.mkOption {
@@ -209,6 +211,17 @@ in
         type = lib.types.str;
         default = "claude";
         description = "The label that hands an issue to Claude. It's created in each repo that lacks it.";
+      };
+      unstickLabel = lib.mkOption {
+        type = lib.types.str;
+        default = "unstick";
+        description = ''
+          An inbox issue with this label too is about what the pipeline is
+          stuck on (the steward's stuck issue has it): its job runs
+          `proj run --unstick`, in a slot of its own past maxJobs, so it never
+          waits in the line it may be about. Put on an issue whose job is
+          still waiting for its first turn, it starts that job over that way.
+        '';
       };
       authors = lib.mkOption {
         type = lib.types.listOf lib.types.str;
