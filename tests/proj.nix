@@ -681,6 +681,9 @@ pkgs.testers.runNixOSTest {
         machine.wait_until_succeeds(f"su - dev -c 'proj state {f}' | grep -x done", timeout=120)
         assert proj(f"log {f}") == "the answer\n\ndid twice", proj(f"log {f}")
         assert machine.succeed(f"cat /data/dev/jobs/{f}/1.result") == "the answer\n\ndid twice\n"
+        # The answer after the first, read and dropped, isn't a broken pipe in
+        # the turn's journal.
+        machine.fail(f"journalctl -q '_SYSTEMD_USER_UNIT={unit(f)}' | grep -F 'Broken pipe'")
 
     with subtest("an answer, then an error: the log has both"):
         f = proj("run web answerfail")
