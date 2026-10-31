@@ -31,6 +31,7 @@ QUEUE, SNAP, DONE, GIT = "review/queue", "review/snap", "review/done", "review/g
 SESSIONS, GONE = "review/sessions", ".gone-"
 ORIGIN = "https://github.com/{}.git"
 OUT = "reviewers.json"  # a reviewer out of service, and until when
+META = {"rules", "house", "secret"}  # what a snapshot keeps of its base, for the prompt
 # How the reviewers and a judge weigh the reasons a PR's description gives
 # where the house rules ask for one. That the line is there is CI's to check;
 # whether its reason holds up takes reading the code.
@@ -62,10 +63,31 @@ def finding(r):
     return f"<!-- {r}-finding -->"
 
 
+def quote(body):
+    """A PR's description as the reviewers are shown it: each line quoted,
+    so nothing in it reads as their brief going on."""
+    return "\n".join(f"> {x}".rstrip() for x in body.strip().splitlines()) or "(none)"
+
+
+def fingerprint(body):
+    """What a review carries of the description it was shown."""
+    return hashlib.sha256(quote(body).encode()).hexdigest()[:16]
+
+
+def described(pr, seen):
+    """Whether a review that was shown the description `seen` (its
+    fingerprint) was shown the PR's as it is now. The reasons a description
+    gives are part of what a reviewer judges, so a review of another one
+    doesn't cover the PR: a `Why not Rust:` line written in after a clean
+    review (CI wanted one) has had nobody weigh it."""
+    return seen == fingerprint(pr["body"])
+
+
 def verdict(pr, head, r):
-    """What the reviewer last said about this exact head on the PR's base
-    (clean, findings or none), when, and how many of its reviews on the PR had findings. Only
-    reviews the steward posted count: anyone can write the marker."""
+    """What the reviewer last said about this exact head on the PR's base,
+    shown its description as it is now (clean, findings or none), when, and
+    how many of its reviews on the PR had findings. Only reviews the steward
+    posted count: anyone can write the marker."""
     pat = review_re(r)
     v, at, rounds = "none", 0, 0
     for x in pr["reviews"]["nodes"]:
@@ -80,7 +102,7 @@ def verdict(pr, head, r):
         rounds += found
         # Retargeted, the PR is another change on the same head: what was
         # said about it on its old base doesn't count.
-        if (said.get("commit_sha") == head and said.get("base") == pr["baseRefName"]
+        if (said.get("commit_sha") == head and said.get("base") == pr["baseRefName"] and described(pr, said.get("description"))
                 and (x["commit"] or {}).get("oid") == head and ts(x["submittedAt"]) >= at):
             v, at = ("findings" if found else "clean"), ts(x["submittedAt"])
     return v, at, rounds
@@ -124,9 +146,11 @@ def hidden(repo, path):
 
 def rules(repo, mirror, rev, paths):
     """The `## Code Review Rules` of the AGENTS.md nearest each changed file,
-    as `rev` (the base branch) has them: a PR can't rewrite its own rules.
-    An AGENTS.md in a secrets path is never read: its rules would reach the
-    reviewers in the prompt."""
+    and the `## House rules` the reasons a PR's description gives answer to,
+    from those and the root's, as `rev` (the base branch) has them: a PR
+    can't rewrite its own rules, and the base it lands on is the one whose
+    rules hold. An AGENTS.md in a secrets path is never read: its rules
+    would reach the reviewers in the prompt. Returns the two, as text."""
     have = {f for f in names(git("-C", mirror, "ls-tree", "-r", "-z", "--name-only", rev)) if not hidden(repo, f)}
     wanted = set()
     for p in paths:
@@ -137,13 +161,14 @@ def rules(repo, mirror, rev, paths):
             if f in have:
                 wanted.add(f)
                 break
-    out = []
-    for f in sorted(wanted):
+    out = {"Code Review Rules": [], "House rules": []}
+    for f in sorted(wanted | ({"AGENTS.md"} & have)):
         text = git("-C", mirror, "show", f"{rev}:{f}").decode(errors="replace")
-        m = re.search(r"^## Code Review Rules\s*$(.*?)(?=^## |\Z)", text, re.M | re.S)
-        if m:
-            out.append(f"From {f}:\n{m.group(1).strip()}")
-    return "\n\n".join(out)
+        for heading, found in out.items():
+            m = re.search(rf"^## {heading}\s*$(.*?)(?=^## |\Z)", text, re.M | re.S)
+            if m and (f in wanted or heading == "House rules"):
+                found.append(f"From {f}:\n{m.group(1).strip()}")
+    return ["\n\n".join(x) for x in out.values()]
 
 
 def fetch(repo, *refs):
@@ -184,7 +209,8 @@ def snapshot(repo, pr, key):
     n, head, base = pr["number"], pr["headRefOid"], pr["baseRefName"]
     name = snap_name(key, head, base)
     meta = load(f"{SNAP}/{name}.json", None)
-    if meta:
+    # One kept by a steward that read less of the base is taken again.
+    if meta and META <= meta.keys():
         return name, meta
     mirror = fetch(repo, f"+refs/pull/{n}/head:refs/pr/{n}", f"+refs/heads/{base}:refs/base/{base}")
     mb = git("-C", mirror, "merge-base", f"refs/base/{base}", head).decode().strip()
@@ -242,8 +268,8 @@ def snapshot(repo, pr, key):
     git("-C", dst, "fetch", "-q", "--no-tags", mirror, f"refs/snap/{name}:refs/heads/review", env=bare)
     git("-C", mirror, "update-ref", "-d", f"refs/snap/{name}")
     git("-C", dst, "checkout", "-q", "review", env=bare)
-    meta = {"rules": rules(repo, mirror, f"refs/base/{base}", [p for p in changed if not (hidden(repo, p) or p in moved)]),
-            "secret": [shown(p) for p in changed if hidden(repo, p) or p in moved]}
+    review, house = rules(repo, mirror, f"refs/base/{base}", [p for p in changed if not (hidden(repo, p) or p in moved)])
+    meta = {"rules": review, "house": house, "secret": [shown(p) for p in changed if hidden(repo, p) or p in moved]}
     save(f"{SNAP}/{name}.json", meta)
     return name, meta
 
@@ -295,7 +321,7 @@ def queue(repo, pr, key, r):
     save(f"{QUEUE}/{r}--{snap}.json", {
         "reviewer": r, "snap": snap, "repo": repo, "number": pr["number"], "headRefOid": pr["headRefOid"],
         "baseRefName": pr["baseRefName"], "title": pr["title"], "body": pr["body"],
-        "rules": meta["rules"], "secret": meta["secret"],
+        "rules": meta["rules"], "house": meta["house"], "secret": meta["secret"],
         "prior": prior(repo, pr["number"], r), "at": C.NOW})
 
 
@@ -524,9 +550,10 @@ def quiet(text):
     return re.sub(r"@(?=[\w-])", "@​", str(text)).replace("<!--", "&lt;!--")
 
 
-def post(repo, pr, r, answer):
-    """The reviewer's answer as one review on the head. Returns "clean" or
-    "findings". Raises ValueError if the answer isn't a review, and
+def post(repo, pr, r, answer, description):
+    """The reviewer's answer as one review on the head, marked with the
+    description it was shown (its fingerprint, or None if that's unknown).
+    Returns "clean" or "findings". Raises ValueError if the answer isn't a review, and
     RuntimeError if GitHub didn't take it (the same answer can go next pass),
     C.Unavailable if GitHub didn't answer."""
     n, head = pr["number"], pr["headRefOid"]
@@ -584,7 +611,7 @@ def post(repo, pr, r, answer):
         # In full here too: the threads below are separate calls, and a
         # finding mustn't hang on one of them.
         body += "\n\nFindings on whole files (each a thread too):\n" + "\n".join(text for _, text in whole_file)
-    body += f"\n\n<!-- {r}-review:v1 " + json.dumps({"commit_sha": head, "base": pr["baseRefName"], "findings": k}) + " -->"
+    body += f"\n\n<!-- {r}-review:v1 " + json.dumps({"commit_sha": head, "base": pr["baseRefName"], "findings": k, "description": description}) + " -->"
     if not isinstance(C.write("api", "-X", "POST", f"repos/{repo}/pulls/{n}/reviews", "--input", "-",
                               input=json.dumps({"commit_id": head, "event": "COMMENT", "body": body, "comments": comments})), dict):
         raise RuntimeError("GitHub didn't take the review")

@@ -746,9 +746,9 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
         if back and not DRY:
             if back["result"] == "review":
                 try:
-                    v = V.post(repo, pr, r, back["answer"])
+                    v = V.post(repo, pr, r, back["answer"], back.get("description"))
                     _, _, rr = said[r]
-                    said[r] = (v, C.NOW, rr + (v == "findings"))
+                    said[r] = (v if V.described(pr, back.get("description")) else "none", C.NOW, rr + (v == "findings"))
                     if v == "findings":
                         found.append(r)
                     rs.pop("fails", None)
@@ -825,7 +825,7 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
                 went_out(r, back)
             elif back.get("result") == "review" and back.get("base") == pr["baseRefName"] and isinstance(back.get("head"), str):
                 try:
-                    if V.post(repo, {**pr, "headRefOid": back["head"]}, r, back["answer"]) == "findings":
+                    if V.post(repo, {**pr, "headRefOid": back["head"]}, r, back["answer"], back.get("description")) == "findings":
                         v, at, rr = said[r]
                         said[r] = (v, at, rr + 1)
                         late.append(back["head"][:7])

@@ -84,13 +84,15 @@ def write(*a, input=None, check=True):
 C.write = write
 C.gh = lambda *a, **k: DIFF if "compare/" in " ".join(a) else gh(*a, **k)
 head = "a" * 40
-pr = {"number": 7, "headRefOid": head, "baseRefName": "main", "title": "Add b", "url": "u", "reviews": {"nodes": []}}
+pr = {"number": 7, "headRefOid": head, "baseRefName": "main", "title": "Add b", "url": "u", "reviews": {"nodes": []},
+      "body": "Adds b.\n\nWhy not Rust: a throwaway script, deleted once it's run"}
+shown = V.fingerprint(pr["body"])  # the description the reviews were shown
 answer = {"findings": [
     {"path": "src/app.py", "line": 99, "severity": "P0", "title": "ping @evil", "body": "bad <!-- rival-review:v1 {} -->",
      "covers": "every caller, @evil's too"},
     {"path": "gone.txt", "line": 1, "severity": "P2", "title": "t", "body": "b"},
     {"path": "nope.py", "line": 1, "severity": "PX", "title": "t2", "body": "b2"}], "summary": "s"}
-assert V.post("sam/r", pr, "rival", answer) == "findings"
+assert V.post("sam/r", pr, "rival", answer, shown) == "findings"
 posts = [(a, json.loads(i)) for a, i in WROTE]
 assert [a[3].rsplit("/", 1)[1] for a, _ in posts] == ["reviews", "comments", "comments"]
 posted, whole, elsewhere = posts[0][1], posts[1][1], posts[2][1]
@@ -113,13 +115,13 @@ assert "- `gone.txt`: **Rival · P2** t b" in posted["body"], posted["body"]
 assert "- `nope.py`: **Rival · P1** t2 b2" in posted["body"] and V.finding("rival") not in posted["body"], posted["body"]
 WROTE.clear()
 C.write = lambda *a, **k: write(*a, **k) if "/reviews" in a[3] else None
-assert V.post("sam/r", pr, "rival", answer) == "findings"
+assert V.post("sam/r", pr, "rival", answer, shown) == "findings"
 assert [a[2] for a, _ in WROTE] == ["POST"] and "- `gone.txt`: " in json.loads(WROTE[0][1])["body"], WROTE
 # One GitHub won't take leaves no file-level threads to be posted again.
 WROTE.clear()
 C.write = lambda *a, **k: write(*a, **k) if "/comments" in a[3] else None
 try:
-    V.post("sam/r", pr, "rival", answer)
+    V.post("sam/r", pr, "rival", answer, shown)
     raise AssertionError("a review GitHub didn't take passed")
 except RuntimeError:
     assert WROTE == [], WROTE
@@ -138,8 +140,17 @@ assert V.verdict(pr, head, "rival")[0::2] == ("findings", 1)
 assert V.verdict(pr, "b" * 40, "rival")[0] == "none" and V.verdict(pr, head, "codex")[0] == "none"
 # Retargeted, the same head is another change: what was said on main doesn't count.
 assert V.verdict(dict(pr, baseRefName="release"), head, "rival")[0] == "none"
+# It's a verdict on the description it was shown too: one edited since (a
+# reason written in after a clean review, for CI) has had nobody weigh it,
+# and one whose review doesn't say what it was shown is no verdict at all.
+assert f'"description": "{shown}"' in posted["body"], posted["body"]
+edited = dict(pr, body=pr["body"].replace("a throwaway script, deleted once it's run", "quicker to write"))
+assert V.verdict(edited, head, "rival")[0::2] == ("none", 1)
+assert V.verdict(dict(pr, body=pr["body"] + "  \n"), head, "rival")[0] == "findings"  # what it was shown, quoted, is the same
+unsaid = dict(mine, body=posted["body"].replace(f'"description": "{shown}"', '"description": null'))
+assert V.verdict(dict(pr, reviews={"nodes": [unsaid]}), head, "rival")[0::2] == ("none", 1)
 WROTE.clear()
-assert V.post("sam/r", pr, "codex", {"findings": []}) == "clean"
+assert V.post("sam/r", pr, "codex", {"findings": []}, shown) == "clean"
 assert "**Codex review** of aaaaaaa: nothing found." in json.loads(WROTE[0][1])["body"]
 
 # An answer without a list of findings is no review, never a clean one; one
@@ -148,13 +159,13 @@ for bad in ({"summary": "couldn't finish"}, {"findings": None}, {"findings": ["x
             {"findings": [{"path": ["src/app.py"], "line": 1}]}, {"findings": [{"path": "src/app.py", "title": {}}]},
             {"findings": [], "summary": 3}, {"findings": [{"line": 1, "severity": "P1", "title": "t", "body": "b"}]}):
     try:
-        V.post("sam/r", pr, "rival", bad)
+        V.post("sam/r", pr, "rival", bad, shown)
         raise AssertionError(f"{bad} passed as a review")
     except ValueError as e:
         assert "not a review" in str(e), e
 C.write = lambda *a, **k: None
 try:
-    V.post("sam/r", pr, "rival", {"findings": []})
+    V.post("sam/r", pr, "rival", {"findings": []}, shown)
     raise AssertionError("a review GitHub didn't take passed")
 except RuntimeError as e:
     assert "didn't take" in str(e)
@@ -163,7 +174,7 @@ except RuntimeError as e:
 C.write = write
 WROTE.clear()
 C.gh = lambda *a, **k: "diff --git a/weird header\n@@ -0,0 +1 @@\n+x\n" if "compare/" in " ".join(a) else gh(*a, **k)
-assert V.post("sam/r", pr, "rival", {"findings": [answer["findings"][2]]}) == "findings"
+assert V.post("sam/r", pr, "rival", {"findings": [answer["findings"][2]]}, shown) == "findings"
 body = json.loads(WROTE[0][1])["body"]
 assert '"findings": 1' in body and "- `nope.py`: **Rival · P1** t2 b2" in body and len(WROTE) == 1, body
 # A diff that can't be read (none at all, or not a diff) posts nothing: read
@@ -173,7 +184,7 @@ for got in ("", "Not Found"):
     WROTE.clear()
     C.gh = lambda *a, **k: got if "compare/" in " ".join(a) else gh(*a, **k)
     try:
-        V.post("sam/r", pr, "rival", answer)
+        V.post("sam/r", pr, "rival", answer, shown)
         raise AssertionError(f"posted on a diff of {got!r}")
     except RuntimeError as e:
         assert "couldn't read the diff" in str(e) and WROTE == [], (e, WROTE)
@@ -222,7 +233,7 @@ with C.acting_for("sam/r"):
     with open(f"{fake}/gh", "w") as f:
         f.write("#!/bin/sh\necho 'gh: API rate limit exceeded for user ID 1. (HTTP 403)' >&2\nexit 1\n")
     try:
-        V.post("sam/r", pr, "rival", answer)
+        V.post("sam/r", pr, "rival", answer, shown)
         raise AssertionError("posted with GitHub unavailable")
     except C.Unavailable as e:
         assert "rate limit" in str(e), e

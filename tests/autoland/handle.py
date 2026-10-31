@@ -55,6 +55,30 @@ status, _ = run(mkpr(), 650)
 assert sorted(POSTED) == [("codex", head, 0), ("rival", head, 0)] and os.listdir(DDIR) == [], POSTED
 assert "Codex and Rival found nothing" in status and merged(), status
 
+# A review covers the description it was shown as much as the head: one
+# edited while they looked (a `Why not Rust:` line written in for CI, say)
+# isn't covered by what they said, so their answers are posted and both
+# look again; once they've been shown it, their word lands it.
+fresh_pr_state()
+run(mkpr(), 0)
+run(mkpr(), 600)
+worker()
+weighed = "Why not Rust: quicker to write"
+status, _ = run(mkpr(body=weighed), 650)
+assert sorted(POSTED) == [("codex", head, 0), ("rival", head, 0)] and not merged(), status
+assert queued() == ["codex", "rival"] and "Codex is reviewing this commit" in status, (status, queued())
+worker()
+status, _ = run(mkpr(body=weighed), 660)
+assert "Codex and Rival found nothing" in status and merged(), status
+# Edited after a clean review, the head's clean reviews don't land it either.
+fresh_pr_state()
+reviewed = [rv_review("codex", 0, body="Why not Rust: a generated file"), rv_review("rival", 0, body="Why not Rust: a generated file")]
+run(mkpr(reviews=reviewed, body=weighed), 0)
+status, _ = run(mkpr(reviews=reviewed, body=weighed), 600)
+assert not merged() and queued() == ["codex", "rival"], (status, queued())
+status, _ = run(mkpr(reviews=reviewed, body="Why not Rust: a generated file"), 610)
+assert merged(), status
+
 # A look at an earlier head that comes back after the PR moved on is posted
 # on the commit it read, so its findings go into the next push. Its
 # "nothing found" says nothing about the new head, which both look at.
