@@ -437,8 +437,8 @@ def sweep(repos, live):
     """For the repos this pass read (`repos`, as state file names spell
     them): the snapshots, queue entries and answers of heads none of their
     open PRs has any more (`live`: the snapshot names of the heads they have).
-    An open PR's earlier head keeps what came back, which the PR's next pass
-    posts on the commit it read (steward.py's `overtaken`). A look the
+    An open PR's earlier head keeps what came back, for the PR's next pass to
+    post on the commit it read or drop (review_step.py's `overtaken`). A look the
     reviewers' service is on stays, whoever's it is, with the snapshot it
     reads and the session it's in, until it ends: so nothing of it is left
     to write after the sweep, whatever code the service runs (it need only

@@ -79,6 +79,14 @@ impl<'a> Job<'a> {
         Ok(f)
     }
 
+    /// The same lock, shared: while it's held, no turn is halfway through
+    /// starting, so its state and turn count agree.
+    pub fn read_lock(&self) -> io::Result<File> {
+        let f = self.lock_file()?;
+        f.lock_shared()?;
+        Ok(f)
+    }
+
     fn lock_file(&self) -> io::Result<File> {
         OpenOptions::new()
             .append(true)

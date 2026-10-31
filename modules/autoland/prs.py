@@ -118,7 +118,8 @@ def ci_state(pr, proofs=(), moved=None, repo=None):
     has run through for the PR's diff, CI is pending. The merge train's
     status is its word on the PR, not a check of it, except its failure: CI
     failed on the head merged alone onto the default branch, which is the
-    head's to fix. Only the App's counts, as with ours."""
+    head's to fix. Only the App's counts, as with ours. A cancelled check run
+    goes by what its workflow did after it (after_cancel)."""
     nodes = pr["commits"]["nodes"]
     commit = nodes[0]["commit"] if nodes else {}
     contexts = (commit.get("statusCheckRollup") or {}).get("contexts") or {}
@@ -142,9 +143,12 @@ def ci_state(pr, proofs=(), moved=None, repo=None):
         if c["__typename"] == "CheckRun":
             if suite(c).get("id") in stale:
                 continue
+            after = after_cancel(c, contexts.get("nodes", []), stale) if cancelled(c) else None
+            if after == "finished":
+                continue
             seen += 1
             name = c["name"]
-            if c["status"] != "COMPLETED":
+            if c["status"] != "COMPLETED" or after == "going":
                 pending.append(name)
             elif c["conclusion"] not in ("SUCCESS", "NEUTRAL", "SKIPPED"):
                 red.append(name)
@@ -178,6 +182,8 @@ def ci_state(pr, proofs=(), moved=None, repo=None):
 # `docs only into BASE from FORK`, FORK the commit the PR left BASE at. Which
 # paths a PR changes, and so which lane it takes, depends on both.
 LANE, DOCS_LANE = "lane into ", "docs only into "
+# Its whole gate's job, skipped in the docs lane and on a PR the train lands.
+GATE = "check"
 
 
 def suite(c):
@@ -203,6 +209,67 @@ def judged(c):
         return job[len(LANE):], None
     m = re.fullmatch(rf"{DOCS_LANE}([^ ]+) from ([0-9a-f]{{40}})", job)
     return (m[1], m[2]) if m else None
+
+
+def cancelled(c):
+    """Whether a check run finished by being cancelled."""
+    return c.get("status") == "COMPLETED" and c.get("conclusion") == "CANCELLED"
+
+
+def after_cancel(c, contexts, stale):
+    """What a cancelled check run's workflow did on the head in its other
+    suites: "finished" once one has done that check's work, so the cancelled
+    run is no word on the head; "going" while one is still running, whichever
+    diff it's for, since CI isn't done speaking; None with neither, as when
+    someone cancelled the run by hand, which stays not green. Done its work:
+    the suite has finished for the PR's diff (stale is those that didn't) with
+    nothing of its own cancelled, so two cancelled runs don't clear each other,
+    and it ran the same work (same_work), whatever that said. A skip vouches
+    for nothing: a caller skipped on a title edit completes too. A check of a
+    shared CI call (one with a lane job) must also be matched in a call whose
+    lane ran and chose this PR's base: a push's or a dispatch's run of the same
+    job has no lane, and judged no PR. Jobs beside that call have no lane to
+    ask for. A check run of no workflow has no other runs to go by."""
+    mine, flow = suite(c).get("id"), workflow(c).get("id")
+    if mine is None or flow is None:
+        return None
+    same = [x for x in contexts if workflow(x).get("id") == flow]
+    others = [x for x in same if suite(x).get("id") != mine]
+    gone = {suite(x).get("id") for x in others if cancelled(x)} | stale
+    done = [x for x in others if suite(x).get("status") == "COMPLETED" and suite(x).get("id") not in gone and ran(x)]
+    shared = any(job_of(x)[1].startswith(LANE) and job_of(x)[0] == job_of(c)[0] for x in same)
+    laned = {(suite(x).get("id"), job_of(x)[0]) for x in done if judged(x)}
+    if any(same_work(c, x) and (not shared or (suite(x).get("id"), job_of(x)[0]) in laned) for x in done):
+        return "finished"
+    return "going" if any(suite(x).get("status") != "COMPLETED" for x in others) else None
+
+
+def job_of(c):
+    """A check run's name split: the call it's of, and its job."""
+    caller, _, job = c["name"].rpartition(" / ")
+    return caller, job
+
+
+def same_work(c, x):
+    """Whether check run x does c's work: the same name, or, in one call of
+    the shared CI, its lane, whose name a run may never have filled in, or its
+    gate, which is its whole gate's job or the docs lane's, and no other job."""
+    if c["name"] == x["name"]:
+        return True
+    (mine, a), (theirs, b) = job_of(c), job_of(x)
+    if mine != theirs:
+        return False
+    return (a.startswith(LANE) and b.startswith(LANE)) or (gate_job(a) and gate_job(b))
+
+
+def gate_job(job):
+    """Whether a job's name is the shared CI's gate for a PR, in either lane."""
+    return job == GATE or job.startswith(DOCS_LANE)
+
+
+def ran(c):
+    """Whether a check run did its work: finished, neither skipped nor cancelled."""
+    return c.get("status") == "COMPLETED" and c.get("conclusion") not in ("SKIPPED", "CANCELLED")
 
 
 def fork_of(repo, pr):
@@ -394,8 +461,8 @@ def land(repo, pr, repo_info):
                 "or GitHub didn't say what the rules are")
     # The merge endpoint merges or refuses; a push since the check makes the
     # sha stale, and it waits for the next pass. A squash or a merge commit
-    # takes the PR's title as its subject, the title house-check holds to the
-    # house style: left to GitHub, a one-commit PR's squash would take that
+    # takes the PR's title as its subject, the title the house check holds to
+    # the house style: left to GitHub, a one-commit PR's squash would take that
     # commit's subject instead, which nothing checked.
     title = [] if method == "rebase" else ["-f", f"commit_title={pr['title']} (#{pr['number']})"]
     try:

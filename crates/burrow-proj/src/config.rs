@@ -52,6 +52,8 @@ pub struct Config {
     /// Each GitHub App's env file, by its name.
     pub apps: BTreeMap<String, PathBuf>,
     pub tools: Tools,
+    /// proj-inbox's settings; None when it's off.
+    pub inbox: Option<Inbox>,
     /// The file it was read from, which each turn's unit is given too.
     #[serde(skip)]
     pub path: PathBuf,
@@ -71,6 +73,31 @@ pub struct Tools {
     pub systemctl: PathBuf,
     pub systemd_run: PathBuf,
     pub timeout: PathBuf,
+}
+
+/// proj-inbox's settings: GitHub issues as proj jobs.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Inbox {
+    /// What it keeps of each issue it has a job for, a folder an issue.
+    pub state: PathBuf,
+    /// The label that hands an issue to Claude.
+    pub label: String,
+    /// The label that, with `label`, makes an issue's job one that waits in no
+    /// line (proj run --unstick): the steward's stuck issue's.
+    pub unstick_label: String,
+    /// Whose issues and replies it acts on.
+    pub authors: Vec<String>,
+    /// Its jobs run in agent sandboxes (proj run --vm).
+    pub vm: bool,
+    /// The machine's name, as its comments sign it.
+    pub host: String,
+    /// The owner's notifier (burrow.tools.notify), when there is one.
+    pub notify: Option<PathBuf>,
+    /// Where it books its next look at each repo.
+    pub wake: PathBuf,
+    /// The machine's own GitHub App, which a bot's issue's job acts as.
+    pub machinery: Option<String>,
 }
 
 impl Config {
@@ -136,6 +163,9 @@ pub(crate) mod tests {
             "flake": "/data/dev/src/box",
             "deployed": "/nowhere/proj",
             "apps": {"workers": "/run/workers.env"},
+            "inbox": {"state": "/var/lib/burrow/proj-inbox", "label": "claude", "unstickLabel": "stuck",
+                      "authors": ["sam"], "vm": false, "host": "box", "notify": "/bin/notify",
+                      "wake": "/var/lib/burrow/proj-inbox/wake.json", "machinery": "workers"},
             "tools": {"bash": "/bin/bash", "flock": "/bin/flock", "gh": "/bin/gh", "git": "/bin/git", "systemctl": "/bin/systemctl",
                       "systemdRun": "/bin/systemd-run", "timeout": "/bin/timeout"}
         })
@@ -162,6 +192,18 @@ pub(crate) mod tests {
                 .waits
                 .is_none()
         );
+        assert_eq!(cfg.inbox.as_ref().map(|i| i.label.as_str()), Some("claude"));
+        let mut off = example();
+        off["inbox"] = Value::Null;
+        assert!(
+            serde_json::from_value::<Config>(off)
+                .unwrap()
+                .inbox
+                .is_none()
+        );
+        let mut odd = example();
+        odd["inbox"]["labels"] = "x".into();
+        assert!(serde_json::from_value::<Config>(odd).is_err());
         let mut odd = example();
         odd["jobs2"] = "/x".into();
         assert!(serde_json::from_value::<Config>(odd).is_err());
