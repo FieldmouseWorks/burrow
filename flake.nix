@@ -73,12 +73,17 @@
       };
 
       # burrow's programs (every binary in crates/) and gh-token, for each
-      # platform they're built for, and the flaky tool (docs/flaky-tests.md),
-      # for a machine to install.
+      # platform they're built for, the flaky tool (docs/flaky-tests.md) and
+      # flake-gate, for a machine to install.
       packages = nixpkgs.lib.foldl' nixpkgs.lib.recursiveUpdate { } [
         (nixpkgs.lib.mapAttrs (_: p: { burrow = p.default; }) crates.packages)
         (nixpkgs.lib.mapAttrs (_: p: { gh-token = p.default; }) ghToken.packages)
-        { ${system}.flaky = pkgs.callPackage ./tools/flaky/package.nix { }; }
+        {
+          ${system} = {
+            flaky = pkgs.callPackage ./tools/flaky/package.nix { };
+            flake-gate = pkgs.callPackage ./tools/flake-gate/package.nix { };
+          };
+        }
       ];
 
       # A bare machine with every module on, for the checks and as an example.
@@ -676,6 +681,13 @@
           python3 -I ${./tests/gate.py} ${./.github/workflows/flake-check.yml}
           touch $out
         '';
+        # flake-gate: a repo's CI gate step, run here as CI runs it, and
+        # burrow's own evaluating apart, as a Claude job's memory needs.
+        flake-gate = pkgs.runCommand "flake-gate-check" { nativeBuildInputs = [ (pkgs.callPackage ./tools/flake-gate/package.nix { }) pkgs.git pkgs.yq-go pkgs.shellcheck ]; } ''
+          shellcheck -s bash ${./tests/flake-gate.sh}
+          bash ${./tests/flake-gate.sh} ${./.}
+          touch $out
+        '';
         # The shared CI's attestation step (flake-check.yml), its own script
         # with stand-ins for curl and gh: a private repo's job signs with its
         # own token, its audience the digest of the statement kept beside it.
@@ -688,6 +700,16 @@
         # the job starts, and one that no longer merges cleanly fails.
         pr-base = pkgs.runCommand "pr-base-check" { nativeBuildInputs = [ (pkgs.python3.withPackages (p: [ p.pyyaml ])) pkgs.git ]; } ''
           python3 -I ${./tests/pr-base.py} ${./.github/workflows/flake-check.yml}
+          touch $out
+        '';
+        # The shared rust-first check (rust-first-check.yml), its own script
+        # with a stand-in for gh: a PR that adds Python, or grows it past what
+        # a fix adds, fails without a "Why not Rust:" line in its body, as a
+        # commit status a newer run replaces; and its callers, burrow's and
+        # the template's, run it again when the body is edited.
+        rust-first = pkgs.runCommand "rust-first-check" { nativeBuildInputs = [ (pkgs.python3.withPackages (p: [ p.pyyaml ])) pkgs.jq ]; } ''
+          python3 -I ${./tests/rust-first.py} ${./.github/workflows/rust-first-check.yml} \
+            ${./.github/workflows/rust-first.yml} ${./templates/project/.github/workflows/rust-first.yml}
           touch $out
         '';
         # Stale Remote Control servers catch up once idle, with a stand-in for Claude.

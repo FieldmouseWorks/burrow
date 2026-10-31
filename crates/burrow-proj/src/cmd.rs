@@ -14,7 +14,7 @@ use crate::job::{Job, answer, awaits, is_error, kick};
 use crate::pick::demoted;
 use crate::turn::{exec, lines, start};
 use crate::waits::rewatch;
-use crate::{Fail, filled, io_fail, now, read, systemd, watch};
+use crate::{Fail, filled, io_fail, now, read, slot, systemd, watch};
 
 /// What a command prints: a reader that's gone (`proj status | head`) is no
 /// failure of the command's.
@@ -41,6 +41,10 @@ fn this_job(var: &str, what: &str) -> Result<String, Fail> {
 pub fn dispatch(cfg: &Config, args: &[String]) -> Result<(), Fail> {
     match args.first().map(String::as_str).filter(|a| !a.is_empty()) {
         Some(cmd @ ("run" | "reply")) => run(cfg, cmd == "reply", &args[1..]),
+        None | Some("status") if args.get(1).is_some_and(|a| a == "--line") => {
+            put(&slot::in_line(cfg));
+            Ok(())
+        }
         None | Some("status") => status(cfg, args.get(1)),
         Some("log") => log(cfg, args),
         Some("state") => {

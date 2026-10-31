@@ -9,9 +9,17 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use super::{Class, Slot, Waiter, class, demoted, github_repo, pick, pipeline_project, place};
+use super::{Class, Classes, Slot, Waiter, demoted, github_repo, pick, pipeline_project};
 use crate::config::Config;
 use crate::config::tests::example;
+
+fn class(cfg: &Config, dir: &Path, given: Class) -> Class {
+    Classes::default().class(cfg, dir, given)
+}
+
+fn place(cfg: &Config, name: &str, dir: &Path) -> (Class, String) {
+    Classes::default().place(cfg, name, dir)
+}
 
 fn config() -> Config {
     let mut cfg: Config = serde_json::from_value(example()).unwrap();

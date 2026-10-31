@@ -30,6 +30,7 @@
 //!                             one of burrow.github.apps, never as the user
 //! proj reply [--first] ID "message"  continue that job's conversation
 //! proj status                 recent jobs and their state
+//! proj status --line          every turn in line, next first, and its wait
 //! proj log ID [--turn N]      the job's latest answer, or turn N's (--raw for
 //!                             the full stream); fails when there's none
 //! proj state ID               queued, running, done, error or failed
