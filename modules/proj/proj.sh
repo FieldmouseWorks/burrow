@@ -282,31 +282,6 @@ watch_run() {
 # Known not to be running: not "can't say".
 gone() { case $(systemctl --user show -P ActiveState "$1" 2>/dev/null) in inactive | failed) return 0 ;; esac; return 1; }
 
-# What job_wait (waits.sh) reads of a job's latest turn.
-facts() {
-  local d=$jobs/$1 n t
-  n=$(cat "$d/turns" 2>/dev/null) || return 1
-  printf 'id\t%s\nturn\t%s\nstate\t%s\n' "$1" "$n" "$(state "$1")"
-  [ ! -e "$d/owned" ] || printf 'owned\t1\n'
-  [ ! -e "$d/unstick" ] || printf 'unstick\t1\n'
-  [ ! -e "$d/$n.stopped" ] || printf 'stopped\t1\n'
-  [ ! -s "$d/$n.end" ] || printf 'end\t%s\n' "$(cat "$d/$n.end")"
-  [ ! -s "$d/link" ] || printf 'link\t%s\n' "$(cat "$d/link")"
-  printf 'queued\t%s\n' "$(stat -c %Y "$d/prompt.$n" 2>/dev/null || echo 0)"
-  [ ! -e "$d/$n.slot" ] || printf 'slot\t%s\n' "$(stat -c %Y "$d/$n.slot")"
-  # When it ended: when it wrote its outcome, or for one stopped before it
-  # could, when it last said anything.
-  t=$(stat -c %Y "$d/$n.outcome" "$d/$n.jsonl" "$d/prompt.$n" 2>/dev/null | head -n 1 || true)
-  printf 'ended\t%s\n' "${t:-0}"
-  # Its deadline as it stands, to the second (none without a timeout): when
-  # it took its slot and its timeout, moved on by any time it waited in
-  # line. And what it waits in line for now, if anything (watch_run).
-  t=$(cat "$d/$n.deadline" 2>/dev/null || true)
-  [[ ! $t =~ ^[0-9]+$ ]] || printf 'deadline\t%s\n' "$((t / 1000000000))"
-  [ ! -s "$d/$n.wait" ] || printf 'wait\t%s\n' "$(head -n 1 "$d/$n.wait")"
-  [ ! -s "$d/await" ] || awk -F '\t' '{ print "await\t" $1 "\t" $2 }' "$d/await"
-}
-
 # The waits of the jobs named, brought up to date for the stall watchdog:
 # JOBS/.waits/ID has a job's (job_wait's) while it has one, and WAITS all of
 # them, which the watchdog reads. Called after each change to a job (a turn
@@ -780,6 +755,8 @@ Carry on from there. Anything you left in the background last turn was stopped w
     # its own to await.next, and await only once it ends; how it says it
     # ends goes to end.next.
     rm -f "$dir/await" "$dir/await.next" "$dir/end.next"
+    # A look while it was being started may have taken it for ended (facts).
+    rm -f "$dir/$n.ended"
     # As its App, or not at all. Its env, read now, is what every run of the
     # turn starts in, so none starts as the user if the App goes while the
     # turn waits for a slot: it acts as an App that's gone, and reaches no

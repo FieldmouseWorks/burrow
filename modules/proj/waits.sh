@@ -1,6 +1,6 @@
 # What one job waits on, for the stall watchdog (../watchdog.nix): rewatch's
-# choice (proj.sh), on its own so the flake can check it. It reads what
-# rewatch found of the job's latest turn, one tab-separated line each:
+# choice (proj.sh), on its own so the flake can check it. job_wait reads what
+# facts found of the job's latest turn, one tab-separated line each:
 # "id ID", "turn N", "state S" (proj state's), "owned 1" for a job whose
 # starter acts on each turn's end itself (proj run --owned), "unstick 1" for
 # one run --unstick (the stuck issue's), "stopped 1" for
@@ -22,11 +22,12 @@
 # stands still meanwhile), for STALL_QUEUED seconds; one running, until its
 # deadline and GRACE (proj stops it before then); one that ended without
 # saying what comes next even when asked again, at once, since nothing resumes
-# it; one that ended in a failure, for RESUME_GRACE, since proj-inbox resumes
-# an issue's job seconds later when a reply waits; one awaiting GitHub, for
-# AWAIT_HOURS and GRACE (proj-watch resumes it by then, told nothing changed). Not watched:
-# a turn that asks a person (their reply resumes it) or is done, one proj
-# stop ended, and any ended turn of an --owned job.
+# it; one that ended in a failure, for RESUME_GRACE from its end, since
+# proj-inbox resumes an issue's job seconds later when a reply waits; one
+# awaiting GitHub, for AWAIT_HOURS and GRACE (proj-watch resumes it by then,
+# told nothing changed). Not watched: a turn that asks a person (their reply
+# resumes it) or is done, one proj stop ended, and any ended turn of an
+# --owned job.
 job_wait() {
   local k a b id='' turn='' state='' owned='' unstick=false stopped='' end='' queued=0 slot=0 ended=0 deadline=0 link=''
   local since due phase kick='' line=false first='' targets='' t at waited='' what=
@@ -92,6 +93,42 @@ job_wait() {
     --argjson due "$due" --arg kick "$kick" --argjson line "$line" --argjson unstick "$unstick" \
     '{what: $what, link: (if $link == "" then null else $link end), phase: $phase, since: $since, due: $due,
       kick: (if $kick == "" then null else $kick end), line: $line, unstick: $unstick}'
+}
+
+# What job_wait reads of a job's latest turn, from its dir and proj's state.
+# A turn ended when it wrote its outcome. One killed before it could (what
+# kills its whole cgroup takes everything in it along) ended when it was first
+# seen to have: the first look is _ended's, from outside that cgroup, and
+# $n.ended keeps it, so later looks don't move it. Its stream can't say: it may
+# have been quiet for hours, or never have started.
+# shellcheck disable=SC2154 # jobs is proj.sh's
+facts() {
+  local d=$jobs/$1 n s t
+  n=$(cat "$d/turns" 2>/dev/null) || return 1
+  s=$(state "$1")
+  printf 'id\t%s\nturn\t%s\nstate\t%s\n' "$1" "$n" "$s"
+  [ ! -e "$d/owned" ] || printf 'owned\t1\n'
+  [ ! -e "$d/unstick" ] || printf 'unstick\t1\n'
+  [ ! -e "$d/$n.stopped" ] || printf 'stopped\t1\n'
+  [ ! -s "$d/$n.end" ] || printf 'end\t%s\n' "$(cat "$d/$n.end")"
+  [ ! -s "$d/link" ] || printf 'link\t%s\n' "$(cat "$d/link")"
+  printf 'queued\t%s\n' "$(stat -c %Y "$d/prompt.$n" 2>/dev/null || echo 0)"
+  [ ! -e "$d/$n.slot" ] || printf 'slot\t%s\n' "$(stat -c %Y "$d/$n.slot")"
+  case $s in
+    queued | running) ;;
+    *)
+      [ -e "$d/$n.outcome" ] || [ -e "$d/$n.ended" ] || : >"$d/$n.ended"
+      t=$(stat -c %Y "$d/$n.outcome" "$d/$n.ended" 2>/dev/null | head -n 1 || true)
+      printf 'ended\t%s\n' "${t:-0}"
+      ;;
+  esac
+  # Its deadline as it stands, to the second (none without a timeout): when
+  # it took its slot and its timeout, moved on by any time it waited in
+  # line. And what it waits in line for now, if anything (watch_run).
+  t=$(cat "$d/$n.deadline" 2>/dev/null || true)
+  [[ ! $t =~ ^[0-9]+$ ]] || printf 'deadline\t%s\n' "$((t / 1000000000))"
+  [ ! -s "$d/$n.wait" ] || printf 'wait\t%s\n' "$(head -n 1 "$d/$n.wait")"
+  [ ! -s "$d/await" ] || awk -F '\t' '{ print "await\t" $1 "\t" $2 }' "$d/await"
 }
 
 # A running turn's wait in line, from its wait dir (each turn's

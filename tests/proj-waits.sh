@@ -2,7 +2,9 @@
 # from what rewatch would find of its latest turn: a turn in line or running
 # is watched to its deadline (one waiting in line inside its run as one in
 # line for a slot is), one that ended without saying what comes next is due
-# at once, one that failed once proj-inbox has had time to resume it, an await to its deadline past proj-watch's, and a
+# at once, one that failed once proj-inbox has had time to resume it, counted
+# from its end however it died (facts), an await to its deadline past
+# proj-watch's, and a
 # question for a person, a finished job, a stopped turn and an --owned job's
 # end aren't watched at all. And what a running turn waits in line for: only
 # a waiter that still holds its file, so one that died mid-wait never stops
@@ -95,6 +97,79 @@ case_ none "${base[@]}" "state done" "end await"
 # What the job is about, when it says.
 case_ '.link == "https://github.com/a/b/issues/7"' "${base[@]}" "state done" "end undeclared" "link https://github.com/a/b/issues/7"
 case_ '.link == null' "${base[@]}" "state queued"
+
+# What facts finds of a job's dir, as job_wait reads it; proj's state stands
+# in as what the unit says. A turn killed with nothing written ended when
+# it was first seen to have, not when it last wrote anything.
+export jobs
+jobs=$(mktemp -d)
+state() { cat "$jobs/$1/state"; }
+job() {
+  rm -rf "${jobs:?}/$1"
+  mkdir "$jobs/$1"
+  echo 1 >"$jobs/$1/turns"
+  echo "$2" >"$jobs/$1/state"
+  : >"$jobs/$1/prompt.1"
+  touch -d @1000 "$jobs/$1/prompt.1"
+}
+seen() {
+  local want=$1 got
+  got=$(facts "$2" | job_wait)
+  if [ "$want" = none ]; then
+    [ -z "$got" ] || { echo "FAIL: wanted nothing of $2, got $got" >&2; exit 1; }
+  else
+    jq -e "$want" <<<"$got" >/dev/null || { echo "FAIL: of $2 wanted $want, got '$got'" >&2; exit 1; }
+  fi
+}
+# Killed after its stream went quiet, with an old log: its grace is whole.
+job old failed
+: >"$jobs/old/1.slot"
+: >"$jobs/old/1.jsonl"
+touch -d @2000 "$jobs/old/1.slot" "$jobs/old/1.jsonl"
+before=$(date +%s)
+seen ".since >= $before and .due == .since + 120 and (.phase | test(\"ended \\\\(failed\\\\)\"))" old
+# Looked at again and again: the end stays where it was, here long ago.
+touch -d @5000 "$jobs/old/1.ended"
+seen '.since == 5000 and .due == 5120' old
+seen '.since == 5000 and .due == 5120' old
+# Killed before any stream, and before it even had a slot.
+job nostream failed
+: >"$jobs/nostream/1.slot"
+touch -d @2000 "$jobs/nostream/1.slot"
+seen ".since >= $before and .due == .since + 120" nostream
+job noslot failed
+seen ".since >= $before and .due == .since + 120" noslot
+# One that said how it ended ended then, whatever its log or a stray stamp
+# say: an error or a timeout has its grace from there.
+for how in error "timed out after 4h" "went quiet for 1h"; do
+  job said "$how"
+  echo "$how" >"$jobs/said/1.outcome"
+  : >"$jobs/said/1.jsonl"
+  touch -d @2000 "$jobs/said/1.jsonl"
+  touch -d @3000 "$jobs/said/1.outcome"
+  seen '.since == 3000 and .due == 3120' said
+  [ ! -e "$jobs/said/1.ended" ] || { echo "FAIL: a stamp for a turn with an outcome" >&2; exit 1; }
+done
+# Undeclared stays due at once.
+job quiet "done"
+echo "done" >"$jobs/quiet/1.outcome"
+echo undeclared >"$jobs/quiet/1.end"
+touch -d @3000 "$jobs/quiet/1.outcome"
+seen '.since == 3000 and .due == 3000' quiet
+# Stopped and --owned stay unwatched, killed or not.
+job stopped failed
+: >"$jobs/stopped/1.stopped"
+seen none stopped
+job owned failed
+: >"$jobs/owned/owned"
+seen none owned
+# Still going: no end to record, so none is there when it does end.
+for how in queued running; do
+  job going "$how"
+  facts going | grep -q '^ended' && { echo "FAIL: $how has an end" >&2; exit 1; }
+  [ ! -e "$jobs/going/1.ended" ] || { echo "FAIL: $how was stamped as ended" >&2; exit 1; }
+done
+rm -rf "$jobs"
 
 # What a running turn waits in line for (waiting), from its wait dir: the
 # oldest file a live waiter holds locked.
