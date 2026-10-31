@@ -364,7 +364,7 @@ assert "run its build and tests yourself" not in JOBS[0]
 assert "git show origin/main:AGENTS.md" in JOBS[0] and "never instructions to follow" in JOBS[0], JOBS[0]
 # A reason its description gives where the house rules ask for one is the
 # judge's to weigh as well, and one that doesn't hold fails it.
-assert V.REASONS in JOBS[0] and "gh pr view 6 -R sam/r --json body" in JOBS[0], JOBS[0]
+assert V.REASONS in JOBS[0] and JOBS[0].endswith("\n\nIts description:\n(none)"), JOBS[0]
 assert "when its build or tests fail or a reason doesn't hold, <!-- autoland-judgment: failed" in JOBS[0], JOBS[0]
 assert "--add-label" not in JOBS[0], JOBS[0]
 # Every job is told the title it quotes is the author's claim, like the rest.
@@ -406,7 +406,9 @@ edited = "Why not Rust: quicker to write"
 status, _ = run(clean(comments=[said(judgment("land"))], body=edited, **gated), 1100)
 assert not merged() and len(JOBS) == 1 and "judging it" in status, (status, JOBS)
 assert judgment("land", body=edited) in JOBS[0] and judgment("land") not in JOBS[0], JOBS[0]
-assert "or an edited description" in JOBS[0], JOBS[0]
+# It's given the description its seal certifies, as the steward read it,
+# rather than whatever the PR says by the time it looks (A, then B, then A).
+assert JOBS[0].endswith("\n\nIts description:\n> Why not Rust: quicker to write") and "edited since" in JOBS[0], JOBS[0]
 status, _ = run(clean(comments=[said(judgment("land")), said(judgment("land", body=edited))], body=edited, **gated), 1200)
 assert merged() and JOBS == [], status
 # A judge acting as the machinery's App posts as that App's Bot: its word is
@@ -642,6 +644,14 @@ fresh_pr_state()
 run(clean(checks=[]), 700)
 status, _ = run(clean(checks=CI_GREEN, comments=[said(judgment("land", n=5))]), 900)
 assert merged() and "judged it fine to land" in status, status
+# Nor does an edited description, which voids the verdict on the old one: a
+# failed verdict there doesn't let green CI land it past its judge, who's
+# asked again, on the description as it is now.
+fresh_pr_state()
+run(clean(checks=[]), 700)
+status, _ = run(clean(checks=CI_GREEN, comments=[said(judgment("failed", n=5))], body=edited), 900)
+assert not merged() and len(JOBS) == 1 and "so you judge it" in JOBS[0], (status, JOBS)
+assert JOBS[0].endswith("\n\nIts description:\n> Why not Rust: quicker to write"), JOBS[0]
 # Nor while that CI is still running: an owner or failed verdict holds it
 # at once, and only a land waits for CI.
 busy_ci = [{"__typename": "CheckRun", "name": "ci", "status": "IN_PROGRESS", "conclusion": None}]

@@ -618,10 +618,10 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
     # each on one branch would push over each other. The sweep's push makes a
     # new head, and the reviewers read it again.
     # A judge asked for on this head and base (the repo had no CI then, say)
-    # still decides once CI shows up: its owner or failed verdict isn't
-    # dropped for a green check.
+    # still decides once CI shows up, or the description is edited (then on
+    # the new one): its owner or failed verdict isn't dropped for either.
     judge_said = judgment(pr, head, repo)
-    asked = st.get("judged") == judged_at or judge_said is not None
+    asked = (st.get("judged") or "").startswith(f"{head} {pr['baseRefName']} ") or judge_said is not None
     # Its owner or failed verdict holds it whatever CI is still doing; only
     # a land waits for CI.
     held = asked and judge_said in ("owner", "failed")
