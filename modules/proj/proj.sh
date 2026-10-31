@@ -440,7 +440,7 @@ case "${1:-status}" in
   status)
     mkdir -p "$jobs"
     if [ "${2:-}" = --line ]; then in_line; exit 0; fi
-    find "$jobs" -mindepth 1 -maxdepth 1 -type d -not -name '.*' -printf '%T@ %f\n' | sort -rn | head -n "${2:-15}" |
+    find "$jobs" -mindepth 1 -maxdepth 1 -type d -not -name '.*' -printf '%T@ %f\n' | sort -rn | sed -n "1,${2:-15}p" |
       while read -r _ id; do
         st=$(state "$id")
         printf '%-40s %-8s %s%s%s%s%s%s%s\n' "$id" "$st" \

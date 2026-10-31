@@ -37,7 +37,8 @@
 # continued, in its own session, and that each job has a scratch dir of its
 # own, gone with the worktrees in it once the job is over (done, stopped, or
 # an --owned job's turn that awaits nothing) and kept while it asks
-# (scratch.sh's own check has the rest). Its GitHub side, proj
+# (scratch.sh's own check has the rest), and that proj status copes with more
+# jobs than a pipe holds. Its GitHub side, proj
 # await, proj-watch and proj-inbox, is proj-github.nix's part of the same
 # script.
 #
@@ -732,6 +733,15 @@ pkgs.testers.runNixOSTest {
         machine.succeed("su - dev -c 'mkdir -p /data/dev/jobs/broken && printf \"o/r#6\\t0\\t{}\\n\" >/data/dev/jobs/broken/await'")
         proj("_watch")
         machine.succeed("rm -rf /data/dev/jobs/broken")
+
+    with subtest("proj status lists its 15 and exits 0 with far more jobs than a pipe holds"):
+        # Their sorted list outgrows a pipe buffer, so whatever keeps the first
+        # lines has to read it all: closing early kills sort, and pipefail fails
+        # the command. proj() asserts the exit.
+        machine.succeed("su - dev -c 'cd /data/dev/jobs && seq -f many-%g 5000 | xargs mkdir'")
+        listed = proj("status").splitlines()
+        machine.succeed("cd /data/dev/jobs && seq -f many-%g 5000 | xargs rm -r")
+        assert len(listed) == 15, listed
 
     with subtest("every answer in a turn is kept, not only the last"):
         f = proj("run web twice")
