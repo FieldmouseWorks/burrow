@@ -40,6 +40,8 @@ inputs:
       rclone
       # gates: quarantining flaky tests (docs/flaky-tests.md)
       (callPackage ../tools/flaky/package.nix { })
+      # gates: a repo's CI gate, run here (flake-gate)
+      (callPackage ../tools/flake-gate/package.nix { })
       # secrets tooling for sops-nix
       age
       sops

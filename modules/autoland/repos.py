@@ -13,6 +13,7 @@ import urllib.parse
 import common as C
 import train as T
 from common import CFG, CONTEXT, DEP_RE, DRY, load, log, repo_cfg, save, ts
+from prs import PROOF_SLOT, RELEASE_AGE, REVIEWER
 from tasks import RED_BRANCH, red_default_task
 
 
@@ -74,6 +75,13 @@ def baseline_ruleset(rc, default):
     }
 
 
+# What each of the steward's waiting labels (prs.py) says it waits on, and
+# what the PR's status adds.
+WAITING = {RELEASE_AGE: f"Its updates are too new to take yet (the minimum release age); {CONTEXT} says until when",
+           PROOF_SLOT: f"Waits its turn for a proof slot on the machine; {CONTEXT} says how many are ahead",
+           REVIEWER: f"Waits for a reviewer to be back in service; {CONTEXT} says which and why"}
+
+
 def settle_repo(r, known):
     """The repo's settings, at most once a day. Returns True if it's new."""
     repo, rc = r["repo"], repo_cfg(r["repo"])
@@ -85,17 +93,20 @@ def settle_repo(r, known):
     due = (C.NOW - st.get("settings", 0) >= 86400 or st.get("app") != CFG["app"]["id"]
            or st.get("train", False) != rc["train"])
     # The labels the steward and its jobs put on PRs: without them a hold
-    # can't be set, a judge can't hand a PR to the owner and no PR can go
-    # first in its proof line. Made again with the daily settings too, in
-    # case one was deleted.
-    want = [CFG["labels"]["hold"], CFG["labels"]["owner"], CFG["labels"]["first"]]
+    # can't be set, a judge can't hand a PR to the owner, no PR can go first
+    # in its proof line and none can say what it waits on. Made again with
+    # the daily settings too, in case one was deleted.
+    labels = CFG["labels"]
+    about = [(labels["hold"], "fbca04", "The steward leaves this PR alone"),
+             (labels["owner"], "b60205", f"Waits for {CFG['owner']}; take the label off to let the steward carry on"),
+             (labels["first"], "0e8a16", "Goes ahead of the PRs without it in the line for proofs that take the machine"),
+             *((labels["waiting"][kind], "c5def5", text) for kind, text in WAITING.items())]
+    want = [name for name, _, _ in about]
     if st.get("labels") != want or due:
-        about = ("The steward leaves this PR alone",
-                 f"Waits for {CFG['owner']}; take the label off to let the steward carry on",
-                 "Goes ahead of the PRs without it in the line for proofs that take the machine")
+        # GitHub takes a description of up to 100 characters.
         made = [C.write("label", "create", name, "-R", repo, "--force", "--color", color,
-                        "--description", text, check=False) is not None
-                for name, color, text in zip(want, ("fbca04", "b60205", "0e8a16"), about)]
+                        "--description", text[:100], check=False) is not None
+                for name, color, text in about]
         if all(made):
             log(f"{repo}: labels {', '.join(want)}")
             st["labels"] = want
@@ -568,8 +579,10 @@ def publish(digest):
         issue("digest.json", "[autoland] PRs waiting for you", CFG["notify"]["label"], CFG["notify"]["assignee"], "",
               owner, "Nothing waiting.")
         # Closed once the inbox can't take it: what's in it is the owner's then.
+        # Its job never waits in proj's line (the unstick label), which may be
+        # the very thing stuck.
         issue("stuck.json", "[autoland] Stuck in the pipeline", CFG["inbox"]["label"], "", stuck_brief(),
-              [x for x in digest if x not in owner], "Nothing stuck.")
+              [x for x in digest if x not in owner], "Nothing stuck.", also=CFG["inbox"]["unstickLabel"])
 
 
 def inbox_off():
@@ -604,9 +617,11 @@ them.
 """
 
 
-def issue(key, title, label, assignee, intro, digest, done):
+def issue(key, title, label, assignee, intro, digest, done, also=""):
     """One issue in config.notify.repo listing digest, kept up to date: each
-    new or changed entry is a comment too, and it's closed once there's none."""
+    new or changed entry is a comment too, and it's closed once there's none.
+    It's found by label, and has the label `also` as well, when there is one:
+    put back on the open one when it's gone."""
     nrepo = CFG["notify"]["repo"]
     groups = {}
     for why, line, desc in digest:
@@ -623,7 +638,7 @@ def issue(key, title, label, assignee, intro, digest, done):
     if prev.get("body") == body and C.NOW - prev.get("checked", 0) < 3600:
         return
     found = C.gh("issue", "list", "-R", nrepo, "--label", label, "--state", "open", "--search",
-                 f'"{title}" in:title', "--json", "number,body", check=False)
+                 f'"{title}" in:title', "--json", "number,body,labels", check=False)
     if not isinstance(found, list):
         return  # couldn't look (no quota?): try next pass, and don't open a second issue
     found = [i for i in found if i]
@@ -638,8 +653,11 @@ def issue(key, title, label, assignee, intro, digest, done):
         return
     full = intro + body + "\n\n_Kept up to date by autoland-steward on " + os.uname().nodename + "._"
     if not found:
-        C.gh("label", "create", label, "-R", nrepo, "--color", "B60205", check=False)
-        args = ["issue", "create", "-R", nrepo, "--label", label, "--title", title, "--body", full]
+        for name in (label, also):
+            if name:
+                C.gh("label", "create", name, "-R", nrepo, "--color", "B60205", check=False)
+        args = ["issue", "create", "-R", nrepo, "--label", label, *(["--label", also] if also else []), "--title", title,
+                "--body", full]
         if assignee:
             args += ["--assignee", assignee]
         ok = C.gh(*args, check=False) is not None
@@ -647,6 +665,9 @@ def issue(key, title, label, assignee, intro, digest, done):
         num = str(found[0]["number"])
         if found[0]["body"] != full:
             ok = C.gh("issue", "edit", num, "-R", nrepo, "--body", full, check=False) is not None
+        if also and ok and also not in {x.get("name") for x in found[0].get("labels") or []}:
+            C.gh("label", "create", also, "-R", nrepo, "--color", "B60205", check=False)
+            ok = C.gh("issue", "edit", num, "-R", nrepo, "--add-label", also, check=False) is not None
         added = [x for x in entries if x not in prev.get("entries", [])]
         if added and ok:
             ok = C.gh("issue", "comment", num, "-R", nrepo, "--body", "New:\n" + "\n".join(f"- {x}" for x in added), check=False) is not None
