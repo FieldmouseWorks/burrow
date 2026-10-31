@@ -2,7 +2,7 @@
 # (AGENTS.md, Build and test). The flake builds them all as
 # packages.SYSTEM.burrow and gates them as checks.crates-*.
 [workspace]
-members = ["burrow-dispatch", "burrow-events", "burrow-house", "burrow-proj", "burrow-usage-reset", "burrow-watchdog", "burrow-workflows"]
+members = ["burrow-dispatch", "burrow-events", "burrow-house", "burrow-proj", "burrow-review", "burrow-usage-reset", "burrow-watchdog", "burrow-workflows"]
 resolver = "3"
 
 [workspace.package]

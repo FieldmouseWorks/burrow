@@ -1,6 +1,6 @@
 """The reviewers' part of one PR's step (step.py): what each reviewer of the
 PR's repo has said of its head, the answers back from their service posted as
-reviews (reviewers.py, review_worker.py), the looks still owed it asked for,
+reviews (reviewers.py, crates/burrow-review), the looks still owed it asked for,
 and what that leaves the PR waiting on. step.py then decides on it, with its
 threads, its CI and its gates."""
 

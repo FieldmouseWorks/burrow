@@ -7,7 +7,7 @@ import os
 import sys
 import time
 
-from harness import (ACTING, FAIL, KICKS, REAL_GH, QDIR, REAL, STATES, STUB, T, WROTE, C, P, R, H, S, V, W, clean, fresh_pr_state, head,
+from harness import (ACTING, FAIL, REAL_GH, QDIR, REAL, STATES, STUB, T, WROTE, C, P, R, H, S, V, clean, fresh_pr_state, head,
                      info, mkpr, pr_state, queued, run, rv_review, tmp, worker)
 
 # A pass that waits on time books its repo's next pass for when the wait
@@ -125,16 +125,9 @@ run(mkpr(), 800)
 assert C.WAKE["sam/r"] == T + 650 + 3600 + 1, C.WAKE
 print("wake-ups: ok")
 
-# A reviewer's answer back, a review or why there's none: the repo's pass is
-# kicked, since nothing goes to GitHub until that pass posts it.
+# A reviewer's answer back kicks the repo's pass (burrow-review's tests),
+# and so does a Claude job, at the end of each turn (proj run --kick).
 fresh_pr_state()
-C.save(f"{V.QUEUE}/codex--lost.json", {"reviewer": "codex", "repo": "sam/r", "number": 5, "snap": "gone",
-                                       "headRefOid": head})
-KICKS.clear()
-W.review("codex--lost.json")
-assert C.load(f"{V.DONE}/codex--lost.json", None)["result"] == "error" and queued() == []
-assert KICKS == ["/kick/autoland/sam/r"], KICKS
-# A Claude job kicks it at the end of each turn (proj run --kick).
 proj = os.path.join(tmp, "proj")
 with open(proj, "w") as f:
     f.write(f"#!/bin/sh\necho \"$@\" >{tmp}/proj-args\necho job-9\n")

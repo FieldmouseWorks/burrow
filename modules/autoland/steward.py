@@ -53,9 +53,9 @@ changing anything.
 for it (proofs.py): the steward builds a proof check that's only a build
 itself, with no Claude job.
 
-`autoland-steward review` works through the reviews the passes queued
-(review_worker.py), as the reviewers' own user. A careful look takes an
-agent many minutes, so it runs as its own service and no pass waits for it.
+The reviews the passes queue are worked through by the reviewers' own
+service (crates/burrow-review, `autoland-review`), as a user of their own. A
+careful look takes an agent many minutes, so no pass waits for it.
 
 In a repo with `train` on, a settled PR goes into its merge train instead of
 being merged, and a pass ends with a step of the train (train.py). `cn`, which
@@ -97,10 +97,6 @@ def token(repo):
 
 
 def main():
-    if sys.argv[1:] == ["review"]:
-        import review_worker
-        review_worker.work()
-        return
     if sys.argv[1:2] == ["token"] and len(sys.argv) == 3:
         token(sys.argv[2])
         return

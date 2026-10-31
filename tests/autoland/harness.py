@@ -1,8 +1,8 @@
 """What the steward's checks share (check.py runs them): its config and
-state in a temp dir; stand-ins for gh, Claude jobs, GitHub's git remote,
-the review agents and Conary's `cn` (each records how it was run, then does
-what it's told) and burrow-events' kick port; and PRs shaped like its
-query's."""
+state in a temp dir; stand-ins for gh, Claude jobs, GitHub's git remote and
+Conary's `cn` (each records how it was run, then does what it's told) and
+burrow-events' kick port; the reviewers' service, with its own stand-ins
+for the agent and its sandbox; and PRs shaped like its query's."""
 
 import http.server
 import json
@@ -42,81 +42,32 @@ os.makedirs(f"{tmp}/home")
 with open(f"{tmp}/cred/webhook", "w") as f:
     f.write("hook-secret\n")
 
-# The review agent: it records how it was run, then does what AGENT says
-# (requests to send out, then an answer, or an error on stderr and an exit
-# code). What came back to the requests goes in HTTP_LOG.
-AGENT_LOG, AGENT, HTTP_LOG = f"{tmp}/agent-log", f"{tmp}/agent.json", f"{tmp}/http-log"
+# The reviewers' service, burrow-review (argv[3]), with its own tests'
+# stand-ins for codex and bubblewrap (argv[4], crates/burrow-review/tests/fakes):
+# codex records how it was run and does what $HOME/.fake/codex.json says.
+REVIEW, FAKES = sys.argv[3], sys.argv[4]
 os.makedirs(f"{tmp}/agents")
-name = "codex"
-with open(f"{tmp}/agents/{name}", "w") as f:
-    f.write(f"""#!{sys.executable}
-import json, os, socket, sys, time, urllib.parse
-args = sys.argv[1:]
-prompt = sys.stdin.read()
-# Its session: the one it's told to resume (an unknown one is an error, as
-# codex has it), or a new one, kept in its home.
-home = os.environ.get("CODEX_HOME")
-sid = args[-2] if args[:2] == ["exec", "resume"] else None
-if sid and not os.path.exists(os.path.join(home, "sessions", sid)):
-    print(f"no session {{sid}}", file=sys.stderr); sys.exit(1)
-resumed, sid = bool(sid), sid or "session-%d" % time.time_ns()
-os.makedirs(os.path.join(home, "sessions"), exist_ok=True)
-open(os.path.join(home, "sessions", sid), "a").write(prompt)
-with open({AGENT_LOG!r}, "a") as f:
-    f.write(json.dumps({{"agent": {name!r}, "args": args, "cwd": os.getcwd(), "env": dict(os.environ), "prompt": prompt,
-                        "session": sid, "resumed": resumed, "began": time.time()}}) + "\\n")
-do = json.load(open({AGENT!r})).get({name!r}, {{}})
-sleep = do.get("sleep", 0)  # seconds, or {{text in the prompt: seconds}}
-time.sleep(next((v for k, v in sleep.items() if k in prompt), 0) if isinstance(sleep, dict) else sleep)
-for req in do.get("http", []):
-    u = urllib.parse.urlsplit(os.environ[req["env"]])
-    c = socket.create_connection((u.hostname, u.port))
-    c.sendall(req["send"].replace("{{path}}", u.path).encode())
-    got = b""
-    while data := c.recv(65536):
-        got += data
-    with open({HTTP_LOG!r}, "a") as f:
-        f.write(json.dumps(got.decode()) + "\\n")
-for e in do.get("events", []):  # --json, ahead of an error
-    print(json.dumps(e))
-if do.get("rc"):
-    print(do["err"], file=sys.stderr); sys.exit(do["rc"])
-out = do.get("say", "Looked.\\n" + json.dumps(do.get("answer", {{"findings": [], "summary": "fine"}})))
-if do.get("gone"):  # its PR closed meanwhile: the sweep marked its session gone
-    session = os.path.dirname(home)
-    gone = os.path.join(os.path.dirname(session), ".gone-0-" + os.path.basename(session))
-    os.rename(session, gone)
-    home = os.path.join(gone, "home")  # where the sandbox's bind still writes
-if do.get("relogin"):  # a refresh, saved as a new file where the login was
-    os.remove(os.path.join(home, "auth.json"))
-    open(os.path.join(home, "auth.json"), "w").write(do["relogin"])
-if "-o" in args:  # codex writes its last message there
-    open(args[args.index("-o") + 1], "w").write(out)
-# --json: events, one a line, the session's id among them.
-print(json.dumps({{"type": "thread.started", "thread_id": sid}}))
-print(json.dumps({{"type": "turn.completed"}}))
-""")
-os.chmod(f"{tmp}/agents/{name}", 0o755)
+os.makedirs(f"{tmp}/home/.fake")
+for fake, at in (("codex", f"{tmp}/agents/codex"), ("bwrap", f"{tmp}/bwrap")):
+    with open(f"{FAKES}/{fake}.bash") as src, open(at, "w") as f:
+        f.write(f"#!{shutil.which('bash')}\n" + src.read())
+    os.chmod(at, 0o755)
+with open(f"{tmp}/store-paths", "w") as f:
+    f.write("/nix/store/aaaa-review-agents\n")
 
 
-# The sandbox: records how it was set up (and the git config it was given),
-# then runs the agent where it says.
-BOX_LOG = f"{tmp}/box-log"
-with open(f"{tmp}/bwrap", "w") as f:
-    f.write(f"""#!{sys.executable}
-import json, os, sys
-a = sys.argv[1:]
-cut = a.index("--")
-binds = [(a[i], a[i + 1], a[i + 2]) for i in range(cut) if a[i] in ("--bind", "--ro-bind", "--ro-bind-try")]
-git = [open(s).read() for k, s, d in binds if d.endswith("/.gitconfig")]
-with open({BOX_LOG!r}, "a") as f:
-    f.write(json.dumps({{"args": a[:cut], "binds": binds, "gitconfig": git}}) + "\\n")
-# Where it starts, as the agent sees it: the path a bind put there.
-where = a[a.index("--chdir") + 1]
-os.chdir(next((src for k, src, d in binds if d == where), where))
-os.execv(a[cut + 1], a[cut + 1:])
-""")
-os.chmod(f"{tmp}/bwrap", 0o755)
+def review_service():
+    """`autoland-review`: burrow-review works through the queue, as the
+    module runs it, on the steward's state here."""
+    with open(f"{tmp}/review.json", "w") as f:
+        json.dump({"queue": f"{tmp}/state/review/queue", "done": f"{tmp}/state/review/done",
+                   "sessions": f"{tmp}/state/review/sessions", "snapshots": f"{tmp}/trees",
+                   "reviewers": {"codex": {"effort": "high", "parallel": 2, "off": []}}, "timeoutMinutes": 5,
+                   "agents": f"{tmp}/agents", "sandbox": f"{tmp}/bwrap",
+                   "box": {"store": f"{tmp}/store-paths", "caBundle": f"{tmp}/ca.crt", "links": {}},
+                   "leadRepos": C.CFG["leadRepos"], "pipelineRepos": C.CFG["pipelineRepos"], "kick": C.CFG["kick"]}, f)
+    subprocess.run([REVIEW, "work"], check=True, env={"REVIEW_CONFIG": f"{tmp}/review.json", "HOME": f"{tmp}/home",
+                                                      "PATH": os.environ["PATH"]})
 
 
 # Conary's cn, for the merge train: it records how it was run, then answers
@@ -164,27 +115,15 @@ def cn_log():
     return [json.loads(x) for x in open(CN_LOG)]
 
 
-def boxes():
-    runs = [json.loads(x) for x in open(BOX_LOG)]
-    open(BOX_LOG, "w").close()
-    return runs
-
-
 def agent(**do):
-    with open(AGENT, "w") as f:
+    """What the stand-in codex does from now on, and a log that starts over."""
+    with open(f"{tmp}/home/.fake/codex.json", "w") as f:
         json.dump(do, f)
-    open(AGENT_LOG, "w").close()
+    open(f"{tmp}/home/.fake/codex.log", "w").close()
 
 
 def agent_runs():
-    return [json.loads(x) for x in open(AGENT_LOG)]
-
-
-def http_said():
-    """What came back to the agents' requests, since last asked."""
-    said = [json.loads(x) for x in open(HTTP_LOG)] if os.path.exists(HTTP_LOG) else []
-    open(HTTP_LOG, "w").close()
-    return said
+    return [json.loads(x) for x in open(f"{tmp}/home/.fake/codex.log")]
 
 
 agent()
@@ -197,7 +136,7 @@ with open(f"{tmp}/config.json", "w") as f:
         "owners": ["sam"], "exclude": [], "context": "review-settled", "rulesets": True, "keepBranches": [],
         "app": {"id": 7, "slug": "steward"},
         "baselineJobs": False, "baselinePerPass": 1, "authors": ["sam"], "bots": ["dependabot", "renovate", "workers"], "machinery": None,
-        "stateDir": f"{tmp}/state", "snapDir": f"{tmp}/trees", "majorKey": f"{tmp}/sweep.key", "projectsDir": f"{tmp}/none", "jobsDir": f"{tmp}/jobs", "renovateEmail": "bot@renovateapp.com", "proj": "proj", "jobTimeout": 60, "jobIdle": 20, "proofTimeout": 180, "heavy": None, "reviewTimeout": 30, "owner": "Sam", "cleanBranches": False,
+        "stateDir": f"{tmp}/state", "snapDir": f"{tmp}/trees", "majorKey": f"{tmp}/sweep.key", "projectsDir": f"{tmp}/none", "jobsDir": f"{tmp}/jobs", "renovateEmail": "bot@renovateapp.com", "proj": "proj", "jobTimeout": 60, "jobIdle": 20, "proofTimeout": 180, "heavy": None, "owner": "Sam", "cleanBranches": False,
         "labels": {"hold": "hold", "owner": "needs-owner", "first": "first", "waiting": {"releaseAge": "waiting: release age", "proofSlot": "waiting: proof slot", "reviewer": "waiting: reviewer"}}, "notify": {"repo": "", "assignee": "", "label": "autoland"}, "inbox": {"enable": False, "label": "claude", "unstickLabel": "unstick", "authors": ["sam"]},
         "dashboard": {"enable": False, "waitDays": 4, "errorDays": 1, "title": "Dependency Dashboard",
                       "renovateKick": "http://127.0.0.1:9/kick/renovate", "renovate": None,
@@ -218,19 +157,10 @@ with open(f"{tmp}/config.json", "w") as f:
         "watch": {"kick": f"http://127.0.0.1:{kicks.server_port}/kick/watchdog", "escalated": f"{tmp}/escalated.json",
                   "renovateSweep": True},
         "renovateRun": 7200,
-        "reviewers": {"codex": {"enable": True, "effort": "high", "parallel": 2},
-                      "rival": {"enable": True, "parallel": 2}},
+        "reviewers": {"codex": {"enable": True}, "rival": {"enable": True}},
         "skipPaths": ["(^|/)secrets?/", r"\.(pem|key|p12|pfx)$", r"(^|/)\.env(\..*)?$"],
-        "agents": f"{tmp}/agents",
-        "sandbox": f"{tmp}/bwrap",
         "nix": f"{tmp}/nix",
-        "box": {"store": f"{tmp}/store-paths", "caBundle": f"{tmp}/ca.crt",
-                "links": {"/bin/sh": "/nix/store/dddd-bash/bin/sh", "/usr/bin/env": "/nix/store/eeee-coreutils/bin/env"}},
     }, f)
-# The store paths an agent's sandbox shows: its closure, never the whole store.
-STORE = ["/nix/store/aaaa-review-agents", "/nix/store/bbbb-python3", "/nix/store/cccc-ripgrep"]
-with open(f"{tmp}/store-paths", "w") as f:
-    f.write("\n".join(STORE) + "\n")
 os.environ["AUTOLAND_CONFIG"] = f"{tmp}/config.json"
 os.environ["CREDENTIALS_DIRECTORY"] = f"{tmp}/cred"
 os.environ["HOME"] = f"{tmp}/home"
@@ -241,7 +171,6 @@ sys.argv = ["steward"]
 import common as C  # noqa: E402,F401
 import prs as P  # noqa: E402,F401
 import repos as R  # noqa: E402,F401
-import review_worker as W  # noqa: E402,F401
 import reviewers as V  # noqa: E402,F401
 import step as H  # noqa: E402,F401
 import steward as S  # noqa: E402,F401
@@ -354,7 +283,7 @@ def queue(repo, pr, key, r):
         raise STUB["queue"]
     C.save(f"{V.QUEUE}/{V.item_name(key, r, pr['headRefOid'], pr['baseRefName'])}.json",
            {"reviewer": r, "repo": repo, "number": pr["number"], "headRefOid": pr["headRefOid"], "baseRefName": pr["baseRefName"],
-            "body": pr["body"]})
+            "description": C.fingerprint(pr["body"])})
 
 
 def post(repo, pr, r, answer, description):
@@ -491,7 +420,7 @@ def worker(**back):
         item = json.load(open(f"{QDIR}/{x}"))
         said = back.get(r, {"result": "review", "answer": {"findings": []}})
         # A review carries the description it was shown, as the service's do.
-        shown = {"description": C.fingerprint(item["body"])} if said["result"] == "review" else {}
+        shown = {"description": item["description"]} if said["result"] == "review" else {}
         C.save(f"{V.DONE}/{x}", {**shown, **said, "at": C.NOW, "head": item.get("headRefOid"), "base": item.get("baseRefName")})
         os.remove(f"{QDIR}/{x}")
 

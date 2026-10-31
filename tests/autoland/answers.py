@@ -6,7 +6,7 @@ import fcntl
 import json
 import os
 
-from harness import (C, DDIR, POSTED, QDIR, H, S, STUB, T0, V, W, agent, agent_runs, clean, fresh_pr_state, head, info,
+from harness import (C, DDIR, POSTED, QDIR, H, S, STUB, T0, V, clean, fresh_pr_state, head, info,
                      merged, mkpr, pr_state, queued, run, rv_review, stand_in, tmp, worker)
 
 stand_in()
@@ -177,17 +177,16 @@ status, digest = run(clean(), 600)
 assert "No reviewer can review it now (Codex: spent; Rival: spent)" in status, status
 assert [x[0] for x in digest] == ["No reviewer can review it"] and queued() == [] and not merged(), digest
 
-# A repo set to Codex alone lands on Codex's word, and a review queued
-# before it was taken off Rival isn't sent.
+# A repo set to Codex alone lands on Codex's word, whatever comes back for
+# a review queued before it was taken off Rival (the reviewers' service
+# doesn't send it: burrow-review's tests).
 fresh_pr_state()
 run(mkpr(reviews=[cx]), 0)
 run(mkpr(reviews=[cx]), 600)
 name, = os.listdir(QDIR)
+assert name.startswith("rival--"), name
 S.CFG["repos"]["sam/r"] = {"rival": False}
-agent()
-W.review(name)
-back = json.load(open(f"{DDIR}/{name}"))
-assert back["result"] == "error" and "isn't one Rival reviews" in back["error"] and agent_runs() == [], back
+worker(rival={"result": "error", "error": "sam/r isn't one Rival reviews"})
 status, _ = run(mkpr(reviews=[cx]), 700)
 assert "state=success" in status and "Codex found nothing" in status and merged()
 del S.CFG["repos"]["sam/r"]
