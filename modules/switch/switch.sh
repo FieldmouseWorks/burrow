@@ -74,15 +74,14 @@ if [ "${1:-}" = --revert-to ]; then
   exit 0
 fi
 
-# Run as the activation unit stops, with the system it was leaving and the one it
-# was putting live. Past its deadline, if the timer hasn't fired yet, the revert
-# starts now: the timer would land it after the window. A switch no longer
-# pending (confirmed, aborted, reverted, or replaced by a later switch) is
-# settled: leave it be. A stop job the killed activation left behind still
+# Run as the activation unit stops, with the system it was putting live. Past its
+# deadline, if the timer hasn't fired yet, the revert starts now: the timer would
+# land it after the window. A switch no longer pending (confirmed, aborted,
+# reverted, or replaced by a later switch) is settled: leave it be. A stop job the killed activation left behind still
 # holds up the revert's own job on that unit until systemd's stop timeout ends
 # it; a unit with none (TimeoutStopSec=infinity) holds it for good, burrow#312.
 if [ "${1:-}" = --activation-stopped ]; then
-  if [ "${SERVICE_RESULT:-}" = timeout ] && [ "$(cat "$state/pending" 2>/dev/null)" = "$3" ] &&
+  if [ "${SERVICE_RESULT:-}" = timeout ] && [ "$(cat "$state/pending" 2>/dev/null)" = "$2" ] &&
     [ "$(systemctl show -p SubState --value "$REVERT.timer")" = waiting ]; then
     echo "activation killed: it hung past its deadline, reverting now" | systemd-cat -t "$SWITCH" -p warning
     # In this order: with the timer gone first, nothing would hold the inactive
@@ -189,7 +188,7 @@ done < <(systemd-analyze timespan "$within")
 rc=0
 systemd-run --unit="$SWITCH-activate" "${keep[@]}" --collect --wait --pipe --quiet \
   --property=RuntimeMaxSec="$((window_us * 3 / 4))us" --property=TimeoutStopSec=5s \
-  --property=ExecStopPost="$(readlink -f "$0") --activation-stopped $prev $new" \
+  --property=ExecStopPost="$(readlink -f "$0") --activation-stopped $new" \
   "$new/bin/switch-to-configuration" test || rc=$?
 # The timer's gone once the revert has fired or the deadline started it: the old
 # system is coming back whatever the activation said.
