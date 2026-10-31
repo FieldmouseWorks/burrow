@@ -9,13 +9,16 @@
 # actions are pinned to commits (repos that allow only pinned actions need
 # that), and Renovate keeps the pins current.
 #
-# Each job runs once a PR at a time: a PR's new run (a push, say) cancels
-# what its last run still has going, which was checking a head the PR no
-# longer has. Anything else (a push to a branch, a train's candidate) is a
-# run of its own that nothing cancels. A job's concurrency group is its
-# caller's workflow, its inputs and the PR (or the run), so calls in one
-# workflow with inputs of their own (a matrix's legs, say) never cancel each
-# other; two calls alike would be the same check twice.
+# Each job runs once a PR at a time: a PR's new run (a push, a retarget)
+# cancels what its last run still has going, which was checking a head or a
+# base the PR no longer has. Anything else (a push to a branch, a train's
+# candidate) is a run of its own that nothing cancels, and so is a PR's title
+# or body edit: Renovate renames a PR just after pushing to it, and the edit
+# would cancel the push's run, whose cancelled checks read as red on the head
+# for good. A job's concurrency group is its caller's workflow, its inputs and
+# the PR (or the run), so calls in one workflow with inputs of their own (a
+# matrix's legs, say) never cancel each other; two calls alike would be the
+# same check twice.
 name: flake-check
 on:
   workflow_call:
@@ -76,10 +79,10 @@ on:
           autoland runs none of the repo's proofs on it. Nothing under
           .github/, no .nix file and no flake.lock is ever documentation
           here, whatever this says: those define the gate itself. Which
-          paths a PR changes depends on its base, so a caller that sets
-          this runs on pull_request's `edited` too, for an edit that
-          changes the base, and a PR retargeted gets its lane again. Empty,
-          every PR gets the whole gate.
+          paths a PR changes depends on its base, so the caller runs on
+          pull_request's `edited` too, for an edit that changes the base
+          (the template's does), and a PR retargeted gets its lane again.
+          Empty, every PR gets the whole gate.
         type: string
         default: ''
       docs-checks:
@@ -107,7 +110,7 @@ jobs:
     name: lane into ${{ github.event.pull_request.base.ref }}
     runs-on: ${{ inputs.runner }}
     concurrency:
-      group: ${{ format('flake-check {0} lane {1} {2} {3} {4} [{5}] [{6}] [{7}] {8}', github.workflow, inputs.runner, inputs.install-nix, inputs.eval-apart, inputs.pr-gate, inputs.build-skip, inputs.docs-paths, inputs.docs-checks, format('pr-{0}', github.event.pull_request.number)) }}
+      group: ${{ format('flake-check {0} lane {1} {2} {3} {4} [{5}] [{6}] [{7}] {8}', github.workflow, inputs.runner, inputs.install-nix, inputs.eval-apart, inputs.pr-gate, inputs.build-skip, inputs.docs-paths, inputs.docs-checks, (github.event_name == 'pull_request' && (github.event.action != 'edited' || github.event.changes.base)) && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id)) }}
       cancel-in-progress: true
     permissions:
       contents: read
@@ -196,7 +199,7 @@ jobs:
     if: ${{ !cancelled() && needs.lane.result != 'cancelled' && needs.lane.outputs.gate != 'train' && needs.lane.outputs.gate != 'docs' }}
     runs-on: ${{ inputs.runner }}
     concurrency:
-      group: ${{ format('flake-check {0} check {1} {2} {3} {4} [{5}] [{6}] [{7}] {8}', github.workflow, inputs.runner, inputs.install-nix, inputs.eval-apart, inputs.pr-gate, inputs.build-skip, inputs.docs-paths, inputs.docs-checks, github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id)) }}
+      group: ${{ format('flake-check {0} check {1} {2} {3} {4} [{5}] [{6}] [{7}] {8}', github.workflow, inputs.runner, inputs.install-nix, inputs.eval-apart, inputs.pr-gate, inputs.build-skip, inputs.docs-paths, inputs.docs-checks, (github.event_name == 'pull_request' && (github.event.action != 'edited' || github.event.changes.base)) && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id)) }}
       cancel-in-progress: true
     permissions:
       contents: read
@@ -644,7 +647,7 @@ jobs:
     name: docs only into ${{ github.event.pull_request.base.ref }} from ${{ needs.lane.outputs.fork }}
     runs-on: ${{ inputs.runner }}
     concurrency:
-      group: ${{ format('flake-check {0} docs {1} {2} {3} {4} [{5}] [{6}] [{7}] {8}', github.workflow, inputs.runner, inputs.install-nix, inputs.eval-apart, inputs.pr-gate, inputs.build-skip, inputs.docs-paths, inputs.docs-checks, format('pr-{0}', github.event.pull_request.number)) }}
+      group: ${{ format('flake-check {0} docs {1} {2} {3} {4} [{5}] [{6}] [{7}] {8}', github.workflow, inputs.runner, inputs.install-nix, inputs.eval-apart, inputs.pr-gate, inputs.build-skip, inputs.docs-paths, inputs.docs-checks, (github.event_name == 'pull_request' && (github.event.action != 'edited' || github.event.changes.base)) && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id)) }}
       cancel-in-progress: true
     permissions:
       contents: read
@@ -674,7 +677,7 @@ jobs:
     if: github.event_name == 'pull_request'
     runs-on: ${{ inputs.runner }}
     concurrency:
-      group: ${{ format('flake-check {0} commits {1} {2} {3} {4} [{5}] [{6}] [{7}] {8}', github.workflow, inputs.runner, inputs.install-nix, inputs.eval-apart, inputs.pr-gate, inputs.build-skip, inputs.docs-paths, inputs.docs-checks, format('pr-{0}', github.event.pull_request.number)) }}
+      group: ${{ format('flake-check {0} commits {1} {2} {3} {4} [{5}] [{6}] [{7}] {8}', github.workflow, inputs.runner, inputs.install-nix, inputs.eval-apart, inputs.pr-gate, inputs.build-skip, inputs.docs-paths, inputs.docs-checks, (github.event_name == 'pull_request' && (github.event.action != 'edited' || github.event.changes.base)) && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id)) }}
       cancel-in-progress: true
     permissions:
       contents: read
