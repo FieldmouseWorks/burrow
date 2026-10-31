@@ -1,8 +1,10 @@
 //! keep-builds: each leg restores the builds the last push to the default
 //! branch kept for that leg, into a directory there before nix is, whose
-//! config names it as a substituter it trusts unsigned; and only a push to
-//! the default branch whose gate passed keeps them, last, under the key
-//! restores look for, without its failure failing the gate. What it keeps is
+//! config names it as a substituter it trusts unsigned, but a PR from a fork
+//! restores nothing (its earlier runs could have saved anything under its
+//! own ref); and only a push to the default branch whose gate passed keeps
+//! them, last, under the key and the path restores look for, without its
+//! failure failing the gate. What it keeps, in place of what it restored, is
 //! every path in the store no one signed (built here, or taken from the kept
 //! builds), but derivations; and what the kept builds hold that a derivation
 //! here still makes, though this gate didn't need it (what an unchanged check
@@ -27,7 +29,7 @@ fn ctx(pairs: &[(&str, V)]) -> Ctx {
 /// The steps that restore the kept builds and let nix take them, and the two
 /// that keep them, last.
 #[test]
-fn every_run_restores_and_only_a_default_branch_push_keeps() {
+fn every_run_but_a_forks_restores_and_only_a_default_branch_push_keeps() {
     let job = job();
     let all = steps(&job);
     let (made, restore, install) = (&all[2], &all[3], &all[4]);
@@ -35,10 +37,37 @@ fn every_run_restores_and_only_a_default_branch_push_keeps() {
         let c = ctx(&[
             ("inputs.keep-builds", keep.into()),
             ("inputs.install-nix", nix.into()),
+            ("github.event_name", "push".into()),
         ]);
-        for s in [made, restore] {
-            assert_eq!(condition(text(&s["if"]), &c), keep && nix, "{s:?}");
+        assert_eq!(condition(text(&made["if"]), &c), keep && nix, "{made:?}");
+        assert_eq!(value(text(&restore["if"]), &c).truthy(), keep && nix);
+    }
+    // A PR's own earlier runs can save under its ref, which its later runs
+    // restore from first: one from a fork, anyone's, restores nothing, nor
+    // one whose fork is gone (GitHub gives its head no repo).
+    for (event, head, restores) in [
+        ("push", None, true),
+        ("workflow_dispatch", None, true),
+        ("pull_request", Some("FieldmouseWorks/burrow"), true),
+        ("pull_request", Some("someone/burrow"), false),
+        ("pull_request", None, false),
+    ] {
+        let mut c = ctx(&[
+            ("inputs.keep-builds", true.into()),
+            ("inputs.install-nix", true.into()),
+            ("github.event_name", event.into()),
+            ("github.repository", "FieldmouseWorks/burrow".into()),
+        ]);
+        if event == "pull_request" {
+            c.insert(
+                "github.event.pull_request.head.repo.full_name".to_owned(),
+                head.map_or(V::Null, Into::into),
+            );
         }
+        let case = format!("{event} {head:?}");
+        assert_eq!(value(text(&restore["if"]), &c).truthy(), restores, "{case}");
+        // The directory nix's config names is there either way.
+        assert!(condition(text(&made["if"]), &c), "{case}");
     }
     assert_eq!(script(made), "mkdir -p \"$RUNNER_TEMP/kept\"");
     let uses = |s: &Value, action: &str| text(&s["uses"]).starts_with(action);
@@ -87,7 +116,8 @@ fn every_run_restores_and_only_a_default_branch_push_keeps() {
     assert!(uses(save, "actions/cache/save@"), "{save:?}");
     let version = |s: &Value| text(&s["uses"]).split_once('@').map(|(_, v)| v.to_owned());
     assert_eq!(version(save), version(restore));
-    assert_eq!(save["with"]["path"], "${{ runner.temp }}/keep");
+    // The cache keeps an entry for a restore of the same paths only.
+    assert_eq!(save["with"]["path"], restore["with"]["path"]);
     assert_eq!(save["with"]["key"], key);
     assert_eq!(save["with"].as_mapping().map(|m| m.len()), Some(2));
     for (event, git_ref, gate, kept) in [
@@ -131,8 +161,8 @@ fn a_default_branch_push_keeps_what_no_one_signed_and_what_it_was_built_from() {
 case "$*" in
   "path-info --all --json --json-format 2") cat "$PATHINFO" ;;
   "path-info --all --store $kept") cat "$KEPT" ;;
-  "copy --no-recursive --to $keep "*) shift 4; echo "store $*" >> "$COPIED" ;;
-  "copy --no-recursive --from $kept?trusted=true --to $keep "*) shift 6; echo "kept $*" >> "$COPIED" ;;
+  "copy --no-recursive --to $keep "*) shift 4; echo "store $*" | tee -a "$COPIED" >> "$RUNNER_TEMP/keep/copied" ;;
+  "copy --no-recursive --from $kept?trusted=true --to $keep "*) shift 6; echo "kept $*" | tee -a "$COPIED" >> "$RUNNER_TEMP/keep/copied" ;;
   *) echo "nix $*: not stood in for" >&2; exit 1 ;;
 esac
 "#,
@@ -208,6 +238,7 @@ for drv; do grep "^$drv " "$OUTPUTS" | cut -d' ' -f2- | tr ' ' '\n' | grep . || 
         .collect::<String>(),
     );
     std::fs::create_dir(runner.join("kept")).unwrap();
+    write(&runner.join("kept/nix-cache-info"), "restored\n");
     let keep = steps(&job())
         .iter()
         .find(|s| s["id"] == "keep")
@@ -225,17 +256,28 @@ for drv; do grep "^$drv " "$OUTPUTS" | cut -d' ' -f2- | tr ' ' '\n' | grep . || 
         ],
     );
     assert_eq!(ran.code, 0, "{}", ran.said());
-    assert!(runner.join("keep").is_dir());
+    let copied = [
+        format!(
+            "store {}",
+            in_store("aaa-git-2.54 bbb-vm-test-run-proj eee-kept-before")
+        ),
+        format!("kept {}", in_store("hhh-tmux hhh-tmux-man")),
+    ];
     assert_eq!(
         read(&runner.join("copied")).lines().collect::<Vec<_>>(),
-        [
-            format!(
-                "store {}",
-                in_store("aaa-git-2.54 bbb-vm-test-run-proj eee-kept-before")
-            ),
-            format!("kept {}", in_store("hhh-tmux hhh-tmux-man")),
-        ]
+        copied
     );
+    // What it kept is where the cache saves from, as only what it kept, and
+    // what it restored is moved aside.
+    assert!(!runner.join("keep").exists(), "{}", ran.said());
+    assert_eq!(
+        read(&runner.join("kept/copied"))
+            .lines()
+            .collect::<Vec<_>>(),
+        copied
+    );
+    assert!(!runner.join("kept/nix-cache-info").exists());
+    assert_eq!(read(&runner.join("restored/nix-cache-info")), "restored\n");
     assert!(
         ran.stdout
             .contains("kept 3 paths from this gate and 2 from the kept builds"),

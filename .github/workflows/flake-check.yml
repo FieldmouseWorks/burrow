@@ -42,10 +42,14 @@ on:
           let every later run's gate substitute from them, a leg from the
           same leg's: a hosted runner starts with an empty store, and builds
           all of that again otherwise. Only a push to the default branch
-          saves them, so no PR's run puts anything in another run's store,
-          and a check whose derivation hasn't changed since gets the result
-          that push's gate got, as one from a public cache would. Needs
-          install-nix, and jq on the runner, as GitHub's hosted ones have.
+          saves them, and a check whose derivation hasn't changed since gets
+          the result that push's gate got, as one from a public cache would.
+          But a run restores its own ref's entries before the default
+          branch's, so a PR's earlier runs can leave what its later ones
+          take: a PR from a fork, which anyone can open, takes none, and a
+          branch of this repo is pushed only by someone it already trusts to
+          run workflows with its tokens. Needs install-nix, and jq on the
+          runner, as GitHub's hosted ones have.
         type: boolean
         default: false
       build-skip:
@@ -321,13 +325,16 @@ jobs:
             exit 1
           fi
       # keep-builds: the builds the last push to the default branch kept, for
-      # nix to substitute from, unsigned (only that push writes them). The
-      # directory is there before nix, whose config names it, whether or not
-      # there's anything kept to restore into it.
+      # nix to substitute from, unsigned. No PR's run saves them, but one can
+      # write the cache under its own ref, which that PR's later runs restore
+      # from first, so a PR from a fork, whose author needs no access to this
+      # repo, restores nothing. The directory is there before nix, whose
+      # config names it, whether or not there's anything kept to restore
+      # into it.
       - if: inputs.keep-builds && inputs.install-nix
         shell: bash
         run: mkdir -p "$RUNNER_TEMP/kept"
-      - if: inputs.keep-builds && inputs.install-nix
+      - if: ${{ inputs.keep-builds && inputs.install-nix && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/kept
@@ -781,8 +788,10 @@ jobs:
       # check that hadn't changed came whole from them, without what it was
       # built from, which the next change to it needs again. Each path on its
       # own, referring to the rest, for nix to find in a public cache or
-      # among these. Keeping them is for later runs' speed, so a failure here
-      # says so and leaves the gate's result as it is.
+      # among these, in place of the kept builds it restored, under the path
+      # it restored them to (the cache keeps what it saves for a restore of
+      # the same path only). Keeping them is for later runs' speed, so a
+      # failure here says so and leaves the gate's result as it is.
       - id: keep
         if: ${{ inputs.keep-builds && inputs.install-nix && steps.gate.outcome == 'success' && github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
         continue-on-error: true
@@ -801,12 +810,15 @@ jobs:
           xargs -r nix copy --no-recursive --to "file://$RUNNER_TEMP/keep?compression=none" < keep.list
           xargs -r nix copy --no-recursive --from "file://$RUNNER_TEMP/kept?trusted=true" \
             --to "file://$RUNNER_TEMP/keep?compression=none" < carry.list
-          echo "kept $(wc -l < keep.list) paths from this gate and $(wc -l < carry.list) from the kept builds, $(du -sh keep | cut -f1)"
+          # Moved aside rather than deleted: nix's daemon, as root, may have
+          # made some of what's in it.
+          mv kept restored && mv keep kept
+          echo "kept $(wc -l < keep.list) paths from this gate and $(wc -l < carry.list) from the kept builds, $(du -sh kept | cut -f1)"
       - if: steps.keep.outcome == 'success'
         continue-on-error: true
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: ${{ runner.temp }}/keep
+          path: ${{ runner.temp }}/kept
           key: flake-kept-${{ github.workflow }}-${{ runner.os }}-leg-${{ matrix.leg }}-of-${{ inputs.legs }}-${{ github.sha }}
   # With legs, the gate's own verdict: whether every leg passed, on the commit
   # each was to check and with one plan to share out, attested as the gate's
