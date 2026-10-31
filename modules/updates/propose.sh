@@ -23,12 +23,16 @@
 # TRAIN_CONTEXT, riding, changed, as_user and git_.
 # shellcheck disable=SC2154
 
+# gh, about REPO. The machine's gh (gh-token) runs a call with the token of
+# the account it's about, and `gh api graphql` names none: GH_REPO does.
+gh_() { as_user env GH_REPO="$REPO" gh "$@"; }
+
 # The open PR, as "NUMBER HEAD"; nothing when there's none. Fails when GitHub
 # doesn't say. Only REPO's own BRANCH counts: a fork's PR from a branch of the
 # same name is anyone's to open. GitHub's head filter is OWNER:BRANCH, and
 # allows one open PR per head and base, so there's never a page more.
 update_pr() {
-  as_user gh api "repos/$REPO/pulls?state=open&base=main&head=${REPO%%/*}:$BRANCH" \
+  gh_ api "repos/$REPO/pulls?state=open&base=main&head=${REPO%%/*}:$BRANCH" \
     --jq '.[0] // empty | "\(.number) \(.head.sha)"'
 }
 
@@ -48,7 +52,7 @@ red_head() {
   read -r n head <<<"$1"
   [ "$head" = "$(cat "$state/proposed" 2>/dev/null)" ] || return 0
   # shellcheck disable=SC2016 # GraphQL's variables
-  json=$(as_user gh api graphql -F n="$n" -f owner="${REPO%%/*}" -f name="${REPO#*/}" -f query='
+  json=$(gh_ api graphql -F n="$n" -f owner="${REPO%%/*}" -f name="${REPO#*/}" -f query='
     query($owner: String!, $name: String!, $n: Int!) {
       repository(owner: $owner, name: $name) { pullRequest(number: $n) { headRefOid
         commits(last: 1) { nodes { commit {
@@ -163,7 +167,7 @@ replace() {
     return 1
   }
   git_ rev-parse HEAD >"$state/proposed"
-  url=$(as_user gh api "repos/$REPO/pulls/$n" -X PATCH -f "title=$2" -f "body=$3" --jq .html_url) ||
+  url=$(gh_ api "repos/$REPO/pulls/$n" -X PATCH -f "title=$2" -f "body=$3" --jq .html_url) ||
     url="https://github.com/$REPO/pull/$n (its title still says the red head's: GitHub didn't take the new one)"
   echo "$url, in place of its red head ${head:0:7}"
 }
@@ -173,7 +177,7 @@ replace() {
 propose() {
   git_ push -q --force origin "HEAD:refs/heads/$BRANCH" || return 1
   git_ rev-parse HEAD >"$state/proposed"
-  as_user gh pr create -R "$REPO" --head "$BRANCH" --base main --title "$1" --body "$2"
+  gh_ pr create -R "$REPO" --head "$BRANCH" --base main --title "$1" --body "$2"
 }
 
 # The PR's body: what HOST-update did with the commit, as its message says.

@@ -494,14 +494,16 @@ def fresh_pr_state():
         os.makedirs(f"{tmp}/state/{d}")
 
 
-REAL = {"job": C.job, "stop_job": C.stop_job, "forget_issues": C.forget_issues}  # the steward's own, for the checks of what it runs
+REAL = {"job": C.job, "stop_job": C.stop_job, "forget_issues": C.forget_issues, "app_hook": R.app_hook}  # the steward's own, for the checks of what it runs
 
 
 def stand_in():
-    """gh, Claude jobs, the queue and the posting, for handle() and the passes."""
+    """gh, Claude jobs, the queue, the posting and the App's webhook, for
+    handle() and the passes."""
     C.gh = gh_stub
     C.write = write
     C.job = job
+    R.app_hook = lambda: None
     C.job_state = lambda jid: STATES.get(jid, "running")
     C.stop_job = stop_job
     C.forget_issues = FORGOT.append
