@@ -40,6 +40,9 @@
 #                               the full stream); fails when there's none
 #   proj state ID               queued, running, done, error or failed
 #   proj stop ID                end a job: its running turn and its waits
+#   proj withdraw ID            end a job only while its turn still waits for
+#                               a slot: prints withdrawn, or running or over
+#                               for one it leaves be
 #   proj unstick ID             make a job one run --unstick from now on: a
 #                               turn of it waiting in line leaves it at its
 #                               next look, one running carries on
@@ -123,6 +126,8 @@ self=$(readlink -f "$0")
 unit() { echo "proj-$(systemd-escape "$1").service"; }
 # The unit that ends each of its turns (_ended), outside the turn's own.
 end_unit() { systemd-escape --template=proj-ended@.service "$1"; }
+# Whether that unit is still to run, or running.
+end_pending() { [ -n "$(systemctl --user show -P Job "$(end_unit "$1")" 2>/dev/null)" ]; }
 # The env file of the GitHub App NAME, from APPS' NAME=FILE lines: nothing for
 # one this machine hasn't.
 app_env() { [[ $1 =~ ^[A-Za-z0-9_-]+$ ]] && sed -n "s/^$1=//p" <<<"$APPS" | head -n 1; }
@@ -217,31 +222,6 @@ cut_off() {
 # Known not to be running: not "can't say".
 gone() { case $(systemctl --user show -P ActiveState "$1" 2>/dev/null) in inactive | failed) return 0 ;; esac; return 1; }
 
-# What job_wait (waits.sh) reads of a job's latest turn.
-facts() {
-  local d=$jobs/$1 n t
-  n=$(cat "$d/turns" 2>/dev/null) || return 1
-  printf 'id\t%s\nturn\t%s\nstate\t%s\n' "$1" "$n" "$(state "$1")"
-  [ ! -e "$d/owned" ] || printf 'owned\t1\n'
-  [ ! -e "$d/unstick" ] || printf 'unstick\t1\n'
-  [ ! -e "$d/$n.stopped" ] || printf 'stopped\t1\n'
-  [ ! -s "$d/$n.end" ] || printf 'end\t%s\n' "$(cat "$d/$n.end")"
-  [ ! -s "$d/link" ] || printf 'link\t%s\n' "$(cat "$d/link")"
-  printf 'queued\t%s\n' "$(stat -c %Y "$d/prompt.$n" 2>/dev/null || echo 0)"
-  [ ! -e "$d/$n.slot" ] || printf 'slot\t%s\n' "$(stat -c %Y "$d/$n.slot")"
-  # When it ended: when it wrote its outcome, or for one stopped before it
-  # could, when it last said anything.
-  t=$(stat -c %Y "$d/$n.outcome" "$d/$n.jsonl" "$d/prompt.$n" 2>/dev/null | head -n 1 || true)
-  printf 'ended\t%s\n' "${t:-0}"
-  # Its deadline as it stands, to the second (none without a timeout): when
-  # it took its slot and its timeout, moved on by any time it waited in
-  # line. And what it waits in line for now, if anything (watch_run).
-  t=$(cat "$d/$n.deadline" 2>/dev/null || true)
-  [[ ! $t =~ ^[0-9]+$ ]] || printf 'deadline\t%s\n' "$((t / 1000000000))"
-  [ ! -s "$d/$n.wait" ] || printf 'wait\t%s\n' "$(head -n 1 "$d/$n.wait")"
-  [ ! -s "$d/await" ] || awk -F '\t' '{ print "await\t" $1 "\t" $2 }' "$d/await"
-}
-
 # The waits of the jobs named, brought up to date for the stall watchdog:
 # JOBS/.waits/ID has a job's (job_wait's) while it has one, and WAITS all of
 # them, which the watchdog reads. Called after each change to a job (a turn
@@ -300,7 +280,7 @@ start_turn() {
   for i in $(seq 120); do
     systemctl --user reset-failed "$(unit "$id")" 2>/dev/null || true
     if [ "$(systemctl --user show -P LoadState "$(unit "$id")" 2>/dev/null)" != loaded ] &&
-      [ -z "$(systemctl --user show -P Job "$(end_unit "$id")" 2>/dev/null)" ]; then
+      ! end_pending "$id"; then
       break
     fi
     if [ "$i" = 120 ]; then
@@ -351,57 +331,6 @@ spare() {
     arc=$(awk '$1 == "size" { s = $3 } $1 == "c_min" { m = $3 } END { print (s > m ? int((s - m) / 1024) : 0) }' /proc/spl/kstat/zfs/arcstats)
   fi
   echo $(((kb + arc) / 1024))
-}
-
-# OWNER/REPO N from a PR or issue URL, or OWNER/REPO#N.
-target() {
-  local t=${1#https://github.com/}
-  if [[ $t =~ ^([^/#]+/[^/#]+)/(pull|issues)/([0-9]+) ]]; then echo "${BASH_REMATCH[1]} ${BASH_REMATCH[3]}"
-  elif [[ $t =~ ^([^/#]+/[^/#]+)#([0-9]+)$ ]]; then echo "${BASH_REMATCH[1]} ${BASH_REMATCH[2]}"
-  else return 1
-  fi
-}
-
-# What a job waiting on a PR or issue would want to hear about, as one line of
-# JSON: a change in it is news. Checks count only once they've all finished,
-# so a run of them wakes the job once. REST, not GraphQL, whose budget is
-# shared with everything else under the login.
-fingerprint() { # repo n
-  local issue comments pr sha reviews status checks
-  # gh failing in a pipeline fails it: jq on nothing says nothing, and exits 0.
-  local -
-  set -o pipefail
-  issue=$("$GH" api "repos/$1/issues/$2") || return
-  # Comments on the issue or PR, but not proj-inbox's own (MARK): a job
-  # awaiting its own issue would wake on every answer the inbox posts there.
-  comments=$("$GH" api --paginate --slurp "repos/$1/issues/$2/comments?per_page=100" |
-    jq --arg mark "$MARK" '[add // [] | .[] | select(.body | contains($mark) | not)] | length') || return
-  if ! jq -e 'has("pull_request")' <<<"$issue" >/dev/null; then
-    jq -c --argjson comments "$comments" '{state, comments: $comments}' <<<"$issue"
-    return
-  fi
-  # Each answer is cut down to what's compared before it's passed on: a whole
-  # one (a long PR body, hundreds of reviews) can be past what one argument
-  # may hold.
-  pr=$("$GH" api "repos/$1/pulls/$2" | jq -c '{state, merged, head: .head.sha, comments, review_comments}') || return
-  sha=$(jq -r .head <<<"$pr")
-  # Every page: a review or check past the first hundred is news too. Reviews
-  # are counted by state, so a dismissed one is news as well as a new one.
-  reviews=$("$GH" api --paginate --slurp "repos/$1/pulls/$2/reviews?per_page=100" |
-    jq -c 'add // [] | group_by(.state) | map({(.[0].state): length}) | add // {}') || return
-  status=$("$GH" api "repos/$1/commits/$sha/status" | jq -c '{total_count, state}') || return
-  checks=$("$GH" api --paginate --slurp "repos/$1/commits/$sha/check-runs?per_page=100" |
-    jq -r --argjson status "$status" '
-      [.[].check_runs[]] as $runs |
-      if any($runs[]; .status != "completed")
-         or ($status.total_count > 0 and $status.state == "pending")
-      then "running"
-      else ([$runs[] | "\(.name)=\(.conclusion)"]
-            + (if $status.total_count > 0 then ["status=\($status.state)"] else [] end)
-            | sort | join(" "))
-      end') || return
-  jq -c --argjson comments "$comments" --argjson reviews "$reviews" --arg checks "$checks" \
-    '. + {comments: $comments, reviews: $reviews, checks: $checks}' <<<"$pr"
 }
 
 case "${1:-status}" in
@@ -555,17 +484,35 @@ case "${1:-status}" in
     fi
     ;;
   state) state "${2:?usage: proj state ID}" ;;
-  stop)
-    id=${2:?usage: proj stop ID}
+  stop | withdraw)
+    id=${2:?usage: proj $1 ID}
     [ -d "$jobs/$id" ] || { echo "no job $id" >&2; exit 1; }
     # Under the lock turns start under, so none starts between looking and
     # stopping. A stopped job is over: nothing it waited on resumes it.
     exec {lk}>>"$jobs/$id/lock"
     flock "$lk"
     u=$(unit "$id") rc=0 idle=''
+    n=$(cat "$jobs/$id/turns" 2>/dev/null || true)
+    # Withdrawn only while it has no slot. A turn says it has one only under
+    # this lock too (took_slot, line.sh), so it can't take one between this
+    # look and the stop; one that doesn't (N.withdrawable unsaid: its turn
+    # runs an older proj, or hasn't reached the line) isn't stopped.
+    # Failing then, or when systemd can't say, so the caller can ask again.
+    if [ "$1" = withdraw ]; then
+      case $(systemctl --user show -P ActiveState "$u" 2>/dev/null) in
+        active | activating | reloading) ;;
+        inactive | failed) echo over; exit 0 ;;
+        *) echo "proj: can't tell whether $id still waits for a slot" >&2; exit 1 ;;
+      esac
+      adopt "$id"
+      if [ -e "$jobs/$id/$n.slot" ]; then echo running; exit 0; fi
+      if [ ! -e "$jobs/$id/$n.withdrawable" ]; then
+        echo "proj: $id's turn can't be withdrawn safely yet (it runs an older proj, or isn't in line yet)" >&2
+        exit 1
+      fi
+    fi
     # Marked first, so the turn's end (_ended) already finds it stopped
     # rather than failed: nobody waits on it.
-    n=$(cat "$jobs/$id/turns" 2>/dev/null || true)
     [ -z "$n" ] || : >"$jobs/$id/$n.stopped"
     # No turn of it running, so no end of one to clear its scratch: this does.
     gone "$u" && idle=1
@@ -583,6 +530,7 @@ case "${1:-status}" in
     fi
     rewatch "$id"
     [ -z "$idle" ] || scratch_clear "$id"
+    [ "$1" != withdraw ] || echo withdrawn
     ;;
   unstick)
     id=${2:?usage: proj unstick ID}
@@ -628,92 +576,7 @@ case "${1:-status}" in
       done) echo "Noted. End your turn now with your answer." ;;
     esac
     ;;
-  _watch)
-    # `_watch [OWNER/REPO]`: jobs waiting on GitHub whose PRs or issues (in
-    # that repo, or any) changed get their next turn. A line of JOBS/ID/await
-    # is "OWNER/REPO#N <tab> since <tab> fingerprint". One pass at a time,
-    # whoever started it (burrow-events, from before a restart too, or a
-    # hand): two would each write WAKE from what they saw.
-    exec {pass}>>"$WAKE.lock"
-    flock "$pass"
-    only=${2:-} retry=''
-    for f in "$jobs"/*/await; do
-      [ -s "$f" ] || continue
-      id=$(basename "$(dirname "$f")")
-      case $(state "$id") in queued | running) continue ;; esac
-      turn=$(cat "$jobs/$id/turns" 2>/dev/null) || continue
-      # Gone already: another _watch (burrow-events', or a hand-run one) has
-      # started its next turn.
-      waits=$(cat "$f" 2>/dev/null) || continue
-      news='' lines=''
-      while IFS=$'\t' read -r t since was; do
-        [ -n "$t" ] || continue
-        if ! read -r repo n < <(target "$t") || ! [[ $since =~ ^[0-9]+$ ]] ||
-          { [ -n "$was" ] && ! jq -e 'type == "object"' <<<"$was" >/dev/null 2>&1; }; then
-          # Not a line proj await writes (one edited by hand): the job hears
-          # so rather than waiting on it for good.
-          news+="- $t: not something proj can watch; no longer watched"$'\n'
-          continue
-        fi
-        # GitHub's names are case-blind: the await's spelling needn't be the event's.
-        if [ -n "$only" ] && [ "${repo,,}" != "${only,,}" ]; then
-          lines+="$t"$'\t'"$since"$'\t'"$was"$'\n'
-          continue
-        fi
-        # GitHub can't be asked just now: looked at again in five minutes.
-        now=$(fingerprint "$repo" "$n" </dev/null) || { now=''; retry+="$repo"$'\t'$(($(date +%s) + 300))$'\n'; }
-        expired=$(($(date +%s) - since >= AWAIT_HOURS * 3600))
-        if [ -n "$now" ] && [ -n "$was" ] && [ "$now" != "$was" ]; then
-          news+="- $t: $(jq -rn --argjson was "$was" --argjson now "$now" '
-            [$now | keys[] as $k | select($was[$k] != $now[$k]) | "\($k) \($was[$k] | tojson) → \($now[$k] | tojson)"] | join(", ")')"$'\n'
-        elif [ "$expired" = 1 ] && [ -n "$now" ]; then
-          news+="- $t: nothing changed in ${AWAIT_HOURS}h; no longer watched"$'\n'
-        elif [ "$expired" = 1 ]; then
-          # The deadline holds even when GitHub can't be read (down, or the
-          # repo gone): the job hears that rather than waiting for good.
-          news+="- $t: couldn't be read from GitHub, and ${AWAIT_HOURS}h have passed; no longer watched"$'\n'
-        else
-          lines+="$t"$'\t'"$since"$'\t'"${was:-$now}"$'\n'
-        fi
-      done <<<"$waits"
-      # GitHub was asked without the lock, so a reply may have started a
-      # turn meanwhile (that turn owns the job's waits), or proj stop ended
-      # the job: either way these are dropped.
-      exec {lk}>>"$jobs/$id/lock"
-      flock "$lk"
-      if [ "$(cat "$jobs/$id/turns")" != "$turn" ] || [ "$(cat "$f" 2>/dev/null)" != "$waits" ]; then
-        :
-      elif [ -n "$news" ]; then
-        # The new turn clears what's left: if it still waits, it says so again.
-        # One that can't start keeps its waits, and is tried again in five
-        # minutes.
-        start_turn "$id" "News on what you were waiting on:
-
-$news
-Carry on from there. Anything you left in the background last turn was stopped when it ended." "" ||
-          retry+=$(cut -f1 <<<"$waits" | sed 's/#.*//' | awk -v at=$(($(date +%s) + 300)) '{ print $0 "\t" at }')$'\n'
-      else
-        printf '%s' "$lines" >"$f.new" && mv -f "$f.new" "$f"
-      fi
-      exec {lk}>&-
-    done
-    # When each repo needs a look next, for burrow-events: the deadline of
-    # every job's waits that's still to come, and the retries. One already
-    # past is a turn that couldn't start (its retry stands for it) or one
-    # this pass skipped as running, whose end kicks proj-watch itself. A pass
-    # over one repo keeps the other repos' wake-ups (their retries too).
-    if [ -n "$WAKE" ]; then
-      { [ -z "$only" ] || jq -r --arg only "${only,,}" --argjson now "$(date +%s)" '
-          to_entries[] | select((.key | ascii_downcase) != $only and (.value | type) == "number" and .value > $now)
-          | "\(.key)\t\(.value)"' "$WAKE" 2>/dev/null || true
-        { cat "$jobs"/*/await 2>/dev/null || true; } | awk -F '\t' -v h="$AWAIT_HOURS" -v now="$(date +%s)" '
-          $2 ~ /^[0-9]+$/ && split($1, t, "#") == 2 && $2 + h * 3600 + 1 > now { print t[1] "\t" ($2 + h * 3600 + 1) }'
-        printf '%s' "$retry"
-      } | jq -Rn 'reduce (inputs | split("\t")) as [$r, $at] ({}; .[$r] = ([.[$r] // empty, ($at | tonumber)] | min))' \
-        >"$WAKE.new"
-      mv -f "$WAKE.new" "$WAKE"
-    fi
-    ;;
+  _watch) watch_awaits "${2:-}" ;;
   _ended)
     # After each turn, however it ended (proj-ended@ID, its unit's OnSuccess
     # and OnFailure): its wait
@@ -725,6 +588,7 @@ Carry on from there. Anything you left in the background last turn was stopped w
     # expands a command line, and a job's id is its project's folder name,
     # spaces, `%` and all.
     id=${PROJ_ENDED:?proj _ended is for the end of a job turn, run by proj-ended@ID}
+    mark_ended "$id"
     rewatch "$id"
     { cat "$jobs/$id/kick" 2>/dev/null || true
       cut -f1 "$jobs/$id/await" 2>/dev/null | sed 's/#.*//; s#^#proj-watch/#' || true

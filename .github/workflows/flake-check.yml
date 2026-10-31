@@ -1,7 +1,9 @@
 # The shared CI for every repo whose gate is its flake (burrow's
 # lib/project.nix): check out, install Nix, `nix flake check`, then attest the
 # result for Conary's ledger; on a PR, also check that GitHub verifies every
-# signed commit it adds (with pr-gate off, only that). Called from a repo's own
+# signed commit it adds (with pr-gate off, only that). A PR that changes only
+# what the caller's docs-paths lists takes the docs lane instead: only the
+# checks that read docs, and no proofs. Called from a repo's own
 # workflow with `uses:`, whose job grants `id-token: write` and
 # `attestations: write` (a called job gets no more than its caller gives). Its
 # actions are pinned to commits (repos that allow only pinned actions need
@@ -64,39 +66,140 @@ on:
           default branch gets the gate for its new base.
         type: boolean
         default: true
+      docs-paths:
+        description: >-
+          The repo's documentation: files nothing its flake builds or tests
+          reads, as glob patterns relative to the repo's root ("README.md",
+          "docs/**", "**/*.md"; `*` stays within a directory, `**` crosses
+          them), space-separated, a leading `!` leaving a path out
+          ("!archive/**"). A PR that changes only these, renames and
+          deletions included, takes the docs lane: its run builds only
+          docs-checks and attests nothing, its check run is named `docs
+          only into BASE from FORK` (the commit the PR left BASE at), and
+          autoland runs none of the repo's proofs on it. Nothing under
+          .github/, no .nix file and no flake.lock is ever documentation
+          here, whatever this says: those define the gate itself. Which
+          paths a PR changes depends on its base, so the caller runs on
+          pull_request's `edited` too, for an edit that changes the base
+          (the template's does), and a PR retargeted gets its lane again.
+          Empty, every PR gets the whole gate.
+        type: string
+        default: ''
+      docs-checks:
+        description: >-
+          The flake's checks that read the documentation (a link checker,
+          say), by name, space-separated: what the docs lane builds. Empty,
+          it builds nothing.
+        type: string
+        default: ''
 jobs:
-  # With pr-gate off, whether this PR is one the train lands: its base is the
-  # default branch, compared as git compares refs. An expression's == ignores
-  # case, so `Main` would pass for `main`, and the train wouldn't take it.
-  train:
-    if: ${{ !inputs.pr-gate && github.event_name == 'pull_request' }}
+  # Which gate a PR gets: none here when the train lands it (pr-gate off,
+  # and its base is the default branch, compared as git compares refs: an
+  # expression's == ignores case, so `Main` would pass for `main`, and the
+  # train wouldn't take it), the docs lane when every path it changes is the
+  # repo's documentation (docs-paths), and otherwise the whole gate. Its
+  # check run names the base it chose against, and the docs lane's the
+  # commit the PR left that base at too: what a PR changes depends on both,
+  # so autoland counts a run only for the PR's base, and a docs lane only
+  # while the PR still leaves it there (its prs.py, LANE and DOCS_LANE). It
+  # runs on every PR, whatever the caller turns on, so a PR retargeted from
+  # a branch that has the docs lane to one that doesn't still gets a run
+  # autoland can tell is for its base.
+  lane:
+    if: ${{ github.event_name == 'pull_request' }}
+    name: lane into ${{ github.event.pull_request.base.ref }}
     runs-on: ${{ inputs.runner }}
     concurrency:
-      group: ${{ format('flake-check {0} train {1} {2} {3} {4} [{5}] {6}', github.workflow, inputs.runner, inputs.install-nix, inputs.eval-apart, inputs.pr-gate, inputs.build-skip, (github.event_name == 'pull_request' && (github.event.action != 'edited' || github.event.changes.base)) && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id)) }}
+      group: ${{ format('flake-check {0} lane {1} {2} {3} {4} [{5}] [{6}] [{7}] {8}', github.workflow, inputs.runner, inputs.install-nix, inputs.eval-apart, inputs.pr-gate, inputs.build-skip, inputs.docs-paths, inputs.docs-checks, (github.event_name == 'pull_request' && (github.event.action != 'edited' || github.event.changes.base)) && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id)) }}
       cancel-in-progress: true
-    permissions: {}
+    permissions:
+      contents: read
     outputs:
-      lands: ${{ steps.base.outputs.lands }}
+      gate: ${{ steps.base.outputs.lands == 'true' && 'train' || steps.paths.outputs.docs == 'true' && 'docs' || 'full' }}
+      fork: ${{ steps.paths.outputs.fork }}
     steps:
       - id: base
         shell: bash
         env:
+          PR_GATE: ${{ inputs.pr-gate }}
           BASE: ${{ github.event.pull_request.base.ref }}
           DEFAULT: ${{ github.event.repository.default_branch }}
         run: |
-          if [ "$BASE" = "$DEFAULT" ]; then lands=true; else lands=false; fi
-          echo "a PR to $BASE (the default branch is $DEFAULT): the train lands it: $lands"
+          if [ "$PR_GATE" = false ] && [ "$BASE" = "$DEFAULT" ]; then lands=true; else lands=false; fi
+          echo "a PR to $BASE (the default branch is $DEFAULT), pr-gate $PR_GATE: the train lands it: $lands"
           echo "lands=$lands" >>"$GITHUB_OUTPUT"
+      - if: steps.base.outputs.lands != 'true' && inputs.docs-paths != ''
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha }}
+          # Every branch's history, for where the PR left its base, but no
+          # file's contents beyond the head's: which paths changed is all
+          # this reads.
+          fetch-depth: 0
+          filter: blob:none
+      - id: paths
+        if: steps.base.outputs.lands != 'true' && inputs.docs-paths != ''
+        shell: bash
+        env:
+          BASE: ${{ github.event.pull_request.base.ref }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          DOCS: ${{ inputs.docs-paths }}
+        run: |
+          # The patterns as git pathspecs: globs, a `!` one an exclusion.
+          # One that starts with `:` would be pathspec magic, which this
+          # doesn't take, and only exclusions would match everything else.
+          set -f
+          patterns=($DOCS)
+          set +f
+          specs=()
+          kept=false
+          for p in "${patterns[@]}"; do
+            case $p in
+              :*) echo "::error title=docs-paths::$p: a pattern can't start with ':'"; exit 1 ;;
+              '!'*) specs+=(":(exclude)${p#!}") ;;
+              *) specs+=("$p"); kept=true ;;
+            esac
+          done
+          if [ "$kept" != true ]; then
+            echo "::error title=docs-paths::it names no documentation, only what to leave out"
+            exit 1
+          fi
+          # The PR's own changes, from where it left its base to its head:
+          # a rename or a copy as the path it left and the one it made, so
+          # a file moved out of the gate's reach still counts where it was.
+          tip=$(git rev-parse --verify "refs/remotes/origin/$BASE^{commit}")
+          if ! fork=$(git merge-base "$tip" "$HEAD_SHA"); then
+            echo "the whole gate: $HEAD_SHA shares no history with $BASE"
+            echo "docs=false" >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "fork=$fork" >>"$GITHUB_OUTPUT"
+          changed=$(git diff --name-only --no-renames -z "$fork" "$HEAD_SHA" | tr '\0' '\n')
+          # Those of them that are the repo's documentation, never what
+          # defines the gate: anything under .github/ (the workflows, and so
+          # the docs-paths they set), the Nix files and the flake's lock.
+          docs=$(git --glob-pathspecs diff --name-only --no-renames -z "$fork" "$HEAD_SHA" -- "${specs[@]}" \
+            ':(exclude).github/**' ':(exclude)**/*.nix' ':(exclude)**/flake.lock' | tr '\0' '\n')
+          if [ -n "$changed" ] && [ "$changed" = "$docs" ]; then
+            echo "the docs lane: every path $HEAD_SHA changes since $fork is documentation:"
+            echo "$changed"
+            echo "docs=true" >>"$GITHUB_OUTPUT"
+          else
+            echo "the whole gate: of what $HEAD_SHA changes since $fork, these aren't documentation:"
+            grep -vxF -f <(echo "$docs") <<<"$changed" || true
+            echo "docs=false" >>"$GITHUB_OUTPUT"
+          fi
+  # The whole gate, unless the train lands the PR or it takes the docs lane:
+  # anything else the lane job says, its failure included, is the whole gate.
+  # A cancelled lane job means the PR has a newer run (concurrency), which
+  # checks the head and base it has now: this one checks nothing.
   check:
-    # Unless the train lands it: anything but a clear yes, the train job's
-    # failure included, is a no. A cancelled one means the PR has a newer
-    # run (concurrency), which checks the head it has now: this one checks
-    # nothing.
-    needs: train
-    if: ${{ !cancelled() && needs.train.result != 'cancelled' && (inputs.pr-gate || github.event_name != 'pull_request' || needs.train.outputs.lands != 'true') }}
+    needs: lane
+    if: ${{ !cancelled() && needs.lane.result != 'cancelled' && needs.lane.outputs.gate != 'train' && needs.lane.outputs.gate != 'docs' }}
     runs-on: ${{ inputs.runner }}
     concurrency:
-      group: ${{ format('flake-check {0} check {1} {2} {3} {4} [{5}] {6}', github.workflow, inputs.runner, inputs.install-nix, inputs.eval-apart, inputs.pr-gate, inputs.build-skip, (github.event_name == 'pull_request' && (github.event.action != 'edited' || github.event.changes.base)) && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id)) }}
+      group: ${{ format('flake-check {0} check {1} {2} {3} {4} [{5}] [{6}] [{7}] {8}', github.workflow, inputs.runner, inputs.install-nix, inputs.eval-apart, inputs.pr-gate, inputs.build-skip, inputs.docs-paths, inputs.docs-checks, (github.event_name == 'pull_request' && (github.event.action != 'edited' || github.event.changes.base)) && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id)) }}
       cancel-in-progress: true
     permissions:
       contents: read
@@ -105,7 +208,8 @@ jobs:
       id-token: write
       attestations: write
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - &checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # The check only reads the tree, and on a self-hosted runner a token
           # left in .git/config outlives the job.
@@ -118,7 +222,8 @@ jobs:
       # the job starts. GitHub's merge commit for the run (github.sha) is the
       # base as it was when the event fired, which a run that waited in a
       # runner's queue, or a re-run, would test long after its base moved on.
-      - id: merge
+      - &merge
+        id: merge
         if: github.event_name == 'pull_request'
         shell: bash
         env:
@@ -530,6 +635,40 @@ jobs:
           subject-path: ${{ steps.subject.outputs.path }}
           predicate-type: https://github.com/FieldmouseWorks/Conary/blob/main/docs/ci-attestation.md#v1
           predicate-path: ${{ runner.temp }}/conary/predicate.json
+  # The docs lane: nothing the PR changes is anything the flake builds or
+  # tests reads, so only the checks that read the documentation are built,
+  # by name, on the head merged with its base as the whole gate checks it,
+  # and nothing else is evaluated. It attests nothing: it ran no gate on the
+  # tree. Its check run's name is how autoland knows the head took it, for
+  # which base, and from which commit on it: the changes the lane judged.
+  docs:
+    needs: lane
+    if: ${{ !cancelled() && needs.lane.outputs.gate == 'docs' }}
+    name: docs only into ${{ github.event.pull_request.base.ref }} from ${{ needs.lane.outputs.fork }}
+    runs-on: ${{ inputs.runner }}
+    concurrency:
+      group: ${{ format('flake-check {0} docs {1} {2} {3} {4} [{5}] [{6}] [{7}] {8}', github.workflow, inputs.runner, inputs.install-nix, inputs.eval-apart, inputs.pr-gate, inputs.build-skip, inputs.docs-paths, inputs.docs-checks, (github.event_name == 'pull_request' && (github.event.action != 'edited' || github.event.changes.base)) && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id)) }}
+      cancel-in-progress: true
+    permissions:
+      contents: read
+    steps:
+      - *checkout
+      - *merge
+      - if: inputs.install-nix && inputs.docs-checks != ''
+        uses: cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b # v31.11.3
+      - id: build
+        shell: bash
+        env:
+          CHECKS: ${{ inputs.docs-checks }}
+        run: |
+          if [ -z "$CHECKS" ]; then
+            echo "no check reads the documentation, so there's nothing to build"
+            exit 0
+          fi
+          system=$(nix config show system)
+          targets=()
+          for c in $CHECKS; do targets+=(".#checks.$system.$c"); done
+          nix build -L --no-link --keep-going "${targets[@]}"
   # A PR's commits as GitHub sees them: each one unsigned, or signed by a key
   # GitHub matches to its committer. One signed by a key that isn't its
   # committer's (a session's own key on a commit given someone else's name and
@@ -538,7 +677,7 @@ jobs:
     if: github.event_name == 'pull_request'
     runs-on: ${{ inputs.runner }}
     concurrency:
-      group: ${{ format('flake-check {0} commits {1} {2} {3} {4} [{5}] {6}', github.workflow, inputs.runner, inputs.install-nix, inputs.eval-apart, inputs.pr-gate, inputs.build-skip, (github.event_name == 'pull_request' && (github.event.action != 'edited' || github.event.changes.base)) && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id)) }}
+      group: ${{ format('flake-check {0} commits {1} {2} {3} {4} [{5}] [{6}] [{7}] {8}', github.workflow, inputs.runner, inputs.install-nix, inputs.eval-apart, inputs.pr-gate, inputs.build-skip, inputs.docs-paths, inputs.docs-checks, (github.event_name == 'pull_request' && (github.event.action != 'edited' || github.event.changes.base)) && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id)) }}
       cancel-in-progress: true
     permissions:
       contents: read

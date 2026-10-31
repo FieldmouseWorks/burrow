@@ -21,6 +21,7 @@ import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime
 
@@ -204,6 +205,14 @@ def gh(*args, input=None, check=True):
         return json.loads(out) if out else ""
     except ValueError:
         return out
+
+
+def compare(repo, base, head):
+    """The REST path of GitHub's compare of head with base, each a branch's
+    name or a commit. Each goes in quoted whole, which GitHub decodes once:
+    any name git allows (a `#`, `%`, `?` or slash in it) is the branch of
+    exactly that name, never cut short or read as another's."""
+    return f"repos/{repo}/compare/{urllib.parse.quote(base, safe='')}...{urllib.parse.quote(head, safe='')}"
 
 
 def said(e):
@@ -514,13 +523,14 @@ def project_dir(repo):
 
 
 NOW_CALLED = """query($owner: String!, $name: String!) {
-  repository(owner: $owner, name: $name) { id nameWithOwner createdAt }
+  repository(owner: $owner, name: $name) { id: databaseId node: id nameWithOwner createdAt }
 }"""
 
 
 def github_now(repo):
     """What GitHub answers repo's name with, following a rename or transfer:
-    {"id", "nameWithOwner", "createdAt"}, in the ids discover() has; None when
+    {"id", "node", "nameWithOwner", "createdAt"}, its id the databaseId discover()
+    has, node its node id, for the holds retiring() kept by that; None when
     it won't say. Asked as its owner's installation, then as each owner's: the
     App may be long gone from the owner a repo moved away from, and only the
     one it moved to can see a private repo's new name."""
@@ -548,15 +558,19 @@ def kept_state(repo):
 
 
 def replaced(st, now):
-    """Whether settings the steward kept under a name were another repo's than
-    `now` ("id", and "created" or "createdAt"): GitHub hands a deleted repo's
-    name to the next one. By GitHub's id; for settings kept before the
-    steward kept ids, when they were set before it was made, or in the second
-    it was (createdAt has no finer grain)."""
+    """Whether what the steward kept under a name was another repo's than
+    `now` ("id", its databaseId, and "created" or "createdAt"): GitHub hands
+    a deleted repo's name to the next one. By the databaseId kept, whether or
+    not that repo ever got its settings. For settings kept before the steward
+    kept databaseIds, when they were set before it was made, or in the second
+    it was (createdAt has no finer grain): restart runs before anything
+    settles a repo, so no settings of the old one's can be newer than the new
+    one. With neither, nothing says which repo it was. A node id kept before
+    says nothing either: GitHub has changed their format."""
+    if "databaseId" in st:
+        return st["databaseId"] != now["id"]
     if "settings" not in st:
         return False
-    if "id" in st:
-        return st["id"] != now["id"]
     return st["settings"] < ts(now.get("created") or now["createdAt"]) + 1
 
 
@@ -597,13 +611,14 @@ def retiring(repo):
     """Whether repo is the one that took on a deleted repo's name whose clones
     and jobs a full pass hasn't finished retiring: its jobs wait for that. By
     GitHub's id, so it follows that repo to any later name, and not to whatever
-    takes up one it left. Asked only while something's being retired; one
+    takes up one it left: its databaseId, or the node id of a hold kept before
+    the steward knew repos by databaseId. Asked only while something's being retired; one
     GitHub won't say about waits too."""
     pending = load(RETIRING_FILE, {})
     if not pending:
         return False
     now = github_now(repo)
-    return not now or any(x["id"] == now["id"] for x in pending.values())
+    return not now or any(x["id"] in (now["id"], now["node"]) for x in pending.values())
 
 
 def destination(repo):

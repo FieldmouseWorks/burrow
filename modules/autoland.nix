@@ -738,9 +738,11 @@ in
         machine rather than in CI, `{ "<check>" = "<how to run it and record
         its verdict>"; }`: once a settled PR waits on nothing else, one
         Claude job a head runs them on that commit and records each verdict,
-        a failure as a failure; a new head stops the last head's job, unless
-        it's building what the new head's proof wants), proofBuilds (checks
-        that are a build and nothing more: `{ "<check>" =
+        a failure as a failure; none on a head the shared CI took in its docs
+        lane, its flake-check.yml's docs-paths, for the PR's base and the
+        commit it leaves that base at; a new head stops the last head's job,
+        unless it's building what the new head's proof wants), proofBuilds
+        (checks that are a build and nothing more: `{ "<check>" =
         "checks.x86_64-linux.<name>"; }`, the flake attribute whose build is
         the check's verdict. The steward builds them itself, ahead of the
         proofJobs and with no Claude job: it works out the attribute's
@@ -751,12 +753,12 @@ in
         isn't built again, its verdict taken from the store, saying so and
         naming the derivation; one whose outputs are being built by a proof
         already running skips the line and holds no slot. A check named in
-        both is a build), proofSlots (how many of those proofs, jobs and
-        builds, the repo may have building at once, for proofs that take the
-        whole machine: the rest wait their turn, those labelled
-        `labels.first` first, then the oldest PR first; a job running a
-        check without a build of its own holds a slot of its own; unset, no
-        limit), keepBranches
+        both is a build; none is built on a head in the docs lane),
+        proofSlots (how many of those proofs, jobs and builds, the repo may
+        have building at once, for proofs that take the whole machine: the
+        rest wait their turn, those labelled `labels.first` first, then the
+        oldest PR first; a job running a check without a build of its own
+        holds a slot of its own; unset, no limit), keepBranches
         (more branch globs the cleanup never touches in this repo, on top of
         the machine's, for branches a repo keeps as evidence), codex (false:
         Codex leaves this repo alone, and none of it goes to it), skipPaths (more path regexes the reviewers never read in

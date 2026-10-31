@@ -17,10 +17,11 @@ CI still needs a runner on the machine (burrow#236).
 
 A repo made under the name of one that was deleted is a new repo too, though
 GitHub gives it the same name, in any case, and so is one renamed or moved
-into a name another repo had: the steward knows it by GitHub's id for it,
-which it keeps with the settings (for settings kept before it kept ids, by
-being made after the steward last settled a repo of that name, or in the
-same second), on the first pass that reads it, kicked or full. Before
+into a name another repo had: the steward knows it by GitHub's databaseId
+for it, the number GitHub keeps for a repo whatever it's called, which the
+steward keeps with the repo's settings (for settings kept before it kept
+them, by being made after the steward last settled a repo of that name, or
+in the same second), on the first pass that reads it, kicked or full. Before
 anything acts on it, every clone of the name in `projectsDir` is moved aside
 under a hidden name, its own included: which repo a clone is of can't be
 told. Then proj-inbox forgets the repo's issues (`proj-inbox forget`), once

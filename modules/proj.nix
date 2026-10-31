@@ -53,9 +53,10 @@ let
       WAITS=${lib.escapeShellArg (lib.optionalString watchdog waits)}
       STALL_QUEUED=${toString (cfg.stallAfterMinutes * 60)}
       GRACE=600
+      RESUME_GRACE=120
       APPS=${lib.escapeShellArg (lib.concatStrings (lib.mapAttrsToList (name: app: "${name}=${app.envFile}\n") config.burrow.github.apps))}
       SCRATCH=${lib.escapeShellArg config.burrow.scratchDir}
-    '' + builtins.readFile ./proj/pick.sh + builtins.readFile ./proj/line.sh + builtins.readFile ./proj/waits.sh
+    '' + builtins.readFile ./proj/pick.sh + builtins.readFile ./proj/line.sh + builtins.readFile ./proj/waits.sh + builtins.readFile ./proj/await.sh
       + builtins.readFile ./proj/scratch.sh + builtins.readFile ./proj/run.sh + builtins.readFile ./proj/proj.sh;
   };
 

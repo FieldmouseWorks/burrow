@@ -122,36 +122,6 @@ inputs:
             description = "The Claude Code build, here and in the agent sandboxes.";
           };
 
-          claude.memory = {
-            high = mkOption {
-              type = types.str;
-              default = "infinity";
-              example = "24G";
-              description = ''
-                Where every Claude this machine runs on its own (proj jobs, Remote
-                Control servers and their sessions) starts being slowed and pushed
-                to give memory back: claude.slice's MemoryHigh. None by default:
-                it slows a session along with the jobs while the machine has
-                memory to spare (on remi, sessions stalled 96% of the time behind
-                it with 27.8G free). Who gives memory back when the machine runs
-                short is the kernel's call, with what burrow.ops and
-                burrow.remoteControl.memoryLow keep back.
-              '';
-            };
-            max = mkOption {
-              type = types.str;
-              default = "infinity";
-              example = "30G";
-              description = ''
-                The most they may hold between them (claude.slice's MemoryMax),
-                none of it in swap. None by default: proj's jobs are what the
-                kernel kills first (OOMScoreAdjust 500) and what systemd-oomd
-                watches (burrow.ops.oomd), so a ceiling here only kills a Claude
-                while memory sits free.
-              '';
-            };
-          };
-
           claude.machineMd = mkOption {
             type = types.lines;
             default = "";
@@ -182,19 +152,11 @@ inputs:
 
         # In the user's systemd manager, where proj jobs (claude-jobs.slice)
         # and Remote Control servers (claude-rc.slice) run. No limit of its
-        # own unless burrow.claude.memory sets one: the kernel shares memory
-        # out, the servers keep theirs back when the machine runs short
-        # (burrow.remoteControl.memoryLow), and the jobs are what it gives up.
-        config.systemd.user.slices.claude = {
-          description = "Every Claude that runs on its own";
-          sliceConfig = {
-            MemoryHigh = config.burrow.claude.memory.high;
-            MemoryMax = config.burrow.claude.memory.max;
-          } // lib.optionalAttrs (config.burrow.claude.memory.max != "infinity") {
-            # Swap would let them grow past it without ever reaching it.
-            MemorySwapMax = 0;
-          };
-        };
+        # own: the kernel shares memory out, the servers keep theirs back
+        # when the machine runs short (burrow.remoteControl.memoryLow), and
+        # the jobs are what it gives up. A ceiling or a throttle here killed
+        # and stalled Claudes on remi while memory sat free (10-30, 10-31).
+        config.systemd.user.slices.claude.description = "Every Claude that runs on its own";
 
         # The git the machine and burrow's units run. curl 8.23 strips the
         # credentials from the URL it reports, and git 2.54 takes that for a

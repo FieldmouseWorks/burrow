@@ -695,7 +695,7 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
         return
 
     machine = C.machine(rc)  # the checks a machine runs, not CI, and how
-    ci, ci_names = ci_state(pr, machine)
+    ci, ci_names, docs = ci_state(pr, machine, moved := moved_from(repo, pr, st), repo)
     # A build's verdicts GitHub took only some of: the rest go up whatever
     # CI says now, so a failure it took doesn't leave the others unposted
     # behind a red PR. Their statuses kick the pass that sees them. Only
@@ -721,7 +721,7 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
             latest[who] = r["state"]
     changes = [w for w, s in latest.items() if s == "CHANGES_REQUESTED"]
     dep = dep_kind(pr)
-    gate = one_way(pr, rc, moved_from(repo, pr, st))
+    gate = one_way(pr, rc, moved)
     renovate = pr["headRefName"].startswith("renovate/")
     proof_only = ci == "pending" and bool(ci_names) and all(c in machine for c in ci_names)
     # A minor dependency PR a Claude job fixed carries Claude's code, which no
@@ -871,7 +871,7 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
                else f"it went past the review-round limit ({rounds} rounds with findings)",
                PAST_LIMIT if capped else REVIEWED)
     else:
-        land_now(f"{' and '.join(V.NAMES[r] for r in live)} found nothing on this commit, every thread is resolved, CI is green")
+        land_now(f"{' and '.join(V.NAMES[r] for r in live)} found nothing on this commit, every thread is resolved, CI is green{' (docs only)' * docs}")
 
     open_a_day(our_status(pr)[1] or "unsettled")
     save(key, st)

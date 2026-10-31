@@ -8,6 +8,10 @@
 # --unstick takes a slot of its own, every turn of it, while every other one
 # is held and turns wait in line, and waits only for another --unstick turn
 # (one made so later, by proj unstick, too: waiting, or at its next turn),
+# that proj withdraw ends a job only while its turn waits for a slot (one
+# that has started, or ended, it leaves be, saying so, and one from an older
+# proj it refuses), and that a turn takes a free slot only once its job's
+# lock, which withdraw looks under, is free,
 # that a job whose turn has ended frees its slot, that one stopped after
 # its answer with work in the background has the rest of that run stopped,
 # hears so once and answers again (the turn ending as its last run did, its
@@ -19,8 +23,9 @@
 # while the last turn's unit is still ending waits for it before its turn is
 # written, that every turn says what comes next (proj await, ask or done), one
 # that doesn't hearing so once and, still silent, being the stall watchdog's
-# at once (as one that ended in a failure is, a turn in line or running to its
-# deadline, and an await to its own, the watchdog kicked as they change),
+# at once (one that ended in a failure a grace from its end, even killed with
+# a log hours old, a turn in line or running to its deadline, and an await to
+# its own, the watchdog kicked as they change),
 # while a question, a finished job, a stopped one and an --owned job's end
 # aren't, that a job run --app acts as its App every turn, whatever the login
 # sets and if the App goes while it waits, or not at all, and that a job
@@ -238,6 +243,36 @@ pkgs.testers.runNixOSTest {
         machine.wait_until_succeeds(f"su - dev -c 'proj state {c}' | grep -x done", timeout=120)
         assert started(d) < started(c), (started(d), started(c))
 
+    with subtest("proj withdraw ends a job only while its turn waits for a slot"):
+        a = proj('run web "sleep 600"')
+        b = proj('run web "sleep 600"')
+        for j in (a, b):
+            machine.wait_until_succeeds(f"su - dev -c 'proj state {j}' | grep -x running", timeout=120)
+        c = proj('run web "sleep 1"')
+        d = proj('run web "sleep 1"')
+        time.sleep(5)
+        assert [state(j) for j in (c, d)] == ["queued", "queued"], [state(j) for j in (c, d)]
+        assert proj(f"withdraw {a}") == "running" and state(a) == "running", state(a)
+        # A turn from an older proj never says it may be withdrawn, and
+        # isn't: it might take its slot unlocked.
+        machine.succeed(f"mv /data/dev/jobs/{c}/1.withdrawable /tmp/withdrawable")
+        machine.fail(f"su - dev -c 'proj withdraw {c}'")
+        assert state(c) == "queued", state(c)
+        machine.succeed(f"mv /tmp/withdrawable /data/dev/jobs/{c}/1.withdrawable")
+        assert proj(f"withdraw {c}") == "withdrawn"
+        assert state(c) not in ("queued", "running") and c not in waits(), (state(c), waits())
+        assert proj(f"withdraw {c}") == "over"
+        # d next in line, its job's lock held as withdraw would hold it: a's
+        # slot comes free, and d waits for the lock to say it has it.
+        machine.succeed(f"su - dev -c 'touch /data/dev/jobs/{d}/lock'")
+        machine.execute(f"su - dev -c 'flock /data/dev/jobs/{d}/lock sleep 30' >/dev/null 2>&1 &")
+        machine.wait_until_fails(f"flock -n /data/dev/jobs/{d}/lock true", timeout=30)
+        proj(f"stop {a}")
+        time.sleep(8)
+        assert state(d) == "queued", state(d)
+        machine.wait_until_succeeds(f"su - dev -c 'proj state {d}' | grep -x done", timeout=120)
+        proj(f"stop {b}")
+
     with subtest("a job whose turn has ended frees its slot"):
         a = proj('run web "linger 600"')
         machine.wait_until_succeeds(f"su - dev -c 'proj state {a}' | grep -x done", timeout=120)
@@ -409,12 +444,29 @@ pkgs.testers.runNixOSTest {
         machine.wait_until_succeeds(f"su - dev -c 'proj state {o2}' | grep -x error", timeout=120)
         waits(lambda w: o not in w and o2 not in w)
         machine.succeed("rm /tmp/silent")
-        # Anyone else's failure is a stall at once: nothing resumes it.
+        # Anyone else's failure is a stall once nothing has resumed it.
         f = proj("run web fail")
         machine.wait_until_succeeds(f"su - dev -c 'proj state {f}' | grep -x error", timeout=120)
-        waits(lambda w: w.get(f, {}).get("phase") == "turn 1 ended (error), and nothing resumes it")
+        waits(lambda w: w.get(f, {}).get("phase") == "turn 1 ended (error), and nothing resumed it")
         proj(f"stop {f}")
         assert f not in waits(), waits()
+        # Killed whole with nothing written, as systemd-oomd does, its log
+        # long quiet: the grace counts from the kill, which _ended saw from
+        # outside the cgroup.
+        k = proj('run web "sleep 600"')
+        machine.wait_until_succeeds(f"su - dev -c 'proj state {k}' | grep -x running", timeout=120)
+        machine.succeed(f"su - dev -c 'touch -d \"1 hour ago\" /data/dev/jobs/{k}/1.jsonl /data/dev/jobs/{k}/prompt.1'")
+        before = int(machine.succeed("date +%s"))
+        machine.succeed(f"systemctl --user -M dev@ kill --kill-whom=all --signal=KILL '{unit(k)}'")
+        w = waits(lambda w: "nothing resumed it" in w.get(k, {}).get("phase", ""))[k]
+        assert w["since"] >= before and w["due"] == w["since"] + 120, w
+        machine.succeed(f"test -e /data/dev/jobs/{k}/1.ended")
+        # And the next turn, running, has no end yet.
+        machine.succeed(f"su - dev -c 'echo s >/data/dev/jobs/{k}/session'")
+        proj(f'reply {k} "sleep 600"')
+        machine.wait_until_succeeds(f"su - dev -c 'proj state {k}' | grep -x running", timeout=120)
+        machine.fail(f"test -e /data/dev/jobs/{k}/2.ended")
+        proj(f"stop {k}")
 
     with subtest("the watchdog hears of a turn in line and one running, each to its deadline"):
         machine.succeed("truncate -s 0 /tmp/kicks")

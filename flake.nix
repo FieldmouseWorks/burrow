@@ -317,6 +317,17 @@
           ${self.nixosConfigurations.example.config.systemd.services.burrow-watchdog.serviceConfig.ExecStart} status
           touch $out
         '';
+        # Claude Code watches /etc/claude-code and follows what it finds: a
+        # symlink there has it walking the Nix store for as long as it runs.
+        claude-etc = let
+          etc = self.nixosConfigurations.example.config.environment.etc;
+          names = builtins.filter (pkgs.lib.hasPrefix "claude-code/") (builtins.attrNames etc);
+          links = builtins.filter (name: etc.${name}.mode == "symlink") names;
+        in pkgs.runCommand "claude-etc-check" { } ''
+          ${pkgs.lib.optionalString (names == [ ]) ''echo "no claude-code files in /etc"; exit 1''}
+          ${pkgs.lib.optionalString (links != [ ]) ''echo "symlinks into the store: ${toString links}"; exit 1''}
+          touch $out
+        '';
         # The steward's tools reach a pass however it's started: by hand or
         # a Claude job (`autoland-steward kick OWNER/REPO`), with no openssl,
         # gh or proj of its own, gets them from the wrapper, ahead of its own
@@ -781,6 +792,14 @@
         # own token, its audience the digest of the statement kept beside it.
         attestation = pkgs.runCommand "attestation-check" { nativeBuildInputs = [ (pkgs.python3.withPackages (p: [ p.pyyaml ])) pkgs.git pkgs.jq ]; } ''
           python3 -I ${./tests/attestation.py} ${./.github/workflows/flake-check.yml}
+          touch $out
+        '';
+        # Which gate the shared CI gives a PR (flake-check.yml's lane job),
+        # its own scripts on real repos: the train's PRs none, documentation
+        # only the docs lane, and never anything that defines the gate.
+        lane = pkgs.runCommand "lane-check" { nativeBuildInputs = [ (pkgs.python3.withPackages (p: [ p.pyyaml ])) pkgs.git ]; } ''
+          python3 -I ${./tests/lane.py} ${./.github/workflows/flake-check.yml} ${./modules/autoland/prs.py} ${./.github/workflows/flake.yml} \
+            ${./templates/project/.github/workflows/flake.yml}
           touch $out
         '';
         # The shared CI's merge step (flake-check.yml), its own script on
