@@ -10,7 +10,7 @@ import sys
 import threading
 import time
 
-from harness import (FAIL, REAL_TOKEN, T0, WROTE, C, P, R, S, T, V, clean, fresh_pr_state, judgment, merges, mkpr, run, said, sh,
+from harness import (FAIL, REAL_TOKEN, T0, WROTE, B, C, P, R, S, T, V, clean, fresh_pr_state, judgment, merges, mkpr, run, said, sh,
                      stand_in, tmp)
 from harness import head as HEAD
 
@@ -142,10 +142,10 @@ C._installs.clear()
 # git to GitHub (a branch deleted) goes with gh as its only credential
 # helper, and the App's token for that repo's owner in its environment.
 RAN = []
-run_kept = R.subprocess.run
-R.subprocess.run = lambda args, **k: RAN.append((args, k.get("env"))) or subprocess.CompletedProcess(args, 0, "", "")
-R.delete_branch("sam/r", "old", "1" * 40)
-R.subprocess.run = run_kept
+run_kept = B.subprocess.run
+B.subprocess.run = lambda args, **k: RAN.append((args, k.get("env"))) or subprocess.CompletedProcess(args, 0, "", "")
+B.delete_branch("sam/r", "old", "1" * 40)
+B.subprocess.run = run_kept
 push, env = next((a, e) for a, e in RAN if "push" in a)
 assert push[push.index("push") - 4:push.index("push")] == list(C.GIT_AUTH), push
 assert env["GH_TOKEN"] == "ghs_app_sam", env.get("GH_TOKEN")

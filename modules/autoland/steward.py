@@ -25,15 +25,16 @@ event reports):
   3. Delete the branches whose tip is already in the default branch or a
      closed PR's head, and archive the stale unmerged ones under
      refs/archive before deleting them too, as a push, a PR closing or
-     the default moving changes them or the wait they were given ends.
+     the default moving changes them or the wait they were given ends
+     (branches.py).
   4. Read each repo's Renovate dashboard: what sits on it too long, short
      of a PR, goes to a Claude job (dashboard.py); and its quarantined
      flaky tests, each to a Claude job that fixes it (flakes.py).
   5. Keep one issue up to date with everything waiting for the owner, and
      one with what the pipeline is stuck on, for a Claude job (repos.py).
 
-`autoland-steward kick OWNER/REPO` is a pass over that repo alone (1, 2, 4
-and 5), run by its autoland@ unit (only that holds the App's key), the
+`autoland-steward kick OWNER/REPO` is a pass over that repo alone (1 to
+5), run by its autoland@ unit (only that holds the App's key), the
 one burrow-events starts within seconds of what changes it: a webhook
 delivery (the App's own, for a repo just made), a Claude job's turn
 ending, a reviewer's answer coming back, or a wait the last pass booked
@@ -67,6 +68,7 @@ import fcntl
 import os
 import sys
 
+import branches as B
 import common as C
 import dashboard as D
 import flakes as F
@@ -252,7 +254,7 @@ def run_pass(kick):
                         waits.failed(repo)
                         C.wake(repo, C.NOW + 5 * MIN)  # ends: waits.failed watches the repo
                 if CFG["cleanBranches"]:
-                    R.watch_branches(r, in_use, mine, full=kick is None)
+                    B.watch_branches(r, in_use, mine, full=kick is None)
             except Exception as e:
                 log(f"{repo}: {e}")
                 waits.failed(repo)
