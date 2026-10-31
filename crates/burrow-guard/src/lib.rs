@@ -16,6 +16,7 @@
 pub mod config;
 mod doors;
 mod push;
+mod shell;
 mod undo;
 
 use std::path::{Path, PathBuf};

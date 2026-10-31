@@ -415,6 +415,61 @@ fn a_push_that_cant_rewrite_a_shared_branch_doesnt_ask() {
     }
 }
 
+// A push's words are the shell's: a quoted or escaped option value is one
+// word, whatever is in it, so it can't take a flag or refspec that follows,
+// or stop the push at a `;` inside it.
+#[test]
+fn a_push_is_read_word_by_word_as_the_shell_splits_it() {
+    let b = Box::new();
+    let main = clone_on("main");
+    // A feature branch tracking another: only a refspec can name main.
+    let work = clone_tracking("work", "feature");
+    let (m, w) = (main.path(), work.path());
+    for cmd in [
+        "git push -f origin -o 'ci -o' HEAD:main",
+        r#"git push -f origin -o "ci -o" HEAD:main"#,
+        r"git push -f origin -o ci\ -o HEAD:main",
+        "git push -f origin -o'ci -o' HEAD:main",
+        "git push -fo 'ci -o' origin HEAD:main",
+        "git push -o 'x -o' -f origin main",
+        "git push --push-option 'x -o' -f origin main",
+        "git push --receive-pack 'git receive-pack' -f origin main",
+        "git push --exec 'git receive-pack' -f origin main",
+        "git push --repo 'origin' -f origin main",
+        "git push -f origin -o 'a;b' HEAD:main",
+        "git push -f origin -o 'a|b' HEAD:main",
+        "git push -f origin -o 'a && b' HEAD:main",
+        "git push -f origin -o \"a\nb\" HEAD:main",
+        // Pushes inside what another command runs.
+        r#"bash -c "git push -f origin -o 'ci -o' HEAD:main""#,
+        "sh -c 'cd x; git push -f origin main'",
+        "x=$(git push -f origin main)",
+        "echo `git push -f origin main`",
+        r#"echo "$(git push -f origin main)""#,
+        // git's own options, and git by its path.
+        "git --no-pager push -f origin main",
+        "git -c 'user.name=A B' push -f origin main",
+        "/usr/bin/git push -f origin main",
+        "git push -f origin main 2>&1 | tail",
+    ] {
+        assert_eq!(
+            b.check(cmd, w),
+            Some(format!("Force-push or delete of 'main' {SHARED}")),
+            "{cmd:?}"
+        );
+    }
+    // A refspec it was given is what it pushes, however its options are
+    // quoted: the branch checked out (main) doesn't count then.
+    for cmd in [
+        "git push -f origin -o 'x -o' feature",
+        "git push -f -o 'a b' origin feature",
+        "git push -o '-f' origin main",
+        "git push -f origin feature > main",
+    ] {
+        assert_eq!(b.check(cmd, m), None, "{cmd:?}");
+    }
+}
+
 #[test]
 fn firmware_and_robot_calls_with_no_undo_ask() {
     let b = Box::with_datasets(&[]);

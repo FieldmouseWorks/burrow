@@ -5,59 +5,60 @@
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::LazyLock;
 
-use regex::Regex;
-
-use crate::pattern;
+use crate::shell;
 
 /// Branches other clones build on. HEAD and @ are whatever is checked out,
 /// which may be one of them.
 const SHARED: [&str; 5] = ["main", "master", "trunk", "HEAD", "@"];
 
-/// `git [-C DIR | -c NAME=VALUE]... push ARGS`, ARGS up to the end of the
-/// line or the next `;`, `&` or `|`.
-static PUSH: LazyLock<Regex> = LazyLock::new(|| {
-    pattern(
-        r"git(?P<opts>([[:space:]]+-[Cc][[:space:]]+[^[:space:];&|]+)*)[[:space:]]+push(?P<args>[[:space:]][^;&|]*)?",
-    )
-});
-
 /// The question for each push in `cmd` that can rewrite or delete a shared
 /// branch; `cwd` is where the command runs.
 pub fn asks(cmd: &str, cwd: &Path, git: &Path) -> Vec<String> {
-    let mut asks = Vec::new();
-    for line in cmd.split('\n') {
-        for m in PUSH.captures_iter(line) {
-            let at = dir(cwd, m.name("opts").map_or("", |o| o.as_str()));
-            let push = Push::read(&words(m.name("args").map_or("", |a| a.as_str())));
-            asks.extend(push.ask(&at, git));
-        }
-    }
-    asks
-}
-
-/// A push's words, quotes and backslashes taken off: `"+main"` is `+main`.
-fn words(args: &str) -> Vec<String> {
-    args.split_whitespace()
-        .map(|w| {
-            w.chars()
-                .filter(|c| !matches!(c, '\'' | '"' | '\\'))
-                .collect()
-        })
+    pushes(cmd, cwd)
+        .into_iter()
+        .filter_map(|(at, push)| push.ask(&at, git))
         .collect()
 }
 
-/// Where git runs: `cwd`, then each `-C DIR` in turn, as git takes them.
-fn dir(cwd: &Path, opts: &str) -> PathBuf {
-    let mut dir = cwd.to_path_buf();
-    let mut words = words(opts).into_iter();
-    while let (Some(opt), Some(value)) = (words.next(), words.next()) {
-        if opt == "-C" {
-            dir = dir.join(value);
+/// Each `git … push …` in `text`, with where it runs, read word by word as
+/// the shell splits them. A word with a command line in it (a script for
+/// `bash -c`, `ssh` or `$(…)`) is read the same way, since it may run.
+fn pushes(text: &str, cwd: &Path) -> Vec<(PathBuf, Push)> {
+    let mut found = Vec::new();
+    for words in shell::commands(text) {
+        for (i, word) in words.iter().enumerate() {
+            if word.contains(char::is_whitespace) {
+                found.extend(pushes(word, cwd));
+            }
+            if (word == "git" || word.ends_with("/git"))
+                && let Some(push) = after_git(cwd, &words[i + 1..])
+            {
+                found.push(push);
+            }
         }
     }
-    dir
+    found
+}
+
+/// What follows `git`, if it's a push: git's own options (each `-C DIR`
+/// taken in turn for where it runs), then `push` and its words.
+fn after_git(cwd: &Path, words: &[String]) -> Option<(PathBuf, Push)> {
+    let mut at = cwd.to_path_buf();
+    let mut words = words.iter();
+    while let Some(w) = words.next() {
+        match w.as_str() {
+            "push" => return Some((at, Push::read(words.as_slice()))),
+            "-C" => at = at.join(words.next()?),
+            // Options whose value is the next word.
+            "-c" | "--git-dir" | "--work-tree" | "--namespace" | "--config-env" => {
+                words.next();
+            }
+            w if w.starts_with('-') => {}
+            _ => return None,
+        }
+    }
+    None
 }
 
 #[derive(Debug, Default)]
