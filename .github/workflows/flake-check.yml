@@ -39,9 +39,14 @@ on:
           in a nix process of its own, then build the checks, rather than the
           checks in one process and then everything in one `nix flake check`.
           For a flake whose evaluations don't fit in its runner's memory
-          together, even with no build beside them. It knows only those
-          outputs (and legacyPackages, which the gate never evaluates), and
-          fails a flake with any other, or with a nixConfig.
+          together, even with no build beside them. It also checks nixosModules
+          and templates as nix flake check does, and forces lib and the outputs
+          nix flake check doesn't know, warning of these; it fails a flake with
+          an output nix flake check checks some other way (apps, overlays,
+          hydraJobs, bundlers, the old default* ones), or with a nixConfig.
+          It evaluates one snapshot of the checkout throughout, so it fails a
+          flake whose lock file needs changing, where nix flake check would
+          write it.
         type: boolean
         default: false
       pr-gate:
@@ -136,21 +141,44 @@ jobs:
           APART: ${{ inputs.eval-apart }}
         run: |
           # eval-apart: what `nix flake check` checks of the outputs it knows,
-          # from the flake as locked and evaluated purely, as nix flake check
-          # evaluates it. With no entry, the plan: the outputs it doesn't know,
-          # and each derivation it evaluates and whether it's a check to build.
-          # With an entry's index, that one: its derivation, or for a NixOS
-          # system nothing, once its toplevel is a derivation. With builds,
-          # every check to build, as a list: in an attrset nix-instantiate
+          # given the flake's outputs as `nix eval` evaluates the checkout's
+          # snapshot (purely, with the same source and self as nix flake
+          # check, a checkout with uncommitted changes included). With no
+          # entry, the plan: the outputs it can't check or doesn't know, and
+          # each derivation it evaluates, whether it's a check and whether
+          # it's a NixOS system. With an entry's index, that one: for a NixOS
+          # system nothing, once its toplevel is a derivation; for the rest
+          # its derivation's path, once it's a derivation as nix flake check
+          # reads one (a name that's a string without context) with a drvPath
+          # that's a store derivation's path. With builds, every check to
+          # build but those in skip, as a list: in an attrset nix-instantiate
           # passes over any name that isn't an identifier, a.b or "sp ace",
           # without a word.
           read -r -d '' plan <<'EOF' || true
-          { url, system, skip, entry ? null, builds ? false }:
+          { system, entry ? null, builds ? false, skip ? "" }: outputs:
           let
-            flake = builtins.getFlake url;
-            inherit (flake) outputs;
-            known = [ "checks" "packages" "devShells" "formatter" "nixosConfigurations" "legacyPackages" ];
+            known = [ "checks" "packages" "devShells" "formatter" "nixosConfigurations" "legacyPackages" "nixosModules" "templates" ];
+            # What nix flake check checks that this doesn't.
+            refused = [ "apps" "defaultPackage" "defaultApp" "devShell" "overlay" "overlays" "nixosModule" "hydraJobs" "defaultTemplate" "bundlers" "defaultBundler" ];
+            # What nix flake check only forces, and doesn't warn of.
+            community = [ "lib" "darwinConfigurations" "darwinModules" "flakeModule" "flakeModules" "herculesCI" "homeConfigurations" "homeModule" "homeModules" "nixopsConfigurations" ];
+            names = builtins.attrNames outputs;
             set = what: v: if builtins.isAttrs v then v else throw "flake output '${what}' is not an attribute set";
+            # Every output is forced, and a NixOS module is only forced.
+            forced = builtins.foldl' (a: n: builtins.seq outputs.${n} a) true names;
+            modules = builtins.mapAttrs (_: m: builtins.seq m true) (set "nixosModules" (outputs.nixosModules or { }));
+            template = n: t:
+              let
+                what = "templates.${n}";
+                extra = builtins.filter (a: !builtins.elem a [ "path" "description" "welcomeText" ]) (builtins.attrNames t);
+              in
+              if !(t ? path) then throw "template '${what}' lacks attribute 'path'"
+              else if !builtins.pathExists t.path then throw "template '${what}' refers to a non-existent path '${toString t.path}'"
+              else if !(t ? description) then throw "template '${what}' lacks attribute 'description'"
+              else if !builtins.isString t.description || builtins.hasContext t.description then throw "the description of template '${what}' is not a string without context"
+              else if extra != [ ] then throw "template '${what}' has unsupported attribute '${builtins.head extra}'"
+              else true;
+            templates = builtins.mapAttrs (n: t: template n (set "templates.${n}" t)) (set "templates" (outputs.templates or { }));
             # An output by system: every system's name has a dash, and only
             # this system's outputs are checked further.
             here = name: f:
@@ -174,15 +202,44 @@ jobs:
             skipped = builtins.filter (s: builtins.isString s && s != "") (builtins.split " " skip);
             build = e: e.check or false && !builtins.elem e.n skipped;
             isDerivation = v: (v.type or null) == "derivation";
+            store = builtins.storeDir + "/";
+            # A store derivation's hash and name, as nix reads a store path's
+            # (a name of at most 211 characters; ending in .drv, it's never
+            # "." or "..").
+            drvName = "[0-9a-df-np-sv-z]{32}-[A-Za-z0-9+._?=-]+[.]drv";
+            drvPath = e: v:
+              if !isDerivation v then throw "flake attribute '${e.what}' is not a derivation"
+              else if !(v ? name) then throw "derivation name missing in ${e.what}"
+              else if !builtins.isString v.name || builtins.hasContext v.name then throw "the name of ${e.what} is not a string without context"
+              else if !(v ? drvPath) then throw "${e.what} has no drvPath"
+              else
+                let
+                  # As nix coerces a drvPath, copying nothing: a string as it
+                  # is, a path in the store as it is (one outside it would be
+                  # copied in, never as a .drv), an attribute set by what its
+                  # __toString gives, or else by its outPath, coerced the same
+                  # way.
+                  coerce = x:
+                    if builtins.isPath x then toString x
+                    else if builtins.isAttrs x && x ? __toString then coerce (x.__toString x)
+                    else if builtins.isAttrs x && x ? outPath then coerce x.outPath
+                    else "${x}";
+                  p = coerce v.drvPath;
+                  name = builtins.substring (builtins.stringLength store) (builtins.stringLength p) p;
+                in
+                if builtins.substring 0 (builtins.stringLength store) p != store
+                  || builtins.match drvName name == null || builtins.stringLength name > 33 + 211
+                then throw "the drvPath of ${e.what} is not a store derivation's path"
+                else p;
           in
           if builds then
             map (e: builtins.foldl' (v: n: v.${n}) outputs e.path) (builtins.filter build entries)
           else if entry == null then
             # legacyPackages has only its system names checked.
-            builtins.deepSeq (here "legacyPackages" (_: [ ])) {
-              nixConfig = import "${flake.outPath}/flake.nix" ? nixConfig;
-              other = builtins.filter (n: !builtins.elem n known) (builtins.attrNames outputs);
-              entries = map (e: { inherit (e) what; build = build e; skip = e.check or false && !build e; }) entries;
+            builtins.deepSeq [ (here "legacyPackages" (_: [ ])) forced modules templates ] {
+              other = builtins.filter (n: builtins.elem n refused) names;
+              unknown = builtins.filter (n: !builtins.elem n (known ++ refused ++ community)) names;
+              entries = map (e: { inherit (e) what; check = e.check or false; name = e.n or null; nixos = e.nixos or false; }) entries;
             }
           else
             let
@@ -190,50 +247,138 @@ jobs:
               v = builtins.foldl' (v: n: v.${n}) outputs e.path;
             in
             if e.nixos or false then
-              (if isDerivation v then [ ] else throw "'config.system.build.toplevel' of ${e.what} is not a derivation")
-            else if isDerivation v then v
-            else throw "flake attribute '${e.what}' is not a derivation"
+              (if isDerivation v then { } else throw "'config.system.build.toplevel' of ${e.what} is not a derivation")
+            else { drv = drvPath e v; }
           EOF
+          # Without eval-apart, the plan over one nix-instantiate's getFlake of
+          # the flake as locked, with whether it has a nixConfig.
           read_plan() {
             url=$(nix flake metadata --json . | jq -r .url)
-            args=(--option pure-eval true --expr "$plan" --argstr url "$url"
-              --argstr system "$(nix config show system)" --argstr skip "$SKIP")
+            args=(--option pure-eval true --argstr url "$url" --argstr system "$(nix config show system)" --argstr skip "$SKIP"
+              --expr "{ url, system, skip, builds ? false }:
+                let
+                  flake = builtins.getFlake url;
+                  planned = ($plan) { inherit system skip builds; } flake.outputs;
+                in
+                if builds then planned else planned // { nixConfig = import \"\${flake.outPath}/flake.nix\" ? nixConfig; }")
             nix-instantiate --eval --strict --json "${args[@]}" > "$RUNNER_TEMP/plan.json"
           }
           apart() {
-            read_plan
-            if [ "$(jq '.other | length' "$RUNNER_TEMP/plan.json")" != 0 ]; then
-              echo "eval-apart knows checks, packages, devShells, formatter, nixosConfigurations and legacyPackages, and this flake also has $(jq -c .other "$RUNNER_TEMP/plan.json"). Its gate is a whole \`nix flake check\`, without eval-apart."
-              return 1
+            system=$(nix config show system)
+            [[ $system =~ ^[A-Za-z0-9_-]+$ ]] || { echo "can't evaluate for system $system"; return 1; }
+            work=$(mktemp -d "$RUNNER_TEMP/eval-apart.XXXXXX")
+            trap 'rm -rf -- "$work"' EXIT
+            # One snapshot of the checkout, as nix reads it: a git work tree's
+            # tracked files as they are now, modes and all, its index, HEAD
+            # and history (the repo's own objects, shared), its repository and
+            # worktree settings, and each submodule checked out the same way
+            # (any other left empty, as git leaves it), so self, clean or
+            # dirty, is what nix flake check gives it. Everything here reads
+            # the snapshot and nothing writes it (the lock file is used as it
+            # is), so an edit to the checkout while the gate runs can't mix
+            # two sources in one result.
+            snapshot() {
+              local top=$1 to=$2 common gitdir rev ref remote line f kv scope
+              common=$(git -C "$top" rev-parse --path-format=absolute --git-common-dir)
+              gitdir=$(git -C "$top" rev-parse --path-format=absolute --git-dir)
+              git init -q --object-format="$(git -C "$top" rev-parse --show-object-format)" "$to"
+              # The settings in effect there, the user's, the repository's and
+              # the worktree's in that order, each with its includes (relative
+              # and conditional ones too) resolved where the checkout is, and
+              # frozen into the snapshot's own config, so the later ones still
+              # win.
+              : > "$to/.git/config"
+              for scope in --global --local --worktree; do
+                while IFS= read -r -d '' kv; do
+                  case $kv in
+                    *$'\n'*) set -- "${kv%%$'\n'*}" "${kv#*$'\n'}" ;;
+                    *) set -- "$kv" true ;;
+                  esac
+                  case ${1,,} in include.path | includeif.*.path | core.worktree | core.bare) continue ;; esac
+                  git config -f "$to/.git/config" --add "$1" "$2"
+                done < <(git -C "$top" config "$scope" --includes --list -z 2> /dev/null)
+              done
+              git config -f "$to/.git/config" core.bare false
+              # A relative submodule URL resolves against the default remote,
+              # or with none against the work tree: the checkout's, not the
+              # snapshot's.
+              ref=$(git -C "$top" symbolic-ref -q HEAD) || ref=
+              remote=$(git -C "$top" config "branch.${ref#refs/heads/}.remote") || remote=
+              if ! git -C "$top" config "remote.${remote:-origin}.url" > /dev/null && ! git -C "$top" config remote.origin.url > /dev/null; then
+                git config -f "$to/.git/config" remote.origin.url "$top"
+              fi
+              echo "$common/objects" > "$to/.git/objects/info/alternates"
+              if [ -f "$common/shallow" ]; then cp -- "$common/shallow" "$to/.git/shallow"; fi
+              if rev=$(git -C "$top" rev-parse -q --verify 'HEAD^{commit}'); then
+                if [ -n "$ref" ]; then
+                  git -C "$to" symbolic-ref HEAD "$ref"
+                  git -C "$to" update-ref "$ref" "$rev"
+                else
+                  git -C "$to" update-ref --no-deref HEAD "$rev"
+                fi
+              fi
+              if [ -f "$gitdir/index" ]; then cp -- "$gitdir/index" "$to/.git/index"; fi
+              git -C "$top" ls-files -z | (cd "$top" && while IFS= read -r -d '' f; do
+                if [ -L "$f" ] || [ -f "$f" ]; then printf '%s\0' "$f"; fi
+              done | tar --null --no-recursion -T - -cf -) | tar -xpf - -C "$to"
+              while IFS= read -r -d '' line; do
+                f=${line#*$'\t'}
+                if [ -e "$top/$f/.git" ]; then snapshot "$top/$f" "$to/$f" < /dev/null; else mkdir -p -- "$to/$f"; fi
+              done < <(git -C "$top" ls-files -z -s | grep -z '^160000 ')
+            }
+            source=$work/source
+            if top=$(git rev-parse --show-toplevel 2> /dev/null); then
+              snapshot "$top" "$source"
+              flake=$source/$(git rev-parse --show-prefix)
+            else
+              cp -a . "$source"
+              flake=$source
             fi
             # nix flake check applies the nixConfig a runner accepts; the
             # evaluations and the build here would leave it out.
-            if [ "$(jq .nixConfig "$RUNNER_TEMP/plan.json")" = true ]; then
+            if [ "$(nix-instantiate --eval --argstr f "$flake/flake.nix" --expr '{ f }: (import f) ? nixConfig')" = true ]; then
               echo "eval-apart can't carry this flake's nixConfig to every evaluation and build. Its gate is a whole \`nix flake check\`, without eval-apart."
               return 1
             fi
+            # The flake's outputs ("#."), as nix flake check evaluates them,
+            # each time afresh.
+            evaluate() { nix eval --no-update-lock-file --option eval-cache false --apply "($plan) { system = \"$system\"; $1 }" "${@:2}" "$flake#."; }
+            evaluate "" --json > "$RUNNER_TEMP/plan.json"
+            if [ "$(jq '.other | length' "$RUNNER_TEMP/plan.json")" != 0 ]; then
+              echo "eval-apart doesn't check apps, overlays, hydraJobs, bundlers or the old default* outputs, and this flake has $(jq -c .other "$RUNNER_TEMP/plan.json"). Its gate is a whole \`nix flake check\`, without eval-apart."
+              return 1
+            fi
+            jq -r '.unknown[] | "warning: unknown flake output \u0027\(.)\u0027"' "$RUNNER_TEMP/plan.json"
+            # Which entries are checks to build, and which checks are skipped.
+            jq --arg skip "$SKIP" '($skip | split(" ") | map(select(. != ""))) as $s
+              | .entries | map(.check and (.name as $n | $s | index([$n]) | not)) as $build
+              | [range(length) as $i | .[$i] + {build: $build[$i], skip: (.[$i].check and ($build[$i] | not))}]' \
+              "$RUNNER_TEMP/plan.json" > "$RUNNER_TEMP/entries.json"
             # Each evaluation exits before the next starts, so the most memory
-            # in use is one evaluation's, and makes its derivation a GC root
-            # before it exits, until the build is done. A failed one fails the
-            # gate, after the rest are evaluated and built (--keep-going).
-            roots=$(mktemp -d "$RUNNER_TEMP/roots.XXXXXX")
-            trap 'rm -rf -- "$roots"' EXIT
+            # in use is one evaluation's. Each derivation is made a GC root at
+            # once, until the build is done; one that isn't a valid derivation
+            # (or that a GC took in between) fails the gate. A
+            # failed evaluation fails the gate, after the rest are evaluated
+            # and built (--keep-going).
+            roots=$work/roots
+            mkdir "$roots"
             failed=0
             targets=()
-            n=$(jq '.entries | length' "$RUNNER_TEMP/plan.json")
+            n=$(jq length "$RUNNER_TEMP/entries.json")
             for ((i = 0; i < n; i++)); do
-              what=$(jq -r ".entries[$i].what" "$RUNNER_TEMP/plan.json")
+              what=$(jq -r ".[$i].what" "$RUNNER_TEMP/entries.json")
               echo "evaluating $what"
-              if ! nix-instantiate --add-root "$roots/$i" --arg entry "$i" "${args[@]}" > /dev/null; then
+              if ! result=$(evaluate "entry = $i;" --json); then
                 failed=1
-              elif [ "$(jq ".entries[$i].build" "$RUNNER_TEMP/plan.json")" = true ]; then
-                if drv=$(readlink "$roots/$i"); then
-                  targets+=("$drv^*")
-                else
-                  echo "evaluating $what gave no derivation"
-                  failed=1
-                fi
-              elif [ "$(jq ".entries[$i].skip" "$RUNNER_TEMP/plan.json")" = true ]; then
+              elif [ "$(jq ".[$i].nixos" "$RUNNER_TEMP/entries.json")" = true ]; then
+                :
+              elif ! drv=$(jq -er .drv <<< "$result") || ! nix-instantiate --add-root "$roots/$i" --argstr drv "$drv" \
+                  --expr '{ drv }: { type = "derivation"; name = "root"; outputName = "out"; drvPath = drv; }' > /dev/null; then
+                echo "evaluating $what gave no derivation"
+                failed=1
+              elif [ "$(jq ".[$i].build" "$RUNNER_TEMP/entries.json")" = true ]; then
+                targets+=("$drv^*")
+              elif [ "$(jq ".[$i].skip" "$RUNNER_TEMP/entries.json")" = true ]; then
                 echo "not building $what"
               fi
             done
@@ -305,18 +450,21 @@ jobs:
           }
           gate 2>&1 | tee "$RUNNER_TEMP/flake.log"
       # The gate's result, signed with this job's own GitHub identity, in the
-      # format Conary reads (FieldmouseWorks/Conary, docs/ci-attestation.md).
-      # GitHub attests for private repositories only on Enterprise Cloud, and
-      # a run with no OIDC token (a fork's PR, Dependabot's) can't sign, so
-      # those get none and their results don't count as evidence.
+      # format Conary reads (FieldmouseWorks/Conary, docs/ci-attestation.md):
+      # a public repo's as a Sigstore bundle, and a private repo's, which
+      # GitHub attests only on Enterprise Cloud, with the job's own token,
+      # whose audience names the digest of what it attests. A run with no OIDC
+      # token (a fork's PR, Dependabot's) can't sign, so it gets none and its
+      # result doesn't count as evidence.
       - id: subject
-        if: ${{ !cancelled() && steps.gate.outcome != 'skipped' && !github.event.repository.private && (github.event_name == 'push' || github.event_name == 'pull_request') }}
+        if: ${{ !cancelled() && steps.gate.outcome != 'skipped' && (github.event_name == 'push' || github.event_name == 'pull_request') }}
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           OUTCOME: ${{ steps.gate.outcome }}
           SKIP: ${{ inputs.build-skip }}
           PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          PRIVATE: ${{ github.event.repository.private }}
         run: |
           if [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
             echo "no OIDC token in this run, so no attestation"
@@ -324,9 +472,10 @@ jobs:
           fi
           case $OUTCOME in success) result=pass ;; *) result=fail ;; esac
           # Artifact names are shared by every job in a run, and a caller may
-          # run this job more than once (a matrix, a re-run), so each log gets
-          # its own.
-          log="flake-log-$(cat /proc/sys/kernel/random/uuid)"
+          # run this job more than once (a matrix, a re-run), so each job's
+          # log and attestation get names of their own.
+          uuid=$(cat /proc/sys/kernel/random/uuid)
+          log="flake-log-$uuid"
           dir="$RUNNER_TEMP/conary"
           mkdir -p "$dir"
           if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
@@ -350,12 +499,29 @@ jobs:
             > "$dir/predicate.json"
           cat "$subject" "$dir/predicate.json"
           { echo "path=$subject"; echo "log=$log"; } >> "$GITHUB_OUTPUT"
+          if [ "$PRIVATE" = true ]; then
+            # The statement is the subject, then the predicate on one line.
+            # The file keeps the token after it, as its last line.
+            attestation="$dir/conary-attestation"
+            { cat "$subject"; jq -c . "$dir/predicate.json"; } > "$attestation"
+            audience="conary-attestation:v1:sha256:$(sha256sum "$attestation" | cut -d' ' -f1)"
+            echo "signing with this job's token, audience $audience"
+            # Nothing in the audience needs escaping in a URL.
+            curl -fsS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+              "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=$audience" | jq -er .value >> "$attestation"
+            { echo "attestation=$attestation"; echo "attestation-name=conary-attestation-$uuid"; } >> "$GITHUB_OUTPUT"
+          fi
       - if: ${{ !cancelled() && steps.subject.outputs.path }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ steps.subject.outputs.log }}
           path: ${{ runner.temp }}/flake.log
-      - if: ${{ !cancelled() && steps.subject.outputs.path }}
+      - if: ${{ !cancelled() && steps.subject.outputs.attestation }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ steps.subject.outputs.attestation-name }}
+          path: ${{ steps.subject.outputs.attestation }}
+      - if: ${{ !cancelled() && steps.subject.outputs.path && !github.event.repository.private }}
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-path: ${{ steps.subject.outputs.path }}

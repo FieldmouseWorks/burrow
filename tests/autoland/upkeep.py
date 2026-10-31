@@ -13,20 +13,44 @@ stand_in()
 # has them (steward.run_pass's acting_for).
 C._for.append("sam")
 
-# Every repo gets the hold, needs-owner and first labels, once a day.
+# Every repo gets the hold, needs-owner and first labels, and the waiting
+# ones (prs.show_waiting), once a day.
+LABELS = ["first", "hold", "needs-owner", "waiting: proof slot", "waiting: release age", "waiting: reviewer"]
+
+
+def made():
+    """The labels made, and each one's description."""
+    got = {}
+    for x in WROTE:
+        if x.startswith("label create "):
+            name, _, rest = x.removeprefix("label create ").partition(" -R ")
+            got[name] = rest.partition(" --description ")[2]
+    return got
+
+
 fresh_pr_state()
 C.NOW = C.ts(T0)
 C.save("repo-sam_r.json", {"settings": C.NOW, "app": 7})
 WROTE.clear()
 R.settle_repo({"repo": "sam/r", "private": False, "default": "main"}, {"sam/r"})
-assert sorted(x.split()[2] for x in WROTE if x.startswith("label create")) == ["first", "hold", "needs-owner"], WROTE
+assert sorted(made()) == LABELS, WROTE
+# A waiting label says what the PR waits on, and that its status says more,
+# within the 100 characters GitHub takes.
+assert all(len(d) <= 100 for d in made().values()), made()
+assert all("review-settled says" in d for n, d in made().items() if n.startswith("waiting: ")), made()
 WROTE.clear()
 R.settle_repo({"repo": "sam/r", "private": False, "default": "main"}, {"sam/r"})
 assert WROTE == [], WROTE
 # A day on, they're made again with the settings, in case one was deleted.
 C.NOW += 86400
 R.settle_repo({"repo": "sam/r", "private": False, "default": "main"}, {"sam/r"})
-assert sorted(x.split()[2] for x in WROTE if x.startswith("label create")) == ["first", "hold", "needs-owner"], WROTE
+assert sorted(made()) == LABELS, WROTE
+# A repo made the labels before there were waiting ones: they're made at
+# once, not a day on.
+C.save("repo-sam_r.json", {**C.load("repo-sam_r.json", {}), "labels": ["hold", "needs-owner", "first"]})
+WROTE.clear()
+R.settle_repo({"repo": "sam/r", "private": False, "default": "main"}, {"sam/r"})
+assert sorted(made()) == LABELS, WROTE
 
 # Wherever the repo has rules (its own rulesets and the default branch's
 # classic protection), up-to-date branches go off and the steward's status
@@ -323,7 +347,13 @@ assert order == ["watch", (9, True), (10, False)], order
 # stay. One with no PR and no commit for STALE_DAYS is kept under
 # refs/archive and deleted (one an earlier sweep archived too); one GitHub
 # won't archive stays, listed for the pipeline.
-old, young = "2026-09-01T00:00:00Z", "2026-10-23T00:00:00Z"
+def ago(days):
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(C.NOW - days * 86400))
+
+
+# Given up on a day past STALE_DAYS (3: agents open a PR when they push), or
+# fresh from today.
+old, young = ago(4), ago(1)
 BRANCHES = {"in-main": ("1" * 40, 0, young), "closed": ("2" * 40, 3, young), "moved": ("3" * 40, 1, young),
             "open": ("4" * 40, 2, old), "renovate/x": ("5" * 40, 1, old), "gh-pages": ("6" * 40, 9, old),
             "old": ("7" * 40, 4, old), "young": ("8" * 40, 4, young), "renovate/closed": ("9" * 40, 1, young),
@@ -397,8 +427,7 @@ assert DELETED == [] and [line for _, line, _ in digest] == ["sam/r: `refused`"]
 # deleted again (the stand-in keeps every branch), already kept.
 CLOSED["closed"] = None
 C.NOW += 86400
-recent = time.gmtime(C.NOW - (R.STALE_DAYS - 1) * 86400)
-BRANCHES["recent"] = ("0" * 40, 4, time.strftime("%Y-%m-%dT%H:%M:%SZ", recent))
+BRANCHES["recent"] = ("0" * 40, 4, ago(R.STALE_DAYS - 1))
 R.sweep_branches(repo_r, {"open"}, [])
 assert DELETED == [("in-main", "1" * 40), ("old", "7" * 40), ("renovate/closed", "9" * 40), ("archived", "d" * 40)], DELETED
 assert len(ARCHIVED) == 2, ARCHIVED

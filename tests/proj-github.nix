@@ -10,8 +10,11 @@
 # starts) and ends the waits of one whose issue closed (proj stop's, which a
 # watch already asking GitHub keeps to), a stop that fails there not holding
 # up the rest, that an issue a bot opened is the machine's work, its job
-# acting as the machinery's App, and that a job dir removed or a wait it
-# can't read stops neither proj-inbox nor _watch.
+# acting as the machinery's App, that one with the unstick label too (the
+# steward's stuck issue) has a job that waits in no line, one already waiting
+# in it leaving it once the label comes, the watchdog told so again each pass
+# whatever an older turn wrote, and that a job dir removed or a wait it can't
+# read stops neither proj-inbox nor _watch.
 { pkgs }:
 ''
   with subtest("a job waiting on a PR is resumed when the PR changes"):
@@ -227,6 +230,60 @@
       github("repos/o/b/issues", "[]")
       machine.succeed("su - dev -c 'proj-inbox o/b'")
 
+  with subtest("the stuck issue's job waits in no line, and one already waiting in it leaves it once the label comes"):
+      machine.succeed("su - dev -c 'git -C /data/dev/src/uk init -q && git -C /data/dev/src/uk remote add origin https://github.com/o/u'")
+      ua = proj('run web "sleep 600"')
+      ub = proj('run web "sleep 600"')
+      uq = proj('run --pipeline web "sleep 600"')
+      for j in (ua, ub, uq):
+          machine.wait_until_succeeds(f"su - dev -c 'proj state {j}' | grep -x running", timeout=120)
+      def inbox_jobs():
+          listed = machine.succeed("su - dev -c 'proj-inbox status'").splitlines()
+          return dict(line.split()[0::2] for line in listed if line.startswith("o/u#"))
+      ui = {"number": 1, "user": {"login": "sam-steward[bot]"}, "html_url": "https://github.com/o/u/issues/1",
+            "title": "[autoland] Stuck in the pipeline", "body": "stuck", "state": "open", "labels": [{"name": "claude"}]}
+      github("repos/o/u/issues", json.dumps([ui]))
+      github("repos/o/u/issues/1/comments", "[]")
+      machine.succeed("su - dev -c 'proj-inbox o/u'")
+      waiting = inbox_jobs()["o/u#1"]
+      time.sleep(3)
+      assert state(waiting) == "queued", state(waiting)
+      machine.fail(f"test -e /data/dev/jobs/{waiting}/unstick")
+      # The steward's label: the same job, out of the line, for the --unstick
+      # slot, held here so it waits there.
+      machine.succeed("touch /tmp/uhold")
+      machine.succeed("""(su - dev -c "flock /data/dev/jobs/.slots/unstick sh -c 'touch /tmp/uheld; while [ -e /tmp/uhold ]; do sleep 0.2; done'" >/dev/null 2>&1 &)""")
+      machine.wait_until_succeeds("test -e /tmp/uheld")
+      ui["labels"].append({"name": "unstick"})
+      github("repos/o/u/issues", json.dumps([ui]))
+      machine.succeed("su - dev -c 'proj-inbox o/u'")
+      assert inbox_jobs()["o/u#1"] == waiting, inbox_jobs()
+      machine.succeed(f"test -e /data/dev/jobs/{waiting}/unstick")
+      w = waits()[waiting]
+      assert w["unstick"] is True and w["phase"] == "turn 1 is waiting for the --unstick slot, which another --unstick turn holds", w
+      # A turn begun before the switch that brought proj unstick writes the
+      # job's waits without it, as it takes a slot, waits inside its run or
+      # ends: every pass tells the watchdog again.
+      machine.succeed(f"cd /data/dev/jobs && ${pkgs.jq}/bin/jq -c 'del(.unstick)' .waits/{waiting} >/tmp/w && cp /tmp/w .waits/{waiting}"
+                      f" && ${pkgs.jq}/bin/jq -c --arg id {waiting} 'del(.items[$id].unstick)' .waits.json >/tmp/w && cp /tmp/w .waits.json")
+      assert "unstick" not in waits()[waiting], waits()[waiting]
+      machine.succeed("su - dev -c 'proj-inbox o/u'")
+      assert waits()[waiting]["unstick"] is True, waits()[waiting]
+      machine.succeed("rm /tmp/uhold /tmp/uheld")
+      machine.wait_until_succeeds(f"su - dev -c 'proj state {waiting}' | grep -x done", timeout=120)
+      # Labelled so from the start: so from its first turn, slots still full.
+      ui2 = {**ui, "number": 2, "html_url": "https://github.com/o/u/issues/2"}
+      github("repos/o/u/issues", json.dumps([ui, ui2]))
+      github("repos/o/u/issues/2/comments", "[]")
+      machine.succeed("su - dev -c 'proj-inbox o/u'")
+      uj = inbox_jobs()["o/u#2"]
+      machine.succeed(f"test -e /data/dev/jobs/{uj}/unstick")
+      machine.wait_until_succeeds(f"su - dev -c 'proj state {uj}' | grep -x done", timeout=120)
+      for j in (ua, ub, uq):
+          proj(f"stop {j}")
+      github("repos/o/u/issues", "[]")
+      machine.succeed("su - dev -c 'proj-inbox o/u'")
+
   with subtest("a reply under a minute old waits, and the inbox books when it's old enough"):
       now = machine.succeed("date -u +%Y-%m-%dT%H:%M:%SZ").strip()
       github("repos/o/r/issues/7", json.dumps(issue))
@@ -429,4 +486,17 @@
       prompt = machine.succeed(f"cat /data/dev/jobs/{e}/prompt.3")
       assert "o/r#5: not something proj can watch" in prompt, prompt
       machine.wait_until_succeeds(f"su - dev -c 'proj state {e}' | grep -x done", timeout=120)
+
+  with subtest("the inbox takes a hidden clone named for its repo, and no other hidden clone"):
+      for d, repo, n in ((".github", ".github", 8), (".mirror", "m", 9)):
+          machine.succeed(f"install -d -o dev -g dev /data/dev/src/{d}")
+          machine.succeed(f"su - dev -c 'git init -q /data/dev/src/{d} && git -C /data/dev/src/{d} remote add origin https://github.com/o/{repo}'")
+          issue = {"number": n, "user": {"login": "sam"}, "html_url": f"https://github.com/o/{repo}/issues/{n}",
+                   "title": "t", "body": "sleep 1", "state": "open", "labels": [{"name": "claude"}]}
+          github(f"repos/o/{repo}/issues", json.dumps([issue]))
+          github(f"repos/o/{repo}/issues/{n}/comments", "[]")
+      machine.succeed("su - dev -c 'proj-inbox o/.github'")
+      machine.succeed("su - dev -c 'proj-inbox o/m'")
+      looked = machine.succeed("su - dev -c 'proj-inbox status'")
+      assert "o/.github#8" in looked and "o/m#9" not in looked, looked
 ''
