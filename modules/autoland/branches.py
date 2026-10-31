@@ -3,6 +3,7 @@ changes them (a push, a PR closing, the default moving, the wait it was
 given ending), with a stale one's commits archived first."""
 
 import fnmatch
+import re
 import subprocess
 import tempfile
 import urllib.parse
@@ -14,17 +15,25 @@ from common import CFG, DEP_RE, DRY, load, log, repo_cfg, save, ts
 
 def delete_branch(repo, name, sha):
     """Delete the branch only if its tip is still `sha`: a push since then
-    keeps it (git's lease; the REST API has no conditional delete)."""
+    keeps it (git's lease; the REST API has no conditional delete). What
+    GitHub said when it refused (a ruleset, a token that can't), else "":
+    deleted, already gone, or kept by a push the next listing shows.
+    C.Unavailable when GitHub didn't answer."""
     if DRY:
         log(f"  would: delete {repo} {name} if still at {sha[:7]}")
-        return
+        return ""
     with tempfile.TemporaryDirectory() as d:
         subprocess.run(["git", "init", "-q", "--bare", d], check=False)
         p = subprocess.run(["git", "-C", d, *C.GIT_AUTH, "push", "-q", f"--force-with-lease=refs/heads/{name}:{sha}",
                             f"https://github.com/{repo}.git", f":refs/heads/{name}"],
                            capture_output=True, text=True, env=C.gh_env(repo))
-        if p.returncode != 0:
-            log(f"{repo}: kept {name}: {p.stderr.strip()[:200]}")
+    said = " ".join(p.stderr.split())[:200]
+    if p.returncode == 0 or re.search(r"stale info|remote ref does not exist", said):
+        return ""
+    if C.UNAVAILABLE.search(said) or re.search(r"could not resolve host|returned error: 5\d\d", said, re.I):
+        raise C.Unavailable(f"git push :{name}: {said}")
+    log(f"{repo}: kept {name}: {said}")
+    return said or f"git exited {p.returncode}"
 
 
 # Unmerged, with no PR and no commit for this long: given up on (agents open
@@ -106,6 +115,7 @@ def closed_heads(repo, since, etag):
 
 
 UNKEPT = f"Stale branches it couldn't archive (unmerged, no PR, {STALE_DAYS}+ days)"
+UNDELETED = "Branches GitHub wouldn't let it delete"
 
 
 # A branch no open PR has goes only once it has sat at one tip this long, so
@@ -121,7 +131,7 @@ def watch_branches(r, in_use, digest, full=False):
     last look), the default moving under it, or the wait it was given
     ending (wake.json). Every pass looks, at no cost to the rate limit while
     nothing changed. A full pass also tries again what GitHub said no to: a
-    stale one's archive, or a read a judgment needed. A pass GitHub stopped
+    stale one's archive, a delete, or a read a judgment needed. A pass GitHub stopped
     answering keeps what it judged and leaves the rest to the next one."""
     repo = r["repo"]
     path = f"repo-{repo.replace('/', '_')}.json"
@@ -177,13 +187,15 @@ def watch_branches(r, in_use, digest, full=False):
     for name, tip in sorted(tips.items()):
         if tip.get("unkept"):
             digest.append((UNKEPT, f"{repo}: `{name}`", ""))
+        elif tip.get("undeleted"):
+            digest.append((UNDELETED, f"{repo}: `{name}`", tip["undeleted"]))
 
 
 def looks_again(tip, full):
     """Whether a branch judged before, and unchanged since, is judged again
     this pass: its wait is over, or (a full pass) GitHub said no last time,
-    to archiving it or to a read its judgment needed."""
-    if tip.get("unkept") or tip.get("retry"):
+    to archiving it, deleting it or a read its judgment needed."""
+    if tip.get("unkept") or tip.get("undeleted") or tip.get("retry"):
         return full
     return tip.get("due", C.NOW + 1) <= C.NOW
 
@@ -250,7 +262,8 @@ def judge(repo, r, name, sha, seen):
             return {**tip, "unkept": True}
         why = f"unmerged, no PR, {STALE_DAYS}+ days; kept at {ARCHIVE}/{name}/{sha}"
     log(f"{repo}: deleting {name} at {sha[:7]} ({why})")
-    # Its record stays until the listing drops it: a delete that didn't go
-    # through is tried again next pass.
-    delete_branch(repo, name, sha)
-    return tip
+    # Its record stays until the listing drops it. One GitHub refused is
+    # listed for the pipeline and tried again on the full pass, not on every
+    # pass until then.
+    refused = delete_branch(repo, name, sha)
+    return {**tip, "undeleted": refused} if refused else tip

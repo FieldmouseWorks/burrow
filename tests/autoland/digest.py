@@ -101,7 +101,7 @@ assert not any(x in stuck["--body"] for x in ("sam/r#1", "sam/r#2", "sam/r#7")),
 
 # A stale branch the sweep couldn't archive is the pipeline's trouble, not
 # the owner's call: archived, it would have gone on its own.
-assert B.UNKEPT not in R.OWNERS
+assert B.UNKEPT not in R.OWNERS and B.UNDELETED not in R.OWNERS
 
 # Every kind the owner settles is one the steward lists: a renamed one
 # would go to the inbox, never to the owner.

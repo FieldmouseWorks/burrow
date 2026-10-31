@@ -2,6 +2,7 @@
 changes them (branches.py)."""
 
 import json
+import subprocess
 import time
 import urllib.parse
 
@@ -126,11 +127,17 @@ def branches_write(*a, **k):
     return {"ref": f["ref"], "object": {"sha": f["sha"]}}
 
 
+REFUSAL = "remote: error: GH013: Repository rule violations found for refs/heads/empty."
+
+
 def deleted(repo, name, sha):
-    """GitHub deleting it, unless it's one whose push is turned away."""
+    """GitHub deleting it, unless it's one whose push is turned away: what
+    it says then."""
     DELETED.append((name, sha))
-    if name not in UNDELETABLE:
-        del BRANCHES[name]
+    if name in UNDELETABLE:
+        return REFUSAL
+    del BRANCHES[name]
+    return ""
 
 
 def look(in_use=("open",), full=False):
@@ -282,16 +289,22 @@ assert LOOKED == ["moved"] and DELETED == [], (LOOKED, DELETED)
 C.NOW += B.GRACE
 look(())
 assert DELETED == [("moved", "f" * 40)], DELETED
-# A delete that doesn't go through is tried again next pass.
+# A delete GitHub refuses (a ruleset, say) is listed for the pipeline with
+# what GitHub said, and tried again on the full pass, not on every pass
+# until then. It goes once GitHub lets it.
 BRANCHES["empty"] = ("0" * 40, 0, old)
 UNDELETABLE.add("empty")
 look(())
 C.NOW += B.GRACE
-look(())
-assert DELETED == [("empty", "0" * 40)], DELETED
+assert look(()) == ["sam/r: `empty`", "sam/r: `refused`"] and DELETED == [("empty", "0" * 40)], DELETED
+digest = []
+B.watch_branches(repo_r, set(), digest)
+assert (B.UNDELETED, "sam/r: `empty`", REFUSAL) in digest, digest
+assert look(()) == ["sam/r: `empty`", "sam/r: `refused`"] and DELETED == [], DELETED
 UNDELETABLE.clear()
-look(())
-assert FRESH == [304] and DELETED == [("empty", "0" * 40)], (FRESH, DELETED)
+look(full=True)
+assert DELETED == [("empty", "0" * 40)], DELETED
+assert look(()) == ["sam/r: `refused`"] and "empty" not in tips(), tips()
 # The stale one's wait ending: archived and deleted.
 C.NOW = C.ts(young) + B.STALE_DAYS * 86400
 look(())
@@ -392,6 +405,26 @@ assert tips()["third"]["seen"] == C.NOW and "closedSince" in C.load("repo-sam_r.
 S.C.CFG["keepBranches"] = []
 look(())
 assert FRESH == [200] and LOOKED == ["gh-pages"], (FRESH, LOOKED)
+# What git says when a delete doesn't go through: a push that beat it, or a
+# branch already gone, is no refusal (the next listing shows either);
+# GitHub not answering ends the pass; anything else is GitHub's refusal, in
+# its words, on one line.
+run_kept = B.subprocess.run
+for said, want in (("! [rejected] x -> x (stale info)", ""),
+                   ("error: unable to delete 'x': remote ref does not exist", ""),
+                   ("remote: error: GH013: Repository rule violations found\nremote: - Cannot delete this branch",
+                    "remote: error: GH013: Repository rule violations found remote: - Cannot delete this branch"),
+                   ("fatal: unable to access 'https://github.com/sam/r.git/': The requested URL returned error: 403",
+                    "fatal: unable to access 'https://github.com/sam/r.git/': The requested URL returned error: 403"),
+                   ("fatal: unable to access 'https://github.com/sam/r.git/': The requested URL returned error: 502", None),
+                   ("fatal: unable to access 'https://github.com/sam/r.git/': Could not resolve host: github.com", None)):
+    B.subprocess.run = lambda args, **k: subprocess.CompletedProcess(args, 1, "", said)
+    try:
+        got = kept_delete("sam/r", "x", "1" * 40)
+    except C.Unavailable:
+        got = None
+    assert got == want, (said, got)
+B.subprocess.run = run_kept
 # More than a page of branches: every page, and no ETag for next time. A
 # protected one, the default too, isn't the steward's to delete.
 C.fresh = lambda path, etag=None: ("tag", [{"name": f"b{i}", "commit": {"sha": "1" * 40}} for i in range(100)])
