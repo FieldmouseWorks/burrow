@@ -112,8 +112,8 @@ git -C "$d" init -q && git -C "$d" add . && git -C "$d" commit -qm burrow
 (cd "$d" && flake-gate --print) > "$tmp/print"
 yq '.jobs.check.steps[] | select(.id == "gate") | .run' "$d/.github/workflows/flake-check.yml" > "$tmp/step"
 diff <(tail -n +4 "$tmp/print") "$tmp/step" || fail "flake-gate runs another script than CI's gate step"
-# The whole flake at once holds 6-7G before its first build, past a Claude
-# job's 8G on remi (burrow.proj.jobMemoryMax); one output at a time fits.
+# The whole flake at once holds 6-7G until its last build ends, beside every
+# other job on remi; one output at a time holds a fraction of that.
 grep -qx 'env: APART=true' "$tmp/print" || fail "burrow's gate evaluates the whole flake at once: $(head -3 "$tmp/print")"
 grep -qx 'env: SKIP=agents' "$tmp/print" || fail "burrow's gate skips $(grep SKIP "$tmp/print")"
 echo "flake-gate: ok"

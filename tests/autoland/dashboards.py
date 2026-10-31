@@ -349,7 +349,7 @@ os.rmdir(ran)
 seen, published = [], []
 kept_fns = (S.R.discover, S.R.settle_repo, S.R.publish, S.open_prs, D.watch)
 S.R.settle_repo = lambda r, known: False
-S.R.discover = lambda: [{"repo": "sam/r"}, {"repo": "sam/q"}]
+S.R.discover = lambda: [{"repo": "sam/r", "default": "main"}, {"repo": "sam/q", "default": "main"}]
 S.R.publish = published.append
 S.open_prs = lambda owner, name: (seen.append(f"prs {owner}/{name}") or {}, [])
 
