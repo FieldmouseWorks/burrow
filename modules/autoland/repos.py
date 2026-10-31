@@ -773,7 +773,7 @@ def swept(r, in_use):
         if DEP_RE.match(name):
             continue
         # Compared at the tip just listed, and deleted only if it's still there.
-        cmp = answer(C.gh, "api", f"repos/{repo}/compare/{r['default']}...{sha}", "--jq",
+        cmp = answer(C.gh, "api", C.compare(repo, r["default"], sha), "--jq",
                      "{ahead: .ahead_by, date: .commits[-1].commit.committer.date}")
         if not isinstance(cmp, dict):
             continue

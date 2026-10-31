@@ -364,7 +364,7 @@ def spelled(**states):
 
 
 def ci(**states):
-    return ci_state(clean(checks=spelled(**states)), S.CFG["repos"]["sam/r"]["proofJobs"])
+    return ci_state(clean(checks=spelled(**states)), S.CFG["repos"]["sam/r"]["proofJobs"])[:2]
 
 
 assert ci(REMI_PROOF="SUCCESS", Other_Proof="SUCCESS") == ("green", [])
