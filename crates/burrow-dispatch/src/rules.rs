@@ -39,6 +39,11 @@ pub enum Move {
         url: String,
         why: String,
     },
+    /// Register a runner for one job, and start its unit as this instance.
+    Fresh { instance: String, why: String },
+    /// Stop a fresh runner's unit that has sat idle: one that hasn't taken
+    /// a job in `quiet` won't.
+    Retire { unit: String, why: String },
 }
 
 impl Move {
@@ -47,12 +52,17 @@ impl Move {
         match self {
             Move::Runner { unit, verb, .. } => format!("{verb} {unit}"),
             Move::Cancel { url, .. } => format!("cancel {url}"),
+            Move::Fresh { instance, .. } => format!("start fresh runner {instance}"),
+            Move::Retire { unit, .. } => format!("stop {unit}"),
         }
     }
 
     pub fn why(&self) -> &str {
         match self {
-            Move::Runner { why, .. } | Move::Cancel { why, .. } => why,
+            Move::Runner { why, .. }
+            | Move::Cancel { why, .. }
+            | Move::Fresh { why, .. }
+            | Move::Retire { why, .. } => why,
         }
     }
 }
@@ -60,8 +70,8 @@ impl Move {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Decision {
     pub moves: Vec<Move>,
-    /// The watch file's items, by key: runner/UNIT, deploy/OWNER/REPO and
-    /// github/OWNER/REPO.
+    /// The watch file's items, by key: runner/UNIT, fresh, deploy/OWNER/REPO
+    /// and github/OWNER/REPO.
     pub items: BTreeMap<String, Item>,
     /// When its next pass should look again, for a move of its own.
     pub wake: Option<f64>,
@@ -145,6 +155,10 @@ pub fn decide(
             now,
             &mut d,
         );
+    }
+    if let (Some(f), Some(pool)) = (&cfg.fresh, &snap.fresh) {
+        let unread = f.repos.iter().any(|r| snap.unread.contains_key(r));
+        crate::fresh::decide(cfg, f, pool, unread, (st, was), now, &mut d);
     }
     if let (Some(dep), Some((update, said))) = (&cfg.deploy, &snap.update) {
         for repo in dep.own.iter().chain(dep.running.keys()) {
@@ -373,11 +387,11 @@ pub(crate) fn short(sha: &str) -> &str {
     sha.get(..7).unwrap_or(sha)
 }
 
-fn book(d: &mut Decision, at: f64) {
+pub(crate) fn book(d: &mut Decision, at: f64) {
     d.wake = Some(d.wake.map_or(at, |w| w.min(at)));
 }
 
-fn jobs(n: usize) -> String {
+pub(crate) fn jobs(n: usize) -> String {
     if n == 1 {
         "1 job".into()
     } else {
@@ -401,8 +415,8 @@ mod tests {
     use burrow_watchdog::words::clock;
 
     use super::{Decision, Move, RECENT, decide};
-    use crate::snapshot::tests::config;
-    use crate::snapshot::{Behind, Job, Run, Seen, Snapshot};
+    use crate::snapshot::tests::{config, fresh};
+    use crate::snapshot::{Behind, Job, Pool, Run, Seen, Snapshot};
     use crate::state::State;
     use crate::world::Unit;
 
@@ -441,7 +455,7 @@ mod tests {
             .iter()
             .filter_map(|m| match m {
                 Move::Runner { unit, verb, .. } => Some((unit.as_str(), *verb)),
-                Move::Cancel { .. } => None,
+                _ => None,
             })
             .collect()
     }
@@ -451,7 +465,7 @@ mod tests {
             .iter()
             .filter_map(|m| match m {
                 Move::Cancel { run, .. } => Some(*run),
-                Move::Runner { .. } => None,
+                _ => None,
             })
             .collect()
     }
@@ -641,6 +655,39 @@ mod tests {
             d.items.is_empty() && d.state.unread.is_empty() && d.state.idle.is_empty(),
             "{d:?}"
         );
+    }
+
+    // One of the fresh runners' repos not read: their wait is as the last
+    // pass saw it, until a pass reads them all.
+    #[test]
+    fn unread_fresh_repo() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = config(dir.path());
+        cfg.fresh = Some(fresh(dir.path()));
+        let was_item = Item {
+            what: "fresh".into(),
+            since: T - 600.0,
+            due: T + 300.0,
+            ..Item::default()
+        };
+        let was = BTreeMap::from([("fresh".to_owned(), was_item.clone())]);
+        let st = State {
+            fresh: Some(T - 600.0),
+            ..State::default()
+        };
+        let mut s = Snapshot {
+            fresh: Some(Pool::default()),
+            unread: BTreeMap::from([("sam/f".into(), "HTTP 502".into())]),
+            ..Snapshot::default()
+        };
+        let d = decide(&cfg, &s, &st, &was, T);
+        assert_eq!(
+            (&d.items["fresh"], d.state.fresh),
+            (&was_item, Some(T - 600.0))
+        );
+        s.unread.clear();
+        let d = decide(&cfg, &s, &st, &was, T);
+        assert!(d.items.is_empty() && d.state.fresh.is_none(), "{d:?}");
     }
 
     // A watched repo's commits the running system wasn't built from wait from

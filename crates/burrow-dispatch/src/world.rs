@@ -3,13 +3,15 @@
 
 use std::collections::BTreeMap;
 use std::fs;
+use std::io::Write as _;
+use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use serde_json::Value;
 
-use crate::config::Config;
+use crate::config::{Config, Fresh};
 
 /// A unit as systemd has it.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -38,6 +40,11 @@ pub trait World {
     fn cancel(&self, repo: &str, run: u64) -> Result<(), String>;
     /// Start a burrow-events pass now (HANDLER[/OWNER/REPO]). Best effort.
     fn kick(&self, path: &str);
+    /// The instances of a template's units systemd has loaded.
+    fn instances(&self, template: &str) -> Vec<String>;
+    /// Register a runner for one job as the instance's, and start its unit
+    /// with that registration, which nothing else then holds.
+    fn fresh(&self, f: &Fresh, instance: &str) -> Result<(), String>;
 }
 
 /// The machine's own: gh (the machinery's, on the PATH), systemctl, and the
@@ -156,6 +163,74 @@ impl World for Real<'_> {
             println!("couldn't kick {path}: {e}");
         }
     }
+
+    fn instances(&self, template: &str) -> Vec<String> {
+        let out = Command::new("systemctl")
+            .args(["list-units", "--all", "--plain", "--no-legend", "--full"])
+            .arg(format!("{template}*.service"))
+            .stderr(Stdio::inherit())
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+            .unwrap_or_default();
+        instances(&out, template)
+    }
+
+    fn fresh(&self, f: &Fresh, instance: &str) -> Result<(), String> {
+        let name = format!("{}{instance}", f.prefix);
+        let out = gh(&[
+            "-X",
+            "POST",
+            &format!("orgs/{}/actions/runners/generate-jitconfig", f.owner),
+            "-f",
+            &format!("name={name}"),
+            "-F",
+            &format!("runner_group_id={}", f.group),
+            "-f",
+            &format!("labels[]={}", f.label),
+        ])
+        .map_err(|e| format!("registering {name}: {e}"))?;
+        // The registration is the job's to take: it's never printed, and
+        // waits only in a file this user alone reads until the unit has it.
+        let config = serde_json::from_slice::<Value>(&out)
+            .ok()
+            .and_then(|v| v.get("encoded_jit_config")?.as_str().map(str::to_owned))
+            .ok_or_else(|| format!("registering {name}: GitHub gave no JIT config"))?;
+        hand(&f.configs.join(instance), &config, || {
+            self.restart(&format!("{}{instance}.service", f.template), "start")
+        })
+    }
+}
+
+/// Leaves `config` at `path`, readable by this user alone, while `start`
+/// starts the unit that loads it, and then removes it, whatever came of the
+/// start. A file already there is someone else's, and stays.
+fn hand(
+    path: &Path,
+    config: &str,
+    start: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+        .and_then(|mut file| file.write_all(config.as_bytes()))
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    // Its unit loads it as it starts (Type=exec: by the time start returns).
+    let started = start();
+    let removed = fs::remove_file(path).map_err(|e| format!("{}: {e}", path.display()));
+    started.and(removed)
+}
+
+/// The instances of a template (`NAME@`) in `systemctl list-units --plain
+/// --no-legend` lines: each line's first word is a unit.
+fn instances(out: &str, template: &str) -> Vec<String> {
+    out.lines()
+        .filter_map(|l| l.split_whitespace().next())
+        .filter_map(|u| u.strip_prefix(template)?.strip_suffix(".service"))
+        .filter(|i| !i.is_empty())
+        .map(str::to_owned)
+        .collect()
 }
 
 /// `systemctl show`'s KEY=VALUE lines.
@@ -203,7 +278,45 @@ fn working(cg: &Path) -> std::io::Result<bool> {
 
 #[cfg(test)]
 mod tests {
-    use super::{shown, working};
+    use super::{hand, instances, shown, working};
+
+    // A JIT config waits only for its unit's start, readable by this user
+    // alone, and is gone after, whether the start worked or not; one
+    // already there isn't touched.
+    #[test]
+    fn hands_a_config_over() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("17-0");
+        for result in [Ok(()), Err("Access denied".to_owned())] {
+            let got = hand(&path, "secret", || {
+                let meta = std::fs::metadata(&path).unwrap();
+                assert_eq!(meta.permissions().mode() & 0o777, 0o600);
+                assert_eq!(std::fs::read_to_string(&path).unwrap(), "secret");
+                result.clone()
+            });
+            assert_eq!(got, result);
+            assert!(!path.exists());
+        }
+        std::fs::write(&path, "theirs").unwrap();
+        let got = hand(&path, "secret", || panic!("started"));
+        assert!(got.unwrap_err().contains("exists"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "theirs");
+    }
+
+    // A template's instances, and nothing else's: another template's, the
+    // template itself, or a unit that only starts like it.
+    #[test]
+    fn reads_instances() {
+        let out = "\
+fresh-runner@17-0.service loaded active running GitHub Actions runner
+fresh-runner@17-1.service loaded failed failed GitHub Actions runner
+fresh-runner@.service loaded inactive dead
+fresh-runner-old@3.service loaded active running other
+";
+        assert_eq!(instances(out, "fresh-runner@"), ["17-0", "17-1"]);
+        assert!(instances("", "fresh-runner@").is_empty());
+    }
 
     // A cgroup whose processes can't be read, or that has one /proc hides,
     // isn't taken for one at no job; one whose processes are all something
