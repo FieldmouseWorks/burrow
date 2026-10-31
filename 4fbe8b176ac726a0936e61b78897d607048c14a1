@@ -1,0 +1,65 @@
+{
+  "conary": "note v1",
+  "change": "58qbchv1bjm30fhme5f4wz4gcr",
+  "repo": {
+    "owner": "fieldmouseworks",
+    "name": "burrow"
+  },
+  "pr": 240,
+  "url": "https://github.com/fieldmouseworks/burrow/pull/240",
+  "summary": "flake-check: a PR that changes only docs skips the gate and the proofs",
+  "task": "https://claude.ai/code/project/chan_01Ad4f4oDXfFTCEzLHzMTD8q?thread=cmsg_01Ad4f4oDXfFTCEzLHzMTD8q44tUrWuRekRs3fR3f6j9A6",
+  "author": {
+    "kind": "agent",
+    "login": "TusanHomichi",
+    "session": "https://claude.ai/code/session_01BkHcyEnVW8sqvYR8o1Cd9h"
+  },
+  "landing": {
+    "revision": "d93e4c2b84e2ba95f29137a1b4b678961ede068d5a2b57a71a127e1a787717ca",
+    "before": "1ed1a34fffa0db3e21f969589095a39be92bcab1",
+    "after": "4fbe8b176ac726a0936e61b78897d607048c14a1",
+    "by": {
+      "kind": "status",
+      "login": "fieldmouseworks-steward[bot]"
+    },
+    "at": 1793457843271
+  },
+  "evidence": [
+    {
+      "kind": "ci",
+      "check": "check / lane into main",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/41207110067/job/124554342074"
+    },
+    {
+      "kind": "ci",
+      "check": "check / commits",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/41207110067/job/124554341960"
+    },
+    {
+      "kind": "ci",
+      "check": "rust-first / python",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/41207110096/job/124554341947"
+    },
+    {
+      "kind": "ci",
+      "check": "rust-first (#240)",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/41207110096"
+    },
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/41207110067/job/124554365682"
+    },
+    {
+      "kind": "ci",
+      "check": "agents",
+      "result": "pass",
+      "source": "status agents"
+    }
+  ]
+}
