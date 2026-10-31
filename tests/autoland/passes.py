@@ -399,11 +399,12 @@ R.hook_projects([{"repo": "sam/r"}])
 assert TRIED == [("api", "repos/mallory/x/hooks")], TRIED
 os.remove(f"{tmp}/state/repo-eve_p.json")
 os.remove(f"{tmp}/state/repo-mallory_x.json")
-# A clone whose repo GitHub has no more (deleted) gets no hook either, and
-# its old one is forgotten: it went with the repo. That's said once, and
+# A clone whose repo GitHub has no more (deleted, or out of the App's reach:
+# GitHub answers both with a 404) gets no hook either. That's said once, and
 # nothing is asked of GitHub on the passes after; a day later the repo is
-# looked up first, quietly, and its hooks asked for only once it's back
-# (restored).
+# looked up first, quietly, and its hooks asked for only once it's back. The
+# hook it had stays on record, so back, that's the hook it keeps: moved to
+# the URL by its id, not a second one added.
 SAID, LOOKED, HOOKS_ASKED, MISSING = [], [], [], {"repos/sam/gone"}
 log_kept, fresh_kept = R.log, C.fresh
 R.log = lambda *a: SAID.append(" ".join(str(x) for x in a))
@@ -419,7 +420,9 @@ def looked_up(path, etag=None):
 def gone_hooks(*a, **k):
     if a[:2] == ("api", "repos/sam/gone/hooks"):
         HOOKS_ASKED.append(C.NOW)
-        return None if "repos/sam/gone" in MISSING else []  # gh's 404, which gh() logs
+        if "repos/sam/gone" in MISSING:
+            return None  # gh's 404, which gh() logs
+        return [{"id": 4, "config": {"url": "https://old.example.org/burrow/hook"}}]
     return gh_kept(*a, **k)
 
 
@@ -432,7 +435,7 @@ assert R.hook_projects([{"repo": "sam/r"}]) == [{"repo": "sam/gone"}]
 assert HOOKS_ASKED == [T] and LOOKED == ["repos/sam/gone"] and WROTE == [], (HOOKS_ASKED, LOOKED, WROTE)
 assert SAID == [f"sam/gone: GitHub has no such repo, so its clone in {S.CFG['projectsDir']} gets no webhook; "
                 "looked up again daily"], SAID
-assert C.load("repo-sam_gone.json", None) == {"hookAt": T, "unreached": "gone"}
+assert C.load("repo-sam_gone.json", None) == {"hook": "h", "hookId": 4, "hookAt": T, "unreached": "gone"}
 SAID.clear()
 LOOKED.clear()
 for at in (T + 600, T + 3600, T + 86400 + 1, T + 86400 + 600):
@@ -444,9 +447,10 @@ LOOKED.clear()
 C.NOW = T + 2 * (86400 + 1)
 R.hook_projects([{"repo": "sam/r"}])
 assert LOOKED == ["repos/sam/gone"] and HOOKS_ASKED == [T, C.NOW], (LOOKED, HOOKS_ASKED)
-assert [x for x in WROTE if "hooks" in x] == ["api -X POST repos/sam/gone/hooks --input -"], WROTE
-assert SAID == ["sam/gone: adding the webhook", "sam/gone: on GitHub again"], SAID
-assert "unreached" not in C.load("repo-sam_gone.json", None) and C.load("repo-sam_gone.json", None)["hook"]
+assert [x for x in WROTE if "hooks" in x] == ["api -X PATCH repos/sam/gone/hooks/4 --input -"], WROTE
+assert SAID == ["sam/gone: on GitHub again"], SAID
+back = C.load("repo-sam_gone.json", None)
+assert "unreached" not in back and back["hookId"] == 4 and back["hook"] != "h", back
 os.remove(f"{tmp}/state/repo-sam_gone.json")
 R.log = log_kept
 C.gh, C.projects = gh_kept, projects_kept
@@ -462,16 +466,19 @@ C.save("repo-sam_was.json", {"hook": "h", "hookId": 9, "other": 2})
 # sam/once was renamed to sam/r too, but GitHub doesn't answer the lookup:
 # the old path may lead to sam/r, so nothing is deleted until it does.
 C.save("repo-sam_once.json", {"hook": "h", "hookId": 9})
-# sam/deleted is gone from GitHub, and took its hook with it: its file lets
-# go, once, with nothing to delete.
-C.save("repo-sam_deleted.json", {"hook": "h", "hookId": 6, "other": 3})
+# GitHub has no sam/hidden the App can see: deleted, or out of its reach,
+# which GitHub doesn't tell apart. Its hook stays on record, looked up again
+# a day later, said once; once the App can see it again, the hook comes off.
+C.save("repo-sam_hidden.json", {"hook": "h", "hookId": 6, "other": 3})
+SAID.clear()
+R.log = lambda *a: SAID.append(" ".join(str(x) for x in a))
 NAMES = {"repos/sam/R": "sam/r", "repos/sam/was": "sam/r", "repos/sam/old": "sam/old", "repos/sam/stuck": "sam/stuck"}
 
 
 def names(path, etag=None):
     if path in NAMES:
         return None, {"full_name": NAMES[path]}
-    if path == "repos/sam/deleted":
+    if path == "repos/sam/hidden":
         raise C.Gone(f"gh api {path}: gh: Not Found (HTTP 404)")
     raise C.Unavailable(f"gh api {path}: gh: HTTP 502")
 
@@ -489,19 +496,26 @@ assert C.load("repo-sam_r.json", None)["hookId"] == 9
 assert C.load("repo-sam_R.json", None) == {}
 assert C.load("repo-sam_was.json", None) == {"other": 2}
 assert C.load("repo-sam_once.json", None) == {"hook": "h", "hookId": 9, "unhookTried": T}
-assert C.load("repo-sam_deleted.json", None) == {"other": 3}
+hidden = {"hook": "h", "hookId": 6, "other": 3, "unhookTried": T, "unreached": "gone"}
+assert C.load("repo-sam_hidden.json", None) == hidden
 WROTE.clear()
 R.unhook_gone([{"repo": "sam/r"}])
 assert WROTE == [], WROTE
 C.NOW = T + 86400 + 1
 R.unhook_gone([{"repo": "sam/r"}])
 assert WROTE == ["api -X DELETE repos/sam/stuck/hooks/8"], WROTE
+assert C.load("repo-sam_hidden.json", None) == {**hidden, "unhookTried": C.NOW}
+assert [x for x in SAID if "sam/hidden" in x] == [
+    "sam/hidden: GitHub has no such repo the App can see, so its webhook stays on record; looked up again daily"], SAID
 NAMES["repos/sam/once"] = "sam/r"
+NAMES["repos/sam/hidden"] = "sam/hidden"
 C.NOW = T + 2 * (86400 + 1)
 WROTE.clear()
 R.unhook_gone([{"repo": "sam/r"}])
 assert C.load("repo-sam_once.json", None) == {}
 assert "DELETE repos/sam/once" not in " ".join(WROTE), WROTE
+assert "api -X DELETE repos/sam/hidden/hooks/6" in WROTE and C.load("repo-sam_hidden.json", None) == {"other": 3}, WROTE
+R.log = log_kept
 FAIL.clear()
 C.gh, C.fresh = gh_kept, fresh_kept
 print("hooks: ok")

@@ -390,7 +390,9 @@ def hook_projects(repos):
     there too, and a clone whose repo GitHub has no more (deleted, or out of
     the App's reach) gets none. Either is said once, then left alone until a
     day later, when it's tried again (a gone one by looking the repo up,
-    quietly), and the rest still get theirs. Returns them all, for unhook_gone to
+    quietly), and the rest still get theirs. GitHub answers a deleted repo
+    and one the App lost access to alike, so the hook's record stays: back,
+    the repo's hook is the one it had. Returns them all, for unhook_gone to
     keep: a hook whose repo couldn't be asked about stays on."""
     if DRY:
         return []
@@ -417,9 +419,6 @@ def hook_projects(repos):
                     C.fresh(f"repos/{repo}")
         except C.Gone:
             why = GONE
-            # A deleted repo's hooks went with it.
-            for k in ("hook", "hookId"):
-                st.pop(k, None)
         except C.Unavailable as e:  # GitHub didn't answer: nothing new is known
             log(f"{repo}: its webhook: {e}")
             why = was
@@ -447,10 +446,11 @@ def unhook_gone(repos):
     archived, out of the owners), off them: their deliveries would start
     passes over nothing, and the URL has no business there. One that can't
     be taken off (no admin any more, say), or whose name GitHub doesn't
-    answer for, is tried again a day later. A repo GitHub has no more
-    (deleted) took its hooks with it, so its file just lets go, once. A
-    renamed repo leaves its old state file behind, and GitHub answers the old
-    name with the new one: that hook is the one hook() adopted under the new
+    answer for, is tried again a day later. GitHub answers a deleted repo
+    and one the App can't reach any more alike, so the hook stays on record
+    and is looked up again a day later too, but said only once. A renamed
+    repo leaves its old state file behind, and GitHub answers the old name
+    with the new one: that hook is the one hook() adopted under the new
     name, so the old file lets go of it instead."""
     if DRY:
         return
@@ -466,21 +466,19 @@ def unhook_gone(repos):
         now = off = None
         try:
             with C.acting_for(repo):
-                try:
-                    now = C.fresh(f"repos/{repo}")[1]
-                    gone = str(now.get("full_name", "")).lower() not in live
-                except C.Gone:
-                    gone = deleted = True
-                    log(f"{repo}: GitHub has no such repo, and its webhook went with it")
-                else:
-                    deleted = False
-                    if gone:
-                        log(f"{repo}: no longer seen to, taking its webhook off")
-                off = deleted or gone and C.write(
-                    "api", "-X", "DELETE", f"repos/{repo}/hooks/{st['hookId']}", check=False) is not None
+                now = C.fresh(f"repos/{repo}")[1]
+                st.pop("unreached", None)
+                gone = str(now.get("full_name", "")).lower() not in live
+                if gone:
+                    log(f"{repo}: no longer seen to, taking its webhook off")
+                off = gone and C.write("api", "-X", "DELETE", f"repos/{repo}/hooks/{st['hookId']}", check=False) is not None
+        except C.Gone:
+            if st.get("unreached") != GONE:
+                log(f"{repo}: GitHub has no such repo the App can see, so its webhook stays on record; looked up again daily")
+            st["unreached"] = GONE
         except RuntimeError as e:  # the App isn't on its owner (any more), or GitHub didn't answer
             log(f"{repo}: {e}")
-        if not off and (now is None or gone):
+        if now is None or (gone and not off):
             # Not known to be gone (the old path may lead to a live repo), or
             # its hook wouldn't come off.
             st["unhookTried"] = C.NOW
