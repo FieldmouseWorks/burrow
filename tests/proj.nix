@@ -3,7 +3,7 @@
 # --first goes ahead but can't starve a turn that has waited long, that a
 # pipeline job's every turn, in one of the pipeline's own repos, takes the
 # slot kept for them when the rest are full, and one in a lead repo goes
-# ahead of the others, while one anywhere else goes as --first and says so
+# ahead of the others, while one anywhere else goes as a steward job and says so
 # (pick.sh's own check has how origins are told apart), that a job run
 # --unstick takes a slot of its own, every turn of it, while every other one
 # is held and turns wait in line, and waits only for another --unstick turn
@@ -74,7 +74,7 @@ pkgs.testers.runNixOSTest {
         # that binds before the slots run out (pick.sh's own check has those).
         maxJobs = 3;
         pipelineSlots = 1;
-        maxJobsPerProject = 2;
+        maxJobsPerProject = 3;
         # The VM is small: only the slot count holds jobs back here.
         minFreeMemory = 0;
         jobMemoryMax = "128M";
@@ -655,9 +655,9 @@ pkgs.testers.runNixOSTest {
             proj(f"stop {j}")
         machine.wait_until_succeeds(f"su - dev -c 'proj state {c}' | grep -x done", timeout=120)
 
-    with subtest("a pipeline job anywhere else goes as --first, and says so in proj status and its turn's journal"):
+    with subtest("a pipeline job anywhere else goes as a steward job, and says so in proj status and its turn's journal"):
         q = proj('run --pipeline ib "sleep 1"')
-        demoted = "asked as --pipeline, but its project has no origin: it goes as --first"
+        demoted = "asked as --pipeline, but its project has no origin: it goes as a steward job"
         listed = proj("status")
         assert f"[{demoted}]" in listed, listed
         # A line a job, whatever columns it has: each starts with its id.

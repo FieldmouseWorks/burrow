@@ -82,7 +82,7 @@ got=$(wc -l <"$tmp/git.log")
 [ "$got" -le 3 ] || fail "a look ran git $got times for 3 projects"
 [ "$(grep -c '^wait' <<<"$seen")" = 60 ] || fail "a look lost waiters: $seen"
 grep -q "^wait$T$jobs/.queue/2-1000-job0${T}pipeline$T$tmp/burrow\$" <<<"$seen" || fail "job0 as a pipeline one in burrow: $seen"
-grep -q "^wait$T$jobs/.queue/2-1002-job2${T}first$T$tmp/web\$" <<<"$seen" || fail "job2 as first in web: $seen"
+grep -q "^wait$T$jobs/.queue/2-1002-job2${T}steward$T$tmp/web\$" <<<"$seen" || fail "job2 as steward in web: $seen"
 
 # The forks don't grow with the line.
 line_of_size 3
@@ -159,7 +159,7 @@ rm -rf "${jobs:?}/.queue" "${jobs:?}/.slots"
 mkdir -p "$jobs/.queue" "$jobs/.slots"
 sleep 3 # so no place is left of the shell above
 MAX_JOBS=1 PIPELINE_SLOTS=0
-export -f look look_due note_next waiter_alive take_slot pick picked place class line_of github_repo origin listed flake_project spare
+export -f look look_due note_next waiter_alive take_slot pick within_share picked place class line_of github_repo origin listed flake_project spare
 export jobs NEXT_FRESH LOOK_EVERY MAX_JOBS PIPELINE_SLOTS
 exec {held}>"$jobs/.slots/1"
 flock -n "$held"
@@ -218,7 +218,7 @@ kill "${pids[@]}" 2>/dev/null || true
 wait "${pids[@]}" 2>/dev/null || true
 line_of_size 4
 got=$(in_line | awk '{print $1, $2}' | paste -sd,)
-[ "$got" = "job0 lead,job3 lead,job1 pipeline,job2 first" ] || fail "in_line: $got"
+[ "$got" = "job0 lead,job3 lead,job1 pipeline,job2 steward" ] || fail "in_line: $got"
 [ "$(in_queue)" = 4 ] || fail "in_line changed the line"
 in_line | sed -n 1p | grep -qE '^job0 +lead +[0-9]+m[0-9]{2}s +.*/burrow$' || fail "in_line's row: $(in_line | sed -n 1p)"
 

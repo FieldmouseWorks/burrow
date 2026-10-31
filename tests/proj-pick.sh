@@ -51,8 +51,29 @@ case_ "p 2" "normal /src/x" free free free "p pipeline /src/b"
 case_ "b 3" "normal /src/psiv" "first /src/psiv" free free "a normal /src/psiv" "b normal /src/lok"
 case_ "" "normal /src/psiv" "normal /src/psiv" free free "a first /src/psiv"
 # A pipeline repo's pipeline jobs don't count against it, and aren't held by it.
-case_ "a 3" "pipeline /src/remi" "normal /src/remi" free free "a normal /src/remi"
+case_ "a 3" "pipeline /src/remi" "normal /src/remi" free free "a steward /src/remi"
 case_ "p 3" "normal /src/remi" "normal /src/remi" free free "p pipeline /src/remi"
+# The last of a project's share stays free for its steward turns, whatever else
+# is in line and however a turn got to first (run --first, or by waiting).
+PER_PROJECT=4 MAX_JOBS=6
+case_ "" "normal /src/psiv" "normal /src/psiv" "normal /src/psiv" free free "pipeline /src/remi" "a normal /src/psiv"
+case_ "" "first /src/psiv" "normal /src/psiv" "normal /src/psiv" free free "pipeline /src/remi" "a first /src/psiv"
+case_ "s 4" "normal /src/psiv" "normal /src/psiv" "normal /src/psiv" free free "pipeline /src/remi" "a normal /src/psiv" "s steward /src/psiv"
+# One look holds its own choices to it too, and another project goes by.
+case_ "a 1${NL}b 2${NL}c 3${NL}s 4${NL}o 5" free free free free free "pipeline /src/remi" "a normal /src/psiv" "b normal /src/psiv" "c normal /src/psiv" "d normal /src/psiv" "s steward /src/psiv" "o normal /src/lok"
+# Steward turns may use the whole share, and stop there.
+case_ "s 4" "steward /src/psiv" "steward /src/psiv" "steward /src/psiv" free free "pipeline /src/remi" "s steward /src/psiv"
+case_ "s 5" "normal /src/psiv" "normal /src/psiv" "normal /src/psiv" "pipeline /src/remi" free "pipeline /src/remi" "s steward /src/psiv"
+case_ "" "normal /src/psiv" "normal /src/psiv" "normal /src/psiv" "steward /src/psiv" free "pipeline /src/remi" "s steward /src/psiv"
+# Steward turns held leave the others the rest of the share.
+case_ "a 4" "steward /src/psiv" "normal /src/psiv" "normal /src/psiv" free free "pipeline /src/remi" "a normal /src/psiv"
+PER_PROJECT=1
+# A share of one still goes to a normal turn with no steward turn in line, and
+# to a steward turn ahead of it when there is one.
+case_ "a 1" free free free free free "pipeline /src/remi" "a normal /src/psiv"
+case_ "s 1" free free free free free "pipeline /src/remi" "s steward /src/psiv" "a normal /src/psiv"
+case_ "" "normal /src/psiv" free free free free "pipeline /src/remi" "a normal /src/psiv"
+PER_PROJECT=2 MAX_JOBS=4
 # Projects are told apart whole, spaces and all; a turn whose project can't be
 # read is in none.
 case_ "b 3" "normal /src/my web" "normal /src/my web" free free "a normal /src/my web" "b normal /src/my"
@@ -69,7 +90,7 @@ case_ "p 4" "lead /src/burrow" "lead /src/burrow" "lead /src/burrow" free "l lea
 # With none of those in line it takes the pipeline's slot as a pipeline turn
 # does, counts against no cap, and holds none of its project's.
 case_ "l 4" "normal /src/burrow" "normal /src/burrow" "normal /src/z" free "a normal /src/web" "l lead /src/burrow"
-case_ "a 3" "lead /src/burrow" "normal /src/burrow" free free "a normal /src/burrow"
+case_ "a 3" "lead /src/burrow" "normal /src/burrow" free free "a steward /src/burrow"
 # With no slot free nobody goes, lead or not; of two lead turns, the first in
 # line goes first.
 case_ "" "normal /src/x" "normal /src/y" "normal /src/z" "pipeline /src/b" "l lead /src/burrow"
@@ -95,9 +116,9 @@ case_ "p 6${NL}a 5" "normal /src/x" "normal /src/y" "normal /src/z" "first /src/
   "p pipeline /src/remi" "a normal /src/web" "b normal /src/lok"
 # PER_PROJECT counts the slots this look hands out: a project stops at its cap
 # and those behind it go by.
-case_ "a 1${NL}b 2${NL}d 3" free free free free free free \
+PER_PROJECT=3 case_ "a 1${NL}b 2${NL}d 3" free free free free free free \
   "a normal /src/web" "b first /src/web" "c normal /src/web" "d normal /src/lok"
-case_ "a 1${NL}d 2" free free "normal /src/web" free free free \
+PER_PROJECT=3 case_ "a 1${NL}d 2" free free "normal /src/web" free free free \
   "a normal /src/web" "c normal /src/web" "d normal /src/lok"
 # The pipeline's slot stays the other pipeline turns' whoever is ahead of them:
 # a turn behind the lead one gets no slot that would push it onto theirs.
@@ -169,7 +190,7 @@ case_ "p 3" "- -" "lead /src/burrow" free "lead /src/burrow" "p pipeline /src/re
 
 # A job run with --pipeline is a pipeline one only in a project of one of the
 # pipeline's own repos, told by its clone's origin: on GitHub, in any form git
-# takes, any case. Anywhere else it goes as --first, so pick holds it to its
+# takes, any case. Anywhere else it goes as a steward job, so pick holds it to its
 # project's cap and off the pipeline's slots: one repo's PRs can't fill the
 # machine.
 export PIPELINE="Sam/Burrow sam/box" LEAD="" FLAKE=/nowhere
@@ -235,9 +256,9 @@ cls() {
 }
 cls p normal pipeline
 cls p first pipeline
-cls d normal first
-cls d "" first
-cls o normal first
+cls d normal steward
+cls d "" steward
+cls o normal steward
 cls n first first
 cls n normal normal
 cls n "" normal
@@ -253,7 +274,7 @@ plc() {
   [ "$got" = "$3$T$4" ] || { echo "FAIL: place $1 $2: wanted '$3 $4', got '${got//$T/ }'" >&2; exit 1; }
 }
 plc 2-17-p-1-x p pipeline 0-17-p-1-x
-plc 0-17-d-1-x d first 1-17-d-1-x
+plc 0-17-d-1-x d steward 1-17-d-1-x
 plc 1-17-p-1-x p pipeline 0-17-p-1-x
 plc 0-17-p-1-x p pipeline 0-17-p-1-x
 plc 2-17-n-1-x n normal 2-17-n-1-x
@@ -272,10 +293,10 @@ for j in t f; do
 done
 dem p ""
 dem n ""
-dem d "asked as --pipeline, but its origin, github.com/sam/psiv, isn't in pipelineRepos: it goes as --first"
-dem t "asked as --pipeline, but its origin, github.com/sam/psiv, isn't in pipelineRepos: it goes as --first"
-dem f "asked as --pipeline, but its origin isn't a GitHub repo's: it goes as --first"
-dem o "asked as --pipeline, but its project has no origin: it goes as --first"
+dem d "asked as --pipeline, but its origin, github.com/sam/psiv, isn't in pipelineRepos: it goes as a steward job"
+dem t "asked as --pipeline, but its origin, github.com/sam/psiv, isn't in pipelineRepos: it goes as a steward job"
+dem f "asked as --pipeline, but its origin isn't a GitHub repo's: it goes as a steward job"
+dem o "asked as --pipeline, but its project has no origin: it goes as a steward job"
 
 # A lead repo's pipeline jobs (LEAD, among PIPELINE, any case) are lead ones,
 # in the same place in line as pipeline ones (pick takes them first); its
@@ -287,7 +308,7 @@ echo "$tmp/scp" >"$tmp/jobs/b/project"
 cls p normal lead
 cls p first lead
 cls b normal pipeline
-cls d normal first
+cls d normal steward
 cls n normal normal
 plc 2-17-p-1-x p lead 0-17-p-1-x
 plc 0-17-b-1-x b pipeline 0-17-b-1-x
@@ -306,7 +327,7 @@ echo "$tmp/psiv" >"$tmp/jobs/v/project"
 echo "$tmp/homelab" >"$tmp/jobs/w/project"
 PIPELINE='' FLAKE=$tmp/homelab/
 cls u normal pipeline
-cls v normal first
+cls v normal steward
 cls w normal normal
 dem u ""
 case_ "u 4" "normal $tmp/homelab" "normal $tmp/homelab" "normal $tmp/x" free \
@@ -323,7 +344,7 @@ for flake in "$tmp/homelab" "$tmp//homelab/" "$tmp/./homelab" "$tmp/jobs/../home
     echo "$proj" >"$tmp/jobs/w/project"
     PIPELINE='' LEAD='' FLAKE=$flake
     cls u normal pipeline
-    cls v normal first
+    cls v normal steward
     cls w normal normal
     dem u ""
     case_ "u 4" "normal $proj" "normal $proj" "normal $tmp/x" free \
@@ -338,7 +359,7 @@ mkdir -p "$tmp/jobs/e"
 for pair in "$tmp/gone|$tmp/gone" "|" "|$tmp/homelab" "$tmp/homelab|"; do
   printf '%s\n' "${pair#*|}" >"$tmp/jobs/e/project"
   PIPELINE='' LEAD='' FLAKE=${pair%%|*}
-  cls e normal first
+  cls e normal steward
 done
 
 echo "proj-pick: ok"
