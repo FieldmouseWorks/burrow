@@ -272,11 +272,13 @@ let
     # sentence` (house/rules.md): "deps: update foo to v1.5". The PR title is
     # the subject the steward squashes onto main, and the house check fails a PR
     # whose title isn't. Left to itself Renovate guesses from each repo's
-    # history, and config:recommended's package rules type it fix or chore,
-    # so a package rule below has the final word on the type.
+    # history, and config:recommended's preset types it fix or chore in package
+    # rules that a run merges after this config's own, so no rule here can
+    # outrank them: the preset is ignored instead.
     semanticCommits = "enabled";
     semanticCommitType = "deps";
     semanticCommitScope = null;
+    ignorePresets = [ ":semanticPrefixFixDepsChoreOthers" ];
     prConcurrentLimit = 20;
 
     # Three days before a release counts: hijacked npm and crates releases are
@@ -364,12 +366,6 @@ let
         matchUpdateTypes = [ "lockFileMaintenance" ];
         matchManagers = [ "nix" ];
         minimumReleaseAgeBehaviour = "timestamp-optional";
-      }
-      {
-        # config:recommended's own rules type a dependency fix and the rest
-        # chore; in the house style every update is "deps:".
-        matchPackageNames = [ "*" ];
-        semanticCommitType = "deps";
       }
     ] ++ lib.optional (rcfg.trustedOwners != [ ]) {
       # A dependency on a repo of trustedOwners' (a pinned workflow, an
