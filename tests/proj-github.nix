@@ -177,6 +177,12 @@
       assert status == 1 and "couldn't read https://github.com/o/r/pull/99 from GitHub" in out, (status, out)
       machine.fail(f"test -e /data/dev/jobs/{e}/await.next")
       machine.fail(f"test -e /data/dev/jobs/{e}/end.next")
+      # Nor when only the last thing it asks for can't be had.
+      machine.succeed("mv /tmp/gh/repos_o_r_commits_abc_check-runs /tmp/gh/check-runs.kept")
+      status, out = machine.execute(f"su - dev -c 'PROJ_JOB={e} proj await https://github.com/o/r/pull/5' 2>&1")
+      assert status == 1 and "couldn't read https://github.com/o/r/pull/5 from GitHub" in out, (status, out)
+      machine.fail(f"test -e /data/dev/jobs/{e}/await.next")
+      machine.succeed("mv /tmp/gh/check-runs.kept /tmp/gh/repos_o_r_commits_abc_check-runs")
       machine.succeed(f"su - dev -c 'PROJ_JOB={e} proj await https://github.com/o/r/pull/5'")
       assert machine.succeed(f"cut -f3 /data/dev/jobs/{e}/await.next").strip().startswith("{"), machine.succeed(f"cat /data/dev/jobs/{e}/await.next")
       machine.succeed(f"rm /data/dev/jobs/{e}/await.next /data/dev/jobs/{e}/end.next")

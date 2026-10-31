@@ -503,6 +503,9 @@ target() {
 # shared with everything else under the login.
 fingerprint() { # repo n
   local issue comments pr sha reviews status checks
+  # gh failing in a pipeline fails it: jq on nothing says nothing, and exits 0.
+  local -
+  set -o pipefail
   issue=$("$GH" api "repos/$1/issues/$2") || return
   # Comments on the issue or PR, but not proj-inbox's own (MARK): a job
   # awaiting its own issue would wake on every answer the inbox posts there.
