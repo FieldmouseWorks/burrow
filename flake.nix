@@ -45,7 +45,8 @@
       # burrow's own programs, one Cargo workspace (crates/): their package
       # and their gate, built for every platform lib/project.nix knows. Its
       # tests include the shared workflows' (crates/burrow-workflows), which
-      # read these files and run git, jq and nix.
+      # read these files and run git, jq and nix; proj's clone repos to read
+      # their origins.
       crates = self.lib.project {
         inherit self;
         rust = {
@@ -288,29 +289,11 @@
         proj-clock = import ./tests/proj-clock.nix { inherit self pkgs; };
         # A switch reaches the turns already waiting in line, each in its place.
         proj-deployed = import ./tests/proj-deployed.nix { inherit self pkgs; };
-        # Who takes a free slot: the pipeline's own (only its own repos'
-        # pipeline jobs), and each project's cap.
-        proj-pick = pkgs.runCommand "proj-pick-check" { nativeBuildInputs = [ pkgs.shellcheck pkgs.git ]; } ''
-          shellcheck -s bash ${./modules/proj/pick.sh} ${./tests/proj-pick.sh}
-          bash ${./tests/proj-pick.sh} ${./modules/proj/pick.sh}
-          touch $out
-        '';
-        # What a look at the line costs, and who gets to skip one.
-        proj-line = pkgs.runCommand "proj-line-check" { nativeBuildInputs = [ pkgs.shellcheck pkgs.git pkgs.strace pkgs.util-linux ]; } ''
-          shellcheck -s bash ${./modules/proj/line.sh} ${./tests/proj-line.sh}
-          bash ${./tests/proj-line.sh} ${./modules/proj/pick.sh} ${./modules/proj/line.sh}
-          touch $out
-        '';
-        # What each job waits on, as the stall watchdog hears it.
-        proj-waits = pkgs.runCommand "proj-waits-check" { nativeBuildInputs = [ pkgs.shellcheck pkgs.jq pkgs.util-linux ]; } ''
-          shellcheck -s bash ${./modules/proj/waits.sh} ${./tests/proj-waits.sh}
-          bash ${./tests/proj-waits.sh} ${./modules/proj/waits.sh}
-          touch $out
-        '';
-        # When a job is over, so its scratch goes, worktrees and all.
-        proj-scratch = pkgs.runCommand "proj-scratch-check" { nativeBuildInputs = [ pkgs.shellcheck pkgs.git ]; } ''
-          shellcheck -s bash ${./modules/proj/scratch.sh} ${./tests/proj-scratch.sh}
-          bash ${./tests/proj-scratch.sh} ${./modules/proj/scratch.sh}
+        # The example's proj reads the config its module writes (a field the
+        # binary doesn't know fails it), and a job it doesn't have is failed.
+        proj-config = pkgs.runCommand "proj-config-check" { } ''
+          got=$(${self.nixosConfigurations.example.config.burrow.tools.proj}/bin/proj state no-such-job)
+          [ "$got" = failed ] || { echo "proj state said: $got"; exit 1; }
           touch $out
         '';
         # The steward and its reviewers, with stand-ins for gh, git's remote and
