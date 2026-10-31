@@ -545,14 +545,16 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
             settle("pending", f"Settled, but no Claude job could judge it ({why})", "Couldn't start a Claude job to judge it")
 
     def prove():
-        """Only checks that run on a machine, not in CI, are left. Those
-        with a proofBuilds attribute go first, built by the steward itself
-        (proofs.build), no Claude job; the rest, once they've passed, a
+        """The reviewers are done, and checks that run on a machine, not in
+        CI, are left. Those with a proofBuilds attribute go first, built by
+        the steward itself (proofs.build), no Claude job, while CI still
+        runs (build_early); the rest, once CI and the builds have passed, a
         Claude job runs on this head and records their verdicts. Either
         starts once its repo's proofSlots have room for it (one started
         again too), or it has nothing new to build; with nothing to build
         at all, neither: the verdicts are taken from the store (proofs.py)."""
         builds = [c for c in ci_names if c in rc["proofBuilds"]]
+        beside = [c for c in ci_names if c not in machine]  # CI still running
         checks = builds or ci_names
         names = ", ".join(checks)
         if builds:
@@ -566,7 +568,8 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
         def running_now():
             skipped = "; nothing new to build, so it skipped the line" if st.get("provedFree") == head else ""
             busy = f"building {names} here" if builds else at_work("proved", doing)
-            settle("pending", f"Settled; {busy}{skipped}"[:140])
+            ci_too = f", CI ({', '.join(beside)}) beside it" if beside else ""
+            settle("pending", f"Settled; {busy}{ci_too}{skipped}"[:140])
 
         # What this proof is: a build or a Claude job, of which checks, each
         # built from which attribute. This head's proof so far was another
@@ -738,6 +741,10 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
     gate = one_way(pr, rc, moved)
     renovate = pr["headRefName"].startswith("renovate/")
     proof_only = ci == "pending" and bool(ci_names) and all(c in machine for c in ci_names)
+    # A check the steward builds itself costs no Claude job, so it needn't
+    # wait for CI to pass: it starts once the reviewers are done, and builds
+    # while CI runs rather than after it. A Claude job's check still waits.
+    build_early = ci == "pending" and any(c in rc["proofBuilds"] for c in ci_names)
     # A minor dependency PR a Claude job fixed carries Claude's code, which no
     # reviewer has read (and Renovate won't merge); a bot's PR that changes a
     # workflow beyond repinning its actions changes the gate. Either goes
@@ -808,7 +815,7 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
             settle("pending", "Major update; waiting for renovate-sweep's verdict on this head", wait=waits.SWEEP)
         elif held:
             judged("a Claude job was asked to judge this head", DEP_SEEN)
-        elif proof_only:
+        elif proof_only or build_early:
             prove()
         elif ci == "pending":
             settle("pending", "Dependency update, CI pending")
@@ -876,7 +883,7 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
                  "redFixed", ours=not swept)
     elif held:
         judged("a Claude job was asked to judge this head", PAST_LIMIT if capped else REVIEWED)
-    elif proof_only:
+    elif proof_only or build_early:
         prove()
     elif ci == "pending":
         settle("pending", "Settled; waiting for CI: " + ", ".join(ci_names)[:90])

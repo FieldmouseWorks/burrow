@@ -99,8 +99,9 @@ assert f"curl -fsS -d '' {R.CFG['kick']}/OWNER/REPO" in stuck["--body"] and "aut
 assert all(x in stuck["--body"] for x in ("sam/r#3", "sam/r#4", "sam/r#5")), stuck["--body"]
 assert not any(x in stuck["--body"] for x in ("sam/r#1", "sam/r#2", "sam/r#7")), stuck["--body"]
 
-# A stale branch the sweep couldn't archive is the pipeline's trouble, not
-# the owner's call: archived, it would have gone on its own.
+# A stale branch the steward couldn't archive, or one GitHub wouldn't let
+# it delete, is the pipeline's trouble, not the owner's call: let through,
+# it would have gone on its own.
 assert B.UNKEPT not in R.OWNERS and B.UNDELETED not in R.OWNERS
 
 # Every kind the owner settles is one the steward lists: a renamed one
