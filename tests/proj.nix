@@ -26,8 +26,10 @@
 # sets and if the App goes while it waits, or not at all, and that a job
 # past its memory cap is killed by its own cgroup's limit rather than the
 # machine running out, that what's killed is the command that outgrew it,
-# the turn carrying on to its answer, and that a turn killed before it
-# answers can still be continued, in its own session. Its GitHub side, proj
+# the turn carrying on to its answer, that a run killed for memory before it
+# answers (Claude itself, as a rule) is carried on in its own session, twice
+# a turn at most, and that a turn killed before it answers can still be
+# continued, in its own session. Its GitHub side, proj
 # await, proj-watch and proj-inbox, is proj-github.nix's part of the same
 # script.
 #
@@ -691,14 +693,27 @@ pkgs.testers.runNixOSTest {
         log = proj(f"log {f}")
         assert log == 'the answer\n\n(turn 1 ended in an error)\n["refused"]', log
 
-    with subtest("a job past its memory cap is killed by its own limit"):
+    with subtest("a job past its memory cap is killed by its own limit, and carries on"):
         e = proj("run web eat")
-        machine.wait_until_succeeds(f"su - dev -c 'proj state {e}' | grep -x failed", timeout=120)
+        machine.wait_until_succeeds(f"su - dev -c 'proj state {e}' | grep -x done", timeout=120)
         machine.succeed("journalctl -k | grep -q 'Memory cgroup out of memory'")
+        assert "--resume eat" in machine.succeed("cat /tmp/args"), machine.succeed("cat /tmp/args")
+
+    with subtest("a run whose Claude outgrows its cap carries on in its own session, twice a turn at most"):
+        b = proj("run web bloat")
+        machine.wait_until_succeeds(f"su - dev -c 'proj state {b}' | grep -x done", timeout=120)
+        assert "--resume bloat" in machine.succeed("cat /tmp/args"), machine.succeed("cat /tmp/args")
+        assert proj(f"log {b}").startswith("did Your last run was killed for memory"), proj(f"log {b}")
+        # Killed each time it's carried on: the third kill ends the turn.
+        machine.succeed("touch /tmp/again")
+        b = proj("run web bloat")
+        machine.wait_until_succeeds(f"su - dev -c 'proj state {b}' | grep -x failed", timeout=180)
+        machine.succeed("rm /tmp/again")
+        runs = machine.succeed(f"grep -c '\"session_id\":\"bloat\"' /data/dev/jobs/{b}/1.jsonl").strip()
+        assert runs == "3", runs
 
     with subtest("a turn killed before it answers can still be continued, in its own session"):
-        # As its unit goes when systemd-oomd kills it, or when Claude itself is
-        # what outgrows the job's memory cap.
+        # As its unit goes when systemd-oomd kills it.
         e = proj('run web "named 600"')
         machine.wait_until_succeeds(f"su - dev -c 'proj state {e}' | grep -x running", timeout=120)
         machine.wait_until_succeeds(f"grep -q named /data/dev/jobs/{e}/1.jsonl", timeout=60)
