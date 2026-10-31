@@ -11,9 +11,9 @@
 # the terminal it wants and you can look at it: `tmux -L rc-NAME attach`.
 #
 # Nothing about a server needs a hand at its terminal: claude-rc-serve
-# (remote-control/serve.sh) trusts the folder before Claude would ask. What's
-# left is a one-time `claude remote-control` run by hand on a new machine, to
-# log in and say yes to Remote Control itself.
+# (remote-control/serve.sh) trusts the folder (claude-trust) before Claude
+# would ask. What's left is a one-time `claude remote-control` run by hand on a
+# new machine, to log in and say yes to Remote Control itself.
 #
 # This is also how a claude.ai project reaches a project: a thread there starts
 # a session on that project's server and talks to it (docs/front-door.md).
@@ -37,7 +37,7 @@ let
 
   serve = pkgs.writeShellApplication {
     name = "claude-rc-serve";
-    runtimeInputs = [ pkgs.coreutils pkgs.findutils pkgs.jq ];
+    runtimeInputs = [ pkgs.coreutils config.burrow.tools.claude-trust ];
     text = ''
       PROJECTS=${lib.escapeShellArg projectsDir}
       FLAKE=${lib.escapeShellArg config.burrow.flake}

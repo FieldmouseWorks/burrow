@@ -1,12 +1,13 @@
 //! The account through Claude Code itself, as the machine's user: the meter
 //! from its SDK's `get_usage` request, and the reset through its own
 //! `/limit-reset weekly`, typed into a Claude Code of our own in a tmux, the
-//! way the owner would at a terminal. It keys nothing but that command, the
-//! folder-trust answer for its own folder and the confirmation of the reset
-//! (with the arrows that bring each dialog's cursor to its yes), each only
-//! once the screen shows what it answers; anything else ends the
-//! session, and ending Claude Code never uses a reset. Once its yes is
-//! pressed, the session lives until Claude Code has its last word on it.
+//! way the owner would at a terminal. It keys nothing but that command and
+//! the confirmation of the reset, each only once the screen shows what it
+//! answers; anything else ends the session, and ending Claude Code never uses
+//! a reset. Its folder is trusted in Claude Code's config before a pass
+//! starts (claude-trust, from the module), so a question about trusting it
+//! ends the session too. Once its yes is pressed, the session lives until
+//! Claude Code has its last word on it.
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
@@ -116,53 +117,21 @@ impl ClaudeCode {
         if let Err(e) = tmux.start(&self.dir, &self.claude) {
             return Reset::NotPressed(e);
         }
-        // Up to its input box, answering only its question about trusting
-        // its own folder. That one opens on its no, and refuses keys that
-        // come too soon after it opens, as the reset's does.
-        let (mut moves, mut presses) = (0, 0);
-        let mut pressed: Option<Instant> = None;
-        loop {
-            let seen = tmux.wait(|screen| {
-                if prompt_ready(screen) {
-                    return Some(None);
-                }
-                let cursor = asks_trust(screen)?;
-                // A press it shows no sign of yet may still be taken.
-                if pressed.is_some_and(|at| at.elapsed() < REFUSED) {
-                    return None;
-                }
-                Some(Some(cursor))
-            });
-            match seen {
-                Ok(None) => break,
-                Ok(Some(Cursor::OnYes)) if presses < PRESSES => {
-                    presses += 1;
-                    thread::sleep(PAUSE);
-                    if let Err(e) = tmux.keys(&["Enter"]) {
-                        return Reset::NotPressed(e);
-                    }
-                    pressed = Some(Instant::now());
-                }
-                Ok(Some(cursor)) if cursor != Cursor::OnYes && moves < 3 => {
-                    moves += 1;
-                    let key = if cursor == Cursor::Below {
-                        "Up"
-                    } else {
-                        "Down"
-                    };
-                    thread::sleep(PAUSE);
-                    if let Err(e) = tmux.keys(&[key]) {
-                        return Reset::NotPressed(e);
-                    }
-                    thread::sleep(POLL);
-                }
-                Ok(Some(_)) => {
-                    return Reset::NotPressed(
-                        "couldn't answer its question about trusting its folder".to_owned(),
-                    );
-                }
-                Err(e) => return Reset::NotPressed(format!("Claude Code didn't come up: {e}")),
+        // Up to its input box.
+        match tmux.wait(|screen| {
+            if prompt_ready(screen) {
+                Some(true)
+            } else {
+                asks_trust(screen).then_some(false)
             }
+        }) {
+            Ok(true) => {}
+            Ok(false) => {
+                return Reset::NotPressed(
+                    "Claude Code asked whether to trust its folder, which claude-trust marks trusted before each pass: the unit's journal says why it didn't".to_owned(),
+                );
+            }
+            Err(e) => return Reset::NotPressed(format!("Claude Code didn't come up: {e}")),
         }
 
         if let Err(e) = tmux.literal(COMMAND).and_then(|()| tmux.keys(&["Enter"])) {
@@ -306,7 +275,20 @@ fn read_reset(screen: &str) -> Screen {
     // Only its confirmation has its yes, so it counts wherever it's drawn.
     let lines: Vec<&str> = screen.lines().collect();
     if let Some(yes) = lines.iter().position(|l| l.contains(YES)) {
-        return Screen::Confirm(cursor(&lines, yes));
+        // The choices' cursor, not the input box's (a `❯` under a rule) nor
+        // COMMAND's echo.
+        let cursor = (0..lines.len()).find(|&i| {
+            lines[i].trim_start().starts_with('❯')
+                && !(i > 0 && is_rule(lines[i - 1]))
+                && !lines[i].trim_end().ends_with(COMMAND)
+        });
+        return Screen::Confirm(match cursor {
+            Some(c) if c == yes => Cursor::OnYes,
+            Some(c) if c > yes => Cursor::Below,
+            // No cursor drawn yet reads as above: Down puts it on the first
+            // choice, and the next look sees where.
+            _ => Cursor::Above,
+        });
     }
     let Some(lines) = answer(screen) else {
         return Screen::Busy;
@@ -400,33 +382,10 @@ fn is_rule(line: &str) -> bool {
     !line.is_empty() && line.chars().all(|c| c == '─')
 }
 
-/// It's asking whether to trust the folder it was started in: where its
-/// cursor is against the yes, or None when it isn't.
-fn asks_trust(screen: &str) -> Option<Cursor> {
-    if prompt_ready(screen) {
-        return None;
-    }
-    let lines: Vec<&str> = screen.lines().collect();
-    let yes = lines.iter().position(|l| l.contains(TRUST))?;
-    Some(cursor(&lines, yes))
-}
-
-/// Where a dialog's cursor is against its yes, the line YES of LINES: the
-/// choices' cursor, not the input box's (a `❯` under a rule) nor COMMAND's
-/// echo.
-fn cursor(lines: &[&str], yes: usize) -> Cursor {
-    let at = (0..lines.len()).find(|&i| {
-        lines[i].trim_start().starts_with('❯')
-            && !(i > 0 && is_rule(lines[i - 1]))
-            && !lines[i].trim_end().ends_with(COMMAND)
-    });
-    match at {
-        Some(c) if c == yes => Cursor::OnYes,
-        Some(c) if c > yes => Cursor::Below,
-        // No cursor drawn yet reads as above: Down puts it on the first
-        // choice, and the next look sees where.
-        _ => Cursor::Above,
-    }
+/// It's asking whether to trust the folder it was started in, wherever its
+/// cursor is.
+fn asks_trust(screen: &str) -> bool {
+    !prompt_ready(screen) && screen.contains(TRUST)
 }
 
 /// A tmux server of our own, for one Claude Code.
@@ -550,7 +509,7 @@ mod tests {
     #[test]
     fn its_input_box() {
         assert!(prompt_ready(UP));
-        assert_eq!(asks_trust(UP), None);
+        assert!(!asks_trust(UP));
         // Claude Code 2.1.314's, as remi's tmux showed it: its no first, and
         // the cursor on it.
         let trust = "
@@ -569,16 +528,12 @@ mod tests {
 
  Enter to confirm · Esc to cancel
 ";
-        assert!(!prompt_ready(trust));
-        assert_eq!(asks_trust(trust), Some(Cursor::Above));
-        let on_yes = trust
-            .replace("❯ No, exit", "  No, exit")
-            .replace("  Yes, I trust", "❯ Yes, I trust");
-        assert_eq!(asks_trust(&on_yes), Some(Cursor::OnYes));
-        let no_below = "\n ❯ Yes, I trust this folder\n   No, exit\n"
-            .replace("❯ Yes", "  Yes")
-            .replace("  No, exit", "❯ No, exit");
-        assert_eq!(asks_trust(&no_below), Some(Cursor::Below));
+        assert!(asks_trust(trust) && !prompt_ready(trust));
+        assert!(asks_trust(
+            &trust
+                .replace("❯ No, exit", "  No, exit")
+                .replace("  Yes, I trust", "❯ Yes, I trust")
+        ));
     }
 
     #[test]
