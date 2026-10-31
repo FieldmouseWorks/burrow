@@ -441,11 +441,22 @@ def unland(repo, pr):
     return off and out
 
 
+TAKEN = "A folder in the way of a repo's checkout"  # the stuck issue's heading for it
+TAKEN_FILE = "taken.json"
+
+
 def repo_cfg(repo):
     """The defaults, with this repo's overrides from config.repos on top."""
     c = dict(CFG["defaults"])
     c.update(CFG["repos"].get(repo, {}))
     return c
+
+
+def origin(path):
+    """The GitHub repo (owner/name) the clone at path has for its origin, or
+    None. Never the URL itself, which can hold a token: only the repo it names."""
+    p = subprocess.run(["git", "-C", path, "remote", "get-url", "origin"], capture_output=True, text=True)
+    return github_repo(p.stdout.strip())
 
 
 def projects(strict=False):
@@ -497,6 +508,80 @@ def project_dir(repo):
     return next((d for d, url in projects() if url.lower() == repo.lower()), None)
 
 
+def github_name(repo):
+    """What GitHub calls repo now, following a rename or transfer; None when
+    it won't say. Asked as its owner's installation, then as each owner's: the
+    App may be long gone from the owner a repo moved away from, and only the
+    one it moved to can see a private repo's new name."""
+    for who in dict.fromkeys([repo.split("/")[0], *CFG["owners"]]):
+        try:
+            with acting_for(who):
+                now = gh("api", f"repos/{repo}")
+        except Unavailable as e:
+            log(f"{repo}: what GitHub calls it now: {e}")
+            return None
+        except RuntimeError:  # not there as this owner, or the App isn't on it
+            continue
+        if isinstance(now, dict) and now.get("full_name"):
+            return now["full_name"]
+    return None
+
+
+def follow_renames(seen=()):
+    """Clones whose origin has an old name of their repo, repointed at the
+    current one, so that everything reading a clone's origin (project_dir,
+    hook_projects, proj's rank, proj-inbox) knows it for that repo. `seen`:
+    names, lower case, known to be current, which needn't be asked about."""
+    for d, url in list(projects()):
+        now = None if url.lower() in seen else github_name(url)
+        if not now or now.lower() == url.lower():
+            continue
+        path = os.path.join(CFG["projectsDir"], d)
+        raw = subprocess.run(["git", "-C", path, "remote", "get-url", "origin"], capture_output=True, text=True).stdout.strip()
+        p = subprocess.run(["git", "-C", path, "remote", "set-url", "origin", raw.replace(url, now)], capture_output=True, text=True)
+        log(f"{d}: its origin {url} is now {now}" + (", repointed" if p.returncode == 0 else f", and it wouldn't repoint: {p.stderr.strip()[-300:]}"))
+
+
+def taken(repo):
+    """What's in the way of repo's checkout, as checkout() found it, while it's
+    still there: {"folder", "origin"} (None for one with no GitHub origin), or
+    None. Nothing's asked of GitHub: a folder moved out or repointed ends it."""
+    had = load(TAKEN_FILE, {}).get(repo)
+    if not had or project_dir(repo) or not os.path.lexists(had["folder"]) or origin(had["folder"]) != had["origin"]:
+        return None
+    return had
+
+
+def taken_line(repo, had):
+    """taken()'s answer as a line of the stuck issue: the same until what's in
+    the way changes, so it's said once."""
+    theirs = f"a clone of {had['origin']}" if had["origin"] else "something with no GitHub origin"
+    return (TAKEN, repo, f"`{had['folder']}` holds {theirs}, which GitHub doesn't answer as {repo}: "
+            f"it needs its checkout there. Its jobs wait until that folder is moved out")
+
+
+def checkout(repo):
+    """Clone repo into projectsDir for a job, unless a clone under an old name
+    turns out to be it. A folder another repo's clone holds is recorded for
+    taken(), once, rather than cloned into; returns None then."""
+    follow_renames()
+    d = project_dir(repo)
+    if d:
+        return d
+    d = repo.split("/")[1]
+    path = os.path.join(CFG["projectsDir"], d)
+    # git clones into an empty folder, and into nothing else.
+    if os.path.lexists(path) and not (os.path.isdir(path) and not os.listdir(path)):
+        had = {"folder": path, "origin": origin(path)}
+        log(f"{repo}: {taken_line(repo, had)[2]}")
+        save(TAKEN_FILE, {**load(TAKEN_FILE, {}), repo: had})
+        return None
+    # The project's clone is the machine user's, for its jobs to push from as
+    # them: cloned as them, not as the App.
+    subprocess.run(["gh", "repo", "clone", repo, path], check=False)
+    return project_dir(repo)
+
+
 def rank(repo):
     """Where repo's reviews go in line, first to last: 0 for a lead repo
     (`leadRepos`, what the pipeline itself is built from), ahead of
@@ -516,12 +601,8 @@ def job(repo, task, clone=False, pipeline=True, timeout=None):
     in a slot kept for it; proj decides which. Its turns stop after timeout
     minutes (jobTimeout's by default). Returns the job id."""
     d = project_dir(repo)
-    if d is None and clone and not DRY:
-        d = repo.split("/")[1]
-        # The project's clone is the machine user's, for its jobs to push
-        # from as them: cloned as them, not as the App.
-        subprocess.run(["gh", "repo", "clone", repo, os.path.join(CFG["projectsDir"], d)], check=False)
-        d = project_dir(repo)
+    if d is None and clone and not DRY and not taken(repo):
+        d = checkout(repo)
     if d is None:
         return None
     if DRY:

@@ -121,6 +121,8 @@ def run_pass(kick):
     repos = R.discover()
     if kick is not None:
         repos = [r for r in repos if r["repo"].lower() in kick]  # GitHub's names are case-blind
+    elif not DRY:
+        C.follow_renames({r["repo"].lower() for r in repos})
     # Repos whose baseline job has started. A repo not in it gets one, a few
     # per pass so the first pass on a machine doesn't start them all at once.
     known = set(load("known.json", []))
@@ -148,14 +150,14 @@ def run_pass(kick):
             try:
                 new = R.settle_repo(r, known)
                 if (new and CFG["baselineJobs"] and started < CFG["baselinePerPass"]
-                        and C.NOW - failed.get(repo, 0) > 86400):
+                        and C.NOW - failed.get(repo, 0) > 86400 and not C.taken(repo)):
                     jid = C.job(repo, CFG["baselineTask"].replace("REPO", repo), clone=True)
                     started += 1
                     if jid:
                         log(f"{repo}: baseline job {jid}")
                         known.add(repo)
                         failed.pop(repo, None)
-                    else:
+                    elif not C.taken(repo):  # which goes on the stuck issue, below
                         log(f"{repo}: baseline job didn't start (no checkout, or proj refused); trying again tomorrow")
                         failed[repo] = C.NOW
                 elif new and not CFG["baselineJobs"]:
@@ -229,6 +231,8 @@ def run_pass(kick):
                     log(f"{repo}: its flaky tests: {e}")
                     waits.failed(repo)
                     C.wake(repo, C.NOW + 5 * MIN)  # ends: waits.failed watches the repo
+            if had := C.taken(repo):
+                mine.append(C.taken_line(repo, had))
     # This pass's wake-ups and owner's lines replace the ones it had for the
     # repos it saw; a full pass's, all of them.
     seen = {r["repo"] for r in repos}
