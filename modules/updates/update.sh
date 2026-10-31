@@ -191,7 +191,7 @@ else
   commit && changed=1
 fi
 
-if [ -z "$changed" ] && [ -z "$force" ] && { [ "$rev" = "$main" ] || [ "$(cat "$state/deployed-main" 2>/dev/null)" = "$main" ] || same_as_running; }; then
+if [ -z "$changed" ] && [ -z "$force" ] && main_runs "$main"; then
   live_at "$main" "$current"
   note current "up to date"
   exit 0
@@ -441,7 +441,7 @@ if [ "$(as_user git -C "$operator" branch --show-current 2>/dev/null)" = main ] 
   as_user git -C "$operator" pull -q --ff-only origin main || true
 fi
 
-live_at "$main" "$new"
+live_at "$(live_through "$main")" "$new"
 note ok "${live:+already }live and confirmed: $went${riding:+ (riding #$riding)}${url:+ (up as $url)}${failed[*]:+ (held back: ${failed[*]})}"
 [ -z "$BOOT" ] || ! "$BOOT" status | grep -q 'trial queued: /' ||
   echo "the new kernel boots once at the next trial window ($BOOT trial)"

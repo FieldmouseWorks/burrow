@@ -19,6 +19,17 @@ same_as_running() {
   [ "$out" = "$current" ]
 }
 
+# Whether main, $1 and checked out, is what runs: the system stamped with it,
+# the one a run put live as that main while it still runs, or one that's the
+# same apart from its stamp. Each asks of the system that runs: a run's
+# record of what it put live says nothing once anyone has switched since (a
+# rollback, or a trial boot that fell back).
+main_runs() {
+  [ "$rev" = "$1" ] ||
+    { [ "$(cat "$state/deployed-main" 2>/dev/null)" = "$1" ] && [ "$(cat "$state/deployed" 2>/dev/null)" = "$current" ]; } ||
+    same_as_running
+}
+
 # Whether $1, HEAD's system, runs already: that very system, or, when HEAD is
 # a commit this run made (a bump, or the merge that rides its PR on main),
 # the same one apart from its stamp. Each run makes that commit afresh, at
@@ -42,6 +53,17 @@ already_live() {
     echo up
   else
     echo hold
+  fi
+}
+
+# How far main is live once a run has put HEAD live: up to $1, the main it
+# started from, or, when HEAD is on main as it went live (pushed as it was,
+# or main itself), up to HEAD.
+live_through() {
+  if [ "$(cat "$state/deployed-main" 2>/dev/null)" = "$(git_ rev-parse HEAD)" ]; then
+    git_ rev-parse HEAD
+  else
+    echo "$1"
   fi
 }
 

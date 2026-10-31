@@ -184,6 +184,9 @@ fn seen(out: &mut String, cfg: &Config, snap: &Snapshot) {
             ),
         };
     }
+    for (repo, why) in &snap.unknown {
+        let _ = writeln!(out, "{repo}: not known to be live: {why}");
+    }
     for (repo, err) in &snap.unread {
         let _ = writeln!(out, "{repo}: couldn't read it: {err}");
     }

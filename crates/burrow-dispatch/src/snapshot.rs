@@ -9,6 +9,7 @@ use std::fs;
 use serde_json::Value;
 
 use crate::config::{Config, Runner};
+use crate::rules::short;
 use crate::world::{Unit, World};
 
 #[derive(Clone, Debug, Default)]
@@ -21,6 +22,10 @@ pub struct Snapshot {
     pub pushes: BTreeMap<String, Vec<Run>>,
     /// Each watched repo with a running commit to compare, by OWNER/REPO.
     pub deploys: BTreeMap<String, Behind>,
+    /// The flake's own repo when HOST-update hasn't found its main live in
+    /// the system that runs, and why: what's live is unknown until a run of
+    /// HOST-update finds it.
+    pub unknown: BTreeMap<String, String>,
     /// HOST-update, and what its last run said.
     pub update: Option<(Unit, String)>,
     /// The repos GitHub couldn't be read for, and why: what's known of them
@@ -123,13 +128,15 @@ pub fn take(cfg: &Config, world: &dyn World) -> Snapshot {
             .unwrap_or_else(|| "nothing yet".to_owned());
         snap.update = Some((world.unit(&d.unit), said));
         let mut compare: Vec<(&String, String)> = Vec::new();
-        // Its own repo, when HOST-update has said how far main is live in
-        // the system that runs; a record or a system that can't be read is
-        // a repo it can't read.
+        // Its own repo, at how far HOST-update found main live in the system
+        // that runs; a record or a system that can't be read is a repo it
+        // can't read.
         if let Some(own) = &d.own {
-            match live(&d.live, world) {
-                Ok(Some(main)) => compare.push((own, main)),
-                Ok(None) => {}
+            match live(&d.live, &d.unit, world) {
+                Ok(Live::At(main)) => compare.push((own, main)),
+                Ok(Live::Unknown(why)) => {
+                    snap.unknown.insert(own.clone(), why);
+                }
                 Err(e) => {
                     snap.unread.insert(own.clone(), e);
                 }
@@ -277,15 +284,26 @@ fn default_branch(world: &dyn World, repo: &str) -> Result<String, String> {
         .ok_or_else(|| format!("{repo} has no default branch"))
 }
 
-/// The commit HOST-update last found its own repo's main live up to, from
-/// its record at `path`, when that record is of the system that runs: none
-/// without a record (no run has made one yet) or for a system switched to
-/// since (HOST-update hasn't looked at that one). A record or a system that
-/// can't be read is an error, so a wait isn't dropped on a failed read.
-fn live(path: &std::path::Path, world: &dyn World) -> Result<Option<String>, String> {
+/// How far HOST-update found its own repo's main live.
+enum Live {
+    /// Up to this commit, in the system that runs.
+    At(String),
+    /// Not for the system that runs, and why: no run has recorded it yet,
+    /// or the system was switched since, by anyone.
+    Unknown(String),
+}
+
+/// What HOST-update's (`unit`'s) record at `path` says of the system that
+/// runs. A record or a system that can't be read is an error, so a wait
+/// isn't dropped on a failed read.
+fn live(path: &std::path::Path, unit: &str, world: &dyn World) -> Result<Live, String> {
     let text = match fs::read(path) {
         Ok(t) => t,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(Live::Unknown(format!(
+                "{unit} hasn't recorded main live in any system yet"
+            )));
+        }
         Err(e) => return Err(format!("{}: {e}", path.display())),
     };
     let v: Value = serde_json::from_slice(&text).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -295,8 +313,16 @@ fn live(path: &std::path::Path, world: &dyn World) -> Result<Option<String>, Str
             .filter(|s| !s.is_empty())
             .ok_or_else(|| format!("{}: no {k}", path.display()))
     };
-    let (main, running) = (field("main")?, field("running")?);
-    Ok((running == world.running()?).then(|| main.to_owned()))
+    let (main, recorded) = (field("main")?, field("running")?);
+    let running = world.running()?;
+    Ok(if recorded == running {
+        Live::At(main.to_owned())
+    } else {
+        Live::Unknown(format!(
+            "{unit} hasn't found main live in the system that runs ({running}) since it was switched to; it found it live up to {} in {recorded}",
+            short(main)
+        ))
+    })
 }
 
 /// What the repo's default branch has that `running` doesn't.
@@ -589,9 +615,9 @@ pub mod tests {
 
     // A watched repo's commits past the running one: how many, the oldest's
     // time and the newest; none when it's live. The flake's own repo is
-    // compared at the commit HOST-update last found main live up to, and
-    // isn't without that record, or when the record is of a system other
-    // than the one that runs; a record or a system that can't be read leaves
+    // compared at the commit HOST-update last found main live up to; without
+    // that record, or with one of a system other than the one that runs,
+    // what's live is unknown; a record or a system that can't be read leaves
     // the repo unread.
     #[test]
     fn deploys() {
@@ -644,16 +670,26 @@ pub mod tests {
             snap.update.as_ref().unwrap().1,
             "ok at 2026-10-29T15:52:00+00:00: deployed"
         );
-        // A system switched to since, by anyone: HOST-update hasn't looked.
+        assert!(snap.unknown.is_empty());
+        // A system switched to since, by anyone: unknown until HOST-update
+        // looks, never taken for live.
         w.running = Some("/nix/store/y".into());
         let snap = take(&cfg, &w);
         assert!(!snap.deploys.contains_key("sam/box") && !snap.unread.contains_key("sam/box"));
+        assert_eq!(
+            snap.unknown["sam/box"],
+            "box-update hasn't found main live in the system that runs (/nix/store/y) since it was switched to; it found it live up to aaa in /nix/store/x"
+        );
         assert_eq!(snap.deploys["sam/kit"].count, 0);
-        // No record yet.
+        // No record yet: unknown too.
         w.running = Some("/nix/store/x".into());
         std::fs::remove_file(&live).unwrap();
         let snap = take(&cfg, &w);
         assert!(!snap.deploys.contains_key("sam/box") && !snap.unread.contains_key("sam/box"));
+        assert_eq!(
+            snap.unknown["sam/box"],
+            "box-update hasn't recorded main live in any system yet"
+        );
         // A record or a system that can't be read isn't taken for live.
         std::fs::write(&live, r#"{"main": "aaa"}"#).unwrap();
         let snap = take(&cfg, &w);

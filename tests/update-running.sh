@@ -181,3 +181,44 @@ live_at "$(git_ rev-parse main)" /nix/store/sys-b
   fail "live_at wrote $(cat "$state/live.json")"
 [ ! -e "$state/live.json.new" ] || fail "live_at left its temporary file"
 echo "live_at: ok"
+
+# Main runs: stamped with it, put live as it by a run whose system still
+# runs, or the same apart from its stamp. Not once the box has been switched
+# back since to an older main's system (a rollback, a trial boot's
+# fallback), whatever the record of what a run put live says.
+git_ checkout -q -B update main
+live
+main=$(git_ rev-parse main)
+: >"$tmp/nix.log"
+main_runs "$main" || fail "main_runs on a system stamped with main"
+[ ! -s "$tmp/nix.log" ] || fail "main_runs asked nix about a system stamped with main"
+old_current=$current old_rev=$rev
+landed 140 system.nix v3
+git_ checkout -q -B update main
+live
+main=$(git_ rev-parse main) main_current=$current main_rev=$rev
+echo "$main" >"$state/deployed-main"
+echo "$current" >"$state/deployed"
+rev=$old_rev # a system stamped with something else, as one put up without a switch is
+main_runs "$main" || fail "main_runs on main as a run put it live"
+current=$old_current rev=$old_rev # rolled back to the older main's system
+if main_runs "$main"; then fail "main_runs on a system rolled back from main"; fi
+landed 150 README v5
+git_ checkout -q -B update main
+current=$main_current rev=$main_rev # main's system, stamped with an older commit of it
+main_runs "$(git_ rev-parse main)" || fail "main_runs on main's system under an older stamp"
+echo "main_runs: ok"
+
+# How far main is live after a run: up to HEAD once it's on main as it went
+# live, otherwise only up to the main the run started from (HEAD rebased
+# before its push landed, a PR in a train repo, a push refused).
+started=$(git_ rev-parse main)
+git_ checkout -q -B update main
+commit 160 flake.lock v5
+git_ rev-parse HEAD >"$state/deployed-main"
+[ "$(live_through "$started")" = "$(git_ rev-parse HEAD)" ] || fail "live_through with HEAD pushed as it went live"
+echo "$started" >"$state/deployed-main"
+[ "$(live_through "$started")" = "$started" ] || fail "live_through with HEAD not on main"
+rm "$state/deployed-main"
+[ "$(live_through "$started")" = "$started" ] || fail "live_through with nothing recorded"
+echo "live_through: ok"
