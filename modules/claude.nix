@@ -133,8 +133,17 @@ in
   config = lib.mkIf cfg.enable {
     environment.systemPackages = [ cfg.package ];
 
-    environment.etc."claude-code/managed-settings.json".text = builtins.toJSON managed;
-    environment.etc."claude-code/CLAUDE.md".text = cfg.machineMd;
+    # Real files, not /etc's usual symlinks: Claude Code watches this folder and
+    # follows what it finds there, and a link has it walking the Nix store for
+    # as long as it runs.
+    environment.etc."claude-code/managed-settings.json" = {
+      text = builtins.toJSON managed;
+      mode = "0444";
+    };
+    environment.etc."claude-code/CLAUDE.md" = {
+      text = cfg.machineMd;
+      mode = "0444";
+    };
 
     # Logins and history live in ~/.claude.
 

@@ -309,6 +309,17 @@
           ${self.nixosConfigurations.example.config.systemd.services.burrow-watchdog.serviceConfig.ExecStart} status
           touch $out
         '';
+        # Claude Code watches /etc/claude-code and follows what it finds: a
+        # symlink there has it walking the Nix store for as long as it runs.
+        claude-etc = let
+          etc = self.nixosConfigurations.example.config.environment.etc;
+          names = builtins.filter (pkgs.lib.hasPrefix "claude-code/") (builtins.attrNames etc);
+          links = builtins.filter (name: etc.${name}.mode == "symlink") names;
+        in pkgs.runCommand "claude-etc-check" { } ''
+          ${pkgs.lib.optionalString (names == [ ]) ''echo "no claude-code files in /etc"; exit 1''}
+          ${pkgs.lib.optionalString (links != [ ]) ''echo "symlinks into the store: ${toString links}"; exit 1''}
+          touch $out
+        '';
         # The steward's tools reach a pass however it's started: by hand or
         # a Claude job (`autoland-steward kick OWNER/REPO`), with no openssl,
         # gh or proj of its own, gets them from the wrapper, ahead of its own

@@ -217,13 +217,17 @@ in
       pkgs.htop
       pkgs.vim
     ];
-    environment.etc."claude-code/managed-settings.json".text = builtins.toJSON {
-      permissions.defaultMode = "bypassPermissions";
-      skipDangerousModePermissionPrompt = true;
-      env = {
-        DISABLE_AUTOUPDATER = "1";
-        # Telemetry and error reports only need more domains on the allowlist.
-        CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1";
+    # A real file, as in modules/claude.nix: a link has Claude walking the store.
+    environment.etc."claude-code/managed-settings.json" = {
+      mode = "0444";
+      text = builtins.toJSON {
+        permissions.defaultMode = "bypassPermissions";
+        skipDangerousModePermissionPrompt = true;
+        env = {
+          DISABLE_AUTOUPDATER = "1";
+          # Telemetry and error reports only need more domains on the allowlist.
+          CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1";
+        };
       };
     };
 
