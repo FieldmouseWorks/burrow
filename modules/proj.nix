@@ -337,6 +337,8 @@ in
       message = "burrow.proj.inbox.authors: name who may hand Claude issues.";
     }];
     environment.systemPackages = [ inbox ];
+    # The steward has it forget a repo GitHub's name now means another of.
+    burrow.tools.proj-inbox = inbox;
     # A repo's issue events start its look (proj-inbox@OWNER-REPO), and so
     # do the start and end of each of its jobs' turns (proj run --kick): it
     # posts the answer once one has ended.

@@ -197,7 +197,7 @@ with open(f"{tmp}/config.json", "w") as f:
         "owners": ["sam"], "exclude": [], "context": "review-settled", "rulesets": True, "keepBranches": [],
         "app": {"id": 7, "slug": "steward"},
         "baselineJobs": False, "baselinePerPass": 1, "authors": ["sam"], "bots": ["dependabot", "renovate", "workers"], "machinery": None,
-        "stateDir": f"{tmp}/state", "majorKey": f"{tmp}/sweep.key", "projectsDir": f"{tmp}/none", "renovateEmail": "bot@renovateapp.com", "proj": "proj", "jobTimeout": 60, "jobIdle": 20, "reviewTimeout": 30, "owner": "Sam", "cleanBranches": False,
+        "stateDir": f"{tmp}/state", "majorKey": f"{tmp}/sweep.key", "projectsDir": f"{tmp}/none", "jobsDir": f"{tmp}/jobs", "renovateEmail": "bot@renovateapp.com", "proj": "proj", "jobTimeout": 60, "jobIdle": 20, "reviewTimeout": 30, "owner": "Sam", "cleanBranches": False,
         "labels": {"hold": "hold", "owner": "needs-owner", "first": "first", "waiting": {"releaseAge": "waiting: release age", "proofSlot": "waiting: proof slot", "reviewer": "waiting: reviewer"}}, "notify": {"repo": "", "assignee": "", "label": "autoland"}, "inbox": {"enable": False, "label": "claude", "unstickLabel": "unstick", "authors": ["sam"]},
         "dashboard": {"enable": False, "waitDays": 4, "errorDays": 1, "title": "Dependency Dashboard",
                       "renovateKick": "http://127.0.0.1:9/kick/renovate", "renovate": None,
@@ -264,7 +264,7 @@ def sh(*a, cwd=None):
 
 
 head = "a" * 40
-WROTE, JOBS, POSTED = [], [], []
+WROTE, JOBS, POSTED, FORGOT = [], [], [], []
 DESCRIBED = []  # the description each posted review was shown (its fingerprint)
 COMMITS = {}  # a PR's commits' author emails, by number, as `pr view --json commits` gives them (None: the ask fails)
 PR_DIFF = {"v": ""}  # what `gh pr diff` gives
@@ -503,7 +503,7 @@ def fresh_pr_state():
         os.makedirs(f"{tmp}/state/{d}")
 
 
-REAL = {"job": C.job}  # the steward's own, for the checks of what it runs
+REAL = {"job": C.job, "stop_job": C.stop_job, "forget_issues": C.forget_issues}  # the steward's own, for the checks of what it runs
 
 
 def stand_in():
@@ -513,5 +513,6 @@ def stand_in():
     C.job = job
     C.job_state = lambda jid: STATES.get(jid, "running")
     C.stop_job = stop_job
+    C.forget_issues = FORGOT.append
     V.queue = queue
     V.post = post
