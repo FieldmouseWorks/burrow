@@ -125,8 +125,9 @@ take_slot() {
   local id=$1 n=$2 class=$3 me='' when f pid got i lk new looked=0 project LC_ALL=C
   mkdir -p "$jobs/.queue" "$jobs/.slots"
   # This turn says it has its slot only under its job's lock (took_slot), so
-  # proj withdraw may stop it while it waits; a turn on a proj from before
-  # that can't be until it hands over to this one, never having said so.
+  # proj withdraw may stop it while it waits. On a proj from before that, it
+  # can't be, never having said so: until it hands over to this one, or from
+  # the moment this one hands it over (unmark).
   : >"$jobs/$id/$n.withdrawable"
   # The place a proj before this one left, if it handed over.
   for f in "$jobs/.queue"/*-"$id"; do
@@ -157,6 +158,7 @@ take_slot() {
     # A switch since the last pass: on with the deployed proj, in this place,
     # whether or not a look is due (one the note skips can wait LOOK_EVERY).
     if successor; then
+      unmark "$id" "$n"
       # Mid-exec its cmdline reads empty, and a look clearing out dead places
       # would take this one for gone: no look runs until it's through (_exec).
       exec 9>"$jobs/.slots/.lock"
@@ -244,6 +246,19 @@ took_slot() {
   exec {jl}>>"$jobs/$1/lock"
   flock "$jl"
   echo "$3" >"$jobs/$1/$2.slot"
+  exec {jl}>&-
+}
+
+# Say job ID's turn N may be withdrawn no more, under the job's lock, so none
+# is stopped on this proj's word once another has it: before a hand-over, to a
+# proj that may take its slot without that lock (one from before took_slot,
+# after a switch back to it). One that can be withdrawn says so again itself,
+# at the top of its take_slot.
+unmark() {
+  local jl
+  exec {jl}>>"$jobs/$1/lock"
+  flock "$jl"
+  rm -f "$jobs/$1/$2.withdrawable"
   exec {jl}>&-
 }
 
