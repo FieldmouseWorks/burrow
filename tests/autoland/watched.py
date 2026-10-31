@@ -23,7 +23,7 @@ S.R.publish = published.append
 S.R.unhook_gone = lambda repos: None
 S.R.hook_projects = lambda repos: []
 REPOS = ["sam/r", "sam/q"]
-S.R.discover = lambda: [{"repo": r} for r in REPOS]
+S.R.discover = lambda: [{"repo": r, "default": "main"} for r in REPOS]
 OPEN = {}  # each repo's open PRs, or None: reading them fails
 
 

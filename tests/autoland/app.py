@@ -218,7 +218,7 @@ def list_gh(*a, **k):
     ASKED.append((C._for[-1] if C._for else None, a[2]))
     return {"sam": [{"id": "R_1", "nameWithOwner": "sam/r", "isPrivate": True, "defaultBranchRef": {"name": "trunk"},
                      "createdAt": T0},
-                    {"nameWithOwner": "sam/empty", "isPrivate": False, "defaultBranchRef": None, "createdAt": T0},
+                    {"id": "R_3", "nameWithOwner": "sam/empty", "isPrivate": False, "defaultBranchRef": None, "createdAt": T0},
                     {"nameWithOwner": "sam/skip", "isPrivate": False, "defaultBranchRef": {"name": "main"}, "createdAt": T0}],
             "eve": [{"id": "R_2", "nameWithOwner": "eve/p", "isPrivate": False, "defaultBranchRef": {"name": "main"},
                      "createdAt": "2026-01-02T03:04:05Z"}]}[a[2]]
@@ -228,7 +228,10 @@ kept = (C.gh, C.CFG["owners"], C.CFG["exclude"])
 C.gh, C.CFG["owners"], C.CFG["exclude"] = list_gh, ["sam", "eve"], ["sam/skip"]
 found = R.discover()
 C.gh, C.CFG["owners"], C.CFG["exclude"] = kept
+# An empty repo is one too, with no default branch yet: it gets its settings
+# and hook, so its first push is heard.
 assert found == [{"repo": "sam/r", "id": "R_1", "private": True, "default": "trunk", "created": T0},
+                 {"repo": "sam/empty", "id": "R_3", "private": False, "default": None, "created": T0},
                  {"repo": "eve/p", "id": "R_2", "private": False, "default": "main", "created": "2026-01-02T03:04:05Z"}], found
 assert ASKED == [("sam", "sam"), ("eve", "eve")], ASKED
 
