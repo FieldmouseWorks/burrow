@@ -2,15 +2,18 @@
 //! checked merged with its base branch as that branch is when the job
 //! starts, not as it was when the event fired (a run that waited in the
 //! queue, or a re-run), the log names both commits, and a head that no
-//! longer merges cleanly fails the job without anything checked. The docs
-//! lane checks out and merges the same way, with the same steps. Which lane a
-//! PR takes, the train's, the docs lane or the whole gate, is lane's; here,
-//! the whole gate and the docs lane run on what the lane job says, a lane job
-//! that failed giving the whole gate, and not at all once the lane job was
-//! cancelled. A PR's newer run cancels what its last one still has going,
-//! and nothing else: not a push's run, another PR's, a sibling call with
-//! inputs of its own, or (from a title or body edit, which a retarget isn't)
-//! the same head's run.
+//! longer merges cleanly fails the job without anything checked. With legs,
+//! every leg, and the gate job after them, merges the head with the base as
+//! the lane job found it instead, dated by its parents, so all of them check
+//! one commit. The docs lane checks out and merges the same way, with the
+//! same steps. Which lane a PR takes, the train's, the docs lane or the whole
+//! gate, is lane's; here, the whole gate and the docs lane run on what the
+//! lane job says, a lane job that failed giving the whole gate, and not at
+//! all once the lane job was cancelled; with legs, the gate job once they've
+//! all passed or failed. A PR's newer run cancels what its last one still
+//! has going, and nothing else: not a push's run, another PR's, a sibling
+//! call with inputs of its own, another of its legs, or (from a title or body
+//! edit, which a retarget isn't) the same head's run.
 
 use std::path::{Path, PathBuf};
 
@@ -70,6 +73,28 @@ fn the_gate_runs_where_it_should() {
             "{case}"
         );
     }
+    // The gate job: with legs, once they've all passed or failed; never with
+    // one leg, nor once a leg was cancelled or none ran, nor once the run was.
+    for (legs, check, cancelled, verdict) in [
+        (4, "success", false, true),
+        (4, "failure", false, true),
+        (4, "cancelled", false, false),
+        (4, "skipped", false, false),
+        (4, "success", true, false),
+        (1, "success", false, false),
+        (1, "failure", false, false),
+    ] {
+        let c = ctx([
+            ("cancelled()", cancelled.into()),
+            ("inputs.legs", V::from(legs)),
+            ("needs.check.result", check.into()),
+        ]);
+        assert_eq!(
+            value(text(&jobs["gate"]["if"]), &c).truthy(),
+            verdict,
+            "{legs} legs, the legs {check}, cancelled {cancelled}"
+        );
+    }
 }
 
 /// A run, for a job's concurrency group.
@@ -84,6 +109,8 @@ struct Run {
     changes: &'static [&'static str],
     /// Inputs other than [`INPUTS`]'.
     inputs: &'static [(&'static str, &'static str)],
+    /// The check job's leg.
+    leg: u64,
 }
 
 const PUSHED: Run = Run {
@@ -94,6 +121,7 @@ const PUSHED: Run = Run {
     action: "synchronize",
     changes: &[],
     inputs: &[],
+    leg: 1,
 };
 
 /// The inputs a run is called with, unless it says otherwise.
@@ -106,6 +134,7 @@ fn inputs() -> Vec<(&'static str, V)> {
         ("inputs.build-skip", "agents".into()),
         ("inputs.docs-paths", "README.md".into()),
         ("inputs.docs-checks", "".into()),
+        ("inputs.legs", 1.into()),
     ]
 }
 
@@ -120,7 +149,7 @@ fn group(jobs: &Value, name: &str, r: &Run) -> String {
         let v = match *v {
             "true" => V::Bool(true),
             "false" => V::Bool(false),
-            v => v.into(),
+            v => v.parse::<u64>().map_or_else(|_| v.into(), V::from),
         };
         assert!(c2.insert(key, v).is_some(), "no input {k}");
     }
@@ -131,6 +160,14 @@ fn group(jobs: &Value, name: &str, r: &Run) -> String {
             if pr { r.pr.into() } else { V::Null },
         ),
         ("github.run_id", r.run.into()),
+        (
+            "matrix.leg",
+            if name == "check" {
+                r.leg.into()
+            } else {
+                V::Null
+            },
+        ),
         ("github.workflow", r.workflow.into()),
         (
             "github.event.action",
@@ -149,7 +186,7 @@ fn group(jobs: &Value, name: &str, r: &Run) -> String {
     value(text(&c["group"]), &c2).text()
 }
 
-const JOBS: [&str; 4] = ["lane", "check", "docs", "commits"];
+const JOBS: [&str; 5] = ["lane", "check", "gate", "docs", "commits"];
 const TITLE: &[&str] = &["title"];
 const BODY: &[&str] = &["body"];
 const BASE: &[&str] = &["base"];
@@ -233,6 +270,13 @@ fn only_a_prs_newer_run_cancels() {
                     ..PUSHED
                 },
             ),
+            g(
+                name,
+                Run {
+                    inputs: &[("legs", "4")],
+                    ..PUSHED
+                },
+            ),
         ];
         assert!(!others.contains(&g(name, PUSHED)), "{name}: {others:?}");
         let mut distinct = others.to_vec();
@@ -244,6 +288,22 @@ fn only_a_prs_newer_run_cancels() {
     all.sort();
     all.dedup();
     assert_eq!(all.len(), JOBS.len());
+    // A run's legs never cancel each other.
+    let mut legs: Vec<_> = (1..=4)
+        .map(|leg| {
+            g(
+                "check",
+                Run {
+                    inputs: &[("legs", "4")],
+                    leg,
+                    ..PUSHED
+                },
+            )
+        })
+        .collect();
+    legs.sort();
+    legs.dedup();
+    assert_eq!(legs.len(), 4, "{legs:?}");
     // A push or a train candidate is a run of its own: none cancels another.
     let push = Run {
         event: "push",
@@ -302,8 +362,8 @@ fn only_a_prs_newer_run_cancels() {
 }
 
 /// The checkout fetches every branch for a PR, then the merge comes before
-/// the gate checks anything, and the docs lane's job starts with the very
-/// same two steps.
+/// the gate checks anything, and the docs lane's job and the gate job start
+/// with the very same two steps.
 #[test]
 fn the_merge_comes_first() {
     let jobs = jobs();
@@ -344,11 +404,15 @@ fn the_merge_comes_first() {
             r#"
             BASE: "${{ github.event.pull_request.base.ref }}"
             HEAD_SHA: "${{ github.event.pull_request.head.sha }}"
+            LEGS: "${{ inputs.legs }}"
+            TIP: "${{ needs.lane.outputs.tip }}"
             "#
         )
     );
     // YAML aliases.
-    assert_eq!(steps(&jobs["docs"])[..2], steps(job)[..2]);
+    for other in ["docs", "gate"] {
+        assert_eq!(steps(&jobs[other])[..2], steps(job)[..2], "{other}");
+    }
 }
 
 /// GitHub: main, and a PR branch off it.
@@ -396,6 +460,12 @@ impl Repo {
     /// The checkout as the action leaves it for a PR (every branch fetched,
     /// the head checked out), then the merge step.
     fn run(&self) -> (Ran, PathBuf) {
+        self.run_legs("1", "")
+    }
+
+    /// The same, on `legs` legs, with the base's tip as the lane job found
+    /// it.
+    fn run_legs(&self, legs: &str, tip: &str) -> (Ran, PathBuf) {
         let ws = self.s.mkdtemp();
         let (origin, at) = (self.origin.to_str().unwrap(), ws.to_str().unwrap());
         self.s
@@ -403,9 +473,16 @@ impl Repo {
         self.s.git(&ws, &["checkout", "-q", "--detach", &self.head]);
         let jobs = jobs();
         let merge = script(&steps(&jobs["check"])[1]);
-        let ran = self
-            .s
-            .bash(merge, &ws, &[("BASE", "main"), ("HEAD_SHA", &self.head)]);
+        let ran = self.s.bash(
+            merge,
+            &ws,
+            &[
+                ("BASE", "main"),
+                ("HEAD_SHA", &self.head),
+                ("LEGS", legs),
+                ("TIP", tip),
+            ],
+        );
         (ran, ws)
     }
 
@@ -456,4 +533,71 @@ fn a_head_that_conflicts_with_its_base_fails() {
         ran.said()
     );
     assert!(r.parents(&ws).len() < 2);
+}
+
+/// With legs, it checks the head merged with main where the lane job found
+/// it, however main has moved since; and fails, merging nothing, when the
+/// lane job didn't say where, or where it said isn't there.
+#[test]
+fn with_legs_the_base_is_where_the_lane_job_found_it() {
+    let (r, event_base) = Repo::new();
+    r.main_moves("c", "later\n");
+    let (ran, ws) = r.run_legs("4", &event_base);
+    assert_eq!(ran.code, 0, "{}", ran.said());
+    let head = &r.head;
+    assert!(
+        ran.stdout
+            .contains(&format!("checking {head} merged with main at {event_base}")),
+        "{}",
+        ran.said()
+    );
+    assert_eq!(r.parents(&ws), [event_base, head.clone()]);
+    assert!(!ws.join("c").exists());
+    for (tip, why) in [
+        ("", "the lane job didn't say where main was"),
+        (&"0".repeat(40), "isn't in this checkout"),
+    ] {
+        let (ran, ws) = r.run_legs("4", tip);
+        assert!(
+            ran.code != 0
+                && ran.stdout.contains("::error title=No base to merge with::")
+                && ran.stdout.contains(why),
+            "{tip:?}: {}",
+            ran.said()
+        );
+        assert_eq!(r.s.git(&ws, &["rev-parse", "HEAD"]), *head);
+    }
+}
+
+/// Every leg, whenever it starts, and a leg run again, checks one commit,
+/// with one rev and lastModified: the merge is dated when the newer of the
+/// two was committed, whatever the clock says now.
+#[test]
+fn every_leg_checks_one_commit_whenever_it_starts() {
+    let (r, event_base) = Repo::new();
+    r.main_moves("c", "later\n");
+    let (first, ws) = r.run_legs("4", &event_base);
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    let (again, ws2) = r.run_legs("4", &event_base);
+    assert!(
+        first.code == 0 && again.code == 0,
+        "{} {}",
+        first.said(),
+        again.said()
+    );
+    let merged = r.s.git(&ws, &["rev-parse", "HEAD"]);
+    assert_eq!(r.s.git(&ws2, &["rev-parse", "HEAD"]), merged);
+    let newer = [event_base.as_str(), r.head.as_str()]
+        .iter()
+        .map(|c| {
+            r.s.git(&ws, &["show", "-s", "--format=%ct", c])
+                .parse::<u64>()
+                .unwrap()
+        })
+        .max()
+        .unwrap();
+    assert_eq!(
+        r.s.git(&ws, &["show", "-s", "--format=%at %ct", &merged]),
+        format!("{newer} {newer}")
+    );
 }

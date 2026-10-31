@@ -119,7 +119,10 @@ def ci_state(pr, proofs=(), moved=None, repo=None):
     status is its word on the PR, not a check of it, except its failure: CI
     failed on the head merged alone onto the default branch, which is the
     head's to fix. Only the App's counts, as with ours. A cancelled check run
-    goes by what its workflow did after it (after_cancel)."""
+    goes by what its workflow did after it (after_cancel). A workflow's
+    check run that passed while its run is still going is pending: a job
+    that needs it has no check run until it starts, so every check on the
+    head can read green a moment before one more begins."""
     nodes = pr["commits"]["nodes"]
     commit = nodes[0]["commit"] if nodes else {}
     contexts = (commit.get("statusCheckRollup") or {}).get("contexts") or {}
@@ -137,8 +140,8 @@ def ci_state(pr, proofs=(), moved=None, repo=None):
     for s in suites.get("nodes", []):
         if s["conclusion"] == "STARTUP_FAILURE":
             seen += 1
-            workflow = ((s.get("workflowRun") or {}).get("workflow") or {}).get("name") or "a workflow"
-            red.append(f"{workflow} (failed to start)")
+            flow = ((s.get("workflowRun") or {}).get("workflow") or {}).get("name") or "a workflow"
+            red.append(f"{flow} (failed to start)")
     for c in contexts.get("nodes", []):
         if c["__typename"] == "CheckRun":
             if suite(c).get("id") in stale:
@@ -152,6 +155,10 @@ def ci_state(pr, proofs=(), moved=None, repo=None):
                 pending.append(name)
             elif c["conclusion"] not in ("SUCCESS", "NEUTRAL", "SKIPPED"):
                 red.append(name)
+            elif workflow(c).get("id") is not None and suite(c).get("status") != "COMPLETED":
+                # Its run isn't over: a job that waits on this one has yet to
+                # start, as the gate's check job waits on its legs.
+                pending.append(f"{workflow(c).get('name') or 'CI'} (still running)")
         else:
             name = c["context"]
             if name == CONTEXT:
@@ -183,7 +190,9 @@ def ci_state(pr, proofs=(), moved=None, repo=None):
 # paths a PR changes, and so which lane it takes, depends on both.
 LANE, DOCS_LANE = "lane into ", "docs only into "
 # Its whole gate's job, skipped in the docs lane and on a PR the train lands.
-GATE = "check"
+# With the gate split across legs (its `legs`), each leg's job, `leg K of N`,
+# does a share of that work, and the job named check says what they found.
+GATE, LEG = "check", re.compile("leg [1-8] of [2-8]")
 
 
 def suite(c):
@@ -253,7 +262,8 @@ def job_of(c):
 def same_work(c, x):
     """Whether check run x does c's work: the same name, or, in one call of
     the shared CI, its lane, whose name a run may never have filled in, or its
-    gate, which is its whole gate's job or the docs lane's, and no other job."""
+    gate, which is its whole gate's job, a leg of it, however many legs, or
+    the docs lane's, and no other job."""
     if c["name"] == x["name"]:
         return True
     (mine, a), (theirs, b) = job_of(c), job_of(x)
@@ -263,8 +273,9 @@ def same_work(c, x):
 
 
 def gate_job(job):
-    """Whether a job's name is the shared CI's gate for a PR, in either lane."""
-    return job == GATE or job.startswith(DOCS_LANE)
+    """Whether a job's name is the shared CI's gate for a PR, in either lane,
+    or a leg of it."""
+    return job == GATE or bool(LEG.fullmatch(job)) or job.startswith(DOCS_LANE)
 
 
 def ran(c):
