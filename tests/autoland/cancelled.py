@@ -43,6 +43,14 @@ assert not landed and JOBS == [] and "waiting for CI" in status, (status, JOBS)
 assert state(old, whole(suite="s2", conclusion=CANCEL), whole(suite="s3")) == ("green", [])
 assert state(old, whole(suite="s2", conclusion=CANCEL), going("s3"))[0] == "pending"
 
+# flake.yml and flake-retarget.yml are one workflow: a retarget's run (another
+# file's id, the same name) clears the push's that it cancelled, on the same head.
+retargeted = whole(suite="s2")
+for c in retargeted:
+    c["checkSuite"]["workflowRun"]["workflow"]["id"] = "retarget-id"
+assert state(old, retargeted) == ("green", [])
+assert state(retargeted, old) == ("green", [])
+
 # Nothing stands in for a newer run that ran through. Alone, as when cancelled
 # by hand; two cancelled runs, which mustn't clear each other; another
 # workflow's green; a check run of no workflow, whose suite says nothing.

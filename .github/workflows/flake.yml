@@ -2,17 +2,12 @@
 # (flake-check.yml), taken from this checkout so a PR runs its own version.
 name: flake
 on:
-  # `edited` for a PR retargeted onto another branch: the shared workflow's
-  # run counts only for the base it judged, and which paths a PR changes,
-  # and so its lane (docs-paths below), depend on its base.
+  # A PR retargeted onto another branch runs from flake-retarget.yml.
   pull_request:
-    types: [opened, synchronize, reopened, edited]
   push:
     branches: [main]
 jobs:
   check:
-    # Of the edits, only a new base: a title or body changes nothing checked.
-    if: github.event.action != 'edited' || github.event.changes.base
     uses: ./.github/workflows/flake-check.yml
     # What the shared workflow needs to attest its result.
     permissions:

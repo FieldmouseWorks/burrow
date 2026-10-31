@@ -9,17 +9,27 @@
 //! the patterns say, and patterns that would match everything are refused.
 //! The lane's check run names the base it chose against, the docs lane's the
 //! commit the PR left that base at too, and every caller runs again when a
-//! PR's base changes.
+//! PR's base changes, from a workflow file of its own, so that a title or body
+//! edit starts no run of the required check's workflow.
 
 use std::path::{Path, PathBuf};
+
+use yaml_serde::Value;
 
 use crate::harness::{Scratch, read, repo_file, script, step, steps, workflow, write, yaml};
 
 const FLAKE_CHECK: &str = ".github/workflows/flake-check.yml";
-/// Every caller: burrow's own, and the template every project copies.
-const CALLERS: [&str; 2] = [
-    ".github/workflows/flake.yml",
-    "templates/project/.github/workflows/flake.yml",
+/// Every caller, and what runs it again for a new base: burrow's own, and the
+/// template every project copies.
+const CALLERS: [(&str, &str); 2] = [
+    (
+        ".github/workflows/flake.yml",
+        ".github/workflows/flake-retarget.yml",
+    ),
+    (
+        "templates/project/.github/workflows/flake.yml",
+        "templates/project/.github/workflows/flake-retarget.yml",
+    ),
 ];
 
 /// The names autoland gives the lane's and the docs lane's check runs
@@ -153,37 +163,68 @@ fn the_jobs_are_wired_as_autoland_reads_them() {
 /// Every caller runs again on a new base, and only on that edit: autoland
 /// counts a run only for the base it judged, and which paths a PR changes
 /// depend on its base.
+/// The jobs of a workflow that call the shared CI.
+fn calls(caller: &Value) -> Vec<(&Value, &Value)> {
+    caller["jobs"]
+        .as_mapping()
+        .expect("jobs")
+        .iter()
+        .filter(|(_, j)| {
+            j["uses"]
+                .as_str()
+                .is_some_and(|u| u.split('@').next().unwrap().ends_with("/flake-check.yml"))
+        })
+        .collect()
+}
+
+/// Autoland counts a run only for the base it judged, and which paths a PR
+/// changes depend on its base, so every caller runs again on a new base.
+/// GitHub can only filter on the `edited` action, so a title or body edit
+/// starts a run of whichever workflow takes it, and there the job skips.
+/// flake.yml mustn't be that workflow: its skipped run would be its latest, and
+/// a ruleset requiring `check / check` would stop counting the push's
+/// (consolebook#173).
 #[test]
-fn callers_run_again_on_a_new_base() {
-    for path in CALLERS {
+fn callers_run_again_on_a_new_base_from_a_file_of_their_own() {
+    for (path, retarget) in CALLERS {
         let caller = workflow(path);
-        let calls: Vec<_> = caller["jobs"]
-            .as_mapping()
-            .expect("jobs")
-            .values()
-            .filter(|j| {
-                j["uses"]
-                    .as_str()
-                    .is_some_and(|u| u.split('@').next().unwrap().ends_with("/flake-check.yml"))
-            })
-            .collect();
-        assert!(!calls.is_empty(), "{path} doesn't call flake-check.yml");
+        let mine = calls(&caller);
+        assert!(!mine.is_empty(), "{path} doesn't call flake-check.yml");
         let types = &caller["on"]["pull_request"]["types"];
         assert!(
-            types
+            !types
                 .as_sequence()
                 .is_some_and(|t| t.iter().any(|t| t == "edited")),
-            "{path}: {:?}",
+            "{path} takes `edited`: {:?}",
             caller["on"]
         );
-        for j in calls {
-            assert_eq!(
-                j["if"], "github.event.action != 'edited' || github.event.changes.base",
-                "{path}"
-            );
+        for (_, j) in &mine {
+            assert!(j.get("if").is_none(), "{path} skips: {:?}", j["if"]);
+        }
+
+        let twin = workflow(retarget);
+        assert_eq!(
+            twin["on"],
+            yaml("pull_request:\n  types: [edited]\n"),
+            "{retarget} runs on anything but `edited`"
+        );
+        // The one name is what makes a retarget supersede the push's run, and
+        // the next push the retarget's: github.workflow is in each concurrency
+        // group, and autoland reads the two as one workflow.
+        assert_eq!(twin["name"], caller["name"], "{retarget}");
+        assert_eq!(twin["permissions"], caller["permissions"], "{retarget}");
+        let its = calls(&twin);
+        assert_eq!(its.len(), mine.len(), "{retarget}");
+        // Only a new base, and otherwise the same call: the same check.
+        for ((name, j), (their_name, theirs)) in mine.iter().zip(&its) {
+            assert_eq!(name, their_name, "{retarget}");
+            assert_eq!(theirs["if"], "github.event.changes.base", "{retarget}");
+            let mut same = (*theirs).clone();
+            same.as_mapping_mut().unwrap().remove("if");
+            assert_eq!(&same, *j, "{retarget}: {name:?}");
         }
     }
-    let burrow = workflow(CALLERS[0]);
+    let burrow = workflow(CALLERS[0].0);
     assert!(
         burrow["jobs"]
             .as_mapping()

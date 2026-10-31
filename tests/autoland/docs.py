@@ -160,6 +160,14 @@ assert not landed and JOBS == [] and WAIT in status, (status, JOBS)
 # Even red, it's not this PR's red.
 status, landed = at(clean(checks=docs(conclusion="FAILURE"), files=("README.md",), base="next"))
 assert not landed and "CI is red" not in status and WAIT in status, status
+# A retarget's run comes from flake-retarget.yml, another file with the workflow's
+# name: it's that workflow's run for `next`, so the push's for main no longer holds CI up.
+retarget = whole(base="next", suite="s2")
+for c in retarget:
+    c["checkSuite"]["workflowRun"]["workflow"]["id"] = "retarget-id"
+status, _ = at(clean(checks=whole(base="main") + retarget, base="next"))
+assert "waiting for CI" not in status, status
+
 # Nothing else stands in for a run of that workflow for `next` that has
 # finished: another workflow's check run under the same job name, another
 # App's, a run of it for yet another base, or one for `next` still going.

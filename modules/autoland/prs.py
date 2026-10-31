@@ -192,8 +192,9 @@ def suite(c):
 
 
 def workflow(c):
-    """The workflow a check run's suite ran: its id and name."""
-    return (suite(c).get("workflowRun") or {}).get("workflow") or {}
+    """The workflow a check run's suite ran, by its name: flake.yml and its
+    flake-retarget.yml are one workflow, and a run of either speaks for it."""
+    return ((suite(c).get("workflowRun") or {}).get("workflow") or {}).get("name")
 
 
 def judged(c):
@@ -230,10 +231,10 @@ def after_cancel(c, contexts, stale):
     lane ran and chose this PR's base: a push's or a dispatch's run of the same
     job has no lane, and judged no PR. Jobs beside that call have no lane to
     ask for. A check run of no workflow has no other runs to go by."""
-    mine, flow = suite(c).get("id"), workflow(c).get("id")
+    mine, flow = suite(c).get("id"), workflow(c)
     if mine is None or flow is None:
         return None
-    same = [x for x in contexts if workflow(x).get("id") == flow]
+    same = [x for x in contexts if workflow(x) == flow]
     others = [x for x in same if suite(x).get("id") != mine]
     gone = {suite(x).get("id") for x in others if cancelled(x)} | stale
     done = [x for x in others if suite(x).get("status") == "COMPLETED" and suite(x).get("id") not in gone and ran(x)]
@@ -307,10 +308,9 @@ def runs(pr, repo):
     stale = {suite(c).get("id") for c, (b, fork) in said if b != base or fork is not None and fork != now} - {None}
     docs = any(fork is not None and suite(c).get("id") not in stale and c["status"] == "COMPLETED"
                and c["conclusion"] == "SUCCESS" for c, (_, fork) in said)
-    ran = {workflow(c).get("id") for c, (_, fork) in said
+    ran = {workflow(c) for c, (_, fork) in said
            if fork is None and suite(c).get("id") not in stale and suite(c).get("status") == "COMPLETED"} - {None}
-    unrun = sorted({workflow(c).get("name") or "CI" for c, _ in said
-                    if suite(c).get("id") in stale and workflow(c).get("id") not in ran})
+    unrun = sorted({workflow(c) or "CI" for c, _ in said if suite(c).get("id") in stale and workflow(c) not in ran})
     return stale, docs, unrun
 
 
