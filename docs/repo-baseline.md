@@ -9,8 +9,10 @@ as any other.
 It first sees a repo the moment it's made: GitHub tells the steward's App
 (its webhook, below), and the pass over that repo sets its settings and its
 own hook and starts the baseline job, which clones it on the machine. One
-made empty gets its settings and hook then, and the rest once its first
-push lands. Nothing about a new repo waits for the owner. A private repo's
+made empty gets its settings and hook then, but not the ruleset, which
+would turn away the push that makes its default branch; that push's pass
+adds the ruleset and starts the job. Nothing about a new repo waits for
+the owner. A private repo's
 CI still needs a runner on the machine (burrow#236).
 
 A repo made under the name of one that was deleted is a new repo too, though

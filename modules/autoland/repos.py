@@ -101,10 +101,12 @@ def settle_repo(r, known):
         st["id"] = r["id"]
         save(f"repo-{repo.replace('/', '_')}.json", st)
     # Due daily, and straight away for another App (its required checks are
-    # pinned to the one it was) or a train turned on or off (the baseline
-    # requires the train's status only while it's on).
+    # pinned to the one it was), a train turned on or off (the baseline
+    # requires the train's status only while it's on), or a repo settled
+    # empty that has its first commit now (it's due its ruleset).
+    empty = r["default"] is None
     due = (C.NOW - st.get("settings", 0) >= 86400 or st.get("app") != CFG["app"]["id"]
-           or st.get("train", False) != rc["train"])
+           or st.get("train", False) != rc["train"] or (st.get("empty", False) and not empty))
     # The labels the steward and its jobs put on PRs: without them a hold
     # can't be set, a judge can't hand a PR to the owner, no PR can go first
     # in its proof line and none can say what it waits on. Made again with
@@ -162,7 +164,10 @@ def settle_repo(r, known):
     if isinstance(pages, list):
         own = [x for page in pages for x in page if x.get("source_type") == "Repository"]
         made = True
-        if CFG["rulesets"] and rc["ruleset"] and not any(x["name"] == "baseline" for x in own):
+        # Not on a repo with no commit yet: the ruleset's checks and PR rule
+        # would turn away the push that makes its default branch, the
+        # owner's too (they bypass it only by PR). That push's pass adds it.
+        if CFG["rulesets"] and rc["ruleset"] and not empty and not any(x["name"] == "baseline" for x in own):
             log(f"{repo}: adding the baseline ruleset")
             made = C.write("api", "-X", "POST", f"repos/{repo}/rulesets", "--input", "-",
                            input=json.dumps(baseline_ruleset(rc, r["default"])), check=False) is not None
@@ -174,6 +179,10 @@ def settle_repo(r, known):
     pinned = keep_protection(repo) and rules
 
     st["settings"] = C.NOW
+    if empty:
+        st["empty"] = True
+    else:
+        st.pop("empty", None)
     if pinned:
         st["app"] = CFG["app"]["id"]
         st["train"] = rc["train"]
@@ -502,12 +511,12 @@ def app_hook():
     `repository` events of every repo its installations reach, a new one's
     included, before the repo has a hook of its own). The App's settings
     turn it on and choose its events; its URL and secret are kept here, set
-    again when they change and once a day, in case they were edited.
-    GitHub never gives the secret back, so it's known by a hash."""
+    again when they or the App change and once a day, in case they were
+    edited. GitHub never gives the secret back, so it's known by a hash."""
     if DRY:
         return
     wh = CFG["webhook"]
-    want = hashlib.sha256(json.dumps([wh["url"], C.webhook_secret()]).encode()).hexdigest()[:16]
+    want = hashlib.sha256(json.dumps([CFG["app"]["id"], wh["url"], C.webhook_secret()]).encode()).hexdigest()[:16]
     st = load("app-hook.json", {})
     if st.get("hook") == want and C.NOW - st.get("at", 0) < 86400:
         return

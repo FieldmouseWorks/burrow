@@ -5,7 +5,8 @@ event reports):
 
   1. Find the repos: every non-archived, non-fork repo of each owner in
      `owners`, new ones included (one with no commit yet too, which gets
-     only this step until its first push). Bring each one's settings to
+     only this step, all but the ruleset, until its first push). Bring
+     each one's settings to
      the baseline (auto-merge, delete-branch-on-merge, squash, secret
      scanning, the `baseline` ruleset); a repo seen for the first time also gets a Claude
      job that brings its files to docs/repo-baseline.md (repos.py). So does

@@ -242,6 +242,19 @@ R.settle_repo({"repo": "sam/r", "private": False, "default": "main"}, {"sam/r"})
 assert [x for x in WROTE if "rulesets" in x] == ["api -X POST repos/sam/r/rulesets --input -"], WROTE
 required = [y for y in BODIES[0][1]["rules"] if y["type"] == "required_status_checks"]
 assert required[0]["parameters"]["required_status_checks"] == [{"context": "review-settled", "integration_id": 7}], required
+# Not on a repo with no commit yet, whose first push it would turn away (the
+# owner's too: they pass it only by PR). Its labels and other settings are
+# set then, and its first push's pass adds the ruleset at once, not a day on.
+C.NOW += 86400
+WROTE.clear()
+R.settle_repo({"repo": "sam/r", "private": False, "default": None}, {"sam/r"})
+assert not [x for x in WROTE if "rulesets" in x] and sorted(made()) == LABELS, WROTE
+assert "api -X PUT repos/sam/r/vulnerability-alerts" in WROTE and C.load("repo-sam_r.json", {})["empty"], WROTE
+C.NOW += 60
+WROTE.clear()
+R.settle_repo({"repo": "sam/r", "private": False, "default": "main"}, {"sam/r"})
+assert [x for x in WROTE if "rulesets" in x] == ["api -X POST repos/sam/r/rulesets --input -"], WROTE
+assert "empty" not in C.load("repo-sam_r.json", {}), C.load("repo-sam_r.json", {})
 C.gh, C.write = gh_stub, write
 
 # A repo made under the name of one GitHub deleted (GitHub's id for it
@@ -548,6 +561,12 @@ REAL["app_hook"]()
 assert len(CALLS) == 4 and CALLS[-1][3]["secret"] == "new-secret", CALLS
 REAL["app_hook"]()
 assert len(CALLS) == 4, CALLS
+# Another App, with the same URL and secret: its own webhook is set on the
+# next pass, not a day on.
+C.CFG["app"]["id"], kept_id = 8, C.CFG["app"]["id"]
+REAL["app_hook"]()
+C.CFG["app"]["id"] = kept_id
+assert len(CALLS) == 5, CALLS
 with open(f"{tmp}/cred/webhook", "w") as f:
     f.write("hook-secret\n")
 C.app_call, C.app_jwt = kept_app
