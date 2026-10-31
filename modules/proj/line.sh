@@ -32,13 +32,18 @@ NEXT_FRESH=2
 # whose class changed can go on holding its old place in line.
 LOOK_EVERY=60
 
-# The deployed proj's store path, so the switch after this one can't move it
-# from under what's run, if it isn't this one and can take a hand-over.
+# The deployed proj's store path, into the_successor, so the switch after this
+# one can't move it from under what's run, if it isn't this one and can take a
+# hand-over. Every waiter asks at every pass, so while the deployed proj is
+# this one the answer takes no fork.
+the_successor=''
 successor() {
   local d
-  d=$(readlink -f "$DEPLOYED" || true)
-  [ "$d" != "$self" ] && [ -x "$d" ] && [ "$("$d" _handover_format 2>/dev/null || true)" = "$HANDOVER_FORMAT" ] || return 1
-  echo "$d"
+  the_successor=''
+  [ -e "$DEPLOYED" ] && ! [ "$DEPLOYED" -ef "$self" ] || return 1
+  d=$(readlink -f "$DEPLOYED") || return 1
+  [ -x "$d" ] && [ "$("$d" _handover_format 2>/dev/null || true)" = "$HANDOVER_FORMAT" ] || return 1
+  the_successor=$d
 }
 
 # Whether a waiter with this place, which last looked at this time, should look
@@ -115,7 +120,7 @@ look() {
 # pick.sh) is asked again at every look, and its place in line, its admission
 # and its slot's N.who all go by that one answer.
 take_slot() {
-  local id=$1 n=$2 class=$3 me='' when f pid got i lk new deployed looked=0 project LC_ALL=C
+  local id=$1 n=$2 class=$3 me='' when f pid got i lk new looked=0 project LC_ALL=C
   mkdir -p "$jobs/.queue" "$jobs/.slots"
   # The place a proj before this one left, if it handed over.
   for f in "$jobs/.queue"/*-"$id"; do
@@ -136,15 +141,16 @@ take_slot() {
       mv -f "$me" "${me%/*}/1-${me##*/2-}" 2>/dev/null || true
       me="${me%/*}/1-${me##*/2-}"
     fi
-    if ! look_due "$me" "$looked"; then sleep 2; continue; fi
-    # A switch since the last look: on with the deployed proj, in this place.
-    if deployed=$(successor); then
+    # A switch since the last pass: on with the deployed proj, in this place,
+    # whether or not a look is due (one the note skips can wait LOOK_EVERY).
+    if successor; then
       # Mid-exec its cmdline reads empty, and a look clearing out dead places
       # would take this one for gone: no look runs until it's through (_exec).
       exec 9>"$jobs/.slots/.lock"
       flock 9
-      exec "$deployed" _exec "$id" "$3"
+      exec "$the_successor" _exec "$id" "$3"
     fi
+    if ! look_due "$me" "$looked"; then sleep 2; continue; fi
     # Where it stands now, and in the journal if that changed while it waits.
     classes=()
     place "${me##*/}" "$jobs/$id"

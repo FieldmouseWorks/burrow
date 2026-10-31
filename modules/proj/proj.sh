@@ -310,8 +310,7 @@ facts() {
 # watchdog hears.
 # By the deployed proj's waits, when a turn outlives a switch (line.sh).
 rewatch() {
-  local d
-  if d=$(successor) && "$d" _rewatch "$@"; then return 0; fi
+  if successor && "$the_successor" _rewatch "$@"; then return 0; fi
   waits "$@" || echo "proj: couldn't update the stall watchdog's waits for $*" >&2
 }
 waits() {
