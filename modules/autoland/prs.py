@@ -1,12 +1,13 @@
 """A repo's open PRs as GitHub has them, and what the steward writes back
-about one: how its CI stands, its `review-settled` status, the merge."""
+about one: how its CI stands, its `review-settled` status, its waiting
+label, the merge."""
 
 import re
 import urllib.parse
 
 import common as C
 import train as T
-from common import CONTEXT, DRY, log
+from common import CFG, CONTEXT, DRY, log
 
 
 # What GitHub says of a PR's merge (its mergeStateStatus, every value GitHub's
@@ -110,7 +111,9 @@ def ci_state(pr, proofs=(), moved=None, repo=None):
     until its job runs, and none is owed on a head in the docs lane.
     A workflow GitHub couldn't start (a bad file, a pin missing an input)
     leaves no check run, only its suite: red, or a broken workflow would read
-    as no CI. A run of burrow's shared CI that judged another diff than the
+    as no CI. A status is its proof's however it's spelled, since GitHub
+    ignores a context's case, and goes by the name the repo gives the proof,
+    one name once. A run of burrow's shared CI that judged another diff than the
     PR's (runs) isn't the PR's CI, none of its check runs; until its workflow
     has run through for the PR's diff, CI is pending. The merge train's
     status is its word on the PR, not a check of it, except its failure: CI
@@ -127,6 +130,7 @@ def ci_state(pr, proofs=(), moved=None, repo=None):
     docs = docs and docs_lane(pr, moved)
     if docs:
         proofs = ()
+    spelled = {p.lower(): p for p in proofs}
     red, pending, seen = [], [], len(unrun)
     pending += [f"{w} for {pr['baseRefName']}" for w in unrun]
     for s in suites.get("nodes", []):
@@ -153,18 +157,19 @@ def ci_state(pr, proofs=(), moved=None, repo=None):
                     continue
                 name = f"{name} ({c.get('description') or 'red alone'})"
             seen += 1
+            name = spelled.get(name.lower(), name)
             if c["state"] in ("PENDING", "EXPECTED"):
                 pending.append(name)
             elif c["state"] != "SUCCESS":
                 red.append(name)
-    named = {c.get("name") or c.get("context") for c in contexts.get("nodes", [])}
+    named = {c.get("name") or spelled.get(c["context"].lower(), c["context"]) for c in contexts.get("nodes", [])}
     for name in proofs:
         if name not in named:
             seen += 1
             pending.append(name)
     if not seen:
         return "none", [], docs
-    return ("red" if red else "pending" if pending else "green"), red or pending, docs
+    return ("red" if red else "pending" if pending else "green"), list(dict.fromkeys(red or pending)), docs
 
 
 # The names burrow's shared CI (flake-check.yml) gives two of its check runs
@@ -277,6 +282,31 @@ def post_status(repo, pr, state, desc):
     return C.write("api", f"repos/{repo}/statuses/{pr['headRefOid']}", "-f", f"state={state}",
                    "-f", f"context={CONTEXT}", "-f", f"description={desc}", "-f", f"target_url={pr['url']}",
                    check=False) is not None
+
+
+# What a PR can wait on that a label of the steward's says, at the top of the
+# PR and in its repo's list (labels.waiting; repos.py makes them): its updates
+# too new to take yet, its turn for a proof slot, a reviewer back in service.
+RELEASE_AGE, PROOF_SLOT, REVIEWER = "releaseAge", "proofSlot", "reviewer"
+
+
+def show_waiting(repo, pr, labels, kind):
+    """The PR's waiting label: the one for kind (one of those, or None) and
+    none of the others, put on with its status, from the same step. labels
+    is the PR's as this pass has them, kept up to date as they change. Best
+    effort: one GitHub didn't take is asked for again by the next pass."""
+    names = CFG["labels"]["waiting"]
+    on = [names[kind]] if kind and names[kind] not in labels else []
+    off = [x for k, x in names.items() if k != kind and x in labels]
+    if not on and not off:
+        return
+    args = [a for x in on for a in ("--add-label", x)] + [a for x in off for a in ("--remove-label", x)]
+    if C.write("pr", "edit", str(pr["number"]), "-R", repo, *args, check=False) is None:
+        if not DRY:
+            log(f"{repo}#{pr['number']}: GitHub didn't take its waiting label ({' '.join(args)})")
+        return
+    labels.difference_update(off)
+    labels.update(on)
 
 
 # The first comment of each of a PR's review threads, read only for eyes():
