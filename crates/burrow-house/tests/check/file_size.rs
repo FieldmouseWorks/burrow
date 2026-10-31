@@ -15,6 +15,9 @@ fn grown() {
             .tree("3e7b", "src/big.rs", &short),
         case(vec![change("modified", "src/big.rs", 2, 1)]).tree("4ead", "src/big.rs", &long),
         case(vec![change("added", "src/new.ts", LINES as u64 + 1, 0)]),
+        // A copy is a new file, whatever its diff counts.
+        case(vec![from(change("copied", "src/b.rs", 0, 0), "src/a.rs")])
+            .tree("4ead", "src/b.rs", &long),
         case(vec![from(change("renamed", "src/b.rs", 3, 1), "src/a.rs")])
             .tree("4ead", "src/b.rs", &long),
         case(vec![
@@ -85,6 +88,18 @@ fn last_line() {
     fails(&c(&format!("{lines}x")), "file-size");
     passes(&c(&format!("{}x", "x\n".repeat(LINES - 1))));
     passes(&c(""));
+}
+
+// A file renamed with no lines changed was already there: it didn't grow.
+#[test]
+fn renamed() {
+    passes(
+        &case(vec![from(change("renamed", "src/b.rs", 0, 0), "src/a.rs")]).tree(
+            "4ead",
+            "src/b.rs",
+            &long(),
+        ),
+    );
 }
 
 // A repo can set its own limit.

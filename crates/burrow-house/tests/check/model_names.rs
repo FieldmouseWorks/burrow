@@ -72,6 +72,15 @@ fn no_patch() {
         "model-names",
     );
     passes(&c.tree("4ead", "AGENTS.md", "# Agents\nRoute it to the reviewer.\n"));
+    // A copy is read whole, whatever its patch shows.
+    let copy = case(vec![from(change("copied", "docs/b.md", 0, 0), "docs/a.md")]);
+    fails(
+        &copy
+            .clone()
+            .tree("4ead", "docs/b.md", "Route it to Opus 5.5.\n"),
+        "model-names",
+    );
+    passes(&copy.tree("4ead", "docs/b.md", "Route it to the reviewer.\n"));
 }
 
 // A repo whose subject is models turns the rule off: it posts no status for

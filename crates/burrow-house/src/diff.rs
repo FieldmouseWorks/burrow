@@ -106,9 +106,13 @@ pub fn read(gh: &dyn GitHub, base: &str, head: &str, lines: usize) -> Result<Dif
         let previous = f["previous_filename"].as_str().unwrap_or(file);
         let added = f["additions"].as_i64().unwrap_or_default();
         let removed = f["deletions"].as_i64().unwrap_or_default();
-        let was = match status {
-            "added" | "copied" => None,
-            _ => contents.language(previous, origin)?,
+        // A copy is a new file, like one added: it has no old side, and
+        // every line of it is the PR's.
+        let new_file = matches!(status, "added" | "copied");
+        let was = if new_file {
+            None
+        } else {
+            contents.language(previous, origin)?
         };
         let now = match status {
             "removed" => None,
@@ -125,13 +129,14 @@ pub fn read(gh: &dyn GitHub, base: &str, head: &str, lines: usize) -> Result<Dif
             (Some(_), None) => diff.growth -= removed,
             (None, None) => {}
         }
-        if status != "removed" && added > removed && rules::is_code(file, now) {
+        if status != "removed" && (new_file || added > removed) && rules::is_code(file, now) {
             let length = contents.length(file, head)?;
             if length > lines {
                 diff.big.push((file.to_owned(), length));
             }
         }
-        let new = adding(f, &mut contents, (previous, origin), head)?;
+        let old = (!new_file).then_some((previous, origin));
+        let new = adding(f, &mut contents, old, head)?;
         let lower = file.to_lowercase();
         let markdown = lower.ends_with(".md") || lower.ends_with(".markdown");
         if !markdown && new.iter().any(|l| rules::timer(l) && !rules::comment(l)) {
@@ -144,38 +149,41 @@ pub fn read(gh: &dyn GitHub, base: &str, head: &str, lines: usize) -> Result<Dif
     Ok(diff)
 }
 
-/// The lines a file's diff adds, from its patch. GitHub gives none for a
-/// binary file or one whose diff is too big to show, or one with fewer
-/// added lines than it counts, so then they're the lines its head has more
-/// of than its old side (`was`, a path at the merge base), and a binary file
-/// adds none.
+/// The lines a file's diff adds: every line of a copy, whose patch shows
+/// only what changed from its source, and otherwise its patch's. GitHub
+/// gives no patch for a binary file or one whose diff is too big to show,
+/// and can give one with fewer added lines than it counts, so then they're
+/// the lines its head has more of than its old side (`was`, a path at the
+/// merge base, none for a new file). A binary file adds none.
 fn adding(
     f: &Value,
     contents: &mut Contents,
-    was: (&str, &str),
+    was: Option<(&str, &str)>,
     head: &str,
 ) -> Result<Vec<String>, String> {
-    let additions = f["additions"].as_i64().unwrap_or_default();
-    if let Some(patch) = f["patch"].as_str() {
-        let added: Vec<String> = patch
-            .lines()
-            .filter_map(|l| l.strip_prefix('+'))
-            .map(str::to_owned)
-            .collect();
-        if i64::try_from(added.len()).unwrap_or(i64::MAX) >= additions {
-            return Ok(added);
-        }
-    }
     let (status, file) = (text(f, "status"), text(f, "filename"));
-    if status == "removed" || additions == 0 {
-        return Ok(vec![]);
+    let additions = f["additions"].as_i64().unwrap_or_default();
+    if status != "copied" {
+        if let Some(patch) = f["patch"].as_str() {
+            let added: Vec<String> = patch
+                .lines()
+                .filter_map(|l| l.strip_prefix('+'))
+                .map(str::to_owned)
+                .collect();
+            if i64::try_from(added.len()).unwrap_or(i64::MAX) >= additions {
+                return Ok(added);
+            }
+        }
+        if status == "removed" || additions == 0 {
+            return Ok(vec![]);
+        }
     }
     let Some(now) = contents.text(file, head)? else {
         return Ok(vec![]);
     };
     let mut had: HashMap<String, usize> = HashMap::new();
-    if status != "added" {
-        for line in contents.text(was.0, was.1)?.unwrap_or_default().lines() {
+    if let Some((path, at)) = was {
+        for line in contents.text(path, at)?.unwrap_or_default().lines() {
             *had.entry(line.to_owned()).or_default() += 1;
         }
     }

@@ -121,6 +121,24 @@ fn no_patch() {
             .tree("4ead", "m/b.nix", &now)
             .tree("3e7b", "m/a.nix", &now),
     );
+    // A copy is new: every line of it is added, whatever its patch shows.
+    let (a, b) = (".github/workflows/a.yml", ".github/workflows/b.yml");
+    let cron = "on:\n  schedule:\n    - cron: '0 * * * *'\n";
+    for copy in [
+        unpatched(from(change("copied", b, 0, 0), a)),
+        from(change("copied", b, 0, 0), a),
+        patched(
+            from(change("copied", b, 1, 0), a),
+            adds(&["name: b"], &[], &[]),
+        ),
+    ] {
+        let c = case(vec![copy]);
+        fails(
+            &c.clone().tree("4ead", b, &format!("name: b\n{cron}")),
+            "timers",
+        );
+        passes(&c.tree("4ead", b, "name: b\non: push\n"));
+    }
     // A comment, Markdown, a binary file: none.
     passes(
         &c("modified", x)
