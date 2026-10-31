@@ -9,6 +9,7 @@ PROPOSE=$(realpath "$1")
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 export HOME=$tmp GIT_CONFIG_NOSYSTEM=1
+unset GH_REPO
 git config --global user.name test
 git config --global user.email test@example.org
 git config --global init.defaultBranch main
@@ -17,13 +18,29 @@ git config --global advice.detachedHead false
 # gh: `api repos/R/pulls?...` answers the open PRs in $tmp/prs ("NUMBER HEAD
 # [OWNER/REPO BRANCH]" lines, sam/homelab's burrow-update by default) as
 # GitHub does, newest first and filtered by its head=OWNER:BRANCH, `pr create`
-# adds one, and every call goes to $tmp/gh.log. With $tmp/gh-down there, it
-# fails as an unreachable GitHub does.
+# adds one, `api graphql ... -F n=N` answers N's head with the checks in
+# $tmp/checks (its check runs, statuses and check suites, as GraphQL has them;
+# with $tmp/more there, the checks have a page more), `api repos/R/pulls/N -X
+# PATCH` answers N's URL, and every call goes to $tmp/gh.log. With
+# $tmp/gh-down there, it fails as an unreachable GitHub does. Like the
+# machine's gh (gh-token), it runs a call only once it can tell the account
+# the call is about: the repo a `repos/OWNER/...` endpoint or `-R` names,
+# else GH_REPO's. `gh api graphql` names none, and gh-token refuses it.
 mkdir "$tmp/bin"
 cat >"$tmp/bin/gh" <<EOF
 #!$(command -v bash)
 set -euo pipefail
 printf '%s\n' "\$*" >>"$tmp/gh.log"
+owner=
+for ((i = 1; i <= \$#; i++)); do
+  case \${!i} in
+    repos/*) owner=\${!i#repos/}; owner=\${owner%%/*} ;;
+    -R) j=\$((i + 1)); owner=\${!j%%/*} ;;
+  esac
+done
+[ -n "\$owner" ] || { owner=\${GH_REPO:-}; owner=\${owner%%/*}; }
+[ -n "\$owner" ] || { echo "gh-token: which account is \\\`gh \$1 \$2\\\` for? Give it -R OWNER/REPO" >&2; exit 1; }
+[ "\$owner" = sam ] || { echo "gh stand-in: a call for \$owner, not sam" >&2; exit 2; }
 [ ! -e "$tmp/gh-down" ] || { echo "error connecting to api.github.com" >&2; exit 1; }
 jq=
 for ((i = 1; i <= \$#; i++)); do [ "\${!i}" != --jq ] || { j=\$((i + 1)); jq=\${!j}; }; done
@@ -34,6 +51,13 @@ case "\$1 \$2" in
       | {number: (.[0] | tonumber), sha: .[1], repo: (.[2] // "sam/homelab"), ref: (.[3] // "burrow-update")}
       | select(\$head == "" or \$head == "\(.repo | split("/")[0]):\(.ref)")
       | {number, head: {sha, ref, repo: {full_name: .repo}}}] | reverse' <"$tmp/prs") ;;
+  "api graphql") n=; for a in "\$@"; do [ "\${a#n=}" = "\$a" ] || n=\${a#n=}; done
+    json=\$(jq -Rn --arg n "\$n" --slurpfile checks "$tmp/checks" --argjson more "\$([ -e "$tmp/more" ] && echo true || echo false)" '
+      [inputs | split(" ") | select(.[0] == \$n)][0][1] as \$head | \$checks[0] as \$c
+      | {data: {repository: {pullRequest: {headRefOid: \$head, commits: {nodes: [{commit: {
+          statusCheckRollup: {contexts: {pageInfo: {hasNextPage: \$more}, nodes: [\$c[] | select(.__typename != "CheckSuite")]}},
+          checkSuites: {pageInfo: {hasNextPage: false}, nodes: [\$c[] | select(.__typename == "CheckSuite")]}}}]}}}}}' <"$tmp/prs") ;;
+  "api repos/sam/homelab/pulls/"*) json=\$(jq -n --arg url "https://github.com/sam/homelab/pull/\${2##*/}" '{html_url: \$url}') ;;
   "pr create") n=\$((\$(wc -l <"$tmp/prs") + 7)); echo "\$n \$(git -C "$tmp/origin.git" rev-parse refs/heads/burrow-update)" >>"$tmp/prs"
     echo "https://github.com/sam/homelab/pull/\$n"; exit 0 ;;
   *) echo "gh stand-in: \$*?" >&2; exit 2 ;;
@@ -46,6 +70,8 @@ PATH=$tmp/bin:$PATH
 # What update.sh gives them.
 # shellcheck disable=SC2034 # propose's
 REPO=sam/homelab BRANCH=burrow-update HOST=box UPDATE=box-update TRAIN=1 riding='' changed=1
+# shellcheck disable=SC2034 # propose's
+SETTLED=review-settled STEWARD=sams-steward TRAIN_CONTEXT=conary/train
 state=$tmp/state work=$tmp/work
 as_user() { "$@"; }
 git_() { git -C "$work" "$@"; }
@@ -62,10 +88,11 @@ commit() { # $1 = file, $2 = its text, in the work tree
 # A fresh GitHub copy with one commit on main, a clone of it at main, and no
 # PRs; HOST-update has proposed nothing.
 fresh() {
-  rm -rf "$tmp/origin.git" "$work" "$state" "$tmp/gh-down"
+  rm -rf "$tmp/origin.git" "$work" "$state" "$tmp/gh-down" "$tmp/more"
   mkdir -p "$state"
   : >"$tmp/prs"
   : >"$tmp/gh.log"
+  echo '[]' >"$tmp/checks"
   git init -q --bare "$tmp/origin.git"
   git clone -q "$tmp/origin.git" "$work" 2>/dev/null
   commit flake.lock v1
@@ -207,3 +234,151 @@ already=$(riding=7 already_live /nix/store/sys-b)
 already=$(changed='' already_live /nix/store/sys-b)
 [ "$already" = current ] || fail "already_live with nothing new: $already"
 echo "already_live: ok"
+
+# A check run ($1 = its status, $2 = its conclusion), a status ($1 = its
+# context, $2 = its state, $3 = who posted it, the steward's App's Bot by
+# default, $4 = as what) and a check suite ($1 = its conclusion), as GraphQL
+# has them.
+run() { jq -n --arg s "$1" --arg c "$2" '{__typename: "CheckRun", status: $s, conclusion: (if $c == "" then null else $c end)}'; }
+status() {
+  jq -n --arg c "$1" --arg s "$2" --arg by "${3:-sams-steward}" --arg as "${4:-Bot}" \
+    '{__typename: "StatusContext", context: $c, state: $s, creator: {login: $by, __typename: $as}}'
+}
+suite() { jq -n --arg c "$1" '{__typename: "CheckSuite", conclusion: $c}'; }
+# The head's checks are these (each a JSON object).
+checks() { jq -s . <<<"$*" >"$tmp/checks"; }
+
+# A head of its own, pushed by a run before this one from a clone since gone:
+# GitHub's branch has it and this clone doesn't, until it's fetched.
+pushed_before() { # $1 = flake.lock's text in it
+  local other=$tmp/before
+  rm -rf "$other"
+  git clone -q "$tmp/origin.git" "$other"
+  echo "$1" >"$other/flake.lock"
+  git -C "$other" commit -qam "flake.lock: $1"
+  git -C "$other" push -q --force origin HEAD:refs/heads/burrow-update
+  git -C "$other" rev-parse HEAD >"$state/proposed"
+  echo "7 $(git -C "$other" rev-parse HEAD)" >"$tmp/prs"
+}
+
+# Red, as the steward reads CI: a check on its own head failed, a workflow
+# failed to start, a status failed, or the train found the head red alone
+# (its failure, from the steward's App); it's fetched, for why_not_replace.
+# Green, pending, rerunning, the steward's own status, the train's error (a
+# merge GitHub refused), its failure from anyone else, over 100 checks, or
+# someone else's head: nothing, so it's ridden (or held) as before. GitHub down, or a
+# head that moved since it was listed: a failure, never "not red".
+fresh
+pushed_before v2
+pr=$(update_pr)
+head=${pr#* }
+for green in "" "$(run IN_PROGRESS '')" "$(run COMPLETED SUCCESS) $(run COMPLETED SKIPPED) $(run COMPLETED NEUTRAL)" \
+  "$(status ci/proof PENDING) $(status conary/train SUCCESS)" "$(status review-settled FAILURE)" \
+  "$(status conary/train ERROR)" "$(status conary/train FAILURE mallory User)" "$(status conary/train FAILURE sams-steward User)" \
+  "$(status conary/train FAILURE other-app)" "$(suite SUCCESS) $(run COMPLETED SUCCESS)"; do
+  checks "$green"
+  out=$(red_head "$pr") && [ -z "$out" ] || fail "red_head with $(jq -c . "$tmp/checks"): $out"
+done
+! git_ cat-file -e "$head^{tree}" 2>/dev/null || fail "red_head fetched a head that isn't red"
+for red in "$(run COMPLETED FAILURE)" "$(run COMPLETED TIMED_OUT)" "$(run COMPLETED CANCELLED) $(run COMPLETED SUCCESS)" \
+  "$(status conary/train FAILURE)" "$(status ci/proof ERROR)" "$(status ci/proof FAILURE mallory User)" \
+  "$(suite STARTUP_FAILURE)" "$(suite STARTUP_FAILURE) $(suite SUCCESS) $(run COMPLETED SUCCESS)"; do
+  checks "$red"
+  out=$(red_head "$pr") && [ "$out" = red ] || fail "red_head with $(jq -c . "$tmp/checks"): $out"
+done
+git_ cat-file -e "$head^{tree}" || fail "red_head didn't fetch the red head"
+touch "$tmp/more"
+out=$(red_head "$pr") && [ -z "$out" ] || fail "red_head with over 100 checks, one red: $out"
+rm "$tmp/more"
+git_ rev-parse HEAD >"$state/proposed"
+out=$(red_head "$pr") && [ -z "$out" ] || fail "red_head with someone else's head on it: $out"
+echo "$head" >"$state/proposed"
+touch "$tmp/gh-down"
+! red_head "$pr" >/dev/null 2>&1 || fail "red_head with GitHub down said it isn't red"
+rm "$tmp/gh-down"
+listed=$pr
+pushed_before v3 # GitHub's head moves on after the listing
+echo "${listed#* }" >"$state/proposed"
+if why=$(red_head "$listed"); then fail "red_head on a head that moved since it was listed: $why"; fi
+grep -q "isn't ${listed#* } any more" <<<"$why" || fail "red_head's word on a moved head: $why"
+echo "red_head: ok"
+
+# A fresh bump replaces the red head only whole, and other than it: not the
+# red head's very tree (nothing moved), nor main itself with nothing new on it
+# (all its inputs failed, or none could be fetched, or none moved), nor one
+# short of an input; once main moved, a whole one does.
+fresh
+pushed_before v2
+pr=$(update_pr)
+checks "$(run COMPLETED FAILURE)"
+red_head "$pr" >/dev/null
+at_main
+main=$(git_ rev-parse HEAD)
+commit flake.lock v2
+why=$(why_not_replace "$pr" "$main") || fail "why_not_replace let the same bump replace it"
+[ "$why" = "a fresh bump is that same tree" ] || fail "why_not_replace's word on the same bump: $why"
+landed README new
+at_main
+main=$(git_ rev-parse HEAD)
+why=$(why_not_replace "$pr" "$main") || fail "why_not_replace let main itself replace it"
+[ "$why" = "a fresh bump has nothing new on main" ] || fail "why_not_replace's word on main itself: $why"
+why=$(why_not_replace "$pr" "$main" claude-code nixpkgs) || fail "why_not_replace let main itself, short of every input, replace it"
+[ "$why" = "a fresh bump is short of claude-code nixpkgs" ] || fail "why_not_replace's word on main short of every input: $why"
+commit flake.lock v3
+why=$(why_not_replace "$pr" "$main" claude-code) || fail "why_not_replace let a bump short of claude-code replace it"
+[ "$why" = "a fresh bump is short of claude-code" ] || fail "why_not_replace's word on a bump short of an input: $why"
+if why=$(why_not_replace "$pr" "$main"); then fail "why_not_replace held a whole, new bump: $why"; fi
+echo "why_not_replace: ok"
+
+# Replacing: the fresh bump goes to the branch as the same PR's new head,
+# retitled, and is what HOST-update remembers it pushed. No new PR.
+url=$(replace "$pr" "Update nixpkgs" "body text") || fail "replace failed: $url"
+[ "$url" = "https://github.com/sam/homelab/pull/7, in place of its red head ${pr:2:7}" ] || fail "replace's word: $url"
+fresh_head=$(git_ rev-parse HEAD)
+[ "$(git -C "$tmp/origin.git" rev-parse refs/heads/burrow-update)" = "$fresh_head" ] || fail "replace didn't move the branch"
+[ "$(cat "$state/proposed")" = "$fresh_head" ] || fail "proposed isn't the fresh head"
+grep -qx -- "api repos/sam/homelab/pulls/7 -X PATCH -f title=Update nixpkgs -f body=body text --jq .html_url" "$tmp/gh.log" ||
+  fail "replace's gh: $(cat "$tmp/gh.log")"
+! grep -q "pr create" "$tmp/gh.log" || fail "replace opened a new PR"
+[ "$(git -C "$tmp/origin.git" rev-parse refs/heads/main)" != "$fresh_head" ] || fail "replace pushed to main"
+echo "replace: ok"
+
+# Green again since (a rerun): left as it was, to ride.
+fresh
+pushed_before v2
+pr=$(update_pr)
+checks "$(run IN_PROGRESS '')"
+at_main
+commit flake.lock v3
+if why=$(replace "$pr" t b); then fail "replaced a head that isn't red: $why"; fi
+grep -q "isn't red any more" <<<"$why" || fail "replace's word on a head that isn't red: $why"
+[ "$(git -C "$tmp/origin.git" rev-parse refs/heads/burrow-update)" = "${pr#* }" ] || fail "replace moved a head that isn't red"
+[ "$(cat "$state/proposed")" = "${pr#* }" ] || fail "replace changed proposed for a head that isn't red"
+echo "replace, green again: ok"
+
+# A fix pushed between its look and its push: the push is refused, and the
+# fix stays.
+fresh
+pushed_before v2
+pr=$(update_pr)
+checks "$(run COMPLETED FAILURE)"
+at_main
+commit flake.lock v3
+fix() {
+  local other=$tmp/fix
+  rm -rf "$other"
+  git clone -q -b burrow-update "$tmp/origin.git" "$other" 2>/dev/null
+  echo fixed >"$other/flake.lock"
+  git -C "$other" commit -qam "fix it"
+  git -C "$other" push -q origin HEAD:burrow-update
+  git -C "$other" rev-parse HEAD
+}
+# shellcheck disable=SC2329 # replace calls it
+git_() { [ "$1" != push ] || [ -n "${fixed:-}" ] || fixed=$(fix); git -C "$work" "$@"; }
+if why=$(replace "$pr" t b); then fail "replace pushed over a fix: $why"; fi
+git_() { git -C "$work" "$@"; }
+grep -q "moved on from" <<<"$why" || fail "replace's word on a fix pushed meanwhile: $why"
+[ "$(git -C "$tmp/origin.git" show refs/heads/burrow-update:flake.lock)" = fixed ] || fail "replace pushed over a fix"
+[ "$(cat "$state/proposed")" = "${pr#* }" ] || fail "replace changed proposed when its push was refused"
+! grep -q PATCH "$tmp/gh.log" || fail "replace retitled a PR it didn't push to"
+echo "replace, a fix meanwhile: ok"

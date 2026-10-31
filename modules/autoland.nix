@@ -111,6 +111,8 @@ let
     # the watchdog's deadline have to outlast.
     renovateRun = if sweeping then config.systemd.services.renovate.serviceConfig.TimeoutStartSec else null;
     projectsDir = config.burrow.projectsDir;
+    # proj's record of its jobs, which repos.py reads for a remade repo's.
+    inherit (config.burrow.proj) jobsDir;
     proj = "${config.burrow.tools.proj}/bin/proj";
     jobTimeout = cfg.jobTimeoutMinutes;
     jobIdle = cfg.jobIdleMinutes;
@@ -126,8 +128,12 @@ let
     # when the inbox will: notify.repo cloned in projectsDir, and the
     # steward's App one of inbox.authors (it is: see below). Otherwise it's
     # the owner's. It has unstickLabel too, so that job never waits in proj's
-    # line, which may be what's stuck.
-    inbox = { inherit (config.burrow.proj.inbox) enable label unstickLabel authors; };
+    # line, which may be what's stuck. `command` is how the steward has the
+    # inbox forget a remade repo's issues (repos.py reset).
+    inbox = {
+      inherit (config.burrow.proj.inbox) enable label unstickLabel authors;
+      command = if config.burrow.proj.inbox.enable then lib.getExe config.burrow.tools.proj-inbox else null;
+    };
     # Renovate's dashboards (dashboard.py), and where a job that ticks a box
     # on one kicks Renovate to read it.
     dashboard = {
@@ -145,6 +151,7 @@ let
     flaky = {
       inherit (cfg.flaky) enable;
       bin = "${flaky}/bin/flaky";
+      jobTimeout = cfg.flaky.jobTimeoutMinutes;
     };
     # What every open PR waits on, for the stall watchdog (autoland/waits.py),
     # and what it took past a Claude job, for the stuck issue.
@@ -559,6 +566,18 @@ in
       '';
     };
 
+    flaky.jobTimeoutMinutes = mkOption {
+      type = types.ints.positive;
+      default = 240;
+      description = ''
+        How long a flaky test's Claude job may run. It builds the project,
+        makes the test fail under its gate's load, fixes it and runs it enough
+        times to show the fix holds, on a machine whose gates are busy too:
+        far more than a PR's fix, so it's project work, not the pipeline's,
+        and doesn't hold the slot kept for that.
+      '';
+    };
+
     keepBranches = mkOption {
       type = types.listOf types.str;
       default = [ "gh-pages" "release/*" "releases/*" ];
@@ -696,10 +715,11 @@ in
         machine rather than in CI, `{ "<check>" = "<how to run it and record
         its verdict>"; }`: once a settled PR waits on nothing else, one
         Claude job a head runs them on that commit and records each verdict,
-        a failure as a failure), proofSlots (how many of those jobs the repo
-        may have building at once, for proofs that take the whole machine:
-        the rest wait their turn, those labelled `labels.first` first, then
-        the oldest PR first; unset, no limit),
+        a failure as a failure; a new head stops the last head's job, unless
+        it's building what the new head's proof wants), proofSlots (how many
+        of those jobs the repo may have building at once, for proofs that
+        take the whole machine: the rest wait their turn, those labelled
+        `labels.first` first, then the oldest PR first; unset, no limit),
         proofBuilds (the flake attribute each proof check builds, `{
         "<check>" = "checks.x86_64-linux.<name>"; }`, whose result is the
         check's verdict: a proof whose attributes' outputs are all in the
@@ -776,10 +796,11 @@ in
     # catch-up, when it starts and hourly.
     burrow.events.handlers.autoland = {
       # The PR itself (opened, ready, labels, retargeted), pushes, reviews and
-      # their threads, comments (a judge's verdict), CI finishing, and commit
-      # statuses (a proof's verdict).
+      # their threads, comments (a judge's verdict), CI finishing, commit
+      # statuses (a proof's verdict), and the repo itself: made (the App's
+      # own webhook sends that, repos.py app_hook), renamed, archived.
       events = [ "push" "pull_request" "pull_request_review" "pull_request_review_comment"
-        "pull_request_review_thread" "issue_comment" "check_suite" "status" ]
+        "pull_request_review_thread" "issue_comment" "check_suite" "status" "repository" ]
         ++ lib.optional (cfg.dashboard.enable || cfg.flaky.enable) "issues";
       # Of the issues, only Renovate's dashboard (dashboard.py) and flaky
       # tests' (flakes.py; the flaky tool's test.rs has the title).
