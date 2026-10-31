@@ -69,7 +69,7 @@ other.
 
 ## Around a gate
 
-The flaky tool (`tools/flaky`, Rust, on `gh`) reads the quarantine before the
+The flaky tool (`crates/flaky`, Rust, on `gh`) reads the quarantine before the
 gate and files its report after. It asks GitHub once a run for the open
 `flaky` issues, once for each one's history, and once for each person in
 them whether they can push, each conditionally with the last answer's etag

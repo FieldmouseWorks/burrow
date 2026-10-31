@@ -38,8 +38,12 @@ inputs:
       # VMs and backups
       qemu_kvm
       rclone
-      # gates: quarantining flaky tests (docs/flaky-tests.md)
-      (callPackage ../tools/flaky/package.nix { })
+      # gates: quarantining flaky tests (docs/flaky-tests.md), asking
+      # through the gh above
+      (runCommand "flaky" { meta.mainProgram = "flaky"; } ''
+        mkdir -p $out/bin
+        ln -s ${inputs.self.packages.${stdenv.hostPlatform.system}.burrow}/bin/flaky $out/bin/flaky
+      '')
       # gates: a repo's CI gate, run here (flake-gate)
       (callPackage ../tools/flake-gate/package.nix { })
       # secrets tooling for sops-nix

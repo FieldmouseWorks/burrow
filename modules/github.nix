@@ -11,7 +11,7 @@
 # what the new system says: a reload when `users` changes. A system without
 # that unit (one from before ACLs, or without the App) stops it and the socket
 # with it, and so starts its own socket, as that system says it should be.
-# A connection is answered by gh-token (./github, one process each,
+# A connection is answered by gh-token (crates/gh-token, one process each,
 # Accept=yes) as its own user, with the App's key as a credential only that
 # user can read: a token for the account or repo asked for, good for at least
 # fifty minutes, kept until then so GitHub mints one at most every ten.
@@ -46,7 +46,12 @@ inputs:
 let
   inherit (lib) mkOption types;
   cfg = config.burrow.github;
-  package = inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.gh-token;
+  # gh-token (crates/gh-token), on its own: burrow.tools.gh-token goes on
+  # PATHs, and the rest of burrow's programs needn't go with it.
+  package = pkgs.runCommand "gh-token" { meta.mainProgram = "gh-token"; } ''
+    mkdir -p $out/bin
+    ln -s ${inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow}/bin/gh-token $out/bin/gh-token
+  '';
   # Who may connect to an App's socket: the whole ACL, so a user no longer in
   # `users` loses it, and root's group, whichever a system before left it in.
   access = app: [

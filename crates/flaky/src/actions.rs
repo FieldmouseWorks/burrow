@@ -7,10 +7,10 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
-use crate::github::{Api, Error};
 use crate::quarantine::{Quarantine, Quarantined, now};
 use crate::run::lines;
 use crate::{filing, quarantine, report};
+use burrow_github::{Api, Error};
 
 /// The job's environment, as GitHub Actions sets it.
 pub type Env<'a> = &'a dyn Fn(&str) -> Option<String>;
@@ -266,9 +266,9 @@ pub fn property(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::github::fake::{Fake, ok};
     use crate::run::scratch;
     use crate::test::iso;
+    use burrow_github::fake::{Fake, ok};
     use serde_json::json;
     use std::collections::HashMap;
 
