@@ -7,9 +7,10 @@ use burrow_watchdog::MIN;
 use burrow_watchdog::watch::Item;
 use burrow_watchdog::words::clock;
 
-use crate::config::Config;
+use crate::config::{Config, Deploy};
 use crate::snapshot::{Run, Seen, Snapshot};
 use crate::state::State;
+use crate::world::Unit;
 
 /// Restarts of one runner, and tries at cancelling one run, are counted
 /// over this long...
@@ -162,58 +163,95 @@ pub fn decide(
     if let (Some(dep), Some((update, said))) = (&cfg.deploy, &snap.update) {
         for repo in dep.own.iter().chain(dep.running.keys()) {
             let key = format!("deploy/{repo}");
+            if let Some(why) = snap.unknown.get(repo) {
+                // Not established for the system that runs: a wait as old as
+                // the last pass's (commits behind, or unknown then too), so
+                // a switch or a lost record never drops one, or from now.
+                // Its age is kept apart from any run's: only a run that finds
+                // main live in the system that runs settles it, never one
+                // under way, failed or held.
+                let since = st.going_live.get(repo).copied().unwrap_or(now);
+                d.state.going_live.insert(repo.clone(), since);
+                let what = format!("{repo} going live");
+                let link = Some(format!("https://github.com/{repo}"));
+                let it = going_live(dep, update, said, what, why, since, link, true);
+                d.items.insert(key, it);
+                continue;
+            }
             let Some(b) = snap.deploys.get(repo) else {
                 // Not read: as the last pass saw it.
-                if let (true, Some(it)) = (snap.unread.contains_key(repo), was.get(&key)) {
-                    d.items.insert(key, it.clone());
+                if snap.unread.contains_key(repo) {
+                    if let Some(it) = was.get(&key) {
+                        d.items.insert(key, it.clone());
+                    }
+                    if let Some(t) = st.going_live.get(repo) {
+                        d.state.going_live.insert(repo.clone(), *t);
+                    }
                 }
                 continue;
             };
             if b.count == 0 {
                 continue;
             }
+            d.state.going_live.insert(repo.clone(), b.oldest);
             let link = Some(format!(
                 "https://github.com/{repo}/compare/{}...{}",
                 b.running, b.branch
             ));
             let what = format!("{repo}'s {} going live", b.branch);
-            let item = match update.since {
-                // A run started after the oldest commit has it.
-                Some(start) if update.state == "activating" && start >= b.oldest => Item {
-                    what,
-                    phase: format!(
-                        "{} has been putting it live since {}",
-                        dep.unit,
-                        clock(start)
-                    ),
-                    since: start,
-                    due: start + dep.run,
-                    link,
-                    kick: None,
-                    line: false,
-                    unstick: false,
-                },
-                _ => Item {
-                    what,
-                    phase: format!(
-                        "{} the running system wasn't built from, the oldest from {} (the newest {}); {}'s last run: {said}",
-                        commits(b.count),
-                        clock(b.oldest),
-                        short(&b.newest),
-                        dep.unit,
-                    ),
-                    since: b.oldest,
-                    due: b.oldest + dep.after,
-                    link,
-                    kick: Some(dep.handler.clone()),
-                    line: false,
-                    unstick: false,
-                },
-            };
-            d.items.insert(key, item);
+            let waiting = format!(
+                "{} the running system wasn't built from, the oldest from {} (the newest {})",
+                commits(b.count),
+                clock(b.oldest),
+                short(&b.newest),
+            );
+            let it = going_live(dep, update, said, what, &waiting, b.oldest, link, false);
+            d.items.insert(key, it);
         }
     }
     d
+}
+
+/// A repo's wait to go live, `waiting` since `since`: on HOST-update's run
+/// once one under way has it (one that started since, or, with `any`, any
+/// one), and otherwise on HOST-update, which the watchdog kicks.
+#[allow(clippy::too_many_arguments)]
+fn going_live(
+    dep: &Deploy,
+    update: &Unit,
+    said: &str,
+    what: String,
+    waiting: &str,
+    since: f64,
+    link: Option<String>,
+    any: bool,
+) -> Item {
+    match update.since {
+        Some(start) if update.state == "activating" && (any || start >= since) => Item {
+            what,
+            phase: format!(
+                "{} has been putting it live since {}",
+                dep.unit,
+                clock(start)
+            ),
+            since: start,
+            due: start + dep.run,
+            link,
+            kick: None,
+            line: false,
+            unstick: false,
+        },
+        _ => Item {
+            what,
+            phase: format!("{waiting}; {}'s last run: {said}", dep.unit),
+            since,
+            due: since + dep.after,
+            link,
+            kick: Some(dep.handler.clone()),
+            line: false,
+            unstick: false,
+        },
+    }
 }
 
 /// One runner's wait, and its move: what's queued for it waits while it's
@@ -345,7 +383,7 @@ fn moot(repo: &str, runs: &[Run], st: &State, now: f64, d: &mut Decision) {
     }
 }
 
-fn short(sha: &str) -> &str {
+pub(crate) fn short(sha: &str) -> &str {
     sha.get(..7).unwrap_or(sha)
 }
 
@@ -728,6 +766,103 @@ mod tests {
                 clock(T + 30.0)
             )
         );
+    }
+
+    // The flake's own repo with what's live unknown (no record, or a switch
+    // since) waits as long as it has: from the last pass's wait for it,
+    // commits behind or unknown then too, so a switch never drops one, or
+    // from now, due `after` later, and the watchdog kicks HOST-update for
+    // it. While any run is at work, it waits on that, and a run that fails
+    // leaves it as old as it was.
+    #[test]
+    fn deploy_unknown() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = config(dir.path());
+        let idle = |said: &str| {
+            Some((
+                Unit {
+                    state: "inactive".into(),
+                    ..Unit::default()
+                },
+                said.to_owned(),
+            ))
+        };
+        let mut s = Snapshot {
+            unknown: BTreeMap::from([("sam/box".into(), "no record".into())]),
+            deploys: BTreeMap::from([("sam/kit".into(), Behind::default())]),
+            update: idle("held at then: held"),
+            ..Snapshot::default()
+        };
+        let d = decide(&cfg, &s, &State::default(), &BTreeMap::new(), T + 60.0);
+        assert_eq!(d.items.keys().collect::<Vec<_>>(), ["deploy/sam/box"]);
+        let it = &d.items["deploy/sam/box"];
+        assert_eq!(
+            (it.since, it.due, it.kick.as_deref()),
+            (T + 60.0, T + 60.0 + 1800.0, Some("update"))
+        );
+        assert_eq!(it.what, "sam/box going live");
+        assert_eq!(it.link.as_deref(), Some("https://github.com/sam/box"));
+        assert_eq!(
+            it.phase,
+            "no record; box-update's last run: held at then: held"
+        );
+        assert_eq!(
+            d.state.going_live,
+            BTreeMap::from([("sam/box".into(), T + 60.0)])
+        );
+        // Commits behind the pass before: as old as they are.
+        let behind = Snapshot {
+            deploys: BTreeMap::from([(
+                "sam/box".into(),
+                Behind {
+                    count: 1,
+                    oldest: T - 600.0,
+                    ..Behind::default()
+                },
+            )]),
+            update: idle("ok at then: deployed"),
+            ..Snapshot::default()
+        };
+        let d = decide(&cfg, &behind, &State::default(), &BTreeMap::new(), T);
+        assert_eq!(d.state.going_live["sam/box"], T - 600.0);
+        let d = decide(&cfg, &s, &d.state, &d.items, T + 60.0);
+        let it = &d.items["deploy/sam/box"];
+        assert_eq!((it.since, it.due), (T - 600.0, T - 600.0 + 1800.0));
+        // A run at work, whenever it started: its wait, the age kept.
+        s.update.as_mut().unwrap().0 = Unit {
+            state: "activating".into(),
+            since: Some(T - 300.0),
+            busy: false,
+        };
+        let d = decide(&cfg, &s, &d.state, &d.items, T + 90.0);
+        let it = &d.items["deploy/sam/box"];
+        assert_eq!(
+            (it.since, it.due, it.kick.as_deref()),
+            (T - 300.0, T - 300.0 + 5400.0, None)
+        );
+        assert_eq!(d.state.going_live["sam/box"], T - 600.0);
+        // It failed: as old as before it, not as its start.
+        s.update = idle("failed at then: activation failed; reverted");
+        let d = decide(&cfg, &s, &d.state, &d.items, T + 120.0);
+        let it = &d.items["deploy/sam/box"];
+        assert_eq!((it.since, it.due), (T - 600.0, T - 600.0 + 1800.0));
+        // Its record unreadable: the wait and its age as they were.
+        let unread = Snapshot {
+            unread: BTreeMap::from([("sam/box".into(), "live.json: bad".into())]),
+            update: idle("ok at then: up to date"),
+            ..Snapshot::default()
+        };
+        let e = decide(&cfg, &unread, &d.state, &d.items, T + 180.0);
+        assert_eq!(e.items["deploy/sam/box"], d.items["deploy/sam/box"]);
+        assert_eq!(e.state.going_live["sam/box"], T - 600.0);
+        // Found live: nothing waits, and the age goes.
+        let live = Snapshot {
+            deploys: BTreeMap::from([("sam/box".into(), Behind::default())]),
+            update: idle("ok at then: up to date"),
+            ..Snapshot::default()
+        };
+        let d = decide(&cfg, &live, &e.state, &e.items, T + 240.0);
+        assert!(d.items.is_empty() && d.state.going_live.is_empty(), "{d:?}");
     }
 
     // A queued push run with a later one of its workflow live on the branch

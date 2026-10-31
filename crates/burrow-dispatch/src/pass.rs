@@ -223,6 +223,9 @@ fn seen(out: &mut String, cfg: &Config, snap: &Snapshot) {
             ),
         };
     }
+    for (repo, why) in &snap.unknown {
+        let _ = writeln!(out, "{repo}: not known to be live: {why}");
+    }
     for (repo, err) in &snap.unread {
         let _ = writeln!(out, "{repo}: couldn't read it: {err}");
     }
@@ -442,8 +445,8 @@ mod tests {
         fn unit(&self, unit: &str) -> Unit {
             self.w.unit(unit)
         }
-        fn revision(&self) -> Result<Option<String>, String> {
-            Ok(None)
+        fn running(&self) -> Result<String, String> {
+            self.w.running()
         }
         fn switching(&self) -> bool {
             // Its first look is before any unit's second.

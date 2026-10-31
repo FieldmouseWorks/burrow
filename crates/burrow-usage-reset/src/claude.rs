@@ -1,11 +1,13 @@
 //! The account through Claude Code itself, as the machine's user: the meter
 //! from its SDK's `get_usage` request, and the reset through its own
 //! `/limit-reset weekly`, typed into a Claude Code of our own in a tmux, the
-//! way the owner would at a terminal. It keys nothing but that command, the
-//! folder-trust answer for its own folder and the confirmation of the reset,
-//! each only once the screen shows what it answers; anything else ends the
-//! session, and ending Claude Code never uses a reset. Once its yes is
-//! pressed, the session lives until Claude Code has its last word on it.
+//! way the owner would at a terminal. It keys nothing but that command and
+//! the confirmation of the reset, each only once the screen shows what it
+//! answers; anything else ends the session, and ending Claude Code never uses
+//! a reset. Its folder is trusted in Claude Code's config before a pass
+//! starts (claude-trust, from the module), so a question about trusting it
+//! ends the session too. Once its yes is pressed, the session lives until
+//! Claude Code has its last word on it.
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
@@ -115,27 +117,21 @@ impl ClaudeCode {
         if let Err(e) = tmux.start(&self.dir, &self.claude) {
             return Reset::NotPressed(e);
         }
-        // Up to its input box, answering only its question about trusting
-        // its own folder, once.
-        let mut trusted = false;
-        loop {
-            let seen = tmux.wait(|screen| {
-                if prompt_ready(screen) {
-                    Some(true)
-                } else {
-                    (!trusted && asks_trust(screen)).then_some(false)
-                }
-            });
-            match seen {
-                Ok(true) => break,
-                Ok(false) => {
-                    trusted = true;
-                    if let Err(e) = tmux.keys(&["Enter"]) {
-                        return Reset::NotPressed(e);
-                    }
-                }
-                Err(e) => return Reset::NotPressed(format!("Claude Code didn't come up: {e}")),
+        // Up to its input box.
+        match tmux.wait(|screen| {
+            if prompt_ready(screen) {
+                Some(true)
+            } else {
+                asks_trust(screen).then_some(false)
             }
+        }) {
+            Ok(true) => {}
+            Ok(false) => {
+                return Reset::NotPressed(
+                    "Claude Code asked whether to trust its folder, which claude-trust marks trusted before each pass: the unit's journal says why it didn't".to_owned(),
+                );
+            }
+            Err(e) => return Reset::NotPressed(format!("Claude Code didn't come up: {e}")),
         }
 
         if let Err(e) = tmux.literal(COMMAND).and_then(|()| tmux.keys(&["Enter"])) {
@@ -247,6 +243,8 @@ pub fn usage(answer: &Value) -> Result<Reading, String> {
 
 /// What it types.
 const COMMAND: &str = "/limit-reset weekly";
+/// The yes of its question about trusting the folder it was started in.
+const TRUST: &str = "Yes, I trust this folder";
 /// The confirmation's yes, as Claude Code words it unless its server says
 /// otherwise: "Yes, use my weekly reset".
 const YES: &str = "Yes, use my";
@@ -384,14 +382,10 @@ fn is_rule(line: &str) -> bool {
     !line.is_empty() && line.chars().all(|c| c == '─')
 }
 
-/// It's asking whether to trust the folder it was started in, with the
-/// cursor on yes.
+/// It's asking whether to trust the folder it was started in, wherever its
+/// cursor is.
 fn asks_trust(screen: &str) -> bool {
-    screen.to_lowercase().contains("trust")
-        && !prompt_ready(screen)
-        && screen
-            .lines()
-            .any(|l| l.trim_start().starts_with('❯') && l.contains("Yes"))
+    !prompt_ready(screen) && screen.contains(TRUST)
 }
 
 /// A tmux server of our own, for one Claude Code.
@@ -516,17 +510,29 @@ mod tests {
     fn its_input_box() {
         assert!(prompt_ready(UP));
         assert!(!asks_trust(UP));
+        // Claude Code 2.1.314's, as remi's tmux showed it: its no first, and
+        // the cursor on it.
         let trust = "
- Do you trust the files in this folder?
+ Accessing workspace:
 
- /var/lib/burrow/usage-reset/claude
+ /var/lib/remi-update/usage-reset/claude
 
- ❯ 1. Yes, I trust this folder
-   2. No, exit
+ Quick safety check: Is this a project you created or one you trust? (Like your own code, a well-known open source project, or work from your team). If not, take a moment to review what's in this folder first.
+
+ Claude Code'll be able to read, edit, and execute files here.
+
+ Security guide
+
+ ❯ No, exit
+   Yes, I trust this folder
+
+ Enter to confirm · Esc to cancel
 ";
         assert!(asks_trust(trust) && !prompt_ready(trust));
-        assert!(!asks_trust(
-            &trust.replace("❯ 1", "  1").replace("  2. No", "❯ 2. No")
+        assert!(asks_trust(
+            &trust
+                .replace("❯ No, exit", "  No, exit")
+                .replace("  Yes, I trust", "❯ Yes, I trust")
         ));
     }
 

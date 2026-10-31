@@ -83,10 +83,14 @@ pub struct Deploy {
     /// What its last run said (status.json).
     pub status: PathBuf,
     /// The machine's own flake's repo (OWNER/REPO), when HOST-update watches
-    /// it: the running system's commit of it is its configuration revision,
-    /// read as a pass starts, so that a build from a dirty tree and the same
-    /// tree committed stay the same system.
+    /// it. Its main is live up to the commit HOST-update last found in what
+    /// runs, as `live` says, read as a pass starts: not the system's stamp,
+    /// which a system that runs already keeps from an older commit, and which
+    /// a ride's merge onto main gives a commit never pushed.
     pub own: Option<String>,
+    /// HOST-update's record of that commit and the system it found it in
+    /// (live.json: `{"main": COMMIT, "running": STORE_PATH}`).
+    pub live: PathBuf,
     /// Each of the flake's inputs whose default branch it puts live
     /// (OWNER/REPO), and the commit of it the running system was built from.
     pub running: BTreeMap<String, String>,
