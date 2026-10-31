@@ -1,0 +1,18 @@
+[package]
+name = "burrow-review"
+description = "The steward's reviewers, each in a sandbox whose only way out is its own API"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+burrow-events = { path = "../burrow-events" }
+jiff.workspace = true
+rustix = { version = "1.1.6", features = ["fs"] }
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

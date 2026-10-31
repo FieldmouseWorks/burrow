@@ -11,16 +11,17 @@
 # actions are pinned to commits (repos that allow only pinned actions need
 # that), and Renovate keeps the pins current.
 #
-# Each job runs once a PR at a time: a PR's new run (a push, a retarget)
-# cancels what its last run still has going, which was checking a head or a
-# base the PR no longer has. Anything else (a push to a branch, a train's
-# candidate) is a run of its own that nothing cancels, and so is a PR's title
-# or body edit: Renovate renames a PR just after pushing to it, and the edit
-# would cancel the push's run and start the same check over. A job's
-# concurrency group is its caller's workflow, its inputs and the PR (or the
-# run), and a leg's its leg too, so calls in one workflow with inputs of their
-# own (a matrix's legs, say) never cancel each other, nor do the gate's own
-# legs; two calls alike would be the same check twice.
+# Each job runs once a PR at a time: a PR's new run (a push, or a retarget from
+# the caller's flake-retarget.yml, which has flake.yml's name) cancels what its
+# last run still has going, which was checking a head or a base the PR no longer
+# has. Anything else (a push to a branch, a train's candidate) is a run of its
+# own that nothing cancels, and so is a PR's title or body edit: Renovate renames
+# a PR just after pushing to it, and the edit would cancel the push's run and
+# start the same check over. A job's concurrency group is its caller's workflow,
+# its inputs and the PR (or the run), and a leg's its leg too, so calls in one
+# workflow with inputs of their own (a matrix's legs, say) never cancel each
+# other, nor do the gate's own legs; two calls alike would be the same check
+# twice.
 name: flake-check
 on:
   workflow_call:
@@ -97,9 +98,8 @@ on:
           candidate it would land (a push to a conary/train/ branch) rather
           than on the PRs in it, so such a PR's own run checks only its
           commits. A PR to any other branch, which the train doesn't land,
-          still gets the gate. A caller that turns it off runs on
-          pull_request's `edited` too, so a PR retargeted away from the
-          default branch gets the gate for its new base.
+          still gets the gate, a PR retargeted away from the default
+          branch (flake-retarget.yml) for its new base.
         type: boolean
         default: true
       docs-paths:
@@ -115,9 +115,8 @@ on:
           autoland runs none of the repo's proofs on it. Nothing under
           .github/, no .nix file and no flake.lock is ever documentation
           here, whatever this says: those define the gate itself. Which
-          paths a PR changes depends on its base, so the caller runs on
-          pull_request's `edited` too, for an edit that changes the base
-          (the template's does), and a PR retargeted gets its lane again.
+          paths a PR changes depends on its base, so a PR retargeted gets
+          its lane again (the template's flake-retarget.yml).
           Empty, every PR gets the whole gate.
         type: string
         default: ''

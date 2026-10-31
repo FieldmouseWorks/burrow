@@ -49,7 +49,9 @@
           include = [
             ".github/workflows/flake-check.yml"
             ".github/workflows/flake.yml"
+            ".github/workflows/flake-retarget.yml"
             "templates/project/.github/workflows/flake.yml"
+            "templates/project/.github/workflows/flake-retarget.yml"
             "modules/autoland/prs.py"
             "modules/cpu/heavy.sh"
           ];
@@ -295,10 +297,19 @@
             touch $out
           '';
         # The steward and its reviewers, with stand-ins for gh, git's remote and
-        # the agents, and its one-way paths as the module sets them.
-        autoland = pkgs.runCommand "autoland-check" { nativeBuildInputs = [ pkgs.python3 pkgs.git pkgs.openssl ]; } ''
+        # the agents, and its one-way paths as the module sets them; a look it
+        # queues is taken by the reviewers' own service, burrow-review, with
+        # its tests' stand-ins for codex and bubblewrap (they need bash and jq).
+        autoland = pkgs.runCommand "autoland-check" { nativeBuildInputs = [ pkgs.python3 pkgs.git pkgs.openssl pkgs.bash pkgs.jq ]; } ''
           python3 -I ${./tests/autoland}/check.py ${./modules/autoland}/steward.py \
-            ${pkgs.writeText "one-way.json" (builtins.toJSON self.nixosConfigurations.example.config.burrow.autoland.oneWay)}
+            ${pkgs.writeText "one-way.json" (builtins.toJSON self.nixosConfigurations.example.config.burrow.autoland.oneWay)} \
+            ${self.packages.${system}.burrow}/bin/burrow-review ${./crates/burrow-review/tests/fakes}
+          touch $out
+        '';
+        # The example's reviewers' service reads the config its module writes
+        # (a field the binary doesn't know fails it).
+        review-config = pkgs.runCommand "review-config-check" { } ''
+          ${builtins.head (pkgs.lib.splitString " " self.nixosConfigurations.example.config.systemd.services.autoland-review.serviceConfig.ExecStart)} check
           touch $out
         '';
         # The steward on a machine without /bin/sh: its sandbox's store still
@@ -336,9 +347,10 @@
         # The steward's tools reach a pass however it's started: by hand or
         # a Claude job (`autoland-steward kick OWNER/REPO`), with no openssl,
         # gh or proj of its own, gets them from the wrapper, ahead of its own
-        # PATH but for a review's. Its gh is the machine's: in an App's env
-        # (a job's), `status` and a project's clone go through the socket,
-        # and a pass's own calls with the steward's token as given.
+        # PATH. The reviewers' service gets none of them: only what its unit
+        # gives it. Its gh is the machine's: in an App's env (a job's),
+        # `status` and a project's clone go through the socket, and a pass's
+        # own calls with the steward's token as given.
         autoland-path = let
           example = self.nixosConfigurations.example.config;
           steward = builtins.head (builtins.filter (p: (p.name or "") == "autoland-steward")
@@ -369,7 +381,10 @@
               env -i PATH="$p" ${pkgs.bash}/bin/bash -c "command -v $t" >/dev/null || { echo "$sub: no $t on the steward's PATH"; exit 1; }
             done
           done
-          p=$(env -i PATH=/caller ${pkgs.bash}/bin/bash path-of review)
+          r=${builtins.head (pkgs.lib.splitString " " example.systemd.services.autoland-review.serviceConfig.ExecStart)}
+          grep -q '^exec .*/bin/burrow-review "$@"' "$r" || { echo "the reviewers' service isn't burrow-review"; exit 1; }
+          sed 's|^exec .*|printf "%s\\n" "$PATH"; exit|' "$r" >review-path-of
+          p=$(env -i PATH=/caller ${pkgs.bash}/bin/bash review-path-of work)
           [ "$p" = /caller ] || { echo "review gets more than its units give it: $p"; exit 1; }
           p=$(env -i PATH=/caller ${pkgs.bash}/bin/bash path-of status)
           gh=$(env -i PATH="$p" ${pkgs.bash}/bin/bash -c 'command -v gh')

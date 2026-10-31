@@ -1,6 +1,6 @@
 """The steward, with gh, Claude jobs, GitHub's git remote and the review
-agent stood in for: the App it acts as, the reviewers (the snapshot they read, the service that
-runs them, what gets posted), handle() end to end, past the review-round limit,
+agent stood in for: the App it acts as, the reviewers (the snapshot they read, the brief
+they're queued with, the reviewers' service taking it, what gets posted), handle() end to end, past the review-round limit,
 on a conflict with its base and on dependency updates too, and the reviewers'
 answers through it, Claude jobs that end without their answer, what a pass
 keeps up in each repo, the branches it deletes, what a PR touches, what starts its passes, the
@@ -9,7 +9,9 @@ no failing step loops quietly, and the label that says what a PR waits on.
 Each module is one part, run in this order.
 
   nix eval --json .#nixosConfigurations.example.config.burrow.autoland.oneWay >/tmp/one-way.json
-  python3 -I tests/autoland/check.py modules/autoland/steward.py /tmp/one-way.json
+  (cd crates && cargo build -p burrow-review)
+  python3 -I tests/autoland/check.py modules/autoland/steward.py /tmp/one-way.json \
+    crates/target/debug/burrow-review crates/burrow-review/tests/fakes
   nix build .#checks.x86_64-linux.autoland
 """
 

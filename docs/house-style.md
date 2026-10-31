@@ -70,16 +70,20 @@ Every repo with code gets a `flake.nix` from the template
   a PR, its `commits` job fails any commit GitHub can't verify: a signed one
   under a name and email its key isn't for (the house rules' Commits). A
   repo whose PRs land through its merge train (autoland's `train`) runs it on
-  pushes to `conary/train/**` and on pull_request's `edited` too, and turns
+  pushes to `conary/train/**` too, and turns
   `pr-gate` off: the gate checks the candidates the train lands, and a PR to
   the default branch gets only its `commits` (one to another branch, or
   retargeted to one, still gets the gate). A repo that lists its
   documentation in `docs-paths` (files nothing its flake builds or tests
   reads; the input says how) gives a PR that changes only those the docs
   lane: only the checks named in `docs-checks`, and none of autoland's
-  proofs. Every repo runs it on pull_request's `edited` too, for a new base
-  only, as the template does: autoland counts a run only for the base it
-  judged, and what a PR changes depends on its base. Check what the build
+  proofs. Every repo runs it again for a new base, from the template's
+  `flake-retarget.yml`, which takes pull_request's `edited` so `flake.yml`
+  doesn't: autoland counts a run only for the base it judged, and what a PR
+  changes depends on its base, but a title or body edit also starts a run of
+  whichever workflow takes `edited`, whose job skips, and that run in
+  `flake.yml` would keep a ruleset from counting the required `check / check`.
+  Check what the build
   reads before listing a path: burrow's
   own `docs/` and `house/` are in its machines' config, so they aren't on
   its list. A repo's heavier gates (VM replays, browser tiers, databases)
