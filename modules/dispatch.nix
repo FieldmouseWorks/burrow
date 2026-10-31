@@ -33,10 +33,11 @@ let
 
   # The commit of each watched input the running system was built from, as
   # the flake's flake.lock pins it (one that follows another's isn't a repo
-  # of its own). The flake's own repo is compared at the running system's
-  # configuration revision, which a pass reads as it starts: its own rev in
-  # here would make a build from a dirty tree and the same tree committed
-  # two systems, and HOST-update would hold on the one it couldn't match.
+  # of its own). The flake's own repo is compared at the commit of main
+  # HOST-update last found in what runs (its live.json), which a pass reads
+  # as it starts: its own rev in here would make a build from a dirty tree
+  # and the same tree committed two systems, and HOST-update would hold on
+  # the one it couldn't match.
   flakeInputs = config.burrow.switch.flakeInputs;
   # Read where it is: a flake given as a path (a checkout) isn't copied to
   # the store, which a read-only evaluation (`nix flake check --no-build`)
@@ -149,6 +150,7 @@ in
           handler = "update";
           status = "${config.burrow.stateDir}/status.json";
           inherit own;
+          live = "${config.burrow.stateDir}/live.json";
           running = lib.genAttrs pinned runningOf;
           after = cfg.deploy.afterMinutes * 60;
           run = cfg.deploy.runMinutes * 60;

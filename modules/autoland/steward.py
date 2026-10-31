@@ -121,6 +121,23 @@ def main():
             C.after_limit(kick)
 
 
+def retire_deleted(known, failed, digest):
+    """The deleted repos whose clones follow_renames wouldn't adopt, retired
+    as restart retires one. Kept until that's all done, however far a try got
+    (the clones may be moved by then, and only its jobs left); each step is as
+    safe twice as once. One that won't goes on the stuck issue."""
+    pending = load(C.RETIRING_FILE, {})
+    for k, x in list(pending.items()):
+        try:
+            if any(have == k for have, _ in C.kept_state(x["name"])):  # gone: a try got to its last step
+                R.reset({"repo": x["name"]}, k, known, failed)
+            del pending[k]
+            save(C.RETIRING_FILE, pending)
+        except Exception as e:  # its own: the next full pass tries again, and its name's taker gets no job meanwhile
+            log(f"{x['name']}: retiring it: {e}")
+            digest[x["name"]] = [(C.RETIRING, x["name"], f"{x['for']} took on its name, and gets no job until this is done (journalctl -u autoland)")]
+
+
 def run_pass(kick):
     waits.begin()
     repos = R.discover()
@@ -135,6 +152,9 @@ def run_pass(kick):
     started = 0
     # What waits for the owner, by repo: a kicked pass replaces its repos'.
     digest = {}
+    if kick is None and not DRY:
+        C.follow_renames({r["repo"].lower() for r in repos})
+        retire_deleted(known, failed, digest)
     read, live = set(), set()  # the repos whose PRs it read, and their heads' snapshots
     covered = []
     for r in repos:
@@ -157,14 +177,14 @@ def run_pass(kick):
                     # first push is heard, and that push's pass does the rest.
                     continue
                 if (new and CFG["baselineJobs"] and started < CFG["baselinePerPass"]
-                        and C.NOW - failed.get(repo, 0) > 86400):
+                        and C.NOW - failed.get(repo, 0) > 86400 and not C.taken(repo)):
                     jid = C.job(repo, CFG["baselineTask"].replace("REPO", repo), clone=True)
                     started += 1
                     if jid:
                         log(f"{repo}: baseline job {jid}")
                         known.add(repo)
                         failed.pop(repo, None)
-                    else:
+                    elif not C.taken(repo):  # which goes on the stuck issue, below
                         log(f"{repo}: baseline job didn't start (no checkout, or proj refused); trying again tomorrow")
                         failed[repo] = C.NOW
                 elif new and not CFG["baselineJobs"]:
@@ -238,6 +258,8 @@ def run_pass(kick):
                     log(f"{repo}: its flaky tests: {e}")
                     waits.failed(repo)
                     C.wake(repo, C.NOW + 5 * MIN)  # ends: waits.failed watches the repo
+            if had := C.taken(repo):
+                mine.append(C.taken_line(repo, had))
     # This pass's wake-ups and owner's lines replace the ones it had for the
     # repos it saw; a full pass's, all of them.
     seen = {r["repo"] for r in repos}
