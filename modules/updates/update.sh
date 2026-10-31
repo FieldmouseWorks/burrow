@@ -182,7 +182,7 @@ commit() {
   git_ diff --quiet && return 1
   local what
   what=$(describe HEAD)
-  git_ commit -qam "Update ${what%, }" -m "Pushed by $UPDATE after the build, the VM tests and the health check passed."
+  git_ commit -qam "deps: update ${what%, }" -m "Pushed by $UPDATE after the build, the VM tests and the health check passed."
 }
 
 # A tree that failed to build in the last day isn't tried again (nor, below, a
@@ -280,10 +280,6 @@ fi
 # now (CVSS 7+, per vulnix). Those go live without the test, under the same dead
 # man's switch and health check as everything else.
 
-# VM test $1 on commit $2, logged to $3.
-run_check() {
-  as_user nix build --no-link -L "git+file://$work?rev=$2#checks.$SYSTEM.$1" >"$3" 2>&1
-}
 # What VM test $1 did on commit $2's tree in the last day: pass, fail or nothing.
 result_of() {
   [ -z "$force" ] && [ -e "$state/check-results" ] || return 0
@@ -426,7 +422,7 @@ fi
 # (The commit says what was skipped. The running system keeps the old commit
 # as its revision; "deployed" below is how the next run knows it's this one.)
 if [ ${#untested[@]} -gt 0 ] && [ -n "$changed" ] && [ -z "$riding" ]; then
-  git_ commit -q --amend -m "Update $(describe | sed 's/, $//')" \
+  git_ commit -q --amend -m "deps: update $(describe | sed 's/, $//')" \
     -m "Pushed by $UPDATE without the VM test ${untested[*]}, which fails on main itself, because it fixes:
 $fixes
 It built and stayed healthy live."

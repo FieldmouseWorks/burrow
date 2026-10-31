@@ -29,6 +29,7 @@
 #                               one of burrow.github.apps, never as the user
 #   proj reply [--first] ID "message"  continue that job's conversation
 #   proj status                 recent jobs and their state
+#   proj status --line          every turn in line, next first, and its wait
 #   proj log ID [--turn N]      the job's latest answer, or turn N's (--raw for
 #                               the full stream); fails when there's none
 #   proj state ID               queued, running, done, error or failed
@@ -52,7 +53,7 @@
 # so a stream of them can't starve it. PIPELINE_SLOTS of the slots are for pipeline jobs in the
 # pipeline's own repos alone, and no project's other jobs hold more than
 # PER_PROJECT at once (pick.sh). A waiting turn is just this shell, which
-# becomes the deployed proj at its next look after a switch (slot.sh). Every turn
+# becomes the deployed proj at its next look after a switch (line.sh). Every turn
 # runs in SLICE, which the machine caps, so jobs can't take memory from
 # anything else, and gets TIMEOUT (or the job's own --timeout) before it's
 # stopped, so a stuck one can't hold its slot for good. A job's --idle stops a
@@ -307,7 +308,7 @@ facts() {
 # whose dir is gone has none. Without the watchdog there's no WAITS: nothing
 # to do. Never the caller's failure: a turn goes on whether or not the
 # watchdog hears.
-# By the deployed proj's waits, when a turn outlives a switch (slot.sh).
+# By the deployed proj's waits, when a turn outlives a switch (line.sh).
 rewatch() {
   local d
   if d=$(successor) && "$d" _rewatch "$@"; then return 0; fi
@@ -394,6 +395,18 @@ start_turn() {
     return 1
   fi
   rewatch "$id"
+}
+
+# Memory to spare, in MiB: what the kernel says is available, plus what the
+# ZFS ARC would give back (the kernel doesn't count it).
+spare() {
+  local kb arc
+  kb=$(awk '/^MemAvailable:/ { print $2 }' /proc/meminfo)
+  arc=0
+  if [ -r /proc/spl/kstat/zfs/arcstats ]; then
+    arc=$(awk '$1 == "size" { s = $3 } $1 == "c_min" { m = $3 } END { print (s > m ? int((s - m) / 1024) : 0) }' /proc/spl/kstat/zfs/arcstats)
+  fi
+  echo $(((kb + arc) / 1024))
 }
 
 # OWNER/REPO N from a PR or issue URL, or OWNER/REPO#N.
@@ -491,8 +504,13 @@ case "${1:-status}" in
       [ -z "$owned" ] || [ ${#kick[@]} -gt 0 ] || { echo "proj run --owned needs a --kick: what acts on each turn's end" >&2; exit 2; }
       [ -z "$app" ] || [ -z "$vm" ] || { echo "proj run --app with --vm: a sandbox has no GitHub login to act with" >&2; exit 2; }
       mkdir -p "$jobs"
-      # Unique even when two jobs start in the same second.
-      id=$(basename "$(mktemp -d "$jobs/$p-$(date +%Y%m%d-%H%M%S)-XXXX")")
+      # Unique even when two jobs start in the same second. Never hidden or
+      # option-like, whatever the project is called (.github, .-x): $jobs's
+      # dotfiles are its own state, what goes through the jobs skips them, and
+      # systemd-escape takes a leading hyphen for an option.
+      name=$p
+      case $p in [.-]*) name=dot$p ;; esac
+      id=$(basename "$(mktemp -d "$jobs/$name-$(date +%Y%m%d-%H%M%S)-XXXX")")
       echo "$src/$p" >"$jobs/$id/project"
       [ ${#kick[@]} = 0 ] || printf '%s\n' "${kick[@]}" >"$jobs/$id/kick"
       [ -z "$limit" ] || echo "$limit" >"$jobs/$id/timeout"
@@ -523,6 +541,7 @@ case "${1:-status}" in
     ;;
   status)
     mkdir -p "$jobs"
+    if [ "${2:-}" = --line ]; then in_line; exit 0; fi
     find "$jobs" -mindepth 1 -maxdepth 1 -type d -not -name '.*' -printf '%T@ %f\n' | sort -rn | head -n "${2:-15}" |
       while read -r _ id; do
         st=$(state "$id")

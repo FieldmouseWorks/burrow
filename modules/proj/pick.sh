@@ -109,6 +109,15 @@ picked() {
   done
 }
 
+# A file's first line into the variable named, or nothing, with no fork: the
+# line has a waiter's worth of these to read at every look.
+line_of() {
+  local -n into=$1
+  into=''
+  # shellcheck disable=SC2034 # the caller's
+  { IFS= read -r into <"$2"; } 2>/dev/null || true
+}
+
 # A clone's origin URL, or nothing (no clone, no origin, or no path at all:
 # git -C "" would ask whatever repo it runs in).
 origin() {
@@ -140,52 +149,66 @@ listed() {
   return 1
 }
 
-# Whether the project at a path is the pipeline's own: the machine's flake
-# (FLAKE), which deploys everything, wherever its origin is; or a clone of one
-# of the pipeline's own repos (PIPELINE: their OWNER/NAMEs, any case, as
-# autoland.pipelineRepos and leadRepos have them). The flake is the same
-# directory however either path spells it (doubled or trailing slashes, dots,
-# symlinks); a path that's empty or isn't there is never it.
-pipeline_project() {
+# Whether a path is the machine's flake (FLAKE), which deploys everything,
+# wherever its origin is. It's the same directory however either path spells
+# it (doubled or trailing slashes, dots, symlinks); a path that's empty or
+# isn't there is never it.
+flake_project() {
   local p f
-  if p=$(realpath -e -- "$1" 2>/dev/null) && f=$(realpath -e -- "$FLAKE" 2>/dev/null) && [ "$p" = "$f" ]; then
-    return 0
-  fi
-  listed "$(github_repo "$1")" "$PIPELINE"
+  p=$(realpath -e -- "$1" 2>/dev/null) && f=$(realpath -e -- "$FLAKE" 2>/dev/null) && [ "$p" = "$f" ]
 }
 
-# A job's class, from its dir. One run with --pipeline is a pipeline one,
-# every turn of it, only while its project is one of the pipeline's own;
-# anywhere else it's first, every turn of it, so it still goes ahead of the
-# line but counts against its project's PER_PROJECT and stays off the
-# pipeline's slots (one repo's PRs, waiting on that repo's own lock, can't
+# Whether the project at a path is the pipeline's own: the flake, or a clone of
+# one of the pipeline's own repos (PIPELINE: their OWNER/NAMEs, any case, as
+# autoland.pipelineRepos and leadRepos have them).
+pipeline_project() {
+  flake_project "$1" || listed "$(github_repo "$1")" "$PIPELINE"
+}
+
+# What class has found of each project since classes was last emptied: asking
+# means git, so a look at the line (look, line.sh) asks once a project.
+declare -A classes=()
+
+# A job's class, from its dir, into the_class. One run with --pipeline is a
+# pipeline one, every turn of it, only while its project is one of the
+# pipeline's own; anywhere else it's first, every turn of it, so it still goes
+# ahead of the line but counts against its project's PER_PROJECT and stays off
+# the pipeline's slots (one repo's PRs, waiting on that repo's own lock, can't
 # fill the machine). In a lead repo's project (LEAD: the ones among PIPELINE
 # that go first of all, as autoland.leadRepos has them) it's lead. Asked each
 # time, so a job from before this rule, or one whose repo was taken off a
 # list since, is held to it too. Otherwise first or normal, as the turn was
 # started.
+the_class=''
 class() {
-  local d
-  if [ ! -e "$1/pipeline" ]; then echo "${2:-normal}"; return 0; fi
-  d=$(cat "$1/project" 2>/dev/null) || d=''
-  if listed "$(github_repo "$d")" "$LEAD"; then echo lead
-  elif pipeline_project "$d"; then echo pipeline
-  else echo first
+  local d='' r
+  if [ ! -e "$1/pipeline" ]; then the_class=${2:-normal}; return 0; fi
+  line_of d "$1/project"
+  if [ -z "${classes[p$d]:-}" ]; then
+    r=$(github_repo "$d")
+    if listed "$r" "$LEAD"; then classes[p$d]=lead
+    elif flake_project "$d" || listed "$r" "$PIPELINE"; then classes[p$d]=pipeline
+    else classes[p$d]=first
+    fi
   fi
+  the_class=${classes[p$d]}
 }
 
-# A waiting turn's class now, and the name its place in line (JOBS/.queue's
-# PREFIX-WHEN-ID) should have for it: 0 lead or pipeline (pick takes lead
-# ones first), 1 first, 2 normal, with a tab between. Its prefix says what
-# the turn itself is (2 normal, anything else first: run with --first, or
+# A waiting turn's class now, into the_class, and into the_place the name its
+# place in line (JOBS/.queue's PREFIX-WHEN-ID) should have for it: 0 lead or
+# pipeline (pick takes lead ones first), 1 first, 2 normal. Its prefix says
+# what the turn itself is (2 normal, anything else first: run with --first, or
 # waited past MAX_WAIT), and class what that makes it now, so a job whose
 # origin or list changed while it waits moves in line and is held to its
 # project's cap as what it is now.
+# shellcheck disable=SC2034 # the caller's
+the_place=''
 place() {
-  local c p
-  c=$(class "$2" "$([[ $1 == 2-* ]] && echo normal || echo first)")
-  case $c in lead | pipeline) p=0 ;; first) p=1 ;; *) p=2 ;; esac
-  printf '%s\t%s\n' "$c" "$p-${1#?-}"
+  local p
+  if [[ $1 == 2-* ]]; then class "$2" normal; else class "$2" first; fi
+  case $the_class in lead | pipeline) p=0 ;; first) p=1 ;; *) p=2 ;; esac
+  # shellcheck disable=SC2034 # the caller's
+  the_place=$p-${1#?-}
 }
 
 # What proj says of a job that asked to be pipeline work and isn't, so a

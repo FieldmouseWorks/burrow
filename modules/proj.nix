@@ -52,7 +52,7 @@ let
       STALL_QUEUED=${toString (cfg.stallAfterMinutes * 60)}
       GRACE=600
       APPS=${lib.escapeShellArg (lib.concatStrings (lib.mapAttrsToList (name: app: "${name}=${app.envFile}\n") config.burrow.github.apps))}
-    '' + builtins.readFile ./proj/pick.sh + builtins.readFile ./proj/waits.sh + builtins.readFile ./proj/slot.sh + builtins.readFile ./proj/proj.sh;
+    '' + builtins.readFile ./proj/pick.sh + builtins.readFile ./proj/line.sh + builtins.readFile ./proj/waits.sh + builtins.readFile ./proj/proj.sh;
   };
 
   inbox = pkgs.writeShellApplication {
@@ -299,6 +299,7 @@ in
           proj run --pipeline burrow "..."  work on the pipeline itself: first of all, in its own slot
           proj run --app NAME web "task"    acting on GitHub as the App NAME
           proj status                       what's running, what finished
+          proj status --line                every turn in line, next first, and its wait
           proj log ID                       its answer (--turn N for an earlier one, --raw for everything)
           proj reply ID "follow-up"         continue the same conversation
           proj stop ID                      end it: its running turn, and anything it awaits
