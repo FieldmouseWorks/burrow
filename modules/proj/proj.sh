@@ -13,6 +13,10 @@
 #                               other pipeline work too; in any other, as
 #                               --first, and status and the turn's journal
 #                               say so (every turn of it, either way)
+#   proj run --unstick PROJECT "task"  what the pipeline is stuck on: never
+#                               in the line, which may be the very thing
+#                               stuck, but in a slot of its own besides
+#                               MAX_JOBS (every turn of it)
 #   proj run --kick NAME PROJECT "task"  kick NAME (HANDLER or HANDLER/OWNER/REPO,
 #                               one of burrow-events') each time a turn starts
 #                               (takes its slot) and each time one ends
@@ -34,6 +38,9 @@
 #                               the full stream); fails when there's none
 #   proj state ID               queued, running, done, error or failed
 #   proj stop ID                end a job: its running turn and its waits
+#   proj unstick ID             make a job one run --unstick from now on: a
+#                               turn of it waiting in line leaves it at its
+#                               next look, one running carries on
 #   proj list                   projects you can run jobs in
 #   proj await TARGET...        from inside a job: resume it once a PR or
 #                               issue (URL or OWNER/REPO#N) changes
@@ -53,7 +60,9 @@
 # so a stream of them can't starve it. PIPELINE_SLOTS of the slots are for pipeline jobs in the
 # pipeline's own repos alone, and no project's other jobs hold more than
 # PER_PROJECT at once, and a waiting one of theirs is owed a slot ahead of the
-# pipeline's when none runs (pick.sh). A waiting turn is just this shell. Every turn
+# pipeline's when none runs (pick.sh). A job run --unstick waits in none of that:
+# its turns take a slot of their own, past the MAX_JOBS, one at a time
+# (line.sh). A waiting turn is just this shell. Every turn
 # runs in SLICE, which the machine caps, so jobs can't take memory from
 # anything else, and gets TIMEOUT (or the job's own --timeout) before it's
 # stopped, so a stuck one can't hold its slot for good. A job's --idle stops a
@@ -280,6 +289,7 @@ facts() {
   n=$(cat "$d/turns" 2>/dev/null) || return 1
   printf 'id\t%s\nturn\t%s\nstate\t%s\n' "$1" "$n" "$(state "$1")"
   [ ! -e "$d/owned" ] || printf 'owned\t1\n'
+  [ ! -e "$d/unstick" ] || printf 'unstick\t1\n'
   [ ! -e "$d/$n.stopped" ] || printf 'stopped\t1\n'
   [ ! -s "$d/$n.end" ] || printf 'end\t%s\n' "$(cat "$d/$n.end")"
   [ ! -s "$d/link" ] || printf 'link\t%s\n' "$(cat "$d/link")"
@@ -454,7 +464,7 @@ fingerprint() { # repo n
 
 case "${1:-status}" in
   run | reply)
-    cmd=$1 vm='' first='' pipeline='' kick=() limit='' idle='' owned='' link='' app=''
+    cmd=$1 vm='' first='' pipeline='' unstick='' kick=() limit='' idle='' owned='' link='' app=''
     shift
     while :; do
       case ${1:-} in
@@ -487,13 +497,14 @@ case "${1:-status}" in
           ;;
         --first) first=first ;;
         --pipeline) [ "$cmd" = run ] || { echo "proj reply has no --pipeline: the job's own class is kept" >&2; exit 2; }; pipeline=1 ;;
+        --unstick) [ "$cmd" = run ] || { echo "proj reply has no --unstick: the job's own slot is kept" >&2; exit 2; }; unstick=1 ;;
         *) break ;;
       esac
       shift
     done
     if [ "$cmd" = run ]; then
-      p=${1:?usage: proj run [--vm] [--first] [--pipeline] [--timeout DUR] [--idle DUR] [--kick NAME]... [--owned] [--link URL] [--app NAME] PROJECT \"task\"}
-      task=${2:?usage: proj run [--vm] [--first] [--pipeline] [--timeout DUR] [--idle DUR] [--kick NAME]... [--owned] [--link URL] [--app NAME] PROJECT \"task\"}
+      p=${1:?usage: proj run [--vm] [--first] [--pipeline] [--unstick] [--timeout DUR] [--idle DUR] [--kick NAME]... [--owned] [--link URL] [--app NAME] PROJECT \"task\"}
+      task=${2:?usage: proj run [--vm] [--first] [--pipeline] [--unstick] [--timeout DUR] [--idle DUR] [--kick NAME]... [--owned] [--link URL] [--app NAME] PROJECT \"task\"}
       [ -d "$src/$p" ] || { echo "no such project: $src/$p" >&2; exit 1; }
       # Owned by what acts on each turn's end, which hears of it by its kick.
       [ -z "$owned" ] || [ ${#kick[@]} -gt 0 ] || { echo "proj run --owned needs a --kick: what acts on each turn's end" >&2; exit 2; }
@@ -518,6 +529,8 @@ case "${1:-status}" in
         [ -z "$why" ] || echo "proj: $id $why" >&2
       fi
       [ -z "$owned" ] || : >"$jobs/$id/owned"
+      # Every turn of it in the slot no one else's may take (line.sh).
+      [ -z "$unstick" ] || : >"$jobs/$id/unstick"
       [ -z "$link" ] || echo "$link" >"$jobs/$id/link"
       [ -z "$app" ] || echo "$app" >"$jobs/$id/app"
       if [ -n "$vm" ]; then agent new "$p" >"$jobs/$id/agent"; fi
@@ -619,6 +632,12 @@ case "${1:-status}" in
       echo "proj: couldn't stop $id" >&2
       exit "$rc"
     fi
+    rewatch "$id"
+    ;;
+  unstick)
+    id=${2:?usage: proj unstick ID}
+    [ -d "$jobs/$id" ] || { echo "no job $id" >&2; exit 1; }
+    : >"$jobs/$id/unstick"
     rewatch "$id"
     ;;
   list) find "$src" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort ;;

@@ -61,7 +61,7 @@ fn command() {
             "stateDir": state, "proj": d.join("proj"), "project": "homelab", "jobTimeout": 60, "jobIdle": 20,
             "sources": {"autoland": {"file": watch, "about": "the PR steward", "look": "journalctl -u autoland.",
                                      "kick": "autoland", "stale": null}},
-            "kick": format!("http://127.0.0.1:{port}/kick"), "escalateAfter": 7200, "ownerAfter": 14400,
+            "kick": format!("http://127.0.0.1:{port}/kick"), "escalateAfter": 7200,
             "stewardKick": "autoland", "labels": null, "notify": d.join("notify"), "owner": "Sam", "host": "box",
         })
         .to_string(),
