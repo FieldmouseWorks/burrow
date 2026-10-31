@@ -8,6 +8,10 @@
 # --unstick takes a slot of its own, every turn of it, while every other one
 # is held and turns wait in line, and waits only for another --unstick turn
 # (one made so later, by proj unstick, too: waiting, or at its next turn),
+# that proj withdraw ends a job only while its turn waits for a slot (one
+# that has started, or ended, it leaves be, saying so, and one from an older
+# proj it refuses), and that a turn takes a free slot only once its job's
+# lock, which withdraw looks under, is free,
 # that a job whose turn has ended frees its slot, that one stopped after
 # its answer with work in the background has the rest of that run stopped,
 # hears so once and answers again (the turn ending as its last run did, its
@@ -237,6 +241,36 @@ pkgs.testers.runNixOSTest {
         proj(f"stop {b}")
         machine.wait_until_succeeds(f"su - dev -c 'proj state {c}' | grep -x done", timeout=120)
         assert started(d) < started(c), (started(d), started(c))
+
+    with subtest("proj withdraw ends a job only while its turn waits for a slot"):
+        a = proj('run web "sleep 600"')
+        b = proj('run web "sleep 600"')
+        for j in (a, b):
+            machine.wait_until_succeeds(f"su - dev -c 'proj state {j}' | grep -x running", timeout=120)
+        c = proj('run web "sleep 1"')
+        d = proj('run web "sleep 1"')
+        time.sleep(5)
+        assert [state(j) for j in (c, d)] == ["queued", "queued"], [state(j) for j in (c, d)]
+        assert proj(f"withdraw {a}") == "running" and state(a) == "running", state(a)
+        # A turn from an older proj never says it may be withdrawn, and
+        # isn't: it might take its slot unlocked.
+        machine.succeed(f"mv /data/dev/jobs/{c}/1.withdrawable /tmp/withdrawable")
+        machine.fail(f"su - dev -c 'proj withdraw {c}'")
+        assert state(c) == "queued", state(c)
+        machine.succeed(f"mv /tmp/withdrawable /data/dev/jobs/{c}/1.withdrawable")
+        assert proj(f"withdraw {c}") == "withdrawn"
+        assert state(c) not in ("queued", "running") and c not in waits(), (state(c), waits())
+        assert proj(f"withdraw {c}") == "over"
+        # d next in line, its job's lock held as withdraw would hold it: a's
+        # slot comes free, and d waits for the lock to say it has it.
+        machine.succeed(f"su - dev -c 'touch /data/dev/jobs/{d}/lock'")
+        machine.execute(f"su - dev -c 'flock /data/dev/jobs/{d}/lock sleep 30' >/dev/null 2>&1 &")
+        machine.wait_until_fails(f"flock -n /data/dev/jobs/{d}/lock true", timeout=30)
+        proj(f"stop {a}")
+        time.sleep(8)
+        assert state(d) == "queued", state(d)
+        machine.wait_until_succeeds(f"su - dev -c 'proj state {d}' | grep -x done", timeout=120)
+        proj(f"stop {b}")
 
     with subtest("a job whose turn has ended frees its slot"):
         a = proj('run web "linger 600"')

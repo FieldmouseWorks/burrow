@@ -1,6 +1,8 @@
 # What a look at proj's line costs (modules/proj/line.sh): the forks it takes
 # don't grow with the line, git runs at most once per project, and the note of
 # who's next lets every other waiter skip its look, for as long as it's fresh.
+# And that a turn says it has its slot only under its job's lock, and stops
+# saying it may be withdrawn under that lock before it's handed over.
 #
 #   bash tests/proj-line.sh modules/proj/pick.sh modules/proj/line.sh
 # shellcheck disable=SC2154 # seen and busy, from look
@@ -159,7 +161,7 @@ rm -rf "${jobs:?}/.queue" "${jobs:?}/.slots"
 mkdir -p "$jobs/.queue" "$jobs/.slots"
 sleep 3 # so no place is left of the shell above
 MAX_JOBS=1 PIPELINE_SLOTS=0
-export -f look look_due note_next waiter_alive take_slot pick within_share picked place class line_of github_repo origin listed flake_project spare
+export -f look look_due note_next waiter_alive take_slot took_slot pick within_share picked place class line_of github_repo origin listed flake_project spare
 export jobs NEXT_FRESH LOOK_EVERY MAX_JOBS PIPELINE_SLOTS
 exec {held}>"$jobs/.slots/1"
 flock -n "$held"
@@ -211,6 +213,55 @@ for w in w0 w1; do
 done
 for i in 2 3 4; do [ ! -e "$jobs/w$i/took" ] || fail "w$i took a slot ahead of the line"; done
 [ "$(in_queue)" = 3 ] || fail "two took slots, and $(in_queue) are left of five"
+
+# A turn says it has its slot (N.slot, proj state's running) only under its
+# job's lock, which proj withdraw looks and stops under: with that held, the
+# head of the line takes the free slot and waits to say so.
+kill "${pids[@]}" 2>/dev/null || true
+wait "${pids[@]}" 2>/dev/null || true
+pids=()
+rm -rf "${jobs:?}/.queue" "${jobs:?}/.slots" "${jobs:?}"/w?
+mkdir -p "$jobs/.queue" "$jobs/.slots" "$jobs/w0"
+MAX_JOBS=1
+flock "$jobs/w0/lock" sleep 6 &
+pids+=($!)
+until ! flock -n "$jobs/w0/lock" true; do sleep 0.05; done
+waiter w0
+sleep 3
+! flock -n "$jobs/.slots/1" true || fail "w0 took no slot while its job's lock was held"
+[ ! -e "$jobs/w0/1.slot" ] || fail "w0 said it had its slot while its job's lock was held"
+[ -e "$jobs/w0/1.withdrawable" ] || fail "w0 waits in line without saying proj withdraw may stop it"
+for _ in $(seq 1 200); do [ -e "$jobs/w0/took" ] && break; sleep 0.05; done
+[ "$(cat "$jobs/w0/1.slot" 2>/dev/null)" = 1 ] || fail "w0 didn't say it had slot 1 once its job's lock was let go"
+
+# A turn handed over to the deployed proj stops saying it may be withdrawn
+# first, under its job's lock: what it's handed to may take its slot without
+# that lock (a proj from before took_slot, after a switch back to it). The one
+# deployed here takes the hand-over and says whether the turn still did.
+kill "${pids[@]}" 2>/dev/null || true
+wait "${pids[@]}" 2>/dev/null || true
+pids=()
+rm -rf "${jobs:?}/.queue" "${jobs:?}/.slots" "${jobs:?}"/w?
+mkdir -p "$jobs/.queue" "$jobs/.slots" "$jobs/w0" "$tmp/deployed"
+cat >"$tmp/deployed/proj" <<STUB
+#!/bin/sh
+case \$1 in
+  _handover_format) echo 1 ;;
+  _exec) if [ -e "$jobs/\$2/1.withdrawable" ]; then echo marked; else echo unmarked; fi >"$jobs/\$2/handed" ;;
+esac
+STUB
+chmod +x "$tmp/deployed/proj"
+export -f successor unmark
+export HANDOVER_FORMAT DEPLOYED=$tmp/deployed/proj self=/nowhere
+flock "$jobs/w0/lock" sleep 6 &
+pids+=($!)
+until ! flock -n "$jobs/w0/lock" true; do sleep 0.05; done
+waiter w0
+sleep 3
+[ ! -e "$jobs/w0/handed" ] || fail "w0 was handed over while its job's lock was held"
+for _ in $(seq 1 200); do [ -e "$jobs/w0/handed" ] && break; sleep 0.05; done
+[ "$(cat "$jobs/w0/handed" 2>/dev/null)" = unmarked ] || fail "w0 was handed over still saying proj withdraw may stop it"
+export DEPLOYED=/nowhere
 
 # in_line: all of it, in the order pick takes them, each with its wait.
 LEAD=sam/burrow

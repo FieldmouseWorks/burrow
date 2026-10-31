@@ -1,6 +1,6 @@
 //! What the watchdog keeps between passes, in its state directory.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 
@@ -10,14 +10,17 @@ use serde::{Deserialize, Serialize};
 use crate::watch::Item;
 
 /// state.json: the stalls it's taking a step at a time, the sources with no
-/// watch file to read (since when), and the stalls that have cleared whose
-/// owner's notice is still to close.
+/// watch file to read (since when), the stalls that have cleared whose
+/// owner's notice is still to close, and its own jobs to withdraw once no
+/// stall needs them, kept until proj has settled each (None in a state from
+/// before it kept them).
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default)]
 pub struct State {
     pub stalls: BTreeMap<String, Stall>,
     pub missing: BTreeMap<String, f64>,
     pub closing: BTreeMap<String, Stall>,
+    pub withdraw: Option<BTreeSet<String>>,
 }
 
 /// One stall: the item as its source last had it, and how far it has gone.
