@@ -102,6 +102,7 @@ dependencies = [
 name = "burrow-workflows"
 version = "0.0.0"
 dependencies = [
+ "regex",
  "serde_json",
  "sha2",
  "tempfile",
