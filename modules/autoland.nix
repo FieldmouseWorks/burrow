@@ -696,10 +696,11 @@ in
         machine rather than in CI, `{ "<check>" = "<how to run it and record
         its verdict>"; }`: once a settled PR waits on nothing else, one
         Claude job a head runs them on that commit and records each verdict,
-        a failure as a failure), proofSlots (how many of those jobs the repo
-        may have building at once, for proofs that take the whole machine:
-        the rest wait their turn, those labelled `labels.first` first, then
-        the oldest PR first; unset, no limit),
+        a failure as a failure; a new head stops the last head's job, unless
+        it's building what the new head's proof wants), proofSlots (how many
+        of those jobs the repo may have building at once, for proofs that
+        take the whole machine: the rest wait their turn, those labelled
+        `labels.first` first, then the oldest PR first; unset, no limit),
         proofBuilds (the flake attribute each proof check builds, `{
         "<check>" = "checks.x86_64-linux.<name>"; }`, whose result is the
         check's verdict: a proof whose attributes' outputs are all in the

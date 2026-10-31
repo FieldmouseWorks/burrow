@@ -107,6 +107,10 @@ let
     REVIEW_HINTS = cfg.firmware.reviewHints;
     # The autoland steward's commit status, which renovate-sweep doesn't count as CI.
     SETTLED = config.burrow.autoland.context or "review-settled";
+    # In a train repo, the steward's App as GraphQL names its bot, and the
+    # train's status, which counts as CI only from that App (updates/propose.sh).
+    STEWARD = if train then autoland.app.slug else "";
+    TRAIN_CONTEXT = if train then config.burrow.ledger.trainContext else "";
     # The repos the steward covers, as it last found them; none without it.
     COVERED = if config.burrow.autoland.enable or false then "${stateDir}/autoland/repos.json" else "";
     SEAL = "${majorSeal}/bin/major-seal";
@@ -747,7 +751,7 @@ in
 
         - `${update}` (on each push to main or a watched input, and hourly) bumps every flake input${lib.optionalString (cfg.claudeManifest != null) " and Claude Code"},
           builds, runs the VM tests, switches, checks health, confirms and
-          ${if train then "puts it up as a PR from its branch `${update}`, which the merge train lands (while that's open it brings in nothing newer, and rides it on main instead)" else "pushes to main"}.
+          ${if train then "puts it up as a PR from its branch `${update}`, which the merge train lands (while that's open it brings in nothing newer, and rides it on main instead, unless a check fails on it: then a fresh bump replaces its head)" else "pushes to main"}.
           It deploys main too, so a merged PR goes live the same way. It
           holds off while a switch is pending or while ${config.networking.hostName} runs changes that
           aren't on main, so ${if train then "put what you switch to up as a PR: only the merge train moves main" else "commit and push what you switch to"}.
