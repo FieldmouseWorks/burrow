@@ -45,7 +45,8 @@
       # burrow's own programs, one Cargo workspace (crates/): their package
       # and their gate, built for every platform lib/project.nix knows. Its
       # tests include the shared workflows' (crates/burrow-workflows), which
-      # read these files and run git, jq and nix; proj's clone repos to read
+      # read these files and run git, jq and nix, and the gate's run its VM
+      # tests in a slot of the real heavy (flock); proj's clone repos to read
       # their origins.
       crates = self.lib.project {
         inherit self;
@@ -56,8 +57,9 @@
             ".github/workflows/flake.yml"
             "templates/project/.github/workflows/flake.yml"
             "modules/autoland/prs.py"
+            "modules/cpu/heavy.sh"
           ];
-          testInputs = pkgs: [ pkgs.git pkgs.jq pkgs.nix ];
+          testInputs = pkgs: [ pkgs.git pkgs.jq pkgs.nix pkgs.util-linux ];
         };
       };
       # A workspace below its repo's root whose test reads a file outside

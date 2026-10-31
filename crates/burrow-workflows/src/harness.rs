@@ -5,7 +5,7 @@
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+use std::process::{Child, Command, Output, Stdio};
 use std::sync::RwLock;
 
 use tempfile::TempDir;
@@ -127,10 +127,7 @@ impl Scratch {
 
     /// A stand-in on the steps' PATH: a bash script.
     pub fn stub(&self, name: &str, body: &str) {
-        let path = self.join("bin").join(name);
-        let _whole = EXEC.write().unwrap_or_else(|e| e.into_inner());
-        fs::write(&path, format!("#!{}\n{body}", which("bash").display())).unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        executable(&self.join("bin").join(name), body);
     }
 
     /// PATH with the stand-ins first.
@@ -154,6 +151,30 @@ impl Scratch {
     /// A step's script, run in `cwd` as GitHub runs `shell: bash`, with the
     /// step's environment on top of [`Scratch::command`]'s.
     pub fn bash(&self, script: &str, cwd: &Path, env: &[(&str, &str)]) -> Ran {
+        let (cmd, outputs) = self.step_command(script, cwd, env);
+        let out = output(cmd);
+        Ran {
+            code: out.status.code().unwrap_or(-1),
+            stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+            outputs: read(&outputs),
+        }
+    }
+
+    /// A step's script started as [`Scratch::bash`] runs it, for a test to
+    /// watch while it runs: all it prints goes to `log`.
+    pub fn start(&self, script: &str, cwd: &Path, env: &[(&str, &str)], log: &Path) -> Child {
+        let (mut cmd, _) = self.step_command(script, cwd, env);
+        let to = fs::File::create(log).unwrap();
+        cmd.stdin(Stdio::null())
+            .stdout(to.try_clone().unwrap())
+            .stderr(to);
+        let _shared = EXEC.read().unwrap_or_else(|e| e.into_inner());
+        cmd.spawn().unwrap_or_else(|e| panic!("{cmd:?}: {e}"))
+    }
+
+    /// The command that runs a step's script, and its GITHUB_OUTPUT file.
+    fn step_command(&self, script: &str, cwd: &Path, env: &[(&str, &str)]) -> (Command, PathBuf) {
         let dir = self.mkdtemp();
         let (file, outputs) = (dir.join("step.sh"), dir.join("output"));
         fs::write(&file, script).unwrap();
@@ -164,13 +185,7 @@ impl Scratch {
             .current_dir(cwd)
             .env("GITHUB_OUTPUT", &outputs)
             .envs(env.iter().copied());
-        let out = output(cmd);
-        Ran {
-            code: out.status.code().unwrap_or(-1),
-            stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
-            outputs: read(&outputs),
-        }
+        (cmd, outputs)
     }
 
     /// git, as a test sets repos up: it fails the test if git fails, and
@@ -207,6 +222,13 @@ impl Scratch {
         self.git(repo, &["commit", "-qm", file]);
         self.git(repo, &["rev-parse", "HEAD"])
     }
+}
+
+/// A bash script at `path`, written under [`EXEC`].
+pub fn executable(path: &Path, body: &str) {
+    let _whole = EXEC.write().unwrap_or_else(|e| e.into_inner());
+    fs::write(path, format!("#!{}\n{body}", which("bash").display())).unwrap();
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
 }
 
 /// Writes a file, making its directory.
