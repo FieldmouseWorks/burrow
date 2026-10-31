@@ -17,6 +17,8 @@
   # "chatter N" says something every second for N seconds, then answers;
   # "named N" names its session ("named") as Claude's first line does, then
   # sleeps N seconds without answering.
+  # "scratch" makes a worktree of web, with a file in it, in its scratch and
+  # says where that is in /tmp/scratch; "scratch ask" then asks.
   # As a job, it says what comes next before it answers (proj done; "ask"
   # asks, "await" awaits), but "silent" doesn't, and with /tmp/silent nothing
   # does, even told to; what it's told is kept in /tmp/told.
@@ -69,6 +71,10 @@
         echo '{"type":"result","session_id":"s","result":"told","is_error":false}'
         exit 0 ;;
       ask) proj ask >/dev/null ;;
+      scratch*)
+        echo "''${PROJ_SCRATCH-}" >/tmp/scratch
+        git -C /data/dev/src/web worktree add -q --detach "$PROJ_SCRATCH/web" && touch "$PROJ_SCRATCH/web/built"
+        case $prompt in *ask) proj ask >/dev/null ;; esac ;;
       await*) proj await "''${prompt#await }" >/dev/null ;;
       # Awaits, then takes a while to answer: what changes meanwhile is news.
       slowawait*) proj await "''${prompt#slowawait }" >/dev/null; sleep 10 ;;

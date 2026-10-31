@@ -51,7 +51,8 @@
 # Jobs run headless (claude -p) in SRC/PROJECT under the same managed
 # settings as every session: no prompts, and an R2 command is refused rather
 # than asked, so the job reports it and the operator brings it to the owner.
-# Everything a job said is kept in JOBS/ID.
+# Everything a job said is kept in JOBS/ID; what it builds goes in a scratch
+# dir of its own, PROJ_SCRATCH, cleared once the job is over (scratch.sh).
 #
 # At most MAX_JOBS turns run Claude at once, and a turn starts only with
 # MIN_FREE MiB of memory to spare; the rest wait in line (queued), lead
@@ -628,12 +629,14 @@ case "${1:-status}" in
     # stopping. A stopped job is over: nothing it waited on resumes it.
     exec {lk}>>"$jobs/$id/lock"
     flock "$lk"
-    u=$(unit "$id") rc=0
+    u=$(unit "$id") rc=0 idle=''
     # Marked first, so the turn's end (_ended) already finds it stopped
     # rather than failed: nobody waits on it.
     n=$(cat "$jobs/$id/turns" 2>/dev/null || true)
     [ -z "$n" ] || : >"$jobs/$id/$n.stopped"
-    gone "$u" || systemctl --user stop "$u" || rc=$?
+    # No turn of it running, so no end of one to clear its scratch: this does.
+    gone "$u" && idle=1
+    [ -n "$idle" ] || systemctl --user stop "$u" || rc=$?
     # Its waits go whatever the stop said. A failed stop is an error unless
     # the turn is known to be over: one that ended on its own between the
     # look and the stop is stopped all the same, and one systemd can't be
@@ -646,6 +649,7 @@ case "${1:-status}" in
       exit "$rc"
     fi
     rewatch "$id"
+    [ -z "$idle" ] || scratch_clear "$id"
     ;;
   unstick)
     id=${2:?usage: proj unstick ID}
@@ -784,6 +788,10 @@ Carry on from there. Anything you left in the background last turn was stopped w
     { cat "$jobs/$id/kick" 2>/dev/null || true
       cut -f1 "$jobs/$id/await" 2>/dev/null | sed 's/#.*//; s#^#proj-watch/#' || true
     } | kick
+    # A job this turn left over has its scratch cleared, after the kicks so
+    # nothing waits on it; its next turn (a reply) starts only once this has
+    # ended, and makes its own afresh.
+    if over "$id"; then scratch_clear "$id"; fi
     ;;
   _handover_format) echo "$HANDOVER_FORMAT" ;;
   _rewatch) shift; rewatch "$@" ;;
@@ -808,6 +816,17 @@ Carry on from there. Anything you left in the background last turn was stopped w
       env=$(app_env "$(cat "$dir/app")")
       if [ -z "$env" ] || ! appenv=$(cat -- "$env" 2>/dev/null) || [ -z "$appenv" ]; then
         echo "no GitHub App $(cat "$dir/app") on this machine to act as" >"$dir/$n.outcome"
+        exit 1
+      fi
+    fi
+    # Its scratch (scratch.sh), made before it takes a slot: one that can't
+    # be made fails the turn rather than leave its work nowhere to go. A
+    # sandbox's job works in the VM's own clone.
+    scratch=''
+    if [ ! -s "$dir/agent" ]; then
+      scratch=$(scratch_of "$id")
+      if ! mkdir -p -- "$scratch"; then
+        echo "couldn't make its scratch dir $scratch" >"$dir/$n.outcome"
         exit 1
       fi
     fi
@@ -862,16 +881,18 @@ Carry on from there. Anything you left in the background last turn was stopped w
       if [ -s "$dir/agent" ]; then
         timeout -k 1m 0 agent sh "$(cat "$dir/agent")" claude "${args[@]}" <"$prompt" >>"$dir/$n.jsonl" &
       else
+        # Where its own worktrees go, and how long they last (scratch.sh).
+        keep="Any worktree, clone or build of your own goes in $scratch (\$PROJ_SCRATCH), yours alone. Push what you mean to keep: it's removed, with everything in it, once this job is over,"
         if [ -n "$must" ]; then
-          args+=(--append-system-prompt "This is proj job $id, running headless. Your turn ends with your answer, and anything you left running in the background is stopped then, so don't wait on anything in the background or with sleep. Before you answer, say what comes next, since nothing else ever resumes this job: run $NEXT. Waiting on anything else (a background run, a notification) is waiting in this turn, in the foreground. $LONG")
+          args+=(--append-system-prompt "This is proj job $id, running headless. Your turn ends with your answer, and anything you left running in the background is stopped then, so don't wait on anything in the background or with sleep. Before you answer, say what comes next, since nothing else ever resumes this job: run $NEXT. Waiting on anything else (a background run, a notification) is waiting in this turn, in the foreground. $LONG $keep when a turn of it ends with \`proj done\`, or it's stopped.")
         else
-          args+=(--append-system-prompt "This is proj job $id, running headless. Your turn ends with your answer, and anything you left running in the background is stopped then, so don't wait on GitHub (CI, reviews, merges) in the background or with sleep. Run \`proj await URL\` for each PR or issue you're still waiting on, then end your turn saying what you wait for: the job is resumed, with this conversation, once one of them changes (checks finish, a review, comment or push, merged or closed). $LONG")
+          args+=(--append-system-prompt "This is proj job $id, running headless. Your turn ends with your answer, and anything you left running in the background is stopped then, so don't wait on GitHub (CI, reviews, merges) in the background or with sleep. Run \`proj await URL\` for each PR or issue you're still waiting on, then end your turn saying what you wait for: the job is resumed, with this conversation, once one of them changes (checks finish, a review, comment or push, merged or closed). $LONG $keep when a turn of it ends awaiting nothing, or it's stopped.")
         fi
         # A login shell, so the job sees the same PATH and env as an SSH login,
         # and then its App's env, which nothing the login sets can undo; Claude
         # starts only once that has.
         # shellcheck disable=SC2016 # expanded by that shell
-        PROJ_JOB=$id PROJ_WAIT_DIR=$waitdir PROJ_APP_ENV=$appenv timeout -k 1m 0 bash -lc 'eval "$PROJ_APP_ENV" && unset PROJ_APP_ENV && exec claude "$@" <"$0"' "$prompt" "${args[@]}" >>"$dir/$n.jsonl" &
+        PROJ_JOB=$id PROJ_WAIT_DIR=$waitdir PROJ_SCRATCH=$scratch PROJ_APP_ENV=$appenv timeout -k 1m 0 bash -lc 'eval "$PROJ_APP_ENV" && unset PROJ_APP_ENV && exec claude "$@" <"$0"' "$prompt" "${args[@]}" >>"$dir/$n.jsonl" &
       fi
       pid=$!
       # Its session, kept once its stream first names it (the first line

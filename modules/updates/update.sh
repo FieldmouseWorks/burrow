@@ -75,7 +75,7 @@ if [ -n "$TRAIN" ]; then
 else
   to_main="commit and push to main"
 fi
-worktree_rules="Work in your own worktree (git -C $operator worktree add $SCRATCH/fix-\$(date +%s) origin/main), never in $operator itself: that checkout is the operator's. When the toplevel builds and \`nix build -L ${checks[*]/#/.#checks.$SYSTEM.}\` passes there, $to_main; $UPDATE deploys main on its next run, with the dead man's switch. If the right answer is to wait for upstream, say so and change nothing. If it needs $OWNER, say exactly what."
+worktree_rules="Work in your own worktree (git -C $operator worktree add \"\$PROJ_SCRATCH/fix\" origin/main), never in $operator itself: that checkout is the operator's. When the toplevel builds and \`nix build -L ${checks[*]/#/.#checks.$SYSTEM.}\` passes there, $to_main; $UPDATE deploys main on its next run, with the dead man's switch. If the right answer is to wait for upstream, say so and change nothing. If it needs $OWNER, say exactly what."
 
 # Never fight a human: a pending switch is someone mid-change.
 if [ -e "$SWITCH_STATE/pending" ]; then

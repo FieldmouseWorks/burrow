@@ -78,7 +78,6 @@ let
     PROJECT = project;
     DIR = stateDir;
     WORK = "${config.burrow.scratchDir}/${update}";
-    SCRATCH = config.burrow.scratchDir;
     SRC = config.burrow.projectsDir;
     FLAKE = config.burrow.flake;
     ORIGIN = cfg.origin;
