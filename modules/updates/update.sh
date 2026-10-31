@@ -280,10 +280,6 @@ fi
 # now (CVSS 7+, per vulnix). Those go live without the test, under the same dead
 # man's switch and health check as everything else.
 
-# VM test $1 on commit $2, logged to $3.
-run_check() {
-  as_user nix build --no-link -L "git+file://$work?rev=$2#checks.$SYSTEM.$1" >"$3" 2>&1
-}
 # What VM test $1 did on commit $2's tree in the last day: pass, fail or nothing.
 result_of() {
   [ -z "$force" ] && [ -e "$state/check-results" ] || return 0
