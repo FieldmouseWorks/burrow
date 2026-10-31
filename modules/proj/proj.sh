@@ -171,11 +171,20 @@ ended() {
   ) 9>>"$d/lock"
 }
 
+# A stream's results (the file's, or stdin's), one per line as they come, but
+# for an empty one: no turn taken, nothing said, no error. A resumed session
+# whose last run was stopped with work in the background puts one out before
+# it starts on its prompt, then goes on working, so it answers nothing.
+answers() {
+  grep --line-buffered '"type":"result"' "$@" |
+    jq -cR --unbuffered 'fromjson? | select(.num_turns == 0 and (.is_error | not) and (.result // "") == "" | not)'
+}
+
 # A turn's answer, from its stream: every result with something to say, in
 # order. Claude answers again each time a background task it left running
 # reports back, so the last result can be a line about that task with the
 # real answer one before it.
-answer() { grep '"type":"result"' "$1" 2>/dev/null | jq -rs 'map(.result // "" | select(. != "")) | join("\n\n")'; }
+answer() { answers "$1" 2>/dev/null | jq -rs 'map(.result // "" | select(. != "")) | join("\n\n")'; }
 
 # Swapped in whole, so a reader never finds it missing or half written.
 set_turns() { echo "$2" >"$jobs/$1/turns.new" && mv -f "$jobs/$1/turns.new" "$jobs/$1/turns"; }
@@ -578,7 +587,7 @@ case "${1:-status}" in
     [ -n "$n" ] || n=$(cat "$jobs/$id/turns")
     # A turn's answer is read from its own stream, so an earlier turn's is
     # still there once later ones have started.
-    last=$(grep '"type":"result"' "$jobs/$id/$n.jsonl" 2>/dev/null | tail -n 1 || true)
+    last=$(answers "$jobs/$id/$n.jsonl" 2>/dev/null | tail -n 1 || true)
     if [ -n "$raw" ]; then
       cat "$jobs/$id/$n.jsonl"
     elif [ -n "$last" ] && text=$(answer "$jobs/$id/$n.jsonl") && [ -n "$text" ]; then
@@ -869,7 +878,7 @@ Carry on from there. Anything you left in the background last turn was stopped w
       # and whatever it left in the background are stopped (the unit takes the
       # rest when this shell ends), and the slot goes with them.
       cut=''
-      if grep -qm1 '"type":"result"' < <(tail -n +"$from" -f --pid="$pid" "$dir/$n.jsonl"); then
+      if grep -qm1 . < <(tail -n +"$from" -f --pid="$pid" "$dir/$n.jsonl" | answers); then
         for _ in $(seq 10); do kill -0 "$pid" 2>/dev/null || break; sleep 1; done
         if kill -0 "$pid" 2>/dev/null; then cut=1; kill "$pid" 2>/dev/null || true; fi
       fi
@@ -878,7 +887,7 @@ Carry on from there. Anything you left in the background last turn was stopped w
       # Its watcher sees the run gone within a second, and clears up after it.
       wait "$dog" || true
       wait "$named" || true
-      last=$(tail -n +"$from" "$dir/$n.jsonl" | grep '"type":"result"' | tail -n 1 || true)
+      last=$(tail -n +"$from" "$dir/$n.jsonl" | answers | tail -n 1 || true)
       # Still up after its answer, it was waiting on something it left in the
       # background (a build past one Bash call), which went with it. Or it
       # answered without saying what comes next, and nothing would ever
