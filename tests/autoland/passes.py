@@ -5,6 +5,7 @@ the kicks from reviews and Claude jobs coming back."""
 import json
 import os
 import sys
+import time
 
 from harness import (ACTING, FAIL, KICKS, REAL_GH, QDIR, REAL, STATES, STUB, T, WROTE, C, P, R, H, S, V, W, clean, fresh_pr_state, head,
                      info, mkpr, pr_state, queued, run, rv_review, tmp, worker)
@@ -83,7 +84,7 @@ run(clean(), 700)
 assert C.WAKE["sam/r"] == T + 700 + 60 + 1, C.WAKE
 H.land = land
 fresh_pr_state()
-C.job, job = (lambda repo, task, clone=False: None), C.job
+C.job, job = (lambda repo, task, clone=False, since=None: None), C.job
 run(clean(files=["secrets/1.yaml"]), 700)
 assert C.WAKE["sam/r"] == T + 700 + 60 + 1, C.WAKE
 C.job = job
@@ -151,6 +152,13 @@ assert open(f"{tmp}/proj-args").read().split() == ["run", "--timeout", "240m", "
 S.CFG["machinery"] = "workers"
 assert REAL["job"]("sam/r", "the task") == "job-9"
 assert open(f"{tmp}/proj-args").read().split() == ["run", "--pipeline", "--app", "workers", "--timeout", "60m", "--idle", "20m", "--kick", "autoland/sam/r", "--owned", "r", "the", "task"]
+# A PR's job stands in line from when the PR was opened (--since, whole
+# seconds), and never from after now, which proj refuses.
+assert REAL["job"]("sam/r", "the task", since=1792800000.7) == "job-9"
+assert open(f"{tmp}/proj-args").read().split()[:5] == ["run", "--pipeline", "--app", "workers", "--since"], open(f"{tmp}/proj-args").read()
+assert open(f"{tmp}/proj-args").read().split()[5] == "1792800000"
+REAL["job"]("sam/r", "the task", since=time.time() + 3600)
+assert int(open(f"{tmp}/proj-args").read().split()[5]) <= time.time()
 C.project_dir = project_dir
 S.CFG.clear()
 S.CFG.update(kept)
@@ -171,7 +179,7 @@ C.save("repos.json", {"untouched": True})
 seen_repos, watched, published = [], [], []
 kept_fns = (S.R.discover, S.R.restart, S.R.settle_repo, S.R.publish, S.R.watch_branches, S.open_prs, S.R.unhook_gone)
 S.R.unhook_gone = lambda repos: (_ for _ in ()).throw(AssertionError("hooks taken off in a kicked pass"))
-S.R.discover = lambda: [{"repo": "sam/r"}, {"repo": "sam/other"}]
+S.R.discover = lambda: [{"repo": "sam/r", "default": "main"}, {"repo": "sam/other", "default": "main"}]
 order = []
 S.R.restart = lambda r, known, failed: order.append(("restart", r["repo"]))
 S.R.settle_repo = lambda r, known: order.append(("settle", r["repo"])) or r["repo"] not in known
@@ -220,7 +228,7 @@ fresh_pr_state()
 C.NOW = T
 seen_repos, watched = [], []
 kept_fns = (S.R.discover, S.R.restart, S.R.settle_repo, S.R.publish, S.open_prs, S.D.watch, S.F.watch)
-S.R.discover = lambda: [{"repo": "sam/r"}]
+S.R.discover = lambda: [{"repo": "sam/r", "default": "main"}]
 S.R.restart = lambda r, known, failed: (_ for _ in ()).throw(RuntimeError("proj stop r-1: couldn't"))
 S.R.settle_repo = lambda r, known: (_ for _ in ()).throw(AssertionError("settled a repo not started over"))
 S.R.publish = lambda lines: None
@@ -236,6 +244,31 @@ S.R.discover, S.R.restart, S.R.settle_repo, S.R.publish, S.open_prs, S.D.watch, 
 assert seen_repos == [] and watched == [], (seen_repos, watched)
 assert C.load("wake.json", None) == {"sam/r": T + 5 * 60}, C.load("wake.json", None)
 print("remade, not started over: ok")
+
+# A repo made empty (no default branch yet): its pass sees to its settings
+# and hook, so its first push is heard, and nothing else: no PRs to read, no
+# baseline job yet (nothing to open a PR on), and it isn't known until then.
+fresh_pr_state()
+settled, seen_repos, NEW_JOBS = [], [], []
+kept_fns = (S.R.discover, S.R.settle_repo, S.R.publish, S.R.unhook_gone, S.R.hook_projects, S.open_prs)
+S.R.discover = lambda: [{"repo": "sam/new", "default": None}]
+S.R.settle_repo = lambda r, known: settled.append(r["repo"]) or r["repo"] not in known
+S.R.publish = S.R.unhook_gone = lambda *a: None
+S.R.hook_projects = lambda repos: []
+S.open_prs = kicked_prs
+C.job, job = (lambda repo, task, clone=False: NEW_JOBS.append(repo) or "job-new"), C.job
+S.CFG.update(baselineJobs=True, baselineTask="REPO is new")
+C.save("known.json", [])
+for args in (["steward", "kick", "sam/new"], ["steward"]):
+    sys.argv = args
+    S.main()
+S.CFG["baselineJobs"] = False
+del S.CFG["baselineTask"]
+C.job, sys.argv = job, argv
+S.R.discover, S.R.settle_repo, S.R.publish, S.R.unhook_gone, S.R.hook_projects, S.open_prs = kept_fns
+assert settled == ["sam/new", "sam/new"] and seen_repos == [] and NEW_JOBS == [], (settled, seen_repos, NEW_JOBS)
+assert C.load("known.json", None) == [], C.load("known.json", None)
+print("empty repos: ok")
 
 # A pass GitHub's rate limit turns away books its repos' next pass for when
 # the limit resets (`gh api rate_limit`, free), not five minutes on, the
@@ -266,7 +299,7 @@ for where in ("discovery", "prs", "after"):
     fresh_pr_state()
     C.NOW = T
     C.save("wake.json", {"sam/other": T + 60, "Sam/R": T + 9000})
-    S.R.discover = limited if where == "discovery" else (lambda: [{"repo": "sam/r"}])
+    S.R.discover = limited if where == "discovery" else (lambda: [{"repo": "sam/r", "default": "main"}])
     S.open_prs = limited if where == "prs" else (lambda owner, name: (info, [mkpr()]))
     S.R.publish = limited if where == "after" else (lambda lines: None)
     path, os.environ["PATH"] = os.environ["PATH"], fake + os.pathsep + os.environ["PATH"]

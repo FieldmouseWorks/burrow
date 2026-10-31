@@ -1,9 +1,9 @@
 # Which waiting turns take a slot now, and which slots: take_slot's choice
-# (proj.sh), on its own so the flake can check it. It reads what take_slot
+# (line.sh), on its own so the flake can check it. It reads what take_slot
 # sees, one tab-separated line each: "slot N free", or "slot N CLASS PROJECT"
 # for one that's taken (its turn's class and project, "-" when not known), for
 # every slot in order; then "wait NAME CLASS PROJECT" for every turn in line,
-# the head first. CLASS is lead, pipeline, first or normal. It hands out every
+# the head first. CLASS is lead, pipeline, steward, first or normal. It hands out every
 # free slot it can in one look, printing "NAME N" for each turn that may start,
 # in the order they're chosen, or nothing; a turn that looks and finds its
 # name starts, so free slots never wait on one named waiter's look.
@@ -17,15 +17,25 @@
 # project, what the pipeline is built from) is a pipeline turn that goes first of all: ahead
 # of the whole line, the other pipeline turns included, except that it leaves
 # them the pipeline's own slots while one waits, so a lead repo's backlog can't
-# stop the work on what deploys it, and one of the others while one of
-# everyone else's waits and none of theirs runs, so it can't stop all the rest
-# either. Any other turn waits
+# stop the work on what deploys it. Any other turn waits
 # while its project holds PER_PROJECT slots (pipeline turns not counted), and
 # lets those behind it by meanwhile, so one project's jobs never fill the
-# machine.
+# machine. The last of a project's PER_PROJECT stays free for its steward turns
+# (run --pipeline, outside the pipeline's own repos), so its own lanes can't
+# hold up its gates and conflict fixes: only a steward turn starts when the
+# project's other turns hold PER_PROJECT - 1, or the one slot when PER_PROJECT
+# is 1, so that slot still goes to whoever's in line. Those other turns are
+# every normal and first one, one that has waited into first and one run
+# --first alike, and a steward turn may use the whole share.
+#
+# Everyone else's turns hold a slot whenever they have one that may start:
+# until they do, a pipeline turn, lead or not, leaves them one free ordinary
+# slot and takes what's left, so a backlog of pipeline work slows the others
+# and never stops them.
 pick() {
-  local kind a b c w pass t=0 r=0 l=0 q=0 o=0 e=0 open keep need loose x=0 y=0 went=() ours=() theirs=() inline=()
-  local -A held=()
+  local lanes=$((PER_PROJECT > 1 ? PER_PROJECT - 1 : 1))
+  local kind a b c w pass t=0 r=0 l=0 q=0 others=0 owed=0 spare open need loose x=0 y=0 went=() ours=() theirs=() inline=()
+  local -A held=() others_of=()
   while IFS=$'\t' read -r kind a b c; do
     case $kind in
       slot)
@@ -33,28 +43,32 @@ pick() {
           if [ "$a" -le $((MAX_JOBS - PIPELINE_SLOTS)) ]; then theirs+=("$a"); else ours+=("$a"); fi
         elif [ "$b" != pipeline ] && [ "$b" != lead ]; then
           held[p$c]=$((${held[p$c]:-0} + 1))
-          o=$((o + 1))
+          [ "$b" = steward ] || others_of[p$c]=$((${others_of[p$c]:-0} + 1))
+          others=$((others + 1))
         fi
         ;;
       wait)
         inline+=("$a"$'\t'"$b"$'\t'"$c")
-        case $b in
-          pipeline) q=$((q + 1)) ;;
-          lead) ;;
-          *) e=1 ;;
-        esac
+        [ "$b" != pipeline ] || q=$((q + 1))
         ;;
     esac
   done
+  if [ "$others" -eq 0 ]; then
+    for w in "${inline[@]}"; do
+      IFS=$'\t' read -r a b c <<<"$w"
+      case $b in lead | pipeline) continue ;; esac
+      within_share "$b" "$c" || continue
+      owed=1
+      break
+    done
+  fi
   # Who goes: each in turn, while the slots still go round. t turns chosen, l
-  # of them lead and r held to the slots anyone may take; open is how many of
-  # the pipeline's own slots the q other pipeline turns in line leave lead ones,
-  # keep how many of the free slots anyone may take lead ones leave everyone
-  # else's turns (one, while one of theirs waits and they hold none of the o
-  # slots held, so a lead backlog can't stop them all), and need how many of
-  # the slots anyone may take lead ones must have.
+  # of them lead and r held to the slots anyone may take; spare is how many of
+  # those the slot owed to the others leaves pipeline turns; open is how many
+  # of the pipeline's own slots the q other pipeline turns in line leave lead
+  # ones, and need how many of the slots anyone may take lead ones must have.
+  spare=$((${#theirs[@]} > owed ? ${#theirs[@]} - owed : 0))
   open=$((${#ours[@]} > q ? ${#ours[@]} - q : 0))
-  keep=$((o == 0 && e && ${#theirs[@]} > 0 ? 1 : 0))
   for pass in lead rest; do
     for w in "${inline[@]}"; do
       IFS=$'\t' read -r a b c <<<"$w"
@@ -64,15 +78,19 @@ pick() {
       [ "$t" -lt $((${#theirs[@]} + ${#ours[@]})) ] || continue
       case $b in
         lead)
-          [ "$l" -lt $((${#theirs[@]} - keep + open)) ] || continue
+          [ "$l" -lt $((spare + open)) ] || continue
           l=$((l + 1))
           went+=("$a"$'\t'"$b")
           ;;
-        pipeline) went+=("$a"$'\t'"$b") ;;
+        pipeline)
+          [ $((t - r)) -lt $((spare + ${#ours[@]})) ] || continue
+          went+=("$a"$'\t'"$b")
+          ;;
         *)
           need=$((l > open ? l - open : 0))
-          [ "${held[p$c]:-0}" -lt "$PER_PROJECT" ] && [ $((r + need)) -lt "${#theirs[@]}" ] || continue
+          within_share "$b" "$c" && [ $((r + need)) -lt "${#theirs[@]}" ] || continue
           held[p$c]=$((${held[p$c]:-0} + 1))
+          [ "$b" = steward ] || others_of[p$c]=$((${others_of[p$c]:-0} + 1))
           r=$((r + 1))
           went+=("$a"$'\t'"$b")
           ;;
@@ -81,8 +99,9 @@ pick() {
     done
   done
   # Which slot each takes, lowest first: pipeline turns may have only what the
-  # others chosen leave them of the slots anyone may take.
-  loose=$((${#theirs[@]} - r))
+  # others chosen, and the slot owed to them, leave them of the slots anyone
+  # may take.
+  loose=$((${#theirs[@]} - r < spare ? ${#theirs[@]} - r : spare))
   for w in "${went[@]}"; do
     a=${w%$'\t'*} b=${w##*$'\t'}
     case $b in
@@ -98,6 +117,12 @@ pick() {
     printf '%s\t%s\n' "$a" "${theirs[x]}"
     x=$((x + 1))
   done
+}
+
+# Whether a turn of this class may start in this project, by the counts pick
+# keeps (its locals).
+within_share() {
+  [ "${held[p$2]:-0}" -lt "$PER_PROJECT" ] && { [ "$1" = steward ] || [ "${others_of[p$2]:-0}" -lt "$lanes" ]; }
 }
 
 # The slot pick (on stdin) gave the turn named, or nothing. Reads all of it, so
@@ -171,10 +196,11 @@ declare -A classes=()
 
 # A job's class, from its dir, into the_class. One run with --pipeline is a
 # pipeline one, every turn of it, only while its project is one of the
-# pipeline's own; anywhere else it's first, every turn of it, so it still goes
-# ahead of the line but counts against its project's PER_PROJECT and stays off
-# the pipeline's slots (one repo's PRs, waiting on that repo's own lock, can't
-# fill the machine). In a lead repo's project (LEAD: the ones among PIPELINE
+# pipeline's own; anywhere else it's steward, every turn of it, so it still goes
+# ahead of the line, with the first ones, and has the slot of its project's
+# PER_PROJECT the others leave it, but counts against that PER_PROJECT and stays
+# off the pipeline's slots (one repo's PRs, waiting on that repo's own lock,
+# can't fill the machine). In a lead repo's project (LEAD: the ones among PIPELINE
 # that go first of all, as autoland.leadRepos has them) it's lead. Asked each
 # time, so a job from before this rule, or one whose repo was taken off a
 # list since, is held to it too. Otherwise first or normal, as the turn was
@@ -188,7 +214,7 @@ class() {
     r=$(github_repo "$d")
     if listed "$r" "$LEAD"; then classes[p$d]=lead
     elif flake_project "$d" || listed "$r" "$PIPELINE"; then classes[p$d]=pipeline
-    else classes[p$d]=first
+    else classes[p$d]=steward
     fi
   fi
   the_class=${classes[p$d]}
@@ -196,7 +222,7 @@ class() {
 
 # A waiting turn's class now, into the_class, and into the_place the name its
 # place in line (JOBS/.queue's PREFIX-WHEN-ID) should have for it: 0 lead or
-# pipeline (pick takes lead ones first), 1 first, 2 normal. Its prefix says
+# pipeline (pick takes lead ones first), 1 steward or first, 2 normal. Its prefix says
 # what the turn itself is (2 normal, anything else first: run with --first, or
 # waited past MAX_WAIT), and class what that makes it now, so a job whose
 # origin or list changed while it waits moves in line and is held to its
@@ -206,7 +232,7 @@ the_place=''
 place() {
   local p
   if [[ $1 == 2-* ]]; then class "$2" normal; else class "$2" first; fi
-  case $the_class in lead | pipeline) p=0 ;; first) p=1 ;; *) p=2 ;; esac
+  case $the_class in lead | pipeline) p=0 ;; steward | first) p=1 ;; *) p=2 ;; esac
   # shellcheck disable=SC2034 # the caller's
   the_place=$p-${1#?-}
 }
@@ -220,8 +246,8 @@ demoted() {
   d=$(cat "$1/project" 2>/dev/null) || d=''
   pipeline_project "$d" && return 0
   r=$(github_repo "$d")
-  if [ -n "$r" ]; then echo "asked as --pipeline, but its origin, github.com/$r, isn't in pipelineRepos: it goes as --first"
-  elif [ -n "$(origin "$d")" ]; then echo "asked as --pipeline, but its origin isn't a GitHub repo's: it goes as --first"
-  else echo "asked as --pipeline, but its project has no origin: it goes as --first"
+  if [ -n "$r" ]; then echo "asked as --pipeline, but its origin, github.com/$r, isn't in pipelineRepos: it goes as a steward job"
+  elif [ -n "$(origin "$d")" ]; then echo "asked as --pipeline, but its origin isn't a GitHub repo's: it goes as a steward job"
+  else echo "asked as --pipeline, but its project has no origin: it goes as a steward job"
   fi
 }

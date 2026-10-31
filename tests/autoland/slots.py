@@ -13,7 +13,7 @@ from harness import C, CI_GREEN, JOBS, S, STATES, UNSTOPPABLE, clean, fresh_pr_s
 
 kept = C.job
 ids = itertools.count(1)
-C.job = lambda repo, task, clone=False: JOBS.append(task) or f"job-{next(ids)}"  # one id a job, across passes
+C.job = lambda repo, task, clone=False, since=None: JOBS.append(task) or f"job-{next(ids)}"  # one id a job, across passes
 S.CFG["repos"]["sam/r"] = {"proofJobs": {"remi-proof": "Run `just proof` and post the remi-proof status."}, "proofSlots": 1}
 proof = CI_GREEN + [{"__typename": "StatusContext", "context": "remi-proof", "state": "PENDING", "description": ""}]
 other = "c" * 40  # another head
@@ -128,7 +128,7 @@ assert ahead(1) in line(1, 800) and ahead(2) in line(2, 800) and JOBS == []
 # first in line.
 order = []
 kept_fns = (S.R.discover, S.R.settle_repo, S.R.publish, S.open_prs, S.R.unhook_gone, S.R.hook_projects, S.step.handle)
-S.R.discover = lambda: [{"repo": "sam/r"}]
+S.R.discover = lambda: [{"repo": "sam/r", "default": "main"}]
 S.R.settle_repo = lambda r, known: False
 S.R.publish = S.R.unhook_gone = lambda *a: None
 S.R.hook_projects = lambda repos: []

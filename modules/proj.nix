@@ -1,6 +1,8 @@
 # proj: the operator hands project work to a Claude inside that project, as a
 # background job (proj/proj.sh). Jobs run as burrow.user, in
-# burrow.projectsDir/PROJECT, and keep everything they said in jobsDir.
+# burrow.projectsDir/PROJECT, and keep everything they said in jobsDir. Each
+# makes its worktrees in a scratch dir of its own under burrow.scratchDir,
+# cleared once the job is over (proj/scratch.sh).
 # With proj.inbox, issues labelled for Claude in the projects' GitHub repos
 # become jobs too (proj/inbox.sh). A job waiting on a PR doesn't hold a slot:
 # proj-watch resumes it when the PR changes. Both are burrow.events handlers:
@@ -51,8 +53,11 @@ let
       WAITS=${lib.escapeShellArg (lib.optionalString watchdog waits)}
       STALL_QUEUED=${toString (cfg.stallAfterMinutes * 60)}
       GRACE=600
+      RESUME_GRACE=120
       APPS=${lib.escapeShellArg (lib.concatStrings (lib.mapAttrsToList (name: app: "${name}=${app.envFile}\n") config.burrow.github.apps))}
-    '' + builtins.readFile ./proj/pick.sh + builtins.readFile ./proj/line.sh + builtins.readFile ./proj/waits.sh + builtins.readFile ./proj/proj.sh;
+      SCRATCH=${lib.escapeShellArg config.burrow.scratchDir}
+    '' + builtins.readFile ./proj/pick.sh + builtins.readFile ./proj/line.sh + builtins.readFile ./proj/waits.sh + builtins.readFile ./proj/await.sh
+      + builtins.readFile ./proj/scratch.sh + builtins.readFile ./proj/run.sh + builtins.readFile ./proj/proj.sh;
   };
 
   inbox = pkgs.writeShellApplication {
@@ -62,7 +67,6 @@ let
       SRC=${lib.escapeShellArg projectsDir}
       JOBS=${lib.escapeShellArg cfg.jobsDir}
       STATE=${lib.escapeShellArg "${stateDir}/proj-inbox"}
-      SCRATCH=${lib.escapeShellArg config.burrow.scratchDir}
       LABEL=${lib.escapeShellArg cfg.inbox.label}
       UNSTICK_LABEL=${lib.escapeShellArg cfg.inbox.unstickLabel}
       AUTHORS=${lib.escapeShellArg (lib.concatStringsSep " " cfg.inbox.authors)}
@@ -114,9 +118,9 @@ in
         work on the pipeline itself waits only on other such work, never on
         everyone else's long jobs; a lead repo's go first of all, ahead of
         the other pipeline jobs too, but leave them these slots while one
-        waits, and everyone else one of the other slots while one of theirs
-        waits and none runs. A pipeline job in any other project goes
-        as `--first`: ahead of the line, but within its project's cap and
+        waits. All of them leave everyone else one of the other slots while
+        one of theirs waits and none runs. A pipeline job in any other project is a
+        steward job: ahead of the line, but within its project's cap and
         never in these slots; `proj status` and its turn's journal say so,
         origin and all.
       '';
@@ -129,7 +133,12 @@ in
         The most slots one project's jobs hold at once, the pipeline's own
         repos' pipeline jobs aside.
         Its next one waits, and lets other projects' by meanwhile, so one
-        project's jobs never fill the machine.
+        project's jobs never fill the machine. The last of these stays free
+        for the project's steward jobs (`proj run --pipeline`, there a pipeline
+        job goes within this cap): its other jobs, `--first` ones and ones
+        that waited `maxWait` included, hold at most maxJobsPerProject - 1,
+        or the one slot when this is 1, so its own lanes can't hold up its
+        gates and conflict fixes. Steward jobs may use the whole share.
       '';
     };
     minFreeMemory = lib.mkOption {
@@ -293,6 +302,9 @@ in
     systemd.tmpfiles.rules = [
       "d ${cfg.jobsDir} 0755 ${user} ${config.users.users.${user}.group} -"
       "d ${stateDir}/proj-watch 0755 ${user} ${config.users.users.${user}.group} -"
+      # Each job's scratch (proj/scratch.sh), which it clears itself once the
+      # job is over: no age here.
+      "d ${config.burrow.scratchDir}/jobs 0755 ${user} ${config.users.users.${user}.group} -"
     ];
 
     # What every job waits on, for the stall watchdog: proj rewrites it, and

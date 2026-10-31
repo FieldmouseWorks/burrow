@@ -13,6 +13,7 @@
 # are hermetic (the Nix sandbox, no network). A repo's heavier gates (VM
 # replays, browsers, databases) stay its own and run in `nix develop`. A Rust
 # workspace's binaries are its packages.default, for machines to install.
+# Every project's gate also looks for secrets in its tracked files.
 { nixpkgs, rust-overlay, crane }:
 {
   self,
@@ -124,6 +125,61 @@ let
       });
     };
 
+  # The house rules' "never commit secrets": gitleaks over every tracked
+  # file (a flake's source is the repo's tracked tree), with its own rules for
+  # credentials that have a known shape (GitHub, cloud and API tokens,
+  # private keys), but not its generic "API key" guess, which takes every
+  # invented test password for one. Its config also skips files by path
+  # (lockfiles, SVGs, vendored and minified code), and a token in any tracked
+  # text file is a leak, so here no allowlist names a path: one that does
+  # nothing else goes, and one that ANDs a path with the rest goes whole
+  # rather than widening to every file. A false alarm is answered in the
+  # repo: `gitleaks:allow` in a comment on the line, or the finding's
+  # fingerprint in .gitleaksignore. Files over 5 MB (recordings, databases)
+  # and binaries aren't read.
+  gitleaksConfig = pkgs: pkgs.runCommand "gitleaks.toml" { nativeBuildInputs = [ pkgs.remarshal pkgs.jq ]; } ''
+    toml2json ${pkgs.gitleaks.src}/config/gitleaks.toml | jq '
+      def unpathed: [ .[]
+        | if has("paths") and ((.condition // "or") | ascii_downcase) == "and" then empty else del(.paths) end
+        | select(has("regexes") or has("stopwords") or has("commits")) ];
+      def allowlists: .allowlists = ((.allowlists // []) + [.allowlist // empty] | unpathed) | del(.allowlist);
+      allowlists
+      | .rules |= map(select(.id != "generic-api-key") | allowlists | if .allowlists == [] then del(.allowlists) end)
+    ' > config.json
+    # Fail closed on a config whose shape this no longer matches.
+    jq -e '([.. | objects | select(has("paths") or has("allowlist"))] == []) and (.rules | length > 100)' config.json >/dev/null
+    json2toml config.json $out
+  '';
+  # A finding is reported by file, line, rule and fingerprint, never by what
+  # the file says: a public repo's CI log is public too. gitleaks' own output
+  # stays out of the log, since it can quote a file: its verbose findings
+  # show the line around a secret with only that secret redacted, and its
+  # warning for a .gitleaksignore line that isn't a fingerprint quotes the
+  # line, a token pasted there included. Leaks exit 2, so any other failure
+  # (a scan that stopped, a bad config) still fails, with a pointer to
+  # gitleaks' log in a build kept with --keep-failed.
+  secretsCheck = pkgs: pkgs.runCommand "secrets" { nativeBuildInputs = [ pkgs.gitleaks pkgs.jq ]; } ''
+    cd ${self}
+    status=0
+    gitleaks dir --no-banner --redact --config ${gitleaksConfig pkgs} --max-target-megabytes 5 \
+      --exit-code 2 --report-format json --report-path "$TMPDIR/leaks.json" . >"$TMPDIR/gitleaks.log" 2>&1 || status=$?
+    if grep -q 'Invalid .gitleaksignore entry' "$TMPDIR/gitleaks.log"; then
+      echo ".gitleaksignore has lines that aren't a fingerprint (FILE:RULE:LINE), and they ignore nothing"
+    fi
+    if [ -e "$TMPDIR/leaks.json" ]; then
+      jq -r '.[] | "\(.File):\(.StartLine): \(.RuleID) (fingerprint \(.Fingerprint))"' "$TMPDIR/leaks.json"
+    fi
+    case $status in
+      0) jq -e 'length == 0' "$TMPDIR/leaks.json" >/dev/null ;;
+      2) exit 1 ;;
+      *)
+        echo "gitleaks stopped (exit $status) before it finished. Its log isn't shown here; nix build this check with --keep-failed and read gitleaks.log in the build directory it keeps."
+        exit 1
+        ;;
+    esac
+    touch $out
+  '';
+
   pyChecks = pkgs:
     let dirs = lib.escapeShellArgs pyCfg.dirs; in
     {
@@ -151,7 +207,8 @@ in
   });
 
   checks = forAll (pkgs:
-    lib.optionalAttrs (rust != null) (rustChecks pkgs)
+    { secrets = secretsCheck pkgs; }
+    // lib.optionalAttrs (rust != null) (rustChecks pkgs)
     // lib.optionalAttrs (python != null) (pyChecks pkgs)
     // checks pkgs);
 

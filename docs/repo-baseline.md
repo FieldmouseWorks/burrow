@@ -6,12 +6,22 @@ day. When it first sees a repo, a Claude job brings the **Files** up to it in
 one PR, opened ready for review, which then goes through the same review loop
 as any other.
 
+It first sees a repo the moment it's made: GitHub tells the steward's App
+(its webhook, below), and the pass over that repo sets its settings and its
+own hook and starts the baseline job, which clones it on the machine. One
+made empty gets its settings and hook then, but not the ruleset, which
+would turn away the push that makes its default branch; that push's pass
+adds the ruleset and starts the job. Nothing about a new repo waits for
+the owner. A private repo's
+CI still needs a runner on the machine (burrow#236).
+
 A repo made under the name of one that was deleted is a new repo too, though
 GitHub gives it the same name, in any case, and so is one renamed or moved
-into a name another repo had: the steward knows it by GitHub's id for it,
-which it keeps with the settings (for settings kept before it kept ids, by
-being made after the steward last settled a repo of that name, or in the
-same second), on the first pass that reads it, kicked or full. Before
+into a name another repo had: the steward knows it by GitHub's databaseId
+for it, the number GitHub keeps for a repo whatever it's called, which the
+steward keeps with the repo's settings (for settings kept before it kept
+them, by being made after the steward last settled a repo of that name, or
+in the same second), on the first pass that reads it, kicked or full. Before
 anything acts on it, every clone of the name in `projectsDir` is moved aside
 under a hidden name, its own included: which repo a clone is of can't be
 told. Then proj-inbox forgets the repo's issues (`proj-inbox forget`), once
@@ -38,9 +48,11 @@ change nothing else in the same PR.
   threads resolved, CODEOWNERS honoured, and the `review-settled` status
   required from the steward's App (in a repo with its merge train on, the
   train's `conary/train` too, from the same App). Repo admins can still
-  merge past it from the PR page. A repo whose
+  merge past it from the PR page, except with the train on: there no one
+  bypasses it, so only the train lands. A repo whose
   automation pushes to its default branch (`directPush`) gets only the first
-  two. Existing rules stay; the ruleset only adds. An org's ruleset doesn't
+  two. A `baseline` that lacks one of these gets it the next time the settings
+  are kept, whenever it was made. Existing rules stay; the ruleset only adds. An org's ruleset doesn't
   stand in for it, whatever its name: the steward can't change the org's, so
   the repo gets its own as well, and GitHub enforces both.
 - No rule makes a branch be up to date with its base before it merges, the
@@ -79,9 +91,12 @@ marks from anyone else, the owner's own login included, isn't the steward's
 word, and the ledger (`burrow.ledger.reviewers`) doesn't count a merge on it
 as a landing.
 
-Make the App under the account that owns most of the repos: no webhook
-(burrow-events has its own), public only so the owner's other accounts can
-install it too (installing it gives nobody else anything), and these
+Make the App under the account that owns most of the repos, public only so
+the owner's other accounts can install it too (installing it gives nobody
+else anything). Turn its webhook on and subscribe it to the Repository
+event: that's how a repo is heard the moment it's made, before it has a
+hook of its own. The steward sets the webhook's URL and secret itself, to
+burrow-events' (leave them to it). Give it these
 repository permissions: read and write on administration (the settings and
 ruleset above), contents (merges and deleting branches), issues (the labels
 and the digest's issues), pull requests (reviews, comments and merges),

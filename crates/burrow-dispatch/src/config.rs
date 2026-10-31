@@ -31,6 +31,35 @@ pub struct Config {
     /// HOST-switch's state directory: a switch is in flight while it holds
     /// `pending`, and its revert unit, while that runs.
     pub switch: Option<Switch>,
+    /// Runners started fresh for one job each, when the machine has them.
+    pub fresh: Option<Fresh>,
+}
+
+/// Runners started fresh for one job each: registered just in time for it
+/// (GitHub's JIT config) with the organization's runner group, each in a
+/// unit of its own whose user and state nothing ran as before.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Fresh {
+    /// The organization they're registered with.
+    pub owner: String,
+    /// Its runner group's id.
+    pub group: u64,
+    /// OWNER/REPO, whose jobs they take.
+    pub repos: Vec<String>,
+    /// The one label each is registered with: a job that asks for it, and
+    /// for nothing else, is theirs.
+    pub label: String,
+    /// What every one's name starts with, then its instance: what a check
+    /// of where a job ran asks for.
+    pub prefix: String,
+    /// Their unit's template, as `NAME@`: each one is `NAME@INSTANCE.service`.
+    pub template: String,
+    /// The most there are at once.
+    pub most: usize,
+    /// Where a JIT config waits, as INSTANCE, for its unit to load it as a
+    /// credential: a directory only this handler's user and root can read.
+    pub configs: PathBuf,
 }
 
 /// A self-hosted runner, as it was registered.
@@ -54,10 +83,14 @@ pub struct Deploy {
     /// What its last run said (status.json).
     pub status: PathBuf,
     /// The machine's own flake's repo (OWNER/REPO), when HOST-update watches
-    /// it: the running system's commit of it is its configuration revision,
-    /// read as a pass starts, so that a build from a dirty tree and the same
-    /// tree committed stay the same system.
+    /// it. Its main is live up to the commit HOST-update last found in what
+    /// runs, as `live` says, read as a pass starts: not the system's stamp,
+    /// which a system that runs already keeps from an older commit, and which
+    /// a ride's merge onto main gives a commit never pushed.
     pub own: Option<String>,
+    /// HOST-update's record of that commit and the system it found it in
+    /// (live.json: `{"main": COMMIT, "running": STORE_PATH}`).
+    pub live: PathBuf,
     /// Each of the flake's inputs whose default branch it puts live
     /// (OWNER/REPO), and the commit of it the running system was built from.
     pub running: BTreeMap<String, String>,

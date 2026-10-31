@@ -1,14 +1,16 @@
 //! One look at what every PR waits on together: each runner, the jobs queued
-//! for it and whether it's at one; each runner repo's push runs on its
-//! default branch that haven't finished; each watched repo's commits the
-//! running system wasn't built from; and HOST-update and HOST-switch.
+//! for it and whether it's at one; the fresh runners and the jobs queued for
+//! them; each runner repo's push runs on its default branch that haven't
+//! finished; each watched repo's commits the running system wasn't built
+//! from; and HOST-update and HOST-switch.
 
 use std::collections::BTreeMap;
 use std::fs;
 
 use serde_json::Value;
 
-use crate::config::{Config, Runner};
+use crate::config::{Config, Fresh, Runner};
+use crate::rules::short;
 use crate::world::{Unit, World};
 
 #[derive(Clone, Debug, Default)]
@@ -16,11 +18,17 @@ pub struct Snapshot {
     pub switching: bool,
     /// Each runner, by unit.
     pub runners: BTreeMap<String, Seen>,
+    /// The fresh runners, when the machine has them.
+    pub fresh: Option<Pool>,
     /// Each runner repo's push runs on its default branch that haven't
     /// finished, by OWNER/REPO, oldest first.
     pub pushes: BTreeMap<String, Vec<Run>>,
     /// Each watched repo with a running commit to compare, by OWNER/REPO.
     pub deploys: BTreeMap<String, Behind>,
+    /// The flake's own repo when HOST-update hasn't found its main live in
+    /// the system that runs, and why: what's live is unknown until a run of
+    /// HOST-update finds it.
+    pub unknown: BTreeMap<String, String>,
     /// HOST-update, and what its last run said.
     pub update: Option<(Unit, String)>,
     /// The repos GitHub couldn't be read for, and why: what's known of them
@@ -33,6 +41,17 @@ pub struct Seen {
     pub repo: String,
     pub unit: Unit,
     /// The jobs queued that it could take, oldest first.
+    pub queued: Vec<Job>,
+}
+
+/// The runners started fresh for one job each, and the jobs queued for
+/// them.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Pool {
+    /// Each one's unit, by its instance.
+    pub units: BTreeMap<String, Unit>,
+    /// The jobs queued that ask for their label, oldest first, in the repos
+    /// that could be read.
     pub queued: Vec<Job>,
 }
 
@@ -80,18 +99,22 @@ pub fn take(cfg: &Config, world: &dyn World) -> Snapshot {
         ..Snapshot::default()
     };
     let mut queues: BTreeMap<&str, Vec<Queued>> = BTreeMap::new();
-    for r in cfg.runners.values() {
-        if !queues.contains_key(r.repo.as_str()) && !snap.unread.contains_key(&r.repo) {
-            match look(world, &r.repo) {
+    let fresh_repos = cfg.fresh.iter().flat_map(|f| &f.repos);
+    for repo in cfg.runners.values().map(|r| &r.repo).chain(fresh_repos) {
+        if !queues.contains_key(repo.as_str()) && !snap.unread.contains_key(repo) {
+            match look(world, repo) {
                 Ok((q, pushes)) => {
-                    queues.insert(&r.repo, q);
-                    snap.pushes.insert(r.repo.clone(), pushes);
+                    queues.insert(repo, q);
+                    snap.pushes.insert(repo.clone(), pushes);
                 }
                 Err(e) => {
-                    snap.unread.insert(r.repo.clone(), e);
+                    snap.unread.insert(repo.clone(), e);
                 }
             }
         }
+    }
+    if let Some(f) = &cfg.fresh {
+        snap.fresh = Some(pool(world, f, &queues));
     }
     for (unit, r) in &cfg.runners {
         let Some(q) = queues.get(r.repo.as_str()) else {
@@ -123,12 +146,15 @@ pub fn take(cfg: &Config, world: &dyn World) -> Snapshot {
             .unwrap_or_else(|| "nothing yet".to_owned());
         snap.update = Some((world.unit(&d.unit), said));
         let mut compare: Vec<(&String, String)> = Vec::new();
-        // Its own repo, when the system says which commit of it it is; one
-        // that can't be asked is a repo it can't read.
+        // Its own repo, at how far HOST-update found main live in the system
+        // that runs; a record or a system that can't be read is a repo it
+        // can't read.
         if let Some(own) = &d.own {
-            match world.revision() {
-                Ok(Some(rev)) => compare.push((own, rev)),
-                Ok(None) => {}
+            match live(&d.live, &d.unit, world) {
+                Ok(Live::At(main)) => compare.push((own, main)),
+                Ok(Live::Unknown(why)) => {
+                    snap.unknown.insert(own.clone(), why);
+                }
                 Err(e) => {
                     snap.unread.insert(own.clone(), e);
                 }
@@ -147,6 +173,31 @@ pub fn take(cfg: &Config, world: &dyn World) -> Snapshot {
         }
     }
     snap
+}
+
+/// The fresh runners' units, and the jobs queued in their repos that ask
+/// for their label and nothing else.
+fn pool(world: &dyn World, f: &Fresh, queues: &BTreeMap<&str, Vec<Queued>>) -> Pool {
+    let mut queued: Vec<Job> = f
+        .repos
+        .iter()
+        .filter_map(|r| queues.get(r.as_str()))
+        .flatten()
+        .filter(|j| {
+            !j.labels.is_empty() && j.labels.iter().all(|l| l.eq_ignore_ascii_case(&f.label))
+        })
+        .map(|j| j.job.clone())
+        .collect();
+    queued.sort_by(|a, b| a.at.total_cmp(&b.at));
+    let units = world
+        .instances(&f.template)
+        .into_iter()
+        .map(|i| {
+            let unit = world.unit(&format!("{}{i}.service", f.template));
+            (i, unit)
+        })
+        .collect();
+    Pool { units, queued }
 }
 
 /// A job queued in a repo, and the labels it asks for.
@@ -276,6 +327,47 @@ fn default_branch(world: &dyn World, repo: &str) -> Result<String, String> {
         .ok_or_else(|| format!("{repo} has no default branch"))
 }
 
+/// How far HOST-update found its own repo's main live.
+enum Live {
+    /// Up to this commit, in the system that runs.
+    At(String),
+    /// Not for the system that runs, and why: no run has recorded it yet,
+    /// or the system was switched since, by anyone.
+    Unknown(String),
+}
+
+/// What HOST-update's (`unit`'s) record at `path` says of the system that
+/// runs. A record or a system that can't be read is an error, so a wait
+/// isn't dropped on a failed read.
+fn live(path: &std::path::Path, unit: &str, world: &dyn World) -> Result<Live, String> {
+    let text = match fs::read(path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(Live::Unknown(format!(
+                "{unit} hasn't recorded main live in any system yet"
+            )));
+        }
+        Err(e) => return Err(format!("{}: {e}", path.display())),
+    };
+    let v: Value = serde_json::from_slice(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+    let field = |k: &str| {
+        v.get(k)
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| format!("{}: no {k}", path.display()))
+    };
+    let (main, recorded) = (field("main")?, field("running")?);
+    let running = world.running()?;
+    Ok(if recorded == running {
+        Live::At(main.to_owned())
+    } else {
+        Live::Unknown(format!(
+            "{unit} hasn't found main live in the system that runs ({running}) since it was switched to; it found it live up to {} in {recorded}",
+            short(main)
+        ))
+    })
+}
+
 /// What the repo's default branch has that `running` doesn't.
 fn behind(world: &dyn World, repo: &str, running: &str) -> Result<Behind, String> {
     let branch = default_branch(world, repo)?;
@@ -338,12 +430,13 @@ pub mod tests {
         pub units: BTreeMap<String, Unit>,
         pub then: BTreeMap<String, Unit>,
         pub looks: RefCell<BTreeMap<String, usize>>,
-        pub revision: Option<String>,
-        pub revision_fails: Option<String>,
+        pub running: Option<String>,
         pub switching: bool,
         pub did: RefCell<Vec<String>>,
         pub fails: Option<String>,
         pub peek: Option<std::path::PathBuf>,
+        /// The fresh runners' instances.
+        pub instances: Vec<String>,
     }
 
     impl Fake {
@@ -373,10 +466,10 @@ pub mod tests {
                 _ => self.units.get(unit).cloned().unwrap_or_default(),
             }
         }
-        fn revision(&self) -> Result<Option<String>, String> {
-            self.revision_fails
+        fn running(&self) -> Result<String, String> {
+            self.running
                 .clone()
-                .map_or_else(|| Ok(self.revision.clone()), Err)
+                .ok_or_else(|| "/run/current-system: No such file or directory".to_owned())
         }
         fn switching(&self) -> bool {
             self.switching
@@ -389,6 +482,12 @@ pub mod tests {
         }
         fn kick(&self, path: &str) {
             self.did.borrow_mut().push(format!("kick {path}"));
+        }
+        fn instances(&self, _: &str) -> Vec<String> {
+            self.instances.clone()
+        }
+        fn fresh(&self, f: &crate::config::Fresh, instance: &str) -> Result<(), String> {
+            self.act(format!("fresh {}{instance} for {}", f.prefix, f.owner))
         }
     }
 
@@ -408,11 +507,21 @@ pub mod tests {
             "gap": 120.0,
             "deploy": {
                 "unit": "box-update", "handler": "update", "status": dir.join("status.json"),
-                "own": "sam/box",
+                "own": "sam/box", "live": dir.join("live.json"),
                 "running": {"sam/kit": "bbb"},
                 "after": 1800.0, "run": 5400.0,
             },
             "switch": {"state": dir.join("switch"), "revert": "box-revert"},
+        }))
+        .unwrap()
+    }
+
+    /// The machine's fresh runners: for sam's sam/r and sam/f, two at most.
+    pub fn fresh(dir: &std::path::Path) -> crate::config::Fresh {
+        serde_json::from_value(json!({
+            "owner": "sam", "group": 1, "repos": ["sam/r", "sam/f"], "label": "fresh-box",
+            "prefix": "fresh-box-", "template": "fresh-runner@", "most": 2,
+            "configs": dir.join("configs"),
         }))
         .unwrap()
     }
@@ -565,11 +674,77 @@ pub mod tests {
         assert!(snap.unread["sam/r"].contains("page=2"), "{:?}", snap.unread);
     }
 
+    // The fresh runners' units, and the jobs queued in their repos, one
+    // read only for them among them, that ask for their label (in any case)
+    // and nothing else, oldest first.
+    #[test]
+    fn fresh_pool() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = config(dir.path());
+        cfg.deploy = None;
+        cfg.fresh = Some(fresh(dir.path()));
+        let mut w = Fake::default();
+        for repo in ["r", "o", "f"] {
+            w.github.insert(
+                format!("repos/sam/{repo}"),
+                Ok(json!({"default_branch": "main"})),
+            );
+            for status in ["queued", "in_progress", "pending"] {
+                w.github.insert(
+                    page(&format!("repos/sam/{repo}/actions/runs?status={status}"), 1),
+                    runs(&[]),
+                );
+            }
+        }
+        w.github.insert(
+            page("repos/sam/r/actions/runs?status=queued", 1),
+            runs(&[1]),
+        );
+        w.github.insert(
+            page("repos/sam/f/actions/runs?status=queued", 1),
+            runs(&[2]),
+        );
+        w.github.insert(
+            page("repos/sam/r/actions/runs/1/jobs?filter=latest", 1),
+            Ok(json!({"jobs": [
+                job("train", "queued", "2026-10-29T17:20:00Z", &["fresh-box"]),
+                job("gate", "queued", "2026-10-29T17:00:00Z", &["self-hosted", "sam"]),
+                job("both", "queued", "2026-10-29T17:00:00Z", &["fresh-box", "sam"]),
+            ]})),
+        );
+        w.github.insert(
+            page("repos/sam/f/actions/runs/2/jobs?filter=latest", 1),
+            Ok(json!({"jobs": [job("other", "queued", "2026-10-29T17:10:00Z", &["Fresh-Box"])]})),
+        );
+        w.instances = vec!["17-0".into()];
+        w.units.insert(
+            "fresh-runner@17-0.service".into(),
+            Unit {
+                state: "active".into(),
+                since: Some(1.0),
+                busy: true,
+            },
+        );
+        let pool = take(&cfg, &w).fresh.unwrap();
+        let names: Vec<&str> = pool
+            .queued
+            .iter()
+            .map(|j| j.url.rsplit('/').next().unwrap())
+            .collect();
+        assert_eq!(names, ["other", "train"]);
+        assert_eq!(pool.units.keys().collect::<Vec<_>>(), ["17-0"]);
+        assert!(pool.units["17-0"].busy);
+        // Without them, nothing's read for them.
+        cfg.fresh = None;
+        assert!(take(&cfg, &w).fresh.is_none());
+    }
+
     // A watched repo's commits past the running one: how many, the oldest's
     // time and the newest; none when it's live. The flake's own repo is
-    // compared at the running system's configuration revision, and isn't
-    // when it has none (built from a dirty tree); one that can't be read
-    // leaves the repo unread.
+    // compared at the commit HOST-update last found main live up to; without
+    // that record, or with one of a system other than the one that runs,
+    // what's live is unknown; a record or a system that can't be read leaves
+    // the repo unread.
     #[test]
     fn deploys() {
         let dir = tempfile::tempdir().unwrap();
@@ -579,8 +754,10 @@ pub mod tests {
             r#"{"time": "2026-10-29T15:52:00+00:00", "result": "ok", "message": "deployed", "running": "/nix/store/x"}"#,
         )
         .unwrap();
+        let live = dir.path().join("live.json");
+        std::fs::write(&live, r#"{"main": "aaa", "running": "/nix/store/x"}"#).unwrap();
         let mut w = Fake {
-            revision: Some("aaa".into()),
+            running: Some("/nix/store/x".into()),
             ..Fake::default()
         };
         for r in ["box", "kit"] {
@@ -619,16 +796,47 @@ pub mod tests {
             snap.update.as_ref().unwrap().1,
             "ok at 2026-10-29T15:52:00+00:00: deployed"
         );
-        w.revision = None;
+        assert!(snap.unknown.is_empty());
+        // A system switched to since, by anyone: unknown until HOST-update
+        // looks, never taken for live.
+        w.running = Some("/nix/store/y".into());
         let snap = take(&cfg, &w);
         assert!(!snap.deploys.contains_key("sam/box") && !snap.unread.contains_key("sam/box"));
-        assert_eq!(snap.deploys["sam/kit"].count, 0);
-        // One that can't be asked isn't taken for live.
-        w.revision_fails = Some("nixos-version: No such file or directory".into());
-        let snap = take(&cfg, &w);
         assert_eq!(
-            snap.unread["sam/box"],
-            "nixos-version: No such file or directory"
+            snap.unknown["sam/box"],
+            "box-update hasn't found main live in the system that runs (/nix/store/y) since it was switched to; it found it live up to aaa in /nix/store/x"
+        );
+        assert_eq!(snap.deploys["sam/kit"].count, 0);
+        // No record yet: unknown too.
+        w.running = Some("/nix/store/x".into());
+        std::fs::remove_file(&live).unwrap();
+        let snap = take(&cfg, &w);
+        assert!(!snap.deploys.contains_key("sam/box") && !snap.unread.contains_key("sam/box"));
+        assert_eq!(
+            snap.unknown["sam/box"],
+            "box-update hasn't recorded main live in any system yet"
+        );
+        // A record or a system that can't be read isn't taken for live.
+        std::fs::write(&live, r#"{"main": "aaa"}"#).unwrap();
+        let snap = take(&cfg, &w);
+        assert!(
+            snap.unread["sam/box"].ends_with("live.json: no running"),
+            "{:?}",
+            snap.unread
+        );
+        std::fs::write(&live, r#"{"main": "", "running": "/nix/store/x"}"#).unwrap();
+        assert!(take(&cfg, &w).unread["sam/box"].ends_with("live.json: no main"));
+        std::fs::write(&live, "{").unwrap();
+        assert!(take(&cfg, &w).unread.contains_key("sam/box"));
+        std::fs::remove_file(&live).unwrap();
+        std::fs::create_dir(&live).unwrap();
+        assert!(take(&cfg, &w).unread.contains_key("sam/box"));
+        std::fs::remove_dir(&live).unwrap();
+        std::fs::write(&live, r#"{"main": "aaa", "running": "/nix/store/x"}"#).unwrap();
+        w.running = None;
+        assert_eq!(
+            take(&cfg, &w).unread["sam/box"],
+            "/run/current-system: No such file or directory"
         );
     }
 }

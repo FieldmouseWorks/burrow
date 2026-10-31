@@ -76,7 +76,8 @@ SETTINGS = {
     # gh's pages: the strict one is on the second.
     "repos/sam/r/rulesets?per_page=100": [LISTED[:1], LISTED[1:]],
     "repos/sam/r/rulesets/1": {"name": "baseline", "target": "branch", "source_type": "Repository",
-                               "rules": [{"type": "deletion"}]},
+                               "bypass_actors": [{"actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "pull_request"}],
+                               "rules": [{"type": y} for y in ("deletion", "non_fast_forward", "pull_request", "required_status_checks")]},
     "repos/sam/r/rulesets/2": gates,
     "repos/sam/r/branches?protected=true&per_page=100": [[{"name": "main"}]],
     "repos/sam/r/branches/main": {"protection": {"required_status_checks": {"enforcement_level": "everyone"}}},
@@ -242,6 +243,19 @@ R.settle_repo({"repo": "sam/r", "private": False, "default": "main"}, {"sam/r"})
 assert [x for x in WROTE if "rulesets" in x] == ["api -X POST repos/sam/r/rulesets --input -"], WROTE
 required = [y for y in BODIES[0][1]["rules"] if y["type"] == "required_status_checks"]
 assert required[0]["parameters"]["required_status_checks"] == [{"context": "review-settled", "integration_id": 7}], required
+# Not on a repo with no commit yet, whose first push it would turn away (the
+# owner's too: they pass it only by PR). Its labels and other settings are
+# set then, and its first push's pass adds the ruleset at once, not a day on.
+C.NOW += 86400
+WROTE.clear()
+R.settle_repo({"repo": "sam/r", "private": False, "default": None}, {"sam/r"})
+assert not [x for x in WROTE if "rulesets" in x] and sorted(made()) == LABELS, WROTE
+assert "api -X PUT repos/sam/r/vulnerability-alerts" in WROTE and C.load("repo-sam_r.json", {})["empty"], WROTE
+C.NOW += 60
+WROTE.clear()
+R.settle_repo({"repo": "sam/r", "private": False, "default": "main"}, {"sam/r"})
+assert [x for x in WROTE if "rulesets" in x] == ["api -X POST repos/sam/r/rulesets --input -"], WROTE
+assert "empty" not in C.load("repo-sam_r.json", {}), C.load("repo-sam_r.json", {})
 C.gh, C.write = gh_stub, write
 
 # A repo made under the name of one GitHub deleted (GitHub's id for it
@@ -257,7 +271,7 @@ C.gh, C.write = gh_stub, write
 # baseline job.
 src, jobs = f"{tmp}/remade-src", S.CFG["jobsDir"]
 S.CFG["projectsDir"] = src
-remade = {"repo": "sam/r", "id": "R_new", "private": False, "default": "main", "created": "2026-10-24T06:00:00Z"}
+remade = {"repo": "sam/r", "id": 2002, "private": False, "default": "main", "created": "2026-10-24T06:00:00Z"}
 MADE = C.ts(remade["created"])
 SEQ = iter(range(100))
 
@@ -343,7 +357,7 @@ assert C.project_dir("sam/r") is None, os.listdir(src)
 WROTE.clear()
 assert R.settle_repo(remade, known) is True
 st = C.load("repo-sam_r.json", {})
-assert st["settings"] == C.NOW and st.get("hookId") != 41 and st["id"] == "R_new", st
+assert st["settings"] == C.NOW and st.get("hookId") != 41 and st["databaseId"] == 2002, st
 assert sorted(made()) == LABELS, WROTE
 assert "api -X PUT repos/sam/r/vulnerability-alerts" in WROTE, WROTE
 # Settled now, it isn't started over again: what's kept about it from here
@@ -355,13 +369,25 @@ STOPPED.clear()
 FORGOT.clear()
 R.restart(remade, known, failed)
 assert "pr-sam_r-2.json" in os.listdir(f"{tmp}/state") and STOPPED == FORGOT == [] and os.path.isdir(f"{src}/r")
-# Nor is one the steward never settled, or one whose id is the one it
-# kept, whenever it was settled; or, for state from before it kept ids, one
-# made a second or more before the steward last settled it. Settled in the
-# second it was made, which comes first can't be told: it starts over.
-for st, again in ((None, False), ({"id": "R_new", "settings": MADE - 86400}, False),
-                  ({"id": "R_old", "settings": MADE + 86400}, True), ({"settings": MADE + 1}, False),
-                  ({"settings": MADE + 0.25}, True)):
+# State from before databaseIds, its node id with it, takes this repo's
+# databaseId once restart has passed it, and the node id goes.
+st = {**C.load("repo-sam_r.json", {}), "id": "R_new"}
+del st["databaseId"]
+C.save("repo-sam_r.json", st)
+R.settle_repo(remade, known)
+st = C.load("repo-sam_r.json", {})
+assert st["databaseId"] == 2002 and "id" not in st, st
+# Nor is one the steward never settled, or one whose databaseId is the one
+# it kept, whenever it was settled; or, for state from before it kept them,
+# one made a second or more before the steward last settled it. Settled in
+# the second it was made, which comes first can't be told: it starts over.
+# A databaseId that isn't this repo's says so even where the old one never
+# got its settings. A node id kept before databaseIds were says nothing:
+# GitHub has changed their format, so such state goes by the time.
+for st, again in ((None, False), ({"databaseId": 2002, "settings": MADE - 86400}, False),
+                  ({"databaseId": 1001, "settings": MADE + 86400}, True), ({"databaseId": 1001}, True),
+                  ({"settings": MADE + 1}, False), ({"settings": MADE + 0.25}, True),
+                  ({"id": "R_old", "settings": MADE + 1}, False), ({"id": "R_new"}, False)):
     old_state()
     if st is None:
         os.remove(f"{tmp}/state/repo-sam_r.json")
@@ -387,7 +413,7 @@ assert os.listdir(f"{tmp}/state/{V.GIT}") == [], os.listdir(f"{tmp}/state/{V.GIT
 # the deleted one left: a clone git made from the name since, and the job
 # working in it, are the deleted one's all the same.
 old_state()
-C.save("repo-sam_r.json", {**C.load("repo-sam_r.json", {}), "id": "R_old"})
+C.save("repo-sam_r.json", {**C.load("repo-sam_r.json", {}), "databaseId": 1001})
 origin = f"{tmp}/remade-origin"
 subprocess.run(["git", "init", "-q", origin], check=True)
 subprocess.run(["git", "-C", origin, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty",
@@ -515,6 +541,49 @@ S.CFG["inbox"] = kept_inbox
 S.CFG["projectsDir"] = f"{tmp}/none"
 shutil.rmtree(jobs)
 print("remade repos: ok")
+
+# The App's own webhook, which hears a repo the moment it's made: its URL
+# and the hooks' secret, set as the App (its JWT), again when either
+# changes and once a day; one GitHub didn't take is tried again next pass.
+CALLS = []
+
+
+def app_call(method, path, jwt, body=None):
+    CALLS.append((method, path, jwt, body))
+    if FAIL_APP:
+        raise FAIL_APP.pop()
+    return {}
+
+
+FAIL_APP = []
+kept_app = (C.app_call, C.app_jwt)
+C.app_call, C.app_jwt = app_call, (lambda: "the-jwt")
+REAL["app_hook"]()
+assert CALLS == [("PATCH", "app/hook/config", "the-jwt", {"url": "https://example.org/burrow/hook", "content_type": "json",
+                                                       "secret": "hook-secret", "insecure_ssl": "0"})], CALLS
+REAL["app_hook"]()
+assert len(CALLS) == 1, CALLS
+C.NOW += 86400
+REAL["app_hook"]()
+assert len(CALLS) == 2, CALLS
+with open(f"{tmp}/cred/webhook", "w") as f:
+    f.write("new-secret\n")
+FAIL_APP.append(C.Unavailable("PATCH app/hook/config: HTTP 502"))
+REAL["app_hook"]()
+REAL["app_hook"]()
+assert len(CALLS) == 4 and CALLS[-1][3]["secret"] == "new-secret", CALLS
+REAL["app_hook"]()
+assert len(CALLS) == 4, CALLS
+# Another App, with the same URL and secret: its own webhook is set on the
+# next pass, not a day on.
+C.CFG["app"]["id"], kept_id = 8, C.CFG["app"]["id"]
+REAL["app_hook"]()
+C.CFG["app"]["id"] = kept_id
+assert len(CALLS) == 5, CALLS
+with open(f"{tmp}/cred/webhook", "w") as f:
+    f.write("hook-secret\n")
+C.app_call, C.app_jwt = kept_app
+print("the App's webhook: ok")
 
 # A red default branch gets one Claude job, and nothing more while it works
 # or its PR is open; a second if it ends with the branch still red, then the

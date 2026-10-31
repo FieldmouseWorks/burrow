@@ -1,11 +1,11 @@
 # The line for a slot: take_slot, and what it reads. The line is JOBS/.queue:
-# one file per waiting turn, named so that sorting puts pipeline ones ahead,
-# then --first ones, then the oldest, holding the waiting shell's pid. A slot
-# is a lock on JOBS/.slots/N, and N.who says whose (class and project), so a
-# turn that's killed frees its slot (and its place in line) by itself. pick
-# (pick.sh) says who has a slot. A job run --unstick waits in no line at all
-# (unstick_slot), and one made so while it waits (proj unstick) leaves the line
-# within a pass.
+# one file per waiting turn, named (entry) so that sorting puts pipeline ones
+# ahead, then --first ones, then the oldest, holding the waiting shell's pid.
+# A slot is a lock on JOBS/.slots/N, and N.who says whose (class and project),
+# so a turn that's killed frees its slot (and its place in line) by itself.
+# pick (pick.sh) says who has a slot. A job run --unstick waits in no line at
+# all (unstick_slot), and one made so while it waits (proj unstick) leaves the
+# line within a pass.
 #
 # One waiter looks at a time, under JOBS/.slots/.lock, and only those pick
 # names can take a slot, so what a look costs comes out of every waiter's turn
@@ -14,11 +14,39 @@
 # leaves all of pick's choice in JOBS/.slots/.next. For NEXT_FRESH seconds after
 # that, any waiter it doesn't name has nothing to learn and skips its look. It's
 # only ever a reason not to look: a slot is taken only by a look, under the lock.
-# shellcheck disable=SC2034,SC2154 # jobs, spare (proj.sh) and the_place (pick.sh) when this is checked alone
+#
+# What a waiting turn decides with is the deployed proj's, not the one it
+# started on: at its next look after a switch it execs that one, and picks up
+# its place in line there, so a change to who goes first reaches everyone
+# waiting and take_slot and pick are always one version. A running turn stays
+# on its proj, but what it tells the stall watchdog is the deployed one's too
+# (rewatch, proj.sh), so the format of a watch item has one owner. All that
+# crosses versions is these: `proj _exec ID CLASS`, in the same pid, with the
+# place left in JOBS/.queue under that pid and the look's lock held on fd 9
+# until that proj is up; and `proj _rewatch ID...`. HANDOVER_FORMAT names them,
+# and a proj that doesn't print the same one isn't handed anything (one from
+# before this, or a switch back to it): the turn stays on the proj it has.
+# shellcheck disable=SC2034,SC2154 # jobs, self, spare (proj.sh) and the_place (pick.sh) when this is checked alone
+HANDOVER_FORMAT=1
+DEPLOYED=/run/current-system/sw/bin/proj
 NEXT_FRESH=2
 # Whatever the note says, a waiter looks this often, which is as long as a job
 # whose class changed can go on holding its old place in line.
 LOOK_EVERY=60
+
+# The deployed proj's store path, into the_successor, so the switch after this
+# one can't move it from under what's run, if it isn't this one and can take a
+# hand-over. Every waiter asks at every pass, so while the deployed proj is
+# this one the answer takes no fork.
+the_successor=''
+successor() {
+  local d
+  the_successor=''
+  [ -e "$DEPLOYED" ] && ! [ "$DEPLOYED" -ef "$self" ] || return 1
+  d=$(readlink -f "$DEPLOYED") || return 1
+  [ -x "$d" ] && [ "$("$d" _handover_format 2>/dev/null || true)" = "$HANDOVER_FORMAT" ] || return 1
+  the_successor=$d
+}
 
 # Whether a waiter with this place, which last looked at this time, should look
 # now: it's never looked, or not lately, or there's no fresh note, or the note
@@ -89,16 +117,42 @@ look() {
   done
 }
 
+# A turn's place in line, the name JOBS/.queue has for it (PREFIX-WHEN-ID):
+# 1 for a --first turn, 2 for any other (pick.sh's place says what that makes
+# it now), and WHEN, in nanoseconds, from when its job's work began (proj run
+# --since), or else from now. Every WHEN has the same number of digits, so
+# sorting the names sorts them by when.
+entry() { # id class
+  local when
+  line_of when "$jobs/$1/since"
+  if [ -n "$when" ]; then when+="000000000"; else when=$(date +%s%N); fi
+  case $2 in first) echo "1-$when-$1" ;; *) echo "2-$when-$1" ;; esac
+}
+
 # Wait in line for a slot, then hold it on fd $slot until this shell ends. The
 # turn is first or normal, as it was started; its job's class (place, in
 # pick.sh) is asked again at every look, and its place in line, its admission
 # and its slot's N.who all go by that one answer.
 take_slot() {
-  local id=$1 n=$2 class=$3 me since got i lk new looked=0 project LC_ALL=C
+  local id=$1 n=$2 class=$3 me='' came='' f pid got i lk new looked=0 project LC_ALL=C
   mkdir -p "$jobs/.queue" "$jobs/.slots"
-  since=$EPOCHSECONDS
-  case $class in first) me=1 ;; *) me=2 ;; esac
-  me="$jobs/.queue/$me-$(date +%s%N)-$id"
+  # This turn says it has its slot only under its job's lock (took_slot), so
+  # proj withdraw may stop it while it waits. On a proj from before that, it
+  # can't be, never having said so: until it hands over to this one, or from
+  # the moment this one hands it over (unmark).
+  : >"$jobs/$id/$n.withdrawable"
+  # The place a proj before this one left, if it handed over, and when that
+  # place was made, which is when this turn came: MAX_WAIT goes by that, not
+  # the name's WHEN, which for a job run --since is when its work began.
+  for f in "$jobs/.queue"/*-"$id"; do
+    line_of pid "$f"
+    if [ "$pid" = "$$" ]; then
+      me=$f
+      came=$(date -r "$f" +%s 2>/dev/null) || came=''
+    fi
+  done
+  [ -n "$me" ] || me="$jobs/.queue/$(entry "$id" "$class")"
+  came=${came:-$EPOCHSECONDS}
   trap 'rm -f "$me" "${me%/*}/.${me##*/}.new"' EXIT
   trap 'exit 143' TERM INT
   while :; do
@@ -109,10 +163,20 @@ take_slot() {
       unstick_slot "$id" "$n"
       return
     fi
-    # Waited long enough: among the --first ones now, by when it came.
-    if [[ ${me##*/} == 2-* ]] && [ $((EPOCHSECONDS - since)) -ge "$MAX_WAIT" ]; then
+    # Waited long enough: among the --first ones now, in its place by WHEN.
+    if [[ ${me##*/} == 2-* ]] && [ $((EPOCHSECONDS - came)) -ge "$MAX_WAIT" ]; then
       mv -f "$me" "${me%/*}/1-${me##*/2-}" 2>/dev/null || true
       me="${me%/*}/1-${me##*/2-}"
+    fi
+    # A switch since the last pass: on with the deployed proj, in this place,
+    # whether or not a look is due (one the note skips can wait LOOK_EVERY).
+    if successor; then
+      unmark "$id" "$n"
+      # Mid-exec its cmdline reads empty, and a look clearing out dead places
+      # would take this one for gone: no look runs until it's through (_exec).
+      exec 9>"$jobs/.slots/.lock"
+      flock 9
+      exec "$the_successor" _exec "$id" "$3"
     fi
     if ! look_due "$me" "$looked"; then sleep 2; continue; fi
     # Where it stands now, and in the journal if that changed while it waits.
@@ -158,7 +222,7 @@ take_slot() {
         exec {lk}>&-
         rm -f "$me"
         trap - EXIT TERM INT
-        echo "$i" >"$jobs/$id/$n.slot"
+        took_slot "$id" "$n" "$i"
         return
       fi
       exec {slot}>&-
@@ -183,17 +247,44 @@ unstick_slot() {
   flock "$slot"
   line_of project "$jobs/$id/project"
   printf 'unstick\t%s\n' "$project" >"$jobs/.slots/unstick.who"
-  echo unstick >"$jobs/$id/$n.slot"
+  took_slot "$id" "$n" unstick
+}
+
+# Say that job ID's turn N has slot S (N.slot, which proj state reads as
+# running), under the job's lock: proj withdraw stops a turn only while it
+# has none, and looks under that lock, so none takes one between its look
+# and its stop. One withdrawn while it waits here is stopped with no slot.
+took_slot() {
+  local jl
+  exec {jl}>>"$jobs/$1/lock"
+  flock "$jl"
+  echo "$3" >"$jobs/$1/$2.slot"
+  exec {jl}>&-
+}
+
+# Say job ID's turn N may be withdrawn no more, under the job's lock, so none
+# is stopped on this proj's word once another has it: before a hand-over, to a
+# proj that may take its slot without that lock (one from before took_slot,
+# after a switch back to it). One that can be withdrawn says so again itself,
+# at the top of its take_slot.
+unmark() {
+  local jl
+  exec {jl}>>"$jobs/$1/lock"
+  flock "$jl"
+  rm -f "$jobs/$1/$2.withdrawable"
+  exec {jl}>&-
 }
 
 # Every turn in line, in the order pick takes them (lead ones, then the rest):
-# its job, class, how long it has waited, and its project. Only reads.
+# its job, class, how long it has waited, and its project. Only reads. The wait
+# is from when its place was made, not its name's WHEN, which for a job started
+# --since is when its work began.
 in_line() {
-  local pass f name fid when wait project
+  local pass f name fid wait project
   for pass in lead rest; do
     for f in "$jobs/.queue"/*; do
       [ -e "$f" ] || continue
-      name=${f##*/}; fid=${name#*-}; when=${fid%%-*}; fid=${fid#*-}
+      name=${f##*/}; fid=${name#*-}; fid=${fid#*-}
       waiter_alive "$f" "$fid" || continue
       classes=()
       place "$name" "$jobs/$fid"
@@ -201,7 +292,8 @@ in_line() {
       else [ "$the_class" != lead ] || continue
       fi
       line_of project "$jobs/$fid/project"
-      wait=$((EPOCHSECONDS - when / 1000000000))
+      wait=$(date -r "$f" +%s 2>/dev/null) || continue
+      wait=$((EPOCHSECONDS - wait))
       printf '%-40s %-8s %4dm%02ds  %s\n' "$fid" "$the_class" $((wait / 60)) $((wait % 60)) "$project"
     done
   done

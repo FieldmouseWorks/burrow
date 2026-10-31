@@ -10,7 +10,7 @@ import os
 import shutil
 import subprocess
 
-from harness import (C, CI_GREEN, DDIR, FAIL, JOBS, POSTED, PR_DIFF, QDIR, P, R, H, S, STATES, STUB, T0, V,
+from harness import (C, CI_GREEN, DDIR, FAIL, JOBS, POSTED, PR_DIFF, QDIR, P, R, H, S, SINCE, STATES, STUB, T0, V,
                      W, WROTE, agent, agent_runs, clean, fresh_pr_state, head, info, judgment, merged,
                      gh_stub, mkpr, pr_state, queued, run, rv_review, said, stand_in, swept, tmp, worker)
 
@@ -343,6 +343,8 @@ fresh_pr_state()
 C.save(f"{V.SNAP}/{V.snap_name('pr-sam_r-5.json', head, 'main')}.json", {"rules": "", "secret": [".env", "cfg/api.yaml"]})
 status, _ = run(clean(files=[".env", "cfg/api.yaml"]), 700)
 assert len(JOBS) == 1 and not merged() and "it changes .env, cfg/api.yaml, which the reviewers" in JOBS[0], (status, JOBS)
+# It waits in proj's line from when the PR was opened, not from this head.
+assert SINCE == [C.ts(T0)], SINCE
 
 # Retargeted after its reviews, the same head is another change: what they
 # said doesn't count, and they're asked again.
@@ -624,7 +626,7 @@ assert not merged() and "the repo has no CI" not in status, status
 assert len(JOBS) == 1 and "CI is red (flake (failed to start))" in JOBS[0], (status, JOBS)
 many_suites = clean(checks=[], suites=broken)
 many_suites["commits"]["nodes"][0]["commit"]["checkSuites"]["pageInfo"]["hasNextPage"] = True
-assert H.ci_state(many_suites) == ("pending", ["over 100 checks, too many to read"])
+assert H.ci_state(many_suites) == ("pending", ["over 100 checks, too many to read"], False)
 fresh_pr_state()
 run(clean(checks=[]), 700)
 # CI that shows up while the judge works doesn't pass it by: its verdict on
@@ -710,12 +712,18 @@ for checks in (CI_GREEN, []):
 # renovate-sweep is told how a covered repo's proofs run.
 C.NOW = C.ts(T0)
 assert C.coverage([{"repo": "sam/r"}], [{"repo": "sam/r"}]) == {
-    "at": C.NOW, "repos": {"sam/r": {"proofJobs": S.CFG["repos"]["sam/r"]["proofJobs"], "covered": True}}}
+    "at": C.NOW, "repos": {"sam/r": {"proofs": S.CFG["repos"]["sam/r"]["proofJobs"], "covered": True}}}
+# A build the steward runs is one of them, told as how a job reruns it.
+S.CFG["repos"]["sam/r"]["proofBuilds"] = {"vm": "checks.x86_64-linux.vm"}
+told = C.coverage([{"repo": "sam/r"}], [])["repos"]["sam/r"]["proofs"]
+assert set(told) == {"remi-proof", "vm"} and "nix build .#checks.x86_64-linux.vm -L" in told["vm"], told
+assert "never post that status yourself" in told["vm"], told
+del S.CFG["repos"]["sam/r"]["proofBuilds"]
 # ... but only the repos a pass saw to are covered: one whose pass failed
 # isn't, so renovate-sweep lists its ok majors itself, and still knows how
 # its proofs run.
 kept_fns = (S.R.discover, S.R.settle_repo, S.R.publish, S.open_prs, S.R.unhook_gone, S.R.hook_projects)
-S.R.discover = lambda: [{"repo": "sam/r"}, {"repo": "sam/bad"}, {"repo": "sam/flaky"}]
+S.R.discover = lambda: [{"repo": f"sam/{n}", "default": "main"} for n in ("r", "bad", "flaky")]
 # A full pass takes the hooks off the repos it no longer sees to, but not
 # off the projects it hooks for proj.
 UNHOOKED = []
@@ -754,7 +762,7 @@ assert UNHOOKED == [S.R.discover() + [{"repo": "eve/p"}]], UNHOOKED
 S.R.discover, S.R.settle_repo, S.R.publish, S.open_prs, S.R.unhook_gone, S.R.hook_projects = kept_fns
 written = json.load(open(f"{tmp}/state/repos.json"))["repos"]
 assert {r: v["covered"] for r, v in written.items()} == {"sam/r": True, "sam/bad": False, "sam/flaky": False}, written
-assert written["sam/bad"]["proofJobs"] == C.repo_cfg("sam/bad")["proofJobs"], written
+assert written["sam/bad"]["proofs"] == C.repo_cfg("sam/bad")["proofJobs"], written
 # A proof job that ends without posting its verdict is started once more.
 fresh_pr_state()
 run(clean(checks=CI_GREEN), 700)

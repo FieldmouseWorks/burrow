@@ -53,10 +53,13 @@ Every repo with code gets a `flake.nix` from the template
   and in CI: rustfmt, clippy on all targets with warnings as errors, and the
   tests of the Cargo workspace, built as `cargo test` builds them (debug
   assertions on); ruff's error rules on Python (and `ruff
-  format`, once a repo has been formatted). `flake-gate` runs it on a machine
-  exactly as the repo's CI does, the workflow's own gate step with the
-  inputs the repo gives it (such as `eval-apart`, for a flake too big to
-  evaluate at once).
+  format`, once a repo has been formatted); and in every repo, gitleaks
+  over every tracked text file for credentials with a known shape (tokens,
+  private keys), reported by file and line, never by what the file says. A
+  false alarm gets `gitleaks:allow` on its line or its fingerprint in
+  `.gitleaksignore`. `flake-gate` runs it on a machine exactly as the repo's
+  CI does, the workflow's own gate step with the inputs the repo gives it
+  (such as `eval-apart`, for a flake too big to evaluate at once).
 - CI is `.github/workflows/flake.yml` from the template, which calls burrow's
   shared [`flake-check`](../.github/workflows/flake-check.yml) workflow. A
   public repo runs it on GitHub's hosted runners, which cost it nothing and
@@ -70,9 +73,17 @@ Every repo with code gets a `flake.nix` from the template
   pushes to `conary/train/**` and on pull_request's `edited` too, and turns
   `pr-gate` off: the gate checks the candidates the train lands, and a PR to
   the default branch gets only its `commits` (one to another branch, or
-  retargeted to one, still gets the gate). A
-  repo's heavier gates (VM replays, browser tiers, databases) stay its own
-  jobs, alongside it, and run their tools from `nix develop`.
+  retargeted to one, still gets the gate). A repo that lists its
+  documentation in `docs-paths` (files nothing its flake builds or tests
+  reads; the input says how) gives a PR that changes only those the docs
+  lane: only the checks named in `docs-checks`, and none of autoland's
+  proofs. Every repo runs it on pull_request's `edited` too, for a new base
+  only, as the template does: autoland counts a run only for the base it
+  judged, and what a PR changes depends on its base. Check what the build
+  reads before listing a path: burrow's
+  own `docs/` and `house/` are in its machines' config, so they aren't on
+  its list. A repo's heavier gates (VM replays, browser tiers, databases)
+  stay its own jobs, alongside it, and run their tools from `nix develop`.
 - Beside it, `.github/workflows/rust-first.yml` from the template calls
   burrow's shared [`rust-first-check`](../.github/workflows/rust-first-check.yml)
   on every PR, and again whenever its body is edited: a PR that adds a Python
