@@ -19,8 +19,9 @@
   # "chatter N" says something every second for N seconds, then answers;
   # "named N" names its session ("named") as Claude's first line does, then
   # sleeps N seconds without answering, as an issue's "inbox-hang" does
-  # ("hang") for good; told it was cut off, it answers, or with /tmp/again
-  # hangs again. "eat" and "bloat" name theirs too.
+  # ("hang") for good, resumed putting out an empty result first; told it
+  # was cut off, it answers, or with /tmp/again hangs again. "eat" and
+  # "bloat" name theirs too.
   # As a job, it says what comes next before it answers (proj done; "ask"
   # asks, "await" awaits), but "silent" doesn't, and with /tmp/silent nothing
   # does, even told to; what it's told is kept in /tmp/told.
@@ -29,7 +30,12 @@
     echo "$*" >/tmp/args
     init() { echo "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"$1\"}"; }
     bloat() { init bloat; x=$(head -c 512M /dev/zero | tr '\0' x); }
-    hang() { init hang; sleep 600; }
+    hang() {
+      init hang
+      # Resumed, it puts out the empty result Claude Code can first.
+      case " $* " in *" --resume "*) echo '{"type":"result","session_id":"hang","num_turns":0,"result":"","is_error":false}' ;; esac
+      sleep 600
+    }
     if [ -n "''${PROJ_JOB:-}" ] && [ ! -e /tmp/silent ]; then
       case $prompt in silent*) ;; *) proj done >/dev/null ;; esac
     fi

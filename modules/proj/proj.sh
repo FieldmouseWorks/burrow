@@ -318,12 +318,12 @@ again() {
 }
 
 # Whether turn N, the latest, was cut off: its whole unit killed (by oomd, as
-# a rule), not stopped, with no answer or error but its session in its
-# stream, and not a sandbox's, whose VM may outlive it. Under the job's lock.
+# a rule), not stopped, with no answer or error (answers) but its session in
+# its stream, and not a sandbox's, whose VM may outlive it. Under the job's lock.
 cut_off() {
   local d=$jobs/$1 f=$jobs/$1/$2.jsonl
   [ "$(cat "$d/turns" 2>/dev/null)" = "$2" ] && [ "$(state "$1")" = failed ] && [ ! -s "$d/$2.outcome" ] &&
-    [ ! -e "$d/$2.stopped" ] && [ ! -s "$d/agent" ] && grep -q '"session_id"' "$f" 2>/dev/null && ! grep -q '"type":"result"' "$f"
+    [ ! -e "$d/$2.stopped" ] && [ ! -s "$d/agent" ] && grep -q '"session_id"' "$f" 2>/dev/null && [ -z "$(answers "$f" 2>/dev/null)" ]
 }
 
 # Known not to be running: not "can't say".
