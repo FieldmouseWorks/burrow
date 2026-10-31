@@ -29,6 +29,10 @@ pub struct Handler {
     pub wake: Option<PathBuf>,
     #[serde(default)]
     pub own_statuses: Vec<String>,
+    /// The labels its passes put on PRs and take off themselves: one going
+    /// on or coming off is no news to them.
+    #[serde(default)]
+    pub own_labels: Vec<String>,
     #[serde(default = "yes")]
     pub per_repo: bool,
     #[serde(default)]
@@ -84,6 +88,16 @@ impl Handler {
         if event == "status"
             && let Some(context) = payload.get("context").and_then(Value::as_str)
             && self.own_statuses.iter().any(|s| s == context)
+        {
+            return false;
+        }
+        if event == "pull_request"
+            && matches!(
+                payload.get("action").and_then(Value::as_str),
+                Some("labeled" | "unlabeled")
+            )
+            && let Some(label) = at(payload, &["label", "name"]).and_then(Value::as_str)
+            && self.own_labels.iter().any(|l| l == label)
         {
             return false;
         }
@@ -447,6 +461,38 @@ mod tests {
         assert!(h.takes("status", &payload("sam/r", json!({}))));
     }
 
+    // A label the steward put on or took off itself is no news to it; anyone
+    // else's label, and anything else that happens to the PR, is.
+    #[test]
+    fn own_labels() {
+        let mut h = handler(&["pull_request"], "autoland");
+        h.own_labels = vec!["waiting: proof slot".into()];
+        let labelled = |action: &str, name: &str| {
+            payload(
+                "sam/r",
+                json!({"action": action, "label": {"name": name}, "pull_request": {"number": 5}}),
+            )
+        };
+        assert!(!h.takes("pull_request", &labelled("labeled", "waiting: proof slot")));
+        assert!(!h.takes(
+            "pull_request",
+            &labelled("unlabeled", "waiting: proof slot")
+        ));
+        assert!(h.takes("pull_request", &labelled("labeled", "needs-owner")));
+        assert!(h.takes("pull_request", &labelled("unlabeled", "hold")));
+        assert!(h.takes(
+            "pull_request",
+            &labelled("synchronize", "waiting: proof slot")
+        ));
+        assert!(h.takes(
+            "pull_request",
+            &payload("sam/r", json!({"action": "labeled"}))
+        ));
+        // Another handler that doesn't put it on still counts it.
+        let inbox = handler(&["pull_request"], "proj-inbox");
+        assert!(inbox.takes("pull_request", &labelled("labeled", "waiting: proof slot")));
+    }
+
     // One with no pass over one repo gets its full pass for a repo's event.
     #[test]
     fn place() {
@@ -461,7 +507,7 @@ mod tests {
     fn config() {
         let cfg: super::Config = serde_json::from_value(json!({
             "kickPort": 8788, "port": null,
-            "handlers": {"update": {"events": ["push"], "unit": "remi-update", "wake": null, "ownStatuses": [],
+            "handlers": {"update": {"events": ["push"], "unit": "remi-update", "wake": null, "ownStatuses": [], "ownLabels": [],
                                     "perRepo": false, "repos": ["sam/r"], "pushes": "default", "branches": null,
                                     "issueTitles": null}}
         }))

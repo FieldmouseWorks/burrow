@@ -453,6 +453,12 @@
           bash ${./tests/update-push.sh} ${./modules/updates/push.sh}
           touch $out
         '';
+        # HOST-update's VM tests take a heavy slot.
+        update-check = pkgs.runCommand "update-check-check" { nativeBuildInputs = [ pkgs.shellcheck ]; } ''
+          shellcheck -s bash -e SC2154 ${./modules/updates/check.sh} ${./tests/update-check.sh}
+          bash ${./tests/update-check.sh} ${./modules/updates/check.sh}
+          touch $out
+        '';
         # HOST-update's own PR in a train repo (modules/updates/propose.sh):
         # real git, with a stand-in for gh.
         update-propose = pkgs.runCommand "update-propose-check" { nativeBuildInputs = [ pkgs.shellcheck pkgs.git pkgs.jq ]; } ''
@@ -714,7 +720,7 @@
           touch $out
         '';
         # flake-gate: a repo's CI gate step, run here as CI runs it, and
-        # burrow's own evaluating apart, as a Claude job's memory needs.
+        # burrow's own evaluating apart, so a Claude job's gate holds little.
         flake-gate = pkgs.runCommand "flake-gate-check" { nativeBuildInputs = [ (pkgs.callPackage ./tools/flake-gate/package.nix { }) pkgs.git pkgs.yq-go pkgs.shellcheck ]; } ''
           shellcheck -s bash ${./tests/flake-gate.sh}
           bash ${./tests/flake-gate.sh} ${./.}
