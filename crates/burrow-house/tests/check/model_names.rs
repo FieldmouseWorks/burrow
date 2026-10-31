@@ -58,6 +58,22 @@ fn look_alikes() {
     }
 }
 
+// A file GitHub gives no patch for is read whole, Markdown included.
+#[test]
+fn no_patch() {
+    let c = case(vec![unpatched(change("modified", "AGENTS.md", 1, 0))]).tree(
+        "3e7b",
+        "AGENTS.md",
+        "# Agents\n",
+    );
+    fails(
+        &c.clone()
+            .tree("4ead", "AGENTS.md", "# Agents\nRoute it to Opus 5.5.\n"),
+        "model-names",
+    );
+    passes(&c.tree("4ead", "AGENTS.md", "# Agents\nRoute it to the reviewer.\n"));
+}
+
 // A repo whose subject is models turns the rule off: it posts no status for
 // it.
 #[test]

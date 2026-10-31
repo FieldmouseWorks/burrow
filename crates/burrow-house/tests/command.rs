@@ -32,9 +32,10 @@ fn setup(d: &Path, fork: bool) {
         "base": {"sha": "ba5e", "ref": "main"},
     });
     fs::write(d.join("pr.json"), pr.to_string()).unwrap();
-    let files = [
-        json!({"status": "modified", "filename": "my dir/big.rs", "additions": 20, "deletions": 5}),
-    ];
+    let files = [json!({
+        "status": "modified", "filename": "my dir/big.rs", "additions": 20, "deletions": 5,
+        "patch": "@@ -1,5 +1,20 @@\n+x",
+    })];
     let compare = json!({"merge_base_commit": {"sha": "3e7b"}, "files": files});
     fs::write(d.join("compare.json"), compare.to_string()).unwrap();
     fs::write(d.join("big.rs"), "x\n".repeat(1001)).unwrap();

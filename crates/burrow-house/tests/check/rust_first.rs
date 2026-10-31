@@ -216,11 +216,31 @@ fn shell() {
                 .body("Why not Rust: Gradle generates this wrapper"),
         );
     }
-    fails(
-        &case(vec![from(
-            change("renamed", "tools/run.sh", 80, 0),
+    // A file that becomes shell counts its whole length, not the lines its
+    // diff adds: renamed from a text file, or copied from another script,
+    // with no line changed.
+    let whole = "x\n".repeat(g as usize + 1);
+    for c in [
+        case(vec![from(
+            change("renamed", "tools/run.sh", 0, 0),
             "tools/run.txt",
         )]),
+        case(vec![from(
+            change("copied", "tools/b.sh", 0, 0),
+            "tools/a.sh",
+        )]),
+    ] {
+        let name = c.files[0]["filename"].as_str().unwrap().to_owned();
+        fails(&c.clone().tree("4ead", &name, &whole), "rust-first");
+        passes(&c.tree("4ead", &name, "x\n".repeat(g as usize).as_str()));
+    }
+    // Its last line counts without a newline.
+    fails(
+        &case(vec![change("added", "tools/run.sh", g, 0)]).tree(
+            "4ead",
+            "tools/run.sh",
+            &format!("{}x", "x\n".repeat(g as usize)),
+        ),
         "rust-first",
     );
     // Two small scripts add up like one big one.
@@ -244,7 +264,11 @@ fn by_shebang() {
         "rust-first",
     );
     fails(
-        &case(vec![change("added", "bin/tool", 80, 0)]).tree("4ead", "bin/tool", SH),
+        &case(vec![change("added", "bin/tool", 80, 0)]).tree(
+            "4ead",
+            "bin/tool",
+            &format!("{SH}{}", "echo\n".repeat(78)),
+        ),
         "rust-first",
     );
     passes(&case(vec![change("added", "bin/tool", 30, 0)]).tree("4ead", "bin/tool", SH));

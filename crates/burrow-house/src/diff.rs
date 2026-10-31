@@ -20,14 +20,15 @@ pub struct Diff {
     /// weren't, whatever their lines.
     pub new_python: Vec<String>,
     /// Lines added to Python and shell, net of every line taken out of
-    /// either, files that stop being either included. A new shell script
-    /// counts its lines here, so glue passes and a feature in bash doesn't.
+    /// either, files that stop being either included. A file that becomes
+    /// shell counts its whole length here, so glue passes and a feature in
+    /// bash doesn't, however it got there.
     pub growth: i64,
     /// Code files the PR leaves longer than it found them and past the limit
     /// at its head, with their length there.
     pub big: Vec<(String, usize)>,
     /// Files with a line the PR adds that sets up a timer, outside Markdown
-    /// and comments.
+    /// and comments. A file GitHub gives no patch for is read whole.
     pub timers: Vec<String>,
     /// Files with a line the PR adds that names a model.
     pub models: Vec<String>,
@@ -47,6 +48,21 @@ impl Contents<'_> {
             self.read.insert(key.clone(), content);
         }
         Ok(&self.read[&key])
+    }
+
+    /// How many lines a file has at a commit, a last one with no newline
+    /// included.
+    fn length(&mut self, path: &str, at: &str) -> Result<usize, String> {
+        let content = self.get(path, at)?;
+        let ends = content.last().is_some_and(|b| *b != b'\n');
+        Ok(content.iter().filter(|b| **b == b'\n').count() + usize::from(ends))
+    }
+
+    /// A file's text at a commit, or None for a binary one: one with a NUL
+    /// byte, as git tells them apart.
+    fn text(&mut self, path: &str, at: &str) -> Result<Option<String>, String> {
+        let content = self.get(path, at)?;
+        Ok((!content.contains(&0)).then(|| String::from_utf8_lossy(content).into_owned()))
     }
 
     /// A path's language at a commit: by its name, or with no extension, by
@@ -103,44 +119,64 @@ pub fn read(gh: &dyn GitHub, base: &str, head: &str, lines: usize) -> Result<Dif
                 diff.growth += added - removed;
             }
             (_, Some(Language::Python)) => diff.new_python.push(file.to_owned()),
-            (None, Some(Language::Shell)) => diff.growth += added,
+            (None, Some(Language::Shell)) => {
+                diff.growth += i64::try_from(contents.length(file, head)?).unwrap_or(i64::MAX);
+            }
             (Some(_), None) => diff.growth -= removed,
             (None, None) => {}
         }
         if status != "removed" && added > removed && rules::is_code(file, now) {
-            let length = contents
-                .get(file, head)?
-                .iter()
-                .filter(|b| **b == b'\n')
-                .count();
+            let length = contents.length(file, head)?;
             if length > lines {
                 diff.big.push((file.to_owned(), length));
             }
         }
+        let new = adding(f, &mut contents, (previous, origin), head)?;
+        let lower = file.to_lowercase();
+        let markdown = lower.ends_with(".md") || lower.ends_with(".markdown");
+        if !markdown && new.iter().any(|l| rules::timer(l) && !rules::comment(l)) {
+            diff.timers.push(file.to_owned());
+        }
+        if new.iter().any(|l| rules::model(l)) {
+            diff.models.push(file.to_owned());
+        }
     }
-    diff.timers = adding(files, false, |l| rules::timer(l) && !rules::comment(l));
-    diff.models = adding(files, true, rules::model);
     Ok(diff)
 }
 
-/// The files with a line the PR adds that `matches`, read from each file's
-/// patch, Markdown's too or not. GitHub gives no patch for a binary file or
-/// one whose diff is too big to show, so those aren't read.
-fn adding(files: &[Value], markdown: bool, matches: impl Fn(&str) -> bool) -> Vec<String> {
-    files
-        .iter()
-        .filter(|f| {
-            let name = text(f, "filename").to_lowercase();
-            markdown || !(name.ends_with(".md") || name.ends_with(".markdown"))
-        })
-        .filter(|f| {
-            f["patch"].as_str().is_some_and(|patch| {
-                patch
-                    .lines()
-                    .filter_map(|l| l.strip_prefix('+'))
-                    .any(&matches)
-            })
-        })
-        .map(|f| text(f, "filename").to_owned())
-        .collect()
+/// The lines a file's diff adds, from its patch. GitHub gives none for a
+/// binary file or one whose diff is too big to show, so then they're the
+/// lines its head has more of than its old side (`was`, a path at the merge
+/// base), and a binary file adds none.
+fn adding(
+    f: &Value,
+    contents: &mut Contents,
+    was: (&str, &str),
+    head: &str,
+) -> Result<Vec<String>, String> {
+    if let Some(patch) = f["patch"].as_str() {
+        let added = patch.lines().filter_map(|l| l.strip_prefix('+'));
+        return Ok(added.map(str::to_owned).collect());
+    }
+    let (status, file) = (text(f, "status"), text(f, "filename"));
+    if status == "removed" || f["additions"].as_i64().unwrap_or_default() == 0 {
+        return Ok(vec![]);
+    }
+    let Some(now) = contents.text(file, head)? else {
+        return Ok(vec![]);
+    };
+    let mut had: HashMap<String, usize> = HashMap::new();
+    if status != "added" {
+        for line in contents.text(was.0, was.1)?.unwrap_or_default().lines() {
+            *had.entry(line.to_owned()).or_default() += 1;
+        }
+    }
+    let mut added = vec![];
+    for line in now.lines() {
+        match had.get_mut(line) {
+            Some(n) if *n > 0 => *n -= 1,
+            _ => added.push(line.to_owned()),
+        }
+    }
+    Ok(added)
 }

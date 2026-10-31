@@ -25,9 +25,14 @@ use serde_json::{Value, json};
 pub const GROWTH: i64 = 50;
 pub const LINES: usize = 1000;
 
-/// A file in a comparison, as GitHub lists it.
+/// A file in a comparison, as GitHub lists it, with a patch of that many
+/// lines added and taken out.
 pub fn change(status: &str, filename: &str, added: u64, removed: u64) -> Value {
-    json!({"status": status, "filename": filename, "additions": added, "deletions": removed})
+    let (plus, minus) = (vec!["x"; added as usize], vec!["x"; removed as usize]);
+    json!({
+        "status": status, "filename": filename, "additions": added, "deletions": removed,
+        "patch": adds(&plus, &[], &minus),
+    })
 }
 
 /// One renamed or copied from another path.
@@ -39,6 +44,12 @@ pub fn from(mut file: Value, previous: &str) -> Value {
 /// One with its patch.
 pub fn patched(mut file: Value, patch: String) -> Value {
     file["patch"] = json!(patch);
+    file
+}
+
+/// One GitHub gives no patch for: binary, or a diff too big to show.
+pub fn unpatched(mut file: Value) -> Value {
+    file.as_object_mut().unwrap().remove("patch");
     file
 }
 

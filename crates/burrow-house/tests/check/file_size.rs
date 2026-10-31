@@ -75,6 +75,18 @@ fn not_grown() {
     }
 }
 
+// The last line counts, with or without a newline after it.
+#[test]
+fn last_line() {
+    let lines = "x\n".repeat(LINES);
+    let c = |content: &str| {
+        case(vec![change("modified", "src/big.rs", 20, 5)]).tree("4ead", "src/big.rs", content)
+    };
+    fails(&c(&format!("{lines}x")), "file-size");
+    passes(&c(&format!("{}x", "x\n".repeat(LINES - 1))));
+    passes(&c(""));
+}
+
 // A repo can set its own limit.
 #[test]
 fn its_own_limit() {
