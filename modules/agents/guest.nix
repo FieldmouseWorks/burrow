@@ -23,6 +23,7 @@ in
   imports = [
     inputs.microvm.nixosModules.microvm
     (import ../toolbox.nix inputs)
+    ../claude/etc.nix
   ];
 
   options.burrow.agentGuest = {
@@ -217,7 +218,7 @@ in
       pkgs.htop
       pkgs.vim
     ];
-    # A real file, as in modules/claude.nix: a link has Claude walking the store.
+    # A copy, not a link into the store (../claude/etc.nix).
     environment.etc."claude-code/managed-settings.json" = {
       mode = "0444";
       text = builtins.toJSON {

@@ -171,12 +171,6 @@ in
         can't watch or drive it.
       '';
     };
-
-    memory = lib.mkOption {
-      type = lib.types.str;
-      default = "4G";
-      description = "The most the browser and its display may hold (MemoryMax), none of it in swap.";
-    };
   };
 
   config = lib.mkIf cfg.enable {
@@ -203,13 +197,7 @@ in
     # Claude's tools for it, in every session of burrow.user's.
     burrow.claude.mcpServers.browser.command = "/run/current-system/sw/bin/burrow-browser-mcp";
 
-    systemd.slices.${account} = {
-      description = "The signed-in browser";
-      sliceConfig = {
-        MemoryMax = cfg.memory;
-        MemorySwapMax = 0;
-      };
-    };
+    systemd.slices.${account}.description = "The signed-in browser";
 
     systemd.services = {
       # The screen: an X server whose VNC is a socket only its user opens. No

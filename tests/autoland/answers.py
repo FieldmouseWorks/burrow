@@ -230,5 +230,29 @@ assert not os.path.exists(f"{tmp}/state/{V.SNAP}/{running}") and os.path.exists(
 V.sweep({"sam_r", "sam_lo-k"}, set())
 left = sorted(x for d in (V.SNAP, V.QUEUE, V.DONE) for x in os.listdir(f"{tmp}/state/{d}"))
 assert left == sorted([other_repo, other_repo + ".json", f"rival--{other_repo}.json", f"codex--{other_repo}.json"]), left
+# All but a look the reviewers' service is on, whoever's code runs it (it
+# need only hold its entry's lock): its entry, its snapshot and its session
+# stay until it ends, so nothing it writes after lands where another PR's
+# would, and the sweep says what it left. Its PR's other sessions go. The
+# next sweep once it's done takes the rest.
+os.makedirs(f"{tmp}/state/{V.SNAP}/{running}")
+C.save(f"{V.SNAP}/{running}.json", {})
+C.save(f"{V.QUEUE}/codex--{running}.json", {})
+on, off = V.session_name("codex", running), V.session_name("rival", running)
+for x in (on, off):
+    os.makedirs(f"{tmp}/state/{V.SESSIONS}/{x}")
+held = open(f"{tmp}/state/{V.QUEUE}/codex--{running}.json")
+fcntl.flock(held, fcntl.LOCK_SH)
+assert V.sweep({"sam_r"}, set()) == [f"codex--{running}.json"]
+assert os.path.isdir(f"{tmp}/state/{V.SNAP}/{running}") and os.path.exists(f"{tmp}/state/{V.QUEUE}/codex--{running}.json")
+sessions = os.listdir(f"{tmp}/state/{V.SESSIONS}")
+assert on in sessions and off not in sessions, sessions
+held.close()
+C.save(f"{V.DONE}/codex--{running}.json", {})  # what came back as it ended
+V.remove(f"{tmp}/state/{V.QUEUE}/codex--{running}.json")
+assert V.sweep({"sam_r"}, set()) == []
+left = sorted(x for d in (V.SNAP, V.QUEUE, V.DONE) for x in os.listdir(f"{tmp}/state/{d}"))
+assert left == sorted([other_repo, other_repo + ".json", f"rival--{other_repo}.json", f"codex--{other_repo}.json"]), left
+assert all(x.startswith(V.GONE) for x in os.listdir(f"{tmp}/state/{V.SESSIONS}")), os.listdir(f"{tmp}/state/{V.SESSIONS}")
 
 print("answers: ok")

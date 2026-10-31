@@ -1,8 +1,11 @@
-# A Remote Control server and its sessions share one memory cap, so a session
-# that grows past it is killed and nothing else is: not the server, not its
-# other sessions. The control is a server on systemd's own OOM policy, which
-# the same kill takes down whole. Servers start on tmux's usual build, whose
-# panes get away from their unit's cap, and catch up onto their own once idle.
+# A Remote Control server and its sessions share one memory backstop (half
+# the machine unless set; 128M here), so a session that grows past it is
+# killed and nothing else is: not the server, not its other sessions. The
+# control is a server on systemd's own OOM policy, which the same kill takes
+# down whole. Servers start on tmux's usual build, whose panes get away from
+# their unit's cap, and catch up onto their own once idle. The servers keep
+# memory back, and so does every slice above them, without which they'd keep
+# none.
 #
 #   nix build .#checks.x86_64-linux.remote-control-memory -L
 { self, pkgs }:
@@ -134,11 +137,30 @@ pkgs.testers.runNixOSTest {
     for p in ("capped", "stops"):
         machine.wait_until_succeeds(f"test -s /data/dev/src/{p}/hog.pid && test -s /data/dev/src/{p}/sibling.pid", timeout=120)
 
-    with subtest("every server has a cap of its own, none of it in swap"):
-        assert show("plain", "MemoryMax", "MemorySwapMax", "OOMPolicy") == {
-            "MemoryMax": str(8 << 30), "MemorySwapMax": "0", "OOMPolicy": "continue"}, show("plain", "MemoryMax", "MemorySwapMax", "OOMPolicy")
+    # The machine's memory, as systemd scales a share of it.
+    total = int(machine.succeed("awk '/^MemTotal:/ { print $2 }' /proc/meminfo")) * 1024
+
+    def share(value, part):
+        return abs(int(value) - total * part // 100) <= total // 100
+
+    with subtest("every server has a backstop of its own, none of it in swap"):
+        plain = show("plain", "MemoryMax", "MemorySwapMax", "OOMPolicy")
+        assert share(plain.pop("MemoryMax"), 50), show("plain", "MemoryMax")
+        assert plain == {"MemorySwapMax": "0", "OOMPolicy": "continue"}, plain
         assert show("capped", "MemoryMax", "OOMPolicy") == {"MemoryMax": str(128 << 20), "OOMPolicy": "continue"}, show("capped", "MemoryMax", "OOMPolicy")
         assert show("stops", "OOMPolicy") == {"OOMPolicy": "stop"}, show("stops", "OOMPolicy")
+
+    with subtest("the servers keep memory back, and so does every slice above them"):
+        # A slice's protection is handed down to what it holds, and a cgroup
+        # keeps no more than its parent does.
+        machine.succeed("grep -Eq '^cgroup2 /sys/fs/cgroup cgroup2 .*memory_recursiveprot' /proc/mounts")
+        group = show("capped", "ControlGroup")["ControlGroup"]
+        assert group.endswith(f"/claude-rc.slice/{unit('capped')}"), group
+        parts = group.strip("/").split("/")[:-1]
+        assert parts[0] == "user.slice" and len(parts) == 5, parts
+        for i in range(1, len(parts) + 1):
+            low = machine.succeed(f"cat /sys/fs/cgroup/{'/'.join(parts[:i])}/memory.low")
+            assert share(low, 10), (parts[:i], low)
 
     with subtest("on tmux's usual build, a server's sessions get away from its cap"):
         hog = pid("capped", "hog")
