@@ -9,6 +9,7 @@ PROPOSE=$(realpath "$1")
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 export HOME=$tmp GIT_CONFIG_NOSYSTEM=1
+unset GH_REPO
 git config --global user.name test
 git config --global user.email test@example.org
 git config --global init.defaultBranch main
@@ -21,12 +22,25 @@ git config --global advice.detachedHead false
 # $tmp/checks (its check runs, statuses and check suites, as GraphQL has them;
 # with $tmp/more there, the checks have a page more), `api repos/R/pulls/N -X
 # PATCH` answers N's URL, and every call goes to $tmp/gh.log. With
-# $tmp/gh-down there, it fails as an unreachable GitHub does.
+# $tmp/gh-down there, it fails as an unreachable GitHub does. Like the
+# machine's gh (gh-token), it runs a call only once it can tell the account
+# the call is about: the repo a `repos/OWNER/...` endpoint or `-R` names,
+# else GH_REPO's. `gh api graphql` names none, and gh-token refuses it.
 mkdir "$tmp/bin"
 cat >"$tmp/bin/gh" <<EOF
 #!$(command -v bash)
 set -euo pipefail
 printf '%s\n' "\$*" >>"$tmp/gh.log"
+owner=
+for ((i = 1; i <= \$#; i++)); do
+  case \${!i} in
+    repos/*) owner=\${!i#repos/}; owner=\${owner%%/*} ;;
+    -R) j=\$((i + 1)); owner=\${!j%%/*} ;;
+  esac
+done
+[ -n "\$owner" ] || { owner=\${GH_REPO:-}; owner=\${owner%%/*}; }
+[ -n "\$owner" ] || { echo "gh-token: which account is \\\`gh \$1 \$2\\\` for? Give it -R OWNER/REPO" >&2; exit 1; }
+[ "\$owner" = sam ] || { echo "gh stand-in: a call for \$owner, not sam" >&2; exit 2; }
 [ ! -e "$tmp/gh-down" ] || { echo "error connecting to api.github.com" >&2; exit 1; }
 jq=
 for ((i = 1; i <= \$#; i++)); do [ "\${!i}" != --jq ] || { j=\$((i + 1)); jq=\${!j}; }; done
@@ -55,7 +69,7 @@ PATH=$tmp/bin:$PATH
 
 # What update.sh gives them.
 # shellcheck disable=SC2034 # propose's
-REPO=sam/homelab BRANCH=burrow-update HOST=box UPDATE=box-update TRAIN=1 riding='' changed=1
+REPO=sam/homelab BRANCH=burrow-update HOST=box UPDATE=box-update
 # shellcheck disable=SC2034 # propose's
 SETTLED=review-settled STEWARD=sams-steward TRAIN_CONTEXT=conary/train
 state=$tmp/state work=$tmp/work
@@ -200,26 +214,6 @@ grep -q "doesn't merge onto main" <<<"$why" || fail "ride's word on a conflict: 
 [ "$(git_ rev-parse HEAD)" = "$main" ] || fail "a conflicted ride moved HEAD"
 [ ! -e "$work/.git/MERGE_HEAD" ] && [ -z "$(git_ status --porcelain)" ] || fail "a conflicted ride left a merge behind"
 echo "ride, conflict: ok"
-
-# Already live, a bump of its own: up only once HOST-update put that very
-# system live (the switch and the health check); held when anyone else did;
-# nothing to do outside a train, while riding, or with nothing new.
-fresh
-already=$(already_live /nix/store/sys-b)
-[ "$already" = hold ] || fail "already_live with nothing deployed: $already"
-echo /nix/store/sys-a >"$state/deployed"
-already=$(already_live /nix/store/sys-b)
-[ "$already" = hold ] || fail "already_live with another system deployed: $already"
-echo /nix/store/sys-b >"$state/deployed"
-already=$(already_live /nix/store/sys-b)
-[ "$already" = up ] || fail "already_live with it deployed: $already"
-already=$(TRAIN='' already_live /nix/store/sys-b)
-[ "$already" = current ] || fail "already_live outside a train: $already"
-already=$(riding=7 already_live /nix/store/sys-b)
-[ "$already" = current ] || fail "already_live riding: $already"
-already=$(changed='' already_live /nix/store/sys-b)
-[ "$already" = current ] || fail "already_live with nothing new: $already"
-echo "already_live: ok"
 
 # A check run ($1 = its status, $2 = its conclusion), a status ($1 = its
 # context, $2 = its state, $3 = who posted it, the steward's App's Bot by

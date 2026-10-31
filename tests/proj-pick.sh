@@ -1,9 +1,8 @@
 # proj's choice of who takes a slot (modules/proj/pick.sh), on what take_slot
 # would see: pipeline jobs' slots stay theirs, one project's jobs stop at
 # PER_PROJECT while the others go by, pipeline ones count against no cap, and
-# lead ones go ahead of everyone but leave the rest one slot, every free slot
-# going in one look; and which
-# jobs are pipeline ones: only those
+# lead ones go ahead of everyone but the slot owed to the others, every free
+# slot going in one look; and which jobs are pipeline ones: only those
 # in the pipeline's own repos and the machine's flake, and lead ones those in
 # its lead repos.
 #
@@ -132,6 +131,41 @@ assigned=${assigned// /$T}
 [ "$(picked /q/2-1-b <<<"$assigned")" = 3 ] || { echo "FAIL: picked didn't find its slot" >&2; exit 1; }
 [ -z "$(picked /q/2-1 <<<"$assigned")" ] || { echo "FAIL: picked found another's slot" >&2; exit 1; }
 [ -z "$(picked a </dev/null)" ] || { echo "FAIL: picked found a slot in nothing" >&2; exit 1; }
+
+# A backlog of pipeline work doesn't starve the others: with none of theirs
+# running, a pipeline or lead turn leaves them the last free ordinary slot.
+case_ "a 3" "pipeline /src/remi" "lead /src/burrow" free "lead /src/burrow" "p pipeline /src/remi" "l lead /src/burrow" "a first /src/web"
+case_ "a 3" "pipeline /src/remi" "lead /src/burrow" free "lead /src/burrow" "l lead /src/burrow" "a normal /src/web"
+# It takes the pipeline's own slot instead, where one's free.
+case_ "p 4${NL}a 3" "pipeline /src/remi" "lead /src/burrow" free free "p pipeline /src/remi" "a first /src/web"
+# With more free than that it takes the lowest as ever, and the others still
+# have theirs next.
+case_ "l 2${NL}a 3" "pipeline /src/remi" free free "lead /src/burrow" "l lead /src/burrow" "a first /src/web"
+# Both rules at once: a lead turn can't have the slot kept for the others, nor
+# the pipeline's own while a pipeline turn waits, so that turn takes it; and
+# with none waiting, the lead turn takes it.
+case_ "p 4${NL}a 3" "pipeline /src/remi" "lead /src/burrow" free free "l lead /src/burrow" "p pipeline /src/remi" "a first /src/web"
+case_ "l 4${NL}a 3" "pipeline /src/remi" "lead /src/burrow" free free "l lead /src/burrow" "a first /src/web"
+# Nobody of theirs waiting: nothing's kept, and the pipeline takes the last.
+case_ "p 3" "pipeline /src/remi" "lead /src/burrow" free "lead /src/burrow" "p pipeline /src/remi"
+# One of theirs already running: that's their share, and the pipeline goes first.
+case_ "p 3" "normal /src/x" "lead /src/burrow" free "lead /src/burrow" "p pipeline /src/remi" "a first /src/web"
+# A holder proj can't name is someone else's here too.
+case_ "p 3" "- -" "lead /src/burrow" free "lead /src/burrow" "p pipeline /src/remi" "a first /src/web"
+# A turn its project's cap holds back can't use what's kept, so nothing is.
+(
+  PER_PROJECT=0
+  case_ "p 3" "pipeline /src/remi" "lead /src/burrow" free "lead /src/burrow" "a first /src/web" "p pipeline /src/remi"
+)
+# In one look too, whoever is ahead in the line: pipeline turns stop at what
+# the slot owed leaves them, the pipeline's own included, and the others go.
+(
+  MAX_JOBS=6
+  case_ "p 1${NL}q 6${NL}a 2" free free "lead /src/burrow" "lead /src/burrow" "lead /src/burrow" free \
+    "p pipeline /src/remi" "q pipeline /src/remi" "r pipeline /src/remi" "a normal /src/web"
+  case_ "l 1${NL}a 2" free free "lead /src/burrow" "lead /src/burrow" "lead /src/burrow" "pipeline /src/remi" \
+    "l lead /src/burrow" "m lead /src/burrow" "a normal /src/web"
+)
 
 # A job run with --pipeline is a pipeline one only in a project of one of the
 # pipeline's own repos, told by its clone's origin: on GitHub, in any form git

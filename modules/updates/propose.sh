@@ -19,16 +19,20 @@
 # only a whole one, though, that isn't the red head's very tree
 # (why_not_replace).
 
-# update.sh sets state, REPO, BRANCH, HOST, UPDATE, TRAIN, SETTLED, STEWARD,
-# TRAIN_CONTEXT, riding, changed, as_user and git_.
+# update.sh sets state, REPO, BRANCH, HOST, UPDATE, SETTLED, STEWARD,
+# TRAIN_CONTEXT, as_user and git_.
 # shellcheck disable=SC2154
+
+# gh, about REPO. The machine's gh (gh-token) runs a call with the token of
+# the account it's about, and `gh api graphql` names none: GH_REPO does.
+gh_() { as_user env GH_REPO="$REPO" gh "$@"; }
 
 # The open PR, as "NUMBER HEAD"; nothing when there's none. Fails when GitHub
 # doesn't say. Only REPO's own BRANCH counts: a fork's PR from a branch of the
 # same name is anyone's to open. GitHub's head filter is OWNER:BRANCH, and
 # allows one open PR per head and base, so there's never a page more.
 update_pr() {
-  as_user gh api "repos/$REPO/pulls?state=open&base=main&head=${REPO%%/*}:$BRANCH" \
+  gh_ api "repos/$REPO/pulls?state=open&base=main&head=${REPO%%/*}:$BRANCH" \
     --jq '.[0] // empty | "\(.number) \(.head.sha)"'
 }
 
@@ -48,7 +52,7 @@ red_head() {
   read -r n head <<<"$1"
   [ "$head" = "$(cat "$state/proposed" 2>/dev/null)" ] || return 0
   # shellcheck disable=SC2016 # GraphQL's variables
-  json=$(as_user gh api graphql -F n="$n" -f owner="${REPO%%/*}" -f name="${REPO#*/}" -f query='
+  json=$(gh_ api graphql -F n="$n" -f owner="${REPO%%/*}" -f name="${REPO#*/}" -f query='
     query($owner: String!, $name: String!, $n: Int!) {
       repository(owner: $owner, name: $name) { pullRequest(number: $n) { headRefOid
         commits(last: 1) { nodes { commit {
@@ -110,21 +114,6 @@ ride() {
   }
 }
 
-# HEAD builds $1, the system HOST runs already. "up" when it's a bump of
-# HOST-update's own to put up, in a train repo and not riding: only once
-# HOST-update put that system live itself (its record in deployed), through
-# the switch and the health check, and then only after the VM tests on HEAD's
-# tree. "hold" when someone else did. Otherwise "current": nothing to do.
-already_live() {
-  if [ -z "$TRAIN" ] || [ -n "$riding" ] || [ -z "$changed" ]; then
-    echo current
-  elif [ "$(cat "$state/deployed" 2>/dev/null)" = "$1" ]; then
-    echo up
-  else
-    echo hold
-  fi
-}
-
 # Why HEAD, a fresh bump on main $2 for its red PR $1, doesn't replace that
 # head, when it doesn't; $3... are the inputs that didn't make it in (they
 # didn't build, or what's new in them couldn't be fetched). One short of any,
@@ -163,7 +152,7 @@ replace() {
     return 1
   }
   git_ rev-parse HEAD >"$state/proposed"
-  url=$(as_user gh api "repos/$REPO/pulls/$n" -X PATCH -f "title=$2" -f "body=$3" --jq .html_url) ||
+  url=$(gh_ api "repos/$REPO/pulls/$n" -X PATCH -f "title=$2" -f "body=$3" --jq .html_url) ||
     url="https://github.com/$REPO/pull/$n (its title still says the red head's: GitHub didn't take the new one)"
   echo "$url, in place of its red head ${head:0:7}"
 }
@@ -173,7 +162,7 @@ replace() {
 propose() {
   git_ push -q --force origin "HEAD:refs/heads/$BRANCH" || return 1
   git_ rev-parse HEAD >"$state/proposed"
-  as_user gh pr create -R "$REPO" --head "$BRANCH" --base main --title "$1" --body "$2"
+  gh_ pr create -R "$REPO" --head "$BRANCH" --base main --title "$1" --body "$2"
 }
 
 # The PR's body: what HOST-update did with the commit, as its message says.

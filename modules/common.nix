@@ -67,9 +67,12 @@ inputs:
             default = "${dirOf config.burrow.projectsDir}/scratch";
             defaultText = lib.literalExpression ''"''${dirOf config.burrow.projectsDir}/scratch"'';
             description = ''
-              Throwaway clones and worktrees (the update pipeline's own clone, the
-              fix jobs' worktrees). Outside projectsDir, so they get no Remote
-              Control server.
+              Throwaway clones and worktrees: the update pipeline's own clone, and
+              each proj job's own dir (jobs/ID), cleared once the job is over.
+              Outside projectsDir, so they get no Remote Control server. Keep it
+              out of rolling snapshots (a dataset of its own on ZFS): build
+              output churns through gigabytes, and a snapshot holds on to all of
+              it until the snapshot goes.
             '';
           };
 
@@ -167,6 +170,15 @@ inputs:
         config.burrow.tools.tmux = pkgs.tmux.overrideAttrs (old: {
           configureFlags = old.configureFlags ++ [ "--disable-cgroups" ];
         });
+
+        # Marks folders trusted in the user's Claude Code config, for the
+        # Claudes that start in one with nobody at their terminal to answer
+        # its question about it (claude/trust.sh).
+        config.burrow.tools.claude-trust = pkgs.writeShellApplication {
+          name = "claude-trust";
+          runtimeInputs = [ pkgs.coreutils pkgs.findutils pkgs.jq ];
+          text = builtins.readFile ./claude/trust.sh;
+        };
 
         # In the user's systemd manager, where proj jobs (claude-jobs.slice)
         # and Remote Control servers (claude-rc.slice) run. No limit of its
