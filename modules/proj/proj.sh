@@ -621,8 +621,9 @@ case "${1:-status}" in
     n=$(cat "$jobs/$id/turns" 2>/dev/null || true)
     # Withdrawn only while it has no slot. A turn says it has one only under
     # this lock too (took_slot, line.sh), so it can't take one between this
-    # look and the stop. Failing when systemd can't say, so the caller can
-    # ask again.
+    # look and the stop; one that doesn't (N.withdrawable unsaid: its turn
+    # began on an older proj, or hasn't reached the line) isn't stopped.
+    # Failing then, or when systemd can't say, so the caller can ask again.
     if [ "$1" = withdraw ]; then
       case $(systemctl --user show -P ActiveState "$u" 2>/dev/null) in
         active | activating | reloading) ;;
@@ -631,6 +632,10 @@ case "${1:-status}" in
       esac
       adopt "$id"
       if [ -e "$jobs/$id/$n.slot" ]; then echo running; exit 0; fi
+      if [ ! -e "$jobs/$id/$n.withdrawable" ]; then
+        echo "proj: $id's turn can't be withdrawn safely yet (it began on an older proj, or isn't in line yet)" >&2
+        exit 1
+      fi
     fi
     # Marked first, so the turn's end (_ended) already finds it stopped
     # rather than failed: nobody waits on it.

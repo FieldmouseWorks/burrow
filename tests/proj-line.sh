@@ -229,6 +229,7 @@ waiter w0
 sleep 3
 ! flock -n "$jobs/.slots/1" true || fail "w0 took no slot while its job's lock was held"
 [ ! -e "$jobs/w0/1.slot" ] || fail "w0 said it had its slot while its job's lock was held"
+[ -e "$jobs/w0/1.withdrawable" ] || fail "w0 waits in line without saying proj withdraw may stop it"
 for _ in $(seq 1 200); do [ -e "$jobs/w0/took" ] && break; sleep 0.05; done
 [ "$(cat "$jobs/w0/1.slot" 2>/dev/null)" = 1 ] || fail "w0 didn't say it had slot 1 once its job's lock was let go"
 

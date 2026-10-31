@@ -96,6 +96,10 @@ look() {
 take_slot() {
   local id=$1 n=$2 class=$3 me since got i lk new looked=0 project LC_ALL=C
   mkdir -p "$jobs/.queue" "$jobs/.slots"
+  # This turn says it has its slot only under its job's lock (took_slot), so
+  # proj withdraw may stop it while it waits; a turn from before that can't
+  # be, never having said so.
+  : >"$jobs/$id/$n.withdrawable"
   since=$EPOCHSECONDS
   case $class in first) me=1 ;; *) me=2 ;; esac
   me="$jobs/.queue/$me-$(date +%s%N)-$id"

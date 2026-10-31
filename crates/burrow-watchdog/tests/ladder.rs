@@ -221,20 +221,6 @@ impl Machine {
             .collect()
     }
 
-    /// proj's line holding these and the watchdog's own job-1, as proj
-    /// writes it.
-    fn in_line(&self, mut items: Value) {
-        let mut it = named(
-            "proj job job-1",
-            "turn 1 is waiting in line for a slot",
-            T,
-            T + H,
-        );
-        it["line"] = true.into();
-        items["job-1"] = it;
-        self.write(&self.line, items, T);
-    }
-
     fn kicks(&self) -> Vec<String> {
         self.world.kicks.borrow().clone()
     }
@@ -430,10 +416,10 @@ fn jobs_time_up() {
 
 // Its own job, still waiting for a slot once its stalls have moved on, is
 // withdrawn (proj withdraw): it has done nothing, and would only take a slot
-// from the line for what's no longer its. Moving again: at once. On the
-// stuck issue (at START, say): while proj's line holds the job, however it
-// got there, an older pass's escalation included. One proj can't settle is
-// asked about again on the next pass.
+// from the line for what's no longer its. Moving again, or on to the stuck
+// issue (at START, say): at once. One proj can't settle is asked about again
+// on the next pass. A state from before it kept these has the jobs of its
+// stalls on the issue to go.
 #[test]
 fn withdraws_its_job() {
     let stalled = |m: &Machine| {
@@ -448,6 +434,7 @@ fn withdraws_its_job() {
         assert!(m.withdrawals().is_empty());
     };
     let gone = |m: &Machine| m.world.states.borrow()["job-1"] == "failed";
+    let kept = |m: &Machine| m.state().withdraw.unwrap_or_default();
 
     let m = Machine::new();
     stalled(&m);
@@ -456,34 +443,35 @@ fn withdraws_its_job() {
     assert!(m.withdrawals() == ["job-1"] && gone(&m));
     m.run(T + 3.0 * MIN);
     assert_eq!(m.withdrawals(), ["job-1"]);
-    assert!(m.state().withdraw.is_empty());
+    assert!(kept(&m).is_empty());
 
     let m = Machine::new();
     stalled(&m);
-    m.in_line(json!({}));
     m.world.stuck.set(true);
     m.run(T + START);
     assert_eq!(
         (m.escalated().len(), m.withdrawals()),
         (1, vec!["job-1".into()])
     );
-    assert_eq!(m.state().withdraw, BTreeSet::from(["job-1".into()]));
+    assert_eq!(kept(&m), BTreeSet::from(["job-1".into()]));
     m.world.stuck.set(false);
     m.run(T + START + MIN);
     assert!(m.withdrawals() == ["job-1", "job-1"] && gone(&m));
-    assert!(m.state().withdraw.is_empty());
-    m.write(&m.line, json!({}), T);
     m.run(T + START + 2.0 * MIN);
-    assert_eq!(m.withdrawals().len(), 2);
+    assert!(m.withdrawals().len() == 2 && kept(&m).is_empty());
     assert_eq!((m.escalated().len(), m.notices()), (1, vec![]));
 
     let m = Machine::new();
     stalled(&m);
+    m.world.stuck.set(true);
     m.run(T + START);
-    assert_eq!((m.escalated().len(), m.withdrawals()), (1, vec![]));
-    m.in_line(json!({}));
+    let path = m.cfg.state_dir.join("state.json");
+    let mut saved: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    saved.as_object_mut().unwrap().remove("withdraw");
+    fs::write(&path, saved.to_string()).unwrap();
+    m.world.stuck.set(false);
     m.run(T + START + MIN);
-    assert!(m.withdrawals() == ["job-1"] && gone(&m));
+    assert!(m.withdrawals() == ["job-1", "job-1"] && gone(&m));
 }
 
 // Its own job is left be once it's at work, and while a stall it was handed
@@ -506,7 +494,7 @@ fn keeps_a_job_it_needs() {
     m.run(T + 2.0 * MIN);
     assert_eq!(m.withdrawals(), ["job-1"]);
     assert_eq!(m.world.states.borrow()["job-1"], "running");
-    assert!(m.state().withdraw.is_empty());
+    assert_eq!(m.state().withdraw, Some(BTreeSet::new()));
 
     let m = Machine::new();
     let mut q = item(T - 3.0 * H, T - MIN, None);
@@ -535,9 +523,6 @@ fn keeps_a_job_it_needs() {
     );
     m.run(T);
     m.state_of("job-1", "queued");
-    m.in_line(
-        json!({"homelab-1": named("proj job homelab-1", "waiting for a slot", T - H, T - MIN)}),
-    );
     m.run(T + START);
     m.run(T + START + MIN);
     assert_eq!((m.notices().len(), m.withdrawals()), (1, vec![]));

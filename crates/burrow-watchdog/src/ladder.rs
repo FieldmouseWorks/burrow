@@ -24,8 +24,17 @@ pub fn run(cfg: &Config, world: &dyn World, now: f64) -> Result<(), String> {
         mut stalls,
         mut missing,
         mut closing,
-        mut withdraw,
+        withdraw,
     } = load(dir, "state.json");
+    // A state from before it kept these has every job its stalls on the stuck
+    // issue were handed still to go.
+    let mut withdraw = withdraw.unwrap_or_else(|| {
+        stalls
+            .values()
+            .filter(|st| st.entry.is_some())
+            .filter_map(|st| st.job.clone())
+            .collect()
+    });
     let before = published(&stalls);
     let (found, due) = overdue(cfg, now, &mut missing);
     let mut wakes: Vec<f64> = due.into_iter().collect();
@@ -116,6 +125,7 @@ pub fn run(cfg: &Config, world: &dyn World, now: f64) -> Result<(), String> {
                 wakes.push(at);
             } else {
                 escalate(cfg, world, &s, st, now);
+                withdraw.insert(job);
             }
         } else if st.item.line {
             // Waiting for a slot: a job would join the same line, ahead of
@@ -175,24 +185,7 @@ pub fn run(cfg: &Config, world: &dyn World, now: f64) -> Result<(), String> {
     // Its own jobs whose stalls have all moved on, moving again or on to the
     // stuck issue's job: one still waiting for a slot has done nothing yet,
     // and would only take one from the line for what's no longer its to fix.
-    // A cleared stall's job was kept as it went; one on the issue counts
-    // while proj's line holds its job, whenever it got there. One the owner
-    // was told of keeps its job, the only Claude still on it.
-    let in_line: BTreeSet<String> = cfg
-        .sources
-        .get(PROJ)
-        .and_then(watched)
-        .map(|(_, items)| {
-            items
-                .into_iter()
-                .filter(|(_, it)| it.line)
-                .map(|(k, _)| k)
-                .collect()
-        })
-        .unwrap_or_default();
-    for st in stalls.values().filter(|st| st.entry.is_some()) {
-        withdraw.extend(st.job.iter().filter(|j| in_line.contains(*j)).cloned());
-    }
+    // One the owner was told of keeps its job, the only Claude still on it.
     let needed: BTreeSet<&String> = stalls
         .values()
         .filter(|st| st.entry.is_none())
@@ -216,7 +209,7 @@ pub fn run(cfg: &Config, world: &dyn World, now: f64) -> Result<(), String> {
             stalls,
             missing,
             closing,
-            withdraw,
+            withdraw: Some(withdraw),
         },
     )?;
     let wake = match wakes.into_iter().reduce(f64::min) {
