@@ -32,6 +32,11 @@ let
   reviewer = "autoland-review";
   reviewerHome = "${stateDir}/autoland-review";
   reviewDir = "${stateDir}/autoland/review";
+  # The snapshots' checkouts (reviewers.py TREES): a cache, taken again from
+  # GitHub whenever one is missing, so out of stateDir and whatever snapshots
+  # the machine keeps of it. On a machine whose root is wiped at boot, a boot
+  # empties it too.
+  snapDir = "/var/cache/autoland/snap";
   # What the reviewers' service runs commands with, and so what an agent
   # reads the snapshot with, and runs the repo's own checks with (python3:
   # the scripts a repo checks itself with).
@@ -103,6 +108,7 @@ let
     bots = [ "dependabot" "renovate" ] ++ lib.optional (machineApp != null) machineApp.slug;
     machinery = if machineApp == null then null else machineApp.name;
     stateDir = "${stateDir}/autoland";
+    inherit snapDir;
     # The key renovate-sweep seals its verdicts on majors with (seal.py),
     # when it runs here; without it, none counts.
     majorKey = if sweeping then "${stateDir}/renovate-sweep/verdict.key" else null;
@@ -900,7 +906,8 @@ in
     };
 
     # The steward's state, and the reviews: it queues them and takes the
-    # snapshots; the reviewers' user reads those, answers in done/, takes
+    # snapshots (their checkouts in snapDir, what each keeps of its base in
+    # snap/); the reviewers' user reads those, answers in done/, takes
     # what it answered off the queue and keeps each open PR's sessions in
     # sessions/, which the
     # steward marks gone when the PR closes. The clones the snapshots come
@@ -915,6 +922,8 @@ in
       "${reviewDir}/sessions" = dir "2770" reviewer;
       "${reviewDir}/snap" = dir "2750" reviewer;
       "${reviewDir}/git" = dir "0700" account.group;
+      "/var/cache/autoland" = dir "0755" account.group;
+      ${snapDir} = dir "2750" reviewer;
     };
 
     burrow.watchdog.sources.autoland = {
