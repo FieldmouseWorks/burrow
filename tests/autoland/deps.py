@@ -250,5 +250,16 @@ fresh_pr_state()
 COMMITS[15] = [DEPENDABOT_EMAIL]
 status, _ = run(mkpr(**dedited), 900)
 assert merged() and "Dependency update, CI green" in status, status
+# So it is on a machine with no Renovate (no address), and one a Claude job
+# fixed there is still reviewed.
+email, S.CFG["renovateEmail"] = S.CFG["renovateEmail"], None
+fresh_pr_state()
+status, _ = run(mkpr(**dedited), 900)
+assert merged() and "Dependency update, CI green" in status, status
+fresh_pr_state()
+COMMITS[15] = [DEPENDABOT_EMAIL, "claude@remi"]
+status, _ = run(mkpr(**dedited), 900)
+assert not merged() and "Dependency update" not in status, status
+S.CFG["renovateEmail"] = email
 
 print("deps: ok")

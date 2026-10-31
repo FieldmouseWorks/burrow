@@ -99,8 +99,8 @@ def bot_edited(repo, pr, st):
     renovate = pr["headRefName"].startswith("renovate/")
     if renovate and not CFG["renovateEmail"]:
         return False
-    bots = sorted({CFG["renovateEmail"], DEPENDABOT_EMAIL})
-    seen = [pr["headRefOid"], pr["baseRefName"], *bots]
+    bots = {CFG["renovateEmail"], DEPENDABOT_EMAIL}
+    seen = [pr["headRefOid"], pr["baseRefName"], CFG["renovateEmail"], DEPENDABOT_EMAIL]
     if st.get("editedHead") != seen:
         got = C.gh("pr", "view", str(pr["number"]), "-R", repo, "--json", "commits", check=False)
         if not got:
