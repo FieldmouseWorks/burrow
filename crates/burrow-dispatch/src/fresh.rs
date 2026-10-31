@@ -127,6 +127,7 @@ fn wait(
         link: Some(oldest.url.clone()),
         kick: Some(cfg.handler.clone()),
         line: false,
+        unstick: false,
     })
 }
 
