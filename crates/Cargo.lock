@@ -47,6 +47,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "burrow-usage-reset"
+version = "0.0.0"
+dependencies = [
+ "jiff",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "burrow-watchdog"
 version = "0.0.0"
 dependencies = [

@@ -126,12 +126,12 @@ commit flake.lock old # an old PR's head, never landed
 git_ push -q origin HEAD:refs/heads/burrow-update
 git_ reset -q --hard HEAD~1
 commit flake.lock v2
-url=$(propose "Update nixpkgs" "body text") || fail "propose failed"
+url=$(propose "deps: update nixpkgs" "body text") || fail "propose failed"
 [ "$url" = "https://github.com/sam/homelab/pull/7" ] || fail "propose's PR: $url"
 head=$(git_ rev-parse HEAD)
 [ "$(git -C "$tmp/origin.git" rev-parse refs/heads/burrow-update)" = "$head" ] || fail "the branch isn't HEAD"
 [ "$(cat "$state/proposed")" = "$head" ] || fail "proposed isn't HEAD"
-grep -qx -- "pr create -R sam/homelab --head burrow-update --base main --title Update nixpkgs --body body text" "$tmp/gh.log" ||
+grep -qx -- "pr create -R sam/homelab --head burrow-update --base main --title deps: update nixpkgs --body body text" "$tmp/gh.log" ||
   fail "propose's gh: $(cat "$tmp/gh.log")"
 [ "$(git -C "$tmp/origin.git" rev-parse refs/heads/main)" != "$head" ] || fail "propose pushed to main"
 echo "propose: ok"
