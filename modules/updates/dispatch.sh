@@ -3,7 +3,7 @@
 # deploys everything is work on the pipeline itself (proj run --pipeline): it
 # goes ahead of everyone's jobs, in the slot kept for it, never behind a
 # project's long ones: proj counts the machine's flake as the pipeline's own
-# (pick.sh), with or without autoland's pipelineRepos. On its own, ahead of
+# (proj's pick), with or without autoland's pipelineRepos. On its own, ahead of
 # update.sh, so a check covers it (tests/update-dispatch.sh); update.sh sets
 # state, PROJECT, APP and as_user. It acts on GitHub as the machine's App,
 # APP, when it has one.

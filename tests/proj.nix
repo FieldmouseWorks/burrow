@@ -4,7 +4,7 @@
 # pipeline job's every turn, in one of the pipeline's own repos, takes the
 # slot kept for them when the rest are full, and one in a lead repo goes
 # ahead of the others, while one anywhere else goes as a steward job and says so
-# (pick.sh's own check has how origins are told apart), that a job run
+# (proj's pick tests have how origins are told apart), that a job run
 # --unstick takes a slot of its own, every turn of it, while every other one
 # is held and turns wait in line, and waits only for another --unstick turn
 # (one made so later, by proj unstick, too: waiting, or at its next turn),
@@ -37,7 +37,7 @@
 # continued, in its own session, and that each job has a scratch dir of its
 # own, gone with the worktrees in it once the job is over (done, stopped, or
 # an --owned job's turn that awaits nothing) and kept while it asks
-# (scratch.sh's own check has the rest). Its GitHub side, proj
+# (proj's scratch tests have the rest). Its GitHub side, proj
 # await, proj-watch and proj-inbox, is proj-github.nix's part of the same
 # script.
 #
@@ -76,7 +76,7 @@ pkgs.testers.runNixOSTest {
       proj = {
         enable = true;
         # Two slots for anyone, one more for pipeline jobs alone, and no cap
-        # that binds before the slots run out (pick.sh's own check has those).
+        # that binds before the slots run out (proj's pick tests have those).
         maxJobs = 3;
         pipelineSlots = 1;
         maxJobsPerProject = 3;
@@ -526,6 +526,14 @@ pkgs.testers.runNixOSTest {
             machine.succeed(f"echo {limit} >/data/dev/jobs/{a}/timeout")
             proj(f'reply {a} "{task}"')
             machine.wait_until_succeeds(f"su - dev -c 'proj state {a}' | grep -x '{st}'", timeout=120)
+
+    with subtest("a job run --since dates from then, and only a time not after now will do"):
+        s = proj("run --since 1700000000 web silent")
+        machine.succeed(f"grep -x 1700000000 /data/dev/jobs/{s}/since")
+        machine.wait_until_succeeds(f"su - dev -c 'proj state {s}' | grep -x done", timeout=120)
+        machine.fail("su - dev -c 'proj run --since soon web silent'")
+        machine.fail("su - dev -c 'proj run --since 9999999999 web silent'")
+        machine.fail(f"su - dev -c 'proj reply --since 1700000000 {s} silent'")
 
     with subtest("a job run --app acts as that App every turn, or not at all"):
         e = proj("run --app workers web showenv")

@@ -85,8 +85,8 @@ pkgs.testers.runNixOSTest {
         return name.split("-", 1)[1], machine.succeed(f"cat /data/dev/jobs/.queue/{name}").strip()
 
     def runs(pid):
-        # The proj a waiter's shell is running now.
-        return machine.succeed(f"tr '\\0' '\\n' </proc/{pid}/cmdline | sed -n 2p").strip()
+        # The proj a waiter is running now, which its wrapper says.
+        return machine.succeed(f"tr '\\0' '\\n' </proc/{pid}/environ | sed -n 's/^PROJ_SELF=//p'").strip()
 
     def deploy(name):
         machine.succeed(f"{base}/specialisation/{name}/bin/switch-to-configuration test")
@@ -118,7 +118,7 @@ pkgs.testers.runNixOSTest {
         handing = machine.succeed("readlink -f /run/current-system/sw/bin/proj").strip()
         assert handing != first
         for j in (q, r):
-            machine.wait_until_succeeds(f"tr '\\0' '\\n' </proc/{in_line[j][1]}/cmdline | grep -Fx {handing}", timeout=30)
+            machine.wait_until_succeeds(f"tr '\\0' '\\n' </proc/{in_line[j][1]}/environ | grep -Fx PROJ_SELF={handing}", timeout=30)
         machine.succeed("test -e /tmp/locked")
         machine.fail("test -e /tmp/unlocked")
         # Settled there, each handed over once: a look's worth of waiting later
@@ -142,7 +142,7 @@ pkgs.testers.runNixOSTest {
 
     with subtest("the turn behind it runs the deployed proj too, in the same place in line"):
         assert state(r) == "queued", state(r)
-        machine.wait_until_succeeds(f"tr '\\0' '\\n' </proc/{in_line[r][1]}/cmdline | grep -Fx {next_proj}", timeout=30)
+        machine.wait_until_succeeds(f"tr '\\0' '\\n' </proc/{in_line[r][1]}/environ | grep -Fx PROJ_SELF={next_proj}", timeout=30)
         assert place(r) == in_line[r], (place(r), in_line[r])
 
     with subtest("its clock towards maxWait didn't start again"):

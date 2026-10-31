@@ -44,7 +44,11 @@
       };
       # burrow's own programs, one Cargo workspace (crates/): their package
       # and their gate, built for every platform lib/project.nix knows.
-      crates = self.lib.project { self = ./crates; rust = { }; };
+      crates = self.lib.project {
+        self = ./crates;
+        # proj's tests clone repos to read their origins.
+        rust.testInputs = pkgs: [ pkgs.git ];
+      };
       # A workspace whose build script finds a native library with
       # pkg-config: lib/project.nix's native inputs, for its checks.
       houseNative = {
@@ -89,6 +93,9 @@
 
       checks.${system} = {
         example = self.nixosConfigurations.example.config.system.build.toplevel;
+        # lib/project.nix's secrets check over all of burrow's tracked files;
+        # the projects below each see only their own directory.
+        secrets = (self.lib.project { inherit self; systems = [ system ]; }).checks.${system}.secrets;
         # Each module on its own, with only what it imports: evaluating is the
         # check, so these build nothing. A service that says how it runs (a
         # Type) has something to run too: systemd refuses one without
@@ -264,29 +271,11 @@
         proj-clock = import ./tests/proj-clock.nix { inherit self pkgs; };
         # A switch reaches the turns already waiting in line, each in its place.
         proj-deployed = import ./tests/proj-deployed.nix { inherit self pkgs; };
-        # Who takes a free slot: the pipeline's own (only its own repos'
-        # pipeline jobs), and each project's cap.
-        proj-pick = pkgs.runCommand "proj-pick-check" { nativeBuildInputs = [ pkgs.shellcheck pkgs.git ]; } ''
-          shellcheck -s bash ${./modules/proj/pick.sh} ${./tests/proj-pick.sh}
-          bash ${./tests/proj-pick.sh} ${./modules/proj/pick.sh}
-          touch $out
-        '';
-        # What a look at the line costs, and who gets to skip one.
-        proj-line = pkgs.runCommand "proj-line-check" { nativeBuildInputs = [ pkgs.shellcheck pkgs.git pkgs.strace pkgs.util-linux ]; } ''
-          shellcheck -s bash ${./modules/proj/line.sh} ${./tests/proj-line.sh}
-          bash ${./tests/proj-line.sh} ${./modules/proj/pick.sh} ${./modules/proj/line.sh}
-          touch $out
-        '';
-        # What each job waits on, as the stall watchdog hears it.
-        proj-waits = pkgs.runCommand "proj-waits-check" { nativeBuildInputs = [ pkgs.shellcheck pkgs.jq pkgs.util-linux ]; } ''
-          shellcheck -s bash ${./modules/proj/waits.sh} ${./tests/proj-waits.sh}
-          bash ${./tests/proj-waits.sh} ${./modules/proj/waits.sh}
-          touch $out
-        '';
-        # When a job is over, so its scratch goes, worktrees and all.
-        proj-scratch = pkgs.runCommand "proj-scratch-check" { nativeBuildInputs = [ pkgs.shellcheck pkgs.git ]; } ''
-          shellcheck -s bash ${./modules/proj/scratch.sh} ${./tests/proj-scratch.sh}
-          bash ${./tests/proj-scratch.sh} ${./modules/proj/scratch.sh}
+        # The example's proj reads the config its module writes (a field the
+        # binary doesn't know fails it), and a job it doesn't have is failed.
+        proj-config = pkgs.runCommand "proj-config-check" { } ''
+          got=$(${self.nixosConfigurations.example.config.burrow.tools.proj}/bin/proj state no-such-job)
+          [ "$got" = failed ] || { echo "proj state said: $got"; exit 1; }
           touch $out
         '';
         # The steward and its reviewers, with stand-ins for gh, git's remote and
@@ -878,6 +867,9 @@
         # The signed-in browser: Claude driving it, its logins kept, its ports
         # and profile kept from everyone else.
         browser = import ./tests/browser.nix { inherit self pkgs; };
+        # lib/project.nix's secrets check fails a project with a token in any
+        # tracked text file, and its log says where, never what.
+        house-secrets-leak = import ./tests/house-secrets.nix { inherit self pkgs; };
         # lib/project.nix's package of a Rust workspace: every member's binaries.
         house-rust-package = let
           pkg = (self.lib.project { self = ./tests/house/rust; systems = [ system ]; rust = { }; }).packages.${system}.default;
