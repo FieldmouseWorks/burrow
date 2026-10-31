@@ -1,11 +1,11 @@
 # The line for a slot: take_slot, and what it reads. The line is JOBS/.queue:
-# one file per waiting turn, named so that sorting puts pipeline ones ahead,
-# then --first ones, then the oldest, holding the waiting shell's pid. A slot
-# is a lock on JOBS/.slots/N, and N.who says whose (class and project), so a
-# turn that's killed frees its slot (and its place in line) by itself. pick
-# (pick.sh) says who has a slot. A job run --unstick waits in no line at all
-# (unstick_slot), and one made so while it waits (proj unstick) leaves the line
-# within a pass.
+# one file per waiting turn, named (entry) so that sorting puts pipeline ones
+# ahead, then --first ones, then the oldest, holding the waiting shell's pid.
+# A slot is a lock on JOBS/.slots/N, and N.who says whose (class and project),
+# so a turn that's killed frees its slot (and its place in line) by itself.
+# pick (pick.sh) says who has a slot. A job run --unstick waits in no line at
+# all (unstick_slot), and one made so while it waits (proj unstick) leaves the
+# line within a pass.
 #
 # One waiter looks at a time, under JOBS/.slots/.lock, and only those pick
 # names can take a slot, so what a look costs comes out of every waiter's turn
@@ -117,29 +117,42 @@ look() {
   done
 }
 
+# A turn's place in line, the name JOBS/.queue has for it (PREFIX-WHEN-ID):
+# 1 for a --first turn, 2 for any other (pick.sh's place says what that makes
+# it now), and WHEN, in nanoseconds, from when its job's work began (proj run
+# --since), or else from now. Every WHEN has the same number of digits, so
+# sorting the names sorts them by when.
+entry() { # id class
+  local when
+  line_of when "$jobs/$1/since"
+  if [ -n "$when" ]; then when+="000000000"; else when=$(date +%s%N); fi
+  case $2 in first) echo "1-$when-$1" ;; *) echo "2-$when-$1" ;; esac
+}
+
 # Wait in line for a slot, then hold it on fd $slot until this shell ends. The
 # turn is first or normal, as it was started; its job's class (place, in
 # pick.sh) is asked again at every look, and its place in line, its admission
 # and its slot's N.who all go by that one answer.
 take_slot() {
-  local id=$1 n=$2 class=$3 me='' when f pid got i lk new looked=0 project LC_ALL=C
+  local id=$1 n=$2 class=$3 me='' came='' f pid got i lk new looked=0 project LC_ALL=C
   mkdir -p "$jobs/.queue" "$jobs/.slots"
   # This turn says it has its slot only under its job's lock (took_slot), so
   # proj withdraw may stop it while it waits. On a proj from before that, it
   # can't be, never having said so: until it hands over to this one, or from
   # the moment this one hands it over (unmark).
   : >"$jobs/$id/$n.withdrawable"
-  # The place a proj before this one left, if it handed over.
+  # The place a proj before this one left, if it handed over, and when that
+  # place was made, which is when this turn came: MAX_WAIT goes by that, not
+  # the name's WHEN, which for a job run --since is when its work began.
   for f in "$jobs/.queue"/*-"$id"; do
     line_of pid "$f"
-    if [ "$pid" = "$$" ]; then me=$f; fi
+    if [ "$pid" = "$$" ]; then
+      me=$f
+      came=$(date -r "$f" +%s 2>/dev/null) || came=''
+    fi
   done
-  if [ -z "$me" ]; then
-    case $class in first) me=1 ;; *) me=2 ;; esac
-    me="$jobs/.queue/$me-$(date +%s%N)-$id"
-  fi
-  # When it came, which its place keeps through a hand-over.
-  when=${me##*/}; when=${when#*-}; when=${when%%-*}
+  [ -n "$me" ] || me="$jobs/.queue/$(entry "$id" "$class")"
+  came=${came:-$EPOCHSECONDS}
   trap 'rm -f "$me" "${me%/*}/.${me##*/}.new"' EXIT
   trap 'exit 143' TERM INT
   while :; do
@@ -150,8 +163,8 @@ take_slot() {
       unstick_slot "$id" "$n"
       return
     fi
-    # Waited long enough: among the --first ones now, by when it came.
-    if [[ ${me##*/} == 2-* ]] && [ $((EPOCHSECONDS - when / 1000000000)) -ge "$MAX_WAIT" ]; then
+    # Waited long enough: among the --first ones now, in its place by WHEN.
+    if [[ ${me##*/} == 2-* ]] && [ $((EPOCHSECONDS - came)) -ge "$MAX_WAIT" ]; then
       mv -f "$me" "${me%/*}/1-${me##*/2-}" 2>/dev/null || true
       me="${me%/*}/1-${me##*/2-}"
     fi
@@ -263,13 +276,15 @@ unmark() {
 }
 
 # Every turn in line, in the order pick takes them (lead ones, then the rest):
-# its job, class, how long it has waited, and its project. Only reads.
+# its job, class, how long it has waited, and its project. Only reads. The wait
+# is from when its place was made, not its name's WHEN, which for a job started
+# --since is when its work began.
 in_line() {
-  local pass f name fid when wait project
+  local pass f name fid wait project
   for pass in lead rest; do
     for f in "$jobs/.queue"/*; do
       [ -e "$f" ] || continue
-      name=${f##*/}; fid=${name#*-}; when=${fid%%-*}; fid=${fid#*-}
+      name=${f##*/}; fid=${name#*-}; fid=${fid#*-}
       waiter_alive "$f" "$fid" || continue
       classes=()
       place "$name" "$jobs/$fid"
@@ -277,7 +292,8 @@ in_line() {
       else [ "$the_class" != lead ] || continue
       fi
       line_of project "$jobs/$fid/project"
-      wait=$((EPOCHSECONDS - when / 1000000000))
+      wait=$(date -r "$f" +%s 2>/dev/null) || continue
+      wait=$((EPOCHSECONDS - wait))
       printf '%-40s %-8s %4dm%02ds  %s\n' "$fid" "$the_class" $((wait / 60)) $((wait % 60)) "$project"
     done
   done

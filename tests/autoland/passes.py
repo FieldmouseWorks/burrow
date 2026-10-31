@@ -5,6 +5,7 @@ the kicks from reviews and Claude jobs coming back."""
 import json
 import os
 import sys
+import time
 
 from harness import (ACTING, FAIL, KICKS, REAL_GH, QDIR, REAL, STATES, STUB, T, WROTE, C, P, R, H, S, V, W, clean, fresh_pr_state, head,
                      info, mkpr, pr_state, queued, run, rv_review, tmp, worker)
@@ -83,7 +84,7 @@ run(clean(), 700)
 assert C.WAKE["sam/r"] == T + 700 + 60 + 1, C.WAKE
 H.land = land
 fresh_pr_state()
-C.job, job = (lambda repo, task, clone=False: None), C.job
+C.job, job = (lambda repo, task, clone=False, since=None: None), C.job
 run(clean(files=["secrets/1.yaml"]), 700)
 assert C.WAKE["sam/r"] == T + 700 + 60 + 1, C.WAKE
 C.job = job
@@ -151,6 +152,13 @@ assert open(f"{tmp}/proj-args").read().split() == ["run", "--timeout", "240m", "
 S.CFG["machinery"] = "workers"
 assert REAL["job"]("sam/r", "the task") == "job-9"
 assert open(f"{tmp}/proj-args").read().split() == ["run", "--pipeline", "--app", "workers", "--timeout", "60m", "--idle", "20m", "--kick", "autoland/sam/r", "--owned", "r", "the", "task"]
+# A PR's job stands in line from when the PR was opened (--since, whole
+# seconds), and never from after now, which proj refuses.
+assert REAL["job"]("sam/r", "the task", since=1792800000.7) == "job-9"
+assert open(f"{tmp}/proj-args").read().split()[:5] == ["run", "--pipeline", "--app", "workers", "--since"], open(f"{tmp}/proj-args").read()
+assert open(f"{tmp}/proj-args").read().split()[5] == "1792800000"
+REAL["job"]("sam/r", "the task", since=time.time() + 3600)
+assert int(open(f"{tmp}/proj-args").read().split()[5]) <= time.time()
 C.project_dir = project_dir
 S.CFG.clear()
 S.CFG.update(kept)

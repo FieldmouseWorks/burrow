@@ -685,12 +685,14 @@ def rank(repo):
     return 1 if r in {x.lower() for x in CFG["pipelineRepos"]} else 2
 
 
-def job(repo, task, clone=False, pipeline=True, timeout=None):
+def job(repo, task, clone=False, pipeline=True, timeout=None, since=None):
     """Hand a task to a Claude job in the repo's project. One that settles a
     PR or the branch PRs land on is pipeline work (proj run --pipeline): it
     goes ahead of the line, and in the pipeline's own repos (pipelineRepos)
     in a slot kept for it; proj decides which. Its turns stop after timeout
-    minutes (jobTimeout's by default). Returns the job id."""
+    minutes (jobTimeout's by default). since, when the work began (a PR's:
+    when it was opened), is where it stands in line among those, so a PR
+    pushed again keeps its place. Returns the job id."""
     if retiring(repo):
         log(f"{repo}: no job until the deleted repo whose name it took on is retired")
         return None
@@ -709,7 +711,9 @@ def job(repo, task, clone=False, pipeline=True, timeout=None):
     # stopped, and ends then. It's the machine's own work, so it acts on
     # GitHub as the machinery's App, where there is one.
     app = ["--app", CFG["machinery"]] if CFG.get("machinery") else []
-    p = subprocess.run([CFG["proj"], "run", *(["--pipeline"] if pipeline else []), *app,
+    # Never after now, which proj refuses: a clock that's behind GitHub's.
+    when = ["--since", str(int(min(since, time.time())))] if since else []
+    p = subprocess.run([CFG["proj"], "run", *(["--pipeline"] if pipeline else []), *app, *when,
                         "--timeout", f"{timeout or CFG['jobTimeout']}m",
                         "--idle", f"{CFG['jobIdle']}m", "--kick", f"autoland/{repo}", "--owned", d, task],
                        capture_output=True, text=True)
