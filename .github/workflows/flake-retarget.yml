@@ -25,4 +25,6 @@ jobs:
       build-skip: agents
       eval-apart: true
       legs: 4
+      # flake.yml says why; a retarget keeps nothing, as no PR does.
+      keep-builds: true
       docs-paths: README.md AGENTS.md CLAUDE.md
