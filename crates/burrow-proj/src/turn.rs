@@ -15,9 +15,7 @@ use crate::config::Config;
 use crate::job::{Job, answer, is_error, kick, last_result, result_of};
 use crate::pick::{Class, demoted};
 use crate::waits::{rewatch, rewatch_later, waiting};
-use crate::{
-    Fail, filled, mtime, mtime_nanos, nanos, now_nanos, read, scratch, slot, swap, systemd,
-};
+use crate::{Fail, filled, mtime_nanos, nanos, now_nanos, read, scratch, slot, swap, systemd};
 
 /// How a job waits on its own long work, which its answer would stop.
 const LONG: &str = "A command that can outlast one Bash call (ten minutes), a long build or test run, goes to the background with its output and exit code written to a file, and you wait for that file in the foreground, in steps under ten minutes each; answer only once it's there.";
@@ -203,7 +201,7 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
     let quiet = read(&job.path("idle"))
         .filter(|i| !i.is_empty())
         .and_then(|i| nanos(&i))
-        .map_or(0, |q| (q + 999_999_999) / 1_000_000_000);
+        .unwrap_or(0);
     let mut killed = 0;
     let (last, mut rc) = loop {
         let mut args: Vec<String> = ["-p", "--output-format", "stream-json", "--verbose"]
@@ -456,7 +454,7 @@ struct Run<'a> {
     job: &'a Job<'a>,
     n: &'a str,
     waitdir: &'a Path,
-    /// Seconds its stream may say nothing before it's stuck; 0 for no limit.
+    /// Nanoseconds its stream may say nothing before it's stuck; 0 for no limit.
     quiet: i64,
 }
 
@@ -571,8 +569,8 @@ impl Clock {
             self.finish(run);
             return;
         }
-        let stream = mtime(&job.turn(n, "jsonl")).unwrap_or(0);
-        if run.quiet > 0 && now / 1_000_000_000 - stream >= run.quiet {
+        let stream = mtime_nanos(&job.turn(n, "jsonl")).unwrap_or(0);
+        if gone_quiet(now, stream, run.quiet) {
             touch(&job.turn(n, "quiet"));
             stop(pid);
             self.finish(run);
@@ -599,6 +597,12 @@ impl Clock {
             rewatch_later(run.cfg, run.job.id);
         }
     }
+}
+
+/// Whether a stream last written at `stream` has said nothing for all of
+/// `quiet` by `now`, all in nanoseconds; a `quiet` of 0 is no --idle.
+fn gone_quiet(now: i64, stream: i64, quiet: i64) -> bool {
+    quiet > 0 && now - stream >= quiet
 }
 
 /// What a run has said so far, read as it says it. Its session is kept as
@@ -732,4 +736,25 @@ fn names_session(stream: &Path, from: u64) -> bool {
         String::from_utf8_lossy(text.get(from as usize..).unwrap_or_default())
             .contains(r#""session_id""#)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::gone_quiet;
+
+    const SECOND: i64 = 1_000_000_000;
+
+    #[test]
+    fn quiet_is_all_of_idle_wherever_in_a_second_the_stream_last_spoke() {
+        let spoke = 100 * SECOND + 900_000_000;
+        // The clock's second turned over fifteen times, in 14.1s of quiet.
+        assert!(!gone_quiet(115 * SECOND, spoke, 15 * SECOND));
+        assert!(!gone_quiet(spoke + 15 * SECOND - 1, spoke, 15 * SECOND));
+        assert!(gone_quiet(spoke + 15 * SECOND, spoke, 15 * SECOND));
+    }
+
+    #[test]
+    fn no_idle_never_goes_quiet() {
+        assert!(!gone_quiet(1000 * SECOND, 0, 0));
+    }
 }
