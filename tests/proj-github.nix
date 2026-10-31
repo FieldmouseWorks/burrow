@@ -261,7 +261,7 @@
       outside = {"number": 1, "user": {"login": "sam-workers[bot]"}, "html_url": "https://github.com/o/x/issues/1",
                  "title": "t", "body": "from-outside", "state": "open", "labels": [{"name": "claude"}]}
       inside = {**outside, "number": 2, "user": {"login": "sam"}, "html_url": "https://github.com/o/x/issues/2", "body": "from-inside"}
-      github("repos/o/x/issues", json.dumps([outside, inside]))
+      github("repos/o/x/issues", json.dumps([outside]))
       github("repos/o/x/issues/2/comments", "[]")
       def refusals():
           return machine.succeed("cat /tmp/gh/posted").count("opened by `sam-workers[bot]`")
@@ -275,6 +275,7 @@
       assert json.loads(machine.succeed("cat /var/lib/burrow/proj-inbox/wake.json")).get("o/x", 0) >= before + 300
       # Said once, however many passes look, and the label coming back after
       # it went doesn't say it again.
+      github("repos/o/x/issues", json.dumps([outside, inside]))
       machine.succeed("su - dev -c 'proj-inbox o/x'")
       machine.succeed("su - dev -c 'proj-inbox o/x'")
       github("repos/o/x/issues", json.dumps([inside]))
