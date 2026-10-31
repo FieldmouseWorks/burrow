@@ -31,6 +31,11 @@
 #                               empty for nothing
 #   proj run --app NAME PROJECT "task"  the job acts on GitHub as the App NAME,
 #                               one of burrow.github.apps, never as the user
+#   proj run --since TIME PROJECT "task"  its place in line, every turn of it,
+#                               dates from TIME (Unix seconds, not after now)
+#                               rather than from when each turn came: work
+#                               that was waiting already (the steward's for a
+#                               PR, from when the PR was opened) keeps its place
 #   proj reply [--first] ID "message"  continue that job's conversation
 #   proj reply --cut-off N ID "message"  so, if its turn N was cut off
 #                               (else exit 3)
@@ -335,7 +340,7 @@ spare() {
 
 case "${1:-status}" in
   run | reply)
-    cmd=$1 vm='' first='' pipeline='' unstick='' kick=() limit='' idle='' owned='' link='' app='' cutoff=''
+    cmd=$1 vm='' first='' pipeline='' unstick='' kick=() limit='' idle='' owned='' link='' app='' since='' cutoff=''
     shift
     while :; do
       case ${1:-} in
@@ -366,6 +371,13 @@ case "${1:-status}" in
           app=$2
           shift
           ;;
+        --since)
+          [ "$cmd" = run ] || { echo "proj reply has no --since: the job's own is kept" >&2; exit 2; }
+          [[ ${2:-} =~ ^[1-9][0-9]{9}$ ]] && [ "$2" -le "$(date +%s)" ] ||
+            { echo "proj run --since TIME (Unix seconds, not after now)" >&2; exit 2; }
+          since=$2
+          shift
+          ;;
         --first) first=first ;;
         --cut-off) [ "$cmd" = reply ] && [[ ${2:-} =~ ^[0-9]+$ ]] || { echo "proj reply --cut-off N ID \"message\"" >&2; exit 2; }; cutoff=$2; shift ;;
         --pipeline) [ "$cmd" = run ] || { echo "proj reply has no --pipeline: the job's own class is kept" >&2; exit 2; }; pipeline=1 ;;
@@ -375,8 +387,8 @@ case "${1:-status}" in
       shift
     done
     if [ "$cmd" = run ]; then
-      p=${1:?usage: proj run [--vm] [--first] [--pipeline] [--unstick] [--timeout DUR] [--idle DUR] [--kick NAME]... [--owned] [--link URL] [--app NAME] PROJECT \"task\"}
-      task=${2:?usage: proj run [--vm] [--first] [--pipeline] [--unstick] [--timeout DUR] [--idle DUR] [--kick NAME]... [--owned] [--link URL] [--app NAME] PROJECT \"task\"}
+      p=${1:?usage: proj run [--vm] [--first] [--pipeline] [--unstick] [--timeout DUR] [--idle DUR] [--kick NAME]... [--owned] [--link URL] [--app NAME] [--since TIME] PROJECT \"task\"}
+      task=${2:?usage: proj run [--vm] [--first] [--pipeline] [--unstick] [--timeout DUR] [--idle DUR] [--kick NAME]... [--owned] [--link URL] [--app NAME] [--since TIME] PROJECT \"task\"}
       [ -d "$src/$p" ] || { echo "no such project: $src/$p" >&2; exit 1; }
       # Owned by what acts on each turn's end, which hears of it by its kick.
       [ -z "$owned" ] || [ ${#kick[@]} -gt 0 ] || { echo "proj run --owned needs a --kick: what acts on each turn's end" >&2; exit 2; }
@@ -404,6 +416,7 @@ case "${1:-status}" in
       # Every turn of it in the slot no one else's may take (line.sh).
       [ -z "$unstick" ] || : >"$jobs/$id/unstick"
       [ -z "$link" ] || echo "$link" >"$jobs/$id/link"
+      [ -z "$since" ] || echo "$since" >"$jobs/$id/since"
       [ -z "$app" ] || echo "$app" >"$jobs/$id/app"
       if [ -n "$vm" ]; then agent new "$p" >"$jobs/$id/agent"; fi
     else

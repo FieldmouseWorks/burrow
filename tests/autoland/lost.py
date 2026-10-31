@@ -19,7 +19,7 @@ ids = itertools.count(1)
 ISSUED = []  # every job's id, in order: one id a job, across passes
 
 
-def job(repo, task, clone=False):
+def job(repo, task, clone=False, since=None):
     JOBS.append(task)
     ISSUED.append(f"job-{next(ids)}")
     return ISSUED[-1]

@@ -259,7 +259,7 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
         what begin starts in its place and gives the id of (a proof build).
         One that isn't in place of one that broke (retry_at) ends a run of
         those."""
-        jid = begin() if begin else C.job(repo, task)
+        jid = begin() if begin else C.job(repo, task, since=ts(pr["createdAt"]))
         step = "build" if begin else "job"
         if jid:
             st[kind] = at

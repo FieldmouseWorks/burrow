@@ -84,7 +84,7 @@ def evals():
 
 kept, kept_build = C.job, P.build
 ids = itertools.count(1)
-C.job = lambda repo, task, clone=False: JOBS.append(task) or f"job-{next(ids)}"
+C.job = lambda repo, task, clone=False, since=None: JOBS.append(task) or f"job-{next(ids)}"
 # A check with an attribute is built by the steward, not a Claude job: each
 # build started is in JOBS too, as "build N CHECK...".
 P.build = lambda repo, pr, checks, st: JOBS.append(f"build {pr['number']} {' '.join(checks)}") or f"{C.BUILD}{next(ids)}"
