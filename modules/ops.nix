@@ -25,6 +25,9 @@ let
   device = "/dev/${link}";
   rule = ''SUBSYSTEM=="watchdog", ATTR{identity}=="${cfg.watchdogIdentity}", SYMLINK+="${link}"'';
   omit = { serviceConfig.ManagedOOMPreference = "omit"; };
+  # claude.slice's throttle, on a machine that sets one, stalls every job
+  # under it on purpose: oomd then leaves the jobs be too.
+  throttled = config.burrow.claude.memory.high != "infinity";
   # The ways in and what minds the machine, each keeping MiB back (protect).
   # Each connection's sshd@ runs in system-sshd.slice, so that's where theirs
   # goes.
@@ -84,8 +87,10 @@ in
         it can thrash first for as long as it likes. sshd (socket-activated or not),
         tailscaled, the switch's own units (burrow.switch) and Remote Control
         servers (burrow.remoteControl) are never picked, and proj's jobs
-        (claude-jobs.slice) are watched like any other slice. A server's own
-        pressure is the kernel's: past its backstop it kills there alone.
+        (claude-jobs.slice) are watched like any other slice, unless
+        claude.slice has a throttle (burrow.claude.memory.high), which stalls
+        them on purpose. A server's own pressure is the kernel's: past its
+        backstop it kills there alone.
       '';
     };
     protect = lib.mkOption {
@@ -182,7 +187,8 @@ in
     # session on it, and one in the user's manager would kill a bystander for
     # pressure inside a server: one at its own backstop. proj's jobs, in
     # claude-jobs.slice, are watched like any other slice, and are what it
-    # kills first there. A login session, in user-UID.slice, is watched on
+    # kills first there, unless claude.slice's throttle stalls them on
+    # purpose (throttled). A login session, in user-UID.slice, is watched on
     # its own. Swap is watched on the root: a server holds none, so that
     # watch never picks one.
     systemd.oomd = lib.mkIf cfg.oomd {
@@ -195,7 +201,8 @@ in
       (pressure "system" "session-.scope" "kill")
       (pressure "user" "slice" "kill")
     ] ++ map (unit: pressure "system" unit "auto") [ "-.slice" "user.slice" "user-.slice" ]
-      ++ map (unit: pressure "user" unit "auto") [ "-.slice" "claude.slice" "claude-rc.slice" ]);
+      ++ map (unit: pressure "user" unit "auto")
+        ([ "-.slice" "claude.slice" ] ++ (if throttled then [ "claude-.slice" ] else [ "claude-rc.slice" ])));
     # The ways in. openssh always has sshd@ (each connection's sshd, with
     # startWhenNeeded) and has sshd only without it; naming a unit it doesn't
     # have would make a stub of it.

@@ -363,7 +363,12 @@ in
       sliceConfig.MemoryLow = cfg.memoryLow;
     };
     systemd.services."user@".serviceConfig.MemoryLow = cfg.memoryLow;
-    systemd.slices."user-".sliceConfig.MemoryLow = cfg.memoryLow;
+    # systemd has no user-.slice, only the drop-ins every user-UID.slice
+    # takes: a unit of that name would configure none of them.
+    systemd.slices."user-" = {
+      overrideStrategy = "asDropin";
+      sliceConfig.MemoryLow = cfg.memoryLow;
+    };
     systemd.slices.user.sliceConfig.MemoryLow = cfg.memoryLow;
 
     systemd.user.services.claude-rc-scan = {

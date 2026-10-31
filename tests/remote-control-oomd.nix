@@ -5,9 +5,11 @@
 # proj job, a CI runner's slice outside system.slice (with a drop-in of its
 # own), a login session, a slice a user made up on the spot. The ways in and
 # what minds the machine keep memory back, and system.slice all of theirs.
+# On a machine that throttles Claude as a whole (burrow.claude.memory.high),
+# a proj job doesn't pay for that throttle, which slows every job under it.
 # The control watches pressure the way burrow.ops did before (the root,
 # user.slice and every slice in a user's manager, NixOS's own options) with
-# no opt-out on the server, and loses the whole server to oomd.
+# no opt-out on the server, and loses the whole server to oomd, and the job.
 #
 #   nix build .#checks.x86_64-linux.remote-control-oomd -L
 { self, pkgs }:
@@ -115,6 +117,14 @@ pkgs.testers.runNixOSTest {
       MemorySwapMax = 0;
     };
   };
+  nodes.throttled = {
+    imports = [ machine self.nixosModules.ops self.nixosModules.proj ];
+    burrow.ops.enable = true;
+    burrow.proj.enable = true;
+    # Any throttle will do: the test moves it to just above what claude.slice
+    # holds.
+    burrow.claude.memory.high = "90%";
+  };
   nodes.control = { lib, ... }: {
     imports = [ machine ];
     systemd.oomd = {
@@ -182,7 +192,7 @@ pkgs.testers.runNixOSTest {
 
     start_all()
     cgroup = {}
-    for m in (guarded, control):
+    for m in (guarded, throttled, control):
         m.wait_for_unit("user@1001.service")
         m.wait_until_succeeds(f"test -s {DIR}/thrash.pid && test -s {DIR}/sibling.pid", timeout=120)
         cgroup[m] = show(m, "ControlGroup")["ControlGroup"]
@@ -254,5 +264,22 @@ pkgs.testers.runNixOSTest {
         children = guarded.succeed("cat /sys/fs/cgroup/system.slice/*/memory.low").split()
         system = int(guarded.succeed("cat /sys/fs/cgroup/system.slice/memory.low"))
         assert system >= sum(map(int, children)) > 0, (system, children)
+
+    with subtest("claude.slice at its MemoryHigh slows a job, and that costs it nothing; the control's oomd kills it"):
+        claude = {m: cgroup[m].split("/claude-rc.slice/")[0] for m in (throttled, control)}
+        job = {m: f"{claude[m]}/claude-jobs.slice/proj-thrash.service" for m in (throttled, control)}
+        for m in (throttled, control):
+            current = int(m.succeed(f"cat /sys/fs/cgroup{claude[m]}/memory.current"))
+            m.succeed(f"systemctl --user -M dev@ set-property --runtime claude.slice MemoryHigh={current + (32 << 20)}")
+            m.succeed("systemd-run --user -M dev@ --unit=proj-thrash --slice=claude-jobs.slice -p MemoryMax=256M -p WorkingDirectory=/home/dev/job ${thrash}/bin/thrash")
+        retry(lambda _: full(throttled, job[throttled]) > 80, timeout_seconds=120)
+        pressure = monitored(throttled, "Memory Pressure Monitored CGroups")
+        assert not {p for p in pressure if p.startswith(claude[throttled])}, pressure
+        control.wait_until_succeeds(f"journalctl -o cat -u systemd-oomd | grep -qF 'Marked {job[control]} for killing'", timeout=120)
+        # Past oomd's 30s here too.
+        share = stalled(throttled, job[throttled], 30)
+        assert share > 80, share
+        throttled.succeed("systemctl --user -M dev@ is-active proj-thrash.service")
+        assert not marked(throttled, job[throttled])
   '';
 }
