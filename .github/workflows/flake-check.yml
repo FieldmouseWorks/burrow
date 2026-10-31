@@ -382,7 +382,7 @@ jobs:
             local name out outs i=0 pending
             nix derivation show -r "${@/%/^*}" | jq -r '(.derivations // .) | to_entries[]
               | (.value.env | if type != "object" then error("a derivation with no env") else . end) as $env
-              | select(($env.requiredSystemFeatures // "" | split(" "))
+              | select(($env.requiredSystemFeatures // "" | [splits("[ \t\n\r]+")])
                   + (.value.structuredAttrs.requiredSystemFeatures // [])
                   + ($env.__json // "{}" | fromjson | .requiredSystemFeatures // [])
                 | any(. == "kvm" or . == "nixos-test"))

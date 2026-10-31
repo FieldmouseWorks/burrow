@@ -676,13 +676,14 @@ vms = flake("""{
         a = drv "a";
         needs-kvm = derivation { name = "needs-kvm"; inherit system; builder = "/bin/sh"; args = [ "-c" "echo > $out" ]; requiredSystemFeatures = [ "kvm" "nixos-test" ]; };
         structured = derivation { name = "structured"; inherit system; builder = "/bin/sh"; args = [ "-c" "echo > $out" ]; __structuredAttrs = true; requiredSystemFeatures = [ "kvm" ]; };
+        tabbed = derivation { name = "tabbed"; inherit system; builder = "/bin/sh"; args = [ "-c" "echo > $out" ]; requiredSystemFeatures = "big-parallel\\tkvm"; };
         # A check around a VM test builds it too.
         around = derivation { name = "around"; inherit system; builder = "/bin/sh"; args = [ "-c" "echo > $out" ];
           test = derivation { name = "inner"; inherit system; builder = "/bin/sh"; args = [ "-c" "echo > $out" ]; requiredSystemFeatures = [ "nixos-test" ]; }; };
       };
     }""")
 with_slots = {"PATH": slotted_bin + os.pathsep + bin_dir + os.pathsep + os.environ["PATH"]}
-VM_CHECKS = ("-needs-kvm.drv^*", "-structured.drv^*", "-around.drv^*")
+VM_CHECKS = ("-needs-kvm.drv^*", "-structured.drv^*", "-tabbed.drv^*", "-around.drv^*")
 
 
 def in_slot():
@@ -697,7 +698,7 @@ def split(calls, out):
     assert all(c in vm for c in VM_CHECKS) and "-a.drv" not in vm, vm
     assert in_slot() == [vm], (in_slot(), vm)
     assert vm.split("--max-jobs ")[1].isdigit(), vm
-    assert "waiting for a heavy slot for 3 checks" in out, out
+    assert "waiting for a heavy slot for 4 checks" in out, out
 
 
 @case
@@ -761,9 +762,9 @@ def built_vms_wait_for_nothing():
         assert all(c in b for c in VM_CHECKS + ("-a.drv^*",)), b
         assert not in_slot(), in_slot()
         roots = open(os.path.join(tmp, "nix.log.roots")).read().splitlines()
-        # One each: the three VM tests, the one inside the wrapper among them.
-        assert len(roots) == 3 and all(r.split()[2].endswith(("-needs-kvm", "-structured", "-inner")) for r in roots), roots
-        assert len({r.split()[1] for r in roots}) == 3, roots
+        # One each: the four VM tests, the one inside the wrapper among them.
+        assert len(roots) == 4 and all(r.split()[2].endswith(("-needs-kvm", "-structured", "-tabbed", "-inner")) for r in roots), roots
+        assert len({r.split()[1] for r in roots}) == 4, roots
 
 
 @case
