@@ -65,9 +65,10 @@ on:
           builds the checks among them. The legs are named `leg K of N`;
           once they've all finished, a job named check, as the gate's own is
           with one leg, says whether they all passed and attests that, with
-          their logs one after another as its log. Every leg, and that job,
-          checks the same tree: on a PR, its head merged with its base as the
-          lane job found the base, not as it is when each job starts.
+          their logs one after another as its log, once every leg checked the
+          same commit and shared out the same plan. On a PR that commit is
+          its head merged with its base as the lane job found the base, not
+          as it is when each job starts.
         type: number
         default: 1
       pr-gate:
@@ -238,8 +239,8 @@ jobs:
     concurrency:
       group: ${{ format('flake-check {0} check {1} {2} {3} {4} [{5}] [{6}] [{7}] {8} leg {9} {10}', github.workflow, inputs.runner, inputs.install-nix, inputs.eval-apart, inputs.pr-gate, inputs.build-skip, inputs.docs-paths, inputs.docs-checks, inputs.legs, matrix.leg, (github.event_name == 'pull_request' && (github.event.action != 'edited' || github.event.changes.base)) && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id)) }}
       cancel-in-progress: true
-    # Each leg's log, its digest and the tree it checked, for the gate job:
-    # a matrix's legs combine their outputs, one name each.
+    # Each leg's log, its digest, the commit it checked and its plan, for the
+    # gate job: a matrix's legs combine their outputs, one name each.
     outputs:
       leg-1: ${{ steps.leg.outputs.leg-1 }}
       leg-2: ${{ steps.leg.outputs.leg-2 }}
@@ -270,7 +271,10 @@ jobs:
       # the job starts. GitHub's merge commit for the run (github.sha) is the
       # base as it was when the event fired, which a run that waited in a
       # runner's queue, or a re-run, would test long after its base moved on.
-      # With legs, as the lane job found it, so every leg checks one tree.
+      # With legs, as the lane job found it. The merge commit is dated when the
+      # newer of the two was committed, not when the job ran, so every leg,
+      # and a leg run again, checks one commit: the flake's rev and
+      # lastModified with it.
       - &merge
         id: merge
         if: github.event_name == 'pull_request'
@@ -292,8 +296,10 @@ jobs:
           fi
           echo "checking $HEAD_SHA merged with $BASE at $tip"
           git checkout -q --detach "$tip"
+          when=$(git show -s --format=%ct "$tip" "$HEAD_SHA" | sort -n | tail -n 1)
           # Base first, then the head, as GitHub orders its merge's parents.
-          if ! git -c user.name=flake-check -c user.email=flake-check@localhost -c commit.gpgsign=false \
+          if ! GIT_AUTHOR_DATE="@$when +0000" GIT_COMMITTER_DATE="@$when +0000" \
+              git -c user.name=flake-check -c user.email=flake-check@localhost -c commit.gpgsign=false \
               merge -q --no-ff --no-edit "$HEAD_SHA"; then
             git merge --abort || true
             echo "::error title=Conflicts with its base::$HEAD_SHA no longer merges cleanly with $BASE at $tip, so nothing was checked. Merge $BASE into the branch and push."
@@ -633,9 +639,10 @@ jobs:
           }
           gate 2>&1 | tee "$RUNNER_TEMP/flake.log"
       # With legs, a leg's log goes to the gate job, which attests the legs
-      # together: as an artifact named for the leg, with the log's digest and
-      # the tree it checked as the leg's own output, which GitHub keeps and
-      # nothing else in the run can write.
+      # together: as an artifact named for the leg, with the log's digest, the
+      # commit it checked and the digest of the plan it took its share of
+      # (none if it stopped before it read one) as the leg's own output,
+      # which GitHub keeps and nothing else in the run can write.
       - id: leg
         if: ${{ !cancelled() && steps.gate.outcome != 'skipped' && inputs.legs > 1 }}
         shell: bash
@@ -644,9 +651,11 @@ jobs:
         run: |
           name="flake-log-leg-$LEG-$(cat /proc/sys/kernel/random/uuid)"
           sha=$(sha256sum "$RUNNER_TEMP/flake.log" | cut -d' ' -f1)
-          tree=$(git rev-parse 'HEAD^{tree}')
-          echo "leg $LEG's log: $name, sha256 $sha, of tree $tree"
-          { echo "name=$name"; echo "leg-$LEG=$name $sha $tree"; } >> "$GITHUB_OUTPUT"
+          commit=$(git rev-parse 'HEAD^{commit}')
+          plan=none
+          if [ -f "$RUNNER_TEMP/plan.json" ]; then plan=$(sha256sum "$RUNNER_TEMP/plan.json" | cut -d' ' -f1); fi
+          echo "leg $LEG's log: $name, sha256 $sha, of commit $commit and plan $plan"
+          { echo "name=$name"; echo "leg-$LEG=$name $sha $commit $plan"; } >> "$GITHUB_OUTPUT"
       - if: ${{ !cancelled() && steps.leg.outputs.name }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -734,10 +743,10 @@ jobs:
           subject-path: ${{ steps.subject.outputs.path }}
           predicate-type: https://github.com/FieldmouseWorks/Conary/blob/main/docs/ci-attestation.md#v1
           predicate-path: ${{ runner.temp }}/conary/predicate.json
-  # With legs, the gate's own verdict: whether every leg passed, on the tree
-  # each was to check, attested as the gate's result with this tree's
-  # subject, and the legs' logs, each the one its leg wrote, one after another
-  # as its log. It runs once every leg has finished, passed or failed, and
+  # With legs, the gate's own verdict: whether every leg passed, on the commit
+  # each was to check and with one plan to share out, attested as the gate's
+  # result with this tree's subject, and the legs' logs, each the one its leg
+  # wrote, one after another as its log. It runs once every leg has finished, passed or failed, and
   # attests nothing once one was cancelled (a newer run has the PR). Named
   # check, as the gate's job is with one leg: by an expression, so the job
   # skipped (with one leg) shows that, not a second check of that name.
@@ -768,14 +777,17 @@ jobs:
           OUTPUTS: ${{ toJSON(needs.check.outputs) }}
         run: |
           # Each leg's log, the one it wrote: its job's output names the
-          # artifact, the log's digest and the tree it checked, which has to
-          # be the tree here. A leg with no output ended before its gate did.
-          tree=$(git rev-parse 'HEAD^{tree}')
+          # artifact, the log's digest and the commit it checked, which has
+          # to be the commit here, and the plan it took its share of, which
+          # has to be every other leg's, or some outputs could be no leg's.
+          # A leg with no output ended before its gate did.
+          commit=$(git rev-parse 'HEAD^{commit}')
           log=$RUNNER_TEMP/flake.log
           : > "$log"
           failed=0
+          plan=
           for ((k = 1; k <= LEGS; k++)); do
-            read -r name sha checked < <(jq -r --arg k "leg-$k" '.[$k] // ""' <<< "$OUTPUTS")
+            read -r name sha checked split < <(jq -r --arg k "leg-$k" '.[$k] // ""' <<< "$OUTPUTS")
             if [ -z "$name" ]; then
               echo "leg $k of $LEGS left no log: it ended before its gate did"
               failed=1
@@ -783,12 +795,21 @@ jobs:
                 || [ "$(sha256sum < "$RUNNER_TEMP/legs/$name/flake.log" | cut -d' ' -f1)" != "$sha" ]; then
               echo "leg $k of $LEGS: its log here isn't the one it wrote, $name with sha256 $sha"
               failed=1
-            elif [ "$checked" != "$tree" ]; then
-              echo "leg $k of $LEGS checked tree $checked, not $tree"
+            elif [ "$checked" != "$commit" ]; then
+              echo "leg $k of $LEGS checked $checked, not $commit"
               failed=1
             else
               echo "leg $k of $LEGS: $name, sha256 $sha"
               { echo "leg $k of $LEGS:"; cat "$RUNNER_TEMP/legs/$name/flake.log"; } >> "$log"
+              if [ "$split" = none ] || [ -z "$split" ]; then
+                echo "leg $k of $LEGS stopped before it read the plan"
+                failed=1
+              elif [ -z "$plan" ]; then
+                plan=$split first=$k
+              elif [ "$split" != "$plan" ]; then
+                echo "leg $k of $LEGS took its share of another plan than leg $first: sha256 $split, not $plan"
+                failed=1
+              fi
             fi
           done
           echo "the legs: $RESULT"

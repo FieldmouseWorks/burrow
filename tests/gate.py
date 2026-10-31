@@ -641,10 +641,16 @@ def legs():
     whole = entries(calls)
     assert len(whole) == 7, calls
     for n in (1, 2, 3, 7, 8):
-        seen, built = [], []
+        seen, built, plans = [], [], set()
         for k in range(1, n + 1):
+            plan = os.path.join(tmp, "plan.json")
+            if os.path.exists(plan):
+                os.remove(plan)
             rc, out, calls = run(d, skip="vm", leg=k, legs=n)
             assert rc == 0, (n, k, out)
+            # The plan it shares out, where the leg's step reads it for the
+            # gate job to hold it to every other leg's.
+            plans.add(open(plan).read())
             # Every leg makes the plan, then evaluates its own share.
             assert calls[0] == "eval plan", (n, k, calls)
             mine = entries(calls)
@@ -652,7 +658,7 @@ def legs():
             assert (f"leg {k} of {n}:" in out) == (n > 1), (n, k, out)
             seen += mine
             built += [t for b in builds(calls) for t in b.split()[4:]]
-        assert sorted(seen) == sorted(whole), (n, seen)
+        assert sorted(seen) == sorted(whole) and len(plans) == 1, (n, seen, plans)
         # Each check built once, by the leg that evaluated it, and the skipped one by none.
         assert sorted(t.split("-", 1)[1] for t in built) == ["a.drv^*", "b.drv^*", "c.drv^*", "d.drv^*"], (n, built)
     # A failure in one leg fails that leg, and only that one.

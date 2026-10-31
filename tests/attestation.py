@@ -4,8 +4,8 @@ whose audience names the digest of the statement it keeps beside the token
 (FieldmouseWorks/Conary, docs/ci-attestation.md), a failed gate is attested
 as failed, a public repo's is left to actions/attest, and a run with no OIDC
 token attests nothing. With legs, no leg attests: the gate job does, with
-the same steps, and passes only when every leg passed on its tree, its log
-the legs' own, each as its leg wrote it.
+the same steps, and passes only when every leg passed on its commit, each
+sharing out one plan, its log the legs' own, each as its leg wrote it.
 
   python3 -I tests/attestation.py .github/workflows/flake-check.yml
   nix build .#checks.x86_64-linux.attestation
@@ -50,7 +50,8 @@ assert bundle["if"] == ("${{ !cancelled() && steps.subject.outputs.path"
                         " && !github.event.repository.private }}"), bundle["if"]
 
 # With legs: each leg's log goes up as an artifact named for it, with its
-# digest and tree as the leg's output, one name per leg, which the job
+# digest, its commit and its plan's digest as the leg's output, one name per
+# leg, which the job
 # passes on. The gate job, once every leg has finished, passed or failed,
 # checks out and merges as they did, judges them, and attests with the very
 # same steps as the gate's job with one leg, but for whether it runs.
@@ -224,7 +225,8 @@ print("a private repo's PR attests its revision: ok")
 LEGS = 3
 
 
-def legs(logs, result="success", tamper=None, wrong_tree=None, missing=None, rename=None):
+def legs(logs, result="success", tamper=None, wrong_commit=None, missing=None, rename=None, other_plan=None,
+         no_plan=None):
     """Each leg's step, then the gate job's: its exit code, what it said and
     the log it leaves to attest."""
     runner_temp = tempfile.mkdtemp(dir=tmp)
@@ -232,6 +234,8 @@ def legs(logs, result="success", tamper=None, wrong_tree=None, missing=None, ren
     for k in range(1, LEGS + 1):
         leg_temp = tempfile.mkdtemp(dir=tmp)
         open(os.path.join(leg_temp, "flake.log"), "w").write(logs[k - 1])
+        if k != no_plan:
+            open(os.path.join(leg_temp, "plan.json"), "w").write('{"entries": []}' if k == other_plan else '{"entries": [1]}')
         out = os.path.join(leg_temp, "output")
         open(out, "w").close()
         p = subprocess.run(["bash", "-eo", "pipefail", "-c", leg_step["run"]], cwd=repo, capture_output=True, text=True,
@@ -244,8 +248,12 @@ def legs(logs, result="success", tamper=None, wrong_tree=None, missing=None, ren
         if k == missing:
             continue
         value = said[f"leg-{k}"]
-        if k == wrong_tree:
-            value = value.rsplit(" ", 1)[0] + " " + "0" * 40
+        name_, sha, checked, plan = value.split(" ")
+        assert name_ == name and checked == git("rev-parse", "HEAD^{commit}", cwd=repo), value
+        assert plan == ("none" if k == no_plan else hashlib.sha256(
+            open(os.path.join(leg_temp, "plan.json"), "rb").read()).hexdigest()), value
+        if k == wrong_commit:
+            value = f"{name} {sha} {'0' * 40} {plan}"
         if k == rename:
             value = value.replace(f"leg-{k}-", "leg-9-", 1)
         outputs[f"leg-{k}"] = value
@@ -268,8 +276,15 @@ for kw, why in (({"result": "failure"}, "the legs: failure"),
                 ({"missing": 2}, "leg 2 of 3 left no log"),
                 ({"tamper": 3}, "leg 3 of 3: its log here isn't the one it wrote"),
                 ({"rename": 1}, "leg 1 of 3: its log here isn't the one it wrote"),
-                ({"wrong_tree": 2}, "leg 2 of 3 checked tree 0000000000000000000000000000000000000000")):
-    code, said, _ = legs(LOGS, **kw)
+                ({"wrong_commit": 2}, "leg 2 of 3 checked 0000000000000000000000000000000000000000, not"),
+                ({"other_plan": 3}, "leg 3 of 3 took its share of another plan than leg 1"),
+                ({"other_plan": 1}, "leg 2 of 3 took its share of another plan than leg 1"),
+                ({"no_plan": 2}, "leg 2 of 3 stopped before it read the plan")):
+    code, said, log = legs(LOGS, **kw)
     assert code != 0 and why in said, (kw, code, said)
-print("a failed leg, or a leg's log missing, changed or for another tree, fails the gate job: ok")
+    # A leg whose log is its own keeps it in the gate's, however the leg went.
+    if "other_plan" in kw or "no_plan" in kw:
+        assert log == "".join(f"leg {k} of {LEGS}:\n{LOGS[k - 1]}" for k in range(1, LEGS + 1)), (kw, log)
+print("a failed leg, a leg's log missing, changed or for another commit, or legs that split different plans, "
+      "fail the gate job: ok")
 

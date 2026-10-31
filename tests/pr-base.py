@@ -23,6 +23,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 
 import yaml
 
@@ -215,6 +216,18 @@ for tip, why in (("", "the lane job didn't say where main was"), ("0" * 40, "isn
     assert p.returncode != 0 and "::error title=No base to merge with::" in p.stdout and why in p.stdout, (tip, p.stdout)
     assert git("rev-parse", "HEAD", cwd=ws) == head
 print("with legs, the base where the lane job found it: ok")
+# Every leg, whenever it starts, and a leg run again, checks one commit, with
+# one rev and lastModified: the merge is dated when the newer of the two was
+# committed, whatever the clock says now.
+first, ws = run(legs=4, tip=event_base)
+time.sleep(1.1)
+again, ws2 = run(legs=4, tip=event_base)
+assert first.returncode == 0 and again.returncode == 0, (first.stderr, again.stderr)
+merged = git("rev-parse", "HEAD", cwd=ws)
+assert git("rev-parse", "HEAD", cwd=ws2) == merged, (merged, git("rev-parse", "HEAD", cwd=ws2))
+newer = max(int(git("show", "-s", "--format=%ct", c, cwd=ws)) for c in (event_base, head))
+assert git("show", "-s", "--format=%at %ct", merged, cwd=ws) == f"{newer} {newer}", git("show", "-s", "--format=%at %ct", merged, cwd=ws)
+print("every leg checks one commit, whenever it starts: ok")
 
 # main moved to something the head conflicts with: the job fails, says why,
 # and leaves no merge to check.
