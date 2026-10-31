@@ -22,3 +22,7 @@ jobs:
       # before every deploy (remi's modules/burrow.nix, `proofJobs` and
       # `checks`).
       build-skip: agents
+      # Evaluating the whole flake at once holds 6-7G until the last build
+      # ends, beside everything else on remi, and flake-gate runs this same
+      # gate in Claude jobs there, inputs and all.
+      eval-apart: true

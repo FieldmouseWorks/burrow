@@ -549,5 +549,11 @@ prs, comments = refresh(21, later)
 prs[0]["statusCheckRollup"][0]["conclusion"] = "FAILURE"
 calls, _ = sweep(prs, comments)
 assert len(calls) == 1 and "#21 " in calls[0][-1], calls
+# A hidden folder counts when it's named for its repo, and only then.
+for name, repo in ((".github", ".github"), (".mirror", "r")):
+    subprocess.run(["git", "init", "-q", os.path.join(two, name)], check=True)
+    subprocess.run(["git", "-C", os.path.join(two, name), "remote", "add", "origin", f"https://github.com/sam/{repo}.git"], check=True)
+calls, _ = sweep([pr(1)], projects=two)
+assert sorted(c[-2] for c in calls) == [".github", "q", "r"], calls
 
 print("renovate-sweep: ok")
