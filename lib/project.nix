@@ -126,22 +126,40 @@ let
     };
 
   # The house rules' "never commit secrets": gitleaks over every tracked
-  # file (a flake's source is the repo's tracked tree), with its rules for
+  # file (a flake's source is the repo's tracked tree), with its own rules for
   # credentials that have a known shape (GitHub, cloud and API tokens,
   # private keys), but not its generic "API key" guess, which takes every
-  # invented test password for one. What it finds is printed redacted, since
-  # a public repo's CI log is public too. A false alarm is answered in the
+  # invented test password for one. Its config also skips files by path
+  # (lockfiles, SVGs, vendored and minified code), and a token in any tracked
+  # text file is a leak, so here no allowlist names a path: one that does
+  # nothing else goes, and one that ANDs a path with the rest goes whole
+  # rather than widening to every file. A false alarm is answered in the
   # repo: `gitleaks:allow` in a comment on the line, or the finding's
   # fingerprint in .gitleaksignore. Files over 5 MB (recordings, databases)
-  # aren't read.
-  gitleaksConfig = builtins.toFile "gitleaks.toml" ''
-    [extend]
-    useDefault = true
-    disabledRules = ["generic-api-key"]
+  # and binaries aren't read.
+  gitleaksConfig = pkgs: pkgs.runCommand "gitleaks.toml" { nativeBuildInputs = [ pkgs.remarshal pkgs.jq ]; } ''
+    toml2json ${pkgs.gitleaks.src}/config/gitleaks.toml | jq '
+      def unpathed: [ .[]
+        | if has("paths") and ((.condition // "or") | ascii_downcase) == "and" then empty else del(.paths) end
+        | select(has("regexes") or has("stopwords") or has("commits")) ];
+      def allowlists: .allowlists = ((.allowlists // []) + [.allowlist // empty] | unpathed) | del(.allowlist);
+      allowlists
+      | .rules |= map(select(.id != "generic-api-key") | allowlists | if .allowlists == [] then del(.allowlists) end)
+    ' > config.json
+    # Fail closed on a config whose shape this no longer matches.
+    jq -e '([.. | objects | select(has("paths") or has("allowlist"))] == []) and (.rules | length > 100)' config.json >/dev/null
+    json2toml config.json $out
   '';
-  secretsCheck = pkgs: pkgs.runCommand "secrets" { nativeBuildInputs = [ pkgs.gitleaks ]; } ''
+  # A finding is reported by file, line, rule and fingerprint, never by what
+  # the file says: a public repo's CI log is public too, and gitleaks' own
+  # output shows the line around a secret, with only that secret redacted.
+  secretsCheck = pkgs: pkgs.runCommand "secrets" { nativeBuildInputs = [ pkgs.gitleaks pkgs.jq ]; } ''
     cd ${self}
-    gitleaks dir --no-banner --verbose --redact --config ${gitleaksConfig} --max-target-megabytes 5 .
+    if ! gitleaks dir --no-banner --redact --config ${gitleaksConfig pkgs} --max-target-megabytes 5 \
+        --report-format json --report-path "$TMPDIR/leaks.json" .; then
+      jq -r '.[] | "\(.File):\(.StartLine): \(.RuleID) (fingerprint \(.Fingerprint))"' "$TMPDIR/leaks.json" || true
+      exit 1
+    fi
     touch $out
   '';
 

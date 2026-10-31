@@ -714,25 +714,9 @@
         # The signed-in browser: Claude driving it, its logins kept, its ports
         # and profile kept from everyone else.
         browser = import ./tests/browser.nix { inherit self pkgs; };
-        # lib/project.nix's secrets check fails a project with a GitHub token
-        # in a tracked file, and prints it redacted. The token is put together
-        # here, so no tracked file holds one (GitHub's push protection would
-        # turn the push away, and burrow's own secrets check would fail).
-        house-secrets-leak = let
-          token = "gh" + "p_" + builtins.substring 0 36 (builtins.hashString "sha256" "house-secrets-leak");
-          leaky = pkgs.runCommand "leaky-project" { } ''
-            mkdir $out
-            echo 'token = "${token}"' > $out/config.toml
-          '';
-          failed = pkgs.testers.testBuildFailure
-            (self.lib.project { self = leaky; systems = [ system ]; }).checks.${system}.secrets;
-        in pkgs.runCommand "house-secrets-leak-check" { } ''
-          grep -q 'RuleID:.*github-pat' ${failed}/testBuildFailure.log || { cat ${failed}/testBuildFailure.log; exit 1; }
-          if grep -qF '${builtins.substring 4 36 token}' ${failed}/testBuildFailure.log; then
-            echo "the token was printed"; exit 1
-          fi
-          touch $out
-        '';
+        # lib/project.nix's secrets check fails a project with a token in any
+        # tracked text file, and its log says where, never what.
+        house-secrets-leak = import ./tests/house-secrets.nix { inherit self pkgs; };
         # lib/project.nix's package of a Rust workspace: every member's binaries.
         house-rust-package = let
           pkg = (self.lib.project { self = ./tests/house/rust; systems = [ system ]; rust = { }; }).packages.${system}.default;
