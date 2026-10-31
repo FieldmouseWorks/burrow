@@ -92,7 +92,7 @@ in
     packages = mkOption {
       type = types.listOf types.package;
       default = [ ];
-      description = "What their jobs find on PATH, beside git, Nix and the basics.";
+      description = "What their jobs find on PATH, beside git, Nix, the basics, and the jq, gh and curl burrow's shared CI calls.";
     };
 
     template = mkOption {
@@ -124,7 +124,9 @@ in
       # A failed one is gone too, not left loaded for the dispatcher to
       # count, or for a switch's health check to find newly failed.
       unitConfig.CollectMode = "inactive-or-failed";
-      path = with pkgs; [ bash coreutils findutils gnugrep gnused gnutar gzip git config.nix.package ] ++ cfg.packages;
+      # The basics, and what burrow's shared CI (flake-check.yml) calls, the
+      # job these are for: jq, gh and curl.
+      path = with pkgs; [ bash coreutils findutils gnugrep gnused gnutar gzip git config.nix.package curl gh jq ] ++ cfg.packages;
       environment = {
         RUNNER_ROOT = "/var/lib/${state}/%i";
         HOME = "/var/lib/${state}/%i";

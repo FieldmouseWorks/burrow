@@ -468,6 +468,9 @@
           assert lib.assertMsg (lib.hasInfix "rm -rf /var/lib/private/burrow-fresh-runner/%i" freshUnit.serviceConfig.ExecStopPost)
             "dispatch: a fresh runner's state outlives it: ${freshUnit.serviceConfig.ExecStopPost}";
           assert lib.assertMsg (!freshUnit.restartIfChanged && !freshUnit.stopIfChanged) "dispatch: a switch can cut a fresh runner's job short";
+          # The job they're for, burrow's flake-check.yml, calls these.
+          assert lib.assertMsg (lib.all (p: builtins.elem p (map lib.getName freshUnit.path)) [ "jq" "gh" "curl" ])
+            "dispatch: a fresh runner's jobs find ${toString (map lib.getName freshUnit.path)} on PATH";
           assert lib.assertMsg ((settings dispatchOnly).fresh == null) "dispatch: fresh runners nobody asked for";
           assert lib.assertMsg (settings unhandled == settings committed)
             "dispatch: with the handlers off, the settings are ${builtins.toJSON (settings unhandled)}";
