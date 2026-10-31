@@ -62,7 +62,8 @@
 # first, and a turn that has waited MAX_WAIT seconds counts as --first itself,
 # so a stream of them can't starve it. PIPELINE_SLOTS of the slots are for pipeline jobs in the
 # pipeline's own repos alone, and no project's other jobs hold more than
-# PER_PROJECT at once (pick.sh). A job run --unstick waits in none of that:
+# PER_PROJECT at once, and a waiting one of theirs is owed a slot ahead of the
+# pipeline's when none runs (pick.sh). A job run --unstick waits in none of that:
 # its turns take a slot of their own, past the MAX_JOBS, one at a time
 # (line.sh). A waiting turn is just this shell, which becomes the deployed proj
 # at its next look after a switch (line.sh). Every turn
