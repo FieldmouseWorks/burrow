@@ -20,6 +20,9 @@ from common import CFG, CONTEXT, DEP_RE, DRY, load, log, repo_cfg, save, ts
 from prs import PROOF_SLOT, RELEASE_AGE, REVIEWER
 from tasks import RED_BRANCH, red_default_task
 
+# What a project's state says when GitHub had no such repo at its last look.
+GONE = "gone"
+
 
 def discover():
     """Each owner's repos the App's installation there reaches: which ones
@@ -463,17 +466,18 @@ def hook(repo, st, due):
     deleted or edited. GitHub never gives the secret back, so it's known by a
     hash. The hook is the one with the id it was given, so a new URL moves
     it rather than leaving the old one sending. A status run has neither the secret (only the services get it)
-    nor anything to change, so it leaves the hook alone."""
+    nor anything to change, so it leaves the hook alone. False when GitHub
+    wouldn't give the hooks or take the change."""
     if DRY:
-        return
+        return True
     wh = CFG["webhook"]
     secret = C.webhook_secret()
     want = hashlib.sha256(json.dumps([wh["url"], wh["events"], secret]).encode()).hexdigest()[:16]
     if st.get("hook") == want and not due:
-        return
+        return True
     hooks = C.gh("api", f"repos/{repo}/hooks", check=False)
     if not isinstance(hooks, list):
-        return  # tried again on the next full pass
+        return False  # tried again on the next full pass
     body = json.dumps({"active": True, "events": wh["events"],
                        "config": {"url": wh["url"], "content_type": "json", "secret": secret, "insecure_ssl": "0"}})
     mine = ([x for x in hooks if x.get("id") == st.get("hookId")]
@@ -486,18 +490,24 @@ def hook(repo, st, due):
         done = C.write("api", "-X", "POST", f"repos/{repo}/hooks", "--input", "-",
                        input=json.dumps({"name": "web", **json.loads(body)}), check=False)
         made = done.get("id") if isinstance(done, dict) else None
-    if done is not None:
-        st["hook"], st["hookId"] = want, made
-        save(f"repo-{repo.replace('/', '_')}.json", st)
+    if done is None:
+        return False
+    st["hook"], st["hookId"] = want, made
+    save(f"repo-{repo.replace('/', '_')}.json", st)
+    return True
 
 
 def hook_projects(repos):
     """The hook on the projects' repos (projectsDir) that it doesn't see to
     (excluded, or another owner's): proj-watch and proj-inbox start from its
     deliveries too. Another owner's gets one only if the App is installed
-    there too; one it can't reach is tried again a day later, and the rest
-    still get theirs. Returns them all, for unhook_gone to keep: a hook
-    whose repo couldn't be asked about stays on."""
+    there too, and a clone whose repo GitHub has no more (deleted, or out of
+    the App's reach) gets none. Either is said once, then left alone until a
+    day later, when it's tried again (a gone one by looking the repo up,
+    quietly), and the rest still get theirs. GitHub answers a deleted repo
+    and one the App lost access to alike, so the hook's record stays: back,
+    the repo's hook is the one it had. Returns them all, for unhook_gone to
+    keep: a hook whose repo couldn't be asked about stays on."""
     if DRY:
         return []
     seen = {r["repo"].lower() for r in repos}
@@ -506,14 +516,42 @@ def hook_projects(repos):
         name = f"repo-{repo.replace('/', '_')}.json"
         st = load(name, {})
         due = C.NOW - st.get("hookAt", 0) >= 86400
+        was = st.get("unreached")
+        if was and not due:
+            continue
         if due:
             st["hookAt"] = C.NOW
             save(name, st)
+        why = None
         try:
             with C.acting_for(repo):
-                hook(repo, st, due)
-        except RuntimeError as e:  # the App isn't on its owner, or GitHub didn't answer
+                if was == GONE:
+                    C.fresh(f"repos/{repo}")  # asking for its hooks would only fail again
+                if not hook(repo, st, due):
+                    # Its hooks couldn't be read or set: Gone if it's the
+                    # repo itself that GitHub doesn't have.
+                    C.fresh(f"repos/{repo}")
+        except C.Gone:
+            why = GONE
+        except C.Unavailable as e:  # GitHub didn't answer: nothing new is known
             log(f"{repo}: its webhook: {e}")
+            why = was
+        except RuntimeError as e:  # the App isn't on its owner, or GitHub said no to the lookup
+            why = str(e)
+        if why == was:
+            continue
+        if why == GONE:
+            log(f"{repo}: GitHub has no such repo, so its clone in {CFG['projectsDir']} gets no webhook; "
+                "looked up again daily")
+        elif why:
+            log(f"{repo}: its webhook: {why}; tried again daily")
+        else:
+            log(f"{repo}: {'on GitHub' if was == GONE else 'reached'} again")
+        if why:
+            st["unreached"] = why
+        else:
+            st.pop("unreached", None)
+        save(name, st)
     return [{"repo": repo} for repo in more]
 
 
@@ -521,10 +559,12 @@ def unhook_gone(repos):
     """The hooks this machine gave repos it no longer sees to (excluded,
     archived, out of the owners), off them: their deliveries would start
     passes over nothing, and the URL has no business there. One that can't
-    be taken off (no admin any more, say), or whose name GitHub won't look
-up, is tried again a day later. A
-    renamed repo leaves its old state file behind, and GitHub answers the old
-    name with the new one: that hook is the one hook() adopted under the new
+    be taken off (no admin any more, say), or whose name GitHub doesn't
+    answer for, is tried again a day later. GitHub answers a deleted repo
+    and one the App can't reach any more alike, so the hook stays on record
+    and is looked up again a day later too, but said only once. A renamed
+    repo leaves its old state file behind, and GitHub answers the old name
+    with the new one: that hook is the one hook() adopted under the new
     name, so the old file lets go of it instead."""
     if DRY:
         return
@@ -537,17 +577,22 @@ up, is tried again a day later. A
         if not st.get("hookId") or C.NOW - st.get("unhookTried", 0) < 86400:
             continue
         repo = name[len("repo-"):-len(".json")].replace("_", "/", 1)  # an owner has no _
+        now = off = None
         try:
             with C.acting_for(repo):
-                now = C.gh("api", f"repos/{repo}", check=False)
-                gone = isinstance(now, dict) and str(now.get("full_name", "")).lower() not in live
+                now = C.fresh(f"repos/{repo}")[1]
+                st.pop("unreached", None)
+                gone = str(now.get("full_name", "")).lower() not in live
                 if gone:
                     log(f"{repo}: no longer seen to, taking its webhook off")
                 off = gone and C.write("api", "-X", "DELETE", f"repos/{repo}/hooks/{st['hookId']}", check=False) is not None
-        except RuntimeError as e:  # the App isn't on its owner (any more), say
+        except C.Gone:
+            if st.get("unreached") != GONE:
+                log(f"{repo}: GitHub has no such repo the App can see, so its webhook stays on record; looked up again daily")
+            st["unreached"] = GONE
+        except RuntimeError as e:  # the App isn't on its owner (any more), or GitHub didn't answer
             log(f"{repo}: {e}")
-            now = off = None
-        if not isinstance(now, dict) or (gone and not off):
+        if now is None or (gone and not off):
             # Not known to be gone (the old path may lead to a live repo), or
             # its hook wouldn't come off.
             st["unhookTried"] = C.NOW
