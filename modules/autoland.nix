@@ -25,47 +25,9 @@ let
   account = config.users.users.${user};
   inherit (lib) mkOption types;
   rv = cfg.reviewers;
-
-  # The review agents, and the user they run as: it has no GitHub login, and
-  # reads only the snapshots the steward takes (secrets paths left out).
-  agents = import ./autoland/agents/package.nix { inherit pkgs; };
-  reviewer = "autoland-review";
-  reviewerHome = "${stateDir}/autoland-review";
-  reviewDir = "${stateDir}/autoland/review";
-  # The snapshots' checkouts (reviewers.py TREES): a cache, taken again from
-  # GitHub whenever one is missing, so out of stateDir and whatever snapshots
-  # the machine keeps of it. On a machine whose root is wiped at boot, a boot
-  # empties it too.
-  snapDir = "/var/cache/autoland/snap";
-  # What the reviewers' service runs commands with, and so what an agent
-  # reads the snapshot with, and runs the repo's own checks with (python3:
-  # the scripts a repo checks itself with).
-  reviewTools = with pkgs; [ bash config.programs.git.package bubblewrap coreutils findutils gnugrep gnused diffutils ripgrep python3 ];
-  # The machine's own /bin/sh, /bin/bash and /usr/bin/env, as an agent's
-  # sandbox shows them; a machine without /bin/sh or /usr/bin/env gives the
-  # sandbox none either.
-  reviewLinks = {
-    "/bin/bash" = "${pkgs.bashInteractive}/bin/bash";
-  } // lib.optionalAttrs (config.environment.binsh != null) {
-    "/bin/sh" = config.environment.binsh;
-  } // lib.optionalAttrs (config.environment.usrbinenv != null) {
-    "/usr/bin/env" = config.environment.usrbinenv;
-  };
-  # All of the store an agent's sandbox shows: the agents, the bridge to
-  # the gate, those tools, the links and the machine's CA bundle, with what
-  # they need. Never the whole store, which holds every flake's sources this
-  # machine has read, private ones included; nor /etc, whose files link into
-  # the machine's own configuration.
-  reviewStore = pkgs.closureInfo {
-    rootPaths = [ agents stewardSrc config.security.pki.caBundle ]
-      ++ reviewTools ++ lib.attrValues reviewLinks;
-  };
-  codexLogin = pkgs.writeShellScriptBin "autoland-codex-login" ''
-    # Codex reviews on the ChatGPT plan's login: a device code to approve in
-    # a browser. Run again whenever the review digest says it's logged out.
-    exec /run/wrappers/bin/sudo -u ${reviewer} ${pkgs.coreutils}/bin/env HOME=${reviewerHome} CODEX_HOME=${reviewerHome}/.codex \
-      ${agents}/bin/codex login --device-auth "$@"
-  '';
+  # The reviewers' user, the queue and snapshots it reads, and the kick,
+  # as the reviewers' service (autoland/review.nix) has them.
+  inherit (import ./autoland/paths.nix config) reviewer reviewDir snapDir stewardKick;
 
   # The baseline and the house style it links to (the rules, the project
   # template and lib), together, so the links resolve for the job that reads
@@ -209,22 +171,13 @@ let
       inherit (config.burrow.events) url;
       events = config.burrow.events.hookEvents;
     };
-    # For the reviewers' answers coming back (review_worker.py).
-    kick = "${config.burrow.events.kick}/autoland";
+    kick = stewardKick;
     reviewers = {
-      codex = { inherit (rv.codex) enable effort parallel; };
+      codex = { inherit (rv.codex) enable; };
     };
     inherit (rv) skipPaths;
-    reviewTimeout = rv.timeoutMinutes;
-    agents = "${agents}/bin";
-    sandbox = "${pkgs.bubblewrap}/bin/bwrap";
     # What a proof would build, and whether it's built (proofs.py).
     nix = "${config.nix.package}/bin";
-    box = {
-      store = "${reviewStore}/store-paths";
-      caBundle = config.security.pki.caBundle;
-      links = reviewLinks;
-    };
     baselineTask = ''
       REPO is new, and doesn't meet the baseline every repo of ${config.burrow.owner}'s keeps yet. Read
       ${baselineDocs}/docs/repo-baseline.md and bring this repo up to its "Files" section: open one PR, ready for review (not a draft), that adds
@@ -246,7 +199,7 @@ let
   # Each of them imported from the package, with this machine's settings, as
   # part of the system's build: an import that doesn't resolve there (a
   # module the package lacks) fails the build, not every pass once it's live.
-  # review_worker is imported only by the reviews' runs, so each one is.
+  # Each one is, so none can be left out.
   stewardImports = pkgs.runCommand "autoland-steward-imports" { } ''
     cd ${stewardSrc}
     AUTOLAND_CONFIG=${configFile} ${pkgs.python3}/bin/python3 -I -c '
@@ -266,19 +219,17 @@ let
   # The command, with this machine's config, so `autoland-steward status`
   # works from any shell, not only in the service. A pass gets its tools
   # however it's started: by its units, or by hand or a Claude job
-  # (`autoland-steward kick OWNER/REPO`) with a PATH of its own. Not a
-  # review: its units give the reviewers only what they read with
-  # (reviewTools).
+  # (`autoland-steward kick OWNER/REPO`) with a PATH of its own.
   steward = pkgs.writeShellScriptBin "autoland-steward" ''
     export AUTOLAND_CONFIG=''${AUTOLAND_CONFIG:-${configFile}}
-    steward_path=${lib.makeBinPath stewardTools}
-    [ "''${1:-}" = review ] || export PATH="$steward_path''${PATH:+:$PATH}"
+    export PATH="${lib.makeBinPath stewardTools}''${PATH:+:$PATH}"
     exec ${pkgs.python3}/bin/python3 -E -s ${stewardSrc}/steward.py "$@"
   '';
 in
 {
   imports = [
     (import ./common.nix inputs)
+    (import ./autoland/review.nix inputs)
     { key = "burrow/notify"; imports = [ (import ./notify.nix inputs) ]; }
     # The heavy slots its proof builds take, where the machine has them.
     { key = "burrow/cpu"; imports = [ (import ./cpu.nix inputs) ]; }
@@ -815,15 +766,7 @@ in
     # opens (repos.py publish).
     burrow.proj.inbox.authors = [ "${cfg.app.slug}[bot]" ];
 
-    environment.systemPackages = [ steward ] ++ lib.optional rv.codex.enable codexLogin;
-
-    users.users.${reviewer} = {
-      isSystemUser = true;
-      group = reviewer;
-      home = reviewerHome;
-      createHome = true;
-    };
-    users.groups.${reviewer} = { };
+    environment.systemPackages = [ steward ];
 
     # Every PR's pass comes from what happens to it (burrow.events): a push, a
     # review, a comment or CI finishing on it starts its repo's pass
@@ -871,45 +814,7 @@ in
         # The repos' hooks' secret (repos.py), and the App's key.
         LoadCredential = [ "webhook:${config.burrow.events.secretFile}" "app-key:${cfg.app.keyFile}" ];
       };
-    }) // {
-      # The reviews the passes queue, as soon as there are any, as the
-      # reviewers' own user: no GitHub login, and the snapshots are all it
-      # can read of the repos.
-      autoland-review = lib.mkIf (!cfg.dryRun) {
-        description = "autoland: the reviewers' reviews of the queued PR heads";
-        # A switch leaves a running one be (see burrow.switch's check).
-        restartIfChanged = false;
-        after = [ "network-online.target" ];
-        wants = [ "network-online.target" ];
-        # What the agents read the snapshot with, and bubblewrap for codex's
-        # own sandbox inside theirs.
-        path = reviewTools;
-        environment.HOME = reviewerHome;
-        # The gate's TLS to the agents' APIs (autoland/egress.py).
-        environment.SSL_CERT_FILE = config.security.pki.caBundle;
-        serviceConfig = {
-          Type = "oneshot";
-          User = reviewer;
-          ExecStart = "${steward}/bin/autoland-steward review";
-          # However long an agent thinks: no pass gives up on a queued review either.
-          TimeoutStartSec = "infinity";
-          Nice = 10;
-          ProtectSystem = "strict";
-          ProtectHome = true;
-          PrivateTmp = true;
-          ReadWritePaths = [ reviewerHome "${reviewDir}/queue" "${reviewDir}/done" "${reviewDir}/sessions" ];
-        };
-      };
-    };
-    systemd.paths.autoland-review = lib.mkIf (!cfg.dryRun) {
-      wantedBy = [ "paths.target" ];
-      # A review to do, or a closed PR's sessions to delete.
-      pathConfig = {
-        DirectoryNotEmpty = "${reviewDir}/queue";
-        PathExistsGlob = "${reviewDir}/sessions/.gone-*";
-      };
-    };
-
+    });
     # The steward's state, and the reviews: it queues them and takes the
     # snapshots (their checkouts in snapDir, what each keeps of its base in
     # snap/); the reviewers' user reads those, answers in done/, takes

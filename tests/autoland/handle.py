@@ -11,7 +11,7 @@ import shutil
 import subprocess
 
 from harness import (C, CI_GREEN, DDIR, FAIL, JOBS, POSTED, PR_DIFF, QDIR, P, R, H, S, SINCE, STATES, STUB, T0, V,
-                     W, WROTE, agent, agent_runs, clean, fresh_pr_state, head, info, judgment, merged,
+                     WROTE, clean, fresh_pr_state, head, info, judgment, merged,
                      gh_stub, mkpr, pr_state, queued, run, rv_review, said, stand_in, swept, tmp, worker)
 
 stand_in()
