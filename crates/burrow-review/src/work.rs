@@ -61,11 +61,12 @@ pub fn review(s: &Service, name: &str) {
         Some(v) => serde_json::from_value::<Item>(v.clone())
             .map_err(|e| format!("its queue entry is unreadable: {e}")),
     };
-    let keys = s.keys();
     let out = match &item {
         Err(e) => Err(Failed::Error(e.clone())),
         Ok(item) => look(s, item),
     };
+    // Read once it's done: a refresh while it ran is scrubbed too.
+    let keys = s.keys();
     let item = item.ok();
     let tag = |v: &Option<Value>, k: &str| {
         v.as_ref()
@@ -128,7 +129,7 @@ fn look(s: &Service, item: &Item) -> Result<Value, Failed> {
         )));
     };
     if !on(s, &item.reviewer, &item.repo) {
-        // The repo was taken off it since it was queued.
+        // It, or the repo, was taken off since the look was queued.
         return Err(Failed::Error(format!(
             "{} isn't one {who} reviews",
             item.repo
@@ -202,11 +203,12 @@ fn look(s: &Service, item: &Item) -> Result<Value, Failed> {
     Ok(answer)
 }
 
-/// Whether the repo has this reviewer.
+/// Whether the repo has this reviewer: it's on, and the repo isn't one it
+/// leaves alone (reviewers.py `on`).
 fn on(s: &Service, reviewer: &str, repo: &str) -> bool {
     s.cfg
         .reviewer(reviewer)
-        .is_some_and(|(_, r)| !r.off.iter().any(|x| x == repo))
+        .is_some_and(|(_, r)| r.enable && !r.off.iter().any(|x| x == repo))
 }
 
 /// The sessions of PRs that closed, which the steward's sweep marked gone:
@@ -254,6 +256,7 @@ fn remove_all(path: &Path) -> io::Result<()> {
 /// look at its last one, and resumes it.
 pub fn work(s: Arc<Service>) {
     forget(&s);
+    let _watch = s.watch();
     let (done_tx, done) = mpsc::channel::<String>();
     // Only what's in hand: a name done with and queued again (a retry, a
     // second look) is taken again.

@@ -126,26 +126,32 @@ fn one_under_way_holds_its_lock() {
     );
 }
 
-/// A repo taken off its reviewer since the look was queued isn't sent, and
-/// a snapshot gone by the time its look starts (its head swept away, or the
-/// cache emptied) is no review either.
+/// A repo taken off its reviewer since the look was queued isn't sent, nor
+/// is anything once the reviewer is off on the machine, and a snapshot gone
+/// by the time its look starts (its head swept away, or the cache emptied)
+/// is no review either.
 #[test]
 fn a_look_it_shouldnt_take_is_an_error() {
     let mut rig = Rig::new();
     let snap = rig.snapshot(5, HEAD);
-    rig.cfg["reviewers"]["codex"]["off"] = json!(["sam/r"]);
-    let entry = rig.queue(&snap, 5, HEAD, json!({}));
-    rig.work();
-    let back = rig.back(&entry);
-    assert!(
-        back["error"]
-            .as_str()
-            .unwrap()
-            .contains("sam/r isn't one Codex reviews"),
-        "{back}"
-    );
+    for (enable, off) in [(true, json!(["sam/r"])), (false, json!([]))] {
+        rig.cfg["reviewers"]["codex"]["enable"] = json!(enable);
+        rig.cfg["reviewers"]["codex"]["off"] = off;
+        let entry = rig.queue(&snap, 5, HEAD, json!({}));
+        rig.work();
+        let back = rig.back(&entry);
+        assert!(
+            back["error"]
+                .as_str()
+                .unwrap()
+                .contains("sam/r isn't one Codex reviews"),
+            "{back}"
+        );
+        assert!(rig.runs().is_empty(), "{:?}", rig.runs());
+    }
+    rig.cfg["reviewers"]["codex"]["enable"] = json!(true);
     rig.cfg["reviewers"]["codex"]["off"] = json!(["sam/other"]);
-    rig.queue(&snap, 5, HEAD, json!({}));
+    let entry = rig.queue(&snap, 5, HEAD, json!({}));
     rig.work();
     assert_eq!(rig.back(&entry)["result"], "review");
     rig.queue(&snap, 5, HEAD, json!({}));

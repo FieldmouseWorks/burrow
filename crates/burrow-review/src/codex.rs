@@ -291,7 +291,8 @@ pub fn look(
     home: &Path,
     sid: Option<&str>,
 ) -> Result<(Value, String), Failed> {
-    let keys = s.keys();
+    // The login it starts with: one a refresh replaces is still scrubbed.
+    s.keys();
     let err = |e: io::Error| Failed::Error(e.to_string());
     let login = s.home.join(".codex");
     fs::create_dir_all(home).map_err(err)?;
@@ -384,6 +385,8 @@ pub fn look(
     drop(gate);
     keep_login(s, &held, &login)
         .map_err(|e| Failed::Error(format!("couldn't keep its login: {e}")))?;
+    // Its keys as they are now it's done, with any it refreshed.
+    let keys = s.keys();
     let Some((code, out, stderr)) = ran.map_err(err)? else {
         return Err(Failed::Error(format!(
             "codex was still at it after {} minutes",

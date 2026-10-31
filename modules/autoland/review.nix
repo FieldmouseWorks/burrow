@@ -45,7 +45,7 @@ let
     sessions = "${reviewDir}/sessions";
     snapshots = snapDir;
     reviewers.codex = {
-      inherit (rv.codex) effort parallel;
+      inherit (rv.codex) enable effort parallel;
       off = lib.attrNames (lib.filterAttrs (_: r: !(r.codex or true)) cfg.repos);
     };
     inherit (rv) timeoutMinutes;

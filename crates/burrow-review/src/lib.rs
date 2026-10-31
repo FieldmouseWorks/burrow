@@ -28,9 +28,11 @@ pub mod queue;
 pub mod scrub;
 mod work;
 
+use std::collections::BTreeSet;
 use std::ffi::OsString;
+use std::io;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub use work::{forget, review, work};
@@ -54,6 +56,11 @@ pub struct Service {
     pub log: Log,
     /// Held while a look puts a refreshed login back: looks run side by side.
     login: Mutex<()>,
+    /// Every key the agents' logins have held while the service read them
+    /// (scrub.rs): what a look says is scrubbed of the ones a refresh wrote
+    /// while it ran, its own or a look's beside it, and of the ones those
+    /// replaced.
+    seen: Arc<Mutex<BTreeSet<String>>>,
 }
 
 impl Service {
@@ -73,6 +80,7 @@ impl Service {
             dial,
             log,
             login: Mutex::new(()),
+            seen: Arc::default(),
         }
     }
 
@@ -80,10 +88,34 @@ impl Service {
         (self.log)(line);
     }
 
-    /// The agents' keys, as their logins have them now.
+    /// The agents' keys: their logins' as they are now, and every one they
+    /// have held since the service began, the longest first, so none is
+    /// left half out by a shorter one inside it.
     fn keys(&self) -> Vec<String> {
-        scrub::secrets(&self.home)
+        let mut seen = held(&self.seen);
+        seen.extend(scrub::secrets(&self.home));
+        let mut keys: Vec<String> = seen.iter().cloned().collect();
+        keys.sort_by_key(|k| std::cmp::Reverse(k.len()));
+        keys
     }
+
+    /// The logins watched for each write to them (scrub.rs `Watch`), until
+    /// what's returned is dropped; nothing to watch if there's no login.
+    fn watch(&self) -> Option<scrub::Watch> {
+        match scrub::Watch::start(&self.home, self.seen.clone()) {
+            Ok(w) => Some(w),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+            Err(e) => {
+                self.say(&format!("couldn't watch the login for refreshes: {e}"));
+                None
+            }
+        }
+    }
+}
+
+/// A lock, held: one a panicking look left poisoned holds nothing broken.
+fn held<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 /// Why a look has no answer.

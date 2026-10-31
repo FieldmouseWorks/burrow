@@ -89,7 +89,7 @@ impl Rig {
         let p = |x: &str| t.join(x).to_string_lossy().into_owned();
         let cfg = json!({
             "queue": p("queue"), "done": p("done"), "sessions": p("sessions"), "snapshots": p("trees"),
-            "reviewers": {"codex": {"effort": "high", "parallel": 2, "off": []}},
+            "reviewers": {"codex": {"enable": true, "effort": "high", "parallel": 2, "off": []}},
             "timeoutMinutes": 30, "agents": p("agents"),
             "sandbox": fakes().join("bwrap"),
             "box": {"store": p("store-paths"), "caBundle": p("ca.crt"),

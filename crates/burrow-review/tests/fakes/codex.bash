@@ -1,7 +1,11 @@
 # A stand-in for the codex CLI, as burrow-review runs it (the tests put a
 # bash shebang on top). It records how it was run in $HOME/.fake/codex.log,
-# one JSON line a run, then does what $HOME/.fake/codex.json says:
-#   sleep    seconds, or {"text in the prompt": seconds}
+# one JSON line a run, then does what $HOME/.fake/codex.json says (a
+# value can be {"text in the prompt": value}, for the look whose prompt has it):
+#   wait     seconds, before it refreshes
+#   refresh  a refreshed login, written in place through the link, as codex
+#            writes one
+#   sleep    seconds
 #   http     [{"env": VAR, "send": TEXT}]: TEXT sent to the proxy VAR names,
 #            what came back recorded in $HOME/.fake/http.log
 #   events   JSON events printed ahead of an error
@@ -36,8 +40,16 @@ jq -cn --arg cwd "$PWD" --arg prompt "$prompt" --arg sid "$sid" --argjson resume
   '{args: $ARGS.positional, cwd: $cwd, env: env, prompt: $prompt, session: $sid,
     resumed: $resumed, began: ($began | tonumber)}' --args -- "${args[@]}" >>"$fake/codex.log"
 
-sleep "$(jq -r --arg p "$prompt" '.sleep // 0 | if type == "object" then
-  ([to_entries[] | select(.key as $k | $p | contains($k)) | .value] | first // 0) else . end' <<<"$todo")"
+# What codex.json says to do, for this look's prompt: $2 if it says nothing.
+todo() {
+  jq -r --arg p "$prompt" --arg k "$1" --arg d "$2" '.[$k] // $d | if type == "object" then
+    ([to_entries[] | select(.key as $k | $p | contains($k)) | .value] | first // $d) else . end' <<<"$todo"
+}
+
+sleep "$(todo wait 0)"
+login=$(todo refresh "")
+[ -z "$login" ] || printf '%s' "$login" >"$CODEX_HOME/auth.json"
+sleep "$(todo sleep 0)"
 
 n=$(jq '.http // [] | length' <<<"$todo")
 for ((i = 0; i < n; i++)); do

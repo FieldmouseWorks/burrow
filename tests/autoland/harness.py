@@ -62,7 +62,7 @@ def review_service():
     with open(f"{tmp}/review.json", "w") as f:
         json.dump({"queue": f"{tmp}/state/review/queue", "done": f"{tmp}/state/review/done",
                    "sessions": f"{tmp}/state/review/sessions", "snapshots": f"{tmp}/trees",
-                   "reviewers": {"codex": {"effort": "high", "parallel": 2, "off": []}}, "timeoutMinutes": 5,
+                   "reviewers": {"codex": {"enable": True, "effort": "high", "parallel": 2, "off": []}}, "timeoutMinutes": 5,
                    "agents": f"{tmp}/agents", "sandbox": f"{tmp}/bwrap",
                    "box": {"store": f"{tmp}/store-paths", "caBundle": f"{tmp}/ca.crt", "links": {}},
                    "leadRepos": C.CFG["leadRepos"], "pipelineRepos": C.CFG["pipelineRepos"], "kick": C.CFG["kick"]}, f)

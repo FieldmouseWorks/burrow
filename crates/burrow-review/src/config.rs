@@ -48,6 +48,9 @@ pub struct Reviewers {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Reviewer {
+    /// Whether the machine has it review at all (`reviewers.codex.enable`):
+    /// off, nothing it was queued before is sent to it either.
+    pub enable: bool,
     /// How hard it thinks: codex's `model_reasoning_effort`.
     pub effort: String,
     /// At most this many of its looks at once.

@@ -210,3 +210,50 @@ fn its_keys_stay_out_of_what_it_says() {
         "{back}"
     );
 }
+
+/// A key the login gets while a look runs is as much its key as the one it
+/// began with: one the look refreshed through its link, and one a look
+/// beside it did, even one that replaces the look's own before it ends.
+#[test]
+fn a_refreshed_logins_keys_stay_out_too() {
+    let rig = Rig::new();
+    let login = rig.home().join(".codex/auth.json");
+    let auth = |k: &str| json!({"tokens": {"refresh_token": k}}).to_string();
+    let (old, mine, theirs) = (
+        "codexOLDrefreshTOKENqwerty",
+        "codexMINErefreshTOKENasdfg",
+        "codexTHEIRSrefreshTOKENzxcv",
+    );
+    fs::write(&login, auth(old)).unwrap();
+    // PR 5's look refreshes, PR 6's refreshes over it, then PR 5's says
+    // both, long enough that its tail is cut where its own key would be if
+    // that were still whole.
+    rig.agent(json!({
+        "wait": {"#6": 1}, "refresh": {"#5": auth(mine), "#6": auth(theirs)}, "sleep": {"#5": 2},
+        "rc": 2, "err": format!("panic: {mine}{} {theirs}", "x".repeat(259)),
+    }));
+    let entries = [5, 6].map(|n| rig.queue(&rig.snapshot(n, HEAD), n, HEAD, json!({})));
+    rig.work();
+    assert_eq!(fs::read_to_string(&login).unwrap(), auth(theirs));
+    let said = format!(
+        "{}\n{}\n{}",
+        rig.said(),
+        rig.back(&entries[0]),
+        rig.back(&entries[1])
+    );
+    assert!(said.contains("[redacted]"), "{said}");
+    for k in [mine, theirs] {
+        assert!(
+            !(0..k.len() - 7).any(|i| said.contains(&k[i..i + 8])),
+            "{k}: {said}"
+        );
+    }
+    // And in an answer, the login it began with and its own refresh of it.
+    let fresh = "codexFRESHrefreshTOKENpoiuy";
+    let back = one(
+        &rig,
+        json!({"refresh": auth(fresh), "answer": {"findings": [], "summary": format!("{fresh} {theirs}")}}),
+    );
+    assert_eq!(back["result"], "review", "{back}");
+    assert_eq!(back["answer"]["summary"], "[redacted] [redacted]", "{back}");
+}
