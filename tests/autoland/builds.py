@@ -6,7 +6,8 @@ all in the store takes no job: its verdict is taken from the store, posted
 while GitHub says it's waiting, saying so and naming the derivation. A slot is held by a build, not
 a job: a job whose paths the jobs started before it are building holds
 none, and one whose eval failed, or whose check has no attribute, holds its
-own."""
+own. A job on a head its PR no longer has keeps building only what the new
+head's proof wants."""
 
 import itertools
 import json
@@ -15,7 +16,7 @@ import re
 import sys
 
 import proofs as P
-from harness import C, CI_GREEN, FAIL, JOBS, STATES, S, V, WROTE, clean, fresh_pr_state, merged, pr_state, run, sh, tmp
+from harness import C, CI_GREEN, FAIL, JOBS, STATES, STOPPED, S, V, WROTE, clean, fresh_pr_state, merged, pr_state, run, sh, tmp
 from prs import ci_state
 
 # A repo whose PRs' heads are real commits on its remote, as GitHub has them.
@@ -242,6 +243,30 @@ status = line(2, 800)
 assert STORE in status and from_store() == [taken(Z)] and len(evals()) == 3, (status, evals())
 assert evals()[-1][-1].endswith("#checks.x86_64-linux.other.drvPath"), evals()
 S.CFG["repos"]["sam/r"]["proofBuilds"] = {"remi-proof": "checks.x86_64-linux.proof"}
+
+# A PR pushed again while its proof builds: the job is left to finish when
+# the new head's proof wants what it's building (its check unchanged), and
+# that proof starts beside it at once, Nix building it once; it's stopped
+# when the new head builds something else, which then takes its slot. Each
+# head is worked out once.
+sh("git", "push", "-q", "-f", f"{origin}/sam/r.git", f"{heads[5]}:refs/pull/1/head", cwd=work)
+for wants, stops in ((X, False), (W, True)):
+    fresh_pr_state()
+    STOPPED.clear()
+    VALID[:] = [Z]
+    nix_knows({1: X, 2: Y, 5: wants})
+    P.begin("sam/r", {1, 2})
+    line(1)
+    job = pr_state(1)["provedJob"]
+    assert ahead(1) in line(2) and JOBS == [], JOBS
+    P.begin("sam/r", {1, 2})
+    status = run(clean(checks=proof, number=1, sha=heads[5]), 800)[0]
+    assert STOPPED == ([job] if stops else []) and RUNNING in status and len(JOBS) == 1, (wants, STOPPED, status, JOBS)
+    assert (SKIPPED in status) != stops, (wants, status)
+    assert ahead(1) in line(2, 800) and JOBS == [], JOBS
+    assert len(evals()) == 3, evals()
+sh("git", "push", "-q", "-f", f"{origin}/sam/r.git", f"{heads[1]}:refs/pull/1/head", cwd=work)
+STOPPED.clear()
 
 # Taken from the store whatever the repo's proofSlots, and a verdict GitHub
 # didn't take is posted again on a later pass, the PR left pending until it

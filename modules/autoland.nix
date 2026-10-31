@@ -125,8 +125,9 @@ let
     # notify.repo with its label, for a Claude job to take (repos.py publish),
     # when the inbox will: notify.repo cloned in projectsDir, and the
     # steward's App one of inbox.authors (it is: see below). Otherwise it's
-    # the owner's.
-    inbox = { inherit (config.burrow.proj.inbox) enable label authors; };
+    # the owner's. It has unstickLabel too, so that job never waits in proj's
+    # line, which may be what's stuck.
+    inbox = { inherit (config.burrow.proj.inbox) enable label unstickLabel authors; };
     # Renovate's dashboards (dashboard.py), and where a job that ticks a box
     # on one kicks Renovate to read it.
     dashboard = {
@@ -144,6 +145,7 @@ let
     flaky = {
       inherit (cfg.flaky) enable;
       bin = "${flaky}/bin/flaky";
+      jobTimeout = cfg.flaky.jobTimeoutMinutes;
     };
     # What every open PR waits on, for the stall watchdog (autoland/waits.py),
     # and what it took past a Claude job, for the stuck issue.
@@ -558,6 +560,18 @@ in
       '';
     };
 
+    flaky.jobTimeoutMinutes = mkOption {
+      type = types.ints.positive;
+      default = 240;
+      description = ''
+        How long a flaky test's Claude job may run. It builds the project,
+        makes the test fail under its gate's load, fixes it and runs it enough
+        times to show the fix holds, on a machine whose gates are busy too:
+        far more than a PR's fix, so it's project work, not the pipeline's,
+        and doesn't hold the slot kept for that.
+      '';
+    };
+
     keepBranches = mkOption {
       type = types.listOf types.str;
       default = [ "gh-pages" "release/*" "releases/*" ];
@@ -696,10 +710,12 @@ in
         its verdict>"; }`: once a settled PR waits on nothing else, one
         Claude job a head runs them on that commit and records each verdict,
         a failure as a failure; none on a head the shared CI took in its docs
-        lane, its flake-check.yml's docs-paths, for the PR's base and the commit it leaves that base at), proofSlots (how many of those jobs the repo
-        may have building at once, for proofs that take the whole machine:
-        the rest wait their turn, those labelled `labels.first` first, then
-        the oldest PR first; unset, no limit),
+        lane, its flake-check.yml's docs-paths, for the PR's base and the
+        commit it leaves that base at; a new head stops the last head's job,
+        unless it's building what the new head's proof wants), proofSlots (how
+        many of those jobs the repo may have building at once, for proofs that
+        take the whole machine: the rest wait their turn, those labelled
+        `labels.first` first, then the oldest PR first; unset, no limit),
         proofBuilds (the flake attribute each proof check builds, `{
         "<check>" = "checks.x86_64-linux.<name>"; }`, whose result is the
         check's verdict: a proof whose attributes' outputs are all in the

@@ -3,22 +3,99 @@ checked merged with its base branch as that branch is when the job starts,
 not as it was when the event fired (a run that waited in the queue, or a
 re-run), the log names both commits, and a head that no longer merges
 cleanly fails the job without anything checked. The docs lane checks out
-and merges the same way, with the same steps. Which gate a PR gets, the
-train's or the docs lane, is tests/lane.py's.
+and merges the same way, with the same steps. Which lane a PR takes, the
+train's, the docs lane or the whole gate, is tests/lane.py's; here, the
+whole gate and the docs lane run on what the lane job says, a lane job that
+failed giving the whole gate, and not at all once the lane job was
+cancelled. A PR's newer run cancels what its last one still has going, and
+nothing else: not a push's run, another PR's, or a sibling call with inputs
+of its own.
 
   python3 -I tests/pr-base.py .github/workflows/flake-check.yml
   nix build .#checks.x86_64-linux.pr-base
 """
 
 import os
+import re
 import subprocess
 import sys
 import tempfile
 
 import yaml
 
-jobs = yaml.safe_load(open(sys.argv[1]))["jobs"]
+workflow = yaml.safe_load(open(sys.argv[1]))
+jobs = workflow["jobs"]
 job = jobs["check"]
+
+
+def text(x):
+    """A value as GitHub puts it in a string."""
+    return "" if x is None else str(x).lower() if isinstance(x, bool) else str(x)
+
+
+def value(expr, ctx):
+    """An Actions expression (${{ ... }}, or text around some) as GitHub
+    works it out, for the little these use: context paths, string literals,
+    format(), cancelled(), !, ==, !=, && and || (which, as in Python, give
+    an operand's value)."""
+    whole = re.fullmatch(r"\$\{\{(.*)\}\}", expr.strip(), re.S)
+    if not whole or "${{" in whole[1]:
+        return re.sub(r"\$\{\{(.*?)\}\}", lambda m: text(value("${{" + m[1] + "}}", ctx)), expr)
+    e = whole[1].replace("cancelled()", "ctx['cancelled()']").replace("format(", "fmt(")
+    e = re.sub(r"\b[a-z_][\w-]*(?:\.[\w-]+)+", lambda m: f"ctx[{m[0]!r}]", e)
+    e = e.replace("!=", " NE ").replace("!", " not ").replace(" NE ", " != ").replace("&&", " and ").replace("||", " or ")
+    return eval(e, {"fmt": lambda f, *a: f.format(*map(text, a)), "ctx": ctx})
+
+
+# Whether the whole gate and the docs lane run: the whole gate for a push,
+# and for a PR the lane job doesn't send to the train or the docs lane, a
+# lane job that failed included (fail closed); the docs lane only where the
+# lane job sent it; neither once the lane job was cancelled (a newer run of
+# the PR has it), nor once the run itself was.
+for event, lane_result, lane_gate, cancelled, whole, docs_lane in (
+        ("push", "skipped", None, False, True, False),
+        ("pull_request", "success", "full", False, True, False),
+        ("pull_request", "success", "train", False, False, False),
+        ("pull_request", "success", "docs", False, False, True),
+        ("pull_request", "failure", None, False, True, False),
+        ("pull_request", "cancelled", None, False, False, False),
+        ("pull_request", "success", "full", True, False, False),
+        ("pull_request", "success", "docs", True, False, False)):
+    ctx = {"cancelled()": cancelled, "github.event_name": event,
+           "needs.lane.result": lane_result, "needs.lane.outputs.gate": lane_gate}
+    assert bool(value(job["if"], ctx)) == whole, (event, lane_result, lane_gate, cancelled, job["if"])
+    assert bool(value(jobs["docs"]["if"], ctx)) == docs_lane, (event, lane_result, lane_gate, cancelled, jobs["docs"]["if"])
+print("the gate runs where it should: ok")
+
+# Each job's concurrency group: a PR's runs share one, so the newer cancels
+# the older; anything else is its run's own; jobs, workflows, PRs and calls
+# with other inputs never share one.
+INPUTS = {"inputs.runner": "ubuntu-latest", "inputs.install-nix": True, "inputs.eval-apart": False,
+          "inputs.pr-gate": True, "inputs.build-skip": "agents", "inputs.docs-paths": "README.md",
+          "inputs.docs-checks": ""}
+
+
+def group(name, event="pull_request", pr=12, run=1001, workflow="flake", **inputs):
+    c = jobs[name]["concurrency"]
+    assert c["cancel-in-progress"] is True, (name, c)
+    ctx = {**INPUTS, **{f"inputs.{k.replace('_', '-')}": v for k, v in inputs.items()}, "github.event_name": event,
+           "github.event.pull_request.number": pr if event == "pull_request" else None, "github.run_id": run,
+           "github.workflow": workflow}
+    return value(c["group"], ctx)
+
+
+JOBS = ("lane", "check", "docs", "commits")
+for name in JOBS:
+    assert group(name) == group(name, run=1002), name  # the PR's next run cancels this one
+    others = [group(name, pr=13), group(name, workflow="other"), group(name, runner="remi"),
+              group(name, build_skip=""), group(name, eval_apart=True), group(name, pr_gate=False),
+              group(name, install_nix=False), group(name, docs_paths="docs/**"), group(name, docs_checks="links")]
+    assert group(name) not in others and len(set(others)) == len(others), (name, others)
+assert len({group(n) for n in JOBS}) == len(JOBS)
+# A push or a train candidate is a run of its own: none cancels another.
+assert group("check", "push", run=1001) != group("check", "push", run=1002)
+assert group("check", "push", run=12) != group("check", pr=12)
+print("only a PR's newer run cancels: ok")
 names = [s.get("id") or s.get("uses", "").split("@")[0] for s in job["steps"]]
 # The checkout fetches every branch for a PR, then the merge comes before
 # the gate checks anything.

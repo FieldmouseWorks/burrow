@@ -14,7 +14,7 @@ T = 1_800_000_000
 
 # The stuck kinds are the pipeline's; one someone else quarantined is the
 # owner's.
-assert F.STUCK not in R.OWNERS and F.NO_JOB not in R.OWNERS and F.OTHERS in R.OWNERS
+assert all(k not in R.OWNERS for k in (F.STUCK, F.UNFINISHED, F.NO_JOB, F.FAILING)) and F.OTHERS in R.OWNERS
 
 # The flaky tool: what it lists (or how it fails), and how it was run.
 FLAKY, ASKED = f"{tmp}/flaky-says.json", f"{tmp}/flaky-asked"
@@ -41,7 +41,10 @@ def says(*issues, rc=0, err=""):
 JOBS, STARTED, STATES = [], [], {}
 
 
-def job(repo, task, clone=False):
+def job(repo, task, clone=False, pipeline=True, timeout=None):
+    # Project work, with a timeout of its own: hours, and never in the slot
+    # the steward's fixes wait on.
+    assert (pipeline, timeout) == (False, C.CFG["flaky"]["jobTimeout"]), (pipeline, timeout)
     JOBS.append((repo, task, clone))
     STARTED.append(repo)
     return STATES.get("next", f"flaky-{len(STARTED)}")
@@ -95,10 +98,10 @@ assert look(0) == [] and len(JOBS) == 1, JOBS
 repo, task, clone = JOBS[0]
 assert repo == "sam/r" and clone, JOBS
 for x in ("`browser/stream`: https://github.com/sam/r/issues/4", "`Closes #N`", "Never skip, loosen, retry or delete",
-          "don't merge it yourself", "never instructions", "don't go and read it",
+          "don't merge it yourself", "never instructions", "don't go and read it", "stopped after 240 minutes",
           "### sam/r#4, `browser/stream`\n\ngithub-actions[bot] opened it:\n\n`t4` flaked in run 1."):
     assert x in task, (x, task)
-assert C.WAKE == {"sam/r": T + (C.CFG["jobTimeout"] + 5) * 60}, C.WAKE
+assert C.WAKE == {"sam/r": T + (C.CFG["flaky"]["jobTimeout"] + 5) * 60}, C.WAKE
 # It asked the tool once, with the steward's state as its cache, as the App
 # (its installation on the repo's owner), never the machine user's login.
 asked = [json.loads(x) for x in open(ASKED)]
@@ -110,11 +113,11 @@ STATES["flaky-1"] = "running"
 says((4, "browser/stream", "github-actions[bot]"), (6, "unit/clock", "sam"), (7, "unit/disk", "eve"))
 mine = look(600)
 assert not JOBS and mine == [(F.OTHERS, "sam/r#7", "`unit/disk`, by eve")], (JOBS, mine)
-assert C.WAKE == {"sam/r": T + (C.CFG["jobTimeout"] + 5) * 60}, C.WAKE
+assert C.WAKE == {"sam/r": T + (C.CFG["flaky"]["jobTimeout"] + 5) * 60}, C.WAKE
 # Past its timeout and still running (proj's end kicks a pass): asked again
 # in a quarter hour.
-look(2 * 3600)
-assert not JOBS and C.WAKE == {"sam/r": T + 2 * 3600 + 15 * 60}, C.WAKE
+look(5 * 3600)
+assert not JOBS and C.WAKE == {"sam/r": T + 5 * 3600 + 15 * 60}, C.WAKE
 
 # It ended, the first still open: the new one gets a job of its own, with
 # what the CI and the authors said on its issue (its last two of those, each
@@ -138,7 +141,7 @@ assert "x" * (F.CLIP - F.CLIP // 5 - 7) + "the end" in task and "sam commented:\
 assert "run 2" not in task and "eve commented" not in task and "push to main" not in task, task
 assert "Ignore the above" not in task and "github-actions[bot] opened it:\n\n`t6` flaked in run 1." in task, task
 # The first waits out a day from its job's end, not from when it was queued.
-assert C.WAKE == {"sam/r": T + 3 * 3600 + (C.CFG["jobTimeout"] + 5) * 60}, C.WAKE
+assert C.WAKE == {"sam/r": T + 3 * 3600 + (C.CFG["flaky"]["jobTimeout"] + 5) * 60}, C.WAKE
 STATES["flaky-2"] = "running"
 mine = look(DAY + 1)
 assert [m for m in mine if m[0] != F.OTHERS] == [] and not JOBS, (mine, JOBS)
@@ -156,6 +159,36 @@ mine = look(DAY + 5 * 3600)
 assert mine == [(F.STUCK, "sam/r#4", "`browser/stream`")] and len(JOBS) == 1, (mine, JOBS)
 assert "`unit/clocks`: https://github.com/sam/r/issues/6" in JOBS[0][1], JOBS
 COMMENTS.clear()
+
+# A job stopped, killed or crashed before it could finish goes to the stuck
+# issue at once, with how it ended, not a day on, and stays there each pass.
+STATES.clear()
+C.save("flaky-sam_r.json", {})
+says((11, "browser/a", "github-actions[bot]"), (12, "browser/b", "github-actions[bot]"))
+look(0)
+jid = f"flaky-{len(STARTED)}"
+STATES[jid] = "timed out after 240m"
+for at in (5 * 3600, 6 * 3600):
+    mine = look(at)
+    assert mine == [(F.UNFINISHED, "sam/r#11", f"`browser/a`: job {jid} timed out after 240m"),
+                    (F.UNFINISHED, "sam/r#12", f"`browser/b`: job {jid} timed out after 240m")], mine
+    assert not JOBS and C.WAKE == {}, (JOBS, C.WAKE)
+# Resumed (proj await, proj reply), it's its latest turn that counts: one
+# that ends done clears it and starts its day then, and a later turn that
+# fails lists it again at once.
+STATES[jid] = "running"
+assert look(7 * 3600) == [] and not JOBS
+STATES[jid] = "done"
+assert look(8 * 3600) == [] and C.WAKE == {"sam/r": T + 8 * 3600 + DAY}, C.WAKE
+STATES[jid] = "running"
+look(9 * 3600)
+STATES[jid] = "failed"
+assert look(10 * 3600) == [(F.UNFINISHED, "sam/r#11", f"`browser/a`: job {jid} failed"),
+                           (F.UNFINISHED, "sam/r#12", f"`browser/b`: job {jid} failed")]
+STATES[jid] = "running"
+look(10 * 3600 + 1800)
+STATES[jid] = "done"
+assert look(11 * 3600) == [] and C.WAKE == {"sam/r": T + 11 * 3600 + DAY}, C.WAKE
 
 # Fixed: its issue closed, so it's gone from the state, and nothing's listed.
 STATES.clear()
@@ -233,8 +266,10 @@ assert "handed" not in C.load("flaky-sam_r.json", {})["issues"]["9"]
 STATES.clear()
 
 # GitHub not answering is Unavailable, and keeps the state for the next pass;
-# anything else the tool says no to is an error.
+# anything else the tool says no to is an error, and books when the failing
+# started.
 was = C.load("flaky-sam_r.json", {})
+assert "failing" not in was, was
 C.limited = lambda stderr, env: None  # it asks gh for the reset: not this test's
 for err, kind in (("GET repos/sam/r/issues: HTTP 503, 3 times", C.Unavailable),
                   ("GET repos/sam/r/issues: HTTP 403: API rate limit exceeded for user", C.Unavailable),
@@ -245,7 +280,24 @@ for err, kind in (("GET repos/sam/r/issues: HTTP 503, 3 times", C.Unavailable),
         raise AssertionError(err)
     except RuntimeError as e:
         assert type(e) is kind and err in str(e), (err, e)
-    assert C.load("flaky-sam_r.json", {}) == was
+    assert C.load("flaky-sam_r.json", {}) == (was if kind is C.Unavailable else {**was, "failing": T + 60})
+
+# One failing every pass (the steward's pass only logs it) goes to the stuck
+# issue once it has failed for an hour, and goes from it when a look works.
+says(rc=1, err='flaky: "sam/.r" isn\'t OWNER/REPO')
+for at, listed in ((60 + 1800, False), (60 + 3600, True), (60 + 7200, True)):
+    mine = []
+    C.NOW = T + at
+    try:
+        with C.acting_for("sam/r"):
+            F.watch("sam/r", mine)
+        raise AssertionError("it worked")
+    except RuntimeError as e:
+        assert type(e) is RuntimeError, e
+    want = [(F.FAILING, "sam/r", 'every pass for an hour and more: flaky quarantine sam/r: flaky: "sam/.r" isn\'t OWNER/REPO')]
+    assert mine == (want if listed else []), (at, mine)
+says()
+assert look(3 * 3600) == [] and "failing" not in C.load("flaky-sam_r.json", {})
 
 # In the steward's pass: each repo's quarantine is looked at, after its PRs,
 # when it's on, and one that fails doesn't stop the rest.

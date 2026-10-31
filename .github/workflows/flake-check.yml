@@ -8,6 +8,14 @@
 # `attestations: write` (a called job gets no more than its caller gives). Its
 # actions are pinned to commits (repos that allow only pinned actions need
 # that), and Renovate keeps the pins current.
+#
+# Each job runs once a PR at a time: a PR's new run (a push, say) cancels
+# what its last run still has going, which was checking a head the PR no
+# longer has. Anything else (a push to a branch, a train's candidate) is a
+# run of its own that nothing cancels. A job's concurrency group is its
+# caller's workflow, its inputs and the PR (or the run), so calls in one
+# workflow with inputs of their own (a matrix's legs, say) never cancel each
+# other; two calls alike would be the same check twice.
 name: flake-check
 on:
   workflow_call:
@@ -98,6 +106,9 @@ jobs:
     if: ${{ github.event_name == 'pull_request' }}
     name: lane into ${{ github.event.pull_request.base.ref }}
     runs-on: ${{ inputs.runner }}
+    concurrency:
+      group: ${{ format('flake-check {0} lane {1} {2} {3} {4} [{5}] [{6}] [{7}] {8}', github.workflow, inputs.runner, inputs.install-nix, inputs.eval-apart, inputs.pr-gate, inputs.build-skip, inputs.docs-paths, inputs.docs-checks, format('pr-{0}', github.event.pull_request.number)) }}
+      cancel-in-progress: true
     permissions:
       contents: read
     outputs:
@@ -178,10 +189,15 @@ jobs:
           fi
   # The whole gate, unless the train lands the PR or it takes the docs lane:
   # anything else the lane job says, its failure included, is the whole gate.
+  # A cancelled lane job means the PR has a newer run (concurrency), which
+  # checks the head and base it has now: this one checks nothing.
   check:
     needs: lane
-    if: ${{ !cancelled() && needs.lane.outputs.gate != 'train' && needs.lane.outputs.gate != 'docs' }}
+    if: ${{ !cancelled() && needs.lane.result != 'cancelled' && needs.lane.outputs.gate != 'train' && needs.lane.outputs.gate != 'docs' }}
     runs-on: ${{ inputs.runner }}
+    concurrency:
+      group: ${{ format('flake-check {0} check {1} {2} {3} {4} [{5}] [{6}] [{7}] {8}', github.workflow, inputs.runner, inputs.install-nix, inputs.eval-apart, inputs.pr-gate, inputs.build-skip, inputs.docs-paths, inputs.docs-checks, github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id)) }}
+      cancel-in-progress: true
     permissions:
       contents: read
       # The attestation: a GitHub OIDC token to sign it with, and the API
@@ -627,6 +643,9 @@ jobs:
     if: ${{ !cancelled() && needs.lane.outputs.gate == 'docs' }}
     name: docs only into ${{ github.event.pull_request.base.ref }} from ${{ needs.lane.outputs.fork }}
     runs-on: ${{ inputs.runner }}
+    concurrency:
+      group: ${{ format('flake-check {0} docs {1} {2} {3} {4} [{5}] [{6}] [{7}] {8}', github.workflow, inputs.runner, inputs.install-nix, inputs.eval-apart, inputs.pr-gate, inputs.build-skip, inputs.docs-paths, inputs.docs-checks, format('pr-{0}', github.event.pull_request.number)) }}
+      cancel-in-progress: true
     permissions:
       contents: read
     steps:
@@ -654,6 +673,9 @@ jobs:
   commits:
     if: github.event_name == 'pull_request'
     runs-on: ${{ inputs.runner }}
+    concurrency:
+      group: ${{ format('flake-check {0} commits {1} {2} {3} {4} [{5}] [{6}] [{7}] {8}', github.workflow, inputs.runner, inputs.install-nix, inputs.eval-apart, inputs.pr-gate, inputs.build-skip, inputs.docs-paths, inputs.docs-checks, format('pr-{0}', github.event.pull_request.number)) }}
+      cancel-in-progress: true
     permissions:
       contents: read
     steps:

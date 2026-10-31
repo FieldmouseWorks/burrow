@@ -57,15 +57,12 @@ assert paths_step["env"] == {"BASE": "${{ github.event.pull_request.base.ref }}"
                              "HEAD_SHA": "${{ github.event.pull_request.head.sha }}",
                              "DOCS": "${{ inputs.docs-paths }}"}, paths_step["env"]
 
-# The whole gate runs unless the lane says train or docs: anything else, the
-# lane job's failure or its absence included, is the whole gate. The docs
-# lane is a job of its own, under the name autoland looks for.
+# The whole gate and the docs lane go by what the lane says (whether each
+# runs, case by case, is tests/pr-base.py's). The docs lane is a job of its
+# own, under the name autoland looks for.
 check, docs = jobs["check"], jobs["docs"]
 assert check["needs"] == "lane" and docs["needs"] == "lane"
-assert check["if"] == ("${{ !cancelled() && needs.lane.outputs.gate != 'train' && "
-                       "needs.lane.outputs.gate != 'docs' }}"), check["if"]
 assert "name" not in check, check.get("name")
-assert docs["if"] == "${{ !cancelled() && needs.lane.outputs.gate == 'docs' }}", docs["if"]
 assert docs["name"] == names[2] + "${{ github.event.pull_request.base.ref }} from ${{ needs.lane.outputs.fork }}", (
     docs["name"], names[2])
 # It reads the tree and attests nothing.

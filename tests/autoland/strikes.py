@@ -8,8 +8,8 @@ import json
 import os
 import re
 
-from harness import FAIL, JOBS, STUB, T, WROTE, C, H, S, clean, fresh_pr_state, merged, mkpr, pr_state, run, stand_in, tmp, \
-    worker
+from harness import FAIL, JOBS, STUB, T, UNSTOPPABLE, WROTE, C, H, S, clean, fresh_pr_state, merged, mkpr, pr_state, run, \
+    stand_in, tmp, worker
 
 import harness
 import waits
@@ -60,6 +60,13 @@ def reviewed():
     worker()
 
 
+def judging():
+    """A judge at work on the PR's head, which it's pushed over next pass."""
+    C.job = lambda *a, **k: "judge-on-a"
+    run(clean(files=["secrets/1.yaml"]), 600)
+    C.job = real_job
+
+
 CASES = {
     "status": {"pr": clean(labels=["hold"]), "fail": lambda: FAIL.append("/statuses/"), "mend": FAIL.clear},
     "update": {"pr": {**clean(), "mergeStateStatus": "BEHIND"}, "fail": lambda: FAIL.append("/update-branch"),
@@ -71,6 +78,8 @@ CASES = {
     "post": {"pr": mkpr(), "setup": reviewed, "fail": lambda: STUB.update(post=C.Unavailable("GitHub's down")),
              "mend": lambda: STUB.update(post=None), "said": "GitHub's down",
              "again": lambda: STUB.update(post=C.Unavailable("GitHub's still down")) or "GitHub's still down"},
+    "stop": {"pr": clean(files=["secrets/1.yaml"], sha="b" * 40), "setup": judging,
+             "fail": lambda: UNSTOPPABLE.add("judge-on-a"), "mend": UNSTOPPABLE.clear},
 }
 # A job that broke (lost) is struck once a job, not once a pass: lost.py has its case.
 assert set(CASES) | {"lost"} == set(H.STRIKES), "each step that's tried again has its case here, or in lost.py"

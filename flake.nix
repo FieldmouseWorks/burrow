@@ -450,6 +450,12 @@
           bash ${./tests/update-push.sh} ${./modules/updates/push.sh}
           touch $out
         '';
+        # HOST-update's VM tests take a heavy slot.
+        update-check = pkgs.runCommand "update-check-check" { nativeBuildInputs = [ pkgs.shellcheck ]; } ''
+          shellcheck -s bash -e SC2154 ${./modules/updates/check.sh} ${./tests/update-check.sh}
+          bash ${./tests/update-check.sh} ${./modules/updates/check.sh}
+          touch $out
+        '';
         # HOST-update's own PR in a train repo (modules/updates/propose.sh):
         # real git, with a stand-in for gh.
         update-propose = pkgs.runCommand "update-propose-check" { nativeBuildInputs = [ pkgs.shellcheck pkgs.git pkgs.jq ]; } ''
