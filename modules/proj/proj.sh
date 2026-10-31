@@ -126,6 +126,8 @@ self=$(readlink -f "$0")
 unit() { echo "proj-$(systemd-escape "$1").service"; }
 # The unit that ends each of its turns (_ended), outside the turn's own.
 end_unit() { systemd-escape --template=proj-ended@.service "$1"; }
+# Whether that unit is still to run, or running.
+end_pending() { [ -n "$(systemctl --user show -P Job "$(end_unit "$1")" 2>/dev/null)" ]; }
 # The env file of the GitHub App NAME, from APPS' NAME=FILE lines: nothing for
 # one this machine hasn't.
 app_env() { [[ $1 =~ ^[A-Za-z0-9_-]+$ ]] && sed -n "s/^$1=//p" <<<"$APPS" | head -n 1; }
@@ -220,31 +222,6 @@ cut_off() {
 # Known not to be running: not "can't say".
 gone() { case $(systemctl --user show -P ActiveState "$1" 2>/dev/null) in inactive | failed) return 0 ;; esac; return 1; }
 
-# What job_wait (waits.sh) reads of a job's latest turn.
-facts() {
-  local d=$jobs/$1 n t
-  n=$(cat "$d/turns" 2>/dev/null) || return 1
-  printf 'id\t%s\nturn\t%s\nstate\t%s\n' "$1" "$n" "$(state "$1")"
-  [ ! -e "$d/owned" ] || printf 'owned\t1\n'
-  [ ! -e "$d/unstick" ] || printf 'unstick\t1\n'
-  [ ! -e "$d/$n.stopped" ] || printf 'stopped\t1\n'
-  [ ! -s "$d/$n.end" ] || printf 'end\t%s\n' "$(cat "$d/$n.end")"
-  [ ! -s "$d/link" ] || printf 'link\t%s\n' "$(cat "$d/link")"
-  printf 'queued\t%s\n' "$(stat -c %Y "$d/prompt.$n" 2>/dev/null || echo 0)"
-  [ ! -e "$d/$n.slot" ] || printf 'slot\t%s\n' "$(stat -c %Y "$d/$n.slot")"
-  # When it ended: when it wrote its outcome, or for one stopped before it
-  # could, when it last said anything.
-  t=$(stat -c %Y "$d/$n.outcome" "$d/$n.jsonl" "$d/prompt.$n" 2>/dev/null | head -n 1 || true)
-  printf 'ended\t%s\n' "${t:-0}"
-  # Its deadline as it stands, to the second (none without a timeout): when
-  # it took its slot and its timeout, moved on by any time it waited in
-  # line. And what it waits in line for now, if anything (watch_run).
-  t=$(cat "$d/$n.deadline" 2>/dev/null || true)
-  [[ ! $t =~ ^[0-9]+$ ]] || printf 'deadline\t%s\n' "$((t / 1000000000))"
-  [ ! -s "$d/$n.wait" ] || printf 'wait\t%s\n' "$(head -n 1 "$d/$n.wait")"
-  [ ! -s "$d/await" ] || awk -F '\t' '{ print "await\t" $1 "\t" $2 }' "$d/await"
-}
-
 # The waits of the jobs named, brought up to date for the stall watchdog:
 # JOBS/.waits/ID has a job's (job_wait's) while it has one, and WAITS all of
 # them, which the watchdog reads. Called after each change to a job (a turn
@@ -303,7 +280,7 @@ start_turn() {
   for i in $(seq 120); do
     systemctl --user reset-failed "$(unit "$id")" 2>/dev/null || true
     if [ "$(systemctl --user show -P LoadState "$(unit "$id")" 2>/dev/null)" != loaded ] &&
-      [ -z "$(systemctl --user show -P Job "$(end_unit "$id")" 2>/dev/null)" ]; then
+      ! end_pending "$id"; then
       break
     fi
     if [ "$i" = 120 ]; then
@@ -611,6 +588,7 @@ case "${1:-status}" in
     # expands a command line, and a job's id is its project's folder name,
     # spaces, `%` and all.
     id=${PROJ_ENDED:?proj _ended is for the end of a job turn, run by proj-ended@ID}
+    mark_ended "$id"
     rewatch "$id"
     { cat "$jobs/$id/kick" 2>/dev/null || true
       cut -f1 "$jobs/$id/await" 2>/dev/null | sed 's/#.*//; s#^#proj-watch/#' || true
