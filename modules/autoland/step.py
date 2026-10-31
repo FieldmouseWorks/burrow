@@ -806,9 +806,11 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
             judged("a major dependency update", DEP_SEEN)
         elif dep == "major":
             land_now("Major update renovate-sweep cleared, CI green")
-        elif renovate and not by_train:
-            # Renovate merges its own, except the ones the train lands, on its
-            # next run on the repo: one with automerge on that's still open
+        elif renovate and not T.on(repo):
+            # Renovate merges its own, on its next run on the repo, except in
+            # a repo with its train on, where it merges none (updates.nix):
+            # the train lands those against the default branch, and land_now
+            # the rest. One with automerge on that's still open
             # past renovateMergeAfter is a stall, which that run is kicked for
             # first (waits.py).
             settle("success", "Dependency update, CI green", wait=waits.RENOVATE if automerges(pr) else waits.STEWARD)

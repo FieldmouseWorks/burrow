@@ -119,8 +119,8 @@ in
         everyone else's long jobs; a lead repo's go first of all, ahead of
         the other pipeline jobs too, but leave them these slots while one
         waits. All of them leave everyone else one of the other slots while
-        one of theirs waits and none runs. A pipeline job in any other project goes
-        as `--first`: ahead of the line, but within its project's cap and
+        one of theirs waits and none runs. A pipeline job in any other project is a
+        steward job: ahead of the line, but within its project's cap and
         never in these slots; `proj status` and its turn's journal say so,
         origin and all.
       '';
@@ -133,7 +133,12 @@ in
         The most slots one project's jobs hold at once, the pipeline's own
         repos' pipeline jobs aside.
         Its next one waits, and lets other projects' by meanwhile, so one
-        project's jobs never fill the machine.
+        project's jobs never fill the machine. The last of these stays free
+        for the project's steward jobs (`proj run --pipeline`, there a pipeline
+        job goes within this cap): its other jobs, `--first` ones and ones
+        that waited `maxWait` included, hold at most maxJobsPerProject - 1,
+        or the one slot when this is 1, so its own lanes can't hold up its
+        gates and conflict fixes. Steward jobs may use the whole share.
       '';
     };
     minFreeMemory = lib.mkOption {
