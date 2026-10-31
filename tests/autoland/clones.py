@@ -136,11 +136,23 @@ for kept_state, gone in (({"settings": MADE + 99, "id": "id-other"}, True), ({"s
     clone("old", "https://github.com/sam/old.git")
     NAMES["sam/old"] = "sam/new"
     C.save("repo-sam_old.json", kept_state)
-    found = C.follow_renames()
-    assert (found == [("sam/old", "sam_old")]) == gone, (kept_state, found)
+    C.follow_renames()
+    assert C.retiring("sam/new") == gone, kept_state
+    assert not C.retiring("sam/other")
+    C.save(C.RETIRING_FILE, {})
     assert (url("old") == "https://github.com/sam/old.git") == gone, (kept_state, url("old"))
     subprocess.run(["rm", "-rf", f"{src}/old"], check=True)
     os.remove(f"{tmp}/state/repo-sam_old.json")
+
+# A job can be what finds such a name, before any pass has: no clone for it.
+clone("old", "https://github.com/sam/old.git")
+C.save("repo-sam_old.json", {"settings": MADE + 99, "id": "id-other"})
+with C.acting_for("sam/new"):
+    assert C.job("sam/new", "t", clone=True) is None
+assert "sam/new" not in tried() and not os.path.exists(f"{src}/new"), tried()
+C.save(C.RETIRING_FILE, {})
+subprocess.run(["rm", "-rf", f"{src}/old"], check=True)
+os.remove(f"{tmp}/state/repo-sam_old.json")
 
 # A free path is cloned to, an empty folder included, as git would.
 os.makedirs(f"{src}/fresh")
@@ -218,13 +230,18 @@ os.rmdir(f"{src}/plain/stuff")
 assert C.taken("sam/plain") is None
 os.rmdir(f"{src}/plain")
 # A full pass hands the deleted repo's name to repos.reset, on its own, and
-# keeps going if that fails: the next one tries again.
+# goes on when that fails, listing it. A try that moved the clone and then
+# couldn't stop a job is tried again though there's no clone left to find it
+# by, and the repo that took the name gets no job until it's done, not one a
+# checkout would make.
 RESET = []
+RESET_FAILS = [True]
 
 
 def reset(r, k, known, failed):
     RESET.append((r["repo"], k))
-    raise RuntimeError("proj won't stop its job")
+    if RESET_FAILS[0]:
+        raise RuntimeError("proj won't stop its job")
 
 
 kept_reset, S.R.reset = S.R.reset, reset
@@ -233,9 +250,36 @@ C.save("repo-sam_old.json", {"settings": T, "id": "id-other"})
 assert full(T + 90050) == line
 assert RESET == [("sam/old", "sam_old")], RESET
 assert url("old") == "https://github.com/sam/old.git"
-S.R.reset = kept_reset
+assert [x for x in PUBLISHED[0] if x[0] == C.RETIRING and x[1] == "sam/old" and "sam/new" in x[2]], PUBLISHED
+with C.acting_for("sam/new"):
+    assert C.job("sam/new", "t", clone=True) is None
+assert "sam/new" not in tried(), tried()
 subprocess.run(["rm", "-rf", f"{src}/old"], check=True)
+assert full(T + 90060) == line
+assert len(RESET) == 2, RESET
+RESET_FAILS[0] = False
+assert full(T + 90070) == line
+assert len(RESET) == 3 and not C.retiring("sam/new"), RESET
+assert not [x for x in PUBLISHED[0] if x[0] == C.RETIRING], PUBLISHED
+# Done with its state gone already: a try that stopped just short of saying so.
+C.save(C.RETIRING_FILE, {"sam_gone": {"name": "sam/gone", "for": "sam/took"}})
+full(T + 90075)
+assert len(RESET) == 3 and not C.retiring("sam/took"), RESET
+S.R.reset = kept_reset
 os.remove(f"{tmp}/state/repo-sam_old.json")
+# A hidden folder counts only while it's named for its repo, so a rename moves
+# it, to keep it the repo's checkout, unless there's something there.
+clone(".cfg", "https://github.com/sam/.cfg.git")
+NAMES["sam/.cfg"] = "sam/config"
+C.follow_renames()
+assert C.project_dir("sam/config") == "config" and not os.path.exists(f"{src}/.cfg"), C.project_dir("sam/config")
+assert url("config") == "https://github.com/sam/config.git", url("config")
+clone(".cfg2", "https://github.com/sam/.cfg2.git")
+NAMES["sam/.cfg2"] = "sam/config2"
+os.makedirs(f"{src}/config2/stuff")
+C.follow_renames()
+assert url(".cfg2") == "https://github.com/sam/.cfg2.git" and os.path.isdir(f"{src}/config2/stuff")
+subprocess.run(["rm", "-rf", f"{src}/.cfg2", f"{src}/config2", f"{src}/config"], check=True)
 # Moved out by hand: the line's gone, and the next pass clones it and goes.
 subprocess.run(["mv", f"{src}/tool", f"{tmp}/clones-moved"], check=True)
 assert full(T + 90100) == []
@@ -247,7 +291,7 @@ C.gh, C.job, sys.argv = kept_gh, kept_job, kept_argv
 os.environ["PATH"] = kept_path
 S.CFG.clear()
 S.CFG.update(kept_cfg)
-for x in ("known.json", "baseline-failed.json", C.TAKEN_FILE, "digest-repos.json", "wake.json", "repo-sam_tool.json"):
+for x in ("known.json", "baseline-failed.json", C.TAKEN_FILE, C.RETIRING_FILE, "digest-repos.json", "wake.json", "repo-sam_tool.json"):
     if os.path.exists(f"{tmp}/state/{x}"):
         os.remove(f"{tmp}/state/{x}")
 ACTING.clear()

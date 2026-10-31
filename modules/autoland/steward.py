@@ -121,6 +121,23 @@ def main():
             C.after_limit(kick)
 
 
+def retire_deleted(known, failed, digest):
+    """The deleted repos whose clones follow_renames wouldn't adopt, retired
+    as restart retires one. Kept until that's all done, however far a try got
+    (the clones may be moved by then, and only its jobs left); each step is as
+    safe twice as once. One that won't goes on the stuck issue."""
+    pending = load(C.RETIRING_FILE, {})
+    for k, x in list(pending.items()):
+        try:
+            if any(have == k for have, _ in C.kept_state(x["name"])):  # gone: a try got to its last step
+                R.reset({"repo": x["name"]}, k, known, failed)
+            del pending[k]
+            save(C.RETIRING_FILE, pending)
+        except Exception as e:  # its own: the next full pass tries again, and its name's taker gets no job meanwhile
+            log(f"{x['name']}: retiring it: {e}")
+            digest[x["name"]] = [(C.RETIRING, x["name"], f"{x['for']} took on its name, and gets no job until this is done (journalctl -u autoland)")]
+
+
 def run_pass(kick):
     waits.begin()
     repos = R.discover()
@@ -132,15 +149,12 @@ def run_pass(kick):
     # Ones whose job didn't start: tried again a day later, so they don't
     # take every pass's slots.
     failed = load("baseline-failed.json", {})
-    if kick is None and not DRY:
-        for name, k in C.follow_renames({r["repo"].lower() for r in repos}):
-            try:
-                R.reset({"repo": name}, k, known, failed)
-            except Exception as e:  # its own: tried again next full pass, and its clone isn't adopted meanwhile
-                log(f"{name}: retiring it: {e}")
     started = 0
     # What waits for the owner, by repo: a kicked pass replaces its repos'.
     digest = {}
+    if kick is None and not DRY:
+        C.follow_renames({r["repo"].lower() for r in repos})
+        retire_deleted(known, failed, digest)
     read, live = set(), set()  # the repos whose PRs it read, and their heads' snapshots
     covered = []
     for r in repos:

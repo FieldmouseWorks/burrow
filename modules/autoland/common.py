@@ -446,6 +446,8 @@ def unland(repo, pr):
 
 TAKEN = "A folder in the way of a repo's checkout"  # the stuck issue's heading for it
 TAKEN_FILE = "taken.json"
+RETIRING = "A deleted repo's clones and jobs that won't retire"  # likewise
+RETIRING_FILE = "retiring.json"  # {its state's key: {"name": the deleted repo's, "for": the repo that took it on}}
 
 
 def repo_cfg(repo):
@@ -566,23 +568,43 @@ def follow_renames(seen=()):
 
     A name the steward knows was a deleted repo's, and that the repo now
     answering it only took on later, is no rename: that clone holds the
-    deleted one's history, and isn't adopted. Returns those as (name, key of
-    its state), for a full pass to retire (repos.reset)."""
-    deleted = []
+    deleted one's history, and isn't adopted. It's kept in RETIRING_FILE, which
+    outlives the clone once a try has moved it: a full pass retires it from
+    there (repos.reset), and until then the repo that took the name gets no
+    job (retiring).
+
+    A hidden folder only counts as a project while it's named for its repo
+    (projects), so one that's renamed moves to the new name, or stays as it
+    was if something's there already."""
     for d, url in list(projects()):
         now = None if url.lower() in seen else github_now(url)
         if not now or now["nameWithOwner"].lower() == url.lower():
             continue
+        new = now["nameWithOwner"]
         gone = [k for k, st in kept_state(url) if replaced(st, now)]
         if gone:
-            log(f"{d}: its origin {url} was a deleted repo's name, which {now['nameWithOwner']} took on: not adopting it")
-            deleted += [(url, k) for k in gone]
+            log(f"{d}: its origin {url} was a deleted repo's name, which {new} took on: not adopting it")
+            save(RETIRING_FILE, {**load(RETIRING_FILE, {}), **{k: {"name": url, "for": new} for k in gone}})
             continue
         path = os.path.join(CFG["projectsDir"], d)
+        if d.startswith("."):
+            to = destination(new)
+            if blocked(to):
+                log(f"{d}: its origin {url} is now {new}, and {to} is taken: leaving it")
+                continue
+            if os.path.lexists(to):
+                os.rmdir(to)
+            os.rename(path, to)
+            path = to
         raw = subprocess.run(["git", "-C", path, "remote", "get-url", "origin"], capture_output=True, text=True).stdout.strip()
-        p = subprocess.run(["git", "-C", path, "remote", "set-url", "origin", raw.replace(url, now["nameWithOwner"])], capture_output=True, text=True)
-        log(f"{d}: its origin {url} is now {now['nameWithOwner']}" + (", repointed" if p.returncode == 0 else f", and it wouldn't repoint: {p.stderr.strip()[-300:]}"))
-    return deleted
+        p = subprocess.run(["git", "-C", path, "remote", "set-url", "origin", raw.replace(url, new)], capture_output=True, text=True)
+        log(f"{d}: its origin {url} is now {new}" + (", repointed" if p.returncode == 0 else f", and it wouldn't repoint: {p.stderr.strip()[-300:]}"))
+
+
+def retiring(repo):
+    """Whether repo took on a deleted repo's name whose clones and jobs a full
+    pass hasn't finished retiring: its jobs wait for that."""
+    return any(x["for"].lower() == repo.lower() for x in load(RETIRING_FILE, {}).values())
 
 
 def destination(repo):
@@ -621,7 +643,7 @@ def checkout(repo):
     taken(), once, rather than cloned into; returns None then."""
     follow_renames()
     d = project_dir(repo)
-    if d:
+    if d or retiring(repo):
         return d
     path = destination(repo)
     if blocked(path):
@@ -653,10 +675,13 @@ def job(repo, task, clone=False, pipeline=True, timeout=None):
     goes ahead of the line, and in the pipeline's own repos (pipelineRepos)
     in a slot kept for it; proj decides which. Its turns stop after timeout
     minutes (jobTimeout's by default). Returns the job id."""
+    if retiring(repo):
+        log(f"{repo}: no job until the deleted repo whose name it took on is retired")
+        return None
     d = project_dir(repo)
     if d is None and clone and not DRY and not taken(repo):
         d = checkout(repo)
-    if d is None:
+    if d is None or retiring(repo):
         return None
     if DRY:
         log(f"  would: proj run {d} ...")
