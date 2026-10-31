@@ -99,6 +99,8 @@ refused "$(repo "$(caller ./.github/workflows/flake-check.yml)" "$(shared '     
   "an env that isn't an input" 'env EVENT is'
 refused "$(repo "$(caller ./.github/workflows/flake-check.yml)" "$(shared '          NONE: ${{ inputs.none }}')")" \
   "an input the workflow doesn't have" "input none, which the workflow doesn't have"
+refused "$(repo "$(caller ./.github/workflows/flake-check.yml)" "$(shared '          OS: ${{ matrix.os }}')")" \
+  "a matrix value that isn't the leg" 'env OS is matrix.os'
 refused "$(repo "$(caller ./.github/workflows/flake-check.yml)" "$(shared | sed 's/shell: bash/shell: sh/')")" \
   "a step that isn't bash" "isn't shell: bash"
 refused "$(repo "$(caller ./.github/workflows/flake-check.yml)
@@ -111,9 +113,14 @@ cp -r "$burrow/.github" "$d/" && chmod -R u+w "$d"
 git -C "$d" init -q && git -C "$d" add . && git -C "$d" commit -qm burrow
 (cd "$d" && flake-gate --print) > "$tmp/print"
 yq '.jobs.check.steps[] | select(.id == "gate") | .run' "$d/.github/workflows/flake-check.yml" > "$tmp/step"
-diff <(tail -n +4 "$tmp/print") "$tmp/step" || fail "flake-gate runs another script than CI's gate step"
+diff <(grep -vE '^(workflow|env): ' "$tmp/print") "$tmp/step" || fail "flake-gate runs another script than CI's gate step"
 # The whole flake at once holds 6-7G until its last build ends, beside every
 # other job on remi; one output at a time holds a fraction of that.
 grep -qx 'env: APART=true' "$tmp/print" || fail "burrow's gate evaluates the whole flake at once: $(head -3 "$tmp/print")"
 grep -qx 'env: SKIP=agents' "$tmp/print" || fail "burrow's gate skips $(grep SKIP "$tmp/print")"
+# CI splits it across legs; here it runs whole, every leg's share at once.
+grep -q 'legs: [2-8]$' "$d/.github/workflows/flake.yml" || fail "burrow's CI runs its gate in one leg"
+for leg in LEGS LEG; do
+  grep -qx "env: $leg=1" "$tmp/print" || fail "flake-gate runs one leg of several: $(grep LEG "$tmp/print")"
+done
 echo "flake-gate: ok"

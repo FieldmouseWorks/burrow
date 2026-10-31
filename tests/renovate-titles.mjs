@@ -1,7 +1,8 @@
 // renovate-titles RENOVATE CONFIG: the PR title Renovate gives each kind of
-// update under CONFIG, as Renovate's own code writes it (presets resolved,
-// then the updates flattened and their branches generated, as a run does
-// once it has looked them up), one line each. The title is the subject the
+// update under CONFIG, as Renovate's own code writes it (a repo's config
+// merged with its own function, where a global config's presets land after
+// that config's packageRules, then the updates flattened and their branches
+// generated, as a run does once it has looked them up), one line each. The title is the subject the
 // steward squashes onto main.
 import fs from "node:fs";
 
@@ -9,10 +10,13 @@ const [renovate, file] = process.argv.slice(2);
 const dist = `${renovate}/lib/node_modules/renovate/dist`;
 const { getConfig } = await import(`${dist}/config/defaults.js`);
 const { mergeChildConfig } = await import(`${dist}/config/utils.js`);
-const { resolveConfigPresets } = await import(`${dist}/config/presets/index.js`);
+const { GlobalConfig } = await import(`${dist}/config/global.js`);
+const { mergeRenovateConfig } = await import(`${dist}/workers/repository/init/merge.js`);
 const { flattenUpdates } = await import(`${dist}/workers/repository/updates/flatten.js`);
 const { generateBranchConfig } = await import(`${dist}/workers/repository/updates/generate.js`);
-const config = mergeChildConfig(getConfig(), (await resolveConfigPresets(JSON.parse(fs.readFileSync(file, "utf8")))).config);
+// A repo of the machine's has no config file of its own to read here.
+GlobalConfig.set({ requireConfig: "ignored" });
+const config = await mergeRenovateConfig(mergeChildConfig(getConfig(), JSON.parse(fs.readFileSync(file, "utf8"))));
 
 // What a lookup leaves on a dependency: its package name, and its updates.
 const dep = (depName, depType, updates, more = {}) => ({ depName, packageName: depName, depType, ...more, updates });

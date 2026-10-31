@@ -1,7 +1,8 @@
 # cargo's RUSTC_WRAPPER (rust-cache.nix): cargo runs `WRAPPER RUSTC ARGS...`,
-# and this runs them through sccache with the user's own cache. The compile
-# runs here, in the build's own process and unit (sccache's client-side mode):
-# the user's daemon, rust-cache-USER, only reads and writes the cache.
+# and a build script's cc crate `WRAPPER CC ARGS...`, and this runs them
+# through sccache with the user's own cache. The compile runs here, in the
+# build's own process and unit (sccache's client-side mode): the user's
+# daemon, rust-cache-USER, only reads and writes the cache.
 # Whatever keeps the cache from being used compiles without it instead, so a
 # build never fails for the cache's sake. ROOT, CONF and SCCACHE are set above.
 
@@ -33,7 +34,7 @@ SCCACHE_CONF=$CONF SCCACHE_SERVER_UDS=$base/sccache.sock SCCACHE_CLIENT_SIDE=1 \
   "$SCCACHE" "$@" || status=$?
 # sccache's own failures exit 2 (a socket with no daemon behind it, a compiler
 # it can't drive), as does a compile it saw killed by a signal; rustc's never
-# do. Compile without it.
+# do, and a C compile that does only runs again. Compile without it.
 if [ "$status" = 2 ]; then
   exec "$@"
 fi

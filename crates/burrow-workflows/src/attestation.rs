@@ -3,14 +3,17 @@
 //! token, whose audience names the digest of the statement it keeps beside
 //! the token (FieldmouseWorks/Conary, docs/ci-attestation.md), a failed gate
 //! is attested as failed, a public repo's is left to actions/attest, and a
-//! run with no OIDC token attests nothing.
+//! run with no OIDC token attests nothing. With legs, no leg attests: the
+//! gate job does, with the same steps, and passes only when every leg passed
+//! on its commit, each sharing out one plan, its log the legs' own, each as
+//! its leg wrote it.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use sha2::{Digest, Sha256};
 
-use crate::harness::{Scratch, read, script, steps, workflow, write, yaml};
+use crate::harness::{Scratch, read, script, step, steps, workflow, write, yaml};
 
 const TOKEN: &str = "eyJhbGciOiJSUzI1NiJ9.eyJhdWQiOiJ4In0.c2ln";
 
@@ -33,10 +36,11 @@ fn every_push_and_pr_attests_and_uploads() {
     assert_eq!(job["permissions"]["id-token"], "write");
     let (at, step) = subject(&job);
     assert_eq!(step["shell"], "bash");
-    // Every repo's push and PR, a private one's included.
+    // Every repo's push and PR, a private one's included; with legs, the
+    // gate job's, not a leg's.
     assert_eq!(
         step["if"],
-        "${{ !cancelled() && steps.gate.outcome != 'skipped' && (github.event_name == 'push' || github.event_name == 'pull_request') }}"
+        "${{ !cancelled() && steps.gate.outcome != 'skipped' && inputs.legs <= 1 && (github.event_name == 'push' || github.event_name == 'pull_request') }}"
     );
     assert_eq!(
         step["env"]["PRIVATE"],
@@ -379,4 +383,306 @@ fn a_pr_whose_checked_commit_isnt_its_merge_attests_nothing() {
         a.said,
         a.outputs
     );
+}
+
+/// With legs: each leg's log goes up as an artifact named for it, with its
+/// digest, its commit and its plan's digest as the leg's output, one name per
+/// leg, which the job passes on. The gate job, once every leg has finished,
+/// passed or failed, checks out and merges as they did, judges them, and
+/// attests with the very same steps as the gate's job with one leg, but for
+/// whether it runs.
+#[test]
+fn with_legs_the_gate_job_attests_for_them() {
+    let wf = workflow(".github/workflows/flake-check.yml");
+    let (job, gate) = (&wf["jobs"]["check"], &wf["jobs"]["gate"]);
+    let all = steps(job);
+    let (at, subject_step) = subject(job);
+    let leg_at = all
+        .iter()
+        .position(|s| s["id"] == "leg")
+        .expect("a leg step");
+    let (leg, leg_up) = (&all[leg_at], &all[leg_at + 1]);
+    assert!(all[leg_at - 1]["id"] == "gate" && leg_at < at, "{all:?}");
+    assert_eq!(
+        leg["if"],
+        "${{ !cancelled() && steps.gate.outcome != 'skipped' && inputs.legs > 1 }}"
+    );
+    assert_eq!(leg["env"], yaml("LEG: '${{ matrix.leg }}'"));
+    assert!(
+        leg_up["uses"]
+            .as_str()
+            .is_some_and(|u| u.starts_with("actions/upload-artifact@")),
+        "{leg_up:?}"
+    );
+    assert_eq!(
+        leg_up["if"],
+        "${{ !cancelled() && steps.leg.outputs.name }}"
+    );
+    assert_eq!(
+        leg_up["with"],
+        yaml("{name: '${{ steps.leg.outputs.name }}', path: '${{ runner.temp }}/flake.log'}")
+    );
+    let outputs: String = (1..=8)
+        .map(|k| format!("leg-{k}: '${{{{ steps.leg.outputs.leg-{k} }}}}'\n"))
+        .collect();
+    assert_eq!(job["outputs"], yaml(&outputs));
+    assert_eq!(gate["needs"], yaml("[lane, check]"));
+    assert_eq!(
+        gate["if"],
+        "${{ !cancelled() && inputs.legs > 1 && (needs.check.result == 'success' || needs.check.result == 'failure') }}"
+    );
+    assert_eq!(gate["permissions"], job["permissions"]);
+    let g = steps(gate);
+    assert_eq!(g[..2], all[..2]);
+    assert!(
+        g[2]["uses"]
+            .as_str()
+            .is_some_and(|u| u.starts_with("actions/download-artifact@")),
+        "{:?}",
+        g[2]
+    );
+    assert_eq!(
+        g[2]["with"],
+        yaml("{pattern: flake-log-leg-*, path: '${{ runner.temp }}/legs'}")
+    );
+    let verdict = &g[3];
+    assert!(
+        verdict["id"] == "gate" && verdict["shell"] == "bash" && verdict.get("if").is_none(),
+        "{verdict:?}"
+    );
+    assert_eq!(
+        verdict["env"],
+        yaml(
+            "{LEGS: '${{ inputs.legs }}', RESULT: '${{ needs.check.result }}', \
+             OUTPUTS: '${{ toJSON(needs.check.outputs) }}'}"
+        )
+    );
+    assert_eq!(g[4]["id"], "subject");
+    let mut same = g[4].clone();
+    same["if"] = subject_step["if"].clone();
+    assert_eq!(&same, subject_step);
+    assert_eq!(
+        g[4]["if"],
+        "${{ !cancelled() && steps.gate.outcome != 'skipped' && (github.event_name == 'push' || github.event_name == 'pull_request') }}"
+    );
+    assert_eq!(g[5..], all[at + 1..]);
+}
+
+const LEGS: usize = 3;
+const LOGS: [&str; LEGS] = ["first leg\n", "second leg\n", "third leg\n"];
+
+/// What a run of the legs does to them, by leg: none, unless it says so.
+#[derive(Default)]
+struct Legs<'a> {
+    /// The check job's result, as GitHub gives it: success unless it says.
+    result: Option<&'a str>,
+    /// Whose log is changed after the leg wrote it.
+    tamper: Option<usize>,
+    /// Whose output names another commit.
+    wrong_commit: Option<usize>,
+    /// Whose output never reaches the gate job.
+    missing: Option<usize>,
+    /// Whose output names another leg's log.
+    rename: Option<usize>,
+    /// Who shared out another plan.
+    other_plan: Option<usize>,
+    /// Who stopped before it read the plan.
+    no_plan: Option<usize>,
+}
+
+/// Each leg's step, then the gate job's, as GitHub gives it the legs'
+/// combined outputs and their artifacts: its exit code, what it said and the
+/// log it leaves to attest.
+fn legs(r: &Repo, l: Legs) -> (i32, String, String) {
+    let wf = workflow(".github/workflows/flake-check.yml");
+    let leg_step = step(&wf["jobs"]["check"], "leg");
+    let verdict = step(&wf["jobs"]["gate"], "gate");
+    let runner_temp = r.s.mkdtemp();
+    let commit = r.rev("HEAD^{commit}");
+    let mut outputs = serde_json::Map::new();
+    for k in 1..=LEGS {
+        let leg_temp = r.s.mkdtemp();
+        write(&leg_temp.join("flake.log"), LOGS[k - 1]);
+        if l.no_plan != Some(k) {
+            let plan = if l.other_plan == Some(k) {
+                r#"{"entries": []}"#
+            } else {
+                r#"{"entries": [1]}"#
+            };
+            write(&leg_temp.join("plan.json"), plan);
+        }
+        let leg = k.to_string();
+        let ran = r.s.bash(
+            script(leg_step),
+            &r.repo,
+            &[("RUNNER_TEMP", leg_temp.to_str().unwrap()), ("LEG", &leg)],
+        );
+        assert_eq!(ran.code, 0, "{}", ran.said());
+        let said: BTreeMap<&str, &str> = ran
+            .outputs
+            .lines()
+            .map(|l| l.split_once('=').expect("name=value"))
+            .collect();
+        let name = said["name"];
+        let uuid = name
+            .strip_prefix(&format!("flake-log-leg-{k}-"))
+            .unwrap_or_else(|| panic!("{name}"));
+        assert!(
+            uuid.len() == 36 && uuid.chars().all(|c| c.is_ascii_hexdigit() || c == '-'),
+            "{name}"
+        );
+        let mine = format!("leg-{k}");
+        assert_eq!(
+            said.keys().copied().collect::<Vec<_>>(),
+            [mine.as_str(), "name"]
+        );
+        if l.missing == Some(k) {
+            continue;
+        }
+        let value = said[mine.as_str()];
+        let [name_, sha, checked, plan] = value.split(' ').collect::<Vec<_>>()[..] else {
+            panic!("{value}")
+        };
+        assert!(name_ == name && checked == commit, "{value}");
+        let want_plan = if l.no_plan == Some(k) {
+            "none".to_owned()
+        } else {
+            Sha256::digest(read(&leg_temp.join("plan.json")).as_bytes())
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect()
+        };
+        assert_eq!(plan, want_plan, "{value}");
+        let mut value = value.to_owned();
+        if l.wrong_commit == Some(k) {
+            value = format!("{name} {sha} {} {plan}", "0".repeat(40));
+        }
+        if l.rename == Some(k) {
+            value = value.replacen(&format!("leg-{k}-"), "leg-9-", 1);
+        }
+        outputs.insert(mine, value.into());
+        // download-artifact: each artifact in a directory of its own name.
+        let tampered = if l.tamper == Some(k) {
+            "tampered\n"
+        } else {
+            ""
+        };
+        write(
+            &runner_temp.join("legs").join(name).join("flake.log"),
+            &(read(&leg_temp.join("flake.log")) + tampered),
+        );
+    }
+    let (legs, outputs) = (
+        LEGS.to_string(),
+        serde_json::Value::Object(outputs).to_string(),
+    );
+    let ran = r.s.bash(
+        script(verdict),
+        &r.repo,
+        &[
+            ("RUNNER_TEMP", runner_temp.to_str().unwrap()),
+            ("LEGS", &legs),
+            ("RESULT", l.result.unwrap_or("success")),
+            ("OUTPUTS", &outputs),
+        ],
+    );
+    (ran.code, ran.said(), read(&runner_temp.join("flake.log")))
+}
+
+/// The gate job's log when every leg's is its own: each, under its name.
+fn all_logs() -> String {
+    (1..=LEGS)
+        .map(|k| format!("leg {k} of {LEGS}:\n{}", LOGS[k - 1]))
+        .collect()
+}
+
+/// With legs, the gate job passes when every leg did, its log theirs.
+#[test]
+fn with_legs_the_gate_job_passes_when_every_leg_did() {
+    let r = Repo::new();
+    r.merge_a_pr();
+    let (code, said, log) = legs(&r, Legs::default());
+    assert_eq!(code, 0, "{said}");
+    assert_eq!(log, all_logs());
+}
+
+/// A failed leg, a leg's log missing, changed or for another commit, or legs
+/// that split different plans, fail the gate job. A leg whose log is its own
+/// keeps it in the gate's, however the leg went.
+#[test]
+fn a_leg_that_failed_or_cant_be_held_to_its_log_fails_the_gate_job() {
+    let r = Repo::new();
+    r.merge_a_pr();
+    for (l, why, own_logs) in [
+        (
+            Legs {
+                result: Some("failure"),
+                ..Legs::default()
+            },
+            "the legs: failure",
+            true,
+        ),
+        (
+            Legs {
+                missing: Some(2),
+                ..Legs::default()
+            },
+            "leg 2 of 3 left no log",
+            false,
+        ),
+        (
+            Legs {
+                tamper: Some(3),
+                ..Legs::default()
+            },
+            "leg 3 of 3: its log here isn't the one it wrote",
+            false,
+        ),
+        (
+            Legs {
+                rename: Some(1),
+                ..Legs::default()
+            },
+            "leg 1 of 3: its log here isn't the one it wrote",
+            false,
+        ),
+        (
+            Legs {
+                wrong_commit: Some(2),
+                ..Legs::default()
+            },
+            "leg 2 of 3 checked 0000000000000000000000000000000000000000, not",
+            false,
+        ),
+        (
+            Legs {
+                other_plan: Some(3),
+                ..Legs::default()
+            },
+            "leg 3 of 3 took its share of another plan than leg 1",
+            true,
+        ),
+        (
+            Legs {
+                other_plan: Some(1),
+                ..Legs::default()
+            },
+            "leg 2 of 3 took its share of another plan than leg 1",
+            true,
+        ),
+        (
+            Legs {
+                no_plan: Some(2),
+                ..Legs::default()
+            },
+            "leg 2 of 3 stopped before it read the plan",
+            true,
+        ),
+    ] {
+        let (code, said, log) = legs(&r, l);
+        assert!(code != 0 && said.contains(why), "{why}: {code} {said}");
+        if own_logs {
+            assert_eq!(log, all_logs(), "{why}");
+        }
+    }
 }
