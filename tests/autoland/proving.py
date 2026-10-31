@@ -15,7 +15,7 @@ import sys
 import time
 
 import proofs as P
-from harness import CI_GREEN, FAIL, T0, JOBS, KICKS, REAL, STATES, STOPPED, WROTE, C, S, clean, fresh_pr_state, pr_state, run, stand_in, tmp
+from harness import CI_GREEN, FAIL, T0, JOBS, KICKS, REAL, STATES, STOPPED, UNSTOPPABLE, WROTE, C, S, clean, fresh_pr_state, pr_state, run, stand_in, tmp
 
 stand_in()
 
@@ -34,6 +34,8 @@ do = json.load(open({TOOLS!r})).get({tool!r}, {{}})
 if {tool!r} == "nix-store" and a[:1] == ["--query"]:
     print("\\n".join(d.removesuffix(".drv") for d in a[2:]))
 elif {tool!r} == "nix-store" and a[:1] == ["--check-validity"]:
+    if do.get("unsure") and not all(p.endswith(".drv") for p in a[2:]):
+        sys.exit(1)
     # A derivation is in the store until it's collected; an output once valid.
     print("\\n".join(p for p in a[2:] if ((p in do.get("collected", [])) if p.endswith(".drv") else (p not in do.get("valid", [])))))
 elif {tool!r} == "nix-store":
@@ -72,7 +74,8 @@ def made(drvs, head="a" * 40, n=5):
     """A build of drvs ({check: drv}), as build() leaves its folder."""
     jid = f"{C.BUILD}sam-r-{n}-{head[:12]}-{time.time_ns()}"
     os.makedirs(f"{tmp}/state/builds/{jid}")
-    C.save(f"builds/{jid}/build.json", {"repo": "sam/r", "number": n, "head": head, "drvs": drvs})
+    C.save(f"builds/{jid}/build.json", {"repo": "sam/r", "number": n, "head": head, "drvs": drvs,
+                                        "outs": {c: [d.removesuffix(".drv")] for c, d in drvs.items()}})
     return jid
 
 
@@ -95,8 +98,8 @@ for rc, state in ((0, "done"), (100, "done"), (101, "done"), (104, "done"), (107
     assert end(jid)["state"] == state, (rc, end(jid))
     assert KICKS == ["/kick/autoland/sam/r"], KICKS
     realised = [x["args"] for x in ran("nix-store") if x["args"][:1] == ["--realise"]]
-    assert realised == [["--realise", "--keep-going", "--add-root", f"{tmp}/state/builds/{jid}/out", "--indirect",
-                         X + ".drv", Y + ".drv"]], ran("nix-store")
+    assert realised == [["--realise", "--keep-going", X + ".drv", Y + ".drv"]], ran("nix-store")
+    assert ("verdicts" in end(jid)) == (state == "done"), end(jid)
     if rc != "kill":
         log = open(f"{tmp}/state/builds/{jid}/log").read()
         assert "subtest: it boots" in log and f"{X}.drv" in log, log
@@ -109,8 +112,7 @@ S.CFG["heavy"] = f"{bin_dir}/heavy"
 tools()
 jid = made({"vm": X + ".drv"})
 P.run(jid)
-assert open(f"{tmp}/heavy-log").read().split() == ["heavy", "--", f"{bin_dir}/nix-store", "--realise", "--keep-going",
-                                                   "--add-root", f"{tmp}/state/builds/{jid}/out", "--indirect", X + ".drv"]
+assert open(f"{tmp}/heavy-log").read().split() == ["heavy", "--", f"{bin_dir}/nix-store", "--realise", "--keep-going", X + ".drv"]
 assert end(jid)["state"] == "done", end(jid)
 # Under a heavy that waits on it, nix killed comes back as the shell's 137:
 # the machine's failure still, not a verdict.
@@ -127,6 +129,25 @@ tools(**{"nix-store": {"collected": [Y + ".drv"]}})
 jid = made({"vm": X + ".drv", "other": Y + ".drv"})
 P.run(jid)
 assert end(jid)["state"] == "failed" and not [x for x in ran("nix-store") if x["args"][:1] == ["--realise"]], ran("nix-store")
+# One passed and one failed (nix's 100): each check's verdict kept in its
+# end, so a collection later can't change it, naming its derivation; what
+# passed is rooted in the build's folder (nix roots none when any failed).
+tools(**{"nix-store": {"rc": 100, "valid": [X]}})
+jid = made({"vm": X + ".drv", "other": Y + ".drv"})
+P.run(jid)
+assert end(jid)["verdicts"] == {"vm": ["success", f"Built here and passed: {X}.drv"],
+                                "other": ["failure", f"Built here and failed: {Y}.drv"]}, end(jid)
+assert [x["args"] for x in ran("nix-store") if x["args"][:1] == ["--realise"]][1:] == [
+    ["--realise", "--add-root", f"{tmp}/state/builds/{jid}/out", "--indirect", X]], ran("nix-store")
+assert P.verdicts(jid) == {"vm": ("success", f"Built here and passed: {X}.drv"),
+                           "other": ("failure", f"Built here and failed: {Y}.drv")}
+tools(**{"nix-store": {"valid": []}})  # collected since: the kept verdicts stand
+assert P.verdicts(jid)["vm"][0] == "success"
+# The store can't say what it built: it ended short, with no verdict.
+tools(**{"nix-store": {"unsure": True}})
+jid = made({"vm": X + ".drv"})
+P.run(jid)
+assert end(jid)["state"] == "failed" and "verdicts" not in end(jid) and P.verdicts(jid) is None, end(jid)
 # An ended build's folder goes KEEP days on, a running one's never.
 old_end = made({"vm": X + ".drv"})
 C.save(f"builds/{old_end}/end.json", {"state": "done", "exit": 0, "at": time.time() - P.KEEP * 86400 - 60})
@@ -171,7 +192,7 @@ pr = clean()
 jid = P.build("sam/r", pr, ["vm"], st)
 assert jid and jid.startswith(C.BUILD + "sam-r-5-" + "a" * 12), jid
 assert json.load(open(f"{tmp}/state/builds/{jid}/build.json")) == {"repo": "sam/r", "number": 5, "head": "a" * 40,
-                                                                   "drvs": {"vm": X + ".drv"}}
+                                                                   "drvs": {"vm": X + ".drv"}, "outs": {"vm": [X]}}
 started = ran("systemd-run")[0]
 a = started["args"]
 assert a[:4] == ["--user", "--quiet", "--collect", f"--unit={C.build_unit(jid)}"], a
@@ -197,8 +218,16 @@ kept_outputs, kept_build = P.outputs, P.build
 
 
 def outputs(repo, pr, checks, st):
-    st["proofOutputs"] = {"for": None, "paths": [X], "drvs": {"vm": X + ".drv"}, "at": C.NOW}
-    return [X]
+    drvs = {"vm": X + ".drv", "other": Y + ".drv"}
+    st["proofOutputs"] = {"for": None, "paths": sorted(drvs[c].removesuffix(".drv") for c in checks), "drvs": drvs, "at": C.NOW}
+    return st["proofOutputs"]["paths"]
+
+
+def finish(jid, valid, rc=0):
+    """The build's run, nix building what's valid, and its state as systemd has it."""
+    tools(**{"nix-store": {"valid": valid, "rc": rc}})
+    P.run(jid)
+    STATES[jid] = end(jid)["state"]
 
 
 def build(repo, pr, checks, st):
@@ -237,8 +266,7 @@ def comments():
 
 
 # Done, its outputs valid: a pass naming its derivation, and no comment.
-STATES[BUILT[0]] = "done"
-tools(**{"nix-store": {"valid": [X]}})
+finish(BUILT[0], [X])
 status, _ = run(clean(checks=VM), 900)
 assert statuses() == [{"state": "success", "context": "vm", "description": f"Built here and passed: {X}.drv", "target_url": "u"}], WROTE
 assert comments() == [] and "Settled; vm built here, its verdict posted" in status, (status, WROTE)
@@ -248,10 +276,9 @@ BUILT.clear()
 tools()  # nothing built yet
 status, _ = run(clean(checks=VM), 700)
 assert len(BUILT) == 1, (status, WROTE)
-with open(f"{tmp}/state/builds/{BUILT[0]}/log", "w") as f:
+finish(BUILT[0], [], 100)
+with open(f"{tmp}/state/builds/{BUILT[0]}/log", "w") as f:  # what the VM test said
     f.write("".join(f"line {i}\n" for i in range(100)) + "subtest: it boots ... failed: ~~~~ no banner\n")
-STATES[BUILT[0]] = "done"
-tools(**{"nix-store": {"valid": []}})
 run(clean(checks=VM), 900)
 assert statuses() == [{"state": "failure", "context": "vm", "description": f"Built here and failed: {X}.drv", "target_url": "u"}], WROTE
 said = comments()
@@ -266,26 +293,46 @@ fresh_pr_state()
 BUILT.clear()
 tools()
 run(clean(checks=VM), 700)
-STATES[BUILT[0]] = "done"
+finish(BUILT[0], [], 100)
 FAIL.append("/comments")
 status, _ = run(clean(checks=VM), 900)
 FAIL.remove("/comments")
 assert statuses() == [] and pr_state()["strikes"] == {"status": 1} and "its verdict not posted yet" in status, (status, WROTE)
 run(clean(checks=VM), 1000)
 assert len(comments()) == 1 and [s["state"] for s in statuses()] == ["failure"] and not pr_state()["strikes"], WROTE
-# The store can't say: nothing posted, a strike, tried again next pass.
+# GitHub takes one failure of two and refuses the other: the PR is red,
+# and the one left is posted all the same on the next pass, from the
+# verdicts the build kept, while CI says red.
 fresh_pr_state()
 BUILT.clear()
-tools()  # nothing built yet
+S.CFG["repos"]["sam/r"] = {"proofBuilds": {"vm": "checks.x86_64-linux.vm", "other": "checks.x86_64-linux.other"}}
+TWO = VM + [{"__typename": "StatusContext", "context": "other", "state": "PENDING", "description": ""}]
+tools()
+run(clean(checks=TWO), 700)
+assert len(BUILT) == 1, BUILT
+finish(BUILT[0], [], 100)
+FAIL.append("context=other")
+status, _ = run(clean(checks=TWO), 900)
+FAIL.remove("context=other")
+# (WROTE has the refused one as well: GitHub took vm's, not other's.)
+assert [s["state"] for s in statuses()] == ["failure"] and [s["state"] for s in statuses("other")] == ["failure"], WROTE
+assert pr_state()["provedUnposted"] == BUILT[0] and "its verdict not posted yet" in status, (status, pr_state())
+RED = CI_GREEN + [{"__typename": "StatusContext", "context": "vm", "state": "FAILURE", "description": ""},
+                  {"__typename": "StatusContext", "context": "other", "state": "PENDING", "description": ""}]
+run(clean(checks=RED), 1000)
+assert [s["state"] for s in statuses("other")] == ["failure"] and "provedUnposted" not in pr_state(), (WROTE, pr_state())
+S.CFG["repos"]["sam/r"] = {"proofBuilds": {"vm": "checks.x86_64-linux.vm"}}
+# A done build that kept no verdicts broke: built again, never a verdict.
+fresh_pr_state()
+BUILT.clear()
+tools()
 run(clean(checks=VM), 700)
+C.save(f"builds/{BUILT[0]}/end.json", {"state": "done", "exit": 0, "at": time.time()})
 STATES[BUILT[0]] = "done"
-os.rename(f"{bin_dir}/nix-store", f"{bin_dir}/nix-store.real")
-status, _ = run(clean(checks=VM), 900)
-os.rename(f"{bin_dir}/nix-store.real", f"{bin_dir}/nix-store")
-assert statuses() == [] and pr_state()["strikes"] == {"status": 1} and "its verdict not posted yet" in status, (status, WROTE)
-tools(**{"nix-store": {"valid": [X]}})
-run(clean(checks=VM), 1000)
-assert [s["state"] for s in statuses()] == ["success"] and not pr_state()["strikes"], WROTE
+run(clean(checks=VM), 900)
+run(clean(checks=VM), 960)
+status, _ = run(clean(checks=VM), 1100)
+assert len(BUILT) == 2 and statuses() == [] and "building vm here again" in status, (status, BUILT, WROTE)
 # A build that stopped short is the machine's failure: no verdict, and
 # another builds it later.
 fresh_pr_state()
@@ -328,6 +375,42 @@ status, _ = run(clean(checks=OTHER), 700)
 assert len(JOBS) == 1 and "Run the other proof." in JOBS[0] and "again" not in status, (status, JOBS)
 assert "provedAgain" not in pr_state() and not pr_state()["provedJob"].startswith(C.BUILD), pr_state()
 S.CFG["repos"]["sam/r"] = {"proofBuilds": {"vm": "checks.x86_64-linux.vm"}}
+# A proof is its checks and their attributes too: a done build of vm says
+# nothing of other, added since, which is built; nor of vm remapped to
+# another attribute, which is built again.
+for config, checks, want in (({"vm": "checks.x86_64-linux.vm", "other": "checks.x86_64-linux.other"},
+                              CI_GREEN + [{"__typename": "StatusContext", "context": "vm", "state": "SUCCESS", "description": ""},
+                                          {"__typename": "StatusContext", "context": "other", "state": "PENDING", "description": ""}],
+                              {"other": Y + ".drv"}),
+                             ({"vm": "checks.x86_64-linux.vm-remapped"}, VM, {"vm": X + ".drv"})):
+    fresh_pr_state()
+    BUILT.clear()
+    tools()
+    S.CFG["repos"]["sam/r"] = {"proofBuilds": {"vm": "checks.x86_64-linux.vm"}}
+    run(clean(checks=VM), 700)
+    finish(BUILT[0], [X])
+    tools()  # what the new proof builds isn't built yet
+    S.CFG["repos"]["sam/r"] = {"proofBuilds": config}
+    status, _ = run(clean(checks=checks), 900)
+    assert len(BUILT) == 2 and "building" in status and statuses() == [], (status, BUILT, WROTE)
+    assert json.load(open(f"{tmp}/state/builds/{BUILT[1]}/build.json"))["drvs"] == want, BUILT
+S.CFG["repos"]["sam/r"] = {"proofBuilds": {"vm": "checks.x86_64-linux.vm"}}
+# A job left at work that won't stop just now goes on the stopping path,
+# tried again each pass, and holds what it holds until it ends.
+fresh_pr_state()
+BUILT.clear()
+STOPPED.clear()
+tools()
+STATES["job-stuck"] = "running"
+UNSTOPPABLE.add("job-stuck")
+C.save("pr-sam_r-5.json", {"head": "a" * 40, "seen": C.ts(T0), "proved": "a" * 40, "provedJob": "job-stuck", "provedAt": C.NOW})
+status, _ = run(clean(checks=VM), 700)
+assert len(BUILT) == 1 and pr_state()["stopping"] == ["job-stuck"], (status, pr_state())
+UNSTOPPABLE.discard("job-stuck")
+run(clean(checks=VM), 800)
+assert "job-stuck" in STOPPED and "stopping" not in pr_state(), (STOPPED, pr_state())
+# A check in both maps, however each spells it, is the build alone.
+assert C.machine({"proofJobs": {"VM": "Run it.", "x": "Run x."}, "proofBuilds": {"vm": "checks.x86_64-linux.vm"}}).keys() == {"vm", "x"}
 print("proof builds' verdicts: ok")
 
 P.outputs, P.build, C.gh = kept_outputs, kept_build, kept_gh

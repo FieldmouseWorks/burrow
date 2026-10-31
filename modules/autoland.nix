@@ -774,9 +774,10 @@ in
 
   config = lib.mkIf cfg.enable {
     system.checks = [ stewardImports ];
-    warnings = lib.concatLists (lib.mapAttrsToList (repo: rc: map
+    # GitHub's contexts ignore case, and so does a check's match here.
+    warnings = lib.concatLists (lib.mapAttrsToList (repo: rc: let builds = map lib.toLower (lib.attrNames (rc.proofBuilds or { })); in map
       (c: "burrow.autoland.repos.\"${repo}\".proofJobs.${c} is never used: ${c} is in its proofBuilds, so the steward builds it itself.")
-      (lib.attrNames (builtins.intersectAttrs (rc.proofBuilds or { }) (rc.proofJobs or { })))) cfg.repos);
+      (lib.filter (c: lib.elem (lib.toLower c) builds) (lib.attrNames (rc.proofJobs or { })))) cfg.repos);
     assertions = [{
       assertion = rv.codex.enable;
       message = "burrow.autoland needs its reviewer: turn on burrow.autoland.reviewers.codex.";

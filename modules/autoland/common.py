@@ -676,8 +676,11 @@ def forget_issues(repo):
 def machine(rc):
     """A repo's checks that a machine runs rather than CI, and how a job
     reruns each on what it pushes: a Claude job's (proofJobs), and the
-    builds the steward runs itself (proofBuilds), which it posts."""
-    return {**rc["proofJobs"], **{
+    builds the steward runs itself (proofBuilds), which it posts. A check
+    in both, however each spells it (GitHub's contexts ignore case), is the
+    build, by its proofBuilds name."""
+    builds = {c.lower() for c in rc["proofBuilds"]}
+    return {**{c: how for c, how in rc["proofJobs"].items() if c.lower() not in builds}, **{
         c: (f"`nix build .#{attr} -L` on the commit. The steward builds it itself for each new head and posts the "
             f"`{c}` status: never post that status yourself.") for c, attr in rc["proofBuilds"].items()}}
 

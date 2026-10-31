@@ -567,35 +567,49 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
             busy = f"building {names} here" if builds else at_work("proved", doing)
             settle("pending", f"Settled; {busy}{skipped}"[:140])
 
-        # This head's proof so far was another stage's: a build before the
-        # Claude jobs, or a Claude job from before its check had a build.
-        # This stage starts afresh, nothing of that one's carried over (its
-        # retries, the two lost answers), and a job left running for a check
-        # that's a build now is stopped: the build does its work.
+        # What this proof is: a build or a Claude job, of which checks, each
+        # built from which attribute. This head's proof so far was another
+        # (a build before the Claude jobs, a job from before its check had
+        # a build, a check added or remapped since): this one starts afresh,
+        # nothing of that one's carried over (its retries, the two lost
+        # answers, its verdicts), and one still at work is stopped, on the
+        # stopping path when proj or systemd won't just now. One recorded
+        # before proofs said what they were is matched on its kind alone.
+        stage = ["build" if builds else "job", sorted(checks), {c: rc["proofBuilds"].get(c) for c in checks}]
         jid = st.get("provedJob")
-        if st.get("proved") == head and jid and jid.startswith(C.BUILD) != bool(builds):
-            if builds and running("proved"):
-                C.stop_job(jid)
-            for k in ("", "Job", "At", "Lost", "Again", "Broke"):
+        was = st.get("provedFor") or ["build" if jid and jid.startswith(C.BUILD) else "job"]
+        if st.get("proved") == head and jid and was != stage[:len(was)]:
+            if running("proved") and not C.stop_job(jid):
+                st["stopping"] = list(dict.fromkeys(st.get("stopping", []) + [jid]))
+            for k in ("", "Job", "At", "Lost", "Again", "Broke", "For", "Unposted"):
                 st.pop("proved" + k, None)
             ends.pop("proved", None)
-        # A build of this head that's done: its verdicts, from the store. A
-        # failure's log goes on the PR first, so a comment GitHub didn't take
-        # is tried again before the red status hands the PR to a fix.
+        # A build of this head that's done: the verdicts it kept. A failure's
+        # log goes on the PR first, so a comment GitHub didn't take is tried
+        # again before the red status hands the PR to a fix; verdicts GitHub
+        # took only some of are posted again even once it's red (handle).
         if builds and st.get("proved") == head and not running("proved") and ends.get("proved") == "done":
             jid = st["provedJob"]
             said = P.verdicts(jid)
-            failed = [c for c, (state, _) in (said or {}).items() if state == "failure"]
-            if failed and st.get("provedSaid") != jid:
-                if C.comment(repo, n, P.failed_log(jid, failed)) is not None:
-                    st["provedSaid"] = jid
-            if said is None or failed and st.get("provedSaid") != jid or not P.record(repo, pr, said):
+            if said is None:
+                # One that kept no verdicts broke: it's built again (below).
+                ends["proved"] = "failed"
+            else:
+                failed = [c for c, (state, _) in said.items() if state == "failure"]
+                if failed and st.get("provedSaid") != jid:
+                    if C.comment(repo, n, P.failed_log(jid, failed)) is not None:
+                        st["provedSaid"] = jid
+                said_all = not failed or st.get("provedSaid") == jid
+                if said_all and P.record(repo, pr, said):
+                    st.pop("provedUnposted", None)
+                    # Their statuses kick the pass that lands it, or hands it to a fix.
+                    settle("pending", f"Settled; {names} built here, its verdict posted"[:140])
+                    return
+                if said_all:
+                    st["provedUnposted"] = jid
                 strike("status")
                 settle("pending", f"Settled; {names} built here, its verdict not posted yet"[:140])
                 return
-            # Their statuses kick the pass that lands it, or hands it to a fix.
-            settle("pending", f"Settled; {names} built here, its verdict posted"[:140])
-            return
         retry = lost("proved")
         if not retry and st.get("proved") == head:
             running_now()
@@ -640,6 +654,8 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
         else:
             settle("pending", f"Settled, but no Claude job could run {names}"[:140],
                    "Couldn't start a Claude job to run its checks")
+        if st.get("provedJob") != before:
+            st["provedFor"] = stage
         P.started(st, outs if st.get("provedJob") != before else None)
 
     if pr["isDraft"]:
@@ -678,6 +694,14 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
 
     machine = C.machine(rc)  # the checks a machine runs, not CI, and how
     ci, ci_names = ci_state(pr, machine)
+    # A build's verdicts GitHub took only some of: the rest go up whatever
+    # CI says now, so a failure it took doesn't leave the others unposted
+    # behind a red PR. Their statuses kick the pass that sees them.
+    if (left := st.get("provedUnposted")) and st.get("proved") == head:
+        if (said := P.verdicts(left)) is not None and P.record(repo, pr, said):
+            st.pop("provedUnposted")
+        else:
+            strike("status")
     # No checks ran at all ("none"). Unless the repo is set not to need any
     # (docs only), that's not green: nothing has tested it, so a judge job
     # runs the build and tests itself. One the train lands, the train's CI

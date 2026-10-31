@@ -162,7 +162,9 @@ def record(repo, pr, verdicts):
     if not isinstance(now, dict):
         return False
     settled = {s["context"].lower() for s in now.get("statuses", []) if s["state"] != "pending"}
-    for c, (state, desc) in verdicts.items():
+    # Passes first: a failure GitHub took turns the PR red, and the passes
+    # left behind it would wait on a pass that keeps posting (step.py).
+    for c, (state, desc) in sorted(verdicts.items(), key=lambda v: v[1][0] != "success"):
         if c.lower() in settled:
             continue
         if C.write("api", f"repos/{repo}/statuses/{head}", "-f", f"state={state}", "-f", f"context={c}",
@@ -246,9 +248,16 @@ def build(repo, pr, checks, st):
     if C.DRY:
         log(f"  would: build {', '.join(sorted(set(drvs.values())))}")
         return jid
+    try:
+        # Each check's outputs, while its derivation is surely in the store
+        # (just worked out): the build's verdicts are read from them alone.
+        outs = {c: nix("nix-store", "--query", "--outputs", d).split() for c, d in drvs.items()}
+    except (RuntimeError, OSError, subprocess.SubprocessError) as e:
+        log(f"{repo}#{n}: can't tell what the build of {', '.join(checks)} makes: {e}")
+        return None
     prune()
     os.makedirs(os.path.join(STATE, "builds", jid))
-    save(f"builds/{jid}/build.json", {"repo": repo, "number": n, "head": head, "drvs": drvs})
+    save(f"builds/{jid}/build.json", {"repo": repo, "number": n, "head": head, "drvs": drvs, "outs": outs})
     # Its own command line: this steward, with this config.
     cmd = [sys.executable, "-E", "-s", os.path.abspath(sys.argv[0]), "build", jid]
     p = C.user_systemctl_run(C.build_unit(jid), cmd)
@@ -272,24 +281,23 @@ def run(jid):
     """The build itself, as its unit runs it (`autoland-steward build ID`):
     `nix-store --realise --keep-going` on its derivations in a heavy slot,
     its log beside them, and how it ended in end.json. Done once nix built
-    all it could (exit 0, or 100 and up when builds failed: the verdicts
-    are in what's valid then); failed when nix couldn't build at all (a
-    lost daemon, say: the machine's failure, not the PR's, so it's built
-    again); timed out past proofTimeout. Then it kicks its repo's pass,
-    which posts them."""
+    all it could (exit 0, or a build failure's 100-107): each check's
+    verdict is then whether its outputs are valid, read at once and kept in
+    end.json, so nothing collected later can change it, and what passed is
+    rooted in the build's folder until it's pruned. Failed when nix couldn't
+    build at all, or the store can't say what it built (the machine's
+    failure, not the PR's, so it's built again); timed out past
+    proofTimeout. Then it kicks its repo's pass, which posts them."""
     b = load(f"builds/{jid}/build.json", None)
     here = os.path.join(STATE, "builds", jid)
     drvs = sorted(set(b["drvs"].values()))
-    if gone(drvs):
-        # Collected since they were worked out: nothing to build, and no
-        # verdict in that. The pass that sees this works them out again.
-        state, rc = "failed", None
-    else:
-        # Its outputs are roots of the store's until the build's folder goes
-        # (prune), so a collection can't take a pass from them before its
-        # verdict is posted.
+    end = {"state": "failed", "exit": None}
+    # Derivations collected since they were worked out leave nothing to
+    # build, and no verdict in that: the pass that sees it works them out
+    # again.
+    if not gone(drvs):
         cmd = ([CFG["heavy"], "--"] if CFG.get("heavy") else []) + [
-            f"{CFG['nix']}/nix-store", "--realise", "--keep-going", "--add-root", os.path.join(here, "out"), "--indirect", *drvs]
+            f"{CFG['nix']}/nix-store", "--realise", "--keep-going", *drvs]
         with open(os.path.join(here, "log"), "wb") as out:
             p = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT)
             try:
@@ -298,9 +306,36 @@ def run(jid):
                 p.terminate()  # heavy stops all of it, then frees its slot
                 p.wait()
                 rc = None
-        state = state_of(rc)
-    save(f"builds/{jid}/end.json", {"state": state, "exit": rc, "at": time.time()})
+        end = {"state": state_of(rc), "exit": rc}
+        if end["state"] == "done":
+            end = {**end, **judged(b, here)}
+    save(f"builds/{jid}/end.json", {**end, "at": time.time()})
     C.kick(b["repo"])
+
+
+def judged(b, here):
+    """A done build's end: each check's verdict, a pass when every output of
+    its derivation is valid (nix makes it so only once its build passed),
+    each naming its derivation; and the passed ones' outputs rooted. Failed
+    instead when the store can't say."""
+    outs = b["outs"]
+    try:
+        bad = set(nix("nix-store", "--check-validity", "--print-invalid",
+                      *sorted({o for p in outs.values() for o in p})).split())
+    except (RuntimeError, OSError, subprocess.SubprocessError) as e:
+        log(f"can't tell what the build of {', '.join(outs)} made: {e}")
+        return {"state": "failed"}
+    said = {c: ["failure", f"Built here and failed: {b['drvs'][c]}"] if bad.intersection(p)
+            else ["success", f"Built here and passed: {b['drvs'][c]}"] for c, p in outs.items()}
+    good = sorted({o for p in outs.values() for o in p} - bad)
+    if good:
+        # nix-store roots a realise's outputs only when all of it passed, so
+        # the ones that did are rooted here; their verdicts are kept already.
+        try:
+            nix("nix-store", "--realise", "--add-root", os.path.join(here, "out"), "--indirect", *good)
+        except (RuntimeError, OSError, subprocess.SubprocessError) as e:
+            log(f"couldn't root what the build of {', '.join(outs)} made: {e}")
+    return {"verdicts": said}
 
 
 # nix-store's exit codes for builds that failed: 100 and up, each bit of the
@@ -324,22 +359,13 @@ def gone(drvs):
 
 
 def verdicts(jid):
-    """A done build's verdicts, by check: a pass when every output of its
-    derivation is valid, which nix makes it only once its build has passed,
-    a failure otherwise; each names its derivation. None when the store
-    can't say."""
-    drvs = (load(f"builds/{jid}/build.json", None) or {}).get("drvs")
-    if not drvs:
-        log(f"build {jid} has no record of what it built")
+    """A done build's verdicts, by check ({check: (state, description)}), as
+    it kept them when it ended (judged). None when it kept none."""
+    said = (load(f"builds/{jid}/end.json", None) or {}).get("verdicts")
+    if not said:
+        log(f"build {jid} kept no verdicts")
         return None
-    try:
-        outs = {c: nix("nix-store", "--query", "--outputs", d).split() for c, d in drvs.items()}
-        bad = set(nix("nix-store", "--check-validity", "--print-invalid", *sorted({o for p in outs.values() for o in p})).split())
-    except (RuntimeError, OSError, subprocess.SubprocessError) as e:
-        log(f"can't tell what build {jid} built: {e}")
-        return None
-    return {c: ("failure", f"Built here and failed: {drvs[c]}") if bad.intersection(p)
-            else ("success", f"Built here and passed: {drvs[c]}") for c, p in outs.items()}
+    return {c: tuple(v) for c, v in said.items()}
 
 
 def failed_log(jid, checks):
