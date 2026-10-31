@@ -1,8 +1,8 @@
 //! A turn's wait in line for a slot.
 //!
-//! The line is jobs/.queue: one file per waiting turn, named so that sorting
-//! puts pipeline ones ahead, then --first ones, then the oldest, holding the
-//! waiting process's pid. A slot is a lock on jobs/.slots/N, and N.who says
+//! The line is jobs/.queue: one file per waiting turn, named ([`entry`]) so
+//! that sorting puts pipeline ones ahead, then --first ones, then the oldest,
+//! holding the waiting process's pid. A slot is a lock on jobs/.slots/N, and N.who says
 //! whose (class and project). The lock is the turn's and everything it starts
 //! ([`held`]), so a turn that's killed frees its slot by itself, once the last
 //! of what it left is gone too; its place in line is cleared by the next look
@@ -46,7 +46,7 @@ use std::time::Duration;
 use crate::config::Config;
 use crate::job::Job;
 use crate::pick::{Class, Classes, Slot, Waiter, pick, project};
-use crate::{now, now_nanos, read};
+use crate::{mtime, now, now_nanos, read};
 
 pub const HANDOVER_FORMAT: &str = "1";
 const NEXT_FRESH: i64 = 2;
@@ -101,27 +101,35 @@ pub fn handed_over(cfg: &Config) {
 }
 
 /// The place a proj before this one left, if it handed over: this job's, under
-/// this pid.
-fn place_left(queue: &Path, id: &str, pid: u32) -> Option<String> {
+/// this pid, and when it was made, which is when this turn came.
+fn place_left(queue: &Path, id: &str, pid: u32) -> Option<(String, i64)> {
     let names = fs::read_dir(queue).ok()?;
     let want = pid.to_string();
-    names
+    let name = names
         .filter_map(|e| e.ok())
         .map(|e| e.file_name().to_string_lossy().into_owned())
         .find(|n| {
             !n.starts_with('.')
                 && job_of(n) == id
                 && read(&queue.join(n)).as_deref() == Some(want.as_str())
-        })
+        })?;
+    let came = mtime(&queue.join(&name)).unwrap_or_else(now);
+    Some((name, came))
 }
 
-/// When a place in line (PREFIX-WHEN-ID) came, in seconds.
-fn came(name: &str) -> i64 {
-    name.split_once('-')
-        .and_then(|(_, r)| r.split_once('-'))
-        .and_then(|(w, _)| w.parse::<i64>().ok())
-        .unwrap_or(0)
-        / 1_000_000_000
+/// A turn's place in line, the name jobs/.queue has for it (PREFIX-WHEN-ID): 1
+/// for a --first turn, 2 for any other ([`Classes::place`] says what that makes
+/// it now), and WHEN, in nanoseconds, from when its job's work began (proj run
+/// --since), or else from now. Every WHEN has the same number of digits, so
+/// sorting the names sorts them by when.
+fn entry(job: &Job, id: &str, given: Class) -> String {
+    let prefix = if given == Class::First { 1 } else { 2 };
+    let since = read(&job.path("since"));
+    let began = since.as_deref().and_then(|s| s.lines().next());
+    match began.filter(|s| !s.is_empty()) {
+        Some(s) => format!("{prefix}-{s}000000000-{id}"),
+        None => format!("{prefix}-{}-{id}", now_nanos()),
+    }
 }
 
 /// A job run --unstick takes what the pipeline is stuck on, and that can be the
@@ -294,11 +302,10 @@ pub fn take(cfg: &Config, id: &str, n: &str, given: Class) -> io::Result<File> {
     // it can't be, never having said so: until it hands over to this one, or
     // from the moment this one hands it over ([`unmark`]).
     fs::write(job.turn(n, "withdrawable"), "")?;
-    let prefix = if given == Class::First { 1 } else { 2 };
-    let mut me = place_left(&queue, id, process::id())
-        .unwrap_or_else(|| format!("{prefix}-{}-{id}", now_nanos()));
-    // When it came, which its place keeps through a hand-over.
-    let since = came(&me);
+    // maxWait goes by when this turn came, not its name's WHEN, which for a job
+    // run --since is when its work began.
+    let (mut me, came) =
+        place_left(&queue, id, process::id()).unwrap_or_else(|| (entry(&job, id, given), now()));
     let mut looked = 0;
     loop {
         // Made --unstick while it waits (proj unstick): it goes now, look or not.
@@ -306,9 +313,9 @@ pub fn take(cfg: &Config, id: &str, n: &str, given: Class) -> io::Result<File> {
             let _ = fs::remove_file(queue.join(&me));
             return unstick_slot(cfg, id, n);
         }
-        // Waited long enough: among the --first ones now, by when it came.
+        // Waited long enough: among the --first ones now, in its place by WHEN.
         if let Some(rest) = me.strip_prefix("2-")
-            && now() - since >= cfg.max_wait as i64
+            && now() - came >= cfg.max_wait as i64
         {
             let to = format!("1-{rest}");
             let _ = fs::rename(queue.join(&me), queue.join(&to));
@@ -397,7 +404,8 @@ pub fn take(cfg: &Config, id: &str, n: &str, given: Class) -> io::Result<File> {
 
 /// `proj status --line`: every turn in line, in the order pick takes them
 /// (lead ones, then the rest), with its job, class, how long it has waited and
-/// its project. Only reads.
+/// its project. Only reads. The wait is from when its place was made, not its
+/// name's WHEN, which for a job started --since is when its work began.
 pub fn in_line(cfg: &Config) -> String {
     let queue = cfg.jobs.join(".queue");
     let mut names: Vec<String> = fs::read_dir(&queue)
@@ -416,14 +424,12 @@ pub fn in_line(cfg: &Config) -> String {
         if !waiter_alive(&queue.join(name), fid) {
             continue;
         }
+        let Some(made) = mtime(&queue.join(name)) else {
+            continue;
+        };
         let dir = cfg.jobs.join(fid);
         let (class, _) = classes.place(cfg, name, &dir);
-        let when: i64 = name
-            .split_once('-')
-            .and_then(|(_, r)| r.split_once('-'))
-            .and_then(|(w, _)| w.parse().ok())
-            .unwrap_or(0);
-        let wait = now() - when / 1_000_000_000;
+        let wait = now() - made;
         let row = format!(
             "{fid:<40} {:<8} {:>4}m{:02}s  {}\n",
             class.name(),

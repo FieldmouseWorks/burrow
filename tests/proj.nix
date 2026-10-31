@@ -527,6 +527,14 @@ pkgs.testers.runNixOSTest {
             proj(f'reply {a} "{task}"')
             machine.wait_until_succeeds(f"su - dev -c 'proj state {a}' | grep -x '{st}'", timeout=120)
 
+    with subtest("a job run --since dates from then, and only a time not after now will do"):
+        s = proj("run --since 1700000000 web silent")
+        machine.succeed(f"grep -x 1700000000 /data/dev/jobs/{s}/since")
+        machine.wait_until_succeeds(f"su - dev -c 'proj state {s}' | grep -x done", timeout=120)
+        machine.fail("su - dev -c 'proj run --since soon web silent'")
+        machine.fail("su - dev -c 'proj run --since 9999999999 web silent'")
+        machine.fail(f"su - dev -c 'proj reply --since 1700000000 {s} silent'")
+
     with subtest("a job run --app acts as that App every turn, or not at all"):
         e = proj("run --app workers web showenv")
         machine.wait_until_succeeds(f"su - dev -c 'proj state {e}' | grep -x done", timeout=120)

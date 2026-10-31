@@ -64,8 +64,8 @@
 //!
 //! At most maxJobs turns run Claude at once, and a turn starts only with
 //! minFreeMemory MiB to spare; the rest wait in line (queued), lead jobs'
-//! first, then the other pipeline jobs', then --first ones, then oldest first,
-//! and a turn that has waited maxWait seconds counts as --first itself, so a
+//! first, then the other pipeline jobs', then --first ones, then oldest first
+//! (a job run --since dates from then, every turn of it), and a turn that has waited maxWait seconds counts as --first itself, so a
 //! stream of them can't starve it. pipelineSlots of the slots are for pipeline
 //! jobs in the pipeline's own repos alone, and no project's other jobs hold
 //! more than maxJobsPerProject at once, and a waiting one of theirs is owed a

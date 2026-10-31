@@ -320,14 +320,15 @@ def item_name(key, r, head, base):
 def queue(repo, pr, key, r):
     """Queue the reviewer on the head's snapshot, with the PR's description
     as it is now: one edited to answer a finding is what the next look at
-    the same head reads. Raises if the snapshot can't be taken (the head
-    moved on, GitHub's unreachable)."""
+    the same head reads. In line by when the PR was opened (opened), so one
+    pushed again keeps its place. Raises if the snapshot can't be taken (the
+    head moved on, GitHub's unreachable)."""
     snap, meta = snapshot(repo, pr, key)
     save(f"{QUEUE}/{r}--{snap}.json", {
         "reviewer": r, "snap": snap, "repo": repo, "number": pr["number"], "headRefOid": pr["headRefOid"],
         "baseRefName": pr["baseRefName"], "title": pr["title"], "body": pr["body"],
         "rules": meta["rules"], "house": meta["house"], "secret": meta["secret"],
-        "prior": prior(repo, pr["number"], r), "at": C.NOW})
+        "prior": prior(repo, pr["number"], r), "opened": ts(pr["createdAt"]), "at": C.NOW})
 
 
 def ask(repo, pr, key, r, rs, after):

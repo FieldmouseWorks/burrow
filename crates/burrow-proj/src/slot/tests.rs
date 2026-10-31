@@ -15,16 +15,17 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::thread::sleep;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use rustix::process::{Pid, Signal, kill_process};
 use tempfile::TempDir;
 
 use super::{
-    LOOK_EVERY, NEXT_FRESH, came, in_line, look, look_due, note_next, place_left, successor, take,
+    LOOK_EVERY, NEXT_FRESH, entry, in_line, look, look_due, note_next, place_left, successor, take,
 };
 use crate::config::Config;
 use crate::config::tests::example;
+use crate::job::Job;
 use crate::now;
 use crate::pick::{Class, Slot};
 
@@ -143,7 +144,10 @@ esac
         cfg.tools.flock = "true".into();
         take(&cfg, &id, "1", Class::Normal).unwrap_err();
     }
-    if what == "take" || what == "leave" {
+    if what == "soon" {
+        cfg.max_wait = 4;
+    }
+    if what == "take" || what == "leave" || what == "soon" {
         let id = env::args().skip_while(|a| a != "_exec").nth(1).unwrap();
         held = Some(take(&cfg, &id, "1", Class::Normal).unwrap());
         // Work the turn leaves behind: a sleep in the background of a shell
@@ -496,7 +500,10 @@ fn the_line_as_status_shows_it() {
         ]
     );
     assert_eq!(in_queue(&jobs), 4, "it changed the line");
+    // Its wait is from when its place was made, not its name's WHEN (the epoch
+    // here, as for a job started --since long ago).
     let wait = rows[0][2];
+    assert!(wait.starts_with("0m"), "{wait}");
     let (m, s) = wait.strip_suffix('s').unwrap().split_once('m').unwrap();
     assert!(
         m.parse::<i64>().is_ok() && s.len() == 2 && s.parse::<i64>().is_ok(),
@@ -508,7 +515,68 @@ fn the_line_as_status_shows_it() {
     assert_eq!(in_line(&config(none.path(), 6)), "");
 }
 
-// A hand-over's place is the job's own, under this pid, and keeps when it came.
+// A turn's place: one whose job was started --since a time (the steward's, from
+// when its PR was opened) stands from then, ahead of turns that came before it
+// but whose work began later, with --first ones ahead of the rest, and the names
+// sort that way.
+#[test]
+fn a_place_dates_from_when_the_work_began() {
+    let tmp = TempDir::new().unwrap();
+    let jobs = jobs_dir(&tmp);
+    let cfg = config(&jobs, 1);
+    let place = |id: &str, given: Class| {
+        fs::create_dir_all(jobs.join(id)).unwrap();
+        entry(&Job::new(&cfg, id), id, given)
+    };
+    let new = place("new", Class::Normal);
+    fs::create_dir_all(jobs.join("old-pr")).unwrap();
+    fs::write(jobs.join("old-pr/since"), "1792800000\n").unwrap();
+    let old = place("old-pr", Class::Normal);
+    let asked = place("asked", Class::First);
+    assert_eq!(old, "2-1792800000000000000-old-pr");
+    let when = new
+        .strip_prefix("2-")
+        .unwrap()
+        .strip_suffix("-new")
+        .unwrap();
+    assert_eq!(when.len(), 19, "{new}");
+    assert!(when.bytes().all(|b| b.is_ascii_digit()), "{new}");
+    let mut names = [new.as_str(), old.as_str(), asked.as_str()];
+    names.sort();
+    assert_eq!(names, [asked.as_str(), old.as_str(), new.as_str()]);
+    assert_eq!(
+        place("old-pr", Class::First),
+        "1-1792800000000000000-old-pr"
+    );
+}
+
+// maxWait goes by how long a turn has waited, not by its place's WHEN: one whose
+// work began long ago (--since) waits among the normal turns until it has waited
+// maxWait itself, then goes among the --first ones from the same WHEN.
+#[test]
+fn max_wait_goes_by_when_it_came() {
+    let tmp = TempDir::new().unwrap();
+    let jobs = jobs_dir(&tmp);
+    let held = File::create(jobs.join(".slots/1")).unwrap();
+    held.try_lock().unwrap();
+    let since = now() - 7200;
+    fs::create_dir_all(jobs.join("late")).unwrap();
+    fs::write(jobs.join("late/since"), format!("{since}\n")).unwrap();
+    let _late = waiter_to("soon", &jobs, &tmp, "late", 1);
+    let normal = jobs.join(format!(".queue/2-{since}000000000-late"));
+    let first = jobs.join(format!(".queue/1-{since}000000000-late"));
+    until("late's place among the normal turns", || normal.exists());
+    let joined = Instant::now();
+    until("late's place among the --first ones", || first.exists());
+    assert!(
+        joined.elapsed() >= Duration::from_secs(2),
+        "among the --first ones after {:?}, not maxWait",
+        joined.elapsed()
+    );
+}
+
+// A hand-over's place is the job's own, under this pid, and it came when that
+// place was made, whatever WHEN its name has.
 #[test]
 fn a_place_left_by_a_hand_over() {
     let tmp = TempDir::new().unwrap();
@@ -517,14 +585,20 @@ fn a_place_left_by_a_hand_over() {
     fs::write(q.join("1-6000000000-my-web-1"), "42\n").unwrap();
     fs::write(q.join("2-7000000000-web-2"), "43\n").unwrap();
     fs::write(q.join(".2-8000000000-web-3.new"), "44\n").unwrap();
+    let made = now() - 600;
+    File::options()
+        .write(true)
+        .open(q.join("2-5000000000-web-1"))
+        .unwrap()
+        .set_modified(UNIX_EPOCH + Duration::from_secs(made as u64))
+        .unwrap();
     assert_eq!(
-        place_left(q, "web-1", 42).as_deref(),
-        Some("2-5000000000-web-1")
+        place_left(q, "web-1", 42),
+        Some(("2-5000000000-web-1".to_owned(), made))
     );
     assert_eq!(place_left(q, "web-1", 43), None);
     assert_eq!(place_left(q, "web-3", 44), None);
     assert_eq!(place_left(q, "web-9", 42), None);
-    assert_eq!(came("2-5000000000-web-1"), 5);
 }
 
 // Who's handed over to: only a proj that isn't this one and prints the same

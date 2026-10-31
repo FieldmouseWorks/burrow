@@ -115,11 +115,21 @@ fn kick_name(k: &str) -> bool {
     }
 }
 
+/// A time proj run --since takes: Unix seconds, ten digits as every one has had
+/// since 2001 and will until 2286, so its place's WHEN sorts with the rest, and
+/// not after now.
+fn since_time(t: &str, now: i64) -> bool {
+    t.len() == 10
+        && !t.starts_with('0')
+        && t.bytes().all(|b| b.is_ascii_digit())
+        && t.parse().is_ok_and(|t: i64| t <= now)
+}
+
 /// `proj run` and `proj reply`.
 fn run(cfg: &Config, reply: bool, args: &[String]) -> Result<(), Fail> {
     let (mut vm, mut first, mut pipeline, mut unstick, mut owned) =
         (false, false, false, false, false);
-    let mut cutoff = None;
+    let (mut cutoff, mut since) = (None, None);
     let (mut kicks, mut limit, mut idle, mut link, mut app) = (Vec::new(), None, None, None, None);
     let mut i = 0;
     let only_run = |what: &str| -> Result<(), Fail> {
@@ -193,6 +203,14 @@ fn run(cfg: &Config, reply: bool, args: &[String]) -> Result<(), Fail> {
                 app = Some(a.to_owned());
                 i += 1;
             }
+            Some("--since") => {
+                only_run("--since: the job's own is kept")?;
+                let t = value.filter(|t| since_time(t, now())).ok_or_else(|| {
+                    Fail::new(2, "proj run --since TIME (Unix seconds, not after now)")
+                })?;
+                since = Some(t.to_owned());
+                i += 1;
+            }
             Some("--first") => first = true,
             Some("--cut-off") => {
                 let bad = || Fail::new(2, "proj reply --cut-off N ID \"message\"");
@@ -218,7 +236,7 @@ fn run(cfg: &Config, reply: bool, args: &[String]) -> Result<(), Fail> {
         i += 1;
     }
     let id = if !reply {
-        let usage = "usage: proj run [--vm] [--first] [--pipeline] [--unstick] [--timeout DUR] [--idle DUR] [--kick NAME]... [--owned] [--link URL] [--app NAME] PROJECT \"task\"";
+        let usage = "usage: proj run [--vm] [--first] [--pipeline] [--unstick] [--timeout DUR] [--idle DUR] [--kick NAME]... [--owned] [--link URL] [--app NAME] [--since TIME] PROJECT \"task\"";
         let p = arg(args, i, usage)?;
         arg(args, i + 1, usage)?;
         let project = format!("{}/{p}", cfg.projects.display());
@@ -273,6 +291,10 @@ fn run(cfg: &Config, reply: bool, args: &[String]) -> Result<(), Fail> {
         }
         if let Some(l) = &link {
             write("link", &format!("{l}\n"))?;
+        }
+        // Every turn's place in line dates from this (slot::entry).
+        if let Some(t) = &since {
+            write("since", &format!("{t}\n"))?;
         }
         if let Some(a) = &app {
             write("app", &format!("{a}\n"))?;
@@ -708,7 +730,7 @@ fn ended(cfg: &Config) -> Result<(), Fail> {
 mod tests {
     use std::fs;
 
-    use super::{baselines, id_name, kick_name, left_be};
+    use super::{baselines, id_name, kick_name, left_be, since_time};
     use crate::config::Config;
     use crate::job::Job;
 
@@ -772,6 +794,26 @@ mod tests {
             ("-x", "dot-x"),
         ] {
             assert_eq!(id_name(project), name, "{project}");
+        }
+    }
+
+    #[test]
+    fn since_times() {
+        for ok in ["1792800000", "2000000000", "1000000000"] {
+            assert!(since_time(ok, 2000000000), "{ok}");
+        }
+        for bad in [
+            "",
+            "0",
+            "soon",
+            "179280000",
+            "17928000000",
+            "0792800000",
+            "179280000x",
+            "-792800000",
+            "2000000001",
+        ] {
+            assert!(!since_time(bad, 2000000000), "{bad}");
         }
     }
 
