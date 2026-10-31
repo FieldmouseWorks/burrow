@@ -52,7 +52,7 @@ let
       STALL_QUEUED=${toString (cfg.stallAfterMinutes * 60)}
       GRACE=600
       APPS=${lib.escapeShellArg (lib.concatStrings (lib.mapAttrsToList (name: app: "${name}=${app.envFile}\n") config.burrow.github.apps))}
-    '' + builtins.readFile ./proj/pick.sh + builtins.readFile ./proj/line.sh + builtins.readFile ./proj/waits.sh + builtins.readFile ./proj/proj.sh;
+    '' + builtins.readFile ./proj/pick.sh + builtins.readFile ./proj/line.sh + builtins.readFile ./proj/waits.sh + builtins.readFile ./proj/await.sh + builtins.readFile ./proj/proj.sh;
   };
 
   inbox = pkgs.writeShellApplication {
