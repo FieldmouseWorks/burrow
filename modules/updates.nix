@@ -164,14 +164,6 @@ let
     cp ${./autoland/seal.py} $out/seal.py
     flake8 --ignore E501,W503 $out
   '';
-  # What holds a Cargo or npm lock file refresh to the release age
-  # (updates/lock-age.py), linted as it's built.
-  lockAgeSrc = pkgs.runCommand "lock-age-src" { nativeBuildInputs = [ pkgs.python3Packages.flake8 ]; } ''
-    mkdir $out
-    cp ${./updates/lock-age.py} $out/lock-age.py
-    flake8 --ignore E501,W503 $out
-  '';
-  lockAgePython = pkgs.python3.withPackages (p: [ p.json5 ]);
   # Every release age a Renovate config sets, its presets resolved by
   # Renovate's own code (updates/release-ages.mjs).
   releaseAges = pkgs.writeShellScriptBin "release-ages" ''
@@ -181,9 +173,10 @@ let
   # policy and the repo's own config set, presets and all. It takes the
   # policy from the store, so the command Renovate runs has only the branch
   # the refresh is for, which Renovate fills in: a ref name has no spaces,
-  # and one with anything but these characters isn't allowed to run.
+  # and one with anything but these characters isn't allowed to run
+  # (crates/lock-age).
   lockAge = pkgs.writeShellScriptBin "lock-age" ''
-    exec ${lockAgePython}/bin/python3 -I ${lockAgeSrc}/lock-age.py \
+    exec ${inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow}/bin/lock-age \
       ${pkgs.writeText "lock-age-policy.json" (builtins.toJSON renovatePolicy)} ${releaseAges}/bin/release-ages "$@"
   '';
   lockAgeCommand = "${lockAge}/bin/lock-age {{{baseBranch}}}";

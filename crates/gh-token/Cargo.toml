@@ -13,7 +13,7 @@ rustls-pki-types = "1.15.1"
 serde.workspace = true
 serde_json.workspace = true
 time = { version = "0.3.55", features = ["parsing"] }
-ureq = { version = "3.5.0", features = ["json", "platform-verifier"] }
+ureq.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

@@ -1,0 +1,21 @@
+[package]
+name = "lock-age"
+description = "A lock file refresh takes only releases its Renovate config's longest release age old"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+jiff.workspace = true
+json5 = "0.4.1"
+serde.workspace = true
+serde_json.workspace = true
+toml = { version = "0.9", default-features = false, features = ["parse", "serde", "std"] }
+ureq.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
