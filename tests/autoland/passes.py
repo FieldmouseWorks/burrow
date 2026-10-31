@@ -374,8 +374,12 @@ os.remove(f"{tmp}/state/repo-eve_p.json")
 # what its hook is now can't be asked.
 
 
+TRIED = []  # the calls made for mallory
+
+
 def uninstalled(*a, **k):
     if C._for and C._for[-1] == "mallory":
+        TRIED.append(a)
         raise RuntimeError("the App steward isn't installed on mallory")
     return [] if a[:2] == ("api", "repos/eve/p/hooks") else gh_kept(*a, **k)
 
@@ -386,8 +390,65 @@ WROTE.clear()
 more = R.hook_projects([{"repo": "sam/r"}])
 assert more == [{"repo": "eve/p"}, {"repo": "mallory/x"}], more
 assert [x for x in WROTE if "hooks" in x] == ["api -X POST repos/eve/p/hooks --input -"], WROTE
+# It's said once, and tried again a day later, not on every pass.
+assert C.load("repo-mallory_x.json", None)["unreached"] == "the App steward isn't installed on mallory"
+TRIED.clear()
+assert R.hook_projects([{"repo": "sam/r"}]) == more and TRIED == [], TRIED
+C.NOW = T + 86400
+R.hook_projects([{"repo": "sam/r"}])
+assert TRIED == [("api", "repos/mallory/x/hooks")], TRIED
 os.remove(f"{tmp}/state/repo-eve_p.json")
 os.remove(f"{tmp}/state/repo-mallory_x.json")
+# A clone whose repo GitHub has no more (deleted) gets no hook either, and
+# its old one is forgotten: it went with the repo. That's said once, and
+# nothing is asked of GitHub on the passes after; a day later the repo is
+# looked up first, quietly, and its hooks asked for only once it's back
+# (restored).
+SAID, LOOKED, HOOKS_ASKED, MISSING = [], [], [], {"repos/sam/gone"}
+log_kept, fresh_kept = R.log, C.fresh
+R.log = lambda *a: SAID.append(" ".join(str(x) for x in a))
+
+
+def looked_up(path, etag=None):
+    LOOKED.append(path)
+    if path in MISSING:
+        raise C.Gone(f"gh api {path}: gh: Not Found (HTTP 404)")
+    return None, {"full_name": path.removeprefix("repos/")}
+
+
+def gone_hooks(*a, **k):
+    if a[:2] == ("api", "repos/sam/gone/hooks"):
+        HOOKS_ASKED.append(C.NOW)
+        return None if "repos/sam/gone" in MISSING else []  # gh's 404, which gh() logs
+    return gh_kept(*a, **k)
+
+
+C.gh, C.fresh = gone_hooks, looked_up
+C.projects = lambda: iter([("gone", "sam/gone")])
+C.save("repo-sam_gone.json", {"hook": "h", "hookId": 4})
+C.NOW = T
+WROTE.clear()
+assert R.hook_projects([{"repo": "sam/r"}]) == [{"repo": "sam/gone"}]
+assert HOOKS_ASKED == [T] and LOOKED == ["repos/sam/gone"] and WROTE == [], (HOOKS_ASKED, LOOKED, WROTE)
+assert SAID == [f"sam/gone: GitHub has no such repo, so its clone in {S.CFG['projectsDir']} gets no webhook; "
+                "looked up again daily"], SAID
+assert C.load("repo-sam_gone.json", None) == {"hookAt": T, "unreached": "gone"}
+SAID.clear()
+LOOKED.clear()
+for at in (T + 600, T + 3600, T + 86400 + 1, T + 86400 + 600):
+    C.NOW = at
+    R.hook_projects([{"repo": "sam/r"}])
+assert HOOKS_ASKED == [T] and LOOKED == ["repos/sam/gone"] and SAID == [] and WROTE == [], (HOOKS_ASKED, LOOKED, SAID, WROTE)
+MISSING.clear()
+LOOKED.clear()
+C.NOW = T + 2 * (86400 + 1)
+R.hook_projects([{"repo": "sam/r"}])
+assert LOOKED == ["repos/sam/gone"] and HOOKS_ASKED == [T, C.NOW], (LOOKED, HOOKS_ASKED)
+assert [x for x in WROTE if "hooks" in x] == ["api -X POST repos/sam/gone/hooks --input -"], WROTE
+assert SAID == ["sam/gone: adding the webhook", "sam/gone: on GitHub again"], SAID
+assert "unreached" not in C.load("repo-sam_gone.json", None) and C.load("repo-sam_gone.json", None)["hook"]
+os.remove(f"{tmp}/state/repo-sam_gone.json")
+R.log = log_kept
 C.gh, C.projects = gh_kept, projects_kept
 # A repo no longer seen to (excluded, archived) has its hook taken off, on
 # a full pass; one that won't come off is tried again a day later.
@@ -401,8 +462,21 @@ C.save("repo-sam_was.json", {"hook": "h", "hookId": 9, "other": 2})
 # sam/once was renamed to sam/r too, but GitHub doesn't answer the lookup:
 # the old path may lead to sam/r, so nothing is deleted until it does.
 C.save("repo-sam_once.json", {"hook": "h", "hookId": 9})
+# sam/deleted is gone from GitHub, and took its hook with it: its file lets
+# go, once, with nothing to delete.
+C.save("repo-sam_deleted.json", {"hook": "h", "hookId": 6, "other": 3})
 NAMES = {"repos/sam/R": "sam/r", "repos/sam/was": "sam/r", "repos/sam/old": "sam/old", "repos/sam/stuck": "sam/stuck"}
-C.gh = lambda *a, **k: {"full_name": NAMES[a[1]]} if a[:1] == ("api",) and a[1:2] and a[1] in NAMES else gh_kept(*a, **k)
+
+
+def names(path, etag=None):
+    if path in NAMES:
+        return None, {"full_name": NAMES[path]}
+    if path == "repos/sam/deleted":
+        raise C.Gone(f"gh api {path}: gh: Not Found (HTTP 404)")
+    raise C.Unavailable(f"gh api {path}: gh: HTTP 502")
+
+
+C.fresh = names
 FAIL.append("sam/stuck/hooks")
 C.NOW = T
 WROTE.clear()
@@ -415,6 +489,7 @@ assert C.load("repo-sam_r.json", None)["hookId"] == 9
 assert C.load("repo-sam_R.json", None) == {}
 assert C.load("repo-sam_was.json", None) == {"other": 2}
 assert C.load("repo-sam_once.json", None) == {"hook": "h", "hookId": 9, "unhookTried": T}
+assert C.load("repo-sam_deleted.json", None) == {"other": 3}
 WROTE.clear()
 R.unhook_gone([{"repo": "sam/r"}])
 assert WROTE == [], WROTE
@@ -428,5 +503,5 @@ R.unhook_gone([{"repo": "sam/r"}])
 assert C.load("repo-sam_once.json", None) == {}
 assert "DELETE repos/sam/once" not in " ".join(WROTE), WROTE
 FAIL.clear()
-C.gh = gh_kept
+C.gh, C.fresh = gh_kept, fresh_kept
 print("hooks: ok")
