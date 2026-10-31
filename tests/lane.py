@@ -70,8 +70,15 @@ assert paths_step["env"] == {"BASE": "${{ github.event.pull_request.base.ref }}"
 # own, under the name autoland looks for.
 check, docs = jobs["check"], jobs["docs"]
 assert check["needs"] == "lane" and docs["needs"] == "lane"
-# Named check with one leg, as it always was, and after its leg with more.
+# Named check with one leg, as it always was, and after its leg with more,
+# each a name autoland knows for a share of the gate's work.
 assert check["name"] == "${{ inputs.legs > 1 && format('leg {0} of {1}', matrix.leg, inputs.legs) || 'check' }}", check["name"]
+gate_names = re.search(r'^GATE, LEG = "(.*)", re.compile\("(.*)"\)$', open(sys.argv[2]).read(), re.M)
+assert gate_names and gate_names[1] == "check", "autoland names no gate or legs"
+for n in range(2, 9):
+    for k in range(1, n + 1):
+        assert re.fullmatch(gate_names[2], "leg {0} of {1}".format(k, n)), (k, n)
+assert not any(re.fullmatch(gate_names[2], x) for x in ("leg 1 of 1", "leg 0 of 2", "leg 9 of 9", "check")), gate_names[2]
 assert docs["name"] == names[2] + "${{ github.event.pull_request.base.ref }} from ${{ needs.lane.outputs.fork }}", (
     docs["name"], names[2])
 # It reads the tree and attests nothing.
