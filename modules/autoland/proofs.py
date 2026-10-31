@@ -28,6 +28,12 @@ as a job does, and is asked after and stopped like one (common.job_state,
 stop_job). Checks without an attribute are a Claude job's, after the
 builds: a failed build needs no job.
 
+A PR behind its base whose builds aren't in the store may have them there
+once it's brought up to date: most PRs change nothing a proof builds, so
+merged into the base's tip they build what the base does, which is built
+already. Then the steward brings it up to date instead of building it
+(merged), and the new head's verdicts come from the store.
+
 A job holds what it holds until it ends, whatever its PR does meanwhile
 (marked a draft, say), but for a new head: a verdict on a head the PR no
 longer has proves nothing, so the steward stops it (superseded), unless
@@ -102,13 +108,25 @@ def nix(*args, timeout=60):
     return p.stdout
 
 
+def derivations(repo, mirror, ref, rev, checks):
+    """Each of checks' derivations, by check, and all their outputs: its
+    flake attribute (the repo's proofBuilds) at that exact commit of the
+    steward's mirror, as a proof's checkout of it has it (its rev
+    included), with import-from-derivation off. Raises when it can't be
+    worked out."""
+    attrs = C.repo_cfg(repo)["proofBuilds"]
+    url = f"git+file://{urllib.parse.quote(mirror)}?ref={ref}&rev={rev}"
+    drvs = {c: nix("nix", "--extra-experimental-features", "nix-command flakes", "eval", "--raw",
+                   "--option", "allow-import-from-derivation", "false", "--option", "accept-flake-config", "false",
+                   "--no-update-lock-file", f"{url}#{attrs[c]}.drvPath", timeout=EVAL_TIMEOUT) for c in sorted(checks)}
+    return drvs, sorted(set(nix("nix-store", "--query", "--outputs", *drvs.values()).split()))
+
+
 def outputs(repo, pr, checks, st):
-    """The store paths PR's proof of checks builds on its head: each check's
-    flake attribute (the repo's proofBuilds) at that exact commit, from the
-    steward's mirror, as the proof job's checkout of it has it (its rev
-    included), with import-from-derivation off. Worked out once a head,
-    and None when it can't be: a check with no attribute, an eval that
-    fails or takes too long (tried again EVAL_RETRY minutes on)."""
+    """The store paths PR's proof of checks builds on its head (derivations).
+    Worked out once a head, and None when it can't be: a check with no
+    attribute, an eval that fails or takes too long (tried again EVAL_RETRY
+    minutes on)."""
     attrs = C.repo_cfg(repo)["proofBuilds"]
     if C.DRY or not checks or not all(c in attrs for c in checks):
         return None
@@ -123,14 +141,54 @@ def outputs(repo, pr, checks, st):
     drvs = paths = None
     try:
         mirror = V.fetch(repo, f"+refs/pull/{n}/head:refs/pr/{n}")
-        url = f"git+file://{urllib.parse.quote(mirror)}?ref=refs/pr/{n}&rev={head}"
-        drvs = {c: nix("nix", "--extra-experimental-features", "nix-command flakes", "eval", "--raw",
-                       "--option", "allow-import-from-derivation", "false", "--option", "accept-flake-config", "false",
-                       "--no-update-lock-file", f"{url}#{attrs[c]}.drvPath", timeout=EVAL_TIMEOUT) for c in sorted(checks)}
-        paths = sorted(set(nix("nix-store", "--query", "--outputs", *drvs.values()).split())) or None
+        drvs, paths = derivations(repo, mirror, f"refs/pr/{n}", head, checks)
+        paths = paths or None
     except (RuntimeError, OSError, subprocess.SubprocessError) as e:
         log(f"{repo}#{n}: can't tell what its proof builds at {head[:12]}: {e}")
     st["proofOutputs"] = {"for": key, "paths": paths, "drvs": drvs if paths else None, "at": C.NOW}
+    return paths
+
+
+def merged(repo, pr, checks, st, tip):
+    """The store paths PR's proof of checks would build once it's brought
+    up to date with its base, whose tip GitHub says is tip: its head merged
+    into tip, as GitHub's update-branch merges it (a clean merge only).
+    Worked out once a head on a tip, and None when it's up to date already,
+    the merge conflicts, or what it builds can't be worked out (tried again
+    EVAL_RETRY minutes on)."""
+    attrs = C.repo_cfg(repo)["proofBuilds"]
+    if C.DRY or not tip or not checks or not all(c in attrs for c in checks):
+        return None
+    n, head, base = pr["number"], pr["headRefOid"], pr["baseRefName"]
+    key = [head, tip, {c: attrs[c] for c in sorted(checks)}]
+    got = st.get("mergedOutputs")
+    if got and got["for"] == key and (not got.get("failed") or C.NOW - got.get("at", 0) < EVAL_RETRY * C.MIN):
+        return got["paths"]
+    paths, failed = None, True
+    try:
+        mirror = V.fetch(repo, f"+refs/pull/{n}/head:refs/pr/{n}", f"+refs/heads/{base}:refs/base/{base}")
+        up = subprocess.run(["git", "-C", mirror, "merge-base", "--is-ancestor", tip, head], capture_output=True, text=True)
+        # 0: the head has the tip already; 1: it doesn't; else git can't say
+        # (a tip that moved on again before the fetch, say).
+        if up.returncode not in (0, 1):
+            raise RuntimeError(f"git merge-base: {up.stderr.strip()[-300:]}")
+        tree = None
+        if up.returncode == 1:
+            tree = subprocess.run(["git", "-C", mirror, "merge-tree", "--write-tree", "--no-messages", tip, head],
+                                  capture_output=True, text=True)
+            # 1 is a merge that conflicts: nothing to bring it up to date to.
+            if tree.returncode not in (0, 1):
+                raise RuntimeError(f"git merge-tree: {tree.stderr.strip()[-300:]}")
+        if tree and tree.returncode == 0:
+            who = ["-c", "user.name=autoland", "-c", "user.email=autoland@localhost", "-c", "commit.gpgsign=false"]
+            rev = V.git("-C", mirror, *who, "commit-tree", tree.stdout.split()[0], "-p", head, "-p", tip,
+                        "-m", f"#{n} brought up to date with {base}").decode().strip()
+            V.git("-C", mirror, "update-ref", f"refs/merged/{n}", rev)
+            paths = derivations(repo, mirror, f"refs/merged/{n}", rev, checks)[1] or None
+        failed = False
+    except (RuntimeError, OSError, subprocess.SubprocessError) as e:
+        log(f"{repo}#{n}: can't tell what its proof builds brought up to date with {base}: {e}")
+    st["mergedOutputs"] = {"for": key, "paths": paths, "failed": failed, "at": C.NOW}
     return paths
 
 
