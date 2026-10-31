@@ -28,7 +28,7 @@ import reviewers as V
 import stopping
 import train as T
 import waits
-from common import CFG, DRY, MIN, load, log, repo_cfg, save, ts
+from common import CFG, DEP_RE, DRY, MIN, load, log, repo_cfg, save, ts
 from seal import MAJOR as MAJOR_VERDICT  # renovate-sweep's, on a Renovate major
 from touches import automerges, bot_edited, dep_kind, gate_edit, moved_from, one_way
 from tasks import DEP_SEEN, PAST_LIMIT, REVIEWED, fix_task, judge_task, judged_on, judgment, owed, proof_task
@@ -183,14 +183,15 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
             T.stop(repo, f"#{n} isn't settled, and GitHub hasn't taken its status")
         return ok
 
-    def update_branch():
+    def update_branch(proof=False):
         """Bring a settled head up to date with a base whose rules want it
-        (the merge won't): the merged-in head is reviewed like any other.
+        (the merge won't), or whose builds its proof wants (proof: prove saw
+        it behind): the merged-in head is reviewed like any other.
         GitHub makes it a moment later, and its push kicks a pass; one that
         hasn't come ten minutes on is asked for again. True while it's being
         brought up to date, False if it isn't behind, None if GitHub didn't
         take the ask (strike)."""
-        if merging != "update":
+        if merging != "update" and not proof:
             return False
         if st.get("updated") == head and C.NOW - st.get("updatedAt", 0) < 10 * MIN:
             after(st["updatedAt"], 10)  # ends: a wait that stays the same is overdue at its deadline
@@ -635,6 +636,19 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
             return
         if builds:
             cleared("eval")
+        # Behind its base (the default branch, whose tip this pass read),
+        # with what it builds merged in all built already: brought up to
+        # date, its new head's verdicts come from the store. Not a
+        # dependency update's: its bot keeps that branch.
+        default = repo_info.get("defaultBranchRef") or {}
+        tip = (default.get("target") or {}).get("oid") if pr["baseRefName"] == default.get("name") else None
+        if (builds and not retry and not DEP_RE.match(pr["headRefName"])
+                and (up := P.merged(repo, pr, checks, st, tip)) and not P.unbuilt(up)):
+            if update_branch(proof=True):
+                settle("pending", f"Settled; brought up to date with {pr['baseRefName']}, which has {names} built here already"[:140])
+                return
+            settle("pending", "Settled; GitHub didn't take its update with its base, so trying again"[:140])
+            return
         free = False
         # One whose next step is failing the PR (again) needs no slot.
         last = retry and st.get("provedAgain") == head and not broke("proved")

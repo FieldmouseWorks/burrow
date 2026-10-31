@@ -16,7 +16,7 @@ import re
 import sys
 
 import proofs as P
-from harness import C, CI_GREEN, FAIL, JOBS, STATES, STOPPED, S, V, WROTE, clean, fresh_pr_state, merged, pr_state, run, sh, tmp
+from harness import C, CI_GREEN, FAIL, JOBS, STATES, STOPPED, S, V, WROTE, clean, fresh_pr_state, info, merged, pr_state, run, sh, tmp
 from prs import ci_state
 
 # A repo whose PRs' heads are real commits on its remote, as GitHub has them.
@@ -57,7 +57,9 @@ else:
     u = urllib.parse.urlsplit(url)
     rev = urllib.parse.parse_qs(u.query)["rev"][0]
     git = subprocess.run(["git", "-C", urllib.parse.unquote(u.path), "cat-file", "-e", rev + "^{{commit}}"])
-    drv = know["drvs"].get(rev + "#" + attr) or know["drvs"].get(rev)
+    tree = subprocess.run(["git", "-C", urllib.parse.unquote(u.path), "rev-parse", rev + "^{{tree}}"],
+                          capture_output=True, text=True).stdout.strip()
+    drv = know["drvs"].get(rev + "#" + attr) or know["drvs"].get(rev) or know["drvs"].get("tree:" + tree)
     if git.returncode or not drv:
         print("error: no", rev, attr, file=sys.stderr)
         sys.exit(1)
@@ -69,11 +71,12 @@ VALID = [Z]
 
 
 def nix_knows(drvs=None, outs=None):
-    """Each PR's derivation (by number, or by (number, attribute)), and a
-    derivation's outputs where it has more than one."""
+    """Each PR's derivation (by number, or by (number, attribute), or by a
+    commit's tree as "tree:TREE"), and a derivation's outputs where it has
+    more than one."""
     drvs = drvs or {1: X, 2: Y, 3: Z, 4: X, 6: W}
-    json.dump({"drvs": {heads[k] if isinstance(k, int) else f"{heads[k[0]]}#{k[1]}.drvPath": d + ".drv"
-                        for k, d in drvs.items()},
+    json.dump({"drvs": {heads[k] if isinstance(k, int) else k if isinstance(k, str) else f"{heads[k[0]]}#{k[1]}.drvPath":
+                        d + ".drv" for k, d in drvs.items()},
                "outs": {d + ".drv": o for d, o in (outs or {}).items()}, "valid": VALID}, open(NIX, "w"))
     open(NIX_LOG, "w").close()
 
@@ -430,6 +433,91 @@ nix_knows({1: XY}, {XY: [X, Y]})
 P.begin("sam/r", {1})
 status = line(1)
 assert RUNNING in status and from_store() == [] and len(JOBS) == 1, (status, WROTE)
+
+# Behind its base, a proof that merged in builds what's built already: the
+# PR is brought up to date instead of built, its new head's verdict then
+# the store's. PR 7 branches from PR 1's head and changes g; main is PR 3's
+# head, which has changed f twice since.
+fresh_pr_state()
+GITHUB.clear()
+sh("git", "push", "-q", f"{origin}/sam/r.git", f"{heads[3]}:refs/heads/main", cwd=work)
+sh("git", "checkout", "-q", "-b", "seven", heads[1], cwd=work)
+for name, n in (("g", 7), ("f", 8)):
+    sh("git", "checkout", "-q", "seven", cwd=work)
+    with open(f"{work}/{name}", "w") as f:
+        f.write(f"pr {n}\n")
+    sh(*GIT, "add", name, cwd=work)
+    sh(*GIT, "commit", "-qm", f"pr {n}", cwd=work)
+    heads[n] = sh("git", "rev-parse", "HEAD", cwd=work).strip()
+    sh("git", "push", "-q", f"{origin}/sam/r.git", f"HEAD:refs/pull/{n}/head", cwd=work)
+    sh("git", "checkout", "-q", "-B", "seven", heads[1], cwd=work)
+up = sh("git", "merge-tree", "--write-tree", heads[3], heads[7], cwd=work).split()[0]
+info["defaultBranchRef"]["target"] = {"oid": heads[3]}  # main's tip, as this pass read it
+UPDATED = "Settled; brought up to date with main, which has remi-proof built here already"
+
+
+def updates(n):
+    return [w for w in WROTE if w.startswith(f"api -X PUT repos/sam/r/pulls/{n}/update-branch")]
+
+
+VALID[:] = [Z]
+nix_knows({7: Y, f"tree:{up}": Z})
+P.begin("sam/r", {7})
+status = line(7)
+assert UPDATED in status and JOBS == [] and from_store() == [], (status, JOBS)
+assert updates(7) == [f"api -X PUT repos/sam/r/pulls/7/update-branch -f expected_head_sha={heads[7]}"], WROTE
+# Worked out once a head on its base's tip: the next pass asks nix nothing,
+# and GitHub isn't asked again while its update is on its way.
+n_evals = len(evals())
+status = line(7, 800)
+assert UPDATED in status and len(evals()) == n_evals and updates(7) == [] and JOBS == [], (status, evals())
+# What it builds merged in isn't built: it's built as it is, not updated.
+fresh_pr_state()
+nix_knows({7: Y, f"tree:{up}": W})
+P.begin("sam/r", {7})
+status = line(7)
+assert RUNNING in status and updates(7) == [] and JOBS == ["build 7 remi-proof"], (status, JOBS)
+# Up to date already (PR 4's head has main's): built, not updated.
+fresh_pr_state()
+nix_knows({4: X})
+P.begin("sam/r", {4})
+status = line(4)
+assert RUNNING in status and updates(4) == [] and JOBS == ["build 4 remi-proof"], (status, JOBS)
+# Its merge with main conflicts (PR 8 changed f too): built as it is.
+fresh_pr_state()
+nix_knows({8: Y})
+P.begin("sam/r", {8})
+status = line(8)
+assert RUNNING in status and updates(8) == [] and JOBS == ["build 8 remi-proof"], (status, JOBS)
+# A dependency update's branch is its bot's: built as it is.
+fresh_pr_state()
+nix_knows({7: Y, f"tree:{up}": Z})
+P.begin("sam/r", {7})
+status = run(clean(checks=proof, number=7, sha=heads[7], branch="renovate/thing"), 700)[0]
+assert RUNNING in status and updates(7) == [] and JOBS == ["build 7 remi-proof"], (status, JOBS)
+# GitHub doesn't take the update: a strike, and asked again next pass.
+fresh_pr_state()
+FAIL.append("update-branch")
+status = line(7)
+assert "GitHub didn't take its update" in status and pr_state(7)["strikes"] == {"update": 1}, (status, WROTE)
+FAIL.remove("update-branch")
+status = line(7, 800)
+assert UPDATED in status and len(updates(7)) == 1 and not pr_state(7)["strikes"], (status, WROTE)
+# Against a base that isn't the default branch, whose tip no pass read: built.
+fresh_pr_state()
+status = run(clean(checks=proof, number=7, sha=heads[7], base="side"), 700)[0]
+assert RUNNING in status and updates(7) == [] and JOBS == ["build 7 remi-proof"], (status, JOBS)
+# main moved on, its new tip merged in building something else: built.
+fresh_pr_state()
+sh("git", "push", "-q", f"{origin}/sam/r.git", f"{heads[4]}:refs/heads/main", cwd=work)
+info["defaultBranchRef"]["target"] = {"oid": heads[4]}
+up4 = sh("git", "merge-tree", "--write-tree", heads[4], heads[7], cwd=work).split()[0]
+nix_knows({7: Y, f"tree:{up}": Z, f"tree:{up4}": W})
+P.begin("sam/r", {7})
+status = line(7)
+assert RUNNING in status and updates(7) == [] and JOBS == ["build 7 remi-proof"], (status, JOBS)
+del info["defaultBranchRef"]["target"]
+sh("git", "checkout", "-q", "main", cwd=work)
 
 del S.CFG["repos"]["sam/r"]
 C.job, P.build = kept, kept_build
