@@ -745,7 +745,8 @@ in
         (checks that are a build and nothing more: `{ "<check>" =
         "checks.x86_64-linux.<name>"; }`, the flake attribute whose build is
         the check's verdict. The steward builds them itself, ahead of the
-        proofJobs and with no Claude job: it works out the attribute's
+        proofJobs and with no Claude job, once the PR is settled, while its
+        CI still runs rather than after it passes: it works out the attribute's
         derivation at that commit and runs `nix-store --realise` on it in a
         heavy slot, in a unit of its user's own (proofTimeoutMinutes), and
         posts each check as its build passed or failed, a failure with its
