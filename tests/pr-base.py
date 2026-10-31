@@ -6,8 +6,8 @@ cleanly fails the job without anything checked. With pr-gate off (a train
 repo's), a PR to the default branch gets no gate, and every push and a PR to
 any other branch still do, a branch whose name differs only in case included.
 A PR's newer run cancels what its last one still has going, and nothing
-else: not a push's run, another PR's, or a sibling call with inputs of its
-own; and an old run whose train job was cancelled checks nothing.
+else: not a push's run, another PR's, a sibling call with inputs of its own,
+or (from a title or body edit, which a retarget isn't) the same head's run; and an old run whose train job was cancelled checks nothing.
 
   python3 -I tests/pr-base.py .github/workflows/flake-check.yml
   nix build .#checks.x86_64-linux.pr-base
@@ -69,18 +69,19 @@ for gate, event, train_result, lands, cancelled, runs in (
 print("the gate runs where it should: ok")
 
 # Each job's concurrency group: a PR's runs share one, so the newer cancels
-# the older; anything else is its run's own; jobs, workflows, PRs and calls
+# the older; anything else is its run's own, a title or body edit's too; jobs, workflows, PRs and calls
 # with other inputs never share one.
 INPUTS = {"inputs.runner": "ubuntu-latest", "inputs.install-nix": True, "inputs.eval-apart": False,
           "inputs.pr-gate": True, "inputs.build-skip": "agents"}
 
 
-def group(name, event="pull_request", pr=12, run=1001, workflow="flake", **inputs):
+def group(name, event="pull_request", pr=12, run=1001, workflow="flake", action="synchronize", changes=None, **inputs):
     c = workflow_jobs[name]["concurrency"]
     assert c["cancel-in-progress"] is True, (name, c)
     ctx = {**INPUTS, **{f"inputs.{k.replace('_', '-')}": v for k, v in inputs.items()}, "github.event_name": event,
            "github.event.pull_request.number": pr if event == "pull_request" else None, "github.run_id": run,
-           "github.workflow": workflow}
+           "github.workflow": workflow, "github.event.action": action if event == "pull_request" else None,
+           "github.event.changes.base": (changes or {}).get("base")}
     return value(c["group"], ctx)
 
 
@@ -95,6 +96,21 @@ assert len({group(n) for n in ("train", "check", "commits")}) == 3
 # A push or a train candidate is a run of its own: none cancels another.
 assert group("check", "push", run=1001) != group("check", "push", run=1002)
 assert group("check", "push", run=12) != group("check", pr=12)
+TITLE, BASE = {"title": {"from": "old"}}, {"base": {"ref": {"from": "main"}}}
+for name in ("train", "check", "commits"):
+    pushed = group(name, run=1001)
+    # Renovate pushes and renames a second later: the rename's run leaves the
+    # push's alone, whichever starts first, and another edit's.
+    for changes in (TITLE, {"body": {"from": "old"}}):
+        edit = group(name, run=1002, action="edited", changes=changes)
+        assert edit != pushed, (name, changes, edit)
+        assert edit != group(name, run=1003, action="edited", changes=changes), (name, changes)
+    # A retarget changes what the head is checked against, so it supersedes
+    # the last run, and the next push supersedes it.
+    assert group(name, run=1002, action="edited", changes=BASE) == pushed, name
+    assert group(name, run=1002, action="edited", changes={**TITLE, **BASE}) == pushed, name
+    for action in ("opened", "reopened", "synchronize"):
+        assert group(name, run=1002, action=action) == pushed, (name, action)
 print("only a PR's newer run cancels: ok")
 assert train["outputs"] == {"lands": "${{ steps.base.outputs.lands }}"}, train["outputs"]
 base_step = next(s for s in train["steps"] if s.get("id") == "base")
