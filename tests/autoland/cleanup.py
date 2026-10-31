@@ -290,8 +290,9 @@ C.NOW += B.GRACE
 look(())
 assert DELETED == [("moved", "f" * 40)], DELETED
 # A delete GitHub refuses (a ruleset, say) is listed for the pipeline with
-# what GitHub said, and tried again on the full pass, not on every pass
-# until then. It goes once GitHub lets it.
+# what GitHub said, and tried again on the full pass alone: not on every
+# pass until then, nor when the default moves or a PR closes at it. It goes
+# once GitHub lets it.
 BRANCHES["empty"] = ("0" * 40, 0, old)
 UNDELETABLE.add("empty")
 look(())
@@ -301,6 +302,14 @@ digest = []
 B.watch_branches(repo_r, set(), digest)
 assert (B.UNDELETED, "sam/r: `empty`", REFUSAL) in digest, digest
 assert look(()) == ["sam/r: `empty`", "sam/r: `refused`"] and DELETED == [], DELETED
+BRANCHES["main"] = ("bc" * 20, 0, young)
+assert look(()) == ["sam/r: `empty`", "sam/r: `refused`"] and DELETED == [], DELETED
+BRANCHES["main"] = ("ab" * 20, 0, young)
+look(())
+# A PR closed at it days ago, changed now (a label), is in the closed feed.
+CLOSED["empty"] = [{"number": 18, "head": {"sha": "0" * 40}, "closed_at": ago(5)}]
+FEED.append({"number": 18, "updated_at": ago(0), "head": {"ref": "empty", "sha": "0" * 40, "repo": {"full_name": "sam/r"}}})
+assert look(()) == ["sam/r: `empty`", "sam/r: `refused`"] and FED == [200] and DELETED == [], (FED, DELETED)
 UNDELETABLE.clear()
 look(full=True)
 assert DELETED == [("empty", "0" * 40)], DELETED
@@ -405,25 +414,38 @@ assert tips()["third"]["seen"] == C.NOW and "closedSince" in C.load("repo-sam_r.
 S.C.CFG["keepBranches"] = []
 look(())
 assert FRESH == [200] and LOOKED == ["gh-pages"], (FRESH, LOOKED)
-# What git says when a delete doesn't go through: a push that beat it, or a
-# branch already gone, is no refusal (the next listing shows either);
-# GitHub not answering ends the pass; anything else is GitHub's refusal, in
-# its words, on one line.
+# What git says when a delete doesn't go through, read whole: a push that
+# beat it, or a branch already gone, is no refusal (the next listing shows
+# either); GitHub not answering ends the pass; anything else is GitHub's
+# refusal, in its words, on one line and cut short. A name git echoes (the
+# branch, the repo, a URL) that reads like an outage doesn't make one.
 run_kept = B.subprocess.run
-for said, want in (("! [rejected] x -> x (stale info)", ""),
-                   ("error: unable to delete 'x': remote ref does not exist", ""),
-                   ("remote: error: GH013: Repository rule violations found\nremote: - Cannot delete this branch",
-                    "remote: error: GH013: Repository rule violations found remote: - Cannot delete this branch"),
-                   ("fatal: unable to access 'https://github.com/sam/r.git/': The requested URL returned error: 403",
-                    "fatal: unable to access 'https://github.com/sam/r.git/': The requested URL returned error: 403"),
-                   ("fatal: unable to access 'https://github.com/sam/r.git/': The requested URL returned error: 502", None),
-                   ("fatal: unable to access 'https://github.com/sam/r.git/': Could not resolve host: github.com", None)):
+long_repo = f"{'o' * 39}/{'r' * 100}"
+for repo, name, said, want in (
+        ("sam/r", "x", "! [rejected] x -> x (stale info)", ""),
+        ("sam/r", "x", "error: unable to delete 'x': remote ref does not exist", ""),
+        ("sam/r", "x", "remote: error: GH013: Repository rule violations found\nremote: - Cannot delete this branch", "refused"),
+        ("sam/r", "x", "fatal: unable to access 'https://github.com/sam/r.git/': The requested URL returned error: 403", "refused"),
+        ("sam/r", "x", "fatal: unable to access 'https://github.com/sam/r.git/': The requested URL returned error: 502", None),
+        ("sam/r", "x", "fatal: unable to access 'https://github.com/sam/r.git/': Could not resolve host: github.com", None),
+        ("sam/r", "x", "fatal: unable to access 'https://github.com/sam/r.git/': Failed to connect to github.com port 443: "
+                       "Connection timed out", None),
+        ("sam/r", "fix/timeout", "remote: error: GH013: Repository rule violations found for refs/heads/fix/timeout.\n"
+                                 "To https://github.com/sam/r.git\n ! [remote rejected] fix/timeout (push declined due to "
+                                 "repository rule violations)", "refused"),
+        ("sam/timeout", "x", "fatal: unable to access 'https://github.com/sam/timeout.git/': The requested URL returned "
+                             "error: 403", "refused"),
+        ("sam/eof", "eof", "To https://github.com/sam/eof.git\n ! [remote rejected] eof (protected branch hook declined)\n"
+                           "error: failed to push some refs to sam/eof", "refused"),
+        (long_repo, "x", f"fatal: unable to access 'https://github.com/{long_repo}.git/': The requested URL returned "
+                         "error: 502", None),
+        ("sam/r", "x" * 250, f"! [rejected] {'x' * 250} -> {'x' * 250} (stale info)", "")):
     B.subprocess.run = lambda args, **k: subprocess.CompletedProcess(args, 1, "", said)
     try:
-        got = kept_delete("sam/r", "x", "1" * 40)
+        got = kept_delete(repo, name, "1" * 40)
     except C.Unavailable:
         got = None
-    assert got == want, (said, got)
+    assert got == (" ".join(said.split())[:200] if want == "refused" else want), (said, got)
 B.subprocess.run = run_kept
 # More than a page of branches: every page, and no ETag for next time. A
 # protected one, the default too, isn't the steward's to delete.

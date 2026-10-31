@@ -27,13 +27,19 @@ def delete_branch(repo, name, sha):
         p = subprocess.run(["git", "-C", d, *C.GIT_AUTH, "push", "-q", f"--force-with-lease=refs/heads/{name}:{sha}",
                             f"https://github.com/{repo}.git", f":refs/heads/{name}"],
                            capture_output=True, text=True, env=C.gh_env(repo))
-    said = " ".join(p.stderr.split())[:200]
+    # Read whole, shown cut: a long URL mustn't push git's verdict off the end.
+    said = " ".join(p.stderr.split())
     if p.returncode == 0 or re.search(r"stale info|remote ref does not exist", said):
         return ""
-    if C.UNAVAILABLE.search(said) or re.search(r"could not resolve host|returned error: 5\d\d", said, re.I):
-        raise C.Unavailable(f"git push :{name}: {said}")
-    log(f"{repo}: kept {name}: {said}")
-    return said or f"git exited {p.returncode}"
+    # Less the names git echoes (URLs, refs, the branch and the repo), so a
+    # branch called fix/timeout reads as a refusal, not an outage.
+    bare = re.sub(r"https?://\S+|refs/\S+", "", said)
+    for echoed in (name, repo):
+        bare = re.sub(rf"(?<![\w./-]){re.escape(echoed)}(?![\w./-])", "", bare)
+    if C.UNAVAILABLE.search(bare) or re.search(r"could not resolve host|returned error: 5\d\d", bare, re.I):
+        raise C.Unavailable(f"git push :{name}: {said[:200]}")
+    log(f"{repo}: kept {name}: {said[:200]}")
+    return said[:200] or f"git exited {p.returncode}"
 
 
 # Unmerged, with no PR and no commit for this long: given up on (agents open
@@ -164,6 +170,12 @@ def watch_branches(r, in_use, digest, full=False):
             elif was is None or was["sha"] != sha or was.get("pr"):
                 # New, pushed to, or its PR just left the open ones: the wait starts now.
                 tips[name] = judge(repo, r, name, sha, C.NOW)
+            elif was.get("undeleted"):
+                # GitHub refused its delete, which nothing but a push changes
+                # (the default moving or a PR closing would only try it
+                # again): tried again on the full pass alone.
+                if full:
+                    tips[name] = judge(repo, r, name, sha, was["seen"])
             elif heads is None or (name, sha) in heads or moved or looks_again(was, full):
                 # Judged again from when it was first seen at this tip, so
                 # its wait comes out the same however often it's judged: a
@@ -194,8 +206,8 @@ def watch_branches(r, in_use, digest, full=False):
 def looks_again(tip, full):
     """Whether a branch judged before, and unchanged since, is judged again
     this pass: its wait is over, or (a full pass) GitHub said no last time,
-    to archiving it, deleting it or a read its judgment needed."""
-    if tip.get("unkept") or tip.get("undeleted") or tip.get("retry"):
+    to archiving it or to a read its judgment needed."""
+    if tip.get("unkept") or tip.get("retry"):
         return full
     return tip.get("due", C.NOW + 1) <= C.NOW
 
