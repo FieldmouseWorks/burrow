@@ -10,7 +10,9 @@
 //! The lane's check run names the base it chose against, the docs lane's the
 //! commit the PR left that base at too, and every caller runs again when a
 //! PR's base changes, from a workflow file of its own, so that a title or body
-//! edit starts no run of the required check's workflow.
+//! edit starts no run of the required check's workflow. With docs-paths or
+//! legs, the lane job says where the base was, for the legs to merge the head
+//! with.
 
 use std::path::{Path, PathBuf};
 
@@ -47,6 +49,21 @@ fn autoland_names() -> (String, String) {
     (lane.to_owned(), docs.to_owned())
 }
 
+/// The name autoland knows the gate's job by, and the pattern of its legs'
+/// (modules/autoland/prs.py's GATE and LEG).
+fn autoland_gate_names() -> (String, String) {
+    let prs = read(&repo_file("modules/autoland/prs.py"));
+    let line = prs
+        .lines()
+        .find_map(|l| l.strip_prefix("GATE, LEG = \""))
+        .expect("autoland names no gate or legs");
+    let (gate, leg) = line
+        .strip_suffix("\")")
+        .and_then(|l| l.split_once("\", re.compile(\""))
+        .expect("GATE, LEG as a string and a compiled pattern");
+    (gate.to_owned(), leg.to_owned())
+}
+
 #[test]
 fn the_jobs_are_wired_as_autoland_reads_them() {
     let wf = workflow(FLAKE_CHECK);
@@ -68,6 +85,7 @@ fn the_jobs_are_wired_as_autoland_reads_them() {
             r#"
             gate: "${{ steps.base.outputs.lands == 'true' && 'train' || steps.paths.outputs.docs == 'true' && 'docs' || 'full' }}"
             fork: "${{ steps.paths.outputs.fork }}"
+            tip: "${{ steps.tip.outputs.tip }}"
             "#
         )
     );
@@ -106,20 +124,34 @@ fn the_jobs_are_wired_as_autoland_reads_them() {
             "#
         )
     );
-    let paths = &lane_steps[2];
+    let (tip, paths) = (&lane_steps[2], &lane_steps[3]);
+    assert_eq!(tip["id"], "tip");
+    assert_eq!(tip["shell"], "bash");
     assert_eq!(paths["id"], "paths");
     assert_eq!(paths["shell"], "bash");
-    for s in &lane_steps[1..] {
+    // The base's tip for the docs lane or the legs, which docs only for the
+    // docs lane.
+    for s in [checkout, tip] {
         assert_eq!(
-            s["if"], "steps.base.outputs.lands != 'true' && inputs.docs-paths != ''",
+            s["if"],
+            "steps.base.outputs.lands != 'true' && (inputs.docs-paths != '' || inputs.legs > 1)",
             "{s:?}"
         );
     }
+    assert_eq!(
+        paths["if"],
+        "steps.base.outputs.lands != 'true' && inputs.docs-paths != ''"
+    );
+    assert_eq!(
+        tip["env"],
+        yaml(r#"BASE: "${{ github.event.pull_request.base.ref }}""#)
+    );
     assert_eq!(
         paths["env"],
         yaml(
             r#"
             BASE: "${{ github.event.pull_request.base.ref }}"
+            TIP: "${{ steps.tip.outputs.tip }}"
             HEAD_SHA: "${{ github.event.pull_request.head.sha }}"
             DOCS: "${{ inputs.docs-paths }}"
             "#
@@ -132,7 +164,26 @@ fn the_jobs_are_wired_as_autoland_reads_them() {
     let (check, docs) = (&wf["jobs"]["check"], &wf["jobs"]["docs"]);
     assert_eq!(check["needs"], "lane");
     assert_eq!(docs["needs"], "lane");
-    assert!(check.get("name").is_none(), "{:?}", check["name"]);
+    // Named check with one leg, as it always was, and after its leg with
+    // more, each a name autoland knows for a share of the gate's work.
+    assert_eq!(
+        check["name"],
+        "${{ inputs.legs > 1 && format('leg {0} of {1}', matrix.leg, inputs.legs) || 'check' }}"
+    );
+    let (gate, leg) = autoland_gate_names();
+    assert_eq!(gate, "check");
+    let leg = regex::Regex::new(&format!("^(?:{leg})$")).expect("LEG, a regex");
+    for n in 2..=8 {
+        for k in 1..=n {
+            assert!(
+                leg.is_match(&format!("leg {k} of {n}")),
+                "{leg}: {k} of {n}"
+            );
+        }
+    }
+    for not in ["leg 1 of 1", "leg 0 of 2", "leg 9 of 9", "check"] {
+        assert!(!leg.is_match(not), "{leg}: {not}");
+    }
     assert_eq!(
         docs["name"],
         format!(
@@ -404,11 +455,38 @@ impl Repo {
 
     fn paths(&self, ws: &Path, head: &str, docs: &str) -> crate::harness::Ran {
         let wf = workflow(FLAKE_CHECK);
+        let tip = self.tip_of(ws);
         self.s.bash(
             script(step(&wf["jobs"]["lane"], "paths")),
             ws,
-            &[("BASE", "main"), ("HEAD_SHA", head), ("DOCS", docs)],
+            &[
+                ("BASE", "main"),
+                ("TIP", &tip),
+                ("HEAD_SHA", head),
+                ("DOCS", docs),
+            ],
         )
+    }
+
+    /// The tip step, as the lane job's checkout leaves it: where the base is.
+    fn tip_of(&self, ws: &Path) -> String {
+        let wf = workflow(FLAKE_CHECK);
+        let ran = self.s.bash(
+            script(step(&wf["jobs"]["lane"], "tip")),
+            ws,
+            &[("BASE", "main")],
+        );
+        let want = self.git(&self.origin, &["rev-parse", "main"]);
+        assert!(
+            ran.code == 0
+                && ran.outputs == format!("tip={want}\n")
+                && ran.said().contains(&format!("main is at {want}")),
+            "{} {} {} (main at {want})",
+            ran.code,
+            ran.outputs,
+            ran.said()
+        );
+        want
     }
 
     /// Whether the PR takes the docs lane, and what the step said. It names

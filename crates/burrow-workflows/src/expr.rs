@@ -1,8 +1,8 @@
 //! GitHub Actions expressions (`${{ ... }}`, or text with some in it), worked
 //! out as GitHub works them out, for what the workflows' `if:`s and
 //! concurrency groups use: context paths, string, number, boolean and null
-//! literals, `format()`, `cancelled()`, `!`, `==`, `!=`, `&&` and `||` (which
-//! give an operand's value), and parentheses.
+//! literals, `format()`, `cancelled()`, `!`, `<`, `<=`, `>`, `>=`, `==`, `!=`,
+//! `&&` and `||` (which give an operand's value), and parentheses.
 
 use std::collections::HashMap;
 
@@ -52,6 +52,15 @@ impl V {
             (V::Null, V::Null) => true,
             (V::Bool(a), V::Bool(b)) => a == b,
             (a, b) => a.num() == b.num(),
+        }
+    }
+
+    /// `<`, `<=`, `>` and `>=`: strings by their letters, ignoring case, and
+    /// values of different types as numbers, where NaN is never in order.
+    fn order(&self, other: &V) -> Option<std::cmp::Ordering> {
+        match (self, other) {
+            (V::Str(a), V::Str(b)) => Some(a.to_lowercase().cmp(&b.to_lowercase())),
+            (a, b) => a.num().partial_cmp(&b.num()),
         }
     }
 }
@@ -111,6 +120,8 @@ enum E {
     Ctx(String),
     Not(Box<E>),
     Eq(Box<E>, Box<E>, bool),
+    /// An order and whether it holds when the two are equal: `<=`, `>=`.
+    Ord(Box<E>, Box<E>, std::cmp::Ordering, bool),
     And(Box<E>, Box<E>),
     Or(Box<E>, Box<E>),
     Call(String, Vec<E>),
@@ -125,6 +136,10 @@ fn eval(e: &E, ctx: &Ctx) -> V {
             .unwrap_or_else(|| panic!("the test gives no {path}")),
         E::Not(e) => V::Bool(!eval(e, ctx).truthy()),
         E::Eq(a, b, equal) => V::Bool(eval(a, ctx).equals(&eval(b, ctx)) == *equal),
+        E::Ord(a, b, want, or_equal) => {
+            let got = eval(a, ctx).order(&eval(b, ctx));
+            V::Bool(got == Some(*want) || (*or_equal && got == Some(std::cmp::Ordering::Equal)))
+        }
         E::And(a, b) => {
             let a = eval(a, ctx);
             if a.truthy() { eval(b, ctx) } else { a }
@@ -197,7 +212,7 @@ impl Parser<'_> {
     }
 
     fn cmp(&mut self) -> E {
-        let mut e = self.unary();
+        let mut e = self.order();
         loop {
             let equal = if self.eat("==") {
                 true
@@ -206,7 +221,27 @@ impl Parser<'_> {
             } else {
                 return e;
             };
-            e = E::Eq(Box::new(e), Box::new(self.unary()), equal);
+            e = E::Eq(Box::new(e), Box::new(self.order()), equal);
+        }
+    }
+
+    /// The orders bind tighter than `==` and `!=`, as GitHub's do.
+    fn order(&mut self) -> E {
+        use std::cmp::Ordering::{Greater, Less};
+        let mut e = self.unary();
+        loop {
+            let (want, or_equal) = if self.eat("<=") {
+                (Less, true)
+            } else if self.eat(">=") {
+                (Greater, true)
+            } else if self.eat("<") {
+                (Less, false)
+            } else if self.eat(">") {
+                (Greater, false)
+            } else {
+                return e;
+            };
+            e = E::Ord(Box::new(e), Box::new(self.unary()), want, or_equal);
         }
     }
 
@@ -297,5 +332,19 @@ fn expressions_work_out_as_githubs_do() {
     assert_eq!(v("${{ 'it''s' }}"), V::from("it's"));
     assert_eq!(v("pr ${{ n }} of ${{ a.b }}"), V::from("pr 12 of x"));
     assert_eq!(v("${{ !(t && nil) }}"), V::Bool(true));
+    assert_eq!(
+        v("${{ n > 1 && n <= 12 && !(n < 12) && n >= '12' }}"),
+        V::Bool(true)
+    );
+    assert_eq!(
+        v("${{ n > 12 || n < 12 || n >= 13 || n <= 11 }}"),
+        V::Bool(false)
+    );
+    assert_eq!(v("${{ a.b < 'Y' && 'b' > 'A' }}"), V::Bool(true));
+    assert_eq!(v("${{ a.b > 1 || a.b <= 1 }}"), V::Bool(false));
+    assert_eq!(
+        v("${{ nil < 1 && t > nil && n > 1 == true }}"),
+        V::Bool(true)
+    );
     assert!(!condition("nil", &ctx));
 }

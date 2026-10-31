@@ -5,7 +5,9 @@
 //! as nix flake check checks it, a failed evaluation or build fails the gate,
 //! every evaluation reads one snapshot of the checkout, and a flake with an
 //! output eval-apart doesn't check, or with a nixConfig, is refused rather
-//! than half checked. Without it, the checks are built first, by derivation,
+//! than half checked. With legs, each leg evaluates its own share of the
+//! outputs, every Nth from its own on, and builds only the checks among
+//! them. Without it, the checks are built first, by derivation,
 //! kept as GC roots, once the one nix process that evaluated them has
 //! exited, so no evaluation stays in memory beside the builds; nix flake
 //! check then finds them built and its outputs still roots. A flake with a
@@ -14,7 +16,8 @@
 //!
 //! Each case has a store, and a scratch directory, of its own. The cases are
 //! by what they hold the gate to: the outputs it checks, the derivations it
-//! takes, the checkout it reads, and the gate without eval-apart.
+//! takes, the checkout it reads, the gate split across legs, and the gate
+//! without eval-apart.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -23,6 +26,7 @@ use crate::harness::{Scratch, output, read, script, step, which, workflow, write
 
 mod checkout;
 mod derivations;
+mod legs;
 mod outputs;
 mod whole;
 
@@ -80,6 +84,8 @@ struct Run<'a> {
     whole: bool,
     skip: &'a str,
     build_fail: &'a str,
+    /// The leg it runs and how many there are; none for the one leg.
+    legs: Option<(&'a str, &'a str)>,
     env: &'a [(&'a str, &'a str)],
 }
 
@@ -237,6 +243,7 @@ exec {real_bin}/nix-instantiate "${{args[@]}}"
             self.s.join("cache"),
             self.s.path().to_str().unwrap().to_owned(),
         );
+        let (leg, legs) = r.legs.unwrap_or(("1", "1"));
         let mut env = vec![
             ("NIX_CONFIG", self.nix_config.as_str()),
             ("XDG_CACHE_HOME", cache.to_str().unwrap()),
@@ -244,6 +251,8 @@ exec {real_bin}/nix-instantiate "${{args[@]}}"
             ("APART", if r.whole { "false" } else { "true" }),
             ("SKIP", r.skip),
             ("BUILD_FAIL", r.build_fail),
+            ("LEG", leg),
+            ("LEGS", legs),
             ("RUNNER_TEMP", &temp),
         ];
         env.extend(r.env.iter().copied());
@@ -281,8 +290,13 @@ fn the_step_takes_its_inputs() {
     let wf = workflow(".github/workflows/flake-check.yml");
     let s = step(&wf["jobs"]["check"], "gate");
     assert_eq!(s["shell"], "bash");
-    assert_eq!(s["env"]["APART"], "${{ inputs.eval-apart }}");
-    assert_eq!(s["env"]["SKIP"], "${{ inputs.build-skip }}");
+    assert_eq!(
+        s["env"],
+        crate::harness::yaml(
+            "{APART: '${{ inputs.eval-apart }}', SKIP: '${{ inputs.build-skip }}', \
+             LEGS: '${{ inputs.legs }}', LEG: '${{ matrix.leg }}'}"
+        )
+    );
 }
 
 /// A flake with an output of every kind the gate checks, and two it never

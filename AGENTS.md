@@ -72,7 +72,9 @@ shared `flake-check.yml` every project calls, with the inputs
 evaluated in a nix process of its own, because evaluating the whole flake at
 once holds 6-7G, more than a Claude job on the machine may (a bare
 `nix flake check` gets the job killed); and `agents` evaluated but not built,
-since CI's runners can't boot it (flake.yml says what builds it instead). The
+since CI's runners can't boot it (flake.yml says what builds it instead).
+CI splits it across legs, each on a runner of its own, where flake-gate runs
+it whole. The
 gate builds the example machine, evaluates each module on its own, runs
 `lib/project.nix`'s gates on the test projects in `tests/house/`, and builds
 the other checks.

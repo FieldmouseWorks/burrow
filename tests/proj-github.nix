@@ -10,7 +10,8 @@
 # starts) and ends the waits of one whose issue closed (proj stop's, which a
 # watch already asking GitHub keeps to), a stop that fails there not holding
 # up the rest, that an issue a bot opened is the machine's work, its job
-# acting as the machinery's App, that one with the unstick label too (the
+# acting as the machinery's App, that one opened by anyone outside the authors
+# has no job and says so once, that one with the unstick label too (the
 # steward's stuck issue) has a job that waits in no line, one already waiting
 # in it leaving it once the label comes, the watchdog told so again each pass
 # whatever an older turn wrote, that an issue's turn cut off before it
@@ -253,6 +254,45 @@
       assert "socket=none" in proj(f"log {jobs['o/b#4']}")
       github("repos/o/b/issues", "[]")
       machine.succeed("su - dev -c 'proj-inbox o/b'")
+
+  with subtest("a labelled issue from outside the authors starts no job, and says so once"):
+      machine.succeed("install -d -o dev -g dev /data/dev/src/ox")
+      machine.succeed("su - dev -c 'git -C /data/dev/src/ox init -q && git -C /data/dev/src/ox remote add origin https://github.com/o/x'")
+      outside = {"number": 1, "user": {"login": "sam-workers[bot]"}, "html_url": "https://github.com/o/x/issues/1",
+                 "title": "t", "body": "from-outside", "state": "open", "labels": [{"name": "claude"}]}
+      inside = {**outside, "number": 2, "user": {"login": "sam"}, "html_url": "https://github.com/o/x/issues/2", "body": "from-inside"}
+      github("repos/o/x/issues", json.dumps([outside]))
+      github("repos/o/x/issues/2/comments", "[]")
+      def refusals():
+          return machine.succeed("cat /tmp/gh/posted").count("opened by `sam-workers[bot]`")
+      assert refusals() == 0
+      # GitHub won't take the comment: it's tried again, in five minutes.
+      machine.succeed("touch /tmp/gh/nopost")
+      before = int(machine.succeed("date +%s"))
+      machine.succeed("su - dev -c 'proj-inbox o/x'")
+      machine.succeed("rm /tmp/gh/nopost")
+      assert refusals() == 0
+      assert json.loads(machine.succeed("cat /var/lib/burrow/proj-inbox/wake.json")).get("o/x", 0) >= before + 300
+      # Said once, however many passes look, and the label coming back after
+      # it went doesn't say it again.
+      github("repos/o/x/issues", json.dumps([outside, inside]))
+      machine.succeed("su - dev -c 'proj-inbox o/x'")
+      machine.succeed("su - dev -c 'proj-inbox o/x'")
+      github("repos/o/x/issues", json.dumps([inside]))
+      machine.succeed("su - dev -c 'proj-inbox o/x'")
+      github("repos/o/x/issues", json.dumps([outside, inside]))
+      machine.succeed("su - dev -c 'proj-inbox o/x'")
+      posted = machine.succeed("cat /tmp/gh/posted")
+      assert refusals() == 1, posted
+      said = posted[posted.index("opened by `sam-workers[bot]`"):]
+      assert "sam, sam-steward[bot]" in said and "<!-- proj-inbox -->" in said, said
+      # No job came of it, and the bar is where it was: an author's still starts one.
+      jobs = dict(line.split()[0::2] for line in machine.succeed("su - dev -c 'proj-inbox status'").splitlines() if line.startswith("o/x#"))
+      assert list(jobs) == ["o/x#2"], jobs
+      machine.wait_until_succeeds(f"su - dev -c 'proj state {jobs['o/x#2']}' | grep -x done", timeout=120)
+      machine.fail("grep -rl from-outside /data/dev/jobs")
+      github("repos/o/x/issues", "[]")
+      machine.succeed("su - dev -c 'proj-inbox o/x'")
 
   with subtest("the stuck issue's job waits in no line, and one already waiting in it leaves it once the label comes"):
       machine.succeed("su - dev -c 'git -C /data/dev/src/uk init -q && git -C /data/dev/src/uk remote add origin https://github.com/o/u'")

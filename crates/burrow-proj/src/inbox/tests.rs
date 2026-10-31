@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::fs::{self, File};
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -203,6 +204,66 @@ fn lanes() {
     let mut off = cfg.clone();
     off.inbox.as_mut().unwrap().unstick_label = String::new();
     assert!(!pass(&off).lane(&labelled(&["claude", ""])));
+}
+
+// A labelled issue from outside the authors starts no job and says so once: a
+// post GitHub refused books another look and records nothing, and the record
+// keeps later passes quiet, the issue's label having gone and come back or not.
+#[test]
+fn refuses_once() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let posted = tmp.path().join("posted");
+    let closed = tmp.path().join("closed");
+    let gh = tmp.path().join("gh");
+    fs::write(
+        &gh,
+        format!(
+            "#!/bin/sh\n[ ! -e '{}' ] || exit 1\ncat >>'{}'\n",
+            closed.display(),
+            posted.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&gh, fs::Permissions::from_mode(0o755)).unwrap();
+    let mut cfg: Config = serde_json::from_value(example()).unwrap();
+    cfg.tools.gh = gh;
+    let inbox = cfg.inbox.as_mut().unwrap();
+    inbox.state = tmp.path().join("state");
+    inbox.authors = vec!["sam".into(), "sam-steward[bot]".into()];
+    let mut p = pass(&cfg);
+    let outside = json!({"number": 7, "user": {"login": "someone-else"}, "body": "from-outside"});
+    let record = tmp.path().join("state/sam_box-7");
+
+    fs::write(&closed, "").unwrap();
+    p.new_issues("sam/box", std::slice::from_ref(&outside))
+        .unwrap();
+    assert!(!posted.exists());
+    assert!(!record.join("refused").exists());
+    assert_eq!(p.unreached, ["sam/box"]);
+    assert!(p.wake["sam/box"] >= crate::now() + 290);
+
+    fs::remove_file(&closed).unwrap();
+    let mut p = pass(&cfg);
+    for _ in 0..3 {
+        p.new_issues("sam/box", std::slice::from_ref(&outside))
+            .unwrap();
+    }
+    let said = fs::read_to_string(&posted).unwrap();
+    assert_eq!(
+        said.matches("opened by `someone-else`").count(),
+        1,
+        "{said}"
+    );
+    assert!(
+        said.contains("box's authors (sam, sam-steward[bot])"),
+        "{said}"
+    );
+    assert!(said.contains(&cfg.inbox_mark), "{said}");
+    assert!(!said.contains("from-outside"), "{said}");
+    assert!(p.unreached.is_empty() && p.wake.is_empty());
+    // No job: no record of one, so the status and the job loop pass it over.
+    assert!(record.join("refused").exists());
+    assert!(!record.join("job").exists());
 }
 
 // A record's revived: the turn the last carrying on started, and its streak.

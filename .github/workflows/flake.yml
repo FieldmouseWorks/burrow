@@ -27,6 +27,11 @@ jobs:
       # ends, beside everything else on remi, and flake-gate runs this same
       # gate in Claude jobs there, inputs and all.
       eval-apart: true
+      # One runner took 55 minutes over burrow's gate (10-31): its outputs
+      # evaluated one after another for 10, then its builds and fifteen VM
+      # tests sharing four cores for 45. Four legs share them out over four
+      # runners, which public repos get free.
+      legs: 4
       # The docs lane, for a PR that changes only these: nothing burrow
       # builds or tests reads them. docs/, house/ and templates/ aren't on
       # it: the steward's config carries them (modules/autoland.nix,

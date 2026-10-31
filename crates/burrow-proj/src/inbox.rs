@@ -19,8 +19,10 @@
 //! comments carry the inbox mark and are never read back as replies; jobs
 //! are told not to comment on their issue themselves for the same reason. A
 //! job only ever sees the issue and the authors' comments: on a public repo,
-//! anyone else's comments are text from strangers. A person's issue is work
-//! they asked for, so its job acts as them; a bot's (the steward's, say) is
+//! anyone else's comments are text from strangers. A labelled issue someone
+//! else opened never becomes a job, and says so once, so whoever labelled it
+//! isn't left waiting. A person's issue is work they asked for, so its job
+//! acts as them; a bot's (the steward's, say) is
 //! the machine's own, so its job acts as the machine's App, where there is
 //! one.
 //!
@@ -549,7 +551,12 @@ description says \"Fixes #{n}\" (or \"Refs #{n}\" if it doesn't settle the issue
         for issue in open {
             let n = raw(&issue["number"]);
             let d = self.inbox.state.join(format!("{}-{n}", key(repo)));
-            if d.join("job").exists() || !self.allowed(&raw(&issue["user"]["login"])) {
+            if d.join("job").exists() {
+                continue;
+            }
+            let opener = raw(&issue["user"]["login"]);
+            if !self.allowed(&opener) {
+                self.refuse(repo, &n, &opener, &d)?;
                 continue;
             }
             // Comments already there are part of the task; replies after
@@ -580,6 +587,26 @@ description says \"Fixes #{n}\" (or \"Refs #{n}\" if it doesn't settle the issue
             write("unannounced", String::new())?;
         }
         Ok(())
+    }
+
+    /// An issue passed over, its opener not one of the authors: said on the
+    /// issue once, or tried again next pass.
+    fn refuse(&mut self, repo: &str, n: &str, opener: &str, d: &Path) -> Result<(), Fail> {
+        let refused = d.join("refused");
+        if refused.exists() {
+            return Ok(());
+        }
+        let said = format!(
+            "No job for this issue: it was opened by `{opener}`, and only an issue opened by one of {}'s authors ({}) starts one. For a job to start, one of them has to open the issue.",
+            self.inbox.host,
+            self.inbox.authors.join(", "),
+        );
+        if !self.post(repo, n, &said) {
+            self.miss(repo);
+            return Ok(());
+        }
+        fs::create_dir_all(d).map_err(|e| io_fail(d, e))?;
+        fs::write(&refused, "").map_err(|e| io_fail(&refused, e))
     }
 
     /// The wake-ups, in place of the ones the repos looked at had; who's out

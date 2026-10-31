@@ -46,16 +46,21 @@ step=$(yq -o=json '[.jobs.check.steps[] | select(.id == "gate")]' "$workflow")
 inputs=$(yq -o=json '.on.workflow_call.inputs // {}' "$workflow")
 
 # The step's env, each an input as GitHub gives it: the caller's value, or
-# the input's default, or its type's (false, 0, empty), each as a string. Anything else this can't
-# mirror, so it stops rather than run a different gate.
+# the input's default, or its type's (false, 0, empty), each as a string. The
+# one exception is the legs CI splits the gate across: here it runs whole, as
+# one leg (legs 1, leg 1). Anything else this can't mirror, so it stops rather
+# than run a different gate.
 env=$(jq -c --argjson with "$with" --argjson inputs "$inputs" '
   .[0].env // {} | to_entries | map(
-    [.value | capture("^[$][{][{] *inputs[.](?<i>[A-Za-z0-9_-]+) *[}][}]$")?.i][0] as $i
-    | if $i == null then error("env \(.key) is \(.value | tojson), not one input")
-      elif ($inputs | has($i) | not) then error("env \(.key) is input \($i), which the workflow doesn'"'"'t have")
-      else {key, value: (if $with | has($i) then $with[$i]
-        elif $inputs[$i] | has("default") then $inputs[$i].default
-        else {boolean: "false", number: "0"}[$inputs[$i].type] // "" end | tostring)}
+    [.value | capture("^[$][{][{] *(?<c>inputs|matrix)[.](?<i>[A-Za-z0-9_-]+) *[}][}]$")?][0] as $m
+    | if $m == null then error("env \(.key) is \(.value | tojson), not one input")
+      elif $m.c == "matrix" then
+        if $m.i == "leg" then {key, value: "1"} else error("env \(.key) is matrix.\($m.i), not the leg") end
+      elif ($inputs | has($m.i) | not) then error("env \(.key) is input \($m.i), which the workflow doesn'"'"'t have")
+      elif $m.i == "legs" then {key, value: "1"}
+      else {key, value: (if $with | has($m.i) then $with[$m.i]
+        elif $inputs[$m.i] | has("default") then $inputs[$m.i].default
+        else {boolean: "false", number: "0"}[$inputs[$m.i].type] // "" end | tostring)}
       end) | from_entries' <<<"$step") || { echo "flake-gate: can't run $uses's gate step as GitHub would" >&2; exit 1; }
 jq -r '.[0].run' <<<"$step" > "$tmp/gate.sh"
 
