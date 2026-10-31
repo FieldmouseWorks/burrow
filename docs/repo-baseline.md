@@ -47,7 +47,10 @@ change nothing else in the same PR.
   rule the steward can't turn off) is brought up to date instead, and the
   new head is settled like any other.
 - The `hold`, `needs-owner` and `first` labels (`burrow.autoland.labels`),
-  which the steward, its jobs and the owner put on PRs.
+  which the steward, its jobs and the owner put on PRs, and the steward's
+  own `waiting: release age`, `waiting: proof slot` and `waiting: reviewer`,
+  which say at a glance what a PR waits on while it does (its
+  `review-settled` status says the rest).
 
 ## The steward's GitHub App
 
