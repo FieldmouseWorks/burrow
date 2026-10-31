@@ -73,13 +73,26 @@ PAST_LIMIT = ("it went past its review-round limit, so its reviewers weren't ask
 DEP_SEEN = "it's a dependency update, which no reviewer reads, so you're the first to read it; its threads are resolved"
 
 
-def verdict_line(repo, n, verdict, head, base):
-    return f"<!-- {JUDGMENT}: {verdict} {head} {C.seal(repo, n, JUDGMENT, verdict, head, base)} -->"
+def judged_on(pr):
+    """What a judge's verdict is on besides its head, which its seal binds:
+    the base (retargeted, the PR is another diff) and the description (the
+    reasons it gives are judged too, so one edited since has had nobody
+    weigh it). Either changed, it's judged again."""
+    return f"{pr['baseRefName']} {C.fingerprint(pr['body'])}"
+
+
+def judgment(pr, head, repo):
+    """The judge's verdict on this head, as the PR is now, or None."""
+    return C.marker(pr, JUDGMENT, head, repo, on=judged_on(pr))
+
+
+def verdict_line(repo, n, verdict, head, on):
+    return f"<!-- {JUDGMENT}: {verdict} {head} {C.seal(repo, n, JUDGMENT, verdict, head, on)} -->"
 
 
 def judge_task(repo, pr, why, no_ci, seen=REVIEWED):
     """seen: what has cleared it so far, in words."""
-    n, head, base, owner = pr["number"], pr["headRefOid"], pr["baseRefName"], CFG["owner"]
+    n, head, base, owner, on = pr["number"], pr["headRefOid"], pr["baseRefName"], CFG["owner"], judged_on(pr)
     test = (" The repo has no CI, so nothing has built or tested this: check out exactly that commit in your own worktree "
             "(git worktree add) under the scratch dir, never in this checkout's main tree, and run its build and tests yourself."
             if no_ci else "")
@@ -99,11 +112,12 @@ def judge_task(repo, pr, why, no_ci, seen=REVIEWED):
         "Claude job that fixes it. "
         "Don't push, merge, or change the PR in any other way. "
         f"Post one comment on the PR (gh pr comment {n} -R {repo}) saying what you checked and why you decided as you did, "
-        f"ending with the line {verdict_line(repo, n, 'land', head, base)}, {verdict_line(repo, n, 'owner', head, base)} "
-        f"or, when its build or tests fail or a reason doesn't hold, {verdict_line(repo, n, 'failed', head, base)}, exactly as written here "
+        f"ending with the line {verdict_line(repo, n, 'land', head, on)}, {verdict_line(repo, n, 'owner', head, on)} "
+        f"or, when its build or tests fail or a reason doesn't hold, {verdict_line(repo, n, 'failed', head, on)}, exactly as written here "
         "(the steward trusts no other), and only the one you chose. "
         f"Don't label it: for owner, the steward adds the {CFG['labels']['owner']} label itself. "
-        f"Only that exact head on {base} counts: if the PR has moved on (a new head, or another base) by the time you're done, "
+        f"Only that exact head on {base}, with the description as you read it, counts: if the PR has moved on (a new head, "
+        "another base, or an edited description) by the time you're done, "
         "say so and post no verdict."
     )
 

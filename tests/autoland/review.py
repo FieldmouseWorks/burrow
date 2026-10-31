@@ -32,6 +32,9 @@ put("src/app.py", "def f():\n    a = 1\n    return a\n")
 put("AGENTS.md", "# r\n\n## House rules\n\n- old house rule\n\n## Code Review Rules\n\n- root rule\n")
 put("src/AGENTS.md", "# x\n\n## Code Review Rules\n\n- never call eval\n\n## House rules\n\n- src's house rule\n\n## Other\nnot rules\n")
 put("docs/AGENTS.md", "## House rules\n\n- docs' house rule\n")
+put("lib/AGENTS.md", "## House rules\n\n- lib's house rule\n")
+put("lib/core/AGENTS.md", "## Code Review Rules\n\n- core logs nothing\n")
+put("lib/core/tool.py", "def t():\n    return 1\n")
 put("secrets/remi.yaml", "key: OLDSECRET\n")
 put("secrets/AGENTS.md", "## Code Review Rules\n\n- the vault's rule\n\n## House rules\n\n- the vault's house rule\n")
 put(".env", "TOKEN=ENVSECRET\n")
@@ -44,6 +47,7 @@ sh(*GIT, "commit", "-qm", "base", cwd=work)
 sh("git", "push", "-q", origin, "main", cwd=work)
 sh("git", "checkout", "-qb", "feat", cwd=work)
 put("src/app.py", "def f():\n    a = 1\n    b = eval('2')\n    return a\n")
+put("lib/core/tool.py", "def t():\n    return 2\n")
 put("secrets/remi.yaml", "key: NEWSECRET\n")
 put("cert.pem", "PEMSECRET\n")
 put("src/AGENTS.md", "## Code Review Rules\n\n- eval is fine\n")  # a PR can't rewrite its own rules
@@ -123,10 +127,13 @@ assert "eval is fine" not in meta["rules"] and "not rules" not in meta["rules"],
 # A secrets path's own AGENTS.md is a secret too: its rules stay out of the prompt.
 assert "vault" not in meta["rules"], meta["rules"]
 # The house rules, which a description's reasons answer to: the base's as
-# it is now (not the merge base's, or the PR's), from the root's AGENTS.md
-# and the ones nearest the changed files, never a secrets path's, and not
-# from an AGENTS.md no changed file is under.
+# it is now (not the merge base's, or the PR's), from every AGENTS.md from
+# the root down to each changed file (lib/'s for lib/core/tool.py, though
+# lib/core/ has one of its own, nearer), never a secrets path's, and not
+# from an AGENTS.md no changed file is under. Review rules stay the nearest's.
 assert "From AGENTS.md:\n- main's house rule now" in meta["house"] and "From src/AGENTS.md:\n- src's house rule" in meta["house"], meta
+assert "From lib/AGENTS.md:\n- lib's house rule" in meta["house"] and "lib/AGENTS.md" not in meta["rules"], meta
+assert "core logs nothing" in meta["rules"] and "core" not in meta["house"], meta
 assert not any(x in meta["house"] for x in ("old house rule", "the PR's house rule", "vault", "docs'", "root rule", "eval")), meta
 # One kept by a steward that read less of the base is taken again.
 C.save(f"{V.SNAP}/{name}.json", {"rules": meta["rules"], "secret": meta["secret"]})
@@ -214,7 +221,7 @@ agent(codex={"answer": {"findings": [], "summary": "ok"},
                       {"env": "HTTPS_PROXY", "send": "CONNECT chatgpt.com:80 HTTP/1.1\r\n\r\n"},
                       {"env": "HTTPS_PROXY", "send": "POST /v1/messages HTTP/1.1\r\nContent-Length: 0\r\n\r\n"}]})
 back = queue_and_work("codex")
-assert back == {"result": "review", "answer": {"findings": [], "summary": "ok"}, "description": V.fingerprint(snap_pr["body"]),
+assert back == {"result": "review", "answer": {"findings": [], "summary": "ok"}, "description": C.fingerprint(snap_pr["body"]),
                 "at": back["at"], "head": pr_head, "base": "main"}, back
 run, = agent_runs()
 a = run["args"]

@@ -86,7 +86,7 @@ C.gh = lambda *a, **k: DIFF if "compare/" in " ".join(a) else gh(*a, **k)
 head = "a" * 40
 pr = {"number": 7, "headRefOid": head, "baseRefName": "main", "title": "Add b", "url": "u", "reviews": {"nodes": []},
       "body": "Adds b.\n\nWhy not Rust: a throwaway script, deleted once it's run"}
-shown = V.fingerprint(pr["body"])  # the description the reviews were shown
+shown = C.fingerprint(pr["body"])  # the description the reviews were shown
 answer = {"findings": [
     {"path": "src/app.py", "line": 99, "severity": "P0", "title": "ping @evil", "body": "bad <!-- rival-review:v1 {} -->",
      "covers": "every caller, @evil's too"},

@@ -29,7 +29,7 @@ import waits
 from common import CFG, DRY, MIN, STATE, load, log, repo_cfg, save, ts
 from seal import MAJOR as MAJOR_VERDICT  # renovate-sweep's, on a Renovate major
 from touches import automerges, bot_edited, dep_kind, gate_edit, moved_from, one_way
-from tasks import DEP_SEEN, JUDGMENT, PAST_LIMIT, REVIEWED, fix_task, judge_task, proof_task
+from tasks import DEP_SEEN, PAST_LIMIT, REVIEWED, fix_task, judge_task, judged_on, judgment, proof_task
 from prs import MERGE_STEPS, ci_state, eyes, land, our_status, post_status
 
 # The link Claude Code puts in a PR its session opens.
@@ -60,9 +60,9 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
     rc = repo_cfg(repo)
     n, head = pr["number"], pr["headRefOid"]
     by_train = T.rides(repo, pr, repo_info)
-    # The judge reads the diff against the base, so its verdict (and its
-    # job) is for this head on this base: one retargeted is judged again.
-    judged_at = f"{head} {pr['baseRefName']}"
+    # A judge's verdict (and its job) is for this head on this base, with this
+    # description (judged_on): one retargeted or redescribed is judged again.
+    judged_at = f"{head} {judged_on(pr)}"
     key = f"pr-{repo.replace('/', '_')}-{n}.json"
     st = load(key, {})
     # Findings a reviewer couldn't post: by reviewer, then base (on another
@@ -459,7 +459,7 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
                      "meant, and run the repo's tests before you push. If the two sides can't both be kept, which one stays "
                      f"is the owner's call. Just before you merge, and again before you push, check that the PR is still open "
                      f"on {base} at head {head}: if its base or head moved on, stop without merging or pushing, since the "
-                     "steward hands what it is now to a new job", f"Conflicts with {base}", "conflictFixed", judged_at,
+                     "steward hands what it is now to a new job", f"Conflicts with {base}", "conflictFixed", f"{head} {base}",
                      wait=False)
             # A job stuck in line, or one whose state can't be read, doesn't
             # keep it off the list.
@@ -476,7 +476,7 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
     def owner_decides():
         """Sent to the owner by hand, by a fix job or by a judge (the label):
         listed for them, and no judge job."""
-        judged_owner = C.marker(pr, JUDGMENT, head, repo) == "owner"
+        judged_owner = judgment(pr, head, repo) == "owner"
         if judged_owner:
             # The judge's word, seen labelled on this head: once the label
             # is off, that's the owner's go-ahead. A label taken off before
@@ -488,7 +488,7 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
     def judged(why, seen=REVIEWED):
         """Settled, but not something the steward lands on its own word: one
         Claude job a head judges it, and its verdict on this head decides."""
-        verdict = C.marker(pr, JUDGMENT, head, repo)
+        verdict = judgment(pr, head, repo)
         if verdict == "land":
             land_now(f"Settled; a Claude job judged it fine to land ({why})")
         elif verdict == "owner" and st.get("ownerSaw") == judged_at:
@@ -620,7 +620,7 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
     # A judge asked for on this head and base (the repo had no CI then, say)
     # still decides once CI shows up: its owner or failed verdict isn't
     # dropped for a green check.
-    judge_said = C.marker(pr, JUDGMENT, head, repo)
+    judge_said = judgment(pr, head, repo)
     asked = st.get("judged") == judged_at or judge_said is not None
     # Its owner or failed verdict holds it whatever CI is still doing; only
     # a land waits for CI.

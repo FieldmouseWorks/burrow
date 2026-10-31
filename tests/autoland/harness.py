@@ -374,12 +374,13 @@ def rv_review(r, k, sha=head, at="2026-10-24T00:11:00Z", who=None, base="main", 
     author = STEWARD if who is None else {"login": who, "__typename": "User"}
     return {"author": author, "state": "COMMENTED", "submittedAt": at, "commit": {"oid": sha},
             "body": f"<!-- {r}-review:v1 " + json.dumps({"commit_sha": sha, "base": base, "findings": k,
-                                                          "description": V.fingerprint(body)}) + " -->"}
+                                                          "description": C.fingerprint(body)}) + " -->"}
 
 
-def judgment(v, n=6, sha=head, base="main"):
-    """A judge's verdict line, sealed as its task gives it."""
-    return f"<!-- autoland-judgment: {v} {sha} {C.seal('sam/r', n, 'autoland-judgment', v, sha, base)} -->"
+def judgment(v, n=6, sha=head, base="main", body=""):
+    """A judge's verdict line, sealed as its task gives it: on the PR's base
+    and the description `body`."""
+    return f"<!-- autoland-judgment: {v} {sha} {C.seal('sam/r', n, 'autoland-judgment', v, sha, f'{base} {C.fingerprint(body)}')} -->"
 
 
 def swept(v, n=8, sha=head, base="main"):
@@ -458,7 +459,7 @@ def worker(**back):
         item = json.load(open(f"{QDIR}/{x}"))
         said = back.get(r, {"result": "review", "answer": {"findings": []}})
         # A review carries the description it was shown, as the service's do.
-        shown = {"description": V.fingerprint(item["body"])} if said["result"] == "review" else {}
+        shown = {"description": C.fingerprint(item["body"])} if said["result"] == "review" else {}
         C.save(f"{V.DONE}/{x}", {**shown, **said, "at": C.NOW, "head": item.get("headRefOid"), "base": item.get("baseRefName")})
         os.remove(f"{QDIR}/{x}")
 

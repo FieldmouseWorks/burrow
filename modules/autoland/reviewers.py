@@ -63,24 +63,13 @@ def finding(r):
     return f"<!-- {r}-finding -->"
 
 
-def quote(body):
-    """A PR's description as the reviewers are shown it: each line quoted,
-    so nothing in it reads as their brief going on."""
-    return "\n".join(f"> {x}".rstrip() for x in body.strip().splitlines()) or "(none)"
-
-
-def fingerprint(body):
-    """What a review carries of the description it was shown."""
-    return hashlib.sha256(quote(body).encode()).hexdigest()[:16]
-
-
 def described(pr, seen):
     """Whether a review that was shown the description `seen` (its
     fingerprint) was shown the PR's as it is now. The reasons a description
     gives are part of what a reviewer judges, so a review of another one
     doesn't cover the PR: a `Why not Rust:` line written in after a clean
     review (CI wanted one) has had nobody weigh it."""
-    return seen == fingerprint(pr["body"])
+    return seen == C.fingerprint(pr["body"])
 
 
 def verdict(pr, head, r):
@@ -147,26 +136,28 @@ def hidden(repo, path):
 def rules(repo, mirror, rev, paths):
     """The `## Code Review Rules` of the AGENTS.md nearest each changed file,
     and the `## House rules` the reasons a PR's description gives answer to,
-    from those and the root's, as `rev` (the base branch) has them: a PR
+    from every AGENTS.md from the root down to each changed file (a nearer
+    one can add to the root's), as `rev` (the base branch) has them: a PR
     can't rewrite its own rules, and the base it lands on is the one whose
     rules hold. An AGENTS.md in a secrets path is never read: its rules
     would reach the reviewers in the prompt. Returns the two, as text."""
     have = {f for f in names(git("-C", mirror, "ls-tree", "-r", "-z", "--name-only", rev)) if not hidden(repo, f)}
-    wanted = set()
+    nearest, above = set(), set()
     for p in paths:
-        d = p
+        mine, d = [], p
         while d:
             d = d.rpartition("/")[0]
             f = f"{d}/AGENTS.md" if d else "AGENTS.md"
             if f in have:
-                wanted.add(f)
-                break
+                mine.append(f)
+        nearest.update(mine[:1])
+        above.update(mine)
     out = {"Code Review Rules": [], "House rules": []}
-    for f in sorted(wanted | ({"AGENTS.md"} & have)):
+    for f in sorted(above):
         text = git("-C", mirror, "show", f"{rev}:{f}").decode(errors="replace")
         for heading, found in out.items():
             m = re.search(rf"^## {heading}\s*$(.*?)(?=^## |\Z)", text, re.M | re.S)
-            if m and (f in wanted or heading == "House rules"):
+            if m and (f in nearest or heading == "House rules"):
                 found.append(f"From {f}:\n{m.group(1).strip()}")
     return ["\n\n".join(x) for x in out.values()]
 

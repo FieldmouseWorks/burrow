@@ -347,7 +347,7 @@ def review(name):
                 raise RuntimeError("its snapshot is gone")
             secret = ("\n\nThese files are secrets and are left out of both commits; the PR changes them, "
                       "but you can't see how: " + ", ".join(item["secret"])) if item["secret"] else ""
-            prompt = PROMPT.format(**{**item, "owner": CFG["owner"], "secret": secret, "body": V.quote(item["body"]),
+            prompt = PROMPT.format(**{**item, "owner": CFG["owner"], "secret": secret, "body": C.quote(item["body"]),
                                       "reasons": V.REASONS, "house": item["house"] or "(none)",
                                       "rules": item["rules"] or "(none)", "prior": item["prior"] or "(none)"})
             # The PR's session: every look at it resumes the one before's.
@@ -374,7 +374,7 @@ def review(name):
             log(f"{item['repo']}#{item['number']}: {V.NAMES[r]} took {time.time() - began:.0f}s"
                 + (" in its session" if last.get("id") else ", starting its session"))
             # The description it was shown, which the review covers as much as the head.
-            out = {"result": "review", "answer": scrub(answer), "description": V.fingerprint(item["body"])}
+            out = {"result": "review", "answer": scrub(answer), "description": C.fingerprint(item["body"])}
         except Out as e:
             out = {"result": "out", "why": scrub(str(e)), "until": e.until}
             log(f"{item['repo']}#{item['number']}: {V.NAMES[item['reviewer']]} is out: {out['why']}")
