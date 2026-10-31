@@ -283,6 +283,12 @@
           bash ${./tests/proj-waits.sh} ${./modules/proj/waits.sh}
           touch $out
         '';
+        # When a job is over, so its scratch goes, worktrees and all.
+        proj-scratch = pkgs.runCommand "proj-scratch-check" { nativeBuildInputs = [ pkgs.shellcheck pkgs.git ]; } ''
+          shellcheck -s bash ${./modules/proj/scratch.sh} ${./tests/proj-scratch.sh}
+          bash ${./tests/proj-scratch.sh} ${./modules/proj/scratch.sh}
+          touch $out
+        '';
         # The steward and its reviewers, with stand-ins for gh, git's remote and
         # the agents, and its one-way paths as the module sets them.
         autoland = pkgs.runCommand "autoland-check" { nativeBuildInputs = [ pkgs.python3 pkgs.git pkgs.openssl ]; } ''
@@ -444,6 +450,34 @@
         notify = pkgs.runCommand "notify-check" { nativeBuildInputs = [ pkgs.shellcheck pkgs.jq pkgs.bash ]; } ''
           shellcheck -s bash ${./tests/notify.sh}
           bash ${./tests/notify.sh} ${./modules/notify/notify.sh}
+          touch $out
+        '';
+        # claude-trust, as the machine gets it, on a stand-in ~/.claude.json:
+        # both spellings of a folder, the rest kept, Claude Code's lock kept to.
+        claude-trust = pkgs.runCommand "claude-trust-check" { nativeBuildInputs = [ pkgs.shellcheck pkgs.jq ]; } ''
+          shellcheck -s bash ${./tests/claude-trust.sh}
+          bash ${./tests/claude-trust.sh} ${pkgs.lib.getExe self.nixosConfigurations.example.config.burrow.tools.claude-trust}
+          touch $out
+        '';
+        # The usage watcher's Claude Code starts in a folder its unit has
+        # trusted already, so it never meets that question with nobody there:
+        # under a state dir with a space in it too, one argument however it's
+        # spelled (systemd's quoting, which bash reads the same for this one).
+        usage-reset-trust = let
+          example = (self.nixosConfigurations.example.extendModules {
+            modules = [{ burrow.stateDir = pkgs.lib.mkForce "/var/lib/burrow state"; }];
+          }).config;
+          pre = map (pkgs.lib.removePrefix "-")
+            (pkgs.lib.toList (example.systemd.services.burrow-usage-reset.serviceConfig.ExecStartPre or [ ]));
+        in pkgs.runCommand "usage-reset-trust-check" { nativeBuildInputs = [ pkgs.jq ]; } ''
+          export HOME=$TMPDIR/home
+          mkdir -p "$HOME"
+          echo '{}' >"$HOME/.claude.json"
+          ${pkgs.lib.concatLines pre}
+          # Where the watcher starts it: its state dir's claude/.
+          dir=${pkgs.lib.escapeShellArg "${example.burrow.stateDir}/usage-reset/claude"}
+          jq -e --arg d "$dir" '.projects[$d].hasTrustDialogAccepted == true' "$HOME/.claude.json" >/dev/null ||
+            { echo "burrow-usage-reset starts its Claude Code in $dir untrusted" >&2; exit 1; }
           touch $out
         '';
         # The update job's fix jobs: pipeline work, one per problem while it's
