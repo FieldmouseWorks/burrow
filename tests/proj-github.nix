@@ -15,9 +15,9 @@
 # in it leaving it once the label comes, the watchdog told so again each pass
 # whatever an older turn wrote, that an issue's turn cut off before it
 # answered, its whole unit killed, carries on in its own session, twice in a
-# row at most (a reply's turn starting a new row) while one that answered
-# first has its answer posted, and that a job dir removed or a wait it
-# can't read stops neither proj-inbox nor _watch.
+# row at most (a reply's turn starting a new row, a stop ending it) while
+# one that answered first has its answer posted, and that a job dir removed
+# or a wait it can't read stops neither proj-inbox nor _watch.
 { pkgs }:
 ''
   with subtest("a job waiting on a PR is resumed when the PR changes"):
@@ -535,6 +535,11 @@
       assert machine.succeed(f"cat /data/dev/jobs/{cj}/turns").strip() == "5"
       posted = machine.succeed("cat /tmp/gh/posted")
       assert "turn 3 was cut off" in posted and "turn 4 was cut off" in posted and "turn 5 ended without an answer" in posted, posted
+      # proj carries on only the latest turn, and never one stopped since.
+      machine.fail(f"su - dev -c 'proj reply --cut-off 4 {cj} x'")
+      proj(f"stop {cj}")
+      machine.fail(f"su - dev -c 'proj reply --cut-off 5 {cj} x'")
+      assert machine.succeed(f"cat /data/dev/jobs/{cj}/turns").strip() == "5"
       # A turn a reply started is no third in a row, though no pass saw a
       # turn end between.
       proj(f'reply {cj} "inbox-hang"')

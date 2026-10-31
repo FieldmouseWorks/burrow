@@ -32,6 +32,7 @@
 #   proj run --app NAME PROJECT "task"  the job acts on GitHub as the App NAME,
 #                               one of burrow.github.apps, never as the user
 #   proj reply [--first] ID "message"  continue that job's conversation
+#   proj reply --cut-off N ID "message"  so, if its turn N was cut off
 #   proj status                 recent jobs and their state
 #   proj status --line          every turn in line, next first, and its wait
 #   proj log ID [--turn N]      the job's latest answer, or turn N's (--raw for
@@ -74,10 +75,8 @@
 # stands still meanwhile, the stall watchdog holding that wait to
 # STALL_QUEUED instead.
 #
-# A run killed for memory before it answers (Claude itself, as a rule) is
-# carried on in its own conversation and slot, twice a turn at most, rather
-# than start the work over. A turn whose whole unit was killed (systemd-oomd
-# does that) is carried on by proj-inbox, for an issue's job.
+# A run killed for memory before it answers (Claude, as a rule) is carried
+# on in its own conversation and slot, twice a turn at most (_exec).
 #
 # A turn ends at its answer. Claude -p stays up after it while anything it
 # left in the background runs (a CI watch, say), holding a slot to do
@@ -307,6 +306,15 @@ again() {
   rewatch "$id" &
 }
 
+# Whether turn N, the latest, was cut off: its whole unit killed (by oomd, as
+# a rule), not stopped, with no answer or error but its session in its
+# stream, and not a sandbox's, whose VM may outlive it. Under the job's lock.
+cut_off() {
+  local d=$jobs/$1 f=$jobs/$1/$2.jsonl
+  [ "$(cat "$d/turns" 2>/dev/null)" = "$2" ] && [ "$(state "$1")" = failed ] && [ ! -s "$d/$2.outcome" ] &&
+    [ ! -e "$d/$2.stopped" ] && [ ! -s "$d/agent" ] && grep -q '"session_id"' "$f" 2>/dev/null && ! grep -q '"type":"result"' "$f"
+}
+
 # Known not to be running: not "can't say".
 gone() { case $(systemctl --user show -P ActiveState "$1" 2>/dev/null) in inactive | failed) return 0 ;; esac; return 1; }
 
@@ -492,7 +500,7 @@ fingerprint() { # repo n
 
 case "${1:-status}" in
   run | reply)
-    cmd=$1 vm='' first='' pipeline='' unstick='' kick=() limit='' idle='' owned='' link='' app=''
+    cmd=$1 vm='' first='' pipeline='' unstick='' kick=() limit='' idle='' owned='' link='' app='' cutoff=''
     shift
     while :; do
       case ${1:-} in
@@ -524,6 +532,7 @@ case "${1:-status}" in
           shift
           ;;
         --first) first=first ;;
+        --cut-off) [ "$cmd" = reply ] && [[ ${2:-} =~ ^[0-9]+$ ]] || { echo "proj reply --cut-off N ID \"message\"" >&2; exit 2; }; cutoff=$2; shift ;;
         --pipeline) [ "$cmd" = run ] || { echo "proj reply has no --pipeline: the job's own class is kept" >&2; exit 2; }; pipeline=1 ;;
         --unstick) [ "$cmd" = run ] || { echo "proj reply has no --unstick: the job's own slot is kept" >&2; exit 2; }; unstick=1 ;;
         *) break ;;
@@ -563,14 +572,15 @@ case "${1:-status}" in
       [ -z "$app" ] || echo "$app" >"$jobs/$id/app"
       if [ -n "$vm" ]; then agent new "$p" >"$jobs/$id/agent"; fi
     else
-      id=${1:?usage: proj reply [--first] ID \"message\"}
-      task=${2:?usage: proj reply [--first] ID \"message\"}
+      id=${1:?usage: proj reply [--first] [--cut-off N] ID \"message\"}
+      task=${2:?usage: proj reply [--first] [--cut-off N] ID \"message\"}
       [ -s "$jobs/$id/session" ] || { echo "$id has no session to continue (yet)" >&2; exit 1; }
       # A job's turns start one at a time, and _watch writes back a wait
       # only under the same lock (held until proj exits).
       exec {lk}>>"$jobs/$id/lock"
       flock "$lk"
       case $(state "$id") in queued | running) echo "$id is still $(state "$id")" >&2; exit 1 ;; esac
+      [ -z "$cutoff" ] || cut_off "$id" "$cutoff" || { echo "$id's turn $cutoff wasn't cut off" >&2; exit 1; }
     fi
     start_turn "$id" "$task" "$first"
     echo "$id"
