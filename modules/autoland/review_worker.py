@@ -342,7 +342,7 @@ def review(name):
             r = item["reviewer"]
             if r not in V.on(item["repo"]):  # the repo was taken off it since
                 raise RuntimeError(f"{item['repo']} isn't one {V.NAMES[r]} reviews")
-            snap = os.path.join(STATE, V.SNAP, item["snap"])
+            snap = os.path.join(V.TREES, item["snap"])
             if not os.path.isdir(snap):
                 raise RuntimeError("its snapshot is gone")
             secret = ("\n\nThese files are secrets and are left out of both commits; the PR changes them, "

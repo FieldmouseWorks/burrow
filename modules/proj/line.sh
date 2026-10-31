@@ -136,6 +136,11 @@ entry() { # id class
 take_slot() {
   local id=$1 n=$2 class=$3 me='' came='' f pid got i lk new looked=0 project LC_ALL=C
   mkdir -p "$jobs/.queue" "$jobs/.slots"
+  # This turn says it has its slot only under its job's lock (took_slot), so
+  # proj withdraw may stop it while it waits. On a proj from before that, it
+  # can't be, never having said so: until it hands over to this one, or from
+  # the moment this one hands it over (unmark).
+  : >"$jobs/$id/$n.withdrawable"
   # The place a proj before this one left, if it handed over, and when that
   # place was made, which is when this turn came: MAX_WAIT goes by that, not
   # the name's WHEN, which for a job run --since is when its work began.
@@ -166,6 +171,7 @@ take_slot() {
     # A switch since the last pass: on with the deployed proj, in this place,
     # whether or not a look is due (one the note skips can wait LOOK_EVERY).
     if successor; then
+      unmark "$id" "$n"
       # Mid-exec its cmdline reads empty, and a look clearing out dead places
       # would take this one for gone: no look runs until it's through (_exec).
       exec 9>"$jobs/.slots/.lock"
@@ -216,7 +222,7 @@ take_slot() {
         exec {lk}>&-
         rm -f "$me"
         trap - EXIT TERM INT
-        echo "$i" >"$jobs/$id/$n.slot"
+        took_slot "$id" "$n" "$i"
         return
       fi
       exec {slot}>&-
@@ -241,7 +247,32 @@ unstick_slot() {
   flock "$slot"
   line_of project "$jobs/$id/project"
   printf 'unstick\t%s\n' "$project" >"$jobs/.slots/unstick.who"
-  echo unstick >"$jobs/$id/$n.slot"
+  took_slot "$id" "$n" unstick
+}
+
+# Say that job ID's turn N has slot S (N.slot, which proj state reads as
+# running), under the job's lock: proj withdraw stops a turn only while it
+# has none, and looks under that lock, so none takes one between its look
+# and its stop. One withdrawn while it waits here is stopped with no slot.
+took_slot() {
+  local jl
+  exec {jl}>>"$jobs/$1/lock"
+  flock "$jl"
+  echo "$3" >"$jobs/$1/$2.slot"
+  exec {jl}>&-
+}
+
+# Say job ID's turn N may be withdrawn no more, under the job's lock, so none
+# is stopped on this proj's word once another has it: before a hand-over, to a
+# proj that may take its slot without that lock (one from before took_slot,
+# after a switch back to it). One that can be withdrawn says so again itself,
+# at the top of its take_slot.
+unmark() {
+  local jl
+  exec {jl}>>"$jobs/$1/lock"
+  flock "$jl"
+  rm -f "$jobs/$1/$2.withdrawable"
+  exec {jl}>&-
 }
 
 # Every turn in line, in the order pick takes them (lead ones, then the rest):
