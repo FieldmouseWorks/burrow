@@ -397,6 +397,10 @@
           committed = machine { rev = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"; } [ ];
           dirty = machine { dirtyRev = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-dirty"; } [ ];
           arm = machine { } [ { nixpkgs.hostPlatform = lib.mkForce "aarch64-linux"; } ];
+          # remi's install rehearsal turns burrow-events' handlers off.
+          unhandled = machine { rev = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"; } [ { burrow.events.handlers = lib.mkForce { }; } ];
+          # A machine may space the passes out itself.
+          spaced = machine { } [ { burrow.events.handlers.dispatch.gap = lib.mkForce 600; } ];
           settings = m: m.config.burrow.dispatch.settings;
           revisions = map (m: m.config.system.configurationRevision) [ committed dirty ];
           deploy = { inherit ((settings committed).deploy) own running; };
@@ -418,6 +422,10 @@
             "dispatch: the systems are stamped ${builtins.toJSON revisions}";
           assert lib.assertMsg (labels committed == wantLabels "X64") "dispatch: x86_64's labels: ${builtins.toJSON (labels committed)}";
           assert lib.assertMsg (labels arm == wantLabels "ARM64") "dispatch: aarch64's labels: ${builtins.toJSON (labels arm)}";
+          assert lib.assertMsg (settings unhandled == settings committed)
+            "dispatch: with the handlers off, the settings are ${builtins.toJSON (settings unhandled)}";
+          assert lib.assertMsg ((settings committed).gap == 120 && (settings spaced).gap == 600)
+            "dispatch: runners' waits allow for a ${toString (settings committed).gap}s gap, and ${toString (settings spaced).gap}s with passes 600s apart";
           pkgs.runCommand "dispatch-config-check" { } ''
             ${self.nixosConfigurations.example.config.systemd.services.burrow-dispatch.serviceConfig.ExecStart} status
             ${committed.config.systemd.services.burrow-dispatch.serviceConfig.ExecStart} status
@@ -428,6 +436,34 @@
         notify = pkgs.runCommand "notify-check" { nativeBuildInputs = [ pkgs.shellcheck pkgs.jq pkgs.bash ]; } ''
           shellcheck -s bash ${./tests/notify.sh}
           bash ${./tests/notify.sh} ${./modules/notify/notify.sh}
+          touch $out
+        '';
+        # claude-trust, as the machine gets it, on a stand-in ~/.claude.json:
+        # both spellings of a folder, the rest kept, Claude Code's lock kept to.
+        claude-trust = pkgs.runCommand "claude-trust-check" { nativeBuildInputs = [ pkgs.shellcheck pkgs.jq ]; } ''
+          shellcheck -s bash ${./tests/claude-trust.sh}
+          bash ${./tests/claude-trust.sh} ${pkgs.lib.getExe self.nixosConfigurations.example.config.burrow.tools.claude-trust}
+          touch $out
+        '';
+        # The usage watcher's Claude Code starts in a folder its unit has
+        # trusted already, so it never meets that question with nobody there:
+        # under a state dir with a space in it too, one argument however it's
+        # spelled (systemd's quoting, which bash reads the same for this one).
+        usage-reset-trust = let
+          example = (self.nixosConfigurations.example.extendModules {
+            modules = [{ burrow.stateDir = pkgs.lib.mkForce "/var/lib/burrow state"; }];
+          }).config;
+          pre = map (pkgs.lib.removePrefix "-")
+            (pkgs.lib.toList (example.systemd.services.burrow-usage-reset.serviceConfig.ExecStartPre or [ ]));
+        in pkgs.runCommand "usage-reset-trust-check" { nativeBuildInputs = [ pkgs.jq ]; } ''
+          export HOME=$TMPDIR/home
+          mkdir -p "$HOME"
+          echo '{}' >"$HOME/.claude.json"
+          ${pkgs.lib.concatLines pre}
+          # Where the watcher starts it: its state dir's claude/.
+          dir=${pkgs.lib.escapeShellArg "${example.burrow.stateDir}/usage-reset/claude"}
+          jq -e --arg d "$dir" '.projects[$d].hasTrustDialogAccepted == true' "$HOME/.claude.json" >/dev/null ||
+            { echo "burrow-usage-reset starts its Claude Code in $dir untrusted" >&2; exit 1; }
           touch $out
         '';
         # The update job's fix jobs: pipeline work, one per problem while it's

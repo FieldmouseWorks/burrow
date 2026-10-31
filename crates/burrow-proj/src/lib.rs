@@ -33,6 +33,8 @@
 //! proj run --app NAME PROJECT "task"  the job acts on GitHub as the App NAME,
 //!                             one of burrow.github.apps, never as the user
 //! proj reply [--first] ID "message"  continue that job's conversation
+//! proj reply --cut-off N ID "message"  so, if its turn N was cut off
+//!                             (else exit 3)
 //! proj status                 recent jobs and their state
 //! proj status --line          every turn in line, next first, and its wait
 //! proj log ID [--turn N]      the job's latest answer, or turn N's (--raw for
@@ -76,6 +78,9 @@
 //! machine-wide lock) says so in the turn's PROJ_WAIT_DIR ([`waits::waiting`]
 //! has how), and the turn's timeout stands still meanwhile, the stall watchdog
 //! holding that wait to stallAfterMinutes instead.
+//!
+//! A run killed for memory before it answers (Claude, as a rule) is carried on
+//! in its own conversation and slot, twice a turn at most ([`turn`]).
 //!
 //! A turn ends at its answer. Claude -p stays up after it while anything it
 //! left in the background runs (a CI watch, say), holding a slot to do

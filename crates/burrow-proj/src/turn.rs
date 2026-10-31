@@ -20,6 +20,9 @@ use crate::{Fail, filled, mtime, mtime_nanos, nanos, now_nanos, read, slot, swap
 /// How a job waits on its own long work, which its answer would stop.
 const LONG: &str = "A command that can outlast one Bash call (ten minutes), a long build or test run, goes to the background with its output and exit code written to a file, and you wait for that file in the foreground, in steps under ten minutes each; answer only once it's there.";
 
+/// What a run killed for memory before it answered is told in the next.
+const KILLED: &str = "Your last run was killed for memory before you answered, and everything it had running went with it. Carry on from where you left off: see what had already finished before you run anything again.";
+
 /// How a turn says what comes next: what resumes the job, if anything.
 const NEXT: &str = "`proj await URL` for each PR or issue you're still waiting on (the job is resumed, with this conversation, once one of them changes: checks finish, a review, comment or push, merged or closed), `proj ask` when your answer is a question only a person can settle (their reply resumes it), or `proj done` when the work is finished";
 
@@ -186,12 +189,12 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
     let must = !job.path("owned").exists() && agent.is_none();
     let stream = job.turn(&n, "jsonl");
     File::create(&stream).map_err(|e| Fail::new(1, format!("proj: {}: {e}", stream.display())))?;
-    let first_prompt = job.path(&format!("prompt.{n}"));
-    let mut prompt = first_prompt.clone();
+    let mut prompt = job.path(&format!("prompt.{n}"));
     let quiet = read(&job.path("idle"))
         .filter(|i| !i.is_empty())
         .and_then(|i| nanos(&i))
         .map_or(0, |q| (q + 999_999_999) / 1_000_000_000);
+    let mut killed = 0;
     let (last, mut rc) = loop {
         let mut args: Vec<String> = ["-p", "--output-format", "stream-json", "--verbose"]
             .map(String::from)
@@ -209,6 +212,7 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
             touch(&job.turn(&n, "late"));
             break (None, 124);
         }
+        let ooms = oom_kills();
         let child = match spawn(
             cfg,
             &job,
@@ -236,6 +240,36 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
         .watch(child, from);
         let rc = code(status);
         let last = last_result(&stream, from);
+        // The turn's next run, in the same conversation and slot, is told
+        // `text`, kept in its N.KIND.
+        let again = |text: &str, kind: &str| -> PathBuf {
+            let told = job.turn(&n, kind);
+            let _ = fs::write(&told, format!("{text}\n"));
+            // The next run's quiet counts from its start, and is its own.
+            let _ = fs::remove_file(job.turn(&n, "quiet"));
+            touch(&stream);
+            // The last run's look telling the watchdog its wait was over may
+            // not have got through before the rest of it went: told again.
+            rewatch_later(cfg, id);
+            told
+        };
+        // Killed for memory before it answered, Claude itself as a rule (a
+        // command it ran that's killed leaves it to answer), and not stopped
+        // for going quiet: carried on in its own conversation, which its
+        // stream named, twice a turn at most, once all of it is gone. Not a
+        // sandbox's, whose work in the VM may outlive its unit's.
+        if last.is_none()
+            && killed < 2
+            && !job.turn(&n, "quiet").exists()
+            && agent.is_none()
+            && oom_kills() > ooms
+            && names_session(&stream, from)
+            && reap()
+        {
+            killed += 1;
+            prompt = again(KILLED, "killed");
+            continue;
+        }
         // Still up after its answer, it was waiting on something it left in
         // the background (a build past one Bash call), which went with it.
         // Or it answered without saying what comes next, and nothing would
@@ -260,20 +294,12 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
             ));
         }
         if !told.is_empty()
-            && prompt == first_prompt
+            && !job.turn(&n, "cut").exists()
             && agent.is_none()
             && last.as_ref().is_some_and(|l| !is_error(l))
             && reap()
         {
-            let cut_prompt = job.turn(&n, "cut");
-            let _ = fs::write(&cut_prompt, format!("{told} Then answer again.\n"));
-            prompt = cut_prompt;
-            // The next run's quiet counts from its start, and is its own.
-            let _ = fs::remove_file(job.turn(&n, "quiet"));
-            touch(&stream);
-            // The last run's look telling the watchdog its wait was over may
-            // not have got through before the rest of it went: told again.
-            rewatch_later(cfg, id);
+            prompt = again(&format!("{told} Then answer again."), "cut");
             continue;
         }
         break (last, rc);
@@ -634,13 +660,10 @@ fn stop(pid: Pid) {
 /// still there after that.
 fn reap() -> bool {
     let me = process::id();
-    let cgroup = fs::read_to_string("/proc/self/cgroup").unwrap_or_default();
-    let Some(path) = cgroup.lines().find_map(|l| l.strip_prefix("0::")) else {
+    let Some(cgroup) = cgroup() else {
         return true;
     };
-    let procs = PathBuf::from("/sys/fs/cgroup")
-        .join(path.trim_start_matches('/'))
-        .join("cgroup.procs");
+    let procs = cgroup.join("cgroup.procs");
     let mut signals = vec![Some(Signal::TERM)];
     signals.extend([None; 9]);
     signals.push(Some(Signal::KILL));
@@ -664,4 +687,32 @@ fn reap() -> bool {
         sleep(Duration::from_secs(1));
     }
     false
+}
+
+/// This process's unit's cgroup.
+fn cgroup() -> Option<PathBuf> {
+    let text = fs::read_to_string("/proc/self/cgroup").ok()?;
+    let path = text.lines().find_map(|l| l.strip_prefix("0::"))?;
+    Some(PathBuf::from("/sys/fs/cgroup").join(path.trim_start_matches('/')))
+}
+
+/// How many of the unit's processes the kernel has killed for memory, past
+/// whichever cap: the job's own, its slice's or the machine's.
+fn oom_kills() -> u64 {
+    cgroup()
+        .and_then(|c| fs::read_to_string(c.join("memory.events")).ok())
+        .and_then(|events| {
+            events
+                .lines()
+                .find_map(|l| l.strip_prefix("oom_kill ")?.trim().parse().ok())
+        })
+        .unwrap_or(0)
+}
+
+/// Whether a stream from byte `from` on has named its session.
+fn names_session(stream: &Path, from: u64) -> bool {
+    fs::read(stream).is_ok_and(|text| {
+        String::from_utf8_lossy(text.get(from as usize..).unwrap_or_default())
+            .contains(r#""session_id""#)
+    })
 }

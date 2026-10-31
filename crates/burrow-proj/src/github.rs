@@ -39,6 +39,7 @@ pub fn fingerprint(cfg: &Config, repo: &str, n: &str) -> Option<Value> {
             .arg("api")
             .args(args)
             .stdin(Stdio::null())
+            .stderr(Stdio::inherit())
             .output()
             .ok()?;
         if !out.status.success() {

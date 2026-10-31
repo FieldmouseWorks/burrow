@@ -118,6 +118,7 @@ fn kick_name(k: &str) -> bool {
 fn run(cfg: &Config, reply: bool, args: &[String]) -> Result<(), Fail> {
     let (mut vm, mut first, mut pipeline, mut unstick, mut owned) =
         (false, false, false, false, false);
+    let mut cutoff = None;
     let (mut kicks, mut limit, mut idle, mut link, mut app) = (Vec::new(), None, None, None, None);
     let mut i = 0;
     let only_run = |what: &str| -> Result<(), Fail> {
@@ -192,6 +193,17 @@ fn run(cfg: &Config, reply: bool, args: &[String]) -> Result<(), Fail> {
                 i += 1;
             }
             Some("--first") => first = true,
+            Some("--cut-off") => {
+                let bad = || Fail::new(2, "proj reply --cut-off N ID \"message\"");
+                let n = value
+                    .filter(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+                    .ok_or_else(bad)?;
+                if !reply {
+                    return Err(bad());
+                }
+                cutoff = Some(n.to_owned());
+                i += 1;
+            }
             Some("--pipeline") => {
                 only_run("--pipeline: the job's own class is kept")?;
                 pipeline = true;
@@ -278,7 +290,7 @@ fn run(cfg: &Config, reply: bool, args: &[String]) -> Result<(), Fail> {
         }
         id
     } else {
-        let usage = "usage: proj reply [--first] ID \"message\"";
+        let usage = "usage: proj reply [--first] [--cut-off N] ID \"message\"";
         let id = arg(args, i, usage)?.to_owned();
         arg(args, i + 1, usage)?;
         id
@@ -288,16 +300,23 @@ fn run(cfg: &Config, reply: bool, args: &[String]) -> Result<(), Fail> {
     // A job's turns start one at a time, and a look by proj-watch writes
     // back a wait only under the same lock, held until proj exits.
     let _held = if reply {
+        // 3: nothing to carry on (--cut-off), as against a turn that can't start.
+        let no = if cutoff.is_some() { 3 } else { 1 };
         if !filled(&job.path("session")) {
             return Err(Fail::new(
-                1,
+                no,
                 format!("{id} has no session to continue (yet)"),
             ));
         }
         let held = job.lock().map_err(|e| io_fail(&job.path("lock"), e))?;
         let st = job.state();
         if st == "queued" || st == "running" {
-            return Err(Fail::new(1, format!("{id} is still {st}")));
+            return Err(Fail::new(no, format!("{id} is still {st}")));
+        }
+        if let Some(n) = &cutoff
+            && !job.cut_off(n)
+        {
+            return Err(Fail::new(3, format!("{id}'s turn {n} wasn't cut off")));
         }
         Some(held)
     } else {
@@ -547,15 +566,7 @@ fn wait_on(cfg: &Config, targets: &[String]) -> Result<(), Fail> {
             .push(target(t).ok_or_else(|| Fail::new(2, format!("not a GitHub PR or issue: {t}")))?);
     }
     let job = Job::new(cfg, &id);
-    let mut text = String::new();
-    for (repo, n) in found {
-        // No fingerprint (GitHub can't be asked just now): _watch takes it
-        // later.
-        let fp = fingerprint(cfg, &repo, &n)
-            .map(|f| f.to_string())
-            .unwrap_or_default();
-        text += &format!("{repo}#{n}\t{}\t{fp}\n", now());
-    }
+    let text = baselines(cfg, &found, targets)?;
     let next = job.path("await.next");
     File::options()
         .append(true)
@@ -569,6 +580,20 @@ fn wait_on(cfg: &Config, targets: &[String]) -> Result<(), Fail> {
         targets.join(" ")
     ));
     Ok(())
+}
+
+/// What to await, a line each: every baseline, or none. One GitHub can't give
+/// (its token refused, the PR not there) fails the whole await, with gh's own
+/// words, rather than leaving the job waiting on something proj never read.
+fn baselines(cfg: &Config, found: &[(String, String)], targets: &[String]) -> Result<String, Fail> {
+    let mut text = String::new();
+    for ((repo, n), t) in found.iter().zip(targets) {
+        let fp = fingerprint(cfg, repo, n).ok_or_else(|| {
+            Fail::new(1, format!("proj: couldn't read {t} from GitHub (gh's error is above), so nothing is awaited: fix that and run proj await again, or end the turn with proj ask"))
+        })?;
+        text += &format!("{repo}#{n}\t{}\t{fp}\n", now());
+    }
+    Ok(text)
 }
 
 /// `proj ask` and `proj done`, from inside a job: how its turn ends, said
@@ -622,7 +647,24 @@ fn ended(cfg: &Config) -> Result<(), Fail> {
 
 #[cfg(test)]
 mod tests {
-    use super::{id_name, kick_name};
+    use super::{baselines, id_name, kick_name};
+    use crate::config::Config;
+
+    // A baseline GitHub can't give fails the whole await, and writes nothing.
+    #[test]
+    fn an_await_needs_every_baseline() {
+        let mut v = crate::config::tests::example();
+        v["tools"]["gh"] = "/nowhere/gh".into();
+        let cfg: Config = serde_json::from_value(v).unwrap();
+        let found = [("o/r".to_owned(), "5".to_owned())];
+        let fail = baselines(&cfg, &found, &["o/r#5".to_owned()]).unwrap_err();
+        assert_eq!(fail.code, 1);
+        assert!(
+            fail.say
+                .unwrap()
+                .contains("couldn't read o/r#5 from GitHub")
+        );
+    }
 
     #[test]
     fn id_names() {

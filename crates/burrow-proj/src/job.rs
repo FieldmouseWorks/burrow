@@ -130,6 +130,22 @@ impl<'a> Job<'a> {
         }
     }
 
+    /// Whether turn N, the latest, was cut off: its whole unit killed (by oomd,
+    /// as a rule), not stopped, with no answer or error but its session in its
+    /// stream, and not a sandbox's, whose VM may outlive it. Under the job's
+    /// lock.
+    pub fn cut_off(&self, n: &str) -> bool {
+        let text = fs::read(self.turn(n, "jsonl")).unwrap_or_default();
+        let text = String::from_utf8_lossy(&text);
+        self.turns().as_deref() == Some(n)
+            && self.state() == "failed"
+            && !filled(&self.turn(n, "outcome"))
+            && !self.turn(n, "stopped").exists()
+            && !filled(&self.path("agent"))
+            && text.contains(r#""session_id""#)
+            && !text.lines().any(|l| result_of(l).is_some())
+    }
+
     /// How turn N ended, for its log: its outcome, or failed when it has
     /// none and isn't going (its unit stopped, or killed with it, before it
     /// wrote one), as `proj state` says. None while it's queued or running,
@@ -385,6 +401,42 @@ mod tests {
         assert!(result_of("{\"type\":\"result\",\"num_turns\":0,\"result\":\"hi\"}").is_some());
         fs::write(&s, format!("{empty}\n")).unwrap();
         assert_eq!(last_result(&s, 0), None);
+    }
+
+    // Cut off: the latest turn, gone with no outcome, no answer and not stopped,
+    // its session named, and no sandbox's.
+    #[test]
+    fn cut_off() {
+        let d = tempfile::tempdir().unwrap();
+        let mut v = crate::config::tests::example();
+        v["jobs"] = d.path().to_str().unwrap().into();
+        v["tools"]["systemctl"] = "/nowhere/systemctl".into();
+        let cfg: Config = serde_json::from_value(v).unwrap();
+        let job = Job::new(&cfg, "web-1");
+        fs::create_dir_all(&job.dir).unwrap();
+        fs::write(job.path("turns"), "2\n").unwrap();
+        let stream = job.turn("2", "jsonl");
+        let session = "{\"type\":\"system\",\"session_id\":\"s\"}\n";
+        let empty = "{\"type\":\"result\",\"session_id\":\"s\",\"num_turns\":0,\"result\":\"\",\"is_error\":false}\n";
+        fs::write(&stream, format!("{session}{empty}")).unwrap();
+        assert!(job.cut_off("2"));
+        assert!(!job.cut_off("1"), "not the latest");
+        fs::write(&stream, "{\"type\":\"system\"}\n").unwrap();
+        assert!(!job.cut_off("2"), "no session named");
+        fs::write(
+            &stream,
+            format!("{session}{{\"type\":\"result\",\"is_error\":true}}\n"),
+        )
+        .unwrap();
+        assert!(!job.cut_off("2"), "it ended in a result");
+        fs::write(&stream, session).unwrap();
+        for f in [job.turn("2", "stopped"), job.path("agent")] {
+            fs::write(&f, "x\n").unwrap();
+            assert!(!job.cut_off("2"), "{}", f.display());
+            fs::remove_file(&f).unwrap();
+        }
+        fs::write(job.turn("2", "outcome"), "failed\n").unwrap();
+        assert!(!job.cut_off("2"), "it has an outcome");
     }
 
     #[test]
