@@ -36,11 +36,12 @@ scratch_clear() {
   [ -e "$dir" ] || return 0
   gone=$SCRATCH/jobs/.gone-$1-$$
   mv -T -- "$dir" "$gone" 2>/dev/null || return 0
-  # A worktree's .git is a file naming its repo; a clone's own repo goes with it.
+  # A worktree's .git is a file naming its repo, at whatever depth the job
+  # made it; a clone's own repo (a .git dir, not looked inside) goes with it.
   while IFS= read -r -d '' g; do
     common=$(git -C "${g%/.git}" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || continue
     case $common in "$gone" | "$gone"/*) ;; *) repos[$common]=1 ;; esac
-  done < <(find "$gone" -maxdepth 4 -name .git -type f -print0 2>/dev/null)
+  done < <(find "$gone" -name .git \( -type d -prune -o -type f -print0 \) 2>/dev/null)
   # What a build left read-only (a Go module cache, a store path copied out)
   # stops rm until it's writable again.
   rm -rf -- "$gone" 2>/dev/null || { chmod -R u+w -- "$gone" 2>/dev/null; rm -rf -- "$gone"; } ||

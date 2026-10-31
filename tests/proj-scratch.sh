@@ -1,9 +1,10 @@
 # Each job's scratch (modules/proj/scratch.sh): when a job is over, so its
 # scratch goes (said `proj done`, or stopped, or an --owned job's turn that
 # awaits nothing; never one that awaits or asks, and only as its latest turn
-# left it), and that clearing it takes its worktrees off their repos too, so
-# their branches check out again, leaves every other job's alone, gets past
-# what a build left read-only, and lets two clears at once both succeed.
+# left it), and that clearing it takes its worktrees, however deep, off their
+# repos too, so their branches check out again, leaves every other job's
+# alone, gets past what a build left read-only, and lets two clears at once
+# both succeed.
 #
 #   bash tests/proj-scratch.sh modules/proj/scratch.sh
 set -euo pipefail
@@ -65,6 +66,10 @@ mkdir -p "$SCRATCH/jobs/a" "$SCRATCH/jobs/b"
 git -C "$tmp/web" worktree add -q -b fix-a "$SCRATCH/jobs/a/web" main
 git -C "$tmp/web" worktree add -q -b fix-b "$SCRATCH/jobs/b/web" main
 git clone -q "$tmp/web" "$SCRATCH/jobs/a/clone"
+# And, deep in a's scratch, the only worktree of a second repo.
+git init -q -b main "$tmp/api"
+git -C "$tmp/api" commit -q --allow-empty -m one
+git -C "$tmp/api" worktree add -q -b fix-deep "$SCRATCH/jobs/a/x/y/z/w/api" main
 # What a build leaves: gigabytes of it, some read-only.
 mkdir -p "$SCRATCH/jobs/a/web/target/debug/ro"
 head -c 1M /dev/zero >"$SCRATCH/jobs/a/web/target/debug/ro/lib.rlib"
@@ -79,6 +84,8 @@ trees=$(git -C "$tmp/web" worktree list --porcelain | sed -n 's/^worktree //p')
 [ "$trees" = "$tmp/web"$'\n'"$SCRATCH/jobs/b/web" ] || fail "worktrees left: $trees"
 git -C "$tmp/web" worktree add -q "$tmp/again" fix-a || fail "fix-a can't be checked out again"
 [ -e "$SCRATCH/jobs/b/web/.git" ] || fail "job b's worktree went with a's"
+trees=$(git -C "$tmp/api" worktree list --porcelain | sed -n 's/^worktree //p')
+[ "$trees" = "$tmp/api" ] || fail "deep worktree left: $trees"
 
 # A job with no scratch (a sandbox's, or one cleared already): nothing to do.
 scratch_clear a || fail "a second clear failed"

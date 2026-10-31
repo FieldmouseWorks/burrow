@@ -721,13 +721,22 @@ pkgs.testers.runNixOSTest {
         def trees():
             return machine.succeed("su - dev -c 'git -C /data/dev/src/web worktree list --porcelain'").count("worktree ")
 
+        def cleared(job):
+            # Its dir goes at once (renamed aside), what was in it and its
+            # worktree's registration on web only after: wait for all three.
+            machine.wait_until_succeeds(
+                f"! test -e /data/dev/scratch/jobs/{job}"
+                " && test -z \"$(find /data/dev/scratch/jobs -maxdepth 1 -name '.gone-*')\""
+                " && test \"$(su - dev -c 'git -C /data/dev/src/web worktree list --porcelain' | grep -c '^worktree ')\" = 1",
+                timeout=60,
+            )
+
         a = proj("run web scratch")
         machine.wait_until_succeeds(f"su - dev -c 'proj state {a}' | grep -x done", timeout=120)
         assert machine.succeed("cat /tmp/scratch").strip() == f"/data/dev/scratch/jobs/{a}", machine.succeed("cat /tmp/scratch")
         assert f"/data/dev/scratch/jobs/{a} (" in machine.succeed("cat /tmp/args"), machine.succeed("cat /tmp/args")
         # Done: the turn's end clears it, its worktree off web with it.
-        machine.wait_until_fails(f"test -e /data/dev/scratch/jobs/{a}", timeout=60)
-        assert trees() == 1, trees()
+        cleared(a)
         # Asking, it keeps it for the reply; stopped, it's over.
         q = proj('run web "scratch ask"')
         machine.wait_until_succeeds(f"su - dev -c 'proj state {q}' | grep -x done", timeout=120)
@@ -735,14 +744,12 @@ pkgs.testers.runNixOSTest {
         machine.succeed(f"test -e /data/dev/scratch/jobs/{q}/web/built")
         assert trees() == 2, trees()
         proj(f"stop {q}")
-        machine.fail(f"test -e /data/dev/scratch/jobs/{q}")
-        assert trees() == 1, trees()
+        cleared(q)
         # An --owned job's turn that awaits nothing is its last.
         machine.succeed("touch /tmp/silent")
         o = proj("run --owned --kick autoland/o/w web scratch")
         machine.wait_until_succeeds(f"su - dev -c 'proj state {o}' | grep -x done", timeout=120)
-        machine.wait_until_fails(f"test -e /data/dev/scratch/jobs/{o}", timeout=60)
-        assert trees() == 1, trees()
+        cleared(o)
         machine.succeed("rm /tmp/silent")
   '';
 }
