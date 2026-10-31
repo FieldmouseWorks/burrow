@@ -177,7 +177,7 @@ C.save("wake.json", {"sam/r": T + 50, "sam/other": T + 60, "sam/gone": T - 1})
 C.save("digest-repos.json", {"sam/r": [["Old", "r line", ""]], "sam/other": [["Open over a day", "other line", "x"]]})
 C.save("repos.json", {"untouched": True})
 seen_repos, watched, published = [], [], []
-kept_fns = (S.R.discover, S.R.restart, S.R.settle_repo, S.R.publish, S.R.watch_branches, S.open_prs, S.R.unhook_gone)
+kept_fns = (S.R.discover, S.R.restart, S.R.settle_repo, S.R.publish, S.B.watch_branches, S.open_prs, S.R.unhook_gone)
 S.R.unhook_gone = lambda repos: (_ for _ in ()).throw(AssertionError("hooks taken off in a kicked pass"))
 S.R.discover = lambda: [{"repo": "sam/r", "default": "main"}, {"repo": "sam/other", "default": "main"}]
 order = []
@@ -185,7 +185,7 @@ S.R.restart = lambda r, known, failed: order.append(("restart", r["repo"]))
 S.R.settle_repo = lambda r, known: order.append(("settle", r["repo"])) or r["repo"] not in known
 S.R.publish = published.append
 in_use = []
-S.R.watch_branches = lambda r, branches, digest, full=False: watched.append(full) or in_use.append(branches)
+S.B.watch_branches = lambda r, branches, digest, full=False: watched.append(full) or in_use.append(branches)
 
 
 def kicked_prs(owner, name):
@@ -207,7 +207,7 @@ del S.CFG["baselineTask"]
 C.job = job
 sys.argv = argv
 S.CFG["cleanBranches"] = False
-S.R.discover, S.R.restart, S.R.settle_repo, S.R.publish, S.R.watch_branches, S.open_prs, S.R.unhook_gone = kept_fns
+S.R.discover, S.R.restart, S.R.settle_repo, S.R.publish, S.B.watch_branches, S.open_prs, S.R.unhook_gone = kept_fns
 assert seen_repos == ["sam/r"] and watched == [False], (seen_repos, watched)
 assert order == [("restart", "sam/r"), ("settle", "sam/r")] and NEW_JOBS == [("sam/r", "sam/r is new", True)], \
     (order, NEW_JOBS)
