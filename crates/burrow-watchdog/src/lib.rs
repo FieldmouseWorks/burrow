@@ -31,10 +31,10 @@
 //!      in the pipeline" issue (the steward publishes escalated.json with the
 //!      rest of that issue), and that's the last step. Its job, if it still
 //!      waits for a slot and no other stall needs it, is withdrawn (proj
-//!      stop): it would only take a slot for what the issue has now. proj's
-//!      inbox hands the issue to a job of its own, run --unstick so it never
-//!      waits in proj's line, and each new entry is that job's next turn; it
-//!      puts what's truly the owner's in front of them itself.
+//!      withdraw): it would only take a slot for what the issue has now.
+//!      proj's inbox hands the issue to a job of its own, run --unstick so it
+//!      never waits in proj's line, and each new entry is that job's next
+//!      turn; it puts what's truly the owner's in front of them itself.
 //!   4. The owner hears, one notice a stall (notify), closed once it clears,
 //!      only of what the stuck issue can't take: with no steward, when the
 //!      steward is what's stuck, or when it's the stuck issue's own job

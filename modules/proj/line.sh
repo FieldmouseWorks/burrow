@@ -158,7 +158,7 @@ take_slot() {
         exec {lk}>&-
         rm -f "$me"
         trap - EXIT TERM INT
-        echo "$i" >"$jobs/$id/$n.slot"
+        took_slot "$id" "$n" "$i"
         return
       fi
       exec {slot}>&-
@@ -183,7 +183,19 @@ unstick_slot() {
   flock "$slot"
   line_of project "$jobs/$id/project"
   printf 'unstick\t%s\n' "$project" >"$jobs/.slots/unstick.who"
-  echo unstick >"$jobs/$id/$n.slot"
+  took_slot "$id" "$n" unstick
+}
+
+# Say that job ID's turn N has slot S (N.slot, which proj state reads as
+# running), under the job's lock: proj withdraw stops a turn only while it
+# has none, and looks under that lock, so none takes one between its look
+# and its stop. One withdrawn while it waits here is stopped with no slot.
+took_slot() {
+  local jl
+  exec {jl}>>"$jobs/$1/lock"
+  flock "$jl"
+  echo "$3" >"$jobs/$1/$2.slot"
+  exec {jl}>&-
 }
 
 # Every turn in line, in the order pick takes them (lead ones, then the rest):

@@ -11,8 +11,8 @@ use crate::watch::Item;
 
 /// state.json: the stalls it's taking a step at a time, the sources with no
 /// watch file to read (since when), the stalls that have cleared whose
-/// owner's notice is still to close, and its own jobs that a stall has
-/// stopped needing, to withdraw once none does if they still wait for a slot.
+/// owner's notice is still to close, and its own jobs to withdraw once no
+/// stall needs them, kept until proj has settled each.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default)]
 pub struct State {

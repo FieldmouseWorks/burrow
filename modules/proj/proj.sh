@@ -38,6 +38,9 @@
 #                               the full stream); fails when there's none
 #   proj state ID               queued, running, done, error or failed
 #   proj stop ID                end a job: its running turn and its waits
+#   proj withdraw ID            end a job only while its turn still waits for
+#                               a slot: prints withdrawn, or running or over
+#                               for one it leaves be
 #   proj unstick ID             make a job one run --unstick from now on: a
 #                               turn of it waiting in line leaves it at its
 #                               next look, one running carries on
@@ -607,17 +610,30 @@ case "${1:-status}" in
     fi
     ;;
   state) state "${2:?usage: proj state ID}" ;;
-  stop)
-    id=${2:?usage: proj stop ID}
+  stop | withdraw)
+    id=${2:?usage: proj $1 ID}
     [ -d "$jobs/$id" ] || { echo "no job $id" >&2; exit 1; }
     # Under the lock turns start under, so none starts between looking and
     # stopping. A stopped job is over: nothing it waited on resumes it.
     exec {lk}>>"$jobs/$id/lock"
     flock "$lk"
     u=$(unit "$id") rc=0
+    n=$(cat "$jobs/$id/turns" 2>/dev/null || true)
+    # Withdrawn only while it has no slot. A turn says it has one only under
+    # this lock too (took_slot, line.sh), so it can't take one between this
+    # look and the stop. Failing when systemd can't say, so the caller can
+    # ask again.
+    if [ "$1" = withdraw ]; then
+      case $(systemctl --user show -P ActiveState "$u" 2>/dev/null) in
+        active | activating | reloading) ;;
+        inactive | failed) echo over; exit 0 ;;
+        *) echo "proj: can't tell whether $id still waits for a slot" >&2; exit 1 ;;
+      esac
+      adopt "$id"
+      if [ -e "$jobs/$id/$n.slot" ]; then echo running; exit 0; fi
+    fi
     # Marked first, so the turn's end (_ended) already finds it stopped
     # rather than failed: nobody waits on it.
-    n=$(cat "$jobs/$id/turns" 2>/dev/null || true)
     [ -z "$n" ] || : >"$jobs/$id/$n.stopped"
     gone "$u" || systemctl --user stop "$u" || rc=$?
     # Its waits go whatever the stop said. A failed stop is an error unless
@@ -632,6 +648,7 @@ case "${1:-status}" in
       exit "$rc"
     fi
     rewatch "$id"
+    [ "$1" != withdraw ] || echo withdrawn
     ;;
   unstick)
     id=${2:?usage: proj unstick ID}

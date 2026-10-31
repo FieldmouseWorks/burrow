@@ -27,7 +27,7 @@ struct Fake {
     /// Every proj call's arguments.
     proj: RefCell<Vec<Vec<String>>>,
     /// What `proj state JOB` answers ("done" for one it doesn't name, failed
-    /// once it's stopped), and whether `proj run` or `proj stop` fails.
+    /// once it's withdrawn), and whether `proj run` or `proj withdraw` fails.
     states: RefCell<HashMap<String, String>>,
     refuse: Cell<bool>,
     stuck: Cell<bool>,
@@ -48,12 +48,18 @@ impl World for Fake {
         match args[0] {
             "run" if self.refuse.get() => (false, String::new()),
             "run" => (true, format!("job-{}", log.len())),
-            "stop" if self.stuck.get() => (false, String::new()),
-            "stop" => {
-                self.states
-                    .borrow_mut()
-                    .insert(args[1].into(), "failed".into());
-                (true, String::new())
+            "withdraw" if self.stuck.get() => (false, String::new()),
+            "withdraw" => {
+                let mut states = self.states.borrow_mut();
+                let said = match states.get(args[1]).map(String::as_str) {
+                    Some("queued") => "withdrawn",
+                    Some("running") => "running",
+                    _ => "over",
+                };
+                if said == "withdrawn" {
+                    states.insert(args[1].into(), "failed".into());
+                }
+                (true, said.into())
             }
             _ => (
                 true,
@@ -204,15 +210,29 @@ impl Machine {
             .collect()
     }
 
-    /// Every job it asked proj to stop, once an ask.
-    fn stops(&self) -> Vec<String> {
+    /// Every job it asked proj to withdraw, once an ask.
+    fn withdrawals(&self) -> Vec<String> {
         self.world
             .proj
             .borrow()
             .iter()
-            .filter(|a| a[0] == "stop")
+            .filter(|a| a[0] == "withdraw")
             .map(|a| a[1].clone())
             .collect()
+    }
+
+    /// proj's line holding these and the watchdog's own job-1, as proj
+    /// writes it.
+    fn in_line(&self, mut items: Value) {
+        let mut it = named(
+            "proj job job-1",
+            "turn 1 is waiting in line for a slot",
+            T,
+            T + H,
+        );
+        it["line"] = true.into();
+        items["job-1"] = it;
+        self.write(&self.line, items, T);
     }
 
     fn kicks(&self) -> Vec<String> {
@@ -408,10 +428,12 @@ fn jobs_time_up() {
     }
 }
 
-// Its own job, still waiting for a slot once its stall has moved on (moving
-// again, or on to the stuck issue at START), is withdrawn: it has done
-// nothing, and would only take a slot from the line for what's no longer
-// its. A stop that doesn't get through is tried again on the next pass.
+// Its own job, still waiting for a slot once its stalls have moved on, is
+// withdrawn (proj withdraw): it has done nothing, and would only take a slot
+// from the line for what's no longer its. Moving again: at once. On the
+// stuck issue (at START, say): while proj's line holds the job, however it
+// got there, an older pass's escalation included. One proj can't settle is
+// asked about again on the next pass.
 #[test]
 fn withdraws_its_job() {
     let stalled = |m: &Machine| {
@@ -423,36 +445,52 @@ fn withdraws_its_job() {
         m.run(T);
         m.state_of("job-1", "queued");
         m.run(T + MIN);
-        assert!(m.stops().is_empty());
+        assert!(m.withdrawals().is_empty());
     };
+    let gone = |m: &Machine| m.world.states.borrow()["job-1"] == "failed";
 
     let m = Machine::new();
     stalled(&m);
     m.write(&m.steward, json!({}), T);
     assert_eq!(m.run(T + 2.0 * MIN).1, BTreeMap::new());
-    assert_eq!(m.stops(), ["job-1"]);
+    assert!(m.withdrawals() == ["job-1"] && gone(&m));
     m.run(T + 3.0 * MIN);
-    assert_eq!(m.stops(), ["job-1"]);
+    assert_eq!(m.withdrawals(), ["job-1"]);
     assert!(m.state().withdraw.is_empty());
 
     let m = Machine::new();
     stalled(&m);
+    m.in_line(json!({}));
     m.world.stuck.set(true);
     m.run(T + START);
-    assert_eq!((m.escalated().len(), m.stops()), (1, vec!["job-1".into()]));
+    assert_eq!(
+        (m.escalated().len(), m.withdrawals()),
+        (1, vec!["job-1".into()])
+    );
     assert_eq!(m.state().withdraw, BTreeSet::from(["job-1".into()]));
     m.world.stuck.set(false);
     m.run(T + START + MIN);
-    m.run(T + START + 2.0 * MIN);
-    assert_eq!(m.stops(), ["job-1", "job-1"]);
+    assert!(m.withdrawals() == ["job-1", "job-1"] && gone(&m));
     assert!(m.state().withdraw.is_empty());
+    m.write(&m.line, json!({}), T);
+    m.run(T + START + 2.0 * MIN);
+    assert_eq!(m.withdrawals().len(), 2);
     assert_eq!((m.escalated().len(), m.notices()), (1, vec![]));
+
+    let m = Machine::new();
+    stalled(&m);
+    m.run(T + START);
+    assert_eq!((m.escalated().len(), m.withdrawals()), (1, vec![]));
+    m.in_line(json!({}));
+    m.run(T + START + MIN);
+    assert!(m.withdrawals() == ["job-1"] && gone(&m));
 }
 
-// Its own job is left be while it has a slot, and while a stall it was
-// handed with still has it: one job takes every stall that's ready in a
-// pass, and one of them moving on leaves the job the rest. One the owner
-// hears of keeps its job too (here, with no steward): the only Claude on it.
+// Its own job is left be once it's at work, and while a stall it was handed
+// with still has it: one job takes every stall that's ready in a pass, and
+// one of them moving on leaves the job the rest. One the owner hears of
+// keeps its job too (here, with no steward), queued or not: it's the only
+// Claude still on it.
 #[test]
 fn keeps_a_job_it_needs() {
     let m = Machine::new();
@@ -463,8 +501,11 @@ fn keeps_a_job_it_needs() {
     );
     m.run(T);
     m.state_of("job-1", "running");
-    m.run(T + 7200.0);
-    assert_eq!((m.escalated().len(), m.stops()), (1, vec![]));
+    m.write(&m.steward, json!({}), T);
+    m.run(T + MIN);
+    m.run(T + 2.0 * MIN);
+    assert_eq!(m.withdrawals(), ["job-1"]);
+    assert_eq!(m.world.states.borrow()["job-1"], "running");
     assert!(m.state().withdraw.is_empty());
 
     let m = Machine::new();
@@ -480,10 +521,10 @@ fn keeps_a_job_it_needs() {
     m.state_of("job-1", "queued");
     m.write(&m.steward, json!({"sam/q#2": q}), T);
     assert_eq!(m.run(T + MIN).1.len(), 1);
-    assert!(m.stops().is_empty());
+    assert!(m.withdrawals().is_empty());
     m.write(&m.steward, json!({}), T);
     m.run(T + 2.0 * MIN);
-    assert_eq!(m.stops(), ["job-1"]);
+    assert_eq!(m.withdrawals(), ["job-1"]);
 
     let mut m = Machine::new();
     m.cfg.steward_kick = None;
@@ -494,9 +535,12 @@ fn keeps_a_job_it_needs() {
     );
     m.run(T);
     m.state_of("job-1", "queued");
+    m.in_line(
+        json!({"homelab-1": named("proj job homelab-1", "waiting for a slot", T - H, T - MIN)}),
+    );
     m.run(T + START);
     m.run(T + START + MIN);
-    assert_eq!((m.notices().len(), m.stops()), (1, vec![]));
+    assert_eq!((m.notices().len(), m.withdrawals()), (1, vec![]));
 }
 
 // A job that ended with it still stuck: its fix gets GRACE to show, then the

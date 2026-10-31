@@ -116,7 +116,6 @@ pub fn run(cfg: &Config, world: &dyn World, now: f64) -> Result<(), String> {
                 wakes.push(at);
             } else {
                 escalate(cfg, world, &s, st, now);
-                withdraw.insert(job);
             }
         } else if st.item.line {
             // Waiting for a slot: a job would join the same line, ahead of
@@ -176,7 +175,24 @@ pub fn run(cfg: &Config, world: &dyn World, now: f64) -> Result<(), String> {
     // Its own jobs whose stalls have all moved on, moving again or on to the
     // stuck issue's job: one still waiting for a slot has done nothing yet,
     // and would only take one from the line for what's no longer its to fix.
-    // One the owner was told of keeps its job, the only Claude still on it.
+    // A cleared stall's job was kept as it went; one on the issue counts
+    // while proj's line holds its job, whenever it got there. One the owner
+    // was told of keeps its job, the only Claude still on it.
+    let in_line: BTreeSet<String> = cfg
+        .sources
+        .get(PROJ)
+        .and_then(watched)
+        .map(|(_, items)| {
+            items
+                .into_iter()
+                .filter(|(_, it)| it.line)
+                .map(|(k, _)| k)
+                .collect()
+        })
+        .unwrap_or_default();
+    for st in stalls.values().filter(|st| st.entry.is_some()) {
+        withdraw.extend(st.job.iter().filter(|j| in_line.contains(*j)).cloned());
+    }
     let needed: BTreeSet<&String> = stalls
         .values()
         .filter(|st| st.entry.is_none())
@@ -239,22 +255,16 @@ fn start_job(cfg: &Config, world: &dyn World, stalls: &[&Stall]) -> Option<Strin
     (ok && !out.is_empty()).then_some(out)
 }
 
-/// Its own job stopped (proj stop) if it's still waiting for a slot: whether
-/// that's done with, stopped or not waiting. A stopped job is over, and
-/// proj's watch has none of it. One that has a slot by now is left to finish.
+/// Its own job ended if its turn still waits for a slot (proj withdraw, which
+/// looks and stops under the lock a turn takes its slot under, so one that
+/// has started is never stopped): whether that's settled, the job withdrawn,
+/// at work or over. One proj can't settle is asked about again next pass.
 fn withdrawn(world: &dyn World, job: &str) -> bool {
-    let (ok, state) = world.proj(&["state", job]);
+    let (ok, out) = world.proj(&["withdraw", job]);
     if !ok {
-        return false;
-    }
-    if state != "queued" {
-        return true;
-    }
-    let (ok, _) = world.proj(&["stop", job]);
-    if ok {
-        println!("withdrew proj job {job}: none of its stalls need it now");
-    } else {
         println!("couldn't withdraw proj job {job}, none of whose stalls need it now");
+    } else if out == "withdrawn" {
+        println!("withdrew proj job {job}: none of its stalls need it now");
     }
     ok
 }
