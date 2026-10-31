@@ -145,21 +145,29 @@ pub fn read(gh: &dyn GitHub, base: &str, head: &str, lines: usize) -> Result<Dif
 }
 
 /// The lines a file's diff adds, from its patch. GitHub gives none for a
-/// binary file or one whose diff is too big to show, so then they're the
-/// lines its head has more of than its old side (`was`, a path at the merge
-/// base), and a binary file adds none.
+/// binary file or one whose diff is too big to show, or one with fewer
+/// added lines than it counts, so then they're the lines its head has more
+/// of than its old side (`was`, a path at the merge base), and a binary file
+/// adds none.
 fn adding(
     f: &Value,
     contents: &mut Contents,
     was: (&str, &str),
     head: &str,
 ) -> Result<Vec<String>, String> {
+    let additions = f["additions"].as_i64().unwrap_or_default();
     if let Some(patch) = f["patch"].as_str() {
-        let added = patch.lines().filter_map(|l| l.strip_prefix('+'));
-        return Ok(added.map(str::to_owned).collect());
+        let added: Vec<String> = patch
+            .lines()
+            .filter_map(|l| l.strip_prefix('+'))
+            .map(str::to_owned)
+            .collect();
+        if i64::try_from(added.len()).unwrap_or(i64::MAX) >= additions {
+            return Ok(added);
+        }
     }
     let (status, file) = (text(f, "status"), text(f, "filename"));
-    if status == "removed" || f["additions"].as_i64().unwrap_or_default() == 0 {
+    if status == "removed" || additions == 0 {
         return Ok(vec![]);
     }
     let Some(now) = contents.text(file, head)? else {

@@ -67,8 +67,8 @@ fn not_timers() {
     )));
 }
 
-// A file GitHub gives no patch for (a diff too big to show): the lines it
-// adds are the ones its head has more of than its old side, the merge base
+// A file GitHub gives no patch for (a diff too big to show), or a patch
+// short of its lines: the lines it adds are the ones its head has more of than its old side, the merge base
 // at its old path. A new file has no old side, and a binary one adds none.
 #[test]
 fn no_patch() {
@@ -85,6 +85,14 @@ fn no_patch() {
             "timers",
         );
     }
+    // Or a patch cut short: fewer added lines than GitHub counts.
+    let short = patched(change("modified", x, 2, 0), adds(&["a"], &[], &[]));
+    fails(
+        &case(vec![short])
+            .tree("4ead", x, &format!("a\n{timer}\n"))
+            .tree("3e7b", x, ""),
+        "timers",
+    );
     // Kept, moved about.
     passes(
         &c("modified", x)

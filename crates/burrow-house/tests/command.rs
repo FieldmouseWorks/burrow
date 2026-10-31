@@ -34,7 +34,7 @@ fn setup(d: &Path, fork: bool) {
     fs::write(d.join("pr.json"), pr.to_string()).unwrap();
     let files = [json!({
         "status": "modified", "filename": "my dir/big.rs", "additions": 20, "deletions": 5,
-        "patch": "@@ -1,5 +1,20 @@\n+x",
+        "patch": format!("@@ -1,5 +1,20 @@{}{}", "\n-x".repeat(5), "\n+x".repeat(20)),
     })];
     let compare = json!({"merge_base_commit": {"sha": "3e7b"}, "files": files});
     fs::write(d.join("compare.json"), compare.to_string()).unwrap();
