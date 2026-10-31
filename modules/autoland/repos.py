@@ -468,30 +468,46 @@ STALE_DAYS = 3
 ARCHIVE = "refs/archive"
 
 
+def answer(call, *args):
+    """What GitHub answered call(*args) (C.gh or C.write), or None when it
+    said no (a branch with no history in common with the default has no
+    comparison, say). C.Unavailable when it didn't answer, which stops a
+    sweep: one that couldn't look at every branch hasn't swept."""
+    try:
+        return call(*args)
+    except C.Unavailable:
+        raise
+    except RuntimeError as e:
+        log(f"  failed: {e}")
+        return None
+
+
 def archive_branch(repo, name, sha):
     """Keep the branch's commits at refs/archive/NAME/SHA, a ref GitHub keeps
     but lists with neither branches nor tags; True once they're kept (by
-    this call or an earlier one), and only then may the branch go."""
+    this call or an earlier one), and only then may the branch go.
+    C.Unavailable when GitHub didn't answer."""
     ref = f"{ARCHIVE}/{name}/{sha}"
     if DRY:
         log(f"  would: keep {repo} {name} at {ref}")
         return True
-    if C.write("api", f"repos/{repo}/git/refs", "-f", f"ref={ref}", "-f", f"sha={sha}", check=False) is not None:
+    if answer(C.write, "api", f"repos/{repo}/git/refs", "-f", f"ref={ref}", "-f", f"sha={sha}") is not None:
         return True
     # Already there: an earlier sweep kept it and then couldn't delete.
-    return C.gh("api", f"repos/{repo}/git/ref/{urllib.parse.quote(ref.removeprefix('refs/'))}",
-                "--jq", f'.object.sha == "{sha}"', check=False) is True
+    return answer(C.gh, "api", f"repos/{repo}/git/ref/{urllib.parse.quote(ref.removeprefix('refs/'))}",
+                  "--jq", f'.object.sha == "{sha}"') is True
 
 
 def closed_at(repo, name, sha):
     """The closed PR whose head was this branch at `sha`, if there is one.
     GitHub keeps that PR's commits (refs/pull/N/head) and offers to restore
-    the branch from its page, so the branch holds nothing the PR doesn't."""
+    the branch from its page, so the branch holds nothing the PR doesn't.
+    None too when GitHub said no; C.Unavailable when it didn't answer."""
     owner = repo.split("/")[0]
     # Every page: a branch name reused for many PRs can have its match
     # past the first hundred.
-    got = C.gh("api", "--paginate", f"repos/{repo}/pulls?state=closed&per_page=100&head={owner}:{urllib.parse.quote(name)}",
-               "--jq", f'.[] | select(.head.sha == "{sha}") | .number', check=False)
+    got = answer(C.gh, "api", "--paginate", f"repos/{repo}/pulls?state=closed&per_page=100&head={owner}:{urllib.parse.quote(name)}",
+                 "--jq", f'.[] | select(.head.sha == "{sha}") | .number')
     if got is None:
         return None
     first = str(got).split("\n")[0]
@@ -504,19 +520,37 @@ UNKEPT = f"Stale branches it couldn't archive (unmerged, no PR, {STALE_DAYS}+ da
 def sweep_branches(r, in_use, digest, sweep=True):
     """Delete the merged branches and the closed PRs' branches, and archive
     and delete the stale ones, once a day and only when `sweep`; the stale
-    ones the last sweep couldn't archive are listed every time."""
+    ones the last sweep couldn't archive are listed every time. A sweep
+    GitHub didn't list the branches for, or stopped answering partway
+    through, isn't one: the next full pass sweeps again, not a day later
+    (what it deleted stays deleted)."""
     repo = r["repo"]
-    st = load(f"repo-{repo.replace('/', '_')}.json", {})
-    if not sweep or C.NOW - st.get("branches", 0) < 86400:
-        for b in st.get("unkept", []):
-            digest.append((UNKEPT, f"{repo}: `{b}`", ""))
-        return
+    path = f"repo-{repo.replace('/', '_')}.json"
+    st = load(path, {})
+    unkept = st.get("unkept", [])
+    if sweep and C.NOW - st.get("branches", 0) >= 86400:
+        try:
+            unkept = swept(r, in_use)
+        except RuntimeError as e:
+            log(f"{repo}: no branch sweep this pass: {e}")
+        else:
+            st.pop("stale", None)  # the list it kept before it archived, which nothing reads now
+            st.update(branches=C.NOW, unkept=unkept)
+            save(path, st)
+    for b in unkept:
+        digest.append((UNKEPT, f"{repo}: `{b}`", ""))
+
+
+def swept(r, in_use):
+    """Sweep r's branches: the stale ones it couldn't archive. RuntimeError
+    when GitHub didn't list them, C.Unavailable when it stopped answering."""
+    repo = r["repo"]
     unkept = []
     # The machine's globs, plus the repo's own (evidence branches it cites),
     # and its train's candidates', which cn makes and deletes.
     keep = CFG["keepBranches"] + repo_cfg(repo).get("keepBranches", []) + [T.TRAIN.get("branches")] * T.on(repo)
-    names = (C.gh("api", "--paginate", f"repos/{repo}/branches?per_page=100", "--jq",
-                  '.[] | select(.protected | not) | "\\(.name) \\(.commit.sha)"', check=False) or "")
+    names = C.gh("api", "--paginate", f"repos/{repo}/branches?per_page=100", "--jq",
+                 '.[] | select(.protected | not) | "\\(.name) \\(.commit.sha)"')
     for x in str(names).split("\n"):
         name, _, sha = x.partition(" ")
         if not name or not sha or name == r["default"] or name in in_use:
@@ -534,8 +568,8 @@ def sweep_branches(r, in_use, digest, sweep=True):
         if DEP_RE.match(name):
             continue
         # Compared at the tip just listed, and deleted only if it's still there.
-        cmp = C.gh("api", f"repos/{repo}/compare/{r['default']}...{sha}", "--jq",
-                   "{ahead: .ahead_by, date: .commits[-1].commit.committer.date}", check=False)
+        cmp = answer(C.gh, "api", f"repos/{repo}/compare/{r['default']}...{sha}", "--jq",
+                     "{ahead: .ahead_by, date: .commits[-1].commit.committer.date}")
         if not isinstance(cmp, dict):
             continue
         if cmp["ahead"] == 0:
@@ -549,11 +583,7 @@ def sweep_branches(r, in_use, digest, sweep=True):
                 delete_branch(repo, name, sha)
             else:
                 unkept.append(name)
-    st.pop("stale", None)  # the list it kept before it archived, which nothing reads now
-    st.update(branches=C.NOW, unkept=unkept)
-    save(f"repo-{repo.replace('/', '_')}.json", st)
-    for b in unkept:
-        digest.append((UNKEPT, f"{repo}: `{b}`", ""))
+    return unkept
 
 
 # What only the owner can settle: their call (a label, a judge's or an
