@@ -118,7 +118,8 @@ def ci_state(pr, proofs=(), moved=None, repo=None):
     has run through for the PR's diff, CI is pending. The merge train's
     status is its word on the PR, not a check of it, except its failure: CI
     failed on the head merged alone onto the default branch, which is the
-    head's to fix. Only the App's counts, as with ours."""
+    head's to fix. Only the App's counts, as with ours. A cancelled check run
+    goes by what its workflow did after it (after_cancel)."""
     nodes = pr["commits"]["nodes"]
     commit = nodes[0]["commit"] if nodes else {}
     contexts = (commit.get("statusCheckRollup") or {}).get("contexts") or {}
@@ -142,9 +143,12 @@ def ci_state(pr, proofs=(), moved=None, repo=None):
         if c["__typename"] == "CheckRun":
             if suite(c).get("id") in stale:
                 continue
+            after = after_cancel(c, contexts.get("nodes", []), stale) if cancelled(c) else None
+            if after == "finished":
+                continue
             seen += 1
             name = c["name"]
-            if c["status"] != "COMPLETED":
+            if c["status"] != "COMPLETED" or after == "going":
                 pending.append(name)
             elif c["conclusion"] not in ("SUCCESS", "NEUTRAL", "SKIPPED"):
                 red.append(name)
@@ -203,6 +207,30 @@ def judged(c):
         return job[len(LANE):], None
     m = re.fullmatch(rf"{DOCS_LANE}([^ ]+) from ([0-9a-f]{{40}})", job)
     return (m[1], m[2]) if m else None
+
+
+def cancelled(c):
+    """Whether a check run finished by being cancelled."""
+    return c.get("status") == "COMPLETED" and c.get("conclusion") == "CANCELLED"
+
+
+def after_cancel(c, contexts, stale):
+    """What a cancelled check run's workflow did on the head in its other
+    suites: "finished" once one that judged the PR's diff (stale is those
+    that didn't) has run through, so the cancelled one is no word on the head;
+    "going" while one is still running, whichever diff it's for, since CI
+    isn't done speaking; None with neither, as when someone cancelled the run
+    by hand, which stays not green. A suite with a cancelled check run of its
+    own hasn't run through: two cancelled runs don't clear each other. A
+    check run of no workflow has no other runs to go by."""
+    mine, flow = suite(c).get("id"), workflow(c).get("id")
+    if mine is None or flow is None:
+        return None
+    others = [x for x in contexts if workflow(x).get("id") == flow and suite(x).get("id") != mine]
+    gone = {suite(x).get("id") for x in others if cancelled(x)}
+    if any(suite(x).get("status") == "COMPLETED" and suite(x).get("id") not in gone | stale for x in others):
+        return "finished"
+    return "going" if any(suite(x).get("status") != "COMPLETED" for x in others) else None
 
 
 def fork_of(repo, pr):
