@@ -37,6 +37,7 @@ C.job = REAL["job"]
 # owner's installation can; `gone` doesn't exist.
 NAMES = {"old-org/app": "sam/app", "sam/was": "sam/now", "eve/app": "eve/app", "sam/app": "sam/app"}
 IDS = {}  # the id GitHub answers a current name with, when a check cares
+NODES = {}  # likewise its node id
 ASKED = []
 
 
@@ -52,7 +53,7 @@ def gh(*a, **k):
     if name not in NAMES:
         raise RuntimeError("gh api: Could not resolve to a Repository")
     now = NAMES[name]
-    return {"data": {"repository": {"id": IDS.get(now, f"id-{now}"), "nameWithOwner": now, "createdAt": "2026-06-01T00:00:00Z"}}}
+    return {"data": {"repository": {"id": IDS.get(now, f"id-{now}"), "node": NODES.get(now, f"R_{now}"), "nameWithOwner": now, "createdAt": "2026-06-01T00:00:00Z"}}}
 
 
 C.gh = gh
@@ -294,6 +295,29 @@ assert not [x for x in PUBLISHED[0] if x[0] == C.RETIRING], PUBLISHED
 C.save(C.RETIRING_FILE, {"sam_gone": {"name": "sam/gone", "for": "sam/took", "id": "id-sam/took"}})
 full(T + 90075)
 assert len(RESET) == 3 and not C.retiring("sam/took"), RESET
+# A hold kept with the node id, from before the steward knew repos by
+# databaseId, holds the same: the repo that took the name gets no job while a
+# retirement keeps failing, at any later name, and a kicked pass doesn't lift
+# it. Another repo that takes up its name goes free, one GitHub won't say about
+# waits, and it ends once retired.
+RESET_FAILS[0] = True
+legacy = {"sam_old": {"name": "sam/old", "for": "sam/took", "id": "R_took"}}
+C.save(C.RETIRING_FILE, legacy)
+NAMES.update({"sam/took": "sam/took", "sam/later": "sam/later"})
+NODES.update({"sam/took": "R_took", "sam/later": "R_took"})
+with C.acting_for("sam/took"):
+    assert C.job("sam/took", "t", clone=True) is None
+full(T + 90080)
+full(T + 90085, "sam/r")
+assert C.load(C.RETIRING_FILE, {}) == legacy
+assert "sam/took" not in tried() and C.retiring("sam/took") and C.retiring("sam/later") and C.retiring("sam/nobody")
+NODES["sam/took"] = "R_other"
+assert not C.retiring("sam/took")
+RESET_FAILS[0] = False
+full(T + 90090)
+assert C.load(C.RETIRING_FILE, {}) == {} and not C.retiring("sam/later")
+NODES.clear()
+del NAMES["sam/took"], NAMES["sam/later"]
 S.R.reset = kept_reset
 os.remove(f"{tmp}/state/repo-sam_old.json")
 # A hidden folder counts only while it's named for its repo. Transferred, it
