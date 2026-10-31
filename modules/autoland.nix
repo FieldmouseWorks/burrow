@@ -28,6 +28,8 @@ let
   # The reviewers' user, the queue and snapshots it reads, and the kick,
   # as the reviewers' service (autoland/review.nix) has them.
   inherit (import ./autoland/paths.nix config) reviewer reviewDir snapDir stewardKick;
+  # burrow's programs: the flaky tool among them.
+  burrow = inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow;
 
   # The baseline and the house style it links to (the rules, the project
   # template and lib), together, so the links resolve for the job that reads
@@ -55,10 +57,6 @@ let
   # dependencyDashboardTitle default): the issue dashboard.py reads, and the
   # one whose events start a pass.
   dashboardTitle = "Dependency Dashboard";
-  # The flaky tool, which lists each repo's quarantined tests: the issues
-  # titled `flaky: TEST` (flakes.py, docs/flaky-tests.md).
-  flaky = pkgs.callPackage ../tools/flaky/package.nix { };
-
   settings = {
     renovateEmail = if renovateMatch == null then null else lib.head renovateMatch;
     inherit (cfg) owners exclude context rulesets keepBranches baselineJobs baselinePerPass;
@@ -122,7 +120,10 @@ let
     # Quarantined flaky tests, each to a Claude job (flakes.py).
     flaky = {
       inherit (cfg.flaky) enable;
-      bin = "${flaky}/bin/flaky";
+      # The flaky tool, which lists each repo's quarantined tests: the issues
+      # titled `flaky: TEST` (docs/flaky-tests.md). It asks through the gh on
+      # the steward's PATH.
+      bin = "${burrow}/bin/flaky";
       jobTimeout = cfg.flaky.jobTimeoutMinutes;
     };
     # What every open PR waits on, for the stall watchdog (autoland/waits.py),

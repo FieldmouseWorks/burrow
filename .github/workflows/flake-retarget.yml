@@ -25,4 +25,5 @@ jobs:
       build-skip: agents
       eval-apart: true
       legs: 4
+      keep-builds: true
       docs-paths: README.md AGENTS.md CLAUDE.md
