@@ -22,7 +22,10 @@
   # Cargo workspace in DIR, built with the toolchain DIR/rust-toolchain.toml
   # (or the repo root's) pins; latest stable without one. `test = false` skips
   # the tests (say, when they need a database); `testInputs = pkgs: [ pkgs.git ]`
-  # puts tools the tests run on their PATH. A workspace that links native
+  # puts tools the tests run on their PATH. `include = [ "docs/spec.md" ]`
+  # names files outside DIR, from the repo's root, that the tests read: the
+  # checks then build from the root with DIR and only those, so a test finds
+  # each where a checkout has it. A workspace that links native
   # libraries names them for every build, check and the dev shell:
   # `nativeBuildInputs = pkgs: [ pkgs.pkg-config ]` for the tools its build
   # scripts run, `buildInputs = pkgs: [ pkgs.alsa-lib ]` for the libraries.
@@ -49,6 +52,7 @@ let
     dir = ".";
     test = true;
     testInputs = _: [ ];
+    include = [ ];
     nativeBuildInputs = _: [ ];
     buildInputs = _: [ ];
   } // (if rust == null then { } else rust);
@@ -94,16 +98,35 @@ let
     doCheck = false;
   };
 
+  # What the checks build from: the whole directory, not only the Cargo
+  # sources, since tests read fixtures. With files outside it to include, the
+  # repo's root with only DIR and those, and the build in DIR (crane's way
+  # for a workspace below its source's root).
+  rustSrc =
+    if rustCfg.include == [ ] then { src = lib.cleanSource rustDir; }
+    else {
+      src = lib.cleanSourceWith {
+        src = lib.cleanSource self;
+        filter = path: type:
+          let rel = lib.removePrefix "${toString self}/" (toString path); in
+          lib.any (p: rel == p || lib.hasPrefix "${p}/" rel || (type == "directory" && lib.hasPrefix "${rel}/" p))
+            ([ rustCfg.dir ] ++ rustCfg.include);
+      };
+      cargoLock = rustDir + "/Cargo.lock";
+      cargoToml = rustDir + "/Cargo.toml";
+      postUnpack = ''
+        cd "$sourceRoot"/${lib.escapeShellArg rustCfg.dir}
+        sourceRoot=.
+      '';
+    };
+
   rustChecks = pkgs:
     let
       craneLib = craneFor pkgs;
-      # The whole directory, not only the Cargo sources: tests read fixtures.
-      src = lib.cleanSource rustDir;
       # Every member of the workspace, not only a root package or its
       # default-members, built as `cargo test` builds them (crane's default is
       # release, which drops debug assertions and overflow checks).
-      common = {
-        inherit src;
+      common = rustSrc // {
         strictDeps = true;
         cargoExtraArgs = "--locked --workspace";
         CARGO_PROFILE = "dev";
@@ -113,7 +136,7 @@ let
       cargoArtifacts = craneLib.buildDepsOnly common;
     in
     {
-      rust-fmt = craneLib.cargoFmt { inherit src; cargoExtraArgs = "--all"; };
+      rust-fmt = craneLib.cargoFmt (rustSrc // { cargoExtraArgs = "--all"; });
       rust-clippy = craneLib.cargoClippy (common // {
         inherit cargoArtifacts;
         cargoClippyExtraArgs = "--all-targets -- -D warnings";
