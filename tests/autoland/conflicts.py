@@ -4,7 +4,7 @@ GitHub, and a Claude job merges the base in at once, one a head on its base,
 before any review or CI. Ordinary and judged PRs alike; a dependency bot's
 own update is the bot's to rebase, and one renovate-sweep has is its job's."""
 
-from harness import COMMITS, JOBS, STATES, WROTE, clean, fresh_pr_state, judgment, merged, merges, mkpr, pr_state, queued, \
+from harness import CI_GREEN, COMMITS, JOBS, S, STATES, WROTE, clean, fresh_pr_state, judgment, merged, merges, mkpr, pr_state, queued, \
     run, said, stand_in, swept
 from touches import DEPENDABOT_EMAIL
 
@@ -25,6 +25,13 @@ def desc(status):
     return status.partition("description=")[2].partition(" -f target_url")[0]
 
 
+# The whole gate can outlast the job on a loaded machine, and then the merge is
+# never pushed: the job runs what the merge touched, and CI has the gate.
+def targeted(task):
+    assert "Run the tests of what the conflicts touched" in task and "CI runs the whole gate once you push" in task, task
+    assert "run the repo's tests" not in task.lower(), task
+
+
 for pr in (clean(), clean(files=(".github/CODEOWNERS",), number=6, comments=[said(judgment("land"))]), clean(base="release")):
     at_odds = conflicting(pr)
     base = pr["baseRefName"]
@@ -34,6 +41,7 @@ for pr in (clean(), clean(files=(".github/CODEOWNERS",), number=6, comments=[sai
     assert len(JOBS) == 1 and f"it conflicts with {base}" in JOBS[0] and f"merge {base} into the branch" in JOBS[0], JOBS
     # It checks the PR is still where it was handed before it merges or pushes.
     assert f"still open on {base} at head {pr['headRefOid']}: if its base or head moved on, stop" in JOBS[0], JOBS
+    targeted(JOBS[0])
     assert "state=pending" in status and f"Conflicts with {base}; a Claude job has it" in status, status
     assert digest == [], digest
     # One job a head while it works, however many passes see it.
@@ -44,6 +52,7 @@ for pr in (clean(), clean(files=(".github/CODEOWNERS",), number=6, comments=[sai
     run(at_odds, 1000)
     status, _ = run(at_odds, 1060)
     assert len(JOBS) == 1 and "it conflicts with" in JOBS[0], JOBS
+    targeted(JOBS[0])  # the retry too
     run(at_odds, 1100)
     status, digest = run(at_odds, 1160)
     assert JOBS == [] and [x[0] for x in digest] == ["Two Claude jobs ended without fixing it"], (JOBS, digest)
@@ -61,9 +70,7 @@ STATES["job-1"] = "done"
 run(dirty(), 1000)
 run(dirty(), 1060)
 assert len(JOBS) == 1 and "merge main into" in JOBS[0], JOBS
-# The whole gate can outlast the job on a loaded machine, and then the merge is
-# never pushed: the job runs what the merge touched, and CI has the gate.
-assert "tests of what the conflicts touched" in JOBS[0] and "CI runs the whole gate once you push" in JOBS[0] and "run the repo's tests" not in JOBS[0], JOBS
+targeted(JOBS[0])
 STATES["job-1"] = "running"  # the second one (ids restart each pass here)
 for state in ("running", "queued", None):
     STATES["job-1"] = state
@@ -167,5 +174,24 @@ fresh_pr_state()
 status, _ = run(conflicting(clean(comments=[said(swept("held"))], **major)), 700)
 assert JOBS == [] and "renovate-sweep held it" in status, (JOBS, status)
 COMMITS.clear()
+# Only a conflict's job is told that: findings, red CI and a failing proof still
+# get the repo's tests, and the proof its rerun. A conflict on a red proof reruns
+# nothing: its merge is a new head, whose proofs run again.
+S.CFG["repos"]["sam/r"] = {"proofJobs": {"remi-proof": "Run `just proof` and post the remi-proof status."}}
+red_proof = CI_GREEN + [{"__typename": "StatusContext", "context": "remi-proof", "state": "FAILURE", "description": ""}]
+for pr, rerun in ((clean(threads=[False]), False), (clean(checks=red), False), (clean(checks=red_proof), True)):
+    fresh_pr_state()
+    run(pr, 0)
+    run(pr, 7200)
+    assert len(JOBS) == 1 and "Run the repo's tests before you push." in JOBS[0], JOBS
+    assert "conflicts touched" not in JOBS[0] and "whole gate" not in JOBS[0], JOBS
+    assert ("Rerun it that way" in JOBS[0]) == rerun, JOBS
+    STATES.clear()
+fresh_pr_state()
+run(conflicting(clean(checks=red_proof)), 700)
+assert len(JOBS) == 1 and "it conflicts with main" in JOBS[0] and "Rerun it that way" not in JOBS[0], JOBS
+targeted(JOBS[0])
+STATES.clear()
+del S.CFG["repos"]["sam/r"]
 fresh_pr_state()
 print("conflicts: ok")
