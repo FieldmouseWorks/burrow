@@ -1,0 +1,47 @@
+{
+  "conary": "note v1",
+  "change": "6x3hhc7kca48941bfjf462x0zj",
+  "repo": {
+    "owner": "fieldmouseworks",
+    "name": "burrow"
+  },
+  "pr": 179,
+  "url": "https://github.com/fieldmouseworks/burrow/pull/179",
+  "summary": "flake-gate: run a repo's CI gate here, and burrow's evaluating apart",
+  "task": "FieldmouseWorks/remi#170",
+  "author": {
+    "kind": "person",
+    "login": "TusanHomichi",
+    "session": null
+  },
+  "landing": {
+    "revision": "8728e435c30d228dcb9c8730878bac5a4f8ac16a13318bd1f8531088bf8e4705",
+    "before": "54d472fbb91a991865c93a989ce6cd79d7913fbc",
+    "after": "a36f122766cf471a29246b917872ce6a0fad5f34",
+    "by": {
+      "kind": "status",
+      "login": "fieldmouseworks-steward[bot]"
+    },
+    "at": 1793406857278
+  },
+  "evidence": [
+    {
+      "kind": "ci",
+      "check": "check / commits",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/41131052430/job/124321745250"
+    },
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/41131052430/job/124321745689"
+    },
+    {
+      "kind": "ci",
+      "check": "agents",
+      "result": "pass",
+      "source": "status agents"
+    }
+  ]
+}
