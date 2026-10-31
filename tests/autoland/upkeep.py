@@ -340,13 +340,15 @@ S.main()
  S.R.watch_default, H.handle) = kept_fns
 assert order == ["watch", (9, True), (10, False)], order
 
-# The daily branch sweep deletes a branch already in the default branch, and
-# one a closed PR was closed at, a bot's included (GitHub deletes on merge,
-# never on close; the PR keeps the commits). One pushed to since its PR
-# closed, an open PR's, a bot's with no closed PR at its tip and a kept one
-# stay. One with no PR and no commit for STALE_DAYS is kept under
-# refs/archive and deleted (one an earlier sweep archived too); one GitHub
-# won't archive stays, listed for the pipeline.
+# Branches nothing needs go on what changes them: a push, a PR closing, or
+# the wait they were given ending. One already in the default branch, or at
+# the tip a closed PR was closed at (a bot's included: GitHub deletes on
+# merge, never on close; the PR keeps the commits), goes once it has sat
+# GRACE at that tip. One with no PR and no commit for STALE_DAYS is kept
+# under refs/archive and deleted (one an earlier look archived too); one
+# GitHub won't archive stays, listed for the pipeline. One pushed to since
+# its PR closed, an open PR's, a bot's with no closed PR at its tip and a
+# kept one stay.
 def ago(days):
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(C.NOW - days * 86400))
 
@@ -364,7 +366,7 @@ CLOSED = {"closed": [{"number": 3, "head": {"sha": "2" * 40}}], "moved": [{"numb
           + [{"number": 5, "head": {"sha": "9" * 40}}],
           # Its last PR merged at another tip, and the bot has pushed its next update.
           "renovate/again": [{"number": 6, "head": {"sha": "b" * 40}}]}
-LOOKED = []
+LOOKED, FRESH = [], []  # the branches whose closed PRs it read; what each listing got (200 or 304)
 # What GitHub has under refs/archive, and what it won't take there.
 ARCHIVED, REFUSED = {f"refs/archive/archived/{'d' * 40}": "d" * 40}, {"refused"}
 # What GitHub answers instead: listing the branches, comparing one (by
@@ -380,12 +382,20 @@ def no(k, why):
     raise (C.Unavailable if C.UNAVAILABLE.search(why) else RuntimeError)(f"gh api: {why}")
 
 
+def branches_fresh(path, etag=None):
+    if path != "repos/sam/r/branches?per_page=100":
+        return kept_fresh(path, etag)
+    if LISTING[0]:
+        no({}, LISTING[0])
+    tag = json.dumps(sorted(BRANCHES.items()))
+    FRESH.append(304 if etag == tag else 200)
+    if etag == tag:
+        return None
+    return tag, [{"name": n, "commit": {"sha": sha}, "protected": False} for n, (sha, _, _) in BRANCHES.items()]
+
+
 def branches_gh(*a, **k):
     path = (a[2] if a[1:2] == ("--paginate",) else a[1]) if a[:1] == ("api",) and len(a) > 1 else ""
-    if path.startswith("repos/sam/r/branches?"):
-        if LISTING[0]:
-            return no(k, LISTING[0])
-        return "\n".join(f"{n} {sha}" for n, (sha, _, _) in BRANCHES.items())
     if path.startswith("repos/sam/r/compare/main..."):
         name, b = next((n, x) for n, x in BRANCHES.items() if x[0] == path.rpartition("...")[2])
         if name in COMPARE:
@@ -421,67 +431,124 @@ def branches_write(*a, **k):
     return {"ref": f["ref"], "object": {"sha": f["sha"]}}
 
 
-DELETED, kept_delete, kept_write = [], R.delete_branch, C.write
-R.delete_branch = lambda repo, name, sha: DELETED.append((name, sha))
+def deleted(repo, name, sha):
+    """GitHub deleting it, unless it's one whose push is turned away."""
+    DELETED.append((name, sha))
+    if name not in UNDELETABLE:
+        del BRANCHES[name]
+
+
+def look(in_use=("open",), full=False):
+    """A pass's look at sam/r's branches: what it lists for the pipeline."""
+    digest = []
+    DELETED.clear(), LOOKED.clear(), FRESH.clear(), C.WAKE.clear()
+    R.watch_branches(repo_r, set(in_use), digest, full)
+    return [line for _, line, _ in digest]
+
+
+DELETED, UNDELETABLE = [], set()
+kept_delete, kept_write, kept_fresh = R.delete_branch, C.write, C.fresh
+R.delete_branch = deleted
 S.C.CFG["keepBranches"] = ["gh-pages"]
-C.gh, C.write = branches_gh, branches_write
-C.save("repo-sam_r.json", {})
-digest = []
-R.sweep_branches(repo_r, {"open"}, digest)
+C.gh, C.write, C.fresh = branches_gh, branches_write, branches_fresh
+# The daily sweep's state, which nothing reads now.
+C.save("repo-sam_r.json", {"branches": C.NOW - 86400, "unkept": ["x"], "stale": []})
+# The first look judges every branch it may delete, and deletes none before
+# GRACE: its pass wakes when that's over.
+assert look(full=True) == [] and DELETED == [], DELETED
+assert sorted(LOOKED) == ["archived", "closed", "in-main", "moved", "old", "refused", "renovate/again",
+                          "renovate/closed", "renovate/x", "young"], LOOKED
+assert C.WAKE == {"sam/r": C.NOW + R.GRACE}, C.WAKE
+assert sorted(C.load("repo-sam_r.json", {})) == ["branchesEtag", "branchesKeep", "tips"], C.load("repo-sam_r.json", {})
+# That pass, a kicked one: the unchanged listing costs nothing against the
+# rate limit, and only what's due is judged again. What goes next is the
+# unmerged one from today, STALE_DAYS from its last commit.
+C.NOW += R.GRACE
+assert look() == ["sam/r: `refused`"]
+assert FRESH == [304] and sorted(LOOKED) == ["archived", "closed", "in-main", "old", "refused", "renovate/closed"], (FRESH, LOOKED)
 assert DELETED == [("in-main", "1" * 40), ("closed", "2" * 40), ("old", "7" * 40), ("renovate/closed", "9" * 40),
                    ("archived", "d" * 40)], DELETED
 assert ARCHIVED == {f"refs/archive/archived/{'d' * 40}": "d" * 40, f"refs/archive/old/{'7' * 40}": "7" * 40}, ARCHIVED
-assert sorted(LOOKED) == ["archived", "closed", "in-main", "moved", "old", "refused", "renovate/again",
-                          "renovate/closed", "renovate/x", "young"], LOOKED
-assert digest == [(R.UNKEPT, "sam/r: `refused`", "")], digest
-# Not again until a day on: what it couldn't archive is all a pass shows meanwhile.
-DELETED.clear()
-digest = []
-R.sweep_branches(repo_r, {"open"}, digest)
-assert DELETED == [] and [line for _, line, _ in digest] == ["sam/r: `refused`"], (DELETED, digest)
-# GitHub won't say which PRs were closed at it: the branch stays. So does
-# one whose last commit is a day short of STALE_DAYS. The archived ones are
-# deleted again (the stand-in keeps every branch), already kept.
-CLOSED["closed"] = None
-C.NOW += 86400
-BRANCHES["recent"] = ("0" * 40, 4, ago(R.STALE_DAYS - 1))
-R.sweep_branches(repo_r, {"open"}, [])
-assert DELETED == [("in-main", "1" * 40), ("old", "7" * 40), ("renovate/closed", "9" * 40), ("archived", "d" * 40)], DELETED
-assert len(ARCHIVED) == 2, ARCHIVED
-# A sweep that didn't look at every branch isn't one. GitHub not listing
-# them (its rate limit, or a no) leaves the last sweep's time and what it
-# couldn't archive, so the next full pass sweeps again, not a day later.
-del BRANCHES["recent"]
-C.NOW += 86400
-last = C.load("repo-sam_r.json", {})
+assert C.WAKE == {"sam/r": C.ts(young) + R.STALE_DAYS * 86400}, C.WAKE
+# Nothing changed since: a pass judges nothing (after the one that sees the
+# deletes), and the one GitHub won't archive is all it lists. A full pass
+# tries that one again.
+look()
+assert look() == ["sam/r: `refused`"] and FRESH == [304] and LOOKED == [] and DELETED == [], (FRESH, LOOKED, DELETED)
+assert look(full=True) == ["sam/r: `refused`"] and LOOKED == ["refused"], LOOKED
+# Its PR closing starts the look: an hour later, it goes. Reopened inside
+# that hour, it stays.
+CLOSED["open"] = [{"number": 2, "head": {"sha": "4" * 40}}]
+look(())
+assert DELETED == [] and C.WAKE["sam/r"] == C.NOW + R.GRACE, (DELETED, C.WAKE)
+C.NOW += R.GRACE
+look()
+assert DELETED == [] and C.load("repo-sam_r.json", {})["tips"]["open"] == {"sha": "4" * 40, "pr": True}
+look(())
+C.NOW += R.GRACE
+look(())
+assert DELETED == [("open", "4" * 40)], DELETED
+# So does a push: to the tip a closed PR was closed at, it goes an hour on.
+BRANCHES["moved"] = ("f" * 40, 1, young)
+look(())
+assert LOOKED == ["moved"] and DELETED == [], (LOOKED, DELETED)
+C.NOW += R.GRACE
+look(())
+assert DELETED == [("moved", "f" * 40)], DELETED
+# A delete that doesn't go through is tried again next pass.
+BRANCHES["empty"] = ("0" * 40, 0, old)
+UNDELETABLE.add("empty")
+look(())
+C.NOW += R.GRACE
+look(())
+assert DELETED == [("empty", "0" * 40)], DELETED
+UNDELETABLE.clear()
+look(())
+assert FRESH == [304] and DELETED == [("empty", "0" * 40)], (FRESH, DELETED)
+# The stale one's wait ending: archived and deleted.
+C.NOW = C.ts(young) + R.STALE_DAYS * 86400
+look(())
+assert DELETED == [("young", "8" * 40)] and f"refs/archive/young/{'8' * 40}" in ARCHIVED, DELETED
+# GitHub not listing them (its rate limit, or a no) changes nothing.
+look(())
+was = C.load("repo-sam_r.json", {})
 for why in ("API rate limit exceeded for installation", "HTTP 403: Resource not accessible by integration"):
     LISTING[0] = why
-    DELETED.clear()
-    digest = []
-    R.sweep_branches(repo_r, {"open"}, digest)
-    assert DELETED == [] and C.load("repo-sam_r.json", {}) == last, (why, DELETED)
-    assert [line for _, line, _ in digest] == ["sam/r: `refused`"], (why, digest)
+    assert look(()) == ["sam/r: `refused`"] and C.load("repo-sam_r.json", {}) == was, why
 LISTING[0] = None
-# Nor does one GitHub stopped answering partway: what it deleted stays
-# deleted, and the next pass sweeps the rest. Archiving a branch then isn't
-# a branch it couldn't archive.
-for where, name, gone in ((COMPARE, "young", ["in-main", "old"]),
-                          (ARCHIVING, "refused", ["in-main", "old", "renovate/closed", "archived"])):
-    where[name] = "HTTP 502: Bad Gateway"
-    DELETED.clear()
-    R.sweep_branches(repo_r, {"open"}, [])
-    assert [n for n, _ in DELETED] == gone, (name, DELETED)
-    assert C.load("repo-sam_r.json", {}) == last, (name, C.load("repo-sam_r.json", {}))
-    del where[name]
-# A branch GitHub says no about is passed over, and the sweep still counts:
+# Nor does GitHub not answering partway lose a branch: what it judged is
+# kept, and the next pass lists again (no ETag kept) and judges the rest.
+# Archiving one then isn't one GitHub wouldn't archive.
+BRANCHES.update({"new": ("0" * 40, 1, ago(0)), "newer": ("b" * 40, 1, ago(0))})
+COMPARE["newer"] = "HTTP 502: Bad Gateway"
+look(())
+assert LOOKED == ["new", "newer"] and C.load("repo-sam_r.json", {})["branchesEtag"] == was["branchesEtag"], LOOKED
+del COMPARE["newer"]
+look(())
+assert FRESH == [200] and LOOKED == ["newer"], (FRESH, LOOKED)
+BRANCHES["quiet"] = ("9" * 40, 2, old)
+look(())
+C.NOW += R.GRACE
+ARCHIVING["quiet"] = "HTTP 502: Bad Gateway"
+assert look(()) == ["sam/r: `refused`"] and DELETED == [], DELETED
+del ARCHIVING["quiet"]
+look(())
+assert DELETED == [("quiet", "9" * 40)], DELETED
+# A branch GitHub says no about is passed over, with no wait of its own:
 # one with no history in common with the default has no comparison.
-BRANCHES["orphan"] = ("0" * 40, 1, old)
-COMPARE["orphan"] = "HTTP 404: No common ancestor between main and 0000000"
-DELETED.clear()
-R.sweep_branches(repo_r, {"open"}, [])
-assert DELETED == [("in-main", "1" * 40), ("old", "7" * 40), ("renovate/closed", "9" * 40), ("archived", "d" * 40)], DELETED
-assert C.load("repo-sam_r.json", {}) == {"branches": C.NOW, "unkept": ["refused"]}, C.load("repo-sam_r.json", {})
-R.delete_branch, C.gh, C.write = kept_delete, gh_stub, kept_write
+BRANCHES["orphan"] = ("c" * 40, 1, old)
+COMPARE["orphan"] = "HTTP 404: No common ancestor between main and ccccccc"
+look(())
+assert DELETED == [] and C.load("repo-sam_r.json", {})["tips"]["orphan"] == {"sha": "c" * 40, "seen": C.NOW}
+# A branch kept no longer is judged, though the listing hasn't changed.
+S.C.CFG["keepBranches"] = []
+look(())
+assert FRESH == [200] and LOOKED == ["gh-pages"], (FRESH, LOOKED)
+# More than a page of branches: every page, and no ETag for next time.
+C.fresh = lambda path, etag=None: ("tag", [{"name": f"b{i}", "commit": {"sha": "1" * 40}} for i in range(100)])
+C.gh = lambda *a, **k: "\n".join(f"b{i} {'1' * 40}" for i in range(101)) if a[2].startswith("repos/sam/r/branches?") else None
+assert R.listed_branches("sam/r", None) == (None, {f"b{i}": "1" * 40 for i in range(101)})
+R.delete_branch, C.gh, C.write, C.fresh = kept_delete, gh_stub, kept_write, kept_fresh
 S.C.CFG["keepBranches"] = []
 C._for.pop()
 

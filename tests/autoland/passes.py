@@ -156,22 +156,22 @@ S.CFG.clear()
 S.CFG.update(kept)
 print("kicks: ok")
 
-# `kick REPO`: only that repo's PRs, none of the full pass's settings, new
-# repos or branch sweep, and its owner's lines and wake-ups replace that
-# repo's while the rest stay. The owner's issue is kept up to date from it.
+# `kick REPO`: only that repo's PRs and branches (not as a full pass: none
+# of its settings, new repos or another try at archiving a branch), and its
+# owner's lines and wake-ups replace that repo's while the rest stay. The owner's issue is kept up to date from it.
 fresh_pr_state()
 C.NOW = T
 C.save("wake.json", {"sam/r": T + 50, "sam/other": T + 60, "sam/gone": T - 1})
 C.save("digest-repos.json", {"sam/r": [["Old", "r line", ""]], "sam/other": [["Open over a day", "other line", "x"]]})
 C.save("repos.json", {"untouched": True})
-seen_repos, swept, published = [], [], []
-kept_fns = (S.R.discover, S.R.settle_repo, S.R.publish, S.R.sweep_branches, S.open_prs, S.R.unhook_gone)
+seen_repos, watched, published = [], [], []
+kept_fns = (S.R.discover, S.R.settle_repo, S.R.publish, S.R.watch_branches, S.open_prs, S.R.unhook_gone)
 S.R.unhook_gone = lambda repos: (_ for _ in ()).throw(AssertionError("hooks taken off in a kicked pass"))
 S.R.discover = lambda: [{"repo": "sam/r"}, {"repo": "sam/other"}]
 S.R.settle_repo = lambda r, known: (_ for _ in ()).throw(AssertionError("settings in a kicked pass"))
 S.R.publish = published.append
 in_use = []
-S.R.sweep_branches = lambda r, branches, digest, sweep=True: swept.append(sweep) or in_use.append(branches)
+S.R.watch_branches = lambda r, branches, digest, full=False: watched.append(full) or in_use.append(branches)
 
 
 def kicked_prs(owner, name):
@@ -186,9 +186,9 @@ C.WAKE.clear()
 S.main()
 sys.argv = argv
 S.CFG["cleanBranches"] = False
-S.R.discover, S.R.settle_repo, S.R.publish, S.R.sweep_branches, S.open_prs, S.R.unhook_gone = kept_fns
-assert seen_repos == ["sam/r"] and swept == [False], (seen_repos, swept)
-# The sweep leaves every open PR's branches, its base as well as its head:
+S.R.discover, S.R.settle_repo, S.R.publish, S.R.watch_branches, S.open_prs, S.R.unhook_gone = kept_fns
+assert seen_repos == ["sam/r"] and watched == [False], (seen_repos, watched)
+# The branch watch leaves every open PR's branches, its base as well as its head:
 # deleting a base closes the PRs on it.
 assert in_use == [{"feat", "main"}], in_use
 assert C.load("repos.json", None) == {"untouched": True}

@@ -16,9 +16,10 @@ event reports):
      (proofJobs) or judge a PR it won't land on its own word (tasks.py says
      what each job is told), post the `review-settled` commit status and
      merge it, or list it for the owner.
-  3. Once a day per repo, delete branches whose tip is already in the
-     default branch or a closed PR's head, and archive the stale unmerged
-     ones under refs/archive before deleting them too.
+  3. Delete the branches whose tip is already in the default branch or a
+     closed PR's head, and archive the stale unmerged ones under
+     refs/archive before deleting them too, as a push or a PR closing
+     changes them or the wait they were given ends.
   4. Read each repo's Renovate dashboard: what sits on it too long, short
      of a PR, goes to a Claude job (dashboard.py); and its quarantined
      flaky tests, each to a Claude job that fixes it (flakes.py).
@@ -100,7 +101,7 @@ def main():
     # `kick REPO...`: just those repos' PRs, now (burrow-events, on what
     # changed on GitHub or here, or a wait that has ended). The full pass,
     # when burrow-events starts and hourly, does the rest: the settings, new
-    # repos' baseline jobs and branches.
+    # repos' baseline jobs and another try at archiving a branch.
     kick = [k.lower() for k in sys.argv[2:]] if sys.argv[1:2] == ["kick"] else None
     if not DRY:
         # One pass at a time, full or kicked: two would act on the same PRs.
@@ -197,8 +198,7 @@ def run_pass(kick):
                         waits.failed(repo)
                         C.wake(repo, C.NOW + 5 * MIN)  # ends: waits.failed watches the repo
                 if CFG["cleanBranches"]:
-                    # Stale ones the last sweep couldn't archive are listed every pass.
-                    R.sweep_branches(r, in_use, mine, sweep=kick is None)
+                    R.watch_branches(r, in_use, mine, full=kick is None)
             except Exception as e:
                 log(f"{repo}: {e}")
                 waits.failed(repo)

@@ -28,8 +28,8 @@ import seal as S
 CFG = json.load(open(os.environ["AUTOLAND_CONFIG"]))
 CONTEXT = CFG["context"]
 DRY = len(sys.argv) > 1 and sys.argv[1] == "status"
-# A dry run keeps its own state, so its once-a-day reads (settings, branches)
-# stay once a day instead of running every pass on the owner's API quota.
+# A dry run keeps its own state, so its once-a-day reads (the settings) stay
+# once a day instead of running every pass on the owner's API quota.
 STATE = CFG["stateDir"] + ("/dry" if DRY else "")
 NOW = time.time()
 MIN = 60

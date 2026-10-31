@@ -202,13 +202,17 @@ For reviewers, the review bot included. Flag as P1:
 - <the repo's own risks: what a reviewer of this codebase must never let through>
 ```
 
-## Hygiene (the steward, daily)
+## Hygiene (the steward)
 
 - Branches whose tip is already in the default branch, or is the head a
-  closed PR was closed at, with no open PR, are deleted (nothing is lost: the
-  closed PR keeps its commits and can restore the branch). GitHub's
-  delete-on-merge only covers merged PRs. `keepBranches` are left alone, and
-  bots' branches go only this way.
+  closed PR was closed at, with no open PR, are deleted once they've sat an
+  hour at that tip (nothing is lost: the closed PR keeps its commits and can
+  restore the branch). GitHub's delete-on-merge only covers merged PRs.
+  `keepBranches` are left alone, and bots' branches go only this way.
+- What starts it is the branch changing: a push to it, its PR closing, or
+  the wait it was given ending. No daily sweep: each pass lists the
+  branches with the last listing's ETag, which GitHub answers for free
+  while nothing changed.
 - Unmerged branches with no PR and no commit for 3 days are archived, then
   deleted: the steward keeps the tip at `refs/archive/BRANCH/SHA` in the same
   repo, a ref GitHub keeps but lists with neither branches nor tags, and
