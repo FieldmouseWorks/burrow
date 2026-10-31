@@ -569,16 +569,15 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
 
         # What this proof is: a build or a Claude job, of which checks, each
         # built from which attribute. This head's proof so far was another
-        # (a build before the Claude jobs, a job from before its check had
-        # a build, a check added or remapped since): this one starts afresh,
-        # nothing of that one's carried over (its retries, the two lost
-        # answers, its verdicts), and one still at work is stopped, on the
-        # stopping path when proj or systemd won't just now. One recorded
-        # before proofs said what they were is matched on its kind alone.
+        # (proofs.fits: a build before the Claude jobs, a job from before
+        # its check had a build, a check added or remapped since): this one
+        # starts afresh, nothing of that one's carried over (its retries,
+        # the two lost answers, its verdicts). One still at work is stopped,
+        # on the stopping path when proj or systemd won't just now, and
+        # holds its slot until it's over (proofs.live).
         stage = ["build" if builds else "job", sorted(checks), {c: rc["proofBuilds"].get(c) for c in checks}]
-        jid = st.get("provedJob")
-        was = st.get("provedFor") or ["build" if jid and jid.startswith(C.BUILD) else "job"]
-        if st.get("proved") == head and jid and was != stage[:len(was)]:
+        if st.get("proved") == head and (jid := st.get("provedJob")) and not P.fits(st, stage):
+            st["proofsLive"] = P.jobs(st)
             if running("proved") and not C.stop_job(jid):
                 st["stopping"] = list(dict.fromkeys(st.get("stopping", []) + [jid]))
             for k in ("", "Job", "At", "Lost", "Again", "Broke", "For", "Unposted"):
@@ -591,6 +590,9 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
         if builds and st.get("proved") == head and not running("proved") and ends.get("proved") == "done":
             jid = st["provedJob"]
             said = P.verdicts(jid)
+            if said is not None:
+                # Only what's left to post: the ones it posted are green.
+                said = {c: v for c, v in said.items() if c in checks}
             if said is None:
                 # One that kept no verdicts broke: it's built again (below).
                 ends["proved"] = "failed"
@@ -696,9 +698,12 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
     ci, ci_names = ci_state(pr, machine)
     # A build's verdicts GitHub took only some of: the rest go up whatever
     # CI says now, so a failure it took doesn't leave the others unposted
-    # behind a red PR. Their statuses kick the pass that sees them.
+    # behind a red PR. Their statuses kick the pass that sees them. Only
+    # those of its checks still built from the attribute it built
+    # (proofs.still): one dropped or remapped since waits for its own build.
     if (left := st.get("provedUnposted")) and st.get("proved") == head:
-        if (said := P.verdicts(left)) is not None and P.record(repo, pr, said):
+        said = P.still(st, P.verdicts(left) or {}, rc["proofBuilds"])
+        if not said or P.record(repo, pr, said):
             st.pop("provedUnposted")
         else:
             strike("status")

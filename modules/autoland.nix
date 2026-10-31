@@ -740,8 +740,8 @@ in
         proofJobs and with no Claude job: it works out the attribute's
         derivation at that commit and runs `nix-store --realise` on it in a
         heavy slot, in a unit of its user's own (proofTimeoutMinutes), and
-        posts each check as its outputs are valid or not, a failure with
-        its log's end on the PR. One whose outputs are all in the store
+        posts each check as its build passed or failed, a failure with its
+        log's end on the PR. One whose outputs are all in the store
         isn't built again, its verdict taken from the store, saying so and
         naming the derivation; one whose outputs are being built by a proof
         already running skips the line and holds no slot. A check named in

@@ -1,9 +1,9 @@
 """A proof check that's a build (proofBuilds) is the steward's own to build,
-with no Claude job: a unit of the machine user's that runs `nix-store
---realise --keep-going` on its derivations (heavy-slotted where the machine
-has heavy), its log beside them and how it ended in end.json, then kicks its
-repo's pass. That pass posts each check as its outputs are valid or not,
-naming its derivation, and a failure's log tail goes on the PR once. A build
+with no Claude job: a unit of the machine user's that runs one `nix-store
+--realise --add-root` per derivation, all at once (heavy-slotted where the
+machine has heavy), its log beside them and how it ended in end.json, then
+kicks its repo's pass. That pass posts each check as its realise passed or
+failed, naming its derivation, and a failure's log tail goes on the PR once. A build
 that stopped short (killed, nix couldn't build at all, past proofTimeout) is
 the machine failing: built again later, never a failure on the PR. It's
 asked after and stopped like a job (common.job_state, stop_job)."""
@@ -36,15 +36,26 @@ if {tool!r} == "nix-store" and a[:1] == ["--query"]:
 elif {tool!r} == "nix-store" and a[:1] == ["--check-validity"]:
     if do.get("unsure") and not all(p.endswith(".drv") for p in a[2:]):
         sys.exit(1)
+    # A collection ran just now (gc: under where its roots would be): an
+    # output is there only while something roots it.
+    roots = {{os.readlink(os.path.join(d, f)) for d, _, fs in os.walk(do.get("gc") or "/nonexistent")
+              for f in fs if os.path.islink(os.path.join(d, f))}}
     # A derivation is in the store until it's collected; an output once valid.
-    print("\\n".join(p for p in a[2:] if ((p in do.get("collected", [])) if p.endswith(".drv") else (p not in do.get("valid", [])))))
+    print("\\n".join(p for p in a[2:] if ((p in do.get("collected", [])) if p.endswith(".drv") else
+                                          (p not in do.get("valid", []) or (do.get("gc") and p not in roots)))))
 elif {tool!r} == "nix-store":
     if do.get("kill"):
         os.kill(os.getpid(), 9)
     print("building", *a[2:], file=sys.stderr)
     print("\\n".join(do.get("log", [])))
     time.sleep(do.get("sleep", 0))
-    sys.exit(do.get("rc", 0))
+    # Each derivation's own end (rcs), else a pass for what it makes valid
+    # and rc for the rest; a pass's outputs rooted where it's asked to.
+    drv = a[-1]
+    rc = do.get("rcs", {{}}).get(drv, 0 if drv.removesuffix(".drv") in do.get("valid", []) else do.get("rc", 0))
+    if rc == 0 and "--add-root" in a:
+        os.symlink(drv.removesuffix(".drv"), a[a.index("--add-root") + 1])
+    sys.exit(rc)
 elif {tool!r} == "systemctl" and a[:2] == ["--user", "show"]:
     if do.get("rc"):
         sys.exit(do["rc"])
@@ -64,9 +75,12 @@ def ran(tool):
     return [x for x in map(json.loads, open(TOOL_LOG)) if x["tool"] == tool]
 
 
-kept_path, kept_nix = os.environ["PATH"], S.CFG["nix"]
+kept_path, kept_nix, kept_config = os.environ["PATH"], S.CFG["nix"], os.environ["AUTOLAND_CONFIG"]
 os.environ["PATH"] = f"{bin_dir}:{kept_path}"
 S.CFG["nix"] = bin_dir
+# The steward a build runs (`autoland-steward realise ID`) has these tools too.
+json.dump({**json.load(open(kept_config)), "nix": bin_dir}, open(f"{tmp}/proving-config.json", "w"))
+os.environ["AUTOLAND_CONFIG"] = f"{tmp}/proving-config.json"
 X, Y = "/nix/store/" + "x" * 32 + "-vm-test-run-vm", "/nix/store/" + "y" * 32 + "-vm-test-run-other"
 
 
@@ -83,22 +97,26 @@ def end(jid):
     return json.load(open(f"{tmp}/state/builds/{jid}/end.json"))
 
 
-# The run: every derivation at once, keeping going past a failure, with its
-# log beside it, how it ended, and its repo's pass kicked.
+# The run: a realise of each derivation, all at once, each rooting what it
+# made in the build's folder, with the log beside them, how it ended, and
+# its repo's pass kicked.
 fresh_pr_state()
 # Killed (no exit status of its own), a signal's or a missing command's
 # status from a shell (137, 127), or nix failing outright (1) is the
 # machine's failure; 100 to 107 is builds that failed, each bit a way.
 for rc, state in ((0, "done"), (100, "done"), (101, "done"), (104, "done"), (107, "done"), (108, "failed"),
                   (1, "failed"), (127, "failed"), (137, "failed"), ("kill", "failed")):
-    tools(**{"nix-store": {"rc": rc, "log": ["subtest: it boots", "ok"]} if rc != "kill" else {"kill": True}})
+    tools(**{"nix-store": {"rc": rc, "valid": [X, Y] if rc == 0 else [], "log": ["subtest: it boots", "ok"]}
+             if rc != "kill" else {"kill": True}})
     jid = made({"vm": X + ".drv", "other": Y + ".drv"})
     KICKS.clear()
     P.run(jid)
     assert end(jid)["state"] == state, (rc, end(jid))
     assert KICKS == ["/kick/autoland/sam/r"], KICKS
-    realised = [x["args"] for x in ran("nix-store") if x["args"][:1] == ["--realise"]]
-    assert realised == [["--realise", "--keep-going", X + ".drv", Y + ".drv"]], ran("nix-store")
+    realised = sorted(x["args"] for x in ran("nix-store") if x["args"][:1] == ["--realise"])
+    here = f"{tmp}/state/builds/{jid}"
+    assert realised == [["--realise", "--add-root", f"{here}/out-0", "--indirect", X + ".drv"],
+                        ["--realise", "--add-root", f"{here}/out-1", "--indirect", Y + ".drv"]], ran("nix-store")
     assert ("verdicts" in end(jid)) == (state == "done"), end(jid)
     if rc != "kill":
         log = open(f"{tmp}/state/builds/{jid}/log").read()
@@ -109,11 +127,19 @@ with open(f"{bin_dir}/heavy", "w") as f:
     f.write(f"#!/bin/sh\necho heavy \"$@\" >>{tmp}/heavy-log\n[ \"$1\" = -- ] && shift\nexec \"$@\"\n")
 os.chmod(f"{bin_dir}/heavy", 0o755)
 S.CFG["heavy"] = f"{bin_dir}/heavy"
-tools()
+tools(**{"nix-store": {"valid": [X]}})
 jid = made({"vm": X + ".drv"})
 P.run(jid)
-assert open(f"{tmp}/heavy-log").read().split() == ["heavy", "--", f"{bin_dir}/nix-store", "--realise", "--keep-going", X + ".drv"]
+assert open(f"{tmp}/heavy-log").read().split() == ["heavy", "--", *P.own("realise", jid)], open(f"{tmp}/heavy-log").read()
+assert P.own()[3] == os.path.join(os.path.dirname(P.__file__), "steward.py"), P.own()
 assert end(jid)["state"] == "done", end(jid)
+# A heavy that ends well without running it: nothing says how its builds
+# ended, so it broke, with no verdict.
+with open(f"{bin_dir}/heavy", "w") as f:
+    f.write("#!/bin/sh\nexit 0\n")
+jid = made({"vm": X + ".drv"})
+P.run(jid)
+assert end(jid)["state"] == "failed" and "verdicts" not in end(jid), end(jid)
 # Under a heavy that waits on it, nix killed comes back as the shell's 137:
 # the machine's failure still, not a verdict.
 with open(f"{bin_dir}/heavy", "w") as f:
@@ -129,16 +155,17 @@ tools(**{"nix-store": {"collected": [Y + ".drv"]}})
 jid = made({"vm": X + ".drv", "other": Y + ".drv"})
 P.run(jid)
 assert end(jid)["state"] == "failed" and not [x for x in ran("nix-store") if x["args"][:1] == ["--realise"]], ran("nix-store")
-# One passed and one failed (nix's 100): each check's verdict kept in its
-# end, so a collection later can't change it, naming its derivation; what
-# passed is rooted in the build's folder (nix roots none when any failed).
-tools(**{"nix-store": {"rc": 100, "valid": [X]}})
+# One passed and one failed (nix's 100), with a collection the moment each
+# realise ended: what passed was rooted by its own realise before then, so
+# it stands. Each check's verdict is kept in its end, so a collection later
+# can't change it either, naming its derivation.
+tools(**{"nix-store": {"rc": 100, "valid": [X], "gc": f"{tmp}/state/builds"}})
 jid = made({"vm": X + ".drv", "other": Y + ".drv"})
 P.run(jid)
 assert end(jid)["verdicts"] == {"vm": ["success", f"Built here and passed: {X}.drv"],
                                 "other": ["failure", f"Built here and failed: {Y}.drv"]}, end(jid)
-assert [x["args"] for x in ran("nix-store") if x["args"][:1] == ["--realise"]][1:] == [
-    ["--realise", "--add-root", f"{tmp}/state/builds/{jid}/out", "--indirect", X]], ran("nix-store")
+assert os.readlink(f"{tmp}/state/builds/{jid}/out-0") == X and not os.path.lexists(f"{tmp}/state/builds/{jid}/out-1")
+assert json.load(open(f"{tmp}/state/builds/{jid}/realised.json")) == {X + ".drv": 0, Y + ".drv": 100}
 assert P.verdicts(jid) == {"vm": ("success", f"Built here and passed: {X}.drv"),
                            "other": ("failure", f"Built here and failed: {Y}.drv")}
 tools(**{"nix-store": {"valid": []}})  # collected since: the kept verdicts stand
@@ -148,6 +175,11 @@ tools(**{"nix-store": {"unsure": True}})
 jid = made({"vm": X + ".drv"})
 P.run(jid)
 assert end(jid)["state"] == "failed" and "verdicts" not in end(jid) and P.verdicts(jid) is None, end(jid)
+# Its realise passed but its outputs aren't there: broken, not a failure.
+tools(**{"nix-store": {"rcs": {X + ".drv": 0}}})
+jid = made({"vm": X + ".drv"})
+P.run(jid)
+assert end(jid)["state"] == "failed" and "verdicts" not in end(jid), end(jid)
 # An ended build's folder goes KEEP days on, a running one's never.
 old_end = made({"vm": X + ".drv"})
 C.save(f"builds/{old_end}/end.json", {"state": "done", "exit": 0, "at": time.time() - P.KEEP * 86400 - 60})
@@ -197,15 +229,13 @@ started = ran("systemd-run")[0]
 a = started["args"]
 assert a[:4] == ["--user", "--quiet", "--collect", f"--unit={C.build_unit(jid)}"], a
 assert f"--setenv=AUTOLAND_CONFIG={os.environ['AUTOLAND_CONFIG']}" in a, a
-assert a[a.index("--") + 1:][-2:] == ["build", jid] and a[a.index("--") + 1] == sys.executable, a
+assert a[a.index("--") + 1:] == P.own("build", jid) and P.own()[0] == sys.executable, a
 tools(**{"systemd-run": {"rc": 1}})
 assert P.build("sam/r", pr, ["vm"], st) is None
 # And `autoland-steward build ID` is that run.
-tools()
+tools(**{"nix-store": {"valid": [X]}})
 jid = made({"vm": X + ".drv"})
-json.dump({**json.load(open(os.environ["AUTOLAND_CONFIG"])), "nix": bin_dir}, open(f"{tmp}/proving-config.json", "w"))
-p = subprocess.run([sys.executable, "-E", "-s", os.path.join(os.path.dirname(P.__file__), "steward.py"), "build", jid],
-                   env={**os.environ, "AUTOLAND_CONFIG": f"{tmp}/proving-config.json"}, capture_output=True, text=True)
+p = subprocess.run(P.own("build", jid), capture_output=True, text=True)
 assert p.returncode == 0 and end(jid)["state"] == "done", p.stderr
 assert not os.path.exists(f"{tmp}/state/pass.lock"), "a build takes no pass's lock"
 print("proof builds' start: ok")
@@ -219,6 +249,8 @@ kept_outputs, kept_build = P.outputs, P.build
 
 def outputs(repo, pr, checks, st):
     drvs = {"vm": X + ".drv", "other": Y + ".drv"}
+    if not set(checks) <= drvs.keys():  # a Claude job's, with no attribute
+        return None
     st["proofOutputs"] = {"for": None, "paths": sorted(drvs[c].removesuffix(".drv") for c in checks), "drvs": drvs, "at": C.NOW}
     return st["proofOutputs"]["paths"]
 
@@ -409,11 +441,74 @@ assert len(BUILT) == 1 and pr_state()["stopping"] == ["job-stuck"], (status, pr_
 UNSTOPPABLE.discard("job-stuck")
 run(clean(checks=VM), 800)
 assert "job-stuck" in STOPPED and "stopping" not in pr_state(), (STOPPED, pr_state())
+# A verdict GitHub didn't take, for a check remapped since: the old
+# derivation's isn't posted, before CI is read or after, and the remapped
+# one is built.
+fresh_pr_state()
+BUILT.clear()
+S.CFG["repos"]["sam/r"] = {"proofBuilds": {"vm": "checks.x86_64-linux.vm", "other": "checks.x86_64-linux.other"}}
+tools()
+run(clean(checks=TWO), 700)
+finish(BUILT[0], [X, Y])
+FAIL.append("context=other")
+run(clean(checks=TWO), 900)
+FAIL.remove("context=other")
+assert pr_state()["provedUnposted"] == BUILT[0] and [s["state"] for s in statuses("other")] == ["success"], (pr_state(), WROTE)
+tools()  # the remapped one isn't built yet
+S.CFG["repos"]["sam/r"] = {"proofBuilds": {"vm": "checks.x86_64-linux.vm", "other": "checks.x86_64-linux.other-remapped"}}
+LEFT = CI_GREEN + [{"__typename": "StatusContext", "context": "vm", "state": "SUCCESS", "description": ""},
+                   {"__typename": "StatusContext", "context": "other", "state": "PENDING", "description": ""}]
+status, _ = run(clean(checks=LEFT), 1000)
+assert statuses("other") == [] and len(BUILT) == 2 and "building other here" in status, (status, WROTE, BUILT)
+assert "provedUnposted" not in pr_state(), pr_state()
+# A check dropped from proofBuilds since its build: the verdict that's left
+# is posted, not the dropped one's.
+fresh_pr_state()
+BUILT.clear()
+S.CFG["repos"]["sam/r"] = {"proofBuilds": {"vm": "checks.x86_64-linux.vm", "other": "checks.x86_64-linux.other"}}
+tools()
+run(clean(checks=TWO), 700)
+finish(BUILT[0], [X, Y])
+S.CFG["repos"]["sam/r"] = {"proofBuilds": {"vm": "checks.x86_64-linux.vm"}}
+status, _ = run(clean(checks=VM), 900)
+assert [s["state"] for s in statuses()] == ["success"] and statuses("other") == [], (status, WROTE)
+# A Claude job that's posted one of its two checks is the same proof still:
+# nothing stops it, and no other starts.
+fresh_pr_state()
+STOPPED.clear()
+S.CFG["repos"]["sam/r"] = {"proofJobs": {"a": "Run a.", "b": "Run b."}}
+AB = CI_GREEN + [{"__typename": "StatusContext", "context": c, "state": "PENDING", "description": ""} for c in ("a", "b")]
+run(clean(checks=AB), 700)
+jid = pr_state()["provedJob"]
+assert len(JOBS) == 1, JOBS
+STATES[jid] = "running"
+A_DONE = CI_GREEN + [{"__typename": "StatusContext", "context": "a", "state": "SUCCESS", "description": ""},
+                     {"__typename": "StatusContext", "context": "b", "state": "PENDING", "description": ""}]
+status, _ = run(clean(checks=A_DONE), 800)
+assert STOPPED == [] and JOBS == [] and pr_state()["provedJob"] == jid and "running b" in status, (status, STOPPED, JOBS)
+# A job from before proofsLive, replaced by a build while it won't stop:
+# it holds its slot until it's over, so with one slot the build waits.
+fresh_pr_state()
+BUILT.clear()
+STOPPED.clear()
+tools()
+S.CFG["repos"]["sam/r"] = {"proofBuilds": {"vm": "checks.x86_64-linux.vm"}, "proofSlots": 1}
+STATES["job-legacy"] = "running"
+UNSTOPPABLE.add("job-legacy")
+C.save("pr-sam_r-5.json", {"head": "a" * 40, "seen": C.ts(T0), "proved": "a" * 40, "provedJob": "job-legacy", "provedAt": C.NOW})
+status, _ = run(clean(checks=VM), 700)
+assert BUILT == [] and "waiting its turn to build vm (1 ahead)" in status, (status, pr_state())
+assert pr_state()["stopping"] == ["job-legacy"], pr_state()
+UNSTOPPABLE.discard("job-legacy")
+run(clean(checks=VM), 800)
+status, _ = run(clean(checks=VM), 900)
+assert "job-legacy" in STOPPED and len(BUILT) == 1 and "Settled; building vm here" in status, (status, STOPPED, BUILT)
+S.CFG["repos"]["sam/r"] = {"proofBuilds": {"vm": "checks.x86_64-linux.vm"}}
 # A check in both maps, however each spells it, is the build alone.
 assert C.machine({"proofJobs": {"VM": "Run it.", "x": "Run x."}, "proofBuilds": {"vm": "checks.x86_64-linux.vm"}}).keys() == {"vm", "x"}
 print("proof builds' verdicts: ok")
 
 P.outputs, P.build, C.gh = kept_outputs, kept_build, kept_gh
 del S.CFG["repos"]["sam/r"]
-os.environ["PATH"], S.CFG["nix"] = kept_path, kept_nix
+os.environ["PATH"], S.CFG["nix"], os.environ["AUTOLAND_CONFIG"] = kept_path, kept_nix, kept_config
 STATES.clear()

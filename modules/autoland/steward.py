@@ -103,6 +103,9 @@ def main():
         # A proof build's unit (proofs.build): no pass, so no lock.
         P.run(sys.argv[2])
         return
+    if sys.argv[1:2] == ["realise"] and len(sys.argv) == 3:
+        # Its derivations built, in its heavy slot (proofs.run).
+        sys.exit(P.realise(sys.argv[2]))
     try:
         for d in ("", V.QUEUE, V.SNAP, V.DONE, V.SESSIONS, V.GIT):
             os.makedirs(os.path.join(STATE, d), exist_ok=True)
