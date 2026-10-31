@@ -19,8 +19,8 @@ thread ── Remote Control (one tap) ─────────────�
 
 ## 1. The inbox (default): nothing to approve
 
-`burrow.proj.inbox` (`modules/proj/inbox.sh`) turns GitHub issues into project
-jobs.
+`burrow.proj.inbox` (proj-inbox, in `crates/burrow-proj`) turns GitHub issues
+into project jobs.
 
 - **Start:** open an issue in the project's own GitHub repo (one checked out in
   `burrow.projectsDir`) with the label `claude` (`inbox.label`), as one of

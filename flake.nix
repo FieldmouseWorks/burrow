@@ -272,12 +272,21 @@
         # A switch reaches the turns already waiting in line, each in its place.
         proj-deployed = import ./tests/proj-deployed.nix { inherit self pkgs; };
         # The example's proj reads the config its module writes (a field the
-        # binary doesn't know fails it), and a job it doesn't have is failed.
-        proj-config = pkgs.runCommand "proj-config-check" { } ''
-          got=$(${self.nixosConfigurations.example.config.burrow.tools.proj}/bin/proj state no-such-job)
-          [ "$got" = failed ] || { echo "proj state said: $got"; exit 1; }
-          touch $out
-        '';
+        # binary doesn't know fails it), and a job it doesn't have is failed;
+        # so does its proj-inbox, with the inbox on, which has no issues yet.
+        proj-config =
+          let
+            inbox = self.nixosConfigurations.example.extendModules {
+              modules = [ { burrow.proj.inbox = { enable = true; authors = [ "octocat" ]; }; } ];
+            };
+          in
+          pkgs.runCommand "proj-config-check" { } ''
+            got=$(${self.nixosConfigurations.example.config.burrow.tools.proj}/bin/proj state no-such-job)
+            [ "$got" = failed ] || { echo "proj state said: $got"; exit 1; }
+            got=$(${inbox.config.burrow.tools.proj-inbox}/bin/proj-inbox status)
+            [ -z "$got" ] || { echo "proj-inbox status said: $got"; exit 1; }
+            touch $out
+          '';
         # The steward and its reviewers, with stand-ins for gh, git's remote and
         # the agents, and its one-way paths as the module sets them.
         autoland = pkgs.runCommand "autoland-check" { nativeBuildInputs = [ pkgs.python3 pkgs.git pkgs.openssl ]; } ''
@@ -840,14 +849,22 @@
           python3 -I ${./tests/pr-base.py} ${./.github/workflows/flake-check.yml}
           touch $out
         '';
-        # The shared rust-first check (rust-first-check.yml), its own script
-        # with a stand-in for gh: a PR that adds Python, or grows it past what
-        # a fix adds, fails without a "Why not Rust:" line in its body, as a
-        # commit status a newer run replaces; and its callers, burrow's and
-        # the template's, run it again when the body is edited.
-        rust-first = pkgs.runCommand "rust-first-check" { nativeBuildInputs = [ (pkgs.python3.withPackages (p: [ p.pyyaml ])) pkgs.jq ]; } ''
-          python3 -I ${./tests/rust-first.py} ${./.github/workflows/rust-first-check.yml} \
-            ${./.github/workflows/rust-first.yml} ${./templates/project/.github/workflows/rust-first.yml}
+        # The house action's callers, burrow's and the template's: each runs
+        # it on every push and whenever the title or body is edited, with a
+        # token that can post its statuses, and the action hands the check
+        # the event's PR and head. The check itself is crates/burrow-house,
+        # gated as crates-*.
+        house-callers = pkgs.runCommand "house-callers-check" { nativeBuildInputs = [ pkgs.yq-go ]; } ''
+          for caller in ${./.github/workflows/house.yml} ${./templates/project/.github/workflows/house.yml}; do
+            yq -e '.on.pull_request.types | sort | join(",") == "edited,opened,reopened,synchronize"' "$caller"
+            yq -e '.jobs.house.permissions | to_entries | map(.key + "=" + .value) | join(",") == "contents=read,pull-requests=read,statuses=write"' "$caller"
+            yq -e '.jobs.house.steps[-1].uses | test("^(\./|FieldmouseWorks/burrow/)\.github/actions/house(@|$)")' "$caller"
+          done
+          action=${./.github/actions/house/action.yml}
+          # Built where rustup finds the crates' pinned toolchain.
+          yq -e '.runs.steps[0]."working-directory" == "''${{ github.action_path }}/../../../crates"' "$action"
+          yq -e '.runs.steps[-1].env.NUMBER == "''${{ github.event.pull_request.number }}"' "$action"
+          yq -e '.runs.steps[-1].env.HEAD_SHA == "''${{ github.event.pull_request.head.sha }}"' "$action"
           touch $out
         '';
         # Stale Remote Control servers catch up once idle, with a stand-in for Claude.

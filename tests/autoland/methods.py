@@ -36,7 +36,7 @@ for rules in ([], [pull_request(*ALL)], [{"type": "pull_request", "parameters": 
     fresh_pr_state()
     run(clean(), 900)
     assert merged_with() == ["squash"], (rules, merges())
-# A squash's subject is the PR's title, the one house-check holds to the
+# A squash's subject is the PR's title, the one the house check holds to the
 # house style, never the subject of the PR's one commit GitHub would take.
 fresh_pr_state()
 run(clean(title="autoland: merge with the title"), 900)
