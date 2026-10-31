@@ -205,6 +205,11 @@ assert ASKED == [], ASKED
 # projectsDir has none of it, and neither has a folder emptied of what's in it.
 S.CFG["projectsDir"] = f"{tmp}/clones-elsewhere"
 assert C.taken("sam/tool") is None
+# Not even with the same sort of clone in the way there: that's a new folder to
+# say, which the record of the old one doesn't.
+subprocess.run(["git", "init", "-q", f"{tmp}/clones-elsewhere/tool"], check=True)
+subprocess.run(["git", "-C", f"{tmp}/clones-elsewhere/tool", "remote", "add", "origin", "https://github.com/eve/tool.git"], check=True)
+assert C.taken("sam/tool") is None
 S.CFG["projectsDir"] = src
 os.makedirs(f"{src}/plain/stuff")
 C.save(C.TAKEN_FILE, {**C.load(C.TAKEN_FILE, {}), "sam/plain": {"folder": f"{src}/plain", "origin": None}})
