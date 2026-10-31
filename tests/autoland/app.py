@@ -10,7 +10,7 @@ import sys
 import threading
 import time
 
-from harness import (FAIL, REAL_TOKEN, WROTE, C, P, R, S, T, V, clean, fresh_pr_state, judgment, merges, mkpr, run, said, sh,
+from harness import (FAIL, REAL_TOKEN, T0, WROTE, C, P, R, S, T, V, clean, fresh_pr_state, judgment, merges, mkpr, run, said, sh,
                      stand_in, tmp)
 from harness import head as HEAD
 
@@ -216,18 +216,20 @@ ASKED = []
 
 def list_gh(*a, **k):
     ASKED.append((C._for[-1] if C._for else None, a[2]))
-    return {"sam": [{"nameWithOwner": "sam/r", "isPrivate": True, "defaultBranchRef": {"name": "trunk"}},
-                    {"nameWithOwner": "sam/empty", "isPrivate": False, "defaultBranchRef": None},
-                    {"nameWithOwner": "sam/skip", "isPrivate": False, "defaultBranchRef": {"name": "main"}}],
-            "eve": [{"nameWithOwner": "eve/p", "isPrivate": False, "defaultBranchRef": {"name": "main"}}]}[a[2]]
+    return {"sam": [{"id": "R_1", "nameWithOwner": "sam/r", "isPrivate": True, "defaultBranchRef": {"name": "trunk"},
+                     "createdAt": T0},
+                    {"nameWithOwner": "sam/empty", "isPrivate": False, "defaultBranchRef": None, "createdAt": T0},
+                    {"nameWithOwner": "sam/skip", "isPrivate": False, "defaultBranchRef": {"name": "main"}, "createdAt": T0}],
+            "eve": [{"id": "R_2", "nameWithOwner": "eve/p", "isPrivate": False, "defaultBranchRef": {"name": "main"},
+                     "createdAt": "2026-01-02T03:04:05Z"}]}[a[2]]
 
 
 kept = (C.gh, C.CFG["owners"], C.CFG["exclude"])
 C.gh, C.CFG["owners"], C.CFG["exclude"] = list_gh, ["sam", "eve"], ["sam/skip"]
 found = R.discover()
 C.gh, C.CFG["owners"], C.CFG["exclude"] = kept
-assert found == [{"repo": "sam/r", "private": True, "default": "trunk"},
-                 {"repo": "eve/p", "private": False, "default": "main"}], found
+assert found == [{"repo": "sam/r", "id": "R_1", "private": True, "default": "trunk", "created": T0},
+                 {"repo": "eve/p", "id": "R_2", "private": False, "default": "main", "created": "2026-01-02T03:04:05Z"}], found
 assert ASKED == [("sam", "sam"), ("eve", "eve")], ASKED
 
 # A pass asks about each repo as the App's installation on that repo's
@@ -242,15 +244,16 @@ def pass_gh(*a, **k):
                                     "pullRequests": {"pageInfo": {"hasNextPage": False}, "nodes": []}}}}
 
 
-kept = (S.R.discover, S.R.publish, S.R.unhook_gone, S.R.hook_projects, C.gh, sys.argv)
+kept = (S.R.discover, S.R.settle_repo, S.R.publish, S.R.unhook_gone, S.R.hook_projects, C.gh, sys.argv)
 S.R.discover = lambda: [{"repo": "sam/r", "default": "main", "private": False},
                         {"repo": "eve/p", "default": "main", "private": False}]
+S.R.settle_repo = lambda r, known: False
 S.R.publish = S.R.unhook_gone = lambda *a: None
 S.R.hook_projects = lambda repos: []
 C.gh = pass_gh
 sys.argv = ["steward", "kick", "sam/r", "eve/p"]
 S.main()
-(S.R.discover, S.R.publish, S.R.unhook_gone, S.R.hook_projects, C.gh, sys.argv) = kept
+(S.R.discover, S.R.settle_repo, S.R.publish, S.R.unhook_gone, S.R.hook_projects, C.gh, sys.argv) = kept
 assert FOR == [("sam", "sam"), ("eve", "eve")], FOR
 
 # The steward merges now, the checked head only, or not at all: nothing is

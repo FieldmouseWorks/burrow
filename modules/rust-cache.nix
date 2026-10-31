@@ -170,9 +170,6 @@ in
         RuntimeDirectory = [ "rust-cache-${u}" ];
         RuntimeDirectoryMode = "0700";
         BindPaths = [ cache ];
-        # A message being stored takes about twice its size.
-        MemoryMax = "4G";
-        MemorySwapMax = 0;
         PrivateNetwork = true;
         RestrictAddressFamilies = [ "AF_UNIX" ];
         NoNewPrivileges = true;
