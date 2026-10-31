@@ -539,7 +539,12 @@
       cj = next(x.split()[-1] for x in machine.succeed("su - dev -c 'proj-inbox status'").splitlines() if x.startswith("o/c#1 "))
       def cut_off(n):
           # As systemd-oomd kills a unit: all of it, the turn's own shell too.
-          machine.wait_until_succeeds(f"grep -q hang /data/dev/jobs/{cj}/{n}.jsonl && grep -qx hang /data/dev/jobs/{cj}/session", timeout=120)
+          # A resumed one (every turn after the first) once it's put out its
+          # empty result, which is no answer.
+          ready = f"grep -q hang /data/dev/jobs/{cj}/{n}.jsonl && grep -qx hang /data/dev/jobs/{cj}/session"
+          if n > 1:
+              ready += f" && grep -q '\"num_turns\":0' /data/dev/jobs/{cj}/{n}.jsonl"
+          machine.wait_until_succeeds(ready, timeout=120)
           machine.succeed(f"systemctl --user -M dev@ kill --signal=KILL '{unit(cj)}'")
           machine.wait_until_fails(f"systemctl --user -M dev@ is-active -q '{unit(cj)}'", timeout=60)
           assert state(cj) == "failed", state(cj)
