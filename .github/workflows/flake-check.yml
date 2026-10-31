@@ -3,7 +3,9 @@
 # result for Conary's ledger; on a PR, also check that GitHub verifies every
 # signed commit it adds (with pr-gate off, only that). A PR that changes only
 # what the caller's docs-paths lists takes the docs lane instead: only the
-# checks that read docs, and no proofs. Called from a repo's own
+# checks that read docs, and no proofs. A gate too long for one runner can
+# be split across legs, each on a runner of its own, and then attested
+# together by one more job. Called from a repo's own
 # workflow with `uses:`, whose job grants `id-token: write` and
 # `attestations: write` (a called job gets no more than its caller gives). Its
 # actions are pinned to commits (repos that allow only pinned actions need
@@ -14,11 +16,11 @@
 # base the PR no longer has. Anything else (a push to a branch, a train's
 # candidate) is a run of its own that nothing cancels, and so is a PR's title
 # or body edit: Renovate renames a PR just after pushing to it, and the edit
-# would cancel the push's run, whose cancelled checks read as red on the head
-# for good. A job's concurrency group is its caller's workflow, its inputs and
-# the PR (or the run), so calls in one workflow with inputs of their own (a
-# matrix's legs, say) never cancel each other; two calls alike would be the
-# same check twice.
+# would cancel the push's run and start the same check over. A job's
+# concurrency group is its caller's workflow, its inputs and the PR (or the
+# run), and a leg's its leg too, so calls in one workflow with inputs of their
+# own (a matrix's legs, say) never cancel each other, nor do the gate's own
+# legs; two calls alike would be the same check twice.
 name: flake-check
 on:
   workflow_call:
@@ -54,6 +56,21 @@ on:
           write it.
         type: boolean
         default: false
+      legs:
+        description: >-
+          How many jobs to split the gate across, 1 to 8, each on a runner of
+          its own, for a gate that takes too long on one; more than one needs
+          eval-apart. Every leg evaluates the plan, and leg K of N then
+          evaluates every Nth output from the Kth (counting from 1) and
+          builds the checks among them. The legs are named `leg K of N`;
+          once they've all finished, a job named check, as the gate's own is
+          with one leg, says whether they all passed and attests that, with
+          their logs one after another as its log, once every leg checked the
+          same commit and shared out the same plan. On a PR that commit is
+          its head merged with its base as the lane job found the base, not
+          as it is when each job starts.
+        type: number
+        default: 1
       pr-gate:
         description: >-
           Run the gate on a PR to the default branch. False in a repo whose
@@ -110,13 +127,14 @@ jobs:
     name: lane into ${{ github.event.pull_request.base.ref }}
     runs-on: ${{ inputs.runner }}
     concurrency:
-      group: ${{ format('flake-check {0} lane {1} {2} {3} {4} [{5}] [{6}] [{7}] {8}', github.workflow, inputs.runner, inputs.install-nix, inputs.eval-apart, inputs.pr-gate, inputs.build-skip, inputs.docs-paths, inputs.docs-checks, (github.event_name == 'pull_request' && (github.event.action != 'edited' || github.event.changes.base)) && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id)) }}
+      group: ${{ format('flake-check {0} lane {1} {2} {3} {4} [{5}] [{6}] [{7}] {8} {9}', github.workflow, inputs.runner, inputs.install-nix, inputs.eval-apart, inputs.pr-gate, inputs.build-skip, inputs.docs-paths, inputs.docs-checks, inputs.legs, (github.event_name == 'pull_request' && (github.event.action != 'edited' || github.event.changes.base)) && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id)) }}
       cancel-in-progress: true
     permissions:
       contents: read
     outputs:
       gate: ${{ steps.base.outputs.lands == 'true' && 'train' || steps.paths.outputs.docs == 'true' && 'docs' || 'full' }}
       fork: ${{ steps.paths.outputs.fork }}
+      tip: ${{ steps.tip.outputs.tip }}
     steps:
       - id: base
         shell: bash
@@ -128,21 +146,33 @@ jobs:
           if [ "$PR_GATE" = false ] && [ "$BASE" = "$DEFAULT" ]; then lands=true; else lands=false; fi
           echo "a PR to $BASE (the default branch is $DEFAULT), pr-gate $PR_GATE: the train lands it: $lands"
           echo "lands=$lands" >>"$GITHUB_OUTPUT"
-      - if: steps.base.outputs.lands != 'true' && inputs.docs-paths != ''
+      - if: steps.base.outputs.lands != 'true' && (inputs.docs-paths != '' || inputs.legs > 1)
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           ref: ${{ github.event.pull_request.head.sha }}
-          # Every branch's history, for where the PR left its base, but no
-          # file's contents beyond the head's: which paths changed is all
-          # this reads.
+          # Every branch's history, for the base's tip and where the PR left
+          # it, but no file's contents beyond the head's: which paths
+          # changed is all this reads.
           fetch-depth: 0
           filter: blob:none
+      # The base's tip as this job finds it: what the docs lane is judged
+      # against, and what every leg merges the head with (legs).
+      - id: tip
+        if: steps.base.outputs.lands != 'true' && (inputs.docs-paths != '' || inputs.legs > 1)
+        shell: bash
+        env:
+          BASE: ${{ github.event.pull_request.base.ref }}
+        run: |
+          tip=$(git rev-parse --verify "refs/remotes/origin/$BASE^{commit}")
+          echo "$BASE is at $tip"
+          echo "tip=$tip" >>"$GITHUB_OUTPUT"
       - id: paths
         if: steps.base.outputs.lands != 'true' && inputs.docs-paths != ''
         shell: bash
         env:
           BASE: ${{ github.event.pull_request.base.ref }}
+          TIP: ${{ steps.tip.outputs.tip }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           DOCS: ${{ inputs.docs-paths }}
         run: |
@@ -168,8 +198,7 @@ jobs:
           # The PR's own changes, from where it left its base to its head:
           # a rename or a copy as the path it left and the one it made, so
           # a file moved out of the gate's reach still counts where it was.
-          tip=$(git rev-parse --verify "refs/remotes/origin/$BASE^{commit}")
-          if ! fork=$(git merge-base "$tip" "$HEAD_SHA"); then
+          if ! fork=$(git merge-base "$TIP" "$HEAD_SHA"); then
             echo "the whole gate: $HEAD_SHA shares no history with $BASE"
             echo "docs=false" >>"$GITHUB_OUTPUT"
             exit 0
@@ -193,14 +222,34 @@ jobs:
   # The whole gate, unless the train lands the PR or it takes the docs lane:
   # anything else the lane job says, its failure included, is the whole gate.
   # A cancelled lane job means the PR has a newer run (concurrency), which
-  # checks the head and base it has now: this one checks nothing.
+  # checks the head and base it has now: this one checks nothing. With legs,
+  # one job each, and then the gate job below says what they found.
   check:
     needs: lane
     if: ${{ !cancelled() && needs.lane.result != 'cancelled' && needs.lane.outputs.gate != 'train' && needs.lane.outputs.gate != 'docs' }}
+    name: ${{ inputs.legs > 1 && format('leg {0} of {1}', matrix.leg, inputs.legs) || 'check' }}
+    strategy:
+      # Every leg runs to its end, as the gate builds every check it can
+      # (--keep-going): one failing says nothing of the others.
+      fail-fast: false
+      matrix:
+        # 1 to legs: an expression has no arithmetic, so a list of each.
+        leg: ${{ fromJSON('[[1], [1], [1, 2], [1, 2, 3], [1, 2, 3, 4], [1, 2, 3, 4, 5], [1, 2, 3, 4, 5, 6], [1, 2, 3, 4, 5, 6, 7], [1, 2, 3, 4, 5, 6, 7, 8]]')[inputs.legs] }}
     runs-on: ${{ inputs.runner }}
     concurrency:
-      group: ${{ format('flake-check {0} check {1} {2} {3} {4} [{5}] [{6}] [{7}] {8}', github.workflow, inputs.runner, inputs.install-nix, inputs.eval-apart, inputs.pr-gate, inputs.build-skip, inputs.docs-paths, inputs.docs-checks, (github.event_name == 'pull_request' && (github.event.action != 'edited' || github.event.changes.base)) && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id)) }}
+      group: ${{ format('flake-check {0} check {1} {2} {3} {4} [{5}] [{6}] [{7}] {8} leg {9} {10}', github.workflow, inputs.runner, inputs.install-nix, inputs.eval-apart, inputs.pr-gate, inputs.build-skip, inputs.docs-paths, inputs.docs-checks, inputs.legs, matrix.leg, (github.event_name == 'pull_request' && (github.event.action != 'edited' || github.event.changes.base)) && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id)) }}
       cancel-in-progress: true
+    # Each leg's log, its digest, the commit it checked and its plan, for the
+    # gate job: a matrix's legs combine their outputs, one name each.
+    outputs:
+      leg-1: ${{ steps.leg.outputs.leg-1 }}
+      leg-2: ${{ steps.leg.outputs.leg-2 }}
+      leg-3: ${{ steps.leg.outputs.leg-3 }}
+      leg-4: ${{ steps.leg.outputs.leg-4 }}
+      leg-5: ${{ steps.leg.outputs.leg-5 }}
+      leg-6: ${{ steps.leg.outputs.leg-6 }}
+      leg-7: ${{ steps.leg.outputs.leg-7 }}
+      leg-8: ${{ steps.leg.outputs.leg-8 }}
     permissions:
       contents: read
       # The attestation: a GitHub OIDC token to sign it with, and the API
@@ -222,6 +271,10 @@ jobs:
       # the job starts. GitHub's merge commit for the run (github.sha) is the
       # base as it was when the event fired, which a run that waited in a
       # runner's queue, or a re-run, would test long after its base moved on.
+      # With legs, as the lane job found it. The merge commit is dated when the
+      # newer of the two was committed, not when the job ran, so every leg,
+      # and a leg run again, checks one commit: the flake's rev and
+      # lastModified with it.
       - &merge
         id: merge
         if: github.event_name == 'pull_request'
@@ -229,12 +282,24 @@ jobs:
         env:
           BASE: ${{ github.event.pull_request.base.ref }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          LEGS: ${{ inputs.legs }}
+          TIP: ${{ needs.lane.outputs.tip }}
         run: |
-          tip=$(git rev-parse --verify "refs/remotes/origin/$BASE^{commit}")
+          if [ "$LEGS" -le 1 ]; then
+            tip=$(git rev-parse --verify "refs/remotes/origin/$BASE^{commit}")
+          elif [ -z "$TIP" ]; then
+            echo "::error title=No base to merge with::the lane job didn't say where $BASE was, so no leg knows what to check $HEAD_SHA merged with"
+            exit 1
+          elif ! tip=$(git rev-parse -q --verify "$TIP^{commit}"); then
+            echo "::error title=No base to merge with::$BASE at $TIP, where the lane job found it, isn't in this checkout"
+            exit 1
+          fi
           echo "checking $HEAD_SHA merged with $BASE at $tip"
           git checkout -q --detach "$tip"
+          when=$(git show -s --format=%ct "$tip" "$HEAD_SHA" | sort -n | tail -n 1)
           # Base first, then the head, as GitHub orders its merge's parents.
-          if ! git -c user.name=flake-check -c user.email=flake-check@localhost -c commit.gpgsign=false \
+          if ! GIT_AUTHOR_DATE="@$when +0000" GIT_COMMITTER_DATE="@$when +0000" \
+              git -c user.name=flake-check -c user.email=flake-check@localhost -c commit.gpgsign=false \
               merge -q --no-ff --no-edit "$HEAD_SHA"; then
             git merge --abort || true
             echo "::error title=Conflicts with its base::$HEAD_SHA no longer merges cleanly with $BASE at $tip, so nothing was checked. Merge $BASE into the branch and push."
@@ -247,6 +312,8 @@ jobs:
         env:
           SKIP: ${{ inputs.build-skip }}
           APART: ${{ inputs.eval-apart }}
+          LEGS: ${{ inputs.legs }}
+          LEG: ${{ matrix.leg }}
         run: |
           # eval-apart: what `nix flake check` checks of the outputs it knows,
           # given the flake's outputs as `nix eval` evaluates the checkout's
@@ -457,11 +524,16 @@ jobs:
               return 1
             fi
             jq -r '.unknown[] | "warning: unknown flake output \u0027\(.)\u0027"' "$RUNNER_TEMP/plan.json"
-            # Which entries are checks to build, and which checks are skipped.
-            jq --arg skip "$SKIP" '($skip | split(" ") | map(select(. != ""))) as $s
+            # Which entries are checks to build, which checks are skipped, and
+            # which entries are this leg's: every LEGS-th from the LEG-th.
+            jq --arg skip "$SKIP" --argjson legs "$LEGS" --argjson leg "$LEG" '($skip | split(" ") | map(select(. != ""))) as $s
               | .entries | map(.check and (.name as $n | $s | index([$n]) | not)) as $build
-              | [range(length) as $i | .[$i] + {build: $build[$i], skip: (.[$i].check and ($build[$i] | not))}]' \
+              | [range(length) as $i | .[$i] + {build: $build[$i], skip: (.[$i].check and ($build[$i] | not)),
+                  mine: ($i % $legs == $leg - 1)}]' \
               "$RUNNER_TEMP/plan.json" > "$RUNNER_TEMP/entries.json"
+            if [ "$LEGS" -gt 1 ]; then
+              echo "leg $LEG of $LEGS: the plan's outputs $LEG, $((LEG + LEGS)), $((LEG + 2 * LEGS)) and so on, of $(jq length "$RUNNER_TEMP/entries.json")"
+            fi
             # Each evaluation exits before the next starts, so the most memory
             # in use is one evaluation's. Each derivation is made a GC root at
             # once, until the build is done; one that isn't a valid derivation
@@ -474,6 +546,7 @@ jobs:
             targets=()
             n=$(jq length "$RUNNER_TEMP/entries.json")
             for ((i = 0; i < n; i++)); do
+              [ "$(jq ".[$i].mine" "$RUNNER_TEMP/entries.json")" = true ] || continue
               what=$(jq -r ".[$i].what" "$RUNNER_TEMP/entries.json")
               echo "evaluating $what"
               if ! result=$(evaluate "entry = $i;" --json); then
@@ -550,6 +623,14 @@ jobs:
             return $failed
           }
           gate() {
+            # Legs: 1 to 8, each of them evaluating apart.
+            if ! [[ $LEGS =~ ^[1-8]$ && $LEG =~ ^[1-8]$ ]] || [ "$LEG" -gt "$LEGS" ]; then
+              echo "can't run leg $LEG of $LEGS: there are 1 to 8 legs, numbered from 1"
+              return 1
+            elif [ "$LEGS" -gt 1 ] && [ "$APART" != true ]; then
+              echo "legs need eval-apart: without it, the gate is one nix flake check, which can't be split"
+              return 1
+            fi
             if [ "$APART" = true ]; then
               apart
             else
@@ -557,23 +638,47 @@ jobs:
             fi
           }
           gate 2>&1 | tee "$RUNNER_TEMP/flake.log"
+      # With legs, a leg's log goes to the gate job, which attests the legs
+      # together: as an artifact named for the leg, with the log's digest, the
+      # commit it checked and the digest of the plan it took its share of
+      # (none if it stopped before it read one) as the leg's own output,
+      # which GitHub keeps and nothing else in the run can write.
+      - id: leg
+        if: ${{ !cancelled() && steps.gate.outcome != 'skipped' && inputs.legs > 1 }}
+        shell: bash
+        env:
+          LEG: ${{ matrix.leg }}
+        run: |
+          name="flake-log-leg-$LEG-$(cat /proc/sys/kernel/random/uuid)"
+          sha=$(sha256sum "$RUNNER_TEMP/flake.log" | cut -d' ' -f1)
+          commit=$(git rev-parse 'HEAD^{commit}')
+          plan=none
+          if [ -f "$RUNNER_TEMP/plan.json" ]; then plan=$(sha256sum "$RUNNER_TEMP/plan.json" | cut -d' ' -f1); fi
+          echo "leg $LEG's log: $name, sha256 $sha, of commit $commit and plan $plan"
+          { echo "name=$name"; echo "leg-$LEG=$name $sha $commit $plan"; } >> "$GITHUB_OUTPUT"
+      - if: ${{ !cancelled() && steps.leg.outputs.name }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ steps.leg.outputs.name }}
+          path: ${{ runner.temp }}/flake.log
       # The gate's result, signed with this job's own GitHub identity, in the
       # format Conary reads (FieldmouseWorks/Conary, docs/ci-attestation.md):
       # a public repo's as a Sigstore bundle, and a private repo's, which
       # GitHub attests only on Enterprise Cloud, with the job's own token,
       # whose audience names the digest of what it attests. A run with no OIDC
       # token (a fork's PR, Dependabot's) can't sign, so it gets none and its
-      # result doesn't count as evidence.
+      # result doesn't count as evidence. With legs, the gate job attests
+      # them, with this same script.
       - id: subject
-        if: ${{ !cancelled() && steps.gate.outcome != 'skipped' && (github.event_name == 'push' || github.event_name == 'pull_request') }}
+        if: ${{ !cancelled() && steps.gate.outcome != 'skipped' && inputs.legs <= 1 && (github.event_name == 'push' || github.event_name == 'pull_request') }}
         shell: bash
-        env:
+        env: &subject-env
           GH_TOKEN: ${{ github.token }}
           OUTCOME: ${{ steps.gate.outcome }}
           SKIP: ${{ inputs.build-skip }}
           PR_HEAD: ${{ github.event.pull_request.head.sha }}
           PRIVATE: ${{ github.event.repository.private }}
-        run: |
+        run: &subject |
           if [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
             echo "no OIDC token in this run, so no attestation"
             exit 0
@@ -619,22 +724,104 @@ jobs:
               "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=$audience" | jq -er .value >> "$attestation"
             { echo "attestation=$attestation"; echo "attestation-name=conary-attestation-$uuid"; } >> "$GITHUB_OUTPUT"
           fi
-      - if: ${{ !cancelled() && steps.subject.outputs.path }}
+      - &log
+        if: ${{ !cancelled() && steps.subject.outputs.path }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ steps.subject.outputs.log }}
           path: ${{ runner.temp }}/flake.log
-      - if: ${{ !cancelled() && steps.subject.outputs.attestation }}
+      - &token
+        if: ${{ !cancelled() && steps.subject.outputs.attestation }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ steps.subject.outputs.attestation-name }}
           path: ${{ steps.subject.outputs.attestation }}
-      - if: ${{ !cancelled() && steps.subject.outputs.path && !github.event.repository.private }}
+      - &bundle
+        if: ${{ !cancelled() && steps.subject.outputs.path && !github.event.repository.private }}
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-path: ${{ steps.subject.outputs.path }}
           predicate-type: https://github.com/FieldmouseWorks/Conary/blob/main/docs/ci-attestation.md#v1
           predicate-path: ${{ runner.temp }}/conary/predicate.json
+  # With legs, the gate's own verdict: whether every leg passed, on the commit
+  # each was to check and with one plan to share out, attested as the gate's
+  # result with this tree's subject, and the legs' logs, each the one its leg
+  # wrote, one after another as its log. It runs once every leg has finished, passed or failed, and
+  # attests nothing once one was cancelled (a newer run has the PR). Named
+  # check, as the gate's job is with one leg: by an expression, so the job
+  # skipped (with one leg) shows that, not a second check of that name.
+  gate:
+    needs: [lane, check]
+    if: ${{ !cancelled() && inputs.legs > 1 && (needs.check.result == 'success' || needs.check.result == 'failure') }}
+    name: ${{ inputs.legs > 1 && 'check' || 'gate' }}
+    runs-on: ${{ inputs.runner }}
+    concurrency:
+      group: ${{ format('flake-check {0} gate {1} {2} {3} {4} [{5}] [{6}] [{7}] {8} {9}', github.workflow, inputs.runner, inputs.install-nix, inputs.eval-apart, inputs.pr-gate, inputs.build-skip, inputs.docs-paths, inputs.docs-checks, inputs.legs, (github.event_name == 'pull_request' && (github.event.action != 'edited' || github.event.changes.base)) && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id)) }}
+      cancel-in-progress: true
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - *checkout
+      - *merge
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: flake-log-leg-*
+          path: ${{ runner.temp }}/legs
+      - id: gate
+        shell: bash
+        env:
+          LEGS: ${{ inputs.legs }}
+          RESULT: ${{ needs.check.result }}
+          OUTPUTS: ${{ toJSON(needs.check.outputs) }}
+        run: |
+          # Each leg's log, the one it wrote: its job's output names the
+          # artifact, the log's digest and the commit it checked, which has
+          # to be the commit here, and the plan it took its share of, which
+          # has to be every other leg's, or some outputs could be no leg's.
+          # A leg with no output ended before its gate did.
+          commit=$(git rev-parse 'HEAD^{commit}')
+          log=$RUNNER_TEMP/flake.log
+          : > "$log"
+          failed=0
+          plan=
+          for ((k = 1; k <= LEGS; k++)); do
+            read -r name sha checked split < <(jq -r --arg k "leg-$k" '.[$k] // ""' <<< "$OUTPUTS")
+            if [ -z "$name" ]; then
+              echo "leg $k of $LEGS left no log: it ended before its gate did"
+              failed=1
+            elif [[ ! $name =~ ^flake-log-leg-$k-[0-9a-f-]+$ ]] || [ ! -f "$RUNNER_TEMP/legs/$name/flake.log" ] \
+                || [ "$(sha256sum < "$RUNNER_TEMP/legs/$name/flake.log" | cut -d' ' -f1)" != "$sha" ]; then
+              echo "leg $k of $LEGS: its log here isn't the one it wrote, $name with sha256 $sha"
+              failed=1
+            elif [ "$checked" != "$commit" ]; then
+              echo "leg $k of $LEGS checked $checked, not $commit"
+              failed=1
+            else
+              echo "leg $k of $LEGS: $name, sha256 $sha"
+              { echo "leg $k of $LEGS:"; cat "$RUNNER_TEMP/legs/$name/flake.log"; } >> "$log"
+              if [ "$split" = none ] || [ -z "$split" ]; then
+                echo "leg $k of $LEGS stopped before it read the plan"
+                failed=1
+              elif [ -z "$plan" ]; then
+                plan=$split first=$k
+              elif [ "$split" != "$plan" ]; then
+                echo "leg $k of $LEGS took its share of another plan than leg $first: sha256 $split, not $plan"
+                failed=1
+              fi
+            fi
+          done
+          echo "the legs: $RESULT"
+          [ "$failed" = 0 ] && [ "$RESULT" = success ]
+      - id: subject
+        if: ${{ !cancelled() && steps.gate.outcome != 'skipped' && (github.event_name == 'push' || github.event_name == 'pull_request') }}
+        shell: bash
+        env: *subject-env
+        run: *subject
+      - *log
+      - *token
+      - *bundle
   # The docs lane: nothing the PR changes is anything the flake builds or
   # tests reads, so only the checks that read the documentation are built,
   # by name, on the head merged with its base as the whole gate checks it,
@@ -647,7 +834,7 @@ jobs:
     name: docs only into ${{ github.event.pull_request.base.ref }} from ${{ needs.lane.outputs.fork }}
     runs-on: ${{ inputs.runner }}
     concurrency:
-      group: ${{ format('flake-check {0} docs {1} {2} {3} {4} [{5}] [{6}] [{7}] {8}', github.workflow, inputs.runner, inputs.install-nix, inputs.eval-apart, inputs.pr-gate, inputs.build-skip, inputs.docs-paths, inputs.docs-checks, (github.event_name == 'pull_request' && (github.event.action != 'edited' || github.event.changes.base)) && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id)) }}
+      group: ${{ format('flake-check {0} docs {1} {2} {3} {4} [{5}] [{6}] [{7}] {8} {9}', github.workflow, inputs.runner, inputs.install-nix, inputs.eval-apart, inputs.pr-gate, inputs.build-skip, inputs.docs-paths, inputs.docs-checks, inputs.legs, (github.event_name == 'pull_request' && (github.event.action != 'edited' || github.event.changes.base)) && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id)) }}
       cancel-in-progress: true
     permissions:
       contents: read
@@ -677,7 +864,7 @@ jobs:
     if: github.event_name == 'pull_request'
     runs-on: ${{ inputs.runner }}
     concurrency:
-      group: ${{ format('flake-check {0} commits {1} {2} {3} {4} [{5}] [{6}] [{7}] {8}', github.workflow, inputs.runner, inputs.install-nix, inputs.eval-apart, inputs.pr-gate, inputs.build-skip, inputs.docs-paths, inputs.docs-checks, (github.event_name == 'pull_request' && (github.event.action != 'edited' || github.event.changes.base)) && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id)) }}
+      group: ${{ format('flake-check {0} commits {1} {2} {3} {4} [{5}] [{6}] [{7}] {8} {9}', github.workflow, inputs.runner, inputs.install-nix, inputs.eval-apart, inputs.pr-gate, inputs.build-skip, inputs.docs-paths, inputs.docs-checks, inputs.legs, (github.event_name == 'pull_request' && (github.event.action != 'edited' || github.event.changes.base)) && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id)) }}
       cancel-in-progress: true
     permissions:
       contents: read

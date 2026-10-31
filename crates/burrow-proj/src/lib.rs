@@ -127,6 +127,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub mod cmd;
 pub mod config;
 pub mod github;
+pub mod inbox;
 pub mod job;
 pub mod pick;
 pub mod scratch;

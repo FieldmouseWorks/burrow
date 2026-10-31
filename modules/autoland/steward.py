@@ -22,17 +22,19 @@ event reports):
      (proofJobs), or judge a PR it won't land on its own word (tasks.py says
      what each job is told), post the `review-settled` commit status and
      merge it, or list it for the owner.
-  3. Once a day per repo, delete branches whose tip is already in the
-     default branch or a closed PR's head, and archive the stale unmerged
-     ones under refs/archive before deleting them too.
+  3. Delete the branches whose tip is already in the default branch or a
+     closed PR's head, and archive the stale unmerged ones under
+     refs/archive before deleting them too, as a push, a PR closing or
+     the default moving changes them or the wait they were given ends
+     (branches.py).
   4. Read each repo's Renovate dashboard: what sits on it too long, short
      of a PR, goes to a Claude job (dashboard.py); and its quarantined
      flaky tests, each to a Claude job that fixes it (flakes.py).
   5. Keep one issue up to date with everything waiting for the owner, and
      one with what the pipeline is stuck on, for a Claude job (repos.py).
 
-`autoland-steward kick OWNER/REPO` is a pass over that repo alone (1, 2, 4
-and 5), run by its autoland@ unit (only that holds the App's key), the
+`autoland-steward kick OWNER/REPO` is a pass over that repo alone (1 to
+5), run by its autoland@ unit (only that holds the App's key), the
 one burrow-events starts within seconds of what changes it: a webhook
 delivery (the App's own, for a repo just made), a Claude job's turn
 ending, a reviewer's answer coming back, or a wait the last pass booked
@@ -66,6 +68,7 @@ import fcntl
 import os
 import sys
 
+import branches as B
 import common as C
 import dashboard as D
 import flakes as F
@@ -118,9 +121,10 @@ def main():
             raise
     # `kick REPO...`: just those repos, now (burrow-events, on what changed
     # on GitHub or here, or a wait that has ended). The full pass, when
-    # burrow-events starts and hourly, does the rest: the branch sweep, the
-    # App's webhook, the hooks of repos it no longer sees to, and whatever
-    # no event reported.
+    # burrow-events starts and hourly, does the rest: the App's webhook,
+    # the hooks of repos it no longer sees to, another try at what GitHub
+    # said no to about a branch (its archive, a read its judgment needed),
+    # and whatever no event reported.
     kick = [k.lower() for k in sys.argv[2:]] if sys.argv[1:2] == ["kick"] else None
     if not DRY:
         # One pass at a time, full or kicked: two would act on the same PRs.
@@ -215,7 +219,7 @@ def run_pass(kick):
                 # First, so a fix PR it made obsolete isn't merged by this same pass.
                 obsolete = R.watch_default(r, info, prs, mine) or set()
                 # Every open PR's branches, head and base, drafts and forks' PRs
-                # included: the branch sweep leaves them all (deleting a base
+                # included: the branch watch leaves them all (deleting a base
                 # closes the PRs on it).
                 in_use = set()
                 seen_to = True
@@ -250,8 +254,7 @@ def run_pass(kick):
                         waits.failed(repo)
                         C.wake(repo, C.NOW + 5 * MIN)  # ends: waits.failed watches the repo
                 if CFG["cleanBranches"]:
-                    # Stale ones the last sweep couldn't archive are listed every pass.
-                    R.sweep_branches(r, in_use, mine, sweep=kick is None)
+                    B.watch_branches(r, in_use, mine, full=kick is None)
             except Exception as e:
                 log(f"{repo}: {e}")
                 waits.failed(repo)

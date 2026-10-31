@@ -55,6 +55,8 @@ pub enum Reset {
 
 /// What the account can be asked: the meter, and to use its banked reset.
 pub trait Account {
+    /// The meter as it stands now. A copy of it from earlier, however it
+    /// looks, is an error: a pass decides and books only on a fresh reading.
     fn read(&mut self) -> Result<Reading, String>;
     /// Ask for the banked reset, calling KEEP once just before its yes is
     /// first pressed. If KEEP fails, nothing is pressed.

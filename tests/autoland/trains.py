@@ -13,7 +13,7 @@ import os
 
 import train as T
 import waits
-from harness import (C, CI_GREEN, FAIL, IDLE, JOBS, P, R, S, STEWARD, WROTE, clean, cn, cn_log, cn_runs, fresh_pr_state,
+from harness import (B, C, CI_GREEN, FAIL, IDLE, JOBS, P, R, S, STEWARD, WROTE, clean, cn, cn_log, cn_runs, fresh_pr_state,
                      gh_stub, head, info, judgment, merges, mkpr, run, said, stand_in, tmp)
 
 stand_in()
@@ -433,21 +433,25 @@ for was, due in ((True, False), (False, True)):
         R.settle_repo({"repo": "sam/r", "private": False, "default": "main"}, {"sam/r"})
     assert (("api", "repos/sam/r") in calls) == due, (was, calls)
 
-# The branch sweep leaves the train's candidates' branches to cn.
-BRANCHES = "conary/train/" + CAND + " " + "e" * 40 + "\nold " + "f" * 40
+# The branch watch leaves the train's candidates' branches to cn.
+BRANCHES = [{"name": "conary/train/" + CAND, "commit": {"sha": "e" * 40}}, {"name": "old", "commit": {"sha": "f" * 40}}]
 deleted = []
-kept_sweep = (R.closed_at, R.delete_branch)
-R.closed_at = lambda repo, name, sha: None
-R.delete_branch = lambda repo, name, sha: deleted.append(name)
-C.gh = lambda *a, **k: BRANCHES if "branches?per_page=100" in a[2] else {"ahead": 0}
+kept_watch = (B.closed_at, B.delete_branch, C.fresh, C.NOW)
+B.closed_at = lambda repo, name, sha: 0
+B.delete_branch = lambda repo, name, sha: deleted.append(name)
+C.fresh = lambda path, etag=None: ("tag", BRANCHES if "/branches?" in path else [])  # and no PR closed
+C.gh = lambda *a, **k: {"ahead": 0}
 for on, want in ((True, ["old"]), (False, ["conary/train/" + CAND, "old"])):
     S.CFG["repos"]["sam/r"] = {"train": on}
     fresh_pr_state()
     deleted.clear()
-    R.sweep_branches({"repo": "sam/r", "default": "main"}, set(), [])
+    C.NOW = kept_watch[3]
+    B.watch_branches({"repo": "sam/r", "default": "main"}, set(), [])
+    C.NOW += B.GRACE  # each goes once it has sat that long
+    B.watch_branches({"repo": "sam/r", "default": "main"}, set(), [])
     assert deleted == want, (on, deleted)
 del S.CFG["repos"]["sam/r"]
-R.closed_at, R.delete_branch = kept_sweep
+B.closed_at, B.delete_branch, C.fresh, C.NOW = kept_watch
 C.gh, C.write = kept_gh, kept_write
 fresh_pr_state()
 print("train rules: ok")

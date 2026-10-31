@@ -43,11 +43,29 @@
         rust.testInputs = pkgs: [ pkgs.openssl ];
       };
       # burrow's own programs, one Cargo workspace (crates/): their package
-      # and their gate, built for every platform lib/project.nix knows.
+      # and their gate, built for every platform lib/project.nix knows. Its
+      # tests include the shared workflows' (crates/burrow-workflows), which
+      # read these files and run git, jq and nix; proj's clone repos to read
+      # their origins.
       crates = self.lib.project {
-        self = ./crates;
-        # proj's tests clone repos to read their origins.
-        rust.testInputs = pkgs: [ pkgs.git ];
+        inherit self;
+        rust = {
+          dir = "crates";
+          include = [
+            ".github/workflows/flake-check.yml"
+            ".github/workflows/flake.yml"
+            "templates/project/.github/workflows/flake.yml"
+            "modules/autoland/prs.py"
+          ];
+          testInputs = pkgs: [ pkgs.git pkgs.jq pkgs.nix ];
+        };
+      };
+      # A workspace below its repo's root whose test reads a file outside
+      # it: lib/project.nix's `include`, for its checks.
+      houseInclude = self.lib.project {
+        self = ./tests/house/rust-include;
+        systems = [ system ];
+        rust = { dir = "ws"; include = [ "spec/fact.txt" ]; };
       };
       # A workspace whose build script finds a native library with
       # pkg-config: lib/project.nix's native inputs, for its checks.
@@ -272,12 +290,21 @@
         # A switch reaches the turns already waiting in line, each in its place.
         proj-deployed = import ./tests/proj-deployed.nix { inherit self pkgs; };
         # The example's proj reads the config its module writes (a field the
-        # binary doesn't know fails it), and a job it doesn't have is failed.
-        proj-config = pkgs.runCommand "proj-config-check" { } ''
-          got=$(${self.nixosConfigurations.example.config.burrow.tools.proj}/bin/proj state no-such-job)
-          [ "$got" = failed ] || { echo "proj state said: $got"; exit 1; }
-          touch $out
-        '';
+        # binary doesn't know fails it), and a job it doesn't have is failed;
+        # so does its proj-inbox, with the inbox on, which has no issues yet.
+        proj-config =
+          let
+            inbox = self.nixosConfigurations.example.extendModules {
+              modules = [ { burrow.proj.inbox = { enable = true; authors = [ "octocat" ]; }; } ];
+            };
+          in
+          pkgs.runCommand "proj-config-check" { } ''
+            got=$(${self.nixosConfigurations.example.config.burrow.tools.proj}/bin/proj state no-such-job)
+            [ "$got" = failed ] || { echo "proj state said: $got"; exit 1; }
+            got=$(${inbox.config.burrow.tools.proj-inbox}/bin/proj-inbox status)
+            [ -z "$got" ] || { echo "proj-inbox status said: $got"; exit 1; }
+            touch $out
+          '';
         # The steward and its reviewers, with stand-ins for gh, git's remote and
         # the agents, and its one-way paths as the module sets them.
         autoland = pkgs.runCommand "autoland-check" { nativeBuildInputs = [ pkgs.python3 pkgs.git pkgs.openssl ]; } ''
@@ -795,22 +822,6 @@
           python3 -I ${./tests/house-sync.py} ${./modules/house/sync.sh} ${./house}
           touch $out
         '';
-        # The shared CI's commit check (flake-check.yml's commits job), its
-        # own script with a stand-in for gh: a PR commit signed by a key
-        # GitHub can't match to its committer fails it.
-        commit-signatures = pkgs.runCommand "commit-signatures-check" { nativeBuildInputs = [ (pkgs.python3.withPackages (p: [ p.pyyaml ])) pkgs.jq ]; } ''
-          python3 -I ${./tests/commit-signatures.py} ${./.github/workflows/flake-check.yml}
-          touch $out
-        '';
-        # The shared CI's gate step with eval-apart (flake-check.yml), its own
-        # script with nix evaluating test flakes for real and a stand-in for
-        # its builds: one nix process per derivation, each a GC root until
-        # it's built, every output checked as nix flake check checks it, and a
-        # flake with an output it doesn't know refused.
-        gate = pkgs.runCommand "gate-check" { nativeBuildInputs = [ (pkgs.python3.withPackages (p: [ p.pyyaml ])) pkgs.git pkgs.jq pkgs.nix ]; } ''
-          python3 -I ${./tests/gate.py} ${./.github/workflows/flake-check.yml}
-          touch $out
-        '';
         # flake-gate: a repo's CI gate step, run here as CI runs it, and
         # burrow's own evaluating apart, so a Claude job's gate holds little.
         flake-gate = pkgs.runCommand "flake-gate-check" { nativeBuildInputs = [ (pkgs.callPackage ./tools/flake-gate/package.nix { }) pkgs.git pkgs.yq-go pkgs.shellcheck ]; } ''
@@ -818,36 +829,22 @@
           bash ${./tests/flake-gate.sh} ${./.}
           touch $out
         '';
-        # The shared CI's attestation step (flake-check.yml), its own script
-        # with stand-ins for curl and gh: a private repo's job signs with its
-        # own token, its audience the digest of the statement kept beside it.
-        attestation = pkgs.runCommand "attestation-check" { nativeBuildInputs = [ (pkgs.python3.withPackages (p: [ p.pyyaml ])) pkgs.git pkgs.jq ]; } ''
-          python3 -I ${./tests/attestation.py} ${./.github/workflows/flake-check.yml}
-          touch $out
-        '';
-        # Which gate the shared CI gives a PR (flake-check.yml's lane job),
-        # its own scripts on real repos: the train's PRs none, documentation
-        # only the docs lane, and never anything that defines the gate.
-        lane = pkgs.runCommand "lane-check" { nativeBuildInputs = [ (pkgs.python3.withPackages (p: [ p.pyyaml ])) pkgs.git ]; } ''
-          python3 -I ${./tests/lane.py} ${./.github/workflows/flake-check.yml} ${./modules/autoland/prs.py} ${./.github/workflows/flake.yml} \
-            ${./templates/project/.github/workflows/flake.yml}
-          touch $out
-        '';
-        # The shared CI's merge step (flake-check.yml), its own script on
-        # real repos: a PR is checked merged with its base as the base is when
-        # the job starts, and one that no longer merges cleanly fails.
-        pr-base = pkgs.runCommand "pr-base-check" { nativeBuildInputs = [ (pkgs.python3.withPackages (p: [ p.pyyaml ])) pkgs.git ]; } ''
-          python3 -I ${./tests/pr-base.py} ${./.github/workflows/flake-check.yml}
-          touch $out
-        '';
-        # The shared rust-first check (rust-first-check.yml), its own script
-        # with a stand-in for gh: a PR that adds Python, or grows it past what
-        # a fix adds, fails without a "Why not Rust:" line in its body, as a
-        # commit status a newer run replaces; and its callers, burrow's and
-        # the template's, run it again when the body is edited.
-        rust-first = pkgs.runCommand "rust-first-check" { nativeBuildInputs = [ (pkgs.python3.withPackages (p: [ p.pyyaml ])) pkgs.jq ]; } ''
-          python3 -I ${./tests/rust-first.py} ${./.github/workflows/rust-first-check.yml} \
-            ${./.github/workflows/rust-first.yml} ${./templates/project/.github/workflows/rust-first.yml}
+        # The house action's callers, burrow's and the template's: each runs
+        # it on every push and whenever the title or body is edited, with a
+        # token that can post its statuses, and the action hands the check
+        # the event's PR and head. The check itself is crates/burrow-house,
+        # gated as crates-*.
+        house-callers = pkgs.runCommand "house-callers-check" { nativeBuildInputs = [ pkgs.yq-go ]; } ''
+          for caller in ${./.github/workflows/house.yml} ${./templates/project/.github/workflows/house.yml}; do
+            yq -e '.on.pull_request.types | sort | join(",") == "edited,opened,reopened,synchronize"' "$caller"
+            yq -e '.jobs.house.permissions | to_entries | map(.key + "=" + .value) | join(",") == "contents=read,pull-requests=read,statuses=write"' "$caller"
+            yq -e '.jobs.house.steps[-1].uses | test("^(\./|FieldmouseWorks/burrow/)\.github/actions/house(@|$)")' "$caller"
+          done
+          action=${./.github/actions/house/action.yml}
+          # Built where rustup finds the crates' pinned toolchain.
+          yq -e '.runs.steps[0]."working-directory" == "''${{ github.action_path }}/../../../crates"' "$action"
+          yq -e '.runs.steps[-1].env.NUMBER == "''${{ github.event.pull_request.number }}"' "$action"
+          yq -e '.runs.steps[-1].env.HEAD_SHA == "''${{ github.event.pull_request.head.sha }}"' "$action"
           touch $out
         '';
         # Stale Remote Control servers catch up once idle, with a stand-in for Claude.
@@ -888,7 +885,18 @@
         // nixpkgs.lib.mapAttrs' (name: nixpkgs.lib.nameValuePair "native-${name}")
           (self.lib.project { self = ./tests/house/rust-native; systems = [ system ]; rust = houseNative; }).checks.${system}
         // (self.lib.project { self = ./tests/house/python; systems = [ system ]; python = { format = true; }; }).checks.${system}
-      );
+        // nixpkgs.lib.mapAttrs' (name: nixpkgs.lib.nameValuePair "include-${name}") houseInclude.checks.${system}
+      ) // {
+        # lib/project.nix's `include`: the checks build from the repo's
+        # root with the workspace and only the files named outside it.
+        house-include-source = pkgs.runCommand "house-include-source-check" { } ''
+          cd ${houseInclude.checks.${system}.rust-test.src}
+          got=$(find . -type f | sort)
+          want=$(printf '%s\n' ./spec/fact.txt ./ws/Cargo.lock ./ws/Cargo.toml ./ws/rust-toolchain.toml ./ws/src/lib.rs)
+          [ "$got" = "$want" ] || { printf 'the source has:\n%s\n' "$got"; exit 1; }
+          touch $out
+        '';
+      };
 
       formatter.${system} = pkgs.nixfmt-rfc-style;
     };

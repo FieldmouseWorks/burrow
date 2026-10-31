@@ -154,7 +154,9 @@ root only.
 7. Checks that run on a machine rather than in CI (the repo names them in
    `proofJobs`, with how to run each): once a settled PR waits on nothing
    else, one Claude job a head runs them on that commit and records each
-   verdict. A red one goes to a fix job like any red CI.
+   verdict. One that's only a build (`proofBuilds`) the steward builds
+   itself, with no Claude job, as soon as the PR is settled, while its CI
+   runs. A red one goes to a fix job like any red CI.
 8. A red default branch (CI failed on what was merged): one Claude job
    finds the cause and opens a PR from `autoland/red-SHA` that reverts the
    merge that broke it, or fixes it, and that PR lands like any other. Nothing
@@ -190,7 +192,7 @@ owner, since nothing else merges it.
   "green" means nothing and dependency updates can't merge themselves.
   The CI is the flake gate the [house style](house-style.md#the-gate-is-the-flake)
   describes: a `flake.nix` from burrow's template, the workflow that calls
-  `nix flake check`, and the template's rust-first workflow beside it. Jobs
+  `nix flake check`, and the template's house workflow beside it. Jobs
   the flake can't hold stay alongside it.
 - **AGENTS.md** with the Code Review Rules section below, plus whatever the
   repo's own agents need (how to build, test and run it). Keep the repo's
@@ -234,13 +236,19 @@ For reviewers, the review bot included. Flag as P1:
 - <the repo's own risks: what a reviewer of this codebase must never let through>
 ```
 
-## Hygiene (the steward, daily)
+## Hygiene (the steward)
 
 - Branches whose tip is already in the default branch, or is the head a
-  closed PR was closed at, with no open PR, are deleted (nothing is lost: the
-  closed PR keeps its commits and can restore the branch). GitHub's
-  delete-on-merge only covers merged PRs. `keepBranches` are left alone, and
-  bots' branches go only this way.
+  closed PR was closed at, with no open PR, are deleted once they've sat an
+  hour at that tip (nothing is lost: the closed PR keeps its commits and can
+  restore the branch). GitHub's delete-on-merge only covers merged PRs.
+  `keepBranches` are left alone, and bots' branches go only this way.
+- What starts it is the branch changing: a push to it, a PR of its
+  closing, the default branch moving, or the wait it was given ending. No
+  daily sweep: each pass lists the branches and the PRs closed since the
+  last look with the last listings' ETags, which GitHub answers for free
+  while nothing changed. A branch GitHub wouldn't read for it is looked at
+  again on the hourly pass.
 - Unmerged branches with no PR and no commit for 3 days are archived, then
   deleted: the steward keeps the tip at `refs/archive/BRANCH/SHA` in the same
   repo, a ref GitHub keeps but lists with neither branches nor tags, and

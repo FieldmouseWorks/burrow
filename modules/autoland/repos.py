@@ -1,6 +1,6 @@
-"""The repos: finding them, keeping their settings at the baseline, the
-daily branch sweep, and the issues that list what waits for the owner and
-what the pipeline is stuck on."""
+"""The repos: finding them, keeping their settings at the baseline, and the
+issues that list what waits for the owner and what the pipeline is stuck
+on. Deleting the branches nothing needs is branches.py's."""
 
 import fnmatch
 import hashlib
@@ -8,15 +8,13 @@ import json
 import os
 import re
 import shutil
-import subprocess
-import tempfile
 import time
 import urllib.parse
 
 import common as C
 import reviewers as V
 import train as T
-from common import CFG, CONTEXT, DEP_RE, DRY, load, log, repo_cfg, save, ts
+from common import CFG, CONTEXT, DRY, load, log, repo_cfg, save
 from prs import PROOF_SLOT, RELEASE_AGE, REVIEWER
 from tasks import RED_BRANCH, red_default_task
 
@@ -679,146 +677,6 @@ def unhook_gone(repos):
         for k in ("hook", "hookId", "unhookTried"):
             st.pop(k, None)
         save(name, st)
-
-
-def delete_branch(repo, name, sha):
-    """Delete the branch only if its tip is still `sha`: a push since then
-    keeps it (git's lease; the REST API has no conditional delete)."""
-    if DRY:
-        log(f"  would: delete {repo} {name} if still at {sha[:7]}")
-        return
-    with tempfile.TemporaryDirectory() as d:
-        subprocess.run(["git", "init", "-q", "--bare", d], check=False)
-        p = subprocess.run(["git", "-C", d, *C.GIT_AUTH, "push", "-q", f"--force-with-lease=refs/heads/{name}:{sha}",
-                            f"https://github.com/{repo}.git", f":refs/heads/{name}"],
-                           capture_output=True, text=True, env=C.gh_env(repo))
-        if p.returncode != 0:
-            log(f"{repo}: kept {name}: {p.stderr.strip()[:200]}")
-
-
-# Unmerged, with no PR and no commit for this long: given up on (agents open
-# a PR when they push). Its commits are kept under ARCHIVE and the branch
-# deleted, so a short wait costs nothing.
-STALE_DAYS = 3
-ARCHIVE = "refs/archive"
-
-
-def answer(call, *args):
-    """What GitHub answered call(*args) (C.gh or C.write), or None when it
-    said no (a branch with no history in common with the default has no
-    comparison, say). C.Unavailable when it didn't answer, which stops a
-    sweep: one that couldn't look at every branch hasn't swept."""
-    try:
-        return call(*args)
-    except C.Unavailable:
-        raise
-    except RuntimeError as e:
-        log(f"  failed: {e}")
-        return None
-
-
-def archive_branch(repo, name, sha):
-    """Keep the branch's commits at refs/archive/NAME/SHA, a ref GitHub keeps
-    but lists with neither branches nor tags; True once they're kept (by
-    this call or an earlier one), and only then may the branch go.
-    C.Unavailable when GitHub didn't answer."""
-    ref = f"{ARCHIVE}/{name}/{sha}"
-    if DRY:
-        log(f"  would: keep {repo} {name} at {ref}")
-        return True
-    if answer(C.write, "api", f"repos/{repo}/git/refs", "-f", f"ref={ref}", "-f", f"sha={sha}") is not None:
-        return True
-    # Already there: an earlier sweep kept it and then couldn't delete.
-    return answer(C.gh, "api", f"repos/{repo}/git/ref/{urllib.parse.quote(ref.removeprefix('refs/'))}",
-                  "--jq", f'.object.sha == "{sha}"') is True
-
-
-def closed_at(repo, name, sha):
-    """The closed PR whose head was this branch at `sha`, if there is one.
-    GitHub keeps that PR's commits (refs/pull/N/head) and offers to restore
-    the branch from its page, so the branch holds nothing the PR doesn't.
-    None too when GitHub said no; C.Unavailable when it didn't answer."""
-    owner = repo.split("/")[0]
-    # Every page: a branch name reused for many PRs can have its match
-    # past the first hundred.
-    got = answer(C.gh, "api", "--paginate", f"repos/{repo}/pulls?state=closed&per_page=100&head={owner}:{urllib.parse.quote(name)}",
-                 "--jq", f'.[] | select(.head.sha == "{sha}") | .number')
-    if got is None:
-        return None
-    first = str(got).split("\n")[0]
-    return int(first) if first.isdigit() else None
-
-
-UNKEPT = f"Stale branches it couldn't archive (unmerged, no PR, {STALE_DAYS}+ days)"
-
-
-def sweep_branches(r, in_use, digest, sweep=True):
-    """Delete the merged branches and the closed PRs' branches, and archive
-    and delete the stale ones, once a day and only when `sweep`; the stale
-    ones the last sweep couldn't archive are listed every time. A sweep
-    GitHub didn't list the branches for, or stopped answering partway
-    through, isn't one: the next full pass sweeps again, not a day later
-    (what it deleted stays deleted)."""
-    repo = r["repo"]
-    path = f"repo-{repo.replace('/', '_')}.json"
-    st = load(path, {})
-    unkept = st.get("unkept", [])
-    if sweep and C.NOW - st.get("branches", 0) >= 86400:
-        try:
-            unkept = swept(r, in_use)
-        except RuntimeError as e:
-            log(f"{repo}: no branch sweep this pass: {e}")
-        else:
-            st.pop("stale", None)  # the list it kept before it archived, which nothing reads now
-            st.update(branches=C.NOW, unkept=unkept)
-            save(path, st)
-    for b in unkept:
-        digest.append((UNKEPT, f"{repo}: `{b}`", ""))
-
-
-def swept(r, in_use):
-    """Sweep r's branches: the stale ones it couldn't archive. RuntimeError
-    when GitHub didn't list them, C.Unavailable when it stopped answering."""
-    repo = r["repo"]
-    unkept = []
-    # The machine's globs, plus the repo's own (evidence branches it cites),
-    # and its train's candidates', which cn makes and deletes.
-    keep = CFG["keepBranches"] + repo_cfg(repo).get("keepBranches", []) + [T.TRAIN.get("branches")] * T.on(repo)
-    names = C.gh("api", "--paginate", f"repos/{repo}/branches?per_page=100", "--jq",
-                 '.[] | select(.protected | not) | "\\(.name) \\(.commit.sha)"')
-    for x in str(names).split("\n"):
-        name, _, sha = x.partition(" ")
-        if not name or not sha or name == r["default"] or name in in_use:
-            continue
-        if any(fnmatch.fnmatch(name, pat) for pat in keep):
-            continue
-        # GitHub deletes a branch when its PR merges, never when it closes.
-        # Matched by the tip, so a bot's branch pushed anew since (its next
-        # update, with no PR yet) or anyone's pushed after the close stays.
-        if (n := closed_at(repo, name, sha)) is not None:
-            log(f"{repo}: deleting {name} at {sha[:7]} (#{n} was closed at it, and keeps its commits)")
-            delete_branch(repo, name, sha)
-            continue
-        # Any other branch of a dependency bot's is its work in progress.
-        if DEP_RE.match(name):
-            continue
-        # Compared at the tip just listed, and deleted only if it's still there.
-        cmp = answer(C.gh, "api", C.compare(repo, r["default"], sha), "--jq",
-                     "{ahead: .ahead_by, date: .commits[-1].commit.committer.date}")
-        if not isinstance(cmp, dict):
-            continue
-        if cmp["ahead"] == 0:
-            log(f"{repo}: deleting {name} at {sha[:7]} (already in {r['default']})")
-            delete_branch(repo, name, sha)
-        elif cmp.get("date") and C.NOW - ts(cmp["date"]) > STALE_DAYS * 86400:
-            # Nothing is lost: one ref made from the archived one restores it.
-            if archive_branch(repo, name, sha):
-                log(f"{repo}: deleting {name} at {sha[:7]} (unmerged, no PR, {STALE_DAYS}+ days; "
-                    f"kept at {ARCHIVE}/{name}/{sha})")
-                delete_branch(repo, name, sha)
-            else:
-                unkept.append(name)
-    return unkept
 
 
 # What only the owner can settle: their call (a label, a judge's or an

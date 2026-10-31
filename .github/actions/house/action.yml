@@ -1,0 +1,56 @@
+# The house rules a machine can read, held to a PR (crates/burrow-house says
+# which), each a commit status of its own, `house/RULE (#N)`. A repo runs it
+# from .github/workflows/house.yml, the template's, on pull_request's
+# opened, edited, reopened and synchronize, in a job that grants
+# `contents: read`, `pull-requests: read` and `statuses: write`:
+#
+#   steps:
+#     - uses: FieldmouseWorks/burrow/.github/actions/house@<commit>
+#
+# It reads the PR's title and body when it runs, so fixing either runs it
+# again. That's why it's a workflow of its own rather than a job in
+# flake-check.yml: an edited body would rerun the whole gate.
+name: house
+description: Hold a PR to the house rules a machine can read
+inputs:
+  growth:
+    description: >-
+      How many lines a PR may add to Python and shell, net, before it says
+      why it isn't Rust: enough for a fix, not for a feature.
+    default: "50"
+  lines:
+    description: How long a code file may grow before it's split.
+    default: "1000"
+  model-names:
+    description: >-
+      Whether a PR that names a model says why. Off only for a repo whose
+      subject is models.
+    default: "true"
+  token:
+    description: A token that can read the PR and post statuses on its commits
+    default: ${{ github.token }}
+runs:
+  using: composite
+  steps:
+    # From this action's own commit, on the runner's cargo, in the crates'
+    # directory: rustup reads the toolchain from where cargo runs, so this
+    # builds with the one crates/rust-toolchain.toml pins, on any runner
+    # with rustup, whatever its default is (or whether it has one).
+    - name: Build the house check
+      shell: bash
+      working-directory: ${{ github.action_path }}/../../../crates
+      env:
+        CARGO_TARGET_DIR: ${{ runner.temp }}/house-build
+      run: cargo build --release --locked --quiet -p burrow-house
+    - name: Check the PR
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        NUMBER: ${{ github.event.pull_request.number }}
+        # The head this run judges, its check is on and its statuses go on,
+        # from the event: a re-run keeps it.
+        HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        GROWTH: ${{ inputs.growth }}
+        LINES: ${{ inputs.lines }}
+        MODEL_NAMES: ${{ inputs.model-names }}
+      run: '"$RUNNER_TEMP/house-build/release/burrow-house" check'

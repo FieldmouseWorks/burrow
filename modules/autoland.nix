@@ -537,10 +537,12 @@ in
       type = types.bool;
       default = true;
       description = ''
-        Daily, delete branches whose tip is already in the default branch or
-        is a closed PR's head (no open PR). Other unmerged ones with no commit
-        for 3 days (not a bot's) are kept at refs/archive/BRANCH/SHA, then
-        deleted (docs/repo-baseline.md says how to restore one).
+        Delete branches whose tip is already in the default branch or is a
+        closed PR's head (no open PR, and an hour at that tip). Other
+        unmerged ones with no commit for 3 days (not a bot's) are kept at
+        refs/archive/BRANCH/SHA, then deleted (docs/repo-baseline.md says how
+        to restore one). A push to a branch, a PR of its closing, the
+        default branch moving or that wait ending starts the look.
       '';
     };
 
@@ -745,7 +747,8 @@ in
         (checks that are a build and nothing more: `{ "<check>" =
         "checks.x86_64-linux.<name>"; }`, the flake attribute whose build is
         the check's verdict. The steward builds them itself, ahead of the
-        proofJobs and with no Claude job: it works out the attribute's
+        proofJobs and with no Claude job, once the PR is settled, while its
+        CI still runs rather than after it passes: it works out the attribute's
         derivation at that commit and runs `nix-store --realise` on it in a
         heavy slot, in a unit of its user's own (proofTimeoutMinutes), and
         posts each check as its build passed or failed, a failure with its
@@ -828,8 +831,8 @@ in
     # reviewer's answer coming back. A pass that waits on time (a new head's
     # settle delay, a reviewer back in service) books its repo's next one in
     # wake.json.
-    # The full pass (settings, new repos, branches) is burrow-events'
-    # catch-up, when it starts and hourly.
+    # The full pass (settings, new repos) is burrow-events' catch-up, when it
+    # starts and hourly.
     burrow.events.handlers.autoland = {
       # The PR itself (opened, ready, labels, retargeted), pushes, reviews and
       # their threads, comments (a judge's verdict), CI finishing, commit

@@ -28,7 +28,7 @@ import reviewers as V
 import stopping
 import train as T
 import waits
-from common import CFG, DRY, MIN, load, log, repo_cfg, save, ts
+from common import CFG, DEP_RE, DRY, MIN, load, log, repo_cfg, save, ts
 from seal import MAJOR as MAJOR_VERDICT  # renovate-sweep's, on a Renovate major
 from touches import automerges, bot_edited, dep_kind, gate_edit, moved_from, one_way
 from tasks import DEP_SEEN, PAST_LIMIT, REVIEWED, fix_task, judge_task, judged_on, judgment, owed, proof_task
@@ -183,14 +183,15 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
             T.stop(repo, f"#{n} isn't settled, and GitHub hasn't taken its status")
         return ok
 
-    def update_branch():
+    def update_branch(proof=False):
         """Bring a settled head up to date with a base whose rules want it
-        (the merge won't): the merged-in head is reviewed like any other.
+        (the merge won't), or whose builds its proof wants (proof: prove saw
+        it behind): the merged-in head is reviewed like any other.
         GitHub makes it a moment later, and its push kicks a pass; one that
         hasn't come ten minutes on is asked for again. True while it's being
         brought up to date, False if it isn't behind, None if GitHub didn't
         take the ask (strike)."""
-        if merging != "update":
+        if merging != "update" and not proof:
             return False
         if st.get("updated") == head and C.NOW - st.get("updatedAt", 0) < 10 * MIN:
             after(st["updatedAt"], 10)  # ends: a wait that stays the same is overdue at its deadline
@@ -544,14 +545,16 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
             settle("pending", f"Settled, but no Claude job could judge it ({why})", "Couldn't start a Claude job to judge it")
 
     def prove():
-        """Only checks that run on a machine, not in CI, are left. Those
-        with a proofBuilds attribute go first, built by the steward itself
-        (proofs.build), no Claude job; the rest, once they've passed, a
+        """The reviewers are done, and checks that run on a machine, not in
+        CI, are left. Those with a proofBuilds attribute go first, built by
+        the steward itself (proofs.build), no Claude job, while CI still
+        runs (build_early); the rest, once CI and the builds have passed, a
         Claude job runs on this head and records their verdicts. Either
         starts once its repo's proofSlots have room for it (one started
         again too), or it has nothing new to build; with nothing to build
         at all, neither: the verdicts are taken from the store (proofs.py)."""
         builds = [c for c in ci_names if c in rc["proofBuilds"]]
+        beside = [c for c in ci_names if c not in machine]  # CI still running
         checks = builds or ci_names
         names = ", ".join(checks)
         if builds:
@@ -565,7 +568,8 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
         def running_now():
             skipped = "; nothing new to build, so it skipped the line" if st.get("provedFree") == head else ""
             busy = f"building {names} here" if builds else at_work("proved", doing)
-            settle("pending", f"Settled; {busy}{skipped}"[:140])
+            ci_too = f", CI ({', '.join(beside)}) beside it" if beside else ""
+            settle("pending", f"Settled; {busy}{ci_too}{skipped}"[:140])
 
         # What this proof is: a build or a Claude job, of which checks, each
         # built from which attribute. This head's proof so far was another
@@ -635,6 +639,19 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
             return
         if builds:
             cleared("eval")
+        # Behind its base (the default branch, whose tip this pass read),
+        # with what it builds merged in all built already: brought up to
+        # date, its new head's verdicts come from the store. Not a
+        # dependency update's: its bot keeps that branch.
+        default = repo_info.get("defaultBranchRef") or {}
+        tip = (default.get("target") or {}).get("oid") if pr["baseRefName"] == default.get("name") else None
+        if (builds and not retry and not DEP_RE.match(pr["headRefName"])
+                and (up := P.merged(repo, pr, checks, st, tip)) and not P.unbuilt(up)):
+            if update_branch(proof=True):
+                settle("pending", f"Settled; brought up to date with {pr['baseRefName']}, which has {names} built here already"[:140])
+                return
+            settle("pending", "Settled; GitHub didn't take its update with its base, so trying again"[:140])
+            return
         free = False
         # One whose next step is failing the PR (again) needs no slot.
         last = retry and st.get("provedAgain") == head and not broke("proved")
@@ -724,6 +741,10 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
     gate = one_way(pr, rc, moved)
     renovate = pr["headRefName"].startswith("renovate/")
     proof_only = ci == "pending" and bool(ci_names) and all(c in machine for c in ci_names)
+    # A check the steward builds itself costs no Claude job, so it needn't
+    # wait for CI to pass: it starts once the reviewers are done, and builds
+    # while CI runs rather than after it. A Claude job's check still waits.
+    build_early = ci == "pending" and any(c in rc["proofBuilds"] for c in ci_names)
     # A minor dependency PR a Claude job fixed carries Claude's code, which no
     # reviewer has read (and Renovate won't merge); a bot's PR that changes a
     # workflow beyond repinning its actions changes the gate. Either goes
@@ -794,7 +815,7 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
             settle("pending", "Major update; waiting for renovate-sweep's verdict on this head", wait=waits.SWEEP)
         elif held:
             judged("a Claude job was asked to judge this head", DEP_SEEN)
-        elif proof_only:
+        elif proof_only or build_early:
             prove()
         elif ci == "pending":
             settle("pending", "Dependency update, CI pending")
@@ -862,7 +883,7 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
                  "redFixed", ours=not swept)
     elif held:
         judged("a Claude job was asked to judge this head", PAST_LIMIT if capped else REVIEWED)
-    elif proof_only:
+    elif proof_only or build_early:
         prove()
     elif ci == "pending":
         settle("pending", "Settled; waiting for CI: " + ", ".join(ci_names)[:90])

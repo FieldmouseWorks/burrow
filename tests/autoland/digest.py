@@ -4,7 +4,7 @@ a Claude job; when the inbox can't take it, all of it is the owner's."""
 
 import os
 
-from harness import C, R, fresh_pr_state, sh, tmp
+from harness import B, C, R, fresh_pr_state, sh, tmp
 
 CALLS = []
 OPEN = {}  # the open issue under each label, as `gh issue list` finds it
@@ -101,7 +101,7 @@ assert not any(x in stuck["--body"] for x in ("sam/r#1", "sam/r#2", "sam/r#7")),
 
 # A stale branch the sweep couldn't archive is the pipeline's trouble, not
 # the owner's call: archived, it would have gone on its own.
-assert R.UNKEPT not in R.OWNERS
+assert B.UNKEPT not in R.OWNERS
 
 # Every kind the owner settles is one the steward lists: a renamed one
 # would go to the inbox, never to the owner.
