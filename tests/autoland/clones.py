@@ -137,8 +137,22 @@ for kept_state, gone in (({"settings": MADE + 99, "id": "id-other"}, True), ({"s
     NAMES["sam/old"] = "sam/new"
     C.save("repo-sam_old.json", kept_state)
     C.follow_renames()
+    NAMES["sam/other"] = "sam/other"
     assert C.retiring("sam/new") == gone, kept_state
     assert not C.retiring("sam/other")
+    if gone:
+        # The hold follows the repo that took the name to its next one, by its
+        # id, and not to another that takes up the name it left. Not knowing
+        # what a repo is holds it too.
+        NAMES["sam/latest"] = "sam/latest"
+        IDS["sam/latest"] = "id-sam/new"
+        assert C.retiring("sam/latest")
+        NAMES["sam/new"] = "sam/new"
+        IDS["sam/new"] = "id-unrelated"
+        assert not C.retiring("sam/new")
+        IDS.clear()
+        del NAMES["sam/new"]
+        assert C.retiring("sam/nobody")
     C.save(C.RETIRING_FILE, {})
     assert (url("old") == "https://github.com/sam/old.git") == gone, (kept_state, url("old"))
     subprocess.run(["rm", "-rf", f"{src}/old"], check=True)
@@ -150,6 +164,14 @@ C.save("repo-sam_old.json", {"settings": MADE + 99, "id": "id-other"})
 with C.acting_for("sam/new"):
     assert C.job("sam/new", "t", clone=True) is None
 assert "sam/new" not in tried() and not os.path.exists(f"{src}/new"), tried()
+C.save(C.RETIRING_FILE, {})
+# Nor when that same look also found it a clone under another old name.
+NAMES["sam/alias"] = "sam/new"
+clone("alias", "https://github.com/sam/alias.git")
+with C.acting_for("sam/new"):
+    assert C.job("sam/new", "t", clone=True) is None
+assert url("alias") == "https://github.com/sam/new.git", url("alias")
+subprocess.run(["rm", "-rf", f"{src}/alias"], check=True)
 C.save(C.RETIRING_FILE, {})
 subprocess.run(["rm", "-rf", f"{src}/old"], check=True)
 os.remove(f"{tmp}/state/repo-sam_old.json")
@@ -266,24 +288,27 @@ assert full(T + 90070) == line
 assert len(RESET) == 3 and not C.retiring("sam/new"), RESET
 assert not [x for x in PUBLISHED[0] if x[0] == C.RETIRING], PUBLISHED
 # Done with its state gone already: a try that stopped just short of saying so.
-C.save(C.RETIRING_FILE, {"sam_gone": {"name": "sam/gone", "for": "sam/took"}})
+C.save(C.RETIRING_FILE, {"sam_gone": {"name": "sam/gone", "for": "sam/took", "id": "id-sam/took"}})
 full(T + 90075)
 assert len(RESET) == 3 and not C.retiring("sam/took"), RESET
 S.R.reset = kept_reset
 os.remove(f"{tmp}/state/repo-sam_old.json")
-# A hidden folder counts only while it's named for its repo, so a rename moves
-# it, to keep it the repo's checkout, unless there's something there.
+# A hidden folder counts only while it's named for its repo. Transferred, it
+# still is. Renamed, it's repointed where it stands, for any job with its path,
+# and the repo's next job clones it afresh.
 clone(".cfg", "https://github.com/sam/.cfg.git")
-NAMES["sam/.cfg"] = "sam/config"
+NAMES["sam/.cfg"] = "eve/.cfg"
 C.follow_renames()
-assert C.project_dir("sam/config") == "config" and not os.path.exists(f"{src}/.cfg"), C.project_dir("sam/config")
-assert url("config") == "https://github.com/sam/config.git", url("config")
-clone(".cfg2", "https://github.com/sam/.cfg2.git")
-NAMES["sam/.cfg2"] = "sam/config2"
-os.makedirs(f"{src}/config2/stuff")
+assert C.project_dir("eve/.cfg") == ".cfg" and url(".cfg") == "https://github.com/eve/.cfg.git", url(".cfg")
+NAMES["eve/.cfg"] = "sam/config"
+NAMES["sam/config"] = "sam/config"
 C.follow_renames()
-assert url(".cfg2") == "https://github.com/sam/.cfg2.git" and os.path.isdir(f"{src}/config2/stuff")
-subprocess.run(["rm", "-rf", f"{src}/.cfg2", f"{src}/config2", f"{src}/config"], check=True)
+assert url(".cfg") == "https://github.com/sam/config.git", url(".cfg")
+with C.acting_for("sam/config"):
+    assert C.job("sam/config", "t", clone=True) == "job-1"
+assert C.project_dir("sam/config") == "config" and os.path.isdir(f"{src}/.cfg")
+subprocess.run(["rm", "-rf", f"{src}/.cfg", f"{src}/config"], check=True)
+os.remove(CLONES)
 # Moved out by hand: the line's gone, and the next pass clones it and goes.
 subprocess.run(["mv", f"{src}/tool", f"{tmp}/clones-moved"], check=True)
 assert full(T + 90100) == []

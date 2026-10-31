@@ -447,7 +447,7 @@ def unland(repo, pr):
 TAKEN = "A folder in the way of a repo's checkout"  # the stuck issue's heading for it
 TAKEN_FILE = "taken.json"
 RETIRING = "A deleted repo's clones and jobs that won't retire"  # likewise
-RETIRING_FILE = "retiring.json"  # {its state's key: {"name": the deleted repo's, "for": the repo that took it on}}
+RETIRING_FILE = "retiring.json"  # {its state's key: {"name": the deleted repo's, "for" and "id": the repo that took it on}}
 
 
 def repo_cfg(repo):
@@ -574,8 +574,9 @@ def follow_renames(seen=()):
     job (retiring).
 
     A hidden folder only counts as a project while it's named for its repo
-    (projects), so one that's renamed moves to the new name, or stays as it
-    was if something's there already."""
+    (projects). One whose repo takes another name is repointed where it is and
+    stops counting: moving it would strand the jobs that have its path, so the
+    repo's next job clones it afresh, and nothing in the folder is lost."""
     for d, url in list(projects()):
         now = None if url.lower() in seen else github_now(url)
         if not now or now["nameWithOwner"].lower() == url.lower():
@@ -584,27 +585,25 @@ def follow_renames(seen=()):
         gone = [k for k, st in kept_state(url) if replaced(st, now)]
         if gone:
             log(f"{d}: its origin {url} was a deleted repo's name, which {new} took on: not adopting it")
-            save(RETIRING_FILE, {**load(RETIRING_FILE, {}), **{k: {"name": url, "for": new} for k in gone}})
+            save(RETIRING_FILE, {**load(RETIRING_FILE, {}), **{k: {"name": url, "for": new, "id": now["id"]} for k in gone}})
             continue
         path = os.path.join(CFG["projectsDir"], d)
-        if d.startswith("."):
-            to = destination(new)
-            if blocked(to):
-                log(f"{d}: its origin {url} is now {new}, and {to} is taken: leaving it")
-                continue
-            if os.path.lexists(to):
-                os.rmdir(to)
-            os.rename(path, to)
-            path = to
         raw = subprocess.run(["git", "-C", path, "remote", "get-url", "origin"], capture_output=True, text=True).stdout.strip()
         p = subprocess.run(["git", "-C", path, "remote", "set-url", "origin", raw.replace(url, new)], capture_output=True, text=True)
         log(f"{d}: its origin {url} is now {new}" + (", repointed" if p.returncode == 0 else f", and it wouldn't repoint: {p.stderr.strip()[-300:]}"))
 
 
 def retiring(repo):
-    """Whether repo took on a deleted repo's name whose clones and jobs a full
-    pass hasn't finished retiring: its jobs wait for that."""
-    return any(x["for"].lower() == repo.lower() for x in load(RETIRING_FILE, {}).values())
+    """Whether repo is the one that took on a deleted repo's name whose clones
+    and jobs a full pass hasn't finished retiring: its jobs wait for that. By
+    GitHub's id, so it follows that repo to any later name, and not to whatever
+    takes up one it left. Asked only while something's being retired; one
+    GitHub won't say about waits too."""
+    pending = load(RETIRING_FILE, {})
+    if not pending:
+        return False
+    now = github_now(repo)
+    return not now or any(x["id"] == now["id"] for x in pending.values())
 
 
 def destination(repo):
@@ -642,8 +641,10 @@ def checkout(repo):
     turns out to be it. A folder another repo's clone holds is recorded for
     taken(), once, rather than cloned into; returns None then."""
     follow_renames()
+    if retiring(repo):  # what that just found may be this repo's to wait for
+        return None
     d = project_dir(repo)
-    if d or retiring(repo):
+    if d:
         return d
     path = destination(repo)
     if blocked(path):
