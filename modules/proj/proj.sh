@@ -886,9 +886,11 @@ Carry on from there. Anything you left in the background last turn was stopped w
       dog=$!
       # The answer ends the turn: a few seconds to exit by itself, then Claude
       # and whatever it left in the background are stopped (the unit takes the
-      # rest when this shell ends), and the slot goes with them.
+      # rest when this shell ends), and the slot goes with them. What's read
+      # past the first answer has nowhere to go, and says nothing of it (a
+      # unit's commands ignore SIGPIPE, so each would complain).
       cut=''
-      if grep -qm1 . < <(tail -n +"$from" -f --pid="$pid" "$dir/$n.jsonl" | answers); then
+      if grep -qm1 . < <(tail -n +"$from" -f --pid="$pid" "$dir/$n.jsonl" | answers 2>/dev/null); then
         for _ in $(seq 10); do kill -0 "$pid" 2>/dev/null || break; sleep 1; done
         if kill -0 "$pid" 2>/dev/null; then cut=1; kill "$pid" 2>/dev/null || true; fi
       fi
