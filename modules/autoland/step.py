@@ -504,8 +504,8 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
             # The judge's own build or tests failed on this head: a fix job
             # has it, and its push is judged again. Its own once a head: a
             # job that answered a finding here without pushing didn't fix this.
-            hand_off("the Claude job that judged it found something failing on this head, its build or tests or a finding "
-                     "left unfixed (its comment on the PR says what)",
+            hand_off("the Claude job that judged it found something failing on this head, its build or tests, a finding "
+                     "left unfixed or a reason in its description that doesn't hold (its comment on the PR says what)",
                      "Settled, but its build or tests fail", "failFixed", judged_at, wait=False)
         elif update_branch():
             settle("pending", "Settled, but behind its base: brought up to date, reviewed again")

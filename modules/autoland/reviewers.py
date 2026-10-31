@@ -31,6 +31,14 @@ QUEUE, SNAP, DONE, GIT = "review/queue", "review/snap", "review/done", "review/g
 SESSIONS, GONE = "review/sessions", ".gone-"
 ORIGIN = "https://github.com/{}.git"
 OUT = "reviewers.json"  # a reviewer out of service, and until when
+# How the reviewers and a judge weigh the reasons a PR's description gives
+# where the house rules ask for one. That the line is there is CI's to check;
+# whether its reason holds up takes reading the code.
+REASONS = ("Where the house rules ask a PR for a line in its description giving a reason (one starting `Why not Rust:` "
+           "for new code that isn't Rust, say), judge the reason against the rule it answers and against the code, not only "
+           "that it's there. Rust is the default, and a coin toss goes to Rust: a reason that only says it was quicker, that "
+           "it's small, that the code around it is in that language already, or that the code itself contradicts (a "
+           "\"throwaway\" script a service runs, \"glue\" with logic of its own) doesn't hold.")
 
 
 def on(repo):
@@ -279,12 +287,15 @@ def item_name(key, r, head, base):
 
 
 def queue(repo, pr, key, r):
-    """Queue the reviewer on the head's snapshot. Raises if the snapshot
-    can't be taken (the head moved on, GitHub's unreachable)."""
+    """Queue the reviewer on the head's snapshot, with the PR's description
+    as it is now: one edited to answer a finding is what the next look at
+    the same head reads. Raises if the snapshot can't be taken (the head
+    moved on, GitHub's unreachable)."""
     snap, meta = snapshot(repo, pr, key)
     save(f"{QUEUE}/{r}--{snap}.json", {
         "reviewer": r, "snap": snap, "repo": repo, "number": pr["number"], "headRefOid": pr["headRefOid"],
-        "baseRefName": pr["baseRefName"], "title": pr["title"], "rules": meta["rules"], "secret": meta["secret"],
+        "baseRefName": pr["baseRefName"], "title": pr["title"], "body": pr["body"],
+        "rules": meta["rules"], "secret": meta["secret"],
         "prior": prior(repo, pr["number"], r), "at": C.NOW})
 
 
