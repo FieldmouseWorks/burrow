@@ -81,13 +81,18 @@ def evals():
     return [x for x in map(json.loads, open(NIX_LOG)) if x[0] == "nix"]
 
 
-kept = C.job
+kept, kept_build = C.job, P.build
 ids = itertools.count(1)
-C.job = lambda repo, task, clone=False: JOBS.append(task) or f"build-{next(ids)}"
+C.job = lambda repo, task, clone=False: JOBS.append(task) or f"job-{next(ids)}"
+# A check with an attribute is built by the steward, not a Claude job: each
+# build started is in JOBS too, as "build N CHECK...".
+P.build = lambda repo, pr, checks, st: JOBS.append(f"build {pr['number']} {' '.join(checks)}") or f"{C.BUILD}{next(ids)}"
 S.CFG["repos"]["sam/r"] = {"proofJobs": {"remi-proof": "Run `just proof` and post the remi-proof status."},
                            "proofBuilds": {"remi-proof": "checks.x86_64-linux.proof"}, "proofSlots": 1}
 proof = CI_GREEN + [{"__typename": "StatusContext", "context": "remi-proof", "state": "PENDING", "description": ""}]
-RUNNING, SKIPPED = "a Claude job is running remi-proof", "nothing new to build, so it skipped the line"
+RUNNING, SKIPPED = "building remi-proof here", "nothing new to build, so it skipped the line"
+RUNNING_JOB = "a Claude job is running remi-proof"  # a check with no attribute
+CANT = "Settled, but what remi-proof builds can't be worked out here yet"
 STORE = "Settled; remi-proof taken from the store, not run again"
 
 
@@ -131,8 +136,8 @@ def line(n, t=700, checks=None):
     return run(clean(checks=checks or proof, number=n, sha=heads[n]), t)[0]
 
 
-def ahead(k):
-    return f"waiting its turn to run remi-proof ({k} ahead)"
+def ahead(k, verb="build"):
+    return f"waiting its turn to {verb} remi-proof ({k} ahead)"
 
 
 fresh_pr_state()
@@ -186,25 +191,28 @@ assert evals() == [["nix", "--extra-experimental-features", "nix-command flakes"
                     f"git+file://{mirror}?ref=refs/pr/{n}&rev={heads[n]}#checks.x86_64-linux.proof.drvPath"]
                    for n in (1, 2)], evals()
 
-# What can't be worked out waits its turn like before: an eval that fails
-# (tried once a head), and a check with no attribute (never tried).
+# A build whose eval fails has nothing to build: no build and no slot, a
+# strike, and the eval tried again EVAL_RETRY minutes on. A check with no
+# attribute is never worked out: a Claude job's, waiting its turn.
 fresh_pr_state()
 nix_knows()
 P.begin("sam/r", {1, 5, 6})
 line(1)
-assert ahead(1) in line(5) and JOBS == [], JOBS
-assert ahead(1) in line(5, 800) and len(evals()) == 2, evals()
+status = line(5)
+assert CANT in status and JOBS == [] and pr_state(5)["strikes"] == {"eval": 1}, (status, JOBS)
+assert CANT in line(5, 800) and len(evals()) == 2, evals()
+assert CANT in line(5, 700 + P.EVAL_RETRY * 60) and len(evals()) == 3, evals()
 S.CFG["repos"]["sam/r"]["proofBuilds"] = {}
 VALID.append(W)  # PR 6's, had it been asked
 nix_knows()
 P.begin("sam/r", {1, 5, 6})
-assert ahead(1) in line(6) and evals() == [], evals()
-# And a job whose paths are unknown holds a slot of its own: PR 1's job
-# building X is one, PR 6's the other.
+assert ahead(1, "run") in line(6) and evals() == [], evals()
+# And a job whose paths are unknown holds a slot of its own: PR 1's build
+# of X is one, PR 6's job the other.
 S.CFG["repos"]["sam/r"]["proofSlots"] = 2
 P.begin("sam/r", {1, 5, 6})
-assert RUNNING in line(6, 900) and len(JOBS) == 1, JOBS
-assert ahead(2) in line(5, 900) and JOBS == [], JOBS
+assert RUNNING_JOB in line(6, 900) and len(JOBS) == 1, JOBS
+assert ahead(2, "run") in line(6, 1000) or RUNNING_JOB in line(6, 1000), JOBS
 
 # Jobs count in the order they started: one whose paths those before it are
 # building holds nothing, a subset or a cover of several alike; one with a
@@ -391,30 +399,31 @@ FAIL.remove("context=other-proof")
 GITHUB[heads[3]] = {"Remi-Proof": "success", "OTHER-PROOF": "pending"}
 line(3, 2500, spelled(Remi_Proof="SUCCESS", OTHER_PROOF="PENDING"))
 assert from_store() == [] and other_store() == [taken(W)] and not pr_state(3)["strikes"], WROTE
-# With what it builds not built, a job runs it, by the repo's name for it.
+# With what it builds not built, it's built, by the repo's name for it.
 fresh_pr_state()
 VALID[:] = []
 nix_knows({3: Z, (3, "checks.x86_64-linux.other"): W})
 status = line(3, 2600, spelled(REMI_PROOF="PENDING", other_proof="SUCCESS"))
-assert RUNNING in status and len(JOBS) == 1 and "remi-proof: Run `just proof`" in JOBS[0], (status, JOBS)
+assert RUNNING in status and JOBS == ["build 3 remi-proof"], (status, JOBS)
 # Passed under another spelling: nothing left to prove, so it lands.
 fresh_pr_state()
 GITHUB[heads[3]] = {"REMI-PROOF": "success", "OTHER-PROOF": "success"}
 status = line(3, 2700, spelled(REMI_PROOF="SUCCESS", OTHER_PROOF="SUCCESS"))
 assert merged() and JOBS == [] and from_store() == [] and other_store() == [], (status, WROTE)
 # Failed under another spelling: red, and the job that fixes it is told how
-# the proof runs.
+# the proof runs: a build's way, the steward's to post.
 fresh_pr_state()
 GITHUB[heads[3]] = {"REMI-PROOF": "failure", "other-proof": "success"}
 red = spelled(REMI_PROOF="FAILURE", other_proof="SUCCESS")
 line(3, 2800, red)
 status = line(3, 10000, red)
 assert not merged() and from_store() == [] and len(JOBS) == 1, (status, WROTE, JOBS)
-assert "remi-proof" in JOBS[0] and "Run `just proof`" in JOBS[0], JOBS
+assert "remi-proof isn't CI" in JOBS[0] and "`nix build .#checks.x86_64-linux.proof -L`" in JOBS[0], JOBS
+assert "Run `just proof`" not in JOBS[0] and "never post that status yourself" in JOBS[0], JOBS
 VALID[:] = [X]
 del S.CFG["repos"]["sam/r"]["proofJobs"]["other-proof"]
 S.CFG["repos"]["sam/r"]["proofBuilds"] = {"remi-proof": "checks.x86_64-linux.proof"}
-# One output of two built isn't all of them: a job runs it.
+# One output of two built isn't all of them: it's built.
 VALID[:] = [X]
 nix_knows({1: XY}, {XY: [X, Y]})
 P.begin("sam/r", {1})
@@ -422,7 +431,7 @@ status = line(1)
 assert RUNNING in status and from_store() == [] and len(JOBS) == 1, (status, WROTE)
 
 del S.CFG["repos"]["sam/r"]
-C.job = kept
+C.job, P.build = kept, kept_build
 C.gh, C.write = kept_gh, kept_write
 V.ORIGIN = kept_origin
 P.OPEN.clear()

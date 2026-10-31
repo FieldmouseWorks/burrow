@@ -543,11 +543,63 @@ def job(repo, task, clone=False, pipeline=True, timeout=None):
 
 def job_state(jid):
     """queued, running, or how it ended (done, error, failed, timed out ...);
-    None when proj can't say."""
+    None when proj can't say. A proof build's (build_state) as well."""
     if DRY:
         return "running"
+    if jid.startswith(BUILD):
+        return build_state(jid)
     p = subprocess.run([CFG["proj"], "state", jid], capture_output=True, text=True)
     return p.stdout.strip() or None
+
+
+# A proof build (proofs.build): no Claude job, but a unit of the machine
+# user's own that builds a proof's derivations. Its id starts with this and
+# names its folder under the state dir's builds/, where it says how it
+# ended (end.json); everything that asks after a job asks after it the same
+# way (job_state, stop_job).
+BUILD = "proof-"
+
+
+def build_unit(jid):
+    return f"autoland-{jid}.service"
+
+
+def user_systemctl(*args):
+    """systemctl --user, as the machine user, from a unit that doesn't set
+    the user's runtime dir (proj sets it the same way)."""
+    env = dict(os.environ)
+    env.setdefault("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+    return subprocess.run(["systemctl", "--user", *args], capture_output=True, text=True, env=env)
+
+
+def user_systemctl_run(unit, cmd):
+    """Starts cmd as unit, a transient one of the machine user's that goes
+    once it ends (its end is in its build's folder), with this steward's
+    config and tools."""
+    env = dict(os.environ)
+    env.setdefault("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+    keep = [f"--setenv={k}={os.environ[k]}" for k in ("AUTOLAND_CONFIG", "PATH") if k in os.environ]
+    return subprocess.run(["systemd-run", "--user", "--quiet", "--collect", f"--unit={unit}", *keep, "--", *cmd],
+                          capture_output=True, text=True, env=env)
+
+
+def build_state(jid):
+    """A proof build's state, as job_state says a job's: running while its
+    unit is; done once it built all it could, each check's verdict then in
+    whether its outputs are valid (proofs.verdicts); failed when it stopped
+    short of that (stopped, killed, or nix couldn't build at all), timed out
+    past proofTimeout; None when systemd can't say."""
+    end = load(f"builds/{jid}/end.json", None)
+    if end is not None:
+        return end["state"]
+    p = user_systemctl("show", "-P", "ActiveState", build_unit(jid))
+    if p.returncode:
+        return None
+    if p.stdout.strip() in ("active", "activating", "deactivating", "reloading", "refreshing"):
+        return "running"
+    # Gone, with no end: unless it wrote one just after the first look.
+    end = load(f"builds/{jid}/end.json", None)
+    return end["state"] if end else "failed"
 
 
 def jobs():
@@ -595,6 +647,13 @@ def stop_job(jid):
     if DRY:
         log(f"  would: proj stop {jid}")
         return True
+    if jid.startswith(BUILD):
+        # Stopping a unit stops its build: nix-daemon drops a build whose
+        # client is gone.
+        p = user_systemctl("stop", build_unit(jid))
+        if p.returncode:
+            log(f"systemctl --user stop {build_unit(jid)}: {p.stderr.strip()[-300:]}")
+        return build_state(jid) not in (None, "running")
     p = subprocess.run([CFG["proj"], "stop", jid], capture_output=True, text=True)
     if p.returncode and p.stderr.startswith(f"no job {jid}"):
         return True
@@ -614,11 +673,21 @@ def forget_issues(repo):
         raise RuntimeError(f"proj-inbox forget {repo}: {p.stderr.strip() or f'exit {p.returncode}'}")
 
 
+def machine(rc):
+    """A repo's checks that a machine runs rather than CI, and how a job
+    reruns each on what it pushes: a Claude job's (proofJobs), and the
+    builds the steward runs itself (proofBuilds), which it posts."""
+    return {**rc["proofJobs"], **{
+        c: (f"`nix build .#{attr} -L` on the commit. The steward builds it itself for each new head and posts the "
+            f"`{c}` status: never post that status yourself.") for c, attr in rc["proofBuilds"].items()}}
+
+
 def coverage(repos, covered):
     """repos.json, for renovate-sweep, and when: every repo the steward has,
-    with how its proofs run and whether this pass saw to its PRs."""
+    with its proofs and how each runs (machine), and whether this pass saw
+    to its PRs."""
     done = {r["repo"] for r in covered}
-    return {"at": NOW, "repos": {r["repo"]: {"proofJobs": repo_cfg(r["repo"])["proofJobs"], "covered": r["repo"] in done}
+    return {"at": NOW, "repos": {r["repo"]: {"proofs": machine(repo_cfg(r["repo"])), "covered": r["repo"] in done}
                                  for r in repos}}
 
 

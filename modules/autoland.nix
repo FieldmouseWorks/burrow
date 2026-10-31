@@ -116,6 +116,10 @@ let
     proj = "${config.burrow.tools.proj}/bin/proj";
     jobTimeout = cfg.jobTimeoutMinutes;
     jobIdle = cfg.jobIdleMinutes;
+    # A proof build's (proofs.py): how long it may take, and the
+    # machine-wide heavy slots it takes one of, where the machine has them.
+    proofTimeout = cfg.proofTimeoutMinutes;
+    heavy = if config.burrow.cpu.enable then "${config.burrow.tools.heavy}/bin/heavy" else null;
     owner = config.burrow.owner;
     cleanBranches = cfg.cleanBranches;
     labels = { inherit (cfg.labels) hold owner first waiting; };
@@ -270,6 +274,8 @@ in
   imports = [
     (import ./common.nix inputs)
     { key = "burrow/notify"; imports = [ (import ./notify.nix inputs) ]; }
+    # The heavy slots its proof builds take, where the machine has them.
+    { key = "burrow/cpu"; imports = [ (import ./cpu.nix inputs) ]; }
     { key = "burrow/proj"; imports = [ (import ./proj.nix inputs) ]; }
     { key = "burrow/events"; imports = [ (import ./events.nix inputs) ]; }
     { key = "burrow/github"; imports = [ (import ./github.nix inputs) ]; }
@@ -479,6 +485,17 @@ in
         deadline too in case that doesn't get through: a job that ended
         without its answer is started once more, and a second is a failed
         status on the PR.
+      '';
+    };
+
+    proofTimeoutMinutes = mkOption {
+      type = types.ints.positive;
+      default = 180;
+      description = ''
+        How long a proof build the steward runs itself (a repo's
+        proofBuilds) may take, its wait for a heavy slot included, before
+        it's stopped and started again: long enough for a NixOS test's own
+        hour (its driver's globalTimeout) after a slot has come free.
       '';
     };
 
@@ -716,17 +733,24 @@ in
         its verdict>"; }`: once a settled PR waits on nothing else, one
         Claude job a head runs them on that commit and records each verdict,
         a failure as a failure; a new head stops the last head's job, unless
-        it's building what the new head's proof wants), proofSlots (how many
-        of those jobs the repo may have building at once, for proofs that
-        take the whole machine: the rest wait their turn, those labelled
-        `labels.first` first, then the oldest PR first; unset, no limit),
-        proofBuilds (the flake attribute each proof check builds, `{
-        "<check>" = "checks.x86_64-linux.<name>"; }`, whose result is the
-        check's verdict: a proof whose attributes' outputs are all in the
-        store takes no job, its verdicts taken from the store, saying so
-        and naming each derivation; one whose outputs are being built by a
-        proof already running skips the line and holds no slot; a job
-        running a check without one holds a slot of its own), keepBranches
+        it's building what the new head's proof wants), proofBuilds (checks
+        that are a build and nothing more: `{ "<check>" =
+        "checks.x86_64-linux.<name>"; }`, the flake attribute whose build is
+        the check's verdict. The steward builds them itself, ahead of the
+        proofJobs and with no Claude job: it works out the attribute's
+        derivation at that commit and runs `nix-store --realise` on it in a
+        heavy slot, in a unit of its user's own (proofTimeoutMinutes), and
+        posts each check as its outputs are valid or not, a failure with
+        its log's end on the PR. One whose outputs are all in the store
+        isn't built again, its verdict taken from the store, saying so and
+        naming the derivation; one whose outputs are being built by a proof
+        already running skips the line and holds no slot. A check named in
+        both is a build), proofSlots (how many of those proofs, jobs and
+        builds, the repo may have building at once, for proofs that take the
+        whole machine: the rest wait their turn, those labelled
+        `labels.first` first, then the oldest PR first; a job running a
+        check without a build of its own holds a slot of its own; unset, no
+        limit), keepBranches
         (more branch globs the cleanup never touches in this repo, on top of
         the machine's, for branches a repo keeps as evidence), codex (false:
         Codex leaves this repo alone, and none of it goes to it), skipPaths (more path regexes the reviewers never read in
@@ -750,6 +774,9 @@ in
 
   config = lib.mkIf cfg.enable {
     system.checks = [ stewardImports ];
+    warnings = lib.concatLists (lib.mapAttrsToList (repo: rc: map
+      (c: "burrow.autoland.repos.\"${repo}\".proofJobs.${c} is never used: ${c} is in its proofBuilds, so the steward builds it itself.")
+      (lib.attrNames (builtins.intersectAttrs (rc.proofBuilds or { }) (rc.proofJobs or { })))) cfg.repos);
     assertions = [{
       assertion = rv.codex.enable;
       message = "burrow.autoland needs its reviewer: turn on burrow.autoland.reviewers.codex.";

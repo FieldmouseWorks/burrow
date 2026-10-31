@@ -710,7 +710,13 @@ for checks in (CI_GREEN, []):
 # renovate-sweep is told how a covered repo's proofs run.
 C.NOW = C.ts(T0)
 assert C.coverage([{"repo": "sam/r"}], [{"repo": "sam/r"}]) == {
-    "at": C.NOW, "repos": {"sam/r": {"proofJobs": S.CFG["repos"]["sam/r"]["proofJobs"], "covered": True}}}
+    "at": C.NOW, "repos": {"sam/r": {"proofs": S.CFG["repos"]["sam/r"]["proofJobs"], "covered": True}}}
+# A build the steward runs is one of them, told as how a job reruns it.
+S.CFG["repos"]["sam/r"]["proofBuilds"] = {"vm": "checks.x86_64-linux.vm"}
+told = C.coverage([{"repo": "sam/r"}], [])["repos"]["sam/r"]["proofs"]
+assert set(told) == {"remi-proof", "vm"} and "nix build .#checks.x86_64-linux.vm -L" in told["vm"], told
+assert "never post that status yourself" in told["vm"], told
+del S.CFG["repos"]["sam/r"]["proofBuilds"]
 # ... but only the repos a pass saw to are covered: one whose pass failed
 # isn't, so renovate-sweep lists its ok majors itself, and still knows how
 # its proofs run.
@@ -754,7 +760,7 @@ assert UNHOOKED == [S.R.discover() + [{"repo": "eve/p"}]], UNHOOKED
 S.R.discover, S.R.settle_repo, S.R.publish, S.open_prs, S.R.unhook_gone, S.R.hook_projects = kept_fns
 written = json.load(open(f"{tmp}/state/repos.json"))["repos"]
 assert {r: v["covered"] for r, v in written.items()} == {"sam/r": True, "sam/bad": False, "sam/flaky": False}, written
-assert written["sam/bad"]["proofJobs"] == C.repo_cfg("sam/bad")["proofJobs"], written
+assert written["sam/bad"]["proofs"] == C.repo_cfg("sam/bad")["proofJobs"], written
 # A proof job that ends without posting its verdict is started once more.
 fresh_pr_state()
 run(clean(checks=CI_GREEN), 700)

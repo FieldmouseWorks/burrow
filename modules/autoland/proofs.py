@@ -18,6 +18,15 @@ store only once its build has passed, so its checks' verdicts are taken
 from there (built, record), saying so and naming each derivation: that
 exact derivation passed on this machine, once, and isn't run again.
 
+A check with a proofBuilds attribute is that build and nothing more, so
+the steward builds it itself (build): no Claude job and no proj slot, but a
+unit of the machine user's own that runs `nix-store --realise` on its
+derivations in a heavy slot (run). Each check's verdict is whether its
+outputs are valid once that's done (verdicts), and a failure's log tail
+goes on the PR. A build holds a slot as a job does, and is asked after and
+stopped like one (common.job_state, stop_job). Checks without an attribute
+are a Claude job's, after the builds: a failed build needs no job.
+
 A job holds what it holds until it ends, whatever its PR does meanwhile
 (marked a draft, say), but for a new head: a verdict on a head the PR no
 longer has proves nothing, so the steward stops it (superseded), unless
@@ -29,18 +38,21 @@ nobody up."""
 import os
 import re
 import subprocess
+import sys
 import time
 import urllib.parse
 
 import common as C
 import reviewers as V
-from common import CFG, STATE, load, log
+from common import CFG, STATE, load, log, save
 
 OPEN = {}  # the open PRs of each repo this pass reads (begin)
 FIRST = {}  # those of them labelled to go first
 WAITING = {}  # the PRs of each repo this pass found waiting their turn
 FREE = "nothing new to build"  # ahead's answer for a proof that skips the line
 EVAL_TIMEOUT = 300  # seconds, its inputs fetched included
+EVAL_RETRY = 15  # minutes before an eval that failed on a head is tried again
+LOG_TAIL = 60  # lines of a failed build's log that go on its PR
 
 
 def begin(repo, numbers, first=()):
@@ -92,14 +104,14 @@ def outputs(repo, pr, checks, st):
     steward's mirror, as the proof job's checkout of it has it (its rev
     included), with import-from-derivation off. Worked out once a head,
     and None when it can't be: a check with no attribute, an eval that
-    fails or takes too long."""
+    fails or takes too long (tried again EVAL_RETRY minutes on)."""
     attrs = C.repo_cfg(repo)["proofBuilds"]
     if C.DRY or not checks or not all(c in attrs for c in checks):
         return None
     n, head = pr["number"], pr["headRefOid"]
     key = [head, {c: attrs[c] for c in sorted(checks)}]
     got = st.get("proofOutputs")
-    if got and got["for"] == key:
+    if got and got["for"] == key and (got["paths"] or C.NOW - got.get("at", 0) < EVAL_RETRY * C.MIN):
         return got["paths"]
     drvs = paths = None
     try:
@@ -111,7 +123,7 @@ def outputs(repo, pr, checks, st):
         paths = sorted(set(nix("nix-store", "--query", "--outputs", *drvs.values()).split())) or None
     except (RuntimeError, OSError, subprocess.SubprocessError) as e:
         log(f"{repo}#{n}: can't tell what its proof builds at {head[:12]}: {e}")
-    st["proofOutputs"] = {"for": key, "paths": paths, "drvs": drvs if paths else None}
+    st["proofOutputs"] = {"for": key, "paths": paths, "drvs": drvs if paths else None, "at": C.NOW}
     return paths
 
 
@@ -125,25 +137,30 @@ def built(repo, pr, checks, st):
     return st["proofOutputs"].get("drvs")
 
 
-def record(repo, pr, checks, drvs):
-    """checks' verdicts on PR's head, taken from the store (built): each a
-    pass that says where it came from and names its derivation, so it
-    doesn't read as a run. GitHub's word on each check, read fresh, says
-    which to post: only one still waiting, so a pass that read it just
-    before the last one's status posts nothing again, and one added, remapped
-    or set back to pending since is posted, and a red one is left red. A
-    context is the same one however it's spelled: GitHub ignores its case. False
-    if GitHub didn't answer or take one: what's left is posted next time."""
+def stored(checks, drvs):
+    """Verdicts for record from built's derivations: each a pass that says
+    it was taken from the store and names its derivation, so it doesn't
+    read as a run."""
+    return {c: ("success", f"Taken from the store, not run again: {drvs[c]} passed here before") for c in checks}
+
+
+def record(repo, pr, verdicts):
+    """Verdicts ({check: (state, description)}) on PR's head, as its
+    statuses. GitHub's word on each check, read fresh, says which to post:
+    only one still waiting, so a pass that read it just before the last
+    one's status posts nothing again, and one added, remapped or set back
+    to pending since is posted, and a red one is left red. A context is the
+    same one however it's spelled: GitHub ignores its case. False if GitHub
+    didn't answer or take one: what's left is posted next time."""
     head = pr["headRefOid"]
     now = C.gh("api", f"repos/{repo}/commits/{head}/status?per_page=100", check=False)
     if not isinstance(now, dict):
         return False
     settled = {s["context"].lower() for s in now.get("statuses", []) if s["state"] != "pending"}
-    for c in checks:
+    for c, (state, desc) in verdicts.items():
         if c.lower() in settled:
             continue
-        desc = f"Taken from the store, not run again: {drvs[c]} passed here before"
-        if C.write("api", f"repos/{repo}/statuses/{head}", "-f", "state=success", "-f", f"context={c}",
+        if C.write("api", f"repos/{repo}/statuses/{head}", "-f", f"state={state}", "-f", f"context={c}",
                    "-f", f"description={desc[:140]}", "-f", f"target_url={pr['url']}", check=False) is None:
             return False
     return True
@@ -211,6 +228,85 @@ def superseded(repo, pr, st):
     for j in keep:
         log(f"{repo}#{pr['number']}: proof job {j}, on its last head, builds what this head's proof wants: left to finish")
     return [j for j in js if j not in keep]
+
+
+def build(repo, pr, checks, st):
+    """Starts building checks' derivations on PR's head (outputs worked
+    them out: they're in st) in a unit of the machine user's own, which
+    runs run(): no Claude job. Its id (common.BUILD and more), or None when
+    systemd wouldn't start it."""
+    n, head = pr["number"], pr["headRefOid"]
+    drvs = {c: st["proofOutputs"]["drvs"][c] for c in checks}
+    jid = f"{C.BUILD}{re.sub('[^a-z0-9]+', '-', repo.lower())}-{n}-{head[:12]}-{time.time_ns()}"
+    if C.DRY:
+        log(f"  would: build {', '.join(sorted(set(drvs.values())))}")
+        return jid
+    os.makedirs(os.path.join(STATE, "builds", jid))
+    save(f"builds/{jid}/build.json", {"repo": repo, "number": n, "head": head, "drvs": drvs})
+    # Its own command line: this steward, with this config.
+    cmd = [sys.executable, "-E", "-s", os.path.abspath(sys.argv[0]), "build", jid]
+    p = C.user_systemctl_run(C.build_unit(jid), cmd)
+    if p.returncode:
+        log(f"{repo}#{n}: couldn't start the build of {', '.join(checks)}: {p.stderr.strip()[-300:]}")
+        return None
+    return jid
+
+
+def run(jid):
+    """The build itself, as its unit runs it (`autoland-steward build ID`):
+    `nix-store --realise --keep-going` on its derivations in a heavy slot,
+    its log beside them, and how it ended in end.json. Done once nix built
+    all it could (exit 0, or 100 and up when builds failed: the verdicts
+    are in what's valid then); failed when nix couldn't build at all (a
+    lost daemon, say: the machine's failure, not the PR's, so it's built
+    again); timed out past proofTimeout. Then it kicks its repo's pass,
+    which posts them."""
+    b = load(f"builds/{jid}/build.json", None)
+    cmd = ([CFG["heavy"], "--"] if CFG.get("heavy") else []) + [
+        f"{CFG['nix']}/nix-store", "--realise", "--keep-going", *sorted(set(b["drvs"].values()))]
+    with open(os.path.join(STATE, "builds", jid, "log"), "wb") as out:
+        p = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT)
+        try:
+            rc = p.wait(timeout=CFG["proofTimeout"] * C.MIN)
+        except subprocess.TimeoutExpired:
+            p.terminate()  # heavy stops all of it, then frees its slot
+            p.wait()
+            rc = None
+    state = "timed out" if rc is None else "done" if rc == 0 or rc >= 100 else "failed"
+    save(f"builds/{jid}/end.json", {"state": state, "exit": rc, "at": time.time()})
+    C.kick(b["repo"])
+
+
+def verdicts(jid):
+    """A done build's verdicts, by check: a pass when every output of its
+    derivation is valid, which nix makes it only once its build has passed,
+    a failure otherwise; each names its derivation. None when the store
+    can't say."""
+    drvs = load(f"builds/{jid}/build.json", {})["drvs"]
+    try:
+        outs = {c: nix("nix-store", "--query", "--outputs", d).split() for c, d in drvs.items()}
+        bad = set(nix("nix-store", "--check-validity", "--print-invalid", *sorted({o for p in outs.values() for o in p})).split())
+    except (RuntimeError, OSError, subprocess.SubprocessError) as e:
+        log(f"can't tell what build {jid} built: {e}")
+        return None
+    return {c: ("failure", f"Built here and failed: {drvs[c]}") if bad.intersection(p)
+            else ("success", f"Built here and passed: {drvs[c]}") for c, p in outs.items()}
+
+
+def failed_log(jid, checks):
+    """What goes on the PR for a build whose checks failed: which, and the
+    end of its log, where a VM test says which subtest failed and how."""
+    b = load(f"builds/{jid}/build.json", {})
+    try:
+        with open(os.path.join(STATE, "builds", jid, "log"), errors="replace") as f:
+            tail = "".join(f.readlines()[-LOG_TAIL:])
+    except OSError:
+        tail = "(its log is gone)\n"
+    fence = "~~~~"  # a log can hold backticks, not this
+    names = ", ".join(f"`{c}`" for c in checks)
+    drvs = ", ".join(f"`{b['drvs'][c]}`" for c in checks)
+    return (f"{names} failed on {b['head']}: building {drvs} on this machine failed. "
+            f"The end of its log (`nix log` on the derivation has all of it):\n\n{fence}\n{tail.replace(fence, '~~~')}{fence}\n")
 
 
 def wait(repo, n):
