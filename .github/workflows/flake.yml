@@ -37,6 +37,12 @@ jobs:
       # tests sharing four cores for 45. Four legs share them out over four
       # runners, which public repos get free.
       legs: 4
+      # And on an empty store each leg built what no public cache has: the
+      # patched git (modules/common.nix), about 16 of a leg's 22-29 minutes,
+      # and every check, changed or not. main's gate keeps those builds for
+      # every later run to take (flake-check.yml says what's kept and why
+      # that's safe).
+      keep-builds: true
       # The docs lane, for a PR that changes only these: nothing burrow
       # builds or tests reads them. docs/, house/ and templates/ aren't on
       # it: the steward's config carries them (modules/autoland.nix,

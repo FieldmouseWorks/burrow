@@ -465,7 +465,9 @@ fn with_legs_the_gate_job_attests_for_them() {
         g[4]["if"],
         "${{ !cancelled() && steps.gate.outcome != 'skipped' && (github.event_name == 'push' || github.event_name == 'pull_request') }}"
     );
-    assert_eq!(g[5..], all[at + 1..]);
+    // The log, the token and the bundle, as a leg attests them; the kept
+    // builds (keep-builds) that follow them in a leg are the leg's alone.
+    assert_eq!(g[5..], all[at + 1..at + 4]);
 }
 
 const LEGS: usize = 3;

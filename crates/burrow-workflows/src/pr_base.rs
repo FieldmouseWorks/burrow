@@ -135,6 +135,7 @@ fn inputs() -> Vec<(&'static str, V)> {
         ("inputs.docs-paths", "README.md".into()),
         ("inputs.docs-checks", "".into()),
         ("inputs.legs", 1.into()),
+        ("inputs.keep-builds", false.into()),
     ]
 }
 
@@ -274,6 +275,13 @@ fn only_a_prs_newer_run_cancels() {
                 name,
                 Run {
                     inputs: &[("legs", "4")],
+                    ..PUSHED
+                },
+            ),
+            g(
+                name,
+                Run {
+                    inputs: &[("keep-builds", "true")],
                     ..PUSHED
                 },
             ),
