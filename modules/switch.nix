@@ -64,8 +64,8 @@ let
 
   # A switch restarts a changed unit that is running (or, with
   # RemainAfterExit, has run) and waits for it. A oneshot that may run longer
-  # than the confirm window then holds the switch past its own revert, which
-  # waits for the activation, so the old system comes back that much late.
+  # than the confirm window then outlasts the activation's deadline, so the
+  # switch gets killed and reverted for a job that was only slow.
   # Only a declared timeout counts: most of NixOS's own oneshots set none and
   # are meant to rerun on a switch, so a job that can run long says so.
   longOneshots = lib.attrNames (lib.filterAttrs (_: s:

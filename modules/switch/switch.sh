@@ -16,7 +16,9 @@
 # HOST-confirm runs within BURROW_CONFIRM_WITHIN (default 10min), the previous
 # system is switched back in by itself. If the box hangs outright, a hardware
 # watchdog (if it has one) reboots it into the last confirmed generation. So a
-# change that cuts off SSH, Tailscale or Claude itself undoes itself.
+# change that cuts off SSH, Tailscale or Claude itself undoes itself. An
+# activation that hangs is killed three quarters of the way through the window
+# and reverted at once, so the old system is back before the window ends.
 
 # Everything here is root's business; sudo is passwordless for the user.
 [ "$(id -u)" = 0 ] || exec sudo env BURROW_CONFIRM_WITHIN="${BURROW_CONFIRM_WITHIN:-$WITHIN}" "$0" "$@"
@@ -68,6 +70,25 @@ if [ "${1:-}" = --revert-to ]; then
     echo "REVERT FAILED (exit $rc): still running the unconfirmed $(readlink -f /run/current-system)" |
       systemd-cat -t "$SWITCH" -p err
     exit 1
+  fi
+  exit 0
+fi
+
+# Run as the activation unit stops, with the system it was putting live. Past its
+# deadline, if the timer hasn't fired yet, the revert starts now: the timer would
+# land it after the window. A switch no longer pending (confirmed, aborted,
+# reverted, or replaced by a later switch) is settled: leave it be. A stop job the
+# killed activation left behind still holds up the revert's own job on that unit
+# until systemd's stop timeout ends it; a unit with none (TimeoutStopSec=infinity)
+# holds it for good, burrow#312.
+if [ "${1:-}" = --activation-stopped ]; then
+  if [ "${SERVICE_RESULT:-}" = timeout ] && [ "$(cat "$state/pending" 2>/dev/null)" = "$2" ] &&
+    [ "$(systemctl show -p SubState --value "$REVERT.timer")" = waiting ]; then
+    echo "activation killed: it hung past its deadline, reverting now" | systemd-cat -t "$SWITCH" -p warning
+    # In this order: with the timer gone first, nothing would hold the inactive
+    # transient service loaded.
+    systemctl start --no-block "$REVERT.service"
+    systemctl stop "$REVERT.timer"
   fi
   exit 0
 fi
@@ -154,16 +175,30 @@ systemd-run --unit="$REVERT" --on-active="$within" --timer-property=AccuracySec=
   --property=Type=oneshot "${keep[@]}" --setenv=PATH="$PATH" \
   "$(readlink -f "$0")" --revert-to "$prev"
 
-# Activate in its own unit, so it finishes even if it restarts whatever called it.
-if ! systemd-run --unit="$SWITCH-activate" "${keep[@]}" --collect --wait --pipe --quiet \
-  "$new/bin/switch-to-configuration" test; then
-  echo "activation reported errors; it will revert in $within unless you run $CONFIRM" >&2
+# Activate in its own unit, so it finishes even if it restarts whatever called
+# it. switch-to-configuration holds the lock the revert needs, so a hung
+# activation would hold off the revert for good: it gets three quarters of the
+# window, and the rest is the revert's. Killing it halfway leaves nothing behind:
+# the revert picks up the units it stopped from the list switch-to-configuration
+# keeps in /run/nixos, a start that never ends is stopped by the revert's own
+# activation, and tests/switch.nix holds them to that.
+# (Its "μs:" line, which says "us:" outside a UTF-8 locale.)
+while read -r key value; do
+  case $key in *s:) window_us=$value ;; esac
+done < <(systemd-analyze timespan "$within")
+rc=0
+systemd-run --unit="$SWITCH-activate" "${keep[@]}" --collect --wait --pipe --quiet \
+  --property=RuntimeMaxSec="$((window_us * 3 / 4))us" --property=TimeoutStopSec=5s \
+  --property=ExecStopPost="$(readlink -f "$0") --activation-stopped $new" \
+  "$new/bin/switch-to-configuration" test || rc=$?
+# The timer's gone once the revert has fired or the deadline started it: the old
+# system is coming back whatever the activation said.
+if [ "$(systemctl show -p SubState --value "$REVERT.timer")" != waiting ]; then
+  echo "not kept: activating took too long for a $within window, so it reverts to $prev" >&2
   exit 1
 fi
-# Activating can outlast the window. The revert has then fired, waited for the
-# activation, and is putting the old system back.
-if [ "$(systemctl show -p SubState --value "$REVERT.timer")" != waiting ]; then
-  echo "not kept: activating took longer than $within, so it reverts to $prev" >&2
+if [ "$rc" != 0 ]; then
+  echo "activation reported errors; it will revert in $within unless you run $CONFIRM" >&2
   exit 1
 fi
 echo "live: $new"
