@@ -734,49 +734,43 @@ def archive_branch(repo, name, sha):
 
 
 def closed_at(repo, name, sha):
-    """The closed PR whose head was this branch at `sha`, 0 when there's
-    none. GitHub keeps that PR's commits (refs/pull/N/head) and offers to
-    restore the branch from its page, so the branch holds nothing the PR
-    doesn't. None when GitHub said no; C.Unavailable when it didn't answer."""
+    """(the closed PR whose head was this branch at `sha`, when it last
+    closed), or 0 when there's none. GitHub keeps that PR's commits
+    (refs/pull/N/head) and offers to restore the branch from its page, so
+    the branch holds nothing the PR doesn't. None when GitHub said no;
+    C.Unavailable when it didn't answer."""
     owner = repo.split("/")[0]
     # Every page: a branch name reused for many PRs can have its match
     # past the first hundred.
     got = answer(C.gh, "api", "--paginate", f"repos/{repo}/pulls?state=closed&per_page=100&head={owner}:{urllib.parse.quote(name)}",
-                 "--jq", f'.[] | select(.head.sha == "{sha}") | .number')
+                 "--jq", f'.[] | select(.head.sha == "{sha}") | "\\(.number) \\(.closed_at)"')
     if got is None:
         return None
-    first = str(got).split("\n")[0]
-    return int(first) if first.isdigit() else 0
+    closes = [(ts(at), int(n)) for n, at in (x.split(" ") for x in str(got).split("\n") if x.count(" ") == 1)]
+    return max(closes)[::-1] if closes else 0
 
 
 def closed_heads(repo, since, etag):
-    """When a PR closed since `since` (its last change, a time) at each
-    branch here and tip: (the etag to ask by next time, the newest change
-    now, {(branch, tip): when}), when being the PR's last change while
-    closed, so the same listing read again gives the same times. None while
-    nothing has changed, a look GitHub doesn't count against the rate
-    limit. No `since` (no look yet, and no branch judged): just the newest
-    change, for the next look to start from. RuntimeError when GitHub
-    didn't list them."""
-    path = f"repos/{repo}/pulls?state=closed&sort=updated&direction=desc&per_page=100"
-    got = C.fresh(path, etag)
+    """The branches here, at the tips they closed at, of the PRs closed (or
+    changed while closed) since `since`, the last look's newest change:
+    (the etag to ask by next time, the newest change now, {(branch, tip)}).
+    None while nothing has changed, a look GitHub doesn't count against
+    the rate limit. No `since` (no look before): no heads, just where the
+    next look starts; a pass that kept no look kept no base either, so the
+    next judges every branch again (watch_branches). The heads are None
+    when more changed since than a page holds, and every branch is to be
+    judged again instead: reading on by page number could skip one a
+    reopen moves up a page. RuntimeError when GitHub didn't list them."""
+    got = C.fresh(f"repos/{repo}/pulls?state=closed&sort=updated&direction=desc&per_page=100", etag)
     if got is None:
         return None
     etag, page = got
     newest = max((ts(p["updated_at"]) for p in page), default=since or 0)
-    heads, n = {}, 1
-    while since is not None:
-        # The same second as `since` again: one changed in it may not have
-        # been listed then.
-        for p in page:
-            at, head = ts(p["updated_at"]), p["head"]
-            if at >= since and (head.get("repo") or {}).get("full_name") == repo:
-                heads[(head["ref"], head["sha"])] = max(at, heads.get((head["ref"], head["sha"]), 0))
-        if len(page) < 100 or ts(page[-1]["updated_at"]) < since:
-            break
-        # More changed since than a page holds: the next page, unasked by etag.
-        n += 1
-        page = C.fresh(f"{path}&page={n}")[1]
+    # The same second as `since` again: one changed in it may not have been
+    # listed then.
+    newer = [p for p in page if since is not None and ts(p["updated_at"]) >= since]
+    heads = None if len(newer) == 100 else {
+        (p["head"]["ref"], p["head"]["sha"]) for p in newer if (p["head"].get("repo") or {}).get("full_name") == repo}
     return etag, newest, heads
 
 
@@ -813,18 +807,15 @@ def watch_branches(r, in_use, digest, full=False):
         got = listed_branches(repo, r["default"], st.get("branchesEtag") if st.get("branchesBy") == by else None)
         listed, base = (got[1], got[2]) if got else ({name: tip["sha"] for name, tip in tips.items()}, st.get("base"))
         # Every comparison was against the default's tip: one that has moved
-        # (a merge into it, a force-push) may judge a branch otherwise.
+        # (a merge into it, a force-push) may judge a branch otherwise. No
+        # base kept (a first look, or one that stopped partway) reads as moved.
         moved = base != st.get("base")
-        # From the last look's newest change, or before any look from the
-        # earliest a branch judged was seen at: what's older, its judgment saw.
-        since = st.get("closedSince", min((tip["seen"] for tip in tips.values() if "seen" in tip), default=None))
-        closed = closed_heads(repo, since, st.get("closedEtag"))
-        heads = {} if closed is None else closed[2]
+        closed = closed_heads(repo, st.get("closedSince"), st.get("closedEtag"))
+        heads = set() if closed is None else closed[2]
         for name in set(tips) - set(listed):
             del tips[name]  # deleted, here or by anyone
         for name, sha in listed.items():
             was = tips.get(name)
-            at = heads.get((name, sha))
             if name == r["default"] or any(fnmatch.fnmatch(name, pat) for pat in keep):
                 tips.pop(name, None)
             elif name in in_use:
@@ -832,12 +823,10 @@ def watch_branches(r, in_use, digest, full=False):
             elif was is None or was["sha"] != sha or was.get("pr"):
                 # New, pushed to, or its PR just left the open ones: the wait starts now.
                 tips[name] = judge(repo, r, name, sha, C.NOW)
-            elif at is not None and at >= was["seen"]:
-                # A PR of it closed (or changed closed) since it was judged:
-                # the wait starts at that change, so a pass that reads the
-                # same listing again judges it the same.
-                tips[name] = judge(repo, r, name, sha, at)
-            elif moved or looks_again(was, full):
+            elif heads is None or (name, sha) in heads or moved or looks_again(was, full):
+                # Judged again from when it was first seen at this tip, so
+                # its wait comes out the same however often it's judged: a
+                # closed PR's runs from the close itself (judge).
                 tips[name] = judge(repo, r, name, sha, was["seen"])
         # Only once every branch is judged by them: a pass that stopped
         # partway leaves them for the next one to judge the rest by too.
@@ -898,11 +887,13 @@ def judge(repo, r, name, sha, seen):
     # GitHub deletes a branch when its PR merges, never when it closes.
     # Matched by the tip, so a bot's branch pushed anew since (its next
     # update, with no PR yet) or anyone's pushed after the close stays.
-    n = closed_at(repo, name, sha)
-    if n is None:
+    pr = closed_at(repo, name, sha)
+    if pr is None:
         return {**tip, "retry": True}
-    if n:
-        due, why = seen + GRACE, f"#{n} was closed at it, and keeps its commits"
+    if pr:
+        # An hour from the close, or from when it was first seen at this
+        # tip if that's later: the same every time it's judged.
+        due, why = max(seen, pr[1]) + GRACE, f"#{pr[0]} was closed at it, and keeps its commits"
     elif DEP_RE.match(name):
         return tip  # any other branch of a dependency bot's is its work in progress
     else:

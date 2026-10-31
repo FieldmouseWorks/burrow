@@ -708,15 +708,16 @@ BRANCHES = {"main": ("ab" * 20, 0, young), "in-main": ("1" * 40, 0, young), "clo
             "renovate/closed": ("9" * 40, 1, young), "renovate/again": ("a" * 40, 1, young),
             "archived": ("d" * 40, 2, old), "refused": ("e" * 40, 2, old)}
 PROTECTED = set()  # the default here isn't, so it's listed with the rest
-CLOSED = {"closed": [{"number": 3, "head": {"sha": "2" * 40}}], "moved": [{"number": 4, "head": {"sha": "f" * 40}}],
+CLOSED = {"closed": [{"number": 3, "head": {"sha": "2" * 40}, "closed_at": ago(5)}],
+          "moved": [{"number": 4, "head": {"sha": "f" * 40}, "closed_at": ago(5)}],
           # Its match is the 101st closed PR on the name: past gh's first page.
-          "renovate/closed": [{"number": n, "head": {"sha": "c" * 40}} for n in range(100, 200)]
-          + [{"number": 5, "head": {"sha": "9" * 40}}],
+          "renovate/closed": [{"number": n, "head": {"sha": "c" * 40}, "closed_at": ago(5)} for n in range(100, 200)]
+          + [{"number": 5, "head": {"sha": "9" * 40}, "closed_at": ago(5)}],
           # Its last PR merged at another tip, and the bot has pushed its next update.
-          "renovate/again": [{"number": 6, "head": {"sha": "b" * 40}}]}
+          "renovate/again": [{"number": 6, "head": {"sha": "b" * 40}, "closed_at": ago(5)}]}
 # The closed PRs as GitHub lists them by their last change: each one's
 # branch, tip and repo.
-FEED = [{"number": pr["number"], "updated_at": ago(5), "head": {"ref": name, "sha": pr["head"]["sha"], "repo": {"full_name": "sam/r"}}}
+FEED = [{"number": pr["number"], "updated_at": pr["closed_at"], "head": {"ref": name, "sha": pr["head"]["sha"], "repo": {"full_name": "sam/r"}}}
         for name, prs in CLOSED.items() for pr in prs]
 LOOKED, FRESH, FED = [], [], []  # the branches whose closed PRs it read; what each listing got (200 or 304)
 # What GitHub has under refs/archive, and what it won't take there.
@@ -735,8 +736,10 @@ def no(k, why):
 
 
 def close(name, number, sha, repo="sam/r"):
-    """A PR from `name` (in `repo`) closed at `sha`, now."""
-    CLOSED.setdefault(name, []).append({"number": number, "head": {"sha": sha}})
+    """A PR from `name` (in `repo`) closed at `sha`, now: GitHub's times are
+    whole seconds."""
+    if repo == "sam/r":  # what head=sam:NAME lists
+        CLOSED.setdefault(name, []).append({"number": number, "head": {"sha": sha}, "closed_at": ago(0)})
     FEED.append({"number": number, "updated_at": ago(0), "head": {"ref": name, "sha": sha, "repo": {"full_name": repo}}})
 
 
@@ -744,8 +747,7 @@ def branches_fresh(path, etag=None):
     if path.startswith("repos/sam/r/pulls?state=closed&sort=updated&direction=desc&per_page=100"):
         if FEEDING[0]:
             no({}, FEEDING[0])
-        n = int(path.partition("&page=")[2] or 1)
-        page = sorted(FEED, key=lambda p: p["updated_at"], reverse=True)[100 * (n - 1):100 * n]
+        page = sorted(FEED, key=lambda p: p["updated_at"], reverse=True)[:100]
         tag = json.dumps(page)
         FED.append(304 if etag == tag else 200)
         return None if etag == tag else (tag, page)
@@ -775,7 +777,7 @@ def branches_gh(*a, **k):
             return no(k, "HTTP 404: Not Found")
         return got == a[a.index("--jq") + 1].partition('== "')[2][:40]
     if path.startswith("repos/sam/r/pulls?state=closed"):
-        # gh's --paginate --jq: the matching numbers from every page, a line each.
+        # gh's --paginate --jq: each match's number and close, from every page, a line each.
         assert a[1] == "--paginate", a
         name = path.partition("head=sam:")[2]
         LOOKED.append(name)
@@ -783,7 +785,7 @@ def branches_gh(*a, **k):
         if prs is None or isinstance(prs, str):
             return no(k, prs or "HTTP 403: Resource not accessible by integration")
         want = a[a.index("--jq") + 1].partition('.head.sha == "')[2][:40]
-        return "\n".join(str(pr["number"]) for pr in prs if pr["head"]["sha"] == want)
+        return "\n".join(f'{pr["number"]} {pr["closed_at"]}' for pr in prs if pr["head"]["sha"] == want)
     return gh_stub(*a, **k)
 
 
@@ -878,38 +880,69 @@ assert FED == [304] and LOOKED == [], (FED, LOOKED)
 C.NOW += R.GRACE
 look(())
 assert DELETED == [("renovate/x", "5" * 40)], DELETED
-# More closed since the last look than a page holds: the pages before it
-# too, and only the branches they closed at are judged.
+# More closed since the last look than a page holds: every branch is judged
+# again, from when it was first seen at its tip, since reading on by page
+# number could skip one a reopen moves up a page. Only the one a PR closed
+# at gets a new wait, an hour from that close.
 BRANCHES["paged"] = ("ee" * 20, 1, young)
 look(())
+before = {name: tip.get("due") for name, tip in tips().items()}
 C.NOW += 1
 close("paged", 11, "ee" * 20)
 for n in range(1000, 1100):
     C.NOW += 1
     close(f"gone-{n}", n, "0" * 40)
-look(())
-assert FED == [200, 200] and LOOKED == ["paged"], (FED, LOOKED)
+assert look(()) == ["sam/r: `refused`"] and FED == [200] and sorted(LOOKED) == sorted(tips()), (FED, LOOKED)
 assert tips()["paged"]["due"] == C.NOW - 100 + R.GRACE, tips()["paged"]
+assert {name: tip.get("due") for name, tip in tips().items() if name != "paged"} == \
+    {name: due for name, due in before.items() if name != "paged"}, tips()
 look(())
 assert FED == [304] and LOOKED == [], (FED, LOOKED)
-# A pass that stops partway and is tried again judges the closes it read
-# again the same: each branch's hour runs from its PR's close, not from the
-# pass, so failing passes can't keep putting it off.
 C.NOW += R.GRACE
 look(())
 assert DELETED == [("paged", "ee" * 20)], DELETED
+# GitHub's times are whole seconds, the pass's clock isn't: a PR closed in
+# the same second its branch (a bot's, with no wait of its own) was first
+# seen still has it judged, and deleted an hour on.
+BRANCHES["renovate/quick"] = ("e3" * 20, 1, young)
+C.NOW += 0.25
+look(())
+assert "due" not in tips()["renovate/quick"], tips()
+close("renovate/quick", 15, "e3" * 20)
+look(())
+assert LOOKED == ["renovate/quick"] and tips()["renovate/quick"]["due"] == C.NOW + R.GRACE, (LOOKED, tips())
+C.NOW += R.GRACE
+look(())
+assert DELETED == [("renovate/quick", "e3" * 20)], DELETED
+C.NOW += 0.75
+# A PR opened and closed between passes, at the tip an older one closed at
+# too: its hour runs from the newer close.
+BRANCHES["twice"] = ("e4" * 20, 1, young)
+CLOSED["twice"] = [{"number": 16, "head": {"sha": "e4" * 20}, "closed_at": ago(5)}]
+look(())
+C.NOW += 1800
+close("twice", 17, "e4" * 20)
+look(())
+assert LOOKED == ["twice"] and tips()["twice"]["due"] == C.NOW + R.GRACE, (LOOKED, tips()["twice"])
+C.NOW += R.GRACE
+look(())
+assert DELETED == [("twice", "e4" * 20)], DELETED
+# A pass that stops partway and is tried again judges the closes it read
+# again the same: each branch's hour runs from its PR's close, not from the
+# pass, so failing passes can't keep putting it off.
 BRANCHES.update({"first": ("f1" * 20, 1, young), "second": ("f2" * 20, 1, young)})
 look(())
 C.NOW += 1
 closing = C.NOW
 close("first", 12, "f1" * 20)
 close("second", 13, "f2" * 20)
+answers = CLOSED["second"]
 CLOSED["second"] = "HTTP 502: Bad Gateway"
 for _ in range(3):
     C.NOW += 600
     look(())
     assert LOOKED == ["first", "second"] and tips()["first"]["due"] == closing + R.GRACE, (LOOKED, tips()["first"])
-CLOSED["second"] = [{"number": 13, "head": {"sha": "f2" * 20}}]
+CLOSED["second"] = answers
 look(())
 assert LOOKED == ["first", "second"] and tips()["second"]["due"] == closing + R.GRACE, (LOOKED, tips()["second"])
 look(())
@@ -1009,15 +1042,15 @@ assert tips()["shy"]["retry"] and tips()["renovate/shy"]["retry"], tips()
 look(())
 assert LOOKED == [], LOOKED
 del COMPARE["shy"]
-CLOSED["renovate/shy"] = [{"number": 11, "head": {"sha": "e2" * 20}}]
+CLOSED["renovate/shy"] = [{"number": 11, "head": {"sha": "e2" * 20}, "closed_at": ago(5)}]
 C.NOW += R.GRACE
 look(full=True)
 assert sorted(LOOKED) == ["orphan", "refused", "renovate/shy", "shy"], LOOKED
 assert DELETED == [("shy", "e1" * 20), ("renovate/shy", "e2" * 20)] and tips()["orphan"]["retry"], (DELETED, tips())
 assert f"refs/archive/shy/{'e1' * 20}" in ARCHIVED and tips()["shy"]["seen"] == seen, ARCHIVED
-# A first look that stops partway, tried again: the closes are read from
-# when the earliest branch it judged was seen, at their own times, and what
-# it judged keeps its wait.
+# A first look that stops partway, tried again: it kept no base, so every
+# branch is judged again from when it was first seen (a closed PR's from its
+# close), and what it judged keeps its wait.
 C.save("repo-sam_r.json", {})
 BRANCHES["third"] = ("f3" * 20, 1, young)
 COMPARE["third"] = "HTTP 502: Bad Gateway"
