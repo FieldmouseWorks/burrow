@@ -388,6 +388,8 @@
           arm = machine { } [ { nixpkgs.hostPlatform = lib.mkForce "aarch64-linux"; } ];
           # remi's install rehearsal turns burrow-events' handlers off.
           unhandled = machine { rev = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"; } [ { burrow.events.handlers = lib.mkForce { }; } ];
+          # A machine may space the passes out itself.
+          spaced = machine { } [ { burrow.events.handlers.dispatch.gap = lib.mkForce 600; } ];
           settings = m: m.config.burrow.dispatch.settings;
           revisions = map (m: m.config.system.configurationRevision) [ committed dirty ];
           deploy = { inherit ((settings committed).deploy) own running; };
@@ -411,6 +413,8 @@
           assert lib.assertMsg (labels arm == wantLabels "ARM64") "dispatch: aarch64's labels: ${builtins.toJSON (labels arm)}";
           assert lib.assertMsg (settings unhandled == settings committed)
             "dispatch: with the handlers off, the settings are ${builtins.toJSON (settings unhandled)}";
+          assert lib.assertMsg ((settings committed).gap == 120 && (settings spaced).gap == 600)
+            "dispatch: runners' waits allow for a ${toString (settings committed).gap}s gap, and ${toString (settings spaced).gap}s with passes 600s apart";
           pkgs.runCommand "dispatch-config-check" { } ''
             ${self.nixosConfigurations.example.config.systemd.services.burrow-dispatch.serviceConfig.ExecStart} status
             ${committed.config.systemd.services.burrow-dispatch.serviceConfig.ExecStart} status
