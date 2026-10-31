@@ -34,30 +34,9 @@ pub fn target(t: &str) -> Option<(String, String)> {
 /// wakes the job once. REST, not GraphQL, whose budget is shared with
 /// everything else under the login. None when GitHub can't be asked.
 pub fn fingerprint(cfg: &Config, repo: &str, n: &str) -> Option<Value> {
-    let gh = |args: &[&str]| -> Option<Value> {
-        let out = Command::new(&cfg.tools.gh)
-            .arg("api")
-            .args(args)
-            .stdin(Stdio::null())
-            .stderr(Stdio::inherit())
-            .output()
-            .ok()?;
-        if !out.status.success() {
-            return None;
-        }
-        serde_json::from_slice(&out.stdout).ok()
-    };
-    // Every page, as one list: a comment, review or check past the first
-    // hundred is news too.
-    let pages = |path: String| -> Option<Vec<Value>> {
-        let got = gh(&["--paginate", "--slurp", &path])?;
-        Some(
-            got.as_array()?
-                .iter()
-                .flat_map(|page| page.as_array().cloned().unwrap_or_default())
-                .collect(),
-        )
-    };
+    let gh = |args: &[&str]| api(cfg, args);
+    // A comment, review or check past the first hundred is news too.
+    let pages = |path: String| every(cfg, &path);
     let issue = gh(&[&format!("repos/{repo}/issues/{n}")])?;
     // Comments on the issue or PR, but not proj-inbox's own: a job awaiting
     // its own issue would wake on every answer the inbox posts there.
@@ -116,6 +95,33 @@ pub fn fingerprint(cfg: &Config, repo: &str, n: &str) -> Option<Value> {
         "reviews": reviews,
         "checks": checks,
     }))
+}
+
+/// What GitHub's REST API answers (`gh api ARGS`), or None when it can't be
+/// asked or doesn't answer with JSON.
+pub fn api(cfg: &Config, args: &[&str]) -> Option<Value> {
+    let out = Command::new(&cfg.tools.gh)
+        .arg("api")
+        .args(args)
+        .stdin(Stdio::null())
+        .stderr(Stdio::inherit())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    serde_json::from_slice(&out.stdout).ok()
+}
+
+/// Every page of a list, as one list.
+pub fn every(cfg: &Config, path: &str) -> Option<Vec<Value>> {
+    let got = api(cfg, &["--paginate", "--slurp", path])?;
+    Some(
+        got.as_array()?
+            .iter()
+            .flat_map(|page| page.as_array().cloned().unwrap_or_default())
+            .collect(),
+    )
 }
 
 /// A value as a string sits in text: null as "null".
