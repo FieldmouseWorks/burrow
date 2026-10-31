@@ -741,10 +741,11 @@ def close(name, number, sha, repo="sam/r"):
 
 
 def branches_fresh(path, etag=None):
-    if path == "repos/sam/r/pulls?state=closed&sort=updated&direction=desc&per_page=100":
+    if path.startswith("repos/sam/r/pulls?state=closed&sort=updated&direction=desc&per_page=100"):
         if FEEDING[0]:
             no({}, FEEDING[0])
-        page = sorted(FEED, key=lambda p: p["updated_at"], reverse=True)[:100]
+        n = int(path.partition("&page=")[2] or 1)
+        page = sorted(FEED, key=lambda p: p["updated_at"], reverse=True)[100 * (n - 1):100 * n]
         tag = json.dumps(page)
         FED.append(304 if etag == tag else 200)
         return None if etag == tag else (tag, page)
@@ -779,8 +780,8 @@ def branches_gh(*a, **k):
         name = path.partition("head=sam:")[2]
         LOOKED.append(name)
         prs = CLOSED.get(name, [])
-        if prs is None:
-            return no(k, "HTTP 403: Resource not accessible by integration")
+        if prs is None or isinstance(prs, str):
+            return no(k, prs or "HTTP 403: Resource not accessible by integration")
         want = a[a.index("--jq") + 1].partition('.head.sha == "')[2][:40]
         return "\n".join(str(pr["number"]) for pr in prs if pr["head"]["sha"] == want)
     return gh_stub(*a, **k)
@@ -877,15 +878,45 @@ assert FED == [304] and LOOKED == [], (FED, LOOKED)
 C.NOW += R.GRACE
 look(())
 assert DELETED == [("renovate/x", "5" * 40)], DELETED
-# More closed since the last look than a page holds: every branch is looked
-# at again.
+# More closed since the last look than a page holds: the pages before it
+# too, and only the branches they closed at are judged.
+BRANCHES["paged"] = ("ee" * 20, 1, young)
+look(())
+C.NOW += 1
+close("paged", 11, "ee" * 20)
 for n in range(1000, 1100):
     C.NOW += 1
     close(f"gone-{n}", n, "0" * 40)
 look(())
-assert FED == [200] and sorted(LOOKED) == sorted(tips()), (FED, LOOKED)
+assert FED == [200, 200] and LOOKED == ["paged"], (FED, LOOKED)
+assert tips()["paged"]["due"] == C.NOW - 100 + R.GRACE, tips()["paged"]
 look(())
 assert FED == [304] and LOOKED == [], (FED, LOOKED)
+# A pass that stops partway and is tried again judges the closes it read
+# again the same: each branch's hour runs from its PR's close, not from the
+# pass, so failing passes can't keep putting it off.
+C.NOW += R.GRACE
+look(())
+assert DELETED == [("paged", "ee" * 20)], DELETED
+BRANCHES.update({"first": ("f1" * 20, 1, young), "second": ("f2" * 20, 1, young)})
+look(())
+C.NOW += 1
+closing = C.NOW
+close("first", 12, "f1" * 20)
+close("second", 13, "f2" * 20)
+CLOSED["second"] = "HTTP 502: Bad Gateway"
+for _ in range(3):
+    C.NOW += 600
+    look(())
+    assert LOOKED == ["first", "second"] and tips()["first"]["due"] == closing + R.GRACE, (LOOKED, tips()["first"])
+CLOSED["second"] = [{"number": 13, "head": {"sha": "f2" * 20}}]
+look(())
+assert LOOKED == ["first", "second"] and tips()["second"]["due"] == closing + R.GRACE, (LOOKED, tips()["second"])
+look(())
+assert LOOKED == [], LOOKED  # read to the end once: those closes are behind it
+C.NOW = closing + R.GRACE
+look(())
+assert DELETED == [("first", "f1" * 20), ("second", "f2" * 20)], DELETED
 # So does a push: to the tip a closed PR was closed at, it goes an hour on.
 BRANCHES["moved"] = ("f" * 40, 1, young)
 look(())
@@ -984,6 +1015,21 @@ look(full=True)
 assert sorted(LOOKED) == ["orphan", "refused", "renovate/shy", "shy"], LOOKED
 assert DELETED == [("shy", "e1" * 20), ("renovate/shy", "e2" * 20)] and tips()["orphan"]["retry"], (DELETED, tips())
 assert f"refs/archive/shy/{'e1' * 20}" in ARCHIVED and tips()["shy"]["seen"] == seen, ARCHIVED
+# A first look that stops partway, tried again: the closes are read from
+# when the earliest branch it judged was seen, at their own times, and what
+# it judged keeps its wait.
+C.save("repo-sam_r.json", {})
+BRANCHES["third"] = ("f3" * 20, 1, young)
+COMPARE["third"] = "HTTP 502: Bad Gateway"
+look(())
+first = C.NOW
+assert "third" not in tips() and "closedSince" not in C.load("repo-sam_r.json", {}), tips()
+C.NOW += 600
+close("renovate/again", 14, "a" * 40)
+del COMPARE["third"]
+look(())
+assert tips()["renovate/again"]["due"] == C.NOW + R.GRACE and tips()["refused"]["seen"] == first, tips()
+assert tips()["third"]["seen"] == C.NOW and "closedSince" in C.load("repo-sam_r.json", {}), tips()
 # A branch kept no longer is judged, though the listing hasn't changed.
 S.C.CFG["keepBranches"] = []
 look(())
