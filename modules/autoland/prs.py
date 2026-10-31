@@ -363,10 +363,14 @@ def land(repo, pr, repo_info):
         return (f"not asked: no merge method both the repo's settings and the rules on {pr['baseRefName']} allow, "
                 "or GitHub didn't say what the rules are")
     # The merge endpoint merges or refuses; a push since the check makes the
-    # sha stale, and it waits for the next pass.
+    # sha stale, and it waits for the next pass. A squash or a merge commit
+    # takes the PR's title as its subject, the title house-check holds to the
+    # house style: left to GitHub, a one-commit PR's squash would take that
+    # commit's subject instead, which nothing checked.
+    title = [] if method == "rebase" else ["-f", f"commit_title={pr['title']} (#{pr['number']})"]
     try:
         C.write("api", "-X", "PUT", f"repos/{repo}/pulls/{pr['number']}/merge",
-                "-f", f"merge_method={method}", "-f", f"sha={pr['headRefOid']}")
+                "-f", f"merge_method={method}", *title, "-f", f"sha={pr['headRefOid']}")
     except RuntimeError as e:
         return C.said(e)
     return None
