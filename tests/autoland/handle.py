@@ -165,6 +165,28 @@ run(mkpr(reviews=[rv_review("codex", 0)]), 600)
 V.answered = real_answered
 assert late_out and V.out("rival") and os.listdir(DDIR) == [], (os.listdir(DDIR), WROTE)
 os.remove(f"{tmp}/state/{V.OUT}")
+# Nor is an earlier head's review dropped for a look at this head that an
+# outage in the same listing means won't come, wherever its answer sorts: an
+# earlier head's in once outs() had looked (b sorts after a), or this head's
+# in once consume() had read it.
+for out_at in ("b" * 40, newer):
+    fresh_pr_state()
+    run(mkpr(), 0)
+    run(mkpr(), 600)
+    worker(rival={"result": "review", "answer": {"findings": [{"path": "a.py"}]}})
+    listed = []
+    def answered(key, r, listed=listed, out_at=out_at):
+        listed.append(r)
+        if listed.count("rival") == 2 and r == "rival":  # overtaken()'s listing
+            C.save(f"{V.DONE}/{V.item_name(key, 'rival', out_at, 'main')}.json",
+                   {"result": "out", "why": "spent", "until": C.ts(T0) + 86400, "head": out_at, "base": "main"})
+        return real_answered(key, r)
+    V.answered = answered
+    status, _ = run(mkpr(sha=newer, reviews=[rv_review("codex", 0, newer)]), 700)
+    V.answered = real_answered
+    assert listed.count("rival") >= 2 and V.out("rival") and ("rival", head, 1) in POSTED, (out_at, POSTED, WROTE)
+    assert not merged() and f"review findings on {head[:7]}" in status and os.listdir(DDIR) == [], (out_at, status)
+    os.remove(f"{tmp}/state/{V.OUT}")
 # One GitHub wouldn't take is kept and tried again, and the PR waits for it.
 fresh_pr_state()
 run(mkpr(), 0)

@@ -149,17 +149,23 @@ def look(repo, pr, key, st, lost_on, digest, line, age, after, strike, cleared):
         threads it read are from before them. "Nothing found" there says
         nothing about this head."""
         rs = st["rv"].setdefault(r, {})
-        mine = V.answered(key, r)
+        this = V.item_name(key, r, head, pr["baseRefName"])
+        mine = {name: load(f"{V.DONE}/{name}.json", None) or {} for name in V.answered(key, r)}
         tries = {n: k for n, k in rs.get("late", {}).items() if n in mine}
-        for name in mine:
-            if name == V.item_name(key, r, head, pr["baseRefName"]):
+        # Whether it's out decides what's dropped, so every outage listed is
+        # recorded first, wherever it sorts: an earlier head's, in since
+        # outs() looked, and this head's, in since consume() read it.
+        for name, back in mine.items():
+            if back.get("result") == "out" and not DRY:
+                if name == this:
+                    consume(r)
+                else:
+                    went_out(r, back)
+                    V.drop(name)
+        for name, back in mine.items():
+            if name == this or DRY or back.get("result") == "out":
                 continue
-            back = load(f"{V.DONE}/{name}.json", None) or {}
-            if DRY:
-                continue
-            if back.get("result") == "out":  # in since outs() looked
-                went_out(r, back)
-            elif back.get("result") == "review" and back.get("base") == pr["baseRefName"] and not (over or V.out(r)):
+            if back.get("result") == "review" and back.get("base") == pr["baseRefName"] and not (over or V.out(r)):
                 log(f"{tag}: dropped {V.NAMES[r]}'s review of {str(back.get('head'))[:7]}, back after the PR moved on: "
                     f"its look at {head[:7]} decides")
             elif back.get("result") == "review" and back.get("base") == pr["baseRefName"] and isinstance(back.get("head"), str):
