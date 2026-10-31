@@ -396,10 +396,10 @@ pkgs.testers.runNixOSTest {
         machine.wait_until_succeeds(f"su - dev -c 'proj state {o2}' | grep -x error", timeout=120)
         waits(lambda w: o not in w and o2 not in w)
         machine.succeed("rm /tmp/silent")
-        # Anyone else's failure is a stall at once: nothing resumes it.
+        # Anyone else's failure is a stall once nothing has resumed it.
         f = proj("run web fail")
         machine.wait_until_succeeds(f"su - dev -c 'proj state {f}' | grep -x error", timeout=120)
-        waits(lambda w: w.get(f, {}).get("phase") == "turn 1 ended (error), and nothing resumes it")
+        waits(lambda w: w.get(f, {}).get("phase") == "turn 1 ended (error), and nothing resumed it")
         proj(f"stop {f}")
         assert f not in waits(), waits()
 

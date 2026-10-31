@@ -21,9 +21,10 @@
 # Watched: a turn waiting in line, for a slot or inside its run (its clock
 # stands still meanwhile), for STALL_QUEUED seconds; one running, until its
 # deadline and GRACE (proj stops it before then); one that ended without
-# saying what comes next even when asked again, or ended in a failure, at
-# once, since nothing resumes it; one awaiting GitHub, for AWAIT_HOURS and
-# GRACE (proj-watch resumes it by then, told nothing changed). Not watched:
+# saying what comes next even when asked again, at once, since nothing resumes
+# it; one that ended in a failure, for RESUME_GRACE, since proj-inbox resumes
+# an issue's job seconds later when a reply waits; one awaiting GitHub, for
+# AWAIT_HOURS and GRACE (proj-watch resumes it by then, told nothing changed). Not watched:
 # a turn that asks a person (their reply resumes it) or is done, one proj
 # stop ended, and any ended turn of an --owned job.
 job_wait() {
@@ -69,7 +70,7 @@ job_wait() {
     *)
       [ -z "$stopped" ] && [ -z "$owned" ] || return 0
       if [ "$state" != "done" ]; then
-        since=$ended due=$ended phase="turn $turn ended ($state), and nothing resumes it"
+        since=$ended due=$((ended + RESUME_GRACE)) phase="turn $turn ended ($state), and nothing resumed it"
       else
         case $end in
           undeclared)

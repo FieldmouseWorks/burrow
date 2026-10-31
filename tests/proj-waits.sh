@@ -1,8 +1,8 @@
 # What proj tells the stall watchdog a job waits on (modules/proj/waits.sh),
 # from what rewatch would find of its latest turn: a turn in line or running
 # is watched to its deadline (one waiting in line inside its run as one in
-# line for a slot is), one that ended without saying what comes next or in a
-# failure is due at once, an await to its deadline past proj-watch's, and a
+# line for a slot is), one that ended without saying what comes next is due
+# at once, one that failed once proj-inbox has had time to resume it, an await to its deadline past proj-watch's, and a
 # question for a person, a finished job, a stopped turn and an --owned job's
 # end aren't watched at all. And what a running turn waits in line for: only
 # a waiter that still holds its file, so one that died mid-wait never stops
@@ -12,7 +12,7 @@
 set -euo pipefail
 # shellcheck source=/dev/null
 . "$1"
-export STALL_QUEUED=7200 AWAIT_HOURS=24 GRACE=600
+export STALL_QUEUED=7200 AWAIT_HOURS=24 GRACE=600 RESUME_GRACE=120
 T=$'\t'
 
 # The facts, one "KEY VALUE..." argument each (spaces become tabs at the
@@ -65,10 +65,11 @@ case_ none "${base[@]}" "state done" "end done" "wait 2500 a lock"
 # Ended without saying what comes next, even when asked again: due at once.
 case_ '.since == 3000 and .due == 3000 and .kick == null and (.phase | test("without saying what comes next"))' \
   "${base[@]}" "state done" "end undeclared"
-# Ended in a failure, or an error: due at once too, and says which.
-case_ '.due == 3000 and (.phase | test("ended \\(timed out after 4h\\)"))' "${base[@]}" "state timed out after 4h"
-case_ '.due == 3000 and (.phase | test("ended \\(error\\)"))' "${base[@]}" "state error" "end done"
-case_ '.due == 3000' "${base[@]}" "state failed"
+# Ended in a failure, or an error: due once proj-inbox has had time to resume
+# it (a reply waiting, a turn cut off), and says which.
+case_ '.since == 3000 and .due == 3120 and (.phase | test("ended \\(timed out after 4h\\)"))' "${base[@]}" "state timed out after 4h"
+case_ '.due == 3120 and (.phase | test("ended \\(error\\)"))' "${base[@]}" "state error" "end done"
+case_ '.due == 3120' "${base[@]}" "state failed"
 # A question for a person, a finished job, and a turn that didn't have to say
 # (a sandbox's, or one from before turns said) aren't watched.
 case_ none "${base[@]}" "state done" "end ask"
