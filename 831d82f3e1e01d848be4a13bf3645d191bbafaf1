@@ -1,0 +1,65 @@
+{
+  "conary": "note v1",
+  "change": "5aa3baerqn40nfw54vd7a67maa",
+  "repo": {
+    "owner": "fieldmouseworks",
+    "name": "burrow"
+  },
+  "pr": 281,
+  "url": "https://github.com/fieldmouseworks/burrow/pull/281",
+  "summary": "autoland: hear a repo the moment it's made",
+  "task": "fieldmouseworks/burrow#234",
+  "author": {
+    "kind": "agent",
+    "login": "TusanHomichi",
+    "session": "https://claude.ai/code/session_01BkHcyDixu852qaoNjHWkvZ"
+  },
+  "landing": {
+    "revision": "9a35c859b81558bd8b887921a2e1cce45ffc2e1b3ef242518c354bf64bea99eb",
+    "before": "c1ab79804c6ba4ef5f8e6cc6f2a5999dcb251894",
+    "after": "831d82f3e1e01d848be4a13bf3645d191bbafaf1",
+    "by": {
+      "kind": "status",
+      "login": "fieldmouseworks-steward[bot]"
+    },
+    "at": 1793443688864
+  },
+  "evidence": [
+    {
+      "kind": "ci",
+      "check": "rust-first / python",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/41190615299/job/124506480537"
+    },
+    {
+      "kind": "ci",
+      "check": "check / commits",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/41190615282/job/124506480306"
+    },
+    {
+      "kind": "ci",
+      "check": "rust-first (#281)",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/41190615299"
+    },
+    {
+      "kind": "review",
+      "check": "codex",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/281#pullrequestreview-5722265609"
+    },
+    {
+      "kind": "ci",
+      "check": "check / check",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/41190615282/job/124506480538"
+    },
+    {
+      "kind": "ci",
+      "check": "agents",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/281"
+    }
+  ]
+}
