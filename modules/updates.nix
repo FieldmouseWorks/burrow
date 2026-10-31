@@ -409,8 +409,8 @@ let
     # The one command a repo's refresh may run after it (lock-age).
     allowedCommands = (renovatePolicy.allowedCommands or [ ]) ++ [ lockAgeAllowed ];
     packageRules = (renovatePolicy.packageRules or [ ]) ++ [ lockAgeRule ] ++ lib.optional (trainRepos != [ ]) {
-      # The train lands these, as it lands every PR there, and the rules refuse
-      # anyone else's merge: Renovate only opens them. Last, so it has the
+      # The steward merges these, through the train onto the default branch,
+      # and the rules there refuse anyone else's merge: Renovate only opens them. Last, so it has the
       # final word over every rule above. A security fix keeps its own
       # automerge (Renovate applies vulnerabilityAlerts after every package
       # rule), and the same rules refuse it.

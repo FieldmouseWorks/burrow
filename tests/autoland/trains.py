@@ -210,12 +210,13 @@ status, _ = run(mkpr(branch="renovate/foo-1.x", title="Update foo from 1.4 to 1.
 assert cn_runs() == [SHOW, JOIN] and "In the train" in status, (cn_runs(), status)
 
 # The train lands only onto the default branch: a PR against another one
-# merges as it would without it, judged first with no CI, and Renovate's
-# own merges it there. One retargeted since it joined comes out first.
+# merges as it would without it, judged first with no CI. Renovate merges
+# nothing in a train repo, so its own there is the steward's to merge. One
+# retargeted since it joined comes out first.
 for pr, says, merged_here in (
         (clean(base="release"), "state=success", True), (clean(base="release", checks=()), "the repo has no CI", False),
         (mkpr(branch="renovate/foo-1.x", title="Update foo from 1.4 to 1.5", base="release"),
-         "Dependency update, CI green", False)):
+         "state=success", True)):
     fresh_pr_state()
     seen()
     status, _ = run(pr, 900)
