@@ -9,10 +9,17 @@ const [renovate, file] = process.argv.slice(2);
 const dist = `${renovate}/lib/node_modules/renovate/dist`;
 const { getConfig } = await import(`${dist}/config/defaults.js`);
 const { mergeChildConfig } = await import(`${dist}/config/utils.js`);
-const { resolveConfigPresets } = await import(`${dist}/config/presets/index.js`);
+const { GlobalConfig } = await import(`${dist}/config/global.js`);
+const { mergeRenovateConfig } = await import(`${dist}/workers/repository/init/merge.js`);
 const { flattenUpdates } = await import(`${dist}/workers/repository/updates/flatten.js`);
 const { generateBranchConfig } = await import(`${dist}/workers/repository/updates/generate.js`);
-const config = mergeChildConfig(getConfig(), (await resolveConfigPresets(JSON.parse(fs.readFileSync(file, "utf8")))).config);
+// As a run does: Renovate's own merge puts the presets' rules after the
+// config's, which is what decides a type. requireConfig "ignored" stands in for
+// a repo with no config file of its own, without a platform to ask.
+GlobalConfig.set({ requireConfig: "ignored" });
+const config = await mergeRenovateConfig(
+  mergeChildConfig(getConfig(), { ...JSON.parse(fs.readFileSync(file, "utf8")), repository: "owner/repo" }),
+);
 
 // What a lookup leaves on a dependency: its package name, and its updates.
 const dep = (depName, depType, updates, more = {}) => ({ depName, packageName: depName, depType, ...more, updates });
