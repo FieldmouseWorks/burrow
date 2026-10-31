@@ -399,6 +399,30 @@
           [ "$got" = the-stewards ] || { echo "a pass's own call doesn't use the steward's token: $got"; exit 1; }
           touch $out
         '';
+        # Each flaky the machine runs, the toolbox's and the steward's, asks
+        # GitHub through the first gh on its caller's PATH (the machine's, which
+        # knows an App's env), with no gh of its own ahead of it.
+        flaky-gh = let
+          example = self.nixosConfigurations.example.config;
+          steward = builtins.head (builtins.filter (p: (p.name or "") == "autoland-steward")
+            example.environment.systemPackages);
+          # GitHub's answer to gh api -i for an empty quarantine, and a note
+          # that it was asked.
+          gh = pkgs.writeShellScript "gh" ''
+            echo "$*" >>"$CALLED"
+            printf 'HTTP/2.0 200 OK\nContent-Type: application/json\r\n\r\n[]'
+          '';
+        in pkgs.runCommand "flaky-gh-check" { nativeBuildInputs = [ pkgs.jq ]; } ''
+          mkdir bin && ln -s ${gh} bin/gh
+          config=$(sed -n 's|^export AUTOLAND_CONFIG=.*:-\(/nix/store/[^}]*\)}$|\1|p' ${steward}/bin/autoland-steward)
+          [ -n "$config" ] || { echo "autoland-steward names no config"; exit 1; }
+          for flaky in ${example.system.path}/bin/flaky "$(jq -r .flaky.bin "$config")"; do
+            rm -f called
+            said=$(env -i PATH=$PWD/bin CALLED=$PWD/called "$flaky" quarantine sam/r 2>&1) || { echo "$flaky: $said"; exit 1; }
+            grep -q '^api ' called || { echo "$flaky asked GitHub through a gh of its own: $said"; exit 1; }
+          done
+          touch $out
+        '';
         # The dispatcher's config as the module writes it, read by the binary
         # (the example's, and one with a deploy to watch): which commit of
         # each watched input the running system has, from the flake's
