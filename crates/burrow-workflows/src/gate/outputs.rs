@@ -94,21 +94,30 @@ fn outputs_are_evaluated_side_by_side() {
 }
 
 /// What the gate makes of a stand-in for its job's cgroups: CGROUP is
-/// /proc/self/cgroup, MOUNTS /proc/self/mountinfo with `{mnt}` for where the
-/// stand-in mounts are, and FILES each cgroup file there by its path under
-/// them. What it said, and how many it ran side by side.
-fn under(cgroup: &str, mounts: &str, files: &[(String, String)]) -> (String, usize) {
+/// /proc/self/cgroup (None, one that can't be read: a directory), MOUNTS
+/// /proc/self/mountinfo with `{mnt}` for where the stand-in mounts are, and
+/// FILES each cgroup file there by its path under them (one ending in `/`,
+/// a file that can't be read: a directory, which even root can't). What it
+/// said, and how many it ran side by side.
+fn under(cgroup: Option<&str>, mounts: &str, files: &[(String, String)]) -> (String, usize) {
     let g = Gate::new();
     let proc = g.s.join("proc");
     let mnt = g.s.join("mnt");
     fs::create_dir_all(&proc).unwrap();
-    fs::write(proc.join("cgroup"), cgroup).unwrap();
+    match cgroup {
+        Some(cgroup) => fs::write(proc.join("cgroup"), cgroup).unwrap(),
+        None => fs::create_dir(proc.join("cgroup")).unwrap(),
+    }
     fs::write(
         proc.join("mountinfo"),
         mounts.replace("{mnt}", mnt.to_str().unwrap()),
     )
     .unwrap();
     for (path, text) in files {
+        if path.ends_with('/') {
+            fs::create_dir_all(mnt.join(path)).unwrap();
+            continue;
+        }
         let path = mnt.join(path);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, text).unwrap();
@@ -217,7 +226,7 @@ fn side_by_side_stays_within_the_jobs_memory_limit() {
         ),
     ];
     for (what, cgroup, mounts, files) in cases {
-        let (out, side) = under(cgroup, &mounts, &files);
+        let (out, side) = under(Some(cgroup), &mounts, &files);
         assert_eq!(side, 1, "{what}: {out}");
         // By the limit it found, not for want of one.
         assert!(!out.contains("memory limit is unknown"), "{what}: {out}");
@@ -226,23 +235,56 @@ fn side_by_side_stays_within_the_jobs_memory_limit() {
 
 /// A limit the gate can't read is unknown, so it runs one evaluation at a
 /// time and says why: no mount shows the job's cgroup, the cgroup isn't
-/// where its mount says, or one with a limit doesn't say what it holds.
+/// where its mount says, one with a limit doesn't say what it holds (or
+/// what it says can't be read), its cgroups can't be read, or a limit's
+/// file is there but doesn't read as one.
 #[test]
 fn an_unknown_limit_takes_one_at_a_time() {
     let v2 = "36 24 0:31 / {mnt}/v2 rw - cgroup2 cgroup2 rw\n";
     let cases = [
         (
             "isn't mounted here",
-            "0::/job\n",
+            Some("0::/job\n"),
             "22 1 0:5 / /proc rw - proc proc rw\n",
             vec![],
         ),
-        ("isn't at", "0::/gone\n", v2, vec![no_limit("v2", false)]),
+        (
+            "isn't at",
+            Some("0::/gone\n"),
+            v2,
+            vec![no_limit("v2", false)],
+        ),
         (
             "doesn't say what it holds",
-            "0::/job\n",
+            Some("0::/job\n"),
             v2,
             vec![("v2/job/memory.max".to_owned(), format!("{}\n", 3u64 << 30))],
+        ),
+        ("couldn't be read", None, v2, vec![]),
+        (
+            "memory.max can't be read",
+            Some("0::/job\n"),
+            v2,
+            vec![("v2/job/memory.max/".to_owned(), String::new())],
+        ),
+        (
+            "memory.max can't be read",
+            Some("0::/job\n"),
+            v2,
+            vec![("v2/job/memory.max".to_owned(), "lots\n".to_owned())],
+        ),
+        (
+            "doesn't say what it holds",
+            Some("0::/job\n"),
+            v2,
+            [
+                limit("v2/job", false),
+                vec![("v2/job/memory.current/".to_owned(), String::new())],
+            ]
+            .concat()
+            .into_iter()
+            .filter(|(p, _)| p != "v2/job/memory.current")
+            .collect(),
         ),
     ];
     for (why, cgroup, mounts, files) in cases {
@@ -282,10 +324,10 @@ fn a_failing_list_of_the_legs_outputs_fails_it() {
 /// nothing: as many side by side as with no cgroups at all.
 #[test]
 fn a_roomy_limit_leaves_the_machines_share() {
-    let (out, alone) = under("", "", &[]);
+    let (out, alone) = under(Some(""), "", &[]);
     let big = 1u64 << 50;
     let (out2, side) = under(
-        "0::/job\n",
+        Some("0::/job\n"),
         "36 24 0:31 / {mnt}/v2 rw - cgroup2 cgroup2 rw\n",
         &[
             ("v2/job/memory.max".to_owned(), format!("{big}\n")),

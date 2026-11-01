@@ -686,8 +686,10 @@ jobs:
             # mount's, a line each; or the hierarchy and "-" when no mount
             # shows the cgroup. Mount points are unescaped (mountinfo writes
             # a space \040, a tab \011); one that isn't stays unfound.
-            if [ -r "$proc/cgroup" ]; then
-              if awk '
+            # No cgroup file at all is a kernel without cgroups; one that's
+            # there but can't be read (or its mounts) is an unknown limit.
+            if [ -e "$proc/cgroup" ]; then
+              if [ -f "$proc/cgroup" ] && [ -f "$proc/mountinfo" ] && awk '
                 function unescape(s) { gsub(/\\040/, " ", s); gsub(/\\011/, "\t", s); return s }
                 FILENAME == ARGV[1] {
                   controllers = $0; sub(/^[^:]*:/, "", controllers)
@@ -732,13 +734,26 @@ jobs:
                 # The job's cgroup and each above it to the mount's, each
                 # limit (none past 2^62, v1's "none") less what it holds.
                 at=${at%/} top=${top%/}
+                # A cgroup without the limit's file has none (the root, or
+                # one whose parent doesn't hand it the controller); one
+                # whose file is there but doesn't read as a number or "max"
+                # has a limit nobody can read.
+                number() { case $1 in '' | *[!0-9]*) return 1 ;; esac; }
                 while [ -z "$unknown" ]; do
-                  if [ -r "$at/$max" ] && limit=$(cat "$at/$max") && [ "$limit" != max ] && [ "$limit" -lt $(( 1 << 62 )) ]; then
-                    if held=$(cat "$at/$holds") && inactive=$(awk -v k="$cache" '$1 == k { print $2; got = 1 } END { exit !got }' "$at/memory.stat"); then
-                      left=$(( limit - held + inactive ))
-                      [ "$left" -ge "$free" ] || free=$left
-                    else
-                      unknown="$at has a limit but doesn't say what it holds"
+                  if [ -e "$at/$max" ]; then
+                    limit=$(cat "$at/$max") || limit=''
+                    if [ "$limit" = max ]; then
+                      :
+                    elif ! number "$limit"; then
+                      unknown="$at/$max can't be read"
+                    elif [ "$limit" -lt $(( 1 << 62 )) ]; then
+                      if held=$(cat "$at/$holds") && inactive=$(awk -v k="$cache" '$1 == k { print $2; got = 1 } END { exit !got }' "$at/memory.stat") \
+                          && number "$held" && number "$inactive"; then
+                        left=$(( limit - held + inactive ))
+                        [ "$left" -ge "$free" ] || free=$left
+                      else
+                        unknown="$at has a limit but doesn't say what it holds"
+                      fi
                     fi
                   fi
                   [ -n "$at" ] && [ "$at" != "$top" ] || break
