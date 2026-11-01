@@ -22,6 +22,7 @@ let
     current = "/etc/${current}";
     lock = "${lockDir}/lock";
     inherit (cfg) owners exclude dryRun;
+    bash = lib.getExe pkgs.bash;
     notify = "${config.burrow.tools.notify}/bin/${config.burrow.prefix}-notify";
   });
   sync = pkgs.runCommand "house-sync" {

@@ -18,6 +18,8 @@ pub struct Config {
     pub owners: Vec<String>,
     /// Repos it leaves alone, as OWNER/NAME patterns (pattern.rs).
     pub exclude: Vec<String>,
+    /// The bash that reads those patterns.
+    pub bash: PathBuf,
     /// HOST-notify: `NOTIFY open|close KEY TITLE [BODY]`.
     pub notify: PathBuf,
     /// Only say what a pass would do, as `status` does.
@@ -41,7 +43,7 @@ mod tests {
         let path = dir.path().join("config.json");
         let mut config = serde_json::json!({
             "house": "/h", "current": "/c", "lock": "/l", "owners": ["sam"],
-            "exclude": [], "notify": "/n", "dryRun": false,
+            "exclude": [], "bash": "/b", "notify": "/n", "dryRun": false,
         });
         std::fs::write(&path, config.to_string()).unwrap();
         let read = Config::read(&path).unwrap();

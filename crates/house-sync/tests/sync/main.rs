@@ -111,6 +111,7 @@ const ALL_CLEAR: [[&str; 2]; 2] = [["close", "house-markers"], ["close", "house-
 struct Setup<'a> {
     current: PathBuf,
     exclude: &'a [&'a str],
+    bash: &'a str,
     owners: &'a [&'a str],
     dry_run: bool,
     lock: PathBuf,
@@ -121,6 +122,7 @@ fn setup() -> Setup<'static> {
     Setup {
         current: house(),
         exclude: &[],
+        bash: "bash",
         owners: &["Sam"],
         dry_run: false,
         lock: std::env::temp_dir().join(format!("house-sync-test-{}.lock", std::process::id())),
@@ -135,6 +137,7 @@ fn config(s: &Setup) -> Config {
         lock: s.lock.clone(),
         owners: s.owners.iter().map(|o| o.to_string()).collect(),
         exclude: s.exclude.iter().map(|o| o.to_string()).collect(),
+        bash: s.bash.into(),
         notify: "/nonexistent/notify".into(),
         dry_run: s.dry_run,
     }
@@ -426,6 +429,8 @@ fn only_a_repo_a_full_pass_would_keep() {
         ("sam/@(b|c)", "sam/c", "sam/a"),
         ("sam/!(a)", "sam/b", "sam/a"),
         ("kim/x sam/b", "sam/b", "sam/a"),
+        ("sam/[a-[.c.]]", "sam/b", "sam/z"),
+        ("sam/b*!(|)", "sam/b", "sam/a"),
     ] {
         let patterns = [pattern];
         let s = Setup {
@@ -438,6 +443,21 @@ fn only_a_repo_a_full_pass_would_keep() {
         assert!(one.read().is_empty(), "{pattern}, one repo");
         assert_eq!(sync_with(&both, Some(kept), &s).read(), [kept]);
     }
+    // A pattern bash can't answer for: the repo is left alone, as a failure.
+    let s = Setup {
+        exclude: &["sam/a"],
+        bash: "/nonexistent/bash",
+        ..setup()
+    };
+    let both = [repo("sam/a", Some(&stale()))];
+    let ran = sync_with(&both, None, &s);
+    assert!(
+        ran.read().is_empty() && ran.wrote().is_empty(),
+        "{}",
+        ran.out
+    );
+    assert_eq!(ran.notices(), [["open", "house-sync"]]);
+    assert_eq!(sync_with(&both, Some("sam/a"), &s).ok, Ok(false));
     // A full pass leaves out the excluded too.
     let s = Setup {
         exclude: &["sam/[ab]"],

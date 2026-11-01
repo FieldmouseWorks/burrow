@@ -90,8 +90,18 @@ pub fn run(
         }
     }
     for repo in repos {
-        if excluded(&cfg.exclude, &repo.name) {
-            continue;
+        match excluded(cfg, &repo.name) {
+            Ok(true) => continue,
+            Ok(false) => {}
+            // It may be one to leave alone, so it's left alone, as a failure.
+            Err(e) => {
+                pass.say(&format!(
+                    "{}: failed, trying again next pass ({e})",
+                    repo.name
+                ));
+                pass.failed.push(repo.name);
+                continue;
+            }
         }
         if let Err(e) = pass.repo(&repo) {
             pass.say(&format!(
@@ -152,11 +162,13 @@ pub fn run(
 
 /// Whether a repo is one of those it leaves alone. An entry is split at its
 /// whitespace, as the bash read them, since no repo's name has any.
-fn excluded(exclude: &[String], name: &str) -> bool {
-    exclude
-        .iter()
-        .flat_map(|e| e.split_whitespace())
-        .any(|p| pattern::matches(p, name))
+fn excluded(cfg: &Config, name: &str) -> Result<bool, String> {
+    for p in cfg.exclude.iter().flat_map(|e| e.split_whitespace()) {
+        if pattern::matches(&cfg.bash, p, name)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// The lock every pass that can change anything holds, waited for.
