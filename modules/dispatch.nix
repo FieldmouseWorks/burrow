@@ -161,7 +161,7 @@ in
         switch = if config.burrow.switch.enable or false
           then { state = "/run/${prefix}-switch"; revert = "${prefix}-revert"; } else null;
         fresh = if !cfg.fresh.enable then null else {
-          inherit (cfg.fresh) owner group repos label prefix most template configs;
+          inherit (cfg.fresh) owner group repos label prefix most idle template configs;
         };
       };
       description = "What burrow-dispatch reads (DISPATCH_CONFIG), as this machine has it.";
@@ -268,7 +268,8 @@ in
       The waits go to the stall watchdog when they last. `burrow-dispatch status` shows what it sees and did.
     '' + lib.optionalString cfg.fresh.enable ''
       For each job queued that asks for `${cfg.fresh.label}`, it starts a runner registered for that one job,
-      `${cfg.fresh.template}INSTANCE` (named `${cfg.fresh.prefix}INSTANCE`, ${toString cfg.fresh.most} at most), and stops one left idle.
+      `${cfg.fresh.template}INSTANCE` (named `${cfg.fresh.prefix}INSTANCE`, ${toString cfg.fresh.most} at most), keeps ${toString cfg.fresh.idle}
+      started and waiting for jobs to come, and stops any other left idle.
     '');
   } (lib.mkIf deploying {
     # HOST-update starting and ending moves what the deploy waits on.

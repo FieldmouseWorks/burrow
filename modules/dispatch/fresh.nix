@@ -84,8 +84,8 @@ in
       description = ''
         What each one's name starts with, then its instance. GitHub's record
         of a job names the runner that took it, so a check that a job ran on
-        one of these (Conary's train, `cn train step --fresh-runners`) asks
-        for this.
+        one of these asks for this: burrow.ledger hands it to Conary's train
+        as CONARY_FRESH_RUNNERS.
       '';
     };
 
@@ -93,6 +93,19 @@ in
       type = types.ints.positive;
       default = 2;
       description = "The most there are at once.";
+    };
+
+    idle = mkOption {
+      type = types.ints.unsigned;
+      default = 0;
+      description = ''
+        How many are kept started and waiting for a job before one is
+        queued, among `most`. A job then starts within seconds, rather than
+        after the dispatcher's next pass and a runner's start, each up to a
+        couple of minutes. Each one kept is a runner process waiting, and
+        one that was kept is still started fresh: nothing ran on it before
+        its job.
+      '';
     };
 
     package = mkOption {
@@ -126,6 +139,11 @@ in
   };
 
   config = lib.mkIf (config.burrow.dispatch.enable && cfg.enable) {
+    assertions = [{
+      assertion = cfg.idle <= cfg.most;
+      message = "burrow.dispatch.fresh.idle (${toString cfg.idle}) is more than there may be at once (most, ${toString cfg.most}).";
+    }];
+
     systemd.services.${template} = {
       description = "GitHub Actions runner %i, started fresh for one job";
       after = [ "network-online.target" ];
