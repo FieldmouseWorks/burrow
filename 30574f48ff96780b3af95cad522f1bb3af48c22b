@@ -150,6 +150,30 @@
       "check": "agents",
       "result": "pass",
       "source": "https://github.com/FieldmouseWorks/burrow/pull/387"
+    },
+    {
+      "kind": "ci",
+      "check": "house/title (#387)",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/41334020768"
+    },
+    {
+      "kind": "ci",
+      "check": "house/rust-first (#387)",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/41334020768"
+    },
+    {
+      "kind": "ci",
+      "check": "house/timers (#387)",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/41334020768"
+    },
+    {
+      "kind": "ci",
+      "check": "house/file-size (#387)",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/41334020768"
     }
   ]
 }
