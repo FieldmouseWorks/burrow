@@ -10,38 +10,7 @@ use std::process::Command;
 
 use super::*;
 use crate::config::Config;
-use crate::testing::config;
-
-/// git as the tests run it, in `dir`: what it printed. Fails the test if it
-/// fails.
-fn sh(dir: &Path, args: &[&str]) -> String {
-    let out = Command::new("git")
-        .args([
-            "-c",
-            "user.name=t",
-            "-c",
-            "user.email=t@t",
-            "-c",
-            "commit.gpgsign=false",
-        ])
-        .arg("-C")
-        .arg(dir)
-        .args(args)
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "git {args:?}: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    String::from_utf8_lossy(&out.stdout).into_owned()
-}
-
-fn put(work: &Path, path: impl AsRef<Path>, text: &str) {
-    let at = work.join(path);
-    fs::create_dir_all(at.parent().unwrap()).unwrap();
-    fs::write(at, text).unwrap();
-}
+use crate::testing::{config, put, sh};
 
 /// A path with bytes that aren't UTF-8.
 fn raw(bytes: &[u8]) -> PathBuf {

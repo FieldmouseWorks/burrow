@@ -25,7 +25,8 @@ pub const CHECKOUT: &str = "/review";
 /// these hosts only.
 pub const HOSTS: &[&str] = &["chatgpt.com", "auth.openai.com", "api.openai.com"];
 
-/// The answer it's held to, which the steward posts (reviewers.py `post`).
+/// The answer it's held to, which the steward posts (burrow-upkeep's
+/// post.rs).
 pub fn schema() -> Value {
     json!({
         "type": "object",

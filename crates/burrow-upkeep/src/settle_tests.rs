@@ -184,7 +184,7 @@ fn labels_are_made_daily_and_at_once_when_one_is_new() {
     );
     assert!(got.contains(&(
         "needs-owner".into(),
-        "Waits for sam; take the label off to let the steward carry on".into()
+        "Waits for Sam; take the label off to let the steward carry on".into()
     )));
     assert_eq!(kept(&cfg)["labels"], json!(LABELS));
     // Made, they're not made again until the day's settings.
@@ -207,7 +207,7 @@ fn labels_are_made_daily_and_at_once_when_one_is_new() {
 fn a_label_says_no_more_than_github_takes() {
     let tmp = tempfile::tempdir().unwrap();
     let mut cfg = config(tmp.path());
-    cfg.settle.owner = "o".repeat(80);
+    cfg.owner = "o".repeat(80);
     let mut hub = github(&cfg);
     settle_at(&cfg, &mut hub, &public(), 0.0);
     let said = made(&hub)
@@ -215,7 +215,7 @@ fn a_label_says_no_more_than_github_takes() {
         .find(|(n, _)| n == "needs-owner")
         .unwrap()
         .1;
-    let want: String = format!("Waits for {}; take the label off", cfg.settle.owner)
+    let want: String = format!("Waits for {}; take the label off", cfg.owner)
         .chars()
         .take(100)
         .collect();

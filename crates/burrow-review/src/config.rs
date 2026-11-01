@@ -9,8 +9,8 @@ use serde::Deserialize;
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Config {
-    /// The looks the steward's passes queue, a file each (reviewers.py
-    /// `queue`), which this takes off once it has answered.
+    /// The looks the steward's passes queue, a file each (burrow-upkeep's
+    /// queue.rs), which this takes off once it has answered.
     pub queue: PathBuf,
     /// Each look's answer, under its queue entry's name, for the repo's next
     /// pass to post.
