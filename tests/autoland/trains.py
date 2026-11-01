@@ -199,6 +199,7 @@ assert cn_runs() == [SHOW, JOIN] and "In the train" in status, (cn_runs(), statu
 del S.CFG["repos"]["sam/r"]
 fresh_pr_state()
 seen()
+run(clean(checks=()), 0)
 status, _ = run(clean(checks=()), 700)
 assert "the repo has no CI" in status and cn_runs() == [], (status, cn_runs())
 S.CFG["repos"]["sam/r"] = {"train": True}
@@ -220,6 +221,8 @@ for pr, says, merged_here in (
          "state=success", True)):
     fresh_pr_state()
     seen()
+    if not merged_here:
+        run(pr, 0)
     status, _ = run(pr, 900)
     assert cn_runs() == [SHOW] and says in status and "train" not in status, (cn_runs(), status)
     assert bool(merges()) == merged_here, (says, WROTE)
