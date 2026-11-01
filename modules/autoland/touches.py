@@ -86,11 +86,16 @@ def dep_kind(pr):
 
 # The address Dependabot commits as, on every repo.
 DEPENDABOT_EMAIL = "49699333+dependabot[bot]@users.noreply.github.com"
+# The address GitHub commits as for a commit it makes or signs itself, on
+# github.com. Renovate doesn't count it as someone editing the branch.
+GITHUB_EMAIL = "noreply@github.com"
 
 
 def bot_edited(repo, pr, st):
     """Whether a dependency bot's branch has a commit no bot wrote (a Claude
-    job's fix): code no reviewer has read, which Renovate won't merge either.
+    job's fix) or that someone else committed (a Claude job's rebase keeps the
+    author and makes itself the committer): code no reviewer has read, which
+    Renovate won't merge either, since it counts both addresses of a commit.
     Asked once per head, base and bots' addresses, since retargeting changes
     which commits are the PR's, and setting Renovate's address right changes
     whose they are. A failed ask is asked again: on a Renovate branch it
@@ -100,13 +105,19 @@ def bot_edited(repo, pr, st):
     if renovate and not CFG["renovateEmail"]:
         return False
     bots = {CFG["renovateEmail"], DEPENDABOT_EMAIL}
-    seen = [pr["headRefOid"], pr["baseRefName"], CFG["renovateEmail"], DEPENDABOT_EMAIL]
+    # GITHUB_EMAIL marks a read that looked at committers too: one from before
+    # that said nothing of them, so the same head is read again.
+    seen = [pr["headRefOid"], pr["baseRefName"], CFG["renovateEmail"], DEPENDABOT_EMAIL, GITHUB_EMAIL]
     if st.get("editedHead") != seen:
         got = C.gh("pr", "view", str(pr["number"]), "-R", repo, "--json", "commits", check=False)
-        if not got:
+        # gh's commits have no committer, and GitHub's REST ones no co-authors.
+        pages = got and C.gh("api", "--paginate", "--slurp", f"repos/{repo}/pulls/{pr['number']}/commits?per_page=100",
+                             check=False)
+        if not pages:
             return not renovate
-        st["edited"] = any(a.get("email") not in bots
-                           for c in got["commits"] for a in c["authors"])
+        st["edited"] = (any(a.get("email") not in bots for c in got["commits"] for a in c["authors"])
+                        or any(c["commit"]["committer"]["email"] not in bots | {GITHUB_EMAIL}
+                               for page in pages for c in page))
         st["editedHead"] = seen
     return st["edited"]
 
