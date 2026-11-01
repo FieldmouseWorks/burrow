@@ -684,11 +684,14 @@
           bash ${./tests/update-check.sh} ${./modules/updates/check.sh}
           touch $out
         '';
-        # HOST-update's own PR in a train repo (modules/updates/propose.sh):
-        # real git, with a stand-in for gh.
-        update-propose = pkgs.runCommand "update-propose-check" { nativeBuildInputs = [ pkgs.shellcheck pkgs.git pkgs.jq ]; } ''
-          shellcheck -s bash ${./modules/updates/propose.sh} ${./tests/update-propose.sh}
-          bash ${./tests/update-propose.sh} ${./modules/updates/propose.sh}
+        # HOST-update's steps in Rust as the example machine builds them
+        # (crates/burrow-update, whose tests are the rest): they read their
+        # config, and its train's.
+        update-config = let
+          inherit (self.nixosConfigurations.example.config) burrow;
+        in pkgs.runCommand "update-config-check" { } ''
+          ${burrow.tools.update-steps}/bin/${burrow.prefix}-update-steps help 2>err && { echo "a usage went as a step"; exit 1; }
+          grep -qx 'usage: ${burrow.prefix}-update-steps pr | .*' err || { echo "it said: $(cat err)"; exit 1; }
           touch $out
         '';
         # Which repo the flake's origin is, and so whether HOST-update goes
