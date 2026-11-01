@@ -52,7 +52,8 @@ def renamed(run, path, id):
     return run
 
 
-retargeted = renamed(whole(suite="s2"), ".github/workflows/flake-retarget.yml", "twin")
+RETARGET = ".github/workflows/flake-retarget.yml"
+retargeted = renamed(whole(suite="s2"), RETARGET, "twin")
 assert state(old, retargeted) == ("green", [])
 assert state(retargeted, old) == ("green", [])
 namesake = renamed(whole(suite="s2"), ".github/workflows/ci.yml", "other")
@@ -60,6 +61,12 @@ assert state(old, namesake) == ("red", [CHECK])
 assert state(namesake, old) == ("red", [CHECK])
 nameless = renamed(whole(suite="s2"), None, "other")
 assert state(old, nameless) == ("red", [CHECK])
+# Across the two files, a run still going leaves CI pending, either way round,
+# and a title edit's skipped run or another cancelled one clears nothing.
+assert state(old, renamed(going("s2"), RETARGET, "twin"))[0] == "pending"
+assert state(renamed(whole(suite="s1", conclusion=CANCEL), RETARGET, "twin"), going("s2"))[0] == "pending"
+assert state(old, renamed([check(CHECK, "SKIPPED", suite="s2")], RETARGET, "twin")) == ("red", [CHECK])
+assert state(old, renamed(whole(suite="s2", conclusion=CANCEL), RETARGET, "twin"))[0] != "green"
 
 # Nothing stands in for a newer run that ran through. Alone, as when cancelled
 # by hand; two cancelled runs, which mustn't clear each other; another
