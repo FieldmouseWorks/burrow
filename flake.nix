@@ -41,7 +41,8 @@
       # tests include the shared workflows' (crates/burrow-workflows), which
       # read these files and run git, jq and nix, and the gate's run its VM
       # tests in a slot of the real heavy (flock); proj's clone repos to read
-      # their origins, and gh-token's make keys with openssl.
+      # their origins, gh-token's make keys with openssl, and lock-age's
+      # check its wait against what the steward reads (lock_wait.py).
       crates = self.lib.project {
         inherit self;
         rust = {
@@ -54,6 +55,7 @@
             "templates/project/.github/workflows/flake-retarget.yml"
             "modules/autoland/prs.py"
             "modules/cpu/heavy.sh"
+            "modules/autoland/lock_wait.py"
           ];
           testInputs = pkgs: [ pkgs.git pkgs.jq pkgs.nix pkgs.util-linux pkgs.openssl ];
         };
@@ -725,13 +727,6 @@
         # all of them, or a run each with its owner's App token.
         renovate-run = pkgs.runCommand "renovate-run-check" { nativeBuildInputs = [ pkgs.python3 pkgs.util-linux ]; } ''
           python3 -I ${./tests/renovate-run.py} ${./modules/updates/renovate.sh}
-          touch $out
-        '';
-        # A lock file refresh's too-new releases go back or fail it, with
-        # stand-ins for cargo, npm and the registries.
-        lock-age = pkgs.runCommand "lock-age-check" { nativeBuildInputs = [ (pkgs.python3.withPackages (p: [ p.json5 ])) pkgs.git ]; } ''
-          export HOME=$TMPDIR
-          python3 -I ${./tests/lock-age.py} ${./modules/updates/lock-age.py}
           touch $out
         '';
         # What decides a lock file refresh's release age in a Renovate config,

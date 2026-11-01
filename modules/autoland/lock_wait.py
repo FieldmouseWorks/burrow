@@ -1,7 +1,7 @@
-"""A Renovate lock file refresh that lock-age (../updates/lock-age.py)
+"""A Renovate lock file refresh that lock-age (crates/lock-age)
 refused only because nothing in it is old enough yet. Renovate shows that
 as its artifacts status, red, and its comment on the failure carries
-lock-age's output, whose last line (lock-age's WAITING) says when the first
+lock-age's output, whose last line (lock-age's `waiting`) says when the first
 of the refresh's releases will be old enough. That's no red CI for a job to
 fix but a date: the autoland steward waits for it (step.py), and
 renovate-sweep then has Renovate refresh the branch again, which it won't by
