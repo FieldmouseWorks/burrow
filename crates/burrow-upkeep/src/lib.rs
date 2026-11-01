@@ -4,7 +4,8 @@
 //! and the flaky tests' quarantine (flaky.rs); and for the reviewers, each
 //! one's look at a PR queued (queue.rs) with its brief (brief.rs) on the
 //! snapshot it reads (snapshot.rs, from the steward's mirror of the repo,
-//! mirror.rs), and their answers, posted on its PRs (post.rs). A
+//! mirror.rs), their answers, posted on its PRs (post.rs), and what they
+//! leave, swept once nothing needs it (sweep.rs). A
 //! pass of the steward's runs
 //! `settle`, then `branches` once it has seen to the repo's PRs, then
 //! `watch`, on each repo it sees to, with the App's token for the repo's
@@ -27,6 +28,7 @@ pub mod post;
 pub mod queue;
 pub mod settle;
 pub mod snapshot;
+pub mod sweep;
 #[cfg(test)]
 mod testing;
 pub mod token;

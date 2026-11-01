@@ -54,13 +54,14 @@ PROOF_RUN = os.path.abspath(sys.argv[7])
 # What the passes here run in its place (upkeeping.py runs the real one): it
 # notes how it was run (UPKEEP_RAN), with what `branches` and `hooks` read on
 # its stdin last, and finds nothing due, stuck or wanted. Its `token` is the
-# real one's, on the config upkeep_config writes (UPKEEP_TOKEN).
-UPKEEP_RAN, UPKEEP_TOKEN = f"{tmp}/upkeep-ran", f"{tmp}/upkeep-token.json"
+# real one's, and so is its `sweep`, which asks GitHub nothing, on the config
+# upkeep_config writes (UPKEEP_REAL).
+UPKEEP_RAN, UPKEEP_REAL = f"{tmp}/upkeep-ran", f"{tmp}/upkeep-real.json"
 with open(f"{tmp}/upkeep-none", "w") as f:
     f.write(f"""#!{sys.executable}
 import json, os, sys
-if sys.argv[2] == "token":
-    os.execv({UPKEEP!r}, [{UPKEEP!r}, {UPKEEP_TOKEN!r}, *sys.argv[2:]])
+if sys.argv[2] in ("token", "sweep"):
+    os.execv({UPKEEP!r}, [{UPKEEP!r}, {UPKEEP_REAL!r}, *sys.argv[2:]])
 with open({UPKEEP_RAN!r}, "a") as f:
     f.write(json.dumps(sys.argv[2:] + ([json.load(sys.stdin)] if sys.argv[2] in ("branches", "hooks") else [])) + "\\n")
 print(json.dumps({{"failed": [], "limited": None}} if sys.argv[2] in ("settle", "hooks") else
@@ -232,7 +233,17 @@ def upkeep_config(path=f"{tmp}/upkeep.json", **over):
     return [UPKEEP, path]
 
 
-upkeep_config(UPKEEP_TOKEN)
+upkeep_config(UPKEEP_REAL)
+
+# A reviewer's session for a PR on its base, as burrow-review names it
+# (queue.rs `session_name`), and the mark the sweep gives a closed PR's
+# (queue.rs `GONE`).
+GONE = ".gone-"
+
+
+def session_name(r, snap):
+    pr, _, base = snap.rsplit("-", 2)
+    return f"{r}--{pr}-{base}"
 
 
 head = "a" * 40

@@ -25,9 +25,6 @@ const AGAIN: &str = "This continues your review of this PR. {since} The checkout
 /// passes add meanwhile.
 const AGAIN_EVERY: Duration = Duration::from_secs(5);
 
-/// The sessions' prefix once the steward's sweep has marked them gone.
-const GONE: &str = ".gone-";
-
 /// One queued look: its answer, or why there's none, left in done/ for the
 /// repo's pass, which it kicks. Gone from the queue either way. One the
 /// sweep took off the queue first (its PR moved on before it began) leaves
@@ -220,7 +217,7 @@ pub fn forget(s: &Service) {
     };
     for x in entries.flatten() {
         let name = x.file_name();
-        if name.to_string_lossy().starts_with(GONE)
+        if name.to_string_lossy().starts_with(queue::GONE)
             && let Err(e) = remove_all(&x.path())
         {
             s.say(&format!(

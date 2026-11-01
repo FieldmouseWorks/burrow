@@ -9,8 +9,8 @@ import shutil
 import subprocess
 import time
 
-from harness import (C, FAIL, FORGOT, JOBS, R, H, REAL, S, STATES, STOPPED, T0, UNSTOPPABLE, UPKEEP_RAN, V, WROTE, fresh_pr_state, info,
-                     mkpr, stand_in, tmp)
+from harness import (C, FAIL, FORGOT, GONE, JOBS, R, H, REAL, S, STATES, STOPPED, T0, UNSTOPPABLE, UPKEEP_RAN, V, WROTE, fresh_pr_state, info,
+                     mkpr, session_name, stand_in, tmp)
 
 stand_in()
 # Its parts are called straight here, so they're for sam's repos as a pass
@@ -70,7 +70,7 @@ def old_state():
     C.save("repo-sam_r-x.json", {"settings": C.ts(T0)})
     snap = V.snap_name("pr-sam_r-1.json", "a" * 40, "main")
     C.save(f"{V.DONE}/codex--{snap}.json", {"result": "ok"})
-    os.makedirs(f"{tmp}/state/{V.SESSIONS}/{V.session_name('codex', snap)}")
+    os.makedirs(f"{tmp}/state/{V.SESSIONS}/{session_name('codex', snap)}")
     os.makedirs(f"{tmp}/state/{V.GIT}/sam__r.git/objects")
     C.save("known.json", ["sam/r", "sam/r-x"])
     C.save("baseline-failed.json", {"sam/r": 1, "sam/r-x": 2})
@@ -110,7 +110,7 @@ left = sorted(os.listdir(f"{tmp}/state"))
 assert not [x for x in left if x.startswith(("pr-sam_r-1", "dashboard-sam_r", "flaky-sam_r", "repo-sam_r."))], left
 assert "pr-sam_r-x-1.json" in left and "repo-sam_r-x.json" in left, left
 assert os.listdir(f"{tmp}/state/{V.DONE}") == [] and not os.path.exists(f"{tmp}/state/{V.GIT}/sam__r.git")
-assert all(x.startswith(V.GONE) for x in os.listdir(f"{tmp}/state/{V.SESSIONS}")), os.listdir(f"{tmp}/state/{V.SESSIONS}")
+assert all(x.startswith(GONE) for x in os.listdir(f"{tmp}/state/{V.SESSIONS}")), os.listdir(f"{tmp}/state/{V.SESSIONS}")
 assert sorted(os.listdir(src)) == sorted(["x", "y"] + [f".{d}.gone-{stamp()}" for d in ("r", "r-2", "new")])
 assert C.project_dir("sam/r") is None, os.listdir(src)
 # Then it's settled as new, at once: burrow-upkeep keeps its labels,
@@ -165,9 +165,13 @@ old_state()
 for name in ("repo-sam_r.json", "pr-sam_r-1.json"):
     os.rename(f"{tmp}/state/{name}", f"{tmp}/state/{name.replace('sam_r', 'Sam_R')}")
 os.rename(f"{tmp}/state/{V.GIT}/sam__r.git", f"{tmp}/state/{V.GIT}/Sam__R.git")
+# What its reviewers left goes too, as its state spells it.
+spelled = V.snap_name("pr-Sam_R-1.json", "a" * 40, "main")
+C.save(f"{V.DONE}/codex--{spelled}.json", {"result": "ok"})
 known, failed = {"Sam/R", "sam/r-x"}, {"Sam/R": 1}
 R.restart(remade, known, failed)
 assert known == {"sam/r-x"} and failed == {}, (known, failed)
+assert os.listdir(f"{tmp}/state/{V.DONE}") == [f"codex--{V.snap_name('pr-sam_r-1.json', 'a' * 40, 'main')}.json"]
 assert not [x for x in os.listdir(f"{tmp}/state") if x.lower().startswith(("repo-sam_r.", "pr-sam_r-1"))]
 assert os.listdir(f"{tmp}/state/{V.GIT}") == [], os.listdir(f"{tmp}/state/{V.GIT}")
 # One renamed into the name, or moved to it, may be years older than what
@@ -228,7 +232,7 @@ for broken, said in (("stop", "couldn't stop job"), ("origin", "can't read its o
         held = open(f"{tmp}/state/{V.QUEUE}/codex--{snap}.json")
         fcntl.flock(held, fcntl.LOCK_SH)
     else:
-        V.sweep = lambda *a: [V.session_name("codex", "pr-sam_r-1-x")]
+        V.sweep = lambda *a: [session_name("codex", "pr-sam_r-1-x")]
     known, failed = {"sam/r"}, {}
     STOPPED.clear()
     try:
@@ -243,7 +247,7 @@ for broken, said in (("stop", "couldn't stop job"), ("origin", "can't read its o
     assert STOPPED == ([] if broken in ("stop", "origin", "folder", "forget", "record") else [jid]), (broken, STOPPED)
     if broken == "look":
         assert os.listdir(f"{tmp}/state/{V.QUEUE}") == [f"codex--{snap}.json"]
-        assert os.path.isdir(f"{tmp}/state/{V.SESSIONS}/{V.session_name('codex', snap)}")
+        assert os.path.isdir(f"{tmp}/state/{V.SESSIONS}/{session_name('codex', snap)}")
         held.close()
     for d in ("half", "loop"):
         shutil.rmtree(f"{src}/{d}", ignore_errors=True)
@@ -255,7 +259,7 @@ for broken, said in (("stop", "couldn't stop job"), ("origin", "can't read its o
     assert STOPPED == [jid] and "repo-sam_r.json" not in os.listdir(f"{tmp}/state"), (broken, STOPPED)
     assert not os.path.exists(f"{src}/r-old") and not os.path.exists(f"{tmp}/state/{V.GIT}/sam__r.git")
     assert os.listdir(f"{tmp}/state/{V.QUEUE}") == [] and \
-        all(x.startswith(V.GONE) for x in os.listdir(f"{tmp}/state/{V.SESSIONS}")), broken
+        all(x.startswith(GONE) for x in os.listdir(f"{tmp}/state/{V.SESSIONS}")), broken
 # Strict, a projectsDir that can't be read raises too, where the listing
 # for picking a project finds none.
 os.symlink("loop", f"{tmp}/loop")

@@ -5,9 +5,11 @@ PR needs any more."""
 import fcntl
 import json
 import os
+import shutil
+import subprocess
 
-from harness import (C, DDIR, POSTED, QDIR, H, S, STUB, T0, V, clean, fresh_pr_state, head, info,
-                     merged, mkpr, pr_state, queued, run, rv_review, stand_in, tmp, worker)
+from harness import (C, DDIR, GONE, POSTED, QDIR, UPKEEP, UPKEEP_REAL, H, S, STUB, T0, V, clean, fresh_pr_state, head,
+                     info, merged, mkpr, pr_state, queued, run, rv_review, session_name, stand_in, tmp, worker)
 
 stand_in()
 
@@ -191,8 +193,10 @@ status, _ = run(mkpr(reviews=[cx]), 700)
 assert "state=success" in status and "Codex found nothing" in status and merged()
 del S.CFG["repos"]["sam/r"]
 
-# The sweep: snapshots, queued reviews and answers of heads no open PR has
-# any more go, for the repos the pass read (a dash in a name included).
+# The sweep (burrow-upkeep's): snapshots, queued reviews and answers of
+# heads no open PR has any more go, repo by repo (a dash in a name
+# included). Its own tests have the cases; these are the Python's view of
+# it, through the real binary.
 fresh_pr_state()
 gone, live_snap = V.snap_name("pr-sam_r-5.json", "d" * 40, "main"), V.snap_name("pr-sam_r-5.json", head, "main")
 other_repo, dashed = V.snap_name("pr-sam_q-1.json", "e" * 40, "main"), V.snap_name("pr-sam_lo-k-3.json", "f" * 40, "main")
@@ -208,15 +212,22 @@ for s in (gone, live_snap, other_repo, dashed, retargeted):
 # entry locked, as the reviewers' service holds it) keeps its snapshot, and
 # what came back from its earlier heads stays for its next pass to post.
 running = V.snap_name("pr-sam_r-5.json", "c" * 40, "main")
-# And what a take that died partway left of a live head's checkout: the
-# finished one is moved into place whole, so this is never read, and goes.
 os.makedirs(f"{V.TREES}/{live_snap}.new")
 os.makedirs(f"{V.TREES}/{running}")
 C.save(f"{V.SNAP}/{running}.json", {})
 C.save(f"{V.QUEUE}/codex--{running}.json", {})
+on, off = session_name("codex", running), session_name("rival", gone.replace("-5-", "-6-"))
+for x in (on, off):
+    os.makedirs(f"{tmp}/state/{V.SESSIONS}/{x}")
 held = open(f"{tmp}/state/{V.QUEUE}/codex--{running}.json")
 fcntl.flock(held, fcntl.LOCK_SH)
-V.sweep({"sam_r", "sam_lo-k"}, {live_snap})
+# As long as it takes, and as nobody: outside acting_for, any GitHub call
+# would raise.
+bound, C.UPKEEP_TIMEOUT = C.UPKEEP_TIMEOUT, 1e-9
+assert not C._for
+assert V.sweep("sam/r", {live_snap}) == [f"codex--{running}.json"]
+C.UPKEEP_TIMEOUT = bound
+assert V.sweep("sam/lo-k", set()) == []
 held.close()
 left = sorted(x for d in (V.TREES, V.SNAP, V.QUEUE, V.DONE) for x in os.listdir(os.path.join(f"{tmp}/state", d)))
 assert left == sorted([live_snap, live_snap + ".json", other_repo, other_repo + ".json",
@@ -224,37 +235,35 @@ assert left == sorted([live_snap, live_snap + ".json", other_repo, other_repo + 
                        f"codex--{live_snap}.json", f"codex--{other_repo}.json",
                        running, running + ".json", f"codex--{running}.json",
                        f"codex--{gone}.json", f"codex--{retargeted}.json"]), left
-# Once it's done, the next sweep takes its snapshot.
-V.remove(f"{tmp}/state/{V.QUEUE}/codex--{running}.json")
-V.sweep({"sam_r", "sam_lo-k"}, {live_snap})
-assert not os.path.exists(f"{V.TREES}/{running}") and os.path.exists(f"{tmp}/state/{V.DONE}/codex--{gone}.json")
-# And a PR that's gone takes everything with it.
-V.sweep({"sam_r", "sam_lo-k"}, set())
-left = sorted(x for d in (V.TREES, V.SNAP, V.QUEUE, V.DONE) for x in os.listdir(os.path.join(f"{tmp}/state", d)))
-assert left == sorted([other_repo, other_repo + ".json", f"rival--{other_repo}.json", f"codex--{other_repo}.json"]), left
-# All but a look the reviewers' service is on, whoever's code runs it (it
-# need only hold its entry's lock): its entry, its snapshot and its session
-# stay until it ends, so nothing it writes after lands where another PR's
-# would, and the sweep says what it left. Its PR's other sessions go. The
-# next sweep once it's done takes the rest.
-os.makedirs(f"{V.TREES}/{running}")
-C.save(f"{V.SNAP}/{running}.json", {})
-C.save(f"{V.QUEUE}/codex--{running}.json", {})
-on, off = V.session_name("codex", running), V.session_name("rival", running)
-for x in (on, off):
-    os.makedirs(f"{tmp}/state/{V.SESSIONS}/{x}")
-held = open(f"{tmp}/state/{V.QUEUE}/codex--{running}.json")
-fcntl.flock(held, fcntl.LOCK_SH)
-assert V.sweep({"sam_r"}, set()) == [f"codex--{running}.json"]
-assert os.path.isdir(f"{V.TREES}/{running}") and os.path.exists(f"{tmp}/state/{V.QUEUE}/codex--{running}.json")
+# PR 5's session stays while it's open; closed PR 6's is marked gone, for
+# the reviewers' service to delete.
 sessions = os.listdir(f"{tmp}/state/{V.SESSIONS}")
-assert on in sessions and off not in sessions, sessions
-held.close()
-C.save(f"{V.DONE}/codex--{running}.json", {})  # what came back as it ended
+assert on in sessions and off not in sessions and any(x.startswith(GONE) and x.endswith(off) for x in sessions), sessions
+# Once it's done, the next sweep takes its snapshot; and a PR that's gone
+# takes everything with it.
 V.remove(f"{tmp}/state/{V.QUEUE}/codex--{running}.json")
-assert V.sweep({"sam_r"}, set()) == []
+assert V.sweep("sam/r", {live_snap}) == []
+assert not os.path.exists(f"{V.TREES}/{running}") and os.path.exists(f"{tmp}/state/{V.DONE}/codex--{gone}.json")
+assert V.sweep("sam/r", set()) == []
 left = sorted(x for d in (V.TREES, V.SNAP, V.QUEUE, V.DONE) for x in os.listdir(os.path.join(f"{tmp}/state", d)))
 assert left == sorted([other_repo, other_repo + ".json", f"rival--{other_repo}.json", f"codex--{other_repo}.json"]), left
-assert all(x.startswith(V.GONE) for x in os.listdir(f"{tmp}/state/{V.SESSIONS}")), os.listdir(f"{tmp}/state/{V.SESSIONS}")
+assert all(x.startswith(GONE) for x in os.listdir(f"{tmp}/state/{V.SESSIONS}")), os.listdir(f"{tmp}/state/{V.SESSIONS}")
+# One that can't sweep raises, with why: here, the answers aren't a dir.
+shutil.rmtree(f"{tmp}/state/{V.DONE}")
+open(f"{tmp}/state/{V.DONE}", "w").close()
+try:
+    V.sweep("sam/q", set())
+    raise AssertionError("a sweep that couldn't read the answers went through")
+except RuntimeError as e:
+    assert str(e).startswith(f"{tmp}/state/{V.DONE}: "), e
+os.remove(f"{tmp}/state/{V.DONE}")
+os.makedirs(f"{tmp}/state/{V.DONE}")
+# The word has no status run, and takes only the repo's snapshots for its
+# open PRs' heads.
+for flags, said in ((["--dry"], []), ([], [other_repo]), ([], [live_snap + "/.."]), ([], {"live": []})):
+    p = subprocess.run([UPKEEP, UPKEEP_REAL, "sweep", "sam/r", "--now", "1", *flags],
+                       input=json.dumps(said), capture_output=True, text=True)
+    assert p.returncode == 2 and p.stdout == "", (flags, said, p)
+assert os.listdir(f"{V.TREES}") == [other_repo], os.listdir(V.TREES)
 
 print("answers: ok")

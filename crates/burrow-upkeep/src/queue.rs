@@ -12,6 +12,14 @@ use crate::pass::Pass;
 use crate::post::finding;
 use crate::snapshot::{self, Look};
 
+/// Under the steward's state dir: the looks queued, the answers the
+/// reviewers' service leaves under each one's name, and the reviewers'
+/// sessions, a PR's each, which the service's config names too
+/// (burrow-review's config.rs).
+pub const QUEUE: &str = "review/queue";
+pub const DONE: &str = "review/done";
+pub const SESSIONS: &str = "review/sessions";
+
 /// What the pass hands `queue`, on stdin: the PR's head on its base, as the
 /// pass read it, and the reviewer to queue on it.
 #[derive(Debug, Deserialize)]
@@ -80,7 +88,7 @@ pub fn queue(p: &mut Pass, ask: &Ask) -> Result<String, String> {
         at: p.now,
     };
     let entry = format!("{}--{}", ask.reviewer, ask.name);
-    p.save(&format!("review/queue/{entry}.json"), &item)?;
+    p.save(&format!("{QUEUE}/{entry}.json"), &item)?;
     Ok(entry)
 }
 

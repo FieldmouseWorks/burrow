@@ -228,7 +228,7 @@ def run_pass(kick):
     if kick is None and not DRY:
         C.follow_renames({r["repo"].lower() for r in repos})
         retire_deleted(known, failed, digest)
-    read, live = set(), set()  # the repos whose PRs it read, and their heads' snapshots
+    live = {}  # the repos whose PRs it read: their heads' snapshots
     covered = []
     for r in repos:
         repo = r["repo"]
@@ -271,7 +271,6 @@ def run_pass(kick):
                          {x.get("name") for x in pr.get("labels", {}).get("nodes", ())}}
                 P.begin(repo, (pr["number"] for pr in prs), first)
                 T.begin(repo)
-                read.add(repo.replace("/", "_"))
                 waits.read(repo, prs)
                 # First, so a red-branch fix it holds isn't merged by this same pass.
                 held = R.watch_default(r, info, prs, mine) or {}
@@ -280,12 +279,13 @@ def run_pass(kick):
                 # closes the PRs on it).
                 in_use = set()
                 seen_to = True
+                snaps = set()  # its open PRs' heads' snapshots
                 # Held fixes first: their holds take back a queued merge
                 # before anything else this pass waits on.
                 # Then in the proof line's order, so proofSlots go to PRs in it.
                 for pr in sorted(prs, key=lambda pr: (pr["number"] not in held, P.place(repo, pr["number"]))):
                     in_use.update((pr["headRefName"], pr["baseRefName"]))
-                    live.add(V.snap_name(f"pr-{repo.replace('/', '_')}-{pr['number']}.json", pr["headRefOid"], pr["baseRefName"]))
+                    snaps.add(V.snap_name(f"pr-{repo.replace('/', '_')}-{pr['number']}.json", pr["headRefOid"], pr["baseRefName"]))
                     try:
                         step.handle(repo, pr, info, mine, held.get(pr["number"]))
                     except Exception as e:  # one bad PR mustn't stop the rest
@@ -295,6 +295,9 @@ def run_pass(kick):
                         if T.seat(repo, pr["number"]) is not None:
                             # It may not be settled any more, and still be in.
                             T.stop(repo, f"#{pr['number']} wasn't seen to")
+                # Swept only once it has every open PR's head: one whose look
+                # failed before then would have the sweep take what's theirs.
+                live[repo] = snaps
                 if seen_to:
                     covered.append(r)
                 else:
@@ -335,7 +338,11 @@ def run_pass(kick):
     save("known.json", sorted(known))
     save("baseline-failed.json", failed)
     if not DRY:
-        V.sweep(read, live)
+        for repo, snaps in live.items():
+            try:
+                V.sweep(repo, snaps)
+            except Exception as e:  # one repo's mustn't stop the rest, or the pass's end
+                log(f"{repo}: couldn't sweep what its reviewers left: {e}")
     if kick is None:
         R.hooks(repos)
     # Last: GitHub failing it leaves the pass's state saved. A line more than

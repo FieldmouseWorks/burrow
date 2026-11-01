@@ -21,6 +21,10 @@ use crate::config::{self, Config};
 use crate::mirror::{self, git, git_in};
 use crate::pass::{load, save};
 
+/// Under the steward's state dir: what each snapshot keeps of its base and
+/// what it hid, NAME.json (`Meta`).
+pub const META: &str = "review/snap";
+
 /// The head a snapshot is of: the PR's head, its base, and the snapshot's
 /// name (reviewers.py `snap_name`, one a head on a base).
 #[derive(Debug)]
@@ -125,7 +129,7 @@ fn line(out: &[u8]) -> String {
 /// one whose checkout the cache lost (a reboot, say).
 pub fn take(cfg: &Config, state: &Path, repo: &str, look: &Look) -> Result<Meta, String> {
     let (name, head, base) = (&look.name, &look.head, &look.base);
-    let kept = format!("review/snap/{name}.json");
+    let kept = format!("{META}/{name}.json");
     let dst = cfg.snapshot.dir.join(name);
     if let Some(meta) = load::<Option<Meta>>(state, &kept)
         && dst.is_dir()

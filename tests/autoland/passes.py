@@ -214,6 +214,45 @@ assert C.load("digest-repos.json", None) == {"sam/r": [], "sam/other": [["Open o
 assert published == [[("Open over a day", "other line", "x")]], published
 print("kick: ok")
 
+# Each repo whose PRs a pass read is swept of what its reviewers left, with
+# the snapshots of its open PRs' heads, once its look has them all: sam/q's,
+# which failed before then (its branch watch), isn't, as the sweep would
+# take what its open PRs have. One that can't be swept doesn't stop the
+# others, or the pass's end.
+fresh_pr_state()
+swept, published = [], []
+kept_fns = (S.R.discover, S.R.settle_repo, S.R.publish, S.open_prs, S.step.handle, V.sweep, S.R.watch_default)
+S.R.discover = lambda: [{"repo": f"sam/{x}", "default": "main"} for x in "rqp"]
+S.R.settle_repo = lambda r, known: False
+S.R.publish = published.append
+S.open_prs = lambda owner, name: (info, [mkpr(), mkpr(number=6, sha="b" * 40, base="release")])
+S.step.handle = lambda *a: None
+
+
+def watch_default(r, *a):
+    if r["repo"] == "sam/q":
+        raise C.Unavailable("gh api repos/sam/q/branches/main: HTTP 502")
+
+
+S.R.watch_default = watch_default
+
+
+def sweep(repo, live):
+    swept.append((repo, live))
+    if repo == "sam/r":
+        raise RuntimeError("its answers: not a dir")
+
+
+V.sweep, sys.argv = sweep, ["steward"]
+S.main()
+sys.argv = argv
+S.R.discover, S.R.settle_repo, S.R.publish, S.open_prs, S.step.handle, V.sweep, S.R.watch_default = kept_fns
+assert swept == [(repo, {V.snap_name(f"pr-{repo.replace('/', '_')}-5.json", head, "main"),
+                         V.snap_name(f"pr-{repo.replace('/', '_')}-6.json", "b" * 40, "release")})
+                 for repo in ("sam/r", "sam/p")], swept
+assert len(published) == 1, published
+print("swept: ok")
+
 # A repo that can't be started over as new, though it was remade, is left
 # alone that pass, its dashboard and flaky tests too: nothing of the deleted
 # one's may act on it. Its next pass, five minutes on, tries again.
