@@ -309,6 +309,10 @@ in
       };
     }) cfg.apps // lib.mapAttrs' (name: app: lib.nameValuePair "gh-token-${name}@" {
       description = "A token of the GitHub App ${app.slug}, for one who asked";
+      # One asker's answer: a failed one (the asker hung up, or GitHub said
+      # ask later, which it's told) is gone with its log kept, not left for a
+      # switch that happens to be running to count as its own failure.
+      unitConfig.CollectMode = "inactive-or-failed";
       # One answer per connection, and the next is already the new system's. A
       # restart would close the socket for as long as the switch runs, and all
       # who ask meanwhile, a unit the switch left running too, get refused.
