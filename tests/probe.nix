@@ -17,8 +17,10 @@ let
   token = "gh" + "p_" + builtins.substring 0 36 (hex "token");
   password = "pw-" + builtins.substring 0 24 (hex "password");
 
-  # gh api -i, as far as the probe asks it: the repo, its issues, a comment
-  # and a close, from and into /var/lib/gh (the unit's /tmp is its own).
+  # gh api -i, as far as the probe asks it: the repo, its issues, who wrote
+  # one (its opener, and the body's editors from edits-N, none by default),
+  # a comment and a close, from and into /var/lib/gh (the unit's /tmp is its
+  # own).
   gh = pkgs.writeShellScriptBin "gh" ''
     [ "$1" = api ] || exit 2
     shift
@@ -38,6 +40,15 @@ let
     case "$method $path" in
       "GET repos/sam/homelab") reply 200 "$(cat $d/repo)" ;;
       "GET repos/sam/homelab/issues?"*) reply 200 "$(cat $d/issues)" ;;
+      "POST graphql")
+        n=$(${pkgs.jq}/bin/jq -r .variables.n)
+        edits=$(cat "$d/edits-$n" 2>/dev/null || echo '[]')
+        reply 200 "$(${pkgs.jq}/bin/jq -c --argjson n "$n" --argjson edits "$edits" '
+          .[] | select(.number == $n)
+          | { data: { repository: { issue: {
+              author: { login: .user.login }, title, body,
+              userContentEdits: { totalCount: ($edits | length), nodes: $edits },
+              timelineItems: { totalCount: 0, nodes: [] } } } } }' $d/issues)" ;;
       "POST repos/sam/homelab/issues/"*/comments)
         n=''${path#repos/sam/homelab/issues/}
         cat >"$d/posted-''${n%/comments}"
@@ -147,6 +158,14 @@ pkgs.testers.runNixOSTest {
     with subtest("anyone else's runs nothing, and is closed"):
         assert "nothing was run" in posted(2), posted(2)
         assert json.loads(machine.succeed("cat /var/lib/gh/closed-2"))["state_reason"] == "not_planned"
+
+    with subtest("an author's probe someone else edited runs nothing, and is closed"):
+        github("issues", [issue(5, "sam", "journal leaky -1h now")])
+        github("edits-5", [{"editor": {"login": "sam"}, "deletedBy": None}, {"editor": {"login": "mallory"}, "deletedBy": None}])
+        machine.succeed("systemctl start burrow-probe.service")
+        assert "written or changed by someone other than sam" in posted(5), posted(5)
+        assert "leaky:" not in posted(5), posted(5)
+        assert json.loads(machine.succeed("cat /var/lib/gh/closed-5"))["state_reason"] == "not_planned"
 
     with subtest("a repo that isn't private gets no answer"):
         github("repo", {"private": False})

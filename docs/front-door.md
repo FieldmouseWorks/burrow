@@ -115,7 +115,8 @@ own, say), in seconds and without starting a Claude.
   A time is `now`, `-30m`, `-2h`, `-3d`, `2026-11-01`, `2026-11-01T13:05Z`
   or `@EPOCH`, in UTC. An empty body asks its title.
 - **Answer:** one comment with every answer, then the issue is closed.
-  Reopen it to ask again.
+  Reopen it to ask again. An issue whose body or title someone else changed
+  (GitHub lets a collaborator edit anyone's) runs nothing: ask in a new one.
 - **What keeps it safe:** no shell, and nothing of the issue's text reaches a
   command but a unit name or a time the grammar made; journals only of the
   units on the allowlist; no answer at all in a repo GitHub doesn't call
