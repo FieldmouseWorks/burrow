@@ -56,17 +56,24 @@ pub fn units(m: &Machine) -> Result<String, String> {
 /// the unit is on the allowlist.
 pub fn journal(m: &Machine, unit: &Unit, since: i64, until: i64) -> Result<String, String> {
     let on = |globs: &[String]| globs.iter().any(|g| glob::matches(g, unit.as_str()));
-    let scope = if on(&m.cfg.journal.units) {
-        "-u"
-    } else if on(&m.cfg.journal.user_units) {
-        "--user-unit"
-    } else {
+    // Each manager whose allowlist names it: a name on both (proj's jobs, say)
+    // is read from both, in one read, so the span and the line limit are the
+    // two logs' together. journalctl ORs its unit matches, and a user unit is
+    // the probe's own user's.
+    let mut args = Vec::new();
+    if on(&m.cfg.journal.units) {
+        args.extend(["-u", unit.as_str()]);
+    }
+    if on(&m.cfg.journal.user_units) {
+        args.extend(["--user-unit", unit.as_str()]);
+    }
+    if args.is_empty() {
         return Err(format!(
             "{unit} isn't on the journal allowlist (system units: {}; user units: {})",
             list(&m.cfg.journal.units),
             list(&m.cfg.journal.user_units),
         ));
-    };
+    }
     if since >= until {
         return Err(format!("{} isn't before {}", utc(since), utc(until)));
     }
@@ -78,7 +85,7 @@ pub fn journal(m: &Machine, unit: &Unit, since: i64, until: i64) -> Result<Strin
         format!("@{until}.999999"),
         JOURNAL_LINES.to_string(),
     );
-    let mut args = vec![scope, unit.as_str(), "--since", &s, "--until", &u, "-n", &n];
+    args.extend(["--since", &s, "--until", &u, "-n", &n]);
     args.extend(JOURNAL);
     let lines = m.output(&m.cfg.tools.journalctl, &args, false, &[])?;
     let count = lines.lines().count();
@@ -269,12 +276,15 @@ pub fn deployed(m: &Machine) -> Result<String, String> {
     Ok(out)
 }
 
-/// `oom`: the kernel's OOM kills and systemd-oomd's since `since`.
+/// `oom`: the kernel's OOM kills and systemd-oomd's since `since`, from
+/// every boot the journal keeps in that span.
 pub fn oom(m: &Machine, since: i64) -> Result<String, String> {
     let s = format!("@{since}");
     let jctl = &m.cfg.tools.journalctl;
+    // The kernel's messages by their transport, not `-k`: that one means
+    // this boot's only, and a kill is often what came before a reboot.
     let mut kernel = vec![
-        "-k",
+        "_TRANSPORT=kernel",
         "--since",
         &s,
         "-g",

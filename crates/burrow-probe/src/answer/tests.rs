@@ -196,11 +196,36 @@ fn a_journal_on_the_allowlist() {
     m.answer(&Query::parse(r"journal claude-rc@LoK\x2dweb -1h -30m").unwrap())
         .unwrap();
     assert_eq!(
-        fake.asked.borrow()[1].1[..2],
+        fake.asked.borrow()[1].1[..3],
         [
             "--user-unit".to_string(),
-            r"claude-rc@LoK\x2dweb.service".to_string()
+            r"claude-rc@LoK\x2dweb.service".to_string(),
+            "--since".to_string(),
         ]
+    );
+}
+
+#[test]
+fn a_journal_on_both_allowlists_is_read_from_both_at_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = config(dir.path());
+    cfg.journal.units.push("proj-*.service".into());
+    cfg.journal.user_units.push("proj-*.service".into());
+    let fake = Fake::default().on("journalctl", "-u", 0, "a job's line\n");
+    let m = machine(&cfg, dir.path(), &fake);
+    let out = m
+        .answer(&Query::parse("journal proj-web-1 -1h now").unwrap())
+        .unwrap();
+    assert!(out.contains(": 1 lines\na job's line\n"), "{out}");
+    let asked = fake.asked.borrow();
+    assert_eq!(
+        asked.len(),
+        1,
+        "one read, so the span and the limit are shared"
+    );
+    assert_eq!(
+        asked[0].1.join(" "),
+        "-u proj-web-1.service --user-unit proj-web-1.service --since @1793496400 --until @1793500000.999999 -n 400 -o short-iso --no-pager --no-hostname -q --utc"
     );
 }
 
@@ -315,7 +340,7 @@ fn oom_reads_the_kernel_and_oomd() {
         Fake::default()
             .on(
                 "journalctl",
-                "-k",
+                "_TRANSPORT=kernel",
                 0,
                 "2026-11-01T01:00:00+00:00 kernel: Out of memory: Killed process 42 (nix)\n",
             )
@@ -328,6 +353,17 @@ fn oom_reads_the_kernel_and_oomd() {
         out.contains("Killed process 42 (nix)\n\nsystemd-oomd's:\nnone\n"),
         "{out}"
     );
+    // Every boot in the span, the kernel's as well as oomd's: no `-k` or
+    // `-b`, which mean this boot only.
+    for (_, args, _) in fake.asked.borrow().iter() {
+        assert!(
+            !args.iter().any(|a| a == "-k"
+                || a == "--dmesg"
+                || a.starts_with("-b")
+                || a.starts_with("--boot")),
+            "{args:?}"
+        );
+    }
 }
 
 #[test]

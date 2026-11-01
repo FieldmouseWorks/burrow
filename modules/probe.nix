@@ -131,6 +131,9 @@ in
 
     systemd.services.burrow-probe = {
       description = "burrow-probe: answer the probe issues in ${cfg.repo}";
+      # A switch leaves a running pass be (see burrow.switch's check); the
+      # next one is the new system's.
+      restartIfChanged = false;
       after = [ "network-online.target" ];
       wants = [ "network-online.target" ];
       path = [ cfg.gh ];

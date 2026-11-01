@@ -24,6 +24,19 @@ impl Scrubbed {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// At most `max` bytes, at a character's end, `note` after a cut. Only
+    /// ever shorter, so what a cut leaves was scrubbed with the rest.
+    pub fn cut(self, max: usize, note: &str) -> Scrubbed {
+        if self.0.len() <= max {
+            return self;
+        }
+        let mut at = max.saturating_sub(note.len());
+        while !self.0.is_char_boundary(at) {
+            at -= 1;
+        }
+        Scrubbed(format!("{}{note}", &self.0[..at]))
+    }
 }
 
 /// Each rule: what it finds, and what goes in its place (`$1` and the like
@@ -36,6 +49,12 @@ static RULES: LazyLock<Vec<(Regex, String)>> = LazyLock::new(|| {
         // a line of its own, timestamp first; the block goes whole.
         (
             r"(?s)-----BEGIN [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----.*?(?:-----END [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----|\z)",
+            "[redacted private key]",
+        ),
+        // A key's END with no BEGIN before it, which a journal's line limit
+        // can leave: everything from the start of the text to it goes.
+        (
+            r"(?s)\A.*?-----END [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----",
             "[redacted private key]",
         ),
         // Headers that carry a credential, to the end of the line.
@@ -72,7 +91,17 @@ static RULES: LazyLock<Vec<(Regex, String)>> = LazyLock::new(|| {
             "[redacted]",
         ),
         // NAME=VALUE, NAME: VALUE, "NAME": "VALUE", where the name says it's
-        // a secret.
+        // a secret. A quoted value goes whole, to its closing quote (past
+        // escaped ones) or the line's end, whatever it holds; then an
+        // unquoted one, to the first character that ends a value.
+        (
+            r#"(?im)\b([a-z0-9_.-]*(?:password|passwd|passphrase|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|client[_-]?secret|credentials?))(["']?\s*[:=]\s*)"(?:[^"\\\r\n]|\\.)*(?:"|$)"#,
+            "$1$2\"[redacted]\"",
+        ),
+        (
+            r#"(?im)\b([a-z0-9_.-]*(?:password|passwd|passphrase|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|client[_-]?secret|credentials?))(["']?\s*[:=]\s*)'(?:[^'\\\r\n]|\\.)*(?:'|$)"#,
+            "$1$2'[redacted]'",
+        ),
         (
             r#"(?i)\b([a-z0-9_.-]*(?:password|passwd|passphrase|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|client[_-]?secret|credentials?))(["']?\s*[:=]\s*["']?)([^\s"',;&]+)"#,
             "$1$2[redacted]",
@@ -179,6 +208,32 @@ mod tests {
     }
 
     #[test]
+    fn a_quoted_value_goes_whole() {
+        for (line, secret) in [
+            (
+                r#"password="correct horse battery staple""#,
+                "horse battery staple",
+            ),
+            (r#"password=";entire-value""#, "entire-value"),
+            (r#"password="a, b; c & d""#, "b; c & d"),
+            (
+                r#"{"client_secret": "with \"escaped\" quotes, and more"}"#,
+                "quotes, and more",
+            ),
+            (r#"{"api_key": "a\\\"b cAd"}"#, "b c"),
+            ("secret='single quoted; value here'", "value here"),
+            ("token = 'it\\'s still secret'", "still secret"),
+            (r#"password="cut off at the line's end"#, "at the line"),
+        ] {
+            hidden(line, secret);
+        }
+        assert_eq!(
+            scrub(r#"db password="a b" user="sam""#).as_str(),
+            r#"db password="[redacted]" user="sam""#
+        );
+    }
+
+    #[test]
     fn a_private_key_goes_whole() {
         let key = format!(
             "-----BEGIN OPENSSH {} KEY-----\nb3BlbnNzaC1rZXktdjEAAAAA\nQUJDREVGR0hJSktMTU5PUFFS\n-----END OPENSSH {} KEY-----",
@@ -192,6 +247,12 @@ mod tests {
             "PRIVATE"
         );
         assert_eq!(scrub(&cut).as_str(), "before\n[redacted private key]");
+        // Its BEGIN cut off: everything up to its END goes.
+        let tail = format!(
+            "QUJDREVGR0hJSktMTU5PUFFS\n-----END RSA {} KEY-----\nafter",
+            "PRIVATE"
+        );
+        assert_eq!(scrub(&tail).as_str(), "[redacted private key]\nafter");
     }
 
     #[test]

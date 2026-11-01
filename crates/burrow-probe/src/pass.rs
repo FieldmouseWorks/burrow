@@ -3,11 +3,16 @@
 //! line saying no probe ran, and is closed too. A repo GitHub doesn't say is
 //! private gets nothing: the answers are the machine's own business.
 //!
+//! What runs is the issue's text as GitHub has it now, and only when its
+//! opener and everyone who has changed its body or title is an author:
+//! GitHub lets a collaborator edit anyone's issue, so who opened it says
+//! nothing about who wrote what it asks.
+//!
 //! The comment goes up before the close, so an answer is never lost to a
 //! close that failed: the issue stays open, and the next pass answers it
 //! again.
 
-use burrow_github::{Api, call, encode};
+use burrow_github::{Api, call, encode, query};
 use serde_json::{Value, json};
 
 use crate::query::Query;
@@ -19,6 +24,30 @@ pub const MAX_QUESTIONS: usize = 10;
 
 /// The most a comment holds, under GitHub's 65,536 characters.
 const MAX_COMMENT: usize = 60_000;
+
+/// The most of a question, or of why it isn't one, a comment echoes.
+const MAX_ECHO: usize = 200;
+
+/// An issue's text, and everyone who wrote it: its opener, each version of
+/// its body, and each change of its title. In one query, so the text that
+/// runs is the text whose writers were checked.
+const WRITTEN: &str = "query($owner: String!, $name: String!, $n: Int!) {
+  repository(owner: $owner, name: $name) {
+    issue(number: $n) {
+      author { login }
+      title
+      body
+      userContentEdits(first: 100) {
+        totalCount
+        nodes { editor { login } deletedBy { login } }
+      }
+      timelineItems(itemTypes: [RENAMED_TITLE_EVENT], first: 100) {
+        totalCount
+        nodes { ... on RenamedTitleEvent { actor { login } } }
+      }
+    }
+  }
+}";
 
 /// What a pass did.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -68,15 +97,27 @@ pub fn pass(
             .pointer("/user/login")
             .and_then(Value::as_str)
             .unwrap_or("");
-        let author = cfg.authors.iter().any(|a| a.eq_ignore_ascii_case(login));
-        let (body, reason) = if author {
-            (scrub(&answers(cfg, issue, answer, now)), "completed")
+        let vetted = if is_author(cfg, login) {
+            match written(api, cfg, n) {
+                Ok(v) => v,
+                Err(e) => {
+                    failed.push(format!("#{n}: {e}"));
+                    continue;
+                }
+            }
         } else {
-            let text = format!(
-                "{MARK}\nOnly {} can ask this machine's probe, so nothing was run.",
+            Err(format!(
+                "Only {} can ask this machine's probe, so nothing was run.",
                 cfg.authors.join(" or ")
-            );
-            (scrub(&text), "not_planned")
+            ))
+        };
+        let author = vetted.is_ok();
+        let (body, reason) = match vetted {
+            Ok(text) => (
+                bounded(scrub(&answers(cfg, &text, answer, now))),
+                "completed",
+            ),
+            Err(why) => (scrub(&format!("{MARK}\n{why}")), "not_planned"),
         };
         match reply(api, repo, n, &body, reason) {
             Ok(()) if author => done.answered.push(n),
@@ -88,6 +129,69 @@ pub fn pass(
         Ok(done)
     } else {
         Err(format!("{repo}: {}", failed.join("; ")))
+    }
+}
+
+fn is_author(cfg: &Config, login: &str) -> bool {
+    cfg.authors.iter().any(|a| a.eq_ignore_ascii_case(login))
+}
+
+/// Issue `n`'s title and body as GitHub has them now, when an author opened
+/// it and every edit of either was an author's; else, as Err inside, why
+/// nothing runs. An editor GitHub doesn't name, or more edits than one query
+/// reads, isn't known to be an author's.
+fn written(api: &mut dyn Api, cfg: &Config, n: u64) -> Result<Result<Value, String>, String> {
+    let (owner, name) = cfg
+        .repo
+        .split_once('/')
+        .ok_or_else(|| format!("{} isn't OWNER/NAME", cfg.repo))?;
+    let data = query(
+        api,
+        owner,
+        WRITTEN,
+        json!({ "owner": owner, "name": name, "n": n }),
+    )
+    .map_err(|e| e.to_string())?;
+    let issue = &data["repository"]["issue"];
+    let by_author = |v: &Value| v.as_str().is_some_and(|l| is_author(cfg, l));
+    let every = |list: &Value, ok: &dyn Fn(&Value) -> bool| {
+        list["nodes"].as_array().is_some_and(|nodes| {
+            list["totalCount"].as_u64() == Some(nodes.len() as u64) && nodes.iter().all(ok)
+        })
+    };
+    let edits = every(&issue["userContentEdits"], &|e| {
+        by_author(&e["editor"]["login"])
+            && (e["deletedBy"].is_null() || by_author(&e["deletedBy"]["login"]))
+    });
+    let renames = every(&issue["timelineItems"], &|r| {
+        by_author(&r["actor"]["login"])
+    });
+    if !by_author(&issue["author"]["login"]) || !edits || !renames {
+        return Ok(Err(format!(
+            "This issue's text was written or changed by someone other than {}, or by someone GitHub doesn't name, so nothing was run. Ask in a new issue.",
+            cfg.authors.join(" or ")
+        )));
+    }
+    Ok(Ok(
+        json!({ "title": issue["title"], "body": issue["body"] }),
+    ))
+}
+
+/// A comment cut to what one holds, whatever made it long: answers are fit
+/// to their share already, so this is for what nothing else bounds.
+fn bounded(body: Scrubbed) -> Scrubbed {
+    body.cut(MAX_COMMENT, "\n\n(cut here, past what a comment holds)")
+}
+
+/// `text`'s first `max` characters, saying when there were more.
+fn clip(text: &str, max: usize) -> String {
+    match text.char_indices().nth(max) {
+        Some((at, _)) => format!(
+            "{}... ({} more characters)",
+            &text[..at],
+            text[at..].chars().count()
+        ),
+        None => text.to_string(),
     }
 }
 
@@ -158,17 +262,30 @@ fn answers(
         out += &format!("\nNothing was asked: {}\n", crate::query::VOCABULARY);
         return out;
     }
-    let each = MAX_COMMENT / asked.len().min(MAX_QUESTIONS);
+    // Each answer's share of the comment, less what goes around it: the
+    // heading above, its question (clipped, up to four bytes a character),
+    // its fence and a note of a cut. The comment as a whole is cut too, for
+    // what this doesn't foresee (a fence a run of backticks made long).
+    let share = (MAX_COMMENT - 1_000) / asked.len().min(MAX_QUESTIONS);
+    let each = share.saturating_sub(4 * MAX_ECHO + 100);
     for line in asked.iter().take(MAX_QUESTIONS) {
-        let shown = line.replace('`', "'");
+        let shown = clip(line, MAX_ECHO).replace('`', "'");
         match Query::parse(line) {
-            Err(why) => out += &format!("\n**`{shown}`**: {why}\n"),
+            Err(why) => out += &format!("\n**`{shown}`**: {}\n", clip(&why, MAX_ECHO)),
             Ok(q) => {
                 let (text, end) = match answer(&q) {
                     Ok(t) => (t, matches!(q, Query::Journal { .. } | Query::Oom { .. })),
                     Err(why) => (format!("No answer: {why}"), false),
                 };
-                out += &format!("\n**`{q}`**\n\n{}\n", fenced(&fit(&text, each, end)));
+                // Scrubbed whole before it's cut, so a cut can't leave part
+                // of a secret its rule needed all of to know (a key's END
+                // without its BEGIN, say). The comment is scrubbed again.
+                let text = scrub(&text);
+                let heading = clip(&q.to_string(), MAX_ECHO).replace('`', "'");
+                out += &format!(
+                    "\n**`{heading}`**\n\n{}\n",
+                    fenced(&fit(text.as_str(), each, end))
+                );
             }
         }
     }
