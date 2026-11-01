@@ -15,7 +15,7 @@ let
   inherit (config.burrow) user;
   name = "burrow-usage-reset";
   dir = "${config.burrow.stateDir}/usage-reset";
-  package = inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow;
+  package = inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow-usage-reset;
 
   configFile = pkgs.writeText "${name}.json" (builtins.toJSON {
     claude = lib.getExe' config.burrow.claude.package "claude";

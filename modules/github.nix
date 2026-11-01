@@ -46,12 +46,8 @@ inputs:
 let
   inherit (lib) mkOption types;
   cfg = config.burrow.github;
-  # gh-token (crates/gh-token), on its own: burrow.tools.gh-token goes on
-  # PATHs, and the rest of burrow's programs needn't go with it.
-  package = pkgs.runCommand "gh-token" { meta.mainProgram = "gh-token"; } ''
-    mkdir -p $out/bin
-    ln -s ${inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow}/bin/gh-token $out/bin/gh-token
-  '';
+  # gh-token (crates/gh-token), for burrow.tools.gh-token.
+  package = inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.gh-token;
   # Who may connect to an App's socket: the whole ACL, so a user no longer in
   # `users` loses it, and root's group, whichever a system before left it in.
   access = app: [

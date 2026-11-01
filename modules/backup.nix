@@ -39,7 +39,7 @@ let
     nativeBuildInputs = [ pkgs.makeBinaryWrapper ];
     meta.mainProgram = name;
   } ''
-    makeBinaryWrapper ${inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow}/bin/burrow-backup $out/bin/${name} \
+    makeBinaryWrapper ${inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow-backup}/bin/burrow-backup $out/bin/${name} \
       --add-flags ${backupConfig}
   '';
 in

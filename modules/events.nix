@@ -22,7 +22,7 @@ let
     port = if hooked then cfg.port else null;
     handlers = lib.mapAttrs (_: h: { inherit (h) events unit wake ownStatuses ownLabels perRepo repos pushes branches issueTitles gap; }) cfg.handlers;
   });
-  package = inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow;
+  package = inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow-events;
   units = lib.mapAttrsToList (_: h: h.unit) cfg.handlers;
   # Each one best-effort: burrow-events down (restarting, say) runs every
   # full pass when it starts anyway.

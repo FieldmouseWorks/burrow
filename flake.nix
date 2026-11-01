@@ -98,6 +98,7 @@
         inherit self;
         rust = {
           dir = "crates";
+          members = true;
           include = [
             ".github/workflows/flake-check.yml"
             ".github/workflows/flake.yml"
@@ -141,10 +142,12 @@
         };
       };
 
-      # burrow's programs (every binary in crates/), for each platform
-      # they're built for, and flake-gate, for a machine to install.
+      # burrow's programs, each crate's a package of its own, which is what
+      # a module runs, for each platform they're built for, and flake-gate,
+      # for a machine to install. There's no package of them all: a module
+      # that ran one from it would change with every crate.
       packages = nixpkgs.lib.foldl' nixpkgs.lib.recursiveUpdate { } [
-        (nixpkgs.lib.mapAttrs (_: p: { burrow = p.default; }) crates.packages)
+        (nixpkgs.lib.mapAttrs (_: p: builtins.removeAttrs p [ "default" ]) crates.packages)
         { ${system}.flake-gate = pkgs.callPackage ./tools/flake-gate/package.nix { }; }
       ];
 
@@ -313,7 +316,7 @@
         autoland = pkgs.runCommand "autoland-check" { nativeBuildInputs = [ pkgs.python3 pkgs.git pkgs.openssl pkgs.bash pkgs.jq ]; } ''
           python3 -I ${./tests/autoland}/check.py ${./modules/autoland}/steward.py \
             ${pkgs.writeText "one-way.json" (builtins.toJSON self.nixosConfigurations.example.config.burrow.autoland.oneWay)} \
-            ${self.packages.${system}.burrow}/bin/burrow-review ${./crates/burrow-review/tests/fakes}
+            ${self.packages.${system}.burrow-review}/bin/burrow-review ${./crates/burrow-review/tests/fakes}
           touch $out
         '';
         # The example's reviewers' service reads the config its module writes
@@ -854,7 +857,10 @@
           [ "$(${pkg}/bin/house-native)" = ${pkgs.zlib.version} ]
           touch $out
         '';
-      } // nixpkgs.lib.listToAttrs (map (name: nixpkgs.lib.nameValuePair "standalone-${name}" (standalone name)) names)
+      }
+      # lib/project.nix's rust.members: each program a package of its own.
+      // import ./tests/house-members.nix { inherit self pkgs; }
+      // nixpkgs.lib.listToAttrs (map (name: nixpkgs.lib.nameValuePair "standalone-${name}" (standalone name)) names)
       // nixpkgs.lib.mapAttrs' (name: nixpkgs.lib.nameValuePair "crates-${name}") crates.checks.${system}
       // nixpkgs.lib.mapAttrs' (name: nixpkgs.lib.nameValuePair "house-${name}") (
         # lib/project.nix's own gates, on the smallest projects that have them.

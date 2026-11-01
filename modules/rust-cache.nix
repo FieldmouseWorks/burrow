@@ -45,7 +45,7 @@ let
   # the builds alike, whatever a user keeps in ~/.config/sccache.
   conf = pkgs.writeText "sccache.conf" "";
 
-  burrow = inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow;
+  rustcWrapper = inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow-rustc-wrapper;
   # What the wrapper reads (crates/burrow-rustc-wrapper).
   wrapperConfig = pkgs.writeText "rustc-wrapper.json" (builtins.toJSON {
     root = cfg.dir;
@@ -57,7 +57,7 @@ let
     nativeBuildInputs = [ pkgs.makeBinaryWrapper ];
     meta.mainProgram = "rustc-wrapper";
   } ''
-    makeBinaryWrapper ${burrow}/bin/burrow-rustc-wrapper $out/bin/rustc-wrapper \
+    makeBinaryWrapper ${rustcWrapper}/bin/burrow-rustc-wrapper $out/bin/rustc-wrapper \
       --add-flags ${wrapperConfig}
   '';
   # What RUSTC_WRAPPER names. A process keeps the environment it started

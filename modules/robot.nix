@@ -17,7 +17,7 @@ let
     nativeBuildInputs = [ pkgs.makeBinaryWrapper ];
     meta.mainProgram = "robot";
   } ''
-    makeBinaryWrapper ${inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow}/bin/burrow-robot \
+    makeBinaryWrapper ${inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow-robot}/bin/burrow-robot \
       $out/bin/robot --add-flags ${robotConfig}
   '';
 in

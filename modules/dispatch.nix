@@ -69,7 +69,7 @@ let
   # from any shell.
   dispatch = pkgs.writeShellScriptBin "burrow-dispatch" ''
     export DISPATCH_CONFIG=''${DISPATCH_CONFIG:-${configFile}}
-    exec ${inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow}/bin/burrow-dispatch "$@"
+    exec ${inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow-dispatch}/bin/burrow-dispatch "$@"
   '';
   kickScript = pkgs.writeShellScript "burrow-dispatch-kick" ''
     ${pkgs.curl}/bin/curl -fsS -m 10 -d "" ${kick} >/dev/null || echo "couldn't kick dispatch" >&2

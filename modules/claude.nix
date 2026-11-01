@@ -26,7 +26,7 @@ let
     nativeBuildInputs = [ pkgs.makeBinaryWrapper ];
     meta.mainProgram = "claude-guard";
   } ''
-    makeBinaryWrapper ${inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow}/bin/burrow-guard \
+    makeBinaryWrapper ${inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow-guard}/bin/burrow-guard \
       $out/bin/claude-guard --add-flags ${guardConfig}
   '';
 

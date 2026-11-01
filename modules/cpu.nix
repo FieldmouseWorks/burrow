@@ -22,7 +22,7 @@ let
     nativeBuildInputs = [ pkgs.makeBinaryWrapper ];
     meta.mainProgram = "heavy";
   } ''
-    makeBinaryWrapper ${inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow}/bin/burrow-heavy \
+    makeBinaryWrapper ${inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow-heavy}/bin/burrow-heavy \
       $out/bin/heavy --inherit-argv0 --add-flags ${heavyConfig}
   '';
 in

@@ -67,14 +67,14 @@ let
   # the config alone (slot.rs, the hand-over).
   proj = pkgs.writeShellScriptBin "proj" ''
     export PROJ_CONFIG=${configFile} PROJ_SELF=$0
-    exec ${inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow}/bin/burrow-proj "$@"
+    exec ${inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow-proj}/bin/burrow-proj "$@"
   '';
 
   # proj-inbox, with the same config, whose inbox part is its own. The turns
   # it starts are proj's (PROJ_SELF), as if a job's Claude had run proj.
   inbox = pkgs.writeShellScriptBin "proj-inbox" ''
     export PROJ_CONFIG=${configFile} PROJ_SELF=${proj}/bin/proj
-    exec ${inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow}/bin/burrow-proj-inbox "$@"
+    exec ${inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow-proj}/bin/burrow-proj-inbox "$@"
   '';
 in
 {

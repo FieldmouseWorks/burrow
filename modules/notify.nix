@@ -23,7 +23,7 @@ let
     nativeBuildInputs = [ pkgs.makeBinaryWrapper ];
     meta.mainProgram = name;
   } ''
-    makeBinaryWrapper ${inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow}/bin/burrow-notify \
+    makeBinaryWrapper ${inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow-notify}/bin/burrow-notify \
       $out/bin/${name} --add-flags ${notifyConfig} \
       --prefix PATH : ${lib.makeBinPath [ pkgs.coreutils pkgs.util-linux pkgs.systemd config.burrow.github.machineGh ]}
   '';

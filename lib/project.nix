@@ -29,6 +29,11 @@
   # libraries names them for every build, check and the dev shell:
   # `nativeBuildInputs = pkgs: [ pkgs.pkg-config ]` for the tools its build
   # scripts run, `buildInputs = pkgs: [ pkgs.alsa-lib ]` for the libraries.
+  # `members = true` (a workspace with no root package) makes each member
+  # with a binary a package of its own, named as its crate and built from
+  # only the members it reaches by path, with the lockfile cut down to what
+  # they use: what runs one program rebuilds only for a change that reaches
+  # it. packages.default then joins them.
   rust ? null,
   # Python: ruff's error rules (syntax errors, undefined names) over DIRS.
   # `format = true` also holds them to `ruff format`.
@@ -53,6 +58,7 @@ let
     test = true;
     testInputs = _: [ ];
     include = [ ];
+    members = false;
     nativeBuildInputs = _: [ ];
     buildInputs = _: [ ];
   } // (if rust == null then { } else rust);
@@ -98,6 +104,136 @@ let
     # The gate runs the tests.
     doCheck = false;
   };
+
+  # rust.members: each member with a binary, built alone. Its workspace is
+  # the member and those it reaches by path (dev and build dependencies
+  # too, since cargo loads them), the root manifest kept but for the other
+  # members and the shared dependencies none of these use; its lockfile is
+  # what those members reach through Cargo.lock's own dependency lists. Both
+  # are written from what evaluation reads, never paths into the repo, so
+  # only the member's sources and what it uses are its inputs.
+  readToml = path: builtins.fromTOML (builtins.readFile path);
+  rootToml = readToml (rustDir + "/Cargo.toml");
+  lockToml = readToml (rustDir + "/Cargo.lock");
+  memberDirs =
+    let dirs = rootToml.workspace.members or [ ]; in
+    if rootToml ? package then throw "rust.members: the workspace in ${rustCfg.dir} has a root package; members wants one without"
+    else if lib.any (d: builtins.match ".*[*?[].*" d != null) dirs then throw "rust.members: name each member in ${rustCfg.dir}/Cargo.toml, not by a glob"
+    else dirs;
+  memberToml = dir: readToml (rustDir + "/${dir}/Cargo.toml");
+  # A manifest's dependency tables, by kind and by target.
+  depTables = toml:
+    lib.concatMap (t: map (kind: t.${kind} or { }) [ "dependencies" "dev-dependencies" "build-dependencies" ])
+      ([ toml ] ++ lib.attrValues (toml.target or { }));
+  # PATH, as DIR's manifest gives it, from the workspace's root.
+  fromRoot = dir: path: lib.concatStringsSep "/" (lib.foldl'
+    (parts: part:
+      if part == "." || part == "" then parts
+      else if part != ".." then parts ++ [ part ]
+      else if parts == [ ] then throw "rust.members: ${dir} depends on ${path}, outside the workspace"
+      else lib.init parts)
+    [ ] (lib.splitString "/" "${dir}/${path}"));
+  # The members DIR depends on: by a path of its own, or by the workspace's
+  # for a dependency it inherits.
+  memberDeps = dir: lib.concatMap (t: lib.concatLists (lib.mapAttrsToList (name: d:
+    let inherited = rootToml.workspace.dependencies.${name} or { }; in
+    if !builtins.isAttrs d then [ ]
+    else if d ? path then [ (fromRoot dir d.path) ]
+    else if (d.workspace or false) && builtins.isAttrs inherited && inherited ? path then [ (fromRoot "." inherited.path) ]
+    else [ ]) t)) (depTables (memberToml dir));
+  closureOf = dir: map (x: x.key) (builtins.genericClosure {
+    startSet = [ { key = dir; } ];
+    operator = x: map (key: { inherit key; }) (memberDeps x.key);
+  });
+  manifestFor = dirs:
+    let
+      shared = lib.concatMap (d: lib.concatMap
+        (t: lib.attrNames (lib.filterAttrs (_: v: builtins.isAttrs v && (v.workspace or false)) t))
+        (depTables (memberToml d))) dirs;
+      ws = rootToml.workspace;
+    in
+    rootToml // {
+      workspace = builtins.removeAttrs ws [ "default-members" "exclude" ] // { members = dirs; }
+        // lib.optionalAttrs (ws ? dependencies) { dependencies = lib.getAttrs (lib.unique shared) ws.dependencies; };
+    };
+  # A lock entry's dependency ("NAME", "NAME VERSION" or "NAME VERSION
+  # (SOURCE)", whatever tells it apart) as its entry.
+  lockByName = lib.groupBy (p: p.name) lockToml.package;
+  lockKey = p: "${p.name} ${p.version} ${p.source or ""}";
+  lockDep = spec:
+    let
+      parts = lib.splitString " " spec;
+      at = n: builtins.elemAt parts n;
+      found = builtins.filter
+        (p: (builtins.length parts < 2 || p.version == at 1) && (builtins.length parts < 3 || "(${p.source or ""})" == at 2))
+        (lockByName.${at 0} or [ ]);
+    in
+    if builtins.length found == 1 then builtins.head found
+    else throw "rust.members: Cargo.lock has ${toString (builtins.length found)} entries for ${spec}";
+  lockFor = dirs:
+    let
+      names = map (d: (memberToml d).package.name) dirs;
+      reached = builtins.genericClosure {
+        startSet = map (p: { key = lockKey p; inherit p; })
+          (builtins.filter (p: !(p ? source) && builtins.elem p.name names) lockToml.package);
+        operator = x: map (p: { key = lockKey p; inherit p; }) (map lockDep (x.p.dependencies or [ ]));
+      };
+      kept = lib.genAttrs (map (x: x.key) reached) (_: true);
+    in
+    lockToml // { package = builtins.filter (p: kept ? ${lockKey p}) lockToml.package; };
+  hasBinary = dir:
+    (memberToml dir).bin or [ ] != [ ]
+    || builtins.pathExists (rustDir + "/${dir}/src/main.rs")
+    || builtins.pathExists (rustDir + "/${dir}/src/bin");
+  memberPackage = pkgs: dir:
+    let
+      craneLib = craneFor pkgs;
+      toml = memberToml dir;
+      dirs = closureOf dir;
+      version = toml.package.version or "0.0.0";
+      cargoToml = craneLib.writeTOML "Cargo.toml" (manifestFor dirs);
+    in
+    craneLib.buildPackage {
+      pname = toml.package.name;
+      version = if builtins.isAttrs version then rootToml.workspace.package.version else version;
+      src = lib.cleanSourceWith {
+        src = craneLib.cleanCargoSource rustDir;
+        name = "${toml.package.name}-source";
+        filter = path: type:
+          let rel = lib.removePrefix "${toString rustDir}/" (toString path); in
+          lib.any (d: rel == d || lib.hasPrefix "${d}/" rel || (type == "directory" && lib.hasPrefix "${rel}/" d)) dirs;
+      };
+      cargoLockParsed = lockFor dirs;
+      postPatch = "cp ${cargoToml} Cargo.toml";
+      # What it's built from, for the checks to read.
+      passthru = { inherit cargoToml; };
+      strictDeps = true;
+      nativeBuildInputs = rustCfg.nativeBuildInputs pkgs;
+      buildInputs = rustCfg.buildInputs pkgs;
+      # One build: its dependencies built apart would be a target directory
+      # kept for each member, where a member's build is seconds.
+      cargoArtifacts = null;
+      # Not --locked: the lockfile is the workspace's, cut down, and cargo
+      # may cut it further (a dependency's optional one that only another
+      # member's features turn on). The versions are still the lockfile's,
+      # the only ones vendored, and the checks hold the whole workspace's
+      # lockfile to its manifests with --locked.
+      cargoExtraArgs = "--offline -p ${toml.package.name}";
+      doCheck = false;
+      meta = lib.optionalAttrs ((toml.bin or [ ]) == [ ] && builtins.pathExists (rustDir + "/${dir}/src/main.rs")) {
+        mainProgram = toml.package.name;
+      };
+    };
+  memberPackages = pkgs:
+    let members = lib.listToAttrs (map (dir: lib.nameValuePair (memberToml dir).package.name (memberPackage pkgs dir))
+      (builtins.filter hasBinary memberDirs));
+    in
+    members // {
+      default = pkgs.symlinkJoin {
+        name = "${rootToml.workspace.metadata.crane.name or "workspace"}-${rootToml.workspace.package.version or "0.0.0"}";
+        paths = lib.attrValues members;
+      };
+    };
 
   # What the checks build from: the whole directory, not only the Cargo
   # sources, since tests read fixtures. With files outside it to include, the
@@ -240,5 +376,5 @@ in
 
   formatter = forAll (pkgs: pkgs.nixfmt-rfc-style);
 } // lib.optionalAttrs (rust != null) {
-  packages = forAll (pkgs: { default = rustPackage pkgs; });
+  packages = forAll (pkgs: if rustCfg.members then memberPackages pkgs else { default = rustPackage pkgs; });
 }

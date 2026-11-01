@@ -28,7 +28,7 @@ let
     nativeBuildInputs = [ pkgs.makeBinaryWrapper ];
     meta.mainProgram = "house-sync";
   } ''
-    makeBinaryWrapper ${inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow}/bin/house-sync \
+    makeBinaryWrapper ${inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.house-sync}/bin/house-sync \
       $out/bin/house-sync --add-flags ${syncConfig} \
       --prefix PATH : ${lib.makeBinPath [ config.burrow.github.machineGh ]}
   '';

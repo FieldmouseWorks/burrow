@@ -1,0 +1,7 @@
+[package]
+name = "members-hello"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+members-shared.workspace = true

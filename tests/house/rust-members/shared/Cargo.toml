@@ -1,0 +1,4 @@
+[package]
+name = "members-shared"
+version.workspace = true
+edition.workspace = true
