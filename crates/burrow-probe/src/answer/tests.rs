@@ -189,7 +189,7 @@ fn a_journal_on_the_allowlist() {
     assert!(!user);
     assert_eq!(
         args.join(" "),
-        "-u box-update.service --since @1793492800 --until @1793500000 -n 400 -o short-iso --no-pager --no-hostname -q --utc"
+        "-u box-update.service --since @1793492800 --until @1793500000.999999 -n 400 -o short-iso --no-pager --no-hostname -q --utc"
     );
     drop(asked);
     // A user unit, by its own glob.

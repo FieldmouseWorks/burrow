@@ -70,9 +70,12 @@ pub fn journal(m: &Machine, unit: &Unit, since: i64, until: i64) -> Result<Strin
     if since >= until {
         return Err(format!("{} isn't before {}", utc(since), utc(until)));
     }
+    // A time names a whole second, and the span takes in all of its last
+    // one: `--until` is to the microsecond, so `@UNTIL` alone would cut what
+    // was logged in the second `now` names, before the probe read it.
     let (s, u, n) = (
         format!("@{since}"),
-        format!("@{until}"),
+        format!("@{until}.999999"),
         JOURNAL_LINES.to_string(),
     );
     let mut args = vec![scope, unit.as_str(), "--since", &s, "--until", &u, "-n", &n];
