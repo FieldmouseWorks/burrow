@@ -304,6 +304,24 @@ def rest_ours(login):
     return login in CFG["authors"]
 
 
+def renovates(login):
+    """Whether a login, as REST gives it, is the one Renovate runs as: the
+    machine's own App's bot (config.renovate), or without one the machine
+    user's gh login, one of the authors."""
+    bot = CFG["renovate"]
+    return login == bot if bot else login in CFG["authors"]
+
+
+def renovated(actor):
+    """The same for an author as GraphQL gives it: a bot's login without
+    "[bot]", which only GitHub's own Bot of that name holds."""
+    if not actor:
+        return False
+    if actor.get("__typename") == "Bot":
+        return renovates(actor.get("login") + "[bot]")
+    return renovates(actor.get("login"))
+
+
 _key = []
 
 
@@ -685,14 +703,16 @@ def rank(repo):
     return 1 if r in {x.lower() for x in CFG["pipelineRepos"]} else 2
 
 
-def job(repo, task, clone=False, pipeline=True, timeout=None, since=None):
+def job(repo, task, clone=False, pipeline=True, timeout=None, since=None, key=None):
     """Hand a task to a Claude job in the repo's project. One that settles a
     PR or the branch PRs land on is pipeline work (proj run --pipeline): it
     goes ahead of the line, and in the pipeline's own repos (pipelineRepos)
     in a slot kept for it; proj decides which. Its turns stop after timeout
     minutes (jobTimeout's by default). since, when the work began (a PR's:
     when it was opened), is where it stands in line among those, so a PR
-    pushed again keeps its place. Returns the job id."""
+    pushed again keeps its place. key, what proj keeps it under (proj run
+    --key), for whatever finds it by that rather than its id: a key a job
+    has is refused. Returns the job id."""
     if retiring(repo):
         log(f"{repo}: no job until the deleted repo whose name it took on is retired")
         return None
@@ -713,7 +733,8 @@ def job(repo, task, clone=False, pipeline=True, timeout=None, since=None):
     app = ["--app", CFG["machinery"]] if CFG.get("machinery") else []
     # Never after now, which proj refuses: a clock that's behind GitHub's.
     when = ["--since", str(int(min(since, time.time())))] if since else []
-    p = subprocess.run([CFG["proj"], "run", *(["--pipeline"] if pipeline else []), *app, *when,
+    keyed = ["--key", key] if key else []
+    p = subprocess.run([CFG["proj"], "run", *(["--pipeline"] if pipeline else []), *app, *when, *keyed,
                         "--timeout", f"{timeout or CFG['jobTimeout']}m",
                         "--idle", f"{CFG['jobIdle']}m", "--kick", f"autoland/{repo}", "--owned", d, task],
                        capture_output=True, text=True)

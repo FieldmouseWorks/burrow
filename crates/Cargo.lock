@@ -235,6 +235,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "burrow-upkeep"
+version = "0.0.0"
+dependencies = [
+ "burrow-github",
+ "flaky",
+ "jiff",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "burrow-usage-reset"
 version = "0.0.0"
 dependencies = [

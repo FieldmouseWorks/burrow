@@ -14,8 +14,9 @@ the loop.
    issue is open the test is quarantined: each time it flakes again it's
    noted on the issue, and a failure that fails both tries fails the gate,
    as any test's does.
-4. The steward (`autoland`, [flakes.py](../modules/autoland/flakes.py)) hands
-   the issue to a Claude job, which finds the cause and opens a PR that says
+4. The steward (`autoland`,
+   [burrow-upkeep](../crates/burrow-upkeep/src/flaky.rs)) hands the issue
+   to a Claude job, which finds the cause and opens a PR that says
    `Closes #N`. Merged, it closes the issue. The job is the project's, not
    the pipeline's, and has hours (`flaky.jobTimeoutMinutes`). One still open
    a day after its job ends goes to the pipeline's stuck issue; at once, when

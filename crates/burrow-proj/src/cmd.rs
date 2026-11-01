@@ -52,6 +52,13 @@ pub fn dispatch(cfg: &Config, args: &[String]) -> Result<(), Fail> {
             put(&format!("{}\n", Job::new(cfg, id).state()));
             Ok(())
         }
+        Some("find") => {
+            let key = arg(args, 1, "usage: proj find KEY")?;
+            if let Some(id) = run::find(cfg, key)? {
+                put(&format!("{id}\n"));
+            }
+            Ok(())
+        }
         Some("stop") => stop(cfg, arg(args, 1, "usage: proj stop ID")?, false),
         Some("withdraw") => stop(cfg, arg(args, 1, "usage: proj withdraw ID")?, true),
         Some("unstick") => unstick(cfg, arg(args, 1, "usage: proj unstick ID")?),
@@ -89,7 +96,7 @@ pub fn dispatch(cfg: &Config, args: &[String]) -> Result<(), Fail> {
         }
         Some(_) => Err(Fail::new(
             2,
-            "usage: proj run|reply|status|log|state|stop|withdraw|unstick|list|await|ask|done",
+            "usage: proj run|reply|status|log|state|find|stop|withdraw|unstick|list|await|ask|done",
         )),
     }
 }

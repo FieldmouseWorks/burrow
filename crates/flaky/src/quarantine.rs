@@ -143,6 +143,21 @@ pub fn tests(q: &[Quarantined]) -> Vec<&str> {
     t
 }
 
+/// Whether `r` is OWNER/REPO as GitHub allows them: it goes into the cache's
+/// paths. A repo's name may start with a dot (`.github`), but isn't `.` or
+/// `..`.
+pub fn repo_name(r: &str) -> bool {
+    let ok = |s: &str, extra: &str| {
+        !s.is_empty()
+            && !s.starts_with('-')
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || "-".contains(c) || extra.contains(c))
+    };
+    r.split_once('/').is_some_and(|(o, n)| {
+        ok(o, "") && !o.starts_with('.') && ok(n, "_.") && n != "." && n != ".."
+    })
+}
+
 /// Seconds since 1970, by this machine's clock.
 pub fn now() -> u64 {
     SystemTime::now()
@@ -336,6 +351,22 @@ mod tests {
             &format!("repos/sam/game/issues/{n}/events"),
             vec![ok(200, Value::Array(events), &[])],
         );
+    }
+
+    #[test]
+    fn a_repo_may_start_with_a_dot() {
+        for r in ["FieldmouseWorks/.github", "o/a.b_c-d", "o-1/r"] {
+            assert!(repo_name(r), "{r}");
+        }
+    }
+
+    #[test]
+    fn what_could_leave_the_cache_is_refused() {
+        for r in [
+            "o/.", "o/..", ".o/r", "-o/r", "o/-r", "o/r/x", "o", "/r", "o/", "o_x/r",
+        ] {
+            assert!(!repo_name(r), "{r}");
+        }
     }
 
     #[test]

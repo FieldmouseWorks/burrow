@@ -1,5 +1,5 @@
 """The steward as its GitHub App: the tokens it mints from the App's key,
-and what counts as the App's own word (its status, its dashboard's author)."""
+and what counts as the App's own word (its status, Renovate's)."""
 
 import base64
 import http.server
@@ -13,8 +13,6 @@ import time
 from harness import (FAIL, REAL_TOKEN, T0, WROTE, B, C, P, R, S, T, V, clean, fresh_pr_state, judgment, merges, mkpr, run, said, sh,
                      stand_in, tmp)
 from harness import head as HEAD
-
-import dashboard as D  # noqa: E402 (harness puts the steward on the path)
 
 # The App's key, as systemd hands it to a pass, and its public half to check
 # what was signed with it.
@@ -184,30 +182,17 @@ for login, ours in [("sam", True), ("workers[bot]", True), ("dependabot[bot]", T
 assert C.acted_on({**mkpr(), "author": {"login": "workers", "__typename": "Bot"}})
 assert not C.acted_on({**mkpr(), "author": {"login": "workers", "__typename": "User"}})
 
-# Renovate's dashboard is one an author opened (Renovate runs as the
-# machine user's login): a search hit anyone else opened isn't it.
-D.FOUND.clear()
-gh_kept = C.gh
-C.gh = lambda *a, **k: [{"number": 3, "title": "Dependency Dashboard", "user": "mallory"},
-                        {"number": 4, "title": "Dependency Dashboard", "user": "sam"}]
-st = {}
-assert D.find("sam/r", st) == 4, st
-D.FOUND.clear()
-C.gh = lambda *a, **k: [{"number": 3, "title": "Dependency Dashboard", "user": "mallory"}]
-st = {}
-assert D.find("sam/r", st) is None and st.get("next"), st
-# Renovate as the machine's own App opens it as that App's bot: not an
-# author's from before, nor a person who took the bot's name.
-C.CFG["dashboard"]["renovate"] = "workers[bot]"
-D.FOUND.clear()
-C.gh = lambda *a, **k: [{"number": 3, "title": "Dependency Dashboard", "user": "sam"},
-                        {"number": 4, "title": "Dependency Dashboard", "user": "workers"},
-                        {"number": 5, "title": "Dependency Dashboard", "user": "workers[bot]"}]
-st = {}
-assert D.find("sam/r", st) == 5, st
-C.CFG["dashboard"]["renovate"] = None
-C.gh = gh_kept
-D.FOUND.clear()
+# Renovate is the machine user, one of the authors, as REST and GraphQL give
+# its login; or the machine's own App, and then neither an author from
+# before nor a person who took the bot's name (burrow-upkeep's dashboard
+# goes by the same rule: dashboard.rs renovates).
+assert C.renovates("sam") and not C.renovates("mallory") and not C.renovates(None)
+assert C.renovated({"login": "sam", "__typename": "User"}) and not C.renovated({"login": "sam", "__typename": "Bot"})
+assert not C.renovated(None) and not C.renovated({"login": "mallory", "__typename": "User"})
+C.CFG["renovate"] = "workers[bot]"
+assert C.renovates("workers[bot]") and not C.renovates("sam") and not C.renovates("workers")
+assert C.renovated({"login": "workers", "__typename": "Bot"}) and not C.renovated({"login": "workers", "__typename": "User"})
+C.CFG["renovate"] = None
 # The repos are the ones the App's installations reach, asked as each
 # owner's, a page at a time: GitHub gives an installation no viewerPermission
 # on any of them. Each is known by its databaseId. An empty repo (no default

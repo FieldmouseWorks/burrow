@@ -220,20 +220,20 @@ print("kick: ok")
 fresh_pr_state()
 C.NOW = T
 seen_repos, watched = [], []
-kept_fns = (S.R.discover, S.R.restart, S.R.settle_repo, S.R.publish, S.open_prs, S.D.watch, S.F.watch)
+kept_fns = (S.R.discover, S.R.restart, S.R.settle_repo, S.R.publish, S.open_prs, S.upkeep)
 S.R.discover = lambda: [{"repo": "sam/r", "default": "main"}]
 S.R.restart = lambda r, known, failed: (_ for _ in ()).throw(RuntimeError("proj stop r-1: couldn't"))
 S.R.settle_repo = lambda r, known: (_ for _ in ()).throw(AssertionError("settled a repo not started over"))
 S.R.publish = lambda lines: None
 S.open_prs = kicked_prs
-S.D.watch = S.F.watch = lambda repo, mine: watched.append(repo)
-S.CFG["dashboard"]["enable"] = S.CFG["flaky"]["enable"] = True
+S.upkeep = lambda repo, mine: watched.append(repo)
+S.CFG["upkeep"] = ["burrow-upkeep", "config.json"]
 sys.argv = ["steward", "kick", "sam/r"]
 C.WAKE.clear()
 S.main()
 sys.argv = argv
-S.CFG["dashboard"]["enable"] = S.CFG["flaky"]["enable"] = False
-S.R.discover, S.R.restart, S.R.settle_repo, S.R.publish, S.open_prs, S.D.watch, S.F.watch = kept_fns
+S.CFG["upkeep"] = None
+S.R.discover, S.R.restart, S.R.settle_repo, S.R.publish, S.open_prs, S.upkeep = kept_fns
 assert seen_repos == [] and watched == [], (seen_repos, watched)
 assert C.load("wake.json", None) == {"sam/r": T + 5 * 60}, C.load("wake.json", None)
 print("remade, not started over: ok")
