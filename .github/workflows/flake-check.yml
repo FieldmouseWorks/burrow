@@ -671,18 +671,24 @@ jobs:
             # or a Claude server's MemoryMax, a container's): what the limit
             # leaves, counting as free the inactive page cache the kernel
             # gives back first. The cgroup is v1's memory controller's when
-            # the job has one, cgroup v2's otherwise, found where it's
-            # mounted, however that is (with other v1 controllers, a subtree
-            # of the hierarchy); none mounted, its limit is unknown, so one
-            # evaluation at a time. CGROUP_PROC is where the job's cgroups
-            # and mounts are read from (/proc/self; a test's stand-in).
+            # the job has one, cgroup v2's otherwise, read through the mount
+            # of its hierarchy that shows the most cgroups above it, however
+            # it's mounted (with other v1 controllers, from a subtree). A
+            # limit that can't be read (no mount shows the cgroup, or a
+            # cgroup with a limit doesn't say what it holds) is unknown, so
+            # one evaluation at a time. CGROUP_PROC is where the job's
+            # cgroups and mounts are read from (/proc/self; a test's
+            # stand-in).
             free=$(( $(awk '$1 == "MemAvailable:" { print $2 }' /proc/meminfo) * 1024 ))
             proc=${CGROUP_PROC:-/proc/self}
-            kind='' at='' top=''
+            kind='' at='' top='' unknown=''
+            # The hierarchy, then the job's cgroup's directory and the
+            # mount's, a line each; or the hierarchy and "-" when no mount
+            # shows the cgroup. Mount points are unescaped (mountinfo writes
+            # a space \040, a tab \011); one that isn't stays unfound.
             if [ -r "$proc/cgroup" ]; then
-              # The hierarchy, the job's cgroup's directory in it, and the
-              # mount's; or the hierarchy and "-" when none's mounted.
-              read -r kind at top < <(awk '
+              if awk '
+                function unescape(s) { gsub(/\\040/, " ", s); gsub(/\\011/, "\t", s); return s }
                 FILENAME == ARGV[1] {
                   controllers = $0; sub(/^[^:]*:/, "", controllers)
                   path = controllers; sub(/:.*/, "", controllers); sub(/^[^:]*:/, "", path)
@@ -694,34 +700,55 @@ jobs:
                   for (i = 7; i < NF && $i != "-"; i++) { }
                   if (kind == "v2" && $(i + 1) != "cgroup2") next
                   if (kind == "v1" && ($(i + 1) != "cgroup" || ("," $(i + 3) ",") !~ /,memory,/)) next
-                  root = $4 == "/" ? "" : $4
+                  root = unescape($4)
+                  if (root == "/") root = ""
                   if (job != root && index(job, root "/") != 1) next
-                  print kind, $5 substr(job, length(root) + 1), $5
-                  found = 1
-                  exit
+                  if (found && length(root) >= length(best)) next
+                  best = root; mount = unescape($5); found = 1
                 }
-                END { if (kind != "" && !found) print kind, "-" }
-              ' "$proc/cgroup" "$proc/mountinfo") || true
+                END {
+                  if (kind == "") exit
+                  print kind
+                  if (!found) { print "-"; exit }
+                  print mount substr(job, length(best) + 1)
+                  print mount
+                }
+              ' "$proc/cgroup" "$proc/mountinfo" > "$work/memory-cgroup"; then
+                { IFS= read -r kind; IFS= read -r at; IFS= read -r top; } < "$work/memory-cgroup" || true
+              else
+                unknown="its cgroups couldn't be read"
+              fi
             fi
             case $kind in
-              v1) max=memory.limit_in_bytes held=memory.usage_in_bytes cache=total_inactive_file ;;
-              v2) max=memory.max held=memory.current cache=inactive_file ;;
+              v1) max=memory.limit_in_bytes holds=memory.usage_in_bytes cache=total_inactive_file ;;
+              v2) max=memory.max holds=memory.current cache=inactive_file ;;
             esac
-            if [ "$at" = - ]; then
-              echo "this job's memory cgroup ($kind) isn't mounted here, so its limit is unknown: one evaluation at a time"
+            if [ -n "$kind" ] && [ -z "$unknown" ]; then
+              if [ "$at" = - ]; then
+                unknown="its memory cgroup ($kind) isn't mounted here"
+              elif [ ! -d "$at" ]; then
+                unknown="its memory cgroup ($kind) isn't at $at"
+              else
+                # The job's cgroup and each above it to the mount's, each
+                # limit (none past 2^62, v1's "none") less what it holds.
+                at=${at%/} top=${top%/}
+                while [ -z "$unknown" ]; do
+                  if [ -r "$at/$max" ] && limit=$(cat "$at/$max") && [ "$limit" != max ] && [ "$limit" -lt $(( 1 << 62 )) ]; then
+                    if held=$(cat "$at/$holds") && inactive=$(awk -v k="$cache" '$1 == k { print $2; got = 1 } END { exit !got }' "$at/memory.stat"); then
+                      left=$(( limit - held + inactive ))
+                      [ "$left" -ge "$free" ] || free=$left
+                    else
+                      unknown="$at has a limit but doesn't say what it holds"
+                    fi
+                  fi
+                  [ -n "$at" ] && [ "$at" != "$top" ] || break
+                  at=${at%/*}
+                done
+              fi
+            fi
+            if [ -n "$unknown" ]; then
+              echo "this job's memory limit is unknown ($unknown): one evaluation at a time"
               free=0
-            elif [ -n "$kind" ]; then
-              # The job's cgroup and each above it to the mount's, each
-              # limit (none past 2^62, v1's "none") less what it holds.
-              at=${at%/}
-              while :; do
-                if [ -r "$at/$max" ] && limit=$(cat "$at/$max") && [ "$limit" != max ] && [ "$limit" -lt $(( 1 << 62 )) ]; then
-                  left=$(( limit - $(cat "$at/$held") + $(awk -v k="$cache" '$1 == k { print $2 }' "$at/memory.stat") ))
-                  [ "$left" -ge "$free" ] || free=$left
-                fi
-                [ -n "$at" ] && [ "$at" != "${top%/}" ] || break
-                at=${at%/*}
-              done
             fi
             side=$(nproc)
             room=$(( free / 2147483648 ))
@@ -749,7 +776,10 @@ jobs:
               fi
               echo ok > "$evals/$i"
             }
-            mapfile -t mine < <(jq -r 'to_entries[] | select(.value.mine) | .key' "$RUNNER_TEMP/entries.json")
+            # Listed to a file first, so a jq that fails fails the gate
+            # (a pipe into mapfile would hide it and evaluate nothing).
+            jq -r 'to_entries[] | select(.value.mine) | .key' "$RUNNER_TEMP/entries.json" > "$work/mine"
+            mapfile -t mine < "$work/mine"
             echo "${#mine[@]} outputs to evaluate, $side side by side"
             for i in "${mine[@]}"; do
               while [ "$(jobs -pr | wc -l)" -ge "$side" ]; do wait -n || true; done

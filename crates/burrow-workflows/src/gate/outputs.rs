@@ -194,22 +194,88 @@ fn side_by_side_stays_within_the_jobs_memory_limit() {
             .replace("{mnt}/v2", "{mnt}/unified"),
             [vec![no_limit("cpu,memory/a/b", true)], limit("cpu,memory/a", true)].concat(),
         ),
+        (
+            "a cgroup above the container's, seen through a later mount of the whole hierarchy",
+            "0::/docker/abc/job\n",
+            "36 24 0:31 /docker/abc {mnt}/sub rw - cgroup2 cgroup2 rw\n\
+             37 24 0:31 / {mnt}/full rw - cgroup2 cgroup2 rw\n"
+                .to_owned(),
+            [
+                vec![
+                    no_limit("sub/job", false),
+                    no_limit("full/docker/abc/job", false),
+                ],
+                limit("full/docker", false),
+            ]
+            .concat(),
+        ),
+        (
+            "the job's own, its hierarchy mounted where the path has a space",
+            "0::/job\n",
+            "36 24 0:31 / {mnt}/with\\040space rw - cgroup2 cgroup2 rw\n".to_owned(),
+            limit("with space/job", false),
+        ),
     ];
     for (what, cgroup, mounts, files) in cases {
         let (out, side) = under(cgroup, &mounts, &files);
         assert_eq!(side, 1, "{what}: {out}");
         // By the limit it found, not for want of one.
-        assert!(!out.contains("isn't mounted here"), "{what}: {out}");
+        assert!(!out.contains("memory limit is unknown"), "{what}: {out}");
     }
 }
 
-/// A memory cgroup that isn't mounted can't be read for a limit, so the
-/// gate runs one evaluation at a time and says why.
+/// A limit the gate can't read is unknown, so it runs one evaluation at a
+/// time and says why: no mount shows the job's cgroup, the cgroup isn't
+/// where its mount says, or one with a limit doesn't say what it holds.
 #[test]
-fn an_unmounted_memory_cgroup_takes_one_at_a_time() {
-    let (out, side) = under("0::/job\n", "22 1 0:5 / /proc rw - proc proc rw\n", &[]);
-    assert_eq!(side, 1, "{out}");
-    assert!(out.contains("isn't mounted here"), "{out}");
+fn an_unknown_limit_takes_one_at_a_time() {
+    let v2 = "36 24 0:31 / {mnt}/v2 rw - cgroup2 cgroup2 rw\n";
+    let cases = [
+        (
+            "isn't mounted here",
+            "0::/job\n",
+            "22 1 0:5 / /proc rw - proc proc rw\n",
+            vec![],
+        ),
+        ("isn't at", "0::/gone\n", v2, vec![no_limit("v2", false)]),
+        (
+            "doesn't say what it holds",
+            "0::/job\n",
+            v2,
+            vec![("v2/job/memory.max".to_owned(), format!("{}\n", 3u64 << 30))],
+        ),
+    ];
+    for (why, cgroup, mounts, files) in cases {
+        let (out, side) = under(cgroup, mounts, &files);
+        assert_eq!(side, 1, "{why}: {out}");
+        assert!(
+            out.contains("memory limit is unknown") && out.contains(why),
+            "{why}: {out}"
+        );
+    }
+}
+
+/// A jq that fails listing the leg's outputs fails the gate, rather than
+/// leaving nothing to evaluate.
+#[test]
+fn a_failing_list_of_the_legs_outputs_fails_it() {
+    let g = Gate::new();
+    g.s.stub(
+        "jq",
+        &format!(
+            "case \"$*\" in *'select(.value.mine)'*) exit 5 ;; esac\nexec {} \"$@\"\n",
+            crate::harness::which("jq").display()
+        ),
+    );
+    let r = g.run(
+        &g.flake(EVERY),
+        Run {
+            skip: "vm",
+            ..Run::default()
+        },
+    );
+    assert!(r.code != 0, "{}", r.out);
+    assert!(!r.out.contains("outputs to evaluate"), "{}", r.out);
 }
 
 /// Limits that leave room for more than the machine has free change
