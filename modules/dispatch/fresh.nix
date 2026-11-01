@@ -18,6 +18,13 @@ let
   inherit (config.burrow) user;
   inherit (cfg) template configs;
   state = lib.removeSuffix "@" template;
+  # Its state directory by its real path. A DynamicUser's /var/lib/NAME is a
+  # symlink into /var/lib/private, and a runner rooted at the symlink hands
+  # its jobs a workspace path that isn't its own real one. git matches an
+  # `includeIf.gitdir:` against the real path, so the credentials
+  # actions/checkout includes that way never apply, and a private repo's
+  # fetch asks for a password.
+  root = "/var/lib/private/${state}/%i";
   start = pkgs.writeShellScript "burrow-fresh-runner" ''
     set -eu
     # The runner takes its arguments from ACTIONS_RUNNER_INPUT_* too, and
@@ -134,15 +141,15 @@ in
       # job these are for: jq, gh and curl.
       path = with pkgs; [ bash coreutils findutils gnugrep gnused gnutar gzip git config.nix.package curl gh jq ] ++ cfg.packages;
       environment = {
-        RUNNER_ROOT = "/var/lib/${state}/%i";
-        HOME = "/var/lib/${state}/%i";
+        RUNNER_ROOT = root;
+        HOME = root;
       };
       serviceConfig = {
         # Started once its runner is: its credential is loaded by then.
         Type = "exec";
         DynamicUser = true;
         StateDirectory = "${state}/%i";
-        WorkingDirectory = "/var/lib/${state}/%i";
+        WorkingDirectory = root;
         # The dispatcher queues the start and leaves the file to the unit,
         # which removes it once its runner has it, or as it stops if it
         # never got that far.
@@ -150,7 +157,7 @@ in
         ExecStart = start;
         ExecStartPost = "${remove} ${configs}/%i";
         # Nothing it leaves is any later job's.
-        ExecStopPost = "${remove} ${configs}/%i /var/lib/private/${state}/%i /var/lib/${state}/%i";
+        ExecStopPost = "${remove} ${configs}/%i ${root} /var/lib/${state}/%i";
         Restart = "no";
         KillMode = "control-group";
         # Past a cap the kernel kills a job's biggest process, which fails

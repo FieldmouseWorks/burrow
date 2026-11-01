@@ -1,6 +1,5 @@
-"""burrow-upkeep in a pass: each repo's labels and settings, kept by the
-binary before its hook is seen to, the branches nothing needs, deleted
-after its PRs are seen to, and its Renovate dashboard and flaky tests,
+"""burrow-upkeep in a pass: each repo's labels, settings and hook, kept by
+the binary, the branches nothing needs, deleted after its PRs are seen to, and its Renovate dashboard and flaky tests,
 looked at by the binary (its own tests have the rules) as the App for the
 repo's owner, what it lists put where the steward sorts it, the passes it
 books booked, the Claude jobs it asks for started under their keys and
@@ -364,22 +363,22 @@ S.R.discover, S.R.settle_repo, S.R.publish, S.open_prs, S.upkeep = kept_fns
 # Its settings, as a pass keeps them: by the binary (its own tests have the
 # rules), as the App, then its hook, which goes by whether they were due.
 # GitHub, here: labels there, the settings on (secret scanning aside), no
-# rulesets and no protected branch.
+# rulesets, no protected branch and no hook.
 SETTLE = [["PATCH", "repos/sam/r/labels/", 200, {}, None],
+          ["GET", "repos/sam/r/hooks?per_page=100", 200, [], None],
+          ["POST", "repos/sam/r/hooks", 201, {"id": 9}, None],
           ["GET", "repos/sam/r/rulesets?per_page=100", 200, [], None],
           ["POST", "repos/sam/r/rulesets", 201, {}, None],
           ["GET", "repos/sam/r/branches?protected=true", 200, [], None],
           ["PUT", "repos/sam/r/vulnerability-alerts", 204, None, None],
           ["PATCH", "repos/sam/r", 200, {}, None],
           ["GET", "repos/sam/r", 200, {"allow_auto_merge": True, "delete_branch_on_merge": True, "allow_squash_merge": True}, None]]
-HOOKED = []
 
 
 def settle(at, *first, private=False, default="main"):
     """settle_repo on sam/r `at` seconds after T, with GitHub as SETTLE has
     it and `first` ahead of that: whether it's new, or what it raised."""
     C.NOW = T + at
-    HOOKED.clear()
     with open(GH, "w") as f:
         json.dump({"answers": [*first, *SETTLE], "issues": {}}, f)
     open(CALLED, "w").close()
@@ -398,18 +397,17 @@ def changed():
     return [(c["method"], c["path"]) for c in called() if c["method"] != "GET"]
 
 
-kept_hook = R.hook
-R.hook = lambda repo, st, due: HOOKED.append((repo, st.get("settings"), due)) or True
 C.save("repo-sam_r.json", {"databaseId": 2002})
-# The first: due, kept, and the hook sees it as kept.
+# The first: due, kept, and the hook added, with the hooks' secret.
 assert settle(0) is False
 st = C.load("repo-sam_r.json", {})
 assert st["settings"] == T and st["app"] == 7 and st["databaseId"] == 2002 and len(st["labels"]) == 6, st
-assert HOOKED == [("sam/r", T, True)], HOOKED
+assert st["hookId"] == 9 and st["hook"], st
 assert ("POST", "repos/sam/r/rulesets") in changed() and ("PATCH", "repos/sam/r") in changed(), changed()
+assert changed()[-1] == ("POST", "repos/sam/r/hooks"), changed()
 assert {c["token"] for c in called()} == {"ghs_app_sam"}, called()
 # A minute on, nothing's due, and nothing's asked.
-assert settle(60) is False and called() == [] and HOOKED == [("sam/r", T, False)], (called(), HOOKED)
+assert settle(60) is False and called() == [], called()
 # A private repo has no secret scanning to turn on; an empty one gets no
 # ruleset until its first commit.
 C.save("repo-sam_r.json", {"databaseId": 2002})
@@ -419,9 +417,9 @@ assert C.load("repo-sam_r.json", {})["empty"], C.load("repo-sam_r.json", {})
 # GitHub not saying what the repo is: its hook is still seen to, and then
 # the pass hears of it.
 C.save("repo-sam_r.json", {"databaseId": 2002})
-said = settle(0, ["GET", "repos/sam/r", 404, {"message": "Not Found"}, None])
+said = settle(0, ["GET", "repos/sam/r/hooks", 200, [], None], ["GET", "repos/sam/r", 404, {"message": "Not Found"}, None])
 assert isinstance(said, RuntimeError) and str(said).startswith("its settings: GET repos/sam/r: HTTP 404"), said
-assert HOOKED == [("sam/r", None, True)], HOOKED
+assert ("POST", "repos/sam/r/hooks") in changed() and C.load("repo-sam_r.json", {})["hookId"] == 9, changed()
 # A status run changes nothing, and keeps state of its own.
 C.save("repo-sam_r.json", {"databaseId": 2002})
 S.DRY = C.DRY = True
@@ -429,7 +427,6 @@ settle(0)
 S.DRY = C.DRY = False
 assert changed() == [] and C.load("repo-sam_r.json", {}) == {"databaseId": 2002}, changed()
 assert json.load(open(f"{C.STATE}/dry/repo-sam_r.json"))["settings"] == T
-R.hook = kept_hook
 print("settling: ok")
 
 # Its branches, as a pass sees to them after its PRs: by the binary (its own

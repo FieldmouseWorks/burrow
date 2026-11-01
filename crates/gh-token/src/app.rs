@@ -1,5 +1,5 @@
 //! The App's side of it: a JWT signed with its key, its installation on an
-//! account, and an installation token minted there.
+//! account, an installation token minted there, and the App's own webhook.
 
 use std::time::Duration;
 
@@ -114,6 +114,20 @@ impl App {
         }))
     }
 
+    /// The App's own webhook, sent to `url` and signed with `secret`: its
+    /// settings on GitHub choose its events and turn it on. `now` is Unix
+    /// seconds.
+    pub fn set_hook(&self, url: &str, secret: &str, now: i64) -> Result<(), Error> {
+        let jwt = self.jwt(now)?;
+        let body = serde_json::json!({
+            "url": url, "content_type": "json", "secret": secret, "insecure_ssl": "0",
+        });
+        let path = "/app/hook/config";
+        let url = format!("{}{path}", self.api);
+        let _: serde_json::Value = self.send(&jwt, &url, self.agent.patch(&url), &body)?;
+        Ok(())
+    }
+
     /// The App's own JWT, which only asks GitHub about the App.
     fn jwt(&self, now: i64) -> Result<String, Error> {
         let head = URL_SAFE_NO_PAD.encode(br#"{"alg":"RS256","typ":"JWT"}"#);
@@ -185,14 +199,23 @@ impl App {
         body: &serde_json::Value,
     ) -> Result<T, Error> {
         let url = format!("{}{path}", self.api);
-        let got = self
-            .agent
-            .post(&url)
+        self.send(jwt, &url, self.agent.post(&url), body)
+    }
+
+    /// `req` to `url`, as the App, with `body` as its JSON.
+    fn send<T: DeserializeOwned>(
+        &self,
+        jwt: &str,
+        url: &str,
+        req: ureq::RequestBuilder<ureq::typestate::WithBody>,
+        body: &serde_json::Value,
+    ) -> Result<T, Error> {
+        let got = req
             .header("Authorization", &format!("Bearer {jwt}"))
             .header("Accept", "application/vnd.github+json")
             .header("X-GitHub-Api-Version", "2022-11-28")
             .send_json(body);
-        answer(&url, got)
+        answer(url, got)
     }
 }
 
@@ -449,6 +472,37 @@ mod tests {
             .err()
             .unwrap();
         assert!(e.unavailable, "{e}");
+    }
+
+    #[test]
+    fn sets_the_apps_own_webhook_as_the_app() {
+        let pem = fake::key(true);
+        let github = fake::serve(|r| match (r.method.as_str(), r.path.as_str()) {
+            ("PATCH", "/app/hook/config") => (200, vec![], r#"{"url":"x"}"#.into()),
+            _ => (404, vec![], r#"{"message":"Not Found"}"#.into()),
+        });
+        app(&github, &pem)
+            .set_hook("https://example.org/hook", "hook-secret", 1_000_000)
+            .unwrap();
+        assert_eq!(github.asked(), ["PATCH /app/hook/config"]);
+        let asked = github.asked.lock().unwrap();
+        let body: serde_json::Value = serde_json::from_str(&asked[0].body).unwrap();
+        assert_eq!(
+            body,
+            serde_json::json!({"url": "https://example.org/hook", "content_type": "json",
+                               "secret": "hook-secret", "insecure_ssl": "0"})
+        );
+        let claims = asked[0].auth.split('.').nth(1).unwrap();
+        let claims: serde_json::Value =
+            serde_json::from_slice(&URL_SAFE_NO_PAD.decode(claims).unwrap()).unwrap();
+        assert_eq!(claims["iss"], "7");
+        drop(asked);
+        // GitHub down is asking again later; its no, refused.
+        for (status, unavailable) in [(502, true), (404, false)] {
+            let github = fake::serve(move |_| (status, vec![], r#"{"message":"no"}"#.into()));
+            let e = app(&github, &pem).set_hook("u", "s", 0).err().unwrap();
+            assert_eq!(e.unavailable, unavailable, "{e}");
+        }
     }
 
     #[test]

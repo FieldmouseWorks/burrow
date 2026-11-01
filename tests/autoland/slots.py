@@ -127,15 +127,14 @@ assert ahead(1) in line(1, 800) and ahead(2) in line(2, 800) and JOBS == []
 # The pass takes a repo's PRs in that order, so a free slot goes to the
 # first in line.
 order = []
-kept_fns = (S.R.discover, S.R.settle_repo, S.R.publish, S.open_prs, S.R.unhook_gone, S.R.hook_projects, S.step.handle)
+kept_fns = (S.R.discover, S.R.settle_repo, S.R.publish, S.open_prs, S.step.handle)
 S.R.discover = lambda: [{"repo": "sam/r", "default": "main"}]
 S.R.settle_repo = lambda r, known: False
-S.R.publish = S.R.unhook_gone = lambda *a: None
-S.R.hook_projects = lambda repos: []
+S.R.publish = lambda *a: None
 S.open_prs = lambda owner, name: (info, [mkpr(number=k, labels=lb) for k, lb in ((2, ()), (9, (first,)), (1, ()), (7, (first,)))])
 S.step.handle = lambda repo, pr, *a: order.append(pr["number"])
 S.main()
-S.R.discover, S.R.settle_repo, S.R.publish, S.open_prs, S.R.unhook_gone, S.R.hook_projects, S.step.handle = kept_fns
+S.R.discover, S.R.settle_repo, S.R.publish, S.open_prs, S.step.handle = kept_fns
 assert order == [7, 9, 1, 2], order
 
 # Unset, no limit.

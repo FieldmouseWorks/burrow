@@ -44,7 +44,7 @@ fn main() -> ExitCode {
     let ran = pass::run(
         &cfg,
         &Ask { dry, only },
-        &mut Gh,
+        &mut Gh::default(),
         &mut notify,
         &mut std::io::stdout(),
     );

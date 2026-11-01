@@ -67,9 +67,6 @@ let
     renovateEmail = if renovateMatch == null then null else lib.head renovateMatch;
     inherit (cfg) owners exclude context rulesets baselineJobs baselinePerPass;
     app = { inherit (cfg.app) id slug; };
-    # GitHub's REST API, where the App's own calls go: its tokens
-    # (burrow-upkeep's token.rs) and its webhook (common.py's app_call).
-    api = "https://api.github.com";
     inherit (cfg) authors;
     # The bots whose PRs and comments are the steward's authors' too, by
     # their Apps' slugs: GraphQL's logins for them, REST's without "[bot]".
@@ -165,12 +162,6 @@ let
     } else null;
     repos = cfg.repos;
     inherit (cfg) pipelineRepos leadRepos;
-    # Every repo's hook to burrow-events (repos.py), with what each of its
-    # handlers takes.
-    webhook = {
-      inherit (config.burrow.events) url;
-      events = config.burrow.events.hookEvents;
-    };
     kick = stewardKick;
     reviewers = {
       codex = { inherit (rv.codex) enable; };
@@ -191,7 +182,16 @@ let
   # settings it shares, a repo's settings, and its branch watch and two
   # parts, each null when it's off.
   upkeepConfig = pkgs.writeText "burrow-upkeep.json" (builtins.toJSON {
-    inherit (settings) stateDir proj projectsDir authors bots app api jobTimeout renovate;
+    inherit (settings) stateDir proj projectsDir authors bots app jobTimeout renovate;
+    # GitHub's REST API, where the App's own calls go: its tokens
+    # (token.rs) and its webhook (hook.rs).
+    api = "https://api.github.com";
+    # Every hook to burrow-events (hook.rs), and what a repo's sends: what
+    # each of its handlers takes.
+    webhook = {
+      inherit (config.burrow.events) url;
+      events = config.burrow.events.hookEvents;
+    };
     # Renovate's dashboards, and where a job that ticks a box on one kicks
     # Renovate to read it.
     dashboard = if cfg.dashboard.enable then {
@@ -246,12 +246,12 @@ let
     '
     touch $out
   '';
-  # What a pass runs: openssl signs the App's JWT (common.py), and the rest
-  # talk to GitHub, unpack its tarballs and start Claude jobs. gh and git are
-  # the machine's (github.nix): a pass's own calls pass the steward's token
-  # in GH_TOKEN, which they use as given, and the rest (`status`, a
-  # project's clone) go as the caller, its App's socket in a job's env too.
-  stewardTools = [ (config.burrow.tools.gh or pkgs.gh) config.programs.git.package pkgs.gnutar pkgs.coreutils pkgs.openssl config.burrow.tools.proj ];
+  # What a pass runs: what talks to GitHub, unpacks its tarballs and starts
+  # Claude jobs. gh and git are the machine's (github.nix): a pass's own
+  # calls pass the steward's token in GH_TOKEN, which they use as given, and
+  # the rest (`status`, a project's clone) go as the caller, its App's socket
+  # in a job's env too.
+  stewardTools = [ (config.burrow.tools.gh or pkgs.gh) config.programs.git.package pkgs.gnutar pkgs.coreutils config.burrow.tools.proj ];
   # The command, with this machine's config, so `autoland-steward status`
   # works from any shell, not only in the service. A pass gets its tools
   # however it's started: by its units, or by hand or a Claude job
@@ -845,7 +845,7 @@ in
       # The PR itself (opened, ready, labels, retargeted), pushes, reviews and
       # their threads, comments (a judge's verdict), CI finishing, commit
       # statuses (a proof's verdict), and the repo itself: made (the App's
-      # own webhook sends that, repos.py app_hook), renamed, archived.
+      # own webhook sends that, burrow-upkeep's hook.rs), renamed, archived.
       events = [ "push" "pull_request" "pull_request_review" "pull_request_review_comment"
         "pull_request_review_thread" "issue_comment" "check_suite" "status" "repository" ]
         ++ lib.optional (cfg.dashboard.enable || cfg.flaky.enable) "issues";
@@ -876,7 +876,8 @@ in
           + (if cfg.dryRun then " status" else lib.optionalString (name == "autoland@") " kick %I");
         TimeoutStartSec = "20min";
         Nice = 10;
-        # The repos' hooks' secret (repos.py), and the App's key.
+        # The hooks' secret and the App's key, which burrow-upkeep reads
+        # (hook.rs, token.rs).
         LoadCredential = [ "webhook:${config.burrow.events.secretFile}" "app-key:${cfg.app.keyFile}" ];
       };
     });

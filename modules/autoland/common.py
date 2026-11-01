@@ -9,7 +9,6 @@ installation on that owner. Whose repos a call is about is set around it
 user's own gh login, which every Claude session on the machine shares.
 `autoland-steward status` changes nothing, and reads as whoever runs it."""
 
-import base64
 import contextlib
 import hashlib
 import hmac
@@ -21,7 +20,6 @@ import stat
 import subprocess
 import sys
 import time
-import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime
@@ -85,10 +83,6 @@ def limited(stderr, env):
 # git's credential, for a fetch from or a push to GitHub: gh's, so the
 # App's token in gh_env(), and none of the machine user's helpers.
 GIT_AUTH = ("-c", "credential.helper=", "-c", "credential.helper=!gh auth git-credential")
-# GitHub's REST API, where the App's own calls (its webhook's config) go:
-# gh can't make them, since it sends a JWT as a token, not as the bearer
-# GitHub wants. A check points it at a stand-in.
-API = CFG["api"]
 # Whose repos the calls now are about, innermost last (acting_for).
 _for = []
 # The App's installation tokens, by owner (lower case): each minted once a
@@ -107,43 +101,6 @@ def acting_for(repo):
         yield
     finally:
         _for.pop()
-
-
-def _b64(b):
-    return base64.urlsafe_b64encode(b).rstrip(b"=").decode()
-
-
-def app_jwt():
-    """A JWT that says this is the App, good for nine minutes, signed with
-    its key: systemd's credential app-key, which only the steward's passes
-    are given. Python's standard library has no RSA, so openssl signs it."""
-    now = int(time.time())
-    signed = ".".join(_b64(json.dumps(x, separators=(",", ":")).encode()) for x in (
-        {"alg": "RS256", "typ": "JWT"}, {"iat": now - 60, "exp": now + 540, "iss": str(CFG["app"]["id"])}))
-    key = os.path.join(os.environ.get("CREDENTIALS_DIRECTORY", ""), "app-key")
-    p = subprocess.run(["openssl", "dgst", "-sha256", "-sign", key, "-binary"], input=signed.encode(), capture_output=True)
-    if p.returncode != 0:
-        raise RuntimeError(f"couldn't sign as the App: {p.stderr.decode(errors='replace').strip()[:200]}")
-    return f"{signed}.{_b64(p.stdout)}"
-
-
-def app_call(method, path, jwt, body=None):
-    """A call the App makes as itself, with body as its JSON; raises as gh()
-    does."""
-    data = json.dumps(body).encode() if body is not None else b"" if method == "POST" else None
-    req = urllib.request.Request(f"{API}/{path}", method=method, data=data, headers={
-        "Authorization": f"Bearer {jwt}", "Accept": "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "burrow-autoland",
-        **({"Content-Type": "application/json"} if body is not None else {})})
-    try:
-        with urllib.request.urlopen(req, timeout=30) as r:
-            return json.load(r)
-    except urllib.error.HTTPError as e:
-        why = f"{method} {path}: HTTP {e.code} {e.read(300).decode(errors='replace')}"
-        out = e.code in (429,) or e.code >= 500 or e.headers.get("x-ratelimit-remaining") == "0"
-        raise (Unavailable if out else RuntimeError)(why) from None
-    except OSError as e:  # no answer at all (URLError is one)
-        raise Unavailable(f"{method} {path}: {e}") from None
 
 
 def token(owner):
@@ -185,14 +142,15 @@ def gh_env(repo=None):
 UPKEEP_TIMEOUT = 300
 
 
-def upkeep(*args, input=None):
+def upkeep(*args, input=None, mints=False):
     """burrow-upkeep (crates/burrow-upkeep) on a repo, as the App for its
     owner, as every GitHub call of a pass's, `input` on its stdin: what it
     printed, read, with a rate limit it met noted for the pass (LIMITED).
-    What it says of itself goes to the journal; one that fails or runs past
-    UPKEEP_TIMEOUT raises."""
+    `mints`: it mints its own tokens, for each owner it's about (`hooks`),
+    so it's handed none. What it says of itself goes to the journal; one
+    that fails or runs past UPKEEP_TIMEOUT raises."""
     p = subprocess.run([*CFG["upkeep"], *args, "--now", repr(NOW), *(["--dry"] if DRY else [])], input=input,
-                       stdout=subprocess.PIPE, text=True, env=gh_env(), timeout=UPKEEP_TIMEOUT)
+                       stdout=subprocess.PIPE, text=True, env=None if mints else gh_env(), timeout=UPKEEP_TIMEOUT)
     if p.returncode:
         raise RuntimeError(f"burrow-upkeep {args[0]} exited {p.returncode}")
     out = json.loads(p.stdout)
@@ -412,13 +370,6 @@ def wake(repo, at):
     limit turned away waits for its reset: steward.after_limit)."""
     if at > NOW:
         WAKE[repo] = min(WAKE.get(repo, at), at)
-
-
-def webhook_secret():
-    """The secret GitHub signs the webhook's deliveries with (burrow-events
-    checks them; repos.py gives it to each repo's hook)."""
-    with open(os.path.join(os.environ.get("CREDENTIALS_DIRECTORY", ""), "webhook")) as f:
-        return f.read().strip()
 
 
 def kick(repo):

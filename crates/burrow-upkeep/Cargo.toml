@@ -1,6 +1,6 @@
 [package]
 name = "burrow-upkeep"
-description = "What the autoland steward keeps up in each repo besides its PRs: its labels and settings, the branches nothing needs, Renovate's dashboard and the flaky tests' quarantine"
+description = "What the autoland steward keeps up in each repo besides its PRs: its labels, settings and webhook, the branches nothing needs, Renovate's dashboard and the flaky tests' quarantine"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -14,6 +14,7 @@ jiff.workspace = true
 regex = { version = "1.13.1", default-features = false, features = ["std", "unicode-perl", "unicode-case"] }
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 tempfile.workspace = true
 ureq.workspace = true
 

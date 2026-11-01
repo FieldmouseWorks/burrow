@@ -386,9 +386,8 @@
           touch $out
         '';
         # The steward's tools reach a pass however it's started: by hand or
-        # a Claude job (`autoland-steward kick OWNER/REPO`), with no openssl,
-        # gh or proj of its own, gets them from the wrapper, ahead of its own
-        # PATH. The reviewers' service gets none of them: only what its unit
+        # a Claude job (`autoland-steward kick OWNER/REPO`), with no gh or
+        # proj of its own, gets them from the wrapper, ahead of its own PATH. The reviewers' service gets none of them: only what its unit
         # gives it. Its gh is the machine's: in an App's env (a job's),
         # `status` and a project's clone go through the socket, and a pass's
         # own calls with the steward's token as given.
@@ -418,7 +417,7 @@
             p=$(env -i PATH=/caller ${pkgs.bash}/bin/bash path-of $sub)
             case $p in *:/caller) ;; *) echo "$sub: the caller's PATH isn't kept after the steward's: $p"; exit 1 ;; esac
             [ "$p" != /caller ] || { echo "autoland-steward sets no PATH of its own"; exit 1; }
-            for t in openssl gh git tar proj; do
+            for t in gh git tar proj; do
               env -i PATH="$p" ${pkgs.bash}/bin/bash -c "command -v $t" >/dev/null || { echo "$sub: no $t on the steward's PATH"; exit 1; }
             done
           done

@@ -3,11 +3,12 @@ repo's old name (GitHub answers that name as the repo) is its checkout, and has
 its origin repointed; a clone of anything else stays, is reported once on the
 stuck issue, and no job tries to clone over it."""
 
+import json
 import os
 import subprocess
 import sys
 
-from harness import REAL, ACTING, C, S, tmp
+from harness import REAL, ACTING, UPKEEP_RAN, C, S, tmp
 
 src = f"{tmp}/clones"
 os.makedirs(src)
@@ -42,7 +43,7 @@ ASKED = []
 
 
 def gh(*a, **k):
-    if a[:2] != ("api", "graphql"):  # a hook's, say: hook_projects goes on without it
+    if a[:2] != ("api", "graphql"):  # anything but the lookup: GitHub says no
         raise RuntimeError("gh api: HTTP 404")
     assert "id: databaseId" in C.NOW_CALLED, "a repo is known by its databaseId, as discover() has it"
     args = dict(x.split("=", 1) for x in a[2:] if "=" in x and not x.startswith("query="))
@@ -94,8 +95,8 @@ assert url("was") == "git@github.com:sam/now.git", url("was")
 assert tried() == [] and not os.path.exists(f"{src}/now")
 
 # A full pass does it before anything needs the checkout, whichever job it is
-# (one that doesn't clone can't find it otherwise), and hook_projects then
-# hooks the repo by its name. A clone of a repo the pass has seen isn't asked
+# (one that doesn't clone can't find it otherwise), and its hooks are then
+# handed the repo by its name. A clone of a repo the pass has seen isn't asked
 # about, nor is one whose name is only spelled differently touched.
 clone("later", "https://github.com/old-org/later.git")
 clone("Spelled", "https://github.com/EVE/app.git")
@@ -106,12 +107,12 @@ assert url("later") == "https://github.com/eve/later.git", url("later")
 assert url("Spelled") == "https://github.com/EVE/app.git", url("Spelled")
 assert not [x for x in ASKED if x[1] in ("sam/app", "sam/now")], ASKED
 assert ("sam", "old-org/later") in ASKED, ASKED  # past the owner the App's gone from
-hooked = S.R.hook_projects([{"repo": "sam/app"}, {"repo": "sam/now"}])
-assert {"repo": "eve/later"} in hooked and {"repo": "old-org/later"} not in hooked, hooked
+open(UPKEEP_RAN, "w").close()
+S.R.hooks([{"repo": "sam/app"}, {"repo": "sam/now"}])
+(hooks,) = [json.loads(x) for x in open(UPKEEP_RAN)]
+assert hooks[0] == "hooks" and hooks[-1]["seen"] == ["sam/app", "sam/now"], hooks
+assert "eve/later" in hooks[-1]["projects"] and "old-org/later" not in hooks[-1]["projects"], hooks
 subprocess.run(["rm", "-rf", f"{src}/later", f"{src}/Spelled"], check=True)
-for x in ("repo-eve_later.json", "repo-EVE_app.json", "repo-eve_app.json"):
-    if os.path.exists(f"{tmp}/state/{x}"):
-        os.remove(f"{tmp}/state/{x}")
 
 # GitHub not answering says nothing about what a repo's called: it stays.
 clone("later", "https://github.com/sam/later.git")
@@ -190,14 +191,12 @@ os.remove(CLONES)
 
 # A clone of another repo, in the path: reported through a real pass, on the
 # stuck issue and not just the log, naming the folder and both origins.
-kept_fns = (S.R.discover, S.R.settle_repo, S.R.publish, S.open_prs, S.R.unhook_gone, S.R.hook_projects)
+kept_fns = (S.R.discover, S.R.settle_repo, S.R.publish, S.open_prs)
 PUBLISHED = []
 NEW = {"new": True}
 S.R.discover = lambda: [{"repo": "sam/tool", "default": "main"}]
 S.R.settle_repo = lambda r, known: NEW["new"]
 S.R.publish = PUBLISHED.append
-S.R.unhook_gone = lambda *a: None
-S.R.hook_projects = lambda repos: []
 S.open_prs = lambda owner, name: ({"id": "R", "defaultBranchRef": {"name": "main"}}, [])
 clone("tool", "https://github.com/eve/tool.git")
 NAMES["eve/tool"] = "eve/tool"
@@ -342,7 +341,7 @@ assert full(T + 90100) == []
 assert tried() == ["sam/tool"], tried()
 assert "sam/tool" in C.load("known.json", [])
 
-S.R.discover, S.R.settle_repo, S.R.publish, S.open_prs, S.R.unhook_gone, S.R.hook_projects = kept_fns
+S.R.discover, S.R.settle_repo, S.R.publish, S.open_prs = kept_fns
 C.gh, C.job, sys.argv = kept_gh, kept_job, kept_argv
 os.environ["PATH"] = kept_path
 S.CFG.clear()

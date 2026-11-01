@@ -3,7 +3,7 @@
 //! says back to the pass (Out).
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use burrow_github::{Api, Error, Response, call};
@@ -188,22 +188,15 @@ impl Pass<'_> {
 
     /// A state file, or its default when there's none or it can't be read.
     pub fn load<T: DeserializeOwned + Default>(&self, name: &str) -> T {
-        fs::read_to_string(self.state_dir().join(name))
-            .ok()
-            .and_then(|t| serde_json::from_str(&t).ok())
-            .unwrap_or_default()
+        load(&self.state_dir(), name)
     }
 
     /// A state file, written whole or not at all. A status run that can't
     /// write the state dir (from a shell of someone else's) is fine.
     pub fn save<T: Serialize>(&self, name: &str, value: &T) -> Result<(), String> {
-        let path = self.state_dir().join(name);
-        let tmp = path.with_extension("json.tmp");
-        let text = serde_json::to_string_pretty(value).map_err(|e| e.to_string())?;
-        match fs::write(&tmp, text).and_then(|()| fs::rename(&tmp, &path)) {
-            Ok(()) => Ok(()),
+        match save(&self.state_dir(), name, value) {
             Err(_) if self.dry => Ok(()),
-            Err(e) => Err(format!("{}: {e}", path.display())),
+            done => done,
         }
     }
 
@@ -269,10 +262,30 @@ impl Pass<'_> {
     }
 }
 
-/// The repo's own state file: what settle and the branch watch keep, each
-/// its own part of it, beside what the steward keeps there itself.
+/// The repo's own state file: what settle, the branch watch and its hook
+/// keep, each its own part of it, beside what the steward keeps there
+/// itself.
 pub fn repo_file(repo: &str) -> String {
     format!("repo-{}.json", repo.replace('/', "_"))
+}
+
+/// The state file `name` in `dir`, or its default when there's none or it
+/// can't be read.
+pub fn load<T: DeserializeOwned + Default>(dir: &Path, name: &str) -> T {
+    fs::read_to_string(dir.join(name))
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default()
+}
+
+/// The state file `name` in `dir`, written whole or not at all.
+pub fn save<T: Serialize>(dir: &Path, name: &str, value: &T) -> Result<(), String> {
+    let path = dir.join(name);
+    let tmp = path.with_extension("json.tmp");
+    let text = serde_json::to_string_pretty(value).map_err(|e| e.to_string())?;
+    fs::write(&tmp, text)
+        .and_then(|()| fs::rename(&tmp, &path))
+        .map_err(|e| format!("{}: {e}", path.display()))
 }
 
 /// When the rate limits GitHub's `rate_limit` says are spent reset, the

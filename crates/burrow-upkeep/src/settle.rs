@@ -221,7 +221,7 @@ fn keep(
 
 /// The labels, each with its colour and what it says: the waiting ones say
 /// what a PR waits on, and that its status says more.
-fn labels(cfg: &Settle) -> Vec<(String, &'static str, String)> {
+pub(crate) fn labels(cfg: &Settle) -> Vec<(String, &'static str, String)> {
     let (l, w, says) = (&cfg.labels, &cfg.labels.waiting, &cfg.context);
     vec![
         (
