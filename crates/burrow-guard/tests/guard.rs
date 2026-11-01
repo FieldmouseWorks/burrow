@@ -515,6 +515,35 @@ fn a_push_is_read_word_by_word_as_the_shell_splits_it() {
 }
 
 #[test]
+fn a_git_joined_to_what_comes_before_it_is_still_read() {
+    let b = Box::new();
+    let work = clone_tracking("work", "feature");
+    let w = work.path();
+    let main = format!("Force-push or delete of 'main' {SHARED}");
+    for cmd in [
+        // Each pushes main under bash with a stub git.
+        "su --command='git push -f origin main; true'",
+        r#"arr[0]='git push -f origin main; true'; eval "${arr[0]}""#,
+        "git -c alias.p='!git push -f origin main -q' p",
+        // Not git itself, but the bash asked about them, and a question
+        // costs less than guessing what they run.
+        "xgit push -f origin main",
+        r#"echo '{"cmd":"git push -f origin main -q"}'"#,
+        // An expansion among git's own options.
+        "git $opts push -f origin main",
+    ] {
+        assert_eq!(b.check(cmd, w), Some(main.clone()), "{cmd:?}");
+    }
+    for cmd in [
+        "gitk push -f origin main",
+        "git $opts status -f origin main",
+        "legit status -f origin main",
+    ] {
+        assert_eq!(b.check(cmd, w), None, "{cmd:?}");
+    }
+}
+
+#[test]
 fn a_refspec_is_read_the_same_after_a_double_dash() {
     let b = Box::new();
     let on_feature = clone_tracking("feature", "feature");

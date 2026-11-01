@@ -86,11 +86,12 @@ fn assigned(word: &str) -> Option<&str> {
     is_name.then_some(value)
 }
 
-/// Whether `word` can run git: named so or by a path, or an expansion that
-/// ends so (`$git`, `${x}git`, `$(true)git`) or is followed by `push`, as
+/// Whether `word` can run git: it ends so, whatever's joined on before it
+/// (a path, `--command=git`, `!git` in a git alias, `arr[0]=git`, `${x}git`),
+/// or an expansion that ends so (`${git}`) or is followed by `push`, as
 /// whatever it holds may be git (`$GIT push`).
 fn runs_git(word: &str, next: Option<&String>) -> bool {
-    if word == "git" || word.ends_with("/git") {
+    if word.ends_with("git") {
         return true;
     }
     (word.contains('$') || word.contains(shell::UNKNOWN))
@@ -138,7 +139,8 @@ fn takes_input_as_words(word: &str) -> bool {
 }
 
 /// What follows `git`, if it's a push: git's own options (each `-C DIR`
-/// taken in turn for where it runs), then `push` and its words.
+/// taken in turn for where it runs), then `push` and its words. An
+/// expansion among them may be an option, or nothing at all.
 fn after_git(cwd: &Path, words: &[String]) -> Option<(PathBuf, Push)> {
     let mut at = cwd.to_path_buf();
     let mut words = words.iter();
@@ -151,7 +153,7 @@ fn after_git(cwd: &Path, words: &[String]) -> Option<(PathBuf, Push)> {
             | "--attr-source" | "--super-prefix" => {
                 words.next();
             }
-            w if w.starts_with('-') => {}
+            w if w.starts_with('-') || w.contains(['$', shell::UNKNOWN]) => {}
             _ => return None,
         }
     }
