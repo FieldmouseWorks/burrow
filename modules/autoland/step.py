@@ -49,13 +49,15 @@ STRIKES = {
     "close": "GitHub keeps refusing to close it, though its base already has everything it changes",
     "mergeable": "GitHub won't say it can be merged",
     "job": "no Claude job can start for it",
-    "build": "its proof build can't start (systemd-run refuses it)",
+    "build": "its proof build or run can't start (systemd-run refuses it, or a run has no checkout here)",
     "eval": "what its proof builds can't be worked out (its eval fails or times out)",
     "post": "GitHub keeps refusing a review it's to post",
     "lost": "its Claude jobs keep stopping before they finish (timed out, quiet or crashed)",
     "stop": "proj keeps refusing to stop its Claude jobs on a head it no longer has",
 }
 STRIKE_LIMIT = 3  # failures in a row of one step, on one head, that make its wait overdue
+# What the steward's own proofs are doing while they're at work.
+VERB = {"build": "building", "run": "running"}
 
 
 def clock(t):
@@ -327,14 +329,15 @@ def handle(repo, pr, repo_info, digest, held=None):
         if not waits.overdue(repo, pr, STRIKES["lost"]):
             digest.append(("Failing again and again", line, f"{STRIKES['lost']}, {times} times in a row (journalctl -u autoland)"))
 
-    def again(kind, task, doing, answer, at=head, begin=None):
+    def again(kind, task, doing, answer, at=head, begin=None, unit=None):
         """A job that ended without its answer is started once more; one that
         does that twice fails the PR's status and is listed for the owner.
         One that broke is started again once its retry is due, however many
         times, and doesn't count toward the two (retry_at). begin: a proof
-        build's, as started has it (doing is then what it builds)."""
+        build's or run's (unit), as started has it (doing is then what it
+        builds or runs)."""
         how = broke(kind)
-        last = f"build of {doing}" if begin else f"Claude job {doing}"
+        last = f"{unit} of {doing}" if begin else f"Claude job {doing}"
         if how and (due := retry_at(kind)) > C.NOW:
             settle("pending", f"Settled; the last {last} {how}, so another starts at {clock(due)}"[:140])
         elif not how and st.get(kind + "Again") == at:
@@ -344,10 +347,10 @@ def handle(repo, pr, repo_info, digest, held=None):
             if not how:
                 st[kind + "Again"] = at
             st.pop(kind + "Lost", None)
-            busy = f"building {doing} here" if begin else at_work(kind, doing, at)
+            busy = f"{VERB[unit]} {doing} here" if begin else at_work(kind, doing, at)
             settle("pending", f"Settled; {busy} again (the last one {how or f'ended without {answer}'})"[:140])
         elif begin:
-            settle("pending", f"Settled, but the build of {doing} couldn't start again"[:140], "Couldn't start a proof build")
+            settle("pending", f"Settled, but the {unit} of {doing} couldn't start again"[:140], f"Couldn't start a proof {unit}")
         else:
             settle("pending", f"Settled, but no Claude job could start {doing} again"[:140],
                    "Couldn't start a Claude job")
@@ -598,38 +601,44 @@ def handle(repo, pr, repo_info, digest, held=None):
         """The reviewers are done, and checks that run on a machine, not in
         CI, are left. Those with a proofBuilds attribute go first, built by
         the steward itself (proofs.build), no Claude job, while CI still
-        runs (build_early); the rest, once CI and the builds have passed, a
-        Claude job runs on this head and records their verdicts. Either
-        starts once its repo's proofSlots have room for it (one started
-        again too), or it has nothing new to build; with nothing to build
-        at all, neither: the verdicts are taken from the store (proofs.py)."""
+        runs (build_early); then those with a proofRuns command, run by the
+        steward itself the same way (proofs.start_run); the rest, once CI,
+        the builds and the runs have passed, a Claude job runs on this head
+        and records their verdicts. Each starts once its repo's proofSlots
+        have room for it (one started again too), or a build has nothing
+        new to build; with nothing to build at all, none: the verdicts are
+        taken from the store (proofs.py)."""
         builds = [c for c in ci_names if c in rc["proofBuilds"]]
+        runs = [] if builds else [c for c in ci_names if c in rc["proofRuns"]]
         beside = [c for c in ci_names if c not in machine]  # CI still running
-        checks = builds or ci_names
+        checks = builds or runs or ci_names
         names = ", ".join(checks)
-        if builds:
+        # The steward's own proof, a build or a run, else a Claude job's.
+        unit = "build" if builds else "run" if runs else None
+        if unit:
             doing, task = names, None
 
             def begin():
-                return P.build(repo, pr, checks, st)
+                return (P.build if builds else P.start_run)(repo, pr, checks, st)
         else:
             doing, task, begin = f"running {names}", proof_task(repo, pr, checks, rc["proofJobs"]), None
 
         def running_now():
             skipped = "; nothing new to build, so it skipped the line" if st.get("provedFree") == head else ""
-            busy = f"building {names} here" if builds else at_work("proved", doing)
+            busy = f"{VERB[unit]} {names} here" if unit else at_work("proved", doing)
             ci_too = f", CI ({', '.join(beside)}) beside it" if beside else ""
             settle("pending", f"Settled; {busy}{ci_too}{skipped}"[:140])
 
-        # What this proof is: a build or a Claude job, of which checks, each
-        # built from which attribute. This head's proof so far was another
-        # (proofs.fits: a build before the Claude jobs, a job from before
-        # its check had a build, a check added or remapped since): this one
+        # What this proof is: a build, a run or a Claude job, of which
+        # checks, each built from which attribute or run as which command.
+        # This head's proof so far was another (proofs.fits: a build before
+        # the Claude jobs, a job from before its check had a build, a check
+        # added or remapped since): this one
         # starts afresh, nothing of that one's carried over (its retries,
         # the two lost answers, its verdicts). One still at work is stopped,
         # on the stopping path when proj or systemd won't just now, and
         # holds its slot until it's over (proofs.live).
-        stage = ["build" if builds else "job", sorted(checks), {c: rc["proofBuilds"].get(c) for c in checks}]
+        stage = [unit or "job", sorted(checks), {c: rc["proofBuilds" if builds else "proofRuns"].get(c) for c in checks}]
         if st.get("proved") == head and (jid := st.get("provedJob")) and not P.fits(st, stage):
             st["proofsLive"] = P.jobs(st)
             if running("proved") and not C.stop_job(jid):
@@ -637,34 +646,35 @@ def handle(repo, pr, repo_info, digest, held=None):
             for k in ("", "Job", "At", "Lost", "Again", "Broke", "For", "Unposted"):
                 st.pop("proved" + k, None)
             ends.pop("proved", None)
-        # A build of this head that's done: the verdicts it kept. A failure's
-        # log goes on the PR first, so a comment GitHub didn't take is tried
-        # again before the red status hands the PR to a fix; verdicts GitHub
-        # took only some of are posted again even once it's red (handle).
-        if builds and st.get("proved") == head and not running("proved") and ends.get("proved") == "done":
+        # A build or run of this head that's done: the verdicts it kept. What
+        # goes on the PR (a failed build's log, a run's summary) goes first,
+        # so a comment GitHub didn't take is tried again before the red
+        # status hands the PR to a fix; verdicts GitHub took only some of
+        # are posted again even once it's red (handle).
+        if unit and st.get("proved") == head and not running("proved") and ends.get("proved") == "done":
             jid = st["provedJob"]
             said = P.verdicts(jid)
             if said is not None:
                 # Only what's left to post: the ones it posted are green.
                 said = {c: v for c, v in said.items() if c in checks}
             if said is None:
-                # One that kept no verdicts broke: it's built again (below).
+                # One that kept no verdicts broke: it's done again (below).
                 ends["proved"] = "failed"
             else:
-                failed = [c for c, (state, _) in said.items() if state == "failure"]
-                if failed and st.get("provedSaid") != jid:
-                    if C.comment(repo, n, P.failed_log(jid, failed)) is not None:
-                        st["provedSaid"] = jid
-                said_all = not failed or st.get("provedSaid") == jid
+                note = P.note(jid, said) if st.get("provedSaid") != jid else None
+                if note is not None and C.comment(repo, n, note) is not None:
+                    st["provedSaid"] = jid
+                said_all = note is None or st.get("provedSaid") == jid
+                done = "built" if builds else "ran"
                 if said_all and P.record(repo, pr, said):
                     st.pop("provedUnposted", None)
                     # Their statuses kick the pass that lands it, or hands it to a fix.
-                    settle("pending", f"Settled; {names} built here, its verdict posted"[:140])
+                    settle("pending", f"Settled; {names} {done} here, its verdict posted"[:140])
                     return
                 if said_all:
                     st["provedUnposted"] = jid
                 strike("status")
-                settle("pending", f"Settled; {names} built here, its verdict not posted yet"[:140])
+                settle("pending", f"Settled; {names} {done} here, its verdict not posted yet"[:140])
                 return
         retry = lost("proved")
         if not retry and st.get("proved") == head:
@@ -715,11 +725,11 @@ def handle(repo, pr, repo_info, digest, held=None):
         before = st.get("provedJob")
         st["provedFree"] = head if free else None
         if retry:
-            again("proved", task, doing, "its verdict", begin=begin)
+            again("proved", task, doing, "its verdict", begin=begin, unit=unit)
         elif started("proved", task, begin=begin):
             running_now()
-        elif builds:
-            settle("pending", f"Settled, but the build of {names} couldn't start"[:140], "Couldn't start a proof build")
+        elif unit:
+            settle("pending", f"Settled, but the {unit} of {names} couldn't start"[:140], f"Couldn't start a proof {unit}")
         else:
             settle("pending", f"Settled, but no Claude job could run {names}"[:140],
                    "Couldn't start a Claude job to run its checks")
@@ -764,13 +774,14 @@ def handle(repo, pr, repo_info, digest, held=None):
 
     machine = C.machine(rc)  # the checks a machine runs, not CI, and how
     ci, ci_names, docs = ci_state(pr, machine, moved := moved_from(repo, pr, st), repo)
-    # A build's verdicts GitHub took only some of: the rest go up whatever
-    # CI says now, so a failure it took doesn't leave the others unposted
-    # behind a red PR. Their statuses kick the pass that sees them. Only
-    # those of its checks still built from the attribute it built
-    # (proofs.still): one dropped or remapped since waits for its own build.
+    # A build's or run's verdicts GitHub took only some of: the rest go up
+    # whatever CI says now, so a failure it took doesn't leave the others
+    # unposted behind a red PR. Their statuses kick the pass that sees them.
+    # Only those of its checks still that kind of proof, from the attribute
+    # or command it had (proofs.still): one dropped, remapped or made the
+    # other kind since waits for its own.
     if (left := st.get("provedUnposted")) and st.get("proved") == head:
-        said = P.still(st, P.verdicts(left) or {}, rc["proofBuilds"])
+        said = P.still(st, P.verdicts(left) or {}, rc)
         if not said or P.record(repo, pr, said):
             st.pop("provedUnposted")
         else:
@@ -795,7 +806,7 @@ def handle(repo, pr, repo_info, digest, held=None):
     # A check the steward builds itself costs no Claude job, so it needn't
     # wait for CI to pass: it starts once the reviewers are done, and builds
     # while CI runs rather than after it. A Claude job's check still waits.
-    build_early = ci == "pending" and any(c in rc["proofBuilds"] for c in ci_names)
+    build_early = ci == "pending" and any(c in rc["proofBuilds"] or c in rc["proofRuns"] for c in ci_names)
     # A minor dependency PR a Claude job fixed carries Claude's code, which no
     # reviewer has read (and Renovate won't merge); a bot's PR that changes a
     # workflow beyond repinning its actions changes the gate. Either goes

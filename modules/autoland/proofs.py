@@ -28,6 +28,16 @@ as a job does, and is asked after and stopped like one (common.job_state,
 stop_job). Checks without an attribute are a Claude job's, after the
 builds: a failed build needs no job.
 
+A check with a proofRuns command is that command's exit and nothing more,
+so the steward runs it itself too (start_run), with no Claude job: in a
+unit of the machine user's own that crates/burrow-proof starts, runs and
+ends, each command in a fresh worktree of the repo's checkout at the PR's
+head, its exit the verdict. The unit's end writes end.json as a build's
+does, and comment.md: what each command wrote to its PROOF_SUMMARY file,
+which goes on the PR; its log stays on the machine, so nothing it prints
+reaches GitHub but what it chose to write there (note). Runs go after the
+builds and before the Claude jobs: a failed run needs no job either.
+
 A PR behind its base whose builds aren't in the store may have them there
 once it's brought up to date: most PRs change nothing a proof builds, so
 merged into the base's tip they build what the base does, which is built
@@ -308,7 +318,7 @@ def build(repo, pr, checks, st):
     systemd wouldn't start it."""
     n, head = pr["number"], pr["headRefOid"]
     drvs = {c: st["proofOutputs"]["drvs"][c] for c in checks}
-    jid = f"{C.BUILD}{re.sub('[^a-z0-9]+', '-', repo.lower())}-{n}-{head[:12]}-{time.time_ns()}"
+    jid = unit_id(repo, n, head)
     if C.DRY:
         log(f"  would: build {', '.join(sorted(set(drvs.values())))}")
         return jid
@@ -319,12 +329,54 @@ def build(repo, pr, checks, st):
     except (RuntimeError, OSError, subprocess.SubprocessError) as e:
         log(f"{repo}#{n}: can't tell what the build of {', '.join(checks)} makes: {e}")
         return None
+    return start(jid, {"repo": repo, "number": n, "head": head, "drvs": drvs, "outs": outs},
+                 f"the build of {', '.join(checks)}")
+
+
+def start_run(repo, pr, checks, st):
+    """Starts running checks' commands (the repo's proofRuns) on PR's head,
+    in a unit crates/burrow-proof starts (`burrow-proof start DIR`, its
+    folder) and asks after as a build's: no Claude job. Each runs in a
+    worktree of the repo's checkout here (common.project_dir), the one its
+    Claude jobs work in. Nothing of the PR's base goes in: a run proves its
+    head under its commands, as a build its head's derivation. Its id, or
+    None when there's no checkout or burrow-proof wouldn't start it."""
+    n, head = pr["number"], pr["headRefOid"]
+    runs = {c: C.repo_cfg(repo)["proofRuns"][c] for c in checks}
+    jid = unit_id(repo, n, head)
+    if C.DRY:
+        log(f"  would: run {', '.join(sorted(runs))}")
+        return jid
+    folder = C.project_dir(repo)
+    if folder is None:
+        log(f"{repo}#{n}: no checkout of it here to run {', '.join(checks)} in")
+        return None
+    # burrow-proof's Record: what it runs, and how, from this steward's config.
+    return start(jid, {"repo": repo, "number": n, "head": head, "checkout": os.path.join(CFG["projectsDir"], folder),
+                       "runs": runs, "unit": C.build_unit(jid), "timeout": int(CFG["proofTimeout"] * C.MIN),
+                       "bash": CFG["bash"], "git": CFG["git"], "trees": CFG["runsDir"],
+                       "kick": f"{CFG['kick']}/{repo}", "commentBytes": COMMENT_BYTES},
+                 f"the run of {', '.join(checks)}", [CFG["proofRun"], "start"])
+
+
+def unit_id(repo, n, head):
+    return f"{C.BUILD}{re.sub('[^a-z0-9]+', '-', repo.lower())}-{n}-{head[:12]}-{time.time_ns()}"
+
+
+def start(jid, build_json, what, starter=None):
+    """The proof's folder, with what it is (build.json), then its unit: a
+    build's runs run(); a run's, starter (its command line, the folder
+    after it) starts. Its id, or None when it wouldn't start."""
     prune()
-    os.makedirs(os.path.join(STATE, "builds", jid))
-    save(f"builds/{jid}/build.json", {"repo": repo, "number": n, "head": head, "drvs": drvs, "outs": outs})
-    p = C.user_systemctl_run(C.build_unit(jid), own("build", jid))
+    here = os.path.join(STATE, "builds", jid)
+    os.makedirs(here)
+    save(f"builds/{jid}/build.json", build_json)
+    if starter is None:
+        p = C.user_systemctl_run(C.build_unit(jid), own("build", jid))
+    else:
+        p = subprocess.run([*starter, here], capture_output=True, text=True)
     if p.returncode:
-        log(f"{repo}#{n}: couldn't start the build of {', '.join(checks)}: {p.stderr.strip()[-300:]}")
+        log(f"{build_json['repo']}#{build_json['number']}: couldn't start {what}: {p.stderr.strip()[-300:]}")
         return None
     return jid
 
@@ -478,6 +530,22 @@ def failed_log(jid, checks):
     return f"{top}{log_bytes.decode()}{fence}\n"
 
 
+def note(jid, said):
+    """What goes on the PR for a done proof, given its verdicts still to
+    post (said), or None: a build's failed checks with its log's end
+    (failed_log); a run's comment.md, as burrow-proof wrote it as it ended
+    (its summaries, and its failures)."""
+    b = load(f"builds/{jid}/build.json", {})
+    if "runs" in b:
+        try:
+            with open(os.path.join(STATE, "builds", jid, "comment.md"), errors="replace") as f:
+                return f.read()
+        except FileNotFoundError:
+            return None
+    failed = sorted(c for c, (state, _) in said.items() if state == "failure")
+    return failed_log(jid, failed) if failed else None
+
+
 def fits(st, stage):
     """Whether the PR's recorded proof is the one stage ([kind, checks,
     {check: attribute}]) wants: the same kind, with each of stage's checks
@@ -492,15 +560,17 @@ def fits(st, stage):
     return set(stage[1]) <= set(was[1]) and all(was[2].get(c) == stage[2].get(c) for c in stage[1])
 
 
-def still(st, said, attrs):
-    """Of the PR's recorded build's verdicts (said), those its checks still
-    want: each check's that's still built (attrs, the repo's proofBuilds)
-    from the attribute that build had. A check dropped or remapped since
-    gets none of it."""
+def still(st, said, rc):
+    """Of the PR's recorded build's or run's verdicts (said), those its
+    checks still want: each check's that's still that kind of proof (a
+    build in rc's proofBuilds, a run in its proofRuns), from the attribute
+    or command that proof had. A check dropped, remapped or made the other
+    kind since gets none of it."""
     was = st.get("provedFor") or []
-    if len(was) != 3 or was[0] != "build":
+    if len(was) != 3 or was[0] not in ("build", "run"):
         return {}
-    return {c: v for c, v in said.items() if c in attrs and attrs[c] == was[2].get(c)}
+    now = rc["proofBuilds" if was[0] == "build" else "proofRuns"]
+    return {c: v for c, v in said.items() if c in now and now[c] == was[2].get(c)}
 
 
 def wait(repo, n):

@@ -314,12 +314,14 @@
         # the agents, and its one-way paths as the module sets them; a look it
         # queues is taken by the reviewers' own service, burrow-review, with
         # its tests' stand-ins for codex and bubblewrap (they need bash and jq).
-        # Its passes run burrow-upkeep, whose source says what it lists.
+        # Its passes run burrow-upkeep, whose source says what it lists, and
+        # start a proof run through burrow-proof, which reads what they write.
         autoland = pkgs.runCommand "autoland-check" { nativeBuildInputs = [ pkgs.python3 pkgs.git pkgs.openssl pkgs.bash pkgs.jq ]; } ''
           python3 -I ${./tests/autoland}/check.py ${./modules/autoland}/steward.py \
             ${pkgs.writeText "one-way.json" (builtins.toJSON self.nixosConfigurations.example.config.burrow.autoland.oneWay)} \
             ${self.packages.${system}.burrow-review}/bin/burrow-review ${./crates/burrow-review/tests/fakes} \
-            ${self.packages.${system}.burrow-upkeep}/bin/burrow-upkeep ${./crates/burrow-upkeep/src}
+            ${self.packages.${system}.burrow-upkeep}/bin/burrow-upkeep ${./crates/burrow-upkeep/src} \
+            ${self.packages.${system}.burrow-proof}/bin/burrow-proof
           touch $out
         '';
         # The example's reviewers' service reads the config its module writes
@@ -728,6 +730,9 @@
         # Probes answer on a private repo's issues, never read a unit off the
         # allowlist, and post a planted token scrubbed.
         probe = import ./tests/probe.nix { inherit self pkgs; };
+        # A proof run in the unit the steward starts: each command fenced,
+        # the whole run bounded, and all of it ended however it ends.
+        proof-run = import ./tests/proof-run.nix { inherit self pkgs; };
         # HOST-switch's revert when the window runs out mid-activation.
         switch = import ./tests/switch.nix { inherit self pkgs; };
         # A runner started fresh for one job: its registration and state

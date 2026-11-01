@@ -1,0 +1,18 @@
+[package]
+name = "burrow-proof"
+description = "A proof check that's a command, run by the autoland steward in a unit of the machine user's own, with no Claude: systemd bounds and ends it, each command fenced in a cgroup of its own"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+ureq.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

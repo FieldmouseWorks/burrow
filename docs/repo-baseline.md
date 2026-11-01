@@ -156,7 +156,11 @@ root only.
    else, one Claude job a head runs them on that commit and records each
    verdict. One that's only a build (`proofBuilds`) the steward builds
    itself, with no Claude job, as soon as the PR is settled, while its CI
-   runs. A red one goes to a fix job like any red CI.
+   runs. One that's only a command's exit (`proofRuns`) the steward runs
+   itself too ([burrow-proof](../crates/burrow-proof/src/lib.rs)), in a
+   worktree at the head and a cgroup of its own, after the builds and
+   before any Claude job, posting only what the command writes to
+   `PROOF_SUMMARY`. A red one goes to a fix job like any red CI.
 8. A red default branch (CI failed on what was merged): one Claude job
    finds the cause and opens a PR from `autoland/red-SHA` that reverts the
    merge that broke it, or fixes it, and that PR lands like any other. Before

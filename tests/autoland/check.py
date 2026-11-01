@@ -10,10 +10,11 @@ no failing step loops quietly, and the label that says what a PR waits on.
 Each module is one part, run in this order.
 
   nix eval --json .#nixosConfigurations.example.config.burrow.autoland.oneWay >/tmp/one-way.json
-  (cd crates && cargo build -p burrow-review -p burrow-upkeep)
+  (cd crates && cargo build -p burrow-review -p burrow-upkeep -p burrow-proof)
   python3 -I tests/autoland/check.py modules/autoland/steward.py /tmp/one-way.json \
     crates/target/debug/burrow-review crates/burrow-review/tests/fakes \
-    crates/target/debug/burrow-upkeep crates/burrow-upkeep/src
+    crates/target/debug/burrow-upkeep crates/burrow-upkeep/src \
+    crates/target/debug/burrow-proof
   nix build .#checks.x86_64-linux.autoland
 """
 
@@ -24,5 +25,5 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import harness  # noqa: E402,F401 (the steward, set up from argv)
 
-for part in ("app", "review", "post", "handle", "rounds", "conflicts", "methods", "landed", "slots", "builds", "proving", "docs", "cancelled", "legs", "lost", "superseded", "deps", "answers", "upkeep", "gates", "passes", "digest", "clones", "upkeeping", "watched", "strikes", "trains", "waiting"):
+for part in ("app", "review", "post", "handle", "rounds", "conflicts", "methods", "landed", "slots", "builds", "proving", "runs", "docs", "cancelled", "legs", "lost", "superseded", "deps", "answers", "upkeep", "gates", "passes", "digest", "clones", "upkeeping", "watched", "strikes", "trains", "waiting"):
     importlib.import_module(part)

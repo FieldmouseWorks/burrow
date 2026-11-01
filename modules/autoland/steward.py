@@ -19,8 +19,8 @@ event reports):
      reviewer (Codex, reviewers.py), post what they found, hand open
      findings, red CI or a conflict with its base to a Claude job, build
      the checks only a machine of the owner's runs that are a build
-     (proofBuilds, proofs.py) and have a Claude job run the rest
-     (proofJobs), or judge a PR it won't land on its own word (tasks.py says
+     (proofBuilds, proofs.py), run those that are a command (proofRuns)
+     and have a Claude job run the rest (proofJobs), or judge a PR it won't land on its own word (tasks.py says
      what each job is told), post the `review-settled` commit status and
      merge it, or list it for the owner.
   3. Delete the branches whose tip is already in the default branch or a
@@ -53,7 +53,8 @@ changing anything.
 
 `autoland-steward build ID` is a proof build, run by the unit a pass starts
 for it (proofs.py): the steward builds a proof check that's only a build
-itself, with no Claude job.
+itself, with no Claude job. One that's only a command is crates/burrow-proof's
+to run, in a unit of its own.
 
 The reviews the passes queue are worked through by the reviewers' own
 service (crates/burrow-review, `autoland-review`), as a user of their own. A
