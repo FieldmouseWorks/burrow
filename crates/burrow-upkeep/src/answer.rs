@@ -272,8 +272,9 @@ pub fn answer(p: &mut Pass, h: &Handed) -> Result<Posted, Unposted> {
     }
     if let Some(new) = description {
         // Read again right before it's written over, and written once: one
-        // asked again could undo an edit made in between. One whose answer
-        // was lost is seen on the next try's read (ours, above).
+        // asked again could undo an edit made in between, after a 429 too.
+        // The next try reads it all again, and sees one whose answer was
+        // lost as ours (above).
         let path = format!("repos/{repo}/pulls/{n}");
         let now = p.get(&path).map_err(unposted)?;
         if now["state"] != json!("open")

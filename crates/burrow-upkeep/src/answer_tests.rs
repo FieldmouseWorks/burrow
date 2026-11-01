@@ -472,13 +472,21 @@ fn the_description_is_read_again_and_written_once() {
         );
     }
     // A write whose answer is lost isn't asked again: it may have gone
-    // through, and an edit after it would be undone. The next try reads it.
-    let mut hub = github(pr("OPEN", PUSHED, BODY, open()));
-    reread(&mut hub, "open", PUSHED, BODY);
-    hub.on("PATCH", "repos/sam/r/pulls/7$", reply(502, json!({})));
-    assert!(matches!(
-        answered(&mut hub, &h),
-        Err(Unposted::Unanswered(_))
-    ));
-    assert_eq!(hub.asked.iter().filter(|a| a.0 == "PATCH").count(), 1);
+    // through, and an edit after it would be undone. Nor one GitHub turned
+    // away for now (429): an edit can come while it waits. The next try
+    // reads the PR again.
+    for status in [502, 429] {
+        let mut hub = github(pr("OPEN", PUSHED, BODY, open()));
+        reread(&mut hub, "open", PUSHED, BODY);
+        hub.on("PATCH", "repos/sam/r/pulls/7$", reply(status, json!({})));
+        assert!(
+            matches!(answered(&mut hub, &h), Err(Unposted::Unanswered(_))),
+            "{status}"
+        );
+        assert_eq!(
+            hub.asked.iter().filter(|a| a.0 == "PATCH").count(),
+            1,
+            "{status}"
+        );
+    }
 }

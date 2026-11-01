@@ -151,9 +151,10 @@ pub fn call_allowing(
 }
 
 /// A write that asked again could undo someone else's (a PATCH of a PR's
-/// description, which its owner edits too): asked again only after a 429,
-/// as a POST is (`call`). One whose answer is lost or a 5xx may have been
-/// done, so it's the caller's to read again and see.
+/// description, which its owner edits too): asked once, whatever comes
+/// back. One whose answer is lost or a 5xx may have been done, and after a
+/// 429 anything may have changed while it waited, so what it was asked on
+/// is the caller's to read again before it asks again.
 pub fn call_once(
     api: &mut dyn Api,
     method: &str,
@@ -161,9 +162,9 @@ pub fn call_once(
     body: Option<&Value>,
 ) -> Result<Response, Error> {
     let what = format!("{method} {path}");
-    let r = tried(api, &what, false, |api| {
-        api.request(method, path, body, None)
-    })?;
+    let r = api
+        .request(method, path, body, None)
+        .map_err(|f| failed(&what, f))?;
     kept(&what, r, &[])
 }
 
@@ -234,14 +235,7 @@ fn tried(
             }
             Ok(r) => return Ok(r),
             Err(f) if f.transient && repeats => f.why,
-            Err(f) => {
-                let why = format!("{what}: {}", f.why);
-                return Err(if f.transient {
-                    Error::unanswered(why)
-                } else {
-                    Error::said(why)
-                });
-            }
+            Err(f) => return Err(failed(what, f)),
         };
         if tries == AGAIN.len() {
             return Err(Error::unanswered(format!(
@@ -251,6 +245,17 @@ fn tried(
         }
         api.pause(AGAIN[tries]);
         tries += 1;
+    }
+}
+
+/// A request GitHub gave no answer to (`transient`: none came), or that
+/// couldn't be made, as an Error.
+fn failed(what: &str, f: Failed) -> Error {
+    let why = format!("{what}: {}", f.why);
+    if f.transient {
+        Error::unanswered(why)
+    } else {
+        Error::said(why)
     }
 }
 
@@ -738,15 +743,25 @@ mod tests {
             e.why
         );
         assert_eq!(gh.asked("PATCH").len(), 1);
-        // A 429 is GitHub doing nothing: asked again.
+        // Nor after a 429: GitHub did nothing, but the edit it would undo
+        // can come while it waits.
         let mut gh = Fake::default();
         gh.on(
             "PATCH",
             "repos/sam/r/pulls/7",
             vec![ok(429, Value::Null, &[]), ok(200, json!({}), &[])],
         );
+        let e = call_once(&mut gh, "PATCH", "repos/sam/r/pulls/7", Some(&body)).unwrap_err();
+        assert!(e.unanswered, "{}", e.why);
+        assert_eq!(gh.asked("PATCH").len(), 1);
+        // Its answer, when it has one.
+        let mut gh = Fake::default();
+        gh.on(
+            "PATCH",
+            "repos/sam/r/pulls/7",
+            vec![ok(200, json!({}), &[])],
+        );
         assert!(call_once(&mut gh, "PATCH", "repos/sam/r/pulls/7", Some(&body)).is_ok());
-        assert_eq!(gh.asked("PATCH").len(), 2);
     }
 
     #[test]
