@@ -127,6 +127,8 @@ pkgs.testers.runNixOSTest {
     # and so every unit under it, runs from before.
     users.users.carol = { isNormalUser = true; uid = 1002; linger = true; };
     specialisation.carol.configuration.burrow.github.apps.workers.users = [ "dev" "carol" ];
+    # A new gh-token, as any bump of it brings.
+    specialisation.answers.configuration.systemd.services."gh-token-workers@".environment.NEW_ANSWERS = "1";
     # The system from before ACLs, as a switch back to it finds it: a group,
     # and no unit that knows of ACLs.
     specialisation.groups.configuration = {
@@ -569,6 +571,20 @@ pkgs.testers.runNixOSTest {
           allowed(dev("gh-token get sam"))
           status, out = machine.execute(carol)
           assert status != 0 and "ghs_" not in out, (status, out)
+
+      with subtest("a switch that changes what answers leaves the socket up, with an answer under way"):
+          answers = "systemctl list-units --state=running --no-legend --plain 'gh-token-workers@*'"
+          machine.succeed(f"systemd-run --unit=asker ${pkgs.socat}/bin/socat -u EXEC:'${pkgs.coreutils}/bin/sleep 600' UNIX-CONNECT:{socket}")
+          machine.wait_until_succeeds(f"{answers} | grep -q .")
+          under_way = machine.succeed(answers).split()[0]
+          inode = machine.succeed(f"stat -c %i {socket}")
+          switch("answers")
+          assert "NEW_ANSWERS" in machine.succeed("systemctl cat gh-token-workers@.service")
+          assert machine.succeed(f"stat -c %i {socket}") == inode
+          machine.succeed(f"systemctl is-active {under_way}")
+          allowed(dev("gh-token get sam"))
+          machine.succeed("systemctl stop asker")
+          switch(None)
 
       access = "gh-token-workers-access.service"
       dropins = f"/run/systemd/system/{access}.d"

@@ -313,6 +313,10 @@ in
       };
     }) cfg.apps // lib.mapAttrs' (name: app: lib.nameValuePair "gh-token-${name}@" {
       description = "A token of the GitHub App ${app.slug}, for one who asked";
+      # One answer per connection, and the next is already the new system's. A
+      # restart would close the socket for as long as the switch runs, and all
+      # who ask meanwhile, a unit the switch left running too, get refused.
+      restartIfChanged = false;
       serviceConfig = {
         ExecStart = "${package}/bin/gh-token answer --api ${lib.escapeShellArg app.api} --app-id ${toString app.id} --key %d/key --cache %t/gh-token-cache/${name}";
         StandardInput = "socket";
