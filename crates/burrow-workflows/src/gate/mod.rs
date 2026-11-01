@@ -6,7 +6,7 @@
 //! every evaluation reads one snapshot of the checkout, and a flake with an
 //! output eval-apart doesn't check, or with a nixConfig, is refused rather
 //! than half checked. With legs, each leg evaluates its own share of the
-//! outputs, every Nth from its own on, and builds only the checks among
+//! outputs, those whose names hash to it, and builds only the checks among
 //! them. Without it, the checks are built first, by derivation,
 //! kept as GC roots, once the one nix process that evaluated them has
 //! exited, so no evaluation stays in memory beside the builds; nix flake

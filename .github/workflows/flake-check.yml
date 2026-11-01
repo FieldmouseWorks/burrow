@@ -83,7 +83,7 @@ on:
           How many jobs to split the gate across, 1 to 8, each on a runner of
           its own, for a gate that takes too long on one; more than one needs
           eval-apart. Every leg evaluates the plan, and leg K of N then
-          evaluates every Nth output from the Kth (counting from 1) and
+          evaluates the outputs whose names hash to K (counting from 1) and
           builds the checks among them. The legs are named `leg K of N`;
           once they've all finished, a job named check, as the gate's own is
           with one leg, says whether they all passed and attests that, with
@@ -639,14 +639,17 @@ jobs:
             fi
             jq -r '.unknown[] | "warning: unknown flake output \u0027\(.)\u0027"' "$RUNNER_TEMP/plan.json"
             # Which entries are checks to build, which checks are skipped, and
-            # which entries are this leg's: every LEGS-th from the LEG-th.
-            jq --arg skip "$SKIP" --argjson legs "$LEGS" --argjson leg "$LEG" '($skip | split(" ") | map(select(. != ""))) as $s
+            # which entries are this leg's: those whose names hash to it. By
+            # name, not place in the plan, so an output added or gone moves no
+            # other to a leg whose kept builds (keep-builds) lack it.
+            jq --arg skip "$SKIP" --argjson legs "$LEGS" --argjson leg "$LEG" 'def hash: reduce explode[] as $c (0; (. * 31 + $c) % 1000003);
+              ($skip | split(" ") | map(select(. != ""))) as $s
               | .entries | map(.check and (.name as $n | $s | index([$n]) | not)) as $build
               | [range(length) as $i | .[$i] + {build: $build[$i], skip: (.[$i].check and ($build[$i] | not)),
-                  mine: ($i % $legs == $leg - 1)}]' \
+                  mine: (.[$i].what | hash % $legs == $leg - 1)}]' \
               "$RUNNER_TEMP/plan.json" > "$RUNNER_TEMP/entries.json"
             if [ "$LEGS" -gt 1 ]; then
-              echo "leg $LEG of $LEGS: the plan's outputs $LEG, $((LEG + LEGS)), $((LEG + 2 * LEGS)) and so on, of $(jq length "$RUNNER_TEMP/entries.json")"
+              echo "leg $LEG of $LEGS: $(jq 'map(select(.mine)) | length' "$RUNNER_TEMP/entries.json") of the plan's $(jq length "$RUNNER_TEMP/entries.json") outputs, those whose names hash to it"
             fi
             # Each evaluation exits before the next starts, so the most memory
             # in use is one evaluation's. Each derivation is made a GC root at
