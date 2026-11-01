@@ -90,7 +90,8 @@
       # read these files and run git, jq and nix, and the gate's run its VM
       # tests in a slot of the real heavy (flock); proj's clone repos to read
       # their origins, gh-token's make keys with openssl, and lock-age's
-      # check its wait against what the steward reads (lock_wait.py).
+      # check its wait against what the steward reads (lock_wait.py), and
+      # house-sync's read burrow's own house blocks.
       crates = self.lib.project {
         inherit self;
         rust = {
@@ -104,6 +105,7 @@
             "modules/autoland/prs.py"
             "modules/cpu/heavy.sh"
             "modules/autoland/lock_wait.py"
+            "house"
           ];
           testInputs = pkgs: [ pkgs.git pkgs.jq pkgs.nix pkgs.util-linux pkgs.openssl ];
         };
@@ -856,10 +858,17 @@
           [ "$got" = artifactErrors ] || { echo "got: $got"; exit 1; }
           touch $out
         '';
-        # Which repos house-sync passes over, and when it tells the owner, with
-        # stand-ins for gh and the notifier.
-        house-sync = pkgs.runCommand "house-sync-check" { nativeBuildInputs = [ pkgs.python3 pkgs.jq pkgs.util-linux pkgs.diffutils ]; } ''
-          python3 -I ${./tests/house-sync.py} ${./modules/house/sync.sh} ${./house}
+        # The example's house-sync reads the config its module writes (a
+        # field the binary doesn't know fails it). The sandbox has no
+        # /etc/burrow/house, so a pass is one for other blocks: it says so and
+        # does nothing, before any gh call or lock.
+        house-sync-config = let
+          sync = pkgs.lib.getExe (builtins.head (builtins.filter (p: (p.name or "") == "house-sync")
+            self.nixosConfigurations.example.config.environment.systemPackages));
+        in pkgs.runCommand "house-sync-config-check" { } ''
+          got=$(${sync} status)
+          [ "$got" = "house-sync: the system has other house blocks than this pass; the pass for those does the work" ] ||
+            { echo "got: $got"; exit 1; }
           touch $out
         '';
         # flake-gate: a repo's CI gate step, run here as CI runs it, and
