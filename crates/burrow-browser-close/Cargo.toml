@@ -1,0 +1,14 @@
+[package]
+name = "burrow-browser-close"
+description = "Closes the signed-in browser as its own window would, so it writes its cookies first"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+base64 = "0.23.1"
+serde_json.workspace = true
+
+[lints]
+workspace = true

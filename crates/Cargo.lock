@@ -45,6 +45,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "burrow-browser-close"
+version = "0.0.0"
+dependencies = [
+ "base64",
+ "serde_json",
+]
+
+[[package]]
 name = "burrow-dispatch"
 version = "0.0.0"
 dependencies = [
