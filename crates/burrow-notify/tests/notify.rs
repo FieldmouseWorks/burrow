@@ -93,6 +93,15 @@ impl GitHub {
         self.fails.contains(&call)
     }
 
+    /// The repo's label of that name, as the repo spells it: GitHub's label
+    /// names ignore case.
+    fn spelled(&self, name: &str) -> Option<String> {
+        self.labels
+            .iter()
+            .find(|l| l.eq_ignore_ascii_case(name))
+            .cloned()
+    }
+
     fn list(&self, query: &str) -> Result<Response, Failed> {
         let params: Vec<(&str, &str)> = query
             .split('&')
@@ -156,10 +165,9 @@ impl Api for GitHub {
                 if self.fails("read label") {
                     return refused();
                 }
-                if self.labels.iter().any(|l| l == name) {
-                    answer(200, json!({"name": name}), None)
-                } else {
-                    answer(404, json!({"message": "Not Found"}), None)
+                match self.spelled(name) {
+                    Some(l) => answer(200, json!({"name": l}), None),
+                    None => answer(404, json!({"message": "Not Found"}), None),
                 }
             }
             ("POST", ["labels"]) => {
@@ -176,7 +184,7 @@ impl Api for GitHub {
                     self.labels.push(name);
                     return refused();
                 }
-                if self.labels.contains(&name) {
+                if self.spelled(&name).is_some() {
                     return answer(422, json!({"message": "Validation Failed"}), None);
                 }
                 self.labels.push(name);
@@ -188,7 +196,12 @@ impl Api for GitHub {
                 }
                 let n = self.add(body["title"].as_str().unwrap(), &[]);
                 let (no_push, drop) = (self.no_push, self.drop_on_create);
-                let known = self.labels.clone();
+                let spelled: Vec<Option<String>> = body["labels"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|l| self.spelled(l.as_str().unwrap()))
+                    .collect();
                 let issue = self.issues.last_mut().unwrap();
                 issue.body = body["body"].as_str().unwrap().into();
                 for (field, into) in [
@@ -200,11 +213,14 @@ impl Api for GitHub {
                         .map(|a| a.iter().map(|v| v.as_str().unwrap().into()).collect())
                         .unwrap_or_default();
                 }
-                // GitHub keeps only labels it knows, and for a login without
-                // push access none, and says 201 all the same.
-                issue
-                    .labels
-                    .retain(|l| !no_push && !drop && known.contains(l));
+                // GitHub keeps only labels it knows, as the repo spells them,
+                // and for a login without push access none, and says 201 all
+                // the same.
+                issue.labels = if no_push || drop {
+                    vec![]
+                } else {
+                    spelled.into_iter().flatten().collect()
+                };
                 let labels = label_objects(&issue.labels);
                 if self.lose {
                     self.lose = false;
@@ -221,7 +237,12 @@ impl Api for GitHub {
                 }
                 let i = number(n);
                 for l in body["labels"].as_array().unwrap() {
-                    self.issues[i].labels.push(l.as_str().unwrap().into());
+                    let l = l.as_str().unwrap();
+                    let l = self.spelled(l).unwrap_or_else(|| l.into());
+                    let on = &mut self.issues[i].labels;
+                    if !on.iter().any(|o| o.eq_ignore_ascii_case(&l)) {
+                        on.push(l);
+                    }
                 }
                 answer(200, json!([]), None)
             }
@@ -650,6 +671,22 @@ fn a_dropped_label_and_a_lost_answer_still_make_one_issue() {
     b.close("k14");
     assert!(!b.github.issues[0].open);
     assert!(!b.pending("k14"));
+}
+
+/// GitHub's label names ignore case: the repo's `Updates` is the notice's
+/// `updates`, so its issue is found again, gets no twin, and closes.
+#[test]
+fn the_label_is_the_repos_in_any_case() {
+    let mut b = machine(Some("sam/homelab"));
+    b.github.labels = vec!["Updates".into()];
+    b.open("k16", NOW);
+    assert_eq!(b.github.issues[0].labels, ["Updates"]);
+    assert!(b.journal.0.is_empty(), "{:?}", b.journal.0);
+    b.open("k16", NOW + 1);
+    assert_eq!(b.github.issues.len(), 1, "a twin");
+    b.close("k16");
+    assert!(!b.github.issues[0].open);
+    assert!(!b.pending("k16"));
 }
 
 /// Dropped only from the issue: a login that may add it, adds it.
