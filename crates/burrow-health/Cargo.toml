@@ -1,0 +1,18 @@
+[package]
+name = "burrow-health"
+description = "HOST-health: the machine's health checks and failed units, a snapshot of them, and whether anything has regressed since one"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+rustix = { version = "1.1.6", features = ["fs", "process"] }
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

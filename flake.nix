@@ -699,6 +699,16 @@
         # HOST-health's ZFS check: the pools the machine needs, by name or
         # GUID, with a stand-in zpool.
         health-zfs = import ./tests/health-zfs.nix { inherit self pkgs; };
+        # HOST-health as the example machine builds it (crates/burrow-health,
+        # whose tests are the rest): it reads its config, and with no checks
+        # and no systemd in the sandbox, reports nothing.
+        health-config = let
+          health = pkgs.lib.getExe self.nixosConfigurations.example.config.burrow.tools.health;
+        in pkgs.runCommand "health-config-check" { } ''
+          got=$(${health} 2>err) || { echo "HOST-health failed (exit $?): $(cat err)"; exit 1; }
+          [ -z "$got" ] || { echo "HOST-health reported: $got"; exit 1; }
+          touch $out
+        '';
         # heartbeat's beat as the example builds it, with a stand-in HOST-health.
         heartbeat = import ./tests/heartbeat.nix { inherit self pkgs; };
         # Off-site backups of ZFS snapshots through restic and rclone, and the
