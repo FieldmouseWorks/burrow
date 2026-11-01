@@ -3,9 +3,11 @@ about one: how its CI stands, its `review-settled` status, its waiting
 label, the merge."""
 
 import re
+import subprocess
 import urllib.parse
 
 import common as C
+import reviewers as V
 import train as T
 from common import CFG, CONTEXT, DRY, log
 
@@ -464,6 +466,34 @@ def rules(repo, base, none, absent, *args):
             return none
         log(f"{repo}: the rules on {base}: {e}")
         return None
+
+
+def adds_nothing(repo, pr):
+    """The base's tip when merging the PR now would change nothing on it,
+    else None: its head merged into that tip, as GitHub merges it, has the
+    tip's own tree. Then what it changes landed some other way (another PR
+    made the same change, red main's fixes most often), and its merge would
+    only put an empty commit on the base. Read from the steward's mirror,
+    fetched just now, so the tip is the one GitHub would merge it onto: the
+    steward's merges are the base's only moves while a pass runs. None too
+    when the merge conflicts or the PR has moved past the head this pass
+    read (GitHub refuses that head's merge). Raises when git can't say."""
+    if DRY:
+        return None
+    n, head, base = pr["number"], pr["headRefOid"], pr["baseRefName"]
+    mirror = V.fetch(repo, f"+refs/pull/{n}/head:refs/pr/{n}", f"+refs/heads/{base}:refs/base/{base}")
+    if V.git("-C", mirror, "rev-parse", f"refs/pr/{n}").decode().strip() != head:
+        return None
+    tip = V.git("-C", mirror, "rev-parse", f"refs/base/{base}").decode().strip()
+    merged = subprocess.run(["git", "-C", mirror, "merge-tree", "--write-tree", "--no-messages", tip, head],
+                            capture_output=True, text=True)
+    # 1 is a merge that conflicts: it would change the base, once resolved.
+    if merged.returncode == 1:
+        return None
+    if merged.returncode:
+        raise RuntimeError(f"git merge-tree: {merged.stderr.strip()[-300:]}")
+    same = merged.stdout.split()[0] == V.git("-C", mirror, "rev-parse", f"{tip}^{{tree}}").decode().strip()
+    return tip if same else None
 
 
 def land(repo, pr, repo_info):

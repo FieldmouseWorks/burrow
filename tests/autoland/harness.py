@@ -384,8 +384,9 @@ def clean(sha=head, comments=(), reviews=(), **kw):
 QDIR, DDIR = f"{tmp}/state/{V.QUEUE}", f"{tmp}/state/{V.DONE}"
 
 
-def run(pr, after, obsolete=False):
-    """One pass, `after` seconds after the head first showed up."""
+def run(pr, after, held=None):
+    """One pass, `after` seconds after the head first showed up; held, a
+    red-branch fix the branch's watch holds, and why."""
     C.NOW = C.ts(T0) + after
     WROTE.clear()
     JOBS.clear()
@@ -395,7 +396,7 @@ def run(pr, after, obsolete=False):
     POSTED.clear()
     digest = []
     with C.acting_for("sam/r"):
-        H.handle("sam/r", pr, info, digest, obsolete)
+        H.handle("sam/r", pr, info, digest, held)
     return " ".join(x for x in WROTE if "/statuses/" in x), digest
 
 
@@ -437,12 +438,23 @@ def fresh_pr_state():
         os.makedirs(os.path.join(f"{tmp}/state", d))
 
 
-REAL = {"job": C.job, "stop_job": C.stop_job, "forget_issues": C.forget_issues, "app_hook": R.app_hook}  # the steward's own, for the checks of what it runs
+REAL = {"job": C.job, "stop_job": C.stop_job, "forget_issues": C.forget_issues, "app_hook": R.app_hook,
+        "adds_nothing": H.adds_nothing}  # the steward's own, for the checks of what it runs
+ALREADY = {}  # the base's tip a PR's merge would change nothing on (H.adds_nothing), by number, or what it raises
+
+
+def already(repo, pr):
+    got = ALREADY.get(pr["number"])
+    if isinstance(got, Exception):
+        raise got
+    return got
 
 
 def stand_in():
-    """gh, Claude jobs, the queue, the posting and the App's webhook, for
-    handle() and the passes."""
+    """gh, Claude jobs, the queue, the posting, the App's webhook and what a
+    merge would change (every merge changes something unless ALREADY says),
+    for handle() and the passes."""
+    H.adds_nothing = already
     C.gh = gh_stub
     C.write = write
     C.job = job

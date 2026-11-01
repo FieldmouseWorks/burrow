@@ -17,6 +17,7 @@ the machine failing, not the job's answer: it's started again the same way
 (retry_at)."""
 
 import re
+import subprocess
 import time
 
 import common as C
@@ -32,7 +33,8 @@ from common import CFG, DEP_RE, DRY, MIN, load, log, repo_cfg, save, ts
 from seal import MAJOR as MAJOR_VERDICT  # renovate-sweep's, on a Renovate major
 from touches import automerges, bot_edited, dep_kind, gate_edit, moved_from, one_way
 from tasks import DEP_SEEN, PAST_LIMIT, REVIEWED, fix_task, judge_task, judged_on, judgment, owed, proof_task
-from prs import MERGE_STEPS, PROOF_SLOT, RELEASE_AGE, REVIEWER, ci_state, eyes, land, our_status, post_status, show_waiting
+from prs import (MERGE_STEPS, PROOF_SLOT, RELEASE_AGE, REVIEWER, adds_nothing, ci_state, eyes, land, our_status, post_status,
+                 show_waiting)
 
 # The link Claude Code puts in a PR its session opens.
 SESSION = re.compile(r"https://claude\.ai/code/session_\w+")
@@ -45,6 +47,8 @@ STRIKES = {
     "status": "GitHub keeps refusing its status",
     "update": "GitHub keeps refusing to bring it up to date",
     "merge": "GitHub keeps refusing the merge",
+    "empty": "what its merge would change can't be worked out (git can't fetch it or merge it)",
+    "close": "GitHub keeps refusing to close it, though its base already has everything it changes",
     "mergeable": "GitHub won't say it can be merged",
     "job": "no Claude job can start for it",
     "build": "its proof build can't start (systemd-run refuses it)",
@@ -61,7 +65,7 @@ def clock(t):
     return time.strftime("%-I:%M%p %Z", time.localtime(t)).replace("AM", "am").replace("PM", "pm")
 
 
-def handle(repo, pr, repo_info, digest, obsolete=False):
+def handle(repo, pr, repo_info, digest, held=None):
     rc = repo_cfg(repo)
     n, head = pr["number"], pr["headRefOid"]
     by_train = T.rides(repo, pr, repo_info)
@@ -424,6 +428,25 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
             return
         strike("merge", refused)
 
+    def already_landed(tip):
+        """Its merge would change nothing on its base, at tip (adds_nothing):
+        taken back from anything that would merge it, and closed, saying so.
+        A dependency bot's is left to its bot, which closes its own once it
+        sees there's nothing left to update: one closed under it is an update
+        it would ignore from then on."""
+        said = f"{pr['baseRefName']} at {tip[:7]} already has everything it changes"
+        if dep:
+            settle("pending", f"Already landed: {said}; its bot closes it"[:140])
+            return
+        settle("pending", f"Already landed: {said}; closing it"[:140])
+        if C.write("pr", "close", str(n), "-R", repo, "--comment",
+                   f"Closed without merging: {said}, so merging this would only add an empty commit. "
+                   "What it does landed another way, most likely through another PR.", check=False) is None:
+            strike("close")
+            return
+        cleared("close")
+        log(f"{tag}: {said}; closed it")
+
     def land_now(desc):
         """Settled: merged, unless what GitHub says of its merge asks for
         something first (MERGE_STEPS). Behind a base whose rules want it up
@@ -431,7 +454,19 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
         reviewed and its CI run like any other before it lands. (One that
         conflicts with its base never gets here: it's handed on first.) In a
         repo with its merge train on, one against the default branch goes in
-        the train instead (train.py's ride)."""
+        the train instead (train.py's ride). First of all, one whose merge
+        would change nothing on its base isn't merged at all: what it
+        changes has landed already (already_landed)."""
+        try:
+            tip = adds_nothing(repo, pr)
+        except (RuntimeError, OSError, subprocess.SubprocessError) as e:
+            settle("pending", "Settled, but what its merge would change can't be worked out; trying again")
+            strike("empty", str(e))
+            return
+        cleared("empty")
+        if tip:
+            already_landed(tip)
+            return
         if merging == "update":
             why = "brought up to date" if update_branch() else "GitHub didn't take the update; trying again"
             settle("pending", f"Settled, but behind its base: {why}")
@@ -698,10 +733,11 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
         settle("pending", f"Too many {' and '.join(cut)} to read: {CFG['owner']} merges it", "Too much to read")
         save(key, st)
         return
-    if obsolete:
-        # A red-branch fix its branch went green without (R.watch_default),
-        # waiting to be closed: like a hold, nothing may merge it.
-        settle("pending", f"Not needed: {pr['baseRefName']} is green again without it")
+    if held:
+        # A fix for a red default branch that mustn't land now
+        # (R.watch_default): the branch isn't red any more, or its CI hasn't
+        # said yet whether it still is. Like a hold, nothing may merge it.
+        settle("pending", held[:140])
         save(key, st)
         return
     if CFG["labels"]["hold"] in labels:
