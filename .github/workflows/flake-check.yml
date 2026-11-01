@@ -517,14 +517,22 @@ jobs:
           # through the mount of its hierarchy that shows the most cgroups
           # above it, however it's mounted (with other v1 controllers, from a
           # subtree). A limit that can't be read (no mount shows the cgroup,
-          # or a cgroup with a limit doesn't say what it holds) is unknown:
-          # $free is then 0, and $unknown says why. CGROUP_PROC is where the
-          # job's cgroups and mounts are read from (/proc/self), MEMINFO the
-          # machine's memory (/proc/meminfo): each a test's stand-in.
+          # or a cgroup with a limit doesn't say what it holds) is unknown,
+          # as is the machine's available memory when it can't be read (no
+          # /proc/meminfo, or no MemAvailable in it): $free is then 0, and
+          # $unknown says why. CGROUP_PROC is where the job's cgroups and
+          # mounts are read from (/proc/self), MEMINFO the machine's memory
+          # (/proc/meminfo): each a test's stand-in.
+          number() { case $1 in '' | *[!0-9]*) return 1 ;; esac; }
           job_memory() {
-            local proc kind='' at='' top='' max holds cache limit held inactive left
-            unknown=''
-            free=$(( $(awk '$1 == "MemAvailable:" { print $2 }' "${MEMINFO:-/proc/meminfo}") * 1024 ))
+            local proc kind='' at='' top='' max holds cache limit held inactive left available
+            unknown='' free=0
+            if ! available=$(awk '$1 == "MemAvailable:" { print $2; got = 1 } END { exit !got }' "${MEMINFO:-/proc/meminfo}" 2> /dev/null) \
+                || ! number "$available"; then
+              unknown="the machine's available memory can't be read"
+              return
+            fi
+            free=$(( available * 1024 ))
             proc=${CGROUP_PROC:-/proc/self}
             # The hierarchy, then the job's cgroup's directory and the
             # mount's, a line each; or the hierarchy and "-" when no mount
@@ -582,7 +590,6 @@ jobs:
                 # one whose parent doesn't hand it the controller); one
                 # whose file is there but doesn't read as a number or "max"
                 # has a limit nobody can read.
-                number() { case $1 in '' | *[!0-9]*) return 1 ;; esac; }
                 while [ -z "$unknown" ]; do
                   if [ -e "$at/$max" ]; then
                     limit=$(cat "$at/$max") || limit=''

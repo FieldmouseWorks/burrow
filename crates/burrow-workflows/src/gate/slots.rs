@@ -359,8 +359,9 @@ fn slots_what_nix_builds_by_name() {
 
 /// The gate on DIR on a runner without slots, a hosted one, with nix's
 /// max-jobs of JOBS, GIB of the machine's memory available and no cgroups,
-/// and ENV: what came of it, and how many jobs its one build was given.
-fn hosted(t: &Slotted, dir: &Path, jobs: u32, gib: u64, env: &[(&str, &str)]) -> (Ran, String) {
+/// run as R says (its env last): what came of it, and how many jobs its one
+/// build was given.
+fn hosted(t: &Slotted, dir: &Path, jobs: u32, gib: u64, r: Run) -> (Ran, String) {
     let meminfo = t.g.s.join("meminfo");
     fs::write(
         &meminfo,
@@ -380,14 +381,8 @@ fn hosted(t: &Slotted, dir: &Path, jobs: u32, gib: u64, env: &[(&str, &str)]) ->
         ("MEMINFO", meminfo.to_str().unwrap()),
         ("CGROUP_PROC", proc.to_str().unwrap()),
     ];
-    all.extend_from_slice(env);
-    let r = t.g.run(
-        dir,
-        Run {
-            env: &all,
-            ..Run::default()
-        },
-    );
+    all.extend_from_slice(r.env);
+    let r = t.g.run(dir, Run { env: &all, ..r });
     assert_eq!(r.code, 0, "{}", r.out);
     let given = r
         .build()
@@ -406,7 +401,7 @@ fn hosted(t: &Slotted, dir: &Path, jobs: u32, gib: u64, env: &[(&str, &str)]) ->
 #[test]
 fn slots_none_on_a_hosted_runner() {
     let t = Slotted::new();
-    let (r, jobs) = hosted(&t, &t.vms, 2, 64, &[]);
+    let (r, jobs) = hosted(&t, &t.vms, 2, 64, Run::default());
     let b = r.build();
     assert!(
         VM_CHECKS.iter().chain(&["-a.drv^*"]).all(|c| b.contains(c)),
@@ -419,18 +414,36 @@ fn slots_none_on_a_hosted_runner() {
     );
     assert_eq!(jobs, "5", "{b}");
     for (gib, want) in [(7, "3"), (3, "2"), (0, "2")] {
-        assert_eq!(hosted(&t, &t.vms, 2, gib, &[]).1, want, "{gib}G free");
+        assert_eq!(
+            hosted(&t, &t.vms, 2, gib, Run::default()).1,
+            want,
+            "{gib}G free"
+        );
     }
-    assert_eq!(hosted(&t, &t.vms, 0, 64, &[]).1, "0");
+    assert_eq!(hosted(&t, &t.vms, 0, 64, Run::default()).1, "0");
     // An older nix's JSON tells the same three apart.
-    assert_eq!(hosted(&t, &t.vms, 2, 64, &[("OLD_JSON", "1")]).1, "5");
+    assert_eq!(
+        hosted(
+            &t,
+            &t.vms,
+            2,
+            64,
+            Run {
+                env: &[("OLD_JSON", "1")],
+                ..Run::default()
+            }
+        )
+        .1,
+        "5"
+    );
     let plain =
         t.g.flake(r#"{ checks.${system} = { a = drv "a"; b = drv "b"; }; }"#);
-    assert_eq!(hosted(&t, &plain, 2, 64, &[]).1, "2");
+    assert_eq!(hosted(&t, &plain, 2, 64, Run::default()).1, "2");
 }
 
-/// A memory limit it can't read, or checks it can't tell apart, leave
-/// nix's own jobs, and it says which.
+/// A memory limit it can't read, the machine's available memory it can't
+/// read, or checks it can't tell apart, leave nix's own jobs, and it says
+/// which.
 #[test]
 fn slots_none_and_unsure_on_a_hosted_runner() {
     let t = Slotted::new();
@@ -441,7 +454,10 @@ fn slots_none_and_unsure_on_a_hosted_runner() {
         &t.vms,
         2,
         64,
-        &[("CGROUP_PROC", unread.to_str().unwrap())],
+        Run {
+            env: &[("CGROUP_PROC", unread.to_str().unwrap())],
+            ..Run::default()
+        },
     );
     assert!(
         jobs == "2"
@@ -461,7 +477,16 @@ fn slots_none_and_unsure_on_a_hosted_runner() {
         ),
     );
     let path = format!("{}:{}", broken.display(), t.g.s.path_var());
-    let (r, jobs) = hosted(&t, &t.vms, 2, 64, &[("PATH", &path)]);
+    let (r, jobs) = hosted(
+        &t,
+        &t.vms,
+        2,
+        64,
+        Run {
+            env: &[("PATH", &path)],
+            ..Run::default()
+        },
+    );
     assert!(
         jobs == "2"
             && r.out
@@ -469,4 +494,39 @@ fn slots_none_and_unsure_on_a_hosted_runner() {
         "{jobs}\n{}",
         r.out
     );
+}
+
+/// No /proc/meminfo, or one without MemAvailable: the build has nix's own
+/// jobs and the evaluations go one at a time, with eval-apart or without,
+/// and it says why.
+#[test]
+fn slots_none_and_no_meminfo_on_a_hosted_runner() {
+    let t = Slotted::new();
+    let bare = t.g.s.join("bare-meminfo");
+    fs::write(&bare, "MemTotal: 1024 kB\n").unwrap();
+    let gone = t.g.s.join("gone");
+    let why = "memory limit is unknown (the machine's available memory can't be read)";
+    for meminfo in [&bare, &gone] {
+        for whole in [false, true] {
+            let (r, jobs) = hosted(
+                &t,
+                &t.vms,
+                2,
+                64,
+                Run {
+                    whole,
+                    env: &[("MEMINFO", meminfo.to_str().unwrap())],
+                    ..Run::default()
+                },
+            );
+            assert!(
+                jobs == "2"
+                    && r.out.contains(&format!("{why}: no more than nix's 2 jobs"))
+                    && r.out.contains(&format!("{why}: one evaluation at a time")) != whole,
+                "{} {whole}: {jobs}\n{}",
+                meminfo.display(),
+                r.out
+            );
+        }
+    }
 }
