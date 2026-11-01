@@ -104,6 +104,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "burrow-notify"
+version = "0.0.0"
+dependencies = [
+ "burrow-github",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "burrow-proj"
 version = "0.0.0"
 dependencies = [
