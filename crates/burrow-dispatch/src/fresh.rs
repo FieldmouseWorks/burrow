@@ -143,9 +143,10 @@ fn wait(
             why: why.clone(),
         });
     }
-    if start > 0 && queued > 0 {
-        // Whether it took one: its job starting says so, but not a start
-        // that failed.
+    if start + coming > 0 {
+        // Whether each came up: a job starting on one says so, but nothing
+        // says a start failed, nor that one kept for jobs to come is up.
+        // Once they're all up, nothing more is booked for them.
         book(d, now + cfg.quiet);
     }
     // Places a stop is freeing that a job, or one to keep, could take:
@@ -437,9 +438,10 @@ mod tests {
         cfg
     }
 
-    // With `idle`, that many are started before any job asks, and kept
-    // waiting however long: no wake-up and no wait for them. Only one past
-    // them is stopped once it's sat `quiet`, the oldest first.
+    // With `idle`, that many are started before any job asks, looked at
+    // again `quiet` on to see they came up, and then kept waiting however
+    // long: no wake-up and no wait for them. Only one past them is stopped
+    // once it's sat `quiet`, the oldest first.
     #[test]
     fn keeps_idle_ones_for_jobs_to_come() {
         let dir = tempfile::tempdir().unwrap();
@@ -447,10 +449,30 @@ mod tests {
         let st = State::default();
         let d = look(&cfg, &pool(&[], &[]), &st, T);
         assert_eq!(moves(&d), (vec!["1800000000-0", "1800000000-1"], vec![]));
-        assert!(
-            d.wake.is_none() && d.items.is_empty() && d.state.fresh.is_none(),
-            "{d:?}"
+        assert_eq!(d.wake, Some(T + Q));
+        assert!(d.items.is_empty() && d.state.fresh.is_none(), "{d:?}");
+        // One that failed to start is started again, and looked at again;
+        // one still on its way up is looked at again too.
+        let p = pool(
+            &[
+                ("a", unit("failed", T - Q, false)),
+                ("b", unit("activating", T - Q, false)),
+            ],
+            &[],
         );
+        let d = look(&cfg, &p, &st, T);
+        assert_eq!(moves(&d), (vec!["1800000000-0"], vec![]));
+        assert_eq!(d.wake, Some(T + Q));
+        let p = pool(
+            &[
+                ("a", unit("active", T - 10.0, false)),
+                ("b", unit("activating", T - Q, false)),
+            ],
+            &[],
+        );
+        let d = look(&cfg, &p, &st, T);
+        assert_eq!(moves(&d), (vec![], vec![]));
+        assert_eq!(d.wake, Some(T + Q));
         let kept = pool(
             &[
                 ("a", unit("active", T - 10.0 * Q, false)),
