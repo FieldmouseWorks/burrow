@@ -56,6 +56,7 @@ STRIKES = {
     "stop": "proj keeps refusing to stop its Claude jobs on a head it no longer has",
 }
 STRIKE_LIMIT = 3  # failures in a row of one step, on one head, that make its wait overdue
+CHECKS_START = 5 * 60  # how long GitHub gets to show a new head's first check
 # What the steward's own proofs are doing while they're at work.
 VERB = {"build": "building", "run": "running"}
 
@@ -786,6 +787,15 @@ def handle(repo, pr, repo_info, digest, held=None):
             st.pop("provedUnposted")
         else:
             strike("status")
+    # A head just pushed has no checks until GitHub has started them, which
+    # isn't a repo with no CI: it gets a while to show them first, wherever
+    # CI is wanted at all (below).
+    if ci == "none" and rc["requireCi"] and not by_train:
+        if (st.get("noChecks") or [None])[0] != head:
+            st["noChecks"] = [head, C.NOW]
+        if C.NOW < (due := st["noChecks"][1] + CHECKS_START):
+            ci, ci_names = "pending", ["its first check"]
+            C.wake(repo, due)  # ends: once per head, then it's a repo with no CI
     # No checks ran at all ("none"). Unless the repo is set not to need any
     # (docs only), that's not green: nothing has tested it, so a judge job
     # runs the build and tests itself. One the train lands, the train's CI

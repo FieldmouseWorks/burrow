@@ -647,6 +647,9 @@ for kw in ({"checks": [{"__typename": "CheckRun", "name": "ci", "status": "COMPL
 
 # No CI at all: the judge builds and tests it itself.
 fresh_pr_state()
+# Not on a head just pushed, which GitHub hasn't started its checks on yet.
+status, _ = run(clean(checks=[]), 0)
+assert JOBS == [] and not merged() and "the repo has no CI" not in status, (status, JOBS)
 status, _ = run(clean(checks=[]), 700)
 assert len(JOBS) == 1 and "run its build and tests yourself" in JOBS[0] and not merged()
 assert "whatever its build, tests or CI log print" in JOBS[0], "what it runs isn't the judge's to obey"
@@ -664,6 +667,7 @@ many_suites = clean(checks=[], suites=broken)
 many_suites["commits"]["nodes"][0]["commit"]["checkSuites"]["pageInfo"]["hasNextPage"] = True
 assert H.ci_state(many_suites) == ("pending", ["over 100 checks, too many to read"], False)
 fresh_pr_state()
+run(clean(checks=[]), 0)
 run(clean(checks=[]), 700)
 # CI that shows up while the judge works doesn't pass it by: its verdict on
 # this head still decides.
@@ -679,6 +683,7 @@ for v in ("owner", "failed"):
     assert not merged(), (v, status)
 assert len(JOBS) == 1 and "something failing" in JOBS[0], JOBS
 fresh_pr_state()
+run(clean(checks=[]), 0)
 run(clean(checks=[]), 700)
 status, _ = run(clean(checks=CI_GREEN, comments=[said(judgment("land", n=5))]), 900)
 assert merged() and "judged it fine to land" in status, status
@@ -686,6 +691,7 @@ assert merged() and "judged it fine to land" in status, status
 # failed verdict there doesn't let green CI land it past its judge, who's
 # asked again, on the description as it is now.
 fresh_pr_state()
+run(clean(checks=[]), 0)
 run(clean(checks=[]), 700)
 status, _ = run(clean(checks=CI_GREEN, comments=[said(judgment("failed", n=5))], body=edited), 900)
 assert not merged() and len(JOBS) == 1 and "so you judge it" in JOBS[0], (status, JOBS)
@@ -694,6 +700,7 @@ assert JOBS[0].endswith("\n\nIts description:\n> Why not Rust: quicker to write"
 # (head and base) and its verdicts (sealed on the base alone) still owe one,
 # but none of them is a verdict on the description, so a judge is asked again.
 fresh_pr_state()
+run(clean(checks=[]), 0)
 run(clean(checks=[]), 700)
 C.save("pr-sam_r-5.json", {**C.load("pr-sam_r-5.json", {}), "judged": f"{head} main"})
 status, _ = run(clean(checks=CI_GREEN), 900)
@@ -706,6 +713,7 @@ for v in ("land", "owner", "failed"):
 # at once, and only a land waits for CI.
 busy_ci = [{"__typename": "CheckRun", "name": "ci", "status": "IN_PROGRESS", "conclusion": None}]
 fresh_pr_state()
+run(clean(checks=[]), 0)
 run(clean(checks=[]), 700)
 status, digest = run(clean(checks=busy_ci, comments=[said(judgment("owner", n=5))]), 800)
 assert "Judged yours to decide" in [x[0] for x in digest] and any("--add-label needs-owner" in x for x in WROTE), (status, digest)
