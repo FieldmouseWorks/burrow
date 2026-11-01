@@ -15,25 +15,32 @@ fn each_derivation_apart() {
         },
     );
     assert_eq!(r.code, 0, "{}", r.out);
-    // One plan, then one evaluation per derivation.
+    // One plan, then one evaluation per derivation, each said in the plan's
+    // order, however they ran.
     assert_eq!(r.calls[0], "eval plan", "{:?}", r.calls);
+    let mut entries = r.entries();
+    entries.sort();
     let want: Vec<String> = (0..6).map(|i| format!("eval entry {i}")).collect();
-    assert_eq!(r.entries(), want, "{:?}", r.calls);
+    assert_eq!(entries, want, "{:?}", r.calls);
     let system = &g.system;
-    for what in [
-        format!("checks.{system}.a"),
-        format!("checks.{system}.vm"),
-        format!("packages.{system}.p"),
-        format!("devShells.{system}.default"),
-        format!("formatter.{system}"),
-        "nixosConfigurations.box".to_owned(),
-    ] {
-        assert!(
-            r.out.contains(&format!("evaluating {what}\n")),
-            "{what}: {}",
-            r.out
-        );
-    }
+    let said: Vec<&str> = r
+        .out
+        .lines()
+        .filter_map(|l| l.strip_prefix("evaluating "))
+        .collect();
+    assert_eq!(
+        said,
+        [
+            format!("checks.{system}.a"),
+            format!("checks.{system}.vm"),
+            format!("packages.{system}.p"),
+            format!("devShells.{system}.default"),
+            format!("formatter.{system}"),
+            "nixosConfigurations.box".to_owned(),
+        ],
+        "{}",
+        r.out
+    );
     // What it builds is the derivation the evaluation gave, outputs and all.
     let b = r.build();
     assert!(
@@ -49,6 +56,38 @@ fn each_derivation_apart() {
 }
 
 /// A failing check fails it.
+/// The outputs are evaluated side by side, as many at once as the step says
+/// it takes (a core each while each has 2G of the free memory), and no more.
+#[test]
+fn outputs_are_evaluated_side_by_side() {
+    let g = Gate::new();
+    let r = g.run(
+        &g.flake(EVERY),
+        Run {
+            skip: "vm",
+            env: &[("EVAL_OVERLAP", "1")],
+            ..Run::default()
+        },
+    );
+    assert_eq!(r.code, 0, "{}", r.out);
+    let side: usize = r
+        .out
+        .lines()
+        .find_map(|l| {
+            l.strip_prefix("6 outputs to evaluate, ")?
+                .strip_suffix(" side by side")
+        })
+        .unwrap_or_else(|| panic!("no count: {}", r.out))
+        .parse()
+        .unwrap();
+    // Each evaluation held a second, so those started together overlapped.
+    let most = super::lines(&g.s.join("nix.log.overlap"))
+        .iter()
+        .map(|n| n.trim().parse::<usize>().unwrap())
+        .max();
+    assert_eq!(most, Some(side.min(6)), "{}", r.out);
+}
+
 #[test]
 fn a_failing_check_fails_it() {
     let g = Gate::new();

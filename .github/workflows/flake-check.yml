@@ -65,8 +65,10 @@ on:
       eval-apart:
         description: >-
           Evaluate each check, package, dev shell, formatter and NixOS system
-          in a nix process of its own, then build the checks, rather than the
-          checks in one process and then everything in one `nix flake check`.
+          in a nix process of its own (as many side by side as the runner has
+          cores, while each has 2G of its free memory), then build the
+          checks, rather than the checks in one process and then everything
+          in one `nix flake check`.
           For a flake whose evaluations don't fit in its runner's memory
           together, even with no build beside them. It also checks nixosModules
           and templates as nix flake check does, and forces lib and the outputs
@@ -651,33 +653,58 @@ jobs:
             if [ "$LEGS" -gt 1 ]; then
               echo "leg $LEG of $LEGS: $(jq 'map(select(.mine)) | length' "$RUNNER_TEMP/entries.json") of the plan's $(jq length "$RUNNER_TEMP/entries.json") outputs, those whose names hash to it"
             fi
-            # Each evaluation exits before the next starts, so the most memory
-            # in use is one evaluation's. Each derivation is made a GC root at
-            # once, until the build is done; one that isn't a valid derivation
-            # (or that a GC took in between) fails the gate. A
-            # failed evaluation fails the gate, after the rest are evaluated
-            # and built (--keep-going).
+            # Evaluations run side by side, one a core while each has 2G of
+            # the free memory (one of burrow's took at most 1.3G), so the most
+            # memory in use is that many evaluations'; each one's log is
+            # printed whole, in the plan's order, once they've all ended. Each
+            # derivation is made a GC root at once, until the build is done;
+            # one that isn't a valid derivation (or that a GC took in between)
+            # fails the gate. A failed evaluation fails the gate, after the
+            # rest are evaluated and built (--keep-going).
             roots=$work/roots
-            mkdir "$roots"
-            failed=0
-            targets=()
-            n=$(jq length "$RUNNER_TEMP/entries.json")
-            for ((i = 0; i < n; i++)); do
-              [ "$(jq ".[$i].mine" "$RUNNER_TEMP/entries.json")" = true ] || continue
+            evals=$work/evals
+            mkdir "$roots" "$evals"
+            side=$(nproc)
+            room=$(awk '/^MemAvailable:/ { print int($2 / 2097152) }' /proc/meminfo)
+            [ "$room" -ge "$side" ] || side=$room
+            [ "$side" -ge 1 ] || side=1
+            # One entry's evaluation, with what came of it in $evals/N: a
+            # derivation to build, or ok; nothing if it failed.
+            one() {
+              local i=$1 what result drv
               what=$(jq -r ".[$i].what" "$RUNNER_TEMP/entries.json")
               echo "evaluating $what"
               if ! result=$(evaluate "entry = $i;" --json); then
-                failed=1
+                return
               elif [ "$(jq ".[$i].nixos" "$RUNNER_TEMP/entries.json")" = true ]; then
                 :
               elif ! drv=$(jq -er .drv <<< "$result") || ! nix-instantiate --add-root "$roots/$i" --argstr drv "$drv" \
                   --expr '{ drv }: { type = "derivation"; name = "root"; outputName = "out"; drvPath = drv; }' > /dev/null; then
                 echo "evaluating $what gave no derivation"
-                failed=1
+                return
               elif [ "$(jq ".[$i].build" "$RUNNER_TEMP/entries.json")" = true ]; then
-                targets+=("$drv^*")
+                echo "$drv^*" > "$evals/$i"
+                return
               elif [ "$(jq ".[$i].skip" "$RUNNER_TEMP/entries.json")" = true ]; then
                 echo "not building $what"
+              fi
+              echo ok > "$evals/$i"
+            }
+            mapfile -t mine < <(jq -r 'to_entries[] | select(.value.mine) | .key' "$RUNNER_TEMP/entries.json")
+            echo "${#mine[@]} outputs to evaluate, $side side by side"
+            for i in "${mine[@]}"; do
+              while [ "$(jobs -pr | wc -l)" -ge "$side" ]; do wait -n || true; done
+              one "$i" > "$evals/$i.log" 2>&1 &
+            done
+            wait
+            failed=0
+            targets=()
+            for i in "${mine[@]}"; do
+              cat "$evals/$i.log"
+              if [ ! -f "$evals/$i" ]; then
+                failed=1
+              elif [ "$(cat "$evals/$i")" != ok ]; then
+                targets+=("$(cat "$evals/$i")")
               fi
             done
             if [ ${#targets[@]} -gt 0 ]; then
