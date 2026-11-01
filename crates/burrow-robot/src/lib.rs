@@ -294,8 +294,9 @@ impl Robot {
     }
 }
 
-/// The agent robot calls with: the system's roots, curl's 30 seconds, and
-/// every status an answer to read.
+/// The agent robot calls with: the system's roots, curl's 30 seconds, no
+/// redirect followed (curl followed none), and every status an answer to
+/// read, so a redirect is a refusal like any other.
 pub fn agent() -> ureq::Agent {
     use ureq::tls::{RootCerts, TlsConfig};
     let tls = TlsConfig::builder()
@@ -304,6 +305,7 @@ pub fn agent() -> ureq::Agent {
     ureq::Agent::config_builder()
         .tls_config(tls)
         .timeout_global(Some(TIMEOUT))
+        .max_redirects(0)
         .http_status_as_error(false)
         .build()
         .into()

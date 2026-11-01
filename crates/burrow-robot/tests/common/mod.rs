@@ -1,5 +1,6 @@
 //! A stand-in for Robot's webservice: takes calls on a local port, keeps
-//! each one, and answers from its routes, or 404 as Robot does.
+//! each one, and answers from its routes, or 404 as Robot does. A 3xx
+//! answer sends the caller to `/elsewhere`.
 
 #![allow(dead_code)]
 
@@ -36,6 +37,7 @@ impl Webservice {
             .map(|(r, s, b)| ((*r).to_owned(), (*s, (*b).to_owned())))
             .collect();
         let kept = Arc::clone(&asked);
+        let elsewhere = format!("{url}/elsewhere");
         thread::spawn(move || {
             for stream in listener.incoming().flatten() {
                 let Some(call) = read(&stream) else {
@@ -50,10 +52,15 @@ impl Webservice {
                             .to_owned(),
                     ));
                 kept.lock().unwrap().push(call);
+                let location = if (300..400).contains(&status) {
+                    format!("Location: {elsewhere}\r\n")
+                } else {
+                    String::new()
+                };
                 let mut stream = stream;
                 let _ = write!(
                     stream,
-                    "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\n{location}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
                     body.len()
                 );
             }

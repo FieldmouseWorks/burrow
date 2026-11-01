@@ -317,6 +317,23 @@ fn a_refusal_says_robots_reason_after_what_it_got() {
     );
 }
 
+/// curl followed no redirect, and robot follows none: the 3xx is the answer,
+/// a refusal, and nothing else is asked, so a POST is never sent on as a GET
+/// or to another host.
+#[test]
+fn a_redirect_is_a_refusal_and_not_followed() {
+    for status in [301, 302, 303, 307, 308] {
+        let ws = Webservice::serve(&[("POST /reset/203.0.113.7", status, "")]);
+        let out = Box::new().run(&ws.url, &["reset"]);
+        assert_eq!(out.status.code(), Some(1), "{status}");
+        assert_eq!(
+            said(&out).1,
+            format!("robot: POST /reset/203.0.113.7: HTTP {status}\n")
+        );
+        assert_eq!(ws.calls(), ["POST /reset/203.0.113.7"], "{status}");
+    }
+}
+
 #[test]
 fn a_webservice_it_cant_reach_is_said_without_the_credentials() {
     let b = Box::new();
