@@ -1,6 +1,6 @@
 # The toolchain burrow's crates build, test and lint with, locally and in CI
-# (the flake reads it). Renovate keeps it on the latest stable; change it here
-# only.
+# (the flake reads it), and the house fixtures in tests/house, which link to
+# it. Renovate keeps it on the latest stable; change it here only.
 [toolchain]
 channel = "1.99.1"
 components = ["rustfmt", "clippy"]
