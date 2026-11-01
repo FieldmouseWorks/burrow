@@ -227,12 +227,10 @@ S.R.settle_repo = lambda r, known: (_ for _ in ()).throw(AssertionError("settled
 S.R.publish = lambda lines: None
 S.open_prs = kicked_prs
 S.upkeep = lambda repo, mine: watched.append(repo)
-S.CFG["upkeep"] = ["burrow-upkeep", "config.json"]
 sys.argv = ["steward", "kick", "sam/r"]
 C.WAKE.clear()
 S.main()
 sys.argv = argv
-S.CFG["upkeep"] = None
 S.R.discover, S.R.restart, S.R.settle_repo, S.R.publish, S.open_prs, S.upkeep = kept_fns
 assert seen_repos == [] and watched == [], (seen_repos, watched)
 assert C.load("wake.json", None) == {"sam/r": T + 5 * 60}, C.load("wake.json", None)

@@ -1,7 +1,8 @@
-"""burrow-upkeep in a pass: each repo's Renovate dashboard and flaky tests,
-looked at by the binary (its own tests have the rules) as the App for the
-repo's owner, what it lists put where the steward sorts it, the passes it
-books booked, the Claude jobs it asks for started under their keys and
+"""burrow-upkeep in a pass: each repo's labels and settings, kept by the
+binary before its hook is seen to, and its Renovate dashboard and flaky
+tests, looked at by the binary (its own tests have the rules) as the App for
+the repo's owner, what it lists put where the steward sorts it, the passes
+it books booked, the Claude jobs it asks for started under their keys and
 found by them, and what happens when any of that fails: the pass goes
 on."""
 
@@ -126,7 +127,10 @@ with open(f"{tmp}/upkeep.json", "w") as f:
                "authors": C.CFG["authors"], "bots": C.CFG["bots"], "app": C.CFG["app"]["slug"],
                "jobTimeout": C.CFG["jobTimeout"], "renovate": C.CFG["renovate"],
                "dashboard": {"title": "Dependency Dashboard", "waitDays": 4, "errorDays": 1, "renovateKick": None, "renovateRuns": None},
-               "flaky": {"jobTimeout": 240}}, f)
+               "flaky": {"jobTimeout": 240},
+               "settle": {"owner": C.CFG["owner"], "appId": C.CFG["app"]["id"], "context": C.CFG["context"],
+                          "trainContext": C.CFG["trainContext"], "rulesets": C.CFG["rulesets"], "labels": C.CFG["labels"],
+                          "defaults": {k: C.CFG["defaults"][k] for k in ("directPush", "ruleset", "train")}, "repos": {}}}, f)
 UP = [UPKEEP, f"{tmp}/upkeep.json"]
 JOBS, LOGGED = [], []
 NEXT = {}  # what C.job gives next, when set ("jid"): None for no job; or raises ("raise")
@@ -301,10 +305,10 @@ assert any("its upkeep: burrow-upkeep watch exited 1" in x for x in LOGGED), LOG
 with open(f"{tmp}/upkeep-slow", "w") as f:
     f.write("#!/bin/sh\nexec sleep 30\n")
 os.chmod(f"{tmp}/upkeep-slow", 0o755)
-timeout, S.UPKEEP_TIMEOUT = S.UPKEEP_TIMEOUT, 1
+timeout, C.UPKEEP_TIMEOUT = C.UPKEEP_TIMEOUT, 1
 began = time.monotonic()
 mine = look(300, [f"{tmp}/upkeep-slow"])
-S.UPKEEP_TIMEOUT = timeout
+C.UPKEEP_TIMEOUT = timeout
 assert time.monotonic() - began < 10 and mine == [] and "sam/r" in waits.FAILED, LOGGED
 assert any("timed out after 1 seconds" in x for x in LOGGED), LOGGED
 
@@ -319,8 +323,8 @@ S.DRY = C.DRY = False
 assert os.path.exists(f"{C.STATE}/dry/flaky-sam_r.json") and state("flaky") == was
 assert {c["token"] for c in called()} == {os.environ["GH_TOKEN"]}, called()
 
-# In the steward's pass: each repo is looked at after its PRs, when either
-# part is on, and one that fails doesn't stop the rest.
+# In the steward's pass: each repo is looked at after its PRs, and one that
+# fails doesn't stop the rest.
 seen, published = [], []
 kept_fns = (S.R.discover, S.R.settle_repo, S.R.publish, S.open_prs, S.upkeep)
 S.R.settle_repo = lambda r, known: False
@@ -362,12 +366,80 @@ S.main()
 assert seen == ["prs sam/r", "upkeep sam/r", "prs sam/q", "upkeep sam/q"], seen
 assert published[-1] == [("Still quarantined a day after a Claude job", "sam/q#4", "x")], published
 assert C.load("wake.json", {})["sam/r"] == T + 300, C.load("wake.json", {})
-C.CFG["upkeep"] = None
-seen.clear()
-S.main()
-assert seen == ["prs sam/r", "prs sam/q"], seen
 sys.argv = argv
 S.R.discover, S.R.settle_repo, S.R.publish, S.open_prs, S.upkeep = kept_fns
+
+
+# Its settings, as a pass keeps them: by the binary (its own tests have the
+# rules), as the App, then its hook, which goes by whether they were due.
+# GitHub, here: labels there, the settings on (secret scanning aside), no
+# rulesets and no protected branch.
+SETTLE = [["PATCH", "repos/sam/r/labels/", 200, {}, None],
+          ["GET", "repos/sam/r/rulesets?per_page=100", 200, [], None],
+          ["POST", "repos/sam/r/rulesets", 201, {}, None],
+          ["GET", "repos/sam/r/branches?protected=true", 200, [], None],
+          ["PUT", "repos/sam/r/vulnerability-alerts", 204, None, None],
+          ["PATCH", "repos/sam/r", 200, {}, None],
+          ["GET", "repos/sam/r", 200, {"allow_auto_merge": True, "delete_branch_on_merge": True, "allow_squash_merge": True}, None]]
+HOOKED = []
+
+
+def settle(at, *first, private=False, default="main"):
+    """settle_repo on sam/r `at` seconds after T, with GitHub as SETTLE has
+    it and `first` ahead of that: whether it's new, or what it raised."""
+    C.NOW = T + at
+    HOOKED.clear()
+    with open(GH, "w") as f:
+        json.dump({"answers": [*first, *SETTLE], "issues": {}}, f)
+    open(CALLED, "w").close()
+    C.CFG["upkeep"] = UP
+    out = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(out), C.acting_for("sam/r"):
+            return R.settle_repo({"repo": "sam/r", "private": private, "default": default}, {"sam/r"})
+    except RuntimeError as e:
+        return e
+    finally:
+        LOGGED[:] = out.getvalue().splitlines()
+
+
+def changed():
+    return [(c["method"], c["path"]) for c in called() if c["method"] != "GET"]
+
+
+kept_hook = R.hook
+R.hook = lambda repo, st, due: HOOKED.append((repo, st.get("settings"), due)) or True
+C.save("repo-sam_r.json", {"databaseId": 2002})
+# The first: due, kept, and the hook sees it as kept.
+assert settle(0) is False
+st = C.load("repo-sam_r.json", {})
+assert st["settings"] == T and st["app"] == 7 and st["databaseId"] == 2002 and len(st["labels"]) == 6, st
+assert HOOKED == [("sam/r", T, True)], HOOKED
+assert ("POST", "repos/sam/r/rulesets") in changed() and ("PATCH", "repos/sam/r") in changed(), changed()
+assert {c["token"] for c in called()} == {"ghs_app_sam"}, called()
+# A minute on, nothing's due, and nothing's asked.
+assert settle(60) is False and called() == [] and HOOKED == [("sam/r", T, False)], (called(), HOOKED)
+# A private repo has no secret scanning to turn on; an empty one gets no
+# ruleset until its first commit.
+C.save("repo-sam_r.json", {"databaseId": 2002})
+settle(0, private=True, default=None)
+assert ("PATCH", "repos/sam/r") not in changed() and ("POST", "repos/sam/r/rulesets") not in changed(), changed()
+assert C.load("repo-sam_r.json", {})["empty"], C.load("repo-sam_r.json", {})
+# GitHub not saying what the repo is: its hook is still seen to, and then
+# the pass hears of it.
+C.save("repo-sam_r.json", {"databaseId": 2002})
+said = settle(0, ["GET", "repos/sam/r", 404, {"message": "Not Found"}, None])
+assert isinstance(said, RuntimeError) and str(said).startswith("its settings: GET repos/sam/r: HTTP 404"), said
+assert HOOKED == [("sam/r", None, True)], HOOKED
+# A status run changes nothing, and keeps state of its own.
+C.save("repo-sam_r.json", {"databaseId": 2002})
+S.DRY = C.DRY = True
+settle(0)
+S.DRY = C.DRY = False
+assert changed() == [] and C.load("repo-sam_r.json", {}) == {"databaseId": 2002}, changed()
+assert json.load(open(f"{C.STATE}/dry/repo-sam_r.json"))["settings"] == T
+R.hook = kept_hook
+print("settling: ok")
 
 C.job, C.CFG["upkeep"] = kept
 print("upkeeping: ok")

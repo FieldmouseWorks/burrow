@@ -49,6 +49,18 @@ REVIEW, FAKES = sys.argv[3], sys.argv[4]
 # burrow-upkeep (argv[5]), which a pass runs on each repo, and its source
 # (argv[6], crates/burrow-upkeep/src).
 UPKEEP, UPKEEP_SRC = sys.argv[5], sys.argv[6]
+# What the passes here run in its place (upkeeping.py runs the real one): it
+# notes how it was run (UPKEEP_RAN) and finds nothing due, stuck or wanted.
+UPKEEP_RAN = f"{tmp}/upkeep-ran"
+with open(f"{tmp}/upkeep-none", "w") as f:
+    f.write(f"""#!{sys.executable}
+import json, sys
+with open({UPKEEP_RAN!r}, "a") as f:
+    f.write(json.dumps(sys.argv[2:]) + "\\n")
+print(json.dumps({{"due": False, "failed": [], "limited": None}} if sys.argv[2] == "settle" else
+                 {{"stuck": [], "wake": None, "failed": [], "limited": None, "searched": False, "jobs": []}}))
+""")
+os.chmod(f"{tmp}/upkeep-none", 0o755)
 os.makedirs(f"{tmp}/agents")
 os.makedirs(f"{tmp}/home/.fake")
 for fake, at in (("codex", f"{tmp}/agents/codex"), ("bwrap", f"{tmp}/bwrap")):
@@ -141,7 +153,7 @@ with open(f"{tmp}/config.json", "w") as f:
         "baselineJobs": False, "baselinePerPass": 1, "authors": ["sam"], "bots": ["dependabot", "renovate", "workers"], "machinery": None,
         "stateDir": f"{tmp}/state", "snapDir": f"{tmp}/trees", "majorKey": f"{tmp}/sweep.key", "projectsDir": f"{tmp}/none", "jobsDir": f"{tmp}/jobs", "renovateEmail": "bot@renovateapp.com", "proj": "proj", "jobTimeout": 60, "jobIdle": 20, "proofTimeout": 180, "heavy": None, "owner": "Sam", "cleanBranches": False,
         "labels": {"hold": "hold", "owner": "needs-owner", "first": "first", "waiting": {"releaseAge": "waiting: release age", "proofSlot": "waiting: proof slot", "reviewer": "waiting: reviewer"}}, "notify": {"repo": "", "assignee": "", "label": "autoland"}, "inbox": {"enable": False, "label": "claude", "unstickLabel": "unstick", "authors": ["sam"]},
-        "renovate": None, "upkeep": None,
+        "renovate": None, "upkeep": [f"{tmp}/upkeep-none", "upkeep.json"],
         "defaults": {"rounds": 5,
                      "oneWay": ONE_WAY, "handoffAfter": 30, "sessionHandoffAfter": 90, "settleDelay": 3,
                      "stallAfter": 120, "holdStallAfter": 480, "renovateMergeAfter": 60,

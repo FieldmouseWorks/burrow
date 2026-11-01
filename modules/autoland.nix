@@ -107,9 +107,10 @@ let
     # Whose login Renovate runs as: the machine's own App, else the user
     # (null: one of `authors`). Its PRs and dashboards are by it.
     renovate = if machineApp == null then null else "${machineApp.slug}[bot]";
-    # What keeps up each repo's Renovate dashboard and flaky tests
-    # (crates/burrow-upkeep), with its config, when either is on.
-    upkeep = if cfg.dashboard.enable || cfg.flaky.enable then [ "${burrowUpkeep}/bin/burrow-upkeep" "${upkeepConfig}" ] else null;
+    # What keeps up each repo's labels and settings, and its Renovate
+    # dashboard and flaky tests when they're on (crates/burrow-upkeep),
+    # with its config.
+    upkeep = [ "${burrowUpkeep}/bin/burrow-upkeep" "${upkeepConfig}" ];
     # What every open PR waits on, for the stall watchdog (autoland/waits.py),
     # and what it took past a Claude job, for the stuck issue.
     watch = if watchdog then {
@@ -173,7 +174,8 @@ let
   };
 
   # burrow-upkeep's (crates/burrow-upkeep/src/config.rs): the steward's own
-  # settings it shares, and its two parts, each null when it's off.
+  # settings it shares, a repo's settings, and its two parts, each null when
+  # it's off.
   upkeepConfig = pkgs.writeText "burrow-upkeep.json" (builtins.toJSON {
     inherit (settings) stateDir proj projectsDir authors bots jobTimeout renovate;
     app = settings.app.slug;
@@ -190,6 +192,16 @@ let
     # Quarantined flaky tests, each to a Claude job: the issues titled
     # `flaky: TEST` (docs/flaky-tests.md).
     flaky = if cfg.flaky.enable then { jobTimeout = cfg.flaky.jobTimeoutMinutes; } else null;
+    # What each repo's labels say and its rules require: the steward's
+    # status and the train's, from its App alone, and each repo's own
+    # directPush, ruleset and train over the defaults.
+    settle = {
+      inherit (settings) owner context trainContext rulesets labels;
+      appId = settings.app.id;
+      defaults = { inherit (settings.defaults) directPush ruleset train; };
+      repos = lib.filterAttrs (_: r: r != { })
+        (lib.mapAttrs (_: builtins.intersectAttrs { directPush = null; ruleset = null; train = null; }) cfg.repos);
+    };
   });
   configFile = pkgs.writeText "autoland.json" (builtins.toJSON settings);
   # steward.py and every module beside it, linted as they're built: all of
