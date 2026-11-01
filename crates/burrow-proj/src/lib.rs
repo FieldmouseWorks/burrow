@@ -5,7 +5,7 @@
 //!
 //! ```text
 //! proj run PROJECT "task"     start a job; prints its id
-//! proj run --vm PROJECT "task"  the same, in a fresh agent sandbox (agent.sh)
+//! proj run --vm PROJECT "task"  the same, in a fresh agent sandbox (burrow-agent)
 //! proj run --first PROJECT "task"  ahead of the line (someone is waiting on it)
 //! proj run --pipeline PROJECT "task"  work on the pipeline itself: in one of
 //!                             its own repos (pipelineRepos, by the clone's

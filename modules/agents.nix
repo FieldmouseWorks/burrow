@@ -1,5 +1,5 @@
 # Agent sandboxes: a microVM per task, each on its own ZFS clone of the data
-# dataset, driven by `agent` (agents/agent.sh). Opt-in: the project sessions
+# dataset, driven by `agent` (crates/burrow-agent). Opt-in: the project sessions
 # and proj jobs keep running on the host unless someone asks for a VM (`agent
 # new`, `proj run --vm`). The VM image is agents/guest.nix. With the defaults:
 #
@@ -102,35 +102,37 @@ let
     '';
   };
 
-  agent = pkgs.writeShellApplication {
-    name = "agent";
-    runtimeInputs = [
+  # The binary with its config; it reads every field, and refuses one it
+  # doesn't know.
+  agentConfig = pkgs.writeText "agent.json" (builtins.toJSON {
+    inherit runner;
+    forwardFiltered = forward 3128;
+    forwardOpen = forward 3129;
+    root = cfg.stateDir;
+    src = projectsDir;
+    data = cfg.dataMountpoint;
+    inherit (cfg) dataDataset dataset;
+    inherit user;
+    inherit (account) uid group home;
+    tokenFile = cfg.claudeTokenFile;
+    sudo = "${config.security.wrapperDir}/sudo";
+    path = lib.makeBinPath [
       zfs
       pkgs.coreutils
       pkgs.util-linux
-      pkgs.procps
-      pkgs.gnused
-      pkgs.jq
       config.programs.git.package
       pkgs.openssh
       pkgs.socat
       pkgs.systemd
     ];
-    text = ''
-      AGENT_RUNNER=${runner}
-      AGENT_FWD_FILTERED=${forward 3128}
-      AGENT_FWD_OPEN=${forward 3129}
-      AGENT_ROOT=${lib.escapeShellArg cfg.stateDir}
-      AGENT_SRC=${lib.escapeShellArg projectsDir}
-      AGENT_DATA=${lib.escapeShellArg cfg.dataMountpoint}
-      AGENT_DATA_DATASET=${lib.escapeShellArg cfg.dataDataset}
-      AGENT_DATASET=${lib.escapeShellArg cfg.dataset}
-      AGENT_USER=${lib.escapeShellArg user}
-      AGENT_GROUP=${lib.escapeShellArg account.group}
-      AGENT_HOME=${lib.escapeShellArg account.home}
-      AGENT_TOKEN_FILE=${lib.escapeShellArg (if cfg.claudeTokenFile == null then "" else cfg.claudeTokenFile)}
-    '' + builtins.readFile ./agents/agent.sh;
-  };
+  });
+  agent = pkgs.runCommand "agent" {
+    nativeBuildInputs = [ pkgs.makeBinaryWrapper ];
+    meta.mainProgram = "agent";
+  } ''
+    makeBinaryWrapper ${inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow}/bin/burrow-agent \
+      $out/bin/agent --add-flags ${agentConfig}
+  '';
 in
 {
   imports = [ (import ./common.nix inputs) inputs.microvm.nixosModules.host ];
@@ -258,7 +260,7 @@ in
     systemd.services.agent-proxy-open = proxy { port = 3129; filtered = false; };
 
     # Stop sandboxes nobody has used for a day; save and delete the ones past
-    # their expiry (agent.sh).
+    # their expiry (crates/burrow-agent).
     systemd.services.agent-gc = {
       description = "Stop idle agent sandboxes, delete expired ones";
       after = [ "agents-dataset.service" ];
