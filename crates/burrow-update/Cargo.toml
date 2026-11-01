@@ -1,0 +1,19 @@
+[package]
+name = "burrow-update"
+description = "HOST-update's steps in Rust, as root with git and gh run as the machine's user: its own PR in a repo whose PRs land through its merge train"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+burrow-github = { path = "../burrow-github" }
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+burrow-github = { path = "../burrow-github", features = ["fake"] }
+tempfile.workspace = true
+
+[lints]
+workspace = true

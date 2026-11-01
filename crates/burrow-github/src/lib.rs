@@ -3,6 +3,7 @@
 //! programs that talk to GitHub share it; with the `fake` feature, their
 //! tests get a GitHub that answers from a script.
 
+use std::ffi::OsString;
 use std::io::Write;
 use std::process::{Command, Stdio};
 use std::{fmt, thread, time::Duration};
@@ -309,6 +310,11 @@ pub struct Gh {
     /// What every call goes with (GH_TOKEN) in place of that login: an
     /// App's installation token a program minted itself.
     pub token: Option<String>,
+    /// The command gh is run under, when it's to run as another user than
+    /// this program (`runuser -u USER --`, for one root runs that acts as
+    /// the machine's user): it runs `gh ...` itself, in this program's
+    /// environment. Empty, gh is run as this program runs.
+    pub via: Vec<OsString>,
 }
 
 impl Api for Gh {
@@ -319,34 +325,34 @@ impl Api for Gh {
         body: Option<&Value>,
         etag: Option<&str>,
     ) -> Result<Response, Failed> {
-        gh_api(self.token.as_deref(), method, path, body, etag, None)
+        gh_api(self, method, path, body, etag, None)
     }
 
     fn graphql(&mut self, owner: &str, body: &Value) -> Result<Response, Failed> {
-        gh_api(
-            self.token.as_deref(),
-            "POST",
-            "graphql",
-            Some(body),
-            None,
-            Some(owner),
-        )
+        gh_api(self, "POST", "graphql", Some(body), None, Some(owner))
     }
 }
 
-/// `gh api -i`, with `token` when there is one, else as `owner`'s account
-/// when the call names none.
+/// `gh api -i` under gh's `via`, with its `token` when there is one, else
+/// as `owner`'s account when the call names none.
 fn gh_api(
-    token: Option<&str>,
+    gh: &Gh,
     method: &str,
     path: &str,
     body: Option<&Value>,
     etag: Option<&str>,
     owner: Option<&str>,
 ) -> Result<Response, Failed> {
-    let mut cmd = Command::new("gh");
+    let mut cmd = match gh.via.split_first() {
+        Some((under, args)) => {
+            let mut c = Command::new(under);
+            c.args(args).arg("gh");
+            c
+        }
+        None => Command::new("gh"),
+    };
     cmd.args(["api", "-i", "-X", method, path]);
-    if let Some(t) = token {
+    if let Some(t) = &gh.token {
         cmd.env("GH_TOKEN", t);
     } else if let Some(owner) = owner {
         // gh-token goes by GH_REPO and the checkout's remotes before this
@@ -984,5 +990,35 @@ mod tests {
         gh.on("GET", path, vec![ok(200, Value::Null, &[])]);
         let r = call(&mut gh, "GET", path, None, None).unwrap();
         assert!(!r.json().unwrap_err().unanswered);
+    }
+
+    /// A Gh whose gh is run under a stand-in for runuser, which answers as
+    /// gh would, with what it was run as: its words, and the environment's
+    /// `shows`.
+    fn under(shows: &str) -> Gh {
+        let answer =
+            format!(r#"cat >/dev/null; printf 'HTTP/1.1 200 OK\n\n%s|%s' "$*" "${{{shows}-}}""#);
+        Gh {
+            token: None,
+            via: ["/bin/sh", "-c", &answer, "runuser"]
+                .map(OsString::from)
+                .to_vec(),
+        }
+    }
+
+    #[test]
+    fn runs_gh_under_its_via() {
+        let mut gh = under("GH_TOKEN_OWNER");
+        let r = gh.request("GET", "repos/sam/homelab", None, None).unwrap();
+        assert_eq!(r.body, "gh api -i -X GET repos/sam/homelab|");
+        // GraphQL as the account it's about, through whatever runs gh.
+        let r = gh.graphql("sam", &json!({"query": "q"})).unwrap();
+        assert_eq!(r.body, "gh api -i -X POST graphql --input -|sam");
+        let mut gh = Gh {
+            token: Some("ghs_x".into()),
+            ..under("GH_TOKEN")
+        };
+        let r = gh.request("GET", "a", None, Some("e")).unwrap();
+        assert_eq!(r.body, "gh api -i -X GET a -H If-None-Match: e|ghs_x");
     }
 }

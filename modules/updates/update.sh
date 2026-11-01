@@ -17,7 +17,8 @@
 # off while a switch is pending or while the box runs changes that aren't on
 # main yet. In a repo whose PRs land through its merge train, what it would push
 # goes up as a PR instead, and it rides that PR until it lands, or puts a fresh
-# bump on it when a check fails on it (propose.sh).
+# bump on it when a check fails on it (crates/burrow-update's train.rs, which
+# it runs as $UPDATER).
 # (Everything in capitals comes from ../updates.nix.)
 
 [ "$(id -u)" = 0 ] || exec sudo "$0" "$@"
@@ -135,14 +136,14 @@ riding=
 replacing=
 url=
 if [ -n "$TRAIN" ]; then
-  pr=$(update_pr) || { note held "GitHub didn't say whether its PR is open; trying again next run"; exit 0; }
+  pr=$("$UPDATER" pr) || { note held "GitHub didn't say whether its PR is open; trying again next run"; exit 0; }
   if [ -n "$pr" ]; then
-    red=$(red_head "$pr") || { note held "$red; trying again next run"; exit 0; }
+    red=$("$UPDATER" red "$pr") || { note held "$red; trying again next run"; exit 0; }
     if [ -n "$red" ]; then
       replacing=$pr
     else
       behind=${pr%% *}
-      why=$(ride "$pr") || { note held "$why"; exit 0; }
+      why=$("$UPDATER" ride "$pr") || { note held "$why"; exit 0; }
       riding=$behind
     fi
   fi
@@ -255,7 +256,7 @@ fi
 settled build-main "main builds again."
 
 # Its red PR's head stays, unless a whole fresh bump other than it replaces it.
-if [ -n "$replacing" ] && why=$(why_not_replace "$replacing" "$main" "${unfetched[@]}" "${failed[@]}"); then
+if [ -n "$replacing" ] && ! why=$("$UPDATER" replaces "$replacing" "$main" "${unfetched[@]}" "${failed[@]}"); then
   note held "its PR #${replacing%% *} is red, and $why; holding for the Claude jobs on it"
   exit 0
 fi
@@ -438,7 +439,7 @@ if [ -z "$live" ]; then
   # confirmed: refused (a fix or a rerun got there first), it goes straight
   # back, so the box never stays on what nothing will land, and the next run
   # rides or holds for that PR as usual.
-  if [ -n "$replacing" ] && ! url=$(replace "$replacing" "$(git_ log -1 --format=%s)" "$(pr_body)"); then
+  if [ -n "$replacing" ] && ! url=$("$UPDATER" replace "$replacing"); then
     "$SWITCH" --abort >>"$state/logs/switch.log" 2>&1 || true
     note held "$url; reverted"
     exit 0
@@ -466,9 +467,9 @@ if [ -n "$TRAIN" ]; then
   elif [ -n "$replacing" ]; then
     # Up already, before its confirm (6), unless it was live before this run:
     # then it goes up now, and a refusal leaves the box as this run found it.
-    [ -z "$live" ] || url=$(replace "$replacing" "$(git_ log -1 --format=%s)" "$(pr_body)") || { echo "$url"; url=; }
+    [ -z "$live" ] || url=$("$UPDATER" replace "$replacing") || { echo "$url"; url=; }
   else
-    url=$(propose "$(git_ log -1 --format=%s)" "$(pr_body)") || echo "its PR didn't open; the next run opens it"
+    url=$("$UPDATER" propose) || echo "its PR didn't open; the next run opens it"
   fi
   [ -n "$changed" ] || git_ rev-parse HEAD >"$state/deployed-main"
 else

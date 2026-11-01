@@ -70,6 +70,7 @@ impl Owners for Installations<'_> {
             let gh = match token(self.app, &owner, self.now)? {
                 Token::Minted(m) => Some(Gh {
                     token: Some(m.token),
+                    ..Gh::default()
                 }),
                 Token::NotInstalled => None,
             };
