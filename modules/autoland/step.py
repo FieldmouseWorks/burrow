@@ -831,9 +831,10 @@ def handle(repo, pr, repo_info, digest, held=None):
     # reviewer has read (and Renovate won't merge); a bot's PR that changes a
     # workflow beyond repinning its actions changes the gate. Either goes
     # through the review loop below like a Claude PR. While a Renovate one's CI
-    # is red it's renovate-sweep's to hand over, findings and all: a job from
-    # each on one branch would push over each other. The sweep's push makes a
-    # new head, and the reviewers read it again.
+    # is red its branch is renovate-sweep's: a job from each on one branch
+    # would push over each other. The sweep's job answers no findings: once its
+    # push is green they're handed over here like any PR's, to a job whose
+    # answers go up only on its own push (claims).
     # A judge asked for on this head and base (the repo had no CI then, say)
     # still decides once CI shows up, or the description is edited (then on
     # the new one): its owner or failed verdict isn't dropped for either.
@@ -849,9 +850,10 @@ def handle(repo, pr, repo_info, digest, held=None):
     refresh = lock_wait.refresh(pr, ci == "red", ci_names, C.renovated, requested) if renovate else {}
 
     # Dependency bumps: CI is the review. Renovate merges its own minor
-    # ones; renovate-sweep fixes the red ones (and settles their threads) and
-    # gives each major a verdict. Anything else that's open on one, a review
-    # finding or a red Dependabot update, goes to a Claude job like any PR's.
+    # ones; renovate-sweep fixes the red ones and gives each major a verdict,
+    # and answers none of their threads. Anything else that's open on one, a
+    # review thread or a red Dependabot update, goes to a Claude job like any
+    # PR's.
     # Sent to the owner (by hand, a fix job or a judge): theirs, whatever else
     # is open on it, and nothing more is asked or handed off until the label
     # comes off.
@@ -879,8 +881,9 @@ def handle(repo, pr, repo_info, digest, held=None):
             settle("pending", "Dependency update, CI red; renovate-sweep has it" + (f" ({threads})" if threads else ""),
                    wait=waits.SWEEP)
         elif renovate and dep == "major" and threads and not major_verdict:
-            # Until it gives this head a verdict, renovate-sweep's job has it,
-            # threads, reviews and all: one job on its branch.
+            # Until it gives this head a verdict, renovate-sweep's job has its
+            # branch: one job on it. Its threads and reviews wait for that
+            # verdict, then go to a job of ours.
             settle("pending", f"Major update, {threads}; renovate-sweep has it"[:140], wait=waits.SWEEP)
         elif renovate and dep == "major" and major_verdict == "held":
             # Held for the owner (renovate-sweep tells them): no job pushes
