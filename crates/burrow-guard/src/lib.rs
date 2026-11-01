@@ -13,6 +13,7 @@
 //! The command is read as text, line by line, so one nested in quotes
 //! (`ssh host '…'`, `sh -c "…"`) counts the same as one typed bare.
 
+mod ansi_c;
 pub mod config;
 mod doors;
 mod push;

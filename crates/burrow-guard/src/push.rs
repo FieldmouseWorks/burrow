@@ -100,9 +100,10 @@ impl Push {
         let mut words = words.iter();
         while let Some(w) = words.next() {
             match w.as_str() {
-                // The rest are refspecs, whatever they look like.
+                // The rest are the remote and refspecs, whatever they look
+                // like.
                 "--" => {
-                    p.positional.extend(words.by_ref().cloned());
+                    words.by_ref().for_each(|w| p.positional(w));
                     break;
                 }
                 w if let Some(option) = w.strip_prefix("--") => {
@@ -133,14 +134,17 @@ impl Push {
                         }
                     }
                 }
-                w if w.starts_with(['+', ':']) => {
-                    p.force = true;
-                    p.positional.push(w[1..].to_owned());
-                }
-                w => p.positional.push(w.to_owned()),
+                w => p.positional(w),
             }
         }
         p
+    }
+
+    /// The remote or a refspec. A `+` forces, and an empty source deletes;
+    /// `:` alone is an ordinary push of the branches both sides have.
+    fn positional(&mut self, word: &str) {
+        self.force |= word.starts_with('+') || (word.starts_with(':') && word != ":");
+        self.positional.push(word.to_owned());
     }
 
     fn ask(&self, at: &Path, git: &Path) -> Option<String> {
@@ -153,14 +157,10 @@ impl Push {
                     .to_owned(),
             );
         }
-        let targets: Vec<String> = if self.positional.len() > 1 {
+        let shared = if self.positional.len() > 1 {
             self.positional[1..]
                 .iter()
-                .map(|refspec| {
-                    let dest = refspec.rsplit(':').next().unwrap_or(refspec);
-                    dest.strip_prefix("refs/heads/").unwrap_or(dest).to_owned()
-                })
-                .collect()
+                .find_map(|refspec| shared_target(refspec))?
         } else {
             let branch = run(git, at, &["symbolic-ref", "--short", "-q", "HEAD"]);
             let upstream = run(
@@ -169,13 +169,48 @@ impl Push {
                 &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
             )
             .map(|u| u.split_once('/').map_or(u.clone(), |(_, b)| b.to_owned()));
-            branch.into_iter().chain(upstream).collect()
+            branch
+                .into_iter()
+                .chain(upstream)
+                .find_map(|t| shared_target(&t))?
         };
-        let shared = targets.iter().find(|t| SHARED.contains(&t.as_str()))?;
         Some(format!(
             "Force-push or delete of '{shared}' (R2: rewrites history other clones depend on)."
         ))
     }
+}
+
+/// What `refspec` updates, if that can be a shared branch: its destination,
+/// or its source where it names no other, by name or by wildcard. `:` alone
+/// is every branch both sides have.
+fn shared_target(refspec: &str) -> Option<String> {
+    let spec = refspec.strip_prefix('+').unwrap_or(refspec);
+    let (source, dest) = spec.rsplit_once(':').unwrap_or((spec, spec));
+    let dest = if dest.is_empty() { source } else { dest };
+    if dest.is_empty() {
+        return Some(":".to_owned());
+    }
+    let name = dest
+        .strip_prefix("refs/heads/")
+        .or_else(|| dest.strip_prefix("heads/"))
+        .unwrap_or(dest);
+    let shared = match name.split_once('*') {
+        None => SHARED.contains(&name),
+        Some((before, after)) => SHARED.iter().any(|branch| {
+            [
+                (*branch).to_owned(),
+                format!("heads/{branch}"),
+                format!("refs/heads/{branch}"),
+            ]
+            .iter()
+            .any(|full| {
+                full.len() >= before.len() + after.len()
+                    && full.starts_with(before)
+                    && full.ends_with(after)
+            })
+        }),
+    };
+    shared.then(|| name.to_owned())
 }
 
 /// What a long option of `git push` means here.

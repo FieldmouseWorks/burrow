@@ -4,7 +4,14 @@
 //! newline ends a command. A redirect and its target aren't words. A
 //! substitution (`$(…)`, `` `…` ``, `<(…)`, `>(…)`) is read as commands of
 //! its own wherever it is, inside double quotes or a redirect's target too,
-//! and stands in its word as [`UNKNOWN`]. Nothing else is expanded.
+//! and stands in its word as [`UNKNOWN`]. Enough of the grammar is followed
+//! to find where a substitution ends: a `)` can close a subshell or a `case`
+//! pattern first, and a comment, a here-document or a `${…}` holds text that
+//! isn't the shell's to read as quotes or parentheses. What a comment or a
+//! here-document says is still read, line by line, since it may be a script
+//! (`bash <<EOF`). Nothing else is expanded.
+
+use crate::ansi_c;
 
 /// What a substitution's output is, in the word that holds it: unknown
 /// until it runs.
@@ -30,6 +37,153 @@ struct Lexer {
     pos: usize,
     /// Every command read, from every scope.
     commands: Vec<Vec<String>>,
+    /// Here-documents whose bodies start at the next newline.
+    heredocs: Vec<Heredoc>,
+}
+
+struct Heredoc {
+    /// The line that ends it.
+    end: String,
+    /// `<<-`: tabs before that line don't count.
+    strip_tabs: bool,
+}
+
+/// What a scope of the reading is inside, innermost last.
+enum Open {
+    Subshell,
+    /// `case`, up to its `in`.
+    CaseHead {
+        subject: bool,
+    },
+    /// A `case`'s patterns, up to the `)` that ends them.
+    CasePatterns {
+        /// The next word, if `esac`, ends the `case`: nothing of a pattern
+        /// has been read, not even its optional `(`.
+        may_end: bool,
+        /// Extended globs open in the pattern (`@(a|b)`).
+        globs: usize,
+    },
+    /// The commands of a `case`'s pattern, up to `;;` or `esac`.
+    CaseBody,
+}
+
+/// The grammar one scope needs to tell what a `)` closes.
+#[derive(Default)]
+struct Grammar {
+    open: Vec<Open>,
+    /// A command's name has been read: the words after it aren't keywords.
+    named: bool,
+}
+
+/// Words a command may follow without having begun: `then case …`.
+const BEFORE_A_COMMAND: [&str; 13] = [
+    "if", "then", "elif", "else", "do", "while", "until", "!", "{", "time", "coproc", "-p", "--",
+];
+
+impl Grammar {
+    /// The word `cmd` holds, about to end.
+    fn word(&mut self, cmd: &Command) {
+        if !cmd.in_word || cmd.target {
+            return;
+        }
+        let word = if cmd.quoted { "" } else { cmd.word.as_str() };
+        match self.open.last_mut() {
+            Some(Open::CaseHead { subject: false }) => {
+                self.open.pop();
+                self.open.push(Open::CaseHead { subject: true });
+            }
+            Some(Open::CaseHead { subject: true }) => {
+                if word == "in" {
+                    self.open.pop();
+                    self.open.push(Open::CasePatterns {
+                        may_end: true,
+                        globs: 0,
+                    });
+                }
+            }
+            Some(Open::CasePatterns { may_end, .. }) => {
+                if *may_end && word == "esac" {
+                    self.open.pop();
+                    self.named = true;
+                } else {
+                    *may_end = false;
+                }
+            }
+            _ if self.named => {}
+            last => {
+                if word == "case" {
+                    self.open.push(Open::CaseHead { subject: false });
+                    self.named = true;
+                } else if word == "esac" && matches!(last, Some(Open::CaseBody)) {
+                    self.open.pop();
+                    self.named = true;
+                } else {
+                    let function_body =
+                        word == "{" && cmd.words.first().is_some_and(|w| w == "function");
+                    self.named = !function_body && !BEFORE_A_COMMAND.contains(&word);
+                }
+            }
+        }
+    }
+
+    /// A `(`; `in_word` if it comes straight after part of a word.
+    fn opens(&mut self, in_word: bool) {
+        self.named = false;
+        match self.open.last_mut() {
+            Some(Open::CasePatterns { may_end, globs }) => {
+                if in_word || !*may_end {
+                    *globs += 1;
+                }
+                *may_end = false;
+            }
+            _ => self.open.push(Open::Subshell),
+        }
+    }
+
+    /// A `)`: whether nothing here holds it, so it's the scope's own.
+    fn closes(&mut self) -> bool {
+        self.named = false;
+        match self.open.last_mut() {
+            Some(Open::Subshell) => {
+                self.open.pop();
+                false
+            }
+            Some(Open::CasePatterns { globs, .. }) if *globs > 0 => {
+                *globs -= 1;
+                false
+            }
+            Some(Open::CasePatterns { .. }) => {
+                self.open.pop();
+                self.open.push(Open::CaseBody);
+                false
+            }
+            _ => true,
+        }
+    }
+
+    /// A `|`, `;`, `&` or newline.
+    fn separator(&mut self, c: char) {
+        self.named = false;
+        if c == '|'
+            && let Some(Open::CasePatterns { may_end, .. }) = self.open.last_mut()
+        {
+            *may_end = false;
+        }
+    }
+
+    fn in_body(&self) -> bool {
+        matches!(self.open.last(), Some(Open::CaseBody))
+    }
+
+    /// A `;;`, `;&` or `;;&`: the next pattern.
+    fn next_pattern(&mut self) {
+        self.named = false;
+        self.open.pop();
+        self.open.push(Open::CasePatterns {
+            may_end: true,
+            globs: 0,
+        });
+    }
 }
 
 /// The command being read in one scope: the text, or one substitution.
@@ -84,6 +238,7 @@ impl Lexer {
             chars: text.chars().collect(),
             pos: 0,
             commands: Vec::new(),
+            heredocs: Vec::new(),
         }
     }
 
@@ -110,32 +265,100 @@ impl Lexer {
             return Err(TooDeep);
         }
         let mut cmd = Command::default();
-        // Subshells open in this scope: a `)` closes one of them first.
-        let mut open = 0usize;
+        let mut grammar = Grammar::default();
         while let Some(c) = self.next() {
+            let in_word = cmd.in_word;
+            let process = matches!(c, '<' | '>') && self.peek() == Some('(');
+            if matches!(
+                c,
+                ' ' | '\t' | '\r' | '\n' | ';' | '&' | '|' | '(' | ')' | '<' | '>'
+            ) && !process
+            {
+                grammar.word(&cmd);
+            }
             match c {
                 ' ' | '\t' | '\r' => cmd.end_word(),
-                ')' if closes && open == 0 => break,
                 '(' => {
-                    open += 1;
+                    grammar.opens(in_word);
                     cmd.end(&mut self.commands);
                 }
                 ')' => {
-                    open = open.saturating_sub(1);
+                    if grammar.closes() && closes {
+                        break;
+                    }
                     cmd.end(&mut self.commands);
                 }
+                '#' if !in_word => self.comment(depth)?,
                 // `&>` and `&>>` send both outputs: a redirect, not the end.
-                '&' if self.peek() == Some('>') => self.redirect(&mut cmd),
-                '\n' | ';' | '&' | '|' => cmd.end(&mut self.commands),
-                '<' | '>' if self.next_if(|c| c == '(').is_some() => {
+                '&' if self.peek() == Some('>') => self.redirect(c, &mut cmd, depth)?,
+                ';' if grammar.in_body() && matches!(self.peek(), Some(';' | '&')) => {
+                    self.pos += 1;
+                    if self.chars.get(self.pos) == Some(&'&') && self.chars[self.pos - 1] == ';' {
+                        self.pos += 1;
+                    }
+                    grammar.next_pattern();
+                    cmd.end(&mut self.commands);
+                }
+                '\n' => {
+                    grammar.separator(c);
+                    cmd.end(&mut self.commands);
+                    self.heredoc_bodies(depth)?;
+                }
+                ';' | '&' | '|' => {
+                    grammar.separator(c);
+                    cmd.end(&mut self.commands);
+                }
+                '<' | '>' if process => {
+                    self.pos += 1;
                     self.list(depth + 1, true)?;
                     cmd.push(UNKNOWN);
                 }
-                '<' | '>' => self.redirect(&mut cmd),
+                '<' | '>' => self.redirect(c, &mut cmd, depth)?,
                 c => self.word(c, &mut cmd, depth)?,
             }
         }
         cmd.end(&mut self.commands);
+        Ok(())
+    }
+
+    /// `text` read as a script of its own, its commands joining these.
+    fn read_apart(&mut self, text: &str, depth: usize) -> Result<(), TooDeep> {
+        let mut inner = Lexer::new(text);
+        inner.list(depth + 1, false)?;
+        self.commands.append(&mut inner.commands);
+        Ok(())
+    }
+
+    /// The rest of the line, after its `#`.
+    fn comment(&mut self, depth: usize) -> Result<(), TooDeep> {
+        let mut text = String::new();
+        while let Some(c) = self.next_if(|c| c != '\n') {
+            text.push(c);
+        }
+        self.read_apart(&text, depth)
+    }
+
+    /// The bodies of the here-documents waiting on this newline, each line
+    /// read on its own: a quote in one doesn't reach the next.
+    fn heredoc_bodies(&mut self, depth: usize) -> Result<(), TooDeep> {
+        for doc in std::mem::take(&mut self.heredocs) {
+            while self.peek().is_some() {
+                let mut line = String::new();
+                while let Some(c) = self.next_if(|c| c != '\n') {
+                    line.push(c);
+                }
+                self.pos += 1;
+                let last = if doc.strip_tabs {
+                    line.trim_start_matches('\t')
+                } else {
+                    line.as_str()
+                };
+                if last == doc.end {
+                    break;
+                }
+                self.read_apart(&line, depth)?;
+            }
+        }
         Ok(())
     }
 
@@ -144,7 +367,10 @@ impl Lexer {
         match c {
             '\\' => match self.next() {
                 Some('\n') | None => {}
-                Some(c) => cmd.push(c),
+                Some(c) => {
+                    cmd.quote();
+                    cmd.push(c);
+                }
             },
             '\'' => {
                 cmd.quote();
@@ -179,9 +405,30 @@ impl Lexer {
                     self.list(depth + 1, true)?;
                     cmd.push(UNKNOWN);
                 }
+                Some('{') => {
+                    self.pos += 1;
+                    cmd.word.push_str("${");
+                    self.parameter(cmd, depth + 1)?;
+                }
                 _ => cmd.push('$'),
             },
             c => cmd.push(c),
+        }
+        Ok(())
+    }
+
+    /// The rest of a `${…}`, after its `{`: part of one word, spaces and
+    /// parentheses and all, with its quotes and substitutions read as usual.
+    fn parameter(&mut self, cmd: &mut Command, depth: usize) -> Result<(), TooDeep> {
+        if depth > DEPTH {
+            return Err(TooDeep);
+        }
+        while let Some(c) = self.next() {
+            if c == '}' {
+                cmd.word.push(c);
+                break;
+            }
+            self.word(c, cmd, depth)?;
         }
         Ok(())
     }
@@ -230,102 +477,66 @@ impl Lexer {
                 c => text.push(c),
             }
         }
-        let mut inner = Lexer::new(&text);
-        inner.list(depth + 1, false)?;
-        self.commands.append(&mut inner.commands);
-        Ok(())
+        self.read_apart(&text, depth)
     }
 
-    /// The rest of a `$'…'` string, after its `'`, its escapes decoded as
-    /// bash decodes them.
+    /// The rest of a `$'…'` string, after its `'`. Its end is found first,
+    /// a backslash taking the character after it, then its escapes decoded.
     fn ansi_c(&mut self, cmd: &mut Command) {
+        let mut raw = Vec::new();
         while let Some(c) = self.next() {
             match c {
                 '\'' => break,
-                '\\' => self.ansi_c_escape(cmd),
-                c => cmd.word.push(c),
+                '\\' => {
+                    raw.push(c);
+                    raw.extend(self.next());
+                }
+                c => raw.push(c),
             }
         }
+        ansi_c::decode(&raw, &mut cmd.word);
     }
 
-    fn ansi_c_escape(&mut self, cmd: &mut Command) {
-        let Some(e) = self.next() else {
-            cmd.word.push('\\');
-            return;
-        };
-        let plain = match e {
-            'a' => '\x07',
-            'b' => '\x08',
-            'e' | 'E' => '\x1b',
-            'f' => '\x0c',
-            'n' => '\n',
-            'r' => '\r',
-            't' => '\t',
-            'v' => '\x0b',
-            '\\' | '\'' | '"' | '?' => e,
-            '0'..='7' => {
-                let n = self.digits(e.to_digit(8).unwrap_or(0), 8, 2);
-                cmd.word.extend(char::from_u32(n));
-                return;
-            }
-            'x' | 'u' | 'U' => {
-                let most = match e {
-                    'x' => 2,
-                    'u' => 4,
-                    _ => 8,
-                };
-                if self.peek().is_some_and(|c| c.is_ascii_hexdigit()) {
-                    let n = self.digits(0, 16, most);
-                    cmd.word.extend(char::from_u32(n));
-                } else {
-                    cmd.word.push('\\');
-                    cmd.word.push(e);
-                }
-                return;
-            }
-            'c' => match self.next() {
-                Some(c) => char::from_u32(u32::from(c) & 0x1f).unwrap_or(c),
-                None => {
-                    cmd.word.push_str("\\c");
-                    return;
-                }
-            },
-            e => {
-                cmd.word.push('\\');
-                e
-            }
-        };
-        cmd.word.push(plain);
-    }
-
-    /// `first` followed by up to `most` more digits in `radix`, as a number.
-    fn digits(&mut self, first: u32, radix: u32, most: usize) -> u32 {
-        let mut n = first;
-        for _ in 0..most {
-            let Some(d) = self.peek().and_then(|c| c.to_digit(radix)) else {
-                break;
-            };
-            n = n * radix + d;
-            self.pos += 1;
-        }
-        n
-    }
-
-    /// A redirect, after its first `<`, `>` or `&`: the rest of the
-    /// operator (`>>`, `>&`, `<>`, `>|`, `<<<`), then its target, which
+    /// A redirect, after its first `<`, `>` or `&` (`first`): the rest of
+    /// the operator (`>>`, `>&`, `<>`, `>|`, `<<<`), then its target, which
     /// isn't a word (`-` and a descriptor's number count as targets). A
-    /// descriptor's number before it (`2>`) isn't a word either.
-    fn redirect(&mut self, cmd: &mut Command) {
+    /// descriptor's number before it (`2>`) isn't a word either. `<<` and
+    /// `<<-` take a here-document's end word for a target.
+    fn redirect(&mut self, first: char, cmd: &mut Command, depth: usize) -> Result<(), TooDeep> {
         if cmd.in_word && !cmd.quoted && cmd.word.bytes().all(|b| b.is_ascii_digit()) {
             cmd.word.clear();
             cmd.in_word = false;
         }
         cmd.end_word();
-        while self
-            .next_if(|c| matches!(c, '<' | '>' | '&' | '|'))
-            .is_some()
-        {}
+        let mut operator = String::from(first);
+        while let Some(c) = self.next_if(|c| matches!(c, '<' | '>' | '&' | '|')) {
+            operator.push(c);
+        }
+        if operator == "<<" {
+            return self.heredoc(depth);
+        }
         cmd.target = true;
+        Ok(())
+    }
+
+    /// A here-document's end word, after its `<<`: quotes come off it.
+    fn heredoc(&mut self, depth: usize) -> Result<(), TooDeep> {
+        let strip_tabs = self.next_if(|c| c == '-').is_some();
+        while self.next_if(|c| matches!(c, ' ' | '\t')).is_some() {}
+        let mut end = Command::default();
+        while let Some(c) = self.next_if(|c| {
+            !matches!(
+                c,
+                ' ' | '\t' | '\r' | '\n' | ';' | '&' | '|' | '(' | ')' | '<' | '>'
+            )
+        }) {
+            self.word(c, &mut end, depth)?;
+        }
+        self.heredocs.push(Heredoc {
+            end: end.word,
+            strip_tabs,
+        });
+        Ok(())
     }
 }
 
@@ -379,9 +590,14 @@ mod tests {
         );
         assert_eq!(
             commands(r#"$'\'\\\"\?\e\cA\q\x\777' $'a b"#),
-            want(&[&["'\\\"?\x1b\x01\\q\\x\u{1ff}", "a b"]])
+            want(&[&["'\\\"?\x1b\x01\\q\\x\u{fffd}", "a b"]])
         );
         assert_eq!(commands(r#"$"a b"c"#), want(&[&["a bc"]]));
+        // A byte, and a NUL ending only its own string.
+        assert_eq!(commands(r"$'git\440push'"), want(&[&["git push"]]));
+        assert_eq!(commands(r"a$'b\0c'd e"), want(&[&["abd", "e"]]));
+        // A backslash takes the quote after it, whatever it escapes.
+        assert_eq!(commands(r"$'\c' b"), want(&[&[r"\c", "b"]]));
         // Not inside double quotes, and not as a plain `$`.
         assert_eq!(commands(r#""$'a'" $ $x"#), want(&[&["$'a'", "$", "$x"]]));
     }
@@ -465,8 +681,112 @@ mod tests {
     }
 
     #[test]
+    fn a_case_pattern_doesnt_end_a_substitution() {
+        let inner = ["case", "x", "in", "x"];
+        for (text, words) in [
+            ("a $(case x in x) b ;; esac) c", vec!["a", "%", "c"]),
+            // Its optional `(`, its alternatives, and every way to the next.
+            ("a $(case x in (x) b ;; esac) c", vec!["a", "%", "c"]),
+            ("a $(case x in x|y) b ;; esac) c", vec!["a", "%", "c"]),
+            ("a $(case x in x) b ;& esac) c", vec!["a", "%", "c"]),
+            ("a $(case x in x) b ;;& esac) c", vec!["a", "%", "c"]),
+            ("a $(case x in x) b; esac) c", vec!["a", "%", "c"]),
+            ("a $(case x in\nx)\nb\nesac\n) c", vec!["a", "%", "c"]),
+            ("a <(case x in x) b ;; esac) c", vec!["a", "%", "c"]),
+        ] {
+            let read = commands(text).unwrap();
+            let last: Vec<_> = read
+                .last()
+                .unwrap()
+                .iter()
+                .map(|w| w.replace(UNKNOWN, "%"))
+                .collect();
+            assert_eq!(last, words, "{text}");
+            assert!(read.contains(&vec!["b".to_owned()]), "{text}: {read:?}");
+            assert_eq!(read[0][..2], inner[..2], "{text}");
+        }
+        // A second pattern after the first's body, and `esac` as a pattern.
+        for text in [
+            "a $(case x in y) d ;; z) b ;; esac) c",
+            "a $(case x in y|esac) d ;; (esac) b ;; esac) c",
+            "a $(case x in @(y|z)) b ;; esac) c",
+            "a $(case x in z) (d) ; b ;; esac) c",
+            "a $(if t; then case x in z) b ;; esac; fi) c",
+            "a $(case x in z) case y in w) b ;; esac ;; esac) c",
+            "a $(case x in esac; b) c",
+            "a $(case ')' in ')') b ;; esac) c",
+        ] {
+            let read = commands(text).unwrap();
+            assert_eq!(read.last().unwrap().len(), 3, "{text}: {read:?}");
+            assert!(read.contains(&vec!["b".to_owned()]), "{text}: {read:?}");
+        }
+        // Not the keyword: a quoted or an argument `case` opens nothing.
+        assert_eq!(
+            commands("a $('case' x in x) b"),
+            want(&[&["case", "x", "in", "x"], &["a", "%", "b"]])
+        );
+        assert_eq!(
+            commands("a $(echo case x in x) b"),
+            want(&[&["echo", "case", "x", "in", "x"], &["a", "%", "b"]])
+        );
+    }
+
+    #[test]
+    fn a_comment_holds_no_quotes_or_parentheses() {
+        // `)` and `'` in a comment are its own; what it says is read too.
+        assert_eq!(
+            commands("a $(b # c) d\ne) f"),
+            want(&[&["c"], &["d"], &["b"], &["e"], &["a", "%", "f"]])
+        );
+        assert_eq!(
+            commands("a # don't\nb c"),
+            want(&[&["dont"], &["a"], &["b", "c"]])
+        );
+        // Only at the start of a word.
+        assert_eq!(commands("a b#c $#"), want(&[&["a", "b#c", "$#"]]));
+    }
+
+    #[test]
+    fn a_here_document_holds_no_quotes_or_parentheses() {
+        assert_eq!(
+            commands("a <<EOF\ndon't\n)\nEOF\nb c"),
+            want(&[&["a"], &["dont"], &["b", "c"]])
+        );
+        // Closing a substitution only after its body.
+        assert_eq!(
+            commands("a $(b <<EOF\n)\nEOF\nc) d"),
+            want(&[&["b"], &["c"], &["a", "%", "d"]])
+        );
+        // Its body is read, its end word's quotes come off, `<<-` strips tabs.
+        assert_eq!(
+            commands("bash <<'E F'\ngit push\nE F\nb"),
+            want(&[&["bash"], &["git", "push"], &["b"]])
+        );
+        assert_eq!(
+            commands("a <<-EOF c\n\tb\n\tEOF\nd"),
+            want(&[&["a", "c"], &["b"], &["d"]])
+        );
+        // Each body in turn, and one that never ends runs out with the text.
+        assert_eq!(
+            commands("a <<X <<Y\nb\nX\nc\nY\nd"),
+            want(&[&["a"], &["b"], &["c"], &["d"]])
+        );
+        assert_eq!(commands("a <<X\nb"), want(&[&["a"], &["b"]]));
+    }
+
+    #[test]
+    fn a_parameter_holds_its_parentheses() {
+        assert_eq!(
+            commands("a $(b ${x:-)} c) d"),
+            want(&[&["b", "${x:-)}", "c"], &["a", "%", "d"]])
+        );
+        assert_eq!(commands("${x:-$(a b)}"), want(&[&["a", "b"], &["${x:-%}"]]));
+    }
+
+    #[test]
     fn nesting_past_the_limit_is_refused() {
         assert_eq!(commands(&"$(".repeat(DEPTH + 1)), Err(TooDeep));
         assert!(commands(&"$(".repeat(DEPTH)).is_ok());
+        assert_eq!(commands(&"${".repeat(DEPTH + 1)), Err(TooDeep));
     }
 }

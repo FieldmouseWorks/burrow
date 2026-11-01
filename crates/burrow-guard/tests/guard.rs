@@ -515,6 +515,126 @@ fn a_push_is_read_word_by_word_as_the_shell_splits_it() {
 }
 
 #[test]
+fn a_refspec_is_read_the_same_after_a_double_dash() {
+    let b = Box::new();
+    let on_feature = clone_tracking("feature", "feature");
+    for cmd in [
+        "git push origin -- +HEAD:main",
+        "git push origin -- +main",
+        "git push origin -- :main",
+        "git push -- origin +main",
+        "git push -- origin :main",
+        "git push -f -- origin main",
+        "git push -f origin -- +main",
+        "git push -d origin -- main",
+        "git push origin -- +x:refs/heads/main",
+        "git push origin -- :refs/heads/main",
+        "git push origin +x:heads/main",
+        "git push -f origin -- +refs/heads/x:refs/heads/main",
+        // A wildcard or a matching push can reach a shared branch.
+        "git push origin -- '+refs/heads/*:refs/heads/*'",
+        "git push origin '+refs/*:refs/*'",
+        "git push -f origin 'refs/heads/m*:refs/heads/m*'",
+        "git push -f origin 'refs/heads/*'",
+        "git push origin +:",
+        "git push -f origin :",
+        "git push -f origin -- :",
+        // A source with an empty destination updates itself.
+        "git push -f origin main:",
+    ] {
+        let said = b.check(cmd, on_feature.path());
+        assert!(
+            said.as_deref().is_some_and(|s| s.ends_with(SHARED)),
+            "{cmd}: {said:?}"
+        );
+    }
+    for cmd in [
+        "git push origin -- feature",
+        "git push origin -- x:main",
+        "git push -- origin main",
+        "git push origin -- +feature",
+        "git push origin -- :feature",
+        "git push origin :",
+        "git push -f origin '+refs/heads/*:refs/tags/*'",
+        "git push origin '+refs/heads/f*:refs/heads/f*'",
+        "git push origin -- -f main",
+    ] {
+        assert_eq!(b.check(cmd, on_feature.path()), None, "{cmd}");
+    }
+}
+
+#[test]
+fn a_substitution_ends_where_the_shell_ends_it() {
+    let b = Box::new();
+    let on_feature = clone_tracking("feature", "feature");
+    let push = "git push -f origin main";
+    for cmd in [
+        format!(r#"echo "$(case x in x){push} ;; esac)""#),
+        format!(r#"echo "$(case x in (x){push} ;; esac)""#),
+        format!(r#"echo "$(case x in x|y){push} ;; esac)""#),
+        format!(r#"echo "$(case x in @(x|y)){push} ;; esac)""#),
+        format!(r#"echo "$(case x in y) a ;; x){push} ;; esac)""#),
+        format!(r"echo `case x in x){push} ;; esac`"),
+        format!(r"cat <(case x in x){push} ;; esac)"),
+        // Its arguments stay with the push around the substitution.
+        "git push -f $(case x in x) echo origin ;; esac) main".to_owned(),
+        // Comments, here-documents and parameters, with what would end it.
+        format!("echo \"$(a # )\n{push} )\""),
+        format!("echo \"$(cat <<E\n)\nE\n{push} )\""),
+        format!("echo \"$(a ${{x:-)}}; {push} )\""),
+        // A quote in any of them isn't one.
+        format!("a # don't\n{push}"),
+        format!("cat <<E\ndon't\nE\n{push}"),
+        format!("bash <<E\n{push}\nE"),
+        format!("cat <<E\ndon't $({push} )\nE"),
+    ] {
+        let said = b.check(&cmd, on_feature.path());
+        assert!(
+            said.as_deref().is_some_and(|s| s.ends_with(SHARED)),
+            "{cmd}: {said:?}"
+        );
+    }
+    for cmd in [
+        "echo \"$(case x in x) ls ;; esac)\" main -f",
+        "echo git-push # )",
+        "cat <<E\ngit status\nE",
+    ] {
+        assert_eq!(b.check(cmd, on_feature.path()), None, "{cmd}");
+    }
+}
+
+#[test]
+fn dollar_quotes_decode_to_the_bytes_bash_runs() {
+    let b = Box::new();
+    let on_feature = clone_tracking("feature", "feature");
+    for cmd in [
+        r"bash -c $'git\440push -f origin main '",
+        r"bash -c $'git push -f origin main\0ignored'",
+        r"bash -c $'git push -f origin main\x00ignored'",
+        r"bash -c $'git push -f origin main\u0000ignored'",
+        r"bash -c $'git push -f origin main\c@ignored'",
+        r"git push $'-\546' origin main",
+        r"git push -f origin $'ma\0x'in",
+        r"bash -c $'git\x{20}push -f origin main '",
+        r"bash -c $'git\u0020push -f origin main '",
+    ] {
+        let said = b.check(cmd, on_feature.path());
+        assert!(
+            said.as_deref().is_some_and(|s| s.ends_with(SHARED)),
+            "{cmd}: {said:?}"
+        );
+    }
+    // What a NUL cuts off runs nowhere.
+    assert_eq!(
+        b.check(
+            r"bash -c $'git push origin feature\0 -f main'",
+            on_feature.path()
+        ),
+        None
+    );
+}
+
+#[test]
 fn a_command_too_deep_to_read_asks() {
     let b = Box::new();
     let work = clone_on("feature");
