@@ -9,6 +9,10 @@ let
   cfg = config.burrow.claude;
   inherit (config.networking) hostName;
 
+  # How long Claude Code gives the hook; past it, the command runs unchecked,
+  # so the guard asks before then.
+  guardTimeout = 10;
+
   # The PreToolUse hook (crates/burrow-guard), with this machine's config
   # (its src/config.rs). A compiled wrapper rather than a script, since it
   # runs on every Bash call.
@@ -16,6 +20,7 @@ let
     git = lib.getExe config.programs.git.package;
     zfs = "${config.boot.zfs.package}/bin/zfs";
     snapshotDatasets = lib.optionals (config.burrow.undo.enable or false) config.burrow.undo.datasets;
+    askAfterSeconds = guardTimeout - 2;
   });
   guard = pkgs.runCommand "claude-guard" {
     nativeBuildInputs = [ pkgs.makeBinaryWrapper ];
@@ -89,7 +94,7 @@ let
           {
             type = "command";
             command = lib.getExe guard;
-            timeout = 10;
+            timeout = guardTimeout;
           }
         ];
       }

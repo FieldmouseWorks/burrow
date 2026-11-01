@@ -3,7 +3,9 @@
 
 use std::fs;
 use std::io::{ErrorKind, Write};
+use std::os::unix::fs::PermissionsExt;
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 /// What `burrow-guard CONFIG` prints for `input`.
 fn hook(config: &str, input: &str) -> String {
@@ -27,7 +29,8 @@ fn hook(config: &str, input: &str) -> String {
     String::from_utf8(out.stdout).unwrap()
 }
 
-const CONFIG: &str = r#"{"git": "git", "zfs": "/no-such-zfs", "snapshotDatasets": []}"#;
+const CONFIG: &str =
+    r#"{"git": "git", "zfs": "/no-such-zfs", "snapshotDatasets": [], "askAfterSeconds": 8}"#;
 
 #[test]
 fn a_command_it_lets_through_gets_no_answer() {
@@ -60,7 +63,7 @@ fn a_guard_that_cant_check_asks() {
         (CONFIG, "not json"),
         (r#"{"git": "git"}"#, ls),
         (
-            r#"{"git": "git", "zfs": "zfs", "snapshotDatasets": [], "extra": 1}"#,
+            r#"{"git": "git", "zfs": "zfs", "snapshotDatasets": [], "askAfterSeconds": 8, "extra": 1}"#,
             ls,
         ),
     ] {
@@ -74,4 +77,27 @@ fn a_guard_that_cant_check_asks() {
         );
         assert_eq!(out["hookSpecificOutput"]["permissionDecision"], "ask");
     }
+}
+
+/// A guard stuck past its deadline asks, as the hook's timeout would let the
+/// command run unchecked.
+#[test]
+fn a_guard_that_takes_too_long_asks() {
+    let dir = tempfile::tempdir().unwrap();
+    let git = dir.path().join("git");
+    fs::write(&git, "#!/bin/sh\nexec sleep 30\n").unwrap();
+    fs::set_permissions(&git, fs::Permissions::from_mode(0o755)).unwrap();
+    let config = format!(
+        r#"{{"git": "{}", "zfs": "/no-such-zfs", "snapshotDatasets": [], "askAfterSeconds": 1}}"#,
+        git.display()
+    );
+    let input = r#"{"tool_name": "Bash", "tool_input": {"command": "git push -f"}, "cwd": "/"}"#;
+    let started = Instant::now();
+    let out: serde_json::Value = serde_json::from_str(&hook(&config, input)).unwrap();
+    assert!(started.elapsed() < Duration::from_secs(20));
+    assert_eq!(
+        out["hookSpecificOutput"]["permissionDecisionReason"],
+        "The guard couldn't check this command (no answer after 1 s), so it asks."
+    );
+    assert_eq!(out["hookSpecificOutput"]["permissionDecision"], "ask");
 }

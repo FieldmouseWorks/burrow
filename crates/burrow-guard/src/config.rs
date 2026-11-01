@@ -15,6 +15,9 @@ pub struct Config {
     /// What gets an undo snapshot before a command that deletes or rewrites
     /// files (burrow.undo.datasets); none, and nothing is snapshotted.
     pub snapshot_datasets: Vec<String>,
+    /// How long the guard takes before it asks instead: past the hook's
+    /// timeout, Claude Code runs the command unchecked.
+    pub ask_after_seconds: u64,
 }
 
 impl Config {

@@ -3,6 +3,8 @@
 //! refspecs, or, with none, from the branch checked out where it runs and
 //! that branch's upstream (`git push --force` on main).
 
+use std::cell::Cell;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -14,20 +16,78 @@ const SHARED: [&str; 5] = ["main", "master", "trunk", "HEAD", "@"];
 
 /// The question for each push in `cmd` that can rewrite or delete a shared
 /// branch; `cwd` is where the command runs. A command nested deeper than
-/// the guard reads asks, since a push in it would go unseen.
+/// the guard reads asks, since a push in it would go unseen, and so does one
+/// too long to read within [`WORDS`] and [`PLACES`].
 pub fn asks(cmd: &str, cwd: &Path, git: &Path) -> Vec<String> {
+    read(cmd, cwd, git).unwrap_or_else(|why| {
+        vec![format!(
+            "The guard couldn't check this command ({}), so it asks.",
+            why.reason()
+        )]
+    })
+}
+
+fn read(cmd: &str, cwd: &Path, git: &Path) -> Result<Vec<String>, Unread> {
     let mut found = Vec::new();
-    let read = shell::commands(cmd).and_then(|commands| pushes(commands, cwd, 0, None, &mut found));
-    if read.is_err() {
-        return vec![
-            "The guard couldn't check this command (it nests too deep to read), so it asks."
-                .to_owned(),
-        ];
+    let budget = Budget(Cell::new(WORDS));
+    pushes(shell::commands(cmd)?, cwd, 0, None, &budget, &mut found)?;
+    let mut places = Places {
+        git,
+        seen: HashMap::new(),
+    };
+    let mut asks = Vec::new();
+    for (at, push) in found {
+        asks.extend(push.ask(&at, &mut places)?);
     }
-    found
-        .into_iter()
-        .filter_map(|(at, push)| push.ask(&at, git))
-        .collect()
+    Ok(asks)
+}
+
+/// Why a command wasn't read to its end.
+#[derive(Debug)]
+enum Unread {
+    Deep,
+    Long,
+}
+
+impl Unread {
+    fn reason(&self) -> &'static str {
+        match self {
+            Unread::Deep => "it nests too deep to read",
+            Unread::Long => "it's too long to read in time",
+        }
+    }
+}
+
+impl From<shell::TooDeep> for Unread {
+    fn from(_: shell::TooDeep) -> Unread {
+        Unread::Deep
+    }
+}
+
+/// How many words a command's pushes may read, each from its own place to
+/// the end of its command, so repeated pushes cost the square of their count.
+/// Past this the reading takes too long and holds too much, and it asks: far
+/// more than a real command's few pushes read.
+const WORDS: usize = 2_000_000;
+
+/// How many places a command's pushes with no refspec may ask git about.
+/// Each is two processes.
+const PLACES: usize = 32;
+
+/// The words left to read.
+struct Budget(Cell<usize>);
+
+impl Budget {
+    /// Takes `n`, or as many as are left: then the reading has to stop.
+    fn spend(&self, n: usize) -> Result<(), Unread> {
+        let left = self.0.get();
+        self.0.set(left.saturating_sub(n));
+        if n > left { Err(Unread::Long) } else { Ok(()) }
+    }
+
+    fn spent(&self) -> bool {
+        self.0.get() == 0
+    }
 }
 
 /// How many times a word may hold a command line that holds another
@@ -40,21 +100,23 @@ const NESTED: usize = 16;
 /// since it may be run later (`eval "$NAME"`). The words after one reach its
 /// last command, as `eval` joins them (`trailing`), unless a shell's `-c`
 /// takes them as its parameters. Each reading is shorter than the word, so
-/// it ends. Every word is visited once a reading, so a command's reading
-/// takes time in step with its length: one cut off by the hook's timeout
-/// would go unchecked.
+/// it ends. A word's walk is linked, not copied, and every step of it comes
+/// off `budget`: a command that reads too long for the hook's timeout, which
+/// would let it run unchecked, asks instead.
 fn pushes(
     commands: Vec<Vec<String>>,
     cwd: &Path,
     depth: usize,
     trailing: Option<&Rest<'_>>,
+    budget: &Budget,
     found: &mut Vec<(PathBuf, Push)>,
-) -> Result<(), shell::TooDeep> {
+) -> Result<(), Unread> {
     if depth > NESTED {
-        return Err(shell::TooDeep);
+        return Err(Unread::Deep);
     }
     let last = commands.len().saturating_sub(1);
-    for (n, words) in commands.iter().enumerate() {
+    for (n, words) in commands.into_iter().enumerate() {
+        let words = with_parameter_texts(words)?;
         let trailing = if n == last { trailing } else { None };
         let shell = words.iter().position(|w| is_shell(w));
         let input_as_words = words.iter().position(|w| takes_input_as_words(w));
@@ -66,25 +128,60 @@ fn pushes(
                 here: &words[i + 1..],
                 then: trailing,
             };
-            let inner = shell::commands(assigned(word).unwrap_or(word))?;
-            if !matches!(inner.as_slice(), [only] if only.as_slice() == std::slice::from_ref(word))
-            {
+            let inner = reading(word)?;
+            if !reads_as_itself(&inner, word) {
                 if !script_read && shell.is_some_and(|at| at + 1 < i) && is_c(&words[i - 1]) {
                     script_read = true;
-                    pushes(given_params(inner, word, rest), cwd, depth + 1, None, found)?;
+                    let inner = given_params(inner, word, rest, budget)?;
+                    pushes(inner, cwd, depth + 1, None, budget, found)?;
                 } else {
-                    pushes(inner, cwd, depth + 1, Some(&rest), found)?;
+                    pushes(inner, cwd, depth + 1, Some(&rest), budget, found)?;
                 }
             }
-            if runs_git(word, rest.iter().next())
-                && let Some((at, mut push)) = after_git(cwd, rest.iter())
+            if runs_git(word, rest.iter(budget).next())
+                && let Some((at, mut push)) = after_git(cwd, rest.iter(budget))
             {
                 push.more = input_as_words.is_some_and(|at| at < i);
                 found.push((at, push));
             }
+            if budget.spent() {
+                return Err(Unread::Long);
+            }
         }
     }
     Ok(())
+}
+
+/// `word` read as a command line: an assignment's value, or all of it.
+fn reading(word: &str) -> Result<Vec<Vec<String>>, shell::TooDeep> {
+    shell::commands(assigned(word).unwrap_or(word))
+}
+
+fn reads_as_itself(reading: &[Vec<String>], word: &String) -> bool {
+    matches!(reading, [only] if only.as_slice() == std::slice::from_ref(word))
+}
+
+/// A command's words, each `${…}`'s text read in ahead of the word holding
+/// it: an unset `x` makes `${x:-git push -f origin main}` those words, and
+/// `eval` runs them even with a `;` among them, so its commands' words all
+/// join. The word stays, as `x` may be set to anything. A word that reads as
+/// more than itself has this done where it's read.
+fn with_parameter_texts(words: Vec<String>) -> Result<Vec<String>, shell::TooDeep> {
+    if !words.iter().any(|w| w.contains("${")) {
+        return Ok(words);
+    }
+    let mut all = Vec::with_capacity(words.len());
+    for word in words {
+        if reads_as_itself(&reading(&word)?, &word) {
+            for text in shell::parameter_texts(&word) {
+                for command in shell::commands(text)? {
+                    all.extend(with_parameter_texts(command)?);
+                }
+            }
+        }
+        all.push(word);
+    }
+    Ok(all)
 }
 
 /// The words after one: the rest of its command, then, when that command
@@ -97,24 +194,27 @@ struct Rest<'a> {
 }
 
 impl<'a> Rest<'a> {
-    fn iter(self) -> Words<'a> {
+    fn iter<'b>(self, budget: &'b Budget) -> Words<'a, 'b> {
         Words {
             here: self.here.iter(),
             then: self.then,
+            budget,
         }
     }
 }
 
-/// A [`Rest`]'s words, in order.
-struct Words<'a> {
+/// A [`Rest`]'s words, in order, for as long as the budget lasts.
+struct Words<'a, 'b> {
     here: std::slice::Iter<'a, String>,
     then: Option<&'a Rest<'a>>,
+    budget: &'b Budget,
 }
 
-impl<'a> Iterator for Words<'a> {
+impl<'a> Iterator for Words<'a, '_> {
     type Item = &'a String;
 
     fn next(&mut self) -> Option<&'a String> {
+        self.budget.spend(1).ok()?;
         loop {
             if let Some(word) = self.here.next() {
                 return Some(word);
@@ -162,27 +262,45 @@ fn is_c(flag: &str) -> bool {
 /// A `-c` script's commands, with the words after it (`args`) for `$0`,
 /// `$1` and so on, and the ones after `$0` for `$@` and `$*`. A script
 /// that names no parameter takes none, so its words are read as they are.
-fn given_params(commands: Vec<Vec<String>>, script: &str, args: Rest<'_>) -> Vec<Vec<String>> {
-    if !script.contains('$') {
-        return commands;
+/// A word that still expands after that may hold any of them, by a spelling
+/// not worked out here (`"${@:1}"`, `$a` after `a=("$@")`), so they follow it.
+fn given_params(
+    commands: Vec<Vec<String>>,
+    script: &str,
+    args: Rest<'_>,
+    budget: &Budget,
+) -> Result<Vec<Vec<String>>, Unread> {
+    if !script.contains(['$', shell::UNKNOWN]) {
+        return Ok(commands);
     }
-    let numbered: Vec<&String> = args.iter().take(10).collect();
-    let given = |word: String| -> Vec<String> {
-        if matches!(word.as_str(), "$@" | "$*" | "${@}" | "${*}") {
-            return args.iter().skip(1).cloned().collect();
+    let numbered: Vec<&String> = args.iter(budget).take(10).collect();
+    let after_zero: Vec<&String> = args.iter(budget).skip(1).collect();
+    let mut given_commands = Vec::with_capacity(commands.len());
+    for words in commands {
+        let mut given = Vec::with_capacity(words.len());
+        for word in words {
+            let mut word = word;
+            if matches!(word.as_str(), "$@" | "$*" | "${@}" | "${*}") {
+                budget.spend(after_zero.len())?;
+                given.extend(after_zero.iter().map(|w| (*w).clone()));
+                continue;
+            }
+            for (n, arg) in numbered.iter().enumerate() {
+                word = word
+                    .replace(&format!("${n}"), arg)
+                    .replace(&format!("${{{n}}}"), arg);
+            }
+            budget.spend(1 + word.len() / 8)?;
+            let expands = word.contains(['$', shell::UNKNOWN]);
+            given.push(word);
+            if expands {
+                budget.spend(after_zero.len())?;
+                given.extend(after_zero.iter().map(|w| (*w).clone()));
+            }
         }
-        let mut word = word;
-        for (n, arg) in numbered.iter().enumerate() {
-            word = word
-                .replace(&format!("${n}"), arg)
-                .replace(&format!("${{{n}}}"), arg);
-        }
-        vec![word]
-    };
-    commands
-        .into_iter()
-        .map(|words| words.into_iter().flat_map(given).collect())
-        .collect()
+        given_commands.push(given);
+    }
+    Ok(given_commands)
 }
 
 /// A program that turns its input into the words of what it runs.
@@ -237,6 +355,9 @@ impl Push {
                     words.by_ref().for_each(|w| p.positional(w));
                     break;
                 }
+                // Its text was read in ahead of it, in its place. What `x`
+                // holds if set isn't known, so it isn't taken for the remote.
+                w if shell::is_only_a_parameter_text(w) => {}
                 w if let Some(option) = w.strip_prefix("--") => {
                     let (name, value) = option.split_once('=').unzip();
                     match long(name.unwrap_or(option)) {
@@ -278,42 +399,64 @@ impl Push {
         self.positional.push(word.to_owned());
     }
 
-    fn ask(&self, at: &Path, git: &Path) -> Option<String> {
+    fn ask(&self, at: &Path, places: &mut Places<'_>) -> Result<Option<String>, Unread> {
         if !self.force {
-            return None;
+            return Ok(None);
         }
         if self.all {
-            return Some(
+            return Ok(Some(
                 "Push that can rewrite or delete every remote branch (R2: rewrites history other clones depend on)."
                     .to_owned(),
-            );
+            ));
         }
         if self.more {
-            return Some(
+            return Ok(Some(
                 "Force-push or delete of whatever its input names (R2: rewrites history other clones depend on)."
                     .to_owned(),
-            );
+            ));
         }
         let shared = if self.positional.len() > 1 {
             self.positional[1..]
                 .iter()
-                .find_map(|refspec| shared_target(refspec))?
+                .find_map(|refspec| shared_target(refspec))
         } else {
-            let branch = run(git, at, &["symbolic-ref", "--short", "-q", "HEAD"]);
+            places.branches(at)?.iter().find_map(|t| shared_target(t))
+        };
+        Ok(shared.map(|shared| {
+            format!(
+                "Force-push or delete of '{shared}' (R2: rewrites history other clones depend on)."
+            )
+        }))
+    }
+}
+
+/// What git says each place's push with no refspec would push, asked once a
+/// place: a command can repeat `git push -f` far faster than git can answer.
+struct Places<'a> {
+    git: &'a Path,
+    seen: HashMap<PathBuf, Vec<String>>,
+}
+
+impl Places<'_> {
+    /// The branch checked out at `at`, and its upstream.
+    fn branches(&mut self, at: &Path) -> Result<&[String], Unread> {
+        if !self.seen.contains_key(at) {
+            if self.seen.len() == PLACES {
+                return Err(Unread::Long);
+            }
+            let branch = run(self.git, at, &["symbolic-ref", "--short", "-q", "HEAD"]);
             let upstream = run(
-                git,
+                self.git,
                 at,
                 &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
             )
             .map(|u| u.split_once('/').map_or(u.clone(), |(_, b)| b.to_owned()));
-            branch
-                .into_iter()
-                .chain(upstream)
-                .find_map(|t| shared_target(&t))?
-        };
-        Some(format!(
-            "Force-push or delete of '{shared}' (R2: rewrites history other clones depend on)."
-        ))
+            self.seen.insert(
+                at.to_path_buf(),
+                branch.into_iter().chain(upstream).collect(),
+            );
+        }
+        Ok(&self.seen[at])
     }
 }
 

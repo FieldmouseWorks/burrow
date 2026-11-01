@@ -243,6 +243,78 @@ impl Command {
     }
 }
 
+/// Each `${…}` in `word`: where it starts and, past its `}`, ends. Nested
+/// ones are inside their own, for a reading of its text to find.
+fn parameters(word: &str) -> Vec<(usize, usize)> {
+    let mut found = Vec::new();
+    let mut from = 0;
+    while let Some(start) = word[from..].find("${").map(|at| from + at) {
+        let mut depth = 0;
+        let mut end = word.len();
+        for (at, c) in word[start + 1..].char_indices() {
+            match c {
+                '{' => depth += 1,
+                '}' => depth -= 1,
+                _ => {}
+            }
+            if depth == 0 {
+                end = start + 1 + at + 1;
+                break;
+            }
+        }
+        found.push((start, end));
+        from = end;
+    }
+    found
+}
+
+/// What a `${…}` holds after its parameter and operator, which may be
+/// what it expands to; the operators that don't use it are read too, since
+/// `${x/a/b}` can.
+fn parameter_text(parameter: &str) -> Option<&str> {
+    let body = parameter.strip_prefix("${")?;
+    let body = body.strip_suffix('}').unwrap_or(body);
+    let body = body
+        .strip_prefix(['!', '#'])
+        .filter(|b| !b.is_empty())
+        .unwrap_or(body);
+    let name = body
+        .find(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+        .unwrap_or(body.len());
+    let name = if name == 0 && !body.is_empty() {
+        body.chars().next().map_or(0, char::len_utf8)
+    } else {
+        name
+    };
+    let mut rest = &body[name..];
+    if rest.starts_with('[') {
+        rest = rest.split_once(']').map_or("", |(_, after)| after);
+    }
+    const OPERATORS: [&str; 22] = [
+        ":-", ":=", ":+", ":?", "##", "%%", "//", "/#", "/%", "^^", ",,", "-", "=", "+", "?", "#",
+        "%", "/", "^", ",", ":", "@",
+    ];
+    let text = OPERATORS
+        .iter()
+        .find_map(|op| rest.strip_prefix(op))
+        .unwrap_or(rest);
+    (!text.is_empty()).then_some(text)
+}
+
+/// The text of each `${…}` in `word` that holds any.
+pub fn parameter_texts(word: &str) -> Vec<&str> {
+    parameters(word)
+        .into_iter()
+        .filter_map(|(start, end)| parameter_text(&word[start..end]))
+        .collect()
+}
+
+/// Whether `word` is one `${…}` with a text, and nothing else.
+pub fn is_only_a_parameter_text(word: &str) -> bool {
+    matches!(parameters(word).as_slice(), [(0, end)] if *end == word.len())
+        && parameter_text(word).is_some()
+}
+
 impl Lexer {
     fn new(text: &str) -> Lexer {
         Lexer {
@@ -817,6 +889,38 @@ mod tests {
             want(&[&["b", "${x:-)}", "c"], &["a", "%", "d"]])
         );
         assert_eq!(commands("${x:-$(a b)}"), want(&[&["a", "b"], &["${x:-%}"]]));
+    }
+
+    #[test]
+    fn a_parameters_text_comes_after_its_operator() {
+        for (word, texts) in [
+            ("${x:-a b}", vec!["a b"]),
+            ("${x-a}", vec!["a"]),
+            ("${x:=a}", vec!["a"]),
+            ("${x:+a}", vec!["a"]),
+            ("${x:--f}", vec!["-f"]),
+            ("${x/a/b c}", vec!["a/b c"]),
+            ("${a[0]:-b}", vec!["b"]),
+            ("${@:1}", vec!["1"]),
+            ("p${x:-a}q${y:-b}r", vec!["a", "b"]),
+            ("${x:-${y:-a}}", vec!["${y:-a}"]),
+            ("${x:-a", vec!["a"]),
+            // No text: nothing but what it names.
+            ("${x}", vec![]),
+            ("${#x}", vec![]),
+            ("${!x}", vec![]),
+            ("${@}", vec![]),
+            ("${#}", vec![]),
+            ("${x:-}", vec![]),
+            ("${a[@]}", vec![]),
+            ("$x", vec![]),
+        ] {
+            assert_eq!(super::parameter_texts(word), texts, "{word}");
+        }
+        assert!(super::is_only_a_parameter_text("${x:-a}"));
+        assert!(!super::is_only_a_parameter_text("${x}"));
+        assert!(!super::is_only_a_parameter_text("p${x:-a}"));
+        assert!(!super::is_only_a_parameter_text("${x:-a}${y:-b}"));
     }
 
     #[test]

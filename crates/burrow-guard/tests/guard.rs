@@ -39,6 +39,7 @@ impl Box {
             git: PathBuf::from("git"),
             zfs,
             snapshot_datasets: datasets.iter().map(|d| (*d).to_owned()).collect(),
+            ask_after_seconds: 8,
         };
         Box { dir, config }
     }
@@ -733,6 +734,119 @@ fn what_a_shell_is_handed_some_other_way_is_read_too() {
     ] {
         assert_eq!(b.check(cmd, on_feature.path()), None, "{cmd}");
     }
+}
+
+#[test]
+fn a_parameters_text_is_read_as_what_it_may_expand_to() {
+    let b = Box::new();
+    let work = clone_on("feature");
+    let main = Some(format!("Force-push or delete of 'main' {SHARED}"));
+    for cmd in [
+        "${x:-git push -f origin main }",
+        ": ${x:=git push -f origin main }; $x",
+        r#"eval "${x:-git push -f origin main }""#,
+        r#"eval "${x:-git push -f origin main; true}""#,
+        r#"bash -c "${x:-git push -f origin main }""#,
+        "${x:+git push -f origin main}",
+        "${x-git push -f origin main}",
+        "${x/a/git push -f origin main}",
+        "${x:-${y:-git push -f origin main}}",
+        "${x:-git} push -f origin main",
+        "${x:-git push} -f origin main",
+        "${x:-git push -f} origin main",
+        "${x:-git push -f origin} main",
+        "git ${x:-push} -f origin main",
+        "git ${x:-push -f origin main}",
+        "git push ${x:--f} origin main",
+        "git push -f ${x:-origin} main",
+        "git push -f origin ${x:-main}",
+        "git push -f origin ${x:-+main}",
+        "pre${x:-; git push -f origin main }post",
+        r#"y="${x:-git push -f origin main }"; eval "$y""#,
+    ] {
+        assert_eq!(b.check(cmd, work.path()), main, "{cmd}");
+    }
+    // A push of the branch it's on, with the remote in a parameter.
+    let on_main = clone_on("main");
+    assert_eq!(b.check("git push -f ${x:-origin}", on_main.path()), main);
+    assert_eq!(b.check("git push -f ${x:-origin}", work.path()), None);
+    // Nothing forced or nothing shared, and no text to read.
+    for cmd in [
+        "${x:-git push origin main}",
+        "${x:-git push -f origin feature}",
+        "echo ${x:-a b} ${y}",
+        "git push -f origin ${x}",
+    ] {
+        assert_eq!(b.check(cmd, work.path()), None, "{cmd}");
+    }
+}
+
+#[test]
+fn a_scripts_words_reach_whatever_in_it_still_expands() {
+    let b = Box::new();
+    let work = clone_on("feature");
+    let main = Some(format!("Force-push or delete of 'main' {SHARED}"));
+    for cmd in [
+        r#"bash -c 'git push "${@:1}"' _ -f origin main"#,
+        r#"bash -c 'git push "${@:1}"; true' _ -f origin main"#,
+        r#"bash -c 'a=("$@"); git push "${a[@]}"' _ -f origin main"#,
+        r#"bash -c 'a="$*"; git push $a; true' _ -f origin main"#,
+        r#"bash -c 'git push $(echo "$@")' _ -f origin main"#,
+        r#"bash -c 'git push "x$@"' _ -f origin main"#,
+        r#"bash -c 'shift; git push "$@"' _ x -f origin main"#,
+        r#"sh -c 'eval "git push \"\${@:1}\""' _ -f origin main"#,
+    ] {
+        assert_eq!(b.check(cmd, work.path()), main, "{cmd}");
+    }
+    // A script that expands nothing takes none, and one that takes them
+    // isn't given a branch they don't name.
+    for cmd in [
+        "bash -c 'git push origin feature' _ -f origin main",
+        r#"bash -c 'git push "${@:1}"' _ -f origin feature"#,
+    ] {
+        assert_eq!(b.check(cmd, work.path()), None, "{cmd}");
+    }
+}
+
+#[test]
+fn a_command_too_long_to_read_asks() {
+    let b = Box::new();
+    let work = clone_on("feature");
+    let asks = Some(
+        "The guard couldn't check this command (it's too long to read in time), so it asks."
+            .to_owned(),
+    );
+    let repeat = |text: &str, n: usize| text.repeat(n);
+    for cmd in [
+        // Each push reads every word after it.
+        repeat("git push x ", 8_000),
+        // Every word of a script given every parameter.
+        format!(
+            "bash -c '{}' _ {}",
+            repeat("$a ", 3_000),
+            repeat("b ", 3_000)
+        ),
+        // Every push asking git about a place of its own.
+        (0..100)
+            .map(|i| format!("git -C d{i} push -f"))
+            .collect::<Vec<_>>()
+            .join("; "),
+    ] {
+        let started = Instant::now();
+        assert_eq!(b.check(&cmd, work.path()), asks, "{}", &cmd[..20]);
+        let took = started.elapsed();
+        assert!(took < Duration::from_secs(10), "{took:?}");
+    }
+    // A force-push of the branch it's on, however often, asks git once.
+    let on_main = clone_on("main");
+    let started = Instant::now();
+    assert_eq!(
+        b.check(&repeat("git push -f; ", 10_000), on_main.path()),
+        Some(format!("Force-push or delete of 'main' {SHARED}"))
+    );
+    assert!(started.elapsed() < Duration::from_secs(5));
+    // A few pushes in one command are read as ever.
+    assert_eq!(b.check(&repeat("git push x ", 100), work.path()), None);
 }
 
 #[test]

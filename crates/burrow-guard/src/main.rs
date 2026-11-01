@@ -3,10 +3,14 @@
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::sync::Once;
+use std::time::{Duration, SystemTime};
 
 use burrow_guard::config::Config;
 use burrow_guard::{Guard, Hook, ask};
+
+/// The one answer, whichever comes first: the guard's, or its deadline's.
+static ANSWER: Once = Once::new();
 
 fn main() {
     // A guard that can't read what it guards asks, rather than let the
@@ -16,9 +20,27 @@ fn main() {
             "The guard couldn't check this command ({e}), so it asks."
         ))
     });
-    if let Some(q) = question {
-        println!("{}", ask(&q));
-    }
+    ANSWER.call_once(|| {
+        if let Some(q) = question {
+            println!("{}", ask(&q));
+        }
+    });
+}
+
+/// Past `seconds`, the answer is a question, whatever the guard is stuck on
+/// (a long command, git or zfs hanging, a loaded machine): the hook's timeout
+/// would let the command run unchecked.
+fn ask_after(seconds: u64) {
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_secs(seconds));
+        ANSWER.call_once(|| {
+            let q = format!(
+                "The guard couldn't check this command (no answer after {seconds} s), so it asks."
+            );
+            println!("{}", ask(&q));
+            std::process::exit(0);
+        });
+    });
 }
 
 fn check() -> Result<Option<String>, String> {
@@ -27,6 +49,7 @@ fn check() -> Result<Option<String>, String> {
         return Err("usage: burrow-guard CONFIG < HOOK-JSON".to_owned());
     };
     let config = Config::load(Path::new(path))?;
+    ask_after(config.ask_after_seconds);
     let mut input = Vec::new();
     std::io::stdin()
         .read_to_end(&mut input)
