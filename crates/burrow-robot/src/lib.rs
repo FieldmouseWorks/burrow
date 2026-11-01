@@ -294,6 +294,39 @@ impl Robot {
     }
 }
 
+/// Hands what a run got to its streams and says whether all of it went well:
+/// the calls succeeded and every byte is out. What it got before a call failed
+/// still goes out, a stream that fails doesn't keep the other from its turn,
+/// and no call is repeated to make up for it: a lost rescue password is told,
+/// not asked for again.
+pub fn deliver(
+    ran: Result<(), String>,
+    out: &str,
+    note: &str,
+    stdout: &mut impl io::Write,
+    stderr: &mut impl io::Write,
+) -> bool {
+    fn put(to: &mut impl io::Write, text: &str) -> io::Result<()> {
+        to.write_all(text.as_bytes())?;
+        to.flush()
+    }
+    let wrote = put(stdout, out);
+    let noted = put(stderr, note);
+    let mut told = String::new();
+    if let Err(e) = &wrote {
+        let _ = writeln!(told, "robot: stdout: {e}: what the calls did stands");
+    }
+    if let Err(e) = &noted {
+        let _ = writeln!(told, "robot: stderr: {e}: what the calls did stands");
+    }
+    if let Err(e) = &ran {
+        let _ = writeln!(told, "robot: {e}");
+    }
+    // The last thing it can say: the return value tells it if this fails too.
+    let _ = put(stderr, &told);
+    ran.is_ok() && wrote.is_ok() && noted.is_ok()
+}
+
 /// The agent robot calls with: the system's roots, curl's 30 seconds, no
 /// redirect followed (curl followed none), and every status an answer to
 /// read, so a redirect is a refusal like any other.
@@ -361,6 +394,138 @@ fn pick(value: &Value, fields: &[&str]) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::io;
+
+    /// A stream that takes `room` bytes, then fails; or fails only its flush.
+    struct Stream {
+        got: Vec<u8>,
+        room: usize,
+        flushes: bool,
+    }
+
+    impl Stream {
+        fn new(room: usize, flushes: bool) -> Stream {
+            Stream {
+                got: Vec::new(),
+                room,
+                flushes,
+            }
+        }
+        fn fine() -> Stream {
+            Stream::new(usize::MAX, true)
+        }
+        fn said(&self) -> String {
+            String::from_utf8_lossy(&self.got).into_owned()
+        }
+    }
+
+    impl io::Write for Stream {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            let n = buf.len().min(self.room);
+            if n == 0 && !buf.is_empty() {
+                return Err(io::Error::other("full"));
+            }
+            self.room -= n;
+            self.got.extend_from_slice(&buf[..n]);
+            Ok(n)
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            if self.flushes {
+                Ok(())
+            } else {
+                Err(io::Error::other("flush failed"))
+            }
+        }
+    }
+
+    #[test]
+    fn delivered_in_full_is_a_success() {
+        let (mut out, mut err) = (Stream::fine(), Stream::fine());
+        assert!(super::deliver(
+            Ok(()),
+            "got\n",
+            "note\n",
+            &mut out,
+            &mut err
+        ));
+        assert_eq!(
+            (out.said().as_str(), err.said().as_str()),
+            ("got\n", "note\n")
+        );
+    }
+
+    #[test]
+    fn output_cut_short_fails_and_the_note_still_goes_out() {
+        let (mut out, mut err) = (Stream::new(2, true), Stream::fine());
+        assert!(!super::deliver(
+            Ok(()),
+            "got\n",
+            "note\n",
+            &mut out,
+            &mut err
+        ));
+        assert_eq!(out.said(), "go");
+        assert_eq!(
+            err.said(),
+            "note\nrobot: stdout: full: what the calls did stands\n"
+        );
+    }
+
+    #[test]
+    fn a_failed_flush_fails_on_either_stream() {
+        let (mut out, mut err) = (Stream::new(usize::MAX, false), Stream::fine());
+        assert!(!super::deliver(Ok(()), "got\n", "", &mut out, &mut err));
+        assert!(err.said().contains("robot: stdout: flush failed"));
+        let (mut out, mut err) = (Stream::fine(), Stream::new(usize::MAX, false));
+        assert!(!super::deliver(
+            Ok(()),
+            "got\n",
+            "note\n",
+            &mut out,
+            &mut err
+        ));
+        assert_eq!(out.said(), "got\n");
+    }
+
+    #[test]
+    fn a_note_cut_short_fails() {
+        let (mut out, mut err) = (Stream::fine(), Stream::new(2, true));
+        assert!(!super::deliver(
+            Ok(()),
+            "got\n",
+            "note\n",
+            &mut out,
+            &mut err
+        ));
+        assert_eq!(out.said(), "got\n");
+    }
+
+    #[test]
+    fn a_failed_call_fails_and_is_said_after_any_write_error() {
+        let (mut out, mut err) = (Stream::new(0, true), Stream::fine());
+        assert!(!super::deliver(
+            Err("GET /x: 500".into()),
+            "got\n",
+            "",
+            &mut out,
+            &mut err
+        ));
+        assert_eq!(
+            err.said(),
+            "robot: stdout: full: what the calls did stands\nrobot: GET /x: 500\n"
+        );
+        let (mut out, mut err) = (Stream::fine(), Stream::fine());
+        assert!(!super::deliver(
+            Err("GET /x: 500".into()),
+            "got\n",
+            "",
+            &mut out,
+            &mut err
+        ));
+        assert_eq!(out.said(), "got\n");
+        assert_eq!(err.said(), "robot: GET /x: 500\n");
+    }
+
     use super::*;
 
     fn words(line: &str) -> Vec<String> {

@@ -401,3 +401,145 @@ fn what_it_cant_run() {
     );
     assert!(ws.calls().is_empty());
 }
+
+/// /dev/full: every write to it fails, as a full disk's does.
+fn full() -> std::process::Stdio {
+    fs::OpenOptions::new()
+        .write(true)
+        .open("/dev/full")
+        .unwrap()
+        .into()
+}
+
+fn armed() -> Webservice {
+    Webservice::serve(&[(
+        "POST /boot/203.0.113.7/rescue",
+        200,
+        r#"{"rescue":{"os":"linux","active":true,"password":"Rescue1"}}"#,
+    )])
+}
+
+#[test]
+fn a_rescue_password_it_cant_write_fails_and_arms_only_once() {
+    let ws = armed();
+    let out = Box::new()
+        .robot(&ws.url, &["rescue", "on", "ee:ff"])
+        .stdout(full())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1), "{:?}", said(&out));
+    let (_, err) = said(&out);
+    assert!(err.contains("rescue armed"), "{err}");
+    assert!(err.contains("robot: stdout: "), "{err}");
+    assert_eq!(ws.calls(), ["POST /boot/203.0.113.7/rescue"]);
+}
+
+#[test]
+fn a_notice_it_cant_write_fails_with_the_password_still_out() {
+    let ws = armed();
+    let out = Box::new()
+        .robot(&ws.url, &["rescue", "on", "ee:ff"])
+        .stderr(full())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1), "{:?}", said(&out));
+    assert!(said(&out).0.contains("Rescue1"), "{:?}", said(&out));
+    assert_eq!(ws.calls(), ["POST /boot/203.0.113.7/rescue"]);
+}
+
+#[test]
+fn every_call_fails_on_output_it_cant_write() {
+    let answers: &[(&[&str], &str, &str)] = &[
+        (
+            &["rescue", "off"],
+            "DELETE /boot/203.0.113.7/rescue",
+            r#"{"rescue":{"active":false}}"#,
+        ),
+        (
+            &["reset"],
+            "POST /reset/203.0.113.7",
+            r#"{"reset":{"type":"hw"}}"#,
+        ),
+        (
+            &["wol"],
+            "POST /wol/203.0.113.7",
+            r#"{"wol":{"server_ip":"203.0.113.7"}}"#,
+        ),
+        (&["status"], "GET /server/203.0.113.7", r#"{"server":{}}"#),
+    ];
+    for (args, call, body) in answers {
+        let ws = if *args == ["status"] {
+            Webservice::serve(&[
+                (call, 200, body),
+                ("GET /boot/203.0.113.7/rescue", 200, RESCUE),
+                ("GET /reset/203.0.113.7", 200, RESET),
+            ])
+        } else {
+            Webservice::serve(&[(call, 200, body)])
+        };
+        let out = Box::new()
+            .robot(&ws.url, args)
+            .stdout(full())
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(1), "{args:?}: {:?}", said(&out));
+        assert!(
+            said(&out).1.contains("robot: stdout: "),
+            "{args:?}: {:?}",
+            said(&out)
+        );
+        // Nothing is asked again to make up for it.
+        assert_eq!(
+            ws.calls().len(),
+            if *args == ["status"] { 3 } else { 1 },
+            "{args:?}"
+        );
+    }
+}
+
+#[test]
+fn a_refusal_is_still_said_when_the_output_cant_be_written() {
+    let ws = Webservice::serve(&[
+        ("GET /server/203.0.113.7", 200, SERVER),
+        ("GET /boot/203.0.113.7/rescue", 500, "{}"),
+    ]);
+    let out = Box::new()
+        .robot(&ws.url, &["status"])
+        .stdout(full())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1), "{:?}", said(&out));
+    let (_, err) = said(&out);
+    assert!(err.contains("robot: stdout: "), "{err}");
+    assert!(
+        err.contains("robot: GET /boot/203.0.113.7/rescue: "),
+        "{err}"
+    );
+}
+
+#[test]
+fn nowhere_to_say_anything_is_a_failure_and_no_panic() {
+    let ws = armed();
+    let out = Box::new()
+        .robot(&ws.url, &["rescue", "on", "ee:ff"])
+        .stdout(full())
+        .stderr(full())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    // Usage keeps its own exit code.
+    let out = Box::new()
+        .robot("http://127.0.0.1:9", &["reset", "cold"])
+        .stderr(full())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    // A refusal with nowhere to say it.
+    let ws = Webservice::serve(&[("POST /wol/203.0.113.7", 500, "{}")]);
+    let out = Box::new()
+        .robot(&ws.url, &["wol"])
+        .stderr(full())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+}
