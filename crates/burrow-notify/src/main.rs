@@ -80,7 +80,7 @@ fn main() -> ExitCode {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());
-    run(&cfg, &ask, &mut Gh, &mut journal, now);
+    run(&cfg, &ask, &mut Gh::default(), &mut journal, now);
     ExitCode::SUCCESS
 }
 

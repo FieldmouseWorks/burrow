@@ -10,7 +10,7 @@ import os
 import shutil
 import subprocess
 
-from harness import (C, CI_GREEN, DDIR, FAIL, JOBS, POSTED, PR_DIFF, QDIR, P, R, H, S, SINCE, STATES, STUB, T0, V,
+from harness import (C, CI_GREEN, DDIR, FAIL, JOBS, POSTED, PR_DIFF, QDIR, P, R, H, S, SINCE, STATES, STUB, T0, UPKEEP_RAN, V,
                      WROTE, clean, fresh_pr_state, head, info, judgment, merged,
                      gh_stub, mkpr, pr_state, queued, run, rv_review, said, stand_in, swept, tmp, worker)
 
@@ -758,13 +758,11 @@ del S.CFG["repos"]["sam/r"]["proofBuilds"]
 # ... but only the repos a pass saw to are covered: one whose pass failed
 # isn't, so renovate-sweep lists its ok majors itself, and still knows how
 # its proofs run.
-kept_fns = (S.R.discover, S.R.settle_repo, S.R.publish, S.open_prs, S.R.unhook_gone, S.R.hook_projects)
+kept_fns = (S.R.discover, S.R.settle_repo, S.R.publish, S.open_prs)
 S.R.discover = lambda: [{"repo": f"sam/{n}", "default": "main"} for n in ("r", "bad", "flaky")]
-# A full pass takes the hooks off the repos it no longer sees to, but not
-# off the projects it hooks for proj.
-UNHOOKED = []
-S.R.unhook_gone = UNHOOKED.append
-S.R.hook_projects = lambda repos: [{"repo": "eve/p"}]
+# A full pass's hooks (burrow-upkeep's) are handed every repo it sees to, a
+# repo whose pass failed too: its hook isn't taken off.
+open(UPKEEP_RAN, "w").close()
 S.R.settle_repo = lambda r, known: False
 # The owner's issue can't be updated (GitHub down): the pass's state is
 # saved all the same.
@@ -794,8 +792,9 @@ try:
 except RuntimeError:
     pass
 assert os.path.exists(f"{tmp}/state/known.json")
-assert UNHOOKED == [S.R.discover() + [{"repo": "eve/p"}]], UNHOOKED
-S.R.discover, S.R.settle_repo, S.R.publish, S.open_prs, S.R.unhook_gone, S.R.hook_projects = kept_fns
+hooks = [json.loads(x)[-1] for x in open(UPKEEP_RAN) if json.loads(x)[0] == "hooks"]
+assert hooks == [{"seen": ["sam/r", "sam/bad", "sam/flaky"], "projects": []}], hooks
+S.R.discover, S.R.settle_repo, S.R.publish, S.open_prs = kept_fns
 written = json.load(open(f"{tmp}/state/repos.json"))["repos"]
 assert {r: v["covered"] for r, v in written.items()} == {"sam/r": True, "sam/bad": False, "sam/flaky": False}, written
 assert written["sam/bad"]["proofs"] == C.repo_cfg("sam/bad")["proofJobs"], written

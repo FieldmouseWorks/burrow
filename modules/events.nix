@@ -3,8 +3,8 @@
 # but the hourly catch-up, for what no event reports.
 #
 # GitHub posts each repo's events to https://HOST/PATH (the steward keeps
-# every repo's hook, and its App's own for a repo just made, autoland/repos.py);
-# nginx passes them to burrow-events,
+# every repo's hook, and its App's own for a repo just made, burrow-upkeep's
+# hook.rs); nginx passes them to burrow-events,
 # which checks each one's signature and starts the pass of every handler that
 # takes that event, for that repo. Things on this machine kick a handler on
 # the local port (`curl -d '' http://127.0.0.1:KICKPORT/kick/HANDLER/OWNER/REPO`),
@@ -228,7 +228,7 @@ in
       message = "burrow.events: deliveries need both host and secretFile (or neither, for none).";
     }];
 
-    # The repos' hooks are the steward's to keep (autoland/repos.py).
+    # The repos' hooks are the steward's to keep (burrow-upkeep's hook.rs).
     warnings = lib.optional (!(lib.attrByPath [ "burrow" "autoland" "enable" ] false config)) ''
       burrow.events is on without burrow.autoland, which keeps each repo's
       webhook: GitHub's events won't reach this machine, so its passes come

@@ -1,13 +1,13 @@
 """What starts the steward's passes, as burrow-events runs them: the
-wake-ups a pass books, a kicked pass over one repo, each repo's hook, and
-the kicks from reviews and Claude jobs coming back."""
+wake-ups a pass books, a kicked pass over one repo, and the kicks from
+reviews and Claude jobs coming back."""
 
 import json
 import os
 import sys
 import time
 
-from harness import (ACTING, FAIL, REAL_GH, QDIR, REAL, STATES, STUB, T, UPKEEP_RAN, WROTE, C, P, R, H, S, V, clean, fresh_pr_state,
+from harness import (FAIL, REAL_GH, QDIR, REAL, STATES, STUB, T, UPKEEP_RAN, WROTE, C, P, H, S, V, clean, fresh_pr_state,
                      head, info, mkpr, pr_state, queued, run, rv_review, tmp, worker)
 
 # A pass that waits on time books its repo's next pass for when the wait
@@ -170,8 +170,7 @@ C.save("wake.json", {"sam/r": T + 50, "sam/other": T + 60, "sam/gone": T - 1})
 C.save("digest-repos.json", {"sam/r": [["Old", "r line", ""]], "sam/other": [["Open over a day", "other line", "x"]]})
 C.save("repos.json", {"untouched": True})
 seen_repos, published = [], []
-kept_fns = (S.R.discover, S.R.restart, S.R.settle_repo, S.R.publish, S.open_prs, S.R.unhook_gone)
-S.R.unhook_gone = lambda repos: (_ for _ in ()).throw(AssertionError("hooks taken off in a kicked pass"))
+kept_fns = (S.R.discover, S.R.restart, S.R.settle_repo, S.R.publish, S.open_prs)
 S.R.discover = lambda: [{"repo": "sam/r", "default": "main"}, {"repo": "sam/other", "default": "main"}]
 order = []
 S.R.restart = lambda r, known, failed: order.append(("restart", r["repo"]))
@@ -197,7 +196,7 @@ S.CFG["baselineJobs"] = False
 del S.CFG["baselineTask"]
 C.job = job
 sys.argv = argv
-S.R.discover, S.R.restart, S.R.settle_repo, S.R.publish, S.open_prs, S.R.unhook_gone = kept_fns
+S.R.discover, S.R.restart, S.R.settle_repo, S.R.publish, S.open_prs = kept_fns
 assert seen_repos == ["sam/r"], seen_repos
 assert order == [("restart", "sam/r"), ("settle", "sam/r")] and NEW_JOBS == [("sam/r", "sam/r is new", True)], \
     (order, NEW_JOBS)
@@ -208,6 +207,7 @@ assert C.load("known.json", None) == ["sam/r"]
 ran = [json.loads(x) for x in open(UPKEEP_RAN)]
 watched = [(x[1], x[x.index("--default") + 1], "--full" in x, x[-1]) for x in ran if x[0] == "branches"]
 assert watched == [("sam/r", "main", False, ["feat", "main"])], ran
+assert not [x for x in ran if x[0] == "hooks"], ran
 assert C.load("repos.json", None) == {"untouched": True}
 assert C.load("wake.json", None) == {"sam/r": T + 3 * 60 + 1, "sam/other": T + 60}, C.load("wake.json", None)
 assert C.load("digest-repos.json", None) == {"sam/r": [], "sam/other": [["Open over a day", "other line", "x"]]}
@@ -241,11 +241,10 @@ print("remade, not started over: ok")
 # baseline job yet (nothing to open a PR on), and it isn't known until then.
 fresh_pr_state()
 settled, seen_repos, NEW_JOBS = [], [], []
-kept_fns = (S.R.discover, S.R.settle_repo, S.R.publish, S.R.unhook_gone, S.R.hook_projects, S.open_prs)
+kept_fns = (S.R.discover, S.R.settle_repo, S.R.publish, S.open_prs)
 S.R.discover = lambda: [{"repo": "sam/new", "default": None}]
 S.R.settle_repo = lambda r, known: settled.append(r["repo"]) or r["repo"] not in known
-S.R.publish = S.R.unhook_gone = lambda *a: None
-S.R.hook_projects = lambda repos: []
+S.R.publish = lambda *a: None
 S.open_prs = kicked_prs
 C.job, job = (lambda repo, task, clone=False: NEW_JOBS.append(repo) or "job-new"), C.job
 S.CFG.update(baselineJobs=True, baselineTask="REPO is new")
@@ -256,7 +255,7 @@ for args in (["steward", "kick", "sam/new"], ["steward"]):
 S.CFG["baselineJobs"] = False
 del S.CFG["baselineTask"]
 C.job, sys.argv = job, argv
-S.R.discover, S.R.settle_repo, S.R.publish, S.R.unhook_gone, S.R.hook_projects, S.open_prs = kept_fns
+S.R.discover, S.R.settle_repo, S.R.publish, S.open_prs = kept_fns
 assert settled == ["sam/new", "sam/new"] and seen_repos == [] and NEW_JOBS == [], (settled, seen_repos, NEW_JOBS)
 assert C.load("known.json", None) == [], C.load("known.json", None)
 print("empty repos: ok")
@@ -364,226 +363,3 @@ long_outside["comments"]["pageInfo"]["hasPreviousPage"] = True
 statuses, digest = run(long_outside, 600)
 assert "Outside contribution" in statuses and [x[0] for x in digest] == ["Outside contributions"], (statuses, digest)
 print("long PRs: ok")
-
-# Each repo keeps a hook to burrow-events: added when it's missing, set
-# again when its URL, events or secret change, left alone otherwise.
-HOOKS, SENT = {"v": []}, []
-gh_kept, write_kept = C.gh, C.write
-C.gh = lambda *a, **k: HOOKS["v"] if a[:2] == ("api", "repos/sam/r/hooks") else gh_kept(*a, **k)
-
-
-def write_hook(*a, **k):
-    SENT.append(json.loads(k["input"]))
-    return write_kept(*a, **k)
-
-
-C.write = write_hook
-fresh_pr_state()
-WROTE.clear()
-st = {}
-# Called straight, for sam's repos as a pass has it (run_pass's acting_for).
-C._for.append("sam")
-R.hook("sam/r", st, False)
-add = [x for x in WROTE if "POST repos/sam/r/hooks" in x]
-assert len(add) == 1 and st["hook"], WROTE
-assert SENT[-1]["config"] == {"url": "https://example.org/burrow/hook", "content_type": "json",
-                              "secret": "hook-secret", "insecure_ssl": "0"}, SENT
-assert SENT[-1]["events"] == ["check_suite", "push"], SENT
-WROTE.clear()
-R.hook("sam/r", st, False)
-assert WROTE == [], WROTE
-HOOKS["v"] = [{"id": 9, "config": {"url": "https://example.org/burrow/hook"}}]
-with open(f"{tmp}/cred/webhook", "w") as f:
-    f.write("new-secret\n")
-R.hook("sam/r", st, False)
-assert [x for x in WROTE if "PATCH repos/sam/r/hooks/9" in x] and not [x for x in WROTE if "POST" in x], WROTE
-assert SENT[-1]["config"]["secret"] == "new-secret", SENT
-# A new URL moves the hook it made, by its id, rather than adding another.
-assert st["hookId"] == 9, st
-WROTE.clear()
-S.CFG["webhook"] = {**S.CFG["webhook"], "url": "https://new.example.org/burrow/hook"}
-R.hook("sam/r", st, False)
-assert [x for x in WROTE if "PATCH repos/sam/r/hooks/9" in x] and not [x for x in WROTE if "POST" in x], WROTE
-assert SENT[-1]["config"]["url"] == "https://new.example.org/burrow/hook", SENT
-S.CFG["webhook"] = {**S.CFG["webhook"], "url": "https://example.org/burrow/hook"}
-# A status run, from a shell without the services' credentials, leaves the
-# hook alone instead of failing on the secret.
-cred = os.environ["CREDENTIALS_DIRECTORY"]
-os.environ["CREDENTIALS_DIRECTORY"] = f"{tmp}/none"
-R.DRY = True
-WROTE.clear()
-R.hook("sam/r", {}, True)
-assert WROTE == [], WROTE
-R.DRY = False
-os.environ["CREDENTIALS_DIRECTORY"] = cred
-C.gh, C.write = gh_kept, write_kept
-C._for.pop()
-# A project of proj's that it doesn't see to (excluded, another owner's)
-# gets the hook too, for proj-watch and proj-inbox, and keeps it.
-projects_kept = C.projects
-C.projects = lambda: iter([("r", "sam/r"), ("R", "Sam/R"), ("p", "eve/p")])
-C.gh = lambda *a, **k: [] if a[:2] == ("api", "repos/eve/p/hooks") else gh_kept(*a, **k)
-C.NOW = T
-WROTE.clear()
-ACTING.clear()
-more = R.hook_projects([{"repo": "sam/r"}])
-assert more == [{"repo": "eve/p"}], more
-assert [x for x in WROTE if "hooks" in x] == ["api -X POST repos/eve/p/hooks --input -"], WROTE
-# As the App's installation on eve, not on sam.
-assert set(ACTING) == {"eve"}, ACTING
-assert C.load("repo-eve_p.json", None)["hookAt"] == T
-C.save("repo-eve_p.json", {"hook": "h", "hookId": 5, "hookAt": T})
-WROTE.clear()
-R.unhook_gone([{"repo": "sam/r"}] + more)
-assert not [x for x in WROTE if "eve/p" in x], WROTE
-os.remove(f"{tmp}/state/repo-eve_p.json")
-# Another owner's project the App isn't installed on gets no hook, and the
-# others still get theirs; it's kept for unhook_gone all the same, since
-# what its hook is now can't be asked.
-
-
-TRIED = []  # the calls made for mallory
-
-
-def uninstalled(*a, **k):
-    if C._for and C._for[-1] == "mallory":
-        TRIED.append(a)
-        raise RuntimeError("the App steward isn't installed on mallory")
-    return [] if a[:2] == ("api", "repos/eve/p/hooks") else gh_kept(*a, **k)
-
-
-C.gh = uninstalled
-C.projects = lambda: iter([("x", "mallory/x"), ("p", "eve/p")])
-WROTE.clear()
-more = R.hook_projects([{"repo": "sam/r"}])
-assert more == [{"repo": "eve/p"}, {"repo": "mallory/x"}], more
-assert [x for x in WROTE if "hooks" in x] == ["api -X POST repos/eve/p/hooks --input -"], WROTE
-# It's said once, and tried again a day later, not on every pass.
-assert C.load("repo-mallory_x.json", None)["unreached"] == "the App steward isn't installed on mallory"
-TRIED.clear()
-assert R.hook_projects([{"repo": "sam/r"}]) == more and TRIED == [], TRIED
-C.NOW = T + 86400
-R.hook_projects([{"repo": "sam/r"}])
-assert TRIED == [("api", "repos/mallory/x/hooks")], TRIED
-os.remove(f"{tmp}/state/repo-eve_p.json")
-os.remove(f"{tmp}/state/repo-mallory_x.json")
-# A clone whose repo GitHub has no more (deleted, or out of the App's reach:
-# GitHub answers both with a 404) gets no hook either. That's said once, and
-# nothing is asked of GitHub on the passes after; a day later the repo is
-# looked up first, quietly, and its hooks asked for only once it's back. The
-# hook it had stays on record, so back, that's the hook it keeps: moved to
-# the URL by its id, not a second one added.
-SAID, LOOKED, HOOKS_ASKED, MISSING = [], [], [], {"repos/sam/gone"}
-log_kept, fresh_kept = R.log, C.fresh
-R.log = lambda *a: SAID.append(" ".join(str(x) for x in a))
-
-
-def looked_up(path, etag=None):
-    LOOKED.append(path)
-    if path in MISSING:
-        raise C.Gone(f"gh api {path}: gh: Not Found (HTTP 404)")
-    return None, {"full_name": path.removeprefix("repos/")}
-
-
-def gone_hooks(*a, **k):
-    if a[:2] == ("api", "repos/sam/gone/hooks"):
-        HOOKS_ASKED.append(C.NOW)
-        if "repos/sam/gone" in MISSING:
-            return None  # gh's 404, which gh() logs
-        return [{"id": 4, "config": {"url": "https://old.example.org/burrow/hook"}}]
-    return gh_kept(*a, **k)
-
-
-C.gh, C.fresh = gone_hooks, looked_up
-C.projects = lambda: iter([("gone", "sam/gone")])
-C.save("repo-sam_gone.json", {"hook": "h", "hookId": 4})
-C.NOW = T
-WROTE.clear()
-assert R.hook_projects([{"repo": "sam/r"}]) == [{"repo": "sam/gone"}]
-assert HOOKS_ASKED == [T] and LOOKED == ["repos/sam/gone"] and WROTE == [], (HOOKS_ASKED, LOOKED, WROTE)
-assert SAID == [f"sam/gone: GitHub has no such repo, so its clone in {S.CFG['projectsDir']} gets no webhook; "
-                "looked up again daily"], SAID
-assert C.load("repo-sam_gone.json", None) == {"hook": "h", "hookId": 4, "hookAt": T, "unreached": "gone"}
-SAID.clear()
-LOOKED.clear()
-for at in (T + 600, T + 3600, T + 86400 + 1, T + 86400 + 600):
-    C.NOW = at
-    R.hook_projects([{"repo": "sam/r"}])
-assert HOOKS_ASKED == [T] and LOOKED == ["repos/sam/gone"] and SAID == [] and WROTE == [], (HOOKS_ASKED, LOOKED, SAID, WROTE)
-MISSING.clear()
-LOOKED.clear()
-C.NOW = T + 2 * (86400 + 1)
-R.hook_projects([{"repo": "sam/r"}])
-assert LOOKED == ["repos/sam/gone"] and HOOKS_ASKED == [T, C.NOW], (LOOKED, HOOKS_ASKED)
-assert [x for x in WROTE if "hooks" in x] == ["api -X PATCH repos/sam/gone/hooks/4 --input -"], WROTE
-assert SAID == ["sam/gone: on GitHub again"], SAID
-back = C.load("repo-sam_gone.json", None)
-assert "unreached" not in back and back["hookId"] == 4 and back["hook"] != "h", back
-os.remove(f"{tmp}/state/repo-sam_gone.json")
-R.log = log_kept
-C.gh, C.projects = gh_kept, projects_kept
-# A repo no longer seen to (excluded, archived) has its hook taken off, on
-# a full pass; one that won't come off is tried again a day later.
-C.save("repo-sam_old.json", {"hook": "h", "hookId": 7, "other": 1})
-C.save("repo-sam_stuck.json", {"hook": "h", "hookId": 8})
-C.save("repo-sam_r.json", {"hook": "h", "hookId": 9})
-# sam/R and sam/was renamed to sam/r: the same repo, whose hook hook() just
-# adopted under the new name, and GitHub answers either old name with it.
-C.save("repo-sam_R.json", {"hook": "h", "hookId": 9})
-C.save("repo-sam_was.json", {"hook": "h", "hookId": 9, "other": 2})
-# sam/once was renamed to sam/r too, but GitHub doesn't answer the lookup:
-# the old path may lead to sam/r, so nothing is deleted until it does.
-C.save("repo-sam_once.json", {"hook": "h", "hookId": 9})
-# GitHub has no sam/hidden the App can see: deleted, or out of its reach,
-# which GitHub doesn't tell apart. Its hook stays on record, looked up again
-# a day later, said once; once the App can see it again, the hook comes off.
-C.save("repo-sam_hidden.json", {"hook": "h", "hookId": 6, "other": 3})
-SAID.clear()
-R.log = lambda *a: SAID.append(" ".join(str(x) for x in a))
-NAMES = {"repos/sam/R": "sam/r", "repos/sam/was": "sam/r", "repos/sam/old": "sam/old", "repos/sam/stuck": "sam/stuck"}
-
-
-def names(path, etag=None):
-    if path in NAMES:
-        return None, {"full_name": NAMES[path]}
-    if path == "repos/sam/hidden":
-        raise C.Gone(f"gh api {path}: gh: Not Found (HTTP 404)")
-    raise C.Unavailable(f"gh api {path}: gh: HTTP 502")
-
-
-C.fresh = names
-FAIL.append("sam/stuck/hooks")
-C.NOW = T
-WROTE.clear()
-R.unhook_gone([{"repo": "sam/r"}])
-assert sorted(x for x in WROTE if "DELETE" in x) == ["api -X DELETE repos/sam/old/hooks/7",
-                                                     "api -X DELETE repos/sam/stuck/hooks/8"], WROTE
-assert C.load("repo-sam_old.json", None) == {"other": 1}
-assert C.load("repo-sam_stuck.json", None) == {"hook": "h", "hookId": 8, "unhookTried": T}
-assert C.load("repo-sam_r.json", None)["hookId"] == 9
-assert C.load("repo-sam_R.json", None) == {}
-assert C.load("repo-sam_was.json", None) == {"other": 2}
-assert C.load("repo-sam_once.json", None) == {"hook": "h", "hookId": 9, "unhookTried": T}
-hidden = {"hook": "h", "hookId": 6, "other": 3, "unhookTried": T, "unreached": "gone"}
-assert C.load("repo-sam_hidden.json", None) == hidden
-WROTE.clear()
-R.unhook_gone([{"repo": "sam/r"}])
-assert WROTE == [], WROTE
-C.NOW = T + 86400 + 1
-R.unhook_gone([{"repo": "sam/r"}])
-assert WROTE == ["api -X DELETE repos/sam/stuck/hooks/8"], WROTE
-assert C.load("repo-sam_hidden.json", None) == {**hidden, "unhookTried": C.NOW}
-assert [x for x in SAID if "sam/hidden" in x] == [
-    "sam/hidden: GitHub has no such repo the App can see, so its webhook stays on record; looked up again daily"], SAID
-NAMES["repos/sam/once"] = "sam/r"
-NAMES["repos/sam/hidden"] = "sam/hidden"
-C.NOW = T + 2 * (86400 + 1)
-WROTE.clear()
-R.unhook_gone([{"repo": "sam/r"}])
-assert C.load("repo-sam_once.json", None) == {}
-assert "DELETE repos/sam/once" not in " ".join(WROTE), WROTE
-assert "api -X DELETE repos/sam/hidden/hooks/6" in WROTE and C.load("repo-sam_hidden.json", None) == {"other": 3}, WROTE
-R.log = log_kept
-FAIL.clear()
-C.gh, C.fresh = gh_kept, fresh_kept
-print("hooks: ok")

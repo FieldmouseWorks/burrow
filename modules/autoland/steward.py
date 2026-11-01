@@ -336,8 +336,7 @@ def run_pass(kick):
     if not DRY:
         V.sweep(read, live)
     if kick is None:
-        R.unhook_gone(repos + R.hook_projects(repos))
-        R.app_hook()
+        R.hooks(repos)
     # Last: GitHub failing it leaves the pass's state saved. A line more than
     # one repo has (a reviewer out of service) is listed once. The stalls the
     # watchdog took past a Claude job go on the stuck issue with the rest.

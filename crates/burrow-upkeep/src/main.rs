@@ -1,22 +1,26 @@
 //! `burrow-upkeep CONFIG settle|branches|watch ...`, run by a pass of the autoland
 //! steward (modules/autoland/steward.py) for each repo, with the App's token
-//! for the repo's owner in GH_TOKEN, under the pass's lock; and `token`,
-//! which mints the pass that token. What it says of itself, on stderr, goes
-//! to the steward's journal.
+//! for the repo's owner in GH_TOKEN, under the pass's lock; `token`, which
+//! mints the pass that token; and `hooks`, which a full pass ends with, and
+//! which mints its own. What it says of itself, on stderr, goes to the
+//! steward's journal.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
+use std::ffi::OsString;
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use burrow_github::Gh;
 use burrow_upkeep::branches::{self, Git};
 use burrow_upkeep::config::Config;
+use burrow_upkeep::hook::{self, Hooks};
 use burrow_upkeep::pass::{Out, Pass, Proj};
-use burrow_upkeep::settle::{self, Repo};
-use burrow_upkeep::token::{self, Token};
+use burrow_upkeep::settle::Repo;
+use burrow_upkeep::token::{self, Installations, Token};
 use gh_token::app::Minted;
+use serde::de::DeserializeOwned;
 use serde_json::json;
 
 const USAGE: &str = "usage:
@@ -25,9 +29,15 @@ const USAGE: &str = "usage:
       (systemd's credential app-key), and when it expires, as JSON on
       stdout; exit status 75 when GitHub can't be asked just now
   burrow-upkeep CONFIG settle OWNER/REPO --now SECONDS [--private] [--empty] [--dry]
-      the repo's labels and settings, if they're due, as of the pass's time:
-      whether they were, what failed and a rate limit's reset, as JSON on
-      stdout; --private, --empty: the repo is private, has no commit yet
+      the repo's labels, settings and webhook, if they're due, as of the
+      pass's time: what failed and a rate limit's reset, as JSON on stdout;
+      --private, --empty: the repo is private, has no commit yet
+  burrow-upkeep CONFIG hooks --now SECONDS
+      a full pass's webhooks: the projects' repos', the ones off the repos
+      no longer seen to, and the App's own, as the App's installation on
+      each owner; a JSON object on stdin lists the repos the pass sees to
+      (seen) and the projects' repos (projects): what failed and a rate
+      limit's reset, as JSON on stdout
   burrow-upkeep CONFIG branches OWNER/REPO --now SECONDS --default BRANCH [--full] [--dry]
       the repo's branches nothing needs any more, deleted, leaving those its
       open PRs have (head and base), a JSON list on stdin: what's stuck and
@@ -136,6 +146,11 @@ fn run(args: &[String]) -> Result<(), Stop> {
         println!("{}", json!({"token": m.token, "expires": m.expires}));
         return Ok(());
     }
+    if let [word, rest @ ..] = words
+        && word == "hooks"
+    {
+        return hooks(config, rest);
+    }
     let (word, repo, rest) = match words {
         [word, repo, rest @ ..] => (word.as_str(), repo.as_str(), rest),
         _ => return Err(Stop::Usage("no word and repo".into())),
@@ -151,7 +166,9 @@ fn run(args: &[String]) -> Result<(), Stop> {
         return Err(Stop::Usage(format!("{flag} is {its}'s")));
     }
     let open = match word {
-        "branches" => Some(open()?),
+        "branches" => Some(stdin::<BTreeSet<String>>(
+            "the open PRs' branches, as a JSON list on stdin",
+        )?),
         _ => None,
     };
     let cfg = Config::read(Path::new(config)).map_err(Stop::Failed)?;
@@ -165,7 +182,7 @@ fn run(args: &[String]) -> Result<(), Stop> {
         now: f.now,
         dry: f.dry,
         searched: f.searched.unwrap_or(0),
-        api: &mut Gh,
+        api: &mut Gh::default(),
         jobs: &mut proj,
         out: Out::default(),
     };
@@ -175,8 +192,8 @@ fn run(args: &[String]) -> Result<(), Stop> {
                 private: f.private,
                 empty: f.empty,
             };
-            let due = settle::settle(&mut p, &cfg.settle, &repo);
-            json!({"due": due, "failed": p.out.failed, "limited": p.out.limited})
+            burrow_upkeep::settle(&mut p, &repo, || secret(&creds()?));
+            json!({"failed": p.out.failed, "limited": p.out.limited})
         }
         ("branches", Some(open)) => {
             let default = f
@@ -202,33 +219,94 @@ fn run(args: &[String]) -> Result<(), Stop> {
     Ok(())
 }
 
-/// The open PRs' branches, as the steward gives them: none is deleted, so
-/// what isn't a list of them stops the look before it starts.
-fn open() -> Result<BTreeSet<String>, Stop> {
+/// What the steward hands the word on stdin, `what` it is: the open PRs'
+/// branches, none of which is deleted, or the repos a full pass's hooks are
+/// about. What isn't stops the word before it starts.
+fn stdin<T: DeserializeOwned>(what: &str) -> Result<T, Stop> {
     let mut text = String::new();
     std::io::stdin()
         .read_to_string(&mut text)
         .map_err(|e| Stop::Failed(format!("stdin: {e}")))?;
-    serde_json::from_str(&text).map_err(|e| {
-        Stop::Usage(format!(
-            "the open PRs' branches, as a JSON list on stdin: {e}"
-        ))
-    })
+    serde_json::from_str(&text).map_err(|e| Stop::Usage(format!("{what}: {e}")))
+}
+
+/// systemd's credentials for the pass: the App's key (app-key) and the
+/// hooks' secret (webhook).
+fn creds() -> Result<PathBuf, String> {
+    std::env::var_os("CREDENTIALS_DIRECTORY")
+        .filter(|d| !d.is_empty())
+        .map(PathBuf::from)
+        .ok_or_else(|| {
+            "no CREDENTIALS_DIRECTORY: the App's key and the hooks' secret are credentials".into()
+        })
+}
+
+/// The hooks' secret, burrow-events': GitHub signs each delivery with it.
+fn secret(creds: &Path) -> Result<String, String> {
+    let path = creds.join("webhook");
+    let text = std::fs::read_to_string(&path)
+        .map_err(|e| format!("the hooks' secret, {}: {e}", path.display()))?;
+    Ok(text.trim().to_string())
+}
+
+/// Unix seconds, by the clock: what the App's JWTs and tokens are judged by.
+fn clock() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
+}
+
+/// A full pass's hooks (hook.rs), as the App: on stdout, what failed and a
+/// rate limit's reset. A status run has no secret, and no hooks to change.
+fn hooks(config: &str, rest: &[String]) -> Result<(), Stop> {
+    let f = flags(rest)?;
+    if let Some((flag, its)) = f.own.first() {
+        return Err(Stop::Usage(format!("{flag} is {its}'s")));
+    }
+    if f.dry {
+        return Err(Stop::Usage(
+            "hooks has no status run: it changes what it looks at".into(),
+        ));
+    }
+    let repos: hook::Repos =
+        stdin("the repos the pass sees to and the projects', as a JSON object on stdin")?;
+    let cfg = Config::read(Path::new(config)).map_err(Stop::Failed)?;
+    let creds = creds().map_err(Stop::Failed)?;
+    let secret = secret(&creds).map_err(Stop::Failed)?;
+    let app = token::app(&cfg, &creds, ureq::Proxy::try_from_env())
+        .map_err(|e| Stop::Failed(e.to_string()))?;
+    let now = clock();
+    let mut owners = Installations {
+        app: &app,
+        now,
+        gh: HashMap::new(),
+    };
+    let mut h = Hooks {
+        cfg: &cfg,
+        now: f.now,
+        secret: &secret,
+        owners: &mut owners,
+        app: &app,
+        clock: now,
+        out: Out::default(),
+        said: vec![],
+    };
+    h.run(&repos);
+    println!(
+        "{}",
+        json!({"failed": h.out.failed, "limited": h.out.limited})
+    );
+    Ok(())
 }
 
 /// The App's token for `owner`, as of the clock now. An owner the App
 /// isn't installed on has none: GitHub's answer, said as such.
 fn app_token(cfg: &Config, owner: &str) -> Result<Minted, Stop> {
-    let creds = std::env::var_os("CREDENTIALS_DIRECTORY")
-        .filter(|d| !d.is_empty())
-        .ok_or_else(|| {
-            Stop::Failed("no CREDENTIALS_DIRECTORY: the App's key is the credential app-key".into())
-        })?;
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX));
+    let creds: OsString = creds().map_err(Stop::Failed)?.into();
     let proxy = ureq::Proxy::try_from_env();
-    match token::token(cfg, owner, Path::new(&creds), proxy, now) {
+    let app = token::app(cfg, Path::new(&creds), proxy)
+        .map_err(|e| Stop::Failed(format!("no token for {owner}: {e}")))?;
+    match token::token(&app, owner, clock()) {
         Ok(Token::Minted(m)) => Ok(m),
         Ok(Token::NotInstalled) => Err(Stop::Failed(format!(
             "the App {} isn't installed on {owner}",

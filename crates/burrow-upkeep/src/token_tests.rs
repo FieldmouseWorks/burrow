@@ -1,5 +1,5 @@
 //! The App's tokens: minted with its key, as the App the config names, and
-//! kept nowhere.
+//! kept nowhere but in memory.
 
 use std::fs;
 use std::path::PathBuf;
@@ -64,7 +64,8 @@ fn files(dir: &Path) -> Vec<String> {
 fn mints_an_owners_token_as_the_app_the_config_names_and_keeps_it_nowhere() {
     let github = github(false);
     let (dir, cfg, creds) = steward(&github);
-    let got = token(&cfg, "sam", &creds, None, NOW);
+    let app = app(&cfg, &creds, None).unwrap();
+    let got = token(&app, "sam", NOW);
     let Ok(Token::Minted(m)) = got else {
         panic!("no token for sam");
     };
@@ -89,10 +90,7 @@ fn mints_an_owners_token_as_the_app_the_config_names_and_keeps_it_nowhere() {
         "a token kept on disk"
     );
     // Each ask mints: nothing kept to hand out again.
-    assert!(matches!(
-        token(&cfg, "Sam", &creds, None, NOW + 60),
-        Ok(Token::Minted(_))
-    ));
+    assert!(matches!(token(&app, "Sam", NOW + 60), Ok(Token::Minted(_))));
     assert_eq!(github.asked().len(), 4);
 }
 
@@ -100,7 +98,7 @@ fn mints_an_owners_token_as_the_app_the_config_names_and_keeps_it_nowhere() {
 fn an_owner_the_app_isnt_on_has_none_to_mint() {
     let github = github(false);
     let (_dir, cfg, creds) = steward(&github);
-    let got = token(&cfg, "eve", &creds, None, NOW);
+    let got = token(&app(&cfg, &creds, None).unwrap(), "eve", NOW);
     assert!(matches!(got, Ok(Token::NotInstalled)));
     assert_eq!(
         github.asked(),
@@ -112,7 +110,7 @@ fn an_owner_the_app_isnt_on_has_none_to_mint() {
 fn github_not_answering_is_asking_again_later() {
     let github = github(true);
     let (_dir, cfg, creds) = steward(&github);
-    match token(&cfg, "sam", &creds, None, NOW) {
+    match token(&app(&cfg, &creds, None).unwrap(), "sam", NOW) {
         Err(e) => assert!(e.unavailable, "{e}"),
         Ok(_) => panic!("a token with GitHub down"),
     }
@@ -122,8 +120,9 @@ fn github_not_answering_is_asking_again_later() {
 fn refuses_what_isnt_an_owner_and_a_pass_without_the_key() {
     let github = github(false);
     let (_dir, cfg, creds) = steward(&github);
+    let the_app = app(&cfg, &creds, None).unwrap();
     for owner in ["sam/r", "", "-sam", "sam name"] {
-        match token(&cfg, owner, &creds, None, NOW) {
+        match token(&the_app, owner, NOW) {
             Err(e) => assert!(!e.unavailable && e.what.contains("isn't an owner"), "{e}"),
             Ok(_) => panic!("a token for {owner:?}"),
         }
@@ -131,9 +130,48 @@ fn refuses_what_isnt_an_owner_and_a_pass_without_the_key() {
     assert!(github.asked().is_empty());
     // Not given the credential: refused, and nothing asked of GitHub.
     fs::remove_file(creds.join("app-key")).unwrap();
-    match token(&cfg, "sam", &creds, None, NOW) {
+    match app(&cfg, &creds, None) {
         Err(e) => assert!(!e.unavailable && e.what.contains("the App's key"), "{e}"),
-        Ok(_) => panic!("a token without the key"),
+        Ok(_) => panic!("the App without its key"),
     }
     assert!(github.asked().is_empty());
+}
+
+#[test]
+fn an_owners_installation_is_minted_for_once_a_process() {
+    let up = github(false);
+    let (_dir, cfg, creds) = steward(&up);
+    let app = app(&cfg, &creds, None).unwrap();
+    let mut owners = Installations {
+        app: &app,
+        now: NOW,
+        gh: HashMap::new(),
+    };
+    assert!(owners.api("sam").unwrap().is_some());
+    assert!(owners.api("Sam").unwrap().is_some());
+    assert!(matches!(&owners.gh["sam"], Some(Gh { token: Some(t) }) if t == "ghs_sam"));
+    // Eve's has none: GitHub's answer, kept too.
+    assert!(owners.api("eve").unwrap().is_none());
+    assert!(owners.api("eve").unwrap().is_none());
+    assert_eq!(
+        up.asked(),
+        [
+            "GET /app/installations?per_page=100&page=1",
+            "POST /app/installations/11/access_tokens",
+            "GET /app/installations?per_page=100&page=1",
+        ]
+    );
+    // What couldn't be asked is asked again.
+    let down = github(true);
+    let (_dir, cfg, creds) = steward(&down);
+    let app = super::app(&cfg, &creds, None).unwrap();
+    let mut owners = Installations {
+        app: &app,
+        now: NOW,
+        gh: HashMap::new(),
+    };
+    for _ in 0..2 {
+        assert!(owners.api("sam").err().unwrap().unavailable);
+    }
+    assert_eq!(down.asked().len(), 2);
 }

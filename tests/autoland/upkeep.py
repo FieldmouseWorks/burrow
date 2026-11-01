@@ -113,13 +113,13 @@ assert os.listdir(f"{tmp}/state/{V.DONE}") == [] and not os.path.exists(f"{tmp}/
 assert all(x.startswith(V.GONE) for x in os.listdir(f"{tmp}/state/{V.SESSIONS}")), os.listdir(f"{tmp}/state/{V.SESSIONS}")
 assert sorted(os.listdir(src)) == sorted(["x", "y"] + [f".{d}.gone-{stamp()}" for d in ("r", "r-2", "new")])
 assert C.project_dir("sam/r") is None, os.listdir(src)
-# Then it's settled as new, at once: burrow-upkeep keeps its labels and
-# settings, and it gets its hook.
+# Then it's settled as new, at once: burrow-upkeep keeps its labels,
+# settings and hook, none of them the deleted one's.
 WROTE.clear()
 open(UPKEEP_RAN, "w").close()
 assert R.settle_repo(remade, known) is True
 st = C.load("repo-sam_r.json", {})
-assert st.get("hookId") != 41 and st["databaseId"] == 2002, st
+assert "hookId" not in st and st["databaseId"] == 2002, st
 assert [json.loads(x)[:2] for x in open(UPKEEP_RAN)] == [["settle", "sam/r"]]
 # Settled now, it isn't started over again: what's kept about it from here
 # on stays, its new clone and that clone's jobs too.
@@ -303,48 +303,6 @@ S.CFG["projectsDir"] = f"{tmp}/none"
 shutil.rmtree(jobs)
 print("remade repos: ok")
 
-# The App's own webhook, which hears a repo the moment it's made: its URL
-# and the hooks' secret, set as the App (its JWT), again when either
-# changes and once a day; one GitHub didn't take is tried again next pass.
-CALLS = []
-
-
-def app_call(method, path, jwt, body=None):
-    CALLS.append((method, path, jwt, body))
-    if FAIL_APP:
-        raise FAIL_APP.pop()
-    return {}
-
-
-FAIL_APP = []
-kept_app = (C.app_call, C.app_jwt)
-C.app_call, C.app_jwt = app_call, (lambda: "the-jwt")
-REAL["app_hook"]()
-assert CALLS == [("PATCH", "app/hook/config", "the-jwt", {"url": "https://example.org/burrow/hook", "content_type": "json",
-                                                       "secret": "hook-secret", "insecure_ssl": "0"})], CALLS
-REAL["app_hook"]()
-assert len(CALLS) == 1, CALLS
-C.NOW += 86400
-REAL["app_hook"]()
-assert len(CALLS) == 2, CALLS
-with open(f"{tmp}/cred/webhook", "w") as f:
-    f.write("new-secret\n")
-FAIL_APP.append(C.Unavailable("PATCH app/hook/config: HTTP 502"))
-REAL["app_hook"]()
-REAL["app_hook"]()
-assert len(CALLS) == 4 and CALLS[-1][3]["secret"] == "new-secret", CALLS
-REAL["app_hook"]()
-assert len(CALLS) == 4, CALLS
-# Another App, with the same URL and secret: its own webhook is set on the
-# next pass, not a day on.
-C.CFG["app"]["id"], kept_id = 8, C.CFG["app"]["id"]
-REAL["app_hook"]()
-C.CFG["app"]["id"] = kept_id
-assert len(CALLS) == 5, CALLS
-with open(f"{tmp}/cred/webhook", "w") as f:
-    f.write("hook-secret\n")
-C.app_call, C.app_jwt = kept_app
-print("the App's webhook: ok")
 
 # A red default branch gets one Claude job, and nothing more while it works
 # or a fix is open; a second if it ends with the branch still red, then the
@@ -469,19 +427,16 @@ assert [x.split()[:3] for x in WROTE] == [["pr", "close", "8"]], WROTE
 # In a pass the watcher goes first, and the steward holds a fix PR it holds
 # (passes.py has what holding does) before any other PR, so one with
 # settled reviews and green CI can't merge before it's closed.
-kept_fns = (S.R.discover, S.R.settle_repo, S.R.publish, S.open_prs, S.R.unhook_gone, S.R.hook_projects,
-            S.R.watch_default, H.handle)
+kept_fns = (S.R.discover, S.R.settle_repo, S.R.publish, S.open_prs, S.R.watch_default, H.handle)
 order = []
 S.R.discover = lambda: [{"repo": "sam/r", "default": "main"}]
 S.R.settle_repo = lambda r, known: False
-S.R.publish = S.R.unhook_gone = lambda *a: None
-S.R.hook_projects = lambda repos: []
+S.R.publish = lambda *a: None
 S.open_prs = lambda owner, name: (info, [mkpr(number=10), mkpr(branch="autoland/red-cccccccccccc", number=9)])
 S.R.watch_default = lambda r, info, prs, digest: order.append("watch") or {9: GONE}
 H.handle = lambda repo, pr, info, digest, held: order.append((pr["number"], held))
 S.main()
-(S.R.discover, S.R.settle_repo, S.R.publish, S.open_prs, S.R.unhook_gone, S.R.hook_projects,
- S.R.watch_default, H.handle) = kept_fns
+S.R.discover, S.R.settle_repo, S.R.publish, S.open_prs, S.R.watch_default, H.handle = kept_fns
 assert order == ["watch", (9, GONE), (10, None)], order
 
 C._for.pop()
