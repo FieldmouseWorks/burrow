@@ -1,9 +1,9 @@
 //! `burrow-upkeep CONFIG settle|branches|watch ...`, run by a pass of the autoland
 //! steward (modules/autoland/steward.py) for each repo, with the App's token
-//! for the repo's owner in GH_TOKEN, under the pass's lock; `token`, which
-//! mints the pass that token; and `hooks`, which a full pass ends with, and
-//! which mints its own. What it says of itself, on stderr, goes to the
-//! steward's journal.
+//! for the repo's owner in GH_TOKEN, under the pass's lock; `post`, which
+//! posts a reviewer's answer on a repo's PR; `token`, which mints the pass
+//! that token; and `hooks`, which a full pass ends with, and which mints its
+//! own. What it says of itself, on stderr, goes to the steward's journal.
 
 use std::collections::{BTreeSet, HashMap};
 use std::ffi::OsString;
@@ -17,6 +17,7 @@ use burrow_upkeep::branches::{self, Git};
 use burrow_upkeep::config::Config;
 use burrow_upkeep::hook::{self, Hooks};
 use burrow_upkeep::pass::{Out, Pass, Proj};
+use burrow_upkeep::post::{self, Look, Posted, Unposted};
 use burrow_upkeep::settle::Repo;
 use burrow_upkeep::token::{self, Installations, Token};
 use gh_token::app::Minted;
@@ -43,6 +44,12 @@ const USAGE: &str = "usage:
       open PRs have (head and base), a JSON list on stdin: what's stuck and
       the pass to book, as JSON on stdout; --default, its default branch;
       --full, a full pass's look, which tries again what GitHub said no to
+  burrow-upkeep CONFIG post OWNER/REPO --now SECONDS
+      a reviewer's answer, posted as its review of the head it read; a JSON
+      object on stdin gives the PR's number, the head, its base, the
+      reviewer (and its name), its answer and the description it was shown:
+      what came of it (clean, findings, notAReview, refused or unanswered)
+      and a rate limit's reset, as JSON on stdout
   burrow-upkeep CONFIG watch OWNER/REPO --now SECONDS [--searched N] [--dry]
       the repo's dashboard and quarantine, as of the pass's time: what's
       stuck, the pass to book and the jobs to start, as JSON on stdout;
@@ -158,12 +165,31 @@ fn run(args: &[String]) -> Result<(), Stop> {
     if !flaky::quarantine::repo_name(repo) {
         return Err(Stop::Usage(format!("{repo:?} isn't OWNER/REPO")));
     }
-    if !["settle", "branches", "watch"].contains(&word) {
+    if !["settle", "branches", "watch", "post"].contains(&word) {
         return Err(Stop::Usage(format!("no word {word:?}")));
     }
     let f = flags(rest)?;
     if let Some((flag, its)) = f.own.iter().find(|(_, its)| *its != word) {
         return Err(Stop::Usage(format!("{flag} is {its}'s")));
+    }
+    if word == "post" && f.dry {
+        return Err(Stop::Usage(
+            "post has no status run: it posts what it's given".into(),
+        ));
+    }
+    let look = match word {
+        "post" => Some(stdin::<Look>(
+            "the look to post, as a JSON object on stdin",
+        )?),
+        _ => None,
+    };
+    if let Some(l) = &look
+        && !(!l.reviewer.is_empty() && l.reviewer.bytes().all(|b| b.is_ascii_lowercase()))
+    {
+        return Err(Stop::Usage(format!(
+            "{:?} isn't a reviewer's name",
+            l.reviewer
+        )));
     }
     let open = match word {
         "branches" => Some(stdin::<BTreeSet<String>>(
@@ -195,6 +221,19 @@ fn run(args: &[String]) -> Result<(), Stop> {
             burrow_upkeep::settle(&mut p, &repo, || secret(&creds()?));
             json!({"failed": p.out.failed, "limited": p.out.limited})
         }
+        ("post", _) => {
+            let Some(look) = &look else {
+                return Err(Stop::Usage("no look to post".into()));
+            };
+            let (outcome, why) = match post::post(&mut p, look) {
+                Ok(Posted::Clean) => ("clean", None),
+                Ok(Posted::Findings) => ("findings", None),
+                Err(Unposted::NotAReview(why)) => ("notAReview", Some(why)),
+                Err(Unposted::Refused(why)) => ("refused", Some(why)),
+                Err(Unposted::Unanswered(why)) => ("unanswered", Some(why)),
+            };
+            json!({"outcome": outcome, "why": why, "limited": p.out.limited})
+        }
         ("branches", Some(open)) => {
             let default = f
                 .default
@@ -220,8 +259,8 @@ fn run(args: &[String]) -> Result<(), Stop> {
 }
 
 /// What the steward hands the word on stdin, `what` it is: the open PRs'
-/// branches, none of which is deleted, or the repos a full pass's hooks are
-/// about. What isn't stops the word before it starts.
+/// branches, none of which is deleted, the look whose answer is posted, or
+/// the repos a full pass's hooks are about. What isn't stops the word before it starts.
 fn stdin<T: DeserializeOwned>(what: &str) -> Result<T, Stop> {
     let mut text = String::new();
     std::io::stdin()

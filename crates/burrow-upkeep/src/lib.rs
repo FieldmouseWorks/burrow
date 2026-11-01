@@ -1,7 +1,8 @@
 //! What the autoland steward keeps up in each repo besides its PRs: its
 //! labels and settings (settle.rs) and its webhook (hook.rs), the branches
 //! nothing needs any more (branches.rs), Renovate's dashboard (dashboard.rs)
-//! and the flaky tests' quarantine (flaky.rs). A pass of the steward's runs
+//! and the flaky tests' quarantine (flaky.rs); and the reviewers' answers,
+//! posted on its PRs (post.rs). A pass of the steward's runs
 //! `settle`, then `branches` once it has seen to the repo's PRs, then
 //! `watch`, on each repo it sees to, with the App's token for the repo's
 //! owner in GH_TOKEN, which `token` (token.rs) mints the pass. A full pass
@@ -17,6 +18,7 @@ pub mod dashboard;
 pub mod flaky;
 pub mod hook;
 pub mod pass;
+pub mod post;
 pub mod settle;
 #[cfg(test)]
 mod testing;

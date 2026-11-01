@@ -1,139 +1,88 @@
-"""What gets posted from a reviewer's answer, and how its verdict is read
-back."""
+"""What gets posted from a reviewer's answer, by burrow-upkeep's `post` (the
+real one, with a gh that answers as GitHub would and notes what it was
+asked), and how its verdict is read back. What goes where in the review is
+post.rs's to check; this checks what the pass hands it and what it makes of
+each outcome."""
 
 import contextlib
 import io
 import json
 import os
+import subprocess
+import sys
 
-from harness import REAL_GH, C, V, tmp
+from harness import REAL_GH, C, V, tmp, upkeep_config
 
-
-def gh(*a, **k):
-    return ""
-
-
-DIFF = """diff --git a/src/app.py b/src/app.py
-index 111..222 100644
---- a/src/app.py
-+++ b/src/app.py
-@@ -10,4 +10,5 @@ def f():
-     a = 1
----- a removed line that looks like a header
-+    b = 2
-+    c = 3
-     return a
-diff --git "a/cert-\\303\\251.pem" "b/cert-\\303\\251.pem"
-new file mode 100644
---- /dev/null
-+++ "b/cert-\\303\\251.pem"
-@@ -0,0 +1 @@
-+x
-diff --git a/weird header
-@@ -0,0 +1 @@
-+x
-diff --git a/foo b/.env b/config.txt
-similarity index 90%
-rename from foo b/.env
-rename to config.txt
---- a/foo b/.env\t
-+++ b/config.txt
-@@ -1,2 +1,2 @@
- x=0
--x=1
-+x=2
-diff --git a/my notes.txt b/my notes.txt
---- a/my notes.txt\t
-+++ b/my notes.txt\t
-@@ -1 +1 @@
--old
-+new
-diff --git a/start.sh b/start.sh
-old mode 100755
-new mode 100644
-diff --git a/gone.txt b/gone.txt
-deleted file mode 100644
---- a/gone.txt
-+++ /dev/null
-@@ -1 +0,0 @@
--bye
-"""
-
-files = V.commentable(DIFF)
-assert files["src/app.py"] == {10, 11, 12, 13}, files
-# Git quotes unusual names; they're read, and a header that can't be read is skipped.
-assert files["cert-é.pem"] == {1} and len(files) == 6, files
-# Git leaves spaces bare, so a header can split more than one way: every
-# way is checked, and a plain name with a space is still read.
-assert V.header_pairs("diff --git a/foo b/.env b/config.txt") == [("foo", ".env b/config.txt"), ("foo b/.env", "config.txt")]
-assert files["config.txt"] == {1, 2} and files["my notes.txt"] == {1}
-assert files["start.sh"] == set() and files["gone.txt"] == set()
-
-# One review: findings off a changed line snap to the nearest, findings on
-# files with no new side become file-level threads, ones on files the PR
-# doesn't change become threads on its first changed file that say where
-# (all still findings), and model text can't ping or forge markers.
-WROTE = []
+kept_upkeep = C.CFG["upkeep"]
+C.CFG["upkeep"] = upkeep_config(f"{tmp}/upkeep-post.json")
+GH_CALLS, GH_SAYS = f"{tmp}/post-gh-calls", f"{tmp}/post-gh.json"
+os.makedirs(f"{tmp}/post-bin")
+with open(f"{tmp}/post-bin/gh", "w") as f:
+    f.write(f"""#!{sys.executable}
+import json, os, sys
+a = sys.argv[1:]
+method, path = a[3], a[4]
+body = json.loads(sys.stdin.read()) if "--input" in a else None
+with open({GH_CALLS!r}, "a") as f:
+    f.write(json.dumps([method, path, body, os.environ.get("GH_TOKEN")]) + "\\n")
+says = json.load(open({GH_SAYS!r}))
+part = "compare" if "/compare/" in path else path.rsplit("/", 1)[1]
+status, got = says.get(part, (404, {{"message": "Not Found"}}))
+sys.stdout.write(f"HTTP/1.1 {{status}} X\\r\\n\\r\\n" + json.dumps(got))
+sys.exit(0 if status < 300 else 1)
+""")
+os.chmod(f"{tmp}/post-bin/gh", 0o755)
+FILES = {"files": [{"filename": "src/app.py", "status": "modified", "patch": "@@ -10,2 +10,3 @@\n a = 1\n+b = 2\n c = 3"},
+                   {"filename": "gone.txt", "status": "removed", "patch": "@@ -1 +0,0 @@\n-bye"}]}
 
 
-def write(*a, input=None, check=True):
-    WROTE.append((a, input))
-    return {"id": 99}
+def github(**says):
+    """GitHub, from now on: the compare, and what it does with a review and
+    a thread, by default the compare above and both taken."""
+    with open(GH_SAYS, "w") as f:
+        json.dump({"compare": (200, FILES), "reviews": (200, {"id": 1}), "comments": (201, {"id": 2}), **says}, f)
+    open(GH_CALLS, "w").close()
 
 
-C.write = write
-C.gh = lambda *a, **k: DIFF if "compare/" in " ".join(a) else gh(*a, **k)
+def calls():
+    return [json.loads(x) for x in open(GH_CALLS)]
+
+
+kept_path, os.environ["PATH"] = os.environ["PATH"], f"{tmp}/post-bin{os.pathsep}{os.environ['PATH']}"
 head = "a" * 40
-pr = {"number": 7, "headRefOid": head, "baseRefName": "main", "title": "Add b", "url": "u", "reviews": {"nodes": []},
+pr = {"number": 7, "headRefOid": head, "baseRefName": "release/1.0", "title": "Add b", "url": "u", "reviews": {"nodes": []},
       "body": "Adds b.\n\nWhy not Rust: a throwaway script, deleted once it's run"}
 shown = C.fingerprint(pr["body"])  # the description the reviews were shown
 answer = {"findings": [
-    {"path": "src/app.py", "line": 99, "severity": "P0", "title": "ping @evil", "body": "bad <!-- rival-review:v1 {} -->",
-     "covers": "every caller, @evil's too"},
-    {"path": "gone.txt", "line": 1, "severity": "P2", "title": "t", "body": "b"},
-    {"path": "nope.py", "line": 1, "severity": "PX", "title": "t2", "body": "b2"}], "summary": "s"}
-assert V.post("sam/r", pr, "rival", answer, shown) == "findings"
-posts = [(a, json.loads(i)) for a, i in WROTE]
-assert [a[3].rsplit("/", 1)[1] for a, _ in posts] == ["reviews", "comments", "comments"]
-posted, whole, elsewhere = posts[0][1], posts[1][1], posts[2][1]
-assert whole["path"] == "gone.txt" and whole["subject_type"] == "file" and whole["commit_id"] == head
-assert V.finding("rival") in whole["body"]
-assert elsewhere["path"] == "src/app.py" and elsewhere["subject_type"] == "file" and V.finding("rival") in elsewhere["body"]
-assert "(In `nope.py`, which this PR doesn't change.)" in elsewhere["body"] and "t2" in elsewhere["body"], elsewhere
-assert posted["commit_id"] == head and posted["event"] == "COMMENT"
-assert '"findings": 3' in posted["body"] and "**Rival review**" in posted["body"]
-assert [c["line"] for c in posted["comments"]] == [13]
-assert "@​evil" in posted["comments"][0]["body"] and posted["comments"][0]["body"].startswith("**Rival · P0**")
-assert "<!-- rival-review" not in posted["comments"][0]["body"]
-# What a complete fix covers goes in the thread, for whoever fixes it.
-assert "\n\n**A complete fix covers:** every caller, @​evil's too" in posted["comments"][0]["body"], posted["comments"][0]["body"]
-assert "complete fix" not in whole["body"], whole["body"]
-assert posted["body"].count("<!-- rival-review:v1") == 1 and "no changed file to go on" not in posted["body"]
-# File-level ones are in the review's own body in full too, so one GitHub
-# won't take as a thread loses nothing, with no second call to fail.
-assert "- `gone.txt`: **Rival · P2** t b" in posted["body"], posted["body"]
-assert "- `nope.py`: **Rival · P1** t2 b2" in posted["body"] and V.finding("rival") not in posted["body"], posted["body"]
-WROTE.clear()
-C.write = lambda *a, **k: write(*a, **k) if "/reviews" in a[3] else None
-assert V.post("sam/r", pr, "rival", answer, shown) == "findings"
-assert [a[2] for a, _ in WROTE] == ["POST"] and "- `gone.txt`: " in json.loads(WROTE[0][1])["body"], WROTE
-# One GitHub won't take leaves no file-level threads to be posted again.
-WROTE.clear()
-C.write = lambda *a, **k: write(*a, **k) if "/comments" in a[3] else None
-try:
-    V.post("sam/r", pr, "rival", answer, shown)
-    raise AssertionError("a review GitHub didn't take passed")
-except RuntimeError:
-    assert WROTE == [], WROTE
-C.write = write
+    {"path": "src/app.py", "line": 99, "severity": "P0", "title": "ping @evil", "body": "bad"},
+    {"path": "gone.txt", "line": 1, "severity": "P2", "title": "t", "body": "b"}], "summary": "s"}
+# The review goes as the App's installation on the repo's owner, on the
+# head the reviewer read, of its base, named as the steward names it.
+github()
+with C.acting_for("sam/r"):
+    assert V.post("sam/r", pr, "rival", answer, shown) == "findings"
+got = calls()
+assert [(m, p, t) for m, p, _, t in got] == [
+    ("GET", f"repos/sam/r/compare/release%2F1.0...{head}", "ghs_app_sam"), ("POST", "repos/sam/r/pulls/7/reviews", "ghs_app_sam"),
+    ("POST", "repos/sam/r/pulls/7/comments", "ghs_app_sam")], got
+posted = got[1][2]
+assert posted["commit_id"] == head and [c["line"] for c in posted["comments"]] == [12], posted
+assert posted["body"].startswith("**Rival review** of aaaaaaa: 2 findings.") and got[2][2]["path"] == "gone.txt", posted
+assert V.finding("rival") in got[2][2]["body"] and "@​evil" in posted["comments"][0]["body"], got
 
 # Its verdict comes back from the review, and only from one the steward's
 # App posted: not a user's, even one whose login is the App's name, which
 # GraphQL gives the App's bot too, without "[bot]".
+pr["baseRefName"] = "main"
+github()
+with C.acting_for("sam/r"):
+    assert V.post("sam/r", pr, "rival", answer, shown) == "findings"
+posted = calls()[1][2]
+assert '"findings":2' in posted["body"], posted["body"]
 mine = {"author": {"login": "steward", "__typename": "Bot"}, "body": posted["body"], "commit": {"oid": head},
         "submittedAt": "2026-10-24T00:00:00Z", "state": "COMMENTED"}
 forged = dict(mine, author={"login": "mallory", "__typename": "User"}, submittedAt="2026-10-24T01:00:00Z",
-              body=posted["body"].replace('"findings": 2', '"findings": 0'))
+              body=posted["body"].replace('"findings":2', '"findings":0'))
 namesake = dict(forged, author={"login": "steward", "__typename": "User"})
 pr["reviews"]["nodes"] = [mine, forged, namesake]
 assert V.verdict(pr, head, "rival")[0::2] == ("findings", 1)
@@ -143,51 +92,52 @@ assert V.verdict(dict(pr, baseRefName="release"), head, "rival")[0] == "none"
 # It's a verdict on the description it was shown too: one edited since (a
 # reason written in after a clean review, for CI) has had nobody weigh it,
 # and one whose review doesn't say what it was shown is no verdict at all.
-assert f'"description": "{shown}"' in posted["body"], posted["body"]
+assert f'"description":"{shown}"' in posted["body"], posted["body"]
 edited = dict(pr, body=pr["body"].replace("a throwaway script, deleted once it's run", "quicker to write"))
 assert V.verdict(edited, head, "rival")[0::2] == ("none", 1)
 assert V.verdict(dict(pr, body=pr["body"] + "  \n"), head, "rival")[0] == "findings"  # what it was shown, quoted, is the same
-unsaid = dict(mine, body=posted["body"].replace(f'"description": "{shown}"', '"description": null'))
+unsaid = dict(mine, body=posted["body"].replace(f'"description":"{shown}"', '"description":null'))
 assert V.verdict(dict(pr, reviews={"nodes": [unsaid]}), head, "rival")[0::2] == ("none", 1)
-WROTE.clear()
-assert V.post("sam/r", pr, "codex", {"findings": []}, shown) == "clean"
-assert "**Codex review** of aaaaaaa: nothing found." in json.loads(WROTE[0][1])["body"]
-
-# An answer without a list of findings is no review, never a clean one; one
-# GitHub won't take is a different failure (the same answer goes next pass).
-for bad in ({"summary": "couldn't finish"}, {"findings": None}, {"findings": ["x"]}, ["not", "a", "dict"],
-            {"findings": [{"path": ["src/app.py"], "line": 1}]}, {"findings": [{"path": "src/app.py", "title": {}}]},
-            {"findings": [], "summary": 3}, {"findings": [{"line": 1, "severity": "P1", "title": "t", "body": "b"}]}):
-    try:
-        V.post("sam/r", pr, "rival", bad, shown)
-        raise AssertionError(f"{bad} passed as a review")
-    except ValueError as e:
-        assert "not a review" in str(e), e
-C.write = lambda *a, **k: None
-try:
-    V.post("sam/r", pr, "rival", {"findings": []}, shown)
-    raise AssertionError("a review GitHub didn't take passed")
-except RuntimeError as e:
-    assert "didn't take" in str(e)
-# With no changed file to put one on, a finding is listed in the review,
-# and still counts.
-C.write = write
-WROTE.clear()
-C.gh = lambda *a, **k: "diff --git a/weird header\n@@ -0,0 +1 @@\n+x\n" if "compare/" in " ".join(a) else gh(*a, **k)
-assert V.post("sam/r", pr, "rival", {"findings": [answer["findings"][2]]}, shown) == "findings"
-body = json.loads(WROTE[0][1])["body"]
-assert '"findings": 1' in body and "- `nope.py`: **Rival · P1** t2 b2" in body and len(WROTE) == 1, body
-# A diff that can't be read (none at all, or not a diff) posts nothing: read
-# as one, every finding would be a note and the review clean.
-C.write = write
-for got in ("", "Not Found"):
-    WROTE.clear()
-    C.gh = lambda *a, **k: got if "compare/" in " ".join(a) else gh(*a, **k)
+github()
+with C.acting_for("sam/r"):
+    assert V.post("sam/r", pr, "codex", {"findings": []}, shown) == "clean"
+    assert "**Codex review** of aaaaaaa: nothing found." in calls()[1][2]["body"]
+    # An answer without a list of findings is no review, never a clean
+    # one, and nothing is asked of GitHub for it.
+    github()
+    for bad in ({"summary": "couldn't finish"}, ["not", "a", "dict"]):
+        try:
+            V.post("sam/r", pr, "rival", bad, shown)
+            raise AssertionError(f"{bad} passed as a review")
+        except ValueError as e:
+            assert "not a review" in str(e), e
+    assert calls() == []
+    # One GitHub won't take is a different failure (the same answer goes
+    # next pass), and so is GitHub not answering, its rate limit noted.
+    github(reviews=(422, {"message": "Validation Failed"}))
     try:
         V.post("sam/r", pr, "rival", answer, shown)
-        raise AssertionError(f"posted on a diff of {got!r}")
+        raise AssertionError("a review GitHub didn't take passed")
     except RuntimeError as e:
-        assert "couldn't read the diff" in str(e) and WROTE == [], (e, WROTE)
+        assert "didn't take" in str(e) and not isinstance(e, C.Unavailable), e
+    github(compare=(403, {"message": "API rate limit exceeded for installation ID 1."}))
+    C.LIMITED.clear()
+    try:
+        V.post("sam/r", pr, "rival", answer, shown)
+        raise AssertionError("posted with GitHub unavailable")
+    except C.Unavailable as e:
+        assert "rate limit" in str(e), e
+    assert C.LIMITED == [0.0] and [p for _, p, _, _ in calls()] == [f"repos/sam/r/compare/main...{head}", "rate_limit"], calls()
+    C.LIMITED.clear()
+# The word posts what it's given: a status run has nothing to post, and a
+# reviewer's name goes into its marks, so it's a plain word.
+github()
+for args, name in ((["--dry"], "rival"), ([], "rival-x"), ([], "")):
+    look = {"number": 7, "head": head, "base": "main", "reviewer": name, "name": "R", "answer": {"findings": []}, "description": None}
+    p = subprocess.run([*C.CFG["upkeep"], "post", "sam/r", "--now", "1", *args], input=json.dumps(look), capture_output=True, text=True)
+    assert p.returncode == 2 and calls() == [], (args, name, p.returncode, p.stderr)
+os.environ["PATH"] = kept_path
+C.CFG["upkeep"] = kept_upkeep
 
 # A gh call allowed to fail still says why in the journal.
 fake = os.path.join(tmp, "bin")
@@ -215,8 +165,7 @@ with C.acting_for("sam/r"):
     with contextlib.redirect_stdout(out):
         assert REAL_GH("pr", "edit", "5", "--add-label", "needs-owner", check=False) is None
     assert "gh pr edit 5: 'needs-owner' not found" in out.getvalue(), out.getvalue()
-    # GitHub not answering is told apart from GitHub saying no, and a review
-    # whose diff it couldn't read then says which (steward.py keeps the answer).
+    # GitHub not answering is told apart from GitHub saying no.
     for said, unavailable in (("gh: API rate limit exceeded for user ID 1. (HTTP 403)", True),
                               ("gh: Server Error (HTTP 502)", True),
                               ('Post "https://api.github.com/graphql": unexpected EOF', True),
@@ -230,13 +179,6 @@ with C.acting_for("sam/r"):
         except RuntimeError as e:
             assert isinstance(e, C.Unavailable) == unavailable and said in str(e), (said, e)
     C.gh = REAL_GH
-    with open(f"{fake}/gh", "w") as f:
-        f.write("#!/bin/sh\necho 'gh: API rate limit exceeded for user ID 1. (HTTP 403)' >&2\nexit 1\n")
-    try:
-        V.post("sam/r", pr, "rival", answer, shown)
-        raise AssertionError("posted with GitHub unavailable")
-    except C.Unavailable as e:
-        assert "rate limit" in str(e), e
 os.environ["PATH"] = path
 
 print("post: ok")
