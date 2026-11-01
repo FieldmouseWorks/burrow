@@ -56,7 +56,8 @@
 //!                             next look, one running carries on
 //! proj list                   projects you can run jobs in
 //! proj await TARGET...        from inside a job: resume it once a PR or
-//!                             issue (URL or OWNER/REPO#N) changes
+//!                             issue (URL or OWNER/REPO#N) changes; one
+//!                             already merged or closed is refused
 //! proj ask                    from inside a job: its answer is a question for
 //!                             a person, whose reply resumes it
 //! proj done                   from inside a job: its work is finished

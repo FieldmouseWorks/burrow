@@ -7,7 +7,8 @@
 # proj-watch's own unit (which a turn's kicks reach for the repos it
 # awaits), but never for proj-inbox's own comment, or once its deadline
 # passes with GitHub unreadable, that an await GitHub can't read fails and
-# awaits nothing, that a reply meanwhile owns the job's waits, that _watch and proj-inbox given a repo look at that repo alone and
+# awaits nothing, as does one on a PR that's merged already, that a reply
+# meanwhile owns the job's waits, that _watch and proj-inbox given a repo look at that repo alone and
 # book when it next needs a look, that proj-inbox posts every finished
 # turn's answer (one resumed before it looked too, none misread while a turn
 # starts) and ends the waits of one whose issue closed (proj stop's, which a
@@ -220,6 +221,17 @@ import ./proj/test.nix { inherit self pkgs; } "proj-github" ''
       machine.succeed(f"su - dev -c 'PROJ_JOB={e} proj await https://github.com/o/r/pull/5'")
       assert machine.succeed(f"cut -f3 /data/dev/jobs/{e}/await.next").strip().startswith("{"), machine.succeed(f"cat /data/dev/jobs/{e}/await.next")
       machine.succeed(f"rm /data/dev/jobs/{e}/await.next /data/dev/jobs/{e}/end.next")
+
+  with subtest("an await on a PR that's merged already fails, and awaits nothing"):
+      # Its baseline would say merged until the deadline: the job would sit
+      # there for nothing.
+      machine.succeed("cp /tmp/gh/repos_o_r_pulls_5 /tmp/gh/pulls-5.kept")
+      github("repos/o/r/pulls/5", '{"state": "closed", "merged": true, "head": {"sha": "abc"}, "comments": 0, "review_comments": 0}')
+      status, out = machine.execute(f"su - dev -c 'PROJ_JOB={e} proj await https://github.com/o/r/pull/5' 2>&1")
+      assert status == 1 and "https://github.com/o/r/pull/5 is merged already, so nothing is awaited" in out, (status, out)
+      machine.fail(f"test -e /data/dev/jobs/{e}/await.next")
+      machine.fail(f"test -e /data/dev/jobs/{e}/end.next")
+      machine.succeed("mv /tmp/gh/pulls-5.kept /tmp/gh/repos_o_r_pulls_5")
 
   with subtest("the await deadline holds while GitHub can't be read"):
       github("repos/o/r/commits/abc/check-runs", '{"check_runs": [{"name": "ci", "status": "in_progress", "conclusion": null}]}')
