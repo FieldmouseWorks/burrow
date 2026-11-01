@@ -8,7 +8,7 @@ publish.workspace = true
 
 [dependencies]
 jiff.workspace = true
-json5 = "0.4.1"
+json5 = "1.0.0"
 serde.workspace = true
 serde_json.workspace = true
 toml = { version = "0.9", default-features = false, features = ["parse", "serde", "std"] }
