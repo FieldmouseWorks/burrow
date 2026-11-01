@@ -72,6 +72,18 @@ pub struct Line {
 const CHECK: &str = "check:";
 const UNITS: [&str; 2] = ["unit:", "user-unit:"];
 
+impl Line {
+    /// The check's name, on a check's line.
+    pub fn check(&self) -> Option<&str> {
+        self.key.strip_prefix(CHECK)
+    }
+
+    /// The unit's name, on a failed unit's line, the system's or the user's.
+    pub fn unit(&self) -> Option<&str> {
+        UNITS.iter().find_map(|p| self.key.strip_prefix(p))
+    }
+}
+
 /// A report as HOST-health prints it and a snapshot keeps it.
 pub fn render(report: &[Line]) -> String {
     report
@@ -86,21 +98,28 @@ pub fn render(report: &[Line]) -> String {
         .collect()
 }
 
-/// A report read back: each line is KEY and its state after the last space.
-/// A line that isn't one is no line.
-pub fn parse(text: &str) -> Vec<Line> {
+/// A report read back, for a compare and for the heartbeat: each line is
+/// KEY and its state after the last space. A line that isn't one means the
+/// report isn't what `render` wrote, so none of it is taken.
+pub fn parse(text: &str) -> Result<Vec<Line>, String> {
     text.lines()
-        .filter_map(|line| {
-            let (key, state) = line.rsplit_once(' ')?;
-            let state = match state {
-                "ok" => State::Ok,
-                "fail" => State::Fail,
-                _ => return None,
+        .enumerate()
+        .map(|(n, line)| {
+            let state = match line.rsplit_once(' ') {
+                Some((key, "ok")) => Some((key, State::Ok)),
+                Some((key, "fail")) => Some((key, State::Fail)),
+                _ => None,
             };
-            Some(Line {
-                key: key.to_owned(),
-                state,
-            })
+            match state {
+                Some((key, state)) if !key.is_empty() => Ok(Line {
+                    key: key.to_owned(),
+                    state,
+                }),
+                _ => Err(format!(
+                    "line {} isn't `KEY ok` or `KEY fail`: {line:?}",
+                    n + 1
+                )),
+            }
         })
         .collect()
 }
@@ -114,18 +133,17 @@ pub fn regressions(before: &[Line], now: &[Line]) -> Vec<String> {
     let failing = |key: &str| now.iter().any(|l| l.key == key && l.state == State::Fail);
     let mut bad = Vec::new();
     for b in before {
-        if b.key.starts_with(CHECK) && b.state == State::Ok && failing(&b.key) {
+        if b.check().is_some() && b.state == State::Ok && failing(&b.key) {
             bad.push(format!("{} is failing", b.key));
         }
     }
     for n in now {
-        if n.key.starts_with(CHECK) && n.state == State::Fail && !has(before, &n.key) {
+        if n.check().is_some() && n.state == State::Fail && !has(before, &n.key) {
             bad.push(format!("{} (new) is failing", n.key));
         }
     }
     for n in now {
-        let unit = UNITS.iter().find_map(|p| n.key.strip_prefix(p));
-        if let Some(unit) = unit
+        if let Some(unit) = n.unit()
             && !has(before, &n.key)
         {
             bad.push(format!("{unit} failed"));
@@ -287,7 +305,7 @@ mod tests {
     use super::*;
 
     fn lines(text: &str) -> Vec<Line> {
-        parse(text)
+        parse(text).unwrap()
     }
 
     #[test]
@@ -311,11 +329,49 @@ mod tests {
             text,
             "check:dns ok\ncheck:the web site fail\nunit:systemd-fsck@dev-disk-by\\x2duuid-1.service fail\n"
         );
-        assert_eq!(parse(&text), report);
-        // What isn't a line is left out.
+        assert_eq!(parse(&text), Ok(report));
+        assert_eq!(parse(""), Ok(vec![]));
+        // A report with a line that isn't one isn't taken at all.
+        for (text, bad) in [
+            (
+                "check:a ok\ncheck:dns maybe",
+                "line 2 isn't `KEY ok` or `KEY fail`: \"check:dns maybe\"",
+            ),
+            (
+                "nothing\ncheck:a ok",
+                "line 1 isn't `KEY ok` or `KEY fail`: \"nothing\"",
+            ),
+            (
+                "check:a ok\n\ncheck:b ok",
+                "line 2 isn't `KEY ok` or `KEY fail`: \"\"",
+            ),
+            (" ok", "line 1 isn't `KEY ok` or `KEY fail`: \" ok\""),
+            (
+                "check:a OK",
+                "line 1 isn't `KEY ok` or `KEY fail`: \"check:a OK\"",
+            ),
+            (
+                "check:a ok ",
+                "line 1 isn't `KEY ok` or `KEY fail`: \"check:a ok \"",
+            ),
+        ] {
+            assert_eq!(parse(text), Err(bad.to_owned()), "{text:?}");
+        }
+    }
+
+    #[test]
+    fn a_line_says_what_its_about() {
+        let all =
+            lines("check:dns ok\nunit:a.service fail\nuser-unit:b.service fail\nother:c fail");
+        let about: Vec<_> = all.iter().map(|l| (l.check(), l.unit())).collect();
         assert_eq!(
-            parse("check:dns maybe\nnothing\n\ncheck:a ok"),
-            lines("check:a ok")
+            about,
+            [
+                (Some("dns"), None),
+                (None, Some("a.service")),
+                (None, Some("b.service")),
+                (None, None)
+            ]
         );
     }
 
