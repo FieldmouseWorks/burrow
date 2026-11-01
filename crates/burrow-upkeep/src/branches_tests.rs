@@ -509,6 +509,43 @@ fn a_branch_github_said_no_about_waits_for_a_full_pass() {
 }
 
 #[test]
+fn a_no_that_names_an_outages_word_is_still_a_no() {
+    // The branch's name is in the path asked, and in what GitHub says:
+    // neither makes its no GitHub not answering, which would end every
+    // look at it and never reach the branches after it.
+    let mut r = SamR::new();
+    let (old, young) = (r.ago(4.0), r.ago(1.0));
+    r.branch("main", "ab", 0, young);
+    r.branch("eof", "1", 1, young);
+    r.branch("fix/timeout", "2", 1, young);
+    r.branch("old-timeout", "3", 4, old);
+    r.branch("zz", "4", 0, young);
+    {
+        let mut w = r.world.borrow_mut();
+        w.closes.insert(
+            "eof".into(),
+            (403, "Resource not accessible by integration"),
+        );
+        w.compares.insert(
+            "fix/timeout".into(),
+            (404, "No common ancestor between main and fix/timeout"),
+        );
+        w.archiving
+            .insert("old-timeout".into(), (422, "Reference update failed"));
+    }
+    r.look(&[], true);
+    assert_eq!(r.looked(), ["eof", "fix/timeout", "old-timeout", "zz"]);
+    assert!(r.tip("eof").retry && r.tip("fix/timeout").retry);
+    r.now += GRACE;
+    let out = r.look(&[], false);
+    assert_eq!(r.deleted(), [("zz".into(), sha("4"))]);
+    assert_eq!(
+        out.stuck.iter().map(|l| l.1.as_str()).collect::<Vec<_>>(),
+        ["sam/r: `old-timeout`"]
+    );
+}
+
+#[test]
 fn a_first_look_that_stops_partway_keeps_no_base_and_the_next_judges_all() {
     let mut r = settled();
     // It kept no base, so every branch is judged again from when it was

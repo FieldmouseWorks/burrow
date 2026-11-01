@@ -17,7 +17,7 @@ pub type Env<'a> = &'a dyn Fn(&str) -> Option<String>;
 
 fn need(env: Env, name: &str) -> Result<String, Error> {
     env(name).filter(|v| !v.is_empty()).ok_or_else(|| {
-        Error(format!(
+        Error::said(format!(
             "{name} isn't set: this runs as a step of a GitHub Actions job"
         ))
     })
@@ -49,7 +49,7 @@ pub fn start(api: &mut dyn Api, env: Env, cache: Option<&Path>) -> Result<(), Er
             return append(&need(env, "GITHUB_ENV")?, "FLAKY_EXPIRED=\nFLAKY_REPORT=\n");
         }
     };
-    let io = |e: std::io::Error| Error(format!("{}: {e}", dir.display()));
+    let io = |e: std::io::Error| Error::said(format!("{}: {e}", dir.display()));
     fs::create_dir_all(&dir).map_err(io)?;
     fs::write(&x, lines(&q.expired)).map_err(io)?;
     let held: String = q
@@ -86,9 +86,8 @@ pub fn file(api: &mut dyn Api, env: Env, cache: Option<&Path>) -> Result<(), Err
     let repo = need(env, "GITHUB_REPOSITORY")?;
     let path = match env("FLAKY_REPORT") {
         None => {
-            return Err(Error(
-                "FLAKY_REPORT isn't set: run burrow's flaky step with `step: start` before the gate"
-                    .into(),
+            return Err(Error::said(
+                "FLAKY_REPORT isn't set: run burrow's flaky step with `step: start` before the gate",
             ));
         }
         Some(p) if p.is_empty() => {
@@ -102,9 +101,9 @@ pub fn file(api: &mut dyn Api, env: Env, cache: Option<&Path>) -> Result<(), Err
     let text = match fs::read_to_string(&path) {
         Ok(t) => t,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(e) => return Err(Error(format!("{path}: {e}"))),
+        Err(e) => return Err(Error::said(format!("{path}: {e}"))),
     };
-    let entries = report::parse(&text).map_err(|e| Error(format!("{path}, {e}")))?;
+    let entries = report::parse(&text).map_err(|e| Error::said(format!("{path}, {e}")))?;
     if entries.is_empty() {
         println!("No flaky tests.");
         return Ok(());
@@ -162,7 +161,7 @@ fn started(dir: &Path) -> Result<Quarantine, Error> {
         match fs::read_to_string(&path) {
             Ok(t) => Ok((path, t)),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok((path, String::new())),
-            Err(e) => Err(Error(format!("{}: {e}", path.display()))),
+            Err(e) => Err(Error::said(format!("{}: {e}", path.display()))),
         }
     };
     let (path, text) = read("held")?;
@@ -181,7 +180,7 @@ fn started(dir: &Path) -> Result<Quarantine, Error> {
                     issue,
                     author: author.into(),
                 }),
-                _ => Err(Error(format!(
+                _ => Err(Error::said(format!(
                     "{}: {l:?} isn't ISSUE TEST AUTHOR",
                     path.display()
                 ))),
@@ -248,7 +247,7 @@ fn append(path: &str, text: &str) -> Result<(), Error> {
         .create(true)
         .open(path)
         .and_then(|mut f| f.write_all(text.as_bytes()))
-        .map_err(|e| Error(format!("{path}: {e}")))
+        .map_err(|e| Error::said(format!("{path}: {e}")))
 }
 
 /// A workflow command's message, escaped as GitHub Actions reads it.
@@ -398,7 +397,7 @@ mod tests {
         // try files nothing, and fails.
         fs::write(&r, "{\"test\": \"stale\"}\n").unwrap();
         let e = file(&mut gh, &env, None).unwrap_err();
-        assert!(e.0.contains("`stale`"), "{e}");
+        assert!(e.why.contains("`stale`"), "{e}");
         assert_eq!(gh.asked("POST").len(), 3);
         fs::remove_dir_all(&dir).unwrap();
     }
@@ -426,7 +425,7 @@ mod tests {
         assert!(
             file(&mut gh, &env, None)
                 .unwrap_err()
-                .0
+                .why
                 .contains("step: start")
         );
         fs::remove_dir_all(&dir).unwrap();

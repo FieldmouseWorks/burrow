@@ -70,6 +70,31 @@ fn what_git_says_of_a_delete() {
     assert_eq!(verdict("x", &quiet), Ok("git exited 128".into()));
 }
 
+#[test]
+fn what_git_says_when_github_isnt_there() {
+    for said in [
+        "error: RPC failed; HTTP 503 curl 22 The requested URL returned error: 503",
+        "error: RPC failed; HTTP 429 curl 22",
+        "fatal: unable to access: Could not resolve host: github.com",
+        "fatal: unable to access: Failed to connect to github.com port 443: Connection refused",
+        "error: RPC failed; curl 56 Recv failure: Connection reset by peer",
+        "fatal: the remote end hung up unexpectedly; fatal: early EOF",
+        "fatal: unable to access: Operation timed out after 300000 milliseconds",
+        "fatal: unable to access: gnutls_handshake() failed: TLS handshake timeout",
+        "remote: API rate limit exceeded",
+    ] {
+        assert!(outage(said), "{said}");
+    }
+    for said in [
+        "remote: error: GH013: Repository rule violations found",
+        "fatal: unable to access: The requested URL returned error: 403",
+        "error: RPC failed; HTTP 50 what",
+        "geofence",
+    ] {
+        assert!(!outage(said), "{said}");
+    }
+}
+
 /// A git that notes how it was run (`log` beside it) and answers a push as
 /// `says` there tells it: the exit code, then what it prints. With
 /// `init-fails` beside it, its init fails.

@@ -30,7 +30,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::config::Flaky;
-use crate::pass::{Ask, DAY, Job, MIN, Pass, unavailable};
+use crate::pass::{Ask, DAY, Job, MIN, Pass};
 
 /// A look that keeps failing this long goes to the stuck issue: once is
 /// GitHub, often; every pass for an hour is a bug.
@@ -125,8 +125,9 @@ fn look(p: &mut Pass, cfg: &Flaky, listed: Result<Vec<Quarantined>, Error>) -> R
     let listed = match listed {
         Ok(listed) => listed,
         Err(e) => {
-            let why = p.github(e);
-            if !unavailable(&why) {
+            let e = p.noted(e);
+            let why = e.why;
+            if !e.unanswered {
                 // The steward's pass only logs it: one that fails every
                 // pass would otherwise never be seen.
                 let since = *st.failing.get_or_insert(p.now);

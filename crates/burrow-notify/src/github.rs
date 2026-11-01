@@ -25,7 +25,7 @@ pub fn open_issues(
         let page = r.json()?;
         let issues = page
             .as_array()
-            .ok_or_else(|| Error(format!("GET {p}: GitHub's answer isn't a list")))?;
+            .ok_or_else(|| Error::said(format!("GET {p}: GitHub's answer isn't a list")))?;
         for issue in issues {
             let ours = issue["pull_request"].is_null()
                 && issue["title"].as_str().is_some_and(|t| t.starts_with(&tag))
@@ -111,7 +111,7 @@ pub fn create(
         return Ok(());
     }
     let n = made["number"].as_u64().ok_or_else(|| {
-        Error(format!(
+        Error::said(format!(
             "POST repos/{repo}/issues: its answer has no number"
         ))
     })?;

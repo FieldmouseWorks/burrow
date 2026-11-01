@@ -170,11 +170,11 @@ fn keep(
         // The plan offers no rules on this repo: there are none to pin.
         // Anything else is GitHub not saying, and nothing's known to be
         // pinned.
-        Err(why) => {
-            if !why.contains(NO_RULES) {
-                eprintln!("{}: its rulesets: {why}", p.repo);
+        Err(e) => {
+            if !e.why.contains(NO_RULES) {
+                eprintln!("{}: its rulesets: {e}", p.repo);
             }
-            why.contains(NO_RULES)
+            e.why.contains(NO_RULES)
         }
         Ok(listed) => {
             let own: Vec<&Value> = listed

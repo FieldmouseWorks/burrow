@@ -13,13 +13,13 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::sync::LazyLock;
 
-use burrow_github::{call, encode};
+use burrow_github::{Error, call, encode};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
 use crate::config::Branches;
-use crate::pass::{DAY, Pass, repo_file, unavailable};
+use crate::pass::{DAY, Pass, repo_file};
 
 /// Unmerged, with no PR and no commit for this many days: given up on
 /// (agents open a PR when they push). Its commits are kept under ARCHIVE
@@ -497,12 +497,12 @@ fn judge(
 /// in common with the default has no comparison, say). Err when it didn't
 /// answer, which ends the pass's look at the branches: the next pass takes
 /// up the rest.
-fn answer<T>(got: Result<T, String>) -> Result<Option<T>, String> {
+fn answer<T>(got: Result<T, Error>) -> Result<Option<T>, String> {
     match got {
         Ok(v) => Ok(Some(v)),
-        Err(why) if unavailable(&why) => Err(why),
-        Err(why) => {
-            eprintln!("  failed: {why}");
+        Err(e) if e.unanswered => Err(e.why),
+        Err(e) => {
+            eprintln!("  failed: {e}");
             Ok(None)
         }
     }
@@ -512,7 +512,7 @@ fn answer<T>(got: Result<T, String>) -> Result<Option<T>, String> {
 /// closed: the latest such close. GitHub keeps that PR's commits
 /// (refs/pull/N/head) and offers to restore the branch from its page, so
 /// the branch holds nothing the PR doesn't. None when there's none.
-fn closed_at(p: &mut Pass, name: &str, sha: &str) -> Result<Option<(u64, f64)>, String> {
+fn closed_at(p: &mut Pass, name: &str, sha: &str) -> Result<Option<(u64, f64)>, Error> {
     let owner = p.repo.split('/').next().unwrap_or_default();
     // Every page: a branch name reused for many PRs can have its match
     // past the first hundred.
@@ -528,7 +528,7 @@ fn closed_at(p: &mut Pass, name: &str, sha: &str) -> Result<Option<(u64, f64)>, 
             continue;
         };
         if pr["head"]["sha"] == sha {
-            let close = (ts(at)?, n);
+            let close = (ts(at).map_err(Error::said)?, n);
             last = Some(last.map_or(close, |l| if close > l { close } else { l }));
         }
     }
@@ -547,7 +547,7 @@ fn archive(p: &mut Pass, name: &str, sha: &str) -> Result<bool, String> {
     }
     let made = json!({"ref": to, "sha": sha});
     let path = format!("repos/{}/git/refs", p.repo);
-    let made = call(p.api, "POST", &path, Some(&made), None).map_err(|e| p.github(e));
+    let made = call(p.api, "POST", &path, Some(&made), None).map_err(|e| p.noted(e));
     if answer(made)?.is_some() {
         return Ok(true);
     }
@@ -565,11 +565,48 @@ const SHOWN: usize = 200;
 /// its ref-status lines.
 static ECHOES: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"https?://\S+|refs/\S+|\[[a-z ]+\] \S+").expect("a regex"));
-/// What git says when GitHub didn't answer, besides what any call says
-/// then (pass::unavailable).
+/// What git says when GitHub didn't answer, besides the words any tool
+/// says it with (outage).
 static OUTAGE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)could not resolve host|returned error: 5\d\d").expect("a regex")
 });
+
+/// Whether what git said, less the fields it echoes names in (ECHOES),
+/// says GitHub didn't answer: a rate limit, a 5xx, no connection. Read
+/// from its words, which a call to GitHub's API never is (its status says,
+/// burrow_github::Error): git has no status to go by.
+fn outage(bare: &str) -> bool {
+    let w = bare.to_lowercase();
+    let http = w
+        .match_indices("http ")
+        .any(|(i, _)| match w.as_bytes().get(i + 5..i + 8) {
+            Some([b'4', b'2', b'9']) => true,
+            Some([b'5', a, b]) => a.is_ascii_digit() && b.is_ascii_digit(),
+            _ => false,
+        });
+    let eof = w.match_indices("eof").any(|(i, _)| {
+        let word = |b: Option<&u8>| b.is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'_');
+        !word(i.checked_sub(1).and_then(|j| w.as_bytes().get(j))) && !word(w.as_bytes().get(i + 3))
+    });
+    OUTAGE.is_match(bare)
+        || http
+        || eof
+        || [
+            "rate limit",
+            "error connecting",
+            "connection reset",
+            "connection refused",
+            "timeout",
+            "time out",
+            "timedout",
+            "timed out",
+            "network is unreachable",
+            "no such host",
+            "tls handshake",
+        ]
+        .iter()
+        .any(|s| w.contains(s))
+}
 
 /// Delete the branch only if its tip is still `sha`: a push since then
 /// keeps it. What GitHub said when it refused (a ruleset, a token that
@@ -614,7 +651,7 @@ fn verdict(name: &str, pushed: &Pushed) -> Result<String, String> {
     // branch called `error` mustn't take the word out of git's own
     // "returned error: 502".
     let bare = ECHOES.replace_all(&said, "");
-    if unavailable(&bare) || OUTAGE.is_match(&bare) {
+    if outage(&bare) {
         return Err(format!("git push :{name}: {shown}"));
     }
     if !shown.is_empty() {

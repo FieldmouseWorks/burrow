@@ -563,7 +563,7 @@ fn a_job_is_found_under_the_very_key_it_was_asked_for_under() {
 fn a_look_that_keeps_failing_goes_to_the_stuck_issue() {
     // GitHub not answering keeps the state for the next pass; anything
     // else the quarantine can't be read for books when the failing
-    // started.
+    // started, whatever its words say (a repo called `timeout`).
     let d = tempfile::tempdir().unwrap();
     let cfg = config(d.path());
     let (mut hub, mut jobs) = (Hub::default(), States::new("done"));
@@ -572,8 +572,11 @@ fn a_look_that_keeps_failing_goes_to_the_stuck_issue() {
     run(&cfg, &mut hub, &mut jobs, 0.0, listed);
     let was = state(&cfg);
     assert!(was.failing.is_none());
-    let fail = |cfg: &Config, hub: &mut Hub, jobs: &mut States, t: f64, why: &str| {
-        let listed = Err(Error(why.into()));
+    let fail = |cfg: &Config, hub: &mut Hub, jobs: &mut States, t: f64, why: &str, unanswered| {
+        let listed = Err(Error {
+            why: why.into(),
+            unanswered,
+        });
         let (out, r) = at(cfg, hub, jobs, t, |p| {
             look(p, p.cfg.flaky.as_ref().unwrap(), listed)
         });
@@ -586,9 +589,10 @@ fn a_look_that_keeps_failing_goes_to_the_stuck_issue() {
             "GET repos/sam/r/issues: HTTP 403: API rate limit exceeded for user",
             true,
         ),
+        ("GET repos/sam/timeout/issues: HTTP 404: Not Found", false),
         ("GET repos/sam/r/issues: HTTP 404: Not Found", false),
     ] {
-        let out = fail(&cfg, &mut hub, &mut jobs, 60.0, why);
+        let out = fail(&cfg, &mut hub, &mut jobs, 60.0, why, gone);
         assert!(out.stuck.is_empty());
         let want = State {
             failing: (!gone).then_some(T + 60.0),
@@ -605,7 +609,7 @@ fn a_look_that_keeps_failing_goes_to_the_stuck_issue() {
         (60.0 + H, true),
         (60.0 + 2.0 * H, true),
     ] {
-        let out = fail(&cfg, &mut hub, &mut jobs, t, why);
+        let out = fail(&cfg, &mut hub, &mut jobs, t, why, false);
         let want = if listed {
             vec![line(
                 FAILING,

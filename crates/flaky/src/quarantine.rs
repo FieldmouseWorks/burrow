@@ -252,7 +252,7 @@ fn change(e: &Value) -> Value {
 fn page(r: &burrow_github::Response) -> Result<Vec<Value>, Error> {
     match r.json()? {
         Value::Array(a) => Ok(a),
-        _ => Err(Error("GitHub's list isn't a list".into())),
+        _ => Err(Error::said("GitHub's list isn't a list")),
     }
 }
 
@@ -640,7 +640,7 @@ mod tests {
             vec![ok(403, json!({"message": "Resource not accessible"}), &[])],
         );
         let e = list(&mut gh, "sam/game", None, NOW).unwrap_err();
-        assert!(e.0.contains("HTTP 403"), "{e}");
+        assert!(e.why.contains("HTTP 403"), "{e}");
         // And a history.
         let mut gh = Fake::default();
         gh.on(
@@ -654,7 +654,7 @@ mod tests {
             vec![ok(403, json!({"message": "Resource not accessible"}), &[])],
         );
         let e = list(&mut gh, "sam/game", None, NOW).unwrap_err();
-        assert!(e.0.contains("HTTP 403"), "{e}");
+        assert!(e.why.contains("HTTP 403"), "{e}");
     }
 
     #[test]

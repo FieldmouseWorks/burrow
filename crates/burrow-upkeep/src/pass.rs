@@ -207,41 +207,51 @@ impl Pass<'_> {
         }
     }
 
-    /// What GitHub has at `path`, or what it said (Pass::github).
-    pub fn get(&mut self, path: &str) -> Result<Value, String> {
+    /// What GitHub has at `path`, or what went wrong (Pass::noted).
+    pub fn get(&mut self, path: &str) -> Result<Value, Error> {
         call(self.api, "GET", path, None, None)
             .and_then(|r| r.json())
-            .map_err(|e| self.github(e))
+            .map_err(|e| self.noted(e))
     }
 
-    /// Every page of a listing from `path` on, as one list, or what GitHub
-    /// said (Pass::github).
-    pub fn pages(&mut self, path: &str) -> Result<Vec<Value>, String> {
+    /// Every page of a listing from `path` on, as one list, or what went
+    /// wrong (Pass::noted).
+    pub fn pages(&mut self, path: &str) -> Result<Vec<Value>, Error> {
         let mut all = vec![];
         let mut next = Some(path.to_string());
         while let Some(at) = next {
-            let r: Response = call(self.api, "GET", &at, None, None).map_err(|e| self.github(e))?;
-            match r.json().map_err(|e| self.github(e))? {
+            let r: Response = call(self.api, "GET", &at, None, None).map_err(|e| self.noted(e))?;
+            match r.json().map_err(|e| self.noted(e))? {
                 Value::Array(page) => all.extend(page),
-                _ => return Err(format!("GET {at}: GitHub's answer isn't a list")),
+                _ => {
+                    return Err(Error::said(format!(
+                        "GET {at}: GitHub's answer isn't a list"
+                    )));
+                }
             }
             next = r.next();
         }
         Ok(all)
     }
 
-    /// What GitHub's error says, once a rate limit it met is noted: when it
-    /// resets, from `rate_limit`, which costs nothing against it. A limit
-    /// with none of it spent (a secondary one) resets at 0, which is past.
-    pub fn github(&mut self, e: Error) -> String {
-        if self.out.limited.is_none() && e.0.to_lowercase().contains("rate limit") {
+    /// GitHub's error, once a rate limit it met is noted: when it resets,
+    /// from `rate_limit`, which costs nothing against it. A limit with none
+    /// of it spent (a secondary one) resets at 0, which is past.
+    pub fn noted(&mut self, e: Error) -> Error {
+        if self.out.limited.is_none() && e.unanswered && e.why.to_lowercase().contains("rate limit")
+        {
             let reset = call(self.api, "GET", "rate_limit", None, None)
                 .ok()
                 .and_then(|r| r.json().ok())
                 .map_or(0.0, |v| reset(&v));
             self.out.limited = Some(reset);
         }
-        e.0
+        e
+    }
+
+    /// What GitHub's error says, once noted.
+    pub fn github(&mut self, e: Error) -> String {
+        self.noted(e).why
     }
 
     /// The steward's authors, as REST gives a login: one of `authors`, or
@@ -277,69 +287,10 @@ fn reset(v: &Value) -> f64 {
         .fold(0.0, f64::max)
 }
 
-/// Whether GitHub's error is it not answering (a rate limit, a 5xx, no
-/// connection) rather than saying no: the same look goes again next pass,
-/// and counts against nothing.
-pub fn unavailable(why: &str) -> bool {
-    let w = why.to_lowercase();
-    let http = w
-        .match_indices("http ")
-        .any(|(i, _)| match w.as_bytes().get(i + 5..i + 8) {
-            Some([b'4', b'2', b'9']) => true,
-            Some([b'5', a, b]) => a.is_ascii_digit() && b.is_ascii_digit(),
-            _ => false,
-        });
-    let eof = w.match_indices("eof").any(|(i, _)| {
-        let word = |b: Option<&u8>| b.is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'_');
-        !word(i.checked_sub(1).and_then(|j| w.as_bytes().get(j))) && !word(w.as_bytes().get(i + 3))
-    });
-    http || eof
-        || [
-            "rate limit",
-            "error connecting",
-            "connection reset",
-            "connection refused",
-            "timeout",
-            "time out",
-            "timedout",
-            "timed out",
-            "network is unreachable",
-            "no such host",
-            "tls handshake",
-        ]
-        .iter()
-        .any(|s| w.contains(s))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
-
-    #[test]
-    fn what_github_not_answering_looks_like() {
-        for why in [
-            "GET repos/sam/r/issues: HTTP 503, 3 times",
-            "GET repos/sam/r/issues: HTTP 403: API rate limit exceeded for user",
-            "GET a: HTTP 429, 3 times",
-            "gh: error connecting to api.github.com",
-            "gh: read: connection reset by peer",
-            "gh: Post \"https://api.github.com/graphql\": EOF",
-            "gh: i/o timeout",
-            "gh: net/http: TLS handshake timeout",
-        ] {
-            assert!(unavailable(why), "{why}");
-        }
-        for why in [
-            "GET repos/sam/r/issues: HTTP 404: Not Found",
-            "GET a: HTTP 403: Resource not accessible",
-            "GET a: HTTP 50: what",
-            "geofence",
-            "flaky: \"sam/.r\" isn't OWNER/REPO",
-        ] {
-            assert!(!unavailable(why), "{why}");
-        }
-    }
 
     #[test]
     fn a_rate_limit_resets_when_its_last_spent_one_does() {

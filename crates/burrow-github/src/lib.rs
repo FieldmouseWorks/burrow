@@ -26,7 +26,7 @@ impl Response {
 
     pub fn json(&self) -> Result<Value, Error> {
         serde_json::from_str(&self.body)
-            .map_err(|e| Error(format!("GitHub's answer isn't JSON: {e}")))
+            .map_err(|e| Error::said(format!("GitHub's answer isn't JSON: {e}")))
     }
 
     /// The next page's path, from the Link header.
@@ -42,12 +42,43 @@ impl Response {
     }
 }
 
+/// What went wrong with a call: what GitHub said, or that it didn't answer.
 #[derive(Debug, PartialEq, Eq)]
-pub struct Error(pub String);
+pub struct Error {
+    pub why: String,
+    /// GitHub didn't answer: a rate limit, a 5xx, no connection. Nothing
+    /// asked for was wrong, and the same ask can go again later. Told by
+    /// the status and the transport, never by the words, which name
+    /// whatever the request was about (a repo called `timeout`).
+    pub unanswered: bool,
+}
+
+impl Error {
+    /// GitHub's no, or an answer that won't do.
+    pub fn said(why: impl Into<String>) -> Self {
+        Self {
+            why: why.into(),
+            unanswered: false,
+        }
+    }
+
+    fn unanswered(why: String) -> Self {
+        Self {
+            why,
+            unanswered: true,
+        }
+    }
+}
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.write_str(&self.0)
+        f.write_str(&self.why)
+    }
+}
+
+impl From<Error> for String {
+    fn from(e: Error) -> String {
+        e.why
     }
 }
 
@@ -142,7 +173,7 @@ pub fn query(
             .map(|e| e["message"].as_str().unwrap_or("an error"))
             .collect();
         let said: String = said.join("; ").chars().take(300).collect();
-        return Err(Error(format!("{what}: {said}")));
+        return Err(Error::said(format!("{what}: {said}")));
     }
     Ok(answer["data"].take())
 }
@@ -164,10 +195,20 @@ fn tried(
             }
             Ok(r) => return Ok(r),
             Err(f) if f.transient && repeats => f.why,
-            Err(f) => return Err(Error(format!("{what}: {}", f.why))),
+            Err(f) => {
+                let why = format!("{what}: {}", f.why);
+                return Err(if f.transient {
+                    Error::unanswered(why)
+                } else {
+                    Error::said(why)
+                });
+            }
         };
         if tries == AGAIN.len() {
-            return Err(Error(format!("{what}: {again}, {} times", tries + 1)));
+            return Err(Error::unanswered(format!(
+                "{what}: {again}, {} times",
+                tries + 1
+            )));
         }
         api.pause(AGAIN[tries]);
         tries += 1;
@@ -175,16 +216,23 @@ fn tried(
 }
 
 /// An answer to keep: 2xx, 304 or one of `allowed`; anything else, an
-/// Error that says what GitHub said.
+/// Error that says what GitHub said. A 429, a 5xx (a POST's, not asked
+/// again) and a 403 for a rate limit are GitHub not answering.
 fn kept(what: &str, r: Response, allowed: &[u16]) -> Result<Response, Error> {
     if (200..300).contains(&r.status) || r.status == 304 || allowed.contains(&r.status) {
         return Ok(r);
     }
-    Err(Error(format!(
-        "{what}: HTTP {}: {}",
-        r.status,
-        message(&r.body)
-    )))
+    let said = message(&r.body);
+    let why = format!("{what}: HTTP {}: {said}", r.status);
+    let limited = r.status == 403
+        && (r.header("x-ratelimit-remaining") == Some("0")
+            || r.header("retry-after").is_some()
+            || said.to_lowercase().contains("rate limit"));
+    Err(if r.status == 429 || r.status >= 500 || limited {
+        Error::unanswered(why)
+    } else {
+        Error::said(why)
+    })
 }
 
 fn message(body: &str) -> String {
@@ -289,7 +337,9 @@ fn gh_api(
 
 impl Failed {
     fn from_gh(err: String) -> Result<Response, Failed> {
-        let lower = err.to_lowercase();
+        // Less the URL gh quotes (`Get "https://...": dial tcp ...`), whose
+        // path names whatever the call was about.
+        let lower = unquoted(&err).to_lowercase();
         let transient = [
             "connect",
             "timeout",
@@ -308,6 +358,11 @@ impl Failed {
             transient,
         })
     }
+}
+
+/// `said`, less what's between double quotes.
+fn unquoted(said: &str) -> String {
+    said.split('"').step_by(2).collect::<Vec<_>>().join(" ")
 }
 
 /// gh api -i's output: the status line, headers, a blank line, the body.
@@ -494,7 +549,7 @@ mod tests {
         let mut gh = Fake::default();
         gh.on("GET", "a", vec![ok(503, Value::Null, &[])]);
         assert_eq!(
-            call(&mut gh, "GET", "a", None, None).unwrap_err().0,
+            call(&mut gh, "GET", "a", None, None).unwrap_err().why,
             "GET a: HTTP 503, 3 times"
         );
         assert_eq!(gh.asked.len(), 3);
@@ -513,7 +568,7 @@ mod tests {
         // Only those: another refusal is still an Error, and so is the same
         // one to a plain call.
         assert_eq!(
-            call(&mut gh, "GET", "c", None, None).unwrap_err().0,
+            call(&mut gh, "GET", "c", None, None).unwrap_err().why,
             "GET c: HTTP 404: Not Found"
         );
         assert!(call_allowing(&mut gh, "GET", "c", None, None, &[422]).is_err());
@@ -591,7 +646,7 @@ mod tests {
             )],
         };
         assert_eq!(
-            query(&mut gh, "nobody", "q", json!({})).unwrap_err().0,
+            query(&mut gh, "nobody", "q", json!({})).unwrap_err().why,
             "POST graphql: Could not resolve to a RepositoryOwner with the login of 'nobody'.; and more"
         );
         let mut gh = Graph {
@@ -599,7 +654,7 @@ mod tests {
             answers: vec![ok(401, json!({"message": "Bad credentials"}), &[])],
         };
         assert_eq!(
-            query(&mut gh, "sam", "q", json!({})).unwrap_err().0,
+            query(&mut gh, "sam", "q", json!({})).unwrap_err().why,
             "POST graphql: HTTP 401: Bad credentials"
         );
         // Asked of a GitHub with nothing of its own for it, it's a POST.
@@ -626,7 +681,7 @@ mod tests {
             let mut gh = Fake::default();
             gh.on("POST", "b", vec![answer]);
             let e = call(&mut gh, "POST", "b", Some(&json!({})), None).unwrap_err();
-            assert_eq!(e.0, said);
+            assert_eq!(e.why, said);
             assert_eq!(gh.asked.len(), 1);
             assert!(gh.paused.is_empty());
         }
@@ -669,7 +724,7 @@ mod tests {
         );
         let e = call(&mut gh, "POST", "b", Some(&json!({})), None).unwrap_err();
         assert_eq!(
-            e.0,
+            e.why,
             "POST b: HTTP 403: Resource not accessible by integration"
         );
         assert_eq!((gh.asked.len(), gh.paused.len()), (1, 0));
@@ -686,7 +741,7 @@ mod tests {
         assert!(
             call(&mut gh, "GET", "b", None, None)
                 .unwrap_err()
-                .0
+                .why
                 .contains("gh auth login")
         );
         assert_eq!(gh.asked.len(), 1);
@@ -700,5 +755,83 @@ mod tests {
                 .unwrap_err()
                 .transient
         );
+        // The URL gh quotes is the call's, not what went wrong.
+        assert!(
+            !Failed::from_gh(
+                "Get \"https://api.github.com/repos/sam/timeout/git/ref/eof\": invalid header"
+                    .into()
+            )
+            .unwrap_err()
+            .transient
+        );
+    }
+
+    #[test]
+    fn says_whether_github_answered_by_the_status_never_the_words() {
+        // Every answer names the repo `timeout` and the branch `eof`, as a
+        // path and as GitHub's message: neither makes an outage.
+        let path = "repos/sam/timeout/compare/main...eof";
+        let message = json!({"message": "No common ancestor between main and eof: timeout"});
+        for (answer, method, unanswered) in [
+            (ok(404, message.clone(), &[]), "GET", false),
+            (ok(422, message.clone(), &[]), "POST", false),
+            (ok(403, message.clone(), &[]), "GET", false),
+            (ok(503, message.clone(), &[]), "GET", true),
+            (ok(502, message.clone(), &[]), "POST", true),
+            (ok(429, message.clone(), &[]), "GET", true),
+            (
+                ok(403, message.clone(), &[("x-ratelimit-remaining", "0")]),
+                "GET",
+                true,
+            ),
+            (
+                ok(403, message.clone(), &[("retry-after", "60")]),
+                "GET",
+                true,
+            ),
+            (
+                ok(
+                    403,
+                    json!({"message": "You have exceeded a secondary rate limit"}),
+                    &[],
+                ),
+                "GET",
+                true,
+            ),
+            (
+                Err(Failed {
+                    why: "gh: connection reset by peer".into(),
+                    transient: true,
+                }),
+                "GET",
+                true,
+            ),
+            (
+                Err(Failed {
+                    why: "gh: connection reset by peer".into(),
+                    transient: true,
+                }),
+                "POST",
+                true,
+            ),
+            (
+                Err(Failed {
+                    why: format!("gh: Get \"https://api.github.com/{path}\": bad"),
+                    transient: false,
+                }),
+                "GET",
+                false,
+            ),
+        ] {
+            let mut gh = Fake::default();
+            gh.on(method, path, vec![answer]);
+            let e = call(&mut gh, method, path, None, None).unwrap_err();
+            assert_eq!(e.unanswered, unanswered, "{e}");
+        }
+        // An answer that won't do is GitHub's.
+        let mut gh = Fake::default();
+        gh.on("GET", path, vec![ok(200, Value::Null, &[])]);
+        let r = call(&mut gh, "GET", path, None, None).unwrap();
+        assert!(!r.json().unwrap_err().unanswered);
     }
 }
