@@ -120,28 +120,45 @@ let
       # A project is a git checkout with an origin. Its .git is a folder: a
       # linked worktree's is a file, and it's a checkout of a project that has
       # its own server. Anything else would be a server with nothing to push
-      # to. The machine's own flake is served whatever it is. A folder made a
-      # project where it stands (git init, a remote added) gets its server at
-      # the next scan, since nothing watches every folder's config.
+      # to. The machine's own flake is served whatever it is.
+      #
+      # A folder that isn't one yet may become one where it stands, its
+      # origin written whenever that comes: a clone's a moment after it makes
+      # the folder, or after a pause, or `git init` and a remote added by
+      # hand. Nothing else changes in the projects folder then, so each such
+      # folder has a path unit on its .git/config while it isn't a project
+      # (claude-rc-origin@NAME), which scans again when that is written. A
+      # linked worktree never becomes one, and gets none.
       flake=$(realpath -m ${lib.escapeShellArg config.burrow.flake})
       want=()
+      waiting=()
       for d in ${lib.escapeShellArg projectsDir}/*/; do
         [ -d "$d" ] || continue
         name=$(basename "$d")
-        if [ "$(realpath "$d")" != "$flake" ]; then
-          [ -d "$d/.git" ] || continue
-          git config --file "$d/.git/config" --get remote.origin.url >/dev/null || continue
+        if [ "$(realpath "$d")" != "$flake" ] &&
+          ! { [ -d "$d/.git" ] && git config --file "$d/.git/config" --get remote.origin.url >/dev/null; }; then
+          if [ -d "$d/.git" ] || [ ! -e "$d/.git" ]; then
+            waiting+=("$(systemd-escape --template claude-rc-origin@.path "$name")")
+          fi
+          continue
         fi
         want+=("$(systemd-escape --template claude-rc@.service "$name")")
       done
-      for unit in "''${want[@]}"; do
-        systemctl --user start --no-block "$unit"
-      done
-      while read -r unit _; do
-        keep=
-        for w in "''${want[@]}"; do [ "$w" = "$unit" ] && keep=1; done
-        [ -n "$keep" ] || systemctl --user stop --no-block "$unit"
-      done < <(systemctl --user list-units --plain --no-legend --all 'claude-rc@*.service')
+      # only GLOB UNIT...: start each UNIT, and stop every other GLOB matches.
+      only() {
+        local glob=$1 unit w keep
+        shift
+        for unit in "$@"; do
+          systemctl --user start --no-block "$unit"
+        done
+        while read -r unit _; do
+          keep=
+          for w in "$@"; do [ "$w" = "$unit" ] && keep=1; done
+          [ -n "$keep" ] || systemctl --user stop --no-block "$unit"
+        done < <(systemctl --user list-units --plain --no-legend --all "$glob")
+      }
+      only 'claude-rc@*.service' "''${want[@]}"
+      only 'claude-rc-origin@*.path' "''${waiting[@]}"
       # A switch leaves running servers alone (restartIfChanged), so a server
       # keeps the tmux and the claude-rc-serve it started with: its Claude
       # Code, its permission mode, where its sessions run. One that runs any
@@ -405,6 +422,18 @@ in
       unitConfig.ConditionUser = user;
       pathConfig = {
         PathChanged = "%h/.claude/sessions";
+        Unit = "claude-rc-scan.service";
+      };
+    };
+
+    # A folder that isn't a project yet becoming one where it stands: its
+    # .git/config written (see claude-rc-scan, which starts and stops these).
+    # Watched before it exists, from the closest folder that does.
+    systemd.user.paths."claude-rc-origin@" = {
+      description = "Scan when ${projectsDir}/%I becomes a git checkout with an origin";
+      unitConfig.ConditionUser = user;
+      pathConfig = {
+        PathChanged = "${projectsDir}/%I/.git/config";
         Unit = "claude-rc-scan.service";
       };
     };

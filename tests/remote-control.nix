@@ -131,11 +131,20 @@ pkgs.testers.runNixOSTest {
     assert wake_in() is None, wake_in()
     booted = time.time()
 
+    def state(template, folder):
+        unit = machine.succeed(f"systemd-escape --template {template} {folder}").strip()
+        return machine.succeed(f"systemctl --user -M dev@ show -p ActiveState --value {unit}").strip()
+
     with subtest("a folder that isn't a project gets no server"):
         for p in ("notes", "local", "linked", "idle-worktrees"):
             machine.fail(f"test -e /data/dev/src/{p}/started")
-            unit = machine.succeed(f"systemd-escape --template claude-rc@.service {p}").strip()
-            assert machine.succeed(f"systemctl --user -M dev@ show -p ActiveState --value {unit}").strip() == "inactive", p
+            assert state("claude-rc@.service", p) == "inactive", p
+        # Each that may become one where it stands is watched for its origin;
+        # a linked worktree, and a project, never are.
+        for p in ("notes", "local", "idle-worktrees"):
+            machine.wait_until_succeeds(f"systemctl --user -M dev@ is-active -q $(systemd-escape --template claude-rc-origin@.path {p})", timeout=30)
+        for p in ("linked", "idle", "machine"):
+            assert state("claude-rc-origin@.path", p) == "inactive", p
 
     machine.succeed("/run/current-system/specialisation/next/bin/switch-to-configuration test")
 
@@ -264,5 +273,32 @@ pkgs.testers.runNixOSTest {
         assert started("idle") == ["old", "new"], started("idle")
         machine.wait_until_succeeds("systemctl --user -M dev@ show -p ActiveState --value claude-rc-scan.service | grep -qx inactive", timeout=60)
         assert wake_in() is None, wake_in()
+
+    with subtest("a folder that becomes a project long after it was made gets its server"):
+        # Its config and then its origin come only once the scan the folder
+        # started, and the look after it, are over and nothing else is left
+        # to come: no scan running, booked or asked for. Then only the
+        # folder's own config changing can bring the scan that serves it.
+        def settled():
+            machine.wait_until_succeeds(
+                "s=$(systemctl --user -M dev@ show -p ActiveState -p InvocationID claude-rc-scan.service) && "
+                "echo \"$s\" | grep -qx ActiveState=inactive && "
+                "id=$(echo \"$s\" | sed -n 's/^InvocationID=//p') && "
+                "a=$(systemctl --user -M dev@ show -p ActiveState -p InvocationID claude-rc-again@$id.service) && "
+                "echo \"$a\" | grep -qx ActiveState=inactive && echo \"$a\" | grep -q '^InvocationID=.' && "
+                "! systemctl --user -M dev@ list-jobs --no-legend | grep -q claude-rc && "
+                "systemctl --user -M dev@ show -p InvocationID --value claude-rc-scan.service | grep -qx \"$id\"", timeout=60)
+            assert wake_in() is None, wake_in()
+        machine.succeed("mkdir /data/dev/src/slow && chown dev:dev /data/dev/src/slow")
+        machine.wait_until_succeeds("systemctl --user -M dev@ is-active -q claude-rc-origin@slow.path", timeout=60)
+        settled()
+        machine.succeed("runuser -u dev -- ${pkgs.git}/bin/git init -q /data/dev/src/slow")
+        settled()
+        machine.fail("test -e /data/dev/src/slow/started")
+        assert state("claude-rc@.service", "slow") == "inactive"
+        machine.succeed("runuser -u dev -- ${pkgs.git}/bin/git -C /data/dev/src/slow remote add origin /tmp/later.git")
+        machine.wait_until_succeeds("grep -qx new /data/dev/src/slow/started", timeout=60)
+        # A project now, so its watch is over.
+        machine.wait_until_succeeds("systemctl --user -M dev@ show -p ActiveState --value claude-rc-origin@slow.path | grep -qx inactive", timeout=60)
   '';
 }
