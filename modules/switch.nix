@@ -62,6 +62,10 @@ let
     in if m == null || unit == null || lib.toInt (lib.head m) == 0 then null
       else lib.toInt (lib.head m) * unit;
 
+  # RemainAfterExit as systemd reads it: free-form, so a Nix bool or any of
+  # its words. Unset, or one it wouldn't read as true, is false.
+  remains = sc: builtins.elem (lib.toLower (toString (sc.RemainAfterExit or false))) [ "1" "yes" "true" "on" "y" "t" ];
+
   # A switch restarts a changed unit that is running (or, with
   # RemainAfterExit, has run) and waits for it. A oneshot that may run longer
   # than the confirm window then outlasts the activation's deadline, so the
@@ -80,7 +84,7 @@ let
       && (sc.Type or null) == "oneshot"
       && t != null
       && (let n = seconds t; w = seconds cfg.confirmWithin; in n == null || w == null || n >= w
-        || (n > 60 && !(sc.RemainAfterExit or false)))
+        || (n > 60 && !remains sc))
   ) config.systemd.services);
 in
 {
