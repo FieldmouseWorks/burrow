@@ -2,7 +2,7 @@
 //! reviewers' service (crates/burrow-review) leaves the answer, and the
 //! repo's next pass hands it here (review_step.py). One review on the head,
 //! marked as that reviewer's and with the description it was shown, which
-//! the steward reads its verdict back from (reviewers.py `verdict`), and a
+//! the steward reads its verdict back from (verdict.rs), and a
 //! thread for each finding, on the line it's about.
 //!
 //! The lines a thread can go on are the new side of GitHub's own compare of
@@ -16,6 +16,7 @@ use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
 use crate::pass::Pass;
+use crate::verdict;
 
 /// What the pass hands `post`, on stdin: the look the reviewers' service
 /// answered.
@@ -32,8 +33,11 @@ pub struct Look {
     /// What it answered, as the service left it: anything, until it's read.
     pub answer: Value,
     /// The fingerprint of the description it was shown, or None when that
-    /// isn't known: its review then covers no description (`verdict`).
+    /// isn't known: its review then covers no description (verdict.rs).
     pub description: Option<String>,
+    /// The fingerprint of the PR's description now, which the review covers
+    /// if it's the one it was shown (verdict.rs `covers`).
+    pub now: String,
 }
 
 /// A review on the head: what its reviewer found, or that it found nothing.
@@ -113,10 +117,11 @@ fn text<'a>(f: &'a Map<String, Value>, k: &str) -> Option<&'a str> {
     f.get(k).and_then(Value::as_str)
 }
 
-/// A line number as an answer may give one: a number (a fraction cut off)
-/// or a number's text. None for anything else, which goes on the file's
-/// first line that can take it.
-fn number(v: &Value) -> Option<i64> {
+/// A whole number as JSON may give one: a number (a fraction cut off) or a
+/// number's text. None for anything else: a finding's line that isn't one
+/// goes on the file's first line that can take it, and a mark's count of
+/// findings that isn't one is no mark (verdict.rs).
+pub(crate) fn number(v: &Value) -> Option<i64> {
     match v {
         Value::Number(n) => n.as_i64().or_else(|| {
             n.as_f64()
@@ -298,8 +303,14 @@ pub fn post(p: &mut Pass, look: &Look) -> Result<Posted, Unposted> {
         let listed: Vec<&str> = whole.iter().map(|(_, l)| l.as_str()).collect();
         body.push_str(&listed.join("\n"));
     }
-    let said = json!({"commit_sha": head, "base": look.base, "findings": k, "description": look.description});
-    body.push_str(&format!("\n\n<!-- {}-review:v1 {said} -->", look.reviewer));
+    let said = verdict::mark(
+        &look.reviewer,
+        head,
+        &look.base,
+        k,
+        look.description.as_deref(),
+    );
+    body.push_str(&format!("\n\n{said}"));
     let review = json!({"commit_id": head, "event": "COMMENT", "body": body, "comments": comments});
     let reviews = format!("repos/{repo}/pulls/{n}/reviews");
     call(p.api, "POST", &reviews, Some(&review), None).map_err(|e| match unposted(p.noted(e)) {

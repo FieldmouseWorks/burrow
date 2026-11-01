@@ -1,7 +1,8 @@
 //! `burrow-upkeep CONFIG settle|branches|watch ...`, run by a pass of the autoland
 //! steward (modules/autoland/steward.py) for each repo, with the App's token
 //! for the repo's owner in GH_TOKEN, under the pass's lock; `post`, which
-//! posts a reviewer's answer on a repo's PR; `queue`, which queues a
+//! posts a reviewer's answer on a repo's PR; `verdict`, which reads what
+//! its reviewers said of one back; `queue`, which queues a
 //! reviewer on one, `fetch`, which fetches refs into the steward's
 //! mirror of a repo, and `sweep`, which deletes what the reviewers leave of
 //! its closed PRs and old heads; `token`, which mints the pass
@@ -26,6 +27,7 @@ use burrow_upkeep::queue::{self, Ask};
 use burrow_upkeep::settle::Repo;
 use burrow_upkeep::sweep;
 use burrow_upkeep::token::{self, Installations, Token};
+use burrow_upkeep::verdict::{self, Asked};
 use gh_token::app::Minted;
 use serde::de::DeserializeOwned;
 use serde_json::json;
@@ -53,9 +55,16 @@ const USAGE: &str = "usage:
   burrow-upkeep CONFIG post OWNER/REPO --now SECONDS
       a reviewer's answer, posted as its review of the head it read; a JSON
       object on stdin gives the PR's number, the head, its base, the
-      reviewer (and its name), its answer and the description it was shown:
-      what came of it (clean, findings, notAReview, refused or unanswered)
-      and a rate limit's reset, as JSON on stdout
+      reviewer (and its name), its answer, the description it was shown and
+      the PR's now: what came of it (clean, findings, notAReview, refused
+      or unanswered), whether its review covers the PR's description, and a
+      rate limit's reset, as JSON on stdout
+  burrow-upkeep CONFIG verdict OWNER/REPO --now SECONDS [--dry]
+      what each of a PR's reviewers last said of its head, read back from
+      the reviews the steward posted; a JSON object on stdin gives the
+      head, its base, the fingerprint of its description, the reviewers and
+      the PR's reviews: each one's verdict, when, and its rounds with
+      findings, or why it couldn't tell, as JSON on stdout
   burrow-upkeep CONFIG queue OWNER/REPO --now SECONDS
       a reviewer queued on a PR's head, with its snapshot and its brief; a
       JSON object on stdin gives the PR's number, the head, its base, its
@@ -188,7 +197,7 @@ fn run(args: &[String]) -> Result<(), Stop> {
         return Err(Stop::Usage(format!("{repo:?} isn't OWNER/REPO")));
     }
     if ![
-        "settle", "branches", "watch", "post", "queue", "fetch", "sweep",
+        "settle", "branches", "watch", "post", "verdict", "queue", "fetch", "sweep",
     ]
     .contains(&word)
     {
@@ -221,12 +230,21 @@ fn run(args: &[String]) -> Result<(), Stop> {
         _ => None,
     };
     if let Some(l) = &look
-        && !(!l.reviewer.is_empty() && l.reviewer.bytes().all(|b| b.is_ascii_lowercase()))
+        && !verdict::named(&l.reviewer)
     {
         return Err(Stop::Usage(format!(
             "{:?} isn't a reviewer's name",
             l.reviewer
         )));
+    }
+    let asked = match word {
+        "verdict" => Some(stdin::<Asked>(
+            "the PR and its reviews, as a JSON object on stdin",
+        )?),
+        _ => None,
+    };
+    if let Some(why) = asked.as_ref().and_then(Asked::wrong) {
+        return Err(Stop::Usage(why));
     }
     let ask = match word {
         "queue" => Some(stdin::<Ask>(
@@ -278,7 +296,17 @@ fn run(args: &[String]) -> Result<(), Stop> {
                 Err(Unposted::Refused(why)) => ("refused", Some(why)),
                 Err(Unposted::Unanswered(why)) => ("unanswered", Some(why)),
             };
-            json!({"outcome": outcome, "why": why, "limited": p.out.limited})
+            let covers = verdict::covers(look.description.as_deref(), &look.now);
+            json!({"outcome": outcome, "covers": covers, "why": why, "limited": p.out.limited})
+        }
+        ("verdict", _) => {
+            let Some(asked) = &asked else {
+                return Err(Stop::Usage("no PR to read".into()));
+            };
+            match verdict::said(&p.me(), asked) {
+                Ok(said) => json!({"said": said, "why": null, "limited": null}),
+                Err(why) => json!({"said": null, "why": why, "limited": null}),
+            }
         }
         ("queue", _) => {
             let Some(ask) = &ask else {
@@ -316,7 +344,7 @@ fn run(args: &[String]) -> Result<(), Stop> {
 
 /// What the steward hands the word on stdin, `what` it is: the open PRs'
 /// branches, none of which is deleted, the look whose answer is posted, the
-/// reviewer to queue, the refs to fetch, the open PRs' snapshots, or the
+/// PR whose verdicts are read, the reviewer to queue, the refs to fetch, the open PRs' snapshots, or the
 /// repos a full pass's hooks are about. What isn't stops the word before it starts.
 fn stdin<T: DeserializeOwned>(what: &str) -> Result<T, Stop> {
     let mut text = String::new();

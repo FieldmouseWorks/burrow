@@ -60,7 +60,7 @@ answer = {"findings": [
 # head the reviewer read, of its base, named as the steward names it.
 github()
 with C.acting_for("sam/r"):
-    assert V.post("sam/r", pr, "rival", answer, shown) == "findings"
+    assert V.post("sam/r", pr, "rival", answer, shown) == ("findings", True)
 got = calls()
 assert [(m, p, t) for m, p, _, t in got] == [
     ("GET", f"repos/sam/r/compare/release%2F1.0...{head}", "ghs_app_sam"), ("POST", "repos/sam/r/pulls/7/reviews", "ghs_app_sam"),
@@ -76,7 +76,7 @@ assert V.finding("rival") in got[2][2]["body"] and "@​evil" in posted["comment
 pr["baseRefName"] = "main"
 github()
 with C.acting_for("sam/r"):
-    assert V.post("sam/r", pr, "rival", answer, shown) == "findings"
+    assert V.post("sam/r", pr, "rival", answer, shown) == ("findings", True)
 posted = calls()[1][2]
 assert '"findings":2' in posted["body"], posted["body"]
 mine = {"author": {"login": "steward", "__typename": "Bot"}, "body": posted["body"], "commit": {"oid": head},
@@ -85,22 +85,55 @@ forged = dict(mine, author={"login": "mallory", "__typename": "User"}, submitted
               body=posted["body"].replace('"findings":2', '"findings":0'))
 namesake = dict(forged, author={"login": "steward", "__typename": "User"})
 pr["reviews"]["nodes"] = [mine, forged, namesake]
-assert V.verdict(pr, head, "rival")[0::2] == ("findings", 1)
-assert V.verdict(pr, "b" * 40, "rival")[0] == "none" and V.verdict(pr, head, "codex")[0] == "none"
+
+
+def said(pr, names=("rival",)):
+    """burrow-upkeep's `verdict`, the real one, which asks GitHub nothing: a
+    pass reads it outside acting_for, with no token."""
+    return V.verdicts("sam/r", pr, list(names))
+
+
+assert said(pr, ["rival", "codex"]) == {"rival": ("findings", C.ts(mine["submittedAt"]), 1), "codex": ("none", 0, 0)}
+# A status run reads them as a pass does: it's what `status` says the PR waits on.
+C.DRY = True
+try:
+    assert said(pr)["rival"][0::2] == ("findings", 1)
+finally:
+    C.DRY = False
+assert said(dict(pr, headRefOid="b" * 40))["rival"][0::2] == ("none", 1)
 # Retargeted, the same head is another change: what was said on main doesn't count.
-assert V.verdict(dict(pr, baseRefName="release"), head, "rival")[0] == "none"
+assert said(dict(pr, baseRefName="release"))["rival"][0] == "none"
 # It's a verdict on the description it was shown too: one edited since (a
 # reason written in after a clean review, for CI) has had nobody weigh it,
 # and one whose review doesn't say what it was shown is no verdict at all.
 assert f'"description":"{shown}"' in posted["body"], posted["body"]
 edited = dict(pr, body=pr["body"].replace("a throwaway script, deleted once it's run", "quicker to write"))
-assert V.verdict(edited, head, "rival")[0::2] == ("none", 1)
-assert V.verdict(dict(pr, body=pr["body"] + "  \n"), head, "rival")[0] == "findings"  # what it was shown, quoted, is the same
+assert said(edited)["rival"][0::2] == ("none", 1)
+assert said(dict(pr, body=pr["body"] + "  \n"))["rival"][0] == "findings"  # what it was shown, quoted, is the same
 unsaid = dict(mine, body=posted["body"].replace(f'"description":"{shown}"', '"description":null'))
-assert V.verdict(dict(pr, reviews={"nodes": [unsaid]}), head, "rival")[0::2] == ("none", 1)
+assert said(dict(pr, reviews={"nodes": [unsaid]}))["rival"][0::2] == ("none", 1)
+# A review the pass posts itself isn't among the PR's reviews yet: it's a
+# verdict if it covers the description as it is now, which `post` says.
 github()
 with C.acting_for("sam/r"):
-    assert V.post("sam/r", pr, "codex", {"findings": []}, shown) == "clean"
+    assert V.post("sam/r", edited, "rival", answer, shown) == ("findings", False)
+    assert V.post("sam/r", pr, "rival", answer, None) == ("findings", False)
+# A time that isn't one stops it, saying why. A reviewer's name goes into
+# the mark it's read by, so it's a plain word.
+try:
+    said(dict(pr, reviews={"nodes": [dict(mine, submittedAt="yesterday")]}))
+    raise AssertionError("a verdict from a time that isn't one")
+except RuntimeError as e:
+    assert "yesterday" in str(e), e
+for name in ("Rival", "ri-val", ""):
+    try:
+        said(pr, [name])
+        raise AssertionError(f"{name!r} read as a reviewer")
+    except RuntimeError as e:
+        assert str(e) == "burrow-upkeep verdict exited 2", e
+github()
+with C.acting_for("sam/r"):
+    assert V.post("sam/r", pr, "codex", {"findings": []}, shown) == ("clean", True)
     assert "**Codex review** of aaaaaaa: nothing found." in calls()[1][2]["body"]
     # An answer without a list of findings is no review, never a clean
     # one, and nothing is asked of GitHub for it.
@@ -133,7 +166,8 @@ with C.acting_for("sam/r"):
 # reviewer's name goes into its marks, so it's a plain word.
 github()
 for args, name in ((["--dry"], "rival"), ([], "rival-x"), ([], "")):
-    look = {"number": 7, "head": head, "base": "main", "reviewer": name, "name": "R", "answer": {"findings": []}, "description": None}
+    look = {"number": 7, "head": head, "base": "main", "reviewer": name, "name": "R", "answer": {"findings": []}, "description": None,
+            "now": shown}
     p = subprocess.run([*C.CFG["upkeep"], "post", "sam/r", "--now", "1", *args], input=json.dumps(look), capture_output=True, text=True)
     assert p.returncode == 2 and calls() == [], (args, name, p.returncode, p.stderr)
 os.environ["PATH"] = kept_path
