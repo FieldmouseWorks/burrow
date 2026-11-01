@@ -1,7 +1,9 @@
 //! `burrow-upkeep CONFIG settle|branches|watch ...`, run by a pass of the autoland
 //! steward (modules/autoland/steward.py) for each repo, with the App's token
 //! for the repo's owner in GH_TOKEN, under the pass's lock; `post`, which
-//! posts a reviewer's answer on a repo's PR; `token`, which mints the pass
+//! posts a reviewer's answer on a repo's PR; `snapshot`, which takes the
+//! snapshot a reviewer reads of one, and `fetch`, which fetches refs into the
+//! steward's mirror of a repo; `token`, which mints the pass
 //! that token; and `hooks`, which a full pass ends with, and which mints its
 //! own. What it says of itself, on stderr, goes to the steward's journal.
 
@@ -16,9 +18,11 @@ use burrow_github::Gh;
 use burrow_upkeep::branches::{self, Git};
 use burrow_upkeep::config::Config;
 use burrow_upkeep::hook::{self, Hooks};
+use burrow_upkeep::mirror;
 use burrow_upkeep::pass::{Out, Pass, Proj};
 use burrow_upkeep::post::{self, Look, Posted, Unposted};
 use burrow_upkeep::settle::Repo;
+use burrow_upkeep::snapshot;
 use burrow_upkeep::token::{self, Installations, Token};
 use gh_token::app::Minted;
 use serde::de::DeserializeOwned;
@@ -50,6 +54,15 @@ const USAGE: &str = "usage:
       reviewer (and its name), its answer and the description it was shown:
       what came of it (clean, findings, notAReview, refused or unanswered)
       and a rate limit's reset, as JSON on stdout
+  burrow-upkeep CONFIG snapshot OWNER/REPO --now SECONDS
+      the snapshot a reviewer reads of a PR's head, taken unless it's kept
+      already; a JSON object on stdin gives the PR's number, the head, its
+      base and the snapshot's name: what it keeps of the base (meta) or why
+      it couldn't be taken, as JSON on stdout
+  burrow-upkeep CONFIG fetch OWNER/REPO --now SECONDS
+      refs fetched into the steward's mirror of the repo, a JSON list of
+      refspecs on stdin: the mirror's path or why it couldn't, as JSON on
+      stdout
   burrow-upkeep CONFIG watch OWNER/REPO --now SECONDS [--searched N] [--dry]
       the repo's dashboard and quarantine, as of the pass's time: what's
       stuck, the pass to book and the jobs to start, as JSON on stdout;
@@ -165,7 +178,7 @@ fn run(args: &[String]) -> Result<(), Stop> {
     if !flaky::quarantine::repo_name(repo) {
         return Err(Stop::Usage(format!("{repo:?} isn't OWNER/REPO")));
     }
-    if !["settle", "branches", "watch", "post"].contains(&word) {
+    if !["settle", "branches", "watch", "post", "snapshot", "fetch"].contains(&word) {
         return Err(Stop::Usage(format!("no word {word:?}")));
     }
     let f = flags(rest)?;
@@ -176,6 +189,9 @@ fn run(args: &[String]) -> Result<(), Stop> {
         return Err(Stop::Usage(
             "post has no status run: it posts what it's given".into(),
         ));
+    }
+    if ["snapshot", "fetch"].contains(&word) {
+        return mirrored(config, word, repo, f.dry);
     }
     let look = match word {
         "post" => Some(stdin::<Look>(
@@ -259,14 +275,46 @@ fn run(args: &[String]) -> Result<(), Stop> {
 }
 
 /// What the steward hands the word on stdin, `what` it is: the open PRs'
-/// branches, none of which is deleted, the look whose answer is posted, or
-/// the repos a full pass's hooks are about. What isn't stops the word before it starts.
+/// branches, none of which is deleted, the look whose answer is posted, the
+/// head to snapshot, the refs to fetch, or the repos a full pass's hooks are
+/// about. What isn't stops the word before it starts.
 fn stdin<T: DeserializeOwned>(what: &str) -> Result<T, Stop> {
     let mut text = String::new();
     std::io::stdin()
         .read_to_string(&mut text)
         .map_err(|e| Stop::Failed(format!("stdin: {e}")))?;
     serde_json::from_str(&text).map_err(|e| Stop::Usage(format!("{what}: {e}")))
+}
+
+/// `snapshot` and `fetch`, which a status run never asks for: the steward's
+/// mirror is fetched into by the steward alone. Neither talks to GitHub's
+/// API, so neither meets its rate limit.
+fn mirrored(config: &str, word: &str, repo: &str, dry: bool) -> Result<(), Stop> {
+    if dry {
+        return Err(Stop::Usage(format!(
+            "{word} has no status run: it writes the steward's mirror"
+        )));
+    }
+    let out = if word == "snapshot" {
+        let look: snapshot::Look = stdin("the PR's head to snapshot, as a JSON object on stdin")?;
+        if let Some(why) = look.wrong() {
+            return Err(Stop::Usage(why));
+        }
+        let cfg = Config::read(Path::new(config)).map_err(Stop::Failed)?;
+        match snapshot::take(&cfg, &cfg.state_dir, repo, &look) {
+            Ok(meta) => json!({"meta": meta, "why": null, "limited": null}),
+            Err(why) => json!({"meta": null, "why": why, "limited": null}),
+        }
+    } else {
+        let refs: Vec<String> = stdin("the refspecs to fetch, as a JSON list on stdin")?;
+        let cfg = Config::read(Path::new(config)).map_err(Stop::Failed)?;
+        match mirror::fetch(&cfg, &cfg.state_dir, repo, &refs) {
+            Ok(m) => json!({"mirror": m, "why": null, "limited": null}),
+            Err(why) => json!({"mirror": null, "why": why, "limited": null}),
+        }
+    };
+    println!("{out}");
+    Ok(())
 }
 
 /// systemd's credentials for the pass: the App's key (app-key) and the

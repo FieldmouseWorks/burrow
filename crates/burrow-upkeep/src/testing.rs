@@ -9,7 +9,7 @@ use burrow_github::{Api, Failed, Response};
 use serde_json::{Value, json};
 
 use crate::config::{
-    App, Branches, Config, Dashboard, Flaky, Labels, Rules, Settle, Waiting, Webhook,
+    App, Branches, Config, Dashboard, Flaky, Labels, Rules, Settle, Snapshot, Waiting, Webhook,
 };
 use crate::pass::{Jobs, Out, Pass};
 
@@ -71,6 +71,16 @@ pub fn config(dir: &Path) -> Config {
             repos: Default::default(),
             train: Some("conary/*".into()),
         }),
+        git: dir.join("origin").display().to_string(),
+        snapshot: Snapshot {
+            dir: dir.join("trees"),
+            skip_paths: vec![
+                "(^|/)secrets?/".into(),
+                r"\.(pem|key)$".into(),
+                r"(^|/)\.env$".into(),
+            ],
+            repos: Default::default(),
+        },
     }
 }
 
