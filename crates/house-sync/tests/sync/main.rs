@@ -16,6 +16,7 @@ use base64::engine::general_purpose::STANDARD;
 use github::{Asked, Fails, GitHub, Notices, Repo, repo};
 use house_sync::blocks::House;
 use house_sync::config::Config;
+use house_sync::exclude::Exclude;
 use house_sync::pass::{self, Ask};
 use serde_json::json;
 
@@ -111,7 +112,6 @@ const ALL_CLEAR: [[&str; 2]; 2] = [["close", "house-markers"], ["close", "house-
 struct Setup<'a> {
     current: PathBuf,
     exclude: &'a [&'a str],
-    bash: &'a str,
     owners: &'a [&'a str],
     dry_run: bool,
     lock: PathBuf,
@@ -122,7 +122,6 @@ fn setup() -> Setup<'static> {
     Setup {
         current: house(),
         exclude: &[],
-        bash: "bash",
         owners: &["Sam"],
         dry_run: false,
         lock: std::env::temp_dir().join(format!("house-sync-test-{}.lock", std::process::id())),
@@ -136,8 +135,11 @@ fn config(s: &Setup) -> Config {
         current: s.current.clone(),
         lock: s.lock.clone(),
         owners: s.owners.iter().map(|o| o.to_string()).collect(),
-        exclude: s.exclude.iter().map(|o| o.to_string()).collect(),
-        bash: s.bash.into(),
+        exclude: s
+            .exclude
+            .iter()
+            .map(|e| Exclude::parse(e).unwrap())
+            .collect(),
         notify: "/nonexistent/notify".into(),
         dry_run: s.dry_run,
     }
@@ -420,17 +422,12 @@ fn only_a_repo_a_full_pass_would_keep() {
             .out
             .contains("house-sync: eve/x: not a repo it keeps\n")
     );
-    // As bash read them: a negated set, a class, an escape, an extended
-    // pattern, and more than one in an entry. Each leaves the other repo in.
+    // A name in any case, a star and a question mark. Each leaves the other
+    // repo in.
     for (pattern, out, kept) in [
-        ("sam/[^a]*", "sam/b", "sam/a"),
-        ("sam/[[:digit:]]", "sam/7", "sam/a"),
-        ("sam/\\[a\\]", "sam/[a]", "sam/a"),
-        ("sam/@(b|c)", "sam/c", "sam/a"),
-        ("sam/!(a)", "sam/b", "sam/a"),
-        ("kim/x sam/b", "sam/b", "sam/a"),
-        ("sam/[a-[.c.]]", "sam/b", "sam/z"),
-        ("sam/b*!(|)", "sam/b", "sam/a"),
+        ("Sam/B", "sam/b", "sam/a"),
+        ("sam/b*", "sam/bare", "sam/a"),
+        ("s?m/?", "sam/c", "sam/cc"),
     ] {
         let patterns = [pattern];
         let s = Setup {
@@ -443,24 +440,9 @@ fn only_a_repo_a_full_pass_would_keep() {
         assert!(one.read().is_empty(), "{pattern}, one repo");
         assert_eq!(sync_with(&both, Some(kept), &s).read(), [kept]);
     }
-    // A pattern bash can't answer for: the repo is left alone, as a failure.
-    let s = Setup {
-        exclude: &["sam/a"],
-        bash: "/nonexistent/bash",
-        ..setup()
-    };
-    let both = [repo("sam/a", Some(&stale()))];
-    let ran = sync_with(&both, None, &s);
-    assert!(
-        ran.read().is_empty() && ran.wrote().is_empty(),
-        "{}",
-        ran.out
-    );
-    assert_eq!(ran.notices(), [["open", "house-sync"]]);
-    assert_eq!(sync_with(&both, Some("sam/a"), &s).ok, Ok(false));
     // A full pass leaves out the excluded too.
     let s = Setup {
-        exclude: &["sam/[ab]"],
+        exclude: &["sam/?"],
         ..setup()
     };
     let ran = sync_with(&everyone(), None, &s);

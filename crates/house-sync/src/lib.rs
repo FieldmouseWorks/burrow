@@ -10,6 +10,6 @@
 
 pub mod blocks;
 pub mod config;
+pub mod exclude;
 pub mod github;
 pub mod pass;
-pub mod pattern;

@@ -77,7 +77,6 @@ impl Machine {
             "lock": dir.path().join("lock"),
             "owners": owners,
             "exclude": [],
-            "bash": "bash",
             "notify": stand_ins().join("notify"),
             "dryRun": dry_run,
         });

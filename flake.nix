@@ -108,7 +108,7 @@
             "modules/autoland/lock_wait.py"
             "house"
           ];
-          testInputs = pkgs: [ pkgs.bash pkgs.git pkgs.jq pkgs.nix pkgs.util-linux pkgs.openssl ];
+          testInputs = pkgs: [ pkgs.git pkgs.jq pkgs.nix pkgs.util-linux pkgs.openssl ];
         };
       };
       # A workspace below its repo's root whose test reads a file outside

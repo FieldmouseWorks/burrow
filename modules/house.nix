@@ -22,7 +22,6 @@ let
     current = "/etc/${current}";
     lock = "${lockDir}/lock";
     inherit (cfg) owners exclude dryRun;
-    bash = lib.getExe pkgs.bash;
     notify = "${config.burrow.tools.notify}/bin/${config.burrow.prefix}-notify";
   });
   sync = pkgs.runCommand "house-sync" {
@@ -56,9 +55,10 @@ in
       type = types.listOf types.str;
       default = [ ];
       description = ''
-        Repos to leave alone (OWNER/NAME patterns, as bash's `[[ == ]]` reads them). Not autoland's exclude: a repo
-        that lands its own PRs still keeps the house blocks, and gets its
-        house PR to land its own way.
+        Repos to leave alone, as OWNER/NAME, each side a name or a glob of one
+        with `*` and `?`, in any case (crates/house-sync/src/exclude.rs). Not
+        autoland's exclude: a repo that lands its own PRs still keeps the
+        house blocks, and gets its house PR to land its own way.
       '';
     };
 

@@ -4,6 +4,8 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
+use crate::exclude::Exclude;
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct Config {
@@ -16,10 +18,8 @@ pub struct Config {
     pub lock: PathBuf,
     /// The GitHub users and orgs whose repos it keeps.
     pub owners: Vec<String>,
-    /// Repos it leaves alone, as OWNER/NAME patterns (pattern.rs).
-    pub exclude: Vec<String>,
-    /// The bash that reads those patterns.
-    pub bash: PathBuf,
+    /// Repos it leaves alone (exclude.rs).
+    pub exclude: Vec<Exclude>,
     /// HOST-notify: `NOTIFY open|close KEY TITLE [BODY]`.
     pub notify: PathBuf,
     /// Only say what a pass would do, as `status` does.
@@ -43,7 +43,7 @@ mod tests {
         let path = dir.path().join("config.json");
         let mut config = serde_json::json!({
             "house": "/h", "current": "/c", "lock": "/l", "owners": ["sam"],
-            "exclude": [], "bash": "/b", "notify": "/n", "dryRun": false,
+            "exclude": ["sam/*"], "notify": "/n", "dryRun": false,
         });
         std::fs::write(&path, config.to_string()).unwrap();
         let read = Config::read(&path).unwrap();
@@ -56,5 +56,14 @@ mod tests {
         let e = Config::read(&path).unwrap_err();
         assert!(e.contains("unknown field `dry_run`"), "{e}");
         assert!(Config::read(&dir.path().join("missing")).is_err());
+        // An exclude entry it can't read as OWNER/NAME is refused with it.
+        config.as_object_mut().unwrap().remove("dry_run");
+        config["exclude"] = serde_json::json!(["sam/*", "sam/[ab]"]);
+        std::fs::write(&path, config.to_string()).unwrap();
+        let e = Config::read(&path).unwrap_err();
+        assert!(
+            e.contains(r#"exclude entry "sam/[ab]" isn't OWNER/NAME"#),
+            "{e}"
+        );
     }
 }

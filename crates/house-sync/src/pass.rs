@@ -14,7 +14,6 @@ use burrow_github::{Api, Error};
 use crate::blocks::{House, Rewritten, rewrite, same_tree};
 use crate::config::Config;
 use crate::github::{self, Open, Pr, Repo};
-use crate::pattern;
 
 /// How the owner hears: HOST-notify's `open KEY TITLE BODY` and
 /// `close KEY TITLE`.
@@ -90,18 +89,8 @@ pub fn run(
         }
     }
     for repo in repos {
-        match excluded(cfg, &repo.name) {
-            Ok(true) => continue,
-            Ok(false) => {}
-            // It may be one to leave alone, so it's left alone, as a failure.
-            Err(e) => {
-                pass.say(&format!(
-                    "{}: failed, trying again next pass ({e})",
-                    repo.name
-                ));
-                pass.failed.push(repo.name);
-                continue;
-            }
+        if cfg.exclude.iter().any(|e| e.matches(&repo.name)) {
+            continue;
         }
         if let Err(e) = pass.repo(&repo) {
             pass.say(&format!(
@@ -158,17 +147,6 @@ pub fn run(
         ])?;
     }
     Ok(true)
-}
-
-/// Whether a repo is one of those it leaves alone. An entry is split at its
-/// whitespace, as the bash read them, since no repo's name has any.
-fn excluded(cfg: &Config, name: &str) -> Result<bool, String> {
-    for p in cfg.exclude.iter().flat_map(|e| e.split_whitespace()) {
-        if pattern::matches(&cfg.bash, p, name)? {
-            return Ok(true);
-        }
-    }
-    Ok(false)
 }
 
 /// The lock every pass that can change anything holds, waited for.
