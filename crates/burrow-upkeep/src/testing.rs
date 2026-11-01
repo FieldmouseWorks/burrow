@@ -192,7 +192,7 @@ pub fn start(cfg: &Config, at: f64, part: &str, jid: &str) {
     let mut hub = Hub::default();
     let mut jobs = States::new("running");
     let (_, r) = look(cfg, &mut hub, &mut jobs, at, |p| {
-        crate::started(p, part, jid)
+        crate::told(p, part, Some(jid))
     });
     r.unwrap();
 }

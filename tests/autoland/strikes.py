@@ -190,7 +190,7 @@ for f in sorted(os.listdir(harness.UPKEEP_SRC)):
     if f.endswith(".rs") and not f.endswith("_tests.rs") and f != "testing.rs":
         lines = open(os.path.join(harness.UPKEEP_SRC, f)).read().splitlines()
         unsaid += [f"{f}:{i}: {x.strip()}" for i, x in enumerate(lines, 1)
-                   if re.search(r"\bp\.wake\(|^\s*wake: ", x) and "// ends:" not in x
+                   if re.search(r"\b(?:p|self)\.wake\(|^\s*wake: ", x) and "// ends:" not in x
                    and "// ends:" not in lines[i - 2]]
 assert not unsaid, "a wake-up without what ends its wait (# ends: ...):\n" + "\n".join(unsaid)
 print("every wait ends: ok")

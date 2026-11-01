@@ -79,9 +79,12 @@ pub struct State {
     pub job: Option<String>,
     #[serde(rename = "jobAt", skip_serializing_if = "Option::is_none")]
     pub job_at: Option<f64>,
-    /// The issues this pass asked a job for, until `started` says it has one.
+    /// The issues a look asked a job for, and when, until `started` says
+    /// it has one or `unstarted` that it hasn't (Pass::unrecorded).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub asked: Vec<u64>,
+    #[serde(rename = "askedAt", skip_serializing_if = "Option::is_none")]
+    pub asked_at: Option<f64>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize, PartialEq)]
@@ -118,6 +121,7 @@ pub fn watch(p: &mut Pass, cfg: &Flaky) -> Result<(), String> {
 fn look(p: &mut Pass, cfg: &Flaky, listed: Result<Vec<Quarantined>, Error>) -> Result<(), String> {
     let name = format!("flaky-{}.json", p.repo.replace('/', "_"));
     let mut st: State = p.load(&name);
+    let held = p.unrecorded("flaky", &mut st.asked, &mut st.asked_at, cfg.job_timeout);
     let listed = match listed {
         Ok(listed) => listed,
         Err(e) => {
@@ -158,11 +162,13 @@ fn look(p: &mut Pass, cfg: &Flaky, listed: Result<Vec<Quarantined>, Error>) -> R
             p.list(OTHERS, at, format!("`{}`, by {}", q.test, q.author));
         }
     }
-    act(p, cfg, &mut st)?;
+    act(p, cfg, &mut st, held)?;
     p.save(&name, &st)
 }
 
-fn act(p: &mut Pass, cfg: &Flaky, st: &mut State) -> Result<(), String> {
+/// `held`: a job asked for before may be at work unrecorded, and none
+/// other starts.
+fn act(p: &mut Pass, cfg: &Flaky, st: &mut State, held: bool) -> Result<(), String> {
     let mut states: HashMap<String, Option<String>> = HashMap::new();
     let mut state = |p: &mut Pass, jid: &str| {
         states
@@ -225,8 +231,7 @@ fn act(p: &mut Pass, cfg: &Flaky, st: &mut State) -> Result<(), String> {
             p.wake(ended + DAY); // ends: a day on, it's listed (STUCK) if still open
         }
     }
-    st.asked.clear();
-    if todo.is_empty() || busy {
+    if todo.is_empty() || busy || held {
         return Ok(());
     }
     // The oldest first, as many as fit; the next job takes the rest.
@@ -258,6 +263,7 @@ fn act(p: &mut Pass, cfg: &Flaky, st: &mut State) -> Result<(), String> {
         unstarted,
     });
     st.asked = handed.into_iter().map(|(n, _)| n).collect();
+    st.asked_at = Some(p.now);
     Ok(())
 }
 
@@ -276,6 +282,7 @@ pub fn started(p: &mut Pass, jid: &str) -> Result<(), String> {
             it.job = Some(jid.into());
         }
     }
+    st.asked_at = None;
     st.job = Some(jid.into());
     st.job_at = Some(p.now);
     p.save(&name, &st)?;
@@ -285,6 +292,19 @@ pub fn started(p: &mut Pass, jid: &str) -> Result<(), String> {
         asked.len()
     );
     Ok(())
+}
+
+/// The job the last look asked for didn't start, or was stopped: the next
+/// look asks again.
+pub fn unstarted(p: &mut Pass) -> Result<(), String> {
+    let name = format!("flaky-{}.json", p.repo.replace('/', "_"));
+    let mut st: State = p.load(&name);
+    if st.asked.is_empty() {
+        return Ok(());
+    }
+    st.asked.clear();
+    st.asked_at = None;
+    p.save(&name, &st)
 }
 
 /// Issue n's body, then its last COMMENTS comments by `ours`, as a job is

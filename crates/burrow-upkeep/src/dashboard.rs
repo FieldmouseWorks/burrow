@@ -66,9 +66,12 @@ pub struct State {
     pub job: Option<String>,
     #[serde(rename = "jobAt", skip_serializing_if = "Option::is_none")]
     pub job_at: Option<f64>,
-    /// The items this pass asked a job for, until `started` says it has one.
+    /// The items a look asked a job for, and when, until `started` says
+    /// it has one or `unstarted` that it hasn't (Pass::unrecorded).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub asked: Vec<String>,
+    #[serde(rename = "askedAt", skip_serializing_if = "Option::is_none")]
+    pub asked_at: Option<f64>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize, PartialEq)]
@@ -186,6 +189,10 @@ fn find(p: &mut Pass, cfg: &Dashboard, st: &mut State) -> Result<Option<u64>, St
 pub fn watch(p: &mut Pass, cfg: &Dashboard) -> Result<(), String> {
     let name = format!("dashboard-{}.json", p.repo.replace('/', "_"));
     let mut st: State = p.load(&name);
+    let timeout = p.cfg.job_timeout;
+    let held = p.unrecorded("dashboard", &mut st.asked, &mut st.asked_at, timeout);
+    // Kept whatever becomes of the dashboard meanwhile.
+    let asked = (std::mem::take(&mut st.asked), st.asked_at.take());
     let gone = |p: &Pass| State {
         next: Some(p.now + 2.0 * HOUR),
         ..State::default()
@@ -242,8 +249,9 @@ pub fn watch(p: &mut Pass, cfg: &Dashboard) -> Result<(), String> {
             }
         }
     }
+    (st.asked, st.asked_at) = asked;
     if let Some(number) = n {
-        act(p, cfg, number, &mut st);
+        act(p, cfg, number, &mut st, held);
     }
     p.save(&name, &st)
 }
@@ -279,7 +287,9 @@ pub fn day(t: f64) -> String {
         .unwrap_or_default()
 }
 
-fn act(p: &mut Pass, cfg: &Dashboard, n: u64, st: &mut State) {
+/// `held`: a job asked for before may be at work unrecorded, and none
+/// other starts.
+fn act(p: &mut Pass, cfg: &Dashboard, n: u64, st: &mut State, held: bool) {
     let ended = runs(p.repo, cfg);
     let mut states: HashMap<String, bool> = HashMap::new();
     // Whether the job is still queued or running, or nothing can say.
@@ -332,8 +342,7 @@ fn act(p: &mut Pass, cfg: &Dashboard, n: u64, st: &mut State) {
             p.wake(due); // ends: a Claude job takes it then
         }
     }
-    st.asked.clear();
-    if todo.is_empty() || busy {
+    if todo.is_empty() || busy || held {
         return;
     }
     let lines: Vec<String> = todo
@@ -362,6 +371,7 @@ fn act(p: &mut Pass, cfg: &Dashboard, n: u64, st: &mut State) {
         )],
     });
     st.asked = todo;
+    st.asked_at = Some(p.now);
 }
 
 /// The job the last look asked for has started, as `jid`: what it was
@@ -379,6 +389,7 @@ pub fn started(p: &mut Pass, jid: &str) -> Result<(), String> {
             it.job = Some(jid.into());
         }
     }
+    st.asked_at = None;
     st.job = Some(jid.into());
     st.job_at = Some(p.now);
     p.save(&name, &st)?;
@@ -388,6 +399,19 @@ pub fn started(p: &mut Pass, jid: &str) -> Result<(), String> {
         asked.len()
     );
     Ok(())
+}
+
+/// The job the last look asked for didn't start, or was stopped: the next
+/// look asks again.
+pub fn unstarted(p: &mut Pass) -> Result<(), String> {
+    let name = format!("dashboard-{}.json", p.repo.replace('/', "_"));
+    let mut st: State = p.load(&name);
+    if st.asked.is_empty() {
+        return Ok(());
+    }
+    st.asked.clear();
+    st.asked_at = None;
+    p.save(&name, &st)
 }
 
 fn task(p: &Pass, cfg: &Dashboard, n: u64, lines: &str) -> String {

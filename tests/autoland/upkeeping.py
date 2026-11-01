@@ -197,29 +197,47 @@ NEXT.pop("jid", None)
 stuck = [x for x in mine if x[0] not in R.OWNERS]
 assert stuck == [("Couldn't start a Claude job", "sam/r#4", "for the flaky test `browser/stream`")], mine
 assert C.WAKE == {"sam/r": T + 300}, C.WAKE
-assert "handed" not in state("flaky")["issues"]["4"], state("flaky")
+assert "handed" not in state("flaky")["issues"]["4"] and "asked" not in state("flaky"), state("flaky")
 assert "sam/r: couldn't start its flaky job (no checkout, or proj refused)" in LOGGED, LOGGED
 
-# One that started but can't be told of is stopped, so the next pass
-# doesn't start a second beside it; the repo's pass is watched as failed.
-with open(f"{tmp}/upkeep-wrap", "w") as f:
+# One that started but can't be told of is stopped, and the next pass asks
+# again (it does below); the repo's pass is watched as failed.
+WRAP = [f"{tmp}/upkeep-wrap", f"{tmp}/upkeep.json"]
+with open(WRAP[0], "w") as f:
     f.write(f"#!/bin/sh\n[ \"$2\" = started ] && exit 1\nexec {UPKEEP} \"$@\"\n")
-os.chmod(f"{tmp}/upkeep-wrap", 0o755)
+os.chmod(WRAP[0], 0o755)
 STOPPED.clear()
-mine = look(60, [f"{tmp}/upkeep-wrap", f"{tmp}/upkeep.json"])
+mine = look(60, WRAP)
 assert len(JOBS) == 1 and STOPPED == ["up-1"], (JOBS, STOPPED)
 assert "sam/r" in waits.FAILED and C.WAKE == {"sam/r": T + 60 + 300}, (waits.FAILED, C.WAKE)
-assert "handed" not in state("flaky")["issues"]["4"], state("flaky")
+assert "handed" not in state("flaky")["issues"]["4"] and "asked" not in state("flaky"), state("flaky")
 assert any("its flaky job up-1, stopped" in x for x in LOGGED), LOGGED
-# One proj couldn't stop either is listed for the stuck issue's job, which
-# can stop it: the next pass, knowing nothing of it, may start another.
+# One proj couldn't stop either may be at work: the next pass starts none
+# beside it, and lists it for the pipeline, until its timeout (240
+# minutes) and five more have passed; then it asks again.
 STOP_OK[0] = False
-mine = look(90, [f"{tmp}/upkeep-wrap", f"{tmp}/upkeep.json"])
+mine = look(90, WRAP)
 STOP_OK[0] = True
-assert ("A Claude job nothing records, which couldn't be stopped", "sam/r", "its flaky job up-1: stop it, if it's still at work") in mine, mine
-assert all(x[0] not in R.OWNERS for x in mine if x[1] == "sam/r"), mine
+assert len(JOBS) == 1, JOBS
 assert any("its flaky job up-1 couldn't be recorded" in x and "proj couldn't stop it" in x for x in LOGGED), LOGGED
 assert not any("stopped:" in x for x in LOGGED), LOGGED
+HELD = ("A Claude job that may be at work unrecorded", "sam/r",
+        "its flaky job, asked for and never recorded (the steward's log has its id): no other starts until its timeout has passed")
+for at in (120, 90 + 244 * 60):
+    mine = look(at, WRAP)
+    assert not JOBS and HELD in mine and C.WAKE["sam/r"] == T + 90 + 245 * 60, (JOBS, mine, C.WAKE)
+    assert HELD[0] not in R.OWNERS, R.OWNERS
+# A stop that raises is one proj couldn't do: held the same.
+def stop_raises(jid):
+    raise OSError(2, "No such file or directory", "proj")
+C.stop_job = stop_raises
+mine = look(90 + 245 * 60, WRAP)
+C.stop_job = lambda jid: STOPPED.append(jid) or STOP_OK[0]
+assert len(JOBS) == 1 and HELD not in mine, (JOBS, mine)
+assert "sam/r: proj stop up-1: [Errno 2] No such file or directory: 'proj'" in LOGGED, LOGGED
+assert any("its flaky job up-1 couldn't be recorded" in x for x in LOGGED), LOGGED
+mine = look(91 + 245 * 60, WRAP)
+assert not JOBS and HELD in mine, (JOBS, mine)
 
 # A job that raises as it starts (a brief past what exec takes, a clone that
 # breaks) is that request's failure: the other part's job starts all the
@@ -235,6 +253,7 @@ mine = look(0)
 assert [j["pipeline"] for j in JOBS] == [True, False], JOBS
 assert state("flaky")["issues"]["4"]["job"] == "up-2", state("flaky")
 assert "handed" not in state("dashboard")["items"]["branch renovate/npm-packages"], state("dashboard")
+assert "asked" not in state("dashboard"), state("dashboard")
 assert ("Couldn't start a Claude job", "sam/r#7", "for what's stuck on Renovate's dashboard") in mine, mine
 assert "sam/r" in waits.FAILED and C.WAKE["sam/r"] == T + 300, (waits.FAILED, C.WAKE)
 assert "sam/r: its dashboard job didn't start: [Errno 7] Argument list too long" in LOGGED, LOGGED

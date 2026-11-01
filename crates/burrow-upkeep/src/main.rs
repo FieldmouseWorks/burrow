@@ -1,4 +1,4 @@
-//! `burrow-upkeep CONFIG watch|started ...`, run by a pass of the autoland
+//! `burrow-upkeep CONFIG watch|started|unstarted ...`, run by a pass of the autoland
 //! steward (modules/autoland/steward.py) for each repo, with the App's token
 //! for the repo's owner in GH_TOKEN, under the pass's lock.
 
@@ -16,6 +16,9 @@ const USAGE: &str = "usage:
       --searched, how many repos the pass has searched for a dashboard
   burrow-upkeep CONFIG started OWNER/REPO dashboard|flaky JOB --now SECONDS [--dry]
       the job the last watch asked for has started
+  burrow-upkeep CONFIG unstarted OWNER/REPO dashboard|flaky --now SECONDS [--dry]
+      it didn't start, or was stopped: the next watch asks again (until
+      one or the other is said, none other starts before its timeout)
   --dry: a status run's, with state of its own";
 
 fn main() -> ExitCode {
@@ -88,10 +91,12 @@ fn run(args: &[String]) -> Result<(), Stop> {
     if !flaky::quarantine::repo_name(repo) {
         return Err(Stop::Usage(format!("{repo:?} isn't OWNER/REPO")));
     }
-    let (started, rest) = match (word, rest) {
+    let (told, rest) = match (word, rest) {
         ("watch", rest) => (None, rest),
-        ("started", [part, jid, rest @ ..]) => (Some((part.as_str(), jid.as_str())), rest),
+        ("started", [part, jid, rest @ ..]) => (Some((part.as_str(), Some(jid.as_str()))), rest),
         ("started", _) => return Err(Stop::Usage("started needs a part and a job".into())),
+        ("unstarted", [part, rest @ ..]) => (Some((part.as_str(), None)), rest),
+        ("unstarted", _) => return Err(Stop::Usage("unstarted needs a part".into())),
         _ => return Err(Stop::Usage(format!("no word {word:?}"))),
     };
     let f = flags(rest)?;
@@ -110,13 +115,13 @@ fn run(args: &[String]) -> Result<(), Stop> {
         jobs: &mut proj,
         out: Out::default(),
     };
-    match started {
+    match told {
         None => {
             burrow_upkeep::watch(&mut p);
             let out = serde_json::to_string(&p.out).map_err(|e| Stop::Failed(e.to_string()))?;
             println!("{out}");
             Ok(())
         }
-        Some((part, jid)) => burrow_upkeep::started(&mut p, part, jid).map_err(Stop::Failed),
+        Some((part, jid)) => burrow_upkeep::told(&mut p, part, jid).map_err(Stop::Failed),
     }
 }

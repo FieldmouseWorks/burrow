@@ -1,6 +1,6 @@
 use super::*;
 use crate::config::Config;
-use crate::pass::Out;
+use crate::pass::{Out, UNRECORDED};
 use crate::testing::{Hub, States, T, answer, config, look as at, start};
 use std::fs;
 
@@ -499,7 +499,9 @@ fn issues_take_as_many_jobs_as_fit_them() {
 #[test]
 fn a_job_that_never_started_hands_nothing() {
     // What's listed if it can't start names every issue it was for, and
-    // until `started`, none is handed: the next look asks again.
+    // until `started`, none is handed. Unrecorded, it holds off any other
+    // for its timeout (240 minutes) and five more; `unstarted`, and the
+    // next look asks again.
     let d = tempfile::tempdir().unwrap();
     let cfg = config(d.path());
     let (mut hub, mut jobs) = (Hub::default(), States::new("done"));
@@ -510,14 +512,50 @@ fn a_job_that_never_started_hands_nothing() {
         [line(NO_JOB, "sam/r#9", "for the flaky test `unit/net`")]
     );
     assert!(state(&cfg).issues[&9].handed.is_none());
+    let held = line(
+        UNRECORDED,
+        "sam/r",
+        "its flaky job, asked for and never recorded (the steward's log has its id): \
+no other starts until its timeout has passed",
+    );
+    for t in [60.0, 244.0 * MIN] {
+        let listed = says(&mut hub, &[(9, "unit/net", ACTIONS)]);
+        let out = run(&cfg, &mut hub, &mut jobs, t, listed);
+        assert!(
+            out.jobs.is_empty() && out.stuck == [held.clone()],
+            "{out:?}"
+        );
+        assert_eq!(out.wake, Some(T + 245.0 * MIN));
+    }
+    // A look that fails holds it too, and lists it.
+    let (out, r) = at(&cfg, &mut hub, &mut jobs, 120.0, |p| {
+        look(
+            p,
+            p.cfg.flaky.as_ref().unwrap(),
+            Err(Error("HTTP 502".into())),
+        )
+    });
+    assert!(r.is_err() && out.stuck == [held.clone()], "{out:?}");
     let listed = says(&mut hub, &[(9, "unit/net", ACTIONS)]);
-    assert_eq!(run(&cfg, &mut hub, &mut jobs, 60.0, listed).jobs.len(), 1);
+    assert_eq!(
+        run(&cfg, &mut hub, &mut jobs, 245.0 * MIN, listed)
+            .jobs
+            .len(),
+        1
+    );
     let (_, r) = at(&cfg, &mut hub, &mut jobs, 0.0, |p| {
-        crate::started(p, "flaky", "j")
+        crate::told(p, "flaky", None)
+    });
+    r.unwrap();
+    let listed = says(&mut hub, &[(9, "unit/net", ACTIONS)]);
+    let out = run(&cfg, &mut hub, &mut jobs, 246.0 * MIN, listed);
+    assert!(out.stuck.is_empty() && out.jobs.len() == 1, "{out:?}");
+    let (_, r) = at(&cfg, &mut hub, &mut jobs, 0.0, |p| {
+        crate::told(p, "flaky", Some("j"))
     });
     r.unwrap();
     let (_, r) = at(&cfg, &mut hub, &mut jobs, 0.0, |p| {
-        crate::started(p, "flaky", "j")
+        crate::told(p, "flaky", Some("j"))
     });
     assert_eq!(r.unwrap_err(), "its flaky tests asked for no job");
 }
@@ -533,6 +571,11 @@ fn a_look_that_keeps_failing_goes_to_the_stuck_issue() {
     hub.on("GET", "rate_limit", answer(200, json!({"resources": {}})));
     let listed = says(&mut hub, &[(9, "unit/net", ACTIONS)]);
     run(&cfg, &mut hub, &mut jobs, 0.0, listed);
+    // The job it asked for didn't start, so holds nothing back.
+    let (_, r) = at(&cfg, &mut hub, &mut jobs, 0.0, |p| {
+        crate::told(p, "flaky", None)
+    });
+    r.unwrap();
     let was = state(&cfg);
     assert!(was.failing.is_none());
     let fail = |cfg: &Config, hub: &mut Hub, jobs: &mut States, t: f64, why: &str| {

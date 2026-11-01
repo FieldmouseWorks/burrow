@@ -17,6 +17,10 @@ pub const MIN: f64 = 60.0;
 pub const HOUR: f64 = 3600.0;
 pub const DAY: f64 = 86400.0;
 
+/// The heading a job's listed under while it may be at work with nothing
+/// recording it (Pass::unrecorded).
+pub const UNRECORDED: &str = "A Claude job that may be at work unrecorded";
+
 /// A line for the steward's lists, as its digest has them: what kind of
 /// thing it is (the heading it's listed under), where (a repo, an issue),
 /// and what about it.
@@ -112,6 +116,34 @@ impl Pass<'_> {
 
     pub fn list(&mut self, heading: &str, at: String, what: String) {
         self.out.stuck.push((heading.to_string(), at, what));
+    }
+
+    /// Whether the job a part's last look asked for (`asked`, at `at`) may
+    /// be at work with nothing recording it: neither `started` nor
+    /// `unstarted` has said how it went. The steward died in between, or
+    /// couldn't record it and couldn't stop it either. Until its timeout
+    /// has passed, and it with it, no other job starts beside it, and it's
+    /// listed; then what it was asked for is asked again.
+    pub fn unrecorded<T>(
+        &mut self,
+        part: &str,
+        asked: &mut Vec<T>,
+        at: &mut Option<f64>,
+        timeout: u64,
+    ) -> bool {
+        let until = at.unwrap_or_default() + (timeout as f64 + 5.0) * MIN;
+        if !asked.is_empty() && self.now < until {
+            let what = format!(
+                "its {part} job, asked for and never recorded (the steward's log has its id): \
+no other starts until its timeout has passed"
+            );
+            self.list(UNRECORDED, self.repo.to_string(), what);
+            self.wake(until); // ends: its timeout has passed, and the job with it
+            return true;
+        }
+        asked.clear();
+        *at = None;
+        false
     }
 
     pub fn state_dir(&self) -> PathBuf {

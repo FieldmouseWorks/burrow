@@ -140,7 +140,6 @@ UPKEEP_TIMEOUT = 300
 # How many repos this pass has searched for a dashboard (burrow-upkeep's
 # FINDS says how many it may).
 SEARCHED = [0]
-UNRECORDED = "A Claude job nothing records, which couldn't be stopped"
 
 
 def upkeep_run(*args, env=None):
@@ -158,13 +157,23 @@ def upkeep(repo, mine):
     """The repo's Renovate dashboard and quarantined flaky tests, which
     burrow-upkeep looks at: what it lists goes in mine, the passes it books
     are booked, and the Claude jobs it asks for are started here, each told
-    back to it once it has its id. One it can't be told of is stopped, so
-    the next pass doesn't start another beside it. Whatever fails is
-    logged, and the stall watchdog watches the repo; the pass goes on."""
+    back to it once it has its id (started), or that it didn't start
+    (unstarted). One it can't be told of is stopped; one that can't be
+    stopped either holds off any other until its timeout has passed, as
+    does one never told of at all (the pass died between). Whatever fails
+    is logged, and the stall watchdog watches the repo; the pass goes on."""
     def failed(why):
         log(f"{repo}: {why}")
         waits.failed(repo)
         C.wake(repo, C.NOW + 5 * MIN)  # ends: waits.failed watches the repo
+
+    def unstarted(j):
+        """No job of j's is at work: the next pass asks again. Untold, it
+        holds the next one off until its timeout, which is safe."""
+        try:
+            upkeep_run("unstarted", repo, j["part"])
+        except Exception as e:
+            failed(f"its {j['part']} job didn't start, and couldn't be told so ({e}): none other until its timeout")
 
     try:
         # As the App, for the repo's owner, as every GitHub call of a pass's.
@@ -186,23 +195,30 @@ def upkeep(repo, mine):
         except Exception as e:  # its own: the other part's job, and the pass, go on
             failed(f"its {j['part']} job didn't start: {e}")
             mine.extend(tuple(x) for x in j["unstarted"])
+            unstarted(j)
             continue
         if not jid:
             log(f"{repo}: couldn't start its {j['part']} job (no checkout, or proj refused)")
             mine.extend(tuple(x) for x in j["unstarted"])
+            unstarted(j)
             if not C.taken(repo):  # no use looking again until that folder moves: a full pass will
                 C.wake(repo, C.NOW + 5 * MIN)  # ends: a job starting; until then each one is listed
             continue
         try:
             upkeep_run("started", repo, j["part"], jid)
         except Exception as e:
-            if C.stop_job(jid):
+            try:
+                stopped = C.stop_job(jid)
+            except Exception as why:  # as one proj couldn't stop
+                log(f"{repo}: proj stop {jid}: {why}")
+                stopped = False
+            if stopped:
                 failed(f"its {j['part']} job {jid}, stopped: it couldn't be recorded: {e}")
+                unstarted(j)
             else:
-                # Nothing here knows of it, so the next pass may start another
-                # beside it: the stuck issue's job (on this machine) stops it.
-                failed(f"its {j['part']} job {jid} couldn't be recorded ({e}), and proj couldn't stop it")
-                mine.append((UNRECORDED, repo, f"its {j['part']} job {jid}: stop it, if it's still at work"))
+                # burrow-upkeep still has it as asked for: it's listed, and
+                # none other starts beside it until its timeout has passed.
+                failed(f"its {j['part']} job {jid} couldn't be recorded ({e}), and proj couldn't stop it: none other until its timeout")
             continue
         C.wake(repo, j["wake"])  # ends: the job's own end, or this look (its `// ends:`)
 
