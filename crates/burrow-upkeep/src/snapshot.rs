@@ -3,7 +3,7 @@
 //! reviewer reads (the secrets paths). The commits are git's own trees with
 //! those paths taken out, so nothing the repo's attributes or ignore files
 //! say can change or hide what the PR changed. Taken once a head on a base,
-//! for every reviewer, which reviewers.py `queue` briefs and queues on it;
+//! for every reviewer, which queue.rs briefs and queues each one on;
 //! what it keeps of the base (the rules the PR is held to) and what it hid
 //! are kept beside it, for the brief and for a judge (reviewers.py
 //! `unseen`).
@@ -21,10 +21,9 @@ use crate::config::{self, Config};
 use crate::mirror::{self, git, git_in};
 use crate::pass::{load, save};
 
-/// What the pass hands `snapshot`, on stdin: the PR's head, its base, and
-/// the snapshot's name (reviewers.py `snap_name`, one a head on a base).
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
+/// The head a snapshot is of: the PR's head, its base, and the snapshot's
+/// name (reviewers.py `snap_name`, one a head on a base).
+#[derive(Debug)]
 pub struct Look {
     pub number: u64,
     pub head: String,

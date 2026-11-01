@@ -1,9 +1,10 @@
 //! What the autoland steward keeps up in each repo besides its PRs: its
 //! labels and settings (settle.rs) and its webhook (hook.rs), the branches
 //! nothing needs any more (branches.rs), Renovate's dashboard (dashboard.rs)
-//! and the flaky tests' quarantine (flaky.rs); and for the reviewers, the
-//! snapshot each reads of a PR (snapshot.rs, from the steward's mirror of
-//! the repo, mirror.rs) and their answers, posted on its PRs (post.rs). A
+//! and the flaky tests' quarantine (flaky.rs); and for the reviewers, each
+//! one's look at a PR queued (queue.rs) with its brief (brief.rs) on the
+//! snapshot it reads (snapshot.rs, from the steward's mirror of the repo,
+//! mirror.rs), and their answers, posted on its PRs (post.rs). A
 //! pass of the steward's runs
 //! `settle`, then `branches` once it has seen to the repo's PRs, then
 //! `watch`, on each repo it sees to, with the App's token for the repo's
@@ -15,6 +16,7 @@
 //! next look finds its job by that key (`proj find`).
 
 pub mod branches;
+pub mod brief;
 pub mod config;
 pub mod dashboard;
 pub mod flaky;
@@ -22,6 +24,7 @@ pub mod hook;
 pub mod mirror;
 pub mod pass;
 pub mod post;
+pub mod queue;
 pub mod settle;
 pub mod snapshot;
 #[cfg(test)]

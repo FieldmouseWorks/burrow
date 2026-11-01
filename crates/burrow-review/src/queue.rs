@@ -1,18 +1,19 @@
 //! The queue the steward's passes fill and this service empties, the
-//! answers it leaves, and the names that tie them to a PR's session. The
-//! steward owns the formats (reviewers.py): an entry is `REVIEWER--SNAP.json`,
-//! where SNAP is `pr-OWNER_REPO-N-HEAD12-BASEHASH`, and the answer goes in
-//! done/ under the same name.
+//! answers it leaves, and the names that tie them to a PR's session. An
+//! entry is an `Item`, which burrow-upkeep's `queue` writes, at
+//! `REVIEWER--SNAP.json`, where SNAP is `pr-OWNER_REPO-N-HEAD12-BASEHASH`
+//! (reviewers.py `snap_name`); the answer goes in done/ under the same
+//! name.
 
 use std::fs::File;
 use std::io;
 use std::path::Path;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// A queued look, as reviewers.py `queue` writes it.
-#[derive(Clone, Debug, Deserialize)]
+/// A queued look.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Item {
     pub reviewer: String,
@@ -26,6 +27,10 @@ pub struct Item {
     pub prompt: String,
     /// What the answer carries of the description the brief quotes.
     pub description: String,
+    /// When the PR was opened, and when the look was queued: the order
+    /// the queue is taken in (work.rs `work`).
+    pub opened: f64,
+    pub at: f64,
 }
 
 /// The reviewer's session for the PR, on its base, whose head the snapshot

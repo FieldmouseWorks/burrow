@@ -19,6 +19,9 @@ pub struct Config {
     /// Where the machine's projects are cloned, burrow among them: a
     /// dashboard's job is told so.
     pub projects_dir: String,
+    /// The machine's owner, by name: whom the owner's label says a PR
+    /// waits for, and whom the reviewers review for.
+    pub owner: String,
     /// The steward's authors (people's logins) and its bots by their Apps'
     /// slugs, as the steward's config has them.
     pub authors: Vec<String>,
@@ -96,8 +99,6 @@ pub struct Flaky {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Settle {
-    /// Whom the owner's label says a PR waits for.
-    pub owner: String,
     /// The steward's status, and the merge train's.
     pub context: String,
     pub train_context: String,

@@ -15,7 +15,7 @@ use burrow_github::{call, call_allowing, encode};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
-use crate::config::{Rules, Settle};
+use crate::config::{Config, Rules, Settle};
 use crate::pass::{DAY, Pass, repo_file};
 
 /// What GitHub says when a repo's plan has no rules (a private repo on a
@@ -94,7 +94,7 @@ fn keep(
     // to the owner, no PR can go first in its proof line and none can say
     // what it waits on. Made again with the daily settings too, in case one
     // was deleted.
-    let about = labels(cfg);
+    let about = labels(p.cfg);
     let want: Vec<String> = about.iter().map(|(n, _, _)| n.clone()).collect();
     if st.labels.as_ref() != Some(&want) || due {
         let mut made = true;
@@ -221,8 +221,12 @@ fn keep(
 
 /// The labels, each with its colour and what it says: the waiting ones say
 /// what a PR waits on, and that its status says more.
-pub(crate) fn labels(cfg: &Settle) -> Vec<(String, &'static str, String)> {
-    let (l, w, says) = (&cfg.labels, &cfg.labels.waiting, &cfg.context);
+pub(crate) fn labels(cfg: &Config) -> Vec<(String, &'static str, String)> {
+    let (l, w, says) = (
+        &cfg.settle.labels,
+        &cfg.settle.labels.waiting,
+        &cfg.settle.context,
+    );
     vec![
         (
             l.hold.clone(),

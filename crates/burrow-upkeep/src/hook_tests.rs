@@ -251,10 +251,7 @@ fn a_repos_hook_is_added_moved_and_left_alone() {
 /// The state settle keeps when its labels and settings aren't due: it asks
 /// GitHub nothing.
 fn settled(cfg: &Config, hook: Option<&str>) {
-    let labels: Vec<String> = settle::labels(&cfg.settle)
-        .into_iter()
-        .map(|(n, _, _)| n)
-        .collect();
+    let labels: Vec<String> = settle::labels(cfg).into_iter().map(|(n, _, _)| n).collect();
     let mut st = json!({"settings": T, "app": 7, "train": false, "labels": labels});
     if let Some(h) = hook {
         st["hook"] = h.into();

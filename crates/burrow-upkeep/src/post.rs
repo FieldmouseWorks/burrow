@@ -199,7 +199,7 @@ pub fn quiet(text: &str) -> String {
 }
 
 /// The mark on each finding's thread, which the reviewer's later looks are
-/// shown theirs by (reviewers.py `prior`).
+/// shown theirs by (queue.rs `prior`).
 pub fn finding(reviewer: &str) -> String {
     format!("<!-- {reviewer}-finding -->")
 }

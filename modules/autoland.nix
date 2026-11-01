@@ -187,7 +187,7 @@ let
   # settings it shares, a repo's settings, and its branch watch and two
   # parts, each null when it's off.
   upkeepConfig = pkgs.writeText "burrow-upkeep.json" (builtins.toJSON {
-    inherit (settings) stateDir proj projectsDir authors bots app jobTimeout renovate;
+    inherit (settings) stateDir owner proj projectsDir authors bots app jobTimeout renovate;
     # GitHub's REST API, where the App's own calls go: its tokens
     # (token.rs) and its webhook (hook.rs).
     api = "https://api.github.com";
@@ -224,7 +224,7 @@ let
     # status and the train's, from its App alone, and each repo's own
     # directPush, ruleset and train over the defaults.
     settle = {
-      inherit (settings) owner context trainContext rulesets labels;
+      inherit (settings) context trainContext rulesets labels;
       defaults = { inherit (settings.defaults) directPush ruleset train; };
       repos = lib.filterAttrs (_: r: r != { })
         (lib.mapAttrs (_: builtins.intersectAttrs { directPush = null; ruleset = null; train = null; }) cfg.repos);

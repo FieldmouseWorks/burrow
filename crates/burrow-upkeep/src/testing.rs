@@ -3,7 +3,9 @@
 //! Claude jobs whose states a test sets.
 
 use std::collections::HashMap;
+use std::fs;
 use std::path::Path;
+use std::process::Command;
 
 use burrow_github::{Api, Failed, Response};
 use serde_json::{Value, json};
@@ -21,6 +23,7 @@ pub const FRACTIONAL: f64 = 1793945621.8617759;
 pub fn config(dir: &Path) -> Config {
     Config {
         state_dir: dir.join("state"),
+        owner: "Sam".into(),
         proj: "proj".into(),
         projects_dir: dir.join("projects").display().to_string(),
         authors: vec!["sam".into()],
@@ -45,7 +48,6 @@ pub fn config(dir: &Path) -> Config {
         }),
         flaky: Some(Flaky { job_timeout: 240 }),
         settle: Settle {
-            owner: "sam".into(),
             context: "review-settled".into(),
             train_context: "conary/train".into(),
             rulesets: true,
@@ -280,4 +282,36 @@ pub fn start(cfg: &Config, at: f64, part: &str, jid: &str) {
         _ => crate::flaky::found(p),
     });
     r.unwrap();
+}
+
+/// git as the tests run it, in `dir`: what it printed. Fails the test if it
+/// fails.
+pub fn sh(dir: &Path, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .args([
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "commit.gpgsign=false",
+        ])
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// `text` at `path` in `work`, its directories made.
+pub fn put(work: &Path, path: impl AsRef<Path>, text: &str) {
+    let at = work.join(path);
+    fs::create_dir_all(at.parent().unwrap()).unwrap();
+    fs::write(at, text).unwrap();
 }

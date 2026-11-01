@@ -8,6 +8,7 @@ publish.workspace = true
 
 [dependencies]
 burrow-github = { path = "../burrow-github" }
+burrow-review = { path = "../burrow-review" }
 flaky = { path = "../flaky" }
 gh-token = { path = "../gh-token" }
 jiff.workspace = true
