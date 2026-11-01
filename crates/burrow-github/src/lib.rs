@@ -150,6 +150,24 @@ pub fn call_allowing(
     kept(&what, r, allowed)
 }
 
+/// A write that asked again could undo someone else's (a PATCH of a PR's
+/// description, which its owner edits too): asked once, whatever comes
+/// back. One whose answer is lost or a 5xx may have been done, and after a
+/// 429 anything may have changed while it waited, so what it was asked on
+/// is the caller's to read again before it asks again.
+pub fn call_once(
+    api: &mut dyn Api,
+    method: &str,
+    path: &str,
+    body: Option<&Value>,
+) -> Result<Response, Error> {
+    let what = format!("{method} {path}");
+    let r = api
+        .request(method, path, body, None)
+        .map_err(|f| failed(&what, f))?;
+    kept(&what, r, &[])
+}
+
 /// A GraphQL query about `owner`'s account (Api::graphql): its `data`,
 /// tried again as a GET is, since a query changes nothing (a mutation isn't
 /// one), and an Error when GitHub's answer holds errors.
@@ -159,11 +177,33 @@ pub fn query(
     query: &str,
     variables: Value,
 ) -> Result<Value, Error> {
+    graphql(api, owner, query, variables, true)
+}
+
+/// A GraphQL mutation about `owner`'s account: its `data`, or an Error as
+/// `query` gives one. Asked again only after a 429, as a POST is (`call`):
+/// GitHub can have done it when its answer is lost or a 5xx.
+pub fn mutate(
+    api: &mut dyn Api,
+    owner: &str,
+    mutation: &str,
+    variables: Value,
+) -> Result<Value, Error> {
+    graphql(api, owner, mutation, variables, false)
+}
+
+fn graphql(
+    api: &mut dyn Api,
+    owner: &str,
+    query: &str,
+    variables: Value,
+    repeats: bool,
+) -> Result<Value, Error> {
     let body = serde_json::json!({ "query": query, "variables": variables });
     let what = "POST graphql";
     let r = kept(
         what,
-        tried(api, what, true, |api| api.graphql(owner, &body))?,
+        tried(api, what, repeats, |api| api.graphql(owner, &body))?,
         &[],
     )?;
     let mut answer = r.json()?;
@@ -195,14 +235,7 @@ fn tried(
             }
             Ok(r) => return Ok(r),
             Err(f) if f.transient && repeats => f.why,
-            Err(f) => {
-                let why = format!("{what}: {}", f.why);
-                return Err(if f.transient {
-                    Error::unanswered(why)
-                } else {
-                    Error::said(why)
-                });
-            }
+            Err(f) => return Err(failed(what, f)),
         };
         if tries == AGAIN.len() {
             return Err(Error::unanswered(format!(
@@ -212,6 +245,17 @@ fn tried(
         }
         api.pause(AGAIN[tries]);
         tries += 1;
+    }
+}
+
+/// A request GitHub gave no answer to (`transient`: none came), or that
+/// couldn't be made, as an Error.
+fn failed(what: &str, f: Failed) -> Error {
+    let why = format!("{what}: {}", f.why);
+    if f.transient {
+        Error::unanswered(why)
+    } else {
+        Error::said(why)
     }
 }
 
@@ -679,6 +723,96 @@ mod tests {
         gh.on("POST", "graphql", vec![ok(200, json!({"data": 1}), &[])]);
         assert_eq!(query(&mut gh, "sam", "q", json!({})).unwrap(), json!(1));
         assert_eq!(gh.asked[0].1, "graphql");
+    }
+
+    #[test]
+    fn writes_once_what_a_replay_could_undo() {
+        // A 502 can come after GitHub took the PATCH: asked again, it would
+        // write over an edit made meanwhile.
+        let mut gh = Fake::default();
+        gh.on(
+            "PATCH",
+            "repos/sam/r/pulls/7",
+            vec![ok(502, Value::Null, &[])],
+        );
+        let body = json!({"body": "new"});
+        let e = call_once(&mut gh, "PATCH", "repos/sam/r/pulls/7", Some(&body)).unwrap_err();
+        assert!(
+            e.unanswered && e.why.starts_with("PATCH repos/sam/r/pulls/7: HTTP 502"),
+            "{}",
+            e.why
+        );
+        assert_eq!(gh.asked("PATCH").len(), 1);
+        // Nor after a 429: GitHub did nothing, but the edit it would undo
+        // can come while it waits.
+        let mut gh = Fake::default();
+        gh.on(
+            "PATCH",
+            "repos/sam/r/pulls/7",
+            vec![ok(429, Value::Null, &[]), ok(200, json!({}), &[])],
+        );
+        let e = call_once(&mut gh, "PATCH", "repos/sam/r/pulls/7", Some(&body)).unwrap_err();
+        assert!(e.unanswered, "{}", e.why);
+        assert_eq!(gh.asked("PATCH").len(), 1);
+        // Its answer, when it has one.
+        let mut gh = Fake::default();
+        gh.on(
+            "PATCH",
+            "repos/sam/r/pulls/7",
+            vec![ok(200, json!({}), &[])],
+        );
+        assert!(call_once(&mut gh, "PATCH", "repos/sam/r/pulls/7", Some(&body)).is_ok());
+    }
+
+    #[test]
+    fn asks_a_mutation_again_only_when_github_did_nothing() {
+        // A 502 can come after GitHub posted the reply: asked again, it
+        // would post a second.
+        let mut gh = Graph {
+            asked: vec![],
+            answers: vec![ok(502, Value::Null, &[])],
+        };
+        let e = mutate(&mut gh, "sam", "mutation { m }", json!({})).unwrap_err();
+        assert_eq!(
+            (e.why.as_str(), e.unanswered),
+            ("POST graphql: HTTP 502: ", true)
+        );
+        assert_eq!(gh.asked.len(), 1);
+        // A 429 is GitHub doing nothing: asked again, as the account it's about.
+        let mut gh = Graph {
+            asked: vec![],
+            answers: vec![
+                ok(429, Value::Null, &[]),
+                ok(200, json!({"data": {"m": 2}}), &[]),
+            ],
+        };
+        assert_eq!(
+            mutate(&mut gh, "Sam", "mutation { m }", json!({"t": "x"})).unwrap(),
+            json!({"m": 2})
+        );
+        assert_eq!(
+            gh.asked,
+            vec![
+                (
+                    "Sam".into(),
+                    json!({"query": "mutation { m }", "variables": {"t": "x"}})
+                );
+                2
+            ]
+        );
+        // Its errors are an Error, as a query's are.
+        let mut gh = Graph {
+            asked: vec![],
+            answers: vec![ok(
+                200,
+                json!({"data": null, "errors": [{"message": "no"}]}),
+                &[],
+            )],
+        };
+        assert_eq!(
+            mutate(&mut gh, "sam", "m", json!({})).unwrap_err().why,
+            "POST graphql: no"
+        );
     }
 
     #[test]

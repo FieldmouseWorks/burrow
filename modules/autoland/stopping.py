@@ -1,12 +1,13 @@
 """What a PR's new head stops: its Claude jobs still at work on the last
 head, whose answers would be for a head it no longer has. Those are its
 proofs, but for one building what the new head's proof wants
-(proofs.superseded), and its judge. Its fix jobs carry on: they push to the
-branch, whatever its head. A job stopped this way is forgotten as its
-kind's, so a head the PR comes back to gets jobs of its own rather than
-taking a stopped one for one that broke (step.py's lost). One proj won't
-stop holds what it holds, and is tried again each pass, a strike each time
-(step.py)."""
+(proofs.superseded), and its judge. Its fix jobs push to the branch
+themselves, so a new head may be one's own push: claims.py stops one only
+once it's plain the head isn't (claims.stale). A job stopped here is
+forgotten as its kind's, so a head the PR comes back to gets jobs of its
+own rather than taking a stopped one for one that broke (step.py's lost).
+One proj won't stop holds what it holds, and is tried again each pass, a
+strike each time (step.py)."""
 
 import common as C
 import proofs as P

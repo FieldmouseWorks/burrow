@@ -80,6 +80,9 @@ let
     # The machinery's App posts and pushes the steward's Claude jobs' work.
     bots = [ "dependabot" "renovate" ] ++ lib.optional (machineApp != null) machineApp.slug;
     machinery = if machineApp == null then null else machineApp.name;
+    # Its login as GitHub's record of a branch's pushes gives it, which
+    # tells a fix job's own push from anyone else's (claims.py).
+    machineryLogin = if machineApp == null then null else "${machineApp.slug}[bot]";
     stateDir = "${stateDir}/autoland";
     inherit snapDir;
     # The key renovate-sweep seals its verdicts on majors with (seal.py),

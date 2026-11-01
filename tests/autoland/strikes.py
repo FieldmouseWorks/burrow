@@ -8,8 +8,8 @@ import json
 import os
 import re
 
-from harness import ALREADY, CI_GREEN, FAIL, JOBS, STUB, T, UNSTOPPABLE, WROTE, C, H, S, clean, fresh_pr_state, merged, mkpr, \
-    pr_state, run, stand_in, tmp, worker
+from harness import ALREADY, CI_GREEN, FAIL, JOBS, STATES, STUB, T, UNSTOPPABLE, WROTE, C, H, S, clean, fresh_pr_state, merged, \
+    mkpr, pr_state, run, stand_in, tmp, worker
 
 import harness
 import proofs as P
@@ -89,6 +89,45 @@ CASES = {
     "close": {"pr": clean(), "setup": lambda: ALREADY.update({5: "e" * 40}), "fail": lambda: FAIL.append("pr close 5"),
               "mend": FAIL.clear, "after": ALREADY.clear},
 }
+# A fix job's answers (claims.py) GitHub won't take: here a conflict's job,
+# handed at once, that ended with a comment to post.
+real_upkeep = C.upkeep
+ANSWER = {}  # what burrow-upkeep's `claims` says came of job-1's answers (outcome, why), while set
+
+
+def upkeep(*args, **kw):
+    if args[0] == "claims" and ANSWER:
+        look = json.loads(kw["input"])
+        kept = {j: h for j, h in look["answering"].items() if ANSWER["outcome"] in ("refused", "unanswered")}
+        return {"answering": kept, "pushedBy": look["pushedBy"], "stop": [], "wake": None, "limited": None,
+                "answered": [{"jid": j, "kind": h["kind"], **ANSWER} for j, h in look["answering"].items()]}
+    return real_upkeep(*args, **kw)
+
+
+def answered():
+    C.upkeep = upkeep
+    run({**clean(), "mergeStateStatus": "DIRTY"}, 600)
+    STATES["job-1"] = "done"
+    os.makedirs(f"{tmp}/jobs/job-1", exist_ok=True)
+    with open(f"{tmp}/jobs/job-1/answers.json", "w") as f:
+        json.dump({"pushed": None, "comment": "Merged main in."}, f)
+
+
+def answer_down(said):
+    ANSWER.update(outcome="refused", why=said)
+    return said
+
+
+def answers_back():
+    C.upkeep = real_upkeep
+    STATES.clear()
+    ANSWER.clear()
+
+
+CASES["answer"] = {"pr": {**clean(), "mergeStateStatus": "DIRTY"}, "setup": answered,
+                   "fail": lambda: answer_down("GitHub's down (HTTP 502)"),
+                   "mend": lambda: ANSWER.update(outcome="posted", why=None), "said": "GitHub's down (HTTP 502)",
+                   "again": lambda: answer_down("GitHub's still down (HTTP 502)"), "after": answers_back}
 # A proof the steward builds (proofs.py): one it can't start, and one whose
 # derivations can't be worked out, which it has nothing to build without.
 VM = CI_GREEN + [{"__typename": "StatusContext", "context": "vm", "state": "PENDING", "description": ""}]

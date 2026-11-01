@@ -3,9 +3,11 @@
 //! for the repo's owner in GH_TOKEN, under the pass's lock; `post`, which
 //! posts a reviewer's answer on a repo's PR; `verdict`, which reads what
 //! its reviewers said of one back; `queue`, which queues a
-//! reviewer on one, `fetch`, which fetches refs into the steward's
-//! mirror of a repo, and `sweep`, which deletes what the reviewers leave of
-//! its closed PRs and old heads; `token`, which mints the pass
+//! reviewer on one; `claims`, which sees to the steward's Claude jobs that
+//! settle a PR, posting each one's answers once its push is the PR's head;
+//! `fetch`, which fetches refs into the steward's mirror of a
+//! repo, and `sweep`, which deletes what the reviewers leave of its closed
+//! PRs and old heads; `token`, which mints the pass
 //! that token; and `hooks`, which a full pass ends with, and which mints its
 //! own. What it says of itself, on stderr, goes to the steward's journal.
 
@@ -18,6 +20,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use burrow_github::Gh;
 use burrow_upkeep::branches::{self, Git};
+use burrow_upkeep::claims;
 use burrow_upkeep::config::Config;
 use burrow_upkeep::hook::{self, Hooks};
 use burrow_upkeep::mirror;
@@ -72,10 +75,17 @@ const USAGE: &str = "usage:
       opened, the reviewer, the snapshot's name and the reasons' weighing:
       the queue entry's name or why it couldn't be queued, and a rate
       limit's reset, as JSON on stdout
-  burrow-upkeep CONFIG fetch OWNER/REPO --now SECONDS
-      refs fetched into the steward's mirror of the repo, a JSON list of
-      refspecs on stdin: the mirror's path or why it couldn't, as JSON on
-      stdout
+  burrow-upkeep CONFIG claims OWNER/REPO --now SECONDS
+      a PR's steward Claude jobs that settle it, seen to; a JSON object on
+      stdin gives the PR's number, its head and branch, the login its jobs
+      push as (or null), proj's jobs dir, its jobs as its state keeps them
+      and who pushed a head as last found: each one that's over has its
+      answers posted only while the PR's head is its push (or the head it
+      was handed, when it pushed none), and each at work on a head someone
+      else moved the PR past is named to stop; the jobs to keep, who pushed
+      the head, the jobs to stop, what came of each one's answers (posted,
+      wrong, unpushed, moved, refused or unanswered), when to look again and
+      a rate limit's reset, as JSON on stdout
   burrow-upkeep CONFIG sweep OWNER/REPO --now SECONDS
       what the reviewers leave of the repo's PRs, deleted once nothing needs
       it, a JSON list on stdin giving the snapshots of its open PRs' heads:
@@ -197,7 +207,7 @@ fn run(args: &[String]) -> Result<(), Stop> {
         return Err(Stop::Usage(format!("{repo:?} isn't OWNER/REPO")));
     }
     if ![
-        "settle", "branches", "watch", "post", "verdict", "queue", "fetch", "sweep",
+        "settle", "branches", "watch", "post", "verdict", "queue", "claims", "fetch", "sweep",
     ]
     .contains(&word)
     {
@@ -207,10 +217,10 @@ fn run(args: &[String]) -> Result<(), Stop> {
     if let Some((flag, its)) = f.own.iter().find(|(_, its)| *its != word) {
         return Err(Stop::Usage(format!("{flag} is {its}'s")));
     }
-    if f.dry && word == "post" {
-        return Err(Stop::Usage(
-            "post has no status run: it posts what it's given".into(),
-        ));
+    if f.dry && ["post", "claims"].contains(&word) {
+        return Err(Stop::Usage(format!(
+            "{word} has no status run: it posts what it's given"
+        )));
     }
     if f.dry && word == "queue" {
         return Err(Stop::Usage(
@@ -255,6 +265,12 @@ fn run(args: &[String]) -> Result<(), Stop> {
     if let Some(why) = ask.as_ref().and_then(Ask::wrong) {
         return Err(Stop::Usage(why));
     }
+    let claimed = match word {
+        "claims" => Some(stdin::<claims::Look>(
+            "the PR and its Claude jobs, as a JSON object on stdin",
+        )?),
+        _ => None,
+    };
     let open = match word {
         "branches" => Some(stdin::<BTreeSet<String>>(
             "the open PRs' branches, as a JSON list on stdin",
@@ -318,6 +334,16 @@ fn run(args: &[String]) -> Result<(), Stop> {
             };
             json!({"queued": queued, "why": why, "limited": p.out.limited})
         }
+        ("claims", _) => {
+            let Some(l) = &claimed else {
+                return Err(Stop::Usage("no PR to see to".into()));
+            };
+            let seen = claims::claims(&mut p, l);
+            let mut out = serde_json::to_value(&seen).map_err(|e| Stop::Failed(e.to_string()))?;
+            out["wake"] = json!(p.out.wake);
+            out["limited"] = json!(p.out.limited);
+            out
+        }
         ("branches", Some(open)) => {
             let default = f
                 .default
@@ -344,7 +370,7 @@ fn run(args: &[String]) -> Result<(), Stop> {
 
 /// What the steward hands the word on stdin, `what` it is: the open PRs'
 /// branches, none of which is deleted, the look whose answer is posted, the
-/// PR whose verdicts are read, the reviewer to queue, the refs to fetch, the open PRs' snapshots, or the
+/// PR whose verdicts are read, the reviewer to queue, a PR's Claude jobs, the refs to fetch, the open PRs' snapshots, or the
 /// repos a full pass's hooks are about. What isn't stops the word before it starts.
 fn stdin<T: DeserializeOwned>(what: &str) -> Result<T, Stop> {
     let mut text = String::new();

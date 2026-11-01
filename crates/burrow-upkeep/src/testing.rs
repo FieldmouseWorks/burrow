@@ -96,6 +96,9 @@ pub struct Hub {
     pub asked: Vec<(String, String, Option<String>, Option<Value>)>,
     /// GraphQL's answer to an issue's query, by its number.
     pub issues: HashMap<u64, Value>,
+    /// GraphQL's answers to anything else, by a word its query has: the
+    /// first whose word it has answers.
+    pub graphql: Vec<(String, Answer)>,
 }
 
 #[derive(Clone)]
@@ -151,6 +154,21 @@ impl Api for Hub {
         {
             let data = json!({"data": {"repository": {"issue": issue}}});
             return Ok(response(200, &data, None));
+        }
+        if (method, path) == ("POST", "graphql")
+            && let Some(q) = body.and_then(|b| b["query"].as_str())
+            && let Some((_, a)) = self
+                .graphql
+                .iter()
+                .find(|(word, _)| q.contains(word.as_str()))
+        {
+            if a.status == 0 {
+                return Err(Failed {
+                    why: a.why.clone(),
+                    transient: false,
+                });
+            }
+            return Ok(response(a.status, &a.body, None));
         }
         let Some((_, _, a)) = self.answers.iter().find(|(m, p, _)| {
             m == method

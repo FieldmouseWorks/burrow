@@ -415,8 +415,10 @@ for task in (H.fix_task("sam/r", steer, "CI is red"), H.judge_task("sam/r", stee
     assert "  " not in task, task
 assert "fixing all of what its finding says a complete fix covers, with a test for each" in H.fix_task("sam/r", steer, "x")
 # A finding on such a reason is settled by the port, or by the reason the
-# line left out, in the description; a judge's only by the port.
-assert "porting the code to Rust" in H.fix_task("sam/r", steer, "x") and "gh pr edit 6 -R sam/r --body-file" in H.fix_task("sam/r", steer, "x")
+# line left out, in the description (which the job leaves for the steward to
+# put in, claims.py); a judge's only by the port.
+assert "porting the code to Rust" in H.fix_task("sam/r", steer, "x") and "writing that reason into the description" in H.fix_task("sam/r", steer, "x")
+assert "description is the PR's whole new description" in H.fix_task("sam/r", steer, "x")
 assert "A judge's is settled only by the port" in H.fix_task("sam/r", steer, "x")
 status, _ = run(clean(**gated), 800)
 assert JOBS == [] and "judging it" in status and not merged()
@@ -601,7 +603,11 @@ status, _ = run(clean(threads=[False, True]), 0)
 assert JOBS == [] and status.endswith("1 open review thread; a Claude job takes it at 12:30am UTC -f target_url=u"), status
 status, _ = run(clean(threads=[False, True]), 31 * 60)
 assert len(JOBS) == 1 and "isn't settled" in JOBS[0], JOBS
-assert "push before you reply" in JOBS[0] and "Never push over it" in JOBS[0], "a fix job's reply names what landed"
+# It says what it did in its answers file, which goes up only once its push
+# is the PR's head (claims.py), from a worktree at the head it was handed.
+assert f"{C.CFG['jobsDir']}/$PROJ_JOB/answers.json" in JOBS[0] and "Never push over it" in JOBS[0], JOBS[0]
+assert "Don't reply on the threads, resolve them" in JOBS[0] and "resolveReviewThread" not in JOBS[0], JOBS[0]
+assert f"git worktree add --detach DIR {head}" in JOBS[0] and f"isn't {head}, someone else" in JOBS[0], JOBS[0]
 assert "1 open review thread; a Claude job has it since 12:31am UTC" in status, status
 assert reacted() == ["api -X POST repos/sam/r/pulls/comments/900/reactions -f content=eyes"], WROTE
 assert ASKED == [(P.THREADS, {"id": "x"})], ASKED

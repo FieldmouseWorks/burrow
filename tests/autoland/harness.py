@@ -54,14 +54,20 @@ UPKEEP, UPKEEP_SRC = sys.argv[5], sys.argv[6]
 PROOF_RUN = os.path.abspath(sys.argv[7])
 # What the passes here run in its place (upkeeping.py runs the real one): it
 # notes how it was run (UPKEEP_RAN), with what `branches` and `hooks` read on
-# its stdin last, and finds nothing due, stuck or wanted. Its `token` is the
-# real one's, and so are its `sweep` and `verdict`, which ask GitHub nothing,
-# on the config upkeep_config writes (UPKEEP_REAL). Those it starts as they
-# are, from sh: every pass's PRs read their verdicts, and a Python's start
-# for each would be most of the Python check's time.
+# its stdin last, and finds nothing due, stuck or wanted; its `claims` keeps
+# every fix job as it was and says nothing of any (unpushed.py runs the real
+# one). Its `token` is the real one's, and so are its `sweep` and `verdict`,
+# which ask GitHub nothing, on the config upkeep_config writes (UPKEEP_REAL).
+# Those it starts as they are, from sh: every pass's PRs read their verdicts,
+# and a Python's start for each would be most of the Python check's time.
 UPKEEP_RAN, UPKEEP_REAL, UPKEEP_FAKE = f"{tmp}/upkeep-ran", f"{tmp}/upkeep-real.json", f"{tmp}/upkeep-fake"
 with open(UPKEEP_FAKE, "w") as f:
     f.write(f"""import json, sys
+if sys.argv[2] == "claims":
+    look = json.load(sys.stdin)
+    print(json.dumps({{"answering": look["answering"], "pushedBy": look["pushedBy"], "stop": [], "answered": [],
+                      "wake": None, "limited": None}}))
+    sys.exit(0)
 with open({UPKEEP_RAN!r}, "a") as f:
     f.write(json.dumps(sys.argv[2:] + ([json.load(sys.stdin)] if sys.argv[2] in ("branches", "hooks") else [])) + "\\n")
 print(json.dumps({{"failed": [], "limited": None}} if sys.argv[2] in ("settle", "hooks") else
@@ -164,7 +170,7 @@ with open(f"{tmp}/config.json", "w") as f:
     json.dump({
         "owners": ["sam"], "exclude": [], "context": "review-settled", "rulesets": True,
         "app": {"id": 7, "slug": "steward"},
-        "baselineJobs": False, "baselinePerPass": 1, "authors": ["sam"], "bots": ["dependabot", "renovate", "workers"], "machinery": None,
+        "baselineJobs": False, "baselinePerPass": 1, "authors": ["sam"], "bots": ["dependabot", "renovate", "workers"], "machinery": None, "machineryLogin": None,
         "stateDir": f"{tmp}/state", "snapDir": f"{tmp}/trees", "majorKey": f"{tmp}/sweep.key", "projectsDir": f"{tmp}/none", "jobsDir": f"{tmp}/jobs", "renovateEmail": "bot@renovateapp.com", "proj": "proj", "jobTimeout": 60, "jobIdle": 20, "proofTimeout": 180, "heavy": None, "owner": "Sam",
         "labels": {"hold": "hold", "owner": "needs-owner", "first": "first", "waiting": {"releaseAge": "waiting: release age", "proofSlot": "waiting: proof slot", "reviewer": "waiting: reviewer"}}, "notify": {"repo": "", "assignee": "", "label": "autoland"}, "inbox": {"enable": False, "label": "claude", "unstickLabel": "unstick", "authors": ["sam"]},
         "renovate": None, "upkeep": [f"{tmp}/upkeep-none", "upkeep.json"],

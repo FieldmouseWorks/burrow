@@ -3,6 +3,7 @@ CI), a judge (a settled PR it won't land on its own word) and a proof job
 (checks that run on a machine). Each is told that everything the PR carries
 is a claim, and the judge exactly which verdict lines count."""
 
+import claims
 import common as C
 import reviewers as V
 from common import CFG
@@ -31,17 +32,36 @@ FOREGROUND = ("A check can outlast a tool call's time limit: start it in the bac
               "is killed when your turn ends, and no notification of it ever comes back. ")
 
 
-# What a fix job runs before it pushes. A conflict's job merges and pushes: the
-# whole gate can outlast it, and then the merge is never pushed.
-TESTS = "Run the repo's tests before you push."
-CONFLICT_TESTS = ("Run the tests of what the conflicts touched before you push, not the repo's whole gate: it can outlast this job, "
-                  "which would end with the merge unpushed, and CI runs the whole gate once you push.")
+# What a fix job runs before it pushes: the whole gate can outlast it, and
+# then its work is never pushed (LoK-web#695's took 27 of its 60 minutes),
+# when CI runs it on the push anyway. A repo with no CI has only the job's.
+TESTS = ("Run the tests of what you changed before you push (for a merge, of what its conflicts touched), not the repo's whole gate: "
+         "it can outlast this job, which would end with your work unpushed, and CI runs the whole gate once you push.")
+NO_CI_TESTS = "Run the repo's tests before you push: it has no CI to run them."
 
 
-def fix_task(repo, pr, why, proofs=None, train=False, conflict=False):
+def answers(repo, pr):
+    """How a fix job says what it did: in its answers file, which the steward
+    posts only once the PR's head is the job's push (claims.py)."""
+    return (
+        "Don't reply on the threads, resolve them, edit the PR's description or comment on it yourself. When you're done, "
+        f"write what you have to say to {claims.brief_file()} as JSON, "
+        '{"pushed": COMMIT, "threads": [{"id": THREAD_ID, "fixed": true, "reply": TEXT}], "description": TEXT, "comment": TEXT}, '
+        "and the steward posts it, resolving each thread after its reply, only once the PR's head is your push. "
+        "pushed is the full commit your push put on the branch (git rev-parse HEAD, once git push has said it updated the branch), "
+        "or null if you pushed nothing. threads has one entry for each thread you settled, by its id "
+        f"(gh api graphql, the reviewThreads of PR {pr['number']} in {repo}): fixed is true only for one your push fixes, and "
+        "reply says what you did, or why it's wrong or out of scope, without naming a commit (the steward names the one it's fixed in). "
+        "description is the PR's whole new description, written from the one you read (gh pr view --json body), or null to leave it. "
+        "comment is what to say on the PR, or null. "
+    )
+
+
+def fix_task(repo, pr, why, proofs=None, train=False, has_ci=True, before=None):
     """proofs: the failing checks that run on a machine, not in CI, and how;
-    train: the merge train's failure is among them; conflict: it's handed to
-    merge its base in."""
+    train: the merge train's failure is among them; has_ci: the repo's CI
+    runs its gate on a push; before: why the last job's answers on this
+    head didn't go up (claims.unposted)."""
     machine = "".join(f" {c} isn't CI: it's run on a machine, like this: {how} Rerun it that way on what you push."
                       for c, how in (proofs or {}).items()) + (f" {FOREGROUND.strip()}" if proofs else "")
     if train:
@@ -50,24 +70,27 @@ def fix_task(repo, pr, why, proofs=None, train=False, conflict=False):
                     "and CI failed on that merge (the status links the failed check, on a conary/train/ branch). "
                     f"Merge {base} into the branch, find what breaks when the two meet, fix it and push: the new head goes "
                     "into the train again once it's settled.")
+    n, head, branch = pr["number"], pr["headRefOid"], pr["headRefName"]
     return (
-        f"{about(repo, pr)} isn't settled: {why}. "
-        f"Settle it. Check out the branch in {WORKTREE}. "
+        f"{about(repo, pr)} isn't settled: {why}. Settle it. "
+        f"First check it's still yours: if the PR's head (gh pr view {n} -R {repo} --json headRefOid) isn't {head}, someone else "
+        "has pushed since it was handed to you, so stop there, leaving nothing. "
+        f"Fetch it (git fetch origin {branch}) and work in {WORKTREE}, made at exactly that commit "
+        f"(git worktree add --detach DIR {head}); push from there with git push origin HEAD:refs/heads/{branch}. "
         "For every unresolved review thread (the reviewers', which the steward posts as its GitHub App marked Codex, or anyone's): "
-        "either fix it, push, and reply on the thread with the commit, "
-        "fixing all of what its finding says a complete fix covers, with a test for each of those cases, not only the line the thread is on, "
-        f"or reply with why it's wrong or out of scope; then resolve the thread (gh api graphql, resolveReviewThread). {CLAIMS}"
+        "either fix it, fixing all of what its finding says a complete fix covers, with a test for each of those cases, "
+        f"not only the line the thread is on, or answer it with why it's wrong or out of scope. {CLAIMS}"
         "A finding that a reason in the PR's description (a `Why not Rust:` line, say) doesn't hold is settled by porting the code "
-        "to Rust, or, only where the code has a solid reason the line left out, by writing that reason into the description "
-        f"(gh pr edit {pr['number']} -R {repo} --body-file) and replying with it. A judge's is settled only by the port: "
-        "only a push gets the PR judged again. "
-        "A commit you name in a reply has to be on the PR's branch: push before you reply. If the push is refused because "
-        "the branch moved on, someone else is at work on it (the Claude session that opened the PR, say): fetch it, read "
-        "what landed, and build on that, or stop if it already settles what you were fixing. Never push over it. "
-        "A review that requests changes is the same: address it, then reply on the PR saying what you did. "
-        f"If CI is red, read the failing job's log, fix the cause and push.{machine} {CONFLICT_TESTS if conflict else TESTS} "
+        "to Rust, or, only where the code has a solid reason the line left out, by writing that reason into the description and "
+        "saying so in the thread's reply. A judge's is settled only by the port: only a push gets the PR judged again. "
+        "A review that requests changes is the same: address it, and say what you did in the comment. "
+        f"If CI is red, read the failing job's log, fix the cause and push.{machine} {TESTS if has_ci else NO_CI_TESTS} "
+        "If the push is refused because the branch moved on, someone else is at work on it (the Claude session that opened "
+        "the PR, say): stop there, leaving nothing, since the new head is theirs (the steward hands it to a job of its own "
+        "if it needs one). Never push over it. "
+        f"{answers(repo, pr)}{f'The last Claude job on this left answers that never went up: {before}. ' if before else ''}"
         "Don't ask for a review and don't merge: the steward does those once you're done. "
-        "If something needs the owner (a decision only they can make, a secret), comment on the PR saying exactly what, "
+        "If something needs the owner (a decision only they can make, a secret), say exactly what in your answers' comment, "
         f"add the {CFG['labels']['owner']} label, and stop."
     )
 
