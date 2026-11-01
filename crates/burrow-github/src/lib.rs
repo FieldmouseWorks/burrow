@@ -64,7 +64,7 @@ pub trait Api {
 
     /// One GraphQL request about `owner`'s account. It names no repo, so it
     /// says whose it is: an App's gh takes that account's installation's
-    /// token (GH_TOKEN_OWNER, gh-token).
+    /// token (GH_TOKEN_OWNER, gh-token), and no repo around it says otherwise.
     fn graphql(&mut self, owner: &str, body: &Value) -> Result<Response, Failed> {
         let _ = owner;
         self.request("POST", "graphql", Some(body), None)
@@ -215,7 +215,12 @@ fn gh_api(
     let mut cmd = Command::new("gh");
     cmd.args(["api", "-i", "-X", method, path]);
     if let Some(owner) = owner {
-        cmd.env("GH_TOKEN_OWNER", owner);
+        // gh-token goes by GH_REPO and the checkout's remotes before this
+        // (account.rs), and they're not what the call is about.
+        cmd.env("GH_TOKEN_OWNER", owner)
+            .env_remove("GH_REPO")
+            .env_remove("GIT_DIR")
+            .current_dir("/");
     }
     if let Some(tag) = etag {
         cmd.args(["-H", &format!("If-None-Match: {tag}")]);

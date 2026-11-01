@@ -116,6 +116,10 @@ impl Api for GitHub {
             ("DELETE", ["git", "refs", "heads", "house", "rules-gone"]) => {
                 answer(422, json!({"message": "Reference does not exist"}), None)
             }
+            // One it refuses to delete, with the same status.
+            ("DELETE", ["git", "refs", "heads", "house", "rules-kept"]) => {
+                answer(422, json!({"message": "Validation Failed"}), None)
+            }
             ("PATCH" | "DELETE", ["git", "refs", "heads", ..]) => answer(200, json!({}), None),
             ("GET", ["contents", "AGENTS.md"]) => match &r.agents {
                 None => answer(404, json!({"message": "Not Found"}), None),

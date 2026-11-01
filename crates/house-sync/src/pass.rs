@@ -14,6 +14,7 @@ use burrow_github::{Api, Error};
 use crate::blocks::{House, Rewritten, rewrite, same_tree};
 use crate::config::Config;
 use crate::github::{self, Open, Pr, Repo};
+use crate::pattern;
 
 /// How the owner hears: HOST-notify's `open KEY TITLE BODY` and
 /// `close KEY TITLE`.
@@ -89,11 +90,7 @@ pub fn run(
         }
     }
     for repo in repos {
-        if cfg
-            .exclude
-            .iter()
-            .any(|g| burrow_events::glob::matches(g, &repo.name))
-        {
+        if excluded(&cfg.exclude, &repo.name) {
             continue;
         }
         if let Err(e) = pass.repo(&repo) {
@@ -151,6 +148,15 @@ pub fn run(
         ])?;
     }
     Ok(true)
+}
+
+/// Whether a repo is one of those it leaves alone. An entry is split at its
+/// whitespace, as the bash read them, since no repo's name has any.
+fn excluded(exclude: &[String], name: &str) -> bool {
+    exclude
+        .iter()
+        .flat_map(|e| e.split_whitespace())
+        .any(|p| pattern::matches(p, name))
 }
 
 /// The lock every pass that can change anything holds, waited for.

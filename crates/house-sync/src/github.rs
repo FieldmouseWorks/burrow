@@ -170,7 +170,12 @@ pub fn close(api: &mut dyn Api, repo: &str, pr: &Pr, why: &str) -> Result<(), Er
     )?;
     if pr.head_here {
         let path = format!("repos/{repo}/git/refs/heads/{}", pr.head);
-        call_allowing(api, "DELETE", &path, None, None, &[422])?;
+        let r = call_allowing(api, "DELETE", &path, None, None, &[422])?;
+        // GitHub says a branch is gone with a 422, and says other refusals
+        // with one too.
+        if r.status == 422 && r.json()?["message"] != json!("Reference does not exist") {
+            return Err(Error(format!("DELETE {path}: HTTP 422: {}", r.body.trim())));
+        }
     }
     Ok(())
 }

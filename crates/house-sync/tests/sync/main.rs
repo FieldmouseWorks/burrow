@@ -417,6 +417,27 @@ fn only_a_repo_a_full_pass_would_keep() {
             .out
             .contains("house-sync: eve/x: not a repo it keeps\n")
     );
+    // As bash read them: a negated set, a class, an escape, an extended
+    // pattern, and more than one in an entry. Each leaves the other repo in.
+    for (pattern, out, kept) in [
+        ("sam/[^a]*", "sam/b", "sam/a"),
+        ("sam/[[:digit:]]", "sam/7", "sam/a"),
+        ("sam/\\[a\\]", "sam/[a]", "sam/a"),
+        ("sam/@(b|c)", "sam/c", "sam/a"),
+        ("sam/!(a)", "sam/b", "sam/a"),
+        ("kim/x sam/b", "sam/b", "sam/a"),
+    ] {
+        let patterns = [pattern];
+        let s = Setup {
+            exclude: &patterns,
+            ..setup()
+        };
+        let both = [repo(out, Some(&stale())), repo(kept, Some(&stale()))];
+        assert_eq!(sync_with(&both, None, &s).read(), [kept], "{pattern}");
+        let one = sync_with(&both, Some(out), &s);
+        assert!(one.read().is_empty(), "{pattern}, one repo");
+        assert_eq!(sync_with(&both, Some(kept), &s).read(), [kept]);
+    }
     // A full pass leaves out the excluded too.
     let s = Setup {
         exclude: &["sam/[ab]"],
@@ -762,6 +783,29 @@ fn older_prs_are_closed_once_theres_a_newer_one() {
     );
     assert_eq!(ran.ok, Ok(true), "{}", ran.out);
     assert_eq!(ran.closed().iter().map(|c| c.0).collect::<Vec<_>>(), [5]);
+    // One GitHub refuses to delete fails the repo, after the other PRs are
+    // closed, and a full pass's notice says so. A fork's isn't asked about.
+    let kept = vec![
+        (5, "house/rules-kept".into(), false),
+        (6, "house/rules-kept".into(), true),
+        older.clone(),
+    ];
+    let kept = Repo {
+        prs: kept,
+        ..repo("sam/a", Some(&current()))
+    };
+    let ran = sync(std::slice::from_ref(&kept), Some("sam/a"));
+    assert_eq!(ran.ok, Ok(false));
+    assert_eq!(
+        ran.closed().iter().map(|c| c.0).collect::<Vec<_>>(),
+        [5, 6, 7]
+    );
+    let deleted = ran.asked.iter().filter(|(m, _, _)| m == "DELETE").count();
+    assert_eq!(deleted, 2, "the fork's branch stays out of it");
+    assert!(ran.out.contains("house-sync: sam/a: failed, trying again next pass (DELETE repos/sam/a/git/refs/heads/house/rules-kept: HTTP 422:"), "{}", ran.out);
+    let ran = sync(&[kept], None);
+    assert_eq!(ran.ok, Ok(true));
+    assert_eq!(ran.notices(), [["open", "house-sync"]]);
     // A close that fails fails the repo, after the others are tried, and
     // the next pass tries it again.
     let prs = vec![(6, "house/rules-01d".into(), false), older.clone()];

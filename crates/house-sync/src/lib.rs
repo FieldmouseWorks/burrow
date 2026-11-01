@@ -12,3 +12,4 @@ pub mod blocks;
 pub mod config;
 pub mod github;
 pub mod pass;
+pub mod pattern;

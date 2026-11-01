@@ -55,7 +55,7 @@ in
       type = types.listOf types.str;
       default = [ ];
       description = ''
-        Repos to leave alone (OWNER/NAME globs). Not autoland's exclude: a repo
+        Repos to leave alone (OWNER/NAME patterns, as bash's `[[ == ]]` reads them). Not autoland's exclude: a repo
         that lands its own PRs still keeps the house blocks, and gets its
         house PR to land its own way.
       '';

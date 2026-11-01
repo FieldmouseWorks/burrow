@@ -477,7 +477,6 @@ name = "house-sync"
 version = "0.0.0"
 dependencies = [
  "base64",
- "burrow-events",
  "burrow-github",
  "serde",
  "serde_json",

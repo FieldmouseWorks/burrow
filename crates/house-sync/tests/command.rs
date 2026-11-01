@@ -20,8 +20,15 @@ fn script(path: &Path, text: &str) {
 /// and logs each call with the account it was told it's about.
 const GH: &str = r#"#!/bin/sh
 echo "${GH_TOKEN_OWNER:--} $*" >>"$LOG"
-cat >/dev/null
+# What gh-token would go by besides the call (account.rs).
+echo "${GH_TOKEN_OWNER:--} repo=${GH_REPO:-} remotes=$(git config --get-regexp '^remote\..*\.url$')" >>"$LOG.around"
+body=$(cat)
 printf 'HTTP/2.0 '
+case "${PAGED:-}$body" in
+  'yes'*'"cursor":null'*)
+    printf '200 OK\n\n{"data":{"repositoryOwner":{"repositories":{"nodes":[],"pageInfo":{"hasNextPage":true,"endCursor":"2"}}}}}'
+    exit ;;
+esac
 case "$*" in
   *" graphql --input -")
     printf '200 OK\n\n{"data":{"repositoryOwner":{"repositories":{"nodes":[{"nameWithOwner":"sam/a","isArchived":false,"defaultBranchRef":{"name":"main"}}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}' ;;
@@ -59,12 +66,16 @@ struct Machine {
 
 impl Machine {
     fn new(dry_run: bool) -> Machine {
+        Machine::of(dry_run, &["Sam"])
+    }
+
+    fn of(dry_run: bool, owners: &[&str]) -> Machine {
         let dir = tempfile::tempdir().unwrap();
         let config = serde_json::json!({
             "house": house(),
             "current": house(),
             "lock": dir.path().join("lock"),
-            "owners": ["Sam"],
+            "owners": owners,
             "exclude": [],
             "notify": stand_ins().join("notify"),
             "dryRun": dry_run,
@@ -74,21 +85,27 @@ impl Machine {
     }
 
     fn run(&self, args: &[&str]) -> Output {
+        self.command(args).output().unwrap()
+    }
+
+    fn command(&self, args: &[&str]) -> Command {
         let d = self.dir.path();
         let path = format!(
             "{}:{}",
             stand_ins().display(),
             std::env::var("PATH").unwrap()
         );
-        Command::new(env!("CARGO_BIN_EXE_house-sync"))
+        let mut command = Command::new(env!("CARGO_BIN_EXE_house-sync"));
+        command
             .arg(d.join("config.json"))
             .args(args)
             .env("PATH", path)
             .env_remove("GH_TOKEN_OWNER")
+            .env_remove("GH_REPO")
+            .env_remove("GIT_DIR")
             .env("LOG", d.join("gh.log"))
-            .env("NOTICES", d.join("notices"))
-            .output()
-            .unwrap()
+            .env("NOTICES", d.join("notices"));
+        command
     }
 
     fn read(&self, name: &str) -> String {
@@ -113,6 +130,56 @@ fn a_pass_asks_gh_as_the_owner_it_lists_and_tells_the_notifier() {
         ]
     );
     assert_eq!(m.read("notices"), "close house-markers\nclose house-sync\n");
+}
+
+/// Run from another owner's checkout, with GH_REPO naming it too: each list,
+/// every page of it, goes to gh as its own owner's with nothing around it
+/// naming another, and the calls that name a repo are left as they were.
+#[test]
+fn a_list_is_the_owners_whatever_repo_it_runs_in() {
+    let m = Machine::of(false, &["Sam", "Kim"]);
+    let checkout = m.dir.path().join("checkout");
+    fs::create_dir(&checkout).unwrap();
+    let git = |args: &[&str]| {
+        let ran = Command::new("git")
+            .args(args)
+            .current_dir(&checkout)
+            .output()
+            .unwrap();
+        assert!(ran.status.success(), "{ran:?}");
+    };
+    git(&["init", "-q"]);
+    git(&["remote", "add", "origin", "https://github.com/eve/x"]);
+    for git_dir in [None, Some(checkout.join(".git"))] {
+        let _ = fs::remove_file(m.dir.path().join("gh.log.around"));
+        let mut command = m.command(&[]);
+        command
+            .current_dir(&checkout)
+            .env("GH_REPO", "eve/x")
+            .env("PAGED", "yes");
+        if let Some(dir) = git_dir {
+            command.env("GIT_DIR", dir);
+        }
+        let ran = command.output().unwrap();
+        assert!(ran.status.success(), "{ran:?}");
+        let around = m.read("gh.log.around");
+        let lists: Vec<&str> = around.lines().filter(|l| !l.starts_with("- ")).collect();
+        assert_eq!(
+            lists,
+            [
+                "Sam repo= remotes=",
+                "Sam repo= remotes=",
+                "Kim repo= remotes=",
+                "Kim repo= remotes=",
+            ]
+        );
+        let rest: Vec<&str> = around.lines().filter(|l| l.starts_with("- ")).collect();
+        assert!(!rest.is_empty());
+        for line in rest {
+            assert!(line.contains("repo=eve/x"), "{line}");
+            assert!(line.contains("github.com/eve/x"), "{line}");
+        }
+    }
 }
 
 #[test]

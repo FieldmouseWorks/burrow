@@ -16,7 +16,7 @@ pub struct Config {
     pub lock: PathBuf,
     /// The GitHub users and orgs whose repos it keeps.
     pub owners: Vec<String>,
-    /// Repos it leaves alone, as OWNER/NAME globs.
+    /// Repos it leaves alone, as OWNER/NAME patterns (pattern.rs).
     pub exclude: Vec<String>,
     /// HOST-notify: `NOTIFY open|close KEY TITLE [BODY]`.
     pub notify: PathBuf,
