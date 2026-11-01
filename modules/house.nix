@@ -77,6 +77,10 @@ in
     # by hand, a new repo's first commits) starts house-sync@OWNER-REPO, its
     # pass over that repo. burrow-events' catch-up, when it starts and hourly,
     # is the full pass, for what no push reports: a house PR closed unmerged.
+    # New blocks need nothing of their own: the units carry them (sync's
+    # HOUSE), so a switch that brings some changes the units, and
+    # burrow-events' switch kick for a handler whose units changed starts the
+    # full pass.
     burrow.events.handlers.house = {
       events = [ "push" ];
       unit = "house-sync";
@@ -95,23 +99,7 @@ in
         TimeoutStartSec = "20min";
         Nice = 10;
       };
-    }) // {
-      # New blocks arrive with a switch, which changes this unit and so starts
-      # it again: it asks burrow-events for a full pass, in line with the
-      # handler's others.
-      house-sync-rules = {
-        description = "house-sync: a full pass for the house blocks this system has";
-        wantedBy = [ "multi-user.target" ];
-        after = [ "burrow-events.service" ];
-        restartTriggers = [ ../house ];
-        path = [ pkgs.curl ];
-        script = "curl -fsS --retry 10 --retry-connrefused --retry-delay 1 -d '' ${config.burrow.events.kick}/house";
-        serviceConfig = {
-          Type = "oneshot";
-          RemainAfterExit = true;
-        };
-      };
-    };
+    });
 
     burrow.claude.machineMd = lib.mkOrder 1060 ''
       ## The house blocks
