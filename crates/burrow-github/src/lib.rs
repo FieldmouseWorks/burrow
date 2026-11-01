@@ -159,11 +159,33 @@ pub fn query(
     query: &str,
     variables: Value,
 ) -> Result<Value, Error> {
+    graphql(api, owner, query, variables, true)
+}
+
+/// A GraphQL mutation about `owner`'s account: its `data`, or an Error as
+/// `query` gives one. Asked again only after a 429, as a POST is (`call`):
+/// GitHub can have done it when its answer is lost or a 5xx.
+pub fn mutate(
+    api: &mut dyn Api,
+    owner: &str,
+    mutation: &str,
+    variables: Value,
+) -> Result<Value, Error> {
+    graphql(api, owner, mutation, variables, false)
+}
+
+fn graphql(
+    api: &mut dyn Api,
+    owner: &str,
+    query: &str,
+    variables: Value,
+    repeats: bool,
+) -> Result<Value, Error> {
     let body = serde_json::json!({ "query": query, "variables": variables });
     let what = "POST graphql";
     let r = kept(
         what,
-        tried(api, what, true, |api| api.graphql(owner, &body))?,
+        tried(api, what, repeats, |api| api.graphql(owner, &body))?,
         &[],
     )?;
     let mut answer = r.json()?;
@@ -679,6 +701,57 @@ mod tests {
         gh.on("POST", "graphql", vec![ok(200, json!({"data": 1}), &[])]);
         assert_eq!(query(&mut gh, "sam", "q", json!({})).unwrap(), json!(1));
         assert_eq!(gh.asked[0].1, "graphql");
+    }
+
+    #[test]
+    fn asks_a_mutation_again_only_when_github_did_nothing() {
+        // A 502 can come after GitHub posted the reply: asked again, it
+        // would post a second.
+        let mut gh = Graph {
+            asked: vec![],
+            answers: vec![ok(502, Value::Null, &[])],
+        };
+        let e = mutate(&mut gh, "sam", "mutation { m }", json!({})).unwrap_err();
+        assert_eq!(
+            (e.why.as_str(), e.unanswered),
+            ("POST graphql: HTTP 502: ", true)
+        );
+        assert_eq!(gh.asked.len(), 1);
+        // A 429 is GitHub doing nothing: asked again, as the account it's about.
+        let mut gh = Graph {
+            asked: vec![],
+            answers: vec![
+                ok(429, Value::Null, &[]),
+                ok(200, json!({"data": {"m": 2}}), &[]),
+            ],
+        };
+        assert_eq!(
+            mutate(&mut gh, "Sam", "mutation { m }", json!({"t": "x"})).unwrap(),
+            json!({"m": 2})
+        );
+        assert_eq!(
+            gh.asked,
+            vec![
+                (
+                    "Sam".into(),
+                    json!({"query": "mutation { m }", "variables": {"t": "x"}})
+                );
+                2
+            ]
+        );
+        // Its errors are an Error, as a query's are.
+        let mut gh = Graph {
+            asked: vec![],
+            answers: vec![ok(
+                200,
+                json!({"data": null, "errors": [{"message": "no"}]}),
+                &[],
+            )],
+        };
+        assert_eq!(
+            mutate(&mut gh, "sam", "m", json!({})).unwrap_err().why,
+            "POST graphql: no"
+        );
     }
 
     #[test]

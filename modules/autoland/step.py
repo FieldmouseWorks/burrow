@@ -20,6 +20,7 @@ import re
 import subprocess
 import time
 
+import claims
 import common as C
 import lock_wait
 import proofs as P
@@ -52,6 +53,7 @@ STRIKES = {
     "build": "its proof build or run can't start (systemd-run refuses it, or a run has no checkout here)",
     "eval": "what its proof builds can't be worked out (its eval fails or times out)",
     "post": "GitHub keeps refusing a review it's to post",
+    "answer": "GitHub keeps refusing a Claude job's answers it's to post",
     "lost": "its Claude jobs keep stopping before they finish (timed out, quiet or crashed)",
     "stop": "proj keeps refusing to stop its Claude jobs on a head it no longer has",
 }
@@ -138,7 +140,6 @@ def handle(repo, pr, repo_info, digest, held=None):
         cleared("stop")
     else:
         strike("stop")
-
     # Open a day, it's listed for the owner (below): a pass then says so.
     after(ts(pr["createdAt"]), 24 * 60)  # ends: listed for the owner
 
@@ -270,6 +271,8 @@ def handle(repo, pr, repo_info, digest, held=None):
             st[kind] = at
             st[kind + "Job"] = jid
             st[kind + "At"] = C.NOW
+            if kind in claims.KINDS:
+                claims.handed(st, kind, jid, pr)
             deadline(kind)
             cleared(step)
             if not broken:
@@ -406,14 +409,15 @@ def handle(repo, pr, repo_info, digest, held=None):
             conflict = kind == "conflictFixed"
             proofs = {c: machine[c] for c in ci_names if c in machine} if ci == "red" and not conflict else {}
             train = ci == "red" and any(c.startswith(f"{T.CONTEXT} (") for c in ci_names)
-            if started(kind, fix_task(repo, pr, why, proofs, train, conflict), at, bool(how)):
+            before = claims.unposted(st, kind, at)
+            if started(kind, fix_task(repo, pr, why, proofs, train, tested, before), at, bool(how)):
                 if retry:
                     if not how:
                         st[kind + "Again"] = at
                     st.pop(kind + "Lost", None)
                 if kind == "handed":
                     eyes(repo, pr)
-                who = f"a Claude job has it since {clock(C.NOW)}"
+                who = f"a Claude job has it since {clock(C.NOW)}" + ("; the last one's answers didn't go up" if before else "")
             else:
                 digest.append(("Couldn't start a Claude job to fix it", line, why))
                 who = "no Claude job could start"
@@ -737,6 +741,11 @@ def handle(repo, pr, repo_info, digest, held=None):
             st["provedFor"] = stage
         P.started(st, outs if st.get("provedJob") != before else None)
 
+    # What its fix jobs left, posted once it's so (or they're stopped).
+    if said := claims.look(repo, pr, st, tag, strike, cleared, after):
+        settle("pending", said)
+        save(key, st)
+        return
     if pr["isDraft"]:
         # Work in progress, whoever's it is: nobody reviews it yet, and nobody
         # is told.
@@ -790,6 +799,7 @@ def handle(repo, pr, repo_info, digest, held=None):
     # (docs only), that's not green: nothing has tested it, so a judge job
     # runs the build and tests itself. One the train lands, the train's CI
     # is what tests it, merged onto the default branch.
+    tested = ci != "none" or by_train  # what a fix job pushes: CI tests it, or only the job does
     if ci == "none" and (not rc["requireCi"] or by_train):
         ci = "green"
     open_threads = sum(1 for t in pr["reviewThreads"]["nodes"] if not t["isResolved"])

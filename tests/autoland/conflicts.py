@@ -25,11 +25,12 @@ def desc(status):
     return status.partition("description=")[2].partition(" -f target_url")[0]
 
 
-# The whole gate can outlast the job on a loaded machine, and then the merge is
-# never pushed: the job runs what the merge touched, and CI has the gate.
+# The whole gate can outlast the job on a loaded machine, and then its work is
+# never pushed: the job runs what it changed (a merge, what the conflicts
+# touched), and CI has the gate.
 def targeted(task):
-    assert "Run the tests of what the conflicts touched" in task and "CI runs the whole gate once you push" in task, task
-    assert "run the repo's tests" not in task.lower(), task
+    assert "Run the tests of what you changed before you push (for a merge, of what its conflicts touched)" in task, task
+    assert "CI runs the whole gate once you push" in task and "run the repo's tests" not in task.lower(), task
 
 
 for pr in (clean(), clean(files=(".github/CODEOWNERS",), number=6, comments=[said(judgment("land"))]), clean(base="release")):
@@ -174,19 +175,35 @@ fresh_pr_state()
 status, _ = run(conflicting(clean(comments=[said(swept("held"))], **major)), 700)
 assert JOBS == [] and "renovate-sweep held it" in status, (JOBS, status)
 COMMITS.clear()
-# Only a conflict's job is told that: findings, red CI and a failing proof still
-# get the repo's tests, and the proof its rerun. A conflict on a red proof reruns
-# nothing: its merge is a new head, whose proofs run again.
+# So is every fix job's, for findings, red CI or a failing proof, which gets the
+# proof's rerun too; a PR no CI runs on has only the job to run its tests. A
+# conflict on a red proof reruns nothing: its merge is a new head, whose proofs
+# run again.
 S.CFG["repos"]["sam/r"] = {"proofJobs": {"remi-proof": "Run `just proof` and post the remi-proof status."}}
 red_proof = CI_GREEN + [{"__typename": "StatusContext", "context": "remi-proof", "state": "FAILURE", "description": ""}]
 for pr, rerun in ((clean(threads=[False]), False), (clean(checks=red), False), (clean(checks=red_proof), True)):
     fresh_pr_state()
     run(pr, 0)
     run(pr, 7200)
-    assert len(JOBS) == 1 and "Run the repo's tests before you push." in JOBS[0], JOBS
-    assert "conflicts touched" not in JOBS[0] and "whole gate" not in JOBS[0], JOBS
+    assert len(JOBS) == 1, JOBS
+    targeted(JOBS[0])
     assert ("Rerun it that way" in JOBS[0]) == rerun, JOBS
     STATES.clear()
+proving = S.CFG["repos"].pop("sam/r")
+fresh_pr_state()
+run(clean(threads=[False], checks=[]), 0)
+run(clean(threads=[False], checks=[]), 7200)
+assert len(JOBS) == 1 and "Run the repo's tests before you push: it has no CI to run them." in JOBS[0], JOBS
+assert "whole gate" not in JOBS[0], JOBS
+STATES.clear()
+# Nor has one of a repo that's set not to need any.
+S.CFG["repos"]["sam/r"] = {"requireCi": False}
+fresh_pr_state()
+run(clean(threads=[False], checks=[]), 0)
+run(clean(threads=[False], checks=[]), 7200)
+assert len(JOBS) == 1 and "it has no CI to run them." in JOBS[0], JOBS
+STATES.clear()
+S.CFG["repos"]["sam/r"] = proving
 fresh_pr_state()
 run(conflicting(clean(checks=red_proof)), 700)
 assert len(JOBS) == 1 and "it conflicts with main" in JOBS[0] and "Rerun it that way" not in JOBS[0], JOBS

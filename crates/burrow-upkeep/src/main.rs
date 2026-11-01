@@ -2,9 +2,11 @@
 //! steward (modules/autoland/steward.py) for each repo, with the App's token
 //! for the repo's owner in GH_TOKEN, under the pass's lock; `post`, which
 //! posts a reviewer's answer on a repo's PR; `queue`, which queues a
-//! reviewer on one, `fetch`, which fetches refs into the steward's
-//! mirror of a repo, and `sweep`, which deletes what the reviewers leave of
-//! its closed PRs and old heads; `token`, which mints the pass
+//! reviewer on one; `answer`, which posts a steward Claude job's answers on
+//! one once its push is the PR's head, and `pusher`, which says who pushed a
+//! branch's head; `fetch`, which fetches refs into the steward's mirror of a
+//! repo, and `sweep`, which deletes what the reviewers leave of its closed
+//! PRs and old heads; `token`, which mints the pass
 //! that token; and `hooks`, which a full pass ends with, and which mints its
 //! own. What it says of itself, on stderr, goes to the steward's journal.
 
@@ -16,6 +18,7 @@ use std::process::ExitCode;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use burrow_github::Gh;
+use burrow_upkeep::answer::{self, Handed, Head};
 use burrow_upkeep::branches::{self, Git};
 use burrow_upkeep::config::Config;
 use burrow_upkeep::hook::{self, Hooks};
@@ -63,6 +66,17 @@ const USAGE: &str = "usage:
       opened, the reviewer, the snapshot's name and the reasons' weighing:
       the queue entry's name or why it couldn't be queued, and a rate
       limit's reset, as JSON on stdout
+  burrow-upkeep CONFIG answer OWNER/REPO --now SECONDS
+      a steward Claude job's answers on a PR, posted only while the PR's
+      head is its push (or the head it was handed, when it pushed none); a
+      JSON object on stdin gives the PR's number, that head, the description
+      then, when it was handed and the job's answers file (or null): what
+      came of it (posted, nothing, wrong, unpushed, moved, refused or
+      unanswered) and a rate limit's reset, as JSON on stdout
+  burrow-upkeep CONFIG pusher OWNER/REPO --now SECONDS
+      who pushed a branch's head, from GitHub's record of its pushes; a JSON
+      object on stdin gives the branch and the head: the login (null for
+      none found) or why it couldn't say, as JSON on stdout
   burrow-upkeep CONFIG fetch OWNER/REPO --now SECONDS
       refs fetched into the steward's mirror of the repo, a JSON list of
       refspecs on stdin: the mirror's path or why it couldn't, as JSON on
@@ -188,7 +202,7 @@ fn run(args: &[String]) -> Result<(), Stop> {
         return Err(Stop::Usage(format!("{repo:?} isn't OWNER/REPO")));
     }
     if ![
-        "settle", "branches", "watch", "post", "queue", "fetch", "sweep",
+        "settle", "branches", "watch", "post", "queue", "answer", "pusher", "fetch", "sweep",
     ]
     .contains(&word)
     {
@@ -198,10 +212,10 @@ fn run(args: &[String]) -> Result<(), Stop> {
     if let Some((flag, its)) = f.own.iter().find(|(_, its)| *its != word) {
         return Err(Stop::Usage(format!("{flag} is {its}'s")));
     }
-    if f.dry && word == "post" {
-        return Err(Stop::Usage(
-            "post has no status run: it posts what it's given".into(),
-        ));
+    if f.dry && ["post", "answer"].contains(&word) {
+        return Err(Stop::Usage(format!(
+            "{word} has no status run: it posts what it's given"
+        )));
     }
     if f.dry && word == "queue" {
         return Err(Stop::Usage(
@@ -237,6 +251,18 @@ fn run(args: &[String]) -> Result<(), Stop> {
     if let Some(why) = ask.as_ref().and_then(Ask::wrong) {
         return Err(Stop::Usage(why));
     }
+    let handed = match word {
+        "answer" => Some(stdin::<Handed>(
+            "the job's answers to post, as a JSON object on stdin",
+        )?),
+        _ => None,
+    };
+    let head = match word {
+        "pusher" => Some(stdin::<Head>(
+            "the branch and its head, as a JSON object on stdin",
+        )?),
+        _ => None,
+    };
     let open = match word {
         "branches" => Some(stdin::<BTreeSet<String>>(
             "the open PRs' branches, as a JSON list on stdin",
@@ -290,6 +316,30 @@ fn run(args: &[String]) -> Result<(), Stop> {
             };
             json!({"queued": queued, "why": why, "limited": p.out.limited})
         }
+        ("answer", _) => {
+            let Some(handed) = &handed else {
+                return Err(Stop::Usage("no answers to post".into()));
+            };
+            let (outcome, why) = match answer::answer(&mut p, handed) {
+                Ok(answer::Posted::Answers) => ("posted", None),
+                Ok(answer::Posted::Nothing) => ("nothing", None),
+                Err(answer::Unposted::Wrong(why)) => ("wrong", Some(why)),
+                Err(answer::Unposted::Unpushed(why)) => ("unpushed", Some(why)),
+                Err(answer::Unposted::Moved(why)) => ("moved", Some(why)),
+                Err(answer::Unposted::Refused(why)) => ("refused", Some(why)),
+                Err(answer::Unposted::Unanswered(why)) => ("unanswered", Some(why)),
+            };
+            json!({"outcome": outcome, "why": why, "limited": p.out.limited})
+        }
+        ("pusher", _) => {
+            let Some(head) = &head else {
+                return Err(Stop::Usage("no head to look up".into()));
+            };
+            match answer::pusher(&mut p, head) {
+                Ok(by) => json!({"by": by, "why": null, "limited": p.out.limited}),
+                Err(e) => json!({"by": null, "why": e.why, "limited": p.out.limited}),
+            }
+        }
         ("branches", Some(open)) => {
             let default = f
                 .default
@@ -316,8 +366,9 @@ fn run(args: &[String]) -> Result<(), Stop> {
 
 /// What the steward hands the word on stdin, `what` it is: the open PRs'
 /// branches, none of which is deleted, the look whose answer is posted, the
-/// reviewer to queue, the refs to fetch, the open PRs' snapshots, or the
-/// repos a full pass's hooks are about. What isn't stops the word before it starts.
+/// reviewer to queue, a Claude job's answers, the branch whose pusher is
+/// asked for, the refs to fetch, the open PRs' snapshots, or the repos a
+/// full pass's hooks are about. What isn't stops the word before it starts.
 fn stdin<T: DeserializeOwned>(what: &str) -> Result<T, Stop> {
     let mut text = String::new();
     std::io::stdin()
