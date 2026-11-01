@@ -90,9 +90,10 @@
       # and their gate, built for every platform lib/project.nix knows. Its
       # tests include the shared workflows' (crates/burrow-workflows), which
       # read these files and run git, jq and nix, and the gate's run its VM
-      # tests in a slot of the real heavy (flock); proj's clone repos to read
-      # their origins, gh-token's make keys with openssl, and lock-age's
-      # check its wait against what the steward reads (lock_wait.py).
+      # tests in a slot of the real heavy (burrow-heavy); proj's clone repos
+      # to read their origins, gh-token's make keys with openssl, and
+      # lock-age's check its wait against what the steward reads
+      # (lock_wait.py).
       crates = self.lib.project {
         inherit self;
         rust = {
@@ -104,7 +105,6 @@
             "templates/project/.github/workflows/flake.yml"
             "templates/project/.github/workflows/flake-retarget.yml"
             "modules/autoland/prs.py"
-            "modules/cpu/heavy.sh"
             "modules/autoland/lock_wait.py"
           ];
           testInputs = pkgs: [ pkgs.git pkgs.jq pkgs.nix pkgs.util-linux pkgs.openssl ];
