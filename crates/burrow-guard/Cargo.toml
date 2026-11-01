@@ -1,0 +1,19 @@
+[package]
+name = "burrow-guard"
+description = "Claude Code's PreToolUse guard: an undo snapshot before what destroys files, a question before a one-way door"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+jiff.workspace = true
+regex = { version = "1.13.1", default-features = false, features = ["std"] }
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

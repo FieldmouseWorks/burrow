@@ -114,7 +114,7 @@ For every reviewer, the steward's included. Flag as P1:
 - secrets, tokens or personal data in the diff or the logs it adds
 - behavior changed beyond what the PR says it does
 - a one-way door that stops asking: an R2 `ask` rule in `modules/claude.nix`
-  dropped or narrowed, or the guard (`modules/claude/guard.sh`) letting a
+  dropped or narrowed, or the guard (`crates/burrow-guard`) letting a
   delete through without its snapshot or a default-branch force-push without
   asking
 - a system change that can stay live without being confirmed: the switch's

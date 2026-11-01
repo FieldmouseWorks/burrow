@@ -1,7 +1,7 @@
 # robot: Hetzner's out-of-band controls (rescue system, hard reset, wake-on-LAN)
 # for a Hetzner dedicated server, from the server itself or from anywhere with
 # the Robot credentials (robot/robot.sh). Cancelling and reinstalling are left
-# out on purpose, and the guard (claude/guard.sh) asks before a raw call to them.
+# out on purpose, and the guard (crates/burrow-guard) asks before a raw call to them.
 inputs:
 { config, lib, pkgs, ... }:
 let

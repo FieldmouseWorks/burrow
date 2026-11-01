@@ -1,0 +1,990 @@
+//! The guard's controls: each would fail on the bug it's for.
+
+use std::fs;
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant, SystemTime};
+
+use burrow_guard::config::Config;
+use burrow_guard::{Guard, Hook, Input};
+use tempfile::TempDir;
+
+/// A machine for the guard: a zfs that writes down what it's asked to do
+/// (and fails, saying `fail`, when that file is there), two undo datasets,
+/// and the mark in a runtime dir of its own.
+struct Box {
+    dir: TempDir,
+    config: Config,
+}
+
+impl Box {
+    fn new() -> Box {
+        Box::with_datasets(&["pool/a", "pool/b"])
+    }
+
+    fn with_datasets(datasets: &[&str]) -> Box {
+        let dir = tempfile::tempdir().unwrap();
+        let zfs = dir.path().join("zfs");
+        fs::write(
+            &zfs,
+            format!(
+                "#!/bin/sh\necho \"$@\" >> '{0}/zfs.log'\n[ ! -e '{0}/fail' ] || {{ cat '{0}/fail' >&2; exit 1; }}\n",
+                dir.path().display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&zfs, fs::Permissions::from_mode(0o755)).unwrap();
+        let config = Config {
+            git: PathBuf::from("git"),
+            zfs,
+            snapshot_datasets: datasets.iter().map(|d| (*d).to_owned()).collect(),
+            ask_after_seconds: 8,
+        };
+        Box { dir, config }
+    }
+
+    fn mark(&self) -> PathBuf {
+        self.dir.path().join("claude-guard-last-snapshot")
+    }
+
+    /// What the guard says about `cmd` run in `cwd`, now.
+    fn check(&self, cmd: &str, cwd: &Path) -> Option<String> {
+        self.check_at(cmd, cwd, SystemTime::now())
+    }
+
+    fn check_at(&self, cmd: &str, cwd: &Path, now: SystemTime) -> Option<String> {
+        let guard = Guard {
+            config: &self.config,
+            mark: self.mark(),
+        };
+        guard.check(&bash(cmd, cwd), now)
+    }
+
+    /// The snapshot rounds zfs was asked for.
+    fn snapshots(&self) -> Vec<String> {
+        fs::read_to_string(self.dir.path().join("zfs.log"))
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// A fresh burst: no snapshot taken yet.
+    fn forget(&self) {
+        let _ = fs::remove_file(self.dir.path().join("zfs.log"));
+        let _ = fs::remove_file(self.mark());
+    }
+}
+
+fn bash(cmd: &str, cwd: &Path) -> Hook {
+    Hook {
+        tool_name: Some("Bash".to_owned()),
+        tool_input: Some(Input {
+            command: Some(cmd.to_owned()),
+        }),
+        cwd: Some(cwd.to_string_lossy().into_owned()),
+    }
+}
+
+fn git(dir: &Path, args: &[&str]) {
+    let ok = Command::new("git")
+        .args([
+            "-c",
+            "user.name=Invented",
+            "-c",
+            "user.email=invented@example.invalid",
+        ])
+        .args(args)
+        .current_dir(dir)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .stdout(Stdio::null())
+        .status()
+        .unwrap()
+        .success();
+    assert!(ok, "git {args:?}");
+}
+
+/// A clone on `branch`, tracking origin's `branch`.
+fn clone_on(branch: &str) -> TempDir {
+    clone_tracking(branch, branch)
+}
+
+/// A clone on `branch`, tracking origin's `upstream`.
+fn clone_tracking(branch: &str, upstream: &str) -> TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    git(d, &["init", "-q", "-b", branch]);
+    git(d, &["commit", "-q", "--allow-empty", "-m", "invented"]);
+    git(d, &["remote", "add", "origin", "/dev/null"]);
+    git(
+        d,
+        &[
+            "update-ref",
+            &format!("refs/remotes/origin/{upstream}"),
+            "HEAD",
+        ],
+    );
+    git(d, &["config", &format!("branch.{branch}.remote"), "origin"]);
+    git(
+        d,
+        &[
+            "config",
+            &format!("branch.{branch}.merge"),
+            &format!("refs/heads/{upstream}"),
+        ],
+    );
+    dir
+}
+
+const SHARED: &str = "(R2: rewrites history other clones depend on).";
+
+#[test]
+fn only_bash_is_read() {
+    let b = Box::new();
+    let mut hook = bash("rm -rf / && git push -f origin main", Path::new("/"));
+    hook.tool_name = Some("Write".to_owned());
+    let guard = Guard {
+        config: &b.config,
+        mark: b.mark(),
+    };
+    assert_eq!(guard.check(&hook, SystemTime::now()), None);
+    assert!(b.snapshots().is_empty());
+}
+
+#[test]
+fn what_destroys_files_is_snapshotted_first() {
+    let b = Box::new();
+    let at = Path::new("/");
+    for cmd in [
+        "rm -rf target",
+        "rmdir x",
+        "shred x",
+        "truncate -s 0 x",
+        "unlink x",
+        "git clean -fdx",
+        "git reset --hard",
+        "git checkout -- .",
+        "git switch main",
+        "git restore x",
+        "git stash",
+        "git branch -D x",
+        "git worktree remove /tmp/x",
+        "git filter-repo --path x",
+        "git -C /tmp/x reset --hard",
+        "git -c core.x=y reset --hard",
+        "echo x > out.txt",
+        "echo x >> out.txt",
+        "echo x>out",
+        "echo x > /tmp/out",
+        "echo x 2> err.log",
+        "cmd 2>>err.log",
+        "cmd &> all.log",
+        "x 1>out",
+        "rsync -a --delete a/ b/",
+        "find . -name '*.o' -delete",
+        "mv a b",
+        "cp a b",
+        "echo x | tee f",
+        "sed -i s/a/b/ f",
+        "perl -pi -e s/a/b/ f",
+        "(rm x)",
+        "true && rm x",
+        "true;rm x",
+        "bash -c 'rm -rf x'",
+        "sh -c \"cp a b\"",
+        "echo `rm x`",
+        "echo $(rm x)",
+        "/bin/rm x",
+        "/usr/bin/mv a b",
+        "ssh host 'rm -rf /data/x'",
+        "echo a\nrm b",
+    ] {
+        b.forget();
+        assert_eq!(b.check(cmd, at), None, "{cmd:?}");
+        let snaps = b.snapshots();
+        assert_eq!(snaps.len(), 1, "{cmd:?}: {snaps:?}");
+        let words: Vec<&str> = snaps[0].split(' ').collect();
+        assert_eq!(words.len(), 3, "{snaps:?}");
+        assert_eq!(words[0], "snapshot");
+        let stamp = words[1].strip_prefix("pool/a@pre-").unwrap();
+        assert_eq!(
+            words[2],
+            format!("pool/b@pre-{stamp}"),
+            "one round, one name"
+        );
+        assert!(stamp.len() == 15 && stamp.as_bytes()[8] == b'-', "{stamp}");
+    }
+}
+
+#[test]
+fn what_leaves_files_alone_isnt() {
+    let b = Box::new();
+    for cmd in [
+        "ls -la",
+        "cat file.txt",
+        "git status",
+        "git log --oneline -5",
+        "cargo test 2>/dev/null",
+        "make 2>&1 | tail",
+        "ls >/dev/null",
+        "cmd &>/dev/null",
+        "cargo fmt",
+        "echo x >&2",
+        "cmd 2>&1",
+        "git push origin feature",
+        "",
+    ] {
+        b.forget();
+        assert_eq!(b.check(cmd, Path::new("/")), None, "{cmd:?}");
+        assert!(b.snapshots().is_empty(), "{cmd:?}");
+    }
+}
+
+#[test]
+fn one_round_of_snapshots_per_burst() {
+    let b = Box::new();
+    let at = Path::new("/");
+    let now = SystemTime::now();
+    b.check_at("rm a", at, now);
+    b.check_at("rm b", at, now + Duration::from_secs(4));
+    assert_eq!(b.snapshots().len(), 1, "a second round inside the burst");
+    b.check_at("rm c", at, now + Duration::from_secs(5));
+    assert_eq!(b.snapshots().len(), 2, "no round once the burst is over");
+    // A mark from the future vouches for nothing.
+    fs::File::options()
+        .write(true)
+        .open(b.mark())
+        .unwrap()
+        .set_modified(now + Duration::from_secs(3600))
+        .unwrap();
+    b.check_at("rm d", at, now + Duration::from_secs(6));
+    assert_eq!(b.snapshots().len(), 3, "a mark from the future held it off");
+}
+
+#[test]
+fn no_snapshot_no_undo_so_it_asks() {
+    let b = Box::new();
+    fs::write(
+        b.dir.path().join("fail"),
+        "cannot create snapshot: out of space\n",
+    )
+    .unwrap();
+    let asked = b.check("rm -rf x", Path::new("/")).unwrap();
+    assert_eq!(
+        asked,
+        "Couldn't take the undo snapshot first (cannot create snapshot: out of space), so this would have no undo."
+    );
+    // A failed round doesn't hold off the next: it's tried again.
+    assert!(b.check("rm -rf x", Path::new("/")).is_some());
+    assert_eq!(b.snapshots().len(), 2);
+
+    let mut gone = Box::new();
+    gone.config.zfs = gone.dir.path().join("no-such-zfs");
+    let asked = gone.check("rm -rf x", Path::new("/")).unwrap();
+    assert!(
+        asked.starts_with("Couldn't take the undo snapshot first ("),
+        "{asked}"
+    );
+}
+
+#[test]
+fn no_datasets_no_snapshot() {
+    let b = Box::with_datasets(&[]);
+    assert_eq!(b.check("rm -rf x", Path::new("/")), None);
+    assert!(b.snapshots().is_empty());
+}
+
+#[test]
+fn a_push_that_can_rewrite_a_shared_branch_asks() {
+    let b = Box::new();
+    let main = clone_on("main");
+    let feature = clone_on("feature");
+    let (m, f) = (main.path(), feature.path());
+    let in_main = format!("git -C {} push -f", m.display());
+    for (cmd, at, branch) in [
+        ("git push -f", m, "main"),
+        ("git push --force", m, "main"),
+        ("git push --force-with-lease", m, "main"),
+        ("git push --force origin main", f, "main"),
+        (
+            "git push --force-with-lease=main:abc origin main",
+            f,
+            "main",
+        ),
+        ("git push --force-if-includes origin main", f, "main"),
+        ("git push origin +main", f, "main"),
+        ("git push origin :main", f, "main"),
+        ("git push origin --delete main", f, "main"),
+        ("git push -f origin HEAD", f, "HEAD"),
+        ("git push -f origin @", f, "@"),
+        ("git push -f origin HEAD:refs/heads/main", f, "main"),
+        ("git push -f origin feature:main", f, "main"),
+        ("git push -f origin refs/heads/main", f, "main"),
+        ("git push -f origin feature main", f, "main"),
+        ("git push -f origin master", f, "master"),
+        ("git push -f origin trunk", f, "trunk"),
+        (&in_main, f, "main"),
+        ("cd x && git push -f origin main", f, "main"),
+        ("echo git push -f origin main", f, "main"),
+        ("git fetch && git push --force", m, "main"),
+        // Every push in the command, not only the first.
+        (
+            "git push -f origin feature && git push -f origin main",
+            f,
+            "main",
+        ),
+        ("git push origin feature; git push -f", m, "main"),
+        // Short options together.
+        ("git push -uf origin main", f, "main"),
+        ("git push -fu", m, "main"),
+        // Quotes don't hide a refspec.
+        ("git push -f origin \"+main\"", f, "main"),
+        ("git push origin \"+main\"", f, "main"),
+        ("git push -f 'origin' 'main'", f, "main"),
+        ("ssh remi 'git -C /data push -f origin main'", f, "main"),
+        // Options before push, and option values that aren't the remote.
+        ("git -c push.default=current push -f", m, "main"),
+        ("git push -o ci.skip -f origin main", f, "main"),
+        ("git push -f -o ci.skip origin", m, "main"),
+        ("git push -f --push-option ci.skip origin", m, "main"),
+    ] {
+        assert_eq!(
+            b.check(cmd, at),
+            Some(format!("Force-push or delete of '{branch}' {SHARED}")),
+            "{cmd:?}"
+        );
+    }
+    // With no refspec, the branch checked out and its upstream both count.
+    let onto_main = clone_tracking("work", "main");
+    let from_main = clone_tracking("main", "work");
+    for at in [onto_main.path(), from_main.path()] {
+        assert_eq!(
+            b.check("git push -f", at),
+            Some(format!("Force-push or delete of 'main' {SHARED}")),
+            "{at:?}"
+        );
+    }
+    let relative = format!(
+        "git -C ../{} push -f",
+        m.file_name().unwrap().to_str().unwrap()
+    );
+    assert_eq!(
+        b.check(&relative, f),
+        Some(format!("Force-push or delete of 'main' {SHARED}")),
+        "-C is taken from where the command runs"
+    );
+    for cmd in [
+        "git push --all -f",
+        "git push --branches -f",
+        "git push --mirror",
+        "git push --prune origin",
+        // Long options as git reads them: the only one a word begins.
+        "git push --al -f",
+        "git push --b -f",
+        "git push --m",
+        "git push --pru origin",
+    ] {
+        assert_eq!(
+            b.check(cmd, f),
+            Some(format!(
+                "Push that can rewrite or delete every remote branch {SHARED}"
+            )),
+            "{cmd:?}"
+        );
+    }
+}
+
+#[test]
+fn a_push_that_cant_rewrite_a_shared_branch_doesnt_ask() {
+    let b = Box::new();
+    let main = clone_on("main");
+    let feature = clone_on("feature");
+    let (m, f) = (main.path(), feature.path());
+    let in_feature = format!("git -C {} push -f", f.display());
+    for (cmd, at) in [
+        ("git push", m),
+        ("git push origin main", m),
+        ("git push --all", f),
+        ("git push -f", f),
+        ("git push -f origin feature", m),
+        ("git push origin +feature", m),
+        ("git push -d origin feature", m),
+        ("git push -f origin main:feature", f),
+        (&in_feature, m),
+        ("git push --dry-run origin main", f),
+        ("git push -o fd origin main", f),
+        ("git push -ofd origin", m),
+    ] {
+        assert_eq!(b.check(cmd, at), None, "{cmd:?}");
+    }
+}
+
+// A push's words are the shell's: a quoted or escaped option value is one
+// word, whatever is in it, so it can't take a flag or refspec that follows,
+// or stop the push at a `;` inside it.
+#[test]
+fn a_push_is_read_word_by_word_as_the_shell_splits_it() {
+    let b = Box::new();
+    let main = clone_on("main");
+    // A feature branch tracking another: only a refspec can name main.
+    let work = clone_tracking("work", "feature");
+    let (m, w) = (main.path(), work.path());
+    for cmd in [
+        "git push -f origin -o 'ci -o' HEAD:main",
+        r#"git push -f origin -o "ci -o" HEAD:main"#,
+        r"git push -f origin -o ci\ -o HEAD:main",
+        "git push -f origin -o'ci -o' HEAD:main",
+        "git push -fo 'ci -o' origin HEAD:main",
+        "git push -o 'x -o' -f origin main",
+        "git push --push-option 'x -o' -f origin main",
+        "git push --receive-pack 'git receive-pack' -f origin main",
+        "git push --exec 'git receive-pack' -f origin main",
+        "git push --repo 'origin' -f origin main",
+        "git push -f origin -o 'a;b' HEAD:main",
+        "git push -f origin -o 'a|b' HEAD:main",
+        "git push -f origin -o 'a && b' HEAD:main",
+        "git push -f origin -o \"a\nb\" HEAD:main",
+        // Pushes inside what another command runs.
+        r#"bash -c "git push -f origin -o 'ci -o' HEAD:main""#,
+        "sh -c 'cd x; git push -f origin main'",
+        "x=$(git push -f origin main)",
+        "echo `git push -f origin main`",
+        r#"echo "$(git push -f origin main)""#,
+        // git's own options, and git by its path.
+        "git --no-pager push -f origin main",
+        "git -c 'user.name=A B' push -f origin main",
+        "/usr/bin/git push -f origin main",
+        "git push -f origin main 2>&1 | tail",
+        // A redirect anywhere among its words, and what it runs.
+        "git push 2>&- -f origin main",
+        "git push <&- -f origin main",
+        "cat <(git push -f origin main)",
+        // Dollar quotes, and the words around a substitution.
+        "bash -c $'git push -f origin main '",
+        r"bash -c $'git\x20push -f origin \x6dain'",
+        "git push -f origin --receive-pack $(printf git-receive-pack) HEAD:main",
+        r#"echo "$(git push -f origin -o "ci -o" HEAD:main )""#,
+        r#"echo "`git push -f origin -o \"ci -o\" HEAD:main`""#,
+        "git push -f origin &>/dev/null main",
+        // What a redirect's target runs.
+        r#"cat <"$(git push -f origin main )""#,
+        r#"cat <<< "$(git push -f origin main)""#,
+        "echo x > `git push -f origin main`",
+        // Whitespace the shell doesn't split on is just part of a word.
+        "echo 'a\u{a0}b\u{b}c\u{c}d'; git push -f origin main",
+        // Long options as git reads them: the only one a word begins.
+        "git push --del origin main",
+        "git push origin --de main",
+        "git push --force-w origin main",
+        "git push --force-i origin main",
+        "git push --pu 'x y' -f origin main",
+        "git push --rece 'git receive-pack' -f origin main",
+        "git push -f --recurse-submodules check origin main",
+        // After `--`, every word is a refspec.
+        "git push -f origin -- main",
+    ] {
+        assert_eq!(
+            b.check(cmd, w),
+            Some(format!("Force-push or delete of 'main' {SHARED}")),
+            "{cmd:?}"
+        );
+    }
+    // A refspec it was given is what it pushes, however its options are
+    // quoted: the branch checked out (main) doesn't count then.
+    for cmd in [
+        "git push -f origin -o 'x -o' feature",
+        "git push -f -o 'a b' origin feature",
+        "git push -o '-f' origin main",
+        "git push -f origin feature > main",
+        "git push -f origin feature <<< main",
+        "git push -f origin feature $(echo main)",
+        // Ambiguous or negated, they stop git or force nothing.
+        "git push --forc origin main",
+        "git push --no-force origin main",
+        "git push --no-repo origin feature",
+    ] {
+        assert_eq!(b.check(cmd, m), None, "{cmd:?}");
+    }
+    // A value an option takes isn't the remote, so this pushes main, the
+    // branch checked out.
+    assert_eq!(
+        b.check("git push -f --recurse-submodules check origin", m),
+        Some(format!("Force-push or delete of 'main' {SHARED}"))
+    );
+}
+
+#[test]
+fn a_git_joined_to_what_comes_before_it_is_still_read() {
+    let b = Box::new();
+    let work = clone_tracking("work", "feature");
+    let w = work.path();
+    let main = format!("Force-push or delete of 'main' {SHARED}");
+    for cmd in [
+        // Each pushes main under bash with a stub git.
+        "su --command='git push -f origin main; true'",
+        r#"arr[0]='git push -f origin main; true'; eval "${arr[0]}""#,
+        "git -c alias.p='!git push -f origin main -q' p",
+        // Not git itself, but the bash asked about them, and a question
+        // costs less than guessing what they run.
+        "xgit push -f origin main",
+        r#"echo '{"cmd":"git push -f origin main -q"}'"#,
+        // An expansion among git's own options.
+        "git $opts push -f origin main",
+    ] {
+        assert_eq!(b.check(cmd, w), Some(main.clone()), "{cmd:?}");
+    }
+    for cmd in [
+        "gitk push -f origin main",
+        "git $opts status -f origin main",
+        "legit status -f origin main",
+    ] {
+        assert_eq!(b.check(cmd, w), None, "{cmd:?}");
+    }
+}
+
+#[test]
+fn a_refspec_is_read_the_same_after_a_double_dash() {
+    let b = Box::new();
+    let on_feature = clone_tracking("feature", "feature");
+    for cmd in [
+        "git push origin -- +HEAD:main",
+        "git push origin -- +main",
+        "git push origin -- :main",
+        "git push -- origin +main",
+        "git push -- origin :main",
+        "git push -f -- origin main",
+        "git push -f origin -- +main",
+        "git push -d origin -- main",
+        "git push origin -- +x:refs/heads/main",
+        "git push origin -- :refs/heads/main",
+        "git push origin +x:heads/main",
+        "git push -f origin -- +refs/heads/x:refs/heads/main",
+        // A wildcard or a matching push can reach a shared branch.
+        "git push origin -- '+refs/heads/*:refs/heads/*'",
+        "git push origin '+refs/*:refs/*'",
+        "git push -f origin 'refs/heads/m*:refs/heads/m*'",
+        "git push -f origin 'refs/heads/*'",
+        "git push origin +:",
+        "git push -f origin :",
+        "git push -f origin -- :",
+        // A source with an empty destination updates itself.
+        "git push -f origin main:",
+    ] {
+        let said = b.check(cmd, on_feature.path());
+        assert!(
+            said.as_deref().is_some_and(|s| s.ends_with(SHARED)),
+            "{cmd}: {said:?}"
+        );
+    }
+    for cmd in [
+        "git push origin -- feature",
+        "git push origin -- x:main",
+        "git push -- origin main",
+        "git push origin -- +feature",
+        "git push origin -- :feature",
+        "git push origin :",
+        "git push -f origin '+refs/heads/*:refs/tags/*'",
+        "git push origin '+refs/heads/f*:refs/heads/f*'",
+        "git push origin -- -f main",
+    ] {
+        assert_eq!(b.check(cmd, on_feature.path()), None, "{cmd}");
+    }
+}
+
+#[test]
+fn a_substitution_ends_where_the_shell_ends_it() {
+    let b = Box::new();
+    let on_feature = clone_tracking("feature", "feature");
+    let push = "git push -f origin main";
+    for cmd in [
+        format!(r#"echo "$(case x in x){push} ;; esac)""#),
+        format!(r#"echo "$(case x in (x){push} ;; esac)""#),
+        format!(r#"echo "$(case x in x|y){push} ;; esac)""#),
+        format!(r#"echo "$(case x in @(x|y)){push} ;; esac)""#),
+        format!(r#"echo "$(case x in y) a ;; x){push} ;; esac)""#),
+        format!(r"echo `case x in x){push} ;; esac`"),
+        format!(r"cat <(case x in x){push} ;; esac)"),
+        // Its arguments stay with the push around the substitution.
+        "git push -f $(case x in x) echo origin ;; esac) main".to_owned(),
+        // Comments, here-documents and parameters, with what would end it.
+        format!("echo \"$(a # )\n{push} )\""),
+        format!("echo \"$(cat <<E\n)\nE\n{push} )\""),
+        "git push -f origin \"$(cat <<E\nbody\nE)\" main".to_owned(),
+        // After every word a command can follow.
+        "git push -f origin $(function f { case x in x) a; esac; }) main".to_owned(),
+        format!("echo \"$(a ${{x:-)}}; {push} )\""),
+        // A quote in any of them isn't one.
+        format!("a # don't\n{push}"),
+        format!("cat <<E\ndon't\nE\n{push}"),
+        format!("bash <<E\n{push}\nE"),
+        format!("cat <<E\ndon't $({push} )\nE"),
+    ] {
+        let said = b.check(&cmd, on_feature.path());
+        assert!(
+            said.as_deref().is_some_and(|s| s.ends_with(SHARED)),
+            "{cmd}: {said:?}"
+        );
+    }
+    for cmd in [
+        "echo \"$(case x in x) ls ;; esac)\" main -f",
+        "echo git-push # )",
+        "cat <<E\ngit status\nE",
+    ] {
+        assert_eq!(b.check(cmd, on_feature.path()), None, "{cmd}");
+    }
+}
+
+#[test]
+fn dollar_quotes_decode_to_the_bytes_bash_runs() {
+    let b = Box::new();
+    let on_feature = clone_tracking("feature", "feature");
+    for cmd in [
+        r"bash -c $'git\440push -f origin main '",
+        r"bash -c $'git push -f origin main\0ignored'",
+        r"bash -c $'git push -f origin main\x00ignored'",
+        r"bash -c $'git push -f origin main\u0000ignored'",
+        r"bash -c $'git push -f origin main\c@ignored'",
+        r"git push $'-\546' origin main",
+        r"git push -f origin $'ma\0x'in",
+        r"bash -c $'git\x{20}push -f origin main '",
+        r"bash -c $'git\u0020push -f origin main '",
+    ] {
+        let said = b.check(cmd, on_feature.path());
+        assert!(
+            said.as_deref().is_some_and(|s| s.ends_with(SHARED)),
+            "{cmd}: {said:?}"
+        );
+    }
+    // What a NUL cuts off runs nowhere.
+    assert_eq!(
+        b.check(
+            r"bash -c $'git push origin feature\0 -f main'",
+            on_feature.path()
+        ),
+        None
+    );
+}
+
+#[test]
+fn what_a_shell_is_handed_some_other_way_is_read_too() {
+    let b = Box::new();
+    let on_feature = clone_tracking("feature", "feature");
+    for cmd in [
+        // A here-string fed to a shell.
+        r#"bash <<< "git push -f origin main; true""#,
+        "sh <<< 'git push --delete origin main && echo ok'",
+        "bash<<<'git push --force origin main; true'",
+        "bash <<< 'git push -f origin main'",
+        // A variable that's run later.
+        r#"cmd="git push -f origin main && echo done"; eval "$cmd""#,
+        "x='git push -f origin main '; $x",
+        "export x='git push -f origin main'",
+        "x+='git push -f origin main'",
+        // The words after a script.
+        r#"bash -c 'git push "$@"' _ -f origin main"#,
+        r#"sh -c 'git push -f origin "$1"' _ main"#,
+        r#"sh -lc 'git push -f origin "${1}"' _ main"#,
+        r#"/bin/bash -c 'git push $*' _ -f origin main"#,
+        "eval 'git push' -f origin main",
+        "eval 'true; git push' -f origin main",
+        // What only an expansion hides.
+        "${x}git push -f origin main",
+        r#"$x""git push -f origin main"#,
+        "$(true)git push -f origin main",
+        "`true`git push -f origin main",
+        "git=git; $git push -f origin main",
+        "${git} push -f origin main",
+        "$GIT push -f origin main",
+        // Its own options before the push.
+        "git --attr-source x push -f origin main",
+    ] {
+        let said = b.check(cmd, on_feature.path());
+        assert!(
+            said.as_deref().is_some_and(|s| s.ends_with(SHARED)),
+            "{cmd}: {said:?}"
+        );
+    }
+    // Refspecs from its input can't be seen, so a force-push asks.
+    for cmd in [
+        "xargs git push -f origin <<< main",
+        "echo main | xargs git push -f origin",
+        "printf main | /usr/bin/xargs git push --force origin",
+    ] {
+        let said = b.check(cmd, on_feature.path());
+        assert!(
+            said.as_deref().is_some_and(|s| s.ends_with(SHARED)),
+            "{cmd}: {said:?}"
+        );
+    }
+    for cmd in [
+        "cat <<< 'hello main'",
+        "git push origin feature <<< main",
+        "x=1 git push origin feature",
+        "msg='git push is fine'; echo $msg",
+        // Parameters a script doesn't use reach nothing.
+        "bash -c 'git push -f origin feature' _ main",
+        r#"bash -c 'git push origin "$1"' _ feature -f"#,
+        "eval 'git push' origin feature",
+        "$git status",
+        "$(true)git status",
+        "echo $x",
+        "echo x | xargs git push origin feature",
+    ] {
+        assert_eq!(b.check(cmd, on_feature.path()), None, "{cmd}");
+    }
+}
+
+#[test]
+fn a_parameters_text_is_read_as_what_it_may_expand_to() {
+    let b = Box::new();
+    let work = clone_on("feature");
+    let main = Some(format!("Force-push or delete of 'main' {SHARED}"));
+    for cmd in [
+        "${x:-git push -f origin main }",
+        ": ${x:=git push -f origin main }; $x",
+        r#"eval "${x:-git push -f origin main }""#,
+        r#"eval "${x:-git push -f origin main; true}""#,
+        r#"bash -c "${x:-git push -f origin main }""#,
+        "${x:+git push -f origin main}",
+        "${x-git push -f origin main}",
+        "${x/a/git push -f origin main}",
+        "${x:-${y:-git push -f origin main}}",
+        "${x:-git} push -f origin main",
+        "${x:-git push} -f origin main",
+        "${x:-git push -f} origin main",
+        "${x:-git push -f origin} main",
+        "git ${x:-push} -f origin main",
+        "git ${x:-push -f origin main}",
+        "git push ${x:--f} origin main",
+        "git push -f ${x:-origin} main",
+        "git push -f origin ${x:-main}",
+        "git push -f origin ${x:-+main}",
+        "pre${x:-; git push -f origin main }post",
+        r#"y="${x:-git push -f origin main }"; eval "$y""#,
+    ] {
+        assert_eq!(b.check(cmd, work.path()), main, "{cmd}");
+    }
+    // A push of the branch it's on, with the remote in a parameter.
+    let on_main = clone_on("main");
+    assert_eq!(b.check("git push -f ${x:-origin}", on_main.path()), main);
+    assert_eq!(b.check("git push -f ${x:-origin}", work.path()), None);
+    // Nothing forced or nothing shared, and no text to read.
+    for cmd in [
+        "${x:-git push origin main}",
+        "${x:-git push -f origin feature}",
+        "echo ${x:-a b} ${y}",
+        "git push -f origin ${x}",
+    ] {
+        assert_eq!(b.check(cmd, work.path()), None, "{cmd}");
+    }
+}
+
+#[test]
+fn a_scripts_words_reach_whatever_in_it_still_expands() {
+    let b = Box::new();
+    let work = clone_on("feature");
+    let main = Some(format!("Force-push or delete of 'main' {SHARED}"));
+    for cmd in [
+        r#"bash -c 'git push "${@:1}"' _ -f origin main"#,
+        r#"bash -c 'git push "${@:1}"; true' _ -f origin main"#,
+        r#"bash -c 'a=("$@"); git push "${a[@]}"' _ -f origin main"#,
+        r#"bash -c 'a="$*"; git push $a; true' _ -f origin main"#,
+        r#"bash -c 'git push $(echo "$@")' _ -f origin main"#,
+        r#"bash -c 'git push "x$@"' _ -f origin main"#,
+        r#"bash -c 'shift; git push "$@"' _ x -f origin main"#,
+        r#"sh -c 'eval "git push \"\${@:1}\""' _ -f origin main"#,
+    ] {
+        assert_eq!(b.check(cmd, work.path()), main, "{cmd}");
+    }
+    // A script that expands nothing takes none, and one that takes them
+    // isn't given a branch they don't name.
+    for cmd in [
+        "bash -c 'git push origin feature' _ -f origin main",
+        r#"bash -c 'git push "${@:1}"' _ -f origin feature"#,
+    ] {
+        assert_eq!(b.check(cmd, work.path()), None, "{cmd}");
+    }
+}
+
+#[test]
+fn a_command_too_long_to_read_asks() {
+    let b = Box::new();
+    let work = clone_on("feature");
+    let asks = Some(
+        "The guard couldn't check this command (it's too long to read in time), so it asks."
+            .to_owned(),
+    );
+    let repeat = |text: &str, n: usize| text.repeat(n);
+    for cmd in [
+        // Each push reads every word after it.
+        repeat("git push x ", 8_000),
+        // Every word of a script given every parameter.
+        format!(
+            "bash -c '{}' _ {}",
+            repeat("$a ", 3_000),
+            repeat("b ", 3_000)
+        ),
+        // Every push asking git about a place of its own.
+        (0..100)
+            .map(|i| format!("git -C d{i} push -f"))
+            .collect::<Vec<_>>()
+            .join("; "),
+    ] {
+        let started = Instant::now();
+        assert_eq!(b.check(&cmd, work.path()), asks, "{}", &cmd[..20]);
+        let took = started.elapsed();
+        assert!(took < Duration::from_secs(10), "{took:?}");
+    }
+    // A force-push of the branch it's on, however often, asks git once.
+    let on_main = clone_on("main");
+    let started = Instant::now();
+    assert_eq!(
+        b.check(&repeat("git push -f; ", 10_000), on_main.path()),
+        Some(format!("Force-push or delete of 'main' {SHARED}"))
+    );
+    assert!(started.elapsed() < Duration::from_secs(5));
+    // A few pushes in one command are read as ever.
+    assert_eq!(b.check(&repeat("git push x ", 100), work.path()), None);
+}
+
+#[test]
+fn a_command_too_deep_to_read_asks() {
+    let b = Box::new();
+    let work = clone_on("feature");
+    let asks = Some(
+        "The guard couldn't check this command (it nests too deep to read), so it asks.".to_owned(),
+    );
+    let substitutions = format!("echo {}", "$(".repeat(100));
+    assert_eq!(b.check(&substitutions, work.path()), asks);
+    // Scripts in scripts: each `bash -c` quotes the next, which doubles
+    // its backslashes, so 18 deep is half a megabyte.
+    let mut script = "git status".to_owned();
+    for _ in 0..18 {
+        script = format!("bash -c {}", quote(&script));
+    }
+    assert_eq!(b.check(&script, work.path()), asks);
+    // Nested a few times, it's read through.
+    let mut script = "git push -f origin main".to_owned();
+    for _ in 0..4 {
+        script = format!("bash -c {}", quote(&script));
+    }
+    assert_eq!(
+        b.check(&script, work.path()),
+        Some(format!("Force-push or delete of 'main' {SHARED}"))
+    );
+}
+
+#[test]
+fn a_long_command_is_read_before_the_hook_gives_up() {
+    // The hook gives the guard 10 seconds (modules/claude.nix), and a
+    // command it cuts off runs unchecked. Each shape here took longer than
+    // that once the words after each word were copied for it.
+    let b = Box::new();
+    let work = clone_on("feature");
+    let n = 10_000;
+    let quoted = (0..n)
+        .map(|i| format!("'line {i} of it'"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let assignments = (0..n)
+        .map(|i| format!("x{i}='line {i} of it'"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    for cmd in [
+        format!("printf '%s\\n' {quoted}"),
+        format!("eval {quoted}"),
+        format!("{assignments} true"),
+    ] {
+        let cmd = format!("{cmd}; git push -f origin main");
+        let started = Instant::now();
+        assert_eq!(
+            b.check(&cmd, work.path()),
+            Some(format!("Force-push or delete of 'main' {SHARED}"))
+        );
+        let took = started.elapsed();
+        assert!(
+            took < Duration::from_secs(10),
+            "{took:?} for {}",
+            &cmd[..20]
+        );
+    }
+}
+
+/// `s` double-quoted for the shell.
+fn quote(s: &str) -> String {
+    let mut quoted = String::from('"');
+    for c in s.chars() {
+        if matches!(c, '\\' | '"' | '$' | '`') {
+            quoted.push('\\');
+        }
+        quoted.push(c);
+    }
+    quoted.push('"');
+    quoted
+}
+
+#[test]
+fn firmware_and_robot_calls_with_no_undo_ask() {
+    let b = Box::with_datasets(&[]);
+    let at = Path::new("/");
+    let boot = "Changes UEFI boot entries (R2: a bad one can stop the box booting).";
+    let vars = "Writes EFI variables (R2: a bad one can stop the box booting).";
+    let robot = "Hetzner Robot call that cancels, orders or reinstalls a server (R2: no undo).";
+    for (cmd, asked) in [
+        ("efibootmgr -o 0001,0002", Some(boot)),
+        ("efibootmgr --bootnext 0001", Some(boot)),
+        ("efibootmgr -c -d /dev/sda", Some(boot)),
+        ("sudo efibootmgr -n 1", Some(boot)),
+        ("efibootmgr -v -B -b 0003", Some(boot)),
+        ("efibootmgr", None),
+        ("efibootmgr -v", None),
+        ("rm /sys/firmware/efi/efivars/x", Some(vars)),
+        ("chattr -i /sys/firmware/efi/efivars/x", Some(vars)),
+        ("echo x > /sys/firmware/efi/efivars/x", Some(vars)),
+        ("ls /sys/firmware/efi/efivars", None),
+        ("cat /sys/firmware/efi/efivars/Boot0001-x", None),
+        (
+            "curl -X POST https://robot-ws.your-server.de/server/1/cancellation",
+            Some(robot),
+        ),
+        (
+            "curl -X POST https://robot-ws.your-server.de/boot/1/linux -d dist=x",
+            Some(robot),
+        ),
+        (
+            "curl https://robot-ws.your-server.de/order/server/product",
+            Some(robot),
+        ),
+        ("curl https://robot-ws.your-server.de/server", None),
+        ("curl https://robot-ws.your-server.de/boot/1/rescue", None),
+    ] {
+        assert_eq!(b.check(cmd, at).as_deref(), asked, "{cmd:?}");
+    }
+}
+
+/// A command the owner lets through at a question still has its undo, and
+/// the question names every door it opens.
+#[test]
+fn the_undo_comes_before_the_question() {
+    let b = Box::new();
+    let feature = clone_on("feature");
+    let asked = b
+        .check(
+            "rm -rf x && efibootmgr -o 1; git push -f origin main",
+            feature.path(),
+        )
+        .unwrap();
+    assert_eq!(
+        b.snapshots().len(),
+        1,
+        "no undo for a command it asked about"
+    );
+    assert_eq!(
+        asked,
+        format!(
+            "Force-push or delete of 'main' {SHARED} Changes UEFI boot entries (R2: a bad one can stop the box booting)."
+        )
+    );
+}

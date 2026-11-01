@@ -75,6 +75,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "burrow-guard"
+version = "0.0.0"
+dependencies = [
+ "jiff",
+ "regex",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "burrow-house"
 version = "0.0.0"
 dependencies = [
