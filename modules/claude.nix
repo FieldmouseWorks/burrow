@@ -102,6 +102,21 @@ let
   } cfg.extraSettings;
 
   robot = config.burrow.robot.enable or false;
+
+  # The ways work gets done here, cheapest first (docs/front-door.md), as far
+  # as this machine has them. Each door's own module says how to use it.
+  doors = lib.optional (config.burrow.probe.enable or false) ''
+      A probe, for a fact that only needs reading (memory, a unit's log, what's deployed,
+         the queue): `burrow-probe ask QUESTION` here, or a `${config.burrow.probe.label}` issue in ${config.burrow.probe.repo}.''
+    ++ lib.optional (config.burrow.autoland.enable or false) ''
+      A run, for a build, gate or proof whose exit is its verdict: a repo's `proofBuilds` or
+         `proofRuns` (burrow.autoland.repos), which the steward runs on each settled PR's head
+         with no Claude. Never a job, or a `proofJobs` prompt, that only runs one command.''
+    ++ lib.optional (config.burrow.proj.enable or false) ''
+      A job, for judgment in a project: `proj run`${lib.optionalString (config.burrow.proj.inbox.enable or false) ", or an issue labelled `${config.burrow.proj.inbox.label}`"}.''
+    ++ lib.optional (config.burrow.remoteControl.enable or false) ''
+      A session, for work ${config.burrow.owner} steers live: theirs to open, on the project's own
+         Remote Control server.'';
 in
 {
   imports = [ (import ./common.nix inputs) ./claude/etc.nix ];
@@ -169,6 +184,15 @@ in
       ] ++ lib.optional (config.burrow.remoteControl.enable or false) ''
           - Projects live in ${config.burrow.projectsDir}. Each folder gets its own always-on Remote
             Control session automatically.'')))
+
+      (lib.mkIf (doors != [ ]) (lib.mkOrder 650 ''
+        ## The cheapest door first
+
+        When you hand work on, or need something checked, take the first of these that fits. A
+        probe and a run start no Claude; a job and a session each hold one, and its memory, for as
+        long as it works (burrow's docs/front-door.md):
+
+        ${lib.concatStrings (lib.imap1 (i: door: "${toString i}. ${door}\n") doors)}''))
 
       (lib.mkOrder 1000 ''
         ## When a tool gets in the way: patch it

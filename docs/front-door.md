@@ -1,17 +1,38 @@
 # One chat for every project
 
 You talk to one claude.ai project chat. The work runs on the box, inside each
-project, by a Claude in that project: its checkout, its CLAUDE.md, its tools
-and logins. Nothing gets copied to the cloud and back.
+project: its checkout, its CLAUDE.md, its tools and logins. Nothing gets
+copied to the cloud and back.
 
-A thread in that chat can hand a project work two ways. Use the first one
-unless you need the second. A question about the box itself that only needs
-reading (its memory, a unit's log, what's deployed) needs neither: ask a
-probe ([below](#probes-facts-with-no-claude)).
+## Four doors, cheapest first
+
+A thread takes the first door that fits. A probe and a run start no Claude on
+the box; a job and a session each hold one, and its memory, for as long as it
+works.
+
+1. **Probe:** a fact about the box that only needs reading (its memory, a
+   unit's log, what's deployed, the job queue), answered in seconds
+   ([below](#probes-facts-with-no-claude)).
+2. **Run:** a build, gate or proof whose exit is its verdict. The repo names
+   it in `proofBuilds` or `proofRuns`, and the steward runs it on each
+   settled PR's head and posts its status
+   ([the PR flow](repo-baseline.md#the-pr-flow-the-steward), step 7). A job
+   told to run one command and report, or a `proofJobs` prompt that asks for
+   no more, is a run that hasn't been written yet.
+3. **Job:** work in a project that needs judgment, handed over as an issue
+   ([the inbox](#jobs-the-inbox-nothing-to-approve)). It waits for a slot,
+   and holds no Claude until it gets one.
+4. **Session:** work the owner steers live, or that can't wait for a slot:
+   Remote Control on the project's server
+   ([below](#sessions-remote-control-one-tap-per-thread)). It costs the owner
+   a tap, and holds a Claude while it's open.
 
 ```
 claude.ai project chat                   GitHub                  the box
 ──────────────────────                   ──────                  ──────────────────────
+thread ── issue labelled `probe` ───▶ the machine's repo ──▶ burrow-probe (on its webhook)
+       ◀── answers, then closed ────
+
 thread ── issue labelled `claude` ──▶ the project's repo ──▶ proj-inbox (on its webhook)
        ◀── answer as a comment ─────                     ──▶ proj run / proj reply
 
@@ -19,7 +40,39 @@ thread ── Remote Control (one tap) ─────────────�
        ◀── results, PRs, questions ────────────────────────────  (own worktree)
 ```
 
-## 1. The inbox (default): nothing to approve
+## Probes: facts with no Claude
+
+`burrow.probe` (crates/burrow-probe) answers read-only questions about the
+box on a private repo's issues (`burrow.probe.repo`, the machine flake's
+own, say), in seconds and without starting a Claude.
+
+- **Ask:** open an issue there labelled `probe` (`probe.label`), as one of
+  `probe.authors` (the inbox's, unless set), with a question a line:
+  - `memory`: RAM, swap, the ZFS ARC, pressure, and the cgroups holding the most
+  - `units`: failed units and jobs under way, the system's and the user's
+  - `journal UNIT SINCE UNTIL`: a unit's last 400 lines in that span, for the
+    units on `probe.journal.units` (and `userUnits`) only
+  - `rc`: each Remote Control server's state, memory and restarts
+  - `queue`: `proj status`
+  - `deployed`: the running and booted systems, the generation, the inputs'
+    revisions, and what `HOST-update` last found live
+  - `oom [SINCE]`: the kernel's and systemd-oomd's kills, a day back by default
+
+  A time is `now`, `-30m`, `-2h`, `-3d`, `2026-11-01`, `2026-11-01T13:05Z`
+  or `@EPOCH`, in UTC. An empty body asks its title.
+- **Answer:** one comment with every answer, then the issue is closed.
+  Reopen it to ask again. An issue whose body or title someone else changed
+  (GitHub lets a collaborator edit anyone's) runs nothing: ask in a new one.
+- **What keeps it safe:** no shell, and nothing of the issue's text reaches a
+  command but a unit name or a time the grammar made; journals only of the
+  units on the allowlist; no answer at all in a repo GitHub doesn't call
+  private; and every answer through a secret scrubber first
+  (`tests/probe.nix` plants a token to prove it). Anyone else's issue runs
+  nothing.
+- On the box, `burrow-probe ask QUESTION` answers one on the terminal, as
+  the machine says it.
+
+## Jobs: the inbox, nothing to approve
 
 `burrow.proj.inbox` (proj-inbox, in `crates/burrow-proj`) turns GitHub issues
 into project jobs.
@@ -55,7 +108,7 @@ into project jobs.
    answer as a reply on the issue, and check back again.
 4. Close the issue when the owner has what they asked for.
 
-## 2. Remote Control: hands-on, one tap per thread
+## Sessions: Remote Control, one tap per thread
 
 For work the owner wants to watch or steer live, a thread starts a Remote
 Control session on the project's server (`modules/remote-control.nix`): the
@@ -93,38 +146,6 @@ pre-approved.
   instructions; they reach the running session.
 - The machine's own flake folder is the operator. Its sessions stay in the
   folder itself, since that checkout is what `HOST-switch` builds.
-
-## Probes: facts with no Claude
-
-`burrow.probe` (crates/burrow-probe) answers read-only questions about the
-box on a private repo's issues (`burrow.probe.repo`, the machine flake's
-own, say), in seconds and without starting a Claude.
-
-- **Ask:** open an issue there labelled `probe` (`probe.label`), as one of
-  `probe.authors` (the inbox's, unless set), with a question a line:
-  - `memory`: RAM, swap, the ZFS ARC, pressure, and the cgroups holding the most
-  - `units`: failed units and jobs under way, the system's and the user's
-  - `journal UNIT SINCE UNTIL`: a unit's last 400 lines in that span, for the
-    units on `probe.journal.units` (and `userUnits`) only
-  - `rc`: each Remote Control server's state, memory and restarts
-  - `queue`: `proj status`
-  - `deployed`: the running and booted systems, the generation, the inputs'
-    revisions, and what `HOST-update` last found live
-  - `oom [SINCE]`: the kernel's and systemd-oomd's kills, a day back by default
-
-  A time is `now`, `-30m`, `-2h`, `-3d`, `2026-11-01`, `2026-11-01T13:05Z`
-  or `@EPOCH`, in UTC. An empty body asks its title.
-- **Answer:** one comment with every answer, then the issue is closed.
-  Reopen it to ask again. An issue whose body or title someone else changed
-  (GitHub lets a collaborator edit anyone's) runs nothing: ask in a new one.
-- **What keeps it safe:** no shell, and nothing of the issue's text reaches a
-  command but a unit name or a time the grammar made; journals only of the
-  units on the allowlist; no answer at all in a repo GitHub doesn't call
-  private; and every answer through a secret scrubber first
-  (`tests/probe.nix` plants a token to prove it). Anyone else's issue runs
-  nothing.
-- On the box, `burrow-probe ask QUESTION` answers one on the terminal, as
-  the machine says it.
 
 ## What's running
 
