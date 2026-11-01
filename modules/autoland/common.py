@@ -188,6 +188,28 @@ def gh_env(repo=None):
     return {**os.environ, "GH_TOKEN": token(repo.split("/")[0].lower() if repo else _for[-1])}
 
 
+# How long one call of burrow-upkeep may take: its look at a repo is a few
+# dozen GitHub calls, each tried three times at most. One that runs past it
+# is killed, and the pass goes on to the next repo.
+UPKEEP_TIMEOUT = 300
+
+
+def upkeep(*args):
+    """burrow-upkeep (crates/burrow-upkeep) on a repo, as the App for its
+    owner, as every GitHub call of a pass's: what it printed, read, with a
+    rate limit it met noted for the pass (LIMITED). What it says of itself
+    goes to the journal; one that fails or runs past UPKEEP_TIMEOUT
+    raises."""
+    p = subprocess.run([*CFG["upkeep"], *args, "--now", repr(NOW), *(["--dry"] if DRY else [])],
+                       stdout=subprocess.PIPE, text=True, env=gh_env(), timeout=UPKEEP_TIMEOUT)
+    if p.returncode:
+        raise RuntimeError(f"burrow-upkeep {args[0]} exited {p.returncode}")
+    out = json.loads(p.stdout)
+    if out["limited"] is not None and not LIMITED:
+        LIMITED.append(out["limited"])
+    return out
+
+
 def gh(*args, input=None, check=True):
     """Run gh; return its stdout (parsed as JSON when it is JSON). Raises
     Unavailable when GitHub didn't answer, RuntimeError when it said no."""

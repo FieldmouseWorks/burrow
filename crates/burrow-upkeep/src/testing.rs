@@ -8,7 +8,7 @@ use std::path::Path;
 use burrow_github::{Api, Failed, Response};
 use serde_json::{Value, json};
 
-use crate::config::{Config, Dashboard, Flaky};
+use crate::config::{Config, Dashboard, Flaky, Labels, Rules, Settle, Waiting};
 use crate::pass::{Jobs, Out, Pass};
 
 pub const T: f64 = 1_800_000_000.0;
@@ -34,12 +34,35 @@ pub fn config(dir: &Path) -> Config {
             renovate_runs: Some(dir.join("renovate-runs")),
         }),
         flaky: Some(Flaky { job_timeout: 240 }),
+        settle: Settle {
+            owner: "sam".into(),
+            app_id: 7,
+            context: "review-settled".into(),
+            train_context: "conary/train".into(),
+            rulesets: true,
+            labels: Labels {
+                hold: "hold".into(),
+                owner: "needs-owner".into(),
+                first: "first".into(),
+                waiting: Waiting {
+                    release_age: "waiting: release age".into(),
+                    proof_slot: "waiting: proof slot".into(),
+                    reviewer: "waiting: reviewer".into(),
+                },
+            },
+            defaults: Rules {
+                direct_push: false,
+                ruleset: true,
+                train: false,
+            },
+            repos: Default::default(),
+        },
     }
 }
 
-/// Each answer GitHub gives, by a method and a path's start: the first that
-/// matches answers. An answer with a status of 0 is none at all (gh's
-/// failure, `why`).
+/// Each answer GitHub gives, by a method and a path's start (the whole path,
+/// ending `$`): the first that matches answers. An answer with a status of
+/// 0 is none at all (gh's failure, `why`).
 #[derive(Default)]
 pub struct Hub {
     pub answers: Vec<(String, String, Answer)>,
@@ -55,6 +78,8 @@ pub struct Answer {
     pub body: Value,
     pub etag: Option<String>,
     pub why: String,
+    /// The next page's path, for the Link header.
+    pub next: Option<String>,
 }
 
 pub fn answer(status: u16, body: Value) -> Answer {
@@ -63,6 +88,7 @@ pub fn answer(status: u16, body: Value) -> Answer {
         body,
         etag: None,
         why: String::new(),
+        next: None,
     }
 }
 
@@ -100,11 +126,11 @@ impl Api for Hub {
             let data = json!({"data": {"repository": {"issue": issue}}});
             return Ok(response(200, &data, None));
         }
-        let Some((_, _, a)) = self
-            .answers
-            .iter()
-            .find(|(m, p, _)| m == method && path.starts_with(p.as_str()))
-        else {
+        let Some((_, _, a)) = self.answers.iter().find(|(m, p, _)| {
+            m == method
+                && p.strip_suffix('$')
+                    .map_or(path.starts_with(p.as_str()), |whole| path == whole)
+        }) else {
             panic!("nothing said for {method} {path}");
         };
         if a.status == 0 {
@@ -117,7 +143,12 @@ impl Api for Hub {
         if a.etag.is_some() && etag == a.etag.as_deref() {
             return Ok(response(304, &Value::Null, a.etag.as_deref()));
         }
-        Ok(response(a.status, &a.body, a.etag.as_deref()))
+        let mut r = response(a.status, &a.body, a.etag.as_deref());
+        if let Some(next) = &a.next {
+            let link = format!("<https://api.github.com/{next}>; rel=\"next\"");
+            r.headers.push(("Link".into(), link));
+        }
+        Ok(r)
     }
 
     fn pause(&mut self, _: u64) {}

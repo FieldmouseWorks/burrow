@@ -1,6 +1,7 @@
-"""The repos: finding them, keeping their settings at the baseline, and the
-issues that list what waits for the owner and what the pipeline is stuck
-on. Deleting the branches nothing needs is branches.py's."""
+"""The repos: finding them, their settings (burrow-upkeep keeps them at the
+baseline) and hooks, and the issues that list what waits for the owner and
+what the pipeline is stuck on. Deleting the branches nothing needs is
+branches.py's."""
 
 import fnmatch
 import hashlib
@@ -9,13 +10,10 @@ import os
 import re
 import shutil
 import time
-import urllib.parse
 
 import common as C
 import reviewers as V
-import train as T
-from common import CFG, CONTEXT, DRY, load, log, repo_cfg, save
-from prs import PROOF_SLOT, RELEASE_AGE, REVIEWER
+from common import CFG, DRY, load, log, save
 from tasks import RED_BRANCH, red_default_task, red_fix
 
 # What a project's state says when GitHub had no such repo at its last look.
@@ -64,63 +62,14 @@ def discover():
     return seen
 
 
-def required(train):
-    """The checks the baseline requires: the App's own status, and in a repo
-    with its train on the train's, which it posts just before it lands a
-    PR. Only the App's: one with the same name from anyone else (the
-    owner's login included) satisfies nothing."""
-    return [{"context": c, "integration_id": CFG["app"]["id"]} for c in [CONTEXT] + [T.CONTEXT] * bool(train)]
-
-
-def bypass_actors(rc):
-    """Who gets past the baseline. The owner (an admin) can still merge past
-    it from the PR page, and automation that pushes (directPush) past it
-    altogether; in a repo with its train on, no one: only the train lands
-    there."""
-    if rc["train"]:
-        return []
-    return [{"actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "always" if rc["directPush"] else "pull_request"}]
-
-
-def baseline_ruleset(rc):
-    rules = [{"type": "deletion"}, {"type": "non_fast_forward"}]
-    if not rc["directPush"]:
-        rules += [
-            {"type": "pull_request", "parameters": {
-                "required_approving_review_count": 0,
-                "dismiss_stale_reviews_on_push": False,
-                # CODEOWNERS (if any) names the paths the owner signs off on.
-                "require_code_owner_review": True,
-                "require_last_push_approval": False,
-                "required_review_thread_resolution": True,
-            }},
-            {"type": "required_status_checks", "parameters": {
-                "strict_required_status_checks_policy": False,
-                "required_status_checks": required(rc["train"]),
-            }},
-        ]
-    return {
-        "name": "baseline",
-        "target": "branch",
-        "enforcement": "active",
-        "conditions": {"ref_name": {"include": ["~DEFAULT_BRANCH"], "exclude": []}},
-        "bypass_actors": bypass_actors(rc),
-        "rules": rules,
-    }
-
-
-# What each of the steward's waiting labels (prs.py) says it waits on, and
-# what the PR's status adds.
-WAITING = {RELEASE_AGE: f"Its updates are too new to take yet (the minimum release age); {CONTEXT} says until when",
-           PROOF_SLOT: f"Waits its turn for a proof slot on the machine; {CONTEXT} says how many are ahead",
-           REVIEWER: f"Waits for a reviewer to be back in service; {CONTEXT} says which and why"}
-
-
 def settle_repo(r, known):
-    """The repo's settings, at most once a day. Returns True if it's new:
-    not in known (restart takes a remade one out)."""
-    repo, rc = r["repo"], repo_cfg(r["repo"])
-    st = load(f"repo-{repo.replace('/', '_')}.json", {})
+    """The repo's labels and settings, which burrow-upkeep keeps
+    (crates/burrow-upkeep/src/settle.rs), then its hook. Returns True if
+    it's new: not in known (restart takes a remade one out). Raises when
+    its settings couldn't be kept, once its hook is seen to."""
+    repo = r["repo"]
+    name = f"repo-{repo.replace('/', '_')}.json"
+    st = load(name, {})
     new = repo not in known
     # GitHub's databaseId for it, by which restart tells a remade repo: kept
     # once restart has passed it, settings kept before it was included. The
@@ -128,96 +77,15 @@ def settle_repo(r, known):
     if r.get("id") and (st.get("databaseId") != r["id"] or "id" in st):
         st.pop("id", None)
         st["databaseId"] = r["id"]
-        save(f"repo-{repo.replace('/', '_')}.json", st)
-    # Due daily, and straight away for another App (its required checks are
-    # pinned to the one it was), a train turned on or off (the baseline
-    # requires the train's status only while it's on), or a repo settled
-    # empty that has its first commit now (it's due its ruleset).
-    empty = r["default"] is None
-    due = (C.NOW - st.get("settings", 0) >= 86400 or st.get("app") != CFG["app"]["id"]
-           or st.get("train", False) != rc["train"] or (st.get("empty", False) and not empty))
-    # The labels the steward and its jobs put on PRs: without them a hold
-    # can't be set, a judge can't hand a PR to the owner, no PR can go first
-    # in its proof line and none can say what it waits on. Made again with
-    # the daily settings too, in case one was deleted.
-    labels = CFG["labels"]
-    about = [(labels["hold"], "fbca04", "The steward leaves this PR alone"),
-             (labels["owner"], "b60205", f"Waits for {CFG['owner']}; take the label off to let the steward carry on"),
-             (labels["first"], "0e8a16", "Goes ahead of the PRs without it in the line for proofs that take the machine"),
-             *((labels["waiting"][kind], "c5def5", text) for kind, text in WAITING.items())]
-    want = [name for name, _, _ in about]
-    if st.get("labels") != want or due:
-        # GitHub takes a description of up to 100 characters.
-        made = [C.write("label", "create", name, "-R", repo, "--force", "--color", color,
-                        "--description", text[:100], check=False) is not None
-                for name, color, text in about]
-        if all(made):
-            log(f"{repo}: labels {', '.join(want)}")
-            st["labels"] = want
-            save(f"repo-{repo.replace('/', '_')}.json", st)
-    hook(repo, st, due)
-    # A repo seen for the first time has no state yet, so it's settled now.
-    if not due:
-        return new
-    info = C.gh("api", f"repos/{repo}")
-    patch = {}
-    for key in ("allow_auto_merge", "delete_branch_on_merge", "allow_squash_merge"):
-        if not info.get(key) and not (key == "allow_auto_merge" and st.get("autoMergeRefused")):
-            patch[key] = True
-    if not r["private"]:
-        sa = info.get("security_and_analysis") or {}
-        for key in ("secret_scanning", "secret_scanning_push_protection"):
-            if (sa.get(key) or {}).get("status") != "enabled":
-                patch.setdefault("security_and_analysis", {})[key] = {"status": "enabled"}
-    if patch:
-        log(f"{repo}: settings {sorted(patch)}")
-        after = C.write("api", "-X", "PATCH", f"repos/{repo}", "--input", "-", input=json.dumps(patch), check=False)
-        # A private repo on a free account takes allow_auto_merge without an
-        # error and leaves it off (the steward merges its PRs itself): once the
-        # PATCH went through and it's still off, stop asking every day.
-        if "allow_auto_merge" in patch and isinstance(after, dict) and not after.get("allow_auto_merge"):
-            st["autoMergeRefused"] = True
-    C.write("api", "-X", "PUT", f"repos/{repo}/vulnerability-alerts", check=False)
-
-    # Every page, an org's rulesets included. Only the repo's own baseline
-    # counts as its baseline: the steward can't pin what the org keeps, so a
-    # repo with the org's gets its own over it, and GitHub enforces both.
-    rules = False
-    try:
-        pages = C.gh("api", f"repos/{repo}/rulesets?per_page=100", "--paginate", "--slurp")
-    except RuntimeError as e:
-        # The plan offers no rules on this repo (private, on a free
-        # account): there are none to pin. Anything else is GitHub not
-        # saying, and nothing's known to be pinned.
-        pages, rules = None, C.NO_RULES in str(e)
-    if isinstance(pages, list):
-        own = [x for page in pages for x in page if x.get("source_type") == "Repository"]
-        made = True
-        # Not on a repo with no commit yet: the ruleset's checks and PR rule
-        # would turn away the push that makes its default branch, the
-        # owner's too (they bypass it only by PR). That push's pass adds it.
-        if CFG["rulesets"] and rc["ruleset"] and not empty and not any(x["name"] == "baseline" for x in own):
-            log(f"{repo}: adding the baseline ruleset")
-            made = C.write("api", "-X", "POST", f"repos/{repo}/rulesets", "--input", "-",
-                           input=json.dumps(baseline_ruleset(rc)), check=False) is not None
-        # Whether or not the repo gets the baseline ruleset, its own rules
-        # are kept in line with it.
-        rules = keep_rules(repo, rc, [x for x in own if x.get("target") == "branch"]) and made
-    # Settled for this App only once every rule is known to take its status
-    # from it alone; once that's not known, the settings are due again.
-    pinned = keep_protection(repo) and rules
-
-    st["settings"] = C.NOW
-    if empty:
-        st["empty"] = True
-    else:
-        st.pop("empty", None)
-    if pinned:
-        st["app"] = CFG["app"]["id"]
-        st["train"] = rc["train"]
-    else:
-        st.pop("app", None)
-    save(f"repo-{repo.replace('/', '_')}.json", st)
+        save(name, st)
+    # An empty repo has no default branch yet: it gets its ruleset with its
+    # first commit.
+    out = C.upkeep("settle", repo, *(["--private"] if r["private"] else []),
+                   *(["--empty"] if r["default"] is None else []))
+    # Read again, as burrow-upkeep left it: the hook's is kept beside it.
+    hook(repo, load(name, {}), out["due"])
+    if out["failed"]:
+        raise RuntimeError("; ".join(out["failed"]))
     return new
 
 
@@ -312,123 +180,6 @@ def retire_checkouts(repo, k):
     for jid, project, repos in C.jobs():
         if (repo.lower() in repos or (not repos and project in ours)) and not C.stop_job(jid):
             raise RuntimeError(f"{repo}: proj couldn't stop job {jid}, which may be the deleted one's")
-
-
-def keep_checks(checks, key):
-    """The steward's own checks among a rule's required ones (its status,
-    its train's), pinned to its App (under key: a ruleset's integration_id,
-    classic protection's app_id): the same name from anyone else satisfies
-    nothing. Returns whether any changed."""
-    moved = False
-    for c in checks:
-        if c.get("context") in (CONTEXT, T.CONTEXT) and c.get(key) != CFG["app"]["id"]:
-            c[key] = CFG["app"]["id"]
-            moved = True
-    return moved
-
-
-def complete_baseline(rs, rc):
-    """A baseline made before this repo's settings were what they are (say
-    while it pushed directly, with only the first two rules) gets the rules
-    it lacks: with no required-status rule in it there's nothing for
-    keep_rules to require the train's status in. Who may bypass it follows
-    the train going on or off. Returns what changed, in words."""
-    if rs.get("name") != "baseline" or not (CFG["rulesets"] and rc["ruleset"]) or rc["directPush"]:
-        return []
-    changed = []
-    have = {y.get("type") for y in rs.get("rules") or []}
-    missing = [y for y in baseline_ruleset(rc)["rules"] if y["type"] not in have]
-    if missing:
-        rs["rules"] = (rs.get("rules") or []) + missing
-        changed.append(f"{', '.join(y['type'] for y in missing)} added")
-    # Only the train's own turn: a repo's other bypass is its own to keep.
-    if bool(rs.get("bypass_actors")) == bool(rc["train"]):
-        rs["bypass_actors"] = bypass_actors(rc)
-        changed.append("no bypass, only the train lands" if rc["train"] else "the owner's bypass back")
-    return changed
-
-
-def keep_rules(repo, rc, rulesets):
-    """Each of the repo's own branch rulesets, in line with the baseline: no
-    up-to-date branches (docs/repo-baseline.md says why), and the steward's
-    status required from its App only; the baseline's own has all its rules
-    (complete_baseline) and requires the train's too exactly while the repo's
-    train is on. The listing names a
-    ruleset without its rules, so each one is read. Returns False when one
-    couldn't be read or wouldn't take the change."""
-    ok = True
-    for x in rulesets:
-        rs = C.gh("api", f"repos/{repo}/rulesets/{x['id']}", check=False)
-        if not isinstance(rs, dict):
-            ok = False
-            continue
-        changed = complete_baseline(rs, rc)
-        for y in rs.get("rules") or []:
-            if y.get("type") != "required_status_checks":
-                continue
-            params = y.get("parameters") or {}
-            if params.get("strict_required_status_checks_policy"):
-                params["strict_required_status_checks_policy"] = False
-                changed.append("up-to-date branches off")
-            if keep_checks(params.get("required_status_checks") or [], "integration_id"):
-                changed.append("the steward's checks from the App only")
-            listed = params.get("required_status_checks") or []
-            has = any(c.get("context") == T.CONTEXT for c in listed)
-            if rs.get("name") == "baseline" and has != bool(rc["train"]):
-                params["required_status_checks"] = (listed + [{"context": T.CONTEXT, "integration_id": CFG["app"]["id"]}]
-                                                    if rc["train"] else [c for c in listed if c.get("context") != T.CONTEXT])
-                changed.append(f"{T.CONTEXT} {'required' if rc['train'] else 'no longer required'}")
-        if changed:
-            log(f"{repo}: {', '.join(dict.fromkeys(changed))} in the {rs.get('name')!r} ruleset")
-            # The whole ruleset goes back, so only those settings change.
-            keep = {k: rs[k] for k in ("name", "target", "enforcement", "bypass_actors", "conditions") if k in rs}
-            put = C.write("api", "-X", "PUT", f"repos/{repo}/rulesets/{x['id']}", "--input", "-",
-                          input=json.dumps({**keep, "rules": rs["rules"]}), check=False)
-            ok = ok and put is not None
-    return ok
-
-
-def keep_protection(repo):
-    """The same in the classic protection of every protected branch, since a
-    PR can be merged into any of them. Returns False when GitHub didn't say
-    what a branch's is, or didn't take the change."""
-    pages = C.gh("api", f"repos/{repo}/branches?protected=true&per_page=100", "--paginate", "--slurp", check=False)
-    if not isinstance(pages, list):
-        return False
-    return all([keep_branch(repo, b["name"]) for page in pages for b in page])
-
-
-def keep_branch(repo, name):
-    """One branch's classic protection, in line. Its checks are read only
-    when the branch says it requires some: the endpoint is a 404 otherwise.
-    Returns False when GitHub didn't say what they are, or didn't take the
-    change."""
-    # A slash in the name (release/1.0) is part of it, not of the path.
-    branch = urllib.parse.quote(name, safe="")
-    b = C.gh("api", f"repos/{repo}/branches/{branch}", check=False)
-    if not isinstance(b, dict):
-        return False
-    checks = (b.get("protection") or {}).get("required_status_checks") or {}
-    if checks.get("enforcement_level", "off") == "off":
-        return True
-    path = f"repos/{repo}/branches/{branch}/protection/required_status_checks"
-    got = C.gh("api", path, check=False)
-    if not isinstance(got, dict):
-        return False
-    patch, changed = {}, []
-    if got.get("strict"):
-        patch["strict"] = False
-        changed.append("up-to-date branches off")
-    listed = got.get("checks") or []
-    if keep_checks(listed, "app_id"):
-        # The others as they were: GitHub lists one any App may set with no
-        # app_id, and reads one sent without it as "whichever set it last".
-        patch["checks"] = [c if c.get("app_id") is not None else {**c, "app_id": -1} for c in listed]
-        changed.append("the steward's checks from the App only")
-    if not patch:
-        return True
-    log(f"{repo}: {', '.join(changed)} in {name}'s protection")
-    return C.write("api", "-X", "PATCH", path, "--input", "-", input=json.dumps(patch), check=False) is not None
 
 
 def watch_default(r, info, prs, digest):

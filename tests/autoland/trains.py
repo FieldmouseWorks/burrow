@@ -3,18 +3,18 @@ the train instead of being merged, and comes out once it isn't settled any
 more; its status says where in the train it is, or why the train holds it
 out; the train's own status is CI only as the App's failure; a pass ends
 with a step of the train unless it has nothing to do; cn gets the App's
-tokens from the steward; and the repo's rules require the train's status."""
+tokens from the steward; and the branch watch leaves the train's branches
+to cn. That the repo's rules require the train's status is burrow-upkeep's
+(settle.rs)."""
 
 import contextlib
-import importlib
 import io
-import json
 import os
 
 import train as T
 import waits
-from harness import (B, C, CI_GREEN, FAIL, IDLE, JOBS, P, R, S, STEWARD, WROTE, clean, cn, cn_log, cn_runs, fresh_pr_state,
-                     gh_stub, head, info, judgment, merges, mkpr, run, said, stand_in, tmp)
+from harness import (B, C, CI_GREEN, FAIL, IDLE, JOBS, P, S, STEWARD, WROTE, clean, cn, cn_log, cn_runs, fresh_pr_state, head,
+                     info, judgment, merges, mkpr, run, said, stand_in, tmp)
 
 stand_in()
 other = "c" * 40  # another head
@@ -336,104 +336,6 @@ ran = cn_log()[0]["token"]
 assert ran["rc"] == 1 and ran["out"] == "" and "no token for sam/r: couldn't sign as the App" in ran["err"], ran
 print("train token: ok")
 
-# The baseline ruleset requires the train's status, the App's alone, in a
-# repo with its train on; one already there is brought in line when the
-# train goes on or off, and another ruleset only has it pinned to the App.
-rc = C.repo_cfg("sam/r")
-assert R.required(False) == [{"context": "review-settled", "integration_id": 7}]
-assert R.required(True) == [{"context": "review-settled", "integration_id": 7}, {"context": "conary/train", "integration_id": 7}]
-made = R.baseline_ruleset({**rc, "train": True})
-assert [y for y in made["rules"] if y["type"] == "required_status_checks"][0]["parameters"]["required_status_checks"] == R.required(True)
-made = R.baseline_ruleset(rc)
-assert [y for y in made["rules"] if y["type"] == "required_status_checks"][0]["parameters"]["required_status_checks"] == R.required(False)
-RULES = {}
-PUT = []
-
-
-def rules_gh(*a, **k):
-    return RULES.get(a[1]) if a[:1] == ("api",) else None
-
-
-def rules_write(*a, **k):
-    PUT.append((a[3], k.get("input")))
-    return {}
-
-
-OWNER_BYPASS = [{"actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "pull_request"}]
-
-
-def ruleset(name, checks, bypass=()):
-    return {"name": name, "target": "branch", "enforcement": "active", "conditions": {}, "bypass_actors": list(bypass),
-            "rules": [{"type": "required_status_checks", "parameters": {
-                "strict_required_status_checks_policy": False, "required_status_checks": checks}},
-                      {"type": "deletion"}, {"type": "non_fast_forward"}, {"type": "pull_request", "parameters": {}}]}
-
-
-kept_gh, kept_write = C.gh, C.write
-C.gh, C.write = rules_gh, rules_write
-settled = [{"context": "review-settled", "integration_id": 7}]
-for on, checks, want in ((True, settled, R.required(True)),
-                         (False, R.required(True), R.required(False)),
-                         (True, R.required(True), None), (False, settled, None)):
-    RULES["repos/sam/r/rulesets/1"] = ruleset("baseline", checks, () if on else OWNER_BYPASS)
-    PUT.clear()
-    assert R.keep_rules("sam/r", {**rc, "train": on}, [{"id": 1}])
-    if want is None:
-        assert PUT == [], (on, checks, PUT)
-    else:
-        assert len(PUT) == 1 and json.loads(PUT[0][1])["rules"][0]["parameters"]["required_status_checks"] == want, (on, PUT)
-# A baseline from before the train (remi's, made while it pushed directly:
-# only the first two rules, the owner bypassing always) has no required
-# checks to add the train's to: it gets the rules it lacks, and no bypass.
-old = ruleset("baseline", [])
-old["rules"] = [{"type": "deletion"}, {"type": "non_fast_forward"}]
-old["bypass_actors"] = [{**OWNER_BYPASS[0], "bypass_mode": "always"}]
-RULES["repos/sam/r/rulesets/1"] = old
-PUT.clear()
-assert R.keep_rules("sam/r", {**rc, "train": True}, [{"id": 1}])
-sent = json.loads(PUT[0][1])
-assert [y["type"] for y in sent["rules"]] == ["deletion", "non_fast_forward", "pull_request", "required_status_checks"], sent
-assert sent["rules"][3]["parameters"]["required_status_checks"] == R.required(True) and sent["bypass_actors"] == [], sent
-# Its bypass comes back with the train off, a directPush repo's rules stay
-# as they are, and so does any baseline with rulesets off.
-RULES["repos/sam/r/rulesets/1"] = ruleset("baseline", R.required(False))
-PUT.clear()
-assert R.keep_rules("sam/r", {**rc, "train": False}, [{"id": 1}])
-assert json.loads(PUT[0][1])["bypass_actors"] == OWNER_BYPASS, PUT
-for changed in ({"directPush": True}, {"ruleset": False}):
-    RULES["repos/sam/r/rulesets/1"] = {**old, "rules": [{"type": "deletion"}]}
-    PUT.clear()
-    assert R.keep_rules("sam/r", {**rc, "train": False, **changed}, [{"id": 1}]) and PUT == [], (changed, PUT)
-# Given up with the ledger off as well, when there's no train for cn to run:
-# the status's name isn't the ledger's to say.
-on_rules, off_rules = R.required(True), R.required(False)
-kept_train, C.CFG["train"] = C.CFG["train"], None
-importlib.reload(T)
-RULES["repos/sam/r/rulesets/1"] = ruleset("baseline", on_rules)
-PUT.clear()
-assert R.keep_rules("sam/r", {**rc, "train": False}, [{"id": 1}])
-assert len(PUT) == 1 and json.loads(PUT[0][1])["rules"][0]["parameters"]["required_status_checks"] == off_rules, PUT
-C.CFG["train"] = kept_train
-importlib.reload(T)
-RULES["repos/sam/r/rulesets/2"] = ruleset("gates", [{"context": "conary/train"}])
-PUT.clear()
-assert R.keep_rules("sam/r", {**rc, "train": False}, [{"id": 2}])
-assert json.loads(PUT[0][1])["rules"][0]["parameters"]["required_status_checks"] == [
-    {"context": "conary/train", "integration_id": 7}], PUT
-
-# The repo's settings are due as soon as its train goes on or off, not a
-# day later: the baseline requires the train's status only while it's on.
-calls = []
-C.gh = lambda *a, **k: calls.append(a[:2]) or gh_stub(*a, **k)
-S.CFG["repos"]["sam/r"] = {"train": True}
-for was, due in ((True, False), (False, True)):
-    fresh_pr_state()
-    C.save("repo-sam_r.json", {"settings": C.NOW, "app": 7, "train": was, "labels": ["hold", "needs-owner"]})
-    calls.clear()
-    with C.acting_for("sam"):
-        R.settle_repo({"repo": "sam/r", "private": False, "default": "main"}, {"sam/r"})
-    assert (("api", "repos/sam/r") in calls) == due, (was, calls)
-
 # The branch watch leaves the train's candidates' branches to cn.
 BRANCHES = [{"name": "conary/train/" + CAND, "commit": {"sha": "e" * 40}}, {"name": "old", "commit": {"sha": "f" * 40}}]
 deleted = []
@@ -441,7 +343,7 @@ kept_watch = (B.closed_at, B.delete_branch, C.fresh, C.NOW)
 B.closed_at = lambda repo, name, sha: 0
 B.delete_branch = lambda repo, name, sha: deleted.append(name)
 C.fresh = lambda path, etag=None: ("tag", BRANCHES if "/branches?" in path else [])  # and no PR closed
-C.gh = lambda *a, **k: {"ahead": 0}
+kept_gh, C.gh = C.gh, lambda *a, **k: {"ahead": 0}
 for on, want in ((True, ["old"]), (False, ["conary/train/" + CAND, "old"])):
     S.CFG["repos"]["sam/r"] = {"train": on}
     fresh_pr_state()
@@ -453,6 +355,6 @@ for on, want in ((True, ["old"]), (False, ["conary/train/" + CAND, "old"])):
     assert deleted == want, (on, deleted)
 del S.CFG["repos"]["sam/r"]
 B.closed_at, B.delete_branch, C.fresh, C.NOW = kept_watch
-C.gh, C.write = kept_gh, kept_write
+C.gh = kept_gh
 fresh_pr_state()
-print("train rules: ok")
+print("train branches: ok")

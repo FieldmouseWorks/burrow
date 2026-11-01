@@ -6,10 +6,11 @@ event reports):
   1. Find the repos: every non-archived, non-fork repo of each owner in
      `owners`, new ones included (one with no commit yet too, which gets
      only this step, all but the ruleset, until its first push). Bring
-     each one's settings to
-     the baseline (auto-merge, delete-branch-on-merge, squash, secret
-     scanning, the `baseline` ruleset); a repo seen for the first time also gets a Claude
-     job that brings its files to docs/repo-baseline.md (repos.py). So does
+     each one's labels and settings to the baseline (auto-merge,
+     delete-branch-on-merge, squash, secret scanning, the `baseline`
+     ruleset: burrow-upkeep's `settle`) and set its hook; a repo seen for
+     the first time also gets a Claude job that brings its files to
+     docs/repo-baseline.md (repos.py). So does
      one made under the name of a repo GitHub deleted, once the deleted
      one's Claude jobs are stopped, its clones moved aside and what the
      steward kept about it forgotten: before anything else acts on it.
@@ -65,9 +66,7 @@ OWNER/REPO`, printed on stdout for it alone.
 """
 
 import fcntl
-import json
 import os
-import subprocess
 import sys
 
 import branches as B
@@ -133,24 +132,9 @@ def main():
             C.after_limit(kick)
 
 
-# How long one call of burrow-upkeep may take: a look at a repo is a few
-# dozen GitHub calls, each tried three times at most. One that runs past it
-# is killed, and the pass goes on to the next repo.
-UPKEEP_TIMEOUT = 300
 # How many repos this pass has searched for a dashboard (burrow-upkeep's
 # FINDS says how many it may).
 SEARCHED = [0]
-
-
-def upkeep_run(*args, env=None):
-    """burrow-upkeep (crates/burrow-upkeep), in env: what it printed. What it
-    says of itself goes to the journal; one that fails or runs past
-    UPKEEP_TIMEOUT raises."""
-    p = subprocess.run([*CFG["upkeep"], *args, "--now", repr(C.NOW), *(["--dry"] if DRY else [])],
-                       stdout=subprocess.PIPE, text=True, env=env, timeout=UPKEEP_TIMEOUT)
-    if p.returncode:
-        raise RuntimeError(f"burrow-upkeep {args[0]} exited {p.returncode}")
-    return p.stdout
 
 
 def upkeep(repo, mine):
@@ -166,8 +150,7 @@ def upkeep(repo, mine):
         C.wake(repo, C.NOW + 5 * MIN)  # ends: waits.failed watches the repo
 
     try:
-        # As the App, for the repo's owner, as every GitHub call of a pass's.
-        out = json.loads(upkeep_run("watch", repo, "--searched", str(SEARCHED[0]), env=C.gh_env()))
+        out = C.upkeep("watch", repo, "--searched", str(SEARCHED[0]))
     except Exception as e:
         failed(f"its upkeep: {e}")
         return
@@ -175,8 +158,6 @@ def upkeep(repo, mine):
     SEARCHED[0] += out["searched"]
     if out["wake"]:
         C.wake(repo, out["wake"])  # ends: as each of burrow-upkeep's own says (its `// ends:`)
-    if out["limited"] is not None and not C.LIMITED:
-        C.LIMITED.append(out["limited"])
     for why in out["failed"]:
         failed(why)
     for j in out["jobs"]:
@@ -317,8 +298,7 @@ def run_pass(kick):
                 log(f"{repo}: {e}")
                 waits.failed(repo)
                 C.wake(repo, C.NOW + 5 * MIN)  # ends: waits.failed watches the repo; GitHub, often
-            if CFG["upkeep"]:
-                upkeep(repo, mine)
+            upkeep(repo, mine)
             if had := C.taken(repo):
                 mine.append(C.taken_line(repo, had))
     # This pass's wake-ups and owner's lines replace the ones it had for the
