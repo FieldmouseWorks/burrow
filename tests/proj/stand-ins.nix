@@ -1,5 +1,5 @@
-# The stand-ins ../proj.nix runs proj against: Claude, and GitHub as gh
-# answers it.
+# The stand-ins proj's VM tests (test.nix) run proj against: Claude, and
+# GitHub as gh answers it.
 { pkgs }:
 {
   # Claude, as far as proj can tell: reads the prompt, answers in stream-json.

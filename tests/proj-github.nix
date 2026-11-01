@@ -1,6 +1,9 @@
-# proj's GitHub side, as tests/proj.nix's script goes on, on its machine and
-# its stand-ins for Claude and gh: that a job waiting on a PR or issue (proj
-# await) is resumed when it changes, even before the turn ended and from
+# proj's GitHub side, on proj/test.nix's machine and its stand-ins for Claude
+# and gh: that a look (proj _watch) with nothing awaited books nothing, and
+# waits for one already running, that a turn kicks what it was started to as
+# it starts and as it ends, one its own --timeout or --idle stops too, that a
+# job waiting on a PR or issue (proj await) is the stall watchdog's past its
+# deadline, and is resumed when it changes, even before the turn ended and from
 # proj-watch's own unit (which a turn's kicks reach for the repos it
 # awaits), but never for proj-inbox's own comment, or once its deadline
 # passes with GitHub unreadable, that an await GitHub can't read fails and
@@ -22,8 +25,29 @@
 # proj-inbox nor _watch, and that a repo proj-inbox forgets (its name now
 # another repo's) has its open issues taken up as new jobs, once a pass
 # under way has ended.
-{ pkgs }:
-''
+#
+#   nix build .#checks.x86_64-linux.proj-github -L
+{ self, pkgs }:
+import ./proj/test.nix { inherit self pkgs; } "proj-github" ''
+  with subtest("a look with nothing awaited succeeds, and books nothing"):
+      proj("_watch")
+      assert json.loads(machine.succeed("cat /var/lib/burrow/proj-watch/wake.json")) == {}
+
+  with subtest("a look waits for one already running"):
+      # burrow-events runs one at a time, but one from before its restart
+      # (or a hand-run one) can still be going: two would each write the
+      # wake file from what they saw.
+      machine.execute("su - dev -c 'flock /var/lib/burrow/proj-watch/wake.json.lock sleep 10' >/dev/null 2>&1 &")
+      machine.wait_until_fails("flock -n /var/lib/burrow/proj-watch/wake.json.lock true", timeout=30)
+      machine.fail("su - dev -c 'timeout 3 proj _watch'")
+      machine.wait_until_succeeds("flock -n /var/lib/burrow/proj-watch/wake.json.lock true", timeout=30)
+
+  # web is a clone of one of the pipeline's own repos (O/Web), with no
+  # issues: the stuck issue's --pipeline job there takes the slot kept for
+  # them.
+  machine.succeed("su - dev -c 'git -C /data/dev/src/web init -q && git -C /data/dev/src/web remote add origin https://github.com/o/web.git'")
+  machine.succeed("mkdir -p /tmp/gh && echo '[]' >/tmp/gh/repos_o_web_issues")
+
   with subtest("a job waiting on a PR is resumed when the PR changes"):
       def github(endpoint, answer):
           machine.succeed(f"mkdir -p /tmp/gh && echo '{answer}' >/tmp/gh/{endpoint.replace('/', '_')}")
@@ -657,4 +681,9 @@
       assert "waiting on CI" in machine.succeed("cat /tmp/gh/posted")
       github("repos/o/c/issues", "[]")
       machine.succeed("su - dev -c 'proj-inbox o/c'")
+
+  with subtest("a job with no turn count doesn't stop _watch looking at the rest"):
+      machine.succeed("su - dev -c 'mkdir -p /data/dev/jobs/broken && printf \"o/r#6\\t0\\t{}\\n\" >/data/dev/jobs/broken/await'")
+      proj("_watch")
+      machine.succeed("rm -rf /data/dev/jobs/broken")
 ''
