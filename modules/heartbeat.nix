@@ -1,6 +1,6 @@
 # heartbeat: something off this machine watches it. Every few minutes the
 # machine tells a Healthchecks check (healthchecks.io, or an instance of your
-# own) how it is, through its ping API (heartbeat/heartbeat.sh). When the pings
+# own) how it is, through its ping API (crates/burrow-heartbeat). When the pings
 # stop, because the machine is down, hung or cut off, or when they say a health
 # check keeps failing, Healthchecks tells the owner by whatever its check is
 # wired to (email, a push to their phone), with nothing here having to be
@@ -17,21 +17,20 @@ let
   inherit (lib) mkOption types;
   name = "${config.burrow.prefix}-heartbeat";
 
-  vars = {
-    HEARTBEAT = name;
-    URL = cfg.url;
-    CHECK = cfg.check;
-    FAIL_AFTER = toString cfg.failAfter;
-    SKIP = lib.concatStringsSep " " cfg.skip;
-    HEALTH = lib.getExe config.burrow.tools.health;
-  };
-
-  heartbeat = pkgs.writeShellApplication {
+  # What crates/burrow-heartbeat reads (its Config).
+  heartbeatConfig = pkgs.writeText "${name}.json" (builtins.toJSON {
     inherit name;
-    runtimeInputs = [ pkgs.coreutils pkgs.curl ];
-    text = lib.concatStrings (lib.mapAttrsToList (n: v: "${n}=${lib.escapeShellArg v}\n") vars)
-      + builtins.readFile ./heartbeat/heartbeat.sh;
-  };
+    inherit (cfg) url check failAfter skip;
+    health = lib.getExe config.burrow.tools.health;
+  });
+
+  heartbeat = pkgs.runCommand name {
+    nativeBuildInputs = [ pkgs.makeBinaryWrapper ];
+    meta.mainProgram = name;
+  } ''
+    makeBinaryWrapper ${inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow}/bin/burrow-heartbeat \
+      $out/bin/${name} --add-flags ${heartbeatConfig}
+  '';
 in
 {
   imports = [
