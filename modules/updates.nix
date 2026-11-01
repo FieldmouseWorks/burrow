@@ -214,10 +214,12 @@ let
     cp ${./autoland/seal.py} $out/seal.py
     flake8 --ignore E501,W503 $out
   '';
+  # What runs Renovate here is this one (updates/renovate-package.nix).
+  renovatePackage = import ./updates/renovate-package.nix pkgs;
   # Every release age a Renovate config sets, its presets resolved by
   # Renovate's own code (updates/release-ages.mjs).
   releaseAges = pkgs.writeShellScriptBin "release-ages" ''
-    exec ${lib.getExe pkgs.nodejs_24} ${./updates/release-ages.mjs} ${pkgs.renovate}
+    exec ${lib.getExe pkgs.nodejs_24} ${./updates/release-ages.mjs} ${renovatePackage}
   '';
   # lock-age holds Cargo and npm refreshes to the longest age the machine's
   # policy and the repo's own config set, presets and all. It takes the
@@ -262,7 +264,7 @@ let
     exec ${pkgs.python3}/bin/python3 -E -s ${majorSealSrc}/major-seal.py ${stateDir}/renovate-sweep "$@"
   '';
   renovateRun = script "renovate-run" ./updates/renovate.sh (
-    [ pkgs.renovate machineGh pkgs.util-linux pkgs.coreutils ] ++ lib.optional (machineApp != null) tools.gh-token
+    [ renovatePackage machineGh pkgs.util-linux pkgs.coreutils ] ++ lib.optional (machineApp != null) tools.gh-token
   );
   renovateSweep = script "renovate-sweep" ./updates/renovate-sweep.sh (
     (with pkgs; [ coreutils findutils jq gnused ]) ++ [ config.programs.git.package machineGh ] ++ calls
@@ -462,13 +464,13 @@ let
   # (updates/renovate-covers.mjs), on the node it runs on.
   coversTool = pkgs.writeShellScript "renovate-covers" ''
     exec ${lib.escapeShellArgs [
-      (lib.getExe pkgs.nodejs_24) "${./updates/renovate-covers.mjs}" "${pkgs.renovate}" (builtins.toJSON renovateSettings.autodiscoverFilter)
+      (lib.getExe pkgs.nodejs_24) "${./updates/renovate-covers.mjs}" "${renovatePackage}" (builtins.toJSON renovateSettings.autodiscoverFilter)
     ]} "$@"
   '';
 
   renovateConfig = pkgs.runCommand "renovate-config.json"
     {
-      nativeBuildInputs = [ pkgs.jq pkgs.renovate ];
+      nativeBuildInputs = [ pkgs.jq renovatePackage ];
       value = builtins.toJSON renovateSettings;
       passAsFile = [ "value" ];
       preferLocalBuild = true;
@@ -887,7 +889,7 @@ in
           to its branch from its own commits, and rebases it away. Give Renovate
           an email of its own.'';
       }];
-      environment.systemPackages = [ renovateSweep pkgs.renovate ];
+      environment.systemPackages = [ renovateSweep renovatePackage ];
 
       # What moves a repo's Renovate PRs (burrow.events): its default branch
       # (to rebase on, or a dependency changed), and its Renovate PRs being
