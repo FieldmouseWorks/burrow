@@ -140,6 +140,7 @@ UPKEEP_TIMEOUT = 300
 # How many repos this pass has searched for a dashboard (burrow-upkeep's
 # FINDS says how many it may).
 SEARCHED = [0]
+UNRECORDED = "A Claude job nothing records, which couldn't be stopped"
 
 
 def upkeep_run(*args, env=None):
@@ -180,7 +181,12 @@ def upkeep(repo, mine):
     for why in out["failed"]:
         failed(why)
     for j in out["jobs"]:
-        jid = C.job(repo, j["task"], clone=True, pipeline=j["pipeline"], timeout=j["timeout"])
+        try:
+            jid = C.job(repo, j["task"], clone=True, pipeline=j["pipeline"], timeout=j["timeout"])
+        except Exception as e:  # its own: the other part's job, and the pass, go on
+            failed(f"its {j['part']} job didn't start: {e}")
+            mine.extend(tuple(x) for x in j["unstarted"])
+            continue
         if not jid:
             log(f"{repo}: couldn't start its {j['part']} job (no checkout, or proj refused)")
             mine.extend(tuple(x) for x in j["unstarted"])
@@ -190,8 +196,13 @@ def upkeep(repo, mine):
         try:
             upkeep_run("started", repo, j["part"], jid)
         except Exception as e:
-            C.stop_job(jid)
-            failed(f"its {j['part']} job {jid}, stopped: it couldn't be recorded: {e}")
+            if C.stop_job(jid):
+                failed(f"its {j['part']} job {jid}, stopped: it couldn't be recorded: {e}")
+            else:
+                # Nothing here knows of it, so the next pass may start another
+                # beside it: the stuck issue's job (on this machine) stops it.
+                failed(f"its {j['part']} job {jid} couldn't be recorded ({e}), and proj couldn't stop it")
+                mine.append((UNRECORDED, repo, f"its {j['part']} job {jid}: stop it, if it's still at work"))
             continue
         C.wake(repo, j["wake"])  # ends: the job's own end, or this look (its `// ends:`)
 

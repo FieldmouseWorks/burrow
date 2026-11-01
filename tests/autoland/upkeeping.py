@@ -115,17 +115,20 @@ with open(f"{tmp}/upkeep.json", "w") as f:
                "flaky": {"jobTimeout": 240}}, f)
 UP = [UPKEEP, f"{tmp}/upkeep.json"]
 JOBS, LOGGED = [], []
-NEXT = {}  # what C.job gives next, when set ("jid"): None for no job
+NEXT = {}  # what C.job gives next, when set ("jid"): None for no job; or raises ("raise")
+STOP_OK = [True]  # whether proj stops a job
 
 
 def job(repo, task, clone=False, pipeline=True, timeout=None, since=None):
     JOBS.append({"repo": repo, "task": task, "clone": clone, "pipeline": pipeline, "timeout": timeout})
+    if "raise" in NEXT:
+        raise NEXT.pop("raise")
     return NEXT.pop("jid") if "jid" in NEXT else f"up-{len(JOBS)}"
 
 
 kept = (C.job, C.stop_job, C.CFG["upkeep"])
 C.job = job
-C.stop_job = lambda jid: STOPPED.append(jid) or True
+C.stop_job = lambda jid: STOPPED.append(jid) or STOP_OK[0]
 C.CFG["upkeep"] = UP
 for f in os.listdir(C.STATE):
     if f.startswith(("dashboard-", "flaky-")) or f == "flaky":
@@ -208,6 +211,34 @@ assert len(JOBS) == 1 and STOPPED == ["up-1"], (JOBS, STOPPED)
 assert "sam/r" in waits.FAILED and C.WAKE == {"sam/r": T + 60 + 300}, (waits.FAILED, C.WAKE)
 assert "handed" not in state("flaky")["issues"]["4"], state("flaky")
 assert any("its flaky job up-1, stopped" in x for x in LOGGED), LOGGED
+# One proj couldn't stop either is listed for the stuck issue's job, which
+# can stop it: the next pass, knowing nothing of it, may start another.
+STOP_OK[0] = False
+mine = look(90, [f"{tmp}/upkeep-wrap", f"{tmp}/upkeep.json"])
+STOP_OK[0] = True
+assert ("A Claude job nothing records, which couldn't be stopped", "sam/r", "its flaky job up-1: stop it, if it's still at work") in mine, mine
+assert all(x[0] not in R.OWNERS for x in mine if x[1] == "sam/r"), mine
+assert any("its flaky job up-1 couldn't be recorded" in x and "proj couldn't stop it" in x for x in LOGGED), LOGGED
+assert not any("stopped:" in x for x in LOGGED), LOGGED
+
+# A job that raises as it starts (a brief past what exec takes, a clone that
+# breaks) is that request's failure: the other part's job starts all the
+# same, and the pass goes on. Here the dashboard's error is due a day on,
+# alongside the flaky test's.
+with open(f"{C.STATE}/dashboard-sam_r.json", "w") as f:
+    json.dump({"n": 7, "by": "sam", "items": {"branch renovate/npm-packages": {
+        "since": T - 2 * DAY, "section": "Errored", "what": "chore(deps): update npm packages", "failing": True}}}, f)
+os.remove(f"{C.STATE}/flaky-sam_r.json")
+github()
+NEXT["raise"] = OSError(7, "Argument list too long")
+mine = look(0)
+assert [j["pipeline"] for j in JOBS] == [True, False], JOBS
+assert state("flaky")["issues"]["4"]["job"] == "up-2", state("flaky")
+assert "handed" not in state("dashboard")["items"]["branch renovate/npm-packages"], state("dashboard")
+assert ("Couldn't start a Claude job", "sam/r#7", "for what's stuck on Renovate's dashboard") in mine, mine
+assert "sam/r" in waits.FAILED and C.WAKE["sam/r"] == T + 300, (waits.FAILED, C.WAKE)
+assert "sam/r: its dashboard job didn't start: [Errno 7] Argument list too long" in LOGGED, LOGGED
+os.remove(f"{C.STATE}/flaky-sam_r.json")
 
 # A part that fails is logged and watched, and the other part goes on:
 # GitHub not answering the dashboard's read leaves the quarantine's job.
