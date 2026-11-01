@@ -65,10 +65,8 @@ fn main() -> ExitCode {
         );
         return ExitCode::from(2);
     };
-    // sudo sets SUDO_UID, and makes root: one sudo started as someone else
-    // (sudo -u) runs as them, with what they may do, rather than starting
-    // again for ever.
-    if !rustix::process::geteuid().is_root() && env::var_os("SUDO_UID").is_none() {
+    // Started as anyone but root, it starts again through sudo.
+    if !rustix::process::geteuid().is_root() {
         let e = match env::current_exe() {
             Ok(exe) => Command::new(&cfg.sudo)
                 .arg("--")
