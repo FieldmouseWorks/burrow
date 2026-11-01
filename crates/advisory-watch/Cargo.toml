@@ -1,0 +1,20 @@
+[package]
+name = "advisory-watch"
+description = "advisory-watch: new vulnerabilities in what the machine and its projects run, each handed to a Claude job the same hour"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+jiff.workspace = true
+rustix = { version = "1.1.6", features = ["fs", "process"] }
+serde.workspace = true
+serde_json.workspace = true
+ureq.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

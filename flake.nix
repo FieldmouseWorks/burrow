@@ -903,6 +903,17 @@
             { echo "got: $got"; exit 1; }
           touch $out
         '';
+        # advisory-watch as the example machine runs it: the config built into
+        # it reads (a field the binary doesn't know fails it), and a report,
+        # which only reads, has nothing yet. Its rules are
+        # crates/advisory-watch's tests.
+        advisory-watch-config = let
+          watch = self.nixosConfigurations.example.config.systemd.services.advisory-watch.serviceConfig.ExecStart;
+        in pkgs.runCommand "advisory-watch-config-check" { } ''
+          got=$(${watch} report 2>err) || { echo "advisory-watch report failed (exit $?): $(cat err)"; exit 1; }
+          [ "$got" = "nothing seen yet" ] || { echo "advisory-watch report said: $got"; exit 1; }
+          touch $out
+        '';
         # flake-gate: a repo's CI gate step, run here as CI runs it, and
         # burrow's own evaluating apart, so a Claude job's gate holds little.
         flake-gate = pkgs.runCommand "flake-gate-check" { nativeBuildInputs = [ (pkgs.callPackage ./tools/flake-gate/package.nix { }) pkgs.git pkgs.yq-go pkgs.shellcheck ]; } ''
