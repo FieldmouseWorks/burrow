@@ -304,6 +304,24 @@ def rest_ours(login):
     return login in CFG["authors"]
 
 
+def renovates(login):
+    """Whether a login, as REST gives it, is the one Renovate runs as: the
+    machine's own App's bot (config.renovate), or without one the machine
+    user's gh login, one of the authors."""
+    bot = CFG["renovate"]
+    return login == bot if bot else login in CFG["authors"]
+
+
+def renovated(actor):
+    """The same for an author as GraphQL gives it: a bot's login without
+    "[bot]", which only GitHub's own Bot of that name holds."""
+    if not actor:
+        return False
+    if actor.get("__typename") == "Bot":
+        return renovates(actor.get("login") + "[bot]")
+    return renovates(actor.get("login"))
+
+
 _key = []
 
 

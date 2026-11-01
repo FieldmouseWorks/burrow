@@ -20,7 +20,6 @@ import re
 import time
 
 import common as C
-import dashboard as D
 import lock_wait
 import proofs as P
 import review_step
@@ -764,7 +763,7 @@ def handle(repo, pr, repo_info, digest, obsolete=False):
     swept = fixed and ci == "red" and renovate
     # The date a lock file refresh waits for, renovate-sweep's to have it refreshed then.
     requested = renovate and lock_wait.requested(pr, C.NOW, CFG["renovateRun"] or 0)
-    refresh = lock_wait.refresh(pr, ci == "red", ci_names, D.renovated, requested) if renovate else {}
+    refresh = lock_wait.refresh(pr, ci == "red", ci_names, C.renovated, requested) if renovate else {}
 
     # Dependency bumps: CI is the review. Renovate merges its own minor
     # ones; renovate-sweep fixes the red ones (and settles their threads) and

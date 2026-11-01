@@ -195,6 +195,21 @@ fn message(body: &str) -> String {
     m.chars().take(300).collect()
 }
 
+/// A value that goes into a path, as one part of it or in its query
+/// (`?q=VALUE`): percent-encoded, all but the characters a URL never
+/// reserves.
+pub fn encode(value: &str) -> String {
+    value
+        .bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                (b as char).to_string()
+            }
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
+}
+
 /// gh api, with -i so the status and headers come back too.
 pub struct Gh;
 
@@ -420,6 +435,14 @@ mod tests {
     use super::fake::{Fake, ok};
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn encodes_a_query_value() {
+        assert_eq!(encode("updates"), "updates");
+        assert_eq!(encode("needs peter&co"), "needs%20peter%26co");
+        assert_eq!(encode("é"), "%C3%A9");
+        assert_eq!(encode("repo:a/b \"x\""), "repo%3Aa%2Fb%20%22x%22");
+    }
 
     #[test]
     fn reads_gh() {

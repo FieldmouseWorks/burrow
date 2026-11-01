@@ -313,10 +313,12 @@
         # the agents, and its one-way paths as the module sets them; a look it
         # queues is taken by the reviewers' own service, burrow-review, with
         # its tests' stand-ins for codex and bubblewrap (they need bash and jq).
+        # Its passes run burrow-upkeep, whose source says what it lists.
         autoland = pkgs.runCommand "autoland-check" { nativeBuildInputs = [ pkgs.python3 pkgs.git pkgs.openssl pkgs.bash pkgs.jq ]; } ''
           python3 -I ${./tests/autoland}/check.py ${./modules/autoland}/steward.py \
             ${pkgs.writeText "one-way.json" (builtins.toJSON self.nixosConfigurations.example.config.burrow.autoland.oneWay)} \
-            ${self.packages.${system}.burrow-review}/bin/burrow-review ${./crates/burrow-review/tests/fakes}
+            ${self.packages.${system}.burrow-review}/bin/burrow-review ${./crates/burrow-review/tests/fakes} \
+            ${self.packages.${system}.burrow-upkeep}/bin/burrow-upkeep ${./crates/burrow-upkeep/src}
           touch $out
         '';
         # The example's reviewers' service reads the config its module writes
@@ -437,9 +439,11 @@
           [ "$got" = the-stewards ] || { echo "a pass's own call doesn't use the steward's token: $got"; exit 1; }
           touch $out
         '';
-        # Each flaky the machine runs, the toolbox's and the steward's, asks
-        # GitHub through the first gh on its caller's PATH (the machine's, which
-        # knows an App's env), with no gh of its own ahead of it.
+        # Each flaky the machine runs asks GitHub through the first gh on its
+        # caller's PATH (the machine's, which knows an App's env), with no gh
+        # of its own ahead of it: the toolbox's, and the steward's, which
+        # burrow-upkeep runs as a library, reading the config the module
+        # writes (a field it doesn't know fails it).
         flaky-gh = let
           example = self.nixosConfigurations.example.config;
           steward = builtins.head (builtins.filter (p: (p.name or "") == "autoland-steward")
@@ -454,10 +458,12 @@
           mkdir bin && ln -s ${gh} bin/gh
           config=$(sed -n 's|^export AUTOLAND_CONFIG=.*:-\(/nix/store/[^}]*\)}$|\1|p' ${steward}/bin/autoland-steward)
           [ -n "$config" ] || { echo "autoland-steward names no config"; exit 1; }
-          for flaky in ${example.system.path}/bin/flaky "$(jq -r .flaky.bin "$config")"; do
+          upkeep=$(jq -r '.upkeep | join(" ")' "$config")
+          [ "$(jq -r '.flaky' "$(jq -r '.upkeep[1]' "$config")")" != null ] || { echo "the steward's upkeep has no flaky tests"; exit 1; }
+          for flaky in "${example.system.path}/bin/flaky quarantine sam/r" "$upkeep watch sam/r --now 1800000000"; do
             rm -f called
-            said=$(env -i PATH=$PWD/bin CALLED=$PWD/called "$flaky" quarantine sam/r 2>&1) || { echo "$flaky: $said"; exit 1; }
-            grep -q '^api ' called || { echo "$flaky asked GitHub through a gh of its own: $said"; exit 1; }
+            said=$(env -i PATH=$PWD/bin CALLED=$PWD/called $flaky 2>&1) || { echo "$flaky: $said"; exit 1; }
+            grep -q '^api .*repos/sam/r/issues?labels=flaky' called || { echo "$flaky asked GitHub through a gh of its own: $said"; exit 1; }
           done
           touch $out
         '';

@@ -28,8 +28,8 @@ event reports):
      the default moving changes them or the wait they were given ends
      (branches.py).
   4. Read each repo's Renovate dashboard: what sits on it too long, short
-     of a PR, goes to a Claude job (dashboard.py); and its quarantined
-     flaky tests, each to a Claude job that fixes it (flakes.py).
+     of a PR, goes to a Claude job; and its quarantined flaky tests, each
+     to a Claude job that fixes it (burrow-upkeep, `upkeep` below).
   5. Keep one issue up to date with everything waiting for the owner, and
      one with what the pipeline is stuck on, for a Claude job (repos.py).
 
@@ -65,13 +65,13 @@ OWNER/REPO`, printed on stdout for it alone.
 """
 
 import fcntl
+import json
 import os
+import subprocess
 import sys
 
 import branches as B
 import common as C
-import dashboard as D
-import flakes as F
 import proofs as P
 import repos as R
 import reviewers as V
@@ -131,6 +131,69 @@ def main():
     finally:
         if C.LIMITED and C.LIMITED[0] > C.NOW:
             C.after_limit(kick)
+
+
+# How long one call of burrow-upkeep may take: a look at a repo is a few
+# dozen GitHub calls, each tried three times at most. One that runs past it
+# is killed, and the pass goes on to the next repo.
+UPKEEP_TIMEOUT = 300
+# How many repos this pass has searched for a dashboard (burrow-upkeep's
+# FINDS says how many it may).
+SEARCHED = [0]
+
+
+def upkeep_run(*args, env=None):
+    """burrow-upkeep (crates/burrow-upkeep), in env: what it printed. What it
+    says of itself goes to the journal; one that fails or runs past
+    UPKEEP_TIMEOUT raises."""
+    p = subprocess.run([*CFG["upkeep"], *args, "--now", repr(C.NOW), *(["--dry"] if DRY else [])],
+                       stdout=subprocess.PIPE, text=True, env=env, timeout=UPKEEP_TIMEOUT)
+    if p.returncode:
+        raise RuntimeError(f"burrow-upkeep {args[0]} exited {p.returncode}")
+    return p.stdout
+
+
+def upkeep(repo, mine):
+    """The repo's Renovate dashboard and quarantined flaky tests, which
+    burrow-upkeep looks at: what it lists goes in mine, the passes it books
+    are booked, and the Claude jobs it asks for are started here, each told
+    back to it once it has its id. One it can't be told of is stopped, so
+    the next pass doesn't start another beside it. Whatever fails is
+    logged, and the stall watchdog watches the repo; the pass goes on."""
+    def failed(why):
+        log(f"{repo}: {why}")
+        waits.failed(repo)
+        C.wake(repo, C.NOW + 5 * MIN)  # ends: waits.failed watches the repo
+
+    try:
+        # As the App, for the repo's owner, as every GitHub call of a pass's.
+        out = json.loads(upkeep_run("watch", repo, "--searched", str(SEARCHED[0]), env=C.gh_env()))
+    except Exception as e:
+        failed(f"its upkeep: {e}")
+        return
+    mine.extend(tuple(x) for x in out["stuck"])
+    SEARCHED[0] += out["searched"]
+    if out["wake"]:
+        C.wake(repo, out["wake"])  # ends: as each of burrow-upkeep's own says (its `// ends:`)
+    if out["limited"] is not None and not C.LIMITED:
+        C.LIMITED.append(out["limited"])
+    for why in out["failed"]:
+        failed(why)
+    for j in out["jobs"]:
+        jid = C.job(repo, j["task"], clone=True, pipeline=j["pipeline"], timeout=j["timeout"])
+        if not jid:
+            log(f"{repo}: couldn't start its {j['part']} job (no checkout, or proj refused)")
+            mine.extend(tuple(x) for x in j["unstarted"])
+            if not C.taken(repo):  # no use looking again until that folder moves: a full pass will
+                C.wake(repo, C.NOW + 5 * MIN)  # ends: a job starting; until then each one is listed
+            continue
+        try:
+            upkeep_run("started", repo, j["part"], jid)
+        except Exception as e:
+            C.stop_job(jid)
+            failed(f"its {j['part']} job {jid}, stopped: it couldn't be recorded: {e}")
+            continue
+        C.wake(repo, j["wake"])  # ends: the job's own end, or this look (its `// ends:`)
 
 
 def retire_deleted(known, failed, digest):
@@ -255,20 +318,8 @@ def run_pass(kick):
                 log(f"{repo}: {e}")
                 waits.failed(repo)
                 C.wake(repo, C.NOW + 5 * MIN)  # ends: waits.failed watches the repo; GitHub, often
-            if CFG["dashboard"]["enable"]:
-                try:
-                    D.watch(repo, mine)
-                except Exception as e:  # its own: the repo's PRs were seen to all the same
-                    log(f"{repo}: its dashboard: {e}")
-                    waits.failed(repo)
-                    C.wake(repo, C.NOW + 5 * MIN)  # ends: waits.failed watches the repo
-            if CFG["flaky"]["enable"]:
-                try:
-                    F.watch(repo, mine)
-                except Exception as e:  # likewise
-                    log(f"{repo}: its flaky tests: {e}")
-                    waits.failed(repo)
-                    C.wake(repo, C.NOW + 5 * MIN)  # ends: waits.failed watches the repo
+            if CFG["upkeep"]:
+                upkeep(repo, mine)
             if had := C.taken(repo):
                 mine.append(C.taken_line(repo, had))
     # This pass's wake-ups and owner's lines replace the ones it had for the

@@ -1,0 +1,21 @@
+[package]
+name = "burrow-upkeep"
+description = "What the autoland steward keeps up in each repo besides its PRs: Renovate's dashboard and the flaky tests' quarantine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+burrow-github = { path = "../burrow-github" }
+flaky = { path = "../flaky" }
+jiff.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+burrow-github = { path = "../burrow-github", features = ["fake"] }
+tempfile.workspace = true
+
+[lints]
+workspace = true

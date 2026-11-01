@@ -4,7 +4,7 @@ a Claude job; when the inbox can't take it, all of it is the owner's."""
 
 import os
 
-from harness import B, C, R, fresh_pr_state, sh, tmp
+from harness import UPKEEP_SRC, B, C, R, fresh_pr_state, sh, tmp
 
 CALLS = []
 OPEN = {}  # the open issue under each label, as `gh issue list` finds it
@@ -106,7 +106,8 @@ assert B.UNKEPT not in R.OWNERS and B.UNDELETED not in R.OWNERS
 
 # Every kind the owner settles is one the steward lists: a renamed one
 # would go to the inbox, never to the owner.
-src = "".join(open(os.path.join(os.path.dirname(R.__file__), f)).read() for f in ("step.py", "review_step.py", "repos.py", "flakes.py"))
+src = "".join(open(os.path.join(os.path.dirname(R.__file__), f)).read() for f in ("step.py", "review_step.py", "repos.py"))
+src += "".join(open(os.path.join(UPKEEP_SRC, f)).read() for f in sorted(os.listdir(UPKEEP_SRC)) if not f.endswith("_tests.rs"))
 for kind in R.OWNERS:
     assert src.count(f'"{kind}"') >= 2, kind
 

@@ -28,8 +28,8 @@ let
   # The reviewers' user, the queue and snapshots it reads, and the kick,
   # as the reviewers' service (autoland/review.nix) has them.
   inherit (import ./autoland/paths.nix config) reviewer reviewDir snapDir stewardKick;
-  # The flaky tool's program.
-  flaky = inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.flaky;
+  # burrow-upkeep, what keeps up each repo besides its PRs.
+  burrowUpkeep = inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow-upkeep;
 
   # The baseline and the house style it links to (the rules, the project
   # template and lib), together, so the links resolve for the job that reads
@@ -54,7 +54,7 @@ let
   trains = lib.attrNames (lib.filterAttrs (_: r: r.train or false) cfg.repos);
 
   # The title Renovate gives each repo's dashboard (its
-  # dependencyDashboardTitle default): the issue dashboard.py reads, and the
+  # dependencyDashboardTitle default): the issue burrow-upkeep reads, and the
   # one whose events start a pass.
   dashboardTitle = "Dependency Dashboard";
   settings = {
@@ -104,28 +104,12 @@ let
       inherit (config.burrow.proj.inbox) enable label unstickLabel authors;
       command = if config.burrow.proj.inbox.enable then lib.getExe config.burrow.tools.proj-inbox else null;
     };
-    # Renovate's dashboards (dashboard.py), and where a job that ticks a box
-    # on one kicks Renovate to read it.
-    dashboard = {
-      inherit (cfg.dashboard) enable waitDays errorDays;
-      title = dashboardTitle;
-      renovateKick = if config.burrow.updates.renovate.enable or false then "${config.burrow.events.kick}/renovate" else null;
-      # Whose dashboards they are: Renovate runs as the machine's own App,
-      # else as the user (null: one of `authors`).
-      renovate = if machineApp == null then null else "${machineApp.slug}[bot]";
-      # When Renovate's runs ended (updates/renovate.sh's RUNS), for an
-      # error's two runs.
-      renovateRuns = if config.burrow.updates.renovate.enable or false then "${config.burrow.updates.renovate.dir}/runs" else null;
-    };
-    # Quarantined flaky tests, each to a Claude job (flakes.py).
-    flaky = {
-      inherit (cfg.flaky) enable;
-      # The flaky tool, which lists each repo's quarantined tests: the issues
-      # titled `flaky: TEST` (docs/flaky-tests.md). It asks through the gh on
-      # the steward's PATH.
-      bin = "${flaky}/bin/flaky";
-      jobTimeout = cfg.flaky.jobTimeoutMinutes;
-    };
+    # Whose login Renovate runs as: the machine's own App, else the user
+    # (null: one of `authors`). Its PRs and dashboards are by it.
+    renovate = if machineApp == null then null else "${machineApp.slug}[bot]";
+    # What keeps up each repo's Renovate dashboard and flaky tests
+    # (crates/burrow-upkeep), with its config, when either is on.
+    upkeep = if cfg.dashboard.enable || cfg.flaky.enable then [ "${burrowUpkeep}/bin/burrow-upkeep" "${upkeepConfig}" ] else null;
     # What every open PR waits on, for the stall watchdog (autoland/waits.py),
     # and what it took past a Claude job, for the stuck issue.
     watch = if watchdog then {
@@ -188,6 +172,25 @@ let
     '';
   };
 
+  # burrow-upkeep's (crates/burrow-upkeep/src/config.rs): the steward's own
+  # settings it shares, and its two parts, each null when it's off.
+  upkeepConfig = pkgs.writeText "burrow-upkeep.json" (builtins.toJSON {
+    inherit (settings) stateDir proj projectsDir authors bots jobTimeout renovate;
+    app = settings.app.slug;
+    # Renovate's dashboards, and where a job that ticks a box on one kicks
+    # Renovate to read it.
+    dashboard = if cfg.dashboard.enable then {
+      inherit (cfg.dashboard) waitDays errorDays;
+      title = dashboardTitle;
+      renovateKick = if config.burrow.updates.renovate.enable or false then "${config.burrow.events.kick}/renovate" else null;
+      # When Renovate's runs ended (updates/renovate.sh's RUNS), for an
+      # error's two runs.
+      renovateRuns = if config.burrow.updates.renovate.enable or false then "${config.burrow.updates.renovate.dir}/runs" else null;
+    } else null;
+    # Quarantined flaky tests, each to a Claude job: the issues titled
+    # `flaky: TEST` (docs/flaky-tests.md).
+    flaky = if cfg.flaky.enable then { jobTimeout = cfg.flaky.jobTimeoutMinutes; } else null;
+  });
   configFile = pkgs.writeText "autoland.json" (builtins.toJSON settings);
   # steward.py and every module beside it, linted as they're built: all of
   # them, so a new one can't be left behind.
@@ -504,7 +507,7 @@ in
         default = (config.burrow.updates.enable or false) && (config.burrow.updates.renovate.enable or false);
         defaultText = lib.literalExpression "burrow.updates.renovate.enable";
         description = ''
-          Watch each repo's Renovate Dependency Dashboard (autoland/dashboard.py):
+          Watch each repo's Renovate Dependency Dashboard (crates/burrow-upkeep):
           an update that sits on it too long without a PR goes to a Claude job,
           and one still there a day after that job to the stuck issue. Its
           job reads Renovate's journal, so it wants Renovate on this machine.
@@ -539,7 +542,7 @@ in
         Send each repo's quarantined flaky tests (open issues titled `flaky:
         TEST`, labelled `flaky`, that its gate files: docs/flaky-tests.md) to a
         Claude job that fixes them, and one still open a day after that job to
-        the stuck issue (autoland/flakes.py).
+        the stuck issue (crates/burrow-upkeep).
       '';
     };
 
@@ -785,8 +788,8 @@ in
       events = [ "push" "pull_request" "pull_request_review" "pull_request_review_comment"
         "pull_request_review_thread" "issue_comment" "check_suite" "status" "repository" ]
         ++ lib.optional (cfg.dashboard.enable || cfg.flaky.enable) "issues";
-      # Of the issues, only Renovate's dashboard (dashboard.py) and flaky
-      # tests' (flakes.py; the flaky tool's test.rs has the title).
+      # Of the issues, only Renovate's dashboard and flaky tests'
+      # (burrow-upkeep's; the flaky tool's test.rs has the title).
       issueTitles = lib.optional cfg.dashboard.enable dashboardTitle
         ++ lib.optional cfg.flaky.enable "flaky: *";
       unit = "autoland";

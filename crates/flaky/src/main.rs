@@ -107,42 +107,11 @@ fn go(args: &[String]) -> Result<i32, Usage> {
     }
 }
 
-/// OWNER/REPO, as GitHub allows them: it goes into paths. A repo's name
-/// may start with a dot (`.github`), but isn't `.` or `..`.
+/// OWNER/REPO, as GitHub allows them (quarantine::repo_name).
 fn repo_arg(r: &str) -> Result<&str, Usage> {
-    let ok = |s: &str, extra: &str| {
-        !s.is_empty()
-            && !s.starts_with('-')
-            && s.chars()
-                .all(|c| c.is_ascii_alphanumeric() || "-".contains(c) || extra.contains(c))
-    };
-    match r.split_once('/') {
-        Some((o, n))
-            if ok(o, "") && !o.starts_with('.') && ok(n, "_.") && n != "." && n != ".." =>
-        {
-            Ok(r)
-        }
-        _ => Err(Usage(format!("{r:?} isn't OWNER/REPO"))),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::repo_arg;
-
-    #[test]
-    fn a_repo_may_start_with_a_dot() {
-        for r in ["FieldmouseWorks/.github", "o/a.b_c-d", "o-1/r"] {
-            assert!(repo_arg(r).is_ok(), "{r}");
-        }
-    }
-
-    #[test]
-    fn what_could_leave_the_cache_is_refused() {
-        for r in [
-            "o/.", "o/..", ".o/r", "-o/r", "o/-r", "o/r/x", "o", "/r", "o/", "o_x/r",
-        ] {
-            assert!(repo_arg(r).is_err(), "{r}");
-        }
+    if quarantine::repo_name(r) {
+        Ok(r)
+    } else {
+        Err(Usage(format!("{r:?} isn't OWNER/REPO")))
     }
 }

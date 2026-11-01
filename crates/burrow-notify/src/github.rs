@@ -1,7 +1,7 @@
 //! What a notice asks of GitHub: its open issues, and opening, commenting on
 //! and closing one.
 
-use burrow_github::{Api, Error, call};
+use burrow_github::{Api, Error, call, encode};
 use serde_json::{Value, json};
 
 /// The notice's open issues, newest first, read from the issues themselves
@@ -147,27 +147,4 @@ pub fn close(api: &mut dyn Api, repo: &str, n: u64, why: &str) -> Result<(), Err
         None,
     )
     .map(drop)
-}
-
-/// A query value, percent-encoded.
-fn encode(value: &str) -> String {
-    value
-        .bytes()
-        .map(|b| match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
-                (b as char).to_string()
-            }
-            _ => format!("%{b:02X}"),
-        })
-        .collect()
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn encodes_a_label() {
-        assert_eq!(super::encode("updates"), "updates");
-        assert_eq!(super::encode("needs peter&co"), "needs%20peter%26co");
-        assert_eq!(super::encode("é"), "%C3%A9");
-    }
 }
