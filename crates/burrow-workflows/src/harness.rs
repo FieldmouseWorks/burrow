@@ -82,6 +82,24 @@ pub fn which(name: &str) -> PathBuf {
         .unwrap_or_else(|| panic!("no {name} on PATH"))
 }
 
+/// A binary of the workspace's own. A test can't name another package's
+/// binary, but `cargo test` from crates/ builds every package's that its
+/// tests run, beside the test binaries: target/PROFILE/NAME.
+pub fn workspace_bin(name: &str) -> PathBuf {
+    let exe = std::env::current_exe().unwrap();
+    let bin = exe
+        .parent()
+        .and_then(Path::parent)
+        .map(|profile| profile.join(name))
+        .unwrap();
+    assert!(
+        bin.is_file(),
+        "{} isn't built: `cargo test` from crates/ builds it, as does `cargo build -p {name}`",
+        bin.display()
+    );
+    bin
+}
+
 /// What a step did.
 pub struct Ran {
     pub code: i32,
