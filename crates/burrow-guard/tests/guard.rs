@@ -638,6 +638,75 @@ fn dollar_quotes_decode_to_the_bytes_bash_runs() {
 }
 
 #[test]
+fn what_a_shell_is_handed_some_other_way_is_read_too() {
+    let b = Box::new();
+    let on_feature = clone_tracking("feature", "feature");
+    for cmd in [
+        // A here-string fed to a shell.
+        r#"bash <<< "git push -f origin main; true""#,
+        "sh <<< 'git push --delete origin main && echo ok'",
+        "bash<<<'git push --force origin main; true'",
+        "bash <<< 'git push -f origin main'",
+        // A variable that's run later.
+        r#"cmd="git push -f origin main && echo done"; eval "$cmd""#,
+        "x='git push -f origin main '; $x",
+        "export x='git push -f origin main'",
+        "x+='git push -f origin main'",
+        // The words after a script.
+        r#"bash -c 'git push "$@"' _ -f origin main"#,
+        r#"sh -c 'git push -f origin "$1"' _ main"#,
+        r#"sh -lc 'git push -f origin "${1}"' _ main"#,
+        r#"/bin/bash -c 'git push $*' _ -f origin main"#,
+        "eval 'git push' -f origin main",
+        "eval 'true; git push' -f origin main",
+        // What only an expansion hides.
+        "${x}git push -f origin main",
+        r#"$x""git push -f origin main"#,
+        "$(true)git push -f origin main",
+        "`true`git push -f origin main",
+        "git=git; $git push -f origin main",
+        "${git} push -f origin main",
+        "$GIT push -f origin main",
+        // Its own options before the push.
+        "git --attr-source x push -f origin main",
+    ] {
+        let said = b.check(cmd, on_feature.path());
+        assert!(
+            said.as_deref().is_some_and(|s| s.ends_with(SHARED)),
+            "{cmd}: {said:?}"
+        );
+    }
+    // Refspecs from its input can't be seen, so a force-push asks.
+    for cmd in [
+        "xargs git push -f origin <<< main",
+        "echo main | xargs git push -f origin",
+        "printf main | /usr/bin/xargs git push --force origin",
+    ] {
+        let said = b.check(cmd, on_feature.path());
+        assert!(
+            said.as_deref().is_some_and(|s| s.ends_with(SHARED)),
+            "{cmd}: {said:?}"
+        );
+    }
+    for cmd in [
+        "cat <<< 'hello main'",
+        "git push origin feature <<< main",
+        "x=1 git push origin feature",
+        "msg='git push is fine'; echo $msg",
+        // Parameters a script doesn't use reach nothing.
+        "bash -c 'git push -f origin feature' _ main",
+        r#"bash -c 'git push origin "$1"' _ feature -f"#,
+        "eval 'git push' origin feature",
+        "$git status",
+        "$(true)git status",
+        "echo $x",
+        "echo x | xargs git push origin feature",
+    ] {
+        assert_eq!(b.check(cmd, on_feature.path()), None, "{cmd}");
+    }
+}
+
+#[test]
 fn a_command_too_deep_to_read_asks() {
     let b = Box::new();
     let work = clone_on("feature");

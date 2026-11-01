@@ -17,7 +17,7 @@ const SHARED: [&str; 5] = ["main", "master", "trunk", "HEAD", "@"];
 /// the guard reads asks, since a push in it would go unseen.
 pub fn asks(cmd: &str, cwd: &Path, git: &Path) -> Vec<String> {
     let mut found = Vec::new();
-    let read = shell::commands(cmd).and_then(|commands| pushes(commands, cwd, 0, &mut found));
+    let read = shell::commands(cmd).and_then(|commands| pushes(commands, cwd, 0, &[], &mut found));
     if read.is_err() {
         return vec![
             "The guard couldn't check this command (it nests too deep to read), so it asks."
@@ -36,32 +36,105 @@ const NESTED: usize = 16;
 
 /// Each `git … push …` in `commands`, with where it runs. A word that
 /// reads as more than itself (a script for `bash -c`, `ssh` or `eval`) is
-/// read the same way, since it may run; each such reading is shorter than
-/// the word, so it ends.
+/// read the same way, since it may run, and so is the value of `NAME=value`,
+/// since it may be run later (`eval "$NAME"`). The words after one reach its
+/// last command, as `eval` joins them (`trailing`), unless a shell's `-c`
+/// takes them as its parameters. Each reading is shorter than the word, so
+/// it ends.
 fn pushes(
     commands: Vec<Vec<String>>,
     cwd: &Path,
     depth: usize,
+    trailing: &[String],
     found: &mut Vec<(PathBuf, Push)>,
 ) -> Result<(), shell::TooDeep> {
     if depth > NESTED {
         return Err(shell::TooDeep);
     }
-    for words in &commands {
+    let last = commands.len().saturating_sub(1);
+    for (n, words) in commands.iter().enumerate() {
+        let trailing = if n == last { trailing } else { &[] };
         for (i, word) in words.iter().enumerate() {
-            let inner = shell::commands(word)?;
+            let rest = [&words[i + 1..], trailing].concat();
+            let inner = shell::commands(assigned(word).unwrap_or(word))?;
             if !matches!(inner.as_slice(), [only] if only.as_slice() == std::slice::from_ref(word))
             {
-                pushes(inner, cwd, depth + 1, found)?;
+                if is_shell_script(words, i) {
+                    pushes(given_params(inner, &rest), cwd, depth + 1, &[], found)?;
+                } else {
+                    pushes(inner, cwd, depth + 1, &rest, found)?;
+                }
             }
-            if (word == "git" || word.ends_with("/git"))
-                && let Some(push) = after_git(cwd, &words[i + 1..])
+            if runs_git(word, rest.first())
+                && let Some((at, mut push)) = after_git(cwd, &rest)
             {
-                found.push(push);
+                push.more = words[..i].iter().any(|w| takes_input_as_words(w));
+                found.push((at, push));
             }
         }
     }
     Ok(())
+}
+
+/// The value of a `NAME=value` word.
+fn assigned(word: &str) -> Option<&str> {
+    let (name, value) = word.split_once('=')?;
+    let name = name.strip_suffix('+').unwrap_or(name);
+    let is_name = !name.is_empty()
+        && !name.starts_with(|c: char| c.is_ascii_digit())
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+    is_name.then_some(value)
+}
+
+/// Whether `word` can run git: named so or by a path, or an expansion that
+/// ends so (`$git`, `${x}git`, `$(true)git`) or is followed by `push`, as
+/// whatever it holds may be git (`$GIT push`).
+fn runs_git(word: &str, next: Option<&String>) -> bool {
+    if word == "git" || word.ends_with("/git") {
+        return true;
+    }
+    (word.contains('$') || word.contains(shell::UNKNOWN))
+        && (word.trim_end_matches('}').ends_with("git") || next.is_some_and(|n| n == "push"))
+}
+
+/// Whether `words[i]` is the script of a shell's `-c`.
+fn is_shell_script(words: &[String], i: usize) -> bool {
+    let Some((flag, before)) = words[..i].split_last() else {
+        return false;
+    };
+    flag.starts_with('-')
+        && !flag.starts_with("--")
+        && flag.ends_with('c')
+        && before.iter().any(|w| {
+            let name = w.rsplit('/').next().unwrap_or(w);
+            matches!(name, "sh" | "bash" | "dash" | "zsh" | "ksh")
+        })
+}
+
+/// A `-c` script's commands, with `args` for `$0`, `$1` and so on, and the
+/// ones after `$0` for `$@` and `$*`.
+fn given_params(commands: Vec<Vec<String>>, args: &[String]) -> Vec<Vec<String>> {
+    let given = |word: String| -> Vec<String> {
+        if matches!(word.as_str(), "$@" | "$*" | "${@}" | "${*}") {
+            return args.iter().skip(1).cloned().collect();
+        }
+        let mut word = word;
+        for (n, arg) in args.iter().enumerate().take(10) {
+            word = word
+                .replace(&format!("${n}"), arg)
+                .replace(&format!("${{{n}}}"), arg);
+        }
+        vec![word]
+    };
+    commands
+        .into_iter()
+        .map(|words| words.into_iter().flat_map(given).collect())
+        .collect()
+}
+
+/// A program that turns its input into the words of what it runs.
+fn takes_input_as_words(word: &str) -> bool {
+    matches!(word.rsplit('/').next(), Some("xargs" | "parallel"))
 }
 
 /// What follows `git`, if it's a push: git's own options (each `-C DIR`
@@ -74,7 +147,8 @@ fn after_git(cwd: &Path, words: &[String]) -> Option<(PathBuf, Push)> {
             "push" => return Some((at, Push::read(words.as_slice()))),
             "-C" => at = at.join(words.next()?),
             // Options whose value is the next word.
-            "-c" | "--git-dir" | "--work-tree" | "--namespace" | "--config-env" => {
+            "-c" | "--git-dir" | "--work-tree" | "--namespace" | "--config-env"
+            | "--attr-source" | "--super-prefix" => {
                 words.next();
             }
             w if w.starts_with('-') => {}
@@ -92,6 +166,8 @@ struct Push {
     all: bool,
     /// The remote, then the refspecs.
     positional: Vec<String>,
+    /// More of its words come from its input, unseen (`xargs`).
+    more: bool,
 }
 
 impl Push {
@@ -154,6 +230,12 @@ impl Push {
         if self.all {
             return Some(
                 "Push that can rewrite or delete every remote branch (R2: rewrites history other clones depend on)."
+                    .to_owned(),
+            );
+        }
+        if self.more {
+            return Some(
+                "Force-push or delete of whatever its input names (R2: rewrites history other clones depend on)."
                     .to_owned(),
             );
         }

@@ -200,6 +200,10 @@ struct Command {
     quoted: bool,
     /// The next word is a redirect's target.
     target: bool,
+    /// That target is a here-string's text.
+    here_string: bool,
+    /// Here-strings' texts: a shell given one runs it.
+    scripts: Vec<String>,
 }
 
 impl Command {
@@ -218,6 +222,8 @@ impl Command {
             let word = std::mem::take(&mut self.word);
             if !std::mem::take(&mut self.target) {
                 self.words.push(word);
+            } else if std::mem::take(&mut self.here_string) {
+                self.scripts.push(word);
             }
         }
         self.in_word = false;
@@ -229,9 +235,11 @@ impl Command {
         // A redirect with no target before the command ends takes nothing
         // from the next command.
         self.target = false;
+        self.here_string = false;
         if !self.words.is_empty() {
             commands.push(std::mem::take(&mut self.words));
         }
+        commands.extend(self.scripts.drain(..).map(|script| vec![script]));
     }
 }
 
@@ -531,6 +539,7 @@ impl Lexer {
             return self.heredoc(depth);
         }
         cmd.target = true;
+        cmd.here_string = operator == "<<<";
         Ok(())
     }
 
@@ -683,13 +692,19 @@ mod tests {
         assert_eq!(commands("a 3>&- b <&- c"), want(&[&["a", "b", "c"]]));
         assert_eq!(
             commands("a &>log b &>>log c <<<x d <<EOF e"),
-            want(&[&["a", "b", "c", "d", "e"]])
+            want(&[&["a", "b", "c", "d", "e"], &["x"]])
         );
         // What a target runs is read all the same.
         assert_eq!(
             commands(r#"a <"$(b c)" d > `e` f < <(g)"#),
             want(&[&["b", "c"], &["e"], &["g"], &["a", "d", "f"]])
         );
+        // A here-string's text is no word of its command, and stands apart.
+        assert_eq!(
+            commands("a <<< 'b c' d; e"),
+            want(&[&["a", "d"], &["b c"], &["e"]])
+        );
+        assert_eq!(commands("<<<a"), want(&[&["a"]]));
         // A redirect left without a target takes nothing from the next
         // command.
         assert_eq!(commands("a >; b"), want(&[&["a"], &["b"]]));
