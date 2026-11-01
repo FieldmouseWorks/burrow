@@ -161,6 +161,9 @@ pub fn decide(
         crate::fresh::decide(cfg, f, pool, unread, (st, was), now, &mut d);
     }
     if let (Some(dep), Some((update, said))) = (&cfg.deploy, &snap.update) {
+        // Its last attempt failed without saying so (killed, timed out, a
+        // command's error): what the run before it said no longer holds.
+        let behind = snap.behind.filter(|_| update.state != "failed");
         for repo in dep.own.iter().chain(dep.running.keys()) {
             let key = format!("deploy/{repo}");
             if let Some(why) = snap.unknown.get(repo) {
@@ -174,7 +177,7 @@ pub fn decide(
                 d.state.going_live.insert(repo.clone(), since);
                 let what = format!("{repo} going live");
                 let link = Some(format!("https://github.com/{repo}"));
-                let it = going_live(dep, update, said, snap.behind, what, why, since, link, true);
+                let it = going_live(dep, update, said, behind, what, why, since, link, true);
                 d.items.insert(key, it);
                 continue;
             }
@@ -206,15 +209,7 @@ pub fn decide(
                 short(&b.newest),
             );
             let it = going_live(
-                dep,
-                update,
-                said,
-                snap.behind,
-                what,
-                &waiting,
-                b.oldest,
-                link,
-                false,
+                dep, update, said, behind, what, &waiting, b.oldest, link, false,
             );
             d.items.insert(key, it);
         }
@@ -775,6 +770,13 @@ mod tests {
                 clock(T)
             )
         );
+        // The unit failed since that run said so: back on the short one.
+        s.update.as_mut().unwrap().0.state = "failed".into();
+        let it =
+            decide(&cfg, &s, &State::default(), &BTreeMap::new(), T + 60.0).items["deploy/sam/box"]
+                .clone();
+        assert_eq!(it.due, T + 1800.0);
+        s.update.as_mut().unwrap().0.state = "inactive".into();
         s.behind = None;
         // A run under way that started before the oldest commit doesn't
         // have it; one that started after does.
@@ -878,6 +880,16 @@ mod tests {
             (T - 300.0, T - 300.0 + 5400.0, None)
         );
         assert_eq!(d.state.going_live["sam/box"], T - 600.0);
+        // Unknown, behind its own PR: the longer wait; its unit failed since,
+        // the short one.
+        let mut held = s.clone();
+        held.behind = Some(405);
+        held.update.as_mut().unwrap().0 = Unit::default();
+        let e = decide(&cfg, &held, &d.state, &d.items, T + 90.0);
+        assert_eq!(e.items["deploy/sam/box"].due, T - 600.0 + 18000.0);
+        held.update.as_mut().unwrap().0.state = "failed".into();
+        let e = decide(&cfg, &held, &d.state, &d.items, T + 90.0);
+        assert_eq!(e.items["deploy/sam/box"].due, T - 600.0 + 1800.0);
         // It failed: as old as before it, not as its start.
         s.update = idle("failed at then: activation failed; reverted");
         let d = decide(&cfg, &s, &d.state, &d.items, T + 120.0);
