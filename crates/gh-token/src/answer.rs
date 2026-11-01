@@ -78,8 +78,11 @@ fn token(config: &Config, request: &str, now: i64) -> Result<String, Error> {
     }
     let pem = fs::read(&config.key)
         .map_err(|e| Error::refused(format!("the App's key, {}: {e}", config.key.display())))?;
-    let minted =
-        App::new(&config.api, config.proxy.clone(), config.app_id, &pem)?.mint(&target, now)?;
+    // An account the App isn't installed on is a refusal to the asker: only
+    // installing it there changes that.
+    let minted = App::new(&config.api, config.proxy.clone(), config.app_id, &pem)?
+        .mint(&target, now)?
+        .ok_or_else(|| Error::refused(format!("the App isn't installed on {}", target.owner)))?;
     // Only a cache: one that can't be written costs a mint next time.
     if let Err(e) = cache::put(&config.cache, &key, &minted) {
         eprintln!(
@@ -258,6 +261,31 @@ mod tests {
                 "GET /app/installations?per_page=100&page=1",
                 "POST /app/installations/42/access_tokens"
             ]
+        );
+    }
+
+    #[test]
+    fn refuses_an_account_the_app_isnt_installed_on() {
+        let github = fake::serve(|r| match r.method.as_str() {
+            "GET" => (200, vec![], fake::installations(&[(42, "sam")])),
+            _ => (404, vec![], r#"{"message":"Not Found"}"#.into()),
+        });
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("key"), fake::key(true)).unwrap();
+        let config = Config {
+            api: github.url.clone(),
+            proxy: None,
+            app_id: 7,
+            key: dir.path().join("key"),
+            cache: dir.path().to_owned(),
+        };
+        assert_eq!(
+            ask(&config, "eve/r\n", 1_793_224_800),
+            "refused the App isn't installed on eve\n"
+        );
+        assert_eq!(
+            github.asked(),
+            ["GET /app/installations?per_page=100&page=1"]
         );
     }
 }

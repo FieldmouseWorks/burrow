@@ -72,7 +72,7 @@ pub fn settle(p: &mut Pass, cfg: &Settle, repo: &Repo) -> bool {
     // requires the train's status only while it's on), or a repo settled
     // empty that has its first commit now (it's due its ruleset).
     let due = p.now - st.settings.unwrap_or(0.0) >= DAY
-        || st.app != Some(cfg.app_id)
+        || st.app != Some(p.cfg.app.id)
         || st.train.unwrap_or(false) != rules.train
         || (st.empty && !repo.empty);
     if let Err(e) = keep(p, cfg, rules, repo, &mut st, &name, due) {
@@ -193,7 +193,8 @@ fn keep(
             {
                 eprintln!("{}: adding the baseline ruleset", p.repo);
                 let path = format!("repos/{}/rulesets", p.repo);
-                made = write(p, "POST", &path, Some(&baseline(cfg, rules))).is_some();
+                let body = baseline(cfg, p.cfg.app.id, rules);
+                made = write(p, "POST", &path, Some(&body)).is_some();
             }
             // Whether or not the repo gets the baseline ruleset, its own
             // rules are kept in line with it.
@@ -210,7 +211,7 @@ fn keep(
     st.settings = Some(p.now);
     st.empty = repo.empty;
     if pinned {
-        st.app = Some(cfg.app_id);
+        st.app = Some(p.cfg.app.id);
         st.train = Some(rules.train);
     } else {
         st.app = None;
@@ -296,14 +297,14 @@ fn label(p: &mut Pass, name: &str, color: &str, text: &str) -> bool {
 /// with its train on the train's, which it posts just before it lands a
 /// PR. Only the App's: one with the same name from anyone else (the
 /// owner's login included) satisfies nothing.
-fn required(cfg: &Settle, train: bool) -> Vec<Value> {
+fn required(cfg: &Settle, app: u64, train: bool) -> Vec<Value> {
     let mut checks = vec![&cfg.context];
     if train {
         checks.push(&cfg.train_context);
     }
     checks
         .into_iter()
-        .map(|c| json!({"context": c, "integration_id": cfg.app_id}))
+        .map(|c| json!({"context": c, "integration_id": app}))
         .collect()
 }
 
@@ -323,7 +324,7 @@ fn bypass(rules: Rules) -> Value {
     json!([{"actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": mode}])
 }
 
-fn baseline(cfg: &Settle, rules: Rules) -> Value {
+fn baseline(cfg: &Settle, app: u64, rules: Rules) -> Value {
     let mut made = vec![
         json!({"type": "deletion"}),
         json!({"type": "non_fast_forward"}),
@@ -339,7 +340,7 @@ fn baseline(cfg: &Settle, rules: Rules) -> Value {
         }}));
         made.push(json!({"type": "required_status_checks", "parameters": {
             "strict_required_status_checks_policy": false,
-            "required_status_checks": required(cfg, rules.train),
+            "required_status_checks": required(cfg, app, rules.train),
         }}));
     }
     json!({
@@ -356,12 +357,12 @@ fn baseline(cfg: &Settle, rules: Rules) -> Value {
 /// train's), pinned to its App (under key: a ruleset's integration_id,
 /// classic protection's app_id): the same name from anyone else satisfies
 /// nothing. Whether any changed.
-fn keep_checks(cfg: &Settle, checks: &mut Value, key: &str) -> bool {
+fn keep_checks(cfg: &Settle, app: u64, checks: &mut Value, key: &str) -> bool {
     let mut moved = false;
     for c in checks.as_array_mut().into_iter().flatten() {
         let ours = c["context"] == *cfg.context || c["context"] == *cfg.train_context;
-        if ours && c[key] != cfg.app_id {
-            c[key] = cfg.app_id.into();
+        if ours && c[key] != app {
+            c[key] = app.into();
             moved = true;
         }
     }
@@ -373,7 +374,7 @@ fn keep_checks(cfg: &Settle, checks: &mut Value, key: &str) -> bool {
 /// it lacks: with no required-status rule in it there's nothing for
 /// keep_rules to require the train's status in. Who may bypass it follows
 /// the train going on or off. What changed, in words.
-fn complete_baseline(cfg: &Settle, rs: &mut Value, rules: Rules) -> Vec<String> {
+fn complete_baseline(cfg: &Settle, app: u64, rs: &mut Value, rules: Rules) -> Vec<String> {
     if rs["name"] != "baseline" || !(cfg.rulesets && rules.ruleset) || rules.direct_push {
         return vec![];
     }
@@ -383,7 +384,7 @@ fn complete_baseline(cfg: &Settle, rs: &mut Value, rules: Rules) -> Vec<String> 
         .iter()
         .filter_map(|y| y["type"].as_str().map(String::from))
         .collect();
-    let missing: Vec<Value> = baseline(cfg, rules)["rules"]
+    let missing: Vec<Value> = baseline(cfg, app, rules)["rules"]
         .as_array()
         .into_iter()
         .flatten()
@@ -426,7 +427,7 @@ fn keep_rules(p: &mut Pass, cfg: &Settle, rules: Rules, rulesets: &[&Value]) -> 
             ok = false;
             continue;
         };
-        let mut changed = complete_baseline(cfg, &mut rs, rules);
+        let mut changed = complete_baseline(cfg, p.cfg.app.id, &mut rs, rules);
         let is_baseline = rs["name"] == "baseline";
         for y in rs["rules"].as_array_mut().into_iter().flatten() {
             if y["type"] != "required_status_checks" || !y["parameters"].is_object() {
@@ -437,7 +438,12 @@ fn keep_rules(p: &mut Pass, cfg: &Settle, rules: Rules, rulesets: &[&Value]) -> 
                 params["strict_required_status_checks_policy"] = false.into();
                 changed.push("up-to-date branches off".into());
             }
-            if keep_checks(cfg, &mut params["required_status_checks"], "integration_id") {
+            if keep_checks(
+                cfg,
+                p.cfg.app.id,
+                &mut params["required_status_checks"],
+                "integration_id",
+            ) {
                 changed.push("the steward's checks from the App only".into());
             }
             let listed = params["required_status_checks"]
@@ -447,7 +453,8 @@ fn keep_rules(p: &mut Pass, cfg: &Settle, rules: Rules, rulesets: &[&Value]) -> 
             let has = listed.iter().any(|c| c["context"] == *cfg.train_context);
             if is_baseline && has != rules.train {
                 let checks: Vec<Value> = if rules.train {
-                    let train = json!({"context": cfg.train_context, "integration_id": cfg.app_id});
+                    let train =
+                        json!({"context": cfg.train_context, "integration_id": p.cfg.app.id});
                     listed.into_iter().chain([train]).collect()
                 } else {
                     listed
@@ -541,7 +548,7 @@ fn keep_branch(p: &mut Pass, cfg: &Settle, name: &str) -> bool {
         patch.insert("strict".into(), false.into());
         changed.push("up-to-date branches off");
     }
-    if keep_checks(cfg, &mut got["checks"], "app_id") {
+    if keep_checks(cfg, p.cfg.app.id, &mut got["checks"], "app_id") {
         // The others as they were: GitHub lists one any App may set with no
         // app_id, and reads one sent without it as "whichever set it last".
         let checks: Vec<Value> = got["checks"]

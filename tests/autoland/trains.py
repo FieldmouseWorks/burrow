@@ -333,5 +333,5 @@ seen(token=True)
 del S.CFG["repos"]["sam/r"]
 os.environ["CREDENTIALS_DIRECTORY"] = cred
 ran = cn_log()[0]["token"]
-assert ran["rc"] == 1 and ran["out"] == "" and "no token for sam/r: couldn't sign as the App" in ran["err"], ran
+assert ran["rc"] == 1 and ran["out"] == "" and "no token for sam/r: " in ran["err"] and "the App's key" in ran["err"], ran
 print("train token: ok")

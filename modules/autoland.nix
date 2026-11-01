@@ -61,6 +61,9 @@ let
     renovateEmail = if renovateMatch == null then null else lib.head renovateMatch;
     inherit (cfg) owners exclude context rulesets baselineJobs baselinePerPass;
     app = { inherit (cfg.app) id slug; };
+    # GitHub's REST API, where the App's own calls go: its tokens
+    # (burrow-upkeep's token.rs) and its webhook (common.py's app_call).
+    api = "https://api.github.com";
     inherit (cfg) authors;
     # The bots whose PRs and comments are the steward's authors' too, by
     # their Apps' slugs: GraphQL's logins for them, REST's without "[bot]".
@@ -174,8 +177,7 @@ let
   # settings it shares, a repo's settings, and its branch watch and two
   # parts, each null when it's off.
   upkeepConfig = pkgs.writeText "burrow-upkeep.json" (builtins.toJSON {
-    inherit (settings) stateDir proj projectsDir authors bots jobTimeout renovate;
-    app = settings.app.slug;
+    inherit (settings) stateDir proj projectsDir authors bots app api jobTimeout renovate;
     # Renovate's dashboards, and where a job that ticks a box on one kicks
     # Renovate to read it.
     dashboard = if cfg.dashboard.enable then {
@@ -194,7 +196,6 @@ let
     # directPush, ruleset and train over the defaults.
     settle = {
       inherit (settings) owner context trainContext rulesets labels;
-      appId = settings.app.id;
       defaults = { inherit (settings.defaults) directPush ruleset train; };
       repos = lib.filterAttrs (_: r: r != { })
         (lib.mapAttrs (_: builtins.intersectAttrs { directPush = null; ruleset = null; train = null; }) cfg.repos);

@@ -3,12 +3,12 @@
 //! (branches.rs), Renovate's dashboard (dashboard.rs) and the flaky tests'
 //! quarantine (flaky.rs). A pass of the steward's runs `settle`, then
 //! `branches` once it has seen to the repo's PRs, then `watch`, on each
-//! repo it sees to, with the App's token for the repo's owner in GH_TOKEN.
-//! It sets the repo's hook once its settings are seen to, and acts on what
-//! `branches` and `watch` say (pass::Out): it lists what's stuck, books the
-//! repo's next pass, and starts the Claude jobs `watch` asks for, each
-//! under its key. Nothing is told back: a part's next look finds its job by
-//! that key (`proj find`).
+//! repo it sees to, with the App's token for the repo's owner in GH_TOKEN,
+//! which `token` (token.rs) mints the pass. The pass sets the repo's hook
+//! once its settings are seen to, and acts on what `branches` and `watch`
+//! say (pass::Out): it lists what's stuck, books the repo's next pass, and
+//! starts the Claude jobs `watch` asks for, each under its key. Nothing is
+//! told back: a part's next look finds its job by that key (`proj find`).
 
 pub mod branches;
 pub mod config;
@@ -18,6 +18,7 @@ pub mod pass;
 pub mod settle;
 #[cfg(test)]
 mod testing;
+pub mod token;
 
 use pass::Pass;
 

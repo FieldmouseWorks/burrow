@@ -8,7 +8,7 @@ use std::path::Path;
 use burrow_github::{Api, Failed, Response};
 use serde_json::{Value, json};
 
-use crate::config::{Branches, Config, Dashboard, Flaky, Labels, Rules, Settle, Waiting};
+use crate::config::{App, Branches, Config, Dashboard, Flaky, Labels, Rules, Settle, Waiting};
 use crate::pass::{Jobs, Out, Pass};
 
 pub const T: f64 = 1_800_000_000.0;
@@ -23,7 +23,11 @@ pub fn config(dir: &Path) -> Config {
         projects_dir: dir.join("projects").display().to_string(),
         authors: vec!["sam".into()],
         bots: vec!["dependabot".into(), "renovate".into(), "workers".into()],
-        app: "steward".into(),
+        app: App {
+            slug: "steward".into(),
+            id: 7,
+        },
+        api: "http://127.0.0.1:9".into(),
         job_timeout: 60,
         renovate: None,
         dashboard: Some(Dashboard {
@@ -36,7 +40,6 @@ pub fn config(dir: &Path) -> Config {
         flaky: Some(Flaky { job_timeout: 240 }),
         settle: Settle {
             owner: "sam".into(),
-            app_id: 7,
             context: "review-settled".into(),
             train_context: "conary/train".into(),
             rulesets: true,
