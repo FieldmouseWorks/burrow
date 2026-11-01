@@ -143,7 +143,24 @@ let
     };
 
   calls = [ tools.proj tools.notify ];
-  healthTool = script health ./updates/health.sh (with pkgs; [ coreutils gnugrep gnused gawk systemd ]);
+  # HOST-health (crates/burrow-health), with its config built in. Its checks
+  # are in /etc/HEALTHD, one for each of burrow.updates.health.
+  healthD = "burrow/health.d";
+  healthConfig = pkgs.writeText "health.json" (builtins.toJSON {
+    name = health;
+    dir = "/etc/${healthD}";
+    inherit user;
+    systemctl = lib.getExe' config.systemd.package "systemctl";
+    checkTimeout = 30;
+    settle = 20;
+  });
+  healthTool = pkgs.runCommand health {
+    nativeBuildInputs = [ pkgs.makeBinaryWrapper ];
+    meta.mainProgram = health;
+  } ''
+    makeBinaryWrapper ${inputs.self.packages.${system}.burrow}/bin/burrow-health $out/bin/${health} \
+      --add-flags ${healthConfig}
+  '';
   # Its own functions first (they run only once update.sh has defined what they call).
   updateTool = script update [ ./updates/dispatch.sh ./updates/running.sh ./updates/propose.sh ./updates/push.sh ./updates/check.sh ./updates/update.sh ] (
     (with pkgs; [ coreutils jq curl util-linux systemd gnugrep gnused gawk vulnix config.nix.package ])
@@ -639,7 +656,7 @@ in
   {
     burrow.tools.health = healthTool;
     environment.etc = lib.mapAttrs'
-      (name: cmd: lib.nameValuePair "burrow/health.d/${name}" {
+      (name: cmd: lib.nameValuePair "${healthD}/${name}" {
         source = pkgs.writeShellScript "health-${name}" ''
           export PATH=${checkPath}:/run/wrappers/bin:/run/current-system/sw/bin
           ${cmd}
