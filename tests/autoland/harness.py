@@ -162,7 +162,7 @@ with open(f"{tmp}/config.json", "w") as f:
                      "oneWay": ONE_WAY, "handoffAfter": 30, "sessionHandoffAfter": 90, "settleDelay": 3,
                      "stallAfter": 120, "holdStallAfter": 480, "renovateMergeAfter": 60,
                      "directPush": False, "ruleset": True, "requireCi": True,
-                     "proofJobs": {}, "proofBuilds": {}, "codex": True, "rival": True, "skipPaths": [],
+                     "proofJobs": {}, "proofBuilds": {}, "proofRuns": {}, "codex": True, "rival": True, "skipPaths": [],
                      "train": False, "trainSize": 8, "trainRequire": [], "trainStallAfter": 240},
         "trainContext": "conary/train",
         "train": {"cn": f"{tmp}/cn", "env": {"CONARY_LEDGER": f"{tmp}/ledger", "CONARY_ANCHOR_REPO": "sam/homelab"}},
@@ -175,6 +175,7 @@ with open(f"{tmp}/config.json", "w") as f:
         "reviewers": {"codex": {"enable": True}, "rival": {"enable": True}},
         "skipPaths": ["(^|/)secrets?/", r"\.(pem|key|p12|pfx)$", r"(^|/)\.env(\..*)?$"],
         "nix": f"{tmp}/nix",
+        "bash": shutil.which("bash"), "runsDir": f"{tmp}/runs",
     }, f)
 os.environ["AUTOLAND_CONFIG"] = f"{tmp}/config.json"
 os.environ["CREDENTIALS_DIRECTORY"] = f"{tmp}/cred"

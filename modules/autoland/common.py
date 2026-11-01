@@ -16,6 +16,7 @@ import hmac
 import json
 import os
 import re
+import shlex
 import stat
 import subprocess
 import sys
@@ -888,13 +889,20 @@ def forget_issues(repo):
 def machine(rc):
     """A repo's checks that a machine runs rather than CI, and how a job
     reruns each on what it pushes: a Claude job's (proofJobs), and the
-    builds the steward runs itself (proofBuilds), which it posts. A check
-    in both, however each spells it (GitHub's contexts ignore case), is the
-    build, by its proofBuilds name."""
+    builds and runs the steward does itself (proofBuilds, proofRuns), which
+    it posts. A check in more than one, however each spells it (GitHub's
+    contexts ignore case), is the build, else the run, by its name there."""
     builds = {c.lower() for c in rc["proofBuilds"]}
-    return {**{c: how for c, how in rc["proofJobs"].items() if c.lower() not in builds}, **{
+    runs = {c: cmd for c, cmd in rc["proofRuns"].items() if c.lower() not in builds}
+    taken = builds | {c.lower() for c in runs}
+    return {**{c: how for c, how in rc["proofJobs"].items() if c.lower() not in taken}, **{
         c: (f"`nix build .#{attr} -L` on the commit. The steward builds it itself for each new head and posts the "
-            f"`{c}` status: never post that status yourself.") for c, attr in rc["proofBuilds"].items()}}
+            f"`{c}` status: never post that status yourself.") for c, attr in rc["proofBuilds"].items()}, **{
+        c: (f"`bash -c {shlex.quote(cmd)}` in a worktree at the commit, with PROOF_REPO, PROOF_NUMBER, PROOF_HEAD, "
+            "PROOF_BASE and PROOF_CHECK set and origin's base branch fetched. The steward runs it itself for each new "
+            f"head and posts the `{c}` status: never post that status yourself. Its last run's log is "
+            f"{STATE}/builds/RUN/log, RUN as its comment on the PR names it, or the newest whose build.json is this "
+            "PR's.") for c, cmd in runs.items()}}
 
 
 def coverage(repos, covered):

@@ -52,6 +52,10 @@ let
   ledger = config.burrow.ledger;
   # The repos whose PRs land through their merge train.
   trains = lib.attrNames (lib.filterAttrs (_: r: r.train or false) cfg.repos);
+  # REPO's CHECK, for each check in both of a repo's proofBuilds and proofRuns.
+  both = lib.concatLists (lib.mapAttrsToList (repo: rc: map (c: "${repo}'s ${c}")
+    (lib.filter (c: lib.elem (lib.toLower c) (map lib.toLower (lib.attrNames (rc.proofBuilds or { }))))
+      (lib.attrNames (rc.proofRuns or { })))) cfg.repos);
 
   # The title Renovate gives each repo's dashboard (its
   # dependencyDashboardTitle default): the issue burrow-upkeep reads, and the
@@ -89,6 +93,10 @@ let
     # machine-wide heavy slots it takes one of, where the machine has them.
     proofTimeout = cfg.proofTimeoutMinutes;
     heavy = if config.burrow.cpu.enable then "${config.burrow.tools.heavy}/bin/heavy" else null;
+    # A proof run's (proofs.commands): the shell its command runs in, and
+    # where its worktrees go, out of projectsDir and its servers.
+    bash = "${pkgs.bash}/bin/bash";
+    runsDir = "${config.burrow.scratchDir}/proofs";
     owner = config.burrow.owner;
     labels = { inherit (cfg.labels) hold owner first waiting; };
     notify = {
@@ -133,6 +141,7 @@ let
       requireCi = true;
       proofJobs = { };
       proofBuilds = { };
+      proofRuns = { };
       codex = true;
       skipPaths = [ ];
       train = false;
@@ -471,10 +480,11 @@ in
       type = types.ints.positive;
       default = 180;
       description = ''
-        How long a proof build the steward runs itself (a repo's
-        proofBuilds) may take, its wait for a heavy slot included, before
-        it's stopped and started again: long enough for a NixOS test's own
-        hour (its driver's globalTimeout) after a slot has come free.
+        How long a proof build or run the steward does itself (a repo's
+        proofBuilds or proofRuns) may take, a build's wait for a heavy slot
+        included, before it's stopped and started again: long enough for a
+        NixOS test's own hour (its driver's globalTimeout) after a slot has
+        come free.
       '';
     };
 
@@ -730,7 +740,23 @@ in
         naming the derivation; one whose outputs are being built by a proof
         already running skips the line and holds no slot. A check named in
         both is a build; none is built on a head in the docs lane),
-        proofSlots (how many of those proofs, jobs and builds, the repo may
+        proofRuns (checks that are a command's exit and nothing more:
+        `{ "<check>" = "<command>"; }`. The steward runs them itself, after
+        the proofBuilds and ahead of the proofJobs, with no Claude job, in
+        the same unit a build has: the command, in bash, in a fresh worktree
+        of the repo's checkout in projectsDir at the PR's head, with what
+        the machine user's own units start with (its PATH) and
+        PROOF_REPO, PROOF_NUMBER, PROOF_HEAD, PROOF_BASE and PROOF_CHECK
+        set, origin's base branch fetched. Exit 0 posts the check as
+        passed, 1 to 125 as failed; anything else (a signal, a command not
+        found, past proofTimeoutMinutes) is the machine failing, and it runs
+        again later. What it prints stays in its log on the machine: only
+        what it writes to the file PROOF_SUMMARY names goes on the PR, as a
+        comment, pass or fail. It takes no heavy slot of its own, so a
+        command takes the locks it needs (`heavy --`, a gate's own). A
+        check can't be in both proofBuilds and proofRuns; one in proofRuns
+        and proofJobs is a run; none runs on a head in the docs lane),
+        proofSlots (how many of those proofs, jobs, builds and runs, the repo may
         have building at once, for proofs that take the whole machine: the
         rest wait their turn, those labelled `labels.first` first, then the
         oldest PR first; a job running a check without a build of its own
@@ -748,7 +774,7 @@ in
         oneWay path rides alone, landing only while the default branch is
         still the base its CI ran on. CI on the PRs themselves is optional:
         with none, a reviewed PR goes straight in. It needs burrow.ledger,
-        isn't directPush, and has no proofJobs or proofBuilds yet), trainSize (the
+        isn't directPush, and has no proofJobs, proofBuilds or proofRuns yet), trainSize (the
         most PRs a candidate holds, 8), trainRequire (checks the train's CI
         waits for even before they report, when more than one workflow
         runs there), trainStallAfter (minutes, trainStallAfterMinutes).
@@ -759,9 +785,12 @@ in
   config = lib.mkIf cfg.enable {
     system.checks = [ stewardImports ];
     # GitHub's contexts ignore case, and so does a check's match here.
-    warnings = lib.concatLists (lib.mapAttrsToList (repo: rc: let builds = map lib.toLower (lib.attrNames (rc.proofBuilds or { })); in map
-      (c: "burrow.autoland.repos.\"${repo}\".proofJobs.${c} is never used: ${c} is in its proofBuilds, so the steward builds it itself.")
-      (lib.filter (c: lib.elem (lib.toLower c) builds) (lib.attrNames (rc.proofJobs or { })))) cfg.repos);
+    warnings = lib.concatLists (lib.mapAttrsToList (repo: rc: let
+      names = kind: map lib.toLower (lib.attrNames (rc.${kind} or { }));
+      shadowed = kind: does: map
+        (c: "burrow.autoland.repos.\"${repo}\".proofJobs.${c} is never used: ${c} is in its ${kind}, so the steward ${does} it itself.")
+        (lib.filter (c: lib.elem (lib.toLower c) (names kind)) (lib.attrNames (rc.proofJobs or { })));
+    in shadowed "proofBuilds" "builds" ++ shadowed "proofRuns" "runs") cfg.repos);
     assertions = [{
       assertion = rv.codex.enable;
       message = "burrow.autoland needs its reviewer: turn on burrow.autoland.reviewers.codex.";
@@ -774,8 +803,12 @@ in
       message = "burrow.autoland: a repo's train (${lib.concatStringsSep ", " trains}) is on the ledger's log: turn on burrow.ledger.";
     } {
       # A proof runs on a PR's head; the train's evidence is its candidates'.
-      assertion = lib.all (r: (cfg.repos.${r}.proofJobs or { }) == { } && (cfg.repos.${r}.proofBuilds or { }) == { }) trains;
-      message = "burrow.autoland: a repo with its train on can't have proofJobs or proofBuilds yet.";
+      assertion = lib.all (r: lib.all (kind: (cfg.repos.${r}.${kind} or { }) == { }) [ "proofJobs" "proofBuilds" "proofRuns" ]) trains;
+      message = "burrow.autoland: a repo with its train on can't have proofJobs, proofBuilds or proofRuns yet.";
+    } {
+      # A check is a build or a run, never both: GitHub's contexts ignore case.
+      assertion = both == [ ];
+      message = "burrow.autoland: a check can't be in both a repo's proofBuilds and its proofRuns: ${lib.concatStringsSep ", " both}.";
     } {
       # Its rules are what keep anything but the train off its default branch.
       assertion = trains == [ ] || cfg.rulesets && lib.all (r: !(cfg.repos.${r}.directPush or false) && (cfg.repos.${r}.ruleset or true)) trains;
@@ -848,6 +881,8 @@ in
       dir = mode: group: { d = { inherit mode user group; }; };
     in {
       "${stateDir}/autoland" = dir "0755" account.group;
+      # The worktrees proof runs check out (proofs.commands).
+      ${settings.runsDir} = dir "0755" account.group;
       ${reviewDir} = dir "2750" reviewer;
       "${reviewDir}/queue" = dir "2770" reviewer;
       "${reviewDir}/done" = dir "2770" reviewer;

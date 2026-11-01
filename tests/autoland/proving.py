@@ -516,7 +516,8 @@ status, _ = run(clean(checks=VM), 900)
 assert "job-legacy" in STOPPED and len(BUILT) == 1 and "Settled; building vm here" in status, (status, STOPPED, BUILT)
 S.CFG["repos"]["sam/r"] = {"proofBuilds": {"vm": "checks.x86_64-linux.vm"}}
 # A check in both maps, however each spells it, is the build alone.
-assert C.machine({"proofJobs": {"VM": "Run it.", "x": "Run x."}, "proofBuilds": {"vm": "checks.x86_64-linux.vm"}}).keys() == {"vm", "x"}
+assert C.machine({"proofJobs": {"VM": "Run it.", "x": "Run x."}, "proofBuilds": {"vm": "checks.x86_64-linux.vm"},
+                  "proofRuns": {}}).keys() == {"vm", "x"}
 print("proof builds' verdicts: ok")
 
 P.outputs, P.build, C.gh = kept_outputs, kept_build, kept_gh
