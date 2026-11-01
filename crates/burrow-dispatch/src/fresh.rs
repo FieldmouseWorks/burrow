@@ -1,9 +1,10 @@
 //! The fresh runners' moves and wait: one started for each job queued for
-//! them that none idle is there to take, up to `most` at once, and one that
-//! has sat idle for `quiet` stopped. A runner registered for one job takes a
-//! job queued for its label within seconds of starting; one that hasn't by
-//! then never will (the job went to another, or was cancelled), and GitHub
-//! drops its registration once it's gone.
+//! them that none idle is there to take, and `idle` more kept waiting for
+//! jobs to come, up to `most` at once. One idle past those kept is stopped
+//! once it has sat `quiet`, and so is one kept that has sat `quiet` beside a
+//! job queued for it: a runner waiting for a job takes one queued for its
+//! label within seconds. GitHub drops a runner's registration once it's
+//! gone, and one kept is still started fresh: nothing ran on it before.
 
 use std::collections::BTreeMap;
 
@@ -68,54 +69,94 @@ fn wait(
                 )
         })
         .collect();
-    let mut waiting = 0;
     // Stopping, so a place a later look can fill.
     let mut leaving = up.iter().filter(|(_, u)| u.state == "deactivating").count();
-    for (instance, u) in &up {
-        if u.state != "active" || u.busy {
-            continue;
-        }
+    // On their way up, so soon waiting for a job.
+    let coming = up
+        .iter()
+        .filter(|(_, u)| !matches!(u.state.as_str(), "active" | "deactivating"))
+        .count();
+    // Those waiting for a job, newest first: the newest `idle` are kept for
+    // jobs to come, however long, and any other is stopped once it has sat
+    // `quiet`. So is one that has sat `quiet` beside a job queued for it:
+    // it would have taken it within seconds.
+    let mut idle: Vec<_> = up
+        .iter()
+        .filter(|(_, u)| u.state == "active" && !u.busy)
+        .collect();
+    idle.sort_by(|(_, a), (_, b)| b.since.unwrap_or(now).total_cmp(&a.since.unwrap_or(now)));
+    let oldest = pool.queued.first();
+    let mut waiting = 0;
+    for (instance, u) in idle {
         let since = u.since.unwrap_or(now);
-        if now >= since + cfg.quiet {
-            leaving += 1;
-            d.moves.push(Move::Retire {
-                unit: format!("{}{instance}.service", f.template),
-                why: format!(
-                    "idle since {}, and a runner for one job takes it in seconds",
-                    clock(since)
-                ),
-            });
-        } else {
-            waiting += 1;
-            book(d, since + cfg.quiet);
+        let missed = oldest.map(|job| job.at.max(since) + cfg.quiet);
+        let extra = (waiting >= f.idle).then_some(since + cfg.quiet);
+        match missed.into_iter().chain(extra).reduce(f64::min) {
+            Some(due) if now >= due => {
+                leaving += 1;
+                let why = if extra.is_some_and(|e| now >= e) {
+                    format!(
+                        "idle since {}, and a runner for one job takes it in seconds",
+                        clock(since)
+                    )
+                } else {
+                    format!(
+                        "idle since {} beside a job queued since {}, which it would have taken in seconds",
+                        clock(since),
+                        clock(oldest.map_or(since, |job| job.at))
+                    )
+                };
+                d.moves.push(Move::Retire {
+                    unit: format!("{}{instance}.service", f.template),
+                    why,
+                });
+            }
+            due => {
+                waiting += 1;
+                if let Some(due) = due {
+                    book(d, due);
+                }
+            }
         }
     }
     let queued = pool.queued.len();
     let room = f.most.saturating_sub(up.len());
-    let start = queued.saturating_sub(waiting).min(room);
-    let oldest = pool.queued.first()?;
-    let queue = format!(
-        "{} queued for them (the oldest since {})",
-        jobs(queued),
-        clock(oldest.at)
+    let start = (queued + f.idle).saturating_sub(waiting + coming).min(room);
+    let queue = oldest.map(|job| {
+        format!(
+            "{} queued for them (the oldest since {})",
+            jobs(queued),
+            clock(job.at)
+        )
+    });
+    let why = format!(
+        "{}, {} of {} up, {waiting} idle",
+        queue
+            .clone()
+            .unwrap_or_else(|| format!("{} kept waiting for jobs to come", f.idle)),
+        up.len(),
+        f.most
     );
     for i in 0..start {
         d.moves.push(Move::Fresh {
             instance: format!("{}-{i}", now as u64),
-            why: format!("{queue}, {} of {} up, {waiting} idle", up.len(), f.most),
+            why: why.clone(),
         });
     }
-    if start > 0 {
+    if start > 0 && queued > 0 {
         // Whether it took one: its job starting says so, but not a start
         // that failed.
         book(d, now + cfg.quiet);
     }
-    // Jobs a place being freed could take: nothing about a runner stopping
-    // wakes a pass, so the next one is booked. Only a stop that's done
-    // frees the place, so `most` holds when it isn't.
-    if leaving > 0 && queued > waiting + start {
+    // Places a stop is freeing that a job, or one to keep, could take:
+    // nothing about a runner stopping wakes a pass, so the next one is
+    // booked. Only a stop that's done frees the place, so `most` holds
+    // when it isn't.
+    if leaving > 0 && queued + f.idle > waiting + coming + start {
         book(d, now);
     }
+    // Nothing queued is no wait, whatever is kept for jobs to come.
+    let (oldest, queue) = (oldest?, queue?);
     // A queue all `most` of them, at jobs, explain is no stall: the jobs
     // they're at are.
     if room == 0 && waiting == 0 && start == 0 && up.iter().all(|(_, u)| u.busy) {
