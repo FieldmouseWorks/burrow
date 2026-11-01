@@ -17,10 +17,12 @@ fn main() -> ExitCode {
     match keep(&Real, Path::new(dir)) {
         Ok(k) => {
             println!(
-                "kept {} paths from this gate and {} from the kept builds, {} MiB",
+                "kept {} paths from this gate and {} from the kept builds, {} MiB; left out {} downloads, {} MiB",
                 k.gate,
                 k.carried,
-                k.bytes.div_ceil(1 << 20)
+                k.bytes.div_ceil(1 << 20),
+                k.downloads,
+                k.download_bytes.div_ceil(1 << 20)
             );
             ExitCode::SUCCESS
         }

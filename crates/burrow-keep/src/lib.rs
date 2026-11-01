@@ -11,7 +11,12 @@
 //!   - and what the kept builds hold that a derivation here still makes,
 //!     though this gate didn't need it: a check that hadn't changed came
 //!     whole from them, without what it was built from, which the next
-//!     change to it needs again. What no derivation here makes is dropped.
+//!     change to it needs again. What no derivation here makes is dropped;
+//!   - but downloads, unless a path kept refers to them: a download is one
+//!     file its hash pins (a flat fixed-output path, as fetchurl makes),
+//!     which a build that needs it again fetches from where it came from in
+//!     one request, and it's usually kept twice over already, as what it
+//!     unpacks to (a toolchain's tarballs, an npm package's).
 //!
 //! nix writes the cache, but a binary cache it writes holds the whole
 //! closure of what it's given: it adds a path only once it can read each
@@ -38,11 +43,13 @@ pub struct Store {
     pub paths: BTreeMap<String, Info>,
 }
 
-/// What nix has of a path: whether anyone signed it, the paths it refers
-/// to, by full name, and its NAR's hash (`sha256-…`) and size.
+/// What nix has of a path: whether anyone signed it, whether it's a
+/// download (flat and fixed-output), the paths it refers to, by full name,
+/// and its NAR's hash (`sha256-…`) and size.
 #[derive(Debug, Clone, Default)]
 pub struct Info {
     pub signed: bool,
+    pub download: bool,
     pub references: Vec<String>,
     pub nar_hash: String,
     pub nar_size: u64,
@@ -60,20 +67,27 @@ pub trait Nix {
 }
 
 /// What a push kept: how many paths of its own, how many from the kept
-/// builds, and the bytes of the cache they make.
+/// builds, and the bytes of the cache they make; and the downloads it left
+/// out, and their NARs' bytes.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Kept {
     pub gate: usize,
     pub carried: usize,
     pub bytes: u64,
+    pub downloads: usize,
+    pub download_bytes: u64,
 }
 
-/// A path in a binary cache: its narinfo's file name, and the NAR that
-/// names, under `nar/`.
+/// A path in a binary cache: its narinfo's file name, the NAR that names,
+/// under `nar/`, and what the narinfo says of the path: whether it's a
+/// download, what it refers to, by full name, and its NAR's size.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Entry {
     narinfo: String,
     nar: String,
+    download: bool,
+    references: Vec<String>,
+    nar_size: u64,
 }
 
 /// Keep this gate's builds, in place of the kept builds in `dir/kept`,
@@ -83,11 +97,14 @@ struct Entry {
 pub fn keep(nix: &dyn Nix, dir: &Path) -> Result<Kept, String> {
     let (kept, keep, restored) = (dir.join("kept"), dir.join("keep"), dir.join("restored"));
     let store = nix.store()?;
-    let gate: Vec<String> = store
+    // What could be kept: this gate's paths no one signed, but derivations,
+    // and what the kept builds hold that a derivation here makes, though
+    // this gate didn't need it.
+    let mine: BTreeSet<&String> = store
         .paths
         .iter()
         .filter(|(p, info)| !info.signed && !p.ends_with(".drv"))
-        .map(|(p, _)| p.clone())
+        .map(|(p, _)| p)
         .collect();
     let drvs: Vec<String> = store
         .paths
@@ -96,12 +113,31 @@ pub fn keep(nix: &dyn Nix, dir: &Path) -> Result<Kept, String> {
         .cloned()
         .collect();
     let made = nix.outputs(&drvs)?;
-    let before = entries(&kept)?;
-    let carried: Vec<String> = before
+    let before = entries(&kept, &store.dir)?;
+    let carried: BTreeSet<&String> = before
         .keys()
         .filter(|p| made.contains(*p) && !store.paths.contains_key(*p))
-        .cloned()
         .collect();
+    // Of those, a download only when the rest refers to it, near or far.
+    let could: BTreeSet<&String> = mine.union(&carried).copied().collect();
+    let mut wanted: BTreeSet<&String> = BTreeSet::new();
+    let mut todo: Vec<&String> = could
+        .iter()
+        .copied()
+        .filter(|p| !known(&store, &before, p).download)
+        .collect();
+    while let Some(p) = todo.pop() {
+        if wanted.insert(p) {
+            let refs = known(&store, &before, p).references;
+            todo.extend(refs.iter().filter(|r| could.contains(r)));
+        }
+    }
+    let gate: Vec<String> = mine
+        .iter()
+        .filter(|p| wanted.contains(*p))
+        .map(|p| (*p).clone())
+        .collect();
+    let left: Vec<&String> = could.difference(&wanted).copied().collect();
 
     clear(&keep)?;
     fs::create_dir_all(keep.join("nar")).map_err(|e| io(&keep, e))?;
@@ -109,7 +145,6 @@ pub fn keep(nix: &dyn Nix, dir: &Path) -> Result<Kept, String> {
         &keep.join("nix-cache-info"),
         &format!("StoreDir: {}\n", store.dir),
     )?;
-    let wanted: BTreeSet<&String> = gate.iter().chain(&carried).collect();
     for p in &wanted {
         if let Some(e) = before.get(*p) {
             link(&kept, &keep, e)?;
@@ -134,9 +169,40 @@ pub fn keep(nix: &dyn Nix, dir: &Path) -> Result<Kept, String> {
     fs::rename(&keep, &kept).map_err(|e| io(&keep, e))?;
     Ok(Kept {
         gate: gate.len(),
-        carried: carried.len(),
+        carried: carried.intersection(&wanted).count(),
         bytes,
+        downloads: left.len(),
+        download_bytes: left
+            .iter()
+            .map(|p| known(&store, &before, p).nar_size)
+            .sum(),
     })
+}
+
+/// What keep needs to know of a path that could be kept.
+struct Known<'a> {
+    download: bool,
+    references: &'a [String],
+    nar_size: u64,
+}
+
+/// A path that could be kept, as the store has it, or else the kept builds.
+fn known<'a>(store: &'a Store, before: &'a BTreeMap<String, Entry>, p: &str) -> Known<'a> {
+    match store.paths.get(p) {
+        Some(i) => Known {
+            download: i.download,
+            references: &i.references,
+            nar_size: i.nar_size,
+        },
+        None => {
+            let e = &before[p];
+            Known {
+                download: e.download,
+                references: &e.references,
+                nar_size: e.nar_size,
+            }
+        }
+    }
 }
 
 fn io(path: &Path, e: std::io::Error) -> String {
@@ -154,9 +220,10 @@ fn clear(dir: &Path) -> Result<(), String> {
     }
 }
 
-/// A binary cache's paths. A narinfo that doesn't parse, or whose NAR isn't
-/// a file of its own under `nar/`, isn't one of them.
-fn entries(cache: &Path) -> Result<BTreeMap<String, Entry>, String> {
+/// A binary cache's paths, in a store whose paths are under `dir`. A
+/// narinfo that doesn't parse, or whose NAR isn't a file of its own under
+/// `nar/`, isn't one of them.
+fn entries(cache: &Path, dir: &str) -> Result<BTreeMap<String, Entry>, String> {
     let mut out = BTreeMap::new();
     for f in fs::read_dir(cache).map_err(|e| io(cache, e))? {
         let f = f.map_err(|e| io(cache, e))?;
@@ -177,7 +244,26 @@ fn entries(cache: &Path) -> Result<BTreeMap<String, Entry>, String> {
             Some(n) if !n.is_empty() && !n.contains('/') && n != "." && n != ".." => n.to_owned(),
             _ => continue,
         };
-        out.insert(path, Entry { narinfo: name, nar });
+        // A flat fixed-output path's CA is `fixed:ALGO:HASH`; a NAR's (a
+        // source, say) is `fixed:r:…` and git's `fixed:git:…`.
+        let download = field("CA").is_some_and(|ca| {
+            ca.strip_prefix("fixed:")
+                .is_some_and(|rest| !rest.starts_with("r:") && !rest.starts_with("git:"))
+        });
+        let references = field("References")
+            .map(|r| r.split_whitespace().map(|r| format!("{dir}/{r}")).collect())
+            .unwrap_or_default();
+        let nar_size = field("NarSize").and_then(|n| n.parse().ok()).unwrap_or(0);
+        out.insert(
+            path,
+            Entry {
+                narinfo: name,
+                nar,
+                download,
+                references,
+                nar_size,
+            },
+        );
     }
     Ok(out)
 }

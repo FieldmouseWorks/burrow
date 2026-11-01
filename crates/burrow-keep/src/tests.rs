@@ -23,6 +23,8 @@ struct P {
 #[derive(Default)]
 struct Fake {
     paths: BTreeMap<String, P>,
+    /// The paths of the store that are downloads.
+    downloads: BTreeSet<String>,
     outputs: BTreeMap<String, Vec<String>>,
     fail: bool,
     /// Each path copy wrote, in order.
@@ -56,6 +58,12 @@ impl Fake {
         self.paths.insert(sp(name), p);
     }
 
+    /// A download in the store, unsigned, as a fetchurl here made it.
+    fn download(&mut self, name: &str, refs: &'static [&'static str], contents: &'static str) {
+        self.path(name, false, refs, contents);
+        self.downloads.insert(sp(name));
+    }
+
     /// A derivation here, unsigned, and what it makes.
     fn drv(&mut self, name: &str, makes: &[&str]) {
         self.path(name, false, &[], "drv");
@@ -74,8 +82,9 @@ fn narinfo(path: &str, contents: &str) -> String {
 
 impl Nix for Fake {
     fn store(&self) -> Result<Store, String> {
-        let info = |p: &P| Info {
+        let info = |n: &String, p: &P| Info {
             signed: p.signed,
+            download: self.downloads.contains(n),
             references: p.refs.iter().map(|r| sp(r)).collect(),
             nar_hash: format!("sha256-{}", p.contents),
             nar_size: p.contents.len() as u64,
@@ -85,7 +94,7 @@ impl Nix for Fake {
             paths: self
                 .paths
                 .iter()
-                .map(|(n, p)| (n.clone(), info(p)))
+                .map(|(n, p)| (n.clone(), info(n, p)))
                 .collect(),
         })
     }
@@ -181,16 +190,20 @@ fn cache(dir: &Path) -> (Vec<String>, Vec<String>) {
 
 /// A cache of these paths, as an earlier push kept it.
 fn kept(dir: &Path, paths: &[(&str, &str)]) {
+    let paths: Vec<(&str, &str, &str)> = paths.iter().map(|(n, c)| (*n, *c, "")).collect();
+    kept_as(dir, &paths);
+}
+
+/// A cache of these paths, each with what its narinfo says besides (its
+/// CA, its references), as an earlier push kept it.
+fn kept_as(dir: &Path, paths: &[(&str, &str, &str)]) {
     let kept = dir.join("kept");
     fs::create_dir_all(kept.join("nar")).unwrap();
     fs::write(kept.join("nix-cache-info"), "StoreDir: /nix/store\n").unwrap();
-    for (name, contents) in paths {
+    for (name, contents, more) in paths {
         let p = sp(name);
-        fs::write(
-            kept.join(format!("{}.narinfo", hash(&p))),
-            narinfo(&p, contents),
-        )
-        .unwrap();
+        let text = narinfo(&p, contents).replace("References: \n", "") + more;
+        fs::write(kept.join(format!("{}.narinfo", hash(&p))), text).unwrap();
         fs::write(kept.join(format!("nar/{contents}.nar")), contents).unwrap();
     }
 }
@@ -284,6 +297,85 @@ fn what_a_derivation_here_still_makes_is_carried_and_the_rest_dropped() {
     );
 }
 
+/// A download in the store goes only when nothing kept refers to it: the
+/// toolchain's tarball, which the toolchain was unpacked from, goes; the
+/// script a wrapper runs stays, as does a source, which isn't one file.
+#[test]
+fn a_download_is_kept_only_when_a_kept_path_refers_to_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    fs::create_dir(d.join("kept")).unwrap();
+    let mut nix = Fake::default();
+    nix.download("aaa-rustc.tar.xz", &[], "tarball");
+    nix.path("bbb-rustc", false, &[], "rustc");
+    nix.path("ccc-wrapper", false, &["ddd-script.sh"], "wrapper");
+    nix.download("ddd-script.sh", &[], "script");
+    nix.path("eee-source", false, &[], "source");
+    nix.drv("fff-rustc.tar.xz.drv", &["aaa-rustc.tar.xz"]);
+    nix.drv("ggg-rustc.drv", &["bbb-rustc"]);
+    nix.drv("hhh-wrapper.drv", &["ccc-wrapper"]);
+    nix.drv("iii-script.sh.drv", &["ddd-script.sh"]);
+    let k = keep(&nix, d).unwrap();
+    assert_eq!(
+        (k.gate, k.carried, k.downloads, k.download_bytes),
+        (4, 0, 1, "tarball".len() as u64),
+        "{k:?}"
+    );
+    assert_eq!(
+        cache(&d.join("kept")).0,
+        names(&["bbb-rustc", "ccc-wrapper", "ddd-script.sh", "eee-source"])
+    );
+    assert!(!nix.wrote.borrow().contains(&sp("aaa-rustc.tar.xz")));
+}
+
+/// What the kept builds hold that a derivation here still makes is
+/// carried as before, but downloads only when what's carried refers to
+/// them, as their narinfos say: a flat CA is a download, a NAR's (`r:`)
+/// or git's isn't.
+#[test]
+fn a_download_the_kept_builds_hold_is_carried_only_when_a_kept_path_refers_to_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    kept_as(
+        d,
+        &[
+            ("aaa-rustc.tar.xz", "tarball", "CA: fixed:sha256:1abc\n"),
+            ("bbb-source", "source", "CA: fixed:r:sha256:1abc\n"),
+            ("ccc-repo", "repo", "CA: fixed:git:sha1:1abc\n"),
+            ("ddd-wrapper", "wrapper", "References: eee-script.sh\n"),
+            ("eee-script.sh", "script", "CA: fixed:sha256:1def\n"),
+        ],
+    );
+    let mut nix = Fake::default();
+    nix.path("zzz-check", false, &[], "check");
+    nix.drv(
+        "kkk-all.drv",
+        &[
+            "aaa-rustc.tar.xz",
+            "bbb-source",
+            "ccc-repo",
+            "ddd-wrapper",
+            "eee-script.sh",
+        ],
+    );
+    let k = keep(&nix, d).unwrap();
+    assert_eq!(
+        (k.gate, k.carried, k.downloads, k.download_bytes),
+        (1, 4, 1, "tarball".len() as u64),
+        "{k:?}"
+    );
+    assert_eq!(
+        cache(&d.join("kept")).0,
+        names(&[
+            "bbb-source",
+            "ccc-repo",
+            "ddd-wrapper",
+            "eee-script.sh",
+            "zzz-check"
+        ])
+    );
+}
+
 /// A narinfo keep can't read, or whose NAR isn't a file of its own under
 /// nar/, isn't a path of the kept builds, and nothing else there is.
 #[test]
@@ -365,7 +457,9 @@ fn nothing_to_keep_is_an_empty_cache() {
         Kept {
             gate: 0,
             carried: 0,
-            bytes: "StoreDir: /nix/store\n".len() as u64
+            bytes: "StoreDir: /nix/store\n".len() as u64,
+            downloads: 0,
+            download_bytes: 0,
         }
     );
     assert!(nix.wrote.borrow().is_empty());
