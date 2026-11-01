@@ -9,8 +9,8 @@ let
   cfg = config.burrow.autoland;
   rv = cfg.reviewers;
   inherit (import ./paths.nix config) reviewer reviewerHome reviewDir snapDir stewardKick;
-  # burrow's programs: the reviewers' service among them.
-  burrow = inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow;
+  # The reviewers' service's program.
+  service = inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow-review;
   # The review agents (codex).
   agents = import ./agents/package.nix { inherit pkgs; };
   # What the reviewers' service runs commands with, and so what an agent
@@ -33,7 +33,7 @@ let
   # flake's sources this machine has read, private ones included; nor /etc,
   # whose files link into the machine's own configuration.
   reviewStore = pkgs.closureInfo {
-    rootPaths = [ agents burrow config.security.pki.caBundle ]
+    rootPaths = [ agents service config.security.pki.caBundle ]
       ++ reviewTools ++ lib.attrValues reviewLinks;
   };
   # The reviewers' service (crates/burrow-review, config.rs): the queue the
@@ -61,7 +61,7 @@ let
   });
   review = pkgs.writeShellScriptBin "burrow-review" ''
     export REVIEW_CONFIG=''${REVIEW_CONFIG:-${reviewConfig}}
-    exec ${burrow}/bin/burrow-review "$@"
+    exec ${service}/bin/burrow-review "$@"
   '';
   codexLogin = pkgs.writeShellScriptBin "autoland-codex-login" ''
     # Codex reviews on the ChatGPT plan's login: a device code to approve in

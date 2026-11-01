@@ -28,7 +28,7 @@ let
     nativeBuildInputs = [ pkgs.makeBinaryWrapper ];
     meta.mainProgram = name;
   } ''
-    makeBinaryWrapper ${inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow}/bin/burrow-heartbeat \
+    makeBinaryWrapper ${inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow-heartbeat}/bin/burrow-heartbeat \
       $out/bin/${name} --add-flags ${heartbeatConfig}
   '';
 in

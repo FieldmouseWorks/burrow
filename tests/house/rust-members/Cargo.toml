@@ -1,0 +1,15 @@
+# Two programs and a library one of them uses, for lib.project's
+# rust.members: each program a package of its own, built from only what it
+# reaches (tests/house-members.nix).
+[workspace]
+members = ["hello", "other", "shared"]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+
+# One inherited by path, one from the registry.
+[workspace.dependencies]
+itoa = "1.0.18"
+members-shared = { path = "shared" }

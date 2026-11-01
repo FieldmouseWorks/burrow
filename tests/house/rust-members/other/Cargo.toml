@@ -1,0 +1,7 @@
+[package]
+name = "members-other"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+itoa.workspace = true

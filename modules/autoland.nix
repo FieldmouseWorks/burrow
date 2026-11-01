@@ -28,8 +28,8 @@ let
   # The reviewers' user, the queue and snapshots it reads, and the kick,
   # as the reviewers' service (autoland/review.nix) has them.
   inherit (import ./autoland/paths.nix config) reviewer reviewDir snapDir stewardKick;
-  # burrow's programs: the flaky tool among them.
-  burrow = inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow;
+  # The flaky tool's program.
+  flaky = inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.flaky;
 
   # The baseline and the house style it links to (the rules, the project
   # template and lib), together, so the links resolve for the job that reads
@@ -123,7 +123,7 @@ let
       # The flaky tool, which lists each repo's quarantined tests: the issues
       # titled `flaky: TEST` (docs/flaky-tests.md). It asks through the gh on
       # the steward's PATH.
-      bin = "${burrow}/bin/flaky";
+      bin = "${flaky}/bin/flaky";
       jobTimeout = cfg.flaky.jobTimeoutMinutes;
     };
     # What every open PR waits on, for the stall watchdog (autoland/waits.py),

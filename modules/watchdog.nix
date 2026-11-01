@@ -44,7 +44,7 @@ let
   # anyone can ask for its status from any shell.
   watchdog = pkgs.writeShellScriptBin "burrow-watchdog" ''
     export WATCHDOG_CONFIG=''${WATCHDOG_CONFIG:-${configFile}}
-    exec ${inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow}/bin/burrow-watchdog "$@"
+    exec ${inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow-watchdog}/bin/burrow-watchdog "$@"
   '';
 in
 {

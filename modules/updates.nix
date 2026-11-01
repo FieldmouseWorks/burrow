@@ -158,7 +158,7 @@ let
     nativeBuildInputs = [ pkgs.makeBinaryWrapper ];
     meta.mainProgram = health;
   } ''
-    makeBinaryWrapper ${inputs.self.packages.${system}.burrow}/bin/burrow-health $out/bin/${health} \
+    makeBinaryWrapper ${inputs.self.packages.${system}.burrow-health}/bin/burrow-health $out/bin/${health} \
       --add-flags ${healthConfig}
   '';
   # Its own functions first (they run only once update.sh has defined what they call).
@@ -199,7 +199,7 @@ let
     nativeBuildInputs = [ pkgs.makeBinaryWrapper ];
     meta.mainProgram = "advisory-watch";
   } ''
-    makeBinaryWrapper ${inputs.self.packages.${system}.burrow}/bin/advisory-watch \
+    makeBinaryWrapper ${inputs.self.packages.${system}.advisory-watch}/bin/advisory-watch \
       $out/bin/advisory-watch --add-flags ${advisoryConfig}
   '';
   firmwareCheck = script "firmware-check" ./updates/firmware-check.sh (
@@ -228,7 +228,7 @@ let
   # and one with anything but these characters isn't allowed to run
   # (crates/lock-age).
   lockAge = pkgs.writeShellScriptBin "lock-age" ''
-    exec ${inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow}/bin/lock-age \
+    exec ${inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.lock-age}/bin/lock-age \
       ${pkgs.writeText "lock-age-policy.json" (builtins.toJSON renovatePolicy)} ${releaseAges}/bin/release-ages "$@"
   '';
   lockAgeCommand = "${lockAge}/bin/lock-age {{{baseBranch}}}";

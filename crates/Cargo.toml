@@ -1,6 +1,7 @@
 # burrow's one Cargo workspace: every program a module runs is a crate here
-# (AGENTS.md, Build and test). The flake builds them all as
-# packages.SYSTEM.burrow and gates them as checks.crates-*.
+# (AGENTS.md, Build and test). The flake builds each crate's as
+# packages.SYSTEM.CRATE (lib/project.nix's rust.members) and gates them as
+# checks.crates-*.
 [workspace]
 members = ["advisory-watch", "burrow-agent", "burrow-backup", "burrow-browser-close", "burrow-dispatch", "burrow-events", "burrow-github", "burrow-guard", "burrow-health", "burrow-heartbeat", "burrow-heavy", "burrow-house", "burrow-keep", "burrow-notify", "burrow-proj", "burrow-review", "burrow-robot", "burrow-rustc-wrapper", "burrow-usage-reset", "burrow-watchdog", "burrow-workflows", "flaky", "gh-token", "house-sync", "lock-age"]
 resolver = "3"
@@ -20,7 +21,7 @@ sha2 = "0.11.1"
 tempfile = "3.27.0"
 ureq = { version = "3.5.0", features = ["json", "platform-verifier"] }
 
-# crane names the package that holds every binary.
+# The name of the whole workspace's builds: its checks (burrow-test and the like).
 [workspace.metadata.crane]
 name = "burrow"
 

@@ -83,8 +83,9 @@ One check on its own: `nix build .#checks.x86_64-linux.agents -L` boots the
 agent sandboxes (nested KVM: it needs `/dev/kvm`).
 
 The programs burrow's modules run are Rust, in one Cargo workspace,
-`crates/`: the flake installs them as `packages.SYSTEM.burrow` and gates them
-as `checks.crates-*`, and `cargo test` there runs the same tests. The shared
+`crates/`: the flake builds each crate's as a package of its own,
+`packages.SYSTEM.CRATE`, which is what a module runs, and gates them as
+`checks.crates-*`, and `cargo test` there runs the same tests. The shared
 workflows' tests are there too, `crates/burrow-workflows`, which ships
 nothing: they run a workflow's own steps, read the files `flake.nix` gives
 them by their place in a checkout, and need git, jq and nix on PATH.
