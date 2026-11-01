@@ -65,10 +65,11 @@ let
   # A switch restarts a changed unit that is running (or, with
   # RemainAfterExit, has run) and waits for it. A oneshot that may run longer
   # than the confirm window then outlasts the activation's deadline, so the
-  # switch gets killed and reverted for a job that was only slow. A pass that
-  # exits when it's done (no RemainAfterExit) can be caught mid-run whatever
-  # its timeout: on a slow box it hits that timeout inside the switch, which
-  # fails the activation and reverts it just the same.
+  # switch gets killed and reverted for a job that was only slow. A pass of
+  # more than a minute that exits when it's done (no RemainAfterExit) is
+  # likely to be caught mid-run whatever its timeout: on a slow box it hits
+  # that timeout inside the switch, which fails the activation and reverts it
+  # just the same. A minute or less is a reload, such as NixOS's nginx's.
   # Only a declared timeout counts: most of NixOS's own oneshots set none and
   # are meant to rerun on a switch, so a job that can run long says so.
   longOneshots = lib.attrNames (lib.filterAttrs (_: s:
@@ -79,7 +80,7 @@ let
       && (sc.Type or null) == "oneshot"
       && t != null
       && (let n = seconds t; w = seconds cfg.confirmWithin; in n == null || w == null || n >= w
-        || !(sc.RemainAfterExit or false))
+        || (n > 60 && !(sc.RemainAfterExit or false)))
   ) config.systemd.services);
 in
 {
