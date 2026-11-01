@@ -9,7 +9,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use super::{Gate, Ran, Run, lines};
-use crate::harness::{executable, read, repo_file, which};
+use crate::harness::{executable, read, which, workspace_bin};
 
 /// The VM tests' checks, as a build names them.
 const VM_CHECKS: [&str; 4] = [
@@ -19,8 +19,8 @@ const VM_CHECKS: [&str; 4] = [
     "-around.drv^*",
 ];
 
-/// A gate on a machine with one heavy slot: heavy itself, as burrow.cpu
-/// assembles it, first on its PATH.
+/// A gate on a machine with one heavy slot: heavy itself, burrow-heavy as
+/// burrow.cpu wraps it, first on its PATH.
 struct Slotted {
     g: Gate,
     /// The one slot's lock file.
@@ -42,12 +42,19 @@ impl Slotted {
         File::create(&slot).unwrap();
         let bin = g.s.join("slotted");
         fs::create_dir(&bin).unwrap();
+        let config = g.s.join("heavy.json");
+        fs::write(
+            &config,
+            serde_json::json!({ "slots": 1, "grace": 3, "dir": slots, "setsid": which("setsid") })
+                .to_string(),
+        )
+        .unwrap();
         executable(
             &bin.join("heavy"),
             &format!(
-                "set -euo pipefail\nSLOTS=1\nGRACE=3\nDIR={}\n{}",
-                slots.display(),
-                read(&repo_file("modules/cpu/heavy.sh"))
+                "exec -a \"$0\" {} {} \"$@\"\n",
+                workspace_bin("burrow-heavy").display(),
+                config.display()
             ),
         );
         let path = format!("{}:{}", bin.display(), g.s.path_var());

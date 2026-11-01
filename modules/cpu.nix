@@ -1,7 +1,7 @@
 # cpu: how the machine shares its CPU between repos and runners. Gates (the
 # slices that hold CI runners) get a larger CPUWeight than the Claudes and
 # services around them, so a gate keeps its share whatever else runs; and
-# `heavy` (cpu/heavy.sh) is one machine-wide set of slots for heavy work (a
+# `heavy` (crates/burrow-heavy) is one machine-wide set of slots for heavy work (a
 # gate, a VM test, a replay, a large build), each with its share of the
 # threads for cargo and test runners to size themselves by. A repo's own
 # queue (the steward's proof slots, a repo's gate lock) decides which of its
@@ -12,15 +12,19 @@ let
   cfg = config.burrow.cpu;
   dir = "/run/burrow-heavy";
 
-  heavy = pkgs.writeShellApplication {
-    name = "heavy";
-    runtimeInputs = [ pkgs.coreutils pkgs.util-linux ];
-    text = ''
-      SLOTS=${toString cfg.heavy.slots}
-      GRACE=${toString cfg.heavy.grace}
-      DIR=${lib.escapeShellArg cfg.heavy.dir}
-    '' + builtins.readFile ./cpu/heavy.sh;
-  };
+  # The binary with its config; it reads every field, and refuses one it
+  # doesn't know. argv0 stays `heavy`, as callers and `ps` name it.
+  heavyConfig = pkgs.writeText "heavy.json" (builtins.toJSON {
+    inherit (cfg.heavy) slots grace dir;
+    setsid = "${pkgs.util-linux}/bin/setsid";
+  });
+  heavy = pkgs.runCommand "heavy" {
+    nativeBuildInputs = [ pkgs.makeBinaryWrapper ];
+    meta.mainProgram = "heavy";
+  } ''
+    makeBinaryWrapper ${inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow}/bin/burrow-heavy \
+      $out/bin/heavy --inherit-argv0 --add-flags ${heavyConfig}
+  '';
 in
 {
   imports = [ (import ./common.nix inputs) ];

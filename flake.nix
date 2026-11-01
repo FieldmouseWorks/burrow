@@ -25,10 +25,12 @@
       system = "x86_64-linux";
       pkgs = nixpkgs.legacyPackages.${system};
 
-      # Each module gets burrow's own inputs (the pinned Claude Code, microvm.nix)
-      # and a key, so importing one twice (say, on its own and via default) is
-      # harmless.
+      # Each module gets burrow's own inputs (the pinned Claude Code, microvm.nix),
+      # a key, so importing one twice (say, on its own and via default) is
+      # harmless, and its file, so what it defines says where it came from
+      # (in an error, and to update-origin) rather than nixpkgs' flake.nix.
       module = name: {
+        _file = toString ./modules/${name}.nix;
         key = "burrow/${name}";
         imports = [ (import ./modules/${name}.nix inputs) ];
       };
@@ -88,8 +90,8 @@
       # and their gate, built for every platform lib/project.nix knows. Its
       # tests include the shared workflows' (crates/burrow-workflows), which
       # read these files and run git, jq and nix, and the gate's run its VM
-      # tests in a slot of the real heavy (flock); proj's clone repos to read
-      # their origins, gh-token's make keys with openssl, and lock-age's
+      # tests in a slot of the real heavy (burrow-heavy); proj's clone repos
+      # to read their origins, gh-token's make keys with openssl, lock-age's
       # check its wait against what the steward reads (lock_wait.py), and
       # house-sync's read burrow's own house blocks.
       crates = self.lib.project {
@@ -103,7 +105,6 @@
             "templates/project/.github/workflows/flake.yml"
             "templates/project/.github/workflows/flake-retarget.yml"
             "modules/autoland/prs.py"
-            "modules/cpu/heavy.sh"
             "modules/autoland/lock_wait.py"
             "house"
           ];
@@ -637,11 +638,19 @@
         # train.
         update-origin = let
           lib = nixpkgs.lib;
-          machine = origin: (self.nixosConfigurations.example.extendModules {
-            modules = [{ burrow.updates.origin = lib.mkForce origin; }];
-          }).config;
-          train = origin: (machine origin).burrow.updates.throughTrain;
-          refused = origin: lib.any (a: !a.assertion && lib.hasInfix "OWNER/NAME" a.message) (machine origin).assertions;
+          # How the example takes an origin: through its train or not, and
+          # refused or not by the updates module's own assertion. Only its
+          # assertions are read: all 1,485 of the example's took 5 s an
+          # origin, 139 s of one leg's gate.
+          take = origin: let
+            machine = self.nixosConfigurations.example.extendModules {
+              modules = [{ burrow.updates.origin = lib.mkForce origin; }];
+            };
+            updates = lib.filter (d: lib.hasSuffix "/modules/updates.nix" (toString d.file)) machine.options.assertions.definitionsWithLocations;
+          in {
+            train = machine.config.burrow.updates.throughTrain;
+            refused = lib.any (a: !a.assertion && lib.hasInfix "OWNER/NAME" a.message) (lib.concatMap (d: d.value) updates);
+          };
           forms = [
             "https://github.com/sam/homelab" "https://github.com/sam/homelab.git" "https://github.com/sam/homelab/"
             "https://github.com/Sam/HomeLab" "https://GitHub.com/sam/homelab.git" "https://github.com./sam/homelab"
@@ -649,12 +658,12 @@
             "git@GITHUB.COM.:sam/homelab/" "ssh://git@github.com/sam/homelab.git" "ssh://git@github.com:22/sam/homelab/"
             "ssh://git@GitHub.com.:22/sam/homelab"
           ];
-          wrong = lib.filter (o: !train o || refused o) forms
-            ++ lib.filter (o: train o || refused o) [
+          wrong = lib.filter (o: let t = take o; in !t.train || t.refused) forms
+            ++ lib.filter (o: let t = take o; in t.train || t.refused) [
               "https://git.example.org/sam/homelab" "https://github.com/sam/other" "/srv/mirrors/github.com/sam/homelab"
               "https://git.example.org/github.com/sam/homelab"
             ]
-            ++ lib.filter (o: !refused o) [
+            ++ lib.filter (o: !(take o).refused) [
               "https://github.com/sam" "https://www.github.com/sam/homelab" "git@github.com:sam/homelab/extra"
               "https://github.com:8443/sam/homelab" "http://github.com/sam/homelab" "https://sam@github.com/sam/homelab"
               "ssh://sam@github.com/sam/homelab" "git://GitHub.com/sam/homelab"
