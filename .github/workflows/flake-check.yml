@@ -49,8 +49,10 @@ on:
           branch's, so a PR's earlier runs can leave what its later ones
           take: a PR from a fork, which anyone can open, takes none, and a
           branch of this repo is pushed only by someone it already trusts to
-          run workflows with its tokens. Needs install-nix, and jq on the
-          runner, as GitHub's hosted ones have.
+          run workflows with its tokens. Needs install-nix, and cargo
+          from rustup on the runner, as GitHub's hosted ones have: a push
+          builds what keeps them (crates/burrow-keep) from this workflow's
+          own commit.
         type: boolean
         default: false
       build-skip:
@@ -861,40 +863,36 @@ jobs:
           subject-path: ${{ steps.subject.outputs.path }}
           predicate-type: https://github.com/FieldmouseWorks/Conary/blob/main/docs/ci-attestation.md#v1
           predicate-path: ${{ runner.temp }}/conary/predicate.json
-      # keep-builds, on a push to the default branch whose gate passed: every
-      # path in the store no one signed, which this gate built or took from
-      # the kept builds (a public cache's are signed), but derivations, which
-      # each evaluation makes again. And what the kept builds hold that this
-      # tree's derivations still make though this gate didn't need it: a
-      # check that hadn't changed came whole from them, without what it was
-      # built from, which the next change to it needs again. Each path on its
-      # own, referring to the rest, for nix to find in a public cache or
-      # among these, in place of the kept builds it restored, under the path
-      # it restored them to (the cache keeps what it saves for a restore of
-      # the same path only). Keeping them is for later runs' speed, so a
-      # failure here says so and leaves the gate's result as it is.
-      - id: keep
+      # keep-builds, on a push to the default branch whose gate passed: what
+      # crates/burrow-keep says, in place of the kept builds it restored and
+      # under the path it restored them to (the cache keeps what it saves for
+      # a restore of the same path only). The tool comes from this workflow's
+      # own commit, which job.workflow_sha names whoever calls it, built on
+      # the runner's cargo in the crates' directory as the house action
+      # builds its check: rustup reads the toolchain
+      # crates/rust-toolchain.toml pins from where cargo runs. Keeping them is
+      # for later runs' speed, so a failure here says so and leaves the gate's
+      # result as it is.
+      - id: keep-tool
         if: ${{ inputs.keep-builds && inputs.install-nix && steps.gate.outcome == 'success' && github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
         continue-on-error: true
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .flake-check-keep
+          persist-credentials: false
+          sparse-checkout: crates
+      - id: keep
+        if: steps.keep-tool.outcome == 'success'
+        continue-on-error: true
         shell: bash
-        working-directory: ${{ runner.temp }}
+        working-directory: .flake-check-keep/crates
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/keep-build
         run: |
-          export LC_ALL=C
-          mkdir -p keep
-          nix path-info --all --json --json-format 2 > store.json
-          jq -r '.storeDir as $d | .info | to_entries[]
-              | select((.value.signatures | length) == 0 and (.key | endswith(".drv") | not)) | "\($d)/\(.key)"' store.json \
-            | sort > keep.list
-          jq -r '.storeDir as $d | .info | keys[] | select(endswith(".drv")) | "\($d)/\(.)"' store.json \
-            | xargs -r nix-store --query --outputs | sort -u > made.list
-          nix path-info --all --store "file://$RUNNER_TEMP/kept" | sort | comm -12 - made.list | comm -23 - keep.list > carry.list
-          xargs -r nix copy --no-recursive --to "file://$RUNNER_TEMP/keep?compression=none" < keep.list
-          xargs -r nix copy --no-recursive --from "file://$RUNNER_TEMP/kept?trusted=true" \
-            --to "file://$RUNNER_TEMP/keep?compression=none" < carry.list
-          # Moved aside rather than deleted: nix's daemon, as root, may have
-          # made some of what's in it.
-          mv kept restored && mv keep kept
-          echo "kept $(wc -l < keep.list) paths from this gate and $(wc -l < carry.list) from the kept builds, $(du -sh kept | cut -f1)"
+          cargo build --release --locked --quiet -p burrow-keep
+          "$CARGO_TARGET_DIR/release/burrow-keep" "$RUNNER_TEMP"
       - if: steps.keep.outcome == 'success'
         continue-on-error: true
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0

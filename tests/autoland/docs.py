@@ -177,6 +177,32 @@ status, _ = at(clean(checks=whole(base="main") + another_file(whole(base="next",
                      base="next"))
 assert WAIT in status, status
 
+
+def twin(run):
+    return another_file(run, RETARGET, "twin")
+
+
+# The two files answer for each other whichever ran last and however often the
+# PR moved: there and back, a push after a retarget, and there and back again.
+for why, checks, base in [
+    ("back by the twin", whole("next") + twin(whole("main", "s2")), "main"),
+    ("a push after a retarget", twin(whole("next")) + whole("main", "s2"), "main"),
+    ("there and back", whole("main") + twin(whole("next", "s2")) + twin(whole("main", "s3")), "main"),
+    ("a title edit after a retarget", whole("main") + twin(whole("next", "s2"))
+     + twin([check("check / check", "SKIPPED", suite="s3")]), "next"),
+]:
+    status, _ = at(clean(checks=checks, base=base))
+    assert "waiting for CI" not in status, (why, status)
+# Its run stands in only once finished, and only for the base it judged: not a
+# title edit's skipped run, one still going, or one for a base the PR has left.
+for why, more in [
+    ("a title edit", [check("check / check", "SKIPPED", suite="s2")]),
+    ("still going", whole("next", "s2", done="IN_PROGRESS")),
+    ("an old base", whole("other", "s2")),
+]:
+    status, _ = at(clean(checks=whole("main") + twin(more), base="next"))
+    assert WAIT in status, (why, status)
+
 # Nothing else stands in for a run of that workflow for `next` that has
 # finished: another workflow's check run under the same job name, another
 # App's, a run of it for yet another base, or one for `next` still going.

@@ -95,6 +95,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "burrow-keep"
+version = "0.0.0"
+dependencies = [
+ "serde_json",
+ "sha2",
+ "tempfile",
+]
+
+[[package]]
 name = "burrow-proj"
 version = "0.0.0"
 dependencies = [
