@@ -1,6 +1,6 @@
 [package]
 name = "burrow-update"
-description = "HOST-update's steps in Rust, as root with git and gh run as the machine's user: its own PR in a repo whose PRs land through its merge train"
+description = "HOST-update's steps in Rust, as root with what they run run as the machine's user: the build, what runs, the push, the VM tests, the fix jobs and its own PR"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

@@ -27,7 +27,7 @@ use std::fs;
 use burrow_github::{Api, call, encode, query};
 use serde_json::{Value, json};
 
-use crate::{Config, Train};
+use crate::{Config, Train, is_commit};
 
 /// HOST-update's open PR, as GitHub listed it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,9 +42,7 @@ impl Pr {
     pub fn parse(said: &str) -> Option<Pr> {
         let (n, head) = said.split_once(' ')?;
         let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
-        let sha = [40, 64].contains(&head.len())
-            && head.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
-        if !digits(n) || !sha {
+        if !digits(n) || !is_commit(head) {
             return None;
         }
         Some(Pr {

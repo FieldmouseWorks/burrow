@@ -85,14 +85,11 @@ let
     FLAKE = config.burrow.flake;
     ORIGIN = cfg.origin;
     TRAIN = if train then "1" else "";
-    # Its steps in Rust (crates/burrow-update): its own PR in a train repo.
+    # Its steps in Rust (crates/burrow-update).
     UPDATER = "${updater}/bin/${update}-steps";
-    CONFIG = config.burrow.switch.configName;
     SYSTEM = system;
     MANIFEST = if cfg.claudeManifest == null then "" else cfg.claudeManifest;
     CHECKS = lib.concatStringsSep " " cfg.checks;
-    # burrow.cpu's slots, which the VM tests wait for where the machine has them.
-    HEAVY = if config.burrow.cpu.enable then "${tools.heavy}/bin/heavy" else "";
     WITHIN = cfg.confirmWithin;
     CHANNEL = "nixos-${config.system.nixos.release}";
     OWNER = config.burrow.owner;
@@ -165,6 +162,11 @@ let
     work = vars.WORK;
     inherit (account) home uid;
     runuser = "${pkgs.util-linux}/bin/runuser";
+    configuration = config.burrow.switch.configName;
+    inherit system project;
+    # burrow.cpu's slots, which the VM tests wait for where the machine has them.
+    heavy = if config.burrow.cpu.enable then "${tools.heavy}/bin/heavy" else null;
+    app = if machineApp == null then null else machineApp.name;
     train = if train then {
       repo = githubRepo; branch = update; settled = vars.SETTLED;
       context = config.burrow.ledger.trainContext; steward = autoland.app.slug;
@@ -173,8 +175,7 @@ let
   updater = pkgs.runCommand "${update}-steps" { nativeBuildInputs = [ pkgs.makeBinaryWrapper ]; } ''
     makeBinaryWrapper ${inputs.self.packages.${system}.burrow-update}/bin/burrow-update $out/bin/${update}-steps --add-flags ${updaterConfig}
   '';
-  # Its own functions first (they run only once update.sh has defined what they call).
-  updateTool = script update [ ./updates/dispatch.sh ./updates/running.sh ./updates/push.sh ./updates/check.sh ./updates/update.sh ] (
+  updateTool = script update ./updates/update.sh (
     (with pkgs; [ coreutils jq curl util-linux systemd gnugrep gnused gawk vulnix config.nix.package ])
     ++ [ config.programs.git.package healthTool tools.switch tools.confirm machineGh ] ++ calls ++ lib.optional (tools ? boot) tools.boot
   );

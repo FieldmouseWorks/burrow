@@ -22,6 +22,17 @@ pub struct Config {
     pub uid: u32,
     /// runuser, which runs them as `user`.
     pub runuser: PathBuf,
+    /// The flake's NixOS configuration for the machine, and the machine's
+    /// system (x86_64-linux), which its VM tests are under.
+    pub configuration: String,
+    pub system: String,
+    /// What takes one of the machine's heavy slots for a VM test (burrow.cpu's
+    /// heavy), when it has them.
+    pub heavy: Option<PathBuf>,
+    /// The machine's own project, where its fix jobs go (proj run), and the
+    /// App they act as on GitHub, when it has one.
+    pub project: String,
+    pub app: Option<String>,
     /// Its PR's settings, when the flake's PRs land through its merge
     /// train; null otherwise.
     pub train: Option<Train>,
@@ -62,15 +73,25 @@ mod tests {
         let mut config = serde_json::json!({
             "update": "box-update", "host": "box", "state": "/s", "work": "/w",
             "user": "sam", "home": "/home/sam", "uid": 1000, "runuser": "/b/runuser",
+            "configuration": "box", "system": "x86_64-linux", "heavy": "/b/heavy",
+            "project": "homelab", "app": "workers",
             "train": {"repo": "sam/homelab", "branch": "box-update", "settled": "review-settled",
                       "context": "conary/train", "steward": "sams-steward"},
         });
         std::fs::write(&path, config.to_string()).unwrap();
         let cfg = Config::read(&path).unwrap();
         assert_eq!(cfg.train.unwrap().steward, "sams-steward");
-        config["train"] = serde_json::Value::Null;
+        assert_eq!(
+            (cfg.heavy.unwrap().to_str(), cfg.app.as_deref()),
+            (Some("/b/heavy"), Some("workers"))
+        );
+        // Outside a train, on a machine without heavy slots or an App.
+        for k in ["train", "heavy", "app"] {
+            config[k] = serde_json::Value::Null;
+        }
         std::fs::write(&path, config.to_string()).unwrap();
-        assert!(Config::read(&path).unwrap().train.is_none());
+        let cfg = Config::read(&path).unwrap();
+        assert!(cfg.train.is_none() && cfg.heavy.is_none() && cfg.app.is_none());
         config["train"] = serde_json::json!({"repo": "sam/homelab", "branch": "b", "settled": "s",
             "context": "c", "steward": "x", "base": "main"});
         std::fs::write(&path, config.to_string()).unwrap();
