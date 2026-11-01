@@ -97,8 +97,12 @@ impl Gate {
         let s = Scratch::default();
         let nix = which("nix");
         let (real_nix, real_bin) = (nix.display(), nix.parent().unwrap().display());
+        // No binary cache: nothing in a case's store comes from one, and
+        // asking one for an output the store hasn't got (the gate roots a VM
+        // test's outputs that way) waits on the network, seconds of retries
+        // each time in the build sandbox, which has none.
         let nix_config = format!(
-            "experimental-features = nix-command flakes\nflake-registry =\nstore = {}",
+            "experimental-features = nix-command flakes\nflake-registry =\nsubstituters =\nstore = {}",
             s.join("store").display()
         );
         // A build collects garbage first, as a GC on the runner could between
