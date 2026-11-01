@@ -1,6 +1,6 @@
 use super::*;
 use crate::config::Config;
-use crate::pass::{Out, UNRECORDED};
+use crate::pass::Out;
 use crate::testing::{Hub, States, T, answer, config, look as at, start};
 use std::fs;
 
@@ -499,9 +499,9 @@ fn issues_take_as_many_jobs_as_fit_them() {
 #[test]
 fn a_job_that_never_started_hands_nothing() {
     // What's listed if it can't start names every issue it was for, and
-    // until `started`, none is handed. Unrecorded, it holds off any other
-    // for its timeout (240 minutes) and five more; `unstarted`, and the
-    // next look asks again.
+    // until the next look finds it by its key, none is handed. One proj
+    // has none of is asked for again; one proj can't say of fails the
+    // look, which asks for nothing; and two under one key hand nothing.
     let d = tempfile::tempdir().unwrap();
     let cfg = config(d.path());
     let (mut hub, mut jobs) = (Hub::default(), States::new("done"));
@@ -511,53 +511,38 @@ fn a_job_that_never_started_hands_nothing() {
         out.jobs[0].unstarted,
         [line(NO_JOB, "sam/r#9", "for the flaky test `unit/net`")]
     );
+    assert_eq!(out.jobs[0].key, format!("upkeep/sam/r/flaky/{T}"));
     assert!(state(&cfg).issues[&9].handed.is_none());
-    let held = line(
-        UNRECORDED,
-        "sam/r",
-        "its flaky job, asked for and never recorded (the steward's log has its id): \
-no other starts until its timeout has passed",
-    );
-    for t in [60.0, 244.0 * MIN] {
-        let listed = says(&mut hub, &[(9, "unit/net", ACTIONS)]);
-        let out = run(&cfg, &mut hub, &mut jobs, t, listed);
-        assert!(
-            out.jobs.is_empty() && out.stuck == [held.clone()],
-            "{out:?}"
-        );
-        assert_eq!(out.wake, Some(T + 245.0 * MIN));
-    }
-    // A look that fails holds it too, and lists it.
+    let listed = says(&mut hub, &[(9, "unit/net", ACTIONS)]);
+    let out = run(&cfg, &mut hub, &mut jobs, 60.0, listed);
+    assert_eq!(jobs.finds, [format!("upkeep/sam/r/flaky/{T}")]);
+    assert_eq!(out.jobs.len(), 1);
+    jobs.unfound = Some("proj find: exit status: 1".into());
+    let listed = says(&mut hub, &[(9, "unit/net", ACTIONS)]);
     let (out, r) = at(&cfg, &mut hub, &mut jobs, 120.0, |p| {
-        look(
-            p,
-            p.cfg.flaky.as_ref().unwrap(),
-            Err(Error("HTTP 502".into())),
-        )
+        look(p, p.cfg.flaky.as_ref().unwrap(), listed)
     });
-    assert!(r.is_err() && out.stuck == [held.clone()], "{out:?}");
+    assert!(r.unwrap_err().ends_with("proj find: exit status: 1") && out.jobs.is_empty());
+    jobs.unfound = None;
+    jobs.start(&cfg, "flaky", "j");
+    jobs.start(&cfg, "flaky", "k");
     let listed = says(&mut hub, &[(9, "unit/net", ACTIONS)]);
+    let (out, r) = at(&cfg, &mut hub, &mut jobs, 180.0, |p| {
+        look(p, p.cfg.flaky.as_ref().unwrap(), listed)
+    });
     assert_eq!(
-        run(&cfg, &mut hub, &mut jobs, 245.0 * MIN, listed)
-            .jobs
-            .len(),
-        1
+        r.unwrap_err(),
+        format!("proj has 2 jobs under upkeep/sam/r/flaky/{}", T + 60.0)
     );
-    let (_, r) = at(&cfg, &mut hub, &mut jobs, 0.0, |p| {
-        crate::told(p, "flaky", None)
-    });
-    r.unwrap();
+    assert!(out.jobs.is_empty() && state(&cfg).issues[&9].handed.is_none());
+    jobs.found.clear();
+    jobs.start(&cfg, "flaky", "j");
+    jobs.set("j", "queued");
     let listed = says(&mut hub, &[(9, "unit/net", ACTIONS)]);
-    let out = run(&cfg, &mut hub, &mut jobs, 246.0 * MIN, listed);
-    assert!(out.stuck.is_empty() && out.jobs.len() == 1, "{out:?}");
-    let (_, r) = at(&cfg, &mut hub, &mut jobs, 0.0, |p| {
-        crate::told(p, "flaky", Some("j"))
-    });
-    r.unwrap();
-    let (_, r) = at(&cfg, &mut hub, &mut jobs, 0.0, |p| {
-        crate::told(p, "flaky", Some("j"))
-    });
-    assert_eq!(r.unwrap_err(), "its flaky tests asked for no job");
+    let out = run(&cfg, &mut hub, &mut jobs, 10.0 * H, listed);
+    assert!(out.jobs.is_empty(), "{out:?}");
+    let it = &state(&cfg).issues[&9];
+    assert_eq!((it.handed, it.job.as_deref()), (Some(T + 60.0), Some("j")));
 }
 
 #[test]
@@ -571,11 +556,6 @@ fn a_look_that_keeps_failing_goes_to_the_stuck_issue() {
     hub.on("GET", "rate_limit", answer(200, json!({"resources": {}})));
     let listed = says(&mut hub, &[(9, "unit/net", ACTIONS)]);
     run(&cfg, &mut hub, &mut jobs, 0.0, listed);
-    // The job it asked for didn't start, so holds nothing back.
-    let (_, r) = at(&cfg, &mut hub, &mut jobs, 0.0, |p| {
-        crate::told(p, "flaky", None)
-    });
-    r.unwrap();
     let was = state(&cfg);
     assert!(was.failing.is_none());
     let fail = |cfg: &Config, hub: &mut Hub, jobs: &mut States, t: f64, why: &str| {

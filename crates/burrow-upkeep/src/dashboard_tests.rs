@@ -1,6 +1,6 @@
 use super::*;
 use crate::config::Config;
-use crate::pass::{Out, UNRECORDED};
+use crate::pass::Out;
 use crate::testing::{Hub, States, T, answer, config, look, start};
 use serde_json::json;
 
@@ -611,92 +611,71 @@ fn an_error_is_stuck_after_two_of_renovates_runs() {
 }
 
 #[test]
-fn a_job_that_started_without_being_asked_for_is_refused() {
+fn a_job_asked_for_is_found_by_its_key_however_long_it_waits() {
+    // Nothing tells the look what became of the job it asked for: the
+    // next one finds it by its key. One still queued days on holds off
+    // any other; one proj has none of never started, and is asked for
+    // again; and while proj can't say, nothing's asked for.
     let d = tempfile::tempdir().unwrap();
-    let cfg = config(d.path());
-    let (mut hub, mut jobs) = (Hub::default(), States::new("done"));
-    let (_, r) = look(&cfg, &mut hub, &mut jobs, 0.0, |p| {
-        crate::told(p, "dashboard", Some("dash-1"))
-    });
-    assert_eq!(r.unwrap_err(), "its dashboard asked for no job");
-    let (_, r) = look(&cfg, &mut hub, &mut jobs, 0.0, |p| {
-        crate::told(p, "train", Some("x"))
-    });
-    assert_eq!(r.unwrap_err(), "no part \"train\": dashboard or flaky");
-}
-
-#[test]
-fn a_job_never_recorded_holds_off_another_until_its_timeout() {
-    // Asked for, then neither `started` nor `unstarted`: it may be at work
-    // with nothing recording it. Until its timeout (60 minutes) and five
-    // more have passed, it's listed and none other is asked for, whatever
-    // becomes of the dashboard meanwhile; then the next look asks again.
-    let d = tempfile::tempdir().unwrap();
-    let cfg = config(d.path());
+    let cfg = Config {
+        flaky: None,
+        ..config(d.path())
+    };
     let (mut hub, mut jobs) = (Hub::default(), States::new("done"));
     hits(&mut hub, 7, "sam");
     dashboard(&mut hub, BODY, &[]);
     watch_at(&cfg, &mut hub, &mut jobs, 0.0);
-    assert_eq!(watch_at(&cfg, &mut hub, &mut jobs, DAY).jobs.len(), 1);
-    let held = [(
-        UNRECORDED,
-        "sam/r",
-        "its dashboard job, asked for and never recorded (the steward's log has its id): \
-no other starts until its timeout has passed",
-    )];
-    for t in [DAY + 1.0, DAY + 64.0 * MIN] {
+    let out = watch_at(&cfg, &mut hub, &mut jobs, DAY);
+    assert_eq!(out.jobs.len(), 1);
+    let key = format!("upkeep/sam/r/dashboard/{}", T + DAY);
+    assert_eq!(out.jobs[0].key, key);
+    // Never started: asked for again, under a key of its own.
+    jobs.finds.clear();
+    let out = watch_at(&cfg, &mut hub, &mut jobs, DAY + 1.0);
+    assert_eq!(jobs.finds, [key]);
+    assert_eq!(out.jobs.len(), 1, "{out:?}");
+    assert_eq!(
+        out.jobs[0].key,
+        format!("upkeep/sam/r/dashboard/{}", T + DAY + 1.0)
+    );
+    // proj can't say: the part fails, asks for nothing, and keeps its ask.
+    jobs.unfound = Some("proj find: exit status: 1".into());
+    let (out, r) = look(&cfg, &mut hub, &mut jobs, DAY + 2.0, |p| {
+        crate::watch(p);
+        Ok(())
+    });
+    r.unwrap();
+    assert!(out.jobs.is_empty(), "{out:?}");
+    assert_eq!(
+        out.failed,
+        [format!(
+            "its dashboard: whether the job it asked for started (upkeep/sam/r/dashboard/{}): \
+proj find: exit status: 1",
+            T + DAY + 1.0
+        )]
+    );
+    assert_eq!(state(&cfg).asked_at, Some(T + DAY + 1.0));
+    // Queued, and still queued a week on: it has what was asked, and no
+    // other job starts beside it.
+    jobs.unfound = None;
+    jobs.start(&cfg, "dashboard", "dash-q");
+    jobs.set("dash-q", "queued");
+    for t in [DAY + 3.0, 8.0 * DAY] {
         let out = watch_at(&cfg, &mut hub, &mut jobs, t);
         assert!(out.jobs.is_empty(), "{out:?}");
-        assert_eq!(lines(&out), held);
-        assert_eq!(out.wake, Some(T + DAY + 65.0 * MIN));
-    }
-    // Then the next look asks again; `started` takes that one, as ever.
-    let out = watch_at(&cfg, &mut hub, &mut jobs, DAY + 65.0 * MIN);
-    assert!(out.stuck.is_empty() && out.jobs.len() == 1, "{out:?}");
-    start(&cfg, DAY + 65.0 * MIN, "dashboard", "dash-2");
-    let st = state(&cfg);
-    assert!(st.asked.is_empty() && st.asked_at.is_none(), "{st:?}");
-    assert_eq!(st.job.as_deref(), Some("dash-2"));
-
-    // One asked for before the dashboard went is held all the same.
-    fresh(&cfg);
-    hits(&mut hub, 7, "sam");
-    dashboard(&mut hub, BODY, &[]);
-    watch_at(&cfg, &mut hub, &mut jobs, 0.0);
-    assert_eq!(watch_at(&cfg, &mut hub, &mut jobs, DAY).jobs.len(), 1);
-    dashboard(&mut hub, BODY, &[("state", "closed")]);
-    for t in [DAY + 1.0, DAY + 2.0] {
-        let out = watch_at(&cfg, &mut hub, &mut jobs, t);
-        assert_eq!(lines(&out), held);
-    }
-    assert_eq!(state(&cfg).asked_at, Some(T + DAY));
-}
-
-#[test]
-fn a_job_that_didnt_start_is_asked_for_again() {
-    // `unstarted`: the next look asks again, nothing held or listed. Said
-    // twice, or with nothing asked, it changes nothing.
-    let d = tempfile::tempdir().unwrap();
-    let cfg = config(d.path());
-    let (mut hub, mut jobs) = (Hub::default(), States::new("done"));
-    hits(&mut hub, 7, "sam");
-    dashboard(&mut hub, BODY, &[]);
-    watch_at(&cfg, &mut hub, &mut jobs, 0.0);
-    assert_eq!(watch_at(&cfg, &mut hub, &mut jobs, DAY).jobs.len(), 1);
-    for _ in 0..2 {
-        let (_, r) = look(&cfg, &mut hub, &mut jobs, DAY, |p| {
-            crate::told(p, "dashboard", None)
-        });
-        r.unwrap();
     }
     let st = state(&cfg);
     assert!(st.asked.is_empty() && st.asked_at.is_none(), "{st:?}");
-    let out = watch_at(&cfg, &mut hub, &mut jobs, DAY + 1.0);
-    assert!(out.stuck.is_empty() && out.jobs.len() == 1, "{out:?}");
-    let (_, r) = look(&cfg, &mut hub, &mut jobs, DAY, |p| {
-        crate::told(p, "train", None)
-    });
-    assert_eq!(r.unwrap_err(), "no part \"train\": dashboard or flaky");
+    assert_eq!(
+        (st.job.as_deref(), st.job_at),
+        (Some("dash-q"), Some(T + DAY + 1.0))
+    );
+    assert!(
+        st.items
+            .values()
+            .filter(|it| it.handed.is_some())
+            .all(|it| it.job.as_deref() == Some("dash-q") && it.handed == Some(T + DAY + 1.0))
+    );
 }
 
 #[test]

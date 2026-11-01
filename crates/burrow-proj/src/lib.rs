@@ -33,6 +33,9 @@
 //!                             empty for nothing
 //! proj run --app NAME PROJECT "task"  the job acts on GitHub as the App NAME,
 //!                             one of burrow.github.apps, never as the user
+//! proj run --key KEY PROJECT "task"  what its starter knows it by before
+//!                             it has its id: one job a key (a key a job has
+//!                             is refused), kept only once its turn started
 //! proj reply [--first] ID "message"  continue that job's conversation
 //! proj reply --cut-off N ID "message"  so, if its turn N was cut off
 //!                             (else exit 3)
@@ -41,6 +44,7 @@
 //! proj log ID [--turn N]      the job's latest answer, or turn N's (--raw for
 //!                             the full stream); fails when there's none
 //! proj state ID               queued, running, done, error or failed
+//! proj find KEY               the id of the job run --key KEY, or nothing
 //! proj stop ID                end a job: its running turn and its waits
 //! proj withdraw ID            end a job only while its turn still waits for
 //!                             a slot: prints withdrawn, or running or over

@@ -17,10 +17,6 @@ pub const MIN: f64 = 60.0;
 pub const HOUR: f64 = 3600.0;
 pub const DAY: f64 = 86400.0;
 
-/// The heading a job's listed under while it may be at work with nothing
-/// recording it (Pass::unrecorded).
-pub const UNRECORDED: &str = "A Claude job that may be at work unrecorded";
-
 /// A line for the steward's lists, as its digest has them: what kind of
 /// thing it is (the heading it's listed under), where (a repo, an issue),
 /// and what about it.
@@ -48,11 +44,15 @@ pub struct Out {
 }
 
 /// A Claude job a look asks for: the pass starts it in the repo's project,
-/// cloned if need be, and says so (`started`), or lists `unstarted`.
+/// cloned if need be, under its key, or lists `unstarted`. The part's next
+/// look finds it by its key (Pass::asked_for), whatever became of its id.
 #[derive(Debug, Serialize, PartialEq)]
 pub struct Job {
-    /// Whose it is: `dashboard` or `flaky`, the part `started` tells.
+    /// Whose it is: `dashboard` or `flaky`.
     pub part: &'static str,
+    /// What proj keeps it under (`proj run --key`): the part's state keeps
+    /// what it asked for until a look finds it, so none other starts.
+    pub key: String,
     pub task: String,
     /// Whether it's the pipeline's work, which goes ahead of the line, or
     /// the project's.
@@ -66,11 +66,18 @@ pub struct Job {
     pub unstarted: Vec<Line>,
 }
 
+/// The key a job a part asked for at `at` is kept under.
+pub fn key(repo: &str, part: &str, at: f64) -> String {
+    format!("upkeep/{repo}/{part}/{at}")
+}
+
 /// How a Claude job stands.
 pub trait Jobs {
     /// queued, running, or how it ended (done, failed, timed out ...); None
     /// when nothing can say.
     fn state(&mut self, jid: &str) -> Option<String>;
+    /// The jobs run under the key (`proj find`): none, or one.
+    fn find(&mut self, key: &str) -> Result<Vec<String>, String>;
 }
 
 /// proj's own word on a job (`proj state ID`). A status run takes every
@@ -88,6 +95,25 @@ impl Jobs for Proj {
         let out = Command::new(&self.bin).args(["state", jid]).output().ok()?;
         let said = String::from_utf8_lossy(&out.stdout).trim().to_string();
         (!said.is_empty()).then_some(said)
+    }
+
+    /// A status run's own jobs are all `dry`, as the steward's are.
+    fn find(&mut self, key: &str) -> Result<Vec<String>, String> {
+        if self.dry {
+            return Ok(vec!["dry".into()]);
+        }
+        let out = Command::new(&self.bin)
+            .args(["find", key])
+            .output()
+            .map_err(|e| format!("{}: {e}", self.bin.display()))?;
+        if !out.status.success() {
+            let why = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            return Err(format!("proj find: {} {why}", out.status));
+        }
+        Ok(String::from_utf8_lossy(&out.stdout)
+            .split_whitespace()
+            .map(String::from)
+            .collect())
     }
 }
 
@@ -118,32 +144,18 @@ impl Pass<'_> {
         self.out.stuck.push((heading.to_string(), at, what));
     }
 
-    /// Whether the job a part's last look asked for (`asked`, at `at`) may
-    /// be at work with nothing recording it: neither `started` nor
-    /// `unstarted` has said how it went. The steward died in between, or
-    /// couldn't record it and couldn't stop it either. Until its timeout
-    /// has passed, and it with it, no other job starts beside it, and it's
-    /// listed; then what it was asked for is asked again.
-    pub fn unrecorded<T>(
-        &mut self,
-        part: &str,
-        asked: &mut Vec<T>,
-        at: &mut Option<f64>,
-        timeout: u64,
-    ) -> bool {
-        let until = at.unwrap_or_default() + (timeout as f64 + 5.0) * MIN;
-        if !asked.is_empty() && self.now < until {
-            let what = format!(
-                "its {part} job, asked for and never recorded (the steward's log has its id): \
-no other starts until its timeout has passed"
-            );
-            self.list(UNRECORDED, self.repo.to_string(), what);
-            self.wake(until); // ends: its timeout has passed, and the job with it
-            return true;
+    /// The job a part's last look asked for, at `at`, as proj has it under
+    /// its key: None when none started.
+    pub fn asked_for(&mut self, part: &str, at: f64) -> Result<Option<String>, String> {
+        let key = key(self.repo, part, at);
+        let mut ids = self
+            .jobs
+            .find(&key)
+            .map_err(|e| format!("whether the job it asked for started ({key}): {e}"))?;
+        match ids.len() {
+            0 | 1 => Ok(ids.pop()),
+            n => Err(format!("proj has {n} jobs under {key}")),
         }
-        asked.clear();
-        *at = None;
-        false
     }
 
     pub fn state_dir(&self) -> PathBuf {

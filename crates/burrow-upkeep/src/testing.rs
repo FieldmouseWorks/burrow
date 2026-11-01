@@ -135,11 +135,15 @@ fn response(status: u16, body: &Value, etag: Option<&str>) -> Response {
     }
 }
 
-/// Claude jobs' states, as a test sets them, else `default`.
+/// Claude jobs' states, as a test sets them, else `default`; and the jobs
+/// proj has under a key (`found`), or why it can't say (`unfound`).
 pub struct States {
     pub of: HashMap<String, String>,
     pub default: Option<String>,
     pub asked: Vec<String>,
+    pub found: HashMap<String, Vec<String>>,
+    pub unfound: Option<String>,
+    pub finds: Vec<String>,
 }
 
 impl States {
@@ -148,7 +152,20 @@ impl States {
             of: HashMap::new(),
             default: Some(default.into()),
             asked: vec![],
+            found: HashMap::new(),
+            unfound: None,
+            finds: vec![],
         }
+    }
+
+    /// The job the part's last look asked for started, as `jid`: proj has
+    /// it under the key that look gave it.
+    pub fn start(&mut self, cfg: &Config, part: &str, jid: &str) {
+        let text = std::fs::read_to_string(cfg.state_dir.join(format!("{part}-sam_r.json")));
+        let st: Value = serde_json::from_str(&text.unwrap()).unwrap();
+        let at = st["askedAt"].as_f64().expect("a job asked for");
+        let key = crate::pass::key("sam/r", part, at);
+        self.found.entry(key).or_default().push(jid.into());
     }
 
     pub fn set(&mut self, jid: &str, state: &str) {
@@ -160,6 +177,14 @@ impl Jobs for States {
     fn state(&mut self, jid: &str) -> Option<String> {
         self.asked.push(jid.into());
         self.of.get(jid).cloned().or_else(|| self.default.clone())
+    }
+
+    fn find(&mut self, key: &str) -> Result<Vec<String>, String> {
+        self.finds.push(key.into());
+        match &self.unfound {
+            Some(why) => Err(why.clone()),
+            None => Ok(self.found.get(key).cloned().unwrap_or_default()),
+        }
     }
 }
 
@@ -187,12 +212,15 @@ pub fn look<R>(
     (p.out, r)
 }
 
-/// The job the look asked for started, as `jid`.
+/// The job the part's look asked for started, as `jid`, and a look `at`
+/// seconds after T has found it.
 pub fn start(cfg: &Config, at: f64, part: &str, jid: &str) {
     let mut hub = Hub::default();
     let mut jobs = States::new("running");
-    let (_, r) = look(cfg, &mut hub, &mut jobs, at, |p| {
-        crate::told(p, part, Some(jid))
+    jobs.start(cfg, part, jid);
+    let (_, r) = look(cfg, &mut hub, &mut jobs, at, |p| match part {
+        "dashboard" => crate::dashboard::found(p),
+        _ => crate::flaky::found(p),
     });
     r.unwrap();
 }

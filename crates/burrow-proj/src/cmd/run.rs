@@ -36,6 +36,37 @@ pub struct New {
     pub app: Option<String>,
     /// When every turn's place in line dates from (slot::entry).
     pub since: Option<String>,
+    /// What its starter knows it by before it has its id (`proj find`).
+    pub key: Option<String>,
+}
+
+/// A --key: what a starter names a job by before it has its id, so it can
+/// find the job (`proj find`) whatever became of the id. Letters, digits
+/// and `._/:-`, at most 200 of them.
+pub fn key_name(k: &str) -> bool {
+    !k.is_empty()
+        && k.len() <= 200
+        && k.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"._/:-".contains(&b))
+}
+
+/// The jobs under the key, oldest first: one, as a rule, since `proj run
+/// --key` refuses a key a job has.
+pub fn find(cfg: &Config, key: &str) -> Result<Vec<String>, Fail> {
+    let mut ids: Vec<String> = match fs::read_dir(&cfg.jobs) {
+        Ok(dir) => dir
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|id| !id.starts_with('.'))
+            .filter(|id| {
+                fs::read_to_string(Job::new(cfg, id).path("key")).is_ok_and(|k| k.trim() == key)
+            })
+            .collect(),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => vec![],
+        Err(e) => return Err(io_fail(&cfg.jobs, e)),
+    };
+    ids.sort();
+    Ok(ids)
 }
 
 /// A --kick: HANDLER or HANDLER/OWNER/REPO.
@@ -78,6 +109,7 @@ const KICK: &str = "proj run --kick HANDLER[/OWNER/REPO]";
 const LINK: &str = "proj run --link URL (https://...)";
 const APP: &str = "proj run --app NAME: one of this machine's GitHub Apps (burrow.github.apps)";
 const SINCE: &str = "proj run --since TIME (Unix seconds, not after now)";
+const KEY: &str = "proj run --key KEY (letters, digits and ._/:-, at most 200)";
 
 /// `proj run` and `proj reply`.
 pub(super) fn run(cfg: &Config, reply: bool, args: &[String]) -> Result<(), Fail> {
@@ -134,6 +166,14 @@ pub(super) fn run(cfg: &Config, reply: bool, args: &[String]) -> Result<(), Fail
                 new.link = Some(l.to_owned()).filter(|l| !l.is_empty());
                 i += 1;
             }
+            Some("--key") => {
+                only_run("--key: the job's own is kept")?;
+                let k = value
+                    .filter(|k| key_name(k))
+                    .ok_or_else(|| Fail::new(2, KEY))?;
+                new.key = Some(k.to_owned());
+                i += 1;
+            }
             Some("--app") => {
                 only_run("--app: the job's own is kept")?;
                 let a = value
@@ -181,7 +221,7 @@ pub(super) fn run(cfg: &Config, reply: bool, args: &[String]) -> Result<(), Fail
         self::reply(cfg, id, &args[i + 1], new.first, cutoff.as_deref())?;
         id.to_owned()
     } else {
-        let usage = "usage: proj run [--vm] [--first] [--pipeline] [--unstick] [--timeout DUR] [--idle DUR] [--kick NAME]... [--owned] [--link URL] [--app NAME] [--since TIME] PROJECT \"task\"";
+        let usage = "usage: proj run [--vm] [--first] [--pipeline] [--unstick] [--timeout DUR] [--idle DUR] [--kick NAME]... [--owned] [--link URL] [--app NAME] [--since TIME] [--key KEY] PROJECT \"task\"";
         let p = arg(args, i, usage)?;
         arg(args, i + 1, usage)?;
         start_job(cfg, &new, p, &args[i + 1])?
@@ -223,6 +263,15 @@ pub fn start_job(cfg: &Config, new: &New, p: &str, task: &str) -> Result<String,
             2,
             "proj run --owned needs a --kick: what acts on each turn's end",
         ));
+    }
+    if let Some(k) = &new.key {
+        if !key_name(k) {
+            return Err(Fail::new(2, KEY));
+        }
+        // One job a key, so what it finds is that job.
+        if let Some(id) = find(cfg, k)?.first() {
+            return Err(Fail::new(1, format!("proj run: {id} has the key {k}")));
+        }
     }
     if new.app.is_some() && new.vm {
         return Err(Fail::new(
@@ -274,6 +323,9 @@ pub fn start_job(cfg: &Config, new: &New, p: &str, task: &str) -> Result<String,
     if let Some(a) = &new.app {
         write("app", &format!("{a}\n"))?;
     }
+    if let Some(k) = &new.key {
+        write("key", &format!("{k}\n"))?;
+    }
     if new.vm {
         let out = File::create(job.path("agent")).map_err(|e| io_fail(&job.path("agent"), e))?;
         let s = Command::new("agent")
@@ -285,7 +337,11 @@ pub fn start_job(cfg: &Config, new: &New, p: &str, task: &str) -> Result<String,
             return Err(Fail::quiet(s.code().unwrap_or(1) as u8));
         }
     }
-    start(cfg, &id, task, new.first).map_err(|e| Fail::new(1, e))?;
+    if let Err(e) = start(cfg, &id, task, new.first) {
+        // A key names a job that started: its starter asks again.
+        let _ = fs::remove_file(job.path("key"));
+        return Err(Fail::new(1, e));
+    }
     Ok(id)
 }
 
@@ -366,7 +422,7 @@ fn id_name(project: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{id_name, kick_name, since_time};
+    use super::{New, find, id_name, key_name, kick_name, since_time, start_job};
 
     #[test]
     fn id_names() {
@@ -415,5 +471,63 @@ mod tests {
         for bad in ["", "Autoland", "a/b", "a/b/c/d", "a//c", "a/b/", "a b"] {
             assert!(!kick_name(bad), "{bad}");
         }
+    }
+
+    #[test]
+    fn keys() {
+        for ok in ["upkeep/o/r/dashboard/1800000000.5", "a", "x:y-z_1"] {
+            assert!(key_name(ok), "{ok}");
+        }
+        let long = "k".repeat(201);
+        for bad in ["", "a b", "a\nb", "ü", long.as_str()] {
+            assert!(!key_name(bad), "{bad}");
+        }
+    }
+
+    // A key finds the jobs that have it, oldest first, and none in a jobs
+    // dir that isn't there yet; its dotfiles are skipped.
+    #[test]
+    fn a_key_finds_its_job() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut v = crate::config::tests::example();
+        v["jobs"] = tmp.path().join("jobs").to_str().unwrap().into();
+        let cfg: crate::config::Config = serde_json::from_value(v).unwrap();
+        assert_eq!(find(&cfg, "k").unwrap(), Vec::<String>::new());
+        for (id, key) in [("b", "k\n"), ("a", "k\n"), ("c", "kk\n"), (".d", "k\n")] {
+            std::fs::create_dir_all(tmp.path().join("jobs").join(id)).unwrap();
+            std::fs::write(tmp.path().join("jobs").join(id).join("key"), key).unwrap();
+        }
+        std::fs::create_dir_all(tmp.path().join("jobs/e")).unwrap();
+        assert_eq!(find(&cfg, "k").unwrap(), ["a", "b"]);
+        assert_eq!(find(&cfg, "kk").unwrap(), ["c"]);
+        assert!(find(&cfg, "x").unwrap().is_empty());
+    }
+
+    // A key a job has is refused, before any job is made.
+    #[test]
+    fn a_key_a_job_has_is_refused() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut v = crate::config::tests::example();
+        v["jobs"] = tmp.path().join("jobs").to_str().unwrap().into();
+        v["projects"] = tmp.path().join("projects").to_str().unwrap().into();
+        let cfg: crate::config::Config = serde_json::from_value(v).unwrap();
+        std::fs::create_dir_all(tmp.path().join("projects/p")).unwrap();
+        std::fs::create_dir_all(tmp.path().join("jobs/p-1")).unwrap();
+        std::fs::write(tmp.path().join("jobs/p-1/key"), "k\n").unwrap();
+        let new = New {
+            key: Some("k".into()),
+            ..New::default()
+        };
+        let fail = start_job(&cfg, &new, "p", "task").unwrap_err();
+        assert_eq!(
+            (fail.code, fail.say.as_deref()),
+            (1, Some("proj run: p-1 has the key k"))
+        );
+        let bad = New {
+            key: Some("a b".into()),
+            ..New::default()
+        };
+        assert_eq!(start_job(&cfg, &bad, "p", "task").unwrap_err().code, 2);
+        assert_eq!(find(&cfg, "k").unwrap(), ["p-1"]);
     }
 }

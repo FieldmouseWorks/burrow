@@ -30,7 +30,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::config::Flaky;
-use crate::pass::{DAY, Job, MIN, Pass, unavailable};
+use crate::pass::{DAY, Job, MIN, Pass, key, unavailable};
 
 /// A look that keeps failing this long goes to the stuck issue: once is
 /// GitHub, often; every pass for an hour is a bug.
@@ -79,8 +79,8 @@ pub struct State {
     pub job: Option<String>,
     #[serde(rename = "jobAt", skip_serializing_if = "Option::is_none")]
     pub job_at: Option<f64>,
-    /// The issues a look asked a job for, and when, until `started` says
-    /// it has one or `unstarted` that it hasn't (Pass::unrecorded).
+    /// The issues a look asked a job for, and when, until the next look
+    /// finds the job by its key (Pass::asked_for) or that none started.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub asked: Vec<u64>,
     #[serde(rename = "askedAt", skip_serializing_if = "Option::is_none")]
@@ -121,7 +121,7 @@ pub fn watch(p: &mut Pass, cfg: &Flaky) -> Result<(), String> {
 fn look(p: &mut Pass, cfg: &Flaky, listed: Result<Vec<Quarantined>, Error>) -> Result<(), String> {
     let name = format!("flaky-{}.json", p.repo.replace('/', "_"));
     let mut st: State = p.load(&name);
-    let held = p.unrecorded("flaky", &mut st.asked, &mut st.asked_at, cfg.job_timeout);
+    asked(p, &mut st)?;
     let listed = match listed {
         Ok(listed) => listed,
         Err(e) => {
@@ -162,13 +162,11 @@ fn look(p: &mut Pass, cfg: &Flaky, listed: Result<Vec<Quarantined>, Error>) -> R
             p.list(OTHERS, at, format!("`{}`, by {}", q.test, q.author));
         }
     }
-    act(p, cfg, &mut st, held)?;
+    act(p, cfg, &mut st)?;
     p.save(&name, &st)
 }
 
-/// `held`: a job asked for before may be at work unrecorded, and none
-/// other starts.
-fn act(p: &mut Pass, cfg: &Flaky, st: &mut State, held: bool) -> Result<(), String> {
+fn act(p: &mut Pass, cfg: &Flaky, st: &mut State) -> Result<(), String> {
     let mut states: HashMap<String, Option<String>> = HashMap::new();
     let mut state = |p: &mut Pass, jid: &str| {
         states
@@ -231,7 +229,7 @@ fn act(p: &mut Pass, cfg: &Flaky, st: &mut State, held: bool) -> Result<(), Stri
             p.wake(ended + DAY); // ends: a day on, it's listed (STUCK) if still open
         }
     }
-    if todo.is_empty() || busy || held {
+    if todo.is_empty() || busy {
         return Ok(());
     }
     // The oldest first, as many as fit; the next job takes the rest.
@@ -253,6 +251,7 @@ fn act(p: &mut Pass, cfg: &Flaky, st: &mut State, held: bool) -> Result<(), Stri
         .collect();
     p.out.jobs.push(Job {
         part: "flaky",
+        key: key(p.repo, "flaky", p.now),
         task: task(p, cfg, st, &handed),
         // Project work, not the pipeline's: it takes hours, and would hold
         // the slot the steward's fixes wait on.
@@ -267,43 +266,41 @@ fn act(p: &mut Pass, cfg: &Flaky, st: &mut State, held: bool) -> Result<(), Stri
     Ok(())
 }
 
-/// The job the last look asked for has started, as `jid`: the issues it
-/// was asked for are handed to it.
-pub fn started(p: &mut Pass, jid: &str) -> Result<(), String> {
-    let name = format!("flaky-{}.json", p.repo.replace('/', "_"));
-    let mut st: State = p.load(&name);
-    let asked = std::mem::take(&mut st.asked);
-    if asked.is_empty() {
-        return Err("its flaky tests asked for no job".into());
-    }
-    for n in &asked {
-        if let Some(it) = st.issues.get_mut(n) {
-            it.handed = Some(p.now);
-            it.job = Some(jid.into());
-        }
-    }
-    st.asked_at = None;
-    st.job = Some(jid.into());
-    st.job_at = Some(p.now);
-    p.save(&name, &st)?;
-    eprintln!(
-        "{}: a Claude job {jid} for {} flaky tests",
-        p.repo,
-        asked.len()
-    );
-    Ok(())
-}
-
-/// The job the last look asked for didn't start, or was stopped: the next
-/// look asks again.
-pub fn unstarted(p: &mut Pass) -> Result<(), String> {
-    let name = format!("flaky-{}.json", p.repo.replace('/', "_"));
-    let mut st: State = p.load(&name);
+/// The job the last look asked for, found by its key: handed the issues
+/// it was asked for, as of when it was. None found never started, and
+/// they're asked for again.
+fn asked(p: &mut Pass, st: &mut State) -> Result<(), String> {
     if st.asked.is_empty() {
         return Ok(());
     }
+    let at = st.asked_at.unwrap_or_default();
+    if let Some(jid) = p.asked_for("flaky", at)? {
+        for n in &st.asked {
+            if let Some(it) = st.issues.get_mut(n) {
+                it.handed = Some(at);
+                it.job = Some(jid.clone());
+            }
+        }
+        eprintln!(
+            "{}: a Claude job {jid} for {} flaky tests",
+            p.repo,
+            st.asked.len()
+        );
+        st.job = Some(jid);
+        st.job_at = Some(at);
+    }
     st.asked.clear();
     st.asked_at = None;
+    Ok(())
+}
+
+/// A look's first step alone (`asked`), for a test to find the job it
+/// asked for.
+#[cfg(test)]
+pub fn found(p: &mut Pass) -> Result<(), String> {
+    let name = format!("flaky-{}.json", p.repo.replace('/', "_"));
+    let mut st: State = p.load(&name);
+    asked(p, &mut st)?;
     p.save(&name, &st)
 }
 

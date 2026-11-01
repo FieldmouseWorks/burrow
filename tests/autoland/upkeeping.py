@@ -1,8 +1,9 @@
 """burrow-upkeep in a pass: each repo's Renovate dashboard and flaky tests,
 looked at by the binary (its own tests have the rules) as the App for the
 repo's owner, what it lists put where the steward sorts it, the passes it
-books booked, the Claude jobs it asks for started and told back, and what
-happens when any of that fails: the pass goes on."""
+books booked, the Claude jobs it asks for started under their keys and
+found by them, and what happens when any of that fails: the pass goes
+on."""
 
 import contextlib
 import io
@@ -11,7 +12,7 @@ import os
 import sys
 import time
 
-from harness import STOPPED, UPKEEP, C, R, S, tmp
+from harness import UPKEEP, C, R, S, tmp
 
 import waits  # noqa: E402 (harness puts the steward on the path)
 
@@ -53,12 +54,20 @@ sys.stderr.write(f"nothing for {{method}} {{path}}\\n")
 sys.exit(1)
 """)
 os.chmod(f"{tmp}/upkeep-bin/gh", 0o755)
-# proj's word on a job: running unless set.
-PROJ_STATES = f"{tmp}/upkeep-proj.json"
+# proj's word on a job (running unless set), and the jobs it has under a
+# key, as the job stand-in below starts them; it can't say with "fail".
+PROJ_STATES, PROJ_KEYS = f"{tmp}/upkeep-proj.json", f"{tmp}/upkeep-keys.json"
 with open(f"{tmp}/upkeep-bin/proj", "w") as f:
     f.write(f"""#!{sys.executable}
 import json, sys
-print(json.load(open({PROJ_STATES!r})).get(sys.argv[2], "running"))
+if sys.argv[1] == "find":
+    keys = json.load(open({PROJ_KEYS!r}))
+    if keys.get("fail"):
+        sys.stderr.write("proj: /data/dev/jobs: Permission denied\\n")
+        sys.exit(1)
+    print("\\n".join(keys.get(sys.argv[2], [])))
+else:
+    print(json.load(open({PROJ_STATES!r})).get(sys.argv[2], "running"))
 """)
 os.chmod(f"{tmp}/upkeep-bin/proj", 0o755)
 os.environ["PATH"] = f"{tmp}/upkeep-bin:{os.environ['PATH']}"
@@ -67,6 +76,11 @@ os.environ["PATH"] = f"{tmp}/upkeep-bin:{os.environ['PATH']}"
 def proj(**states):
     with open(PROJ_STATES, "w") as f:
         json.dump(states, f)
+
+
+def keys(**kept):
+    with open(PROJ_KEYS, "w") as f:
+        json.dump(kept, f)
 
 
 DASHBOARD = """## Errored
@@ -116,20 +130,25 @@ with open(f"{tmp}/upkeep.json", "w") as f:
 UP = [UPKEEP, f"{tmp}/upkeep.json"]
 JOBS, LOGGED = [], []
 NEXT = {}  # what C.job gives next, when set ("jid"): None for no job; or raises ("raise")
-STOP_OK = [True]  # whether proj stops a job
 
 
-def job(repo, task, clone=False, pipeline=True, timeout=None, since=None):
-    JOBS.append({"repo": repo, "task": task, "clone": clone, "pipeline": pipeline, "timeout": timeout})
+def job(repo, task, clone=False, pipeline=True, timeout=None, since=None, key=None):
+    """proj run, which keeps the job under its key."""
+    JOBS.append({"repo": repo, "task": task, "clone": clone, "pipeline": pipeline, "timeout": timeout, "key": key})
     if "raise" in NEXT:
         raise NEXT.pop("raise")
-    return NEXT.pop("jid") if "jid" in NEXT else f"up-{len(JOBS)}"
+    jid = NEXT.pop("jid") if "jid" in NEXT else f"up-{len(JOBS)}"
+    if jid:
+        kept_keys = json.load(open(PROJ_KEYS))
+        kept_keys[key] = [jid]
+        keys(**kept_keys)
+    return jid
 
 
-kept = (C.job, C.stop_job, C.CFG["upkeep"])
+kept = (C.job, C.CFG["upkeep"])
 C.job = job
-C.stop_job = lambda jid: STOPPED.append(jid) or STOP_OK[0]
 C.CFG["upkeep"] = UP
+keys()
 for f in os.listdir(C.STATE):
     if f.startswith(("dashboard-", "flaky-")) or f == "flaky":
         os.system(f"rm -rf {C.STATE}/{f}")
@@ -158,9 +177,9 @@ def state(part):
 
 # The first look: the dashboard is found (one search, counted), its error
 # isn't due for a day; the CI's flaky test goes to a Claude job at once,
-# project work with its own timeout, in a clone if need be, and is handed to
-# it once it has started. Eve's is the owner's to look at, listed under the
-# heading the steward gives the owner; every call went as the App.
+# project work with its own timeout, in a clone if need be, under its key.
+# Eve's is the owner's to look at, listed under the heading the steward
+# gives the owner; every call went as the App.
 github()
 proj()
 mine = look(0)
@@ -168,28 +187,39 @@ assert mine == [("Flaky tests someone else quarantined", "sam/r#8", "`unit/disk`
 assert all(x[0] in R.OWNERS for x in mine), mine
 assert [(j["pipeline"], j["timeout"], j["clone"]) for j in JOBS] == [(False, 240, True)], JOBS
 assert "`browser/stream`: https://github.com/sam/r/issues/4" in JOBS[0]["task"], JOBS
-assert state("flaky")["issues"]["4"] == {"test": "browser/stream", "handed": T, "job": "up-1"}, state("flaky")
+assert JOBS[0]["key"] == f"upkeep/sam/r/flaky/{T}", JOBS
+assert state("flaky")["asked"] == [4] and state("flaky")["askedAt"] == T, state("flaky")
 assert C.WAKE == {"sam/r": T + 245 * 60}, C.WAKE
 assert S.SEARCHED == [1], S.SEARCHED
 assert {c["token"] for c in called()} == {"ghs_app_sam"}, called()
 assert "sam/r" not in waits.FAILED, LOGGED
 
-# A day on: the dashboard's error is due, a job of the pipeline's with the
-# steward's timeout. The flaky test's job is still at work, so it's looked at
-# again in a quarter of an hour. No search: the dashboard's number is kept,
-# and its read asks with its etag.
+# A day on: the flaky test's job is found by its key, and handed its
+# issue as of when it was asked for; nothing told the binary its id. It's
+# still at work, so it's looked at again in a quarter of an hour. The
+# dashboard's error is due, a job of the pipeline's with the steward's
+# timeout. No search: the dashboard's number is kept, and its read asks
+# with its etag.
 github()
 mine = look(DAY)
+assert state("flaky")["issues"]["4"] == {"test": "browser/stream", "handed": T, "job": "up-1"}, state("flaky")
 assert [(j["pipeline"], j["timeout"]) for j in JOBS] == [(True, 60)], JOBS
 assert "Errored: chore(deps): update npm packages (branch renovate/npm-packages)" in JOBS[0]["task"], JOBS
-assert state("dashboard")["items"]["branch renovate/npm-packages"]["job"] == "up-1", state("dashboard")
 assert S.SEARCHED == [0] and ["repos/sam/r/issues/7", 'W/"d"'] in [[c["path"], c["etag"]] for c in called()], called()
 assert C.WAKE == {"sam/r": T + DAY + 15 * 60}, C.WAKE
+# Still queued hours on, the dashboard's job is found, and none other
+# starts beside it.
+proj(**{"up-1": "queued"})
+mine = look(DAY + 5 * 3600)
+assert not JOBS and state("dashboard")["items"]["branch renovate/npm-packages"]["job"] == "up-1", (JOBS, state("dashboard"))
+assert state("dashboard")["items"]["branch renovate/npm-packages"]["handed"] == T + DAY, state("dashboard")
+proj()
 
 # A job that can't start: what it was for is listed for the pipeline, a
 # look booked in five minutes, and nothing handed.
 for f in ("dashboard", "flaky"):
     os.remove(f"{C.STATE}/{f}-sam_r.json")
+keys()  # and the jobs proj had: these looks start at T again
 github()
 NEXT["jid"] = None
 mine = look(0)
@@ -197,47 +227,23 @@ NEXT.pop("jid", None)
 stuck = [x for x in mine if x[0] not in R.OWNERS]
 assert stuck == [("Couldn't start a Claude job", "sam/r#4", "for the flaky test `browser/stream`")], mine
 assert C.WAKE == {"sam/r": T + 300}, C.WAKE
-assert "handed" not in state("flaky")["issues"]["4"] and "asked" not in state("flaky"), state("flaky")
+assert "handed" not in state("flaky")["issues"]["4"], state("flaky")
 assert "sam/r: couldn't start its flaky job (no checkout, or proj refused)" in LOGGED, LOGGED
+# proj has no job under its key: the next look asks again.
+mine = look(60)
+assert len(JOBS) == 1 and JOBS[0]["key"] == f"upkeep/sam/r/flaky/{T + 60}", JOBS
+assert "handed" not in state("flaky")["issues"]["4"], state("flaky")
 
-# One that started but can't be told of is stopped, and the next pass asks
-# again (it does below); the repo's pass is watched as failed.
-WRAP = [f"{tmp}/upkeep-wrap", f"{tmp}/upkeep.json"]
-with open(WRAP[0], "w") as f:
-    f.write(f"#!/bin/sh\n[ \"$2\" = started ] && exit 1\nexec {UPKEEP} \"$@\"\n")
-os.chmod(WRAP[0], 0o755)
-STOPPED.clear()
-mine = look(60, WRAP)
-assert len(JOBS) == 1 and STOPPED == ["up-1"], (JOBS, STOPPED)
-assert "sam/r" in waits.FAILED and C.WAKE == {"sam/r": T + 60 + 300}, (waits.FAILED, C.WAKE)
-assert "handed" not in state("flaky")["issues"]["4"] and "asked" not in state("flaky"), state("flaky")
-assert any("its flaky job up-1, stopped" in x for x in LOGGED), LOGGED
-# One proj couldn't stop either may be at work: the next pass starts none
-# beside it, and lists it for the pipeline, until its timeout (240
-# minutes) and five more have passed; then it asks again.
-STOP_OK[0] = False
-mine = look(90, WRAP)
-STOP_OK[0] = True
-assert len(JOBS) == 1, JOBS
-assert any("its flaky job up-1 couldn't be recorded" in x and "proj couldn't stop it" in x for x in LOGGED), LOGGED
-assert not any("stopped:" in x for x in LOGGED), LOGGED
-HELD = ("A Claude job that may be at work unrecorded", "sam/r",
-        "its flaky job, asked for and never recorded (the steward's log has its id): no other starts until its timeout has passed")
-for at in (120, 90 + 244 * 60):
-    mine = look(at, WRAP)
-    assert not JOBS and HELD in mine and C.WAKE["sam/r"] == T + 90 + 245 * 60, (JOBS, mine, C.WAKE)
-    assert HELD[0] not in R.OWNERS, R.OWNERS
-# A stop that raises is one proj couldn't do: held the same.
-def stop_raises(jid):
-    raise OSError(2, "No such file or directory", "proj")
-C.stop_job = stop_raises
-mine = look(90 + 245 * 60, WRAP)
-C.stop_job = lambda jid: STOPPED.append(jid) or STOP_OK[0]
-assert len(JOBS) == 1 and HELD not in mine, (JOBS, mine)
-assert "sam/r: proj stop up-1: [Errno 2] No such file or directory: 'proj'" in LOGGED, LOGGED
-assert any("its flaky job up-1 couldn't be recorded" in x for x in LOGGED), LOGGED
-mine = look(91 + 245 * 60, WRAP)
-assert not JOBS and HELD in mine, (JOBS, mine)
+# While proj can't say what it has under a key, the part fails, is
+# watched, and asks for nothing; once it can, the job is found.
+keys(fail=True)
+mine = look(90)
+assert not JOBS and "sam/r" in waits.FAILED and C.WAKE["sam/r"] == T + 90 + 300, (JOBS, waits.FAILED, C.WAKE)
+assert any(f"its flaky tests: whether the job it asked for started (upkeep/sam/r/flaky/{T + 60}): proj find:" in x
+           and "Permission denied" in x for x in LOGGED), LOGGED
+keys(**{f"upkeep/sam/r/flaky/{T + 60}": ["up-1"]})
+mine = look(120)
+assert not JOBS and state("flaky")["issues"]["4"]["job"] == "up-1", (JOBS, state("flaky"))
 
 # A job that raises as it starts (a brief past what exec takes, a clone that
 # breaks) is that request's failure: the other part's job starts all the
@@ -247,13 +253,13 @@ with open(f"{C.STATE}/dashboard-sam_r.json", "w") as f:
     json.dump({"n": 7, "by": "sam", "items": {"branch renovate/npm-packages": {
         "since": T - 2 * DAY, "section": "Errored", "what": "chore(deps): update npm packages", "failing": True}}}, f)
 os.remove(f"{C.STATE}/flaky-sam_r.json")
+keys()
 github()
 NEXT["raise"] = OSError(7, "Argument list too long")
 mine = look(0)
 assert [j["pipeline"] for j in JOBS] == [True, False], JOBS
-assert state("flaky")["issues"]["4"]["job"] == "up-2", state("flaky")
+assert [j["key"] for j in JOBS] == [f"upkeep/sam/r/{p}/{T}" for p in ("dashboard", "flaky")], JOBS
 assert "handed" not in state("dashboard")["items"]["branch renovate/npm-packages"], state("dashboard")
-assert "asked" not in state("dashboard"), state("dashboard")
 assert ("Couldn't start a Claude job", "sam/r#7", "for what's stuck on Renovate's dashboard") in mine, mine
 assert "sam/r" in waits.FAILED and C.WAKE["sam/r"] == T + 300, (waits.FAILED, C.WAKE)
 assert "sam/r: its dashboard job didn't start: [Errno 7] Argument list too long" in LOGGED, LOGGED
@@ -348,5 +354,5 @@ assert seen == ["prs sam/r", "prs sam/q"], seen
 sys.argv = argv
 S.R.discover, S.R.settle_repo, S.R.publish, S.open_prs, S.upkeep = kept_fns
 
-C.job, C.stop_job, C.CFG["upkeep"] = kept
+C.job, C.CFG["upkeep"] = kept
 print("upkeeping: ok")
