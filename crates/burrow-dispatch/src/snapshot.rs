@@ -497,6 +497,12 @@ pub mod tests {
         fn fresh(&self, f: &crate::config::Fresh, instance: &str) -> Result<(), String> {
             self.act(format!("fresh {}{instance} for {}", f.prefix, f.owner))
         }
+        fn sweep(&self, f: &crate::config::Fresh) -> Vec<String> {
+            self.did
+                .borrow_mut()
+                .push(format!("sweep {}", f.configs.display()));
+            Vec::new()
+        }
     }
 
     pub fn config(dir: &std::path::Path) -> Config {

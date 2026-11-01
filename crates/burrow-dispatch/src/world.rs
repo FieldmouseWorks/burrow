@@ -42,9 +42,12 @@ pub trait World {
     fn kick(&self, path: &str);
     /// The instances of a template's units systemd has loaded.
     fn instances(&self, template: &str) -> Vec<String>;
-    /// Register a runner for one job as the instance's, and start its unit
-    /// with that registration, which nothing else then holds.
+    /// Register a runner for one job as the instance's, and queue its
+    /// unit's start with that registration, which the unit then owns.
     fn fresh(&self, f: &Fresh, instance: &str) -> Result<(), String>;
+    /// Remove the JIT configs no loaded unit owns: what it says of each, by
+    /// name.
+    fn sweep(&self, f: &Fresh) -> Vec<String>;
 }
 
 /// The machine's own: gh (the machinery's, on the PATH), systemctl, and the
@@ -195,15 +198,62 @@ impl World for Real<'_> {
             .ok()
             .and_then(|v| v.get("encoded_jit_config")?.as_str().map(str::to_owned))
             .ok_or_else(|| format!("registering {name}: GitHub gave no JIT config"))?;
+        let unit = format!("{}{instance}.service", f.template);
         hand(&f.configs.join(instance), &config, || {
-            self.restart(&format!("{}{instance}.service", f.template), "start")
+            // Queued, not waited for: a box slow to set a unit's sandbox up
+            // (remi#438: 90s each) would hold the pass past its timeout.
+            let out = Command::new("systemctl")
+                .args(["start", "--no-block", &unit])
+                .output()
+                .map_err(|e| format!("systemctl: {e}"))?;
+            if out.status.success() {
+                Ok(())
+            } else {
+                Err(String::from_utf8_lossy(&out.stderr).trim().to_owned())
+            }
         })
+    }
+
+    fn sweep(&self, f: &Fresh) -> Vec<String> {
+        sweep(&f.configs, &self.instances(&f.template))
     }
 }
 
-/// Leaves `config` at `path`, readable by this user alone, while `start`
-/// starts the unit that loads it, and then removes it, whatever came of the
-/// start. A file already there is someone else's, and stays.
+/// Removes each JIT config in `dir` but the `live` instances'. Once its
+/// start is queued, a config is its unit's: the unit removes it as its
+/// runner starts, or as it stops if it never got that far. One whose unit
+/// systemd no longer has was left by a start that never ran (a pass cut
+/// short between writing it and queueing the start, or a start job
+/// cancelled), and its registration is still one a process could take a
+/// job with. What it says of each names it, never what it held.
+fn sweep(dir: &Path, live: &[String]) -> Vec<String> {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut said: Vec<String> = entries
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if live.contains(&name) {
+                return None;
+            }
+            let why = "a JIT config no unit has";
+            match fs::remove_file(e.path()) {
+                Ok(()) => Some(format!("removed {name}, {why}")),
+                // Its unit stopped, and took it, after systemd was asked.
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+                Err(err) => Some(format!("couldn't remove {name}, {why}: {err}")),
+            }
+        })
+        .collect();
+    said.sort();
+    said
+}
+
+/// Leaves `config` at `path`, readable by this user alone, for the unit
+/// `start` queues to load and then remove. A start that fails removes it
+/// here, since no unit will. A file already there is someone else's, and
+/// stays.
 fn hand(
     path: &Path,
     config: &str,
@@ -216,10 +266,11 @@ fn hand(
         .open(path)
         .and_then(|mut file| file.write_all(config.as_bytes()))
         .map_err(|e| format!("{}: {e}", path.display()))?;
-    // Its unit loads it as it starts (Type=exec: by the time start returns).
-    let started = start();
-    let removed = fs::remove_file(path).map_err(|e| format!("{}: {e}", path.display()));
-    started.and(removed)
+    start().inspect_err(|_| {
+        if let Err(e) = fs::remove_file(path) {
+            println!("couldn't remove {}: {e}", path.display());
+        }
+    })
 }
 
 /// The instances of a template (`NAME@`) in `systemctl list-units --plain
@@ -278,17 +329,17 @@ fn working(cg: &Path) -> std::io::Result<bool> {
 
 #[cfg(test)]
 mod tests {
-    use super::{hand, instances, shown, working};
+    use super::{hand, instances, shown, sweep, working};
 
-    // A JIT config waits only for its unit's start, readable by this user
-    // alone, and is gone after, whether the start worked or not; one
-    // already there isn't touched.
+    // A JIT config is there for its unit's start, readable by this user
+    // alone, and stays for the unit once the start is queued; a start that
+    // fails takes it away. One already there isn't touched.
     #[test]
     fn hands_a_config_over() {
         use std::os::unix::fs::PermissionsExt as _;
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("17-0");
-        for result in [Ok(()), Err("Access denied".to_owned())] {
+        for result in [Err("Access denied".to_owned()), Ok(())] {
             let got = hand(&path, "secret", || {
                 let meta = std::fs::metadata(&path).unwrap();
                 assert_eq!(meta.permissions().mode() & 0o777, 0o600);
@@ -296,12 +347,43 @@ mod tests {
                 result.clone()
             });
             assert_eq!(got, result);
-            assert!(!path.exists());
+            assert_eq!(path.exists(), result.is_ok());
         }
+        std::fs::remove_file(&path).unwrap();
         std::fs::write(&path, "theirs").unwrap();
         let got = hand(&path, "secret", || panic!("started"));
         assert!(got.unwrap_err().contains("exists"));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "theirs");
+    }
+
+    // Every config no loaded unit has, readable or not, is removed, and
+    // named; a live unit's stays. A directory with none, or none at all,
+    // says nothing.
+    #[test]
+    fn sweeps_what_no_unit_has() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        assert!(sweep(&dir.path().join("gone"), &[]).is_empty());
+        assert!(sweep(dir.path(), &[]).is_empty());
+        for (name, mode) in [("17-1", 0o600), ("17-0", 0o400), ("18-0", 0o600)] {
+            let path = dir.path().join(name);
+            std::fs::write(&path, "secret").unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+        }
+        let said = sweep(dir.path(), &["18-0".into(), "19-0".into()]);
+        assert_eq!(
+            said,
+            [
+                "removed 17-0, a JIT config no unit has",
+                "removed 17-1, a JIT config no unit has"
+            ]
+        );
+        assert!(said.iter().all(|s| !s.contains("secret")));
+        let left: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(left, ["18-0"]);
     }
 
     // A template's instances, and nothing else's: another template's, the

@@ -9,7 +9,8 @@
 # as a unit of its own, `burrow-fresh-runner@INSTANCE`, as a user and in a
 # state directory nothing ran as or in before, removed when it stops. The
 # dispatcher starts one for each job queued for their label that none idle
-# is there to take, and stops one left idle.
+# is there to take, and stops one left idle. tests/fresh-runner.nix boots
+# one.
 { config, lib, pkgs, ... }:
 let
   cfg = config.burrow.dispatch.fresh;
@@ -26,6 +27,11 @@ let
     export ACTIONS_RUNNER_INPUT_JITCONFIG
     exec ${cfg.package}/bin/Runner.Listener run
   '';
+  # Removes what it's given as root, from the host's mount namespace. A `+`
+  # command still finds a DynamicUser's state an idmapped mount it can't
+  # write (systemd 260, remi#438), and under a ProtectSystem the unit's /run
+  # is read-only.
+  remove = "+${pkgs.util-linux}/bin/nsenter -t 1 -m -- ${pkgs.coreutils}/bin/rm -rf";
 in
 {
   options.burrow.dispatch.fresh = {
@@ -132,16 +138,19 @@ in
         HOME = "/var/lib/${state}/%i";
       };
       serviceConfig = {
-        # Started once its credential is loaded: the dispatcher removes the
-        # file it came from as soon as `systemctl start` returns.
+        # Started once its runner is: its credential is loaded by then.
         Type = "exec";
         DynamicUser = true;
         StateDirectory = "${state}/%i";
         WorkingDirectory = "/var/lib/${state}/%i";
+        # The dispatcher queues the start and leaves the file to the unit,
+        # which removes it once its runner has it, or as it stops if it
+        # never got that far.
         LoadCredential = "jit:${configs}/%i";
         ExecStart = start;
+        ExecStartPost = "${remove} ${configs}/%i";
         # Nothing it leaves is any later job's.
-        ExecStopPost = "+${pkgs.coreutils}/bin/rm -rf /var/lib/private/${state}/%i /var/lib/${state}/%i";
+        ExecStopPost = "${remove} ${configs}/%i /var/lib/private/${state}/%i /var/lib/${state}/%i";
         Restart = "no";
         KillMode = "control-group";
         # Past a cap the kernel kills a job's biggest process, which fails

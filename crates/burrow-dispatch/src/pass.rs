@@ -24,6 +24,13 @@ pub fn run(cfg: &Config, world: &dyn World, now: f64) -> Result<(), String> {
     let was = watch::read(&dir.join("watch.json"))
         .map(|(_, items)| items)
         .unwrap_or_default();
+    // Before this pass hands anything over: what no unit has now was left
+    // by an earlier start that never ran.
+    if let Some(f) = &cfg.fresh {
+        for said in world.sweep(f) {
+            println!("{said}");
+        }
+    }
     let snap = snapshot::take(cfg, world);
     for (repo, err) in &snap.unread {
         println!("couldn't read {repo}: {err}");
@@ -398,9 +405,14 @@ mod tests {
         );
         let t = 1_793_293_200.0;
         run(&cfg, &w, t).unwrap();
+        let sweep = format!("sweep {}", dir.path().join("configs").display());
         assert_eq!(
             *w.did.borrow(),
-            ["fresh fresh-box-1793293200-0 for sam", "kick watchdog"]
+            [
+                sweep.as_str(),
+                "fresh fresh-box-1793293200-0 for sam",
+                "kick watchdog"
+            ]
         );
         let st: State = load(dir.path(), "state.json");
         assert_eq!(
@@ -416,7 +428,7 @@ mod tests {
         w.github.insert(page(QUEUED, 1), runs(&[]));
         w.did.borrow_mut().clear();
         run(&cfg, &w, t + 300.0).unwrap();
-        assert_eq!(w.did.borrow()[0], format!("stop {unit}"));
+        assert_eq!(w.did.borrow()[1], format!("stop {unit}"));
         w.then.insert(
             unit.into(),
             Unit {
@@ -466,6 +478,9 @@ mod tests {
         }
         fn fresh(&self, f: &crate::config::Fresh, instance: &str) -> Result<(), String> {
             self.w.fresh(f, instance)
+        }
+        fn sweep(&self, f: &crate::config::Fresh) -> Vec<String> {
+            self.w.sweep(f)
         }
     }
 

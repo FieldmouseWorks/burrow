@@ -562,8 +562,14 @@
           assert lib.assertMsg ((settings committed).fresh == wantFresh) "dispatch: fresh runners ${builtins.toJSON (settings committed).fresh}";
           assert lib.assertMsg (builtins.elem "sam-org/homelab" handled) "dispatch: the fresh runners' repo's events aren't its: ${builtins.toJSON handled}";
           assert lib.assertMsg (freshGot == freshWant) "dispatch: a fresh runner's unit has ${builtins.toJSON freshGot}";
-          assert lib.assertMsg (lib.hasInfix "rm -rf /var/lib/private/burrow-fresh-runner/%i" freshUnit.serviceConfig.ExecStopPost)
-            "dispatch: a fresh runner's state outlives it: ${freshUnit.serviceConfig.ExecStopPost}";
+          # From the host's mount namespace: from the unit's, it can't
+          # (tests/fresh-runner.nix boots one).
+          assert lib.assertMsg (lib.hasInfix "nsenter -t 1 -m -- " freshUnit.serviceConfig.ExecStopPost
+            && lib.hasSuffix " /run/burrow-fresh/%i /var/lib/private/burrow-fresh-runner/%i /var/lib/burrow-fresh-runner/%i" freshUnit.serviceConfig.ExecStopPost)
+            "dispatch: a fresh runner's registration or state outlives it: ${freshUnit.serviceConfig.ExecStopPost}";
+          assert lib.assertMsg (lib.hasInfix "nsenter -t 1 -m -- " freshUnit.serviceConfig.ExecStartPost
+            && lib.hasSuffix "rm -rf /run/burrow-fresh/%i" freshUnit.serviceConfig.ExecStartPost)
+            "dispatch: a fresh runner's registration outlives its start: ${freshUnit.serviceConfig.ExecStartPost}";
           assert lib.assertMsg (!freshUnit.restartIfChanged && !freshUnit.stopIfChanged) "dispatch: a switch can cut a fresh runner's job short";
           # The job they're for, burrow's flake-check.yml, calls these.
           assert lib.assertMsg (lib.all (p: builtins.elem p (map lib.getName freshUnit.path)) [ "jq" "gh" "curl" ])
