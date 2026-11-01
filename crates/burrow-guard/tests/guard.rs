@@ -581,6 +581,9 @@ fn a_substitution_ends_where_the_shell_ends_it() {
         // Comments, here-documents and parameters, with what would end it.
         format!("echo \"$(a # )\n{push} )\""),
         format!("echo \"$(cat <<E\n)\nE\n{push} )\""),
+        "git push -f origin \"$(cat <<E\nbody\nE)\" main".to_owned(),
+        // After every word a command can follow.
+        "git push -f origin $(function f { case x in x) a; esac; }) main".to_owned(),
         format!("echo \"$(a ${{x:-)}}; {push} )\""),
         // A quote in any of them isn't one.
         format!("a # don't\n{push}"),

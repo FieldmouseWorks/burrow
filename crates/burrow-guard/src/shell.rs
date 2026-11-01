@@ -109,6 +109,11 @@ impl Grammar {
                     *may_end = false;
                 }
             }
+            // `function NAME {`: `function` names nothing, but its body's
+            // `{` comes after its name.
+            _ if word == "{" && cmd.words.first().is_some_and(|w| w == "function") => {
+                self.named = false;
+            }
             _ if self.named => {}
             last => {
                 if word == "case" {
@@ -118,9 +123,7 @@ impl Grammar {
                     self.open.pop();
                     self.named = true;
                 } else {
-                    let function_body =
-                        word == "{" && cmd.words.first().is_some_and(|w| w == "function");
-                    self.named = !function_body && !BEFORE_A_COMMAND.contains(&word);
+                    self.named = !BEFORE_A_COMMAND.contains(&word);
                 }
             }
         }
@@ -302,7 +305,7 @@ impl Lexer {
                 '\n' => {
                     grammar.separator(c);
                     cmd.end(&mut self.commands);
-                    self.heredoc_bodies(depth)?;
+                    self.heredoc_bodies(depth, closes)?;
                 }
                 ';' | '&' | '|' => {
                     grammar.separator(c);
@@ -339,20 +342,32 @@ impl Lexer {
     }
 
     /// The bodies of the here-documents waiting on this newline, each line
-    /// read on its own: a quote in one doesn't reach the next.
-    fn heredoc_bodies(&mut self, depth: usize) -> Result<(), TooDeep> {
+    /// read on its own: a quote in one doesn't reach the next. In a
+    /// substitution (`closes`), the end word with the substitution's `)`
+    /// straight after it ends the body too, as it does in bash.
+    fn heredoc_bodies(&mut self, depth: usize, closes: bool) -> Result<(), TooDeep> {
         for doc in std::mem::take(&mut self.heredocs) {
             while self.peek().is_some() {
+                let start = self.pos;
                 let mut line = String::new();
                 while let Some(c) = self.next_if(|c| c != '\n') {
                     line.push(c);
                 }
-                self.pos += 1;
                 let last = if doc.strip_tabs {
                     line.trim_start_matches('\t')
                 } else {
                     line.as_str()
                 };
+                if closes
+                    && last
+                        .strip_prefix(doc.end.as_str())
+                        .is_some_and(|rest| rest.starts_with(')'))
+                {
+                    // Back to the `)`, for the substitution to end at.
+                    self.pos = start + (line.len() - last.len()) + doc.end.chars().count();
+                    break;
+                }
+                self.pos += 1;
                 if last == doc.end {
                     break;
                 }
@@ -712,6 +727,7 @@ mod tests {
             "a $(case x in @(y|z)) b ;; esac) c",
             "a $(case x in z) (d) ; b ;; esac) c",
             "a $(if t; then case x in z) b ;; esac; fi) c",
+            "a $(function f { case x in z) b ;; esac; }) c",
             "a $(case x in z) case y in w) b ;; esac ;; esac) c",
             "a $(case x in esac; b) c",
             "a $(case ')' in ')') b ;; esac) c",
@@ -752,10 +768,15 @@ mod tests {
             commands("a <<EOF\ndon't\n)\nEOF\nb c"),
             want(&[&["a"], &["dont"], &["b", "c"]])
         );
-        // Closing a substitution only after its body.
+        // Closing a substitution only after its body, or with its end
+        // word, as bash does.
         assert_eq!(
             commands("a $(b <<EOF\n)\nEOF\nc) d"),
             want(&[&["b"], &["c"], &["a", "%", "d"]])
+        );
+        assert_eq!(
+            commands("a \"$(b <<EOF\nc\nEOF)\" d $(e <<-EOF\n\tEOF) f"),
+            want(&[&["b"], &["c"], &["e"], &["a", "%", "d", "%", "f"]])
         );
         // Its body is read, its end word's quotes come off, `<<-` strips tabs.
         assert_eq!(
