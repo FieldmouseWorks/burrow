@@ -17,7 +17,7 @@ const SHARED: [&str; 5] = ["main", "master", "trunk", "HEAD", "@"];
 /// the guard reads asks, since a push in it would go unseen.
 pub fn asks(cmd: &str, cwd: &Path, git: &Path) -> Vec<String> {
     let mut found = Vec::new();
-    let read = shell::commands(cmd).and_then(|commands| pushes(commands, cwd, 0, &[], &mut found));
+    let read = shell::commands(cmd).and_then(|commands| pushes(commands, cwd, 0, None, &mut found));
     if read.is_err() {
         return vec![
             "The guard couldn't check this command (it nests too deep to read), so it asks."
@@ -40,12 +40,14 @@ const NESTED: usize = 16;
 /// since it may be run later (`eval "$NAME"`). The words after one reach its
 /// last command, as `eval` joins them (`trailing`), unless a shell's `-c`
 /// takes them as its parameters. Each reading is shorter than the word, so
-/// it ends.
+/// it ends. Every word is visited once a reading, so a command's reading
+/// takes time in step with its length: one cut off by the hook's timeout
+/// would go unchecked.
 fn pushes(
     commands: Vec<Vec<String>>,
     cwd: &Path,
     depth: usize,
-    trailing: &[String],
+    trailing: Option<&Rest<'_>>,
     found: &mut Vec<(PathBuf, Push)>,
 ) -> Result<(), shell::TooDeep> {
     if depth > NESTED {
@@ -53,27 +55,75 @@ fn pushes(
     }
     let last = commands.len().saturating_sub(1);
     for (n, words) in commands.iter().enumerate() {
-        let trailing = if n == last { trailing } else { &[] };
+        let trailing = if n == last { trailing } else { None };
+        let shell = words.iter().position(|w| is_shell(w));
+        let input_as_words = words.iter().position(|w| takes_input_as_words(w));
+        // A shell takes the first word after its `-c` as the script, and
+        // the rest as that script's parameters.
+        let mut script_read = false;
         for (i, word) in words.iter().enumerate() {
-            let rest = [&words[i + 1..], trailing].concat();
+            let rest = Rest {
+                here: &words[i + 1..],
+                then: trailing,
+            };
             let inner = shell::commands(assigned(word).unwrap_or(word))?;
             if !matches!(inner.as_slice(), [only] if only.as_slice() == std::slice::from_ref(word))
             {
-                if is_shell_script(words, i) {
-                    pushes(given_params(inner, &rest), cwd, depth + 1, &[], found)?;
+                if !script_read && shell.is_some_and(|at| at + 1 < i) && is_c(&words[i - 1]) {
+                    script_read = true;
+                    pushes(given_params(inner, word, rest), cwd, depth + 1, None, found)?;
                 } else {
-                    pushes(inner, cwd, depth + 1, &rest, found)?;
+                    pushes(inner, cwd, depth + 1, Some(&rest), found)?;
                 }
             }
-            if runs_git(word, rest.first())
-                && let Some((at, mut push)) = after_git(cwd, &rest)
+            if runs_git(word, rest.iter().next())
+                && let Some((at, mut push)) = after_git(cwd, rest.iter())
             {
-                push.more = words[..i].iter().any(|w| takes_input_as_words(w));
+                push.more = input_as_words.is_some_and(|at| at < i);
                 found.push((at, push));
             }
         }
     }
     Ok(())
+}
+
+/// The words after one: the rest of its command, then, when that command
+/// was read from a word, the words after that word. Linked rather than
+/// joined, so no word is copied for each word before it.
+#[derive(Clone, Copy)]
+struct Rest<'a> {
+    here: &'a [String],
+    then: Option<&'a Rest<'a>>,
+}
+
+impl<'a> Rest<'a> {
+    fn iter(self) -> Words<'a> {
+        Words {
+            here: self.here.iter(),
+            then: self.then,
+        }
+    }
+}
+
+/// A [`Rest`]'s words, in order.
+struct Words<'a> {
+    here: std::slice::Iter<'a, String>,
+    then: Option<&'a Rest<'a>>,
+}
+
+impl<'a> Iterator for Words<'a> {
+    type Item = &'a String;
+
+    fn next(&mut self) -> Option<&'a String> {
+        loop {
+            if let Some(word) = self.here.next() {
+                return Some(word);
+            }
+            let next = self.then?;
+            self.here = next.here.iter();
+            self.then = next.then;
+        }
+    }
 }
 
 /// The value of a `NAME=value` word.
@@ -98,29 +148,31 @@ fn runs_git(word: &str, next: Option<&String>) -> bool {
         && (word.trim_end_matches('}').ends_with("git") || next.is_some_and(|n| n == "push"))
 }
 
-/// Whether `words[i]` is the script of a shell's `-c`.
-fn is_shell_script(words: &[String], i: usize) -> bool {
-    let Some((flag, before)) = words[..i].split_last() else {
-        return false;
-    };
-    flag.starts_with('-')
-        && !flag.starts_with("--")
-        && flag.ends_with('c')
-        && before.iter().any(|w| {
-            let name = w.rsplit('/').next().unwrap_or(w);
-            matches!(name, "sh" | "bash" | "dash" | "zsh" | "ksh")
-        })
+/// Whether `word` names a shell, which runs the script its `-c` gives it.
+fn is_shell(word: &str) -> bool {
+    let name = word.rsplit('/').next().unwrap_or(word);
+    matches!(name, "sh" | "bash" | "dash" | "zsh" | "ksh")
 }
 
-/// A `-c` script's commands, with `args` for `$0`, `$1` and so on, and the
-/// ones after `$0` for `$@` and `$*`.
-fn given_params(commands: Vec<Vec<String>>, args: &[String]) -> Vec<Vec<String>> {
+/// Whether `flag` is a shell's `-c`, alone or with other short options.
+fn is_c(flag: &str) -> bool {
+    flag.starts_with('-') && !flag.starts_with("--") && flag.ends_with('c')
+}
+
+/// A `-c` script's commands, with the words after it (`args`) for `$0`,
+/// `$1` and so on, and the ones after `$0` for `$@` and `$*`. A script
+/// that names no parameter takes none, so its words are read as they are.
+fn given_params(commands: Vec<Vec<String>>, script: &str, args: Rest<'_>) -> Vec<Vec<String>> {
+    if !script.contains('$') {
+        return commands;
+    }
+    let numbered: Vec<&String> = args.iter().take(10).collect();
     let given = |word: String| -> Vec<String> {
         if matches!(word.as_str(), "$@" | "$*" | "${@}" | "${*}") {
             return args.iter().skip(1).cloned().collect();
         }
         let mut word = word;
-        for (n, arg) in args.iter().enumerate().take(10) {
+        for (n, arg) in numbered.iter().enumerate() {
             word = word
                 .replace(&format!("${n}"), arg)
                 .replace(&format!("${{{n}}}"), arg);
@@ -141,12 +193,14 @@ fn takes_input_as_words(word: &str) -> bool {
 /// What follows `git`, if it's a push: git's own options (each `-C DIR`
 /// taken in turn for where it runs), then `push` and its words. An
 /// expansion among them may be an option, or nothing at all.
-fn after_git(cwd: &Path, words: &[String]) -> Option<(PathBuf, Push)> {
+fn after_git<'a>(
+    cwd: &Path,
+    mut words: impl Iterator<Item = &'a String>,
+) -> Option<(PathBuf, Push)> {
     let mut at = cwd.to_path_buf();
-    let mut words = words.iter();
     while let Some(w) = words.next() {
         match w.as_str() {
-            "push" => return Some((at, Push::read(words.as_slice()))),
+            "push" => return Some((at, Push::read(words))),
             "-C" => at = at.join(words.next()?),
             // Options whose value is the next word.
             "-c" | "--git-dir" | "--work-tree" | "--namespace" | "--config-env"
@@ -173,9 +227,8 @@ struct Push {
 }
 
 impl Push {
-    fn read(words: &[String]) -> Push {
+    fn read<'a>(mut words: impl Iterator<Item = &'a String>) -> Push {
         let mut p = Push::default();
-        let mut words = words.iter();
         while let Some(w) = words.next() {
             match w.as_str() {
                 // The rest are the remote and refspecs, whatever they look

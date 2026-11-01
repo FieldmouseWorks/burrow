@@ -4,7 +4,7 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use burrow_guard::config::Config;
 use burrow_guard::{Guard, Hook, Input};
@@ -760,6 +760,42 @@ fn a_command_too_deep_to_read_asks() {
         b.check(&script, work.path()),
         Some(format!("Force-push or delete of 'main' {SHARED}"))
     );
+}
+
+#[test]
+fn a_long_command_is_read_before_the_hook_gives_up() {
+    // The hook gives the guard 10 seconds (modules/claude.nix), and a
+    // command it cuts off runs unchecked. Each shape here took longer than
+    // that once the words after each word were copied for it.
+    let b = Box::new();
+    let work = clone_on("feature");
+    let n = 10_000;
+    let quoted = (0..n)
+        .map(|i| format!("'line {i} of it'"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let assignments = (0..n)
+        .map(|i| format!("x{i}='line {i} of it'"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    for cmd in [
+        format!("printf '%s\\n' {quoted}"),
+        format!("eval {quoted}"),
+        format!("{assignments} true"),
+    ] {
+        let cmd = format!("{cmd}; git push -f origin main");
+        let started = Instant::now();
+        assert_eq!(
+            b.check(&cmd, work.path()),
+            Some(format!("Force-push or delete of 'main' {SHARED}"))
+        );
+        let took = started.elapsed();
+        assert!(
+            took < Duration::from_secs(10),
+            "{took:?} for {}",
+            &cmd[..20]
+        );
+    }
 }
 
 /// `s` double-quoted for the shell.
