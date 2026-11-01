@@ -66,9 +66,10 @@ on:
         description: >-
           Evaluate each check, package, dev shell, formatter and NixOS system
           in a nix process of its own (as many side by side as the runner has
-          cores, while each has 2G of its free memory), then build the
-          checks, rather than the checks in one process and then everything
-          in one `nix flake check`.
+          cores, while each has 2G of the memory free to the job, its
+          cgroups' limits counted), then build the checks, rather than the
+          checks in one process and then everything in one
+          `nix flake check`.
           For a flake whose evaluations don't fit in its runner's memory
           together, even with no build beside them. It also checks nixosModules
           and templates as nix flake check does, and forces lib and the outputs
@@ -654,18 +655,46 @@ jobs:
               echo "leg $LEG of $LEGS: $(jq 'map(select(.mine)) | length' "$RUNNER_TEMP/entries.json") of the plan's $(jq length "$RUNNER_TEMP/entries.json") outputs, those whose names hash to it"
             fi
             # Evaluations run side by side, one a core while each has 2G of
-            # the free memory (one of burrow's took at most 1.3G), so the most
-            # memory in use is that many evaluations'; each one's log is
-            # printed whole, in the plan's order, once they've all ended. Each
-            # derivation is made a GC root at once, until the build is done;
-            # one that isn't a valid derivation (or that a GC took in between)
-            # fails the gate. A failed evaluation fails the gate, after the
-            # rest are evaluated and built (--keep-going).
+            # the memory free to this job (one of burrow's took at most
+            # 1.3G), so the most memory in use is that many evaluations';
+            # each one's log is printed whole, in the plan's order, once
+            # they've all ended. Each derivation is made a GC root at once,
+            # until the build is done; one that isn't a valid derivation (or
+            # that a GC took in between) fails the gate. A failed evaluation
+            # fails the gate, after the rest are evaluated and built
+            # (--keep-going).
             roots=$work/roots
             evals=$work/evals
             mkdir "$roots" "$evals"
+            # Free to this job: the machine's available memory, or less where
+            # a cgroup it's in, or one above that, has a memory limit (a proj
+            # job's or a Claude server's MemoryMax, a container's): what the
+            # limit leaves, counting as free the inactive page cache the
+            # kernel gives back first. cgroup v2's limits, and v1's memory
+            # controller's; CGROUP_FS is where they're mounted
+            # (/sys/fs/cgroup; a test's stand-in tree).
+            free=$(( $(awk '$1 == "MemAvailable:" { print $2 }' /proc/meminfo) * 1024 ))
+            cgroups=${CGROUP_FS:-/sys/fs/cgroup}
+            # The cgroup at PATH in the hierarchy in DIR and each above it,
+            # by the files with its limit (none past 2^62) and what it
+            # holds, and memory.stat's key for its inactive page cache.
+            limits() {
+              local dir=$1 cgroup=${2%/} max=$3 held=$4 cache=$5 at limit left
+              while :; do
+                at=$dir$cgroup
+                if [ -r "$at/$max" ] && limit=$(cat "$at/$max") && [ "$limit" != max ] && [ "$limit" -lt $(( 1 << 62 )) ]; then
+                  left=$(( limit - $(cat "$at/$held") + $(awk -v k="$cache" '$1 == k { print $2 }' "$at/memory.stat") ))
+                  [ "$left" -ge "$free" ] || free=$left
+                fi
+                [ -n "$cgroup" ] || break
+                cgroup=${cgroup%/*}
+              done
+            }
+            limits "$cgroups" "$(sed -n 's/^0:://p' /proc/self/cgroup)" memory.max memory.current inactive_file
+            limits "$cgroups/memory" "$(sed -n 's/^[0-9]*:\([^:]*,\)\{0,1\}memory\(,[^:]*\)\{0,1\}:\(.*\)/\3/p' /proc/self/cgroup)" \
+              memory.limit_in_bytes memory.usage_in_bytes total_inactive_file
             side=$(nproc)
-            room=$(awk '/^MemAvailable:/ { print int($2 / 2097152) }' /proc/meminfo)
+            room=$(( free / 2147483648 ))
             [ "$room" -ge "$side" ] || side=$room
             [ "$side" -ge 1 ] || side=1
             # One entry's evaluation, with what came of it in $evals/N: a

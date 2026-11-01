@@ -1,7 +1,21 @@
 //! The outputs the gate checks, as nix flake check checks them, and what it
 //! evaluates and builds of them.
 
+use std::fs;
+
 use super::{EVERY, Gate, Run};
+
+/// How many evaluations the gate said it runs side by side.
+fn side(out: &str) -> usize {
+    out.lines()
+        .find_map(|l| {
+            l.strip_prefix("6 outputs to evaluate, ")?
+                .strip_suffix(" side by side")
+        })
+        .unwrap_or_else(|| panic!("no count: {out}"))
+        .parse()
+        .unwrap()
+}
 
 /// Each derivation on its own, kept until built, then only the checks built.
 #[test]
@@ -57,7 +71,8 @@ fn each_derivation_apart() {
 
 /// A failing check fails it.
 /// The outputs are evaluated side by side, as many at once as the step says
-/// it takes (a core each while each has 2G of the free memory), and no more.
+/// it takes (a core each while each has 2G of the memory free to it), and no
+/// more.
 #[test]
 fn outputs_are_evaluated_side_by_side() {
     let g = Gate::new();
@@ -70,22 +85,93 @@ fn outputs_are_evaluated_side_by_side() {
         },
     );
     assert_eq!(r.code, 0, "{}", r.out);
-    let side: usize = r
-        .out
-        .lines()
-        .find_map(|l| {
-            l.strip_prefix("6 outputs to evaluate, ")?
-                .strip_suffix(" side by side")
-        })
-        .unwrap_or_else(|| panic!("no count: {}", r.out))
-        .parse()
-        .unwrap();
     // Each evaluation held a second, so those started together overlapped.
     let most = super::lines(&g.s.join("nix.log.overlap"))
         .iter()
         .map(|n| n.trim().parse::<usize>().unwrap())
         .max();
-    assert_eq!(most, Some(side.min(6)), "{}", r.out);
+    assert_eq!(most, Some(side(&r.out).min(6)), "{}", r.out);
+}
+
+/// In a cgroup with a memory limit, only as many side by side as the limit
+/// leaves room for, however much the machine has free: here 2G (3G, less
+/// the 2G the cgroup holds, 1G of it inactive page cache), so one at a time.
+#[test]
+fn side_by_side_stays_within_a_cgroups_memory_limit() {
+    under_a_limit(Cgroups::V2);
+}
+
+/// The same under cgroup v1's memory controller, whose "no limit" is a
+/// number.
+#[test]
+fn side_by_side_stays_within_a_v1_memory_limit() {
+    under_a_limit(Cgroups::V1);
+}
+
+enum Cgroups {
+    V1,
+    V2,
+}
+
+fn under_a_limit(v: Cgroups) {
+    let g = Gate::new();
+    // A stand-in for the cgroup filesystem, with the gate's own cgroup in it
+    // and the limit at its top, so it's found only by walking every level up.
+    let own = fs::read_to_string("/proc/self/cgroup").unwrap();
+    let own = own
+        .lines()
+        .find_map(|l| {
+            let [_, controllers, path] = l.splitn(3, ':').collect::<Vec<_>>()[..] else {
+                return None;
+            };
+            let mine = match v {
+                Cgroups::V2 => controllers.is_empty(),
+                Cgroups::V1 => controllers.split(',').any(|c| c == "memory"),
+            };
+            mine.then_some(path)
+        })
+        .unwrap_or("/");
+    let fs_top = g.s.join("cgroup");
+    let (top, max, held, cache, none) = match v {
+        Cgroups::V2 => (
+            fs_top.clone(),
+            "memory.max",
+            "memory.current",
+            "inactive_file",
+            "max".to_owned(),
+        ),
+        Cgroups::V1 => (
+            fs_top.join("memory"),
+            "memory.limit_in_bytes",
+            "memory.usage_in_bytes",
+            "total_inactive_file",
+            "9223372036854771712".to_owned(),
+        ),
+    };
+    let mut at = top.clone();
+    for part in own.split('/').filter(|p| !p.is_empty()) {
+        at.push(part);
+        fs::create_dir_all(&at).unwrap();
+        fs::write(at.join(max), format!("{none}\n")).unwrap();
+    }
+    fs::create_dir_all(&top).unwrap();
+    fs::write(top.join(max), format!("{}\n", 3u64 << 30)).unwrap();
+    fs::write(top.join(held), format!("{}\n", 2u64 << 30)).unwrap();
+    fs::write(
+        top.join("memory.stat"),
+        format!("anon 1073741824\nactive_file 0\n{cache} {}\n", 1u64 << 30),
+    )
+    .unwrap();
+    let r = g.run(
+        &g.flake(EVERY),
+        Run {
+            skip: "vm",
+            env: &[("CGROUP_FS", fs_top.to_str().unwrap())],
+            ..Run::default()
+        },
+    );
+    assert_eq!(r.code, 0, "{}", r.out);
+    assert_eq!(side(&r.out), 1, "{}", r.out);
 }
 
 #[test]
