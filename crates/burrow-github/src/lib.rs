@@ -78,9 +78,12 @@ pub struct Failed {
 /// The waits before the second and third tries.
 const AGAIN: [u64; 2] = [2, 8];
 
-/// A request that has to work: tried again after AGAIN on no answer, a 5xx
-/// or a 429; 304 (with `etag`) and 2xx are answers, anything else an Error
-/// that says what GitHub said.
+/// A request that has to work: tried again after AGAIN on a 429, and on no
+/// answer or a 5xx when asking again can't do it twice; 304 (with `etag`)
+/// and 2xx are answers, anything else an Error that says what GitHub said.
+/// A POST makes something each time (an issue, a comment), and GitHub can
+/// have made it when its answer is lost or a 5xx, so a POST is asked again
+/// only after a 429, which GitHub answers without doing anything.
 pub fn call(
     api: &mut dyn Api,
     method: &str,
@@ -88,11 +91,14 @@ pub fn call(
     body: Option<&Value>,
     etag: Option<&str>,
 ) -> Result<Response, Error> {
+    let repeats = method != "POST";
     let mut tries = 0;
     loop {
         let again = match api.request(method, path, body, etag) {
             Ok(r) if (200..300).contains(&r.status) || r.status == 304 => return Ok(r),
-            Ok(r) if r.status >= 500 || r.status == 429 => format!("HTTP {}", r.status),
+            Ok(r) if r.status == 429 || (repeats && r.status >= 500) => {
+                format!("HTTP {}", r.status)
+            }
             Ok(r) => {
                 return Err(Error(format!(
                     "{method} {path}: HTTP {}: {}",
@@ -100,7 +106,7 @@ pub fn call(
                     message(&r.body)
                 )));
             }
-            Err(f) if f.transient => f.why,
+            Err(f) if f.transient && repeats => f.why,
             Err(f) => return Err(Error(format!("{method} {path}: {}", f.why))),
         };
         if tries == AGAIN.len() {
@@ -379,6 +385,52 @@ mod tests {
             "GET a: HTTP 503, 3 times"
         );
         assert_eq!(gh.asked.len(), 3);
+    }
+
+    #[test]
+    fn asks_a_post_again_only_when_github_did_nothing() {
+        // GitHub can have made the issue when its answer is lost or a 5xx:
+        // asking again would make a second.
+        for (answer, said) in [
+            (
+                Err(Failed {
+                    why: "gh: connection reset by peer".into(),
+                    transient: true,
+                }),
+                "POST b: gh: connection reset by peer",
+            ),
+            (ok(502, Value::Null, &[]), "POST b: HTTP 502: "),
+        ] {
+            let mut gh = Fake::default();
+            gh.on("POST", "b", vec![answer]);
+            let e = call(&mut gh, "POST", "b", Some(&json!({})), None).unwrap_err();
+            assert_eq!(e.0, said);
+            assert_eq!(gh.asked.len(), 1);
+            assert!(gh.paused.is_empty());
+        }
+        // A 429 is refused before anything's done.
+        let mut gh = Fake::default();
+        gh.on(
+            "POST",
+            "b",
+            vec![
+                ok(429, Value::Null, &[]),
+                ok(201, json!({"number": 7}), &[]),
+            ],
+        );
+        let r = call(&mut gh, "POST", "b", Some(&json!({})), None).unwrap();
+        assert_eq!(r.status, 201);
+        assert_eq!(gh.paused, vec![2]);
+        // What asking again can't do twice still is.
+        for method in ["PATCH", "PUT", "DELETE"] {
+            let mut gh = Fake::default();
+            gh.on(
+                method,
+                "c",
+                vec![ok(502, Value::Null, &[]), ok(200, json!({}), &[])],
+            );
+            assert_eq!(call(&mut gh, method, "c", None, None).unwrap().status, 200);
+        }
     }
 
     #[test]
