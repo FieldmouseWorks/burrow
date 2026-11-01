@@ -608,6 +608,11 @@ assert "gh run list --branch main" in JOBS[0] and "with no PR" in JOBS[0], JOBS[
 # green, someone may have opened a fix, or the same fix may have landed.
 assert "Just before you push, check both again" in JOBS[0] and "git diff origin/main is empty" in JOBS[0], JOBS[0]
 assert "starts autoland/red-" in JOBS[0] and "if GitHub has one of that name already" in JOBS[0], JOBS[0]
+# A PR it counts as a fix under way is one the watcher counts: ready, from
+# the repo itself, by one of the steward's authors. Anyone can open one
+# from a fork, and it mustn't stop the job.
+assert "isDraft,isCrossRepository,author" in JOBS[0] and "opened by one of sam, app/dependabot, app/renovate, app/workers" in JOBS[0], JOBS[0]
+assert "One from a fork, a draft, or anyone else's doesn't count" in JOBS[0], JOBS[0]
 assert R.watch_default(repo_r, default("FAILURE"), [], mine) == {}
 assert len(JOBS) == 1, JOBS  # still running
 STATES["job-1"] = "done"
@@ -648,11 +653,17 @@ assert len(JOBS) == 3 and mine == [], (JOBS, mine)
 # While CI on main runs (a fix landed, so main moved on), every fix waits
 # for it to say, its job at work or not: one landing now could land on top
 # of the fix that made it green. Then red, they go on; nothing is closed.
+# (step.handle holds one too if main moves on after this read: landed.py.)
 WROTE.clear()
 fixes = [mkpr(branch="autoland/red-cccccccccccc", number=9), mkpr(branch="autoland/red-dddddddddddd", number=8)]
 assert R.watch_default(repo_r, default("PENDING", sha="e" * 40), fixes, mine) == {9: WAIT, 8: WAIT}
 STATES[f"job-{len(JOBS)}"] = "done"
 assert R.watch_default(repo_r, default("PENDING", sha="e" * 40), fixes, mine) == {9: WAIT, 8: WAIT}
+# So they do on any word but red or green: a check expected and not there
+# yet, or none at all on the tip.
+assert R.watch_default(repo_r, default("EXPECTED", sha="e" * 40), fixes, mine) == {9: WAIT, 8: WAIT}
+unsaid = {"defaultBranchRef": {"name": "main", "target": {"oid": "e" * 40, "statusCheckRollup": None}}}
+assert R.watch_default(repo_r, unsaid, fixes, mine) == {9: WAIT, 8: WAIT}
 assert R.watch_default(repo_r, default("FAILURE", sha="e" * 40), fixes, mine) == {}
 assert WROTE == [] and len(JOBS) == 3 and C.load("repo-sam_r.json", {}).get("red"), (WROTE, JOBS)
 STATES[f"job-{len(JOBS)}"] = "running"

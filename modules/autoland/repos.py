@@ -16,7 +16,7 @@ import reviewers as V
 import train as T
 from common import CFG, CONTEXT, DRY, load, log, repo_cfg, save
 from prs import PROOF_SLOT, RELEASE_AGE, REVIEWER
-from tasks import RED_BRANCH, red_default_task
+from tasks import RED_BRANCH, red_default_task, red_fix
 
 # What a project's state says when GitHub had no such repo at its last look.
 GONE = "gone"
@@ -438,10 +438,12 @@ def watch_default(r, info, prs, digest):
     cause and opens a PR from RED_BRANCH that reverts or fixes it, which
     lands like any other. Nothing more while that job works or a fix is
     open; a second job if it's still red after (seen on two passes), then
-    the owner. A fix lands only while the branch is red: while CI on it is
-    still running (the branch moved on: a fix landed, say), a fix waits for
-    it to say, and once it's green again a fix isn't needed and is closed.
-    Returns the fixes this pass mustn't merge, each with why."""
+    the owner. A fix lands only while CI says the branch is red: while it
+    says nothing yet (the branch moved on, a fix landed, say, and its CI is
+    running) a fix waits, and once it's green again a fix isn't needed and
+    is closed. Returns the fixes this pass mustn't merge, each with why;
+    step.handle holds the rest too if the branch has moved on since this
+    read it (a merge earlier in this very pass)."""
     repo, default = r["repo"], r["default"]
     target = (info.get("defaultBranchRef") or {}).get("target") or {}
     sha, state = target.get("oid"), (target.get("statusCheckRollup") or {}).get("state")
@@ -449,20 +451,15 @@ def watch_default(r, info, prs, digest):
     st = load(key, {})
     red = st.get("red") or {}
     working = red.get("job") and C.job_state(red["job"]) in (None, "queued", "running")
-    # The fixes: PRs from one of the steward's own authors to this branch,
-    # from a branch named for a red it was (RED_BRANCH and the commit):
-    # its jobs', and anyone's of its own who fixed it under that name, as
-    # house/prs.md asks. Anyone can open a PR from a branch of that name on
-    # a fork, and that one is nothing of the steward's.
-    fixes = [pr for pr in prs if pr["headRefName"].startswith(RED_BRANCH)
-             and pr["baseRefName"] == default and C.acted_on(pr)]
-    if state == "PENDING":
-        # CI on the branch is under way: it may have gone green since it was
-        # red. A fix waits for it to say, or one could land on top of the fix
-        # that made it green, which a revert would undo.
+    fixes = [pr for pr in prs if red_fix(pr, default)]
+    if state not in ("FAILURE", "ERROR", "SUCCESS"):
+        # CI on the branch hasn't said (it's running, or has nothing on the
+        # tip): it may have gone green since it was red. A fix waits for it,
+        # or one could land on top of the fix that made it green, and a
+        # revert would undo that.
         return {pr["number"]: f"Waiting for CI on {default}: it lands only while {default} is red" for pr in fixes}
-    if state not in ("FAILURE", "ERROR"):
-        if state != "SUCCESS" or not (red or fixes):
+    if state == "SUCCESS":
+        if not (red or fixes):
             return {}
         gone = f"Not needed: {default} is green again without it"
         # Green while its job still works: wait for the job to end, so a PR

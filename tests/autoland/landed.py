@@ -1,13 +1,16 @@
 """A PR whose merge would change nothing on its base is closed as landed,
 never merged: its head merged into the base's tip has the tip's own tree,
 because another PR made the same change (two fixes for a red main, say).
-adds_nothing reads that from the steward's mirror, fetched from the repo's
-real remote here; handle() closes such a PR with a comment, and leaves a
-dependency bot's to its bot."""
+onto reads that from the steward's mirror, fetched from the repo's real
+remote here; handle() closes such a PR with a comment, and leaves a
+dependency bot's to its bot, never clearing it to merge. A fix for red main
+lands only on the tip the pass saw red."""
 
-from harness import ALREADY, REAL, WROTE, clean, fresh_pr_state, merged, mkpr, pr_state, run, sh, stand_in, tmp
+from harness import ALREADY, REAL, TIP, WROTE, S, clean, cn, cn_runs, fresh_pr_state, info, merged, mkpr, pr_state, run, sh, \
+    stand_in, tmp
 
 import reviewers as V
+import train as T
 
 stand_in()
 
@@ -51,47 +54,47 @@ clash = commit("clash", **{"agents.nix": "packages.burrow-something\n"})
 for n, rev in ((1, fix_a), (2, fix_b), (3, more), (4, clash)):
     pull(n, rev)
 kept_origin, V.ORIGIN = V.ORIGIN, f"{origin}/{{}}.git"
-adds_nothing = REAL["adds_nothing"]
+onto = REAL["onto"]
 
 
 def pr(n, rev):
     return {"number": n, "headRefOid": rev, "baseRefName": "main"}
 
 
-# While main is red, every fix adds something.
+# While main is red, every fix adds something to it.
 for n, rev in ((1, fix_a), (2, fix_b), (3, more), (4, clash)):
-    assert adds_nothing("sam/r", pr(n, rev)) is None, n
-# The first fix lands (a squash of it): the second one now adds nothing,
-# and says what main's tip has it. The others still change something,
-# the one that clashes with it included (its merge conflicts).
+    assert onto("sam/r", pr(n, rev)) == (red, False), n
+# The first fix lands (a squash of it): the second one now adds nothing on
+# main's new tip. The others still change something, the one that clashes
+# with it included (its merge conflicts).
 sh("git", "checkout", "-q", "main", cwd=work)
 landed = commit("fix a, squashed", **{"agents.nix": "packages.burrow-agent\n"})
 sh("git", "push", "-q", remote, "main", cwd=work)
-assert adds_nothing("sam/r", pr(2, fix_b)) == landed
-assert adds_nothing("sam/r", pr(3, more)) is None
-assert adds_nothing("sam/r", pr(4, clash)) is None
+assert onto("sam/r", pr(2, fix_b)) == (landed, True)
+assert onto("sam/r", pr(3, more)) == (landed, False)
+assert onto("sam/r", pr(4, clash)) == (landed, False)
 # Its merge is read onto main as it is: one that adds nothing there adds
 # nothing after main moves on with something else too.
 later = commit("later", **{"third.txt": "x\n"})
 sh("git", "push", "-q", remote, "main", cwd=work)
-assert adds_nothing("sam/r", pr(2, fix_b)) == later
+assert onto("sam/r", pr(2, fix_b)) == (later, True)
 # A head already in main (pushed there as it is) adds nothing too.
 pull(5, landed)
-assert adds_nothing("sam/r", pr(5, landed)) == later
-# A PR that moved past the head the pass read: no word, and GitHub refuses
-# that head's merge anyway.
+assert onto("sam/r", pr(5, landed)) == (later, True)
+# A PR that moved past the head the pass read changes something: GitHub
+# refuses that head's merge anyway.
 pull(2, more)
-assert adds_nothing("sam/r", pr(2, fix_b)) is None
+assert onto("sam/r", pr(2, fix_b)) == (later, False)
 pull(2, fix_b)
-# git that can't fetch it raises: the steward can't tell, so it can't land.
+# git that can't fetch it raises: the steward can't tell, so nothing lands.
 V.ORIGIN = f"{tmp}/no-such-origin/{{}}.git"
 try:
-    adds_nothing("sam/r", pr(2, fix_b))
+    onto("sam/r", pr(2, fix_b))
     raise AssertionError("a fetch that fails said something")
 except RuntimeError as e:
     assert "git -C" in str(e), e
 V.ORIGIN = kept_origin
-print("adds nothing: ok")
+print("onto: ok")
 
 # handle(): a settled PR whose merge would add nothing is closed, saying
 # so, and never merged; its status says why.
@@ -102,23 +105,66 @@ assert not merged(), WROTE
 assert "state=pending" in status and f"Already landed: main at {later[:7]} already has everything it changes; closing it" in status, status
 closes = [x for x in WROTE if x.startswith("pr close 5 -R sam/r --comment ")]
 assert len(closes) == 1 and f"Closed without merging: main at {later[:7]} already has everything it changes" in closes[0], WROTE
-assert "strikes" not in pr_state() or not pr_state()["strikes"], pr_state()
+assert not pr_state().get("strikes"), pr_state()
 # Behind a base whose rules want it up to date, it isn't brought up to date
 # first: the merge of main into it would change nothing either.
 fresh_pr_state()
 status, _ = run({**clean(), "mergeStateStatus": "BEHIND"}, 900)
 assert not any("/update-branch" in x for x in WROTE) and any(x.startswith("pr close 5") for x in WROTE), WROTE
-# A dependency bot's is left to its bot, which closes its own: closed under
-# it, it's an update the bot ignores from then on.
+# In a repo with its train on, it doesn't join the train either.
+S.CFG["repos"]["sam/r"] = {"train": True}
 fresh_pr_state()
-bump = {"branch": "dependabot/npm/foo-1", "title": "Bump foo from 1.4 to 1.5", "number": 13}
-ALREADY[13] = later
-status, _ = run(mkpr(**bump), 900)
-assert not merged() and not any(x.startswith("pr close") for x in WROTE), WROTE
-assert "Already landed" in status and "its bot closes it" in status, status
-# One that adds something is merged as before.
+cn()
+T.begin("sam/r")
+run(clean(), 900)
+assert not any(a[:2] == ["train", "join"] for a in cn_runs()) and any(x.startswith("pr close 5") for x in WROTE), (cn_runs(), WROTE)
+del S.CFG["repos"]["sam/r"]
+cn()
+# A dependency bot's is left to its bot, which closes its own: closed under
+# it, it's an update the bot ignores from then on. That's so for one the
+# steward would merge (Dependabot's) and one it would only clear for
+# Renovate to merge: it isn't cleared.
+for bump in ({"branch": "dependabot/npm/foo-1", "title": "Bump foo from 1.4 to 1.5", "number": 13},
+             {"branch": "renovate/foo-1.x", "title": "deps: update foo to v1.5", "number": 14}):
+    fresh_pr_state()
+    ALREADY[bump["number"]] = later
+    status, _ = run(mkpr(**bump), 900)
+    assert not merged() and not any(x.startswith("pr close") for x in WROTE), (bump, WROTE)
+    assert "state=pending" in status and "Already landed" in status and "its bot closes it" in status, (bump, status)
+    # Nor is one whose merge git can't work out.
+    ALREADY[bump["number"]] = RuntimeError("git fetch: no network")
+    status, _ = run(mkpr(**bump), 1000)
+    assert not merged() and "state=pending" in status and "can't be worked out" in status, (bump, status)
 ALREADY.clear()
+# One that adds something is merged as before, or cleared for Renovate.
 fresh_pr_state()
 run(clean(), 900)
 assert merged() and not any(x.startswith("pr close") for x in WROTE), WROTE
+fresh_pr_state()
+status, _ = run(mkpr(branch="renovate/foo-1.x", title="deps: update foo to v1.5", number=14), 900)
+assert "state=success" in status and "Dependency update, CI green" in status, status
 print("landed: ok")
+
+# A fix for red main lands only on the tip the pass saw red: one that moved
+# on since (a merge earlier in this very pass, or anyone's push) has no word
+# from CI yet, so it waits for it, by the steward or its train.
+red_info = {**info, "defaultBranchRef": {"name": "main", "target": {"oid": "f" * 40, "statusCheckRollup": {"state": "FAILURE"}}}}
+kept_info = dict(info)
+info.update(red_info)
+fix = {"branch": "autoland/red-cccccccccccc"}
+fresh_pr_state()
+TIP["v"] = "e" * 40
+status, _ = run(clean(**fix), 900)
+assert not merged() and "state=pending" in status and "lands only while main is red" in status, (status, WROTE)
+# Any other PR merges onto the moved tip as before: only a red fix waits.
+fresh_pr_state()
+run(clean(), 900)
+assert merged(), WROTE
+# On the tip it saw red, the fix lands.
+TIP["v"] = "f" * 40
+fresh_pr_state()
+run(clean(**fix), 900)
+assert merged(), WROTE
+info.clear()
+info.update(kept_info)
+print("red fixes on the tip seen red: ok")

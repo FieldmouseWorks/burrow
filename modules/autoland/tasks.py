@@ -167,6 +167,22 @@ def proof_task(repo, pr, checks, proofs):
 RED_BRANCH = "autoland/red-"
 
 
+def red_fix(pr, default):
+    """Whether the PR is a fix for a red default branch: one from one of the
+    steward's own authors to it, from a branch named for a red it was
+    (RED_BRANCH and the commit): its jobs', and anyone's of its own who
+    fixed it under that name, as house/prs.md asks. Anyone can open a PR
+    from a branch of that name on a fork, and that one is nothing of the
+    steward's; nor is a draft."""
+    return pr["headRefName"].startswith(RED_BRANCH) and pr["baseRefName"] == default and C.acted_on(pr)
+
+
+def fixers():
+    """Who a fix counts from, as a job reads a PR's author from gh: a person
+    by login, an App as app/SLUG."""
+    return ", ".join([*CFG["authors"], *(f"app/{b}" for b in CFG["bots"])])
+
+
 def red_default_task(repo, branch, sha):
     # Done first and again just before the push: the red may have been fixed
     # meanwhile, or someone else may be fixing it.
@@ -174,9 +190,10 @@ def red_default_task(repo, branch, sha):
              f"gh run list --branch {branch}): if the newest run of the checks that failed has passed since, it's been fixed "
              "or was a flake, so stop there, with no PR; if it's still running, wait for it in the foreground (gh run watch RUN_ID, "
              "in steps under ten minutes each); if it failed, go on, from the tip. "
-             f"(2) If an open PR to {branch} comes from a branch whose name starts {RED_BRANCH} "
-             f"(gh pr list -R {repo} --base {branch} --state open --json number,headRefName), someone is fixing it already: "
-             "stop there, with no PR. ")
+             f"(2) If an open PR to {branch} that isn't a draft comes from a branch of {repo} itself whose name starts "
+             f"{RED_BRANCH}, opened by one of {fixers()} (gh pr list -R {repo} --base {branch} --state open "
+             "--json number,headRefName,isDraft,isCrossRepository,author), someone is fixing it already: stop there, with no PR. "
+             "One from a fork, a draft, or anyone else's doesn't count: go on. ")
     return (
         f"The default branch {branch} of {repo} is red: CI failed on {sha}, and every open PR is built on it. "
         f"Before anything else, check that it still needs you. {still}"

@@ -439,22 +439,24 @@ def fresh_pr_state():
 
 
 REAL = {"job": C.job, "stop_job": C.stop_job, "forget_issues": C.forget_issues, "app_hook": R.app_hook,
-        "adds_nothing": H.adds_nothing}  # the steward's own, for the checks of what it runs
-ALREADY = {}  # the base's tip a PR's merge would change nothing on (H.adds_nothing), by number, or what it raises
+        "onto": H.onto}  # the steward's own, for the checks of what it runs
+# What H.onto says: the base's tip a PR's merge would change nothing on, by
+# number, or what it raises; any other's changes something on TIP's tip.
+ALREADY, TIP = {}, {"v": "f" * 40}
 
 
-def already(repo, pr):
+def onto(repo, pr):
     got = ALREADY.get(pr["number"])
     if isinstance(got, Exception):
         raise got
-    return got
+    return (got, True) if got else (TIP["v"], False)
 
 
 def stand_in():
     """gh, Claude jobs, the queue, the posting, the App's webhook and what a
     merge would change (every merge changes something unless ALREADY says),
     for handle() and the passes."""
-    H.adds_nothing = already
+    H.onto = onto
     C.gh = gh_stub
     C.write = write
     C.job = job
