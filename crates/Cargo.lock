@@ -190,6 +190,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "burrow-robot"
+version = "0.0.0"
+dependencies = [
+ "base64",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "ureq",
+]
+
+[[package]]
 name = "burrow-rustc-wrapper"
 version = "0.0.0"
 dependencies = [
