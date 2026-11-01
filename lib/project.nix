@@ -113,8 +113,10 @@ let
           lib.any (p: rel == p || lib.hasPrefix "${p}/" rel || (type == "directory" && lib.hasPrefix "${rel}/" p))
             ([ rustCfg.dir ] ++ rustCfg.include);
       };
-      cargoLock = rustDir + "/Cargo.lock";
-      cargoToml = rustDir + "/Cargo.toml";
+      # Each file alone: a flake's self is a store path, and a path into it
+      # would make every check depend on the whole repo.
+      cargoLock = builtins.path { path = rustDir + "/Cargo.lock"; name = "Cargo.lock"; };
+      cargoToml = builtins.path { path = rustDir + "/Cargo.toml"; name = "Cargo.toml"; };
       postUnpack = ''
         cd "$sourceRoot"/${lib.escapeShellArg rustCfg.dir}
         sourceRoot=.
