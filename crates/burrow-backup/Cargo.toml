@@ -1,0 +1,18 @@
+[package]
+name = "burrow-backup"
+description = "HOST-backup: each new ZFS snapshot off the box through restic, and the daily drill that restores it"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+jiff.workspace = true
+rustix = { version = "1.1.6", features = ["fs", "process"] }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

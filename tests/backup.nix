@@ -169,7 +169,7 @@ pkgs.testers.runNixOSTest {
         machine.succeed("chattr +i /var/lib/burrow/backup")
         machine.fail("systemctl start machine-backup")
         machine.succeed("chattr -i /var/lib/burrow/backup")
-        machine.succeed("journalctl -u machine-backup | grep -F 'chmod 700 \"$state\" exited 1'")
+        machine.succeed("journalctl -u machine-backup | grep -F \"/var/lib/burrow/backup: Operation not permitted (os error 1), so its state can't be kept private\"")
         told_owner(n)
 
     with subtest("the next snapshot sends only what changed, and the hold moves to it"):

@@ -57,6 +57,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "burrow-backup"
+version = "0.0.0"
+dependencies = [
+ "jiff",
+ "rustix",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+]
+
+[[package]]
 name = "burrow-browser-close"
 version = "0.0.0"
 dependencies = [
