@@ -837,3 +837,106 @@ fn a_branch_an_earlier_run_left_is_started_over() {
     assert_eq!(moved.2, Some(json!({"sha": "c0ffee", "force": true})));
     assert_eq!(ran.wrote(), ["sam/a"]);
 }
+
+/// The repo that holds house/ itself, as burrow's does.
+fn source_repo(agents: &str, rules: &str, prs: &str) -> Repo {
+    let mut r = repo("sam/a", Some(agents));
+    r.source = vec![
+        ("rules.md".into(), rules.into()),
+        ("prs.md".into(), prs.into()),
+    ];
+    r.prs = vec![(7, "house/rules-0ther".into(), false)];
+    r
+}
+
+#[test]
+fn a_pass_never_takes_out_blocks_newer_than_the_systems_from_their_own_repo() {
+    // A merge to burrow, before the switch: its house/ and its AGENTS.md have
+    // blocks the system doesn't yet, in either file, or its AGENTS.md is stale.
+    let newer_prs = prs().replace("never as drafts", "never, ever, as drafts");
+    let newer_rules = rules().replace("These hold in every repo.", "These hold everywhere.");
+    assert!(newer_prs != prs() && newer_rules != rules());
+    for (agents, source_rules, source_prs) in [
+        (
+            current().replace(&prs(), &newer_prs),
+            rules(),
+            newer_prs.clone(),
+        ),
+        (
+            current().replace(&rules(), &newer_rules),
+            newer_rules.clone(),
+            prs(),
+        ),
+        (stale(), rules(), newer_prs.clone()),
+        // Its AGENTS.md still the system's: the cleanup path is held back too.
+        (current(), rules(), newer_prs.clone()),
+    ] {
+        let repos = [source_repo(&agents, &source_rules, &source_prs)];
+        for only in [Some("sam/a"), None] {
+            let ran = sync(&repos, only);
+            assert_eq!(ran.ok, Ok(true));
+            assert!(ran.wrote().is_empty(), "{:?}", ran.asked);
+            assert!(
+                ran.asked.iter().all(|(m, _, _)| m == "GET"),
+                "{:?}",
+                ran.asked
+            );
+            assert!(ran.out.contains("isn't this system's"), "{}", ran.out);
+            assert!(!ran.notices().contains(&["open", "house-sync"]));
+        }
+        // status says the same, and changes nothing.
+        let dry = Ask {
+            dry: true,
+            only: Some("sam/a"),
+        };
+        let ran = run_with(&repos, &dry, &setup(), Arc::default());
+        assert!(!ran.out.contains("would open"), "{}", ran.out);
+        assert!(!ran.out.contains("would close"), "{}", ran.out);
+        assert!(ran.out.contains("isn't this system's"), "{}", ran.out);
+    }
+}
+
+#[test]
+fn the_repo_that_holds_the_blocks_gets_its_pr_once_the_system_has_them() {
+    let repos = [source_repo(&stale_prs(), &rules(), &prs())];
+    let ran = sync(&repos, Some("sam/a"));
+    assert_eq!(ran.ok, Ok(true));
+    assert_eq!(ran.wrote(), ["sam/a"]);
+    assert_eq!(ran.written()["sam/a"], current());
+}
+
+#[test]
+fn the_repo_that_holds_the_blocks_has_older_prs_closed_once_the_system_has_them() {
+    let ran = sync(&[source_repo(&current(), &rules(), &prs())], Some("sam/a"));
+    assert_eq!(ran.ok, Ok(true));
+    assert_eq!(ran.closed().len(), 1, "{:?}", ran.asked);
+    // Read at the snapshot the rest of the pass works from.
+    assert!(
+        ran.asked
+            .iter()
+            .any(|(_, p, _)| p.ends_with("/contents/house/prs.md?ref=c0ffee"))
+    );
+}
+
+#[test]
+fn a_source_it_cant_read_fails_the_repo_rather_than_opening_a_pr() {
+    // Stale, or current so that only the cleanup is left: nothing changes.
+    for agents in [stale_prs(), current()] {
+        let mut broken = source_repo(&agents, &rules(), "unused");
+        broken.source_fails = true;
+        let ran = sync(&[broken.clone()], Some("sam/a"));
+        assert_eq!(ran.ok, Ok(false));
+        assert!(
+            ran.asked.iter().all(|(m, _, _)| m == "GET"),
+            "{:?}",
+            ran.asked
+        );
+        let ran = sync(&[broken], None);
+        assert!(
+            ran.asked.iter().all(|(m, _, _)| m == "GET"),
+            "{:?}",
+            ran.asked
+        );
+        assert!(ran.notices().contains(&["open", "house-sync"]));
+    }
+}

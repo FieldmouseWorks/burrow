@@ -29,6 +29,10 @@ pub struct Repo {
     /// A branch of the house PR's name is there already.
     pub branch_left: bool,
     pub agents: Option<String>,
+    /// Files under its own house/, by name, as burrow's repo has them.
+    pub source: Vec<(String, String)>,
+    /// Reading its house/ gets a server error.
+    pub source_fails: bool,
     /// Open PRs: number, head branch, whether that's in a fork.
     pub prs: Vec<(u64, String, bool)>,
     /// The ones it may not close.
@@ -44,6 +48,8 @@ pub fn repo(name: &str, agents: Option<&str>) -> Repo {
         fails: Fails::No,
         branch_left: false,
         agents: agents.map(String::from),
+        source: vec![],
+        source_fails: false,
         prs: vec![],
         stuck: vec![],
     }
@@ -139,6 +145,15 @@ impl Api for GitHub {
                 }
             },
             ("PUT", ["contents", "AGENTS.md"]) => answer(200, json!({}), None),
+            ("GET", ["contents", "house", _]) if r.source_fails => {
+                answer(500, json!({"message": "Server Error"}), None)
+            }
+            ("GET", ["contents", "house", file]) => {
+                match r.source.iter().find(|(name, _)| name == file) {
+                    None => answer(404, json!({"message": "Not Found"}), None),
+                    Some((_, text)) => answer(200, json!({"content": STANDARD.encode(text)}), None),
+                }
+            }
             ("GET", ["pulls"]) => {
                 assert!(query.contains("state=open"), "{path}");
                 let page: usize = query

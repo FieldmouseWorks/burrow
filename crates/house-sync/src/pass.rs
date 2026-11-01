@@ -203,6 +203,19 @@ impl Pass<'_> {
             }
             Rewritten::Text(text) => text,
         };
+        // The repo that holds house/ itself: a merge there reaches its default
+        // branch before this system has it, and a PR now would take those
+        // blocks back out of its AGENTS.md, and a close would be for blocks this
+        // system is about to replace. The pass after the switch has them.
+        for block in &self.house.blocks {
+            let source = format!("house/{}.md", block.name);
+            if github::file(self.api, name, &source, &sha)?.is_some_and(|text| text != block.text) {
+                self.say(&format!(
+                    "{name}: its own {source} isn't this system's; the pass for that one does the work"
+                ));
+                return Ok(());
+            }
+        }
         let open = github::open_prs(self.api, name)?;
         let rev = self.house.rev.clone();
         if text == agents {
