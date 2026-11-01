@@ -129,6 +129,13 @@
   # What a dashboard's Repository Problems lists under the example's
   # config, by Renovate's own logger: not the refresh it was told to take
   # without a release timestamp, but still a warning that's a problem.
+  # A lock file refresh that changes nothing commits nothing, by Renovate's own
+  # cargo manager (modules/updates/renovate-package.nix).
+  renovate-cargo-unchanged = pkgs.runCommand "renovate-cargo-unchanged-check" { } ''
+    export HOME=$TMPDIR
+    LOG_LEVEL=fatal ${pkgs.lib.getExe pkgs.nodejs_24} ${./renovate-cargo-unchanged.mjs} ${import ../modules/updates/renovate-package.nix pkgs}
+    touch $out
+  '';
   renovate-problems = pkgs.runCommand "renovate-problems-check" { } ''
     export HOME=$TMPDIR
     got=$(LOG_LEVEL=fatal ${pkgs.lib.getExe pkgs.nodejs_24} ${./renovate-problems.mjs} ${pkgs.renovate} \
