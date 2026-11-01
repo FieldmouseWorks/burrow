@@ -102,6 +102,22 @@ def open_prs(owner, name):
     return info, prs
 
 
+def has_ci(pr, proofs=()):
+    """Whether CI checks the head: a check run, or a status that's neither
+    ours, the merge train's, nor one of proofs (the checks a Claude job runs
+    on a machine, which ci_state counts as pending before they've run), or
+    a workflow GitHub couldn't start. A fix job's push gets the whole gate
+    there, or else only from the job."""
+    nodes = pr["commits"]["nodes"]
+    commit = nodes[0]["commit"] if nodes else {}
+    contexts = ((commit.get("statusCheckRollup") or {}).get("contexts") or {}).get("nodes", [])
+    suites = (commit.get("checkSuites") or {}).get("nodes", [])
+    theirs = {p.lower() for p in proofs} | {CONTEXT.lower()}
+    return any(s["conclusion"] == "STARTUP_FAILURE" for s in suites) or any(
+        c["__typename"] == "CheckRun" or (c["context"].lower() not in theirs and not c["context"].startswith(T.CONTEXT))
+        for c in contexts)
+
+
 def ci_state(pr, proofs=(), moved=None, repo=None):
     """green / pending / red / none (no checks at all) over every check on
     the head except ours, the names of the ones that aren't green, and

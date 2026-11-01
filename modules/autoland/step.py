@@ -33,7 +33,7 @@ from common import CFG, DEP_RE, DRY, MIN, load, log, repo_cfg, save, ts
 from seal import MAJOR as MAJOR_VERDICT  # renovate-sweep's, on a Renovate major
 from touches import automerges, bot_edited, dep_kind, gate_edit, moved_from, one_way
 from tasks import DEP_SEEN, PAST_LIMIT, REVIEWED, fix_task, judge_task, judged_on, judgment, owed, proof_task, red_fix
-from prs import MERGE_STEPS, PROOF_SLOT, RELEASE_AGE, REVIEWER, ci_state, eyes, land, onto, our_status, post_status, show_waiting
+from prs import MERGE_STEPS, PROOF_SLOT, RELEASE_AGE, REVIEWER, ci_state, eyes, has_ci, land, onto, our_status, post_status, show_waiting
 
 # The link Claude Code puts in a PR its session opens.
 SESSION = re.compile(r"https://claude\.ai/code/session_\w+")
@@ -799,7 +799,7 @@ def handle(repo, pr, repo_info, digest, held=None):
     # (docs only), that's not green: nothing has tested it, so a judge job
     # runs the build and tests itself. One the train lands, the train's CI
     # is what tests it, merged onto the default branch.
-    tested = ci != "none" or by_train  # what a fix job pushes: CI tests it, or only the job does
+    tested = by_train or has_ci(pr, machine)  # what a fix job pushes: CI tests it, or only the job does
     if ci == "none" and (not rc["requireCi"] or by_train):
         ci = "green"
     open_threads = sum(1 for t in pr["reviewThreads"]["nodes"] if not t["isResolved"])

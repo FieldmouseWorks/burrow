@@ -51,7 +51,8 @@ def handed(st, kind, jid, pr):
 def look(repo, pr, st, tag, strike, cleared, after):
     """Each fix job the PR handed out that's over: what it left, posted, or
     why not. One still at work on a head someone else moved past is
-    stopped. The PR's status when the pass is to stop here, or None:
+    stopped (one proj won't stop is left to stopping.py, as a new head's
+    jobs are). The PR's status when the pass is to stop here, or None:
     answers went up (what it read of the PR is stale; a pass is booked for
     now), or GitHub turned them away (tried again on a later pass, a strike
     each time, and nothing else is handed out meanwhile). Why a job's
@@ -66,9 +67,16 @@ def look(repo, pr, st, tag, strike, cleared, after):
         state = C.job_state(jid)
         if state in (None, "queued", "running"):
             if rec["head"] != pr["headRefOid"] and stale(repo, pr, st, jid, state, rec, after):
+                why = stale_why(pr, state, st)
                 if C.stop_job(jid):
-                    log(f"{tag}: stopped Claude job {jid}: {stale_why(pr, state, st)}")
-                    jobs.pop(jid)
+                    log(f"{tag}: stopped Claude job {jid}: {why}")
+                else:
+                    # Kept for stopping.stop to try again each pass, a
+                    # strike each time it can't, as a new head's jobs are.
+                    log(f"{tag}: couldn't stop Claude job {jid}, though {why}")
+                    st["stopping"] = list(dict.fromkeys(st.get("stopping", []) + [jid]))
+                    strike("stop")
+                jobs.pop(jid)
             continue
         try:
             with open(answers_file(jid)) as f:

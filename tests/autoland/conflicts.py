@@ -189,6 +189,15 @@ for pr, rerun in ((clean(threads=[False]), False), (clean(checks=red), False), (
     targeted(JOBS[0])
     assert ("Rerun it that way" in JOBS[0]) == rerun, JOBS
     STATES.clear()
+# A proof isn't CI: a PR only a proof checks has only the job to run its
+# tests, whether its proof has reported or not, and however it went.
+for proof in (None, "PENDING", "SUCCESS", "FAILURE"):
+    checks = [{"__typename": "StatusContext", "context": "remi-proof", "state": proof, "description": ""}] if proof else []
+    fresh_pr_state()
+    run(clean(threads=[False], checks=checks), 0)
+    run(clean(threads=[False], checks=checks), 7200)
+    assert len(JOBS) == 1 and "it has no CI to run them." in JOBS[0] and "whole gate" not in JOBS[0], (proof, JOBS)
+    STATES.clear()
 proving = S.CFG["repos"].pop("sam/r")
 fresh_pr_state()
 run(clean(threads=[False], checks=[]), 0)
