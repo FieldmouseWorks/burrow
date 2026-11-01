@@ -667,32 +667,62 @@ jobs:
             evals=$work/evals
             mkdir "$roots" "$evals"
             # Free to this job: the machine's available memory, or less where
-            # a cgroup it's in, or one above that, has a memory limit (a proj
-            # job's or a Claude server's MemoryMax, a container's): what the
-            # limit leaves, counting as free the inactive page cache the
-            # kernel gives back first. cgroup v2's limits, and v1's memory
-            # controller's; CGROUP_FS is where they're mounted
-            # (/sys/fs/cgroup; a test's stand-in tree).
+            # its memory cgroup, or one above that, has a limit (a proj job's
+            # or a Claude server's MemoryMax, a container's): what the limit
+            # leaves, counting as free the inactive page cache the kernel
+            # gives back first. The cgroup is v1's memory controller's when
+            # the job has one, cgroup v2's otherwise, found where it's
+            # mounted, however that is (with other v1 controllers, a subtree
+            # of the hierarchy); none mounted, its limit is unknown, so one
+            # evaluation at a time. CGROUP_PROC is where the job's cgroups
+            # and mounts are read from (/proc/self; a test's stand-in).
             free=$(( $(awk '$1 == "MemAvailable:" { print $2 }' /proc/meminfo) * 1024 ))
-            cgroups=${CGROUP_FS:-/sys/fs/cgroup}
-            # The cgroup at PATH in the hierarchy in DIR and each above it,
-            # by the files with its limit (none past 2^62) and what it
-            # holds, and memory.stat's key for its inactive page cache.
-            limits() {
-              local dir=$1 cgroup=${2%/} max=$3 held=$4 cache=$5 at limit left
+            proc=${CGROUP_PROC:-/proc/self}
+            kind='' at='' top=''
+            if [ -r "$proc/cgroup" ]; then
+              # The hierarchy, the job's cgroup's directory in it, and the
+              # mount's; or the hierarchy and "-" when none's mounted.
+              read -r kind at top < <(awk '
+                FILENAME == ARGV[1] {
+                  controllers = $0; sub(/^[^:]*:/, "", controllers)
+                  path = controllers; sub(/:.*/, "", controllers); sub(/^[^:]*:/, "", path)
+                  if (("," controllers ",") ~ /,memory,/) { kind = "v1"; job = path }
+                  else if (controllers == "" && kind == "") { kind = "v2"; job = path }
+                  next
+                }
+                {
+                  for (i = 7; i < NF && $i != "-"; i++) { }
+                  if (kind == "v2" && $(i + 1) != "cgroup2") next
+                  if (kind == "v1" && ($(i + 1) != "cgroup" || ("," $(i + 3) ",") !~ /,memory,/)) next
+                  root = $4 == "/" ? "" : $4
+                  if (job != root && index(job, root "/") != 1) next
+                  print kind, $5 substr(job, length(root) + 1), $5
+                  found = 1
+                  exit
+                }
+                END { if (kind != "" && !found) print kind, "-" }
+              ' "$proc/cgroup" "$proc/mountinfo") || true
+            fi
+            case $kind in
+              v1) max=memory.limit_in_bytes held=memory.usage_in_bytes cache=total_inactive_file ;;
+              v2) max=memory.max held=memory.current cache=inactive_file ;;
+            esac
+            if [ "$at" = - ]; then
+              echo "this job's memory cgroup ($kind) isn't mounted here, so its limit is unknown: one evaluation at a time"
+              free=0
+            elif [ -n "$kind" ]; then
+              # The job's cgroup and each above it to the mount's, each
+              # limit (none past 2^62, v1's "none") less what it holds.
+              at=${at%/}
               while :; do
-                at=$dir$cgroup
                 if [ -r "$at/$max" ] && limit=$(cat "$at/$max") && [ "$limit" != max ] && [ "$limit" -lt $(( 1 << 62 )) ]; then
                   left=$(( limit - $(cat "$at/$held") + $(awk -v k="$cache" '$1 == k { print $2 }' "$at/memory.stat") ))
                   [ "$left" -ge "$free" ] || free=$left
                 fi
-                [ -n "$cgroup" ] || break
-                cgroup=${cgroup%/*}
+                [ -n "$at" ] && [ "$at" != "${top%/}" ] || break
+                at=${at%/*}
               done
-            }
-            limits "$cgroups" "$(sed -n 's/^0:://p' /proc/self/cgroup)" memory.max memory.current inactive_file
-            limits "$cgroups/memory" "$(sed -n 's/^[0-9]*:\([^:]*,\)\{0,1\}memory\(,[^:]*\)\{0,1\}:\(.*\)/\3/p' /proc/self/cgroup)" \
-              memory.limit_in_bytes memory.usage_in_bytes total_inactive_file
+            fi
             side=$(nproc)
             room=$(( free / 2147483648 ))
             [ "$room" -ge "$side" ] || side=$room

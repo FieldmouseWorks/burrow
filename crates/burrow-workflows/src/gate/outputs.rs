@@ -93,85 +93,144 @@ fn outputs_are_evaluated_side_by_side() {
     assert_eq!(most, Some(side(&r.out).min(6)), "{}", r.out);
 }
 
-/// In a cgroup with a memory limit, only as many side by side as the limit
-/// leaves room for, however much the machine has free: here 2G (3G, less
-/// the 2G the cgroup holds, 1G of it inactive page cache), so one at a time.
-#[test]
-fn side_by_side_stays_within_a_cgroups_memory_limit() {
-    under_a_limit(Cgroups::V2);
-}
-
-/// The same under cgroup v1's memory controller, whose "no limit" is a
-/// number.
-#[test]
-fn side_by_side_stays_within_a_v1_memory_limit() {
-    under_a_limit(Cgroups::V1);
-}
-
-enum Cgroups {
-    V1,
-    V2,
-}
-
-fn under_a_limit(v: Cgroups) {
+/// What the gate makes of a stand-in for its job's cgroups: CGROUP is
+/// /proc/self/cgroup, MOUNTS /proc/self/mountinfo with `{mnt}` for where the
+/// stand-in mounts are, and FILES each cgroup file there by its path under
+/// them. What it said, and how many it ran side by side.
+fn under(cgroup: &str, mounts: &str, files: &[(String, String)]) -> (String, usize) {
     let g = Gate::new();
-    // A stand-in for the cgroup filesystem, with the gate's own cgroup in it
-    // and the limit at its top, so it's found only by walking every level up.
-    let own = fs::read_to_string("/proc/self/cgroup").unwrap();
-    let own = own
-        .lines()
-        .find_map(|l| {
-            let [_, controllers, path] = l.splitn(3, ':').collect::<Vec<_>>()[..] else {
-                return None;
-            };
-            let mine = match v {
-                Cgroups::V2 => controllers.is_empty(),
-                Cgroups::V1 => controllers.split(',').any(|c| c == "memory"),
-            };
-            mine.then_some(path)
-        })
-        .unwrap_or("/");
-    let fs_top = g.s.join("cgroup");
-    let (top, max, held, cache, none) = match v {
-        Cgroups::V2 => (
-            fs_top.clone(),
-            "memory.max",
-            "memory.current",
-            "inactive_file",
-            "max".to_owned(),
-        ),
-        Cgroups::V1 => (
-            fs_top.join("memory"),
-            "memory.limit_in_bytes",
-            "memory.usage_in_bytes",
-            "total_inactive_file",
-            "9223372036854771712".to_owned(),
-        ),
-    };
-    let mut at = top.clone();
-    for part in own.split('/').filter(|p| !p.is_empty()) {
-        at.push(part);
-        fs::create_dir_all(&at).unwrap();
-        fs::write(at.join(max), format!("{none}\n")).unwrap();
-    }
-    fs::create_dir_all(&top).unwrap();
-    fs::write(top.join(max), format!("{}\n", 3u64 << 30)).unwrap();
-    fs::write(top.join(held), format!("{}\n", 2u64 << 30)).unwrap();
+    let proc = g.s.join("proc");
+    let mnt = g.s.join("mnt");
+    fs::create_dir_all(&proc).unwrap();
+    fs::write(proc.join("cgroup"), cgroup).unwrap();
     fs::write(
-        top.join("memory.stat"),
-        format!("anon 1073741824\nactive_file 0\n{cache} {}\n", 1u64 << 30),
+        proc.join("mountinfo"),
+        mounts.replace("{mnt}", mnt.to_str().unwrap()),
     )
     .unwrap();
+    for (path, text) in files {
+        let path = mnt.join(path);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, text).unwrap();
+    }
     let r = g.run(
         &g.flake(EVERY),
         Run {
             skip: "vm",
-            env: &[("CGROUP_FS", fs_top.to_str().unwrap())],
+            env: &[("CGROUP_PROC", proc.to_str().unwrap())],
             ..Run::default()
         },
     );
     assert_eq!(r.code, 0, "{}", r.out);
-    assert_eq!(side(&r.out), 1, "{}", r.out);
+    let side = side(&r.out);
+    (r.out, side)
+}
+
+/// A limit of 3G on the cgroup in DIR, which holds 2G, 1G of it inactive
+/// page cache: 2G left, room for one evaluation. v1's files when V1.
+fn limit(dir: &str, v1: bool) -> Vec<(String, String)> {
+    let (max, held, cache) = if v1 {
+        (
+            "memory.limit_in_bytes",
+            "memory.usage_in_bytes",
+            "total_inactive_file",
+        )
+    } else {
+        ("memory.max", "memory.current", "inactive_file")
+    };
+    vec![
+        (format!("{dir}/{max}"), format!("{}\n", 3u64 << 30)),
+        (format!("{dir}/{held}"), format!("{}\n", 2u64 << 30)),
+        (
+            format!("{dir}/memory.stat"),
+            format!("anon 1073741824\nactive_file 0\n{cache} {}\n", 1u64 << 30),
+        ),
+    ]
+}
+
+/// No limit on the cgroup in DIR: v2's "max", v1's largest number.
+fn no_limit(dir: &str, v1: bool) -> (String, String) {
+    if v1 {
+        (
+            format!("{dir}/memory.limit_in_bytes"),
+            "9223372036854771712\n".to_owned(),
+        )
+    } else {
+        (format!("{dir}/memory.max"), "max\n".to_owned())
+    }
+}
+
+/// Under a memory limit, only as many side by side as it leaves room for,
+/// however much the machine has free, wherever the limit is: on a cgroup
+/// above the job's, on the job's own under a mount of a subtree of the
+/// hierarchy, under v1's memory controller mounted with others. Each leaves
+/// 2G, so one at a time.
+#[test]
+fn side_by_side_stays_within_the_jobs_memory_limit() {
+    let v2 = "36 24 0:31 / {mnt}/v2 rw,nosuid shared:9 - cgroup2 cgroup2 rw,nsdelegate\n";
+    let cases = [
+        (
+            "a cgroup above the job's",
+            "0::/user.slice/job.service\n",
+            v2.to_owned(),
+            [
+                vec![no_limit("v2/user.slice/job.service", false)],
+                limit("v2/user.slice", false),
+            ]
+            .concat(),
+        ),
+        (
+            "the job's own, its hierarchy mounted from a cgroup above it",
+            "0::/docker/abc/job\n",
+            "36 24 0:31 /docker/abc {mnt}/sub rw - cgroup2 cgroup2 rw\n".to_owned(),
+            [vec![no_limit("sub", false)], limit("sub/job", false)].concat(),
+        ),
+        (
+            "v1's, its memory controller mounted with others",
+            "0::/\n12:cpu,cpuacct,memory:/a/b\n1:name=systemd:/a/b\n",
+            format!(
+                "{v2}38 24 0:33 / {{mnt}}/cpu,memory rw,relatime shared:12 - cgroup cgroup rw,cpu,cpuacct,memory\n"
+            )
+            .replace("{mnt}/v2", "{mnt}/unified"),
+            [vec![no_limit("cpu,memory/a/b", true)], limit("cpu,memory/a", true)].concat(),
+        ),
+    ];
+    for (what, cgroup, mounts, files) in cases {
+        let (out, side) = under(cgroup, &mounts, &files);
+        assert_eq!(side, 1, "{what}: {out}");
+        // By the limit it found, not for want of one.
+        assert!(!out.contains("isn't mounted here"), "{what}: {out}");
+    }
+}
+
+/// A memory cgroup that isn't mounted can't be read for a limit, so the
+/// gate runs one evaluation at a time and says why.
+#[test]
+fn an_unmounted_memory_cgroup_takes_one_at_a_time() {
+    let (out, side) = under("0::/job\n", "22 1 0:5 / /proc rw - proc proc rw\n", &[]);
+    assert_eq!(side, 1, "{out}");
+    assert!(out.contains("isn't mounted here"), "{out}");
+}
+
+/// Limits that leave room for more than the machine has free change
+/// nothing: as many side by side as with no cgroups at all.
+#[test]
+fn a_roomy_limit_leaves_the_machines_share() {
+    let (out, alone) = under("", "", &[]);
+    let big = 1u64 << 50;
+    let (out2, side) = under(
+        "0::/job\n",
+        "36 24 0:31 / {mnt}/v2 rw - cgroup2 cgroup2 rw\n",
+        &[
+            ("v2/job/memory.max".to_owned(), format!("{big}\n")),
+            ("v2/job/memory.current".to_owned(), "0\n".to_owned()),
+            (
+                "v2/job/memory.stat".to_owned(),
+                "inactive_file 0\n".to_owned(),
+            ),
+        ],
+    );
+    assert_eq!(side, alone, "{out}\n{out2}");
 }
 
 #[test]
