@@ -221,6 +221,9 @@ in
     };
     systemd.services.burrow-dispatch = {
       description = "burrow-dispatch: keep the runners and the deploy every PR waits on moving";
+      # A switch leaves a running pass be (see burrow.switch's check), and
+      # burrow-events-switched-* kicks the next one, the new unit's.
+      restartIfChanged = false;
       # gh as the machinery's App, or the user's own login without one.
       path = [ config.burrow.github.machineGh config.systemd.package ];
       serviceConfig = {

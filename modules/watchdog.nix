@@ -112,6 +112,9 @@ in
     };
     systemd.services.burrow-watchdog = {
       description = "burrow-watchdog: take what has stopped moving a step further";
+      # A switch leaves a running pass be (see burrow.switch's check), and
+      # burrow-events-switched-* kicks the next one, the new unit's.
+      restartIfChanged = false;
       path = [ config.burrow.tools.proj ];
       serviceConfig = {
         Type = "oneshot";
