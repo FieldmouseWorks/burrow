@@ -484,8 +484,10 @@
             modules = [
               self.nixosModules.dispatch
               self.nixosModules.updates
+              self.nixosModules.ledger
               ./examples/machine.nix
               {
+                burrow.ledger = { package = cnStandIn; anchorRepo = "sam/homelab"; reviewers = [ "sams-steward[bot]" ]; };
                 burrow.dispatch = {
                   enable = true;
                   runners = {
@@ -577,6 +579,10 @@
           assert lib.assertMsg (lib.all (p: builtins.elem p (map lib.getName freshUnit.path)) [ "jq" "gh" "curl" ])
             "dispatch: a fresh runner's jobs find ${toString (map lib.getName freshUnit.path)} on PATH";
           assert lib.assertMsg ((settings dispatchOnly).fresh == null) "dispatch: fresh runners nobody asked for";
+          # What tells Conary which runners' CI it counts.
+          assert lib.assertMsg ((committed.config.burrow.ledger.env.CONARY_FRESH_RUNNERS or null) == "fresh-burrow-"
+            && !(dispatchOnly.config.burrow.ledger.env ? CONARY_FRESH_RUNNERS))
+            "dispatch: the ledger's cn is told fresh runners' names start ${builtins.toJSON (committed.config.burrow.ledger.env.CONARY_FRESH_RUNNERS or null)}, and ${builtins.toJSON (dispatchOnly.config.burrow.ledger.env.CONARY_FRESH_RUNNERS or null)} with none";
           assert lib.assertMsg (settings unhandled == settings committed)
             "dispatch: with the handlers off, the settings are ${builtins.toJSON (settings unhandled)}";
           assert lib.assertMsg ((settings committed).gap == 120 && (settings spaced).gap == 600)

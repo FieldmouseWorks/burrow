@@ -19,6 +19,8 @@ let
   inherit (config.burrow.github) machineApp;
   inherit (lib) mkOption types;
   autoland = lib.attrByPath [ "burrow" "autoland" ] { } config;
+  # The machine's runners started fresh for one job each, if it has them.
+  fresh = lib.attrByPath [ "burrow" "dispatch" ] { } config;
   # Where conaryd listens. Its directory is conaryd's own (RuntimeDirectory).
   socket = "/run/conary/conaryd.sock";
 
@@ -211,12 +213,19 @@ in
         CONARY_REVIEWERS = lib.concatStringsSep "," cfg.reviewers;
         CONARY_OWN_CONTEXTS = lib.concatStringsSep "," cfg.ownContexts;
         CONARY_SESSION_LINKS = lib.concatStringsSep "," cfg.sessionLinks;
+      } // lib.optionalAttrs ((fresh.enable or false) && fresh.fresh.enable) {
+        # A self-hosted runner's CI counts only from one started fresh for
+        # its job, and only burrow.dispatch.fresh names a runner so
+        # (Conary's docs/ci-attestation.md): one that took a job before
+        # could have signed in this one's name.
+        CONARY_FRESH_RUNNERS = fresh.fresh.prefix;
       };
       defaultText = lib.literalExpression "{ CONARY_LEDGER = dir; CONARY_ANCHOR_REPO = anchorRepo; ... }";
       description = ''
         What every writer of the ledger tells `cn` about it: its passes, and
         the steward's merge train (burrow.autoland's `train`), each with its
-        own CONARY_TOKEN_COMMAND.
+        own CONARY_TOKEN_COMMAND. On a machine with runners started fresh
+        for one job each (burrow.dispatch.fresh), the start of their names.
       '';
     };
 
