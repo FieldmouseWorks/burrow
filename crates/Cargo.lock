@@ -94,6 +94,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "burrow-health"
+version = "0.0.0"
+dependencies = [
+ "rustix",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "burrow-heartbeat"
 version = "0.0.0"
 dependencies = [
