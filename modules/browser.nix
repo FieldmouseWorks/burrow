@@ -238,7 +238,7 @@ in
           StateDirectoryMode = "0700";
           # Closed as its window would be, so it writes its cookies first. As
           # burrow.user: the only one its DevTools port answers.
-          ExecStop = "+${pkgs.util-linux}/bin/runuser -u ${user} -- ${pkgs.python3}/bin/python3 -I ${./browser/close.py} ${toString cfg.cdpPort}";
+          ExecStop = "+${pkgs.util-linux}/bin/runuser -u ${user} -- ${inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow}/bin/burrow-browser-close ${toString cfg.cdpPort}";
           ExecStart = lib.escapeShellArgs [
             (lib.getExe cfg.package)
             "--user-data-dir=${stateDir}/profile"
