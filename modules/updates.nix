@@ -166,9 +166,42 @@ let
     (with pkgs; [ coreutils jq curl util-linux systemd gnugrep gnused gawk vulnix config.nix.package ])
     ++ [ config.programs.git.package healthTool tools.switch tools.confirm machineGh ] ++ calls ++ lib.optional (tools ? boot) tools.boot
   );
-  advisoryWatch = script "advisory-watch" ./updates/advisory-watch.sh (
-    (with pkgs; [ coreutils curl jq gnugrep gnused gawk util-linux vulnix osv-scanner config.nix.package ]) ++ calls
-  );
+  # advisory-watch (crates/advisory-watch), with what a pass is told built in.
+  advisoryConfig = pkgs.writeText "advisory-watch.json" (builtins.toJSON {
+    state = "${stateDir}/advisories";
+    src = config.burrow.projectsDir;
+    inherit user project system train;
+    host = config.networking.hostName;
+    channel = vars.CHANNEL;
+    inherit update;
+    flake = config.burrow.flake;
+    owner = config.burrow.owner;
+    notify = vars.NOTIFY;
+    boot = if vars.BOOT == "" then null else vars.BOOT;
+    inherit (cfg) checks;
+    app = if machineApp == null then null else machineApp.name;
+    # CISA's own copy on GitHub second: cisa.gov refuses some hosting
+    # providers' addresses.
+    kev = [
+      "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
+      "https://raw.githubusercontent.com/cisagov/kev-data/develop/known_exploited_vulnerabilities.json"
+    ];
+    tools = {
+      sudo = "${config.security.wrapperDir}/sudo";
+      runuser = "${pkgs.util-linux}/bin/runuser";
+      nixStore = "${config.nix.package}/bin/nix-store";
+      vulnix = lib.getExe pkgs.vulnix;
+      osvScanner = lib.getExe pkgs.osv-scanner;
+      proj = "${tools.proj}/bin/proj";
+    };
+  });
+  advisoryWatch = pkgs.runCommand "advisory-watch" {
+    nativeBuildInputs = [ pkgs.makeBinaryWrapper ];
+    meta.mainProgram = "advisory-watch";
+  } ''
+    makeBinaryWrapper ${inputs.self.packages.${system}.burrow}/bin/advisory-watch \
+      $out/bin/advisory-watch --add-flags ${advisoryConfig}
+  '';
   firmwareCheck = script "firmware-check" ./updates/firmware-check.sh (
     (with pkgs; [ coreutils jq gnugrep gnused fwupd dmidecode nvme-cli util-linux ]) ++ calls
   );

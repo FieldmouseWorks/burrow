@@ -252,8 +252,8 @@ impl World for Fake {
     }
 
     /// release-ages, Renovate's reading of a config, is checked on its own
-    /// with Renovate (flake.nix's release-ages); here a stand-in reads days
-    /// and weeks, and knows three presets: "slow" sets 2 weeks, "files" adds
+    /// with Renovate (tests/renovate-checks.nix's release-ages); here a stand-in reads
+    /// days and weeks, and knows three presets: "slow" sets 2 weeks, "files" adds
     /// ci/slow.json as a config file, "inherits" inherits config. Any other
     /// preset it can't resolve.
     fn release_ages(&mut self, config: &Value) -> Result<Ages, String> {
