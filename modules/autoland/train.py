@@ -32,6 +32,9 @@ CONTEXT = CFG["trainContext"]
 # Why the train holds a PR out, as cn says it, and until what, in words.
 HELD = {"red": "it was red alone in it, until a new head",
         "conflict": "it won't merge after the PRs ahead of it, until they've landed or left",
+        # Its merge changes nothing after them: once they've landed, it's
+        # closed (step.py's mergeable), or left to its dependency bot.
+        "empty": "it changes nothing after the PRs ahead of it, until they've landed or left",
         "refused": "{}, until the default branch moves or a new head",
         "elsewhere": "it was just retargeted off the default branch, so it's seen to again"}
 TRAINS = {}  # each train repo's train, as this pass read it (begin)
