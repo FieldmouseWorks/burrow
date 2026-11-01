@@ -105,7 +105,7 @@ in
     packages = mkOption {
       type = types.listOf types.package;
       default = [ ];
-      description = "What their jobs find on PATH, beside git, Nix, the basics, and the jq, gh and curl burrow's shared CI calls.";
+      description = "What their jobs find on PATH, beside git, Nix, the basics, the jq, gh and curl burrow's shared CI calls, and the system's packages.";
     };
 
     template = mkOption {
@@ -138,8 +138,12 @@ in
       # count, or for a switch's health check to find newly failed.
       unitConfig.CollectMode = "inactive-or-failed";
       # The basics, and what burrow's shared CI (flake-check.yml) calls, the
-      # job these are for: jq, gh and curl.
-      path = with pkgs; [ bash coreutils findutils gnugrep gnused gnutar gzip git config.nix.package curl gh jq ] ++ cfg.packages;
+      # job these are for: jq, gh and curl. Then what any job on the
+      # machine finds: the system's packages, such as awk and the slots a
+      # gate takes (heavy). Without them a gate here would fail, or run
+      # outside the machine's slots.
+      path = with pkgs; [ bash coreutils findutils gnugrep gnused gnutar gzip git config.nix.package curl gh jq ] ++ cfg.packages
+        ++ [ "/run/current-system/sw" ];
       environment = {
         RUNNER_ROOT = root;
         HOME = root;
