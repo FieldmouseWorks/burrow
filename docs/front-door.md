@@ -5,7 +5,9 @@ project, by a Claude in that project: its checkout, its CLAUDE.md, its tools
 and logins. Nothing gets copied to the cloud and back.
 
 A thread in that chat can hand a project work two ways. Use the first one
-unless you need the second.
+unless you need the second. A question about the box itself that only needs
+reading (its memory, a unit's log, what's deployed) needs neither: ask a
+probe ([below](#probes-facts-with-no-claude)).
 
 ```
 claude.ai project chat                   GitHub                  the box
@@ -91,6 +93,38 @@ pre-approved.
   instructions; they reach the running session.
 - The machine's own flake folder is the operator. Its sessions stay in the
   folder itself, since that checkout is what `HOST-switch` builds.
+
+## Probes: facts with no Claude
+
+`burrow.probe` (crates/burrow-probe) answers read-only questions about the
+box on a private repo's issues (`burrow.probe.repo`, the machine flake's
+own, say), in seconds and without starting a Claude.
+
+- **Ask:** open an issue there labelled `probe` (`probe.label`), as one of
+  `probe.authors` (the inbox's, unless set), with a question a line:
+  - `memory`: RAM, swap, the ZFS ARC, pressure, and the cgroups holding the most
+  - `units`: failed units and jobs under way, the system's and the user's
+  - `journal UNIT SINCE UNTIL`: a unit's last 400 lines in that span, for the
+    units on `probe.journal.units` (and `userUnits`) only
+  - `rc`: each Remote Control server's state, memory and restarts
+  - `queue`: `proj status`
+  - `deployed`: the running and booted systems, the generation, the inputs'
+    revisions, and what `HOST-update` last found live
+  - `oom [SINCE]`: the kernel's and systemd-oomd's kills, a day back by default
+
+  A time is `now`, `-30m`, `-2h`, `-3d`, `2026-11-01`, `2026-11-01T13:05Z`
+  or `@EPOCH`, in UTC. An empty body asks its title.
+- **Answer:** one comment with every answer, then the issue is closed.
+  Reopen it to ask again. An issue whose body or title someone else changed
+  (GitHub lets a collaborator edit anyone's) runs nothing: ask in a new one.
+- **What keeps it safe:** no shell, and nothing of the issue's text reaches a
+  command but a unit name or a time the grammar made; journals only of the
+  units on the allowlist; no answer at all in a repo GitHub doesn't call
+  private; and every answer through a secret scrubber first
+  (`tests/probe.nix` plants a token to prove it). Anyone else's issue runs
+  nothing.
+- On the box, `burrow-probe ask QUESTION` answers one on the terminal, as
+  the machine says it.
 
 ## What's running
 
