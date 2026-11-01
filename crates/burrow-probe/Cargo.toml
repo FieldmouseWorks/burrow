@@ -1,0 +1,22 @@
+[package]
+name = "burrow-probe"
+description = "Read-only questions about the machine, asked on a private repo's issues and answered there, with no Claude"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+burrow-events = { path = "../burrow-events" }
+burrow-github = { path = "../burrow-github" }
+jiff.workspace = true
+regex = { version = "1.13.1", default-features = false, features = ["std", "unicode-perl", "unicode-case"] }
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+burrow-github = { path = "../burrow-github", features = ["fake"] }
+tempfile.workspace = true
+
+[lints]
+workspace = true

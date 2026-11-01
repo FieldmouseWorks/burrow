@@ -36,6 +36,11 @@
       serverIp = "203.0.113.7";
     };
     heartbeat.enable = true;
+    probe = {
+      enable = true;
+      repo = "sam/homelab";
+      authors = [ "sam" ];
+    };
     autoland = {
       enable = true;
       owners = [ "sam" ];

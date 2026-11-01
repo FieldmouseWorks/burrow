@@ -37,7 +37,7 @@
       # The ledger's machines take Conary from its own flake; burrow's checks
       # build theirs with a stand-in for its `cn`.
       cnStandIn = pkgs.writeShellScriptBin "cn" "exit 1";
-      names = [ "claude" "undo" "switch" "notify" "updates" "proj" "remote-control" "agents" "robot" "ops" "toolbox" "autoland" "house" "events" "ledger" "browser" "heartbeat" "backup" "watchdog" "github" "rust-cache" "cpu" "dispatch" "usage-reset" ];
+      names = [ "claude" "undo" "switch" "notify" "updates" "proj" "remote-control" "agents" "robot" "ops" "probe" "toolbox" "autoland" "house" "events" "ledger" "browser" "heartbeat" "backup" "watchdog" "github" "rust-cache" "cpu" "dispatch" "usage-reset" ];
       # Each module on its own, with only what it imports, in a check of its
       # own (standalone-NAME), so the gate's legs share the evaluations out:
       # evaluating is the check, so these build nothing. A service that says
@@ -77,6 +77,7 @@
             (nixpkgs.lib.optionalAttrs (name == "updates") { burrow.updates.origin = "https://github.com/sam/homelab"; })
             (nixpkgs.lib.optionalAttrs (name == "autoland") { burrow.autoland = { owners = [ "sam" ]; authors = [ "sam" ]; app = { id = 123456; slug = "sams-steward"; keyFile = "/run/secrets/autoland-app-key"; }; reviewers.codex.enable = true; }; })
             (nixpkgs.lib.optionalAttrs (name == "house") { burrow.house.owners = [ "sam" ]; })
+            (nixpkgs.lib.optionalAttrs (name == "probe") { burrow.probe = { repo = "sam/homelab"; authors = [ "sam" ]; }; })
             (nixpkgs.lib.optionalAttrs (name == "dispatch") { burrow.dispatch.runners.ci-runner = { repo = "sam/homelab"; labels = [ "homelab" ]; }; })
             (nixpkgs.lib.optionalAttrs (name == "ledger") { burrow.ledger = { package = cnStandIn; owners = [ "sam" ]; anchorRepo = "sam/homelab"; reviewers = [ "sams-steward[bot]" ]; sessionLinks = [ "sam/homelab" ]; daemon = true; }; })
             (nixpkgs.lib.optionalAttrs (builtins.elem name [ "events" "autoland" ]) { burrow.events = { host = "example.org"; secretFile = "/run/secrets/burrow-webhook"; }; })
@@ -719,6 +720,9 @@
         # burrow-events for real: deliveries, kicks and wake-ups starting a
         # handler's units through polkit.
         events-service = import ./tests/events.nix { inherit self pkgs; };
+        # Probes answer on a private repo's issues, never read a unit off the
+        # allowlist, and post a planted token scrubbed.
+        probe = import ./tests/probe.nix { inherit self pkgs; };
         # HOST-switch's revert when the window runs out mid-activation.
         switch = import ./tests/switch.nix { inherit self pkgs; };
         # systemd-oomd kills what eats the memory before the machine drowns.
