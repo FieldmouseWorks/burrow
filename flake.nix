@@ -721,6 +721,9 @@
         events-service = import ./tests/events.nix { inherit self pkgs; };
         # HOST-switch's revert when the window runs out mid-activation.
         switch = import ./tests/switch.nix { inherit self pkgs; };
+        # A runner started fresh for one job: its registration and state
+        # gone however it ends, and a clean end not failed.
+        fresh-runner = import ./tests/fresh-runner.nix { inherit self pkgs; };
         # systemd-oomd kills what eats the memory before the machine drowns.
         oomd = import ./tests/oomd.nix { inherit self pkgs; };
         # systemd pets the board's own watchdog, whichever came up first.
