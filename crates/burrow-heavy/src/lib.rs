@@ -27,6 +27,7 @@ use rustix::fs::{FlockOperation, flock};
 use rustix::io::Errno;
 
 pub mod config;
+pub mod cpus;
 mod run;
 
 pub use config::Config;
@@ -97,15 +98,9 @@ pub fn parse(args: &[OsString]) -> Option<Call> {
     })
 }
 
-/// The threads this process may run on, as nproc counts them: its CPU
-/// affinity.
-fn threads() -> io::Result<u32> {
-    Ok(rustix::thread::sched_getaffinity(None)?.count())
-}
-
 /// Each slot's share of the threads, at least one.
-fn share(threads: u32, slots: u32) -> u32 {
-    (threads / slots).max(1)
+fn share(threads: u64, slots: u32) -> u64 {
+    (threads / u64::from(slots)).max(1)
 }
 
 /// The whole call, after the config: its exit status.
@@ -114,7 +109,7 @@ pub fn main(config: &Config, args: &[OsString]) -> u8 {
         note!("{USAGE_LINE}");
         return USAGE;
     };
-    let threads = match threads() {
+    let threads = match cpus::threads() {
         Ok(n) => n,
         Err(e) => {
             note!("heavy: can't count the threads: {e}");
@@ -135,7 +130,7 @@ pub fn main(config: &Config, args: &[OsString]) -> u8 {
 
 /// Which slots are free. Trying each lock is the one test that works in
 /// every PID namespace: /proc/locks may name a holder long gone.
-fn status(config: &Config, share: u32, threads: u32) -> u8 {
+fn status(config: &Config, share: u64, threads: u64) -> u8 {
     let mut out = format!("{} slots of {share} threads (of {threads})\n", config.slots);
     for i in 1..=config.slots {
         let state = match File::open(config.slot(i)) {
@@ -169,7 +164,7 @@ pub(crate) fn not_run(e: &io::Error) -> u8 {
 
 /// Takes the first free slot and runs the command in it, waiting for one
 /// while every slot is busy.
-fn take(config: &Config, share: u32, wait: Option<u64>, command: &[OsString]) -> u8 {
+fn take(config: &Config, share: u64, wait: Option<u64>, command: &[OsString]) -> u8 {
     let deadline = wait.map(|s| Instant::now() + Duration::from_secs(s));
     let expired = || deadline.is_some_and(|d| Instant::now() >= d);
     let mut said = false;

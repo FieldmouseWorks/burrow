@@ -172,6 +172,55 @@ fn status_says_which_slots_are_free() {
     assert!(s.status().contains("slot2: free"));
 }
 
+/// What `heavy status` and nproc count with these OpenMP variables set.
+fn counts(s: &Slots, omp: &[(&str, &str)]) -> (String, String) {
+    let set = |mut cmd: Command| {
+        cmd.env_remove("OMP_NUM_THREADS")
+            .env_remove("OMP_THREAD_LIMIT");
+        cmd.envs(omp.iter().copied()).output().unwrap()
+    };
+    let status = text(&set(s.heavy(&["status"])).stdout);
+    let of = status
+        .lines()
+        .next()
+        .and_then(|l| l.split_once("(of "))
+        .map(|(_, n)| n.trim_end_matches(')').to_owned())
+        .unwrap_or_else(|| panic!("no count in {status:?}"));
+    (
+        of,
+        text(&set(Command::new("nproc")).stdout).trim().to_owned(),
+    )
+}
+
+#[test]
+fn it_counts_the_threads_as_nproc_does() {
+    let s = Slots::new(2, 3);
+    for omp in [
+        &[][..],
+        &[("OMP_NUM_THREADS", "3")],
+        &[("OMP_NUM_THREADS", "4096")],
+        &[("OMP_NUM_THREADS", " 5,2 ")],
+        &[("OMP_NUM_THREADS", "0")],
+        &[("OMP_NUM_THREADS", "two")],
+        &[("OMP_THREAD_LIMIT", "1")],
+        &[("OMP_THREAD_LIMIT", "2")],
+        &[("OMP_THREAD_LIMIT", "4096")],
+        &[("OMP_THREAD_LIMIT", "0")],
+        &[("OMP_NUM_THREADS", "8"), ("OMP_THREAD_LIMIT", "3")],
+        &[("OMP_NUM_THREADS", "x"), ("OMP_THREAD_LIMIT", "2")],
+    ] {
+        let (heavy, nproc) = counts(&s, omp);
+        assert_eq!(heavy, nproc, "{omp:?}");
+    }
+    // And the share follows the count.
+    let out = s
+        .heavy(&["sh", "-c", "echo $HEAVY_JOBS"])
+        .env("OMP_NUM_THREADS", "6")
+        .output()
+        .unwrap();
+    assert_eq!(text(&out.stdout), "3\n");
+}
+
 #[test]
 fn the_command_gets_its_share_and_its_status_passes_through() {
     let s = Slots::new(2, 3);

@@ -21,7 +21,7 @@ const LOOK: Duration = Duration::from_millis(100);
 
 /// Runs `command` in slot `slot` and returns its exit status, once the
 /// whole of it has stopped.
-pub fn run(config: &Config, slot: u32, share: u32, command: &[OsString]) -> u8 {
+pub fn run(config: &Config, slot: u32, share: u64, command: &[OsString]) -> u8 {
     // Listening before the start: a signal that comes in between is the
     // command's to answer as soon as it has a pid. SIGCHLD wakes the wait
     // when the command exits.
