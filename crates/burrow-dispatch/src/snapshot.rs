@@ -31,6 +31,9 @@ pub struct Snapshot {
     pub unknown: BTreeMap<String, String>,
     /// HOST-update, and what its last run said.
     pub update: Option<(Unit, String)>,
+    /// HOST-update's own open PR, when its last run said it's waiting on
+    /// that to land before it brings in anything newer.
+    pub behind: Option<u64>,
     /// The repos GitHub couldn't be read for, and why: what's known of them
     /// is what the last pass saw.
     pub unread: BTreeMap<String, String>,
@@ -136,9 +139,14 @@ pub fn take(cfg: &Config, world: &dyn World) -> Snapshot {
         );
     }
     if let Some(d) = &cfg.deploy {
-        let said = fs::read(&d.status)
+        let status = fs::read(&d.status)
             .ok()
-            .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+            .and_then(|b| serde_json::from_slice::<Value>(&b).ok());
+        snap.behind = status
+            .as_ref()
+            .and_then(|v| v.get("behind"))
+            .and_then(Value::as_u64);
+        let said = status
             .map(|v| {
                 let s = |k| v.get(k).and_then(Value::as_str).unwrap_or("").to_owned();
                 format!("{} at {}: {}", s("result"), s("time"), s("message"))
@@ -509,7 +517,7 @@ pub mod tests {
                 "unit": "box-update", "handler": "update", "status": dir.join("status.json"),
                 "own": "sam/box", "live": dir.join("live.json"),
                 "running": {"sam/kit": "bbb"},
-                "after": 1800.0, "run": 5400.0,
+                "after": 1800.0, "run": 5400.0, "ride": 18000.0,
             },
             "switch": {"state": dir.join("switch"), "revert": "box-revert"},
         }))
@@ -751,7 +759,7 @@ pub mod tests {
         let cfg = config(dir.path());
         std::fs::write(
             dir.path().join("status.json"),
-            r#"{"time": "2026-10-29T15:52:00+00:00", "result": "ok", "message": "deployed", "running": "/nix/store/x"}"#,
+            r#"{"time": "2026-10-29T15:52:00+00:00", "result": "ok", "message": "deployed", "running": "/nix/store/x", "behind": 405}"#,
         )
         .unwrap();
         let live = dir.path().join("live.json");
@@ -796,6 +804,7 @@ pub mod tests {
             snap.update.as_ref().unwrap().1,
             "ok at 2026-10-29T15:52:00+00:00: deployed"
         );
+        assert_eq!(snap.behind, Some(405));
         assert!(snap.unknown.is_empty());
         // A system switched to since, by anyone: unknown until HOST-update
         // looks, never taken for live.

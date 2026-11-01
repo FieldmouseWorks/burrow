@@ -94,10 +94,12 @@ pub struct Deploy {
     /// Each of the flake's inputs whose default branch it puts live
     /// (OWNER/REPO), and the commit of it the running system was built from.
     pub running: BTreeMap<String, String>,
-    /// Seconds a commit may wait to go live, and a run of HOST-update may
-    /// take.
+    /// Seconds a commit may wait to go live, a run of HOST-update may take,
+    /// and a commit may wait behind HOST-update's own open PR (it brings in
+    /// nothing newer until that lands).
     pub after: f64,
     pub run: f64,
+    pub ride: f64,
 }
 
 #[derive(Clone, Debug, Deserialize)]
