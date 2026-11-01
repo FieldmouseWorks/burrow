@@ -1,7 +1,21 @@
 //! The outputs the gate checks, as nix flake check checks them, and what it
 //! evaluates and builds of them.
 
+use std::fs;
+
 use super::{EVERY, Gate, Run};
+
+/// How many evaluations the gate said it runs side by side.
+fn side(out: &str) -> usize {
+    out.lines()
+        .find_map(|l| {
+            l.strip_prefix("6 outputs to evaluate, ")?
+                .strip_suffix(" side by side")
+        })
+        .unwrap_or_else(|| panic!("no count: {out}"))
+        .parse()
+        .unwrap()
+}
 
 /// Each derivation on its own, kept until built, then only the checks built.
 #[test]
@@ -15,25 +29,32 @@ fn each_derivation_apart() {
         },
     );
     assert_eq!(r.code, 0, "{}", r.out);
-    // One plan, then one evaluation per derivation.
+    // One plan, then one evaluation per derivation, each said in the plan's
+    // order, however they ran.
     assert_eq!(r.calls[0], "eval plan", "{:?}", r.calls);
+    let mut entries = r.entries();
+    entries.sort();
     let want: Vec<String> = (0..6).map(|i| format!("eval entry {i}")).collect();
-    assert_eq!(r.entries(), want, "{:?}", r.calls);
+    assert_eq!(entries, want, "{:?}", r.calls);
     let system = &g.system;
-    for what in [
-        format!("checks.{system}.a"),
-        format!("checks.{system}.vm"),
-        format!("packages.{system}.p"),
-        format!("devShells.{system}.default"),
-        format!("formatter.{system}"),
-        "nixosConfigurations.box".to_owned(),
-    ] {
-        assert!(
-            r.out.contains(&format!("evaluating {what}\n")),
-            "{what}: {}",
-            r.out
-        );
-    }
+    let said: Vec<&str> = r
+        .out
+        .lines()
+        .filter_map(|l| l.strip_prefix("evaluating "))
+        .collect();
+    assert_eq!(
+        said,
+        [
+            format!("checks.{system}.a"),
+            format!("checks.{system}.vm"),
+            format!("packages.{system}.p"),
+            format!("devShells.{system}.default"),
+            format!("formatter.{system}"),
+            "nixosConfigurations.box".to_owned(),
+        ],
+        "{}",
+        r.out
+    );
     // What it builds is the derivation the evaluation gave, outputs and all.
     let b = r.build();
     assert!(
@@ -49,6 +70,277 @@ fn each_derivation_apart() {
 }
 
 /// A failing check fails it.
+/// The outputs are evaluated side by side, as many at once as the step says
+/// it takes (a core each while each has 2G of the memory free to it), and no
+/// more.
+#[test]
+fn outputs_are_evaluated_side_by_side() {
+    let g = Gate::new();
+    let r = g.run(
+        &g.flake(EVERY),
+        Run {
+            skip: "vm",
+            env: &[("EVAL_OVERLAP", "1")],
+            ..Run::default()
+        },
+    );
+    assert_eq!(r.code, 0, "{}", r.out);
+    // Each evaluation held a second, so those started together overlapped.
+    let most = super::lines(&g.s.join("nix.log.overlap"))
+        .iter()
+        .map(|n| n.trim().parse::<usize>().unwrap())
+        .max();
+    assert_eq!(most, Some(side(&r.out).min(6)), "{}", r.out);
+}
+
+/// What the gate makes of a stand-in for its job's cgroups: CGROUP is
+/// /proc/self/cgroup (None, one that can't be read: a directory), MOUNTS
+/// /proc/self/mountinfo with `{mnt}` for where the stand-in mounts are, and
+/// FILES each cgroup file there by its path under them (one ending in `/`,
+/// a file that can't be read: a directory, which even root can't). What it
+/// said, and how many it ran side by side.
+fn under(cgroup: Option<&str>, mounts: &str, files: &[(String, String)]) -> (String, usize) {
+    let g = Gate::new();
+    let proc = g.s.join("proc");
+    let mnt = g.s.join("mnt");
+    fs::create_dir_all(&proc).unwrap();
+    match cgroup {
+        Some(cgroup) => fs::write(proc.join("cgroup"), cgroup).unwrap(),
+        None => fs::create_dir(proc.join("cgroup")).unwrap(),
+    }
+    fs::write(
+        proc.join("mountinfo"),
+        mounts.replace("{mnt}", mnt.to_str().unwrap()),
+    )
+    .unwrap();
+    for (path, text) in files {
+        if path.ends_with('/') {
+            fs::create_dir_all(mnt.join(path)).unwrap();
+            continue;
+        }
+        let path = mnt.join(path);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, text).unwrap();
+    }
+    let r = g.run(
+        &g.flake(EVERY),
+        Run {
+            skip: "vm",
+            env: &[("CGROUP_PROC", proc.to_str().unwrap())],
+            ..Run::default()
+        },
+    );
+    assert_eq!(r.code, 0, "{}", r.out);
+    let side = side(&r.out);
+    (r.out, side)
+}
+
+/// A limit of 3G on the cgroup in DIR, which holds 2G, 1G of it inactive
+/// page cache: 2G left, room for one evaluation. v1's files when V1.
+fn limit(dir: &str, v1: bool) -> Vec<(String, String)> {
+    let (max, held, cache) = if v1 {
+        (
+            "memory.limit_in_bytes",
+            "memory.usage_in_bytes",
+            "total_inactive_file",
+        )
+    } else {
+        ("memory.max", "memory.current", "inactive_file")
+    };
+    vec![
+        (format!("{dir}/{max}"), format!("{}\n", 3u64 << 30)),
+        (format!("{dir}/{held}"), format!("{}\n", 2u64 << 30)),
+        (
+            format!("{dir}/memory.stat"),
+            format!("anon 1073741824\nactive_file 0\n{cache} {}\n", 1u64 << 30),
+        ),
+    ]
+}
+
+/// No limit on the cgroup in DIR: v2's "max", v1's largest number.
+fn no_limit(dir: &str, v1: bool) -> (String, String) {
+    if v1 {
+        (
+            format!("{dir}/memory.limit_in_bytes"),
+            "9223372036854771712\n".to_owned(),
+        )
+    } else {
+        (format!("{dir}/memory.max"), "max\n".to_owned())
+    }
+}
+
+/// Under a memory limit, only as many side by side as it leaves room for,
+/// however much the machine has free, wherever the limit is: on a cgroup
+/// above the job's, on the job's own under a mount of a subtree of the
+/// hierarchy, under v1's memory controller mounted with others. Each leaves
+/// 2G, so one at a time.
+#[test]
+fn side_by_side_stays_within_the_jobs_memory_limit() {
+    let v2 = "36 24 0:31 / {mnt}/v2 rw,nosuid shared:9 - cgroup2 cgroup2 rw,nsdelegate\n";
+    let cases = [
+        (
+            "a cgroup above the job's",
+            "0::/user.slice/job.service\n",
+            v2.to_owned(),
+            [
+                vec![no_limit("v2/user.slice/job.service", false)],
+                limit("v2/user.slice", false),
+            ]
+            .concat(),
+        ),
+        (
+            "the job's own, its hierarchy mounted from a cgroup above it",
+            "0::/docker/abc/job\n",
+            "36 24 0:31 /docker/abc {mnt}/sub rw - cgroup2 cgroup2 rw\n".to_owned(),
+            [vec![no_limit("sub", false)], limit("sub/job", false)].concat(),
+        ),
+        (
+            "v1's, its memory controller mounted with others",
+            "0::/\n12:cpu,cpuacct,memory:/a/b\n1:name=systemd:/a/b\n",
+            format!(
+                "{v2}38 24 0:33 / {{mnt}}/cpu,memory rw,relatime shared:12 - cgroup cgroup rw,cpu,cpuacct,memory\n"
+            )
+            .replace("{mnt}/v2", "{mnt}/unified"),
+            [vec![no_limit("cpu,memory/a/b", true)], limit("cpu,memory/a", true)].concat(),
+        ),
+        (
+            "a cgroup above the container's, seen through a later mount of the whole hierarchy",
+            "0::/docker/abc/job\n",
+            "36 24 0:31 /docker/abc {mnt}/sub rw - cgroup2 cgroup2 rw\n\
+             37 24 0:31 / {mnt}/full rw - cgroup2 cgroup2 rw\n"
+                .to_owned(),
+            [
+                vec![
+                    no_limit("sub/job", false),
+                    no_limit("full/docker/abc/job", false),
+                ],
+                limit("full/docker", false),
+            ]
+            .concat(),
+        ),
+        (
+            "the job's own, its hierarchy mounted where the path has a space",
+            "0::/job\n",
+            "36 24 0:31 / {mnt}/with\\040space rw - cgroup2 cgroup2 rw\n".to_owned(),
+            limit("with space/job", false),
+        ),
+    ];
+    for (what, cgroup, mounts, files) in cases {
+        let (out, side) = under(Some(cgroup), &mounts, &files);
+        assert_eq!(side, 1, "{what}: {out}");
+        // By the limit it found, not for want of one.
+        assert!(!out.contains("memory limit is unknown"), "{what}: {out}");
+    }
+}
+
+/// A limit the gate can't read is unknown, so it runs one evaluation at a
+/// time and says why: no mount shows the job's cgroup, the cgroup isn't
+/// where its mount says, one with a limit doesn't say what it holds (or
+/// what it says can't be read), its cgroups can't be read, or a limit's
+/// file is there but doesn't read as one.
+#[test]
+fn an_unknown_limit_takes_one_at_a_time() {
+    let v2 = "36 24 0:31 / {mnt}/v2 rw - cgroup2 cgroup2 rw\n";
+    let cases = [
+        (
+            "isn't mounted here",
+            Some("0::/job\n"),
+            "22 1 0:5 / /proc rw - proc proc rw\n",
+            vec![],
+        ),
+        (
+            "isn't at",
+            Some("0::/gone\n"),
+            v2,
+            vec![no_limit("v2", false)],
+        ),
+        (
+            "doesn't say what it holds",
+            Some("0::/job\n"),
+            v2,
+            vec![("v2/job/memory.max".to_owned(), format!("{}\n", 3u64 << 30))],
+        ),
+        ("couldn't be read", None, v2, vec![]),
+        (
+            "memory.max can't be read",
+            Some("0::/job\n"),
+            v2,
+            vec![("v2/job/memory.max/".to_owned(), String::new())],
+        ),
+        (
+            "memory.max can't be read",
+            Some("0::/job\n"),
+            v2,
+            vec![("v2/job/memory.max".to_owned(), "lots\n".to_owned())],
+        ),
+        (
+            "doesn't say what it holds",
+            Some("0::/job\n"),
+            v2,
+            [
+                limit("v2/job", false),
+                vec![("v2/job/memory.current/".to_owned(), String::new())],
+            ]
+            .concat()
+            .into_iter()
+            .filter(|(p, _)| p != "v2/job/memory.current")
+            .collect(),
+        ),
+    ];
+    for (why, cgroup, mounts, files) in cases {
+        let (out, side) = under(cgroup, mounts, &files);
+        assert_eq!(side, 1, "{why}: {out}");
+        assert!(
+            out.contains("memory limit is unknown") && out.contains(why),
+            "{why}: {out}"
+        );
+    }
+}
+
+/// A jq that fails listing the leg's outputs fails the gate, rather than
+/// leaving nothing to evaluate.
+#[test]
+fn a_failing_list_of_the_legs_outputs_fails_it() {
+    let g = Gate::new();
+    g.s.stub(
+        "jq",
+        &format!(
+            "case \"$*\" in *'select(.value.mine)'*) exit 5 ;; esac\nexec {} \"$@\"\n",
+            crate::harness::which("jq").display()
+        ),
+    );
+    let r = g.run(
+        &g.flake(EVERY),
+        Run {
+            skip: "vm",
+            ..Run::default()
+        },
+    );
+    assert!(r.code != 0, "{}", r.out);
+    assert!(!r.out.contains("outputs to evaluate"), "{}", r.out);
+}
+
+/// Limits that leave room for more than the machine has free change
+/// nothing: as many side by side as with no cgroups at all.
+#[test]
+fn a_roomy_limit_leaves_the_machines_share() {
+    let (out, alone) = under(Some(""), "", &[]);
+    let big = 1u64 << 50;
+    let (out2, side) = under(
+        Some("0::/job\n"),
+        "36 24 0:31 / {mnt}/v2 rw - cgroup2 cgroup2 rw\n",
+        &[
+            ("v2/job/memory.max".to_owned(), format!("{big}\n")),
+            ("v2/job/memory.current".to_owned(), "0\n".to_owned()),
+            (
+                "v2/job/memory.stat".to_owned(),
+                "inactive_file 0\n".to_owned(),
+            ),
+        ],
+    );
+    assert_eq!(side, alone, "{out}\n{out2}");
+}
+
 #[test]
 fn a_failing_check_fails_it() {
     let g = Gate::new();
