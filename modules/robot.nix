@@ -1,20 +1,25 @@
 # robot: Hetzner's out-of-band controls (rescue system, hard reset, wake-on-LAN)
 # for a Hetzner dedicated server, from the server itself or from anywhere with
-# the Robot credentials (robot/robot.sh). Cancelling and reinstalling are left
+# the Robot credentials (crates/burrow-robot). Cancelling and reinstalling are left
 # out on purpose, and the guard (crates/burrow-guard) asks before a raw call to them.
 inputs:
 { config, lib, pkgs, ... }:
 let
   cfg = config.burrow.robot;
 
-  robot = pkgs.writeShellApplication {
-    name = "robot";
-    runtimeInputs = [ pkgs.curl pkgs.jq pkgs.coreutils pkgs.gnused ];
-    text = ''
-      ROBOT_DEFAULT_IP=${lib.escapeShellArg cfg.serverIp}
-      ROBOT_DEFAULT_CREDS=${lib.escapeShellArg cfg.credentialsFile}
-    '' + builtins.readFile ./robot/robot.sh;
-  };
+  # What crates/burrow-robot reads (its Config), and the command with it
+  # built in. sudo, for a credentials file only root may read, is the
+  # caller's own.
+  robotConfig = pkgs.writeText "robot.json" (builtins.toJSON {
+    inherit (cfg) serverIp credentialsFile;
+  });
+  robot = pkgs.runCommand "robot" {
+    nativeBuildInputs = [ pkgs.makeBinaryWrapper ];
+    meta.mainProgram = "robot";
+  } ''
+    makeBinaryWrapper ${inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow}/bin/burrow-robot \
+      $out/bin/robot --add-flags ${robotConfig}
+  '';
 in
 {
   imports = [ (import ./common.nix inputs) ];
@@ -41,6 +46,7 @@ in
 
   config = lib.mkIf cfg.enable {
     environment.systemPackages = [ robot ];
+    burrow.tools.robot = robot;
 
     burrow.claude.machineMd = lib.mkOrder 1300 ''
       ## When ${config.networking.hostName} is in trouble
