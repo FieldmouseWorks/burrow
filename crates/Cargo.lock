@@ -57,6 +57,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "burrow-agent"
+version = "0.0.0"
+dependencies = [
+ "jiff",
+ "rustix",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "burrow-backup"
 version = "0.0.0"
 dependencies = [

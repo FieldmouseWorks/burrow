@@ -173,7 +173,7 @@ pkgs.testers.runNixOSTest {
         host.fail("test -e /data/dev/src/demo/b")
         host.succeed(f"test -e {clone}/b")
         # And it comes back by itself, however long a loaded machine takes
-        # to boot it (agent.sh's boot).
+        # to boot it (BOOT in crates/burrow-agent/src/ssh.rs).
         host.wait_until_succeeds(f"su - dev -c 'agent sh {a} true </dev/null'", timeout=960)
 
     with subtest("fetch brings its work back as refs, without running its git config"):

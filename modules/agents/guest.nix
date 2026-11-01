@@ -82,7 +82,7 @@ in
       ];
 
       # The per-VM part: the network, vsock, the project and home shares and the
-      # credentials. `agent new` writes it; see agent.sh.
+      # credentials. `agent new` writes it; see crates/burrow-agent.
       extraArgsScript = "${pkgs.coreutils}/bin/cat qemu-args";
     };
 

@@ -1,0 +1,17 @@
+[package]
+name = "burrow-agent"
+description = "agent: one disposable microVM per task, on its own ZFS clone of the data dataset"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+jiff.workspace = true
+rustix = { version = "1.1.6", features = ["fs", "process", "system"] }
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true
