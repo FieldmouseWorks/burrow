@@ -868,13 +868,19 @@ fn a_pass_never_takes_out_blocks_newer_than_the_systems_from_their_own_repo() {
             prs(),
         ),
         (stale(), rules(), newer_prs.clone()),
+        // Its AGENTS.md still the system's: the cleanup path is held back too.
+        (current(), rules(), newer_prs.clone()),
     ] {
         let repos = [source_repo(&agents, &source_rules, &source_prs)];
         for only in [Some("sam/a"), None] {
             let ran = sync(&repos, only);
             assert_eq!(ran.ok, Ok(true));
             assert!(ran.wrote().is_empty(), "{:?}", ran.asked);
-            assert!(ran.written().is_empty() && ran.closed().is_empty());
+            assert!(
+                ran.asked.iter().all(|(m, _, _)| m == "GET"),
+                "{:?}",
+                ran.asked
+            );
             assert!(ran.out.contains("isn't this system's"), "{}", ran.out);
             assert!(!ran.notices().contains(&["open", "house-sync"]));
         }
@@ -885,6 +891,8 @@ fn a_pass_never_takes_out_blocks_newer_than_the_systems_from_their_own_repo() {
         };
         let ran = run_with(&repos, &dry, &setup(), Arc::default());
         assert!(!ran.out.contains("would open"), "{}", ran.out);
+        assert!(!ran.out.contains("would close"), "{}", ran.out);
+        assert!(ran.out.contains("isn't this system's"), "{}", ran.out);
     }
 }
 
@@ -898,10 +906,37 @@ fn the_repo_that_holds_the_blocks_gets_its_pr_once_the_system_has_them() {
 }
 
 #[test]
+fn the_repo_that_holds_the_blocks_has_older_prs_closed_once_the_system_has_them() {
+    let ran = sync(&[source_repo(&current(), &rules(), &prs())], Some("sam/a"));
+    assert_eq!(ran.ok, Ok(true));
+    assert_eq!(ran.closed().len(), 1, "{:?}", ran.asked);
+    // Read at the snapshot the rest of the pass works from.
+    assert!(
+        ran.asked
+            .iter()
+            .any(|(_, p, _)| p.ends_with("/contents/house/prs.md?ref=c0ffee"))
+    );
+}
+
+#[test]
 fn a_source_it_cant_read_fails_the_repo_rather_than_opening_a_pr() {
-    let mut broken = source_repo(&stale_prs(), &rules(), "unused");
-    broken.source_fails = true;
-    let ran = sync(&[broken], Some("sam/a"));
-    assert_eq!(ran.ok, Ok(false));
-    assert!(ran.wrote().is_empty(), "{:?}", ran.asked);
+    // Stale, or current so that only the cleanup is left: nothing changes.
+    for agents in [stale_prs(), current()] {
+        let mut broken = source_repo(&agents, &rules(), "unused");
+        broken.source_fails = true;
+        let ran = sync(&[broken.clone()], Some("sam/a"));
+        assert_eq!(ran.ok, Ok(false));
+        assert!(
+            ran.asked.iter().all(|(m, _, _)| m == "GET"),
+            "{:?}",
+            ran.asked
+        );
+        let ran = sync(&[broken], None);
+        assert!(
+            ran.asked.iter().all(|(m, _, _)| m == "GET"),
+            "{:?}",
+            ran.asked
+        );
+        assert!(ran.notices().contains(&["open", "house-sync"]));
+    }
 }
