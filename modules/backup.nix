@@ -9,51 +9,39 @@
 # minutes after it's taken, and once a day regardless, in case they stop.
 # Once a day it also forgets what `keep` doesn't keep, reads a share of the
 # repository back, checks the newest backup holds everything its snapshot
-# had, and restores a few paths to compare byte for byte (backup/backup.sh).
+# had, and restores a few paths to compare byte for byte (crates/burrow-backup).
 inputs:
 { config, lib, pkgs, ... }:
 let
   cfg = config.burrow.backup;
-  inherit (config.burrow) prefix user tools;
-  account = config.users.users.${user};
+  inherit (config.burrow) prefix tools;
   name = "${prefix}-backup";
 
-  vars = {
-    NAME = name;
-    HOST = config.networking.hostName;
-    DIR = "${config.burrow.stateDir}/backup";
-    REPO = cfg.repository;
-    PASSWORD = cfg.passwordFile;
-    RCLONE_CONFIG_FILE = if cfg.rcloneConfigFile == null then "" else cfg.rcloneConfigFile;
-    PATTERN = cfg.snapshots;
-    EXCLUDE_FILE = pkgs.writeText "${name}-exclude" (lib.concatLines cfg.exclude);
-    VERIFY_DAYS = toString cfg.verifyDays;
-    PACK_SIZE = toString cfg.packSize;
-    STALE_AFTER = toString cfg.staleAfter;
-    SCRATCH = config.burrow.scratchDir;
-    PROJ = lib.optionalString (tools ? proj) "${tools.proj}/bin/proj";
-    PROJECT = baseNameOf config.burrow.flake;
-    OWNER = config.burrow.owner;
-    NOTIFY = "${tools.notify}/bin/${prefix}-notify";
-    BURROW_USER = user;
-    HOME_DIR = account.home;
-    USER_UID = toString account.uid;
-  };
-
-  # Lists, as bash arrays: a path with a space in it stays one path.
-  lists = {
-    DATASETS = cfg.datasets;
-    DRILL = cfg.drill;
-    KEEP = lib.concatLists (lib.mapAttrsToList (k: n: [ "--keep-${k}" (toString n) ]) cfg.keep);
-  };
-
-  backup = pkgs.writeShellApplication {
+  # HOST-backup (crates/burrow-backup), with its config built in.
+  backupConfig = pkgs.writeText "${name}.json" (builtins.toJSON {
     inherit name;
-    runtimeInputs = with pkgs; [ restic rclone jq coreutils findutils diffutils gnugrep gawk util-linux bash config.boot.zfs.package ];
-    text = lib.concatStrings (lib.mapAttrsToList (n: v: "${n}=${lib.escapeShellArg v}\n") vars)
-      + lib.concatStrings (lib.mapAttrsToList (n: v: "${n}=(${lib.escapeShellArgs v})\n") lists)
-      + builtins.readFile ./backup/backup.sh;
-  };
+    host = config.networking.hostName;
+    state = "${config.burrow.stateDir}/backup";
+    inherit (cfg) repository passwordFile rcloneConfigFile snapshots datasets drill keep verifyDays packSize staleAfter;
+    excludeFile = pkgs.writeText "${name}-exclude" (lib.concatLines cfg.exclude);
+    scratch = config.burrow.scratchDir;
+    proj = if tools ? proj then "${tools.proj}/bin/proj" else null;
+    project = baseNameOf config.burrow.flake;
+    inherit (config.burrow) owner user;
+    notify = "${tools.notify}/bin/${prefix}-notify";
+    sudo = "${config.security.wrapperDir}/sudo";
+    # What it runs by name, and what those run: restic's rclone, mount's
+    # mount.zfs.
+    path = lib.makeBinPath (with pkgs; [ restic rclone util-linux config.boot.zfs.package ]);
+  });
+
+  backup = pkgs.runCommand name {
+    nativeBuildInputs = [ pkgs.makeBinaryWrapper ];
+    meta.mainProgram = name;
+  } ''
+    makeBinaryWrapper ${inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow}/bin/burrow-backup $out/bin/${name} \
+      --add-flags ${backupConfig}
+  '';
 in
 {
   imports = [
