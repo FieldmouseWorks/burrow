@@ -20,6 +20,7 @@ use serde_json::{Map, Value, json};
 
 use crate::config::Branches;
 use crate::pass::{DAY, Pass, repo_file};
+use crate::ts;
 
 /// Unmerged, with no PR and no commit for this many days: given up on
 /// (agents open a PR when they push). Its commits are kept under ARCHIVE
@@ -666,14 +667,6 @@ fn verdict(name: &str, pushed: &Pushed) -> Result<String, String> {
 /// A commit, as a log line names it.
 fn short(sha: &str) -> &str {
     sha.get(..7).unwrap_or(sha)
-}
-
-/// GitHub's time, in seconds.
-fn ts(at: &str) -> Result<f64, String> {
-    let t: jiff::Timestamp = at
-        .parse()
-        .map_err(|e| format!("GitHub's time {at:?}: {e}"))?;
-    Ok(t.as_millisecond() as f64 / 1000.0)
 }
 
 /// Whether `name` matches the glob, as Python's fnmatch, which the

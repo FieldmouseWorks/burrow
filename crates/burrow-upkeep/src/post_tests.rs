@@ -38,6 +38,7 @@ fn of(reviewer: &str, name: &str, answer: Value) -> Look {
         name: name.into(),
         answer,
         description: Some("4f2a".into()),
+        now: "4f2a".into(),
     }
 }
 

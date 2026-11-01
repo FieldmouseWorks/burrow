@@ -49,7 +49,7 @@ def look(repo, pr, key, st, lost_on, digest, line, age, after, strike, cleared):
         # in, say, is the owner's to do.
         if live and away[r] and not any(x[:2] == ("A reviewer is out of service", V.NAMES[r]) for x in digest):
             digest.append(("A reviewer is out of service", V.NAMES[r], away[r]))
-    said = {r: V.verdict(pr, head, r) for r in names}  # verdict, when, rounds with findings
+    said = V.verdicts(repo, pr, names)  # verdict, when, rounds with findings
     found = []  # the reviewers whose findings on this head this pass posted
     late, unposted = [], []  # earlier heads whose findings this pass posted; reviews it couldn't post yet
 
@@ -77,9 +77,9 @@ def look(repo, pr, key, st, lost_on, digest, line, age, after, strike, cleared):
         if back and not DRY:
             if back["result"] == "review":
                 try:
-                    v = V.post(repo, pr, r, back["answer"], back.get("description"))
+                    v, covers = V.post(repo, pr, r, back["answer"], back.get("description"))
                     _, _, rr = said[r]
-                    said[r] = (v if V.described(pr, back.get("description")) else "none", C.NOW, rr + (v == "findings"))
+                    said[r] = (v if covers else "none", C.NOW, rr + (v == "findings"))
                     if v == "findings":
                         found.append(r)
                     rs.pop("fails", None)
@@ -170,7 +170,7 @@ def look(repo, pr, key, st, lost_on, digest, line, age, after, strike, cleared):
                     f"its look at {head[:7]} decides")
             elif back.get("result") == "review" and back.get("base") == pr["baseRefName"] and isinstance(back.get("head"), str):
                 try:
-                    if V.post(repo, {**pr, "headRefOid": back["head"]}, r, back["answer"], back.get("description")) == "findings":
+                    if V.post(repo, {**pr, "headRefOid": back["head"]}, r, back["answer"], back.get("description"))[0] == "findings":
                         v, at, rr = said[r]
                         said[r] = (v, at, rr + 1)
                         late.append(back["head"][:7])
