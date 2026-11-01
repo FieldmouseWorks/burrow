@@ -1,0 +1,18 @@
+[package]
+name = "burrow-rustc-wrapper"
+description = "The compile cache's way into every Rust build: a compile through sccache with the user's own cache, or without it when anything keeps the cache from being used"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+rustix = { version = "1.1.6", features = ["fs", "process"] }
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
