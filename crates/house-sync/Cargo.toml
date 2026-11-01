@@ -1,0 +1,20 @@
+[package]
+name = "house-sync"
+description = "Every repo's copies of the house blocks kept the same as burrow's"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+base64 = "0.23.1"
+burrow-github = { path = "../burrow-github" }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

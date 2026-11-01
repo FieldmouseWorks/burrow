@@ -9,8 +9,8 @@ use std::path::Path;
 use super::{EVERY, Gate, Run};
 use crate::harness::read;
 
-/// With legs, each leg evaluates its own share of the outputs, in the plan's
-/// order, and builds only its checks: together, each once.
+/// With legs, each leg evaluates its own share of the outputs, said in the
+/// plan's order, and builds only its checks: together, each once.
 #[test]
 fn each_leg_takes_its_own_share() {
     let g = Gate::new();
@@ -52,12 +52,22 @@ fn each_leg_takes_its_own_share() {
             plans.insert(read(&plan));
             // Every leg makes the plan, then evaluates its own share.
             assert_eq!(r.calls[0], "eval plan", "leg {k} of {n}: {:?}", r.calls);
-            let mine: Vec<usize> = r
-                .entries()
+            // Each said in the plan's order, however they ran.
+            let plan_json: serde_json::Value = serde_json::from_str(&read(&plan)).unwrap();
+            let order: Vec<&str> = plan_json["entries"]
+                .as_array()
+                .unwrap()
                 .iter()
-                .map(|e| e.strip_prefix("eval entry ").unwrap().parse().unwrap())
+                .map(|e| e["what"].as_str().unwrap())
                 .collect();
-            assert!(mine.is_sorted(), "leg {k} of {n}: {:?}", r.calls);
+            let said: Vec<usize> = r
+                .out
+                .lines()
+                .filter_map(|l| l.strip_prefix("evaluating "))
+                .map(|w| order.iter().position(|o| *o == w).unwrap())
+                .collect();
+            assert_eq!(said.len(), r.entries().len(), "leg {k} of {n}: {}", r.out);
+            assert!(said.is_sorted(), "leg {k} of {n}: {}", r.out);
             assert_eq!(
                 r.out.contains(&format!("leg {k} of {n}:")),
                 n > 1,
