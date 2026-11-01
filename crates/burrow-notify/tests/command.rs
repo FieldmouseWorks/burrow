@@ -24,7 +24,7 @@ printf 'HTTP/2.0 '
 case "$*" in
   *" GET repos/sam/homelab/issues?"*) printf '200 OK\n\n[]' ;;
   *" POST repos/sam/homelab/labels --input -") printf '201 Created\n\n{}' ;;
-  *" POST repos/sam/homelab/issues --input -") printf '201 Created\n\n{"number":1}' ;;
+  *" POST repos/sam/homelab/issues --input -") printf '201 Created\n\n{"number":1,"labels":[{"name":"updates"}]}' ;;
   *) printf '404 Not Found\n\n{"message":"Not Found"}' ;;
 esac
 "#;
@@ -134,7 +134,7 @@ fn a_notice_opens_is_pending_and_closes() {
     assert_eq!(
         m.read("gh.log").lines().collect::<Vec<_>>(),
         [
-            "api -i -X GET repos/sam/homelab/issues?state=open&labels=updates&per_page=100",
+            "api -i -X GET repos/sam/homelab/issues?state=open&per_page=100",
             "api -i -X POST repos/sam/homelab/labels --input -",
             "api -i -X POST repos/sam/homelab/issues --input -",
         ],
@@ -213,7 +213,7 @@ fn a_notice_github_doesnt_get_goes_to_the_journal_and_fails_nothing() {
     assert!(ran.status.success(), "{ran:?}");
     let journal = m.read("journal");
     assert!(
-        journal.starts_with("-t box-notify -p warning|box-notify open k1: couldn't reach GitHub (GET repos/sam/homelab/issues?state=open&labels=updates&per_page=100: gh: HTTP 401: Bad credentials)"),
+        journal.starts_with("-t box-notify -p warning|box-notify open k1: couldn't reach GitHub (GET repos/sam/homelab/issues?state=open&per_page=100: gh: HTTP 401: Bad credentials)"),
         "{journal}"
     );
     assert_eq!(

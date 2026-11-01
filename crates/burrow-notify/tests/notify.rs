@@ -29,12 +29,19 @@ struct Issue {
 struct GitHub {
     issues: Vec<Issue>,
     labels: Vec<String>,
+    /// A login without push access: its new issues' labels are dropped, and
+    /// it may neither make a label nor add one.
+    no_push: bool,
+    /// Drops the labels of a new issue, though it may add them after.
+    drop_on_create: bool,
     down: bool,
     /// The calls it answers with a 503: "list", "label", "create",
     /// "comment", "close".
     fails: Vec<&'static str>,
     /// It opens the next issue and loses its answer.
     lose: bool,
+    /// It makes the next label and answers with a 503.
+    lose_label: bool,
     asked: Vec<(String, String, Option<Value>)>,
 }
 
@@ -48,6 +55,10 @@ fn answer(status: u16, body: Value, link: Option<String>) -> Result<Response, Fa
             body.to_string()
         },
     })
+}
+
+fn label_objects(labels: &[String]) -> Value {
+    labels.iter().map(|l| json!({"name": l})).collect()
 }
 
 impl GitHub {
@@ -89,28 +100,23 @@ impl GitHub {
             .collect();
         let param = |k: &str| params.iter().find(|(p, _)| *p == k).map(|(_, v)| *v);
         assert_eq!(param("state"), Some("open"), "{query}");
-        assert_eq!(param("labels"), Some("updates"), "{query}");
         let per_page: usize = param("per_page").unwrap().parse().unwrap();
         let page: usize = param("page").map_or(1, |p| p.parse().unwrap());
         // Newest first, as GitHub sorts them, PRs among them.
-        let open: Vec<&Issue> = self
-            .issues
-            .iter()
-            .rev()
-            .filter(|i| i.open && i.labels.iter().any(|l| l == "updates"))
-            .collect();
+        let open: Vec<&Issue> = self.issues.iter().rev().filter(|i| i.open).collect();
         let shown: Vec<Value> = open
             .iter()
             .skip((page - 1) * per_page)
             .take(per_page)
             .map(|i| {
                 json!({"number": i.number, "title": i.title,
+                       "labels": label_objects(&i.labels),
                        "pull_request": if i.pull_request { json!({"url": "x"}) } else { Value::Null }})
             })
             .collect();
         let link = (page * per_page < open.len()).then(|| {
             format!(
-                "<https://api.github.com/{REPO}issues?state=open&labels=updates&per_page={per_page}&page={}>; rel=\"next\"",
+                "<https://api.github.com/{REPO}issues?state=open&per_page={per_page}&page={}>; rel=\"next\"",
                 page + 1
             )
         });
@@ -146,12 +152,30 @@ impl Api for GitHub {
                 }
                 self.list(&issues["issues?".len()..])
             }
+            ("GET", ["labels", name]) => {
+                if self.fails("read label") {
+                    return refused();
+                }
+                if self.labels.iter().any(|l| l == name) {
+                    answer(200, json!({"name": name}), None)
+                } else {
+                    answer(404, json!({"message": "Not Found"}), None)
+                }
+            }
             ("POST", ["labels"]) => {
                 if self.fails("label") {
                     return refused();
                 }
                 let name = body["name"].as_str().unwrap().to_string();
                 assert_eq!(body["description"], "box-notify's notices");
+                if self.no_push {
+                    return answer(403, json!({"message": "Forbidden"}), None);
+                }
+                if self.lose_label {
+                    self.lose_label = false;
+                    self.labels.push(name);
+                    return refused();
+                }
                 if self.labels.contains(&name) {
                     return answer(422, json!({"message": "Validation Failed"}), None);
                 }
@@ -163,6 +187,8 @@ impl Api for GitHub {
                     return refused();
                 }
                 let n = self.add(body["title"].as_str().unwrap(), &[]);
+                let (no_push, drop) = (self.no_push, self.drop_on_create);
+                let known = self.labels.clone();
                 let issue = self.issues.last_mut().unwrap();
                 issue.body = body["body"].as_str().unwrap().into();
                 for (field, into) in [
@@ -174,6 +200,12 @@ impl Api for GitHub {
                         .map(|a| a.iter().map(|v| v.as_str().unwrap().into()).collect())
                         .unwrap_or_default();
                 }
+                // GitHub keeps only labels it knows, and for a login without
+                // push access none, and says 201 all the same.
+                issue
+                    .labels
+                    .retain(|l| !no_push && !drop && known.contains(l));
+                let labels = label_objects(&issue.labels);
                 if self.lose {
                     self.lose = false;
                     return Err(Failed {
@@ -181,7 +213,17 @@ impl Api for GitHub {
                         transient: true,
                     });
                 }
-                answer(201, json!({"number": n}), None)
+                answer(201, json!({"number": n, "labels": labels}), None)
+            }
+            ("POST", ["issues", n, "labels"]) => {
+                if self.no_push {
+                    return answer(403, json!({"message": "Forbidden"}), None);
+                }
+                let i = number(n);
+                for l in body["labels"].as_array().unwrap() {
+                    self.issues[i].labels.push(l.as_str().unwrap().into());
+                }
+                answer(200, json!([]), None)
             }
             ("POST", ["issues", n, "comments"]) => {
                 if self.fails("comment") {
@@ -435,8 +477,8 @@ fn every_page_of_issues_is_read() {
             .map(|(_, p, _)| p.as_str())
             .collect::<Vec<_>>(),
         [
-            "repos/sam/homelab/issues?state=open&labels=updates&per_page=100",
-            "repos/sam/homelab/issues?state=open&labels=updates&per_page=100&page=2",
+            "repos/sam/homelab/issues?state=open&per_page=100",
+            "repos/sam/homelab/issues?state=open&per_page=100&page=2",
         ]
     );
     // Opened elsewhere, so not said here today: the problem is said again.
@@ -509,13 +551,116 @@ fn without_its_notice_file_nothing_is_opened() {
 }
 
 #[test]
-fn a_label_it_cant_make_doesnt_stop_the_issue() {
+fn a_label_the_repo_already_has_is_used() {
     let mut b = machine(Some("sam/homelab"));
-    b.github.fails = vec!["label"];
+    b.github.labels = vec!["updates".into()];
     b.open("k12", NOW);
-    assert_eq!(b.github.open_titles(), ["[k12] Stuck"]);
     assert_eq!(b.github.issues[0].labels, ["updates"]);
-    assert!(b.journal.0.is_empty());
+    assert!(b.journal.0.is_empty(), "{:?}", b.journal.0);
+}
+
+/// Absent, and it can't be made: no issue that would come out unlabelled and
+/// no record of one, and the journal says why; the next try starts afresh.
+#[test]
+fn a_label_it_cant_make_opens_nothing() {
+    for (no_push, fails, why) in [
+        (true, vec![], "HTTP 403"),
+        (false, vec!["label"], "HTTP 503"),
+    ] {
+        let mut b = machine(Some("sam/homelab"));
+        b.github.no_push = no_push;
+        b.github.fails = fails;
+        b.open("k12", NOW);
+        assert!(b.github.issues.is_empty());
+        assert!(!b.pending("k12"));
+        let (priority, line) = &b.journal.0[0];
+        assert_eq!(*priority, Priority::Warning);
+        assert!(
+            line.starts_with("box-notify open k12: couldn't reach GitHub ("),
+            "{line}"
+        );
+        assert!(line.contains(why), "{line}");
+        b.github.no_push = false;
+        b.github.fails = vec![];
+        b.open("k12", NOW);
+        assert_eq!(b.github.issues[0].labels, ["updates"]);
+        assert!(b.pending("k12"));
+    }
+}
+
+/// GitHub made the label and lost its answer: asked, it says it's there.
+#[test]
+fn a_label_whose_answer_was_lost_is_used() {
+    let mut b = machine(Some("sam/homelab"));
+    b.github.lose_label = true;
+    b.open("k12", NOW);
+    assert_eq!(b.github.issues[0].labels, ["updates"]);
+    assert!(b.journal.0.is_empty(), "{:?}", b.journal.0);
+}
+
+/// The make failed and GitHub can't say whether it's there: nothing's opened.
+#[test]
+fn a_label_github_cant_vouch_for_opens_nothing() {
+    let mut b = machine(Some("sam/homelab"));
+    b.github.lose_label = true;
+    b.github.fails = vec!["read label"];
+    b.open("k12", NOW);
+    assert!(b.github.issues.is_empty());
+    assert!(!b.pending("k12"));
+    assert_eq!(b.journal.0.len(), 1);
+}
+
+/// The label's there but the login has no push access: GitHub drops it from
+/// the new issue, says 201, and refuses to add it. The issue is still the
+/// notice's: no twin, the journal says so, and it closes.
+#[test]
+fn an_issue_whose_label_was_dropped_is_still_found() {
+    let mut b = machine(Some("sam/homelab"));
+    b.github.labels = vec!["updates".into()];
+    b.github.no_push = true;
+    b.open("k13", NOW);
+    assert_eq!(b.github.open_titles(), ["[k13] Stuck"]);
+    assert!(b.github.issues[0].labels.is_empty());
+    assert!(b.pending("k13"));
+    assert_eq!(b.journal.0.len(), 1);
+    assert!(
+        b.journal.0[0].1.contains("issues/1/labels"),
+        "{:?}",
+        b.journal.0
+    );
+    b.open("k13", NOW + 1);
+    assert_eq!(b.github.issues.len(), 1, "a twin");
+    b.close("k13");
+    assert!(!b.github.issues[0].open);
+    assert_eq!(b.github.issues[0].comments, ["Fixed."]);
+    assert!(!b.pending("k13"));
+}
+
+/// As above, with the answer lost too: only the title can find it.
+#[test]
+fn a_dropped_label_and_a_lost_answer_still_make_one_issue() {
+    let mut b = machine(Some("sam/homelab"));
+    b.github.labels = vec!["updates".into()];
+    b.github.no_push = true;
+    b.github.lose = true;
+    b.open("k14", NOW);
+    b.open("k14", NOW + 1);
+    assert_eq!(b.github.issues.len(), 1, "a twin");
+    assert!(b.pending("k14"));
+    b.close("k14");
+    assert!(!b.github.issues[0].open);
+    assert!(!b.pending("k14"));
+}
+
+/// Dropped only from the issue: a login that may add it, adds it.
+#[test]
+fn a_label_dropped_from_a_new_issue_is_added() {
+    let mut b = machine(Some("sam/homelab"));
+    // A repo where the create's labels are dropped though adding one works.
+    b.github.drop_on_create = true;
+    b.open("k15", NOW);
+    assert_eq!(b.github.issues[0].labels, ["updates"]);
+    assert!(b.journal.0.is_empty(), "{:?}", b.journal.0);
 }
 
 #[test]

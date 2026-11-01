@@ -57,7 +57,7 @@ in
     label = lib.mkOption {
       type = lib.types.str;
       default = "updates";
-      description = "The label every notice carries; it's how HOST-notify finds its own issues.";
+      description = "The label every notice asks for; HOST-notify takes an issue with another label for someone else's.";
     };
   };
 

@@ -35,7 +35,7 @@ pub struct Config {
     pub repo: Option<String>,
     /// Who each issue is assigned to, so GitHub tells them.
     pub assignee: Option<String>,
-    /// The label every notice carries: it's how it finds its own issues.
+    /// The label every notice asks for; an issue with another label isn't one.
     pub label: String,
     /// One file per notice it asked for, holding when it last said so.
     pub dir: PathBuf,
@@ -192,7 +192,9 @@ impl Notices<'_> {
         // issue", which would open a second one.
         let open = github::open_issues(api, repo, &cfg.label, key)?;
         let Some(&first) = open.first() else {
-            github::label(api, repo, &cfg.label, &cfg.name);
+            // Before the notice file: with no label there's no issue, and
+            // nothing to close.
+            github::label(api, repo, &cfg.label, &cfg.name)?;
             // Kept before it's asked for: GitHub can open the issue and the
             // answer still be lost, and then only this says it needs closing.
             write_stamp(&stamp, now)?;
