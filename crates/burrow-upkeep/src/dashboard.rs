@@ -27,7 +27,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::config::Dashboard;
-use crate::pass::{DAY, HOUR, Job, MIN, Pass, key};
+use crate::pass::{Ask, DAY, HOUR, Job, MIN, Pass};
 
 pub const STUCK: &str = "Still on Renovate's dashboard a day after a Claude job";
 pub const NO_JOB: &str = "Couldn't start a Claude job";
@@ -66,13 +66,12 @@ pub struct State {
     pub job: Option<String>,
     #[serde(rename = "jobAt", skip_serializing_if = "Option::is_none")]
     pub job_at: Option<f64>,
-    /// The items a look asked a job for, and when it first gave the key
-    /// they're asked under, until a look finds a job under it
-    /// (Pass::asked_for).
+    /// The items a look asked a job for, and the ask that stands, until a
+    /// look finds a job under its key (Pass::asked_for).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub asked: Vec<String>,
-    #[serde(rename = "askedAt", skip_serializing_if = "Option::is_none")]
-    pub asked_at: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ask: Option<Ask>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize, PartialEq)]
@@ -192,7 +191,7 @@ pub fn watch(p: &mut Pass, cfg: &Dashboard) -> Result<(), String> {
     let mut st: State = p.load(&name);
     asked(p, &mut st)?;
     // The key stands whatever becomes of the dashboard meanwhile.
-    let asked_at = st.asked_at;
+    let ask = st.ask.take();
     let gone = |p: &Pass| State {
         next: Some(p.now + 2.0 * HOUR),
         ..State::default()
@@ -249,7 +248,7 @@ pub fn watch(p: &mut Pass, cfg: &Dashboard) -> Result<(), String> {
             }
         }
     }
-    st.asked_at = asked_at;
+    st.ask = ask;
     if let Some(number) = n {
         act(p, cfg, number, &mut st);
     }
@@ -355,7 +354,7 @@ fn act(p: &mut Pass, cfg: &Dashboard, n: u64, st: &mut State) {
             )
         })
         .collect();
-    let key = key(p.repo, "dashboard", *st.asked_at.get_or_insert(p.now));
+    let key = p.ask("dashboard", &mut st.ask);
     p.out.jobs.push(Job {
         part: "dashboard",
         key,
@@ -374,13 +373,14 @@ fn act(p: &mut Pass, cfg: &Dashboard, n: u64, st: &mut State) {
 }
 
 /// The job the part asked for, found by its key: handed what it was asked
-/// for, as of when the key was given. While none has started, the key
-/// stands, and what's due is asked for again under it.
+/// for, as of its last ask. While none has started, the key stands, and
+/// what's due is asked for again under it.
 fn asked(p: &mut Pass, st: &mut State) -> Result<(), String> {
-    let Some(at) = st.asked_at else {
+    let Some(ask) = &st.ask else {
         return Ok(());
     };
-    let Some(jid) = p.asked_for("dashboard", at)? else {
+    let at = ask.at;
+    let Some(jid) = p.asked_for(ask)? else {
         st.asked.clear();
         return Ok(());
     };
@@ -398,7 +398,7 @@ fn asked(p: &mut Pass, st: &mut State) -> Result<(), String> {
     st.job = Some(jid);
     st.job_at = Some(at);
     st.asked.clear();
-    st.asked_at = None;
+    st.ask = None;
     Ok(())
 }
 

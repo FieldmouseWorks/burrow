@@ -30,7 +30,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::config::Flaky;
-use crate::pass::{DAY, Job, MIN, Pass, key, unavailable};
+use crate::pass::{Ask, DAY, Job, MIN, Pass, unavailable};
 
 /// A look that keeps failing this long goes to the stuck issue: once is
 /// GitHub, often; every pass for an hour is a bug.
@@ -84,8 +84,8 @@ pub struct State {
     /// (Pass::asked_for).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub asked: Vec<u64>,
-    #[serde(rename = "askedAt", skip_serializing_if = "Option::is_none")]
-    pub asked_at: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ask: Option<Ask>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize, PartialEq)]
@@ -250,7 +250,7 @@ fn act(p: &mut Pass, cfg: &Flaky, st: &mut State) -> Result<(), String> {
             (NO_JOB.to_string(), format!("{}#{n}", p.repo), what)
         })
         .collect();
-    let key = key(p.repo, "flaky", *st.asked_at.get_or_insert(p.now));
+    let key = p.ask("flaky", &mut st.ask);
     p.out.jobs.push(Job {
         part: "flaky",
         key,
@@ -268,13 +268,14 @@ fn act(p: &mut Pass, cfg: &Flaky, st: &mut State) -> Result<(), String> {
 }
 
 /// The job the part asked for, found by its key: handed what it was asked
-/// for, as of when the key was given. While none has started, the key
-/// stands, and what's due is asked for again under it.
+/// for, as of its last ask. While none has started, the key stands, and
+/// what's due is asked for again under it.
 fn asked(p: &mut Pass, st: &mut State) -> Result<(), String> {
-    let Some(at) = st.asked_at else {
+    let Some(ask) = &st.ask else {
         return Ok(());
     };
-    let Some(jid) = p.asked_for("flaky", at)? else {
+    let at = ask.at;
+    let Some(jid) = p.asked_for(ask)? else {
         st.asked.clear();
         return Ok(());
     };
@@ -292,7 +293,7 @@ fn asked(p: &mut Pass, st: &mut State) -> Result<(), String> {
     st.job = Some(jid);
     st.job_at = Some(at);
     st.asked.clear();
-    st.asked_at = None;
+    st.ask = None;
     Ok(())
 }
 

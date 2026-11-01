@@ -7,8 +7,8 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use burrow_github::{Api, Error, call};
-use serde::Serialize;
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::config::Config;
@@ -68,8 +68,20 @@ pub struct Job {
 }
 
 /// The key a job a part asked for at `at` is kept under.
-pub fn key(repo: &str, part: &str, at: f64) -> String {
+fn key(repo: &str, part: &str, at: f64) -> String {
     format!("upkeep/{repo}/{part}/{at}")
+}
+
+/// A job a part has asked for and no look has found yet.
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
+pub struct Ask {
+    /// The key it's asked for under, as it was given. It's kept whole, not
+    /// made again from a time: a time read back from JSON can come out a
+    /// hair off, and a key a hair off finds nothing and starts a second job.
+    pub key: String,
+    /// When it was last asked for: what a job found under the key is dated
+    /// by, since one that took the key late started on a later ask.
+    pub at: f64,
 }
 
 /// How a Claude job stands.
@@ -143,12 +155,26 @@ impl Pass<'_> {
         self.out.stuck.push((heading.to_string(), at, what));
     }
 
-    /// The job a part asked for under the key it gave at `at`, as proj has
-    /// it: None while none has started.
-    pub fn asked_for(&mut self, part: &str, at: f64) -> Result<Option<String>, String> {
-        let key = key(self.repo, part, at);
+    /// Ask for a part's job now: under the key of the ask that stands, or a
+    /// new one if none does. What it gives is the key to ask under.
+    pub fn ask(&self, part: &str, stands: &mut Option<Ask>) -> String {
+        let key = match stands.take() {
+            Some(ask) => ask.key,
+            None => key(self.repo, part, self.now),
+        };
+        *stands = Some(Ask {
+            key: key.clone(),
+            at: self.now,
+        });
+        key
+    }
+
+    /// The job a part asked for, as proj has it under the ask's key: None
+    /// while none has started.
+    pub fn asked_for(&mut self, ask: &Ask) -> Result<Option<String>, String> {
+        let key = &ask.key;
         self.jobs
-            .find(&key)
+            .find(key)
             .map_err(|e| format!("whether the job it asked for started ({key}): {e}"))
     }
 

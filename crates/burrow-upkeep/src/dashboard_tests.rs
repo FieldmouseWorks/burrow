@@ -1,7 +1,7 @@
 use super::*;
 use crate::config::Config;
 use crate::pass::Out;
-use crate::testing::{Hub, States, T, answer, config, look, start};
+use crate::testing::{FRACTIONAL, Hub, States, T, answer, config, look, start};
 use serde_json::json;
 
 const BODY: &str = "This issue lists Renovate updates and detected dependencies.
@@ -639,7 +639,8 @@ fn a_job_asked_for_is_found_by_its_key_however_long_it_waits() {
     // Closed and found again meanwhile: the key stands.
     dashboard(&mut hub, BODY, &[("state", "closed")]);
     watch_at(&cfg, &mut hub, &mut jobs, DAY + 2.0);
-    assert_eq!(state(&cfg).asked_at, Some(T + DAY));
+    let stands = state(&cfg).ask.unwrap();
+    assert_eq!((stands.key.as_str(), stands.at), (&*key, T + DAY + 1.0));
     jobs.unfound = Some("proj find: exit status: 1".into());
     let (out, r) = look(&cfg, &mut hub, &mut jobs, DAY + 3.0, |p| {
         crate::watch(p);
@@ -653,7 +654,7 @@ fn a_job_asked_for_is_found_by_its_key_however_long_it_waits() {
             "its dashboard: whether the job it asked for started ({key}): proj find: exit status: 1"
         )]
     );
-    assert_eq!(state(&cfg).asked_at, Some(T + DAY));
+    assert_eq!(state(&cfg).ask.unwrap().key, key);
     // Queued, and still queued a week on: it has what was asked, and no
     // other job starts beside it.
     jobs.unfound = None;
@@ -668,7 +669,7 @@ fn a_job_asked_for_is_found_by_its_key_however_long_it_waits() {
         assert!(out.jobs.is_empty(), "{out:?}");
     }
     let st = state(&cfg);
-    assert!(st.asked.is_empty() && st.asked_at.is_none(), "{st:?}");
+    assert!(st.asked.is_empty() && st.ask.is_none(), "{st:?}");
     assert_eq!(
         (st.job.as_deref(), st.job_at),
         (Some("dash-q"), Some(T + DAY))
@@ -679,6 +680,56 @@ fn a_job_asked_for_is_found_by_its_key_however_long_it_waits() {
             .filter(|it| it.handed.is_some())
             .all(|it| it.job.as_deref() == Some("dash-q") && it.handed == Some(T + DAY))
     );
+}
+
+#[test]
+fn a_job_is_found_under_the_very_key_it_was_asked_for_under() {
+    // The steward's clock has a fraction, and this one comes back from the
+    // state file's JSON a hair off: a key made again from it finds nothing
+    // and starts a second job.
+    let d = tempfile::tempdir().unwrap();
+    let cfg = Config {
+        flaky: None,
+        ..config(d.path())
+    };
+    let (mut hub, mut jobs) = (Hub::default(), States::new("running"));
+    hits(&mut hub, 7, "sam");
+    dashboard(&mut hub, BODY, &[]);
+    let now = FRACTIONAL - T;
+    watch_at(&cfg, &mut hub, &mut jobs, now - 2.0 * DAY);
+    let out = watch_at(&cfg, &mut hub, &mut jobs, now);
+    let key = &out.jobs[0].key;
+    assert_eq!(key, "upkeep/sam/r/dashboard/1793945621.8617759");
+    jobs.found.insert(key.clone(), "j".into());
+    let out = watch_at(&cfg, &mut hub, &mut jobs, now + 60.0);
+    assert!(out.jobs.is_empty(), "{out:?}");
+    assert_eq!(state(&cfg).job.as_deref(), Some("j"));
+}
+
+#[test]
+fn a_job_that_took_its_key_late_is_dated_by_the_last_ask() {
+    // Asked for, and asked again days on before one starts: its day runs
+    // from then, so what it was given isn't stuck as soon as it ends.
+    let d = tempfile::tempdir().unwrap();
+    let cfg = Config {
+        flaky: None,
+        ..config(d.path())
+    };
+    let (mut hub, mut jobs) = (Hub::default(), States::new("done"));
+    hits(&mut hub, 7, "sam");
+    dashboard(&mut hub, BODY, &[]);
+    watch_at(&cfg, &mut hub, &mut jobs, 0.0);
+    assert_eq!(watch_at(&cfg, &mut hub, &mut jobs, DAY).jobs.len(), 1);
+    let out = watch_at(&cfg, &mut hub, &mut jobs, 4.0 * DAY);
+    assert_eq!(
+        out.jobs[0].key,
+        format!("upkeep/sam/r/dashboard/{}", T + DAY)
+    );
+    jobs.start(&cfg, "dashboard", "j");
+    let out = watch_at(&cfg, &mut hub, &mut jobs, 4.0 * DAY + 60.0);
+    assert!(lines(&out).is_empty() && out.jobs.is_empty(), "{out:?}");
+    assert_eq!(state(&cfg).job_at, Some(T + 4.0 * DAY));
+    assert!(!lines(&watch_at(&cfg, &mut hub, &mut jobs, 5.0 * DAY + 60.0)).is_empty());
 }
 
 #[test]

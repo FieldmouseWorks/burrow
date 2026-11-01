@@ -188,7 +188,7 @@ assert all(x[0] in R.OWNERS for x in mine), mine
 assert [(j["pipeline"], j["timeout"], j["clone"]) for j in JOBS] == [(False, 240, True)], JOBS
 assert "`browser/stream`: https://github.com/sam/r/issues/4" in JOBS[0]["task"], JOBS
 assert JOBS[0]["key"] == f"upkeep/sam/r/flaky/{T}", JOBS
-assert state("flaky")["asked"] == [4] and state("flaky")["askedAt"] == T, state("flaky")
+assert state("flaky")["asked"] == [4] and state("flaky")["ask"] == {"key": f"upkeep/sam/r/flaky/{T}", "at": T}, state("flaky")
 assert C.WAKE == {"sam/r": T + 245 * 60}, C.WAKE
 assert S.SEARCHED == [1], S.SEARCHED
 assert {c["token"] for c in called()} == {"ghs_app_sam"}, called()
@@ -245,6 +245,20 @@ assert any(f"its flaky tests: whether the job it asked for started (upkeep/sam/r
 keys(**{f"upkeep/sam/r/flaky/{T}": ["up-1"]})
 mine = look(120)
 assert not JOBS and state("flaky")["issues"]["4"]["job"] == "up-1", (JOBS, state("flaky"))
+
+# The steward's clock has a fraction, and this one reads back from the state
+# file's JSON a hair off: the next look still finds the job under the key it
+# was asked for under, and starts no other.
+os.remove(f"{C.STATE}/flaky-sam_r.json")
+keys()
+github()
+at = 1793945621.8617759 - T
+look(at)
+key = "upkeep/sam/r/flaky/1793945621.8617759"
+assert [j["key"] for j in JOBS if "/flaky/" in j["key"]] == [key], JOBS
+look(at + 60)
+assert not [j for j in JOBS if "/flaky/" in j["key"]], JOBS
+assert state("flaky")["issues"]["4"]["job"] == json.load(open(PROJ_KEYS))[key][0], state("flaky")
 
 # A job that raises as it starts (a brief past what exec takes, a clone that
 # breaks) is that request's failure: the other part's job starts all the

@@ -1,7 +1,7 @@
 use super::*;
 use crate::config::Config;
 use crate::pass::Out;
-use crate::testing::{Hub, States, T, answer, config, look as at, start};
+use crate::testing::{FRACTIONAL, Hub, States, T, answer, config, look as at, start};
 use std::fs;
 
 const H: f64 = 3600.0;
@@ -525,7 +525,8 @@ fn a_job_that_never_started_hands_nothing() {
         look(p, p.cfg.flaky.as_ref().unwrap(), listed)
     });
     assert!(r.unwrap_err().ends_with("proj find: exit status: 1") && out.jobs.is_empty());
-    assert_eq!(state(&cfg).asked_at, Some(T));
+    let stands = state(&cfg).ask.unwrap();
+    assert_eq!((stands.key.as_str(), stands.at), (&*key, T + 60.0));
     jobs.unfound = None;
     jobs.start(&cfg, "flaky", "j");
     jobs.set("j", "queued");
@@ -534,8 +535,28 @@ fn a_job_that_never_started_hands_nothing() {
     assert!(out.jobs.is_empty(), "{out:?}");
     let st = state(&cfg);
     let it = &st.issues[&9];
-    assert_eq!((it.handed, it.job.as_deref()), (Some(T), Some("j")));
-    assert!(st.asked.is_empty() && st.asked_at.is_none(), "{st:?}");
+    assert_eq!((it.handed, it.job.as_deref()), (Some(T + 60.0), Some("j")));
+    assert!(st.asked.is_empty() && st.ask.is_none(), "{st:?}");
+}
+
+#[test]
+fn a_job_is_found_under_the_very_key_it_was_asked_for_under() {
+    // The steward's clock has a fraction, and this one comes back from the
+    // state file's JSON a hair off: a key made again from it finds nothing
+    // and starts a second job.
+    let d = tempfile::tempdir().unwrap();
+    let cfg = config(d.path());
+    let (mut hub, mut jobs) = (Hub::default(), States::new("running"));
+    let now = FRACTIONAL - T;
+    let listed = says(&mut hub, &[(9, "unit/net", ACTIONS)]);
+    let out = run(&cfg, &mut hub, &mut jobs, now, listed);
+    let key = &out.jobs[0].key;
+    assert_eq!(key, "upkeep/sam/r/flaky/1793945621.8617759");
+    jobs.found.insert(key.clone(), "j".into());
+    let listed = says(&mut hub, &[(9, "unit/net", ACTIONS)]);
+    let out = run(&cfg, &mut hub, &mut jobs, now + 60.0, listed);
+    assert!(out.jobs.is_empty(), "{out:?}");
+    assert_eq!(state(&cfg).job.as_deref(), Some("j"));
 }
 
 #[test]

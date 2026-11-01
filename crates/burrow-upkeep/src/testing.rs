@@ -12,6 +12,9 @@ use crate::config::{Config, Dashboard, Flaky};
 use crate::pass::{Jobs, Out, Pass};
 
 pub const T: f64 = 1_800_000_000.0;
+/// A time with a fraction that serde_json reads back a hair off, as about
+/// one in eight of the steward's clock is.
+pub const FRACTIONAL: f64 = 1793945621.8617759;
 
 pub fn config(dir: &Path) -> Config {
     Config {
@@ -163,9 +166,8 @@ impl States {
     pub fn start(&mut self, cfg: &Config, part: &str, jid: &str) {
         let text = std::fs::read_to_string(cfg.state_dir.join(format!("{part}-sam_r.json")));
         let st: Value = serde_json::from_str(&text.unwrap()).unwrap();
-        let at = st["askedAt"].as_f64().expect("a job asked for");
-        let key = crate::pass::key("sam/r", part, at);
-        self.found.insert(key, jid.into());
+        let key = st["ask"]["key"].as_str().expect("a job asked for");
+        self.found.insert(key.into(), jid.into());
     }
 
     pub fn set(&mut self, jid: &str, state: &str) {
