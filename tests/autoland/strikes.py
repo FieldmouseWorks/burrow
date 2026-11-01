@@ -92,12 +92,15 @@ CASES = {
 # A fix job's answers (claims.py) GitHub won't take: here a conflict's job,
 # handed at once, that ended with a comment to post.
 real_upkeep = C.upkeep
-ANSWER = {}  # what burrow-upkeep's `answer` says (outcome, why), while set
+ANSWER = {}  # what burrow-upkeep's `claims` says came of job-1's answers (outcome, why), while set
 
 
 def upkeep(*args, **kw):
-    if args[0] == "answer" and ANSWER:
-        return {**ANSWER, "limited": None}
+    if args[0] == "claims" and ANSWER:
+        look = json.loads(kw["input"])
+        kept = {j: h for j, h in look["answering"].items() if ANSWER["outcome"] in ("refused", "unanswered")}
+        return {"answering": kept, "pushedBy": look["pushedBy"], "stop": [], "wake": None, "limited": None,
+                "answered": [{"jid": j, "kind": h["kind"], **ANSWER} for j, h in look["answering"].items()]}
     return real_upkeep(*args, **kw)
 
 

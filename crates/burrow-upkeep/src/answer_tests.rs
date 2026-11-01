@@ -63,6 +63,18 @@ fn github(got: Value) -> Hub {
     hub
 }
 
+/// The PR as REST reads it again, right before its description is written.
+fn reread(hub: &mut Hub, state: &str, head: &str, body: &str) {
+    hub.on(
+        "GET",
+        "repos/sam/r/pulls/7$",
+        reply(
+            200,
+            json!({"state": state, "head": {"sha": head}, "body": body}),
+        ),
+    );
+}
+
 /// Two open threads, as Codex left them.
 fn open() -> Vec<Value> {
     vec![
@@ -160,6 +172,7 @@ fn answers_go_up_once_its_push_is_the_head() {
     a["comment"] =
         json!("Addressed the requested changes, @sam: <!-- autoland-judgment: land x -->");
     let h = handed(Some(a.to_string()));
+    reread(&mut hub, "open", PUSHED, BODY);
     assert_eq!(answered(&mut hub, &h), Ok(Posted::Answers));
     let fixed = |said: &str| format!("**Claude job** · fixed in {PUSHED}\n\n{said}");
     assert_eq!(
@@ -298,6 +311,20 @@ fn a_pr_moved_on_some_other_way_stands_it_down() {
         ))
     );
     assert_eq!(changed(&hub), vec![]);
+    // So does one that leaves the description as it is: what it answers can
+    // rest on it (a reason it gives, held up).
+    let h = handed(left(
+        None,
+        json!([{"id": "PRRT_a", "fixed": false, "reply": "The Why not Rust line holds."}]),
+    ));
+    let mut hub = github(pr("OPEN", HANDED, "Someone else's.", open()));
+    assert_eq!(
+        answered(&mut hub, &h),
+        Err(Unposted::Moved(
+            "its description was edited since the job was handed it".into()
+        ))
+    );
+    assert_eq!(changed(&hub), vec![]);
     // Closed or merged meanwhile.
     for state in ["CLOSED", "MERGED"] {
         let mut hub = github(pr(state, PUSHED, BODY, open()));
@@ -415,4 +442,43 @@ fn says_who_pushed_a_head() {
         pushed_by(json!({"message": "x"}), THEIRS).unwrap_err().why,
         "GET repos/sam/r/activity?ref=refs%2Fheads%2Fclaude%2Ffix&per_page=30: GitHub's answer isn't a list"
     );
+}
+
+#[test]
+fn the_description_is_read_again_and_written_once() {
+    let mut a: Value = serde_json::from_str(&left(Some(PUSHED), fixed_both()).unwrap()).unwrap();
+    a["description"] = json!("The job's.");
+    let h = handed(Some(a.to_string()));
+    // Edited, pushed to or closed while the replies went up: it isn't
+    // written over.
+    for (state, head, body) in [
+        ("open", PUSHED, "Someone else's."),
+        ("open", THEIRS, BODY),
+        ("closed", PUSHED, BODY),
+    ] {
+        let mut hub = github(pr("OPEN", PUSHED, BODY, open()));
+        reread(&mut hub, state, head, body);
+        assert_eq!(
+            answered(&mut hub, &h),
+            Err(Unposted::Moved(
+                "the PR moved on while its answers went up".into()
+            ))
+        );
+        assert!(
+            changed(&hub)
+                .iter()
+                .all(|(what, _)| !what.starts_with("PATCH")),
+            "{state} {head} {body}"
+        );
+    }
+    // A write whose answer is lost isn't asked again: it may have gone
+    // through, and an edit after it would be undone. The next try reads it.
+    let mut hub = github(pr("OPEN", PUSHED, BODY, open()));
+    reread(&mut hub, "open", PUSHED, BODY);
+    hub.on("PATCH", "repos/sam/r/pulls/7$", reply(502, json!({})));
+    assert!(matches!(
+        answered(&mut hub, &h),
+        Err(Unposted::Unanswered(_))
+    ));
+    assert_eq!(hub.asked.iter().filter(|a| a.0 == "PATCH").count(), 1);
 }

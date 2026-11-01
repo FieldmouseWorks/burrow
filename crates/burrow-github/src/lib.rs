@@ -150,6 +150,23 @@ pub fn call_allowing(
     kept(&what, r, allowed)
 }
 
+/// A write that asked again could undo someone else's (a PATCH of a PR's
+/// description, which its owner edits too): asked again only after a 429,
+/// as a POST is (`call`). One whose answer is lost or a 5xx may have been
+/// done, so it's the caller's to read again and see.
+pub fn call_once(
+    api: &mut dyn Api,
+    method: &str,
+    path: &str,
+    body: Option<&Value>,
+) -> Result<Response, Error> {
+    let what = format!("{method} {path}");
+    let r = tried(api, &what, false, |api| {
+        api.request(method, path, body, None)
+    })?;
+    kept(&what, r, &[])
+}
+
 /// A GraphQL query about `owner`'s account (Api::graphql): its `data`,
 /// tried again as a GET is, since a query changes nothing (a mutation isn't
 /// one), and an Error when GitHub's answer holds errors.
@@ -701,6 +718,35 @@ mod tests {
         gh.on("POST", "graphql", vec![ok(200, json!({"data": 1}), &[])]);
         assert_eq!(query(&mut gh, "sam", "q", json!({})).unwrap(), json!(1));
         assert_eq!(gh.asked[0].1, "graphql");
+    }
+
+    #[test]
+    fn writes_once_what_a_replay_could_undo() {
+        // A 502 can come after GitHub took the PATCH: asked again, it would
+        // write over an edit made meanwhile.
+        let mut gh = Fake::default();
+        gh.on(
+            "PATCH",
+            "repos/sam/r/pulls/7",
+            vec![ok(502, Value::Null, &[])],
+        );
+        let body = json!({"body": "new"});
+        let e = call_once(&mut gh, "PATCH", "repos/sam/r/pulls/7", Some(&body)).unwrap_err();
+        assert!(
+            e.unanswered && e.why.starts_with("PATCH repos/sam/r/pulls/7: HTTP 502"),
+            "{}",
+            e.why
+        );
+        assert_eq!(gh.asked("PATCH").len(), 1);
+        // A 429 is GitHub doing nothing: asked again.
+        let mut gh = Fake::default();
+        gh.on(
+            "PATCH",
+            "repos/sam/r/pulls/7",
+            vec![ok(429, Value::Null, &[]), ok(200, json!({}), &[])],
+        );
+        assert!(call_once(&mut gh, "PATCH", "repos/sam/r/pulls/7", Some(&body)).is_ok());
+        assert_eq!(gh.asked("PATCH").len(), 2);
     }
 
     #[test]

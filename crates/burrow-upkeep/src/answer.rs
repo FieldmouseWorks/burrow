@@ -1,30 +1,28 @@
 //! What a Claude job of the steward's that settles a PR leaves for the
 //! steward to post (tasks.py `fix_task`): its replies on the PR's review
 //! threads, each resolved after it, the PR's new description and a comment.
-//! The job pushes and writes them to its answers file; the repo's pass hands
-//! them here once the job is over (claims.py), and they go up as the
-//! steward's App only while the PR's head is the job's own push, or the head
-//! it was handed when it pushed nothing. So a job can't say it fixed
-//! something in a commit GitHub doesn't have, and a job whose PR someone
-//! else moved on meanwhile says nothing at all: the new head is theirs.
+//! The job pushes and writes them to its answers file; once the job is over
+//! the PR's pass reads it (claims.rs), and they go up as the steward's App
+//! only while the PR's head is the job's own push, or the head it was handed
+//! when it pushed nothing. So a job can't say it fixed something in a commit
+//! GitHub doesn't have, and a job whose PR someone else moved on meanwhile
+//! says nothing at all: the new head is theirs.
 //!
 //! `pusher` says who pushed a branch's head, from GitHub's own record of the
 //! branch's pushes, so a pass can tell a job's own push from anyone else's
-//! (stopping.py).
+//! (claims.rs).
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use burrow_github::{Error, call, encode, mutate, query};
+use burrow_github::{Error, call, call_once, encode, mutate, query};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::pass::Pass;
 use crate::post::quiet;
 
-/// What the pass hands `answer`, on stdin: the PR, what its job was handed,
-/// and what the job left.
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
+/// The PR, what its job was handed, and what the job left.
+#[derive(Debug)]
 pub struct Handed {
     pub number: u64,
     /// The PR's head when the job was handed it.
@@ -225,18 +223,17 @@ pub fn answer(p: &mut Pass, h: &Handed) -> Result<Posted, Unposted> {
             short(head)
         )));
     }
+    // An answer can rest on the description (a reason it gives, held up):
+    // edited since by anyone but this job's own earlier try, it's someone
+    // else's PR now, whether the job writes one or not.
     let body = pr["body"].as_str().unwrap_or_default();
-    let description = match &a.description {
-        Some(new) if !same(new, body) => {
-            if !same(body, &h.description) {
-                return Err(Unposted::Moved(
-                    "its description was edited since the job was handed it".into(),
-                ));
-            }
-            Some(new)
-        }
-        _ => None,
-    };
+    let ours = a.description.as_deref().is_some_and(|new| same(new, body));
+    if !same(body, &h.description) && !ours {
+        return Err(Unposted::Moved(
+            "its description was edited since the job was handed it".into(),
+        ));
+    }
+    let description = a.description.as_ref().filter(|_| !ours);
     let threads: BTreeMap<&str, &Value> = pr["reviewThreads"]["nodes"]
         .as_array()
         .map(|ts| {
@@ -274,8 +271,20 @@ pub fn answer(p: &mut Pass, h: &Handed) -> Result<Posted, Unposted> {
         mutate(p.api, owner, RESOLVE, json!({"t": r.id})).map_err(|e| unposted(p.noted(e)))?;
     }
     if let Some(new) = description {
+        // Read again right before it's written over, and written once: one
+        // asked again could undo an edit made in between. One whose answer
+        // was lost is seen on the next try's read (ours, above).
         let path = format!("repos/{repo}/pulls/{n}");
-        call(p.api, "PATCH", &path, Some(&json!({"body": new})), None)
+        let now = p.get(&path).map_err(unposted)?;
+        if now["state"] != json!("open")
+            || now["head"]["sha"].as_str() != Some(want)
+            || !same(now["body"].as_str().unwrap_or_default(), body)
+        {
+            return Err(Unposted::Moved(
+                "the PR moved on while its answers went up".into(),
+            ));
+        }
+        call_once(p.api, "PATCH", &path, Some(&json!({"body": new})))
             .map_err(|e| unposted(p.noted(e)))?;
     }
     if let Some(c) = &a.comment {
@@ -305,9 +314,8 @@ pub fn answer(p: &mut Pass, h: &Handed) -> Result<Posted, Unposted> {
     Ok(Posted::Answers)
 }
 
-/// What the pass hands `pusher`, on stdin: a branch and its head.
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
+/// A branch and its head.
+#[derive(Debug)]
 pub struct Head {
     pub branch: String,
     pub head: String,

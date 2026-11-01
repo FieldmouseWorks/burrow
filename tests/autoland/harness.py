@@ -53,15 +53,21 @@ UPKEEP, UPKEEP_SRC = sys.argv[5], sys.argv[6]
 PROOF_RUN = os.path.abspath(sys.argv[7])
 # What the passes here run in its place (upkeeping.py runs the real one): it
 # notes how it was run (UPKEEP_RAN), with what `branches` and `hooks` read on
-# its stdin last, and finds nothing due, stuck or wanted. Its `token` is the
-# real one's, and so is its `sweep`, which asks GitHub nothing, on the config
-# upkeep_config writes (UPKEEP_REAL).
+# its stdin last, and finds nothing due, stuck or wanted; its `claims` keeps
+# every fix job as it was and says nothing of any (unpushed.py runs the real
+# one). Its `token` is the real one's, and so is its `sweep`, which asks
+# GitHub nothing, on the config upkeep_config writes (UPKEEP_REAL).
 UPKEEP_RAN, UPKEEP_REAL = f"{tmp}/upkeep-ran", f"{tmp}/upkeep-real.json"
 with open(f"{tmp}/upkeep-none", "w") as f:
     f.write(f"""#!{sys.executable}
 import json, os, sys
 if sys.argv[2] in ("token", "sweep"):
     os.execv({UPKEEP!r}, [{UPKEEP!r}, {UPKEEP_REAL!r}, *sys.argv[2:]])
+if sys.argv[2] == "claims":
+    look = json.load(sys.stdin)
+    print(json.dumps({{"answering": look["answering"], "pushedBy": look["pushedBy"], "stop": [], "answered": [],
+                      "wake": None, "limited": None}}))
+    sys.exit(0)
 with open({UPKEEP_RAN!r}, "a") as f:
     f.write(json.dumps(sys.argv[2:] + ([json.load(sys.stdin)] if sys.argv[2] in ("branches", "hooks") else [])) + "\\n")
 print(json.dumps({{"failed": [], "limited": None}} if sys.argv[2] in ("settle", "hooks") else

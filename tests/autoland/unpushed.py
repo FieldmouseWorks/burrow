@@ -1,7 +1,7 @@
-"""A fix job's answers (claims.py), through burrow-upkeep's `answer` and
-`pusher` (the real ones, with a gh that answers as GitHub would and notes
-what it was asked): they go up only once the PR's head is the job's own
-push. A job whose push never landed says nothing, and the PR is handed on
+"""A PR's fix jobs (claims.py), through burrow-upkeep's `claims` (the real
+one, with a gh that answers as GitHub would and notes what it was asked, and
+a proj that says how each job stands as the harness's does): their answers
+go up only once the PR's head is the job's own push. A job whose push never landed says nothing, and the PR is handed on
 as one that ended without its answer; one whose PR someone else pushed to
 says nothing either, and is stopped while it still works. What goes up and
 how is answer.rs's to check; this checks what the pass hands it and what it
@@ -13,7 +13,8 @@ import json
 import os
 import sys
 
-from harness import JOBS, STATES, STOPPED, T, UNSTOPPABLE, C, clean, fresh_pr_state, head, pr_state, run, stand_in, tmp, upkeep_config
+import harness
+from harness import JOBS, STATES, STOPPED, T, UNSTOPPABLE, C, clean, fresh_pr_state, head, pr_state, stand_in, tmp, upkeep_config
 
 stand_in()
 kept_job, ids = C.job, itertools.count(1)
@@ -33,11 +34,24 @@ def fresh():
     ids = itertools.count(1)
 
 
+def run(*a, **kw):
+    """A pass, its proj saying of each job what STATES does."""
+    with open(PROJ_SAYS, "w") as f:
+        json.dump(STATES, f)
+    return harness.run(*a, **kw)
+
+
 C.job = job
-kept_upkeep, kept_bot = C.CFG["upkeep"], C.CFG["machineryLogin"]
-C.CFG["upkeep"] = upkeep_config(f"{tmp}/upkeep-answer.json")
-GH_CALLS, GH_SAYS = f"{tmp}/answer-gh-calls", f"{tmp}/answer-gh.json"
+GH_CALLS, GH_SAYS, PROJ_SAYS = f"{tmp}/answer-gh-calls", f"{tmp}/answer-gh.json", f"{tmp}/answer-proj.json"
 os.makedirs(f"{tmp}/answer-bin")
+with open(f"{tmp}/answer-bin/proj", "w") as f:
+    f.write(f"""#!{sys.executable}
+import json, sys
+print(json.load(open({PROJ_SAYS!r})).get(sys.argv[2], "running"))
+""")
+os.chmod(f"{tmp}/answer-bin/proj", 0o755)
+kept_upkeep, kept_bot = C.CFG["upkeep"], C.CFG["machineryLogin"]
+C.CFG["upkeep"] = upkeep_config(f"{tmp}/upkeep-answer.json", proj=f"{tmp}/answer-bin/proj")
 with open(f"{tmp}/answer-bin/gh", "w") as f:
     f.write(f"""#!{sys.executable}
 import json, sys
@@ -51,6 +65,9 @@ if path == "graphql":
     got = {{"data": {{"repository": {{"pullRequest": says["pr"]}}}}}} if "reviewThreads" in body["query"] else {{"data": {{}}}}
 elif "/activity" in path:
     got = says["activity"]
+elif method == "GET" and path == "repos/sam/r/pulls/5":
+    pr = says["pr"]
+    got = {{"state": pr["state"].lower(), "head": {{"sha": pr["headRefOid"]}}, "body": pr["body"]}}
 elif method == "GET":
     got = []
 else:
@@ -161,7 +178,7 @@ for pushes in ([("workers[bot]", pushed)], []):
     github(pushed, pushes)
     run(clean(sha=pushed, threads=[False]), 35 * 60)
     assert STOPPED == [] and "job-1" in pr_state()["answering"], (pushes, STOPPED, pr_state())
-    assert bool(pushes) or C.WAKE["sam/r"] == T + 37 * 60 + 1, C.WAKE
+    assert bool(pushes) or C.WAKE["sam/r"] == T + 37 * 60, C.WAKE
 # Without that App (jobs push as the user, as the owner's session may) a
 # push can't be told apart: the job carries on, and what it leaves on a
 # head that isn't its push stands down.
