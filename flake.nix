@@ -341,6 +341,15 @@
           ${self.nixosConfigurations.example.config.systemd.services.burrow-watchdog.serviceConfig.ExecStart} status
           touch $out
         '';
+        # The example's rustc wrapper reads the config its module writes: a
+        # field the binary doesn't know is a line on stderr at every compile,
+        # which goes uncached. Here, with no cache, it compiles without one
+        # and says nothing.
+        rustc-wrapper-config = pkgs.runCommand "rustc-wrapper-config-check" { } ''
+          said=$(${self.nixosConfigurations.example.config.environment.etc."rust-cache/rustc-wrapper".source} ${pkgs.coreutils}/bin/echo compiled 2>&1)
+          [ "$said" = compiled ] || { echo "the wrapper said: $said"; exit 1; }
+          touch $out
+        '';
         # The example's guard, as Claude Code runs it, reads the config its
         # module writes (a field the binary doesn't know makes it ask at
         # every command): a plain command goes through, a one-way door asks.
