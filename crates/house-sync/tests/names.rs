@@ -48,8 +48,8 @@ fn named(text: &str) -> Vec<&'static str> {
 #[test]
 fn the_match_finds_a_name_and_leaves_longer_words() {
     assert_eq!(
-        named("a\nClaude job takes it, as gpt-5 did"),
-        ["gpt", "claude"]
+        named("a\nClaude job takes it, as copilot2 did"),
+        ["claude", "copilot"]
     );
     assert!(named("an affable job, in claudes and opuses").is_empty());
 }
