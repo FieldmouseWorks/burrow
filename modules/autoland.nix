@@ -58,6 +58,13 @@ let
   both = lib.concatLists (lib.mapAttrsToList (repo: rc: map (c: "${repo}'s ${c}")
     (lib.filter (c: lib.elem (lib.toLower c) (map lib.toLower (lib.attrNames (rc.proofBuilds or { }))))
       (lib.attrNames (rc.proofRuns or { })))) cfg.repos);
+  # Every setting a repo in `repos` may have: the steward's defaults, and the
+  # two read only where they're set (keepBranches by the branch cleanup,
+  # proofSlots by the proof line).
+  known = lib.attrNames settings.defaults ++ [ "keepBranches" "proofSlots" ];
+  # "REPO".SETTING, for each setting a repo has that isn't one of those.
+  unknown = lib.concatLists (lib.mapAttrsToList (repo: rc: map (k: "\"${repo}\".${k}")
+    (lib.filter (k: !lib.elem k known) (lib.attrNames rc))) cfg.repos);
 
   # The title Renovate gives each repo's dashboard (its
   # dependencyDashboardTitle default): the issue burrow-upkeep reads, and the
@@ -787,7 +794,9 @@ in
         isn't directPush, and has no proofJobs, proofBuilds or proofRuns yet), trainSize (the
         most PRs a candidate holds, 8), trainRequire (checks the train's CI
         waits for even before they report, when more than one workflow
-        runs there), trainStallAfter (minutes, trainStallAfterMinutes).
+        runs there), trainStallAfter (minutes, trainStallAfterMinutes). Any
+        other setting is refused, a typo or a newer burrow's alike, rather
+        than doing nothing.
       '';
     };
   };
@@ -819,6 +828,12 @@ in
       # A check is a build or a run, never both: GitHub's contexts ignore case.
       assertion = both == [ ];
       message = "burrow.autoland: a check can't be in both a repo's proofBuilds and its proofRuns: ${lib.concatStringsSep ", " both}.";
+    } {
+      # One the steward doesn't read does nothing, without a word: a typo, or
+      # a setting a machine takes up before its burrow has it, which drops
+      # whatever it replaces (a check's proof) until the burrow catches up.
+      assertion = unknown == [ ];
+      message = "burrow.autoland.repos: no such setting: ${lib.concatStringsSep ", " unknown}. A repo's settings are the ones the option's description lists; a newer burrow's need that burrow.";
     } {
       # Its rules are what keep anything but the train off its default branch.
       assertion = trains == [ ] || cfg.rulesets && lib.all (r: !(cfg.repos.${r}.directPush or false) && (cfg.repos.${r}.ruleset or true)) trains;
