@@ -1,11 +1,11 @@
 # A runner started fresh for one job (modules/dispatch/fresh.nix), for real,
 # with a stand-in for the runner: it reads the registration it was handed as
-# its credential, leaves a file in its state and finds what a checkout in its
-# workspace includes, then ends as its instance says. The dispatcher's user
-# hands it over and queues the start, as burrow-dispatch does. Whichever way
-# it ends, its registration and its state are gone, and one whose job went
-# well doesn't end failed. Confined the way a machine may confine it further
-# (ProtectSystem).
+# its credential, leaves a file in its state, finds what a checkout in its
+# workspace includes and finds the machine's own packages, then ends as its
+# instance says. The dispatcher's user hands it over and queues the start,
+# as burrow-dispatch does. Whichever way it ends, its registration and its
+# state are gone, and one whose job went well doesn't end failed. Confined
+# the way a machine may confine it further (ProtectSystem).
 #
 #   nix build .#checks.x86_64-linux.fresh-runner -L
 { self, pkgs }:
@@ -24,6 +24,10 @@ let
     printf '[burrow]\n\tseen = yes\n' >"$RUNNER_ROOT/included"
     git -C "$w" config --local "includeIf.gitdir:$w/.git.path" "$RUNNER_ROOT/included"
     [ "$(git -C "$w" config burrow.seen)" = yes ]
+    # What any job on the machine finds: its packages, such as the awk the
+    # shared gate reads memory with and the slots it takes (heavy).
+    awk 'BEGIN { exit 0 }'
+    machine-tool
     case $1 in
       1-*) exit 0 ;;
       2-*) exit 1 ;;
@@ -37,6 +41,7 @@ pkgs.testers.runNixOSTest {
   nodes.machine = { lib, ... }: {
     imports = [ self.nixosModules.dispatch ];
     users.users.dev.isNormalUser = true;
+    environment.systemPackages = [ (pkgs.writeShellScriptBin "machine-tool" "exit 0") ];
     burrow.dispatch = {
       enable = true;
       fresh = { enable = true; owner = "sam-org"; repos = [ "sam-org/homelab" ]; };
