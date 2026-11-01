@@ -5,7 +5,7 @@ use std::fs::{self, File};
 use std::io::{self, Write};
 
 use crate::config::Config;
-use crate::github::{fingerprint, target};
+use crate::github::{fingerprint, over, target};
 use crate::job::{Job, answer, awaits, is_error, kick, result_of};
 use crate::pick::demoted;
 use crate::turn::{exec, lines};
@@ -396,12 +396,22 @@ fn wait_on(cfg: &Config, targets: &[String]) -> Result<(), Fail> {
 /// What to await, a line each: every baseline, or none. One GitHub can't give
 /// (its token refused, the PR not there) fails the whole await, with gh's own
 /// words, rather than leaving the job waiting on something proj never read.
+/// So does one that's already merged or closed ([`over`]): the job checked it
+/// before it merged, as a rule, and goes on to what comes after.
 fn baselines(cfg: &Config, found: &[(String, String)], targets: &[String]) -> Result<String, Fail> {
     let mut text = String::new();
     for ((repo, n), t) in found.iter().zip(targets) {
         let fp = fingerprint(cfg, repo, n).ok_or_else(|| {
             Fail::new(1, format!("proj: couldn't read {t} from GitHub (gh's error is above), so nothing is awaited: fix that and run proj await again, or end the turn with proj ask"))
         })?;
+        if let Some(how) = over(&fp) {
+            return Err(Fail::new(
+                1,
+                format!(
+                    "proj: {t} is {how} already, so nothing is awaited: go on with what comes after it, then end the turn with proj await on what's still open, proj ask or proj done"
+                ),
+            ));
+        }
         text += &format!("{repo}#{n}\t{}\t{fp}\n", now());
     }
     Ok(text)
@@ -467,6 +477,10 @@ fn ended(cfg: &Config) -> Result<(), Fail> {
 mod tests {
     use std::fs;
 
+    use std::env;
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Command;
+
     use super::{baselines, left_be};
     use crate::config::Config;
     use crate::job::Job;
@@ -518,5 +532,84 @@ mod tests {
                 .unwrap()
                 .contains("couldn't read o/r#5 from GitHub")
         );
+    }
+
+    // An await on a PR that's merged, or one or an issue that's closed, fails
+    // the whole await and writes nothing: its baseline says what it will say
+    // until awaitHours runs out, so the job would sit until then for nothing.
+    // The stand-in gh is written and run where nothing else forks, as
+    // slot::tests' stand-in git is.
+    #[test]
+    fn an_await_on_what_is_over_is_refused() {
+        let status = Command::new(env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "cmd::tests::awaits_against_a_stand_in_gh",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env("BURROW_PROJ_TEST_AWAIT", "1")
+            .output()
+            .unwrap();
+        let out = String::from_utf8_lossy(&status.stdout);
+        assert!(status.status.success(), "{out}");
+        assert!(out.contains("1 passed"), "{out}");
+    }
+
+    #[test]
+    fn awaits_against_a_stand_in_gh() {
+        if env::var_os("BURROW_PROJ_TEST_AWAIT").is_none() {
+            return;
+        }
+        let tmp = tempfile::TempDir::new().unwrap();
+        let gh = tmp.path().join("gh");
+        // #5 a merged PR, #6 a PR closed without merging, #7 a closed
+        // issue, #8 an open PR.
+        fs::write(
+            &gh,
+            r#"#!/bin/sh
+for a; do ep=${a%%\?*}; done
+case $ep in
+  */comments | */reviews) echo '[[]]' ;;
+  */status) echo '{"total_count": 0, "state": "pending"}' ;;
+  */check-runs) echo '[{"check_runs": []}]' ;;
+  repos/o/r/issues/7) echo '{"state": "closed"}' ;;
+  repos/o/r/issues/8) echo '{"pull_request": {}, "state": "open"}' ;;
+  repos/o/r/issues/*) echo '{"pull_request": {}, "state": "closed"}' ;;
+  repos/o/r/pulls/5) echo '{"state": "closed", "merged": true, "head": {"sha": "abc"}, "review_comments": 0}' ;;
+  repos/o/r/pulls/6) echo '{"state": "closed", "merged": false, "head": {"sha": "abc"}, "review_comments": 0}' ;;
+  repos/o/r/pulls/8) echo '{"state": "open", "merged": false, "head": {"sha": "abc"}, "review_comments": 0}' ;;
+  *) exit 1 ;;
+esac
+"#,
+        )
+        .unwrap();
+        fs::set_permissions(&gh, fs::Permissions::from_mode(0o755)).unwrap();
+        let mut v = crate::config::tests::example();
+        v["tools"]["gh"] = gh.to_str().unwrap().into();
+        let cfg: Config = serde_json::from_value(v).unwrap();
+        let await_on = |ns: &[&str]| {
+            let found: Vec<(String, String)> = ns
+                .iter()
+                .map(|n| ("o/r".to_owned(), (*n).to_owned()))
+                .collect();
+            let targets: Vec<String> = ns.iter().map(|n| format!("o/r#{n}")).collect();
+            baselines(&cfg, &found, &targets).map_err(|f| (f.code, f.say.unwrap_or_default()))
+        };
+
+        let open = await_on(&["8"]).unwrap();
+        assert!(open.starts_with("o/r#8\t"), "{open}");
+        assert!(open.contains(r#""merged":false"#), "{open}");
+        for (n, how) in [("5", "merged"), ("6", "closed"), ("7", "closed")] {
+            let (code, say) = await_on(&[n]).unwrap_err();
+            assert_eq!(code, 1, "o/r#{n}");
+            assert!(
+                say.contains(&format!("o/r#{n} is {how} already, so nothing is awaited")),
+                "o/r#{n}: {say}"
+            );
+        }
+        // One that's over fails the lot, open ones with it.
+        let (_, say) = await_on(&["8", "5"]).unwrap_err();
+        assert!(say.contains("o/r#5 is merged already"), "{say}");
     }
 }

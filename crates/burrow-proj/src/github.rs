@@ -97,6 +97,20 @@ pub fn fingerprint(cfg: &Config, repo: &str, n: &str) -> Option<Value> {
     }))
 }
 
+/// What a [`fingerprint`] says its PR or issue is once it's over: merged, or
+/// closed without; None while it's open. Nothing a job awaits can come of
+/// one that's over, so `proj await` refuses it: awaited, it would hold the
+/// job until awaitHours ran out.
+pub fn over(fp: &Value) -> Option<&'static str> {
+    if fp["merged"] == true {
+        Some("merged")
+    } else if fp["state"] == "closed" {
+        Some("closed")
+    } else {
+        None
+    }
+}
+
 /// What GitHub's REST API answers (`gh api ARGS`), or None when it can't be
 /// asked or doesn't answer with JSON.
 pub fn api(cfg: &Config, args: &[&str]) -> Option<Value> {
@@ -150,7 +164,7 @@ pub fn changes(was: &Map<String, Value>, now: &Map<String, Value>) -> String {
 mod tests {
     use serde_json::json;
 
-    use super::{changes, target};
+    use super::{changes, over, target};
 
     #[test]
     fn targets() {
@@ -178,6 +192,20 @@ mod tests {
         ] {
             assert_eq!(t(bad), None, "{bad}");
         }
+    }
+
+    // Merged, closed without, or open: a PR's fingerprint and an issue's.
+    #[test]
+    fn what_is_over() {
+        let pr = |state: &str, merged: bool| json!({"state": state, "merged": merged, "checks": "ci=success"});
+        assert_eq!(over(&pr("closed", true)), Some("merged"));
+        assert_eq!(over(&pr("closed", false)), Some("closed"));
+        assert_eq!(over(&pr("open", false)), None);
+        assert_eq!(
+            over(&json!({"state": "closed", "comments": 3})),
+            Some("closed")
+        );
+        assert_eq!(over(&json!({"state": "open", "comments": 3})), None);
     }
 
     // Each key that changed, as it was and is now; one only there before
