@@ -29,13 +29,14 @@ stop_job). Checks without an attribute are a Claude job's, after the
 builds: a failed build needs no job.
 
 A check with a proofRuns command is that command's exit and nothing more,
-so the steward runs it itself the same way (start_run): the same unit, no
-Claude job, but each command in a fresh worktree of the repo's checkout at
-the PR's head (commands), its exit the verdict. What the command writes to
-its PROOF_SUMMARY file goes on the PR; its log stays on the machine, so
-nothing it prints reaches GitHub but what it chose to write there (note).
-Runs go after the builds and before the Claude jobs: a failed run needs no
-job either.
+so the steward runs it itself too (start_run), with no Claude job: in a
+unit of the machine user's own that crates/burrow-proof starts, runs and
+ends, each command in a fresh worktree of the repo's checkout at the PR's
+head, its exit the verdict. The unit's end writes end.json as a build's
+does, and comment.md: what each command wrote to its PROOF_SUMMARY file,
+which goes on the PR; its log stays on the machine, so nothing it prints
+reaches GitHub but what it chose to write there (note). Runs go after the
+builds and before the Claude jobs: a failed run needs no job either.
 
 A PR behind its base whose builds aren't in the store may have them there
 once it's brought up to date: most PRs change nothing a proof builds, so
@@ -333,36 +334,47 @@ def build(repo, pr, checks, st):
 
 
 def start_run(repo, pr, checks, st):
-    """Starts running checks' commands (the repo's proofRuns) on PR's head
-    in the same unit a build has (run): no Claude job. Each runs in a
+    """Starts running checks' commands (the repo's proofRuns) on PR's head,
+    in a unit crates/burrow-proof starts (`burrow-proof start DIR`, its
+    folder) and asks after as a build's: no Claude job. Each runs in a
     worktree of the repo's checkout here (common.project_dir), the one its
-    Claude jobs work in. Its id, or None when there's no checkout or
-    systemd wouldn't start it."""
+    Claude jobs work in. Nothing of the PR's base goes in: a run proves its
+    head under its commands, as a build its head's derivation. Its id, or
+    None when there's no checkout or burrow-proof wouldn't start it."""
     n, head = pr["number"], pr["headRefOid"]
     runs = {c: C.repo_cfg(repo)["proofRuns"][c] for c in checks}
     jid = unit_id(repo, n, head)
     if C.DRY:
         log(f"  would: run {', '.join(sorted(runs))}")
         return jid
-    checkout = C.project_dir(repo)
-    if checkout is None:
+    folder = C.project_dir(repo)
+    if folder is None:
         log(f"{repo}#{n}: no checkout of it here to run {', '.join(checks)} in")
         return None
-    return start(jid, {"repo": repo, "number": n, "head": head, "base": pr["baseRefName"], "checkout": checkout,
-                       "runs": runs}, f"the run of {', '.join(checks)}")
+    # burrow-proof's Record: what it runs, and how, from this steward's config.
+    return start(jid, {"repo": repo, "number": n, "head": head, "checkout": os.path.join(CFG["projectsDir"], folder),
+                       "runs": runs, "unit": C.build_unit(jid), "timeout": int(CFG["proofTimeout"] * C.MIN),
+                       "bash": CFG["bash"], "git": CFG["git"], "trees": CFG["runsDir"],
+                       "kick": f"{CFG['kick']}/{repo}", "commentBytes": COMMENT_BYTES},
+                 f"the run of {', '.join(checks)}", [CFG["proofRun"], "start"])
 
 
 def unit_id(repo, n, head):
     return f"{C.BUILD}{re.sub('[^a-z0-9]+', '-', repo.lower())}-{n}-{head[:12]}-{time.time_ns()}"
 
 
-def start(jid, build_json, what):
-    """The proof's folder, with what it is (build.json), then its unit,
-    which runs run(). Its id, or None when systemd wouldn't start it."""
+def start(jid, build_json, what, starter=None):
+    """The proof's folder, with what it is (build.json), then its unit: a
+    build's runs run(); a run's, starter (its command line, the folder
+    after it) starts. Its id, or None when it wouldn't start."""
     prune()
-    os.makedirs(os.path.join(STATE, "builds", jid))
+    here = os.path.join(STATE, "builds", jid)
+    os.makedirs(here)
     save(f"builds/{jid}/build.json", build_json)
-    p = C.user_systemctl_run(C.build_unit(jid), own("build", jid))
+    if starter is None:
+        p = C.user_systemctl_run(C.build_unit(jid), own("build", jid))
+    else:
+        p = subprocess.run([*starter, here], capture_output=True, text=True)
     if p.returncode:
         log(f"{build_json['repo']}#{build_json['number']}: couldn't start {what}: {p.stderr.strip()[-300:]}")
         return None
@@ -386,177 +398,34 @@ def prune():
 
 
 def run(jid):
-    """The proof itself, as its unit runs it (`autoland-steward build ID`):
-    a build's or a run's (commands), how it ended in end.json, then a kick
-    of its repo's pass, which posts its verdicts."""
+    """The build itself, as its unit runs it (`autoland-steward build ID`):
+    realise in a heavy slot, its log beside it, and how it ended in
+    end.json. Done once nix built all it could (each realise's exit 0, or a
+    build failure's 100-107): each check's verdict is then kept in end.json
+    (judged), so nothing collected later can change it. Failed when nix
+    couldn't build at all, or what it built isn't there (the machine's
+    failure, not the PR's, so it's built again); timed out past
+    proofTimeout. Then it kicks its repo's pass, which posts them."""
     b = load(f"builds/{jid}/build.json", None)
-    end = commands(jid, b) if "runs" in b else realised(jid, b)
-    save(f"builds/{jid}/end.json", {**end, "at": time.time()})
-    C.kick(b["repo"])
-
-
-def realised(jid, b):
-    """A build's end: realise in a heavy slot, its log beside it. Done once
-    nix built all it could (each realise's exit 0, or a build failure's
-    100-107): each check's verdict is then kept in end.json (judged), so
-    nothing collected later can change it. Failed when nix couldn't build
-    at all, or what it built isn't there (the machine's failure, not the
-    PR's, so it's built again); timed out past proofTimeout."""
+    end = {"state": "failed", "exit": None}
     # Derivations collected since they were worked out leave nothing to
     # build, and no verdict in that: the pass that sees it works them out
     # again.
-    if gone(sorted(set(b["drvs"].values()))):
-        return {"state": "failed", "exit": None}
-    cmd = ([CFG["heavy"], "--"] if CFG.get("heavy") else []) + own("realise", jid)
-    with open(os.path.join(STATE, "builds", jid, "log"), "wb") as out:
-        p = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT)
-        try:
-            rc = p.wait(timeout=CFG["proofTimeout"] * C.MIN)
-        except subprocess.TimeoutExpired:
-            p.terminate()  # heavy stops all of it, then frees its slot
-            p.wait()
-            rc = None
-    end = {"state": state_of(rc), "exit": rc}
-    return {**end, **judged(jid, b)} if end["state"] == "done" else end
-
-
-# A run's command: 0 passes, 1 to this fails. Anything else, a signal's
-# (killed, or a shell's 128 and up), a command not found or not runnable
-# (127, 126), is the machine's failure, not a verdict: it's run again.
-RUN_FAILED = range(1, 126)
-
-
-def commands(jid, b):
-    """A run's end: each check's command in turn (the repo's proofRuns, by
-    check name), in bash, in a fresh detached worktree of the repo's
-    checkout at the PR's head under runsDir, removed once it ends. Its
-    environment is what the machine user's own units start with (proj's
-    jobs too; user_path), with PROOF_REPO, PROOF_NUMBER, PROOF_HEAD,
-    PROOF_BASE (origin/BASE fetched just before) and PROOF_CHECK, and
-    PROOF_SUMMARY, a file whose words go on the PR (note). Everything it
-    prints goes to the run's log, on this machine only. It takes no heavy
-    slot: a command takes the locks it needs itself. Done once each ran,
-    each check's verdict its exit (RUN_FAILED); failed when one couldn't
-    (the head can't be fetched, the user's PATH can't be read, a command
-    killed); timed out past proofTimeout, all of them together. A stop
-    (SIGTERM) ends the command and removes its worktree too."""
-    here = os.path.join(STATE, "builds", jid)
-    git = ["git", "-C", b["checkout"]]
-    deadline = time.monotonic() + CFG["proofTimeout"] * C.MIN
-    stopped = []
-
-    def stop(*_):
-        stopped.append(True)
-        raise Stopped()
-
-    signal.signal(signal.SIGTERM, stop)
-    verdicts, exits = {}, {}
-    with open(os.path.join(here, "log"), "ab") as out:
-        def note_line(text):
-            out.write(f"autoland: {text}\n".encode())
-            out.flush()
-
-        try:
-            sweep(b["checkout"])
-            path = user_path()
-            if path is None:
-                note_line("can't read the PATH the machine user's units start with (systemctl --user show-environment)")
-                return {"state": "failed", "exit": None}
-            # The head (refs/pull/N/head names it on GitHub) and the base,
-            # which updates origin/BASE as any fetch of it does.
-            fetch = subprocess.run([*git, "fetch", "-q", "origin", f"refs/pull/{b['number']}/head", b["base"]],
-                                   stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT)
-            have = subprocess.run([*git, "cat-file", "-e", f"{b['head']}^{{commit}}"], capture_output=True)
-            if fetch.returncode or have.returncode:
-                note_line(f"can't fetch {b['head']} into {b['checkout']}")
-                return {"state": "failed", "exit": None}
-            for i, (c, cmd) in enumerate(sorted(b["runs"].items())):
-                note_line(f"{c}: {cmd}")
-                rc = one(jid, b, c, cmd, i, path, out, deadline)
-                note_line(f"{c}: {'past proofTimeout' if rc is None else f'exit {rc}'}")
-                if rc is None:
-                    return {"state": "timed out", "exit": None}
-                if rc != 0 and rc not in RUN_FAILED:
-                    return {"state": "failed", "exit": rc}
-                verdicts[c] = ["success", "Ran here and passed"] if rc == 0 else ["failure", f"Ran here and failed: exit {rc}"]
-                exits[c] = rc
-        except Stopped:
-            note_line("stopped")
-            return {"state": "failed", "exit": None}
-    return {"state": "done", "exit": 0, "verdicts": verdicts, "exits": exits}
-
-
-class Stopped(Exception):
-    """The run's unit was stopped (SIGTERM)."""
-
-
-def one(jid, b, check, cmd, i, path, out, deadline):
-    """One check's command (commands): its exit, None past the deadline.
-    Its worktree goes once it ends, however it ends."""
-    tree = os.path.join(CFG["runsDir"], f"{jid}-{i}")
-    git = ["git", "-C", b["checkout"]]
-    add = subprocess.run([*git, "worktree", "add", "-q", "--detach", tree, b["head"]],
-                         stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT)
-    if add.returncode:
-        out.write(f"autoland: {check}: can't make its worktree at {tree}\n".encode())
-        shutil.rmtree(tree, ignore_errors=True)
-        return -1  # the machine's failure (RUN_FAILED)
-    env = {k: v for k, v in os.environ.items() if k != "AUTOLAND_CONFIG"}
-    env.update(PATH=path, PROOF_REPO=b["repo"], PROOF_NUMBER=str(b["number"]), PROOF_HEAD=b["head"],
-               PROOF_BASE=b["base"], PROOF_CHECK=check,
-               PROOF_SUMMARY=os.path.join(STATE, "builds", jid, f"summary-{i}.md"))
-    p = None
-    try:
-        # A session of its own, so a timeout or a stop ends all of it.
-        p = subprocess.Popen([CFG["bash"], "-c", cmd], cwd=tree, env=env, stdin=subprocess.DEVNULL, stdout=out,
-                             stderr=subprocess.STDOUT, start_new_session=True)
-        try:
-            rc = p.wait(timeout=max(deadline - time.monotonic(), 0))
-        except subprocess.TimeoutExpired:
-            rc = None
-        return 128 - rc if rc is not None and rc < 0 else rc
-    finally:
-        if p is not None and p.poll() is None:
-            end_all(p)
-        subprocess.run([*git, "worktree", "remove", "--force", tree], capture_output=True)
-        shutil.rmtree(tree, ignore_errors=True)
-
-
-def end_all(p):
-    """Ends p's whole session: SIGTERM, then SIGKILL ten seconds on."""
-    for sig, wait in ((signal.SIGTERM, 10), (signal.SIGKILL, None)):
-        try:
-            os.killpg(p.pid, sig)
-        except ProcessLookupError:
-            return
-        try:
-            p.wait(timeout=wait)
-            return
-        except subprocess.TimeoutExpired:
-            continue
-
-
-def sweep(checkout):
-    """Worktrees under runsDir of runs that have ended (killed with no
-    chance to remove their own), and what the checkout knows of them."""
-    root = CFG["runsDir"]
-    for d in os.listdir(root) if os.path.isdir(root) else ():
-        jid = d.rsplit("-", 1)[0]
-        if C.build_state(jid) not in (None, "running"):
-            subprocess.run(["git", "-C", checkout, "worktree", "remove", "--force", os.path.join(root, d)], capture_output=True)
-            shutil.rmtree(os.path.join(root, d), ignore_errors=True)
-    subprocess.run(["git", "-C", checkout, "worktree", "prune"], capture_output=True)
-
-
-def user_path():
-    """The PATH the machine user's own units start with, its manager's (as
-    proj's jobs get it), for a run's commands; None when systemd can't say,
-    or says it escaped."""
-    p = C.user_systemctl("show-environment")
-    if p.returncode:
-        return None
-    paths = [line[len("PATH="):] for line in p.stdout.splitlines() if line.startswith("PATH=")]
-    return paths[0] if paths and paths[0] and not paths[0].startswith("$") else None
+    if not gone(sorted(set(b["drvs"].values()))):
+        cmd = ([CFG["heavy"], "--"] if CFG.get("heavy") else []) + own("realise", jid)
+        with open(os.path.join(STATE, "builds", jid, "log"), "wb") as out:
+            p = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT)
+            try:
+                rc = p.wait(timeout=CFG["proofTimeout"] * C.MIN)
+            except subprocess.TimeoutExpired:
+                p.terminate()  # heavy stops all of it, then frees its slot
+                p.wait()
+                rc = None
+        end = {"state": state_of(rc), "exit": rc}
+        if end["state"] == "done":
+            end = {**end, **judged(jid, b)}
+    save(f"builds/{jid}/end.json", {**end, "at": time.time()})
+    C.kick(b["repo"])
 
 
 def realise(jid):
@@ -664,51 +533,17 @@ def failed_log(jid, checks):
 def note(jid, said):
     """What goes on the PR for a done proof, given its verdicts still to
     post (said), or None: a build's failed checks with its log's end
-    (failed_log); a run's summaries and failures (ran)."""
+    (failed_log); a run's comment.md, as burrow-proof wrote it as it ended
+    (its summaries, and its failures)."""
     b = load(f"builds/{jid}/build.json", {})
-    failed = sorted(c for c, (state, _) in said.items() if state == "failure")
     if "runs" in b:
-        return ran(jid, b, said)
-    return failed_log(jid, failed) if failed else None
-
-
-def ran(jid, b, said):
-    """A run's comment: for each of its checks in said, what its command
-    wrote to PROOF_SUMMARY, and for a failure that wrote none, its exit.
-    Never its log, which stays here: a command's output can hold what its
-    repo keeps private, and only the summary is its own word on what's fit
-    to post. None when nothing failed and nothing was written. Cut to fit
-    COMMENT_BYTES, each summary its share of what's left."""
-    exits = (load(f"builds/{jid}/end.json", None) or {}).get("exits", {})
-    parts = []
-    for i, c in enumerate(sorted(b["runs"])):
-        if c not in said:
-            continue
         try:
-            with open(os.path.join(STATE, "builds", jid, f"summary-{i}.md"), errors="replace") as f:
-                summary = f.read().strip()
-        except OSError:
-            summary = ""
-        if said[c][0] == "failure":
-            head = f"`{c}` failed on {b['head']}: it ran here and exited {exits.get(c)}."
-            if not summary:
-                head += f" What it printed stays on this machine, in the log of run `{jid}`."
-        elif summary:
-            head = f"`{c}` passed on {b['head']}."
-        else:
-            continue
-        parts.append((head, summary))
-    if not parts:
-        return None
-    room = (COMMENT_BYTES - sum(len(h.encode()) + 4 for h, _ in parts)) // len(parts)
-    out = []
-    for head, summary in parts:
-        cut = summary.encode()
-        if len(cut) > room:
-            # A character the cut lands inside is dropped whole.
-            cut = cut[:max(room - len("\n…".encode()), 0)].decode(errors="ignore").encode() + "\n…".encode()
-        out.append(f"{head}\n\n{cut.decode()}" if summary else head)
-    return "\n\n".join(out) + "\n"
+            with open(os.path.join(STATE, "builds", jid, "comment.md"), errors="replace") as f:
+                return f.read()
+        except FileNotFoundError:
+            return None
+    failed = sorted(c for c, (state, _) in said.items() if state == "failure")
+    return failed_log(jid, failed) if failed else None
 
 
 def fits(st, stage):
@@ -725,15 +560,17 @@ def fits(st, stage):
     return set(stage[1]) <= set(was[1]) and all(was[2].get(c) == stage[2].get(c) for c in stage[1])
 
 
-def still(st, said, attrs):
+def still(st, said, rc):
     """Of the PR's recorded build's or run's verdicts (said), those its
-    checks still want: each check's that's still built or run (attrs, the
-    repo's proofBuilds and proofRuns) from the attribute or command that
-    proof had. A check dropped or remapped since gets none of it."""
+    checks still want: each check's that's still that kind of proof (a
+    build in rc's proofBuilds, a run in its proofRuns), from the attribute
+    or command that proof had. A check dropped, remapped or made the other
+    kind since gets none of it."""
     was = st.get("provedFor") or []
     if len(was) != 3 or was[0] not in ("build", "run"):
         return {}
-    return {c: v for c, v in said.items() if c in attrs and attrs[c] == was[2].get(c)}
+    now = rc["proofBuilds" if was[0] == "build" else "proofRuns"]
+    return {c: v for c, v in said.items() if c in now and now[c] == was[2].get(c)}
 
 
 def wait(repo, n):

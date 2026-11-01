@@ -898,11 +898,10 @@ def machine(rc):
     return {**{c: how for c, how in rc["proofJobs"].items() if c.lower() not in taken}, **{
         c: (f"`nix build .#{attr} -L` on the commit. The steward builds it itself for each new head and posts the "
             f"`{c}` status: never post that status yourself.") for c, attr in rc["proofBuilds"].items()}, **{
-        c: (f"`bash -c {shlex.quote(cmd)}` in a worktree at the commit, with PROOF_REPO, PROOF_NUMBER, PROOF_HEAD, "
-            "PROOF_BASE and PROOF_CHECK set and origin's base branch fetched. The steward runs it itself for each new "
-            f"head and posts the `{c}` status: never post that status yourself. Its last run's log is "
-            f"{STATE}/builds/RUN/log, RUN as its comment on the PR names it, or the newest whose build.json is this "
-            "PR's.") for c, cmd in runs.items()}}
+        c: (f"`bash -c {shlex.quote(cmd)}` in a worktree at the commit, with PROOF_REPO, PROOF_NUMBER, PROOF_HEAD "
+            "and PROOF_CHECK set and only the commit fetched. The steward runs it itself for each new head and posts "
+            f"the `{c}` status: never post that status yourself. Its last run's log is {STATE}/builds/RUN/log, RUN as "
+            "its comment on the PR names it, or the newest whose build.json is this PR's.") for c, cmd in runs.items()}}
 
 
 def coverage(repos, covered):

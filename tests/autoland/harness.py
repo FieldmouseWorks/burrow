@@ -49,6 +49,8 @@ REVIEW, FAKES = sys.argv[3], sys.argv[4]
 # burrow-upkeep (argv[5]), which a pass runs on each repo, and its source
 # (argv[6], crates/burrow-upkeep/src).
 UPKEEP, UPKEEP_SRC = sys.argv[5], sys.argv[6]
+# burrow-proof (argv[7]), which starts a proof run's unit (runs.py).
+PROOF_RUN = os.path.abspath(sys.argv[7])
 # What the passes here run in its place (upkeeping.py runs the real one): it
 # notes how it was run (UPKEEP_RAN), with what `branches` read on its stdin
 # last, and finds nothing due, stuck or wanted. Its `token` is the real
@@ -175,7 +177,7 @@ with open(f"{tmp}/config.json", "w") as f:
         "reviewers": {"codex": {"enable": True}, "rival": {"enable": True}},
         "skipPaths": ["(^|/)secrets?/", r"\.(pem|key|p12|pfx)$", r"(^|/)\.env(\..*)?$"],
         "nix": f"{tmp}/nix",
-        "bash": shutil.which("bash"), "runsDir": f"{tmp}/runs",
+        "proofRun": PROOF_RUN, "bash": shutil.which("bash"), "git": shutil.which("git"), "runsDir": f"{tmp}/runs",
     }, f)
 os.environ["AUTOLAND_CONFIG"] = f"{tmp}/config.json"
 os.environ["CREDENTIALS_DIRECTORY"] = f"{tmp}/cred"

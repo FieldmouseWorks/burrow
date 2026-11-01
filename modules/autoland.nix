@@ -30,6 +30,8 @@ let
   inherit (import ./autoland/paths.nix config) reviewer reviewDir snapDir stewardKick;
   # burrow-upkeep, what keeps up each repo besides its PRs.
   burrowUpkeep = inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow-upkeep;
+  # burrow-proof, what runs a proof that's a command (a repo's proofRuns).
+  burrowProof = inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow-proof;
 
   # The baseline and the house style it links to (the rules, the project
   # template and lib), together, so the links resolve for the job that reads
@@ -93,9 +95,12 @@ let
     # machine-wide heavy slots it takes one of, where the machine has them.
     proofTimeout = cfg.proofTimeoutMinutes;
     heavy = if config.burrow.cpu.enable then "${config.burrow.tools.heavy}/bin/heavy" else null;
-    # A proof run's (proofs.commands): the shell its command runs in, and
-    # where its worktrees go, out of projectsDir and its servers.
+    # A proof run's (proofs.start_run, crates/burrow-proof): what starts,
+    # runs and ends it, the shell its command runs in, the git that makes
+    # its worktrees, and where they go, out of projectsDir and its servers.
+    proofRun = "${burrowProof}/bin/burrow-proof";
     bash = "${pkgs.bash}/bin/bash";
+    git = "${pkgs.git}/bin/git";
     runsDir = "${config.burrow.scratchDir}/proofs";
     owner = config.burrow.owner;
     labels = { inherit (cfg.labels) hold owner first waiting; };
@@ -742,20 +747,25 @@ in
         both is a build; none is built on a head in the docs lane),
         proofRuns (checks that are a command's exit and nothing more:
         `{ "<check>" = "<command>"; }`. The steward runs them itself, after
-        the proofBuilds and ahead of the proofJobs, with no Claude job, in
-        the same unit a build has: the command, in bash, in a fresh worktree
-        of the repo's checkout in projectsDir at the PR's head, with what
-        the machine user's own units start with (its PATH) and
-        PROOF_REPO, PROOF_NUMBER, PROOF_HEAD, PROOF_BASE and PROOF_CHECK
-        set, origin's base branch fetched. Exit 0 posts the check as
+        the proofBuilds and ahead of the proofJobs, with no Claude job, in a
+        unit of the machine user's own (crates/burrow-proof): the command,
+        in bash, in a fresh worktree of the repo's checkout in projectsDir
+        at the PR's head, with what the user's own units start with (its
+        PATH) and PROOF_REPO, PROOF_NUMBER, PROOF_HEAD and PROOF_CHECK set.
+        Only the head is fetched: a run proves the commit, whatever the PR
+        targets, so a command that wants more of origin (its default
+        branch's tools) fetches it itself. Exit 0 posts the check as
         passed, 1 to 125 as failed; anything else (a signal, a command not
-        found, past proofTimeoutMinutes) is the machine failing, and it runs
-        again later. What it prints stays in its log on the machine: only
-        what it writes to the file PROOF_SUMMARY names goes on the PR, as a
-        comment, pass or fail. It takes no heavy slot of its own, so a
-        command takes the locks it needs (`heavy --`, a gate's own). A
-        check can't be in both proofBuilds and proofRuns; one in proofRuns
-        and proofJobs is a run; none runs on a head in the docs lane),
+        found, past proofTimeoutMinutes, which bounds the whole run) is the
+        machine failing, and it runs again later. Each command runs in a
+        cgroup of its own, and whatever it leaves running is killed before
+        its worktree goes; a stop or a timeout ends all of it. What it
+        prints stays in its log on the machine: only what it writes to the
+        file PROOF_SUMMARY names goes on the PR, as a comment, pass or fail.
+        It takes no heavy slot of its own, so a command takes the locks it
+        needs (`heavy --`, a gate's own). A check can't be in both
+        proofBuilds and proofRuns; one in proofRuns and proofJobs is a run;
+        none runs on a head in the docs lane),
         proofSlots (how many of those proofs, jobs, builds and runs, the repo may
         have building at once, for proofs that take the whole machine: the
         rest wait their turn, those labelled `labels.first` first, then the
@@ -881,7 +891,7 @@ in
       dir = mode: group: { d = { inherit mode user group; }; };
     in {
       "${stateDir}/autoland" = dir "0755" account.group;
-      # The worktrees proof runs check out (proofs.commands).
+      # The worktrees proof runs check out (crates/burrow-proof).
       ${settings.runsDir} = dir "0755" account.group;
       ${reviewDir} = dir "2750" reviewer;
       "${reviewDir}/queue" = dir "2770" reviewer;

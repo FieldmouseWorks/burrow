@@ -774,13 +774,14 @@ def handle(repo, pr, repo_info, digest, held=None):
 
     machine = C.machine(rc)  # the checks a machine runs, not CI, and how
     ci, ci_names, docs = ci_state(pr, machine, moved := moved_from(repo, pr, st), repo)
-    # A build's verdicts GitHub took only some of: the rest go up whatever
-    # CI says now, so a failure it took doesn't leave the others unposted
-    # behind a red PR. Their statuses kick the pass that sees them. Only
-    # those of its checks still built from the attribute it built
-    # (proofs.still): one dropped or remapped since waits for its own build.
+    # A build's or run's verdicts GitHub took only some of: the rest go up
+    # whatever CI says now, so a failure it took doesn't leave the others
+    # unposted behind a red PR. Their statuses kick the pass that sees them.
+    # Only those of its checks still that kind of proof, from the attribute
+    # or command it had (proofs.still): one dropped, remapped or made the
+    # other kind since waits for its own.
     if (left := st.get("provedUnposted")) and st.get("proved") == head:
-        said = P.still(st, P.verdicts(left) or {}, {**rc["proofRuns"], **rc["proofBuilds"]})
+        said = P.still(st, P.verdicts(left) or {}, rc)
         if not said or P.record(repo, pr, said):
             st.pop("provedUnposted")
         else:
