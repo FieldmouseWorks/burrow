@@ -156,6 +156,7 @@ in
           running = lib.genAttrs pinned runningOf;
           after = cfg.deploy.afterMinutes * 60;
           run = cfg.deploy.runMinutes * 60;
+          ride = cfg.deploy.rideMinutes * 60;
         };
         switch = if config.burrow.switch.enable or false
           then { state = "/run/${prefix}-switch"; revert = "${prefix}-revert"; } else null;
@@ -190,6 +191,15 @@ in
         type = types.ints.positive;
         default = 90;
         description = "How long a run of HOST-update that has the commit may take before that's a stall.";
+      };
+      rideMinutes = mkOption {
+        type = types.ints.positive;
+        default = 300;
+        description = ''
+          How long a commit may wait while HOST-update's own open PR is ahead of
+          it: it brings in nothing newer until that lands, and the steward
+          already watches that PR.
+        '';
       };
     };
   };

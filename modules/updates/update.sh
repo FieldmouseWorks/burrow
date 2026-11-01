@@ -34,11 +34,16 @@ force=
 as_user() { runuser -u "$BURROW_USER" -- env HOME="$HOME_DIR" XDG_RUNTIME_DIR="/run/user/$USER_UID" "$@"; }
 git_() { as_user git -C "$work" "$@"; }
 
+behind=
 note() {
   # $1 = ok|held|failed|current, $2 = what happened
   echo "$2"
+  # .behind: its open PR, while a commit newer than this run's has to wait for
+  # that to land; burrow-dispatch gives such a commit longer. Not on a failure,
+  # which is this run's own to fix.
   jq -n --arg r "$1" --arg m "$2" --arg t "$(date -Is)" \
-    --arg run "$(readlink -f /run/current-system)" '{time: $t, result: $r, message: $m, running: $run}' \
+    --arg run "$(readlink -f /run/current-system)" --arg b "$([ "$1" = failed ] || echo "$behind")" \
+    '{time: $t, result: $r, message: $m, running: $run} + (if $b == "" then {} else {behind: ($b | tonumber)} end)' \
     >"$state/status.json"
 }
 
@@ -136,8 +141,9 @@ if [ -n "$TRAIN" ]; then
     if [ -n "$red" ]; then
       replacing=$pr
     else
+      behind=${pr%% *}
       why=$(ride "$pr") || { note held "$why"; exit 0; }
-      riding=${pr%% *}
+      riding=$behind
     fi
   fi
 fi
