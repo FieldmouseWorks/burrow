@@ -96,16 +96,16 @@ hold, owner = S.CFG["labels"]["hold"], S.CFG["labels"]["owner"]
 red = [{"__typename": "CheckRun", "name": "ci", "status": "COMPLETED", "conclusion": "FAILURE"}]
 done = CI_GREEN + [{"__typename": "StatusContext", "context": "remi-proof", "state": "SUCCESS", "description": ""}]
 busy = proof + [{"__typename": "CheckRun", "name": "build", "status": "IN_PROGRESS", "conclusion": None}]
-for kw, obsolete in (({"draft": True}, False), ({"labels": (hold,)}, False), ({"labels": (owner,)}, False),
-                     ({}, True), ({"threads": [False]}, False), ({"checks": red}, False),
-                     ({"checks": busy}, False), ({"checks": done}, False)):
+for kw, held in (({"draft": True}, None), ({"labels": (hold,)}, None), ({"labels": (owner,)}, None),
+                 ({}, "Not needed: main is green again without it"), ({"threads": [False]}, None), ({"checks": red}, None),
+                 ({"checks": busy}, None), ({"checks": done}, None)):
     fresh_pr_state()
     P.begin("sam/r", {1, 2, 3})
     line(1)
     assert ahead(1) in line(2) and ahead(2) in line(3)
     ends(1)
     P.begin("sam/r", {2, 3})  # the first one landed
-    status, _ = run(clean(**{"checks": proof, **kw}, number=2), 800, obsolete)
+    status, _ = run(clean(**{"checks": proof, **kw}, number=2), 800, held)
     assert "waiting its turn" not in status, (kw, status)
     status = line(3, 800)
     assert RUNNING in status and len(JOBS) == 1, (kw, status, JOBS)

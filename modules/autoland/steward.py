@@ -274,21 +274,21 @@ def run_pass(kick):
                 T.begin(repo)
                 read.add(repo.replace("/", "_"))
                 waits.read(repo, prs)
-                # First, so a fix PR it made obsolete isn't merged by this same pass.
-                obsolete = R.watch_default(r, info, prs, mine) or set()
+                # First, so a red-branch fix it holds isn't merged by this same pass.
+                held = R.watch_default(r, info, prs, mine) or {}
                 # Every open PR's branches, head and base, drafts and forks' PRs
                 # included: the branch watch leaves them all (deleting a base
                 # closes the PRs on it).
                 in_use = set()
                 seen_to = True
-                # Obsolete fixes first: their holds take back a queued merge
+                # Held fixes first: their holds take back a queued merge
                 # before anything else this pass waits on.
                 # Then in the proof line's order, so proofSlots go to PRs in it.
-                for pr in sorted(prs, key=lambda pr: (pr["number"] not in obsolete, P.place(repo, pr["number"]))):
+                for pr in sorted(prs, key=lambda pr: (pr["number"] not in held, P.place(repo, pr["number"]))):
                     in_use.update((pr["headRefName"], pr["baseRefName"]))
                     live.add(V.snap_name(f"pr-{repo.replace('/', '_')}-{pr['number']}.json", pr["headRefOid"], pr["baseRefName"]))
                     try:
-                        step.handle(repo, pr, info, mine, pr["number"] in obsolete)
+                        step.handle(repo, pr, info, mine, held.get(pr["number"]))
                     except Exception as e:  # one bad PR mustn't stop the rest
                         log(f"{repo}#{pr['number']}: {e}")
                         waits.failed(repo, pr)

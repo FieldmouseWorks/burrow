@@ -130,6 +130,7 @@ T.leave = kept_leave
 # Held out of the train, it waits for what lets it back in, and the status
 # says which, with what GitHub said when it refused the merge.
 for held, checks, says in (("conflict", CI_GREEN, "it won't merge after the PRs ahead of it, until they've landed or left"),
+                           ("empty", CI_GREEN, "it changes nothing after the PRs ahead of it, until they've landed or left"),
                            ("red", CI_GREEN, "it was red alone in it, until a new head"),
                            ("refused", CI_GREEN + [mark("ERROR", "GitHub refused its merge: 2 of 3 required checks are expected")],
                             "GitHub refused its merge: 2 of 3 required checks are expected, until the default branch moves")):

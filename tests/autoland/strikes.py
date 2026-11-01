@@ -8,8 +8,8 @@ import json
 import os
 import re
 
-from harness import CI_GREEN, FAIL, JOBS, STUB, T, UNSTOPPABLE, WROTE, C, H, S, clean, fresh_pr_state, merged, mkpr, pr_state, \
-    run, stand_in, tmp, worker
+from harness import ALREADY, CI_GREEN, FAIL, JOBS, STUB, T, UNSTOPPABLE, WROTE, C, H, S, clean, fresh_pr_state, merged, mkpr, \
+    pr_state, run, stand_in, tmp, worker
 
 import harness
 import proofs as P
@@ -81,6 +81,13 @@ CASES = {
              "again": lambda: STUB.update(post=C.Unavailable("GitHub's still down")) or "GitHub's still down"},
     "stop": {"pr": clean(files=["secrets/1.yaml"], sha="b" * 40), "setup": judging,
              "fail": lambda: UNSTOPPABLE.add("judge-on-a"), "mend": UNSTOPPABLE.clear},
+    # What its merge would change, which git can't say; and a PR that adds
+    # nothing, which GitHub won't close.
+    "empty": {"pr": clean(), "fail": lambda: ALREADY.update({5: RuntimeError("git fetch: no network")}),
+              "mend": ALREADY.clear, "said": "git fetch: no network",
+              "again": lambda: ALREADY.update({5: RuntimeError("git fetch: still no network")}) or "git fetch: still no network"},
+    "close": {"pr": clean(), "setup": lambda: ALREADY.update({5: "e" * 40}), "fail": lambda: FAIL.append("pr close 5"),
+              "mend": FAIL.clear, "after": ALREADY.clear},
 }
 # A proof the steward builds (proofs.py): one it can't start, and one whose
 # derivations can't be worked out, which it has nothing to build without.
