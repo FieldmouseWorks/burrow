@@ -543,7 +543,7 @@ pub mod tests {
     pub fn fresh(dir: &std::path::Path) -> crate::config::Fresh {
         serde_json::from_value(json!({
             "owner": "sam", "group": 1, "repos": ["sam/r", "sam/f"], "label": "fresh-box",
-            "prefix": "fresh-box-", "template": "fresh-runner@", "most": 2,
+            "prefix": "fresh-box-", "template": "fresh-runner@", "most": 2, "idle": 0,
             "configs": dir.join("configs"),
         }))
         .unwrap()

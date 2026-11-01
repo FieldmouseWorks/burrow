@@ -512,6 +512,9 @@
           };
           committed = machine { rev = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"; } [ ];
           dispatchOnly = machine { } [ { burrow.dispatch.fresh.enable = lib.mkForce false; } ];
+          # More kept waiting than there may be at once.
+          overKept = machine { } [ { burrow.dispatch.fresh.idle = 3; } ];
+          refused = m: builtins.filter (a: !a.assertion) m.config.assertions;
           dirty = machine { dirtyRev = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-dirty"; } [ ];
           arm = machine { } [ { nixpkgs.hostPlatform = lib.mkForce "aarch64-linux"; } ];
           # remi's install rehearsal turns burrow-events' handlers off.
@@ -536,7 +539,7 @@
           # credential only it reads, and that nothing outlives.
           wantFresh = {
             owner = "sam-org"; group = 1; repos = [ "sam-org/homelab" ]; label = "fresh-burrow";
-            prefix = "fresh-burrow-"; most = 2; template = "burrow-fresh-runner@"; configs = "/run/burrow-fresh";
+            prefix = "fresh-burrow-"; most = 2; idle = 0; template = "burrow-fresh-runner@"; configs = "/run/burrow-fresh";
           };
           freshUnit = committed.config.systemd.services."burrow-fresh-runner@";
           # Each setting in the section of the unit file systemd reads it
@@ -583,6 +586,9 @@
           assert lib.assertMsg ((committed.config.burrow.ledger.env.CONARY_FRESH_RUNNERS or null) == "fresh-burrow-"
             && !(dispatchOnly.config.burrow.ledger.env ? CONARY_FRESH_RUNNERS))
             "dispatch: the ledger's cn is told fresh runners' names start ${builtins.toJSON (committed.config.burrow.ledger.env.CONARY_FRESH_RUNNERS or null)}, and ${builtins.toJSON (dispatchOnly.config.burrow.ledger.env.CONARY_FRESH_RUNNERS or null)} with none";
+          assert lib.assertMsg (map (a: a.message) (refused overKept) == [ "burrow.dispatch.fresh.idle (3) is more than there may be at once (most, 2)." ]
+            && refused committed == [ ])
+            "dispatch: more fresh runners kept waiting than there may be refuses ${builtins.toJSON (map (a: a.message) (refused overKept))}";
           assert lib.assertMsg (settings unhandled == settings committed)
             "dispatch: with the handlers off, the settings are ${builtins.toJSON (settings unhandled)}";
           assert lib.assertMsg ((settings committed).gap == 120 && (settings spaced).gap == 600)

@@ -389,6 +389,114 @@ mod tests {
         assert_eq!(look(&cfg, &p, &st, T).wake, Some(T - 10.0 + Q));
     }
 
+    fn keeping(dir: &std::path::Path, idle: usize, most: usize) -> Config {
+        let mut cfg = cfg(dir);
+        let f = cfg.fresh.as_mut().unwrap();
+        (f.idle, f.most) = (idle, most);
+        cfg
+    }
+
+    // With `idle`, that many are started before any job asks, and kept
+    // waiting however long: no wake-up and no wait for them. Only one past
+    // them is stopped once it's sat `quiet`, the oldest first.
+    #[test]
+    fn keeps_idle_ones_for_jobs_to_come() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = keeping(dir.path(), 2, 3);
+        let st = State::default();
+        let d = look(&cfg, &pool(&[], &[]), &st, T);
+        assert_eq!(moves(&d), (vec!["1800000000-0", "1800000000-1"], vec![]));
+        assert!(
+            d.wake.is_none() && d.items.is_empty() && d.state.fresh.is_none(),
+            "{d:?}"
+        );
+        let kept = pool(
+            &[
+                ("a", unit("active", T - 10.0 * Q, false)),
+                ("b", unit("active", T - 20.0 * Q, false)),
+            ],
+            &[],
+        );
+        let d = look(&cfg, &kept, &st, T);
+        assert_eq!(moves(&d), (vec![], vec![]));
+        assert!(d.wake.is_none() && d.items.is_empty(), "{d:?}");
+        let three = pool(
+            &[
+                ("a", unit("active", T - 10.0 * Q, false)),
+                ("b", unit("active", T - 20.0 * Q, false)),
+                ("c", unit("active", T - 5.0 * Q, false)),
+            ],
+            &[],
+        );
+        assert_eq!(
+            moves(&look(&cfg, &three, &st, T)),
+            (vec![], vec!["fresh-runner@b.service"])
+        );
+        // One past them, not yet `quiet`, is looked at again then.
+        let new = pool(
+            &[
+                ("a", unit("active", T - 10.0, false)),
+                ("b", unit("active", T - 20.0, false)),
+                ("c", unit("active", T - 30.0, false)),
+            ],
+            &[],
+        );
+        let d = look(&cfg, &new, &st, T);
+        assert_eq!(moves(&d), (vec![], vec![]));
+        assert_eq!(d.wake, Some(T - 30.0 + Q));
+    }
+
+    // One at a job, or on its way up, isn't waiting for one to come: the
+    // first is made up for, the second already counts.
+    #[test]
+    fn only_ones_waiting_are_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = keeping(dir.path(), 2, 3);
+        let st = State::default();
+        let p = pool(
+            &[
+                ("a", unit("active", T - Q, true)),
+                ("b", unit("active", T - Q, false)),
+            ],
+            &[],
+        );
+        assert_eq!(moves(&look(&cfg, &p, &st, T)).0, ["1800000000-0"]);
+        let p = pool(
+            &[
+                ("a", unit("activating", T, false)),
+                ("b", unit("active", T - Q, false)),
+            ],
+            &[],
+        );
+        assert_eq!(moves(&look(&cfg, &p, &st, T)), (vec![], vec![]));
+        // A queued job counts too: two kept and one for it, room allowing.
+        let p = pool(&[("b", unit("active", T - Q, false))], &[T - 5.0]);
+        assert_eq!(
+            moves(&look(&cfg, &p, &st, T)).0,
+            ["1800000000-0", "1800000000-1"]
+        );
+    }
+
+    // One kept that sits `quiet` beside a job queued for it, without taking
+    // it, won't: it's stopped and another started. Until then it's looked
+    // at again when it would have.
+    #[test]
+    fn one_kept_that_leaves_a_job_waiting_is_stopped() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = keeping(dir.path(), 1, 2);
+        let st = State::default();
+        let p = pool(&[("a", unit("active", T - 10.0 * Q, false))], &[T - Q]);
+        let d = look(&cfg, &p, &st, T);
+        assert_eq!(
+            moves(&d),
+            (vec!["1800000000-0"], vec!["fresh-runner@a.service"])
+        );
+        let p = pool(&[("a", unit("active", T - 10.0 * Q, false))], &[T - 10.0]);
+        let d = look(&cfg, &p, &st, T);
+        assert_eq!(moves(&d), (vec!["1800000000-0"], vec![]));
+        assert_eq!(d.wake, Some(T - 10.0 + Q));
+    }
+
     // A pass that couldn't read one of the pool's repos hasn't seen its
     // queue end: the wait stays as the last pass saw it, its deadline too.
     #[test]

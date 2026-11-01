@@ -95,6 +95,19 @@ in
       description = "The most there are at once.";
     };
 
+    idle = mkOption {
+      type = types.ints.unsigned;
+      default = 0;
+      description = ''
+        How many are kept started and waiting for a job before one is
+        queued, among `most`. A job then starts within seconds, rather than
+        after the dispatcher's next pass and a runner's start, each up to a
+        couple of minutes. Each one kept is a runner process waiting, and
+        one that was kept is still started fresh: nothing ran on it before
+        its job.
+      '';
+    };
+
     package = mkOption {
       type = types.package;
       default = pkgs.github-runner;
@@ -126,6 +139,7 @@ in
   };
 
   config = lib.mkIf (config.burrow.dispatch.enable && cfg.enable) {
+
     systemd.services.${template} = {
       description = "GitHub Actions runner %i, started fresh for one job";
       after = [ "network-online.target" ];

@@ -57,6 +57,9 @@ pub struct Fresh {
     pub template: String,
     /// The most there are at once.
     pub most: usize,
+    /// How many are kept started and waiting for a job before one is
+    /// queued, so a job doesn't wait for one to start.
+    pub idle: usize,
     /// Where a JIT config waits, as INSTANCE, for its unit to load it as a
     /// credential: a directory only this handler's user and root can read.
     pub configs: PathBuf,
