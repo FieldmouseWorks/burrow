@@ -278,10 +278,12 @@
         # Sandboxes for real: boot two, work in them, break out of nothing.
         # Nested KVM: run it on a machine that has /dev/kvm.
         agents = import ./tests/agents.nix { inherit self pkgs; };
-        # proj's turns and memory caps, with a stand-in for Claude; who waits
-        # in line for its slots; and its GitHub side, with a stand-in gh. Three
-        # tests on one machine's config, so they run side by side.
+        # proj's turns and memory caps, with a stand-in for Claude; a turn's
+        # second run, once its first is stopped; who waits in line for its
+        # slots; and its GitHub side, with a stand-in gh. Four tests on one
+        # machine's config, so they run side by side.
         proj = import ./tests/proj.nix { inherit self pkgs; };
+        proj-second-runs = import ./tests/proj-second-runs.nix { inherit self pkgs; };
         proj-slots = import ./tests/proj-slots.nix { inherit self pkgs; };
         proj-github = import ./tests/proj-github.nix { inherit self pkgs; };
         # A turn's clock, which stands still while it waits in line.

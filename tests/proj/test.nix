@@ -5,9 +5,10 @@
 #
 #   import ./proj/test.nix { inherit self pkgs; } "proj" ''with subtest(...): ...''
 #
-# proj.nix has a job's turns, proj-slots.nix who waits in line and who goes
-# first, and proj-github.nix its GitHub side. They're tests of their own so
-# CI runs them side by side, each on a machine of its own.
+# proj.nix has a job's turns, proj-second-runs.nix a turn's second run once
+# its first is stopped, proj-slots.nix who waits in line and who goes first,
+# and proj-github.nix its GitHub side. They're tests of their own so CI runs
+# them side by side, each on a machine of its own.
 { self, pkgs }:
 name: script:
 let
