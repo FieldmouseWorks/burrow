@@ -54,8 +54,9 @@ pub fn dispatch(cfg: &Config, args: &[String]) -> Result<(), Fail> {
         }
         Some("find") => {
             let key = arg(args, 1, "usage: proj find KEY")?;
-            let ids = run::find(cfg, key)?;
-            put(&ids.iter().map(|id| format!("{id}\n")).collect::<String>());
+            if let Some(id) = run::find(cfg, key)? {
+                put(&format!("{id}\n"));
+            }
             Ok(())
         }
         Some("stop") => stop(cfg, arg(args, 1, "usage: proj stop ID")?, false),

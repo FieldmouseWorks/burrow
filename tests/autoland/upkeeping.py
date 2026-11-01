@@ -229,9 +229,10 @@ assert stuck == [("Couldn't start a Claude job", "sam/r#4", "for the flaky test 
 assert C.WAKE == {"sam/r": T + 300}, C.WAKE
 assert "handed" not in state("flaky")["issues"]["4"], state("flaky")
 assert "sam/r: couldn't start its flaky job (no checkout, or proj refused)" in LOGGED, LOGGED
-# proj has no job under its key: the next look asks again.
+# proj has no job under its key: the next look asks again, under the same
+# key, so a start still under way can't end up beside a second job.
 mine = look(60)
-assert len(JOBS) == 1 and JOBS[0]["key"] == f"upkeep/sam/r/flaky/{T + 60}", JOBS
+assert len(JOBS) == 1 and JOBS[0]["key"] == f"upkeep/sam/r/flaky/{T}", JOBS
 assert "handed" not in state("flaky")["issues"]["4"], state("flaky")
 
 # While proj can't say what it has under a key, the part fails, is
@@ -239,9 +240,9 @@ assert "handed" not in state("flaky")["issues"]["4"], state("flaky")
 keys(fail=True)
 mine = look(90)
 assert not JOBS and "sam/r" in waits.FAILED and C.WAKE["sam/r"] == T + 90 + 300, (JOBS, waits.FAILED, C.WAKE)
-assert any(f"its flaky tests: whether the job it asked for started (upkeep/sam/r/flaky/{T + 60}): proj find:" in x
+assert any(f"its flaky tests: whether the job it asked for started (upkeep/sam/r/flaky/{T}): proj find:" in x
            and "Permission denied" in x for x in LOGGED), LOGGED
-keys(**{f"upkeep/sam/r/flaky/{T + 60}": ["up-1"]})
+keys(**{f"upkeep/sam/r/flaky/{T}": ["up-1"]})
 mine = look(120)
 assert not JOBS and state("flaky")["issues"]["4"]["job"] == "up-1", (JOBS, state("flaky"))
 

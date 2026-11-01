@@ -50,8 +50,9 @@ pub struct Out {
 pub struct Job {
     /// Whose it is: `dashboard` or `flaky`.
     pub part: &'static str,
-    /// What proj keeps it under (`proj run --key`): the part's state keeps
-    /// what it asked for until a look finds it, so none other starts.
+    /// What proj keeps it under (`proj run --key`, one job a key): the
+    /// part asks under the same key until a look finds a job under it, so
+    /// a starter that outlived its pass can't start a second beside it.
     pub key: String,
     pub task: String,
     /// Whether it's the pipeline's work, which goes ahead of the line, or
@@ -76,8 +77,8 @@ pub trait Jobs {
     /// queued, running, or how it ended (done, failed, timed out ...); None
     /// when nothing can say.
     fn state(&mut self, jid: &str) -> Option<String>;
-    /// The jobs run under the key (`proj find`): none, or one.
-    fn find(&mut self, key: &str) -> Result<Vec<String>, String>;
+    /// The job run under the key, once it has started (`proj find`).
+    fn find(&mut self, key: &str) -> Result<Option<String>, String>;
 }
 
 /// proj's own word on a job (`proj state ID`). A status run takes every
@@ -98,9 +99,9 @@ impl Jobs for Proj {
     }
 
     /// A status run's own jobs are all `dry`, as the steward's are.
-    fn find(&mut self, key: &str) -> Result<Vec<String>, String> {
+    fn find(&mut self, key: &str) -> Result<Option<String>, String> {
         if self.dry {
-            return Ok(vec!["dry".into()]);
+            return Ok(Some("dry".into()));
         }
         let out = Command::new(&self.bin)
             .args(["find", key])
@@ -110,10 +111,8 @@ impl Jobs for Proj {
             let why = String::from_utf8_lossy(&out.stderr).trim().to_string();
             return Err(format!("proj find: {} {why}", out.status));
         }
-        Ok(String::from_utf8_lossy(&out.stdout)
-            .split_whitespace()
-            .map(String::from)
-            .collect())
+        let said = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        Ok((!said.is_empty()).then_some(said))
     }
 }
 
@@ -144,18 +143,13 @@ impl Pass<'_> {
         self.out.stuck.push((heading.to_string(), at, what));
     }
 
-    /// The job a part's last look asked for, at `at`, as proj has it under
-    /// its key: None when none started.
+    /// The job a part asked for under the key it gave at `at`, as proj has
+    /// it: None while none has started.
     pub fn asked_for(&mut self, part: &str, at: f64) -> Result<Option<String>, String> {
         let key = key(self.repo, part, at);
-        let mut ids = self
-            .jobs
+        self.jobs
             .find(&key)
-            .map_err(|e| format!("whether the job it asked for started ({key}): {e}"))?;
-        match ids.len() {
-            0 | 1 => Ok(ids.pop()),
-            n => Err(format!("proj has {n} jobs under {key}")),
-        }
+            .map_err(|e| format!("whether the job it asked for started ({key}): {e}"))
     }
 
     pub fn state_dir(&self) -> PathBuf {

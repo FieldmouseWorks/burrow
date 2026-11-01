@@ -499,50 +499,43 @@ fn issues_take_as_many_jobs_as_fit_them() {
 #[test]
 fn a_job_that_never_started_hands_nothing() {
     // What's listed if it can't start names every issue it was for, and
-    // until the next look finds it by its key, none is handed. One proj
-    // has none of is asked for again; one proj can't say of fails the
-    // look, which asks for nothing; and two under one key hand nothing.
+    // until a look finds it by its key, none is handed. While none has
+    // started under the key, it's asked for again under the same one; while
+    // proj can't say, the look fails and asks for nothing.
     let d = tempfile::tempdir().unwrap();
     let cfg = config(d.path());
     let (mut hub, mut jobs) = (Hub::default(), States::new("done"));
+    let key = format!("upkeep/sam/r/flaky/{T}");
     let listed = says(&mut hub, &[(9, "unit/net", ACTIONS)]);
     let out = run(&cfg, &mut hub, &mut jobs, 0.0, listed);
     assert_eq!(
         out.jobs[0].unstarted,
         [line(NO_JOB, "sam/r#9", "for the flaky test `unit/net`")]
     );
-    assert_eq!(out.jobs[0].key, format!("upkeep/sam/r/flaky/{T}"));
+    assert_eq!(out.jobs[0].key, key);
     assert!(state(&cfg).issues[&9].handed.is_none());
     let listed = says(&mut hub, &[(9, "unit/net", ACTIONS)]);
     let out = run(&cfg, &mut hub, &mut jobs, 60.0, listed);
-    assert_eq!(jobs.finds, [format!("upkeep/sam/r/flaky/{T}")]);
+    assert_eq!(jobs.finds, std::slice::from_ref(&key));
     assert_eq!(out.jobs.len(), 1);
+    assert_eq!(out.jobs[0].key, key);
     jobs.unfound = Some("proj find: exit status: 1".into());
     let listed = says(&mut hub, &[(9, "unit/net", ACTIONS)]);
     let (out, r) = at(&cfg, &mut hub, &mut jobs, 120.0, |p| {
         look(p, p.cfg.flaky.as_ref().unwrap(), listed)
     });
     assert!(r.unwrap_err().ends_with("proj find: exit status: 1") && out.jobs.is_empty());
+    assert_eq!(state(&cfg).asked_at, Some(T));
     jobs.unfound = None;
-    jobs.start(&cfg, "flaky", "j");
-    jobs.start(&cfg, "flaky", "k");
-    let listed = says(&mut hub, &[(9, "unit/net", ACTIONS)]);
-    let (out, r) = at(&cfg, &mut hub, &mut jobs, 180.0, |p| {
-        look(p, p.cfg.flaky.as_ref().unwrap(), listed)
-    });
-    assert_eq!(
-        r.unwrap_err(),
-        format!("proj has 2 jobs under upkeep/sam/r/flaky/{}", T + 60.0)
-    );
-    assert!(out.jobs.is_empty() && state(&cfg).issues[&9].handed.is_none());
-    jobs.found.clear();
     jobs.start(&cfg, "flaky", "j");
     jobs.set("j", "queued");
     let listed = says(&mut hub, &[(9, "unit/net", ACTIONS)]);
     let out = run(&cfg, &mut hub, &mut jobs, 10.0 * H, listed);
     assert!(out.jobs.is_empty(), "{out:?}");
-    let it = &state(&cfg).issues[&9];
-    assert_eq!((it.handed, it.job.as_deref()), (Some(T + 60.0), Some("j")));
+    let st = state(&cfg);
+    let it = &st.issues[&9];
+    assert_eq!((it.handed, it.job.as_deref()), (Some(T), Some("j")));
+    assert!(st.asked.is_empty() && st.asked_at.is_none(), "{st:?}");
 }
 
 #[test]

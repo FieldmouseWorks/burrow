@@ -141,7 +141,7 @@ pub struct States {
     pub of: HashMap<String, String>,
     pub default: Option<String>,
     pub asked: Vec<String>,
-    pub found: HashMap<String, Vec<String>>,
+    pub found: HashMap<String, String>,
     pub unfound: Option<String>,
     pub finds: Vec<String>,
 }
@@ -165,7 +165,7 @@ impl States {
         let st: Value = serde_json::from_str(&text.unwrap()).unwrap();
         let at = st["askedAt"].as_f64().expect("a job asked for");
         let key = crate::pass::key("sam/r", part, at);
-        self.found.entry(key).or_default().push(jid.into());
+        self.found.insert(key, jid.into());
     }
 
     pub fn set(&mut self, jid: &str, state: &str) {
@@ -179,11 +179,11 @@ impl Jobs for States {
         self.of.get(jid).cloned().or_else(|| self.default.clone())
     }
 
-    fn find(&mut self, key: &str) -> Result<Vec<String>, String> {
+    fn find(&mut self, key: &str) -> Result<Option<String>, String> {
         self.finds.push(key.into());
         match &self.unfound {
             Some(why) => Err(why.clone()),
-            None => Ok(self.found.get(key).cloned().unwrap_or_default()),
+            None => Ok(self.found.get(key).cloned()),
         }
     }
 }

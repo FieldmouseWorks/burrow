@@ -66,8 +66,9 @@ pub struct State {
     pub job: Option<String>,
     #[serde(rename = "jobAt", skip_serializing_if = "Option::is_none")]
     pub job_at: Option<f64>,
-    /// The items a look asked a job for, and when, until the next look
-    /// finds the job by its key (Pass::asked_for) or that none started.
+    /// The items a look asked a job for, and when it first gave the key
+    /// they're asked under, until a look finds a job under it
+    /// (Pass::asked_for).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub asked: Vec<String>,
     #[serde(rename = "askedAt", skip_serializing_if = "Option::is_none")]
@@ -190,6 +191,8 @@ pub fn watch(p: &mut Pass, cfg: &Dashboard) -> Result<(), String> {
     let name = format!("dashboard-{}.json", p.repo.replace('/', "_"));
     let mut st: State = p.load(&name);
     asked(p, &mut st)?;
+    // The key stands whatever becomes of the dashboard meanwhile.
+    let asked_at = st.asked_at;
     let gone = |p: &Pass| State {
         next: Some(p.now + 2.0 * HOUR),
         ..State::default()
@@ -246,6 +249,7 @@ pub fn watch(p: &mut Pass, cfg: &Dashboard) -> Result<(), String> {
             }
         }
     }
+    st.asked_at = asked_at;
     if let Some(number) = n {
         act(p, cfg, number, &mut st);
     }
@@ -351,9 +355,10 @@ fn act(p: &mut Pass, cfg: &Dashboard, n: u64, st: &mut State) {
             )
         })
         .collect();
+    let key = key(p.repo, "dashboard", *st.asked_at.get_or_insert(p.now));
     p.out.jobs.push(Job {
         part: "dashboard",
-        key: key(p.repo, "dashboard", p.now),
+        key,
         task: task(p, cfg, n, &lines.join("\n")),
         pipeline: true,
         timeout: p.cfg.job_timeout,
@@ -366,32 +371,32 @@ fn act(p: &mut Pass, cfg: &Dashboard, n: u64, st: &mut State) {
         )],
     });
     st.asked = todo;
-    st.asked_at = Some(p.now);
 }
 
-/// The job the last look asked for, found by its key: handed what it was
-/// asked for, as of when it was. None found never started, and what's due
-/// is asked for again.
+/// The job the part asked for, found by its key: handed what it was asked
+/// for, as of when the key was given. While none has started, the key
+/// stands, and what's due is asked for again under it.
 fn asked(p: &mut Pass, st: &mut State) -> Result<(), String> {
-    if st.asked.is_empty() {
+    let Some(at) = st.asked_at else {
         return Ok(());
-    }
-    let at = st.asked_at.unwrap_or_default();
-    if let Some(jid) = p.asked_for("dashboard", at)? {
-        for k in &st.asked {
-            if let Some(it) = st.items.get_mut(k) {
-                it.handed = Some(at);
-                it.job = Some(jid.clone());
-            }
+    };
+    let Some(jid) = p.asked_for("dashboard", at)? else {
+        st.asked.clear();
+        return Ok(());
+    };
+    for k in &st.asked {
+        if let Some(it) = st.items.get_mut(k) {
+            it.handed = Some(at);
+            it.job = Some(jid.clone());
         }
-        eprintln!(
-            "{}: a Claude job {jid} for {} stuck on its dashboard",
-            p.repo,
-            st.asked.len()
-        );
-        st.job = Some(jid);
-        st.job_at = Some(at);
     }
+    eprintln!(
+        "{}: a Claude job {jid} for {} stuck on its dashboard",
+        p.repo,
+        st.asked.len()
+    );
+    st.job = Some(jid);
+    st.job_at = Some(at);
     st.asked.clear();
     st.asked_at = None;
     Ok(())

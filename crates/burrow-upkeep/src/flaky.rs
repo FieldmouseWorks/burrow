@@ -79,8 +79,9 @@ pub struct State {
     pub job: Option<String>,
     #[serde(rename = "jobAt", skip_serializing_if = "Option::is_none")]
     pub job_at: Option<f64>,
-    /// The issues a look asked a job for, and when, until the next look
-    /// finds the job by its key (Pass::asked_for) or that none started.
+    /// The issues a look asked a job for, and when it first gave the key
+    /// they're asked under, until a look finds a job under it
+    /// (Pass::asked_for).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub asked: Vec<u64>,
     #[serde(rename = "askedAt", skip_serializing_if = "Option::is_none")]
@@ -249,9 +250,10 @@ fn act(p: &mut Pass, cfg: &Flaky, st: &mut State) -> Result<(), String> {
             (NO_JOB.to_string(), format!("{}#{n}", p.repo), what)
         })
         .collect();
+    let key = key(p.repo, "flaky", *st.asked_at.get_or_insert(p.now));
     p.out.jobs.push(Job {
         part: "flaky",
-        key: key(p.repo, "flaky", p.now),
+        key,
         task: task(p, cfg, st, &handed),
         // Project work, not the pipeline's: it takes hours, and would hold
         // the slot the steward's fixes wait on.
@@ -262,33 +264,33 @@ fn act(p: &mut Pass, cfg: &Flaky, st: &mut State) -> Result<(), String> {
         unstarted,
     });
     st.asked = handed.into_iter().map(|(n, _)| n).collect();
-    st.asked_at = Some(p.now);
     Ok(())
 }
 
-/// The job the last look asked for, found by its key: handed the issues
-/// it was asked for, as of when it was. None found never started, and
-/// they're asked for again.
+/// The job the part asked for, found by its key: handed what it was asked
+/// for, as of when the key was given. While none has started, the key
+/// stands, and what's due is asked for again under it.
 fn asked(p: &mut Pass, st: &mut State) -> Result<(), String> {
-    if st.asked.is_empty() {
+    let Some(at) = st.asked_at else {
         return Ok(());
-    }
-    let at = st.asked_at.unwrap_or_default();
-    if let Some(jid) = p.asked_for("flaky", at)? {
-        for n in &st.asked {
-            if let Some(it) = st.issues.get_mut(n) {
-                it.handed = Some(at);
-                it.job = Some(jid.clone());
-            }
+    };
+    let Some(jid) = p.asked_for("flaky", at)? else {
+        st.asked.clear();
+        return Ok(());
+    };
+    for n in &st.asked {
+        if let Some(it) = st.issues.get_mut(n) {
+            it.handed = Some(at);
+            it.job = Some(jid.clone());
         }
-        eprintln!(
-            "{}: a Claude job {jid} for {} flaky tests",
-            p.repo,
-            st.asked.len()
-        );
-        st.job = Some(jid);
-        st.job_at = Some(at);
     }
+    eprintln!(
+        "{}: a Claude job {jid} for {} flaky tests",
+        p.repo,
+        st.asked.len()
+    );
+    st.job = Some(jid);
+    st.job_at = Some(at);
     st.asked.clear();
     st.asked_at = None;
     Ok(())

@@ -613,9 +613,11 @@ fn an_error_is_stuck_after_two_of_renovates_runs() {
 #[test]
 fn a_job_asked_for_is_found_by_its_key_however_long_it_waits() {
     // Nothing tells the look what became of the job it asked for: the
-    // next one finds it by its key. One still queued days on holds off
-    // any other; one proj has none of never started, and is asked for
-    // again; and while proj can't say, nothing's asked for.
+    // next one finds it by its key. Until one has started under it, it's
+    // asked for again under the same key, so a starter that outlived its
+    // pass and takes the key after all is the only job; while proj can't
+    // say, nothing's asked for; and one still queued days on holds off any
+    // other.
     let d = tempfile::tempdir().unwrap();
     let cfg = Config {
         flaky: None,
@@ -629,18 +631,17 @@ fn a_job_asked_for_is_found_by_its_key_however_long_it_waits() {
     assert_eq!(out.jobs.len(), 1);
     let key = format!("upkeep/sam/r/dashboard/{}", T + DAY);
     assert_eq!(out.jobs[0].key, key);
-    // Never started: asked for again, under a key of its own.
     jobs.finds.clear();
     let out = watch_at(&cfg, &mut hub, &mut jobs, DAY + 1.0);
-    assert_eq!(jobs.finds, [key]);
+    assert_eq!(jobs.finds, std::slice::from_ref(&key));
     assert_eq!(out.jobs.len(), 1, "{out:?}");
-    assert_eq!(
-        out.jobs[0].key,
-        format!("upkeep/sam/r/dashboard/{}", T + DAY + 1.0)
-    );
-    // proj can't say: the part fails, asks for nothing, and keeps its ask.
+    assert_eq!(out.jobs[0].key, key);
+    // Closed and found again meanwhile: the key stands.
+    dashboard(&mut hub, BODY, &[("state", "closed")]);
+    watch_at(&cfg, &mut hub, &mut jobs, DAY + 2.0);
+    assert_eq!(state(&cfg).asked_at, Some(T + DAY));
     jobs.unfound = Some("proj find: exit status: 1".into());
-    let (out, r) = look(&cfg, &mut hub, &mut jobs, DAY + 2.0, |p| {
+    let (out, r) = look(&cfg, &mut hub, &mut jobs, DAY + 3.0, |p| {
         crate::watch(p);
         Ok(())
     });
@@ -649,15 +650,17 @@ fn a_job_asked_for_is_found_by_its_key_however_long_it_waits() {
     assert_eq!(
         out.failed,
         [format!(
-            "its dashboard: whether the job it asked for started (upkeep/sam/r/dashboard/{}): \
-proj find: exit status: 1",
-            T + DAY + 1.0
+            "its dashboard: whether the job it asked for started ({key}): proj find: exit status: 1"
         )]
     );
-    assert_eq!(state(&cfg).asked_at, Some(T + DAY + 1.0));
+    assert_eq!(state(&cfg).asked_at, Some(T + DAY));
     // Queued, and still queued a week on: it has what was asked, and no
     // other job starts beside it.
     jobs.unfound = None;
+    fresh(&cfg);
+    dashboard(&mut hub, BODY, &[]);
+    watch_at(&cfg, &mut hub, &mut jobs, 0.0);
+    assert_eq!(watch_at(&cfg, &mut hub, &mut jobs, DAY).jobs.len(), 1);
     jobs.start(&cfg, "dashboard", "dash-q");
     jobs.set("dash-q", "queued");
     for t in [DAY + 3.0, 8.0 * DAY] {
@@ -668,13 +671,13 @@ proj find: exit status: 1",
     assert!(st.asked.is_empty() && st.asked_at.is_none(), "{st:?}");
     assert_eq!(
         (st.job.as_deref(), st.job_at),
-        (Some("dash-q"), Some(T + DAY + 1.0))
+        (Some("dash-q"), Some(T + DAY))
     );
     assert!(
         st.items
             .values()
             .filter(|it| it.handed.is_some())
-            .all(|it| it.job.as_deref() == Some("dash-q") && it.handed == Some(T + DAY + 1.0))
+            .all(|it| it.job.as_deref() == Some("dash-q") && it.handed == Some(T + DAY))
     );
 }
 
