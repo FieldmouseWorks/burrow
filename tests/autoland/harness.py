@@ -51,11 +51,14 @@ REVIEW, FAKES = sys.argv[3], sys.argv[4]
 UPKEEP, UPKEEP_SRC = sys.argv[5], sys.argv[6]
 # What the passes here run in its place (upkeeping.py runs the real one): it
 # notes how it was run (UPKEEP_RAN), with what `branches` read on its stdin
-# last, and finds nothing due, stuck or wanted.
-UPKEEP_RAN = f"{tmp}/upkeep-ran"
+# last, and finds nothing due, stuck or wanted. Its `token` is the real
+# one's, on the config upkeep_config writes (UPKEEP_TOKEN).
+UPKEEP_RAN, UPKEEP_TOKEN = f"{tmp}/upkeep-ran", f"{tmp}/upkeep-token.json"
 with open(f"{tmp}/upkeep-none", "w") as f:
     f.write(f"""#!{sys.executable}
-import json, sys
+import json, os, sys
+if sys.argv[2] == "token":
+    os.execv({UPKEEP!r}, [{UPKEEP!r}, {UPKEEP_TOKEN!r}, *sys.argv[2:]])
 with open({UPKEEP_RAN!r}, "a") as f:
     f.write(json.dumps(sys.argv[2:] + ([json.load(sys.stdin)] if sys.argv[2] == "branches" else [])) + "\\n")
 print(json.dumps({{"due": False, "failed": [], "limited": None}} if sys.argv[2] == "settle" else
@@ -150,7 +153,7 @@ with open(sys.argv[2]) as f:
 with open(f"{tmp}/config.json", "w") as f:
     json.dump({
         "owners": ["sam"], "exclude": [], "context": "review-settled", "rulesets": True,
-        "app": {"id": 7, "slug": "steward"},
+        "app": {"id": 7, "slug": "steward"}, "api": "http://127.0.0.1:9",
         "baselineJobs": False, "baselinePerPass": 1, "authors": ["sam"], "bots": ["dependabot", "renovate", "workers"], "machinery": None,
         "stateDir": f"{tmp}/state", "snapDir": f"{tmp}/trees", "majorKey": f"{tmp}/sweep.key", "projectsDir": f"{tmp}/none", "jobsDir": f"{tmp}/jobs", "renovateEmail": "bot@renovateapp.com", "proj": "proj", "jobTimeout": 60, "jobIdle": 20, "proofTimeout": 180, "heavy": None, "owner": "Sam",
         "labels": {"hold": "hold", "owner": "needs-owner", "first": "first", "waiting": {"releaseAge": "waiting: release age", "proofSlot": "waiting: proof slot", "reviewer": "waiting: reviewer"}}, "notify": {"repo": "", "assignee": "", "label": "autoland"}, "inbox": {"enable": False, "label": "claude", "unstickLabel": "unstick", "authors": ["sam"]},
@@ -202,6 +205,26 @@ for d in (V.QUEUE, V.SNAP, V.TREES, V.DONE, V.SESSIONS, V.GIT):
 
 def sh(*a, cwd=None):
     return subprocess.run(a, cwd=cwd, check=True, capture_output=True, text=True).stdout
+
+
+def upkeep_config(path=f"{tmp}/upkeep.json", **over):
+    """burrow-upkeep's config, as the module writes it, on the steward's
+    state, with `over` over it: the real binary's command, as the pass's
+    config has it (C.CFG["upkeep"])."""
+    with open(path, "w") as f:
+        json.dump({"stateDir": C.STATE, "proj": f"{tmp}/upkeep-bin/proj", "projectsDir": C.CFG["projectsDir"],
+                   "authors": C.CFG["authors"], "bots": C.CFG["bots"], "app": C.CFG["app"], "api": C.API,
+                   "jobTimeout": C.CFG["jobTimeout"], "renovate": C.CFG["renovate"],
+                   "dashboard": {"title": "Dependency Dashboard", "waitDays": 4, "errorDays": 1, "renovateKick": None, "renovateRuns": None},
+                   "flaky": {"jobTimeout": 240},
+                   "settle": {"owner": C.CFG["owner"], "context": C.CFG["context"],
+                              "trainContext": C.CFG["trainContext"], "rulesets": C.CFG["rulesets"], "labels": C.CFG["labels"],
+                              "defaults": {k: C.CFG["defaults"][k] for k in ("directPush", "ruleset", "train")}, "repos": {}},
+                   "branches": {"keep": ["gh-pages"], "repos": {}, "train": "conary/*"}, **over}, f)
+    return [UPKEEP, path]
+
+
+upkeep_config(UPKEEP_TOKEN)
 
 
 head = "a" * 40

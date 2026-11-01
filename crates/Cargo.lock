@@ -238,13 +238,16 @@ dependencies = [
 name = "burrow-upkeep"
 version = "0.0.0"
 dependencies = [
+ "base64",
  "burrow-github",
  "flaky",
+ "gh-token",
  "jiff",
  "regex",
  "serde",
  "serde_json",
  "tempfile",
+ "ureq",
 ]
 
 [[package]]

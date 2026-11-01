@@ -265,7 +265,7 @@ impl Pass<'_> {
 
     /// The steward's own login, as REST gives it: its App's bot.
     pub fn me(&self) -> String {
-        format!("{}[bot]", self.cfg.app)
+        format!("{}[bot]", self.cfg.app.slug)
     }
 }
 

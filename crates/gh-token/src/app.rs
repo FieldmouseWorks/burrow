@@ -79,15 +79,18 @@ impl App {
     }
 
     /// A token for the target: the App's installation on its owner, every
-    /// repo of it or only its repo. `now` is Unix seconds.
-    pub fn mint(&self, target: &Target, now: i64) -> Result<Minted, Error> {
+    /// repo of it or only its repo. `now` is Unix seconds. None: the App
+    /// isn't installed on the owner.
+    pub fn mint(&self, target: &Target, now: i64) -> Result<Option<Minted>, Error> {
         #[derive(Deserialize)]
         struct Token {
             token: String,
             expires_at: String,
         }
         let jwt = self.jwt(now)?;
-        let id = self.installation(&jwt, &target.owner)?;
+        let Some(id) = self.installation(&jwt, &target.owner)? else {
+            return Ok(None);
+        };
         let body = match &target.repo {
             Some(r) => serde_json::json!({ "repositories": [r] }),
             None => serde_json::json!({}),
@@ -105,10 +108,10 @@ impl App {
         let expires = OffsetDateTime::parse(&got.expires_at, &Rfc3339)
             .map_err(|e| Error::refused(format!("{path}: its expires_at: {e}")))?
             .unix_timestamp();
-        Ok(Minted {
+        Ok(Some(Minted {
             token: got.token,
             expires,
-        })
+        }))
     }
 
     /// The App's own JWT, which only asks GitHub about the App.
@@ -131,9 +134,9 @@ impl App {
         Ok(format!("{signed}.{}", URL_SAFE_NO_PAD.encode(sig)))
     }
 
-    /// The installation on `owner`, from every page of the App's: one
-    /// GitHub didn't give is an error, never an installation missing.
-    fn installation(&self, jwt: &str, owner: &str) -> Result<u64, Error> {
+    /// The installation on `owner`, from every page of the App's, or None:
+    /// a page GitHub didn't give is an error, never an installation missing.
+    fn installation(&self, jwt: &str, owner: &str) -> Result<Option<u64>, Error> {
         #[derive(Deserialize)]
         struct Installation {
             id: u64,
@@ -152,12 +155,10 @@ impl App {
                     .is_some_and(|a| a.login.eq_ignore_ascii_case(owner))
             };
             if let Some(i) = got.iter().find(on) {
-                return Ok(i.id);
+                return Ok(Some(i.id));
             }
             if got.len() < 100 {
-                return Err(Error::refused(format!(
-                    "the App isn't installed on {owner}"
-                )));
+                return Ok(None);
             }
         }
         Err(Error::refused(format!(
@@ -294,7 +295,10 @@ mod tests {
     fn mints_a_token_for_an_account_or_one_repo() {
         let pem = fake::key(true);
         let github = github("ghs_abc");
-        let got = app(&github, &pem).mint(&target("sam"), 1_000_000).unwrap();
+        let got = app(&github, &pem)
+            .mint(&target("sam"), 1_000_000)
+            .unwrap()
+            .unwrap();
         assert_eq!((got.token.as_str(), got.expires), ("ghs_abc", EXPIRES_AT));
         assert_eq!(
             github.asked(),
@@ -345,7 +349,7 @@ mod tests {
             }
         });
         let got = app(&github, &fake::key(true)).mint(&target("sam"), 0);
-        assert_eq!(got.map(|m| m.token), Ok("ghs_abc".to_owned()));
+        assert_eq!(got.map(|m| m.unwrap().token), Ok("ghs_abc".to_owned()));
     }
 
     #[test]
@@ -354,6 +358,7 @@ mod tests {
         assert_eq!(
             app(&github, &fake::key(false))
                 .mint(&target("sam"), 0)
+                .unwrap()
                 .unwrap()
                 .token,
             "ghs_abc"
@@ -373,12 +378,18 @@ mod tests {
     }
 
     #[test]
-    fn an_account_without_the_app_is_refused() {
-        let e = app(&github("ghs_abc"), &fake::key(true))
-            .mint(&target("eve"), 0)
-            .err()
-            .unwrap();
-        assert_eq!(e, Error::refused("the App isn't installed on eve"));
+    fn an_account_without_the_app_has_no_token_to_mint() {
+        let github = github("ghs_abc");
+        let got = app(&github, &fake::key(true)).mint(&target("eve"), 0);
+        assert!(matches!(got, Ok(None)));
+        // Every page read, and nothing asked to mint.
+        assert_eq!(
+            github.asked(),
+            [
+                "GET /app/installations?per_page=100&page=1",
+                "GET /app/installations?per_page=100&page=2",
+            ]
+        );
     }
 
     #[test]
@@ -463,6 +474,7 @@ mod tests {
     fn takes_github_s_tokens_as_they_come() {
         let got = app(&github(fake::TOKEN), &fake::key(true))
             .mint(&target("sam"), 0)
+            .unwrap()
             .unwrap();
         assert_eq!(got.token, fake::TOKEN);
     }

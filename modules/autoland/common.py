@@ -84,17 +84,17 @@ def limited(stderr, env):
 # git's credential, for a fetch from or a push to GitHub: gh's, so the
 # App's token in gh_env(), and none of the machine user's helpers.
 GIT_AUTH = ("-c", "credential.helper=", "-c", "credential.helper=!gh auth git-credential")
-# GitHub's REST API, where the App's own calls (its installations, their
-# tokens) go: gh can't make them, since it sends a JWT as a token, not as
-# the bearer GitHub wants. A check points it at a stand-in.
-API = "https://api.github.com"
+# GitHub's REST API, where the App's own calls (its webhook's config) go:
+# gh can't make them, since it sends a JWT as a token, not as the bearer
+# GitHub wants. A check points it at a stand-in.
+API = CFG["api"]
 # Whose repos the calls now are about, innermost last (acting_for).
 _for = []
-# The App's installations, by owner (lower case), and their tokens: each
-# minted once a process and kept in memory only. The state dir is the
-# machine user's, so a token written there would let anything of theirs act
-# as the App for the rest of its hour.
-_installs, _tokens = {}, {}
+# The App's installation tokens, by owner (lower case): each minted once a
+# process and kept in memory only. The state dir is the machine user's, so
+# a token written there would let anything of theirs act as the App for
+# the rest of its hour.
+_tokens = {}
 
 
 @contextlib.contextmanager
@@ -145,35 +145,25 @@ def app_call(method, path, jwt, body=None):
         raise Unavailable(f"{method} {path}: {e}") from None
 
 
-def installations(jwt):
-    """The App's installations, by owner (lower case), every page of them: a
-    public App can be on accounts that aren't among the owners, and they
-    take up pages too. A page GitHub didn't answer raises, so a lookup cut
-    short is never read as an owner it isn't on."""
-    found, page = {}, 1
-    while True:
-        got = app_call("GET", f"app/installations?per_page=100&page={page}", jwt)
-        found.update({str((i.get("account") or {}).get("login", "")).lower(): i["id"] for i in got})
-        if len(got) < 100:
-            return found
-        page += 1
-
-
 def token(owner):
     """A token of the App's installation on owner (lower case). One lasts an
     hour and a pass twenty minutes at most, so each is minted once a
-    process, and again only if it has under ten minutes left."""
+    process, and again only if it has under ten minutes left. burrow-upkeep
+    mints it (crates/burrow-upkeep/src/token.rs), with the App's key: it
+    raises Unavailable when GitHub can't be asked just now, RuntimeError
+    when there's none to have (the App isn't installed on owner)."""
     have = _tokens.get(owner)
     if have and have[1] - time.time() > 600:
         return have[0]
-    jwt = app_jwt()
-    if owner not in _installs:
-        _installs.clear()
-        _installs.update(installations(jwt))
-    if owner not in _installs:
-        raise RuntimeError(f"the App {CFG['app']['slug']} isn't installed on {owner}")
-    got = app_call("POST", f"app/installations/{_installs[owner]}/access_tokens", jwt)
-    _tokens[owner] = (got["token"], ts(got["expires_at"]))
+    p = subprocess.run([*CFG["upkeep"], "token", owner], capture_output=True, text=True, timeout=UPKEEP_TIMEOUT)
+    said = p.stderr.strip()
+    if p.returncode:
+        raise (Unavailable if p.returncode == 75 else RuntimeError)(said.splitlines()[-1] if said else
+                                                                    f"burrow-upkeep token exited {p.returncode}")
+    if said:
+        log(said)
+    got = json.loads(p.stdout)
+    _tokens[owner] = (got["token"], got["expires"])
     return got["token"]
 
 

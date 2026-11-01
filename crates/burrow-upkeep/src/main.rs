@@ -1,21 +1,29 @@
 //! `burrow-upkeep CONFIG settle|branches|watch ...`, run by a pass of the autoland
 //! steward (modules/autoland/steward.py) for each repo, with the App's token
-//! for the repo's owner in GH_TOKEN, under the pass's lock. What it says of
-//! itself, on stderr, goes to the steward's journal.
+//! for the repo's owner in GH_TOKEN, under the pass's lock; and `token`,
+//! which mints the pass that token. What it says of itself, on stderr, goes
+//! to the steward's journal.
 
 use std::collections::BTreeSet;
 use std::io::Read;
 use std::path::Path;
 use std::process::ExitCode;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use burrow_github::Gh;
 use burrow_upkeep::branches::{self, Git};
 use burrow_upkeep::config::Config;
 use burrow_upkeep::pass::{Out, Pass, Proj};
 use burrow_upkeep::settle::{self, Repo};
+use burrow_upkeep::token::{self, Token};
+use gh_token::app::Minted;
 use serde_json::json;
 
 const USAGE: &str = "usage:
+  burrow-upkeep CONFIG token OWNER
+      a token of the App's installation on OWNER, minted with its key
+      (systemd's credential app-key), and when it expires, as JSON on
+      stdout; exit status 75 when GitHub can't be asked just now
   burrow-upkeep CONFIG settle OWNER/REPO --now SECONDS [--private] [--empty] [--dry]
       the repo's labels and settings, if they're due, as of the pass's time:
       whether they were, what failed and a rate limit's reset, as JSON on
@@ -43,12 +51,18 @@ fn main() -> ExitCode {
             eprintln!("burrow-upkeep: {why}");
             ExitCode::FAILURE
         }
+        Err(Stop::Later(why)) => {
+            eprintln!("burrow-upkeep: {why}");
+            // sysexits' EX_TEMPFAIL, as gh-token's: ask again later.
+            ExitCode::from(75)
+        }
     }
 }
 
 enum Stop {
     Usage(String),
     Failed(String),
+    Later(String),
 }
 
 /// What follows the words: --now (required) and --dry, then each word's
@@ -114,6 +128,14 @@ fn run(args: &[String]) -> Result<(), Stop> {
     let (config, words) = args
         .split_first()
         .ok_or_else(|| Stop::Usage("no config".into()))?;
+    if let [word, owner] = words
+        && word == "token"
+    {
+        let cfg = Config::read(Path::new(config)).map_err(Stop::Failed)?;
+        let m = app_token(&cfg, owner)?;
+        println!("{}", json!({"token": m.token, "expires": m.expires}));
+        return Ok(());
+    }
     let (word, repo, rest) = match words {
         [word, repo, rest @ ..] => (word.as_str(), repo.as_str(), rest),
         _ => return Err(Stop::Usage("no word and repo".into())),
@@ -192,4 +214,27 @@ fn open() -> Result<BTreeSet<String>, Stop> {
             "the open PRs' branches, as a JSON list on stdin: {e}"
         ))
     })
+}
+
+/// The App's token for `owner`, as of the clock now. An owner the App
+/// isn't installed on has none: GitHub's answer, said as such.
+fn app_token(cfg: &Config, owner: &str) -> Result<Minted, Stop> {
+    let creds = std::env::var_os("CREDENTIALS_DIRECTORY")
+        .filter(|d| !d.is_empty())
+        .ok_or_else(|| {
+            Stop::Failed("no CREDENTIALS_DIRECTORY: the App's key is the credential app-key".into())
+        })?;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX));
+    let proxy = ureq::Proxy::try_from_env();
+    match token::token(cfg, owner, Path::new(&creds), proxy, now) {
+        Ok(Token::Minted(m)) => Ok(m),
+        Ok(Token::NotInstalled) => Err(Stop::Failed(format!(
+            "the App {} isn't installed on {owner}",
+            cfg.app.slug
+        ))),
+        Err(e) if e.unavailable => Err(Stop::Later(format!("no token for {owner}: {e}"))),
+        Err(e) => Err(Stop::Failed(format!("no token for {owner}: {e}"))),
+    }
 }

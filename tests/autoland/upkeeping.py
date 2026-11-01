@@ -14,7 +14,7 @@ import os
 import sys
 import time
 
-from harness import UPKEEP, C, R, S, tmp
+from harness import UPKEEP, C, R, S, tmp, upkeep_config
 
 import waits  # noqa: E402 (harness puts the steward on the path)
 
@@ -122,18 +122,7 @@ def called():
     return [json.loads(x) for x in open(CALLED)]
 
 
-# burrow-upkeep's config, as the module writes it, on the steward's state.
-with open(f"{tmp}/upkeep.json", "w") as f:
-    json.dump({"stateDir": C.STATE, "proj": f"{tmp}/upkeep-bin/proj", "projectsDir": C.CFG["projectsDir"],
-               "authors": C.CFG["authors"], "bots": C.CFG["bots"], "app": C.CFG["app"]["slug"],
-               "jobTimeout": C.CFG["jobTimeout"], "renovate": C.CFG["renovate"],
-               "dashboard": {"title": "Dependency Dashboard", "waitDays": 4, "errorDays": 1, "renovateKick": None, "renovateRuns": None},
-               "flaky": {"jobTimeout": 240},
-               "settle": {"owner": C.CFG["owner"], "appId": C.CFG["app"]["id"], "context": C.CFG["context"],
-                          "trainContext": C.CFG["trainContext"], "rulesets": C.CFG["rulesets"], "labels": C.CFG["labels"],
-                          "defaults": {k: C.CFG["defaults"][k] for k in ("directPush", "ruleset", "train")}, "repos": {}},
-               "branches": {"keep": ["gh-pages"], "repos": {}, "train": "conary/*"}}, f)
-UP = [UPKEEP, f"{tmp}/upkeep.json"]
+UP = upkeep_config()
 JOBS, LOGGED = [], []
 NEXT = {}  # what C.job gives next, when set ("jid"): None for no job; or raises ("raise")
 

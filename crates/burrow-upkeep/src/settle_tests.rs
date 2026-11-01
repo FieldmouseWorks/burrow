@@ -49,7 +49,7 @@ fn required_rule(strict: bool, required: Value) -> Value {
 
 /// The baseline as the steward makes it, required checks and all.
 fn full_baseline(cfg: &Config) -> Value {
-    let mut b = baseline(&cfg.settle, cfg.settle.defaults);
+    let mut b = baseline(&cfg.settle, cfg.app.id, cfg.settle.defaults);
     b["source_type"] = "Repository".into();
     b
 }
@@ -681,7 +681,7 @@ fn an_orgs_baseline_isnt_the_repos_and_one_with_none_gets_it() {
         json!([{"id": 9, "name": "baseline", "target": "branch", "source_type": "Organization"}]);
     hub.on("GET", &format!("{LISTING}$"), answer(200, org));
     settle_at(&cfg, &mut hub, &public(), 0.0);
-    let made = baseline(&cfg.settle, cfg.settle.defaults);
+    let made = baseline(&cfg.settle, cfg.app.id, cfg.settle.defaults);
     assert_eq!(ruled(&hub), [("POST", "repos/sam/r/rulesets", Some(&made))]);
     // With none at all, it's added, its required status from the App only.
     hub.on("GET", &format!("{LISTING}$"), answer(200, json!([])));
@@ -703,7 +703,7 @@ fn an_orgs_baseline_isnt_the_repos_and_one_with_none_gets_it() {
         direct_push: true,
         ..cfg.settle.defaults
     };
-    let made = baseline(&cfg.settle, pushed);
+    let made = baseline(&cfg.settle, cfg.app.id, pushed);
     assert_eq!(
         made["rules"],
         json!([{"type": "deletion"}, {"type": "non_fast_forward"}])
@@ -751,9 +751,12 @@ fn the_baseline_requires_the_trains_status_exactly_while_its_train_is_on() {
     let off = cfg.settle.defaults;
     let on = Rules { train: true, ..off };
     let both = checks(&[("review-settled", 7), ("conary/train", 7)]);
-    assert_eq!(json!(required(&cfg.settle, false)), checks(&SETTLED));
-    assert_eq!(json!(required(&cfg.settle, true)), both);
-    let made = baseline(&cfg.settle, on);
+    assert_eq!(
+        json!(required(&cfg.settle, cfg.app.id, false)),
+        checks(&SETTLED)
+    );
+    assert_eq!(json!(required(&cfg.settle, cfg.app.id, true)), both);
+    let made = baseline(&cfg.settle, cfg.app.id, on);
     assert_eq!(
         made["rules"][3]["parameters"]["required_status_checks"],
         both

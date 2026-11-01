@@ -11,7 +11,7 @@ import threading
 import time
 
 from harness import (FAIL, REAL_TOKEN, T0, WROTE, C, P, R, S, T, V, clean, fresh_pr_state, judgment, merges, mkpr, run, said, sh,
-                     stand_in, tmp)
+                     stand_in, tmp, upkeep_config)
 from harness import head as HEAD
 
 # The App's key, as systemd hands it to a pass, and its public half to check
@@ -70,13 +70,15 @@ def unb64(s):
     return base64.urlsafe_b64decode(s + "=" * (-len(s) % 4))
 
 
-# A token for sam's repos: the installation is looked up as the App, with a
-# JWT its key signed, saying it's App 7, for at most ten minutes.
+# A token for sam's repos, minted by burrow-upkeep (the real one, on the
+# stand-in here): the installation is looked up as the App, with a JWT its
+# key signed, saying it's App 7, for at most ten minutes.
+kept_upkeep = C.CFG["upkeep"]
+C.CFG["upkeep"] = upkeep_config(f"{tmp}/upkeep-app.json", api=C.API)
 assert REAL_TOKEN("sam") == "ghs_minted1"
 assert MINTED == ["/app/installations/11/access_tokens"], MINTED
-# Every page of the installations was read, not just the first.
-assert [p for _, p, _ in SEEN] == ["/app/installations?per_page=100&page=1", "/app/installations?per_page=100&page=2",
-                                   "/app/installations/11/access_tokens"], SEEN
+# Sam's installation is on the first page, so that's the one read.
+assert [p for _, p, _ in SEEN] == ["/app/installations?per_page=100&page=1", "/app/installations/11/access_tokens"], SEEN
 for method, path, auth in SEEN:
     assert auth.startswith("Bearer "), SEEN
     jwt = auth[len("Bearer "):]
@@ -88,16 +90,19 @@ for method, path, auth in SEEN:
         f.write(unb64(sig))
     subprocess.run(["openssl", "dgst", "-sha256", "-verify", PUB, "-signature", f"{tmp}/jwt.sig"],
                    input=f"{head}.{body}".encode(), check=True, capture_output=True)
-# Kept for the process: the next call for sam mints nothing; eve's is another
-# installation's, and the installations aren't looked up again.
+# Kept for the process: the next call for sam mints nothing. Eve's is
+# another installation's, on the second page: every page is read up to it.
 SEEN.clear()
 assert REAL_TOKEN("sam") == "ghs_minted1" and SEEN == [], SEEN
-assert REAL_TOKEN("eve") == "ghs_minted2" and [p for _, p, _ in SEEN] == ["/app/installations/12/access_tokens"], SEEN
+assert REAL_TOKEN("eve") == "ghs_minted2", SEEN
+assert [p for _, p, _ in SEEN] == ["/app/installations?per_page=100&page=1", "/app/installations?per_page=100&page=2",
+                                   "/app/installations/12/access_tokens"], SEEN
 # One with under ten minutes left is minted again.
 C._tokens["sam"] = ("ghs_minted1", time.time() + 300)
 assert REAL_TOKEN("sam") == "ghs_minted3"
-# Never written anywhere: the state dir is the machine user's.
-for root, _, files in os.walk(f"{tmp}/state"):
+# Never written anywhere: the state dir is the machine user's, and every
+# Claude session on the machine is that user.
+for root, _, files in os.walk(tmp):
     for name in files:
         with open(os.path.join(root, name), "rb") as f:
             assert b"ghs_minted" not in f.read(), os.path.join(root, name)
@@ -113,29 +118,28 @@ try:
     REAL_TOKEN("nobody")
     raise AssertionError("a token with GitHub down")
 except C.Unavailable as e:
-    assert "HTTP 503" in str(e), e
+    assert "503" in str(e), e
 API["down"] = False
 # Nor a page of them: an owner that might be on it isn't said to be missing.
 API["page2"] = False
-C._installs.clear()
 C._tokens.clear()
 try:
     REAL_TOKEN("eve")
     raise AssertionError("a token with a page of installations unread")
 except C.Unavailable as e:
-    assert "HTTP 502" in str(e), e
+    assert "502" in str(e), e
 API["page2"] = True
-# Without the key (a pass not given the credential), nothing is signed.
+# Without the key (a pass not given the credential), nothing is minted.
 os.rename(KEY, KEY + ".gone")
 try:
     C._tokens.clear()
     REAL_TOKEN("sam")
     raise AssertionError("a token without the App's key")
 except RuntimeError as e:
-    assert "couldn't sign as the App" in str(e), e
+    assert "the App's key" in str(e) and not isinstance(e, C.Unavailable), e
 os.rename(KEY + ".gone", KEY)
 C._tokens.clear()
-C._installs.clear()
+C.CFG["upkeep"] = kept_upkeep
 
 # The steward's status is the one its App posted. Anyone who can push can
 # post the context, a user whose login is the App's name too (GraphQL gives

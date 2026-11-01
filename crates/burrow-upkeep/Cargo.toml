@@ -9,14 +9,18 @@ publish.workspace = true
 [dependencies]
 burrow-github = { path = "../burrow-github" }
 flaky = { path = "../flaky" }
+gh-token = { path = "../gh-token" }
 jiff.workspace = true
 regex = { version = "1.13.1", default-features = false, features = ["std", "unicode-perl", "unicode-case"] }
 serde.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
+ureq.workspace = true
 
 [dev-dependencies]
+base64.workspace = true
 burrow-github = { path = "../burrow-github", features = ["fake"] }
+gh-token = { path = "../gh-token", features = ["fake"] }
 
 [lints]
 workspace = true

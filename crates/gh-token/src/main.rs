@@ -12,29 +12,16 @@
 //!   gh-token git-lfs REAL [ARGS...]
 //!       git-lfs, REAL, but never as the App (remote.rs)
 //!
-//! A token comes back for an account (every repo the App's installation on
-//! it reaches) or for one repo of it. It's good for at least fifty minutes,
-//! and for an hour at most. Exit status 75 is "ask again later": GitHub, the
-//! network or the service wasn't there.
-
-mod account;
-mod answer;
-mod app;
-mod cache;
-mod client;
-mod command;
-mod error;
-#[cfg(test)]
-mod fake;
-mod remote;
-mod target;
+//! Each over the library (lib.rs). Exit status 75 is "ask again later":
+//! GitHub, the network or the service wasn't there.
 
 use std::io;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use error::Error;
+use gh_token::error::Error;
+use gh_token::{answer, client, remote};
 
 const USAGE: &str = "usage: gh-token answer --app-id ID --key FILE --cache DIR [--api URL]
        gh-token get OWNER[/REPO]

@@ -19,11 +19,14 @@ pub struct Config {
     /// Where the machine's projects are cloned, burrow among them: a
     /// dashboard's job is told so.
     pub projects_dir: String,
-    /// The steward's authors (people's logins), its bots by their Apps'
-    /// slugs, and its own App's slug, as the steward's config has them.
+    /// The steward's authors (people's logins) and its bots by their Apps'
+    /// slugs, as the steward's config has them.
     pub authors: Vec<String>,
     pub bots: Vec<String>,
-    pub app: String,
+    /// The steward's own App.
+    pub app: App,
+    /// GitHub's REST API, where the App's tokens are minted (token.rs).
+    pub api: String,
     /// How long a Claude job may run, in minutes, unless its part says
     /// otherwise: a dashboard's job's.
     pub job_timeout: u64,
@@ -38,6 +41,16 @@ pub struct Config {
     pub settle: Settle,
     /// The branches nothing needs any more, when they're deleted.
     pub branches: Option<Branches>,
+}
+
+/// The steward's App: its bot is SLUG[bot]; its id is the one its tokens
+/// are minted as, and the one the steward's own required checks are pinned
+/// to (settle.rs).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct App {
+    pub slug: String,
+    pub id: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -69,9 +82,6 @@ pub struct Flaky {
 pub struct Settle {
     /// Whom the owner's label says a PR waits for.
     pub owner: String,
-    /// The steward's App: the steward's own required checks are pinned to
-    /// it, so the same name from anyone else satisfies nothing.
-    pub app_id: u64,
     /// The steward's status, and the merge train's.
     pub context: String,
     pub train_context: String,
