@@ -1,8 +1,10 @@
 //! burrow-update as update.sh runs it: the config file, and a stand-in for
 //! runuser that runs git as it is and answers as gh from HOME/gh (with
 //! HOME/gh.log keeping how gh was run), or fails as gh does when there's no
-//! HOME/gh (with no token, so it isn't asked again). What each word does is train.rs's
-//! tests; these are its words, where it says why, and its exits.
+//! HOME/gh (with no token, so it isn't asked again); as proj from HOME/proj
+//! the same way (HOME/proj.log); and as a nix that builds nothing. What each
+//! word does is the library's tests; these are its words, where it says
+//! why, and its exits.
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -26,13 +28,21 @@ fn runuser() -> PathBuf {
 [ "$1" = -u ] && [ "$2" = sam ] && [ "$3" = -- ] && [ "$4" = env ] || exit 9
 shift 3
 home=${2#HOME=}
-if [ "$4" = gh ]; then
+case $4 in
+gh)
   echo "$*" >>"$home/gh.log"
   cat >/dev/null
   [ -e "$home/gh" ] || { echo "gh-token: no token for sam" >&2; exit 1; }
   printf 'HTTP/1.1 200 OK\n\n'
-  exec cat "$home/gh"
-fi
+  exec cat "$home/gh" ;;
+proj)
+  echo "$*" >>"$home/proj.log"
+  [ -e "$home/proj" ] || { echo "proj: no slot for it" >&2; exit 1; }
+  exec cat "$home/proj" ;;
+nix)
+  echo "error: build failed" >&2
+  exit 1 ;;
+esac
 exec "$@"
 "#,
         )
@@ -55,7 +65,8 @@ impl Machine {
             dir: tempfile::tempdir().unwrap(),
         };
         fs::create_dir(m.home()).unwrap();
-        fs::create_dir(m.path("state")).unwrap();
+        fs::create_dir_all(m.path("state/logs")).unwrap();
+        fs::create_dir(m.path("state/jobs")).unwrap();
         fs::write(
             m.home().join(".gitconfig"),
             "[user]\n\tname = test\n\temail = test@example.org\n",
@@ -64,6 +75,8 @@ impl Machine {
         let config = serde_json::json!({
             "update": "box-update", "host": "box", "state": m.path("state"), "work": m.path("work"),
             "user": "sam", "home": m.home(), "uid": 1000, "runuser": runuser(),
+            "configuration": "box", "system": "x86_64-linux", "heavy": null,
+            "project": "homelab", "app": null,
             "train": if train { serde_json::json!({"repo": "sam/homelab", "branch": "box-update",
                 "settled": "review-settled", "context": "conary/train", "steward": "sams-steward"}) }
                 else { serde_json::Value::Null },
@@ -112,6 +125,11 @@ impl Machine {
     fn answers(&self, json: &str) {
         fs::write(self.home().join("gh"), json).unwrap();
     }
+
+    /// What proj answers.
+    fn proj(&self, out: &str) {
+        fs::write(self.home().join("proj"), out).unwrap();
+    }
 }
 
 fn said(out: &Output) -> (Option<i32>, String, String) {
@@ -137,7 +155,11 @@ fn a_usage_or_a_config_it_cant_take_is_neither_a_step_nor_a_refusal() {
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(2));
-    let usage = "usage: box-update-steps pr | red PR | ride PR | replaces PR MAIN [INPUT...] | replace PR | propose\n";
+    let usage = "usage: box-update-steps build | same CURRENT REV | main-runs MAIN CURRENT REV \
+| runs-already NEW CURRENT REV MADE RIDING | live-through MAIN | live-at MAIN RUNNING \
+| push-main | check NAME COMMIT LOG | dispatch KEY PROMPT \
+| pr | red PR | ride PR | replaces PR MAIN [INPUT...] | replace PR | propose\n";
+    let a = sha('a');
     for words in [
         &[][..],
         &["prs"],
@@ -145,9 +167,39 @@ fn a_usage_or_a_config_it_cant_take_is_neither_a_step_nor_a_refusal() {
         &["ride"],
         &["ride", "7 abc"],
         &["red", "7"],
-        &["replaces", &format!("7 {}", sha('a'))],
+        &["replaces", &format!("7 {a}")],
         &["replace"],
         &["propose", "now"],
+        &["build", "now"],
+        &["same", "/nix/store/sys"],
+        &["same", "/nix/store/sys", "abc"],
+        &["main-runs", "main", "/nix/store/sys", ""],
+        &["main-runs", &a, "/nix/store/sys", "ABC"],
+        &[
+            "runs-already",
+            "/nix/store/new",
+            "/nix/store/sys",
+            "",
+            "yes",
+            "",
+        ],
+        &[
+            "runs-already",
+            "/nix/store/new",
+            "/nix/store/sys",
+            "",
+            "",
+            "#7",
+        ],
+        &["runs-already", "/nix/store/new", "/nix/store/sys", "", ""],
+        &["live-through", "HEAD"],
+        &["live-at", "main", "/nix/store/sys"],
+        &["push-main", "now"],
+        &["check", "../agents", &a, "log"],
+        &["check", "agents", "abc", "log"],
+        &["dispatch", "jobs/x", "prompt"],
+        &["dispatch", "-x", "prompt"],
+        &["dispatch", "build-main"],
     ] {
         assert_eq!(
             said(&m.run(words)),
@@ -155,13 +207,115 @@ fn a_usage_or_a_config_it_cant_take_is_neither_a_step_nor_a_refusal() {
             "{words:?}"
         );
     }
-    // A repo whose PRs don't land through its train has no PR of its own.
+    // A repo whose PRs don't land through its train has no PR of its own,
+    // and the rest of a run as any other.
     let m = Machine::new(false);
     let (code, out, err) = said(&m.run(&["pr"]));
     assert_eq!((code, out.as_str()), (Some(2), ""));
     assert!(
         err.contains("its merge train, and this one's don't"),
         "{err}"
+    );
+    assert_eq!(
+        said(&m.run(&["live-through", &a])),
+        (Some(0), format!("{a}\n"), String::new())
+    );
+    // Its words before any of that: a usage, not a refusal.
+    assert_eq!(
+        said(&m.run(&["red", "7"])),
+        (Some(2), String::new(), usage.into())
+    );
+}
+
+#[test]
+fn a_runs_steps_say_what_update_sh_reads_and_their_whys_go_where_it_puts_them() {
+    let m = Machine::new(false);
+    let (main, head) = (
+        m.git(&["rev-parse", "HEAD~1"]),
+        m.git(&["rev-parse", "HEAD"]),
+    );
+    // No build: nothing on stdout, nix's words in its log.
+    assert_eq!(
+        said(&m.run(&["build"])),
+        (Some(1), String::new(), String::new())
+    );
+    assert_eq!(
+        fs::read_to_string(m.path("state/logs/build.log")).unwrap(),
+        "error: build failed\n"
+    );
+    assert_eq!(said(&m.run(&["same", "/nix/store/sys", ""])).0, Some(1));
+    assert_eq!(
+        said(&m.run(&["main-runs", &main, "/nix/store/sys", &main])).0,
+        Some(0)
+    );
+    // What runs already: its verdict, or nothing.
+    let sys = "/nix/store/sys";
+    for (made, riding, verdict) in [
+        ("1", "", "hold\n"),
+        ("1", "7", "current\n"),
+        ("", "", "current\n"),
+    ] {
+        assert_eq!(
+            said(&m.run(&["runs-already", sys, sys, &head, made, riding])),
+            (Some(0), verdict.into(), String::new()),
+            "{made:?} {riding:?}"
+        );
+    }
+    assert_eq!(
+        said(&m.run(&["runs-already", "/nix/store/new", sys, &head, "", ""])),
+        (Some(0), String::new(), String::new())
+    );
+    assert_eq!(
+        said(&m.run(&["live-at", &main, sys])),
+        (Some(0), String::new(), String::new())
+    );
+    fs::remove_dir_all(m.path("state")).unwrap();
+    let (code, out, err) = said(&m.run(&["live-at", &main, sys]));
+    assert_eq!((code, out.as_str()), (Some(1), ""));
+    assert!(err.contains("live.json"), "{err}");
+    // A push that doesn't go: why on stdout, for the journal.
+    let (code, out, _) = said(&m.run(&["push-main"]));
+    assert_eq!(
+        (code, out.as_str()),
+        (
+            Some(1),
+            "push to main was refused 1 times; the next run bumps it afresh\n"
+        )
+    );
+}
+
+#[test]
+fn a_problem_handed_over_is_said_and_one_that_isnt_goes_on() {
+    let m = Machine::new(false);
+    m.proj("homelab-1\n");
+    assert_eq!(
+        said(&m.run(&["dispatch", "build-main", "main doesn't build"])),
+        (
+            Some(0),
+            "handed to Claude: proj log homelab-1\n".into(),
+            String::new()
+        )
+    );
+    assert_eq!(
+        fs::read_to_string(m.home().join("proj.log")).unwrap(),
+        format!(
+            "env HOME={} XDG_RUNTIME_DIR=/run/user/1000 proj run --pipeline homelab main doesn't build\n",
+            m.home().display()
+        )
+    );
+    fs::remove_file(m.home().join("proj")).unwrap();
+    let (code, out, err) = said(&m.run(&["dispatch", "health", "it broke"]));
+    assert_eq!((code, out.as_str()), (Some(0), ""));
+    assert!(err.contains("proj: no slot for it"), "{err}");
+    // A VM test that doesn't build doesn't pass.
+    assert_eq!(
+        said(&m.run(&[
+            "check",
+            "agents",
+            &m.git(&["rev-parse", "HEAD"]),
+            m.path("check.log").to_str().unwrap()
+        ])),
+        (Some(1), String::new(), String::new())
     );
 }
 

@@ -17,8 +17,11 @@
 # off while a switch is pending or while the box runs changes that aren't on
 # main yet. In a repo whose PRs land through its merge train, what it would push
 # goes up as a PR instead, and it rides that PR until it lands, or puts a fresh
-# bump on it when a check fails on it (crates/burrow-update's train.rs, which
-# it runs as $UPDATER).
+# bump on it when a check fails on it.
+#
+# Its steps in Rust are crates/burrow-update, which it runs as $UPDATER: the
+# build, what runs and what's live, the push, the VM tests, the fix jobs and
+# its PR.
 # (Everything in capitals comes from ../updates.nix.)
 
 [ "$(id -u)" = 0 ] || exec sudo "$0" "$@"
@@ -68,7 +71,6 @@ mkdir -p "$state/jobs" "$state/logs"
 exec 9>"/run/$UPDATE.lock"
 flock -n 9 || { echo "another $UPDATE is running"; exit 0; }
 
-# dispatch, which hands a problem to a Claude job, is ./dispatch.sh.
 settled() { rm -f "$state/jobs/$1" "$state/since-$1"; "$NOTIFY" close "$1" "${2:-Cleared by a later run.}"; }
 # Seconds since a problem was first seen (and stayed unsettled).
 age() {
@@ -100,11 +102,6 @@ git_ reset -q --hard origin/main
 git_ clean -qfdx
 main=$(git_ rev-parse HEAD)
 
-build() {
-  as_user nix build --no-link --print-out-paths \
-    "$work#nixosConfigurations.$CONFIG.config.system.build.toplevel" 2>"$state/logs/build.log" | tail -n1
-}
-
 # 2. Does the box run main, or something main has since moved past? Then it's ours
 # to update. If it runs changes that aren't on main, someone is mid-work: hold.
 current=$(readlink -f /run/current-system)
@@ -115,7 +112,7 @@ if [ -n "$rev" ] && [[ $rev != *dirty* ]] && git_ merge-base --is-ancestor "$rev
   in_sync=1
 elif [ "$current" = "$(cat "$state/deployed" 2>/dev/null)" ]; then
   in_sync=1
-elif same_as_running; then
+elif "$UPDATER" same "$current" "$rev"; then
   in_sync=1
 fi
 if [ -z "$in_sync" ]; then
@@ -208,8 +205,8 @@ else
   commit && changed=1
 fi
 
-if [ -z "$changed" ] && [ -z "$force" ] && main_runs "$main"; then
-  live_at "$main" "$current"
+if [ -z "$changed" ] && [ -z "$force" ] && "$UPDATER" main-runs "$main" "$current" "$rev"; then
+  "$UPDATER" live-at "$main" "$current"
   note current "up to date"
   exit 0
 fi
@@ -217,21 +214,21 @@ fi
 # 4. Build. If everything at once doesn't, take what does, one input at a time,
 # so one broken input never holds back another's security fix.
 failed=()
-if [ -n "$riding" ] && { failed_before build || ! new=$(build) || [ -z "$new" ]; }; then
+if [ -n "$riding" ] && { failed_before build || ! new=$("$UPDATER" build); }; then
   failed_before build || remember_failed build
   note failed "main with its PR #$riding on top doesn't build"
-  dispatch build-riding "$UPDATE: $origin main ($main) with $UPDATE's own PR #$riding merged on top doesn't build; the log is $state/logs/build.log. Fix it on that PR's branch, in your own worktree, so the train can land it; $UPDATE holds off until it has. Never push to main."
+  "$UPDATER" dispatch build-riding "$UPDATE: $origin main ($main) with $UPDATE's own PR #$riding merged on top doesn't build; the log is $state/logs/build.log. Fix it on that PR's branch, in your own worktree, so the train can land it; $UPDATE holds off until it has. Never push to main."
   exit 1
 fi
 settled build-riding "main with its PR on top builds."
-if [ -z "$riding" ] && { failed_before build || ! new=$(build) || [ -z "$new" ]; }; then
+if [ -z "$riding" ] && { failed_before build || ! new=$("$UPDATER" build); }; then
   failed_before build || { cp "$state/logs/build.log" "$state/logs/build-all.log"; remember_failed build; }
   git_ reset -q --hard "$main"
   unfetched=()
   for i in $inputs claude-code; do
     update_one "$i" || unfetched+=("$i")
     commit || continue
-    if ! failed_before build && new=$(build) && [ -n "$new" ]; then
+    if ! failed_before build && new=$("$UPDATER" build); then
       echo "$i: builds"
     else
       failed_before build || { cp "$state/logs/build.log" "$state/logs/build-$i.log"; remember_failed build; }
@@ -241,15 +238,15 @@ if [ -z "$riding" ] && { failed_before build || ! new=$(build) || [ -z "$new" ];
   done
   # None of them built: main itself, with nothing new on it.
   [ "$(git_ rev-parse HEAD)" != "$main" ] || changed=
-  new=$(build) || {
+  new=$("$UPDATER" build) || {
     note failed "main itself doesn't build"
-    dispatch build-main "$UPDATE: $origin main ($main) doesn't build; the log is $state/logs/build.log. Fix it. $worktree_rules"
+    "$UPDATER" dispatch build-main "$UPDATE: $origin main ($main) doesn't build; the log is $state/logs/build.log. Fix it. $worktree_rules"
     "$NOTIFY" open build-main "main doesn't build" "$UPDATE can't build $origin main ($main). A Claude job is on it; this closes when main builds again."
     exit 1
   }
 fi
 if [ ${#failed[@]} -gt 0 ]; then
-  dispatch build-inputs "$UPDATE: these updates don't build with $HOST's flake: ${failed[*]}. The logs are $state/logs/build-<input>.log. Everything else went through without them. Make them build. $worktree_rules"
+  "$UPDATER" dispatch build-inputs "$UPDATE: these updates don't build with $HOST's flake: ${failed[*]}. The logs are $state/logs/build-<input>.log. Everything else went through without them. Make them build. $worktree_rules"
 else
   settled build-inputs
 fi
@@ -262,7 +259,7 @@ if [ -n "$replacing" ] && ! why=$("$UPDATER" replaces "$replacing" "$main" "${un
 fi
 
 live=
-if runs_already "$new"; then
+case $("$UPDATER" runs-already "$new" "$current" "$rev" "$changed" "$riding") in
   # Running already, and not on main: what a run before put live (its PR
   # didn't open, or closed, or the train took it while that run was testing a
   # newer one, or its push to main was refused), or a bump that changes only
@@ -273,20 +270,17 @@ if runs_already "$new"; then
   # nothing since that changes the system: nothing to do until the PR lands.
   # Nothing is switched either way: the box keeps the system it runs, under
   # an older commit's stamp.
-  new=$current
-  case $(already_live "$new") in
-    up) live=1 ;;
-    hold)
-      note current "$HOST runs what $(describe) builds, but $UPDATE didn't put it live, so it never had the health check; holding it until main has it"
-      exit 0
-      ;;
-    *)
-      live_at "$main" "$current"
-      note current "nothing new builds; up to date${riding:+ (riding #$riding)}${failed[*]:+ (held back: ${failed[*]})}"
-      exit 0
-      ;;
-  esac
-fi
+  up) new=$current live=1 ;;
+  hold)
+    note current "$HOST runs what $(describe) builds, but $UPDATE didn't put it live, so it never had the health check; holding it until main has it"
+    exit 0
+    ;;
+  current)
+    "$UPDATER" live-at "$main" "$current"
+    note current "nothing new builds; up to date${riding:+ (riding #$riding)}${failed[*]:+ (held back: ${failed[*]})}"
+    exit 0
+    ;;
+esac
 
 # 5. The VM tests, under KVM, on exactly this tree.
 #
@@ -326,17 +320,17 @@ for c in "${checks[@]}"; do
   log=$state/logs/check-$c.log
   r=$(result_of "$c" "$head")
   if [ -z "$r" ]; then
-    if run_check "$c" "$head" "$log"; then
+    if "$UPDATER" check "$c" "$head" "$log"; then
       r=pass
       n=$(($(cat "$state/clean-$c" 2>/dev/null || echo 0) + 1))
       echo "$n" >"$state/clean-$c"
       [ "$n" -lt 3 ] || settled "flaky-$c" "The VM test $c has passed first time three runs in a row."
-    elif run_check "$c" "$head" "$log.again"; then
+    elif "$UPDATER" check "$c" "$head" "$log.again"; then
       r=pass
       mv "$log" "$state/logs/flaky-$c.log"
       mv "$log.again" "$log"
       echo 0 >"$state/clean-$c"
-      dispatch "flaky-$c" "$UPDATE: the VM test $c is flaky: on $head it failed once (log: $state/logs/flaky-$c.log) and passed when run again ($log). A flaky test holds back security updates, so find the cause and fix it, in the test or in what it tests; a retry or a longer timeout isn't a fix unless the cause really is time. $worktree_rules"
+      "$UPDATER" dispatch "flaky-$c" "$UPDATE: the VM test $c is flaky: on $head it failed once (log: $state/logs/flaky-$c.log) and passed when run again ($log). A flaky test holds back security updates, so find the cause and fix it, in the test or in what it tests; a retry or a longer timeout isn't a fix unless the cause really is time. $worktree_rules"
       "$NOTIFY" open "flaky-$c" "VM test $c is flaky" \
         "The VM test $c failed and then passed on the same tree, so updates went ahead. A Claude job is finding the cause; this closes once the test passes first time three runs in a row."
     else
@@ -357,16 +351,16 @@ for c in "${checks[@]}"; do
     base=$(result_of "$c" "$main")
     if [ -z "$base" ]; then
       base=fail
-      run_check "$c" "$main" "$state/logs/check-$c-main.log" && base=pass
+      "$UPDATER" check "$c" "$main" "$state/logs/check-$c-main.log" && base=pass
       record "$c" "$main" "$base"
     fi
   fi
   if [ "$base" = fail ]; then
     untested+=("$c")
-    dispatch "check-$c" "$UPDATE: the VM test $c fails on $origin main ($main) itself, not only with the updates. The log is $log; the tree is $work (don't edit there, it's reset every run). Fix main. $worktree_rules"
+    "$UPDATER" dispatch "check-$c" "$UPDATE: the VM test $c fails on $origin main ($main) itself, not only with the updates. The log is $log; the tree is $work (don't edit there, it's reset every run). Fix main. $worktree_rules"
   else
     note failed "VM test $c fails with $(describe) and passes on main"
-    dispatch "check-$c" "$UPDATE: the VM test $c fails with these updates on top of main: $(describe). It passes on main, so the updates break it. The log is $log; the tree is $work at $head (don't edit there, it's reset every run). Make the updates pass it. $worktree_rules"
+    "$UPDATER" dispatch "check-$c" "$UPDATE: the VM test $c fails with these updates on top of main: $(describe). It passes on main, so the updates break it. The log is $log; the tree is $work at $head (don't edit there, it's reset every run). Make the updates pass it. $worktree_rules"
   fi
   if [ "$(age "check-$c")" -gt 86400 ]; then
     "$NOTIFY" open "check-$c" "Updates stuck: VM test $c fails" \
@@ -409,19 +403,19 @@ if [ -z "$live" ]; then
   if [ "$rc" = 3 ]; then
     # Refused before anything went live: an older nixpkgs than the running one.
     note failed "the switch refused it as a downgrade; nothing changed"
-    dispatch switch "$UPDATE: $SWITCH refused $new ($(describe)) as built from an older nixpkgs than the running system, so nothing went live. The output is $state/logs/switch.log. Find out why the new system looks older (each reads nixpkgs' date from its /etc/burrow/inputs.json) and fix it. $worktree_rules"
+    "$UPDATER" dispatch switch "$UPDATE: $SWITCH refused $new ($(describe)) as built from an older nixpkgs than the running system, so nothing went live. The output is $state/logs/switch.log. Find out why the new system looks older (each reads nixpkgs' date from its /etc/burrow/inputs.json) and fix it. $worktree_rules"
     exit 1
   fi
   if [ "$rc" != 0 ]; then
     "$SWITCH" --abort >>"$state/logs/switch.log" 2>&1 || true
     note failed "activation failed; reverted"
-    dispatch activation "$UPDATE: switching to $new ($(describe)) failed during activation and was reverted. The output is $state/logs/switch.log; journalctl has the rest. Fix it. $worktree_rules"
+    "$UPDATER" dispatch activation "$UPDATE: switching to $new ($(describe)) failed during activation and was reverted. The output is $state/logs/switch.log; journalctl has the rest. Fix it. $worktree_rules"
     exit 1
   fi
   if ! bad=$("$HEALTH" compare "$state/health-before" 180); then
     "$SWITCH" --abort >>"$state/logs/switch.log" 2>&1 || true
     note failed "unhealthy after the switch ($bad); reverted"
-    dispatch health "$UPDATE switched $HOST to $new ($(describe)) and these regressed: $bad. It reverted right away. Find out why (journalctl, the unit logs, a diff of the two systems: nix store diff-closures $current $new) and fix it. $worktree_rules"
+    "$UPDATER" dispatch health "$UPDATE switched $HOST to $new ($(describe)) and these regressed: $bad. It reverted right away. Find out why (journalctl, the unit logs, a diff of the two systems: nix store diff-closures $current $new) and fix it. $worktree_rules"
     "$NOTIFY" open health "An update broke something and was rolled back" \
       "$UPDATE switched to $(describe) and then: $bad. $HOST went straight back to the previous system. A Claude job is on it; this closes when an update goes through."
     exit 1
@@ -473,14 +467,14 @@ if [ -n "$TRAIN" ]; then
   fi
   [ -n "$changed" ] || git_ rev-parse HEAD >"$state/deployed-main"
 else
-  push_main || true
+  "$UPDATER" push-main || true
 fi
 if [ "$(as_user git -C "$operator" branch --show-current 2>/dev/null)" = main ] &&
   as_user git -C "$operator" diff --quiet HEAD 2>/dev/null; then
   as_user git -C "$operator" pull -q --ff-only origin main || true
 fi
 
-live_at "$(live_through "$main")" "$new"
+"$UPDATER" live-at "$("$UPDATER" live-through "$main")" "$new"
 note ok "${live:+already }live and confirmed: $went${riding:+ (riding #$riding)}${url:+ (up as $url)}${failed[*]:+ (held back: ${failed[*]})}"
 [ -z "$BOOT" ] || ! "$BOOT" status | grep -q 'trial queued: /' ||
   echo "the new kernel boots once at the next trial window ($BOOT trial)"

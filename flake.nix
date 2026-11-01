@@ -655,35 +655,6 @@
             { echo "burrow-usage-reset starts its Claude Code in $dir untrusted" >&2; exit 1; }
           touch $out
         '';
-        # The update job's fix jobs: pipeline work, one per problem while it's
-        # recent.
-        update-dispatch = pkgs.runCommand "update-dispatch-check" { nativeBuildInputs = [ pkgs.shellcheck ]; } ''
-          shellcheck -s bash ${./modules/updates/dispatch.sh} ${./tests/update-dispatch.sh}
-          bash ${./tests/update-dispatch.sh} ${./modules/updates/dispatch.sh}
-          touch $out
-        '';
-        # The update job's push: what went live reaches main, even when main moved
-        # while it ran.
-        update-push = pkgs.runCommand "update-push-check" { nativeBuildInputs = [ pkgs.shellcheck pkgs.git ]; } ''
-          shellcheck -s bash ${./modules/updates/push.sh} ${./tests/update-push.sh}
-          bash ${./tests/update-push.sh} ${./modules/updates/push.sh}
-          touch $out
-        '';
-        # What HOST-update compares to tell what runs already
-        # (modules/updates/running.sh): a system built again from a new commit
-        # of the same tree runs already, and its record of what's live says
-        # so. Real git, with a stand-in for nix.
-        update-running = pkgs.runCommand "update-running-check" { nativeBuildInputs = [ pkgs.shellcheck pkgs.git pkgs.jq ]; } ''
-          shellcheck -s bash ${./modules/updates/running.sh} ${./tests/update-running.sh}
-          bash ${./tests/update-running.sh} ${./modules/updates/running.sh}
-          touch $out
-        '';
-        # HOST-update's VM tests take a heavy slot.
-        update-check = pkgs.runCommand "update-check-check" { nativeBuildInputs = [ pkgs.shellcheck ]; } ''
-          shellcheck -s bash -e SC2154 ${./modules/updates/check.sh} ${./tests/update-check.sh}
-          bash ${./tests/update-check.sh} ${./modules/updates/check.sh}
-          touch $out
-        '';
         # HOST-update's steps in Rust as the example machine builds them
         # (crates/burrow-update, whose tests are the rest): they read their
         # config, and its train's.
@@ -691,7 +662,7 @@
           inherit (self.nixosConfigurations.example.config) burrow;
         in pkgs.runCommand "update-config-check" { } ''
           ${burrow.tools.update-steps}/bin/${burrow.prefix}-update-steps help 2>err && { echo "a usage went as a step"; exit 1; }
-          grep -qx 'usage: ${burrow.prefix}-update-steps pr | .*' err || { echo "it said: $(cat err)"; exit 1; }
+          grep -qx 'usage: ${burrow.prefix}-update-steps build | .*' err || { echo "it said: $(cat err)"; exit 1; }
           touch $out
         '';
         # Which repo the flake's origin is, and so whether HOST-update goes

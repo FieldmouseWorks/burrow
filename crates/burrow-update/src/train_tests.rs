@@ -1,172 +1,19 @@
 //! HOST-update's PR on its own: real git, with a bare repo for GitHub's copy
-//! and a stand-in for runuser, and a GitHub that answers from a script.
+//! and a stand-in for runuser (testing.rs), and a GitHub that answers from a
+//! script.
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::sync::OnceLock;
 
 use burrow_github::fake::{Fake, ok};
 use burrow_github::{Failed, Response};
 use serde_json::{Value, json};
 
 use super::*;
-
-const BRANCH: &str = "box-update";
-
-/// The stand-in for runuser, written once for every test: a file being
-/// written while another test starts a process is open for writing in that
-/// process until it execs, and running the file then fails with "Text file
-/// busy". It runs what it's given as it is, as the machine's user would,
-/// after a test's hook for a push from the clone WORK: WORK.before-push, a
-/// script it runs once.
-fn runuser() -> PathBuf {
-    static BIN: OnceLock<tempfile::TempDir> = OnceLock::new();
-    let bin = BIN.get_or_init(|| {
-        let bin = tempfile::tempdir().unwrap();
-        let path = bin.path().join("runuser");
-        fs::write(
-            &path,
-            r#"#!/bin/sh
-[ "$1" = -u ] && [ "$2" = sam ] && [ "$3" = -- ] && [ "$4" = env ] || exit 9
-shift 3
-if [ "$4 $5 $7" = "git -C push" ] && [ -e "$6.before-push" ]; then
-  sh "$6.before-push" && rm "$6.before-push"
-fi
-exec "$@"
-"#,
-        )
-        .unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
-        bin
-    });
-    bin.path().join("runuser")
-}
-
-fn train() -> Train {
-    Train {
-        repo: "sam/homelab".into(),
-        branch: BRANCH.into(),
-        settled: "review-settled".into(),
-        context: "conary/train".into(),
-        steward: "sams-steward".into(),
-    }
-}
-
-/// A machine's clone of its flake at main, GitHub's copy beside it as a
-/// bare repo with one commit on main, and HOST-update's state, with nothing
-/// proposed yet.
-struct Machine {
-    dir: tempfile::TempDir,
-    cfg: Config,
-}
+use crate::testing::{BRANCH, Machine, sha, train};
 
 impl Machine {
-    fn new() -> Machine {
-        let dir = tempfile::tempdir().unwrap();
-        let d = dir.path().to_path_buf();
-        let home = d.join("home");
-        fs::create_dir(&home).unwrap();
-        fs::write(
-            home.join(".gitconfig"),
-            "[user]\n\tname = test\n\temail = test@example.org\n[init]\n\tdefaultBranch = main\n[advice]\n\tdetachedHead = false\n",
-        )
-        .unwrap();
-        fs::create_dir(d.join("state")).unwrap();
-        let cfg = Config {
-            update: "box-update".into(),
-            host: "box".into(),
-            state: d.join("state"),
-            work: d.join("work"),
-            user: "sam".into(),
-            home: home.to_str().unwrap().into(),
-            uid: 1000,
-            runuser: runuser(),
-            train: Some(train()),
-        };
-        let m = Machine { dir, cfg };
-        let d = m.dir.path();
-        m.git(d, &["init", "-q", "--bare", "origin.git"]);
-        m.git(d, &["clone", "-q", "origin.git", "work"]);
-        m.commit("flake.lock", "v1");
-        m.work(&["push", "-q", "origin", "HEAD:main"]);
-        m
-    }
-
     fn t(&self) -> &Train {
         self.cfg.train.as_ref().unwrap()
-    }
-
-    fn path(&self, p: &str) -> PathBuf {
-        self.dir.path().join(p)
-    }
-
-    /// git in `at`, as the test, with the machine's user's config.
-    fn git(&self, at: &Path, args: &[&str]) -> String {
-        let out = self.git_at(at).args(args).output().unwrap();
-        assert!(
-            out.status.success(),
-            "git {args:?}: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        String::from_utf8_lossy(&out.stdout).trim_end().to_string()
-    }
-
-    fn git_at(&self, at: &Path) -> Command {
-        let mut c = Command::new("git");
-        c.arg("-C")
-            .arg(at)
-            .env("HOME", &self.cfg.home)
-            .env("GIT_CONFIG_NOSYSTEM", "1");
-        c
-    }
-
-    fn work(&self, args: &[&str]) -> String {
-        self.git(&self.cfg.work, args)
-    }
-
-    fn origin(&self, args: &[&str]) -> String {
-        self.git(&self.path("origin.git"), args)
-    }
-
-    /// `file` holding `text`, committed in the clone with HOST-update's word
-    /// on what it passed.
-    fn commit(&self, file: &str, text: &str) {
-        fs::write(self.cfg.work.join(file), format!("{text}\n")).unwrap();
-        self.work(&["add", file]);
-        self.work(&[
-            "commit",
-            "-qm",
-            &format!("{file}: {text}"),
-            "-m",
-            "Pushed by box-update after the build, the VM tests and the health check passed.",
-        ]);
-    }
-
-    /// `file` holding `text`, committed on GitHub's `branch` from a clone of
-    /// its own (`by`), and pushed there: its new head.
-    fn pushed(&self, by: &str, branch: &str, file: &str, text: &str) -> String {
-        let other = self.path(by);
-        let _ = fs::remove_dir_all(&other);
-        let origin = self.path("origin.git");
-        self.git(
-            self.dir.path(),
-            &["clone", "-q", "-b", branch, origin.to_str().unwrap(), by],
-        );
-        fs::write(other.join(file), format!("{text}\n")).unwrap();
-        self.git(&other, &["add", file]);
-        self.git(&other, &["commit", "-qm", &format!("{file}: {text}")]);
-        self.git(
-            &other,
-            &["push", "-q", "--force", "origin", &format!("HEAD:{branch}")],
-        );
-        self.git(&other, &["rev-parse", "HEAD"])
-    }
-
-    /// main moving on GitHub, as another PR's landing would.
-    fn landed(&self, file: &str, text: &str) {
-        self.pushed("other", "main", file, text);
     }
 
     /// A head of its own on its PR, #7, pushed onto main by a run before
@@ -184,49 +31,13 @@ impl Machine {
         fs::write(self.cfg.state.join("proposed"), format!("{head}\n")).unwrap();
     }
 
-    /// The clone as update.sh leaves it before riding: at GitHub's main.
-    fn at_main(&self) -> String {
-        self.work(&["fetch", "-q", "origin", "main"]);
-        self.work(&["checkout", "-q", "-B", "update", "origin/main"]);
-        self.work(&["reset", "-q", "--hard", "origin/main"]);
-        self.head()
-    }
-
-    fn head(&self) -> String {
-        self.work(&["rev-parse", "HEAD"])
-    }
-
     /// GitHub's copy of its PR's branch.
     fn branch(&self) -> String {
         self.origin(&["rev-parse", &format!("refs/heads/{BRANCH}")])
     }
 
-    fn main(&self) -> String {
-        self.origin(&["rev-parse", "refs/heads/main"])
-    }
-
     fn proposed(&self) -> Option<String> {
-        fs::read_to_string(self.cfg.state.join("proposed"))
-            .ok()
-            .map(|s| s.trim_end().to_string())
-    }
-
-    /// Whether the clone has `commit`.
-    fn has(&self, commit: &str) -> bool {
-        self.git_at(&self.cfg.work)
-            .args(["cat-file", "-e", &format!("{commit}^{{tree}}")])
-            .output()
-            .unwrap()
-            .status
-            .success()
-    }
-
-    /// Whether the clone is as it was: at `at`, with no merge half done and
-    /// nothing changed.
-    fn left_at(&self, at: &str) -> bool {
-        self.head() == at
-            && !self.cfg.work.join(".git/MERGE_HEAD").exists()
-            && self.work(&["status", "--porcelain"]).is_empty()
+        self.recorded("proposed")
     }
 }
 
@@ -242,10 +53,6 @@ fn listed(prs: &[(u64, String, Value)]) -> Value {
             json!({"number": n, "head": {"sha": sha, "ref": BRANCH, "repo": repo}})
         })
         .collect()
-}
-
-fn sha(c: char) -> String {
-    c.to_string().repeat(40)
 }
 
 fn down() -> Result<Response, Failed> {
@@ -739,7 +546,8 @@ fn replacing_leaves_a_head_gone_green_or_fixed_or_unread() {
          git clone -q -b {BRANCH} '{origin}' '{fix}' 2>/dev/null\n\
          echo fixed >'{fix}/flake.lock'\n\
          git -C '{fix}' commit -qam 'fix it'\n\
-         git -C '{fix}' push -q origin HEAD:{BRANCH}\n",
+         git -C '{fix}' push -q origin HEAD:{BRANCH}\n\
+         rm \"$0\"\n",
         home = m.cfg.home,
         origin = m.path("origin.git").display(),
         fix = m.path("fix").display(),
