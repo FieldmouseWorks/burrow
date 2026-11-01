@@ -36,6 +36,54 @@
       # build theirs with a stand-in for its `cn`.
       cnStandIn = pkgs.writeShellScriptBin "cn" "exit 1";
       names = [ "claude" "undo" "switch" "notify" "updates" "proj" "remote-control" "agents" "robot" "ops" "toolbox" "autoland" "house" "events" "ledger" "browser" "heartbeat" "backup" "watchdog" "github" "rust-cache" "cpu" "dispatch" "usage-reset" ];
+      # Each module on its own, with only what it imports, in a check of its
+      # own (standalone-NAME), so the gate's legs share the evaluations out:
+      # evaluating is the check, so these build nothing. A service that says
+      # how it runs (a Type) has something to run too: systemd refuses one
+      # without ExecStart or ExecStop, and only when it starts. A module that
+      # registers a burrow-events handler has burrow-events to run it. And a
+      # memory cap holds swap to it too: a unit that may swap outgrows its
+      # cap without ever reaching it, and the machine thrashes rather than
+      # the kernel killing inside the cap. The example is held to the same.
+      runnable = name: machine: let
+        sd = machine.config.systemd;
+        s = sd.services;
+        empty = builtins.filter (n: s.${n}.enable && s.${n}.serviceConfig ? Type
+          && !(s.${n}.serviceConfig ? ExecStart || s.${n}.serviceConfig ? ExecStop)) (builtins.attrNames s);
+        unrun = machine.config.burrow.events.handlers or { } != { } && !(s ? burrow-events);
+        swapping = builtins.concatMap ({ kind, units, section }: builtins.concatMap (n:
+          let c = units.${n}.${section}; in
+          nixpkgs.lib.optional (toString (c.MemoryMax or "infinity") != "infinity"
+            && toString (c.MemorySwapMax or "") != "0") "${kind} ${n}") (builtins.attrNames units)) [
+          { kind = "service"; units = s; section = "serviceConfig"; }
+          { kind = "slice"; units = sd.slices; section = "sliceConfig"; }
+          { kind = "user service"; units = sd.user.services; section = "serviceConfig"; }
+          { kind = "user slice"; units = sd.user.slices; section = "sliceConfig"; }
+        ];
+      in if empty != [ ] then throw "${name}: services with nothing to run: ${builtins.concatStringsSep ", " empty}"
+         else if unrun then throw "${name}: burrow-events handlers with no burrow-events to start them"
+         else if swapping != [ ] then throw "${name}: memory caps that let their units swap (give each MemorySwapMax = 0): ${builtins.concatStringsSep ", " swapping}"
+         else machine;
+      standalone = name: let
+        machine = nixpkgs.lib.nixosSystem {
+          modules = [
+            self.nixosModules.${name}
+            ./examples/machine.nix
+            (nixpkgs.lib.optionalAttrs (name == "robot") { burrow.robot.serverIp = "203.0.113.7"; })
+            (nixpkgs.lib.optionalAttrs (name == "undo") { burrow.undo.datasets = [ "rpool/safe/data" ]; })
+            (nixpkgs.lib.optionalAttrs (name == "backup") { burrow.backup = { repository = "rclone:offsite:backups/burrow"; passwordFile = "/run/secrets/backup-password"; rcloneConfigFile = "/run/secrets/backup-rclone"; datasets = [ "rpool/safe/data" ]; }; })
+            (nixpkgs.lib.optionalAttrs (name == "updates") { burrow.updates.origin = "https://github.com/sam/homelab"; })
+            (nixpkgs.lib.optionalAttrs (name == "autoland") { burrow.autoland = { owners = [ "sam" ]; authors = [ "sam" ]; app = { id = 123456; slug = "sams-steward"; keyFile = "/run/secrets/autoland-app-key"; }; reviewers.codex.enable = true; }; })
+            (nixpkgs.lib.optionalAttrs (name == "house") { burrow.house.owners = [ "sam" ]; })
+            (nixpkgs.lib.optionalAttrs (name == "dispatch") { burrow.dispatch.runners.ci-runner = { repo = "sam/homelab"; labels = [ "homelab" ]; }; })
+            (nixpkgs.lib.optionalAttrs (name == "ledger") { burrow.ledger = { package = cnStandIn; owners = [ "sam" ]; anchorRepo = "sam/homelab"; reviewers = [ "sams-steward[bot]" ]; sessionLinks = [ "sam/homelab" ]; daemon = true; }; })
+            (nixpkgs.lib.optionalAttrs (builtins.elem name [ "events" "autoland" ]) { burrow.events = { host = "example.org"; secretFile = "/run/secrets/burrow-webhook"; }; })
+            # github has no switch: it's on with an App to serve.
+            (if name == "github" then { burrow.github.apps.workers = { id = 2; slug = "sam-workers"; keyFile = "/run/secrets/workers-key"; }; }
+             else { burrow.${{ remote-control = "remoteControl"; rust-cache = "rustCache"; usage-reset = "usageReset"; }.${name} or name}.enable = true; })
+          ];
+        };
+      in pkgs.writeText "burrow-standalone-${name}" "${builtins.unsafeDiscardStringContext (runnable name machine).config.system.build.toplevel.drvPath}\n";
       # burrow's own programs, one Cargo workspace (crates/): their package
       # and their gate, built for every platform lib/project.nix knows. Its
       # tests include the shared workflows' (crates/burrow-workflows), which
@@ -103,60 +151,11 @@
       };
 
       checks.${system} = {
-        example = self.nixosConfigurations.example.config.system.build.toplevel;
+        # The example, built, and runnable as each module on its own is.
+        example = (runnable "example" self.nixosConfigurations.example).config.system.build.toplevel;
         # lib/project.nix's secrets check over all of burrow's tracked files;
         # the projects below each see only their own directory.
         secrets = (self.lib.project { inherit self; systems = [ system ]; }).checks.${system}.secrets;
-        # Each module on its own, with only what it imports: evaluating is the
-        # check, so these build nothing. A service that says how it runs (a
-        # Type) has something to run too: systemd refuses one without
-        # ExecStart or ExecStop, and only when it starts. A module that
-        # registers a burrow-events handler has burrow-events to run it. And a
-        # memory cap holds swap to it too: a unit that may swap outgrows its
-        # cap without ever reaching it, and the machine thrashes rather than
-        # the kernel killing inside the cap.
-        standalone = let
-          runnable = name: machine: let
-            sd = machine.config.systemd;
-            s = sd.services;
-            empty = builtins.filter (n: s.${n}.enable && s.${n}.serviceConfig ? Type
-              && !(s.${n}.serviceConfig ? ExecStart || s.${n}.serviceConfig ? ExecStop)) (builtins.attrNames s);
-            unrun = machine.config.burrow.events.handlers or { } != { } && !(s ? burrow-events);
-            swapping = builtins.concatMap ({ kind, units, section }: builtins.concatMap (n:
-              let c = units.${n}.${section}; in
-              nixpkgs.lib.optional (toString (c.MemoryMax or "infinity") != "infinity"
-                && toString (c.MemorySwapMax or "") != "0") "${kind} ${n}") (builtins.attrNames units)) [
-              { kind = "service"; units = s; section = "serviceConfig"; }
-              { kind = "slice"; units = sd.slices; section = "sliceConfig"; }
-              { kind = "user service"; units = sd.user.services; section = "serviceConfig"; }
-              { kind = "user slice"; units = sd.user.slices; section = "sliceConfig"; }
-            ];
-          in if empty != [ ] then throw "${name}: services with nothing to run: ${builtins.concatStringsSep ", " empty}"
-             else if unrun then throw "${name}: burrow-events handlers with no burrow-events to start them"
-             else if swapping != [ ] then throw "${name}: memory caps that let their units swap (give each MemorySwapMax = 0): ${builtins.concatStringsSep ", " swapping}"
-             else machine;
-        in pkgs.writeText "burrow-standalone" (nixpkgs.lib.concatMapStrings (name:
-          let
-            machine = nixpkgs.lib.nixosSystem {
-              modules = [
-                self.nixosModules.${name}
-                ./examples/machine.nix
-                (nixpkgs.lib.optionalAttrs (name == "robot") { burrow.robot.serverIp = "203.0.113.7"; })
-                (nixpkgs.lib.optionalAttrs (name == "undo") { burrow.undo.datasets = [ "rpool/safe/data" ]; })
-                (nixpkgs.lib.optionalAttrs (name == "backup") { burrow.backup = { repository = "rclone:offsite:backups/burrow"; passwordFile = "/run/secrets/backup-password"; rcloneConfigFile = "/run/secrets/backup-rclone"; datasets = [ "rpool/safe/data" ]; }; })
-                (nixpkgs.lib.optionalAttrs (name == "updates") { burrow.updates.origin = "https://github.com/sam/homelab"; })
-                (nixpkgs.lib.optionalAttrs (name == "autoland") { burrow.autoland = { owners = [ "sam" ]; authors = [ "sam" ]; app = { id = 123456; slug = "sams-steward"; keyFile = "/run/secrets/autoland-app-key"; }; reviewers.codex.enable = true; }; })
-                (nixpkgs.lib.optionalAttrs (name == "house") { burrow.house.owners = [ "sam" ]; })
-                (nixpkgs.lib.optionalAttrs (name == "dispatch") { burrow.dispatch.runners.ci-runner = { repo = "sam/homelab"; labels = [ "homelab" ]; }; })
-                (nixpkgs.lib.optionalAttrs (name == "ledger") { burrow.ledger = { package = cnStandIn; owners = [ "sam" ]; anchorRepo = "sam/homelab"; reviewers = [ "sams-steward[bot]" ]; sessionLinks = [ "sam/homelab" ]; daemon = true; }; })
-                (nixpkgs.lib.optionalAttrs (builtins.elem name [ "events" "autoland" ]) { burrow.events = { host = "example.org"; secretFile = "/run/secrets/burrow-webhook"; }; })
-                # github has no switch: it's on with an App to serve.
-                (if name == "github" then { burrow.github.apps.workers = { id = 2; slug = "sam-workers"; keyFile = "/run/secrets/workers-key"; }; }
-                 else { burrow.${{ remote-control = "remoteControl"; rust-cache = "rustCache"; usage-reset = "usageReset"; }.${name} or name}.enable = true; })
-              ];
-            };
-          in "${name} ${builtins.unsafeDiscardStringContext (runnable name machine).config.system.build.toplevel.drvPath}\n")
-            names + "example ${builtins.unsafeDiscardStringContext (runnable "example" self.nixosConfigurations.example).config.system.build.toplevel.drvPath}\n");
         # heavy's slots: one holder at a time per slot, its share of the
         # threads, nested calls let through, the exit status and stdin passed
         # on, a cancelled workload stopped before its slot goes, a bounded
@@ -276,8 +275,12 @@
         # Sandboxes for real: boot two, work in them, break out of nothing.
         # Nested KVM: run it on a machine that has /dev/kvm.
         agents = import ./tests/agents.nix { inherit self pkgs; };
-        # proj's queue and memory caps, with a stand-in for Claude.
+        # proj's turns and memory caps, with a stand-in for Claude; who waits
+        # in line for its slots; and its GitHub side, with a stand-in gh. Three
+        # tests on one machine's config, so they run side by side.
         proj = import ./tests/proj.nix { inherit self pkgs; };
+        proj-slots = import ./tests/proj-slots.nix { inherit self pkgs; };
+        proj-github = import ./tests/proj-github.nix { inherit self pkgs; };
         # A turn's clock, which stands still while it waits in line.
         proj-clock = import ./tests/proj-clock.nix { inherit self pkgs; };
         # A switch reaches the turns already waiting in line, each in its place.
@@ -897,7 +900,8 @@
           [ "$(${pkg}/bin/house-native)" = ${pkgs.zlib.version} ]
           touch $out
         '';
-      } // nixpkgs.lib.mapAttrs' (name: nixpkgs.lib.nameValuePair "crates-${name}") crates.checks.${system}
+      } // nixpkgs.lib.listToAttrs (map (name: nixpkgs.lib.nameValuePair "standalone-${name}" (standalone name)) names)
+      // nixpkgs.lib.mapAttrs' (name: nixpkgs.lib.nameValuePair "crates-${name}") crates.checks.${system}
       // nixpkgs.lib.mapAttrs' (name: nixpkgs.lib.nameValuePair "house-${name}") (
         # lib/project.nix's own gates, on the smallest projects that have them.
         (self.lib.project { self = ./tests/house/rust; systems = [ system ]; rust.testInputs = pkgs: [ pkgs.git ]; }).checks.${system}
