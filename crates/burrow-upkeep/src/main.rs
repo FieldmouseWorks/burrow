@@ -2,8 +2,9 @@
 //! steward (modules/autoland/steward.py) for each repo, with the App's token
 //! for the repo's owner in GH_TOKEN, under the pass's lock; `post`, which
 //! posts a reviewer's answer on a repo's PR; `queue`, which queues a
-//! reviewer on one, and `fetch`, which fetches refs into the steward's
-//! mirror of a repo; `token`, which mints the pass
+//! reviewer on one, `fetch`, which fetches refs into the steward's
+//! mirror of a repo, and `sweep`, which deletes what the reviewers leave of
+//! its closed PRs and old heads; `token`, which mints the pass
 //! that token; and `hooks`, which a full pass ends with, and which mints its
 //! own. What it says of itself, on stderr, goes to the steward's journal.
 
@@ -23,6 +24,7 @@ use burrow_upkeep::pass::{Out, Pass, Proj};
 use burrow_upkeep::post::{self, Look, Posted, Unposted};
 use burrow_upkeep::queue::{self, Ask};
 use burrow_upkeep::settle::Repo;
+use burrow_upkeep::sweep;
 use burrow_upkeep::token::{self, Installations, Token};
 use gh_token::app::Minted;
 use serde::de::DeserializeOwned;
@@ -65,6 +67,11 @@ const USAGE: &str = "usage:
       refs fetched into the steward's mirror of the repo, a JSON list of
       refspecs on stdin: the mirror's path or why it couldn't, as JSON on
       stdout
+  burrow-upkeep CONFIG sweep OWNER/REPO --now SECONDS
+      what the reviewers leave of the repo's PRs, deleted once nothing needs
+      it, a JSON list on stdin giving the snapshots of its open PRs' heads:
+      what it left (the looks under way, the sessions it couldn't mark gone)
+      or why it couldn't sweep, as JSON on stdout
   burrow-upkeep CONFIG watch OWNER/REPO --now SECONDS [--searched N] [--dry]
       the repo's dashboard and quarantine, as of the pass's time: what's
       stuck, the pass to book and the jobs to start, as JSON on stdout;
@@ -180,7 +187,11 @@ fn run(args: &[String]) -> Result<(), Stop> {
     if !flaky::quarantine::repo_name(repo) {
         return Err(Stop::Usage(format!("{repo:?} isn't OWNER/REPO")));
     }
-    if !["settle", "branches", "watch", "post", "queue", "fetch"].contains(&word) {
+    if ![
+        "settle", "branches", "watch", "post", "queue", "fetch", "sweep",
+    ]
+    .contains(&word)
+    {
         return Err(Stop::Usage(format!("no word {word:?}")));
     }
     let f = flags(rest)?;
@@ -199,6 +210,9 @@ fn run(args: &[String]) -> Result<(), Stop> {
     }
     if word == "fetch" {
         return fetched(config, repo, f.dry);
+    }
+    if word == "sweep" {
+        return swept(config, repo, f.dry);
     }
     let look = match word {
         "post" => Some(stdin::<Look>(
@@ -302,8 +316,8 @@ fn run(args: &[String]) -> Result<(), Stop> {
 
 /// What the steward hands the word on stdin, `what` it is: the open PRs'
 /// branches, none of which is deleted, the look whose answer is posted, the
-/// reviewer to queue, the refs to fetch, or the repos a full pass's hooks
-/// are about. What isn't stops the word before it starts.
+/// reviewer to queue, the refs to fetch, the open PRs' snapshots, or the
+/// repos a full pass's hooks are about. What isn't stops the word before it starts.
 fn stdin<T: DeserializeOwned>(what: &str) -> Result<T, Stop> {
     let mut text = String::new();
     std::io::stdin()
@@ -326,6 +340,29 @@ fn fetched(config: &str, repo: &str, dry: bool) -> Result<(), Stop> {
     let out = match mirror::fetch(&cfg, &cfg.state_dir, repo, &refs) {
         Ok(m) => json!({"mirror": m, "why": null, "limited": null}),
         Err(why) => json!({"mirror": null, "why": why, "limited": null}),
+    };
+    println!("{out}");
+    Ok(())
+}
+
+/// `sweep`, which a status run never asks for: it deletes the steward's
+/// state. It asks GitHub nothing, so it's handed no token.
+fn swept(config: &str, repo: &str, dry: bool) -> Result<(), Stop> {
+    if dry {
+        return Err(Stop::Usage(
+            "sweep has no status run: it deletes what the reviewers leave".into(),
+        ));
+    }
+    let live: BTreeSet<String> =
+        stdin("the snapshots of the open PRs' heads, as a JSON list on stdin")?;
+    let key = repo.replace('/', "_");
+    if let Some(why) = sweep::wrong(&key, &live) {
+        return Err(Stop::Usage(why));
+    }
+    let cfg = Config::read(Path::new(config)).map_err(Stop::Failed)?;
+    let out = match sweep::sweep(&cfg.state_dir, &cfg.snapshot.dir, &key, &live) {
+        Ok(left) => json!({"left": left, "why": null, "limited": null}),
+        Err(why) => json!({"left": null, "why": why, "limited": null}),
     };
     println!("{out}");
     Ok(())

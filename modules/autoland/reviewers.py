@@ -7,7 +7,8 @@ the reviewers' service (crates/burrow-review) runs the agents as a user of
 their own, with no GitHub access and no secrets paths in what they read;
 the next pass posts what came back (`post`, burrow-upkeep's), as the
 steward's App and marked as that reviewer's, and reads each reviewer's
-verdict back from those posts (`verdict`)."""
+verdict back from those posts (`verdict`); and each pass sweeps away what
+no open PR needs any more (`sweep`, burrow-upkeep's)."""
 
 import fcntl
 import hashlib
@@ -16,7 +17,6 @@ import os
 import re
 import shutil
 import subprocess
-import time
 
 import common as C
 from common import CFG, DRY, MIN, STATE, load, log, ts
@@ -35,8 +35,8 @@ QUEUE, SNAP, DONE, GIT = "review/queue", "review/snap", "review/done", "review/g
 TREES = CFG["snapDir"]
 # Each reviewer's session for each open PR, which every look at it resumes.
 # The reviewers' service owns what's in them; the sweep marks a closed PR's
-# GONE, and the service deletes it.
-SESSIONS, GONE = "review/sessions", ".gone-"
+# gone (burrow-upkeep's sweep.rs), and the service deletes it.
+SESSIONS = "review/sessions"
 OUT = "reviewers.json"  # a reviewer out of service, and until when
 # How the reviewers (burrow-upkeep's brief.rs, handed it by `queue`) and a
 # judge (tasks.py) weigh the reasons a PR's description gives where the
@@ -139,14 +139,6 @@ def remove(p):
             os.remove(p)
     except FileNotFoundError:
         pass
-
-
-def session_name(r, snap):
-    """The reviewer's session for the PR, on its base, whose head the
-    snapshot `snap` is: the same for every head, so each look resumes the
-    last one's, and another for a retargeted PR, which is another change."""
-    pr, _, base = snap.rsplit("-", 2)
-    return f"{r}--{pr}-{base}"
 
 
 def item_name(key, r, head, base):
@@ -274,47 +266,21 @@ def taken(path):
         return True
 
 
-def sweep(repos, live):
-    """For the repos this pass read (`repos`, as state file names spell
-    them): the snapshots, queue entries and answers of heads none of their
-    open PRs has any more (`live`: the snapshot names of the heads they have).
-    An open PR's earlier head keeps what came back, for the PR's next pass to
-    post on the commit it read or drop (review_step.py's `overtaken`). A look the
-    reviewers' service is on stays, whoever's it is, with the snapshot it
-    reads and the session it's in, until it ends: so nothing of it is left
-    to write after the sweep, whatever code the service runs (it need only
-    hold its entry's lock, `taken`), and a later sweep takes the rest.
-    Returns what it left of the heads it swept: their looks under way, and
-    the sessions it couldn't mark gone."""
-    prs = {s.rsplit("-", 2)[0] for s in live}
-    keep, busy, left = set(), set(), []
-    for d in (QUEUE, DONE, SNAP, TREES):  # the queue first: a look still running keeps its snapshot
-        for x in os.listdir(os.path.join(STATE, d)):
-            snap = x.removesuffix(".json")
-            if d in (QUEUE, DONE):
-                snap = snap.partition("--")[2]
-            if snap.rsplit("-", 3)[0].removeprefix("pr-") not in repos or snap in live:
-                continue
-            if d == QUEUE:
-                if not taken(os.path.join(STATE, d, x)):
-                    keep.add(snap)
-                    busy.add(session_name(x.partition("--")[0], snap))
-                    left.append(x)
-            elif not (snap in keep if d in (SNAP, TREES) else snap.rsplit("-", 2)[0] in prs):
-                remove(os.path.join(STATE, d, x))
-    # And the reviewers' sessions, for good, once their PR is closed (or
-    # retargeted): nothing of one PR's carries over to another's.
-    on = {f"{pr}-{base}" for pr, _, base in (s.rsplit("-", 2) for s in live)}
-    for x in os.listdir(os.path.join(STATE, SESSIONS)):
-        pr = x.partition("--")[2]
-        if x.startswith(GONE) or pr.rsplit("-", 2)[0].removeprefix("pr-") not in repos or pr in on or x in busy:
-            continue
-        try:
-            os.rename(os.path.join(STATE, SESSIONS, x), os.path.join(STATE, SESSIONS, f"{GONE}{time.time_ns()}-{x}"))
-        except OSError as e:
-            log(f"couldn't mark the session {x} gone: {e}")
-            left.append(x)
-    return left
+def sweep(repo, live):
+    """What the reviewers leave of the repo's PRs, swept once nothing needs
+    it (burrow-upkeep's `sweep`, crates/burrow-upkeep/src/sweep.rs): the
+    snapshots, queue entries and answers of heads none of its open PRs has
+    any more (`live`: the snapshot names of the heads they have), and the
+    sessions of its PRs that closed or were retargeted, marked gone for the
+    reviewers' service to delete. A look the service is on stays, with what
+    it reads, until it ends. Returns what it left of the heads it swept:
+    their looks under way, and the sessions it couldn't mark gone. Raises
+    when it couldn't sweep. As long as deleting takes, as it always has,
+    and as nobody: it asks GitHub nothing."""
+    out = C.upkeep("sweep", repo, input=json.dumps(sorted(live)), as_app=False, bounded=False)
+    if out["left"] is None:
+        raise RuntimeError(out["why"])
+    return out["left"]
 
 
 # ---------------------------------------------------------------- posting

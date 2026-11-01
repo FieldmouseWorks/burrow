@@ -119,7 +119,8 @@ def reset(r, k, known, failed):
     save("known.json", sorted(known))
     save("baseline-failed.json", failed)
     retire_checkouts(repo, k)
-    left = V.sweep({k}, set())
+    # The repo as its state spells it: an owner's name has no `_`.
+    left = V.sweep(k.replace("_", "/", 1), set())
     if left:
         raise RuntimeError(f"its reviewers aren't done with {', '.join(left)}: a look under way, or a session "
                            "that couldn't be marked gone")
@@ -269,7 +270,7 @@ def hooks(repos):
     the next full pass tries it again. A status run has no hooks to change."""
     if DRY:
         return
-    out = C.upkeep("hooks", mints=True, input=json.dumps({
+    out = C.upkeep("hooks", as_app=False, input=json.dumps({
         "seen": [r["repo"] for r in repos], "projects": [repo for _, repo in C.projects()]}))
     for f in out["failed"]:
         log(f"the hooks: {f}")

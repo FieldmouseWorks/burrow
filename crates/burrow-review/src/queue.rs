@@ -12,6 +12,11 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+/// The prefix the steward's sweep (burrow-upkeep's sweep.rs) gives a
+/// session once its PR has closed or been retargeted: this service then
+/// deletes it (work.rs `forget`).
+pub const GONE: &str = ".gone-";
+
 /// A queued look.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
