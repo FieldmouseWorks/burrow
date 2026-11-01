@@ -74,8 +74,8 @@ status, _ = run(mkpr(**minor), 7200)
 assert len(JOBS) == 1 and "1 open review thread" in JOBS[0] and not merged(), (status, JOBS)
 status, _ = run(mkpr(**minor), 9000)
 assert JOBS == [], "one job a head"
-# A Renovate major's threads are renovate-sweep's until it gives the head a
-# verdict; after that, nobody else's.
+# A Renovate major's branch is renovate-sweep's until it gives the head a
+# verdict; its threads then go to a job of ours, as the sweep's answers none.
 fresh_pr_state()
 run(mkpr(threads=[False], **major), 0)
 status, _ = run(mkpr(threads=[False], **major), 7200)
@@ -88,6 +88,7 @@ run(mkpr(threads=[False], comments=[said(swept("held"))], **major), 0)
 status, _ = run(mkpr(threads=[False], comments=[said(swept("held"))], **major), 9000)
 assert JOBS == [] and not merged() and "renovate-sweep held it" in status, (status, JOBS)
 # A red Renovate one is renovate-sweep's, threads and all: no second job on its branch.
+# Its threads wait for CI to go green, not for the sweep's job to answer them.
 fresh_pr_state()
 red_ci = [{"__typename": "CheckRun", "name": "ci", "status": "COMPLETED", "conclusion": "FAILURE"}]
 run(mkpr(checks=red_ci, **minor), 0)
@@ -212,6 +213,11 @@ status, _ = run(mkpr(checks=red_ci, threads=[False], **edited), 7200)
 assert JOBS == [] and not merged(), (status, JOBS)
 status, _ = run(clean(checks=red_ci, **edited), 7200)
 assert JOBS == [] and "CI is red" in status, (status, JOBS)
+# Green on the sweep's push, its threads are a job of ours to answer.
+fresh_pr_state()
+run(mkpr(threads=[False], **edited), 0)
+status, _ = run(mkpr(threads=[False], **edited), 7200)
+assert len(JOBS) == 1 and "1 open review thread" in JOBS[0] and not merged(), (status, JOBS)
 # Read while the machine had Renovate's address wrong, its own commits looked
 # like a Claude job's fix. Set right, the same head is read again, not taken
 # from that read.
