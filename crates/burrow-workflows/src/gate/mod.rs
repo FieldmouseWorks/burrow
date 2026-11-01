@@ -148,7 +148,18 @@ impl Gate {
     done
     [ -z "$what" ] || echo "eval $what" >> "$NIX_LOG"
     # The checkout edited once the plan is made, if asked.
-    [ -z "$EDIT" ] || [ "$what" != "entry 0" ] || cp -- "$EDIT" "$EDIT_TO" ;;
+    [ -z "$EDIT" ] || [ "$what" != "entry 0" ] || cp -- "$EDIT" "$EDIT_TO"
+    # How many entries are being evaluated at once, each held a second, if
+    # asked: one line each, as it starts.
+    if [ -n "$EVAL_OVERLAP" ] && [ "${{what#entry }}" != "$what" ]; then
+      mkdir -p "$NIX_LOG.running"
+      : > "$NIX_LOG.running/$$"
+      ls "$NIX_LOG.running" | wc -l >> "$NIX_LOG.overlap"
+      sleep 1
+      {real_nix} "$@" && rc=0 || rc=$?
+      rm -- "$NIX_LOG.running/$$"
+      exit $rc
+    fi ;;
 esac
 exec {real_nix} "$@"
 "#
@@ -268,7 +279,7 @@ exec {real_bin}/nix-store "$@"
     /// The gate step's script, and its environment for a run, with the logs
     /// of a run before cleared.
     fn gate_step(&self, r: &Run) -> (String, Vec<(String, String)>) {
-        for suffix in ["", ".links", ".slot", ".roots"] {
+        for suffix in ["", ".links", ".slot", ".roots", ".overlap"] {
             let _ = fs::remove_file(self.s.join(&format!("nix.log{suffix}")));
         }
         let wf = workflow(".github/workflows/flake-check.yml");

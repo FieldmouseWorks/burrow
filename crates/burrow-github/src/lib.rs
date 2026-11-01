@@ -62,6 +62,14 @@ pub trait Api {
         etag: Option<&str>,
     ) -> Result<Response, Failed>;
 
+    /// One GraphQL request about `owner`'s account. It names no repo, so it
+    /// says whose it is: an App's gh takes that account's installation's
+    /// token (GH_TOKEN_OWNER, gh-token), and no repo around it says otherwise.
+    fn graphql(&mut self, owner: &str, body: &Value) -> Result<Response, Failed> {
+        let _ = owner;
+        self.request("POST", "graphql", Some(body), None)
+    }
+
     /// A wait before asking again.
     fn pause(&mut self, secs: u64) {
         thread::sleep(Duration::from_secs(secs));
@@ -91,33 +99,92 @@ pub fn call(
     body: Option<&Value>,
     etag: Option<&str>,
 ) -> Result<Response, Error> {
-    let repeats = method != "POST";
+    call_allowing(api, method, path, body, etag, &[])
+}
+
+/// call, where the statuses in `allowed` are answers too, for the caller to
+/// read (a 404 for no such thing): never an Error, and never asked again.
+pub fn call_allowing(
+    api: &mut dyn Api,
+    method: &str,
+    path: &str,
+    body: Option<&Value>,
+    etag: Option<&str>,
+    allowed: &[u16],
+) -> Result<Response, Error> {
+    let what = format!("{method} {path}");
+    let r = tried(api, &what, method != "POST", |api| {
+        api.request(method, path, body, etag)
+    })?;
+    kept(&what, r, allowed)
+}
+
+/// A GraphQL query about `owner`'s account (Api::graphql): its `data`,
+/// tried again as a GET is, since a query changes nothing (a mutation isn't
+/// one), and an Error when GitHub's answer holds errors.
+pub fn query(
+    api: &mut dyn Api,
+    owner: &str,
+    query: &str,
+    variables: Value,
+) -> Result<Value, Error> {
+    let body = serde_json::json!({ "query": query, "variables": variables });
+    let what = "POST graphql";
+    let r = kept(
+        what,
+        tried(api, what, true, |api| api.graphql(owner, &body))?,
+        &[],
+    )?;
+    let mut answer = r.json()?;
+    if let Some(errors) = answer.get("errors").and_then(Value::as_array) {
+        let said: Vec<&str> = errors
+            .iter()
+            .map(|e| e["message"].as_str().unwrap_or("an error"))
+            .collect();
+        let said: String = said.join("; ").chars().take(300).collect();
+        return Err(Error(format!("{what}: {said}")));
+    }
+    Ok(answer["data"].take())
+}
+
+/// One request, asked again after AGAIN on a 429, and on no answer or a 5xx
+/// when it `repeats`: the first answer that isn't one of those, whatever its
+/// status.
+fn tried(
+    api: &mut dyn Api,
+    what: &str,
+    repeats: bool,
+    mut ask: impl FnMut(&mut dyn Api) -> Result<Response, Failed>,
+) -> Result<Response, Error> {
     let mut tries = 0;
     loop {
-        let again = match api.request(method, path, body, etag) {
-            Ok(r) if (200..300).contains(&r.status) || r.status == 304 => return Ok(r),
+        let again = match ask(&mut *api) {
             Ok(r) if r.status == 429 || (repeats && r.status >= 500) => {
                 format!("HTTP {}", r.status)
             }
-            Ok(r) => {
-                return Err(Error(format!(
-                    "{method} {path}: HTTP {}: {}",
-                    r.status,
-                    message(&r.body)
-                )));
-            }
+            Ok(r) => return Ok(r),
             Err(f) if f.transient && repeats => f.why,
-            Err(f) => return Err(Error(format!("{method} {path}: {}", f.why))),
+            Err(f) => return Err(Error(format!("{what}: {}", f.why))),
         };
         if tries == AGAIN.len() {
-            return Err(Error(format!(
-                "{method} {path}: {again}, {} times",
-                tries + 1
-            )));
+            return Err(Error(format!("{what}: {again}, {} times", tries + 1)));
         }
         api.pause(AGAIN[tries]);
         tries += 1;
     }
+}
+
+/// An answer to keep: 2xx, 304 or one of `allowed`; anything else, an
+/// Error that says what GitHub said.
+fn kept(what: &str, r: Response, allowed: &[u16]) -> Result<Response, Error> {
+    if (200..300).contains(&r.status) || r.status == 304 || allowed.contains(&r.status) {
+        return Ok(r);
+    }
+    Err(Error(format!(
+        "{what}: HTTP {}: {}",
+        r.status,
+        message(&r.body)
+    )))
 }
 
 fn message(body: &str) -> String {
@@ -139,45 +206,68 @@ impl Api for Gh {
         body: Option<&Value>,
         etag: Option<&str>,
     ) -> Result<Response, Failed> {
-        let mut cmd = Command::new("gh");
-        cmd.args(["api", "-i", "-X", method, path]);
-        if let Some(tag) = etag {
-            cmd.args(["-H", &format!("If-None-Match: {tag}")]);
-        }
-        if body.is_some() {
-            cmd.args(["--input", "-"]);
-        }
-        cmd.stdin(if body.is_some() {
-            Stdio::piped()
-        } else {
-            Stdio::null()
-        })
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-        let mut child = cmd.spawn().map_err(|e| Failed {
-            why: format!("gh: {e}"),
-            transient: false,
-        })?;
-        if let Some(b) = body {
-            let mut stdin = child.stdin.take().expect("piped");
-            stdin
-                .write_all(b.to_string().as_bytes())
-                .map_err(|e| Failed {
-                    why: format!("gh: {e}"),
-                    transient: true,
-                })?;
-        }
-        let out = child.wait_with_output().map_err(|e| Failed {
-            why: format!("gh: {e}"),
-            transient: true,
-        })?;
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        match parse(&stdout) {
-            Some(r) => Ok(r),
-            None => {
-                let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
-                Failed::from_gh(err)
-            }
+        gh_api(method, path, body, etag, None)
+    }
+
+    fn graphql(&mut self, owner: &str, body: &Value) -> Result<Response, Failed> {
+        gh_api("POST", "graphql", Some(body), None, Some(owner))
+    }
+}
+
+/// `gh api -i`, as `owner`'s account when the call names none.
+fn gh_api(
+    method: &str,
+    path: &str,
+    body: Option<&Value>,
+    etag: Option<&str>,
+    owner: Option<&str>,
+) -> Result<Response, Failed> {
+    let mut cmd = Command::new("gh");
+    cmd.args(["api", "-i", "-X", method, path]);
+    if let Some(owner) = owner {
+        // gh-token goes by GH_REPO and the checkout's remotes before this
+        // (account.rs), and they're not what the call is about.
+        cmd.env("GH_TOKEN_OWNER", owner)
+            .env_remove("GH_REPO")
+            .env_remove("GIT_DIR")
+            .current_dir("/");
+    }
+    if let Some(tag) = etag {
+        cmd.args(["-H", &format!("If-None-Match: {tag}")]);
+    }
+    if body.is_some() {
+        cmd.args(["--input", "-"]);
+    }
+    cmd.stdin(if body.is_some() {
+        Stdio::piped()
+    } else {
+        Stdio::null()
+    })
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped());
+    let mut child = cmd.spawn().map_err(|e| Failed {
+        why: format!("gh: {e}"),
+        transient: false,
+    })?;
+    if let Some(b) = body {
+        let mut stdin = child.stdin.take().expect("piped");
+        stdin
+            .write_all(b.to_string().as_bytes())
+            .map_err(|e| Failed {
+                why: format!("gh: {e}"),
+                transient: true,
+            })?;
+    }
+    let out = child.wait_with_output().map_err(|e| Failed {
+        why: format!("gh: {e}"),
+        transient: true,
+    })?;
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    match parse(&stdout) {
+        Some(r) => Ok(r),
+        None => {
+            let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            Failed::from_gh(err)
         }
     }
 }
@@ -385,6 +475,115 @@ mod tests {
             "GET a: HTTP 503, 3 times"
         );
         assert_eq!(gh.asked.len(), 3);
+    }
+
+    #[test]
+    fn answers_what_the_caller_reads() {
+        let mut gh = Fake::default();
+        gh.on(
+            "GET",
+            "c",
+            vec![ok(404, json!({"message": "Not Found"}), &[])],
+        );
+        let r = call_allowing(&mut gh, "GET", "c", None, None, &[404]).unwrap();
+        assert_eq!((r.status, gh.asked.len()), (404, 1));
+        // Only those: another refusal is still an Error, and so is the same
+        // one to a plain call.
+        assert_eq!(
+            call(&mut gh, "GET", "c", None, None).unwrap_err().0,
+            "GET c: HTTP 404: Not Found"
+        );
+        assert!(call_allowing(&mut gh, "GET", "c", None, None, &[422]).is_err());
+        // What's worth asking again still is.
+        let mut gh = Fake::default();
+        gh.on(
+            "GET",
+            "c",
+            vec![ok(502, Value::Null, &[]), ok(404, json!({}), &[])],
+        );
+        let r = call_allowing(&mut gh, "GET", "c", None, None, &[404]).unwrap();
+        assert_eq!((r.status, gh.paused.as_slice()), (404, &[2][..]));
+    }
+
+    /// A GitHub that keeps whose account each GraphQL call was about.
+    struct Graph {
+        asked: Vec<(String, Value)>,
+        answers: Vec<Result<Response, Failed>>,
+    }
+
+    impl Api for Graph {
+        fn request(
+            &mut self,
+            method: &str,
+            path: &str,
+            _: Option<&Value>,
+            _: Option<&str>,
+        ) -> Result<Response, Failed> {
+            panic!("{method} {path} isn't GraphQL")
+        }
+
+        fn graphql(&mut self, owner: &str, body: &Value) -> Result<Response, Failed> {
+            self.asked.push((owner.into(), body.clone()));
+            self.answers.remove(0)
+        }
+
+        fn pause(&mut self, _: u64) {}
+    }
+
+    #[test]
+    fn queries_as_the_account_they_are_about() {
+        let mut gh = Graph {
+            asked: vec![],
+            answers: vec![
+                ok(502, Value::Null, &[]),
+                ok(200, json!({"data": {"viewer": {"login": "sam"}}}), &[]),
+            ],
+        };
+        let data = query(
+            &mut gh,
+            "Sam",
+            "query { viewer { login } }",
+            json!({"a": 1}),
+        )
+        .unwrap();
+        assert_eq!(data, json!({"viewer": {"login": "sam"}}));
+        assert_eq!(gh.asked.len(), 2);
+        assert_eq!(
+            gh.asked[1],
+            (
+                "Sam".into(),
+                json!({"query": "query { viewer { login } }", "variables": {"a": 1}})
+            )
+        );
+        // An answer that holds errors is an Error, whatever its status.
+        let mut gh = Graph {
+            asked: vec![],
+            answers: vec![ok(
+                200,
+                json!({"data": {"repositoryOwner": null}, "errors": [
+                    {"message": "Could not resolve to a RepositoryOwner with the login of 'nobody'."},
+                    {"message": "and more"}
+                ]}),
+                &[],
+            )],
+        };
+        assert_eq!(
+            query(&mut gh, "nobody", "q", json!({})).unwrap_err().0,
+            "POST graphql: Could not resolve to a RepositoryOwner with the login of 'nobody'.; and more"
+        );
+        let mut gh = Graph {
+            asked: vec![],
+            answers: vec![ok(401, json!({"message": "Bad credentials"}), &[])],
+        };
+        assert_eq!(
+            query(&mut gh, "sam", "q", json!({})).unwrap_err().0,
+            "POST graphql: HTTP 401: Bad credentials"
+        );
+        // Asked of a GitHub with nothing of its own for it, it's a POST.
+        let mut gh = Fake::default();
+        gh.on("POST", "graphql", vec![ok(200, json!({"data": 1}), &[])]);
+        assert_eq!(query(&mut gh, "sam", "q", json!({})).unwrap(), json!(1));
+        assert_eq!(gh.asked[0].1, "graphql");
     }
 
     #[test]
