@@ -3,9 +3,10 @@ renovate-sweep's sealed verdict on its head, a minor or a security fix
 merges itself, a Dependabot major is judged, one a Claude job fixed is
 reviewed, and whose each one's threads and red CI are."""
 
+import json
 import time
 
-from harness import CI_GREEN, COMMITS, JOBS, C, S, T0, clean, fresh_pr_state, head, judgment, merged, mkpr, run, said, swept
+from harness import CI_GREEN, COMMITS, COMMITTERS, JOBS, C, S, T0, clean, fresh_pr_state, head, judgment, merged, mkpr, run, said, swept, tmp
 from touches import DEPENDABOT_EMAIL
 
 other = "c" * 40  # another head
@@ -222,6 +223,32 @@ assert "Dependency update" not in status, status
 S.CFG["renovateEmail"] = email
 status, _ = run(mkpr(checks=red_ci, **edited), 7200)
 assert "Dependency update, CI red; renovate-sweep has it" in status, status
+
+# A Claude job's rebase keeps Renovate's author and makes itself the committer.
+# Renovate counts that as an edit and won't merge it, so left to Renovate it
+# would sit green for good: it's reviewed and landed like a Claude PR. GitHub
+# as the committer is no edit, for Renovate or here.
+fresh_pr_state()
+COMMITS[14] = ["bot@renovateapp.com"]
+status, _ = run(clean(**edited), 900)
+assert not merged() and "Dependency update, CI green" in status, status
+COMMITTERS[14] = ["bot@renovateapp.com", "peter@remi"]
+fresh_pr_state()
+status, _ = run(clean(**edited), 900)
+assert merged() and "Dependency update" not in status, status
+# A head read before committers were looked at is read again.
+fresh_pr_state()
+green = clean(**edited)
+with open(f"{tmp}/state/pr-sam_r-14.json", "w") as f:
+    json.dump({"edited": False, "editedHead": [green["headRefOid"], green["baseRefName"], S.CFG["renovateEmail"], DEPENDABOT_EMAIL]}, f)
+status, _ = run(green, 900)
+assert merged() and "Dependency update" not in status, status
+# If they can't be read, Renovate still checks for itself before it merges.
+fresh_pr_state()
+COMMITTERS[14] = None
+status, _ = run(clean(**edited), 900)
+assert not merged() and "Dependency update, CI green" in status, status
+COMMITTERS.clear()
 
 # So is a Dependabot one a Claude job fixed: the steward merges those, and
 # what the job pushed is code no reviewer has read.
