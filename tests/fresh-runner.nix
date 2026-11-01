@@ -1,10 +1,11 @@
 # A runner started fresh for one job (modules/dispatch/fresh.nix), for real,
 # with a stand-in for the runner: it reads the registration it was handed as
-# its credential and leaves a file in its state, then ends as its instance
-# says. The dispatcher's user hands it over and queues the start, as
-# burrow-dispatch does. Whichever way it ends, its registration and its
-# state are gone, and one whose job went well doesn't end failed. Confined
-# the way a machine may confine it further (ProtectSystem).
+# its credential, leaves a file in its state and finds what a checkout in its
+# workspace includes, then ends as its instance says. The dispatcher's user
+# hands it over and queues the start, as burrow-dispatch does. Whichever way
+# it ends, its registration and its state are gone, and one whose job went
+# well doesn't end failed. Confined the way a machine may confine it further
+# (ProtectSystem).
 #
 #   nix build .#checks.x86_64-linux.fresh-runner -L
 { self, pkgs }:
@@ -15,6 +16,14 @@ let
     set -eu
     [ "$(cat "$CREDENTIALS_DIRECTORY/jit")" = "registration $1" ]
     echo left >"$RUNNER_ROOT/left"
+    # What actions/checkout does with the credentials it writes for a
+    # private repo's fetch: include them by the path of the workspace under
+    # the runner's root, which git matches against the real path.
+    w=$RUNNER_ROOT/_work/r
+    git init -q "$w"
+    printf '[burrow]\n\tseen = yes\n' >"$RUNNER_ROOT/included"
+    git -C "$w" config --local "includeIf.gitdir:$w/.git.path" "$RUNNER_ROOT/included"
+    [ "$(git -C "$w" config burrow.seen)" = yes ]
     case $1 in
       1-*) exit 0 ;;
       2-*) exit 1 ;;
