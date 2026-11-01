@@ -56,7 +56,10 @@ let
     exec sleep infinity
   '';
   machine = {
-    imports = [ self.nixosModules.remote-control ];
+    imports = [
+      self.nixosModules.remote-control
+      (import ./remote-control/projects.nix { inherit pkgs; names = [ "busy" ]; })
+    ];
     burrow = {
       claude.package = claude;
       remoteControl = {

@@ -5,7 +5,9 @@
 # session that has sat idle for half an hour isn't in use. Nothing waits for a
 # timer: the switch scans, a session's status changing does,
 # and a scan that leaves a server waiting books the next one for when its
-# quiet spell ends.
+# quiet spell ends. Only a project gets a server: a git checkout with an
+# origin, or the machine's own flake, whatever it is. A clone made while the
+# servers run gets one too.
 #
 #   nix build .#checks.x86_64-linux.remote-control -L
 { self, pkgs }:
@@ -35,7 +37,21 @@ pkgs.testers.runNixOSTest {
   name = "remote-control";
 
   nodes.machine = { lib, ... }: {
-    imports = [ self.nixosModules.remote-control ];
+    # The folders below with a session file are projects. Not projects: a git
+    # repository with no origin, and linked worktrees of a project.
+    imports = [
+      self.nixosModules.remote-control
+      (import ./remote-control/projects.nix {
+        inherit pkgs;
+        names = [ "idle" "busy" "recent" "waiting" "left" "late" "due" ];
+        after = ''
+          git init -q /data/dev/src/local
+          git -C /data/dev/src/idle -c user.name=dev -c user.email=dev@example.invalid commit -q --allow-empty -m start
+          git -C /data/dev/src/idle worktree add -q /data/dev/src/idle-worktrees/one
+          git -C /data/dev/src/idle worktree add -q /data/dev/src/linked
+        '';
+      })
+    ];
     burrow = {
       claude.package = claude "old";
       remoteControl.enable = true;
@@ -69,6 +85,11 @@ pkgs.testers.runNixOSTest {
       "f /data/dev/src/late/session 0644 dev dev - idle 600"
       "d /data/dev/src/due 0755 dev dev -"
       "f /data/dev/src/due/session 0644 dev dev - waiting 600"
+      # The machine's own flake (burrow.flake), not a git checkout here.
+      "d /data/dev/src/machine 0755 dev dev -"
+      # Not projects: notes, and a folder of a project's extra checkouts.
+      "d /data/dev/src/notes 0755 dev dev -"
+      "d /data/dev/src/idle-worktrees 0755 dev dev -"
     ];
   };
 
@@ -103,12 +124,27 @@ pkgs.testers.runNixOSTest {
     machine.wait_for_unit("user@1001.service")
     sent = time.time()
     skew = float(machine.succeed("date +%s.%N")) - (sent + time.time()) / 2
-    for p in ("idle", "busy", "recent", "waiting", "left", "late", "due"):
+    for p in ("idle", "busy", "recent", "waiting", "left", "late", "due", "machine"):
         machine.wait_until_succeeds(f"grep -qx old /data/dev/src/{p}/started", timeout=120)
     # Nothing is stale yet: no scan booked.
     machine.wait_until_succeeds("systemctl --user -M dev@ show -p ActiveState --value claude-rc-scan.service | grep -qx inactive", timeout=60)
     assert wake_in() is None, wake_in()
     booted = time.time()
+
+    def state(template, folder):
+        unit = machine.succeed(f"systemd-escape --template {template} {folder}").strip()
+        return machine.succeed(f"systemctl --user -M dev@ show -p ActiveState --value {unit}").strip()
+
+    with subtest("a folder that isn't a project gets no server"):
+        for p in ("notes", "local", "linked", "idle-worktrees"):
+            machine.fail(f"test -e /data/dev/src/{p}/started")
+            assert state("claude-rc@.service", p) == "inactive", p
+        # Each that may become one where it stands is watched for its origin;
+        # a linked worktree, and a project, never are.
+        for p in ("notes", "local", "idle-worktrees"):
+            machine.wait_until_succeeds(f"systemctl --user -M dev@ is-active -q $(systemd-escape --template claude-rc-origin@.path {p})", timeout=30)
+        for p in ("linked", "idle", "machine"):
+            assert state("claude-rc-origin@.path", p) == "inactive", p
 
     machine.succeed("/run/current-system/specialisation/next/bin/switch-to-configuration test")
 
@@ -225,7 +261,10 @@ pkgs.testers.runNixOSTest {
                 f"[ \"$(systemctl --user -M dev@ show -p InvocationID --value claude-rc-scan.service)\" != {last} ] && "
                 "systemctl --user -M dev@ show -p ActiveState --value claude-rc-scan.service | grep -qx inactive", timeout=10)
         machine.succeed("systemctl --user -M dev@ is-active -q claude-rc-scan-sessions.path claude-rc-scan.path")
-        machine.succeed("mkdir /data/dev/src/later && chown dev:dev /data/dev/src/later")
+        # A clone makes its folder before it writes the origin: the scan that
+        # folder starts may find no origin yet, and the look after it does.
+        machine.succeed("runuser -u dev -- ${pkgs.git}/bin/git init -q --bare /tmp/later.git")
+        machine.succeed("runuser -u dev -- ${pkgs.git}/bin/git clone -q /tmp/later.git /data/dev/src/later")
         machine.wait_until_succeeds("grep -qx new /data/dev/src/later/started", timeout=60)
 
     with subtest("a server already on the new one stays up, and nothing is booked"):
@@ -234,5 +273,67 @@ pkgs.testers.runNixOSTest {
         assert started("idle") == ["old", "new"], started("idle")
         machine.wait_until_succeeds("systemctl --user -M dev@ show -p ActiveState --value claude-rc-scan.service | grep -qx inactive", timeout=60)
         assert wake_in() is None, wake_in()
+
+    with subtest("a folder that becomes a project long after it was made gets its server"):
+        # Its config and then its origin come only once the scan the folder
+        # started, and the look after it, are over and nothing else is left
+        # to come: no scan running, booked or asked for. Then only the
+        # folder's own config changing can bring the scan that serves it.
+        def settled():
+            machine.wait_until_succeeds(
+                "s=$(systemctl --user -M dev@ show -p ActiveState -p InvocationID claude-rc-scan.service) && "
+                "echo \"$s\" | grep -qx ActiveState=inactive && "
+                "id=$(echo \"$s\" | sed -n 's/^InvocationID=//p') && "
+                # The look after it is over: it drops the scan's note once
+                # it has decided (its unit, done, may be gone already).
+                "! test -e /run/user/1001/claude-rc-scan/$id.seen && "
+                "! systemctl --user -M dev@ list-jobs --no-legend | grep -q claude-rc && "
+                "systemctl --user -M dev@ show -p InvocationID --value claude-rc-scan.service | grep -qx \"$id\"", timeout=60)
+            assert wake_in() is None, wake_in()
+        machine.succeed("mkdir /data/dev/src/slow && chown dev:dev /data/dev/src/slow")
+        machine.wait_until_succeeds("systemctl --user -M dev@ is-active -q claude-rc-origin@slow.path", timeout=60)
+        settled()
+        machine.succeed("runuser -u dev -- ${pkgs.git}/bin/git init -q /data/dev/src/slow")
+        settled()
+        machine.fail("test -e /data/dev/src/slow/started")
+        assert state("claude-rc@.service", "slow") == "inactive"
+        machine.succeed("runuser -u dev -- ${pkgs.git}/bin/git -C /data/dev/src/slow remote add origin /tmp/later.git")
+        machine.wait_until_succeeds("grep -qx new /data/dev/src/slow/started", timeout=60)
+        # A project now, so its watch is over.
+        machine.wait_until_succeeds("systemctl --user -M dev@ show -p ActiveState --value claude-rc-origin@slow.path | grep -qx inactive", timeout=60)
+
+    with subtest("a linked folder whose origin comes while a scan runs gets its server"):
+        # elsewhere is a link to a checkout outside the projects folder, with
+        # no origin yet. A scan is held up reading zz-hold's config (a pipe,
+        # until the test answers), after it has found elsewhere no project.
+        # elsewhere's origin comes meanwhile; the path units start nothing
+        # while the scan runs, and nothing in the projects folder itself
+        # changes: only the look after the scan, reading through the link,
+        # can see it.
+        machine.succeed(
+            "mkdir /data/dev/elsewhere && chown dev:dev /data/dev/elsewhere && "
+            "runuser -u dev -- ${pkgs.git}/bin/git init -q /data/dev/elsewhere && "
+            "ln -s /data/dev/elsewhere /data/dev/src/elsewhere && chown -h dev:dev /data/dev/src/elsewhere")
+        machine.wait_until_succeeds("systemctl --user -M dev@ is-active -q claude-rc-origin@elsewhere.path", timeout=60)
+        settled()
+        machine.succeed(
+            "mkdir -p /data/dev/stage/zz-hold/.git && mkfifo -m 644 /data/dev/stage/zz-hold/.git/config && "
+            "chown -R dev:dev /data/dev/stage")
+        # As in the held status above: a writer holds the pipe open, so the
+        # scan's read gets past opening it and waits for what's written.
+        holder = machine.succeed("{ exec sleep infinity >/data/dev/stage/zz-hold/.git/config; } >/dev/null 2>&1 </dev/null & echo $!").strip()
+        machine.succeed("mv /data/dev/stage/zz-hold /data/dev/src/zz-hold")
+        git = machine.wait_until_succeeds("pgrep -u dev -f 'config --file /data/dev/src/zz-hold/'", timeout=60).split()[0]
+        fd = machine.wait_until_succeeds(f"for d in /proc/{git}/fd/*; do case $(readlink $d) in */zz-hold/.git/config) echo $d;; esac; done | grep .", timeout=10).split()[0]
+        machine.succeed("runuser -u dev -- ${pkgs.git}/bin/git -C /data/dev/elsewhere remote add origin /tmp/later.git")
+        # zz-hold's config is an ordinary file again, as old as the pipe the
+        # scan began by, so the look sees nothing changed there; the read
+        # that's held gets an empty config, then its end.
+        machine.succeed(
+            "touch -r /data/dev/src/zz-hold/.git/config /data/dev/stage/config && chown dev:dev /data/dev/stage/config && "
+            "mv /data/dev/stage/config /data/dev/src/zz-hold/.git/config")
+        machine.succeed(f"echo >{fd} && kill {holder}")
+        machine.wait_until_succeeds("grep -qx new /data/dev/src/elsewhere/started", timeout=60)
+        machine.fail("test -e /data/dev/src/zz-hold/started")
   '';
 }
