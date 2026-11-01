@@ -6,7 +6,7 @@ use std::fs;
 use std::io::Write as _;
 use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::{Command, Output, Stdio};
 use std::time::Duration;
 
 use serde_json::Value;
@@ -23,6 +23,9 @@ pub struct Unit {
     /// Whether a process named Runner.Worker is in it: a runner at a job.
     /// One running whose processes can't be read counts as at one.
     pub busy: bool,
+    /// Whether systemd has a job for it still to run: a start queued
+    /// behind what it's ordered after leaves it inactive until then.
+    pub pending: bool,
 }
 
 pub trait World {
@@ -40,11 +43,15 @@ pub trait World {
     fn cancel(&self, repo: &str, run: u64) -> Result<(), String>;
     /// Start a burrow-events pass now (HANDLER[/OWNER/REPO]). Best effort.
     fn kick(&self, path: &str);
-    /// The instances of a template's units systemd has loaded.
-    fn instances(&self, template: &str) -> Vec<String>;
-    /// Register a runner for one job as the instance's, and start its unit
-    /// with that registration, which nothing else then holds.
+    /// The instances of a template's units systemd has loaded, or why
+    /// they couldn't all be listed.
+    fn instances(&self, template: &str) -> Result<Vec<String>, String>;
+    /// Register a runner for one job as the instance's, and queue its
+    /// unit's start with that registration, which the unit then owns.
     fn fresh(&self, f: &Fresh, instance: &str) -> Result<(), String>;
+    /// Remove the JIT configs no loaded unit owns: what it says of each, by
+    /// name.
+    fn sweep(&self, f: &Fresh) -> Vec<String>;
 }
 
 /// The machine's own: gh (the machinery's, on the PATH), systemctl, and the
@@ -77,6 +84,7 @@ impl World for Real<'_> {
             "ActiveEnterTimestamp",
             "InactiveExitTimestamp",
             "ControlGroup",
+            "Job",
         ];
         let out = Command::new("systemctl")
             .arg("show")
@@ -113,7 +121,12 @@ impl World for Real<'_> {
                     working(&Path::new("/sys/fs/cgroup").join(cg.trim_start_matches('/')))
                         .unwrap_or(true)
                 });
-        Unit { state, since, busy }
+        Unit {
+            state,
+            since,
+            busy,
+            pending: pending(&shown),
+        }
     }
 
     fn running(&self) -> Result<String, String> {
@@ -164,15 +177,12 @@ impl World for Real<'_> {
         }
     }
 
-    fn instances(&self, template: &str) -> Vec<String> {
+    fn instances(&self, template: &str) -> Result<Vec<String>, String> {
         let out = Command::new("systemctl")
             .args(["list-units", "--all", "--plain", "--no-legend", "--full"])
             .arg(format!("{template}*.service"))
-            .stderr(Stdio::inherit())
-            .output()
-            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
-            .unwrap_or_default();
-        instances(&out, template)
+            .output();
+        listed(out, template)
     }
 
     fn fresh(&self, f: &Fresh, instance: &str) -> Result<(), String> {
@@ -195,15 +205,70 @@ impl World for Real<'_> {
             .ok()
             .and_then(|v| v.get("encoded_jit_config")?.as_str().map(str::to_owned))
             .ok_or_else(|| format!("registering {name}: GitHub gave no JIT config"))?;
+        let unit = format!("{}{instance}.service", f.template);
         hand(&f.configs.join(instance), &config, || {
-            self.restart(&format!("{}{instance}.service", f.template), "start")
+            // Queued, not waited for: a box slow to set a unit's sandbox up
+            // (remi#438: 90s each) would hold the pass past its timeout.
+            let out = Command::new("systemctl")
+                .args(["start", "--no-block", &unit])
+                .output()
+                .map_err(|e| format!("systemctl: {e}"))?;
+            if out.status.success() {
+                Ok(())
+            } else {
+                Err(String::from_utf8_lossy(&out.stderr).trim().to_owned())
+            }
         })
+    }
+
+    fn sweep(&self, f: &Fresh) -> Vec<String> {
+        sweep(&f.configs, self.instances(&f.template))
     }
 }
 
-/// Leaves `config` at `path`, readable by this user alone, while `start`
-/// starts the unit that loads it, and then removes it, whatever came of the
-/// start. A file already there is someone else's, and stays.
+/// Removes each JIT config in `dir` but the `live` instances'. Once its
+/// start is queued, a config is its unit's: the unit removes it as its
+/// runner starts, or as it stops if it never got that far. One whose unit
+/// systemd no longer has was left by a start that never ran (a pass cut
+/// short between writing it and queueing the start, or a start job
+/// cancelled), and its registration is still one a process could take a
+/// job with. When the units couldn't be listed, which one owns each
+/// config isn't known, so every one stays. What it says of each names it,
+/// never what it held.
+fn sweep(dir: &Path, live: Result<Vec<String>, String>) -> Vec<String> {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let entries: Vec<fs::DirEntry> = entries.flatten().collect();
+    let live = match live {
+        Ok(live) => live,
+        Err(_) if entries.is_empty() => return Vec::new(),
+        Err(e) => return vec![format!("kept every JIT config, its unit unknown: {e}")],
+    };
+    let mut said: Vec<String> = entries
+        .into_iter()
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if live.contains(&name) {
+                return None;
+            }
+            let why = "a JIT config no unit has";
+            match fs::remove_file(e.path()) {
+                Ok(()) => Some(format!("removed {name}, {why}")),
+                // Its unit stopped, and took it, after systemd was asked.
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+                Err(err) => Some(format!("couldn't remove {name}, {why}: {err}")),
+            }
+        })
+        .collect();
+    said.sort();
+    said
+}
+
+/// Leaves `config` at `path`, readable by this user alone, for the unit
+/// `start` queues to load and then remove. A start that fails removes it
+/// here, since no unit will. A file already there is someone else's, and
+/// stays.
 fn hand(
     path: &Path,
     config: &str,
@@ -216,10 +281,26 @@ fn hand(
         .open(path)
         .and_then(|mut file| file.write_all(config.as_bytes()))
         .map_err(|e| format!("{}: {e}", path.display()))?;
-    // Its unit loads it as it starts (Type=exec: by the time start returns).
-    let started = start();
-    let removed = fs::remove_file(path).map_err(|e| format!("{}: {e}", path.display()));
-    started.and(removed)
+    start().inspect_err(|_| {
+        if let Err(e) = fs::remove_file(path) {
+            println!("couldn't remove {}: {e}", path.display());
+        }
+    })
+}
+
+/// The instances of a template (`NAME@`) `systemctl list-units` listed:
+/// none at all unless it ran and succeeded, since what a failed one printed
+/// may be only some of them.
+fn listed(out: std::io::Result<Output>, template: &str) -> Result<Vec<String>, String> {
+    let out = out.map_err(|e| format!("listing {template}*: systemctl: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "listing {template}*: systemctl {}: {}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(instances(&String::from_utf8_lossy(&out.stdout), template))
 }
 
 /// The instances of a template (`NAME@`) in `systemctl list-units --plain
@@ -231,6 +312,12 @@ fn instances(out: &str, template: &str) -> Vec<String> {
         .filter(|i| !i.is_empty())
         .map(str::to_owned)
         .collect()
+}
+
+/// Whether `systemctl show` gave the unit a job: its id, and nothing at
+/// all when it has none.
+fn pending(shown: &BTreeMap<String, String>) -> bool {
+    shown.get("Job").is_some_and(|j| !j.is_empty())
 }
 
 /// `systemctl show`'s KEY=VALUE lines.
@@ -278,17 +365,20 @@ fn working(cg: &Path) -> std::io::Result<bool> {
 
 #[cfg(test)]
 mod tests {
-    use super::{hand, instances, shown, working};
+    use std::os::unix::process::ExitStatusExt as _;
+    use std::process::{ExitStatus, Output};
 
-    // A JIT config waits only for its unit's start, readable by this user
-    // alone, and is gone after, whether the start worked or not; one
-    // already there isn't touched.
+    use super::{hand, instances, listed, pending, shown, sweep, working};
+
+    // A JIT config is there for its unit's start, readable by this user
+    // alone, and stays for the unit once the start is queued; a start that
+    // fails takes it away. One already there isn't touched.
     #[test]
     fn hands_a_config_over() {
         use std::os::unix::fs::PermissionsExt as _;
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("17-0");
-        for result in [Ok(()), Err("Access denied".to_owned())] {
+        for result in [Err("Access denied".to_owned()), Ok(())] {
             let got = hand(&path, "secret", || {
                 let meta = std::fs::metadata(&path).unwrap();
                 assert_eq!(meta.permissions().mode() & 0o777, 0o600);
@@ -296,12 +386,71 @@ mod tests {
                 result.clone()
             });
             assert_eq!(got, result);
-            assert!(!path.exists());
+            assert_eq!(path.exists(), result.is_ok());
         }
+        std::fs::remove_file(&path).unwrap();
         std::fs::write(&path, "theirs").unwrap();
         let got = hand(&path, "secret", || panic!("started"));
         assert!(got.unwrap_err().contains("exists"));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "theirs");
+    }
+
+    // Every config no loaded unit has, readable or not, is removed, and
+    // named; a live unit's stays. A directory with none, or none at all,
+    // says nothing.
+    #[test]
+    fn sweeps_what_no_unit_has() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        assert!(sweep(&dir.path().join("gone"), Ok(vec![])).is_empty());
+        assert!(sweep(dir.path(), Ok(vec![])).is_empty());
+        assert!(sweep(dir.path(), Err("bus".into())).is_empty());
+        for (name, mode) in [("17-1", 0o600), ("17-0", 0o400), ("18-0", 0o600)] {
+            let path = dir.path().join(name);
+            std::fs::write(&path, "secret").unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+        }
+        // The units unlisted: every one stays, the unit it's for unknown.
+        assert_eq!(
+            sweep(dir.path(), Err("Failed to connect to bus".into())),
+            ["kept every JIT config, its unit unknown: Failed to connect to bus"]
+        );
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 3);
+        let said = sweep(dir.path(), Ok(vec!["18-0".into(), "19-0".into()]));
+        assert_eq!(
+            said,
+            [
+                "removed 17-0, a JIT config no unit has",
+                "removed 17-1, a JIT config no unit has"
+            ]
+        );
+        assert!(said.iter().all(|s| !s.contains("secret")));
+        let left: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(left, ["18-0"]);
+    }
+
+    // A listing counts only when systemctl ran and succeeded: one that
+    // failed lists nothing, whatever it printed first, and one that worked
+    // and found none lists none.
+    #[test]
+    fn lists_only_what_systemctl_finished() {
+        let out = |code: i32, stdout: &str| {
+            Ok(Output {
+                status: ExitStatus::from_raw(code << 8),
+                stdout: stdout.as_bytes().to_vec(),
+                stderr: b"Failed to connect to bus".to_vec(),
+            })
+        };
+        let line = "fresh-runner@17-0.service loaded active running GitHub Actions runner\n";
+        assert_eq!(listed(out(0, line), "fresh-runner@").unwrap(), ["17-0"]);
+        assert_eq!(listed(out(0, ""), "fresh-runner@"), Ok(vec![]));
+        let err = listed(out(1, line), "fresh-runner@").unwrap_err();
+        assert!(err.contains("Failed to connect to bus"), "{err}");
+        let spawn = Err(std::io::Error::from(std::io::ErrorKind::NotFound));
+        assert!(listed(spawn, "fresh-runner@").is_err());
     }
 
     // A template's instances, and nothing else's: another template's, the
@@ -348,5 +497,8 @@ fresh-runner-old@3.service loaded active running other
         assert_eq!(got["ActiveState"], "active");
         assert_eq!(got["ActiveEnterTimestamp"], "@1800000000");
         assert_eq!(got["ControlGroup"], "/system.slice/r.service");
+        assert!(!pending(&got));
+        assert!(pending(&shown("ActiveState=inactive\nJob=4242\n")));
+        assert!(!pending(&shown("ActiveState=inactive\nJob=\n")));
     }
 }

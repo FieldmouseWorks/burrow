@@ -16,23 +16,24 @@ use crate::snapshot::Pool;
 use crate::state::State;
 
 /// `unread`: one of the pool's repos wasn't read this time, so its queue
-/// isn't all here.
+/// isn't all here. No `pool`: their units couldn't be listed, so how many
+/// are up isn't known, and none is started or stopped.
 pub fn decide(
     cfg: &Config,
     f: &Fresh,
-    pool: &Pool,
+    pool: Option<&Pool>,
     unread: bool,
     (st, was): (&State, &BTreeMap<String, Item>),
     now: f64,
     d: &mut Decision,
 ) {
-    match wait(cfg, f, pool, st, now, d) {
+    match pool.and_then(|pool| wait(cfg, f, pool, st, now, d)) {
         Some(item) => {
             d.state.fresh = Some(item.since);
             d.items.insert(KEY.into(), item);
         }
         // What wasn't read may still be waiting: as the last pass saw it.
-        None if unread => {
+        None if unread || pool.is_none() => {
             if let Some(it) = was.get(KEY) {
                 d.items.insert(KEY.into(), it.clone());
             }
@@ -54,15 +55,17 @@ fn wait(
     d: &mut Decision,
 ) -> Option<Item> {
     // Each unit that's up holds its place: at a job, waiting for one, or
-    // on its way in or out.
+    // on its way in or out, its start queued behind what it's ordered
+    // after among them.
     let up: Vec<(&String, &crate::world::Unit)> = pool
         .units
         .iter()
         .filter(|(_, u)| {
-            matches!(
-                u.state.as_str(),
-                "active" | "activating" | "deactivating" | "reloading"
-            )
+            u.pending
+                || matches!(
+                    u.state.as_str(),
+                    "active" | "activating" | "deactivating" | "reloading"
+                )
         })
         .collect();
     let mut waiting = 0;
@@ -154,6 +157,7 @@ mod tests {
             state: state.into(),
             since: Some(since),
             busy,
+            pending: false,
         }
     }
 
@@ -175,12 +179,12 @@ mod tests {
     }
 
     fn look(cfg: &Config, p: &Pool, st: &State, now: f64) -> Decision {
-        read(cfg, p, false, (st, &BTreeMap::new()), now)
+        read(cfg, Some(p), false, (st, &BTreeMap::new()), now)
     }
 
     fn read(
         cfg: &Config,
-        p: &Pool,
+        p: Option<&Pool>,
         unread: bool,
         last: (&State, &BTreeMap<String, Item>),
         now: f64,
@@ -280,6 +284,19 @@ mod tests {
             &[T - 60.0, T - 30.0],
         );
         assert_eq!(moves(&look(&cfg, &p, &st, T)).0.len(), 2);
+        // One whose start is queued, behind what it's ordered after, holds
+        // its place though it isn't up yet.
+        let queued = Unit {
+            pending: true,
+            ..unit("inactive", T, false)
+        };
+        let p = pool(&[("b", queued.clone())], &[T - 60.0, T - 30.0]);
+        assert_eq!(moves(&look(&cfg, &p, &st, T)).0.len(), 1);
+        let p = pool(
+            &[("a", queued.clone()), ("b", queued)],
+            &[T - 60.0, T - 30.0],
+        );
+        assert_eq!(moves(&look(&cfg, &p, &st, T)), (vec![], vec![]));
     }
 
     // Jobs waiting with room for more are a wait for the watchdog, from the
@@ -380,14 +397,27 @@ mod tests {
         let cfg = cfg(dir.path());
         let first = look(&cfg, &pool(&[], &[T - 600.0]), &State::default(), T);
         let (st, was) = (&first.state, &first.items);
-        let d = read(&cfg, &pool(&[], &[]), true, (st, was), T + Q);
+        let d = read(&cfg, Some(&pool(&[], &[])), true, (st, was), T + Q);
         assert_eq!((&d.items, d.state.fresh), (was, Some(T)));
         // What it could read still moves, and the wait keeps its age.
-        let d = read(&cfg, &pool(&[], &[T - 60.0]), true, (st, was), T + Q);
+        let d = read(&cfg, Some(&pool(&[], &[T - 60.0])), true, (st, was), T + Q);
         assert_eq!(moves(&d).0.len(), 1);
         assert_eq!((d.items["fresh"].since, d.state.fresh), (T, Some(T)));
         // Read, and nothing's queued: it's over.
-        let d = read(&cfg, &pool(&[], &[]), false, (st, was), T + Q);
+        let d = read(&cfg, Some(&pool(&[], &[])), false, (st, was), T + Q);
         assert!(d.items.is_empty() && d.state.fresh.is_none());
+    }
+
+    // Their units unlisted, how many are up isn't known: none is started
+    // or stopped, and the wait stays as the last pass saw it.
+    #[test]
+    fn nothing_moves_with_the_units_unlisted() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = cfg(dir.path());
+        let first = look(&cfg, &pool(&[], &[T - 600.0]), &State::default(), T);
+        let (st, was) = (&first.state, &first.items);
+        let d = read(&cfg, None, false, (st, was), T + Q);
+        assert!(d.moves.is_empty() && d.wake.is_none(), "{d:?}");
+        assert_eq!((&d.items, d.state.fresh), (was, Some(T)));
     }
 }

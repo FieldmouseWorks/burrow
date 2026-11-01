@@ -18,8 +18,9 @@ pub struct Snapshot {
     pub switching: bool,
     /// Each runner, by unit.
     pub runners: BTreeMap<String, Seen>,
-    /// The fresh runners, when the machine has them.
-    pub fresh: Option<Pool>,
+    /// The fresh runners, when the machine has them, or why their units
+    /// couldn't be listed.
+    pub fresh: Option<Result<Pool, String>>,
     /// Each runner repo's push runs on its default branch that haven't
     /// finished, by OWNER/REPO, oldest first.
     pub pushes: BTreeMap<String, Vec<Run>>,
@@ -185,7 +186,11 @@ pub fn take(cfg: &Config, world: &dyn World) -> Snapshot {
 
 /// The fresh runners' units, and the jobs queued in their repos that ask
 /// for their label and nothing else.
-fn pool(world: &dyn World, f: &Fresh, queues: &BTreeMap<&str, Vec<Queued>>) -> Pool {
+fn pool(
+    world: &dyn World,
+    f: &Fresh,
+    queues: &BTreeMap<&str, Vec<Queued>>,
+) -> Result<Pool, String> {
     let mut queued: Vec<Job> = f
         .repos
         .iter()
@@ -198,14 +203,14 @@ fn pool(world: &dyn World, f: &Fresh, queues: &BTreeMap<&str, Vec<Queued>>) -> P
         .collect();
     queued.sort_by(|a, b| a.at.total_cmp(&b.at));
     let units = world
-        .instances(&f.template)
+        .instances(&f.template)?
         .into_iter()
         .map(|i| {
             let unit = world.unit(&format!("{}{i}.service", f.template));
             (i, unit)
         })
         .collect();
-    Pool { units, queued }
+    Ok(Pool { units, queued })
 }
 
 /// A job queued in a repo, and the labels it asks for.
@@ -445,6 +450,8 @@ pub mod tests {
         pub peek: Option<std::path::PathBuf>,
         /// The fresh runners' instances.
         pub instances: Vec<String>,
+        /// Why they couldn't be listed, if they couldn't.
+        pub unlisted: Option<String>,
     }
 
     impl Fake {
@@ -491,11 +498,19 @@ pub mod tests {
         fn kick(&self, path: &str) {
             self.did.borrow_mut().push(format!("kick {path}"));
         }
-        fn instances(&self, _: &str) -> Vec<String> {
-            self.instances.clone()
+        fn instances(&self, _: &str) -> Result<Vec<String>, String> {
+            self.unlisted
+                .clone()
+                .map_or_else(|| Ok(self.instances.clone()), Err)
         }
         fn fresh(&self, f: &crate::config::Fresh, instance: &str) -> Result<(), String> {
             self.act(format!("fresh {}{instance} for {}", f.prefix, f.owner))
+        }
+        fn sweep(&self, f: &crate::config::Fresh) -> Vec<String> {
+            self.did
+                .borrow_mut()
+                .push(format!("sweep {}", f.configs.display()));
+            Vec::new()
         }
     }
 
@@ -632,6 +647,7 @@ pub mod tests {
                 state: "active".into(),
                 since: Some(1.0),
                 busy: false,
+                ..Unit::default()
             },
         );
         let snap = take(&cfg, &w);
@@ -731,9 +747,10 @@ pub mod tests {
                 state: "active".into(),
                 since: Some(1.0),
                 busy: true,
+                ..Unit::default()
             },
         );
-        let pool = take(&cfg, &w).fresh.unwrap();
+        let pool = take(&cfg, &w).fresh.unwrap().unwrap();
         let names: Vec<&str> = pool
             .queued
             .iter()
@@ -742,6 +759,12 @@ pub mod tests {
         assert_eq!(names, ["other", "train"]);
         assert_eq!(pool.units.keys().collect::<Vec<_>>(), ["17-0"]);
         assert!(pool.units["17-0"].busy);
+        // Their units unlisted: no pool, but why.
+        w.unlisted = Some("Failed to connect to bus".into());
+        assert_eq!(
+            take(&cfg, &w).fresh,
+            Some(Err("Failed to connect to bus".into()))
+        );
         // Without them, nothing's read for them.
         cfg.fresh = None;
         assert!(take(&cfg, &w).fresh.is_none());
