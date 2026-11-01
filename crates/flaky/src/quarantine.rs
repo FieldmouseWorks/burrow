@@ -15,7 +15,7 @@ use serde_json::{Map, Value, json};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::test::{ACTIONS, EXPIRES, LABEL, PREFIX, can_push, quarantined_by, seconds, valid};
-use burrow_github::{Api, Error, call};
+use burrow_github::{Api, Error, call, call_allowing};
 
 /// What a cache holds: one written in another shape is read as none.
 const CACHE: u64 = 2;
@@ -207,12 +207,12 @@ impl Who<'_> {
         }
         let path = format!("repos/{}/collaborators/{login}/permission", self.repo);
         let kept = &self.kept[login];
-        let now = match call(api, "GET", &path, None, kept["etag"].as_str()) {
-            Ok(r) if r.status == 304 => kept.clone(),
-            Ok(r) => json!({"etag": r.header("etag"), "permission": r.json()?["permission"]}),
+        let r = call_allowing(api, "GET", &path, None, kept["etag"].as_str(), &[404])?;
+        let now = match r.status {
+            304 => kept.clone(),
             // No such person any more.
-            Err(e) if e.0.contains("HTTP 404") => json!({"permission": "none"}),
-            Err(e) => return Err(e),
+            404 => json!({"permission": "none"}),
+            _ => json!({"etag": r.header("etag"), "permission": r.json()?["permission"]}),
         };
         let can = now["permission"].as_str().is_some_and(can_push);
         self.pushers.insert(login.to_string(), now);

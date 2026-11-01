@@ -1,5 +1,5 @@
 # house: every repo's copies of the house blocks (the files in house/, each
-# between its markers in AGENTS.md) kept the same as burrow's (house/sync.sh).
+# between its markers in AGENTS.md) kept the same as burrow's (crates/house-sync).
 # A change to a block here reaches each repo as one PR, which the steward
 # lands: the machine's own App's (burrow.github.machinery), when it has one.
 # Nothing waits for a timer: a switch that brings new blocks starts a pass
@@ -15,19 +15,23 @@ let
   current = "burrow/house";
   lockDir = "/run/house-sync";
 
-  sync = pkgs.writeShellApplication {
-    name = "house-sync";
-    runtimeInputs = [ config.burrow.github.machineGh ] ++ (with pkgs; [ jq coreutils gnugrep gnused gawk diffutils util-linux ]);
-    text = ''
-      HOUSE=${../house}
-      CURRENT=/etc/${current}
-      LOCK=${lockDir}/lock
-      OWNERS=${lib.escapeShellArg (lib.concatStringsSep " " cfg.owners)}
-      EXCLUDE=${lib.escapeShellArg (lib.concatStringsSep " " cfg.exclude)}
-      NOTIFY=${config.burrow.tools.notify}/bin/${config.burrow.prefix}-notify
-      ${lib.optionalString cfg.dryRun "DRY_RUN=1"}
-    '' + builtins.readFile ./house/sync.sh;
-  };
+  # What a pass is told (crates/house-sync), and the command with it built
+  # in. gh is the machine's: as its own App, when it has one.
+  syncConfig = pkgs.writeText "house-sync.json" (builtins.toJSON {
+    house = ../house;
+    current = "/etc/${current}";
+    lock = "${lockDir}/lock";
+    inherit (cfg) owners exclude dryRun;
+    notify = "${config.burrow.tools.notify}/bin/${config.burrow.prefix}-notify";
+  });
+  sync = pkgs.runCommand "house-sync" {
+    nativeBuildInputs = [ pkgs.makeBinaryWrapper ];
+    meta.mainProgram = "house-sync";
+  } ''
+    makeBinaryWrapper ${inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow}/bin/house-sync \
+      $out/bin/house-sync --add-flags ${syncConfig} \
+      --prefix PATH : ${lib.makeBinPath [ config.burrow.github.machineGh ]}
+  '';
 in
 {
   imports = [
@@ -51,9 +55,10 @@ in
       type = types.listOf types.str;
       default = [ ];
       description = ''
-        Repos to leave alone (OWNER/NAME globs). Not autoland's exclude: a repo
-        that lands its own PRs still keeps the house blocks, and gets its
-        house PR to land its own way.
+        Repos to leave alone, as OWNER/NAME, each side a name or a glob of one
+        with `*` and `?`, in any case (crates/house-sync/src/exclude.rs). Not
+        autoland's exclude: a repo that lands its own PRs still keeps the
+        house blocks, and gets its house PR to land its own way.
       '';
     };
 
