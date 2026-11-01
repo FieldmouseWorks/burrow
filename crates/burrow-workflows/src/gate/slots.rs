@@ -1,7 +1,7 @@
 //! The slot a gate's VM tests wait for: on a machine with heavy's slots, a
 //! check with a VM test still to run builds only while it holds one, once
 //! the rest are built with none; a runner without slots builds it all at
-//! once, as it always has.
+//! once, with a job more for each VM test while the memory lasts.
 
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
@@ -357,21 +357,116 @@ fn slots_what_nix_builds_by_name() {
     );
 }
 
-/// A runner without slots, a hosted one, builds it all at once, as it
-/// always has.
+/// The gate on DIR on a runner without slots, a hosted one, with nix's
+/// max-jobs of JOBS, GIB of the machine's memory available and no cgroups,
+/// and ENV: what came of it, and how many jobs its one build was given.
+fn hosted(t: &Slotted, dir: &Path, jobs: u32, gib: u64, env: &[(&str, &str)]) -> (Ran, String) {
+    let meminfo = t.g.s.join("meminfo");
+    fs::write(
+        &meminfo,
+        format!(
+            "MemTotal: {} kB\nMemAvailable: {} kB\n",
+            128u64 << 20,
+            gib << 20
+        ),
+    )
+    .unwrap();
+    // No cgroup file: a kernel without cgroups.
+    let proc = t.g.s.join("no-cgroups");
+    fs::create_dir_all(&proc).unwrap();
+    let config = format!("{}\nmax-jobs = {jobs}", t.g.nix_config);
+    let mut all = vec![
+        ("NIX_CONFIG", config.as_str()),
+        ("MEMINFO", meminfo.to_str().unwrap()),
+        ("CGROUP_PROC", proc.to_str().unwrap()),
+    ];
+    all.extend_from_slice(env);
+    let r = t.g.run(
+        dir,
+        Run {
+            env: &all,
+            ..Run::default()
+        },
+    );
+    assert_eq!(r.code, 0, "{}", r.out);
+    let given = r
+        .build()
+        .split("--max-jobs ")
+        .nth(1)
+        .and_then(|j| j.split_whitespace().next())
+        .unwrap_or_default()
+        .to_owned();
+    (r, given)
+}
+
+/// A runner without slots, a hosted one, builds it all at once, with a job
+/// more for each check that's a VM test itself (three: the one around a VM
+/// test isn't), as far as each job keeps 2G of the memory free; never
+/// fewer than nix's own, and none when nix builds none.
 #[test]
 fn slots_none_on_a_hosted_runner() {
     let t = Slotted::new();
-    let r = t.g.apart(&t.vms);
-    assert_eq!(r.code, 0, "{}", r.out);
+    let (r, jobs) = hosted(&t, &t.vms, 2, 64, &[]);
     let b = r.build();
     assert!(
-        VM_CHECKS.iter().chain(&["-a.drv^*"]).all(|c| b.contains(c)) && !b.contains("--max-jobs"),
+        VM_CHECKS.iter().chain(&["-a.drv^*"]).all(|c| b.contains(c)),
         "{b}"
     );
     assert!(
         t.in_slot().is_empty() && !r.out.contains("heavy slot"),
         "{}",
+        r.out
+    );
+    assert_eq!(jobs, "5", "{b}");
+    for (gib, want) in [(7, "3"), (3, "2"), (0, "2")] {
+        assert_eq!(hosted(&t, &t.vms, 2, gib, &[]).1, want, "{gib}G free");
+    }
+    assert_eq!(hosted(&t, &t.vms, 0, 64, &[]).1, "0");
+    // An older nix's JSON tells the same three apart.
+    assert_eq!(hosted(&t, &t.vms, 2, 64, &[("OLD_JSON", "1")]).1, "5");
+    let plain =
+        t.g.flake(r#"{ checks.${system} = { a = drv "a"; b = drv "b"; }; }"#);
+    assert_eq!(hosted(&t, &plain, 2, 64, &[]).1, "2");
+}
+
+/// A memory limit it can't read, or checks it can't tell apart, leave
+/// nix's own jobs, and it says which.
+#[test]
+fn slots_none_and_unsure_on_a_hosted_runner() {
+    let t = Slotted::new();
+    let unread = t.g.s.join("unread");
+    fs::create_dir_all(unread.join("cgroup")).unwrap();
+    let (r, jobs) = hosted(
+        &t,
+        &t.vms,
+        2,
+        64,
+        &[("CGROUP_PROC", unread.to_str().unwrap())],
+    );
+    assert!(
+        jobs == "2"
+            && r.out.contains(
+                "memory limit is unknown (its cgroups couldn't be read): no more than nix's 2 jobs"
+            ),
+        "{jobs}\n{}",
+        r.out
+    );
+    let broken = t.g.s.join("nojq");
+    fs::create_dir(&broken).unwrap();
+    executable(
+        &broken.join("jq"),
+        &format!(
+            "if [[ \"$*\" == *requiredSystemFeatures* ]]; then exit 1; fi\nexec {} \"$@\"\n",
+            which("jq").display()
+        ),
+    );
+    let path = format!("{}:{}", broken.display(), t.g.s.path_var());
+    let (r, jobs) = hosted(&t, &t.vms, 2, 64, &[("PATH", &path)]);
+    assert!(
+        jobs == "2"
+            && r.out
+                .contains("couldn't tell which checks are VM tests, so no more than nix's 2 jobs"),
+        "{jobs}\n{}",
         r.out
     );
 }

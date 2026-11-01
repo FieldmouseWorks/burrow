@@ -76,7 +76,7 @@ fn each_leg_takes_its_own_share() {
             );
             seen.extend(r.entries().into_iter().map(str::to_owned));
             for b in r.builds() {
-                built.extend(b.split_whitespace().skip(4).map(|t| {
+                built.extend(b.split_whitespace().skip(6).map(|t| {
                     t.split_once('-')
                         .unwrap_or_else(|| panic!("{t}"))
                         .1

@@ -479,21 +479,23 @@ jobs:
               "$@"
             fi
           }
+          # Whether an entry of nix derivation show's JSON has a VM to run:
+          # it requires kvm or nixos-test. Nix's JSON has structured attrs as
+          # structuredAttrs or, before 2.25 or so, in env.__json, and anything
+          # else with no env is an error.
+          vm_jq='def vm: (.value.env | if type != "object" then error("a derivation with no env") else . end) as $env
+            | ($env.requiredSystemFeatures // "" | [splits("[ \t\n\r]+")])
+              + (.value.structuredAttrs.requiredSystemFeatures // [])
+              + ($env.__json // "{}" | fromjson | .requiredSystemFeatures // [])
+            | any(. == "kvm" or . == "nixos-test");'
           # Prints which derivations in these ones' closures still have a VM
-          # to run, by store name: those requiring kvm or nixos-test with an
-          # output it couldn't root as it stands. A rerun's tests, already
-          # built, wait for nothing, and stay built under $roots until the
-          # gate's end; rooting a path builds nothing. Nix's JSON has
-          # structured attrs as structuredAttrs or, before 2.25 or so, in
-          # env.__json, and anything else with no env is an error.
+          # to run, by store name: those with an output it couldn't root as
+          # it stands. A rerun's tests, already built, wait for nothing, and
+          # stay built under $roots until the gate's end; rooting a path
+          # builds nothing.
           unbuilt_vms() {
             local name out outs i=0 pending
-            nix derivation show -r "${@/%/^*}" | jq -r '(.derivations // .) | to_entries[]
-              | (.value.env | if type != "object" then error("a derivation with no env") else . end) as $env
-              | select(($env.requiredSystemFeatures // "" | [splits("[ \t\n\r]+")])
-                  + (.value.structuredAttrs.requiredSystemFeatures // [])
-                  + ($env.__json // "{}" | fromjson | .requiredSystemFeatures // [])
-                | any(. == "kvm" or . == "nixos-test"))
+            nix derivation show -r "${@/%/^*}" | jq -r "$vm_jq"' (.derivations // .) | to_entries[] | select(vm)
               | .key | sub(".*/"; "")' > "$RUNNER_TEMP/vms" || return 1
             while read -r name; do
               pending=
@@ -506,17 +508,136 @@ jobs:
               [ -z "$pending" ] || echo "$name"
             done < "$RUNNER_TEMP/vms"
           }
+          # What's free to this job, in bytes, in $free: the machine's
+          # available memory, or less where its memory cgroup, or one above
+          # that, has a limit (a proj job's or a Claude server's MemoryMax, a
+          # container's): what the limit leaves, counting as free the inactive
+          # page cache the kernel gives back first. The cgroup is v1's memory
+          # controller's when the job has one, cgroup v2's otherwise, read
+          # through the mount of its hierarchy that shows the most cgroups
+          # above it, however it's mounted (with other v1 controllers, from a
+          # subtree). A limit that can't be read (no mount shows the cgroup,
+          # or a cgroup with a limit doesn't say what it holds) is unknown:
+          # $free is then 0, and $unknown says why. CGROUP_PROC is where the
+          # job's cgroups and mounts are read from (/proc/self), MEMINFO the
+          # machine's memory (/proc/meminfo): each a test's stand-in.
+          job_memory() {
+            local proc kind='' at='' top='' max holds cache limit held inactive left
+            unknown=''
+            free=$(( $(awk '$1 == "MemAvailable:" { print $2 }' "${MEMINFO:-/proc/meminfo}") * 1024 ))
+            proc=${CGROUP_PROC:-/proc/self}
+            # The hierarchy, then the job's cgroup's directory and the
+            # mount's, a line each; or the hierarchy and "-" when no mount
+            # shows the cgroup. Mount points are unescaped (mountinfo writes
+            # a space \040, a tab \011); one that isn't stays unfound.
+            # No cgroup file at all is a kernel without cgroups; one that's
+            # there but can't be read (or its mounts) is an unknown limit.
+            if [ -e "$proc/cgroup" ]; then
+              if [ -f "$proc/cgroup" ] && [ -f "$proc/mountinfo" ] && awk '
+                function unescape(s) { gsub(/\\040/, " ", s); gsub(/\\011/, "\t", s); return s }
+                FILENAME == ARGV[1] {
+                  controllers = $0; sub(/^[^:]*:/, "", controllers)
+                  path = controllers; sub(/:.*/, "", controllers); sub(/^[^:]*:/, "", path)
+                  if (("," controllers ",") ~ /,memory,/) { kind = "v1"; job = path }
+                  else if (controllers == "" && kind == "") { kind = "v2"; job = path }
+                  next
+                }
+                {
+                  for (i = 7; i < NF && $i != "-"; i++) { }
+                  if (kind == "v2" && $(i + 1) != "cgroup2") next
+                  if (kind == "v1" && ($(i + 1) != "cgroup" || ("," $(i + 3) ",") !~ /,memory,/)) next
+                  root = unescape($4)
+                  if (root == "/") root = ""
+                  if (job != root && index(job, root "/") != 1) next
+                  if (found && length(root) >= length(best)) next
+                  best = root; mount = unescape($5); found = 1
+                }
+                END {
+                  if (kind == "") exit
+                  print kind
+                  if (!found) { print "-"; exit }
+                  print mount substr(job, length(best) + 1)
+                  print mount
+                }
+              ' "$proc/cgroup" "$proc/mountinfo" > "$RUNNER_TEMP/memory-cgroup"; then
+                { IFS= read -r kind; IFS= read -r at; IFS= read -r top; } < "$RUNNER_TEMP/memory-cgroup" || true
+              else
+                unknown="its cgroups couldn't be read"
+              fi
+            fi
+            case $kind in
+              v1) max=memory.limit_in_bytes holds=memory.usage_in_bytes cache=total_inactive_file ;;
+              v2) max=memory.max holds=memory.current cache=inactive_file ;;
+            esac
+            if [ -n "$kind" ] && [ -z "$unknown" ]; then
+              if [ "$at" = - ]; then
+                unknown="its memory cgroup ($kind) isn't mounted here"
+              elif [ ! -d "$at" ]; then
+                unknown="its memory cgroup ($kind) isn't at $at"
+              else
+                # The job's cgroup and each above it to the mount's, each
+                # limit (none past 2^62, v1's "none") less what it holds.
+                at=${at%/} top=${top%/}
+                # A cgroup without the limit's file has none (the root, or
+                # one whose parent doesn't hand it the controller); one
+                # whose file is there but doesn't read as a number or "max"
+                # has a limit nobody can read.
+                number() { case $1 in '' | *[!0-9]*) return 1 ;; esac; }
+                while [ -z "$unknown" ]; do
+                  if [ -e "$at/$max" ]; then
+                    limit=$(cat "$at/$max") || limit=''
+                    if [ "$limit" = max ]; then
+                      :
+                    elif ! number "$limit"; then
+                      unknown="$at/$max can't be read"
+                    elif [ "$limit" -lt $(( 1 << 62 )) ]; then
+                      if held=$(cat "$at/$holds") && inactive=$(awk -v k="$cache" '$1 == k { print $2; got = 1 } END { exit !got }' "$at/memory.stat") \
+                          && number "$held" && number "$inactive"; then
+                        left=$(( limit - held + inactive ))
+                        [ "$left" -ge "$free" ] || free=$left
+                      else
+                        unknown="$at has a limit but doesn't say what it holds"
+                      fi
+                    fi
+                  fi
+                  [ -n "$at" ] && [ "$at" != "$top" ] || break
+                  at=${at%/*}
+                done
+              fi
+            fi
+            [ -z "$unknown" ] || free=0
+          }
           # Builds these checks (each a derivation and ^*), keeping the outputs
           # under the link $1 if it's given: first those with no VM to run in
           # their closures, with no slot, then the rest in one. Both are built
           # by derivation, so neither holds an evaluation. A check that can't
-          # be told apart counts as a VM test.
+          # be told apart counts as a VM test. Without slots (a hosted
+          # runner), all of them at once, with a job more for each check
+          # that's a VM test itself, as far as each job keeps 2G of the memory
+          # free to this job (as an evaluation does; the hosted VM tests ask
+          # for 1-2G): a VM test mostly waits on its VM, holding a job but
+          # little of a core, and with nix's one job a core, six of them on
+          # four cores waited in line for 90 s with the machine at ease. Never
+          # fewer jobs than nix's own, and none when the machine builds
+          # nothing itself (0 jobs).
           build_checks() {
-            local link=$1 rc=0 target closure found plain=() vms=() plain_link=(--no-link) vm_link=(--no-link)
+            local link=$1 rc=0 target closure found jobs tests room plain=() vms=() plain_link=(--no-link) vm_link=(--no-link)
             shift
             [ -z "$link" ] || { plain_link=(--out-link "$link"); vm_link=(--out-link "$link-vm"); }
             if ! has_slots; then
-              nix build -L "${plain_link[@]}" --keep-going "$@"
+              jobs=$(nix config show max-jobs) || return 1
+              if [ "$jobs" != 0 ]; then
+                if ! tests=$(nix derivation show "$@" | jq "$vm_jq"' [(.derivations // .) | to_entries[] | select(vm)] | length'); then
+                  echo "couldn't tell which checks are VM tests, so no more than nix's $jobs jobs"
+                  tests=0
+                fi
+                job_memory
+                [ -z "$unknown" ] || echo "this job's memory limit is unknown ($unknown): no more than nix's $jobs jobs"
+                room=$(( free / 2147483648 ))
+                [ "$room" -le $(( jobs + tests )) ] || room=$(( jobs + tests ))
+                [ "$room" -le "$jobs" ] || jobs=$room
+              fi
+              nix build -L "${plain_link[@]}" --keep-going --max-jobs "$jobs" "$@"
               return
             fi
             if ! unbuilt_vms "${@%^\*}" > "$RUNNER_TEMP/unbuilt-vms"; then
@@ -666,105 +787,8 @@ jobs:
             roots=$work/roots
             evals=$work/evals
             mkdir "$roots" "$evals"
-            # Free to this job: the machine's available memory, or less where
-            # its memory cgroup, or one above that, has a limit (a proj job's
-            # or a Claude server's MemoryMax, a container's): what the limit
-            # leaves, counting as free the inactive page cache the kernel
-            # gives back first. The cgroup is v1's memory controller's when
-            # the job has one, cgroup v2's otherwise, read through the mount
-            # of its hierarchy that shows the most cgroups above it, however
-            # it's mounted (with other v1 controllers, from a subtree). A
-            # limit that can't be read (no mount shows the cgroup, or a
-            # cgroup with a limit doesn't say what it holds) is unknown, so
-            # one evaluation at a time. CGROUP_PROC is where the job's
-            # cgroups and mounts are read from (/proc/self; a test's
-            # stand-in).
-            free=$(( $(awk '$1 == "MemAvailable:" { print $2 }' /proc/meminfo) * 1024 ))
-            proc=${CGROUP_PROC:-/proc/self}
-            kind='' at='' top='' unknown=''
-            # The hierarchy, then the job's cgroup's directory and the
-            # mount's, a line each; or the hierarchy and "-" when no mount
-            # shows the cgroup. Mount points are unescaped (mountinfo writes
-            # a space \040, a tab \011); one that isn't stays unfound.
-            # No cgroup file at all is a kernel without cgroups; one that's
-            # there but can't be read (or its mounts) is an unknown limit.
-            if [ -e "$proc/cgroup" ]; then
-              if [ -f "$proc/cgroup" ] && [ -f "$proc/mountinfo" ] && awk '
-                function unescape(s) { gsub(/\\040/, " ", s); gsub(/\\011/, "\t", s); return s }
-                FILENAME == ARGV[1] {
-                  controllers = $0; sub(/^[^:]*:/, "", controllers)
-                  path = controllers; sub(/:.*/, "", controllers); sub(/^[^:]*:/, "", path)
-                  if (("," controllers ",") ~ /,memory,/) { kind = "v1"; job = path }
-                  else if (controllers == "" && kind == "") { kind = "v2"; job = path }
-                  next
-                }
-                {
-                  for (i = 7; i < NF && $i != "-"; i++) { }
-                  if (kind == "v2" && $(i + 1) != "cgroup2") next
-                  if (kind == "v1" && ($(i + 1) != "cgroup" || ("," $(i + 3) ",") !~ /,memory,/)) next
-                  root = unescape($4)
-                  if (root == "/") root = ""
-                  if (job != root && index(job, root "/") != 1) next
-                  if (found && length(root) >= length(best)) next
-                  best = root; mount = unescape($5); found = 1
-                }
-                END {
-                  if (kind == "") exit
-                  print kind
-                  if (!found) { print "-"; exit }
-                  print mount substr(job, length(best) + 1)
-                  print mount
-                }
-              ' "$proc/cgroup" "$proc/mountinfo" > "$work/memory-cgroup"; then
-                { IFS= read -r kind; IFS= read -r at; IFS= read -r top; } < "$work/memory-cgroup" || true
-              else
-                unknown="its cgroups couldn't be read"
-              fi
-            fi
-            case $kind in
-              v1) max=memory.limit_in_bytes holds=memory.usage_in_bytes cache=total_inactive_file ;;
-              v2) max=memory.max holds=memory.current cache=inactive_file ;;
-            esac
-            if [ -n "$kind" ] && [ -z "$unknown" ]; then
-              if [ "$at" = - ]; then
-                unknown="its memory cgroup ($kind) isn't mounted here"
-              elif [ ! -d "$at" ]; then
-                unknown="its memory cgroup ($kind) isn't at $at"
-              else
-                # The job's cgroup and each above it to the mount's, each
-                # limit (none past 2^62, v1's "none") less what it holds.
-                at=${at%/} top=${top%/}
-                # A cgroup without the limit's file has none (the root, or
-                # one whose parent doesn't hand it the controller); one
-                # whose file is there but doesn't read as a number or "max"
-                # has a limit nobody can read.
-                number() { case $1 in '' | *[!0-9]*) return 1 ;; esac; }
-                while [ -z "$unknown" ]; do
-                  if [ -e "$at/$max" ]; then
-                    limit=$(cat "$at/$max") || limit=''
-                    if [ "$limit" = max ]; then
-                      :
-                    elif ! number "$limit"; then
-                      unknown="$at/$max can't be read"
-                    elif [ "$limit" -lt $(( 1 << 62 )) ]; then
-                      if held=$(cat "$at/$holds") && inactive=$(awk -v k="$cache" '$1 == k { print $2; got = 1 } END { exit !got }' "$at/memory.stat") \
-                          && number "$held" && number "$inactive"; then
-                        left=$(( limit - held + inactive ))
-                        [ "$left" -ge "$free" ] || free=$left
-                      else
-                        unknown="$at has a limit but doesn't say what it holds"
-                      fi
-                    fi
-                  fi
-                  [ -n "$at" ] && [ "$at" != "$top" ] || break
-                  at=${at%/*}
-                done
-              fi
-            fi
-            if [ -n "$unknown" ]; then
-              echo "this job's memory limit is unknown ($unknown): one evaluation at a time"
-              free=0
-            fi
+            job_memory
+            [ -z "$unknown" ] || echo "this job's memory limit is unknown ($unknown): one evaluation at a time"
             side=$(nproc)
             room=$(( free / 2147483648 ))
             [ "$room" -ge "$side" ] || side=$room

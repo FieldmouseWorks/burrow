@@ -58,7 +58,11 @@ fn each_derivation_apart() {
     // What it builds is the derivation the evaluation gave, outputs and all.
     let b = r.build();
     assert!(
-        b.starts_with("build -L --no-link --keep-going /nix/store/") && b.ends_with("-a.drv^*"),
+        b.starts_with("build -L --no-link --keep-going --max-jobs ")
+            && b.split_whitespace()
+                .nth(6)
+                .is_some_and(|t| t.starts_with("/nix/store/"))
+            && b.ends_with("-a.drv^*"),
         "{b}"
     );
     assert!(!b.contains("-vm.drv") && !b.contains("-p.drv"), "{b}");
