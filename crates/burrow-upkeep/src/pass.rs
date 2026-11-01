@@ -6,7 +6,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
-use burrow_github::{Api, Error, call};
+use burrow_github::{Api, Error, Response, call};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -207,6 +207,29 @@ impl Pass<'_> {
         }
     }
 
+    /// What GitHub has at `path`, or what it said (Pass::github).
+    pub fn get(&mut self, path: &str) -> Result<Value, String> {
+        call(self.api, "GET", path, None, None)
+            .and_then(|r| r.json())
+            .map_err(|e| self.github(e))
+    }
+
+    /// Every page of a listing from `path` on, as one list, or what GitHub
+    /// said (Pass::github).
+    pub fn pages(&mut self, path: &str) -> Result<Vec<Value>, String> {
+        let mut all = vec![];
+        let mut next = Some(path.to_string());
+        while let Some(at) = next {
+            let r: Response = call(self.api, "GET", &at, None, None).map_err(|e| self.github(e))?;
+            match r.json().map_err(|e| self.github(e))? {
+                Value::Array(page) => all.extend(page),
+                _ => return Err(format!("GET {at}: GitHub's answer isn't a list")),
+            }
+            next = r.next();
+        }
+        Ok(all)
+    }
+
     /// What GitHub's error says, once a rate limit it met is noted: when it
     /// resets, from `rate_limit`, which costs nothing against it. A limit
     /// with none of it spent (a secondary one) resets at 0, which is past.
@@ -234,6 +257,12 @@ impl Pass<'_> {
     pub fn me(&self) -> String {
         format!("{}[bot]", self.cfg.app)
     }
+}
+
+/// The repo's own state file: what settle and the branch watch keep, each
+/// its own part of it, beside what the steward keeps there itself.
+pub fn repo_file(repo: &str) -> String {
+    format!("repo-{}.json", repo.replace('/', "_"))
 }
 
 /// When the rate limits GitHub's `rate_limit` says are spent reset, the

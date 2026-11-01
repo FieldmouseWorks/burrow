@@ -4,7 +4,7 @@ a Claude job; when the inbox can't take it, all of it is the owner's."""
 
 import os
 
-from harness import UPKEEP_SRC, B, C, R, fresh_pr_state, sh, tmp
+from harness import UPKEEP_SRC, C, R, fresh_pr_state, sh, tmp
 
 CALLS = []
 OPEN = {}  # the open issue under each label, as `gh issue list` finds it
@@ -100,9 +100,11 @@ assert all(x in stuck["--body"] for x in ("sam/r#3", "sam/r#4", "sam/r#5")), stu
 assert not any(x in stuck["--body"] for x in ("sam/r#1", "sam/r#2", "sam/r#7")), stuck["--body"]
 
 # A stale branch the steward couldn't archive, or one GitHub wouldn't let
-# it delete, is the pipeline's trouble, not the owner's call: let through,
-# it would have gone on its own.
-assert B.UNKEPT not in R.OWNERS and B.UNDELETED not in R.OWNERS
+# it delete (burrow-upkeep's branches.rs), is the pipeline's trouble, not
+# the owner's call: let through, it would have gone on its own.
+branches_rs = open(os.path.join(UPKEEP_SRC, "branches.rs")).read()
+for heading in ("Stale branches it couldn't archive", "Branches GitHub wouldn't let it delete"):
+    assert f'"{heading}' in branches_rs and not any(o.startswith(heading) for o in R.OWNERS), heading
 
 # Every kind the owner settles is one the steward lists: a renamed one
 # would go to the inbox, never to the owner.

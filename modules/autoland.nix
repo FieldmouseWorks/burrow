@@ -59,7 +59,7 @@ let
   dashboardTitle = "Dependency Dashboard";
   settings = {
     renovateEmail = if renovateMatch == null then null else lib.head renovateMatch;
-    inherit (cfg) owners exclude context rulesets keepBranches baselineJobs baselinePerPass;
+    inherit (cfg) owners exclude context rulesets baselineJobs baselinePerPass;
     app = { inherit (cfg.app) id slug; };
     inherit (cfg) authors;
     # The bots whose PRs and comments are the steward's authors' too, by
@@ -87,7 +87,6 @@ let
     proofTimeout = cfg.proofTimeoutMinutes;
     heavy = if config.burrow.cpu.enable then "${config.burrow.tools.heavy}/bin/heavy" else null;
     owner = config.burrow.owner;
-    cleanBranches = cfg.cleanBranches;
     labels = { inherit (cfg.labels) hold owner first waiting; };
     notify = {
       inherit (config.burrow.notify) repo assignee;
@@ -146,8 +145,6 @@ let
     train = if ledger.enable then {
       cn = "${ledger.package}/bin/cn";
       inherit (ledger) env;
-      # Its candidates' branches, cn's to make and delete.
-      branches = "conary/*";
     } else null;
     repos = cfg.repos;
     inherit (cfg) pipelineRepos leadRepos;
@@ -174,8 +171,8 @@ let
   };
 
   # burrow-upkeep's (crates/burrow-upkeep/src/config.rs): the steward's own
-  # settings it shares, a repo's settings, and its two parts, each null when
-  # it's off.
+  # settings it shares, a repo's settings, and its branch watch and two
+  # parts, each null when it's off.
   upkeepConfig = pkgs.writeText "burrow-upkeep.json" (builtins.toJSON {
     inherit (settings) stateDir proj projectsDir authors bots jobTimeout renovate;
     app = settings.app.slug;
@@ -202,6 +199,14 @@ let
       repos = lib.filterAttrs (_: r: r != { })
         (lib.mapAttrs (_: builtins.intersectAttrs { directPush = null; ruleset = null; train = null; }) cfg.repos);
     };
+    # The branches never deleted: the machine's globs, each repo's own on
+    # top, and the train's candidates' (cn's to make and delete) in a repo
+    # whose train is on.
+    branches = if cfg.cleanBranches then {
+      keep = cfg.keepBranches;
+      repos = lib.filterAttrs (_: k: k != [ ]) (lib.mapAttrs (_: r: r.keepBranches or [ ]) cfg.repos);
+      train = if ledger.enable then "conary/*" else null;
+    } else null;
   });
   configFile = pkgs.writeText "autoland.json" (builtins.toJSON settings);
   # steward.py and every module beside it, linted as they're built: all of

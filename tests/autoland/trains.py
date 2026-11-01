@@ -3,9 +3,9 @@ the train instead of being merged, and comes out once it isn't settled any
 more; its status says where in the train it is, or why the train holds it
 out; the train's own status is CI only as the App's failure; a pass ends
 with a step of the train unless it has nothing to do; cn gets the App's
-tokens from the steward; and the branch watch leaves the train's branches
-to cn. That the repo's rules require the train's status is burrow-upkeep's
-(settle.rs)."""
+tokens from the steward. That the repo's rules require the train's status,
+and that the branch watch leaves the train's branches to cn, are
+burrow-upkeep's (settle.rs, branches.rs)."""
 
 import contextlib
 import io
@@ -13,7 +13,7 @@ import os
 
 import train as T
 import waits
-from harness import (B, C, CI_GREEN, FAIL, IDLE, JOBS, P, S, STEWARD, WROTE, clean, cn, cn_log, cn_runs, fresh_pr_state, head,
+from harness import (C, CI_GREEN, FAIL, IDLE, JOBS, P, S, STEWARD, WROTE, clean, cn, cn_log, cn_runs, fresh_pr_state, head,
                      info, judgment, merges, mkpr, run, said, stand_in, tmp)
 
 stand_in()
@@ -335,26 +335,3 @@ os.environ["CREDENTIALS_DIRECTORY"] = cred
 ran = cn_log()[0]["token"]
 assert ran["rc"] == 1 and ran["out"] == "" and "no token for sam/r: couldn't sign as the App" in ran["err"], ran
 print("train token: ok")
-
-# The branch watch leaves the train's candidates' branches to cn.
-BRANCHES = [{"name": "conary/train/" + CAND, "commit": {"sha": "e" * 40}}, {"name": "old", "commit": {"sha": "f" * 40}}]
-deleted = []
-kept_watch = (B.closed_at, B.delete_branch, C.fresh, C.NOW)
-B.closed_at = lambda repo, name, sha: 0
-B.delete_branch = lambda repo, name, sha: deleted.append(name)
-C.fresh = lambda path, etag=None: ("tag", BRANCHES if "/branches?" in path else [])  # and no PR closed
-kept_gh, C.gh = C.gh, lambda *a, **k: {"ahead": 0}
-for on, want in ((True, ["old"]), (False, ["conary/train/" + CAND, "old"])):
-    S.CFG["repos"]["sam/r"] = {"train": on}
-    fresh_pr_state()
-    deleted.clear()
-    C.NOW = kept_watch[3]
-    B.watch_branches({"repo": "sam/r", "default": "main"}, set(), [])
-    C.NOW += B.GRACE  # each goes once it has sat that long
-    B.watch_branches({"repo": "sam/r", "default": "main"}, set(), [])
-    assert deleted == want, (on, deleted)
-del S.CFG["repos"]["sam/r"]
-B.closed_at, B.delete_branch, C.fresh, C.NOW = kept_watch
-C.gh = kept_gh
-fresh_pr_state()
-print("train branches: ok")

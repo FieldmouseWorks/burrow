@@ -27,7 +27,7 @@ event reports):
      closed PR's head, and archive the stale unmerged ones under
      refs/archive before deleting them too, as a push, a PR closing or
      the default moving changes them or the wait they were given ends
-     (branches.py).
+     (burrow-upkeep's `branches`).
   4. Read each repo's Renovate dashboard: what sits on it too long, short
      of a PR, goes to a Claude job; and its quarantined flaky tests, each
      to a Claude job that fixes it (burrow-upkeep, `upkeep` below).
@@ -66,10 +66,10 @@ OWNER/REPO`, printed on stdout for it alone.
 """
 
 import fcntl
+import json
 import os
 import sys
 
-import branches as B
 import common as C
 import proofs as P
 import repos as R
@@ -137,34 +137,51 @@ def main():
 SEARCHED = [0]
 
 
-def upkeep(repo, mine):
-    """The repo's Renovate dashboard and quarantined flaky tests, which
-    burrow-upkeep looks at: what it lists goes in mine, the passes it books
-    are booked, and the Claude jobs it asks for are started here, each under
-    the key it gives, by which its next look finds the job (whatever became
-    of its id here). Whatever fails is logged, and the stall watchdog
-    watches the repo; the pass goes on."""
-    def failed(why):
-        log(f"{repo}: {why}")
-        waits.failed(repo)
-        C.wake(repo, C.NOW + 5 * MIN)  # ends: waits.failed watches the repo
+def failing(repo, why):
+    """What of burrow-upkeep's look failed: logged, and the stall watchdog
+    watches the repo."""
+    log(f"{repo}: {why}")
+    waits.failed(repo)
+    C.wake(repo, C.NOW + 5 * MIN)  # ends: waits.failed watches the repo
 
-    try:
-        out = C.upkeep("watch", repo, "--searched", str(SEARCHED[0]))
-    except Exception as e:
-        failed(f"its upkeep: {e}")
-        return
+
+def told(repo, out, mine):
+    """What a look of burrow-upkeep's says: what it lists goes in mine, the
+    pass it books is booked, and what failed is `failing`."""
     mine.extend(tuple(x) for x in out["stuck"])
-    SEARCHED[0] += out["searched"]
     if out["wake"]:
         C.wake(repo, out["wake"])  # ends: as each of burrow-upkeep's own says (its `// ends:`)
     for why in out["failed"]:
-        failed(why)
+        failing(repo, why)
+
+
+def branches(repo, default, in_use, mine, full):
+    """The branches nothing needs any more, which burrow-upkeep deletes,
+    leaving `in_use`, every open PR's head and base: told. A full pass's
+    also tries again what GitHub said no to. It raises when it fails, as
+    the repo's other steps do."""
+    told(repo, C.upkeep("branches", repo, "--default", default, *(["--full"] if full else []),
+                        input=json.dumps(sorted(in_use))), mine)
+
+
+def upkeep(repo, mine):
+    """The repo's Renovate dashboard and quarantined flaky tests, which
+    burrow-upkeep looks at: told, and the Claude jobs it asks for are
+    started here, each under the key it gives, by which its next look finds
+    the job (whatever became of its id here). Whatever fails is
+    `failing`; the pass goes on."""
+    try:
+        out = C.upkeep("watch", repo, "--searched", str(SEARCHED[0]))
+    except Exception as e:
+        failing(repo, f"its upkeep: {e}")
+        return
+    told(repo, out, mine)
+    SEARCHED[0] += out["searched"]
     for j in out["jobs"]:
         try:
             jid = C.job(repo, j["task"], clone=True, pipeline=j["pipeline"], timeout=j["timeout"], key=j["key"])
         except Exception as e:  # its own: the other part's job, and the pass, go on
-            failed(f"its {j['part']} job didn't start: {e}")
+            failing(repo, f"its {j['part']} job didn't start: {e}")
             mine.extend(tuple(x) for x in j["unstarted"])
             continue
         if not jid:
@@ -292,8 +309,7 @@ def run_pass(kick):
                         log(f"{repo}: its train: {e}")
                         waits.failed(repo)
                         C.wake(repo, C.NOW + 5 * MIN)  # ends: waits.failed watches the repo
-                if CFG["cleanBranches"]:
-                    B.watch_branches(r, in_use, mine, full=kick is None)
+                branches(repo, r["default"], in_use, mine, full=kick is None)
             except Exception as e:
                 log(f"{repo}: {e}")
                 waits.failed(repo)

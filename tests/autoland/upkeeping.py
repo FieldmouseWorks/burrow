@@ -1,8 +1,9 @@
 """burrow-upkeep in a pass: each repo's labels and settings, kept by the
-binary before its hook is seen to, and its Renovate dashboard and flaky
-tests, looked at by the binary (its own tests have the rules) as the App for
-the repo's owner, what it lists put where the steward sorts it, the passes
-it books booked, the Claude jobs it asks for started under their keys and
+binary before its hook is seen to, the branches nothing needs, deleted
+after its PRs are seen to, and its Renovate dashboard and flaky tests,
+looked at by the binary (its own tests have the rules) as the App for the
+repo's owner, what it lists put where the steward sorts it, the passes it
+books booked, the Claude jobs it asks for started under their keys and
 found by them, and what happens when any of that fails: the pass goes
 on."""
 
@@ -130,7 +131,8 @@ with open(f"{tmp}/upkeep.json", "w") as f:
                "flaky": {"jobTimeout": 240},
                "settle": {"owner": C.CFG["owner"], "appId": C.CFG["app"]["id"], "context": C.CFG["context"],
                           "trainContext": C.CFG["trainContext"], "rulesets": C.CFG["rulesets"], "labels": C.CFG["labels"],
-                          "defaults": {k: C.CFG["defaults"][k] for k in ("directPush", "ruleset", "train")}, "repos": {}}}, f)
+                          "defaults": {k: C.CFG["defaults"][k] for k in ("directPush", "ruleset", "train")}, "repos": {}},
+               "branches": {"keep": ["gh-pages"], "repos": {}, "train": "conary/*"}}, f)
 UP = [UPKEEP, f"{tmp}/upkeep.json"]
 JOBS, LOGGED = [], []
 NEXT = {}  # what C.job gives next, when set ("jid"): None for no job; or raises ("raise")
@@ -440,6 +442,101 @@ assert changed() == [] and C.load("repo-sam_r.json", {}) == {"databaseId": 2002}
 assert json.load(open(f"{C.STATE}/dry/repo-sam_r.json"))["settings"] == T
 R.hook = kept_hook
 print("settling: ok")
+
+# Its branches, as a pass sees to them after its PRs: by the binary (its own
+# tests have the rules), as the App, every open PR's left alone. GitHub,
+# here: the default (not main), an open PR's branch, and one already in the
+# default with no closed PR; git, a stand-in that notes how it was run, and as whom.
+BRANCHES = [["GET", "repos/sam/r/branches?per_page=100", 200,
+             [{"name": "trunk", "commit": {"sha": "ab" * 20}, "protected": True},
+              {"name": "feat", "commit": {"sha": "2" * 40}, "protected": False},
+              {"name": "in-main", "commit": {"sha": "1" * 40}, "protected": False}], 'W/"b"'],
+            ["GET", "repos/sam/r/pulls?state=closed&sort=updated", 200, [], 'W/"c"'],
+            ["GET", "repos/sam/r/pulls?state=closed&per_page=100&head=sam:", 200, [], None],
+            ["GET", "repos/sam/r/compare/trunk...", 200, {"ahead_by": 0, "commits": []}, None]]
+GIT_SAYS, GIT_RAN = f"{tmp}/upkeep-git-says", f"{tmp}/upkeep-git-ran"
+os.makedirs(f"{tmp}/upkeep-git")
+with open(f"{tmp}/upkeep-git/git", "w") as f:
+    f.write(f"""#!{sys.executable}
+import json, os, sys
+a = sys.argv[1:]
+if a[0] == "init":
+    os.makedirs(a[-1], exist_ok=True)
+    sys.exit(0)
+with open({GIT_RAN!r}, "a") as f:
+    f.write(json.dumps({{"args": a, "token": os.environ.get("GH_TOKEN")}}) + "\\n")
+code, said = json.load(open({GIT_SAYS!r}))
+sys.stderr.write(said)
+sys.exit(code)
+""")
+os.chmod(f"{tmp}/upkeep-git/git", 0o755)
+GH013 = "remote: error: GH013: Repository rule violations found for refs/heads/in-main."
+
+
+def prune(at, full=False, says=(0, ""), cmd=None):
+    """The steward's branch watch on sam/r, `at` seconds after T, `feat` an
+    open PR's and git saying `says` of a delete: what it listed."""
+    C.NOW = T + at
+    C.WAKE.clear()
+    waits.begin()
+    with open(GH, "w") as f:
+        json.dump({"answers": BRANCHES, "issues": {}}, f)
+    with open(GIT_SAYS, "w") as f:
+        json.dump(says, f)
+    open(CALLED, "w").close()
+    open(GIT_RAN, "w").close()
+    C.CFG["upkeep"] = cmd or UP
+    mine, out = [], io.StringIO()
+    with contextlib.redirect_stdout(out), C.acting_for("sam/r"):
+        S.branches("sam/r", "trunk", {"feat"}, mine, full)
+    LOGGED[:] = out.getvalue().splitlines()
+    return mine
+
+
+def pushed():
+    return [json.loads(x) for x in open(GIT_RAN)]
+
+
+path = os.environ["PATH"]
+os.environ["PATH"] = f"{tmp}/upkeep-git:{path}"
+C.save("repo-sam_r.json", {"databaseId": 2002})
+# The first look judges the one nothing needs, and books its pass for when
+# its wait is over; the open PR's is left alone, and nothing is deleted.
+assert prune(0) == [] and pushed() == [], pushed()
+assert C.WAKE == {"sam/r": T + 3600}, C.WAKE
+st = C.load("repo-sam_r.json", {})
+assert st["tips"]["feat"] == {"sha": "2" * 40, "pr": True} and st["tips"]["in-main"]["due"] == T + 3600, st
+assert st["databaseId"] == 2002 and {c["token"] for c in called()} == {"ghs_app_sam"}, (st, called())
+# An hour on, it's deleted, by git as the App: GitHub refusing it is listed
+# for the pipeline, with what it said.
+mine = prune(3600, says=(1, GH013))
+assert mine == [("Branches GitHub wouldn't let it delete", "sam/r: `in-main`", GH013)], mine
+assert [(p["args"][-2:], p["token"]) for p in pushed()] == [(["https://github.com/sam/r.git", ":refs/heads/in-main"], "ghs_app_sam")], pushed()
+assert f"--force-with-lease=refs/heads/in-main:{'1' * 40}" in pushed()[0]["args"], pushed()
+# Tried again on a full pass alone, which GitHub lets through.
+assert prune(3700) == mine and pushed() == [], pushed()
+assert prune(3800, full=True) == [] and len(pushed()) == 1, pushed()
+# A look whose state can't be saved is the repo's failure, watched; the
+# pass goes on.
+os.makedirs(f"{C.STATE}/repo-sam_r.json.tmp")
+prune(3900)
+os.rmdir(f"{C.STATE}/repo-sam_r.json.tmp")
+assert any(x.startswith("sam/r: its branches: ") for x in LOGGED), LOGGED
+assert "sam/r" in waits.FAILED and C.WAKE["sam/r"] == T + 3900 + 300, (waits.FAILED, C.WAKE)
+# A status run deletes nothing, and keeps state of its own.
+C.save("repo-sam_r.json", {"databaseId": 2002, "tips": {"in-main": {"sha": "1" * 40, "seen": T - 7200}}})
+S.DRY = C.DRY = True
+prune(4000)
+S.DRY = C.DRY = False
+assert pushed() == [] and C.load("repo-sam_r.json", {})["tips"]["in-main"] == {"sha": "1" * 40, "seen": T - 7200}
+assert json.load(open(f"{C.STATE}/dry/repo-sam_r.json"))["tips"]["feat"]["pr"]
+# With the branch watch off, it asks GitHub nothing.
+with open(f"{tmp}/upkeep-off.json", "w") as f:
+    json.dump({**json.load(open(f"{tmp}/upkeep.json")), "branches": None}, f)
+assert prune(4100, cmd=[UPKEEP, f"{tmp}/upkeep-off.json"]) == [] and called() == [], called()
+os.environ["PATH"] = path
+C.save("repo-sam_r.json", {})
+print("pruning: ok")
 
 C.job, C.CFG["upkeep"] = kept
 print("upkeeping: ok")

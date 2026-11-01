@@ -7,8 +7,8 @@ import os
 import sys
 import time
 
-from harness import (ACTING, FAIL, REAL_GH, QDIR, REAL, STATES, STUB, T, WROTE, C, P, R, H, S, V, clean, fresh_pr_state, head,
-                     info, mkpr, pr_state, queued, run, rv_review, tmp, worker)
+from harness import (ACTING, FAIL, REAL_GH, QDIR, REAL, STATES, STUB, T, UPKEEP_RAN, WROTE, C, P, R, H, S, V, clean, fresh_pr_state,
+                     head, info, mkpr, pr_state, queued, run, rv_review, tmp, worker)
 
 # A pass that waits on time books its repo's next pass for when the wait
 # ends: a new head's settle delay, and how long findings sit before a job.
@@ -169,16 +169,14 @@ C.NOW = T
 C.save("wake.json", {"sam/r": T + 50, "sam/other": T + 60, "sam/gone": T - 1})
 C.save("digest-repos.json", {"sam/r": [["Old", "r line", ""]], "sam/other": [["Open over a day", "other line", "x"]]})
 C.save("repos.json", {"untouched": True})
-seen_repos, watched, published = [], [], []
-kept_fns = (S.R.discover, S.R.restart, S.R.settle_repo, S.R.publish, S.B.watch_branches, S.open_prs, S.R.unhook_gone)
+seen_repos, published = [], []
+kept_fns = (S.R.discover, S.R.restart, S.R.settle_repo, S.R.publish, S.open_prs, S.R.unhook_gone)
 S.R.unhook_gone = lambda repos: (_ for _ in ()).throw(AssertionError("hooks taken off in a kicked pass"))
 S.R.discover = lambda: [{"repo": "sam/r", "default": "main"}, {"repo": "sam/other", "default": "main"}]
 order = []
 S.R.restart = lambda r, known, failed: order.append(("restart", r["repo"]))
 S.R.settle_repo = lambda r, known: order.append(("settle", r["repo"])) or r["repo"] not in known
 S.R.publish = published.append
-in_use = []
-S.B.watch_branches = lambda r, branches, digest, full=False: watched.append(full) or in_use.append(branches)
 
 
 def kicked_prs(owner, name):
@@ -187,7 +185,7 @@ def kicked_prs(owner, name):
 
 
 S.open_prs, argv = kicked_prs, sys.argv
-S.CFG["cleanBranches"] = True
+open(UPKEEP_RAN, "w").close()
 sys.argv = ["steward", "kick", "Sam/R"]  # as burrow-events spells it, or not
 C.WAKE.clear()
 C.save("known.json", [])
@@ -199,15 +197,17 @@ S.CFG["baselineJobs"] = False
 del S.CFG["baselineTask"]
 C.job = job
 sys.argv = argv
-S.CFG["cleanBranches"] = False
-S.R.discover, S.R.restart, S.R.settle_repo, S.R.publish, S.B.watch_branches, S.open_prs, S.R.unhook_gone = kept_fns
-assert seen_repos == ["sam/r"] and watched == [False], (seen_repos, watched)
+S.R.discover, S.R.restart, S.R.settle_repo, S.R.publish, S.open_prs, S.R.unhook_gone = kept_fns
+assert seen_repos == ["sam/r"], seen_repos
 assert order == [("restart", "sam/r"), ("settle", "sam/r")] and NEW_JOBS == [("sam/r", "sam/r is new", True)], \
     (order, NEW_JOBS)
 assert C.load("known.json", None) == ["sam/r"]
-# The branch watch leaves every open PR's branches, its base as well as its head:
-# deleting a base closes the PRs on it.
-assert in_use == [{"feat", "main"}], in_use
+# The branch watch leaves every open PR's branches, its base as well as its head
+# (deleting a base closes the PRs on it), and a kicked pass's doesn't try
+# again what GitHub said no to.
+ran = [json.loads(x) for x in open(UPKEEP_RAN)]
+watched = [(x[1], x[x.index("--default") + 1], "--full" in x, x[-1]) for x in ran if x[0] == "branches"]
+assert watched == [("sam/r", "main", False, ["feat", "main"])], ran
 assert C.load("repos.json", None) == {"untouched": True}
 assert C.load("wake.json", None) == {"sam/r": T + 3 * 60 + 1, "sam/other": T + 60}, C.load("wake.json", None)
 assert C.load("digest-repos.json", None) == {"sam/r": [], "sam/other": [["Open over a day", "other line", "x"]]}

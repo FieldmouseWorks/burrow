@@ -5,17 +5,18 @@
 //! when that can't wait: another App, a train turned on or off, a repo's
 //! first commit.
 //!
-//! What's kept is in repo-REPO.json, beside what the steward keeps there
-//! itself (the repo's databaseId and its hook's), which stays as it was.
+//! What's kept is in repo-REPO.json, beside what the branch watch keeps
+//! there (branches.rs) and what the steward keeps itself (the repo's
+//! databaseId and its hook's), which stay as they were.
 
 use std::collections::HashSet;
 
-use burrow_github::{Response, call, call_allowing, encode};
+use burrow_github::{call, call_allowing, encode};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
 use crate::config::{Rules, Settle};
-use crate::pass::{DAY, Pass};
+use crate::pass::{DAY, Pass, repo_file};
 
 /// What GitHub says when a repo's plan has no rules (a private repo on a
 /// free account): there are none to pin.
@@ -47,7 +48,7 @@ pub struct State {
         skip_serializing_if = "std::ops::Not::not"
     )]
     pub auto_merge_refused: bool,
-    /// What the steward keeps here itself.
+    /// What the branch watch and the steward keep here.
     #[serde(flatten)]
     pub rest: Map<String, Value>,
 }
@@ -63,7 +64,7 @@ pub struct Repo {
 /// whatever became of them: the steward's hook goes by it too. What failed
 /// is in `failed`.
 pub fn settle(p: &mut Pass, cfg: &Settle, repo: &Repo) -> bool {
-    let name = format!("repo-{}.json", p.repo.replace('/', "_"));
+    let name = repo_file(p.repo);
     let mut st: State = p.load(&name);
     let rules = cfg.rules(p.repo);
     // Due daily, and straight away for another App (its required checks are
@@ -164,7 +165,7 @@ fn keep(
     // Every page, an org's rulesets included. Only the repo's own baseline
     // counts as its baseline: the steward can't pin what the org keeps, so
     // a repo with the org's gets its own over it, and GitHub enforces both.
-    let listed = pages(p, &format!("repos/{}/rulesets?per_page=100", p.repo));
+    let listed = p.pages(&format!("repos/{}/rulesets?per_page=100", p.repo));
     let ruled = match listed {
         // The plan offers no rules on this repo: there are none to pin.
         // Anything else is GitHub not saying, and nothing's known to be
@@ -501,7 +502,7 @@ fn keep_rules(p: &mut Pass, cfg: &Settle, rules: Rules, rulesets: &[&Value]) -> 
 /// branch's is, or didn't take the change.
 fn keep_protection(p: &mut Pass, cfg: &Settle) -> bool {
     let path = format!("repos/{}/branches?protected=true&per_page=100", p.repo);
-    let branches = match pages(p, &path) {
+    let branches = match p.pages(&path) {
         Ok(b) => b,
         Err(why) => {
             eprintln!("  failed: {why}");
@@ -567,29 +568,7 @@ fn keep_branch(p: &mut Pass, cfg: &Settle, name: &str) -> bool {
 
 /// What GitHub has at `path`, or None, said, when it won't say.
 fn read(p: &mut Pass, path: &str) -> Option<Value> {
-    match call(p.api, "GET", path, None, None).and_then(|r| r.json()) {
-        Ok(v) => Some(v),
-        Err(e) => {
-            let why = p.github(e);
-            eprintln!("  failed: {why}");
-            None
-        }
-    }
-}
-
-/// Every page of a listing, as one list.
-fn pages(p: &mut Pass, path: &str) -> Result<Vec<Value>, String> {
-    let mut all = vec![];
-    let mut next = Some(path.to_string());
-    while let Some(at) = next {
-        let r: Response = call(p.api, "GET", &at, None, None).map_err(|e| p.github(e))?;
-        match r.json().map_err(|e| p.github(e))? {
-            Value::Array(page) => all.extend(page),
-            _ => return Err(format!("GET {at}: GitHub's answer isn't a list")),
-        }
-        next = r.next();
-    }
-    Ok(all)
+    p.get(path).map_err(|why| eprintln!("  failed: {why}")).ok()
 }
 
 /// A change: what GitHub answered (null for no body), or None, said, when

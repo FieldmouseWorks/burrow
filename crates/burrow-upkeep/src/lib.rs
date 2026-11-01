@@ -1,13 +1,16 @@
 //! What the autoland steward keeps up in each repo besides its PRs: its
-//! labels and settings (settle.rs), Renovate's dashboard (dashboard.rs) and
-//! the flaky tests' quarantine (flaky.rs). A pass of the steward's runs
-//! `settle` and then `watch` on each repo it sees to, with the App's token
-//! for the repo's owner in GH_TOKEN. It sets the repo's hook once its
-//! settings are seen to, and acts on what `watch` says (pass::Out): it lists
-//! what's stuck, books the repo's next pass, and starts the Claude jobs it
-//! asks for, each under its key. Nothing is told back: a part's next look
-//! finds its job by that key (`proj find`).
+//! labels and settings (settle.rs), the branches nothing needs any more
+//! (branches.rs), Renovate's dashboard (dashboard.rs) and the flaky tests'
+//! quarantine (flaky.rs). A pass of the steward's runs `settle`, then
+//! `branches` once it has seen to the repo's PRs, then `watch`, on each
+//! repo it sees to, with the App's token for the repo's owner in GH_TOKEN.
+//! It sets the repo's hook once its settings are seen to, and acts on what
+//! `branches` and `watch` say (pass::Out): it lists what's stuck, books the
+//! repo's next pass, and starts the Claude jobs `watch` asks for, each
+//! under its key. Nothing is told back: a part's next look finds its job by
+//! that key (`proj find`).
 
+pub mod branches;
 pub mod config;
 pub mod dashboard;
 pub mod flaky;

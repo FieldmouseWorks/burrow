@@ -1,7 +1,7 @@
 """The repos: finding them, their settings (burrow-upkeep keeps them at the
 baseline) and hooks, and the issues that list what waits for the owner and
 what the pipeline is stuck on. Deleting the branches nothing needs is
-branches.py's."""
+burrow-upkeep's too (its `branches`)."""
 
 import fnmatch
 import hashlib
