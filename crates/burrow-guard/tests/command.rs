@@ -2,7 +2,7 @@
 //! and nothing or a decision on stdout.
 
 use std::fs;
-use std::io::Write;
+use std::io::{ErrorKind, Write};
 use std::process::{Command, Stdio};
 
 /// What `burrow-guard CONFIG` prints for `input`.
@@ -17,12 +17,11 @@ fn hook(config: &str, input: &str) -> String {
         .stdout(Stdio::piped())
         .spawn()
         .unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(input.as_bytes())
-        .unwrap();
+    // A config it can't read answers without reading its input, and may be
+    // gone by now: what it answers is the test's to judge.
+    if let Err(e) = child.stdin.take().unwrap().write_all(input.as_bytes()) {
+        assert_eq!(e.kind(), ErrorKind::BrokenPipe, "{e}");
+    }
     let out = child.wait_with_output().unwrap();
     assert!(out.status.success());
     String::from_utf8(out.stdout).unwrap()
