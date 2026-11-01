@@ -118,32 +118,73 @@ fn no_checks_at_all_is_healthy() {
 }
 
 #[test]
-fn only_a_check_that_says_ok_passes() {
+fn a_report_it_cant_read_tells_nothing() {
     let dir = tempfile::tempdir().unwrap();
     let s = dir.path();
+    beat(s, &["check:zfs fail"]);
+    // What HOST-health's own reading refuses: a beat that can't tell, with
+    // nothing passing, failing or forgotten for it.
+    for (lines, bad) in [
+        (
+            &["check:sshd ok", "check:zfs maybe"][..],
+            r#"line 2 isn't `KEY ok` or `KEY fail`: "check:zfs maybe""#,
+        ),
+        (
+            &["  check:a   ok  "],
+            r#"line 1 isn't `KEY ok` or `KEY fail`: "  check:a   ok  ""#,
+        ),
+        (
+            &["check:c"],
+            r#"line 1 isn't `KEY ok` or `KEY fail`: "check:c""#,
+        ),
+        (
+            &["check:d OK"],
+            r#"line 1 isn't `KEY ok` or `KEY fail`: "check:d OK""#,
+        ),
+        (
+            &["check:zfs ok", ""],
+            r#"line 2 isn't `KEY ok` or `KEY fail`: """#,
+        ),
+        (
+            &["unit:x"],
+            r#"line 1 isn't `KEY ok` or `KEY fail`: "unit:x""#,
+        ),
+    ] {
+        assert_eq!(
+            beat(s, lines),
+            ping(
+                "/log",
+                &format!(
+                    "box-health's report doesn't read ({bad}), so this beat can't tell how the machine is"
+                )
+            ),
+            "{lines:?}"
+        );
+    }
+    assert_eq!(fs::read_to_string(s.join("zfs")).unwrap(), "1\n");
+}
+
+#[test]
+fn a_check_is_named_as_health_names_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = dir.path();
+    // A space in a check's name is the name's, not the line's end.
     assert_eq!(
         beat(
             s,
-            &[
-                "  check:a   ok  ",
-                "check:b ok then",
-                "check:c",
-                "check:d OK",
-                "noise",
-                "",
-                "unit:x"
-            ]
+            &["check:the web site ok", "check:a b fail", "check:c fail"]
         ),
-        ping(
-            "",
-            "healthy: 1 checks pass\nfailing for less: b c d\nfailed units (not counted): x"
-        )
+        ping("", "healthy: 1 checks pass\nfailing for less: a b, c")
+    );
+    assert_eq!(
+        beat(s, &["check:a b fail", "check:c fail"]),
+        ping("/fail", "failing for 2 beats or more: a b, c")
     );
     assert_eq!(
         beat(s, &["user-unit:music.service fail", "unit:a.service fail"]),
         ping(
             "",
-            "healthy: 0 checks pass\nfailed units (not counted): music.service a.service"
+            "healthy: 0 checks pass\nfailed units (not counted): music.service, a.service"
         )
     );
 }
@@ -186,7 +227,7 @@ fn a_streak_it_cant_keep_counts_as_down() {
             &run,
             &["check:.. fail", "check:a/b fail", "check:../escaped fail"]
         ),
-        ping("/fail", "failing for 2 beats or more: .. a/b ../escaped"),
+        ping("/fail", "failing for 2 beats or more: .., a/b, ../escaped"),
         "names that can't be a file's"
     );
     assert!(

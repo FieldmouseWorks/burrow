@@ -69,8 +69,11 @@ fn main() -> ExitCode {
             }
         },
         Ask::Compare(file, secs) => {
-            let before = match fs::read(&file) {
-                Ok(text) => parse(&String::from_utf8_lossy(&text)),
+            let before = match fs::read(&file)
+                .map_err(|e| e.to_string())
+                .and_then(|text| parse(&String::from_utf8_lossy(&text)))
+            {
+                Ok(before) => before,
                 Err(e) => {
                     let why = format!(
                         "the snapshot {} can't be read ({e}), so nothing can be compared with it\n",

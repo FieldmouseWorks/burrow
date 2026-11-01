@@ -6,7 +6,7 @@
 //! |------------------------------------------|---------------------------------------|
 //! | no check has failed `failAfter` beats    | success (a check failing for fewer is named in it: a blip) |
 //! | one has failed `failAfter` beats running | fail, naming it: alerts at once       |
-//! | HOST-health itself fails                 | log: no success, no change, every streak kept |
+//! | HOST-health itself fails, or says what isn't a report | log: no success, no change, every streak kept |
 //!
 //! Silence alerts too, once the check's period and grace run out: the
 //! machine is down, hung or cut off. Failed units ride along in the body for
@@ -20,6 +20,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
+use burrow_health::State;
 use serde::Deserialize;
 
 /// What modules/heartbeat.nix builds in.
@@ -57,10 +58,7 @@ impl Health {
     /// Runs HOST-health and keeps its whole report or none of it: a run that
     /// dies halfway can't say the machine is healthy.
     pub fn run(health: &Path) -> Health {
-        let name = health.file_name().map_or_else(
-            || health.display().to_string(),
-            |n| n.to_string_lossy().into_owned(),
-        );
+        let name = program(health);
         match Command::new(health)
             .stdin(Stdio::null())
             .stderr(Stdio::inherit())
@@ -73,6 +71,14 @@ impl Health {
             },
         }
     }
+}
+
+/// HOST-health's name, as the beat says it.
+fn program(health: &Path) -> String {
+    health.file_name().map_or_else(
+        || health.display().to_string(),
+        |n| n.to_string_lossy().into_owned(),
+    )
 }
 
 /// The status as the shell gives it: a signal's is 128 and its number.
@@ -94,28 +100,29 @@ pub struct Ping {
 /// The ping for what HOST-health said. `streaks` holds, per check, how many
 /// beats running it has failed (lost on a reboot, which is fine).
 pub fn verdict(cfg: &Config, health: &Health, streaks: &Path) -> Ping {
+    // HOST-health's own reading of its report (burrow_health::parse), so
+    // the two never disagree on what a line says.
     let report = match health {
-        Health::Failed(why) => {
+        Health::Failed(why) => Err(why.clone()),
+        Health::Said(report) => burrow_health::parse(report)
+            .map_err(|e| format!("{}'s report doesn't read ({e})", program(&cfg.health))),
+    };
+    let report = match report {
+        Ok(report) => report,
+        Err(why) => {
             return Ping {
                 suffix: "/log",
                 body: format!("{why}, so this beat can't tell how the machine is"),
             };
         }
-        Health::Said(report) => report,
     };
     let (mut pass, mut down, mut blips, mut units) = (0, Vec::new(), Vec::new(), Vec::new());
-    // HOST-health prints `check:NAME ok|fail` per check and `unit:NAME fail`
-    // or `user-unit:NAME fail` per failed unit.
-    for line in report.lines() {
-        let line = line.trim();
-        let (what, state) = line
-            .split_once(char::is_whitespace)
-            .map_or((line, ""), |(w, s)| (w, s.trim()));
-        if let Some(name) = what.strip_prefix("check:") {
+    for line in &report {
+        if let Some(name) = line.check() {
             if cfg.skip.contains(name) {
                 continue;
             }
-            if state == "ok" {
+            if line.state == State::Ok {
                 pass += 1;
                 forget(streaks, name);
             } else if failed_for(streaks, name).is_none_or(|n| n >= cfg.fail_after) {
@@ -124,10 +131,7 @@ pub fn verdict(cfg: &Config, health: &Health, streaks: &Path) -> Ping {
             } else {
                 blips.push(name);
             }
-        } else if let Some(unit) = what
-            .strip_prefix("unit:")
-            .or_else(|| what.strip_prefix("user-unit:"))
-        {
+        } else if let Some(unit) = line.unit() {
             units.push(unit);
         }
     }
@@ -142,17 +146,17 @@ pub fn verdict(cfg: &Config, health: &Health, streaks: &Path) -> Ping {
             format!(
                 "failing for {} beats or more: {}",
                 cfg.fail_after,
-                down.join(" ")
+                down.join(", ")
             ),
         )
     };
     if !blips.is_empty() {
-        body.push_str(&format!("\nfailing for less: {}", blips.join(" ")));
+        body.push_str(&format!("\nfailing for less: {}", blips.join(", ")));
     }
     if !units.is_empty() {
         body.push_str(&format!(
             "\nfailed units (not counted): {}",
-            units.join(" ")
+            units.join(", ")
         ));
     }
     Ping { suffix, body }

@@ -406,6 +406,19 @@ fn a_snapshot_it_cant_read_fails_the_compare() {
         )
     );
     assert_eq!(m.read("systemctl.log"), "");
+    // Nor one that isn't a report: half of one isn't taken as the whole.
+    let torn = m.path("torn");
+    fs::write(&torn, "check:dns ok\ncheck:web fa").unwrap();
+    let ran = m.run(&[], &["compare", torn.to_str().unwrap(), "0"]);
+    assert_eq!(ran.status.code(), Some(1), "{ran:?}");
+    assert_eq!(
+        stdout(&ran),
+        format!(
+            "the snapshot {} can't be read (line 2 isn't `KEY ok` or `KEY fail`: \"check:web fa\"), so nothing can be compared with it\n",
+            torn.display()
+        )
+    );
+    assert_eq!(m.read("systemctl.log"), "");
 }
 
 #[test]
