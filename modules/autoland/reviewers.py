@@ -4,9 +4,9 @@ snapshot of the PR and answers with its findings.
 A pass takes the snapshot and queues the review with its brief (`queue`);
 the reviewers' service (crates/burrow-review) runs the agents as a user of
 their own, with no GitHub access and no secrets paths in what they read;
-the next pass posts what came back (`post`), as the steward's App and
-marked as that reviewer's, and reads each reviewer's verdict back from
-those posts (`verdict`)."""
+the next pass posts what came back (`post`, burrow-upkeep's), as the
+steward's App and marked as that reviewer's, and reads each reviewer's
+verdict back from those posts (`verdict`)."""
 
 import fcntl
 import hashlib
@@ -520,163 +520,16 @@ def sweep(repos, live):
 
 # ---------------------------------------------------------------- posting
 
-QUOTED = r'"(?:[^"\\]|\\.)*"'
-
-
-def unquote(t):
-    """A name as git writes it: bare, or quoted with C-style escapes (the
-    octal ones bytes of UTF-8) when it holds unusual characters. None if
-    it's neither."""
-    if not t.startswith('"'):
-        return t
-    if not re.fullmatch(QUOTED, t):
-        return None
-    try:
-        return t[1:-1].encode("latin-1", "backslashreplace").decode("unicode_escape").encode("latin-1").decode("utf-8", "replace")
-    except (UnicodeError, ValueError):
-        return None
-
-
-def header_pairs(header):
-    """Every (old, new) a `diff --git` line can be read as. Git leaves
-    spaces bare, so "a/x b/y b/z" is two renames at once; the caller
-    checks them all."""
-    rest = header[len("diff --git "):]
-    pairs = []
-    for i, c in enumerate(rest):
-        if c == " ":
-            a, b = unquote(rest[:i]), unquote(rest[i + 1:])
-            if a and b and a.startswith("a/") and b.startswith("b/"):
-                pairs.append((a[2:], b[2:]))
-    return pairs
-
-
-def file_path(lines):
-    """For one file's part of a diff: the name it has on the new side (the
-    old one if it's deleted), or None if that's not certain."""
-    pairs = header_pairs(lines[0])
-    told = {}
-    for x in lines[1:]:
-        if x.startswith("@@"):
-            break
-        m = re.match(r"(rename|copy) (from|to) (.*)", x) or re.match(r"(---|\+\+\+) (?:(/dev/null)|(.*?))\t?$", x)
-        if not m:
-            continue
-        if m.group(2) == "/dev/null":
-            told[m.group(1)] = None
-            continue
-        name = unquote(m.group(3))
-        if m.group(1) in ("---", "+++"):
-            name = name[2:] if name and name[:2] in ("a/", "b/") else None
-        if name is None:
-            return None  # a name it can't read
-        told[m.group(1) + (m.group(2) if m.group(1) in ("rename", "copy") else "")] = name
-    same = {b for a, b in pairs if a == b}
-    return (told.get("+++") or told.get("renameto") or told.get("copyto")
-            or (told.get("---") if "+++" in told else None)
-            or (same.pop() if len(same) == 1 else pairs[0][1] if len(pairs) == 1 else None))
-
-
-def commentable(diff):
-    """{path: the new-side line numbers a review comment can go on} for
-    every file the diff changes (an empty set: a file with no new side)."""
-    files = {}
-    for part in re.split(r"(?m)^(?=diff --git )", diff):
-        lines = part.splitlines()
-        if not lines or not lines[0].startswith("diff --git "):
-            continue
-        path = file_path(lines)
-        if path is None:
-            continue
-        files[path] = set()
-        new, in_hunk = 0, False
-        for x in lines[1:]:
-            if x.startswith("@@"):
-                m = re.match(r"@@ -\d+(?:,\d+)? \+(\d+)", x)
-                new, in_hunk = (int(m.group(1)) if m else 0), True
-            elif in_hunk and x.startswith(("+", " ")):
-                files[path].add(new)
-                new += 1
-    return files
-
-
-def quiet(text):
-    """Model text goes out under the user's login: no @-pings from it, and
-    no markers."""
-    return re.sub(r"@(?=[\w-])", "@​", str(text)).replace("<!--", "&lt;!--")
-
-
 def post(repo, pr, r, answer, description):
     """The reviewer's answer as one review on the head, marked with the
-    description it was shown (its fingerprint, or None if that's unknown).
-    Returns "clean" or "findings". Raises ValueError if the answer isn't a review, and
-    RuntimeError if GitHub didn't take it (the same answer can go next pass),
+    description it was shown (its fingerprint, or None if that's unknown),
+    by burrow-upkeep (crates/burrow-upkeep/src/post.rs). Returns "clean" or
+    "findings". Raises ValueError if the answer isn't a review, RuntimeError
+    if GitHub didn't take it (the same answer can go next pass), and
     C.Unavailable if GitHub didn't answer."""
-    n, head = pr["number"], pr["headRefOid"]
-    # Anything but a list of findings is no review at all, never a clean one.
-    found = answer.get("findings") if isinstance(answer, dict) else None
-    text = ("path", "title", "body")
-    if (not isinstance(found, list) or not isinstance(answer.get("summary", ""), str)
-            or not all(isinstance(f, dict) and all(isinstance(f.get(k), str) for k in text) for f in found)):
-        raise ValueError(f"not a review: {json.dumps(answer)[:100]}")
-    diff = C.gh("api", "-H", "Accept: application/vnd.github.diff",
-                C.compare(repo, pr["baseRefName"], head))
-    # Read wrong, every finding would land as a note and the review count as
-    # clean.
-    if not isinstance(diff, str) or not diff.startswith("diff --git "):
-        raise RuntimeError("couldn't read the diff")
-    files = commentable(diff)
-    mark, who = finding(r), NAMES[r]
-    comments, whole_file, loose = [], [], []
-    for f in found:
-        sev = f.get("severity") if f.get("severity") in ("P0", "P1", "P2") else "P1"
-        msg = f"**{who} · {sev}** {quiet(f['title'])}\n\n{quiet(f['body'])}"
-        if isinstance(f.get("covers"), str) and f["covers"].strip():
-            msg += f"\n\n**A complete fix covers:** {quiet(f['covers'])}"
-        lines = files.get(f["path"])
-        if lines is None:
-            # Not a file this PR changes (a caller it breaks, say): still a
-            # finding, a thread on the PR's first changed file that says
-            # where. With none to go on, it's listed in the review.
-            on = next(iter(files), None)
-            if on is None:
-                loose.append(f"- `{quiet(f['path'])}`: " + msg.replace("\n\n", " "))
-            else:
-                whole_file.append(({"path": on, "body": f"{msg}\n\n(In `{quiet(f['path'])}`, which this PR doesn't change.)\n\n{mark}"},
-                                   f"- `{quiet(f['path'])}`: " + msg.replace("\n\n", " ")))
-            continue
-        if not lines:
-            # Changed, but with no new side to comment on (deleted, binary,
-            # a mode change): a thread on the whole file, still a finding.
-            whole_file.append(({"path": f["path"], "body": msg + "\n\n" + mark}, f"- `{quiet(f['path'])}`: " + msg.replace("\n\n", " ")))
-            continue
-        try:
-            want = int(f.get("line"))
-        except (TypeError, ValueError):
-            want = min(lines)
-        line = want if want in lines else min(lines, key=lambda x: abs(x - want))
-        comments.append({"path": f["path"], "line": line, "side": "RIGHT", "body": msg + "\n\n" + mark})
-    k = len(comments) + len(whole_file) + len(loose)
-    body = (f"**{who} review** of {head[:7]}: "
-            + (f"{k} finding{'s' * (k > 1)}. Fix or answer each, then resolve its thread." if k else "nothing found."))
-    if answer.get("summary"):
-        body += f"\n\n{quiet(answer['summary'])}"
-    if loose:
-        body += "\n\nFindings with no changed file to go on:\n" + "\n".join(loose)
-    if whole_file:
-        # In full here too: the threads below are separate calls, and a
-        # finding mustn't hang on one of them.
-        body += "\n\nFindings on whole files (each a thread too):\n" + "\n".join(text for _, text in whole_file)
-    body += f"\n\n<!-- {r}-review:v1 " + json.dumps({"commit_sha": head, "base": pr["baseRefName"], "findings": k, "description": description}) + " -->"
-    if not isinstance(C.write("api", "-X", "POST", f"repos/{repo}/pulls/{n}/reviews", "--input", "-",
-                              input=json.dumps({"commit_id": head, "event": "COMMENT", "body": body, "comments": comments})), dict):
-        raise RuntimeError("GitHub didn't take the review")
-    # A review can't hold file-level comments: they go on their own, after
-    # it, so a review GitHub turns away (posted again next pass) leaves none
-    # behind. Its body has them already, so one GitHub won't take loses nothing.
-    for c, _ in whole_file:
-        if not isinstance(C.write("api", "-X", "POST", f"repos/{repo}/pulls/{n}/comments", "--input", "-",
-                                  input=json.dumps({**c, "commit_id": head, "subject_type": "file"}), check=False), dict):
-            log(f"{repo}#{n}: couldn't post {who}'s finding on {c['path']}")
-    log(f"{repo}#{n}: {who}'s review posted, {k} finding(s)")
-    return "findings" if k else "clean"
+    out = C.upkeep("post", repo, input=json.dumps({
+        "number": pr["number"], "head": pr["headRefOid"], "base": pr["baseRefName"], "reviewer": r, "name": NAMES[r],
+        "answer": answer, "description": description}))
+    if out["outcome"] in ("clean", "findings"):
+        return out["outcome"]
+    raise {"notAReview": ValueError, "refused": RuntimeError, "unanswered": C.Unavailable}[out["outcome"]](out["why"])
