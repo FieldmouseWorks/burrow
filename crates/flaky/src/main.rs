@@ -37,7 +37,7 @@ struct Usage(String);
 fn go(args: &[String]) -> Result<i32, Usage> {
     let cache = default_cache();
     let cache = cache.as_deref();
-    let mut gh = Gh;
+    let mut gh = Gh::default();
     let fail = |e: String| {
         eprintln!("flaky: {e}");
         1

@@ -50,9 +50,9 @@ REVIEW, FAKES = sys.argv[3], sys.argv[4]
 # (argv[6], crates/burrow-upkeep/src).
 UPKEEP, UPKEEP_SRC = sys.argv[5], sys.argv[6]
 # What the passes here run in its place (upkeeping.py runs the real one): it
-# notes how it was run (UPKEEP_RAN), with what `branches` read on its stdin
-# last, and finds nothing due, stuck or wanted. Its `token` is the real
-# one's, on the config upkeep_config writes (UPKEEP_TOKEN).
+# notes how it was run (UPKEEP_RAN), with what `branches` and `hooks` read on
+# its stdin last, and finds nothing due, stuck or wanted. Its `token` is the
+# real one's, on the config upkeep_config writes (UPKEEP_TOKEN).
 UPKEEP_RAN, UPKEEP_TOKEN = f"{tmp}/upkeep-ran", f"{tmp}/upkeep-token.json"
 with open(f"{tmp}/upkeep-none", "w") as f:
     f.write(f"""#!{sys.executable}
@@ -60,8 +60,8 @@ import json, os, sys
 if sys.argv[2] == "token":
     os.execv({UPKEEP!r}, [{UPKEEP!r}, {UPKEEP_TOKEN!r}, *sys.argv[2:]])
 with open({UPKEEP_RAN!r}, "a") as f:
-    f.write(json.dumps(sys.argv[2:] + ([json.load(sys.stdin)] if sys.argv[2] == "branches" else [])) + "\\n")
-print(json.dumps({{"due": False, "failed": [], "limited": None}} if sys.argv[2] == "settle" else
+    f.write(json.dumps(sys.argv[2:] + ([json.load(sys.stdin)] if sys.argv[2] in ("branches", "hooks") else [])) + "\\n")
+print(json.dumps({{"failed": [], "limited": None}} if sys.argv[2] in ("settle", "hooks") else
                  {{"stuck": [], "wake": None, "failed": [], "limited": None, "searched": False, "jobs": []}}))
 """)
 os.chmod(f"{tmp}/upkeep-none", 0o755)
@@ -153,7 +153,7 @@ with open(sys.argv[2]) as f:
 with open(f"{tmp}/config.json", "w") as f:
     json.dump({
         "owners": ["sam"], "exclude": [], "context": "review-settled", "rulesets": True,
-        "app": {"id": 7, "slug": "steward"}, "api": "http://127.0.0.1:9",
+        "app": {"id": 7, "slug": "steward"},
         "baselineJobs": False, "baselinePerPass": 1, "authors": ["sam"], "bots": ["dependabot", "renovate", "workers"], "machinery": None,
         "stateDir": f"{tmp}/state", "snapDir": f"{tmp}/trees", "majorKey": f"{tmp}/sweep.key", "projectsDir": f"{tmp}/none", "jobsDir": f"{tmp}/jobs", "renovateEmail": "bot@renovateapp.com", "proj": "proj", "jobTimeout": 60, "jobIdle": 20, "proofTimeout": 180, "heavy": None, "owner": "Sam",
         "labels": {"hold": "hold", "owner": "needs-owner", "first": "first", "waiting": {"releaseAge": "waiting: release age", "proofSlot": "waiting: proof slot", "reviewer": "waiting: reviewer"}}, "notify": {"repo": "", "assignee": "", "label": "autoland"}, "inbox": {"enable": False, "label": "claude", "unstickLabel": "unstick", "authors": ["sam"]},
@@ -167,7 +167,6 @@ with open(f"{tmp}/config.json", "w") as f:
         "trainContext": "conary/train",
         "train": {"cn": f"{tmp}/cn", "env": {"CONARY_LEDGER": f"{tmp}/ledger", "CONARY_ANCHOR_REPO": "sam/homelab"}},
         "repos": {}, "pipelineRepos": ["Sam/Pipe"], "leadRepos": ["Sam/Lead"],
-        "webhook": {"url": "https://example.org/burrow/hook", "events": ["check_suite", "push"]},
         "kick": f"http://127.0.0.1:{kicks.server_port}/kick/autoland",
         "watch": {"kick": f"http://127.0.0.1:{kicks.server_port}/kick/watchdog", "escalated": f"{tmp}/escalated.json",
                   "renovateSweep": True},
@@ -213,7 +212,8 @@ def upkeep_config(path=f"{tmp}/upkeep.json", **over):
     config has it (C.CFG["upkeep"])."""
     with open(path, "w") as f:
         json.dump({"stateDir": C.STATE, "proj": f"{tmp}/upkeep-bin/proj", "projectsDir": C.CFG["projectsDir"],
-                   "authors": C.CFG["authors"], "bots": C.CFG["bots"], "app": C.CFG["app"], "api": C.API,
+                   "authors": C.CFG["authors"], "bots": C.CFG["bots"], "app": C.CFG["app"], "api": "http://127.0.0.1:9",
+                   "webhook": {"url": "https://example.org/burrow/hook", "events": ["check_suite", "push"]},
                    "jobTimeout": C.CFG["jobTimeout"], "renovate": C.CFG["renovate"],
                    "dashboard": {"title": "Dependency Dashboard", "waitDays": 4, "errorDays": 1, "renovateKick": None, "renovateRuns": None},
                    "flaky": {"jobTimeout": 240},
@@ -472,7 +472,7 @@ def fresh_pr_state():
         os.makedirs(os.path.join(f"{tmp}/state", d))
 
 
-REAL = {"job": C.job, "stop_job": C.stop_job, "forget_issues": C.forget_issues, "app_hook": R.app_hook,
+REAL = {"job": C.job, "stop_job": C.stop_job, "forget_issues": C.forget_issues,
         "onto": H.onto}  # the steward's own, for the checks of what it runs
 # What H.onto says: the base's tip a PR's merge would change nothing on, by
 # number, or what it raises; any other's changes something on TIP's tip.
@@ -487,14 +487,13 @@ def onto(repo, pr):
 
 
 def stand_in():
-    """gh, Claude jobs, the queue, the posting, the App's webhook and what a
-    merge would change (every merge changes something unless ALREADY says),
-    for handle() and the passes."""
+    """gh, Claude jobs, the queue, the posting and what a merge would change
+    (every merge changes something unless ALREADY says), for handle() and
+    the passes."""
     H.onto = onto
     C.gh = gh_stub
     C.write = write
     C.job = job
-    R.app_hook = lambda: None
     C.job_state = lambda jid: STATES.get(jid, "running")
     C.stop_job = stop_job
     C.forget_issues = FORGOT.append

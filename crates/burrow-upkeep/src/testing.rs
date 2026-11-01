@@ -8,7 +8,9 @@ use std::path::Path;
 use burrow_github::{Api, Failed, Response};
 use serde_json::{Value, json};
 
-use crate::config::{App, Branches, Config, Dashboard, Flaky, Labels, Rules, Settle, Waiting};
+use crate::config::{
+    App, Branches, Config, Dashboard, Flaky, Labels, Rules, Settle, Waiting, Webhook,
+};
 use crate::pass::{Jobs, Out, Pass};
 
 pub const T: f64 = 1_800_000_000.0;
@@ -28,6 +30,10 @@ pub fn config(dir: &Path) -> Config {
             id: 7,
         },
         api: "http://127.0.0.1:9".into(),
+        webhook: Webhook {
+            url: "https://example.org/burrow/hook".into(),
+            events: vec!["check_suite".into(), "push".into()],
+        },
         job_timeout: 60,
         renovate: None,
         dashboard: Some(Dashboard {

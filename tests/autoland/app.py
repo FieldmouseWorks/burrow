@@ -1,8 +1,11 @@
 """The steward as its GitHub App: the tokens it mints from the App's key,
+the hooks a full pass sees to as each owner's installation and as the App,
 and what counts as the App's own word (its status, Renovate's)."""
 
 import base64
+import contextlib
 import http.server
+import io
 import json
 import os
 import subprocess
@@ -21,8 +24,8 @@ sh("openssl", "genpkey", "-algorithm", "RSA", "-pkeyopt", "rsa_keygen_bits:2048"
 sh("openssl", "pkey", "-in", KEY, "-pubout", "-out", PUB)
 
 # GitHub's API, standing in: the App's installations (sam spelled as GitHub
-# has it), and a token for each, numbered.
-SEEN, MINTED = [], []
+# has it), a token for each, numbered, and the App's own webhook.
+SEEN, MINTED, APP_HOOK = [], [], []
 API = {"down": False, "page2": True}
 
 
@@ -57,13 +60,20 @@ class GitHub(http.server.BaseHTTPRequestHandler):
             return self.answer(201, {"token": f"ghs_minted{len(MINTED)}", "expires_at": at})
         self.answer(404, {"message": "Not Found"})
 
+    def do_PATCH(self):
+        SEEN.append(("PATCH", self.path, self.headers.get("Authorization")))
+        if self.path == "/app/hook/config":
+            APP_HOOK.append(json.loads(self.rfile.read(int(self.headers["Content-Length"]))))
+            return self.answer(200, {})
+        self.answer(404, {"message": "Not Found"})
+
     def log_message(self, *a):
         pass
 
 
 api = http.server.HTTPServer(("127.0.0.1", 0), GitHub)
 threading.Thread(target=api.serve_forever, daemon=True).start()
-C.API = f"http://127.0.0.1:{api.server_port}"
+API_URL = f"http://127.0.0.1:{api.server_port}"
 
 
 def unb64(s):
@@ -74,7 +84,7 @@ def unb64(s):
 # stand-in here): the installation is looked up as the App, with a JWT its
 # key signed, saying it's App 7, for at most ten minutes.
 kept_upkeep = C.CFG["upkeep"]
-C.CFG["upkeep"] = upkeep_config(f"{tmp}/upkeep-app.json", api=C.API)
+C.CFG["upkeep"] = upkeep_config(f"{tmp}/upkeep-app.json", api=API_URL)
 assert REAL_TOKEN("sam") == "ghs_minted1"
 assert MINTED == ["/app/installations/11/access_tokens"], MINTED
 # Sam's installation is on the first page, so that's the one read.
@@ -139,6 +149,71 @@ except RuntimeError as e:
     assert "the App's key" in str(e) and not isinstance(e, C.Unavailable), e
 os.rename(KEY + ".gone", KEY)
 C._tokens.clear()
+
+# A full pass's hooks, by burrow-upkeep (the real one, on the stand-in here,
+# and a gh that notes as whom each call went): eve's project, which the pass
+# doesn't see to, gets its hook as eve's installation; a repo of sam's no
+# longer seen to has its hook taken off as sam's; the App's own is set as
+# the App. Each owner's token is minted for it, and kept nowhere.
+GH_CALLS = f"{tmp}/app-gh-calls"
+os.makedirs(f"{tmp}/app-bin")
+with open(f"{tmp}/app-bin/gh", "w") as f:
+    f.write(f"""#!{sys.executable}
+import json, os, sys
+a = sys.argv[1:]
+method, path = a[3], a[4]
+if "--input" in a:
+    sys.stdin.read()
+with open({GH_CALLS!r}, "a") as f:
+    f.write(json.dumps([method, path, os.environ.get("GH_TOKEN")]) + "\\n")
+status, body = {{("GET", "repos/eve/p/hooks?per_page=100"): (200, []), ("POST", "repos/eve/p/hooks"): (201, {{"id": 5}}),
+                ("GET", "repos/sam/old"): (200, {{"full_name": "sam/old"}}),
+                ("DELETE", "repos/sam/old/hooks/7"): (204, None)}}.get((method, path), (404, {{"message": "Not Found"}}))
+sys.stdout.write(f"HTTP/1.1 {{status}} X\\r\\n\\r\\n" + ("" if body is None else json.dumps(body)))
+sys.exit(0 if status < 300 else 1)
+""")
+os.chmod(f"{tmp}/app-bin/gh", 0o755)
+kept_path, kept_projects = os.environ["PATH"], C.projects
+os.environ["PATH"] = f"{tmp}/app-bin:{kept_path}"
+C.projects = lambda: iter([("p", "eve/p"), ("r", "sam/r")])
+C.save("repo-sam_old.json", {"hook": "h", "hookId": 7, "other": 1})
+MINTED.clear()
+SEEN.clear()
+C.NOW = T
+R.hooks([{"repo": "sam/r"}])
+calls = [json.loads(x) for x in open(GH_CALLS)]
+# Each token by the installation it was minted on: eve's 12, sam's 11.
+whose = {f"ghs_minted{k + 1}": path.split("/")[3] for k, path in enumerate(MINTED)}
+assert [(m, p, whose.get(t)) for m, p, t in calls] == [
+    ("GET", "repos/eve/p/hooks?per_page=100", "12"), ("POST", "repos/eve/p/hooks", "12"),
+    ("GET", "repos/sam/old", "11"), ("DELETE", "repos/sam/old/hooks/7", "11")], (calls, MINTED)
+assert APP_HOOK == [{"url": "https://example.org/burrow/hook", "content_type": "json", "secret": "hook-secret",
+                     "insecure_ssl": "0"}], APP_HOOK
+assert [m for m, p, _ in SEEN if p == "/app/hook/config"] == ["PATCH"], SEEN
+assert C.load("repo-eve_p.json", None)["hookId"] == 5 and C.load("repo-sam_old.json", None) == {"other": 1}
+for root, _, files in os.walk(tmp):
+    for name in files:
+        with open(os.path.join(root, name), "rb") as f:
+            assert b"ghs_minted" not in f.read() or name == "app-gh-calls", os.path.join(root, name)
+# A status run sees to no hooks.
+open(GH_CALLS, "w").close()
+S.DRY = C.DRY = R.DRY = True
+R.hooks([])
+S.DRY = C.DRY = R.DRY = False
+assert open(GH_CALLS).read() == ""
+# What wouldn't save is logged: the next full pass tries it again.
+EVE = f"{tmp}/state/repo-eve_p.json"
+os.remove(EVE)
+os.mkdir(EVE)
+out = io.StringIO()
+with contextlib.redirect_stdout(out):
+    R.hooks([{"repo": "sam/r"}])
+assert f"the hooks: {EVE}: " in out.getvalue(), out.getvalue()
+os.rmdir(EVE)
+os.environ["PATH"], C.projects = kept_path, kept_projects
+for x in os.listdir(f"{tmp}/state"):
+    if x.startswith(("repo-eve_p.json", "repo-sam_old.json", "app-hook.json")):
+        os.remove(f"{tmp}/state/{x}")
 C.CFG["upkeep"] = kept_upkeep
 
 # The steward's status is the one its App posted. Anyone who can push can
@@ -237,16 +312,15 @@ def pass_gh(*a, **k):
                                     "pullRequests": {"pageInfo": {"hasNextPage": False}, "nodes": []}}}}
 
 
-kept = (S.R.discover, S.R.settle_repo, S.R.publish, S.R.unhook_gone, S.R.hook_projects, C.gh, sys.argv)
+kept = (S.R.discover, S.R.settle_repo, S.R.publish, C.gh, sys.argv)
 S.R.discover = lambda: [{"repo": "sam/r", "default": "main", "private": False},
                         {"repo": "eve/p", "default": "main", "private": False}]
 S.R.settle_repo = lambda r, known: False
-S.R.publish = S.R.unhook_gone = lambda *a: None
-S.R.hook_projects = lambda repos: []
+S.R.publish = lambda *a: None
 C.gh = pass_gh
 sys.argv = ["steward", "kick", "sam/r", "eve/p"]
 S.main()
-(S.R.discover, S.R.settle_repo, S.R.publish, S.R.unhook_gone, S.R.hook_projects, C.gh, sys.argv) = kept
+(S.R.discover, S.R.settle_repo, S.R.publish, C.gh, sys.argv) = kept
 assert FOR == [("sam", "sam"), ("eve", "eve")], FOR
 
 # The steward merges now, the checked head only, or not at all: nothing is

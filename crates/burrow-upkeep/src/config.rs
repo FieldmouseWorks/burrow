@@ -27,6 +27,8 @@ pub struct Config {
     pub app: App,
     /// GitHub's REST API, where the App's tokens are minted (token.rs).
     pub api: String,
+    /// The webhooks to burrow-events (hook.rs).
+    pub webhook: Webhook,
     /// How long a Claude job may run, in minutes, unless its part says
     /// otherwise: a dashboard's job's.
     pub job_timeout: u64,
@@ -51,6 +53,15 @@ pub struct Config {
 pub struct App {
     pub slug: String,
     pub id: u64,
+}
+
+/// Where every webhook of the steward's sends, and what a repo's sends: the
+/// events burrow-events' handlers take.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Webhook {
+    pub url: String,
+    pub events: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]

@@ -16,12 +16,9 @@ import waits
 stand_in()
 MIN = 60
 published = []
-kept_fns = (S.R.discover, S.R.settle_repo, S.R.publish, S.open_prs, S.R.unhook_gone, S.R.hook_projects,
-            S.R.watch_default, S.branches, S.V.snap_name)
+kept_fns = (S.R.discover, S.R.settle_repo, S.R.publish, S.open_prs, S.R.watch_default, S.branches, S.V.snap_name)
 S.R.settle_repo = lambda r, known: False
 S.R.publish = published.append
-S.R.unhook_gone = lambda repos: None
-S.R.hook_projects = lambda repos: []
 REPOS = ["sam/r", "sam/q"]
 S.R.discover = lambda: [{"repo": r, "default": "main"} for r in REPOS]
 OPEN = {}  # each repo's open PRs, or None: reading them fails
@@ -206,21 +203,21 @@ OPEN["sam/r"][0] = pr("sam/r", 5, threads=[False])  # a new phase, had the pass 
 failing = run(1400)
 assert failing["sam/r#5"] == items["sam/r#5"] and failing["sam/r#7"] == items["sam/r#7"], failing
 assert failing["sam/r"]["phase"] == waits.FAILS and failing["sam/r"]["since"] == T + 1400, failing
-S.R.watch_default = kept_fns[6]
+S.R.watch_default = kept_fns[4]
 # Between them: what it saw to is as it noted, the rest as they were.
-S.V.snap_name = lambda name, *a: broken() if name.endswith("-7.json") else kept_fns[8](name, *a)
+S.V.snap_name = lambda name, *a: broken() if name.endswith("-7.json") else kept_fns[6](name, *a)
 OPEN["sam/r"][1] = pr("sam/r", 7)  # off hold, had the pass seen to it
 failing = run(1500)
 assert failing["sam/r#5"]["phase"] != items["sam/r#5"]["phase"] and failing["sam/r#5"]["since"] == T + 1500, failing
 assert failing["sam/r#7"] == items["sam/r#7"] and failing["sam/r"]["since"] == T + 1400, failing
-S.V.snap_name = kept_fns[8]
+S.V.snap_name = kept_fns[6]
 # After them: all as noted, and a PR that's closed is gone.
 S.branches = broken
 OPEN["sam/r"] = OPEN["sam/r"][:1]
 failing = run(1600, "sam/r")
 assert sorted(failing) == ["sam/q#2", "sam/r", "sam/r#5"] and failing["sam/r#5"]["since"] == T + 1500, failing
 assert failing["sam/r"]["since"] == T + 1400, failing
-S.branches = kept_fns[7]
+S.branches = kept_fns[5]
 assert sorted(run(1700)) == ["sam/q#2", "sam/r#5"]
 print("waits failing: ok")
 
@@ -275,7 +272,6 @@ assert run(460, "sam/r")["sam/r#9"]["kick"] == "autoland/sam/r"
 S.CFG["watch"]["renovateSweep"] = True
 print("waits on Renovate: ok")
 
-(S.R.discover, S.R.settle_repo, S.R.publish, S.open_prs, S.R.unhook_gone, S.R.hook_projects,
- S.R.watch_default, S.branches, S.V.snap_name) = kept_fns
+S.R.discover, S.R.settle_repo, S.R.publish, S.open_prs, S.R.watch_default, S.branches, S.V.snap_name = kept_fns
 OPEN.clear()
 fresh_pr_state()

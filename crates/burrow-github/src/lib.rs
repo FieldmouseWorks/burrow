@@ -258,8 +258,14 @@ pub fn encode(value: &str) -> String {
         .collect()
 }
 
-/// gh api, with -i so the status and headers come back too.
-pub struct Gh;
+/// gh api, with -i so the status and headers come back too: as the login
+/// it's run with, or with `token` when it's given one.
+#[derive(Default)]
+pub struct Gh {
+    /// What every call goes with (GH_TOKEN) in place of that login: an
+    /// App's installation token a program minted itself.
+    pub token: Option<String>,
+}
 
 impl Api for Gh {
     fn request(
@@ -269,16 +275,25 @@ impl Api for Gh {
         body: Option<&Value>,
         etag: Option<&str>,
     ) -> Result<Response, Failed> {
-        gh_api(method, path, body, etag, None)
+        gh_api(self.token.as_deref(), method, path, body, etag, None)
     }
 
     fn graphql(&mut self, owner: &str, body: &Value) -> Result<Response, Failed> {
-        gh_api("POST", "graphql", Some(body), None, Some(owner))
+        gh_api(
+            self.token.as_deref(),
+            "POST",
+            "graphql",
+            Some(body),
+            None,
+            Some(owner),
+        )
     }
 }
 
-/// `gh api -i`, as `owner`'s account when the call names none.
+/// `gh api -i`, with `token` when there is one, else as `owner`'s account
+/// when the call names none.
 fn gh_api(
+    token: Option<&str>,
     method: &str,
     path: &str,
     body: Option<&Value>,
@@ -287,7 +302,9 @@ fn gh_api(
 ) -> Result<Response, Failed> {
     let mut cmd = Command::new("gh");
     cmd.args(["api", "-i", "-X", method, path]);
-    if let Some(owner) = owner {
+    if let Some(t) = token {
+        cmd.env("GH_TOKEN", t);
+    } else if let Some(owner) = owner {
         // gh-token goes by GH_REPO and the checkout's remotes before this
         // (account.rs), and they're not what the call is about.
         cmd.env("GH_TOKEN_OWNER", owner)

@@ -45,7 +45,7 @@ fn main() -> ExitCode {
         run: &Commands,
     };
     match rest.split_first() {
-        None => match pass(&mut Gh, &cfg, &mut |q| m.answer(q), &utc(now)) {
+        None => match pass(&mut Gh::default(), &cfg, &mut |q| m.answer(q), &utc(now)) {
             Ok(done) => {
                 for n in &done.answered {
                     eprintln!("answered {}#{n}", cfg.repo);
