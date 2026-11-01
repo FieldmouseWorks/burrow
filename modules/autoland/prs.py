@@ -3,9 +3,11 @@ about one: how its CI stands, its `review-settled` status, its waiting
 label, the merge."""
 
 import re
+import subprocess
 import urllib.parse
 
 import common as C
+import reviewers as V
 import train as T
 from common import CFG, CONTEXT, DRY, log
 
@@ -464,6 +466,33 @@ def rules(repo, base, none, absent, *args):
             return none
         log(f"{repo}: the rules on {base}: {e}")
         return None
+
+
+def onto(repo, pr):
+    """The base's tip as GitHub has it now, and whether merging the PR onto
+    it would change nothing: its head merged into that tip, as GitHub merges
+    it, has the tip's own tree. Then what it changes landed some other way
+    (another PR made the same change, red main's fixes most often), and its
+    merge would only put an empty commit on the base. Read from the
+    steward's mirror, fetched just now, so the tip is the one GitHub would
+    merge it onto. A merge that conflicts, or a PR that has moved past the
+    head this pass read (GitHub refuses that head's merge), changes
+    something. Raises when git can't say; (None, False) in a dry run."""
+    if DRY:
+        return None, False
+    n, head, base = pr["number"], pr["headRefOid"], pr["baseRefName"]
+    mirror = V.fetch(repo, f"+refs/pull/{n}/head:refs/pr/{n}", f"+refs/heads/{base}:refs/base/{base}")
+    tip = V.git("-C", mirror, "rev-parse", f"refs/base/{base}").decode().strip()
+    if V.git("-C", mirror, "rev-parse", f"refs/pr/{n}").decode().strip() != head:
+        return tip, False
+    merged = subprocess.run(["git", "-C", mirror, "merge-tree", "--write-tree", "--no-messages", tip, head],
+                            capture_output=True, text=True)
+    # 1 is a merge that conflicts: it would change the base, once resolved.
+    if merged.returncode == 1:
+        return tip, False
+    if merged.returncode:
+        raise RuntimeError(f"git merge-tree: {merged.stderr.strip()[-300:]}")
+    return tip, merged.stdout.split()[0] == V.git("-C", mirror, "rev-parse", f"{tip}^{{tree}}").decode().strip()
 
 
 def land(repo, pr, repo_info):

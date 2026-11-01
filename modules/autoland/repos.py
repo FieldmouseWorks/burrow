@@ -16,7 +16,7 @@ import reviewers as V
 import train as T
 from common import CFG, CONTEXT, DRY, load, log, repo_cfg, save
 from prs import PROOF_SLOT, RELEASE_AGE, REVIEWER
-from tasks import RED_BRANCH, red_default_task
+from tasks import RED_BRANCH, red_default_task, red_fix
 
 # What a project's state says when GitHub had no such repo at its last look.
 GONE = "gone"
@@ -436,76 +436,83 @@ def watch_default(r, info, prs, digest):
     built on it. With no merge queue (docs/repo-baseline.md), this is how
     two PRs that broke it together get undone: a Claude job finds the
     cause and opens a PR from RED_BRANCH that reverts or fixes it, which
-    lands like any other. Nothing more while that job works or its PR is
+    lands like any other. Nothing more while that job works or a fix is
     open; a second job if it's still red after (seen on two passes), then
-    the owner. Returns the PRs this pass mustn't merge: a fix PR made
-    obsolete by the branch going green some other way."""
-    repo = r["repo"]
+    the owner. A fix lands only while CI says the branch is red: while it
+    says nothing yet (the branch moved on, a fix landed, say, and its CI is
+    running) a fix waits, and once it's green again a fix isn't needed and
+    is closed. Returns the fixes this pass mustn't merge, each with why;
+    step.handle holds the rest too if the branch has moved on since this
+    read it (a merge earlier in this very pass)."""
+    repo, default = r["repo"], r["default"]
     target = (info.get("defaultBranchRef") or {}).get("target") or {}
     sha, state = target.get("oid"), (target.get("statusCheckRollup") or {}).get("state")
     key = f"repo-{repo.replace('/', '_')}.json"
     st = load(key, {})
     red = st.get("red") or {}
     working = red.get("job") and C.job_state(red["job"]) in (None, "queued", "running")
-    # Its PR: the one its task names, from the steward's own authors to this
-    # branch. Anyone can open a PR from a branch of that name on a fork, and
-    # that one is nothing of the steward's.
-    fix = RED_BRANCH + (red.get("at") or "")[:12]
-    open_fix = [pr for pr in prs if red.get("at") and pr["headRefName"] == fix
-                and pr["baseRefName"] == r["default"] and C.acted_on(pr)]
-    if state not in ("FAILURE", "ERROR"):
-        if not red or state != "SUCCESS":
-            return
+    fixes = [pr for pr in prs if red_fix(pr, default)]
+    if state not in ("FAILURE", "ERROR", "SUCCESS"):
+        # CI on the branch hasn't said (it's running, or has nothing on the
+        # tip): it may have gone green since it was red. A fix waits for it,
+        # or one could land on top of the fix that made it green, and a
+        # revert would undo that.
+        return {pr["number"]: f"Waiting for CI on {default}: it lands only while {default} is red" for pr in fixes}
+    if state == "SUCCESS":
+        if not (red or fixes):
+            return {}
+        gone = f"Not needed: {default} is green again without it"
         # Green while its job still works: wait for the job to end, so a PR
-        # it opens can't outlive the red it was for, and leave alone one it
-        # has opened. Once it has ended, its PR, if one is open, isn't needed.
+        # it opens can't outlive the red it was for, and leave the fixes
+        # alone till then. Once it has ended, no fix is needed.
         if working:
-            return {pr["number"] for pr in open_fix}
+            return {pr["number"]: gone for pr in fixes}
         # Ended with no PR to show: as when red, seen on two passes before
         # the red is forgotten, since this one may have read the PRs just
         # before the job opened its own.
-        if not open_fix and red.get("job") and not red.get("ended"):
+        if not fixes and red.get("job") and not red.get("ended"):
             red["ended"] = True
             save(key, st)
             C.wake(repo, C.NOW + 60)  # ends: the second look, once
-            return set()
+            return {}
         unclosed = []
-        for pr in open_fix:
-            log(f"{repo}: closing #{pr['number']}, {r['default']} is green again without it")
+        for pr in fixes:
+            log(f"{repo}: closing #{pr['number']}, {default} is green again without it")
             if C.write("pr", "close", str(pr["number"]), "-R", repo, "--comment",
-                       f"{r['default']} is green again at {sha[:7]}, so this fix for {red['at'][:7]} isn't needed.",
-                       check=False) is None:
+                       f"{default} is green again at {sha[:7]}, so this fix for {pr['headRefName'].removeprefix(RED_BRANCH)[:7]} "
+                       "isn't needed.", check=False) is None:
                 unclosed.append(pr)
-        # One GitHub wouldn't close is still known by the red it was for, and
-        # tried again soon.
+        # One GitHub wouldn't close is still known by its branch, and tried
+        # again soon.
         if unclosed:
             C.wake(repo, C.NOW + 5 * 60)  # ends: the fix PR's own wait is overdue at its deadline (waits.py)
-        else:
-            log(f"{repo}: {r['default']} is green again")
+        elif red:
+            log(f"{repo}: {default} is green again")
             st.pop("red")
             save(key, st)
-        return {pr["number"] for pr in open_fix}
-    line = f"{repo} {r['default']} at {sha[:7]}"
-    if working or open_fix:
-        return
+        return {pr["number"]: gone for pr in fixes}
+    line = f"{repo} {default} at {sha[:7]}"
+    if working or fixes:
+        return {}
     # Its job ended with no PR to show. Seen on two passes: this one may
     # have read the PRs just before the job opened its own.
     if red.get("job") and not red.get("ended"):
         red["ended"] = True
         save(key, st)
         C.wake(repo, C.NOW + 60)  # ends: the second look, once
-        return
+        return {}
     if red.get("jobs", 0) >= 2:
         digest.append(("The default branch is red", line, "two Claude jobs ended with it still red"))
-        return
-    jid = C.job(repo, red_default_task(repo, r["default"], sha))
+        return {}
+    jid = C.job(repo, red_default_task(repo, default, sha))
     if not jid:
         digest.append(("Couldn't start a Claude job to fix it", line, "the default branch is red"))
         C.wake(repo, C.NOW + 5 * 60)  # ends: listed on the stuck issue
-        return
-    log(f"{repo}: {r['default']} is red at {sha[:7]}; a Claude job {jid} fixes it")
-    st["red"] = {"job": jid, "jobs": red.get("jobs", 0) + 1, "at": sha}
+        return {}
+    log(f"{repo}: {default} is red at {sha[:7]}; a Claude job {jid} fixes it")
+    st["red"] = {"job": jid, "jobs": red.get("jobs", 0) + 1}
     save(key, st)
+    return {}
 
 
 def hook(repo, st, due):

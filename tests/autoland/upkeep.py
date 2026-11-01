@@ -585,33 +585,49 @@ C.app_call, C.app_jwt = kept_app
 print("the App's webhook: ok")
 
 # A red default branch gets one Claude job, and nothing more while it works
-# or its PR is open; a second if it ends with the branch still red, then the
+# or a fix is open; a second if it ends with the branch still red, then the
 # owner. Green again, it starts over.
 def default(state, sha="c" * 40):
     return {"defaultBranchRef": {"name": "main", "target": {"oid": sha, "statusCheckRollup": {"state": state}}}}
 
 
+GONE = "Not needed: main is green again without it"
+WAIT = "Waiting for CI on main: it lands only while main is red"
 repo_r = {"repo": "sam/r", "private": False, "default": "main"}
 JOBS.clear()
 mine = []
-R.watch_default(repo_r, default("SUCCESS"), [], mine)
-R.watch_default(repo_r, default("PENDING"), [], mine)
-R.watch_default(repo_r, {}, [], mine)
+assert R.watch_default(repo_r, default("SUCCESS"), [], mine) == {}
+assert R.watch_default(repo_r, default("PENDING"), [], mine) == {}
+assert R.watch_default(repo_r, {}, [], mine) == {}
 assert JOBS == [] and mine == []
-R.watch_default(repo_r, default("FAILURE"), [], mine)
+assert R.watch_default(repo_r, default("FAILURE"), [], mine) == {}
 assert len(JOBS) == 1 and "is red: CI failed on " + "c" * 40 in JOBS[0] and "autoland/red-cccccccccccc" in JOBS[0], JOBS
 assert "gh run list --commit " + "c" * 40 in JOBS[0] and "issue and comment" in JOBS[0], JOBS[0]
 assert "gh run list --branch main" in JOBS[0] and "with no PR" in JOBS[0], JOBS[0]
-R.watch_default(repo_r, default("FAILURE"), [], mine)
+# It's told to look again before it pushes: main may have moved on and gone
+# green, someone may have opened a fix, or the same fix may have landed.
+assert "Just before you push, check both again" in JOBS[0] and "git diff origin/main is empty" in JOBS[0], JOBS[0]
+assert "starts autoland/red-" in JOBS[0] and "if GitHub has one of that name already" in JOBS[0], JOBS[0]
+# A PR it counts as a fix under way is one the watcher counts: ready, from
+# the repo itself, by one of the steward's authors. Anyone can open one
+# from a fork, and it mustn't stop the job.
+assert "isDraft,isCrossRepository,author" in JOBS[0] and "opened by one of sam, app/dependabot, app/renovate, app/workers" in JOBS[0], JOBS[0]
+assert "One from a fork, a draft, or anyone else's doesn't count" in JOBS[0], JOBS[0]
+assert R.watch_default(repo_r, default("FAILURE"), [], mine) == {}
 assert len(JOBS) == 1, JOBS  # still running
 STATES["job-1"] = "done"
-R.watch_default(repo_r, default("FAILURE"), [mkpr(branch="autoland/red-cccccccccccc")], mine)
+# Red, a fix of its own lands: nothing holds it.
+assert R.watch_default(repo_r, default("FAILURE"), [mkpr(branch="autoland/red-cccccccccccc")], mine) == {}
 assert len(JOBS) == 1, JOBS  # its PR is open
-# One from a fork, a draft or someone else, or to another branch, isn't it.
+# So does anyone's of the steward's named for another red: a fix under way.
+assert R.watch_default(repo_r, default("FAILURE"), [mkpr(branch="autoland/red-bbbbbbbbbbbb")], mine) == {}
+assert len(JOBS) == 1, JOBS
+# One from a fork, a draft or someone else, or to another branch, isn't one.
 for pr in (dict(mkpr(branch="autoland/red-cccccccccccc"), isCrossRepository=True),
            mkpr(branch="autoland/red-cccccccccccc", draft=True),
            dict(mkpr(branch="autoland/red-cccccccccccc"), author={"login": "mallory"}),
-           mkpr(branch="autoland/red-cccccccccccc", base="dev")):
+           mkpr(branch="autoland/red-cccccccccccc", base="dev"),
+           mkpr(branch="autoland/redcccccccccccc")):
     st_kept = C.load("repo-sam_r.json", {})
     R.watch_default(repo_r, default("FAILURE"), [pr], mine)
     R.watch_default(repo_r, default("FAILURE"), [pr], mine)
@@ -634,24 +650,40 @@ mine.clear()
 R.watch_default(repo_r, default("SUCCESS"), [], mine)
 R.watch_default(repo_r, default("FAILURE"), [], mine)
 assert len(JOBS) == 3 and mine == [], (JOBS, mine)
-# Green while its job still works: the red is kept until the job ends, and
-# then its PR, no longer needed, is closed; another one is left alone.
+# While CI on main runs (a fix landed, so main moved on), every fix waits
+# for it to say, its job at work or not: one landing now could land on top
+# of the fix that made it green. Then red, they go on; nothing is closed.
+# (step.handle holds one too if main moves on after this read: landed.py.)
 WROTE.clear()
+fixes = [mkpr(branch="autoland/red-cccccccccccc", number=9), mkpr(branch="autoland/red-dddddddddddd", number=8)]
+assert R.watch_default(repo_r, default("PENDING", sha="e" * 40), fixes, mine) == {9: WAIT, 8: WAIT}
+STATES[f"job-{len(JOBS)}"] = "done"
+assert R.watch_default(repo_r, default("PENDING", sha="e" * 40), fixes, mine) == {9: WAIT, 8: WAIT}
+# So they do on any word but red or green: a check expected and not there
+# yet, or none at all on the tip.
+assert R.watch_default(repo_r, default("EXPECTED", sha="e" * 40), fixes, mine) == {9: WAIT, 8: WAIT}
+unsaid = {"defaultBranchRef": {"name": "main", "target": {"oid": "e" * 40, "statusCheckRollup": None}}}
+assert R.watch_default(repo_r, unsaid, fixes, mine) == {9: WAIT, 8: WAIT}
+assert R.watch_default(repo_r, default("FAILURE", sha="e" * 40), fixes, mine) == {}
+assert WROTE == [] and len(JOBS) == 3 and C.load("repo-sam_r.json", {}).get("red"), (WROTE, JOBS)
+STATES[f"job-{len(JOBS)}"] = "running"
+# Green while its job still works: the red is kept until the job ends, and
+# then every fix, no longer needed, is closed.
 opened = [mkpr(branch="autoland/red-cccccccccccc", number=9)]
-assert R.watch_default(repo_r, default("SUCCESS", sha="e" * 40), opened, mine) == {9}
+assert R.watch_default(repo_r, default("SUCCESS", sha="e" * 40), opened, mine) == {9: GONE}
 assert C.load("repo-sam_r.json", {}).get("red") and WROTE == [], WROTE
 STATES[f"job-{len(JOBS)}"] = "done"
-fixes = [mkpr(branch="autoland/red-cccccccccccc", number=9), mkpr(branch="autoland/red-dddddddddddd", number=8)]
-# GitHub won't close it: the red is kept, the close tried again soon, and
-# the pass still leaves the PR alone.
+# GitHub won't close one: the red is kept, the close tried again soon, and
+# the pass still leaves the PRs alone.
 FAIL.append("pr close 9")
 C.WAKE.clear()
-assert R.watch_default(repo_r, default("SUCCESS", sha="e" * 40), fixes, mine) == {9}
+assert R.watch_default(repo_r, default("SUCCESS", sha="e" * 40), fixes, mine) == {9: GONE, 8: GONE}
 FAIL.remove("pr close 9")
 assert C.load("repo-sam_r.json", {}).get("red") and C.WAKE.get("sam/r"), C.WAKE
 WROTE.clear()
-assert R.watch_default(repo_r, default("SUCCESS", sha="e" * 40), fixes, mine) == {9}
-assert [x.split()[:3] for x in WROTE] == [["pr", "close", "9"]], WROTE
+assert R.watch_default(repo_r, default("SUCCESS", sha="e" * 40), fixes, mine) == {9: GONE, 8: GONE}
+assert [x.split()[:3] for x in WROTE] == [["pr", "close", "9"], ["pr", "close", "8"]], WROTE
+assert "fix for ccccccc isn't needed" in WROTE[0] and "fix for ddddddd" in WROTE[1], WROTE
 assert not C.load("repo-sam_r.json", {}).get("red"), C.load("repo-sam_r.json", {})
 R.watch_default(repo_r, default("FAILURE"), [], mine)
 assert len(JOBS) == 4 and mine == [], (JOBS, mine)
@@ -660,16 +692,21 @@ assert len(JOBS) == 4 and mine == [], (JOBS, mine)
 # it's there, and closed.
 STATES[f"job-{len(JOBS)}"] = "done"
 C.WAKE.clear()
-assert R.watch_default(repo_r, default("SUCCESS", sha="e" * 40), [], mine) == set()
+assert R.watch_default(repo_r, default("SUCCESS", sha="e" * 40), [], mine) == {}
 assert C.load("repo-sam_r.json", {}).get("red") and C.WAKE.get("sam/r") == C.NOW + 60, C.WAKE
 WROTE.clear()
-assert R.watch_default(repo_r, default("SUCCESS", sha="e" * 40), opened, mine) == {9}
+assert R.watch_default(repo_r, default("SUCCESS", sha="e" * 40), opened, mine) == {9: GONE}
 assert [x.split()[:3] for x in WROTE] == [["pr", "close", "9"]], WROTE
 assert not C.load("repo-sam_r.json", {}).get("red"), C.load("repo-sam_r.json", {})
+# Green with a fix the steward started no job for (someone of its own fixed
+# a red under the name): not needed either, and closed.
+WROTE.clear()
+assert R.watch_default(repo_r, default("SUCCESS", sha="e" * 40), [fixes[1]], mine) == {8: GONE}
+assert [x.split()[:3] for x in WROTE] == [["pr", "close", "8"]], WROTE
 
-# In a pass the watcher goes first, and the steward holds a fix PR it made
-# obsolete (passes.py has what holding does) before any other PR, so one
-# with settled reviews and green CI can't merge before it's closed.
+# In a pass the watcher goes first, and the steward holds a fix PR it holds
+# (passes.py has what holding does) before any other PR, so one with
+# settled reviews and green CI can't merge before it's closed.
 kept_fns = (S.R.discover, S.R.settle_repo, S.R.publish, S.open_prs, S.R.unhook_gone, S.R.hook_projects,
             S.R.watch_default, H.handle)
 order = []
@@ -678,12 +715,12 @@ S.R.settle_repo = lambda r, known: False
 S.R.publish = S.R.unhook_gone = lambda *a: None
 S.R.hook_projects = lambda repos: []
 S.open_prs = lambda owner, name: (info, [mkpr(number=10), mkpr(branch="autoland/red-cccccccccccc", number=9)])
-S.R.watch_default = lambda r, info, prs, digest: order.append("watch") or {9}
-H.handle = lambda repo, pr, info, digest, obsolete: order.append((pr["number"], obsolete))
+S.R.watch_default = lambda r, info, prs, digest: order.append("watch") or {9: GONE}
+H.handle = lambda repo, pr, info, digest, held: order.append((pr["number"], held))
 S.main()
 (S.R.discover, S.R.settle_repo, S.R.publish, S.open_prs, S.R.unhook_gone, S.R.hook_projects,
  S.R.watch_default, H.handle) = kept_fns
-assert order == ["watch", (9, True), (10, False)], order
+assert order == ["watch", (9, GONE), (10, None)], order
 
 C._for.pop()
 

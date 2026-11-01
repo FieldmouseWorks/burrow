@@ -159,10 +159,23 @@ root only.
    runs. A red one goes to a fix job like any red CI.
 8. A red default branch (CI failed on what was merged): one Claude job
    finds the cause and opens a PR from `autoland/red-SHA` that reverts the
-   merge that broke it, or fixes it, and that PR lands like any other. Nothing
-   more while the job works or its PR is open; one more job if the branch is
-   still red after, then the pipeline's stuck issue. Green again without it (fixed some other
-   way, or a flake), its PR is closed once the job has ended.
+   merge that broke it, or fixes it, and that PR lands like any other. Before
+   it starts and again before it pushes, the job checks the red still needs
+   it: CI on the branch's tip hasn't passed since, no other `autoland/red-`
+   PR is open (a ready one from the repo itself, by one of the authors),
+   and its fix still changes something on the tip. Nothing more while the
+   job works or any such PR is open (the house Pull requests block asks
+   everyone else to fix it only from a branch of that name); one more job
+   if the branch is still red after, then the pipeline's stuck issue. A fix
+   lands only on a tip CI says is red: while CI on the branch hasn't said
+   (it moved on, a fix landed, say, or the tip has no checks), or the tip
+   has moved since the pass read it, a fix waits, and green again (fixed
+   some other way, or a flake) the fixes are closed once the job has ended.
+9. A PR whose merge would change nothing on its base (its head merged into
+   the base's tip has the tip's own tree: another PR made the same change)
+   is closed, saying so, instead of landing as an empty commit. A dependency
+   bot's is left for the bot to close, and never cleared for the bot to
+   merge.
 
 Waiting for the owner instead, listed in one issue: what a judge job sent
 them (or anyone labelled `needs-owner`), held Renovate majors, and outside
