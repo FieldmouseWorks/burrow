@@ -169,6 +169,42 @@ fn a_ping_that_doesnt_land_is_said_and_fails_nothing() {
 }
 
 #[test]
+fn a_url_it_cant_use_is_said_without_the_key() {
+    for url in ["", "relative/path", "http:"] {
+        let out = Unit::new(url).beat(&["check:sshd ok"]);
+        assert!(out.status.success(), "{url:?}");
+        assert_eq!(
+            said(&out).1,
+            "the ping to box didn't land (the ping's URL can't be used); Healthchecks alerts once the check's grace runs out\n",
+            "{url:?}"
+        );
+    }
+}
+
+/// As curl without -L and with -f: below 400 it has landed, whatever the
+/// answer says about going elsewhere. One POST, nothing sent anywhere else,
+/// nothing tried again, nothing said.
+#[test]
+fn a_redirect_has_landed_and_isnt_followed() {
+    let elsewhere = Healthchecks::serve("/KEY/box", &[]);
+    let to = format!("{}/KEY/box", elsewhere.url);
+    for code in [300, 301, 302, 303, 304, 305, 307, 308, 399] {
+        for moved_to in [Some(to.as_str()), None] {
+            let hc = Healthchecks::serve_moved("/KEY/box", &[code], moved_to);
+            let out = Unit::new(&hc.url).beat(&["check:sshd ok"]);
+            assert!(out.status.success(), "{code} {moved_to:?}");
+            assert_eq!(said(&out).1, "", "{code} {moved_to:?}");
+            assert_eq!(
+                hc.pings(),
+                [("/KEY/box".to_owned(), "healthy: 1 checks pass\n".to_owned())],
+                "{code} {moved_to:?}"
+            );
+        }
+    }
+    assert!(elsewhere.pings().is_empty(), "{:?}", elsewhere.pings());
+}
+
+#[test]
 fn outside_its_unit_it_says_so() {
     let unit = Unit::new(&common::nobody());
     for var in ["CREDENTIALS_DIRECTORY", "RUNTIME_DIRECTORY"] {

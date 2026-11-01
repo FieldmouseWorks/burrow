@@ -202,7 +202,7 @@ pub const AGAIN: [Duration; 3] = [
 ];
 
 /// The agent the beat pings through: the machine's own trust (its CA
-/// bundle) and `TRY_FOR` a try.
+/// bundle), `TRY_FOR` a try, and no redirect followed, as curl without `-L`.
 pub fn agent() -> ureq::Agent {
     use ureq::tls::{RootCerts, TlsConfig};
     let tls = TlsConfig::builder()
@@ -212,14 +212,16 @@ pub fn agent() -> ureq::Agent {
         .tls_config(tls)
         .timeout_global(Some(TRY_FOR))
         .http_status_as_error(false)
+        .max_redirects(0)
         .build()
         .into()
 }
 
 /// Sends `ping` to `url/key/check`, trying again after a timeout, a 408, a
 /// 429, a 500, 502, 503 or 504, three times at most, as `curl --retry 3`
-/// did. The error names neither the URL nor the key (ureq's errors don't),
-/// since any user on the machine can read the journal.
+/// did. Anything below 400 has landed, a redirect too, as `curl -f` had it.
+/// The error names neither the URL nor the key (`why_not`), since any user on
+/// the machine can read the journal.
 pub fn send(
     agent: &ureq::Agent,
     url: &str,
@@ -236,7 +238,7 @@ pub fn send(
     let mut waits = AGAIN.iter();
     loop {
         let (again, why) = match agent.post(&to).send(&body) {
-            Ok(r) if r.status().is_success() => return Ok(()),
+            Ok(r) if r.status().as_u16() < 400 => return Ok(()),
             Ok(r) => {
                 let code = r.status().as_u16();
                 (
@@ -244,11 +246,28 @@ pub fn send(
                     format!("HTTP {code}"),
                 )
             }
-            Err(e) => (matches!(e, ureq::Error::Timeout(_)), e.to_string()),
+            Err(e) => (matches!(e, ureq::Error::Timeout(_)), why_not(&e)),
         };
         match waits.next() {
             Some(wait) if again => pause(*wait),
             _ => return Err(why),
         }
+    }
+}
+
+/// What a failed try says. Never ureq's own text: its errors can quote the
+/// whole request URL, key included (`/KEY/box is missing scheme`), so only
+/// the kind of failure gets out.
+pub fn why_not(e: &ureq::Error) -> String {
+    use ureq::Error;
+    match e {
+        Error::Timeout(_) => "timed out".to_owned(),
+        Error::HostNotFound => "host not found".to_owned(),
+        Error::ConnectionFailed => "connection failed".to_owned(),
+        Error::Io(e) => e.kind().to_string(),
+        Error::BadUri(_) | Error::Http(_) => "the ping's URL can't be used".to_owned(),
+        Error::Tls(_) => "TLS failed".to_owned(),
+        Error::InvalidProxyUrl | Error::ConnectProxyFailed(_) => "the proxy failed".to_owned(),
+        _ => "the request failed".to_owned(),
     }
 }

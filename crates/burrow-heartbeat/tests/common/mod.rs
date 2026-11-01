@@ -19,6 +19,12 @@ impl Healthchecks {
     /// Answers the first pings from `answers` in turn, then 200 for a path
     /// at or under `check` and 404 for any other.
     pub fn serve(check: &str, answers: &[u16]) -> Healthchecks {
+        Healthchecks::serve_moved(check, answers, None)
+    }
+
+    /// The same, and every answer says `Location: moved_to`.
+    pub fn serve_moved(check: &str, answers: &[u16], moved_to: Option<&str>) -> Healthchecks {
+        let location = moved_to.map_or(String::new(), |to| format!("Location: {to}\r\n"));
         let listener = TcpListener::bind("127.0.0.1:0").expect("a port");
         let url = format!("http://{}", listener.local_addr().expect("its address"));
         let pings = Arc::new(Mutex::new(Vec::new()));
@@ -40,7 +46,7 @@ impl Healthchecks {
                 let mut stream = stream;
                 let _ = write!(
                     stream,
-                    "HTTP/1.1 {code} X\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK"
+                    "HTTP/1.1 {code} X\r\n{location}Content-Length: 2\r\nConnection: close\r\n\r\nOK"
                 );
             }
         });

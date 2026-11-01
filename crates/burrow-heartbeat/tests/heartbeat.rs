@@ -9,7 +9,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use burrow_heartbeat::{Config, Health, Ping, send, verdict};
+use burrow_heartbeat::{Config, Health, Ping, send, verdict, why_not};
 use common::Healthchecks;
 
 fn config(fail_after: u32) -> Config {
@@ -248,6 +248,7 @@ fn agent() -> ureq::Agent {
         .proxy(None)
         .timeout_global(Some(Duration::from_millis(500)))
         .http_status_as_error(false)
+        .max_redirects(0)
         .build()
         .into()
 }
@@ -376,6 +377,52 @@ fn a_key_that_cant_be_in_a_url_isnt_named_either() {
     );
     let e = r.unwrap_err();
     assert!(!e.contains("CRET"), "{e}");
+}
+
+#[test]
+fn a_url_it_cant_use_never_names_the_key() {
+    // ureq's own error for each of these quotes the whole URL.
+    for url in [
+        "",
+        "relative/path",
+        "box.example",
+        "http:",
+        "ftp://box.example",
+    ] {
+        let mut pauses = 0;
+        let r = send(&agent(), url, "SECRET", "box", &ping("", "x"), &mut |_| {
+            pauses += 1
+        });
+        assert_eq!(r, Err("the ping's URL can't be used".to_owned()), "{url:?}");
+        assert_eq!(pauses, 0, "{url:?}");
+    }
+}
+
+#[test]
+fn no_failure_says_more_than_its_kind() {
+    use ureq::Error;
+    let io = || std::io::Error::new(std::io::ErrorKind::ConnectionReset, "/SECRET/box");
+    for (e, says) in [
+        (
+            Error::BadUri("/SECRET/box".into()),
+            "the ping's URL can't be used",
+        ),
+        (Error::Io(io()), "connection reset"),
+        (
+            Error::ConnectProxyFailed("/SECRET/box".into()),
+            "the proxy failed",
+        ),
+        (
+            Error::RequireHttpsOnly("/SECRET/box".into()),
+            "the request failed",
+        ),
+        (Error::Other(Box::new(io())), "the request failed"),
+        (Error::Tls("/SECRET/box"), "TLS failed"),
+        (Error::HostNotFound, "host not found"),
+        (Error::ConnectionFailed, "connection failed"),
+    ] {
+        assert_eq!(why_not(&e), says, "{e}");
+    }
 }
 
 #[test]
