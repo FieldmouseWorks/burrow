@@ -79,9 +79,8 @@ pub struct State {
     pub job: Option<String>,
     #[serde(rename = "jobAt", skip_serializing_if = "Option::is_none")]
     pub job_at: Option<f64>,
-    /// The issues a look asked a job for, and when it first gave the key
-    /// they're asked under, until a look finds a job under it
-    /// (Pass::asked_for).
+    /// The issues a look asked a job for, and the ask that stands, until a
+    /// look finds a job under its key (Pass::asked_for).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub asked: Vec<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]

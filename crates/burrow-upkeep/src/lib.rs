@@ -3,7 +3,8 @@
 //! (flaky.rs). A pass of the steward's runs `watch` on each repo it sees to,
 //! with the App's token for the repo's owner in GH_TOKEN, and acts on what
 //! it says (pass::Out): it lists what's stuck, books the repo's next pass,
-//! and starts the Claude jobs it asks for, telling each back (`started`).
+//! and starts the Claude jobs it asks for, each under its key. Nothing is
+//! told back: a part's next look finds its job by that key (`proj find`).
 
 pub mod config;
 pub mod dashboard;

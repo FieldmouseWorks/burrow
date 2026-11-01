@@ -58,13 +58,43 @@ fn key_path(cfg: &Config, key: &str) -> std::path::PathBuf {
     cfg.jobs.join(".keys").join(key.replace('/', "+"))
 }
 
+/// A key's own lock, in `.keys/.locks` (no key's link starts with a dot),
+/// held while its link is read and judged, let go or taken: so a link a
+/// starter has just taken over is never let go on a judgment of the job it
+/// pointed at before.
+fn key_lock(cfg: &Config, key: &str) -> Result<File, Fail> {
+    let dir = cfg.jobs.join(".keys").join(".locks");
+    fs::create_dir_all(&dir).map_err(|e| io_fail(&dir, e))?;
+    let path = dir.join(key.replace('/', "+"));
+    let f = File::options()
+        .append(true)
+        .create(true)
+        .open(&path)
+        .map_err(|e| io_fail(&path, e))?;
+    f.lock().map_err(|e| io_fail(&path, e))?;
+    Ok(f)
+}
+
 /// The job holding the key, once it has started a turn. One that never
 /// did (its first turn or its sandbox failed to start) lets the key go,
-/// so it can be asked for again. That's judged under the job's lock, which
-/// its starter holds until it has started, or failed to: a start under way
-/// is waited for, never taken for one that failed. What can't be read
-/// fails: absence is only ever what was read.
+/// so it can be asked for again. That's judged under the key's lock and
+/// the job's, which its starter holds until it has started, or failed to:
+/// a start under way is waited for, never taken for one that failed. What
+/// can't be read fails: absence is only ever what was read.
 pub fn find(cfg: &Config, key: &str) -> Result<Option<String>, Fail> {
+    let path = key_path(cfg, key);
+    // No link, nothing to judge: a key no job has.
+    match fs::symlink_metadata(&path) {
+        Ok(_) => {}
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(io_fail(&path, e)),
+    }
+    let _key = key_lock(cfg, key)?;
+    find_held(cfg, key)
+}
+
+/// `find`, with the key's lock held.
+fn find_held(cfg: &Config, key: &str) -> Result<Option<String>, Fail> {
     let path = key_path(cfg, key);
     let id = match fs::read_link(&path) {
         Ok(id) => id.to_string_lossy().into_owned(),
@@ -99,21 +129,18 @@ pub fn find(cfg: &Config, key: &str) -> Result<Option<String>, Fail> {
 /// The key taken for the new job `id`, or the job that has it.
 fn take_key(cfg: &Config, key: &str, id: &str) -> Result<(), Fail> {
     let path = key_path(cfg, key);
-    let keys = cfg.jobs.join(".keys");
-    fs::create_dir_all(&keys).map_err(|e| io_fail(&keys, e))?;
-    for _ in 0..2 {
-        match std::os::unix::fs::symlink(id, &path) {
-            Ok(()) => return Ok(()),
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
-                // One that never started lets it go, and it's taken again.
-                if let Some(had) = find(cfg, key)? {
-                    return Err(Fail::new(1, format!("proj run: {had} has the key {key}")));
-                }
-            }
-            Err(e) => return Err(io_fail(&path, e)),
-        }
+    let _key = key_lock(cfg, key)?;
+    match std::os::unix::fs::symlink(id, &path) {
+        Ok(()) => return Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(io_fail(&path, e)),
     }
-    Err(Fail::new(1, format!("proj run: the key {key} is taken")))
+    // One that never started lets it go, and, under the key's lock, it's
+    // this job's before anything else can judge or take it.
+    if let Some(had) = find_held(cfg, key)? {
+        return Err(Fail::new(1, format!("proj run: {had} has the key {key}")));
+    }
+    std::os::unix::fs::symlink(id, &path).map_err(|e| io_fail(&path, e))
 }
 
 /// A --kick: HANDLER or HANDLER/OWNER/REPO.
@@ -465,7 +492,7 @@ fn id_name(project: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{New, find, id_name, key_name, kick_name, since_time, start_job};
+    use super::{New, find, id_name, key_lock, key_name, kick_name, since_time, start_job};
 
     #[test]
     fn id_names() {
@@ -588,6 +615,62 @@ mod tests {
         hold(tmp.path(), "e/k", "e", false);
         assert!(find(&mute, "e/k").is_err(), "a systemd that can't say");
         assert!(link("e+k").is_ok(), "and the key is kept");
+    }
+
+    // A key is judged and let go under its own lock: one a starter takes
+    // over meanwhile, for a job that has started, is that job's, and stays.
+    #[test]
+    fn a_key_is_judged_under_its_own_lock() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let cfg = keyed(tmp.path(), "not-found");
+        hold(tmp.path(), "k", "p-1", false);
+        std::fs::create_dir_all(tmp.path().join("jobs/p-2")).unwrap();
+        std::fs::write(tmp.path().join("jobs/p-2/turns"), "1\n").unwrap();
+        let held = key_lock(&cfg, "k").unwrap();
+        let finder = {
+            let cfg = cfg.clone();
+            std::thread::spawn(move || find(&cfg, "k").unwrap())
+        };
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let link = tmp.path().join("jobs/.keys/k");
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink("p-2", &link).unwrap();
+        drop(held);
+        assert_eq!(finder.join().unwrap().as_deref(), Some("p-2"));
+        assert!(std::fs::symlink_metadata(&link).is_ok(), "and it keeps it");
+    }
+
+    // A key is taken under its own lock too: a starter waits out a judgment
+    // under way, and finds the job that took the key over meanwhile.
+    #[test]
+    fn a_key_is_taken_under_its_own_lock() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let cfg = keyed(tmp.path(), "not-found");
+        std::fs::create_dir_all(tmp.path().join("projects/p")).unwrap();
+        hold(tmp.path(), "k", "p-1", false);
+        std::fs::create_dir_all(tmp.path().join("jobs/p-2")).unwrap();
+        std::fs::write(tmp.path().join("jobs/p-2/turns"), "1\n").unwrap();
+        let held = key_lock(&cfg, "k").unwrap();
+        let starter = {
+            let cfg = cfg.clone();
+            std::thread::spawn(move || {
+                let new = New {
+                    key: Some("k".into()),
+                    ..New::default()
+                };
+                start_job(&cfg, &new, "p", "task").unwrap_err().say
+            })
+        };
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let link = tmp.path().join("jobs/.keys/k");
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink("p-2", &link).unwrap();
+        drop(held);
+        assert_eq!(
+            starter.join().unwrap().as_deref(),
+            Some("proj run: p-2 has the key k")
+        );
+        assert_eq!(std::fs::read_link(&link).unwrap().to_str(), Some("p-2"));
     }
 
     // A job still starting, its starter holding its lock, is waited for:
