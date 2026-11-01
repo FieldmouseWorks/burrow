@@ -164,7 +164,7 @@ with open(f"{tmp}/config.json", "w") as f:
                      "oneWay": ONE_WAY, "handoffAfter": 30, "sessionHandoffAfter": 90, "settleDelay": 3,
                      "stallAfter": 120, "holdStallAfter": 480, "renovateMergeAfter": 60,
                      "directPush": False, "ruleset": True, "requireCi": True,
-                     "proofJobs": {}, "proofBuilds": {}, "proofRuns": {}, "codex": True, "rival": True, "skipPaths": [],
+                     "proofJobs": {}, "proofBuilds": {}, "proofRuns": {}, "codex": True, "rival": True,
                      "train": False, "trainSize": 8, "trainRequire": [], "trainStallAfter": 240},
         "trainContext": "conary/train",
         "train": {"cn": f"{tmp}/cn", "env": {"CONARY_LEDGER": f"{tmp}/ledger", "CONARY_ANCHOR_REPO": "sam/homelab"}},
@@ -174,7 +174,6 @@ with open(f"{tmp}/config.json", "w") as f:
                   "renovateSweep": True},
         "renovateRun": 7200,
         "reviewers": {"codex": {"enable": True}, "rival": {"enable": True}},
-        "skipPaths": ["(^|/)secrets?/", r"\.(pem|key|p12|pfx)$", r"(^|/)\.env(\..*)?$"],
         "nix": f"{tmp}/nix",
         "proofRun": PROOF_RUN, "bash": shutil.which("bash"), "git": shutil.which("git"), "runsDir": f"{tmp}/runs",
     }, f)
@@ -209,6 +208,10 @@ def sh(*a, cwd=None):
     return subprocess.run(a, cwd=cwd, check=True, capture_output=True, text=True).stdout
 
 
+# The paths no reviewer reads, in burrow-upkeep's config (snapshot.rs).
+SKIP = ["(^|/)secrets?/", r"\.(pem|key|p12|pfx)$", r"(^|/)\.env(\..*)?$"]
+
+
 def upkeep_config(path=f"{tmp}/upkeep.json", **over):
     """burrow-upkeep's config, as the module writes it, on the steward's
     state, with `over` over it: the real binary's command, as the pass's
@@ -223,7 +226,8 @@ def upkeep_config(path=f"{tmp}/upkeep.json", **over):
                    "settle": {"owner": C.CFG["owner"], "context": C.CFG["context"],
                               "trainContext": C.CFG["trainContext"], "rulesets": C.CFG["rulesets"], "labels": C.CFG["labels"],
                               "defaults": {k: C.CFG["defaults"][k] for k in ("directPush", "ruleset", "train")}, "repos": {}},
-                   "branches": {"keep": ["gh-pages"], "repos": {}, "train": "conary/*"}, **over}, f)
+                   "branches": {"keep": ["gh-pages"], "repos": {}, "train": "conary/*"},
+                   "git": f"{tmp}/origin", "snapshot": {"dir": V.TREES, "skipPaths": SKIP, "repos": {}}, **over}, f)
     return [UPKEEP, path]
 
 

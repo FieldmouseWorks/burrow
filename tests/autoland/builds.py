@@ -16,7 +16,8 @@ import re
 import sys
 
 import proofs as P
-from harness import C, CI_GREEN, FAIL, JOBS, STATES, STOPPED, S, V, WROTE, clean, fresh_pr_state, info, merged, pr_state, run, sh, tmp
+from harness import C, CI_GREEN, FAIL, JOBS, STATES, STOPPED, S, V, WROTE, clean, fresh_pr_state, info, merged, pr_state, run, sh, tmp, \
+    upkeep_config
 from prs import ci_state
 
 # A repo whose PRs' heads are real commits on its remote, as GitHub has them.
@@ -32,7 +33,8 @@ for n in range(1, 7):
     sh(*GIT, "commit", "-qm", f"pr {n}", cwd=work)
     heads[n] = sh("git", "rev-parse", "HEAD", cwd=work).strip()
     sh("git", "push", "-q", f"{origin}/sam/r.git", f"HEAD:refs/pull/{n}/head", cwd=work)
-kept_origin, V.ORIGIN = V.ORIGIN, f"{origin}/{{}}.git"
+# The steward's mirror fetches from it (burrow-upkeep's `fetch`).
+kept_upkeep, C.CFG["upkeep"] = C.CFG["upkeep"], upkeep_config(f"{tmp}/upkeep-builds.json", git=origin)
 
 # nix and nix-store: each head's derivation as NIX says, its outputs as NIX
 # says or that path less ".drv", and NIX's valid paths built. An eval reads its commit
@@ -544,7 +546,7 @@ S.CFG["repos"]["sam/r"]["proofBuilds"] = {"remi-proof": "checks.x86_64-linux.pro
 del S.CFG["repos"]["sam/r"]
 C.job, P.build = kept, kept_build
 C.gh, C.write = kept_gh, kept_write
-V.ORIGIN = kept_origin
+C.CFG["upkeep"] = kept_upkeep
 P.OPEN.clear()
 P.WAITING.clear()
 STATES.clear()

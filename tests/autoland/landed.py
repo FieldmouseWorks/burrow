@@ -6,10 +6,9 @@ remote here; handle() closes such a PR with a comment, and leaves a
 dependency bot's to its bot, never clearing it to merge. A fix for red main
 lands only on the tip the pass saw red."""
 
-from harness import ALREADY, REAL, TIP, WROTE, S, clean, cn, cn_runs, fresh_pr_state, info, merged, mkpr, pr_state, run, sh, \
-    stand_in, tmp
+from harness import ALREADY, REAL, TIP, WROTE, C, S, clean, cn, cn_runs, fresh_pr_state, info, merged, mkpr, pr_state, run, sh, \
+    stand_in, tmp, upkeep_config
 
-import reviewers as V
 import train as T
 
 stand_in()
@@ -53,8 +52,13 @@ sh("git", "checkout", "-q", "-b", "clash", red, cwd=work)
 clash = commit("clash", **{"agents.nix": "packages.burrow-something\n"})
 for n, rev in ((1, fix_a), (2, fix_b), (3, more), (4, clash)):
     pull(n, rev)
-kept_origin, V.ORIGIN = V.ORIGIN, f"{origin}/{{}}.git"
-onto = REAL["onto"]
+# The steward's mirror fetches from it (burrow-upkeep's `fetch`).
+kept_upkeep, C.CFG["upkeep"] = C.CFG["upkeep"], upkeep_config(f"{tmp}/upkeep-landed.json", git=origin)
+
+
+def onto(repo, pr):
+    with C.acting_for(repo):
+        return REAL["onto"](repo, pr)
 
 
 def pr(n, rev):
@@ -87,13 +91,13 @@ pull(2, more)
 assert onto("sam/r", pr(2, fix_b)) == (later, False)
 pull(2, fix_b)
 # git that can't fetch it raises: the steward can't tell, so nothing lands.
-V.ORIGIN = f"{tmp}/no-such-origin/{{}}.git"
+C.CFG["upkeep"] = upkeep_config(f"{tmp}/upkeep-landed.json", git=f"{tmp}/no-such-origin")
 try:
     onto("sam/r", pr(2, fix_b))
     raise AssertionError("a fetch that fails said something")
 except RuntimeError as e:
     assert "git -C" in str(e), e
-V.ORIGIN = kept_origin
+C.CFG["upkeep"] = kept_upkeep
 print("onto: ok")
 
 # handle(): a settled PR whose merge would add nothing is closed, saying

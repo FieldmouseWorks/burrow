@@ -15,7 +15,6 @@ import os
 import re
 import shutil
 import subprocess
-import tempfile
 import time
 
 import common as C
@@ -37,9 +36,7 @@ TREES = CFG["snapDir"]
 # The reviewers' service owns what's in them; the sweep marks a closed PR's
 # GONE, and the service deletes it.
 SESSIONS, GONE = "review/sessions", ".gone-"
-ORIGIN = "https://github.com/{}.git"
 OUT = "reviewers.json"  # a reviewer out of service, and until when
-META = {"rules", "house", "secret"}  # what a snapshot keeps of its base, for the prompt
 # How the reviewers and a judge weigh the reasons a PR's description gives
 # where the house rules ask for one. That the line is there is CI's to check;
 # whether its reason holds up takes reading the code.
@@ -135,19 +132,6 @@ def verdict(pr, head, r):
 
 # ---------------------------------------------------------------- the snapshot
 
-def names(out):
-    """Paths from git's -z output. A path is bytes, not always UTF-8: the
-    ones that aren't keep their bytes (surrogateescape), so git gets the
-    same path back."""
-    return [p for p in out.decode(errors="surrogateescape").split("\0") if p]
-
-
-def shown(path):
-    """A path as text to show (a prompt, a judge's task): any bytes that
-    aren't UTF-8 as replacement characters."""
-    return path.encode(errors="surrogateescape").decode(errors="replace")
-
-
 def git(*args, cwd=None, input=None, env=None):
     p = subprocess.run(["git", *args], cwd=cwd, input=input, env=env, capture_output=True, check=False)
     if p.returncode != 0:
@@ -155,58 +139,15 @@ def git(*args, cwd=None, input=None, env=None):
     return p.stdout
 
 
-def skipped(repo, path):
-    """The machine's skipPaths, and the repo's own on top: a repo's list
-    only adds to the machine's, so nothing can take a secrets path back
-    into view."""
-    return any(re.search(p, path) for p in CFG["skipPaths"] + C.repo_cfg(repo)["skipPaths"])
-
-
-def hidden(repo, path):
-    """A secrets path: matched itself, or in a directory that is (a
-    directory matches with a trailing slash)."""
-    parts = path.split("/")
-    return skipped(repo, path) or any(skipped(repo, "/".join(parts[:i]) + "/") for i in range(1, len(parts)))
-
-
-def rules(repo, mirror, rev, paths):
-    """The `## Code Review Rules` of the AGENTS.md nearest each changed file,
-    and the `## House rules` the reasons a PR's description gives answer to,
-    from every AGENTS.md from the root down to each changed file (a nearer
-    one can add to the root's), as `rev` (the base branch) has them: a PR
-    can't rewrite its own rules, and the base it lands on is the one whose
-    rules hold. An AGENTS.md in a secrets path is never read: its rules
-    would reach the reviewers in the prompt. Returns the two, as text."""
-    have = {f for f in names(git("-C", mirror, "ls-tree", "-r", "-z", "--name-only", rev)) if not hidden(repo, f)}
-    nearest, above = set(), set()
-    for p in paths:
-        mine, d = [], p
-        while d:
-            d = d.rpartition("/")[0]
-            f = f"{d}/AGENTS.md" if d else "AGENTS.md"
-            if f in have:
-                mine.append(f)
-        nearest.update(mine[:1])
-        above.update(mine)
-    out = {"Code Review Rules": [], "House rules": []}
-    for f in sorted(above):
-        text = git("-C", mirror, "show", f"{rev}:{f}").decode(errors="replace")
-        for heading, found in out.items():
-            m = re.search(rf"^## {heading}\s*$(.*?)(?=^## |\Z)", text, re.M | re.S)
-            if m and (f in nearest or heading == "House rules"):
-                found.append(f"From {f}:\n{m.group(1).strip()}")
-    return ["\n\n".join(x) for x in out.values()]
-
-
 def fetch(repo, *refs):
     """The steward's bare clone of the repo, which only it reads, with refs
-    fetched into it from GitHub: what the snapshots are taken from, and what
-    a proof's builds are worked out from (proofs.py)."""
-    mirror = os.path.join(STATE, GIT, repo.replace("/", "__") + ".git")
-    if not os.path.isdir(mirror):
-        git("init", "-q", "--bare", mirror)
-    git("-C", mirror, *C.GIT_AUTH, "fetch", "-q", "--no-tags", ORIGIN.format(repo), *refs, env=C.gh_env(repo))
-    return mirror
+    fetched into it from GitHub (burrow-upkeep's `fetch`): what the
+    snapshots are taken from, and what a proof's builds are worked out from
+    (proofs.py). As long as git takes, as it always has."""
+    out = C.upkeep("fetch", repo, input=json.dumps(refs), bounded=False)
+    if out["mirror"] is None:
+        raise RuntimeError(out["why"])
+    return out["mirror"]
 
 
 def snap_name(key, head, base):
@@ -227,84 +168,18 @@ def remove(p):
 
 
 def snapshot(repo, pr, key):
-    """A fresh repo of two commits, the PR's merge base and its head, each
-    without the secrets paths: all a reviewer gets to read. The commits are
-    git's own trees with those paths taken out, so nothing the repo's
-    attributes or ignore files say can change or hide what the PR changed.
-    Taken once a head on a base, for every reviewer. Returns its name, the
-    review rules and the secrets paths the PR changes."""
+    """The snapshot a reviewer reads of the PR's head, burrow-upkeep's
+    (snapshot.rs): two commits, its merge base and its head, each without
+    the secrets paths. Taken once a head on a base, for every reviewer, and
+    as long as git takes. Returns its name and what it keeps of the base
+    (the review rules, and the secrets paths the PR changes)."""
     n, head, base = pr["number"], pr["headRefOid"], pr["baseRefName"]
     name = snap_name(key, head, base)
-    meta = load(f"{SNAP}/{name}.json", None)
-    dst = os.path.join(TREES, name)
-    # One kept by a steward that read less of the base is taken again, and
-    # so is one whose checkout the cache lost (a reboot, say).
-    if meta and META <= meta.keys() and os.path.isdir(dst):
-        return name, meta
-    mirror = fetch(repo, f"+refs/pull/{n}/head:refs/pr/{n}", f"+refs/heads/{base}:refs/base/{base}")
-    mb = git("-C", mirror, "merge-base", f"refs/base/{base}", head).decode().strip()
-    changed = names(git("-C", mirror, "diff", "-z", "--name-only", "--no-renames", mb, head))
-    # A secret renamed or copied to a plain path is still a secret, so its
-    # new name is hidden too. A plain file copied into a secrets path stays
-    # in view: only the copy is hidden, by its own path.
-    moved = set()
-    out = names(git("-C", mirror, "diff", "-z", "--name-status", "-M", "-C", "--find-copies-harder", mb, head))
-    i = 0
-    while i < len(out):
-        status = out[i]
-        if status[:1] in ("R", "C"):
-            src, dst_ = out[i + 1], out[i + 2]
-            if hidden(repo, src):
-                moved.add(dst_)
-            i += 3
-        else:
-            i += 2
-    # Each commit's tree less the secrets paths, built in the mirror (which
-    # only the steward reads), so their contents never reach the snapshot.
-    who = ["-c", "user.name=autoland", "-c", "user.email=autoland@localhost", "-c", "commit.gpgsign=false"]
-    index = os.path.join(mirror, f"snap-{name}.index")
-    parent = []
-    empty = tempfile.mkdtemp()
-    try:
-        for label, rev in (("base", mb), (f"head {head}", head)):
-            if os.path.exists(index):
-                os.remove(index)
-            # The index only: git wants a work tree for it, and an empty one
-            # is never read or written.
-            e = {**os.environ, "GIT_INDEX_FILE": index, "GIT_WORK_TREE": empty}
-            subprocess.run(["git", "-C", mirror, "read-tree", rev], env=e, check=True, capture_output=True)
-            paths = names(subprocess.run(["git", "-C", mirror, "ls-files", "-z"], env=e, check=True,
-                                         capture_output=True).stdout)
-            gone = [p for p in paths if hidden(repo, p) or p in moved]
-            if gone:
-                subprocess.run(["git", "-C", mirror, "update-index", "-z", "--force-remove", "--stdin"], env=e,
-                               input="\0".join(gone).encode(errors="surrogateescape") + b"\0", check=True, capture_output=True)
-            tree = subprocess.run(["git", "-C", mirror, "write-tree"], env=e, check=True,
-                                  capture_output=True).stdout.decode().strip()
-            commit = git("-C", mirror, *who, "commit-tree", tree, *parent, "-m", label).decode().strip()
-            parent = ["-p", commit]
-    finally:
-        os.rmdir(empty)
-        if os.path.exists(index):
-            os.remove(index)
-    git("-C", mirror, "update-ref", f"refs/snap/{name}", commit)
-    # Made aside and moved into place whole: a checkout under its own name
-    # is always a finished one, which the meta kept from before may vouch for.
-    new = dst + ".new"
-    shutil.rmtree(new, ignore_errors=True)
-    # Nothing from the steward's own git config (an LFS filter, say) runs
-    # on what the PR put there.
-    bare = {**os.environ, "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1"}
-    git("init", "-q", new, env=bare)
-    git("-C", new, "fetch", "-q", "--no-tags", mirror, f"refs/snap/{name}:refs/heads/review", env=bare)
-    git("-C", mirror, "update-ref", "-d", f"refs/snap/{name}")
-    git("-C", new, "checkout", "-q", "review", env=bare)
-    shutil.rmtree(dst, ignore_errors=True)
-    os.rename(new, dst)
-    review, house = rules(repo, mirror, f"refs/base/{base}", [p for p in changed if not (hidden(repo, p) or p in moved)])
-    meta = {"rules": review, "house": house, "secret": [shown(p) for p in changed if hidden(repo, p) or p in moved]}
-    save(f"{SNAP}/{name}.json", meta)
-    return name, meta
+    out = C.upkeep("snapshot", repo, input=json.dumps({"number": n, "head": head, "base": base, "name": name}),
+                   bounded=False)
+    if out["meta"] is None:
+        raise RuntimeError(out["why"])
+    return name, out["meta"]
 
 
 # ---------------------------------------------------------------- earlier findings

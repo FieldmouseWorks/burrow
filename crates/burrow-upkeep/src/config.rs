@@ -43,6 +43,11 @@ pub struct Config {
     pub settle: Settle,
     /// The branches nothing needs any more, when they're deleted.
     pub branches: Option<Branches>,
+    /// Where the steward's mirrors fetch each repo from: OWNER/NAME.git
+    /// under it (mirror.rs).
+    pub git: String,
+    /// What the reviewers read of a PR (snapshot.rs).
+    pub snapshot: Snapshot,
 }
 
 /// The steward's App: its bot is SLUG[bot]; its id is the one its tokens
@@ -177,6 +182,17 @@ impl Branches {
         let cn = self.train.iter().filter(|_| train);
         self.keep.iter().chain(own).chain(cn).cloned().collect()
     }
+}
+
+/// Where the reviewers' snapshots are checked out, and the paths none of
+/// them reads: regexes of the machine's, and each repo's own on top (by
+/// OWNER/NAME), which only add to the machine's.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Snapshot {
+    pub dir: PathBuf,
+    pub skip_paths: Vec<String>,
+    pub repos: BTreeMap<String, Vec<String>>,
 }
 
 impl Config {

@@ -59,9 +59,9 @@ let
     (lib.filter (c: lib.elem (lib.toLower c) (map lib.toLower (lib.attrNames (rc.proofBuilds or { }))))
       (lib.attrNames (rc.proofRuns or { })))) cfg.repos);
   # Every setting a repo in `repos` may have: the steward's defaults, and the
-  # two read only where they're set (keepBranches by the branch cleanup,
-  # proofSlots by the proof line).
-  known = lib.attrNames settings.defaults ++ [ "keepBranches" "proofSlots" ];
+  # three read only where they're set (keepBranches by the branch cleanup,
+  # proofSlots by the proof line, skipPaths by the reviewers' snapshot).
+  known = lib.attrNames settings.defaults ++ [ "keepBranches" "proofSlots" "skipPaths" ];
   # "REPO".SETTING, for each setting a repo has that isn't one of those.
   unknown = lib.concatLists (lib.mapAttrsToList (repo: rc: map (k: "\"${repo}\".${k}")
     (lib.filter (k: !lib.elem k known) (lib.attrNames rc))) cfg.repos);
@@ -152,7 +152,6 @@ let
       proofBuilds = { };
       proofRuns = { };
       codex = true;
-      skipPaths = [ ];
       train = false;
       trainSize = 8;
       trainRequire = [ ];
@@ -173,7 +172,6 @@ let
     reviewers = {
       codex = { inherit (rv.codex) enable; };
     };
-    inherit (rv) skipPaths;
     # What a proof would build, and whether it's built (proofs.py).
     nix = "${config.nix.package}/bin";
     baselineTask = ''
@@ -198,6 +196,16 @@ let
     webhook = {
       inherit (config.burrow.events) url;
       events = config.burrow.events.hookEvents;
+    };
+    # Where the steward's mirrors fetch each repo from (mirror.rs).
+    git = "https://github.com";
+    # The reviewers' snapshots (snapshot.rs): where they're checked out, and
+    # the paths none of them reads, the machine's and each repo's own on
+    # top.
+    snapshot = {
+      dir = snapDir;
+      inherit (rv) skipPaths;
+      repos = lib.filterAttrs (_: s: s != [ ]) (lib.mapAttrs (_: r: r.skipPaths or [ ]) cfg.repos);
     };
     # Renovate's dashboards, and where a job that ticks a box on one kicks
     # Renovate to read it.
@@ -708,7 +716,9 @@ in
           sides of the diff: they're told such a file changed, not how, so a
           PR that changes one is judged before it lands. A directory matches
           with a trailing slash. A repo's own `skipPaths` (in `repos`) adds
-          to these.
+          to these. They're Rust's regex syntax, which has no lookaround or
+          backreferences: one it can't read stops every snapshot it's for,
+          so those reviews wait rather than read what it was meant to hide.
         '';
       };
     };

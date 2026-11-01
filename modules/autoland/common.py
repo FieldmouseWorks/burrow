@@ -142,15 +142,18 @@ def gh_env(repo=None):
 UPKEEP_TIMEOUT = 300
 
 
-def upkeep(*args, input=None, mints=False):
+def upkeep(*args, input=None, mints=False, bounded=True):
     """burrow-upkeep (crates/burrow-upkeep) on a repo, as the App for its
     owner, as every GitHub call of a pass's, `input` on its stdin: what it
     printed, read, with a rate limit it met noted for the pass (LIMITED).
     `mints`: it mints its own tokens, for each owner it's about (`hooks`),
     so it's handed none. What it says of itself goes to the journal; one
-    that fails or runs past UPKEEP_TIMEOUT raises."""
+    that fails, or runs past UPKEEP_TIMEOUT while it's `bounded`, raises.
+    A fetch into the steward's mirror isn't: it takes as long as git does,
+    as it always has."""
     p = subprocess.run([*CFG["upkeep"], *args, "--now", repr(NOW), *(["--dry"] if DRY else [])], input=input,
-                       stdout=subprocess.PIPE, text=True, env=None if mints else gh_env(), timeout=UPKEEP_TIMEOUT)
+                       stdout=subprocess.PIPE, text=True, env=None if mints else gh_env(),
+                       timeout=UPKEEP_TIMEOUT if bounded else None)
     if p.returncode:
         raise RuntimeError(f"burrow-upkeep {args[0]} exited {p.returncode}")
     out = json.loads(p.stdout)
