@@ -62,10 +62,18 @@ let
     in if m == null || unit == null || lib.toInt (lib.head m) == 0 then null
       else lib.toInt (lib.head m) * unit;
 
+  # RemainAfterExit as systemd reads it: free-form, so a Nix bool or any of
+  # its words. Unset, or one it wouldn't read as true, is false.
+  remains = sc: builtins.elem (lib.toLower (toString (sc.RemainAfterExit or false))) [ "1" "yes" "true" "on" "y" "t" ];
+
   # A switch restarts a changed unit that is running (or, with
   # RemainAfterExit, has run) and waits for it. A oneshot that may run longer
   # than the confirm window then outlasts the activation's deadline, so the
-  # switch gets killed and reverted for a job that was only slow.
+  # switch gets killed and reverted for a job that was only slow. A pass of
+  # more than a minute that exits when it's done (no RemainAfterExit) is
+  # likely to be caught mid-run whatever its timeout: on a slow box it hits
+  # that timeout inside the switch, which fails the activation and reverts it
+  # just the same. A minute or less is a reload, such as NixOS's nginx's.
   # Only a declared timeout counts: most of NixOS's own oneshots set none and
   # are meant to rerun on a switch, so a job that can run long says so.
   longOneshots = lib.attrNames (lib.filterAttrs (_: s:
@@ -75,7 +83,8 @@ let
     in s.enable && s.restartIfChanged
       && (sc.Type or null) == "oneshot"
       && t != null
-      && (let n = seconds t; w = seconds cfg.confirmWithin; in n == null || w == null || n >= w)
+      && (let n = seconds t; w = seconds cfg.confirmWithin; in n == null || w == null || n >= w
+        || (n > 60 && !remains sc))
   ) config.systemd.services);
 in
 {
@@ -134,7 +143,8 @@ in
         assertion = longOneshots == [ ];
         message = ''
           These oneshot services may run longer than burrow.switch.confirmWithin
-          (${cfg.confirmWithin}), and a switch that finds one running restarts it and waits:
+          (${cfg.confirmWithin}), or are passes a switch can catch mid-run, and a switch that
+          finds one running restarts it and waits, reverting if it times out:
           ${lib.concatStringsSep ", " longOneshots}. Give each restartIfChanged = false,
           so a switch leaves a running one be and the next run is the new one.'';
       }];
