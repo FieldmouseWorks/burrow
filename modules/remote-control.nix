@@ -94,10 +94,12 @@ let
       # either: a scan already running then has a look of its own to come.
       sessions=$HOME/.claude/sessions
       notes=$XDG_RUNTIME_DIR/claude-rc-scan
+      # Through links, as the scan reads them: the projects folder, a
+      # project's folder, its .git and its config may each be one.
       seen() {
         { find "$sessions" -mindepth 1 -maxdepth 1 -printf '%p %T@\n' 2>/dev/null || true; } | sort
-        { find ${lib.escapeShellArg projectsDir} -mindepth 1 -maxdepth 1 -printf '%p\n' 2>/dev/null || true; } | sort
-        { find ${lib.escapeShellArg projectsDir} -mindepth 3 -maxdepth 3 -path '*/.git/config' -printf '%p %T@\n' 2>/dev/null || true; } | sort
+        { find -L ${lib.escapeShellArg projectsDir} -mindepth 1 -maxdepth 1 -printf '%p\n' 2>/dev/null || true; } | sort
+        { find -L ${lib.escapeShellArg projectsDir} -mindepth 3 -maxdepth 3 -path '*/.git/config' -printf '%p %T@\n' 2>/dev/null || true; } | sort
       }
       case ''${1:-} in
         done)

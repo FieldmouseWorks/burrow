@@ -284,8 +284,9 @@ pkgs.testers.runNixOSTest {
                 "s=$(systemctl --user -M dev@ show -p ActiveState -p InvocationID claude-rc-scan.service) && "
                 "echo \"$s\" | grep -qx ActiveState=inactive && "
                 "id=$(echo \"$s\" | sed -n 's/^InvocationID=//p') && "
-                "a=$(systemctl --user -M dev@ show -p ActiveState -p InvocationID claude-rc-again@$id.service) && "
-                "echo \"$a\" | grep -qx ActiveState=inactive && echo \"$a\" | grep -q '^InvocationID=.' && "
+                # The look after it is over: it drops the scan's note once
+                # it has decided (its unit, done, may be gone already).
+                "! test -e /run/user/1001/claude-rc-scan/$id.seen && "
                 "! systemctl --user -M dev@ list-jobs --no-legend | grep -q claude-rc && "
                 "systemctl --user -M dev@ show -p InvocationID --value claude-rc-scan.service | grep -qx \"$id\"", timeout=60)
             assert wake_in() is None, wake_in()
@@ -300,5 +301,39 @@ pkgs.testers.runNixOSTest {
         machine.wait_until_succeeds("grep -qx new /data/dev/src/slow/started", timeout=60)
         # A project now, so its watch is over.
         machine.wait_until_succeeds("systemctl --user -M dev@ show -p ActiveState --value claude-rc-origin@slow.path | grep -qx inactive", timeout=60)
+
+    with subtest("a linked folder whose origin comes while a scan runs gets its server"):
+        # elsewhere is a link to a checkout outside the projects folder, with
+        # no origin yet. A scan is held up reading zz-hold's config (a pipe,
+        # until the test answers), after it has found elsewhere no project.
+        # elsewhere's origin comes meanwhile; the path units start nothing
+        # while the scan runs, and nothing in the projects folder itself
+        # changes: only the look after the scan, reading through the link,
+        # can see it.
+        machine.succeed(
+            "mkdir /data/dev/elsewhere && chown dev:dev /data/dev/elsewhere && "
+            "runuser -u dev -- ${pkgs.git}/bin/git init -q /data/dev/elsewhere && "
+            "ln -s /data/dev/elsewhere /data/dev/src/elsewhere && chown -h dev:dev /data/dev/src/elsewhere")
+        machine.wait_until_succeeds("systemctl --user -M dev@ is-active -q claude-rc-origin@elsewhere.path", timeout=60)
+        settled()
+        machine.succeed(
+            "mkdir -p /data/dev/stage/zz-hold/.git && mkfifo -m 644 /data/dev/stage/zz-hold/.git/config && "
+            "chown -R dev:dev /data/dev/stage")
+        # As in the held status above: a writer holds the pipe open, so the
+        # scan's read gets past opening it and waits for what's written.
+        holder = machine.succeed("{ exec sleep infinity >/data/dev/stage/zz-hold/.git/config; } >/dev/null 2>&1 </dev/null & echo $!").strip()
+        machine.succeed("mv /data/dev/stage/zz-hold /data/dev/src/zz-hold")
+        git = machine.wait_until_succeeds("pgrep -u dev -f 'config --file /data/dev/src/zz-hold/'", timeout=60).split()[0]
+        fd = machine.wait_until_succeeds(f"for d in /proc/{git}/fd/*; do case $(readlink $d) in */zz-hold/.git/config) echo $d;; esac; done | grep .", timeout=10).split()[0]
+        machine.succeed("runuser -u dev -- ${pkgs.git}/bin/git -C /data/dev/elsewhere remote add origin /tmp/later.git")
+        # zz-hold's config is an ordinary file again, as old as the pipe the
+        # scan began by, so the look sees nothing changed there; the read
+        # that's held gets an empty config, then its end.
+        machine.succeed(
+            "touch -r /data/dev/src/zz-hold/.git/config /data/dev/stage/config && chown dev:dev /data/dev/stage/config && "
+            "mv /data/dev/stage/config /data/dev/src/zz-hold/.git/config")
+        machine.succeed(f"echo >{fd} && kill {holder}")
+        machine.wait_until_succeeds("grep -qx new /data/dev/src/elsewhere/started", timeout=60)
+        machine.fail("test -e /data/dev/src/zz-hold/started")
   '';
 }
