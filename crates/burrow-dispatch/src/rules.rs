@@ -158,7 +158,7 @@ pub fn decide(
     }
     if let (Some(f), Some(pool)) = (&cfg.fresh, &snap.fresh) {
         let unread = f.repos.iter().any(|r| snap.unread.contains_key(r));
-        crate::fresh::decide(cfg, f, pool, unread, (st, was), now, &mut d);
+        crate::fresh::decide(cfg, f, pool.as_ref().ok(), unread, (st, was), now, &mut d);
     }
     if let (Some(dep), Some((update, said))) = (&cfg.deploy, &snap.update) {
         // Its last attempt failed without saying so (killed, timed out, a
@@ -446,6 +446,7 @@ mod tests {
                 state: state.into(),
                 since: Some(since),
                 busy,
+                ..Unit::default()
             },
             queued: queued
                 .iter()
@@ -690,7 +691,7 @@ mod tests {
             ..State::default()
         };
         let mut s = Snapshot {
-            fresh: Some(Pool::default()),
+            fresh: Some(Ok(Pool::default())),
             unread: BTreeMap::from([("sam/f".into(), "HTTP 502".into())]),
             ..Snapshot::default()
         };
@@ -784,6 +785,7 @@ mod tests {
             state: "activating".into(),
             since: Some(T - 1.0),
             busy: false,
+            ..Unit::default()
         };
         assert_eq!(
             decide(&cfg, &s, &State::default(), &BTreeMap::new(), T + 60.0).items["deploy/sam/box"]
@@ -872,6 +874,7 @@ mod tests {
             state: "activating".into(),
             since: Some(T - 300.0),
             busy: false,
+            ..Unit::default()
         };
         let d = decide(&cfg, &s, &d.state, &d.items, T + 90.0);
         let it = &d.items["deploy/sam/box"];

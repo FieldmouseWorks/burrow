@@ -6,7 +6,7 @@ use std::fs;
 use std::io::Write as _;
 use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::{Command, Output, Stdio};
 use std::time::Duration;
 
 use serde_json::Value;
@@ -23,6 +23,9 @@ pub struct Unit {
     /// Whether a process named Runner.Worker is in it: a runner at a job.
     /// One running whose processes can't be read counts as at one.
     pub busy: bool,
+    /// Whether systemd has a job for it still to run: a start queued
+    /// behind what it's ordered after leaves it inactive until then.
+    pub pending: bool,
 }
 
 pub trait World {
@@ -40,8 +43,9 @@ pub trait World {
     fn cancel(&self, repo: &str, run: u64) -> Result<(), String>;
     /// Start a burrow-events pass now (HANDLER[/OWNER/REPO]). Best effort.
     fn kick(&self, path: &str);
-    /// The instances of a template's units systemd has loaded.
-    fn instances(&self, template: &str) -> Vec<String>;
+    /// The instances of a template's units systemd has loaded, or why
+    /// they couldn't all be listed.
+    fn instances(&self, template: &str) -> Result<Vec<String>, String>;
     /// Register a runner for one job as the instance's, and queue its
     /// unit's start with that registration, which the unit then owns.
     fn fresh(&self, f: &Fresh, instance: &str) -> Result<(), String>;
@@ -80,6 +84,7 @@ impl World for Real<'_> {
             "ActiveEnterTimestamp",
             "InactiveExitTimestamp",
             "ControlGroup",
+            "Job",
         ];
         let out = Command::new("systemctl")
             .arg("show")
@@ -116,7 +121,12 @@ impl World for Real<'_> {
                     working(&Path::new("/sys/fs/cgroup").join(cg.trim_start_matches('/')))
                         .unwrap_or(true)
                 });
-        Unit { state, since, busy }
+        Unit {
+            state,
+            since,
+            busy,
+            pending: pending(&shown),
+        }
     }
 
     fn running(&self) -> Result<String, String> {
@@ -167,15 +177,12 @@ impl World for Real<'_> {
         }
     }
 
-    fn instances(&self, template: &str) -> Vec<String> {
+    fn instances(&self, template: &str) -> Result<Vec<String>, String> {
         let out = Command::new("systemctl")
             .args(["list-units", "--all", "--plain", "--no-legend", "--full"])
             .arg(format!("{template}*.service"))
-            .stderr(Stdio::inherit())
-            .output()
-            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
-            .unwrap_or_default();
-        instances(&out, template)
+            .output();
+        listed(out, template)
     }
 
     fn fresh(&self, f: &Fresh, instance: &str) -> Result<(), String> {
@@ -215,7 +222,7 @@ impl World for Real<'_> {
     }
 
     fn sweep(&self, f: &Fresh) -> Vec<String> {
-        sweep(&f.configs, &self.instances(&f.template))
+        sweep(&f.configs, self.instances(&f.template))
     }
 }
 
@@ -225,13 +232,21 @@ impl World for Real<'_> {
 /// systemd no longer has was left by a start that never ran (a pass cut
 /// short between writing it and queueing the start, or a start job
 /// cancelled), and its registration is still one a process could take a
-/// job with. What it says of each names it, never what it held.
-fn sweep(dir: &Path, live: &[String]) -> Vec<String> {
+/// job with. When the units couldn't be listed, which one owns each
+/// config isn't known, so every one stays. What it says of each names it,
+/// never what it held.
+fn sweep(dir: &Path, live: Result<Vec<String>, String>) -> Vec<String> {
     let Ok(entries) = fs::read_dir(dir) else {
         return Vec::new();
     };
+    let entries: Vec<fs::DirEntry> = entries.flatten().collect();
+    let live = match live {
+        Ok(live) => live,
+        Err(_) if entries.is_empty() => return Vec::new(),
+        Err(e) => return vec![format!("kept every JIT config, its unit unknown: {e}")],
+    };
     let mut said: Vec<String> = entries
-        .flatten()
+        .into_iter()
         .filter_map(|e| {
             let name = e.file_name().to_string_lossy().into_owned();
             if live.contains(&name) {
@@ -273,6 +288,21 @@ fn hand(
     })
 }
 
+/// The instances of a template (`NAME@`) `systemctl list-units` listed:
+/// none at all unless it ran and succeeded, since what a failed one printed
+/// may be only some of them.
+fn listed(out: std::io::Result<Output>, template: &str) -> Result<Vec<String>, String> {
+    let out = out.map_err(|e| format!("listing {template}*: systemctl: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "listing {template}*: systemctl {}: {}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(instances(&String::from_utf8_lossy(&out.stdout), template))
+}
+
 /// The instances of a template (`NAME@`) in `systemctl list-units --plain
 /// --no-legend` lines: each line's first word is a unit.
 fn instances(out: &str, template: &str) -> Vec<String> {
@@ -282,6 +312,12 @@ fn instances(out: &str, template: &str) -> Vec<String> {
         .filter(|i| !i.is_empty())
         .map(str::to_owned)
         .collect()
+}
+
+/// Whether `systemctl show` gave the unit a job: its id, and nothing at
+/// all when it has none.
+fn pending(shown: &BTreeMap<String, String>) -> bool {
+    shown.get("Job").is_some_and(|j| !j.is_empty())
 }
 
 /// `systemctl show`'s KEY=VALUE lines.
@@ -329,7 +365,10 @@ fn working(cg: &Path) -> std::io::Result<bool> {
 
 #[cfg(test)]
 mod tests {
-    use super::{hand, instances, shown, sweep, working};
+    use std::os::unix::process::ExitStatusExt as _;
+    use std::process::{ExitStatus, Output};
+
+    use super::{hand, instances, listed, pending, shown, sweep, working};
 
     // A JIT config is there for its unit's start, readable by this user
     // alone, and stays for the unit once the start is queued; a start that
@@ -363,14 +402,21 @@ mod tests {
     fn sweeps_what_no_unit_has() {
         use std::os::unix::fs::PermissionsExt as _;
         let dir = tempfile::tempdir().unwrap();
-        assert!(sweep(&dir.path().join("gone"), &[]).is_empty());
-        assert!(sweep(dir.path(), &[]).is_empty());
+        assert!(sweep(&dir.path().join("gone"), Ok(vec![])).is_empty());
+        assert!(sweep(dir.path(), Ok(vec![])).is_empty());
+        assert!(sweep(dir.path(), Err("bus".into())).is_empty());
         for (name, mode) in [("17-1", 0o600), ("17-0", 0o400), ("18-0", 0o600)] {
             let path = dir.path().join(name);
             std::fs::write(&path, "secret").unwrap();
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
         }
-        let said = sweep(dir.path(), &["18-0".into(), "19-0".into()]);
+        // The units unlisted: every one stays, the unit it's for unknown.
+        assert_eq!(
+            sweep(dir.path(), Err("Failed to connect to bus".into())),
+            ["kept every JIT config, its unit unknown: Failed to connect to bus"]
+        );
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 3);
+        let said = sweep(dir.path(), Ok(vec!["18-0".into(), "19-0".into()]));
         assert_eq!(
             said,
             [
@@ -384,6 +430,27 @@ mod tests {
             .map(|e| e.unwrap().file_name())
             .collect();
         assert_eq!(left, ["18-0"]);
+    }
+
+    // A listing counts only when systemctl ran and succeeded: one that
+    // failed lists nothing, whatever it printed first, and one that worked
+    // and found none lists none.
+    #[test]
+    fn lists_only_what_systemctl_finished() {
+        let out = |code: i32, stdout: &str| {
+            Ok(Output {
+                status: ExitStatus::from_raw(code << 8),
+                stdout: stdout.as_bytes().to_vec(),
+                stderr: b"Failed to connect to bus".to_vec(),
+            })
+        };
+        let line = "fresh-runner@17-0.service loaded active running GitHub Actions runner\n";
+        assert_eq!(listed(out(0, line), "fresh-runner@").unwrap(), ["17-0"]);
+        assert_eq!(listed(out(0, ""), "fresh-runner@"), Ok(vec![]));
+        let err = listed(out(1, line), "fresh-runner@").unwrap_err();
+        assert!(err.contains("Failed to connect to bus"), "{err}");
+        let spawn = Err(std::io::Error::from(std::io::ErrorKind::NotFound));
+        assert!(listed(spawn, "fresh-runner@").is_err());
     }
 
     // A template's instances, and nothing else's: another template's, the
@@ -430,5 +497,8 @@ fresh-runner-old@3.service loaded active running other
         assert_eq!(got["ActiveState"], "active");
         assert_eq!(got["ActiveEnterTimestamp"], "@1800000000");
         assert_eq!(got["ControlGroup"], "/system.slice/r.service");
+        assert!(!pending(&got));
+        assert!(pending(&shown("ActiveState=inactive\nJob=4242\n")));
+        assert!(!pending(&shown("ActiveState=inactive\nJob=\n")));
     }
 }

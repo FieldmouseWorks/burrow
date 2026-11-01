@@ -35,6 +35,9 @@ pub fn run(cfg: &Config, world: &dyn World, now: f64) -> Result<(), String> {
     for (repo, err) in &snap.unread {
         println!("couldn't read {repo}: {err}");
     }
+    if let Some(Err(e)) = &snap.fresh {
+        println!("couldn't list the fresh runners, so none is started or stopped: {e}");
+    }
     let Decision {
         moves,
         items,
@@ -196,7 +199,10 @@ fn seen(out: &mut String, cfg: &Config, snap: &Snapshot) {
             s.queued.len()
         );
     }
-    if let (Some(f), Some(pool)) = (&cfg.fresh, &snap.fresh) {
+    if let (Some(f), Some(Err(e))) = (&cfg.fresh, &snap.fresh) {
+        let _ = writeln!(out, "fresh runners ({}): {e}", f.label);
+    }
+    if let (Some(f), Some(Ok(pool))) = (&cfg.fresh, &snap.fresh) {
         let busy = pool.units.values().filter(|u| u.busy).count();
         let _ = writeln!(
             out,
@@ -209,9 +215,10 @@ fn seen(out: &mut String, cfg: &Config, snap: &Snapshot) {
         for (i, u) in &pool.units {
             let _ = writeln!(
                 out,
-                "  {}{i}: {}{}",
+                "  {}{i}: {}{}{}",
                 f.prefix,
                 u.state,
+                if u.pending { ", a job queued" } else { "" },
                 if u.busy { ", at a job" } else { "" }
             );
         }
@@ -257,6 +264,7 @@ mod tests {
             state: "active".into(),
             since: Some(since),
             busy: false,
+            ..Unit::default()
         }
     }
 
@@ -473,7 +481,7 @@ mod tests {
         fn kick(&self, path: &str) {
             self.w.kick(path)
         }
-        fn instances(&self, template: &str) -> Vec<String> {
+        fn instances(&self, template: &str) -> Result<Vec<String>, String> {
             self.w.instances(template)
         }
         fn fresh(&self, f: &crate::config::Fresh, instance: &str) -> Result<(), String> {
