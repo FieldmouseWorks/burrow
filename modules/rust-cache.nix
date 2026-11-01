@@ -1,5 +1,5 @@
 # rust-cache: every Rust build on the machine shares a compile cache. cargo
-# runs rustc through sccache (rust-cache/rustc-wrapper.sh), so a dependency a
+# runs rustc through sccache (crates/burrow-rustc-wrapper), so a dependency a
 # user compiled once comes out of that user's cache the next time, in a fresh
 # worktree or a CI checkout as much as in the one it was built in. Only
 # library crates built without incremental compilation come out of it, which
@@ -45,18 +45,21 @@ let
   # the builds alike, whatever a user keeps in ~/.config/sccache.
   conf = pkgs.writeText "sccache.conf" "";
 
-  vars = {
-    ROOT = cfg.dir;
-    CONF = "${conf}";
-    SCCACHE = lib.getExe sccache;
-  };
-
-  wrapper = pkgs.writeShellApplication {
-    name = "rustc-wrapper";
-    runtimeInputs = [ pkgs.coreutils ];
-    text = lib.concatStrings (lib.mapAttrsToList (n: v: "${n}=${lib.escapeShellArg v}\n") vars)
-      + builtins.readFile ./rust-cache/rustc-wrapper.sh;
-  };
+  burrow = inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow;
+  # What the wrapper reads (crates/burrow-rustc-wrapper).
+  wrapperConfig = pkgs.writeText "rustc-wrapper.json" (builtins.toJSON {
+    root = cfg.dir;
+    conf = "${conf}";
+    sccache = lib.getExe sccache;
+    id = "${pkgs.coreutils}/bin/id";
+  });
+  wrapper = pkgs.runCommand "rustc-wrapper" {
+    nativeBuildInputs = [ pkgs.makeBinaryWrapper ];
+    meta.mainProgram = "rustc-wrapper";
+  } ''
+    makeBinaryWrapper ${burrow}/bin/burrow-rustc-wrapper $out/bin/rustc-wrapper \
+      --add-flags ${wrapperConfig}
+  '';
   # What RUSTC_WRAPPER names. A process keeps the environment it started
   # with, and a CI runner or a Remote Control session outlives many switches.
   # Naming the wrapper itself would leave it on the one it started with, and
@@ -70,6 +73,10 @@ let
   # It's named sccache because the cc crate puts RUSTC_WRAPPER in front of a
   # build script's C compiles only when its file is named that (cc's
   # RUSTC_WRAPPER docs); under any other name those compiles go uncached.
+  # It stays a script on bash and coreutils, so its path changes only with
+  # them: the systemd manager's environment names it, and a switch that
+  # changes that environment re-executes systemd. Built from burrow, it would
+  # change with every burrow change.
   launcher = pkgs.writeTextFile {
     name = "rust-cache-launcher";
     destination = "/bin/sccache";
