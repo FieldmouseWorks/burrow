@@ -2,9 +2,11 @@
 # box from your phone (Claude app) and any browser (claude.ai/code): each
 # project shows up as its own machine/folder there.
 #
-# Every folder in burrow.projectsDir gets one, found by itself: clone a repo
-# there and it appears on the phone a moment later; delete the folder and its
-# server stops. The machine's own flake (burrow.flake) is one of them, so its
+# Every project in burrow.projectsDir gets one, found by itself: a git checkout
+# with an origin. Clone a repo there and it appears on the phone a moment
+# later; delete the folder and its server stops. A folder that isn't a project
+# (notes, scratch, a folder of a project's extra checkouts, a linked worktree)
+# gets none. The machine's own flake (burrow.flake) always gets one, so its
 # session is the operator: the one you talk to about the machine itself.
 #
 # Each server runs `claude remote-control` in its own tmux server, so it has
@@ -73,16 +75,18 @@ let
 
   scan = pkgs.writeShellApplication {
     name = "claude-rc-scan";
-    runtimeInputs = [ pkgs.systemd pkgs.coreutils pkgs.findutils pkgs.gnugrep pkgs.procps pkgs.jq ];
+    runtimeInputs = [ pkgs.systemd pkgs.coreutils pkgs.findutils pkgs.gnugrep pkgs.procps pkgs.jq config.programs.git.package ];
     text = ''
-      # Start a server for every project folder, stop the ones whose folder is gone,
-      # and restart the stale ones once they hold no session.
+      # Start a server for every project, stop the ones whose folder is gone or
+      # no longer a project, and restart the stale ones once they hold no
+      # session.
       #
       # A start while a scan runs (a path unit's, the booked timer's) only
       # joins it, until it has stopped, so what changed meanwhile would go
-      # unseen: a session's status, a folder added or gone, a quiet spell's
-      # end. So each scan notes what it saw as it began and when its spells
-      # end, and as it stops (`claude-rc-scan done`) asks for a look after it
+      # unseen: a session's status, a folder added or gone, a checkout's
+      # origin written (a clone writes it just after making the folder), a
+      # quiet spell's end. So each scan notes what it saw as it began and when
+      # its spells end, and as it stops (`claude-rc-scan done`) asks for a look after it
       # (claude-rc-again@ID, `claude-rc-scan again ID`), which waits for it to
       # be stopped and scans again if anything changed since or a spell is
       # over. That look has a unit of its own, so no start joins it; and its
@@ -93,6 +97,7 @@ let
       seen() {
         { find "$sessions" -mindepth 1 -maxdepth 1 -printf '%p %T@\n' 2>/dev/null || true; } | sort
         { find ${lib.escapeShellArg projectsDir} -mindepth 1 -maxdepth 1 -printf '%p\n' 2>/dev/null || true; } | sort
+        { find ${lib.escapeShellArg projectsDir} -mindepth 3 -maxdepth 3 -path '*/.git/config' -printf '%p %T@\n' 2>/dev/null || true; } | sort
       }
       case ''${1:-} in
         done)
@@ -112,21 +117,21 @@ let
       mkdir -p "$notes"
       note=$notes/$INVOCATION_ID
       seen >"$note.seen"
-      # A linked git worktree (its .git is a file) is a checkout of a project
-      # that already has its own server, so it gets none; neither does a folder
-      # matching burrow.remoteControl.skip.
-      skips=(${lib.escapeShellArgs cfg.skip})
+      # A project is a git checkout with an origin. Its .git is a folder: a
+      # linked worktree's is a file, and it's a checkout of a project that has
+      # its own server. Anything else would be a server with nothing to push
+      # to. The machine's own flake is served whatever it is. A folder made a
+      # project where it stands (git init, a remote added) gets its server at
+      # the next scan, since nothing watches every folder's config.
+      flake=$(realpath -m ${lib.escapeShellArg config.burrow.flake})
       want=()
       for d in ${lib.escapeShellArg projectsDir}/*/; do
         [ -d "$d" ] || continue
         name=$(basename "$d")
-        [ -f "$d/.git" ] && continue
-        skip=
-        for glob in "''${skips[@]}"; do
-          # shellcheck disable=SC2053 # the glob is meant to match
-          [[ $name == $glob ]] && skip=1
-        done
-        [ -z "$skip" ] || continue
+        if [ "$(realpath "$d")" != "$flake" ]; then
+          [ -d "$d/.git" ] || continue
+          git config --file "$d/.git/config" --get remote.origin.url >/dev/null || continue
+        fi
         want+=("$(systemd-escape --template claude-rc@.service "$name")")
       done
       for unit in "''${want[@]}"; do
@@ -213,16 +218,6 @@ in
 
   options.burrow.remoteControl = {
     enable = lib.mkEnableOption "an always-on Claude Remote Control server for every project folder";
-    skip = lib.mkOption {
-      type = lib.types.listOf lib.types.str;
-      default = [ "*-worktrees" ];
-      example = [ "*-worktrees" "scratch-*" ];
-      description = ''
-        Shell globs for folders in burrow.projectsDir that get no server: folders
-        that hold a project's extra checkouts rather than a project. Linked git
-        worktrees are always skipped.
-      '';
-    };
     spawn = lib.mkOption {
       type = lib.types.enum [ "worktree" "same-dir" ];
       default = "worktree";
@@ -230,8 +225,7 @@ in
         Where a session started from claude.ai works. worktree: its own git
         worktree of the project, so sessions working at once never share a
         checkout (an idleSession stays in the folder itself). same-dir: all
-        of them in the folder. The machine's own flake
-        and folders that aren't git repositories are always same-dir.
+        of them in the folder. The machine's own flake is always same-dir.
       '';
     };
     permissionMode = lib.mkOption {

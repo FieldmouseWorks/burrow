@@ -63,10 +63,10 @@ The owner's messages in the thread reach it directly. The catch: each thread
 shows the owner an approval card first, and a box with no desktop app can't be
 pre-approved.
 
-- Every folder in `burrow.projectsDir` has an always-on `claude remote-control`
-  server that trusts its folder by itself, so it never sits at a prompt nobody
-  can see. Linked git worktrees and folders matching
-  `burrow.remoteControl.skip` get none.
+- Every project in `burrow.projectsDir`, a git checkout with an origin, has an
+  always-on `claude remote-control` server that trusts its folder by itself, so
+  it never sits at a prompt nobody can see. The machine's own flake always has
+  one. Any other folder, a linked git worktree included, gets none.
 - With `burrow.remoteControl.spawn = "worktree"` (the default) each session
   started from claude.ai gets its own git worktree, so several threads can work
   in one project at once. A server holds no session until one is asked for

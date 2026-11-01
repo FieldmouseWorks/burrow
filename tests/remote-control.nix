@@ -5,7 +5,9 @@
 # session that has sat idle for half an hour isn't in use. Nothing waits for a
 # timer: the switch scans, a session's status changing does,
 # and a scan that leaves a server waiting books the next one for when its
-# quiet spell ends.
+# quiet spell ends. Only a project gets a server: a git checkout with an
+# origin, or the machine's own flake, whatever it is. A clone made while the
+# servers run gets one too.
 #
 #   nix build .#checks.x86_64-linux.remote-control -L
 { self, pkgs }:
@@ -35,7 +37,21 @@ pkgs.testers.runNixOSTest {
   name = "remote-control";
 
   nodes.machine = { lib, ... }: {
-    imports = [ self.nixosModules.remote-control ];
+    # The folders below with a session file are projects. Not projects: a git
+    # repository with no origin, and linked worktrees of a project.
+    imports = [
+      self.nixosModules.remote-control
+      (import ./remote-control/projects.nix {
+        inherit pkgs;
+        names = [ "idle" "busy" "recent" "waiting" "left" "late" "due" ];
+        after = ''
+          git init -q /data/dev/src/local
+          git -C /data/dev/src/idle -c user.name=dev -c user.email=dev@example.invalid commit -q --allow-empty -m start
+          git -C /data/dev/src/idle worktree add -q /data/dev/src/idle-worktrees/one
+          git -C /data/dev/src/idle worktree add -q /data/dev/src/linked
+        '';
+      })
+    ];
     burrow = {
       claude.package = claude "old";
       remoteControl.enable = true;
@@ -69,6 +85,11 @@ pkgs.testers.runNixOSTest {
       "f /data/dev/src/late/session 0644 dev dev - idle 600"
       "d /data/dev/src/due 0755 dev dev -"
       "f /data/dev/src/due/session 0644 dev dev - waiting 600"
+      # The machine's own flake (burrow.flake), not a git checkout here.
+      "d /data/dev/src/machine 0755 dev dev -"
+      # Not projects: notes, and a folder of a project's extra checkouts.
+      "d /data/dev/src/notes 0755 dev dev -"
+      "d /data/dev/src/idle-worktrees 0755 dev dev -"
     ];
   };
 
@@ -103,12 +124,18 @@ pkgs.testers.runNixOSTest {
     machine.wait_for_unit("user@1001.service")
     sent = time.time()
     skew = float(machine.succeed("date +%s.%N")) - (sent + time.time()) / 2
-    for p in ("idle", "busy", "recent", "waiting", "left", "late", "due"):
+    for p in ("idle", "busy", "recent", "waiting", "left", "late", "due", "machine"):
         machine.wait_until_succeeds(f"grep -qx old /data/dev/src/{p}/started", timeout=120)
     # Nothing is stale yet: no scan booked.
     machine.wait_until_succeeds("systemctl --user -M dev@ show -p ActiveState --value claude-rc-scan.service | grep -qx inactive", timeout=60)
     assert wake_in() is None, wake_in()
     booted = time.time()
+
+    with subtest("a folder that isn't a project gets no server"):
+        for p in ("notes", "local", "linked", "idle-worktrees"):
+            machine.fail(f"test -e /data/dev/src/{p}/started")
+            unit = machine.succeed(f"systemd-escape --template claude-rc@.service {p}").strip()
+            assert machine.succeed(f"systemctl --user -M dev@ show -p ActiveState --value {unit}").strip() == "inactive", p
 
     machine.succeed("/run/current-system/specialisation/next/bin/switch-to-configuration test")
 
@@ -225,7 +252,10 @@ pkgs.testers.runNixOSTest {
                 f"[ \"$(systemctl --user -M dev@ show -p InvocationID --value claude-rc-scan.service)\" != {last} ] && "
                 "systemctl --user -M dev@ show -p ActiveState --value claude-rc-scan.service | grep -qx inactive", timeout=10)
         machine.succeed("systemctl --user -M dev@ is-active -q claude-rc-scan-sessions.path claude-rc-scan.path")
-        machine.succeed("mkdir /data/dev/src/later && chown dev:dev /data/dev/src/later")
+        # A clone makes its folder before it writes the origin: the scan that
+        # folder starts may find no origin yet, and the look after it does.
+        machine.succeed("runuser -u dev -- ${pkgs.git}/bin/git init -q --bare /tmp/later.git")
+        machine.succeed("runuser -u dev -- ${pkgs.git}/bin/git clone -q /tmp/later.git /data/dev/src/later")
         machine.wait_until_succeeds("grep -qx new /data/dev/src/later/started", timeout=60)
 
     with subtest("a server already on the new one stays up, and nothing is booked"):

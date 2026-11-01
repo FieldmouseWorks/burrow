@@ -56,7 +56,10 @@ pkgs.testers.runNixOSTest {
   name = "remote-control-memory";
 
   nodes.machine = { lib, ... }: {
-    imports = [ self.nixosModules.remote-control ];
+    imports = [
+      self.nixosModules.remote-control
+      (import ./remote-control/projects.nix { inherit pkgs; names = projects; })
+    ];
     burrow = {
       claude.package = claude;
       remoteControl = {

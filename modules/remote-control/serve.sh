@@ -17,8 +17,8 @@ real=$(realpath "$dir")
 
 spawn=$SPAWN
 # The machine's own flake stays one checkout: that's the one the switch builds.
-# A folder that isn't a git repository can't have worktrees.
-if [ "$real" = "$(realpath "$FLAKE")" ] || [ ! -d "$dir/.git" ]; then spawn=same-dir; fi
+# It's the one folder served that may not be a git checkout (claude-rc-scan).
+if [ "$real" = "$(realpath "$FLAKE")" ]; then spawn=same-dir; fi
 for n in "${SAME_DIR[@]}"; do
   if [ "$n" = "$name" ]; then spawn=same-dir; fi
 done
