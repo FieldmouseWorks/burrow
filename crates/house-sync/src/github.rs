@@ -105,11 +105,29 @@ pub fn agents(api: &mut dyn Api, repo: &str, at: &str) -> Result<Option<(String,
     let (Some(sha), Some(content)) = (file["sha"].as_str(), file["content"].as_str()) else {
         return Err(missing(&path, "sha or content"));
     };
+    Ok(Some((sha.into(), decode(&path, content)?)))
+}
+
+/// A file's bytes at a commit, or None when there isn't one.
+pub fn file(api: &mut dyn Api, repo: &str, name: &str, at: &str) -> Result<Option<Vec<u8>>, Error> {
+    let path = format!("repos/{repo}/contents/{name}?ref={at}");
+    let r = call_allowing(api, "GET", &path, None, None, &[404])?;
+    if r.status == 404 {
+        return Ok(None);
+    }
+    let file = r.json()?;
+    let content = file["content"]
+        .as_str()
+        .ok_or_else(|| missing(&path, "content"))?;
+    decode(&path, content).map(Some)
+}
+
+/// The base64 a contents answer carries, in lines.
+fn decode(path: &str, content: &str) -> Result<Vec<u8>, Error> {
     let content: String = content.chars().filter(|c| !c.is_whitespace()).collect();
-    let bytes = STANDARD
+    STANDARD
         .decode(content)
-        .map_err(|e| Error(format!("{path}: its content isn't base64: {e}")))?;
-    Ok(Some((sha.into(), bytes)))
+        .map_err(|e| Error(format!("{path}: its content isn't base64: {e}")))
 }
 
 /// An open PR.

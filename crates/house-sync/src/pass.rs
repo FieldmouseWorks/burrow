@@ -212,6 +212,18 @@ impl Pass<'_> {
             );
             return self.close_older(name, &open, &why);
         }
+        // The repo that holds house/ itself: a merge there reaches its default
+        // branch before this system has it, and a PR now would take those
+        // blocks back out of its AGENTS.md. The pass after the switch has them.
+        for block in &self.house.blocks {
+            let source = format!("house/{}.md", block.name);
+            if github::file(self.api, name, &source, &sha)?.is_some_and(|text| text != block.text) {
+                self.say(&format!(
+                    "{name}: its own {source} isn't this system's; the pass for that one does the work"
+                ));
+                return Ok(());
+            }
+        }
         // Already open for these blocks: only the cleanup may be left to do.
         let branch = self.house.branch();
         if let Some(current) = open.iter().find(|p| p.head == branch) {
