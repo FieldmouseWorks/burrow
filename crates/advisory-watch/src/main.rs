@@ -24,7 +24,8 @@ fn main() -> ExitCode {
         }
     };
     match words {
-        [] => one_pass(&cfg, config),
+        [] => one_pass(&cfg, config, false),
+        [w] if w == THROUGH_SUDO => one_pass(&cfg, config, true),
         [w] if w == "report" => report(&cfg),
         _ => {
             eprintln!("usage: advisory-watch [report]");
@@ -33,11 +34,14 @@ fn main() -> ExitCode {
     }
 }
 
-fn one_pass(cfg: &Config, config: &str) -> ExitCode {
-    // sudo sets SUDO_UID, and makes root: a pass sudo started as someone
-    // else (sudo -u) runs as them, with what they may do, rather than
-    // starting again for ever.
-    if !rustix::process::geteuid().is_root() && env::var_os("SUDO_UID").is_none() {
+/// The word a pass that isn't root starts again with, through sudo. sudo
+/// makes it root. Where it doesn't (a runas default, or the tests'
+/// stand-in), the pass runs as whoever it made it, rather than starting
+/// again for ever.
+const THROUGH_SUDO: &str = "__through-sudo";
+
+fn one_pass(cfg: &Config, config: &str, through_sudo: bool) -> ExitCode {
+    if !through_sudo && !rustix::process::geteuid().is_root() {
         let exe = match env::current_exe() {
             Ok(exe) => exe,
             Err(e) => {
@@ -49,6 +53,7 @@ fn one_pass(cfg: &Config, config: &str) -> ExitCode {
             .arg("--")
             .arg(exe)
             .arg(config)
+            .arg(THROUGH_SUDO)
             .exec();
         eprintln!("advisory-watch: {}: {e}", cfg.tools.sudo.display());
         return ExitCode::FAILURE;

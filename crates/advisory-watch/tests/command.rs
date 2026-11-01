@@ -27,14 +27,14 @@ fn stand_ins() -> &'static Path {
         let bin = tempfile::tempdir().unwrap();
         let b = bin.path();
         fs::set_permissions(b, fs::Permissions::from_mode(0o755)).unwrap();
-        // Root, as far as a pass can tell from SUDO_UID; never twice.
+        // Runs it as it is, and never under itself.
         script(
             &b.join("sudo"),
             r#"#!/bin/sh
 echo "$*" >>"$FAKE/sudo"
-[ "$SUDO_UID" = "" ] && [ "$1" = -- ] || exit 9
+[ "$IN_SUDO" = "" ] && [ "$1" = -- ] || exit 9
 shift
-SUDO_UID=1 exec "$@"
+IN_SUDO=1 exec "$@"
 "#,
         );
         script(
@@ -268,7 +268,7 @@ impl Machine {
             .args(words)
             .env("FAKE", self.path("fake"))
             .env("XDG_RUNTIME_DIR", "/run/user/0")
-            .env_remove("SUDO_UID");
+            .env_remove("IN_SUDO");
         c
     }
 
@@ -601,6 +601,8 @@ fn a_source_it_cant_read_is_passed_over_and_tried_again() {
 fn a_pass_started_as_anyone_else_goes_through_sudo() {
     let m = Machine::new();
     let mut c = m.command(&[]);
+    // From a shell that came from sudo (sudo -iu dev) too.
+    c.env("SUDO_UID", "1000");
     if root() {
         // As nobody, who may write the state and read the rest.
         for p in ["", "state", "src", "fake", "www"] {
@@ -613,7 +615,10 @@ fn a_pass_started_as_anyone_else_goes_through_sudo() {
     assert!(out.status.success(), "{}", stderr(&out));
     assert_eq!(
         m.fake("sudo"),
-        format!("-- {BIN} {}\n", m.path("config.json").display())
+        format!(
+            "-- {BIN} {} __through-sudo\n",
+            m.path("config.json").display()
+        )
     );
     assert_eq!(m.seen().len(), 3);
 }
