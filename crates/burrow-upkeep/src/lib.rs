@@ -4,10 +4,10 @@
 //! and the flaky tests' quarantine (flaky.rs); and for the reviewers, each
 //! one's look at a PR queued (queue.rs) with its brief (brief.rs) on the
 //! snapshot it reads (snapshot.rs, from the steward's mirror of the repo,
-//! mirror.rs), their answers, posted on its PRs (post.rs), and what they
-//! leave, swept once nothing needs it (sweep.rs); and for its Claude jobs
-//! that settle a PR (claims.rs), their answers, posted only once the PR's
-//! head is their push (answer.rs). A
+//! mirror.rs), their answers, posted on its PRs (post.rs) and read back
+//! as their verdicts (verdict.rs), and what they leave, swept once nothing
+//! needs it (sweep.rs); and for its Claude jobs that settle a PR (claims.rs),
+//! their answers, posted only once the PR's head is their push (answer.rs). A
 //! pass of the steward's runs
 //! `settle`, then `branches` once it has seen to the repo's PRs, then
 //! `watch`, on each repo it sees to, with the App's token for the repo's
@@ -36,6 +36,7 @@ pub mod sweep;
 #[cfg(test)]
 mod testing;
 pub mod token;
+pub mod verdict;
 
 use pass::{Pass, repo_file};
 
@@ -61,6 +62,14 @@ pub fn settle(p: &mut Pass, repo: &settle::Repo, secret: impl FnOnce() -> Result
     if let Err(e) = hook::keep(p, &secret, &mut st, due) {
         eprintln!("{}: its webhook: {e}", p.repo);
     }
+}
+
+/// GitHub's time, in seconds.
+pub fn ts(at: &str) -> Result<f64, String> {
+    let t: jiff::Timestamp = at
+        .parse()
+        .map_err(|e| format!("GitHub's time {at:?}: {e}"))?;
+    Ok(t.as_millisecond() as f64 / 1000.0)
 }
 
 /// Each part the config has on, each on its own: one that fails says so in

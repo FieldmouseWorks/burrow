@@ -7,6 +7,7 @@ for the agent and its sandbox; and PRs shaped like its query's."""
 import http.server
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -55,14 +56,13 @@ PROOF_RUN = os.path.abspath(sys.argv[7])
 # notes how it was run (UPKEEP_RAN), with what `branches` and `hooks` read on
 # its stdin last, and finds nothing due, stuck or wanted; its `claims` keeps
 # every fix job as it was and says nothing of any (unpushed.py runs the real
-# one). Its `token` is the real one's, and so is its `sweep`, which asks
-# GitHub nothing, on the config upkeep_config writes (UPKEEP_REAL).
-UPKEEP_RAN, UPKEEP_REAL = f"{tmp}/upkeep-ran", f"{tmp}/upkeep-real.json"
-with open(f"{tmp}/upkeep-none", "w") as f:
-    f.write(f"""#!{sys.executable}
-import json, os, sys
-if sys.argv[2] in ("token", "sweep"):
-    os.execv({UPKEEP!r}, [{UPKEEP!r}, {UPKEEP_REAL!r}, *sys.argv[2:]])
+# one). Its `token` is the real one's, and so are its `sweep` and `verdict`,
+# which ask GitHub nothing, on the config upkeep_config writes (UPKEEP_REAL).
+# Those it starts as they are, from sh: every pass's PRs read their verdicts,
+# and a Python's start for each would be most of the Python check's time.
+UPKEEP_RAN, UPKEEP_REAL, UPKEEP_FAKE = f"{tmp}/upkeep-ran", f"{tmp}/upkeep-real.json", f"{tmp}/upkeep-fake"
+with open(UPKEEP_FAKE, "w") as f:
+    f.write(f"""import json, sys
 if sys.argv[2] == "claims":
     look = json.load(sys.stdin)
     print(json.dumps({{"answering": look["answering"], "pushedBy": look["pushedBy"], "stop": [], "answered": [],
@@ -72,6 +72,13 @@ with open({UPKEEP_RAN!r}, "a") as f:
     f.write(json.dumps(sys.argv[2:] + ([json.load(sys.stdin)] if sys.argv[2] in ("branches", "hooks") else [])) + "\\n")
 print(json.dumps({{"failed": [], "limited": None}} if sys.argv[2] in ("settle", "hooks") else
                  {{"stuck": [], "wake": None, "failed": [], "limited": None, "searched": False, "jobs": []}}))
+""")
+with open(f"{tmp}/upkeep-none", "w") as f:
+    f.write(f"""#!/bin/sh
+case "$2" in
+token|sweep|verdict) shift; exec {shlex.quote(UPKEEP)} {shlex.quote(UPKEEP_REAL)} "$@" ;;
+esac
+exec {shlex.quote(sys.executable)} -I {shlex.quote(UPKEEP_FAKE)} "$@"
 """)
 os.chmod(f"{tmp}/upkeep-none", 0o755)
 os.makedirs(f"{tmp}/agents")
@@ -357,7 +364,8 @@ def post(repo, pr, r, answer, description):
         raise ValueError("not a review")
     POSTED.append((r, pr["headRefOid"], len(answer["findings"])))
     DESCRIBED.append(description)
-    return "findings" if answer["findings"] else "clean"
+    # Its review covers the PR's description if it was shown it (post.rs).
+    return "findings" if answer["findings"] else "clean", description == C.fingerprint(pr["body"])
 
 
 STATES = {}  # a job's state, by id, as `proj state` says it: running unless set

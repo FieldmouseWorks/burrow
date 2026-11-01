@@ -11,6 +11,7 @@ use crate::brief::brief;
 use crate::pass::Pass;
 use crate::post::finding;
 use crate::snapshot::{self, Look};
+use crate::verdict::named;
 
 /// Under the steward's state dir: the looks queued, the answers the
 /// reviewers' service leaves under each one's name, and the reviewers'
@@ -61,8 +62,7 @@ impl Ask {
     /// and the marks).
     pub fn wrong(&self) -> Option<String> {
         self.look().wrong().or_else(|| {
-            (self.reviewer.is_empty() || !self.reviewer.bytes().all(|b| b.is_ascii_lowercase()))
-                .then(|| format!("{:?} isn't a reviewer's name", self.reviewer))
+            (!named(&self.reviewer)).then(|| format!("{:?} isn't a reviewer's name", self.reviewer))
         })
     }
 }
