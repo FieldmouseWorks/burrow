@@ -86,6 +86,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "burrow-heartbeat"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
+ "ureq",
+]
+
+[[package]]
 name = "burrow-heavy"
 version = "0.0.0"
 dependencies = [

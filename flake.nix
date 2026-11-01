@@ -690,7 +690,7 @@
         # HOST-health's ZFS check: the pools the machine needs, by name or
         # GUID, with a stand-in zpool.
         health-zfs = import ./tests/health-zfs.nix { inherit self pkgs; };
-        # heartbeat's beats, with stand-ins for HOST-health and Healthchecks.
+        # heartbeat's beat as the example builds it, with a stand-in HOST-health.
         heartbeat = import ./tests/heartbeat.nix { inherit self pkgs; };
         # Off-site backups of ZFS snapshots through restic and rclone, and the
         # restore drill that checks them.
