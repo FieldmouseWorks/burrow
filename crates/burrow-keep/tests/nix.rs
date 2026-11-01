@@ -118,6 +118,18 @@ impl Case {
         piped(load, db.as_bytes());
     }
 
+    /// A download in `store`, unsigned, as a fetchurl leaves one: a flat
+    /// fixed-output path holding this.
+    fn download(&self, store: &str, name: &str, contents: &str) -> String {
+        let file = self.path(name);
+        fs::write(&file, contents).unwrap();
+        self.nix_store(
+            store,
+            &["--add-fixed", "sha256", file.to_str().unwrap()],
+            &[],
+        )
+    }
+
     /// A push's keep step: burrow-keep on `store`, with `run/kept` holding
     /// what was restored.
     fn keep(&self, store: &str, run: &str) -> String {
@@ -190,14 +202,20 @@ fn what_a_push_keeps_the_next_substitutes_with_what_a_public_cache_serves() {
     let lib = &format!("/nix/store/{}-lib", "1".repeat(32));
     let old = &format!("/nix/store/{}-old-check", "2".repeat(32));
 
+    let wrapper = &format!("/nix/store/{}-wrapper", "3".repeat(32));
+
     // Push 1 built the check and what it was built from, and an old check
     // no derivation makes any more; the library came signed from a public
-    // cache.
+    // cache. It fetched a tarball, and a script that a wrapper it built
+    // runs.
     let (check, dep) = c.drvs("s1");
     c.register("s1", lib, "lib", &[]);
     c.register("s1", &dep, "dep", &[]);
     c.register("s1", &check, &format!("check of {lib}"), &[lib]);
     c.register("s1", old, "old", &[]);
+    let tarball = c.download("s1", "tarball", "a tarball");
+    let script = c.download("s1", "script", "a script");
+    c.register("s1", wrapper, &format!("runs {script}"), &[&script]);
     let key = c.path("key");
     fs::write(
         &key,
@@ -218,17 +236,31 @@ fn what_a_push_keeps_the_next_substitutes_with_what_a_public_cache_serves() {
     fs::create_dir_all(c.path("run1/kept")).unwrap();
     let said = c.keep("s1", "run1");
     assert!(
-        said.starts_with("kept 3 paths from this gate and 0 from the kept builds"),
+        said.starts_with("kept 5 paths from this gate and 0 from the kept builds")
+            && said.ends_with("left out 1 downloads, 1 MiB"),
         "{said}"
     );
-    let mut first = vec![check.clone(), dep.clone(), old.to_owned()];
+    let mut first = vec![
+        check.clone(),
+        dep.clone(),
+        old.to_owned(),
+        wrapper.to_owned(),
+        script.clone(),
+    ];
     first.sort();
     assert_eq!(c.cached("run1/kept"), first);
+    assert!(!c.cached("run1/kept").contains(&tarball));
 
     // A fresh runner substitutes the check from what push 1 kept, and the
-    // library it refers to from the public cache.
-    c.nix_store("s2", &["--realise", &check], &["run1/kept", "public"]);
+    // library it refers to from the public cache; and the wrapper, with the
+    // script it runs.
+    c.nix_store(
+        "s2",
+        &["--realise", &check, wrapper],
+        &["run1/kept", "public"],
+    );
     assert!(c.valid("s2", &check) && c.valid("s2", lib));
+    assert!(c.valid("s2", wrapper) && c.valid("s2", &script));
 
     // Push 2: the check hadn't changed, so it came whole from the kept
     // builds, and dep, which it was built from, never reached the store.

@@ -64,6 +64,18 @@ pub fn parse_store(json: &[u8]) -> Result<Store, String> {
         };
         let signatures = field("signatures")?.as_array();
         let references = field("references")?.as_array();
+        // null for an input-addressed path; a fixed-output or text one's
+        // method is flat, nar, git or text.
+        let download = match p.get("ca") {
+            None => return Err(format!("nix path-info: {name} has no ca")),
+            Some(Value::Null) => false,
+            Some(ca) => {
+                ca["method"]
+                    .as_str()
+                    .ok_or_else(|| format!("nix path-info: {name}: ca {ca}"))?
+                    == "flat"
+            }
+        };
         let (Some(signatures), Some(references), Some(nar_hash), Some(nar_size)) = (
             signatures,
             references,
@@ -79,6 +91,7 @@ pub fn parse_store(json: &[u8]) -> Result<Store, String> {
             .ok_or_else(|| format!("nix path-info: {name}: {p}"))?;
         let info = Info {
             signed: !signatures.is_empty(),
+            download,
             references,
             nar_hash: nar_hash.to_owned(),
             nar_size,
@@ -126,15 +139,20 @@ mod tests {
     use super::parse_store;
 
     /// nix's path-info, as 2.34 writes it: names without the store's
-    /// directory, which it gives once.
+    /// directory, which it gives once, and each path's ca, null unless it's
+    /// fixed-output or text.
     #[test]
     fn the_store_is_each_path_what_it_refers_to_and_whether_anyone_signed_it() {
         let s = parse_store(
             br#"{"info": {
-                "aaa-built": {"signatures": [], "narHash": "sha256-A=", "narSize": 1,
+                "aaa-built": {"ca": null, "signatures": [], "narHash": "sha256-A=", "narSize": 1,
                     "references": ["aaa-built", "bbb-public"], "version": 2},
-                "bbb-public": {"signatures": ["cache.nixos.org-1:x"], "narHash": "sha256-B=",
-                    "narSize": 2, "references": [], "version": 2}
+                "bbb-public": {"ca": null, "signatures": ["cache.nixos.org-1:x"], "narHash": "sha256-B=",
+                    "narSize": 2, "references": [], "version": 2},
+                "ccc-x.tar.xz": {"ca": {"hash": "sha256-C=", "method": "flat"}, "signatures": [],
+                    "narHash": "sha256-C=", "narSize": 3, "references": [], "version": 2},
+                "ddd-source": {"ca": {"hash": "sha256-D=", "method": "nar"}, "signatures": [],
+                    "narHash": "sha256-D=", "narSize": 4, "references": [], "version": 2}
             }, "storeDir": "/nix/store", "version": 2}"#,
         )
         .unwrap();
@@ -146,6 +164,7 @@ mod tests {
                 (
                     p.as_str(),
                     i.signed,
+                    i.download,
                     i.references.clone(),
                     i.nar_hash.as_str(),
                     i.nar_size,
@@ -158,6 +177,7 @@ mod tests {
                 (
                     "/nix/store/aaa-built",
                     false,
+                    false,
                     vec![
                         "/nix/store/aaa-built".to_owned(),
                         "/nix/store/bbb-public".to_owned()
@@ -165,13 +185,29 @@ mod tests {
                     "sha256-A=",
                     1
                 ),
-                ("/nix/store/bbb-public", true, vec![], "sha256-B=", 2)
+                ("/nix/store/bbb-public", true, false, vec![], "sha256-B=", 2),
+                (
+                    "/nix/store/ccc-x.tar.xz",
+                    false,
+                    true,
+                    vec![],
+                    "sha256-C=",
+                    3
+                ),
+                (
+                    "/nix/store/ddd-source",
+                    false,
+                    false,
+                    vec![],
+                    "sha256-D=",
+                    4
+                )
             ]
         );
         let path = |fields: &str| {
             format!(r#"{{"info": {{"aaa-x": {{{fields}}}}}, "storeDir": "/nix/store"}}"#)
         };
-        let whole = r#""signatures": [], "references": [], "narHash": "sha256-A=", "narSize": 1"#;
+        let whole = r#""ca": null, "signatures": [], "references": [], "narHash": "sha256-A=", "narSize": 1"#;
         assert!(parse_store(path(whole).as_bytes()).is_ok());
         let mut bad = vec![
             r#"{"info": {}}"#.to_owned(),
@@ -179,8 +215,9 @@ mod tests {
             "nope".to_owned(),
             path(&whole.replace(r#""references": []"#, r#""references": [1]"#)),
             path(&whole.replace(r#""narSize": 1"#, r#""narSize": "1""#)),
+            path(&whole.replace(r#""ca": null"#, r#""ca": {"hash": "sha256-A="}"#)),
         ];
-        for field in ["signatures", "references", "narHash", "narSize"] {
+        for field in ["ca", "signatures", "references", "narHash", "narSize"] {
             let kept: Vec<&str> = whole.split(", ").filter(|f| !f.contains(field)).collect();
             bad.push(path(&kept.join(", ")));
         }

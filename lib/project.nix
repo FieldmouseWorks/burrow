@@ -60,8 +60,9 @@ let
   rustDir = if rustCfg.dir == "." then self else self + "/${rustCfg.dir}";
 
   # What the repo's rust-toolchain(.toml) asks for, as rust-overlay's
-  # fromRustupToolchain takes it; latest stable with rustfmt and clippy
-  # without one.
+  # fromRustupToolchain takes it; without one, latest stable with rustfmt and
+  # clippy and nothing else (rustup's default profile would add 700 MiB of
+  # offline docs to every build that needs the toolchain).
   toolchainSpec =
     let
       file = lib.findFirst builtins.pathExists null [
@@ -76,7 +77,7 @@ let
         if lib.hasInfix "[toolchain]" text then (builtins.fromTOML text).toolchain
         else { channel = lib.trim text; };
     in
-    { components = [ ]; } // (if file != null then spec else { channel = "stable"; components = [ "rustfmt" "clippy" ]; });
+    { components = [ ]; } // (if file != null then spec else { channel = "stable"; profile = "minimal"; components = [ "rustfmt" "clippy" ]; });
 
   # extra: components on top of the repo's own (the shell's rust-analyzer).
   toolchainFor = pkgs: extra:
