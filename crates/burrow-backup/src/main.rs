@@ -108,13 +108,13 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
-        Ask::Pass => match ready(&run, false).and_then(|_lock| pass::pass(&run)) {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(why) => {
-                pass::failed(&run, &why);
+        Ask::Pass => {
+            if pass::automatic(&run) {
+                ExitCode::SUCCESS
+            } else {
                 ExitCode::FAILURE
             }
-        },
+        }
         ask => {
             let _lock = match ready(&run, matches!(ask, Ask::Status)) {
                 Ok(Some(lock)) => lock,
@@ -160,15 +160,17 @@ fn ready(run: &Run, status: bool) -> Result<Option<std::fs::File>, String> {
     if status {
         print!("{}", status::local(run)?);
     }
-    let (lock, free) = burrow_backup::lock(cfg)?;
-    if !free {
-        if status {
+    let path = burrow_backup::lock_path(cfg);
+    let lock = if status {
+        let (lock, free) = burrow_backup::lock(&path)?;
+        if !free {
             println!("a backup or drill is running (journalctl -u {})", cfg.name);
             return Ok(None);
         }
-        eprintln!("waiting for the backup that's running");
-        burrow_backup::wait(&lock)?;
-    }
+        lock
+    } else {
+        burrow_backup::hold(&path)?
+    };
     burrow_backup::rclone(cfg)?;
     Ok(Some(lock))
 }

@@ -12,8 +12,8 @@ use serde_json::Value;
 
 use crate::mounts::Mounts;
 use crate::{
-    Config, Run, age, backup_flags, drill, exit_code, local, now, read, remove, snapshot, stamp,
-    tail, upkeep, write, zfs,
+    Config, Run, age, backup_flags, drill, exit_code, hold, local, lock_path, now, private_state,
+    rclone, read, remove, snapshot, stamp, tail, upkeep, write, zfs,
 };
 
 /// What state/last.json keeps of the newest backup.
@@ -44,6 +44,40 @@ impl Last {
 
 fn round2(x: f64) -> f64 {
     (x * 100.0).round() / 100.0
+}
+
+/// The automatic run, and whether it went through.
+pub fn automatic(run: &Run) -> bool {
+    serially(
+        run.cfg,
+        &lock_path(run.cfg),
+        || pass(run),
+        |why| failed(run, why),
+    )
+}
+
+/// `pass` and, when it or what prepares it fails, `report`, with the lock
+/// held from before the one to after the other: an older failure can't then
+/// write over a newer success, or two of them each start a job.
+fn serially(
+    cfg: &Config,
+    lock: &Path,
+    pass: impl FnOnce() -> Result<(), String>,
+    report: impl FnOnce(&str),
+) -> bool {
+    let private = private_state(cfg);
+    let held = hold(lock);
+    let done = match &held {
+        Ok(_) => private.and_then(|()| rclone(cfg)).and_then(|()| pass()),
+        Err(e) => Err(e.clone()),
+    };
+    match done {
+        Ok(()) => true,
+        Err(why) => {
+            report(&why);
+            false
+        }
+    }
 }
 
 /// One pass, which ends with the newest snapshot off the box and the day's
@@ -336,6 +370,147 @@ fn notify(run: &Run, args: &[&str]) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::mpsc;
+    use std::thread;
+
+    fn lock_is_free(path: &Path) -> bool {
+        crate::lock(path).unwrap().1
+    }
+
+    /// What `serially` reports with `cfg` and a `pass` that fails or not:
+    /// each thing it said, and whether the lock was held as it said it.
+    fn reported(
+        cfg: &Config,
+        lock: &Path,
+        passes: Result<(), String>,
+    ) -> (bool, Vec<(String, bool)>) {
+        let mut said = Vec::new();
+        let ok = serially(
+            cfg,
+            lock,
+            || passes,
+            |why| {
+                said.push((why.to_owned(), !lock_is_free(lock)));
+            },
+        );
+        (ok, said)
+    }
+
+    #[test]
+    fn a_failure_is_reported_with_the_lock_still_held() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock = dir.path().join("lock");
+        let state = dir.path().join("state");
+        let mut cfg = crate::config::for_tests(&state);
+
+        // rclone's setup fails: its secret isn't there.
+        let (ok, said) = reported(&cfg, &lock, Ok(()));
+        assert!(!ok);
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert!(said[0].0.contains("can't read rclone's config"), "{said:?}");
+        assert!(said[0].1, "rclone's failure was reported unlocked");
+        assert!(lock_is_free(&lock), "let go after the report");
+
+        // The pass fails.
+        std::fs::write(state.join("secret.conf"), "[offsite]\n").unwrap();
+        let (ok, said) = reported(&cfg, &lock, Err("the pass".to_owned()));
+        assert!(!ok);
+        assert_eq!(said, [("the pass".to_owned(), true)]);
+        assert!(lock_is_free(&lock));
+
+        // The state can't be made private: a file where it should be.
+        let file = dir.path().join("a-file");
+        std::fs::write(&file, "").unwrap();
+        cfg.state = file;
+        let (ok, said) = reported(&cfg, &lock, Ok(()));
+        assert!(!ok);
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert!(said[0].1, "the state's failure was reported unlocked");
+    }
+
+    #[test]
+    fn a_pass_that_works_reports_nothing_and_lets_go() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock = dir.path().join("lock");
+        let mut cfg = crate::config::for_tests(dir.path());
+        cfg.rclone_config_file = None;
+        let held = std::cell::Cell::new(false);
+        let ok = serially(
+            &cfg,
+            &lock,
+            || {
+                held.set(!lock_is_free(&lock));
+                Ok(())
+            },
+            |why| panic!("reported {why}"),
+        );
+        assert!(ok);
+        assert!(held.get(), "the pass ran unlocked");
+        assert!(lock_is_free(&lock));
+    }
+
+    #[test]
+    fn a_lock_it_cant_take_is_still_reported_and_runs_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = crate::config::for_tests(dir.path());
+        cfg.rclone_config_file = None;
+        let mut said = Vec::new();
+        let ok = serially(
+            &cfg,
+            &dir.path().join("no-such-dir/lock"),
+            || panic!("the pass ran without the lock"),
+            |why| said.push(why.to_owned()),
+        );
+        assert!(!ok);
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert!(said[0].contains("no-such-dir/lock"), "{said:?}");
+    }
+
+    // Two runs overlapping: the second starts nothing, its report included,
+    // until the first has finished reporting.
+    #[test]
+    fn an_overlapping_run_waits_out_the_others_report() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock = dir.path().join("lock");
+        let mut cfg = crate::config::for_tests(dir.path());
+        cfg.rclone_config_file = None;
+        let (cfg, lock) = (&cfg, lock.as_path());
+        let (reporting, first_reporting) = mpsc::channel();
+        let (finish, finish_report) = mpsc::channel::<()>();
+        let (second, second_said) = mpsc::channel();
+        thread::scope(|s| {
+            s.spawn(move || {
+                serially(
+                    cfg,
+                    lock,
+                    || Err("first".to_owned()),
+                    |_| {
+                        reporting.send(()).unwrap();
+                        finish_report.recv().unwrap();
+                    },
+                )
+            });
+            first_reporting.recv().unwrap();
+            s.spawn(move || {
+                serially(
+                    cfg,
+                    lock,
+                    || Err("second".to_owned()),
+                    |why| {
+                        second.send(why.to_owned()).unwrap();
+                    },
+                )
+            });
+            let early = second_said.recv_timeout(Duration::from_millis(300));
+            // Before the assert: the scope can't end with the first still waiting.
+            finish.send(()).unwrap();
+            assert!(
+                early.is_err(),
+                "the second run reported during the first's report"
+            );
+            assert_eq!(second_said.recv().unwrap(), "second");
+        });
+    }
 
     #[test]
     fn a_failure_goes_to_a_job_once_every_6_hours() {

@@ -276,15 +276,19 @@ pub fn private_state(cfg: &Config) -> Result<(), String> {
 }
 
 /// One at a time: a backup, a drill, a restore by hand. Each of them may
-/// refresh rclone's token. The lock, and whether it was free.
-pub fn lock(cfg: &Config) -> Result<(File, bool), String> {
+/// refresh rclone's token.
+pub fn lock_path(cfg: &Config) -> PathBuf {
+    PathBuf::from(format!("/run/{}.lock", cfg.name))
+}
+
+/// The lock, and whether it was free.
+pub fn lock(path: &Path) -> Result<(File, bool), String> {
     use rustix::fs::{FlockOperation, flock};
-    let path = PathBuf::from(format!("/run/{}.lock", cfg.name));
     let file = OpenOptions::new()
         .create(true)
         .truncate(false)
         .write(true)
-        .open(&path)
+        .open(path)
         .map_err(|e| format!("{}: {e}", path.display()))?;
     match flock(&file, FlockOperation::NonBlockingLockExclusive) {
         Ok(()) => Ok((file, true)),
@@ -293,10 +297,15 @@ pub fn lock(cfg: &Config) -> Result<(File, bool), String> {
     }
 }
 
-/// Waits for the lock someone else holds.
-pub fn wait(file: &File) -> Result<(), String> {
+/// The lock, waiting for it if someone else holds it.
+pub fn hold(path: &Path) -> Result<File, String> {
     use rustix::fs::{FlockOperation, flock};
-    flock(file, FlockOperation::LockExclusive).map_err(|e| format!("the lock: {e}"))
+    let (file, free) = lock(path)?;
+    if !free {
+        eprintln!("waiting for the backup that's running");
+        flock(&file, FlockOperation::LockExclusive).map_err(|e| format!("the lock: {e}"))?;
+    }
+    Ok(file)
 }
 
 #[cfg(test)]

@@ -150,18 +150,24 @@ fn class(p: &[char]) -> Option<(Set, &[char])> {
                 continue;
             }
         }
-        let (c, next) = if c == '\\' {
-            (*p.get(i + 1)?, i + 2)
-        } else {
-            (c, i + 1)
-        };
+        let (c, next) = member(p, i)?;
         if p.get(next) == Some(&'-') && p.get(next + 1).is_some_and(|&e| e != ']') {
-            items.push(Item::Range(c, p[next + 1]));
-            i = next + 2;
+            let (end, after) = member(p, next + 1)?;
+            items.push(Item::Range(c, end));
+            i = after;
         } else {
             items.push(Item::One(c));
             i = next;
         }
+    }
+}
+
+/// The character a bracket expression has at `i`, its `\\` taken off, and
+/// where what follows it starts; None when the pattern ends on the `\\`.
+fn member(p: &[char], i: usize) -> Option<(char, usize)> {
+    match *p.get(i)? {
+        '\\' => Some((*p.get(i + 1)?, i + 2)),
+        c => Some((c, i + 1)),
     }
 }
 
@@ -217,6 +223,80 @@ mod tests {
             ("x[[:upper:][:digit:]]", &["xA", "x1"], &["xa"]),
             ("a\\*", &["a*"], &["ab"]),
             ("a[\\]]", &["a]"], &["a\\"]),
+            // A range's endpoints, either escaped, with what follows them.
+            ("snap-[a-z]", &["snap-b"], &["snap-A", "snap-z]"]),
+            (
+                "snap-[a-\\z]",
+                &["snap-a", "snap-b", "snap-z"],
+                &["snap-\\", "snap-A", "snap-]"],
+            ),
+            ("snap-[\\a-z]", &["snap-b"], &["snap-A"]),
+            ("snap-[\\a-\\z]", &["snap-b"], &["snap-A", "snap-\\"]),
+            ("snap-[z-\\a]", &[], &["snap-a", "snap-z", "snap-m"]),
+            (
+                "snap-[!a-\\z]",
+                &["snap-A", "snap-\\"],
+                &["snap-b", "snap-z"],
+            ),
+            ("snap-[^a-\\z]", &["snap-A"], &["snap-b"]),
+            (
+                "snap-[A-\\\\]",
+                &["snap-Z", "snap-[", "snap-\\"],
+                &["snap-]", "snap-a"],
+            ),
+            ("snap-[a-\\]]", &[], &["snap-a", "snap-]", "snap-b]"]),
+            (
+                "snap-[\\]-a]",
+                &["snap-]", "snap-^", "snap-a"],
+                &["snap-b", "snap-\\"],
+            ),
+            ("snap-[+-\\-]", &["snap-+", "snap--"], &["snap-a"]),
+            (
+                "snap-[a-\\cx]",
+                &["snap-a", "snap-c", "snap-x"],
+                &["snap-d", "snap-\\"],
+            ),
+            ("snap-[a-\\c\\x]", &["snap-b", "snap-x"], &["snap-d"]),
+            (
+                "snap-[a-\\cxy-z]",
+                &["snap-b", "snap-x", "snap-z"],
+                &["snap-d"],
+            ),
+            ("snap-[a-\\c-]", &["snap-b", "snap--"], &["snap-d"]),
+            ("snap-[a-\\z]y", &["snap-by"], &["snap-b", "snap-\\y"]),
+            ("snap-[a-\\z]*", &["snap-b", "snap-abc"], &["snap-A"]),
+            ("[a-\\z]-[0-\\9]", &["b-5", "a-0", "z-9"], &["snap-b"]),
+            // Never closed: the `\` takes what would've closed it.
+            (
+                "snap-[a-\\]",
+                &["snap-[a-]"],
+                &["snap-a", "snap-]", "snap-[a-\\]"],
+            ),
+            ("snap-[a-\\", &["snap-[a-\\"], &["snap-a"]),
+            // In a group, whichever kind.
+            ("@(snap-[a-\\z]|other)", &["snap-b", "other"], &["snap-A"]),
+            ("@(other|snap-[!a-\\z])", &["snap-A", "other"], &["snap-b"]),
+            ("?(snap-[a-\\z])", &["snap-b", ""], &["snap-A"]),
+            ("*(snap-[a-\\z])", &["snap-b", ""], &["snap-A"]),
+            ("+(snap-[a-\\z])", &["snap-b"], &["snap-A", ""]),
+            ("!(snap-[a-\\z])", &["snap-A", ""], &["snap-b"]),
+            ("snap-@([a-\\)]|0)", &[], &["snap-a", "snap-b", "snap-)"]),
+            (
+                "snap-@([\\(-\\)]|0)",
+                &["snap-(", "snap-)", "snap-0"],
+                &["snap-a", "snap-\\"],
+            ),
+            ("snap-@([a-\\]]|0)", &["snap-0"], &["snap-a", "snap-]"]),
+            (
+                "snap-+([a-\\c])",
+                &["snap-ab", "snap-abc"],
+                &["snap-", "snap-a-"],
+            ),
+            (
+                "snap-@([a-\\c]@([x-\\z]|0))",
+                &["snap-bx", "snap-b0"],
+                &["snap-b", "snap-ab"],
+            ),
             ("a[", &["a["], &["a"]),
             ("a[b", &["a[b"], &["ab"]),
             ("a\\", &["a\\"], &["a"]),
