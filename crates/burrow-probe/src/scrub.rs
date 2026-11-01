@@ -52,9 +52,11 @@ static RULES: LazyLock<Vec<(Regex, String)>> = LazyLock::new(|| {
             "[redacted private key]",
         ),
         // A key's END with no BEGIN before it, which a journal's line limit
-        // can leave: everything from the start of the text to it goes.
+        // can leave. Every whole block is gone by now, so each END left is
+        // one of those, and everything from the start of the text to the
+        // last of them goes, however many fragments there are.
         (
-            r"(?s)\A.*?-----END [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----",
+            r"(?s)\A.*-----END [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----",
             "[redacted private key]",
         ),
         // Headers that carry a credential, to the end of the line.
@@ -91,15 +93,17 @@ static RULES: LazyLock<Vec<(Regex, String)>> = LazyLock::new(|| {
             "[redacted]",
         ),
         // NAME=VALUE, NAME: VALUE, "NAME": "VALUE", where the name says it's
-        // a secret. A quoted value goes whole, to its closing quote (past
-        // escaped ones) or the line's end, whatever it holds; then an
-        // unquoted one, to the first character that ends a value.
+        // a secret. A quoted value goes whole, whatever it holds: past
+        // escaped quotes, a dangling backslash too, to its closing quote or,
+        // with none, the line's end (LF, CRLF or the text's). Nothing stops
+        // it short, so the unquoted rule after never gets half of one; that
+        // one is for a bare value, to the first character that ends one.
         (
-            r#"(?im)\b([a-z0-9_.-]*(?:password|passwd|passphrase|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|client[_-]?secret|credentials?))(["']?\s*[:=]\s*)"(?:[^"\\\r\n]|\\.)*(?:"|$)"#,
+            r#"(?i)\b([a-z0-9_.-]*(?:password|passwd|passphrase|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|client[_-]?secret|credentials?))(["']?\s*[:=]\s*)"(?:[^"\\\r\n]|\\[^\r\n])*\\?"?"#,
             "$1$2\"[redacted]\"",
         ),
         (
-            r#"(?im)\b([a-z0-9_.-]*(?:password|passwd|passphrase|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|client[_-]?secret|credentials?))(["']?\s*[:=]\s*)'(?:[^'\\\r\n]|\\.)*(?:'|$)"#,
+            r#"(?i)\b([a-z0-9_.-]*(?:password|passwd|passphrase|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|client[_-]?secret|credentials?))(["']?\s*[:=]\s*)'(?:[^'\\\r\n]|\\[^\r\n])*\\?'?"#,
             "$1$2'[redacted]'",
         ),
         (
@@ -224,9 +228,24 @@ mod tests {
             ("secret='single quoted; value here'", "value here"),
             ("token = 'it\\'s still secret'", "still secret"),
             (r#"password="cut off at the line's end"#, "at the line"),
+            // A dangling backslash, at the text's end or a line's, LF or CRLF.
+            ("password=\"correct horse\\", "horse"),
+            ("password=\"correct horse\\\nnext", "horse"),
+            ("password=\"correct horse\r\nnext", "horse"),
+            ("password=\"correct horse\\\r\nnext", "horse"),
+            ("secret='single quoted \\", "quoted"),
+            ("secret='single quoted\r\nnext", "quoted"),
         ] {
             hidden(line, secret);
+            // However many times it's scrubbed.
+            let twice = scrub(scrub(line).as_str());
+            assert!(!twice.as_str().contains(secret), "{:?}", twice.as_str());
         }
+        // The line after an unclosed one stays.
+        assert_eq!(
+            scrub("password=\"a b\r\nnext line").as_str(),
+            "password=\"[redacted]\"\r\nnext line"
+        );
         assert_eq!(
             scrub(r#"db password="a b" user="sam""#).as_str(),
             r#"db password="[redacted]" user="sam""#
@@ -247,6 +266,21 @@ mod tests {
             "PRIVATE"
         );
         assert_eq!(scrub(&cut).as_str(), "before\n[redacted private key]");
+        // Several with their BEGINs cut off, and a whole one among them:
+        // every payload goes, to the last END.
+        let (end, begin) = (
+            format!("-----END RSA {} KEY-----", "PRIVATE"),
+            format!("-----BEGIN RSA {} KEY-----", "PRIVATE"),
+        );
+        let many = format!(
+            "payloadone\n{end}\npayloadtwo\n{end}\n{begin}\npayloadwhole\n{end}\npayloadthree\n{end}\nafter"
+        );
+        let out = scrub(&many);
+        assert_eq!(out.as_str(), "[redacted private key]\nafter");
+        assert_eq!(
+            scrub(out.as_str()).as_str(),
+            "[redacted private key]\nafter"
+        );
         // Its BEGIN cut off: everything up to its END goes.
         let tail = format!(
             "QUJDREVGR0hJSktMTU5PUFFS\n-----END RSA {} KEY-----\nafter",
