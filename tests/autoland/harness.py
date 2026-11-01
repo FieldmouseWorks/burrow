@@ -50,13 +50,14 @@ REVIEW, FAKES = sys.argv[3], sys.argv[4]
 # (argv[6], crates/burrow-upkeep/src).
 UPKEEP, UPKEEP_SRC = sys.argv[5], sys.argv[6]
 # What the passes here run in its place (upkeeping.py runs the real one): it
-# notes how it was run (UPKEEP_RAN) and finds nothing due, stuck or wanted.
+# notes how it was run (UPKEEP_RAN), with what `branches` read on its stdin
+# last, and finds nothing due, stuck or wanted.
 UPKEEP_RAN = f"{tmp}/upkeep-ran"
 with open(f"{tmp}/upkeep-none", "w") as f:
     f.write(f"""#!{sys.executable}
 import json, sys
 with open({UPKEEP_RAN!r}, "a") as f:
-    f.write(json.dumps(sys.argv[2:]) + "\\n")
+    f.write(json.dumps(sys.argv[2:] + ([json.load(sys.stdin)] if sys.argv[2] == "branches" else [])) + "\\n")
 print(json.dumps({{"due": False, "failed": [], "limited": None}} if sys.argv[2] == "settle" else
                  {{"stuck": [], "wake": None, "failed": [], "limited": None, "searched": False, "jobs": []}}))
 """)
@@ -148,10 +149,10 @@ with open(sys.argv[2]) as f:
     ONE_WAY = json.load(f)
 with open(f"{tmp}/config.json", "w") as f:
     json.dump({
-        "owners": ["sam"], "exclude": [], "context": "review-settled", "rulesets": True, "keepBranches": [],
+        "owners": ["sam"], "exclude": [], "context": "review-settled", "rulesets": True,
         "app": {"id": 7, "slug": "steward"},
         "baselineJobs": False, "baselinePerPass": 1, "authors": ["sam"], "bots": ["dependabot", "renovate", "workers"], "machinery": None,
-        "stateDir": f"{tmp}/state", "snapDir": f"{tmp}/trees", "majorKey": f"{tmp}/sweep.key", "projectsDir": f"{tmp}/none", "jobsDir": f"{tmp}/jobs", "renovateEmail": "bot@renovateapp.com", "proj": "proj", "jobTimeout": 60, "jobIdle": 20, "proofTimeout": 180, "heavy": None, "owner": "Sam", "cleanBranches": False,
+        "stateDir": f"{tmp}/state", "snapDir": f"{tmp}/trees", "majorKey": f"{tmp}/sweep.key", "projectsDir": f"{tmp}/none", "jobsDir": f"{tmp}/jobs", "renovateEmail": "bot@renovateapp.com", "proj": "proj", "jobTimeout": 60, "jobIdle": 20, "proofTimeout": 180, "heavy": None, "owner": "Sam",
         "labels": {"hold": "hold", "owner": "needs-owner", "first": "first", "waiting": {"releaseAge": "waiting: release age", "proofSlot": "waiting: proof slot", "reviewer": "waiting: reviewer"}}, "notify": {"repo": "", "assignee": "", "label": "autoland"}, "inbox": {"enable": False, "label": "claude", "unstickLabel": "unstick", "authors": ["sam"]},
         "renovate": None, "upkeep": [f"{tmp}/upkeep-none", "upkeep.json"],
         "defaults": {"rounds": 5,
@@ -161,8 +162,7 @@ with open(f"{tmp}/config.json", "w") as f:
                      "proofJobs": {}, "proofBuilds": {}, "codex": True, "rival": True, "skipPaths": [],
                      "train": False, "trainSize": 8, "trainRequire": [], "trainStallAfter": 240},
         "trainContext": "conary/train",
-        "train": {"cn": f"{tmp}/cn", "env": {"CONARY_LEDGER": f"{tmp}/ledger", "CONARY_ANCHOR_REPO": "sam/homelab"},
-                  "branches": "conary/*"},
+        "train": {"cn": f"{tmp}/cn", "env": {"CONARY_LEDGER": f"{tmp}/ledger", "CONARY_ANCHOR_REPO": "sam/homelab"}},
         "repos": {}, "pipelineRepos": ["Sam/Pipe"], "leadRepos": ["Sam/Lead"],
         "webhook": {"url": "https://example.org/burrow/hook", "events": ["check_suite", "push"]},
         "kick": f"http://127.0.0.1:{kicks.server_port}/kick/autoland",
@@ -180,7 +180,6 @@ os.environ["GH_TOKEN"] = "ghp_steward_token"  # never passed on to an agent
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(sys.argv[1])))
 sys.argv = ["steward"]
-import branches as B  # noqa: E402,F401
 import common as C  # noqa: E402,F401
 import prs as P  # noqa: E402,F401
 import repos as R  # noqa: E402,F401

@@ -228,7 +228,7 @@ impl Notices<'_> {
         // by the next one.
         match fs::remove_file(&stamp) {
             Err(e) if e.kind() != ErrorKind::NotFound => {
-                Err(Error(format!("{}: {e}", stamp.display())))
+                Err(Error::said(format!("{}: {e}", stamp.display())))
             }
             _ => Ok(()),
         }
@@ -244,7 +244,8 @@ fn said(stamp: &Path) -> u64 {
 }
 
 fn write_stamp(stamp: &Path, now: u64) -> Result<(), Error> {
-    fs::write(stamp, format!("{now}\n")).map_err(|e| Error(format!("{}: {e}", stamp.display())))
+    fs::write(stamp, format!("{now}\n"))
+        .map_err(|e| Error::said(format!("{}: {e}", stamp.display())))
 }
 
 #[cfg(test)]

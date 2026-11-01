@@ -210,7 +210,7 @@ pub fn watch(p: &mut Pass, cfg: &Dashboard) -> Result<(), String> {
         if r.status != 304 {
             // Deleted (404, 410) is no issue at all.
             let issue = if r.status < 300 {
-                r.json().map_err(|e| e.0)?
+                r.json()?
             } else {
                 Value::Null
             };

@@ -97,7 +97,7 @@ fn go(args: &[String]) -> Result<i32, Usage> {
             Ok(match done {
                 Ok(()) => 0,
                 Err(e) => {
-                    println!("::error title=Flaky tests::{}", actions::data(&e.0));
+                    println!("::error title=Flaky tests::{}", actions::data(&e.why));
                     1
                 }
             })

@@ -24,7 +24,7 @@ const REPOS: &str = "query($owner: String!, $cursor: String) {
 }";
 
 fn missing(what: &str, field: &str) -> Error {
-    Error(format!("{what}: GitHub's answer has no {field}"))
+    Error::said(format!("{what}: GitHub's answer has no {field}"))
 }
 
 /// The owner's repos it keeps: not archived, not forks, and with a default
@@ -127,7 +127,7 @@ fn decode(path: &str, content: &str) -> Result<Vec<u8>, Error> {
     let content: String = content.chars().filter(|c| !c.is_whitespace()).collect();
     STANDARD
         .decode(content)
-        .map_err(|e| Error(format!("{path}: its content isn't base64: {e}")))
+        .map_err(|e| Error::said(format!("{path}: its content isn't base64: {e}")))
 }
 
 /// An open PR.
@@ -192,7 +192,10 @@ pub fn close(api: &mut dyn Api, repo: &str, pr: &Pr, why: &str) -> Result<(), Er
         // GitHub says a branch is gone with a 422, and says other refusals
         // with one too.
         if r.status == 422 && r.json()?["message"] != json!("Reference does not exist") {
-            return Err(Error(format!("DELETE {path}: HTTP 422: {}", r.body.trim())));
+            return Err(Error::said(format!(
+                "DELETE {path}: HTTP 422: {}",
+                r.body.trim()
+            )));
         }
     }
     Ok(())

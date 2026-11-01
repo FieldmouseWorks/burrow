@@ -194,13 +194,13 @@ def gh_env(repo=None):
 UPKEEP_TIMEOUT = 300
 
 
-def upkeep(*args):
+def upkeep(*args, input=None):
     """burrow-upkeep (crates/burrow-upkeep) on a repo, as the App for its
-    owner, as every GitHub call of a pass's: what it printed, read, with a
-    rate limit it met noted for the pass (LIMITED). What it says of itself
-    goes to the journal; one that fails or runs past UPKEEP_TIMEOUT
-    raises."""
-    p = subprocess.run([*CFG["upkeep"], *args, "--now", repr(NOW), *(["--dry"] if DRY else [])],
+    owner, as every GitHub call of a pass's, `input` on its stdin: what it
+    printed, read, with a rate limit it met noted for the pass (LIMITED).
+    What it says of itself goes to the journal; one that fails or runs past
+    UPKEEP_TIMEOUT raises."""
+    p = subprocess.run([*CFG["upkeep"], *args, "--now", repr(NOW), *(["--dry"] if DRY else [])], input=input,
                        stdout=subprocess.PIPE, text=True, env=gh_env(), timeout=UPKEEP_TIMEOUT)
     if p.returncode:
         raise RuntimeError(f"burrow-upkeep {args[0]} exited {p.returncode}")

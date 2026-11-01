@@ -8,7 +8,7 @@ use std::path::Path;
 use burrow_github::{Api, Failed, Response};
 use serde_json::{Value, json};
 
-use crate::config::{Config, Dashboard, Flaky, Labels, Rules, Settle, Waiting};
+use crate::config::{Branches, Config, Dashboard, Flaky, Labels, Rules, Settle, Waiting};
 use crate::pass::{Jobs, Out, Pass};
 
 pub const T: f64 = 1_800_000_000.0;
@@ -57,6 +57,11 @@ pub fn config(dir: &Path) -> Config {
             },
             repos: Default::default(),
         },
+        branches: Some(Branches {
+            keep: vec!["gh-pages".into()],
+            repos: Default::default(),
+            train: Some("conary/*".into()),
+        }),
     }
 }
 

@@ -9,9 +9,10 @@ use serde::Deserialize;
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Config {
-    /// The steward's state dir, where each repo's dashboard-REPO.json and
-    /// flaky-REPO.json are kept, and the flaky tool's cache under flaky/. A
-    /// status run (`--dry`) keeps its own under dry/.
+    /// The steward's state dir, where each repo's repo-REPO.json,
+    /// dashboard-REPO.json and flaky-REPO.json are kept, and the flaky
+    /// tool's cache under flaky/. A status run (`--dry`) keeps its own
+    /// under dry/.
     pub state_dir: PathBuf,
     /// proj, which says how a Claude job stands (`proj state ID`).
     pub proj: PathBuf,
@@ -35,6 +36,8 @@ pub struct Config {
     pub flaky: Option<Flaky>,
     /// What each repo's settings are kept at (`settle`).
     pub settle: Settle,
+    /// The branches nothing needs any more, when they're deleted.
+    pub branches: Option<Branches>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -131,6 +134,27 @@ impl Settle {
             ruleset: o.ruleset.unwrap_or(d.ruleset),
             train: o.train.unwrap_or(d.train),
         }
+    }
+}
+
+/// Which branches are never deleted, by glob: those of every repo, each
+/// repo's own on top (by OWNER/NAME), and the merge train's candidates' in
+/// a repo whose train is on (cn makes and deletes them), when there's a
+/// train.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Branches {
+    pub keep: Vec<String>,
+    pub repos: BTreeMap<String, Vec<String>>,
+    pub train: Option<String>,
+}
+
+impl Branches {
+    /// The globs the repo's branches are kept by, its train on or not.
+    pub fn keep(&self, repo: &str, train: bool) -> Vec<String> {
+        let own = self.repos.get(repo).into_iter().flatten();
+        let cn = self.train.iter().filter(|_| train);
+        self.keep.iter().chain(own).chain(cn).cloned().collect()
     }
 }
 

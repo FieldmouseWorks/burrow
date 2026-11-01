@@ -44,7 +44,7 @@ pub fn file(
     let mut groups: Vec<(&str, Vec<&str>)> = Vec::new();
     for e in entries {
         if start.expired.contains(&e.test) {
-            return Err(Error(format!(
+            return Err(Error::said(format!(
                 "the gate passed `{}` on a second try, but its quarantine had run out: its failure fails the gate",
                 e.test
             )));
@@ -114,7 +114,7 @@ pub fn file(
         )?;
         let issue = r.json()?["number"]
             .as_u64()
-            .ok_or_else(|| Error("GitHub's new issue has no number".into()))?;
+            .ok_or_else(|| Error::said("GitHub's new issue has no number"))?;
         out.push(Filed {
             test: test.into(),
             issue,
@@ -137,7 +137,7 @@ fn label(api: &mut dyn Api, repo: &str) -> Result<(), Error> {
         None,
     ) {
         Ok(_) => Ok(()),
-        Err(e) if e.0.contains("HTTP 422") => Ok(()), // it has it
+        Err(e) if e.why.contains("HTTP 422") => Ok(()), // it has it
         Err(e) => Err(e),
     }
 }
@@ -323,7 +323,8 @@ mod tests {
         )
         .unwrap_err();
         assert!(
-            e.0.contains("passed `stale` on a second try, but its quarantine had run out"),
+            e.why
+                .contains("passed `stale` on a second try, but its quarantine had run out"),
             "{e}"
         );
         assert!(gh.asked.is_empty());
@@ -360,7 +361,7 @@ mod tests {
             "x",
         )
         .unwrap_err();
-        assert!(e.0.contains("HTTP 403"), "{e}");
+        assert!(e.why.contains("HTTP 403"), "{e}");
     }
 
     #[test]
