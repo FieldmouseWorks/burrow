@@ -655,14 +655,16 @@
             { echo "burrow-usage-reset starts its Claude Code in $dir untrusted" >&2; exit 1; }
           touch $out
         '';
-        # HOST-update's steps in Rust as the example machine builds them
-        # (crates/burrow-update, whose tests are the rest): they read their
-        # config, and its train's.
+        # HOST-update as the example machine builds it (crates/burrow-update,
+        # whose tests are the rest): it takes its config, every setting in it
+        # one it knows, and refuses a word it doesn't before it runs anything.
         update-config = let
           inherit (self.nixosConfigurations.example.config) burrow;
         in pkgs.runCommand "update-config-check" { } ''
-          ${burrow.tools.update-steps}/bin/${burrow.prefix}-update-steps help 2>err && { echo "a usage went as a step"; exit 1; }
-          grep -qx 'usage: ${burrow.prefix}-update-steps build | .*' err || { echo "it said: $(cat err)"; exit 1; }
+          rc=0
+          ${burrow.tools.update}/bin/${burrow.prefix}-update help 2>err || rc=$?
+          [ "$rc" = 2 ] || { echo "a usage exited $rc"; exit 1; }
+          grep -qxF 'usage: ${burrow.prefix}-update [--force | status]' err || { echo "it said: $(cat err)"; exit 1; }
           touch $out
         '';
         # Which repo the flake's origin is, and so whether HOST-update goes

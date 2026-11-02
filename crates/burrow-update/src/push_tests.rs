@@ -6,7 +6,7 @@ use super::*;
 use crate::testing::Machine;
 
 impl Machine {
-    /// A bump on top of a clean copy of main, as update.sh's run has it.
+    /// A bump on top of a clean copy of main, as a run has it.
     fn bump(&self, text: &str) {
         self.at_main();
         self.commit("flake.lock", text);

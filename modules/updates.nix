@@ -75,31 +75,15 @@ let
   renovateRunFor = 2 * 3600;
 
   vars = {
-    UPDATE = update;
-    HEALTH = health;
     HOST = config.networking.hostName;
     PROJECT = project;
     DIR = stateDir;
-    WORK = "${config.burrow.scratchDir}/${update}";
     SRC = config.burrow.projectsDir;
-    FLAKE = config.burrow.flake;
-    ORIGIN = cfg.origin;
-    TRAIN = if train then "1" else "";
-    # Its steps in Rust (crates/burrow-update).
-    UPDATER = "${updater}/bin/${update}-steps";
-    SYSTEM = system;
-    MANIFEST = if cfg.claudeManifest == null then "" else cfg.claudeManifest;
-    CHECKS = lib.concatStringsSep " " cfg.checks;
-    WITHIN = cfg.confirmWithin;
     CHANNEL = "nixos-${config.system.nixos.release}";
     OWNER = config.burrow.owner;
     BURROW_USER = user;
-    BURROW_GROUP = account.group;
     HOME_DIR = account.home;
     USER_UID = toString account.uid;
-    SWITCH = "${prefix}-switch";
-    SWITCH_STATE = "/run/${prefix}-switch";
-    CONFIRM = "${prefix}-confirm";
     BOOT = if config.burrow.switch.trialBoot.enable then "${prefix}-boot" else "";
     NOTIFY = "${prefix}-notify";
     REVIEW_HINTS = cfg.firmware.reviewHints;
@@ -153,17 +137,20 @@ let
     makeBinaryWrapper ${inputs.self.packages.${system}.burrow-health}/bin/burrow-health $out/bin/${health} \
       --add-flags ${healthConfig}
   '';
-  # HOST-update's steps in Rust (crates/burrow-update's config.rs says what
-  # each of these is), for update.sh to run as root.
-  updaterConfig = pkgs.writeText "update.json" (builtins.toJSON {
-    inherit update user;
+  # HOST-update (crates/burrow-update, whose config.rs says what each of
+  # these is), with its config built in. What it runs as root it runs by
+  # path; what it runs as the user (git, gh, nix, proj, Claude Code) goes
+  # through runuser, on a PATH of its own.
+  updateConfig = pkgs.writeText "update.json" (builtins.toJSON {
+    inherit update user system project;
     host = vars.HOST;
     state = vars.DIR;
-    work = vars.WORK;
-    inherit (account) home uid;
+    work = "${config.burrow.scratchDir}/${update}";
+    inherit (account) home uid group;
     runuser = "${pkgs.util-linux}/bin/runuser";
+    path = lib.makeBinPath [ pkgs.coreutils config.programs.git.package config.nix.package machineGh tools.proj ]
+      + ":/run/current-system/sw/bin";
     configuration = config.burrow.switch.configName;
-    inherit system project;
     # burrow.cpu's slots, which the VM tests wait for where the machine has them.
     heavy = if config.burrow.cpu.enable then "${tools.heavy}/bin/heavy" else null;
     app = if machineApp == null then null else machineApp.name;
@@ -171,14 +158,37 @@ let
       repo = githubRepo; branch = update; settled = vars.SETTLED;
       context = config.burrow.ledger.trainContext; steward = autoland.app.slug;
     } else null;
+    inherit (cfg) origin checks;
+    flake = config.burrow.flake;
+    owner = config.burrow.owner;
+    manifest = cfg.claudeManifest;
+    releases = "https://downloads.claude.ai/claude-code-releases";
+    within = cfg.confirmWithin;
+    switchState = "/run/${prefix}-switch";
+    currentSystem = "/run/current-system";
+    lock = "/run/${update}.lock";
+    timers = [ "burrow-events-catch-up.timer" ] ++ lib.optional (tools ? boot) "${tools.boot.meta.mainProgram}-trial.timer";
+    tools = {
+      sudo = "${config.security.wrapperDir}/sudo";
+      switch = lib.getExe tools.switch;
+      confirm = lib.getExe tools.confirm;
+      boot = if tools ? boot then lib.getExe tools.boot else null;
+      health = lib.getExe healthTool;
+      notify = lib.getExe tools.notify;
+      vulnix = lib.getExe pkgs.vulnix;
+      curl = lib.getExe pkgs.curl;
+      install = "${pkgs.coreutils}/bin/install";
+      logger = "${config.systemd.package}/bin/systemd-cat";
+      systemctl = "${config.systemd.package}/bin/systemctl";
+    };
   });
-  updater = pkgs.runCommand "${update}-steps" { nativeBuildInputs = [ pkgs.makeBinaryWrapper ]; } ''
-    makeBinaryWrapper ${inputs.self.packages.${system}.burrow-update}/bin/burrow-update $out/bin/${update}-steps --add-flags ${updaterConfig}
+  updateTool = pkgs.runCommand update {
+    nativeBuildInputs = [ pkgs.makeBinaryWrapper ];
+    meta.mainProgram = update;
+  } ''
+    makeBinaryWrapper ${inputs.self.packages.${system}.burrow-update}/bin/burrow-update $out/bin/${update} \
+      --add-flags ${updateConfig}
   '';
-  updateTool = script update ./updates/update.sh (
-    (with pkgs; [ coreutils jq curl util-linux systemd gnugrep gnused gawk vulnix config.nix.package ])
-    ++ [ config.programs.git.package healthTool tools.switch tools.confirm machineGh ] ++ calls ++ lib.optional (tools ? boot) tools.boot
-  );
   # advisory-watch (crates/advisory-watch), with what a pass is told built in.
   advisoryConfig = pkgs.writeText "advisory-watch.json" (builtins.toJSON {
     state = "${stateDir}/advisories";
@@ -624,7 +634,7 @@ in
       });
 
       environment.systemPackages = [ updateTool healthTool ];
-      burrow.tools.update-steps = updater;
+      burrow.tools.update = updateTool;
 
       # VM tests run in the Nix build sandbox, as nixbld users; let them at KVM.
       services.udev.extraRules = ''
@@ -635,7 +645,8 @@ in
         description = "Update the system: bump, build, test, switch, confirm";
         # Its own switch must not stop it halfway.
         restartIfChanged = false;
-        # Claude Code, for the smoke test after it changes.
+        # The system's tools, on the PATH of what it runs as root: the switch,
+        # and the activation that runs.
         path = [ "/run/current-system/sw" ];
         serviceConfig = {
           Type = "oneshot";

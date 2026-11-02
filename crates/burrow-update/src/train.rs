@@ -21,7 +21,6 @@
 //! that isn't that one is someone else's, a fix, and what it holds hasn't
 //! been through HOST-update's gate.
 
-use std::fmt;
 use std::fs;
 
 use burrow_github::{Api, call, encode, query};
@@ -35,27 +34,6 @@ pub struct Pr {
     pub number: u64,
     /// Its head when it was listed.
     pub head: String,
-}
-
-impl Pr {
-    /// One as update.sh hands it over, "NUMBER HEAD".
-    pub fn parse(said: &str) -> Option<Pr> {
-        let (n, head) = said.split_once(' ')?;
-        let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
-        if !digits(n) || !is_commit(head) {
-            return None;
-        }
-        Some(Pr {
-            number: n.parse().ok()?,
-            head: head.to_string(),
-        })
-    }
-}
-
-impl fmt::Display for Pr {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{} {}", self.number, self.head)
-    }
 }
 
 /// Its open PR, None when there's none. Fails when GitHub doesn't say. Only
@@ -82,14 +60,17 @@ pub fn open(t: &Train, api: &mut dyn Api) -> Result<Option<Pr>, String> {
             .is_some_and(|r| r.eq_ignore_ascii_case(&t.repo))
     });
     let Some(p) = ours else { return Ok(None) };
-    let said = format!(
-        "{} {}",
-        p["number"].as_u64().unwrap_or(0),
-        p["head"]["sha"].as_str().unwrap_or("")
-    );
-    Pr::parse(&said)
-        .map(Some)
-        .ok_or_else(|| format!("GET {path}: a PR that isn't one ({said})"))
+    let head = p["head"]["sha"].as_str().unwrap_or("");
+    match p["number"].as_u64() {
+        Some(number) if is_commit(head) => Ok(Some(Pr {
+            number,
+            head: head.to_string(),
+        })),
+        _ => Err(format!(
+            "GET {path}: a PR that isn't one ({} {head})",
+            p["number"]
+        )),
+    }
 }
 
 /// Whether its open PR `pr` is red on a head HOST-update pushed, with that
@@ -177,7 +158,7 @@ fn failing(t: &Train, commit: &Value) -> bool {
     !nodes(suites).iter().all(started) || nodes(contexts).iter().any(red)
 }
 
-/// Main with its open PR `pr` on top, in the clone, which update.sh has at
+/// Main with its open PR `pr` on top, in the clone, which a run has at
 /// main. Fails, saying why, when that head isn't the one HOST-update pushed
 /// (someone's fixing it: what it holds hasn't been through HOST-update's
 /// gate) or doesn't merge onto main, with the clone as it was.
@@ -234,9 +215,9 @@ pub fn replaces(cfg: &Config, pr: &Pr, main: &str, short: &[String]) -> Result<(
 /// PR, never a new one. Only while that head is still on it and still red: a
 /// head pushed since is someone's fix, and one gone green (a rerun) is the
 /// steward's to settle and put in the train, so it's ridden instead. Gives
-/// the PR's URL; fails, saying why, with the PR left as it was. update.sh
-/// calls it once HEAD is live and healthy but before it's confirmed, so a
-/// refusal reverts it: the box never stays on a bump nothing will land.
+/// the PR's URL; fails, saying why, with the PR left as it was. A run calls
+/// it once HEAD is live and healthy but before it's confirmed (live.rs), so
+/// a refusal reverts it: the box never stays on a bump nothing will land.
 pub fn replace(cfg: &Config, t: &Train, api: &mut dyn Api, pr: &Pr) -> Result<String, String> {
     let (title, body) = said(cfg)?;
     let n = pr.number;

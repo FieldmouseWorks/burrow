@@ -40,7 +40,7 @@ impl Machine {
         self.commit_at(t, file, text);
     }
 
-    /// HEAD as update.sh leaves it before building main itself: main,
+    /// HEAD as a run leaves it before building main itself: main,
     /// checked out.
     fn on_main(&self) -> String {
         self.work(&["checkout", "-q", "-B", "update", "main"]);
@@ -125,7 +125,7 @@ fn a_build_is_heads_system_with_what_nix_said_in_its_log() {
     let log = m.cfg.state.join("logs/build.log");
     fs::write(&log, "a build before\n").unwrap();
     let new = build(&m.cfg).unwrap();
-    assert!(new.starts_with("/nix/store/"), "{new}");
+    assert!(new.starts_with(m.path("store").to_str().unwrap()), "{new}");
     assert_eq!(
         fs::read_to_string(&log).unwrap(),
         "",
@@ -315,10 +315,6 @@ fn what_runs_already_goes_up_only_once_it_put_it_live_itself() {
     assert_eq!(already(&m, true, true), Some(Already::Current));
     assert_eq!(already(&m, false, false), Some(Already::Current));
     assert_eq!(m.kept("nix.log"), "", "it asked nix about the very system");
-    assert_eq!(
-        [Already::Up, Already::Hold, Already::Current].map(|a| a.word()),
-        ["up", "hold", "current"]
-    );
 }
 
 #[test]

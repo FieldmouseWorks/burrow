@@ -262,6 +262,8 @@ name = "burrow-update"
 version = "0.0.0"
 dependencies = [
  "burrow-github",
+ "jiff",
+ "rustix",
  "serde",
  "serde_json",
  "tempfile",
