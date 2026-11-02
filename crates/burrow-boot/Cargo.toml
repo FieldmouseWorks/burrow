@@ -1,0 +1,19 @@
+[package]
+name = "burrow-boot"
+description = "HOST-boot: GRUB only ever defaults to a kernel that has booted on the machine; a new one boots once on trial first"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+rustix = { version = "1.1.6", features = ["fs", "process"] }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

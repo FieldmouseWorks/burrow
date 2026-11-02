@@ -80,6 +80,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "burrow-boot"
+version = "0.0.0"
+dependencies = [
+ "rustix",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+]
+
+[[package]]
 name = "burrow-browser-close"
 version = "0.0.0"
 dependencies = [
