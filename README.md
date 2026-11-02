@@ -10,6 +10,44 @@ work to Claude sessions inside each project.
 
 MIT licensed. Status: in daily use on one machine; options may still move.
 
+## Why
+
+Agents write code faster than a person can approve it. On a machine set up
+the usual way, the slow part is the person: clicking "allow", reading every
+diff before it merges, babysitting every update. burrow moves the safety from
+asking first to undoing after. A deleted file is a snapshot away, a system
+change that breaks the box reverts itself, an update that fails its tests
+never stays live, and a PR merges only once a reviewer and CI have passed the
+exact commit. What can't be undone (wiping a disk, flashing firmware, deleting
+remote data, force-pushing `main`) still asks.
+
+## How it fits together
+
+You talk to one Claude session, the operator, from the Claude app or
+claude.ai. It changes the machine through the machine's own flake checkout,
+and hands project work to Claude jobs inside each project (`proj`), or to a
+microVM when a task should be fenced off (`agents`). Work lands as pull
+requests: the steward (`autoland`) has Codex review each one, has Claude jobs
+fix every finding and red check, and merges once the exact head is reviewed
+clean and green. A merge to the machine's flake goes live through
+`HOST-update`, behind the dead man's switch (`switch`) and a health check, and
+the same pipeline keeps the flake's inputs, Claude Code and every repo's
+dependencies current (`updates`). Work starts within seconds of a GitHub
+webhook or an event on the box (`events`); the watchdog and the dispatcher
+(`watchdog`, `dispatch`) notice what has stopped moving, and you hear only
+about what needs you, one issue per problem (`notify`).
+
+The modules, by job:
+
+- **The safety net:** `claude`, `undo`, `switch`, `backup`, `ops`,
+  `heartbeat`, `robot`
+- **Doing the work:** `remote-control`, `proj`, `probe`, `agents`, `browser`,
+  `toolbox`, `rust-cache`, `cpu`, `github`, `usage-reset`
+- **Landing it:** `autoland`, `events`, `watchdog`, `dispatch`, `ledger`
+- **Keeping it current:** `updates`, `house`, `notify`
+
+Each is a row in the table below, and each can be imported on its own.
+
 ## What's in it
 
 | Module | Option | What it does |
