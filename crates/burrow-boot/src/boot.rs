@@ -6,7 +6,8 @@
 //! - boot-default: the system it last made GRUB's default
 //! - boot-trial: the system queued for a trial boot
 //! - boot-trying: the system a trial reboot went into, until the boot after
-//!   settles it (`check`)
+//!   settles it (`check`) and every grubenv has let go of it; a trial of
+//!   another system waits until they have
 //!
 //! What it says goes to stdout, and to stderr when it refused something;
 //! what the owner should hear about also goes to the journal and HOST-notify.
@@ -147,6 +148,21 @@ impl<'a> Boot<'a> {
         let Some(title) = menu::title_of(&menu, &new) else {
             return Err(Broke(format!("{} is not in the GRUB menu", new.display())));
         };
+        // An older trial still tracked is one a grubenv may still boot. It's
+        // let go of everywhere before this one takes its place, or the boot
+        // into it would be checked as this one's.
+        if let Some(older) = self.read(TRYING)?
+            && older != new
+        {
+            self.editenv(&["unset".as_ref(), "next_entry".as_ref()])
+                .map_err(|Broke(why)| {
+                    Broke(format!(
+                        "a grubenv may still boot the trial of {}, so {} waits: {why}",
+                        older.display(),
+                        new.display()
+                    ))
+                })?;
+        }
         self.write(TRYING, &new)?;
         let mut next = OsString::from("next_entry=");
         next.push(&title);
