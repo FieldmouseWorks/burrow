@@ -37,6 +37,11 @@ HELD = {"red": "it was red alone in it, until a new head",
         "empty": "it changes nothing after the PRs ahead of it, until they've landed or left",
         "refused": "{}, until the default branch moves or a new head",
         "elsewhere": "it was just retargeted off the default branch, so it's seen to again"}
+# The PR's waiting label while it's in the train (labels.waiting.train,
+# prs.show_waiting), put on and taken off with its status. Renovate's
+# stopUpdatingLabel is the same label: a new head on a PR in a candidate
+# throws the candidate away, gate and all, and one behind it would be next.
+LABEL = "train"
 TRAINS = {}  # each train repo's train, as this pass read it (begin)
 # The train repos this pass mustn't step, and why: a PR in the train it
 # couldn't take out, or wasn't sure was still settled.
@@ -142,7 +147,7 @@ def ride(repo, pr, st, alone, desc, settle, strike, said):
             return
         st["joined"] = head
         where = seat(repo, n)
-    if not settle("success", f"In the train, {where}. {desc}"[:140], wait=waits.TRAIN) and not DRY:
+    if not settle("success", f"In the train, {where}. {desc}"[:140], wait=waits.TRAIN, label=LABEL) and not DRY:
         # Without its status cn wouldn't land it (Conary#55): out until
         # GitHub takes it (settle strikes it).
         leave(repo, pr)
