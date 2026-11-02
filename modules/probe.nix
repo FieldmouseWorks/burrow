@@ -82,12 +82,15 @@ in
         default = [
           "${prefix}-*.service"
           "burrow-*.service"
+          # The steward's (autoland.nix): its pass, each repo's, and the rest.
+          "autoland.service"
+          "autoland@*.service"
           "autoland-*.service"
           "proj-*.service"
           "nix-daemon.service"
           "systemd-oomd.service"
         ];
-        defaultText = lib.literalExpression ''[ "''${config.burrow.prefix}-*.service" "burrow-*.service" "autoland-*.service" "proj-*.service" "nix-daemon.service" "systemd-oomd.service" ]'';
+        defaultText = lib.literalExpression ''[ "''${config.burrow.prefix}-*.service" "burrow-*.service" "autoland.service" "autoland@*.service" "autoland-*.service" "proj-*.service" "nix-daemon.service" "systemd-oomd.service" ]'';
         description = ''
           The system units whose journals a probe may read (globs: `*`, `?`,
           `[...]`). Keep off any whose log can hold a secret: the scrubber only
