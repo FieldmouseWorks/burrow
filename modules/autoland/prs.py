@@ -390,8 +390,9 @@ def post_status(repo, pr, state, desc):
 
 
 # What a PR can wait on that a label of the steward's says, at the top of the
-# PR and in its repo's list (labels.waiting; repos.py makes them): its updates
-# too new to take yet, its turn for a proof slot, a reviewer back in service.
+# PR and in its repo's list (labels.waiting; burrow-upkeep makes them): its
+# updates too new to take yet, its turn for a proof slot, a reviewer back in
+# service, and (train.py's LABEL) its turn in its repo's train.
 RELEASE_AGE, PROOF_SLOT, REVIEWER = "releaseAge", "proofSlot", "reviewer"
 
 

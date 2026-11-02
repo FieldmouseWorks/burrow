@@ -320,7 +320,13 @@ let
   # Renovate's policy, settings included, before lock-age goes in
   # (renovateSettings).
   renovatePolicy = import ./updates/renovate-policy.nix { inherit lib rcfg githubRepo; };
-  renovateSettings = renovatePolicy // {
+  renovateSettings = renovatePolicy // lib.optionalAttrs (trainRepos != [ ]) {
+    # A PR in a train has the steward's label saying so, and Renovate pushes
+    # nothing to it then (rebase or newer release alike): a new head would
+    # throw away the candidate it rides in, gate and all. A newer release
+    # comes in its own PR once it has landed.
+    stopUpdatingLabel = autoland.labels.waiting.train;
+  } // {
     # The one command a repo's refresh may run after it (lock-age).
     allowedCommands = (renovatePolicy.allowedCommands or [ ]) ++ [ lockAgeAllowed ];
     packageRules = (renovatePolicy.packageRules or [ ]) ++ [ lockAgeRule ] ++ lib.optional (trainRepos != [ ]) {

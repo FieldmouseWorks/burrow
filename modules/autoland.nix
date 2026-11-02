@@ -676,6 +676,15 @@ in
           default = "waiting: reviewer";
           description = "On a PR that can't settle until a reviewer out of service is back.";
         };
+        train = mkOption {
+          type = types.str;
+          default = "waiting: train";
+          description = ''
+            On a PR in its repo's merge train, until it lands or leaves. It's
+            Renovate's `stopUpdatingLabel` too: a push to a PR in the train
+            throws away the candidate it rides in, gate and all.
+          '';
+        };
       };
     };
 

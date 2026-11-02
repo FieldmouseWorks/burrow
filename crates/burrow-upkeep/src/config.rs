@@ -127,6 +127,7 @@ pub struct Waiting {
     pub release_age: String,
     pub proof_slot: String,
     pub reviewer: String,
+    pub train: String,
 }
 
 /// A repo's rules: whether automation pushes to its default branch

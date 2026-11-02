@@ -401,7 +401,9 @@ C.save("repo-sam_r.json", {"databaseId": 2002})
 # The first: due, kept, and the hook added, with the hooks' secret.
 assert settle(0) is False
 st = C.load("repo-sam_r.json", {})
-assert st["settings"] == T and st["app"] == 7 and st["databaseId"] == 2002 and len(st["labels"]) == 6, st
+labels = C.CFG["labels"]
+assert st["settings"] == T and st["app"] == 7 and st["databaseId"] == 2002 and set(st["labels"]) == {
+    labels["hold"], labels["owner"], labels["first"], *labels["waiting"].values()}, st
 assert st["hookId"] == 9 and st["hook"], st
 assert ("POST", "repos/sam/r/rulesets") in changed() and ("PATCH", "repos/sam/r") in changed(), changed()
 assert changed()[-1] == ("POST", "repos/sam/r/hooks"), changed()

@@ -59,6 +59,7 @@ pub fn config(dir: &Path) -> Config {
                     release_age: "waiting: release age".into(),
                     proof_slot: "waiting: proof slot".into(),
                     reviewer: "waiting: reviewer".into(),
+                    train: "waiting: train".into(),
                 },
             },
             defaults: Rules {

@@ -64,6 +64,10 @@ assert env["CONARY_TOKEN_COMMAND"].endswith("/steward.py token") and " -E -s " i
 # What it waits on is the train's, with the train's deadline.
 noted = waits.NOTED["sam/r"]["sam/r#5"]
 assert noted["phase"].startswith("In the train, next in line.") and noted["minutes"] == 240, noted
+# Its waiting label says it's in the train, and is Renovate's stop label
+# too: a push to a PR in the train throws away the candidate it rides in.
+TRAIN_ON, TRAIN_OFF = (f"pr edit 5 -R sam/r --{x}-label waiting: train" for x in ("add", "remove"))
+assert TRAIN_ON in WROTE, WROTE
 
 # One touching a one-way path (R2), once its judge said land, joins alone: a
 # candidate of its own, which lands only while main is still its base.
@@ -115,6 +119,11 @@ for pr in (clean(threads=[False]), mkpr(sha=other), clean(draft=True), clean(lab
     assert "state=pending" in status and cn_runs() == [SHOW, LEAVE], (status, cn_runs())
     assert len(said) == 1 and "state=pending" in " ".join(said[0]), said
     assert T.seat("sam/r", 5) is None
+# Out, its label comes off, so Renovate may update it again.
+fresh_pr_state()
+seen(show=train([5]))
+run(clean(threads=[False], labels=["waiting: train"]), 1000)
+assert cn_runs() == [SHOW, LEAVE] and TRAIN_OFF in WROTE, (cn_runs(), WROTE)
 # One that isn't in has nothing to leave.
 seen()
 run(clean(threads=[False]), 1000)
@@ -144,6 +153,12 @@ for held, checks, says in (("conflict", CI_GREEN, "it won't merge after the PRs 
     seen()
     status, _ = run(clean(checks=checks), 800)
     assert cn_runs() == [SHOW, JOIN] and "In the train" in status, (cn_runs(), status)
+# Held out, it isn't labelled in the train: the new head that lets one red
+# alone back in is Renovate's to push, for one of its own.
+fresh_pr_state()
+seen(join={"joined": False, "held": "red"})
+status, _ = run(clean(labels=["waiting: train"]), 700)
+assert "held out of the train" in status and TRAIN_OFF in WROTE, (status, WROTE)
 
 # GitHub not taking the status the rules require: out again, until it does.
 fresh_pr_state()

@@ -4,13 +4,14 @@ use crate::pass::Out;
 use crate::testing::{Hub, States, T, answer, config, look};
 use serde_json::json;
 
-const LABELS: [&str; 6] = [
+const LABELS: [&str; 7] = [
     "hold",
     "needs-owner",
     "first",
     "waiting: release age",
     "waiting: proof slot",
     "waiting: reviewer",
+    "waiting: train",
 ];
 const LISTING: &str = "repos/sam/r/rulesets?per_page=100";
 const BRANCHES: &str = "repos/sam/r/branches?protected=true&per_page=100";
@@ -177,7 +178,7 @@ fn labels_are_made_daily_and_at_once_when_one_is_new() {
     assert!(got.iter().all(|(_, d)| d.chars().count() <= 100), "{got:?}");
     let waiting = got.iter().filter(|(n, _)| n.starts_with("waiting: "));
     assert!(
-        waiting.clone().count() == 3
+        waiting.clone().count() == 4
             && waiting
                 .clone()
                 .all(|(_, d)| d.contains("review-settled says"))
@@ -254,10 +255,10 @@ fn a_label_github_lacks_is_made_and_one_it_wont_take_is_tried_again() {
         answer(422, json!({"message": "Validation Failed"})),
     );
     settle_at(&cfg, &mut hub, &public(), 0.0);
-    assert_eq!(made(&hub).len(), 6);
+    assert_eq!(made(&hub).len(), LABELS.len());
     assert_eq!(kept(&cfg).get("labels"), None);
     settle_at(&cfg, &mut hub, &public(), 60.0);
-    assert_eq!(made(&hub).len(), 6);
+    assert_eq!(made(&hub).len(), LABELS.len());
 }
 
 #[test]
@@ -725,7 +726,7 @@ fn an_empty_repo_gets_its_ruleset_with_its_first_commit() {
         empty: true,
     };
     settle_at(&cfg, &mut hub, &empty, 0.0);
-    assert!(!hub.paths().contains(&"repos/sam/r/rulesets") && made(&hub).len() == 6);
+    assert!(!hub.paths().contains(&"repos/sam/r/rulesets") && made(&hub).len() == LABELS.len());
     assert!(writes(&hub).contains(&("PUT", "repos/sam/r/vulnerability-alerts", None)));
     assert_eq!(kept(&cfg)["empty"], true);
     // Still empty, it's settled once a day like any other.

@@ -77,9 +77,11 @@ change nothing else in the same PR.
   new head is settled like any other.
 - The `hold`, `needs-owner` and `first` labels (`burrow.autoland.labels`),
   which the steward, its jobs and the owner put on PRs, and the steward's
-  own `waiting: release age`, `waiting: proof slot` and `waiting: reviewer`,
-  which say at a glance what a PR waits on while it does (its
-  `review-settled` status says the rest).
+  own `waiting: release age`, `waiting: proof slot`, `waiting: reviewer` and
+  `waiting: train`, which say at a glance what a PR waits on while it does
+  (its `review-settled` status says the rest). Renovate pushes nothing to a
+  PR labelled `waiting: train`, which would throw away the candidate it
+  rides in.
 
 ## The steward's GitHub App
 

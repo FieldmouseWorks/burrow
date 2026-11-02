@@ -265,6 +265,11 @@ pub(crate) fn labels(cfg: &Config) -> Vec<(String, &'static str, String)> {
             "c5def5",
             format!("Waits for a reviewer to be back in service; {says} says which and why"),
         ),
+        (
+            w.train.clone(),
+            "c5def5",
+            format!("In its merge train, which lands it; {says} says where. Renovate leaves it be"),
+        ),
     ]
 }
 
