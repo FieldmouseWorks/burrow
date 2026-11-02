@@ -150,11 +150,17 @@ impl<'a> Boot<'a> {
         self.write(TRYING, &new)?;
         let mut next = OsString::from("next_entry=");
         next.push(&title);
-        if let Err(e) = self.editenv(&["set".as_ref(), &next]) {
-            // Nothing went on trial: the boot after this isn't one.
-            let _ = self.editenv(&["unset".as_ref(), "next_entry".as_ref()]);
-            let _ = fs::remove_file(self.file(TRYING));
-            return Err(e);
+        if let Err(Broke(why)) = self.editenv(&["set".as_ref(), &next]) {
+            // Taken back from every grubenv, so the boot after this isn't a
+            // trial. While one may still hold it, boot-trying stays: the
+            // boot after is checked as the trial it may be.
+            let taken_back = self
+                .editenv(&["unset".as_ref(), "next_entry".as_ref()])
+                .and_then(|()| remove(&self.file(TRYING)));
+            return Err(match taken_back {
+                Ok(()) => Broke(why),
+                Err(Broke(also)) => Broke(format!("{why}; taking it back: {also}")),
+            });
         }
         rustix::fs::sync();
         self.journal(
@@ -169,7 +175,8 @@ impl<'a> Boot<'a> {
     /// and is the boot default from now on, or didn't and is never tried
     /// again; and remembers that what booted came up. A step of a failed
     /// trial that breaks doesn't stop the rest, rebooting out of it most of
-    /// all: it's said, and check exits 1.
+    /// all, and nor does a notice that won't open or close: each is said,
+    /// and check exits 1.
     fn check(&self) -> Result<u8, Broke> {
         let cfg = self.cfg;
         let booted = canonical(&cfg.booted)?;
@@ -198,7 +205,7 @@ impl<'a> Boot<'a> {
                         "err",
                         &format!("TRIAL FAILED: {t} did not come up; booted {b} instead"),
                     );
-                    self.notify(&[
+                    let notified = self.notify(&[
                         "open",
                         NOTICE,
                         "A new kernel didn't boot",
@@ -207,6 +214,7 @@ impl<'a> Boot<'a> {
                             cfg.host
                         ),
                     ]);
+                    noted(&mut ok, &cfg.boot, notified);
                     return Ok(if ok { 0 } else { 1 });
                 }
                 // Through multi-user, but broken: back to the proven default
@@ -215,7 +223,7 @@ impl<'a> Boot<'a> {
                     "err",
                     &format!("TRIAL FAILED: {t} booted without sshd; rebooting into the default"),
                 );
-                self.notify(&[
+                let notified = self.notify(&[
                     "open",
                     NOTICE,
                     "A new kernel booted broken",
@@ -224,6 +232,7 @@ impl<'a> Boot<'a> {
                         cfg.host
                     ),
                 ]);
+                noted(&mut ok, &cfg.boot, notified);
                 self.reboot()?;
                 return Ok(if ok { 0 } else { 1 });
             }
@@ -240,11 +249,12 @@ impl<'a> Boot<'a> {
                 "notice",
                 &format!("trial passed: {} is the boot default", booted.display()),
             );
-            self.notify(&[
+            let notified = self.notify(&[
                 "close",
                 NOTICE,
                 &format!("The trial boot of {} worked.", booted.display()),
             ]);
+            noted(&mut ok, &cfg.boot, notified);
         }
         Ok(if ok { 0 } else { 1 })
     }
@@ -346,21 +356,32 @@ impl<'a> Boot<'a> {
     }
 
     /// `args` in each grubenv beside a GRUB (in /boot, and a mirrored
-    /// /boot-fallback), made first if it's missing.
+    /// /boot-fallback), made first if it's missing. Each is tried, even
+    /// after one fails: what failed, said together.
     fn editenv(&self, args: &[&OsStr]) -> Result<(), Broke> {
+        let editenv = &self.cfg.tools.grub_editenv;
+        let mut failed = Vec::new();
         for dir in &self.cfg.grub_dirs {
             let grub = dir.join("grub");
             if !grub.exists() {
                 continue;
             }
             let env = grub.join("grubenv");
-            let editenv = &self.cfg.tools.grub_editenv;
-            if !env.exists() {
-                ran(editenv, [env.as_os_str(), "create".as_ref()])?;
+            let made = if env.exists() {
+                Ok(())
+            } else {
+                ran(editenv, [env.as_os_str(), "create".as_ref()])
+            };
+            let edited = made.and_then(|()| ran(editenv, [&[env.as_os_str()][..], args].concat()));
+            if let Err(Broke(why)) = edited {
+                failed.push(why);
             }
-            ran(editenv, [&[env.as_os_str()][..], args].concat())?;
         }
-        Ok(())
+        if failed.is_empty() {
+            Ok(())
+        } else {
+            Err(Broke(failed.join("; ")))
+        }
     }
 
     fn reboot(&self) -> Result<(), Broke> {
@@ -386,23 +407,17 @@ impl<'a> Boot<'a> {
         }
     }
 
-    /// HOST-notify, told `words`: a notice that doesn't open or close is
-    /// said, and changes nothing else.
-    fn notify(&self, words: &[&str]) {
+    /// HOST-notify, told `words`: whether the notice opened or closed.
+    fn notify(&self, words: &[&str]) -> Result<(), Broke> {
         let notify = &self.cfg.tools.notify;
         match Command::new(notify)
             .args(words)
             .stdin(Stdio::null())
             .status()
         {
-            Ok(s) if s.success() => {}
-            Ok(s) => complain(&format!(
-                "{}: {} {}: {s}",
-                self.cfg.boot,
-                notify.display(),
-                words[0]
-            )),
-            Err(e) => complain(&format!("{}: {}: {e}", self.cfg.boot, notify.display())),
+            Ok(s) if s.success() => Ok(()),
+            Ok(s) => Err(Broke(format!("{} {}: {s}", notify.display(), words[0]))),
+            Err(e) => Err(Broke(format!("{}: {e}", notify.display()))),
         }
     }
 

@@ -33,7 +33,7 @@ fn bin() -> &'static Path {
             ),
             (
                 "grub-editenv",
-                "#!/bin/sh\necho \"$*\" >>\"$FAKE/grub-editenv\"\n[ ! -e \"$FAKE/fail-editenv-$2\" ] || exit 1\ncase \"$2\" in\n  create) : >\"$1\" ;;\n  set) echo \"$3\" >>\"$1\" ;;\n  unset) echo \"-$3\" >>\"$1\" ;;\nesac\n",
+                "#!/bin/sh\necho \"$*\" >>\"$FAKE/grub-editenv\"\n[ ! -e \"$FAKE/fail-editenv-$2\" ] || exit 1\nd=${1%/grub/grubenv}\n[ ! -e \"$FAKE/fail-editenv-$2-${d##*/}\" ] || exit 1\ncase \"$2\" in\n  create) : >\"$1\" ;;\n  set) echo \"$3\" >>\"$1\" ;;\n  unset) echo \"-$3\" >>\"$1\" ;;\nesac\n",
             ),
             (
                 "systemctl",
@@ -651,6 +651,105 @@ fn a_trial_not_in_the_menu_or_that_cant_be_set_reboots_nothing() {
     let out = m.run(&["trial"]);
     assert_eq!(out.status.code(), Some(1));
     assert!(said(&out).2.ends_with("systemctl reboot: exit status: 1\n"));
+}
+
+#[test]
+fn a_trial_a_grubenv_wont_let_go_of_is_still_checked_as_one() {
+    let m = queued();
+    let (boot, fallback) = (
+        m.path("boot/grub/grubenv"),
+        m.path("boot-fallback/grub/grubenv"),
+    );
+    let unset = |env: &Path| format!("{} unset next_entry\n", env.display());
+    // Set in /boot, refused in /boot-fallback: taken back from both.
+    m.set("fail-editenv-set-boot-fallback", "");
+    let out = m.run(&["trial"]);
+    let (code, _, stderr) = said(&out);
+    assert_eq!(code, Some(1));
+    assert!(
+        stderr.contains(&format!("{} set next_entry=", fallback.display())),
+        "{stderr}"
+    );
+    let editenv = m.fake("grub-editenv");
+    assert!(editenv.contains(&unset(&boot)), "{editenv}");
+    assert!(editenv.contains(&unset(&fallback)), "{editenv}");
+    assert_eq!(m.state("boot-trying"), None);
+    // /boot won't let it go either. The take-back still reaches
+    // /boot-fallback, and as the boot after may be the trial, it's still
+    // tracked as one.
+    m.set("fail-editenv-unset-boot", "");
+    let out = m.run(&["trial"]);
+    let (code, _, stderr) = said(&out);
+    assert_eq!(code, Some(1));
+    // What it couldn't take back, after what it couldn't set.
+    let back = stderr.split_once("; taking it back: ").map(|(_, b)| b);
+    assert!(
+        back.is_some_and(|b| b.ends_with(&format!(
+            "{} unset next_entry: exit status: 1\n",
+            boot.display()
+        ))),
+        "{stderr}"
+    );
+    assert!(m.fake("grub-editenv").contains(&unset(&fallback)));
+    assert_eq!(m.state("boot-trying"), Some(format!("{}\n", m.sys("two"))));
+    assert!(!m.fake("systemctl").contains("reboot"));
+    // GRUB boots it, without sshd: checked as the trial it is.
+    fs::remove_file(m.path("fake/fail-editenv-unset-boot")).unwrap();
+    m.boots("two");
+    m.set("sshd-down", "");
+    assert_eq!(said(&m.run(&["check"])), ok(""));
+    assert_eq!(m.state("boot-failed"), Some(m.bits("two")));
+    assert!(
+        m.fake("systemctl")
+            .ends_with("-q is-active sshd.service\nreboot\n")
+    );
+    assert_eq!(m.state("boot-trying"), None);
+}
+
+#[test]
+fn a_notice_that_wont_open_or_close_fails_check_and_settles_it_all_the_same() {
+    // A trial that didn't come up, one without sshd, and one that passed.
+    for (came_up, sshd, word) in [
+        (false, true, "open"),
+        (true, false, "open"),
+        (true, true, "close"),
+    ] {
+        let m = queued();
+        m.run(&["trial"]);
+        m.fake("systemctl");
+        if came_up {
+            m.boots("two");
+        }
+        if !sshd {
+            m.set("sshd-down", "");
+        }
+        m.set("fail-notify", "");
+        let out = m.run(&["check"]);
+        let (code, stdout, stderr) = said(&out);
+        let case = format!("{word}, came up {came_up}, sshd {sshd}");
+        assert_eq!((code, stdout.as_str()), (Some(1), ""), "{case}");
+        assert!(stderr.starts_with("box-boot: "), "{case}: {stderr}");
+        assert!(
+            stderr.ends_with(&format!("box-notify {word}: exit status: 1\n")),
+            "{case}: {stderr}"
+        );
+        assert_eq!(m.fake("notify").split('|').next(), Some(word), "{case}");
+        assert_eq!(m.state("boot-trial"), None, "{case}");
+        assert_eq!(m.state("boot-trying"), None, "{case}");
+        let systemctl = m.fake("systemctl");
+        if came_up && sshd {
+            assert_eq!(m.state("boot-proven"), Some(m.bits("two")), "{case}");
+            assert_eq!(m.state("boot-default"), Some(format!("{}\n", m.sys("two"))));
+            assert!(!systemctl.contains("reboot"), "{case}");
+        } else {
+            assert_eq!(m.state("boot-failed"), Some(m.bits("two")), "{case}");
+            assert_eq!(
+                systemctl.ends_with("reboot\n"),
+                came_up,
+                "{case}: {systemctl}"
+            );
+        }
+    }
 }
 
 #[test]
