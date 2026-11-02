@@ -177,64 +177,49 @@ impl<'a> Boot<'a> {
     /// trial that breaks doesn't stop the rest, rebooting out of it most of
     /// all, and nor does a notice that won't open or close: each is said,
     /// and check exits 1.
+    ///
+    /// The trial is tracked (boot-trying) until next_entry is cleared from
+    /// every grubenv. While one still holds it, each check looks again: a
+    /// trial settled already isn't settled twice, and one that failed,
+    /// booted again by that grubenv's disk, is rebooted out of, never
+    /// proven.
     fn check(&self) -> Result<u8, Broke> {
         let cfg = self.cfg;
         let booted = canonical(&cfg.booted)?;
         let trying = self.read(TRYING)?;
-        remove(&self.file(TRYING))?;
         let mut ok = true;
         // GRUB clears next_entry itself; make sure, so a missed clear never
         // loops.
-        noted(
-            &mut ok,
-            &cfg.boot,
-            self.editenv(&["unset".as_ref(), "next_entry".as_ref()]),
-        );
+        let cleared = self
+            .editenv(&["unset".as_ref(), "next_entry".as_ref()])
+            .and_then(|()| remove(&self.file(TRYING)));
+        noted(&mut ok, &cfg.boot, cleared);
+        let mut passed = false;
         if let Some(trying) = &trying {
-            let came_up = booted == *trying;
-            if !came_up || !self.sshd_active() {
-                noted(
-                    &mut ok,
-                    &cfg.boot,
-                    bits(trying).and_then(|b| self.add(FAILED, &b)),
-                );
-                noted(&mut ok, &cfg.boot, self.unqueue());
-                let (t, b) = (trying.display(), booted.display());
-                if !came_up {
+            // What an earlier check made of it, if one did.
+            let (proven, failed) = match bits(trying) {
+                Ok(b) => (self.listed(PROVEN, &b)?, self.listed(FAILED, &b)?),
+                Err(_) => (false, false),
+            };
+            if proven {
+                // It passed: what's left of it boots a proven system.
+            } else if failed {
+                if booted == *trying {
                     self.journal(
                         "err",
-                        &format!("TRIAL FAILED: {t} did not come up; booted {b} instead"),
-                    );
-                    let notified = self.notify(&[
-                        "open",
-                        NOTICE,
-                        "A new kernel didn't boot",
                         &format!(
-                            "{} tried to boot {t} once and came back up on {b} instead (panic, hang or watchdog reset). That kernel won't be tried again. The default is still the last good one. Claude is looking into it.",
-                            cfg.host
+                            "TRIAL FAILED: {} booted again, from a grubenv that kept it; rebooting into the default",
+                            trying.display()
                         ),
-                    ]);
-                    noted(&mut ok, &cfg.boot, notified);
+                    );
+                    self.reboot()?;
                     return Ok(if ok { 0 } else { 1 });
                 }
-                // Through multi-user, but broken: back to the proven default
-                // (next_entry is cleared already).
-                self.journal(
-                    "err",
-                    &format!("TRIAL FAILED: {t} booted without sshd; rebooting into the default"),
-                );
-                let notified = self.notify(&[
-                    "open",
-                    NOTICE,
-                    "A new kernel booted broken",
-                    &format!(
-                        "{} booted {t} once, but sshd didn't come up, so it rebooted into the last good system. That kernel won't be tried again.",
-                        cfg.host
-                    ),
-                ]);
-                noted(&mut ok, &cfg.boot, notified);
-                self.reboot()?;
-                return Ok(if ok { 0 } else { 1 });
+            } else {
+                passed = self.settle(trying, &booted, &mut ok)?;
+                if !passed {
+                    return Ok(if ok { 0 } else { 1 });
+                }
             }
         }
         // This kernel, initrd and command line work here.
@@ -242,7 +227,7 @@ impl<'a> Boot<'a> {
         if !self.listed(PROVEN, &bits)? {
             self.add(PROVEN, &bits)?;
         }
-        if trying.is_some() {
+        if passed {
             self.make_default(&booted)?;
             self.unqueue()?;
             self.journal(
@@ -257,6 +242,59 @@ impl<'a> Boot<'a> {
             noted(&mut ok, &cfg.boot, notified);
         }
         Ok(if ok { 0 } else { 1 })
+    }
+
+    /// The trial of `trying` settled as `booted` came up: whether it
+    /// passed. One that didn't is never tried again, and one without sshd
+    /// is rebooted out of.
+    fn settle(&self, trying: &Path, booted: &Path, ok: &mut bool) -> Result<bool, Broke> {
+        let cfg = self.cfg;
+        let came_up = booted == trying;
+        if came_up && self.sshd_active() {
+            return Ok(true);
+        }
+        noted(
+            ok,
+            &cfg.boot,
+            bits(trying).and_then(|b| self.add(FAILED, &b)),
+        );
+        noted(ok, &cfg.boot, self.unqueue());
+        let (t, b) = (trying.display(), booted.display());
+        if !came_up {
+            self.journal(
+                "err",
+                &format!("TRIAL FAILED: {t} did not come up; booted {b} instead"),
+            );
+            let notified = self.notify(&[
+                "open",
+                NOTICE,
+                "A new kernel didn't boot",
+                &format!(
+                    "{} tried to boot {t} once and came back up on {b} instead (panic, hang or watchdog reset). That kernel won't be tried again. The default is still the last good one. Claude is looking into it.",
+                    cfg.host
+                ),
+            ]);
+            noted(ok, &cfg.boot, notified);
+            return Ok(false);
+        }
+        // Through multi-user, but broken: back to the proven default
+        // (next_entry is cleared already).
+        self.journal(
+            "err",
+            &format!("TRIAL FAILED: {t} booted without sshd; rebooting into the default"),
+        );
+        let notified = self.notify(&[
+            "open",
+            NOTICE,
+            "A new kernel booted broken",
+            &format!(
+                "{} booted {t} once, but sshd didn't come up, so it rebooted into the last good system. That kernel won't be tried again.",
+                cfg.host
+            ),
+        ]);
+        noted(ok, &cfg.boot, notified);
+        self.reboot()?;
+        Ok(false)
     }
 
     fn status(&self) -> Result<u8, Broke> {

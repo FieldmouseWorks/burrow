@@ -917,5 +917,80 @@ fn a_failed_trial_reboots_whatever_else_breaks_and_says_it() {
     );
     assert!(m.fake("systemctl").ends_with("reboot\n"));
     assert_eq!(m.state("boot-trial"), None);
+    // Still tracked: no grubenv let go of it.
+    assert_eq!(m.state("boot-trying"), Some(format!("{}\n", m.sys("two"))));
+}
+
+#[test]
+fn a_failed_trial_a_grubenv_keeps_is_rebooted_out_of_whenever_it_boots() {
+    let m = queued();
+    let two = m.sys("two");
+    m.run(&["trial"]);
+    // It didn't come up, and /boot-fallback won't let it go.
+    m.set("fail-editenv-unset-boot-fallback", "");
+    for f in ["journal", "notify", "systemctl"] {
+        m.fake(f);
+    }
+    let out = m.run(&["check"]);
+    assert_eq!(said(&out).0, Some(1));
+    assert_eq!(m.state("boot-failed"), Some(m.bits("two")));
+    assert_eq!(m.state("boot-trial"), None);
+    assert!(m.fake("notify").starts_with("open|"));
+    assert_eq!(m.state("boot-trying"), Some(format!("{two}\n")));
+    // An ordinary boot after: it's settled already, so nothing again.
+    m.fake("journal");
+    let out = m.run(&["check"]);
+    assert_eq!(said(&out).0, Some(1));
+    assert_eq!(m.fake("notify"), "");
+    assert_eq!(m.fake("journal"), "");
+    assert_eq!(m.state("boot-failed"), Some(m.bits("two")));
+    assert!(!m.fake("systemctl").contains("reboot"));
+    // Booted from /boot-fallback's disk: the failed trial, sshd and all.
+    // Rebooted out of, and never proven.
+    m.boots("two");
+    let out = m.run(&["check"]);
+    assert_eq!(said(&out).0, Some(1));
+    assert_eq!(
+        m.fake("journal"),
+        format!(
+            "-t box-boot -p err TRIAL FAILED: {two} booted again, from a grubenv that kept it; rebooting into the default\n"
+        )
+    );
+    assert!(m.fake("systemctl").ends_with("reboot\n"));
+    assert!(!m.state("boot-proven").unwrap().contains(&m.bits("two")));
+    assert_eq!(m.fake("notify"), "");
+    // Once it lets go, it's done.
+    fs::remove_file(m.path("fake/fail-editenv-unset-boot-fallback")).unwrap();
+    m.boots("one");
+    assert_eq!(said(&m.run(&["check"])), ok(""));
     assert_eq!(m.state("boot-trying"), None);
+}
+
+#[test]
+fn a_passed_trial_a_grubenv_keeps_is_settled_once() {
+    let m = queued();
+    let two = m.sys("two");
+    m.run(&["trial"]);
+    m.boots("two");
+    m.set("fail-editenv-unset-boot-fallback", "");
+    m.fake("notify");
+    let out = m.run(&["check"]);
+    assert_eq!(said(&out).0, Some(1));
+    assert_eq!(m.state("boot-default"), Some(format!("{two}\n")));
+    assert!(m.fake("notify").starts_with("close|"));
+    assert_eq!(m.state("boot-trying"), Some(format!("{two}\n")));
+    // A boot after: what's left of it boots a proven system.
+    for f in ["journal", "switch-to-configuration", "systemctl"] {
+        m.fake(f);
+    }
+    let out = m.run(&["check"]);
+    assert_eq!(said(&out).0, Some(1));
+    assert_eq!(m.fake("notify"), "");
+    assert_eq!(m.fake("journal"), "");
+    assert_eq!(m.fake("switch-to-configuration"), "");
+    assert!(!m.fake("systemctl").contains("reboot"));
+    fs::remove_file(m.path("fake/fail-editenv-unset-boot-fallback")).unwrap();
+    assert_eq!(said(&m.run(&["check"])), ok(""));
+    assert_eq!(m.state("boot-trying"), None);
+    assert_eq!(m.state("boot-proven"), Some(m.bits("two")));
 }
