@@ -1,0 +1,89 @@
+{
+  "conary": "note v1",
+  "change": "7aes1c6qna508zrp9srp3fk4cs",
+  "repo": {
+    "owner": "fieldmouseworks",
+    "name": "burrow"
+  },
+  "pr": 407,
+  "url": "https://github.com/fieldmouseworks/burrow/pull/407",
+  "summary": "readme: say why burrow exists and how its modules fit together",
+  "task": "https://claude.ai/code/project/chan_01Ad4f4oDXfFTCEzLHzMTD8q?thread=cmsg_01Ad4f4oDXfFTCEzLHzMTD8qAyuJ58AvPRf1fytK7EAK3a",
+  "author": {
+    "kind": "agent",
+    "login": "TusanHomichi",
+    "session": "https://claude.ai/code/session_01BkHcyBhJt2iAceHnXS9h9B"
+  },
+  "landing": {
+    "revision": "c94c2320771a1463fc29697dd3699d59409d7b72ca43203a04a33dad91957d44",
+    "before": "dad44b3daa92c27a1f8f913ae61b3eeadde1ad2e",
+    "after": "9b0adfe79f89f6e18b854518d3d3bdaf8855da2f",
+    "by": {
+      "kind": "status",
+      "login": "fieldmouseworks-steward[bot]"
+    },
+    "at": 1793580922650
+  },
+  "evidence": [
+    {
+      "kind": "ci",
+      "check": "check / lane into main",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/41369458772/job/125036592372"
+    },
+    {
+      "kind": "ci",
+      "check": "check / commits",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/41369458772/job/125036592170"
+    },
+    {
+      "kind": "ci",
+      "check": "check / docs only into main from dad44b3daa92c27a1f8f913ae61b3eeadde1ad2e",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/41369458772/job/125036621913"
+    },
+    {
+      "kind": "ci",
+      "check": "house",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/41369458960/job/125036592285"
+    },
+    {
+      "kind": "ci",
+      "check": "house/title (#407)",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/41369458960"
+    },
+    {
+      "kind": "ci",
+      "check": "house/rust-first (#407)",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/41369458960"
+    },
+    {
+      "kind": "ci",
+      "check": "house/timers (#407)",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/41369458960"
+    },
+    {
+      "kind": "ci",
+      "check": "house/file-size (#407)",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/41369458960"
+    },
+    {
+      "kind": "ci",
+      "check": "house/model-names (#407)",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/actions/runs/41369458960"
+    },
+    {
+      "kind": "review",
+      "check": "codex",
+      "result": "pass",
+      "source": "https://github.com/FieldmouseWorks/burrow/pull/407#pullrequestreview-5731102728"
+    }
+  ]
+}
