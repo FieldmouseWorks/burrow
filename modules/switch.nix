@@ -21,14 +21,9 @@ let
     BOOT = if cfg.trialBoot.enable then boot else "";
     REVERT = "${prefix}-revert";
     STATE = "/run/${prefix}-switch";
-    SWITCH_STATE = vars.STATE;
     FLAKE = config.burrow.flake;
     CONFIG = cfg.configName;
     WITHIN = cfg.confirmWithin;
-    HOST = config.networking.hostName;
-    DIR = stateDir;
-    NOTIFY = config.burrow.prefix + "-notify";
-    BURROW_USER = user;
   };
 
   # Each script gets the names it uses, set above its own text.
@@ -39,8 +34,32 @@ let
   };
   base = [ pkgs.coreutils pkgs.util-linux pkgs.systemd ];
 
-  bootTool = script boot ./switch/boot.sh [ "BOOT" "HOST" "DIR" "SWITCH_STATE" "NOTIFY" "BURROW_USER" ]
-    (base ++ [ pkgs.gawk pkgs.gnugrep pkgs.grub2 config.burrow.tools.notify ]);
+  # HOST-boot (crates/burrow-boot, whose lib.rs says what each of these
+  # is), with its config built in.
+  bootConfig = pkgs.writeText "boot.json" (builtins.toJSON {
+    inherit boot user;
+    host = config.networking.hostName;
+    state = stateDir;
+    switchState = vars.STATE;
+    booted = "/run/booted-system";
+    current = "/run/current-system";
+    grubCfg = "/boot/grub/grub.cfg";
+    grubDirs = [ "/boot" "/boot-fallback" ];
+    tools = {
+      sudo = "${config.security.wrapperDir}/sudo";
+      grubEditenv = "${pkgs.grub2}/bin/grub-editenv";
+      systemctl = "${config.systemd.package}/bin/systemctl";
+      notify = lib.getExe config.burrow.tools.notify;
+      logger = "${config.systemd.package}/bin/systemd-cat";
+    };
+  });
+  bootTool = pkgs.runCommand boot {
+    nativeBuildInputs = [ pkgs.makeBinaryWrapper ];
+    meta.mainProgram = boot;
+  } ''
+    makeBinaryWrapper ${inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow-boot}/bin/burrow-boot $out/bin/${boot} \
+      --add-flags ${bootConfig}
+  '';
   switchTool = script switch ./switch/switch.sh [ "SWITCH" "CONFIRM" "REVERT" "STATE" "FLAKE" "CONFIG" "WITHIN" ]
     (base ++ [ pkgs.jq config.nix.package ]);
   confirmTool = script confirm ./switch/confirm.sh [ "REVERT" "STATE" "BOOT" ]

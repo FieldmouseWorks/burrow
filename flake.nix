@@ -667,6 +667,17 @@
           grep -qxF 'usage: ${burrow.prefix}-update [--force | status]' err || { echo "it said: $(cat err)"; exit 1; }
           touch $out
         '';
+        # HOST-boot as the example machine builds it: its config is one
+        # burrow-boot takes, and a word it doesn't know exits 2 with its usage.
+        boot-config = let
+          inherit (self.nixosConfigurations.example.config) burrow;
+        in pkgs.runCommand "boot-config-check" { } ''
+          rc=0
+          ${pkgs.lib.getExe burrow.tools.boot} help 2>err || rc=$?
+          [ "$rc" = 2 ] || { echo "a usage exited $rc: $(cat err)"; exit 1; }
+          grep -qxF 'usage: ${burrow.prefix}-boot default SYSTEM | trial [--force] | check | status' err || { echo "it said: $(cat err)"; exit 1; }
+          touch $out
+        '';
         # Which repo the flake's origin is, and so whether HOST-update goes
         # through its train: the same in every spelling of GitHub's URLs
         # (scheme, host case, a trailing dot, the default port, either SSH

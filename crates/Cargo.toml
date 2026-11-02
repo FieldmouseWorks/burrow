@@ -3,7 +3,7 @@
 # packages.SYSTEM.CRATE (lib/project.nix's rust.members) and gates them as
 # checks.crates-*.
 [workspace]
-members = ["advisory-watch", "burrow-agent", "burrow-backup", "burrow-browser-close", "burrow-dispatch", "burrow-events", "burrow-github", "burrow-guard", "burrow-health", "burrow-heartbeat", "burrow-heavy", "burrow-house", "burrow-keep", "burrow-notify", "burrow-probe", "burrow-proof", "burrow-proj", "burrow-review", "burrow-robot", "burrow-rustc-wrapper", "burrow-update", "burrow-upkeep", "burrow-usage-reset", "burrow-watchdog", "burrow-workflows", "flaky", "gh-token", "house-sync", "lock-age"]
+members = ["advisory-watch", "burrow-agent", "burrow-backup", "burrow-boot", "burrow-browser-close", "burrow-dispatch", "burrow-events", "burrow-github", "burrow-guard", "burrow-health", "burrow-heartbeat", "burrow-heavy", "burrow-house", "burrow-keep", "burrow-notify", "burrow-probe", "burrow-proof", "burrow-proj", "burrow-review", "burrow-robot", "burrow-rustc-wrapper", "burrow-update", "burrow-upkeep", "burrow-usage-reset", "burrow-watchdog", "burrow-workflows", "flaky", "gh-token", "house-sync", "lock-age"]
 resolver = "3"
 
 [workspace.package]
