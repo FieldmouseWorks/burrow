@@ -269,6 +269,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "burrow-switch"
+version = "0.0.0"
+dependencies = [
+ "rustix",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "burrow-update"
 version = "0.0.0"
 dependencies = [

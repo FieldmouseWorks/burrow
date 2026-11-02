@@ -1,0 +1,18 @@
+[package]
+name = "burrow-switch"
+description = "HOST-switch and HOST-confirm: system changes with a dead man's switch"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+rustix = { version = "1.1.6", features = ["fs", "process"] }
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
