@@ -1,6 +1,6 @@
 [package]
 name = "burrow-update"
-description = "HOST-update's steps in Rust, as root with what they run run as the machine's user: the build, what runs, the push, the VM tests, the fix jobs and its own PR"
+description = "HOST-update: the machine kept on the newest of everything it runs, built, VM-tested, put live with the dead man's switch and health-checked, unattended"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,6 +8,8 @@ publish.workspace = true
 
 [dependencies]
 burrow-github = { path = "../burrow-github" }
+jiff.workspace = true
+rustix = { version = "1.1.6", features = ["fs", "process"] }
 serde.workspace = true
 serde_json.workspace = true
 

@@ -1,39 +1,54 @@
-//! HOST-update's steps in Rust. modules/updates/update.sh is the rest of
-//! it: it runs as root and calls these (main.rs's words) where it once ran
-//! bash of its own. They run as root too, with what they run (git, gh, nix,
-//! proj) run as the machine's user through runuser, the way update.sh's
-//! `as_user` runs them,
-//! and what they keep between runs in HOST-update's state dir, which is
-//! root's.
+//! HOST-update in Rust: one run of it (run.rs), as root, with what it runs
+//! (git, gh, nix, proj, claude) run as the machine's user through runuser,
+//! and what it keeps between runs in its state dir, which is root's. What it
+//! runs as root, it runs by path.
 //!
+//! - run.rs: the run, in order: a clean copy of main, whether the box runs
+//!   it, the bump, the build, then
+//! - vm_tests.rs: the VM tests, and the security fixes that can go live
+//!   without one main fails too
+//! - live.rs: live, with the dead man's switch, healthy and confirmed
+//! - bump.rs: what's new upstream, brought into the clone and committed
+//! - memo.rs: what a run remembers of trees it built and tested
 //! - running.rs: what the machine runs, against what HEAD builds, and what
 //!   a run found live
 //! - push.rs: what went live, onto main
 //! - check.rs: a VM test, in a heavy slot where the machine has them
-//! - dispatch.rs: a problem, handed to a Claude job
+//! - dispatch.rs: a problem, handed to a Claude job and told to the owner
 //! - train.rs: HOST-update's own PR, in a repo whose PRs land through its
 //!   merge train
+//! - status.rs: what a run did, said and kept
 
 use std::ffi::{OsStr, OsString};
 use std::process::{Command, Stdio};
 
 use burrow_github::Gh;
 
-pub mod check;
+mod bump;
+mod check;
 pub mod config;
-pub mod dispatch;
-pub mod push;
-pub mod running;
-pub mod train;
+mod dispatch;
+mod live;
+mod memo;
+mod push;
+pub mod run;
+mod running;
+pub mod status;
+mod train;
+mod vm_tests;
 
 #[cfg(test)]
 mod testing;
 
 pub use config::{Config, Train};
 
+/// Something a run needed broke: it stops there, says why and exits 1.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Broke(pub String);
+
 impl Config {
     /// What runs a program as the user, ahead of the program: runuser, with
-    /// the user's home and runtime dir, as update.sh's `as_user` has it.
+    /// the user's home and runtime dir, and the PATH it's given.
     pub fn as_user(&self) -> Vec<OsString> {
         vec![
             self.runuser.clone().into(),
@@ -43,6 +58,7 @@ impl Config {
             "env".into(),
             format!("HOME={}", self.home).into(),
             format!("XDG_RUNTIME_DIR=/run/user/{}", self.uid).into(),
+            format!("PATH={}", self.path).into(),
         ]
     }
 
@@ -113,8 +129,8 @@ pub fn is_commit(s: &str) -> bool {
     [40, 64].contains(&s.len()) && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
-/// Whether `s` is a name update.sh gives a step: a VM test's (an attribute
-/// of the flake's checks) or a problem's (a file in jobs/). Letters, digits,
+/// Whether `s` is a name a run gives a step: a VM test's (an attribute of
+/// the flake's checks) or a problem's (a file in jobs/). Letters, digits,
 /// - and _, and not -first, so it's neither a path nor an option.
 pub fn is_name(s: &str) -> bool {
     !s.is_empty()

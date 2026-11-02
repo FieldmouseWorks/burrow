@@ -8,19 +8,19 @@ use std::process::{Command, Stdio};
 
 use crate::{Config, last_line};
 
-/// What the machine runs, as update.sh found it when its run began: the
-/// system (`current`, a store path) and the commit it's stamped with, when
-/// that's one (`rev`, which a build from a dirty checkout ends in -dirty).
+/// What the machine runs, as a run found it when it began: the system
+/// (`current`, a store path) and the commit it's stamped with, when that's
+/// one (`rev`, which a build from a dirty checkout ends in -dirty).
 pub struct Running {
     pub current: String,
     pub rev: Option<String>,
 }
 
 impl Running {
-    /// What update.sh says runs: the system, and its stamp, or nothing when
-    /// it isn't a commit. A stamp that isn't 40 hex digits, with -dirty or
-    /// not, is none: update.sh never says one, and it goes into a Nix
-    /// expression as it is.
+    /// What runs: the system, and its stamp (as nixos-version says it), or
+    /// none when that isn't a commit. A stamp that isn't 40 hex digits, with
+    /// -dirty or not, is none, since it goes into a Nix expression as it
+    /// is; nothing at all is a system with no stamp.
     pub fn parse(current: &str, rev: &str) -> Option<Running> {
         let commit = rev.strip_suffix("-dirty").unwrap_or(rev);
         let rev = match rev {
@@ -52,16 +52,6 @@ pub enum Already {
     Hold,
     /// Riding its PR, or nothing new: nothing to do.
     Current,
-}
-
-impl Already {
-    pub fn word(&self) -> &'static str {
-        match self {
-            Already::Up => "up",
-            Already::Hold => "hold",
-            Already::Current => "current",
-        }
-    }
 }
 
 /// HEAD's system, built: its store path, or nothing when it doesn't build.

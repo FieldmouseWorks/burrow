@@ -5,11 +5,10 @@
 use std::fs;
 
 use burrow_github::fake::{Fake, ok};
-use burrow_github::{Failed, Response};
 use serde_json::{Value, json};
 
 use super::*;
-use crate::testing::{BRANCH, Machine, sha, train};
+use crate::testing::{BRANCH, Machine, checked, down, listed, sha, train};
 
 impl Machine {
     fn t(&self) -> &Train {
@@ -41,27 +40,6 @@ impl Machine {
     }
 }
 
-/// GitHub's list of open PRs: each one's number, head and head's repo.
-fn listed(prs: &[(u64, String, Value)]) -> Value {
-    prs.iter()
-        .map(|(n, sha, repo)| {
-            let repo = if repo.is_null() {
-                Value::Null
-            } else {
-                json!({"full_name": repo})
-            };
-            json!({"number": n, "head": {"sha": sha, "ref": BRANCH, "repo": repo}})
-        })
-        .collect()
-}
-
-fn down() -> Result<Response, Failed> {
-    Err(Failed {
-        why: "gh: error connecting to api.github.com".into(),
-        transient: true,
-    })
-}
-
 /// A check run, as GraphQL has it.
 fn run(status: &str, conclusion: Option<&str>) -> Value {
     json!({"__typename": "CheckRun", "status": status, "conclusion": conclusion})
@@ -83,20 +61,6 @@ fn suite(conclusion: &str) -> Value {
     json!({"__typename": "CheckSuite", "conclusion": conclusion})
 }
 
-/// GraphQL's answer for a PR whose head is `head`, with these checks; with
-/// `more`, they have a page more.
-fn checked(head: &str, checks: &[Value], more: bool) -> Value {
-    let (suites, contexts): (Vec<&Value>, Vec<&Value>) =
-        checks.iter().partition(|c| c["__typename"] == "CheckSuite");
-    let suites: Vec<Value> = suites
-        .into_iter()
-        .map(|s| json!({"conclusion": s["conclusion"]}))
-        .collect();
-    json!({"data": {"repository": {"pullRequest": {"headRefOid": head, "commits": {"nodes": [{"commit": {
-        "statusCheckRollup": {"contexts": {"pageInfo": {"hasNextPage": more}, "nodes": contexts}},
-        "checkSuites": {"pageInfo": {"hasNextPage": false}, "nodes": suites}}}]}}}}})
-}
-
 /// A GitHub that says `head`'s checks are these.
 fn github(head: &str, checks: &[Value]) -> Fake {
     let mut gh = Fake::default();
@@ -106,36 +70,6 @@ fn github(head: &str, checks: &[Value]) -> Fake {
         vec![ok(200, checked(head, checks, false), &[])],
     );
     gh
-}
-
-#[test]
-fn a_pr_is_read_as_update_sh_hands_it_over() {
-    let a = sha('a');
-    let pr = Pr::parse(&format!("7 {a}")).unwrap();
-    assert_eq!(
-        pr,
-        Pr {
-            number: 7,
-            head: a.clone()
-        }
-    );
-    assert_eq!(pr.to_string(), format!("7 {a}"));
-    assert!(Pr::parse(&format!("7 {}", "b".repeat(64))).is_some());
-    for wrong in [
-        String::new(),
-        "7".into(),
-        format!("7  {a}"),
-        format!("x {a}"),
-        format!("-7 {a}"),
-        format!(" {a}"),
-        format!("7 {}", "A".repeat(40)),
-        "7 abc".into(),
-        format!("7 -{}", "a".repeat(39)),
-        format!("7 {a} 8"),
-        format!("99999999999999999999999 {a}"),
-    ] {
-        assert_eq!(Pr::parse(&wrong), None, "{wrong:?}");
-    }
 }
 
 #[test]
@@ -181,6 +115,9 @@ fn its_pr_is_its_own_branchs_open_one() {
     let odd = (7, "abc".to_string(), json!("sam/homelab"));
     let e = open(&t, &mut on(ok(200, listed(&[odd]), &[]))).unwrap_err();
     assert!(e.ends_with("a PR that isn't one (7 abc)"), "{e}");
+    let long = (7, "b".repeat(64), json!("sam/homelab"));
+    let pr = open(&t, &mut on(ok(200, listed(&[long]), &[]))).unwrap();
+    assert_eq!(pr.map(|p| p.head), Some("b".repeat(64)));
 }
 
 #[test]
