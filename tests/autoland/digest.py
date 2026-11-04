@@ -149,6 +149,13 @@ R.publish(DIGEST)
 CALLS.clear()
 R.publish(DIGEST + [("Open over a day", "sam/r#4", "unsettled")])
 assert said(9) == ["New:\n- Open over a day: sam/r#4: unsettled"], said(9)
+# Its status moving on, as a day-old PR's does at each step of its reviews
+# and CI, isn't news: the issue says where it is now, and no comment hands
+# it to the job again (each was a turn that found nothing to do).
+CALLS.clear()
+R.publish(DIGEST + [("Open over a day", "sam/r#4", "Codex is reviewing this commit")])
+assert said(9) == [], said(9)
+assert any(a[:3] == ("issue", "edit", "9") and "sam/r#4: Codex is reviewing this commit" in a[-1] for a in CALLS), CALLS
 # The same kind on the same PR with another diagnosis: news.
 moved = [x if x[0] != "Couldn't merge" else (x[0], x[1], "GitHub says it's behind") for x in DIGEST]
 CALLS.clear()
