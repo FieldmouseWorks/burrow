@@ -82,23 +82,39 @@
     [ "$got" = "$(sed 's/^ *//' <<<"$want")" ] || { echo "got: $got"; exit 1; }
     touch $out
   '';
-  # What a project following a repo of the example's trusted owner gets,
-  # by Renovate's own extraction, lookup and branching (homelab's main
-  # stood in for): its workflow, action and flake input pinned to
-  # homelab's main move in one PR, and only once main has been quiet for
-  # half an hour. A flake input not pinned by commit isn't looked up (the
-  # lock file refresh moves it).
+  # What a project following a repo gets under the example's config, by
+  # Renovate's own extraction, lookup, branching and branch processing
+  # (homelab's main stood in for). Its workflows, action and flake input
+  # pinned to the trusted owner's homelab main move in one PR, and only
+  # once main has been quiet for half an hour; someone else's soak three
+  # days. Either way the open PR's stability check then passes, so
+  # Renovate can merge it. A flake input not pinned by commit isn't looked
+  # up (the lock file refresh moves it), and nixpkgs keeps its channel
+  # versioning.
   renovate-follow = pkgs.runCommand "renovate-follow-check" { } ''
     export HOME=$TMPDIR
     got=$(LOG_LEVEL=fatal ${pkgs.lib.getExe pkgs.nodejs_24} ${./renovate-follow.mjs} ${pkgs.renovate} \
       ${self.nixosConfigurations.example.config.systemd.services.renovate.environment.RENOVATE_CONFIG_FILE} 2>/dev/null)
-    pins='github-actions sam/homelab digest 2222222, github-actions sam/homelab digest 2222222'
-    want="pinned 10 min: renovate/sam-homelab pending: deps: update sam/homelab to 2222222: $pins, nix homelab digest 2222222
-    pinned 40 min: renovate/sam-homelab opens: deps: update sam/homelab to 2222222: $pins, nix homelab digest 2222222
-    pinned .git 10 min: renovate/sam-homelab pending: deps: update sam/homelab to 2222222: $pins, nix homelab digest 2222222
-    pinned .git 40 min: renovate/sam-homelab opens: deps: update sam/homelab to 2222222: $pins, nix homelab digest 2222222
-    unpinned 10 min: renovate/sam-homelab pending: deps: update sam/homelab digest to 2222222: $pins
-    unpinned 40 min: renovate/sam-homelab opens: deps: update sam/homelab digest to 2222222: $pins"
+    sam='github-actions sam/homelab digest 2222222, github-actions sam/homelab digest 2222222, github-actions sam/homelab pinDigest 2222222'
+    kim='github-actions kim/homelab digest 2222222, github-actions kim/homelab digest 2222222'
+    nix='nix homelab digest 2222222'
+    channels='nixpkgs nixpkgs, unstable nixpkgs'
+    want="pinned: nix homelab exact, $channels
+    pinned 10 min: renovate/sam-homelab new: pending, open: pending: deps: update sam/homelab to 2222222: $sam, $nix
+    pinned 40 min: renovate/sam-homelab new: creates, open: stability green: deps: update sam/homelab to 2222222: $sam, $nix
+    pinned .git: nix homelab exact, $channels
+    pinned .git 10 min: renovate/sam-homelab new: pending, open: pending: deps: update sam/homelab to 2222222: $sam, $nix
+    pinned .git 40 min: renovate/sam-homelab new: creates, open: stability green: deps: update sam/homelab to 2222222: $sam, $nix
+    unpinned: nix homelab git, $channels
+    unpinned 10 min: renovate/sam-homelab new: pending, open: pending: deps: update sam/homelab digest to 2222222: $sam
+    unpinned 40 min: renovate/sam-homelab new: creates, open: stability green: deps: update sam/homelab digest to 2222222: $sam
+    someone else's, pinned: nix homelab exact, $channels
+    someone else's, pinned 40 min: renovate/ci-actions new: pending, open: pending: deps: update kim/homelab digest to 2222222: $kim
+    someone else's, pinned 40 min: renovate/homelab-digest new: pending, open: pending: deps: update homelab digest to 2222222: $nix
+    someone else's, pinned 40 min: renovate/pin-dependencies new: pending, open: pending: deps: pin kim/homelab action to 2222222: github-actions kim/homelab pinDigest 2222222
+    someone else's, pinned 4400 min: renovate/ci-actions new: creates, open: stability green: deps: update kim/homelab digest to 2222222: $kim
+    someone else's, pinned 4400 min: renovate/homelab-digest new: creates, open: stability green: deps: update homelab digest to 2222222: $nix
+    someone else's, pinned 4400 min: renovate/pin-dependencies new: creates, open: stability green: deps: pin kim/homelab action to 2222222: github-actions kim/homelab pinDigest 2222222"
     [ "$got" = "$(sed 's/^ *//' <<<"$want")" ] || { echo "got: $got"; exit 1; }
     touch $out
   '';
