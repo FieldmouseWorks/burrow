@@ -76,7 +76,7 @@ def dep_kind(pr):
     labels = {x["name"] for x in pr["labels"]["nodes"]}
     if "security" in labels and pr["headRefName"].startswith("renovate/"):
         # Renovate's security fixes merge themselves, majors too: none waits
-        # for renovate-sweep's verdict (renovate-sweep.sh).
+        # for renovate-sweep's verdict (crates/burrow-renovate/src/sweep.rs).
         return "minor"
     m = MAJOR_RE.search(pr["title"])
     if "major" in labels or (m and m.group(1) != m.group(2)):
