@@ -11,7 +11,6 @@ fn config() -> Config {
         repo: "sam/box".into(),
         label: "undo".into(),
         authors: vec!["Sam".into()],
-        owners: vec!["sam".into()],
         host: "box".into(),
         cn: "/bin/cn".into(),
     }
@@ -169,7 +168,7 @@ fn anyone_else_s_issue_runs_nothing() {
 #[test]
 fn what_isn_t_one_undo_cn_takes_runs_nothing() {
     for (body, says) in [
-        ("undo other/web#5", "isn't a repo of sam"),
+        ("undo sam/..#5", "isn't OWNER/REPO"),
         ("undo sam/web#5\nundo sam/web#6", "One undo an issue"),
         (
             "undo sam/web#5; rm -rf /",
@@ -198,7 +197,7 @@ fn what_isn_t_one_undo_cn_takes_runs_nothing() {
 #[test]
 fn cn_s_refusal_is_the_answer_and_github_unavailable_leaves_it_open() {
     let mut gh = github(json!([issue(5, "sam", "undo sam/web#5")]));
-    let cn = FakeCn::says(1, "", "cn: change 01x hasn't landed\n");
+    let cn = FakeCn::says(65, "", "cn: change 01x hasn't landed\n");
     let done = pass(&mut gh, &config(), &cn).unwrap();
     assert_eq!(done.refused, [5]);
     assert_eq!(
@@ -207,9 +206,10 @@ fn cn_s_refusal_is_the_answer_and_github_unavailable_leaves_it_open() {
     );
     let body = &bodies(&gh)[0];
     assert!(
-        body.contains("No undo was opened.") && body.contains("hasn't landed"),
+        body.contains("cn refused, so nothing was undone:") && body.contains("hasn't landed"),
         "{body}"
     );
+    assert!(!body.contains("stopped"), "{body}");
     assert_eq!(closed_as(&gh), ["not_planned"]);
 
     let mut gh = github(json!([issue(6, "sam", "undo sam/web#5")]));
@@ -218,4 +218,87 @@ fn cn_s_refusal_is_the_answer_and_github_unavailable_leaves_it_open() {
     assert!(err.contains("#6: GitHub is unavailable"), "{err}");
     assert!(bodies(&gh).is_empty());
     assert!(closed_as(&gh).is_empty());
+}
+
+#[test]
+fn a_run_that_stopped_tells_what_it_opened_and_claims_no_refusal() {
+    // A session's undo opened one repo's PR, then stopped in the next.
+    let opened = OPENED.lines().next().unwrap();
+    let unrecorded = r#"{"unrecorded":"https://github.com/sam/api/pull/4","pr":4}"#;
+    for (code, stdout) in [
+        (Some(1), opened),
+        (None, opened),
+        (Some(1), ""),
+        (Some(1), unrecorded),
+    ] {
+        let mut gh = github(json!([issue(
+            8,
+            "sam",
+            "undo --actor https://claude.ai/code/session_01Bad"
+        )]));
+        let cn = FakeCn {
+            ran: Ran {
+                code,
+                stdout: stdout.into(),
+                stderr: "cn: sam/api: Server Error\n".into(),
+            },
+            asked: RefCell::new(Vec::new()),
+        };
+        let done = pass(&mut gh, &config(), &cn).unwrap();
+        assert_eq!(done.refused, [8]);
+        let body = &bodies(&gh)[0];
+        assert!(
+            body.contains("cn stopped before it finished") && body.contains("Server Error"),
+            "{body}"
+        );
+        assert!(body.contains("Asking again finds what it opened"), "{body}");
+        assert!(!body.contains("nothing was undone"), "{body}");
+        assert_eq!(
+            body.contains("- https://github.com/sam/web/pull/12: reverts 2 changes, opened."),
+            stdout == opened,
+            "{body}"
+        );
+        assert_eq!(
+            body.contains(
+                "- https://github.com/sam/api/pull/4: opened, and cn stopped before recording it"
+            ),
+            stdout == unrecorded,
+            "{body}"
+        );
+        assert_eq!(
+            body.contains("after what's above"),
+            !stdout.is_empty(),
+            "{body}"
+        );
+        assert_eq!(closed_as(&gh), ["not_planned"]);
+    }
+}
+
+#[test]
+fn an_answer_too_long_for_a_comment_is_cut_and_posted_once() {
+    let line = format!("undo {}", "x".repeat(65_500));
+    let mut gh = github(json!([issue(9, "sam", &line)]));
+    let rows: String = (0..2_000)
+        .map(|_| format!("{}\n", OPENED.lines().next().unwrap()))
+        .collect();
+    let cn = FakeCn::says(0, &rows, "");
+    pass(&mut gh, &config(), &cn).unwrap();
+    let mut gh2 = github(json!([issue(
+        10,
+        "sam",
+        "undo --actor https://claude.ai/code/session_01Bad"
+    )]));
+    pass(&mut gh2, &config(), &cn).unwrap();
+    for gh in [&gh, &gh2] {
+        let said = bodies(gh);
+        assert_eq!(said.len(), 1);
+        assert!(
+            said[0].len() <= burrow_door::MAX_COMMENT,
+            "{}",
+            said[0].len()
+        );
+        assert_eq!(closed_as(gh).len(), 1);
+    }
+    // The long line was refused without running; the long answer ran once.
+    assert_eq!(cn.asked.borrow().len(), 1);
 }

@@ -1,7 +1,7 @@
 use burrow_github::fake::{Fake, ok};
 use serde_json::{Value, json};
 
-use super::{Door, Issue, asked};
+use super::{Door, Issue, MAX_COMMENT, asked, bounded};
 
 fn issue(title: &str, body: Value) -> Value {
     json!({ "number": 1, "title": title, "body": body })
@@ -72,4 +72,30 @@ fn only_an_author_s_issue_is_read_and_its_refusal_names_the_door() {
     };
     let said = door.written(&mut gh, &ours).unwrap().unwrap_err();
     assert!(said.contains("changed by someone other than Sam"), "{said}");
+}
+
+#[test]
+fn a_reply_is_cut_to_what_a_comment_holds() {
+    let authors = ["Sam".to_owned()];
+    let door = Door {
+        repo: "sam/box",
+        label: "undo",
+        authors: &authors,
+        what: "this machine's undo",
+    };
+    let mut gh = Fake::default();
+    gh.on("POST", "repos/", vec![ok(201, json!({}), &[])]);
+    gh.on("PATCH", "repos/", vec![ok(200, json!({}), &[])]);
+    // Two-byte characters, so a cut at the limit falls inside one.
+    let long = "é".repeat(MAX_COMMENT);
+    door.reply(&mut gh, 3, &long, "completed").unwrap();
+    let posted = gh.asked("POST")[0].2.as_ref().unwrap()["body"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(posted.len() <= MAX_COMMENT, "{}", posted.len());
+    assert!(posted.starts_with("éé") && posted.ends_with("past what a comment holds)"));
+    assert_eq!(bounded("short"), "short");
+    let exact = "x".repeat(MAX_COMMENT);
+    assert_eq!(bounded(&exact), exact);
 }

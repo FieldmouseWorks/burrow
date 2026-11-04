@@ -15,8 +15,8 @@
 //! same way, so this door opens nothing that can't be shut.
 //!
 //! Nothing of the issue's text reaches a shell: a request is parsed into
-//! cn's arguments, each one checked for its shape, and a repo only of the
-//! owners the ledger keeps.
+//! cn's arguments, each one checked for its shape. What it may reach is
+//! the ledger's to say, as cn refuses what the ledger keeps nothing of.
 
 pub mod pass;
 pub mod request;
@@ -35,8 +35,6 @@ pub struct Config {
     pub label: String,
     /// Who may ask (GitHub logins, any case).
     pub authors: Vec<String>,
-    /// The owners whose repos may be undone in: the ledger's.
-    pub owners: Vec<String>,
     /// The machine's name, for the answer's first line.
     pub host: String,
     /// `cn`, on the ledger, as its writers run it.

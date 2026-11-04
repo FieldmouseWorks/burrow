@@ -24,19 +24,6 @@ impl Scrubbed {
     pub fn as_str(&self) -> &str {
         &self.0
     }
-
-    /// At most `max` bytes, at a character's end, `note` after a cut. Only
-    /// ever shorter, so what a cut leaves was scrubbed with the rest.
-    pub fn cut(self, max: usize, note: &str) -> Scrubbed {
-        if self.0.len() <= max {
-            return self;
-        }
-        let mut at = max.saturating_sub(note.len());
-        while !self.0.is_char_boundary(at) {
-            at -= 1;
-        }
-        Scrubbed(format!("{}{note}", &self.0[..at]))
-    }
 }
 
 /// Each rule: what it finds, and what goes in its place (`$1` and the like

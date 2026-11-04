@@ -2,7 +2,9 @@
 //! only authors wrote runs its `cn undo`, gets what that made in one
 //! comment, and is closed; one anyone else wrote, or that asks for nothing
 //! cn takes, gets a line saying why nothing ran, and is closed too. One
-//! that found GitHub unavailable is left open for the next pass.
+//! that found GitHub unavailable is left open for the next pass. The
+//! comment tells every undo cn says it has, whether it finished, refused
+//! or stopped partway: one that stopped tells what it opened before then.
 
 use burrow_door::{Door, asked, clip, fenced};
 use burrow_github::Api;
@@ -13,6 +15,10 @@ use crate::{Config, MARK};
 
 /// What cn exits with when GitHub couldn't be asked.
 const UNAVAILABLE: i32 = 75;
+
+/// What cn exits with when the ledger refused what was asked: nothing was
+/// undone. Any other failure may have stopped partway.
+const REFUSED: i32 = 65;
 
 /// The most of cn's own words a comment echoes.
 const MAX_SAID: usize = 2_000;
@@ -66,7 +72,7 @@ pub fn pass(api: &mut dyn Api, cfg: &Config, cn: &dyn Cn) -> Result<Done, String
             }
         };
         let request = match asked(&text).as_slice() {
-            [line] => Request::parse(line, &cfg.owners),
+            [line] => Request::parse(line),
             [] => Err(format!("Nothing was asked: {WORDS}.")),
             _ => Err(format!("One undo an issue: {WORDS}.")),
         };
@@ -105,26 +111,56 @@ pub fn pass(api: &mut dyn Api, cfg: &Config, cn: &dyn Cn) -> Result<Done, String
 /// The comment on what `cn undo` did, and how the issue closes.
 fn answer(cfg: &Config, request: &Request, ran: &Ran) -> (String, &'static str) {
     let mut out = format!("{MARK}\n`cn {request}` on {}:\n", cfg.host);
-    if ran.code != Some(0) {
-        let said = clip(ran.stderr.trim(), MAX_SAID);
-        out += &format!("\nNo undo was opened.\n\n{}\n", fenced(&said));
-        return (out, "not_planned");
+    // cn tells its undos before anything else can stop it, so these are
+    // what it has, however it ended.
+    let any = rows(&ran.stdout, &mut out);
+    let said = || fenced(&clip(ran.stderr.trim(), MAX_SAID));
+    match ran.code {
+        Some(0) => {
+            if !any {
+                out += "\ncn said nothing it opened.\n";
+            }
+            (out, "completed")
+        }
+        Some(REFUSED) => {
+            out += &format!("\ncn refused, so nothing was undone:\n\n{}\n", said());
+            (out, "not_planned")
+        }
+        _ => {
+            let after = if any { ", after what's above" } else { "" };
+            out += &format!(
+                "\ncn stopped before it finished{after}:\n\n{}\n\nAsking again finds what it opened rather than opening more.\n",
+                said()
+            );
+            (out, "not_planned")
+        }
     }
+}
+
+/// cn's JSON lines, each undo and what's gone, onto `out`: whether any was.
+fn rows(stdout: &str, out: &mut String) -> bool {
     let mut any = false;
-    for line in ran.stdout.lines().filter(|l| !l.trim().is_empty()) {
+    for line in stdout.lines().filter(|l| !l.trim().is_empty()) {
         let Ok(v) = serde_json::from_str::<Value>(line) else {
-            out += &format!("\n{}\n", fenced(&clip(line, MAX_SAID)));
+            *out += &format!("\n{}\n", fenced(&clip(line, MAX_SAID)));
             continue;
         };
+        if let Some(url) = v["unrecorded"].as_str() {
+            *out += &format!(
+                "\n- {url}: opened, and cn stopped before recording it as the undo. Asking again records it.\n"
+            );
+            any = true;
+            continue;
+        }
         if let Some(gone) = ids(&v["gone"]) {
-            out += &format!(
+            *out += &format!(
                 "\nTrunk already lacks what these brought, so nothing reverts them: {gone}.\n"
             );
             any = true;
             continue;
         }
         let Some(url) = v["url"].as_str() else {
-            out += &format!("\n{}\n", fenced(&clip(line, MAX_SAID)));
+            *out += &format!("\n{}\n", fenced(&clip(line, MAX_SAID)));
             continue;
         };
         any = true;
@@ -141,17 +177,14 @@ fn answer(cfg: &Config, request: &Request, ran: &Ran) -> (String, &'static str) 
         } else {
             format!("{n} changes")
         };
-        out += &format!("\n- {url}: reverts {changes}, {how}.\n");
+        *out += &format!("\n- {url}: reverts {changes}, {how}.\n");
         if let Some(left) = ids(&v["left"]) {
-            out += &format!(
+            *out += &format!(
                 "  Left out, since each one's revert conflicts with the rest: {left}. Ask again for an undo of their own.\n"
             );
         }
     }
-    if !any {
-        out += "\ncn said nothing it opened.\n";
-    }
-    (out, "completed")
+    any
 }
 
 /// A list of change ids, as `a, b`: None when there are none.

@@ -1,12 +1,8 @@
 use super::Request;
 
-fn owners() -> Vec<String> {
-    vec!["Sam".into(), "sam-org".into()]
-}
-
 #[test]
 fn each_undo_cn_takes() {
-    let p = |l: &str| Request::parse(l, &owners());
+    let p = Request::parse;
     assert_eq!(
         p("undo sam/web#12").unwrap(),
         Request::Change {
@@ -32,6 +28,22 @@ fn each_undo_cn_takes() {
         p("undo --repo SAM-ORG/web.site --since 2026-11-03T16:00:00-08:00").unwrap(),
         since
     );
+    // A repo's name may start with a dot; which repos it reaches is cn's
+    // to say, from the ledger.
+    assert_eq!(
+        p("undo sam/.github#3").unwrap(),
+        Request::Change {
+            repo: "sam/.github".into(),
+            pr: 3
+        }
+    );
+    assert_eq!(
+        p("undo --since 2026-11-04T00:00:00Z --repo other/.github").unwrap(),
+        Request::Since {
+            since: 1_793_750_400_000,
+            repo: "other/.github".into()
+        }
+    );
     assert_eq!(
         since.args(),
         [
@@ -52,8 +64,10 @@ fn nothing_else() {
         "undo sam/web#0",
         "undo sam/web#-1",
         "undo sam/web#1 now",
-        "undo other/web#1",
-        "undo sam/.git#1",
+        "undo sam/.#1",
+        "undo sam/..#1",
+        "undo .sam/web#1",
+        "undo sa_m/web#1",
         "undo sam/web/x#1",
         "undo sam/w$b#1",
         "undo --actor",
@@ -61,10 +75,10 @@ fn nothing_else() {
         "undo --actor https://claude.ai/code/session_01;x",
         "undo --since yesterday --repo sam/web",
         "undo --since 2026-11-04T00:00:00Z",
-        "undo --since 2026-11-04T00:00:00Z --repo other/web",
+        "undo --since 2026-11-04T00:00:00Z --repo sam/..",
         "Undo sam/web#1",
         "revert sam/web#1",
     ] {
-        assert!(Request::parse(line, &owners()).is_err(), "{line}");
+        assert!(Request::parse(line).is_err(), "{line}");
     }
 }

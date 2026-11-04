@@ -62,7 +62,6 @@ let
   # What crates/burrow-ledger-door reads (its Config).
   doorConfig = pkgs.writeText "burrow-ledger-door.json" (builtins.toJSON {
     inherit (cfg.door) repo label authors;
-    inherit (cfg) owners;
     host = config.networking.hostName;
     cn = lib.getExe writerCn;
   });

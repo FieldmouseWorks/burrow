@@ -123,6 +123,7 @@ dependencies = [
 name = "burrow-events"
 version = "0.0.0"
 dependencies = [
+ "burrow-github",
  "hmac",
  "serde",
  "serde_json",

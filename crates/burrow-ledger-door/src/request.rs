@@ -19,28 +19,29 @@ pub const WORDS: &str = "ask for one undo: `undo OWNER/REPO#N`, `undo --actor ht
 const SESSION: &str = "https://claude.ai/code/session_";
 
 impl Request {
-    /// The request a line makes, with its repos among `owners`'.
-    pub fn parse(line: &str, owners: &[String]) -> Result<Self, String> {
+    /// The request a line makes. Which repos it may reach is the ledger's
+    /// to say: cn refuses a change, or a repo, the ledger keeps nothing of,
+    /// and a session's undo reaches only the repos the ledger has it
+    /// landing in.
+    pub fn parse(line: &str) -> Result<Self, String> {
         let words: Vec<&str> = line.split_whitespace().collect();
         match words.as_slice() {
             ["undo", what] if !what.starts_with('-') => {
-                let (repo, pr) = what
-                    .split_once('#')
-                    .ok_or_else(|| format!("`{what}` isn't OWNER/REPO#N: {WORDS}"))?;
-                let pr = pr
-                    .parse::<u64>()
-                    .ok()
-                    .filter(|&n| n > 0)
-                    .ok_or_else(|| format!("`{what}` isn't OWNER/REPO#N: {WORDS}"))?;
+                let not = || format!("`{}` isn't OWNER/REPO#N: {WORDS}", echo(what));
+                let (repo, pr) = what.split_once('#').ok_or_else(not)?;
+                let pr = pr.parse::<u64>().ok().filter(|&n| n > 0).ok_or_else(not)?;
                 Ok(Self::Change {
-                    repo: repo_of(repo, owners)?,
+                    repo: repo_of(repo)?,
                     pr,
                 })
             }
             ["undo", "--actor", session] => {
                 let id = session.strip_prefix(SESSION).unwrap_or("");
                 if id.is_empty() || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
-                    return Err(format!("`{session}` isn't a session's link: {WORDS}"));
+                    return Err(format!(
+                        "`{}` isn't a session's link: {WORDS}",
+                        echo(session)
+                    ));
                 }
                 Ok(Self::Actor {
                     session: (*session).to_owned(),
@@ -50,16 +51,13 @@ impl Request {
             | ["undo", "--repo", repo, "--since", time] => {
                 let at: jiff::Timestamp = time
                     .parse()
-                    .map_err(|_| format!("`{time}` isn't an RFC 3339 time: {WORDS}"))?;
+                    .map_err(|_| format!("`{}` isn't an RFC 3339 time: {WORDS}", echo(time)))?;
                 Ok(Self::Since {
                     since: at.as_millisecond(),
-                    repo: repo_of(repo, owners)?,
+                    repo: repo_of(repo)?,
                 })
             }
-            _ => Err(format!(
-                "`{}` isn't one undo; {WORDS}",
-                burrow_door::clip(line, 200).replace('`', "'")
-            )),
+            _ => Err(format!("`{}` isn't one undo; {WORDS}", echo(line))),
         }
     }
 
@@ -85,24 +83,19 @@ impl fmt::Display for Request {
     }
 }
 
-/// OWNER/NAME, both a name GitHub could give, and OWNER one of `owners`.
-fn repo_of(repo: &str, owners: &[String]) -> Result<String, String> {
-    let named = |s: &str| {
-        !s.is_empty()
-            && !s.starts_with('.')
-            && s.chars()
-                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
-    };
-    let Some((owner, name)) = repo.split_once('/').filter(|(o, n)| named(o) && named(n)) else {
-        return Err(format!("`{repo}` isn't OWNER/REPO: {WORDS}"));
-    };
-    if !owners.iter().any(|o| o.eq_ignore_ascii_case(owner)) {
-        return Err(format!(
-            "{repo} isn't a repo of {}, whose changes the ledger keeps",
-            owners.join(" or ")
-        ));
+/// OWNER/NAME, as GitHub allows them (burrow_github::repo_name).
+fn repo_of(repo: &str) -> Result<String, String> {
+    if burrow_github::repo_name(repo) {
+        Ok(repo.to_owned())
+    } else {
+        Err(format!("`{}` isn't OWNER/REPO: {WORDS}", echo(repo)))
     }
-    Ok(format!("{owner}/{name}"))
+}
+
+/// Words of the issue's, as a refusal shows them: clipped, and in no
+/// backticks of their own.
+fn echo(said: &str) -> String {
+    burrow_door::clip(said, 200).replace('`', "'")
 }
 
 #[cfg(test)]
