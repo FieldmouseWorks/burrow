@@ -24,7 +24,9 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::harness::{Scratch, output, read, script, step, which, workflow, write};
+use crate::harness::{
+    Scratch, output, read, repo_file, script, step, text, which, workflow, write,
+};
 
 mod checkout;
 mod derivations;
@@ -300,6 +302,7 @@ exec {real_bin}/nix-store "$@"
             ("LEG", leg.to_owned()),
             ("LEGS", legs.to_owned()),
             ("RUNNER_TEMP", path(self.s.path().to_path_buf())),
+            ("TOOLS", path(repo_file(".github/flake-check"))),
         ]
         .into_iter()
         .chain(r.env.iter().copied().map(|(k, v)| (k, v.to_owned())))
@@ -354,16 +357,41 @@ fn lines(path: &Path) -> Vec<String> {
 }
 
 #[test]
-fn the_step_takes_its_inputs() {
+fn the_step_takes_its_inputs_and_runs_its_files_at_the_workflows_commit() {
     let wf = workflow(".github/workflows/flake-check.yml");
-    let s = step(&wf["jobs"]["check"], "gate");
+    let check = &wf["jobs"]["check"];
+    let s = step(check, "gate");
     assert_eq!(s["shell"], "bash");
     assert_eq!(
         s["env"],
         crate::harness::yaml(
             "{APART: '${{ inputs.eval-apart }}', SKIP: '${{ inputs.build-skip }}', \
-             LEGS: '${{ inputs.legs }}', LEG: '${{ matrix.leg }}'}"
+             LEGS: '${{ inputs.legs }}', LEG: '${{ matrix.leg }}', \
+             TOOLS: '${{ github.workspace }}/.flake-check/.github/flake-check'}"
         )
+    );
+    assert_eq!(s["run"], r#"bash "$TOOLS/gate.sh""#);
+    // Its files, as the workflow's own commit has them (whatever ref its
+    // caller named), checked out where TOOLS says, just before it.
+    let steps = crate::harness::steps(check);
+    let at = steps.iter().position(|x| x["id"] == "gate").unwrap();
+    let tools = &steps[at - 1];
+    assert!(
+        text(&tools["uses"]).starts_with("actions/checkout@"),
+        "{tools:?}"
+    );
+    assert_eq!(
+        tools["with"],
+        crate::harness::yaml(
+            "{repository: '${{ job.workflow_repository }}', ref: '${{ job.workflow_sha }}', \
+             path: .flake-check, persist-credentials: false, sparse-checkout: .github/flake-check}"
+        )
+    );
+    assert!(tools.get("if").is_none(), "{tools:?}");
+    // The plan it splices in is beside it.
+    assert!(
+        read(&repo_file(".github/flake-check/gate.sh"))
+            .contains(r#"plan=$(< "${BASH_SOURCE[0]%/*}/plan.nix")"#)
     );
 }
 

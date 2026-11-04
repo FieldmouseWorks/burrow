@@ -102,6 +102,7 @@
           members = true;
           include = [
             ".github/workflows/flake-check.yml"
+            ".github/flake-check"
             ".github/workflows/flake.yml"
             ".github/workflows/flake-retarget.yml"
             "templates/project/.github/workflows/flake.yml"
@@ -883,9 +884,10 @@
           touch $out
         '';
         # flake-gate: a repo's CI gate step, run here as CI runs it, and
-        # burrow's own evaluating apart, so a Claude job's gate holds little.
+        # burrow's own evaluating apart, so a Claude job's gate holds little;
+        # and the gate's own script, shellchecked.
         flake-gate = pkgs.runCommand "flake-gate-check" { nativeBuildInputs = [ (pkgs.callPackage ./tools/flake-gate/package.nix { }) pkgs.git pkgs.yq-go pkgs.shellcheck ]; } ''
-          shellcheck -s bash ${./tests/flake-gate.sh}
+          shellcheck -s bash ${./tests/flake-gate.sh} ${./.github/flake-check/gate.sh}
           bash ${./tests/flake-gate.sh} ${./.}
           touch $out
         '';
