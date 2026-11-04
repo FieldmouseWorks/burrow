@@ -84,7 +84,7 @@ run(clean(), 700)
 assert C.WAKE["sam/r"] == T + 700 + 60 + 1, C.WAKE
 H.land = land
 fresh_pr_state()
-C.job, job = (lambda repo, task, clone=False, since=None: None), C.job
+C.job, job = (lambda repo, task, clone=False, since=None, role=None: None), C.job
 run(clean(files=["secrets/1.yaml"]), 700)
 assert C.WAKE["sam/r"] == T + 700 + 60 + 1, C.WAKE
 C.job = job

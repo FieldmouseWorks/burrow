@@ -4,7 +4,7 @@ GitHub, and a Claude job merges the base in at once, one a head on its base,
 before any review or CI. Ordinary and judged PRs alike; a dependency bot's
 own update is the bot's to rebase, and one renovate-sweep has is its job's."""
 
-from harness import CI_GREEN, COMMITS, JOBS, S, STATES, WROTE, clean, fresh_pr_state, judgment, merged, merges, mkpr, pr_state, queued, \
+from harness import CI_GREEN, COMMITS, JOBS, ROLES, S, STATES, WROTE, clean, fresh_pr_state, judgment, merged, merges, mkpr, pr_state, queued, \
     run, said, stand_in, swept
 from touches import DEPENDABOT_EMAIL
 
@@ -40,6 +40,8 @@ for pr in (clean(), clean(files=(".github/CODEOWNERS",), number=6, comments=[sai
     status, digest = run(at_odds, 900)
     assert merges() == [] and not any("/update-branch" in x for x in WROTE), (pr["number"], WROTE)
     assert len(JOBS) == 1 and f"it conflicts with {base}" in JOBS[0] and f"merge {base} into the branch" in JOBS[0], JOBS
+    # As the kind of work it is, which the machine may give a model of its own.
+    assert ROLES == ["steward-conflictFixed"], ROLES
     # It checks the PR is still where it was handed before it merges or pushes.
     assert f"still open on {base} at head {pr['headRefOid']}: if its base or head moved on, stop" in JOBS[0], JOBS
     targeted(JOBS[0])

@@ -210,6 +210,13 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
         if let Some(s) = read(&job.path("session")).filter(|s| !s.is_empty()) {
             args.extend(["--resume".into(), s]);
         }
+        // Its role's model, as the machine has it now.
+        if let Some(m) = read(&job.path("role"))
+            .filter(|r| !r.is_empty())
+            .and_then(|r| cfg.model(&r))
+        {
+            args.extend(["--model".into(), m]);
+        }
         // Where this run's stream starts: an earlier run's answer isn't its.
         let from = fs::metadata(&stream).map_or(0, |m| m.len());
         // Its deadline, looked at last thing before the run starts: past,

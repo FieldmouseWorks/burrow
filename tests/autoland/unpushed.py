@@ -20,7 +20,7 @@ stand_in()
 kept_job, ids = C.job, itertools.count(1)
 
 
-def job(repo, task, clone=False, since=None):
+def job(repo, task, clone=False, since=None, role=None):
     """One id a job, across passes."""
     JOBS.append(task)
     return f"job-{next(ids)}"

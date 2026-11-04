@@ -56,7 +56,7 @@ fn kick_then_job() {
     let runs = m.runs();
     let [job] = &runs[..] else { panic!("{runs:?}") };
     assert_eq!(
-        job[..10],
+        job[..12],
         [
             "run",
             "--pipeline",
@@ -66,11 +66,13 @@ fn kick_then_job() {
             "20m",
             "--kick",
             "watchdog",
+            "--role",
+            "watchdog",
             "--owned",
             "homelab"
         ]
     );
-    let task = &job[10];
+    let task = &job[12];
     for want in [
         "PR #7 in sam/r",
         "https://github.com/sam/r/pull/7",
@@ -468,7 +470,7 @@ fn one_job_a_pass() {
     let runs = m.runs();
     let [job] = &runs[..] else { panic!("{runs:?}") };
     for want in ["PR #7", "PR #2", "proj job homelab-1"] {
-        assert!(job[10].contains(want), "{want}");
+        assert!(job[12].contains(want), "{want}");
     }
     m.write(
         &m.line,
@@ -524,8 +526,8 @@ fn in_line() {
     m.run(T + MIN);
     let runs = m.runs();
     let [job] = &runs[..] else { panic!("{runs:?}") };
-    assert!(job[10].contains("PR #7"));
-    assert!(!job[10].contains("homelab-1"));
+    assert!(job[12].contains("PR #7"));
+    assert!(!job[12].contains("homelab-1"));
     m.run(T + 86400.0);
     assert!(m.notices().is_empty());
 }
@@ -671,8 +673,8 @@ fn stale_source() {
     let runs = m.runs();
     let [job] = &runs[..] else { panic!("{runs:?}") };
     assert!(
-        job[10].contains("the PR steward")
-            && job[10].contains("burrow-watchdog snooze autoland - MINUTES")
+        job[12].contains("the PR steward")
+            && job[12].contains("burrow-watchdog snooze autoland - MINUTES")
     );
     m.state_of("job-1", "running");
     m.pass(T + GRACE + 7200.0, false);
