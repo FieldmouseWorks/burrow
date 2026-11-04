@@ -45,7 +45,8 @@
 //! A job of its own that ended on a usage limit (`proj resets` says until
 //! when) says nothing of its stalls: they don't go on to step 3 for it, and
 //! no job starts for any stall until the limit resets, when one takes them
-//! all.
+//! all. It watches each job it started until it's over, so a limit holds the
+//! next even when that job's stalls have since moved on.
 //!
 //! notify never says whether GitHub took a notice, so one is sent again every
 //! RENOTIFY while its stall lasts (notify adds a comment at most once a day).

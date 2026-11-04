@@ -25,10 +25,25 @@ pub fn run(cfg: &Config, world: &dyn World, now: f64) -> Result<(), String> {
         mut missing,
         mut closing,
         withdraw,
+        mut jobs,
         limit,
     } = load(dir, "state.json");
     // Claude is out until then: a job now would end as the last one did.
     let mut limit = limit.filter(|&t| t > now);
+    // Its jobs, seen over: one that ended on a usage limit holds the next,
+    // whatever has become of the stalls it was for (moving again, snoozed,
+    // on the stuck issue, their owner told).
+    jobs.retain(|job| {
+        let state = world.proj(&["state", job]).1;
+        if state == "queued" || LIVE.contains(&state.as_str()) {
+            return true;
+        }
+        if let Some(t) = limited(world, job) {
+            println!("proj job {job} ended on a usage limit until {}", clock(t));
+            limit = later(limit, t, now);
+        }
+        false
+    });
     // A state from before it kept these has every job its stalls on the stuck
     // issue were handed still to go.
     let mut withdraw = withdraw.unwrap_or_else(|| {
@@ -113,14 +128,15 @@ pub fn run(cfg: &Config, world: &dyn World, now: f64) -> Result<(), String> {
             && let Some(t) = limited(world, &job)
         {
             // Its job ended on a usage limit, which says nothing of the stall:
-            // another takes it once the limit resets.
+            // another takes it once the limit resets, with nothing kept of
+            // the steps before (a start that failed among them).
             println!(
-                "proj job {job} ended on a usage limit until {}: {}",
+                "its proj job {job} ended on a usage limit until {}: {}",
                 clock(t),
                 line(&st.item)
             );
-            limit = Some(limit.map_or(t, |l| l.max(t))).filter(|&t| t > now);
-            (st.job, st.handed, st.ended) = (None, None, None);
+            limit = later(limit, t, now);
+            (st.job, st.handed, st.ended, st.tried) = (None, None, None, None);
             ready.push(s);
         } else if let Some(job) = st.job.clone() {
             let state = world.proj(&["state", &job]).1;
@@ -186,6 +202,7 @@ pub fn run(cfg: &Config, world: &dyn World, now: f64) -> Result<(), String> {
                     println!("stalled, handed to proj job {jid}: {}", line(&st.item));
                     st.job = Some(jid.clone());
                     st.handed = Some(now);
+                    st.tried = None;
                 }
                 None => {
                     println!("stalled, and no job could start: {}", line(&st.item));
@@ -193,6 +210,7 @@ pub fn run(cfg: &Config, world: &dyn World, now: f64) -> Result<(), String> {
                 }
             }
         }
+        jobs.extend(jid.clone());
         // Its next look comes by the time its next step could: a queued
         // job's escalation, or a retry's (escalateAfter may be the shorter).
         wakes.push(match jid {
@@ -235,6 +253,7 @@ pub fn run(cfg: &Config, world: &dyn World, now: f64) -> Result<(), String> {
             missing,
             closing,
             withdraw: Some(withdraw),
+            jobs,
             limit,
         },
     )?;
@@ -272,6 +291,12 @@ fn start_job(cfg: &Config, world: &dyn World, stalls: &[&Stall]) -> Option<Strin
     ]);
     let (ok, out) = world.proj(&args);
     (ok && !out.is_empty()).then_some(out)
+}
+
+/// The later of a usage limit's hold and another limit's reset, while it's
+/// still to come.
+fn later(limit: Option<f64>, t: f64, now: f64) -> Option<f64> {
+    Some(limit.map_or(t, |l| l.max(t))).filter(|&t| t > now)
 }
 
 /// When the usage limit its own job ended on resets, if that's how it ended
