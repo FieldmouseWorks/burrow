@@ -15,32 +15,23 @@ let
   confirm = "${prefix}-confirm";
   boot = "${prefix}-boot";
 
-  vars = {
-    SWITCH = switch;
-    CONFIRM = confirm;
-    BOOT = if cfg.trialBoot.enable then boot else "";
-    REVERT = "${prefix}-revert";
-    STATE = "/run/${prefix}-switch";
-    FLAKE = config.burrow.flake;
-    CONFIG = cfg.configName;
-    WITHIN = cfg.confirmWithin;
-  };
-
-  # Each script gets the names it uses, set above its own text.
-  script = name: file: names: runtimeInputs: pkgs.writeShellApplication {
-    inherit name runtimeInputs;
-    text = lib.concatMapStrings (n: "${n}=${lib.escapeShellArg vars.${n}}\n") names
-      + builtins.readFile file;
-  };
-  base = [ pkgs.coreutils pkgs.util-linux pkgs.systemd ];
+  switchState = "/run/${prefix}-switch";
+  system = pkgs.stdenv.hostPlatform.system;
+  # A binary of one of burrow's crates, with its config built in.
+  wrapped = name: crate: bin: conf: pkgs.runCommand name {
+    nativeBuildInputs = [ pkgs.makeBinaryWrapper ];
+    meta.mainProgram = name;
+  } ''
+    makeBinaryWrapper ${inputs.self.packages.${system}.${crate}}/bin/${bin} $out/bin/${name} \
+      --add-flags ${conf}
+  '';
 
   # HOST-boot (crates/burrow-boot, whose lib.rs says what each of these
-  # is), with its config built in.
-  bootConfig = pkgs.writeText "boot.json" (builtins.toJSON {
-    inherit boot user;
+  # is).
+  bootTool = wrapped boot "burrow-boot" "burrow-boot" (pkgs.writeText "boot.json" (builtins.toJSON {
+    inherit boot user switchState;
     host = config.networking.hostName;
     state = stateDir;
-    switchState = vars.STATE;
     booted = "/run/booted-system";
     current = "/run/current-system";
     grubCfg = "/boot/grub/grub.cfg";
@@ -52,18 +43,35 @@ let
       notify = lib.getExe config.burrow.tools.notify;
       logger = "${config.systemd.package}/bin/systemd-cat";
     };
+  }));
+
+  # HOST-switch and HOST-confirm (crates/burrow-switch, whose lib.rs says
+  # what each of these is), one config for both.
+  switchConfig = pkgs.writeText "switch.json" (builtins.toJSON {
+    inherit switch confirm;
+    revert = "${prefix}-revert";
+    state = switchState;
+    flake = config.burrow.flake;
+    configuration = cfg.configName;
+    within = cfg.confirmWithin;
+    current = "/run/current-system";
+    profile = "/nix/var/nix/profiles/system";
+    activationLock = "/run/nixos/switch-to-configuration.lock";
+    path = lib.makeBinPath [ pkgs.coreutils pkgs.util-linux config.systemd.package ];
+    tools = {
+      sudo = "${config.security.wrapperDir}/sudo";
+      systemctl = "${config.systemd.package}/bin/systemctl";
+      systemdRun = "${config.systemd.package}/bin/systemd-run";
+      systemdAnalyze = "${config.systemd.package}/bin/systemd-analyze";
+      logger = "${config.systemd.package}/bin/systemd-cat";
+      runuser = "${pkgs.util-linux}/bin/runuser";
+      nix = "${config.nix.package}/bin/nix";
+      nixEnv = "${config.nix.package}/bin/nix-env";
+      boot = if cfg.trialBoot.enable then lib.getExe bootTool else null;
+    };
   });
-  bootTool = pkgs.runCommand boot {
-    nativeBuildInputs = [ pkgs.makeBinaryWrapper ];
-    meta.mainProgram = boot;
-  } ''
-    makeBinaryWrapper ${inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.burrow-boot}/bin/burrow-boot $out/bin/${boot} \
-      --add-flags ${bootConfig}
-  '';
-  switchTool = script switch ./switch/switch.sh [ "SWITCH" "CONFIRM" "REVERT" "STATE" "FLAKE" "CONFIG" "WITHIN" ]
-    (base ++ [ pkgs.jq config.nix.package ]);
-  confirmTool = script confirm ./switch/confirm.sh [ "REVERT" "STATE" "BOOT" ]
-    (base ++ [ config.nix.package ] ++ lib.optional cfg.trialBoot.enable bootTool);
+  switchTool = wrapped switch "burrow-switch" "burrow-switch" switchConfig;
+  confirmTool = wrapped confirm "burrow-switch" "burrow-confirm" switchConfig;
 
   watchdog = config.systemd.settings.Manager.RuntimeWatchdogSec or null != null;
 
