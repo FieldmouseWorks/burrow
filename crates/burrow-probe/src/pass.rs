@@ -224,11 +224,20 @@ fn reply(
 
 /// The questions an issue asks: each line of its body, or its title when the
 /// body asks none. Blank lines, code fences and HTML comments aren't
-/// questions; a line's own backticks and a list's `- ` go.
+/// questions; a line's own backticks and a list's `- ` go. A rule (`---`)
+/// ends them: what's under it is a signature, as the footer Claude Code
+/// puts on everything it posts.
 pub fn questions(issue: &Value) -> Vec<String> {
+    let rule = |l: &str| {
+        l.len() >= 3
+            && ['-', '*', '_']
+                .iter()
+                .any(|&c| l.chars().all(|x| x == c || x == ' '))
+    };
     let lines = |text: &str| -> Vec<String> {
         text.lines()
             .map(str::trim)
+            .take_while(|l| !rule(l))
             .filter(|l| !l.is_empty() && !l.starts_with("```") && !l.starts_with("<!--"))
             .map(|l| {
                 l.strip_prefix("- ")
