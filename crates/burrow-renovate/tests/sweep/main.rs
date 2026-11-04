@@ -106,10 +106,12 @@ while read -r who when; do [ "$who" != "$1" ] || echo "$when"; done
     (
         // A job, kept whether or not it starts (FAKE/proj-fails), that
         // starts once FAKE/proj-blocks is gone. FAKE/proj-held-lock says it
-        // was handed the sweep's lock.
+        // was handed the sweep's lock. ls says nothing on stderr, which the
+        // sweep passes on: a descriptor that closes while it lists them
+        // (one the shell had for a moment) is no failure of the sweep's.
         "proj",
         r#"n=$(ls "$FAKE" | grep -c '^job-'); printf '%s\0' "$@" >"$FAKE/job-$n"
-if ls -l /proc/$$/fd | grep -q 'sweep\.lock'; then : >"$FAKE/proj-held-lock"; fi
+if ls -l /proc/$$/fd 2>/dev/null | grep -q 'sweep\.lock'; then : >"$FAKE/proj-held-lock"; fi
 while [ -e "$FAKE/proj-blocks" ]; do sleep 0.05; done
 [ ! -e "$FAKE/proj-fails" ] || exit 3
 "#,
