@@ -4,10 +4,12 @@
 
 mod common;
 
+use std::fs;
+
 use burrow_watchdog::MIN;
 use burrow_watchdog::watch::sid;
 use common::{H, Machine, T, item};
-use serde_json::json;
+use serde_json::{Value, json};
 
 #[test]
 fn waits_for_the_reset() {
@@ -108,4 +110,28 @@ fn a_job_its_stall_left() {
     let (_, stalls) = m.run(T + 2.0 * H);
     assert_eq!(m.runs().len(), 2, "{:?}", m.runs());
     assert!(stalls.values().all(|st| st.job.is_some()), "{stalls:?}");
+}
+
+#[test]
+fn a_job_from_before_it_kept_them() {
+    let m = Machine::new();
+    m.write(
+        &m.steward,
+        json!({"sam/r#7": item(T - 3.0 * H, T - MIN, None)}),
+        T,
+    );
+    let (_, stalls) = m.run(T);
+    let job = stalls.values().find_map(|st| st.job.clone()).unwrap();
+    m.state_of(&job, "running");
+    // The state a watchdog that didn't keep its jobs wrote.
+    let path = m.cfg.state_dir.join("state.json");
+    let mut state: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    state.as_object_mut().unwrap().remove("jobs");
+    fs::write(&path, state.to_string()).unwrap();
+    // Its stall moves again and its job ends on a usage limit: that still
+    // holds the next.
+    m.write(&m.steward, json!({}), T + 10.0 * MIN);
+    m.limited(&job, T + 2.0 * H);
+    m.run(T + 10.0 * MIN);
+    assert_eq!(m.state().limit, Some(T + 2.0 * H));
 }

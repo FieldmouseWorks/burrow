@@ -13,8 +13,8 @@ use crate::watch::Item;
 /// watch file to read (since when), the stalls that have cleared whose
 /// owner's notice is still to close, its own jobs to withdraw once no
 /// stall needs them, kept until proj has settled each (None in a state from
-/// before it kept them), the jobs it started that it hasn't yet seen over,
-/// and until when a usage limit one of them ended on holds the next
+/// before it kept them), the jobs it started that it hasn't yet seen over
+/// (None in a state from before it kept those), and until when a usage limit one of them ended on holds the next
 /// (`proj resets`).
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default)]
@@ -23,8 +23,7 @@ pub struct State {
     pub missing: BTreeMap<String, f64>,
     pub closing: BTreeMap<String, Stall>,
     pub withdraw: Option<BTreeSet<String>>,
-    #[serde(skip_serializing_if = "BTreeSet::is_empty")]
-    pub jobs: BTreeSet<String>,
+    pub jobs: Option<BTreeSet<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub limit: Option<f64>,
 }

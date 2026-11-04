@@ -25,14 +25,23 @@ pub fn run(cfg: &Config, world: &dyn World, now: f64) -> Result<(), String> {
         mut missing,
         mut closing,
         withdraw,
-        mut jobs,
+        jobs,
         limit,
     } = load(dir, "state.json");
     // Claude is out until then: a job now would end as the last one did.
     let mut limit = limit.filter(|&t| t > now);
     // Its jobs, seen over: one that ended on a usage limit holds the next,
     // whatever has become of the stalls it was for (moving again, snoozed,
-    // on the stuck issue, their owner told).
+    // on the stuck issue, their owner told). A state from before it kept
+    // them has every job it still names.
+    let mut jobs = jobs.unwrap_or_else(|| {
+        stalls
+            .values()
+            .chain(closing.values())
+            .filter_map(|st| st.job.clone())
+            .chain(withdraw.iter().flatten().cloned())
+            .collect()
+    });
     jobs.retain(|job| {
         let state = world.proj(&["state", job]).1;
         if state == "queued" || LIVE.contains(&state.as_str()) {
@@ -253,7 +262,7 @@ pub fn run(cfg: &Config, world: &dyn World, now: f64) -> Result<(), String> {
             missing,
             closing,
             withdraw: Some(withdraw),
-            jobs,
+            jobs: Some(jobs),
             limit,
         },
     )?;
