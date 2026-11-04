@@ -329,15 +329,19 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
             let _ = fs::write(job.turn(&n, "end"), format!("{end}\n"));
         }
         let done = !is_error(&last);
-        // A usage limit's error: the job waits for its reset, as for a PR
+        // A usage limit's error: when the job may run again, for whoever acts
+        // on its end (proj resets), and the job waits for that, as for a PR
         // (limit), its await in place before its outcome says it ended. Not
-        // an --owned job's: its starter acts on its end, and tries again.
+        // an --owned job's: its starter acts on its end, and tries again then.
+        let at = now();
         if !done
-            && !job.path("owned").exists()
             && let Some(serde_json::Value::String(said)) = last.get("result")
-            && let Some(wait) = crate::limit::line(said, now())
+            && let Some(due) = crate::limit::due(said, at)
         {
-            let _ = swap(&job.path("await"), &wait);
+            let _ = fs::write(job.turn(&n, "resets"), format!("{due}\n"));
+            if !job.path("owned").exists() {
+                let _ = swap(&job.path("await"), &crate::limit::line(at, due));
+            }
         }
         outcome(if done { "done" } else { "error" });
         // What it awaits, from the baseline `proj await` took; one line per

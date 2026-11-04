@@ -137,9 +137,9 @@ Each has an entry below, and each can be imported on its own.
   resumes it) or `proj done`; one that won't is told once and answers again,
   and still silent is a stall. A turn that ends on a usage limit waits for it
   the same way: the job is resumed once the limit resets, when Claude Code's
-  message says it does (an `--owned` job's starter tries again itself). Only
-  jobs whose starter acts on each turn's end (`--owned`: the steward's, the
-  watchdog's) needn't say.
+  message says it does (an `--owned` job's starter tries again itself,
+  `proj resets` saying when it may). Only jobs whose starter acts on each
+  turn's end (`--owned`: the steward's, the watchdog's) needn't say.
 - **`probe`** (`burrow.probe`): `burrow-probe`: read-only questions about the
   box, asked as an issue labelled `probe` in a private repo
   (`burrow.probe.repo`) and answered there in seconds, with no Claude:
@@ -197,10 +197,13 @@ Each has an entry below, and each can be imported on its own.
   withdrawn (`proj withdraw`, which ends a job only while its turn waits for a
   slot, so one that has started is never stopped), so it never takes a slot
   for nothing. You hear only of what that issue can't take: the steward itself
-  stuck, no steward, or that issue's own job stuck. A job that finds one
-  legitimately slow gives it more time, once, with a reason. It books its own
-  next pass for the next deadline: no timer, and no GitHub calls of its own.
-  `burrow-watchdog status` shows what it watches.
+  stuck, no steward, or that issue's own job stuck. A job of its own that ends
+  on a usage limit holds the ladder instead: the next job starts once the
+  limit resets (`proj resets` says when), and nothing goes to the stuck issue
+  for it. A job that finds one legitimately slow gives it more time, once,
+  with a reason. It books its own next pass for the next deadline: no timer,
+  and no GitHub calls of its own. `burrow-watchdog status` shows what it
+  watches.
 - **`dispatch`** (`burrow.dispatch`): `burrow-dispatch`: what every PR waits
   on together, the machine's Actions runners and its deploy, keeps moving. A
   runner (`runners`, by unit, with the repo and labels it takes jobs for) that

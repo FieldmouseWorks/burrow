@@ -120,6 +120,14 @@ impl<'a> Job<'a> {
         }
     }
 
+    /// When the usage limit its latest turn ended on lets it run again, in
+    /// seconds, as that turn wrote it (`proj resets`, for an --owned job's
+    /// starter): None for a turn that ended otherwise, or is still going.
+    pub fn resets(&self) -> Option<i64> {
+        let n = self.turns()?;
+        crate::waits::seconds(&read(&self.turn(&n, "resets"))?)
+    }
+
     /// What `proj state` says: queued or running while its unit is up (as
     /// its latest turn has a slot or not), then how that turn ended, as it
     /// wrote it, or failed when it wrote nothing.
@@ -399,6 +407,26 @@ mod tests {
             .unwrap()
             .set_modified(at)
             .unwrap();
+    }
+
+    // What `proj resets` says: the usage limit its latest turn ended on, as
+    // that turn wrote it; nothing before a turn, for one that didn't, or once
+    // the next has started.
+    #[test]
+    fn when_a_limit_resets() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut v = example();
+        v["jobs"] = tmp.path().to_str().unwrap().into();
+        let cfg: Config = serde_json::from_value(v).unwrap();
+        let job = Job::new(&cfg, "web-1");
+        fs::create_dir(&job.dir).unwrap();
+        assert_eq!(job.resets(), None);
+        job.set_turns(1).unwrap();
+        assert_eq!(job.resets(), None);
+        fs::write(job.turn("1", "resets"), "1793823060\n").unwrap();
+        assert_eq!(job.resets(), Some(1793823060));
+        job.set_turns(2).unwrap();
+        assert_eq!(job.resets(), None);
     }
 
     // When a turn ended, as the stall watchdog goes by it. A turn killed with
