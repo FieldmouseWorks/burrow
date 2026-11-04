@@ -228,11 +228,16 @@ fn reply(
 /// ends them: what's under it is a signature, as the footer Claude Code
 /// puts on everything it posts.
 pub fn questions(issue: &Value) -> Vec<String> {
+    // CommonMark's thematic break: three or more of one marker, with only
+    // spaces or tabs between.
     let rule = |l: &str| {
-        l.len() >= 3
-            && ['-', '*', '_']
-                .iter()
-                .any(|&c| l.chars().all(|x| x == c || x == ' '))
+        let mut marks = l.chars().filter(|c| !matches!(c, ' ' | '\t'));
+        marks.next().is_some_and(|m| {
+            matches!(m, '-' | '*' | '_') && {
+                let rest: Vec<char> = marks.collect();
+                rest.len() >= 2 && rest.iter().all(|&c| c == m)
+            }
+        })
     };
     let lines = |text: &str| -> Vec<String> {
         text.lines()

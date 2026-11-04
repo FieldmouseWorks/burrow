@@ -353,6 +353,12 @@ fn what_an_issue_asks() {
         ["rc", "queue"]
     );
     assert_eq!(q("memory", json!("***\nrc")), ["memory"]);
+    assert_eq!(q("x", json!("rc\n-\t- -\nunits")), ["rc"]);
+    // Fewer than three markers, or mixed ones, aren't a rule.
+    assert_eq!(
+        q("x", json!("memory\n_ _\n* *\n- -\n-*-\nunits")),
+        ["memory", "_ _", "* *", "-", "-*-", "units"]
+    );
     // Past the limit, the rest are named, not run.
     let many = ["memory"; MAX_QUESTIONS + 2].join("\n");
     let mut gh = github(true, json!([issue(5, "sam", "x", json!(many))]));
