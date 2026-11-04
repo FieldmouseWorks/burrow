@@ -118,20 +118,55 @@ lib.recursiveUpdate ({
       matchManagers = [ "nix" ];
       minimumReleaseAgeBehaviour = "timestamp-optional";
     }
-  ] ++ lib.optional (rcfg.trustedOwners != [ ]) {
-    # A dependency on a repo of trustedOwners' (a pinned workflow, an
-    # action, a flake input) waits for nothing: the soak is against someone
-    # else's hijacked release, and on a repo that's still moving it never
-    # ends. Each new commit restarts the three days, so a pin on burrow's
-    # main sat in "pending status checks" while burrow merged daily. Only
-    # where the source URL is the repo the datasource fetches from (GitHub's
-    # own, git's): a registry's package (a Docker image, an npm package)
-    # claims whatever source URL it likes, and an OWNER/NAME on another host
-    # is someone else's.
-    matchDatasources = [ "github-tags" "github-digest" "github-releases" "git-refs" "git-tags" ];
-    matchSourceUrls = map (o: "https://github.com/${o}/*") rcfg.trustedOwners;
-    minimumReleaseAge = null;
-  } ++ lib.optional (githubRepo != null) {
+  ] ++ lib.optionals (rcfg.trustedOwners != [ ]) [
+    {
+      # A flake input pinned to a branch of one of trustedOwners' GitHub
+      # repos by commit (`?ref=main&rev=...`) is looked up the way an action
+      # pinned to that branch is: on GitHub, where the branch's head has a
+      # commit date, so the rules below hold it and group it with the pins
+      # on the same repo. Through git it has none: its update waits on a
+      # timestamp that never comes, and the lookup never learns its source
+      # URL, so the rule below doesn't spare it the soak either. An input
+      # with no ref moves only with the lock file refresh, and isn't looked
+      # up at all.
+      matchManagers = [ "nix" ];
+      matchDatasources = [ "git-refs" ];
+      matchPackageNames = map (o: "https://github.com/${o}/*") rcfg.trustedOwners;
+      matchCurrentValue = "/./";
+      overrideDatasource = "github-digest";
+      overridePackageName = "{{{replace '\\.git$' '' (replace '^[^:]+://[^/]+/' '' packageName)}}}";
+      versioning = "exact";
+    }
+    {
+      # A dependency on a repo of trustedOwners' (a pinned workflow, an
+      # action, a flake input) waits for no soak: the soak is against
+      # someone else's hijacked release, and on a repo that's still moving
+      # it never ends. Each new commit restarts the three days, so a pin on
+      # burrow's main sat in "pending status checks" while burrow merged
+      # daily. Only where the source URL is the repo the datasource fetches
+      # from (GitHub's own, git's): a registry's package (a Docker image, an
+      # npm package) claims whatever source URL it likes, and an OWNER/NAME
+      # on another host is someone else's.
+      matchDatasources = [ "github-tags" "github-digest" "github-releases" "git-refs" "git-tags" ];
+      matchSourceUrls = map (o: "https://github.com/${o}/*") rcfg.trustedOwners;
+      minimumReleaseAge = null;
+    }
+    {
+      # Everything pinned to a branch of one of their repos (its workflows,
+      # its actions, the flake input) moves in one PR, once that branch has
+      # been quiet for half an hour. It's batching, not a soak: a burst of
+      # merges upstream comes down as one PR, not one a merge, each running
+      # the project's whole gate. A branch that goes on moving holds it
+      # only until it stops for half an hour, and Renovate's next run on
+      # the project (its own events, or burrow-events' hourly catch-up)
+      # opens it. A PR already open keeps its commit meanwhile.
+      matchDatasources = [ "github-digest" ];
+      matchSourceUrls = map (o: "https://github.com/${o}/*") rcfg.trustedOwners;
+      minimumReleaseAge = "30 minutes";
+      groupName = "{{{sourceRepo}}}";
+      groupSlug = "{{{sourceRepoSlug}}}";
+    }
+  ] ++ lib.optional (githubRepo != null) {
     # The machine's own flake.lock is HOST-update's: it deploys what it bumps.
     matchRepositories = [ githubRepo ];
     matchManagers = [ "nix" ];

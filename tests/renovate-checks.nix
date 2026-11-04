@@ -55,8 +55,9 @@
   '';
   # The example's Renovate config, as Renovate's own rules read it: a
   # pin on a GitHub repo of its trusted owner's (sam, any case) waits
-  # for no soak; anyone else's still does, and so does a sam/... on
-  # another host or a registry's package that claims a sam repo.
+  # for no soak, and one on a branch of it only for the branch to go
+  # quiet (renovate-follow); anyone else's still soaks, and so does a
+  # sam/... on another host or a registry's package that claims a sam repo.
   renovate-soak = pkgs.runCommand "renovate-soak-check" { } ''
     export HOME=$TMPDIR
     got=$(${pkgs.lib.getExe pkgs.nodejs_24} ${./renovate-soak.mjs} ${pkgs.renovate} \
@@ -70,7 +71,7 @@
       '{"datasource":"docker","packageName":"sam/tools","sourceUrl":"https://github.com/sam/tools"}' \
       '{"datasource":"npm","packageName":"homelab","manager":"npm","sourceUrl":"https://github.com/sam/homelab"}' \
       2>/dev/null)
-    want='github-digest sam/homelab none
+    want='github-digest sam/homelab 30 minutes
     github-tags Sam/Tools none
     git-refs https://github.com/sam/homelab.git none
     github-digest actions/checkout 3 days
@@ -78,6 +79,26 @@
     github-tags sam/tools at https://ghe.example.com 3 days
     docker sam/tools 3 days
     npm homelab 3 days'
+    [ "$got" = "$(sed 's/^ *//' <<<"$want")" ] || { echo "got: $got"; exit 1; }
+    touch $out
+  '';
+  # What a project following a repo of the example's trusted owner gets,
+  # by Renovate's own extraction, lookup and branching (homelab's main
+  # stood in for): its workflow, action and flake input pinned to
+  # homelab's main move in one PR, and only once main has been quiet for
+  # half an hour. A flake input not pinned by commit isn't looked up (the
+  # lock file refresh moves it).
+  renovate-follow = pkgs.runCommand "renovate-follow-check" { } ''
+    export HOME=$TMPDIR
+    got=$(LOG_LEVEL=fatal ${pkgs.lib.getExe pkgs.nodejs_24} ${./renovate-follow.mjs} ${pkgs.renovate} \
+      ${self.nixosConfigurations.example.config.systemd.services.renovate.environment.RENOVATE_CONFIG_FILE} 2>/dev/null)
+    pins='github-actions sam/homelab digest 2222222, github-actions sam/homelab digest 2222222'
+    want="pinned 10 min: renovate/sam-homelab pending: deps: update sam/homelab to 2222222: $pins, nix homelab digest 2222222
+    pinned 40 min: renovate/sam-homelab opens: deps: update sam/homelab to 2222222: $pins, nix homelab digest 2222222
+    pinned .git 10 min: renovate/sam-homelab pending: deps: update sam/homelab to 2222222: $pins, nix homelab digest 2222222
+    pinned .git 40 min: renovate/sam-homelab opens: deps: update sam/homelab to 2222222: $pins, nix homelab digest 2222222
+    unpinned 10 min: renovate/sam-homelab pending: deps: update sam/homelab digest to 2222222: $pins
+    unpinned 40 min: renovate/sam-homelab opens: deps: update sam/homelab digest to 2222222: $pins"
     [ "$got" = "$(sed 's/^ *//' <<<"$want")" ] || { echo "got: $got"; exit 1; }
     touch $out
   '';

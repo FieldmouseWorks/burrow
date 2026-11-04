@@ -1,7 +1,8 @@
 # burrow.lib.project: a project's dev shell and its gate, so each repo's
 # flake.nix is a few lines and gets better when burrow does (Renovate bumps
-# the burrow input like any other).
+# the burrow input, pinned by commit as templates/project/flake.nix has it).
 #
+#   inputs.burrow.url = "git+https://github.com/FieldmouseWorks/burrow?ref=main&rev=COMMIT";
 #   outputs = { self, burrow }: burrow.lib.project {
 #     inherit self;
 #     rust = { };                      # or { dir = "client"; }
