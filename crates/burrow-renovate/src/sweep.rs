@@ -32,13 +32,14 @@
 //! It runs as the user; what it runs, it runs by path (`Config::tools`).
 
 use std::ffi::OsString;
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use rustix::fs::{FlockOperation, flock};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -144,6 +145,19 @@ impl Config {
 
     /// Whether everything it did worked.
     fn sweep(&self, only: Option<&str>) -> Result<bool, Broke> {
+        // One sweep at a time, the full one and each repo's alike: each
+        // reads the keys only once the one before has kept what it handed
+        // over, so no two hand the same head to a job. A job doesn't hold
+        // it (Rust opens it close-on-exec).
+        let path = self.state.join("sweep.lock");
+        let broke = |e: io::Error| Broke(format!("{}: {e}", path.display()));
+        fs::create_dir_all(&self.state).map_err(broke)?;
+        let lock = OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(&path)
+            .map_err(broke)?;
+        flock(&lock, FlockOperation::LockExclusive).map_err(|e| broke(e.into()))?;
         // Who the jobs post as, whose verdicts are read: the App's bot, or
         // the user's own login. A user can hold the bot's name in GraphQL's
         // spelling, but not the seal. Who Renovate comments as, as REST
@@ -230,20 +244,39 @@ impl Config {
                 }
             }
         }
-        if handed.is_empty() {
+        // Each one's key is kept before its job starts, so a key that can't
+        // be kept hands nothing over pass after pass; a job that doesn't
+        // start gives them back to the next pass.
+        let mut kept = Vec::new();
+        let mut was = Vec::new();
+        for h in handed {
+            let before = fs::read_to_string(&h.key).ok();
+            match write(&h.key, &format!("{}\n", h.want)) {
+                Ok(()) => {
+                    kept.push(h);
+                    was.push(before);
+                }
+                Err(Broke(why)) => {
+                    complain(&format!("{}: {why}", self.name));
+                    pass.failed = true;
+                }
+            }
+        }
+        if kept.is_empty() {
             return;
         }
-        if let Err(Broke(why)) = self.hand(project, repo, &info, &handed) {
+        if let Err(Broke(why)) = self.hand(project, repo, &info, &kept) {
             complain(&format!("{}: {why}", self.name));
             pass.failed = true;
-            return;
-        }
-        // Kept once the job has them: a job that didn't start leaves them
-        // to the next pass.
-        for h in &handed {
-            if let Err(Broke(why)) = write(&h.key, &format!("{}\n", h.want)) {
-                complain(&format!("{}: {why}", self.name));
-                pass.failed = true;
+            for (h, before) in kept.iter().zip(was) {
+                let back = match before {
+                    Some(text) => write(&h.key, &text),
+                    None => fs::remove_file(&h.key)
+                        .map_err(|e| Broke(format!("{}: {e}", h.key.display()))),
+                };
+                if let Err(Broke(why)) = back {
+                    complain(&format!("{}: {why}", self.name));
+                }
             }
         }
     }
@@ -912,56 +945,4 @@ pub(crate) fn shown(v: Option<&Value>) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn its_config_is_every_setting_and_only_those() {
-        let config = serde_json::json!({
-            "name": "renovate-sweep", "state": "/s/renovate-sweep", "projects": "/p", "owner": "Sam",
-            "settled": "review-settled", "covered": "/s/autoland/repos.json",
-            "app": {"name": "workers", "bot": "sam-workers"}, "renovateRun": 7200,
-            "tools": {"gh": "/b/gh", "git": "/b/git", "proj": "/b/proj", "notify": "/b/notify",
-                      "seal": "/b/major-seal", "lockWait": "/b/lock-wait"},
-        });
-        let cfg: Config = serde_json::from_value(config.clone()).unwrap();
-        assert_eq!(cfg.app.unwrap().bot, "sam-workers");
-        assert_eq!(cfg.renovate_run, 7200);
-        let mut user = config.clone();
-        user["app"] = Value::Null;
-        user["covered"] = Value::Null;
-        let cfg: Config = serde_json::from_value(user).unwrap();
-        assert!(cfg.app.is_none() && cfg.covered.is_none());
-        let mut more = config.clone();
-        more["stray"] = 1.into();
-        assert!(serde_json::from_value::<Config>(more).is_err());
-        let mut less = config;
-        less["tools"].as_object_mut().unwrap().remove("lockWait");
-        assert!(serde_json::from_value::<Config>(less).is_err());
-    }
-
-    #[test]
-    fn projects_are_as_a_shell_globs_them_the_hidden_ones_last() {
-        let dir = tempfile::tempdir().unwrap();
-        for name in ["b", "a", ".github", ".a", "B"] {
-            fs::create_dir(dir.path().join(name)).unwrap();
-        }
-        fs::write(dir.path().join("file"), "").unwrap();
-        std::os::unix::fs::symlink(dir.path().join("a"), dir.path().join("c")).unwrap();
-        assert_eq!(projects(dir.path()), ["B", "a", "b", "c", ".a", ".github"]);
-        assert!(projects(&dir.path().join("none")).is_empty());
-    }
-
-    #[test]
-    fn a_request_taken_back_is_its_head_tries_and_when() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("sam_r-1.released");
-        assert_eq!(taken_back(&path), (String::new(), 0, 0));
-        fs::write(&path, "abc 2 1000\n").unwrap();
-        assert_eq!(taken_back(&path), ("abc".into(), 2, 1000));
-        assert_eq!(
-            with_suffix(&dir.path().join("k"), ".released"),
-            dir.path().join("k.released")
-        );
-    }
-}
+mod tests;

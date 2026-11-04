@@ -135,21 +135,84 @@ fn what_it_cant_do_it_says_and_fails_the_pass() {
     let p = m.sweep(&[]);
     assert_eq!(p.code, Some(1));
     assert!(p.jobs.is_empty() && p.notices.is_empty());
-    // A key it can't keep.
+    // A key it can't keep: what it's for goes to no job, this pass or the
+    // next, while the others still do.
     let m = Machine::new();
-    m.prs(&[pr(1)]);
+    m.prs(&[pr(1), red(2)]);
     fs::create_dir_all(m.state("sam_r-1/x")).unwrap();
-    let p = m.sweep(&[]);
-    assert_eq!(p.code, Some(1));
-    assert!(
-        p.err.starts_with(&format!(
-            "renovate-sweep: {}: ",
-            m.state("sam_r-1").display()
-        )),
-        "{}",
-        p.err
-    );
-    assert_eq!(p.jobs.len(), 1);
+    for _ in 0..2 {
+        let p = m.sweep(&[]);
+        assert_eq!(p.code, Some(1));
+        assert!(
+            p.err.starts_with(&format!(
+                "renovate-sweep: {}: ",
+                m.state("sam_r-1").display()
+            )),
+            "{}",
+            p.err
+        );
+        assert_eq!(p.jobs.len(), 1);
+        assert!(!p.task().contains("#1 ") && p.task().contains("#2 "));
+        fs::remove_file(m.state("sam_r-2")).unwrap();
+    }
+}
+
+#[test]
+fn sweeps_side_by_side_hand_each_head_to_one_job() {
+    let finish = |c: Child| {
+        let out = c.wait_with_output().unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&out.stderr), "");
+    };
+    let jobs = |m: &Machine| {
+        fs::read_dir(m.path("fake"))
+            .unwrap()
+            .filter(|e| {
+                e.as_ref()
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("job-")
+            })
+            .count()
+    };
+    let until = |what: &Path| {
+        let by = SystemTime::now() + Duration::from_secs(30);
+        while !what.exists() {
+            assert!(SystemTime::now() < by, "no {}", what.display());
+            thread::sleep(Duration::from_millis(20));
+        }
+    };
+    // A full sweep that has decided on PR 1 and is still reading PR 2, or
+    // that is starting their job: a sweep of the repo (as another clone
+    // spells it) waits for it, then finds them handed over.
+    for blocked in ["gh-blocked", "job-0"] {
+        let m = Machine::new();
+        m.prs(&[red(1), pr(2)]);
+        match blocked {
+            "gh-blocked" => m.set("gh-blocks", "2"),
+            _ => m.set("proj-blocks", ""),
+        }
+        let full = m.start(&[]);
+        until(&m.path("fake").join(blocked));
+        let one = m.start(&["Sam/R"]);
+        thread::sleep(Duration::from_millis(500));
+        assert_eq!(jobs(&m), usize::from(blocked == "job-0"));
+        m.set("gh-go", "");
+        m.unset("proj-blocks");
+        finish(full);
+        finish(one);
+        assert_eq!(jobs(&m), 1, "{blocked}");
+        let job = fs::read_to_string(m.path("fake/job-0")).unwrap();
+        assert!(job.contains("#1 ") && job.contains("#2 "));
+        // The job doesn't hold the lock: a job outliving its sweep holds
+        // up no other.
+        assert!(!m.path("fake/proj-held-lock").exists());
+    }
 }
 
 #[test]

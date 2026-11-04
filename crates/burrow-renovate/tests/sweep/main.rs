@@ -23,8 +23,9 @@ mod refreshes;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Child, Command, Stdio};
 use std::sync::OnceLock;
+use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
@@ -56,13 +57,18 @@ const STAND_INS: [(&str, &str); 6] = [
         // Renovate PRs (FAKE/prs-OWNER_REPO, or FAKE/prs for every repo),
         // PR N's comments (FAKE/comments-N) and Renovate's comments as REST
         // has them (FAKE/rest-N). It refuses an edit when FAKE/gh-refuses
-        // is there.
+        // is there, and the first to read PR N's comments when FAKE/gh-blocks
+        // says N waits for FAKE/gh-go.
         "gh",
         r#"echo "gh $*" >>"$FAKE/log"
 case "$1 $2" in
   "api user") [ ! -e "$FAKE/user-fails" ] || exit 1; echo me ;;
   "pr list") cat "$FAKE/prs-$(echo "$4" | tr / _)" 2>/dev/null || cat "$FAKE/prs" 2>/dev/null || echo [] ;;
-  "pr view") cat "$FAKE/comments-$3" 2>/dev/null || echo '{"comments": []}' ;;
+  "pr view")
+    if [ "$(cat "$FAKE/gh-blocks" 2>/dev/null)" = "$3" ] && mv "$FAKE/gh-blocks" "$FAKE/gh-blocked" 2>/dev/null; then
+      while [ ! -e "$FAKE/gh-go" ]; do sleep 0.05; done
+    fi
+    cat "$FAKE/comments-$3" 2>/dev/null || echo '{"comments": []}' ;;
   "api --paginate") n=${4%/comments}; cat "$FAKE/rest-${n##*/}" 2>/dev/null ;;
   "api -X") [ ! -e "$FAKE/gh-refuses" ] ;;
   "label create"|"pr edit") ;;
@@ -93,9 +99,13 @@ while read -r who when; do [ "$who" != "$1" ] || echo "$when"; done
 "#,
     ),
     (
-        // A job, kept whether or not it starts (FAKE/proj-fails).
+        // A job, kept whether or not it starts (FAKE/proj-fails), that
+        // starts once FAKE/proj-blocks is gone. FAKE/proj-held-lock says it
+        // was handed the sweep's lock.
         "proj",
         r#"n=$(ls "$FAKE" | grep -c '^job-'); printf '%s\0' "$@" >"$FAKE/job-$n"
+if ls -l /proc/$$/fd | grep -q 'sweep\.lock'; then : >"$FAKE/proj-held-lock"; fi
+while [ -e "$FAKE/proj-blocks" ]; do sleep 0.05; done
 [ ! -e "$FAKE/proj-fails" ] || exit 3
 "#,
     ),
@@ -329,6 +339,18 @@ impl Machine {
                 .map(str::to_string)
                 .collect(),
         }
+    }
+
+    /// A sweep of `words`, started.
+    fn start(&self, words: &[&str]) -> Child {
+        Command::new(SWEEP)
+            .arg(self.config())
+            .args(words)
+            .env("FAKE", self.path("fake"))
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap()
     }
 
     /// A full sweep that went as it should, as the notices are concerned.

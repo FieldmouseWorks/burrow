@@ -373,6 +373,11 @@ fn a_job_that_doesnt_start_keeps_nothing_and_fails_the_pass() {
     assert_eq!(p.majors().0, "close");
     m.unset("proj-fails");
     assert!(m.pass().task().contains("#1 "));
+    // One handed over before, for another head, goes back to that.
+    m.keep(1, "", "old red\n");
+    m.set("proj-fails", "");
+    assert_eq!(m.sweep(&[]).code, Some(1));
+    assert_eq!(m.key(1, ""), "old red\n");
 }
 
 #[test]
