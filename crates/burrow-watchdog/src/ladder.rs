@@ -25,7 +25,10 @@ pub fn run(cfg: &Config, world: &dyn World, now: f64) -> Result<(), String> {
         mut missing,
         mut closing,
         withdraw,
+        limit,
     } = load(dir, "state.json");
+    // Claude is out until then: a job now would end as the last one did.
+    let mut limit = limit.filter(|&t| t > now);
     // A state from before it kept these has every job its stalls on the stuck
     // issue were handed still to go.
     let mut withdraw = withdraw.unwrap_or_else(|| {
@@ -106,6 +109,19 @@ pub fn run(cfg: &Config, world: &dyn World, now: f64) -> Result<(), String> {
             if now >= told + RENOTIFY {
                 tell(cfg, world, &s, st, now);
             }
+        } else if let Some(job) = st.job.clone()
+            && let Some(t) = limited(world, &job)
+        {
+            // Its job ended on a usage limit, which says nothing of the stall:
+            // another takes it once the limit resets.
+            println!(
+                "proj job {job} ended on a usage limit until {}: {}",
+                clock(t),
+                line(&st.item)
+            );
+            limit = Some(limit.map_or(t, |l| l.max(t))).filter(|&t| t > now);
+            (st.job, st.handed, st.ended) = (None, None, None);
+            ready.push(s);
         } else if let Some(job) = st.job.clone() {
             let state = world.proj(&["state", &job]).1;
             let handed = st.handed.unwrap_or(st.first);
@@ -148,7 +164,16 @@ pub fn run(cfg: &Config, world: &dyn World, now: f64) -> Result<(), String> {
         }
     }
 
-    if !ready.is_empty() {
+    if let (false, Some(t)) = (ready.is_empty(), limit) {
+        for s in &ready {
+            println!(
+                "stalled, a job for it waits for the usage limit to reset at {}: {}",
+                clock(t),
+                line(&stalls[s].item)
+            );
+        }
+        wakes.push(t);
+    } else if !ready.is_empty() {
         let jid = start_job(
             cfg,
             world,
@@ -210,6 +235,7 @@ pub fn run(cfg: &Config, world: &dyn World, now: f64) -> Result<(), String> {
             missing,
             closing,
             withdraw: Some(withdraw),
+            limit,
         },
     )?;
     let wake = match wakes.into_iter().reduce(f64::min) {
@@ -246,6 +272,13 @@ fn start_job(cfg: &Config, world: &dyn World, stalls: &[&Stall]) -> Option<Strin
     ]);
     let (ok, out) = world.proj(&args);
     (ok && !out.is_empty()).then_some(out)
+}
+
+/// When the usage limit its own job ended on resets, if that's how it ended
+/// (proj resets says nothing of one still going, or that ended otherwise).
+fn limited(world: &dyn World, job: &str) -> Option<f64> {
+    let (ok, out) = world.proj(&["resets", job]);
+    ok.then(|| out.parse().ok()).flatten()
 }
 
 /// Its own job ended if its turn still waits for a slot (proj withdraw, which
@@ -407,6 +440,12 @@ pub fn status(cfg: &Config, now: f64) -> String {
                 clock(it.due)
             ));
         }
+    }
+    if let Some(t) = saved.limit.filter(|&t| t > now) {
+        out.push(format!(
+            "its jobs wait for the usage limit to reset, at {}",
+            clock(t)
+        ));
     }
     for st in saved.closing.values() {
         out.push(format!(

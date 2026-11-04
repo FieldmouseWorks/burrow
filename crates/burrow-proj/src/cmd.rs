@@ -53,6 +53,13 @@ pub fn dispatch(cfg: &Config, args: &[String]) -> Result<(), Fail> {
             put(&format!("{}\n", Job::new(cfg, id).state()));
             Ok(())
         }
+        Some("resets") => {
+            let id = arg(args, 1, "usage: proj resets ID")?;
+            if let Some(at) = Job::new(cfg, id).resets() {
+                put(&format!("{at}\n"));
+            }
+            Ok(())
+        }
         Some("find") => {
             let key = arg(args, 1, "usage: proj find KEY")?;
             if let Some(id) = run::find(cfg, key)? {
@@ -97,7 +104,7 @@ pub fn dispatch(cfg: &Config, args: &[String]) -> Result<(), Fail> {
         }
         Some(_) => Err(Fail::new(
             2,
-            "usage: proj run|reply|status|log|state|find|stop|withdraw|unstick|list|await|ask|done",
+            "usage: proj run|reply|status|log|state|resets|find|stop|withdraw|unstick|list|await|ask|done",
         )),
     }
 }

@@ -101,12 +101,16 @@ fn time_of(clock: &str) -> Option<Time> {
     Time::new(hour % 12 + half, minute, 0, 0).ok()
 }
 
-/// The await line for a turn that ended at `now` on the usage limit its
-/// answer `text` names: resumed MARGIN after the reset, and FLOOR after now
-/// at the soonest. None when it names none.
-pub fn line(text: &str, now: i64) -> Option<String> {
-    let due = (resets(text, now)? + MARGIN).max(now + FLOOR);
-    Some(format!("{TARGET}\t{now}\t{due}\n"))
+/// When a job whose turn ended at `now` on the usage limit its answer `text`
+/// names may run again: MARGIN after the reset, and FLOOR after now at the
+/// soonest. None when it names none.
+pub fn due(text: &str, now: i64) -> Option<i64> {
+    Some((resets(text, now)? + MARGIN).max(now + FLOOR))
+}
+
+/// The await line of a job waiting since `since` to be resumed at `due`.
+pub fn line(since: i64, due: i64) -> String {
+    format!("{TARGET}\t{since}\t{due}\n")
 }
 
 /// A time in seconds since the epoch as people read it, in UTC.
@@ -121,7 +125,7 @@ pub fn utc(at: i64) -> String {
 mod tests {
     use jiff::Timestamp;
 
-    use super::{FLOOR, MARGIN, TARGET, line, resets, utc};
+    use super::{FLOOR, MARGIN, TARGET, due, line, resets, utc};
 
     fn at(s: &str) -> i64 {
         s.parse::<Timestamp>().unwrap().as_second()
@@ -134,8 +138,9 @@ mod tests {
         let said = "You've hit your monthly spend limit · raise it at https://claude.ai/settings/usage?from=cc_cli_limit_message · your weekly limit resets Nov 4, 12pm (America/Los_Angeles)";
         let now = at("2026-11-02T02:47:45Z");
         assert_eq!(resets(said, now), Some(at("2026-11-04T20:00:00Z")));
+        assert_eq!(due(said, now), Some(at("2026-11-04T20:01:00Z")));
         assert_eq!(
-            line(said, now).unwrap(),
+            line(now, at("2026-11-04T20:01:00Z")),
             format!("{TARGET}\t{now}\t{}\n", at("2026-11-04T20:01:00Z"))
         );
     }
@@ -177,11 +182,7 @@ mod tests {
                 Some(at("2026-11-04T15:30:00Z")),
                 "{now}"
             );
-            let due = line(said, at(now)).unwrap();
-            assert!(
-                due.ends_with(&format!("\t{}\n", at(now) + FLOOR)),
-                "{now}: {due}"
-            );
+            assert_eq!(due(said, at(now)), Some(at(now) + FLOOR), "{now}");
         }
         assert_eq!(
             resets(said, at("2026-11-04T15:45:01Z")),
@@ -227,7 +228,7 @@ mod tests {
             "",
         ] {
             assert_eq!(resets(said, now), None, "{said}");
-            assert_eq!(line(said, now), None, "{said}");
+            assert_eq!(due(said, now), None, "{said}");
         }
     }
 
@@ -236,16 +237,7 @@ mod tests {
     #[test]
     fn when_the_job_is_resumed() {
         let now = at("2026-11-04T20:00:00Z");
-        let due = |said: &str| {
-            line(said, now)
-                .unwrap()
-                .trim_end()
-                .rsplit('\t')
-                .next()
-                .unwrap()
-                .parse::<i64>()
-                .unwrap()
-        };
+        let due = |said: &str| due(said, now).unwrap();
         assert_eq!(
             due("You've hit your weekly limit · resets Nov 4, 12pm (America/Los_Angeles)"),
             now + FLOOR

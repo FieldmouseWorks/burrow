@@ -42,6 +42,11 @@
 //!      before the stuck issue took its stall on is closed. A stall told of
 //!      keeps its job, queued or not: the only Claude still on it.
 //!
+//! A job of its own that ended on a usage limit (`proj resets` says until
+//! when) says nothing of its stalls: they don't go on to step 3 for it, and
+//! no job starts for any stall until the limit resets, when one takes them
+//! all.
+//!
 //! notify never says whether GitHub took a notice, so one is sent again every
 //! RENOTIFY while its stall lasts (notify adds a comment at most once a day).
 //! A close is sent again on every pass until `notify pending` says it got
