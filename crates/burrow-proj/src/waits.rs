@@ -70,11 +70,19 @@ pub fn job_wait(cfg: &Config, f: &Facts) -> Option<Item> {
     let mut kick = None;
     let (since, due, phase) = match f.state.as_str() {
         // Out of usage, no turn takes a slot till it's back (usage.rs): each
-        // has stallAfterMinutes from then.
+        // has stallAfterMinutes from then, its reset or the sooner end the
+        // record has, which stays a while after.
         "queued" if let Some(spent) = &f.spent => (
             f.queued,
-            (f.queued + stall).max(spent.until + stall),
-            format!("turn {turn} is waiting in line: {}", usage::line(spent)),
+            (f.queued + stall).max(spent.release() + stall),
+            if spent.back.is_none() {
+                format!("turn {turn} is waiting in line: {}", usage::line(spent))
+            } else {
+                format!(
+                    "turn {turn} is waiting in line for a slot, which usage was out for till {}",
+                    usage::when(spent.release())
+                )
+            },
         ),
         "queued" => (
             f.queued,
@@ -257,6 +265,21 @@ pub fn rewatch(cfg: &Config, ids: &[&str]) {
             ids.join(" ")
         );
     }
+}
+
+/// [`rewatch`] for every job it watches: the machine's usage changed
+/// ([`usage`]), which moves the deadline of every turn in line.
+pub fn rewatch_all(cfg: &Config) {
+    let mut ids: Vec<String> = fs::read_dir(cfg.jobs.join(".waits"))
+        .map(|d| {
+            d.filter_map(|e| e.ok())
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .filter(|n| !n.starts_with('.') && !n.ends_with(".new"))
+                .collect()
+        })
+        .unwrap_or_default();
+    ids.sort();
+    rewatch(cfg, &ids.iter().map(String::as_str).collect::<Vec<_>>());
 }
 
 /// [`rewatch`] in the background, never waited for: the watchdog's lock, or

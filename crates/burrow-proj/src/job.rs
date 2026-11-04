@@ -251,7 +251,7 @@ impl<'a> Job<'a> {
             } else {
                 Vec::new()
             },
-            spent: usage::out(self.cfg),
+            spent: usage::kept(self.cfg),
             turn: n,
             state,
         })

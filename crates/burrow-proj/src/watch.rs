@@ -14,7 +14,13 @@ use crate::config::Config;
 use crate::github::{changes, fingerprint, target};
 use crate::job::{Job, awaits};
 use crate::turn::start;
-use crate::{Fail, filled, io_fail, now, read, swap};
+use crate::{Fail, filled, io_fail, now, read, swap, usage};
+
+/// What a proj from before usage.rs (#422's) wrote to a job's await for a
+/// turn that ended on a usage limit: `usage-limit\tSINCE\tRESET`. A look
+/// takes it into the machine's hold (usage.rs), in a look at any repo, and
+/// the job's next turn starts at once, to wait in line for the reset.
+const OLD_LIMIT: &str = "usage-limit";
 
 /// Seconds before a repo GitHub couldn't be asked about, or a turn that
 /// couldn't start, is looked at again.
@@ -43,6 +49,19 @@ pub fn look(cfg: &Config, only: &str) -> Result<(), Fail> {
         let (mut news, mut lines) = (String::new(), String::new());
         for a in awaits(&waits) {
             if a.target.is_empty() {
+                continue;
+            }
+            if a.target == OLD_LIMIT {
+                if let Some(reset) = a.was.parse::<i64>().ok().filter(|&t| t > now()) {
+                    usage::record(
+                        cfg,
+                        &id,
+                        Some(reset),
+                        "a usage limit an earlier proj recorded",
+                        now(),
+                    );
+                }
+                news.push_str("- the usage limit your last turn ended on: proj holds every turn in line until it resets, this one included\n");
                 continue;
             }
             let was = (!a.was.is_empty()).then(|| serde_json::from_str::<Value>(&a.was).ok());
@@ -112,8 +131,9 @@ pub fn look(cfg: &Config, only: &str) -> Result<(), Fail> {
             );
             if let Err(e) = start(cfg, &id, &prompt, false) {
                 eprintln!("{e}");
+                // By repo; "" (every repo's look) for one that's no repo's.
                 for a in awaits(&waits) {
-                    let repo = a.target.split('#').next().unwrap_or_default().to_owned();
+                    let repo = target(&a.target).map(|(r, _)| r).unwrap_or_default();
                     retry.push((repo, now() + RETRY));
                 }
             }

@@ -84,7 +84,7 @@ pub fn dispatch(cfg: &Config, args: &[String]) -> Result<(), Fail> {
                 Ok(())
             }
             Some("back") => {
-                usage::back(cfg);
+                usage::back(cfg, None);
                 Ok(())
             }
             Some(_) => Err(Fail::new(2, "usage: proj usage [back]")),

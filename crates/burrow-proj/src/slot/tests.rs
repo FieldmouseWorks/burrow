@@ -123,7 +123,7 @@ fn child() {
     // A deployed proj to hand over to, saying whether the turn could still be
     // withdrawn when it got it. Written here, where nothing else forks, so no
     // child holds it open for writing as it's run.
-    if what == "hand-over" {
+    if what == "hand-over" || what == "stay" {
         let id = env::args().skip_while(|a| a != "_exec").nth(1).unwrap();
         let stub = cfg.jobs.join("deployed");
         fs::write(
@@ -142,14 +142,19 @@ esac
         cfg.deployed = stub;
         cfg.tools.bash = "sh".into();
         cfg.tools.flock = "true".into();
-        take(&cfg, &id, "1", Class::Normal).unwrap_err();
+        if what == "hand-over" {
+            take(&cfg, &id, "1", Class::Normal, true).unwrap_err();
+        } else {
+            held = Some(take(&cfg, &id, "1", Class::Normal, false).unwrap());
+            fs::write(cfg.jobs.join(&id).join("took"), now().to_string()).unwrap();
+        }
     }
     if what == "soon" {
         cfg.max_wait = 4;
     }
     if what == "take" || what == "leave" || what == "soon" {
         let id = env::args().skip_while(|a| a != "_exec").nth(1).unwrap();
-        held = Some(take(&cfg, &id, "1", Class::Normal).unwrap());
+        held = Some(take(&cfg, &id, "1", Class::Normal, true).unwrap());
         // Work the turn leaves behind: a sleep in the background of a shell
         // that's gone, so nothing's child, which ignores TERM.
         if what == "leave" {
@@ -669,7 +674,7 @@ fn an_unstick_turn_takes_its_own_slot() {
     fs::create_dir_all(jobs.join("u")).unwrap();
     fs::write(jobs.join("u/project"), "/src/web\n").unwrap();
     fs::write(jobs.join("u/unstick"), "").unwrap();
-    let slot = take(&cfg, "u", "1", Class::Normal).unwrap();
+    let slot = take(&cfg, "u", "1", Class::Normal, true).unwrap();
     assert_eq!(
         fs::read_to_string(jobs.join("u/1.slot")).unwrap(),
         "unstick\n"
@@ -774,6 +779,68 @@ fn a_turn_handed_over_may_be_withdrawn_no_more() {
     lock.unlock().unwrap();
     until("w0 is handed over", || handed.exists());
     assert_eq!(fs::read_to_string(handed).unwrap(), "unmarked\n");
+}
+
+// A turn waiting again partway through (refused for usage, turn.rs) isn't
+// handed over: the deployed proj would start it afresh. It stays on its own.
+#[test]
+fn a_turn_under_way_isnt_handed_over() {
+    let tmp = TempDir::new().unwrap();
+    let jobs = jobs_dir(&tmp);
+    let _kid = waiter_to("stay", &jobs, &tmp, "w0", 1);
+    until("w0 takes its slot", || took(&jobs, "w0").is_some());
+    assert!(!jobs.join("w0/handed").exists());
+}
+
+/// The machine out of usage until well after the test, as usage.rs keeps it.
+fn out_of_usage(jobs: &Path) {
+    let until = now() + 3600;
+    fs::write(
+        jobs.join(crate::usage::FILE),
+        format!(r#"{{"until": {until}, "said": "You've hit your monthly spend limit", "job": "x", "at": 1}}"#),
+    )
+    .unwrap();
+}
+
+// Out of usage, no turn takes a slot, free as it is; back, it does.
+#[test]
+fn out_of_usage_no_turn_takes_a_slot() {
+    let tmp = TempDir::new().unwrap();
+    let jobs = jobs_dir(&tmp);
+    out_of_usage(&jobs);
+    let _kid = waiter(&jobs, &tmp, "w0", 1);
+    sleep(Duration::from_secs(4));
+    assert_eq!(took(&jobs, "w0"), None);
+    assert_eq!(in_queue(&jobs), 1, "it keeps its place in line");
+    fs::remove_file(jobs.join(crate::usage::FILE)).unwrap();
+    until("w0 takes its slot", || took(&jobs, "w0").is_some());
+}
+
+// An --unstick turn already waiting on the --unstick slot when the turn
+// holding it was refused for usage doesn't take it once that lets it go.
+#[test]
+fn an_unstick_turn_waiting_on_its_slot_waits_out_a_refusal() {
+    let tmp = TempDir::new().unwrap();
+    let jobs = jobs_dir(&tmp);
+    let held = File::create(jobs.join(".slots/unstick")).unwrap();
+    held.try_lock().unwrap();
+    fs::create_dir_all(jobs.join("u")).unwrap();
+    fs::write(jobs.join("u/project"), "/src/web\n").unwrap();
+    fs::write(jobs.join("u/unstick"), "").unwrap();
+    let _kid = spawn_child(
+        "take",
+        &jobs,
+        1,
+        &["_exec".into(), "u".into(), "1".into(), "normal".into()],
+    );
+    sleep(Duration::from_secs(2));
+    out_of_usage(&jobs);
+    held.unlock().unwrap();
+    sleep(Duration::from_secs(4));
+    assert_eq!(took(&jobs, "u"), None);
+    assert!(!jobs.join("u/1.slot").exists());
+    fs::remove_file(jobs.join(crate::usage::FILE)).unwrap();
+    until("u takes its slot", || took(&jobs, "u").is_some());
 }
 
 // A slot stays with what its turn left running: with the turn's process

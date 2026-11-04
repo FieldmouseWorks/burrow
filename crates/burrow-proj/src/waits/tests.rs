@@ -103,6 +103,8 @@ fn out_of_usage_a_turn_in_line_is_due_from_the_reset() {
         said: "You've hit your monthly spend limit".into(),
         job: "web-1".into(),
         at: 900,
+        back: None,
+        told: 900,
     });
     let w = job_wait(&cfg, &f).unwrap();
     assert_eq!((w.since, w.due), (1000.0, 57_200.0));
@@ -118,6 +120,20 @@ fn out_of_usage_a_turn_in_line_is_due_from_the_reset() {
     // One that came after the reset's own stall is held to its own.
     f.queued = 60_000;
     assert_eq!(job_wait(&cfg, &f).unwrap().due, 67_200.0);
+    // Back sooner than its reset: a stall from then, and said so.
+    f.queued = 1000;
+    f.spent.as_mut().unwrap().back = Some(20_000);
+    let w = job_wait(&cfg, &f).unwrap();
+    assert_eq!(w.due, 27_200.0);
+    assert!(
+        w.phase
+            .starts_with("turn 2 is waiting in line for a slot, which usage was out for till "),
+        "{}",
+        w.phase
+    );
+    // Back after it: from the reset.
+    f.spent.as_mut().unwrap().back = Some(70_000);
+    assert_eq!(job_wait(&cfg, &f).unwrap().due, 57_200.0);
 }
 
 #[test]

@@ -23,7 +23,8 @@
   # was cut off, it answers, or with /tmp/again hangs again. "eat" and
   # "bloat" name theirs too.
   # "spent" is refused as Claude Code refuses a run once the plan's usage is
-  # spent, while /tmp/spent holds how many seconds on its limit resets; told
+  # spent, while /tmp/spent holds how many seconds on its limit resets (with
+  # /tmp/spent-stray, leaving work behind that ignores TERM); told
   # it was refused, it keeps what it was told in /tmp/told-spent, and how it
   # was run in /tmp/spent-args, and answers.
   # "scratch" makes a worktree of web, with a file in it, in its scratch and
@@ -89,6 +90,12 @@
       spent*)
         if [ -e /tmp/spent ]; then
           init spent
+          # Work it started before the refusal, deaf to TERM and in a
+          # session of its own.
+          if [ -e /tmp/spent-stray ]; then
+            # shellcheck disable=SC2016
+            setsid bash -c 'trap "" TERM; exec -a proj-spent-stray sleep 600' </dev/null >/dev/null 2>&1 &
+          fi
           resets=$(( $(date +%s) + $(cat /tmp/spent) ))
           said="You've hit your monthly spend limit · raise it at https://claude.ai/settings/usage · your weekly limit resets Nov 4, 12pm (America/Los_Angeles)"
           ${pkgs.jq}/bin/jq -nc --arg s "$said" --argjson r "$resets" '{type: "assistant", session_id: "spent", error: "rate_limit", api_error: "usage_limit_reached", api_error_params: {rate_limit_info: {status: "rejected", resetsAt: $r, rateLimitType: "seven_day"}}, message: {content: [{type: "text", text: $s}]}}'
@@ -136,8 +143,10 @@
     ${pkgs.jq}/bin/jq -nc --arg r "did $prompt" '{type: "result", session_id: "s", result: $r, is_error: false}'
   '';
   # HOST-notify, as far as its callers can tell: each call's words, a line
-  # each (its body's lines joined), in /tmp/notices.
+  # each (its body's lines joined), in /tmp/notices; every notice got through
+  # (`pending` says none is).
   notify = pkgs.writeShellScriptBin "notify" ''
+    [ "$1" != pending ] || exit 1
     { printf '%s' "$*" | tr '\n' ' '; echo; } >>/tmp/notices
   '';
   # GitHub, as far as proj-watch and proj-inbox can tell: each endpoint's

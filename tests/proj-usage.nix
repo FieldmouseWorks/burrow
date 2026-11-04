@@ -11,9 +11,14 @@
 { self, pkgs }:
 import ./proj/test.nix { inherit self pkgs; } "proj-usage" ''
   with subtest("a run refused for usage holds every turn till its limit resets, then each runs"):
-      machine.succeed("echo 30 >/tmp/spent && chmod 644 /tmp/spent")
+      machine.succeed("echo 30 >/tmp/spent && chmod 644 /tmp/spent && touch /tmp/spent-stray")
       a = proj("run web spent")
       machine.wait_until_succeeds("test -e /data/dev/jobs/.usage.json", timeout=60)
+      # What the refused run left is gone before its turn waits again: it
+      # would hold the slot given up, or run beside the next run.
+      machine.wait_until_succeeds(f"su - dev -c 'proj state {a}' | grep -x queued", timeout=60)
+      machine.fail("pgrep -f proj-spent-stray")
+      machine.succeed("rm /tmp/spent-stray")
       out = json.loads(proj("usage"))
       assert out["job"] == a and out["said"].startswith("You've hit your monthly spend limit"), out
       assert out["until"] > out["at"] + 20, out
@@ -50,9 +55,25 @@ import ./proj/test.nix { inherit self pkgs; } "proj-usage" ''
   with subtest("proj usage back lets the line go before the reset: the owner raised the limit"):
       machine.succeed("echo 3600 >/tmp/spent")
       a = proj("run web spent")
-      machine.wait_until_succeeds("test -e /data/dev/jobs/.usage.json", timeout=60)
+      # Its record outlives the last hold a while: what says it's out is
+      # proj usage.
+      machine.wait_until_succeeds("su - dev -c 'proj usage' | grep -q until", timeout=60)
       machine.succeed("rm /tmp/spent")
       machine.wait_until_succeeds(f"su - dev -c 'proj state {a}' | grep -x queued", timeout=60)
       proj("usage back")
       machine.wait_until_succeeds(f"su - dev -c 'proj state {a}' | grep -x done", timeout=120)
+
+  with subtest("a usage-limit await an earlier proj wrote is the machine's hold now, and the job's next turn waits for it"):
+      j = proj("run web hello")
+      machine.wait_until_succeeds(f"su - dev -c 'proj state {j}' | grep -x done", timeout=60)
+      since = int(machine.succeed("date +%s"))
+      reset = since + 20
+      machine.succeed(f"su - dev -c \"printf 'usage-limit\\t{since}\\t{reset}\\n' >/data/dev/jobs/{j}/await\"")
+      proj("_watch")
+      assert json.loads(proj("usage"))["until"] == reset, proj("usage")
+      machine.wait_until_succeeds(f"su - dev -c 'proj state {j}' | grep -x queued", timeout=60)
+      machine.wait_until_succeeds(f"su - dev -c 'proj state {j}' | grep -x done", timeout=120)
+      prompt = machine.succeed(f"cat /data/dev/jobs/{j}/prompt.2")
+      assert "the usage limit your last turn ended on" in prompt, prompt
+      assert proj("usage") == "", proj("usage")
 ''

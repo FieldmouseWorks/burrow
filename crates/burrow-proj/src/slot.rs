@@ -139,19 +139,24 @@ fn entry(job: &Job, id: &str, given: Class) -> String {
 /// only for another --unstick turn to give it up. Nor do they wait for memory
 /// to spare: the slice, which the machine caps, holds this turn with the rest,
 /// and the job that finds why the machine is full can't wait for it to empty.
-fn unstick_slot(cfg: &Config, id: &str, n: &str) -> io::Result<File> {
+fn unstick_slot(cfg: &Config, id: &str, n: &str) -> io::Result<Option<File>> {
     let slots = cfg.jobs.join(".slots");
     let job = Job::new(cfg, id);
     fs::create_dir_all(&slots)?;
     let slot = File::create(slots.join("unstick"))?;
     slot.lock()?;
+    // The one it waited for may have been refused for usage, and let go of
+    // the slot to wait for the reset: so does this one (None).
+    if usage::out(cfg).is_some() {
+        return Ok(None);
+    }
     let slot = held(slot)?;
     fs::write(
         slots.join("unstick.who"),
         format!("unstick\t{}\n", project(&job.dir)),
     )?;
     took_slot(&job, n, "unstick")?;
-    Ok(slot)
+    Ok(Some(slot))
 }
 
 /// Say that this job's turn N has slot S (N.slot, which proj state reads as
@@ -290,8 +295,15 @@ fn look(cfg: &Config, me: &str, dir: &Path, own: Class) -> io::Result<Look> {
 }
 
 /// Wait in line for a slot, then hold it: the slot is this process's until
-/// the file returned is closed, or the process ends.
-pub fn take(cfg: &Config, id: &str, n: &str, given: Class) -> io::Result<File> {
+/// the file returned is closed, or the process ends. With `may_hand_over`, a
+/// switch meanwhile hands the wait to the deployed proj ([`successor`]).
+pub fn take(
+    cfg: &Config,
+    id: &str,
+    n: &str,
+    given: Class,
+    may_hand_over: bool,
+) -> io::Result<File> {
     let queue = cfg.jobs.join(".queue");
     let slots = cfg.jobs.join(".slots");
     fs::create_dir_all(&queue)?;
@@ -314,7 +326,11 @@ pub fn take(cfg: &Config, id: &str, n: &str, given: Class) -> io::Result<File> {
         // Made --unstick while it waits (proj unstick): it goes now, look or not.
         if job.path("unstick").exists() && !spent {
             let _ = fs::remove_file(queue.join(&me));
-            return unstick_slot(cfg, id, n);
+            // Out of usage by the time it had the slot: back in line.
+            if let Some(slot) = unstick_slot(cfg, id, n)? {
+                return Ok(slot);
+            }
+            continue;
         }
         // Waited long enough: among the --first ones now, in its place by WHEN.
         if let Some(rest) = me.strip_prefix("2-")
@@ -327,7 +343,7 @@ pub fn take(cfg: &Config, id: &str, n: &str, given: Class) -> io::Result<File> {
         // A switch since the last pass: on with the deployed proj, in this
         // place, whether or not a look is due (one the note skips can wait
         // LOOK_EVERY).
-        if let Some(to) = successor(cfg) {
+        if may_hand_over && let Some(to) = successor(cfg) {
             unmark(&job, n)?;
             let lk = File::create(slots.join(".lock"))?;
             lk.lock()?;
@@ -339,6 +355,7 @@ pub fn take(cfg: &Config, id: &str, n: &str, given: Class) -> io::Result<File> {
             if !job.path("unstick").exists() {
                 publish(&queue, &me)?;
             }
+            usage::remind(cfg);
             sleep(Duration::from_secs(2));
             continue;
         }
@@ -361,7 +378,8 @@ pub fn take(cfg: &Config, id: &str, n: &str, given: Class) -> io::Result<File> {
         // one waited for it.
         let lk = File::create(slots.join(".lock"))?;
         lk.lock()?;
-        if !due(&slots, &queue.join(&me), looked) {
+        // Out of usage while it waited for the lock: no look, no slot.
+        if !due(&slots, &queue.join(&me), looked) || usage::out(cfg).is_some() {
             drop(lk);
             sleep(Duration::from_secs(2));
             continue;

@@ -170,8 +170,14 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
     } else {
         Class::Normal
     };
-    let take = || slot::take(cfg, id, &n, given).map_err(|e| Fail::new(1, format!("proj: {e}")));
-    let mut held = Some(take()?);
+    // Handed over to the deployed proj while it waits, the first time only:
+    // that one starts the turn afresh, which a turn already under way (one
+    // waiting again after a refusal) would lose all of. It stays on this one,
+    // as a running turn does.
+    let take = |hand_over: bool| {
+        slot::take(cfg, id, &n, given, hand_over).map_err(|e| Fail::new(1, format!("proj: {e}")))
+    };
+    let mut held = Some(take(true)?);
     // It's at work now, which is news to what it was started to kick: a turn
     // can wait in line for hours, and the steward says which it is.
     kick(cfg, lines(&job.path("kick")));
@@ -228,6 +234,7 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
             break (None, 124);
         }
         let ooms = oom_kills();
+        let started = now();
         let child = match spawn(
             cfg,
             &job,
@@ -273,32 +280,43 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
         // slot and waits in line again, where none is handed out till then,
         // and runs once more in its own conversation, its clock stood still
         // meanwhile. Any other answer says usage is there.
-        if let Some(l) = &last {
+        let refusal = last.as_ref().and_then(|l| {
             let text = fs::read(&stream).unwrap_or_default();
             let run = String::from_utf8_lossy(text.get(from as usize..).unwrap_or_default());
-            if let Some((until, said)) = usage::refused(l, &run, now()) {
+            usage::refused(l, &run, now())
+        });
+        match refusal {
+            Some((until, said)) => {
                 let spent = usage::record(cfg, id, until, &said, now());
                 eprintln!("proj: {}", usage::line(&spent));
-                // Waiting, as `proj state` and the watchdog read it: under
-                // the job's lock, as its slot was said (slot.rs took_slot).
-                {
-                    let _lock = job.lock();
-                    let _ = fs::remove_file(job.turn(&n, "slot"));
+                // All of the refused run gone first, as for any run after
+                // another: what it left could hold the slot it gives up
+                // (slot.rs held), or run beside the next.
+                if reap() {
+                    // Waiting, as `proj state` and the watchdog read it:
+                    // under the job's lock, as its slot was said (slot.rs
+                    // took_slot).
+                    {
+                        let _lock = job.lock();
+                        let _ = fs::remove_file(job.turn(&n, "slot"));
+                    }
+                    drop(held.take());
+                    rewatch(cfg, &[id]);
+                    let waited = now_nanos();
+                    let _ = held.insert(take(false)?);
+                    kick(cfg, lines(&job.path("kick")));
+                    if let Some(dl) = deadline(&job, &n) {
+                        let dl = dl + (now_nanos() - waited);
+                        let _ = fs::write(job.turn(&n, "deadline"), format!("{dl}\n"));
+                    }
+                    let asked = read(&job.path(&format!("prompt.{n}"))).unwrap_or_default();
+                    prompt = again(&format!("{SPENT}\n\n> {said}\n\n{asked}"), "spent");
+                    continue;
                 }
-                drop(held.take());
-                rewatch(cfg, &[id]);
-                let waited = now_nanos();
-                let _ = held.insert(take()?);
-                kick(cfg, lines(&job.path("kick")));
-                if let Some(dl) = deadline(&job, &n) {
-                    let dl = dl + (now_nanos() - waited);
-                    let _ = fs::write(job.turn(&n, "deadline"), format!("{dl}\n"));
-                }
-                let asked = read(&job.path(&format!("prompt.{n}"))).unwrap_or_default();
-                prompt = again(&format!("{SPENT}\n\n> {said}\n\n{asked}"), "spent");
-                continue;
+                eprintln!("proj: what the refused run left wouldn't stop, so the turn ends here");
             }
-            usage::back(cfg);
+            None if last.is_some() => usage::back(cfg, Some(started)),
+            None => {}
         }
         // Killed for memory before it answered, Claude itself as a rule (a
         // command it ran that's killed leaves it to answer), and not stopped

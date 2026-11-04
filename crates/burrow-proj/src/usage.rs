@@ -8,12 +8,21 @@
 //! (slot.rs), the turn that was refused waits in line again and runs once
 //! more after (turn.rs), the stall watchdog holds what waits on it (`proj
 //! usage` tells it), and the owner hears once, with the cause and when it
-//! resets. The first run that isn't refused afterwards ends it ([`back`]),
-//! and the notice is closed; so does `proj usage back`, for a limit the
-//! owner raised before it would have reset.
+//! resets. The first run that started after the refusal and isn't refused
+//! ends it ([`back`]), and the notice is closed; so does `proj usage back`,
+//! for a limit the owner raised before it would have reset.
+//!
+//! Every change to it goes under jobs/.usage.lock, so turns refused at once,
+//! and runs that finish meanwhile, each see the last one's. Its record
+//! outlives the hold: until the owner's notice is surely closed, and for a
+//! stall's time after the line moved again, which the watchdog's deadlines
+//! for turns in line count from ([`Spent::release`]). HOST-notify can't say
+//! whether GitHub took a notice, so the open is sent again every RETELL
+//! while it holds ([`remind`]), and the close until `HOST-notify pending`
+//! says it got through.
 
 use std::fs::{self, File};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use jiff::Timestamp;
 use jiff::tz::TimeZone;
@@ -23,6 +32,7 @@ use serde_json::Value;
 use crate::config::Config;
 use crate::job::is_error;
 use crate::limit;
+use crate::waits::rewatch_all;
 use crate::{now, swap};
 
 /// Where it's kept, in jobs.
@@ -32,6 +42,9 @@ const NOTICE: &str = "proj-usage";
 /// How long it's out when Claude Code doesn't say when the limit resets,
 /// or says a time already past: it's tried again then.
 const UNSAID: i64 = 3600;
+/// How often the owner's notice is sent again while it may not have got
+/// through: HOST-notify never says.
+const RETELL: i64 = 3600;
 
 /// The machine out of usage: until when, Claude Code's own words, and the
 /// job and time it was refused at.
@@ -42,6 +55,26 @@ pub struct Spent {
     pub said: String,
     pub job: String,
     pub at: i64,
+    /// When it ended, by a run that wasn't refused or `proj usage back`;
+    /// None while it holds.
+    #[serde(default)]
+    pub back: Option<i64>,
+    /// When the owner's notice was last sent: its open while it holds, its
+    /// close after.
+    #[serde(default)]
+    pub told: i64,
+}
+
+impl Spent {
+    /// When the line moved again: its reset, or sooner if it ended sooner.
+    pub fn release(&self) -> i64 {
+        self.back.map_or(self.until, |b| b.min(self.until))
+    }
+
+    /// Whether it holds the line at `now`.
+    pub fn holds(&self, now: i64) -> bool {
+        self.back.is_none() && self.until > now
+    }
 }
 
 /// Whether a run ended refused for usage, and if so when Claude Code says
@@ -96,60 +129,128 @@ fn limit_words(said: &str) -> bool {
 
 /// The machine's state as it stands: Some while it's out of usage.
 pub fn out(cfg: &Config) -> Option<Spent> {
-    kept(cfg).filter(|s| s.until > now())
+    kept(cfg).filter(|s| s.holds(now()))
 }
 
-fn kept(cfg: &Config) -> Option<Spent> {
+/// Its record, holding or not, while it's kept.
+pub fn kept(cfg: &Config) -> Option<Spent> {
     let text = fs::read_to_string(cfg.jobs.join(FILE)).ok()?;
     serde_json::from_str(&text).ok()
 }
 
+/// jobs/.usage.lock, held: every change to the record goes under it.
+fn lock(cfg: &Config) -> Option<File> {
+    let f = File::create(cfg.jobs.join(".usage.lock")).ok()?;
+    f.lock().ok()?;
+    Some(f)
+}
+
+fn keep(cfg: &Config, s: &Spent) {
+    let text = serde_json::to_string(s).unwrap_or_default();
+    if let Err(e) = swap(&cfg.jobs.join(FILE), &format!("{text}\n")) {
+        eprintln!("proj: {FILE}: {e}");
+    }
+}
+
 /// Job `id`'s run was refused at `at`: the machine is out of usage until
 /// `until`, or UNSAID on when that's unsaid or past. The owner is told when
-/// it wasn't out already. What it's out until, as recorded.
+/// it wasn't out already, and every turn in line has its deadline moved.
+/// What it's out until, as recorded.
 pub fn record(cfg: &Config, id: &str, until: Option<i64>, said: &str, at: i64) -> Spent {
     let until = until.filter(|&t| t > at).unwrap_or(at + UNSAID);
-    // Every running turn is refused at once: one of them tells the owner.
-    let _lock = File::create(cfg.jobs.join(".usage.lock")).and_then(|f| f.lock().map(|()| f));
-    let was = out(cfg);
-    let spent = Spent {
-        until: was.as_ref().map_or(until, |w| w.until.max(until)),
-        said: said.to_owned(),
-        job: id.to_owned(),
-        at: was.as_ref().map_or(at, |w| w.at),
+    let _lock = lock(cfg);
+    let was = kept(cfg).filter(|w| w.back.is_none());
+    let spent = match &was {
+        // Every running turn is refused at once: the first tells the owner,
+        // the rest only ever move the reset on.
+        Some(w) => Spent {
+            until: w.until.max(until),
+            ..w.clone()
+        },
+        None => Spent {
+            until,
+            said: said.to_owned(),
+            job: id.to_owned(),
+            at,
+            back: None,
+            told: now(),
+        },
     };
     if was.as_ref() == Some(&spent) {
         return spent;
     }
-    let text = serde_json::to_string(&spent).unwrap_or_default();
-    if let Err(e) = swap(&cfg.jobs.join(FILE), &format!("{text}\n")) {
-        eprintln!("proj: {FILE}: {e}");
-    }
+    keep(cfg, &spent);
     if was.is_none() {
         tell(cfg, &["open", NOTICE, &title(&spent), &body(&spent)]);
     }
+    rewatch_all(cfg);
     spent
 }
 
-/// A run that wasn't refused, or `proj usage back` (the owner raised the
-/// limit): usage is back, the turns waiting for it take slots again, and the
-/// owner's notice is closed.
-pub fn back(cfg: &Config) {
-    let Some(spent) = kept(cfg) else { return };
-    if fs::remove_file(cfg.jobs.join(FILE)).is_ok() {
-        eprintln!(
-            "proj: Claude has usage again (out since {})",
-            when(spent.at)
-        );
-        tell(
-            cfg,
-            &[
-                "close",
-                NOTICE,
-                "Claude has usage again, and proj's jobs are running.",
-            ],
-        );
+/// While it holds, the owner's notice once more every RETELL: one GitHub
+/// didn't take is sent again. Cheap when there's nothing to do, so every
+/// turn in line can ask.
+pub fn remind(cfg: &Config) {
+    let due = |s: &Spent| s.holds(now()) && now() - s.told >= RETELL;
+    if !kept(cfg).is_some_and(|s| due(&s)) {
+        return;
     }
+    let _lock = lock(cfg);
+    if let Some(mut s) = kept(cfg).filter(|s| due(s)) {
+        s.told = now();
+        keep(cfg, &s);
+        tell(cfg, &["open", NOTICE, &title(&s), &body(&s)]);
+    }
+}
+
+/// Usage is back: a run that started at `started` (in seconds) and wasn't
+/// refused, or `proj usage back` (None: the owner raised the limit). The
+/// turns waiting take slots again, every turn in line has its deadline
+/// moved, and the owner's notice is closed. A run that started before the
+/// refusal proves nothing: its last call may have come before it. Once it
+/// has ended, each call settles what's left: the close is sent again until
+/// it got through, and the record goes a stall's time after the release.
+pub fn back(cfg: &Config, started: Option<i64>) {
+    if kept(cfg).is_none() {
+        return;
+    }
+    let _lock = lock(cfg);
+    let Some(mut s) = kept(cfg) else { return };
+    let now = now();
+    if s.back.is_none() {
+        if started.is_some_and(|t| t <= s.at) {
+            return;
+        }
+        s.back = Some(now);
+        s.told = now;
+        keep(cfg, &s);
+        eprintln!("proj: Claude has usage again (out since {})", when(s.at));
+        tell(cfg, &["close", NOTICE, CLOSED]);
+        rewatch_all(cfg);
+        return;
+    }
+    let settled = !pending(cfg);
+    if settled && now >= s.release() + cfg.stall_queued() {
+        let _ = fs::remove_file(cfg.jobs.join(FILE));
+    } else if !settled && now - s.told >= RETELL / 12 {
+        s.told = now;
+        keep(cfg, &s);
+        tell(cfg, &["close", NOTICE, CLOSED]);
+    }
+}
+
+const CLOSED: &str = "Claude has usage again, and proj's jobs are running.";
+
+/// Whether HOST-notify may still have the notice open: a close that didn't
+/// get through. Without it, nothing is.
+fn pending(cfg: &Config) -> bool {
+    cfg.notify.as_ref().is_some_and(|n| {
+        Command::new(n)
+            .args(["pending", NOTICE])
+            .stdout(Stdio::null())
+            .status()
+            .is_ok_and(|st| st.success())
+    })
 }
 
 /// It, in a line: `proj status`'s, and the turn's journal's.
