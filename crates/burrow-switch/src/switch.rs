@@ -167,28 +167,16 @@ fn switch(
     // lands rather than being interrupted halfway through activating.
     cfg.systemctl_quiet(&["stop", &cfg.timer()]);
     cfg.wait_while(Config::reverting);
+    let before = Before::read(cfg)?;
     cfg.systemctl_quiet(&["reset-failed", &cfg.timer(), &cfg.service()]);
     cfg.remove("revert-failed")?;
     cfg.write("prev", &prev)?;
     cfg.write("pending", &new)?;
 
     // The revert armed before anything is touched.
-    let armed = ran(Command::new(&cfg.tools.systemd_run)
-        .arg(format!("--unit={}", cfg.revert))
-        .arg(format!("--on-active={within}"))
-        .args([
-            "--timer-property=AccuracySec=1s",
-            "--property=Type=oneshot",
-            KEEP,
-        ])
-        .arg(format!("--setenv=PATH={}", cfg.path))
-        .arg(&me.exe)
-        .arg(&me.config)
-        .arg("--revert-to")
-        .arg(&prev));
-    if let Err(e) = armed {
-        // Nothing went live, and nothing would take it back.
-        cfg.remove("pending")?;
+    if let Err(e) = arm(cfg, me, within, &prev) {
+        // Nothing went live.
+        not_armed(cfg, me, within, &prev, &before)?;
         return Err(e);
     }
 
@@ -235,6 +223,86 @@ fn switch(
         cfg.confirm
     ));
     Ok(0)
+}
+
+/// The revert's timer: back to `prev` in `within`.
+fn arm(cfg: &Config, me: &Me, within: &str, prev: &Path) -> Result<(), Broke> {
+    ran(Command::new(&cfg.tools.systemd_run)
+        .arg(format!("--unit={}", cfg.revert))
+        .arg(format!("--on-active={within}"))
+        .args([
+            "--timer-property=AccuracySec=1s",
+            "--property=Type=oneshot",
+            KEEP,
+        ])
+        .arg(format!("--setenv=PATH={}", cfg.path))
+        .arg(&me.exe)
+        .arg(&me.config)
+        .arg("--revert-to")
+        .arg(prev))
+}
+
+/// What was pending before a switch, and whether its revert had failed.
+struct Before {
+    pending: Option<PathBuf>,
+    revert_failed: Option<PathBuf>,
+}
+
+impl Before {
+    fn read(cfg: &Config) -> Result<Before, Broke> {
+        Ok(Before {
+            pending: cfg.recorded("pending")?,
+            revert_failed: cfg.recorded("revert-failed")?,
+        })
+    }
+}
+
+/// A switch whose revert won't arm, taken back. With nothing unconfirmed
+/// live, nothing's pending. Otherwise what was pending is again, and an
+/// earlier switch that's still live keeps a revert: the one this switch
+/// stopped, armed again with its window, or, when that won't arm either,
+/// the confirmed system put back now.
+fn not_armed(
+    cfg: &Config,
+    me: &Me,
+    within: &str,
+    prev: &Path,
+    before: &Before,
+) -> Result<(), Broke> {
+    let running = cfg.running()?;
+    if running == prev {
+        return cfg.remove("pending");
+    }
+    for (name, was) in [
+        ("pending", &before.pending),
+        ("revert-failed", &before.revert_failed),
+    ] {
+        match was {
+            Some(system) => cfg.write(name, system)?,
+            None => cfg.remove(name)?,
+        }
+    }
+    // An earlier switch's revert that had fired and failed already stays
+    // said, by status; one whose timer wasn't stopped still waits.
+    if before.pending.as_deref() != Some(running.as_path())
+        || before.revert_failed.is_some()
+        || cfg.show(&cfg.timer(), "SubState") == "waiting"
+    {
+        return Ok(());
+    }
+    let running = running.display();
+    if arm(cfg, me, within, prev).is_ok() {
+        complain(&format!(
+            "{running} is still pending: it reverts in {within} unless you run {}",
+            cfg.confirm
+        ));
+        return Ok(());
+    }
+    complain(&format!(
+        "{running} is still unconfirmed, and its revert won't arm either: reverting to {} now",
+        prev.display()
+    ));
+    revert_to(cfg, prev).map(drop)
 }
 
 /// The window, in microseconds, as `systemd-analyze timespan` reads it:

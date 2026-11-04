@@ -55,8 +55,9 @@ pub struct Config {
     pub profile: PathBuf,
     /// The lock switch-to-configuration holds while it activates.
     pub activation_lock: PathBuf,
-    /// The PATH a revert's units run with: systemd starts them with a bare
-    /// one.
+    /// The PATH a revert's units run with, and systemd-cat: systemd starts
+    /// a unit with a bare one, without coreutils on NixOS, and systemd-cat
+    /// hands what it logs to cat.
     pub path: String,
     pub tools: Tools,
 }
@@ -185,10 +186,12 @@ impl Config {
     }
 
     /// `line`, in the journal at `priority`, tagged as HOST-switch; on
-    /// stderr when the journal won't take it.
+    /// stderr when the journal won't take it. With its own PATH: run from
+    /// the activation's ExecStopPost, it has systemd's.
     fn journal(&self, priority: &str, line: &str) {
         let logged = Command::new(&self.tools.logger)
             .args(["-t", &self.switch, "-p", priority])
+            .env("PATH", &self.path)
             .stdin(Stdio::piped())
             .spawn()
             .and_then(|mut c| {

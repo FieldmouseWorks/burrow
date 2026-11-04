@@ -24,11 +24,22 @@ pub fn bin() -> &'static Path {
     static BIN: OnceLock<tempfile::TempDir> = OnceLock::new();
     BIN.get_or_init(|| {
         let bin = tempfile::tempdir().unwrap();
+        // The tests' own PATH for the stand-ins, whatever PATH they're
+        // run with: theirs is the switch's business.
+        let path = std::env::var("PATH").unwrap();
         for (name, text) in STAND_INS {
-            let path = bin.path().join(name);
-            fs::write(&path, text).unwrap();
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+            let file = bin.path().join(name);
+            fs::write(&file, text.replace("@PATH@", &path)).unwrap();
+            fs::set_permissions(&file, fs::Permissions::from_mode(0o755)).unwrap();
         }
+        // The PATH the config gives units and systemd-cat: cat, and
+        // nothing else.
+        fs::create_dir(bin.path().join("path")).unwrap();
+        let cat = std::env::split_paths(&path)
+            .map(|d| d.join("cat"))
+            .find(|c| c.exists())
+            .unwrap();
+        symlink(cat, bin.path().join("path/cat")).unwrap();
         // For a run as nobody, too.
         fs::set_permissions(bin.path(), fs::Permissions::from_mode(0o755)).unwrap();
         bin
@@ -44,11 +55,12 @@ const STAND_INS: [(&str, &str); 10] = [
         // started with, but the tests' own and SERVICE_RESULT, which a
         // unit gives the switch as root, where there's no sudo.
         r#"#!/bin/sh
+given=$PATH PATH='@PATH@'
 [ -z "$IN_SUDO" ] || exit 9
 echo "$*" >>"$FAKE/sudo"
 [ "$1" = -- ] || exit 9
 shift
-exec env -i FAKE="$FAKE" CURRENT="$CURRENT" PATH="$PATH" ${SERVICE_RESULT+SERVICE_RESULT="$SERVICE_RESULT"} IN_SUDO=1 "$@"
+exec env -i FAKE="$FAKE" CURRENT="$CURRENT" PATH="$given" ${SERVICE_RESULT+SERVICE_RESULT="$SERVICE_RESULT"} IN_SUDO=1 "$@"
 "#,
     ),
     (
@@ -58,6 +70,7 @@ exec env -i FAKE="$FAKE" CURRENT="$CURRENT" PATH="$PATH" ${SERVICE_RESULT+SERVIC
         // them, if there's one.
         "systemctl",
         r#"#!/bin/sh
+PATH='@PATH@'
 echo "$*" >>"$FAKE/systemctl"
 case "$*" in
   "show -p ActiveState --value box-revert.service")
@@ -73,21 +86,34 @@ case "$*" in
   "list-timers box-revert.timer --no-pager")
     printf 'NEXT LEFT LAST PASSED UNIT ACTIVATES\nMon 10:10 9min - - box-revert.timer box-revert.service\n\n1 timers listed.\n' ;;
   "stop box-revert.timer")
-    echo dead >"$FAKE/timer-state"
+    [ -e "$FAKE/keeps-timer" ] || echo dead >"$FAKE/timer-state"
     [ ! -e "$FAKE/fires-on-stop" ] || mv "$FAKE/fires-on-stop" "$FAKE/activating-for" ;;
 esac
 "#,
     ),
     (
-        // A timer armed waits; what it's told to wait for, it runs.
+        // A timer armed waits; what it's told to wait for, it runs, with
+        // the PATH it's given or a bare one, as systemd does. FAKE/fail-run-
+        // UNIT is how many runs of UNIT fail: every one, when it's empty.
         "systemd-run",
         r#"#!/bin/sh
+PATH='@PATH@'
 echo "$*" >>"$FAKE/systemd-run"
-wait=
+wait= path=/var/empty
 for a in "$@"; do
   case $a in
-    --unit=*) [ ! -e "$FAKE/fail-run-${a#--unit=}" ] || exit 1 ;;
+    --unit=*)
+      f=$FAKE/fail-run-${a#--unit=}
+      if [ -e "$f" ]; then
+        n=$(cat "$f")
+        case $n in
+          '') exit 1 ;;
+          0) ;;
+          *) echo $((n - 1)) >"$f"; exit 1 ;;
+        esac
+      fi ;;
     --on-active=*) echo waiting >"$FAKE/timer-state" ;;
+    --setenv=PATH=*) path=${a#--setenv=PATH=} ;;
     --wait) wait=1 ;;
   esac
 done
@@ -96,12 +122,13 @@ while [ "${1#--}" != "$1" ]; do shift; done
 # A unit of its own, as root: a switch it runs isn't inside the sudo that
 # started this one.
 unset IN_SUDO
-exec "$@"
+PATH=$path exec "$@"
 "#,
     ),
     (
         "systemd-analyze",
         r#"#!/bin/sh
+PATH='@PATH@'
 [ "$1" = timespan ] || exit 1
 case $2 in
   *min) n=${2%min}; m=60000000 ;;
@@ -113,15 +140,19 @@ printf 'Original: %s\n      μs: %s\n   Human: %s\n' "$2" $((n * m)) "$2"
 "#,
     ),
     (
+        // As systemd-cat with no command: what it's given goes to the
+        // journal through cat, found on the PATH it's run with.
         "systemd-cat",
         r#"#!/bin/sh
-echo "$* $(cat)" >>"$FAKE/journal"
-[ ! -e "$FAKE/fail-logger" ]
+[ ! -e "$FAKE/fail-logger" ] || exit 1
+printf '%s ' "$*" >>"$FAKE/journal"
+exec cat >>"$FAKE/journal"
 "#,
     ),
     (
         "runuser",
         r#"#!/bin/sh
+PATH='@PATH@'
 echo "$*" >>"$FAKE/runuser"
 while [ "$1" != -- ]; do shift; done
 shift
@@ -131,6 +162,7 @@ exec "$@"
     (
         "nix",
         r#"#!/bin/sh
+PATH='@PATH@'
 echo "$*" >>"$FAKE/nix"
 [ ! -e "$FAKE/fail-nix" ] || exit 1
 cat "$FAKE/built"
@@ -139,6 +171,7 @@ cat "$FAKE/built"
     (
         "nix-env",
         r#"#!/bin/sh
+PATH='@PATH@'
 echo "NIX_REMOTE=$NIX_REMOTE $*" >>"$FAKE/nix-env"
 [ ! -e "$FAKE/fail-nix-env" ] || exit 1
 ln -sfn "$4" "$2"
@@ -147,6 +180,7 @@ ln -sfn "$4" "$2"
     (
         "box-boot",
         r#"#!/bin/sh
+PATH='@PATH@'
 echo "$*" >>"$FAKE/box-boot"
 [ ! -e "$FAKE/fail-boot" ]
 "#,
@@ -157,6 +191,7 @@ echo "$*" >>"$FAKE/box-boot"
         // FAKE/locked-NAME is how many tries it refuses as locked.
         "switch-to-configuration",
         r#"#!/bin/sh
+PATH='@PATH@'
 sys=${0%/bin/switch-to-configuration}
 name=${sys##*/}
 echo "$name $*" >>"$FAKE/switch-to-configuration"
@@ -168,6 +203,11 @@ exit $(cat "$FAKE/exit-$name" 2>/dev/null || echo 0)
 "#,
     ),
 ];
+
+/// The PATH the config gives the revert's units and systemd-cat.
+pub fn unit_path() -> String {
+    bin().join("path").display().to_string()
+}
 
 pub fn root() -> bool {
     rustix::process::geteuid().is_root()
@@ -200,7 +240,7 @@ impl Machine {
             "switch": "box-switch", "confirm": "box-confirm", "revert": "box-revert",
             "state": m.path("state"), "flake": m.path("flake"), "configuration": "box",
             "within": "10min", "current": m.path("run/current-system"), "profile": m.path("profile"),
-            "activationLock": m.path("s2c.lock"), "path": "/b",
+            "activationLock": m.path("s2c.lock"), "path": unit_path(),
             "tools": {"sudo": b.join("sudo"), "systemctl": b.join("systemctl"),
                       "systemdRun": b.join("systemd-run"), "systemdAnalyze": b.join("systemd-analyze"),
                       "logger": b.join("systemd-cat"), "runuser": b.join("runuser"),

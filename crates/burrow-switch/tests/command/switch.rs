@@ -4,7 +4,7 @@ use std::process::Stdio;
 use std::thread;
 use std::time::Duration;
 
-use crate::machine::{CONFIRM, Machine, SWITCH, chown, ok, refused, root, said};
+use crate::machine::{CONFIRM, Machine, SWITCH, chown, ok, refused, root, said, unit_path};
 
 const USAGE: &str =
     "usage: box-switch [FLAKE_DIR | --toplevel PATH | --status | --abort] [--allow-downgrade]\n";
@@ -50,7 +50,7 @@ fn a_usage_or_a_config_it_cant_take_exits_2_having_run_nothing() {
 #[test]
 fn a_switch_arms_the_revert_then_activates_with_a_deadline() {
     let m = Machine::new(false);
-    let (one, two, me) = (m.sys("one"), m.sys("two"), m.me());
+    let (one, two, me, path) = (m.sys("one"), m.sys("two"), m.me(), unit_path());
     let out = m.switch(&["--toplevel", &two]);
     assert_eq!(
         said(&out),
@@ -67,7 +67,7 @@ fn a_switch_arms_the_revert_then_activates_with_a_deadline() {
     assert_eq!(
         m.fake("systemd-run"),
         format!(
-            "--unit=box-revert --on-active=10min --timer-property=AccuracySec=1s --property=Type=oneshot --property=ManagedOOMPreference=omit --setenv=PATH=/b {me} --revert-to {one}\n\
+            "--unit=box-revert --on-active=10min --timer-property=AccuracySec=1s --property=Type=oneshot --property=ManagedOOMPreference=omit --setenv=PATH={path} {me} --revert-to {one}\n\
              --unit=box-switch-activate --property=ManagedOOMPreference=omit --collect --wait --pipe --quiet --property=RuntimeMaxSec=450000000us --property=TimeoutStopSec=5s --property=ExecStopPost={me} --activation-stopped {two} {two}/bin/switch-to-configuration test\n"
         )
     );
@@ -291,9 +291,165 @@ fn a_revert_that_wont_arm_puts_nothing_live() {
     let out = m.switch(&["--toplevel", &m.sys("two")]);
     assert_eq!(out.status.code(), Some(1));
     assert!(said(&out).2.starts_with("box-switch: "));
-    assert_eq!(m.state("pending"), None);
     assert_eq!(m.fake("switch-to-configuration"), "");
-    assert_eq!(m.running(), m.sys("one"));
+    nothing_pending(&m, &m.sys("one"));
+    // Nor in place of a switch that didn't go live.
+    let m = Machine::new(false);
+    m.set("stays-two", "");
+    assert_eq!(
+        m.switch(&["--toplevel", &m.sys("two")]).status.code(),
+        Some(0)
+    );
+    let three = m.system("three", Some(300));
+    m.set("fail-run-box-revert", "");
+    assert_eq!(m.switch(&["--toplevel", &three]).status.code(), Some(1));
+    nothing_pending(&m, &m.sys("one"));
+}
+
+/// Nothing pending, as status, abort and confirm say, and `system` runs.
+fn nothing_pending(m: &Machine, system: &str) {
+    assert_eq!(m.state("pending"), None);
+    assert_eq!(m.state("revert-failed"), None);
+    assert_eq!(m.running(), system);
+    assert_eq!(
+        said(&m.switch(&["--status"])),
+        ok(&format!("nothing pending; running {system}\n"))
+    );
+    assert_eq!(said(&m.switch(&["--abort"])), ok("nothing pending\n"));
+    assert_eq!(said(&m.confirm()), ok("nothing pending\n"));
+}
+
+#[test]
+fn a_switch_whose_revert_wont_arm_leaves_the_one_before_it_pending_and_reverting() {
+    let arm = |m: &Machine| {
+        format!(
+            "--unit=box-revert --on-active=10min --timer-property=AccuracySec=1s --property=Type=oneshot --property=ManagedOOMPreference=omit --setenv=PATH={} {} --revert-to {}\n",
+            unit_path(),
+            m.me(),
+            m.sys("one")
+        )
+    };
+    let replaced = |fails: &str| {
+        let m = Machine::switched(false);
+        let three = m.system("three", Some(300));
+        m.set("fail-run-box-revert", fails);
+        let out = m.switch(&["--toplevel", &three]);
+        assert_eq!(out.status.code(), Some(1));
+        (m, said(&out).2)
+    };
+    // Its revert armed again, with this window.
+    let (m, err) = replaced("1");
+    let (one, two) = (m.sys("one"), m.sys("two"));
+    assert!(
+        err.starts_with(&format!(
+            "{two} is still pending: it reverts in 10min unless you run box-confirm\nbox-switch: "
+        )),
+        "{err}"
+    );
+    assert_eq!(m.fake("systemd-run"), arm(&m).repeat(2));
+    assert_eq!(m.fake("switch-to-configuration"), "");
+    assert_eq!(m.running(), two);
+    assert_eq!(m.state("pending"), Some(format!("{two}\n")));
+    assert_eq!(m.state("prev"), Some(format!("{one}\n")));
+    assert_eq!(
+        said(&m.switch(&["--status"])),
+        ok(&format!(
+            "pending: {two}\nreverts to: {one}\nMon 10:10 9min - - box-revert.timer box-revert.service\n"
+        ))
+    );
+    assert_eq!(said(&m.confirm()), ok(&format!("confirmed: {two}\n")));
+    assert_eq!(m.profile(), two);
+    let (m, _) = replaced("1");
+    assert_eq!(said(&m.switch(&["--abort"])), ok(""));
+    nothing_pending(&m, &m.sys("one"));
+
+    // When that won't arm either, it reverts now.
+    let (m, err) = replaced("");
+    let (one, two) = (m.sys("one"), m.sys("two"));
+    assert!(
+        err.starts_with(&format!(
+            "{two} is still unconfirmed, and its revert won't arm either: reverting to {one} now\nbox-switch: "
+        )),
+        "{err}"
+    );
+    assert_eq!(m.fake("systemd-run"), arm(&m).repeat(2));
+    assert_eq!(m.fake("switch-to-configuration"), "one test\n");
+    assert_eq!(
+        m.fake("journal"),
+        format!("-t box-switch -p warning not confirmed, reverted to {one} (activation exit 0)\n")
+    );
+    nothing_pending(&m, &one);
+
+    // Its timer still waiting, when it wouldn't stop: left be.
+    let m = Machine::switched(false);
+    let (one, two) = (m.sys("one"), m.sys("two"));
+    m.set("keeps-timer", "");
+    m.set("fail-run-box-revert", "");
+    let out = m.switch(&["--toplevel", &m.system("three", Some(300))]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(said(&out).2.starts_with("box-switch: "), "{}", said(&out).2);
+    assert_eq!(m.fake("systemd-run"), arm(&m));
+    assert_eq!(m.fake("switch-to-configuration"), "");
+    assert_eq!(m.running(), two);
+    assert_eq!(m.state("pending"), Some(format!("{two}\n")));
+    assert_eq!(m.state("prev"), Some(format!("{one}\n")));
+
+    // An unconfirmed system no switch put live: left be.
+    let m = Machine::new(false);
+    let two = m.sys("two");
+    m.runs("two");
+    m.set("fail-run-box-revert", "");
+    let out = m.switch(&["--toplevel", &m.system("three", Some(300))]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(said(&out).2.starts_with("box-switch: "), "{}", said(&out).2);
+    assert_eq!(m.fake("systemd-run"), arm(&m));
+    assert_eq!(m.fake("switch-to-configuration"), "");
+    nothing_pending(&m, &two);
+
+    // Its revert fired as this switch stopped it, and didn't get back:
+    // still said.
+    let m = Machine::switched(false);
+    let (one, two) = (m.sys("one"), m.sys("two"));
+    m.set("activating-for", "1");
+    m.set(
+        "lands",
+        &format!("echo {one} >{}\n", m.path("state/revert-failed").display()),
+    );
+    m.set("fail-run-box-revert", "");
+    let out = m.switch(&["--toplevel", &m.system("three", Some(300))]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(said(&out).2.starts_with("box-switch: "), "{}", said(&out).2);
+    assert_eq!(m.fake("systemd-run"), arm(&m));
+    assert_eq!(m.running(), two);
+    assert_eq!(m.state("pending"), Some(format!("{two}\n")));
+    assert_eq!(m.state("revert-failed"), Some(format!("{one}\n")));
+
+    // Its revert fired and failed: still said.
+    let m = Machine::switched(false);
+    let (one, two) = (m.sys("one"), m.sys("two"));
+    m.set("stays-one", "");
+    m.set("exit-one", "1");
+    assert_eq!(m.switch(&["--revert-to", &one]).status.code(), Some(1));
+    m.fake("switch-to-configuration");
+    m.fake("journal");
+    fs::remove_file(m.path("fake/stays-one")).unwrap();
+    fs::remove_file(m.path("fake/exit-one")).unwrap();
+    m.set("fail-run-box-revert", "");
+    let out = m.switch(&["--toplevel", &m.system("three", Some(300))]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(said(&out).2.starts_with("box-switch: "), "{}", said(&out).2);
+    assert_eq!(m.fake("systemd-run"), arm(&m));
+    assert_eq!(m.fake("switch-to-configuration"), "");
+    assert_eq!(m.running(), two);
+    assert_eq!(m.state("pending"), Some(format!("{two}\n")));
+    assert_eq!(m.state("revert-failed"), Some(format!("{one}\n")));
+    let status = said(&m.switch(&["--status"])).1;
+    assert!(
+        status.starts_with(&format!(
+            "REVERT FAILED: still on the unconfirmed {two};\nthe last confirmed system is {one} (see journalctl -t box-switch)\npending: {two}\n"
+        )),
+        "{status}"
+    );
 }
 
 #[test]
@@ -488,10 +644,13 @@ fn a_revert_that_doesnt_get_back_says_so_and_status_too() {
 fn an_activation_killed_at_its_deadline_starts_the_revert_at_once() {
     let m = Machine::switched(false);
     let two = m.sys("two");
+    // As the activation's unit runs it: with systemd's bare PATH, which on
+    // NixOS has no coreutils.
     let stopped = |result: &str, system: &str| {
         let out = m
             .command(SWITCH, &["--activation-stopped", system])
             .env("SERVICE_RESULT", result)
+            .env("PATH", "/var/empty")
             .output()
             .unwrap();
         assert_eq!(said(&out), ok(""));
@@ -529,7 +688,8 @@ fn an_abort_reverts_at_once() {
     assert_eq!(
         m.fake("systemd-run"),
         format!(
-            "--unit=box-revert-now --property=ManagedOOMPreference=omit --collect --wait --pipe --quiet --setenv=PATH=/b {} --revert-to {one}\n",
+            "--unit=box-revert-now --property=ManagedOOMPreference=omit --collect --wait --pipe --quiet --setenv=PATH={} {} --revert-to {one}\n",
+            unit_path(),
             m.me()
         )
     );
