@@ -19,7 +19,8 @@
 //! for turns in line count from ([`Spent::release`]). HOST-notify can't say
 //! whether GitHub took a notice, so the open is sent again every RETELL
 //! while it holds ([`remind`]), and the close until `HOST-notify pending`
-//! says it got through.
+//! says it got through: by the runs, and by proj-watch's every look, which
+//! books its next for it ([`tend`]), so neither waits on a run to come.
 
 use std::fs::{self, File};
 use std::process::{Command, Stdio};
@@ -30,7 +31,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::config::Config;
-use crate::job::is_error;
+use crate::job::{is_error, kick};
 use crate::limit;
 use crate::waits::rewatch_all;
 use crate::{now, swap};
@@ -63,6 +64,11 @@ pub struct Spent {
     /// close after.
     #[serde(default)]
     pub told: i64,
+    /// When a run was last refused while it held: only a run that started
+    /// after that says usage is back ([`back`]). 0 in a record from before
+    /// it was kept, which `at` stands for.
+    #[serde(default)]
+    pub last: i64,
 }
 
 impl Spent {
@@ -74,6 +80,12 @@ impl Spent {
     /// Whether it holds the line at `now`.
     pub fn holds(&self, now: i64) -> bool {
         self.back.is_none() && self.until > now
+    }
+
+    /// When a run was last refused: a run that started then or before
+    /// proves nothing of usage now.
+    pub fn refused(&self) -> i64 {
+        self.last.max(self.at)
     }
 }
 
@@ -154,17 +166,21 @@ fn keep(cfg: &Config, s: &Spent) {
 
 /// Job `id`'s run was refused at `at`: the machine is out of usage until
 /// `until`, or UNSAID on when that's unsaid or past. The owner is told when
-/// it wasn't out already, and every turn in line has its deadline moved.
+/// it wasn't out already, or its reset had passed (a run refused again then
+/// is a new one to tell), and every turn in line has its deadline moved.
 /// What it's out until, as recorded.
 pub fn record(cfg: &Config, id: &str, until: Option<i64>, said: &str, at: i64) -> Spent {
     let until = until.filter(|&t| t > at).unwrap_or(at + UNSAID);
     let _lock = lock(cfg);
     let was = kept(cfg).filter(|w| w.back.is_none());
+    let lapsed = was.as_ref().is_none_or(|w| !w.holds(at));
     let spent = match &was {
         // Every running turn is refused at once: the first tells the owner,
-        // the rest only ever move the reset on.
+        // the rest move the reset on, and when it was last refused.
         Some(w) => Spent {
             until: w.until.max(until),
+            last: w.refused().max(at),
+            told: if lapsed { now() } else { w.told },
             ..w.clone()
         },
         None => Spent {
@@ -174,17 +190,33 @@ pub fn record(cfg: &Config, id: &str, until: Option<i64>, said: &str, at: i64) -
             at,
             back: None,
             told: now(),
+            last: at,
         },
     };
     if was.as_ref() == Some(&spent) {
         return spent;
     }
     keep(cfg, &spent);
-    if was.is_none() {
+    if lapsed {
         tell(cfg, &["open", NOTICE, &title(&spent), &body(&spent)]);
     }
-    rewatch_all(cfg);
+    if lapsed || was.as_ref().is_some_and(|w| w.until != spent.until) {
+        changed(cfg);
+    }
     spent
+}
+
+/// The hold changed: every turn in line has its deadline moved, the stall
+/// watchdog looks again whether or not those did (it holds every other
+/// source's stalls by it too), and so does proj-watch, which tends the
+/// owner's notice from then on ([`tend`]).
+fn changed(cfg: &Config) {
+    rewatch_all(cfg);
+    let mut kicks = vec!["proj-watch".to_owned()];
+    if cfg.waits.is_some() {
+        kicks.push("watchdog".to_owned());
+    }
+    kick(cfg, kicks);
 }
 
 /// While it holds, the owner's notice once more every RETELL: one GitHub
@@ -206,10 +238,9 @@ pub fn remind(cfg: &Config) {
 /// Usage is back: a run that started at `started` (in seconds) and wasn't
 /// refused, or `proj usage back` (None: the owner raised the limit). The
 /// turns waiting take slots again, every turn in line has its deadline
-/// moved, and the owner's notice is closed. A run that started before the
-/// refusal proves nothing: its last call may have come before it. Once it
-/// has ended, each call settles what's left: the close is sent again until
-/// it got through, and the record goes a stall's time after the release.
+/// moved, and the owner's notice is closed. A run that started no later
+/// than the last refusal proves nothing: its last call may have come before
+/// it. Once it has ended, each call settles what's left ([`settle`]).
 pub fn back(cfg: &Config, started: Option<i64>) {
     if kept(cfg).is_none() {
         return;
@@ -218,7 +249,7 @@ pub fn back(cfg: &Config, started: Option<i64>) {
     let Some(mut s) = kept(cfg) else { return };
     let now = now();
     if s.back.is_none() {
-        if started.is_some_and(|t| t <= s.at) {
+        if started.is_some_and(|t| t <= s.refused()) {
             return;
         }
         s.back = Some(now);
@@ -226,9 +257,40 @@ pub fn back(cfg: &Config, started: Option<i64>) {
         keep(cfg, &s);
         eprintln!("proj: Claude has usage again (out since {})", when(s.at));
         tell(cfg, &["close", NOTICE, CLOSED]);
-        rewatch_all(cfg);
+        changed(cfg);
         return;
     }
+    settle(cfg, s, now);
+}
+
+/// The owner's notice, with no run to ask (proj-watch's every look): while
+/// it holds, its open again every RETELL ([`remind`]); once it has ended,
+/// what's left settled ([`settle`]). When it next needs a look, while
+/// there's anything left: one past its reset that no run has ended yet
+/// waits for the next run that isn't refused, which closes it.
+pub fn tend(cfg: &Config) -> Option<i64> {
+    let s = kept(cfg)?;
+    let now = now();
+    if s.holds(now) {
+        remind(cfg);
+        return kept(cfg).map(|s| s.told + RETELL);
+    }
+    s.back?;
+    let _lock = lock(cfg);
+    let s = kept(cfg).filter(|s| s.back.is_some())?;
+    settle(cfg, s, now);
+    let s = kept(cfg)?;
+    Some(if pending(cfg) {
+        s.told + RETELL / 12
+    } else {
+        s.release() + cfg.stall_queued()
+    })
+}
+
+/// What's left once it has ended, under the lock: the close sent again
+/// until it got through, and the record gone a stall's time after the
+/// release.
+fn settle(cfg: &Config, mut s: Spent, now: i64) {
     let settled = !pending(cfg);
     if settled && now >= s.release() + cfg.stall_queued() {
         let _ = fs::remove_file(cfg.jobs.join(FILE));
@@ -242,14 +304,16 @@ pub fn back(cfg: &Config, started: Option<i64>) {
 const CLOSED: &str = "Claude has usage again, and proj's jobs are running.";
 
 /// Whether HOST-notify may still have the notice open: a close that didn't
-/// get through. Without it, nothing is.
+/// get through. Only its exit 1 says it's closed (or was never opened); one
+/// that couldn't run, was killed or answered anything else may still have
+/// it. Without HOST-notify, nothing is.
 fn pending(cfg: &Config) -> bool {
     cfg.notify.as_ref().is_some_and(|n| {
-        Command::new(n)
+        !Command::new(n)
             .args(["pending", NOTICE])
             .stdout(Stdio::null())
             .status()
-            .is_ok_and(|st| st.success())
+            .is_ok_and(|st| st.code() == Some(1))
     })
 }
 

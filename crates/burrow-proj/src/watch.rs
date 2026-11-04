@@ -142,7 +142,23 @@ pub fn look(cfg: &Config, only: &str) -> Result<(), Fail> {
         }
         drop(held);
     }
+    // The owner's notice of the machine out of usage, tended here as well as
+    // by the runs, which may never come: booked again, in every repo's look,
+    // while there's anything left of it.
+    if let Some(at) = usage::tend(cfg) {
+        retry.push((String::new(), at));
+    }
     book(cfg, only, &retry)
+}
+
+/// What a turn's end kicks for a wait on `target`: its repo's look, or
+/// every repo's for one that's no repo's, such as an OLD_LIMIT (which only
+/// that takes in). burrow-events has no look for a repo by any other name.
+pub fn kick_for(target: &str) -> String {
+    match crate::github::target(target) {
+        Some((repo, _)) => format!("proj-watch/{repo}"),
+        None => "proj-watch".to_owned(),
+    }
 }
 
 /// The jobs, by id: every folder in jobs but the dot ones.
@@ -213,4 +229,28 @@ fn book(cfg: &Config, only: &str, retry: &[(String, i64)]) -> Result<(), Fail> {
     }
     let text = serde_json::to_string_pretty(&at).map_err(|e| Fail::new(1, format!("proj: {e}")))?;
     swap(&cfg.wake, &format!("{text}\n")).map_err(|e| io_fail(&cfg.wake, e))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{OLD_LIMIT, kick_for};
+
+    // A wait on a PR or issue kicks its repo's look, however it's written; one
+    // that's no repo's (an earlier proj's usage limit) kicks every repo's,
+    // the only look that takes it in: burrow-events has none by its name.
+    #[test]
+    fn a_turns_end_kicks_the_look_that_takes_its_wait() {
+        for (t, kick) in [
+            ("sam/r#7", "proj-watch/sam/r"),
+            ("https://github.com/sam/r/pull/7", "proj-watch/sam/r"),
+            (
+                "https://github.com/sam/r/issues/7#issuecomment-1",
+                "proj-watch/sam/r",
+            ),
+            (OLD_LIMIT, "proj-watch"),
+            ("not a target", "proj-watch"),
+        ] {
+            assert_eq!(kick_for(t), kick, "{t}");
+        }
+    }
 }

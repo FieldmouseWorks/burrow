@@ -291,8 +291,11 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
                 eprintln!("proj: {}", usage::line(&spent));
                 // All of the refused run gone first, as for any run after
                 // another: what it left could hold the slot it gives up
-                // (slot.rs held), or run beside the next.
-                if reap() {
+                // (slot.rs held), or run beside the next. A sandbox's work
+                // is in its VM, past the unit's reach: the VM is stopped,
+                // which ends all of it, and the next run's `agent sh` starts
+                // it again, its clone and home as they were.
+                if reap() && agent.as_deref().is_none_or(|a| stopped("agent", a)) {
                     // Waiting, as `proj state` and the watchdog read it:
                     // under the job's lock, as its slot was said (slot.rs
                     // took_slot).
@@ -736,6 +739,20 @@ fn stop(pid: Pid) {
 /// Everything in this process's unit but itself: what a run left behind, in
 /// whatever process group, TERM first, then KILL. False if any of it is
 /// still there after that.
+/// Whether sandbox `id`'s VM, and so everything a run left in it, is
+/// stopped: `agent stop` (as `agent`, the command) said so.
+fn stopped(agent: &str, id: &str) -> bool {
+    let ok = Command::new(agent)
+        .args(["stop", id])
+        .stdout(Stdio::null())
+        .status()
+        .is_ok_and(|st| st.success());
+    if !ok {
+        eprintln!("proj: agent stop {id} didn't say the sandbox stopped");
+    }
+    ok
+}
+
 fn reap() -> bool {
     let me = process::id();
     let Some(cgroup) = cgroup() else {
@@ -797,7 +814,34 @@ fn names_session(stream: &Path, from: u64) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::gone_quiet;
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+
+    use super::{gone_quiet, stopped};
+
+    // A sandbox's VM counts as stopped, everything a refused run left in it
+    // with it, only once `agent stop` says so: one that fails, or can't run,
+    // and the turn doesn't go on.
+    #[test]
+    fn a_sandbox_stopped_only_when_agent_says_so() {
+        let d = tempfile::tempdir().unwrap();
+        let agent = |code: i32| {
+            let f = d.path().join(format!("agent-{code}"));
+            let script = format!(
+                "#!/bin/sh\necho \"$*\" >>{}/asked\nexit {code}\n",
+                d.path().display()
+            );
+            fs::write(&f, script).unwrap();
+            fs::set_permissions(&f, fs::Permissions::from_mode(0o755)).unwrap();
+            f.to_str().unwrap().to_owned()
+        };
+        assert!(stopped(&agent(0), "web-ab12"));
+        assert!(!stopped(&agent(1), "web-ab12"));
+        let missing = d.path().join("no-agent");
+        assert!(!stopped(missing.to_str().unwrap(), "web-ab12"));
+        let asked = fs::read_to_string(d.path().join("asked")).unwrap();
+        assert_eq!(asked, "stop web-ab12\nstop web-ab12\n");
+    }
 
     const SECOND: i64 = 1_000_000_000;
 

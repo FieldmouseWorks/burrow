@@ -477,10 +477,7 @@ fn ended(cfg: &Config) -> Result<(), Fail> {
     rewatch(cfg, &[&id]);
     let mut names = lines(&job.path("kick"));
     for a in awaits(&read(&job.path("await")).unwrap_or_default()) {
-        names.push(format!(
-            "proj-watch/{}",
-            a.target.split('#').next().unwrap_or_default()
-        ));
+        names.push(watch::kick_for(&a.target));
     }
     kick(cfg, names);
     // A job this turn left over has its scratch cleared, after the kicks so

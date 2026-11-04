@@ -105,6 +105,7 @@ fn out_of_usage_a_turn_in_line_is_due_from_the_reset() {
         at: 900,
         back: None,
         told: 900,
+        last: 900,
     });
     let w = job_wait(&cfg, &f).unwrap();
     assert_eq!((w.since, w.due), (1000.0, 57_200.0));

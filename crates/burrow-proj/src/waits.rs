@@ -143,8 +143,7 @@ pub fn job_wait(cfg: &Config, f: &Facts) -> Option<Item> {
                             .copied()
                             .reduce(|a, b| if b.1 < a.1 { b } else { a })?;
                         let targets: Vec<&str> = awaits.iter().map(|(t, _)| *t).collect();
-                        let repo = first.rsplit_once('#').map_or(first, |(r, _)| r);
-                        kick = Some(format!("proj-watch/{repo}"));
+                        kick = Some(crate::watch::kick_for(first));
                         let hours = cfg.await_hours;
                         (
                             at,
