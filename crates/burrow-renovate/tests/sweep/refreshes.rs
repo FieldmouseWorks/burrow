@@ -7,7 +7,7 @@ use super::*;
 fn a_refresh_that_waits_for_its_releases_is_asked_for_again_three_times() {
     // A lock file refresh lock-age refused only because nothing in it is
     // old enough yet goes to no job: it waits, then Renovate is asked to
-    // refresh it again (the "rebase!" title), and asked again only when a
+    // refresh it again (Renovate's rebase label), and asked again only when a
     // request went without anything moving, three times at most.
     let m = Machine::new();
     let (later, past) = (now() + 3 * 86400, now() - 60);
@@ -60,21 +60,20 @@ fn a_request_standing_six_hours_is_taken_back_for_a_job() {
     // a new time on the same head starts the requests over.
     let m = Machine::new();
     let past = now() - 60;
-    let standing = format!("rebase!{LOCK}");
     m.prs(&[m.refresh(22, past, "me", LOCK)]);
     m.pass();
     m.asked_ago(22, 7200);
-    m.prs(&[m.refresh(22, past, "me", &standing)]);
+    m.prs(&[requested(m.refresh(22, past, "me", LOCK))]);
     let p = m.pass();
     assert!(p.jobs.is_empty() && p.asked().is_empty());
     m.asked_ago(22, 7 * 3600);
     m.prs(&[m.refresh(22, past - 3600, "me", LOCK)]);
     assert_eq!(m.pass().asked(), rebase(22));
     m.asked_ago(22, 7 * 3600);
-    m.prs(&[m.refresh(22, past - 3600, "me", &standing)]);
+    m.prs(&[requested(m.refresh(22, past - 3600, "me", LOCK))]);
     let p = m.pass();
     assert!(p.jobs.is_empty());
-    assert_eq!(p.asked(), unasked(22, LOCK));
+    assert_eq!(p.asked(), unasked(22));
     // Taken back: no more asking on that head, and no job till the run is
     // over.
     m.prs(&[m.refresh(22, past - 3600, "me", LOCK)]);
@@ -82,7 +81,7 @@ fn a_request_standing_six_hours_is_taken_back_for_a_job() {
     assert!(p.jobs.is_empty() && p.asked().is_empty());
     m.released(22, 7300);
     let p = m.pass();
-    assert!(p.task().contains("#22 ") && !p.task().contains("rebase!"));
+    assert!(p.task().contains("#22 ") && !p.task().contains("rebase"));
     assert!(p.asked().is_empty());
 }
 
@@ -114,23 +113,22 @@ fn a_request_github_wont_take_back_goes_to_the_job_to_take_back() {
     // back itself.
     let m = Machine::new();
     let past = now() - 60;
-    let standing = format!("rebase!{LOCK}");
     m.set("gh-refuses", "");
     m.prs(&[m.refresh(25, past, "me", LOCK)]);
     m.pass();
     m.asked_ago(25, 7200);
-    m.prs(&[m.refresh(25, past, "me", &standing)]);
+    m.prs(&[requested(m.refresh(25, past, "me", LOCK))]);
     let p = m.pass();
     assert!(p.jobs.is_empty() && p.asked().is_empty());
     m.asked_ago(25, 7 * 3600);
     for _ in 0..3 {
-        assert_eq!(m.pass().asked(), unasked(25, LOCK));
+        assert_eq!(m.pass().asked(), unasked(25));
         let p = m.pass();
         assert!(p.jobs.is_empty() && p.asked().is_empty());
         m.released(25, 700);
     }
     let p = m.pass();
-    assert!(p.task().contains("#25 \"rebase!Lock file maintenance (cargo)\" (branch renovate/cargo-lock-file-maintenance): its CI fails; its title still starts with rebase!, which has Renovate redo the branch over what you push: take that off the title first, and push nothing to it for 120 minutes after, while a Renovate run that read it may still be going\n"), "{}", p.task());
+    assert!(p.task().contains("#25 \"Lock file maintenance (cargo)\" (branch renovate/cargo-lock-file-maintenance): its CI fails; it has the rebase label, which has Renovate redo the branch over what you push: take the label off first, and push nothing to it for 120 minutes after, while a Renovate run that read it may still be going\n"), "{}", p.task());
     assert!(p.asked().is_empty());
 }
 
@@ -139,23 +137,26 @@ fn whatever_else_sends_a_pr_with_a_request_to_a_job_takes_the_request_off_first(
     // Another red check, a failure that isn't only age, a major: the
     // request comes off first, and the job waits out the run.
     let later = now() + 3 * 86400;
-    let title = "rebase!Update foo26 to v2";
+    let title = "Update foo26 to v2";
     for why in ["check", "failure", "major"] {
         let m = Machine::new();
-        let mut p = m.refresh(26, later, "me", title);
+        let mut p = requested(m.refresh(26, later, "me", title));
         match why {
             "check" => p["statusCheckRollup"][0]["conclusion"] = "FAILURE".into(),
             "failure" => m.unset("rest-26"),
             _ => {
                 p["statusCheckRollup"].as_array_mut().unwrap().truncate(1);
-                p["labels"] = json!([{"name": "major"}]);
+                p["labels"] = json!([{"name": "major"}, {"name": "rebase"}]);
             }
         }
         m.prs(&[p.clone()]);
         let got = m.pass();
         assert!(got.jobs.is_empty(), "{why}");
-        assert_eq!(got.asked(), unasked(26, "Update foo26 to v2"), "{why}");
-        p["title"] = "Update foo26 to v2".into();
+        assert_eq!(got.asked(), unasked(26), "{why}");
+        p["labels"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|l| l["name"] != "rebase");
         m.prs(&[p]);
         let got = m.pass();
         assert!(got.jobs.is_empty() && got.asked().is_empty(), "{why}");

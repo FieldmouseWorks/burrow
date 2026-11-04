@@ -170,26 +170,34 @@ impl Pass {
         self.notice("majors")
     }
 
-    /// The titles it asked GitHub for.
+    /// What it asked GitHub to do to a PR's rebase label.
     fn asked(&self) -> Vec<&str> {
         self.log
             .iter()
-            .filter_map(|l| l.strip_prefix("gh api -X PATCH "))
+            .filter_map(|l| l.strip_prefix("gh api -X "))
             .collect()
     }
 }
 
-/// What asking for PR `n` to have `title` looks like.
-fn retitled(n: u64, title: &str) -> String {
-    format!("repos/{REPO}/pulls/{n} -f title={title}")
-}
-
+/// Asking for PR `n` to be refreshed: Renovate's rebase label on it.
 fn rebase(n: u64) -> Vec<String> {
-    vec![retitled(n, &format!("rebase!{LOCK}"))]
+    vec![format!(
+        "POST repos/{REPO}/issues/{n}/labels -f labels[]=rebase"
+    )]
 }
 
-fn unasked(n: u64, title: &str) -> Vec<String> {
-    vec![retitled(n, title)]
+/// Taking that request back.
+fn unasked(n: u64) -> Vec<String> {
+    vec![format!("DELETE repos/{REPO}/issues/{n}/labels/rebase")]
+}
+
+/// `p` with the rebase label on it: a request standing.
+fn requested(mut p: Value) -> Value {
+    p["labels"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"name": "rebase"}));
+    p
 }
 
 impl Machine {

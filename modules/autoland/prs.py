@@ -44,7 +44,7 @@ query($owner: String!, $name: String!, $cursor: String) {
         reviews(last: 100) { pageInfo { hasPreviousPage startCursor } nodes { %s } }
         comments(last: 100) { pageInfo { hasPreviousPage startCursor } nodes { %s } }
         reactions(last: 20) { nodes { content createdAt user { login } } }
-        timelineItems(last: 10, itemTypes: [RENAMED_TITLE_EVENT]) { nodes { ... on RenamedTitleEvent { createdAt previousTitle } } }
+        timelineItems(last: 10, itemTypes: [UNLABELED_EVENT]) { nodes { ... on UnlabeledEvent { createdAt label { name } } } }
         commits(last: 1) {
           nodes { commit { oid statusCheckRollup { contexts(first: 100) { pageInfo { hasNextPage } nodes {
             __typename

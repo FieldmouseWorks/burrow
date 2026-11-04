@@ -124,20 +124,20 @@ def at(after):
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(C.ts(T0) + after))
 
 
-def renamed(after):
-    return {"createdAt": at(after), "previousTitle": "rebase!Update foo from 1.4 to 1.5"}
+def unlabeled(after, name="rebase"):
+    return {"createdAt": at(after), "label": {"name": name}}
 
 
 # A review thread on a green Renovate PR goes to a job, but not while a
-# rebase! request stands: Renovate would redo the branch over the job's fix.
+# rebase request (the label) stands: Renovate would redo the branch over the job's fix.
 fresh_pr_state()
-asking = {"branch": "renovate/foo-3", "title": "rebase!Update foo from 1.4 to 1.5", "number": 17}
+asking = {"branch": "renovate/foo-3", "title": "Update foo from 1.4 to 1.5", "number": 17, "labels": ["rebase"]}
 run(mkpr(threads=[False], **asking), 0)
 status, _ = run(mkpr(threads=[False], **asking), 7200)
 assert JOBS == [] and "1 open review thread" in status, status
 # A run that read it may still be going for a run's length after it came off,
 # not after a pass last saw it: last seen at 7200, gone at 7200 + 3500.
-asked = {**asking, "title": "Update foo from 1.4 to 1.5", "renames": [renamed(7200 + 3500)]}
+asked = {**asking, "labels": [], "unlabels": [unlabeled(7200 + 3500)]}
 run(mkpr(threads=[False], **asked), 7300)
 assert JOBS == [], "a run that read it may still be going"
 run(mkpr(threads=[False], **asked), 7200 + 7300)
@@ -153,7 +153,7 @@ JOBS.clear()
 # A request no pass ever saw, on and off between two, counts the same. Nor
 # does the fence hang on the watchdog: without it there's still a job to fence.
 fresh_pr_state()
-quiet = {**asked, "renames": [{"createdAt": at(100), "previousTitle": "Update foo from 1.4 to 1.5"}, renamed(200)]}
+quiet = {**asked, "unlabels": [unlabeled(100, "major"), unlabeled(200)]}
 watch, S.CFG["watch"] = S.CFG["watch"], None
 run(mkpr(threads=[False], **quiet), 0)
 status, _ = run(mkpr(threads=[False], **quiet), 7000)
@@ -163,9 +163,9 @@ assert JOBS, "a job once its run is over"
 JOBS.clear()
 S.CFG["watch"] = watch
 
-# Only a rename off the request counts: an ordinary retitle holds nothing back.
+# Only the request's label coming off counts: another label holds nothing back.
 fresh_pr_state()
-plain = {**asked, "renames": [{"createdAt": at(0), "previousTitle": "Update foo"}]}
+plain = {**asked, "unlabels": [unlabeled(0, "major")]}
 run(mkpr(threads=[False], **plain), 0)
 run(mkpr(threads=[False], **plain), 7300)
 assert JOBS, "a job: no request was ever made"
