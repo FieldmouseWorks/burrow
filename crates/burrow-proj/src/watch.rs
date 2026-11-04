@@ -1,5 +1,7 @@
 //! proj-watch's look (`proj _watch [OWNER/REPO]`): jobs waiting on GitHub
-//! whose PRs or issues (in that repo, or any) changed get their next turn.
+//! whose PRs or issues (in that repo, or any) changed get their next turn,
+//! and so do jobs whose usage limit has reset ([`crate::limit`]), whatever
+//! the repo.
 //! One look at a time, whoever started it (burrow-events, from before a
 //! restart too, or a hand): two would each write the wake file from what
 //! they saw.
@@ -13,7 +15,9 @@ use serde_json::Value;
 use crate::config::Config;
 use crate::github::{changes, fingerprint, target};
 use crate::job::{Job, awaits};
+use crate::limit;
 use crate::turn::start;
+use crate::waits::seconds;
 use crate::{Fail, filled, io_fail, now, read, swap};
 
 /// Seconds before a repo GitHub couldn't be asked about, or a turn that
@@ -43,6 +47,21 @@ pub fn look(cfg: &Config, only: &str) -> Result<(), Fail> {
         let (mut news, mut lines) = (String::new(), String::new());
         for a in awaits(&waits) {
             if a.target.is_empty() {
+                continue;
+            }
+            // A usage limit's reset is due by the clock alone, in any look.
+            if a.target == limit::TARGET {
+                match seconds(&a.was) {
+                    Some(due) if now() >= due => news.push_str(&format!(
+                        "- the usage limit your last turn ended on: it reset by {}\n",
+                        limit::utc(due)
+                    )),
+                    Some(_) => lines.push_str(&a.line()),
+                    None => news.push_str(&format!(
+                        "- {}: not something proj can watch; no longer watched\n",
+                        a.target
+                    )),
+                }
                 continue;
             }
             let was = (!a.was.is_empty()).then(|| serde_json::from_str::<Value>(&a.was).ok());
@@ -113,8 +132,7 @@ pub fn look(cfg: &Config, only: &str) -> Result<(), Fail> {
             if let Err(e) = start(cfg, &id, &prompt, false) {
                 eprintln!("{e}");
                 for a in awaits(&waits) {
-                    let repo = a.target.split('#').next().unwrap_or_default().to_owned();
-                    retry.push((repo, now() + RETRY));
+                    retry.push((repo_of(&a.target), now() + RETRY));
                 }
             }
         } else {
@@ -123,6 +141,16 @@ pub fn look(cfg: &Config, only: &str) -> Result<(), Fail> {
         drop(held);
     }
     book(cfg, only, &retry)
+}
+
+/// The wake file's key a look at a target is booked under: its repo, or ""
+/// (every repo's look) for a usage limit, which is no repo's.
+fn repo_of(target: &str) -> String {
+    if target == limit::TARGET {
+        String::new()
+    } else {
+        target.split('#').next().unwrap_or_default().to_owned()
+    }
 }
 
 /// The jobs, by id: every folder in jobs but the dot ones.
@@ -141,7 +169,8 @@ fn job_ids(cfg: &Config) -> Vec<String> {
 }
 
 /// When each repo needs a look next, for burrow-events: the deadline of
-/// every job's waits that's still to come, and the retries. One already past
+/// every job's waits that's still to come (a usage limit's reset under "",
+/// every repo's look), and the retries. One already past
 /// is a turn that couldn't start (its retry stands for it) or one this look
 /// skipped as running, whose end kicks proj-watch itself. A look at one repo
 /// keeps the other repos' wake-ups (their retries too).
@@ -172,6 +201,12 @@ fn book(cfg: &Config, only: &str, retry: &[(String, i64)]) -> Result<(), Fail> {
     let hours = cfg.await_hours as i64;
     for id in job_ids(cfg) {
         for a in awaits(&read(&Job::new(cfg, &id).path("await")).unwrap_or_default()) {
+            if a.target == limit::TARGET {
+                if let Some(due) = seconds(&a.was).filter(|due| *due > now) {
+                    add("", due);
+                }
+                continue;
+            }
             let Some(since) = (!a.since.is_empty() && a.since.bytes().all(|b| b.is_ascii_digit()))
                 .then(|| a.since.parse::<i64>().ok())
                 .flatten()

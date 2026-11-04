@@ -243,6 +243,10 @@ impl<'a> Job<'a> {
                 let (since, what) = line.split_once('\t').unwrap_or((line, ""));
                 (since.to_owned(), what.to_owned())
             }),
+            resets: awaits(&read(&self.path("await")).unwrap_or_default())
+                .iter()
+                .find(|a| a.target == crate::limit::TARGET)
+                .and_then(|a| crate::waits::seconds(&a.was)),
             awaits: if filled(&self.path("await")) {
                 awaits(&read(&self.path("await")).unwrap_or_default())
                     .into_iter()

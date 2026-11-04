@@ -192,8 +192,8 @@ in
         command of its holding a file in its PROJ_WAIT_DIR: its timeout
         stands still meanwhile), before the stall watchdog, when it's on,
         takes it. A turn running past its timeout, one awaiting GitHub past
-        awaitHours, or one that ended without saying what comes next, it
-        takes then.
+        awaitHours, one waiting on a usage limit past its reset, or one that
+        ended without saying what comes next, it takes then.
       '';
     };
     awaitHours = lib.mkOption {

@@ -108,6 +108,9 @@
 //! when a turn that awaits it ends, and at the deadline _watch books in its
 //! wake file.
 //!
+//! A turn that ends on a usage limit waits for it the same way: proj-watch
+//! resumes the job once the limit resets, as its words say when ([`limit`]).
+//!
 //! Nothing else resumes a job, so every turn says what comes next, or it
 //! would wait for good on something nobody will tell it about (a background
 //! run, a notification): `proj await`, `proj ask` or `proj done`, before it
@@ -136,6 +139,7 @@ pub mod config;
 pub mod github;
 pub mod inbox;
 pub mod job;
+pub mod limit;
 pub mod pick;
 pub mod scratch;
 pub mod slot;

@@ -7,6 +7,7 @@ use std::io::{self, Write};
 use crate::config::Config;
 use crate::github::{fingerprint, over, target};
 use crate::job::{Job, answer, awaits, is_error, kick, result_of};
+use crate::limit;
 use crate::pick::demoted;
 use crate::turn::{exec, lines};
 use crate::waits::rewatch;
@@ -230,6 +231,18 @@ pub fn told(cfg: &Config, id: &str, n: &str) -> Result<String, String> {
         let outcome = job.ended(n);
         if is_error(last) {
             out.push_str(&format!("\n(turn {n} ended in an error)\n"));
+            // The latest turn's usage limit: when proj resumes the job.
+            if job.turns().as_deref() == Some(n)
+                && let Some(due) = awaits(&read(&job.path("await")).unwrap_or_default())
+                    .iter()
+                    .find(|a| a.target == limit::TARGET)
+                    .and_then(|a| crate::waits::seconds(&a.was))
+            {
+                out.push_str(&format!(
+                    "(a usage limit: proj resumes the job by itself once it resets, at {})\n",
+                    limit::utc(due)
+                ));
+            }
             match last.get("errors") {
                 None | Some(serde_json::Value::Null) | Some(serde_json::Value::Bool(false)) => (),
                 Some(errors) => out.push_str(&format!("{errors}\n")),
@@ -447,7 +460,8 @@ fn ends(cfg: &Config, how: &str, words: usize) -> Result<(), Fail> {
 /// and OnFailure): its wait is the stall watchdog's to know, what the job was started to kick (proj run
 /// --kick) gets a pass now, and so does proj-watch for each repo the turn
 /// awaits, which then sees at once anything that changed since the turn
-/// took its baseline.
+/// took its baseline; for a usage limit's reset, its whole look, which
+/// books the look that resumes the job ([`limit`]).
 fn ended(cfg: &Config) -> Result<(), Fail> {
     let id = this_job(
         "PROJ_ENDED",
@@ -458,10 +472,14 @@ fn ended(cfg: &Config) -> Result<(), Fail> {
     rewatch(cfg, &[&id]);
     let mut names = lines(&job.path("kick"));
     for a in awaits(&read(&job.path("await")).unwrap_or_default()) {
-        names.push(format!(
-            "proj-watch/{}",
-            a.target.split('#').next().unwrap_or_default()
-        ));
+        names.push(if a.target == limit::TARGET {
+            "proj-watch".to_owned()
+        } else {
+            format!(
+                "proj-watch/{}",
+                a.target.split('#').next().unwrap_or_default()
+            )
+        });
     }
     kick(cfg, names);
     // A job this turn left over has its scratch cleared, after the kicks so

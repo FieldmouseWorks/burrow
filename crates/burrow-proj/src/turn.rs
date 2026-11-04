@@ -15,7 +15,7 @@ use crate::config::Config;
 use crate::job::{Job, answer, is_error, kick, last_result, result_of};
 use crate::pick::{Class, demoted};
 use crate::waits::{rewatch, rewatch_later, waiting};
-use crate::{Fail, filled, mtime_nanos, nanos, now_nanos, read, scratch, slot, swap, systemd};
+use crate::{Fail, filled, mtime_nanos, nanos, now, now_nanos, read, scratch, slot, swap, systemd};
 
 /// How a job waits on its own long work, which its answer would stop.
 const LONG: &str = "A command that can outlast one Bash call (ten minutes), a long build or test run, goes to the background with its output and exit code written to a file, and you wait for that file in the foreground, in steps under ten minutes each; answer only once it's there.";
@@ -329,6 +329,16 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
             let _ = fs::write(job.turn(&n, "end"), format!("{end}\n"));
         }
         let done = !is_error(&last);
+        // A usage limit's error: the job waits for its reset, as for a PR
+        // (limit), its await in place before its outcome says it ended. Not
+        // an --owned job's: its starter acts on its end, and tries again.
+        if !done
+            && !job.path("owned").exists()
+            && let Some(serde_json::Value::String(said)) = last.get("result")
+            && let Some(wait) = crate::limit::line(said, now())
+        {
+            let _ = swap(&job.path("await"), &wait);
+        }
         outcome(if done { "done" } else { "error" });
         // What it awaits, from the baseline `proj await` took; one line per
         // target, the first await of it in the turn.
