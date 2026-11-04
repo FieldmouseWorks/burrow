@@ -171,6 +171,32 @@ run(mkpr(threads=[False], **plain), 7300)
 assert JOBS, "a job: no request was ever made"
 JOBS.clear()
 
+# A rebase! title, which Renovate reads on every run, is a request too: while
+# it stands, and for a run's length after it came off.
+fresh_pr_state()
+titled = {**asking, "labels": [], "title": "rebase!Update foo from 1.4 to 1.5"}
+run(mkpr(threads=[False], **titled), 0)
+status, _ = run(mkpr(threads=[False], **titled), 7200)
+assert JOBS == [] and "1 open review thread" in status, status
+retitled = {**asking, "labels": [], "unlabels": [{"createdAt": at(7200 + 100), "previousTitle": titled["title"]}]}
+run(mkpr(threads=[False], **retitled), 7300)
+assert JOBS == [], "a run that read the title may still be going"
+run(mkpr(threads=[False], **retitled), 7200 + 100 + 7300)
+assert JOBS, "a job once the title is back and its run over"
+JOBS.clear()
+
+# A timeline cut short inside the run's window may have lost a request among
+# other labels' comings and goings: it counts as one until its oldest is
+# older than a run.
+fresh_pr_state()
+churn = {**asking, "labels": [], "cut": True, "unlabels": [unlabeled(7000 + i, "waiting: reviewer") for i in range(3)]}
+run(mkpr(threads=[False], **churn), 0)
+run(mkpr(threads=[False], **churn), 7200)
+assert JOBS == [], "the history the request may be in was cut off"
+run(mkpr(threads=[False], **churn), 7000 + 7300)
+assert JOBS, "a job once even the oldest it has is older than a run"
+JOBS.clear()
+
 # A red Dependabot one has no sweep: it goes to a job.
 fresh_pr_state()
 bump = {"branch": "dependabot/npm/foo-1", "title": "Bump foo from 1.4 to 1.5", "number": 13}

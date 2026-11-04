@@ -214,3 +214,70 @@ fn only_renovates_own_word_on_a_refresh_makes_it_wait() {
         got.log
     );
 }
+
+/// PR `n`'s timeline: a request that came off `ago` seconds back, by
+/// `event` (unlabeled, or renamed from a rebase! title).
+fn gone(m: &Machine, n: u64, event: &str, ago: i64) {
+    let at = jiff::Timestamp::from_second(now() as i64 - ago).unwrap();
+    let e = match event {
+        "unlabeled" => {
+            json!({"event": "unlabeled", "created_at": at.to_string(), "label": {"name": "rebase"}})
+        }
+        _ => json!({"event": "renamed", "created_at": at.to_string(),
+                    "rename": {"from": "rebase!Update foo27 to v2", "to": "Update foo27 to v2"}}),
+    };
+    // Other events, and another label coming off, count for nothing.
+    let other = json!({"event": "unlabeled", "created_at": jiff::Timestamp::now().to_string(), "label": {"name": "major"}});
+    m.set(&format!("timeline-{n}"), &json!([[e], [other]]).to_string());
+}
+
+#[test]
+fn a_rebase_title_comes_off_on_sight_and_its_run_is_waited_out() {
+    // Renovate redoes the branch on every run while a title starts
+    // rebase!, ours or anyone's, and each push starts the next: the sweep
+    // takes it off and hands the PR to no job till a run that read it is
+    // over.
+    let m = Machine::new();
+    let mut p = pr_with(27, &[], "FAILURE");
+    p["title"] = "rebase!Update foo27 to v2".into();
+    m.prs(&[p]);
+    let got = m.pass();
+    assert!(got.jobs.is_empty(), "{:#?}", got.jobs);
+    assert_eq!(
+        got.asked(),
+        [format!(
+            "PATCH repos/{REPO}/pulls/27 -f title=Update foo27 to v2"
+        )]
+    );
+    m.prs(&[pr_with(27, &[], "FAILURE")]);
+    gone(&m, 27, "renamed", 600);
+    let got = m.pass();
+    assert!(got.jobs.is_empty() && got.asked().is_empty());
+    gone(&m, 27, "renamed", 7300);
+    assert!(m.pass().task().contains("#27 "));
+}
+
+#[test]
+fn a_request_that_came_off_between_passes_is_waited_out_on_any_head() {
+    // Renovate took the label (a request no pass saw standing, someone
+    // else's, or on a head since replaced): a run that read it may be
+    // going still, so no job for a run's length after.
+    let m = Machine::new();
+    m.prs(&[pr_with(28, &[], "FAILURE")]);
+    gone(&m, 28, "unlabeled", 600);
+    let got = m.pass();
+    assert!(got.jobs.is_empty() && got.asked().is_empty());
+    gone(&m, 28, "unlabeled", 7300);
+    assert!(m.pass().task().contains("#28 "));
+}
+
+#[test]
+fn a_timeline_that_cant_be_read_holds_the_pr() {
+    // Whether a request just came off it can't say: no job this pass.
+    let m = Machine::new();
+    m.prs(&[pr_with(29, &[], "FAILURE")]);
+    m.set("timeline-29", "not json");
+    assert!(m.pass().jobs.is_empty());
+    m.unset("timeline-29");
+    assert!(m.pass().task().contains("#29 "));
+}

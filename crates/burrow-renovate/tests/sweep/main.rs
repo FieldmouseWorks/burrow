@@ -55,9 +55,10 @@ const STAND_INS: [(&str, &str); 6] = [
     (
         // GitHub: the user's login (FAKE/user-fails to fail), a repo's
         // Renovate PRs (FAKE/prs-OWNER_REPO, or FAKE/prs for every repo),
-        // PR N's comments (FAKE/comments-N) and Renovate's comments as REST
-        // has them (FAKE/rest-N). It refuses an edit when FAKE/gh-refuses
-        // is there, and the first to read PR N's comments when FAKE/gh-blocks
+        // PR N's comments (FAKE/comments-N), Renovate's comments as REST
+        // has them (FAKE/rest-N) and PR N's timeline (FAKE/timeline-N, as
+        // the pages --slurp gives them, or none). It refuses an edit when
+        // FAKE/gh-refuses is there, and the first to read PR N's comments when FAKE/gh-blocks
         // says N waits for FAKE/gh-go.
         "gh",
         r#"echo "gh $*" >>"$FAKE/log"
@@ -69,7 +70,11 @@ case "$1 $2" in
       while [ ! -e "$FAKE/gh-go" ]; do sleep 0.05; done
     fi
     cat "$FAKE/comments-$3" 2>/dev/null || echo '{"comments": []}' ;;
-  "api --paginate") n=${4%/comments}; cat "$FAKE/rest-${n##*/}" 2>/dev/null ;;
+  "api --paginate")
+    case "$4" in
+      */timeline) n=${4%/timeline}; cat "$FAKE/timeline-${n##*/}" 2>/dev/null || echo '[[]]' ;;
+      *) n=${4%/comments}; cat "$FAKE/rest-${n##*/}" 2>/dev/null ;;
+    esac ;;
   "api -X") [ ! -e "$FAKE/gh-refuses" ] ;;
   "label create"|"pr edit") ;;
   *) echo "gh $*: not a stand-in answer" >&2; exit 1 ;;

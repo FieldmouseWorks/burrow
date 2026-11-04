@@ -46,21 +46,17 @@ use serde_json::Value;
 use crate::{complain, say, trimmed};
 
 mod pr;
+mod request;
 mod steward;
 mod task;
 
 use pr::{Pr, State};
+use request::{REQUEST, TITLE};
 use steward::Steward;
 
 /// The labels a job puts on a major it read.
 pub(crate) const OK: &str = "major-ok";
 pub(crate) const HELD: &str = "major-held";
-/// The label that has Renovate redo the branch on its next run, which takes
-/// it off once it has (its rebaseLabel, modules/updates/renovate-policy.nix;
-/// modules/autoland/lock_wait.py's REQUEST). One run: a "rebase!" title has
-/// it redo the branch on every run until someone takes it off, and each of
-/// those pushes starts the next run (TusanHomichi/career#22, 6,492 CI runs).
-const REQUEST: &str = "rebase";
 /// How long a refresh request is given before it's asked again: Renovate
 /// runs within the hour.
 const RUN_COMES: i64 = 3600;
@@ -636,6 +632,14 @@ impl Sweep<'_> {
             };
             pass.stuck.push_str(&format!("- {title}: {url} ({why})\n"));
         }
+        // A rebase! title has Renovate redo the branch on each of its runs,
+        // each of whose pushes starts the next, until someone takes it off:
+        // the sweep does, and leaves the PR for a pass after, which waits out
+        // a run that read it (handing over, below).
+        if let Some(rest) = title.strip_prefix(TITLE) {
+            self.retitle(&n, rest.trim_start());
+            return Ok(None);
+        }
         // A head whose refresh request was taken back for a job (below) has
         // done with requests: when, and how many times it was asked.
         let released = with_suffix(&key, ".released");
@@ -754,6 +758,16 @@ impl Sweep<'_> {
         } else if rel_sha == sha && now - rel_at < cfg.renovate_run as i64 {
             return Ok(None);
         }
+        // Nor while a run that read a request that came off since (Renovate
+        // took it, or someone else did, on this head or an old one) may be
+        // going still, or while the PR's timeline can't say.
+        if !standing
+            && self
+                .request_gone(&n)
+                .is_none_or(|at| at.is_some_and(|at| now - at < cfg.renovate_run as i64))
+        {
+            return Ok(None);
+        }
         if major {
             // The job labels what it read; the labels have to exist first.
             if !self.labelled {
@@ -862,27 +876,6 @@ impl Sweep<'_> {
             .wait_with_output()
             .map(|o| trimmed(o.stdout))
             .unwrap_or_default()
-    }
-
-    /// PR `n` given Renovate's rebase label (`on`) or rid of it, whatever
-    /// GitHub says to it.
-    fn request(&self, n: &str, on: bool) {
-        let cfg = self.cfg;
-        let repo = self.repo;
-        let (method, path) = if on {
-            ("POST", format!("repos/{repo}/issues/{n}/labels"))
-        } else {
-            (
-                "DELETE",
-                format!("repos/{repo}/issues/{n}/labels/{REQUEST}"),
-            )
-        };
-        let label = format!("labels[]={REQUEST}");
-        let mut args = vec!["api", "-X", method, &path];
-        if on {
-            args.extend(["-f", &label]);
-        }
-        cfg.quietly(&cfg.tools.gh, &args);
     }
 }
 

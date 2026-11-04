@@ -429,14 +429,14 @@ CI_GREEN = [{"__typename": "CheckRun", "name": "ci", "status": "COMPLETED", "con
 
 
 def mkpr(reviews=(), comments=(), threads=(), draft=False, number=5, sha=head, files=("a.py",), labels=(),
-         branch="feat", title="t", checks=CI_GREEN, base="main", body="", suites=(), unlabels=()):
+         branch="feat", title="t", checks=CI_GREEN, base="main", body="", suites=(), unlabels=(), cut=False):
     return {
         "id": "x", "number": number, "title": title, "url": "u", "isDraft": draft, "isCrossRepository": False,
         "headRefName": branch, "headRefOid": sha, "baseRefName": base, "createdAt": T0, "updatedAt": T0, "body": body,
         "mergeStateStatus": "CLEAN", "author": {"login": "sam"}, "autoMergeRequest": None, "mergeQueueEntry": None,
         "labels": {"pageInfo": {"hasNextPage": False}, "nodes": [{"name": x} for x in labels]},
         "files": {"nodes": [{"path": f, "changeType": "MODIFIED"} for f in files]},
-        "changedFiles": len(files), "reactions": {"nodes": []}, "timelineItems": {"nodes": list(unlabels)}, "comments": {"pageInfo": {"hasPreviousPage": False}, "nodes": list(comments)},
+        "changedFiles": len(files), "reactions": {"nodes": []}, "timelineItems": {"pageInfo": {"hasPreviousPage": cut}, "nodes": list(unlabels)}, "comments": {"pageInfo": {"hasPreviousPage": False}, "nodes": list(comments)},
         "reviewThreads": {"pageInfo": {"hasNextPage": False}, "nodes": [{"isResolved": r} for r in threads]},
         "reviews": {"pageInfo": {"hasPreviousPage": False}, "nodes": list(reviews)},
         "commits": {"nodes": [{"commit": {"oid": sha, "statusCheckRollup": {"contexts": {
