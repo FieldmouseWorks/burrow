@@ -7,7 +7,7 @@ use super::*;
 fn a_refresh_that_waits_for_its_releases_is_asked_for_again_three_times() {
     // A lock file refresh lock-age refused only because nothing in it is
     // old enough yet goes to no job: it waits, then Renovate is asked to
-    // refresh it again (the "rebase!" title), and asked again only when a
+    // refresh it again (Renovate's rebase label), and asked again only when a
     // request went without anything moving, three times at most.
     let m = Machine::new();
     let (later, past) = (now() + 3 * 86400, now() - 60);
@@ -60,21 +60,20 @@ fn a_request_standing_six_hours_is_taken_back_for_a_job() {
     // a new time on the same head starts the requests over.
     let m = Machine::new();
     let past = now() - 60;
-    let standing = format!("rebase!{LOCK}");
     m.prs(&[m.refresh(22, past, "me", LOCK)]);
     m.pass();
     m.asked_ago(22, 7200);
-    m.prs(&[m.refresh(22, past, "me", &standing)]);
+    m.prs(&[requested(m.refresh(22, past, "me", LOCK))]);
     let p = m.pass();
     assert!(p.jobs.is_empty() && p.asked().is_empty());
     m.asked_ago(22, 7 * 3600);
     m.prs(&[m.refresh(22, past - 3600, "me", LOCK)]);
     assert_eq!(m.pass().asked(), rebase(22));
     m.asked_ago(22, 7 * 3600);
-    m.prs(&[m.refresh(22, past - 3600, "me", &standing)]);
+    m.prs(&[requested(m.refresh(22, past - 3600, "me", LOCK))]);
     let p = m.pass();
     assert!(p.jobs.is_empty());
-    assert_eq!(p.asked(), unasked(22, LOCK));
+    assert_eq!(p.asked(), unasked(22));
     // Taken back: no more asking on that head, and no job till the run is
     // over.
     m.prs(&[m.refresh(22, past - 3600, "me", LOCK)]);
@@ -82,7 +81,7 @@ fn a_request_standing_six_hours_is_taken_back_for_a_job() {
     assert!(p.jobs.is_empty() && p.asked().is_empty());
     m.released(22, 7300);
     let p = m.pass();
-    assert!(p.task().contains("#22 ") && !p.task().contains("rebase!"));
+    assert!(p.task().contains("#22 ") && !p.task().contains("rebase"));
     assert!(p.asked().is_empty());
 }
 
@@ -114,23 +113,22 @@ fn a_request_github_wont_take_back_goes_to_the_job_to_take_back() {
     // back itself.
     let m = Machine::new();
     let past = now() - 60;
-    let standing = format!("rebase!{LOCK}");
     m.set("gh-refuses", "");
     m.prs(&[m.refresh(25, past, "me", LOCK)]);
     m.pass();
     m.asked_ago(25, 7200);
-    m.prs(&[m.refresh(25, past, "me", &standing)]);
+    m.prs(&[requested(m.refresh(25, past, "me", LOCK))]);
     let p = m.pass();
     assert!(p.jobs.is_empty() && p.asked().is_empty());
     m.asked_ago(25, 7 * 3600);
     for _ in 0..3 {
-        assert_eq!(m.pass().asked(), unasked(25, LOCK));
+        assert_eq!(m.pass().asked(), unasked(25));
         let p = m.pass();
         assert!(p.jobs.is_empty() && p.asked().is_empty());
         m.released(25, 700);
     }
     let p = m.pass();
-    assert!(p.task().contains("#25 \"rebase!Lock file maintenance (cargo)\" (branch renovate/cargo-lock-file-maintenance): its CI fails; its title still starts with rebase!, which has Renovate redo the branch over what you push: take that off the title first, and push nothing to it for 120 minutes after, while a Renovate run that read it may still be going\n"), "{}", p.task());
+    assert!(p.task().contains("#25 \"Lock file maintenance (cargo)\" (branch renovate/cargo-lock-file-maintenance): its CI fails; it has the rebase label, which has Renovate redo the branch over what you push: take the label off first, and push nothing to it for 120 minutes after, while a Renovate run that read it may still be going\n"), "{}", p.task());
     assert!(p.asked().is_empty());
 }
 
@@ -139,23 +137,26 @@ fn whatever_else_sends_a_pr_with_a_request_to_a_job_takes_the_request_off_first(
     // Another red check, a failure that isn't only age, a major: the
     // request comes off first, and the job waits out the run.
     let later = now() + 3 * 86400;
-    let title = "rebase!Update foo26 to v2";
+    let title = "Update foo26 to v2";
     for why in ["check", "failure", "major"] {
         let m = Machine::new();
-        let mut p = m.refresh(26, later, "me", title);
+        let mut p = requested(m.refresh(26, later, "me", title));
         match why {
             "check" => p["statusCheckRollup"][0]["conclusion"] = "FAILURE".into(),
             "failure" => m.unset("rest-26"),
             _ => {
                 p["statusCheckRollup"].as_array_mut().unwrap().truncate(1);
-                p["labels"] = json!([{"name": "major"}]);
+                p["labels"] = json!([{"name": "major"}, {"name": "rebase"}]);
             }
         }
         m.prs(&[p.clone()]);
         let got = m.pass();
         assert!(got.jobs.is_empty(), "{why}");
-        assert_eq!(got.asked(), unasked(26, "Update foo26 to v2"), "{why}");
-        p["title"] = "Update foo26 to v2".into();
+        assert_eq!(got.asked(), unasked(26), "{why}");
+        p["labels"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|l| l["name"] != "rebase");
         m.prs(&[p]);
         let got = m.pass();
         assert!(got.jobs.is_empty() && got.asked().is_empty(), "{why}");
@@ -212,4 +213,76 @@ fn only_renovates_own_word_on_a_refresh_makes_it_wait() {
         "{:#?}",
         got.log
     );
+}
+
+/// PR `n`'s timeline: a request that came off `ago` seconds back, by
+/// `event` (unlabeled, or renamed from a rebase! title).
+fn gone(m: &Machine, n: u64, event: &str, ago: i64) {
+    let at = jiff::Timestamp::from_second(now() as i64 - ago).unwrap();
+    let e = match event {
+        "unlabeled" => {
+            json!({"event": "unlabeled", "created_at": at.to_string(), "label": {"name": "rebase"}})
+        }
+        _ => json!({"event": "renamed", "created_at": at.to_string(),
+                    "rename": {"from": "rebase!Update foo27 to v2", "to": "Update foo27 to v2"}}),
+    };
+    // Other events, and another label coming off, count for nothing.
+    let other = json!({"event": "unlabeled", "created_at": jiff::Timestamp::now().to_string(), "label": {"name": "major"}});
+    m.set(&format!("timeline-{n}"), &json!([[e], [other]]).to_string());
+}
+
+#[test]
+fn a_rebase_title_comes_off_on_sight_and_its_run_is_waited_out() {
+    // Renovate redoes the branch on every run while a title starts
+    // rebase!, ours or anyone's, and each push starts the next: the sweep
+    // takes it off and hands the PR to no job till a run that read it is
+    // over.
+    let m = Machine::new();
+    let mut p = pr_with(27, &[], "FAILURE");
+    p["title"] = "rebase!Update foo27 to v2".into();
+    m.prs(&[p]);
+    let got = m.pass();
+    assert!(got.jobs.is_empty(), "{:#?}", got.jobs);
+    assert_eq!(
+        got.asked(),
+        [format!(
+            "PATCH repos/{REPO}/pulls/27 -f title=Update foo27 to v2"
+        )]
+    );
+    m.prs(&[pr_with(27, &[], "FAILURE")]);
+    gone(&m, 27, "renamed", 600);
+    let got = m.pass();
+    assert!(got.jobs.is_empty() && got.asked().is_empty());
+    gone(&m, 27, "renamed", 7300);
+    assert!(m.pass().task().contains("#27 "));
+}
+
+#[test]
+fn a_request_that_came_off_between_passes_is_waited_out_on_any_head() {
+    // Renovate took the label (a request no pass saw standing, someone
+    // else's, or on a head since replaced): a run that read it may be
+    // going still, so no job for a run's length after.
+    let m = Machine::new();
+    m.prs(&[pr_with(28, &[], "FAILURE")]);
+    gone(&m, 28, "unlabeled", 600);
+    let got = m.pass();
+    assert!(got.jobs.is_empty() && got.asked().is_empty());
+    gone(&m, 28, "unlabeled", 7300);
+    assert!(m.pass().task().contains("#28 "));
+}
+
+#[test]
+fn a_timeline_that_cant_be_read_holds_the_pr() {
+    // Whether a request just came off it can't say: no job this pass.
+    let m = Machine::new();
+    m.prs(&[pr_with(29, &[], "FAILURE")]);
+    m.set("timeline-29", "not json");
+    assert!(m.pass().jobs.is_empty());
+    m.unset("timeline-29");
+    // Nor when gh failed, whatever it printed: --slurp prints what pages it
+    // got, none or some, as a list all the same.
+    m.set("timeline-fails", "");
+    assert!(m.pass().jobs.is_empty());
+    m.unset("timeline-fails");
+    assert!(m.pass().task().contains("#29 "));
 }

@@ -67,6 +67,13 @@ lib.recursiveUpdate ({
   # renovate-sweep reports security PRs stuck that way.
   rebaseWhen = "conflicted";
 
+  # What renovate-sweep puts on a lock file refresh to have it redone
+  # (modules/autoland/lock_wait.py's REQUEST): Renovate redoes the branch on
+  # its next run and takes the label off, so one ask is one redo. A
+  # "rebase!" title has it redo the branch on every run until someone takes
+  # it off, and each of those pushes starts the next run.
+  rebaseLabel = "rebase";
+
   # The rules below take a lock file refresh, and a digest update on
   # GitHub, without a release timestamp on purpose, and each time Renovate
   # warns that it did. A warning lands on the dashboard's Repository

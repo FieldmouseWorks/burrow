@@ -46,18 +46,17 @@ use serde_json::Value;
 use crate::{complain, say, trimmed};
 
 mod pr;
+mod request;
 mod steward;
 mod task;
 
 use pr::{Pr, State};
+use request::{REQUEST, TITLE};
 use steward::Steward;
 
 /// The labels a job puts on a major it read.
 pub(crate) const OK: &str = "major-ok";
 pub(crate) const HELD: &str = "major-held";
-/// A title's prefix that has Renovate redo the branch, on its every run
-/// (modules/autoland/lock_wait.py's REQUEST).
-const REQUEST: &str = "rebase!";
 /// How long a refresh request is given before it's asked again: Renovate
 /// runs within the hour.
 const RUN_COMES: i64 = 3600;
@@ -633,6 +632,14 @@ impl Sweep<'_> {
             };
             pass.stuck.push_str(&format!("- {title}: {url} ({why})\n"));
         }
+        // A rebase! title has Renovate redo the branch on each of its runs,
+        // each of whose pushes starts the next, until someone takes it off:
+        // the sweep does, and leaves the PR for a pass after, which waits out
+        // a run that read it (handing over, below).
+        if let Some(rest) = title.strip_prefix(TITLE) {
+            self.retitle(&n, rest.trim_start());
+            return Ok(None);
+        }
         // A head whose refresh request was taken back for a job (below) has
         // done with requests: when, and how many times it was asked.
         let released = with_suffix(&key, ".released");
@@ -645,9 +652,10 @@ impl Sweep<'_> {
         // enough yet, is no fix for a job: it waits for the time Renovate's
         // comment on it gives (lock-wait). Then Renovate is asked to
         // refresh it again, as it won't by itself while the branch doesn't
-        // conflict: the "rebase!" title its every run reads, whatever its
-        // config. Each ask counts, whether GitHub took it, refused it or
-        // never answered: the title on the next pass says which. A request
+        // conflict: the rebase label, which its next run reads, whatever its
+        // config, and takes off. Each ask counts, whether GitHub took it,
+        // refused it or never answered: the labels on the next pass say
+        // which. A request
         // still standing six hours on, or three that went without the head
         // or the time moving, and it's red CI for a job, once a Renovate
         // run that read the last one is over: Renovate having taken it
@@ -657,7 +665,7 @@ impl Sweep<'_> {
             .filter(|c| c.state == State::Red)
             .map(|c| &c.name)
             .collect();
-        let standing = title.starts_with(REQUEST);
+        let standing = pr.labelled(REQUEST);
         if reds == [&Value::from("renovate/artifacts")]
             && !who.renovate.is_empty()
             && seen != format!("{sha} red")
@@ -699,7 +707,7 @@ impl Sweep<'_> {
                         &key,
                         &format!("{sha} refreshed {ripe} {} {now}\n", tries + 1),
                     )?;
-                    self.retitle(&n, &format!("{REQUEST}{title}"));
+                    self.request(&n, true);
                     return Ok(None);
                 } else if !standing {
                     write(&released, &format!("{sha} 0 {now}\n"))?;
@@ -726,12 +734,12 @@ impl Sweep<'_> {
             write(&key, &format!("{want}\n"))?;
             return Ok(None);
         }
-        // A refresh request still standing ("rebase!", ours or anyone's)
+        // A refresh request still standing (the rebase label, ours or anyone's)
         // has Renovate redo the branch over whatever a job pushes, as it
         // does for no other branch someone else pushed to: it comes off
         // first. A Renovate run that read it before may still be going, so
         // the job waits out the longest one. Three times, ten minutes
-        // apart, that GitHub kept the title, whether it refused or never
+        // apart, that GitHub kept the label, whether it refused or never
         // answered, and the job is handed it to take off itself.
         let mut request = String::new();
         let now = now();
@@ -739,15 +747,25 @@ impl Sweep<'_> {
         if standing && (rel_tries < limits.releases || now - rel_at < limits.release_gap) {
             if now - rel_at >= limits.release_gap {
                 write(&released, &format!("{sha} {} {now}\n", rel_tries + 1))?;
-                self.retitle(&n, &title[REQUEST.len()..]);
+                self.request(&n, false);
             }
             return Ok(None);
         } else if standing {
             request = format!(
-                "; its title still starts with rebase!, which has Renovate redo the branch over what you push: take that off the title first, and push nothing to it for {} minutes after, while a Renovate run that read it may still be going",
+                "; it has the {REQUEST} label, which has Renovate redo the branch over what you push: take the label off first, and push nothing to it for {} minutes after, while a Renovate run that read it may still be going",
                 cfg.renovate_run / 60
             );
         } else if rel_sha == sha && now - rel_at < cfg.renovate_run as i64 {
+            return Ok(None);
+        }
+        // Nor while a run that read a request that came off since (Renovate
+        // took it, or someone else did, on this head or an old one) may be
+        // going still, or while the PR's timeline can't say.
+        if !standing
+            && self
+                .request_gone(&n)
+                .is_none_or(|at| at.is_some_and(|at| now - at < cfg.renovate_run as i64))
+        {
             return Ok(None);
         }
         if major {
@@ -858,22 +876,6 @@ impl Sweep<'_> {
             .wait_with_output()
             .map(|o| trimmed(o.stdout))
             .unwrap_or_default()
-    }
-
-    /// PR `n`'s title made `title`, whatever GitHub says to it.
-    fn retitle(&self, n: &str, title: &str) {
-        let cfg = self.cfg;
-        cfg.quietly(
-            &cfg.tools.gh,
-            &[
-                "api",
-                "-X",
-                "PATCH",
-                &format!("repos/{}/pulls/{n}", self.repo),
-                "-f",
-                &format!("title={title}"),
-            ],
-        );
     }
 }
 

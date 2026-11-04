@@ -124,20 +124,20 @@ def at(after):
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(C.ts(T0) + after))
 
 
-def renamed(after):
-    return {"createdAt": at(after), "previousTitle": "rebase!Update foo from 1.4 to 1.5"}
+def unlabeled(after, name="rebase"):
+    return {"createdAt": at(after), "label": {"name": name}}
 
 
 # A review thread on a green Renovate PR goes to a job, but not while a
-# rebase! request stands: Renovate would redo the branch over the job's fix.
+# rebase request (the label) stands: Renovate would redo the branch over the job's fix.
 fresh_pr_state()
-asking = {"branch": "renovate/foo-3", "title": "rebase!Update foo from 1.4 to 1.5", "number": 17}
+asking = {"branch": "renovate/foo-3", "title": "Update foo from 1.4 to 1.5", "number": 17, "labels": ["rebase"]}
 run(mkpr(threads=[False], **asking), 0)
 status, _ = run(mkpr(threads=[False], **asking), 7200)
 assert JOBS == [] and "1 open review thread" in status, status
 # A run that read it may still be going for a run's length after it came off,
 # not after a pass last saw it: last seen at 7200, gone at 7200 + 3500.
-asked = {**asking, "title": "Update foo from 1.4 to 1.5", "renames": [renamed(7200 + 3500)]}
+asked = {**asking, "labels": [], "unlabels": [unlabeled(7200 + 3500)]}
 run(mkpr(threads=[False], **asked), 7300)
 assert JOBS == [], "a run that read it may still be going"
 run(mkpr(threads=[False], **asked), 7200 + 7300)
@@ -153,7 +153,7 @@ JOBS.clear()
 # A request no pass ever saw, on and off between two, counts the same. Nor
 # does the fence hang on the watchdog: without it there's still a job to fence.
 fresh_pr_state()
-quiet = {**asked, "renames": [{"createdAt": at(100), "previousTitle": "Update foo from 1.4 to 1.5"}, renamed(200)]}
+quiet = {**asked, "unlabels": [unlabeled(100, "major"), unlabeled(200)]}
 watch, S.CFG["watch"] = S.CFG["watch"], None
 run(mkpr(threads=[False], **quiet), 0)
 status, _ = run(mkpr(threads=[False], **quiet), 7000)
@@ -163,12 +163,38 @@ assert JOBS, "a job once its run is over"
 JOBS.clear()
 S.CFG["watch"] = watch
 
-# Only a rename off the request counts: an ordinary retitle holds nothing back.
+# Only the request's label coming off counts: another label holds nothing back.
 fresh_pr_state()
-plain = {**asked, "renames": [{"createdAt": at(0), "previousTitle": "Update foo"}]}
+plain = {**asked, "unlabels": [unlabeled(0, "major")]}
 run(mkpr(threads=[False], **plain), 0)
 run(mkpr(threads=[False], **plain), 7300)
 assert JOBS, "a job: no request was ever made"
+JOBS.clear()
+
+# A rebase! title, which Renovate reads on every run, is a request too: while
+# it stands, and for a run's length after it came off.
+fresh_pr_state()
+titled = {**asking, "labels": [], "title": "rebase!Update foo from 1.4 to 1.5"}
+run(mkpr(threads=[False], **titled), 0)
+status, _ = run(mkpr(threads=[False], **titled), 7200)
+assert JOBS == [] and "1 open review thread" in status, status
+retitled = {**asking, "labels": [], "unlabels": [{"createdAt": at(7200 + 100), "previousTitle": titled["title"]}]}
+run(mkpr(threads=[False], **retitled), 7300)
+assert JOBS == [], "a run that read the title may still be going"
+run(mkpr(threads=[False], **retitled), 7200 + 100 + 7300)
+assert JOBS, "a job once the title is back and its run over"
+JOBS.clear()
+
+# A timeline cut short inside the run's window may have lost a request among
+# other labels' comings and goings: it counts as one until its oldest is
+# older than a run.
+fresh_pr_state()
+churn = {**asking, "labels": [], "cut": True, "unlabels": [unlabeled(7000 + i, "waiting: reviewer") for i in range(3)]}
+run(mkpr(threads=[False], **churn), 0)
+run(mkpr(threads=[False], **churn), 7200)
+assert JOBS == [], "the history the request may be in was cut off"
+run(mkpr(threads=[False], **churn), 7000 + 7300)
+assert JOBS, "a job once even the oldest it has is older than a run"
 JOBS.clear()
 
 # A red Dependabot one has no sweep: it goes to a job.
