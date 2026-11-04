@@ -198,10 +198,17 @@ try:
 finally:
     C.UPKEEP_TIMEOUT = bound
 assert mirror == f"{tmp}/state/{V.GIT}/sam__r.git" and sh("git", "-C", mirror, "rev-parse", "refs/base/main"), mirror
-# One that can't be taken raises, saying why: a PR GitHub has no head for,
-# a head that isn't the PR's, and a refspec that isn't one of refs, which
-# is never fetched.
-for pr, said in (({**snap_pr, "number": 6}, "refs/pull/6/head"), ({**snap_pr, "headRefOid": "b" * 40}, "b" * 40)):
+# A PR whose refs/pull/N/head GitHub has lost (remi#495) is fetched by its
+# head's id: for its proof's builds and its merge (proofs.py, prs.py
+# `onto`), as for its snapshot (snapshot_tests.rs).
+with C.acting_for("sam/r"):
+    mirror = V.fetch("sam/r", "+refs/heads/main:refs/base/main", pr={**snap_pr, "number": 6})
+assert sh("git", "-C", mirror, "rev-parse", "refs/pr/6").strip() == pr_head
+# One that can't be taken raises, saying why: a PR whose ref is lost and
+# whose head GitHub hasn't either, a head that isn't the PR's, and a
+# refspec that isn't one of refs, which is never fetched.
+for pr, said in (({**snap_pr, "number": 6, "headRefOid": "c" * 40}, "refs/pull/6/head"),
+                 ({**snap_pr, "headRefOid": "b" * 40}, "b" * 40)):
     try:
         snapshot(pr)
         raise AssertionError("a snapshot that can't be taken was")
@@ -216,7 +223,7 @@ except RuntimeError as e:
 # And neither has a status run, or takes an ask that isn't one.
 ask = {"number": 5, "head": pr_head, "base": "main", "title": "t", "quoted": "(none)", "description": "d", "opened": 0,
        "reviewer": "codex", "name": name, "reasons": "r"}
-for word, flags, said in (("queue", ["--dry"], ask), ("fetch", ["--dry"], []), ("queue", [], {**ask, "head": "--output=x"}),
+for word, flags, said in (("queue", ["--dry"], ask), ("fetch", ["--dry"], {"refs": []}), ("queue", [], {**ask, "head": "--output=x"}),
                           ("queue", [], {**ask, "name": "../x"}), ("queue", [], {**ask, "reviewer": "Codex"})):
     p = subprocess.run([*C.CFG["upkeep"], word, "sam/r", "--now", "1", *flags], input=json.dumps(said), capture_output=True, text=True)
     assert p.returncode == 2 and p.stdout == "", (word, flags, said, p)

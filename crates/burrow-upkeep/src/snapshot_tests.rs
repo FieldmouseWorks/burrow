@@ -527,11 +527,54 @@ fn a_fetch_fetches_only_refs_and_says_why_it_failed() {
     assert!(why.contains("isn't a refspec of refs"), "{why}");
     assert!(mirror::refspec("refs/heads/main") && mirror::refspec("+refs/x:refs/y"));
     assert!(!mirror::refspec("-x") && !mirror::refspec("+-x") && !mirror::refspec("HEAD"));
+    let id = "a".repeat(40);
+    assert!(mirror::refspec(&format!("+{id}:refs/pr/5")));
+    assert!(!mirror::refspec(&id) && !mirror::refspec(&format!("{id}:-x")));
+    assert!(!mirror::refspec(&format!("{}:refs/pr/5", "A".repeat(40))));
     let why = mirror::fetch(&r.cfg, &r.cfg.state_dir, "sam/nope", &refs).unwrap_err();
     assert!(
         why.starts_with("git -C ") && why.contains("sam__nope.git: "),
         "{why}"
     );
+}
+
+/// GitHub lost refs/pull/495/head on remi#495 while the PR stayed open, and
+/// the steward couldn't queue Codex for two days: a PR's head is fetched by
+/// its id when its pull ref is gone, and is the head the PR reports.
+#[test]
+fn a_pr_whose_pull_ref_github_lost_is_fetched_by_its_heads_id() {
+    let r = rig();
+    let origin = Path::new(&r.cfg.git).join("sam/r.git");
+    sh(&origin, &["update-ref", "-d", "refs/pull/5/head"]);
+    sh(&origin, &["update-ref", "refs/pull/5/merge", &r.head]);
+    let state = &r.cfg.state_dir;
+    let more = ["+refs/heads/main:refs/base/main".to_string()];
+    let m = mirror::fetch_pr(&r.cfg, state, "sam/r", 5, &r.head, &more).unwrap();
+    assert_eq!(sh(&m, &["rev-parse", "refs/pr/5"]).trim(), r.head);
+    assert!(!sh(&m, &["rev-parse", "refs/base/main"]).trim().is_empty());
+    // The snapshot Codex is queued on is taken the same way.
+    assert!(take(&r.cfg, state, "sam/r", &look(&r.head)).is_ok());
+    // A head GitHub doesn't have either fails, saying the ref was lost.
+    let why = mirror::fetch_pr(&r.cfg, state, "sam/r", 5, &"c".repeat(40), &more).unwrap_err();
+    assert!(
+        why.contains("couldn't find remote ref refs/pull/5/head"),
+        "{why}"
+    );
+    assert!(why.contains("by its head's id"), "{why}");
+    // And one that isn't a commit's id is never fetched.
+    let why = mirror::fetch_pr(&r.cfg, state, "sam/r", 5, "--all", &more).unwrap_err();
+    assert!(why.contains("isn't a commit's id"), "{why}");
+    // Nor is one that's no commit: the head's tree, say.
+    let tree = sh(&origin, &["rev-parse", &format!("{}^{{tree}}", r.head)]);
+    let why = mirror::fetch_pr(&r.cfg, state, "sam/r", 5, tree.trim(), &more).unwrap_err();
+    assert!(why.contains("isn't a commit"), "{why}");
+}
+
+#[test]
+fn with_its_pull_ref_a_prs_head_is_where_that_points() {
+    let r = rig();
+    let m = mirror::fetch_pr(&r.cfg, &r.cfg.state_dir, "sam/r", 5, &"c".repeat(40), &[]).unwrap();
+    assert_eq!(sh(&m, &["rev-parse", "refs/pr/5"]).trim(), r.head);
 }
 
 #[test]
