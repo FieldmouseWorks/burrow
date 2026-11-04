@@ -343,7 +343,8 @@ in
       relay (`proj status` marks it [asks]; `proj reply` answers), `proj done`
       when it's finished. One that won't say is marked [no next step]${lib.optionalString watchdog ", and the stall watchdog takes it"}.
       A job can't ask ${config.burrow.owner} anything: R2 commands get refused, so bring those to
-      them. ${config.burrow.owner} can also open any project's own session directly from their phone.
+      them. A job has the machine's MCP servers but not the claude.ai connectors (mail,
+      calendar, drive) or skills: work that needs those is a session's. ${config.burrow.owner} can also open any project's own session directly from their phone.
     '';
   }
 
