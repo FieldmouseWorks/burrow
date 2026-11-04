@@ -210,5 +210,29 @@ pub fn asked(issue: &Value) -> Vec<String> {
     }
 }
 
+/// `text`'s first `max` characters, saying when there were more.
+pub fn clip(text: &str, max: usize) -> String {
+    match text.char_indices().nth(max) {
+        Some((at, _)) => format!(
+            "{}... ({} more characters)",
+            &text[..at],
+            text[at..].chars().count()
+        ),
+        None => text.to_string(),
+    }
+}
+
+/// `text` in a code block whose fence no run of backticks in it can close.
+pub fn fenced(text: &str) -> String {
+    let mut longest = 0;
+    let mut run = 0;
+    for c in text.chars() {
+        run = if c == '`' { run + 1 } else { 0 };
+        longest = longest.max(run);
+    }
+    let fence = "`".repeat((longest + 1).max(3));
+    format!("{fence}text\n{}\n{fence}", text.trim_end())
+}
+
 #[cfg(test)]
 mod tests;

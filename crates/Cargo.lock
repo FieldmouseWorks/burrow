@@ -209,6 +209,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "burrow-ledger-door"
+version = "0.0.0"
+dependencies = [
+ "burrow-door",
+ "burrow-github",
+ "jiff",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "burrow-notify"
 version = "0.0.0"
 dependencies = [

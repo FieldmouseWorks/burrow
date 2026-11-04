@@ -4,7 +4,7 @@
 //! probe ran, and is closed too. A repo GitHub doesn't say is private gets
 //! nothing: the answers are the machine's own business.
 
-use burrow_door::{Door, asked};
+use burrow_door::{Door, asked, clip, fenced};
 use burrow_github::{Api, call};
 use serde_json::Value;
 
@@ -90,18 +90,6 @@ fn bounded(body: Scrubbed) -> Scrubbed {
     body.cut(MAX_COMMENT, "\n\n(cut here, past what a comment holds)")
 }
 
-/// `text`'s first `max` characters, saying when there were more.
-fn clip(text: &str, max: usize) -> String {
-    match text.char_indices().nth(max) {
-        Some((at, _)) => format!(
-            "{}... ({} more characters)",
-            &text[..at],
-            text[at..].chars().count()
-        ),
-        None => text.to_string(),
-    }
-}
-
 /// The answers to an issue's questions, as one comment.
 fn answers(
     cfg: &Config,
@@ -149,18 +137,6 @@ fn answers(
         );
     }
     out
-}
-
-/// `text` in a code block whose fence no run of backticks in it can close.
-fn fenced(text: &str) -> String {
-    let mut longest = 0;
-    let mut run = 0;
-    for c in text.chars() {
-        run = if c == '`' { run + 1 } else { 0 };
-        longest = longest.max(run);
-    }
-    let fence = "`".repeat((longest + 1).max(3));
-    format!("{fence}text\n{}\n{fence}", text.trim_end())
 }
 
 /// `text` cut to `max` bytes, at a line's end: its last lines when `end`

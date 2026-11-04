@@ -88,6 +88,8 @@
       package = pkgs.writeShellScriptBin "cn" "exit 1";
       anchorRepo = "sam/homelab";
       daemon = true;
+      # `undo` issues in the probe's repo, from its authors.
+      door.enable = true;
     };
     events = {
       host = "example.org";
