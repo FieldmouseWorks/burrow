@@ -100,10 +100,64 @@ pub fn path(state: &Path, repo: &str) -> PathBuf {
         .join(format!("{}.git", repo.replace('/', "__")))
 }
 
-/// Whether a refspec is one of refs: anything else (an option, say) isn't
-/// fetched.
+/// Whether a refspec is one of refs, or a commit's id into one of refs:
+/// anything else (an option, say) isn't fetched.
 pub fn refspec(r: &str) -> bool {
-    r.strip_prefix('+').unwrap_or(r).starts_with("refs/")
+    let r = r.strip_prefix('+').unwrap_or(r);
+    r.starts_with("refs/")
+        || r.split_once(':')
+            .is_some_and(|(src, dst)| id(src) && dst.starts_with("refs/"))
+}
+
+/// Whether `s` is a commit's full id, as git writes it.
+pub fn id(s: &str) -> bool {
+    matches!(s.len(), 40 | 64) && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// The repo's mirror, with PR `n`'s head fetched into refs/pr/N, and
+/// `more` beside it. GitHub keeps a PR's head as refs/pull/N/head, but can
+/// lose that ref while the PR stays open (it did, on remi#495, and a close
+/// and reopen didn't bring it back): then it's fetched by the id of `head`,
+/// the head the PR reports, and refs/pr/N is that commit or the fetch
+/// fails. With the ref there, refs/pr/N is where it points, which a push
+/// since may have moved past `head`.
+pub fn fetch_pr(
+    cfg: &Config,
+    state: &Path,
+    repo: &str,
+    n: u64,
+    head: &str,
+    more: &[String],
+) -> Result<PathBuf, String> {
+    let into = format!("refs/pr/{n}");
+    let refs = |src: &str| {
+        let mut refs = vec![format!("+{src}:{into}")];
+        refs.extend_from_slice(more);
+        refs
+    };
+    let pull = format!("refs/pull/{n}/head");
+    let lost = match fetch(cfg, state, repo, &refs(&pull)) {
+        Err(why) if why.contains(&format!("couldn't find remote ref {pull}")) => why,
+        got => return got,
+    };
+    if !id(head) {
+        return Err(format!(
+            "{lost}; and {head:?} isn't a commit's id to fetch instead"
+        ));
+    }
+    let m = fetch(cfg, state, repo, &refs(head))
+        .map_err(|e| format!("{lost}; and by its head's id: {e}"))?;
+    let got = git_in(&m)
+        .args(["rev-parse", "--verify", "-q", &format!("{into}^{{commit}}")])
+        .run()
+        .map(|out| String::from_utf8_lossy(&out).trim().to_string())
+        .unwrap_or_default();
+    if got != head {
+        return Err(format!(
+            "{lost}; and {head} fetched by its id isn't a commit"
+        ));
+    }
+    Ok(m)
 }
 
 /// The repo's mirror, with `refs` fetched into it from GitHub, as the token

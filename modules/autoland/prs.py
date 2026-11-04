@@ -498,7 +498,7 @@ def onto(repo, pr):
     if DRY:
         return None, False
     n, head, base = pr["number"], pr["headRefOid"], pr["baseRefName"]
-    mirror = V.fetch(repo, f"+refs/pull/{n}/head:refs/pr/{n}", f"+refs/heads/{base}:refs/base/{base}")
+    mirror = V.fetch(repo, f"+refs/heads/{base}:refs/base/{base}", pr=pr)
     tip = V.git("-C", mirror, "rev-parse", f"refs/base/{base}").decode().strip()
     if V.git("-C", mirror, "rev-parse", f"refs/pr/{n}").decode().strip() != head:
         return tip, False
