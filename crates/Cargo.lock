@@ -111,6 +111,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "burrow-door"
+version = "0.0.0"
+dependencies = [
+ "burrow-github",
+ "serde_json",
+]
+
+[[package]]
 name = "burrow-events"
 version = "0.0.0"
 dependencies = [
@@ -214,6 +222,7 @@ dependencies = [
 name = "burrow-probe"
 version = "0.0.0"
 dependencies = [
+ "burrow-door",
  "burrow-events",
  "burrow-github",
  "jiff",
