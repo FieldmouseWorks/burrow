@@ -1,0 +1,19 @@
+[package]
+name = "burrow-firmware"
+description = "firmware-check: what firmware fwupd offers goes to the owner daily, and a monthly Claude job looks at what it doesn't carry; flashing stays the owner's call"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+jiff.workspace = true
+rustix = { version = "1.1.6", features = ["process"] }
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

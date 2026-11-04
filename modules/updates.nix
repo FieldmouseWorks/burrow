@@ -76,17 +76,13 @@ let
 
   vars = {
     HOST = config.networking.hostName;
-    PROJECT = project;
     DIR = stateDir;
     SRC = config.burrow.projectsDir;
     CHANNEL = "nixos-${config.system.nixos.release}";
     OWNER = config.burrow.owner;
-    BURROW_USER = user;
-    HOME_DIR = account.home;
     USER_UID = toString account.uid;
     BOOT = if config.burrow.switch.trialBoot.enable then "${prefix}-boot" else "";
     NOTIFY = "${prefix}-notify";
-    REVIEW_HINTS = cfg.firmware.reviewHints;
     # The autoland steward's commit status, which renovate-sweep doesn't count as CI.
     SETTLED = config.burrow.autoland.context or "review-settled";
     # The repos the steward covers, as it last found them; none without it.
@@ -225,9 +221,34 @@ let
     makeBinaryWrapper ${inputs.self.packages.${system}.advisory-watch}/bin/advisory-watch \
       $out/bin/advisory-watch --add-flags ${advisoryConfig}
   '';
-  firmwareCheck = script "firmware-check" ./updates/firmware-check.sh (
-    (with pkgs; [ coreutils jq gnugrep gnused fwupd dmidecode nvme-cli util-linux ]) ++ calls
-  );
+  # firmware-check (crates/burrow-firmware), with its config built in.
+  firmwareConfig = pkgs.writeText "firmware.json" (builtins.toJSON {
+    name = "firmware-check";
+    host = vars.HOST;
+    offered = "${stateDir}/firmware-offered";
+    inherit user project;
+    app = if machineApp == null then null else machineApp.name;
+    owner = config.burrow.owner;
+    notify = vars.NOTIFY;
+    inherit (cfg.firmware) reviewHints;
+    cpuinfo = "/proc/cpuinfo";
+    tools = {
+      sudo = "${config.security.wrapperDir}/sudo";
+      notify = lib.getExe tools.notify;
+      fwupdmgr = lib.getExe' config.services.fwupd.package "fwupdmgr";
+      dmidecode = lib.getExe' pkgs.dmidecode "dmidecode";
+      nvme = lib.getExe' pkgs.nvme-cli "nvme";
+      runuser = "${pkgs.util-linux}/bin/runuser";
+      proj = "${tools.proj}/bin/proj";
+    };
+  });
+  firmwareCheck = pkgs.runCommand "firmware-check" {
+    nativeBuildInputs = [ pkgs.makeBinaryWrapper ];
+    meta.mainProgram = "firmware-check";
+  } ''
+    makeBinaryWrapper ${inputs.self.packages.${system}.burrow-firmware}/bin/burrow-firmware \
+      $out/bin/firmware-check --add-flags ${firmwareConfig}
+  '';
   # What seals renovate-sweep's verdicts on majors (updates/major-seal.py),
   # with the seal the autoland steward checks them with beside it, linted as
   # it's built.
@@ -732,7 +753,7 @@ in
         description = "Look for firmware updates (installing them is the owner's call)";
         serviceConfig = {
           Type = "oneshot";
-          ExecStart = "${firmwareCheck}/bin/firmware-check";
+          ExecStart = lib.getExe firmwareCheck;
         };
       };
       systemd.timers.firmware-check = {
@@ -747,7 +768,7 @@ in
         description = "Monthly look at vendor firmware that LVFS doesn't carry";
         serviceConfig = {
           Type = "oneshot";
-          ExecStart = "${firmwareCheck}/bin/firmware-check --review";
+          ExecStart = "${lib.getExe firmwareCheck} --review";
         };
       };
       systemd.timers.firmware-review = {
