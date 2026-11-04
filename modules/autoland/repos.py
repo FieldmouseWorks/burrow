@@ -285,6 +285,13 @@ OWNERS = ("Judged yours to decide", "Outside contributions", "Too much to read",
           "No reviewer can review it", "Flaky tests someone else quarantined")
 
 
+# Kinds whose words are the PR's status as it stands, which changes each time
+# it moves on: listed with another, it's the same news. Each comment on the
+# stuck issue is a turn of its Claude job, and a day-old PR's every step
+# through its reviews and CI was one that found nothing to do (remi#210).
+MOVING = ("Open over a day",)
+
+
 def publish(digest):
     """What waits for the owner, in one issue in config.notify.repo assigned
     to them; what the pipeline is stuck on, in another the inbox hands to a
@@ -347,9 +354,13 @@ def issue(key, title, label, assignee, intro, digest, done, also=""):
     for why, line, desc in digest:
         groups.setdefault(why, []).append(f"- {line}" + (f": {desc}" if desc else ""))
     body = "\n\n".join(f"**{why}**\n" + "\n".join(lines) for why, lines in groups.items())
-    # Whole entries, so a PR listed again for something else, or for the
-    # same thing with another diagnosis, is news too.
-    entries = sorted({f"{why}: {line}" + (f": {desc}" if desc else "") for why, line, desc in digest})
+    # What's news, by what it's known by: the whole entry, so a PR listed
+    # again for something else, or for the same thing with another
+    # diagnosis, is news too; but a kind whose words are the PR's own status
+    # (MOVING) by its kind and PR alone.
+    news = {f"{why}: {line}" + (f": {desc}" if desc and why not in MOVING else ""):
+            f"{why}: {line}" + (f": {desc}" if desc else "") for why, line, desc in digest}
+    entries = sorted(news)
     if DRY or not nrepo:
         log(f"--- {title} ---\n" + (body or "(nothing)"))
         return
@@ -388,7 +399,7 @@ def issue(key, title, label, assignee, intro, digest, done, also=""):
         if also and ok and also not in {x.get("name") for x in found[0].get("labels") or []}:
             C.gh("label", "create", also, "-R", nrepo, "--color", "B60205", check=False)
             ok = C.gh("issue", "edit", num, "-R", nrepo, "--add-label", also, check=False) is not None
-        added = [x for x in entries if x not in prev.get("entries", [])]
+        added = [news[x] for x in entries if x not in prev.get("entries", [])]
         if added and ok:
             ok = C.gh("issue", "comment", num, "-R", nrepo, "--body", "New:\n" + "\n".join(f"- {x}" for x in added), check=False) is not None
     if ok:
