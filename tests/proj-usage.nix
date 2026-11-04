@@ -35,10 +35,11 @@ import ./proj/test.nix { inherit self pkgs; } "proj-usage" ''
       # it was asked, in its own conversation and turn.
       machine.wait_until_succeeds(f"su - dev -c 'proj state {a}' | grep -x done", timeout=120)
       machine.wait_until_succeeds(f"su - dev -c 'proj state {b}' | grep -x done", timeout=120)
-      assert machine.succeed(f"cat /data/dev/jobs/{a}/turns").strip() == "1"
+      turns = machine.succeed(f"cat /data/dev/jobs/{a}/turns /data/dev/jobs/{a}/*.outcome; ls /data/dev/jobs/{a}")
+      assert turns.startswith("1\n"), turns
       told = machine.succeed("cat /tmp/told-spent")
       assert told.startswith("Your last run was refused") and "monthly spend limit" in told and told.rstrip().endswith("spent"), told
-      assert "--resume spent" in machine.succeed("cat /tmp/args")
+      assert "--resume spent" in machine.succeed("cat /tmp/spent-args"), machine.succeed("cat /tmp/spent-args")
       # Back: nothing held, said so, and the notice closed.
       assert proj("usage") == "", proj("usage")
       assert not proj("status").startswith("Claude is out of usage"), proj("status")

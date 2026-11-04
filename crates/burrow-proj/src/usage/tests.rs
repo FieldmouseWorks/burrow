@@ -17,6 +17,9 @@ const RESULT: &str = r#"{"type":"result","subtype":"success","is_error":true,"nu
 /// refusal.
 const ALLOWED: &str = r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","resetsAt":1792836000,"rateLimitType":"five_hour"}}"#;
 
+/// 2026-11-02 02:47 UTC, when that refusal came.
+const NOW: i64 = 1_793_587_665;
+
 fn v(s: &str) -> Value {
     serde_json::from_str(s).unwrap()
 }
@@ -24,15 +27,17 @@ fn v(s: &str) -> Value {
 #[test]
 fn a_refused_run_says_when_its_limit_resets() {
     let stream = format!("{ALLOWED}\n{ASSISTANT}\n{RESULT}\n");
-    let (until, said) = refused(&v(RESULT), &stream).unwrap();
+    let (until, said) = refused(&v(RESULT), &stream, NOW).unwrap();
     // Nov 4, 12pm PST.
     assert_eq!(until, Some(1_793_822_400));
+    // Its words say so too, for a stream that has no timestamp.
+    assert_eq!(refused(&v(RESULT), "", NOW).unwrap().0, Some(1_793_822_400));
     assert!(
         said.starts_with("You've hit your monthly spend limit"),
         "{said}"
     );
     // Claude Code's other limits, by their words alone, the older one with
-    // its reset after a bar.
+    // its reset after a bar, one with its zone read by those words.
     for (said, until) in [
         (
             "Claude AI usage limit reached|1793822400",
@@ -43,20 +48,24 @@ fn a_refused_run_says_when_its_limit_resets() {
         ("You've reached your usage limit.", None),
         (
             "You've hit your limit · resets 3pm (America/Los_Angeles)",
-            None,
+            Some(1_793_660_400),
         ),
     ] {
         let r = json!({"type": "result", "is_error": true, "result": said});
-        assert_eq!(refused(&r, ""), Some((until, said.to_owned())), "{said}");
+        assert_eq!(
+            refused(&r, "", NOW),
+            Some((until, said.to_owned())),
+            "{said}"
+        );
     }
     // An error of another kind isn't one, nor is an answer that talks of a
     // limit, nor a run whose window was only reported.
     let boom = json!({"type": "result", "is_error": true, "errors": ["boom"]});
-    assert_eq!(refused(&boom, ALLOWED), None);
+    assert_eq!(refused(&boom, ALLOWED, NOW), None);
     let answer = json!({"type": "result", "is_error": false, "result": "Usage limit reached on the API, so I added a retry."});
-    assert_eq!(refused(&answer, ""), None);
+    assert_eq!(refused(&answer, "", NOW), None);
     let api = json!({"type": "result", "is_error": true, "result": "API Error: 529 overloaded"});
-    assert_eq!(refused(&api, ""), None);
+    assert_eq!(refused(&api, "", NOW), None);
 }
 
 /// proj's config with its jobs in a dir of its own, and a notify that keeps

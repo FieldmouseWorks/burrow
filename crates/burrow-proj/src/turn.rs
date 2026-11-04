@@ -276,7 +276,7 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
         if let Some(l) = &last {
             let text = fs::read(&stream).unwrap_or_default();
             let run = String::from_utf8_lossy(text.get(from as usize..).unwrap_or_default());
-            if let Some((until, said)) = usage::refused(l, &run) {
+            if let Some((until, said)) = usage::refused(l, &run, now()) {
                 let spent = usage::record(cfg, id, until, &said, now());
                 eprintln!("proj: {}", usage::line(&spent));
                 // Waiting, as `proj state` and the watchdog read it: under

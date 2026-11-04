@@ -657,29 +657,25 @@
             { echo "burrow-usage-reset starts its Claude Code in $dir untrusted" >&2; exit 1; }
           touch $out
         '';
-        # HOST-update as the example machine builds it (crates/burrow-update,
-        # whose tests are the rest): it takes its config, every setting in it
-        # one it knows, and refuses a word it doesn't before it runs anything.
-        update-config = let
+        # Each tool burrow builds from a crate with its config built in, as
+        # the example machine builds it (the crates' own tests are the
+        # rest): its config is one its binary takes, every setting in it one
+        # it knows, and a word it doesn't know exits 2 with its usage before
+        # it runs anything.
+        tool-configs = let
           inherit (self.nixosConfigurations.example.config) burrow;
-        in pkgs.runCommand "update-config-check" { } ''
-          rc=0
-          ${burrow.tools.update}/bin/${burrow.prefix}-update help 2>err || rc=$?
-          [ "$rc" = 2 ] || { echo "a usage exited $rc"; exit 1; }
-          grep -qxF 'usage: ${burrow.prefix}-update [--force | status]' err || { echo "it said: $(cat err)"; exit 1; }
-          touch $out
-        '';
-        # HOST-boot as the example machine builds it: its config is one
-        # burrow-boot takes, and a word it doesn't know exits 2 with its usage.
-        boot-config = let
-          inherit (self.nixosConfigurations.example.config) burrow;
-        in pkgs.runCommand "boot-config-check" { } ''
-          rc=0
-          ${pkgs.lib.getExe burrow.tools.boot} help 2>err || rc=$?
-          [ "$rc" = 2 ] || { echo "a usage exited $rc: $(cat err)"; exit 1; }
-          grep -qxF 'usage: ${burrow.prefix}-boot default SYSTEM | trial [--force] | check | status' err || { echo "it said: $(cat err)"; exit 1; }
-          touch $out
-        '';
+          usage = tool: line: ''
+            rc=0
+            ${pkgs.lib.getExe burrow.tools.${tool}} --help 2>err || rc=$?
+            [ "$rc" = 2 ] || { echo "${tool}: a usage exited $rc: $(cat err)"; exit 1; }
+            grep -qxF ${pkgs.lib.escapeShellArg "usage: ${burrow.prefix}-${line}"} err || { echo "${tool} said: $(cat err)"; exit 1; }
+          '';
+        in pkgs.runCommand "tool-configs-check" { } (
+          usage "update" "update [--force | status]"
+          + usage "switch" "switch [FLAKE_DIR | --toplevel PATH | --status | --abort] [--allow-downgrade]"
+          + usage "confirm" "confirm"
+          + usage "boot" "boot default SYSTEM | trial [--force] | check | status"
+          + "touch $out\n");
         # Which repo the flake's origin is, and so whether HOST-update goes
         # through its train: the same in every spelling of GitHub's URLs
         # (scheme, host case, a trailing dot, the default port, either SSH

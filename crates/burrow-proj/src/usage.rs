@@ -22,6 +22,7 @@ use serde_json::Value;
 
 use crate::config::Config;
 use crate::job::is_error;
+use crate::limit;
 use crate::{now, swap};
 
 /// Where it's kept, in jobs.
@@ -45,8 +46,10 @@ pub struct Spent {
 
 /// Whether a run ended refused for usage, and if so when Claude Code says
 /// the limit resets (None when it doesn't) and its words. `last` is the
-/// run's result; `stream` its lines, where the reset time is.
-pub fn refused(last: &Value, stream: &str) -> Option<(Option<i64>, String)> {
+/// run's result; `stream` its lines, where the reset time is as a
+/// timestamp; failing that, its words say it ([`crate::limit`]), read at
+/// `now`.
+pub fn refused(last: &Value, stream: &str, now: i64) -> Option<(Option<i64>, String)> {
     if !is_error(last) {
         return None;
     }
@@ -77,7 +80,7 @@ pub fn refused(last: &Value, stream: &str) -> Option<(Option<i64>, String)> {
     {
         until = t.trim().parse().ok();
     }
-    Some((until, said.to_owned()))
+    Some((until.or_else(|| limit::resets(said, now)), said.to_owned()))
 }
 
 /// Claude Code's words for a spent plan, when its result doesn't carry the

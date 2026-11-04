@@ -142,6 +142,7 @@ pub mod config;
 pub mod github;
 pub mod inbox;
 pub mod job;
+pub mod limit;
 pub mod pick;
 pub mod scratch;
 pub mod slot;
