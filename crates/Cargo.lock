@@ -95,6 +95,7 @@ name = "burrow-browser-close"
 version = "0.0.0"
 dependencies = [
  "base64",
+ "rustix",
  "serde_json",
 ]
 
@@ -111,6 +112,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "burrow-door"
+version = "0.0.0"
+dependencies = [
+ "burrow-github",
+ "serde_json",
+]
+
+[[package]]
 name = "burrow-events"
 version = "0.0.0"
 dependencies = [
@@ -118,6 +127,17 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "tempfile",
+]
+
+[[package]]
+name = "burrow-firmware"
+version = "0.0.0"
+dependencies = [
+ "jiff",
+ "rustix",
+ "serde",
+ "serde_json",
  "tempfile",
 ]
 
@@ -203,6 +223,7 @@ dependencies = [
 name = "burrow-probe"
 version = "0.0.0"
 dependencies = [
+ "burrow-door",
  "burrow-events",
  "burrow-github",
  "jiff",
@@ -233,6 +254,19 @@ dependencies = [
  "serde_json",
  "tempfile",
  "ureq",
+]
+
+[[package]]
+name = "burrow-renovate"
+version = "0.0.0"
+dependencies = [
+ "jiff",
+ "md-5",
+ "regex",
+ "rustix",
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]
@@ -440,9 +474,9 @@ dependencies = [
 
 [[package]]
 name = "crc32fast"
-version = "1.5.3"
+version = "1.5.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0ba106e844045ddc02c20768ac4b0b7cb45f2cc2ecbd833ac9f5dacb183c2055"
+checksum = "5f97d3416d5337d15c4b0d78c8c91df922ca143f57ec20e2d1c188333047ef04"
 dependencies = [
  "cfg-if",
 ]
@@ -950,6 +984,16 @@ name = "log"
 version = "0.4.35"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5d15f86d12da44cd8d4ec3c73984537eb7f4cadcb9776a575a0a8a05ca11005c"
+
+[[package]]
+name = "md-5"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "69b6441f590336821bb897fb28fc622898ccceb1d6cea3fde5ea86b090c4de98"
+dependencies = [
+ "cfg-if",
+ "digest",
+]
 
 [[package]]
 name = "memchr"

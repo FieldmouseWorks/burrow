@@ -76,49 +76,15 @@ let
 
   vars = {
     HOST = config.networking.hostName;
-    PROJECT = project;
     DIR = stateDir;
-    SRC = config.burrow.projectsDir;
     CHANNEL = "nixos-${config.system.nixos.release}";
-    OWNER = config.burrow.owner;
-    BURROW_USER = user;
-    HOME_DIR = account.home;
     USER_UID = toString account.uid;
     BOOT = if config.burrow.switch.trialBoot.enable then "${prefix}-boot" else "";
     NOTIFY = "${prefix}-notify";
-    REVIEW_HINTS = cfg.firmware.reviewHints;
     # The autoland steward's commit status, which renovate-sweep doesn't count as CI.
     SETTLED = config.burrow.autoland.context or "review-settled";
-    # The repos the steward covers, as it last found them; none without it.
-    COVERED = if config.burrow.autoland.enable or false then "${stateDir}/autoland/repos.json" else "";
-    SEAL = "${majorSeal}/bin/major-seal";
-    # When a lock file refresh lock-age refused for age only can go again.
-    LOCK_WAIT = "${lockWait}/bin/lock-wait";
-    RENOVATE_RUN = toString renovateRunFor;
-    # The App the jobs these start act as (proj run --app), and its bot as
-    # GraphQL names it: none without burrow.github.machinery.
-    APP = if machineApp == null then "" else machineApp.name;
-    BOT = if machineApp == null then "" else machineApp.slug;
-    APP_ENV = if machineApp == null then "" else machineApp.envFile;
-    # Renovate's (updates/renovate.sh).
-    APP_OWNERS = lib.concatStringsSep " " cfg.renovate.owners;
-    COVERS = coversTool;
-    RUN_LOCK = "${cfg.renovate.dir}/run.lock";
-    RUNS = "${cfg.renovate.dir}/runs";
   };
 
-  # Each script gets the names it uses (shellcheck rejects the rest), set above
-  # its own text.
-  uses = text: n: lib.length (builtins.split "\\$\\{?${n}([^A-Za-z0-9_]|$)" text) > 1;
-  script = name: files: runtimeInputs:
-    let text = lib.concatMapStrings builtins.readFile (lib.toList files);
-    in pkgs.writeShellApplication {
-      inherit name runtimeInputs;
-      text = lib.concatMapStrings (n: "${n}=${lib.escapeShellArg vars.${n}}\n")
-        (lib.filter (uses text) (lib.attrNames vars)) + text;
-    };
-
-  calls = [ tools.proj tools.notify ];
   # HOST-health (crates/burrow-health), with its config built in. Its checks
   # are in /etc/HEALTHD, one for each of burrow.updates.health.
   healthD = "burrow/health.d";
@@ -225,9 +191,34 @@ let
     makeBinaryWrapper ${inputs.self.packages.${system}.advisory-watch}/bin/advisory-watch \
       $out/bin/advisory-watch --add-flags ${advisoryConfig}
   '';
-  firmwareCheck = script "firmware-check" ./updates/firmware-check.sh (
-    (with pkgs; [ coreutils jq gnugrep gnused fwupd dmidecode nvme-cli util-linux ]) ++ calls
-  );
+  # firmware-check (crates/burrow-firmware), with its config built in.
+  firmwareConfig = pkgs.writeText "firmware.json" (builtins.toJSON {
+    name = "firmware-check";
+    host = vars.HOST;
+    offered = "${stateDir}/firmware-offered";
+    inherit user project;
+    app = if machineApp == null then null else machineApp.name;
+    owner = config.burrow.owner;
+    notify = vars.NOTIFY;
+    inherit (cfg.firmware) reviewHints;
+    cpuinfo = "/proc/cpuinfo";
+    tools = {
+      sudo = "${config.security.wrapperDir}/sudo";
+      notify = lib.getExe tools.notify;
+      fwupdmgr = lib.getExe' config.services.fwupd.package "fwupdmgr";
+      dmidecode = lib.getExe' pkgs.dmidecode "dmidecode";
+      nvme = lib.getExe' pkgs.nvme-cli "nvme";
+      runuser = "${pkgs.util-linux}/bin/runuser";
+      proj = "${tools.proj}/bin/proj";
+    };
+  });
+  firmwareCheck = pkgs.runCommand "firmware-check" {
+    nativeBuildInputs = [ pkgs.makeBinaryWrapper ];
+    meta.mainProgram = "firmware-check";
+  } ''
+    makeBinaryWrapper ${inputs.self.packages.${system}.burrow-firmware}/bin/burrow-firmware \
+      $out/bin/firmware-check --add-flags ${firmwareConfig}
+  '';
   # What seals renovate-sweep's verdicts on majors (updates/major-seal.py),
   # with the seal the autoland steward checks them with beside it, linted as
   # it's built.
@@ -286,12 +277,58 @@ let
   majorSeal = pkgs.writeShellScriptBin "major-seal" ''
     exec ${pkgs.python3}/bin/python3 -E -s ${majorSealSrc}/major-seal.py ${stateDir}/renovate-sweep "$@"
   '';
-  renovateRun = script "renovate-run" ./updates/renovate.sh (
-    [ renovatePackage machineGh pkgs.util-linux pkgs.coreutils ] ++ lib.optional (machineApp != null) tools.gh-token
-  );
-  renovateSweep = script "renovate-sweep" ./updates/renovate-sweep.sh (
-    (with pkgs; [ coreutils findutils jq gnused ]) ++ [ config.programs.git.package machineGh ] ++ calls
-  );
+  # renovate-run (crates/burrow-renovate), with its config built in.
+  renovateRunConfig = pkgs.writeText "renovate-run.json" (builtins.toJSON {
+    name = "renovate-run";
+    runLock = "${cfg.renovate.dir}/run.lock";
+    runs = "${cfg.renovate.dir}/runs";
+    app = if machineApp == null then null else {
+      inherit (machineApp) env;
+      inherit (cfg.renovate) owners;
+      ghToken = "${tools.gh-token}/bin/gh-token";
+    };
+    tools = {
+      gh = "${machineGh}/bin/gh";
+      renovate = "${renovatePackage}/bin/renovate";
+      covers = "${coversTool}";
+    };
+  });
+  renovateRun = pkgs.runCommand "renovate-run" {
+    nativeBuildInputs = [ pkgs.makeBinaryWrapper ];
+    meta.mainProgram = "renovate-run";
+  } ''
+    makeBinaryWrapper ${inputs.self.packages.${system}.burrow-renovate}/bin/burrow-renovate \
+      $out/bin/renovate-run --add-flags ${renovateRunConfig}
+  '';
+  # renovate-sweep (crates/burrow-renovate), with its config built in.
+  renovateSweepConfig = pkgs.writeText "renovate-sweep.json" (builtins.toJSON {
+    name = "renovate-sweep";
+    state = "${stateDir}/renovate-sweep";
+    projects = config.burrow.projectsDir;
+    owner = config.burrow.owner;
+    settled = vars.SETTLED;
+    # The repos the steward covers, as it last found them; none without it.
+    covered = if config.burrow.autoland.enable or false then "${stateDir}/autoland/repos.json" else null;
+    # The App the jobs it starts act as (proj run --app), and its bot as
+    # GraphQL names it: none without burrow.github.machinery.
+    app = if machineApp == null then null else { inherit (machineApp) name; bot = machineApp.slug; };
+    renovateRun = renovateRunFor;
+    tools = {
+      gh = "${machineGh}/bin/gh";
+      git = lib.getExe config.programs.git.package;
+      proj = "${tools.proj}/bin/proj";
+      notify = lib.getExe tools.notify;
+      seal = "${majorSeal}/bin/major-seal";
+      lockWait = "${lockWait}/bin/lock-wait";
+    };
+  });
+  renovateSweep = pkgs.runCommand "renovate-sweep" {
+    nativeBuildInputs = [ pkgs.makeBinaryWrapper ];
+    meta.mainProgram = "renovate-sweep";
+  } ''
+    makeBinaryWrapper ${inputs.self.packages.${system}.burrow-renovate}/bin/burrow-renovate-sweep \
+      $out/bin/renovate-sweep --add-flags ${renovateSweepConfig}
+  '';
 
   # The ZFS pools the machine needs imported, as NixOS's zfs module decides
   # it: the ones its file systems mount from (a pool only noauto mounts use
@@ -732,7 +769,7 @@ in
         description = "Look for firmware updates (installing them is the owner's call)";
         serviceConfig = {
           Type = "oneshot";
-          ExecStart = "${firmwareCheck}/bin/firmware-check";
+          ExecStart = lib.getExe firmwareCheck;
         };
       };
       systemd.timers.firmware-check = {
@@ -747,7 +784,7 @@ in
         description = "Monthly look at vendor firmware that LVFS doesn't carry";
         serviceConfig = {
           Type = "oneshot";
-          ExecStart = "${firmwareCheck}/bin/firmware-check --review";
+          ExecStart = "${lib.getExe firmwareCheck} --review";
         };
       };
       systemd.timers.firmware-review = {
@@ -811,7 +848,7 @@ in
         serviceConfig = {
           Type = "oneshot";
           User = user;
-          ExecStart = "${renovateRun}/bin/renovate-run${lib.optionalString (name == "renovate@") " %I"}";
+          ExecStart = "${lib.getExe renovateRun}${lib.optionalString (name == "renovate@") " %I"}";
           TimeoutStartSec = renovateRunFor;
           Nice = 10;
         };

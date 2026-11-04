@@ -184,6 +184,7 @@ pub fn run(cfg: &Config, world: &dyn World, now: f64) -> Result<(), String> {
                     println!("stalled, handed to proj job {jid}: {}", line(&st.item));
                     st.job = Some(jid.clone());
                     st.handed = Some(now);
+                    st.tried = None;
                 }
                 None => {
                     println!("stalled, and no job could start: {}", line(&st.item));

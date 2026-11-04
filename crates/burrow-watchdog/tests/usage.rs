@@ -4,11 +4,11 @@
 //! holds what's overdue instead, hands it no job and books its next look
 //! for the reset; after, each starts the ladder again from its kick.
 
-mod world;
+mod common;
 
 use burrow_watchdog::GRACE;
+use common::{H, Machine, T, item, named};
 use serde_json::json;
-use world::{H, Machine, T, item, named};
 
 fn out_until(m: &Machine, until: f64) {
     *m.world.usage.borrow_mut() = json!({
@@ -77,7 +77,7 @@ fn a_stall_handed_on_before_stays_where_it_is_and_its_job_goes() {
     // One the owner was told of before (the stuck issue's own job's) stays
     // theirs.
     let m = Machine::new();
-    m.write(&m.line, json!({"homelab-9": world::unstick(true)}), T);
+    m.write(&m.line, json!({"homelab-9": common::unstick(true)}), T);
     m.write(&m.steward, json!({}), T);
     let (_, _) = m.run(T);
     assert_eq!(m.notices().len(), 1, "{:?}", m.notices());

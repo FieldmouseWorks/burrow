@@ -1,5 +1,5 @@
 # The checks of Renovate's setup, each as Renovate's own code reads it: what its
-# runs cover, what its config decides, and what the sweep does with its PRs.
+# runs cover, what its config decides, and the sweep's seals and waits.
 { self, pkgs }:
 {
   # Which repos a run of Renovate on one repo covers: the ones its
@@ -15,15 +15,11 @@
     done
     touch $out
   '';
-  # Which Renovate PRs renovate-sweep hands over and lists, with stand-ins for gh and proj.
-  renovate-sweep = pkgs.runCommand "renovate-sweep-check" { nativeBuildInputs = [ pkgs.python3 pkgs.git pkgs.jq pkgs.gnused ]; } ''
-    python3 -I ${./renovate-sweep.py} ${../modules/updates/renovate-sweep.sh} ${../modules/updates/major-seal.py} ${../modules/autoland/seal.py} ${../modules/autoland/lock_wait.py}
-    touch $out
-  '';
-  # Which repos Renovate's runs cover, with whose token: gh's login for
-  # all of them, or a run each with its owner's App token.
-  renovate-run = pkgs.runCommand "renovate-run-check" { nativeBuildInputs = [ pkgs.python3 pkgs.util-linux ]; } ''
-    python3 -I ${./renovate-run.py} ${../modules/updates/renovate.sh}
+  # What renovate-sweep leaves to Python: major-seal's seals on a job's
+  # verdicts, and when lock-wait says a refresh can go again (the sweep
+  # itself is crates/burrow-renovate's, tested there).
+  renovate-sweep = pkgs.runCommand "renovate-sweep-check" { nativeBuildInputs = [ pkgs.python3 ]; } ''
+    python3 -I ${./renovate-sweep.py} ${../modules/updates/major-seal.py} ${../modules/autoland/seal.py} ${../modules/autoland/lock_wait.py}
     touch $out
   '';
   # What decides a lock file refresh's release age in a Renovate config,
@@ -55,8 +51,9 @@
   '';
   # The example's Renovate config, as Renovate's own rules read it: a
   # pin on a GitHub repo of its trusted owner's (sam, any case) waits
-  # for no soak; anyone else's still does, and so does a sam/... on
-  # another host or a registry's package that claims a sam repo.
+  # for no soak, and one on a branch of it only for the branch to go
+  # quiet (renovate-follow); anyone else's still soaks, and so does a
+  # sam/... on another host or a registry's package that claims a sam repo.
   renovate-soak = pkgs.runCommand "renovate-soak-check" { } ''
     export HOME=$TMPDIR
     got=$(${pkgs.lib.getExe pkgs.nodejs_24} ${./renovate-soak.mjs} ${pkgs.renovate} \
@@ -70,7 +67,7 @@
       '{"datasource":"docker","packageName":"sam/tools","sourceUrl":"https://github.com/sam/tools"}' \
       '{"datasource":"npm","packageName":"homelab","manager":"npm","sourceUrl":"https://github.com/sam/homelab"}' \
       2>/dev/null)
-    want='github-digest sam/homelab none
+    want='github-digest sam/homelab 30 minutes
     github-tags Sam/Tools none
     git-refs https://github.com/sam/homelab.git none
     github-digest actions/checkout 3 days
@@ -78,6 +75,42 @@
     github-tags sam/tools at https://ghe.example.com 3 days
     docker sam/tools 3 days
     npm homelab 3 days'
+    [ "$got" = "$(sed 's/^ *//' <<<"$want")" ] || { echo "got: $got"; exit 1; }
+    touch $out
+  '';
+  # What a project following a repo gets under the example's config, by
+  # Renovate's own extraction, lookup, branching and branch processing
+  # (homelab's main stood in for). Its workflows, action and flake input
+  # pinned to the trusted owner's homelab main move in one PR, and only
+  # once main has been quiet for half an hour; someone else's soak three
+  # days. Either way the open PR's stability check then passes, so
+  # Renovate can merge it. A flake input not pinned by commit isn't looked
+  # up (the lock file refresh moves it), and nixpkgs keeps its channel
+  # versioning.
+  renovate-follow = pkgs.runCommand "renovate-follow-check" { } ''
+    export HOME=$TMPDIR
+    got=$(LOG_LEVEL=fatal ${pkgs.lib.getExe pkgs.nodejs_24} ${./renovate-follow.mjs} ${pkgs.renovate} \
+      ${self.nixosConfigurations.example.config.systemd.services.renovate.environment.RENOVATE_CONFIG_FILE} 2>/dev/null)
+    sam='github-actions sam/homelab digest 2222222, github-actions sam/homelab digest 2222222, github-actions sam/homelab pinDigest 2222222'
+    kim='github-actions kim/homelab digest 2222222, github-actions kim/homelab digest 2222222'
+    nix='nix homelab digest 2222222'
+    channels='nixpkgs nixpkgs, unstable nixpkgs'
+    want="pinned: nix homelab exact, $channels
+    pinned 10 min: renovate/sam-homelab new: pending, open: pending: deps: update sam/homelab to 2222222: $sam, $nix
+    pinned 40 min: renovate/sam-homelab new: creates, open: stability green: deps: update sam/homelab to 2222222: $sam, $nix
+    pinned .git: nix homelab exact, $channels
+    pinned .git 10 min: renovate/sam-homelab new: pending, open: pending: deps: update sam/homelab to 2222222: $sam, $nix
+    pinned .git 40 min: renovate/sam-homelab new: creates, open: stability green: deps: update sam/homelab to 2222222: $sam, $nix
+    unpinned: nix homelab git, $channels
+    unpinned 10 min: renovate/sam-homelab new: pending, open: pending: deps: update sam/homelab digest to 2222222: $sam
+    unpinned 40 min: renovate/sam-homelab new: creates, open: stability green: deps: update sam/homelab digest to 2222222: $sam
+    someone else's, pinned: nix homelab exact, $channels
+    someone else's, pinned 40 min: renovate/ci-actions new: pending, open: pending: deps: update kim/homelab digest to 2222222: $kim
+    someone else's, pinned 40 min: renovate/homelab-digest new: pending, open: pending: deps: update homelab digest to 2222222: $nix
+    someone else's, pinned 40 min: renovate/pin-dependencies new: pending, open: pending: deps: pin kim/homelab action to 2222222: github-actions kim/homelab pinDigest 2222222
+    someone else's, pinned 4400 min: renovate/ci-actions new: creates, open: stability green: deps: update kim/homelab digest to 2222222: $kim
+    someone else's, pinned 4400 min: renovate/homelab-digest new: creates, open: stability green: deps: update homelab digest to 2222222: $nix
+    someone else's, pinned 4400 min: renovate/pin-dependencies new: creates, open: stability green: deps: pin kim/homelab action to 2222222: github-actions kim/homelab pinDigest 2222222"
     [ "$got" = "$(sed 's/^ *//' <<<"$want")" ] || { echo "got: $got"; exit 1; }
     touch $out
   '';

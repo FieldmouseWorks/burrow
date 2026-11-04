@@ -1,8 +1,8 @@
 //! A pass, step by step, with proj, burrow-events' kick port and notify
-//! stood in for: what it does with an item past its deadline, and when it
-//! looks again (world/ has the machine it runs on).
+//! stood in for (common): what it does with an item past its deadline, and
+//! when it looks again.
 
-mod world;
+mod common;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -10,8 +10,8 @@ use std::fs;
 use burrow_watchdog::ladder::snooze;
 use burrow_watchdog::watch::sid;
 use burrow_watchdog::{ESCALATED, GRACE, IN_LINE, MIN, RENOTIFY, RETRY, SNOOZE_MAX, START};
+use common::{H, Machine, T, item, named, unstick};
 use serde_json::{Value, json};
-use world::{H, Machine, T, item, named, unstick};
 
 // Nothing to watch: nothing done, and a pass booked only for when the
 // steward, which should write every so often, would be stale. An item not
