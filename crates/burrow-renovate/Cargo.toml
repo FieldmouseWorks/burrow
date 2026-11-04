@@ -1,0 +1,18 @@
+[package]
+name = "burrow-renovate"
+description = "renovate-run: Renovate over every repo it covers, or over one, a run at a time, each with its own token"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+rustix = { version = "1.1.6", features = ["fs"] }
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

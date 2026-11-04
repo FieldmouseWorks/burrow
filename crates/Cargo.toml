@@ -23,6 +23,7 @@ members = [
     "burrow-probe",
     "burrow-proj",
     "burrow-proof",
+    "burrow-renovate",
     "burrow-review",
     "burrow-robot",
     "burrow-rustc-wrapper",
