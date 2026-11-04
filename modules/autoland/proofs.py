@@ -154,7 +154,7 @@ def outputs(repo, pr, checks, st):
             return got["paths"]
     drvs = paths = None
     try:
-        mirror = V.fetch(repo, f"+refs/pull/{n}/head:refs/pr/{n}")
+        mirror = V.fetch(repo, pr=pr)
         drvs, paths = derivations(repo, mirror, f"refs/pr/{n}", head, checks)
         paths = paths or None
     except (RuntimeError, OSError, subprocess.SubprocessError) as e:
@@ -180,7 +180,7 @@ def merged(repo, pr, checks, st, tip):
         return got["paths"]
     paths, failed = None, True
     try:
-        mirror = V.fetch(repo, f"+refs/pull/{n}/head:refs/pr/{n}", f"+refs/heads/{base}:refs/base/{base}")
+        mirror = V.fetch(repo, f"+refs/heads/{base}:refs/base/{base}", pr=pr)
         up = subprocess.run(["git", "-C", mirror, "merge-base", "--is-ancestor", tip, head], capture_output=True, text=True)
         # 0: the head has the tip already; 1: it doesn't; else git can't say
         # (a tip that moved on again before the fetch, say).

@@ -104,7 +104,9 @@ pub fn id(dir: &Path) -> Result<&str, String> {
 }
 
 /// The PR's head fetched into the checkout (GitHub keeps it as
-/// refs/pull/N/head), and there: nothing else of origin's.
+/// refs/pull/N/head), and there: nothing else of origin's. GitHub can lose
+/// that ref while the PR stays open (remi#495): then the head is fetched by
+/// its id.
 fn fetched(rec: &Record, log: &File) -> bool {
     let git = |args: &[&str], out: Stdio, err: Stdio| -> bool {
         Command::new(&rec.git)
@@ -117,11 +119,19 @@ fn fetched(rec: &Record, log: &File) -> bool {
             .status()
             .is_ok_and(|s| s.success())
     };
-    let (Ok(out), Ok(err)) = (log.try_clone(), log.try_clone()) else {
-        return false;
+    let fetch = |what: &str| {
+        let (Ok(out), Ok(err)) = (log.try_clone(), log.try_clone()) else {
+            return false;
+        };
+        git(&["fetch", "-q", "origin", what], out.into(), err.into())
     };
     let pull = format!("refs/pull/{}/head", rec.number);
-    git(&["fetch", "-q", "origin", &pull], out.into(), err.into())
+    let id = matches!(rec.head.len(), 40 | 64)
+        && rec
+            .head
+            .bytes()
+            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+    (fetch(&pull) || (id && fetch(&rec.head)))
         && git(
             &["cat-file", "-e", &format!("{}^{{commit}}", rec.head)],
             Stdio::null(),

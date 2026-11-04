@@ -89,12 +89,15 @@ def git(*args, cwd=None, input=None, env=None):
     return p.stdout
 
 
-def fetch(repo, *refs):
+def fetch(repo, *refs, pr=None):
     """The steward's bare clone of the repo, which only it reads, with refs
     fetched into it from GitHub (burrow-upkeep's `fetch`): what the
     snapshots are taken from, and what a proof's builds are worked out from
-    (proofs.py). As long as git takes, as it always has."""
-    out = C.upkeep("fetch", repo, input=json.dumps(refs), bounded=False)
+    (proofs.py). With pr, its head too, as refs/pr/N: from refs/pull/N/head,
+    or by the head's id when GitHub has lost that ref (mirror.rs
+    `fetch_pr`). As long as git takes, as it always has."""
+    ask = {"refs": list(refs), "pr": pr and {"number": pr["number"], "head": pr["headRefOid"]}}
+    out = C.upkeep("fetch", repo, input=json.dumps(ask), bounded=False)
     if out["mirror"] is None:
         raise RuntimeError(out["why"])
     return out["mirror"]

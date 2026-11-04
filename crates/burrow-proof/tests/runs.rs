@@ -143,6 +143,21 @@ fn one_the_machine_failed_ends_the_run_there() {
     assert!(!b.exists() && !dir.join("ran.json").exists());
 }
 
+/// GitHub lost refs/pull/495/head on remi#495 while the PR stayed open:
+/// the head is fetched by its id then.
+#[test]
+fn a_head_whose_pull_ref_github_lost_is_fetched_by_its_id() {
+    let w = World::new();
+    world::git(&w.origin, &["update-ref", "-d", "refs/pull/5/head"]);
+    world::git(&w.origin, &["update-ref", "refs/pull/5/merge", &w.head]);
+    let out = w.path().join("head");
+    let cmd = format!("git rev-parse HEAD >{}", out.display());
+    let dir = w.made("proof-sam-r-5-1", &w.record(&[("gate", &cmd)]));
+    run(&dir, &mut Plain::default()).unwrap();
+    assert_eq!(ran(&dir).exits["gate"], 0);
+    assert_eq!(read(&out).trim(), w.head);
+}
+
 #[test]
 fn a_head_that_cant_be_fetched_runs_nothing() {
     let w = World::new();
