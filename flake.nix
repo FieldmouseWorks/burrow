@@ -661,18 +661,23 @@
         # it knows, and a word it doesn't know exits 2 with its usage before
         # it runs anything.
         tool-configs = let
-          inherit (self.nixosConfigurations.example.config) burrow;
-          usage = tool: line: ''
+          inherit (self.nixosConfigurations.example.config) burrow systemd;
+          # The tool `exe`, whose usage is `line`.
+          usage = exe: line: ''
             rc=0
-            ${pkgs.lib.getExe burrow.tools.${tool}} --help 2>err || rc=$?
-            [ "$rc" = 2 ] || { echo "${tool}: a usage exited $rc: $(cat err)"; exit 1; }
-            grep -qxF ${pkgs.lib.escapeShellArg "usage: ${burrow.prefix}-${line}"} err || { echo "${tool} said: $(cat err)"; exit 1; }
+            ${exe} --help 2>err || rc=$?
+            [ "$rc" = 2 ] || { echo "${exe}: a usage exited $rc: $(cat err)"; exit 1; }
+            grep -qxF ${pkgs.lib.escapeShellArg "usage: ${line}"} err || { echo "${exe} said: $(cat err)"; exit 1; }
           '';
+          tool = name: pkgs.lib.getExe burrow.tools.${name};
+          p = burrow.prefix;
         in pkgs.runCommand "tool-configs-check" { } (
-          usage "update" "update [--force | status]"
-          + usage "switch" "switch [FLAKE_DIR | --toplevel PATH | --status | --abort] [--allow-downgrade]"
-          + usage "confirm" "confirm"
-          + usage "boot" "boot default SYSTEM | trial [--force] | check | status"
+          usage (tool "update") "${p}-update [--force | status]"
+          + usage (tool "switch") "${p}-switch [FLAKE_DIR | --toplevel PATH | --status | --abort] [--allow-downgrade]"
+          + usage (tool "confirm") "${p}-confirm"
+          + usage (tool "boot") "${p}-boot default SYSTEM | trial [--force] | check | status"
+          + usage systemd.services.firmware-check.serviceConfig.ExecStart "firmware-check [--review]"
+          + usage systemd.services.renovate.serviceConfig.ExecStart "renovate-run [OWNER/REPO]"
           + "touch $out\n");
         # Which repo the flake's origin is, and so whether HOST-update goes
         # through its train: the same in every spelling of GitHub's URLs
