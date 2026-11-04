@@ -95,6 +95,7 @@ name = "burrow-browser-close"
 version = "0.0.0"
 dependencies = [
  "base64",
+ "rustix",
  "serde_json",
 ]
 

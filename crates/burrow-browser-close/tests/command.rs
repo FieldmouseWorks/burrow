@@ -32,7 +32,8 @@ fn it_closes_the_browser_and_exits_once_its_gone() {
 
 #[test]
 fn with_nothing_answering_it_exits_0_saying_nothing() {
-    let out = run(&[&nobody().to_string()], Some("1"));
+    let (_held, port) = nobody();
+    let out = run(&[&port.to_string()], Some("1"));
     assert!(out.status.success(), "{out:?}");
     assert!(out.stdout.is_empty() && out.stderr.is_empty(), "{out:?}");
 }

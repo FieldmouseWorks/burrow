@@ -4,6 +4,7 @@
 
 mod common;
 
+use std::net::{TcpListener, TcpStream};
 use std::time::{Duration, Instant};
 
 use base64::Engine as _;
@@ -91,9 +92,10 @@ fn an_answer_is_read_to_its_length() {
 
 #[test]
 fn with_nothing_answering_as_devtools_theres_nothing_to_close() {
+    let (_held, port) = nobody();
     let started = Instant::now();
     assert_eq!(
-        close(nobody(), 1, Duration::from_secs(10)),
+        close(port, 1, Duration::from_secs(10)),
         Ok(Closed::NotAnswering)
     );
     for status in [404, 500] {
@@ -157,4 +159,13 @@ fn a_browser_still_up_when_its_time_is_up_is_a_failure() {
     assert!(took >= Duration::from_secs(1), "{took:?}");
     assert!(took < Duration::from_secs(3), "{took:?}");
     assert!(!devtools.seen().frame.is_empty());
+}
+
+/// The port the tests that want nothing answering use: refused, and no other
+/// test's stand-in can be given it while they do.
+#[test]
+fn nobody_holds_its_port() {
+    let (_held, port) = nobody();
+    assert!(TcpStream::connect(("127.0.0.1", port)).is_err());
+    assert!(TcpListener::bind(("127.0.0.1", port)).is_err());
 }
