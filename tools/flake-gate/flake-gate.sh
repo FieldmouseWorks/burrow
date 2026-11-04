@@ -1,7 +1,9 @@
 # flake-gate: a repo's CI gate, run here. It runs the gate step of the shared
 # flake-check workflow the repo's .github/workflows/flake.yml calls, that
 # step's own script, with the inputs the repo gives it (eval-apart,
-# build-skip), as GitHub runs it. The workflow stays the gate's one home.
+# build-skip), as GitHub runs it, and the gate's own files (the step's
+# TOOLS, the workflow's .github/flake-check) at the workflow's own commit.
+# The workflow stays the gate's one home.
 #
 #   flake-gate           run it in the repo this is in
 #   flake-gate --print   print the inputs and the script, and run nothing
@@ -26,8 +28,10 @@ with=$(jq -c '.[0].value.with // {}' <<<"$jobs")
 workflow=$(mktemp)
 tmp=$(mktemp -d)
 trap 'rm -rf -- "$workflow" "$tmp"' EXIT
+# The gate's files, beside the workflow: this repo's own, or the named
+# repo's at the ref its workflow came from.
 case $uses in
-  ./*) cp -- "${uses#./}" "$workflow" ;;
+  ./*) cp -- "${uses#./}" "$workflow"; tools=$root/.github/flake-check ;;
   */*/*@*)
     # OWNER/REPO/PATH@REF, at the branch, tag or commit the caller names,
     # fetched as git reads any GitHub repo: no token needed for a public one
@@ -36,7 +40,9 @@ case $uses in
     path=$(cut -d/ -f3- <<<"${uses%@*}")
     git init -q "$tmp/workflow-repo"
     git -C "$tmp/workflow-repo" fetch -q --depth=1 "https://github.com/$repo" "${uses##*@}"
-    git -C "$tmp/workflow-repo" show "FETCH_HEAD:$path" > "$workflow" ;;
+    git -C "$tmp/workflow-repo" show "FETCH_HEAD:$path" > "$workflow"
+    git -C "$tmp/workflow-repo" checkout -q FETCH_HEAD -- .github/flake-check 2> /dev/null || true
+    tools=$tmp/workflow-repo/.github/flake-check ;;
   *) echo "flake-gate: can't fetch $uses" >&2; exit 1 ;;
 esac
 
@@ -46,14 +52,16 @@ step=$(yq -o=json '[.jobs.check.steps[] | select(.id == "gate")]' "$workflow")
 inputs=$(yq -o=json '.on.workflow_call.inputs // {}' "$workflow")
 
 # The step's env, each an input as GitHub gives it: the caller's value, or
-# the input's default, or its type's (false, 0, empty), each as a string. The
-# one exception is the legs CI splits the gate across: here it runs whole, as
-# one leg (legs 1, leg 1). Anything else this can't mirror, so it stops rather
-# than run a different gate.
-env=$(jq -c --argjson with "$with" --argjson inputs "$inputs" '
+# the input's default, or its type's (false, 0, empty), each as a string;
+# and TOOLS, where the gate's files are. The one exception is the legs CI
+# splits the gate across: here it runs whole, as one leg (legs 1, leg 1).
+# Anything else this can't mirror, so it stops rather than run a different
+# gate.
+env=$(jq -c --argjson with "$with" --argjson inputs "$inputs" --arg tools "$tools" '
   .[0].env // {} | to_entries | map(
     [.value | capture("^[$][{][{] *(?<c>inputs|matrix)[.](?<i>[A-Za-z0-9_-]+) *[}][}]$")?][0] as $m
-    | if $m == null then error("env \(.key) is \(.value | tojson), not one input")
+    | if .key == "TOOLS" then {key, value: $tools}
+      elif $m == null then error("env \(.key) is \(.value | tojson), not one input")
       elif $m.c == "matrix" then
         if $m.i == "leg" then {key, value: "1"} else error("env \(.key) is matrix.\($m.i), not the leg") end
       elif ($inputs | has($m.i) | not) then error("env \(.key) is input \($m.i), which the workflow doesn'"'"'t have")
@@ -62,6 +70,10 @@ env=$(jq -c --argjson with "$with" --argjson inputs "$inputs" '
         elif $inputs[$m.i] | has("default") then $inputs[$m.i].default
         else {boolean: "false", number: "0"}[$inputs[$m.i].type] // "" end | tostring)}
       end) | from_entries' <<<"$step") || { echo "flake-gate: can't run $uses's gate step as GitHub would" >&2; exit 1; }
+if jq -e 'has("TOOLS")' <<<"$env" > /dev/null && [ ! -f "$tools/gate.sh" ]; then
+  echo "flake-gate: $uses's gate step runs its files, and there's no .github/flake-check/gate.sh beside it" >&2
+  exit 1
+fi
 jq -r '.[0].run' <<<"$step" > "$tmp/gate.sh"
 
 if [ -n "$print" ]; then
