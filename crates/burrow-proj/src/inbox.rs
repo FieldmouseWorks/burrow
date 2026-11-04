@@ -683,7 +683,7 @@ description says \"Fixes #{n}\" (or \"Refs #{n}\" if it doesn't settle the issue
             .map(|(n, _)| n.replacen('_', "/", 1))
             .collect();
         long.sort();
-        let Some(notify) = &self.inbox.notify else {
+        let Some(notify) = &self.cfg.notify else {
             return Ok(());
         };
         let said = if !long.is_empty() {

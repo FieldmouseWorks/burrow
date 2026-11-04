@@ -289,6 +289,8 @@
         proj = import ./tests/proj.nix { inherit self pkgs; };
         proj-second-runs = import ./tests/proj-second-runs.nix { inherit self pkgs; };
         proj-slots = import ./tests/proj-slots.nix { inherit self pkgs; };
+        # A run refused for usage holds the line till its limit resets.
+        proj-usage = import ./tests/proj-usage.nix { inherit self pkgs; };
         proj-github = import ./tests/proj-github.nix { inherit self pkgs; };
         # A turn's clock, which stands still while it waits in line.
         proj-clock = import ./tests/proj-clock.nix { inherit self pkgs; };

@@ -25,7 +25,7 @@ use serde_json::Value;
 
 use crate::config::Config;
 use crate::waits::Facts;
-use crate::{filled, mtime, now, read, swap, systemd};
+use crate::{filled, mtime, now, read, swap, systemd, usage};
 
 pub struct Job<'a> {
     pub cfg: &'a Config,
@@ -251,6 +251,7 @@ impl<'a> Job<'a> {
             } else {
                 Vec::new()
             },
+            spent: usage::out(self.cfg),
             turn: n,
             state,
         })

@@ -58,6 +58,9 @@
 //! proj await TARGET...        from inside a job: resume it once a PR or
 //!                             issue (URL or OWNER/REPO#N) changes; one
 //!                             already merged or closed is refused
+//! proj usage [back]           whether the machine is out of Claude usage, and
+//!                             until when (JSON; nothing when it isn't);
+//!                             back: it isn't, now (the limit was raised)
 //! proj ask                    from inside a job: its answer is a question for
 //!                             a person, whose reply resumes it
 //! proj done                   from inside a job: its work is finished
@@ -94,7 +97,10 @@
 //! holding that wait to stallAfterMinutes instead.
 //!
 //! A run killed for memory before it answers (Claude, as a rule) is carried on
-//! in its own conversation and slot, twice a turn at most ([`turn`]).
+//! in its own conversation and slot, twice a turn at most ([`turn`]). One
+//! Claude Code refuses because the plan's usage is spent puts the whole
+//! machine out of usage until the limit resets: no turn takes a slot till
+//! then, and the refused one waits in line and runs again ([`usage`]).
 //!
 //! A turn ends at its answer. Claude -p stays up after it while anything it
 //! left in the background runs (a CI watch, say), holding a slot to do
@@ -141,6 +147,7 @@ pub mod scratch;
 pub mod slot;
 pub mod systemd;
 pub mod turn;
+pub mod usage;
 pub mod waits;
 pub mod watch;
 

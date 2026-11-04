@@ -10,7 +10,7 @@ use sha2::{Digest, Sha256};
 use crate::config::Config;
 use crate::state::{Stall, State, load, published, save};
 use crate::watch::{overdue, watched};
-use crate::words::{clock, entry, line, notice as notice_words, task};
+use crate::words::{clock, day, entry, line, notice as notice_words, task};
 use crate::world::World;
 use crate::{GRACE, MIN, PROJ, RENOTIFY, RETRY, SNOOZE_MAX, START, STEWARD};
 
@@ -70,9 +70,28 @@ pub fn run(cfg: &Config, world: &dyn World, now: f64) -> Result<(), String> {
     // The watchdog's own jobs in proj's line are its own steps' to time:
     // another job for one would queue behind it.
     let mine: BTreeSet<String> = stalls.values().filter_map(|st| st.job.clone()).collect();
+    let spent = out_of_usage(world, now);
+    let mut waiting = 0;
     let mut ready = Vec::new();
     for (s, cur) in found {
         if cur.source == PROJ && mine.contains(&cur.key) {
+            continue;
+        }
+        // Out of usage, every Claude job waits for it (proj's usage.rs), so
+        // what waits on one can't move, and a job of the watchdog's own would
+        // only wait too. Held, not a stall, until it resets: proj tells the
+        // owner of it, once. One already on the stuck issue, or the owner's,
+        // stays there. After, it starts the ladder again from its kick.
+        if let Some((until, _)) = &spent
+            && !stalls
+                .get(&s)
+                .is_some_and(|st| st.entry.is_some() || st.told.is_some())
+        {
+            if let Some(st) = stalls.remove(&s) {
+                withdraw.extend(st.job);
+            }
+            waiting += 1;
+            wakes.push(*until);
             continue;
         }
         let st = stalls.entry(s.clone()).or_insert_with(|| Stall {
@@ -148,6 +167,10 @@ pub fn run(cfg: &Config, world: &dyn World, now: f64) -> Result<(), String> {
         }
     }
 
+    if let Some((_, said)) = spent.filter(|_| waiting > 0) {
+        println!("{waiting} held, not stalls: {said}");
+    }
+
     if !ready.is_empty() {
         let jid = start_job(
             cfg,
@@ -217,6 +240,19 @@ pub fn run(cfg: &Config, world: &dyn World, now: f64) -> Result<(), String> {
         None => json!({}),
     };
     save(dir, "wake.json", &wake)
+}
+
+/// When proj says the machine is out of Claude usage (`proj usage`): when it
+/// resets, and proj's line on it. None when it isn't, or proj can't say.
+fn out_of_usage(world: &dyn World, now: f64) -> Option<(f64, String)> {
+    let (ok, out) = world.proj(&["usage"]);
+    let v: serde_json::Value = serde_json::from_str(&out).ok().filter(|_| ok)?;
+    let until = v["until"].as_f64().filter(|&t| t > now)?;
+    let said = v["said"].as_str().unwrap_or_default();
+    Some((
+        until,
+        format!("Claude is out of usage until {} (\"{said}\")", day(until)),
+    ))
 }
 
 /// The job's id, when one could start. Its end kicks the next pass, which

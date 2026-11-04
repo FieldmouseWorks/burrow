@@ -46,7 +46,7 @@ use std::time::Duration;
 use crate::config::Config;
 use crate::job::Job;
 use crate::pick::{Class, Classes, Slot, Waiter, pick, project};
-use crate::{mtime, now, now_nanos, read};
+use crate::{mtime, now, now_nanos, read, usage};
 
 pub const HANDOVER_FORMAT: &str = "1";
 const NEXT_FRESH: i64 = 2;
@@ -308,8 +308,11 @@ pub fn take(cfg: &Config, id: &str, n: &str, given: Class) -> io::Result<File> {
         place_left(&queue, id, process::id()).unwrap_or_else(|| (entry(&job, id, given), now()));
     let mut looked = 0;
     loop {
+        // Out of usage, nothing takes a slot till it's back (usage.rs): every
+        // run would be refused, an --unstick turn's too.
+        let spent = usage::out(cfg).is_some();
         // Made --unstick while it waits (proj unstick): it goes now, look or not.
-        if job.path("unstick").exists() {
+        if job.path("unstick").exists() && !spent {
             let _ = fs::remove_file(queue.join(&me));
             return unstick_slot(cfg, id, n);
         }
@@ -332,6 +335,13 @@ pub fn take(cfg: &Config, id: &str, n: &str, given: Class) -> io::Result<File> {
             drop(lk);
             return Err(failed);
         }
+        if spent {
+            if !job.path("unstick").exists() {
+                publish(&queue, &me)?;
+            }
+            sleep(Duration::from_secs(2));
+            continue;
+        }
         if !due(&slots, &queue.join(&me), looked) {
             sleep(Duration::from_secs(2));
             continue;
@@ -345,14 +355,7 @@ pub fn take(cfg: &Config, id: &str, n: &str, given: Class) -> io::Result<File> {
             }
             me = new;
         }
-        // Published whole (a dot file, which the line skips, then renamed),
-        // so a waiter clearing out dead places never sees it without its
-        // pid. Put back if it went anyway.
-        if !queue.join(&me).exists() {
-            let tmp = queue.join(format!(".{me}.new"));
-            fs::write(&tmp, format!("{}\n", process::id()))?;
-            fs::rename(&tmp, queue.join(&me))?;
-        }
+        publish(&queue, &me)?;
         // A slot is taken only under this lock, so one a look sees free stays
         // free until it's done. Another waiter's look may have come while this
         // one waited for it.
@@ -400,6 +403,18 @@ pub fn take(cfg: &Config, id: &str, n: &str, given: Class) -> io::Result<File> {
         drop(lk);
         sleep(Duration::from_secs(2));
     }
+}
+
+/// This waiter's place in line, `me`, published whole (a dot file, which the
+/// line skips, then renamed), so a waiter clearing out dead places never sees
+/// it without its pid. Put back if it went anyway.
+fn publish(queue: &Path, me: &str) -> io::Result<()> {
+    if !queue.join(me).exists() {
+        let tmp = queue.join(format!(".{me}.new"));
+        fs::write(&tmp, format!("{}\n", process::id()))?;
+        fs::rename(&tmp, queue.join(me))?;
+    }
+    Ok(())
 }
 
 /// `proj status --line`: every turn in line, in the order pick takes them

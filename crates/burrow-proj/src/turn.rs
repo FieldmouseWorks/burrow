@@ -15,13 +15,19 @@ use crate::config::Config;
 use crate::job::{Job, answer, is_error, kick, last_result, result_of};
 use crate::pick::{Class, demoted};
 use crate::waits::{rewatch, rewatch_later, waiting};
-use crate::{Fail, filled, mtime_nanos, nanos, now_nanos, read, scratch, slot, swap, systemd};
+use crate::{
+    Fail, filled, mtime_nanos, nanos, now, now_nanos, read, scratch, slot, swap, systemd, usage,
+};
 
 /// How a job waits on its own long work, which its answer would stop.
 const LONG: &str = "A command that can outlast one Bash call (ten minutes), a long build or test run, goes to the background with its output and exit code written to a file, and you wait for that file in the foreground, in steps under ten minutes each; answer only once it's there.";
 
 /// What a run killed for memory before it answered is told in the next.
 const KILLED: &str = "Your last run was killed for memory before you answered, and everything it had running went with it. Carry on from where you left off: see what had already finished before you run anything again.";
+
+/// What a run refused for usage is told in the next, once it's back, with
+/// what it was refused saying and the turn's prompt.
+const SPENT: &str = "Your last run was refused before it finished: Claude was out of usage, and every job waited until it was back. It's back now. Carry on from where you left off: see what had already finished before you run anything again. What it said, and what you were asked this turn:";
 
 /// How a turn says what comes next: what resumes the job, if anything.
 const NEXT: &str = "`proj await URL` for each PR or issue you're still waiting on (the job is resumed, with this conversation, once one of them changes: checks finish, a review, comment or push, merged or closed), `proj ask` when your answer is a question only a person can settle (their reply resumes it), or `proj done` when the work is finished";
@@ -164,7 +170,8 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
     } else {
         Class::Normal
     };
-    let _slot = slot::take(cfg, id, &n, given).map_err(|e| Fail::new(1, format!("proj: {e}")))?;
+    let take = || slot::take(cfg, id, &n, given).map_err(|e| Fail::new(1, format!("proj: {e}")));
+    let mut held = Some(take()?);
     // It's at work now, which is news to what it was started to kick: a turn
     // can wait in line for hours, and the steward says which it is.
     kick(cfg, lines(&job.path("kick")));
@@ -261,6 +268,38 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
             rewatch_later(cfg, id);
             told
         };
+        // Refused because the plan's usage is spent: so is every other
+        // turn's, until the limit resets (usage.rs). This one gives up its
+        // slot and waits in line again, where none is handed out till then,
+        // and runs once more in its own conversation, its clock stood still
+        // meanwhile. Any other answer says usage is there.
+        if let Some(l) = &last {
+            let text = fs::read(&stream).unwrap_or_default();
+            let run = String::from_utf8_lossy(text.get(from as usize..).unwrap_or_default());
+            if let Some((until, said)) = usage::refused(l, &run) {
+                let spent = usage::record(cfg, id, until, &said, now());
+                eprintln!("proj: {}", usage::line(&spent));
+                // Waiting, as `proj state` and the watchdog read it: under
+                // the job's lock, as its slot was said (slot.rs took_slot).
+                {
+                    let _lock = job.lock();
+                    let _ = fs::remove_file(job.turn(&n, "slot"));
+                }
+                drop(held.take());
+                rewatch(cfg, &[id]);
+                let waited = now_nanos();
+                let _ = held.insert(take()?);
+                kick(cfg, lines(&job.path("kick")));
+                if let Some(dl) = deadline(&job, &n) {
+                    let dl = dl + (now_nanos() - waited);
+                    let _ = fs::write(job.turn(&n, "deadline"), format!("{dl}\n"));
+                }
+                let asked = read(&job.path(&format!("prompt.{n}"))).unwrap_or_default();
+                prompt = again(&format!("{SPENT}\n\n> {said}\n\n{asked}"), "spent");
+                continue;
+            }
+            usage::back(cfg);
+        }
         // Killed for memory before it answered, Claude itself as a rule (a
         // command it ran that's killed leaves it to answer), and not stopped
         // for going quiet: carried on in its own conversation, which its

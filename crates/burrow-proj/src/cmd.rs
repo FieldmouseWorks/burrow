@@ -10,7 +10,7 @@ use crate::job::{Job, answer, awaits, is_error, kick, result_of};
 use crate::pick::demoted;
 use crate::turn::{exec, lines};
 use crate::waits::rewatch;
-use crate::{Fail, io_fail, now, read, scratch, slot, systemd, watch};
+use crate::{Fail, io_fail, now, read, scratch, slot, systemd, usage, watch};
 
 mod run;
 
@@ -73,6 +73,22 @@ pub fn dispatch(cfg: &Config, args: &[String]) -> Result<(), Fail> {
             put(&names.iter().map(|n| format!("{n}\n")).collect::<String>());
             Ok(())
         }
+        Some("usage") => match args.get(1).map(String::as_str) {
+            None => {
+                if let Some(s) = usage::out(cfg) {
+                    put(&format!(
+                        "{}\n",
+                        serde_json::to_string(&s).unwrap_or_default()
+                    ));
+                }
+                Ok(())
+            }
+            Some("back") => {
+                usage::back(cfg);
+                Ok(())
+            }
+            Some(_) => Err(Fail::new(2, "usage: proj usage [back]")),
+        },
         Some("await") => wait_on(cfg, &args[1..]),
         Some(how @ ("ask" | "done")) => ends(cfg, how, args.len()),
         Some("_watch") => watch::look(cfg, args.get(1).map_or("", String::as_str)),
@@ -96,7 +112,7 @@ pub fn dispatch(cfg: &Config, args: &[String]) -> Result<(), Fail> {
         }
         Some(_) => Err(Fail::new(
             2,
-            "usage: proj run|reply|status|log|state|find|stop|withdraw|unstick|list|await|ask|done",
+            "usage: proj run|reply|status|log|state|find|stop|withdraw|unstick|list|usage|await|ask|done",
         )),
     }
 }
@@ -124,6 +140,9 @@ fn status(cfg: &Config, limit: Option<&String>) -> Result<(), Fail> {
         .map(|(t, id)| (t.unwrap_or(std::time::UNIX_EPOCH), id))
         .collect();
     jobs.sort_by(|a, b| b.cmp(a));
+    if let Some(spent) = usage::out(cfg) {
+        put(&format!("{}\n", usage::line(&spent)));
+    }
     for (_, id) in jobs.into_iter().take(limit) {
         let job = Job::new(cfg, &id);
         let st = job.state();

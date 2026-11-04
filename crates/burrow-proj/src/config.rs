@@ -51,6 +51,8 @@ pub struct Config {
     pub deployed: PathBuf,
     /// Each GitHub App's env file, by its name.
     pub apps: BTreeMap<String, PathBuf>,
+    /// The owner's notifier (burrow.tools.notify), when there is one.
+    pub notify: Option<PathBuf>,
     pub tools: Tools,
     /// proj-inbox's settings; None when it's off.
     pub inbox: Option<Inbox>,
@@ -92,8 +94,6 @@ pub struct Inbox {
     pub vm: bool,
     /// The machine's name, as its comments sign it.
     pub host: String,
-    /// The owner's notifier (burrow.tools.notify), when there is one.
-    pub notify: Option<PathBuf>,
     /// Where it books its next look at each repo.
     pub wake: PathBuf,
     /// The machine's own GitHub App, which a bot's issue's job acts as.
@@ -163,8 +163,9 @@ pub(crate) mod tests {
             "flake": "/data/dev/src/box",
             "deployed": "/nowhere/proj",
             "apps": {"workers": "/run/workers.env"},
+            "notify": "/bin/notify",
             "inbox": {"state": "/var/lib/burrow/proj-inbox", "label": "claude", "unstickLabel": "stuck",
-                      "authors": ["sam"], "vm": false, "host": "box", "notify": "/bin/notify",
+                      "authors": ["sam"], "vm": false, "host": "box",
                       "wake": "/var/lib/burrow/proj-inbox/wake.json", "machinery": "workers"},
             "tools": {"bash": "/bin/bash", "flock": "/bin/flock", "gh": "/bin/gh", "git": "/bin/git", "systemctl": "/bin/systemctl",
                       "systemdRun": "/bin/systemd-run", "timeout": "/bin/timeout"}

@@ -93,7 +93,10 @@ fn command() {
     assert_eq!(*kicks.lock().unwrap(), ["/kick/autoland/sam/r"]);
     let log = fs::read_to_string(d.join("proj.log")).unwrap();
     assert!(
-        log.starts_with("run --pipeline --timeout 60m --idle 20m --kick watchdog --owned homelab "),
+        // Whether the machine is out of Claude usage, which would hold it.
+        log.starts_with(
+            "usage\nrun --pipeline --timeout 60m --idle 20m --kick watchdog --owned homelab "
+        ),
         "{log}"
     );
     assert!(log.contains("PR #2") && !log.contains("PR #7"), "{log}");

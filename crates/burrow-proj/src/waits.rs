@@ -3,7 +3,8 @@
 //! running turn waits in line for.
 //!
 //! Watched: a turn waiting in line, for a slot or inside its run (its clock
-//! stands still meanwhile), for stallAfterMinutes; one running, until its
+//! stands still meanwhile), for stallAfterMinutes, and while the machine is
+//! out of usage, for that long after it resets; one running, until its
 //! deadline and GRACE (proj stops it before then); one that ended without
 //! saying what comes next even when asked again, at once, since nothing resumes
 //! it; one that ended in a failure, for RESUME_GRACE from its end, since
@@ -25,7 +26,7 @@ use serde_json::{Map, Value, json};
 use crate::config::Config;
 use crate::job::Job;
 use crate::slot::successor;
-use crate::{GRACE, RESUME_GRACE, mtime, now, swap};
+use crate::{GRACE, RESUME_GRACE, mtime, now, swap, usage};
 
 /// What [`job_wait`] reads of a job's latest turn.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -57,6 +58,8 @@ pub struct Facts {
     pub wait: Option<(String, String)>,
     /// Each PR or issue it awaits, and since when, as its await has them.
     pub awaits: Vec<(String, String)>,
+    /// The machine out of Claude usage, if it is (usage.rs).
+    pub spent: Option<usage::Spent>,
 }
 
 /// One job's wait in the watchdog's form, or None when there's nothing to
@@ -66,6 +69,13 @@ pub fn job_wait(cfg: &Config, f: &Facts) -> Option<Item> {
     let turn = &f.turn;
     let mut kick = None;
     let (since, due, phase) = match f.state.as_str() {
+        // Out of usage, no turn takes a slot till it's back (usage.rs): each
+        // has stallAfterMinutes from then.
+        "queued" if let Some(spent) = &f.spent => (
+            f.queued,
+            (f.queued + stall).max(spent.until + stall),
+            format!("turn {turn} is waiting in line: {}", usage::line(spent)),
+        ),
         "queued" => (
             f.queued,
             f.queued + stall,

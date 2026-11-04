@@ -25,6 +25,18 @@ pub fn clock_in(t: f64, tz: &TimeZone) -> String {
         .replace("PM", "pm")
 }
 
+/// A time days off, with its day: Wed Nov 4, 12:00pm PST.
+pub fn day(t: f64) -> String {
+    let Ok(at) = Timestamp::from_second(t.floor() as i64) else {
+        return format!("{t:.0}");
+    };
+    let date = at
+        .to_zoned(TimeZone::system())
+        .strftime("%a %b %-d")
+        .to_string();
+    format!("{date}, {}", clock(t))
+}
+
 /// The item in one line: what, and its link.
 pub fn line(it: &Item) -> String {
     match &it.link {

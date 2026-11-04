@@ -41,11 +41,11 @@ let
     inherit (config.burrow) flake;
     deployed = "/run/current-system/sw/bin/proj";
     apps = lib.mapAttrs (_: app: app.envFile) config.burrow.github.apps;
+    notify = if config.burrow.tools ? notify then lib.getExe config.burrow.tools.notify else null;
     inbox = if cfg.inbox.enable then {
       state = "${stateDir}/proj-inbox";
       inherit (cfg.inbox) label unstickLabel authors vm;
       host = config.networking.hostName;
-      notify = if config.burrow.tools ? notify then lib.getExe config.burrow.tools.notify else null;
       wake = inboxWake;
       machinery = if machineApp == null then null else machineApp.name;
     } else null;
