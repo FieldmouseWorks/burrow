@@ -122,6 +122,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "burrow-firmware"
+version = "0.0.0"
+dependencies = [
+ "jiff",
+ "rustix",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "burrow-github"
 version = "0.0.0"
 dependencies = [
