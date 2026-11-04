@@ -95,12 +95,6 @@ let
     # GraphQL names it: none without burrow.github.machinery.
     APP = if machineApp == null then "" else machineApp.name;
     BOT = if machineApp == null then "" else machineApp.slug;
-    APP_ENV = if machineApp == null then "" else machineApp.envFile;
-    # Renovate's (updates/renovate.sh).
-    APP_OWNERS = lib.concatStringsSep " " cfg.renovate.owners;
-    COVERS = coversTool;
-    RUN_LOCK = "${cfg.renovate.dir}/run.lock";
-    RUNS = "${cfg.renovate.dir}/runs";
   };
 
   # Each script gets the names it uses (shellcheck rejects the rest), set above
@@ -307,9 +301,29 @@ let
   majorSeal = pkgs.writeShellScriptBin "major-seal" ''
     exec ${pkgs.python3}/bin/python3 -E -s ${majorSealSrc}/major-seal.py ${stateDir}/renovate-sweep "$@"
   '';
-  renovateRun = script "renovate-run" ./updates/renovate.sh (
-    [ renovatePackage machineGh pkgs.util-linux pkgs.coreutils ] ++ lib.optional (machineApp != null) tools.gh-token
-  );
+  # renovate-run (crates/burrow-renovate), with its config built in.
+  renovateRunConfig = pkgs.writeText "renovate-run.json" (builtins.toJSON {
+    name = "renovate-run";
+    runLock = "${cfg.renovate.dir}/run.lock";
+    runs = "${cfg.renovate.dir}/runs";
+    app = if machineApp == null then null else {
+      inherit (machineApp) env;
+      inherit (cfg.renovate) owners;
+      ghToken = "${tools.gh-token}/bin/gh-token";
+    };
+    tools = {
+      gh = "${machineGh}/bin/gh";
+      renovate = "${renovatePackage}/bin/renovate";
+      covers = "${coversTool}";
+    };
+  });
+  renovateRun = pkgs.runCommand "renovate-run" {
+    nativeBuildInputs = [ pkgs.makeBinaryWrapper ];
+    meta.mainProgram = "renovate-run";
+  } ''
+    makeBinaryWrapper ${inputs.self.packages.${system}.burrow-renovate}/bin/burrow-renovate \
+      $out/bin/renovate-run --add-flags ${renovateRunConfig}
+  '';
   renovateSweep = script "renovate-sweep" ./updates/renovate-sweep.sh (
     (with pkgs; [ coreutils findutils jq gnused ]) ++ [ config.programs.git.package machineGh ] ++ calls
   );
@@ -832,7 +846,7 @@ in
         serviceConfig = {
           Type = "oneshot";
           User = user;
-          ExecStart = "${renovateRun}/bin/renovate-run${lib.optionalString (name == "renovate@") " %I"}";
+          ExecStart = "${lib.getExe renovateRun}${lib.optionalString (name == "renovate@") " %I"}";
           TimeoutStartSec = renovateRunFor;
           Nice = 10;
         };

@@ -20,12 +20,6 @@
     python3 -I ${./renovate-sweep.py} ${../modules/updates/renovate-sweep.sh} ${../modules/updates/major-seal.py} ${../modules/autoland/seal.py} ${../modules/autoland/lock_wait.py}
     touch $out
   '';
-  # Which repos Renovate's runs cover, with whose token: gh's login for
-  # all of them, or a run each with its owner's App token.
-  renovate-run = pkgs.runCommand "renovate-run-check" { nativeBuildInputs = [ pkgs.python3 pkgs.util-linux ]; } ''
-    python3 -I ${./renovate-run.py} ${../modules/updates/renovate.sh}
-    touch $out
-  '';
   # What decides a lock file refresh's release age in a Renovate config,
   # as Renovate itself migrates it, resolves its presets (at any scope)
   # and reads its durations; what it can't resolve or read fails.

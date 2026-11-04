@@ -216,8 +216,8 @@ let
       inherit (cfg.dashboard) waitDays errorDays;
       title = dashboardTitle;
       renovateKick = if config.burrow.updates.renovate.enable or false then "${config.burrow.events.kick}/renovate" else null;
-      # When Renovate's runs ended (updates/renovate.sh's RUNS), for an
-      # error's two runs.
+      # When Renovate's runs ended (renovate-run's `runs`,
+      # crates/burrow-renovate), for an error's two runs.
       renovateRuns = if config.burrow.updates.renovate.enable or false then "${config.burrow.updates.renovate.dir}/runs" else null;
     } else null;
     # Quarantined flaky tests, each to a Claude job: the issues titled
