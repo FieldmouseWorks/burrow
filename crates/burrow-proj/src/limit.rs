@@ -25,7 +25,8 @@ pub const TARGET: &str = "usage-limit";
 
 /// The soonest the job is resumed, in seconds after the turn ended: a reset
 /// already past (a clock that's off, or a limit that outlasts the window its
-/// words name) can't send it round again in seconds.
+/// words name) can't send it round again in seconds. Also how long ago a
+/// reset said as a time alone may have passed and still be that one.
 pub const FLOOR: i64 = 900;
 
 /// How long after the reset the job is resumed, in seconds: the limit's
@@ -67,15 +68,20 @@ pub fn resets(text: &str, now: i64) -> Option<i64> {
             let month = MONTHS.iter().position(|m| *m == month)? as i8 + 1;
             Date::new(year, month, day.parse().ok()?).ok()?
         }
-        // A time alone is within the day: the next time the clock says it.
+        // A time alone is within the day: the next time the clock says it,
+        // or the last one if that passed no more than FLOOR ago. The turn's
+        // end and this reading lag behind the words, a moment or across
+        // midnight; a later one read as passed costs one more refusal FLOOR
+        // on, which then reads as the next.
         None => {
             let date = today.date();
-            let at = date.to_datetime(time).to_zoned(tz.clone()).ok()?;
-            if at.timestamp().as_second() > now {
-                date
-            } else {
-                date.tomorrow().ok()?
-            }
+            [date.yesterday().ok()?, date, date.tomorrow().ok()?]
+                .into_iter()
+                .find(|d| {
+                    d.to_datetime(time)
+                        .to_zoned(tz.clone())
+                        .is_ok_and(|at| at.timestamp().as_second() >= now - FLOOR)
+                })?
         }
     };
     let at = at.to_datetime(time).to_zoned(tz).ok()?;
@@ -150,6 +156,46 @@ mod tests {
             resets(
                 "You've hit your weekly limit · resets 12am (UTC)",
                 at("2026-11-04T23:00:00Z")
+            ),
+            Some(at("2026-11-05T00:00:00Z"))
+        );
+    }
+
+    // One that passed no more than FLOOR ago is that one, not tomorrow's: the
+    // turn's end, and proj reading it, lag behind the words. Across midnight
+    // too, and FLOOR after the turn ended is when the job resumes.
+    #[test]
+    fn a_reset_just_past() {
+        let said = "You've hit your session limit · resets 3:30pm (UTC)";
+        for now in [
+            "2026-11-04T15:30:00Z",
+            "2026-11-04T15:30:05Z",
+            "2026-11-04T15:45:00Z",
+        ] {
+            assert_eq!(
+                resets(said, at(now)),
+                Some(at("2026-11-04T15:30:00Z")),
+                "{now}"
+            );
+            let due = line(said, at(now)).unwrap();
+            assert!(
+                due.ends_with(&format!("\t{}\n", at(now) + FLOOR)),
+                "{now}: {due}"
+            );
+        }
+        assert_eq!(
+            resets(said, at("2026-11-04T15:45:01Z")),
+            Some(at("2026-11-05T15:30:00Z"))
+        );
+        let late = "You've hit your weekly limit · resets 11:55pm (UTC)";
+        assert_eq!(
+            resets(late, at("2026-11-05T00:05:00Z")),
+            Some(at("2026-11-04T23:55:00Z"))
+        );
+        assert_eq!(
+            resets(
+                "You've hit your weekly limit · resets 12am (UTC)",
+                at("2026-11-05T00:00:30Z")
             ),
             Some(at("2026-11-05T00:00:00Z"))
         );
