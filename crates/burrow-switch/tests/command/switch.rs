@@ -363,7 +363,17 @@ fn a_switch_whose_revert_wont_arm_leaves_the_one_before_it_pending_and_reverting
     assert_eq!(said(&m.switch(&["--abort"])), ok(""));
     nothing_pending(&m, &m.sys("one"));
 
-    // When that won't arm either, it reverts now.
+    // When that won't arm either, it reverts now, in a unit of its own as
+    // an abort does: one that outlives what started it, even when putting
+    // the confirmed system back stops that.
+    let now = |m: &Machine| {
+        format!(
+            "--unit=box-revert-now --property=ManagedOOMPreference=omit --collect --wait --pipe --quiet --setenv=PATH={} {} --revert-to {}\n",
+            unit_path(),
+            m.me(),
+            m.sys("one")
+        )
+    };
     let (m, err) = replaced("");
     let (one, two) = (m.sys("one"), m.sys("two"));
     assert!(
@@ -372,13 +382,51 @@ fn a_switch_whose_revert_wont_arm_leaves_the_one_before_it_pending_and_reverting
         )),
         "{err}"
     );
-    assert_eq!(m.fake("systemd-run"), arm(&m).repeat(2));
+    assert_eq!(m.fake("systemd-run"), arm(&m).repeat(2) + &now(&m));
     assert_eq!(m.fake("switch-to-configuration"), "one test\n");
     assert_eq!(
         m.fake("journal"),
         format!("-t box-switch -p warning not confirmed, reverted to {one} (activation exit 0)\n")
     );
     nothing_pending(&m, &one);
+    // One that doesn't get back says so, as a revert does.
+    let m = Machine::switched(false);
+    let (one, two) = (m.sys("one"), m.sys("two"));
+    m.set("stays-one", "");
+    m.set("fail-run-box-revert", "");
+    let out = m.switch(&["--toplevel", &m.system("three", Some(300))]);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(m.state("pending"), Some(format!("{two}\n")));
+    assert_eq!(m.state("revert-failed"), Some(format!("{one}\n")));
+    assert_eq!(
+        m.fake("journal"),
+        format!(
+            "-t box-switch -p err REVERT FAILED (exit 0): still running the unconfirmed {two}\n"
+        )
+    );
+    // And one that can't start.
+    let m = Machine::switched(false);
+    let (one, two) = (m.sys("one"), m.sys("two"));
+    m.set("fail-run-box-revert", "");
+    m.set("fail-run-box-revert-now", "");
+    let out = m.switch(&["--toplevel", &m.system("three", Some(300))]);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(m.fake("systemd-run"), arm(&m).repeat(2) + &now(&m));
+    assert_eq!(m.fake("switch-to-configuration"), "");
+    assert_eq!(m.running(), two);
+    assert_eq!(m.state("pending"), Some(format!("{two}\n")));
+    assert_eq!(m.state("revert-failed"), Some(format!("{one}\n")));
+    assert_eq!(
+        m.fake("journal"),
+        format!(
+            "-t box-switch -p err REVERT FAILED (it couldn't start): still running the unconfirmed {two}\n"
+        )
+    );
+    let status = said(&m.switch(&["--status"])).1;
+    assert!(
+        status.starts_with(&format!("REVERT FAILED: still on the unconfirmed {two};\n")),
+        "{status}"
+    );
 
     // Its timer still waiting, when it wouldn't stop: left be.
     let m = Machine::switched(false);

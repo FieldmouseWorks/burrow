@@ -261,7 +261,7 @@ impl Before {
 /// live, nothing's pending. Otherwise what was pending is again, and an
 /// earlier switch that's still live keeps a revert: the one this switch
 /// stopped, armed again with its window, or, when that won't arm either,
-/// the confirmed system put back now.
+/// the confirmed system put back now, in a unit of its own as an abort's.
 fn not_armed(
     cfg: &Config,
     me: &Me,
@@ -302,7 +302,17 @@ fn not_armed(
         "{running} is still unconfirmed, and its revert won't arm either: reverting to {} now",
         prev.display()
     ));
-    revert_to(cfg, prev).map(drop)
+    let _ = revert_now(cfg, me, prev);
+    // A revert that ran says itself how it went. One that couldn't start
+    // is said as one that didn't get back.
+    if cfg.running()? != prev && cfg.recorded("revert-failed")?.is_none() {
+        cfg.write("revert-failed", prev)?;
+        cfg.journal(
+            "err",
+            &format!("REVERT FAILED (it couldn't start): still running the unconfirmed {running}"),
+        );
+    }
+    Ok(())
 }
 
 /// The window, in microseconds, as `systemd-analyze timespan` reads it:
@@ -444,16 +454,21 @@ fn abort(cfg: &Config, me: &Me) -> Result<u8, Broke> {
             cfg.file("prev").display()
         )));
     };
-    let reverted = Command::new(&cfg.tools.systemd_run)
+    Ok(u8::try_from(exit_of(revert_now(cfg, me, &prev))).unwrap_or(1))
+}
+
+/// The revert, now, in a unit of its own: it outlives whatever started it,
+/// even when putting `prev` back stops that.
+fn revert_now(cfg: &Config, me: &Me, prev: &Path) -> std::io::Result<std::process::ExitStatus> {
+    Command::new(&cfg.tools.systemd_run)
         .arg(format!("--unit={}-now", cfg.revert))
         .args([KEEP, "--collect", "--wait", "--pipe", "--quiet"])
         .arg(format!("--setenv=PATH={}", cfg.path))
         .arg(&me.exe)
         .arg(&me.config)
         .arg("--revert-to")
-        .arg(&prev)
-        .status();
-    Ok(u8::try_from(exit_of(reverted)).unwrap_or(1))
+        .arg(prev)
+        .status()
 }
 
 /// The confirmed system put back, as the revert's units run it when the
