@@ -21,6 +21,7 @@ use std::process::{Command, ExitStatus, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rustix::fs::{FlockOperation, flock};
+use rustix::io::{FdFlags, fcntl_setfd};
 use serde::Deserialize;
 
 /// What a program that couldn't be run exits with, as a shell says it.
@@ -160,6 +161,12 @@ impl Config {
             Err(e) => return self.broke(&self.run_lock, e),
         };
         if let Err(e) = flock(&lock, FlockOperation::LockExclusive) {
+            return self.broke(&self.run_lock, e.into());
+        }
+        // Renovate holds it too, until it's gone: a renovate-run killed
+        // while its Renovate still runs (or shuts down) leaves no gap for
+        // another run on the same clones.
+        if let Err(e) = fcntl_setfd(&lock, FdFlags::empty()) {
             return self.broke(&self.run_lock, e.into());
         }
         let mut asked = match &self.app {

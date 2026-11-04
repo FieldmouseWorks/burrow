@@ -81,6 +81,13 @@ echo "ghs_$2_$(wc -l <"$FAKE/log")"
         "renovate",
         r#"echo "renovate $* token=$RENOVATE_TOKEN com=$GITHUB_COM_TOKEN" >>"$FAKE/log"
 locked renovate
+# FAKE/renovate-outlives: renovate-run is killed while it runs, and the lock
+# is still held once it's gone.
+if [ -e "$FAKE/renovate-outlives" ]; then
+  kill -9 "$PPID"
+  while [ -e "/proc/$PPID" ] && [ "$(cut -d' ' -f3 "/proc/$PPID/stat")" != Z ]; do sleep 0.05; done
+  locked "renovate after renovate-run"
+fi
 [ ! -e "$FAKE/renovate-fails" ] || case "$*" in *"$(cat "$FAKE/renovate-fails")"*) exit 1 ;; esac
 "#,
     ),
@@ -247,6 +254,21 @@ fn as_the_user_one_run_covers_every_repo_with_its_login() {
     );
     assert_eq!(m.noted(), ["all"]);
     assert_eq!(m.ended("all").len(), 1);
+}
+
+#[test]
+fn renovate_holds_the_lock_till_its_gone_whatever_becomes_of_its_run() {
+    for app in [None, Some(&["sam"][..])] {
+        for words in [&[][..], &["sam/r"]] {
+            let m = Machine::new(app);
+            m.set("sam-repos", "sam/r\n");
+            m.set("renovate-outlives", "");
+            let (code, _, _) = m.run(words);
+            assert_eq!(code, None, "{app:?} {words:?}: killed");
+            // calls() fails on an unlocked call.
+            assert!(m.runs().len() == 1, "{app:?} {words:?}");
+        }
+    }
 }
 
 #[test]
