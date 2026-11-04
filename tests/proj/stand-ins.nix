@@ -109,6 +109,12 @@
         exit 1 ;;
       # Fails as Claude does when the API refuses it: a result with no text.
       fail) echo '{"type":"result","session_id":"s","is_error":true,"errors":["refused"]}'; exit 1 ;;
+      # Fails as Claude Code does at a usage limit, in its words for when it
+      # resets: "limit 3pm" resets at the next 3pm UTC.
+      limit*)
+        ${pkgs.jq}/bin/jq -nc --arg r "You've hit your session limit · resets ''${prompt#limit } (UTC)" \
+          '{type: "result", session_id: "s", result: $r, is_error: true}'
+        exit 1 ;;
       # An issue's task (proj-inbox) that takes a while to answer.
       *inbox-slow*) sleep 8 ;;
       # What it would act on GitHub as: its App's socket, git's settings and

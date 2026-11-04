@@ -7,9 +7,10 @@
 //! deadline and GRACE (proj stops it before then); one that ended without
 //! saying what comes next even when asked again, at once, since nothing resumes
 //! it; one that ended in a failure, for RESUME_GRACE from its end, since
-//! proj-inbox resumes an issue's job seconds later when a reply waits; one
-//! awaiting GitHub, for awaitHours and GRACE (proj-watch resumes it by then,
-//! told nothing changed). Not watched:
+//! proj-inbox resumes an issue's job seconds later when a reply waits, but
+//! one that ended on a usage limit for GRACE past when proj-watch resumes it
+//! ([`crate::limit`]); one awaiting GitHub, for awaitHours and GRACE
+//! (proj-watch resumes it by then, told nothing changed). Not watched:
 //! a turn that asks a person (their reply resumes it) or is done, one proj
 //! stop ended, and any ended turn of an --owned job.
 
@@ -24,6 +25,7 @@ use serde_json::{Map, Value, json};
 
 use crate::config::Config;
 use crate::job::Job;
+use crate::limit;
 use crate::slot::successor;
 use crate::{GRACE, RESUME_GRACE, mtime, now, swap};
 
@@ -57,6 +59,9 @@ pub struct Facts {
     pub wait: Option<(String, String)>,
     /// Each PR or issue it awaits, and since when, as its await has them.
     pub awaits: Vec<(String, String)>,
+    /// When proj-watch resumes it after the usage limit its turn ended on,
+    /// in seconds, as its await has it ([`crate::limit`]).
+    pub resets: Option<i64>,
 }
 
 /// One job's wait in the watchdog's form, or None when there's nothing to
@@ -97,7 +102,17 @@ pub fn job_wait(cfg: &Config, f: &Facts) -> Option<Item> {
             if f.stopped || f.owned {
                 return None;
             }
-            if state != "done" {
+            if let (false, Some(due)) = (state == "done", f.resets) {
+                kick = Some("proj-watch".to_owned());
+                (
+                    f.ended,
+                    due + GRACE,
+                    format!(
+                        "turn {turn} ended on a usage limit; proj-watch resumes it once that resets, at {}",
+                        limit::utc(due)
+                    ),
+                )
+            } else if state != "done" {
                 (
                     f.ended,
                     f.ended + RESUME_GRACE,
@@ -161,7 +176,7 @@ pub fn job_wait(cfg: &Config, f: &Facts) -> Option<Item> {
 }
 
 /// Whole seconds, written as digits alone.
-fn seconds(s: &str) -> Option<i64> {
+pub fn seconds(s: &str) -> Option<i64> {
     (!s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()))
         .then(|| s.parse().ok())
         .flatten()
