@@ -32,6 +32,7 @@ use burrow_upkeep::sweep;
 use burrow_upkeep::token::{self, Installations, Token};
 use burrow_upkeep::verdict::{self, Asked};
 use gh_token::app::Minted;
+use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::json;
 
@@ -380,6 +381,24 @@ fn stdin<T: DeserializeOwned>(what: &str) -> Result<T, Stop> {
     serde_json::from_str(&text).map_err(|e| Stop::Usage(format!("{what}: {e}")))
 }
 
+/// What `fetch` is asked for: refspecs, and a PR's head into refs/pr/N
+/// (`mirror::fetch_pr`).
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Fetch {
+    #[serde(default)]
+    pr: Option<FetchPr>,
+    refs: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FetchPr {
+    number: u64,
+    /// The head the PR reports.
+    head: String,
+}
+
 /// `fetch`, which a status run never asks for: the steward's mirror is
 /// fetched into by the steward alone. It doesn't talk to GitHub's API, so
 /// it never meets its rate limit.
@@ -389,9 +408,14 @@ fn fetched(config: &str, repo: &str, dry: bool) -> Result<(), Stop> {
             "fetch has no status run: it writes the steward's mirror".into(),
         ));
     }
-    let refs: Vec<String> = stdin("the refspecs to fetch, as a JSON list on stdin")?;
+    let ask: Fetch = stdin("what to fetch, as a JSON object on stdin")?;
     let cfg = Config::read(Path::new(config)).map_err(Stop::Failed)?;
-    let out = match mirror::fetch(&cfg, &cfg.state_dir, repo, &refs) {
+    let (state, refs) = (&cfg.state_dir, &ask.refs);
+    let got = match &ask.pr {
+        Some(pr) => mirror::fetch_pr(&cfg, state, repo, pr.number, &pr.head, refs),
+        None => mirror::fetch(&cfg, state, repo, refs),
+    };
+    let out = match got {
         Ok(m) => json!({"mirror": m, "why": null, "limited": null}),
         Err(why) => json!({"mirror": null, "why": why, "limited": null}),
     };

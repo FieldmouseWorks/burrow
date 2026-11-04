@@ -137,12 +137,8 @@ pub fn take(cfg: &Config, state: &Path, repo: &str, look: &Look) -> Result<Meta,
         return Ok(meta);
     }
     let hide = Hide::new(&cfg.snapshot, repo)?;
-    let n = look.number;
-    let refs = [
-        format!("+refs/pull/{n}/head:refs/pr/{n}"),
-        format!("+refs/heads/{base}:refs/base/{base}"),
-    ];
-    let m = mirror::fetch(cfg, state, repo, &refs)?;
+    let more = [format!("+refs/heads/{base}:refs/base/{base}")];
+    let m = mirror::fetch_pr(cfg, state, repo, look.number, head, &more)?;
     let base_ref = format!("refs/base/{base}");
     let mb = line(&git_in(&m).args(["merge-base", &base_ref, head]).run()?);
     let changed = names(
