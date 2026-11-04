@@ -279,5 +279,10 @@ fn a_timeline_that_cant_be_read_holds_the_pr() {
     m.set("timeline-29", "not json");
     assert!(m.pass().jobs.is_empty());
     m.unset("timeline-29");
+    // Nor when gh failed, whatever it printed: --slurp prints what pages it
+    // got, none or some, as a list all the same.
+    m.set("timeline-fails", "");
+    assert!(m.pass().jobs.is_empty());
+    m.unset("timeline-fails");
     assert!(m.pass().task().contains("#29 "));
 }

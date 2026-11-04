@@ -57,7 +57,8 @@ const STAND_INS: [(&str, &str); 6] = [
         // Renovate PRs (FAKE/prs-OWNER_REPO, or FAKE/prs for every repo),
         // PR N's comments (FAKE/comments-N), Renovate's comments as REST
         // has them (FAKE/rest-N) and PR N's timeline (FAKE/timeline-N, as
-        // the pages --slurp gives them, or none). It refuses an edit when
+        // the pages --slurp gives them, or none; FAKE/timeline-fails has it
+        // fail after printing them, as gh does when a page doesn't come). It refuses an edit when
         // FAKE/gh-refuses is there, and the first to read PR N's comments when FAKE/gh-blocks
         // says N waits for FAKE/gh-go.
         "gh",
@@ -72,7 +73,8 @@ case "$1 $2" in
     cat "$FAKE/comments-$3" 2>/dev/null || echo '{"comments": []}' ;;
   "api --paginate")
     case "$4" in
-      */timeline) n=${4%/timeline}; cat "$FAKE/timeline-${n##*/}" 2>/dev/null || echo '[[]]' ;;
+      */timeline) n=${4%/timeline}; cat "$FAKE/timeline-${n##*/}" 2>/dev/null || echo '[[]]'
+        [ ! -e "$FAKE/timeline-fails" ] ;;
       *) n=${4%/comments}; cat "$FAKE/rest-${n##*/}" 2>/dev/null ;;
     esac ;;
   "api -X") [ ! -e "$FAKE/gh-refuses" ] ;;

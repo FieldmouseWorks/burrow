@@ -1,6 +1,8 @@
 //! Asking Renovate to redo a branch, and taking the request back: its
 //! rebase label, and the rebase! title prefix the sweep only ever takes off.
 
+use std::process::{Command, Stdio};
+
 use serde_json::Value;
 
 use super::Sweep;
@@ -18,19 +20,23 @@ pub(super) const TITLE: &str = "rebase!";
 impl Sweep<'_> {
     /// When a refresh request on PR `n` last came off, as its timeline has
     /// it: the rebase label taken off, or a rebase! title changed. Some(None)
-    /// when one never did, None when the timeline can't be read.
+    /// when one never did, None when the timeline can't be read: gh failing
+    /// on any page counts, though what it printed may still parse (an empty
+    /// or a partial list).
     pub(super) fn request_gone(&self, n: &str) -> Option<Option<i64>> {
-        let cfg = self.cfg;
-        let said = cfg.said(
-            &cfg.tools.gh,
-            &[
+        let out = Command::new(&self.cfg.tools.gh)
+            .args([
                 "api",
                 "--paginate",
                 "--slurp",
                 &format!("repos/{}/issues/{n}/timeline", self.repo),
-            ],
-        );
-        let pages: Vec<Vec<Value>> = serde_json::from_slice(&said).ok()?;
+            ])
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+            .ok()
+            .filter(|o| o.status.success())?;
+        let pages: Vec<Vec<Value>> = serde_json::from_slice(&out.stdout).ok()?;
         Some(
             pages
                 .iter()
