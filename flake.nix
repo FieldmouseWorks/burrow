@@ -677,6 +677,7 @@
           + usage (tool "confirm") "${p}-confirm"
           + usage (tool "boot") "${p}-boot default SYSTEM | trial [--force] | check | status"
           + usage systemd.services.firmware-check.serviceConfig.ExecStart "firmware-check [--review]"
+          + usage systemd.services.renovate.serviceConfig.ExecStart "renovate-run [OWNER/REPO]"
           + "touch $out\n");
         # Which repo the flake's origin is, and so whether HOST-update goes
         # through its train: the same in every spelling of GitHub's URLs

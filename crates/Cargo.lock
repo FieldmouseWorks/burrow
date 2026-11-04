@@ -247,6 +247,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "burrow-renovate"
+version = "0.0.0"
+dependencies = [
+ "rustix",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "burrow-review"
 version = "0.0.0"
 dependencies = [
