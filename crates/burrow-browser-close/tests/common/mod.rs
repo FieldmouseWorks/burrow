@@ -5,10 +5,13 @@
 #![allow(dead_code)]
 
 use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::os::fd::OwnedFd;
 use std::process::{Child, Command};
 use std::sync::{Arc, Mutex};
 use std::thread;
+
+use rustix::net::{self, AddressFamily, SocketType};
 
 /// How the stand-in answers.
 #[derive(Clone, Copy)]
@@ -49,13 +52,15 @@ pub fn browser() -> Child {
     Command::new("sleep").arg("60").spawn().expect("sleep")
 }
 
-/// A port nothing listens on: one the system just gave out and took back.
-pub fn nobody() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .expect("a port")
-        .local_addr()
-        .expect("its address")
-        .port()
+/// A port nothing listens on, held while its socket is: bound but not
+/// listening, so a connection to it is refused, and no other test's
+/// stand-in can be given it meanwhile.
+pub fn nobody() -> (OwnedFd, u16) {
+    let socket = net::socket(AddressFamily::INET, SocketType::STREAM, None).expect("a socket");
+    net::bind(&socket, &SocketAddr::from(([127, 0, 0, 1], 0))).expect("a port");
+    let at = net::getsockname(&socket).expect("its address");
+    let port = SocketAddr::try_from(at).expect("an IP address").port();
+    (socket, port)
 }
 
 impl DevTools {
