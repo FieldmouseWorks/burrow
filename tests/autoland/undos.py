@@ -197,7 +197,10 @@ for rc, out, said in ((65, [], "cn: no landed change for sam/u#12"),
 # before recording, which is a fix already; after UNDO_TRIES, the next job
 # is told. A pass sooner than that (any event starts one) asks nothing and
 # uses up no try: it books the pass for then.
-kept_now = C.NOW
+# The retry's clock is the time now, not the pass's start: here, C.NOW
+# moved on by however long this pass has run.
+kept_now, ran = C.NOW, [0]
+R.clock = lambda: C.NOW + ran[0]
 start()
 STATES["job-1"] = "done"
 answer("job-1", {"undo": "sam/u#12"})
@@ -205,7 +208,7 @@ writer(rc=1, out=[{"unrecorded": "https://github.com/sam/u/pull/40", "pr": 40}],
 C.WAKE.clear()
 assert R.watch_default(repo, default("FAILURE"), [], mine) == {}
 assert red()["undos"] == [40] and not red().get("asked"), red()
-assert C.NOW + 300 <= C.WAKE.get("sam/u") == red()["retryAt"] < C.NOW + 310, (red(), C.WAKE)
+assert C.WAKE.get("sam/u") == red()["retryAt"] == C.NOW + 300, (red(), C.WAKE)
 for _ in range(3):
     C.WAKE.clear()
     assert R.watch_default(repo, default("FAILURE"), [undo_pr()], mine) == {}
@@ -230,6 +233,21 @@ R.watch_default(repo, default("FAILURE"), [], mine)
 assert len(writer_runs()) == R.UNDO_TRIES, writer_runs()
 assert len(JOBS) == 2 and f"stopped {R.UNDO_TRIES} times" in JOBS[1] and "GitHub is unavailable" in JOBS[1], JOBS[1]
 C.NOW = kept_now
+# A pass that ran seven minutes before it asked: five minutes from when cn
+# stopped, not from the pass's start, and checked against the time then.
+start()
+STATES["job-1"] = "done"
+answer("job-1", {"undo": "sam/u#12"})
+writer(rc=75, err="cn: GitHub is unavailable")
+ran[0] = 420
+R.watch_default(repo, default("FAILURE"), [], mine)
+assert red()["retryAt"] == C.NOW + 420 + 300 and red()["undoTries"] == 1, red()
+C.NOW += 420 + 60
+ran[0] = 0
+R.watch_default(repo, default("FAILURE"), [], mine)
+assert len(writer_runs()) == 1 and red()["undoTries"] == 1, (writer_runs(), red())
+C.NOW = kept_now
+R.clock = __import__("time").time
 
 # Run past its time, what it printed before then counts all the same.
 start()

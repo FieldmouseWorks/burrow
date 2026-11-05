@@ -280,6 +280,9 @@ def watch_default(r, info, prs, digest):
 # How many times cn may stop partway through a red's undo (GitHub
 # unavailable or erring) before the red's next job is told it couldn't be.
 UNDO_TRIES = 3
+# The time now, not when the pass started (C.NOW): a pass can wait for its
+# lock and see to other repos first, and a retry's spacing is real time.
+clock = time.time
 UNDO_NAMED = re.compile(r"([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)#([1-9][0-9]{0,9})")
 
 
@@ -320,7 +323,7 @@ def undo_red(repo, red):
     if asked is None:
         red["asked"] = True
         return False
-    if red.get("retryAt", 0) > C.NOW:
+    if red.get("retryAt", 0) > clock():
         C.wake(repo, red["retryAt"])  # ends: retryAt, UNDO_TRIES
         return True
     if DRY:
@@ -328,7 +331,6 @@ def undo_red(repo, red):
         return True
     # The writer's own token, never the steward's: its PR is the machinery's.
     env = {k: v for k, v in os.environ.items() if k not in ("GH_TOKEN", "GITHUB_TOKEN", "CONARY_TOKEN_COMMAND")}
-    started = time.monotonic()
     try:
         p = subprocess.run([CFG["undo"], "undo", asked], env=env, capture_output=True, text=True, timeout=600)
         rc, out, said = p.returncode, p.stdout, p.stderr.strip()[-300:]
@@ -369,7 +371,7 @@ def undo_red(repo, red):
     log(f"{repo}: cn undo {asked} stopped ({said}), try {red['undoTries']} of {UNDO_TRIES}")
     if red["undoTries"] < UNDO_TRIES:
         # From when it stopped: a pass that comes sooner (any event) waits.
-        red["retryAt"] = C.NOW + (time.monotonic() - started) + 5 * 60
+        red["retryAt"] = clock() + 5 * 60
         C.wake(repo, red["retryAt"])  # ends: UNDO_TRIES
         return True
     red["asked"] = True
