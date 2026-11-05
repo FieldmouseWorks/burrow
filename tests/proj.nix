@@ -67,6 +67,9 @@ import ./proj/test.nix { inherit self pkgs; } "proj" ''
       assert told.startswith("Your answer didn't say what comes next"), told
       assert all(x in told for x in ("proj await URL", "proj ask", "proj done")), told
       assert "proj done" in machine.succeed("cat /tmp/args")
+      # Without the claude.ai connectors or skills, which no job uses.
+      assert "--disable-slash-commands" in machine.succeed("cat /tmp/args").split(), machine.succeed("cat /tmp/args")
+      assert machine.succeed("cat /tmp/connectors").strip() == "false", machine.succeed("cat /tmp/connectors")
       assert machine.succeed(f"cat /data/dev/jobs/{a}/turns").strip() == "1" and end(a) == "undeclared"
       assert proj(f"log {a}") == ("did silent\n\ntold\n\n(turn 1 ended without saying what comes next, "
                                   "even when asked again: nothing resumes the job but a reply)"), proj(f"log {a}")
