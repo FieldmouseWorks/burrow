@@ -36,7 +36,7 @@ pub fn look(cfg: &Config, only: &str) -> Result<(), Fail> {
     pass.lock().map_err(|e| io_fail(&lock, e))?;
     let hours = cfg.await_hours as i64;
     let mut retry: Vec<(String, i64)> = Vec::new();
-    for id in job_ids(cfg) {
+    'jobs: for id in job_ids(cfg) {
         let job = Job::new(cfg, &id);
         let f = job.path("await");
         if !filled(&f) || matches!(job.state().as_str(), "queued" | "running") {
@@ -52,8 +52,14 @@ pub fn look(cfg: &Config, only: &str) -> Result<(), Fail> {
                 continue;
             }
             if a.target == OLD_LIMIT {
-                if let Some(reset) = a.was.parse::<i64>().ok().filter(|&t| t > now()) {
-                    usage::record(cfg, &id, Some(reset), usage::EARLIER, now());
+                let reset = a.was.parse::<i64>().unwrap_or(0);
+                let written = a.since.parse::<i64>().unwrap_or_else(|_| now());
+                // Not taken: the job's waits stay as they are, for the next
+                // look, which is booked.
+                if let Err(e) = usage::earlier(cfg, &id, reset, written) {
+                    eprintln!("{e}");
+                    retry.push((String::new(), now() + RETRY));
+                    continue 'jobs;
                 }
                 news.push_str("- the usage limit your last turn ended on: proj holds every turn in line until it resets, this one included\n");
                 continue;

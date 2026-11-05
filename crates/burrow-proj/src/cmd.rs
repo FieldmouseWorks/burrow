@@ -75,7 +75,11 @@ pub fn dispatch(cfg: &Config, args: &[String]) -> Result<(), Fail> {
         }
         Some("usage") => match args.get(1).map(String::as_str) {
             None => {
-                usage::adopt(cfg);
+                // What can't be taken now is left where it is, for the next
+                // pass: what's held already is still said.
+                if let Err(e) = usage::adopt(cfg) {
+                    eprintln!("{e}");
+                }
                 if let Some(s) = usage::out(cfg) {
                     put(&format!(
                         "{}\n",
@@ -93,16 +97,9 @@ pub fn dispatch(cfg: &Config, args: &[String]) -> Result<(), Fail> {
                 let until = arg(args, 2, "usage: proj usage hold UNTIL")?
                     .parse::<i64>()
                     .map_err(|_| Fail::new(2, "usage: proj usage hold UNTIL (seconds)"))?;
-                if until > now() {
-                    usage::record(
-                        cfg,
-                        "the stall watchdog",
-                        Some(until),
-                        usage::EARLIER,
-                        now(),
-                    );
-                }
-                Ok(())
+                // Fails unless the hold has it: the watchdog keeps its own
+                // till then.
+                usage::earlier(cfg, "the stall watchdog", until, now()).map_err(|e| Fail::new(1, e))
             }
             Some(_) => Err(Fail::new(2, "usage: proj usage [back | hold UNTIL]")),
         },

@@ -287,7 +287,15 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
         });
         match refusal {
             Some((until, said)) => {
-                let spent = usage::record(cfg, id, until, &said, now());
+                // A hold that can't be written holds nothing: this turn
+                // ends refused, as one did before the hold.
+                let spent = match usage::record(cfg, id, until, &said, now()) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        eprintln!("{e}: so the turn ends here, refused");
+                        break (last, rc);
+                    }
+                };
                 eprintln!("proj: {}", usage::line(&spent));
                 // All of the refused run gone first, as for any run after
                 // another: what it left could hold the slot it gives up

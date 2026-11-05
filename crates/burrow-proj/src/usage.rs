@@ -34,7 +34,7 @@ use crate::config::Config;
 use crate::job::{Job, is_error, kick};
 use crate::limit;
 use crate::waits::rewatch_all;
-use crate::{now, swap};
+use crate::{filled, mtime, now, swap};
 
 /// Where it's kept, in jobs.
 pub(crate) const FILE: &str = ".usage.json";
@@ -150,28 +150,41 @@ pub fn kept(cfg: &Config) -> Option<Spent> {
     serde_json::from_str(&text).ok()
 }
 
-/// jobs/.usage.lock, held: every change to the record goes under it.
-fn lock(cfg: &Config) -> Option<File> {
-    let f = File::create(cfg.jobs.join(".usage.lock")).ok()?;
-    f.lock().ok()?;
-    Some(f)
+/// jobs/.usage.lock, held: every change to the record goes under it, and
+/// none goes ahead without it.
+fn lock(cfg: &Config) -> Result<File, String> {
+    let path = cfg.jobs.join(".usage.lock");
+    let f = File::create(&path).map_err(|e| format!("proj: {}: {e}", path.display()))?;
+    f.lock()
+        .map_err(|e| format!("proj: {}: {e}", path.display()))?;
+    Ok(f)
 }
 
-fn keep(cfg: &Config, s: &Spent) {
-    let text = serde_json::to_string(s).unwrap_or_default();
-    if let Err(e) = swap(&cfg.jobs.join(FILE), &format!("{text}\n")) {
-        eprintln!("proj: {FILE}: {e}");
-    }
+/// The record written whole (a temp file renamed over it), or why not.
+fn keep(cfg: &Config, s: &Spent) -> Result<(), String> {
+    let text = serde_json::to_string(s).map_err(|e| format!("proj: {FILE}: {e}"))?;
+    swap(&cfg.jobs.join(FILE), &format!("{text}\n")).map_err(|e| format!("proj: {FILE}: {e}"))
 }
 
 /// Job `id`'s run was refused at `at`: the machine is out of usage until
 /// `until`, or UNSAID on when that's unsaid or past. The owner is told when
 /// it wasn't out already, or its reset had passed (a run refused again then
 /// is a new one to tell), and every turn in line has its deadline moved.
-/// What it's out until, as recorded.
-pub fn record(cfg: &Config, id: &str, until: Option<i64>, said: &str, at: i64) -> Spent {
+/// What it's out until, as recorded, or why it couldn't be.
+pub fn record(
+    cfg: &Config,
+    id: &str,
+    until: Option<i64>,
+    said: &str,
+    at: i64,
+) -> Result<Spent, String> {
+    let _lock = lock(cfg)?;
+    put(cfg, id, until, said, at)
+}
+
+/// [`record`], under the lock.
+fn put(cfg: &Config, id: &str, until: Option<i64>, said: &str, at: i64) -> Result<Spent, String> {
     let until = until.filter(|&t| t > at).unwrap_or(at + UNSAID);
-    let _lock = lock(cfg);
     let was = kept(cfg).filter(|w| w.back.is_none());
     let lapsed = was.as_ref().is_none_or(|w| !w.holds(at));
     let spent = match &was {
@@ -194,16 +207,16 @@ pub fn record(cfg: &Config, id: &str, until: Option<i64>, said: &str, at: i64) -
         },
     };
     if was.as_ref() == Some(&spent) {
-        return spent;
+        return Ok(spent);
     }
-    keep(cfg, &spent);
+    keep(cfg, &spent)?;
     if lapsed {
         tell(cfg, &["open", NOTICE, &title(&spent), &body(&spent)]);
     }
     if lapsed || was.as_ref().is_some_and(|w| w.until != spent.until) {
         changed(cfg);
     }
-    spent
+    Ok(spent)
 }
 
 /// The hold changed: every turn in line has its deadline moved, the stall
@@ -227,11 +240,12 @@ pub fn remind(cfg: &Config) {
     if !kept(cfg).is_some_and(|s| due(&s)) {
         return;
     }
-    let _lock = lock(cfg);
+    let Ok(_lock) = lock(cfg) else { return };
     if let Some(mut s) = kept(cfg).filter(|s| due(s)) {
         s.told = now();
-        keep(cfg, &s);
-        tell(cfg, &["open", NOTICE, &title(&s), &body(&s)]);
+        if keep(cfg, &s).is_ok() {
+            tell(cfg, &["open", NOTICE, &title(&s), &body(&s)]);
+        }
     }
 }
 
@@ -245,7 +259,7 @@ pub fn back(cfg: &Config, started: Option<i64>) {
     if kept(cfg).is_none() {
         return;
     }
-    let _lock = lock(cfg);
+    let Ok(_lock) = lock(cfg) else { return };
     let Some(mut s) = kept(cfg) else { return };
     let now = now();
     if s.back.is_none() {
@@ -254,7 +268,10 @@ pub fn back(cfg: &Config, started: Option<i64>) {
         }
         s.back = Some(now);
         s.told = now;
-        keep(cfg, &s);
+        if let Err(e) = keep(cfg, &s) {
+            eprintln!("{e}");
+            return;
+        }
         eprintln!("proj: Claude has usage again (out since {})", when(s.at));
         tell(cfg, &["close", NOTICE, CLOSED]);
         changed(cfg);
@@ -276,7 +293,7 @@ pub fn tend(cfg: &Config) -> Option<i64> {
         return kept(cfg).map(|s| s.told + RETELL);
     }
     s.back?;
-    let _lock = lock(cfg);
+    let _lock = lock(cfg).ok()?;
     let s = kept(cfg).filter(|s| s.back.is_some())?;
     settle(cfg, s, now);
     let s = kept(cfg)?;
@@ -296,8 +313,9 @@ fn settle(cfg: &Config, mut s: Spent, now: i64) {
         let _ = fs::remove_file(cfg.jobs.join(FILE));
     } else if !settled && now - s.told >= RETELL / 12 {
         s.told = now;
-        keep(cfg, &s);
-        tell(cfg, &["close", NOTICE, CLOSED]);
+        if keep(cfg, &s).is_ok() {
+            tell(cfg, &["close", NOTICE, CLOSED]);
+        }
     }
 }
 
@@ -305,16 +323,35 @@ fn settle(cfg: &Config, mut s: Spent, now: i64) {
 /// it's taken into the hold.
 pub const EARLIER: &str = "a usage limit an earlier proj or watchdog recorded";
 
+/// A usage limit an earlier proj or watchdog recorded apart from this one,
+/// written at `written` and resetting at `reset`, taken into the hold: none
+/// once it has reset, nor when a release since (`proj usage back`, or a run
+/// that wasn't refused) has ended the hold it came from. Each caller drops
+/// its own record of it only once this has succeeded.
+pub fn earlier(cfg: &Config, id: &str, reset: i64, written: i64) -> Result<(), String> {
+    let _lock = lock(cfg)?;
+    earlier_locked(cfg, id, reset, written)
+}
+
+fn earlier_locked(cfg: &Config, id: &str, reset: i64, written: i64) -> Result<(), String> {
+    if reset <= now() || kept(cfg).and_then(|s| s.back).is_some_and(|b| written <= b) {
+        return Ok(());
+    }
+    put(cfg, id, Some(reset), EARLIER, now()).map(|_| ())
+}
+
 /// The holds an earlier proj (#428's) kept apart from this one, each taken
-/// into it: N.resets, the time a job's latest turn wrote that its usage limit
-/// resets, any job's (an --owned one's included, whose starter would have
-/// asked `proj resets`), and from a turn still running that proj, once it
-/// ends. Each is read once and removed. The stall watchdog asks `proj usage`
+/// into it ([`earlier`]): N.resets, the time a job's latest turn wrote that
+/// its usage limit resets, any job's (an --owned one's included, whose
+/// starter would have asked `proj resets`), and from a turn still running
+/// that proj once it ends. That turn writes N.resets before its outcome, so
+/// one with no outcome yet may be half written and is left for a later
+/// look. All under the lock, so two looks never take one twice, and each
+/// removed only once the hold has it. The stall watchdog asks `proj usage`
 /// every pass, which runs this first.
-pub fn adopt(cfg: &Config) {
-    let Ok(dirs) = fs::read_dir(&cfg.jobs) else {
-        return;
-    };
+pub fn adopt(cfg: &Config) -> Result<(), String> {
+    let _lock = lock(cfg)?;
+    let dirs = fs::read_dir(&cfg.jobs).map_err(|e| format!("proj: {}: {e}", cfg.jobs.display()))?;
     for e in dirs.filter_map(|e| e.ok()) {
         let id = e.file_name().to_string_lossy().into_owned();
         if id.starts_with('.') {
@@ -323,16 +360,24 @@ pub fn adopt(cfg: &Config) {
         let job = Job::new(cfg, &id);
         let Some(n) = job.turns() else { continue };
         let f = job.turn(&n, "resets");
+        if !f.exists() || !filled(&job.turn(&n, "outcome")) {
+            continue;
+        }
         let Ok(text) = fs::read_to_string(&f) else {
             continue;
         };
-        if let Ok(t) = text.trim().parse::<i64>()
-            && t > now()
-        {
-            record(cfg, &id, Some(t), EARLIER, now());
+        if let Ok(reset) = text.trim().parse::<i64>() {
+            let written = mtime(&f).unwrap_or_else(now);
+            earlier_locked(cfg, &id, reset, written)?;
         }
-        let _ = fs::remove_file(&f);
+        match fs::remove_file(&f) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                return Err(format!("proj: {}: {e}", f.display()));
+            }
+            _ => {}
+        }
     }
+    Ok(())
 }
 
 const CLOSED: &str = "Claude has usage again, and proj's jobs are running.";

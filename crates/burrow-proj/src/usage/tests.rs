@@ -133,7 +133,7 @@ fn out_of_usage_till_it_resets_and_told_once() {
     let (d, cfg) = rig();
     let t = now();
     assert_eq!(out(&cfg), None);
-    let s = record(&cfg, "web-1", Some(t + 7200), SAID, t);
+    let s = record(&cfg, "web-1", Some(t + 7200), SAID, t).unwrap();
     assert_eq!(
         (s.until, s.at, s.job.as_str(), s.back),
         (t + 7200, t, "web-1", None)
@@ -148,10 +148,12 @@ fn out_of_usage_till_it_resets_and_told_once() {
     // Every turn running is refused too: told once, and out till the latest
     // reset any of them gives, from the first refusal.
     assert_eq!(
-        record(&cfg, "web-2", Some(t + 3600), SAID, t + 5).until,
+        record(&cfg, "web-2", Some(t + 3600), SAID, t + 5)
+            .unwrap()
+            .until,
         t + 7200
     );
-    let s3 = record(&cfg, "web-3", Some(t + 9000), SAID, t + 6);
+    let s3 = record(&cfg, "web-3", Some(t + 9000), SAID, t + 6).unwrap();
     assert_eq!((s3.until, s3.at, s3.job.as_str()), (t + 9000, t, "web-1"));
     assert_eq!(told(&d).len(), 1);
     // Told again only once it's been RETELL: GitHub may not have taken it.
@@ -159,23 +161,26 @@ fn out_of_usage_till_it_resets_and_told_once() {
     assert_eq!(told(&d).len(), 1);
     let mut old = kept(&cfg).unwrap();
     old.told = t - RETELL;
-    keep(&cfg, &old);
+    keep(&cfg, &old).unwrap();
     remind(&cfg);
     assert_eq!(told(&d).len(), 2);
     assert!(told(&d)[1].starts_with("open proj-usage"));
     // A reset unsaid, or already past: an hour on.
     back(&cfg, None);
     fs::remove_file(cfg.jobs.join(FILE)).unwrap();
-    assert_eq!(record(&cfg, "web-4", None, SAID, t).until, t + UNSAID);
+    assert_eq!(
+        record(&cfg, "web-4", None, SAID, t).unwrap().until,
+        t + UNSAID
+    );
     back(&cfg, None);
     assert_eq!(
-        record(&cfg, "web-4", Some(t - 5), SAID, t).until,
+        record(&cfg, "web-4", Some(t - 5), SAID, t).unwrap().until,
         t + UNSAID
     );
     // Past its reset it's no longer out, though no run has said so yet.
     let mut past = kept(&cfg).unwrap();
     past.until = t - 1;
-    keep(&cfg, &past);
+    keep(&cfg, &past).unwrap();
     assert_eq!(out(&cfg), None);
 }
 
@@ -186,7 +191,7 @@ fn out_of_usage_till_it_resets_and_told_once() {
 fn back_with_a_run_that_started_after_it() {
     let (d, cfg) = rig();
     let t = now();
-    record(&cfg, "web-1", Some(t + 7200), SAID, t);
+    record(&cfg, "web-1", Some(t + 7200), SAID, t).unwrap();
     back(&cfg, Some(t - 30));
     back(&cfg, Some(t));
     assert!(out(&cfg).is_some() && told(&d).len() == 1);
@@ -197,7 +202,7 @@ fn back_with_a_run_that_started_after_it() {
         told(&d)[1..],
         ["close proj-usage Claude has usage again, and proj's jobs are running.".to_owned()]
     );
-    let again = record(&cfg, "web-2", Some(t + 9000), SAID, t + 2);
+    let again = record(&cfg, "web-2", Some(t + 9000), SAID, t + 2).unwrap();
     assert_eq!(
         (again.at, again.job.as_str(), again.back),
         (t + 2, "web-2", None)
@@ -215,7 +220,7 @@ fn back_with_a_run_that_started_after_it() {
 fn the_close_until_it_got_through_and_the_record_a_stall_after() {
     let (d, cfg) = rig();
     let t = now();
-    record(&cfg, "web-1", Some(t + 7200), SAID, t);
+    record(&cfg, "web-1", Some(t + 7200), SAID, t).unwrap();
     fs::write(d.path().join("pending"), "").unwrap();
     back(&cfg, None);
     assert_eq!(told(&d).len(), 2);
@@ -226,7 +231,7 @@ fn the_close_until_it_got_through_and_the_record_a_stall_after() {
     assert_eq!(told(&d).len(), 2);
     let mut s = kept(&cfg).unwrap();
     s.told -= RETELL / 12;
-    keep(&cfg, &s);
+    keep(&cfg, &s).unwrap();
     back(&cfg, Some(t + 1));
     assert_eq!(told(&d).len(), 3);
     assert!(told(&d)[2].starts_with("close proj-usage"));
@@ -237,7 +242,7 @@ fn the_close_until_it_got_through_and_the_record_a_stall_after() {
     // A stall on: gone.
     let mut s = kept(&cfg).unwrap();
     s.back = Some(t - cfg.stall_queued() - 1);
-    keep(&cfg, &s);
+    keep(&cfg, &s).unwrap();
     back(&cfg, Some(t + 1));
     assert_eq!(kept(&cfg), None);
     assert_eq!(told(&d).len(), 3);
@@ -254,7 +259,7 @@ fn every_change_looks_at_every_watched_turn_again() {
         (
             "record",
             Box::new(|c: &Config| {
-                record(c, "web-1", Some(now() + 60), SAID, now());
+                record(c, "web-1", Some(now() + 60), SAID, now()).unwrap();
             }) as Box<dyn Fn(&Config)>,
         ),
         ("back", Box::new(|c: &Config| back(c, None))),
@@ -274,14 +279,14 @@ fn every_change_looks_at_every_watched_turn_again() {
 fn back_only_with_a_run_after_the_last_refusal() {
     let (d, cfg) = rig();
     let t = now();
-    record(&cfg, "web-1", Some(t + 7200), SAID, t);
+    record(&cfg, "web-1", Some(t + 7200), SAID, t).unwrap();
     // Refused again, the reset unchanged, then later with it moved on.
-    let s = record(&cfg, "web-2", Some(t + 7200), SAID, t + 10);
+    let s = record(&cfg, "web-2", Some(t + 7200), SAID, t + 10).unwrap();
     assert_eq!((s.at, s.refused(), s.until), (t, t + 10, t + 7200));
     back(&cfg, Some(t + 5));
     back(&cfg, Some(t + 10));
     assert!(out(&cfg).is_some());
-    record(&cfg, "web-3", Some(t + 9000), SAID, t + 20);
+    record(&cfg, "web-3", Some(t + 9000), SAID, t + 20).unwrap();
     back(&cfg, Some(t + 15));
     assert!(out(&cfg).is_some());
     assert_eq!(told(&d).len(), 1);
@@ -290,8 +295,8 @@ fn back_only_with_a_run_after_the_last_refusal() {
     // Its reset passed, no run having ended it, and a run is refused again:
     // out once more, told so, and only a run after that ends it.
     fs::remove_file(cfg.jobs.join(FILE)).unwrap();
-    record(&cfg, "web-4", Some(t + 100), SAID, t);
-    let s = record(&cfg, "web-5", Some(t + 7200), SAID, t + 200);
+    record(&cfg, "web-4", Some(t + 100), SAID, t).unwrap();
+    let s = record(&cfg, "web-5", Some(t + 7200), SAID, t + 200).unwrap();
     assert_eq!((s.at, s.refused(), s.until), (t, t + 200, t + 7200));
     assert_eq!(told(&d).len(), 4, "{:?}", told(&d));
     assert!(told(&d)[3].starts_with("open proj-usage"));
@@ -329,12 +334,12 @@ fn only_pending_1_says_the_close_got_through() {
     let (d, cfg) = rig();
     let t = now();
     let gone = |c: &Config| {
-        record(c, "web-1", Some(t + 7200), SAID, t);
+        record(c, "web-1", Some(t + 7200), SAID, t).unwrap();
         back(c, None);
         let mut s = kept(c).unwrap();
         s.back = Some(t - c.stall_queued() - 1);
         s.told = t - RETELL;
-        keep(c, &s);
+        keep(c, &s).unwrap();
     };
     for (how, file) in [("exit 2", "pending-code"), ("killed", "pending-killed")] {
         gone(&cfg);
@@ -364,13 +369,13 @@ fn tended_with_no_run_to_ask() {
     let (d, cfg) = rig();
     let t = now();
     assert_eq!(tend(&cfg), None);
-    record(&cfg, "web-1", Some(t + 7200), SAID, t);
+    record(&cfg, "web-1", Some(t + 7200), SAID, t).unwrap();
     let told_at = kept(&cfg).unwrap().told;
     assert_eq!(tend(&cfg), Some(told_at + RETELL));
     assert_eq!(told(&d).len(), 1);
     let mut s = kept(&cfg).unwrap();
     s.told = t - RETELL;
-    keep(&cfg, &s);
+    keep(&cfg, &s).unwrap();
     let next = tend(&cfg).unwrap();
     assert_eq!(told(&d).len(), 2);
     assert!(next >= t + RETELL - 1, "{next}");
@@ -383,7 +388,7 @@ fn tended_with_no_run_to_ask() {
     assert_eq!(told(&d).len(), 3);
     let mut s = kept(&cfg).unwrap();
     s.told -= RETELL / 12;
-    keep(&cfg, &s);
+    keep(&cfg, &s).unwrap();
     tend(&cfg);
     assert_eq!(told(&d).len(), 4);
     assert!(told(&d)[3].starts_with("close proj-usage"));
@@ -393,14 +398,14 @@ fn tended_with_no_run_to_ask() {
     assert_eq!(tend(&cfg), Some(s.release() + cfg.stall_queued()));
     let mut s = kept(&cfg).unwrap();
     s.back = Some(t - cfg.stall_queued() - 1);
-    keep(&cfg, &s);
+    keep(&cfg, &s).unwrap();
     assert_eq!(tend(&cfg), None);
     assert_eq!(kept(&cfg), None);
     // Past its reset with no run yet to end it: nothing to send till one does.
-    record(&cfg, "web-2", Some(t + 60), SAID, t);
+    record(&cfg, "web-2", Some(t + 60), SAID, t).unwrap();
     let mut s = kept(&cfg).unwrap();
     s.until = t - 1;
-    keep(&cfg, &s);
+    keep(&cfg, &s).unwrap();
     let before = told(&d).len();
     assert_eq!(tend(&cfg), None);
     assert_eq!(told(&d).len(), before);
@@ -414,11 +419,11 @@ fn every_change_kicks_the_watchdog_and_proj_watch() {
     let (d, cfg) = rig();
     let t = now();
     let both = ["/kick/proj-watch".to_owned(), "/kick/watchdog".to_owned()];
-    record(&cfg, "web-1", Some(t + 7200), SAID, t);
+    record(&cfg, "web-1", Some(t + 7200), SAID, t).unwrap();
     assert_eq!(kicked(&d), both);
-    record(&cfg, "web-2", Some(t + 7200), SAID, t + 1);
+    record(&cfg, "web-2", Some(t + 7200), SAID, t + 1).unwrap();
     assert_eq!(kicked(&d), Vec::<String>::new());
-    record(&cfg, "web-3", Some(t + 9000), SAID, t + 2);
+    record(&cfg, "web-3", Some(t + 9000), SAID, t + 2).unwrap();
     assert_eq!(kicked(&d), both);
     back(&cfg, None);
     assert_eq!(kicked(&d), both);
@@ -426,36 +431,88 @@ fn every_change_kicks_the_watchdog_and_proj_watch() {
     let mut alone = cfg.clone();
     alone.waits = None;
     fs::remove_file(cfg.jobs.join(FILE)).unwrap();
-    record(&alone, "web-4", Some(t + 7200), SAID, t);
+    record(&alone, "web-4", Some(t + 7200), SAID, t).unwrap();
     assert_eq!(kicked(&d), ["/kick/proj-watch".to_owned()]);
 }
 
 /// What #428's proj wrote of a usage limit, N.resets for a job's latest
-/// turn (an --owned one's too), is taken into the hold, once; an earlier
-/// turn's is no longer the job's, and one already past holds nothing.
+/// turn (an --owned one's too), is taken into the hold once its turn has
+/// ended, and removed once the hold has it; an earlier turn's is no longer
+/// the job's, one already past holds nothing, nor does one written before a
+/// release ended the hold it came from.
 #[test]
 fn an_earlier_projs_resets_are_the_hold_now() {
     let (_d, cfg) = rig();
     let t = now();
-    let job = |id: &str, turns: &str, files: &[(&str, i64)]| {
+    let job = |id: &str, turns: &str, ended: bool, files: &[(&str, i64)]| {
         let dir = cfg.jobs.join(id);
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("turns"), format!("{turns}\n")).unwrap();
+        if ended {
+            fs::write(dir.join(format!("{turns}.outcome")), "error\n").unwrap();
+        }
         for (n, at) in files {
             fs::write(dir.join(format!("{n}.resets")), format!("{at}\n")).unwrap();
         }
     };
-    job("web-1", "2", &[("1", t + 9000), ("2", t + 3600)]);
-    job("owned-1", "1", &[("1", t + 5400)]);
+    job("web-1", "2", true, &[("1", t + 9000), ("2", t + 3600)]);
+    job("owned-1", "1", true, &[("1", t + 5400)]);
     fs::write(cfg.jobs.join("owned-1/owned"), "").unwrap();
-    job("web-2", "1", &[("1", t - 60)]);
-    adopt(&cfg);
+    job("web-2", "1", true, &[("1", t - 60)]);
+    // Its turn still going: maybe half written, so left for later.
+    job("web-3", "1", false, &[("1", t + 9999)]);
+    adopt(&cfg).unwrap();
     let s = out(&cfg).unwrap();
     assert_eq!((s.until, s.said.as_str()), (t + 5400, EARLIER));
     for gone in ["web-1/2.resets", "owned-1/1.resets", "web-2/1.resets"] {
         assert!(!cfg.jobs.join(gone).exists(), "{gone}");
     }
     assert!(cfg.jobs.join("web-1/1.resets").exists());
-    adopt(&cfg);
+    assert!(cfg.jobs.join("web-3/1.resets").exists());
+    adopt(&cfg).unwrap();
     assert_eq!(out(&cfg).unwrap().until, t + 5400);
+    // Released early (`proj usage back`): web-3's, written before that, ends
+    // up taken and dropped, never holding again.
+    back(&cfg, None);
+    let mut released = kept(&cfg).unwrap();
+    released.back = Some(t - 3);
+    keep(&cfg, &released).unwrap();
+    fs::write(cfg.jobs.join("web-3/1.outcome"), "error\n").unwrap();
+    let past = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs((t - 5) as u64);
+    fs::File::options()
+        .write(true)
+        .open(cfg.jobs.join("web-3/1.resets"))
+        .unwrap()
+        .set_modified(past)
+        .unwrap();
+    adopt(&cfg).unwrap();
+    assert_eq!(out(&cfg), None);
+    assert!(!cfg.jobs.join("web-3/1.resets").exists());
+    // One written since the release is a hold of its own.
+    job("web-4", "1", true, &[("1", t + 7200)]);
+    adopt(&cfg).unwrap();
+    assert_eq!(out(&cfg).unwrap().until, t + 7200);
+}
+
+/// A hold that can't be written isn't one: the record it would replace
+/// stays where it was, and so does the caller's own.
+#[test]
+fn a_hold_that_cant_be_written_takes_nothing() {
+    let (_d, cfg) = rig();
+    let t = now();
+    let dir = cfg.jobs.join("web-1");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("turns"), "1\n").unwrap();
+    fs::write(dir.join("1.outcome"), "error\n").unwrap();
+    fs::write(dir.join("1.resets"), format!("{}\n", t + 3600)).unwrap();
+    // The lock exists already; the record can't be: the jobs dir is shut.
+    fs::write(cfg.jobs.join(".usage.lock"), "").unwrap();
+    fs::set_permissions(&cfg.jobs, fs::Permissions::from_mode(0o555)).unwrap();
+    let adopted = adopt(&cfg);
+    let held = earlier(&cfg, "the stall watchdog", t + 3600, t);
+    let recorded = record(&cfg, "web-2", Some(t + 3600), SAID, t);
+    fs::set_permissions(&cfg.jobs, fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(adopted.is_err() && held.is_err() && recorded.is_err());
+    assert!(dir.join("1.resets").exists());
+    assert_eq!(kept(&cfg), None);
 }
