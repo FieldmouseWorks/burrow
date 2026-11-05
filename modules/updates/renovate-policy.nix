@@ -74,15 +74,17 @@ lib.recursiveUpdate ({
   # it off, and each of those pushes starts the next run.
   rebaseLabel = "rebase";
 
-  # The rules below take a lock file refresh, and a digest update on
-  # GitHub, without a release timestamp on purpose, and each time Renovate
-  # warns that it did. A warning lands on the dashboard's Repository
-  # Problems, where nothing can clear it and the steward takes it for
-  # something stuck. Only the warning for an upgrade that went ahead: any
+  # The rules below take a lock file refresh, a digest update on GitHub and
+  # a GitHub runner label without a release timestamp on purpose, and each
+  # time Renovate warns that it did: once for the upgrade, when it builds
+  # the branch, and once for the release, when it looks the update up (a
+  # runner label's, every run). A warning lands on the dashboard's
+  # Repository Problems, where nothing can clear it and the steward takes it
+  # for something stuck. Only the warnings for one that went ahead: any
   # other still counts.
   logLevelRemap = [
     {
-      matchMessage = "/^Some upgrade\\(s\\) did not have a releaseTimestamp, but as we're running with minimumReleaseAgeBehaviour=timestamp-optional, proceeding\\./";
+      matchMessage = "/^Some (upgrade|release)\\(s\\) did not have a releaseTimestamp, but as we're running with minimumReleaseAgeBehaviour=timestamp-optional, proceeding\\./";
       newLogLevel = "debug";
     }
   ];
