@@ -9,7 +9,7 @@ which."""
 
 import os
 
-from harness import C, FAIL, JOBS, R, STATES, WROTE, tmp
+from harness import C, FAIL, JOBS, R, STATES, WROTE, mkpr, tmp
 from undos import ROW, undo_pr, writer, writer_runs
 
 C._for.append("sam")
@@ -140,6 +140,20 @@ for why, info in (
     R.watch_default(repo, info, [], mine)
     assert writer_runs() == [] and len(JOBS) == 1 and red().get("job") == "job-1", (why, writer_runs(), JOBS, red())
     assert '{"undo": "sam/u#N"}' in JOBS[0] and "for this red already" not in JOBS[0], (why, JOBS[0])
+
+# A red fix open already, with no red seen yet (one for another commit, say):
+# it's the fix in hand, so nothing is undone and no job starts. A draft's, a
+# fork's, one to another branch or by anyone else isn't, as ever.
+for pr in (mkpr(branch="autoland/red-cccccccccccc"), mkpr(branch="autoland/red-bbbbbbbbbbbb")):
+    fresh()
+    assert R.watch_default(repo, default(), [pr], mine) == {}
+    assert writer_runs() == [] and JOBS == [] and not red(), (pr["headRefName"], writer_runs(), JOBS, red())
+outside = dict(mkpr(branch="autoland/red-bbbbbbbbbbbb", number=8), author={"__typename": "User", "login": "eve"})
+for pr in (mkpr(branch="autoland/red-bbbbbbbbbbbb", draft=True), dict(mkpr(branch="autoland/red-bbbbbbbbbbbb"), isCrossRepository=True),
+           mkpr(branch="autoland/red-bbbbbbbbbbbb", base="dev"), outside):
+    fresh()
+    R.watch_default(repo, default(), [pr], mine)
+    assert len(writer_runs()) == 1 and JOBS == [], (pr, writer_runs(), JOBS)
 
 # A red already being seen to isn't looked at again: its job works.
 fresh()

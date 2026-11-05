@@ -245,8 +245,10 @@ def watch_default(r, info, prs, digest):
             save(key, st)
         return {pr["number"]: gone for pr in fixes}
     line = f"{repo} {default} at {sha[:7]}"
-    # A new red one landing caused: its undo is asked for with no job.
-    if not red and CFG.get("undo"):
+    # A new red one landing caused: its undo is asked for with no job,
+    # unless a fix is open already (anyone's of the steward's own, from a
+    # RED_BRANCH branch), which is the red's fix in hand, as for a job.
+    if not red and not fixes and CFG.get("undo"):
         named = landed_alone(repo, default, target)
         if named:
             log(f"{repo}: {default} is red at {sha[:7]}, and {named}'s landing alone made it so: undoing it, with no job")
