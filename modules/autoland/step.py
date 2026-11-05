@@ -532,7 +532,7 @@ def handle(repo, pr, repo_info, digest, held=None):
         either branch."""
         base = pr["baseRefName"]
         verdict = C.marker(pr, MAJOR_VERDICT, head, repo, base) if dep == "major" and renovate else None
-        if dep and not bot_edited(repo, pr, st):
+        if dep and not bot_edited(repo, pr, st, renovate):
             settle("pending", f"Conflicts with {base}; its bot rebases it")
             open_a_day(f"Dependency update; conflicts with {base}", swept=renovate)
         elif verdict == "held":
@@ -843,7 +843,10 @@ def handle(repo, pr, repo_info, digest, held=None):
     # Its owner or failed verdict holds it whatever CI is still doing; only
     # a land waits for CI.
     held = asked and judge_said in ("owner", "failed")
-    fixed = dep == "minor" and not gate and (bot_edited(repo, pr, st) or gate_edit(repo, pr, st))
+    # Renovate merges its own once they're green, but none in a repo with its
+    # train on (updates.nix), so it reads their commits for itself first.
+    rechecked = renovate and not T.on(repo)
+    fixed = dep == "minor" and not gate and (bot_edited(repo, pr, st, rechecked) or gate_edit(repo, pr, st))
     swept = fixed and ci == "red" and renovate
     # The date a lock file refresh waits for, renovate-sweep's to have it refreshed then.
     requested = renovate and lock_wait.requested(pr, C.NOW, CFG["renovateRun"] or 0)

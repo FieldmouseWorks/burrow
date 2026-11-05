@@ -91,16 +91,18 @@ DEPENDABOT_EMAIL = "49699333+dependabot[bot]@users.noreply.github.com"
 GITHUB_EMAIL = "noreply@github.com"
 
 
-def bot_edited(repo, pr, st):
+def bot_edited(repo, pr, st, rechecked):
     """Whether a dependency bot's branch has a commit no bot wrote (a Claude
     job's fix) or that someone else committed (a Claude job's rebase keeps the
     author and makes itself the committer): code no reviewer has read, which
     Renovate won't merge either, since it counts both addresses of a commit.
-    Where that's unknown (provenance), it counts as not edited on a Renovate
-    branch, since Renovate checks for itself before it merges, and as edited
-    on a Dependabot one, which the steward merges."""
+    Where that's unknown (provenance), it counts as not edited where Renovate
+    acts on the branch next (rechecked: it merges or rebases it), since it
+    checks for itself first, and as edited where the steward merges it with
+    nothing reading them after: a Dependabot update, or a Renovate one in a
+    repo with its train on."""
     edited = provenance(repo, pr, st)
-    return (not pr["headRefName"].startswith("renovate/")) if edited is None else edited
+    return (not rechecked) if edited is None else edited
 
 
 def provenance(repo, pr, st):
