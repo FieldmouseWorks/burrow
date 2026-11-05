@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use burrow_heartbeat::site::answers;
-use common::Healthchecks;
+use common::{Healthchecks, health};
 
 const KEY: &str = "SITEPINGKEY";
 
@@ -74,17 +74,22 @@ impl Unit {
     /// One beat, pinging `url`, with a HOST-health that says nothing: the
     /// path the machine's own ping takes.
     fn beat(&self, url: &str) -> Output {
-        let health = self.root.join("box-health");
-        fs::write(&health, "#!/bin/sh\n").unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&health, fs::Permissions::from_mode(0o755)).unwrap();
+        // The shared stand-in, written before any test starts a process:
+        // one written here could be open for writing in another test's child
+        // when this one runs it ("Text file busy").
+        let health = health();
+        let report = self.root.join("health-report");
+        fs::write(&report, "").unwrap();
         let config = self.root.join("box-heartbeat.json");
         let json = serde_json::json!({
             "name": "box-heartbeat", "url": url, "check": "web", "failAfter": 2,
             "skip": [], "health": health,
         });
         fs::write(&config, json.to_string()).unwrap();
-        self.command(&[config.to_str().unwrap()]).output().unwrap()
+        self.command(&[config.to_str().unwrap()])
+            .env("HEALTH_REPORT", &report)
+            .output()
+            .unwrap()
     }
 }
 
