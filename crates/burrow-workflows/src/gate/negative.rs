@@ -648,14 +648,62 @@ fn only_the_checks_own_builder_failing_counts() {
     assert_eq!(once.code, 1, "{}", once.out);
     assert_eq!(once.result(), "pass", "{}", once.out);
     assert!(once.out.contains("it passes"), "{}", once.out);
+    // Killed, or exiting as a shell does for a signal or a timeout.
     let killed = r.run_with(&head, "", &[("BUILD_SIGNAL_TEXT", WANTS_2)]);
-    assert_eq!(killed.code, 1, "{}", killed.out);
-    assert!(killed.found.is_none(), "{}", killed.out);
-    assert!(
-        killed.out.contains("own builder failed with an exit code"),
-        "{}",
-        killed.out
+    let shell = r.run_with(
+        &head,
+        "",
+        &[("BUILD_FAIL_TEXT", WANTS_2), ("BUILD_EXIT", "137")],
     );
+    let timeout = r.run_with(
+        &head,
+        "",
+        &[("BUILD_FAIL_TEXT", WANTS_2), ("BUILD_EXIT", "124")],
+    );
+    for ran in [killed, shell, timeout] {
+        assert_eq!(ran.code, 1, "{}", ran.out);
+        assert!(ran.found.is_none(), "{}", ran.out);
+        assert!(
+            ran.out
+                .contains("own builder failed with a test's exit code"),
+            "{}",
+            ran.out
+        );
+    }
+    // A test's own code counts.
+    let code = r.run_with(
+        &head,
+        "",
+        &[("BUILD_FAIL_TEXT", WANTS_2), ("BUILD_EXIT", "101")],
+    );
+    assert_eq!(code.result(), "fail", "{}", code.out);
+}
+
+/// A check that's a fetch can fail on the network: it says nothing.
+#[test]
+fn a_fetch_failing_cant_tell() {
+    let r = Repo::new();
+    let flake = read(&r.origin.join("flake.nix"));
+    let fetch = flake.replace(
+        r#"inherit system want;"#,
+        &format!(
+            r#"inherit system want; outputHashMode = "flat"; outputHash = "sha256-" + (if want == "2
+" then "{}" else "{}");"#,
+            "A".repeat(43) + "=",
+            "B".repeat(42) + "E="
+        ),
+    );
+    assert_ne!(fetch, flake);
+    write(&r.origin.join("flake.nix"), &fetch);
+    r.g.s.git(&r.origin, &["commit", "-qam", "t a fetch"]);
+    let head = r.pr(
+        "real",
+        &[("lib.txt", Some("2\n")), ("tests/want.txt", Some("2\n"))],
+    );
+    let ran = r.run(&head, "", WANTS_2);
+    assert_eq!(ran.code, 1, "{}", ran.out);
+    assert!(ran.found.is_none(), "{}", ran.out);
+    assert!(ran.out.contains("is a fetch"), "{}", ran.out);
 }
 
 /// What a check that failed is built from builds as the check did: in the
@@ -688,9 +736,10 @@ fn its_dependencies_wait_for_the_slot_too() {
     );
 }
 
-/// An evaluation that failed with a fetch or a build on the way, or with
-/// nix out of memory, or that a signal stopped the second time, didn't
-/// fail on what it evaluated.
+/// An evaluation that failed with a fetch or a build on the way, with an
+/// error nix doesn't place in code (nix out of memory, the daemon out of
+/// reach), or that a signal stopped the second time, didn't fail on what
+/// it evaluated.
 #[test]
 fn an_evaluation_counts_only_failing_on_its_own_expression() {
     let r = Repo::new();
@@ -710,6 +759,7 @@ fn an_evaluation_counts_only_failing_on_its_own_expression() {
     );
     let again = r.run_with(&throws, "", &[("EVAL_KILL_AGAIN", &fromtests)]);
     let oom = r.run_with(&throws, "", &[("EVAL_OOM", &fromtests)]);
+    let daemon = r.run_with(&throws, "", &[("EVAL_DAEMON", &fromtests)]);
     let fetches = r.pr(
         "fetches",
         &[
@@ -726,7 +776,8 @@ fn an_evaluation_counts_only_failing_on_its_own_expression() {
     let fetched = r.run_with(&fetches, "", &[("NIX_CONFIG", &config)]);
     for (ran, says) in [
         (again, "ended with 137"),
-        (oom, "out of memory"),
+        (oom, "doesn't place its error"),
+        (daemon, "doesn't place its error"),
         (fetched, "fetched on the way"),
     ] {
         assert_eq!(ran.code, 1, "{says}: {}", ran.out);

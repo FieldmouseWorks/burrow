@@ -131,10 +131,11 @@ impl Gate {
     # Or, for each derivation it's given, when one in its closure holds, as
     # nix's compact JSON, one of BUILD_FAIL_TEXT, or BUILD_SIGNAL_TEXT (its
     # builder killed), or BUILD_FLAKY_TEXT in the first BUILD_FLAKY_TIMES
-    # builds (2 if not given): nix's error for each that failed, and for
-    # the one given, in nix's words. One with none of them is built, its
-    # outputs in the store (nix-store, below, says), and the rest are tried
-    # too, as --keep-going does.
+    # builds (2 if not given): nix's error for each that failed, its
+    # builder exiting BUILD_EXIT (1 if not given), and for the one given,
+    # in nix's words. One with none of them is built, its outputs in the
+    # store (nix-store, below, says), and the rest are tried too, as
+    # --keep-going does.
     flaky=
     if [ -n "$BUILD_FLAKY_TEXT" ]; then
       n=$(cat "$NIX_LOG.flaky" 2> /dev/null || echo 0)
@@ -159,7 +160,7 @@ impl Gate {
         if [ "$how" = signal ]; then
           echo "       Reason: builder failed due to signal 9 (Killed)." >&2
         else
-          echo "       Reason: builder failed with exit code 1." >&2
+          echo "       Reason: builder failed with exit code ${{BUILD_EXIT:-1}}." >&2
         fi
       done <<< "$bad"
       if ! grep -q "^$d " <<< "$bad"; then
@@ -195,13 +196,17 @@ impl Gate {
     [ -z "$what" ] || echo "eval $what" >> "$NIX_LOG"
     # Killed, as a limit would, when it evaluates what this names, or
     # from the second time it does what EVAL_KILL_AGAIN names; out of
-    # memory, as nix says it is, for EVAL_OOM.
+    # memory, as nix says it is, for EVAL_OOM, and with the daemon out of
+    # reach for EVAL_DAEMON.
     [ -z "$EVAL_KILL" ] || case "$*" in *"$EVAL_KILL"*) exit 137 ;; esac
     [ -z "$EVAL_KILL_AGAIN" ] || case "$*" in *"$EVAL_KILL_AGAIN"*)
       [ ! -e "$NIX_LOG.tried" ] || exit 137
       : > "$NIX_LOG.tried" ;; esac
     [ -z "$EVAL_OOM" ] || case "$*" in *"$EVAL_OOM"*)
       echo '@nix {{"action":"msg","level":0,"msg":"\u001b[31;1merror:\u001b[0m out of memory"}}' >&2
+      exit 1 ;; esac
+    [ -z "$EVAL_DAEMON" ] || case "$*" in *"$EVAL_DAEMON"*)
+      echo '@nix {{"action":"msg","column":null,"file":null,"level":0,"line":null,"msg":"\u001b[31;1merror:\u001b[0m cannot connect to socket at '"'"'/nix/var/nix/daemon-socket/socket'"'"': Connection refused"}}' >&2
       exit 1 ;; esac
     # The checkout edited once the plan is made, if asked.
     [ -z "$EDIT" ] || [ "$what" != "entry 0" ] || cp -- "$EDIT" "$EDIT_TO"

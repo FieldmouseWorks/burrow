@@ -43,9 +43,12 @@ errors() {
 }
 # Whether an evaluation that ended with $1, having logged $2, failed on
 # what it evaluated: nix's own failure (1, not a signal or a limit's
-# kill), not nix out of memory, and with nothing built, fetched or
-# substituted on the way, any of which could be what failed (a store
-# path it only had to find is fine). Says why not when it isn't.
+# kill), with nothing built, fetched or substituted on the way, any of
+# which could be what failed (a store path it only had to find is
+# fine), and an error nix places in code, at a file's line and column,
+# as the evaluator's are. One it doesn't place (the daemon or the store
+# out of reach, nix out of memory, anything else of nix's own) says
+# nothing. Says why not when it isn't.
 own() {
   local why
   if [ "$1" != 1 ]; then
@@ -55,7 +58,9 @@ own() {
   if ! why=$(jq -nrR '[inputs | select(startswith("@nix ")) | .[5:] | fromjson?] as $log
       | first(([$log[] | select(.action == "start" and (.type | IN(100, 101, 105, 108, 109, 110, 111, 112))) | .text]
           | select(length > 0) | "it built or fetched on the way (\(join("; ")))"),
-        ($log[] | select(.action == "msg" and .level == 0 and (.msg | test("out of memory"))) | "nix ran out of memory"))' "$2"); then
+        ([$log[] | select(.action == "msg" and .level == 0)
+            | select(.file != null or (.msg | gsub("\u001b\\[[0-9;]*m"; "") | test("\\bat [^\n]+:[0-9]+:[0-9]+")))]
+          | select(length == 0) | "nix doesn'"'"'t place its error in any code"))' "$2"); then
     echo "its log can't be read, so it can't tell"
     return 1
   fi
@@ -93,17 +98,24 @@ built() {
   [ -n "$outs" ] && xargs -d '\n' nix-store --check-validity <<< "$outs" 2> /dev/null
 }
 # Whether nix's log of a failed build, $2, says the builder of $1, the
-# derivation, failed with an exit code: in nix's words since 2.30 or so,
-# `Cannot build 'DRV'.` and on the next line `Reason: builder failed
-# with exit code N.`, and before, `builder for 'DRV' failed with exit
-# code N`. A signal, a timeout, a dependency or nix's own failure is
-# none of those.
+# derivation, failed with an exit code a test gives: in nix's words
+# since 2.30 or so, `Cannot build 'DRV'.` and on the next line `Reason:
+# builder failed with exit code N.`, and before, `builder for 'DRV'
+# failed with exit code N`. A signal, a timeout, a dependency or nix's
+# own failure is none of those, and nor is a code a shell gives for
+# them: 124, timeout's, and 128 and up, a signal's.
 builder_failed() {
   awk -v d="$1" '
-    index($0, "builder for \047" d "\047 failed with exit code ") { found = 1 }
-    named && $0 ~ /^ *Reason: builder failed with exit code / { found = 1 }
+    function code(s) { sub(/.*failed with exit code /, "", s); s += 0; return s >= 1 && s < 128 && s != 124 }
+    index($0, "builder for \047" d "\047 failed with exit code ") && code($0) { found = 1 }
+    named && $0 ~ /^ *Reason: builder failed with exit code / && code($0) { found = 1 }
     { named = index($0, "Cannot build \047" d "\047.") > 0 }
     END { exit !found }' "$2"
+}
+# Whether the derivation $1 is a fetch: an output with a fixed hash,
+# which its builder downloads, so its failing can be the network's.
+fetch() {
+  nix derivation show "$1" | jq -e '(.derivations // .) | to_entries[0].value | any(.outputs[]; has("hash"))' > /dev/null
 }
 # A derivation's inputs, each with the outputs it takes, one installable a
 # line: nix's JSON names them by store path or, in its version 4, by name
@@ -307,10 +319,13 @@ negative() {
         unsure=1
       elif build_checks "" "${targets[$k]}^*" 2>&1 | tee "$work/again"; then
         echo "${targets[$k]} built once what it's built from had: it passes"
+      elif fetch "${targets[$k]}"; then
+        echo "${targets[$k]} is a fetch, whose failure can be the network's, so it can't tell"
+        unsure=1
       elif builder_failed "${targets[$k]}" "$work/again"; then
         caught=1
       else
-        echo "nix doesn't say ${targets[$k]}'s own builder failed with an exit code, so it can't tell"
+        echo "nix doesn't say ${targets[$k]}'s own builder failed with a test's exit code, so it can't tell"
         unsure=1
       fi
     done
