@@ -1,7 +1,7 @@
 # Renovate's policy for every repo, settings included (a repo's own
 # renovate.json can add to it), before ../updates.nix puts lock-age in
 # (its renovateSettings).
-{ lib, rcfg, githubRepo }:
+{ lib, rcfg, githubRepo, batchLabel }:
 lib.recursiveUpdate ({
   platform = "github";
   autodiscover = true;
@@ -173,7 +173,7 @@ lib.recursiveUpdate ({
       matchSourceUrls = map (o: "https://github.com/${o}/*") rcfg.trustedOwners;
       minimumReleaseAge = null;
     }
-    {
+    ({
       # Everything pinned to a branch of one of their repos (its workflows,
       # its actions, the flake input) moves in one PR, once that branch has
       # been quiet for half an hour. It's batching, not a soak: a burst of
@@ -181,13 +181,20 @@ lib.recursiveUpdate ({
       # the project's whole gate. A branch that goes on moving holds it
       # only until it stops for half an hour, and Renovate's next run on
       # the project (its own events, or burrow-events' hourly catch-up)
-      # opens it. A PR already open keeps its commit meanwhile.
+      # opens it. A PR already open keeps its commit meanwhile, and
+      # Renovate doesn't merge it either: a branch pin has one release, the
+      # branch head, and while that's too new internalChecksFilter's strict
+      # leaves the branch before its automerge step. On a branch merged to
+      # all day it would never land, so the steward lands it once it's green
+      # and settled, by the label it has (burrow.autoland.labels.batch).
       matchDatasources = [ "github-digest" ];
       matchSourceUrls = map (o: "https://github.com/${o}/*") rcfg.trustedOwners;
       minimumReleaseAge = "30 minutes";
       groupName = "{{{sourceRepo}}}";
       groupSlug = "{{{sourceRepoSlug}}}";
-    }
+    } // lib.optionalAttrs (batchLabel != null) {
+      addLabels = [ batchLabel ];
+    })
   ] ++ lib.optional (githubRepo != null) {
     # The machine's own flake.lock is HOST-update's: it deploys what it bumps.
     matchRepositories = [ githubRepo ];

@@ -60,6 +60,42 @@ assert merged()
 fresh_pr_state()
 status, _ = run(mkpr(branch="renovate/foo-1.x", title="Update foo from 1.4 to 1.5", number=9), 900)
 assert "state=success" in status and not merged() and JOBS == []
+# A batch of a trusted owner's branch pins (its label) the steward lands:
+# Renovate merges none while that branch keeps moving. Only one Renovate
+# would merge itself (automerge on), and only with the label.
+fresh_pr_state()
+batch = {"branch": "renovate/sam-homelab", "title": "deps: update sam/homelab to 2222222", "number": 11,
+         "body": "\U0001f6a6 **Automerge**: Enabled.", "labels": ("upstream batch",)}
+for kw in ({**batch, "labels": ()}, {**batch, "body": "\U0001f6a6 **Automerge**: Disabled by config."}):
+    status, _ = run(mkpr(**kw), 900)
+    assert "state=success" in status and not merged() and JOBS == [], (kw, status)
+status, _ = run(mkpr(**batch), 900)
+assert merged() and "Dependency update, CI green" in status and JOBS == [], status
+# Only one whose commits were read and are Renovate's alone: one whose
+# authors or committers can't be read, or on a machine with no Renovate
+# address to check them against, waits for Renovate, which checks for itself.
+for unread in ("authors", "committers", "address"):
+    fresh_pr_state()
+    COMMITS[11] = None if unread == "authors" else ["bot@renovateapp.com"]
+    COMMITTERS[11] = None if unread == "committers" else ["noreply@github.com"]
+    email = S.CFG["renovateEmail"]
+    if unread == "address":
+        S.CFG["renovateEmail"] = None
+    status, _ = run(mkpr(**batch), 900)
+    S.CFG["renovateEmail"] = email
+    assert "state=success" in status and not merged() and JOBS == [], (unread, status)
+# One a Claude job wrote or committed to is reviewed like a Claude PR, not
+# landed on CI alone.
+for who in ("author", "committer"):
+    fresh_pr_state()
+    COMMITS[11] = ["bot@renovateapp.com"] + ["claude@remi"] * (who == "author")
+    COMMITTERS[11] = ["noreply@github.com"] + ["claude@remi"] * (who == "committer")
+    status, _ = run(mkpr(**batch), 900)
+    assert not merged() and "Dependency update" not in status, (who, status)
+    status, _ = run(clean(**batch), 900)
+    assert merged(), (who, status)
+COMMITS.pop(11)
+COMMITTERS.pop(11)
 status, _ = run(mkpr(branch="dependabot/npm/foo-2", title="Bump foo from 1.4 to 2.0", number=10), 900)
 assert len(JOBS) == 1 and "a major dependency update" in JOBS[0] and not merged()
 assert "no reviewer reads" in JOBS[0] and "its reviewers found nothing" not in JOBS[0], JOBS[0]

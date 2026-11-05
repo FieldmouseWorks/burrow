@@ -4,10 +4,11 @@ use crate::pass::Out;
 use crate::testing::{Hub, States, T, answer, config, look};
 use serde_json::json;
 
-const LABELS: [&str; 7] = [
+const LABELS: [&str; 8] = [
     "hold",
     "needs-owner",
     "first",
+    "upstream batch",
     "waiting: release age",
     "waiting: proof slot",
     "waiting: reviewer",

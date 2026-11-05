@@ -110,7 +110,7 @@ let
     git = "${pkgs.git}/bin/git";
     runsDir = "${config.burrow.scratchDir}/proofs";
     owner = config.burrow.owner;
-    labels = { inherit (cfg.labels) hold owner first waiting; };
+    labels = { inherit (cfg.labels) hold owner first batch waiting; };
     notify = {
       inherit (config.burrow.notify) repo assignee;
       label = config.burrow.notify.label;
@@ -284,6 +284,7 @@ in
   imports = [
     (import ./common.nix inputs)
     (import ./autoland/review.nix inputs)
+    ./autoland/labels.nix
     { key = "burrow/notify"; imports = [ (import ./notify.nix inputs) ]; }
     # The heavy slots its proof builds take, where the machine has them.
     { key = "burrow/cpu"; imports = [ (import ./cpu.nix inputs) ]; }
@@ -629,63 +630,6 @@ in
       type = types.ints.positive;
       default = 2;
       description = "At most this many baseline jobs start in one pass (the first pass would otherwise start one per repo).";
-    };
-
-    labels = {
-      hold = mkOption {
-        type = types.str;
-        default = "hold";
-        description = ''
-          A PR with this label is paused: its status goes back to pending and
-          nothing merges it. For a wait on something else (another PR, a
-          deploy); one that waits for you takes the owner label, which lists
-          it for you.
-        '';
-      };
-      owner = mkOption {
-        type = types.str;
-        default = "needs-owner";
-        description = "Marks a PR that waits for you; take it off to let the steward carry on.";
-      };
-      first = mkOption {
-        type = types.str;
-        default = "first";
-        description = ''
-          A PR with this label goes ahead of every PR without it in its repo's
-          line for proofSlots, and the oldest first among those with it: for a
-          fix the rest of the line waits on, opened after them.
-        '';
-      };
-      # What a PR waits on, where it shows at a glance: the steward puts one
-      # on with the status that says it and takes it off once that wait is
-      # over (autoland/prs.py). Its status says the rest: until when, how
-      # many are ahead, which reviewer.
-      waiting = {
-        releaseAge = mkOption {
-          type = types.str;
-          default = "waiting: release age";
-          description = "On a lock file refresh none of whose updates is old enough to take yet (the minimum release age).";
-        };
-        proofSlot = mkOption {
-          type = types.str;
-          default = "waiting: proof slot";
-          description = "On a PR waiting its turn for one of its repo's proofSlots.";
-        };
-        reviewer = mkOption {
-          type = types.str;
-          default = "waiting: reviewer";
-          description = "On a PR that can't settle until a reviewer out of service is back.";
-        };
-        train = mkOption {
-          type = types.str;
-          default = "waiting: train";
-          description = ''
-            On a PR in its repo's merge train, until it lands or leaves. It's
-            Renovate's `stopUpdatingLabel` too: a push to a PR in the train
-            throws away the candidate it rides in, gate and all.
-          '';
-        };
-      };
     };
 
     reviewers = {

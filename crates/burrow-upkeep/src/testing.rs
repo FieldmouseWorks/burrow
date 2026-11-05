@@ -55,6 +55,7 @@ pub fn config(dir: &Path) -> Config {
                 hold: "hold".into(),
                 owner: "needs-owner".into(),
                 first: "first".into(),
+                batch: "upstream batch".into(),
                 waiting: Waiting {
                     release_age: "waiting: release age".into(),
                     proof_slot: "waiting: proof slot".into(),
