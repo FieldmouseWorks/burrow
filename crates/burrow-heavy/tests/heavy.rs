@@ -1,5 +1,5 @@
 //! The binary as `heavy` runs it, on slots of its own. The module's whole
-//! tool, as it's wrapped, is held to the rest by flake.nix's `cpu` check.
+//! tool, as it's wrapped, is held to the rest by the `cpu` check (checks/cpu.nix).
 
 use std::fs::{self, File};
 use std::io::Write as _;

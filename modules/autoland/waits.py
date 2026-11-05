@@ -70,15 +70,18 @@ def read(repo, prs):
     OPEN[repo] = {key_of(repo, pr) for pr in prs}
 
 
-def item(repo, pr, phase, minutes, kick, rev, until=None, grace=0):
+def item(repo, pr, phase, minutes, kick, rev, until=None, grace=0, claude=False):
     # .get: what failed may be the PR's own record.
     return {"what": f"{repo}#{pr['number']} {pr.get('title', '')}".strip(), "link": pr.get("url"), "phase": phase,
-            "minutes": minutes, "kick": kick, "rev": rev, "until": until, "grace": grace}
+            "minutes": minutes, "kick": kick, "rev": rev, "until": until, "grace": grace, "claude": claude}
 
 
-def note(repo, pr, phase, wait, refreshing=False, ripe=None):
+def note(repo, pr, phase, wait, refreshing=False, ripe=None, jobs=None):
     """The PR's wait as its status says it (its last in a pass stands); wait
-    None: nothing to watch. On a Renovate PR renovate-sweep may have a
+    None: nothing to watch. It waits on Claude (the watchdog's claude, which
+    holds it while Claude is out of usage) while one of the Claude jobs the
+    pass looked at for it (jobs: what proj said of each, by id; a proof
+    build is none) is queued or at work. On a Renovate PR renovate-sweep may have a
     refresh going on (refreshing), no stall goes to a job before the sweep's
     own would have had the branch: its minutes count from after the sweep's
     longest recovery from the date a lock file refresh waits for (ripe), or
@@ -98,7 +101,8 @@ def note(repo, pr, phase, wait, refreshing=False, ripe=None):
         run = CFG["renovateRun"]
         grace = lock_wait.recovery(run) if ripe else lock_wait.drain(run)
         phase += lock_wait.guard(run)
-    NOTED.setdefault(repo, {})[key_of(repo, pr)] = item(repo, pr, phase, minutes, kick, rev, ripe, grace)
+    claude = any(s in ("queued", "running") for j, s in (jobs or {}).items() if not j.startswith(C.BUILD))
+    NOTED.setdefault(repo, {})[key_of(repo, pr)] = item(repo, pr, phase, minutes, kick, rev, ripe, grace, claude)
 
 
 def overdue(repo, pr, why, said=None):
@@ -163,6 +167,8 @@ def publish(seen, digest, full):
             items[key] = {"what": it["what"], "link": it["link"], "phase": phase, "since": since,
                           "due": since if key in FAILING else max(since, it.get("until") or 0) + it.get("grace", 0) + it["minutes"] * MIN,
                           "kick": it["kick"],
+                          # A step that keeps failing is the steward's, whatever job it has.
+                          "claude": it.get("claude", False) and key not in FAILING,
                           "rev": it["rev"]}
     save("watch.json", {"at": C.NOW, "items": items})
     if items != was:

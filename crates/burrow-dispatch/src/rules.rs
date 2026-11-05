@@ -110,6 +110,7 @@ pub fn decide(
                 kick: Some(cfg.handler.clone()),
                 line: false,
                 unstick: false,
+                claude: false,
             },
         );
     }
@@ -248,6 +249,7 @@ fn going_live(
             kick: None,
             line: false,
             unstick: false,
+            claude: false,
         },
         _ => Item {
             what,
@@ -264,6 +266,7 @@ fn going_live(
             kick: Some(dep.handler.clone()),
             line: false,
             unstick: false,
+            claude: false,
         },
     }
 }
@@ -317,6 +320,7 @@ fn runner(
             kick: Some(cfg.handler.clone()),
             line: false,
             unstick: false,
+            claude: false,
         },
     );
     if snap.switching || recent.len() >= RESTARTS {

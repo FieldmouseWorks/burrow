@@ -174,6 +174,8 @@ pub fn job_wait(cfg: &Config, f: &Facts) -> Option<Item> {
         // The stuck issue's own: its stall goes to the owner, since that
         // issue would only hand it to itself.
         unstick: f.unstick,
+        // A turn in line is `line`'s: none waits on a job of its own.
+        claude: false,
     })
 }
 

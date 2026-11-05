@@ -121,13 +121,19 @@ pub fn entry(it: &Item) -> [String; 3] {
 }
 
 /// The owner's notice of a stall: its title and body.
-pub fn notice(cfg: &Config, it: &Item) -> (String, String) {
+pub fn notice(cfg: &Config, it: &Item, out: Option<f64>) -> (String, String) {
     let why = if it.unstick {
-        "It's the Claude job that takes the pipeline's stuck issue, so what's on that issue waits for it."
+        "It's the Claude job that takes the pipeline's stuck issue, so what's on that issue waits for it.".to_owned()
+    } else if let Some(until) = out {
+        format!(
+            "Claude is out of usage until {}, so no Claude job can take it meanwhile, nor the stuck issue's.",
+            day(until)
+        )
     } else if it.line {
         "It's waiting in proj's line, where a Claude job of its own would only have queued too."
+            .to_owned()
     } else {
-        "A Claude job couldn't move it."
+        "A Claude job couldn't move it.".to_owned()
     };
     (
         format!("Stuck: {}", it.what).chars().take(200).collect(),
