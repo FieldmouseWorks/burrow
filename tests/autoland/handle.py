@@ -862,10 +862,12 @@ status, _ = run(clean(checks=negative_red), 7200)
 assert "CI is red: check / negative" in status and len(JOBS) == 1, (status, JOBS)
 from tasks import NEGATIVE  # noqa: E402
 assert NEGATIVE.format("check / negative") in JOBS[0], JOBS[0]
-assert "Never delete, skip or weaken a test" in JOBS[0], JOBS[0]
+assert "never delete, skip or weaken a test" in JOBS[0], JOBS[0]
+# Red can also mean it couldn't tell, which says nothing about the tests.
+assert "says nothing about the tests" in JOBS[0], JOBS[0]
 # Only the negative's: another red check, or one whose name merely ends in
 # "negative", gets the usual brief.
-assert "pass on its base's code too" not in H.fix_task("sam/r", steer, "CI is red: ci")
+assert "burrow's negative" not in H.fix_task("sam/r", steer, "CI is red: ci")
 assert H.negative(["ci", "check / non-negative", "negatives"]) is None
 assert H.negative(["ci", "negative"]) == "negative"
 # The same on a Dependabot update.
