@@ -207,8 +207,10 @@ impl Gate {
     [ -z "$what" ] || echo "eval $what" >> "$NIX_LOG"
     # Killed, as a limit would, when it evaluates what this names, or
     # from the second time it does what EVAL_KILL_AGAIN names; out of
-    # memory, as nix says it is, for EVAL_OOM, and with the daemon out of
-    # reach for EVAL_DAEMON.
+    # memory, as nix says it is, for EVAL_OOM; and for EVAL_DAEMON, with
+    # the daemon out of reach, as nix says it under the frames of the
+    # builtin that reached for it, unless it evaluates in a store of its
+    # own.
     [ -z "$EVAL_KILL" ] || case "$*" in *"$EVAL_KILL"*) exit 137 ;; esac
     [ -z "$EVAL_KILL_AGAIN" ] || case "$*" in *"$EVAL_KILL_AGAIN"*)
       [ ! -e "$NIX_LOG.tried" ] || exit 137
@@ -216,8 +218,8 @@ impl Gate {
     [ -z "$EVAL_OOM" ] || case "$*" in *"$EVAL_OOM"*)
       echo '@nix {{"action":"msg","level":0,"msg":"\u001b[31;1merror:\u001b[0m out of memory"}}' >&2
       exit 1 ;; esac
-    [ -z "$EVAL_DAEMON" ] || case "$*" in *"$EVAL_DAEMON"*)
-      echo '@nix {{"action":"msg","column":null,"file":null,"level":0,"line":null,"msg":"\u001b[31;1merror:\u001b[0m cannot connect to socket at '"'"'/nix/var/nix/daemon-socket/socket'"'"': Connection refused"}}' >&2
+    [ -z "$EVAL_DAEMON" ] || case "$*" in *"--store "*) ;; *"$EVAL_DAEMON"*)
+      echo '@nix {{"action":"msg","column":null,"file":null,"level":0,"line":null,"msg":"\u001b[31;1merror:\u001b[0m\n       … while calling the '"'"'derivationStrict'"'"' builtin\n         at «nix-internal»/derivation-internal.nix:37:12:\n\n       \u001b[31;1merror:\u001b[0m cannot connect to socket at '"'"'/nix/var/nix/daemon-socket/socket'"'"': Connection refused"}}' >&2
       exit 1 ;; esac
     # The checkout edited once the plan is made, if asked.
     [ -z "$EDIT" ] || [ "$what" != "entry 0" ] || cp -- "$EDIT" "$EDIT_TO"

@@ -49,10 +49,10 @@ errors() {
 # as the evaluator's are. One it doesn't place (the daemon or the store
 # out of reach, nix out of memory, anything else of nix's own) says
 # nothing. Nix doesn't say which errors are the evaluator's own, only
-# where they were, so a store failure nix places inside the expression
-# (one a builtin raises, under the frames of its caller) reads as one
-# too: the base's evaluation beside the first try and after the second
-# is what's left to stop that. Says why not when it isn't.
+# where they were, so a store failure it places inside the expression
+# (one a builtin raises, under its caller's frames) reads as one too:
+# failed_there's second try, apart from the store, is what stops that.
+# Says why not when it isn't.
 own() {
   local why
   if [ "$1" != 1 ]; then
@@ -76,13 +76,19 @@ own() {
 # Whether an evaluation on the negative tree failed on what it
 # evaluated, where $1 and $2 are its exit status and log, and $3 how
 # it's run, as `$3 TREE ARGS...` with the trees under $4 and $5.. its
-# further arguments: its own failure (own), and again on a second try,
-# with the base's evaluation, which worked beside the first, working
-# after both.
+# further arguments: its own failure (own), and again on a second try
+# apart from the daemon, the machine's store and the network, in a
+# store of the job's own that nothing else uses and no substituter
+# fills (apart, which $3 puts before its arguments), with the base's
+# evaluation, which worked beside the first, working there after it.
+# A failure of the store, the daemon or the network the first time
+# can't happen the second, and the base's working in the same store
+# says that store works.
 failed_there() {
   local rc=$1 log=$2 how=$3 trees=$4
   shift 4
   own "$rc" "$log" || return 1
+  local apart=(--store "local?root=$work/apart" --option substituters "")
   rc=0
   "$how" "$trees/negative" "$@" > /dev/null 2> "$log.again" || rc=$?
   if [ "$rc" = 0 ]; then
@@ -140,7 +146,8 @@ inputs() {
 }
 negative() {
   work=$(mktemp -d "$RUNNER_TEMP/negative.XXXXXX")
-  trap 'rm -rf -- "$work"' EXIT
+  # The store failed_there evaluates apart in is nix's, read-only.
+  trap 'chmod -R u+w -- "$work" 2> /dev/null; rm -rf -- "$work"' EXIT
   : > "$work/tests"
   : > "$work/checks"
   : > "$work/skipped"
@@ -209,7 +216,7 @@ negative() {
   # by side as the job's memory allows (build.sh): its .drv path, or
   # nothing where it doesn't evaluate.
   names() {
-    nix eval --no-update-lock-file --option eval-cache false --log-format internal-json \
+    nix eval "${apart[@]}" --no-update-lock-file --option eval-cache false --log-format internal-json \
       --json "$1#." --apply "o: builtins.attrNames (o.checks.$system or { })"
   }
   if ! names "$work/base" > "$work/base.names" 2> "$work/base.names.err"; then
@@ -236,7 +243,7 @@ negative() {
   # exit status in $3.rc. One that isn't a valid derivation (or that a GC
   # took in between) is an error.
   drv_of() {
-    nix eval --no-update-lock-file --option eval-cache false --log-format internal-json \
+    nix eval "${apart[@]}" --no-update-lock-file --option eval-cache false --log-format internal-json \
       --raw "$1#." --apply "o: o.checks.$system.$2.drvPath"
   }
   evaluate() {

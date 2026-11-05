@@ -620,6 +620,22 @@ fn a_failure_that_isnt_the_tests_own_cant_tell() {
     );
 }
 
+/// An evaluation that failed reaching the daemon, even where nix places
+/// the error in code, evaluates apart from it.
+#[test]
+fn an_evaluation_the_store_failed_says_nothing() {
+    let r = Repo::new();
+    let head = r.pr(
+        "real",
+        &[("lib.txt", Some("2\n")), ("tests/want.txt", Some("2\n"))],
+    );
+    let t = format!(r#"negative#. --apply o: o.checks.{}."t""#, r.g.system);
+    let ran = r.run_with(&head, "", &[("EVAL_DAEMON", &t)]);
+    assert_eq!(ran.code, 1, "{}", ran.out);
+    assert!(ran.found.is_none(), "{}", ran.out);
+    assert!(ran.out.contains("evaluated on a second try"), "{}", ran.out);
+}
+
 /// A check that failed only while a dependency did, or whose builder a
 /// signal stopped, says nothing either: the last try, once everything it's
 /// built from has built, is what counts, and only its own builder's exit.
@@ -757,9 +773,8 @@ fn its_dependencies_wait_for_the_slot_too() {
 }
 
 /// An evaluation that failed with a fetch or a build on the way, with an
-/// error nix doesn't place in code (nix out of memory, the daemon out of
-/// reach), or that a signal stopped the second time, didn't fail on what
-/// it evaluated.
+/// error nix doesn't place in code (nix out of memory), or that a signal
+/// stopped the second time, didn't fail on what it evaluated.
 #[test]
 fn an_evaluation_counts_only_failing_on_its_own_expression() {
     let r = Repo::new();
@@ -779,7 +794,7 @@ fn an_evaluation_counts_only_failing_on_its_own_expression() {
     );
     let again = r.run_with(&throws, "", &[("EVAL_KILL_AGAIN", &fromtests)]);
     let oom = r.run_with(&throws, "", &[("EVAL_OOM", &fromtests)]);
-    let daemon = r.run_with(&throws, "", &[("EVAL_DAEMON", &fromtests)]);
+
     let fetches = r.pr(
         "fetches",
         &[
@@ -797,7 +812,6 @@ fn an_evaluation_counts_only_failing_on_its_own_expression() {
     for (ran, says) in [
         (again, "ended with 137"),
         (oom, "doesn't place its error"),
-        (daemon, "doesn't place its error"),
         (fetched, "fetched on the way"),
     ] {
         assert_eq!(ran.code, 1, "{says}: {}", ran.out);
