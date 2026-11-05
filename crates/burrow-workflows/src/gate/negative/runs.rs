@@ -132,6 +132,32 @@ fn a_failure_counts_whatever_the_check_runs() {
     assert_eq!(ran.result(), "fail", "{}", ran.out);
 }
 
+/// A test another changed file brings in counts as read: fromtests reads
+/// tests/new.txt only once the new tests/check.nix does, so neither alone
+/// on the old code would show it, but taking either out of the negative
+/// tree changes what fromtests is.
+#[test]
+fn a_test_brought_in_by_another_counts_as_read() {
+    let r = Repo::declaring("{ testFiles = [ ]; }");
+    let head = r.pr(
+        "companion",
+        &[
+            ("lib.txt", Some("2\n")),
+            ("tests/new.txt", Some("x\n")),
+            (
+                "tests/check.nix",
+                Some(
+                    "{ drv }: drv \"fromtests\" (if builtins.pathExists ./new.txt then [ ./new.txt ] else [ ])\n",
+                ),
+            ),
+        ],
+    );
+    let ran = r.run(&head, "", "");
+    assert_eq!(ran.code, 1, "{}", ran.out);
+    assert_eq!(ran.result(), "pass", "{}", ran.out);
+    assert!(ran.list("unrun").is_empty(), "{}", ran.out);
+}
+
 /// A testFiles that isn't a list of paths from the repo's root (a pathspec
 /// of git's own magic, a path out of the tree, a string) can't tell.
 #[test]

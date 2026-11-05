@@ -417,21 +417,29 @@ negative() {
       git diff --name-only --no-renames --diff-filter=d -z "$fork" "$HEAD_SHA" -- "${globs[@]/#/:(glob)}" >> "$work/covered"
     fi
   done
-  # A check that doesn't say runs the new tests it reads: each one whose
-  # head version alone, on the base, changes the check's derivation.
+  # A check that doesn't say runs the new tests it reads: each one that,
+  # taken out of the negative tree (back to the base's version, or gone
+  # where the base has none) and nothing else, changes the check's
+  # derivation there or stops it evaluating. So a test only another
+  # changed file brings in counts, and one nothing reads doesn't.
   if [ ${#undeclared[@]} -gt 0 ]; then
     mkdir "$work/one"
     j=0
     while IFS= read -r -d '' f; do
       j=$((j + 1))
       export GIT_INDEX_FILE=$work/one/$j.index
-      git read-tree "$fork"
-      git update-index --add --cacheinfo "$(git --literal-pathspecs ls-tree --format='%(objectmode),%(objectname)' "$HEAD_SHA" -- "$f"),$f"
+      git read-tree "$tree"
+      at=$(git --literal-pathspecs ls-tree --format='%(objectmode),%(objectname)' "$fork" -- "$f")
+      if [ -n "$at" ]; then
+        git update-index --cacheinfo "$at,$f"
+      else
+        git update-index --force-remove -- "$f"
+      fi
       one=$(git write-tree)
       unset GIT_INDEX_FILE
       one=$(GIT_AUTHOR_DATE="@$when +0000" GIT_COMMITTER_DATE="@$when +0000" \
         git -c user.name=flake-check -c user.email=flake-check@localhost -c commit.gpgsign=false \
-        commit-tree "$one" -p "$fork" -m "one test of $HEAD_SHA on $fork's code")
+        commit-tree "$one" -p "$fork" -m "the tests of $HEAD_SHA on $fork's code, but one")
       git clone -q --shared --no-checkout . "$work/one/$j"
       git -C "$work/one/$j" checkout -q --detach "$one"
       printf '%s\0' "$f" > "$work/one/$j.file"
@@ -444,13 +452,7 @@ negative() {
     local m
     for ((m = 1; m <= j; m++)); do
       for k in "${undeclared[@]}"; do
-        if [ "$(cat "$work/one/$m.$k.rc")" != 0 ]; then
-          echo "check ${targets[$k]} doesn't evaluate with $(tr -d '\0' < "$work/one/$m.file") alone on the old code:"
-          errors "$work/one/$m.$k.err"
-          echo "so it can't tell whether that check reads it"
-          return 1
-        fi
-        if [ "$(cat "$work/one/$m.$k")" != "${bases[$k]}" ]; then
+        if [ "$(cat "$work/one/$m.$k.rc")" != 0 ] || [ "$(cat "$work/one/$m.$k")" != "${targets[$k]}" ]; then
           cat "$work/one/$m.file" >> "$work/covered"
           break
         fi
