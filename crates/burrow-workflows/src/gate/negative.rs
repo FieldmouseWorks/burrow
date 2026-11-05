@@ -822,10 +822,10 @@ fn an_evaluation_counts_only_failing_on_its_own_expression() {
 
 /// A flake input the store hasn't got yet is fetched by whichever
 /// evaluation needs it first. When that's the negative tree's failing one,
-/// its failure is still the test's own: the inputs are fetched before
-/// anything is evaluated, so that evaluation fetches nothing.
+/// its failure is still the test's own: the second try, which fetches
+/// nothing, is the one held to it.
 #[test]
-fn an_input_not_yet_fetched_is_fetched_before_the_evaluations() {
+fn an_input_the_failing_evaluation_fetched_first_still_counts() {
     let r = Repo::new();
     let s = &r.g.s;
     // The input: a tarball, served over HTTP as often as it's asked for.
