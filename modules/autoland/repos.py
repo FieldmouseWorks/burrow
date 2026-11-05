@@ -16,7 +16,7 @@ import common as C
 import reviewers as V
 from common import CFG, DRY, load, log, save
 import claims
-from tasks import RED_BRANCH, red_default_task, red_fix
+from tasks import RED_BRANCH, UNDO_BRANCH, red_default_task, red_fix
 
 # Each owner's own repos, not forks, a page at a time (what `gh repo list
 # --source` asks, with the repo's databaseId, which it can't give).
@@ -186,9 +186,11 @@ def watch_default(r, info, prs, digest):
     cause and opens a PR from RED_BRANCH that reverts or fixes it, which
     lands like any other; with the ledger on, a revert of one PR's merge is
     instead the ledger's undo of that PR, which the job names and the
-    steward has it open (undo_red). Nothing more while that job works or a fix is
-    open; a second job if it's still red after (seen on two passes), then
-    the owner. A fix lands only while CI says the branch is red: while it
+    steward has it open (undo_red). When one PR's landing alone turned it
+    red (landed_alone), the steward names that PR itself, and starts a job
+    only if its undo can't be had or leaves it red. Nothing more while that
+    job works or a fix is open; a second job if it's still red after (seen
+    on two passes), then the owner. A fix lands only while CI says the branch is red: while it
     says nothing yet (the branch moved on, a fix landed, say, and its CI is
     running) a fix waits, and once it's green again a fix isn't needed and
     is closed. Returns the fixes this pass mustn't merge, each with why;
@@ -219,8 +221,8 @@ def watch_default(r, info, prs, digest):
             return {pr["number"]: gone for pr in fixes}
         # Ended with no PR to show: as when red, seen on two passes before
         # the red is forgotten, since this one may have read the PRs just
-        # before the job opened its own.
-        if not fixes and red.get("job") and not red.get("ended"):
+        # before the job, or cn, opened its own.
+        if not fixes and (red.get("job") or red.get("named")) and not red.get("ended"):
             red["ended"] = True
             save(key, st)
             C.wake(repo, C.NOW + 60)  # ends: the second look, once
@@ -243,9 +245,23 @@ def watch_default(r, info, prs, digest):
             save(key, st)
         return {pr["number"]: gone for pr in fixes}
     line = f"{repo} {default} at {sha[:7]}"
-    # Its job ended: an undo it named is the fix, asked for before anything
-    # else (and again, a few times, if cn stopped before it was done).
-    if not working and red.get("job") and CFG.get("undo") and not (red.get("asked") or red.get("refused")):
+    # A new red one landing caused: its undo is asked for with no job,
+    # unless a fix is open already (anyone's of the steward's own, from a
+    # RED_BRANCH branch), which is the red's fix in hand, as for a job.
+    if not red and not fixes and CFG.get("undo"):
+        named = landed_alone(repo, default, target)
+        if named:
+            log(f"{repo}: {default} is red at {sha[:7]}, and {named}'s landing alone made it so: undoing it, with no job")
+            red = st["red"] = {"named": named}
+    # Its job ended, or the steward named the PR itself: that undo is the
+    # fix, asked for before anything else (and again, a few times, if cn
+    # stopped before it was done). One the steward named waits while
+    # another fix is open, as it did before it was first asked, unless cn
+    # opened its undo already: a retry finds that one and records it,
+    # opening none beside it.
+    others = [pr for pr in fixes if pr["number"] not in red.get("undos", ())]
+    if (not working and (red.get("job") or (red.get("named") and (red.get("undos") or not others))) and CFG.get("undo")
+            and not (red.get("asked") or red.get("refused"))):
         booked = undo_red(repo, red)
         save(key, st)
         if booked:
@@ -254,9 +270,10 @@ def watch_default(r, info, prs, digest):
     # while it's open, though nothing of this red's.
     if working or fixes or any(pr["number"] in red.get("theirs", ()) for pr in prs):
         return {}
-    # Its job ended with no PR to show. Seen on two passes: this one may
-    # have read the PRs just before the job opened its own.
-    if red.get("job") and not red.get("ended"):
+    # Its job ended, or the undo the steward asked for itself was refused,
+    # or has gone, with no PR to show. Seen on two passes: this one may
+    # have read the PRs just before the job or cn opened its own.
+    if (red.get("job") or red.get("named")) and not red.get("ended"):
         red["ended"] = True
         save(key, st)
         C.wake(repo, C.NOW + 60)  # ends: the second look, once
@@ -264,15 +281,16 @@ def watch_default(r, info, prs, digest):
     if red.get("jobs", 0) >= 2:
         digest.append(("The default branch is red", line, "two Claude jobs ended with it still red"))
         return {}
-    jid = C.job(repo, red_default_task(repo, default, sha, red.get("refused")), role="red-main")
+    jid = C.job(repo, red_default_task(repo, default, sha, red.get("refused"), red.get("undone", ())), role="red-main")
     if not jid:
         digest.append(("Couldn't start a Claude job to fix it", line, "the default branch is red"))
         C.wake(repo, C.NOW + 5 * 60)  # ends: listed on the stuck issue
         return {}
     log(f"{repo}: {default} is red at {sha[:7]}; a Claude job {jid} fixes it")
     # One told the ledger couldn't undo it isn't asked to: what it names
-    # isn't undone.
-    st["red"] = {"job": jid, "jobs": red.get("jobs", 0) + 1, **({"refused": red["refused"]} if red.get("refused") else {})}
+    # isn't undone. One told what was undone for it may name another.
+    st["red"] = {"job": jid, "jobs": red.get("jobs", 0) + 1, **({"refused": red["refused"]} if red.get("refused") else {}),
+                 **({"undone": red["undone"]} if red.get("undone") else {})}
     save(key, st)
     return {}
 
@@ -284,6 +302,37 @@ UNDO_TRIES = 3
 # lock and see to other repos first, and a retry's spacing is real time.
 clock = time.time
 UNDO_NAMED = re.compile(r"([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)#([1-9][0-9]{0,9})")
+# The line an undo's PR carries in its body (Conary's undo.rs, Marker).
+UNDO_MARKER = "<!-- conary-undo: "
+
+
+def landed_alone(repo, default, target):
+    """The PR, as REPO#N, whose landing alone turned the default branch red,
+    when that needs no working out: the tip is one merged PR's landing to
+    it, the tip's first parent's CI passed, and a check run on the tip
+    failed (one cancelled, timed out or never started is no proof of the
+    PR's: a runner killed, say). All of it is in what the pass read of the
+    tip (prs.TIP). None when it isn't, or when that PR is an undo or a red
+    fix itself, whose own undo would loop: a Claude job finds the cause
+    then, as for two landings since green, or a train's members landed back
+    to back (their parents have no CI)."""
+    parents = (target.get("parents") or {}).get("nodes") or []
+    if not parents or ((parents[0] or {}).get("statusCheckRollup") or {}).get("state") != "SUCCESS":
+        return None
+    runs = (((target.get("statusCheckRollup") or {}).get("contexts") or {}).get("nodes")) or []
+    if not any((c or {}).get("conclusion") == "FAILURE" for c in runs):
+        return None
+    landed = [pr for pr in ((target.get("associatedPullRequests") or {}).get("nodes") or [])
+              if pr and pr.get("state") == "MERGED"]
+    if len(landed) != 1:
+        return None
+    pr = landed[0]
+    if (pr.get("mergeCommit") or {}).get("oid") != target.get("oid") or pr.get("baseRefName") != default:
+        return None
+    head, body = pr.get("headRefName") or "", pr.get("body") or ""
+    if head.startswith((RED_BRANCH, UNDO_BRANCH)) or any(x.strip().startswith(UNDO_MARKER) for x in body.splitlines()):
+        return None
+    return f"{repo}#{pr['number']}"
 
 
 def undo_asked(repo, jid):
@@ -305,7 +354,8 @@ def undo_asked(repo, jid):
 
 
 def undo_red(repo, red):
-    """The undo the red's ended job named, run by the ledger's writer cn
+    """The undo the red's ended job named, or the steward named itself
+    (landed_alone), run by the ledger's writer cn
     (CFG["undo"]). A PR it opened for this red, or opened and stopped
     before recording, is kept in the red's undos, the red's fix from now on
     (tasks.red_fix); one it found open already is only if it was this red's
@@ -318,9 +368,12 @@ def undo_red(repo, red):
     last stop, whatever pass comes first. Otherwise it's asked: a job that
     named nothing, an undo the ledger refused (cn's exit 65) or had nothing
     to revert, or one that kept stopping, goes on as a job with no PR to
-    show, the next one told why."""
-    asked = undo_asked(repo, red["job"])
-    if asked is None:
+    show, the next one told why. One undone for this red already, which
+    left it red, isn't asked for again: the job was told it was."""
+    asked = red.get("named") or undo_asked(repo, red["job"])
+    if asked is None or asked in red.get("undone", ()):
+        if asked:
+            log(f"{repo}: job {red['job']} named {asked} to undo, which was undone for this red already")
         red["asked"] = True
         return False
     if red.get("retryAt", 0) > clock():
@@ -355,6 +408,8 @@ def undo_red(repo, red):
             theirs.add(row["pr"])
     red["undos"], red["theirs"] = sorted(ours), sorted(theirs - ours)
     if rc == 0 and (ours or theirs):
+        if red["undos"]:
+            red["undone"] = [*red.get("undone", ()), asked]
         log(f"{repo}: undid {asked} for its red default branch: #{', #'.join(map(str, red['undos'] + red['theirs']))}"
             + (" (asked for already, by someone else)" if red["theirs"] else ""))
         red["asked"] = True
