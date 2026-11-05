@@ -51,6 +51,11 @@ pub struct Config {
     pub deployed: PathBuf,
     /// Each GitHub App's env file, by its name.
     pub apps: BTreeMap<String, PathBuf>,
+    /// The model each role's jobs run on (`proj run --role`): a file the
+    /// machine keeps outside any repo, a `ROLE MODEL` line a role (# starts a
+    /// comment), since which model does what is the machine's business. A
+    /// role it doesn't list, or no file, runs on Claude's own default.
+    pub roles: PathBuf,
     pub tools: Tools,
     /// proj-inbox's settings; None when it's off.
     pub inbox: Option<Inbox>,
@@ -126,6 +131,25 @@ impl Config {
         ok.then(|| self.apps.get(name)).flatten()
     }
 
+    /// The model `roles` gives `role`, if it lists one.
+    pub fn model(&self, role: &str) -> Option<String> {
+        let text = std::fs::read_to_string(&self.roles).ok()?;
+        // A line starting # is a comment.
+        text.lines()
+            .filter(|l| !l.trim_start().starts_with('#'))
+            .find_map(|l| {
+                let mut w = l.split_whitespace();
+                (w.next() == Some(role))
+                    .then(|| w.next())
+                    .flatten()
+                    .filter(|m| {
+                        m.bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b"._:[]-".contains(&b))
+                    })
+                    .map(str::to_owned)
+            })
+    }
+
     /// How long a turn may wait in line, in seconds.
     pub fn stall_queued(&self) -> i64 {
         (self.stall_after_minutes * 60) as i64
@@ -163,12 +187,30 @@ pub(crate) mod tests {
             "flake": "/data/dev/src/box",
             "deployed": "/nowhere/proj",
             "apps": {"workers": "/run/workers.env"},
+            "roles": "/nowhere/roles",
             "inbox": {"state": "/var/lib/burrow/proj-inbox", "label": "claude", "unstickLabel": "stuck",
                       "authors": ["sam"], "vm": false, "host": "box", "notify": "/bin/notify",
                       "wake": "/var/lib/burrow/proj-inbox/wake.json", "machinery": "workers"},
             "tools": {"bash": "/bin/bash", "flock": "/bin/flock", "gh": "/bin/gh", "git": "/bin/git", "systemctl": "/bin/systemctl",
                       "systemdRun": "/bin/systemd-run", "timeout": "/bin/timeout"}
         })
+    }
+
+    // A role's model is its line's second word; a role the file doesn't
+    // list, a line with no model or one with odd bytes, or no file, is none.
+    #[test]
+    fn roles() {
+        let dir = tempfile::tempdir().unwrap();
+        let roles = dir.path().join("roles");
+        let mut cfg: Config = serde_json::from_value(example()).unwrap();
+        cfg.roles = roles.clone();
+        assert_eq!(cfg.model("routine"), None);
+        std::fs::write(&roles, "# a comment\nroutine  small-1\nbare\nodd a$b\n").unwrap();
+        assert_eq!(cfg.model("routine").as_deref(), Some("small-1"));
+        assert_eq!(cfg.model("bare"), None);
+        assert_eq!(cfg.model("odd"), None);
+        assert_eq!(cfg.model("judge"), None);
+        assert_eq!(cfg.model("#"), None);
     }
 
     // The module's config reads whole; a field the binary doesn't know, or
