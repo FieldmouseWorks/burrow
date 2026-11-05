@@ -31,6 +31,7 @@ use crate::harness::{
 mod checkout;
 mod derivations;
 mod legs;
+mod negative;
 mod outputs;
 mod slots;
 mod whole;

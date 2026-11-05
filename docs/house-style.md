@@ -68,11 +68,18 @@ Every repo with code gets a `flake.nix` from the template
   On a public repo it also attests the gate's result for Conary's ledger, so
   the caller's job grants it `id-token: write` and `attestations: write`. On
   a PR, its `commits` job fails any commit GitHub can't verify: a signed one
-  under a name and email its key isn't for (the house rules' Commits). A
+  under a name and email its key isn't for (the house rules' Commits). Its
+  `negative` job holds a PR to the house rule that a new check fails on the
+  bug it's for: a PR that adds or changes test files and changes anything
+  else too has its new tests built on its base's code, and is red when they
+  pass there (Conary's
+  [Negative runs](https://github.com/FieldmouseWorks/Conary/blob/main/docs/ci-attestation.md#negative-runs)
+  says how). A test is a file by its path, so tests go in files of their
+  own (`tests/`, `tests.rs`, `test_*.py`), not inline. A
   repo whose PRs land through its merge train (autoland's `train`) runs it on
   pushes to `conary/train/**` too, and turns
   `pr-gate` off: the gate checks the candidates the train lands, and a PR to
-  the default branch gets only its `commits` (one to another branch, or
+  the default branch gets only its `commits` and `negative` (one to another branch, or
   retargeted to one, still gets the gate). A repo that lists its
   documentation in `docs-paths` (files nothing its flake builds or tests
   reads; the input says how) gives a PR that changes only those the docs
