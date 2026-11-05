@@ -356,7 +356,11 @@ let
     in if m == null then null else lib.head m;
   # Renovate's policy, settings included, before lock-age goes in
   # (renovateSettings).
-  renovatePolicy = import ./updates/renovate-policy.nix { inherit lib rcfg githubRepo; };
+  renovatePolicy = import ./updates/renovate-policy.nix {
+    inherit lib rcfg githubRepo;
+    # The steward lands the batched PRs it finds this label on.
+    batchLabel = if autoland.enable or false then autoland.labels.batch else null;
+  };
   renovateSettings = renovatePolicy // lib.optionalAttrs (trainRepos != [ ]) {
     # A PR in a train has the steward's label saying so, and Renovate pushes
     # nothing to it then (rebase or newer release alike): a new head would

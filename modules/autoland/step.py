@@ -912,13 +912,15 @@ def handle(repo, pr, repo_info, digest, held=None):
             judged("a major dependency update", DEP_SEEN)
         elif dep == "major":
             land_now("Major update renovate-sweep cleared, CI green")
-        elif renovate and not T.on(repo):
+        elif renovate and not T.on(repo) and not (automerges(pr) and CFG["labels"]["batch"] in labels):
             # Renovate merges its own, on its next run on the repo, except in
             # a repo with its train on, where it merges none (updates.nix):
             # the train lands those against the default branch, and land_now
-            # the rest. One with automerge on that's still open
-            # past renovateMergeAfter is a stall, which that run is kicked for
-            # first (waits.py). Not one nothing may merge (mergeable): one
+            # the rest. So does a batch of a trusted owner's branch pins (its
+            # label): Renovate merges none while that branch keeps moving
+            # (updates/renovate-policy.nix). One with automerge on that's
+            # still open past renovateMergeAfter is a stall, which that run is
+            # kicked for first (waits.py). Not one nothing may merge (mergeable): one
             # whose change has landed already is Renovate's to close.
             if mergeable():
                 settle("success", "Dependency update, CI green", wait=waits.RENOVATE if automerges(pr) else waits.STEWARD)

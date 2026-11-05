@@ -110,7 +110,7 @@ let
     git = "${pkgs.git}/bin/git";
     runsDir = "${config.burrow.scratchDir}/proofs";
     owner = config.burrow.owner;
-    labels = { inherit (cfg.labels) hold owner first waiting; };
+    labels = { inherit (cfg.labels) hold owner first batch waiting; };
     notify = {
       inherit (config.burrow.notify) repo assignee;
       label = config.burrow.notify.label;
@@ -654,6 +654,17 @@ in
           A PR with this label goes ahead of every PR without it in its repo's
           line for proofSlots, and the oldest first among those with it: for a
           fix the rest of the line waits on, opened after them.
+        '';
+      };
+      batch = mkOption {
+        type = types.str;
+        default = "upstream batch";
+        description = ''
+          Renovate puts it on the one PR that moves every pin on a branch of a
+          trusted owner's repo (burrow.updates.renovate.trustedOwners), and the
+          steward lands that PR itself once it's green and settled. Renovate
+          only merges it on a run that finds the branch quiet for half an
+          hour, which a branch merged to all day never is.
         '';
       };
       # What a PR waits on, where it shows at a glance: the steward puts one
