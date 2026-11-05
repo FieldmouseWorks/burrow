@@ -52,6 +52,9 @@ errors() {
 # where they were, so a store failure it places inside the expression
 # (one a builtin raises, under its caller's frames) reads as one too:
 # failed_there's second try, apart from the store, is what stops that.
+# With $3 `first`, what it built or fetched on the way isn't held against
+# it: that's for a first try, which can be the one that fetches an input
+# (any, on a fresh runner), and whose second try is held to all of it.
 # Says why not when it isn't.
 own() {
   local why
@@ -59,8 +62,8 @@ own() {
     echo "it ended with $1, not an evaluation's failure, so it can't tell"
     return 1
   fi
-  if ! why=$(jq -nrR '[inputs | select(startswith("@nix ")) | .[5:] | fromjson?] as $log
-      | first(([$log[] | select(.action == "start" and (.type | IN(100, 101, 105, 108, 109, 110, 111, 112))) | .text]
+  if ! why=$(jq -nrR --arg first "${3:-}" '[inputs | select(startswith("@nix ")) | .[5:] | fromjson?] as $log
+      | first(([$log[] | select($first != "first" and .action == "start" and (.type | IN(100, 101, 105, 108, 109, 110, 111, 112))) | .text]
           | select(length > 0) | "it built or fetched on the way (\(join("; ")))"),
         ([$log[] | select(.action == "msg" and .level == 0)
             | select(.file != null or (.msg | gsub("\u001b\\[[0-9;]*m"; "") | test("\\bat [^\n]+:[0-9]+:[0-9]+")))]
@@ -76,10 +79,12 @@ own() {
 # Whether an evaluation on the negative tree failed on what it
 # evaluated, where $1 and $2 are its exit status and log, and $3 how
 # it's run, as `$3 TREE ARGS...` with the trees under $4 and $5.. its
-# further arguments: its own failure (own), and again on a second try
+# further arguments: its own failure (own, as a first try), and again,
+# held to all of own, on a second try
 # apart from the daemon, the machine's store and the network, in a
 # store of the job's own that nothing else uses and no substituter
-# fills (apart, which $3 puts before its arguments), with the base's
+# fills but with the tree's inputs (apart, which $3 puts before its
+# arguments), with the base's
 # evaluation, which worked beside the first, working there after it.
 # A failure of the store, the daemon or the network the first time
 # can't happen the second, and the base's working in the same store
@@ -87,8 +92,18 @@ own() {
 failed_there() {
   local rc=$1 log=$2 how=$3 trees=$4
   shift 4
-  own "$rc" "$log" || return 1
+  own "$rc" "$log" first || return 1
   local apart=(--store "local?root=$work/apart" --option substituters "")
+  # The tree's flake inputs, copied into that store from the machine's.
+  # The first try may have substituted one (nixpkgs, from its cache),
+  # which leaves no copy nix's fetchers keep, so the second, with no
+  # substituter, would fetch it again and own would refuse it.
+  if ! nix flake archive --no-update-lock-file --to "local?root=$work/apart" "$trees/negative" \
+    > /dev/null 2> "$log.inputs"; then
+    errors "$log.inputs"
+    echo "its inputs can't be copied into a store apart, so it can't tell"
+    return 1
+  fi
   rc=0
   "$how" "$trees/negative" "$@" > /dev/null 2> "$log.again" || rc=$?
   if [ "$rc" = 0 ]; then
