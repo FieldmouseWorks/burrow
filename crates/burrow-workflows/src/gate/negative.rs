@@ -823,7 +823,10 @@ fn an_evaluation_counts_only_failing_on_its_own_expression() {
 /// A flake input the store hasn't got yet is fetched by whichever
 /// evaluation needs it first. When that's the negative tree's failing one,
 /// its failure is still the test's own: the second try, which fetches
-/// nothing, is the one held to it.
+/// nothing, is the one held to it. And when it came from a substituter,
+/// as nixpkgs does on a fresh runner, which leaves no copy the fetchers
+/// keep, the second try still fetches nothing: the inputs are copied
+/// into its store first.
 #[test]
 fn an_input_the_failing_evaluation_fetched_first_still_counts() {
     let r = Repo::new();
@@ -878,9 +881,19 @@ fn an_input_the_failing_evaluation_fetched_first_still_counts() {
             "{args:?}: {}",
             String::from_utf8_lossy(&out.stderr)
         );
+        String::from_utf8(out.stdout).unwrap()
     };
     s.git(&r.origin, &["add", "-A"]);
     nix(&["nix", "flake", "lock"]);
+    // A binary cache holding the input, for the second run.
+    let archived: serde_json::Value =
+        serde_json::from_str(&nix(&["nix", "flake", "archive", "--json"])).unwrap();
+    let dep_path = archived["inputs"]["dep"]["path"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let bincache = format!("file://{}", s.join("bincache").display());
+    nix(&["nix", "copy", "--to", &bincache, &dep_path]);
     nix(&["nix-store", "--gc"]);
     s.git(&r.origin, &["add", "-A"]);
     s.git(&r.origin, &["commit", "-qm", "an input"]);
@@ -900,6 +913,18 @@ fn an_input_the_failing_evaluation_fetched_first_still_counts() {
     assert_eq!(ran.code, 0, "{}", ran.out);
     assert_eq!(ran.result(), "fail", "{}", ran.out);
     assert!(ran.list("checks").contains(&"fromtests"), "{}", ran.out);
+    // Again with neither the store nor the fetchers' cache holding it,
+    // and the binary cache to substitute it from.
+    nix(&["nix-store", "--gc"]);
+    fs::remove_dir_all(s.join("cache")).unwrap();
+    let config = r.g.nix_config.replace(
+        "substituters =",
+        &format!("require-sigs = false\nsubstituters = {bincache}"),
+    );
+    assert_ne!(config, r.g.nix_config);
+    let ran = r.run_with(&head, "", &[("NIX_CONFIG", &config)]);
+    assert_eq!(ran.code, 0, "{}", ran.out);
+    assert_eq!(ran.result(), "fail", "{}", ran.out);
 }
 
 /// An evaluation a signal or a limit stopped didn't fail on the old code.

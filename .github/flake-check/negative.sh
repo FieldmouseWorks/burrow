@@ -83,7 +83,8 @@ own() {
 # held to all of own, on a second try
 # apart from the daemon, the machine's store and the network, in a
 # store of the job's own that nothing else uses and no substituter
-# fills (apart, which $3 puts before its arguments), with the base's
+# fills but with the tree's inputs (apart, which $3 puts before its
+# arguments), with the base's
 # evaluation, which worked beside the first, working there after it.
 # A failure of the store, the daemon or the network the first time
 # can't happen the second, and the base's working in the same store
@@ -93,6 +94,16 @@ failed_there() {
   shift 4
   own "$rc" "$log" first || return 1
   local apart=(--store "local?root=$work/apart" --option substituters "")
+  # The tree's flake inputs, copied into that store from the machine's.
+  # The first try may have substituted one (nixpkgs, from its cache),
+  # which leaves no copy nix's fetchers keep, so the second, with no
+  # substituter, would fetch it again and own would refuse it.
+  if ! nix flake archive --no-update-lock-file --to "local?root=$work/apart" "$trees/negative" \
+    > /dev/null 2> "$log.inputs"; then
+    errors "$log.inputs"
+    echo "its inputs can't be copied into a store apart, so it can't tell"
+    return 1
+  fi
   rc=0
   "$how" "$trees/negative" "$@" > /dev/null 2> "$log.again" || rc=$?
   if [ "$rc" = 0 ]; then
