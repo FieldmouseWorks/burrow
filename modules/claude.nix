@@ -133,18 +133,6 @@ in
       description = "More one-way-door commands that should ask (each also with sudo).";
     };
 
-    effort = lib.mkOption {
-      type = lib.types.nullOr (lib.types.enum [ "low" "medium" "high" "xhigh" "max" ]);
-      default = null;
-      example = "high";
-      description = ''
-        How hard every Claude session and job thinks, on the host and in the
-        agent sandboxes alike (Claude Code's `effortLevel`): where each one
-        starts, which `/effort` can still move. null leaves each model's own
-        default.
-      '';
-    };
-
     extraSettings = lib.mkOption {
       type = lib.types.attrs;
       default = { };

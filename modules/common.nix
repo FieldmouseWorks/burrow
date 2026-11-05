@@ -122,6 +122,20 @@ inputs:
             description = "The Claude Code build, here and in the agent sandboxes.";
           };
 
+          claude.effort = mkOption {
+            # What a settings file's effortLevel takes: Claude Code drops max
+            # there, so it's no starting point.
+            type = types.nullOr (types.enum [ "low" "medium" "high" "xhigh" ]);
+            default = null;
+            example = "high";
+            description = ''
+              How hard every Claude session and job thinks, here and in the
+              agent sandboxes (Claude Code's `effortLevel`): where each one
+              starts, which `/effort` can still move. null leaves each model's
+              own default.
+            '';
+          };
+
           claude.machineMd = mkOption {
             type = types.lines;
             default = "";
