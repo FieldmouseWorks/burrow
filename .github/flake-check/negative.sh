@@ -25,14 +25,16 @@ tests_specs=(':(glob)tests/**' ':(glob)**/tests.rs' ':(glob)**/tests/**' ':(glob
   ':(glob)**/*_test.*' ':(glob)**/*.test.ts' ':(glob)src/test/**')
 # What it found, as negative.json and the step's outputs: the result, the
 # tree it built on (none for none), the PR's test files, the checks it
-# built and those it would have but SKIP names.
+# built and those it would have but SKIP names, and the new tests no check
+# that passed runs.
 found() {
   local result=$1 tree=$2
   jq -n --arg result "$result" --arg tree "$tree" \
     --rawfile tests "$work/tests" --rawfile checks "$work/checks" --rawfile skipped "$work/skipped" \
+    --rawfile unrun "$work/unrun" \
     'def list: split("\u0000") | map(select(. != ""));
       {$result, tree: (if $tree == "" then null else $tree end),
-        tests: ($tests | list), checks: ($checks | list), skipped: ($skipped | list)}' \
+        tests: ($tests | list), checks: ($checks | list), skipped: ($skipped | list), unrun: ($unrun | list)}' \
     > "$RUNNER_TEMP/negative.json"
   echo "result=$result" >> "$GITHUB_OUTPUT"
 }
@@ -166,6 +168,7 @@ negative() {
   : > "$work/tests"
   : > "$work/checks"
   : > "$work/skipped"
+  : > "$work/unrun"
   local tip fork f meta mode oid status tree commit when side name q b n system at tree_at rc
   tip=$(git rev-parse --verify "refs/remotes/origin/$BASE^{commit}")
   if ! fork=$(git merge-base "$tip" "$HEAD_SHA"); then
@@ -261,6 +264,13 @@ negative() {
     nix eval "${apart[@]}" --no-update-lock-file --option eval-cache false --log-format internal-json \
       --raw "$1#." --apply "o: o.checks.$system.$2.drvPath"
   }
+  # What each check built here says it runs (its testFiles), in the base's
+  # flake, as a JSON list in the order of targets: null where it doesn't
+  # say, or the base has no such check.
+  runs_of() {
+    nix eval --no-update-lock-file --option eval-cache false --log-format internal-json \
+      --json "$work/base#." --apply "o: map (n: (o.checks.$system.\${n} or { }).testFiles or null) [ ${tqs[*]} ]"
+  }
   evaluate() {
     local drv rc=0
     drv=$(drv_of "$1" "$2" 2> "$3.err") || rc=$?
@@ -295,7 +305,7 @@ negative() {
   # names. One the base has that doesn't evaluate there leaves nothing to
   # compare with; one that doesn't evaluate on the negative tree, while it
   # does on the base, fails there.
-  local targets=() bases=() caught=0
+  local targets=() bases=() tqs=() caught=0
   for ((k = 1; k <= i; k++)); do
     name=$(cat "$work/drvs/$k.name")
     q=$(cat "$work/drvs/$k.q")
@@ -321,6 +331,7 @@ negative() {
       printf '%s\0' "$name" >> "$work/checks"
       targets+=("$n")
       bases+=("$b")
+      tqs+=("$q")
     fi
   done
   # A check failed on the old code only when, with everything it's
@@ -372,15 +383,49 @@ negative() {
   if [ "$caught" = 1 ]; then
     echo "the new tests fail on the old code, as they should"
     found fail "$tree"
-  elif [ -s "$work/skipped" ]; then
-    echo "every check built here passed with the new tests on the old code, and those that weren't built (build-skip) are where they'd fail, if anywhere: the caller's runner that builds them has to say"
-    found skipped "$tree"
-  elif [ ${#targets[@]} -eq 0 ]; then
-    echo "::error title=No check runs the new tests::no check of the flake reads the test files $HEAD_SHA changes, so nothing tests them"
-    found pass "$tree"
+    return 0
+  fi
+  # Every check built here passed. Reading a test file isn't running it (a
+  # formatter, a lint or a secrets scan reads every file), so the new tests
+  # passed on the old code only where a check that passed runs them: one
+  # whose testFiles, git glob pathspecs from the repo's root, matches them,
+  # or one that doesn't say, taken to run every test it reads. Each says so
+  # in the base's flake, not the PR's.
+  if ! runs_of > "$work/runs.json" 2> "$work/runs.err"; then
+    errors "$work/runs.err"
+    echo "which tests the checks run doesn't evaluate on the base, so it can't tell"
     return 1
+  fi
+  local runs globs
+  : > "$work/covered"
+  for k in "${!targets[@]}"; do
+    runs=$(jq -c --argjson k "$k" '.[$k]' "$work/runs.json")
+    if [ "$runs" = null ]; then
+      printf '%s\n' "$added" >> "$work/covered"
+      continue
+    fi
+    if ! jq -e 'type == "array" and all(.[]; type == "string" and test("^[A-Za-z0-9_.*-][A-Za-z0-9_./*-]*$")
+        and (split("/") | index("..") | not))' <<< "$runs" > /dev/null; then
+      echo "${targets[$k]}'s testFiles isn't a list of paths from the repo's root, so it can't tell"
+      return 1
+    fi
+    mapfile -t globs < <(jq -r '.[]' <<< "$runs")
+    if [ ${#globs[@]} -gt 0 ]; then
+      git diff --name-only --no-renames --diff-filter=d "$fork" "$HEAD_SHA" -- "${globs[@]/#/:(glob)}" >> "$work/covered"
+    fi
+  done
+  comm -23 <(sort -u <<< "$added") <(sort -u "$work/covered") | tr '\n' '\0' > "$work/unrun"
+  if [ -s "$work/unrun" ] || [ -s "$work/skipped" ]; then
+    if [ -s "$work/unrun" ]; then
+      echo "no check that passed here runs these new tests, so where they'd fail is for the gate that runs them to say:"
+      tr '\0' '\n' < "$work/unrun"
+    fi
+    if [ -s "$work/skipped" ]; then
+      echo "every check built here passed with the new tests on the old code, and those that weren't built (build-skip) are where they'd fail, if anywhere: the caller's runner that builds them has to say"
+    fi
+    found skipped "$tree"
   else
-    echo "::error title=The new tests pass on the old code::with $HEAD_SHA's test files on $fork's code every check that reads them passes, so they don't test what it changes. Make a test fail without the change, or land a tidy of the tests on its own."
+    echo "::error title=The new tests pass on the old code::with $HEAD_SHA's test files on $fork's code every check that runs them passes, so they don't test what it changes. Make a test fail without the change, or land a tidy of the tests on its own."
     found pass "$tree"
     return 1
   fi
