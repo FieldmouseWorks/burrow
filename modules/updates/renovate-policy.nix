@@ -195,7 +195,27 @@ lib.recursiveUpdate ({
     } // lib.optionalAttrs (batchLabel != null) {
       addLabels = [ batchLabel ];
     })
-  ] ++ lib.optional (githubRepo != null) {
+  ] ++ lib.optionals (rcfg.followOnly != [ ]) ([
+    {
+      # A repo whose own dependencies another bot keeps (followOnly): off,
+      # everything, lock file refreshes included...
+      matchRepositories = rcfg.followOnly;
+      enabled = false;
+    }
+  ] ++ lib.optional (rcfg.trustedOwners != [ ]) {
+    # ...but the pins on a branch of a trusted owner's repo, which no such
+    # bot follows: Dependabot moves a commit pin only with the version tag
+    # in its comment, never `@SHA # main`, so without this the project's
+    # copy of a shared workflow stays where it was first pinned. Matched by
+    # name, since whether a dependency is looked up at all is decided before
+    # its lookup finds a source URL: an action or workflow as OWNER/NAME on
+    # GitHub, a flake input by its URL through git (the rule above makes it
+    # OWNER/NAME on GitHub for its lookup).
+    matchRepositories = rcfg.followOnly;
+    matchDatasources = [ "github-digest" "git-refs" ];
+    matchPackageNames = map (o: "/^(https://github\\.com/)?${o}/[^/]+$/i") rcfg.trustedOwners;
+    enabled = true;
+  }) ++ lib.optional (githubRepo != null) {
     # The machine's own flake.lock is HOST-update's: it deploys what it bumps.
     matchRepositories = [ githubRepo ];
     matchManagers = [ "nix" ];

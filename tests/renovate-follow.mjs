@@ -178,3 +178,35 @@ for (const [label, owner, repo, pinned, ages] of flakes) {
     }
   }
 }
+// A project whose own dependencies Dependabot keeps (the example's
+// followOnly, sam/kept): with both homelabs' workflows and a flake pinned to
+// the trusted owner's, only that owner's branch pins come up, in their one
+// batch; someone else's pins, their commit pin and every lock file refresh
+// stay off. Every branch is listed here, refreshes included.
+{
+  Object.assign(config, { repository: "sam/kept" });
+  const files = {
+    ".github/workflows/flake.yml": workflow("sam"),
+    ".github/workflows/other.yml": workflow("kim"),
+    ...flake("https://github.com/sam/homelab", true),
+  };
+  for (const [name, text] of Object.entries(files)) {
+    fs.mkdirSync(path.dirname(path.join(dir, name)), { recursive: true });
+    fs.writeFileSync(path.join(dir, name), text);
+  }
+  age = 40;
+  const packageFiles = {};
+  for (const [manager, names] of [["github-actions", [".github/workflows/flake.yml", ".github/workflows/other.yml"]], ["nix", ["flake.nix"]]]) {
+    packageFiles[manager] = [];
+    for (const name of names) {
+      const res = await extractPackageFile(manager, files[name], name, mergeChildConfig(config, { manager, ...config[manager] }));
+      if (res) packageFiles[manager].push({ packageFile: name, ...res });
+    }
+  }
+  await fetchUpdates(config, packageFiles);
+  const { branches } = await branchifyUpgrades(config, packageFiles);
+  for (const b of branches.sort((x, y) => x.branchName.localeCompare(y.branchName))) {
+    const updates = b.upgrades.map((u) => `${u.manager} ${u.depName} ${u.updateType} ${(u.newDigest ?? "").slice(0, 7)}`).sort().join(", ");
+    console.log(`kept 40 min: ${b.branchName}: ${b.prTitle}: ${updates}`);
+  }
+}

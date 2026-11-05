@@ -88,7 +88,8 @@
   # merge included, so the trusted owner's has the label the steward
   # lands it by. A flake input not pinned by commit isn't looked
   # up (the lock file refresh moves it), and nixpkgs keeps its channel
-  # versioning.
+  # versioning. A project on followOnly gets the trusted owner's pins
+  # alone: no one else's, no lock file refresh.
   renovate-follow = pkgs.runCommand "renovate-follow-check" { } ''
     export HOME=$TMPDIR
     got=$(LOG_LEVEL=fatal ${pkgs.lib.getExe pkgs.nodejs_24} ${./renovate-follow.mjs} ${pkgs.renovate} \
@@ -112,7 +113,8 @@
     someone else's, pinned 40 min: renovate/pin-dependencies new: pending, open: pending: deps: pin kim/homelab action to 2222222 []: github-actions kim/homelab pinDigest 2222222
     someone else's, pinned 4400 min: renovate/ci-actions new: creates, open: stability green: deps: update kim/homelab digest to 2222222 []: $kim
     someone else's, pinned 4400 min: renovate/homelab-digest new: creates, open: stability green: deps: update homelab digest to 2222222 []: $nix
-    someone else's, pinned 4400 min: renovate/pin-dependencies new: creates, open: stability green: deps: pin kim/homelab action to 2222222 []: github-actions kim/homelab pinDigest 2222222"
+    someone else's, pinned 4400 min: renovate/pin-dependencies new: creates, open: stability green: deps: pin kim/homelab action to 2222222 []: github-actions kim/homelab pinDigest 2222222
+    kept 40 min: renovate/sam-homelab: deps: update sam/homelab to 2222222: $sam, $nix"
     [ "$got" = "$(sed 's/^ *//' <<<"$want")" ] || { echo "got: $got"; exit 1; }
     touch $out
   '';

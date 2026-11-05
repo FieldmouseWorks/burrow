@@ -23,6 +23,8 @@
       renovate = {
         enable = true;
         autodiscoverFilter = [ "sam/*" ];
+        # Dependabot keeps this one's own dependencies.
+        followOnly = [ "sam/kept" ];
       };
     };
     proj.enable = true;

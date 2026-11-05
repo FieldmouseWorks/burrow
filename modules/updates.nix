@@ -568,6 +568,19 @@ in
           get.
         '';
       };
+      followOnly = lib.mkOption {
+        type = lib.types.listOf (lib.types.strMatching "[^/]+/[^/]+");
+        default = [ ];
+        example = [ "sam/legacy" ];
+        description = ''
+          Repos (OWNER/NAME, as GitHub spells them) whose own dependencies
+          another bot keeps, Dependabot say. There Renovate moves only the
+          pins on a branch of trustedOwners' repos (a shared workflow, an
+          action, a flake input pinned by commit), which that bot can't
+          follow, and opens nothing else: no other update, no lock file
+          refresh. autodiscoverFilter still has to take them.
+        '';
+      };
       gitAuthor = lib.mkOption {
         type = lib.types.nullOr lib.types.str;
         default = null;
