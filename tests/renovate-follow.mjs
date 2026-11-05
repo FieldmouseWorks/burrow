@@ -13,8 +13,8 @@
 // but the lock file refreshes (a refresh leaves an input pinned by commit
 // where it is): how the flake pins homelab, the head's age, the branch,
 // what processing does with it new (pending, or creates it) and open
-// (pending, or the stability check it sets), its title, and each update
-// in it.
+// (pending, or the stability check it sets), its title, the labels its
+// PR gets, and each update in it.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -29,6 +29,7 @@ const { extractPackageFile } = await import(`${dist}/modules/manager/index.js`);
 const { fetchUpdates } = await import(`${dist}/workers/repository/process/fetch.js`);
 const { branchifyUpgrades } = await import(`${dist}/workers/repository/updates/branchify.js`);
 const { processBranch } = await import(`${dist}/workers/repository/update/branch/index.js`);
+const { prepareLabels } = await import(`${dist}/workers/repository/update/pr/labels.js`);
 const { default: platforms } = await import(`${dist}/modules/platform/api.js`);
 const { platformScmImpls } = await import(`${dist}/modules/platform/scm.js`);
 const { setPlatformApi } = await import(`${dist}/modules/platform/index.js`);
@@ -173,7 +174,7 @@ for (const [label, owner, repo, pinned, ages] of flakes) {
     const { branches } = await branchifyUpgrades(config, packageFiles);
     for (const b of branches.filter((b) => !b.isLockFileMaintenance).sort((x, y) => x.branchName.localeCompare(y.branchName))) {
       const updates = b.upgrades.map((u) => `${u.manager} ${u.depName} ${u.updateType} ${u.newDigest.slice(0, 7)}`).sort().join(", ");
-      console.log(`${label} ${minutes} min: ${b.branchName} new: ${await outcome(b, false)}, open: ${await outcome(b, true)}: ${b.prTitle}: ${updates}`);
+      console.log(`${label} ${minutes} min: ${b.branchName} new: ${await outcome(b, false)}, open: ${await outcome(b, true)}: ${b.prTitle} [${prepareLabels(b).join(", ")}]: ${updates}`);
     }
   }
 }

@@ -12,7 +12,7 @@
 { self, pkgs }:
 name: script:
 let
-  inherit (import ./stand-ins.nix { inherit pkgs; }) claude gh;
+  inherit (import ./stand-ins.nix { inherit pkgs; }) claude gh notify;
   # autoland's lists of the pipeline's own repos and its lead ones, which
   # proj reads, without the rest of autoland: web is one of the first here,
   # and lead the only one of the second.
@@ -38,6 +38,8 @@ pkgs.testers.runNixOSTest {
     ];
     burrow = {
       claude.package = claude;
+      # The owner's notifier: what it's asked, a line each, in /tmp/notices.
+      tools.notify = notify;
       # On, so proj keeps its waits and kicks it; it never runs here (no
       # burrow-events), the test reads what proj writes.
       watchdog.enable = true;

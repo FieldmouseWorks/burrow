@@ -117,6 +117,7 @@ pub struct Labels {
     pub hold: String,
     pub owner: String,
     pub first: String,
+    pub batch: String,
     pub waiting: Waiting,
 }
 

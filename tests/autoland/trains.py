@@ -13,7 +13,7 @@ import os
 
 import train as T
 import waits
-from harness import (C, CI_GREEN, FAIL, IDLE, JOBS, P, S, STEWARD, WROTE, clean, cn, cn_log, cn_runs, fresh_pr_state, head,
+from harness import (C, CI_GREEN, COMMITS, COMMITTERS, FAIL, IDLE, JOBS, P, S, STEWARD, WROTE, clean, cn, cn_log, cn_runs, fresh_pr_state, head,
                      info, judgment, merges, mkpr, run, said, stand_in, tmp)
 
 stand_in()
@@ -225,6 +225,22 @@ fresh_pr_state()
 seen()
 status, _ = run(mkpr(branch="renovate/foo-1.x", title="Update foo from 1.4 to 1.5"), 900)
 assert cn_runs() == [SHOW, JOIN] and "In the train" in status, (cn_runs(), status)
+# Nothing after the steward reads its commits, so one it can't tell is
+# Renovate's alone (commits not read, or no address for Renovate) is reviewed
+# like one a Claude job fixed, not put in the train on CI alone.
+for unread in (COMMITS, COMMITTERS, "address"):
+    fresh_pr_state()
+    seen()
+    email = S.CFG["renovateEmail"]
+    if unread == "address":
+        S.CFG["renovateEmail"] = None
+    else:
+        unread[5] = None
+    status, _ = run(mkpr(branch="renovate/foo-1.x", title="Update foo from 1.4 to 1.5"), 900)
+    S.CFG["renovateEmail"] = email
+    COMMITS.clear()
+    COMMITTERS.clear()
+    assert JOIN not in cn_runs() and "Dependency update" not in status and "train" not in status, (unread, cn_runs(), status)
 
 # The train lands only onto the default branch: a PR against another one
 # merges as it would without it, judged first with no CI. Renovate merges

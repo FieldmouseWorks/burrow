@@ -15,13 +15,19 @@ use crate::config::Config;
 use crate::job::{Job, answer, is_error, kick, last_result, result_of};
 use crate::pick::{Class, demoted};
 use crate::waits::{rewatch, rewatch_later, waiting};
-use crate::{Fail, filled, mtime_nanos, nanos, now, now_nanos, read, scratch, slot, swap, systemd};
+use crate::{
+    Fail, filled, mtime_nanos, nanos, now, now_nanos, read, scratch, slot, swap, systemd, usage,
+};
 
 /// How a job waits on its own long work, which its answer would stop.
 const LONG: &str = "A command that can outlast one Bash call (ten minutes), a long build or test run, goes to the background with its output and exit code written to a file, and you wait for that file in the foreground, in steps under ten minutes each; answer only once it's there.";
 
 /// What a run killed for memory before it answered is told in the next.
 const KILLED: &str = "Your last run was killed for memory before you answered, and everything it had running went with it. Carry on from where you left off: see what had already finished before you run anything again.";
+
+/// What a run refused for usage is told in the next, once it's back, with
+/// what it was refused saying and the turn's prompt.
+const SPENT: &str = "Your last run was refused before it finished: Claude was out of usage, and every job waited until it was back. It's back now. Carry on from where you left off: see what had already finished before you run anything again. What it said, and what you were asked this turn:";
 
 /// How a turn says what comes next: what resumes the job, if anything.
 const NEXT: &str = "`proj await URL` for each PR or issue you're still waiting on (the job is resumed, with this conversation, once one of them changes: checks finish, a review, comment or push, merged or closed), `proj ask` when your answer is a question only a person can settle (their reply resumes it), or `proj done` when the work is finished";
@@ -164,7 +170,14 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
     } else {
         Class::Normal
     };
-    let _slot = slot::take(cfg, id, &n, given).map_err(|e| Fail::new(1, format!("proj: {e}")))?;
+    // Handed over to the deployed proj while it waits, the first time only:
+    // that one starts the turn afresh, which a turn already under way (one
+    // waiting again after a refusal) would lose all of. It stays on this one,
+    // as a running turn does.
+    let take = |hand_over: bool| {
+        slot::take(cfg, id, &n, given, hand_over).map_err(|e| Fail::new(1, format!("proj: {e}")))
+    };
+    let mut held = Some(take(true)?);
     // It's at work now, which is news to what it was started to kick: a turn
     // can wait in line for hours, and the steward says which it is.
     kick(cfg, lines(&job.path("kick")));
@@ -237,6 +250,7 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
             break (None, 124);
         }
         let ooms = oom_kills();
+        let started = now();
         let child = match spawn(
             cfg,
             &job,
@@ -277,6 +291,60 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
             rewatch_later(cfg, id);
             told
         };
+        // Refused because the plan's usage is spent: so is every other
+        // turn's, until the limit resets (usage.rs). This one gives up its
+        // slot and waits in line again, where none is handed out till then,
+        // and runs once more in its own conversation, its clock stood still
+        // meanwhile. Any other answer says usage is there.
+        let refusal = last.as_ref().and_then(|l| {
+            let text = fs::read(&stream).unwrap_or_default();
+            let run = String::from_utf8_lossy(text.get(from as usize..).unwrap_or_default());
+            usage::refused(l, &run, now())
+        });
+        match refusal {
+            Some((until, said)) => {
+                // A hold that can't be written holds nothing: this turn
+                // ends refused, as one did before the hold.
+                let spent = match usage::record(cfg, id, until, &said, now()) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        eprintln!("{e}: so the turn ends here, refused");
+                        break (last, rc);
+                    }
+                };
+                eprintln!("proj: {}", usage::line(&spent));
+                // All of the refused run gone first, as for any run after
+                // another: what it left could hold the slot it gives up
+                // (slot.rs held), or run beside the next. A sandbox's work
+                // is in its VM, past the unit's reach: the VM is stopped,
+                // which ends all of it, and the next run's `agent sh` starts
+                // it again, its clone and home as they were.
+                if reap() && agent.as_deref().is_none_or(|a| stopped("agent", a)) {
+                    // Waiting, as `proj state` and the watchdog read it:
+                    // under the job's lock, as its slot was said (slot.rs
+                    // took_slot).
+                    {
+                        let _lock = job.lock();
+                        let _ = fs::remove_file(job.turn(&n, "slot"));
+                    }
+                    drop(held.take());
+                    rewatch(cfg, &[id]);
+                    let waited = now_nanos();
+                    let _ = held.insert(take(false)?);
+                    kick(cfg, lines(&job.path("kick")));
+                    if let Some(dl) = deadline(&job, &n) {
+                        let dl = dl + (now_nanos() - waited);
+                        let _ = fs::write(job.turn(&n, "deadline"), format!("{dl}\n"));
+                    }
+                    let asked = read(&job.path(&format!("prompt.{n}"))).unwrap_or_default();
+                    prompt = again(&format!("{SPENT}\n\n> {said}\n\n{asked}"), "spent");
+                    continue;
+                }
+                eprintln!("proj: what the refused run left wouldn't stop, so the turn ends here");
+            }
+            None if last.is_some() => usage::back(cfg, Some(started)),
+            None => {}
+        }
         // Killed for memory before it answered, Claude itself as a rule (a
         // command it ran that's killed leaves it to answer), and not stopped
         // for going quiet: carried on in its own conversation, which its
@@ -345,20 +413,6 @@ pub fn exec(cfg: &Config, id: &str, given: &str) -> Result<(), Fail> {
             let _ = fs::write(job.turn(&n, "end"), format!("{end}\n"));
         }
         let done = !is_error(&last);
-        // A usage limit's error: when the job may run again, for whoever acts
-        // on its end (proj resets), and the job waits for that, as for a PR
-        // (limit), its await in place before its outcome says it ended. Not
-        // an --owned job's: its starter acts on its end, and tries again then.
-        let at = now();
-        if !done
-            && let Some(serde_json::Value::String(said)) = last.get("result")
-            && let Some(due) = crate::limit::due(said, at)
-        {
-            let _ = fs::write(job.turn(&n, "resets"), format!("{due}\n"));
-            if !job.path("owned").exists() {
-                let _ = swap(&job.path("await"), &crate::limit::line(at, due));
-            }
-        }
         outcome(if done { "done" } else { "error" });
         // What it awaits, from the baseline `proj await` took; one line per
         // target, the first await of it in the turn.
@@ -714,6 +768,20 @@ fn stop(pid: Pid) {
 /// Everything in this process's unit but itself: what a run left behind, in
 /// whatever process group, TERM first, then KILL. False if any of it is
 /// still there after that.
+/// Whether sandbox `id`'s VM, and so everything a run left in it, is
+/// stopped: `agent stop` (as `agent`, the command) said so.
+fn stopped(agent: &str, id: &str) -> bool {
+    let ok = Command::new(agent)
+        .args(["stop", id])
+        .stdout(Stdio::null())
+        .status()
+        .is_ok_and(|st| st.success());
+    if !ok {
+        eprintln!("proj: agent stop {id} didn't say the sandbox stopped");
+    }
+    ok
+}
+
 fn reap() -> bool {
     let me = process::id();
     let Some(cgroup) = cgroup() else {
@@ -775,7 +843,34 @@ fn names_session(stream: &Path, from: u64) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::gone_quiet;
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+
+    use super::{gone_quiet, stopped};
+
+    // A sandbox's VM counts as stopped, everything a refused run left in it
+    // with it, only once `agent stop` says so: one that fails, or can't run,
+    // and the turn doesn't go on.
+    #[test]
+    fn a_sandbox_stopped_only_when_agent_says_so() {
+        let d = tempfile::tempdir().unwrap();
+        let agent = |code: i32| {
+            let f = d.path().join(format!("agent-{code}"));
+            let script = format!(
+                "#!/bin/sh\necho \"$*\" >>{}/asked\nexit {code}\n",
+                d.path().display()
+            );
+            fs::write(&f, script).unwrap();
+            fs::set_permissions(&f, fs::Permissions::from_mode(0o755)).unwrap();
+            f.to_str().unwrap().to_owned()
+        };
+        assert!(stopped(&agent(0), "web-ab12"));
+        assert!(!stopped(&agent(1), "web-ab12"));
+        let missing = d.path().join("no-agent");
+        assert!(!stopped(missing.to_str().unwrap(), "web-ab12"));
+        let asked = fs::read_to_string(d.path().join("asked")).unwrap();
+        assert_eq!(asked, "stop web-ab12\nstop web-ab12\n");
+    }
 
     const SECOND: i64 = 1_000_000_000;
 

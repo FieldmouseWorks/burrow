@@ -247,6 +247,11 @@ pub(crate) fn labels(cfg: &Config) -> Vec<(String, &'static str, String)> {
             "Goes ahead of the PRs without it in the line for proofs that take the machine".into(),
         ),
         (
+            l.batch.clone(),
+            "0366d6",
+            "Renovate's batch of a trusted owner's branch pins, which the steward lands once settled".into(),
+        ),
+        (
             w.release_age.clone(),
             "c5def5",
             format!(

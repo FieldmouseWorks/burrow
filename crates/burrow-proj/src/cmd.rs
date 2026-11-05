@@ -7,11 +7,10 @@ use std::io::{self, Write};
 use crate::config::Config;
 use crate::github::{fingerprint, over, target};
 use crate::job::{Job, answer, awaits, is_error, kick, result_of};
-use crate::limit;
 use crate::pick::demoted;
 use crate::turn::{exec, lines};
 use crate::waits::rewatch;
-use crate::{Fail, io_fail, now, read, scratch, slot, systemd, watch};
+use crate::{Fail, io_fail, now, read, scratch, slot, systemd, usage, watch};
 
 mod run;
 
@@ -53,13 +52,6 @@ pub fn dispatch(cfg: &Config, args: &[String]) -> Result<(), Fail> {
             put(&format!("{}\n", Job::new(cfg, id).state()));
             Ok(())
         }
-        Some("resets") => {
-            let id = arg(args, 1, "usage: proj resets ID")?;
-            if let Some(at) = Job::new(cfg, id).resets() {
-                put(&format!("{at}\n"));
-            }
-            Ok(())
-        }
         Some("find") => {
             let key = arg(args, 1, "usage: proj find KEY")?;
             if let Some(id) = run::find(cfg, key)? {
@@ -81,6 +73,37 @@ pub fn dispatch(cfg: &Config, args: &[String]) -> Result<(), Fail> {
             put(&names.iter().map(|n| format!("{n}\n")).collect::<String>());
             Ok(())
         }
+        Some("usage") => match args.get(1).map(String::as_str) {
+            None => {
+                // What can't be taken now is left where it is, for the next
+                // pass: what's held already is still said.
+                if let Err(e) = usage::adopt(cfg) {
+                    eprintln!("{e}");
+                }
+                if let Some(s) = usage::out(cfg) {
+                    put(&format!(
+                        "{}\n",
+                        serde_json::to_string(&s).unwrap_or_default()
+                    ));
+                }
+                Ok(())
+            }
+            Some("back") => {
+                usage::back(cfg, None);
+                Ok(())
+            }
+            // A hold #428's stall watchdog kept for itself, until UNTIL.
+            Some("hold") => {
+                let until = arg(args, 2, "usage: proj usage hold UNTIL")?
+                    .parse::<i64>()
+                    .map_err(|_| Fail::new(2, "usage: proj usage hold UNTIL (seconds)"))?;
+                // Fails unless the hold has it: the watchdog keeps its own
+                // till then. It doesn't say when it was written: before
+                // this proj ran.
+                usage::earlier(cfg, "the stall watchdog", until, None).map_err(|e| Fail::new(1, e))
+            }
+            Some(_) => Err(Fail::new(2, "usage: proj usage [back | hold UNTIL]")),
+        },
         Some("await") => wait_on(cfg, &args[1..]),
         Some(how @ ("ask" | "done")) => ends(cfg, how, args.len()),
         Some("_watch") => watch::look(cfg, args.get(1).map_or("", String::as_str)),
@@ -104,7 +127,7 @@ pub fn dispatch(cfg: &Config, args: &[String]) -> Result<(), Fail> {
         }
         Some(_) => Err(Fail::new(
             2,
-            "usage: proj run|reply|status|log|state|resets|find|stop|withdraw|unstick|list|await|ask|done",
+            "usage: proj run|reply|status|log|state|find|stop|withdraw|unstick|list|usage|await|ask|done",
         )),
     }
 }
@@ -132,6 +155,9 @@ fn status(cfg: &Config, limit: Option<&String>) -> Result<(), Fail> {
         .map(|(t, id)| (t.unwrap_or(std::time::UNIX_EPOCH), id))
         .collect();
     jobs.sort_by(|a, b| b.cmp(a));
+    if let Some(spent) = usage::out(cfg) {
+        put(&format!("{}\n", usage::line(&spent)));
+    }
     for (_, id) in jobs.into_iter().take(limit) {
         let job = Job::new(cfg, &id);
         let st = job.state();
@@ -238,18 +264,6 @@ pub fn told(cfg: &Config, id: &str, n: &str) -> Result<String, String> {
         let outcome = job.ended(n);
         if is_error(last) {
             out.push_str(&format!("\n(turn {n} ended in an error)\n"));
-            // The latest turn's usage limit: when proj resumes the job.
-            if job.turns().as_deref() == Some(n)
-                && let Some(due) = awaits(&read(&job.path("await")).unwrap_or_default())
-                    .iter()
-                    .find(|a| a.target == limit::TARGET)
-                    .and_then(|a| crate::waits::seconds(&a.was))
-            {
-                out.push_str(&format!(
-                    "(a usage limit: proj resumes the job by itself once it resets, at {})\n",
-                    limit::utc(due)
-                ));
-            }
             match last.get("errors") {
                 None | Some(serde_json::Value::Null) | Some(serde_json::Value::Bool(false)) => (),
                 Some(errors) => out.push_str(&format!("{errors}\n")),
@@ -467,8 +481,7 @@ fn ends(cfg: &Config, how: &str, words: usize) -> Result<(), Fail> {
 /// and OnFailure): its wait is the stall watchdog's to know, what the job was started to kick (proj run
 /// --kick) gets a pass now, and so does proj-watch for each repo the turn
 /// awaits, which then sees at once anything that changed since the turn
-/// took its baseline; for a usage limit's reset, its whole look, which
-/// books the look that resumes the job ([`limit`]).
+/// took its baseline.
 fn ended(cfg: &Config) -> Result<(), Fail> {
     let id = this_job(
         "PROJ_ENDED",
@@ -479,14 +492,7 @@ fn ended(cfg: &Config) -> Result<(), Fail> {
     rewatch(cfg, &[&id]);
     let mut names = lines(&job.path("kick"));
     for a in awaits(&read(&job.path("await")).unwrap_or_default()) {
-        names.push(if a.target == limit::TARGET {
-            "proj-watch".to_owned()
-        } else {
-            format!(
-                "proj-watch/{}",
-                a.target.split('#').next().unwrap_or_default()
-            )
-        });
+        names.push(watch::kick_for(&a.target));
     }
     kick(cfg, names);
     // A job this turn left over has its scratch cleared, after the kicks so

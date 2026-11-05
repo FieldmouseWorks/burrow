@@ -135,11 +135,14 @@ Each has an entry below, and each can be imported on its own.
   job holds no slot and is resumed when it changes; one already merged or
   closed is refused, so the job goes on), `proj ask` a person (their reply
   resumes it) or `proj done`; one that won't is told once and answers again,
-  and still silent is a stall. A turn that ends on a usage limit waits for it
-  the same way: the job is resumed once the limit resets, when Claude Code's
-  message says it does (an `--owned` job's starter tries again itself,
-  `proj resets` saying when it may). Only jobs whose starter acts on each
-  turn's end (`--owned`: the steward's, the watchdog's) needn't say.
+  and still silent is a stall. Only jobs whose starter acts on each turn's end
+  (`--owned`: the steward's, the watchdog's) needn't say. A run Claude Code
+  refuses because the plan's usage is spent (a monthly spend limit, a weekly
+  or five-hour limit) puts the whole machine out of usage until the limit
+  resets: no turn takes a slot till then, the refused turn waits in line and
+  runs again by itself after, `proj status` says why and until when, and
+  `HOST-notify` tells you once (`proj usage back` lets the line go sooner,
+  once you've raised the limit).
 - **`probe`** (`burrow.probe`): `burrow-probe`: read-only questions about the
   box, asked as an issue labelled `probe` in a private repo
   (`burrow.probe.repo`) and answered there in seconds, with no Claude:
@@ -187,9 +190,8 @@ Each has an entry below, and each can be imported on its own.
   open PR's wait as its status says it (`stallAfterMinutes`, longer for a
   hold), due at once when one of its steps has failed three times in a row;
   proj, every job's turn waiting in line (`proj.stallAfterMinutes`), running
-  past its timeout, awaiting GitHub past `awaitHours`, waiting on a usage
-  limit past its reset, or ended without saying what comes next or in a
-  failure (at once). Past a deadline it kicks that item's pass, then hands
+  past its timeout, awaiting GitHub past `awaitHours`, or ended without
+  saying what comes next or in a failure (at once). Past a deadline it kicks that item's pass, then hands
   every stall that's ready to one Claude job ahead of proj's line, then puts
   what's still stuck on the steward's stuck issue, whose own `--unstick` job
   takes it from there. A job of its own that's still waiting for a slot once
@@ -197,11 +199,11 @@ Each has an entry below, and each can be imported on its own.
   withdrawn (`proj withdraw`, which ends a job only while its turn waits for a
   slot, so one that has started is never stopped), so it never takes a slot
   for nothing. You hear only of what that issue can't take: the steward itself
-  stuck, no steward, or that issue's own job stuck. A job of its own that ends
-  on a usage limit holds the ladder instead: the next job starts once the
-  limit resets (`proj resets` says when), and nothing goes to the stuck issue
-  for it. A job that finds one legitimately slow gives it more time, once,
-  with a reason. It books its own next pass for the next deadline: no timer,
+  stuck, no steward, or that issue's own job stuck. A job that finds one
+  legitimately slow gives it more time, once, with a reason. While proj says
+  the machine is out of Claude usage, it holds every stall not already on the
+  issue or yours, and takes each up again from its kick after the reset. It
+  books its own next pass for the next deadline: no timer,
   and no GitHub calls of its own. `burrow-watchdog status` shows what it
   watches.
 - **`dispatch`** (`burrow.dispatch`): `burrow-dispatch`: what every PR waits

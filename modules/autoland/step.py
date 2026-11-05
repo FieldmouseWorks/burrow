@@ -31,7 +31,7 @@ import train as T
 import waits
 from common import CFG, DEP_RE, DRY, MIN, load, log, repo_cfg, save, ts
 from seal import MAJOR as MAJOR_VERDICT  # renovate-sweep's, on a Renovate major
-from touches import automerges, bot_edited, dep_kind, gate_edit, moved_from, one_way
+from touches import automerges, bot_edited, dep_kind, gate_edit, moved_from, one_way, provenance
 from tasks import DEP_SEEN, PAST_LIMIT, REVIEWED, fix_task, judge_task, judged_on, judgment, owed, proof_task, red_fix, red_undos
 from prs import MERGE_STEPS, PROOF_SLOT, RELEASE_AGE, REVIEWER, ci_state, eyes, has_ci, land, onto, our_status, post_status, show_waiting
 
@@ -532,7 +532,7 @@ def handle(repo, pr, repo_info, digest, held=None):
         either branch."""
         base = pr["baseRefName"]
         verdict = C.marker(pr, MAJOR_VERDICT, head, repo, base) if dep == "major" and renovate else None
-        if dep and not bot_edited(repo, pr, st):
+        if dep and not bot_edited(repo, pr, st, renovate):
             settle("pending", f"Conflicts with {base}; its bot rebases it")
             open_a_day(f"Dependency update; conflicts with {base}", swept=renovate)
         elif verdict == "held":
@@ -843,7 +843,10 @@ def handle(repo, pr, repo_info, digest, held=None):
     # Its owner or failed verdict holds it whatever CI is still doing; only
     # a land waits for CI.
     held = asked and judge_said in ("owner", "failed")
-    fixed = dep == "minor" and not gate and (bot_edited(repo, pr, st) or gate_edit(repo, pr, st))
+    # Renovate merges its own once they're green, but none in a repo with its
+    # train on (updates.nix), so it reads their commits for itself first.
+    rechecked = renovate and not T.on(repo)
+    fixed = dep == "minor" and not gate and (bot_edited(repo, pr, st, rechecked) or gate_edit(repo, pr, st))
     swept = fixed and ci == "red" and renovate
     # The date a lock file refresh waits for, renovate-sweep's to have it refreshed then.
     requested = renovate and lock_wait.requested(pr, C.NOW, CFG["renovateRun"] or 0)
@@ -912,12 +915,18 @@ def handle(repo, pr, repo_info, digest, held=None):
             judged("a major dependency update", DEP_SEEN)
         elif dep == "major":
             land_now("Major update renovate-sweep cleared, CI green")
-        elif renovate and not T.on(repo):
+        elif renovate and not T.on(repo) and not (automerges(pr) and CFG["labels"]["batch"] in labels
+                                                  and provenance(repo, pr, st) is False):
             # Renovate merges its own, on its next run on the repo, except in
             # a repo with its train on, where it merges none (updates.nix):
             # the train lands those against the default branch, and land_now
-            # the rest. One with automerge on that's still open
-            # past renovateMergeAfter is a stall, which that run is kicked for
+            # the rest. So does a batch of a trusted owner's branch pins (its
+            # label): Renovate merges none while that branch keeps moving
+            # (updates/renovate-policy.nix), but only one whose commits were
+            # read and are Renovate's alone (provenance): Renovate checks
+            # that before it merges, so one that couldn't be read waits for
+            # it. One with automerge on that's still open past
+            # renovateMergeAfter is a stall, which that run is kicked for
             # first (waits.py). Not one nothing may merge (mergeable): one
             # whose change has landed already is Renovate's to close.
             if mergeable():

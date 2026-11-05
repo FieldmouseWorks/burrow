@@ -1,9 +1,9 @@
-//! The stand-ins the watchdog's tests run a pass against: proj,
-//! burrow-events' kick port and notify, as its contract has it
+//! The machine a pass runs on, with proj, burrow-events' kick port and
+//! notify stood in for. notify stands in as its contract has it
 //! (modules/notify, whose own check holds it to that): `pending` says
 //! whether a notice it was asked to open may still be open, and nothing gets
-//! through while GitHub is down. And a machine with a steward and proj's
-//! line, everything else stood in for.
+//! through while GitHub is down. proj's `usage` says what `usage` holds: ""
+//! for a machine with Claude usage to spare.
 
 #![allow(dead_code)]
 
@@ -30,9 +30,9 @@ pub struct Fake {
     /// What `proj state JOB` answers ("done" for one it doesn't name, failed
     /// once it's withdrawn), and whether `proj run` or `proj withdraw` fails.
     pub states: RefCell<HashMap<String, String>>,
-    /// What `proj resets JOB` answers: nothing for one it doesn't name.
-    pub resets: RefCell<HashMap<String, String>>,
     pub refuse: Cell<bool>,
+    /// What `proj usage` prints.
+    pub usage: RefCell<String>,
     pub stuck: Cell<bool>,
     pub kicks: RefCell<Vec<String>>,
     /// notify's calls but `pending`.
@@ -49,16 +49,24 @@ impl World for Fake {
         let mut log = self.proj.borrow_mut();
         log.push(args.iter().map(|a| a.to_string()).collect());
         match args[0] {
+            // proj takes the hold (unless it refuses everything), and says
+            // it's out from then on.
+            "usage" if args.get(1) == Some(&"hold") => {
+                if self.refuse.get() {
+                    return (false, String::new());
+                }
+                *self.usage.borrow_mut() = format!(
+                    r#"{{"until": {}, "said": "a usage limit an earlier proj or watchdog recorded"}}"#,
+                    args[2]
+                );
+                (true, String::new())
+            }
+            "usage" => (true, self.usage.borrow().clone()),
             "run" if self.refuse.get() => (false, String::new()),
-            "run" => (true, format!("job-{}", log.len())),
-            "resets" => (
-                true,
-                self.resets
-                    .borrow()
-                    .get(args[1])
-                    .cloned()
-                    .unwrap_or_default(),
-            ),
+            "run" => {
+                let n = log.iter().filter(|a| a[0] == "run").count();
+                (true, format!("job-{n}"))
+            }
             "withdraw" if self.stuck.get() => (false, String::new()),
             "withdraw" => {
                 let mut states = self.states.borrow_mut();
@@ -249,15 +257,6 @@ impl Machine {
             .states
             .borrow_mut()
             .insert(job.into(), state.into());
-    }
-
-    /// The job ended in an error, on a usage limit that resets at `at`.
-    pub fn limited(&self, job: &str, at: f64) {
-        self.state_of(job, "error");
-        self.world
-            .resets
-            .borrow_mut()
-            .insert(job.into(), format!("{at}"));
     }
 
     /// A stall taken to the owner, in the fewest passes: when they heard.

@@ -1,4 +1,4 @@
-//! A usage limit a turn ended on, and the job's wait for it to reset.
+//! When a usage limit resets, by Claude Code's own words for it.
 //!
 //! Claude Code ends a run it can't make with its own words for why, which
 //! say when the limit resets, in the zone it shows times in: "You've hit
@@ -6,32 +6,17 @@
 //! once that's more than a day off ("You've hit your monthly spend limit ·
 //! raise it at … · your weekly limit resets Nov 4, 12pm
 //! (America/Los_Angeles)"), and the year too once it isn't this one.
-//! [`resets`] reads that back.
-//!
-//! A job whose turn ended so waits for the reset as it would for a PR: its
-//! await holds a [`TARGET`] line ([`line`]), proj-watch books a look for
-//! then and resumes the job once it's past, and the stall watchdog holds
-//! the job to it ([`crate::waits`]). Nothing else would resume it: a job
-//! whose turn ended in an error waits for a reply.
+//! [`resets`] reads that back, for a refusal whose stream doesn't carry the
+//! reset as a timestamp ([`crate::usage::refused`]).
 
 use jiff::Timestamp;
 use jiff::civil::{Date, Time};
 use jiff::tz::TimeZone;
 
-/// What a job's await names its wait for a usage limit by: its line is
-/// `usage-limit\tSINCE\tDUE`, when it began waiting and when the job is
-/// resumed, both in seconds since the epoch.
-pub const TARGET: &str = "usage-limit";
-
-/// The soonest the job is resumed, in seconds after the turn ended: a reset
-/// already past (a clock that's off, or a limit that outlasts the window its
-/// words name) can't send it round again in seconds. Also how long ago a
-/// reset said as a time alone may have passed and still be that one.
-pub const FLOOR: i64 = 900;
-
-/// How long after the reset the job is resumed, in seconds: the limit's
-/// clock and this machine's needn't agree to the second.
-pub const MARGIN: i64 = 60;
+/// How long ago a reset said as a time alone may have passed and still be
+/// that one, in seconds: the turn's end, and proj reading it, lag behind
+/// the words.
+const FLOOR: i64 = 900;
 
 const MONTHS: [&str; 12] = [
     "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
@@ -101,31 +86,11 @@ fn time_of(clock: &str) -> Option<Time> {
     Time::new(hour % 12 + half, minute, 0, 0).ok()
 }
 
-/// When a job whose turn ended at `now` on the usage limit its answer `text`
-/// names may run again: MARGIN after the reset, and FLOOR after now at the
-/// soonest. None when it names none.
-pub fn due(text: &str, now: i64) -> Option<i64> {
-    Some((resets(text, now)? + MARGIN).max(now + FLOOR))
-}
-
-/// The await line of a job waiting since `since` to be resumed at `due`.
-pub fn line(since: i64, due: i64) -> String {
-    format!("{TARGET}\t{since}\t{due}\n")
-}
-
-/// A time in seconds since the epoch as people read it, in UTC.
-pub fn utc(at: i64) -> String {
-    Timestamp::from_second(at).map_or_else(
-        |_| format!("{at}"),
-        |t| t.strftime("%Y-%m-%d %H:%M UTC").to_string(),
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use jiff::Timestamp;
 
-    use super::{FLOOR, MARGIN, TARGET, due, line, resets, utc};
+    use super::resets;
 
     fn at(s: &str) -> i64 {
         s.parse::<Timestamp>().unwrap().as_second()
@@ -138,11 +103,6 @@ mod tests {
         let said = "You've hit your monthly spend limit · raise it at https://claude.ai/settings/usage?from=cc_cli_limit_message · your weekly limit resets Nov 4, 12pm (America/Los_Angeles)";
         let now = at("2026-11-02T02:47:45Z");
         assert_eq!(resets(said, now), Some(at("2026-11-04T20:00:00Z")));
-        assert_eq!(due(said, now), Some(at("2026-11-04T20:01:00Z")));
-        assert_eq!(
-            line(now, at("2026-11-04T20:01:00Z")),
-            format!("{TARGET}\t{now}\t{}\n", at("2026-11-04T20:01:00Z"))
-        );
     }
 
     // A time alone is the next one: later today, or tomorrow once it's past.
@@ -168,7 +128,7 @@ mod tests {
 
     // One that passed no more than FLOOR ago is that one, not tomorrow's: the
     // turn's end, and proj reading it, lag behind the words. Across midnight
-    // too, and FLOOR after the turn ended is when the job resumes.
+    // too.
     #[test]
     fn a_reset_just_past() {
         let said = "You've hit your session limit · resets 3:30pm (UTC)";
@@ -182,7 +142,6 @@ mod tests {
                 Some(at("2026-11-04T15:30:00Z")),
                 "{now}"
             );
-            assert_eq!(due(said, at(now)), Some(at(now) + FLOOR), "{now}");
         }
         assert_eq!(
             resets(said, at("2026-11-04T15:45:01Z")),
@@ -212,8 +171,7 @@ mod tests {
         );
     }
 
-    // No limit named, no reset, a zone or time that can't be read: none, and
-    // the job waits for a reply as before.
+    // No limit named, no reset, a zone or time that can't be read: none.
     #[test]
     fn no_reset_it_can_read() {
         let now = at("2026-11-04T09:00:00Z");
@@ -228,28 +186,6 @@ mod tests {
             "",
         ] {
             assert_eq!(resets(said, now), None, "{said}");
-            assert_eq!(due(said, now), None, "{said}");
         }
-    }
-
-    // A reset already past, or moments off, is FLOOR after the turn ended at
-    // the soonest; a later one is MARGIN after it.
-    #[test]
-    fn when_the_job_is_resumed() {
-        let now = at("2026-11-04T20:00:00Z");
-        let due = |said: &str| due(said, now).unwrap();
-        assert_eq!(
-            due("You've hit your weekly limit · resets Nov 4, 12pm (America/Los_Angeles)"),
-            now + FLOOR
-        );
-        assert_eq!(
-            due("You've hit your session limit · resets 8:05pm (UTC)"),
-            now + FLOOR
-        );
-        assert_eq!(
-            due("You've hit your session limit · resets 11pm (UTC)"),
-            at("2026-11-04T23:00:00Z") + MARGIN
-        );
-        assert_eq!(utc(now), "2026-11-04 20:00 UTC");
     }
 }
