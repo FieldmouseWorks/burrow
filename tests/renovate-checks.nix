@@ -118,6 +118,19 @@
     [ "$got" = "$(sed 's/^ *//' <<<"$want")" ] || { echo "got: $got"; exit 1; }
     touch $out
   '';
+  # A job on an older GitHub-hosted runner, under the example's config, by
+  # Renovate's own extraction, lookup (its github-runners list, which has
+  # no release dates), branching and branch processing: the runner's
+  # update gets its branch, and its open PR's stability check passes,
+  # rather than waiting on a release date that never comes.
+  renovate-runners = pkgs.runCommand "renovate-runners-check" { } ''
+    export HOME=$TMPDIR
+    got=$(LOG_LEVEL=fatal ${pkgs.lib.getExe pkgs.nodejs_24} ${./renovate-runners.mjs} ${pkgs.renovate} \
+      ${self.nixosConfigurations.example.config.systemd.services.renovate.environment.RENOVATE_CONFIG_FILE} 2>/dev/null)
+    want='renovate/ubuntu-24.x new: creates, open: stability green: deps: update dependency ubuntu to v24: github-runners ubuntu major 24.04'
+    [ "$got" = "$want" ] || { echo "got: $got"; exit 1; }
+    touch $out
+  '';
   # Which updates Renovate merges itself under the example's config, as
   # Renovate's own rules read it: all but a major, a commit pin of an
   # action (pinDigest) included. The steward leaves Renovate's own PRs

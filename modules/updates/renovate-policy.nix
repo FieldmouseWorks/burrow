@@ -158,6 +158,16 @@ lib.recursiveUpdate ({
       matchUpdateTypes = [ "digest" "pinDigest" ];
       minimumReleaseAgeBehaviour = "timestamp-optional";
     }
+    {
+      # A GitHub-hosted runner label (`runs-on: ubuntu-22.04`) is looked up
+      # in a list Renovate ships with itself (github-runners), which has no
+      # release dates: by default its update waits on a pending stability
+      # check for good, short of a branch. There's no release to soak: the
+      # label names an image GitHub runs, and the list moves only with
+      # Renovate itself.
+      matchDatasources = [ "github-runners" ];
+      minimumReleaseAgeBehaviour = "timestamp-optional";
+    }
   ] ++ lib.optionals (rcfg.trustedOwners != [ ]) [
     {
       # A dependency on a repo of trustedOwners' (a pinned workflow, an
