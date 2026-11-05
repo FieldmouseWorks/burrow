@@ -263,7 +263,7 @@ fn put(
 
 /// The hold changed: every turn in line has its deadline moved, the stall
 /// watchdog looks again whether or not those did (it holds every other
-/// source's stalls by it too), and so does proj-watch, which tends the
+/// source's waits on Claude by it too), and so does proj-watch, which tends the
 /// owner's notice from then on ([`tend`]).
 fn changed(cfg: &Config) {
     rewatch_all(cfg);
@@ -296,36 +296,62 @@ pub fn remind(cfg: &Config) {
 /// turns waiting take slots again, every turn in line has its deadline
 /// moved, and the owner's notice is closed. A run that started no later
 /// than the last refusal proves nothing: its last call may have come before
-/// it. Once it has ended, each call settles what's left ([`settle`]).
+/// it. Once it has ended, each call settles what's left ([`settle`]). The
+/// owner's release is kept ([`RELEASED`]) with or without a hold to end,
+/// one settled or none recorded yet: an earlier proj's or watchdog's limit
+/// taken in after it, but written before, never holds again ([`earlier`]).
 pub fn back(cfg: &Config, started: Option<i64>) {
-    if kept(cfg).is_none() {
+    let owner = started.is_none();
+    if !owner && kept(cfg).is_none() {
         return;
     }
     let Ok(_lock) = lock(cfg) else { return };
-    let Some(mut s) = kept(cfg) else { return };
     let now = now();
-    if s.back.is_none() {
-        if started.is_some_and(|t| t <= s.refused()) {
-            return;
-        }
-        s.back = Some(now);
-        s.told = now;
-        // What it ended is kept first, past the record: without it, an
-        // earlier proj's limit could hold it again.
-        let mark = released(cfg).map(|r| r.max(now)).and_then(|r| {
-            swap(&cfg.jobs.join(RELEASED), &format!("{r}\n"))
-                .map_err(|e| format!("proj: {RELEASED}: {e}"))
-        });
-        if let Err(e) = mark.and_then(|()| keep(cfg, &s)) {
-            eprintln!("{e}");
-            return;
-        }
-        eprintln!("proj: Claude has usage again (out since {})", when(s.at));
-        tell(cfg, &["close", NOTICE, CLOSED]);
-        changed(cfg);
+    let s = kept(cfg);
+    let ends = s.as_ref().is_some_and(|s| s.back.is_none());
+    if ends && started.is_some_and(|t| s.as_ref().is_some_and(|s| t <= s.refused())) {
         return;
     }
-    settle(cfg, s, now);
+    // What it ended is kept first, past the record: without it, an earlier
+    // proj's limit could hold it again.
+    if (owner || ends)
+        && let Err(e) = mark(cfg, now)
+    {
+        eprintln!("{e}");
+        return;
+    }
+    match s {
+        Some(mut s) if ends => {
+            s.back = Some(now);
+            s.told = now;
+            if let Err(e) = keep(cfg, &s) {
+                eprintln!("{e}");
+                return;
+            }
+            eprintln!("proj: Claude has usage again (out since {})", when(s.at));
+            tell(cfg, &["close", NOTICE, CLOSED]);
+            changed(cfg);
+        }
+        Some(s) => {
+            settle(cfg, s, now);
+            if owner {
+                changed(cfg);
+            }
+        }
+        // The watchdog, and proj-watch's look, drop the limits they still
+        // keep that it ended.
+        None => {
+            eprintln!("proj: no usage hold is on; no usage limit recorded before now will hold");
+            changed(cfg);
+        }
+    }
+}
+
+/// A release at `now`, kept in [`RELEASED`] for good (the latest one), or
+/// why not.
+fn mark(cfg: &Config, now: i64) -> Result<(), String> {
+    let r = released(cfg)?.max(now);
+    swap(&cfg.jobs.join(RELEASED), &format!("{r}\n")).map_err(|e| format!("proj: {RELEASED}: {e}"))
 }
 
 /// The owner's notice, with no run to ask (proj-watch's every look): while

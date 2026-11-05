@@ -69,7 +69,7 @@ fn case(more: &[&str], want: impl Fn(&Item) -> bool) {
     assert_eq!(
         keys,
         [
-            "due", "kick", "line", "link", "phase", "since", "unstick", "what"
+            "claude", "due", "kick", "line", "link", "phase", "since", "unstick", "what"
         ]
     );
 }

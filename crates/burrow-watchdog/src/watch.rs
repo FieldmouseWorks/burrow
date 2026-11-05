@@ -30,6 +30,20 @@ pub struct Item {
     /// that issue is its to move, so its own stall is the owner's.
     #[serde(default)]
     pub unstick: bool,
+    /// What it waits on is a Claude job its source handed it to, queued or at
+    /// work: out of usage, that can't move it ([`Item::needs_claude`]).
+    #[serde(default)]
+    pub claude: bool,
+}
+
+impl Item {
+    /// Whether only a Claude can move it, a turn in proj's line or a job its
+    /// source handed it to: out of usage, it's held rather than a stall. What
+    /// else stalls meanwhile (a source stuck itself, a turn past its
+    /// deadline) is a failure of its own.
+    pub fn needs_claude(&self) -> bool {
+        self.line || self.claude
+    }
 }
 
 /// An item past its deadline, or a source stuck itself (`key` "").
@@ -87,6 +101,7 @@ fn item(it: &Value) -> Option<Item> {
         kick: text("kick"),
         line: it.get("line").and_then(Value::as_bool).unwrap_or(false),
         unstick: it.get("unstick").and_then(Value::as_bool).unwrap_or(false),
+        claude: it.get("claude").and_then(Value::as_bool).unwrap_or(false),
     })
 }
 
@@ -136,6 +151,7 @@ pub fn overdue(
                             kick: src.kick.clone(),
                             line: false,
                             unstick: false,
+                            claude: false,
                         },
                     },
                 );

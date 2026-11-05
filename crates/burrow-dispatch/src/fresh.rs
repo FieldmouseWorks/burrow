@@ -173,6 +173,7 @@ fn wait(
         kick: Some(cfg.handler.clone()),
         line: false,
         unstick: false,
+        claude: false,
     })
 }
 
