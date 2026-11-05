@@ -717,7 +717,7 @@ jobs:
           printf 'conary negative v1\n%s\n%s\n' "$FORK" "$PR_HEAD" > "$subject"
           jq --arg base "$FORK" --arg head "$PR_HEAD" \
             --arg sha256 "$(sha256sum "$RUNNER_TEMP/negative.log" | cut -d' ' -f1)" --arg artifact "$log" \
-            '{result, revision: {$base, $head}, tree, tests, checks, skipped, log: {$sha256, $artifact}}' \
+            '{result, revision: {$base, $head}, tree, tests, checks, skipped, unrun, log: {$sha256, $artifact}}' \
             "$RUNNER_TEMP/negative.json" > "$dir/predicate.json"
           cat "$subject" "$dir/predicate.json"
           { echo "path=$subject"; echo "log=$log"; } >> "$GITHUB_OUTPUT"

@@ -21,6 +21,10 @@ use super::{Gate, LOGS, lines};
 use crate::expr::{V, value};
 use crate::harness::{read, repo_file, script, step, steps, text, workflow, write, yaml};
 
+/// Which new tests count as having passed on the old code: those a check
+/// that passed runs.
+mod runs;
+
 /// t's derivation once its test wants 2, which fails it.
 const WANTS_2: &str = r#""want":"2\n""#;
 
@@ -70,6 +74,12 @@ impl Ran {
 
 impl Repo {
     fn new() -> Repo {
+        Repo::declaring("{ }")
+    }
+
+    /// The same, with t's attributes past its derivation's (`{ testFiles
+    /// = [ ]; }`, say) as this Nix expression.
+    fn declaring(t_extra: &str) -> Repo {
         let g = Gate::new();
         let origin = g.dir();
         let system = &g.system;
@@ -96,7 +106,7 @@ impl Repo {
           dep = drv "dep" [ ];
           builder = "/bin/sh";
           args = [ "-c" "echo ${{toString [ (copy ./lib.txt) (copy ./tests) ]}} > $out" ];
-        }};
+        }} // {t_extra};
         other = drv "other" [ (copy ./lib.txt) ];
         fromtests = import ./tests/check.nix {{ inherit drv; }};
       }};
@@ -329,48 +339,6 @@ fn a_test_that_catches_its_change_fails_on_the_old_code() {
     assert_eq!(r.file(&tree, "tests/want.txt").as_deref(), Some("2\n"));
     let fork = r.g.s.git(&r.co, &["rev-parse", "origin/main"]);
     assert_eq!(ran.outputs["fork"], fork);
-}
-
-/// A PR whose new test passes on the old code too doesn't test its change:
-/// red, and it says what to do.
-#[test]
-fn a_test_that_passes_on_the_old_code_is_red() {
-    let r = Repo::new();
-    let head = r.pr(
-        "vacuous",
-        &[
-            ("lib.txt", Some("2\n")),
-            ("tests/want.txt", Some("1\n# also\n")),
-        ],
-    );
-    let ran = r.run(&head, "", "");
-    assert_eq!(ran.code, 1, "{}", ran.out);
-    assert_eq!(ran.result(), "pass");
-    assert!(
-        ran.out.contains("The new tests pass on the old code"),
-        "{}",
-        ran.out
-    );
-    assert_eq!(ran.list("checks"), ["t"]);
-}
-
-/// Test files no check reads test nothing: red, with nothing built.
-#[test]
-fn tests_no_check_reads_are_red() {
-    let r = Repo::new();
-    let head = r.pr(
-        "unread",
-        &[("lib.txt", Some("2\n")), ("docs/tests/x.txt", Some("x\n"))],
-    );
-    let ran = r.run(&head, "", "");
-    assert_eq!(ran.code, 1, "{}", ran.out);
-    assert_eq!(ran.result(), "pass");
-    assert!(
-        ran.out.contains("No check runs the new tests"),
-        "{}",
-        ran.out
-    );
-    assert!(ran.builds().is_empty(), "{:?}", ran.calls);
 }
 
 /// A test file whose own expression doesn't evaluate on the old code

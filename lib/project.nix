@@ -44,7 +44,13 @@
   node ? null,
   # More dev shell tools: pkgs: [ pkgs.godot ].
   packages ? (_: [ ]),
-  # More hermetic checks: pkgs: { name = derivation; }.
+  # More hermetic checks: pkgs: { name = derivation; }. A check that reads
+  # test files without running them all says which it runs, as git glob
+  # pathspecs from the repo's root: `passthru.testFiles = [ "server/**" ]`,
+  # or `[ ]` for one that runs none (a formatter, a lint). The negative run
+  # (flake-check.yml) counts a new test as passing on the old code only
+  # where a check that runs it passed; one that doesn't say runs every test
+  # it reads.
   checks ? (_: { }),
 }:
 let
@@ -276,10 +282,12 @@ let
       cargoArtifacts = craneLib.buildDepsOnly common;
     in
     {
-      rust-fmt = craneLib.cargoFmt (rustSrc // { cargoExtraArgs = "--all"; });
+      # They read the tests, and clippy compiles them, but neither runs one.
+      rust-fmt = craneLib.cargoFmt (rustSrc // { cargoExtraArgs = "--all"; passthru.testFiles = [ ]; });
       rust-clippy = craneLib.cargoClippy (common // {
         inherit cargoArtifacts;
         cargoClippyExtraArgs = "--all-targets -- -D warnings";
+        passthru.testFiles = [ ];
       });
     } // lib.optionalAttrs rustCfg.test {
       rust-test = craneLib.cargoTest (common // {
@@ -321,7 +329,11 @@ let
   # line, a token pasted there included. Leaks exit 2, so any other failure
   # (a scan that stopped, a bad config) still fails, with a pointer to
   # gitleaks' log in a build kept with --keep-failed.
-  secretsCheck = pkgs: pkgs.runCommand "secrets" { nativeBuildInputs = [ pkgs.gitleaks pkgs.jq ]; } ''
+  secretsCheck = pkgs: pkgs.runCommand "secrets" {
+    nativeBuildInputs = [ pkgs.gitleaks pkgs.jq ];
+    # It reads every file and runs none.
+    passthru.testFiles = [ ];
+  } ''
     cd ${self}
     status=0
     gitleaks dir --no-banner --redact --config ${gitleaksConfig pkgs} --max-target-megabytes 5 \
@@ -346,7 +358,7 @@ let
   pyChecks = pkgs:
     let dirs = lib.escapeShellArgs pyCfg.dirs; in
     {
-      python-ruff = pkgs.runCommand "python-ruff" { nativeBuildInputs = [ pkgs.ruff ]; } ''
+      python-ruff = pkgs.runCommand "python-ruff" { nativeBuildInputs = [ pkgs.ruff ]; passthru.testFiles = [ ]; } ''
         cd ${self}
         ruff check --no-cache --select E9,F63,F7,F82 ${dirs}
         ${lib.optionalString pyCfg.format "ruff format --no-cache --check ${dirs}"}

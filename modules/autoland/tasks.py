@@ -66,16 +66,16 @@ def negative(names):
 
 # What a red negative can mean, by what its log says, and the ways of
 # turning it green that don't count: its fix is a test that tests the
-# change (Conary#206). negative.sh goes red three ways, and only two of
-# them are about the tests.
+# change (Conary#206). negative.sh goes red two ways, and only one of
+# them is about the tests.
 NEGATIVE = ("{} is burrow's negative: it ran the tests this PR adds or changes on its base's code. Read its log for "
-            "which of three things it found. \"The new tests pass on the old code\": they don't test what the PR "
-            "changes, so make them fail without the change, by testing the behaviour it adds or fixes, and check "
-            "that they do on the base; if some of the test changes are a tidy the code doesn't need, take them out "
-            "of this PR into one of their own. \"No check runs the new tests\": no check of the flake reads those "
-            "files, so make one that does. Anything else (it can't tell, it timed out, the base or a dependency "
-            "didn't build or evaluate, a fetch or the runner failed) says nothing about the tests: fix what the log "
-            "shows if it's the PR's, and if it's the machine's, push nothing and say so in your answers' comment. "
+            "which of two things it found. \"The new tests pass on the old code\": a check that runs them passed there, "
+            "so they don't test what the PR changes; make them fail without the change, by testing the behaviour it "
+            "adds or fixes, and check that they do on the base; if some of the test changes are a tidy the code "
+            "doesn't need, take them out of this PR into one of their own. Anything else (it can't tell, it timed "
+            "out, the base or a dependency didn't build or evaluate, a fetch or the runner failed) says nothing about "
+            "the tests: fix what the log shows if it's the PR's, and if it's the machine's, push nothing and say so "
+            "in your answers' comment. "
             "Whichever it is, never delete, skip or weaken a test to turn it green, and never move a test into the "
             "code it tests (an inline #[cfg(test)] block counts as code) to get it out of the negative's sight.")
 
