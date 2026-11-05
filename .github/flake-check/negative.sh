@@ -417,6 +417,9 @@ negative() {
   comm -23 <(sort -u <<< "$added") <(sort -u "$work/covered") | tr '\n' '\0' > "$work/unrun"
   if [ -s "$work/unrun" ] || [ -s "$work/skipped" ]; then
     if [ -s "$work/unrun" ]; then
+      # Flagged on the PR: a test no gate runs is a hole in the repo's
+      # coverage, and this result proves nothing about it.
+      echo "::warning title=New tests the flake doesn't run::no check of the flake runs $(tr '\0' ' ' < "$work/unrun")so the negative can't judge them and counts for nothing. If no gate runs them either, they test nothing; give a check that runs them its testFiles."
       echo "no check that passed here runs these new tests, so where they'd fail is for the gate that runs them to say:"
       tr '\0' '\n' < "$work/unrun"
     fi

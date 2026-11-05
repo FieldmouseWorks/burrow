@@ -57,6 +57,13 @@ fn a_check_that_doesnt_run_the_test_says_nothing_of_it() {
         assert_eq!(ran.result(), "skipped", "{runs}: {}", ran.out);
         assert_eq!(ran.list("unrun"), ["tests/want.txt"], "{runs}");
         assert_eq!(ran.list("checks"), ["t"], "{runs}");
+        // Flagged on the PR, never quietly green.
+        assert!(
+            ran.out
+                .contains("::warning title=New tests the flake doesn't run::"),
+            "{runs}: {}",
+            ran.out
+        );
         assert!(
             ran.out
                 .contains("no check that passed here runs these new tests"),
