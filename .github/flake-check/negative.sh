@@ -210,6 +210,17 @@ negative() {
     git clone -q --shared --no-checkout . "$work/${at%%:*}"
     git -C "$work/${at%%:*}" checkout -q --detach "${at#*:}"
   done
+  # Each tree's flake inputs, fetched before anything is evaluated. An
+  # input the store hasn't got (any of them, on a fresh runner) is
+  # otherwise fetched by whichever evaluation needs it first, and when
+  # that's one failing on the negative tree, own can't count its failure.
+  for at in base negative; do
+    if ! nix flake archive --no-update-lock-file "$work/$at" > /dev/null 2> "$work/$at.archive.err"; then
+      errors "$work/$at.archive.err"
+      echo "the $at tree's inputs can't be fetched, so it can't tell"
+      return 1
+    fi
+  done
   system=$(nix config show system)
   [[ $system =~ ^[A-Za-z0-9_-]+$ ]] || { echo "can't evaluate for system $system"; return 1; }
   # Each check's derivation in each tree, a nix process each, as many side

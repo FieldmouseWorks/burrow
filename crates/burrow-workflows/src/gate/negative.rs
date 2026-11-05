@@ -820,6 +820,88 @@ fn an_evaluation_counts_only_failing_on_its_own_expression() {
     }
 }
 
+/// A flake input the store hasn't got yet is fetched by whichever
+/// evaluation needs it first. When that's the negative tree's failing one,
+/// its failure is still the test's own: the inputs are fetched before
+/// anything is evaluated, so that evaluation fetches nothing.
+#[test]
+fn an_input_not_yet_fetched_is_fetched_before_the_evaluations() {
+    let r = Repo::new();
+    let s = &r.g.s;
+    // The input: a tarball, served over HTTP as often as it's asked for.
+    let www = s.join("www");
+    write(&www.join("dep/x.txt"), "x\n");
+    let mut tar = s.command("tar");
+    tar.args(["czf", "dep.tar.gz", "dep"]).current_dir(&www);
+    assert!(crate::harness::output(tar).status.success());
+    let tarball = fs::read(www.join("dep.tar.gz")).unwrap();
+    let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/dep.tar.gz", server.local_addr().unwrap());
+    std::thread::spawn(move || {
+        use std::io::{BufRead, BufReader, Write};
+        for mut conn in server.incoming().flatten() {
+            let mut request = BufReader::new(conn.try_clone().unwrap());
+            let mut line = String::new();
+            while request.read_line(&mut line).is_ok_and(|n| n > 2) {
+                line.clear();
+            }
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                tarball.len()
+            );
+            let _ = conn.write_all(head.as_bytes());
+            let _ = conn.write_all(&tarball);
+        }
+    });
+    let flake = read(&r.origin.join("flake.nix"))
+        .replace(
+            "  outputs = { self }:",
+            &format!("  inputs.dep = {{ url = \"{url}\"; flake = false; }};\n  outputs = {{ self, dep }}:"),
+        )
+        .replace("{ inherit drv; }", "{ inherit drv dep; }");
+    write(&r.origin.join("flake.nix"), &flake);
+    write(
+        &r.origin.join("tests/check.nix"),
+        "{ drv, ... }: drv \"fromtests\" [ ]\n",
+    );
+    // Locked with a cache of its own, then collected, so neither the job's
+    // store nor its fetcher cache has the input.
+    let nix = |args: &[&str]| {
+        let mut cmd = s.command(args[0]);
+        cmd.args(&args[1..])
+            .current_dir(&r.origin)
+            .env("NIX_CONFIG", &r.g.nix_config)
+            .env("XDG_CACHE_HOME", s.join("lock-cache"));
+        let out = crate::harness::output(cmd);
+        assert!(
+            out.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    s.git(&r.origin, &["add", "-A"]);
+    nix(&["nix", "flake", "lock"]);
+    nix(&["nix-store", "--gc"]);
+    s.git(&r.origin, &["add", "-A"]);
+    s.git(&r.origin, &["commit", "-qm", "an input"]);
+    let head = r.pr(
+        "needsdep",
+        &[
+            ("lib.txt", Some("2\n")),
+            (
+                "tests/check.nix",
+                Some(
+                    "{ drv, dep }: builtins.seq (builtins.readFile \"${dep}/x.txt\") (throw \"needs what the change adds\")\n",
+                ),
+            ),
+        ],
+    );
+    let ran = r.run(&head, "", "");
+    assert_eq!(ran.code, 0, "{}", ran.out);
+    assert_eq!(ran.result(), "fail", "{}", ran.out);
+    assert!(ran.list("checks").contains(&"fromtests"), "{}", ran.out);
+}
+
 /// An evaluation a signal or a limit stopped didn't fail on the old code.
 #[test]
 fn a_killed_evaluation_cant_tell() {
