@@ -429,3 +429,33 @@ fn every_change_kicks_the_watchdog_and_proj_watch() {
     record(&alone, "web-4", Some(t + 7200), SAID, t);
     assert_eq!(kicked(&d), ["/kick/proj-watch".to_owned()]);
 }
+
+/// What #428's proj wrote of a usage limit, N.resets for a job's latest
+/// turn (an --owned one's too), is taken into the hold, once; an earlier
+/// turn's is no longer the job's, and one already past holds nothing.
+#[test]
+fn an_earlier_projs_resets_are_the_hold_now() {
+    let (_d, cfg) = rig();
+    let t = now();
+    let job = |id: &str, turns: &str, files: &[(&str, i64)]| {
+        let dir = cfg.jobs.join(id);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("turns"), format!("{turns}\n")).unwrap();
+        for (n, at) in files {
+            fs::write(dir.join(format!("{n}.resets")), format!("{at}\n")).unwrap();
+        }
+    };
+    job("web-1", "2", &[("1", t + 9000), ("2", t + 3600)]);
+    job("owned-1", "1", &[("1", t + 5400)]);
+    fs::write(cfg.jobs.join("owned-1/owned"), "").unwrap();
+    job("web-2", "1", &[("1", t - 60)]);
+    adopt(&cfg);
+    let s = out(&cfg).unwrap();
+    assert_eq!((s.until, s.said.as_str()), (t + 5400, EARLIER));
+    for gone in ["web-1/2.resets", "owned-1/1.resets", "web-2/1.resets"] {
+        assert!(!cfg.jobs.join(gone).exists(), "{gone}");
+    }
+    assert!(cfg.jobs.join("web-1/1.resets").exists());
+    adopt(&cfg);
+    assert_eq!(out(&cfg).unwrap().until, t + 5400);
+}

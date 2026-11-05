@@ -75,6 +75,7 @@ pub fn dispatch(cfg: &Config, args: &[String]) -> Result<(), Fail> {
         }
         Some("usage") => match args.get(1).map(String::as_str) {
             None => {
+                usage::adopt(cfg);
                 if let Some(s) = usage::out(cfg) {
                     put(&format!(
                         "{}\n",
@@ -87,7 +88,23 @@ pub fn dispatch(cfg: &Config, args: &[String]) -> Result<(), Fail> {
                 usage::back(cfg, None);
                 Ok(())
             }
-            Some(_) => Err(Fail::new(2, "usage: proj usage [back]")),
+            // A hold #428's stall watchdog kept for itself, until UNTIL.
+            Some("hold") => {
+                let until = arg(args, 2, "usage: proj usage hold UNTIL")?
+                    .parse::<i64>()
+                    .map_err(|_| Fail::new(2, "usage: proj usage hold UNTIL (seconds)"))?;
+                if until > now() {
+                    usage::record(
+                        cfg,
+                        "the stall watchdog",
+                        Some(until),
+                        usage::EARLIER,
+                        now(),
+                    );
+                }
+                Ok(())
+            }
+            Some(_) => Err(Fail::new(2, "usage: proj usage [back | hold UNTIL]")),
         },
         Some("await") => wait_on(cfg, &args[1..]),
         Some(how @ ("ask" | "done")) => ends(cfg, how, args.len()),

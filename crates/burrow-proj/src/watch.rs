@@ -53,13 +53,7 @@ pub fn look(cfg: &Config, only: &str) -> Result<(), Fail> {
             }
             if a.target == OLD_LIMIT {
                 if let Some(reset) = a.was.parse::<i64>().ok().filter(|&t| t > now()) {
-                    usage::record(
-                        cfg,
-                        &id,
-                        Some(reset),
-                        "a usage limit an earlier proj recorded",
-                        now(),
-                    );
+                    usage::record(cfg, &id, Some(reset), usage::EARLIER, now());
                 }
                 news.push_str("- the usage limit your last turn ended on: proj holds every turn in line until it resets, this one included\n");
                 continue;

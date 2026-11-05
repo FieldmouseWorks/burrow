@@ -49,6 +49,18 @@ impl World for Fake {
         let mut log = self.proj.borrow_mut();
         log.push(args.iter().map(|a| a.to_string()).collect());
         match args[0] {
+            // proj takes the hold (unless it refuses everything), and says
+            // it's out from then on.
+            "usage" if args.get(1) == Some(&"hold") => {
+                if self.refuse.get() {
+                    return (false, String::new());
+                }
+                *self.usage.borrow_mut() = format!(
+                    r#"{{"until": {}, "said": "a usage limit an earlier proj or watchdog recorded"}}"#,
+                    args[2]
+                );
+                (true, String::new())
+            }
             "usage" => (true, self.usage.borrow().clone()),
             "run" if self.refuse.get() => (false, String::new()),
             "run" => {

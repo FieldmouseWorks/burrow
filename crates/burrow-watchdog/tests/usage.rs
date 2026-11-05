@@ -85,3 +85,56 @@ fn a_stall_handed_on_before_stays_where_it_is_and_its_job_goes() {
     let (_, stalls) = m.run(T + H);
     assert_eq!(stalls.len(), 1);
 }
+
+/// A hold #428's watchdog kept in its own state goes to proj's, machine-wide,
+/// and holds every stall meanwhile; one proj won't take holds here, and is
+/// handed over again next pass.
+#[test]
+fn a_hold_an_earlier_watchdog_kept_is_procs_now() {
+    for refuse in [false, true] {
+        let m = Machine::new();
+        let until = T + 2.0 * H;
+        std::fs::write(
+            m.cfg.state_dir.join("state.json"),
+            json!({"limit": until}).to_string(),
+        )
+        .unwrap();
+        m.write(
+            &m.steward,
+            json!({"pr-sam_r-7": item(T - 3.0 * H, T - H, Some("autoland/sam/r"))}),
+            T,
+        );
+        m.world.refuse.set(refuse);
+        let (wake, stalls) = m.run(T);
+        let holds = m
+            .world
+            .proj
+            .borrow()
+            .iter()
+            .filter(|a| a[0] == "usage" && a.get(1).map(String::as_str) == Some("hold"))
+            .count();
+        assert_eq!(holds, 1, "{refuse}");
+        assert!(
+            stalls.is_empty() && m.kicks().is_empty() && m.runs().is_empty(),
+            "{refuse}"
+        );
+        assert_eq!(wake, Some(until), "{refuse}");
+        assert_eq!(m.state().limit, refuse.then_some(until), "{refuse}");
+    }
+    // One already past holds nothing, and goes.
+    let m = Machine::new();
+    std::fs::write(
+        m.cfg.state_dir.join("state.json"),
+        json!({"limit": T - 1.0}).to_string(),
+    )
+    .unwrap();
+    m.run(T);
+    assert_eq!(m.state().limit, None);
+    assert!(
+        m.world
+            .proj
+            .borrow()
+            .iter()
+            .all(|a| a.get(1).map(String::as_str) != Some("hold"))
+    );
+}

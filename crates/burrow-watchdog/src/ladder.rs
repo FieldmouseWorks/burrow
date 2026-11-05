@@ -25,7 +25,14 @@ pub fn run(cfg: &Config, world: &dyn World, now: f64) -> Result<(), String> {
         mut missing,
         mut closing,
         withdraw,
+        limit,
     } = load(dir, "state.json");
+    // A hold #428's watchdog kept for itself: proj's, machine-wide, now.
+    // Kept to hand over again if proj didn't take it.
+    let limit = limit.filter(|&t| t > now).filter(|t| {
+        let (ok, _) = world.proj(&["usage", "hold", &format!("{}", t.ceil() as i64)]);
+        !ok
+    });
     // A state from before it kept these has every job its stalls on the stuck
     // issue were handed still to go.
     let mut withdraw = withdraw.unwrap_or_else(|| {
@@ -70,7 +77,18 @@ pub fn run(cfg: &Config, world: &dyn World, now: f64) -> Result<(), String> {
     // The watchdog's own jobs in proj's line are its own steps' to time:
     // another job for one would queue behind it.
     let mine: BTreeSet<String> = stalls.values().filter_map(|st| st.job.clone()).collect();
-    let spent = out_of_usage(world, now);
+    // One proj didn't take holds here till it does.
+    let spent = out_of_usage(world, now).or_else(|| {
+        limit.map(|t| {
+            (
+                t,
+                format!(
+                    "a usage limit an earlier watchdog recorded, until {}",
+                    day(t)
+                ),
+            )
+        })
+    });
     let mut waiting = 0;
     let mut ready = Vec::new();
     for (s, cur) in found {
@@ -234,6 +252,7 @@ pub fn run(cfg: &Config, world: &dyn World, now: f64) -> Result<(), String> {
             missing,
             closing,
             withdraw: Some(withdraw),
+            limit,
         },
     )?;
     let wake = match wakes.into_iter().reduce(f64::min) {

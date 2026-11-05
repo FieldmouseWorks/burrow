@@ -31,7 +31,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::config::Config;
-use crate::job::{is_error, kick};
+use crate::job::{Job, is_error, kick};
 use crate::limit;
 use crate::waits::rewatch_all;
 use crate::{now, swap};
@@ -298,6 +298,40 @@ fn settle(cfg: &Config, mut s: Spent, now: i64) {
         s.told = now;
         keep(cfg, &s);
         tell(cfg, &["close", NOTICE, CLOSED]);
+    }
+}
+
+/// What an earlier proj's own record of a usage limit is said as, once
+/// it's taken into the hold.
+pub const EARLIER: &str = "a usage limit an earlier proj or watchdog recorded";
+
+/// The holds an earlier proj (#428's) kept apart from this one, each taken
+/// into it: N.resets, the time a job's latest turn wrote that its usage limit
+/// resets, any job's (an --owned one's included, whose starter would have
+/// asked `proj resets`), and from a turn still running that proj, once it
+/// ends. Each is read once and removed. The stall watchdog asks `proj usage`
+/// every pass, which runs this first.
+pub fn adopt(cfg: &Config) {
+    let Ok(dirs) = fs::read_dir(&cfg.jobs) else {
+        return;
+    };
+    for e in dirs.filter_map(|e| e.ok()) {
+        let id = e.file_name().to_string_lossy().into_owned();
+        if id.starts_with('.') {
+            continue;
+        }
+        let job = Job::new(cfg, &id);
+        let Some(n) = job.turns() else { continue };
+        let f = job.turn(&n, "resets");
+        let Ok(text) = fs::read_to_string(&f) else {
+            continue;
+        };
+        if let Ok(t) = text.trim().parse::<i64>()
+            && t > now()
+        {
+            record(cfg, &id, Some(t), EARLIER, now());
+        }
+        let _ = fs::remove_file(&f);
     }
 }
 
