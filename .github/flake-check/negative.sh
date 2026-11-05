@@ -181,7 +181,8 @@ negative() {
   git diff --name-only --no-renames -z "$fork" "$HEAD_SHA" > "$work/changed"
   git diff --name-only --no-renames -z "$fork" "$HEAD_SHA" -- "${tests_specs[@]}" > "$work/tests"
   local added others
-  added=$(git diff --name-only --no-renames --diff-filter=d -z "$fork" "$HEAD_SHA" -- "${tests_specs[@]}" | tr '\0' '\n')
+  git diff --name-only --no-renames --diff-filter=d -z "$fork" "$HEAD_SHA" -- "${tests_specs[@]}" > "$work/added"
+  added=$(tr '\0' '\n' < "$work/added")
   others=$(comm -z -23 <(sort -z "$work/changed") <(sort -z "$work/tests") | tr '\0' '\n')
   if [ -z "$added" ] || [ -z "$others" ]; then
     if [ -z "$added" ]; then
@@ -396,25 +397,67 @@ negative() {
     echo "which tests the checks run doesn't evaluate on the base, so it can't tell"
     return 1
   fi
-  local runs globs
+  local runs globs one f undeclared=() j
   : > "$work/covered"
   for k in "${!targets[@]}"; do
     runs=$(jq -c --argjson k "$k" '.[$k]' "$work/runs.json")
     if [ "$runs" = null ]; then
-      printf '%s\n' "$added" >> "$work/covered"
+      undeclared+=("$k")
       continue
     fi
-    if ! jq -e 'type == "array" and all(.[]; type == "string" and test("^[A-Za-z0-9_.*-][A-Za-z0-9_./*-]*$")
-        and (split("/") | index("..") | not))' <<< "$runs" > /dev/null; then
+    # Any of git's glob syntax, but none of its magic (a leading `:`), no
+    # path from outside the tree, and no control characters.
+    if ! jq -e 'type == "array" and all(.[]; type == "string" and length > 0 and (test("^[:/]") | not)
+        and (test("[[:cntrl:]]") | not) and (split("/") | index("..") | not))' <<< "$runs" > /dev/null; then
       echo "${targets[$k]}'s testFiles isn't a list of paths from the repo's root, so it can't tell"
       return 1
     fi
     mapfile -t globs < <(jq -r '.[]' <<< "$runs")
     if [ ${#globs[@]} -gt 0 ]; then
-      git diff --name-only --no-renames --diff-filter=d "$fork" "$HEAD_SHA" -- "${globs[@]/#/:(glob)}" >> "$work/covered"
+      git diff --name-only --no-renames --diff-filter=d -z "$fork" "$HEAD_SHA" -- "${globs[@]/#/:(glob)}" >> "$work/covered"
     fi
   done
-  comm -23 <(sort -u <<< "$added") <(sort -u "$work/covered") | tr '\n' '\0' > "$work/unrun"
+  # A check that doesn't say runs the new tests it reads: each one whose
+  # head version alone, on the base, changes the check's derivation.
+  if [ ${#undeclared[@]} -gt 0 ]; then
+    mkdir "$work/one"
+    j=0
+    while IFS= read -r -d '' f; do
+      j=$((j + 1))
+      export GIT_INDEX_FILE=$work/one/$j.index
+      git read-tree "$fork"
+      git update-index --add --cacheinfo "$(git --literal-pathspecs ls-tree --format='%(objectmode),%(objectname)' "$HEAD_SHA" -- "$f"),$f"
+      one=$(git write-tree)
+      unset GIT_INDEX_FILE
+      one=$(GIT_AUTHOR_DATE="@$when +0000" GIT_COMMITTER_DATE="@$when +0000" \
+        git -c user.name=flake-check -c user.email=flake-check@localhost -c commit.gpgsign=false \
+        commit-tree "$one" -p "$fork" -m "one test of $HEAD_SHA on $fork's code")
+      git clone -q --shared --no-checkout . "$work/one/$j"
+      git -C "$work/one/$j" checkout -q --detach "$one"
+      printf '%s\0' "$f" > "$work/one/$j.file"
+      for k in "${undeclared[@]}"; do
+        while [ "$(jobs -pr | wc -l)" -ge "$side" ]; do wait -n || true; done
+        evaluate "$work/one/$j" "${tqs[$k]}" "$work/one/$j.$k" &
+      done
+    done < "$work/added"
+    wait || true
+    local m
+    for ((m = 1; m <= j; m++)); do
+      for k in "${undeclared[@]}"; do
+        if [ "$(cat "$work/one/$m.$k.rc")" != 0 ]; then
+          echo "check ${targets[$k]} doesn't evaluate with $(tr -d '\0' < "$work/one/$m.file") alone on the old code:"
+          errors "$work/one/$m.$k.err"
+          echo "so it can't tell whether that check reads it"
+          return 1
+        fi
+        if [ "$(cat "$work/one/$m.$k")" != "${bases[$k]}" ]; then
+          cat "$work/one/$m.file" >> "$work/covered"
+          break
+        fi
+      done
+    done
+  fi
+  comm -z -23 <(sort -z -u "$work/added") <(sort -z -u "$work/covered") > "$work/unrun"
   if [ -s "$work/unrun" ] || [ -s "$work/skipped" ]; then
     if [ -s "$work/unrun" ]; then
       # Flagged on the PR: a test no gate runs is a hole in the repo's

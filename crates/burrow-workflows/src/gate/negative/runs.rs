@@ -37,13 +37,58 @@ fn a_test_that_passes_on_the_old_code_is_red() {
     assert!(ran.list("unrun").is_empty(), "{}", ran.out);
 }
 
-/// The same where t says it runs the test, by a glob.
+/// The same where t says it runs the test, by any of git's globs.
 #[test]
 fn a_check_that_says_it_runs_the_test_counts_its_pass() {
-    let r = Repo::declaring(r#"{ testFiles = [ "tests/*.txt" ]; }"#);
-    let ran = r.run(&vacuous(&r), "", "");
-    assert_eq!(ran.code, 1, "{}", ran.out);
-    assert_eq!(ran.result(), "pass", "{}", ran.out);
+    for runs in [
+        r#""tests/*.txt""#,
+        r#""tests/w?nt.txt""#,
+        r#""tests/[vw]ant.txt""#,
+    ] {
+        let r = Repo::declaring(&format!("{{ testFiles = [ {runs} ]; }}"));
+        let ran = r.run(&vacuous(&r), "", "");
+        assert_eq!(ran.code, 1, "{runs}: {}", ran.out);
+        assert_eq!(ran.result(), "pass", "{runs}: {}", ran.out);
+    }
+}
+
+/// A file's name is compared as git has it, whatever it holds: a test
+/// with quotes, a space and a non-ASCII letter in its name, run by a
+/// check that says so or read by one that doesn't, isn't unrun.
+#[test]
+fn a_test_is_known_by_its_whole_name() {
+    for t_extra in ["{ }", r#"{ testFiles = [ "tests/**" ]; }"#] {
+        let r = Repo::declaring(t_extra);
+        let head = r.pr(
+            "named",
+            &[
+                ("lib.txt", Some("2\n")),
+                ("tests/wänt \"q\".txt", Some("x\n")),
+            ],
+        );
+        let ran = r.run(&head, "", "");
+        assert_eq!(ran.result(), "pass", "{t_extra}: {}", ran.out);
+        assert!(ran.list("unrun").is_empty(), "{t_extra}: {}", ran.out);
+    }
+}
+
+/// A check that doesn't say runs only the new tests it reads: t reads
+/// tests/, so a new test elsewhere is unrun beside one t runs.
+#[test]
+fn a_check_that_doesnt_say_runs_only_what_it_reads() {
+    let r = Repo::new();
+    let head = r.pr(
+        "mixed",
+        &[
+            ("lib.txt", Some("2\n")),
+            ("tests/want.txt", Some("1\n# also\n")),
+            ("docs/tests/x.txt", Some("x\n")),
+        ],
+    );
+    let ran = r.run(&head, "", "");
+    assert_eq!(ran.code, 0, "{}", ran.out);
+    assert_eq!(ran.result(), "skipped", "{}", ran.out);
+    assert_eq!(ran.list("unrun"), ["docs/tests/x.txt"], "{}", ran.out);
 }
 
 /// A check that reads the test but runs none, or not that one, says
@@ -96,6 +141,7 @@ fn a_testfiles_that_isnt_paths_cant_tell() {
         r#"[ "../x" ]"#,
         r#"[ "/tests" ]"#,
         r#""tests/**""#,
+        r#"[ "tests/\n" ]"#,
     ] {
         let r = Repo::declaring(&format!("{{ testFiles = {runs}; }}"));
         let ran = r.run(&vacuous(&r), "", "");
