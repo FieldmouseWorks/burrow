@@ -57,13 +57,39 @@ def answers(repo, pr):
     )
 
 
-def fix_task(repo, pr, why, proofs=None, train=False, has_ci=True, before=None):
+def negative(names):
+    """The failing check among names that is burrow's shared CI's negative,
+    which flake-check.yml names `negative` (under its caller's job, as
+    `check / negative`), or None."""
+    return next((c for c in names if c == "negative" or c.endswith(" / negative")), None)
+
+
+# What a red negative can mean, by what its log says, and the ways of
+# turning it green that don't count: its fix is a test that tests the
+# change (Conary#206). negative.sh goes red three ways, and only two of
+# them are about the tests.
+NEGATIVE = ("{} is burrow's negative: it ran the tests this PR adds or changes on its base's code. Read its log for "
+            "which of three things it found. \"The new tests pass on the old code\": they don't test what the PR "
+            "changes, so make them fail without the change, by testing the behaviour it adds or fixes, and check "
+            "that they do on the base; if some of the test changes are a tidy the code doesn't need, take them out "
+            "of this PR into one of their own. \"No check runs the new tests\": no check of the flake reads those "
+            "files, so make one that does. Anything else (it can't tell, it timed out, the base or a dependency "
+            "didn't build or evaluate, a fetch or the runner failed) says nothing about the tests: fix what the log "
+            "shows if it's the PR's, and if it's the machine's, push nothing and say so in your answers' comment. "
+            "Whichever it is, never delete, skip or weaken a test to turn it green, and never move a test into the "
+            "code it tests (an inline #[cfg(test)] block counts as code) to get it out of the negative's sight.")
+
+
+def fix_task(repo, pr, why, proofs=None, train=False, has_ci=True, before=None, red_negative=None):
     """proofs: the failing checks that run on a machine, not in CI, and how;
     train: the merge train's failure is among them; has_ci: the repo's CI
     runs its gate on a push; before: why the last job's answers on this
-    head didn't go up (claims.unposted)."""
+    head didn't go up (claims.unposted); red_negative: the failing check
+    that is burrow's negative (negative())."""
     machine = "".join(f" {c} isn't CI: it's run on a machine, like this: {how} Rerun it that way on what you push."
                       for c, how in (proofs or {}).items()) + (f" {FOREGROUND.strip()}" if proofs else "")
+    if red_negative:
+        machine += " " + NEGATIVE.format(red_negative)
     if train:
         base = pr["baseRefName"]
         machine += (f" The failing {CFG['trainContext']} status is the merge train's: it merged this head alone onto {base} "

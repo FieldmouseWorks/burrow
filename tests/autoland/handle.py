@@ -853,6 +853,23 @@ assert len(JOBS) == 1 and "CI is red: remi-proof" in status and "isn't settled" 
 status, _ = run(clean(checks=red), 7500)
 assert JOBS == [], "one a head"
 STATES.clear()
+# A red negative (burrow's shared CI's, under its caller's job): the job is
+# told what it means, and that deleting or hiding the test isn't a fix.
+fresh_pr_state()
+negative_red = CI_GREEN + [{"__typename": "CheckRun", "name": "check / negative", "status": "COMPLETED", "conclusion": "FAILURE"}]
+run(clean(checks=negative_red), 0)
+status, _ = run(clean(checks=negative_red), 7200)
+assert "CI is red: check / negative" in status and len(JOBS) == 1, (status, JOBS)
+from tasks import NEGATIVE  # noqa: E402
+assert NEGATIVE.format("check / negative") in JOBS[0], JOBS[0]
+assert "never delete, skip or weaken a test" in JOBS[0], JOBS[0]
+# Red can also mean it couldn't tell, which says nothing about the tests.
+assert "says nothing about the tests" in JOBS[0], JOBS[0]
+# Only the negative's: another red check, or one whose name merely ends in
+# "negative", gets the usual brief.
+assert "burrow's negative" not in H.fix_task("sam/r", steer, "CI is red: ci")
+assert H.negative(["ci", "check / non-negative", "negatives"]) is None
+assert H.negative(["ci", "negative"]) == "negative"
 # The same on a Dependabot update.
 fresh_pr_state()
 dbump = {"branch": "dependabot/npm/foo-1", "title": "Bump foo from 1.4 to 1.5", "number": 11}
